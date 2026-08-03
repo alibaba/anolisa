@@ -1,5 +1,7 @@
 # ANOLISA User Guide
 
+[中文版](../zh/README.md)
+
 ANOLISA provides a complete server-side runtime for AI Agent workloads. Components are installed via the `anolisa` CLI and operate independently.
 
 ---
@@ -37,6 +39,7 @@ ANOLISA provides a complete server-side runtime for AI Agent workloads. Componen
 | Document | Component | Description |
 |----------|-----------|-------------|
 | [anolisa CLI](user-entrypoint/anolisa-cli.md) | anolisa | Unified CLI for component management |
+| [cosh-ng](user-entrypoint/cosh-ng/README.md) | cosh-ng | AI-native Linux terminal with an integrated Agent runtime |
 | [Copilot Shell](user-entrypoint/copilot-shell/QUICKSTART.md) | cosh | AI terminal assistant and command gateway |
 | [OS Skills](user-entrypoint/os-skills.md) | os-skills | System management and DevOps skills |
 

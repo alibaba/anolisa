@@ -1,84 +1,91 @@
-# 快速开始
+# cosh-ng 快速开始
 
-cosh-ng（Computable Operating System Harness）为 AI Agent 提供确定性的跨发行版系统操作接口。它由三个二进制组成：
+[English](../../../en/user-entrypoint/cosh-ng/QUICKSTART.md)
 
-- **cosh-cli** — 结构化 JSON CLI，覆盖包管理、服务管理、工作区快照和安全审计
-- **cosh-core** — 无头 JSONL 后端，集成 LLM 提供商、钩子、工具和技能
-- **cosh-shell** — AI 增强的交互式终端，提供 PTY 主机、流式分析和工具审批
+cosh-ng 在普通 bash 或 zsh 会话中加入 Agent。运行 `cosh` 后，既可以照常执行命令，
+也可以直接用自然语言交代更复杂的任务，全程无需离开终端。
 
-## 前置条件
+## 1. 安装
 
-- Linux（Alinux / CentOS / Ubuntu / Debian / Fedora / openSUSE）或 macOS（有限功能）
-- Rust 1.74+
-- pkg/svc 命令需要 root 或 sudo 权限
-- checkpoint 命令需要运行中的 ws-ckpt 守护进程
-
-## 构建
+安装 ANOLISA CLI 和 cosh-ng。
 
 ```bash
-cd src/cosh-ng
-cargo build --workspace
+curl -fsSL https://get.agentic-os.sh | bash
+sudo anolisa --install-mode system install cosh-ng
 ```
 
-构建产物位于 `target/debug/` 下：`cosh-cli`、`cosh-core`、`cosh-shell`。
-
-发布构建：
+Alibaba Cloud Linux 用户也可以直接安装 RPM。
 
 ```bash
-cargo build --workspace --release
+sudo yum install cosh-ng
 ```
 
-## 第一次运行
+以上安装方式目前面向 Linux。macOS 请按照
+[开发者入门指南](../../../../developer-guide/zh/cosh-ng/getting-started.md)从源码构建。
 
-### cosh-cli：结构化系统操作
+验证安装。
 
 ```bash
-# 安装一个包（JSON 输出）
-cosh-cli pkg install nginx
-# → {"ok":true,"data":{"package":"nginx","version":"1.24.0","already_installed":false},...}
-
-# 预览模式（不实际执行）
-cosh-cli pkg install nginx --dry-run
-
-# 查看服务状态
-cosh-cli svc status nginx
-# → {"ok":true,"data":{"name":"nginx","active":true,"enabled":true,"recent_logs":[...]},...}
+cosh --version
+cosh-cli --version
 ```
 
-### cosh-core：AI Agent 后端
+修改软件包和服务需要 root 权限；工作空间 checkpoint 命令还需要运行中的
+`ws-ckpt` daemon。
+
+## 2. 进入 AI 终端
+
+在希望 Agent 工作的项目或系统目录中启动 cosh。
 
 ```bash
-# 单条提示执行
-cosh-core --headless "帮我查看磁盘使用情况"
-
-# 或通过管道进入 headless 模式
-echo '{"type":"user","message":{"role":"user","content":"列出当前目录文件"}}' | cosh-core --headless
+cd your-project
+cosh
 ```
 
-### cosh-shell：交互式终端
+你可以像以前一样运行 Shell 命令，也可以直接用自然语言描述任务。
 
-```bash
-# 启动交互式 AI Shell
-cosh-shell
-
-# 浏览当前工作空间中可恢复的对话
-cosh-shell --resume
-
-# 或直接选择已知的 provider 会话
-cosh-shell --resume <session-id>
+```text
+$ git status
+$ 找出上次部署失败的原因；先检查，不要做任何修改
 ```
 
-## 配置
+Agent 会在终端中持续输出处理过程。操作需要你同意时，cosh 会显示审批卡片或
+问题卡片，等待你选择。
 
-配置文件位于 `~/.copilot-shell/config.toml`。首次运行时自动创建默认配置。
+刚开始时，这几条命令最常用。
 
-详见 [配置文档](configuration.md)。
+```text
+/auth                         选择或更新 provider 认证
+/help                         查看可用 slash 命令
+/status                       查看当前运行时和会话
+/mode approval recommend      每次 Agent 工具调用都请求确认
+/session list                 列出当前工作空间可恢复的对话
+```
 
-## 下一步
+用 `/session list --all` 可以找到其他工作空间里创建的对话。需要恢复时，先进入创建该
+对话的工作空间，再启动 cosh。
 
-- [cosh-cli 总览](cli/overview.md) — 了解 CLI 子系统
-- [cosh-core 总览](core/overview.md) — 了解无头模式与 LLM 集成
-- [cosh-shell 总览](shell/overview.md) — 了解交互式终端
-- [会话恢复](shell/session-recovery.md) — 恢复、检查并安全清理 Agent 对话
-- [会话压缩](shell/session-compaction.md) — 在不删除 transcript 的前提下缩减模型可见上下文
-- [输出格式](output-format.md) — 理解 JSON 信封与错误码
+## 3. 复用工作
+
+查看当前工作空间可用的 Skills。
+
+```text
+/skills list
+/skills detail service-health
+```
+
+工作空间、用户、扩展和系统中的 Skill 会按优先级合并。搜索顺序和文件格式见
+[Skills](core/skills.md)。
+
+## 4. 接着完成手里的任务
+
+| 你要完成的事 | 继续阅读 |
+|---|---|
+| 控制审批和安全策略 | [工具审批](shell/approval.md) |
+| 恢复或压缩对话 | [会话恢复](shell/session-recovery.md) |
+| 选择模型并完成认证 | [模型 Provider](core/providers.md) |
+| 接入其他服务提供的工具 | [接入 MCP server](mcp.md) |
+| 自动处理软件包、服务、快照或审计工作 | [管理系统操作](cli/overview.md) |
+| 集成其他前端 | [Headless 模式](core/headless-mode.md) |
+
+[完整用户手册](README.md)按用户任务整理了其余页面。

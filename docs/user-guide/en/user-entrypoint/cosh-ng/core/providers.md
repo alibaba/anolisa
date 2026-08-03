@@ -1,95 +1,115 @@
-# LLM Providers
+# Model Providers and Authentication
 
-cosh-core connects to multiple LLM providers via the OpenAI-compatible API protocol. All providers use streaming SSE output and support function calling.
+[中文版](../../../../zh/user-entrypoint/cosh-ng/core/providers.md)
 
-## Supported Providers
+The default cosh-core adapter supports OpenAI-compatible streaming providers
+and Alibaba Cloud's AK/SK-authenticated SysOM path. Interactive users should
+start with `/auth`; configuration is useful for managed or headless setups.
 
-| Provider Type | Profile | Description |
-|--------------|---------|-------------|
-| `dashscope` | DashScope | Alibaba Cloud Bailian (Qwen series), supports thinking |
-| `aliyun` | SysOM | Alibaba Cloud AK/SK signature authentication (ROA style) |
-| `openai` | OpenAI | OpenAI official API, uses `max_completion_tokens` |
-| `deepseek` | DeepSeek | DeepSeek API, supports thinking |
-| Other | Generic | Any OpenAI-compatible endpoint |
+## Interactive authentication
 
-## Configuration
+Run:
 
-Configure providers in `~/.copilot-shell/config.toml`:
+```text
+/auth
+```
+
+The picker includes built-in Coding Plan and Token Plan profiles plus provider
+credential forms. Built-in plan endpoints use the China service catalog by
+default. Select the international catalog before starting cosh when needed:
+
+```bash
+COSH_SERVICE_SITE=international cosh
+```
+
+Accepted aliases are `china`/`cn` and
+`international`/`intl`/`global`. The setting changes the endpoints offered by
+the picker; it does not rewrite a saved custom URL.
+
+## Provider configuration
+
+Provider definitions belong in `/etc/copilot-shell/config.toml` or
+`~/.copilot-shell/config.toml`, never project configuration:
 
 ```toml
 [ai]
+active_provider = "dashscope"
 active_model = "qwen-plus"
 
 [ai.providers.dashscope]
 type = "dashscope"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-api_key = ""    # Or via DASHSCOPE_API_KEY environment variable
+api_key = "${DASHSCOPE_API_KEY}"
 model = "qwen-plus"
-
-[ai.providers.aliyun]
-type = "aliyun"
-access_key_id = ""      # Or ALIBABA_CLOUD_ACCESS_KEY_ID
-access_key_secret = ""  # Or ALIBABA_CLOUD_ACCESS_KEY_SECRET
-model = "qwen-plus"
+explicit_cache = false
 
 [ai.providers.openai]
 type = "openai"
 base_url = "https://api.openai.com/v1"
-api_key = ""    # Or OPENAI_API_KEY
+api_key = "${OPENAI_API_KEY}"
 model = "gpt-4o"
 
 [ai.providers.deepseek]
 type = "deepseek"
 base_url = "https://api.deepseek.com/v1"
-api_key = ""
+api_key = "${DEEPSEEK_API_KEY}"
 model = "deepseek-chat"
+
+[ai.providers.aliyun]
+type = "aliyun"
+access_key_id = "${ALIBABA_CLOUD_ACCESS_KEY_ID}"
+access_key_secret = "${ALIBABA_CLOUD_ACCESS_KEY_SECRET}"
+security_token = "${ALIBABA_CLOUD_SECURITY_TOKEN}"
+model = "qwen-plus"
 ```
 
-## Provider Profile Differences
+For an ECS RAM role, set `type = "aliyun"` and
+`auth_source = "ecs_ram_role"` instead of storing static AK/SK values.
 
-Behavioral differences across profiles in API requests:
+## Provider profiles
 
-| Profile | max_tokens Field | Thinking Field | Authentication |
-|---------|-----------------|----------------|----------------|
-| Generic | `max_tokens` | — | Bearer token |
-| DashScope | `max_tokens` | `reasoning_content` | Bearer token |
-| OpenAI | `max_completion_tokens` | — | Bearer token |
-| DeepSeek | `max_tokens` | `reasoning_content` | Bearer token |
-| SysOM (aliyun) | — | — | AK/SK signature |
+| `type` | Protocol behavior |
+|---|---|
+| `dashscope` | OpenAI-compatible request with Qwen reasoning-content handling |
+| `openai` | OpenAI token-field conventions |
+| `deepseek` | OpenAI-compatible request with reasoning-content handling |
+| `aliyun` | Alibaba Cloud request signing with static credentials or ECS RAM role |
+| other value | Generic OpenAI-compatible profile |
 
-## Runtime Switching
+All model output is streamed. `extra_params` may add provider-specific request
+fields; do not use it to override security-sensitive transport configuration.
 
-Dynamically switch models via JSONL control protocol:
+## Caching and output limits
 
-```json
-{"type":"control_request","request_id":"sw-1","request":{"subtype":"switch_model","model":"qwen-max"}}
-```
+DashScope uses implicit context caching when `explicit_cache` is `false` or
+omitted. Set it to `true` to add explicit cache markers for deterministic
+prefix reuse. Explicit and implicit modes have different creation and hit
+prices, so confirm the current DashScope billing policy before enabling it.
+When a provider reports cache usage, cosh-core accumulates `cached_tokens` and
+records it as `session.tokens.cached` in per-turn SLS telemetry.
 
-Or override via CLI arguments:
+For recognized model families, cosh-core selects a model-aware maximum output
+budget instead of applying the old fixed 4096-token cap. This especially helps
+reasoning and long-output models. Unknown models keep the conservative fallback;
+the configured model name sent to the provider is never rewritten.
 
-```bash
-cosh-core --headless --model qwen-max
-```
+## Resolution order
 
-Environment variable override:
+1. System, user, and permitted project preferences are layered.
+2. `COSH_AI_PROVIDER`, `COSH_MODEL`, and `COSH_OUTPUT_LANGUAGE` override the
+   corresponding active selections.
+3. Provider fields resolve from the selected provider definition.
+4. OpenAI-compatible base URL and key fall back to `OPENAI_BASE_URL`,
+   `DASHSCOPE_API_KEY`, then `OPENAI_API_KEY` where applicable.
+5. Aliyun credentials fall back to the standard
+   `ALIBABA_CLOUD_ACCESS_KEY_*` and security-token variables.
 
-```bash
-COSH_MODEL=qwen-max cosh-core --headless
-```
+`--model <name>` overrides the model only; it does not select a provider with
+the same name. Use `COSH_AI_PROVIDER` or `ai.active_provider` to switch provider.
 
-## Authentication Priority
+If required credentials are unavailable, an interactive core sends an
+`auth_required` control request. A standalone headless client must implement
+that exchange or configure credentials before startup.
 
-1. CLI `--model` argument → selects corresponding provider config
-2. Environment variables (`DASHSCOPE_API_KEY`, `ALIBABA_CLOUD_ACCESS_KEY_*`)
-3. Values in config.toml `[ai.providers.<name>]`
-4. All empty → triggers interactive authentication flow (sends `auth_required` to Shell)
-
-## Generation Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `max_tokens` | 4096 | Maximum generated tokens |
-| `temperature` | — | Sampling temperature (uses provider default if not set) |
-| `stream` | true | Always stream output |
-
-Custom parameters can be passed via `extra_params` in the `[ai.providers.<name>]` section of config.toml.
+See [Configuration](../configuration.md) for layer restrictions and secret
+handling, and [Headless mode](headless-mode.md) for the control protocol.

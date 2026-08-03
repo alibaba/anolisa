@@ -1,63 +1,63 @@
-# 技能系统
+# Skills
 
-cosh-core 的技能系统允许通过 Markdown 文件定义可复用的 Agent 技能。LLM 可在对话中主动发现和调用已注册的技能。
+[English](../../../../en/user-entrypoint/cosh-ng/core/skills.md)
 
-## 技能搜索路径
+Skills 把反复使用的操作方法整理成 Agent 可以按需加载的指令。Agent 平时只读取名称和
+简介，任务需要时才加载完整内容。
 
-技能按优先级从高到低在以下目录中搜索：
+## 在 cosh 中使用 Skills
 
-| 层级 | 路径 | 说明 |
-|------|------|------|
-| Project | `<project>/.copilot-shell/skills/` | 项目级技能 |
-| Custom | config.toml `skills.custom_paths` | 自定义路径 |
-| User | `~/.copilot-shell/skills/` | 用户级技能 |
-| Extension | 扩展 `skill_dirs` 声明 | 通过扩展注册 |
-| System | `/usr/share/anolisa/skills/` | 系统级（RPM 安装） |
+```text
+/skills                     列出最终生效的 Skills
+/skills detail <name>       查看一个 Skill 及其来源层级
+/skills enable <name>       让被禁用的 Skill 重新可用
+/skills disable <name>      对 Agent 隐藏一个 Skill
+```
 
-同名技能按优先级覆盖（Project > Custom > User > Extension > System）。
+## 搜索顺序
 
-## 技能文件格式
+多个位置存在同名 Skill 时，排在前面的版本生效。
 
-技能是一个 Markdown 文件（`.md`），包含 YAML frontmatter 和正文：
+| 优先级 | 位置 |
+|---:|---|
+| 1 | `<workspace>/.copilot-shell/skills/` |
+| 2 | `skills.custom_paths` 中的路径 |
+| 3 | `~/.copilot-shell/skills/` |
+| 4 | Extensions 提供的 Skill 目录 |
+| 5 | `/usr/share/anolisa/skills/` |
+
+运行时会监视已有的搜索目录，文件变化后自动刷新 Skill 缓存。
+
+## Skill 格式
+
+推荐使用 `<skill-name>/SKILL.md` 目录布局。
 
 ```markdown
 ---
-name: check-disk
-description: 检查磁盘使用情况并给出建议
+name: service-health
+description: Inspect a systemd service and summarize actionable evidence
+allowedTools:
+  - shell
 ---
 
-# 检查磁盘使用情况
+# Service health
 
-1. 执行 `df -h` 获取挂载点使用率
-2. 对使用率超过 80% 的分区发出警告
-3. 执行 `du -sh /var/log` 检查日志目录大小
+Inspect status and recent logs before proposing a change. Ask for approval
+before restarting the service.
 ```
+
+`name` 和 `description` 用于识别 Skill。`allowedTools` 可省略，可以使用 YAML 列表或
+逗号分隔字符串。系统仍兼容旧的 `<name>.md` 单文件格式，但推荐使用目录布局，以便携带
+其他资源。
 
 ## 配置
 
+共享只读目录可以直接加入搜索路径，无需复制到用户目录。
+
 ```toml
 [skills]
-custom_paths = ["~/my-skills", "/opt/team-skills"]
+custom_paths = ["~/team-skills", "/opt/company/skills"]
 ```
 
-## 运行时行为
-
-1. 启动时 `SkillManager` 扫描所有路径，构建技能缓存
-2. 技能列表注入系统提示词的 `# Available Skills` 段
-3. LLM 通过 `skill` 工具调用技能（传入技能名称）
-4. 技能内容以 system message 形式注入对话上下文
-5. 文件系统监听器自动检测新增/修改的技能文件（热加载）
-
-## 禁用技能
-
-通过状态文件 `~/.copilot-shell/states/skills.json` 管理：
-
-```json
-{ "disabled": ["dangerous-skill"] }
-```
-
-被禁用的技能不会出现在 LLM 的可见列表中。
-
-## 与 copilot-shell 的区别
-
-cosh-core 的技能系统镜像了 copilot-shell 的技能发现逻辑，但实现为纯 Rust。同一套技能文件可同时被两者加载。
+项目 Skills 和项目配置都以启动工作区为基准解析。存在同名 Skill 时，使用
+`/skills detail <name>` 查看最终采用的版本和来源。

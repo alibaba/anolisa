@@ -1,168 +1,88 @@
-# 扩展系统
+# Extensions
 
-cosh-core 的扩展系统通过 `cosh-extension.json` 配置文件注册技能目录和钩子。扩展是一个包含配置文件的目录，可来自系统级安装或用户级安装。
+[English](../../../../en/user-entrypoint/cosh-ng/core/extensions.md)
 
-## 扩展目录
+Extensions 可以打包 Skills、Hooks、MCP 服务、设置、上下文文件和 Agent 定义。通过
+交互式终端管理 Extension 时，系统会展示新增或变化的能力，并在启用可执行内容前请求
+确认。
 
-| 层级 | 路径 | 说明 |
-|------|------|------|
-| 用户级 | `~/.copilot-shell/extensions/<name>/` | 优先级高，覆盖同名系统扩展 |
-| 系统级 | `/usr/share/anolisa/extensions/<name>/` | RPM/包管理器安装 |
+## 常用命令
 
-用户级扩展与系统级扩展同名时，用户级覆盖系统级。
+```text
+/extensions list
+/extensions info <name>
+/extensions doctor [name]
 
-## 配置文件
+/extensions install ./extension
+/extensions install https://example.com/extension.git --ref main
+/extensions link ./extension
+/extensions update <name>
+/extensions update --all
+/extensions uninstall <name>
 
-每个扩展目录下必须包含 `cosh-extension.json`：
-
-```json
-{
-  "name": "agent-sec-core",
-  "version": "0.7.0",
-  "skills": "skills",
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "^(run_shell_command|shell)$",
-        "hooks": [
-          {
-            "type": "command",
-            "name": "code-scanner",
-            "command": "python3 ${extensionPath}/hooks/code_scanner_hook.py",
-            "description": "Scans tool code for security vulnerabilities",
-            "timeout": 5000
-          }
-        ]
-      }
-    ],
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "name": "context-loader",
-            "command": "${extensionPath}/hooks/load-context.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
+/extensions enable <name>
+/extensions disable <name>
+/extensions reload
 ```
 
-### 字段说明
+需要由系统管理副本时使用 `install`，开发本地 Extension 时使用 `link`。HTTPS Git
+地址可以指定 ref。运行 `/extensions help` 查看当前版本支持的完整语法。
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `name` | string | 是 | 扩展唯一标识 |
-| `version` | string | 否 | 版本号（默认 "0.0.0"） |
-| `skills` | string \| string[] | 否 | 技能目录（默认 "skills"），相对于扩展根目录 |
-| `hooks` | object | 否 | 按事件分组的钩子定义 |
+## 确认变更
 
-### 钩子组结构
+安装、链接、卸载或改变能力的更新可能先生成一项待确认操作。
 
-```json
-{
-  "matcher": "^shell$",
-  "sequential": true,
-  "hooks": [
-    {
-      "type": "command",
-      "name": "hook-name",
-      "command": "执行命令",
-      "description": "说明",
-      "timeout": 5000,
-      "env": { "TOKENLESS_AGENT_ID": "cosh-ng" }
-    }
-  ]
-}
+```text
+/extensions operation <operation-id>
+/extensions consent <operation-id>
+/extensions cancel <operation-id>
 ```
 
-| 字段 | 说明 |
-|------|------|
-| `matcher` | 正则匹配工具名（仅 PreToolUse/PostToolUse 有效） |
-| `sequential` | 组内钩子是否顺序执行 |
-| `hooks[].command` | 钩子执行的 shell 命令 |
-| `hooks[].timeout` | 超时时间（毫秒） |
-| `hooks[].env` | 仅注入该钩子子进程的环境变量 |
+确认前请检查来源、版本和能力差异。能力指纹包含可执行的 Hook 命令及其环境变量，任一
+内容变化都需要重新确认。
 
-`env` 语义：
+## 设置
 
-- 子进程继承宿主环境，`env` 中的同名条目覆盖继承值；宿主进程自身永不被修改。
-- 变量名须符合 POSIX 规则 `[A-Za-z_][A-Za-z0-9_]*`。严格 `schemaVersion: 1`
-  manifest 会以 `extension_hook_env_name_invalid` **直接拒绝**；legacy manifest
-  丢弃该条目并只记录变量名（绝不记录取值）。
-- 变量替换只作用于取值，变量名按字面量处理。
-- 宿主在 `env` 之后注入 `COSH_RUNTIME=cosh-ng` 与 `COSH_NG_VERSION`，
-  因此其优先级高于同名声明条目。这只是协作式归因信号——manifest 同时控制
-  `command`，可以在自己的 shell 中重新赋值。
-- `env` 属于可执行能力，会计入 capability 指纹：声明或修改需要用户重新确认；
-  未声明 `env` 的钩子指纹保持不变。
-
-完整钩子协议见 [hooks.md](hooks.md)。
-
-## 变量替换
-
-配置中的字符串字段支持变量替换：
-
-| 变量 | 替换为 |
-|------|--------|
-| `${extensionPath}` | 扩展目录绝对路径 |
-| `${workspacePath}` | 当前工作区目录 |
-| `${/}` | 路径分隔符（Linux 始终为 `/`） |
-
-示例：`"command": "python3 ${extensionPath}/hooks/check.py --dir=${workspacePath}"`
-
-## 安装元数据
-
-可选文件 `cosh-extension-install.json` 记录安装来源：
-
-```json
-{
-  "source": "/path/to/local/extension",
-  "type": "link",
-  "installed_at": "2026-07-01T10:00:00Z"
-}
+```text
+/extensions settings list <name> [--scope user|workspace]
+/extensions settings get <name> <key> [--scope user|workspace]
+/extensions settings set <name> <key> <value> --scope user
+/extensions settings unset <name> <key> --scope workspace
 ```
 
-`type` 可选值：`"local"`（复制安装）或 `"link"`（符号链接）。
+敏感值保存在操作系统密钥存储中，显示时会替换为 `[redacted]`。工作区设置只对已经
+信任的项目生效。
 
-## 启用/禁用
+## 来源优先级
 
-通过 Registry 协议管理扩展状态：
+系统 Extensions 通常位于 `/usr/share/anolisa/extensions/`，用户 Extensions 位于
+`~/.copilot-shell/extensions/`。两处出现同一个 Extension 时，系统会提示来源冲突，
+此时可以手动选择。
 
-```bash
-# 列出扩展
-echo '{"type":"registry_request","request_id":"r1","domain":"extensions","action":"list","params":{}}' \
-  | cosh-core --registry
-
-# 查看详情
-echo '{"type":"registry_request","request_id":"r2","domain":"extensions","action":"detail","params":{"name":"agent-sec-core"}}' \
-  | cosh-core --registry
-
-# 禁用扩展
-echo '{"type":"registry_request","request_id":"r3","domain":"extensions","action":"disable","params":{"name":"hook-test"}}' \
-  | cosh-core --registry
-
-# 启用扩展
-echo '{"type":"registry_request","request_id":"r4","domain":"extensions","action":"enable","params":{"name":"hook-test"}}' \
-  | cosh-core --registry
+```text
+/extensions select-source <name> user
+/extensions select-source <name> system
 ```
 
-禁用状态持久化在 `~/.copilot-shell/states/extensions.json`：
+## 激活模型
 
-```json
-{ "disabled": ["hook-test"] }
-```
+系统会先构建并检查一份新的 Extension 注册表。检查失败时，当前版本继续工作。没有
+正在运行的 Agent 任务时，新版本立即启用。有任务运行时，重载会等到安全时机，当前
+任务继续使用启动时的版本。
 
-禁用扩展后，其钩子和技能均不生效。启用时自动清除该扩展相关钩子的禁用状态。
+链接的 Extension 会检查源文件是否发生变化。`/extensions doctor` 会报告无效清单、
+确认过期、文件缺失、来源冲突和加载失败。
 
-## 加载流程
+## 能力边界
 
-1. 扫描系统级目录（低优先级）
-2. 扫描用户级目录（高优先级，同名覆盖）
-3. 读取 `cosh-extension.json` 并解析
-4. 执行变量替换（`${extensionPath}` 等）
-5. 加载 `cosh-extension-install.json`（如存在）
-6. 应用禁用状态（从 `extensions.json` 读取）
-7. 按扩展名字母排序
+- 本地 stdio MCP 工具使用完整 `<extension>/mcp/<server>/<tool>` 命名空间，并保留正常
+  审批。
+- Hook `env` 只作用于 Hook 子进程，不会修改宿主进程。
+- Extension 上下文有大小限制，并放在项目上下文之后。
+- Agent 定义会被校验和列出，在统一的子 Agent 执行器可用前报告
+  `executable=false`。
+- 禁用 Extension 会在下一次安全重载时移除运行时能力，不会删除已安装的软件包。
+
+作者可使用 `/extensions new <path> --template <name>` 创建清单骨架。`<name>` 可选
+`minimal`、`skill`、`hook`、`mcp`、`context` 或 `agent`，完成后运行
+`/extensions doctor` 检查。

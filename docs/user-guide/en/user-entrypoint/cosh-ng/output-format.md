@@ -1,5 +1,7 @@
 # Output Format
 
+[中文版](../../../zh/user-entrypoint/cosh-ng/output-format.md)
+
 All cosh-cli commands output a unified JSON envelope `CoshResponse<T>`, making it easy for AI Agents to parse.
 
 ## Success Response

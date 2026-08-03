@@ -1,7 +1,8 @@
 # 服务管理
 
-`cosh-cli svc` 子系统通过 systemd 管理系统服务。所有 Linux 发行版使用统一的
-`systemctl` 接口，macOS 不支持此子系统。
+[English](../../../../en/user-entrypoint/cosh-ng/cli/service-management.md)
+
+`cosh-cli svc` 子系统通过统一的 `systemctl` 接口管理 Linux systemd 服务。
 
 ## 命令列表
 
@@ -23,7 +24,7 @@
 cosh-cli svc status nginx
 ```
 
-输出：
+输出示例
 
 ```json
 {
@@ -54,7 +55,7 @@ cosh-cli svc restart nginx
 cosh-cli svc restart nginx --dry-run
 ```
 
-成功输出：
+成功输出示例
 
 ```json
 {
@@ -87,7 +88,7 @@ cosh-cli svc list --state running
 cosh-cli svc list --state failed
 ```
 
-输出：
+输出示例
 
 ```json
 {

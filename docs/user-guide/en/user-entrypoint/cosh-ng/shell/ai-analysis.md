@@ -1,5 +1,7 @@
 # AI Analysis
 
+[中文版](../../../../zh/user-entrypoint/cosh-ng/shell/ai-analysis.md)
+
 cosh-shell can automatically or on-demand invoke the AI adapter to analyze failure causes and provide suggestions when a command failure is detected.
 
 ## Analysis Modes

@@ -1,5 +1,7 @@
 # Workspace Checkpoints
 
+[中文版](../../../../zh/user-entrypoint/cosh-ng/cli/checkpoint.md)
+
 The `cosh-cli checkpoint` subsystem manages workspace snapshots by communicating with the ws-ckpt daemon via Unix socket. Snapshots enable Agents to save state before executing high-risk operations and quickly rollback on failure.
 
 ## Prerequisites
@@ -15,8 +17,10 @@ Checkpoint commands require a running ws-ckpt daemon. If not running, commands r
 | `cosh-cli checkpoint list` | List all snapshots |
 | `cosh-cli checkpoint status` | Check daemon status |
 | `cosh-cli checkpoint init` | Initialize workspace |
+| `cosh-cli checkpoint recover` | Recover workspace checkpoint metadata |
 | `cosh-cli checkpoint delete` | Delete snapshot |
 | `cosh-cli checkpoint diff` | Compare two snapshots |
+| `cosh-cli checkpoint cleanup` | Keep a bounded number of snapshots |
 
 ## create
 
@@ -79,6 +83,29 @@ Delete a specified snapshot.
 cosh-cli checkpoint delete --snapshot step-042
 ```
 
+Use `--workspace <path>` when snapshot IDs may exist in multiple workspaces.
+`--force` skips backend confirmation where supported.
+
+## recover
+
+Recover checkpoint metadata for an initialized workspace:
+
+```bash
+cosh-cli checkpoint recover --workspace /home/agent/project
+```
+
+## cleanup
+
+Ask the daemon to retain a bounded number of snapshots:
+
+```bash
+cosh-cli checkpoint cleanup --workspace /home/agent/project --keep 20
+```
+
+Checkpoint mutations do not implement `--dry-run` in cosh-cli. Inspect the
+workspace, snapshot ID, pin state, and daemon policy before restoring, deleting,
+or cleaning up.
+
 ## status
 
 Check ws-ckpt daemon connection status.
@@ -94,9 +121,9 @@ Checkpoint commands communicate with the ws-ckpt daemon via Unix socket, using b
 ## Typical Agent Workflow
 
 ```
-1. cosh-cli checkpoint create --id pre-action -m "safe point"
+1. cosh-cli checkpoint create --workspace /path/to/workspace --id pre-action -m "safe point"
 2. Execute high-risk operation (file modifications, service restarts, etc.)
 3. Verify operation results
-4. If failed → cosh-cli checkpoint restore pre-action
+4. If failed → cosh-cli checkpoint restore pre-action --workspace /path/to/workspace
 5. If successful → proceed to next step
 ```

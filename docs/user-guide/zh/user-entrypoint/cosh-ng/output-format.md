@@ -1,5 +1,7 @@
 # 输出格式
 
+[English](../../../en/user-entrypoint/cosh-ng/output-format.md)
+
 cosh-cli 的所有命令输出统一的 JSON 信封 `CoshResponse<T>`，方便 AI Agent 解析。
 
 ## 成功响应
@@ -70,12 +72,12 @@ cosh-cli 的所有命令输出统一的 JSON 信封 `CoshResponse<T>`，方便 A
 
 ## 退出码
 
-- `0` — 操作成功（`ok: true`）
-- `1` — 操作失败（`ok: false`）
+- `0` 表示操作成功，响应中的 `ok` 为 `true`
+- `1` 表示操作失败，响应中的 `ok` 为 `false`
 
 ## Agent 对接模式
 
-对于 AI Agent 消费 cosh-cli 输出，推荐以下模式：
+AI Agent 处理 cosh-cli 输出时，可以按以下步骤执行。
 
 1. 解析 JSON，检查 `ok` 字段
 2. 若 `ok: false`，读取 `error.recoverable` 决定是否重试

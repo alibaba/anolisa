@@ -1,58 +1,49 @@
-# cosh-cli 总览
+# 管理系统操作
 
-cosh-cli 是 cosh-ng 的结构化命令行工具，为 AI Agent 提供零学习成本的跨发行版
-系统操作接口。所有命令输出 JSON 格式的 `CoshResponse<T>` 信封。
+[English](../../../../en/user-entrypoint/cosh-ng/cli/overview.md)
 
-## 设计理念
+脚本或 Agent 需要稳定的系统操作 JSON 接口时，可以使用 `cosh-cli`。它会识别当前
+平台，调用对应后端，并在统一响应中返回错误类型、重试建议、耗时、平台和预览状态。
 
-1. **零学习** — Agent 无需区分 dnf / apt / zypper
-2. **结构化输出** — 纯 JSON，无需正则解析文本
-3. **可逆** — checkpoint 创建 → 执行 → 失败时回滚
-4. **分类错误** — `recoverable` 字段告知 Agent 是否值得重试
-5. **Dry-run** — 所有写操作支持 `--dry-run` 预览
+## 命令域
 
-## 命令子系统
+| 命令域 | 操作 | 后端 |
+|---|---|---|
+| `pkg` | `install`、`remove`、`search`、`list` | dnf、apt、zypper 或 Homebrew |
+| `svc` | `status`、`start`、`stop`、`restart`、`enable`、`disable`、`list` | systemd |
+| `checkpoint` | `init`、`recover`、`create`、`list`、`restore`、`status`、`delete`、`diff`、`cleanup` | ws-ckpt Unix socket |
+| `audit` | `check`、`log`、`status`、`events`、`trace`、`export`、`prune`、`policy` | 审计策略和存储 |
 
-| 子系统 | 说明 | 详细文档 |
-|--------|------|----------|
-| `pkg` | 跨发行版包管理 | [package-management.md](package-management.md) |
-| `svc` | systemd 服务管理 | [service-management.md](service-management.md) |
-| `checkpoint` | 工作区快照（ws-ckpt） | [checkpoint.md](checkpoint.md) |
-| `audit` | 安全策略审计 | [audit.md](audit.md) |
+运行 `cosh-cli <domain> --help` 和 `cosh-cli <domain> <action> --help` 查看精确参数。
 
-## 通用选项
-
-```
-cosh-cli <SUBCOMMAND> [OPTIONS]
-```
-
-| 选项 | 说明 |
-|------|------|
-| `--help` / `-h` | 显示帮助信息 |
-| `--version` / `-V` | 显示版本号 |
-| `--dry-run` | 预览模式，不实际执行（各写操作子命令各自支持） |
-
-## 快速示例
+## 安全的初次示例
 
 ```bash
-# 包管理
-cosh-cli pkg install nginx
+# Read-only
 cosh-cli pkg search "web server"
 cosh-cli pkg list --installed
-cosh-cli pkg remove nginx --dry-run
-
-# 服务管理
 cosh-cli svc status nginx
-cosh-cli svc restart nginx --dry-run
 cosh-cli svc list --state running
+cosh-cli audit status
 
-# 工作区快照
-cosh-cli checkpoint create --workspace /home/agent/project --id step-042 -m "before refactor"
-cosh-cli checkpoint restore step-040 --workspace /home/agent/project
-cosh-cli checkpoint list --workspace /home/agent/project
-
-# 安全审计
-cosh-cli audit check --action "rm -rf /var/log"
-cosh-cli audit log --session abc123
-cosh-cli audit policy show
+# 预览支持 dry-run 的软件包/服务修改
+cosh-cli pkg install nginx --dry-run
+cosh-cli svc restart nginx --dry-run
 ```
+
+`--dry-run` 只适用于部分操作。软件包安装、卸载和服务状态修改支持该参数，快照操作
+不支持。执行快照命令前，请仔细检查工作区和快照参数。
+
+Linux 上的软件包和服务修改通常需要 root 权限。服务操作依赖 systemd，不能在 macOS
+上使用。快照命令需要 ws-ckpt 守护进程正在运行，指定的工作区路径也必须存在。
+
+## 在脚本或 Agent 中处理响应
+
+1. 把 stdout 解析为一个 `CoshResponse<T>` JSON 值。
+2. 检查 `ok`，不要根据说明文字推断是否成功。
+3. 失败时使用 `error.recoverable` 判断重试是否有意义，并根据 `error.hint` 决定下一步。
+4. 判断修改是否已经发生前，先确认 `meta.dry_run`。
+5. 单独保留 stderr，stdout 是稳定的自动化接口。
+
+继续阅读[输出格式](../output-format.md)、[软件包管理](package-management.md)、
+[服务管理](service-management.md)、[Checkpoints](checkpoint.md)和[Audit](audit.md)。

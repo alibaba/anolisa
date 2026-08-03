@@ -1,137 +1,70 @@
-# 交互模式
+# 交互行为和命令
 
-cosh-shell 在原生 PTY 之上运行 bash/zsh，通过 OSC 转义序列标记命令边界，实现 AI 分析与工具审批的无缝集成。
+[English](../../../../en/user-entrypoint/cosh-ng/shell/interactive-mode.md)
 
-## PTY 主机
+本页是启动 cosh 和控制当前会话的精简参考。请运行 `/help` 查看已安装版本实际支持的
+命令集合。
 
-cosh-shell 通过 `openpty()` 创建伪终端对，在 slave 端启动 bash 或 zsh 子进程：
+## 启动模式
 
+| 命令 | 行为 |
+|---|---|
+| `cosh` | 启动已配置的 bash/zsh 和 Agent 适配器 |
+| `cosh --shell zsh` | 选择底层 Shell |
+| `cosh --isolated` | 跳过用户 rcfile，启动隔离会话 |
+| `cosh --login` | 启动 login shell |
+| `cosh --resume [id]` | 选择持久化的 Agent 对话 |
+| `cosh -c '<command>'` | 通过底层 Shell 执行后退出 |
+| `cosh -- <program> [args...]` | 直接执行程序后退出 |
+
+## 输入和编辑
+
+- Shell 语法会发送到前台 bash/zsh 进程。
+- 在 `smart` 或 `auto` 分析模式下，自然语言输入会开始一轮 Agent 对话。
+- 行首斜杠会调用 cosh 控制命令。自然语言句子里即使出现斜杠，也不会被当成控制命令。
+- 终端支持协商后的按键协议时，`Shift+Enter` 可插入换行；多行粘贴保持为一次逻辑提交。
+- 上方向键历史同时包含 Shell 输入和 slash 命令。
+
+cosh 会向子 Shell 注入私有 OSC 消息，用它标记命令边界。这样无需解析 Shell
+提示符，也能关联命令文本、退出状态、工作目录和捕获到的输出。
+
+## 公开 slash 命令
+
+| 命令 | 用途 |
+|---|---|
+| `/help` | 查看运行版本支持的命令 |
+| `/draft` | 打开 prompt draft 工作流 |
+| `/health` | 运行本地健康检查 |
+| `/status`（`/about`） | 查看运行状态、provider 和当前会话；`/about` 是别名 |
+| `/stats [model\|tools]` | 查看当前模型或工具活动 |
+| `/auth` | 选择或更新 provider 认证 |
+| `/config language [auto\|en-US\|zh-CN]` | 查看或设置 UI 语言 |
+| `/mode approval [recommend\|auto\|trust]` | 查看或修改审批行为 |
+| `/mode analysis [smart\|auto\|manual]` | 查看或修改分析路由 |
+| `/session ...` | 新建、列出（包括 `--all`）、恢复、清理或压缩对话 |
+| `/recommendations [on\|off\|status\|privacy\|clear]` | 管理本地输入建议 |
+| `/hooks <command>` | 查看 Hook 记录、反馈和项目信任状态 |
+| `/extensions <command>` | 管理扩展包和设置 |
+| `/skills [list\|detail\|enable\|disable]` | 管理可复用 Skills |
+| `/mcp [list\|connect\|inspect\|refresh\|disconnect\|login\|logout]` | 管理 MCP server |
+
+`/details`、`/audit`、`/send-to-shell` 等命令只在当前卡片或任务具备所需上下文时出现。
+诊断和兼容命令不会出现在普通帮助中。
+
+## Skills
+
+```text
+/skills detail service-health
+/skills disable service-health
+/skills enable service-health
 ```
-┌──────────────────────┐
-│    cosh-shell        │
-│  ┌────────────────┐  │       ┌──────────────┐
-│  │  PTY master    │──────────│  bash/zsh    │
-│  └────────────────┘  │       │  (PTY slave) │
-│  ┌────────────────┐  │       └──────────────┘
-│  │  OSC Parser    │  │
-│  └────────────────┘  │
-└──────────────────────┘
-```
 
-### Shell 选择
-
-```bash
-cosh-shell                    # 默认使用 auto（自动检测）
-cosh-shell --shell zsh        # 使用 zsh
-cosh-shell raw qwen --shell zsh
-cosh-shell --resume           # Shell 启动后打开会话选择器
-cosh-shell --resume <id>      # 选择要恢复的 provider 对话
-```
-
-Shell 选择优先级：
-1. `--shell` 参数
-2. `COSH_SHELL_RAW_SHELL` 环境变量
-3. 配置文件 `shell.default`
-4. 自动检测（默认 bash）
-
-### 运行模式
-
-| 模式 | 说明 |
-|------|------|
-| 默认（无子命令） | 使用配置的适配器启动交互式 shell |
-| `raw [adapter]` | 显式指定适配器 |
-| `-c <command>` | 执行命令后退出（直通底层 shell） |
-| `-- <command>` | 直接执行命令后退出 |
-| `--isolated` | 隔离模式，不加载用户 rcfile |
-| `--login` / `-l` | 作为登录 shell 启动 |
-
-## OSC 标记系统
-
-cosh-shell 注入自定义 rcfile（bashrc/zshrc）到子 shell，通过 OSC 1337 转义序列标记命令生命周期：
-
-```
-ESC]1337;COSH;<payload>BEL
-```
-
-标记的事件包括：
-- Shell 就绪（prompt 显示）
-- 命令开始执行（preexec）
-- 命令执行结束（precmd，携带退出码）
-- 工作目录变更
-
-这些标记使 cosh-shell 精确识别：
-1. 用户何时输入命令
-2. 命令何时开始/结束
-3. 命令的退出码
-4. 当前工作目录
-
-## 输入分类
-
-用户在 shell 中的输入被分类为以下类型：
-
-| 类型 | 说明 | 示例 |
-|------|------|------|
-| Shell 命令 | 普通 shell 命令 | `ls -la`、`git status` |
-| Slash 命令 | `/` 开头的内置控制命令 | `/help`、`/mode` |
-| Natural Language | 自然语言提问 | 由 AI 适配器处理 |
-| Agent Marker | Agent 执行标记 | 内部使用 |
-
-## Slash 命令
-
-| 命令 | 说明 |
-|------|------|
-| `/help` | 显示帮助信息 |
-| `/mode [approval\|analysis] [value]` | 查看或切换模式 |
-| `/config [key] [value]` | 查看或修改运行时配置 |
-| `/hooks [list\|enable\|disable] [name]` | 管理钩子 |
-| `/extensions [list\|enable\|disable] [name]` | 管理扩展 |
-| `/skills [list\|enable\|disable] [name]` | 管理技能 |
-| `/session [status\|list\|resume <id>\|clear ...]` | 管理 provider 对话 |
-| `/session compact [status\|cancel]` | 启动、检查或取消后台会话压缩 |
-| `/resume [id]` | 会话选择器或会话选择的别名 |
-| `/debug [state\|events\|adapter]` | 调试信息 |
-| `/auth` | 触发认证流程 |
-
-选择器按键、工作空间作用域、清理确认和可恢复错误处理详见
-[会话恢复](session-recovery.md)。手动和自动压缩语义详见
-[会话压缩](session-compaction.md)。
-
-## 启动流程
-
-1. 解析命令行参数（shell 类型、适配器、模式）
-2. 安装终端恢复处理（SIGTERM/SIGHUP/panic 时恢复 termios）
-3. 加载配置（`~/.copilot-shell/config.toml`）
-4. 初始化日志（文件输出到 `~/.copilot-shell/logs/`）
-5. 创建 PTY 会话，启动 bash/zsh 子进程
-6. 注入 OSC 标记脚本
-7. 启动 AI 适配器连接
-8. 渲染启动横幅（COSH logo + 适配器/shell/审批模式信息）
-9. 进入主事件循环
+`/skills` 需要默认的 cosh-core 适配器。Skill 状态按启动 cosh 时确定的工作空间解析，
+并从下一轮 Agent 对话开始生效。
 
 ## 终端恢复
 
-cosh-shell 在以下场景自动恢复终端状态（termios）：
+cosh 会在正常退出、panic、`SIGTERM`、`SIGHUP` 或 `SIGQUIT` 时恢复终端设置。如果被
+强制终止后终端仍显示异常，可在父 Shell 中运行 `reset`。
 
-- 进程收到 SIGTERM / SIGHUP / SIGQUIT
-- panic 触发
-- 正常退出
-
-确保异常退出时终端不会留在 raw mode。
-
-## Native 模式 vs 隔离模式
-
-| 特性 | Native 模式（默认） | 隔离模式（`--isolated`） |
-|------|---------------------|--------------------------|
-| 用户 rcfile | 加载（~/.bashrc 等） | 跳过 |
-| PS1 提示符 | 保留用户设置 | 使用 `cosh-osc$ ` |
-| 历史记录 | 加载 $HISTFILE | 不加载 |
-| 环境变量 | 继承 | 最小化 |
-
-## 会话工作目录
-
-cosh-shell 在 `~/.copilot-shell/` 下为每个会话创建工作目录，存储：
-
-- OSC 标记脚本
-- 命令输出引用（24 小时自动清理）
-- 终端恢复请求文件
-- Shell handoff 请求文件
+对话持久化和删除保证见[会话恢复](session-recovery.md)，卡片行为见[工具审批](approval.md)。

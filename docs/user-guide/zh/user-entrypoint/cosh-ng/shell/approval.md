@@ -1,26 +1,33 @@
 # 工具审批
 
-cosh-shell 的工具审批系统在 AI 适配器请求执行工具时，以可视化卡片呈现操作详情，让用户决定是否允许。
+[English](../../../../en/user-entrypoint/cosh-ng/shell/approval.md)
 
-## 审批模式
+Agent 要执行受保护的操作时，cosh 会先显示审批卡片。卡片会告诉你将要
+调用哪个工具、传入什么内容，以及哪些风险或 Hook 结果需要注意。
 
-通过 `/mode approval <mode>` 或配置 `shell.approval_mode` 切换：
+## 选择审批模式
+
+用 `/mode approval <mode>` 切换，也可以设置 `shell.approval_mode`。
 
 | 模式 | 含义 | 对 cosh-core 的映射 |
 |------|------|---------------------|
-| `recommend` | 推荐模式：所有工具调用需审批 | `strict` |
-| `auto` | 自动模式（默认）：仅 shell 命令需审批 | `auto` |
-| `trust` | 信任模式：所有工具自动执行（需 `confirm` 确认） | `trust` |
+| `recommend` | 只读工作可直接执行；修改状态或访问外部系统时请求确认 | `strict` |
+| `auto` | 默认模式；符合条件的低风险工具和 FileEdit 可直接执行，Shell、网络、MCP 和外部工具仍会询问 | `auto` |
+| `trust` | 显式确认后，常规调用不再显示卡片 | `trust` |
 
-切换到 trust 模式需要二次确认：
+切换到 trust 模式需要二次确认。
 
 ```
 /mode approval trust confirm
 ```
 
-## 审批卡片
+Trust 仍受安全门禁约束。Reboot、shutdown、halt 等无法恢复的系统控制命令始终
+需要明确审批，即使命令经过 wrapper 包装或已预先信任。高风险卡片不会创建持久
+trust key。
 
-当工具需要审批时，cosh-shell 渲染内联审批面板：
+## 读懂审批卡片
+
+工具需要审批时，cosh-shell 会在终端内显示审批面板。
 
 ```
 ┌─────────────────────────────────────────┐
@@ -37,28 +44,12 @@ cosh-shell 的工具审批系统在 AI 适配器请求执行工具时，以可�
 └─────────────────────────────────────────┘
 ```
 
-### 卡片元素
+决定前先核对工具名称、输入预览、风险和 Hook 警告。预览被截断时，用 Details
+展开完整内容。多个请求正在排队时，右上角的数字会显示当前位置。
 
-| 元素 | 说明 |
-|------|------|
-| Tool | 工具名称 |
-| Risk | 风险等级（由钩子评估） |
-| Queue | 队列位置（当多个请求排队时） |
-| Command/Input | 工具输入预览 |
-| Hook warnings | 钩子产生的警告信息 |
-| Actions | 可选操作按钮 |
+## 执行已批准的 Shell 命令
 
-### 用户操作
-
-| 操作 | 说明 |
-|------|------|
-| Approve | 允许执行 |
-| Deny | 拒绝执行 |
-| Details | 展开完整输入内容 |
-
-## Shell 命令 Handoff
-
-当审批的工具是 `shell` 类型且用户批准时，命令会"移交"到前台 PTY 执行（而非由 cosh-core 在后台执行）：
+批准 `shell` 工具后，cosh 会把命令交给前台 Shell。
 
 ```
 用户批准 shell 命令
@@ -73,46 +64,34 @@ bash/zsh 在前台执行（用户可交互）
 执行结果通过 OSC 标记回传
 ```
 
-这意味着：
+这条命令的行为与你亲自输入时一样。
+
 - 命令输出直接显示在终端
 - 用户可以实时交互（如确认提示）
 - Ctrl+C 可中断执行
 
-## 审批日志
+已批准的 Shell 命令会串行执行。命令等待终端输入时，cosh 可以显示最近的提示内容。
+密码、pager 或普通 stdin 等待默认在 120 秒后中断。设置
+`shell.input_wait_timeout_secs = 0` 可以关闭该超时。全屏 TUI 和管道读取不会计时。
 
-所有审批决策记录在内存中的 journal：
+## 查看历史审批
 
-| 字段 | 说明 |
-|------|------|
-| `id` | 审批请求唯一标识 |
-| `run_id` | 所属 Agent 运行 ID |
-| `kind` | 请求类型（Tool / ShellCommand） |
-| `risk` | 风险等级 |
-| `decision` | 最终决策（Allow / Deny / Cancel） |
-| `subject` | 工具名称 |
-| `preview` | 操作预览 |
-
-## 与 cosh-core 审批协议的关系
-
-cosh-shell 的审批系统是 cosh-core JSONL 协议中 `can_use_tool` 控制请求的前端实现：
-
-```
-Core → Shell:  {"type":"control_request","request_id":"apr-1","request":{"subtype":"can_use_tool",...}}
-                       │
-                       ▼
-              cosh-shell 渲染审批卡片
-                       │
-                       ▼ (用户决策)
-Shell → Core:  {"type":"control_response","response":{"subtype":"tool_approval","request_id":"apr-1","response":{"behavior":"allow"}}}
-```
+cosh 会在运行日志中记录审批结果。启用审计日志后，脱敏副本也会写入持久审计时间线。
+需要追查之前的操作时，查看[审计指南](../cli/audit.md)。
 
 ## 配置
 
 ```toml
 [shell]
-# 审批模式：recommend | auto | trust
+# 审批模式 recommend | auto | trust
 approval_mode = "auto"
 
-# 信任的命令列表（始终自动审批）
+# 信任的命令列表
 trusted_commands = ["ls", "cat", "echo"]
+
+# 已批准前台命令的输入等待超时；0 表示禁用
+input_wait_timeout_secs = 120
 ```
+
+`trusted_commands` 使用精确的 trust key，不按 Shell 字符串片段匹配，也无法越过
+无法恢复命令的安全门禁。环境变量覆盖见[配置](../configuration.md)。

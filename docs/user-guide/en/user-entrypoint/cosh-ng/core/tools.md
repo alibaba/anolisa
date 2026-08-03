@@ -1,101 +1,104 @@
-# Tool System
+# Agent Tools
 
-cosh-core includes a set of built-in tools for LLM to invoke during conversations. Tools are classified by security level, which determines the approval strategy.
+[中文版](../../../../zh/user-entrypoint/cosh-ng/core/tools.md)
 
-## Built-in Tool List
+cosh-core exposes a bounded tool registry to the model. Tool kind, approval
+mode, explicit allow lists, hooks, and the cosh-shell frontend jointly decide
+whether a call can run.
 
-| Tool Name | Classification | Description |
-|-----------|---------------|-------------|
-| `read_file` | ReadOnly | Read file contents (supports line ranges) |
-| `grep` | ReadOnly | Regex search file contents |
-| `edit` | FileEdit | Precise file editing via search-and-replace |
-| `write_file` | FileEdit | Create or overwrite files |
-| `shell` | ShellExec | Execute shell commands |
-| `skill` | Other | Invoke registered skills |
-| `todo` | Other | Manage task lists |
-| `ask_user_question` | Other | Ask user a question and wait for response |
-| `cosh_shell_evidence` | ShellEvidence | Get terminal output as evidence (requires `--enable-shell-evidence-tool`) |
-| `mcp__<server>__<tool>` | Mcp | Tool discovered from a configured MCP server |
+## Default tools
 
-## Tool Classification
+| Tool | Kind | Purpose |
+|---|---|---|
+| `read_file` | ReadOnly | Read a bounded file range |
+| `read_many_files` | ReadOnly | Read several files in one call |
+| `grep` | ReadOnly | Search file content |
+| `glob` | ReadOnly | Match filesystem paths |
+| `list_directory` | ReadOnly | List one directory |
+| `edit` | FileEdit | Replace exact file content |
+| `write_file` | FileEdit | Create or replace a file |
+| `save_memory` | FileEdit | Store a project or global memory fact |
+| `shell` | ShellExec | Execute a shell command |
+| `web_fetch` | Network | Fetch an HTTP resource |
+| `skill` | Other | List or load a Skill |
+| `todo` | Other | Maintain an in-run task list |
+| `ask_user_question` | Other | Pause for structured user input |
 
-```rust
-pub enum ToolKind {
-    ReadOnly,       // Pure read, does not modify system state
-    FileEdit,       // Modifies file contents
-    ShellExec,      // Executes arbitrary shell commands
-    ShellEvidence,  // Reads terminal output history
-    Mcp,            // Calls an external MCP server tool
-    Other,          // Side-effect-free auxiliary operations
-}
+`cosh_shell_evidence` is opt-in through
+`--enable-shell-evidence-tool`. Configured MCP servers add
+`mcp__<server>__<tool>` names; extensions may add namespaced external tools.
+
+## Workspace boundary for read tools
+
+`read_file`, `read_many_files`, `grep`, `glob`, and `list_directory` are rooted
+in the canonical workspace captured when cosh-core starts. A later shell `cd`
+does not move that boundary. Absolute paths and symlinks work only when they
+resolve inside the pinned workspace; escapes, mount crossings, special files,
+and root replacement fail closed.
+
+Search and batch results remain bounded. When a limit, unreadable subtree, or
+cycle makes a result incomplete, the tool reports truncation instead of
+presenting the partial result as exhaustive.
+
+## Approval behavior
+
+| Tool kind | `trust` | `auto` | `balanced` / `suggest` / `strict` |
+|---|---|---|---|
+| ReadOnly | Run | Run | Run |
+| FileEdit | Run | Run | Ask |
+| ShellExec | Run | Ask | Ask |
+| Network | Run | Ask | Ask |
+| MCP / extension external | Run | Ask | Ask |
+| Other | Run | Run | Ask |
+
+Unknown tool names are denied. Hooks can still block or escalate an otherwise
+allowed call. `ask_user_question` is a control interaction, and terminal
+evidence reads follow their own bounded frontend protocol.
+
+The shell maps its user-facing modes to core policy: `recommend` behaves like
+strict approval, `auto` maps to core auto, and `trust` maps to core trust.
+
+## Exposure versus approval
+
+Use `--tools` to limit the declarations sent to the model:
+
+```bash
+cosh-core --headless --tools read_file,grep,ask_user_question
+cosh-core --headless --tools empty
 ```
 
-Classification determines the default behavior under approval modes:
+Use `--allowed-tools` only when exact names should bypass approval:
 
-| Approval Mode | ReadOnly | FileEdit | ShellExec | ShellEvidence | MCP | Other |
-|--------------|----------|----------|-----------|---------------|-----|-------|
-| `trust` | Auto | Auto | Auto | Auto | Auto | Auto |
-| `auto` | Auto | Auto | Approval | Auto | Approval | Auto |
-| `balanced` | Auto | Approval | Approval | Auto | Approval | Approval |
-| `suggest` | Auto | Approval | Approval | Auto | Approval | Approval |
-| `strict` | Auto | Approval | Approval | Auto | Approval | Approval |
-
-> **Note**: `ask_user_question` and `cosh_shell_evidence` tools always bypass the approval flow and auto-execute regardless of mode.
-
-## Tool Call Protocol
-
-When LLM decides to call a tool, Core notifies via streaming events:
-
-```json
-{"type":"stream_event","event":{"subtype":"tool_use_begin","tool_name":"shell","tool_use_id":"tu-1"}}
-{"type":"stream_event","event":{"subtype":"tool_use_delta","content":"{\"command\":\"df -h\"}"}}
-{"type":"stream_event","event":{"subtype":"tool_use_end"}}
+```bash
+cosh-core --headless --allowed-tools mcp__search__query
 ```
 
-If approval is required, Core sends a `can_use_tool` request:
+Allow-listing `shell`, a network tool, or an external tool grants real authority;
+do not use it as a convenience workaround for approval prompts.
+
+## Tool-call protocol
+
+Core streams tool-use events, then sends a control request if policy requires a
+decision:
 
 ```json
 {"type":"control_request","request_id":"apr-1","request":{"subtype":"can_use_tool","tool_name":"shell","tool_input":{"command":"df -h"}}}
 ```
 
-Shell replies with the approval result:
+The frontend answers with the same request ID. cosh-shell renders this exchange
+as a card and, for approved shell commands, can execute the command in its
+foreground PTY instead of inside the core process.
 
-```json
-{"type":"control_response","response":{"subtype":"tool_approval","request_id":"apr-1","response":{"behavior":"allow"}}}
-```
+Tool output is injected back into the current Agent turn and is subject to
+size, redaction, and loop limits before another model request. MCP output is
+bounded to 64 KiB before entering Agent context.
 
-`behavior` options: `allow`, `deny`, `ask`.
+## MCP and extension tools
 
-## Tool Results
+Trusted MCP server definitions come only from system or user configuration,
+never project configuration. Both stdio and Streamable HTTP servers receive the
+canonical workspace through the MCP roots capability. Tool descriptions from an
+external server never downgrade its approval requirement.
 
-After tool execution completes, results are injected into the conversation context for LLM to continue reasoning. Each tool returns:
-
-```rust
-pub struct ToolResult {
-    pub output: String,   // Tool output content
-    pub is_error: bool,   // Whether this is an error result
-}
-```
-
-## Auto-approved Tools
-
-Specify tools that are always auto-approved via the `--allowed-tools` argument:
-
-```bash
-cosh-core --headless --allowed-tools shell,edit
-```
-
-With this, `shell` and `edit` tools auto-execute under any approval mode without user confirmation.
-
-## Tool Registration
-
-Tools are managed uniformly via `ToolRegistry`. The default tool set is created via `ToolRegistry::with_defaults()`. `--enable-shell-evidence-tool` additionally registers the `cosh_shell_evidence` tool.
-
-Custom tools can be injected via the extension system. See [extensions.md](extensions.md).
-
-## MCP Tools
-
-MCP tools are dynamically discovered only when `cosh-core --headless` starts.
-Each configured server receives `initialize`, then `tools/list`; a model call to
-the registered name is forwarded as `tools/call`. See [Configuration](../configuration.md#mcp-servers)
-for trusted-server configuration, Streamable HTTP, and OAuth setup.
+See [Connect an MCP server](../mcp.md) for setup and lifecycle management.
+Extension-provided tools are covered in [Extensions](extensions.md).

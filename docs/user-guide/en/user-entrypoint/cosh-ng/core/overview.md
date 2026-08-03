@@ -1,85 +1,80 @@
-# cosh-core Overview
+# Integrate Another Frontend
 
-cosh-core is the AI Agent runtime core of cosh-ng. It provides a headless JSONL backend integrating LLM providers, hook system, tool execution, skill management, and session persistence.
+[中文版](../../../../zh/user-entrypoint/cosh-ng/core/overview.md)
 
-## Positioning
+`cosh-core` is the Agent runtime behind the interactive `cosh` terminal. It
+owns provider access, the model/tool loop, hooks, Skills, MCP, extensions,
+registry state, conversation persistence, and compaction.
+Most users should start `cosh`; invoke cosh-core directly only to integrate a
+frontend or automate a runtime control operation.
 
-cosh-core serves as the backend engine for cosh-shell. cosh-shell communicates with the cosh-core process via stdin/stdout (JSONL protocol). cosh-core can also be used independently:
-
-- **Single prompt mode** — Pass in a prompt directly, exit after execution
-- **Headless mode** — Long-running process, continuously receiving JSONL messages
-- **Registry mode** — Process registry requests only, then exit
-
-## Run Modes
+## Supported entry points
 
 ```bash
-# Single prompt (requires explicit --headless)
-cosh-core --headless "Check system load"
+# One prompt, then exit
+cosh-core --headless "Inspect disk usage; do not modify anything"
 
-# Long-running headless mode (receives JSONL via stdin)
+# Long-running JSONL process
 cosh-core --headless
 
-# Registry mode
-cosh-core --registry
-
-# Override model
-cosh-core --headless --model qwen-max "Analyze this code"
-
-# Override approval mode
-cosh-core --headless --approval-mode trust "Install nginx"
-
-# Resume session
+# Resume or compact a persisted conversation
 cosh-core --headless --resume <session-id>
+cosh-core --resume <session-id> --compact
+
+# One provider-free registry request on stdin
+cosh-core --registry
 ```
 
-## CLI Arguments
+Without `--headless`, non-TTY stdin still selects headless mode automatically.
+The interactive terminal uses a long-running headless process and the registry
+protocol rather than cosh-core's direct TTY UI.
 
-| Argument | Description |
-|----------|-------------|
-| `--headless` | Force headless JSONL mode |
-| `--model <name>` | Override configured model |
-| `--approval-mode <mode>` | Override approval mode (trust/auto/balanced/strict) |
-| `--allowed-tools <tools>` | Comma-separated list of auto-approved tools |
-| `--resume <session-id>` | Resume an existing session |
-| `--verbose` | Increase log verbosity |
-| `--registry` | Registry mode |
-| `--enable-shell-evidence-tool` | Enable terminal output evidence tool |
+## Important options
 
-## Core Capabilities
+| Option | Effect |
+|---|---|
+| `--headless` | Force JSONL stdin/stdout mode |
+| `--model <name>` | Override the configured model |
+| `--approval-mode <mode>` | Override `trust`, `auto`, `balanced`, or `strict` |
+| `--allowed-tools <names>` | Bypass approval for exact registered names |
+| `--tools <selection>` | Expose `default`, no tools, or a comma-separated subset |
+| `--bare` | Disable project config, hooks, Skills, extensions, and session persistence |
+| `--resume <id>` | Select an existing workspace-scoped conversation |
+| `--compact` | Compact the selected conversation and exit |
+| `--registry` | Handle one registry request and exit |
+| `--enable-shell-evidence-tool` | Add bounded terminal-evidence access for cosh-shell |
+| `--verbose` | Raise stderr logging verbosity |
 
-| Capability | Description | Documentation |
-|-----------|-------------|---------------|
-| LLM Providers | OpenAI compatible / Aliyun SysOM | [providers.md](providers.md) |
-| Hook System | 8 event points, extensible | [hooks.md](hooks.md) |
-| Tool Execution | Built-in tools + custom tools | [tools.md](tools.md) |
-| Skill Management | Markdown skill definitions | [skills.md](skills.md) |
-| Extension Loading | cosh-extension.json | [extensions.md](extensions.md) |
-| Session Persistence | JSON format session storage | — |
+`--allowed-tools` changes approval policy; `--tools` changes what the model can
+see. Do not confuse the two.
 
-## Architecture Overview
+## Runtime lifecycle
 
-```
-stdin (JSONL)                stdout (JSONL)
-     │                            ▲
-     ▼                            │
-┌────────────────────────────────────────┐
-│              cosh-core                 │
-│  ┌──────┐  ┌──────────┐  ┌──────────┐  │
-│  │ Auth │  │ Provider │  │  Tools   │  │
-│  └──────┘  └──────────┘  └──────────┘  │
-│  ┌──────┐  ┌──────────┐  ┌──────────┐  │
-│  │Hooks │  │ Session  │  │  Skills  │  │
-│  └──────┘  └──────────┘  └──────────┘  │
-└────────────────────────────────────────┘
-```
+1. Resolve the workspace and layered configuration.
+2. Build a runtime generation containing provider-independent tools, Skills,
+   extension capabilities, and MCP connections.
+3. Select/authenticate the provider.
+4. Read JSONL messages and stream model/tool events.
+5. Request approval or user input through control messages when required.
+6. Persist the transcript and model-visible projection at safe boundaries.
+7. Publish healthy registry changes immediately when idle, or defer them until
+   the active run completes.
 
-## Authentication Flow
+The process writes logs to stderr/file output; stdout remains protocol-only in
+headless and registry modes.
 
-If no API key is configured, cosh-core sends an `auth_required` control request on startup:
+## Capability map
 
-1. Core sends `AuthRequired`, listing available authentication providers
-2. Shell (or external client) displays authentication UI
-3. User selects a provider and fills in credentials
-4. Shell sends back `ControlResponse` containing credentials
-5. Core applies credentials, optionally persists to config.toml
-6. Core sends `auth_ok` status, begins normal operation
+| Capability | Reference |
+|---|---|
+| JSONL and registry messages | [Headless mode](headless-mode.md) |
+| Providers and authentication | [Providers](providers.md) |
+| Built-in, MCP, and extension tools | [Tools](tools.md) |
+| MCP server setup and lifecycle | [Connect an MCP server](../mcp.md) |
+| Reusable instructions | [Skills](skills.md) |
+| Event policy | [Hooks](hooks.md) |
+| Packaged capabilities | [Extensions](extensions.md) |
+| Session configuration | [Configuration](../configuration.md) |
+
+Protocol integrators should also read the developer
+[IPC protocol reference](../../../../../developer-guide/en/cosh-ng/ipc-protocol.md).

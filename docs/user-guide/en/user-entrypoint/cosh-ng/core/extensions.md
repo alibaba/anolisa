@@ -1,172 +1,97 @@
-# Extension System
+# Extensions
 
-The cosh-core extension system registers skill directories and hooks via `cosh-extension.json` configuration files. An extension is a directory containing a configuration file, which can come from system-level or user-level installations.
+[中文版](../../../../zh/user-entrypoint/cosh-ng/core/extensions.md)
 
-## Extension Directories
+Extensions package one or more Skills, hooks, MCP servers, settings, context
+files, or Agent definitions. Manage them from the interactive terminal so cosh
+can show capability changes and request consent before activating executable
+behavior.
 
-| Level | Path | Description |
-|-------|------|-------------|
-| User-level | `~/.copilot-shell/extensions/<name>/` | Higher priority, overrides same-name system extensions |
-| System-level | `/usr/share/anolisa/extensions/<name>/` | RPM/package manager installed |
+## Common commands
 
-When user-level and system-level extensions share the same name, user-level overrides system-level.
+```text
+/extensions list
+/extensions info <name>
+/extensions doctor [name]
 
-## Configuration File
+/extensions install ./extension
+/extensions install https://example.com/extension.git --ref main
+/extensions link ./extension
+/extensions update <name>
+/extensions update --all
+/extensions uninstall <name>
 
-Each extension directory must contain `cosh-extension.json`:
-
-```json
-{
-  "name": "agent-sec-core",
-  "version": "0.7.0",
-  "skills": "skills",
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "^(run_shell_command|shell)$",
-        "hooks": [
-          {
-            "type": "command",
-            "name": "code-scanner",
-            "command": "python3 ${extensionPath}/hooks/code_scanner_hook.py",
-            "description": "Scans tool code for security vulnerabilities",
-            "timeout": 5000
-          }
-        ]
-      }
-    ],
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "name": "context-loader",
-            "command": "${extensionPath}/hooks/load-context.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
+/extensions enable <name>
+/extensions disable <name>
+/extensions reload
 ```
 
-### Field Reference
+Use `install` for a managed copy and `link` for local extension development.
+HTTPS Git sources may select a ref. Run `/extensions help` for the exact syntax
+supported by the installed version.
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | string | Yes | Extension unique identifier |
-| `version` | string | No | Version number (default "0.0.0") |
-| `skills` | string \| string[] | No | Skill directory (default "skills"), relative to extension root |
-| `hooks` | object | No | Hook definitions grouped by event |
+## Consent flow
 
-### Hook Group Structure
+Install, link, uninstall, and capability-changing updates may return a pending
+operation instead of mutating immediately:
 
-```json
-{
-  "matcher": "^shell$",
-  "sequential": true,
-  "hooks": [
-    {
-      "type": "command",
-      "name": "hook-name",
-      "command": "execution command",
-      "description": "description",
-      "timeout": 5000,
-      "env": { "TOKENLESS_AGENT_ID": "cosh-ng" }
-    }
-  ]
-}
+```text
+/extensions operation <operation-id>
+/extensions consent <operation-id>
+/extensions cancel <operation-id>
 ```
 
-| Field | Description |
-|-------|-------------|
-| `matcher` | Regex matching tool names (only effective for PreToolUse/PostToolUse) |
-| `sequential` | Whether hooks in the group execute sequentially |
-| `hooks[].command` | Shell command the hook executes |
-| `hooks[].timeout` | Timeout in milliseconds |
-| `hooks[].env` | Environment variables for this hook's child process only |
+Review the source, version, and capability diff before consent. Capability
+fingerprints include executable hook commands and their declared environment;
+changing either requires fresh consent.
 
-`env` semantics:
+## Settings
 
-- The child inherits the host environment; an `env` entry overrides an
-  inherited value of the same name. The host process is never modified.
-- Names must match the POSIX rule `[A-Za-z_][A-Za-z0-9_]*`. A strict
-  `schemaVersion: 1` manifest is **rejected** with
-  `extension_hook_env_name_invalid`; a legacy manifest drops the offending
-  entry and logs the name (never the value).
-- Variable substitution applies to values only — names are literal.
-- The host injects `COSH_RUNTIME=cosh-ng` and `COSH_NG_VERSION` after `env`, so
-  they take precedence over a declared entry of the same name. This is a
-  cooperative attribution signal only — a manifest also controls `command` and
-  can reassign these in its own shell.
-- `env` is executable capability and is part of the capability fingerprint:
-  declaring or changing it requires the user to re-consent. Hooks with no `env`
-  keep their existing fingerprint.
-
-See [hooks.md](hooks.md) for the full hook protocol.
-
-## Variable Substitution
-
-String fields in configuration support variable substitution:
-
-| Variable | Replaced With |
-|----------|--------------|
-| `${extensionPath}` | Extension directory absolute path |
-| `${workspacePath}` | Current workspace directory |
-| `${/}` | Path separator (always `/` on Linux) |
-
-Example: `"command": "python3 ${extensionPath}/hooks/check.py --dir=${workspacePath}"`
-
-## Installation Metadata
-
-Optional file `cosh-extension-install.json` records the installation source:
-
-```json
-{
-  "source": "/path/to/local/extension",
-  "type": "link",
-  "installed_at": "2026-07-01T10:00:00Z"
-}
+```text
+/extensions settings list <name> [--scope user|workspace]
+/extensions settings get <name> <key> [--scope user|workspace]
+/extensions settings set <name> <key> <value> --scope user
+/extensions settings unset <name> <key> --scope workspace
 ```
 
-`type` options: `"local"` (copy install) or `"link"` (symbolic link).
+Sensitive values are stored in the operating-system secret store and rendered
+as `[redacted]`. Workspace settings apply only to an already trusted project.
 
-## Enable/Disable
+## Source priority
 
-Manage extension state via the Registry protocol:
+System extensions normally live under `/usr/share/anolisa/extensions/`; user
+extensions live under `~/.copilot-shell/extensions/`. When both provide the
+same identity, cosh reports the ambiguity and can select an explicit source:
 
-```bash
-# List extensions
-echo '{"type":"registry_request","request_id":"r1","domain":"extensions","action":"list","params":{}}' \
-  | cosh-core --registry
-
-# View details
-echo '{"type":"registry_request","request_id":"r2","domain":"extensions","action":"detail","params":{"name":"agent-sec-core"}}' \
-  | cosh-core --registry
-
-# Disable extension
-echo '{"type":"registry_request","request_id":"r3","domain":"extensions","action":"disable","params":{"name":"hook-test"}}' \
-  | cosh-core --registry
-
-# Enable extension
-echo '{"type":"registry_request","request_id":"r4","domain":"extensions","action":"enable","params":{"name":"hook-test"}}' \
-  | cosh-core --registry
+```text
+/extensions select-source <name> user
+/extensions select-source <name> system
 ```
 
-Disabled state is persisted in `~/.copilot-shell/states/extensions.json`:
+## Activation model
 
-```json
-{ "disabled": ["hook-test"] }
-```
+cosh builds a candidate registry generation before activation. An unhealthy
+candidate is rejected without replacing the current generation. A healthy
+candidate activates immediately when no Agent run is active; otherwise one
+reload waits for the next safe point, and the active run stays pinned to its
+original generation.
 
-After disabling an extension, its hooks and skills are no longer effective. Enabling automatically clears the disabled state of hooks related to that extension.
+Linked extensions are checked for source drift. `/extensions doctor` reports
+invalid manifests, stale consent, missing files, source conflicts, and runtime
+load failures.
 
-## Loading Flow
+## Capability boundaries
 
-1. Scan system-level directory (lower priority)
-2. Scan user-level directory (higher priority, overrides same names)
-3. Read `cosh-extension.json` and parse
-4. Perform variable substitution (`${extensionPath}`, etc.)
-5. Load `cosh-extension-install.json` (if present)
-6. Apply disabled state (read from `extensions.json`)
-7. Sort by extension name alphabetically
+- Local stdio MCP tools use the full
+  `<extension>/mcp/<server>/<tool>` namespace and retain normal approval.
+- Hook `env` values apply only to the hook child process; they never mutate the
+  host process.
+- Extension context is bounded and inserted after project context.
+- Agent definitions are validated and listed, but report `executable=false`
+  until the unified subagent executor is available.
+- Disabling an extension removes its runtime capabilities at the next healthy
+  generation boundary; it does not delete the installed package.
+
+Authors can use `/extensions new <path> --template <name>` to create a current
+manifest scaffold, where `<name>` is `minimal`, `skill`, `hook`, `mcp`,
+`context`, or `agent`; then validate it with `/extensions doctor`.

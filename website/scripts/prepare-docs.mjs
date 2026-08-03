@@ -194,12 +194,30 @@ const categoryNames = {
   },
 };
 
+const categoryPathNames = {
+  en: {
+    'user-guide/user-entrypoint/cosh-ng': 'cosh-ng',
+    'user-guide/user-entrypoint/cosh-ng/shell': 'Work in the Terminal',
+    'user-guide/user-entrypoint/cosh-ng/core': 'Add Capabilities and Integrate',
+    'user-guide/user-entrypoint/cosh-ng/cli': 'Manage System Operations',
+  },
+  zh: {
+    'user-guide/user-entrypoint/cosh-ng': 'cosh-ng',
+    'user-guide/user-entrypoint/cosh-ng/shell': '在终端中工作',
+    'user-guide/user-entrypoint/cosh-ng/core': '加入能力与集成',
+    'user-guide/user-entrypoint/cosh-ng/cli': '管理系统操作',
+  },
+};
+
 // Sidebar ordering mirrors the architecture layers: entry points → token
 // saving → runtime → the cross-cutting observability/security layer.
 // Without explicit positions Docusaurus sorts categories alphabetically,
 // which reverses that reading order.
 const categoryPositions = {
   'user-guide/user-entrypoint': 3,
+  'user-guide/user-entrypoint/cosh-ng/shell': 3,
+  'user-guide/user-entrypoint/cosh-ng/core': 5,
+  'user-guide/user-entrypoint/cosh-ng/cli': 6,
   'user-guide/token-saving': 4,
   'user-guide/runtime': 5,
   'user-guide/agent-observability': 6,
@@ -208,6 +226,11 @@ const categoryPositions = {
 
 const documentPositions = {
   'user-guide/installation.md': 2,
+  'user-guide/user-entrypoint/cosh-ng/quickstart.md': 2,
+  'user-guide/user-entrypoint/cosh-ng/mcp.md': 4,
+  'user-guide/user-entrypoint/cosh-ng/configuration.md': 7,
+  'user-guide/user-entrypoint/cosh-ng/supported-distros.md': 8,
+  'user-guide/user-entrypoint/cosh-ng/output-format.md': 9,
   'user-guide/troubleshooting.md': 8,
 };
 
@@ -229,7 +252,8 @@ async function writeCategories(outputRoot, documents, locale) {
   }
   for (const directory of [...directories].sort()) {
     const segment = path.posix.basename(directory);
-    const label = categoryNames[locale][segment] || humanize(segment);
+    const label =
+      categoryPathNames[locale][directory] || categoryNames[locale][segment] || humanize(segment);
     const indexId = `${directory}/index`;
     const hasIndex = documents.some((document) => document.target === `${indexId}.md`);
     const topLevelPosition =

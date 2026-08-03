@@ -1,6 +1,27 @@
-# 钩子系统
+# Hook 系统
 
-cosh-core 的钩子系统允许在 Agent 执行流程的关键节点注入外部逻辑。钩子通过执行外部命令实现，支持拦截、审计和上下文注入。
+[English](../../../../en/user-entrypoint/cosh-ng/core/hooks.md)
+
+Hooks 可以在 Agent 执行的关键位置运行外部命令，用于拦截操作、记录审计信息或补充
+上下文。Hook 命令拥有实际执行能力，只应启用来源可信的配置。
+
+## 查看和管理 Hooks
+
+运行 `/hooks --help` 查看当前版本支持的命令。常用操作如下。
+
+| 命令 | 用途 |
+|---|---|
+| `/hooks` | 查看 Shell 和 Agent Hooks 的来源、状态与项目信任状态 |
+| `/hooks history`、`/hooks events` | 查看最近发现和展示事件 |
+| `/hooks details <id>`、`/hooks analyze <id>`、`/hooks ignore <id>` | 处理一项发现 |
+| `/hooks feedback noisy\|useful <id>` | 记录一项发现是否有用 |
+| `/hooks mute <target>`、`/hooks unmute <target>` | 静音或恢复某个主题或 Hook ID |
+| `/hooks enable <id>`、`/hooks disable <id>` | 修改 Hook 状态 |
+| `/hooks trust-project`、`/hooks untrust-project` | 保存或撤销对项目 Hooks 的信任 |
+| `/hooks clear-feedback`、`/hooks clear-project-trust` | 清除已保存的反馈或项目信任 |
+
+项目根目录受信任前，项目 Hooks 不会执行。通过默认适配器启用 Agent Hook 后，状态会
+保存到注册表。Shell Hook 的状态只在当前会话中生效。
 
 ## 事件点
 
@@ -17,7 +38,7 @@ cosh-core 的钩子系统允许在 Agent 执行流程的关键节点注入外部
 
 ## 配置
 
-在 `~/.copilot-shell/config.toml` 中定义：
+在 `~/.copilot-shell/config.toml` 中定义 Hooks。
 
 ```toml
 [hooks]
@@ -40,7 +61,7 @@ timeout = 3000
 
 ### 输入（stdin → 钩子进程）
 
-Core 以 JSON 格式将事件数据写入钩子进程的 stdin：
+Core 会把 JSON 事件逐条写入 Hook 进程的 stdin。
 
 ```json
 {
@@ -56,7 +77,7 @@ Core 以 JSON 格式将事件数据写入钩子进程的 stdin：
 
 ### 输出（钩子进程 → stdout）
 
-钩子以 JSON 格式返回决策：
+Hook 通过 stdout 返回 JSON 决策。
 
 ```json
 {
@@ -83,10 +104,10 @@ Core 以 JSON 格式将事件数据写入钩子进程的 stdin：
 | `systemMessage` | 通知消息（优先于 reason 展示给用户） |
 | `hookSpecificOutput` | 自定义 JSON 数据（其中 `additional_context` 会注入对话上下文） |
 
-### BeforeModel：改写工具声明
+### 使用 BeforeModel 改写工具声明
 
-`BeforeModel` 输入在 `llm_request.config.tools` 中携带本次请求的完整工具声明，
-钩子可以通过同一路径返回改写后的数组（例如压缩 `description` 与 JSON Schema）：
+`BeforeModel` 输入会在 `llm_request.config.tools` 中携带本次请求的完整工具声明。
+Hook 可以通过同一路径返回改写后的数组，例如缩短 `description` 与 JSON Schema。
 
 ```json
 {
@@ -102,12 +123,12 @@ Core 以 JSON 格式将事件数据写入钩子进程的 stdin：
 }
 ```
 
-约束：
+改写需要满足以下约束。
 
 - 改写只作用于当前一次 LLM 请求，工具注册表与下一轮声明不受影响
 - 数组的工具数量、顺序和名称必须与输入完全一致，`parameters` 必须是 JSON object；
   否则整个数组被丢弃并回退原始声明（工具过滤不属于该协议）
-- 改写只允许**压缩**：估算 token 数超过原声明的数组即使结构合法也会被拒绝。
+- 改写只能**缩短**声明。估算 Token 数超过原声明的数组即使结构合法也会被拒绝。
   本轮的上下文预算在钩子执行前就按原声明计算完毕，更大的数组会让运行时低估真实
   请求，可能导致 provider 上下文溢出
 - 多个钩子按配置顺序生效，取最后一个合法数组；非法值不会覆盖此前的合法值
@@ -115,15 +136,15 @@ Core 以 JSON 格式将事件数据写入钩子进程的 stdin：
 
 ## 执行模型
 
-1. 同一事件点可注册多个钩子，按配置顺序依次执行
-2. 任一钩子返回 `block`，则最终决策为 block（短路）
-3. 钩子超时（默认 5000ms）视为透传
-4. 钩子进程退出码非零视为错误，不影响主流程
-5. 无 `name` 字段的钩子定义会被跳过
+1. 同一事件点可以注册多个 Hook，系统按配置顺序执行
+2. 任一 Hook 返回 `block` 后，系统立即停止并拒绝操作
+3. Hook 超时默认按 5000 ms 计算，超时后允许主流程继续
+4. Hook 进程以非零状态退出时记为错误，不影响主流程
+5. 没有 `name` 字段的 Hook 定义会被跳过
 
 ## 通知
 
-钩子执行后产生的通知通过 JSONL 输出传递给 Shell：
+Hook 执行后产生的通知通过 JSONL 传给 Shell。
 
 ```json
 {"type":"stream_event","event":{"subtype":"hook_notification","hook_name":"security-check","message":"该命令被安全策略拦截","decision":"block"}}
@@ -133,7 +154,7 @@ Shell 端负责渲染通知卡片。
 
 ## 环境变量
 
-钩子定义可声明 `env`，只注入该钩子的子进程：
+Hook 定义可以声明 `env`，这些变量只会注入对应的子进程。
 
 ```json
 {
@@ -146,16 +167,16 @@ Shell 端负责渲染通知卡片。
 
 - 子进程默认继承宿主环境，`env` 中的同名变量覆盖继承值
 - 宿主进程自身永不被修改（不调用 `setenv`）
-- 变量名须符合 POSIX 规则 `[A-Za-z_][A-Za-z0-9_]*`。严格 `schemaVersion: 1`
-  扩展 manifest 会以 `extension_hook_env_name_invalid` 直接拒绝，问题在安装期暴露；
-  配置文件与 legacy manifest 的钩子在启动子进程时再校验一次作为兜底：丢弃该条目、
+- 变量名须符合 POSIX 规则 `[A-Za-z_][A-Za-z0-9_]*`。使用 `schemaVersion: 1` 的
+  Extension 清单遇到无效变量名时，会以 `extension_hook_env_name_invalid` 拒绝安装。
+  配置文件与旧版清单中的 Hooks 会在启动子进程时再次校验，丢弃无效条目，
   钩子照常执行，且只记录变量名（绝不记录取值）
 - `${extensionPath}` / `${workspacePath}` 只在取值中替换，变量名按字面量处理
 - 宿主在声明的 env map 之后注入 `COSH_RUNTIME=cosh-ng` 与 `COSH_NG_VERSION`，
   因此其优先级高于同名 `env` 条目，钩子可据此识别运行时（用于统计归因等）。
-  这是协作式信号，**不是**安全边界——同一个 manifest 也控制 `command`，
-  可以在自己的 shell 里重新赋值或 unset 这些变量，因此任何安全相关逻辑都不得依赖它们
-- `env` 属于可执行能力，会计入扩展的 capability 指纹：新增或修改 `env` 会触发重新确认
+  这些值只用于协作，不能充当安全边界。同一个清单也控制 `command`，可以在自己的
+  Shell 中重新赋值或清除变量，安全逻辑不得依赖它们
+- `env` 属于可执行能力，会计入 Extension 的能力指纹。新增或修改 `env` 会触发重新确认
 
 ## 扩展钩子
 

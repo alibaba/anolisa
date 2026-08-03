@@ -1,5 +1,7 @@
 # ANOLISA 用户指南
 
+[English](../en/README.md)
+
 ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` CLI 统一安装，各组件独立使用。
 
 ---
@@ -37,6 +39,7 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 | 文档 | 组件 | 说明 |
 |------|------|------|
 | [anolisa CLI](user-entrypoint/anolisa-cli.md) | anolisa | 统一 CLI 组件管理 |
+| [cosh-ng](user-entrypoint/cosh-ng/README.md) | cosh-ng | 集成 Agent runtime 的 AI 原生 Linux 终端 |
 | [Copilot Shell](user-entrypoint/copilot-shell/QUICKSTART.md) | cosh | AI 终端助手与命令网关 |
 | [OS 技能库](user-entrypoint/os-skills.md) | os-skills | 系统管理与 DevOps 技能 |
 

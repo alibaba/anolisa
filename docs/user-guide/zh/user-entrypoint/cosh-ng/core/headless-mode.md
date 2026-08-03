@@ -1,5 +1,7 @@
 # Headless 模式
 
+[English](../../../../en/user-entrypoint/cosh-ng/core/headless-mode.md)
+
 cosh-core 的 headless 模式通过 stdin/stdout 提供 JSONL 协议接口，是 cosh-shell 与 cosh-core 之间的标准通信方式，也可供任意客户端集成。
 
 ## 启动
@@ -19,7 +21,7 @@ cosh-core --headless --model qwen-max --approval-mode trust
 
 所有输入通过 stdin 逐行发送，每行一个 JSON 对象，以 `type` 字段区分消息类型。
 
-### user — 用户消息
+### user（用户消息）
 
 ```json
 {
@@ -30,7 +32,7 @@ cosh-core --headless --model qwen-max --approval-mode trust
 }
 ```
 
-### control_request — 控制请求
+### control_request（控制请求）
 
 ```json
 {
@@ -40,7 +42,7 @@ cosh-core --headless --model qwen-max --approval-mode trust
 }
 ```
 
-支持的 `subtype`：
+支持以下 `subtype`。
 
 | subtype | 说明 |
 |---------|------|
@@ -51,7 +53,7 @@ cosh-core --headless --model qwen-max --approval-mode trust
 | `reload_config` | 重新加载 config.toml |
 | `config_override` | 运行时覆盖配置（`approval_mode`、`allowed_tools`） |
 
-### control_response — 控制响应（回复 Core 的请求）
+### control_response（回复 Core 请求）
 
 ```json
 {
@@ -64,7 +66,7 @@ cosh-core --headless --model qwen-max --approval-mode trust
 }
 ```
 
-### registry_request — 注册表请求
+### registry_request（注册表请求）
 
 ```json
 {
@@ -80,19 +82,20 @@ cosh-core --headless --model qwen-max --approval-mode trust
 
 所有输出写入 stdout，同样逐行 JSON。
 
-### system — 系统消息
+### system（系统消息）
 
 ```json
 {"type":"system","subtype":"init","session_id":"...","session_resumable":true,"model":"qwen3.7-plus","tools":["ask_user_question","edit","grep","read_file","shell","skill","todo","write_file"]}
 ```
 
-常见 `subtype`：`init`、`auth_required`、`auth_ok`、`model_switched`、`config_reloaded`。
+常见 `subtype` 包括 `init`、`auth_required`、`auth_ok`、`model_switched` 和
+`config_reloaded`。
 `init` 会携带 `session_resumable`；当其为 `false` 时，调用方不得复用输出的
 会话 ID。
 
-### stream_event — 流式事件
+### stream_event（流式事件）
 
-LLM 生成过程中逐 token 输出：
+LLM 生成过程中会逐 Token 输出事件。
 
 ```json
 {"type":"stream_event","event":{"subtype":"text_delta","content":"你好"}}
@@ -102,9 +105,9 @@ LLM 生成过程中逐 token 输出：
 {"type":"stream_event","event":{"subtype":"tool_use_end"}}
 ```
 
-### control_request — Core 发起的请求
+### control_request（Core 发起的请求）
 
-Core 需要 Shell 协作时（如工具审批、用户提问）：
+Core 需要 Shell 协作时会发出请求，例如工具审批或向用户提问。
 
 ```json
 {
@@ -114,7 +117,7 @@ Core 需要 Shell 协作时（如工具审批、用户提问）：
 }
 ```
 
-### result — 轮次结束
+### result（轮次结束）
 
 ```json
 {"type":"result","subtype":"success","is_error":false,"result":"completed","session_id":"...","duration_ms":1234}
@@ -122,7 +125,7 @@ Core 需要 Shell 协作时（如工具审批、用户提问）：
 
 ## 初始化握手
 
-标准启动序列：
+标准启动序列如下。
 
 ```
 Shell → Core:  {"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}
@@ -130,7 +133,7 @@ Core → Shell:  {"type":"control_response","response":{"subtype":"success","req
 Core → Shell:  {"type":"system","subtype":"init","session_id":"...","session_resumable":true,"model":"...","tools":[...]}
 ```
 
-`capabilities` 声明 Core 支持的协议能力：
+`capabilities` 声明 Core 支持的协议能力。
 
 | 能力 | 说明 |
 |------|------|
@@ -140,7 +143,7 @@ Core → Shell:  {"type":"system","subtype":"init","session_id":"...","session_r
 
 ## 认证流程
 
-若未配置 API 密钥，Core 在初始化时发送认证请求：
+若未配置 API 密钥，Core 会在初始化时发送认证请求。
 
 ```
 Core → Shell:  {"type":"control_request","request_id":"auth-init","request":{"subtype":"auth_required","reason":"not_configured","providers":[...]}}
@@ -158,7 +161,7 @@ Core 会解析 `--workspace` 指定的工作空间（未提供时使用进程 cw
 空间的 `.copilot-shell/config.toml`、验证规范 UUID，并加载与 cosh-shell
 交互式恢复共用的版本化会话信封。默认根目录为
 `~/.copilot-shell/cosh-core/sessions/`，记录位于确定性的工作空间作用域目录下。
-相对 `session.persist_dir` 也从该工作空间解析，而不是从无关的启动器 cwd 解析。
+相对 `session.persist_dir` 同样以该工作空间为基准解析，与启动器的 cwd 无关。
 
 传入升级前原始消息数组文件的 UUID 时，Core 只检查能够证明归请求工作空间
 所有的旧版扁平目录。对原先的相对默认值，该路径是
@@ -184,13 +187,13 @@ provider 会话 ID 在启动后不可变。后续用户消息缺少 ID 或携带
 
 ## 错误处理
 
-协议级错误通过 `result` 消息传递：
+协议级错误通过 `result` 消息传递。
 
 ```json
 {"type":"result","is_error":true,"errors":["provider returned HTTP 429: rate limit exceeded"],"session_id":"..."}
 ```
 
-会话加载与持久化失败还会携带独立于 provider 错误文本的机器可读错误码和阶段：
+会话加载与持久化失败还会携带机器可读的错误码和阶段，与模型服务错误文本分开。
 
 ```json
 {"type":"result","is_error":true,"errors":["session recovery failed [not_found]: session not found"],"session_error_code":"not_found","session_error_phase":"load","session_id":"..."}

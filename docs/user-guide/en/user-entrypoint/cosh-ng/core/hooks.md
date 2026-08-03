@@ -1,6 +1,29 @@
 # Hook System
 
-The cosh-core hook system allows injecting external logic at key points in the Agent execution flow. Hooks are implemented by executing external commands and support interception, auditing, and context injection.
+[中文版](../../../../zh/user-entrypoint/cosh-ng/core/hooks.md)
+
+Hooks run external commands at key points in Agent execution. They can block an
+operation, record audit information, or add context. Hook commands have real
+execution authority, so enable them only from sources you trust.
+
+## Inspect and control hooks from cosh
+
+Run `/hooks --help` for the installed command set. The main groups are:
+
+| Command | Purpose |
+|---|---|
+| `/hooks` | Show Shell and Agent hooks, source, state, and project trust |
+| `/hooks history`, `/hooks events` | Inspect recent findings and display events |
+| `/hooks details <id>`, `/hooks analyze <id>`, `/hooks ignore <id>` | Act on one finding |
+| `/hooks feedback noisy\|useful <id>` | Record whether a finding was useful |
+| `/hooks mute <target>`, `/hooks unmute <target>` | Mute or restore a topic or Hook ID |
+| `/hooks enable <id>`, `/hooks disable <id>` | Change Hook state |
+| `/hooks trust-project`, `/hooks untrust-project` | Persist trust for project Hooks |
+| `/hooks clear-feedback`, `/hooks clear-project-trust` | Clear persisted preferences |
+
+Project Hooks do not execute until the project root is trusted. Enabling an
+Agent Hook through the default cosh-core adapter persists its registry state;
+Shell Hook state is scoped to the session.
 
 ## Event Points
 

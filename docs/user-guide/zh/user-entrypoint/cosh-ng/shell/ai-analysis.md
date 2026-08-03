@@ -1,20 +1,22 @@
 # AI 分析
 
+[English](../../../../en/user-entrypoint/cosh-ng/shell/ai-analysis.md)
+
 cosh-shell 在检测到命令失败时，可自动或按需调用 AI 适配器分析失败原因并给出建议。
 
 ## 分析模式
 
-通过 `/mode analysis <mode>` 或配置 `shell.analysis_mode` 切换：
+通过 `/mode analysis <mode>` 或配置 `shell.analysis_mode` 切换。
 
 | 模式 | 说明 |
 |------|------|
-| `smart` | 智能模式：严重错误显示操作卡片，一般错误提示可分析 |
-| `auto` | 自动模式：检测到失败立即自动分析 |
-| `manual` | 手动模式：显示操作卡片，等待用户确认后分析 |
+| `smart` | 严重错误显示操作卡片，一般错误提示可以分析 |
+| `auto` | 检测到失败后立即自动分析 |
+| `manual` | 显示操作卡片，等待用户确认后分析 |
 
 ## 失败分类
 
-cosh-shell 对命令退出码和输出进行语义分析，将失败归类：
+cosh-shell 根据命令退出码和输出判断失败类型。
 
 | 分类 | 示例 | 说明 |
 |------|------|------|
@@ -26,12 +28,13 @@ cosh-shell 对命令退出码和输出进行语义分析，将失败归类：
 | `UsageOrHelp` | `Usage:` 输出 | 用法错误 |
 | `UnknownFailure` | 其他 | 未分类失败 |
 
-以下分类视为"非真正失败"，不触发分析：
-- `Success` — 实际成功
-- `InteractiveCancel` — 用户主动中断
-- `UserInterrupt` — Ctrl+C
-- `PipelineNormal` — 管道正常退出码
-- `ProviderOrInternalArtifact` — 内部工具产生的退出码
+以下情况不会触发分析。
+
+- `Success` 表示实际成功
+- `InteractiveCancel` 表示用户主动取消
+- `UserInterrupt` 表示用户按下 Ctrl+C
+- `PipelineNormal` 表示管道正常退出
+- `ProviderOrInternalArtifact` 表示模型服务或内部工具产生的退出码
 
 ## 分析处置矩阵
 
@@ -42,11 +45,12 @@ cosh-shell 对命令退出码和输出进行语义分析，将失败归类：
 | UnknownFailure | 操作卡片 | 提示 | 提示 |
 | UsageOrHelp | 提示 | 静默 | 静默 |
 
-处置类型说明：
-- **自动分析** — 立即调用 AI 适配器分析
-- **操作卡片** — 渲染交互卡片，用户可选择"分析"或"跳过"
-- **提示** — 显示简短提示，用户可输入 slash 命令触发分析
-- **静默** — 仅记录，不干扰用户
+系统会根据分类采取以下处理方式。
+
+- **自动分析**会立即调用 AI 适配器
+- **操作卡片**允许用户选择“分析”或“跳过”
+- **提示**会显示简短说明，用户可以输入斜杠命令开始分析
+- **静默**只记录事件，不打断用户
 
 ## 分析流程
 
@@ -67,7 +71,7 @@ cosh-shell 对命令退出码和输出进行语义分析，将失败归类：
 
 ## Agent 分析过程
 
-1. 收集失败上下文：命令文本、退出码、输出摘录（最多 8KB）
+1. 收集命令文本、退出码和最多 8 KiB 的输出摘录
 2. 构造 prompt 发送到 AI 适配器（cosh-core）
 3. 适配器流式返回分析结果
 4. cosh-shell 以 Markdown 格式渲染分析内容
@@ -77,11 +81,11 @@ cosh-shell 对命令退出码和输出进行语义分析，将失败归类：
 
 ```toml
 [shell]
-# 分析模式：smart | auto | manual
+# 分析模式可选 smart、auto 或 manual
 analysis_mode = "smart"
 ```
 
-运行时切换：
+运行时也可以切换。
 
 ```
 /mode analysis smart

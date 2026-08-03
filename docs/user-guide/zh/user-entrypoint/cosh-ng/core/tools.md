@@ -1,100 +1,94 @@
-# 工具系统
+# Agent 工具
 
-cosh-core 内置一组工具供 LLM 在对话过程中调用。工具按安全等级分类，决定审批策略。
+[English](../../../../en/user-entrypoint/cosh-ng/core/tools.md)
 
-## 内置工具列表
+Agent 通过工具读取和修改文件、运行命令、访问网络或调用 MCP 服务。每次调用能否
+执行，由工具类型、当前审批模式、允许名单和 Hooks 共同决定。
 
-| 工具名 | 分类 | 说明 |
-|--------|------|------|
-| `read_file` | ReadOnly | 读取文件内容（支持行范围） |
-| `grep` | ReadOnly | 正则搜索文件内容 |
-| `edit` | FileEdit | 基于搜索替换的精确文件编辑 |
-| `write_file` | FileEdit | 创建或覆盖文件 |
-| `shell` | ShellExec | 执行 shell 命令 |
-| `skill` | Other | 调用已注册的技能 |
-| `todo` | Other | 管理任务清单 |
-| `ask_user_question` | Other | 向用户提问并等待回答 |
-| `cosh_shell_evidence` | ShellEvidence | 获取终端输出作为证据（需 `--enable-shell-evidence-tool`） |
-| `mcp__<server>__<tool>` | Mcp | 从已配置 MCP Server 发现的工具 |
+## 默认工具
 
-## 工具分类
+| 工具 | 类型 | 用途 |
+|---|---|---|
+| `read_file` | ReadOnly | 读取有边界的文件范围 |
+| `read_many_files` | ReadOnly | 一次读取多个文件 |
+| `grep` | ReadOnly | 搜索文件内容 |
+| `glob` | ReadOnly | 匹配文件系统路径 |
+| `list_directory` | ReadOnly | 列出一个目录 |
+| `edit` | FileEdit | 精确替换文件内容 |
+| `write_file` | FileEdit | 新建或替换文件 |
+| `save_memory` | FileEdit | 保存项目或全局记忆 |
+| `shell` | ShellExec | 执行 Shell 命令 |
+| `web_fetch` | Network | 获取 HTTP 资源 |
+| `skill` | Other | 列出或加载 Skill |
+| `todo` | Other | 维护当前任务清单 |
+| `ask_user_question` | Other | 暂停并获取结构化用户输入 |
 
-```rust
-pub enum ToolKind {
-    ReadOnly,       // 纯读取，不修改系统状态
-    FileEdit,       // 修改文件内容
-    ShellExec,      // 执行任意 shell 命令
-    ShellEvidence,  // 读取终端输出历史
-    Mcp,            // 调用外部 MCP Server 工具
-    Other,          // 无副作用的辅助操作
-}
+`cosh_shell_evidence` 需要通过 `--enable-shell-evidence-tool` 显式启用。配置 MCP
+服务后，会出现形如 `mcp__<server>__<tool>` 的工具名。Extensions 也可以加入带命名
+空间的外部工具。
+
+## 读取范围
+
+`read_file`、`read_many_files`、`grep`、`glob` 和 `list_directory` 以 cosh-core
+启动时确定的工作区为根。随后在 Shell 中执行 `cd` 不会改变这个范围。绝对路径和符号
+链接只有在解析后仍位于该工作区内时才能使用。越过工作区、跨挂载点、特殊文件和根目录
+被替换等情况都会被拒绝。
+
+搜索和批量读取都有数量限制。遇到上限、不可读的子目录或循环时，工具会明确标记结果
+被截断，避免把局部结果当成完整结果。
+
+## 审批行为
+
+| 工具类型 | `trust` | `auto` | `balanced` / `suggest` / `strict` |
+|---|---|---|---|
+| ReadOnly | 执行 | 执行 | 执行 |
+| FileEdit | 执行 | 执行 | 询问 |
+| ShellExec | 执行 | 询问 | 询问 |
+| Network | 执行 | 询问 | 询问 |
+| MCP / Extension 外部工具 | 执行 | 询问 | 询问 |
+| Other | 执行 | 执行 | 询问 |
+
+未知工具名会被拒绝。Hooks 仍可阻止原本允许的调用，或要求用户再次确认。
+`ask_user_question` 用来向用户提问，终端证据读取遵循独立的前端协议和范围限制。
+
+用户选择的模式会映射为相应的审批策略。`recommend` 使用严格审批，`auto` 使用自动
+策略，`trust` 使用信任策略。
+
+## 暴露与审批的区别
+
+使用 `--tools` 限制提供给模型的工具。
+
+```bash
+cosh-core --headless --tools read_file,grep,ask_user_question
+cosh-core --headless --tools empty
 ```
 
-分类决定了审批模式下的默认行为：
+只有明确需要某个工具跳过审批时，才使用 `--allowed-tools`。
 
-| 审批模式 | ReadOnly | FileEdit | ShellExec | ShellEvidence | MCP | Other |
-|----------|----------|----------|-----------|---------------|-----|-------|
-| `trust` | 自动 | 自动 | 自动 | 自动 | 自动 | 自动 |
-| `auto` | 自动 | 自动 | 审批 | 自动 | 审批 | 自动 |
-| `balanced` | 自动 | 审批 | 审批 | 自动 | 审批 | 审批 |
-| `suggest` | 自动 | 审批 | 审批 | 自动 | 审批 | 审批 |
-| `strict` | 自动 | 审批 | 审批 | 自动 | 审批 | 审批 |
-
-> **注意**：`ask_user_question` 和 `cosh_shell_evidence` 工具始终绕过审批流程，无论何种模式均自动执行。
-
-## 工具调用协议
-
-LLM 决定调用工具时，Core 通过流式事件通知：
-
-```json
-{"type":"stream_event","event":{"subtype":"tool_use_begin","tool_name":"shell","tool_use_id":"tu-1"}}
-{"type":"stream_event","event":{"subtype":"tool_use_delta","content":"{\"command\":\"df -h\"}"}}
-{"type":"stream_event","event":{"subtype":"tool_use_end"}}
+```bash
+cosh-core --headless --allowed-tools mcp__search__query
 ```
 
-如果需要审批，Core 发送 `can_use_tool` 请求：
+把 `shell`、网络工具或外部工具加入允许名单会授予真实权限，请谨慎使用。
+
+## 工具调用过程
+
+Core 先流式输出工具调用事件。需要用户决定时，它会再发送控制请求。
 
 ```json
 {"type":"control_request","request_id":"apr-1","request":{"subtype":"can_use_tool","tool_name":"shell","tool_input":{"command":"df -h"}}}
 ```
 
-Shell 回复审批结果：
+前端使用同一个 request ID 回答。cosh-shell 会把这组交互显示为卡片，获批的 Shell
+命令可以交给前台 PTY 执行。
 
-```json
-{"type":"control_response","response":{"subtype":"tool_approval","request_id":"apr-1","response":{"behavior":"allow"}}}
-```
+工具输出会回到当前一轮对话。进入下一次模型请求前，系统会限制大小、处理敏感内容并
+控制循环次数。MCP 输出进入 Agent 上下文前限制为 64 KiB。
 
-`behavior` 可选值：`allow`、`deny`、`ask`。
+## MCP 和 Extension 工具
 
-## 工具结果
+受信任的 MCP 服务只能由系统或用户配置，项目配置不能添加。Stdio 和 Streamable HTTP
+服务都会通过 MCP roots 能力收到启动工作区。外部服务提供的工具说明不会降低审批要求。
 
-工具执行完成后，结果注入对话上下文供 LLM 继续推理。每个工具返回：
-
-```rust
-pub struct ToolResult {
-    pub output: String,   // 工具输出内容
-    pub is_error: bool,   // 是否为错误结果
-}
-```
-
-## 自动审批工具
-
-通过 `--allowed-tools` 参数指定始终自动审批的工具列表：
-
-```bash
-cosh-core --headless --allowed-tools shell,edit
-```
-
-此时 `shell` 和 `edit` 工具在任何审批模式下都自动执行，无需用户确认。
-
-## 工具注册
-
-工具通过 `ToolRegistry` 统一管理。默认注册的工具集合通过 `ToolRegistry::with_defaults()` 创建。`--enable-shell-evidence-tool` 额外注册 `cosh_shell_evidence` 工具。
-
-自定义工具可通过扩展系统注入，参见 [extensions.md](extensions.md)。
-
-## MCP 工具
-
-MCP 工具只会在 `cosh-core --headless` 启动时动态发现。每个已配置的 Server 先接收
-`initialize`，再接收 `tools/list`；模型调用注册名称时会转发为 `tools/call`。受信任
-Server 配置、Streamable HTTP 与 OAuth 设置详见[配置说明](../configuration.md#mcp-server)。
+配置和生命周期管理见[接入 MCP server](../mcp.md)。Extension 提供的工具见
+[Extensions](extensions.md)。

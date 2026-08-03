@@ -1,11 +1,19 @@
 # Security Audit and Production Troubleshooting
 
+[中文版](../../../../zh/user-entrypoint/cosh-ng/cli/audit.md)
+
 The `cosh-cli audit` subsystem evaluates security policy and provides a redacted, correlated
 timeline for production troubleshooting. `cosh-core`, `cosh-shell`, and policy checks append
 versioned JSONL events without changing the existing SLS/metrics export.
 
-Install cosh with `anolisa install cosh`, then use these commands locally or from an incident
-runbook. Every command returns the standard `CoshResponse<T>` JSON envelope.
+Install cosh-ng with the ANOLISA CLI, then use these commands locally or from
+an incident runbook:
+
+```bash
+sudo anolisa --install-mode system install cosh-ng
+```
+
+Every command returns the standard `CoshResponse<T>` JSON envelope.
 
 ## Operational Commands
 

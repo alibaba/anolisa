@@ -1,6 +1,9 @@
 # Service Management
 
-The `cosh-cli svc` subsystem manages system services via systemd. All Linux distributions use the unified `systemctl` interface. macOS does not support this subsystem.
+[中文版](../../../../zh/user-entrypoint/cosh-ng/cli/service-management.md)
+
+The `cosh-cli svc` subsystem manages Linux systemd services through the
+`systemctl` interface.
 
 ## Command List
 

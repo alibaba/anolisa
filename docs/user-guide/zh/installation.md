@@ -1,26 +1,28 @@
 # 安装指南
 
-本指南涵盖 ANOLISA 的渐进式安装——从 CLI 工具到各组件及适配器的配置。
+[English](../en/installation.md)
+
+本指南介绍如何安装 ANOLISA CLI、所需组件和适配器。
 
 ---
 
-## 第一步：安装 ANOLISA CLI
+## 第一步 安装 ANOLISA CLI
 
 `anolisa` CLI 是管理所有 ANOLISA 组件的统一入口。
 
-### 方式 A：安装脚本（推荐）
+### 方式 A 安装脚本（推荐）
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash
 ```
 
-### 方式 B：YUM（Alinux）
+### 方式 B YUM（Alinux）
 
 ```bash
 sudo yum install anolisa
 ```
 
-安装后验证：
+安装后验证版本。
 
 ```bash
 anolisa --version
@@ -28,15 +30,16 @@ anolisa --version
 
 ---
 
-## 第二步：环境检测
+## 第二步 环境检测
 
-运行环境检查以识别系统能力：
+运行环境检查，识别系统能力。
 
 ```bash
 anolisa env
 ```
 
-将显示：
+命令会显示以下信息。
+
 - 操作系统和架构
 - 可用文件系统（btrfs 用于 ws-ckpt）
 - FUSE 可用性（用于 skillfs）
@@ -45,9 +48,9 @@ anolisa env
 
 ---
 
-## 第三步：安装组件
+## 第三步 安装组件
 
-根据需要逐个安装组件：
+根据需要逐个安装组件。
 
 ```bash
 anolisa install <component>
@@ -57,7 +60,8 @@ anolisa install <component>
 
 | 组件 | 说明 | 支持的模式 |
 |------|------|------------|
-| `cosh` | Copilot Shell — AI 终端助手 | user、system |
+| `cosh` | Copilot Shell AI 终端助手 | user、system |
+| `cosh-ng` | AI 原生 Linux 终端与 Agent 运行时（实验阶段） | **system** |
 | `os-skills` | 系统管理与 DevOps 技能 | user、system |
 | `tokenless` | Token 优化（压缩） | user、system |
 | `ws-ckpt` | 工作区快照/回滚 | **system** |
@@ -66,10 +70,17 @@ anolisa install <component>
 | `agentsight` | eBPF 追踪与 Dashboard | **system** |
 | `agent-sec-core` | 安全加固 | **system** |
 
-> **注意**：仅支持 system mode 的组件需要 `sudo` 并显式选择 system scope：
+> **注意** 仅支持 system 模式的组件需要 `sudo`，并且必须显式选择 system 范围。
 > ```bash
 > sudo anolisa --install-mode system install agentsight
 > ```
+
+以 system 模式安装 cosh-ng，随后运行 `cosh` 进入终端。
+
+```bash
+sudo anolisa --install-mode system install cosh-ng
+cosh
+```
 
 ### 安装全部组件
 
@@ -79,7 +90,7 @@ anolisa install --all
 
 ### YUM 替代方式（Alinux）
 
-每个组件也可通过 YUM 安装：
+每个组件也可通过 YUM 安装。
 
 ```bash
 sudo yum install <component>
@@ -87,9 +98,9 @@ sudo yum install <component>
 
 ---
 
-## 第四步：适配器配置
+## 第四步 配置适配器
 
-适配器将组件桥接到特定 Agent 框架。安装组件后再启用适配器：
+适配器把组件接入特定 Agent 框架。安装组件后再启用适配器。
 
 ```bash
 anolisa adapter scan
@@ -114,15 +125,15 @@ ws-ckpt plugin install --runtime hermes
 
 ---
 
-## 第五步：验证安装
+## 第五步 验证安装
 
-查看所有已安装组件的状态：
+查看所有已安装组件的状态。
 
 ```bash
 anolisa status
 ```
 
-运行内置诊断工具：
+运行内置诊断工具。
 
 ```bash
 anolisa doctor
@@ -132,14 +143,14 @@ anolisa doctor
 
 ## 卸载
 
-移除特定组件：
+移除指定组件。
 
 ```bash
 anolisa uninstall <component>
 ```
 
 当前没有批量卸载命令。先列出安装记录，再逐个卸载目标组件，以便分别确认其
-authority 和系统软件包移除策略：
+权限来源和系统软件包移除策略。
 
 ```bash
 anolisa list --installed
@@ -150,13 +161,13 @@ anolisa uninstall <component>
 
 ## 升级
 
-更新特定组件：
+更新指定组件。
 
 ```bash
 anolisa update <component>
 ```
 
-更新所有已安装组件：
+更新所有已安装组件。
 
 ```bash
 anolisa update all
@@ -170,5 +181,6 @@ anolisa update all
 ## 下一步
 
 - [anolisa CLI 参考](user-entrypoint/anolisa-cli.md)
+- [cosh-ng 快速开始](user-entrypoint/cosh-ng/QUICKSTART.md)
 - [Copilot Shell](user-entrypoint/copilot-shell/QUICKSTART.md)
 - [故障排查](troubleshooting.md)

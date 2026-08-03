@@ -1,7 +1,9 @@
 # 包管理
 
-`cosh-cli pkg` 子系统提供跨发行版的包管理操作。自动检测当前发行版并路由到
-对应的包管理器后端（dnf / apt-get / zypper / brew）。
+[English](../../../../en/user-entrypoint/cosh-ng/cli/package-management.md)
+
+`cosh-cli pkg` 子系统在 Linux 和 macOS 上提供结构化软件包操作。macOS 使用
+Homebrew，Linux 使用 dnf、apt 或 zypper，也支持通过 `ID_LIKE` 声明的兼容衍生版。
 
 ## 命令列表
 
@@ -21,7 +23,7 @@ cosh-cli pkg install nginx
 cosh-cli pkg install nginx --dry-run
 ```
 
-成功输出：
+成功输出示例
 
 ```json
 {
@@ -47,7 +49,7 @@ cosh-cli pkg remove nginx
 cosh-cli pkg remove nginx --dry-run
 ```
 
-成功输出：
+成功输出示例
 
 ```json
 {
@@ -63,27 +65,30 @@ cosh-cli pkg remove nginx --dry-run
 
 ## search
 
-搜索可用包。返回结果包含安装状态。
+使用便携 glob 子集 `*`、`?` 和方括号字符类搜索软件包名。返回结果包含安装状态。
 
 ```bash
-cosh-cli pkg search "web server"
+cosh-cli pkg search 'libssl*'
 ```
 
-输出：
+输出示例
 
 ```json
 {
   "ok": true,
   "data": {
     "packages": [
-      { "name": "nginx", "version": "1.24.0", "description": "...", "installed": true },
-      { "name": "apache2", "version": "2.4.58", "description": "...", "installed": false }
+      { "name": "libssl3", "version": "3.0.2", "summary": "...", "installed": true },
+      { "name": "libssl-dev", "summary": "...", "installed": false }
     ],
     "total": 2
   },
   "meta": { "subsystem": "pkg", "duration_ms": 800, "distro": "ubuntu", "dry_run": false }
 }
 ```
+
+Query 会作为单个参数传递，不经过 Shell 展开。系统会拒绝 backend-specific regex，
+并转换便携 pattern，让各个受支持的后端使用一致的完整软件包名语义。
 
 ## list
 
@@ -93,7 +98,7 @@ cosh-cli pkg search "web server"
 cosh-cli pkg list --installed
 ```
 
-输出：
+输出示例
 
 ```json
 {
@@ -111,15 +116,17 @@ cosh-cli pkg list --installed
 
 ## 后端映射
 
-| 操作 | dnf | apt-get | zypper | brew |
-|------|-----|---------|--------|------|
+| 操作 | dnf | apt | zypper | Homebrew |
+|------|-----|-----|--------|----------|
 | install | `dnf install -y` | `apt-get install -y` | `zypper install -y` | `brew install` |
 | remove | `dnf remove -y` | `apt-get remove -y` | `zypper remove -y` | `brew uninstall` |
-| search | `dnf search -q` | `apt-cache search` | `zypper search` | `brew search` |
+| search | `dnf search -q` | `apt-cache search --names-only` | `zypper search` | `brew search` |
 | list | `dnf list installed -q` | `dpkg-query -W` | `zypper se --installed-only` | `brew list --versions` |
 
 ## 错误处理
 
-- 包不存在时返回 `PkgNotFound`，`hint` 建议搜索
-- 包管理器执行失败返回 `PkgBackendError`，`recoverable: true`
-- 未支持的发行版返回 `UnsupportedDistro`
+- 软件包不存在时返回 `PkgNotFound`，`hint` 建议搜索。
+- 包管理器执行失败返回 `PkgBackendError`，并设置 `recoverable: true`。
+- 没有直接 ID 或兼容 `ID_LIKE` 家族的发行版返回 `UnsupportedDistro`。
+
+路由和支持边界见[支持的平台](../supported-distros.md)。

@@ -1,138 +1,79 @@
-# Interactive Mode
+# Interactive Behavior and Commands
 
-cosh-shell runs bash/zsh on top of a native PTY and marks command boundaries using OSC escape sequences, enabling seamless integration of AI analysis and tool approval.
+[中文版](../../../../zh/user-entrypoint/cosh-ng/shell/interactive-mode.md)
 
-## PTY Host
+This page is a compact reference for starting cosh and controlling a running
+session. Run `/help` for the exact command set supported by the installed
+version.
 
-cosh-shell creates a pseudo-terminal pair via `openpty()` and starts a bash or zsh subprocess on the slave end:
+## Launch modes
 
+| Command | Behavior |
+|---|---|
+| `cosh` | Start the configured bash/zsh and Agent adapter |
+| `cosh --shell zsh` | Select the underlying shell |
+| `cosh --isolated` | Skip user rcfiles for an isolated session |
+| `cosh --login` | Start a login shell |
+| `cosh --resume [id]` | Pick or select a persisted Agent conversation |
+| `cosh -c '<command>'` | Execute through the underlying shell and exit |
+| `cosh -- <program> [args...]` | Execute a program directly and exit |
+
+## Input and editing
+
+- Shell syntax is sent to the foreground bash/zsh process.
+- Natural-language input starts an Agent turn in `smart` or `auto` analysis
+  mode.
+- A leading slash invokes a cosh control command. Natural-language sentences
+  that merely contain a slash are not misclassified as control commands.
+- `Shift+Enter` inserts a newline when the terminal supports the negotiated key
+  protocol; multiline paste is preserved as one logical submission.
+- Up-arrow history includes both shell and slash-command input.
+
+cosh marks command boundaries with private OSC messages injected into the child
+shell. This lets it associate command text, exit status, working directory, and
+captured output without parsing the prompt itself.
+
+## Public slash commands
+
+| Command | Purpose |
+|---|---|
+| `/help` | Show commands supported by the running version |
+| `/draft` | Open the prompt draft workflow |
+| `/health` | Run local health collectors |
+| `/status` (`/about`) | Show runtime, provider, and session status; `/about` is an alias |
+| `/stats [model\|tools]` | Show runtime model identity or current tool activity |
+| `/auth` | Choose or update provider authentication |
+| `/config language [auto\|en-US\|zh-CN]` | Inspect or set UI language |
+| `/mode approval [recommend\|auto\|trust]` | Inspect or change approval behavior |
+| `/mode analysis [smart\|auto\|manual]` | Inspect or change analysis routing |
+| `/session ...` | Create, list (including `--all`), resume, clear, or compact conversations |
+| `/recommendations [on\|off\|status\|privacy\|clear]` | Control local prompt recommendations |
+| `/hooks <command>` | Inspect findings, state, feedback, and project Hook trust |
+| `/extensions <command>` | Manage extension packages and settings |
+| `/skills [list\|detail\|enable\|disable]` | Manage reusable Skills |
+| `/mcp [list\|connect\|inspect\|refresh\|disconnect\|login\|logout]` | Manage MCP servers |
+
+Some commands such as `/details`, `/audit`, and `/send-to-shell` appear only
+when the current card or run provides the required context. Diagnostic and
+compatibility commands are intentionally omitted from normal help.
+
+## Skills
+
+```text
+/skills detail service-health
+/skills disable service-health
+/skills enable service-health
 ```
-┌──────────────────────┐
-│    cosh-shell        │
-│  ┌────────────────┐  │       ┌──────────────┐
-│  │  PTY master    │──────────│  bash/zsh    │
-│  └────────────────┘  │       │  (PTY slave) │
-│  ┌────────────────┐  │       └──────────────┘
-│  │  OSC Parser    │  │
-│  └────────────────┘  │
-└──────────────────────┘
-```
 
-### Shell Selection
+`/skills` requires the default cosh-core adapter. Skill state is resolved for
+the canonical workspace and becomes visible to subsequent Agent turns.
 
-```bash
-cosh-shell                    # Default: auto (auto-detect)
-cosh-shell --shell zsh        # Use zsh
-cosh-shell raw qwen --shell zsh
-cosh-shell --resume           # Open the session picker after shell startup
-cosh-shell --resume <id>      # Select a provider conversation to resume
-```
+## Terminal recovery
 
-Shell selection priority:
-1. `--shell` argument
-2. `COSH_SHELL_RAW_SHELL` environment variable
-3. Configuration file `shell.default`
-4. Auto-detect (default bash)
+cosh restores terminal settings on normal exit, panic, `SIGTERM`, `SIGHUP`, or
+`SIGQUIT`. If a terminal still looks corrupted after a hard kill, run `reset`
+from the parent shell.
 
-### Run Modes
-
-| Mode | Description |
-|------|-------------|
-| Default (no subcommand) | Start interactive shell with configured adapter |
-| `raw [adapter]` | Explicitly specify adapter |
-| `-c <command>` | Execute command then exit (pass-through to underlying shell) |
-| `-- <command>` | Execute command directly then exit |
-| `--isolated` | Isolated mode, do not load user rcfile |
-| `--login` / `-l` | Start as login shell |
-
-## OSC Marking System
-
-cosh-shell injects a custom rcfile (bashrc/zshrc) into the child shell, marking command lifecycle via OSC 1337 escape sequences:
-
-```
-ESC]1337;COSH;<payload>BEL
-```
-
-Marked events include:
-- Shell ready (prompt displayed)
-- Command execution start (preexec)
-- Command execution end (precmd, carries exit code)
-- Working directory change
-
-These markers enable cosh-shell to precisely identify:
-1. When the user enters a command
-2. When a command starts/ends
-3. The command's exit code
-4. Current working directory
-
-## Input Classification
-
-User input in the shell is classified into the following types:
-
-| Type | Description | Example |
-|------|-------------|---------|
-| Shell Command | Normal shell command | `ls -la`, `git status` |
-| Slash Command | Built-in control command starting with `/` | `/help`, `/mode` |
-| Natural Language | Natural language question | Handled by AI adapter |
-| Agent Marker | Agent execution marker | Internal use |
-
-## Slash Commands
-
-| Command | Description |
-|---------|-------------|
-| `/help` | Display help information |
-| `/mode [approval\|analysis] [value]` | View or switch mode |
-| `/config [key] [value]` | View or modify runtime configuration |
-| `/hooks [list\|enable\|disable] [name]` | Manage hooks |
-| `/extensions [list\|enable\|disable] [name]` | Manage extensions |
-| `/skills [list\|enable\|disable] [name]` | Manage skills |
-| `/session [status\|list\|resume <id>\|clear ...]` | Manage provider conversations |
-| `/session compact [status\|cancel]` | Start, inspect, or cancel background session compaction |
-| `/resume [id]` | Alias for the session picker or session selection |
-| `/debug [state\|events\|adapter]` | Debug information |
-| `/auth` | Trigger authentication flow |
-
-See [Session Recovery](session-recovery.md) for picker keys, workspace scoping,
-clear confirmation, and recoverable error behavior. See
-[Session Compaction](session-compaction.md) for manual and automatic compaction
-semantics.
-
-## Startup Flow
-
-1. Parse command-line arguments (shell type, adapter, mode)
-2. Install terminal restore handler (restore termios on SIGTERM/SIGHUP/panic)
-3. Load configuration (`~/.copilot-shell/config.toml`)
-4. Initialize logging (file output to `~/.copilot-shell/logs/`)
-5. Create PTY session, start bash/zsh subprocess
-6. Inject OSC marking script
-7. Start AI adapter connection
-8. Render startup banner (COSH logo + adapter/shell/approval mode info)
-9. Enter main event loop
-
-## Terminal Restore
-
-cosh-shell automatically restores terminal state (termios) in the following scenarios:
-
-- Process receives SIGTERM / SIGHUP / SIGQUIT
-- Panic triggered
-- Normal exit
-
-Ensures terminal is not left in raw mode after abnormal exit.
-
-## Native Mode vs Isolated Mode
-
-| Feature | Native Mode (default) | Isolated Mode (`--isolated`) |
-|---------|----------------------|------------------------------|
-| User rcfile | Loaded (~/.bashrc etc.) | Skipped |
-| PS1 prompt | Preserves user settings | Uses `cosh-osc$ ` |
-| History | Loads $HISTFILE | Not loaded |
-| Environment variables | Inherited | Minimized |
-
-## Session Working Directory
-
-cosh-shell creates a working directory for each session under `~/.copilot-shell/`, storing:
-
-- OSC marking scripts
-- Command output references (auto-cleaned after 24 hours)
-- Terminal restore request files
-- Shell handoff request files
+For conversation persistence and deletion guarantees, see
+[Session recovery](session-recovery.md). For card behavior, see
+[Tool approval](approval.md).

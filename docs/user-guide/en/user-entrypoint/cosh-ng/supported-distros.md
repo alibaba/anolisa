@@ -1,42 +1,55 @@
-# Supported Distributions
+# Supported Platforms and Linux Distributions
 
-cosh-ng automatically detects the current operating system by reading `/etc/os-release` (Linux) or calling `sw_vers` (macOS), and routes to the corresponding package manager and service manager backend.
+[中文版](../../../zh/user-entrypoint/cosh-ng/supported-distros.md)
 
-## Support Matrix
+cosh-ng builds from source on Linux and macOS. The interactive terminal uses
+the installed Bash or Zsh on either platform. Package operations use Homebrew
+on macOS and distribution-specific backends on Linux. Service operations
+currently require Linux with systemd.
 
-| Distribution | Package Manager | Service Manager | Notes |
-|-------------|----------------|-----------------|-------|
-| Alinux (2/3/4) | dnf | systemd | Alibaba Cloud native Linux |
-| CentOS 7/8/9 | dnf | systemd | |
-| Fedora | dnf | systemd | |
-| Ubuntu | apt-get | systemd | |
-| Debian | apt-get | systemd | |
-| openSUSE Leap/Tumbleweed | zypper | systemd | |
-| macOS | brew | — | Only pkg subsystem available |
+## macOS
 
-## Detection Logic
+cosh-ng detects the macOS version with `sw_vers` and routes `cosh-cli pkg`
+commands to Homebrew. The documented installer and RPM path target Linux, so
+macOS users build the workspace from source. `cosh-cli svc` is unavailable on
+macOS because its backend uses `systemctl`.
 
-Distribution detection is implemented via `Distro::detect()`:
+## Linux Support Matrix
 
-1. When the compile target is macOS, calls `sw_vers -productVersion` to get the version
-2. On Linux, reads `/etc/os-release` and parses the `ID` and `VERSION_ID` fields
-3. Maps `ID` to a known distribution variant
-4. Unrecognized `ID` values fall into `Unknown`, and most operations return `UnsupportedDistro` error
+| `/etc/os-release` ID | Package manager | Service manager |
+|----------------------|-----------------|-----------------|
+| `alinux`, `centos`, `fedora` | dnf | systemd |
+| `ubuntu`, `debian` | apt | systemd |
+| `opensuse-leap`, `opensuse-tumbleweed`, `sles` | zypper | systemd |
 
-## Package Manager Mapping
+An unlisted Linux distribution can reuse a supported package family when its
+`ID_LIKE` contains one of these values:
 
-| Distribution ID | Package Manager | Install Command | Search Command |
-|----------------|----------------|-----------------|----------------|
-| alinux / centos / fedora | Dnf | `dnf install -y` | `dnf search -q` |
-| ubuntu / debian | Apt | `apt-get install -y` | `apt-cache search` |
-| opensuse-leap / opensuse-tumbleweed / sles | Zypper | `zypper install -y` | `zypper search` |
-| macOS | Brew | `brew install` | `brew search` |
+| `ID_LIKE` family | Package manager | Example |
+|---|---|---|
+| `alinux`, `centos`, `fedora`, `rhel` | dnf | Rocky Linux |
+| `debian`, `ubuntu` | apt | Debian-compatible derivatives |
+| `opensuse`, `suse` | zypper | SUSE-compatible derivatives |
 
-## Service Manager
+The JSON metadata keeps the distribution's real `ID`. Family routing means the
+package backend is compatible; it is not a certification of every derivative
+or release.
 
-All Linux distributions use systemd (`systemctl`) uniformly. macOS does not support the svc subsystem.
+cosh-ng does not promise support for every release of those distributions.
+Run `anolisa env` before installation and use `cosh-cli` read-only commands to
+verify the package or service backend on the target host.
 
-## Adding New Distribution Support
+## Detection and Routing
 
-To add support for a new distribution, see the developer documentation
-[Adding Distribution Support Guide](../../../../developer-guide/en/cosh-ng/adding-distros.md).
+`Distro::detect()` reads `/etc/os-release`, falling back to
+`/usr/lib/os-release` only when the primary file is absent. It normalizes `ID`,
+preserves `VERSION_ID`, and checks `ID_LIKE` when the ID is not built in. An ID
+with no compatible family remains `Unknown`; package operations then return a
+structured `UnsupportedDistro` error.
+
+Package commands route to `dnf`, `apt-get`/`apt-cache`, or `zypper`. Service
+commands use `systemctl`. Package install/remove and service mutations expose
+action-specific `--dry-run` flags; check the exact action with `--help`.
+
+To add a Linux distribution, follow the
+[developer guide](../../../../developer-guide/en/cosh-ng/adding-distros.md).

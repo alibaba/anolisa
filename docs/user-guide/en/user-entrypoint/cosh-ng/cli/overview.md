@@ -1,57 +1,55 @@
-# cosh-cli Overview
+# Manage System Operations
 
-cosh-cli is the structured command-line tool of cosh-ng, providing AI Agents with a zero-learning-cost cross-distribution system operation interface. All commands output JSON-formatted `CoshResponse<T>` envelopes.
+[中文版](../../../../zh/user-entrypoint/cosh-ng/cli/overview.md)
 
-## Design Philosophy
+Use `cosh-cli` when a script or Agent needs a stable JSON interface to supported
+system operations. It normalizes platform-specific backends and reports typed
+errors, retry guidance, duration, platform, and preview state in one envelope.
 
-1. **Zero Learning** — Agents don't need to distinguish between dnf / apt / zypper
-2. **Structured Output** — Pure JSON, no regex parsing of text needed
-3. **Reversible** — checkpoint create → execute → rollback on failure
-4. **Classified Errors** — `recoverable` field tells Agents whether retry is worthwhile
-5. **Dry-run** — All write operations support `--dry-run` preview
+## Command domains
 
-## Command Subsystems
+| Domain | Actions | Backend |
+|---|---|---|
+| `pkg` | `install`, `remove`, `search`, `list` | dnf, apt, zypper, or Homebrew |
+| `svc` | `status`, `start`, `stop`, `restart`, `enable`, `disable`, `list` | systemd |
+| `checkpoint` | `init`, `recover`, `create`, `list`, `restore`, `status`, `delete`, `diff`, `cleanup` | ws-ckpt Unix socket |
+| `audit` | `check`, `log`, `status`, `events`, `trace`, `export`, `prune`, `policy` | audit policy and store |
 
-| Subsystem | Description | Documentation |
-|-----------|-------------|---------------|
-| `pkg` | Cross-distribution package management | [package-management.md](package-management.md) |
-| `svc` | systemd service management | [service-management.md](service-management.md) |
-| `checkpoint` | Workspace snapshots (ws-ckpt) | [checkpoint.md](checkpoint.md) |
-| `audit` | Security policy auditing | [audit.md](audit.md) |
+Run `cosh-cli <domain> --help` and
+`cosh-cli <domain> <action> --help` for exact flags.
 
-## Common Options
-
-```
-cosh-cli <SUBCOMMAND> [OPTIONS]
-```
-
-| Option | Description |
-|--------|-------------|
-| `--help` / `-h` | Display help information |
-| `--version` / `-V` | Display version number |
-| `--dry-run` | Preview mode, no actual execution (supported by each write subcommand) |
-
-## Quick Examples
+## Safe first examples
 
 ```bash
-# Package management
-cosh-cli pkg install nginx
+# Read-only
 cosh-cli pkg search "web server"
 cosh-cli pkg list --installed
-cosh-cli pkg remove nginx --dry-run
-
-# Service management
 cosh-cli svc status nginx
-cosh-cli svc restart nginx --dry-run
 cosh-cli svc list --state running
+cosh-cli audit status
 
-# Workspace snapshots
-cosh-cli checkpoint create --workspace /home/agent/project --id step-042 -m "before refactor"
-cosh-cli checkpoint restore step-040 --workspace /home/agent/project
-cosh-cli checkpoint list --workspace /home/agent/project
-
-# Security audit
-cosh-cli audit check --action "rm -rf /var/log"
-cosh-cli audit log --session abc123
-cosh-cli audit policy show
+# Preview supported package/service mutations
+cosh-cli pkg install nginx --dry-run
+cosh-cli svc restart nginx --dry-run
 ```
+
+`--dry-run` is action-specific, not a global flag. Package install/remove and
+service state mutations support it. Checkpoint mutations do not; review their
+workspace and snapshot arguments carefully.
+
+Linux package and service mutations normally require root privileges. Service
+operations require systemd and are unavailable on macOS. Checkpoint commands
+require a running ws-ckpt daemon and an existing workspace path.
+
+## Agent consumption pattern
+
+1. Parse stdout as one `CoshResponse<T>` JSON value.
+2. Check `ok`; do not infer success from human-readable text.
+3. On failure, use `error.recoverable` to decide whether retry makes sense and
+   `error.hint` for the next action.
+4. Confirm `meta.dry_run` before assuming a mutation occurred.
+5. Preserve stderr separately; stdout is the automation contract.
+
+See [Output format](../output-format.md), [Package management](package-management.md),
+[Service management](service-management.md), [Checkpoints](checkpoint.md), and
+[Audit](audit.md).

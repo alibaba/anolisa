@@ -20,8 +20,8 @@
 
 **面向 Agent 工作负载的操作系统层。**
 
-让 Agent 在你的终端里直接指挥系统干活，并在工具响应进入模型之前就把冗余去掉
-——同时保留你现有的 Shell、Agent 框架和沙箱。
+让 Agent 在你的终端里直接指挥系统干活，并在工具响应进入模型之前去掉冗余，
+同时保留你现有的 Shell、Agent 框架和沙箱。
 
 [English](README.md) · [项目网站](https://agentic-os.sh/) ·
 [快速开始](docs/QUICKSTART_zh.md) ·
@@ -52,8 +52,9 @@ Agent 框架和沙箱。ANOLISA CLI 提供统一的安装入口，各项能力�
 
 <h3 align="center">让 Agent 直接在终端工作</h3>
 
-cosh-ng 为 Agent 提供结构化、可预期的 Shell 和系统操作接口。保留现有的 Agent
-框架和沙箱，让系统操作继续在熟悉的终端工作流中完成。
+cosh-ng 是面向 AI 时代重构的 Linux 终端。它保留熟悉的 Bash/Zsh 行为，同时加入
+能理解意图、调用工具与 Skills、并在高风险操作前请求确认的 Agent。Shell 命令和
+自然语言共用一个终端，不必切换到独立的聊天应用。
 
 [开始使用 cosh-ng →](docs/user-guide/zh/user-entrypoint/cosh-ng/QUICKSTART.md)
 
@@ -82,8 +83,8 @@ Skills，只把用得到的技能放进上下文，[AgentSight](src/agentsight/R
 | **Token 减少 65.8%** | **Token 减少 47.3%** | **Token 减少 62.9%** |
 | ResponseCompressor · 46.85 µs | SchemaCompressor · 11.44 µs | 198.91 µs |
 
-节省作用于进入上下文的工具响应，而不是整个会话的账单——如何估算具体工作负载
-下的收益，见 [Token-less README](src/tokenless/README_zh.md)。
+节省比例针对进入上下文的工具响应，不代表整个会话的账单。具体工作负载的估算方法
+见 [Token-less README](src/tokenless/README_zh.md)。
 
 [查看 Token-less 用户手册 →](docs/user-guide/zh/token-saving/tokenless/user-manual.md)
 
@@ -91,7 +92,7 @@ Skills，只把用得到的技能放进上下文，[AgentSight](src/agentsight/R
 
 <h3 align="center">让 Agent 的每次执行都有边界，也留有退路</h3>
 
-ANOLISA 正在完善面向 Agent 的执行环境：
+ANOLISA 正在完善面向 Agent 的执行环境。
 [Agent Sec Core](src/agent-sec-core/README_zh.md) 隔离高风险操作，
 [ws-ckpt](src/ws-ckpt/README_zh.md) 为工作区变更保留恢复点。
 
@@ -99,17 +100,18 @@ ANOLISA 正在完善面向 Agent 的执行环境：
 
 ## 安装
 
-ANOLISA CLI 是统一的安装入口，cosh-ng、Token-less 和其他能力都可以按需启用。
+ANOLISA CLI 是统一的安装入口。cosh-ng 使用 system mode 安装；Token-less 和
+其他能力可独立按需添加。
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash
 
-anolisa install cosh-ng
+sudo anolisa --install-mode system install cosh-ng
 anolisa install tokenless
 ```
 
-运行 `cosh-ng` 进入 Agent-native shell，或让现有的任意 Agent 接上——Token-less
-会作用于工具调用，无需额外配置。
+运行 `cosh` 进入 AI 原生终端。Token-less 也可直接优化现有 Agent 的工具调用，
+无需更换 Agent 框架。
 
 [查看快速开始 →](docs/QUICKSTART_zh.md)
 

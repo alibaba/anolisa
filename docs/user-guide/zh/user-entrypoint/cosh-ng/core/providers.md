@@ -1,87 +1,107 @@
-# LLM 提供商
+# 模型 Provider 与认证
 
-cosh-core 通过 OpenAI 兼容 API 协议对接多家 LLM 提供商。所有提供商均使用流式 SSE 输出，支持 function calling。
+[English](../../../../en/user-entrypoint/cosh-ng/core/providers.md)
 
-## 支持的提供商
+默认 cosh-core 适配器支持 OpenAI-compatible 流式 provider，也支持使用 AK/SK 认证的
+Alibaba Cloud SysOM。交互式使用从 `/auth` 开始。托管或 headless 环境可以直接写配置文件。
 
-| 提供商类型 | Profile | 说明 |
-|------------|---------|------|
-| `dashscope` | DashScope | 阿里云百炼（通义千问系列），支持 thinking |
-| `aliyun` | SysOM | 阿里云 AK/SK 签名认证（ROA 风格） |
-| `openai` | OpenAI | OpenAI 官方 API，使用 `max_completion_tokens` |
-| 其他 | Generic | 任意 OpenAI 兼容端点 |
+## 交互式认证
 
-## 配置
+运行以下命令。
 
-在 `~/.copilot-shell/config.toml` 中配置提供商：
+```text
+/auth
+```
+
+认证菜单包含内置 Coding Plan、Token Plan 和 provider 凭据表单。内置计划默认使用
+中国站服务目录。需要国际站时，在启动 cosh 前设置环境变量。
+
+```bash
+COSH_SERVICE_SITE=international cosh
+```
+
+可用别名包括 `china`/`cn` 和 `international`/`intl`/`global`。该设置只改变认证菜单中
+的 endpoint，已保存的自定义 URL 不会改变。
+
+## Provider 配置
+
+Provider 定义只能放在 `/etc/copilot-shell/config.toml` 或
+`~/.copilot-shell/config.toml`，项目配置不接受这些定义。
 
 ```toml
 [ai]
+active_provider = "dashscope"
 active_model = "qwen-plus"
 
 [ai.providers.dashscope]
 type = "dashscope"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-api_key = ""    # 或通过 DASHSCOPE_API_KEY 环境变量
+api_key = "${DASHSCOPE_API_KEY}"
 model = "qwen-plus"
-
-[ai.providers.aliyun]
-type = "aliyun"
-access_key_id = ""      # 或 ALIBABA_CLOUD_ACCESS_KEY_ID
-access_key_secret = ""  # 或 ALIBABA_CLOUD_ACCESS_KEY_SECRET
-model = "qwen-plus"
+explicit_cache = false
 
 [ai.providers.openai]
 type = "openai"
 base_url = "https://api.openai.com/v1"
-api_key = ""    # 或 OPENAI_API_KEY
+api_key = "${OPENAI_API_KEY}"
 model = "gpt-4o"
+
+[ai.providers.deepseek]
+type = "deepseek"
+base_url = "https://api.deepseek.com/v1"
+api_key = "${DEEPSEEK_API_KEY}"
+model = "deepseek-chat"
+
+[ai.providers.aliyun]
+type = "aliyun"
+access_key_id = "${ALIBABA_CLOUD_ACCESS_KEY_ID}"
+access_key_secret = "${ALIBABA_CLOUD_ACCESS_KEY_SECRET}"
+security_token = "${ALIBABA_CLOUD_SECURITY_TOKEN}"
+model = "qwen-plus"
 ```
 
-## Provider Profile 差异
+使用 ECS RAM role 时，设置 `type = "aliyun"` 和 `auth_source = "ecs_ram_role"`，
+无需保存静态 AK/SK。
 
-不同 Profile 在 API 请求中的行为差异：
+## Provider 类型
 
-| Profile | max_tokens 字段 | thinking 字段 | 认证方式 |
-|---------|----------------|---------------|----------|
-| Generic | `max_tokens` | — | Bearer token |
-| DashScope | `max_tokens` | `reasoning_content` | Bearer token |
-| OpenAI | `max_completion_tokens` | — | Bearer token |
-| SysOM (aliyun) | — | — | AK/SK 签名 |
+| `type` | 协议行为 |
+|---|---|
+| `dashscope` | 发送 OpenAI-compatible 请求，并处理 Qwen reasoning content |
+| `openai` | 使用 OpenAI token 字段约定 |
+| `deepseek` | 发送 OpenAI-compatible 请求，并处理 reasoning content |
+| `aliyun` | 使用静态凭据或 ECS RAM role 签名 Alibaba Cloud 请求 |
+| 其他值 | 使用通用 OpenAI-compatible 协议 |
 
-## 运行时切换
+所有模型输出都使用流式传输。`extra_params` 可以增加 provider-specific 请求字段。
+不要用它覆盖安全敏感的传输配置。
 
-通过 JSONL 控制协议动态切换模型：
+## Cache 与输出上限
 
-```json
-{"type":"control_request","request_id":"sw-1","request":{"subtype":"switch_model","model":"qwen-max"}}
-```
+`explicit_cache` 为 `false` 或省略时，DashScope 使用隐式上下文缓存。设为 `true`
+后会添加显式 cache marker，用于复用确定的前缀。显式和隐式模式的创建与
+命中价格不同，启用前应确认 DashScope 当前的计费规则。
+Provider 返回 cache usage 时，cosh-core 会累计 `cached_tokens`，并在每轮 SLS 记录中
+写入 `session.tokens.cached`。
 
-或通过 CLI 参数覆盖：
+对已识别的模型家族，cosh-core 会按模型选择最大输出预算。旧版本固定使用
+4096-token 上限，现在 reasoning 和长输出模型可以使用更合适的预算。未识别的模型仍使用
+保守默认值。发送给 provider 的原始模型名不会改变。
 
-```bash
-cosh-core --headless --model qwen-max
-```
+## 配置如何生效
 
-环境变量覆盖：
+1. 依次应用系统、用户和允许的项目偏好。
+2. `COSH_AI_PROVIDER`、`COSH_MODEL`、`COSH_OUTPUT_LANGUAGE` 覆盖当前选择。
+3. 从已选中的 provider 定义解析其他字段。
+4. OpenAI-compatible base URL 和 key 在适用时依次回退到 `OPENAI_BASE_URL`、
+   `DASHSCOPE_API_KEY`、`OPENAI_API_KEY`。
+5. Aliyun 凭据回退到标准 `ALIBABA_CLOUD_ACCESS_KEY_*` 和 security-token 变量。
 
-```bash
-COSH_MODEL=qwen-max cosh-core --headless
-```
+`--model <name>` 只覆盖模型名。切换 provider 请使用 `COSH_AI_PROVIDER` 或
+`ai.active_provider`。
 
-## 认证优先级
+缺少必要凭据时，交互式 Core 会发送 `auth_required` control request。独立 headless client
+需要处理该请求，或者在启动前配置凭据。
 
-1. CLI `--model` 参数 → 选择对应的 provider 配置
-2. 环境变量（`DASHSCOPE_API_KEY`、`ALIBABA_CLOUD_ACCESS_KEY_*`）
-3. config.toml 中 `[ai.providers.<name>]` 的配置值
-4. 均为空时 → 触发交互式认证流程（向 Shell 发送 `auth_required`）
-
-## 生成参数
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `max_tokens` | 4096 | 最大生成 token 数 |
-| `temperature` | — | 采样温度（不设置则使用提供商默认） |
-| `stream` | true | 始终流式输出 |
-
-可通过 config.toml 的 `[ai.providers.<name>]` 段添加 `extra_params` 传递自定义参数。
+配置层限制和 secret 处理见[配置](../configuration.md)，control protocol 见
+[Headless 模式](headless-mode.md)。

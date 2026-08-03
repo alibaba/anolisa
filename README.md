@@ -55,9 +55,10 @@ capability can be enabled independently.
 
 <h3 align="center">Let the Agent work directly in the terminal</h3>
 
-cosh-ng gives Agents a structured, predictable interface for Shell and system
-operations. Keep the Agent framework and sandbox already in use, and bring
-system work into the existing terminal workflow.
+cosh-ng is an AI-native Linux terminal: it keeps familiar Bash/Zsh behavior,
+then adds an Agent that can understand intent, use tools and Skills, and ask
+for approval before risky work. Shell commands and natural language share one
+terminal instead of forcing users into a separate chat application.
 
 [Get started with cosh-ng →](docs/user-guide/en/user-entrypoint/cosh-ng/QUICKSTART.md)
 
@@ -106,18 +107,18 @@ ANOLISA is building out the Agent execution environment:
 
 ## Install
 
-ANOLISA CLI is the common installation entry point. Enable cosh-ng, Token-less,
-or other capabilities as needed.
+ANOLISA CLI is the common installation entry point. cosh-ng is installed in
+system mode; Token-less and other capabilities can be added independently.
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash
 
-anolisa install cosh-ng
+sudo anolisa --install-mode system install cosh-ng
 anolisa install tokenless
 ```
 
-Run `cosh-ng` to enter the Agent-native shell, or point any existing Agent at
-it — Token-less applies to tool calls without further configuration.
+Run `cosh` to enter the AI-native terminal. Token-less can also optimize tool
+calls from an existing Agent without changing its framework.
 
 [Read the Quick Start →](docs/QUICKSTART.md)
 

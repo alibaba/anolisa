@@ -1,5 +1,7 @@
 # Headless Mode
 
+[中文版](../../../../zh/user-entrypoint/cosh-ng/core/headless-mode.md)
+
 cosh-core's headless mode provides a JSONL protocol interface via stdin/stdout. It is the standard communication method between cosh-shell and cosh-core, and can also be integrated by any client.
 
 ## Startup

@@ -1,85 +1,73 @@
-# cosh-core 总览
+# 集成其他前端
 
-cosh-core 是 cosh-ng 的 AI Agent 运行时核心。它提供无头 JSONL 后端，集成 LLM 提供商、钩子系统、工具执行、技能管理和会话持久化。
+[English](../../../../en/user-entrypoint/cosh-ng/core/overview.md)
 
-## 定位
+`cosh-core` 是交互式 `cosh` 终端背后的 Agent 运行时。它负责连接 provider，运行
+模型和工具循环，并管理 Hooks、Skills、MCP、扩展、registry、对话保存和压缩。
+日常使用直接启动 `cosh`。只有集成其他前端或自动执行运行时控制操作时，才需要
+直接调用 cosh-core。
 
-cosh-core 是 cosh-shell 的后端引擎。cosh-shell 通过 stdin/stdout 与 cosh-core 进程通信（JSONL 协议）。cosh-core 也可以独立使用：
-
-- **单条提示模式** — 直接传入 prompt，执行完退出
-- **Headless 模式** — 长驻进程，持续接收 JSONL 消息
-- **Registry 模式** — 仅处理注册表请求后退出
-
-## 运行模式
+## 支持的入口
 
 ```bash
-# 单条提示（需显式 --headless）
-cosh-core --headless "帮我查看系统负载"
+# 执行一个 prompt 后退出
+cosh-core --headless "检查磁盘使用情况，不要做任何修改"
 
-# 长驻 headless 模式（通过 stdin 接收 JSONL）
+# 持续运行的 JSONL 进程
 cosh-core --headless
 
-# Registry 模式
-cosh-core --registry
-
-# 覆盖模型
-cosh-core --headless --model qwen-max "分析这段代码"
-
-# 覆盖审批模式
-cosh-core --headless --approval-mode trust "安装 nginx"
-
-# 恢复会话
+# 恢复或压缩持久化对话
 cosh-core --headless --resume <session-id>
+cosh-core --resume <session-id> --compact
+
+# 从 stdin 处理一次不需要 provider 的 registry request
+cosh-core --registry
 ```
 
-## CLI 参数
+未提供 `--headless` 时，非 TTY stdin 也会自动进入 headless 模式。交互式终端使用
+持续运行的 headless 进程和 registry 协议，不使用 cosh-core 的直接 TTY 界面。
 
-| 参数 | 说明 |
-|------|------|
-| `--headless` | 强制 headless JSONL 模式 |
-| `--model <name>` | 覆盖配置中的模型 |
-| `--approval-mode <mode>` | 覆盖审批模式（trust/auto/balanced/strict） |
-| `--allowed-tools <tools>` | 逗号分隔的自动审批工具列表 |
-| `--resume <session-id>` | 恢复已有会话 |
-| `--verbose` | 增加日志详细程度 |
-| `--registry` | Registry 模式 |
-| `--enable-shell-evidence-tool` | 启用终端输出证据工具 |
+## 重要选项
 
-## 核心能力
+| 选项 | 作用 |
+|---|---|
+| `--headless` | 强制使用 JSONL stdin/stdout 模式 |
+| `--model <name>` | 覆盖已配置模型 |
+| `--approval-mode <mode>` | 覆盖 `trust`、`auto`、`balanced` 或 `strict` |
+| `--allowed-tools <names>` | 让精确匹配的已注册工具跳过审批 |
+| `--tools <selection>` | 向模型暴露默认工具、空工具集或逗号分隔子集 |
+| `--bare` | 禁用 project config、hooks、Skills、extensions 和 session persistence |
+| `--resume <id>` | 选择当前工作空间中的已有对话 |
+| `--compact` | 压缩已选择对话后退出 |
+| `--registry` | 处理一次 registry request 后退出 |
+| `--enable-shell-evidence-tool` | 为 cosh-shell 增加有边界的终端 evidence 访问 |
+| `--verbose` | 提高 stderr 日志级别 |
 
-| 能力 | 说明 | 详细文档 |
-|------|------|----------|
-| LLM 提供商 | OpenAI 兼容 / Aliyun SysOM | [providers.md](providers.md) |
-| 钩子系统 | 8 个事件点，可扩展 | [hooks.md](hooks.md) |
-| 工具执行 | 内置工具 + 自定义工具 | [tools.md](tools.md) |
-| 技能管理 | Markdown 技能定义 | [skills.md](skills.md) |
-| 扩展加载 | cosh-extension.json | [extensions.md](extensions.md) |
-| 会话持久化 | JSON 格式会话存储 | — |
+`--allowed-tools` 修改审批策略，`--tools` 决定模型可以看到哪些工具。
 
-## 架构概览
+## 运行流程
 
-```
-stdin (JSONL)                stdout (JSONL)
-     │                            ▲
-     ▼                            │
-┌────────────────────────────────────────┐
-│              cosh-core                 │
-│  ┌──────┐  ┌──────────┐  ┌──────────┐  │
-│  │ Auth │  │ Provider │  │  Tools   │  │
-│  └──────┘  └──────────┘  └──────────┘  │
-│  ┌──────┐  ┌──────────┐  ┌──────────┐  │
-│  │Hooks │  │ Session  │  │  Skills  │  │
-│  └──────┘  └──────────┘  └──────────┘  │
-└────────────────────────────────────────┘
-```
+1. 确定工作空间并读取分层配置。
+2. 加载不依赖 provider 的工具、Skills、扩展能力和 MCP 连接。
+3. 选择 provider 并完成认证。
+4. 读取 JSONL 消息，并持续输出模型和工具事件。
+5. 需要时通过 control message 请求审批或用户输入。
+6. 在安全边界保存完整对话和模型可见内容。
+7. 没有活动任务时立即应用健康的 registry 变更。存在活动任务时，等它完成后再应用。
 
-## 认证流程
+进程把日志写入 stderr 或日志文件。Headless 和 registry 模式的 stdout 只用于协议输出。
 
-若未配置 API 密钥，cosh-core 在启动时发送 `auth_required` 控制请求：
+## 能力导航
 
-1. Core 发送 `AuthRequired`，列出可用认证提供商
-2. Shell（或外部客户端）展示认证 UI
-3. 用户选择提供商并填写凭证
-4. Shell 回送 `ControlResponse` 包含凭证
-5. Core 应用凭证，可选持久化到 config.toml
-6. Core 发送 `auth_ok` 状态，开始正常工作
+| 能力 | 参考 |
+|---|---|
+| JSONL 和 registry messages | [Headless 模式](headless-mode.md) |
+| Providers 和认证 | [Providers](providers.md) |
+| 内置、MCP 和 extension tools | [Tools](tools.md) |
+| MCP server 配置与管理 | [接入 MCP server](../mcp.md) |
+| 可复用指令 | [Skills](skills.md) |
+| 事件策略 | [Hooks](hooks.md) |
+| 打包能力 | [Extensions](extensions.md) |
+| Session 配置 | [配置](../configuration.md) |
+
+协议集成者还应阅读开发者 [IPC 协议参考](../../../../../developer-guide/zh/cosh-ng/ipc-protocol.md)。

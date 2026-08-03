@@ -36,9 +36,9 @@ anolisa list
 
 ## Install Components
 
-Install components on demand. The current `agentsight`, `agent-sec-core`,
-`ws-ckpt`, and `skillfs` artifacts require system mode; the other examples
-below support user mode.
+Install components on demand. The current `cosh-ng`, `agentsight`,
+`agent-sec-core`, `ws-ckpt`, and `skillfs` artifacts require system mode; the
+other examples below support user mode.
 
 ```bash
 # Token optimization (via anolisa CLI)
@@ -64,8 +64,11 @@ sudo anolisa --install-mode system install skillfs
 # OS skill library
 anolisa install os-skills
 
-# Copilot Shell (AI terminal gateway)
+# Copilot Shell
 anolisa install cosh
+
+# cosh-ng (AI-native Linux terminal)
+sudo anolisa --install-mode system install cosh-ng
 ```
 
 Check health:
@@ -81,7 +84,7 @@ anolisa status
 After installation, each component operates independently:
 
 ```bash
-# Copilot Shell — AI terminal assistant
+# Start the installed terminal
 cosh
 
 # Token optimization — compress tool schemas and command output
@@ -127,6 +130,7 @@ anolisa adapter enable ws-ckpt hermes       # ws-ckpt → Hermes
 ### User Entry Points
 
 - [anolisa CLI Reference](user-guide/en/user-entrypoint/anolisa-cli.md)
+- [cosh-ng AI-native Terminal](user-guide/en/user-entrypoint/cosh-ng/QUICKSTART.md)
 - [Copilot Shell](user-guide/en/user-entrypoint/copilot-shell/QUICKSTART.md)
 - [OS Skills](user-guide/en/user-entrypoint/os-skills.md)
 
