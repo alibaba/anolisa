@@ -402,6 +402,113 @@ mod tests {
         );
     }
 
+    // CSI-u Backspace (#2150) deletes like 0x7f on the native candidate
+    // path: `/au` erases to an empty inactive buffer, and every deletion
+    // keeps the line Pending instead of poisoning it Unsafe.
+    #[test]
+    fn csi_u_backspace_deletes_native_candidate_to_empty() {
+        let mut line = CandidateLineBuffer::default();
+        line.push(b"/au");
+        for _ in 0..3 {
+            line.push(b"\x1b[127u");
+            assert_eq!(status_of(&line), CandidateLineStatus::Pending);
+        }
+        assert!(line.visible_line_bytes().is_empty());
+        assert!(!line.is_active());
+        // One more Backspace on the empty buffer stays a clean no-op.
+        line.push(b"\x1b[127u");
+        assert!(!line.is_active());
+    }
+
+    // CSI-u Backspace modifier variants (#2150): any single numeric
+    // modifier deletes one character, matching readline's indifference.
+    #[test]
+    fn csi_u_backspace_modifier_variants_delete_one_char() {
+        for sequence in [
+            b"\x1b[127;2u".as_slice(),
+            b"\x1b[127;3u".as_slice(),
+            b"\x1b[127;5u".as_slice(),
+            b"\x1b[127;13u".as_slice(),
+        ] {
+            let mut line = CandidateLineBuffer::default();
+            line.push(b"/au");
+            line.push(sequence);
+            assert_eq!(
+                line.visible_line_bytes(),
+                b"/a",
+                "variant {:?} must delete one char",
+                String::from_utf8_lossy(sequence)
+            );
+        }
+    }
+
+    // CSI-u Backspace removes a full UTF-8 character, not a single byte.
+    #[test]
+    fn csi_u_backspace_deletes_whole_utf8_char() {
+        let mut line = soft_buffer();
+        line.push("??分析".as_bytes());
+        line.push(b"\x1b[127u");
+        assert_eq!(line.visible_line_bytes(), "??分".as_bytes());
+    }
+
+    // CSI-u Backspace removes a soft newline as one visible character,
+    // matching the 0x7f semantics of matrix #12.
+    #[test]
+    fn csi_u_backspace_deletes_soft_newline_whole() {
+        let mut line = soft_buffer();
+        line.push("分析".as_bytes());
+        line.push(b"\x1b[13;2u");
+        line.push(b"\x1b[127u");
+        line.push(b"\r");
+        let CandidateLineStatus::Complete { line: text, .. } = status_of(&line) else {
+            panic!("draft must complete after CSI-u backspace");
+        };
+        assert_eq!(text, "分析");
+    }
+
+    // Malformed or unrelated CSI-u forms stay fail-closed: the bytes are
+    // buffered untouched and the line flushes Unsafe, byte-identical to
+    // the pre-fix route.
+    #[test]
+    fn malformed_csi_u_backspace_forms_stay_unsafe() {
+        for sequence in [
+            b"\x1b[127;u".as_slice(),
+            b"\x1b[127;2;3u".as_slice(),
+            b"\x1b[127:1u".as_slice(),
+            b"\x1b[1270u".as_slice(),
+            b"\x1b[12u".as_slice(),
+            b"\x1b[127~".as_slice(),
+        ] {
+            let mut line = CandidateLineBuffer::default();
+            line.push(b"/au");
+            line.push(sequence);
+            assert_eq!(
+                status_of(&line),
+                CandidateLineStatus::Unsafe,
+                "form {:?} must stay Unsafe",
+                String::from_utf8_lossy(sequence)
+            );
+            assert_eq!(
+                &line.bytes[..3],
+                b"/au",
+                "draft prefix must stay intact for the flush"
+            );
+        }
+    }
+
+    // A CSI-u Backspace split across PTY reads is not reassembled: the
+    // fragments stay buffered and the completed sequence flushes Unsafe
+    // (fail-closed; terminals write key sequences atomically).
+    #[test]
+    fn split_csi_u_backspace_stays_fail_closed() {
+        let mut line = CandidateLineBuffer::default();
+        line.push(b"/au");
+        line.push(b"\x1b[12");
+        assert_eq!(status_of(&line), CandidateLineStatus::Pending);
+        line.push(b"7u");
+        assert_eq!(status_of(&line), CandidateLineStatus::Unsafe);
+    }
+
     // Matrix #19 precondition: a draft of only soft newlines normalizes to
     // whitespace-only text (relay consumes it without submitting).
     #[test]

@@ -1046,3 +1046,84 @@ fn draft_pasted_tab_is_inserted_as_data() {
         .expect("paste must report a draft change");
     assert_eq!(changed, "第一行A\tB", "pasted tab must survive: {changed}");
 }
+
+// CSI-u Backspace (#2150) edits the draft like 0x7f: one character per
+// sequence, numeric modifier variants included.
+#[test]
+fn draft_csi_u_backspace_deletes_one_char() {
+    let capture = draft_capture();
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let (events, _) = state.consume_split(&capture, b"\x1b[127u");
+    let changed = events
+        .iter()
+        .find_map(|event| match event {
+            RawInputEvent::PromptDraftChanged { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .expect("CSI-u backspace must report a draft change");
+    assert_eq!(changed, "第一");
+
+    let (events, _) = state.consume_split(&capture, b"\x1b[127;2u");
+    let changed = events
+        .iter()
+        .find_map(|event| match event {
+            RawInputEvent::PromptDraftChanged { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .expect("modifier variant must report a draft change");
+    assert_eq!(changed, "第");
+}
+
+// CSI-u Backspace (#2150) pops free-text captures exactly like 0x7f.
+#[test]
+fn text_question_csi_u_backspace_pops_like_delete() {
+    let capture = RawInputCapture::TextQuestion {
+        id: "auth@field-0-1".to_string(),
+        initial_text: "qwen3.7-max".to_string(),
+        secret: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    assert_eq!(
+        state.consume(&capture, b"\x1b[127u"),
+        vec![RawInputEvent::CardInput(
+            "auth@field-0-1".to_string(),
+            "qwen3.7-ma".to_string(),
+        )]
+    );
+    // An empty buffer stays a silent no-op, matching 0x7f.
+    state.reset();
+    state.apply_capture(&capture);
+    let _ = state.consume(&capture, b"\x7f".repeat(16).as_slice());
+    assert_eq!(state.consume(&capture, b"\x1b[127u"), vec![]);
+}
+
+// A CSI-u Backspace split across reads reassembles through the pending
+// CSI holder before it edits the draft: no fragment leaks as text.
+#[test]
+fn draft_split_csi_u_backspace_reassembles_before_editing() {
+    let capture = draft_capture();
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let (events, _) = state.consume_split(&capture, b"\x1b[127;2");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RawInputEvent::PromptDraftChanged { .. })),
+        "held CSI prefix must not edit the draft yet: {events:?}"
+    );
+
+    let (events, _) = state.consume_split(&capture, b"u");
+    let changed = events
+        .iter()
+        .find_map(|event| match event {
+            RawInputEvent::PromptDraftChanged { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .expect("joined CSI-u backspace must delete one char");
+    assert_eq!(changed, "第一");
+}
