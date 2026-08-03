@@ -22,7 +22,7 @@
             "type": "command",
             "name": "tokenless-rewrite",
             "description": "Rewrites shell commands via rtk for token savings",
-            "command": "python3 ${QODER_TOKENLESS_HOOKS}/rewrite_hook.py",
+            "command": "python3 ${QODER_TOKENLESS_HOOKS}/rewrite_hook.py --agent-id qoder-cli",
             "timeout": 5000,
             "env": { "TOKENLESS_AGENT_ID": "qoder-cli" }
           }
@@ -37,7 +37,7 @@
             "type": "command",
             "name": "tokenless-compress-response",
             "description": "Compresses tool responses and encodes to TOON format",
-            "command": "python3 ${QODER_TOKENLESS_HOOKS}/compress_response_hook.py",
+            "command": "python3 ${QODER_TOKENLESS_HOOKS}/compress_response_hook.py --agent-id qoder-cli",
             "timeout": 10000,
             "env": { "TOKENLESS_AGENT_ID": "qoder-cli" }
           }

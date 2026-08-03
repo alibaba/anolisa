@@ -120,8 +120,10 @@ for entries in cfg.get('hooks', {}).values():
     for entry in entries:
         for hook in entry.get('hooks') or []:
             parts = shlex.split(hook.get('command', ''))
-            if parts and not os.path.exists(parts[-1]):
-                missing.append(hook['command'])
+            scripts = [p for p in parts if p.endswith(('.py', '.sh'))]
+            for script in scripts:
+                if not os.path.exists(script):
+                    missing.append(hook['command'])
 print('\n'.join(missing))
 PYEOF
 )"
@@ -143,6 +145,50 @@ if [ -f "$SETTINGS" ] && grep -qF 'tokenless@local' "$SETTINGS"; then
     log_pass "settings.json enables tokenless@local plugin"
 else
     log_fail "settings.json missing plugins.enabled entry"
+fi
+
+# 6. UPGRADE (upsert, not append): a re-install must refresh a stale managed
+#    hook whose command changed, and must never touch foreign hooks.
+python3 - "$SETTINGS" <<'PYEOF'
+import json, sys
+path = sys.argv[1]
+cfg = json.load(open(path))
+pre = cfg.setdefault('hooks', {}).setdefault('PreToolUse', [])
+# Make the managed rewrite hook look pre-upgrade (no --agent-id)...
+for entry in pre:
+    for hook in entry.get('hooks') or []:
+        if hook.get('name') == 'tokenless-rewrite':
+            hook['command'] = hook['command'].replace(' --agent-id qoder-cli', '')
+# ...and add a foreign hook the installer must preserve untouched.
+pre.append({
+    'matcher': '*',
+    'hooks': [{'type': 'command', 'name': 'foreign-guard', 'command': 'echo keep-me'}],
+})
+json.dump(cfg, open(path, 'w'), indent=2)
+PYEOF
+
+HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" bash "$INSTALL_SH" >/dev/null 2>&1
+reinstall_rc=$?
+upsert_problems="$(SETTINGS="$SETTINGS" python3 - <<'PYEOF'
+import json, os
+cfg = json.load(open(os.environ['SETTINGS']))
+pre = cfg.get('hooks', {}).get('PreToolUse', [])
+rewrites = [h for e in pre for h in (e.get('hooks') or []) if h.get('name') == 'tokenless-rewrite']
+foreign = [h for e in pre for h in (e.get('hooks') or []) if h.get('name') == 'foreign-guard']
+problems = []
+if len(rewrites) != 1:
+    problems.append(f'expected 1 tokenless-rewrite, found {len(rewrites)}')
+elif '--agent-id qoder-cli' not in rewrites[0].get('command', ''):
+    problems.append('tokenless-rewrite command was not refreshed with --agent-id')
+if len(foreign) != 1:
+    problems.append(f'foreign hook not preserved (found {len(foreign)})')
+print('; '.join(problems))
+PYEOF
+)"
+if [ $reinstall_rc -eq 0 ] && [ -z "$upsert_problems" ]; then
+    log_pass "re-install upserts stale managed hook and preserves foreign hooks"
+else
+    log_fail "upsert regression: ${upsert_problems:-installer exited $reinstall_rc}"
 fi
 
 echo ""

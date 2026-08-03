@@ -159,20 +159,26 @@ if not isinstance(existing_hooks, dict):
 
 for event, entries in resolved['hooks'].items():
     existing = existing_hooks.get(event, [])
-    existing_names = set()
-    for e in existing:
-        for h in (e.get('hooks') or []):
-            if h.get('name'):
-                existing_names.add(h['name'])
-    for entry in entries:
-        entry_name = None
-        for h in (entry.get('hooks') or []):
-            if h.get('name'):
-                entry_name = h['name']
-                break
-        if entry_name and entry_name not in existing_names:
-            existing.append(entry)
-    existing_hooks[event] = existing
+    # Names this component manages for this event.
+    incoming_names = {
+        h['name']
+        for entry in entries
+        for h in (entry.get('hooks') or [])
+        if h.get('name')
+    }
+
+    # Upsert, not append-by-name: drop the matcher groups we own (those whose
+    # named hooks are entirely ours) so a re-install refreshes a changed
+    # command or env. Append-only would leave a stale entry — e.g. an existing
+    # tokenless hook installed before --agent-id would never gain it. Groups
+    # carrying any foreign hook are preserved untouched.
+    def _owned_by_us(entry):
+        named = [h.get('name') for h in (entry.get('hooks') or []) if h.get('name')]
+        return bool(named) and all(name in incoming_names for name in named)
+
+    refreshed = [entry for entry in existing if not _owned_by_us(entry)]
+    refreshed.extend(entries)
+    existing_hooks[event] = refreshed
 
 cfg['hooks'] = existing_hooks
 
