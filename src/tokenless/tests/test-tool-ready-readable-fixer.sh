@@ -21,6 +21,7 @@ set -euo pipefail
 
 [ "${1:-}" = "fix-all" ]
 cat >/dev/null
+echo "[tokenless-env-fix] simulated fixer output"
 touch "$TOKENLESS_FIX_MARKER"
 EOF
 chmod 0644 "$FIXER"
@@ -55,6 +56,11 @@ OUTPUT=$(
 )
 
 [ -f "$MARKER" ]
+if ! jq -e -s 'length == 1 and (.[0] | type == "object")' \
+    <<<"$OUTPUT" >/dev/null; then
+    echo "expected one JSON object without fixer output, got: $OUTPUT" >&2
+    exit 1
+fi
 grep -q "NOT_READY" <<<"$OUTPUT"
 grep -q "Skip retry" <<<"$OUTPUT"
 
