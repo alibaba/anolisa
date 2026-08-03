@@ -103,6 +103,12 @@ pub struct ApplyCredentialPolicy {
     pub agent_id: String,
     /// Optional AgentSight session identity.
     pub session_id: Option<String>,
+    /// Optional conversation identity supplied by the Agent adapter.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    /// Optional tool-call identity supplied by the Agent adapter.
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
     /// Root PID whose process tree receives the policy.
     pub root_pid: i32,
     /// Linux process start time used to reject PID reuse.
@@ -120,6 +126,12 @@ pub struct ApplyPolicy {
     pub agent_id: String,
     /// Optional AgentSight session identity.
     pub session_id: Option<String>,
+    /// Optional conversation identity supplied by the Agent adapter.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    /// Optional tool-call identity supplied by the Agent adapter.
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
     /// Root PID whose process tree receives the policy.
     pub root_pid: i32,
     /// Linux `/proc/<pid>/stat` start time used to reject PID reuse.
@@ -543,6 +555,8 @@ mod tests {
             binding_id,
             agent_id: "agent-1".into(),
             session_id: Some("session-1".into()),
+            conversation_id: None,
+            tool_call_id: None,
             root_pid: 42,
             process_start_time: 101,
             policy_id: "credential-exfiltration".into(),
@@ -569,6 +583,8 @@ mod tests {
             binding_id,
             agent_id: "agent-1".into(),
             session_id: Some("session-1".into()),
+            conversation_id: None,
+            tool_call_id: None,
             root_pid: 42,
             process_start_time: 101,
             policy: CredentialExfiltrationPolicy {
@@ -735,6 +751,8 @@ mod tests {
                 binding_id: Uuid::new_v4(),
                 agent_id: "agent-1".into(),
                 session_id: Some("session-1".into()),
+                conversation_id: Some("conversation-1".into()),
+                tool_call_id: Some("tool-call-1".into()),
                 root_pid: 42,
                 process_start_time: 101,
                 policy: CredentialExfiltrationPolicy {
@@ -1046,5 +1064,32 @@ mod tests {
                 actual: 3,
             }
         ));
+    }
+
+    #[test]
+    fn credential_policy_preserves_tool_context_and_defaults_old_frames() {
+        let mut request = replacement_credential(Uuid::new_v4());
+        request.conversation_id = Some("conversation-1".into());
+        request.tool_call_id = Some("tool-call-1".into());
+
+        let encoded = serde_json::to_value(&request).expect("request should encode");
+        let decoded: ApplyCredentialPolicy =
+            serde_json::from_value(encoded).expect("request should decode");
+        assert_eq!(decoded.conversation_id.as_deref(), Some("conversation-1"));
+        assert_eq!(decoded.tool_call_id.as_deref(), Some("tool-call-1"));
+
+        let mut old_frame = serde_json::to_value(&request).expect("old frame should encode");
+        old_frame
+            .as_object_mut()
+            .expect("request should be an object")
+            .remove("conversation_id");
+        old_frame
+            .as_object_mut()
+            .expect("request should be an object")
+            .remove("tool_call_id");
+        let decoded: ApplyCredentialPolicy =
+            serde_json::from_value(old_frame).expect("old frame should decode");
+        assert!(decoded.conversation_id.is_none());
+        assert!(decoded.tool_call_id.is_none());
     }
 }

@@ -52,6 +52,8 @@ impl EnforcerFixture {
             binding_id: Uuid::new_v4(),
             agent_id: "hermes-test".into(),
             session_id: Some("session-1".into()),
+            conversation_id: Some("conversation-1".into()),
+            tool_call_id: Some("tool-call-1".into()),
             root_pid: 4242,
             process_start_time: 99,
             policy_id: "credential-exfiltration".into(),
@@ -128,6 +130,8 @@ fn product_policy(mode: PolicyMode, taint_ttl_secs: u64) -> ApplyCredentialPolic
         binding_id: Uuid::new_v4(),
         agent_id: "hermes-product-test".into(),
         session_id: Some("session-product".into()),
+        conversation_id: Some("conversation-product".into()),
+        tool_call_id: Some("tool-product".into()),
         root_pid: 4242,
         process_start_time: 99,
         policy: CredentialExfiltrationPolicy {
@@ -179,6 +183,13 @@ fn subscription_returns_ordered_source_taint_sink_and_decision() {
     assert_eq!(events[0].occurred_at_ns + 1, events[1].occurred_at_ns);
     assert_eq!(events[1].occurred_at_ns + 1, events[2].occurred_at_ns);
     assert_eq!(events[2].occurred_at_ns + 1, events[3].occurred_at_ns);
+    for event in &events {
+        assert_eq!(
+            event.identity.conversation_id.as_deref(),
+            Some("conversation-1")
+        );
+        assert_eq!(event.identity.tool_call_id.as_deref(), Some("tool-call-1"));
+    }
 }
 
 #[test]

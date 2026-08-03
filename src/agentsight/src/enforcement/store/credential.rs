@@ -264,6 +264,8 @@ pub(super) fn upsert_credential_intent_from_binding_on(
         binding_id: binding.request.binding_id,
         agent_id: binding.request.agent_id.clone(),
         session_id: binding.request.session_id.clone(),
+        conversation_id: binding.request.conversation_id.clone(),
+        tool_call_id: binding.request.tool_call_id.clone(),
         root_pid: binding.request.root_pid,
         process_start_time: binding.request.process_start_time,
         policy: policy.clone(),

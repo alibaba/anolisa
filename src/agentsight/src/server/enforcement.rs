@@ -33,6 +33,8 @@ const FILE_POLICY_REVISION: &str = "agentsight-file-open-v1";
 pub(super) struct FileBindingRequest {
     agent_id: String,
     session_id: Option<String>,
+    conversation_id: Option<String>,
+    tool_call_id: Option<String>,
     root_pid: i32,
     path: PathBuf,
 }
@@ -42,6 +44,8 @@ pub(super) struct FileBindingRequest {
 pub(super) struct CredentialBindingRequest {
     agent_id: String,
     session_id: Option<String>,
+    conversation_id: Option<String>,
+    tool_call_id: Option<String>,
     root_pid: i32,
     source_path: PathBuf,
     trusted_endpoint: Option<String>,
@@ -312,6 +316,8 @@ fn build_file_binding(request: FileBindingRequest) -> Result<ApplyPolicy, String
             .session_id
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
+        conversation_id: normalize_optional_identity(request.conversation_id, "conversation_id")?,
+        tool_call_id: normalize_optional_identity(request.tool_call_id, "tool_call_id")?,
         root_pid: request.root_pid,
         process_start_time,
         policy_id: format!("agentsight-file-open:{binding_id}"),
@@ -360,10 +366,25 @@ fn build_credential_binding(
             .session_id
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
+        conversation_id: normalize_optional_identity(request.conversation_id, "conversation_id")?,
+        tool_call_id: normalize_optional_identity(request.tool_call_id, "tool_call_id")?,
         root_pid: request.root_pid,
         process_start_time,
         policy,
     })
+}
+
+fn normalize_optional_identity(
+    value: Option<String>,
+    field: &str,
+) -> Result<Option<String>, String> {
+    let value = value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if value.as_ref().is_some_and(|value| value.len() > 256) {
+        return Err(format!("{field} must contain at most 256 bytes"));
+    }
+    Ok(value)
 }
 
 fn coordinator_error(error: EnforcementCoordinatorError) -> HttpResponse {
@@ -478,6 +499,8 @@ mod tests {
         let binding = build_file_binding(FileBindingRequest {
             agent_id: " qoder ".into(),
             session_id: Some(" session-1 ".into()),
+            conversation_id: Some(" conversation-1 ".into()),
+            tool_call_id: Some(" tool-call-1 ".into()),
             root_pid: child.id() as i32,
             path: path.clone(),
         })
@@ -485,6 +508,8 @@ mod tests {
 
         assert_eq!(binding.agent_id, "qoder");
         assert_eq!(binding.session_id.as_deref(), Some("session-1"));
+        assert_eq!(binding.conversation_id.as_deref(), Some("conversation-1"));
+        assert_eq!(binding.tool_call_id.as_deref(), Some("tool-call-1"));
         assert_eq!(binding.root_pid, child.id() as i32);
         assert!(binding.process_start_time > 0);
         assert_eq!(binding.policy_revision, "agentsight-file-open-v1");
@@ -514,6 +539,8 @@ mod tests {
         let binding = build_credential_binding(CredentialBindingRequest {
             agent_id: " qoder ".into(),
             session_id: Some(" session-1 ".into()),
+            conversation_id: Some(" conversation-1 ".into()),
+            tool_call_id: Some(" tool-call-1 ".into()),
             root_pid: child.id() as i32,
             source_path: path.clone(),
             trusted_endpoint: Some(" 10.0.0.8 ".into()),
@@ -526,6 +553,8 @@ mod tests {
 
         assert_eq!(binding.agent_id, "qoder");
         assert_eq!(binding.session_id.as_deref(), Some("session-1"));
+        assert_eq!(binding.conversation_id.as_deref(), Some("conversation-1"));
+        assert_eq!(binding.tool_call_id.as_deref(), Some("tool-call-1"));
         assert_eq!(binding.policy.mode, PolicyMode::Audit);
         assert_eq!(binding.policy.revision, 3);
         assert_eq!(binding.policy.taint_label, "CREDENTIAL");
@@ -552,6 +581,8 @@ mod tests {
             build_file_binding(FileBindingRequest {
                 agent_id: "".into(),
                 session_id: None,
+                conversation_id: None,
+                tool_call_id: None,
                 root_pid: 1,
                 path: directory,
             })
@@ -571,6 +602,8 @@ mod tests {
             build_file_binding(FileBindingRequest {
                 agent_id: "qoder".into(),
                 session_id: None,
+                conversation_id: None,
+                tool_call_id: None,
                 root_pid: std::process::id() as i32,
                 path: path.clone(),
             })
@@ -619,6 +652,8 @@ mod tests {
                 build_file_binding(FileBindingRequest {
                     agent_id: "qoder".into(),
                     session_id: None,
+                    conversation_id: None,
+                    tool_call_id: None,
                     root_pid: child.id() as i32,
                     path: path.clone(),
                 })
@@ -757,6 +792,8 @@ mod tests {
             binding_id: Uuid::new_v4(),
             agent_id: "agent-1".into(),
             session_id: None,
+            conversation_id: None,
+            tool_call_id: None,
             root_pid: 42,
             process_start_time: 7,
             policy_id: "policy-1".into(),

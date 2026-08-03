@@ -259,6 +259,8 @@ impl ReplacePolicy {
                     binding_id: source.binding_id,
                     agent_id: current.agent_id.clone(),
                     session_id: current.session_id.clone(),
+                    conversation_id: current.conversation_id.clone(),
+                    tool_call_id: current.tool_call_id.clone(),
                     root_pid: current.root_pid,
                     process_start_time: current.process_start_time,
                     policy: snapshot.policy.clone(),
@@ -268,6 +270,8 @@ impl ReplacePolicy {
                 let mut request = source.clone();
                 request.agent_id = current.agent_id.clone();
                 request.session_id = current.session_id.clone();
+                request.conversation_id = current.conversation_id.clone();
+                request.tool_call_id = current.tool_call_id.clone();
                 request.root_pid = current.root_pid;
                 request.process_start_time = current.process_start_time;
                 ReplacementPolicy::Generic(request)

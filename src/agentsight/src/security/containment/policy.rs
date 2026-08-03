@@ -144,6 +144,8 @@ pub(super) fn enforce_request(
         binding_id,
         agent_id: context.binding.request.agent_id.clone(),
         session_id: context.binding.request.session_id.clone(),
+        conversation_id: context.binding.request.conversation_id.clone(),
+        tool_call_id: context.binding.request.tool_call_id.clone(),
         root_pid,
         process_start_time,
         policy,
