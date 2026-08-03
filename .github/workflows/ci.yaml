@@ -933,7 +933,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.88.0'
-          components: 'rustfmt, clippy'
+          components: 'rustfmt, clippy, llvm-tools-preview'
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -949,6 +952,19 @@ jobs:
           node npm/tests/platforms.test.js
           node npm/scripts/package-npm.js --validate
 
+      - name: Validate nightly E2E harness
+        run: |
+          bash -n src/anolisa/tests/nightly/raw-lifecycle.sh
+          src/anolisa/tests/nightly/raw-lifecycle.sh --list
+          REPO_CONFIG=$(mktemp)
+          trap 'rm -f "$REPO_CONFIG"' EXIT
+          cp src/anolisa/manifests/repo.toml "$REPO_CONFIG"
+          ANOLISA_E2E_REPO_CONFIG_PATH="$REPO_CONFIG" \
+            ANOLISA_RAW_REPO_URL="https://mirror.example.com/raw/v1/" \
+            src/anolisa/tests/nightly/raw-lifecycle.sh --configure-repo
+          grep -Fx 'base_url = "https://mirror.example.com/raw/v1/"' \
+            "$REPO_CONFIG"
+
       - name: Check formatting
         run: |
           cd src/anolisa
@@ -959,10 +975,58 @@ jobs:
           cd src/anolisa
           cargo clippy --all-targets --locked -- -D warnings
 
-      - name: Run tests
+      - name: Run documentation tests
         run: |
           cd src/anolisa
-          cargo test --locked
+          cargo test --workspace --doc --locked
+
+      - name: Run tests with coverage
+        run: |
+          cd src/anolisa
+          mkdir -p coverage
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --workspace --all-targets --locked --no-report
+          # Permission-path tests can leave their process profile write-only;
+          # llvm-profdata needs every emitted profile to be readable.
+          find target/llvm-cov-target -type f -name '*.profraw' \
+            -exec chmod u+r {} +
+          cargo llvm-cov report --json --output-path coverage/coverage.json
+          cargo llvm-cov report --lcov --output-path coverage/lcov.info
+
+      - name: Publish coverage summary
+        id: coverage
+        run: |
+          cd src/anolisa
+          LINE_COVERAGE=$(node -e '
+            const report = require("./coverage/coverage.json");
+            process.stdout.write(String(report.data[0].totals.lines.percent));
+          ')
+          FUNCTION_COVERAGE=$(node -e '
+            const report = require("./coverage/coverage.json");
+            process.stdout.write(String(report.data[0].totals.functions.percent));
+          ')
+          echo "line-coverage=${LINE_COVERAGE}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## anolisa code coverage"
+            echo ""
+            echo "| Metric | Coverage |"
+            echo "|--------|----------|"
+            printf '| Lines | **%.2f%%** |\n' "$LINE_COVERAGE"
+            printf '| Functions | %.2f%% |\n' "$FUNCTION_COVERAGE"
+            echo ""
+            echo "Coverage is reported for the full \`src/anolisa\` Rust workspace."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: anolisa-coverage
+          path: |
+            src/anolisa/coverage/coverage.json
+            src/anolisa/coverage/lcov.info
+          if-no-files-found: warn
+          retention-days: 14
 
   # =========================================================================
   # Step 10: Test SkillFS (Rust workspace)
