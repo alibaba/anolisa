@@ -19,10 +19,17 @@ impl ShellHandoffState {
         });
     }
 
+    /// Emits one approved request only when no earlier request is still pending.
+    ///
+    /// The marker transport has one request sidecar and one parser claim slot,
+    /// so overlapping emissions would replace the first request's identity.
     /// `event_index` is the shell-event count observed when the handoff is
     /// written to the PTY; the untracked-closure fallback only considers
     /// `ShellReady` events strictly after this index.
     pub(crate) fn emit_next_approved(&mut self, event_index: usize) -> Option<ShellHandoffRequest> {
+        if !self.pending.is_empty() {
+            return None;
+        }
         let mut handoff = self.approved.pop_front()?;
         handoff.emitted_at = Some(Instant::now());
         handoff.emitted_at_event_index = Some(event_index);

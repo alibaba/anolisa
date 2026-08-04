@@ -2579,12 +2579,9 @@ fn untracked_shell_handoff_closure_leaves_interactive_handoffs_untouched() {
 }
 
 #[test]
-fn untracked_shell_handoffs_share_prompt_boundary_when_emitted_in_same_cycle() {
-    // Boundary contract: handoffs emitted within the same prompt cycle (no
-    // ShellReady between their emission points) legitimately share the next
-    // ShellReady as their closure boundary. Forcing a distinct boundary per
-    // handoff would pin later handoffs to unrelated future prompts and
-    // misreport the evidence timeline.
+fn untracked_shell_handoffs_close_on_distinct_prompt_boundaries() {
+    // The transport owns one request sidecar and claim slot, so the second
+    // request remains approved until the first closes at its prompt boundary.
     let mut state = InlineState::default();
     for (command, approval_id) in [("ls -la /root/", "req-a"), ("df -h", "req-b")] {
         let request = ShellHandoffRequest::new(
@@ -2607,20 +2604,33 @@ fn untracked_shell_handoffs_share_prompt_boundary_when_emitted_in_same_cycle() {
         .shell_handoff_mut()
         .emit_next_approved(2)
         .expect("emit first handoff");
-    state
+    assert!(state
         .control
         .shell_handoff_mut()
         .emit_next_approved(2)
-        .expect("emit second handoff");
-    let events = vec![
+        .is_none());
+    let mut events = vec![
         untracked_test_event(ShellEventKind::ShellReady, None),
         untracked_test_event(ShellEventKind::ShellReady, None),
         untracked_test_event(ShellEventKind::ShellReady, None),
     ];
 
-    let ids = close_untracked_shell_handoffs(&mut state, &events);
+    let first_ids = close_untracked_shell_handoffs(&mut state, &events);
+    assert_eq!(first_ids, vec!["handoff-1"]);
+    assert!(state.control.shell_handoff().pending_front().is_none());
 
-    assert_eq!(ids, vec!["handoff-1", "handoff-2"]);
+    let second = state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(events.len())
+        .expect("emit second handoff after first closure");
+    assert_eq!(second.approval_id, "req-b");
+    assert!(close_untracked_shell_handoffs(&mut state, &events).is_empty());
+
+    events.push(untracked_test_event(ShellEventKind::ShellReady, None));
+    let second_ids = close_untracked_shell_handoffs(&mut state, &events);
+
+    assert_eq!(second_ids, vec!["handoff-2"]);
     assert!(state.control.shell_handoff().pending_front().is_none());
     for id in ["handoff-1", "handoff-2"] {
         let row = state
@@ -2631,9 +2641,7 @@ fn untracked_shell_handoffs_share_prompt_boundary_when_emitted_in_same_cycle() {
             .expect("handoff row");
         assert_eq!(row.status, "completed_untracked");
     }
-    // Both closures produced recoverable evidence, and neither is lost: claims
-    // are handed out one per idle boundary, so two successive claims each yield
-    // exactly one.
+    // Both closures produced recoverable evidence, and neither is lost.
     assert_eq!(
         state
             .evidence
@@ -2681,20 +2689,24 @@ fn untracked_shell_handoff_emitted_after_boundary_stays_pending() {
         .shell_handoff_mut()
         .emit_next_approved(1)
         .expect("emit first handoff");
-    state
-        .control
-        .shell_handoff_mut()
-        .emit_next_approved(3)
-        .expect("emit second handoff");
     let events = vec![
         untracked_test_event(ShellEventKind::ShellReady, None),
         untracked_test_event(ShellEventKind::ShellReady, None),
         untracked_test_event(ShellEventKind::ShellReady, None),
     ];
+    assert_eq!(
+        close_untracked_shell_handoffs(&mut state, &events),
+        vec!["handoff-1"]
+    );
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(3)
+        .expect("emit second handoff");
 
     let ids = close_untracked_shell_handoffs(&mut state, &events);
 
-    assert_eq!(ids, vec!["handoff-1"]);
+    assert!(ids.is_empty(), "{ids:?}");
     let pending = state
         .control
         .shell_handoff()
@@ -3154,9 +3166,8 @@ fn activity_records_terminal_output_read_misroute_for_fenced_fallback() {
 }
 
 // #2142 review R5: a block carrying an explicit handoff token must decide by
-// that token alone. Two approved handoffs for the identical command sit in
-// the queue; the block claimed with the *second* request's token must not be
-// text-matched against the *first* (front) request.
+// that token alone. A block carrying another request's token must not be
+// text-matched against the pending request, even when the commands are equal.
 #[test]
 fn block_with_another_requests_token_does_not_close_the_front_handoff() {
     let mut state = InlineState::default();
@@ -3174,21 +3185,18 @@ fn block_with_another_requests_token_does_not_close_the_front_handoff() {
         )
         .expect("handoff request");
         requests.push(request.clone());
-        state
-            .control
-            .shell_handoff_mut()
-            .enqueue_approved_request(request);
+        if approval == "req-a" {
+            state
+                .control
+                .shell_handoff_mut()
+                .enqueue_approved_request(request);
+        }
     }
     state
         .control
         .shell_handoff_mut()
         .emit_next_approved(0)
         .expect("emit first handoff");
-    state
-        .control
-        .shell_handoff_mut()
-        .emit_next_approved(1)
-        .expect("emit second handoff");
     let block = CommandBlock {
         id: "cmd-second".to_string(),
         session_id: "session-1".to_string(),
