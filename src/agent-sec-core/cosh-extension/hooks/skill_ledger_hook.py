@@ -202,7 +202,8 @@ def _resolve_skill_dir(skill_name: str, cwd: str) -> tuple[str | None, bool]:
 
     Current hook scope is intentionally limited to:
     project (.copilot-shell/skills/) → user (~/.copilot-shell/skills/)
-    → system (/usr/share/anolisa/skills/).
+    → system (/usr/share/anolisa/skills/) → raw system
+    (/usr/local/share/anolisa/skills/).
 
     Returns ``(path, traversal_detected)``:
     - ``(str, False)`` — resolved successfully.

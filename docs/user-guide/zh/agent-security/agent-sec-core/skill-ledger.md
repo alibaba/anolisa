@@ -301,7 +301,7 @@ Qoder CLI 是低层完整性门禁：plugin 为 `Skill` tool 注册独立的 `Pr
 
 OpenClaw 默认 `enabled=true, policy="ask"`；Hermes 默认 `enabled=true, policy="ask"`；copilot-shell 和 Qoder CLI 默认 manifest 注册 Skill Ledger PreToolUse hook，并通过 `SKILL_LEDGER_HOOK_POLICY` 控制 policy。除 Qoder CLI 上述低层门禁外，其它兼容 hook 在 CLI 基础设施异常时保持 fail-open，避免阻断 Skill 加载。
 
-copilot-shell hook 当前仅覆盖 project / user / system 三类目录：`<cwd>/.copilot-shell/skills/`、`~/.copilot-shell/skills/`、`/usr/share/anolisa/skills/`。若 Skill 来自 custom、extension、remote 或其它路径，hook 会 fail-open 并跳过 skill-ledger 检查；OpenClaw 插件则按读取到的 `SKILL.md` 路径提取 Skill 目录。
+copilot-shell hook 当前仅覆盖 project / user / system 三类目录：`<cwd>/.copilot-shell/skills/`、`~/.copilot-shell/skills/`，以及 RPM 与 raw install 对应的 system 根目录 `/usr/share/anolisa/skills/` 和 `/usr/local/share/anolisa/skills/`。若 Skill 来自 custom、extension、remote 或其它路径，hook 会 fail-open 并跳过 skill-ledger 检查；OpenClaw 插件则按读取到的 `SKILL.md` 路径提取 Skill 目录。
 
 批量认证或安装后认证场景中，建议先完成目录定位和认证，再让 Agent 读取未认证 Skill 内容：批量认证前避免主动读取未认证 Skill 的 `SKILL.md` 或辅助文件；安装成功后应先定位最终本地目录，确认包含 `SKILL.md`，再执行快速扫描认证。
 
@@ -383,7 +383,7 @@ agent-sec-cli skill-ledger decide /path/to/skill --clear
 
 #### 配置 Skill 目录（批量扫描使用）
 
-默认已包含五个内置目录：`~/.openclaw/skills/*`、`~/.copilot-shell/skills/*`、`~/.hermes/skills/**`、`~/.qoder/skills/*`、`/usr/share/anolisa/skills/*`。项目级 Qoder 目录不作为相对默认项；对项目 Skill 显式执行 `scan` 或 `certify` 后，其绝对目录会沿用自动记忆机制写入 `managedSkillDirs`。如需添加其它目录，创建或编辑 `~/.config/agent-sec/skill-ledger/config.json`：
+默认已包含六个内置目录：`~/.openclaw/skills/*`、`~/.copilot-shell/skills/*`、`~/.hermes/skills/**`、`~/.qoder/skills/*`、`/usr/share/anolisa/skills/*`、`/usr/local/share/anolisa/skills/*`。项目级 Qoder 目录不作为相对默认项；对项目 Skill 显式执行 `scan` 或 `certify` 后，其绝对目录会沿用自动记忆机制写入 `managedSkillDirs`。如需添加其它目录，创建或编辑 `~/.config/agent-sec/skill-ledger/config.json`：
 
 ```json
 {
