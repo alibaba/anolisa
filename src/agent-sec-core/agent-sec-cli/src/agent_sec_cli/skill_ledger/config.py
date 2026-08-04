@@ -45,6 +45,7 @@ DEFAULT_SKILL_DIRS = [
     "~/.hermes/skills/**",
     "~/.qoder/skills/*",
     "/usr/share/anolisa/skills/*",
+    "/usr/local/share/anolisa/skills/*",
 ]
 _IGNORED_RECURSIVE_DIRS = frozenset(
     {".git", ".github", ".hub", ".archive", ".skill-meta"}

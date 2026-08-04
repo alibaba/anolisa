@@ -116,12 +116,14 @@ def _supported_skill_bases(cwd: str) -> list[Path]:
 
     Current scope is intentionally limited to:
     project (.copilot-shell/skills/) → user (~/.copilot-shell/skills/)
-    → system (/usr/share/anolisa/skills/).
+    → system (/usr/share/anolisa/skills/) → raw system
+    (/usr/local/share/anolisa/skills/).
     """
     return [
         Path(cwd) / ".copilot-shell" / "skills",
         Path.home() / ".copilot-shell" / "skills",
         Path("/usr/share/anolisa/skills"),
+        Path("/usr/local/share/anolisa/skills"),
     ]
 
 
