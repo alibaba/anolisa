@@ -330,24 +330,56 @@ pub(crate) fn timeout_eligible(kind: &InteractiveHintKind) -> bool {
 
 /// Shared input-wait episode clock between the relay loop (producer: the
 /// sentinel sampler) and the runtime controller (consumer: the #2161
-/// input-wait timeout). Stores the epoch-millis when the current
-/// timeout-eligible episode began; 0 means "not waiting". The producer
-/// clears it on output activity, ineligible/None classifications, and
-/// handoff exit, so the consumer's duration read is always the length of
-/// the *current uninterrupted* wait (re-entry restarts the clock).
+/// input-wait timeout). Stores the monotonic-millis (see [`Self::now_ms`])
+/// when the current timeout-eligible episode began; 0 means "not
+/// waiting". The producer clears it on output activity, ineligible/None
+/// classifications, and handoff exit, so the consumer's duration read is
+/// always the length of the *current uninterrupted* wait (re-entry
+/// restarts the clock).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct InputWaitStatus {
     waiting_since_ms: Arc<AtomicU64>,
+    /// Test-only pinned clock (0 = use the real monotonic clock).
+    /// Shared across clones like the episode stamp so producer/consumer
+    /// handles observe the same simulated time; absent from release
+    /// builds so the production layout stays a single atomic.
+    #[cfg(test)]
+    test_clock_ms: Arc<AtomicU64>,
 }
 
 impl InputWaitStatus {
+    /// Milliseconds on a process-local monotonic clock (#2168 review
+    /// P1-1): an `Instant` anchor makes the interrupt timer immune to
+    /// NTP/VM/container wall-clock jumps, which with `SystemTime` could
+    /// fire a false SIGINT (forward jump) or never fire (backward jump).
+    /// Only differences of this clock are ever used; the constant offset
+    /// keeps values strictly positive (0 stays "not waiting") and leaves
+    /// backdating headroom early in the process lifetime.
+    ///
+    /// Bounds: the `1 << 32` offset is a ~49.7-day base, and elapsed
+    /// milliseconds only reach the remaining u64 range after ~584 million
+    /// years of process uptime — consumers may treat this value as
+    /// overflow-free for any conceivable timeout configuration.
     fn now_ms() -> u64 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
-            .max(1)
+        use std::sync::OnceLock;
+        static EPOCH: OnceLock<Instant> = OnceLock::new();
+        let epoch = *EPOCH.get_or_init(Instant::now);
+        Instant::now().duration_since(epoch).as_millis() as u64 + (1 << 32)
+    }
+
+    /// Clock reading feeding the production chain. Tests may pin it via
+    /// [`Self::set_test_clock_ms`] to drive deterministic forward/backward
+    /// jump scenarios through `mark_waiting`/`waiting_for`; the real path
+    /// stays the lock-free `Instant` read above (#2176 review P2).
+    fn clock_ms(&self) -> u64 {
+        #[cfg(test)]
+        {
+            let pinned = self.test_clock_ms.load(Ordering::Acquire);
+            if pinned != 0 {
+                return pinned;
+            }
+        }
+        Self::now_ms()
     }
 
     /// Marks the start of an eligible wait episode; keeps the original
@@ -355,7 +387,7 @@ impl InputWaitStatus {
     pub(crate) fn mark_waiting(&self) {
         let _ = self.waiting_since_ms.compare_exchange(
             0,
-            Self::now_ms(),
+            self.clock_ms(),
             Ordering::AcqRel,
             Ordering::Acquire,
         );
@@ -371,15 +403,32 @@ impl InputWaitStatus {
         if since == 0 {
             return None;
         }
-        Some(Duration::from_millis(Self::now_ms().saturating_sub(since)))
+        Some(Duration::from_millis(Self::elapsed_ms(
+            self.clock_ms(),
+            since,
+        )))
+    }
+
+    /// Jump-defensive elapsed arithmetic: a start stamp ahead of `now`
+    /// (impossible on the monotonic clock; the backward-jump failure
+    /// mode of the former wall-clock implementation) clamps to zero
+    /// rather than underflowing into an instant timeout.
+    fn elapsed_ms(now_ms: u64, since_ms: u64) -> u64 {
+        now_ms.saturating_sub(since_ms)
     }
 
     #[cfg(test)]
     pub(crate) fn backdate_for_test(&self, age: Duration) {
         self.waiting_since_ms.store(
-            Self::now_ms().saturating_sub(age.as_millis() as u64),
+            self.clock_ms().saturating_sub(age.as_millis() as u64),
             Ordering::Release,
         );
+    }
+
+    /// Pins the episode clock for tests (0 restores the real clock).
+    #[cfg(test)]
+    pub(crate) fn set_test_clock_ms(&self, ms: u64) {
+        self.test_clock_ms.store(ms, Ordering::Release);
     }
 }
 
@@ -465,47 +514,90 @@ mod linux {
     /// Cost bound per sample (#2168 review): stop probing group members
     /// after this many, keeping the worst case fail-quiet, not slow.
     const MAX_PGRP_PROBES: usize = 32;
+    #[cfg(test)]
+    pub(super) const MAX_PGRP_PROBES_FOR_TEST: usize = MAX_PGRP_PROBES;
 
     pub(super) fn fill_foreground_block_state(fg_pgid: i32, snapshot: &mut InteractiveSnapshot) {
+        // #2168 review P1-2: probe the group leader first — the common
+        // single-process foreground group (read -p, sudo, pagers) then
+        // resolves without scanning the whole process table.
+        //
+        // Assumption scope: when the leader is not the blocked reader
+        // (a descendant is), this shortcut simply misses and the walk
+        // below degrades to the pre-shortcut full-table scan — the
+        // shortcut is budgeted separately (#2176 review P2), so all
+        // MAX_PGRP_PROBES fallback slots stay available to non-leader
+        // members and every member base could reach is still reached.
+        // Enumeration order stays /proc-dependent exactly as before;
+        // evidence is per-group (one blocked member suffices), so order
+        // can only affect which member supplies the wording-only
+        // `fg_comm`, never the verdict.
+        let leader_in_group = process_pgid(fg_pgid) == Some(fg_pgid);
+        if leader_in_group && probe_member(fg_pgid, snapshot) {
+            return;
+        }
         let Ok(entries) = std::fs::read_dir("/proc") else {
             return;
         };
-        let mut probed = 0usize;
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
-                continue;
-            };
-            if process_pgid(pid) != Some(fg_pgid) {
-                continue;
+        let members = entries.flatten().filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<i32>().ok()?;
+            if pid == fg_pgid && leader_in_group {
+                return None;
             }
-            probed += 1;
-            if probed > MAX_PGRP_PROBES {
-                return;
-            }
-            let wchan = read_proc(pid, "wchan").unwrap_or_default();
-            let syscall = read_proc(pid, "syscall").unwrap_or_default();
-            // #2168 review: a blocked read(2) only counts when the fd it
-            // waits on resolves to the tty — `sleep 130 | cat` blocks in a
-            // pipe read on fd 0 and must never accrue input-wait timeout.
-            let blocked_read = blocked_read_fd(&syscall)
-                .map(|fd| fd_is_tty(pid, fd))
-                .unwrap_or(false);
-            if TTY_READ_WCHANS.contains(&wchan.trim()) || blocked_read {
-                snapshot.blocked_tty_read = true;
-                snapshot.fg_comm = read_proc(pid, "comm")
-                    .map(|comm| comm.trim().to_string())
-                    .filter(|comm| !comm.is_empty())
-                    .or_else(|| snapshot.fg_comm.take());
-                // Evidence is per-group: one blocked member is enough.
-                return;
-            }
-            if snapshot.fg_comm.is_none() {
-                snapshot.fg_comm = read_proc(pid, "comm")
-                    .map(|comm| comm.trim().to_string())
-                    .filter(|comm| !comm.is_empty());
+            (process_pgid(pid) == Some(fg_pgid)).then_some(pid)
+        });
+        scan_members(members, |pid| probe_member(pid, snapshot));
+    }
+
+    /// Walks fallback group members with the full probe budget: up to
+    /// MAX_PGRP_PROBES members are probed, stopping early on the first
+    /// evidence hit. Extracted so the budget contract (a blocked member
+    /// in the last slot is still probed; the bound stays fail-quiet)
+    /// is testable without a live /proc (#2176 review P2).
+    pub(super) fn scan_members(
+        members: impl Iterator<Item = i32>,
+        mut probe: impl FnMut(i32) -> bool,
+    ) -> bool {
+        for pid in members.take(MAX_PGRP_PROBES) {
+            if probe(pid) {
+                return true;
             }
         }
+        false
+    }
+
+    /// Probes one foreground-group member; returns true once
+    /// blocked-tty-read evidence is found (evidence is per-group: one
+    /// blocked member is enough, the caller stops scanning).
+    ///
+    /// `fg_comm` is a wording prior only (see the field docs on
+    /// [`InteractiveSnapshot`]): it merely sharpens hint copy and never
+    /// carries identity semantics — which member it names may depend on
+    /// probe order, and that is acceptable by design.
+    fn probe_member(pid: i32, snapshot: &mut InteractiveSnapshot) -> bool {
+        let wchan = read_proc(pid, "wchan").unwrap_or_default();
+        let syscall = read_proc(pid, "syscall").unwrap_or_default();
+        // #2168 review: a blocked read(2) only counts when the fd it
+        // waits on resolves to the tty — `sleep 130 | cat` blocks in a
+        // pipe read on fd 0 and must never accrue input-wait timeout.
+        let blocked_read = blocked_read_fd(&syscall)
+            .map(|fd| fd_is_tty(pid, fd))
+            .unwrap_or(false);
+        if TTY_READ_WCHANS.contains(&wchan.trim()) || blocked_read {
+            snapshot.blocked_tty_read = true;
+            snapshot.fg_comm = member_comm(pid).or_else(|| snapshot.fg_comm.take());
+            return true;
+        }
+        if snapshot.fg_comm.is_none() {
+            snapshot.fg_comm = member_comm(pid);
+        }
+        false
+    }
+
+    fn member_comm(pid: i32) -> Option<String> {
+        read_proc(pid, "comm")
+            .map(|comm| comm.trim().to_string())
+            .filter(|comm| !comm.is_empty())
     }
 
     /// Parses `/proc/<pid>/syscall`: the fd argument of a blocked read(2),
