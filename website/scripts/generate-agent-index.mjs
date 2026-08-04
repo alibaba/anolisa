@@ -203,6 +203,25 @@ const installCommand = quickstart.match(
 )?.[0];
 if (!installCommand) throw new Error('Could not derive the canonical install command from docs/QUICKSTART.md');
 
+const tokenlessQuickstartPath =
+  'docs/user-guide/en/token-saving/tokenless/QUICKSTART.md';
+const tokenlessFrameworkPath =
+  'docs/user-guide/en/token-saving/tokenless/framework-integration.md';
+const tokenlessQuickstart = await readFile(
+  path.join(repoRoot, tokenlessQuickstartPath),
+  'utf8',
+);
+const tokenlessFramework = await readFile(
+  path.join(repoRoot, tokenlessFrameworkPath),
+  'utf8',
+);
+const tokenlessInstallCommand = tokenlessQuickstart.match(
+  /curl\s+-fsSL\s+https:\/\/get\.agentic-os\.sh\s+\|\s+bash\s+-s\s+--\s+tokenless/,
+)?.[0];
+if (!tokenlessInstallCommand) {
+  throw new Error(`Could not derive Tokenless install command from ${tokenlessQuickstartPath}`);
+}
+
 const agentsMarkdown = await readFile(path.join(repoRoot, 'AGENTS.md'), 'utf8');
 const componentRows = parseOverview(agentsMarkdown);
 const components = [];
@@ -359,6 +378,32 @@ const indexText = [
 ].join('\n');
 await writeFile(path.join(agentsOutput, 'repo-index.txt'), indexText);
 
+const tokenlessSetup = [
+  '# ANOLISA Tokenless Setup for Agents',
+  '',
+  'Goal: Install Tokenless and enable it for a compatible Agent already present on the host.',
+  '',
+  '## Required workflow',
+  '',
+  '1. Detect the operating system, architecture, Agent, and Agent version.',
+  '2. Check the platform and framework matrices below. Stop on an unsupported host.',
+  '3. Show the plan and ask before making changes.',
+  `4. Install the CLI and Tokenless with: ${tokenlessInstallCommand}`,
+  '5. Run `~/.local/bin/anolisa adapter scan` and select only the Agent the user intends to modify.',
+  '6. Run `~/.local/bin/anolisa adapter enable tokenless <agent>` after confirmation.',
+  '7. Ask the user to restart the Agent, perform a representative tool task, and verify with `tokenless stats summary`.',
+  '8. Do not claim model-bill savings from Tokenless statistics; they measure only content processed by Tokenless.',
+  '',
+  `===== ${tokenlessQuickstartPath} =====`,
+  '',
+  tokenlessQuickstart,
+  '',
+  `===== ${tokenlessFrameworkPath} =====`,
+  '',
+  tokenlessFramework,
+].join('\n');
+await writeFile(path.join(agentsOutput, 'tokenless.txt'), tokenlessSetup);
+
 function enumBody(source, enumName) {
   const enumStart = source.search(new RegExp(`(?:pub\\s+)?enum\\s+${enumName}\\b`));
   if (enumStart < 0) throw new Error(`Could not find enum ${enumName}`);
@@ -436,7 +481,7 @@ await writeFile(path.join(agentsOutput, 'changelog.txt'), changelogText.join('\n
 
 await writeGenerated(
   'static/llms.txt',
-  `# ANOLISA\n\n> A server-side operating layer for AI agent workloads.\n\n- Website: ${siteHref()}\n- Documentation: ${siteHref('docs/')}\n- Quickstart: ${siteHref('docs/quickstart/')}\n- User guide: ${siteHref('docs/user-guide/')}\n- Developer guide: ${siteHref('docs/developer-guide/')}\n- Chinese documentation: ${siteHref('zh/docs/')}\n- Agent setup workflow: ${siteHref('agents/')}\n- Repository index: ${siteHref('agents/repo-index.json')}\n- CLI reference: ${siteHref('agents/cli-reference.txt')}\n- Changelog: ${siteHref('agents/changelog.txt')}\n- Full English documentation: ${siteHref('llms-full.txt')}\n- Source: ${index.repository}\n- Source commit: ${sourceCommit}\n`,
+  `# ANOLISA\n\n> A server-side operating layer for AI agent workloads.\n\n- Website: ${siteHref()}\n- Documentation: ${siteHref('docs/')}\n- Quickstart: ${siteHref('docs/quickstart/')}\n- User guide: ${siteHref('docs/user-guide/')}\n- Developer guide: ${siteHref('docs/developer-guide/')}\n- Chinese documentation: ${siteHref('zh/docs/')}\n- Agent setup workflow: ${siteHref('agents/')}\n- Tokenless setup for Agents: ${siteHref('agents/tokenless.txt')}\n- Repository index: ${siteHref('agents/repo-index.json')}\n- CLI reference: ${siteHref('agents/cli-reference.txt')}\n- Changelog: ${siteHref('agents/changelog.txt')}\n- Full English documentation: ${siteHref('llms-full.txt')}\n- Source: ${index.repository}\n- Source commit: ${sourceCommit}\n`,
 );
 
 const fullDocumentation = [];

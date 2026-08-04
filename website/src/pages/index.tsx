@@ -11,14 +11,14 @@ const content = {
   en: {
     badge: 'Agentic OS 1.0',
     lead: 'An operating system layer built for agents.',
-    hook: 'Cut 30–70% of your agent’s tool-output tokens with one command.',
+    hook: 'Use Tokenless to cut redundant tool-output tokens without replacing your Agent.',
     systemScope: 'Just one thing the OS does for your agent — it also runs, recovers, and secures it.',
     statement:
       'The users of operating systems have changed. ANOLISA makes agents first-class participants at the system layer.',
-    installLabel: 'One entry point. Enable what you need.',
-    agentLabel: 'Bring your Agent in',
+    installLabel: 'Install Tokenless with one command.',
+    agentLabel: 'Let your Agent set up Tokenless',
     agentPrompt:
-      'Read https://agentic-os.sh/agents/ to learn how to use ANOLISA, then help me install it for this environment.',
+      'Help me install and enable ANOLISA Tokenless for the compatible Agent in this environment. Read https://agentic-os.sh/agents/ first, show me the plan, and ask before system changes.',
     copy: 'Copy',
     copied: 'Copied',
     surfaceLabel: 'ANOLISA system surface',
@@ -35,13 +35,13 @@ const content = {
   zh: {
     badge: 'Agentic OS 1.0',
     lead: 'Agent 原生的操作系统层。',
-    hook: '一条命令，让 Agent 少烧 30–70% 的工具输出 token。',
+    hook: '用 Tokenless 压缩工具输出，不必更换正在使用的 Agent。',
     systemScope: '这只是操作系统为 Agent 做的一件事——它还让 Agent 跑得起、退得回、守得住。',
     statement: '操作系统的使用者已经改变。ANOLISA 让 Agent 成为系统中的一等公民。',
-    installLabel: '一个入口，按需启用',
-    agentLabel: '让你的 Agent 接入',
+    installLabel: '一条命令安装 Tokenless',
+    agentLabel: '让你的 Agent 配置 Tokenless',
     agentPrompt:
-      '阅读 https://agentic-os.sh/agents/，了解如何使用 ANOLISA，并根据当前环境帮我完成安装。',
+      '帮我为当前环境中兼容的 Agent 安装并启用 ANOLISA Tokenless。先阅读 https://agentic-os.sh/agents/，说明执行计划，并在系统级变更前征得确认。',
     copy: '复制',
     copied: '已复制',
     surfaceLabel: 'ANOLISA 系统能力视图',

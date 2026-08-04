@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# install.sh — lightweight installer for the anolisa CLI.
+# install.sh — bootstrap installer for the anolisa CLI and selected capabilities.
 #
 # Usage:
 #   curl -fsSL https://get.agentic-os.sh | bash
+#   curl -fsSL https://get.agentic-os.sh | bash -s -- tokenless
 #
 # Environment overrides:
 #   ANOLISA_VERSION      version to install      (default: stable)
@@ -22,10 +23,39 @@ MANIFEST_SCHEMA=""
 RESOLVED_VERSION=""
 ARTIFACT_URL=""
 ARTIFACT_SHA256=""
+TARGET_COMPONENT=""
 
 log()  { printf '\033[1;32m%s\033[0m %s\n' "==>" "$*"; }
 warn() { printf '\033[1;33m%s\033[0m %s\n' "warn:" "$*" >&2; }
 err()  { printf '\033[1;31m%s\033[0m %s\n' "error:" "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+Install the ANOLISA CLI, optionally followed by a supported capability.
+
+Usage:
+  install.sh
+  install.sh tokenless
+
+Examples:
+  curl -fsSL https://get.agentic-os.sh | bash
+  curl -fsSL https://get.agentic-os.sh | bash -s -- tokenless
+EOF
+}
+
+parse_args() {
+  case "$#" in
+    0) ;;
+    1)
+      case "$1" in
+        tokenless) TARGET_COMPONENT="$1" ;;
+        -h|--help) usage; exit 0 ;;
+        *) err "unsupported capability: $1 (supported: tokenless)" ;;
+      esac
+      ;;
+    *) err "expected at most one capability argument" ;;
+  esac
+}
 
 cleanup() {
   [ -z "$TMPDIR_INSTALL" ] || rm -rf "$TMPDIR_INSTALL"
@@ -175,6 +205,7 @@ sha256_verify() {
 }
 
 main() {
+  parse_args "$@"
   detect_platform
   command -v curl >/dev/null 2>&1 || err "curl is required but not found"
   command -v tar  >/dev/null 2>&1 || err "tar is required but not found"
@@ -249,7 +280,12 @@ main() {
   esac
 
   log "$installed_version"
+  if [ "$TARGET_COMPONENT" = "tokenless" ]; then
+    log "installing Tokenless"
+    "${INSTALL_DIR}/anolisa" install tokenless
+    log "Tokenless installed"
+  fi
   log "done"
 }
 
-main
+main "$@"

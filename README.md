@@ -110,14 +110,17 @@ ANOLISA CLI is the common installation entry point. Enable cosh-ng, Token-less,
 or other capabilities as needed.
 
 ```bash
+# Install the CLI only
 curl -fsSL https://get.agentic-os.sh | bash
 
+# Or install the CLI and Tokenless together
+curl -fsSL https://get.agentic-os.sh | bash -s -- tokenless
+
 anolisa install cosh-ng
-anolisa install tokenless
 ```
 
-Run `cosh-ng` to enter the Agent-native shell, or point any existing Agent at
-it — Token-less applies to tool calls without further configuration.
+Run `cosh-ng` to enter the Agent-native shell. For Tokenless, scan the installed
+Agent frameworks and explicitly enable the matching adapter.
 
 [Read the Quick Start →](docs/QUICKSTART.md)
 

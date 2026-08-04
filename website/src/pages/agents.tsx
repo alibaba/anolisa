@@ -6,18 +6,18 @@ import type {Locale} from '../../content.config';
 const content = {
   en: {
     eyebrow: 'anolisa://agents',
-    title: 'ANOLISA Agent Entry Point',
+    title: 'Set up Tokenless with your Agent',
     intro:
-      'Read the repository index and CLI reference for current capabilities, platform scope, and setup methods.',
+      'Use the Tokenless setup guide to check compatibility, install the capability, and enable the matching Agent adapter.',
     note:
       'Automated setup currently covers Linux and macOS. Ask before making system changes.',
     endpoints: 'Machine-readable endpoints',
   },
   zh: {
     eyebrow: 'anolisa://agents',
-    title: 'ANOLISA Agent 入口',
+    title: '让 Agent 配置 Tokenless',
     intro:
-      '读取仓库索引和 CLI 参考，获取当前可用能力、平台范围与安装方式。',
+      '读取 Tokenless 配置指南，检查兼容性、安装能力并启用匹配的 Agent Adapter。',
     note: '自动安装目前面向 Linux 与 macOS；执行系统变更前应先征得用户确认。',
     endpoints: '机器可读入口',
   },
@@ -28,6 +28,7 @@ export default function AgentsPage() {
   const locale: Locale = i18n.currentLocale === 'zh' ? 'zh' : 'en';
   const t = content[locale];
   const endpointItems = [
+    ['tokenless.txt', useBaseUrl('/agents/tokenless.txt')],
     ['repo-index.json', useBaseUrl('/agents/repo-index.json')],
     ['repo-index.txt', useBaseUrl('/agents/repo-index.txt')],
     ['cli-reference.txt', useBaseUrl('/agents/cli-reference.txt')],

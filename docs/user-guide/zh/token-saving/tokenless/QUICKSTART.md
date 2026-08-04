@@ -18,14 +18,16 @@ Tokenless 帮助 AI Agent 用更少的 Token 完成原来的工作。
 
 ## 2. 安装 Tokenless
 
-先安装 anolisa CLI，再用它安装 Tokenless：
+同时安装 anolisa CLI 和 Tokenless：
 
 ```bash
-curl -fsSL https://get.agentic-os.sh | bash
-anolisa --version
-anolisa install tokenless
-tokenless --version
+curl -fsSL https://get.agentic-os.sh | bash -s -- tokenless
+~/.local/bin/anolisa --version
+~/.local/bin/tokenless --version
 ```
+
+如果已经安装 anolisa CLI，可直接运行 `anolisa install tokenless`。能力参数只安装
+Tokenless，不会修改任何 Agent 配置；下一步仍需显式启用对应的 Adapter。
 
 ## 3. 开始使用 Tokenless
 

@@ -14,6 +14,15 @@ The `anolisa` CLI is the unified entry point for managing all ANOLISA components
 curl -fsSL https://get.agentic-os.sh | bash
 ```
 
+To install the CLI and Tokenless in one pass:
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- tokenless
+```
+
+The capability argument installs Tokenless only. It does not enable an Agent
+adapter or make system-level changes.
+
 ### Option B: YUM (Alinux)
 
 ```bash

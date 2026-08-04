@@ -14,6 +14,14 @@
 curl -fsSL https://get.agentic-os.sh | bash
 ```
 
+如需一次完成 CLI 和 Tokenless 安装：
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- tokenless
+```
+
+能力参数只安装 Tokenless，不会启用 Agent Adapter，也不会执行系统级变更。
+
 ### 方式 B：YUM（Alinux）
 
 ```bash

@@ -12,38 +12,36 @@
       "install_name": "sec-core"
     },
     "tokenless": {
-      "install": "npm install -g anolisa-tokenless",
-      "install_method": "npm",
+      "install": "curl -fsSL https://get.agentic-os.sh | bash -s -- tokenless",
+      "install_method": "bootstrap",
       "install_variants": [
         {
-          "method": "cli",
-          "preferred": false,
-          "command": "anolisa install tokenless",
+          "method": "bootstrap",
+          "preferred": true,
+          "command": "curl -fsSL https://get.agentic-os.sh | bash -s -- tokenless",
           "platforms": [
             {
               "os": "linux",
-              "architectures": ["x86_64"]
+              "architectures": ["x86_64", "aarch64"]
             },
             {
               "os": "macos",
               "architectures": ["aarch64"]
             }
           ],
-          "requires": ["anolisa"],
+          "requires": ["curl", "bash"],
           "preflight": [
-            "anolisa --json env",
-            "anolisa --json list",
-            "anolisa --dry-run install tokenless"
+            "command -v curl",
+            "command -v bash"
           ],
           "verify": [
-            "anolisa --json adapter scan",
-            "anolisa --json status tokenless",
-            "anolisa --json doctor tokenless"
+            "~/.local/bin/anolisa --json status tokenless",
+            "~/.local/bin/tokenless --version"
           ]
         },
         {
           "method": "npm",
-          "preferred": true,
+          "preferred": false,
           "command": "npm install -g anolisa-tokenless",
           "platforms": [
             {

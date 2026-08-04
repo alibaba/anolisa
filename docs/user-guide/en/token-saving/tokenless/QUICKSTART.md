@@ -18,14 +18,17 @@ Savings vary by task. Short tasks or tasks that are mostly conversation may show
 
 ## 2. Install Tokenless
 
-Install the anolisa CLI first, then use it to install Tokenless:
+Install the anolisa CLI and Tokenless together:
 
 ```bash
-curl -fsSL https://get.agentic-os.sh | bash
-anolisa --version
-anolisa install tokenless
-tokenless --version
+curl -fsSL https://get.agentic-os.sh | bash -s -- tokenless
+~/.local/bin/anolisa --version
+~/.local/bin/tokenless --version
 ```
+
+If the anolisa CLI is already installed, run `anolisa install tokenless`
+instead. The capability argument installs Tokenless but does not modify any
+agent configuration; enable the matching adapter explicitly in the next step.
 
 ## 3. Start using Tokenless
 

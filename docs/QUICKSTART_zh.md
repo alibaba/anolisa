@@ -12,6 +12,12 @@ ANOLISA 是面向 AI Agent 工作负载的服务端操作系统层。通过统�
 curl -fsSL https://get.agentic-os.sh | bash
 ```
 
+如需同时安装 CLI 和 Tokenless，可将能力名称传给安装脚本：
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- tokenless
+```
+
 > Alinux 4 用户也可通过 `sudo yum install anolisa` 安装。
 
 验证：

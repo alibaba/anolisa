@@ -102,14 +102,17 @@ ANOLISA 正在完善面向 Agent 的执行环境：
 ANOLISA CLI 是统一的安装入口，cosh-ng、Token-less 和其他能力都可以按需启用。
 
 ```bash
+# 仅安装 CLI
 curl -fsSL https://get.agentic-os.sh | bash
 
+# 或同时安装 CLI 和 Tokenless
+curl -fsSL https://get.agentic-os.sh | bash -s -- tokenless
+
 anolisa install cosh-ng
-anolisa install tokenless
 ```
 
-运行 `cosh-ng` 进入 Agent-native shell，或让现有的任意 Agent 接上——Token-less
-会作用于工具调用，无需额外配置。
+运行 `cosh-ng` 进入 Agent-native shell。使用 Tokenless 时，先扫描已经安装的
+Agent 框架，再显式启用匹配的 Adapter。
 
 [查看快速开始 →](docs/QUICKSTART_zh.md)
 
