@@ -299,7 +299,9 @@ impl FrameworkDriver for CodexDriver {
             reason: Some(detect.reason.clone()),
             resource: None,
         });
-        conditions.push(bundle_match_condition(claim));
+        let bundle_condition = bundle_match_condition(claim);
+        let bundle_status = bundle_condition.status;
+        conditions.push(bundle_condition);
 
         // Symlink presence is a reliable filesystem check independent of
         // the CLI.
@@ -309,7 +311,8 @@ impl FrameworkDriver for CodexDriver {
         conditions.push(AdapterCondition {
             kind: AdapterConditionKind::SymlinkPresent,
             status: bool_status(symlink_ok),
-            reason: (!symlink_ok).then(|| "plugin symlink missing or retargeted".to_string()),
+            reason: (!symlink_ok)
+                .then(|| "plugin symlink missing, retargeted, or dangling".to_string()),
             resource: Some(ClaimResourceRef {
                 id: RES_SYMLINK.to_string(),
             }),
@@ -376,7 +379,14 @@ impl FrameworkDriver for CodexDriver {
             (ConditionStatus::Unknown, ConditionStatus::Unknown)
         };
 
-        let summary = summarize(claim.status, detect.detected, mkt_status, plugin_status);
+        let summary = summarize(
+            claim.status,
+            detect.detected,
+            bool_status(symlink_ok),
+            bundle_status,
+            mkt_status,
+            plugin_status,
+        );
         Ok(AdapterStatusReport {
             summary,
             conditions,
@@ -723,10 +733,13 @@ fn list_contains_token(stdout: &str, token: &str) -> bool {
         .any(|line| line.split_whitespace().any(|t| t == token))
 }
 
-/// True when `link` is a symlink resolving to `target`.
+/// True when `link` is a symlink resolving to `target` and the target
+/// still exists. A dangling link — exactly what an RPM update that moves
+/// the resource root leaves behind — must not count as present: codex
+/// cannot load plugin files through it.
 fn symlink_points_to(link: &Path, target: &Path) -> bool {
     std::fs::read_link(link)
-        .map(|dest| dest == target)
+        .map(|dest| dest == target && target.exists())
         .unwrap_or(false)
 }
 
@@ -763,11 +776,16 @@ fn bundle_match_condition(claim: &AdapterClaim) -> AdapterCondition {
     }
 }
 
-/// Roll signals into a summary. Healthy requires the framework detected and
-/// both marketplace and plugin verified present.
+/// Roll signals into a summary. Healthy requires the framework detected,
+/// the plugin symlink functional, the resource bundle verified unchanged,
+/// and both marketplace and plugin verified present — a broken symlink or
+/// a drifted/vanished bundle means codex is not actually serving this
+/// plugin, so registration alone must not report Healthy.
 fn summarize(
     claim_status: ClaimStatus,
     detected: bool,
+    symlink: ConditionStatus,
+    bundle: ConditionStatus,
     marketplace: ConditionStatus,
     plugin: ConditionStatus,
 ) -> AdapterSummary {
@@ -777,11 +795,14 @@ fn summarize(
     if !detected {
         return AdapterSummary::Degraded;
     }
-    match (marketplace, plugin) {
-        (ConditionStatus::True, ConditionStatus::True) => AdapterSummary::Healthy,
-        (ConditionStatus::False, _) | (_, ConditionStatus::False) => AdapterSummary::Degraded,
-        _ => AdapterSummary::Unknown,
+    let signals = [symlink, bundle, marketplace, plugin];
+    if signals.contains(&ConditionStatus::False) {
+        return AdapterSummary::Degraded;
     }
+    if signals.contains(&ConditionStatus::Unknown) {
+        return AdapterSummary::Unknown;
+    }
+    AdapterSummary::Healthy
 }
 
 #[cfg(test)]
@@ -860,6 +881,46 @@ mod tests {
             "anolisa-tokenless"
         ));
         assert!(!list_contains_token("", "anolisa-tokenless"));
+    }
+
+    #[test]
+    fn summarize_folds_symlink_and_bundle_signals() {
+        use ConditionStatus::{False, True, Unknown};
+        let s = |symlink, bundle, mkt, plugin| {
+            summarize(ClaimStatus::Enabled, true, symlink, bundle, mkt, plugin)
+        };
+        // Registration alone must not report Healthy: a broken symlink or
+        // a drifted bundle degrades even with both registrations intact.
+        assert_eq!(s(False, Unknown, True, True), AdapterSummary::Degraded);
+        assert_eq!(s(True, False, True, True), AdapterSummary::Degraded);
+        // Undecidable drift is Unknown, not Healthy.
+        assert_eq!(s(True, Unknown, True, True), AdapterSummary::Unknown);
+        assert_eq!(s(True, True, True, True), AdapterSummary::Healthy);
+        // CleanupFailed and framework-missing keep their priority.
+        assert_eq!(
+            summarize(ClaimStatus::CleanupFailed, true, True, True, True, True),
+            AdapterSummary::CleanupFailed
+        );
+        assert_eq!(
+            summarize(ClaimStatus::Enabled, false, True, True, True, True),
+            AdapterSummary::Degraded
+        );
+    }
+
+    #[test]
+    fn dangling_symlink_does_not_count_as_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("bundle");
+        std::fs::create_dir(&target).expect("target");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        assert!(symlink_points_to(&link, &target));
+        // An RPM update that moves the root leaves exactly this behind.
+        std::fs::remove_dir(&target).expect("remove target");
+        assert!(
+            !symlink_points_to(&link, &target),
+            "dangling symlink must not count as present"
+        );
     }
 
     #[test]

@@ -42,7 +42,7 @@ use super::driver::{
 };
 use super::registry::DriverRegistry;
 use crate::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
-use crate::domain::{Installation, LifecycleStatus};
+use crate::domain::{Installation, LifecycleStatus, NativePm, ProviderBinding};
 use crate::lock::InstallLock;
 use crate::manifest::ComponentManifest;
 use crate::state::ObjectKind;
@@ -200,6 +200,91 @@ pub struct StatusReport {
     pub entries: Vec<StatusEntry>,
 }
 
+/// Declaration state of `[adapters.backends.rpm].resource_root` for one
+/// framework entry — the single source of truth for the three-valued
+/// semantics (undeclared / declared-but-blank / usable). Every consumer
+/// matches on it, so absent and blank can never be conflated again (a
+/// blank root is a contract defect: enable rejects it and scan must not
+/// fall back to the raw `dest`).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum RpmRootDecl {
+    /// Key not declared: RPM provenance falls back to the raw `dest`.
+    Absent,
+    /// Declared but blank after trimming — fail closed everywhere.
+    Blank,
+    /// Declared with a placeholder outside the RPM vocabulary
+    /// (`{datadir}`, `{component}`) — fail closed everywhere. Any other
+    /// layout placeholder (`{bindir}`, `{libexecdir}`, …) expands
+    /// against the *consuming* manager's layout: a user-mode manager
+    /// consuming a system RPM contract would resolve it under the user
+    /// prefix, misreporting the package payload as missing or — worse —
+    /// selecting a caller-writable bundle in place of the package-owned
+    /// one.
+    Unsupported {
+        /// The declared template (trimmed).
+        template: String,
+        /// The first offending placeholder (without braces).
+        placeholder: String,
+    },
+    /// Declared with a usable template (trimmed, non-empty).
+    Declared(String),
+}
+
+impl RpmRootDecl {
+    /// Classify a raw declaration value (as read from the manifest).
+    fn from_raw(raw: Option<&str>) -> Self {
+        match raw {
+            None => Self::Absent,
+            Some(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    Self::Blank
+                } else if let Some(placeholder) = unsupported_rpm_placeholder(trimmed) {
+                    Self::Unsupported {
+                        template: trimmed.to_string(),
+                        placeholder,
+                    }
+                } else {
+                    Self::Declared(trimmed.to_string())
+                }
+            }
+        }
+    }
+
+    /// The usable template, when one is declared.
+    fn declared(&self) -> Option<&str> {
+        match self {
+            Self::Declared(root) => Some(root),
+            Self::Absent | Self::Blank | Self::Unsupported { .. } => None,
+        }
+    }
+}
+
+/// First `{placeholder}` in `template` outside the vocabulary allowed for
+/// `[adapters.backends.rpm].resource_root`. An RPM payload path is
+/// scope-independent by definition: absolute (the package-owned path) or
+/// `{datadir}`-rooted (expanded against the datadir roots of the scope
+/// that owns the contract, plus `{component}`). Every other layout
+/// placeholder expands against the consuming manager's layout — the
+/// wrong scope whenever the contract is consumed cross-scope. Token
+/// scanning mirrors [`expand_layout_placeholders`](super::expand_layout_placeholders)
+/// (unterminated braces are left for the expander to handle).
+fn unsupported_rpm_placeholder(template: &str) -> Option<String> {
+    let mut search_from = 0;
+    while let Some(rel_open) = template[search_from..].find('{') {
+        let open = search_from + rel_open;
+        let Some(rel_close) = template[open..].find('}') else {
+            break;
+        };
+        let key = &template[open + 1..open + rel_close];
+        if key != "datadir" && key != "component" {
+            return Some(key.to_string());
+        }
+        search_from = open + rel_close + 1;
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct AdapterDecl {
     component: String,
@@ -210,6 +295,14 @@ struct AdapterDecl {
     /// expansion. Used by `scan` and `enable` to resolve the
     /// contract-driven resource root.
     dest: Option<String>,
+    /// `[adapters.backends.rpm].resource_root` declaration state.
+    /// Authoritative over [`dest`](Self::dest) when the component has RPM
+    /// provenance — a unified contract keeps `dest` for raw installs
+    /// while the RPM payload lives at a package-owned path.
+    rpm_root: RpmRootDecl,
+    /// Whether the component's installed record is RPM-delegated in the
+    /// visible root that owns this declaration.
+    rpm_provenance: bool,
     /// Bundle entry filename declared in the contract, if any. Scan uses
     /// it (like enable) to tell a real bundle directory from a stale
     /// leftover skeleton.
@@ -218,6 +311,106 @@ struct AdapterDecl {
     /// component contract was resolved. `dest` expansion is scoped to
     /// only these roots.
     scoped_datadir_roots: Vec<PathBuf>,
+}
+
+impl AdapterDecl {
+    /// Contract resource-root template effective for this declaration's
+    /// install provenance: an RPM-installed component reads its bundle
+    /// from the declared RPM resource root, everything else from `dest`.
+    fn effective_root_template(&self) -> Option<&str> {
+        if self.rpm_provenance
+            && let Some(root) = self.rpm_root.declared()
+        {
+            return Some(root);
+        }
+        self.dest.as_deref()
+    }
+
+    /// The RPM backend root this provenance depends on is declared but
+    /// unusable — blank, or using a placeholder outside the RPM
+    /// vocabulary — the same contract defect enable rejects. Scan must
+    /// report the resource as unavailable rather than fall back to
+    /// `dest`.
+    fn rpm_root_defective(&self) -> bool {
+        self.rpm_provenance
+            && matches!(
+                self.rpm_root,
+                RpmRootDecl::Blank | RpmRootDecl::Unsupported { .. }
+            )
+    }
+}
+
+/// Trust decision for the receipt symlink *targets* of one
+/// `(component, framework)`: the roots targets may resolve under, plus
+/// whether the two-source condition — RPM provenance recorded in state
+/// **and** a contract-declared `[adapters.backends.rpm].resource_root`
+/// — currently grants external-root trust. This is the single decision
+/// point shared by every claim-validation site (enable prior-receipt,
+/// pre-persist, apply, disable, status) and by the anchor lifecycle, so
+/// no call site can fall out of sync with the rule. Derived from the
+/// on-disk contract and state provenance — never from the receipt under
+/// validation — so a forged receipt cannot authorize its own target.
+struct ExternalRootTrust {
+    /// Roots a receipt's symlink targets may resolve under. Derived from
+    /// the contract only — the state anchor is deliberately not a member:
+    /// roots authorize subtrees, and a state-resident value must never
+    /// authorize more than itself.
+    target_roots: Vec<PathBuf>,
+    /// Enable-time anchor from state, honoured as an *exact-equality*
+    /// symlink-target allowance (see
+    /// [`AdapterClaim::validate_with_trust`]): it keeps the receipt of a
+    /// since-moved or since-removed external root reportable and
+    /// cleanable, while a forged anchor authorizes nothing beneath it and
+    /// no write outside anolisa's own layout.
+    anchor: Option<PathBuf>,
+    /// The two-source condition held. The enable-time anchor is
+    /// (re)written on enable exactly when this is true: a forged state
+    /// entry alone must not become durable.
+    anchor_eligible: bool,
+}
+
+impl ExternalRootTrust {
+    /// The anchor as an exact-target allowance slice for
+    /// [`AdapterClaim::validate_with_trust`].
+    fn exact_targets(&self) -> &[PathBuf] {
+        self.anchor.as_slice()
+    }
+
+    /// Persist or clear the enable-time anchor under the same
+    /// eligibility that governs anchor consumption — by construction the
+    /// write condition and the read condition can never diverge. The
+    /// anchor keeps a prior receipt validatable after an RPM update
+    /// moves the contract root, so re-enable can migrate it instead of
+    /// wedging on `OwnedPath`.
+    ///
+    /// An anchor is worth remembering only when the just-validated claim
+    /// actually depends on external symlink-target trust
+    /// ([`AdapterClaim::requires_external_symlink_trust`]): a receipt
+    /// whose targets all re-validate from the static boundary on every
+    /// run — or one with no symlink resources at all (every driver but
+    /// Codex today) — never reads its anchor back, and a redundant
+    /// anchor would bump the state schema to v6 for nothing, locking
+    /// released 0.2.16 CLIs out of all state commands on a path that
+    /// never needed trust migration.
+    fn sync_anchor(
+        &self,
+        state: &mut StateStore,
+        layout: &FsLayout,
+        claim: &AdapterClaim,
+        trusted_owned_roots: &[PathBuf],
+    ) {
+        if self.anchor_eligible
+            && claim.requires_external_symlink_trust(layout, trusted_owned_roots)
+        {
+            state.upsert_adapter_trust_root(
+                &claim.component,
+                &claim.framework,
+                claim.resource_root.clone(),
+            );
+        } else {
+            state.remove_adapter_trust_root(&claim.component, &claim.framework);
+        }
+    }
 }
 
 /// A state root paired with the datadir roots it may use for component
@@ -411,13 +604,20 @@ impl AdapterManager {
             if let Some(entry) = entries.get_mut(&key) {
                 entry.declared = true;
                 entry.adapter_type = declaration.adapter_type.clone();
-                // When the contract declares a custom dest, the
-                // contract-resolved path is authoritative — override the
-                // convention-discovered root (which may point elsewhere).
-                // If the contract dest directory does not exist, show
-                // resource_root = None (declared yes / resource absent).
-                if declaration.dest.is_some() {
-                    entry.resource_root = declaration.dest.as_deref().and_then(|dest| {
+                // When the contract declares a custom resource root for
+                // this provenance (raw `dest`, or the RPM backend root for
+                // an RPM-installed component), the contract-resolved path
+                // is authoritative — override the convention-discovered
+                // root (which may point elsewhere). If the contract
+                // directory does not exist, show resource_root = None
+                // (declared yes / resource absent).
+                if declaration.rpm_root_defective() {
+                    // Blank RPM root: enable will reject this contract, so
+                    // a stale raw `dest` bundle must not be reported as a
+                    // usable resource (declared yes / resource absent).
+                    entry.resource_root = None;
+                } else if declaration.effective_root_template().is_some() {
+                    entry.resource_root = declaration.effective_root_template().and_then(|dest| {
                         self.resolve_declared_scan_root(
                             &declaration.component,
                             &declaration.framework,
@@ -443,17 +643,21 @@ impl AdapterManager {
                 continue;
             }
 
-            // Not found in directory discovery — resolve from contract
-            // dest, if present.
-            let resource_root = declaration.dest.as_deref().and_then(|dest| {
-                self.resolve_declared_scan_root(
-                    &declaration.component,
-                    &declaration.framework,
-                    dest,
-                    declaration.bundle_entry.as_deref(),
-                    &declaration.scoped_datadir_roots,
-                )
-            });
+            // Not found in directory discovery — resolve from the
+            // provenance-effective contract root, if declared.
+            let resource_root = if declaration.rpm_root_defective() {
+                None
+            } else {
+                declaration.effective_root_template().and_then(|dest| {
+                    self.resolve_declared_scan_root(
+                        &declaration.component,
+                        &declaration.framework,
+                        dest,
+                        declaration.bundle_entry.as_deref(),
+                        &declaration.scoped_datadir_roots,
+                    )
+                })
+            };
 
             let (driver_available, framework_detected) =
                 self.driver_scan_facts(&declaration.framework);
@@ -559,7 +763,7 @@ impl AdapterManager {
         let _lock = InstallLock::acquire(&self.layout.lock_file)?;
         let mut state = self.load_state()?;
 
-        let (manifest, scoped_datadir_roots, contract_datadir_root) =
+        let (manifest, scoped_datadir_roots, contract_datadir_root, rpm_provenance) =
             self.load_visible_component_manifest(component, &state)?;
         let framework = self.resolve_framework(component, framework, &manifest)?;
 
@@ -650,7 +854,20 @@ impl AdapterManager {
             &manifest,
             &scoped_datadir_roots,
             contract_datadir_root.as_deref(),
+            rpm_provenance,
         )?;
+        // Receipt symlink targets must validate against roots derived from
+        // the on-disk contract and state provenance — never from the receipt
+        // itself. See [`ExternalRootTrust`] for the rule; every validation
+        // site below and the anchor lifecycle share this one decision.
+        let trust = self.external_root_trust(
+            component,
+            &manifest,
+            &framework,
+            &scoped_datadir_roots,
+            rpm_provenance,
+            &state,
+        );
         let skills = resolve_skill_sources(
             skill_specs,
             &self.layout,
@@ -761,22 +978,28 @@ impl AdapterManager {
         if let Some(prior) = state.find_adapter_claim(component, &framework).cloned() {
             // A forged prior receipt must not gain authority merely because a
             // driver preserves facts from it during re-enable.
-            prior.validate_with_owned_roots(
+            prior.validate_with_trust(
                 &self.layout,
                 &claim_allowed_roots,
-                &self.all_datadir_roots,
+                &trust.target_roots,
+                trust.exact_targets(),
             )?;
             driver.preserve_reenable_facts(&prior, &mut claim)?;
         }
         // Defense in depth: the driver must not emit a claim that points
         // outside its own declared roots. Reject before persisting.
-        claim.validate_with_owned_roots(
+        claim.validate_with_trust(
             &self.layout,
             &claim_allowed_roots,
-            &self.all_datadir_roots,
+            &trust.target_roots,
+            trust.exact_targets(),
         )?;
 
         state.upsert_adapter_claim(claim.clone());
+        // Anchor lifecycle shares the trust decision above: it is recorded
+        // exactly when the validated claim depends on an externally-targeted
+        // symlink, anything else clears a stale anchor.
+        trust.sync_anchor(&mut state, &self.layout, &claim, &self.all_datadir_roots);
         state.save(&self.state_path)?;
         let apply_result = {
             let mut progress = ManagerEnableProgress {
@@ -784,7 +1007,8 @@ impl AdapterManager {
                 state_path: &self.state_path,
                 layout: &self.layout,
                 allowed_external_roots: &claim_allowed_roots,
-                extra_owned_roots: &self.all_datadir_roots,
+                extra_owned_roots: &trust.target_roots,
+                exact_symlink_targets: trust.exact_targets(),
             };
             driver.apply_enable(&mut claim, &prepared, &ctx, &mut progress)
         };
@@ -970,10 +1194,12 @@ impl AdapterManager {
         };
 
         // Re-validate the receipt before acting on it (forged-state guard).
-        claim.validate_with_owned_roots(
+        let trust = self.external_root_trust_from_state(component, &framework, &state);
+        claim.validate_with_trust(
             &self.layout,
             &driver.allowed_external_roots(&ctx),
-            &self.all_datadir_roots,
+            &trust.target_roots,
+            trust.exact_targets(),
         )?;
 
         if dry_run {
@@ -995,6 +1221,8 @@ impl AdapterManager {
         let disable_notices = post_disable_notices(&claim);
         if claim_removed {
             state.remove_adapter_claim(component, &framework);
+            // The anchor exists to validate this receipt; drop it with it.
+            state.remove_adapter_trust_root(component, &framework);
             self.log_operation(&label, component, LogStatus::Ok, "adapter disabled", None);
         } else {
             // Keep the receipt so cleanup can be retried; mark it failed.
@@ -1134,10 +1362,12 @@ impl AdapterManager {
                 ops: &ops,
             };
 
-            claim.validate_with_owned_roots(
+            let trust = self.external_root_trust_from_state(&claim.component, &framework, &state);
+            claim.validate_with_trust(
                 &self.layout,
                 &driver.allowed_external_roots(&ctx),
-                &self.all_datadir_roots,
+                &trust.target_roots,
+                trust.exact_targets(),
             )?;
             let report = with_source_condition(driver.status(claim, &ctx)?, &source);
             entries.push(StatusEntry {
@@ -1180,8 +1410,8 @@ impl AdapterManager {
         framework: &str,
         current_state: &StateStore,
     ) -> SourceProbe {
-        let vr = match self.find_component_visible_root(component, current_state) {
-            Ok(Some(vr)) => vr,
+        let (vr, rpm) = match self.find_component_visible_root(component, current_state) {
+            Ok(Some((vr, rpm_provenance))) => (vr, rpm_provenance),
             Ok(None) => {
                 return source_missing(format!(
                     "no visible installed component '{component}' supplies this adapter"
@@ -1233,6 +1463,7 @@ impl AdapterManager {
             &manifest,
             &vr.contract_datadir_roots,
             contract_datadir_root.as_deref(),
+            rpm,
         ) {
             // resolve prefers a root with a valid bundle, so a winner that
             // still fails the bundle check means every candidate is a stale
@@ -1310,8 +1541,8 @@ impl AdapterManager {
         &self,
         component: &str,
         current_state: &StateStore,
-    ) -> Result<(ComponentManifest, Vec<PathBuf>, Option<PathBuf>), AdapterError> {
-        let vr = self
+    ) -> Result<(ComponentManifest, Vec<PathBuf>, Option<PathBuf>, bool), AdapterError> {
+        let (vr, rpm_provenance) = self
             .find_component_visible_root(component, current_state)?
             .ok_or_else(|| AdapterError::ComponentNotInstalled {
                 component: component.to_string(),
@@ -1341,6 +1572,7 @@ impl AdapterManager {
             manifest,
             vr.contract_datadir_roots.clone(),
             contract_datadir_root,
+            rpm_provenance,
         ))
     }
 
@@ -1348,25 +1580,29 @@ impl AdapterManager {
     /// an adapter-visible status ([`LifecycleStatus::Installed`]).
     /// Returns the full
     /// [`VisibleRoot`] so callers can scope contract resolution to the
-    /// paired datadir roots.
+    /// paired datadir roots, along with whether the record has RPM
+    /// provenance (delegated to the native RPM manager) — resource-root
+    /// resolution selects the backend-specific contract root from it.
     fn find_component_visible_root(
         &self,
         component: &str,
         current_state: &StateStore,
-    ) -> Result<Option<&VisibleRoot>, AdapterError> {
+    ) -> Result<Option<(&VisibleRoot, bool)>, AdapterError> {
         for vr in &self.visible_roots {
-            let visible = if vr.state_dir == self.layout.state_dir {
+            let found = if vr.state_dir == self.layout.state_dir {
                 current_state
                     .find(ObjectKind::Component, component)
-                    .is_some_and(is_adapter_visible)
+                    .filter(|i| is_adapter_visible(i))
+                    .map(rpm_provenance)
             } else {
                 let state_path = vr.state_dir.join("installed.toml");
                 Self::load_state_at(&state_path)?
                     .find(ObjectKind::Component, component)
-                    .is_some_and(is_adapter_visible)
+                    .filter(|i| is_adapter_visible(i))
+                    .map(rpm_provenance)
             };
-            if visible {
-                return Ok(Some(vr));
+            if let Some(rpm) = found {
+                return Ok(Some((vr, rpm)));
             }
         }
         Ok(None)
@@ -1386,8 +1622,9 @@ impl AdapterManager {
         current_state: &StateStore,
     ) -> (Vec<AdapterDecl>, Vec<String>) {
         let mut declarations = BTreeSet::new();
-        // Map component name → the VisibleRoot where it was first seen.
-        let mut component_vr: BTreeMap<String, &VisibleRoot> = BTreeMap::new();
+        // Map component name → the VisibleRoot where it was first seen,
+        // plus the RPM provenance of its installed record there.
+        let mut component_vr: BTreeMap<String, (&VisibleRoot, bool)> = BTreeMap::new();
         let mut warnings = Vec::new();
 
         for vr in &self.visible_roots {
@@ -1413,11 +1650,13 @@ impl AdapterManager {
                 .filter(|object| object.kind == ObjectKind::Component)
                 .filter(|object| is_adapter_visible(object))
             {
-                component_vr.entry(object.name.clone()).or_insert(vr);
+                component_vr
+                    .entry(object.name.clone())
+                    .or_insert((vr, rpm_provenance(object)));
             }
         }
 
-        for (component, vr) in &component_vr {
+        for (component, (vr, rpm)) in &component_vr {
             let resolved = match super::contract::resolve_component_contract_with_source(
                 component,
                 std::slice::from_ref(&vr.state_dir),
@@ -1483,6 +1722,14 @@ impl AdapterManager {
                             .map(str::trim)
                             .filter(|d| !d.is_empty())
                             .map(str::to_string),
+                        rpm_root: RpmRootDecl::from_raw(
+                            adapter
+                                .backends
+                                .rpm
+                                .as_ref()
+                                .and_then(|rpm| rpm.resource_root.as_deref()),
+                        ),
+                        rpm_provenance: *rpm,
                         bundle_entry: declared_bundle_entry(&manifest, framework),
                         scoped_datadir_roots: scoped_roots.clone(),
                     });
@@ -1497,7 +1744,11 @@ impl AdapterManager {
     /// specific datadir root. The template may use layout placeholders
     /// (`{datadir}`, `{etcdir}`, …) and the extra variable `{component}`.
     ///
-    /// Returns `None` when the template is absent or empty.
+    /// The expansion must be absolute: layout placeholders always expand
+    /// to absolute directories, so a relative result means the template
+    /// was a bare relative path — probing it would resolve against the
+    /// process CWD, letting whoever controls the working directory decide
+    /// which bundle is read. Rejected before any filesystem access.
     fn expand_dest_template(
         &self,
         dest_template: &str,
@@ -1506,7 +1757,110 @@ impl AdapterManager {
     ) -> Result<PathBuf, AdapterError> {
         let mut layout = self.layout.clone();
         layout.datadir = datadir.to_path_buf();
-        super::expand_layout_placeholders(dest_template, &layout, &[("component", component)])
+        let path =
+            super::expand_layout_placeholders(dest_template, &layout, &[("component", component)])?;
+        if !path.is_absolute() {
+            return Err(AdapterError::RelativeTemplateExpansion {
+                template: dest_template.to_string(),
+                path,
+            });
+        }
+        Ok(path)
+    }
+
+    /// Build the [`ExternalRootTrust`] decision from an already-loaded
+    /// contract. The trusted set is the shared datadir roots, extended —
+    /// only under the two-source condition — with the contract's expanded
+    /// RPM root and the receipt's enable-time anchor.
+    fn external_root_trust(
+        &self,
+        component: &str,
+        manifest: &ComponentManifest,
+        framework: &str,
+        scoped_datadir_roots: &[PathBuf],
+        rpm_provenance: bool,
+        state: &StateStore,
+    ) -> ExternalRootTrust {
+        let mut target_roots = self.all_datadir_roots.clone();
+        // The anchor is read regardless of the two-source outcome: as an
+        // exact-equality allowance it is what keeps a stale external-root
+        // receipt reportable and cleanable after the RPM (or the whole
+        // contract) went away — while `anchor_eligible` below still gates
+        // whether enable may persist one.
+        let anchor = state
+            .find_adapter_trust_root(component, framework)
+            .map(Path::to_path_buf);
+        let template = match (rpm_provenance, rpm_root_decl(manifest, framework)) {
+            (true, RpmRootDecl::Declared(template)) => template,
+            // No RPM provenance, or no usable declared root (absent,
+            // blank, or an unsupported placeholder): validation stays
+            // exactly as strict as before the unified contract, and
+            // enable will clear any stale anchor.
+            _ => {
+                return ExternalRootTrust {
+                    target_roots,
+                    anchor,
+                    anchor_eligible: false,
+                };
+            }
+        };
+        // `{datadir}` templates expand under already-trusted roots; absolute
+        // RPM roots (the normal case, e.g. /opt/…) expand identically for
+        // every datadir and dedupe to one extra entry.
+        for datadir in scoped_datadir_roots
+            .iter()
+            .chain(std::iter::once(&self.layout.datadir))
+        {
+            if let Ok(path) = self.expand_dest_template(&template, component, datadir)
+                && !target_roots.contains(&path)
+            {
+                target_roots.push(path);
+            }
+        }
+        ExternalRootTrust {
+            target_roots,
+            anchor,
+            anchor_eligible: true,
+        }
+    }
+
+    /// [`Self::external_root_trust`] for receipt-only flows
+    /// (disable/status) that have not already loaded the component
+    /// manifest. When the contract is no longer visible (e.g. the
+    /// component was uninstalled before disable), the roots fall back to
+    /// the shared datadirs and only the exact-equality anchor allowance
+    /// survives — enough to report and clean up the stale receipt, while
+    /// a state file alone still cannot authorize any subtree or any
+    /// write outside anolisa's layout.
+    fn external_root_trust_from_state(
+        &self,
+        component: &str,
+        framework: &str,
+        state: &StateStore,
+    ) -> ExternalRootTrust {
+        match self.load_visible_component_manifest(component, state) {
+            Ok((manifest, scoped_datadir_roots, _contract_datadir_root, rpm_provenance)) => self
+                .external_root_trust(
+                    component,
+                    &manifest,
+                    framework,
+                    &scoped_datadir_roots,
+                    rpm_provenance,
+                    state,
+                ),
+            Err(_) => ExternalRootTrust {
+                target_roots: self.all_datadir_roots.clone(),
+                // The contract is gone, but the receipt may still point at
+                // an anchored external root; surfacing the anchor as an
+                // exact allowance is what lets status report it and
+                // disable clean it up instead of wedging on
+                // `ClaimValidation` forever.
+                anchor: state
+                    .find_adapter_trust_root(component, framework)
+                    .map(Path::to_path_buf),
+                anchor_eligible: false,
+            },
+        }
     }
 
     /// Resolve the adapter resource root for a component/framework using
@@ -1531,7 +1885,16 @@ impl AdapterManager {
     /// - When no expanded path exists, returns
     ///   [`AdapterError::ContractResourceRootNotFound`].
     ///
-    /// Convention fallback (`dest` absent):
+    /// Backend-aware selection: when `rpm_provenance` is true and the
+    /// contract declares `[adapters.backends.rpm].resource_root`, that
+    /// template replaces `dest` — an RPM payload lives at the
+    /// package-owned path (possibly outside every datadir root, e.g.
+    /// `/opt/…`), which the raw `dest` cannot describe. The declared RPM
+    /// root is as authoritative as an explicit `dest`: a missing directory
+    /// is [`AdapterError::ContractResourceRootNotFound`], never a silent
+    /// fallback to the raw dest or convention discovery.
+    ///
+    /// Convention fallback (no effective template):
     /// - Searches `{datadir}/adapters/<component>/<framework>/` across
     ///   **all** datadir roots via [`Self::discover_resource_root`].
     ///   The `effective_datadir` is `self.layout.datadir` (the primary
@@ -1543,8 +1906,51 @@ impl AdapterManager {
         manifest: &ComponentManifest,
         scoped_datadir_roots: &[PathBuf],
         contract_datadir_root: Option<&Path>,
+        rpm_provenance: bool,
     ) -> Result<(PathBuf, PathBuf), AdapterError> {
-        let dest_template = declared_dest(manifest, framework);
+        let dest_template = if rpm_provenance {
+            match rpm_root_decl(manifest, framework) {
+                // A declared-but-blank RPM root is a contract defect, not
+                // an undeclared backend: silently selecting the raw `dest`
+                // would point enable at a bundle the RPM never laid down.
+                // Fail closed (mirrors the empty-`render` rejection in raw
+                // install).
+                RpmRootDecl::Blank => {
+                    return Err(AdapterError::InvalidAdapterInput {
+                        component: component.to_string(),
+                        framework: framework.to_string(),
+                        reason: "[adapters.backends.rpm].resource_root is declared but empty; \
+                                 declare the RPM bundle path or remove the key"
+                            .to_string(),
+                    });
+                }
+                // A placeholder outside the RPM vocabulary would expand
+                // against the consuming manager's layout — the wrong scope
+                // whenever the contract is consumed cross-scope (e.g. a
+                // user-mode manager consuming a system RPM contract). Fail
+                // closed instead of probing a wrong-scope path.
+                RpmRootDecl::Unsupported {
+                    template,
+                    placeholder,
+                } => {
+                    return Err(AdapterError::InvalidAdapterInput {
+                        component: component.to_string(),
+                        framework: framework.to_string(),
+                        reason: format!(
+                            "[adapters.backends.rpm].resource_root \"{template}\" uses \
+                             placeholder '{{{placeholder}}}'; an RPM root must be an absolute \
+                             path or a {{datadir}}-rooted template (plus {{component}}) — \
+                             other layout placeholders would resolve against the consuming \
+                             scope's layout, not the contract's"
+                        ),
+                    });
+                }
+                RpmRootDecl::Declared(template) => Some(template),
+                RpmRootDecl::Absent => declared_dest(manifest, framework),
+            }
+        } else {
+            declared_dest(manifest, framework)
+        };
         let declared_entry = declared_bundle_entry(manifest, framework);
         match dest_template {
             Some(template) => {
@@ -1603,14 +2009,12 @@ impl AdapterManager {
                 let path = match last_expanded {
                     Some((p, _)) => p,
                     None => {
-                        // All expansions failed (unknown placeholder etc.)
-                        // — try expanding with the primary layout for the
-                        // error message.
-                        super::expand_layout_placeholders(
-                            &template,
-                            &self.layout,
-                            &[("component", component)],
-                        )?
+                        // All expansions failed (unknown placeholder,
+                        // relative result, …) — re-expand against the
+                        // primary datadir so the caller sees the actual
+                        // rejection instead of a generic not-found.
+                        let primary = self.layout.datadir.clone();
+                        self.expand_dest_template(&template, component, &primary)?
                     }
                 };
                 Err(AdapterError::ContractResourceRootNotFound {
@@ -1858,14 +2262,18 @@ struct ManagerEnableProgress<'a> {
     layout: &'a FsLayout,
     allowed_external_roots: &'a [PathBuf],
     extra_owned_roots: &'a [PathBuf],
+    /// Exact-equality symlink-target allowances (the enable-time anchor);
+    /// see [`AdapterClaim::validate_with_trust`].
+    exact_symlink_targets: &'a [PathBuf],
 }
 
 impl EnableProgress for ManagerEnableProgress<'_> {
     fn persist_claim(&mut self, claim: &AdapterClaim) -> Result<(), AdapterError> {
-        claim.validate_with_owned_roots(
+        claim.validate_with_trust(
             self.layout,
             self.allowed_external_roots,
             self.extra_owned_roots,
+            self.exact_symlink_targets,
         )?;
         self.state.upsert_adapter_claim(claim.clone());
         self.state.save(self.state_path)?;
@@ -2539,6 +2947,20 @@ fn declared_dest(manifest: &ComponentManifest, framework: &str) -> Option<String
         .map(str::to_string)
 }
 
+/// Classify the `[adapters.backends.rpm].resource_root` declaration of
+/// the first `[[adapters]]` entry whose `framework` matches. See
+/// [`RpmRootDecl`] for the three-valued semantics.
+fn rpm_root_decl(manifest: &ComponentManifest, framework: &str) -> RpmRootDecl {
+    RpmRootDecl::from_raw(
+        manifest
+            .adapters
+            .iter()
+            .find(|adapter| adapter.framework.as_deref().map(str::trim) == Some(framework))
+            .and_then(|adapter| adapter.backends.rpm.as_ref())
+            .and_then(|rpm| rpm.resource_root.as_deref()),
+    )
+}
+
 /// Extract the `adapter_type` from the first `[[adapters]]` entry whose
 /// `framework` matches. Returns `None` when the manifest omits the field
 /// (which the caller treats as defaulting to `"plugin"`).
@@ -2628,6 +3050,20 @@ fn validate_adapter_type_for_framework(
 /// Both fully-installed and adopted components should be adapter-visible.
 fn is_adapter_visible(installation: &Installation) -> bool {
     installation.status == LifecycleStatus::Installed
+}
+
+/// Whether an installed record is delegated to the native RPM manager
+/// (managed, adopted, or observed alike): its payload was placed by the
+/// RPM transaction, so adapter resource-root resolution must prefer the
+/// contract's `[adapters.backends.rpm].resource_root` over the raw `dest`.
+fn rpm_provenance(installation: &Installation) -> bool {
+    matches!(
+        installation.binding,
+        ProviderBinding::Delegated {
+            pm: NativePm::Rpm,
+            ..
+        }
+    )
 }
 
 /// Return the datadir root that supplied a resolved component contract.
@@ -4167,7 +4603,7 @@ entry = "cosh-extension.json"
         manager.all_datadir_roots = vec![first_datadir, second_datadir];
 
         let state = load_written_state(&state_dir.join("installed.toml"));
-        let (manifest, scoped_roots, contract_datadir_root) = manager
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
             .load_visible_component_manifest("tokenless", &state)
             .expect("load manifest");
         let (resolved, _) = manager
@@ -4177,6 +4613,7 @@ entry = "cosh-extension.json"
                 &manifest,
                 &scoped_roots,
                 contract_datadir_root.as_deref(),
+                rpm_provenance,
             )
             .expect("resolve");
         assert_eq!(
@@ -4240,7 +4677,7 @@ entry = ".qoder-plugin/plugin.json"
         manager.all_datadir_roots = vec![first_datadir, second_datadir];
 
         let state = load_written_state(&state_dir.join("installed.toml"));
-        let (manifest, scoped_roots, contract_datadir_root) = manager
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
             .load_visible_component_manifest("tokenless", &state)
             .expect("load manifest");
         let (resolved, _) = manager
@@ -4250,6 +4687,7 @@ entry = ".qoder-plugin/plugin.json"
                 &manifest,
                 &scoped_roots,
                 contract_datadir_root.as_deref(),
+                rpm_provenance,
             )
             .expect("resolve");
         assert_eq!(
@@ -4593,7 +5031,7 @@ entry = "custom-entry.json"
 
         // resolve_resource_root (used by enable) must return the custom path.
         let state = load_written_state(&state_dir.join("installed.toml"));
-        let (manifest, scoped_roots, contract_datadir_root) = manager
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
         let (resolved, _effective_datadir) = manager
@@ -4603,11 +5041,498 @@ entry = "custom-entry.json"
                 &manifest,
                 &scoped_roots,
                 contract_datadir_root.as_deref(),
+                rpm_provenance,
             )
             .expect("resolve");
         assert_eq!(
             resolved, custom_root,
             "enable resource root must be the contract dest"
+        );
+    }
+
+    /// Contract TOML with a raw `dest` plus an RPM backend resource root.
+    fn contract_toml_with_rpm_root(name: &str, rpm_root: &str) -> String {
+        format!(
+            r#"
+[component]
+name = "{name}"
+version = "0.1.0"
+layer = "runtime"
+
+[[adapters]]
+framework = "openclaw"
+adapter_type = "plugin"
+plugin_id = "{name}"
+source = "adapters/openclaw"
+dest = "{{datadir}}/adapters/{{component}}/openclaw/"
+
+[adapters.backends.rpm]
+resource_root = "{rpm_root}"
+"#
+        )
+    }
+
+    /// Manager over one visible root, mirroring the scan/enable fixtures.
+    fn manager_for(
+        tmp: &std::path::Path,
+        state_dir: &std::path::Path,
+        datadir: &std::path::Path,
+    ) -> AdapterManager {
+        let layout = FsLayout::system(Some(tmp.to_path_buf()));
+        let mut manager = AdapterManager::new(layout, Some(tmp.to_path_buf()), "test".into());
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir: state_dir.to_path_buf(),
+            contract_datadir_roots: vec![datadir.to_path_buf()],
+        }];
+        manager.all_datadir_roots = vec![datadir.to_path_buf()];
+        manager
+    }
+
+    /// An RPM-installed component reads its bundle from the contract's
+    /// `[adapters.backends.rpm].resource_root`, not the raw `dest`.
+    #[test]
+    fn rpm_component_uses_declared_rpm_resource_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let datadir = tmp.path().join("data");
+
+        // Adopted ⇒ RPM provenance in the migrated domain record.
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
+
+        let rpm_root = tmp.path().join("opt/agent-sec/openclaw-plugin");
+        write_contract_with_content(
+            &datadir,
+            "sec-core",
+            &contract_toml_with_rpm_root("sec-core", &rpm_root.to_string_lossy()),
+        );
+        // Bundle exists only at the RPM-provided path — the raw dest was
+        // never laid down because the payload came from the RPM.
+        std::fs::create_dir_all(&rpm_root).expect("mkdir rpm root");
+        std::fs::write(rpm_root.join("plugin.json"), b"{}").expect("write");
+
+        let manager = manager_for(tmp.path(), &state_dir, &datadir);
+
+        // scan must surface the RPM root.
+        let report = manager.scan().expect("scan");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "sec-core" && e.framework == "openclaw")
+            .expect("sec-core/openclaw should be in scan");
+        assert!(entry.declared);
+        assert_eq!(
+            entry.resource_root.as_ref(),
+            Some(&rpm_root),
+            "scan must select the RPM backend resource root"
+        );
+
+        // resolve_resource_root (used by enable) must return the RPM root.
+        let state = load_written_state(&state_dir.join("installed.toml"));
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
+            .load_visible_component_manifest("sec-core", &state)
+            .expect("load manifest");
+        assert!(rpm_provenance, "adopted RPM record must carry provenance");
+        let (resolved, _effective_datadir) = manager
+            .resolve_resource_root(
+                "sec-core",
+                "openclaw",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+                rpm_provenance,
+            )
+            .expect("resolve");
+        assert_eq!(
+            resolved, rpm_root,
+            "enable resource root must be the RPM backend root"
+        );
+    }
+
+    /// A declared RPM root that does not exist is an error — never a
+    /// silent fallback to the raw dest, even when that directory exists.
+    #[test]
+    fn rpm_component_missing_rpm_root_errors_without_dest_fallback() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let datadir = tmp.path().join("data");
+
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
+
+        let rpm_root = tmp.path().join("opt/agent-sec/openclaw-plugin");
+        write_contract_with_content(
+            &datadir,
+            "sec-core",
+            &contract_toml_with_rpm_root("sec-core", &rpm_root.to_string_lossy()),
+        );
+        // Only the raw dest holds a bundle — e.g. a stale leftover from an
+        // earlier raw install. It must not shadow the missing RPM payload.
+        let dest_root = datadir.join("adapters/sec-core/openclaw");
+        std::fs::create_dir_all(&dest_root).expect("mkdir dest");
+        std::fs::write(dest_root.join("plugin.json"), b"{}").expect("write");
+
+        let manager = manager_for(tmp.path(), &state_dir, &datadir);
+
+        let report = manager.scan().expect("scan");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "sec-core" && e.framework == "openclaw")
+            .expect("sec-core/openclaw should be in scan");
+        assert!(entry.declared);
+        assert!(
+            entry.resource_root.is_none(),
+            "scan must not fall back to the raw dest for an RPM install"
+        );
+
+        let state = load_written_state(&state_dir.join("installed.toml"));
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
+            .load_visible_component_manifest("sec-core", &state)
+            .expect("load manifest");
+        let err = manager
+            .resolve_resource_root(
+                "sec-core",
+                "openclaw",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+                rpm_provenance,
+            )
+            .expect_err("missing RPM root must fail, not fall back");
+        match &err {
+            AdapterError::ContractResourceRootNotFound { path, .. } => {
+                assert_eq!(path, &rpm_root, "error must point at the missing RPM root");
+            }
+            other => panic!("expected ContractResourceRootNotFound, got: {other}"),
+        }
+    }
+
+    /// Blank RPM root in scan: the declaration must surface as declared
+    /// with no usable resource, even when a stale raw `dest` bundle still
+    /// exists — scan must agree with the enable-time rejection instead of
+    /// advertising a root enable will refuse.
+    #[test]
+    fn scan_blank_rpm_root_hides_stale_raw_dest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let datadir = tmp.path().join("data");
+
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
+        write_contract_with_content(
+            &datadir,
+            "sec-core",
+            &contract_toml_with_rpm_root("sec-core", "   "),
+        );
+        // Stale raw bundle at the dest — must not be reported as usable.
+        let dest_root = datadir.join("adapters/sec-core/openclaw");
+        std::fs::create_dir_all(&dest_root).expect("mkdir dest");
+        std::fs::write(dest_root.join("plugin.json"), b"{}").expect("write");
+
+        let manager = manager_for(tmp.path(), &state_dir, &datadir);
+        let report = manager.scan().expect("scan");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "sec-core" && e.framework == "openclaw")
+            .expect("sec-core/openclaw should be in scan");
+        assert!(entry.declared, "declaration must stay visible");
+        assert!(
+            entry.resource_root.is_none(),
+            "blank RPM root must not fall back to the stale raw dest, got {:?}",
+            entry.resource_root
+        );
+    }
+
+    /// A declared-but-blank RPM root is a contract defect: resolution must
+    /// fail closed instead of silently selecting the raw dest.
+    #[test]
+    fn rpm_component_blank_rpm_root_rejected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let datadir = tmp.path().join("data");
+
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
+        write_contract_with_content(
+            &datadir,
+            "sec-core",
+            &contract_toml_with_rpm_root("sec-core", "  "),
+        );
+        // A valid bundle at the raw dest must NOT rescue the blank root.
+        let dest_root = datadir.join("adapters/sec-core/openclaw");
+        std::fs::create_dir_all(&dest_root).expect("mkdir dest");
+        std::fs::write(dest_root.join("plugin.json"), b"{}").expect("write");
+
+        let manager = manager_for(tmp.path(), &state_dir, &datadir);
+        let state = load_written_state(&state_dir.join("installed.toml"));
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
+            .load_visible_component_manifest("sec-core", &state)
+            .expect("load manifest");
+        let err = manager
+            .resolve_resource_root(
+                "sec-core",
+                "openclaw",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+                rpm_provenance,
+            )
+            .expect_err("blank rpm root must fail, not fall back to dest");
+        match &err {
+            AdapterError::InvalidAdapterInput { reason, .. } => {
+                assert!(
+                    reason.contains("resource_root") && reason.contains("empty"),
+                    "reason must name the defect: {reason}"
+                );
+            }
+            other => panic!("expected InvalidAdapterInput, got: {other}"),
+        }
+    }
+
+    /// `[adapters.backends.rpm].resource_root` vocabulary: absolute paths
+    /// and `{datadir}`/`{component}` templates are usable; any other
+    /// placeholder classifies as `Unsupported` — it would expand against
+    /// the consuming scope's layout, not the contract's.
+    #[test]
+    fn rpm_root_decl_rejects_non_datadir_placeholders() {
+        assert_eq!(
+            RpmRootDecl::from_raw(Some("/opt/agent-sec/openclaw-plugin/")),
+            RpmRootDecl::Declared("/opt/agent-sec/openclaw-plugin/".to_string())
+        );
+        assert_eq!(
+            RpmRootDecl::from_raw(Some("{datadir}/adapters/{component}/codex/")),
+            RpmRootDecl::Declared("{datadir}/adapters/{component}/codex/".to_string())
+        );
+        match RpmRootDecl::from_raw(Some("{libexecdir}/plugin")) {
+            RpmRootDecl::Unsupported { placeholder, .. } => assert_eq!(placeholder, "libexecdir"),
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        // The alien placeholder wins even next to an allowed one.
+        match RpmRootDecl::from_raw(Some("{datadir}/{bindir}/x")) {
+            RpmRootDecl::Unsupported { placeholder, .. } => assert_eq!(placeholder, "bindir"),
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    /// A non-`{datadir}` layout placeholder in the RPM root must fail
+    /// closed, never expand against the *consuming* manager's layout:
+    /// before this rule, `{libexecdir}/plugin` consumed cross-scope (e.g.
+    /// a user-mode manager reading a system RPM contract) resolved under
+    /// the consumer's prefix — misreporting the RPM payload as missing or
+    /// selecting a caller-writable bundle. A valid bundle planted at
+    /// exactly that wrong-scope path must not be selected.
+    #[test]
+    fn rpm_component_non_datadir_placeholder_rejected_not_wrong_scope() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let datadir = tmp.path().join("data");
+
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
+        write_contract_with_content(
+            &datadir,
+            "sec-core",
+            &contract_toml_with_rpm_root("sec-core", "{libexecdir}/plugin"),
+        );
+        // Bundle at the consuming layout's libexecdir — where the old
+        // expansion would have landed. It must stay unreachable.
+        let manager = manager_for(tmp.path(), &state_dir, &datadir);
+        let wrong_scope = manager.layout.libexec_dir.join("plugin");
+        std::fs::create_dir_all(&wrong_scope).expect("mkdir wrong-scope bundle");
+        std::fs::write(wrong_scope.join("plugin.json"), b"{}").expect("write");
+
+        // scan: declared, but no usable resource.
+        let report = manager.scan().expect("scan");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "sec-core" && e.framework == "openclaw")
+            .expect("sec-core/openclaw should be in scan");
+        assert!(entry.declared, "declaration must stay visible");
+        assert!(
+            entry.resource_root.is_none(),
+            "an unsupported placeholder must not resolve, got {:?}",
+            entry.resource_root
+        );
+
+        // enable-time resolution: hard error naming the placeholder.
+        let state = load_written_state(&state_dir.join("installed.toml"));
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
+            .load_visible_component_manifest("sec-core", &state)
+            .expect("load manifest");
+        let err = manager
+            .resolve_resource_root(
+                "sec-core",
+                "openclaw",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+                rpm_provenance,
+            )
+            .expect_err("unsupported placeholder must fail, not resolve wrong-scope");
+        match &err {
+            AdapterError::InvalidAdapterInput { reason, .. } => {
+                assert!(
+                    reason.contains("libexecdir"),
+                    "reason must name the placeholder: {reason}"
+                );
+            }
+            other => panic!("expected InvalidAdapterInput, got: {other}"),
+        }
+    }
+
+    /// A relative RPM root must be rejected before any filesystem probe:
+    /// probing it would resolve against the process CWD, so whoever
+    /// controls the working directory would control which bundle is read.
+    /// A valid bundle planted at exactly that CWD-relative path must not
+    /// be selected.
+    #[test]
+    fn rpm_component_relative_root_rejected_even_with_cwd_bundle() {
+        /// Removes the CWD bundle even when an assertion fails.
+        struct CwdBundle(std::path::PathBuf);
+        impl Drop for CwdBundle {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let rel_name = format!("anolisa-test-cwd-bundle-{}", std::process::id());
+        let cwd_bundle = std::env::current_dir().expect("cwd").join(&rel_name);
+        std::fs::create_dir_all(&cwd_bundle).expect("mkdir cwd bundle");
+        std::fs::write(cwd_bundle.join("plugin.json"), b"{}").expect("write");
+        let _cleanup = CwdBundle(cwd_bundle);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let datadir = tmp.path().join("data");
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Adopted,
+        );
+        write_contract_with_content(
+            &datadir,
+            "sec-core",
+            &contract_toml_with_rpm_root("sec-core", &rel_name),
+        );
+
+        let manager = manager_for(tmp.path(), &state_dir, &datadir);
+
+        // scan: declared, but the relative root is not a usable resource.
+        let report = manager.scan().expect("scan");
+        let entry = report
+            .entries
+            .iter()
+            .find(|e| e.component == "sec-core" && e.framework == "openclaw")
+            .expect("sec-core/openclaw should be in scan");
+        assert!(
+            entry.resource_root.is_none(),
+            "a relative root must not resolve against the CWD, got {:?}",
+            entry.resource_root
+        );
+
+        // enable-time resolution: rejected before any filesystem probe.
+        let state = load_written_state(&state_dir.join("installed.toml"));
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
+            .load_visible_component_manifest("sec-core", &state)
+            .expect("load manifest");
+        let err = manager
+            .resolve_resource_root(
+                "sec-core",
+                "openclaw",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+                rpm_provenance,
+            )
+            .expect_err("relative root must fail even with a valid CWD bundle");
+        match &err {
+            AdapterError::RelativeTemplateExpansion { path, .. } => {
+                assert_eq!(path, &PathBuf::from(&rel_name));
+            }
+            other => panic!("expected RelativeTemplateExpansion, got: {other}"),
+        }
+    }
+
+    /// A raw-installed component keeps using `dest` even when the contract
+    /// also declares an RPM backend root (unified contract, raw install).
+    #[test]
+    fn raw_component_ignores_rpm_resource_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let datadir = tmp.path().join("data");
+
+        // Installed ⇒ raw-managed provenance.
+        seed_installed_state(
+            &state_dir,
+            crate::state::InstallMode::System,
+            tmp.path(),
+            "sec-core",
+            ObjectStatus::Installed,
+        );
+
+        let rpm_root = tmp.path().join("opt/agent-sec/openclaw-plugin");
+        write_contract_with_content(
+            &datadir,
+            "sec-core",
+            &contract_toml_with_rpm_root("sec-core", &rpm_root.to_string_lossy()),
+        );
+        // Bundles exist at both roots; the raw install must pick dest.
+        let dest_root = datadir.join("adapters/sec-core/openclaw");
+        for root in [&dest_root, &rpm_root] {
+            std::fs::create_dir_all(root).expect("mkdir");
+            std::fs::write(root.join("plugin.json"), b"{}").expect("write");
+        }
+
+        let manager = manager_for(tmp.path(), &state_dir, &datadir);
+
+        let state = load_written_state(&state_dir.join("installed.toml"));
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
+            .load_visible_component_manifest("sec-core", &state)
+            .expect("load manifest");
+        assert!(!rpm_provenance, "raw install must not carry RPM provenance");
+        let (resolved, _effective_datadir) = manager
+            .resolve_resource_root(
+                "sec-core",
+                "openclaw",
+                &manifest,
+                &scoped_roots,
+                contract_datadir_root.as_deref(),
+                rpm_provenance,
+            )
+            .expect("resolve");
+        assert_eq!(
+            resolved, dest_root,
+            "raw install must keep the raw dest resource root"
         );
     }
 
@@ -4659,7 +5584,7 @@ entry = "custom-entry.json"
         // resolve_resource_root: must return ContractResourceRootNotFound,
         // NOT silently fall back to convention.
         let state = load_written_state(&state_dir.join("installed.toml"));
-        let (manifest, scoped_roots, contract_datadir_root) = manager
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
         let err = manager
@@ -4669,6 +5594,7 @@ entry = "custom-entry.json"
                 &manifest,
                 &scoped_roots,
                 contract_datadir_root.as_deref(),
+                rpm_provenance,
             )
             .expect_err("must fail when contract dest directory is absent");
         assert!(
@@ -4735,7 +5661,7 @@ entry = "custom-entry.json"
 
         // resolve_resource_root must error, not fall back.
         let state = load_written_state(&state_dir.join("installed.toml"));
-        let (manifest, scoped_roots, contract_datadir_root) = manager
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
         let err = manager
@@ -4745,6 +5671,7 @@ entry = "custom-entry.json"
                 &manifest,
                 &scoped_roots,
                 contract_datadir_root.as_deref(),
+                rpm_provenance,
             )
             .expect_err("must not fall back to convention");
         assert!(
@@ -4886,7 +5813,7 @@ source = "{datadir}/skills/code-scanner/"
 
         // Resolve resource root — must come from system datadir.
         let state = load_written_state(&manager.state_path);
-        let (manifest, scoped_roots, contract_datadir_root) = manager
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
         let (resource_root, effective_datadir) = manager
@@ -4896,6 +5823,7 @@ source = "{datadir}/skills/code-scanner/"
                 &manifest,
                 &scoped_roots,
                 contract_datadir_root.as_deref(),
+                rpm_provenance,
             )
             .expect("resolve resource root");
         assert_eq!(resource_root, custom_root);
@@ -5074,7 +6002,7 @@ source = "{datadir}/skills/code-scanner/"
 
         // Verify resolve_resource_root returns the package datadir path.
         let state = load_written_state(&state_dir.join("installed.toml"));
-        let (manifest, scoped_roots, contract_datadir_root) = manager
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
         let (resource_root, effective_datadir) = manager
@@ -5084,6 +6012,7 @@ source = "{datadir}/skills/code-scanner/"
                 &manifest,
                 &scoped_roots,
                 contract_datadir_root.as_deref(),
+                rpm_provenance,
             )
             .expect("resolve resource root");
         assert_eq!(
@@ -5157,7 +6086,7 @@ source = "{datadir}/skills/code-scanner/"
         manager.all_datadir_roots = vec![package_datadir.clone()];
 
         let state = load_written_state(&state_dir.join("installed.toml"));
-        let (manifest, scoped_roots, contract_datadir_root) = manager
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
 
@@ -5169,6 +6098,7 @@ source = "{datadir}/skills/code-scanner/"
                 &manifest,
                 &scoped_roots,
                 contract_datadir_root.as_deref(),
+                rpm_provenance,
             )
             .expect("resolve resource root");
         assert_eq!(
@@ -5828,7 +6758,7 @@ source = "{{datadir}}/skills/code-scanner/"
         manager.all_datadir_roots = vec![local_datadir.clone(), pkg_datadir.clone()];
 
         let state = load_written_state(&state_dir.join("installed.toml"));
-        let (manifest, scoped_roots, contract_datadir_root) = manager
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
 
@@ -5840,6 +6770,7 @@ source = "{{datadir}}/skills/code-scanner/"
                 &manifest,
                 &scoped_roots,
                 contract_datadir_root.as_deref(),
+                rpm_provenance,
             )
             .expect("resolve resource root");
         assert_eq!(
@@ -5945,7 +6876,7 @@ source = "{{datadir}}/skills/code-scanner/"
         manager.all_datadir_roots = vec![local_datadir.clone(), pkg_datadir.clone()];
 
         let state = load_written_state(&state_dir.join("installed.toml"));
-        let (manifest, scoped_roots, contract_datadir_root) = manager
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
         assert_eq!(
@@ -5961,6 +6892,7 @@ source = "{{datadir}}/skills/code-scanner/"
                 &manifest,
                 &scoped_roots,
                 contract_datadir_root.as_deref(),
+                rpm_provenance,
             )
             .expect("resolve resource root");
         assert_eq!(resource_root, abs_dest);
@@ -6063,7 +6995,7 @@ source = "{{datadir}}/skills/code-scanner/"
         manager.all_datadir_roots = vec![local_datadir.clone(), pkg_datadir.clone()];
 
         let state = load_written_state(&state_dir.join("installed.toml"));
-        let (manifest, scoped_roots, contract_datadir_root) = manager
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
         assert_eq!(
@@ -6079,6 +7011,7 @@ source = "{{datadir}}/skills/code-scanner/"
                 &manifest,
                 &scoped_roots,
                 contract_datadir_root.as_deref(),
+                rpm_provenance,
             )
             .expect("resolve resource root");
         assert_eq!(resource_root, abs_dest);
@@ -6135,7 +7068,7 @@ source = "{{datadir}}/skills/code-scanner/"
         manager.all_datadir_roots = vec![pkg_datadir.clone()];
 
         let state = load_written_state(&state_dir.join("installed.toml"));
-        let (_manifest, _scoped_roots, contract_datadir_root) = manager
+        let (_manifest, _scoped_roots, contract_datadir_root, _rpm_provenance) = manager
             .load_visible_component_manifest("sec-core", &state)
             .expect("load manifest");
         assert_eq!(
@@ -6220,7 +7153,7 @@ dest = "{datadir}/skills"
         // enable path: resolve_resource_root must also prefer the package
         // datadir.
         let state = load_written_state(&state_dir.join("installed.toml"));
-        let (manifest, scoped_roots, contract_datadir_root) = manager
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
             .load_visible_component_manifest("os-skills", &state)
             .expect("load manifest");
         let (resource_root, effective_datadir) = manager
@@ -6230,6 +7163,7 @@ dest = "{datadir}/skills"
                 &manifest,
                 &scoped_roots,
                 contract_datadir_root.as_deref(),
+                rpm_provenance,
             )
             .expect("resolve resource root");
         assert_eq!(
@@ -6293,7 +7227,7 @@ dest = "{datadir}/skills"
         manager.all_datadir_roots = vec![local_datadir.clone(), package_datadir.clone()];
 
         let state = load_written_state(&state_dir.join("installed.toml"));
-        let (manifest, scoped_roots, contract_datadir_root) = manager
+        let (manifest, scoped_roots, contract_datadir_root, rpm_provenance) = manager
             .load_visible_component_manifest("os-skills", &state)
             .expect("load manifest");
         let (resource_root, effective_datadir) = manager
@@ -6303,6 +7237,7 @@ dest = "{datadir}/skills"
                 &manifest,
                 &scoped_roots,
                 contract_datadir_root.as_deref(),
+                rpm_provenance,
             )
             .expect("resolve resource root");
         assert_eq!(

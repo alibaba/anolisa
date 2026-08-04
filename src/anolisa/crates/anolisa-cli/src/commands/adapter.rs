@@ -605,6 +605,7 @@ fn handle_status(ctx: &CliContext, component: Option<&str>) -> Result<(), CliErr
 fn map_err(command: &str, err: AdapterError) -> CliError {
     match err {
         AdapterError::UnknownPlaceholder { .. }
+        | AdapterError::RelativeTemplateExpansion { .. }
         | AdapterError::UnknownFramework { .. }
         | AdapterError::AmbiguousFramework { .. }
         | AdapterError::UnsupportedAdapterType { .. }

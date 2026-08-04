@@ -19,6 +19,11 @@ use std::path::{Path, PathBuf};
 /// Default schema version applied when the TOML omits it.
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
+/// Canonical `render` value for layout-placeholder content rendering
+/// (see [`InstallFileSpec::render`]). Single source of the wire spelling
+/// so contract authors, the install resolver, and docs cannot drift.
+pub const RENDER_ANOLISA_PATHS_V1: &str = "anolisa-paths-v1";
+
 // ---------------------------------------------------------------------------
 // ComponentManifest
 // ---------------------------------------------------------------------------
@@ -275,6 +280,17 @@ pub struct InstallFileSpec {
     /// [`FileKind::Data`]; legacy `[install]` files have no `type`.
     #[serde(default, skip_serializing_if = "is_default_file_kind")]
     pub kind: FileKind,
+    /// Content-rendering mode requested by the contract, e.g.
+    /// [`RENDER_ANOLISA_PATHS_V1`]. Declares that the installer MUST
+    /// substitute layout placeholders (`{bindir}`, `{datadir}`, …) inside
+    /// the file *content* against the final [`FsLayout`] before placing it
+    /// — relocatable systemd unit templates rely on this. The value is
+    /// versioned so the vocabulary can evolve without ambiguity; installers
+    /// reject values they do not implement. `None` copies bytes verbatim.
+    ///
+    /// [`FsLayout`]: anolisa_platform::fs_layout::FsLayout
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render: Option<String>,
 }
 
 /// Skip serializing the default [`FileKind`] so round-tripped legacy manifests
@@ -627,6 +643,12 @@ pub struct AdapterSpec {
     /// Destination path after layout placeholder expansion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dest: Option<String>,
+    /// `[adapters.backends]` — backend-specific resource-root overrides.
+    /// A unified raw/RPM contract keeps [`dest`](Self::dest) as the raw
+    /// install target while RPM payloads live at a package-owned path;
+    /// scan/enable select the root by the component's install provenance.
+    #[serde(default, skip_serializing_if = "AdapterBackendsSpec::is_empty")]
+    pub backends: AdapterBackendsSpec,
     /// Bundle description: how the driver should read the adapter's
     /// resource directory.
     #[serde(default, skip_serializing_if = "AdapterBundleSpec::is_empty")]
@@ -686,6 +708,40 @@ impl AdapterBundleSpec {
     fn is_empty(&self) -> bool {
         self.schema.is_none() && self.entry.is_none()
     }
+}
+
+/// `[adapters.backends]` — backend-specific adapter resource metadata for
+/// unified raw/RPM contracts. Only the RPM backend is defined today; the
+/// table shape leaves room for other native backends.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AdapterBackendsSpec {
+    /// `[adapters.backends.rpm]` — resource metadata for RPM-installed
+    /// components.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpm: Option<AdapterRpmBackendSpec>,
+}
+
+impl AdapterBackendsSpec {
+    /// True when no backend declares any metadata; the whole `[adapters.
+    /// backends]` table is then omitted on serialization so round-tripped
+    /// contracts without it stay byte-stable.
+    pub fn is_empty(&self) -> bool {
+        self.rpm.as_ref().is_none_or(|r| r.resource_root.is_none())
+    }
+}
+
+/// `[adapters.backends.rpm]` — adapter resource metadata consumed when the
+/// owning component was installed via the RPM backend.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AdapterRpmBackendSpec {
+    /// Read-only resource root holding the RPM-installed adapter bundle.
+    /// May use layout placeholders (`{datadir}`, …, plus `{component}`) or
+    /// be an absolute package-owned path such as
+    /// `/opt/agent-sec/openclaw-plugin/`. Scan/enable read the bundle from
+    /// here instead of expanding [`AdapterSpec::dest`]; ANOLISA never
+    /// writes under it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_root: Option<String>,
 }
 
 /// Compatibility metadata for an adapter entry. Lets packaging and the
@@ -1025,6 +1081,9 @@ struct LayoutFileRaw {
     /// Minimal-schema `type` → [`FileKind`]. Absent defaults to `Data`.
     #[serde(default, rename = "type")]
     kind: FileKind,
+    /// Content-rendering mode (see [`InstallFileSpec::render`]).
+    #[serde(default)]
+    render: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1113,6 +1172,13 @@ struct InstallFileRaw {
     /// symlinks; absent defaults to `Data`, keeping old files byte-stable.
     #[serde(default, rename = "type")]
     kind: FileKind,
+    /// Content-rendering mode (see [`InstallFileSpec::render`]). Parsed on
+    /// the legacy path too — both because serialized manifests round-trip
+    /// through `[install]`, and because silently dropping a declared
+    /// render would install literal placeholders (the failure this field
+    /// exists to prevent).
+    #[serde(default)]
+    render: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1164,6 +1230,11 @@ struct AdapterRaw {
     source: Option<String>,
     #[serde(default)]
     dest: Option<String>,
+    // `[adapters.backends]` deserializes directly into the typed shape —
+    // simple and tolerant (`default` table, optional `rpm` sub-table) —
+    // same rationale as the top-level `[backends]`.
+    #[serde(default)]
+    backends: AdapterBackendsSpec,
     #[serde(default)]
     bundle: AdapterBundleRaw,
     #[serde(default)]
@@ -1293,6 +1364,7 @@ impl From<ComponentManifestRaw> for ComponentManifest {
                     dest: f.target,
                     mode: f.mode,
                     kind: f.kind,
+                    render: f.render,
                 })
                 .filter(|f| f.install_path().is_some())
                 .collect();
@@ -1323,6 +1395,7 @@ impl From<ComponentManifestRaw> for ComponentManifest {
                             dest: f.dest,
                             mode: f.mode,
                             kind: f.kind,
+                            render: f.render,
                         })
                         .filter(|f| f.install_path().is_some())
                         .collect();
@@ -1382,6 +1455,7 @@ impl From<ComponentManifestRaw> for ComponentManifest {
                 plugin_id: a.plugin_id,
                 source: a.source,
                 dest: a.dest,
+                backends: a.backends,
                 bundle: AdapterBundleSpec {
                     schema: a.bundle.schema,
                     entry: a.bundle.entry,
@@ -2473,6 +2547,67 @@ mod tests {
     }
 
     #[test]
+    fn layout_files_render_parses_and_round_trips() {
+        // Minimal-schema `render` reaches InstallFileSpec verbatim and
+        // survives serialization, so a snapshotted contract keeps the
+        // rendering request; entries without it stay `None` and omit the
+        // key on round-trip.
+        let m = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "sec-core"
+            version = "0.9.0"
+            [component.layout]
+            [[component.layout.files]]
+            source = "share/agent-sec-core.service.in"
+            target = "{userunitdir}/agent-sec-core.service"
+            render = "anolisa-paths-v1"
+            [[component.layout.files]]
+            source = "bin/agent-sec-cli"
+            target = "{bindir}/agent-sec-cli"
+        "#,
+        )
+        .expect("parse");
+        assert_eq!(
+            m.install.files[0].render.as_deref(),
+            Some(RENDER_ANOLISA_PATHS_V1)
+        );
+        assert_eq!(m.install.files[1].render, None);
+
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        let m2 = ComponentManifest::from_toml_str(&serialized).expect("re-parse");
+        assert_eq!(
+            m.install.files, m2.install.files,
+            "round-trip must preserve render"
+        );
+    }
+
+    #[test]
+    fn legacy_install_files_carry_render_too() {
+        // The legacy `[install]` path must not silently drop a declared
+        // render — that would install literal placeholders — and serialized
+        // manifests round-trip through this shape.
+        let m = ComponentManifest::from_toml_str(
+            r#"
+            [component]
+            name = "t"
+            version = "1.0.0"
+            [install]
+            modes = ["user"]
+            [[install.files]]
+            source = "share/unit.in"
+            dest = "{userunitdir}/unit.service"
+            render = "anolisa-paths-v1"
+        "#,
+        )
+        .expect("parse");
+        assert_eq!(
+            m.install.files[0].render.as_deref(),
+            Some(RENDER_ANOLISA_PATHS_V1)
+        );
+    }
+
+    #[test]
     fn health_spec_uses_declared_check_when_present() {
         let m = ComponentManifest::from_toml_str(
             r#"
@@ -2736,6 +2871,50 @@ mod tests {
         assert!(
             !serialized.contains("[compat]"),
             "empty compat must be skipped in serialization"
+        );
+        assert!(
+            !serialized.contains("[adapters.backends]"),
+            "empty backends must be skipped in serialization"
+        );
+    }
+
+    #[test]
+    fn adapter_backends_rpm_resource_root_parses_and_round_trips() {
+        // `[adapters.backends.rpm]` declares the read-only resource root an
+        // RPM install provides; it must parse alongside the raw `dest` and
+        // survive round-trip so snapshotted contracts keep both roots.
+        let toml_text = r#"
+            [component]
+            name = "sec-core"
+            version = "0.9.0"
+
+            [[adapters]]
+            framework = "openclaw"
+            source = "adapters/sec-core/openclaw"
+            dest = "{datadir}/adapters/{component}/openclaw/"
+
+            [adapters.backends.rpm]
+            resource_root = "/opt/agent-sec/openclaw-plugin/"
+        "#;
+        let m = ComponentManifest::from_toml_str(toml_text).expect("parse");
+        let a = &m.adapters[0];
+        assert_eq!(
+            a.dest.as_deref(),
+            Some("{datadir}/adapters/{component}/openclaw/")
+        );
+        assert_eq!(
+            a.backends
+                .rpm
+                .as_ref()
+                .and_then(|rpm| rpm.resource_root.as_deref()),
+            Some("/opt/agent-sec/openclaw-plugin/")
+        );
+
+        let serialized = toml::to_string_pretty(&m).expect("serialize");
+        let m2 = ComponentManifest::from_toml_str(&serialized).expect("re-parse");
+        assert_eq!(
+            m.adapters, m2.adapters,
+            "round-trip must preserve backend resource roots"
         );
     }
 

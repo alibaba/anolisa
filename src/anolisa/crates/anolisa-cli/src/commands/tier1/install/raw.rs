@@ -6,7 +6,8 @@ use std::path::Path;
 
 use anolisa_core::download::{DownloadCache, DownloadError};
 use anolisa_core::install_runner::{
-    ResolvedInstallFile, SUPPORTED_ARTIFACT_TYPES, read_embedded_component_manifest_text,
+    RenderMode, RenderSpec, ResolvedInstallFile, SUPPORTED_ARTIFACT_TYPES,
+    read_embedded_component_manifest_text,
 };
 use anolisa_core::path_safety::validate_owned_path;
 use anolisa_core::{
@@ -19,7 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::context::CliContext;
 use crate::repo_config::{
-    HostVars, RepoConfig, raw_artifact_url, raw_index_url, raw_relative_root,
+    HostVars, RepoConfig, raw_artifact_url, raw_index_url, raw_index_v2_url, raw_relative_root,
 };
 use crate::response::CliError;
 
@@ -52,6 +53,41 @@ pub(super) fn index_fetch_error(index_url: &str, err: DownloadError) -> CliError
     }
 }
 
+/// Whether a fetch failure means "this index file is not published", as
+/// opposed to a transport or repository fault. Only the former may fall
+/// back from `index-v2.toml` to `index.toml`: falling back on transient
+/// errors could silently downgrade a gen-2 repository to its gen-1 view.
+fn index_not_published(err: &DownloadError) -> bool {
+    match err {
+        DownloadError::HttpStatus { status, .. } => *status == 404 || *status == 410,
+        // file:// repositories surface a missing index as I/O NotFound.
+        DownloadError::Io { source, .. } => source.kind() == std::io::ErrorKind::NotFound,
+        _ => false,
+    }
+}
+
+/// Fetch the raw index, preferring the complete generation-2 file and
+/// falling back to `index.toml` only when the repository has not published
+/// one (split-index bootstrap; see `raw_index_v2_url`). Returns the URL the
+/// index was actually served from, for error attribution downstream.
+fn fetch_raw_index(
+    cache: &DownloadCache,
+    base_url: &str,
+) -> Result<(String, std::path::PathBuf), CliError> {
+    let v2_url = raw_index_v2_url(base_url);
+    match cache.fetch(&v2_url, None) {
+        Ok(downloaded) => Ok((v2_url, downloaded.cached_path)),
+        Err(err) if index_not_published(&err) => {
+            let v1_url = raw_index_url(base_url);
+            let downloaded = cache
+                .fetch(&v1_url, None)
+                .map_err(|err| index_fetch_error(&v1_url, err))?;
+            Ok((v1_url, downloaded.cached_path))
+        }
+        Err(err) => Err(index_fetch_error(&v2_url, err)),
+    }
+}
+
 pub(crate) fn resolve_raw(
     ctx: &CliContext,
     layout: &FsLayout,
@@ -64,25 +100,24 @@ pub(crate) fn resolve_raw(
         backend,
         base_url,
         version,
-        warnings,
+        mut warnings,
     } = inputs;
 
     // The index is always re-fetched (DownloadCache overwrites on conflict),
     // so a republished repo is picked up without a cache flush.
-    let index_url = raw_index_url(&base_url);
     let cache = DownloadCache::new(layout.cache_dir.clone());
-    let downloaded_index = cache
-        .fetch(&index_url, None)
-        .map_err(|err| index_fetch_error(&index_url, err))?;
+    let (index_url, cached_index_path) = fetch_raw_index(&cache, &base_url)?;
+    // Entry-tolerant parse: a row shaped for a future CLI fails closed for
+    // its own component (skipped, surfaced as a warning) instead of taking
+    // the whole shared index — and every unrelated component — down with it.
     // The unfiltered index is kept for error attribution: a pinned version
     // that only ships non-installable artifact types must be reported as
     // "published but not installable", not as unpublished.
-    let full_index = DistributionIndex::load(&downloaded_index.cached_path).map_err(|err| {
-        CliError::Runtime {
+    let (full_index, skipped_entries) = DistributionIndex::load_lenient(&cached_index_path)
+        .map_err(|err| CliError::Runtime {
             command: COMMAND.to_string(),
             reason: format!("failed to parse distribution index {index_url}: {err}"),
-        }
-    })?;
+        })?;
     let index = installable_raw_index(full_index.clone());
 
     // The index is keyed by the backend-native package name so that
@@ -98,6 +133,25 @@ pub(crate) fn resolve_raw(
         pkg_base: env.pkg_base.as_deref(),
         preferred_types: &[],
     };
+    // A skipped row that may answer this query forces a refusal *before*
+    // resolution: picking the best of the remaining rows could silently
+    // substitute an older parsable version for the one this build cannot
+    // read (and `update` could even downgrade). Rows for other components,
+    // targets, or non-matching pinned versions stay mere warnings.
+    if let Some(blocking) = skipped_entries.iter().find(|s| s.may_match(&query)) {
+        return Err(CliError::Runtime {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "distribution index {index_url} contains an entry for '{package}' this CLI cannot parse ({}); refusing to resolve '{package}' against the remaining entries to avoid a silent downgrade — run 'anolisa self-update' and retry",
+                blocking.reason
+            ),
+        });
+    }
+    warnings.extend(
+        skipped_entries
+            .into_iter()
+            .map(|s| format!("distribution index {index_url}: {}", s.reason)),
+    );
     let entry = index.resolve(&query).map_err(|err| {
         // A pinned version the installable index cannot satisfy gets a
         // dedicated refusal, symmetric with the rpm backend's version-pin
@@ -552,6 +606,60 @@ fn validate_manifest_contract_header(
             ),
         });
     }
+
+    validate_min_anolisa_version(manifest, &resolution.component, source)?;
+    Ok(())
+}
+
+/// Enforce the `[component.contract].min_anolisa_version` gate: refuse the
+/// contract when this CLI is older than the version it requires.
+///
+/// A contract may depend on install behavior (content rendering,
+/// backend-aware adapter roots, …) that an older CLI silently lacks —
+/// tolerant parsing would drop the unknown fields and install a broken
+/// result. Fail-closed: a `min_anolisa_version` that is not valid SemVer is
+/// rejected too, with no `--force` escape hatch.
+fn validate_min_anolisa_version(
+    manifest: &ComponentManifest,
+    component: &str,
+    source: InstallContractSource,
+) -> Result<(), CliError> {
+    validate_min_anolisa_version_against(manifest, component, source, env!("CARGO_PKG_VERSION"))
+}
+
+/// [`validate_min_anolisa_version`] with the CLI version injected, so tests
+/// can pin release-boundary scenarios (e.g. a released binary that predates
+/// a capability meeting the first contract that requires it) without
+/// depending on the workspace version at build time.
+fn validate_min_anolisa_version_against(
+    manifest: &ComponentManifest,
+    component: &str,
+    source: InstallContractSource,
+    current: &str,
+) -> Result<(), CliError> {
+    let Some(required) = manifest.contract.min_anolisa_version.as_deref() else {
+        return Ok(());
+    };
+    let required_version =
+        semver::Version::parse(required).map_err(|err| CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "{} for component '{component}' declares min_anolisa_version '{required}', which is not a valid SemVer version: {err}",
+                source.label(),
+            ),
+        })?;
+    let current_version = semver::Version::parse(current).map_err(|err| CliError::Runtime {
+        command: COMMAND.to_string(),
+        reason: format!("cannot parse this CLI's own version '{current}': {err}"),
+    })?;
+    if current_version < required_version {
+        return Err(CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "component '{component}' requires anolisa >= {required}, but this CLI is {current}; run 'anolisa self-update' and retry",
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -684,14 +792,74 @@ fn resolve_manifest_files(
             }
             _ => spec.source.clone(),
         };
+        let render = resolve_render_spec(spec, component)?;
         files.push(ResolvedInstallFile {
             source,
             dest,
             mode: spec.mode.clone(),
             kind: spec.kind,
+            render,
         });
     }
     Ok(files)
+}
+
+/// Map a layout entry's `render` string onto a runner [`RenderSpec`].
+///
+/// Fail-closed on values this CLI does not implement: tolerant manifest
+/// parsing keeps read-only commands working, but installing without the
+/// requested rendering would place literal `{bindir}`-style placeholders
+/// (e.g. an unstartable systemd unit). Rendering targets a single regular
+/// file — a directory source or symlink entry with `render` is a contract
+/// defect and is rejected here with the same rationale.
+///
+/// This is the early, user-facing gate: it fires at contract-resolution
+/// time with `InvalidArgument` and full layout-entry context. The runner
+/// re-checks the same invariant defensively for callers that build
+/// [`ResolvedInstallFile`] directly (see `InstallRunner` symlink/directory
+/// validation); keep the two in sync when the rule changes.
+fn resolve_render_spec(
+    spec: &anolisa_core::manifest::InstallFileSpec,
+    component: &str,
+) -> Result<Option<RenderSpec>, CliError> {
+    let Some(raw) = spec.render.as_deref() else {
+        return Ok(None);
+    };
+    // Present-but-blank is a contract defect, not an undeclared render:
+    // treating it as `None` would copy the template verbatim and land
+    // literal placeholders — the exact failure `render` exists to prevent.
+    let render = raw.trim();
+    if render.is_empty() {
+        return Err(CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "component '{component}' layout entry '{}' declares an empty render value; declare a supported mode (e.g. '{}') or remove the key",
+                spec.display(),
+                anolisa_core::manifest::RENDER_ANOLISA_PATHS_V1,
+            ),
+        });
+    }
+    let mode = RenderMode::parse(render).ok_or_else(|| CliError::InvalidArgument {
+        command: COMMAND.to_string(),
+        reason: format!(
+            "component '{component}' layout entry '{}' requests render '{render}', which this CLI does not support (supported: '{}'); run 'anolisa self-update' and retry",
+            spec.display(),
+            anolisa_core::manifest::RENDER_ANOLISA_PATHS_V1,
+        ),
+    })?;
+    if spec.kind == FileKind::Symlink || spec.source.as_deref().is_some_and(|s| s.ends_with('/')) {
+        return Err(CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "component '{component}' layout entry '{}' requests render '{render}', but render applies to single regular files — not directory sources or symlinks",
+                spec.display(),
+            ),
+        });
+    }
+    Ok(Some(RenderSpec {
+        mode,
+        component: component.to_string(),
+    }))
 }
 
 /// Render the manifest's `[[adapters]]` entries into install file mappings.
@@ -772,6 +940,7 @@ pub(crate) fn resolve_adapter_files(
             // bundle are not expressible in `[[adapters]]` in the MVP.
             mode: Some("0644".to_string()),
             kind: FileKind::Data,
+            render: None,
         });
     }
     Ok(files)
@@ -873,6 +1042,82 @@ mod tests {
     use anolisa_core::ComponentManifest;
     use anolisa_platform::fs_layout::FsLayout;
     use tempfile::tempdir;
+
+    /// Split-index bootstrap: a repository that publishes the complete
+    /// generation-2 index must be served from it, so gated entries are
+    /// visible to this CLI while pre-gate CLIs keep reading `index.toml`.
+    #[test]
+    fn fetch_raw_index_prefers_v2_when_published() {
+        let repo = tempdir().unwrap();
+        let root = repo.path().join("v1");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("index.toml"), "schema_version = 1\n").unwrap();
+        std::fs::write(root.join("index-v2.toml"), "schema_version = 2\n").unwrap();
+        let cache = tempdir().unwrap();
+        let dl = DownloadCache::new(cache.path().to_path_buf());
+        let (url, path) = fetch_raw_index(&dl, &format!("file://{}", root.display())).unwrap();
+        assert!(url.ends_with("/index-v2.toml"), "got {url}");
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("schema_version = 2"));
+    }
+
+    /// A gen-1 repository (no `index-v2.toml`) keeps working unchanged.
+    #[test]
+    fn fetch_raw_index_falls_back_to_v1_when_v2_missing() {
+        let repo = tempdir().unwrap();
+        let root = repo.path().join("v1");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("index.toml"), "schema_version = 1\n").unwrap();
+        let cache = tempdir().unwrap();
+        let dl = DownloadCache::new(cache.path().to_path_buf());
+        let (url, path) = fetch_raw_index(&dl, &format!("file://{}", root.display())).unwrap();
+        assert!(url.ends_with("/index.toml"), "got {url}");
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("schema_version = 1"));
+    }
+
+    /// With neither file published the error must attribute the miss to
+    /// `index.toml` (the canonical location), not to the optional v2 file.
+    #[test]
+    fn fetch_raw_index_reports_missing_repo_against_v1() {
+        let repo = tempdir().unwrap();
+        let root = repo.path().join("v1");
+        std::fs::create_dir_all(&root).unwrap();
+        let cache = tempdir().unwrap();
+        let dl = DownloadCache::new(cache.path().to_path_buf());
+        let err = fetch_raw_index(&dl, &format!("file://{}", root.display())).unwrap_err();
+        let CliError::Runtime { reason, .. } = err else {
+            panic!("expected runtime error");
+        };
+        assert!(
+            reason.contains("local raw repository index not found"),
+            "got: {reason}"
+        );
+        assert!(reason.contains("index.toml"), "got: {reason}");
+        assert!(!reason.contains("index-v2.toml"), "got: {reason}");
+    }
+
+    /// Fallback is reserved for "not published"; transport faults on the v2
+    /// fetch must not silently downgrade a gen-2 repository to its v1 view.
+    #[test]
+    fn index_not_published_distinguishes_absence_from_faults() {
+        let http = |status| DownloadError::HttpStatus {
+            url: "https://example.invalid/index-v2.toml".to_string(),
+            status,
+        };
+        assert!(index_not_published(&http(404)));
+        assert!(index_not_published(&http(410)));
+        assert!(!index_not_published(&http(500)));
+        assert!(!index_not_published(&http(403)));
+        assert!(index_not_published(&DownloadError::Io {
+            path: std::path::PathBuf::from("/repo/v1/index-v2.toml"),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        }));
+        assert!(!index_not_published(&DownloadError::Network {
+            url: "https://example.invalid/index-v2.toml".to_string(),
+            reason: "timed out".to_string(),
+        }));
+    }
 
     #[test]
     fn resolve_adapter_files_lays_bundle_under_datadir() {
@@ -1098,5 +1343,243 @@ mod tests {
         let manifest = ComponentManifest::from_toml_str(&toml).expect("parse manifest");
         let err = resolve_install_hooks(&manifest, &layout, "demo").expect_err("must error");
         assert!(matches!(err, CliError::Runtime { .. }));
+    }
+
+    // -- render mapping ------------------------------------------------------
+
+    fn render_manifest(entry: &str) -> ComponentManifest {
+        let toml = format!(
+            r#"
+            [component]
+            name = "sec-core"
+            version = "0.9.0"
+            [component.layout]
+            modes = ["system"]
+            {entry}
+        "#
+        );
+        ComponentManifest::from_toml_str(&toml).expect("parse manifest")
+    }
+
+    #[test]
+    fn resolve_manifest_files_maps_render_v1() {
+        let prefix = tempdir().unwrap();
+        let layout = FsLayout::system(Some(prefix.path().to_path_buf()));
+        let manifest = render_manifest(
+            r#"
+            [[component.layout.files]]
+            source = "share/agent-sec-core.service.in"
+            target = "{userunitdir}/agent-sec-core.service"
+            render = "anolisa-paths-v1"
+        "#,
+        );
+        let files = resolve_manifest_files(&manifest, &layout, "sec-core").expect("resolve");
+        assert_eq!(
+            files[0].render,
+            Some(RenderSpec {
+                mode: RenderMode::AnolisaPathsV1,
+                component: "sec-core".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_manifest_files_rejects_unknown_render() {
+        // A render value this CLI does not implement must fail closed —
+        // copying the template verbatim would install an unstartable unit.
+        let prefix = tempdir().unwrap();
+        let layout = FsLayout::system(Some(prefix.path().to_path_buf()));
+        let manifest = render_manifest(
+            r#"
+            [[component.layout.files]]
+            source = "share/unit.in"
+            target = "{datadir}/unit"
+            render = "anolisa-paths-v2"
+        "#,
+        );
+        let err = resolve_manifest_files(&manifest, &layout, "sec-core")
+            .expect_err("unknown render must be rejected");
+        match err {
+            CliError::InvalidArgument { reason, .. } => {
+                assert!(reason.contains("anolisa-paths-v2"), "got: {reason}");
+                assert!(reason.contains("self-update"), "got: {reason}");
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_manifest_files_rejects_render_on_directory_source() {
+        let prefix = tempdir().unwrap();
+        let layout = FsLayout::system(Some(prefix.path().to_path_buf()));
+        let manifest = render_manifest(
+            r#"
+            [[component.layout.files]]
+            source = "share/tree/"
+            target = "{datadir}/tree/"
+            render = "anolisa-paths-v1"
+        "#,
+        );
+        let err = resolve_manifest_files(&manifest, &layout, "sec-core")
+            .expect_err("render on a directory source must be rejected");
+        assert!(
+            matches!(err, CliError::InvalidArgument { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_manifest_files_rejects_render_on_symlink() {
+        let prefix = tempdir().unwrap();
+        let layout = FsLayout::system(Some(prefix.path().to_path_buf()));
+        let manifest = render_manifest(
+            r#"
+            [[component.layout.files]]
+            source = "{bindir}/real"
+            target = "{bindir}/link"
+            type = "symlink"
+            render = "anolisa-paths-v1"
+        "#,
+        );
+        let err = resolve_manifest_files(&manifest, &layout, "sec-core")
+            .expect_err("render on a symlink must be rejected");
+        assert!(
+            matches!(err, CliError::InvalidArgument { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_manifest_files_rejects_blank_render() {
+        // Present-but-blank must be rejected, not silently treated as
+        // undeclared — that would copy the template verbatim.
+        let prefix = tempdir().unwrap();
+        let layout = FsLayout::system(Some(prefix.path().to_path_buf()));
+        for value in ["", "   "] {
+            let manifest = render_manifest(&format!(
+                r#"
+            [[component.layout.files]]
+            source = "share/unit.in"
+            target = "{{datadir}}/unit"
+            render = "{value}"
+        "#
+            ));
+            let err = resolve_manifest_files(&manifest, &layout, "sec-core")
+                .expect_err("blank render must be rejected");
+            match err {
+                CliError::InvalidArgument { reason, .. } => {
+                    assert!(reason.contains("empty render"), "got: {reason}");
+                }
+                other => panic!("expected InvalidArgument, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_manifest_files_without_render_stays_none() {
+        let prefix = tempdir().unwrap();
+        let layout = FsLayout::system(Some(prefix.path().to_path_buf()));
+        let manifest = render_manifest(
+            r#"
+            [[component.layout.files]]
+            source = "bin/agent-sec-cli"
+            target = "{bindir}/agent-sec-cli"
+            type = "executable"
+        "#,
+        );
+        let files = resolve_manifest_files(&manifest, &layout, "sec-core").expect("resolve");
+        assert_eq!(files[0].render, None);
+    }
+
+    // -- min_anolisa_version gate --------------------------------------------
+
+    fn contract_manifest(min_version: Option<&str>) -> ComponentManifest {
+        let contract = match min_version {
+            Some(v) => format!("[component.contract]\nmin_anolisa_version = \"{v}\"\n"),
+            None => String::new(),
+        };
+        let toml = format!(
+            r#"
+            [component]
+            name = "sec-core"
+            version = "0.9.0"
+            {contract}
+        "#
+        );
+        ComponentManifest::from_toml_str(&toml).expect("parse manifest")
+    }
+
+    #[test]
+    fn min_anolisa_version_gate_accepts_absent_older_and_equal() {
+        let source = InstallContractSource::EmbeddedArtifact;
+        validate_min_anolisa_version(&contract_manifest(None), "sec-core", source)
+            .expect("absent field must pass");
+        validate_min_anolisa_version(&contract_manifest(Some("0.1.0")), "sec-core", source)
+            .expect("older requirement must pass");
+        let current = env!("CARGO_PKG_VERSION");
+        validate_min_anolisa_version(&contract_manifest(Some(current)), "sec-core", source)
+            .expect("equal requirement must pass");
+    }
+
+    #[test]
+    fn min_anolisa_version_gate_rejects_newer_requirement() {
+        let err = validate_min_anolisa_version(
+            &contract_manifest(Some("99.0.0")),
+            "sec-core",
+            InstallContractSource::EmbeddedArtifact,
+        )
+        .expect_err("a newer requirement must be rejected");
+        match err {
+            CliError::InvalidArgument { reason, .. } => {
+                assert!(reason.contains("99.0.0"), "got: {reason}");
+                assert!(
+                    reason.contains(env!("CARGO_PKG_VERSION")),
+                    "must name the current version: {reason}"
+                );
+                assert!(reason.contains("self-update"), "got: {reason}");
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn min_anolisa_version_gate_rejects_invalid_semver() {
+        // Fail-closed: a malformed requirement means the contract's intent
+        // is unknown; installing anyway could bypass the gate it wanted.
+        let err = validate_min_anolisa_version(
+            &contract_manifest(Some("not-a-version")),
+            "sec-core",
+            InstallContractSource::SidecarMeta,
+        )
+        .expect_err("invalid SemVer must be rejected");
+        match err {
+            CliError::InvalidArgument { reason, .. } => {
+                assert!(reason.contains("not-a-version"), "got: {reason}");
+                assert!(reason.contains("SemVer"), "got: {reason}");
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn min_anolisa_version_gate_protects_first_release_boundary() {
+        // Regression for the first contract that depends on unified-contract
+        // consumption (sec-core): the capability ships in 0.2.17, one
+        // release after 0.2.16 which predates rendering and this gate. A
+        // contract declaring 0.2.17 must be refused by a 0.2.16 CLI and
+        // accepted from 0.2.17 on — pinned with injected versions so the
+        // workspace version bump cannot silently invalidate the scenario.
+        let manifest = contract_manifest(Some("0.2.17"));
+        let source = InstallContractSource::EmbeddedArtifact;
+        let err = validate_min_anolisa_version_against(&manifest, "sec-core", source, "0.2.16")
+            .expect_err("a 0.2.16 CLI must refuse a contract requiring 0.2.17");
+        assert!(
+            matches!(err, CliError::InvalidArgument { .. }),
+            "got {err:?}"
+        );
+        validate_min_anolisa_version_against(&manifest, "sec-core", source, "0.2.17")
+            .expect("the release shipping the capability must pass");
+        validate_min_anolisa_version_against(&manifest, "sec-core", source, "0.3.0")
+            .expect("later releases must keep passing");
     }
 }

@@ -57,6 +57,11 @@ pub struct ResolvedInstallFile {
     /// File role; [`FileKind::Symlink`] entries are created after the
     /// regular files instead of being extracted from the artifact.
     pub kind: FileKind,
+    /// Content-rendering request from the manifest `render` key. `None`
+    /// places the archive bytes verbatim. Rendering runs before the
+    /// installed sha256 is computed, so state records the bytes that
+    /// actually land on disk.
+    pub render: Option<RenderSpec>,
 }
 
 impl ResolvedInstallFile {
@@ -68,7 +73,39 @@ impl ResolvedInstallFile {
             dest,
             mode: None,
             kind: FileKind::Data,
+            render: None,
         }
+    }
+}
+
+/// Content-rendering request carried on a [`ResolvedInstallFile`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderSpec {
+    /// Versioned rendering mode resolved from the manifest `render` value.
+    pub mode: RenderMode,
+    /// Component name substituted for the `{component}` placeholder,
+    /// mirroring destination-path expansion.
+    pub component: String,
+}
+
+/// Supported file content-rendering modes.
+///
+/// Each variant corresponds to one versioned manifest `render` value; the
+/// install resolver rejects values with no variant here so an unsupported
+/// contract fails closed instead of installing unrendered placeholders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderMode {
+    /// [`RENDER_ANOLISA_PATHS_V1`](crate::manifest::RENDER_ANOLISA_PATHS_V1):
+    /// substitute layout placeholders (`{bindir}`, `{datadir}`, … plus
+    /// `{component}`) inside UTF-8 file content against the final layout.
+    AnolisaPathsV1,
+}
+
+impl RenderMode {
+    /// Map a manifest `render` string to a supported mode. Returns `None`
+    /// for values this CLI does not implement — callers must reject those.
+    pub fn parse(value: &str) -> Option<Self> {
+        (value == crate::manifest::RENDER_ANOLISA_PATHS_V1).then_some(Self::AnolisaPathsV1)
     }
 }
 
@@ -171,6 +208,16 @@ pub enum InstallError {
     /// parsed as a component manifest.
     #[error("embedded component manifest could not be parsed: {0}")]
     EmbeddedManifestParse(String),
+
+    /// Content rendering (`render = "anolisa-paths-v1"`) failed for an entry.
+    #[error("cannot render '{path}': {reason}")]
+    Render {
+        /// Destination of the entry that could not be rendered.
+        path: PathBuf,
+        /// What was wrong (non-UTF-8 content, unknown placeholder, or a
+        /// render request on a non-regular entry).
+        reason: String,
+    },
 }
 
 /// Extract and parse the published install contract embedded in a tar.gz
@@ -464,6 +511,17 @@ impl<'a> InstallRunner<'a> {
     ) -> Result<(), InstallError> {
         let mut seen = BTreeSet::new();
         for link in links {
+            // A symlink has no content to render; a render request on one
+            // is a contract defect, not something to silently drop. The CLI
+            // rejects this earlier with contract context (raw install's
+            // render resolution); this re-check is defense-in-depth for
+            // callers constructing `ResolvedInstallFile` directly.
+            if link.render.is_some() {
+                return Err(InstallError::Render {
+                    path: link.dest.clone(),
+                    reason: "render applies to regular files, not symlinks".to_string(),
+                });
+            }
             let referent =
                 link.source
                     .as_deref()
@@ -498,6 +556,18 @@ impl<'a> InstallRunner<'a> {
             if let Some(source) = file.source.as_deref()
                 && archive_source_is_dir(source)
             {
+                // Rendering targets one regular file; a directory source
+                // fans out to arbitrarily many entries and would silently
+                // rewrite payloads the contract author never meant to
+                // template. Fail closed. Mirrors the CLI-side early check
+                // in raw install's render resolution; keep both in sync.
+                if file.render.is_some() {
+                    return Err(InstallError::Render {
+                        path: file.dest.clone(),
+                        reason: "render applies to single regular files, not directory sources"
+                            .to_string(),
+                    });
+                }
                 let prefix = normalize_archive_key(source);
                 let prefix = prefix.trim_end_matches('/');
                 let mut matched = false;
@@ -515,6 +585,7 @@ impl<'a> InstallRunner<'a> {
                             dest: file.dest.join(relative),
                             mode: file.mode.clone(),
                             kind: file.kind,
+                            render: None,
                         },
                         bytes.clone(),
                     ));
@@ -535,7 +606,8 @@ impl<'a> InstallRunner<'a> {
                     .ok_or_else(|| InstallError::MissingArchiveEntry {
                         basename: key.clone(),
                     })?;
-            expanded.push((file.clone(), bytes.clone()));
+            let bytes = self.rendered_bytes(file, bytes)?;
+            expanded.push((file.clone(), bytes));
         }
 
         let expanded_files: Vec<ResolvedInstallFile> =
@@ -543,6 +615,49 @@ impl<'a> InstallRunner<'a> {
         self.validate_install_targets(&expanded_files, destination_policy)?;
 
         Ok(expanded)
+    }
+
+    /// Apply the entry's content-rendering request to the archive bytes.
+    ///
+    /// No-op clone when the entry declares no `render`. For
+    /// [`RenderMode::AnolisaPathsV1`] the bytes must be UTF-8 text; layout
+    /// placeholders are substituted via the same expansion vocabulary used
+    /// for destination paths, so path and content semantics cannot drift.
+    fn rendered_bytes(
+        &self,
+        file: &ResolvedInstallFile,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, InstallError> {
+        let Some(spec) = file.render.as_ref() else {
+            return Ok(bytes.to_vec());
+        };
+        match spec.mode {
+            RenderMode::AnolisaPathsV1 => {
+                let text = std::str::from_utf8(bytes).map_err(|_| InstallError::Render {
+                    path: file.dest.clone(),
+                    reason: "content is not valid UTF-8 — anolisa-paths-v1 renders text files only"
+                        .to_string(),
+                })?;
+                let rendered = crate::adapter::expand_layout_placeholders_str(
+                    text,
+                    self.layout,
+                    &[("component", spec.component.as_str())],
+                )
+                .map_err(|err| {
+                    let reason = match err {
+                        crate::adapter::AdapterError::UnknownPlaceholder {
+                            placeholder, ..
+                        } => format!("content references unknown placeholder '{{{placeholder}}}'"),
+                        other => other.to_string(),
+                    };
+                    InstallError::Render {
+                        path: file.dest.clone(),
+                        reason,
+                    }
+                })?;
+                Ok(rendered.into_bytes())
+            }
+        }
     }
 
     fn validate_dest(&self, dest: &Path) -> Result<(), InstallError> {
@@ -637,6 +752,7 @@ impl PreparedSymlink {
             dest: self.dest.clone(),
             mode: None,
             kind: FileKind::Symlink,
+            render: None,
         }
     }
 }
@@ -1147,6 +1263,7 @@ mod tests {
                     dest: dest.clone(),
                     mode: None,
                     kind: FileKind::Data,
+                    render: None,
                 }],
             )
             .expect("install ok");
@@ -1183,6 +1300,7 @@ mod tests {
                     dest: dest_root.clone(),
                     mode: Some("0644".to_string()),
                     kind: FileKind::Data,
+                    render: None,
                 }],
             )
             .expect("install ok");
@@ -1228,6 +1346,7 @@ mod tests {
                     dest: dest.clone(),
                     mode: Some("0644".to_string()),
                     kind: FileKind::Data,
+                    render: None,
                 }],
             )
             .expect("install ok");
@@ -1255,6 +1374,7 @@ mod tests {
                     dest: dest.clone(),
                     mode: Some("not-octal".to_string()),
                     kind: FileKind::Data,
+                    render: None,
                 }],
             )
             .expect_err("must reject invalid mode");
@@ -1374,6 +1494,7 @@ mod tests {
                     dest: dest.clone(),
                     mode: None,
                     kind: FileKind::Data,
+                    render: None,
                 }],
             )
             .expect_err("must reject");
@@ -1405,6 +1526,7 @@ mod tests {
                     dest: dest.clone(),
                     mode: None,
                     kind: FileKind::Data,
+                    render: None,
                 }],
             )
             .expect_err("must reject");
@@ -1557,6 +1679,7 @@ mod tests {
             dest,
             mode: None,
             kind: FileKind::Symlink,
+            render: None,
         }
     }
 
@@ -1580,6 +1703,7 @@ mod tests {
                 dest: referent.clone(),
                 mode: Some("0755".into()),
                 kind: FileKind::Data,
+                render: None,
             },
             symlink_entry(&referent, link_dest.clone()),
         ];
@@ -1620,6 +1744,7 @@ mod tests {
                 dest: link_dest.clone(),
                 mode: None,
                 kind: FileKind::Symlink,
+                render: None,
             },
         ];
 
@@ -1741,5 +1866,193 @@ mod tests {
             .install_files("tar_gz", &cached, &files)
             .expect_err("must error");
         assert!(matches!(err, InstallError::NoDestinations));
+    }
+
+    // -- content rendering (`render = "anolisa-paths-v1"`) ------------------
+
+    fn render_entry(source: &str, dest: PathBuf) -> ResolvedInstallFile {
+        ResolvedInstallFile {
+            source: Some(source.to_string()),
+            dest,
+            mode: Some("0644".to_string()),
+            kind: FileKind::Data,
+            render: Some(RenderSpec {
+                mode: RenderMode::AnolisaPathsV1,
+                component: "sec-core".to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn render_substitutes_placeholders_and_hashes_rendered_bytes() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let template = "[Service]\nExecStart=\"{bindir}/agent-sec-daemon\" serve\nReadWritePaths=\"{datadir}\"\n";
+        let gz = build_tar_gz(&[("share/agent-sec-core.service.in", template.as_bytes())]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
+
+        let dest = layout.datadir.join("agent-sec-core.service");
+        let outcome = runner
+            .install_files(
+                "tar_gz",
+                &cached,
+                &[render_entry(
+                    "share/agent-sec-core.service.in",
+                    dest.clone(),
+                )],
+            )
+            .expect("install ok");
+
+        let expected = template
+            .replace("{bindir}", &layout.bin_dir.to_string_lossy())
+            .replace("{datadir}", &layout.datadir.to_string_lossy());
+        let installed = fs::read_to_string(&dest).unwrap();
+        assert_eq!(installed, expected, "placeholders must be substituted");
+        assert!(
+            !installed.contains('{'),
+            "no literal placeholder may survive rendering"
+        );
+        // State records the sha256 of the *rendered* bytes, so integrity
+        // verification over the installed file passes.
+        assert_eq!(outcome.files[0].sha256, sha256_of(expected.as_bytes()));
+    }
+
+    #[test]
+    fn render_expands_component_variable() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let gz = build_tar_gz(&[("conf.in", b"root={datadir}/adapters/{component}\n")]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
+
+        let dest = layout.etc_dir.join("conf");
+        runner
+            .install_files("tar_gz", &cached, &[render_entry("conf.in", dest.clone())])
+            .expect("install ok");
+        assert_eq!(
+            fs::read_to_string(&dest).unwrap(),
+            format!("root={}/adapters/sec-core\n", layout.datadir.display())
+        );
+    }
+
+    #[test]
+    fn render_unknown_placeholder_rejected() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let gz = build_tar_gz(&[("unit.in", b"ExecStart={no_such_dir}/daemon\n")]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
+
+        let dest = layout.datadir.join("unit");
+        let err = runner
+            .install_files("tar_gz", &cached, &[render_entry("unit.in", dest.clone())])
+            .expect_err("must reject unknown placeholder");
+        match err {
+            InstallError::Render { path, reason } => {
+                assert_eq!(path, dest);
+                assert!(
+                    reason.contains("no_such_dir"),
+                    "reason must name the placeholder: {reason}"
+                );
+            }
+            other => panic!("expected Render, got {other:?}"),
+        }
+        assert!(!dest.exists(), "nothing may land on a failed render");
+    }
+
+    #[test]
+    fn render_non_utf8_content_rejected() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let gz = build_tar_gz(&[("blob.in", &[0xff, 0xfe, 0x00, 0x7b][..])]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
+
+        let dest = layout.datadir.join("blob");
+        let err = runner
+            .install_files("tar_gz", &cached, &[render_entry("blob.in", dest.clone())])
+            .expect_err("must reject non-UTF-8 content");
+        match err {
+            InstallError::Render { path, reason } => {
+                assert_eq!(path, dest);
+                assert!(reason.contains("UTF-8"), "reason must say UTF-8: {reason}");
+            }
+            other => panic!("expected Render, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_on_directory_source_rejected() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let gz = build_tar_gz(&[("tree/file", b"x")]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
+
+        let dest = layout.datadir.join("tree");
+        let err = runner
+            .install_files("tar_gz", &cached, &[render_entry("tree/", dest.clone())])
+            .expect_err("must reject render on a directory source");
+        match err {
+            InstallError::Render { path, .. } => assert_eq!(path, dest),
+            other => panic!("expected Render, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_on_symlink_rejected() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let gz = build_tar_gz(&[("bin/foo", b"x")]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
+
+        let referent = layout.bin_dir.join("foo");
+        let link_dest = layout.bin_dir.join("foo-link");
+        let mut link = symlink_entry(&referent, link_dest.clone());
+        link.render = Some(RenderSpec {
+            mode: RenderMode::AnolisaPathsV1,
+            component: "sec-core".to_string(),
+        });
+        let files = vec![
+            ResolvedInstallFile {
+                source: Some("bin/foo".to_string()),
+                dest: referent,
+                mode: None,
+                kind: FileKind::Data,
+                render: None,
+            },
+            link,
+        ];
+        let err = runner
+            .install_files("tar_gz", &cached, &files)
+            .expect_err("must reject render on a symlink");
+        match err {
+            InstallError::Render { path, .. } => assert_eq!(path, link_dest),
+            other => panic!("expected Render, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_mode_parse_accepts_only_v1() {
+        assert_eq!(
+            RenderMode::parse("anolisa-paths-v1"),
+            Some(RenderMode::AnolisaPathsV1)
+        );
+        assert_eq!(RenderMode::parse("anolisa-paths-v2"), None);
+        assert_eq!(RenderMode::parse(""), None);
     }
 }
