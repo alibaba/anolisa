@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "TOKENLESS_AGENT_ID=claude-code bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" rewrite_hook.py",
+            "command": "TOKENLESS_AGENT_ID=claude-code bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" rewrite_hook.py --agent-id claude-code",
             "timeout": 10
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "TOKENLESS_AGENT_ID=claude-code bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" compress_response_hook.py",
+            "command": "TOKENLESS_AGENT_ID=claude-code bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" compress_response_hook.py --agent-id claude-code",
             "timeout": 15
           }
         ]
