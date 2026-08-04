@@ -10,6 +10,36 @@ fn snap(echo_off: bool, icanon: bool, blocked: bool) -> InteractiveSnapshot {
     }
 }
 
+/// Snapshot with fg_is_foreign=false (shell itself is the foreground group,
+/// as happens when bash is waiting for line-continuation input, #2182).
+fn snap_shell_fg(echo_off: bool, icanon: bool, blocked: bool) -> InteractiveSnapshot {
+    InteractiveSnapshot {
+        echo_off,
+        icanon,
+        fg_is_foreign: false,
+        blocked_tty_read: blocked,
+        fg_comm: Some("bash".to_string()),
+    }
+}
+
+#[test]
+fn bash_line_continuation_classifies_as_stdin_wait() {
+    // Bash waiting for PS2 input (unmatched quote): echo on, icanon, blocked
+    // tty read, shell still is the foreground group (fg_is_foreign=false).
+    // Must reach Row 5 (StdinWait) so the #2161 input-wait timeout fires
+    // and prevents the agent turn from stalling permanently (#2182).
+    assert_eq!(
+        classify_interactive_state(&snap_shell_fg(false, true, true), false, None),
+        Some(InteractiveHintKind::StdinWait)
+    );
+    // Shell-is-fg but NOT blocked in a tty read (e.g. actively running a
+    // command): must still classify to None so normal execution is exempt.
+    assert_eq!(
+        classify_interactive_state(&snap_shell_fg(false, true, false), false, None),
+        None
+    );
+}
+
 #[test]
 fn decision_table_rows_match_probe_matrix_anchors() {
     // Row 1: read -s / getpass / sudo fingerprint.

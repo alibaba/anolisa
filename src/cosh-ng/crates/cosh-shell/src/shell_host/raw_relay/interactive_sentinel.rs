@@ -78,7 +78,11 @@ pub(crate) fn classify_interactive_state(
         return Some(InteractiveHintKind::RawInteractive { comm: comm() });
     }
     // Row 5: cooked mode but blocked reading stdin/tty — confirmation
-    // prompts (rm -i) and bare stdin consumers (cat, wc).
+    // prompts (rm -i), bare stdin consumers (cat, wc), and bash itself
+    // waiting for line-continuation input (unmatched quote → PS2 prompt,
+    // #2182). Shell-is-fg is no longer gated by fg_is_foreign: the /proc
+    // probe runs for all fg groups; Row 5 fires whenever the evidence
+    // arrives regardless of whether a child process is in the foreground.
     if !snapshot.echo_off && snapshot.icanon && snapshot.blocked_tty_read {
         return Some(InteractiveHintKind::StdinWait);
     }
@@ -124,6 +128,13 @@ impl SentinelThrottle {
 /// Samples S1 (termios) and S3 (foreground pgrp blocking point) for the
 /// given PTY master fd. Fail-quiet: every error path yields the default
 /// snapshot, which classifies to `None`.
+///
+/// The `/proc` block-state probe runs for any foreground pgrp, not only
+/// foreign ones: when bash itself is the foreground group and enters a
+/// line-continuation wait (unmatched quote → PS2 prompt), it blocks in a
+/// canonical tty read with echo on and icanon set — Row 5 (StdinWait) of
+/// the decision table — and must accrue the `input_wait_timeout` clock
+/// so the agent turn does not stall permanently (#2182).
 pub(crate) fn sample_interactive_state(master_fd: i32, shell_pgid: i32) -> InteractiveSnapshot {
     let mut snapshot = InteractiveSnapshot::default();
     let Ok(termios) =
@@ -136,8 +147,13 @@ pub(crate) fn sample_interactive_state(master_fd: i32, shell_pgid: i32) -> Inter
     snapshot.icanon = termios.local_flags.contains(LocalFlags::ICANON);
 
     let fg = unsafe { nix::libc::tcgetpgrp(master_fd) };
-    if fg > 0 && fg != shell_pgid {
-        snapshot.fg_is_foreign = true;
+    if fg > 0 {
+        if fg != shell_pgid {
+            snapshot.fg_is_foreign = true;
+        }
+        // Probe blocked-tty-read for the foreground group unconditionally:
+        // bash staying as its own fg group can still block in a stdin read
+        // (line-continuation, `read` builtin) and must reach Row 5.
         #[cfg(target_os = "linux")]
         linux::fill_foreground_block_state(fg, &mut snapshot);
     }
