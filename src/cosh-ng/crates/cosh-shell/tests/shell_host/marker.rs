@@ -2911,3 +2911,1518 @@ fn shell_host_bash_missing_path_counterproofs_stay_native() {
             .expect("restore opaque");
     }
 }
+
+// zsh sibling of the bash missing-path route (#1943): a slash-bearing
+// first word never reaches command_not_found_handler (zsh execs the token
+// as a path), so the accept-line widget reclassifies it with the
+// missing-path context and intercepts before execution.
+#[test]
+fn shell_host_zsh_missing_path_natural_language_intercepts() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-nl-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    let mut config = ShellHostConfig::new("zsh-missing-path-nl", &work_dir);
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let prompt = "你读一下，并安装这个skill：/nonexistent-cosh-1943-probe/SKILL.md";
+    let output =
+        run_scripted_zsh(&config, &[ScriptedInput::user_line(prompt)]).expect("scripted zsh pty");
+
+    let intercept = output
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(prompt)
+                && event.component.as_deref() == Some("natural_language")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "zsh missing-path natural-language intercept: {:?}",
+                output.events
+            )
+        });
+    // Pre-execution intercepts are shaped like slash/agent-marker intercepts
+    // (no top_level_missing correlation: the command never started, so there
+    // is no in-flight attempt to correlate with).
+    assert!(intercept.routing.is_none(), "{:?}", output.events);
+    // Interception must prevent execution: no command block and no native
+    // zsh path error may appear for the prompt.
+    let ledger = build_command_blocks(&output.events);
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+    assert!(!ledger.blocks.iter().any(|block| block.command == prompt));
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(
+        !terminal.contains("no such file or directory"),
+        "{terminal}"
+    );
+    // The erased edit line is re-echoed so the submission stays visible.
+    assert!(terminal.contains(prompt), "{terminal}");
+}
+
+/// The zsh missing-path route keeps the sensitive contract of its bash
+/// sibling: a slash-bearing NL prompt carrying a key intercepts with the
+/// sensitive routing flag and the journal whole-field redaction, and the
+/// re-echoed line shows the redaction placeholder instead of the raw text.
+#[test]
+fn shell_host_zsh_sensitive_missing_path_natural_language_intercepts() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-sensitive-nl-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    let mut config = ShellHostConfig::new("zsh-missing-path-sensitive-nl", &work_dir);
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let prompt =
+        "你读一下，并安装这个skill：/nonexistent-cosh-1943-probe/SKILL.md API Key: sk-fbaa6";
+    let output =
+        run_scripted_zsh(&config, &[ScriptedInput::user_line(prompt)]).expect("scripted zsh pty");
+
+    let intercept = output
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.component.as_deref() == Some("natural_language")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "zsh sensitive missing-path natural-language intercept: {:?}",
+                output.events
+            )
+        });
+    assert_eq!(intercept.input.as_deref(), Some("<redacted>"));
+    assert!(
+        intercept
+            .routing
+            .as_ref()
+            .is_some_and(|routing| routing.sensitive && !routing.top_level_missing),
+        "{intercept:?}"
+    );
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(
+        !terminal.contains("no such file or directory"),
+        "{terminal}"
+    );
+    // The re-echo path must never restore what ZLE erased: only the
+    // placeholder may appear after the edit line is cleared.
+    assert!(
+        terminal.contains("<redacted sensitive command>"),
+        "{terminal}"
+    );
+    assert!(
+        !format!("{:?}", output.events).contains("sk-fbaa6"),
+        "{:?}",
+        output.events
+    );
+    let journal = std::fs::read_to_string(&output.journal_path).unwrap();
+    assert!(!journal.contains("sk-fbaa6"), "{journal}");
+}
+
+// zsh fail-closed counterproofs mirroring the bash set: existing paths,
+// plain-English typo paths, dangling symlinks and permission-opaque
+// parents must all keep native zsh behavior, and the slash-free CNF
+// route must keep working next to the new widget.
+#[test]
+fn shell_host_zsh_missing_path_counterproofs_stay_native() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-native-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    let probe_path = work_dir.join("probe-1943.sh");
+    let executed_path = work_dir.join("probe-1943-executed");
+    std::fs::write(
+        &probe_path,
+        format!("#!/bin/sh\ntouch {}\n", executed_path.display()),
+    )
+    .expect("probe script");
+    make_executable(&probe_path);
+    let data_path = work_dir.join("data-1943.txt");
+    std::fs::write(&data_path, "plain data\n").expect("data file");
+    let dangling_path = work_dir.join("dangling-1943");
+    std::os::unix::fs::symlink(work_dir.join("no-such-target"), &dangling_path)
+        .expect("dangling symlink");
+    let opaque_dir = work_dir.join("opaque-1943");
+    std::fs::create_dir_all(&opaque_dir).expect("opaque dir");
+    let opaque_file = opaque_dir.join("real-file");
+    std::fs::write(&opaque_file, "x\n").expect("opaque file");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&opaque_dir, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod opaque");
+    }
+
+    let mut config = ShellHostConfig::new("zsh-missing-path-native", &work_dir);
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+    let existing_exec = probe_path.display().to_string();
+    let existing_data = format!("{} 帮我读一下", data_path.display());
+    let dangling_input = format!("{} 帮我读一下", dangling_path.display());
+    let opaque_input = format!("{} 帮我读一下", opaque_file.display());
+    let output = run_scripted_zsh(
+        &config,
+        &[
+            ScriptedInput::user_line(existing_exec.clone()),
+            ScriptedInput::user_line("/usr/bin/nonexistent-cosh-1943-probe"),
+            ScriptedInput::user_line(existing_data.clone()),
+            ScriptedInput::user_line(dangling_input.clone()),
+            ScriptedInput::user_line(opaque_input.clone()),
+        ],
+    )
+    .expect("scripted zsh pty");
+
+    assert!(
+        executed_path.exists(),
+        "existing script must run natively: {:?}",
+        output.events
+    );
+    assert!(
+        !output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("no such file or directory"), "{terminal}");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&opaque_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore opaque");
+    }
+}
+
+/// A user rcfile that wraps accept-line keeps both halves of the contract:
+/// the cosh widget still intercepts slash-bearing NL prompts, and native
+/// lines still reach the user's widget through the saved alias.
+#[test]
+fn shell_host_zsh_missing_path_intercepts_with_user_accept_line_widget() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-user-widget-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let widget_log = work_dir.join("user-widget.log");
+    std::fs::write(
+        home_dir.join(".zshrc"),
+        format!(
+            "_user_accept_line() {{ print -r -- \"user-widget:$BUFFER\" >> {}; zle .accept-line }}\n\
+             zle -N accept-line _user_accept_line\n",
+            widget_log.display()
+        ),
+    )
+    .expect("zshrc");
+    let mut config = ShellHostConfig::new("zsh-missing-path-user-widget", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let prompt = "你读一下，并安装这个skill：/nonexistent-cosh-1943-probe/SKILL.md";
+    let output = run_scripted_zsh(
+        &config,
+        &[
+            ScriptedInput::user_line(prompt),
+            ScriptedInput::user_line("echo widget-chain-ok"),
+        ],
+    )
+    .expect("scripted zsh pty");
+
+    assert!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(prompt)
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("widget-chain-ok"), "{terminal}");
+    // The user's own widget stays in the chain for pass-through lines.
+    let log = std::fs::read_to_string(&widget_log).unwrap_or_default();
+    assert!(log.contains("user-widget:echo widget-chain-ok"), "{log}");
+}
+
+/// Intercepted lines never enter history (repeated submissions included):
+/// replaying zsh's native history policy outside native hook processing is
+/// an open-ended surface, so the route writes nothing at all.
+#[test]
+fn shell_host_zsh_missing_path_intercepted_lines_stay_out_of_history() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-hist-policy-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let hist_dump = work_dir.join("hist-dump");
+    std::fs::write(home_dir.join(".zshrc"), "setopt HIST_IGNORE_DUPS\n").expect("zshrc");
+    let mut config = ShellHostConfig::new("zsh-missing-path-hist-policy", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let prompt = "帮我看看：/nonexistent-cosh-1943-hist/SKILL.md";
+    let output = run_scripted_zsh(
+        &config,
+        &[
+            ScriptedInput::user_line(prompt),
+            ScriptedInput::user_line(prompt),
+            ScriptedInput::user_line(format!("fc -ln -8 > {} 2>&1", hist_dump.display())),
+        ],
+    )
+    .expect("scripted zsh pty");
+
+    // Both submissions intercept.
+    let intercepts = output
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(prompt)
+                && event.component.as_deref() == Some("natural_language")
+        })
+        .count();
+    assert_eq!(intercepts, 2, "{:?}", output.events);
+    // Neither reaches history.
+    let hist = std::fs::read_to_string(&hist_dump).unwrap_or_default();
+    assert!(
+        !hist.contains("nonexistent-cosh-1943-hist"),
+        "intercepted prompts must never enter history: {hist}"
+    );
+}
+
+/// accept-line customized with `zle -A` to another builtin is not a
+/// `user:*` widget; the unconditional alias save must still preserve it
+/// while keeping the interception mounted on top.
+#[test]
+fn shell_host_zsh_missing_path_intercepts_with_builtin_alias_accept_line() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-builtin-alias-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(
+        home_dir.join(".zshrc"),
+        "zle -A accept-line-and-down-history accept-line\n",
+    )
+    .expect("zshrc");
+    let mut config = ShellHostConfig::new("zsh-missing-path-builtin-alias", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let prompt = "你读一下，并安装这个skill：/nonexistent-cosh-1943-probe/SKILL.md";
+    let output = run_scripted_zsh(
+        &config,
+        &[
+            ScriptedInput::user_line(prompt),
+            ScriptedInput::user_line("echo builtin-alias-ok"),
+        ],
+    )
+    .expect("scripted zsh pty");
+
+    assert!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(prompt)
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    // Native lines keep executing through the preserved builtin alias.
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("builtin-alias-ok"), "{terminal}");
+    let ledger = build_command_blocks(&output.events);
+    assert!(!ledger.blocks.iter().any(|block| block.command == prompt));
+}
+
+/// Heredoc continuation lines submit through accept-line with
+/// CONTEXT=cont: the widget must pass them through untouched even when
+/// they look like slash-bearing natural language.
+#[test]
+fn shell_host_zsh_missing_path_heredoc_continuation_stays_native() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-heredoc-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    let mut config = ShellHostConfig::new("zsh-missing-path-heredoc", &work_dir);
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let continuation = "帮我读一下：/nonexistent-cosh-1943-probe/SKILL.md";
+    let output = run_scripted_zsh(
+        &config,
+        &[
+            ScriptedInput::user_line("cat <<'EOF'"),
+            ScriptedInput::user_line(continuation),
+            ScriptedInput::user_line("EOF"),
+        ],
+    )
+    .expect("scripted zsh pty");
+
+    // The heredoc body must flow through cat, not the agent.
+    assert!(
+        !output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains(continuation), "{terminal}");
+}
+
+/// A saved user accept-line widget that synthesizes a command for an
+/// empty buffer must never run after a successful intercept: the
+/// finalize path goes through the builtin, so no native command may
+/// start for a line the marker already claimed as intercepted.
+#[test]
+fn shell_host_zsh_missing_path_intercept_never_runs_user_widget_synthesis() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-widget-synth-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(
+        home_dir.join(".zshrc"),
+        "_user_accept_line() {\n\
+           if [[ -z \"$BUFFER\" ]]; then BUFFER='echo review-unexpected-native'; fi\n\
+           zle .accept-line\n\
+         }\n\
+         zle -N accept-line _user_accept_line\n",
+    )
+    .expect("zshrc");
+    let mut config = ShellHostConfig::new("zsh-missing-path-widget-synth", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let prompt = "你读一下，并安装这个skill：/nonexistent-cosh-1943-probe/SKILL.md";
+    let output = run_scripted_zsh(
+        &config,
+        &[
+            ScriptedInput::user_line(prompt),
+            ScriptedInput::user_line("echo synth-guard-done"),
+        ],
+    )
+    .expect("scripted zsh pty");
+
+    assert!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(prompt)
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    // The empty-buffer synthesis must not have produced a command block.
+    let ledger = build_command_blocks(&output.events);
+    assert!(
+        !ledger
+            .blocks
+            .iter()
+            .any(|block| block.command.contains("review-unexpected-native")),
+        "{:?}",
+        ledger.blocks
+    );
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(!terminal.contains("review-unexpected-native"), "{terminal}");
+    // Pass-through lines still reach the user widget (which passes them on).
+    assert!(terminal.contains("synth-guard-done"), "{terminal}");
+}
+
+/// A foreign zshaddhistory hook (e.g. per-directory-history running
+/// `fc -p`) must never be replayed by the manual history re-add: outside
+/// native hook processing zsh does not restore the pushed history
+/// context, so the policy check fails closed to skipping the add and the
+/// session HISTFILE stays untouched.
+#[test]
+fn shell_host_zsh_missing_path_foreign_history_hook_stays_uninvoked() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-foreign-hook-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let hook_log = work_dir.join("hook-invocations.log");
+    let histfile_dump = work_dir.join("histfile-dump");
+    // The hook logs every invocation and swaps the history context the way
+    // per-directory-history plugins do.
+    std::fs::write(
+        home_dir.join(".zshrc"),
+        format!(
+            "autoload -Uz add-zsh-hook\n\
+             _user_dir_history() {{\n\
+               print -r -- \"hook:${{1%$'\\n'}}\" >> {log}\n\
+               fc -p {local_hist}\n\
+               return 0\n\
+             }}\n\
+             add-zsh-hook zshaddhistory _user_dir_history\n",
+            log = hook_log.display(),
+            local_hist = work_dir.join("local-history").display(),
+        ),
+    )
+    .expect("zshrc");
+    let mut config = ShellHostConfig::new("zsh-missing-path-foreign-hook", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let prompt = "你读一下，并安装这个skill：/nonexistent-cosh-1943-probe/SKILL.md";
+    let output = run_scripted_zsh(
+        &config,
+        &[
+            ScriptedInput::user_line(prompt),
+            ScriptedInput::user_line(format!(
+                "print -r -- \"histfile:$HISTFILE\" > {} 2>&1",
+                histfile_dump.display()
+            )),
+        ],
+    )
+    .expect("scripted zsh pty");
+
+    // Interception itself still fires.
+    assert!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(prompt)
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    // The foreign hook must not have been invoked for the intercepted line
+    // (native invocations for later pass-through lines are fine).
+    let log = std::fs::read_to_string(&hook_log).unwrap_or_default();
+    assert!(
+        !log.contains("nonexistent-cosh-1943-probe"),
+        "foreign zshaddhistory hook must not be replayed for the intercepted line: {log}"
+    );
+    // The session history context was not left swapped by a replayed fc -p.
+    let dump = std::fs::read_to_string(&histfile_dump).unwrap_or_default();
+    assert!(
+        !dump.contains("local-history"),
+        "HISTFILE must not be left pointing at the hook's pushed context: {dump}"
+    );
+}
+
+/// A URL-shaped first word keeps the native result even though its first
+/// path component proves missing in a readable cwd and the Han-bearing
+/// line classifies as natural language.
+#[test]
+fn shell_host_zsh_missing_path_url_first_word_stays_native() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-url-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    let mut config = ShellHostConfig::new("zsh-missing-path-url", &work_dir);
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let output = run_scripted_zsh(
+        &config,
+        &[ScriptedInput::user_line(
+            "https://example.invalid/path 请帮我打开",
+        )],
+    )
+    .expect("scripted zsh pty");
+
+    assert!(
+        !output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(
+        terminal.contains("no such file or directory"),
+        "URL first word must keep the native zsh result: {terminal}"
+    );
+}
+
+/// A keymap that binds the submit key straight to another widget bypasses
+/// the accept-line name entirely; the submit-key claim must still route
+/// the interception while pass-through lines keep the user's widget.
+#[test]
+fn shell_host_zsh_missing_path_intercepts_with_direct_submit_key_binding() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-submit-key-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let widget_log = work_dir.join("submit-widget.log");
+    std::fs::write(
+        home_dir.join(".zshrc"),
+        format!(
+            "_user_submit() {{\n\
+               print -r -- \"submit-widget:$BUFFER\" >> {}\n\
+               zle .accept-line\n\
+             }}\n\
+             zle -N _user_submit\n\
+             bindkey '^M' _user_submit\n\
+             bindkey '^J' _user_submit\n",
+            widget_log.display()
+        ),
+    )
+    .expect("zshrc");
+    let mut config = ShellHostConfig::new("zsh-missing-path-submit-key", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let prompt = "你读一下，并安装这个skill：/nonexistent-cosh-1943-probe/SKILL.md";
+    let output = run_scripted_zsh(
+        &config,
+        &[
+            ScriptedInput::user_line(prompt),
+            ScriptedInput::user_line("echo submit-key-ok"),
+        ],
+    )
+    .expect("scripted zsh pty");
+
+    // The slash-bearing NL prompt is intercepted despite the direct binding.
+    assert!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(prompt)
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    let ledger = build_command_blocks(&output.events);
+    assert!(!ledger.blocks.iter().any(|block| block.command == prompt));
+    // Pass-through lines still reach the user's directly-bound widget.
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("submit-key-ok"), "{terminal}");
+    let log = std::fs::read_to_string(&widget_log).unwrap_or_default();
+    assert!(log.contains("submit-widget:echo submit-key-ok"), "{log}");
+    // The intercepted line never went through the user widget.
+    assert!(
+        !log.contains("nonexistent-cosh-1943-probe"),
+        "intercept path must not invoke the user's submit widget: {log}"
+    );
+}
+
+/// The re-echo path performs no prompt expansion: with PROMPT_SUBST a
+/// side-effecting $(...) in PS1 must run exactly as often as native prompt
+/// rendering, never an extra time on the intercept route.
+#[test]
+fn shell_host_zsh_missing_path_intercept_does_not_reevaluate_ps1() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-ps1-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let counter = work_dir.join("ps1-evals");
+    std::fs::write(
+        home_dir.join(".zshrc"),
+        format!(
+            "setopt PROMPT_SUBST\nPS1='$(echo x >> {})> '\n",
+            counter.display()
+        ),
+    )
+    .expect("zshrc");
+    let mut config = ShellHostConfig::new("zsh-missing-path-ps1", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let prompt = "帮我看看：/nonexistent-cosh-1943-ps1/SKILL.md";
+    let dump = work_dir.join("ps1-eval-count");
+    let output = run_scripted_zsh(
+        &config,
+        &[
+            ScriptedInput::user_line(prompt),
+            ScriptedInput::user_line(format!(
+                "wc -l < {} > {} 2>&1",
+                counter.display(),
+                dump.display()
+            )),
+        ],
+    )
+    .expect("scripted zsh pty");
+
+    assert!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(prompt)
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    // Prompt renders observed by the wc line: the initial prompt and the
+    // one repainted after the intercepted submission — an extra evaluation
+    // on the intercept route would push this to 3.
+    let count = std::fs::read_to_string(&dump).unwrap_or_default();
+    assert_eq!(
+        count.trim(),
+        "2",
+        "intercept route must not add a PS1 evaluation: {count}"
+    );
+}
+
+/// Submit-key widgets are saved per keymap: a vicmd-specific widget on the
+/// same key must never be invoked from the insert-mode map, even though
+/// both keymaps were claimed (a flat per-key table would overwrite the
+/// main entry with the vicmd one).
+#[test]
+fn shell_host_zsh_missing_path_submit_key_widgets_stay_per_keymap() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-per-keymap-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let main_log = work_dir.join("main-widget.log");
+    let cmd_log = work_dir.join("cmd-widget.log");
+    std::fs::write(
+        home_dir.join(".zshrc"),
+        format!(
+            "_main_submit() {{\n\
+               print -r -- \"main:$BUFFER\" >> {main}\n\
+               zle .accept-line\n\
+             }}\n\
+             _cmd_submit() {{\n\
+               print -r -- \"cmd:$BUFFER\" >> {cmd}\n\
+               zle .accept-line\n\
+             }}\n\
+             zle -N _main_submit\n\
+             zle -N _cmd_submit\n\
+             bindkey '^M' _main_submit\n\
+             bindkey '^J' _main_submit\n\
+             bindkey -M vicmd '^M' _cmd_submit\n\
+             bindkey -M vicmd '^J' _cmd_submit\n",
+            main = main_log.display(),
+            cmd = cmd_log.display(),
+        ),
+    )
+    .expect("zshrc");
+    let mut config = ShellHostConfig::new("zsh-missing-path-per-keymap", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let prompt = "你读一下，并安装这个skill：/nonexistent-cosh-1943-probe/SKILL.md";
+    let output = run_scripted_zsh(
+        &config,
+        &[
+            ScriptedInput::user_line(prompt),
+            ScriptedInput::user_line("echo per-keymap-ok"),
+        ],
+    )
+    .expect("scripted zsh pty");
+
+    assert!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(prompt)
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("per-keymap-ok"), "{terminal}");
+    // Pass-through lines in the insert-mode map reach the main widget…
+    let main = std::fs::read_to_string(&main_log).unwrap_or_default();
+    assert!(main.contains("main:echo per-keymap-ok"), "{main}");
+    // …and never the vicmd widget claimed on the same key.
+    let cmd = std::fs::read_to_string(&cmd_log).unwrap_or_default();
+    assert!(
+        cmd.is_empty(),
+        "vicmd widget must not be invoked from the insert-mode map: {cmd}"
+    );
+}
+
+/// A directly bound submit widget that finishes with the NAMED
+/// `zle accept-line` re-enters the wrapper; the in-progress guard must
+/// route that call to the builtin so the widget runs exactly once per
+/// line and the submission still completes.
+#[test]
+fn shell_host_zsh_missing_path_reentrant_accept_line_runs_widget_once() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-reentrant-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let widget_log = work_dir.join("reentrant-widget.log");
+    std::fs::write(
+        home_dir.join(".zshrc"),
+        format!(
+            "_user_submit() {{\n\
+               print -r -- \"submit:$BUFFER\" >> {}\n\
+               zle accept-line\n\
+             }}\n\
+             zle -N _user_submit\n\
+             bindkey '^M' _user_submit\n\
+             bindkey '^J' _user_submit\n",
+            widget_log.display()
+        ),
+    )
+    .expect("zshrc");
+    let mut config = ShellHostConfig::new("zsh-missing-path-reentrant", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let prompt = "你读一下，并安装这个skill：/nonexistent-cosh-1943-probe/SKILL.md";
+    let output = run_scripted_zsh(
+        &config,
+        &[
+            ScriptedInput::user_line(prompt),
+            ScriptedInput::user_line("echo reentrant-ok"),
+        ],
+    )
+    .expect("scripted zsh pty");
+
+    assert!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(prompt)
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    // The pass-through line submits and executes despite the named
+    // accept-line call inside the user widget.
+    assert!(terminal.contains("reentrant-ok"), "{terminal}");
+    assert!(
+        !terminal.contains("maximum nested"),
+        "delegated dispatch must not recurse: {terminal}"
+    );
+    // The user widget ran exactly once for the pass-through line.
+    let log = std::fs::read_to_string(&widget_log).unwrap_or_default();
+    assert_eq!(
+        log.matches("submit:echo reentrant-ok").count(),
+        1,
+        "user widget must run exactly once per submission: {log}"
+    );
+}
+
+/// zsh resolves aliases and functions before any path lookup, even for a
+/// slash-bearing word; a defined `function 路径/run` must execute natively
+/// and never be classified as a missing path (review round 6).
+#[test]
+fn shell_host_zsh_missing_path_slash_function_stays_native() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-fn-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(
+        home_dir.join(".zshrc"),
+        "function 探针1943/run { print -r -- \"function-native-ok:$*\" }\n",
+    )
+    .expect("zshrc");
+    let mut config = ShellHostConfig::new("zsh-missing-path-fn", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let output = run_scripted_zsh(
+        &config,
+        &[ScriptedInput::user_line("探针1943/run 帮我运行一下")],
+    )
+    .expect("scripted zsh pty");
+
+    assert!(
+        !output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(
+        terminal.contains("function-native-ok:帮我运行一下"),
+        "slash-bearing function must run natively: {terminal}"
+    );
+}
+
+/// An unquoted glob in a slash-bearing first word may expand to an
+/// existing executable at execution time; the literal token proving
+/// missing on disk proves nothing, so the line stays native even when it
+/// carries Han characters (review round 6).
+#[test]
+fn shell_host_zsh_missing_path_han_glob_stays_native() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-glob-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let glob_dir = work_dir.join("目录甲");
+    std::fs::create_dir_all(&glob_dir).expect("glob dir");
+    let script = glob_dir.join("run");
+    std::fs::write(&script, "#!/bin/sh\necho glob-native-ok\n").expect("script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    let mut config = ShellHostConfig::new("zsh-missing-path-glob", &work_dir);
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let output = run_scripted_zsh(
+        &config,
+        &[
+            ScriptedInput::user_line(format!("cd {}", work_dir.display())),
+            ScriptedInput::user_line("目录*/run 帮我处理一下"),
+        ],
+    )
+    .expect("scripted zsh pty");
+
+    assert!(
+        !output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(
+        terminal.contains("glob-native-ok"),
+        "Han glob first word must expand and run natively: {terminal}"
+    );
+}
+
+/// A user accept-line wrapper (installed via `zle -N accept-line`) is part
+/// of the native submission chain: when a directly bound widget finishes
+/// with the NAMED `zle accept-line`, the re-entry must reach the saved
+/// wrapper — not skip to the builtin — and both widgets run exactly once
+/// (review round 6).
+#[test]
+fn shell_host_zsh_missing_path_reentrant_reaches_saved_accept_line() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-chain-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let chain_log = work_dir.join("chain.log");
+    std::fs::write(
+        home_dir.join(".zshrc"),
+        format!(
+            "_user_accept_wrapper() {{\n\
+               print -r -- \"B:$BUFFER\" >> {log}\n\
+               zle .accept-line\n\
+             }}\n\
+             zle -N accept-line _user_accept_wrapper\n\
+             _user_submit() {{\n\
+               print -r -- \"A:$BUFFER\" >> {log}\n\
+               zle accept-line\n\
+             }}\n\
+             zle -N _user_submit\n\
+             bindkey '^M' _user_submit\n\
+             bindkey '^J' _user_submit\n",
+            log = chain_log.display()
+        ),
+    )
+    .expect("zshrc");
+    let mut config = ShellHostConfig::new("zsh-missing-path-chain", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let output = run_scripted_zsh(&config, &[ScriptedInput::user_line("echo chain-ok")])
+        .expect("scripted zsh pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("chain-ok"), "{terminal}");
+    assert!(
+        !terminal.contains("maximum nested"),
+        "re-entry chain must stay finite: {terminal}"
+    );
+    let log = std::fs::read_to_string(&chain_log).unwrap_or_default();
+    // Native chain: A (bound widget) then B (accept-line wrapper), each
+    // exactly once per submission.
+    assert_eq!(
+        log.matches("A:echo chain-ok").count(),
+        1,
+        "bound widget must run exactly once: {log}"
+    );
+    assert_eq!(
+        log.matches("B:echo chain-ok").count(),
+        1,
+        "saved accept-line wrapper must stay in the chain: {log}"
+    );
+}
+
+/// Quoting is stripped by zsh's lexer before resolution: `"路径/run"`
+/// runs the defined function natively, while the raw token would probe
+/// as a missing path. The literal-word whitelist must fail open on any
+/// quoted first word (review round 7).
+#[test]
+fn shell_host_zsh_missing_path_quoted_function_stays_native() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-quoted-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(
+        home_dir.join(".zshrc"),
+        "function 探针1943q/run { print -r -- \"quoted-native-ok:$*\" }\n",
+    )
+    .expect("zshrc");
+    let mut config = ShellHostConfig::new("zsh-missing-path-quoted", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let output = run_scripted_zsh(
+        &config,
+        &[ScriptedInput::user_line("\"探针1943q/run\" 帮我运行一下")],
+    )
+    .expect("scripted zsh pty");
+
+    assert!(
+        !output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(
+        terminal.contains("quoted-native-ok:帮我运行一下"),
+        "quoted slash-bearing function must run natively: {terminal}"
+    );
+}
+
+/// Brace expansion rewrites the command word before execution:
+/// `/b{in,路径}/echo` natively runs `/bin/echo` even though the literal
+/// token is missing on disk. Any brace-bearing first word must fail open
+/// (review round 7).
+#[test]
+fn shell_host_zsh_missing_path_brace_expansion_stays_native() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-brace-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    let mut config = ShellHostConfig::new("zsh-missing-path-brace", &work_dir);
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let output = run_scripted_zsh(
+        &config,
+        &[ScriptedInput::user_line(
+            "/b{in,路径}/echo brace-native-ok 帮我运行",
+        )],
+    )
+    .expect("scripted zsh pty");
+
+    assert!(
+        !output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(
+        terminal.contains("brace-native-ok"),
+        "brace-expanded first word must run natively: {terminal}"
+    );
+}
+
+/// `bindkey -A main vicmd` makes both keymaps share one physical map, so
+/// the second claim scan sees the first scan's rebind; the saved entry
+/// must be mirrored so a vicmd-mode submission still reaches the user's
+/// widget exactly once (review round 7).
+#[test]
+fn shell_host_zsh_missing_path_aliased_keymap_keeps_user_widget() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-aliased-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let widget_log = work_dir.join("aliased-widget.log");
+    std::fs::write(
+        home_dir.join(".zshrc"),
+        format!(
+            "_user_submit() {{\n\
+               print -r -- \"submit:$KEYMAP:$BUFFER\" >> {log}\n\
+               zle .accept-line\n\
+             }}\n\
+             zle -N _user_submit\n\
+             bindkey '^M' _user_submit\n\
+             bindkey '^J' _user_submit\n\
+             bindkey '^B' vi-cmd-mode\n\
+             bindkey -A main vicmd\n",
+            log = widget_log.display()
+        ),
+    )
+    .expect("zshrc");
+    let mut config = ShellHostConfig::new("zsh-missing-path-aliased", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    // ^B (a non-prefix key, embedded in the line bytes) enters vicmd —
+    // aliased to main — before the newline submits; the submission must
+    // reach the user's widget through the mirrored vicmd table entry.
+    let output = run_scripted_zsh(
+        &config,
+        &[ScriptedInput::user_line("echo aliased-ok\u{02}")],
+    )
+    .expect("scripted zsh pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("aliased-ok"), "{terminal}");
+    let log = std::fs::read_to_string(&widget_log).unwrap_or_default();
+    assert_eq!(
+        log.matches("submit:vicmd:echo aliased-ok").count(),
+        1,
+        "vicmd submission must reach the user's widget exactly once: {log}"
+    );
+}
+
+/// An rcfile may create its own keymap, bind the submit keys there to a
+/// widget finishing with `zle .accept-line`, and select it from
+/// zle-line-init via `zle -K`. zsh's builtin keymap set is closed, so the
+/// mount claims every non-builtin keymap: interception still fires and
+/// pass-through lines keep the user's widget (review round 8).
+#[test]
+fn shell_host_zsh_missing_path_custom_keymap_still_intercepts() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-custom-km-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let widget_log = work_dir.join("custom-km-widget.log");
+    std::fs::write(
+        home_dir.join(".zshrc"),
+        format!(
+            "bindkey -N review-map main\n\
+             _user_submit() {{\n\
+               print -r -- \"submit:$KEYMAP:$BUFFER\" >> {log}\n\
+               zle .accept-line\n\
+             }}\n\
+             zle -N _user_submit\n\
+             bindkey -M review-map '^M' _user_submit\n\
+             bindkey -M review-map '^J' _user_submit\n\
+             zle-line-init() {{ zle -K review-map }}\n\
+             zle -N zle-line-init\n",
+            log = widget_log.display()
+        ),
+    )
+    .expect("zshrc");
+    let mut config = ShellHostConfig::new("zsh-missing-path-custom-km", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let prompt = "你读一下，并安装这个skill：/nonexistent-cosh-1943-probe/SKILL.md";
+    let output = run_scripted_zsh(
+        &config,
+        &[
+            ScriptedInput::user_line(prompt),
+            ScriptedInput::user_line("echo custom-km-ok"),
+        ],
+    )
+    .expect("scripted zsh pty");
+
+    // The NL line is intercepted even though submission happens in the
+    // user-defined keymap…
+    assert!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(prompt)
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    // …and the pass-through line still reaches the user's widget exactly
+    // once, from that keymap.
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("custom-km-ok"), "{terminal}");
+    let log = std::fs::read_to_string(&widget_log).unwrap_or_default();
+    assert_eq!(
+        log.matches("submit:review-map:echo custom-km-ok").count(),
+        1,
+        "custom-keymap submission must reach the user's widget exactly once: {log}"
+    );
+}
+
+/// Keymap names may carry spaces (`bindkey -N 'review map' main`); the
+/// mount enumerates `bindkey -l` per line so such a map is still claimed
+/// and interception fires from it (review round 9).
+#[test]
+fn shell_host_zsh_missing_path_space_keymap_still_intercepts() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-space-km-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let widget_log = work_dir.join("space-km-widget.log");
+    std::fs::write(
+        home_dir.join(".zshrc"),
+        format!(
+            "bindkey -N 'review map' main\n\
+             _user_submit() {{\n\
+               print -r -- \"submit:$KEYMAP:$BUFFER\" >> {log}\n\
+               zle .accept-line\n\
+             }}\n\
+             zle -N _user_submit\n\
+             bindkey -M 'review map' '^M' _user_submit\n\
+             bindkey -M 'review map' '^J' _user_submit\n\
+             zle-line-init() {{ zle -K 'review map' }}\n\
+             zle -N zle-line-init\n",
+            log = widget_log.display()
+        ),
+    )
+    .expect("zshrc");
+    let mut config = ShellHostConfig::new("zsh-missing-path-space-km", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let prompt = "你读一下，并安装这个skill：/nonexistent-cosh-1943-probe/SKILL.md";
+    let output = run_scripted_zsh(
+        &config,
+        &[
+            ScriptedInput::user_line(prompt),
+            ScriptedInput::user_line("echo space-km-ok"),
+        ],
+    )
+    .expect("scripted zsh pty");
+
+    assert!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(prompt)
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("space-km-ok"), "{terminal}");
+    let log = std::fs::read_to_string(&widget_log).unwrap_or_default();
+    assert_eq!(
+        log.matches("submit:review map:echo space-km-ok").count(),
+        1,
+        "space-bearing keymap submission must reach the user's widget exactly once: {log}"
+    );
+}
+
+/// With distinct main/vicmd submit widgets and a custom alias of main,
+/// the two-phase mount captures each keymap's binding before any rebind:
+/// the aliased map dispatches the widget of the map it actually shares
+/// (main's), never vicmd's (review round 9).
+#[test]
+fn shell_host_zsh_missing_path_alias_mirrors_shared_map_widget() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-zsh-missing-path-alias-src-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let main_log = work_dir.join("alias-main.log");
+    let cmd_log = work_dir.join("alias-vicmd.log");
+    std::fs::write(
+        home_dir.join(".zshrc"),
+        format!(
+            "_main_submit() {{\n\
+               print -r -- \"main:$KEYMAP:$BUFFER\" >> {main}\n\
+               zle .accept-line\n\
+             }}\n\
+             _cmd_submit() {{\n\
+               print -r -- \"cmd:$KEYMAP:$BUFFER\" >> {cmd}\n\
+               zle .accept-line\n\
+             }}\n\
+             zle -N _main_submit\n\
+             zle -N _cmd_submit\n\
+             bindkey '^M' _main_submit\n\
+             bindkey '^J' _main_submit\n\
+             bindkey -M vicmd '^M' _cmd_submit\n\
+             bindkey -M vicmd '^J' _cmd_submit\n\
+             bindkey -A main review-alias\n\
+             zle-line-init() {{ zle -K review-alias }}\n\
+             zle -N zle-line-init\n",
+            main = main_log.display(),
+            cmd = cmd_log.display(),
+        ),
+    )
+    .expect("zshrc");
+    let mut config = ShellHostConfig::new("zsh-missing-path-alias-src", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let output = run_scripted_zsh(&config, &[ScriptedInput::user_line("echo alias-src-ok")])
+        .expect("scripted zsh pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("alias-src-ok"), "{terminal}");
+    // The alias of main dispatches main's widget…
+    let main = std::fs::read_to_string(&main_log).unwrap_or_default();
+    assert_eq!(
+        main.matches("main:review-alias:echo alias-src-ok").count(),
+        1,
+        "aliased map must dispatch the shared map's widget exactly once: {main}"
+    );
+    // …and never vicmd's widget saved under the same key.
+    let cmd = std::fs::read_to_string(&cmd_log).unwrap_or_default();
+    assert!(
+        cmd.is_empty(),
+        "vicmd widget must not leak into an alias of main: {cmd}"
+    );
+}

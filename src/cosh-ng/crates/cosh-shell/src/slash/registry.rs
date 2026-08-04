@@ -483,7 +483,7 @@ mod tests {
         let registry = exact_slash_control_commands().collect::<BTreeSet<_>>();
         for (shell, marker) in [
             ("bash", include_str!("../shell_host/marker/bash.rs")),
-            ("zsh", include_str!("../shell_host/marker/zsh.rs")),
+            ("zsh", include_str!("../shell_host/marker/zsh_marker.sh")),
         ] {
             let case_lines = marker
                 .lines()
@@ -518,7 +518,7 @@ mod tests {
         let registry = exact_slash_control_commands()
             .map(|name| name.trim_start_matches('/'))
             .collect::<BTreeSet<_>>();
-        let marker = include_str!("../shell_host/marker/zsh.rs");
+        let marker = include_str!("../shell_host/marker/zsh_marker.sh");
         let line = marker
             .lines()
             .map(str::trim)
