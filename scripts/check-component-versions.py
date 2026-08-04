@@ -19,7 +19,7 @@ VERSION_RE = re.compile(
     r'^\s*(?:"version"|version)\s*[:=]\s*"([^"]+)"\s*,?\s*$', re.MULTILINE
 )
 TOML_CONTRACTS = (
-    ("src/agent-sec-core/openclaw-plugin/package.json", "src/agent-sec-core/adapters/component.toml"),
+    ("src/agent-sec-core/openclaw-plugin/package.json", "src/agent-sec-core/.anolisa/component.toml"),
     ("src/agentsight/Cargo.toml", "src/agentsight/component.toml"),
     ("src/copilot-shell/package.json", "src/copilot-shell/component.toml"),
     ("src/cosh-ng/Cargo.toml", "src/cosh-ng/component.toml"),
@@ -51,8 +51,15 @@ GENERATED_CONTRACTS = (
 )
 
 
+def read_text(path: str) -> str:
+    try:
+        return (ROOT / path).read_text()
+    except FileNotFoundError:
+        raise ValueError(f"{path}: contract file not found in repository") from None
+
+
 def read_toml_version(path: str) -> str:
-    text = (ROOT / path).read_text()
+    text = read_text(path)
     if tomllib is not None:
         try:
             data = tomllib.loads(text)
@@ -68,7 +75,7 @@ def read_toml_version(path: str) -> str:
 
 
 def read_json_version(path: str) -> str:
-    version = json.loads((ROOT / path).read_text()).get("version")
+    version = json.loads(read_text(path)).get("version")
     if not isinstance(version, str):
         raise ValueError(f"no JSON version field in {path} (component: {path.rsplit('/', 1)[0]})")
     return version
@@ -87,7 +94,7 @@ def check_equal(errors: list[str], source: str, target: str) -> None:
 
 def check_template(errors: list[str], source: str, template: str) -> None:
     expected = read_version(source)
-    content = (ROOT / template).read_text()
+    content = read_text(template)
     if content.count("@VERSION@") != 1:
         errors.append(f"{template}: expected exactly one @VERSION@ placeholder")
         return
@@ -99,7 +106,7 @@ def check_template(errors: list[str], source: str, template: str) -> None:
 
 def check_agent_memory_lock(errors: list[str], expected: str) -> None:
     path = "src/agent-memory/adapters/agent-memory/openclaw/package-lock.json"
-    lock = json.loads((ROOT / path).read_text())
+    lock = json.loads(read_text(path))
     root_version = lock.get("version")
     if root_version != expected:
         errors.append(f"{path}: expected root version {expected}, found {root_version}")
