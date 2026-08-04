@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use anolisa_core::adapter::AdapterError;
-use anolisa_core::adapter::claim::{ClaimResourceKind, ClaimStatus};
+use anolisa_core::adapter::claim::{ClaimResourceKind, ClaimStatus, DriverPayload};
 use anolisa_core::adapter::driver::{AdapterConditionKind, AdapterSummary, ConditionStatus};
 use anolisa_core::adapter::manager::{AdapterManager, EnableOutcome};
 use anolisa_platform::fs_layout::FsLayout;
@@ -46,6 +46,9 @@ const MANAGED_ENV: &[&str] = &[
     "FAKE_QODER_LOG",
     "FAKE_QODER_CACHE",
     "FAKE_QODER_FAIL",
+    "FAKE_QODER_LARGE_INVENTORY",
+    "FAKE_QODER_PLUGIN_ID",
+    "FAKE_QODER_PROJECT_PLUGIN",
 ];
 
 struct EnvGuard {
@@ -1013,13 +1016,62 @@ fn stage_qoder_bundle(root: &Path) {
     .expect("hooks.json");
 }
 
-/// Fake `qodercli`: records each argv line to `$FAKE_QODER_LOG` and mirrors
-/// qodercli's plugin cache under `$FAKE_QODER_CACHE` — `plugins install`
-/// copies the staged plugin dir verbatim, like the real CLI — so the
-/// driver's cache-based removal check reflects prior install/uninstall
-/// calls and tests can assert on the cached bundle contents.
-/// `$FAKE_QODER_FAIL=uninstall` fails the uninstall without clearing the
-/// cache, so the driver cannot confirm removal.
+/// Qoder-native fixture using the same nested hook layout as sec-core.
+fn stage_native_qoder_bundle(root: &Path) {
+    std::fs::create_dir_all(root.join(".qoder-plugin")).expect("qoder-plugin");
+    std::fs::create_dir_all(root.join("hooks")).expect("hooks");
+    std::fs::write(
+        root.join(".qoder-plugin/plugin.json"),
+        br#"{"name":"tokenless","version":"0.6.0"}"#,
+    )
+    .expect("plugin.json");
+    std::fs::write(
+        root.join("hooks/hooks.json"),
+        br#"{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "", "hooks": [
+        { "type": "command", "command": "python3",
+          "args": ["${QODER_PLUGIN_ROOT}/hooks/observability_hook.py"] } ] }
+    ]
+  }
+}
+"#,
+    )
+    .expect("hooks/hooks.json");
+    std::fs::write(
+        root.join("hooks/observability_hook.py"),
+        b"print('observability')\n",
+    )
+    .expect("observability hook");
+}
+
+fn set_native_qoder_plugin_id(world: &World, plugin_id: &str) {
+    std::fs::write(
+        world.resource_root.join(".qoder-plugin/plugin.json"),
+        format!(r#"{{"name":"{plugin_id}","version":"0.6.0"}}"#),
+    )
+    .expect("replace native plugin id");
+
+    let contract_path = world
+        .layout
+        .state_dir
+        .join("component-manifests")
+        .join(COMPONENT)
+        .join("component.toml");
+    let contract = std::fs::read_to_string(&contract_path).expect("read component contract");
+    let prior = format!("plugin_id = \"{COMPONENT}\"");
+    assert_eq!(contract.matches(&prior).count(), 1);
+    std::fs::write(
+        contract_path,
+        contract.replace(&prior, &format!("plugin_id = \"{plugin_id}\"")),
+    )
+    .expect("replace contract plugin id");
+}
+
+/// Fake `qodercli`: records argv, mirrors the local plugin cache, and emits
+/// the JSON inventory used by the native lifecycle. Failure modes cover
+/// read-only preflight, post-install verification, and uninstall retention.
 fn write_fake_qodercli(dir: &Path) -> PathBuf {
     let path = dir.join("qodercli");
     write_exec(
@@ -1027,13 +1079,68 @@ fn write_fake_qodercli(dir: &Path) -> PathBuf {
         r#"#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_QODER_LOG"
 cache="$FAKE_QODER_CACHE"
+plugin="${FAKE_QODER_PLUGIN_ID:-tokenless}"
 if [ "$1" = "plugins" ]; then
+  if [ "$3" = "--help" ]; then
+    [ "$FAKE_QODER_FAIL" = "help-$2" ] && { echo "unsupported $2" >&2; exit 1; }
+    exit 0
+  fi
   case "$2" in
-    install) mkdir -p "$cache" && cp -R "$3" "$cache/" 2>/dev/null ;;
+    validate)
+      [ "$FAKE_QODER_FAIL" = "validate" ] && { echo "validate boom" >&2; exit 1; } ;;
+    install)
+      [ "$FAKE_QODER_FAIL" = "install" ] && { echo "install boom" >&2; exit 1; }
+      mkdir -p "$cache"
+      if [ "$4" = "--scope" ]; then
+        rm -rf "$cache/$plugin"
+        cp -R "$3" "$cache/$plugin" 2>/dev/null
+        : > "$cache/.user-$plugin"
+      else
+        cp -R "$3" "$cache/" 2>/dev/null
+      fi ;;
     uninstall)
       [ "$FAKE_QODER_FAIL" = "uninstall" ] && { echo "uninstall boom" >&2; exit 1; }
-      rm -rf "$cache/$3" 2>/dev/null || true ;;
-    list) ;;
+      [ "$FAKE_QODER_FAIL" = "uninstall-retain" ] && exit 0
+      rm -f "$cache/.user-$3"
+      if [ "$FAKE_QODER_PROJECT_PLUGIN" != "1" ]; then
+        rm -rf "$cache/$3" 2>/dev/null || true
+      fi ;;
+    list)
+      [ "$FAKE_QODER_FAIL" = "list" ] && { echo "list boom" >&2; exit 1; }
+      if [ "$FAKE_QODER_FAIL" = "list-invalid" ]; then
+        printf '%s\n' '{invalid'
+      elif [ "$FAKE_QODER_FAIL" = "post-list-fail" ] && [ -d "$cache/$plugin" ]; then
+        echo "post-install list boom" >&2
+        exit 1
+      elif [ "$FAKE_QODER_LARGE_INVENTORY" = "1" ]; then
+        printf '['
+        i=0
+        while [ "$i" -lt 900 ]; do
+          [ "$i" -gt 0 ] && printf ','
+          printf '{"id":"filler-%s@local","scope":"user","enabled":true,"resources":{"hooks":[{}]}}' "$i"
+          i=$((i + 1))
+        done
+        if [ -d "$cache/$plugin" ]; then
+          printf ',{"id":"%s@local","scope":"user","enabled":true,"resources":{"hooks":[{}]}}' "$plugin"
+        fi
+        printf ']\n'
+      elif [ "$FAKE_QODER_PROJECT_PLUGIN" = "1" ]; then
+        if [ -f "$cache/.user-$plugin" ]; then
+          printf '[{"id":"%s@local","scope":"project","enabled":true,"resources":{"hooks":[{}]}},{"id":"%s@local","scope":"user","enabled":true,"resources":{"hooks":[{}]}}]\n' "$plugin" "$plugin"
+        else
+          printf '[{"id":"%s@local","scope":"project","enabled":true,"resources":{"hooks":[{}]}}]\n' "$plugin"
+        fi
+      elif [ ! -d "$cache/$plugin" ] || [ "$FAKE_QODER_FAIL" = "post-list-absent" ]; then
+        printf '%s\n' '[]'
+      elif [ "$FAKE_QODER_FAIL" = "post-list-invalid" ]; then
+        printf '%s\n' '{invalid'
+      elif [ "$FAKE_QODER_FAIL" = "post-list-disabled" ]; then
+        printf '[{"id":"%s@local","scope":"user","enabled":false,"resources":{"hooks":[{}]}}]\n' "$plugin"
+      elif [ "$FAKE_QODER_FAIL" = "post-list-no-hooks" ]; then
+        printf '[{"id":"%s@local","scope":"user","enabled":true,"resources":{"hooks":[]}}]\n' "$plugin"
+      else
+        printf '[{"id":"%s@local","scope":"user","enabled":true,"resources":{"hooks":[{}]}}]\n' "$plugin"
+      fi ;;
   esac
   exit 0
 fi
@@ -1103,6 +1210,960 @@ fn enabled_plugins(settings: &serde_json::Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[test]
+fn qoder_native_enable_status_disable_uses_cli_lifecycle() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, settings, cache, staging) = apply_qoder_env(&guard, &world, &fake);
+    let original_settings = b"{\n  \"theme\": \"night\"\n}\n";
+    std::fs::create_dir_all(settings.parent().expect("settings parent")).expect("mkdir .qoder");
+    std::fs::write(&settings, original_settings).expect("seed settings");
+
+    let manager = world.manager();
+    let claim = match manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable native plugin")
+    {
+        EnableOutcome::Enabled(claim) => *claim,
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
+    };
+
+    assert_eq!(claim.driver_schema, 3);
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    for command in [
+        "plugins validate --help".to_string(),
+        "plugins install --help".to_string(),
+        "plugins list --help".to_string(),
+        "plugins uninstall --help".to_string(),
+        format!("plugins validate {}", world.resource_root.display()),
+        format!(
+            "plugins install {} --scope user",
+            world.resource_root.display()
+        ),
+    ] {
+        assert!(
+            log_text.lines().any(|line| line == command),
+            "missing native command {command:?} in {log_text}"
+        );
+    }
+    assert!(
+        !staging.exists(),
+        "native install must not create a staging copy"
+    );
+    assert_eq!(
+        std::fs::read(&settings).expect("settings unchanged"),
+        original_settings,
+        "native lifecycle must leave settings.json byte-for-byte unchanged"
+    );
+    let source_hooks = std::fs::read_to_string(world.resource_root.join("hooks/hooks.json"))
+        .expect("source hooks");
+    let cached_hooks =
+        std::fs::read_to_string(cache.join("tokenless/hooks/hooks.json")).expect("cached hooks");
+    assert!(source_hooks.contains("${QODER_PLUGIN_ROOT}"));
+    assert!(cached_hooks.contains("${QODER_PLUGIN_ROOT}"));
+
+    assert_eq!(claim.resources.len(), 1);
+    assert!(matches!(
+        &claim.resources[0].kind,
+        ClaimResourceKind::FrameworkPlugin { framework, plugin_id }
+            if framework == "qoder" && plugin_id == "tokenless"
+    ));
+    let DriverPayload::Qoder(payload) = &claim.driver_payload else {
+        panic!("expected Qoder receipt payload");
+    };
+    assert!(payload.settings_resource.is_none());
+    assert!(!payload.plugin_preexisting);
+    assert!(payload.plugin_install_confirmed);
+    assert!(payload.managed_hooks.is_empty());
+    assert!(payload.managed_hook_specs.is_empty());
+
+    let status = manager.status(Some(COMPONENT)).expect("native status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+    for kind in [
+        AdapterConditionKind::PluginRegistered,
+        AdapterConditionKind::ActivationEnabled,
+        AdapterConditionKind::PluginResourcesLoaded,
+        AdapterConditionKind::VerificationSupported,
+    ] {
+        assert!(status.entries[0].report.conditions.iter().any(|condition| {
+            condition.kind == kind && condition.status == ConditionStatus::True
+        }));
+    }
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable native plugin");
+    assert!(disabled.claim_removed);
+    assert!(disabled.report.cleanup_complete);
+    assert!(!cache.join("tokenless").exists());
+    assert_eq!(
+        std::fs::read(&settings).expect("settings unchanged after disable"),
+        original_settings
+    );
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert!(
+        log_text
+            .lines()
+            .any(|line| line == "plugins uninstall tokenless --scope user")
+    );
+}
+
+#[test]
+fn qoder_native_enable_tolerates_unavailable_validate_command() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, _cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    guard.set("FAKE_QODER_FAIL", Path::new("help-validate"));
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("native install does not require validate support");
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert!(
+        log_text
+            .lines()
+            .any(|line| line == "plugins validate --help")
+    );
+    assert!(
+        !log_text
+            .lines()
+            .any(|line| { line == format!("plugins validate {}", world.resource_root.display()) }),
+        "unsupported validate command must not be invoked: {log_text}"
+    );
+    assert!(log_text.lines().any(|line| {
+        line == format!(
+            "plugins install {} --scope user",
+            world.resource_root.display()
+        )
+    }));
+    assert!(
+        manager
+            .disable(COMPONENT, Some("qoder"), false)
+            .expect("disable")
+            .claim_removed
+    );
+}
+
+#[test]
+fn qoder_native_enable_rejects_same_id_project_scope_with_shared_cache() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    guard.set("FAKE_QODER_PROJECT_PLUGIN", Path::new("1"));
+    let shared_cache = cache.join("tokenless");
+    std::fs::create_dir_all(&shared_cache).expect("project plugin shared cache");
+    std::fs::write(shared_cache.join("owner.txt"), b"project-owned\n")
+        .expect("project ownership marker");
+
+    let manager = world.manager();
+    let error = manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("project registration must block the shared-cache install");
+    assert!(
+        matches!(&error, AdapterError::FrameworkCli { reason, .. }
+            if reason.contains("matching non-user Qoder registration")
+                && reason.contains("project")
+                && reason.contains("shares the local plugin cache")),
+        "unexpected project-scope conflict: {error:?}"
+    );
+    assert!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .is_none(),
+        "scope conflict must fail before the write-ahead receipt"
+    );
+    assert_eq!(
+        std::fs::read(shared_cache.join("owner.txt")).expect("project marker retained"),
+        b"project-owned\n"
+    );
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert!(
+        !log_text.lines().any(|line| {
+            (line.starts_with("plugins install ") || line.starts_with("plugins uninstall "))
+                && line.ends_with(" --scope user")
+        }),
+        "scope conflict must not mutate the shared cache: {log_text}"
+    );
+}
+
+#[test]
+fn qoder_native_lifecycle_reads_inventory_larger_than_default_capture() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (_log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    guard.set("FAKE_QODER_LARGE_INVENTORY", Path::new("1"));
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable must parse the target after more than 64 KiB of inventory");
+    assert!(cache.join("tokenless").exists());
+    assert_eq!(
+        manager.status(Some(COMPONENT)).expect("status").entries[0]
+            .report
+            .summary,
+        AdapterSummary::Healthy
+    );
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable must verify absence in the large inventory");
+    assert!(disabled.claim_removed);
+    assert!(disabled.report.cleanup_complete);
+    assert!(!cache.join("tokenless").exists());
+}
+
+#[test]
+fn qoder_native_preflight_failures_do_not_write_receipts() {
+    let guard = EnvGuard::acquire();
+    for failure in ["help-install", "validate", "list", "list-invalid"] {
+        let world = stage(
+            "qoder",
+            "plugin",
+            "{datadir}/adapters/{component}/qoder/",
+            stage_native_qoder_bundle,
+        );
+        let fake = write_fake_qodercli(&world.prefix);
+        let (_log, settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+        guard.set("FAKE_QODER_FAIL", Path::new(failure));
+
+        world
+            .manager()
+            .enable(COMPONENT, Some("qoder"), false)
+            .expect_err("native preflight must fail");
+        assert!(
+            world
+                .load_state()
+                .find_adapter_claim(COMPONENT, "qoder")
+                .is_none(),
+            "preflight failure {failure} must not persist a receipt"
+        );
+        assert!(!cache.join("tokenless").exists());
+        assert!(!settings.exists());
+    }
+}
+
+#[test]
+fn qoder_native_apply_failures_keep_write_ahead_receipt() {
+    let guard = EnvGuard::acquire();
+    for failure in [
+        "install",
+        "post-list-fail",
+        "post-list-invalid",
+        "post-list-absent",
+        "post-list-disabled",
+        "post-list-no-hooks",
+    ] {
+        let world = stage(
+            "qoder",
+            "plugin",
+            "{datadir}/adapters/{component}/qoder/",
+            stage_native_qoder_bundle,
+        );
+        let fake = write_fake_qodercli(&world.prefix);
+        let (log, settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+        let original_settings = b"{\"keep\":true}\n";
+        std::fs::create_dir_all(settings.parent().expect("settings parent")).expect("mkdir .qoder");
+        std::fs::write(&settings, original_settings).expect("seed settings");
+        guard.set("FAKE_QODER_FAIL", Path::new(failure));
+
+        world
+            .manager()
+            .enable(COMPONENT, Some("qoder"), false)
+            .expect_err("native apply must fail");
+        let claim = world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .cloned()
+            .expect("write-ahead receipt kept");
+        assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+        let DriverPayload::Qoder(payload) = &claim.driver_payload else {
+            panic!("expected Qoder receipt payload");
+        };
+        assert_eq!(
+            payload.plugin_install_confirmed,
+            failure != "install",
+            "only a successful install command may confirm ownership"
+        );
+        assert_eq!(
+            std::fs::read(&settings).expect("settings unchanged"),
+            original_settings
+        );
+        assert_eq!(
+            cache.join("tokenless").exists(),
+            failure != "install",
+            "post-install failures keep qodercli's installed plugin"
+        );
+        let log_text = std::fs::read_to_string(&log).expect("qoder log");
+        assert!(
+            !log_text
+                .lines()
+                .any(|line| line == "plugins uninstall tokenless --scope user"),
+            "enable verification failure must not guess whether uninstall is safe"
+        );
+    }
+}
+
+#[test]
+fn qoder_native_failed_install_never_adopts_later_user_plugin() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    guard.set("FAKE_QODER_FAIL", Path::new("install"));
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("initial install fails before creating a plugin");
+
+    let failed_claim = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "qoder")
+        .cloned()
+        .expect("failed write-ahead receipt retained");
+    assert_eq!(failed_claim.status, ClaimStatus::CleanupFailed);
+    let DriverPayload::Qoder(payload) = &failed_claim.driver_payload else {
+        panic!("expected Qoder receipt payload");
+    };
+    assert!(!payload.plugin_preexisting);
+    assert!(!payload.plugin_install_confirmed);
+
+    let user_plugin = cache.join("tokenless");
+    std::fs::create_dir_all(&user_plugin).expect("user-installed plugin");
+    std::fs::write(user_plugin.join("owner.txt"), b"user-owned\n").expect("user ownership marker");
+    guard.set("FAKE_QODER_FAIL", Path::new(""));
+
+    let retry_error = manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("retry must not adopt the user's plugin");
+    assert!(
+        matches!(&retry_error, AdapterError::FrameworkCli { reason, .. }
+            if reason.contains("pre-existing user-scope")),
+        "unexpected retry error: {retry_error:?}"
+    );
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable fails closed for unconfirmed ownership");
+    assert!(!disabled.claim_removed);
+    assert!(!disabled.report.cleanup_complete);
+    assert_eq!(
+        std::fs::read(user_plugin.join("owner.txt")).expect("user plugin retained"),
+        b"user-owned\n"
+    );
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert_eq!(
+        log_text
+            .lines()
+            .filter(|line| {
+                line.starts_with("plugins install ") && line.ends_with(" --scope user")
+            })
+            .count(),
+        1,
+        "retry must not run another install: {log_text}"
+    );
+    assert!(
+        !log_text
+            .lines()
+            .any(|line| line == "plugins uninstall tokenless --scope user"),
+        "disable must not uninstall an unconfirmed registration: {log_text}"
+    );
+
+    std::fs::remove_dir_all(&user_plugin).expect("user removes their plugin");
+    let cleaned = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("absence permits receipt cleanup");
+    assert!(cleaned.claim_removed);
+    assert!(cleaned.report.cleanup_complete);
+}
+
+#[test]
+fn qoder_native_post_install_failure_keeps_confirmed_cleanup_ownership() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    guard.set("FAKE_QODER_FAIL", Path::new("post-list-disabled"));
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("post-install verification fails");
+    let claim = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "qoder")
+        .cloned()
+        .expect("cleanup receipt retained");
+    let DriverPayload::Qoder(payload) = &claim.driver_payload else {
+        panic!("expected Qoder receipt payload");
+    };
+    assert!(payload.plugin_install_confirmed);
+
+    guard.set("FAKE_QODER_FAIL", Path::new(""));
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("confirmed install remains eligible for cleanup");
+    assert!(disabled.claim_removed);
+    assert!(disabled.report.cleanup_complete);
+    assert!(!cache.join("tokenless").exists());
+    assert!(
+        std::fs::read_to_string(&log)
+            .expect("qoder log")
+            .lines()
+            .any(|line| line == "plugins uninstall tokenless --scope user")
+    );
+}
+
+#[test]
+fn qoder_native_v2_preapply_receipt_never_claims_later_user_plugin() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    guard.set("FAKE_QODER_FAIL", Path::new("install"));
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("create an unconfirmed write-ahead receipt without a plugin");
+
+    let state_path = world.layout.state_dir.join("installed.toml");
+    let mut state = world.load_state();
+    let claim = state
+        .adapter_claims
+        .iter_mut()
+        .find(|claim| claim.component == COMPONENT && claim.framework == "qoder")
+        .expect("qoder claim");
+    // Schema v2 had no durable post-install checkpoint. `Enabled` is the
+    // exact pre-apply state the Manager persisted, so a crash could leave
+    // this value even though qodercli never created the registration.
+    claim.driver_schema = 2;
+    claim.status = ClaimStatus::Enabled;
+    let DriverPayload::Qoder(payload) = &mut claim.driver_payload else {
+        panic!("expected Qoder receipt payload");
+    };
+    payload.plugin_install_confirmed = false;
+    state.save(&state_path).expect("save v2 receipt fixture");
+
+    let user_plugin = cache.join("tokenless");
+    std::fs::create_dir_all(&user_plugin).expect("later user plugin");
+    std::fs::write(user_plugin.join("owner.txt"), b"user-owned\n").expect("user ownership marker");
+    guard.set("FAKE_QODER_FAIL", Path::new(""));
+
+    let retry_error = manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("v2 receipt must not authorize replacing the later user plugin");
+    assert!(
+        matches!(&retry_error, AdapterError::FrameworkCli { reason, .. }
+            if reason.contains("pre-existing user-scope")),
+        "unexpected v2 retry error: {retry_error:?}"
+    );
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("v2 receipt must keep unconfirmed registration untouched");
+    assert!(!disabled.claim_removed);
+    assert!(!disabled.report.cleanup_complete);
+    assert_eq!(
+        std::fs::read(user_plugin.join("owner.txt")).expect("user marker retained"),
+        b"user-owned\n"
+    );
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert_eq!(
+        log_text
+            .lines()
+            .filter(|line| {
+                line.starts_with("plugins install ") && line.ends_with(" --scope user")
+            })
+            .count(),
+        1,
+        "retry must not run a second install: {log_text}"
+    );
+    assert!(
+        !log_text
+            .lines()
+            .any(|line| line == "plugins uninstall tokenless --scope user"),
+        "disable must not uninstall the later user registration: {log_text}"
+    );
+}
+
+#[test]
+fn qoder_native_enable_rejects_unowned_preexisting_user_plugin() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    let preexisting = cache.join("tokenless");
+    std::fs::create_dir_all(&preexisting).expect("pre-existing plugin cache");
+    std::fs::write(preexisting.join("owner.txt"), b"user-owned\n").expect("ownership marker");
+    std::fs::write(preexisting.join("version.txt"), b"0.9.0\n").expect("pre-existing version");
+    std::fs::write(world.resource_root.join("version.txt"), b"9.9.9\n")
+        .expect("replacement version");
+
+    let manager = world.manager();
+    let error = manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("unowned user plugin must block enable");
+    assert!(
+        matches!(&error, AdapterError::FrameworkCli { reason, .. } if reason.contains("pre-existing user-scope")),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .is_none(),
+        "ownership conflict must fail before receipt persistence"
+    );
+    assert_eq!(
+        std::fs::read(preexisting.join("version.txt")).expect("pre-existing version retained"),
+        b"0.9.0\n"
+    );
+    assert_eq!(
+        std::fs::read(preexisting.join("owner.txt")).expect("pre-existing plugin retained"),
+        b"user-owned\n"
+    );
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable without receipt is a no-op");
+    assert!(!disabled.claim_removed);
+    assert!(disabled.report.cleanup_complete);
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert!(
+        !log_text
+            .lines()
+            .any(|line| line.starts_with("plugins install ") && line.ends_with(" --scope user")),
+        "enable must not replace a pre-existing plugin: {log_text}"
+    );
+    assert!(
+        !log_text
+            .lines()
+            .any(|line| line == "plugins uninstall tokenless --scope user"),
+        "disable must not uninstall a pre-existing plugin: {log_text}"
+    );
+}
+
+#[test]
+fn qoder_native_reenable_can_replace_anolisa_owned_user_plugin() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    std::fs::write(world.resource_root.join("generation.txt"), b"first\n")
+        .expect("first generation");
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("initial enable");
+    std::fs::write(world.resource_root.join("generation.txt"), b"second\n")
+        .expect("second generation");
+    let claim = match manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("owned re-enable")
+    {
+        EnableOutcome::Enabled(claim) => *claim,
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
+    };
+    let DriverPayload::Qoder(payload) = &claim.driver_payload else {
+        panic!("expected Qoder receipt payload");
+    };
+    assert!(!payload.plugin_preexisting);
+    assert!(payload.plugin_install_confirmed);
+    assert_eq!(
+        std::fs::read(cache.join("tokenless/generation.txt")).expect("cached generation"),
+        b"second\n"
+    );
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert_eq!(
+        log_text
+            .lines()
+            .filter(|line| {
+                line.starts_with("plugins install ") && line.ends_with(" --scope user")
+            })
+            .count(),
+        2
+    );
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable owned plugin");
+    assert!(disabled.claim_removed);
+    assert!(disabled.report.cleanup_complete);
+}
+
+#[test]
+fn qoder_native_reenable_rejects_preexisting_different_plugin_id() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("initial native enable");
+
+    let replacement = cache.join("replacement");
+    std::fs::create_dir_all(&replacement).expect("pre-existing replacement plugin");
+    std::fs::write(replacement.join("owner.txt"), b"user-owned\n")
+        .expect("replacement ownership marker");
+    set_native_qoder_plugin_id(&world, "replacement");
+    guard.set("FAKE_QODER_PLUGIN_ID", Path::new("replacement"));
+
+    let error = manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("a different pre-existing plugin id must not inherit ownership");
+    assert!(
+        matches!(&error, AdapterError::BundleInvalid { reason, .. }
+            if reason.contains("changed from 'tokenless' to 'replacement'")),
+        "unexpected error: {error:?}"
+    );
+    let retained = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "qoder")
+        .cloned()
+        .expect("original receipt retained");
+    assert_eq!(retained.plugin_id.as_deref(), Some("tokenless"));
+    assert_eq!(
+        std::fs::read(replacement.join("owner.txt")).expect("replacement plugin retained"),
+        b"user-owned\n"
+    );
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert_eq!(
+        log_text
+            .lines()
+            .filter(|line| {
+                line.starts_with("plugins install ") && line.ends_with(" --scope user")
+            })
+            .count(),
+        1,
+        "re-enable must not install the replacement plugin: {log_text}"
+    );
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("original plugin cleanup remains available");
+    assert!(disabled.claim_removed);
+    assert!(!cache.join("tokenless").exists());
+    assert_eq!(
+        std::fs::read(replacement.join("owner.txt")).expect("replacement remains after cleanup"),
+        b"user-owned\n"
+    );
+}
+
+#[test]
+fn qoder_native_reenable_rejects_absent_different_plugin_id() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("initial native enable");
+
+    set_native_qoder_plugin_id(&world, "replacement");
+    guard.set("FAKE_QODER_PLUGIN_ID", Path::new("replacement"));
+    let error = manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("an absent different plugin id must not replace the cleanup claim");
+    assert!(
+        matches!(&error, AdapterError::BundleInvalid { reason, .. }
+            if reason.contains("changed from 'tokenless' to 'replacement'")),
+        "unexpected error: {error:?}"
+    );
+    assert!(!cache.join("replacement").exists());
+    let retained = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "qoder")
+        .cloned()
+        .expect("original receipt retained");
+    assert_eq!(retained.plugin_id.as_deref(), Some("tokenless"));
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert_eq!(
+        log_text
+            .lines()
+            .filter(|line| {
+                line.starts_with("plugins install ") && line.ends_with(" --scope user")
+            })
+            .count(),
+        1,
+        "re-enable must not install the replacement plugin: {log_text}"
+    );
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("original plugin cleanup remains available");
+    assert!(disabled.claim_removed);
+    assert!(!cache.join("tokenless").exists());
+    assert!(!cache.join("replacement").exists());
+}
+
+#[test]
+fn qoder_native_rejects_custom_manifest_before_cli_or_receipt() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let manifest_path = world
+        .layout
+        .state_dir
+        .join("component-manifests")
+        .join(COMPONENT)
+        .join("component.toml");
+    let mut contract = std::fs::read_to_string(&manifest_path).expect("read contract");
+    contract.push_str("\n[adapters.bundle]\nentry = \"custom.json\"\n");
+    std::fs::write(&manifest_path, contract).expect("write custom entry");
+    std::fs::remove_file(world.resource_root.join(".qoder-plugin/plugin.json"))
+        .expect("remove native manifest");
+    std::fs::write(
+        world.resource_root.join("custom.json"),
+        br#"{"name":"tokenless","version":"9.9.9"}"#,
+    )
+    .expect("write ignored custom manifest");
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    let error = manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("custom manifest must fail before qodercli install");
+    assert!(
+        matches!(&error, AdapterError::BundleInvalid { reason, .. } if reason.contains(".qoder-plugin/plugin.json")),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .is_none()
+    );
+    assert!(!cache.join("tokenless").exists());
+    assert!(
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .all(|line| !line.starts_with("plugins install "))
+    );
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable without receipt is a no-op");
+    assert!(!disabled.claim_removed);
+    assert!(disabled.report.cleanup_complete);
+}
+
+#[test]
+fn qoder_native_disable_keeps_receipt_until_absence_is_verified() {
+    let guard = EnvGuard::acquire();
+    for failure in ["uninstall", "uninstall-retain", "list", "list-invalid"] {
+        let world = stage(
+            "qoder",
+            "plugin",
+            "{datadir}/adapters/{component}/qoder/",
+            stage_native_qoder_bundle,
+        );
+        let fake = write_fake_qodercli(&world.prefix);
+        apply_qoder_env(&guard, &world, &fake);
+        guard.set("FAKE_QODER_FAIL", Path::new(""));
+        let manager = world.manager();
+        manager
+            .enable(COMPONENT, Some("qoder"), false)
+            .expect("enable native plugin");
+        guard.set("FAKE_QODER_FAIL", Path::new(failure));
+
+        let disabled = manager
+            .disable(COMPONENT, Some("qoder"), false)
+            .expect("disable returns a cleanup report");
+        assert!(!disabled.claim_removed, "receipt kept for {failure}");
+        assert!(!disabled.report.cleanup_complete);
+        let claim = world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .cloned()
+            .expect("receipt kept");
+        assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+    }
+}
+
+#[test]
+fn qoder_cross_layout_reenable_preserves_legacy_receipt_for_cleanup() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (_log, settings, _cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("legacy enable");
+
+    std::fs::remove_file(world.resource_root.join("hooks.json")).expect("remove legacy hooks");
+    stage_native_qoder_bundle(&world.resource_root);
+    let error = manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("cross-layout re-enable must be explicit");
+    assert!(
+        matches!(error, AdapterError::BundleInvalid { .. }),
+        "unexpected error: {error:?}"
+    );
+    let claim = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "qoder")
+        .cloned()
+        .expect("legacy receipt retained");
+    let DriverPayload::Qoder(payload) = &claim.driver_payload else {
+        panic!("expected Qoder receipt payload");
+    };
+    assert!(payload.settings_resource.is_some());
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("legacy cleanup remains available");
+    assert!(disabled.claim_removed);
+    let settings = read_json(&settings);
+    assert!(!enabled_plugins(&settings).contains(&"tokenless@local".to_string()));
+    assert!(hook_names(&settings, "PreToolUse").is_empty());
+}
+
+#[test]
+fn qoder_native_disable_without_cli_keeps_receipt() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    apply_qoder_env(&guard, &world, &fake);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable native plugin");
+    guard.set("QODERCLI_BIN", &world.prefix.join("missing-qodercli"));
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable returns a cleanup report");
+    assert!(!disabled.claim_removed);
+    assert!(!disabled.report.cleanup_complete);
+    assert_eq!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .expect("receipt kept")
+            .status,
+        ClaimStatus::CleanupFailed
+    );
+}
+
+#[test]
+fn qoder_native_status_fails_closed_for_unverifiable_or_inconsistent_state() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    apply_qoder_env(&guard, &world, &fake);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable native plugin");
+
+    guard.set("FAKE_QODER_FAIL", Path::new("list-invalid"));
+    let status = manager.status(Some(COMPONENT)).expect("status report");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Unknown);
+    assert!(status.entries[0].report.conditions.iter().any(|condition| {
+        condition.kind == AdapterConditionKind::VerificationSupported
+            && condition.status == ConditionStatus::False
+    }));
+
+    guard.set("FAKE_QODER_FAIL", Path::new(""));
+    let state_path = world.layout.state_dir.join("installed.toml");
+    let mut state = world.load_state();
+    let claim = state
+        .adapter_claims
+        .iter_mut()
+        .find(|claim| claim.component == COMPONENT)
+        .expect("claim");
+    let DriverPayload::Qoder(payload) = &mut claim.driver_payload else {
+        panic!("expected Qoder receipt payload");
+    };
+    payload.managed_hooks.push("forged-hook".to_string());
+    state.save(&state_path).expect("save forged receipt");
+    assert!(matches!(
+        manager.status(Some(COMPONENT)),
+        Err(AdapterError::BundleInvalid { .. })
+    ));
 }
 
 #[test]

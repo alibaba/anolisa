@@ -42,7 +42,11 @@ pub const CLAIM_SCHEMA_VERSION: u32 = 1;
 
 /// Schema version for [`DriverPayload`]. Bumped independently of
 /// [`CLAIM_SCHEMA_VERSION`] when a driver's typed payload changes shape.
-pub const DRIVER_SCHEMA_VERSION: u32 = 1;
+pub const DRIVER_SCHEMA_VERSION: u32 = 3;
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 /// A single adapter receipt: "the current user's `component` has, through
 /// `framework`'s driver, taken over the framework-side state described by
@@ -579,20 +583,31 @@ pub struct QoderManagedHook {
     pub entry: Value,
 }
 
-/// Qoder driver payload. Holds [`ClaimResource::id`] references and the
-/// exact hook specs ANOLISA wrote — never argv, script paths, or the settings
-/// path itself. The qodercli invocation is rebuilt by the built-in driver,
-/// and the driver recomputes the `settings.json` path from the caller's home
-/// directory rather than reading it back from the receipt, so a forged
-/// payload cannot redirect the write.
+/// Qoder driver payload.
+///
+/// Native receipts reference only the framework-managed plugin. Legacy
+/// receipts also retain the exact settings resource and hook specs that
+/// ANOLISA owns so status and cleanup remain backward compatible.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QoderClaim {
     /// Resource id of the installed plugin
     /// ([`ClaimResourceKind::FrameworkPlugin`]).
     pub plugin_resource: String,
-    /// Resource id of the user's `settings.json` ANOLISA edits in place
-    /// ([`ClaimResourceKind::ExternalPath`]).
-    pub settings_resource: String,
+    /// Legacy resource id of the user's `settings.json` ANOLISA edits in place
+    /// ([`ClaimResourceKind::ExternalPath`]). Native receipts omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_resource: Option<String>,
+    /// Whether the native plugin registration existed before ANOLISA enable.
+    /// Such a plugin is retained on disable because ANOLISA cannot claim
+    /// ownership of framework state it did not create.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub plugin_preexisting: bool,
+    /// Whether ANOLISA confirmed a successful native plugin installation.
+    /// Native enable persists this transition immediately after qodercli
+    /// succeeds, so a retained write-ahead receipt never infers ownership
+    /// from an install attempt that may not have created the registration.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub plugin_install_confirmed: bool,
     /// Hook names ANOLISA merged into `settings.json` at enable time.
     /// These names are metadata for human/debug visibility; lifecycle logic
     /// uses [`Self::managed_hook_specs`]. `disable` prunes only exact hook
@@ -1520,7 +1535,7 @@ mod tests {
             enabled_at: "2026-07-08T10:30:45Z".to_string(),
             resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/qoder"),
             bundle_digest: Some("sha256:90de".to_string()),
-            driver_schema: DRIVER_SCHEMA_VERSION,
+            driver_schema: 1,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
             resources: vec![
@@ -1542,7 +1557,9 @@ mod tests {
             ],
             driver_payload: DriverPayload::Qoder(QoderClaim {
                 plugin_resource: "qoder_plugin".to_string(),
-                settings_resource: "qoder_settings".to_string(),
+                settings_resource: Some("qoder_settings".to_string()),
+                plugin_preexisting: false,
+                plugin_install_confirmed: false,
                 managed_hooks: vec!["tokenless-rewrite".to_string()],
                 managed_hook_specs: vec![QoderManagedHook {
                     event: "PreToolUse".to_string(),
@@ -1568,6 +1585,10 @@ mod tests {
             adapter_claims: vec![sample_qoder_claim()],
         };
         let text = toml::to_string_pretty(&wrapper).expect("serialize Qoder to TOML");
+        assert!(
+            text.contains("settings_resource = \"qoder_settings\""),
+            "legacy receipt keeps its string settings reference: {text}"
+        );
         let parsed: Wrapper = toml::from_str(&text).expect("parse Qoder from TOML");
         assert_eq!(wrapper, parsed, "Qoder round-trip mismatch; TOML:\n{text}");
 
@@ -1575,6 +1596,77 @@ mod tests {
         let json = serde_json::to_string(&claim).expect("serialize Qoder JSON");
         let back: AdapterClaim = serde_json::from_str(&json).expect("parse Qoder JSON");
         assert_eq!(claim, back);
+    }
+
+    #[test]
+    fn native_qoder_claim_omits_settings_resource() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            adapter_claims: Vec<AdapterClaim>,
+        }
+
+        let mut claim = sample_qoder_claim();
+        claim
+            .resources
+            .retain(|resource| resource.id == "qoder_plugin");
+        let DriverPayload::Qoder(payload) = &mut claim.driver_payload else {
+            unreachable!("sample is a Qoder claim")
+        };
+        payload.settings_resource = None;
+        payload.plugin_preexisting = false;
+        payload.plugin_install_confirmed = true;
+        payload.managed_hooks.clear();
+        payload.managed_hook_specs.clear();
+        claim.driver_schema = DRIVER_SCHEMA_VERSION;
+        let wrapper = Wrapper {
+            adapter_claims: vec![claim],
+        };
+
+        let text = toml::to_string_pretty(&wrapper).expect("serialize native Qoder receipt");
+        assert!(!text.contains("settings_resource"), "native TOML: {text}");
+        assert!(
+            text.contains("plugin_install_confirmed = true"),
+            "native TOML: {text}"
+        );
+        assert_eq!(wrapper.adapter_claims[0].driver_schema, 3);
+        let parsed: Wrapper = toml::from_str(&text).expect("parse native Qoder receipt");
+        assert_eq!(wrapper, parsed);
+    }
+
+    #[test]
+    fn native_qoder_v2_receipt_defaults_install_confirmation_to_false() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            adapter_claims: Vec<AdapterClaim>,
+        }
+
+        let mut claim = sample_qoder_claim();
+        claim
+            .resources
+            .retain(|resource| resource.id == "qoder_plugin");
+        let DriverPayload::Qoder(payload) = &mut claim.driver_payload else {
+            unreachable!("sample is a Qoder claim")
+        };
+        payload.settings_resource = None;
+        payload.plugin_preexisting = false;
+        payload.plugin_install_confirmed = false;
+        payload.managed_hooks.clear();
+        payload.managed_hook_specs.clear();
+        claim.driver_schema = 2;
+        let text = toml::to_string_pretty(&Wrapper {
+            adapter_claims: vec![claim],
+        })
+        .expect("serialize v2 Native Qoder receipt");
+        assert!(
+            !text.contains("plugin_install_confirmed"),
+            "v2 TOML: {text}"
+        );
+
+        let parsed: Wrapper = toml::from_str(&text).expect("parse v2 Native Qoder receipt");
+        let DriverPayload::Qoder(payload) = &parsed.adapter_claims[0].driver_payload else {
+            unreachable!("fixture is a Qoder claim")
+        };
+        assert!(!payload.plugin_install_confirmed);
     }
 
     #[test]
