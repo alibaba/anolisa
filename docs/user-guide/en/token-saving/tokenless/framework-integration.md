@@ -11,14 +11,14 @@ Tokenless uses adapters to connect compression, command rewriting, and environme
 | cosh | `cosh` | ✅ | Replaces supported shell input | Cosh-NG replaces the response; legacy Copilot Shell appends context | Attempted after response compression | ✅ |
 | OpenClaw | `openclaw` | ✅ | Replaces the `exec` command input | Replaces the persisted tool-result message | Off by default; opt in | — |
 | Hermes | `hermes` | ✅ | Blocks the first call and asks the agent to retry | Replaces the result string | Attempted after response compression | — |
-| Qoder | `qoder` | ✅ | Emits rewritten shell input | Emits `additionalContext` | Attempted after response compression | — |
+| Qoder | `qoder` | ✅ | Replaces Bash input with `updatedInput` | Replaces output with `updatedToolOutput` | Attempted after response compression | — |
 | Claude Code | `claude-code` | ✅ | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Used only when the replacement can remain text | — |
 | Codex | `codex` | ✅ | Replaces supported shell input | Keeps the original and adds analysis or a compressed alternative | Used to build that alternative | — |
 | Qwen Code | `qwencode` | ✅ | Emits rewritten shell input | Emits `additionalContext` | Attempted after response compression | ✅ |
 
 “—” means that the current adapter does not register that capability. The corresponding Tokenless CLI command may still be available.
 
-`additionalContext` is an additive hook field. The Tokenless source does not remove the original result on those paths; the final treatment also depends on the host implementation. A statistics record proves that a candidate became smaller, not that the host removed the original from its model request.
+`additionalContext` is an additive hook field. The Tokenless source does not remove the original result on Qwen Code and legacy Copilot Shell paths; the final treatment also depends on the host implementation. A statistics record proves that a candidate became smaller, not that the host removed the original from its model request.
 
 ## Adapter processing rules
 
@@ -164,7 +164,11 @@ The plugin takes effect in a new Hermes session. Restart Hermes and run a shell-
 
 ### Qoder
 
-Qoder IDE and qodercli may cache plugin configuration. Fully restart the IDE after enabling or upgrading. If an old hook path is reported, see [Qoder plugin cache issue](troubleshooting.md#qoder-plugin-cache-issue).
+The adapter uses Qoder's native `hooks/hooks.json` and `commands/*.md` discovery layout. Before installation it checks the actual `qodercli plugins validate/install/list/uninstall` capabilities and parses `plugins list --json`; it does not pin a minimum Qoder version or fall back to settings injection.
+
+Qoder owns plugin registration and `enabledPlugins`. Tokenless does not add hooks to `settings.json`; it uses the JSON plugin inventory to verify that two `PreToolUse` hooks, one `PostToolUse` hook, and `/tokenless-stats` are enabled. Run `/plugins reload` or restart Qoder after enabling or upgrading.
+
+Legacy tokenless settings are migrated only when their complete fingerprints match. The migration is atomic, preserves unrelated Qoder data, and rolls back a newly installed plugin if safe cleanup fails. See [Qoder native plugin installation or upgrade issue](troubleshooting.md#qoder-native-plugin-installation-or-upgrade-issue) for recovery commands.
 
 ### Claude Code
 

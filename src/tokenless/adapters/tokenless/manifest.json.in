@@ -46,13 +46,14 @@
       }
     },
     "qoder": {
-      "compatibleVersions": ">=0.2.0",
+      "compatibleVersions": "*",
       "capabilities": {
         "hooks": [
           "tool-ready",
           "rewrite",
           "compress-response"
-        ]
+        ],
+        "commands": ["tokenless-stats"]
       },
       "actions": {
         "detect":    "qoder/scripts/detect.sh",

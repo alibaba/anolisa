@@ -228,33 +228,33 @@ Expired or never-successfully-written content cannot be recovered.
 
 ## Statistics exist but the prompt is not smaller
 
-First check the framework's response-delivery path in the [support matrix](framework-integration.md#support-matrix). Qoder and Qwen Code emit `additionalContext`; legacy Copilot Shell appends it; Codex intentionally retains the original result and adds only analysis or a compressed alternative. These paths can record a smaller candidate without reducing the final prompt.
+First check the framework's response-delivery path in the [support matrix](framework-integration.md#support-matrix). Qwen Code emits `additionalContext`; legacy Copilot Shell appends it; Codex intentionally retains the original result and adds only analysis or a compressed alternative. These paths can record a smaller candidate without reducing the final prompt. Qoder instead replaces the original response through `updatedToolOutput` when compression is beneficial.
 
 For Claude Code, response replacement requires version 2.1.121 or later. Older or unrecognized versions pass the original through. OpenClaw replaces persisted results, but TOON remains off unless `toon_compression_enabled=true`.
 
-## Qoder plugin cache issue
+## Qoder native plugin installation or upgrade issue
 
-Use this section only when an upgrade produces:
-
-```text
-python3: can't open file '/rewrite_hook.py'
-```
-
-Refresh the adapter:
+Inspect Qoder's inventory with the same `QODER_CONFIG_DIR` used during installation. Run the validation command for the layout that installed Tokenless:
 
 ```bash
+# anolisa user install
+qodercli plugins validate "${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/adapters/tokenless/qoder"
+
+# anolisa raw system install
+qodercli plugins validate /usr/local/share/anolisa/adapters/tokenless/qoder
+
+# RPM install
+qodercli plugins validate /usr/share/anolisa/adapters/tokenless/qoder
+
+qodercli plugins list --json
+
 anolisa adapter disable tokenless qoder
 anolisa adapter enable tokenless qoder
 ```
 
-Confirm that the cache has no unexpanded placeholder:
+For a custom install prefix, validate `<prefix>/usr/local/share/anolisa/adapters/tokenless/qoder` instead.
 
-```bash
-grep -R -n 'QODER_TOKENLESS_HOOKS' \
-  ~/.qoder/plugins/cache/local/tokenless*/*/hooks.json 2>/dev/null
-```
-
-No output is expected. Fully exit and restart Qoder IDE afterwards.
+If a required `plugins` subcommand is unavailable or `list --json` cannot be parsed, upgrade Qoder; Tokenless does not fall back to editing `settings.json`. A legacy migration failure leaves the settings file unchanged and normally rolls back the newly installed plugin. If rollback also fails, follow the degraded-state uninstall command printed by the adapter. Run `/plugins reload` or fully restart Qoder after a successful reinstall.
 
 ## anolisa and RPM state disagree
 

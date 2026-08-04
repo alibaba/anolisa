@@ -116,7 +116,8 @@ test_stats_system() {
     log_section "Test 4: Stats System"
 
     # Use a temp DB for testing
-    local test_db=$(mktemp)
+    # Database overrides are intentionally restricted to the real user home.
+    local test_db=$(mktemp "$HOME/.tokenless-test-stats.XXXXXX")
     export TOKENLESS_STATS_DB="$test_db"
 
     log_info "Test 4.1: Stats auto-record via compress-schema"
@@ -165,7 +166,8 @@ test_stats_system() {
 test_toon_compression() {
     log_section "Test 5: TOON Compression with Stats Verification"
 
-    local test_db=$(mktemp)
+    # Database overrides are intentionally restricted to the real user home.
+    local test_db=$(mktemp "$HOME/.tokenless-test-stats.XXXXXX")
     export TOKENLESS_STATS_DB="$test_db"
 
     # --- 5.0 Environment check ---

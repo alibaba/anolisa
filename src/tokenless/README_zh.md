@@ -60,6 +60,32 @@ tokenless 只优化**工具调用响应**进入 LLM 上下文前的冗余，不�
 - **Claude Code 插件** — Tool Ready + 命令重写 + 响应压缩 + TOON
 - **Codex 插件** — Tool Ready + 命令重写 + 响应压缩 + TOON
 
+## Qoder CLI 原生插件
+
+Qoder 适配器采用官方插件目录约定：hook 位于 `hooks/hooks.json`，统计命令
+位于 `commands/tokenless-stats.md`。安装、启停、状态检查和卸载全部交给
+`qodercli plugins`；正常流程不会向 `~/.qoder/settings.json` 手工注入插件配置。
+
+```bash
+make qoder-install
+```
+
+安装器会先检测 `qodercli plugins validate/install/list/uninstall` 和可解析的
+JSON 插件清单，再验证并安装用户级插件。这里不硬编码最低 Qoder 版本：若缺少
+所需能力，请升级 Qoder，不会回退到旧 settings 注入方式。安装完成后在 Qoder
+中运行 `/plugins reload`，或重启 Qoder；随后可使用 `/tokenless-stats`。
+
+原生 Qoder 状态会遵循 `QODER_CONFIG_DIR`。历史清理仍单独检查
+`~/.qoder/settings.json`，因为所有旧版 Tokenless 写入器即使设置了
+`QODER_CONFIG_DIR`，也会固定写入这个历史路径。
+
+Qoder 的命令重写 hook 只返回官方 `updatedInput`；`PostToolUse` 压缩结果通过官方
+`hookSpecificOutput.updatedToolOutput` 替换原工具响应，不会把压缩内容重复追加
+到上下文。升级旧版适配器时只会原子删除 tokenless 完整固定指纹对应的历史
+hook 和旧 `.plugins.enabled` 中的精确值 `tokenless@local`，不会改动官方
+`enabledPlugins`、用户自定义 hook 或未知字段。若历史文件不安全或格式异常，
+迁移会停止并回滚刚完成的原生注册；若回滚也失败，错误信息会给出人工恢复命令。
+
 ## 快速开始
 
 ```bash

@@ -115,9 +115,16 @@ Step 2：tokenless compress-toon（无损 TOON 编码）
 
 ### 路径 4：Qoder CLI 插件（`PostToolUse` hook）
 
-使用共享的 `compress_response_hook.py`（与 copilot-shell 共用），通过 `hooks.json` 中的 `${QODER_TOKENLESS_HOOKS}` 变量引用共享 hook 路径。
+Qoder 通过原生插件资源 `hooks/hooks.json` 注册 hook，并由
+`${QODER_PLUGIN_ROOT}/hooks/run-hook.sh` 调度共享的
+`compress_response_hook.py`。dispatcher 设置 `TOKENLESS_AGENT_ID=qoder-cli`，
+不依赖自定义插件环境变量。
 
-注意：对所有非 Claude Code 的 agent（路径 2/4 等共享该 hook 的运行时），`additionalContext` 中的载荷在 TOON 编码更小时是 **TOON 文本**而非 JSON。TOON 是面向 LLM 直接阅读的紧凑文本格式，集成方无需解码；仅在离线调试需要还原 JSON 时可用 `toon -d` 转换。
+压缩后的响应通过官方 `hookSpecificOutput.updatedToolOutput` 替换原工具响应；
+`additionalContext` 只携带必要的环境错误归因，不重复追加压缩正文，也不输出
+Qoder 无官方语义的顶层 `suppressOutput`。无压缩收益时返回空对象，原始响应
+保持不变。若 TOON 编码后的文本更小，`updatedToolOutput` 中可承载 TOON 文本；
+仅在离线调试需要还原 JSON 时使用 `toon -d`。
 
 ### 路径 5：Claude Code 插件（`PostToolUse` hook）
 
@@ -310,7 +317,9 @@ curl -s https://api.example.com/data | tokenless compress-response
 | OpenClaw 插件配置 | `adapters/tokenless/openclaw/openclaw.plugin.json` |
 | copilot-shell hook（响应+TOON 流水线） | `adapters/tokenless/common/hooks/compress_response_hook.py` |
 | Hermes 插件 | `adapters/tokenless/hermes/__init__.py` |
-| Qoder 插件配置 | `adapters/tokenless/qoder/hooks.json` |
+| Qoder 插件配置 | `adapters/tokenless/qoder/hooks/hooks.json` |
+| Qoder hook dispatcher | `adapters/tokenless/qoder/hooks/run-hook.sh` |
+| Qoder Prompt Command | `adapters/tokenless/qoder/commands/tokenless-stats.md` |
 | Claude Code 插件 | `adapters/tokenless/claude-code/hooks/run-hook.sh` |
 | Codex 压缩 hook | `adapters/tokenless/codex/scripts/compress-response` |
 | TOON 编解码器（crates.io toon-format） | `toon-format` crate v0.4.6 |

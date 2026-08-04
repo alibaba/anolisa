@@ -11,14 +11,14 @@ Tokenless 通过 Adapter 把压缩、命令重写和环境检查接入 Agent。�
 | cosh | `cosh` | ✅ | 替换受支持的 Shell 输入 | Cosh-NG 替换响应；旧版 Copilot Shell 追加上下文 | 在响应压缩后尝试 | ✅ |
 | OpenClaw | `openclaw` | ✅ | 替换 `exec` 命令输入 | 替换持久化工具结果消息 | 默认关闭，需主动启用 | — |
 | Hermes | `hermes` | ✅ | 阻止第一次调用并要求 Agent 重试 | 替换结果字符串 | 在响应压缩后尝试 | — |
-| Qoder | `qoder` | ✅ | 输出改写后的 Shell 输入 | 输出 `additionalContext` | 在响应压缩后尝试 | — |
+| Qoder | `qoder` | ✅ | 通过 `updatedInput` 替换 Bash 输入 | 通过 `updatedToolOutput` 替换响应 | 在响应压缩后尝试 | — |
 | Claude Code | `claude-code` | ✅ | 替换 Bash 输入 | 2.1.121 及以上替换输出；否则透传 | 仅在替换结果可保持文本时使用 | — |
 | Codex | `codex` | ✅ | 替换受支持的 Shell 输入 | 保留原文，追加分析或压缩备选内容 | 用于生成该备选内容 | — |
 | Qwen Code | `qwencode` | ✅ | 输出改写后的 Shell 输入 | 输出 `additionalContext` | 在响应压缩后尝试 | ✅ |
 
 “—”表示当前 Adapter 没有注册此能力；对应的 Tokenless CLI 命令仍可能可用。
 
-`additionalContext` 是追加型 Hook 字段。在这些路径上，Tokenless 源码本身不会删除原始结果，最终处理方式还取决于宿主实现。统计记录只能证明压缩候选内容变小了，不能证明宿主已经从模型请求中移除原文。
+`additionalContext` 是追加型 Hook 字段。在 Qwen Code 和旧版 Copilot Shell 路径上，Tokenless 源码本身不会删除原始结果，最终处理方式还取决于宿主实现。统计记录只能证明压缩候选内容变小了，不能证明宿主已经从模型请求中移除原文。
 
 ## Adapter 处理规则
 
@@ -164,7 +164,11 @@ Plugin 在 Hermes 新会话中生效。重启 Hermes 后执行一个 Shell 工�
 
 ### Qoder
 
-Qoder IDE 和 qodercli 可能缓存 Plugin 配置。启用或升级后应完全重启 IDE。若出现旧 Hook 路径错误，参阅[Qoder Plugin 缓存问题](troubleshooting.md#qoder-plugin-缓存问题)。
+Adapter 使用 Qoder 原生的 `hooks/hooks.json` 和 `commands/*.md` 发现约定。安装前会检测实际的 `qodercli plugins validate/install/list/uninstall` 能力，并解析 `plugins list --json`；它不硬编码最低 Qoder 版本，也不会回退到 settings 注入。
+
+Plugin 注册和 `enabledPlugins` 由 Qoder 管理。Tokenless 不会向 `settings.json` 添加 Hook，而是通过 JSON Plugin 清单验证两个 `PreToolUse` Hook、一个 `PostToolUse` Hook 和 `/tokenless-stats` 已启用。开启或升级后运行 `/plugins reload`，或重启 Qoder。
+
+旧版 Tokenless settings 仅在完整指纹匹配时迁移。迁移采用原子写入、保留无关 Qoder 数据，并在安全清理失败时回滚刚安装的 Plugin。恢复命令见 [Qoder 原生 Plugin 安装或升级问题](troubleshooting.md#qoder-原生-plugin-安装或升级问题)。
 
 ### Claude Code
 

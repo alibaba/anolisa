@@ -106,13 +106,20 @@ agent-sec-cli skill-ledger status
 
 ## Integrate with Agent Frameworks
 
-Bridge installed components to Agent frameworks (cosh / OpenClaw / Hermes):
+Bridge installed components to Agent frameworks (cosh / OpenClaw / Hermes / Qoder):
 
 ```bash
 anolisa adapter scan                        # Discover installed frameworks
 anolisa adapter enable tokenless openclaw   # tokenless → OpenClaw
+anolisa adapter enable tokenless qoder      # tokenless → native Qoder plugin
 anolisa adapter enable ws-ckpt hermes       # ws-ckpt → Hermes
 ```
+
+The Qoder adapter uses `qodercli plugins` for validation, registration, status,
+and removal; it never injects normal plugin state into `settings.json`. After
+enabling it, run `/plugins reload` in Qoder or restart Qoder. If capability
+detection asks for an upgrade, install a Qoder version that provides the native
+plugin commands rather than attempting legacy settings injection.
 
 ---
 

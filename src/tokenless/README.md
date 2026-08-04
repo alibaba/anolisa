@@ -344,6 +344,11 @@ plugins:
 
 ## Qoder CLI Plugin
 
+The adapter is a native Qoder plugin that follows Qoder's standard
+`hooks/hooks.json` and `commands/*.md` layout. Registration, enablement, status,
+and removal are delegated to `qodercli plugins`; tokenless does not write normal
+plugin state into `~/.qoder/settings.json`.
+
 The plugin registers hooks at three Qoder events, covering three strategies:
 
 | Strategy | Event | Action | Status |
@@ -353,12 +358,34 @@ The plugin registers hooks at three Qoder events, covering three strategies:
 | Response compression | `PostToolUse` | Compresses tool responses and encodes to TOON format | ✅ Active |
 
 Each hook degrades gracefully — if the corresponding binary is not installed, that hook is silently skipped.
+The command rewrite hook returns Qoder's official `updatedInput` replacement.
+For `PostToolUse`, Qoder receives the compressed response through the official
+`hookSpecificOutput.updatedToolOutput` field, replacing the original tool output
+instead of appending a duplicate copy to context. The plugin also provides the
+Markdown prompt command `/tokenless-stats`.
 
 ### Install
 
 ```bash
 make qoder-install
 ```
+
+The installer detects the required `qodercli plugins` capabilities, validates
+the plugin resources, installs them at user scope, and verifies the enabled
+plugin inventory returned by `plugins list --json`. It does not hard-code a
+minimum Qoder version; if the required commands or JSON inventory are missing,
+upgrade Qoder instead of using legacy settings injection. `QODER_CONFIG_DIR` is
+respected when locating native Qoder state. Legacy cleanup separately inspects
+`~/.qoder/settings.json` because every older tokenless writer hard-coded that
+historical path even when `QODER_CONFIG_DIR` was set.
+
+After installation, run `/plugins reload` in Qoder or restart Qoder. Upgrades
+from an older tokenless adapter remove only the exact legacy hook fingerprints
+and `tokenless@local` entry previously owned by tokenless. The migration is
+atomic and preserves Qoder's `enabledPlugins`, unrelated hooks, and unknown
+fields. Unsafe or invalid legacy settings abort the migration and roll back a
+new native registration; the reported error includes the manual recovery
+command if rollback also fails.
 
 ## Claude Code Plugin
 

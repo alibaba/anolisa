@@ -41,6 +41,7 @@ from hook_utils import (
 
 _MIN_RTK_VERSION = (0, 35, 0)
 _AGENT_ID = resolve_agent_id()
+_QODER_AGENT_ID = "qoder-cli"
 
 # Shell connectives that terminate a command-list / pipeline segment.
 # A bare `rtk` wrapper can appear at command start or right after one.
@@ -203,19 +204,18 @@ def main() -> None:
     rewritten = _anchor_rtk_prefix(rewritten, rtk_bin)
 
     # 7. Build response
-    # Emit both formats for runtime compatibility:
-    # - ``tool_input``: Cosh-NG partial patch (merges with original params)
-    # - ``updatedInput``: copilot-shell full replacement (legacy)
+    # Qoder consumes the official full-replacement field. Other runtimes keep
+    # the existing partial patch alongside it for backward compatibility.
     updated_input = dict(tool_input)
     updated_input["command"] = rewritten
 
-    output = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "tool_input": {"command": rewritten},
-            "updatedInput": updated_input,
-        },
+    hook_output = {
+        "hookEventName": "PreToolUse",
+        "updatedInput": updated_input,
     }
+    if _AGENT_ID != _QODER_AGENT_ID:
+        hook_output["tool_input"] = {"command": rewritten}
+    output = {"hookSpecificOutput": hook_output}
     print(json.dumps(output))
 
 

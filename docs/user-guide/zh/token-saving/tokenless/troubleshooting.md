@@ -228,33 +228,33 @@ tokenless retrieve <hash> --stash-db ~/.tokenless/stash.db
 
 ## 有统计记录但 Prompt 没有变小
 
-先查看[支持矩阵](framework-integration.md#支持矩阵)中的响应交付路径。Qoder 和 Qwen Code 输出 `additionalContext`，旧版 Copilot Shell 会追加该字段，Codex 则有意保留原始结果，只追加分析或压缩备选。这些路径可以记录变小的候选内容，但不一定减少最终 Prompt。
+先查看[支持矩阵](framework-integration.md#支持矩阵)中的响应交付路径。Qwen Code 输出 `additionalContext`，旧版 Copilot Shell 会追加该字段，Codex 则有意保留原始结果，只追加分析或压缩备选。这些路径可以记录变小的候选内容，但不一定减少最终 Prompt。Qoder 则在压缩有收益时通过 `updatedToolOutput` 替换原始响应。
 
 Claude Code 需要 2.1.121 或更高版本才能替换响应；旧版本或无法识别版本时会透传原文。OpenClaw 会替换持久化结果，但只有设置 `toon_compression_enabled=true` 才会启用 TOON。
 
-## Qoder Plugin 缓存问题
+## Qoder 原生 Plugin 安装或升级问题
 
-仅在升级后出现以下错误时执行本节：
-
-```text
-python3: can't open file '/rewrite_hook.py'
-```
-
-刷新 Adapter：
+使用安装时相同的 `QODER_CONFIG_DIR` 检查 Qoder 清单，并根据 Tokenless 的安装布局执行对应的校验命令：
 
 ```bash
+# anolisa user install
+qodercli plugins validate "${XDG_DATA_HOME:-$HOME/.local/share}/anolisa/adapters/tokenless/qoder"
+
+# anolisa raw system install
+qodercli plugins validate /usr/local/share/anolisa/adapters/tokenless/qoder
+
+# RPM install
+qodercli plugins validate /usr/share/anolisa/adapters/tokenless/qoder
+
+qodercli plugins list --json
+
 anolisa adapter disable tokenless qoder
 anolisa adapter enable tokenless qoder
 ```
 
-确认缓存中没有未展开的占位符：
+如果使用自定义安装前缀，请改为校验 `<prefix>/usr/local/share/anolisa/adapters/tokenless/qoder`。
 
-```bash
-grep -R -n 'QODER_TOKENLESS_HOOKS' \
-  ~/.qoder/plugins/cache/local/tokenless*/*/hooks.json 2>/dev/null
-```
-
-预期无输出。之后完全退出并重启 Qoder IDE。
+如果缺少必要的 `plugins` 子命令，或 `list --json` 无法解析，请升级 Qoder；Tokenless 不会回退为修改 `settings.json`。旧配置迁移失败时 settings 文件保持不变，通常也会回滚刚安装的 Plugin。若回滚同样失败，请执行 Adapter 输出的 degraded 状态卸载命令。重新安装成功后运行 `/plugins reload`，或完全重启 Qoder。
 
 ## anolisa 与 RPM 状态不一致
 

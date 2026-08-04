@@ -101,13 +101,19 @@ agent-sec-cli skill-ledger status
 
 ## 适配 Agent 框架
 
-将已安装组件桥接到 Agent 框架（cosh / OpenClaw / Hermes）：
+将已安装组件桥接到 Agent 框架（cosh / OpenClaw / Hermes / Qoder）：
 
 ```bash
 anolisa adapter scan                        # 发现已安装框架
 anolisa adapter enable tokenless openclaw   # tokenless → OpenClaw
+anolisa adapter enable tokenless qoder      # tokenless → Qoder 原生插件
 anolisa adapter enable ws-ckpt hermes       # ws-ckpt → Hermes
 ```
+
+Qoder 适配器通过 `qodercli plugins` 完成校验、注册、状态检查和卸载，不会向
+`settings.json` 注入正常插件状态。启用后请在 Qoder 中运行 `/plugins reload`，
+或重启 Qoder。若能力检测提示升级，请安装支持原生插件命令的 Qoder 版本，
+不要回退到旧 settings 注入方式。
 
 ---
 

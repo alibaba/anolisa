@@ -236,17 +236,18 @@ trimmed=$(echo "$out" | tr -d '[:space:]')
 [ "$trimmed" = "{}" ] && pass "qoder-cli passes through with {}" \
     || fail "expected {}, got: $out"
 
-# ===== 4. Other agents keep the additionalContext contract =====
-section "Test 4: non-claude agents unchanged"
+# ===== 4. Qoder uses native output replacement =====
+section "Test 4: qoder native replacement"
 
-info "4.1: qoder-cli — compressed payload via additionalContext"
+info "4.1: qoder-cli — compressed payload via updatedToolOutput"
 out=$(run_hook qoder-cli "$STUB1" "$BASH_INPUT")
 extra=$(jget "$out" "hookSpecificOutput.additionalContext")
 updated=$(jget "$out" "hookSpecificOutput.updatedToolOutput")
-if echo "$extra" | grep -qF "$SENTINEL" && [ -z "$updated" ]; then
-    pass "qoder-cli keeps additionalContext, no updatedToolOutput"
+suppressed=$(jget "$out" "suppressOutput")
+if echo "$updated" | grep -qF "$SENTINEL" && [ -z "$extra" ] && [ -z "$suppressed" ]; then
+    pass "qoder-cli replaces output without duplication or suppressOutput"
 else
-    fail "qoder-cli contract changed: $out"
+    fail "qoder-cli replacement contract invalid: $out"
 fi
 
 # ===== 5. Env attribution stays additive-only on the replacement path =====

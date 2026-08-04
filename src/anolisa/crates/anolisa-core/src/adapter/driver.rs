@@ -164,6 +164,11 @@ pub enum PreparedEnable {
         /// claiming an entry until its `config set` command succeeds.
         selected_config_indices: Vec<usize>,
     },
+    /// Qoder native-plugin capabilities resolved before installation.
+    Qoder {
+        /// Whether any native tokenless registration existed before enable.
+        preexisting_native_plugin: bool,
+    },
 }
 
 /// Manager-owned persistence channel for resources applied incrementally.
@@ -264,6 +269,8 @@ pub enum AdapterConditionKind {
     ResourceBundleMatches,
     /// The plugin is still present in the framework registry.
     PluginRegistered,
+    /// The framework reports every resource required by the installed plugin.
+    PluginResourcesLoaded,
     /// The framework-native activation policy currently enables the plugin.
     ActivationEnabled,
     /// A marketplace source is still registered (future drivers).
@@ -351,8 +358,8 @@ impl CliOutput {
 /// with OpenClaw/Hermes, [`write_file`](AdapterOps::write_file) /
 /// [`create_symlink`](AdapterOps::create_symlink) landed with the
 /// Codex/Claude Code drivers, and [`read_file`](AdapterOps::read_file)
-/// landed with the Qoder driver (which must read the user's
-/// `settings.json` back before merging into it).
+/// landed with the Qoder driver (which reads a legacy `settings.json` only
+/// when an older receipt authorizes exact cleanup).
 pub trait AdapterOps {
     /// Spawn a framework CLI with a timeout, capture and truncate its
     /// output, and record the invocation in the central log. The argv is

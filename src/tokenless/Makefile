@@ -159,6 +159,14 @@ install-adapter-resources: build-openclaw-plugin
 	rm -rf $(DESTDIR)$(SHARE_DIR)
 	install -d -m 0755 $(DESTDIR)$(SHARE_DIR)
 	cp -pr $(ADAPTER_SRC_DIR)/. $(DESTDIR)$(SHARE_DIR)/
+	# Qoder's plugin root must be self-contained. Materialize shared resources
+	# so bundle digests and downstream packagers observe their real contents.
+	rm -rf $(DESTDIR)$(SHARE_DIR)/qoder/common
+	install -d -m 0755 $(DESTDIR)$(SHARE_DIR)/qoder/common
+	cp -pr $(ADAPTER_SRC_DIR)/common/. $(DESTDIR)$(SHARE_DIR)/qoder/common/
+	rm -f $(DESTDIR)$(SHARE_DIR)/qoder/hooks/run-hook.sh
+	install -p -m 0755 $(ADAPTER_SRC_DIR)/common/hooks/run-hook.sh \
+		$(DESTDIR)$(SHARE_DIR)/qoder/hooks/run-hook.sh
 	# Strip build-only artifacts from the installed plugin tree.
 	rm -rf $(DESTDIR)$(SHARE_DIR)/openclaw/node_modules
 	rm -f  $(DESTDIR)$(SHARE_DIR)/openclaw/package-lock.json

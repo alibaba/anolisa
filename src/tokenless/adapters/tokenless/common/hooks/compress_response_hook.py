@@ -31,6 +31,9 @@ Output contract per agent:
     from wrapped responses; never include ``returnDisplay``.  Keep
     environment/error attribution in ``additionalContext`` (additive).
     Unsupported Cosh-NG versions fail open with compression disabled.
+  - qoder-cli: the compressed payload replaces the tool result via
+    ``hookSpecificOutput.updatedToolOutput``. ``additionalContext`` remains
+    attribution-only, and no unsupported top-level suppression flag is sent.
   - other agents: the compressed payload is injected via
     ``additionalContext`` per each runtime's hook contract.
 
@@ -39,6 +42,8 @@ The agent ID is read from the TOKENLESS_AGENT_ID environment variable
 agent ID is overridden to ``cosh-ng`` for correct stats attribution.
 Fallback paths follow the ANOLISA FHS spec: /usr/bin/tokenless.
 """
+
+from __future__ import annotations
 
 import json
 import os
@@ -76,6 +81,7 @@ _MIN_RESPONSE_CHARS = 200
 # the additive additionalContext, which would duplicate the payload.
 _CLAUDE_AGENT_ID = "claude-code"
 _CLAUDE_MIN_REPLACE_VERSION = (2, 1, 121)
+_QODER_AGENT_ID = "qoder-cli"
 
 # Cache for `claude --version`, keyed on binary path+mtime+size so upgrades
 # invalidate it. Hooks run as a fresh process per tool call and spawning the
@@ -103,20 +109,24 @@ def _emit(output: dict) -> None:
     print(json.dumps(output, ensure_ascii=False))
 
 
-def _emit_attribution_or_skip(env_attribution: str) -> None:
+def _emit_attribution_or_skip(env_attribution: str, agent_id: str) -> None:
     """Pass the original result through, keeping only additive diagnostics.
 
     Emits an attribution-only additionalContext when present (it is genuinely
-    additive and safe on every agent), otherwise a plain skip. Never returns.
+    additive and safe on every agent), otherwise a plain skip. Qoder uses
+    updatedToolOutput instead of the unsupported top-level suppressOutput.
+    Never returns.
     """
     if env_attribution:
-        _emit({
-            "suppressOutput": True,
+        output = {
             "hookSpecificOutput": {
                 "hookEventName": "PostToolUse",
                 "additionalContext": env_attribution,
             },
-        })
+        }
+        if agent_id != _QODER_AGENT_ID:
+            output["suppressOutput"] = True
+        _emit(output)
         sys.exit(0)
     skip()
 
@@ -292,13 +302,13 @@ def main() -> None:
 
     # 13. Content retrieval -- skip entirely (preserve integrity)
     if tool_name in SKIP_TOOLS:
-        _emit_attribution_or_skip(env_attribution)
+        _emit_attribution_or_skip(env_attribution, agent_id)
 
     # 14. All other tools -- skip small responses, but still inject
     # env attribution for error cases (small size doesn't mean the
     # error classification is unimportant to the agent).
     if len(tool_response) < _MIN_RESPONSE_CHARS:
-        _emit_attribution_or_skip(env_attribution)
+        _emit_attribution_or_skip(env_attribution, agent_id)
 
     # 15. Step 1: Response compression with 3-layer thresholds
     compressed = tool_response
@@ -367,7 +377,20 @@ def main() -> None:
     # Nothing shrank — pass the original through untouched instead of
     # emitting a same-size duplicate of the response (applies to all agents).
     if not used_resp_compression and not toon_output:
-        _emit_attribution_or_skip(env_attribution)
+        _emit_attribution_or_skip(env_attribution, agent_id)
+
+    # Qoder's native PostToolUse protocol can replace the model-visible tool
+    # result directly. Keep diagnostics additive, but never duplicate the
+    # compressed payload through additionalContext.
+    if agent_id == _QODER_AGENT_ID:
+        hook_output = {
+            "hookEventName": "PostToolUse",
+            "updatedToolOutput": final_output,
+        }
+        if env_attribution:
+            hook_output["additionalContext"] = env_attribution
+        _emit({"hookSpecificOutput": hook_output})
+        return
 
     # 17. Build response — dispatch by agent runtime.
     #
@@ -382,14 +405,14 @@ def main() -> None:
                 "Claude Code < 2.1.121 (or version unknown): "
                 "updatedToolOutput unsupported, response compression disabled."
             )
-            _emit_attribution_or_skip(env_attribution)
+            _emit_attribution_or_skip(env_attribution, agent_id)
 
         if isinstance(tool_response_raw, (dict, list)):
             # Structured original: the replacement must preserve the built-in
             # tool output schema, so TOON (a text encoding) is not applicable
             # and only a genuine compress-response win qualifies.
             if not used_resp_compression:
-                _emit_attribution_or_skip(env_attribution)
+                _emit_attribution_or_skip(env_attribution, agent_id)
             compressed_parsed = try_parse_json(compressed)
             if isinstance(tool_response_raw, dict) and isinstance(
                 compressed_parsed, dict
@@ -400,14 +423,14 @@ def main() -> None:
             elif compressed_parsed is not None:
                 updated_output = compressed_parsed
             else:
-                _emit_attribution_or_skip(env_attribution)
+                _emit_attribution_or_skip(env_attribution, agent_id)
             # Restoring empty schema fields can cancel out a marginal win;
             # only replace when the result is strictly smaller than the
             # original serialized response.
             if len(json.dumps(updated_output, separators=(",", ":"))) >= len(
                 tool_response
             ):
-                _emit_attribution_or_skip(env_attribution)
+                _emit_attribution_or_skip(env_attribution, agent_id)
         else:
             # String original (JSON-in-string): replace with the smallest
             # text form (TOON when it won, compressed JSON otherwise).
@@ -426,7 +449,7 @@ def main() -> None:
     # Skip compression if it doesn't reduce model-visible size.
     if cosh_ng_detected:
         if len(final_output) >= len(tool_response):
-            _emit_attribution_or_skip(env_attribution)
+            _emit_attribution_or_skip(env_attribution, agent_id)
 
         hook_specific = {
             "hookEventName": "PostToolUse",

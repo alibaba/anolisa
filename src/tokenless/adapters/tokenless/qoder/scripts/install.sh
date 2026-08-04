@@ -1,210 +1,129 @@
 #!/usr/bin/env bash
-# install.sh — Install tokenless plugin for Qoder CLI.
-#
-# Responsibility boundary:
-#   - Register the plugin with qodercli (`qodercli plugins install`),
-#     staging a copy whose hooks.json has ${QODER_TOKENLESS_HOOKS} expanded
-#     to the absolute hooks path first (see staging comment below).
-#   - Merge our hook commands into ~/.qoder/settings.json under .hooks,
-#     dedup by command string so re-installs are idempotent.
-#   - Hook scripts themselves live in adapters/tokenless/common/hooks/
-#     (shared with cosh/openclaw/hermes); we only inject absolute paths.
+# Install tokenless through Qoder's native plugin lifecycle.
 set -euo pipefail
 
 AGENT="${ANOLISA_TARGET:-qoder}"
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
 ADAPTER_DIR="${ANOLISA_ADAPTER_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
-
 PLUGIN_DIR="$ADAPTER_DIR/qoder"
-HOOKS_DIR="$ADAPTER_DIR/common/hooks"
-SETTINGS_PATH="$HOME/.qoder/settings.json"
+SCRIPT_DIR="$PLUGIN_DIR/scripts"
+QODER_ROOT="${QODER_CONFIG_DIR:-$HOME/.qoder}"
+# Every legacy tokenless writer ignored QODER_CONFIG_DIR and wrote this exact
+# historical path. Native Qoder state still uses QODER_ROOT above.
+LEGACY_SETTINGS="$HOME/.qoder/settings.json"
+USER_DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}"
+[[ "$USER_DATA_ROOT" = /* ]] || USER_DATA_ROOT="$HOME/.local/share"
+LEGACY_ROOT_ARGS=(
+    --legacy-hooks-root "$ADAPTER_DIR/common/hooks"
+    --legacy-hooks-root "$USER_DATA_ROOT/anolisa/adapters/tokenless/common/hooks"
+    --legacy-hooks-root "/usr/local/share/anolisa/adapters/tokenless/common/hooks"
+    --legacy-hooks-root "/usr/share/anolisa/adapters/tokenless/common/hooks"
+)
 
-# Read version from plugin.json (already templated with the real version
-# by the build system). Falls back to "0.0.0" only when plugin.json is
-# absent or unparseable.
-VERSION="0.0.0"
-plugin_json="$PLUGIN_DIR/.qoder-plugin/plugin.json"
-if [ -f "$plugin_json" ] && command -v python3 &>/dev/null; then
-    VERSION="$(PLUGIN_JSON="$plugin_json" python3 -c "
-import json, os
-print(json.load(open(os.environ['PLUGIN_JSON'])).get('version','0.0.0'))
-" 2>/dev/null || echo "0.0.0")"
-elif [ -f "$plugin_json" ] && command -v jq &>/dev/null; then
-    VERSION="$(jq -r '.version // "0.0.0"' "$plugin_json" 2>/dev/null || echo "0.0.0")"
-fi
+resolve_qodercli() {
+    local candidate latest versioned_glob
+    versioned_glob="$QODER_ROOT/bin/qodercli/qodercli-${ANOLISA_QODER_VERSION:-*}"
+    # shellcheck disable=SC2086 # intentional versioned binary glob
+    latest="$(ls -d $versioned_glob 2>/dev/null | sort -V | tail -1 || true)"
+    for candidate in "${QODERCLI_BIN:-}" "$latest" \
+        "$QODER_ROOT/bin/qodercli/qodercli" qodercli; do
+        [ -n "$candidate" ] || continue
+        if [ -x "$candidate" ] || command -v "$candidate" >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
 
-# Find qodercli binary. Pick the highest versioned qodercli-X.Y.Z first
-# (sort -V handles semver: 10 > 9), then fall back to the unversioned
-# binary and finally PATH lookup.
-QODERCLI=""
-versioned_glob="$HOME/.qoder/bin/qodercli/qodercli-${ANOLISA_QODER_VERSION:-*}"
-# shellcheck disable=SC2086  # intentional glob expansion
-latest_versioned="$(ls -d $versioned_glob 2>/dev/null | sort -V | tail -1 || true)"
+fail_upgrade() {
+    echo "[${COMPONENT}] ERROR: $1" >&2
+    echo "    Upgrade Qoder to a release with native plugin hooks and JSON inventory." >&2
+    exit 1
+}
 
-for candidate in "$latest_versioned" \
-                 "$HOME/.qoder/bin/qodercli/qodercli" \
-                 "qodercli"; do
-    [ -z "$candidate" ] && continue
-    if [ -x "$candidate" ] || command -v "$candidate" &>/dev/null; then
-        QODERCLI="$candidate"
-        break
-    fi
+QODERCLI="$(resolve_qodercli || true)"
+[ -n "$QODERCLI" ] || fail_upgrade "qodercli not found"
+command -v python3 >/dev/null 2>&1 \
+    || fail_upgrade "python3 is required for safe plugin verification"
+
+for required in \
+    "$PLUGIN_DIR/.qoder-plugin/plugin.json" \
+    "$PLUGIN_DIR/hooks/hooks.json" \
+    "$PLUGIN_DIR/hooks/run-hook.sh" \
+    "$PLUGIN_DIR/common/hooks/hook_utils.py" \
+    "$PLUGIN_DIR/common/hooks/tool_ready_hook.sh" \
+    "$PLUGIN_DIR/common/hooks/rewrite_hook.py" \
+    "$PLUGIN_DIR/common/hooks/compress_response_hook.py" \
+    "$PLUGIN_DIR/common/tool-ready-spec.json" \
+    "$PLUGIN_DIR/common/tokenless-env-fix.sh" \
+    "$PLUGIN_DIR/commands/tokenless-stats.md"; do
+    [ -e "$required" ] || fail_upgrade "incomplete Qoder plugin bundle: missing $required"
 done
 
-if [ -z "$QODERCLI" ]; then
-    echo "[${COMPONENT}] ERROR: qodercli not found, aborting plugin registration" >&2
-    echo "    Install Qoder CLI first: https://qoder.com/cli" >&2
-    exit 1
+for subcommand in validate install list uninstall; do
+    "$QODERCLI" plugins "$subcommand" --help >/dev/null 2>&1 \
+        || fail_upgrade "Qoder lacks 'plugins ${subcommand}'"
+done
+
+list_plugins() {
+    "$QODERCLI" plugins list --json
+}
+
+preexisting=0
+if before_json="$(list_plugins)"; then
+    if ! printf '%s' "$before_json" | python3 -c 'import json,sys; json.load(sys.stdin)' \
+        >/dev/null 2>&1; then
+        fail_upgrade "'plugins list --json' returned invalid JSON"
+    fi
+    if printf '%s' "$before_json" | python3 "$SCRIPT_DIR/verify-plugin-list.py" \
+        --presence-only >/dev/null 2>&1; then
+        preexisting=1
+    else
+        presence_rc=$?
+        [ "$presence_rc" -eq 1 ] \
+            || fail_upgrade "'plugins list --json' returned an unrecognized inventory structure"
+    fi
+else
+    fail_upgrade "Qoder does not support 'plugins list --json'"
 fi
 
-# python3 is required to merge hooks into settings.json; without it the
-# `qodercli plugins install` step would succeed but no hooks would fire,
-# silently leaving tokenless inactive. Fail loudly instead.
-if ! command -v python3 &>/dev/null; then
-    echo "[${COMPONENT}] ERROR: python3 required to merge hooks into ${SETTINGS_PATH}" >&2
-    exit 1
+if ! validate_out="$("$QODERCLI" plugins validate "$PLUGIN_DIR" 2>&1)"; then
+    fail_upgrade "Qoder rejected the native tokenless plugin: $validate_out"
 fi
 
-echo "[${COMPONENT}] Installing ${AGENT} plugin v${VERSION}..."
-
-# Register plugin via qodercli standard command.
-# qodercli derives plugin name from the directory name, so stage the adapter
-# under a name matching plugin.json's "name" field via a private tempdir.
-# (A predictable /tmp/tokenless would collide across users on shared hosts and
-# race with concurrent installs.)
-# Stage a real copy, not a symlink: qodercli copies the plugin into its cache
-# verbatim, and consumers that load the cached hooks.json directly (e.g. the
-# Qoder IDE, which shares ~/.qoder with qodercli) do NOT expand
-# ${QODER_TOKENLESS_HOOKS}. Registering the raw file leaves them with broken
-# commands like `python3 /rewrite_hook.py`, whose non-zero exit is treated as
-# a tool-call block — the hook's own fail-open never gets a chance to run.
-echo "[${COMPONENT}] Registering plugin with qodercli..."
-TEMP_DIR="$(mktemp -d -t tokenless-qoder-install.XXXXXX)"
-trap 'rm -rf "$TEMP_DIR"' EXIT
-mkdir -p "$TEMP_DIR/tokenless"
-cp -R "$PLUGIN_DIR"/. "$TEMP_DIR/tokenless/"
-# python3 is guaranteed present (checked above); use it instead of sed for
-# portable in-place expansion (macOS and Linux sed -i syntax differ).
-HOOKS_DIR="$HOOKS_DIR" STAGED_HOOKS_JSON="$TEMP_DIR/tokenless/hooks.json" python3 - <<'PYEOF'
-import os
-
-hooks_dir = os.environ['HOOKS_DIR']
-path = os.environ['STAGED_HOOKS_JSON']
-with open(path) as f:
-    content = f.read()
-with open(path, 'w') as f:
-    f.write(content.replace('${QODER_TOKENLESS_HOOKS}', hooks_dir))
-PYEOF
-# Use `if !` so the failure branch survives `set -e`: a bare
-# `OUT=$(...)` assignment would otherwise abort the script before $?
-# is captured, and qodercli's stderr (now redirected into the var)
-# would never be printed.
-if ! PLUGIN_INSTALL_OUT="$("$QODERCLI" plugins install "$TEMP_DIR/tokenless" 2>&1)"; then
+echo "[${COMPONENT}] Installing ${AGENT} as a native Qoder plugin..."
+if ! install_out="$("$QODERCLI" plugins install "$PLUGIN_DIR" --scope user 2>&1)"; then
     echo "[${COMPONENT}] ERROR: qodercli plugins install failed" >&2
-    echo "    Output: $PLUGIN_INSTALL_OUT" >&2
+    echo "    $install_out" >&2
     exit 1
 fi
-echo "$PLUGIN_INSTALL_OUT"
+printf '%s\n' "$install_out"
 
-# Verify the plugin was registered: qodercli plugins list may not show
-# freshly installed plugins (qodercli display quirk), so we check the
-# cache directory that plugins install should have populated instead.
-# qodercli has been observed using two names for the cache key — the
-# plugin id ("tokenless") and a target-suffixed variant
-# ("tokenless-qoder"); accept either to stay aligned with the %preun
-# cleanup in tokenless.spec.in.
-CACHE_BASE="$HOME/.qoder/plugins/cache/local"
-if [ ! -d "$CACHE_BASE/tokenless" ] && [ ! -d "$CACHE_BASE/tokenless-qoder" ]; then
-    echo "[${COMPONENT}] ERROR: qodercli did not create plugin cache under $CACHE_BASE" >&2
-    echo "    Inspect with: ${QODERCLI} plugins list" >&2
+rollback() {
+    if [ "$preexisting" -eq 1 ]; then
+        echo "[${COMPONENT}] WARNING: pre-existing native plugin retained; inspect with '$QODERCLI plugins list'" >&2
+        return
+    fi
+    if ! "$QODERCLI" plugins uninstall tokenless --scope user >/dev/null 2>&1; then
+        echo "[${COMPONENT}] DEGRADED: rollback failed; run '$QODERCLI plugins uninstall tokenless --scope user'" >&2
+    fi
+}
+
+if ! after_json="$(list_plugins)" \
+    || ! printf '%s' "$after_json" | python3 "$SCRIPT_DIR/verify-plugin-list.py"; then
+    echo "[${COMPONENT}] ERROR: Qoder did not activate all tokenless plugin resources" >&2
+    rollback
     exit 1
 fi
 
-# Merge hooks into ~/.qoder/settings.json.
-# hooks.json carries the ${QODER_TOKENLESS_HOOKS} placeholder; we expand it
-# to the actual common/hooks/ path so qodercli sees absolute paths.
-HOOKS_DIR="$HOOKS_DIR" \
-HOOKS_JSON_PATH="$PLUGIN_DIR/hooks.json" \
-SETTINGS_PATH="$SETTINGS_PATH" \
-COMPONENT="$COMPONENT" \
-python3 - <<'PYEOF'
-import json, os, sys
+if ! migration_out="$(python3 "$SCRIPT_DIR/migrate-legacy-settings.py" \
+    "${LEGACY_ROOT_ARGS[@]}" "$LEGACY_SETTINGS" 2>&1)"; then
+    echo "[${COMPONENT}] ERROR: $migration_out" >&2
+    rollback
+    exit 1
+fi
+printf '[%s] Legacy migration: %s\n' "$COMPONENT" "$migration_out"
 
-hooks_dir = os.environ['HOOKS_DIR']
-hooks_json_path = os.environ['HOOKS_JSON_PATH']
-settings_path = os.environ['SETTINGS_PATH']
-component = os.environ.get('COMPONENT', 'tokenless')
-
-with open(hooks_json_path) as f:
-    hooks_str = f.read()
-hooks_str = hooks_str.replace('${QODER_TOKENLESS_HOOKS}', hooks_dir)
-resolved = json.loads(hooks_str)
-
-cfg = {}
-if os.path.exists(settings_path):
-    try:
-        with open(settings_path) as f:
-            cfg = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        # Refuse to clobber a settings.json we cannot parse — overwriting
-        # with our hooks alone would silently wipe every other user setting.
-        print(f'[{component}] ERROR: cannot parse {settings_path}: {e}', file=sys.stderr)
-        sys.exit(1)
-if not isinstance(cfg, dict):
-    cfg = {}
-
-existing_hooks = cfg.get('hooks', {})
-if not isinstance(existing_hooks, dict):
-    existing_hooks = {}
-
-for event, entries in resolved['hooks'].items():
-    existing = existing_hooks.get(event, [])
-    # Names this component manages for this event.
-    incoming_names = {
-        h['name']
-        for entry in entries
-        for h in (entry.get('hooks') or [])
-        if h.get('name')
-    }
-
-    # Upsert, not append-by-name: drop the matcher groups we own (those whose
-    # named hooks are entirely ours) so a re-install refreshes a changed
-    # command or env. Append-only would leave a stale entry — e.g. an existing
-    # tokenless hook installed before --agent-id would never gain it. Groups
-    # carrying any foreign hook are preserved untouched.
-    def _owned_by_us(entry):
-        named = [h.get('name') for h in (entry.get('hooks') or []) if h.get('name')]
-        return bool(named) and all(name in incoming_names for name in named)
-
-    refreshed = [entry for entry in existing if not _owned_by_us(entry)]
-    refreshed.extend(entries)
-    existing_hooks[event] = refreshed
-
-cfg['hooks'] = existing_hooks
-
-# Also ensure the plugin is enabled in settings.json. qodercli plugins
-# install writes installed_plugins.json but does NOT touch settings.json's
-# plugins.enabled — without this the plugin won't show in `plugin list`.
-plugins_cfg = cfg.get('plugins')
-if not isinstance(plugins_cfg, dict):
-    plugins_cfg = {}
-    cfg['plugins'] = plugins_cfg
-enabled = plugins_cfg.get('enabled')
-if not isinstance(enabled, list):
-    enabled = []
-    plugins_cfg['enabled'] = enabled
-plugin_id = 'tokenless@local'
-if plugin_id not in enabled:
-    enabled.append(plugin_id)
-os.makedirs(os.path.dirname(settings_path), exist_ok=True)
-
-# Atomic write: stage to .tmp then os.replace() so a kill mid-write cannot
-# leave qodercli with a truncated settings.json.
-tmp_path = settings_path + '.tmp'
-with open(tmp_path, 'w') as f:
-    json.dump(cfg, f, indent=2)
-os.replace(tmp_path, settings_path)
-print(f'[{component}] Updated {settings_path}')
-PYEOF
-
-echo "[${COMPONENT}] ${AGENT} plugin v${VERSION} installed and activated."
+echo "[${COMPONENT}] ${AGENT} plugin installed and verified as tokenless@local."
+echo "[${COMPONENT}] Run /plugins reload in Qoder or restart Qoder to apply it."

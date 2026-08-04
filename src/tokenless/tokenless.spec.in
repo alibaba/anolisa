@@ -101,6 +101,7 @@ mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/dist
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/commands
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin
@@ -167,14 +168,18 @@ install -m 0755 adapters/tokenless/hermes/scripts/detect.sh %{buildroot}%{_datad
 install -m 0755 adapters/tokenless/hermes/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts/
 install -m 0755 adapters/tokenless/hermes/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts/
 
-# Install Qoder CLI plugin (manifest + hooks.json + install scripts).
-# Hook scripts themselves are shared from common/hooks/ — no duplication here.
+# Install the native Qoder plugin as a self-contained resource tree so adapter
+# bundle digests track changes to shared hooks before Qoder caches the plugin.
 install -m 0644 adapters/tokenless/qoder/.qoder-plugin/plugin.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin/
-install -m 0644 adapters/tokenless/qoder/hooks.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/
-install -m 0644 adapters/tokenless/qoder/commands/tokenless-stats.toml %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/commands/
+install -m 0644 adapters/tokenless/qoder/hooks/hooks.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/hooks/
+install -m 0755 adapters/tokenless/qoder/hooks/run-hook.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/hooks/
+cp -a adapters/tokenless/common %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/common
+install -m 0644 adapters/tokenless/qoder/commands/tokenless-stats.md %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/commands/
 install -m 0755 adapters/tokenless/qoder/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
 install -m 0755 adapters/tokenless/qoder/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
 install -m 0755 adapters/tokenless/qoder/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
+install -m 0755 adapters/tokenless/qoder/scripts/migrate-legacy-settings.py %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
+install -m 0755 adapters/tokenless/qoder/scripts/verify-plugin-list.py %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
 
 # Install Claude Code plugin (marketplace + plugin manifest + wrapper hook + scripts).
 # plugin.json is stamped from .in by `make stamp-adapter-templates` during %build
@@ -243,6 +248,7 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %dir %{_datadir}/anolisa/adapters/tokenless/hermes/scripts
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin
+%dir %{_datadir}/anolisa/adapters/tokenless/qoder/hooks
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder/scripts
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder/commands
 %dir %{_datadir}/anolisa/adapters/tokenless/claude-code
@@ -276,13 +282,17 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/detect.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/install.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/uninstall.sh
-# Qoder CLI plugin — hook scripts reused from common/hooks/ (no duplication).
+# Native Qoder CLI plugin.
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin/plugin.json
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/hooks.json
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/commands/tokenless-stats.toml
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/hooks/hooks.json
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/hooks/run-hook.sh
+%{_datadir}/anolisa/adapters/tokenless/qoder/common
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/commands/tokenless-stats.md
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/detect.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/install.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/uninstall.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/migrate-legacy-settings.py
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/verify-plugin-list.py
 
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin/marketplace.json
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin/plugin.json
@@ -366,23 +376,11 @@ hash -r 2>/dev/null || true
 # On uninstall ($1=0): clean qodercli, codex, openclaw, and hermes plugins
 if [ $1 -eq 0 ]; then
     # --- Qoder CLI plugin cleanup ---
-    # Unregister plugin via qodercli and remove hooks from settings.json.
+    # Unregister through qodercli and migrate exact legacy settings entries.
     QODER_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/uninstall.sh"
     if [ -x "$QODER_SCRIPT" ]; then
         bash "$QODER_SCRIPT" || true
     fi
-    # Clean up plugin cache (qodercli's uninstall may leave orphaned cache).
-    # qodercli's cache key has been observed in two forms — the plugin's
-    # package name ("tokenless") and a target-suffixed variant
-    # ("tokenless-qoder"). Cover both so leftover caches don't shadow a
-    # fresh install on the next rpm upgrade.
-    for cache_dir in "$HOME/.qoder/plugins/cache/local/tokenless" \
-                     "$HOME/.qoder/plugins/cache/local/tokenless-qoder"; do
-        if [ -d "$cache_dir" ]; then
-            rm -rf "$cache_dir" || true
-        fi
-    done
-
     # --- Codex plugin cleanup ---
     # Remove codex marketplace entry + plugin cache.
     CODEX_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/codex/scripts/uninstall.sh"

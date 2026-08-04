@@ -4185,9 +4185,8 @@ entry = "cosh-extension.json"
         );
     }
 
-    /// A root satisfying only part of a driver's mandatory file set (qoder
-    /// needs plugin manifest AND hooks.json) is not a valid bundle and must
-    /// not shadow a complete bundle in a later root.
+    /// A root satisfying only part of Qoder's native-plugin layout is not a
+    /// valid bundle and must not shadow a complete bundle in a later root.
     #[test]
     fn resolve_resource_root_skips_incomplete_qoder_bundle() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4220,15 +4219,37 @@ entry = ".qoder-plugin/plugin.json"
 "#;
         write_contract_with_content(&first_datadir, "tokenless", contract);
 
-        // First root: manifest only — read_bundle would reject it for the
-        // missing hooks.json. Second root: complete bundle.
+        // First root: manifest only. Second root: complete native bundle.
         let incomplete = first_datadir.join("adapters/tokenless/qoder");
         std::fs::create_dir_all(incomplete.join(".qoder-plugin")).expect("incomplete dir");
         std::fs::write(incomplete.join(".qoder-plugin/plugin.json"), b"{}").expect("manifest");
         let complete = second_datadir.join("adapters/tokenless/qoder");
-        std::fs::create_dir_all(complete.join(".qoder-plugin")).expect("complete dir");
+        std::fs::create_dir_all(complete.join(".qoder-plugin")).expect("manifest dir");
+        std::fs::create_dir_all(complete.join("hooks")).expect("hooks dir");
+        std::fs::create_dir_all(complete.join("commands")).expect("commands dir");
+        std::fs::create_dir_all(complete.join("common/hooks")).expect("embedded hooks dir");
         std::fs::write(complete.join(".qoder-plugin/plugin.json"), b"{}").expect("manifest");
-        std::fs::write(complete.join("hooks.json"), b"{}").expect("hooks");
+        std::fs::write(
+            complete.join("hooks/hooks.json"),
+            br#"{"hooks":{"PreToolUse":[{},{}],"PostToolUse":[{}]}}"#,
+        )
+        .expect("hooks");
+        std::fs::write(complete.join("hooks/run-hook.sh"), b"#!/bin/sh\n").expect("runner");
+        std::fs::write(
+            complete.join("commands/tokenless-stats.md"),
+            b"---\ndescription: stats\n---\nshow stats\n",
+        )
+        .expect("command");
+        for relative in [
+            "common/hooks/hook_utils.py",
+            "common/hooks/tool_ready_hook.sh",
+            "common/hooks/rewrite_hook.py",
+            "common/hooks/compress_response_hook.py",
+            "common/tool-ready-spec.json",
+            "common/tokenless-env-fix.sh",
+        ] {
+            std::fs::write(complete.join(relative), b"stub\n").expect("embedded resource");
+        }
 
         let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
         let mut manager = AdapterManager::new(layout, Some(tmp.path().join("home")), "test".into());

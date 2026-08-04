@@ -98,7 +98,7 @@ Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、
 | cosh | Extension | Tool Ready、命令重写、响应压缩 + TOON、Schema；Cosh-NG 有替换路径，旧版 Copilot Shell 则追加额外上下文 |
 | OpenClaw | Plugin | Tool Ready、`exec` 命令重写、替换持久化结果、可选 TOON；无 Schema |
 | Hermes | Plugin | Tool Ready、阻止后重试的命令重写、用响应压缩 + TOON 替换结果；无 Schema |
-| Qoder | Plugin | Tool Ready、命令重写、通过 `additionalContext` 交付响应压缩 + TOON；无 Schema |
+| Qoder | 原生 Plugin | Tool Ready、通过 `updatedInput` 替换 Bash 输入、通过 `updatedToolOutput` 替换响应压缩 + TOON；无 Schema |
 | Claude Code | Marketplace Plugin | Tool Ready、Bash 命令重写；Claude Code 2.1.121 及以上可替换响应；条件式 TOON；无 Schema |
 | Codex | Plugin | Tool Ready、命令重写；把响应/TOON 分析追加为上下文，保留原始结果；无 Schema |
 | Qwen Code | Extension | Tool Ready、命令重写、通过 `additionalContext` 交付响应压缩 + TOON、Schema |

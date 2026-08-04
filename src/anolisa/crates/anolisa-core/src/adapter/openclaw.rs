@@ -389,6 +389,11 @@ impl FrameworkDriver for OpenClawDriver {
                         "openclaw plugin enable requires prepared host capabilities",
                     ));
                 }
+                PreparedEnable::Qoder { .. } => {
+                    return Err(prepared_state_mismatch(
+                        "openclaw plugin enable received Qoder host capabilities",
+                    ));
+                }
             }
         };
         validate_config_claim_state(claim)?;

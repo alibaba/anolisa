@@ -37,6 +37,9 @@ case "$SCRIPT" in
 esac
 
 CANDIDATES=(
+    # Native plugin caches contain a self-contained common/ directory beside
+    # hooks/. This path survives Qoder dereferencing this dispatcher symlink.
+    "${SCRIPT_DIR}/../common/hooks/${SCRIPT}"
     "${SCRIPT_DIR}/../../common/hooks/${SCRIPT}"
     "/usr/local/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}"
     "/usr/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}"

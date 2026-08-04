@@ -98,7 +98,7 @@ Command rewriting also changes the shell command submitted by the host. Most ada
 | cosh | Extension | Tool Ready, rewrite, response + TOON, Schema; Cosh-NG has a replacement path, while legacy Copilot Shell appends additional context |
 | OpenClaw | Plugin | Tool Ready, `exec` rewrite, persisted-result replacement, optional TOON; no Schema |
 | Hermes | Plugin | Tool Ready, block-and-retry rewrite, result replacement with response + TOON; no Schema |
-| Qoder | Plugin | Tool Ready, rewrite, response + TOON through `additionalContext`; no Schema |
+| Qoder | Native plugin | Tool Ready, Bash replacement through `updatedInput`, response + TOON replacement through `updatedToolOutput`; no Schema |
 | Claude Code | Marketplace plugin | Tool Ready, Bash rewrite, response replacement on Claude Code 2.1.121 or later; conditional TOON; no Schema |
 | Codex | Plugin | Tool Ready, rewrite, response/TOON analysis added as context; the original result is retained; no Schema |
 | Qwen Code | Extension | Tool Ready, rewrite, response + TOON through `additionalContext`, Schema |

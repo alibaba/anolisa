@@ -48,6 +48,7 @@ import {
   cpSync,
   readdirSync,
   chmodSync,
+  lstatSync,
 } from 'node:fs';
 import { join, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -607,6 +608,19 @@ function copyAdapters(rootPkgDir) {
       !src.endsWith(`${sep}package-lock.json`) &&
       !src.endsWith(`${sep}.gitignore`),
   });
+
+  // Node resolves copied symlinks to absolute source paths by default. Ship
+  // real resources so neither npm nor Qoder can retain build-machine paths.
+  const qoderCommon = join(adaptersDest, 'qoder', 'common');
+  rmSync(qoderCommon, { recursive: true, force: true });
+  cpSync(join(adaptersDest, 'common'), qoderCommon, { recursive: true });
+
+  const qoderDispatcher = join(adaptersDest, 'qoder', 'hooks', 'run-hook.sh');
+  rmSync(qoderDispatcher, { force: true });
+  copyFileSync(join(qoderCommon, 'hooks', 'run-hook.sh'), qoderDispatcher);
+  if (!lstatSync(qoderDispatcher).isFile()) {
+    throw new Error('Qoder hook dispatcher was not materialized as a regular file');
+  }
 
   // Stamp *.in templates with the release version (Makefile does this via
   // stamp-adapter-templates for RPM installs) and drop the raw templates.
