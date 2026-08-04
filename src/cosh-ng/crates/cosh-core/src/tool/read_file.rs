@@ -270,7 +270,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reuses_workspace_pinned_when_context_is_created() {
+    async fn root_replacement_follows_platform_confinement() {
         let parent = tempfile::tempdir().unwrap();
         let container = parent.path().join("container");
         let root = container.join("workspace");
@@ -290,7 +290,13 @@ mod tests {
             .await
             .unwrap();
 
+        #[cfg(target_os = "linux")]
         assert!(result.output.contains("trusted"));
+        #[cfg(target_os = "macos")]
+        {
+            assert!(result.is_error);
+            assert!(result.output.contains("Pinned workspace root was replaced"));
+        }
         assert!(!result.output.contains("outside"));
     }
 

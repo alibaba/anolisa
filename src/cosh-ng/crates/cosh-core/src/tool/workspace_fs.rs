@@ -5,12 +5,17 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
+#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use rustix::fs::{openat2, readlinkat, Dir, FileType, Mode, OFlags, ResolveFlags, CWD};
+#[cfg(target_os = "macos")]
+use rustix::fs::open;
+#[cfg(target_os = "linux")]
+use rustix::fs::{openat2, readlinkat, ResolveFlags, CWD};
+use rustix::fs::{Dir, FileType, Mode, OFlags};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
@@ -19,11 +24,15 @@ use super::expand_tilde;
 const MAX_WALK_ENTRIES: usize = 10_000;
 const MAX_IGNORE_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_IGNORE_TOTAL_BYTES: u64 = 4 * 1024 * 1024;
+#[cfg(target_os = "linux")]
 const MAX_SYMLINKS: usize = 40;
+#[cfg(target_os = "linux")]
 const RESOLVE_FLAGS: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_MAGICLINKS)
     .union(ResolveFlags::NO_XDEV);
+#[cfg(target_os = "linux")]
 const ROOT_RESOLVE_FLAGS: ResolveFlags = ResolveFlags::NO_MAGICLINKS;
+#[cfg(target_os = "linux")]
 const PIN_FLAGS: OFlags = OFlags::PATH.union(OFlags::CLOEXEC).union(OFlags::NOFOLLOW);
 const READ_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::CLOEXEC)
@@ -192,6 +201,7 @@ impl WorkspaceFs {
         Self::open_root(root).map_err(|error| error.to_string())
     }
 
+    #[cfg(target_os = "linux")]
     pub(super) fn open_root(root: &Path) -> Result<Self, WorkspaceRootError> {
         let requested_root = root.to_path_buf();
         let descriptor = openat2(
@@ -222,6 +232,43 @@ impl WorkspaceFs {
         })
     }
 
+    #[cfg(target_os = "macos")]
+    pub(super) fn open_root(root: &Path) -> Result<Self, WorkspaceRootError> {
+        let requested_root = root.to_path_buf();
+        let root = root.canonicalize().map_err(|error| {
+            let message = format!("Failed to open workspace root {}: {error}", root.display());
+            if error.kind() == std::io::ErrorKind::NotFound {
+                WorkspaceRootError::Missing(message)
+            } else {
+                WorkspaceRootError::Permanent(message)
+            }
+        })?;
+        let directory = File::open(&root).map_err(|error| {
+            WorkspaceRootError::Permanent(format!(
+                "Failed to open workspace root {}: {error}",
+                root.display()
+            ))
+        })?;
+        let metadata = directory.metadata().map_err(|error| {
+            WorkspaceRootError::Permanent(format!(
+                "Failed to inspect workspace root {}: {error}",
+                root.display()
+            ))
+        })?;
+        if !metadata.is_dir() {
+            return Err(WorkspaceRootError::Permanent(format!(
+                "Workspace root is not a directory: {}",
+                root.display()
+            )));
+        }
+        Ok(Self {
+            root,
+            requested_root,
+            directory,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
     fn check_platform_support(directory: &File) -> Result<(), WorkspaceRootError> {
         openat2(directory, ".", PIN_FLAGS, Mode::empty(), RESOLVE_FLAGS)
             .map(drop)
@@ -419,14 +466,22 @@ impl WorkspaceFs {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn open_beneath(&self, relative_path: &Path) -> Result<Option<File>, WorkspaceOpenError> {
         self.resolve_beneath(relative_path, true)
     }
 
+    #[cfg(target_os = "macos")]
+    fn open_beneath(&self, relative_path: &Path) -> Result<Option<File>, WorkspaceOpenError> {
+        self.resolve_beneath(relative_path)
+    }
+
+    #[cfg(target_os = "linux")]
     fn pin_beneath(&self, relative_path: &Path) -> Result<Option<File>, WorkspaceOpenError> {
         self.resolve_beneath(relative_path, false)
     }
 
+    #[cfg(target_os = "linux")]
     fn resolve_beneath(
         &self,
         relative_path: &Path,
@@ -531,6 +586,195 @@ impl WorkspaceFs {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn resolve_beneath(&self, relative_path: &Path) -> Result<Option<File>, WorkspaceOpenError> {
+        // macOS has no openat2 equivalent. Canonical paths plus descriptor
+        // identity checks provide best-effort confinement around each open.
+        self.verify_pinned_root()?;
+        let display_path = self.display_path(relative_path);
+        let candidate = self.root.join(relative_path);
+        let canonical = match candidate.canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Err(WorkspaceOpenError::Inaccessible(display_path));
+            }
+            Err(error)
+                if rustix::io::Errno::from_io_error(&error) == Some(rustix::io::Errno::LOOP) =>
+            {
+                return Err(WorkspaceOpenError::SymlinkLoop(display_path));
+            }
+            Err(error) => {
+                return Err(WorkspaceOpenError::Other(format!(
+                    "Failed to resolve {}: {error}",
+                    display_path.display()
+                )));
+            }
+        };
+        if canonical.strip_prefix(&self.root).is_err() {
+            return Err(WorkspaceOpenError::Escape(display_path));
+        }
+
+        let root_metadata = self.directory.metadata().map_err(|error| {
+            WorkspaceOpenError::Other(format!(
+                "Failed to inspect pinned workspace root {}: {error}",
+                self.root.display()
+            ))
+        })?;
+        let resolved_metadata = std::fs::metadata(&canonical).map_err(|error| {
+            WorkspaceOpenError::Other(format!(
+                "Failed to inspect {}: {error}",
+                display_path.display()
+            ))
+        })?;
+        if resolved_metadata.dev() != root_metadata.dev() {
+            return Err(WorkspaceOpenError::Escape(display_path));
+        }
+        // macOS has no O_PATH equivalent, so metadata-only callers may still
+        // require read permission when pinning an object.
+        let flags = if resolved_metadata.is_dir() {
+            READ_FLAGS | OFlags::DIRECTORY | OFlags::NOFOLLOW
+        } else if resolved_metadata.is_file() {
+            READ_FLAGS | OFlags::NOFOLLOW
+        } else {
+            return Err(WorkspaceOpenError::Unsupported(display_path));
+        };
+        let descriptor = open(&canonical, flags, Mode::empty()).map_err(|error| match error {
+            rustix::io::Errno::ACCESS | rustix::io::Errno::PERM => {
+                WorkspaceOpenError::Inaccessible(display_path.clone())
+            }
+            rustix::io::Errno::LOOP => WorkspaceOpenError::Escape(display_path.clone()),
+            _ => WorkspaceOpenError::Other(format!(
+                "Failed to open {}: {error}",
+                display_path.display()
+            )),
+        })?;
+        let file = File::from(descriptor);
+        let opened_metadata = file.metadata().map_err(|error| {
+            WorkspaceOpenError::Other(format!(
+                "Failed to inspect {}: {error}",
+                display_path.display()
+            ))
+        })?;
+
+        let verified = candidate.canonicalize().map_err(|error| {
+            WorkspaceOpenError::Other(format!(
+                "Failed to verify {} after opening: {error}",
+                display_path.display()
+            ))
+        })?;
+        let verified_metadata = std::fs::metadata(&verified).map_err(|error| {
+            WorkspaceOpenError::Other(format!(
+                "Failed to inspect {} after opening: {error}",
+                display_path.display()
+            ))
+        })?;
+        if verified.strip_prefix(&self.root).is_err()
+            || verified_metadata.dev() != root_metadata.dev()
+            || opened_metadata.dev() != verified_metadata.dev()
+            || opened_metadata.ino() != verified_metadata.ino()
+        {
+            return Err(WorkspaceOpenError::Escape(display_path));
+        }
+        self.verify_pinned_root()?;
+        Ok(Some(file))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn metadata_beneath(
+        &self,
+        relative_path: &Path,
+    ) -> Result<Option<std::fs::Metadata>, WorkspaceOpenError> {
+        // Metadata-only consumers reopen paths before reading or traversing, so
+        // repeated identity checks can preserve confinement without read access.
+        self.verify_pinned_root()?;
+        let display_path = self.display_path(relative_path);
+        let candidate = self.root.join(relative_path);
+        let canonical = match candidate.canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Err(WorkspaceOpenError::Inaccessible(display_path));
+            }
+            Err(error)
+                if rustix::io::Errno::from_io_error(&error) == Some(rustix::io::Errno::LOOP) =>
+            {
+                return Err(WorkspaceOpenError::SymlinkLoop(display_path));
+            }
+            Err(error) => {
+                return Err(WorkspaceOpenError::Other(format!(
+                    "Failed to resolve {}: {error}",
+                    display_path.display()
+                )));
+            }
+        };
+        if canonical.strip_prefix(&self.root).is_err() {
+            return Err(WorkspaceOpenError::Escape(display_path));
+        }
+
+        let root_metadata = self.directory.metadata().map_err(|error| {
+            WorkspaceOpenError::Other(format!(
+                "Failed to inspect pinned workspace root {}: {error}",
+                self.root.display()
+            ))
+        })?;
+        let resolved_metadata = std::fs::metadata(&canonical).map_err(|error| {
+            WorkspaceOpenError::Other(format!(
+                "Failed to inspect {}: {error}",
+                display_path.display()
+            ))
+        })?;
+        if resolved_metadata.dev() != root_metadata.dev() {
+            return Err(WorkspaceOpenError::Escape(display_path));
+        }
+
+        let verified = candidate.canonicalize().map_err(|error| {
+            WorkspaceOpenError::Other(format!(
+                "Failed to verify {} after inspection: {error}",
+                display_path.display()
+            ))
+        })?;
+        let verified_metadata = std::fs::metadata(&verified).map_err(|error| {
+            WorkspaceOpenError::Other(format!(
+                "Failed to inspect {} after verification: {error}",
+                display_path.display()
+            ))
+        })?;
+        if verified.strip_prefix(&self.root).is_err()
+            || verified_metadata.dev() != root_metadata.dev()
+            || resolved_metadata.dev() != verified_metadata.dev()
+            || resolved_metadata.ino() != verified_metadata.ino()
+        {
+            return Err(WorkspaceOpenError::Escape(display_path));
+        }
+        self.verify_pinned_root()?;
+        Ok(Some(verified_metadata))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn verify_pinned_root(&self) -> Result<(), WorkspaceOpenError> {
+        let pinned = self.directory.metadata().map_err(|error| {
+            WorkspaceOpenError::Other(format!(
+                "Failed to inspect pinned workspace root {}: {error}",
+                self.root.display()
+            ))
+        })?;
+        let live = std::fs::metadata(&self.root).map_err(|error| {
+            WorkspaceOpenError::Other(format!(
+                "Pinned workspace root changed: {}: {error}",
+                self.root.display()
+            ))
+        })?;
+        if !live.is_dir() || pinned.dev() != live.dev() || pinned.ino() != live.ino() {
+            return Err(WorkspaceOpenError::Other(format!(
+                "Pinned workspace root was replaced: {}",
+                self.root.display()
+            )));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
     fn pin_relative_node_kind(
         &self,
         relative_path: &Path,
@@ -544,6 +788,25 @@ impl WorkspaceFs {
                 self.display_path(relative_path).display()
             ))
         })?;
+        if metadata.is_file() {
+            Ok(Some(WorkspaceNodeKind::File))
+        } else if metadata.is_dir() {
+            Ok(Some(WorkspaceNodeKind::Directory))
+        } else {
+            Err(WorkspaceOpenError::Unsupported(
+                self.display_path(relative_path),
+            ))
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn pin_relative_node_kind(
+        &self,
+        relative_path: &Path,
+    ) -> Result<Option<WorkspaceNodeKind>, WorkspaceOpenError> {
+        let Some(metadata) = self.metadata_beneath(relative_path)? else {
+            return Ok(None);
+        };
         if metadata.is_file() {
             Ok(Some(WorkspaceNodeKind::File))
         } else if metadata.is_dir() {
@@ -894,6 +1157,7 @@ impl WorkspaceFs {
         Ok((files, incomplete || limit_reached, ignore_incomplete))
     }
 
+    #[cfg(target_os = "linux")]
     fn git_marker(
         &self,
         relative_directory: &Path,
@@ -924,6 +1188,19 @@ impl WorkspaceFs {
                     self.display_path(&marker_path).display()
                 ))
             })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn git_marker(
+        &self,
+        relative_directory: &Path,
+    ) -> Result<Option<GitMarker>, WorkspaceOpenError> {
+        let marker_path = relative_directory.join(".git");
+        self.pin_relative_node_kind(&marker_path).map(|kind| {
+            kind.map(|kind| GitMarker {
+                is_directory: kind == WorkspaceNodeKind::Directory,
+            })
+        })
     }
 
     fn load_ignore_matchers(
@@ -1200,6 +1477,7 @@ fn is_permission_error(error: rustix::io::Errno) -> bool {
     matches!(error, rustix::io::Errno::ACCESS | rustix::io::Errno::PERM)
 }
 
+#[cfg(target_os = "linux")]
 fn reopen_pinned(
     pinned: &File,
     display_path: &Path,
@@ -1229,6 +1507,7 @@ fn reopen_pinned(
     }
 }
 
+#[cfg(target_os = "linux")]
 fn platform_support_error(error: rustix::io::Errno) -> WorkspaceRootError {
     if error == rustix::io::Errno::NOSYS {
         WorkspaceRootError::Permanent(format!(
@@ -1242,6 +1521,7 @@ fn platform_support_error(error: rustix::io::Errno) -> WorkspaceRootError {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn root_path_from_descriptor(
     directory: &File,
     requested_root: &Path,
@@ -1268,12 +1548,14 @@ fn root_path_from_descriptor(
     Ok(root)
 }
 
+#[cfg(target_os = "linux")]
 fn path_components(path: &Path) -> Result<VecDeque<OsString>, WorkspaceOpenError> {
     let mut components = VecDeque::new();
     prepend_components(&mut components, path)?;
     Ok(components)
 }
 
+#[cfg(target_os = "linux")]
 fn prepend_components(
     remaining: &mut VecDeque<OsString>,
     path: &Path,
@@ -1298,6 +1580,7 @@ fn prepend_components(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn open_component(
     directory: &File,
     component: &Path,
@@ -1378,6 +1661,19 @@ mod tests {
     }
 
     #[test]
+    fn parent_components_cannot_escape_the_workspace() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(parent.path().join("outside.txt"), "outside").unwrap();
+        let workspace = WorkspaceFs::new(&root).unwrap();
+
+        let error = workspace.open_file(&root, "../outside.txt").unwrap_err();
+
+        assert!(error.contains("escapes workspace root"), "{error}");
+    }
+
+    #[test]
     fn walker_skips_external_symlinks_and_follows_internal_ones() {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("workspace");
@@ -1400,6 +1696,7 @@ mod tests {
         assert!(!paths.iter().any(|path| path.ends_with("outside-link")));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn root_descriptor_survives_path_replacement() {
         let parent = tempfile::tempdir().unwrap();
@@ -1425,6 +1722,27 @@ mod tests {
         assert_eq!(content, "trusted");
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn root_replacement_fails_closed() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("value.txt"), "trusted").unwrap();
+        let workspace = WorkspaceFs::new(&root).unwrap();
+
+        let moved = parent.path().join("moved");
+        std::fs::rename(&root, &moved).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("value.txt"), "replacement").unwrap();
+
+        let error = workspace.open_file(&root, "value.txt").unwrap_err();
+        assert!(
+            error.contains("Pinned workspace root was replaced"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn root_identity_is_derived_from_the_pinned_descriptor() {
         let directory = tempfile::tempdir().unwrap();
@@ -1435,7 +1753,7 @@ mod tests {
 
         let workspace = WorkspaceFs::new(&link).unwrap();
 
-        assert_eq!(workspace.root(), target);
+        assert_eq!(workspace.root(), target.canonicalize().unwrap());
     }
 
     #[test]
@@ -1446,7 +1764,7 @@ mod tests {
 
         let workspace = WorkspaceFs::new(&root).unwrap();
 
-        assert_eq!(workspace.root(), root);
+        assert_eq!(workspace.root(), root.canonicalize().unwrap());
     }
 
     #[test]
@@ -1475,6 +1793,7 @@ mod tests {
         assert_eq!(content, "inside");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn absolute_symlink_targets_accept_the_configured_root_alias() {
         let directory = tempfile::tempdir().unwrap();
@@ -1498,6 +1817,7 @@ mod tests {
         assert_eq!(content, "inside");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn searchable_root_does_not_require_list_permission_for_exact_reads() {
         use std::os::unix::fs::PermissionsExt;
@@ -1720,8 +2040,8 @@ mod tests {
         assert_eq!(
             walked.paths,
             vec![
-                directory.path().join("alias/inside.rs"),
-                real.join("inside.rs"),
+                workspace.root().join("alias/inside.rs"),
+                workspace.root().join("real/inside.rs"),
             ]
         );
         assert!(!walked.truncated);
@@ -1765,6 +2085,7 @@ mod tests {
         assert!(matches!(kind, Some(WorkspaceNodeKind::File)));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn unsupported_openat2_has_an_actionable_startup_error() {
         let error = platform_support_error(rustix::io::Errno::NOSYS).to_string();

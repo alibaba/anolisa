@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finds_unreadable_matching_files_without_opening_for_read() {
+    async fn lists_unreadable_matching_file_names() {
         use std::os::unix::fs::PermissionsExt;
 
         let directory = tempfile::tempdir().unwrap();
@@ -197,6 +197,7 @@ mod tests {
 
         assert!(!result.is_error);
         assert!(result.output.contains("locked.rs"));
+        assert!(!result.output.contains("results truncated"));
     }
 
     #[test]
