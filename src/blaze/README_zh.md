@@ -18,6 +18,7 @@ Prometheus 指标导出，设计为 E2B 类编排平台的单机执行代理。
 - **内核 hook 注册** — 前/后置 hook 状态追踪
 - **Prometheus 指标** — 请求计数、实例 gauge、池大小
 - **Spawner 后端** — FirecrackerSpawner、BubblewrapSpawner、MockSpawner
+- **可选 VM 网络** — 每台 Firecracker VM 独立使用 netns、tap、veth 和 NAT
 
 ## 快速开始
 
@@ -75,7 +76,16 @@ memory = "512Mi"
 [backend.firecracker]
 vcpus = 4        # 仅对 Firecracker 覆盖 [vm].vcpus
 memory = "1Gi"   # 仅对 Firecracker 覆盖 [vm].memory
+enable_network = false
 ```
+
+设置 `enable_network = true` 后，每台 Firecracker VM 会获得独立的网络
+slot。显式销毁 sandbox 和启动失败补偿会在进程确认终止后删除对应的 netns、
+tap 和 veth。daemon 重启后再次销毁时可以根据记录恢复清理，但不会在后台
+自动扫描。slot 创建和删除使用主机级锁，避免多个 daemon 同时分配相同的主机
+设备名。加载的 Firecracker 策略启用该选项时，backend probe 还会检查所需
+命令和主机权限；网络关闭时跳过这些检查。上游路由和 DNS 仍由主机运维方
+配置。
 
 ### 存储配置
 
@@ -145,6 +155,7 @@ src/blaze/
 
 - Rust 1.88+（参见 `src/blaze/rust-toolchain.toml`）
 - 具有 root 权限的 Linux 主机（sandbox 后端需要）
+- 启用 VM 网络时需要 `ip`、`iptables`、`sysctl` 和 netns 管理权限
 
 ## 许可证
 

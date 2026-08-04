@@ -19,6 +19,7 @@ Designed as the per-host agent for E2B-style orchestrator platforms.
 - **Kernel hook registry** — state tracking for pre/post hooks
 - **Prometheus metrics** — request counts, instance gauges, pool sizes
 - **Spawners** — FirecrackerSpawner, BubblewrapSpawner, MockSpawner
+- **Optional VM networking** — isolated namespace, tap, veth, and NAT per Firecracker VM
 
 ## Quick Start
 
@@ -76,7 +77,19 @@ memory = "512Mi"
 [backend.firecracker]
 vcpus = 4        # overrides [vm].vcpus for Firecracker only
 memory = "1Gi"   # overrides [vm].memory for Firecracker only
+enable_network = false
 ```
+
+Set `enable_network = true` to create an isolated network slot for each
+Firecracker VM. Explicit sandbox destroy and compensated startup failure remove
+the namespace, tap, and veth after process termination. A destroy retried after
+a daemon restart can reconstruct the recorded slot; there is no background
+cleanup scan. Slot creation and deletion use a host-wide lock so independent
+daemon processes cannot allocate the same host device names concurrently.
+When a loaded Firecracker policy enables this option, backend probing also
+checks the required commands and host privileges. The checks are skipped when
+networking is disabled. Upstream routing and DNS remain host operator
+responsibilities.
 
 ### Storage Configuration
 
@@ -146,6 +159,7 @@ src/blaze/
 
 - Rust 1.88+ (see `src/blaze/rust-toolchain.toml`)
 - Linux host with root privileges for sandbox backends
+- `ip`, `iptables`, `sysctl`, and network namespace privileges when VM
+  networking is enabled
 
 ## License
-
