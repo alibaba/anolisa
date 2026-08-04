@@ -37,7 +37,18 @@ pub async fn run(config_path: &Path) -> Result<()> {
     let pool = PoolManager::new();
     let template = TemplateRegistry::new();
     let hook = HookRegistry::new();
-    let (spawners, active_backend) = build_spawners(&config).await;
+    let network_required = policy.policies().iter().any(|policy| {
+        policy
+            .backend
+            .firecracker
+            .as_ref()
+            .is_some_and(|config| config.enable_network)
+            && policy
+                .select
+                .backend_priority
+                .contains(&BackendKind::Firecracker)
+    });
+    let (spawners, active_backend) = build_spawners(&config, network_required).await;
 
     // Build storage provider
     if config.storage.provider != "file" && config.storage.provider != "auto" {
@@ -123,8 +134,14 @@ fn ensure_dirs(cfg: &DaemonConfig) -> Result<()> {
 ///   1. `firecracker` → [`FirecrackerSpawner`]
 ///   2. `bubblewrap` → [`BubblewrapSpawner`]
 ///   3. fallback → [`MockSpawner`]
-async fn build_spawners(cfg: &DaemonConfig) -> (SpawnerRegistry, BackendKind) {
-    let firecracker: DynSpawner = Arc::new(FirecrackerSpawner::new(cfg.storage.images_dir.clone()));
+async fn build_spawners(
+    cfg: &DaemonConfig,
+    network_required: bool,
+) -> (SpawnerRegistry, BackendKind) {
+    let firecracker: DynSpawner = Arc::new(FirecrackerSpawner::with_network_requirement(
+        cfg.storage.images_dir.clone(),
+        network_required,
+    ));
     let bubblewrap: DynSpawner = Arc::new(BubblewrapSpawner);
     let mock: DynSpawner = Arc::new(MockSpawner);
     let mut spawners = SpawnerRegistry::new();

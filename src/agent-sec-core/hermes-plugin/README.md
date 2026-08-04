@@ -130,7 +130,7 @@ Hermes 支持的 hook 及其回调签名：
 - `enabled = false`：完全不注册 Hermes hook。
 - `policy = "ask"`：默认策略；未触发暂不支持兜底时，当 summary `message` 非空会缓存为本轮告警，并通过
   `transform_llm_output` 追加到最终回复开头，确保用户可见。
-- `policy = "debug"`：静默兼容模式；summary `message` 非空、CLI 失败或 JSON 解析失败都 fail-open，只写 debug。
+- `policy = "observe"`：静默模式；summary `message` 非空、CLI 失败或 JSON 解析失败都 fail-open，只写 debug。旧值 `debug` 仍作为别名兼容。
 - `policy = "warn"`：warning-only 兼容模式；未触发暂不支持兜底时，summary `message` 非空会缓存为本轮告警，并通过
   `transform_llm_output` 追加到最终回复开头，确保用户可见。
 - `policy = "block"`：summary `message` 非空时直接返回 Hermes block 结果。
@@ -206,10 +206,18 @@ CLI 调用方式和 `openclaw-plugin` 保持一致：helper 将一条 JSON paylo
 
 `pii-scan-user-input` 对齐 Cosh/OpenClaw 多点位 PII checker 语义：
 
+默认 `policy = "observe"`，只扫描和审计。`warn` 返回脱敏告警并继续。
+Hermes 没有可靠的原生确认协议，因此 `ask` 显式 fallback 为 `warn`。
+`block + deny` 在
+`pre_tool_call` 返回原生 block；`pre_llm_call` / `post_tool_call` 的不可阻断边界
+fallback 为 `warn`。model output 保留现有脱敏行为。环境变量 policy 优先于
+capability 配置，旧变量 `PII_CHECKER_MODE` 继续兼容。
+
 - 挂在 `pre_llm_call`、`pre_tool_call`、`post_tool_call`、`transform_llm_output`、`on_session_end`
 - 扫描本轮用户输入、tool 参数、tool 返回结果和最终模型回复；不扫描 history、memory 或 RAG context
 - 调用 `agent-sec-cli scan-pii --stdin --format json --redact-output --source <source>`，敏感原文仅通过 stdin 传入子进程
-- tool 参数/结果的 `warn` / `deny` 不阻断请求，只缓存脱敏 warning
+- tool 参数的 `block + deny` 在执行前阻断；scanner `warn`、`ask` fallback 和 tool
+  结果只缓存脱敏 warning
 - `transform_llm_output` 会扫描最终模型回复；命中时使用 `redacted_text` 替换用户可见回复，并 prepend 已缓存 warning
 - 当前实现依赖 Hermes 对完整最终回复调用一次 `transform_llm_output`；若未来改成流式分片 transform，需要重新审视 warning pop 语义
 - `on_session_end` 清理残留缓存

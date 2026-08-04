@@ -2,6 +2,7 @@
 //! Backend process ownership and runtime lifecycle abstraction.
 
 pub mod firecracker;
+mod netns;
 
 use std::collections::HashMap;
 use std::fmt;

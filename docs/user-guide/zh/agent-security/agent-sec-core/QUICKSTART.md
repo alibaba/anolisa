@@ -188,15 +188,17 @@ Qwen Code extension 会扫描用户输入、工具输入、成功及失败的工
 脱敏 evidence。
 
 ```bash
-# 显式阻断 scanner deny verdict
-export PII_CHECKER_MODE=block
+# 在可执行阻断的 hook 边界显式阻断 scanner deny verdict
+export PII_CHECKER_HOOK_POLICY=block
 ./qwen-code-extension/scripts/deploy.sh
 ```
 
 | 环境变量 | 默认值 | 行为 |
 |----------|--------|------|
-| `PII_CHECKER_ENABLED` | `true` | 设为 `false`、`0`、`no` 或 `off` 时跳过扫描 |
-| `PII_CHECKER_MODE` | `observe` | `observe` 告警；`block` 阻断 deny；`deny` 是兼容别名 |
+| `PII_CHECKER_HOOK_ENABLED` | `true` | 设为 `false` 时在读取输入前跳过 PII hook |
+| `PII_CHECKER_HOOK_POLICY` | `observe` | `observe` 静默审计；`warn` 告警；`ask`/`block` 按宿主能力执行或 fallback |
+| `PII_CHECKER_ENABLED` | - | 仅兼容 Qwen 旧 enabled 变量；新开关缺失时生效 |
+| `PII_CHECKER_MODE` | - | 六个宿主均兼容的旧 policy 变量；`debug` 等价于 `observe`，`deny` 等价于 `block` |
 | `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | 开启后传递 `--include-low-confidence` |
 | `PII_CHECKER_TIMEOUT` | `5` | scanner 超时秒数，最大 8 秒 |
 
@@ -331,7 +333,7 @@ timeout = 10
 [capabilities.skill-ledger]
 enabled = true
 timeout = 5
-policy = "ask"          # ask（默认）| warn | block | debug
+policy = "ask"          # observe | warn | ask（默认）| block
 ```
 
 ### Qwen Code
@@ -358,16 +360,19 @@ agent-sec-cli skill-ledger show .qwen/skills/<skill>
 agent-sec-cli skill-ledger show "${QWEN_HOME:-$HOME/.qwen}/skills/<skill>"
 ```
 
-通过 `show` 结果中的 `managed=true` 确认已纳管。未纳管 Skill 始终 fail-open，
-包括显式启用 block 的情况。默认 policy 为 `debug`；请在启动 Qwen Code 的可信环境
-中设置 policy：
+`show` 仅在 Skill 未纳管时返回 `managed=false`；不含该标记的正常 exposure summary
+表示已纳管。未纳管 Skill 始终 fail-open，包括显式启用 block 的情况。默认 policy
+为 `ask`；请在启动 Qwen Code 的可信环境中设置 policy：
 
 ```bash
-SKILL_LEDGER_HOOK_POLICY=debug qwen  # 仅观察（默认）
-SKILL_LEDGER_HOOK_POLICY=warn qwen   # 显示告警后继续
-SKILL_LEDGER_HOOK_POLICY=ask qwen    # 使用前请求确认
+SKILL_LEDGER_HOOK_POLICY=observe qwen  # 仅观察
+SKILL_LEDGER_HOOK_POLICY=warn qwen   # 返回非阻断诊断后继续
+SKILL_LEDGER_HOOK_POLICY=ask qwen    # 使用前请求确认（默认）
 SKILL_LEDGER_HOOK_POLICY=block qwen  # exposure warning 非空时拒绝
 ```
+
+Qwen Code 0.19.9 会将非阻断 `systemMessage` 记录到 session debug 日志，但不在 TTY
+中展示；原生 `permissionDecision=ask/deny` 和可执行的 `block` 决策不受影响。
 
 hook 遵循现有 Skill Ledger exposure message，包括已有的 `decide` 决策。正常的
 `pass` 和 `warn` 状态会放行；已纳管的 `none`、`drifted`、`deny` 和 `tampered`

@@ -84,6 +84,34 @@ def test_invalid_or_unrelated_input_is_fail_open(monkeypatch, capsys, payload):
     assert output == {}
 
 
+def test_hook_disabled_short_circuits_before_work(monkeypatch, capsys):
+    monkeypatch.setattr(skill_ledger_hook, "_HOOK_ENABLED", False)
+    monkeypatch.setattr(
+        skill_ledger_hook.json,
+        "load",
+        lambda _stream: pytest.fail("input should not be read"),
+    )
+    monkeypatch.setattr(
+        skill_ledger_hook,
+        "_resolve_skill_dir",
+        lambda *_args: pytest.fail("skills should not be resolved"),
+    )
+    monkeypatch.setattr(
+        skill_ledger_hook,
+        "_ensure_keys",
+        lambda *_args: pytest.fail("keys should not be initialized"),
+    )
+    monkeypatch.setattr(
+        skill_ledger_hook,
+        "_show_skill",
+        lambda *_args: pytest.fail("CLI should not be called"),
+    )
+
+    skill_ledger_hook.main()
+
+    assert json.loads(capsys.readouterr().out) == {}
+
+
 def test_resolves_frontmatter_name_and_project_precedes_user(monkeypatch, tmp_path):
     project_root = tmp_path / "project" / ".qwen" / "skills"
     user_root = tmp_path / "home" / ".qwen" / "skills"
@@ -675,11 +703,48 @@ def test_main_calls_show_for_project_candidate_without_falling_back(
     assert '"code":"unmanaged"' in stderr
 
 
+def test_main_defaults_to_ask_for_managed_risk(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("SKILL_LEDGER_HOOK_POLICY", raising=False)
+    monkeypatch.delenv("SKILL_LEDGER_MODE", raising=False)
+    skill_root = tmp_path / "skills"
+    _create_skill(skill_root)
+    monkeypatch.setattr(
+        skill_ledger_hook,
+        "_supported_skill_bases",
+        lambda _cwd: [skill_root],
+    )
+    monkeypatch.setattr(
+        skill_ledger_hook,
+        "_read_disabled_skill_names",
+        lambda *_args: frozenset(),
+    )
+    monkeypatch.setattr(skill_ledger_hook, "_ensure_keys", lambda *_args: None)
+    monkeypatch.setattr(
+        skill_ledger_hook,
+        "_show_skill",
+        lambda *_args: {
+            "latestStatus": "deny",
+            "message": "review required",
+        },
+    )
+
+    output, _ = _run_main(monkeypatch, capsys, _event(cwd=tmp_path))
+
+    specific = output["hookSpecificOutput"]
+    assert specific["hookEventName"] == "PreToolUse"
+    assert specific["permissionDecision"] == "ask"
+    assert "review required" in specific["permissionDecisionReason"]
+
+
 @pytest.mark.parametrize("status", ("pass", "warn"))
 @pytest.mark.parametrize("policy", ("debug", "warn", "ask", "block"))
 def test_trusted_null_message_never_overrides_permission(status, policy, monkeypatch):
     monkeypatch.setenv("SKILL_LEDGER_HOOK_POLICY", policy)
-    summary = {"managed": True, "latestStatus": status, "message": None}
+    summary = {"latestStatus": status, "message": None}
 
     output = skill_ledger_hook._format_qwen(summary, "test-skill", policy, _event())
 
@@ -700,7 +765,6 @@ def test_exposure_message_uses_policy(status, policy, expected, capsys):
     output = json.loads(
         skill_ledger_hook._format_qwen(
             {
-                "managed": True,
                 "latestStatus": status,
                 "message": "review required",
             },
@@ -759,6 +823,11 @@ def test_prior_user_decision_null_message_is_not_blocked():
         {"managed": True, "latestStatus": "unknown", "message": "warning"},
         {"managed": True, "latestStatus": "deny"},
         {"managed": True, "latestStatus": "deny", "message": []},
+        {
+            "managed": "true",
+            "latestStatus": "deny",
+            "message": "warning",
+        },
     ),
 )
 def test_incomplete_or_unknown_summary_is_fail_open(summary):
@@ -812,13 +881,43 @@ def test_trace_context_falls_back_to_tool_use_id():
     assert context["tool_call_id"] == "tool-use-1"
 
 
-def test_invalid_policy_defaults_to_debug(monkeypatch, capsys):
+def test_missing_policy_defaults_to_ask(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SKILL_LEDGER_HOOK_POLICY", raising=False)
+    monkeypatch.delenv("SKILL_LEDGER_MODE", raising=False)
+
+    assert skill_ledger_hook._read_policy(_event()) == "ask"
+
+
+def test_new_policy_overrides_legacy_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SKILL_LEDGER_HOOK_POLICY", "observe")
+    monkeypatch.setenv("SKILL_LEDGER_MODE", "deny")
+
+    assert skill_ledger_hook._read_policy(_event()) == "observe"
+
+
+def test_invalid_policy_defaults_to_ask(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     monkeypatch.setenv("SKILL_LEDGER_HOOK_POLICY", "invalid")
 
     policy = skill_ledger_hook._read_policy(_event())
 
-    assert policy == "debug"
+    assert policy == "ask"
     assert '"code":"invalid_policy"' in capsys.readouterr().err
+
+
+def test_invalid_legacy_mode_defaults_to_ask(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("SKILL_LEDGER_HOOK_POLICY", raising=False)
+    monkeypatch.setenv("SKILL_LEDGER_MODE", "invalid")
+
+    policy = skill_ledger_hook._read_policy(_event())
+
+    assert policy == "ask"
+    diagnostic = capsys.readouterr().err
+    assert '"code":"invalid_policy"' in diagnostic
+    assert "invalid legacy mode; using ask" in diagnostic
 
 
 def test_missing_keys_trigger_best_effort_init(monkeypatch, tmp_path):

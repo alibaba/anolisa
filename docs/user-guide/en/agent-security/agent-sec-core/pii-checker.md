@@ -73,6 +73,20 @@ sensitive suffix visible.
 Security Events. Host integrations consume the same verdict and finding schema; whether a host
 only observes a finding or blocks an operation depends on that host's configured PII policy.
 
+## Host hook policy
+
+Set `PII_CHECKER_HOOK_ENABLED=false` to skip host PII hooks entirely. When enabled,
+`PII_CHECKER_HOOK_POLICY` accepts `observe`, `warn`, `ask`, or `block` and defaults to
+`observe`. `ask` or `block` falls back to `warn` when the host or hook event cannot enforce
+that action; post-execution hooks never claim to undo an external side effect. The environment
+policy overrides Hermes/OpenClaw capability configuration. All six host adapters retain the
+legacy `PII_CHECKER_MODE` policy variable; `debug` maps to `observe`, and `deny` maps to
+`block`. Qwen Code additionally accepts the legacy `PII_CHECKER_ENABLED` switch when
+`PII_CHECKER_HOOK_ENABLED` is absent.
+
+Scanner verdict `deny` describes finding severity. Hook policy `block` controls whether the
+current adapter attempts enforcement.
+
 ## Custom regex rules
 
 PII Checker optionally loads custom business-specific types from one fixed user-level file:

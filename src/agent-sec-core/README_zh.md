@@ -189,12 +189,16 @@ sudo yum install agent-sec-core
 
 ### 防止 Qwen Code 泄露 PII
 
-Qwen Code extension 默认观察用户输入、工具输入/输出和最终模型输出。设置
-`PII_CHECKER_MODE=block` 后会在受支持的决策点执行 scanner 的高风险 `deny` verdict；
-Qwen Code 0.19.9 的失败工具输出仅审计，scanner 失败时仍保持 fail-open。
+Qwen Code extension 默认以 `PII_CHECKER_HOOK_POLICY=observe` 扫描用户输入、工具
+输入/输出和最终模型输出。设置 policy 为 `block` 后，会在受支持的决策点执行
+scanner 的高风险 `deny` verdict；设置 `PII_CHECKER_HOOK_ENABLED=false` 会在读取输入
+或调用 scanner 前关闭 hook。六个宿主均兼容旧 policy 变量 `PII_CHECKER_MODE`，其中
+`debug` 映射为 `observe`，`deny` 映射为 `block`。仅 Qwen Code 在新 enabled 开关缺失时
+额外兼容旧开关 `PII_CHECKER_ENABLED`。Qwen Code 0.19.9 的失败工具输出仅审计，scanner
+失败时仍保持 fail-open。
 
 ```bash
-export PII_CHECKER_MODE=block
+export PII_CHECKER_HOOK_POLICY=block
 ./qwen-code-extension/scripts/deploy.sh
 ```
 
@@ -303,7 +307,9 @@ agent-sec-cli skill-ledger status
 内置 Qoder CLI plugin 为 `Skill` tool 注册 `PreToolUse` hook。hook 先从
 `~/.qoder/skills/` 解析用户级 Skill，再从 `<cwd>/.qoder/skills/` 解析项目级
 Skill，随后执行只读的 `skill-ledger check`，并按
-`SKILL_LEDGER_HOOK_POLICY=ask|debug|warn|block`（默认 `ask`）处理结果。每次
+`SKILL_LEDGER_HOOK_POLICY=observe|warn|ask|block`（默认 `ask`）处理结果。设置
+`SKILL_LEDGER_HOOK_ENABLED=false` 可跳过 hook；旧值 `debug` 是 `observe` 的别名，
+`deny` 是 `block` 的别名。每次
 检查都会把 Qoder trace 标识写入安全审计日志。
 
 设计文档：[`docs/design/SKILL_LEDGER_zh.md`](docs/design/SKILL_LEDGER_zh.md) · 用户指南：[Skill Ledger 用户手册](../../docs/user-guide/zh/agent-security/agent-sec-core/skill-ledger.md)

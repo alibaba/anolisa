@@ -445,6 +445,10 @@ def events(
         ),
     ),
     trace_id: str | None = typer.Option(None, "--trace-id", help="Filter by trace ID."),
+    session_id: str | None = typer.Option(
+        None, "--session-id", help="Filter by session ID."
+    ),
+    run_id: str | None = typer.Option(None, "--run-id", help="Filter by run ID."),
     since: str | None = typer.Option(
         None, "--since", help="Inclusive lower bound (ISO-8601 timestamp)."
     ),
@@ -566,6 +570,8 @@ def events(
             event_type=event_type,
             category=category,
             trace_id=trace_id,
+            session_id=session_id,
+            run_id=run_id,
             since=resolved_since,
             until=resolved_until,
             limit=10000,
@@ -594,6 +600,8 @@ def events(
             event_type=event_type,
             category=category,
             trace_id=trace_id,
+            session_id=session_id,
+            run_id=run_id,
             since=resolved_since,
             until=resolved_until,
             offset=offset,
@@ -616,6 +624,8 @@ def events(
             event_type=event_type,
             category=category,
             trace_id=trace_id,
+            session_id=session_id,
+            run_id=run_id,
             since=resolved_since,
             until=resolved_until,
             offset=offset,
@@ -634,6 +644,8 @@ def events(
         event_type=event_type,
         category=category,
         trace_id=trace_id,
+        session_id=session_id,
+        run_id=run_id,
         since=resolved_since,
         until=resolved_until,
         limit=limit,

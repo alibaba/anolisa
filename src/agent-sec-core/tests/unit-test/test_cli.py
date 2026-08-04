@@ -3,7 +3,7 @@
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 from agent_sec_cli.cli import (
@@ -19,6 +19,7 @@ from agent_sec_cli.correlation_context import (
     get_current_trace_context,
 )
 from agent_sec_cli.security_middleware.result import ActionResult
+from click import unstyle
 from typer.testing import CliRunner
 
 
@@ -340,7 +341,7 @@ def test_main_initializes_invocation_context_and_logging_after_trace_context(
     ]
 
 
-def test_events_count_forwards_trace_id_filter():
+def test_events_count_forwards_filters():
     captured = {}
 
     class Reader:
@@ -350,6 +351,8 @@ def test_events_count_forwards_trace_id_filter():
             event_type=None,
             category=None,
             trace_id=None,
+            session_id=None,
+            run_id=None,
             since=None,
             until=None,
             offset=0,
@@ -359,6 +362,8 @@ def test_events_count_forwards_trace_id_filter():
                     "event_type": event_type,
                     "category": category,
                     "trace_id": trace_id,
+                    "session_id": session_id,
+                    "run_id": run_id,
                     "since": since,
                     "until": until,
                     "offset": offset,
@@ -368,12 +373,24 @@ def test_events_count_forwards_trace_id_filter():
 
     with patch("agent_sec_cli.cli.get_reader", return_value=Reader()):
         result = CliRunner().invoke(
-            app, ["events", "--trace-id", "trace-abc", "--count"]
+            app,
+            [
+                "events",
+                "--trace-id",
+                "trace-abc",
+                "--session-id",
+                "session-abc",
+                "--run-id",
+                "run-abc",
+                "--count",
+            ],
         )
 
     assert result.exit_code == 0
     assert result.output == "2\n"
     assert captured["trace_id"] == "trace-abc"
+    assert captured["session_id"] == "session-abc"
+    assert captured["run_id"] == "run-abc"
 
 
 def test_events_count_by_forwards_filters():
@@ -387,6 +404,8 @@ def test_events_count_by_forwards_filters():
             event_type=None,
             category=None,
             trace_id=None,
+            session_id=None,
+            run_id=None,
             since=None,
             until=None,
             offset=0,
@@ -397,6 +416,8 @@ def test_events_count_by_forwards_filters():
                     "event_type": event_type,
                     "category": category,
                     "trace_id": trace_id,
+                    "session_id": session_id,
+                    "run_id": run_id,
                     "since": since,
                     "until": until,
                     "offset": offset,
@@ -417,6 +438,10 @@ def test_events_count_by_forwards_filters():
                 "sandbox",
                 "--trace-id",
                 "trace-abc",
+                "--session-id",
+                "session-abc",
+                "--run-id",
+                "run-abc",
             ],
         )
 
@@ -425,6 +450,64 @@ def test_events_count_by_forwards_filters():
     assert captured["event_type"] == "alpha"
     assert captured["category"] == "sandbox"
     assert captured["trace_id"] == "trace-abc"
+    assert captured["session_id"] == "session-abc"
+    assert captured["run_id"] == "run-abc"
+
+
+def test_events_list_forwards_session_and_run_filters():
+    reader = Mock()
+    reader.query.return_value = []
+
+    with patch("agent_sec_cli.cli.get_reader", return_value=reader):
+        result = CliRunner().invoke(
+            app,
+            [
+                "events",
+                "--session-id",
+                "session-abc",
+                "--run-id",
+                "run-abc",
+                "--output",
+                "json",
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert result.output == "[]\n"
+    assert reader.query.call_args.kwargs["session_id"] == "session-abc"
+    assert reader.query.call_args.kwargs["run_id"] == "run-abc"
+
+
+def test_events_summary_forwards_session_and_run_filters():
+    reader = Mock()
+    reader.query.return_value = []
+
+    with patch("agent_sec_cli.cli.get_reader", return_value=reader):
+        result = CliRunner().invoke(
+            app,
+            [
+                "events",
+                "--session-id",
+                "session-abc",
+                "--run-id",
+                "run-abc",
+                "--summary",
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert result.output == "No security events recorded.\n\n"
+    assert reader.query.call_args.kwargs["session_id"] == "session-abc"
+    assert reader.query.call_args.kwargs["run_id"] == "run-abc"
+
+
+def test_events_help_lists_session_and_run_filters():
+    result = CliRunner().invoke(app, ["events", "--help"])
+
+    assert result.exit_code == 0
+    help_text = unstyle(result.output)
+    assert "--session-id" in help_text
+    assert "--run-id" in help_text
 
 
 class TestHardenCli(unittest.TestCase):

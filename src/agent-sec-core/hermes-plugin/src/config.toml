@@ -10,6 +10,7 @@ timeout = 5
 [capabilities.pii-scan-user-input]
 enabled = true
 timeout = 10
+policy = "observe"
 include_low_confidence = false
 warning_ttl_seconds = 300
 

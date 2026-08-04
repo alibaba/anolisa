@@ -3,15 +3,25 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .hook_config import (  # noqa: TID252 - standalone plugin package
+    env_flag_enabled,
+)
+
 if TYPE_CHECKING:
     from .capabilities.base import AgentSecCoreCapability
 
 logger = logging.getLogger("agent-sec-core")
+
+_CAPABILITY_ENABLED_ENV = {
+    "pii-scan-user-input": "PII_CHECKER_HOOK_ENABLED",
+    "skill-ledger": "SKILL_LEDGER_HOOK_ENABLED",
+}
 
 # If a single hook invocation exceeds this threshold (seconds), emit a warning.
 _SLOW_HOOK_THRESHOLD = 2.0
@@ -78,7 +88,11 @@ def register_capabilities(
                 f"[agent-sec-core] {cap.id} config missing required key 'enabled', skipping"
             )
             continue
-        if not cap_config["enabled"]:
+        enabled = bool(cap_config["enabled"])
+        enabled_env = _CAPABILITY_ENABLED_ENV.get(cap.id)
+        if enabled_env is not None and enabled_env in os.environ:
+            enabled = env_flag_enabled(enabled_env, True)
+        if not enabled:
             logger.info(f"[agent-sec-core] {cap.id} disabled by config, skipping")
             continue
         try:

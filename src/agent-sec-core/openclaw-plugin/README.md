@@ -309,7 +309,7 @@ run the same acceptance checks per supported host version.
 
 | Capability         | Hook                  | Priority | Behavior                                             |
 |--------------------|-----------------------|----------|------------------------------------------------------|
-| `pii-scan-user-input` | `before_dispatch`, `before_tool_call`, `after_tool_call`, `llm_output` | 200 before dispatch/tool call | Scans user text, tool parameters, tool output, and model output for PII/credentials; optionally blocks pre-execution `deny` verdicts |
+| `pii-scan-user-input` | `before_dispatch`, `before_tool_call`, `after_tool_call`, `llm_output` | 200 before dispatch/tool call | Scans user text, tool parameters, tool output, and model output for PII/credentials; applies the unified hook policy |
 | `prompt-scan`      | `before_dispatch`     | 190      | Scans inbound messages for prompt injection attacks   |
 | `scan-code`        | `before_tool_call`    | 0 (default) | Scans tool commands for security issues              |
 | `skill-ledger`     | `before_tool_call`    | 80       | Checks Skill Ledger exposure summary when SKILL.md is read; default policy asks on actionable messages |
@@ -329,7 +329,7 @@ openclaw config set plugins.entries.agent-sec.config.codeScanRequireApproval tru
 
 The `pii-scan-user-input` capability scans the current inbound user text in `before_dispatch`, tool parameters in `before_tool_call`, tool results/errors in `after_tool_call`, and assistant text in `llm_output`. It intentionally does not scan assembled prompt history, memory, or RAG context, so older PII does not trigger repeated warnings on later turns.
 
-By default, `capabilities["pii-scan-user-input"].enableBlock` is `false`, so `warn` and `deny` verdicts are logged and execution continues. Set `enableBlock: true` to block pre-execution `deny` verdicts: user input returns `{ handled: true, text }`, and tool parameters return `{ block: true, blockReason }`. Tool output and model output findings are warning-only. Warning and block text use redacted evidence and never include raw PII values.
+By default, `capabilities["pii-scan-user-input"].policy` is `observe`, so findings are audited without a user-visible warning. `warn` logs redacted warnings, `ask` requests approval for supported pre-tool calls and otherwise falls back to `warn`, and `block` rejects pre-execution `deny` verdicts. Tool output and model output cannot undo side effects and therefore fall back to warnings. Legacy `enableBlock: true/false` maps to `block/warn` when `policy` is absent.
 
 ### Configuring `observability`
 
@@ -405,10 +405,16 @@ Default behavior:
 - `enabled: false` fully disables registration.
 - `policy: "ask"` is the default. It allows silent summaries and returns OpenClaw `requireApproval` when `show.message` is non-empty.
 - `policy: "warn"` logs warning-level diagnostics for non-empty `show.message` but allows the read.
-- `policy: "debug"` logs debug diagnostics for non-empty `show.message` and allows the read.
+- `policy: "observe"` logs debug diagnostics for non-empty `show.message` and allows the read.
 - `policy: "block"` blocks the read when `show.message` is non-empty and uses that message as the block reason.
 - `latestStatus: "unmanaged"` is a Skill Ledger diagnostic state with `show.message: null`; every policy, including `block`, allows it silently.
 - Legacy configs without `policy` still map `enableBlock: true` to `block` and `enableBlock: false` to `warn`.
+- Legacy `debug` and `deny` policy values are accepted as aliases for `observe` and `block`.
+
+Deployment environment variables override capability configuration. Use
+`SKILL_LEDGER_HOOK_ENABLED`, `PII_CHECKER_HOOK_ENABLED`,
+`SKILL_LEDGER_HOOK_POLICY`, and `PII_CHECKER_HOOK_POLICY` for deployment-level
+control. Disabling Skill Ledger short-circuits before key initialization.
   `blockStatuses` is accepted as deprecated configuration metadata but no longer controls runtime decisions.
 
 Set `policy: "warn"` when wanting visible diagnostics without approval:

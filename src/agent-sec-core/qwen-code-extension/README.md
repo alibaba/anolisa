@@ -46,10 +46,11 @@ manifest 版本不同时执行 `extensions update`。同版本本地开发请卸
 ## Skill Ledger 保护
 
 Skill Ledger hook 是同步的 `PreToolUse` hook，只处理模型调用 Qwen Code `skill` Tool
-的场景。默认 policy 为 `debug`，只记录 exposure warning 而不改变 Qwen Code 的权限
-决策。显式设置环境变量后，可切换为可见告警、用户确认或阻断：
+的场景。默认 policy 为 `ask`，在 exposure message 非空时请求用户确认。显式设置
+环境变量后，可切换为静默审计、非阻断诊断、用户确认或阻断：
 
 ```bash
+SKILL_LEDGER_HOOK_POLICY=observe qwen
 SKILL_LEDGER_HOOK_POLICY=warn qwen
 SKILL_LEDGER_HOOK_POLICY=ask qwen
 SKILL_LEDGER_HOOK_POLICY=block qwen
@@ -66,11 +67,18 @@ agent-sec-cli skill-ledger show .qwen/skills/<skill>
 agent-sec-cli skill-ledger show "${QWEN_HOME:-$HOME/.qwen}/skills/<skill>"
 ```
 
-`scan` / `certify` 会 best-effort 记住技能目录；以 `show` 返回的 `managed=true` 作为
-已纳管确认。hook 复用 `show` 的 exposure `message`：`message` 为空时不覆盖 Qwen
-Code 原有权限；非空时，`debug` 记录后放行，`warn` 显示告警后放行，`ask` 请求用户
-确认，`block` 拒绝本次 Tool 调用。`pass` / `warn` 通常不产生 message；`none` /
-`drifted` / `deny` / `tampered` 在没有既有用户放行决策时会产生 message。
+`scan` / `certify` 会 best-effort 记住技能目录。`show` 仅在 Skill 未纳管时返回
+`managed=false`；不含该标记的正常 exposure summary 表示已纳管。hook 复用 `show`
+的 exposure `message`：`message` 为空时不覆盖 Qwen Code 原有权限；非空时，
+`observe` 记录后放行，`warn` 返回非阻断 `systemMessage` 后放行，`ask` 请求用户确认，
+`block` 拒绝本次 Tool 调用。旧值 `debug` 仍作为 `observe` 的别名。`pass` / `warn`
+通常不产生 message；`none` / `drifted` / `deny` / `tampered` 在没有既有用户放行决策
+时会产生 message。
+
+已验证的 Qwen Code 0.19.9 不在 TTY 渲染 hook 返回的非阻断 `systemMessage`。hook
+仍会返回该消息，Qwen 会将其记录到 session debug 日志，并继续执行。这会影响 `warn`
+以及 fallback 为 `warn` 的不支持边界；原生 `permissionDecision=ask/deny` 和可执行的
+`block` 决策不受影响。
 
 保护边界有意与 Cosh 保持一致：
 
@@ -103,25 +111,27 @@ subagent 等无法交互的场景会按 Qwen Code 规则退化为拒绝。
 
 敏感原文只通过 stdin 传给
 `agent-sec-cli scan-pii --stdin --format json --redact-output`，不会作为命令行参数。
-用户可见告警和阻断理由只使用 `evidence_redacted`。CLI 缺失、超时、非零退出、非法
+非阻断告警和阻断理由只使用 `evidence_redacted`。CLI 缺失、超时、非零退出、非法
 JSON、`error` 或未知 verdict 均 fail-open。
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `PII_CHECKER_ENABLED` | `true` | 设为 `false`、`0`、`no` 或 `off` 时跳过扫描 |
-| `PII_CHECKER_MODE` | `observe` | `observe` 只告警；`block` 显式阻断 scanner `deny`；兼容 `deny` 别名 |
+| `PII_CHECKER_HOOK_ENABLED` | `true` | 仅识别 `true` / `false`；`false` 时在读取输入和调用 CLI 前短路 |
+| `PII_CHECKER_HOOK_POLICY` | `observe` | `observe` 静默审计；支持 `warn` / `ask` / `block`；兼容 `debug` / `deny` 别名 |
+| `PII_CHECKER_ENABLED` | `true` | 旧开关；未设置新开关时继续兼容 `false`、`0`、`no`、`off` |
+| `PII_CHECKER_MODE` | `observe` | 旧 policy 变量；未设置新 policy 时继续兼容；`debug` 映射为 `observe`，`deny` 映射为 `block` |
 | `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | 开启后传递 `--include-low-confidence` |
 | `PII_CHECKER_TIMEOUT` | `5` | 子进程超时秒数，最大 8 秒；非法或非正值回退到 5 秒 |
 
 例如，显式开启阻断后再部署或启动 Qwen Code：
 
 ```bash
-export PII_CHECKER_MODE=block
+export PII_CHECKER_HOOK_POLICY=block
 export PII_CHECKER_TIMEOUT=5
 ./qwen-code-extension/scripts/deploy.sh
 ```
 
-只有 scanner `deny` 会在 block 模式下阻断，`warn` 始终仅告警。`PreToolUse` 的
+只有 scanner `deny` 会在 block 模式下阻断；scanner `warn` 按 hook policy 静默或告警。`PreToolUse` 的
 observe/pass 结果不会返回 `permissionDecision: allow`，因此不会绕过 Qwen Code 原有的
 工具权限确认。
 

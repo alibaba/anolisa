@@ -13,11 +13,15 @@ Protection direction:
     curl-ing a phone number to an external endpoint or writing PII to a file.
     This is the only point to enforce PII policy before the tool executes.
 
-Modes (controlled by PII_CHECKER_MODE env var, default: observe):
+Policy (controlled by PII_CHECKER_HOOK_POLICY, default: observe):
   - observe: silent pass-through, only audit trail via agent-sec-cli events.
              Even if PII is detected, content will NOT be blocked.
-  - deny: surface scanner "warn" verdicts through systemMessage and continue;
-          block scanner "deny" verdicts at all three hook points.
+  - warn: surface scanner findings through systemMessage and continue.
+  - ask: fall back to warn when this Codex hook cannot request confirmation.
+  - block: block scanner "deny" at a controllable boundary; post-tool blocking
+           cannot undo side effects that already occurred.
+
+Legacy PII_CHECKER_MODE is supported; debug maps to observe and deny maps to block.
 
 Protocol note: Codex supports non-blocking systemMessage warnings but does not
 support "redact and pass" for these hook points. A warning therefore forwards
@@ -38,11 +42,39 @@ import subprocess
 import sys
 from typing import Any
 
+from hook_config import env_flag_enabled, env_hook_policy, normalize_hook_policy
 from trace_context import with_trace_context
 
 # -- config ----------------------------------------------------------------
 
-MODE = os.environ.get("PII_CHECKER_MODE", "observe").lower()
+_HOOK_ENABLED = env_flag_enabled("PII_CHECKER_HOOK_ENABLED", True)
+MODE = os.environ.get("PII_CHECKER_MODE")
+_POLICY_FROM_ENV = "PII_CHECKER_HOOK_POLICY" in os.environ
+
+
+def _read_policy() -> str:
+    """Read the canonical policy, falling back to the legacy mode."""
+    if "PII_CHECKER_HOOK_POLICY" in os.environ:
+        raw = os.environ.get("PII_CHECKER_HOOK_POLICY")
+        policy = env_hook_policy("PII_CHECKER_HOOK_POLICY", "observe")
+        if normalize_hook_policy(raw, "") == "":
+            print("[pii-checker] invalid hook policy; using observe", file=sys.stderr)
+        return policy
+    raw = os.environ.get("PII_CHECKER_MODE")
+    policy = normalize_hook_policy(raw, "observe")
+    if "PII_CHECKER_MODE" in os.environ and normalize_hook_policy(raw, "") == "":
+        print("[pii-checker] invalid legacy mode; using observe", file=sys.stderr)
+    return policy
+
+
+_POLICY = _read_policy()
+
+
+def _effective_policy() -> str:
+    """Return policy while preserving legacy module-level test overrides."""
+    return _POLICY if _POLICY_FROM_ENV else normalize_hook_policy(MODE, _POLICY)
+
+
 try:
     TIMEOUT = int(os.environ.get("PII_CHECKER_TIMEOUT", "5"))
 except (ValueError, TypeError):
@@ -134,15 +166,29 @@ def _format_block_reason(
 
 
 def _format_warning_message(
-    findings: list[dict], hook_event: str, source_desc: str
+    findings: list[dict],
+    hook_event: str,
+    source_desc: str,
+    verdict: str,
+    policy: str,
 ) -> str:
     """Build a non-blocking warning using only redacted finding evidence."""
     count, details = _format_finding_details(findings)
+    if policy == "ask":
+        actual_handling = "当前 hook 不支持确认，fallback 为 warn，执行将继续。"
+    elif policy == "block":
+        actual_handling = (
+            "scanner verdict 未达到 block 条件，fallback 为 warn，执行将继续。"
+        )
+    else:
+        actual_handling = "warn，执行将继续。"
     lines = [
         f"[pii-checker] ⚠️ 隐私告警：{source_desc}中检测到 {count} 项个人敏感信息",
         *details,
         f"  告警环节  : {hook_event}",
-        "检测结果为 warn，执行将继续。",
+        f"扫描判定：{verdict}",
+        f"Hook 策略：{policy}",
+        f"实际处理：{actual_handling}",
     ]
     return "\n".join(lines)
 
@@ -153,9 +199,21 @@ def _block(findings: list[dict], hook_event: str, source_desc: str) -> None:
     print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
 
 
-def _warn(findings: list[dict], hook_event: str, source_desc: str) -> None:
+def _warn(
+    findings: list[dict],
+    hook_event: str,
+    source_desc: str,
+    verdict: str,
+    policy: str,
+) -> None:
     """Output a user-visible warning without changing execution control."""
-    message = _format_warning_message(findings, hook_event, source_desc)
+    message = _format_warning_message(
+        findings,
+        hook_event,
+        source_desc,
+        verdict,
+        policy,
+    )
     print(json.dumps({"systemMessage": message}, ensure_ascii=False))
 
 
@@ -234,6 +292,9 @@ def _source_desc_for_event(hook_event: str) -> str:
 
 
 def main() -> None:
+    if not _HOOK_ENABLED:
+        return
+
     # 1. Read stdin JSON (fail-open: empty stdout = allow in Codex)
     try:
         input_data = json.load(sys.stdin)
@@ -291,18 +352,18 @@ def main() -> None:
 
     if verdict == "pass" or not findings:
         return  # no PII detected, allow
+    if verdict not in {"warn", "deny"}:
+        return
 
-    if MODE == "observe":
+    policy = _effective_policy()
+    if policy == "observe":
         return  # observe mode: don't block, audit only via CLI events
-    elif MODE == "deny":
-        source_desc = _source_desc_for_event(hook_event)
-        if verdict == "warn":
-            # systemMessage is supported by all three hook points and remains non-blocking.
-            _warn(findings, hook_event, source_desc)
-        else:
-            # Preserve the existing fail-safe for deny or unexpected non-pass verdicts.
-            _block(findings, hook_event, source_desc)
-    # else: unknown mode, fail-open
+    source_desc = _source_desc_for_event(hook_event)
+    if policy == "block" and verdict == "deny":
+        _block(findings, hook_event, source_desc)
+        return
+    # Codex cannot request approval at all PII hook points; ask falls back to warn.
+    _warn(findings, hook_event, source_desc, verdict, policy)
 
 
 if __name__ == "__main__":

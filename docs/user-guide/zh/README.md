@@ -72,6 +72,7 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 
 | 文档 | 组件 | 说明 |
 |------|------|------|
+| [Blaze Firecracker 网络](runtime/blaze.md) | blaze | 可选的单 sandbox VM 网络、主机要求、生命周期与运维边界 |
 | [工作区快照](runtime/ws-ckpt.md) | ws-ckpt | 秒级快照创建/回滚，基于 btrfs COW |
 | [技能文件系统](runtime/skillfs.md) | skillfs | FUSE 虚拟视图、渐进披露 |
 
