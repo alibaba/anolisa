@@ -4,7 +4,40 @@ All notable changes to the cosh-ng project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.14.0] — Unreleased
+## [0.15.0] — Unreleased
+
+## [0.14.0] — 2026-08-04
+
+### Added
+- `/status`, `/about`, and `/stats` slash commands for runtime introspection (#1778)
+- `/mcp` slash command for MCP server management (#1949)
+- `/session list --all` to enumerate sessions across workspaces (#2139)
+- DashScope prompt cache support to reduce token cost (#2046)
+- `cached_tokens` observability for cache-hit diagnostics (#2075)
+- Dynamic `max_tokens` by model in the OpenAI provider (#2165)
+- Advertise `roots` capability in MCP client initialization (#2007)
+- Hook tools and environment support in core (#1894)
+- Surface tool-argument status and cap retries across core and shell (#1925)
+- Auto-execute fully readonly compound commands in shell (#1959)
+- Extend capped runs across core and shell (#2035)
+- Improved auth menu across core and shell (#2062)
+- Bound agent handoff input-waits in shell (#2168)
+
+### Changed
+- Terminal-agnostic multi-line prompt entry in shell (#1947)
+
+### Fixed
+- Shell handoff and hooks: preserve LLM input, drop stale handoff text, resume handoff fallback within a provider session, redact handoff evidence, close secret-redacted handoffs via one-time claim token, converge Han NL input ownership, route sensitive NL to agent, and run project hooks for send-to-shell (#1955, #2010, #2055, #2074, #2130, #2137, #2151, #2154)
+- Approval lifecycle: guarantee terminal state with lifecycle ledger and last-resort timeout, rearm auth input, surface sandbox-bypass approval in trust mode, and reject zero idle timeout (#1934, #1939, #1968, #2116)
+- Auth flows: step `/auth` back on ESC, list `/auth` in `/help`, and hint `/auth` on noauth startup (#1891, #1906, #2166)
+- Slash command and prompt input: prevent slash echo duplication on intercept, let Up recall slash commands, intercept slash-bearing NL prompts, support soft newline in NL prompts, keep card submit type-ahead, normalize CSI-u backspace, and key ghost ownership by route (#1868, #1899, #1911, #1922, #1942, #1993, #2167)
+- Shell rendering: stop extdebug leak into prompt hooks, highlight code-block syntax, reply in user language, compact skills list, and disable implicit pagers (#1849, #1904, #1910, #1921, #1998)
+- Command risk and safety: assess all compound-command segments for risk, gate irrecoverable system-control commands, and classify interpreter risk (#1905, #2081, #2119)
+- File IO hardening: reject placeholder writes, make file writes atomic, bound and confine read tools, restore blocking before drop-write, and treat fd-dup redirect as non-write (#1918, #2069, #2120, #2121, #2124, #2127)
+- Shell recovery and drift: prevent recovery storms and use zsh preexec `$3` for drift (#2072, #2073)
+- Audit logging: show hook context (#2082)
+- Core runtime: preserve tool arguments, align compaction, show real session prompt, fail closed on emit error, and make truncation UTF-8-safe (#1844, #1847, #2003, #2005, #2118)
+- Types, wire, and packaging: fix wire errors, drop cross-workspace dev-dep, align RPM identity, align bundle health checks, and add base-dir hint in skill tool (#1514, #1933, #1937, #1984, #2140)
 
 ## [0.13.0] — 2026-07-26
 
