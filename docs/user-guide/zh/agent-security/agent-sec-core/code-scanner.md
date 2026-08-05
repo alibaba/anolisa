@@ -27,7 +27,7 @@ make build-cli
 | Codex | `true` / `false` | `observe`、`block` | 支持；默认 10 秒 |
 | Cosh | `true` / `false` | 仅 `ask` | 不支持；固定 10 秒 |
 | Hermes | `true` / `false` | `observe`、`block` | 不支持；使用 capability `timeout` |
-| OpenClaw | `true` / `false` | `observe`、`ask` | 不支持；固定 10 秒 |
+| OpenClaw | `true` / `false` | `observe`、`ask`、`block` | 不支持；固定 10 秒 |
 
 `CODE_SCANNER_HOOK_ENABLED=false` 会跳过 hook input 处理和 CLI 调用。在 Hermes 和 OpenClaw 中，合法布尔环境变量会覆盖 capability `enabled`；非法值等价于未设置，并回到 capability 配置。
 
@@ -39,7 +39,7 @@ make build-cli
 
 兼容别名会先完成归一化，再检查宿主能力：`debug` 映射为 `observe`，`deny` 映射为 `block`。`warn`、非法值以及宿主不支持的模式都等价于未设置；这些配置错配不会进入 stdout、systemMessage 或其他 HookOutput。独立脚本会向 stderr 记录 bounded diagnostic，Hermes/OpenClaw capability 会写宿主 logger。
 
-因此，Cosh 收到 `observe` 或 `block` 时仍保持固定 `ask`；Codex 和 Hermes 忽略 `ask`；OpenClaw 忽略 `block` 及其 `deny` 别名。随后插件使用未设置 `CODE_SCANNER_MODE` 时相同的默认值或原生配置。
+因此，Cosh 收到 `observe` 或 `block` 时仍保持固定 `ask`；Codex 和 Hermes 忽略 `ask`；OpenClaw 支持 `observe`、`ask` 和 `block`，其中 `deny` 会归一化为 `block`。不受支持的模式会使用未设置 `CODE_SCANNER_MODE` 时相同的默认值或原生配置。
 
 ## 原生配置优先级
 
@@ -54,7 +54,7 @@ enable_block = false
 
 受支持的 `CODE_SCANNER_MODE` 优先于 `enable_block`；否则 `enable_block=true` 选择 block，`false` 选择 observe。
 
-OpenClaw 保留 `capabilities["scan-code"].enabled` 和 `codeScanRequireApproval`。受支持的 `CODE_SCANNER_MODE` 优先于 `codeScanRequireApproval`；否则 `true` 选择 ask，`false` 选择 observe。OpenClaw 的普通 findings 不会返回 direct block。
+OpenClaw 保留 `capabilities["scan-code"].enabled` 和 `codeScanRequireApproval`。受支持的 `CODE_SCANNER_MODE` 优先于 `codeScanRequireApproval`；否则 `true` 选择 ask，`false` 选择 observe。在 `ask` 模式下，普通 findings 返回 `requireApproval`；在 `block` 模式下，普通 findings 返回 `{ block: true, blockReason }`。
 
 ## 示例
 

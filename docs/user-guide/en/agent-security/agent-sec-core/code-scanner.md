@@ -27,7 +27,7 @@ Install or deploy the adapter for the Agent you use as described in the [AgentSe
 | Codex | `true` / `false` | `observe`, `block` | Supported; default 10 seconds |
 | Cosh | `true` / `false` | `ask` only | Not supported; fixed at 10 seconds |
 | Hermes | `true` / `false` | `observe`, `block` | Not supported; uses capability `timeout` |
-| OpenClaw | `true` / `false` | `observe`, `ask` | Not supported; fixed at 10 seconds |
+| OpenClaw | `true` / `false` | `observe`, `ask`, `block` | Not supported; fixed at 10 seconds |
 
 `CODE_SCANNER_HOOK_ENABLED=false` skips hook input processing and CLI invocation. On Hermes and OpenClaw, a valid boolean environment value overrides capability `enabled`; an invalid value is treated as unset and falls back to capability configuration.
 
@@ -39,7 +39,7 @@ Install or deploy the adapter for the Agent you use as described in the [AgentSe
 
 Compatibility aliases are normalized before host capability checks: `debug` maps to `observe`, and `deny` maps to `block`. `warn`, invalid values, and modes unsupported by that host are treated as unset; these configuration diagnostics never enter stdout, system messages, or other HookOutput. Standalone scripts write bounded diagnostics to stderr, while Hermes/OpenClaw capabilities write them to the host logger.
 
-Consequently, Cosh keeps its fixed `ask` response when given `observe` or `block`; Codex and Hermes ignore `ask`; OpenClaw ignores `block` and its `deny` alias. The plugin then uses the same default or native configuration it would use if `CODE_SCANNER_MODE` were absent.
+Consequently, Cosh keeps its fixed `ask` response when given `observe` or `block`; Codex and Hermes ignore `ask`; OpenClaw supports `observe`, `ask`, and `block`, with `deny` normalized to `block`. Unsupported modes use the same default or native configuration the plugin would use if `CODE_SCANNER_MODE` were absent.
 
 ## Native Configuration Precedence
 
@@ -54,7 +54,7 @@ enable_block = false
 
 A supported `CODE_SCANNER_MODE` overrides `enable_block`; otherwise `enable_block=true` selects block and `false` selects observe.
 
-OpenClaw preserves `capabilities["scan-code"].enabled` and `codeScanRequireApproval`. A supported `CODE_SCANNER_MODE` overrides `codeScanRequireApproval`; otherwise `true` selects ask and `false` selects observe. Ordinary findings never return direct block in OpenClaw.
+OpenClaw preserves `capabilities["scan-code"].enabled` and `codeScanRequireApproval`. A supported `CODE_SCANNER_MODE` overrides `codeScanRequireApproval`; otherwise `true` selects ask and `false` selects observe. In `ask` mode, ordinary findings return `requireApproval`; in `block` mode, ordinary findings return `{ block: true, blockReason }`.
 
 ## Examples
 
