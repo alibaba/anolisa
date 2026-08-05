@@ -379,7 +379,7 @@ def test_cli_failure_and_invalid_json_fail_open(mock_cli) -> None:
         assert "rm -rf /secret/path" not in proc.stderr
 
 
-def test_invalid_mode_is_silent_and_equivalent_to_unset(mock_cli) -> None:
+def test_invalid_mode_writes_diagnostic_and_is_equivalent_to_unset(mock_cli) -> None:
     env, capture = mock_cli(
         output=_DENY_RESULT,
         extra={"CODE_SCANNER_MODE": "banana"},
@@ -388,5 +388,7 @@ def test_invalid_mode_is_silent_and_equivalent_to_unset(mock_cli) -> None:
     proc = _run_hook(_pre_tool_input("rm -rf /secret/path"), env)
 
     assert _stdout_json(proc) == {}
-    assert proc.stderr == ""
+    assert "CODE_SCANNER_MODE" in proc.stderr
+    assert "banana" in proc.stderr
+    assert "rm -rf /secret/path" not in proc.stderr
     assert capture.exists()

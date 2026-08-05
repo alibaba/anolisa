@@ -29,10 +29,23 @@ _TOOL_FIELD = {
     "shell": "command",
 }
 _HOOK_ENABLED = env_flag_enabled("CODE_SCANNER_HOOK_ENABLED", True)
-_MODE = normalize_hook_policy(os.environ.get("CODE_SCANNER_MODE"), "")
-if _MODE != "ask":
-    _MODE = "ask"
 _DEFAULT_LANGUAGE = "bash"
+
+
+def _diagnostic(message: str) -> None:
+    """Write debug-only hook details to stderr."""
+    print(f"[code-scanner] {message}", file=sys.stderr)
+
+
+def _read_mode() -> str:
+    raw = os.environ.get("CODE_SCANNER_MODE")
+    mode = normalize_hook_policy(raw, "")
+    if raw is not None and mode != "ask":
+        _diagnostic(f"invalid or unsupported CODE_SCANNER_MODE={raw[:32]!r}; using ask")
+    return "ask"
+
+
+_MODE = _read_mode()
 
 
 # -- helpers ---------------------------------------------------------------

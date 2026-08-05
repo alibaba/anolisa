@@ -99,31 +99,39 @@ class TestCodeScanPreToolCall:
         mock_cli.assert_called_once()
 
     @pytest.mark.parametrize(
-        ("mode", "enable_block", "expected_policy"),
+        ("mode", "enable_block", "expected_policy", "expected_diagnostic"),
         [
-            ("observe", True, "observe"),
-            ("debug", True, "observe"),
-            ("block", False, "block"),
-            ("deny", False, "block"),
-            ("ask", True, "block"),
-            ("warn", False, "observe"),
-            ("invalid", True, "block"),
+            ("observe", True, "observe", False),
+            ("debug", True, "observe", False),
+            ("block", False, "block", False),
+            ("deny", False, "block", False),
+            ("ask", True, "block", True),
+            ("warn", False, "observe", True),
+            ("invalid", True, "block", True),
         ],
     )
     def test_mode_uses_only_existing_interactions(
         self,
         monkeypatch,
+        caplog,
         mode,
         enable_block,
         expected_policy,
+        expected_diagnostic,
     ):
         monkeypatch.setenv("CODE_SCANNER_MODE", mode)
+        caplog.set_level("WARNING", logger="agent-sec-core")
         cap = CodeScanCapability()
         cap._timeout = 5.0
 
         cap._on_register({"enable_block": enable_block})
 
         assert cap._policy == expected_policy
+        if expected_diagnostic:
+            assert "CODE_SCANNER_MODE" in caplog.text
+            assert mode in caplog.text
+        else:
+            assert "CODE_SCANNER_MODE" not in caplog.text
 
     def test_code_scanner_timeout_env_is_ignored(self, monkeypatch):
         monkeypatch.setenv("CODE_SCANNER_TIMEOUT", "1")

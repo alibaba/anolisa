@@ -103,7 +103,7 @@ subagent 等无法交互的场景会按 Qwen Code 规则退化为拒绝。
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `CODE_SCANNER_HOOK_ENABLED` | `true` | `false` 时在读取 hook input 和调用 CLI 前短路；非法值等价于未设置 |
-| `CODE_SCANNER_MODE` | `observe` | 支持 `observe` / `ask` / `block`；`debug` 等价于 `observe`，`deny` 等价于 `block`；`warn` 及非法值等价于未设置 |
+| `CODE_SCANNER_MODE` | `observe` | 支持 `observe` / `ask` / `block`；`debug` 等价于 `observe`，`deny` 等价于 `block`；`warn` 及非法值等价于未设置，并向 stderr 写入 bounded diagnostic |
 | `CODE_SCANNER_TIMEOUT` | `10` | 保留现有 CLI 超时环境变量 |
 
 `ask` 和 `block` 复用现有 `permissionDecision=ask/deny` 交互，不新增 HookOutput 类型。scanner `warn` 与 `deny` 都进入所选交互。

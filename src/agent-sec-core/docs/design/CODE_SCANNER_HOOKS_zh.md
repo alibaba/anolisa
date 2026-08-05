@@ -41,7 +41,7 @@
 
 归一化后必须再次检查宿主能力子集。例如，OpenClaw 收到 `deny` 后先归一化为 `block`，但普通 findings 不支持 direct block，因此该环境变量最终不生效，并回到原生配置。
 
-`warn` 不属于 Code Scanner 可配置 MODE。`warn`、非法值和宿主不支持的值都等价于没有设置 `CODE_SCANNER_MODE`，且不得通过 stdout、stderr、systemMessage 或宿主 logger 输出配置诊断。
+`warn` 不属于 Code Scanner 可配置 MODE。`warn`、非法值和宿主不支持的值都等价于没有设置 `CODE_SCANNER_MODE`。配置错配诊断不得进入 stdout、systemMessage 或其他 HookOutput；独立脚本写 stderr，Hermes/OpenClaw capability 写宿主 logger。
 
 ## 4. 环境变量能力矩阵
 
@@ -184,7 +184,7 @@ Qoder、Qwen Code 和 Cosh 没有 Code Scanner 专属 self-protect 分支。Code
 - scanner 返回 `error` 或未知 verdict。
 - 输入事件、工具名或命令字段不符合当前 hook 目标。
 
-配置错误与扫描故障不能伪装成审批、阻断或 HookOutput。特别是 Codex 的 stdout 是 hook 协议通道；不支持或非法 MODE 不得向 stdout/stderr 写入 warning。其他宿主同样保持静默配置 fallback。
+配置错误与扫描故障不能伪装成审批、阻断或 HookOutput。特别是 Codex 的 stdout 是 hook 协议通道；不支持或非法 MODE 不得向 stdout 写入 warning。配置错配只通过独立脚本 stderr 或 Hermes/OpenClaw 宿主 logger 记录 bounded diagnostic，不包含原始命令、hook input 或 findings。
 
 ## 9. 配置决策流程
 

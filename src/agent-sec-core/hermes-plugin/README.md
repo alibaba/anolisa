@@ -126,7 +126,7 @@ Hermes 支持的 hook 及其回调签名：
 默认由 `enable_block` 决定 observe/block；合法的 `CODE_SCANNER_MODE=observe|block`
 优先于该配置。`debug` 等价于 `observe`，`deny` 等价于 `block`；Hermes 不支持
 Code Scanner ask，因此 `ask`、`warn` 和非法值都等价于未设置并回到
-`enable_block`。`CODE_SCANNER_HOOK_ENABLED=true|false` 可覆盖 capability `enabled`，
+`enable_block`，同时通过宿主 logger 写入 bounded diagnostic。`CODE_SCANNER_HOOK_ENABLED=true|false` 可覆盖 capability `enabled`，
 非法值等价于未设置。超时继续使用 capability `timeout`，不读取
 `CODE_SCANNER_TIMEOUT`。
 

@@ -37,7 +37,7 @@ Install or deploy the adapter for the Agent you use as described in the [AgentSe
 - `ask` uses the host's existing approval interaction.
 - `block` uses the host's existing deny or block interaction.
 
-Compatibility aliases are normalized before host capability checks: `debug` maps to `observe`, and `deny` maps to `block`. `warn`, invalid values, and modes unsupported by that host are treated as unset without stdout, stderr, system-message, or logger diagnostics.
+Compatibility aliases are normalized before host capability checks: `debug` maps to `observe`, and `deny` maps to `block`. `warn`, invalid values, and modes unsupported by that host are treated as unset; these configuration diagnostics never enter stdout, system messages, or other HookOutput. Standalone scripts write bounded diagnostics to stderr, while Hermes/OpenClaw capabilities write them to the host logger.
 
 Consequently, Cosh keeps its fixed `ask` response when given `observe` or `block`; Codex and Hermes ignore `ask`; OpenClaw ignores `block` and its `deny` alias. The plugin then uses the same default or native configuration it would use if `CODE_SCANNER_MODE` were absent.
 

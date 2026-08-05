@@ -3,6 +3,7 @@ import {
   buildTraceContext,
   callAgentSecCli,
   envFlagEnabled,
+  isHookPolicyValue,
   normalizeHookPolicy,
 } from "../utils.js";
 
@@ -14,11 +15,21 @@ export const codeScan: SecurityCapability = {
     const cfg = (api.pluginConfig as Record<string, any>) ?? {};
     const hookEnabled = envFlagEnabled("CODE_SCANNER_HOOK_ENABLED", true);
     const fallbackPolicy = cfg.codeScanRequireApproval === true ? "ask" : "observe";
-    const configuredPolicy = normalizeHookPolicy(process.env.CODE_SCANNER_MODE, fallbackPolicy);
+    const rawPolicy = process.env.CODE_SCANNER_MODE;
+    const configuredPolicy = normalizeHookPolicy(rawPolicy, fallbackPolicy);
     const policy =
       configuredPolicy === "observe" || configuredPolicy === "ask"
         ? configuredPolicy
         : fallbackPolicy;
+    if (
+      rawPolicy !== undefined &&
+      (!isHookPolicyValue(rawPolicy) ||
+        (configuredPolicy !== "observe" && configuredPolicy !== "ask"))
+    ) {
+      api.logger.warn(
+        `[scan-code] invalid or unsupported CODE_SCANNER_MODE=${JSON.stringify(rawPolicy.slice(0, 32))}; using ${policy}`,
+      );
+    }
 
     api.on("before_tool_call", async (event: any, ctx: any) => {
       try {
@@ -65,7 +76,9 @@ export const codeScan: SecurityCapability = {
         const msg = `[code-scanner] Detected ${findings.length} issue(s):\n${descs.join("\n")}\n\nCommand: ${command}`;
 
         if (verdict === "deny") {
-          api.logger.warn(`[scan-code] DENY (policy=${policy}) — ${msg}`);
+          api.logger.warn(
+            `[scan-code] DENY (requireApproval=${policy === "ask" ? "true" : "false"}) — ${msg}`,
+          );
           if (policy === "ask") {
             return {
               requireApproval: {

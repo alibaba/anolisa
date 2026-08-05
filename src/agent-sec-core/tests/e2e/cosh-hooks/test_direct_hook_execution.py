@@ -173,7 +173,12 @@ def test_cosh_code_scanner_mode_never_changes_fixed_ask_behavior(
 
     assert proc.returncode == 0
     assert json.loads(proc.stdout)["decision"] == "ask"
-    assert proc.stderr == ""
+    if mode == "ask":
+        assert proc.stderr == ""
+    else:
+        assert "CODE_SCANNER_MODE" in proc.stderr
+        assert mode in proc.stderr
+        assert "rm -rf /secret/path" not in proc.stderr
     assert capture.exists()
 
 

@@ -35,14 +35,29 @@ from trace_context import with_trace_context
 # -- config ----------------------------------------------------------------
 
 HOOK_ENABLED = env_flag_enabled("CODE_SCANNER_HOOK_ENABLED", True)
-MODE = normalize_hook_policy(os.environ.get("CODE_SCANNER_MODE"), "")
-if MODE not in {"observe", "block"}:
-    MODE = "observe"
+_DEFAULT_LANGUAGE = "bash"
+
+
+def _diagnostic(message: str) -> None:
+    print(f"[code-scanner] {' '.join(message.split())}", file=sys.stderr)
+
+
+def _read_mode() -> str:
+    raw = os.environ.get("CODE_SCANNER_MODE")
+    mode = normalize_hook_policy(raw, "")
+    if raw is not None and mode not in {"observe", "block"}:
+        _diagnostic(
+            f"invalid or unsupported CODE_SCANNER_MODE={raw[:32]!r}; using observe"
+        )
+        return "observe"
+    return mode or "observe"
+
+
+MODE = _read_mode()
 try:
     TIMEOUT = int(os.environ.get("CODE_SCANNER_TIMEOUT", "10"))
 except (ValueError, TypeError):
     TIMEOUT = 10
-_DEFAULT_LANGUAGE = "bash"
 
 
 # -- output helpers --------------------------------------------------------

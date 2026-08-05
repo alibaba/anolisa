@@ -4,6 +4,7 @@
 import json
 import os
 import subprocess
+import sys
 from typing import Any
 
 from qoder_hook_common import (
@@ -16,17 +17,33 @@ from qoder_hook_common import (
 )
 
 _HOOK_ENABLED = env_flag_enabled("CODE_SCANNER_HOOK_ENABLED", True)
-_MODE = normalize_hook_policy(os.environ.get("CODE_SCANNER_MODE"), "")
-if _MODE not in {"observe", "ask", "block"}:
-    _MODE = "observe"
+_DEFAULT_LANGUAGE = "bash"
+_MAX_FINDINGS_DISPLAY = 5
+_MAX_TEXT_CHARS = 120
+
+
+def _diagnostic(message: str) -> None:
+    """Write a single-line configuration diagnostic to stderr."""
+    print(f"[code-scanner] {' '.join(message.split())}", file=sys.stderr)
+
+
+def _read_mode() -> str:
+    """Return the configured Code Scanner mode."""
+    raw = os.environ.get("CODE_SCANNER_MODE")
+    mode = normalize_hook_policy(raw, "")
+    if raw is not None and mode not in {"observe", "ask", "block"}:
+        _diagnostic(
+            f"invalid or unsupported CODE_SCANNER_MODE={raw[:32]!r}; using observe"
+        )
+        return "observe"
+    return mode or "observe"
+
+
+_MODE = _read_mode()
 try:
     _TIMEOUT = int(os.environ.get("CODE_SCANNER_TIMEOUT", "10"))
 except (TypeError, ValueError):
     _TIMEOUT = 10
-
-_DEFAULT_LANGUAGE = "bash"
-_MAX_FINDINGS_DISPLAY = 5
-_MAX_TEXT_CHARS = 120
 
 
 def _safe_string(value: Any) -> str:

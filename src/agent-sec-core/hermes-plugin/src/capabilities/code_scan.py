@@ -35,7 +35,14 @@ class CodeScanCapability(AgentSecCoreCapability):
     def _on_register(self, config: dict) -> None:
         """Read code-scan specific config."""
         fallback_policy = "block" if config.get("enable_block", False) else "observe"
-        policy = normalize_hook_policy(os.environ.get("CODE_SCANNER_MODE"), "")
+        raw_policy = os.environ.get("CODE_SCANNER_MODE")
+        policy = normalize_hook_policy(raw_policy, "")
+        if raw_policy is not None and policy not in {"observe", "block"}:
+            logger.warning(
+                "[agent-sec-core] code-scan invalid or unsupported CODE_SCANNER_MODE=%r; using %s",
+                raw_policy[:32],
+                fallback_policy,
+            )
         self._policy = policy if policy in {"observe", "block"} else fallback_policy
         self._hook_enabled = env_flag_enabled("CODE_SCANNER_HOOK_ENABLED", True)
 

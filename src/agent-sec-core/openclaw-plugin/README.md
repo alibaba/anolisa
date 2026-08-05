@@ -325,7 +325,7 @@ Set `codeScanRequireApproval: true` to enable approval mode, which pops a confir
 openclaw config set plugins.entries.agent-sec.config.codeScanRequireApproval true
 ```
 
-`CODE_SCANNER_HOOK_ENABLED=true|false` overrides `capabilities["scan-code"].enabled`, and `CODE_SCANNER_MODE=observe|ask` overrides `codeScanRequireApproval`. `debug` aliases `observe`; unsupported `block`/`deny`, `warn`, and invalid values are treated as unset and use the original plugin configuration. Ordinary findings never gain a direct-block response; the existing self-protect finding remains the only forced-block exception. OpenClaw keeps its fixed 10-second timeout and does not read `CODE_SCANNER_TIMEOUT`.
+`CODE_SCANNER_HOOK_ENABLED=true|false` overrides `capabilities["scan-code"].enabled`, and `CODE_SCANNER_MODE=observe|ask` overrides `codeScanRequireApproval`. `debug` aliases `observe`; unsupported `block`/`deny`, `warn`, and invalid values are treated as unset, emit a bounded host-logger diagnostic, and use the original plugin configuration. Ordinary findings never gain a direct-block response; the existing self-protect finding remains the only forced-block exception. OpenClaw keeps its fixed 10-second timeout and does not read `CODE_SCANNER_TIMEOUT`.
 
 ### Configuring `pii-scan-user-input`
 

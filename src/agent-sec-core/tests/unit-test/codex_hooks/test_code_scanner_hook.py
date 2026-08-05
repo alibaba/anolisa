@@ -44,8 +44,8 @@ _HOOK_SCRIPT = os.path.join(_HOOKS_DIR, "code_scanner_hook.py")
 # ---------------------------------------------------------------------------
 
 
-def _run_hook(input_data, *, env_override=None):
-    """Run code_scanner_hook.py as subprocess and return parsed JSON output."""
+def _run_hook_process(input_data, *, env_override=None):
+    """Run code_scanner_hook.py as subprocess and return the process."""
     env = os.environ.copy()
     if env_override:
         env.update(env_override)
@@ -60,6 +60,12 @@ def _run_hook(input_data, *, env_override=None):
         env=env,
     )
     assert proc.returncode == 0, f"Hook crashed: stderr={proc.stderr}"
+    return proc
+
+
+def _run_hook(input_data, *, env_override=None):
+    """Run code_scanner_hook.py as subprocess and return parsed JSON output."""
+    proc = _run_hook_process(input_data, env_override=env_override)
     if not proc.stdout.strip():
         return {}
     return json.loads(proc.stdout)
@@ -379,7 +385,7 @@ class TestUnsupportedMode:
     """Unsupported modes are equivalent to an unset MODE."""
 
     @pytest.mark.parametrize("mode", ["banana", "ask", "warn"])
-    def test_unsupported_mode_allows(self, mock_cli, mode):
+    def test_unsupported_mode_allows_with_stderr_diagnostic(self, mock_cli, mode):
         env = mock_cli(
             output=json.dumps(
                 {
@@ -389,11 +395,15 @@ class TestUnsupportedMode:
             ),
             extra={"CODE_SCANNER_MODE": mode},
         )
-        output = _run_hook(
+        proc = _run_hook_process(
             {"tool_input": {"command": "rm -rf /tmp"}},
             env_override=env,
         )
+        output = json.loads(proc.stdout) if proc.stdout.strip() else {}
         assert output == {}
+        assert "CODE_SCANNER_MODE" in proc.stderr
+        assert mode in proc.stderr
+        assert "rm -rf /tmp" not in proc.stderr
 
     def test_debug_alias_allows(self, mock_cli):
         env = mock_cli(

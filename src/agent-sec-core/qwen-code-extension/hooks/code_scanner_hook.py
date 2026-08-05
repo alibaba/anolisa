@@ -11,18 +11,32 @@ from hook_config import env_flag_enabled, normalize_hook_policy
 from trace_context import with_trace_context
 
 _HOOK_ENABLED = env_flag_enabled("CODE_SCANNER_HOOK_ENABLED", True)
-_MODE = normalize_hook_policy(os.environ.get("CODE_SCANNER_MODE"), "")
-if _MODE not in {"observe", "ask", "block"}:
-    _MODE = "observe"
-try:
-    _TIMEOUT = int(os.environ.get("CODE_SCANNER_TIMEOUT", "10"))
-except (TypeError, ValueError):
-    _TIMEOUT = 10
-
 _TOOL_NAME = "run_shell_command"
 _LANGUAGE = "bash"
 _MAX_FINDINGS_DISPLAY = 5
 _MAX_TEXT_CHARS = 120
+
+
+def _diagnostic(message: str) -> None:
+    print(f"[code-scanner] {' '.join(message.split())}", file=sys.stderr)
+
+
+def _read_mode() -> str:
+    raw = os.environ.get("CODE_SCANNER_MODE")
+    mode = normalize_hook_policy(raw, "")
+    if raw is not None and mode not in {"observe", "ask", "block"}:
+        _diagnostic(
+            f"invalid or unsupported CODE_SCANNER_MODE={raw[:32]!r}; using observe"
+        )
+        return "observe"
+    return mode or "observe"
+
+
+_MODE = _read_mode()
+try:
+    _TIMEOUT = int(os.environ.get("CODE_SCANNER_TIMEOUT", "10"))
+except (TypeError, ValueError):
+    _TIMEOUT = 10
 
 
 def _json_output(payload: dict[str, Any]) -> str:

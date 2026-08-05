@@ -37,7 +37,7 @@ make build-cli
 - `ask` 使用宿主现有的审批交互。
 - `block` 使用宿主现有的 deny 或 block 交互。
 
-兼容别名会先完成归一化，再检查宿主能力：`debug` 映射为 `observe`，`deny` 映射为 `block`。`warn`、非法值以及宿主不支持的模式都等价于未设置，且不会向 stdout、stderr、systemMessage 或宿主 logger 输出配置诊断。
+兼容别名会先完成归一化，再检查宿主能力：`debug` 映射为 `observe`，`deny` 映射为 `block`。`warn`、非法值以及宿主不支持的模式都等价于未设置；这些配置错配不会进入 stdout、systemMessage 或其他 HookOutput。独立脚本会向 stderr 记录 bounded diagnostic，Hermes/OpenClaw capability 会写宿主 logger。
 
 因此，Cosh 收到 `observe` 或 `block` 时仍保持固定 `ask`；Codex 和 Hermes 忽略 `ask`；OpenClaw 忽略 `block` 及其 `deny` 别名。随后插件使用未设置 `CODE_SCANNER_MODE` 时相同的默认值或原生配置。
 

@@ -354,7 +354,7 @@ describe("scan-code", () => {
     it("unsupported block and deny modes use the original config fallback", async () => {
       for (const mode of ["block", "deny"]) {
         process.env.CODE_SCANNER_MODE = mode;
-        const { handler } = registerAndGetHandler({ codeScanRequireApproval: true });
+        const { handler, logs } = registerAndGetHandler({ codeScanRequireApproval: true });
         mockCli({
           exitCode: 0,
           stdout: '{"verdict":"deny","findings":[{"desc_zh":"危险"}]}',
@@ -365,12 +365,13 @@ describe("scan-code", () => {
 
         assert.ok(result.requireApproval);
         assert.equal(result.block, undefined);
+        assert.ok(logs.some((log) => log.includes("CODE_SCANNER_MODE") && log.includes(mode)));
       }
     });
 
     it("debug alias selects the existing observe interaction", async () => {
       process.env.CODE_SCANNER_MODE = "debug";
-      const { handler } = registerAndGetHandler({ codeScanRequireApproval: true });
+      const { handler, logs } = registerAndGetHandler({ codeScanRequireApproval: true });
       mockCli({
         exitCode: 0,
         stdout: '{"verdict":"warn","findings":[{"desc_zh":"注意"}]}',
@@ -380,11 +381,12 @@ describe("scan-code", () => {
       const result = await handler(execEvent("risky-cmd"), {});
 
       assert.equal(result, undefined);
+      assert.equal(logs.some((log) => log.includes("CODE_SCANNER_MODE")), false);
     });
 
     it("invalid MODE is equivalent to an unset MODE", async () => {
       process.env.CODE_SCANNER_MODE = "invalid";
-      const { handler } = registerAndGetHandler({ codeScanRequireApproval: true });
+      const { handler, logs } = registerAndGetHandler({ codeScanRequireApproval: true });
       mockCli({
         exitCode: 0,
         stdout: '{"verdict":"warn","findings":[{"desc_zh":"注意"}]}',
@@ -395,6 +397,7 @@ describe("scan-code", () => {
 
       assert.ok(result.requireApproval);
       assert.equal(result.block, undefined);
+      assert.ok(logs.some((log) => log.includes("CODE_SCANNER_MODE") && log.includes("invalid")));
     });
 
     it("deny but empty findings → undefined (findings.length === 0 gate)", async () => {
