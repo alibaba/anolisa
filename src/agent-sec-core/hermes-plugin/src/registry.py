@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("agent-sec-core")
 
 _CAPABILITY_ENABLED_ENV = {
+    "code-scan": "CODE_SCANNER_HOOK_ENABLED",
     "pii-scan-user-input": "PII_CHECKER_HOOK_ENABLED",
     "skill-ledger": "SKILL_LEDGER_HOOK_ENABLED",
 }
@@ -90,8 +91,10 @@ def register_capabilities(
             continue
         enabled = bool(cap_config["enabled"])
         enabled_env = _CAPABILITY_ENABLED_ENV.get(cap.id)
-        if enabled_env is not None and enabled_env in os.environ:
-            enabled = env_flag_enabled(enabled_env, True)
+        if enabled_env is not None:
+            raw_enabled = os.environ.get(enabled_env, "").strip().lower()
+            if raw_enabled in {"true", "false"}:
+                enabled = env_flag_enabled(enabled_env, enabled)
         if not enabled:
             logger.info(f"[agent-sec-core] {cap.id} disabled by config, skipping")
             continue

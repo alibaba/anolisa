@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 from ..cli_runner import call_agent_sec_cli, trace_context
-from ..hook_config import env_flag_enabled
+from ..hook_config import (  # noqa: TID252 - standalone plugin package
+    env_flag_enabled,
+    normalize_hook_policy,
+)
 from .base import AgentSecCoreCapability
 
 logger = logging.getLogger("agent-sec-core")
@@ -30,7 +34,9 @@ class CodeScanCapability(AgentSecCoreCapability):
 
     def _on_register(self, config: dict) -> None:
         """Read code-scan specific config."""
-        self._enable_block = config.get("enable_block", False)
+        fallback_policy = "block" if config.get("enable_block", False) else "observe"
+        policy = normalize_hook_policy(os.environ.get("CODE_SCANNER_MODE"), "")
+        self._policy = policy if policy in {"observe", "block"} else fallback_policy
         self._hook_enabled = env_flag_enabled("CODE_SCANNER_HOOK_ENABLED", True)
 
     def get_hooks_define(self) -> dict:
@@ -101,7 +107,7 @@ class CodeScanCapability(AgentSecCoreCapability):
             logger.warning(
                 f"[agent-sec-core] {self.id} DENY tool={tool_name} code={code[:120]} | {msg}"
             )
-            if self._enable_block:
+            if self._policy == "block":
                 return {"action": "block", "message": msg}
             return None
 
@@ -110,7 +116,7 @@ class CodeScanCapability(AgentSecCoreCapability):
             logger.warning(
                 f"[agent-sec-core] {self.id} WARN tool={tool_name} code={code[:120]} | {msg}"
             )
-            if self._enable_block:
+            if self._policy == "block":
                 return {"action": "block", "message": msg}
             return None
 

@@ -58,6 +58,39 @@ describe("capability registration defaults", () => {
     }
   });
 
+  it("lets code scanner environment switches override capability enabled values", () => {
+    process.env.CODE_SCANNER_HOOK_ENABLED = "true";
+    try {
+      assert.equal(
+        isCapabilityEnabled(capability("scan-code"), { "scan-code": { enabled: false } }),
+        true,
+      );
+      process.env.CODE_SCANNER_HOOK_ENABLED = "false";
+      assert.equal(
+        isCapabilityEnabled(capability("scan-code"), { "scan-code": { enabled: true } }),
+        false,
+      );
+    } finally {
+      delete process.env.CODE_SCANNER_HOOK_ENABLED;
+    }
+  });
+
+  it("ignores invalid code scanner enabled values", () => {
+    process.env.CODE_SCANNER_HOOK_ENABLED = "invalid";
+    try {
+      assert.equal(
+        isCapabilityEnabled(capability("scan-code"), { "scan-code": { enabled: false } }),
+        false,
+      );
+      assert.equal(
+        isCapabilityEnabled(capability("scan-code"), { "scan-code": { enabled: true } }),
+        true,
+      );
+    } finally {
+      delete process.env.CODE_SCANNER_HOOK_ENABLED;
+    }
+  });
+
   it("does not give deprecated skill-ledger enableBlock a schema default", () => {
     const manifest = readJson("openclaw.plugin.json");
     const enableBlock =

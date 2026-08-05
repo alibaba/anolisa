@@ -51,6 +51,7 @@ ANOLISA provides a complete server-side runtime for AI Agent workloads. Componen
 | Document | Component | Description |
 |----------|-----------|-------------|
 | [AgentSecCore](agent-security/agent-sec-core/QUICKSTART.md) | agent-sec-core | Hardening, code scanning, prompt scanning, skill ledger |
+| [Code Scanner Hook Configuration](agent-security/agent-sec-core/code-scanner.md) | agent-sec-core | Per-agent hook modes, environment variables, and fallback behavior |
 | [PII Checker](agent-security/agent-sec-core/pii-checker.md) | agent-sec-core | Personal data / credential detection and redaction |
 | [Skill Ledger User Guide](agent-security/agent-sec-core/skill-ledger.md) | agent-sec-core | Skill integrity chain and signing workflow |
 | [OpenClaw Deployment & Upgrade](agent-security/agent-sec-core/openclaw-deploy.md) | agent-sec-core | OpenClaw plugin deployment and upgrade guide |

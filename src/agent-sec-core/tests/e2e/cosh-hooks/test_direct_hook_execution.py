@@ -160,6 +160,24 @@ def test_cosh_code_scanner_invalid_enabled_value_defaults_to_enabled(
 
 
 @pytest.mark.parametrize(
+    "mode", ["ask", "observe", "block", "debug", "deny", "warn", "invalid"]
+)
+def test_cosh_code_scanner_mode_never_changes_fixed_ask_behavior(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    proc, capture = _run_code_scanner_hook(
+        tmp_path,
+        {"CODE_SCANNER_MODE": mode},
+    )
+
+    assert proc.returncode == 0
+    assert json.loads(proc.stdout)["decision"] == "ask"
+    assert proc.stderr == ""
+    assert capture.exists()
+
+
+@pytest.mark.parametrize(
     ("payload", "policy", "expected_decision", "message_fragment"),
     [
         (

@@ -7,17 +7,18 @@ import subprocess
 from typing import Any
 
 from qoder_hook_common import (
-    dumps_hook_output,
     env_flag_enabled,
     jsonish_value,
     load_hook_input,
+    normalize_hook_policy,
     pre_tool_decision_output,
     with_trace_context,
 )
 
 _HOOK_ENABLED = env_flag_enabled("CODE_SCANNER_HOOK_ENABLED", True)
-_MODE = os.environ.get("CODE_SCANNER_MODE", "observe").strip().lower()
-_VALID_MODES = {"observe", "ask", "deny"}
+_MODE = normalize_hook_policy(os.environ.get("CODE_SCANNER_MODE"), "")
+if _MODE not in {"observe", "ask", "block"}:
+    _MODE = "observe"
 try:
     _TIMEOUT = int(os.environ.get("CODE_SCANNER_TIMEOUT", "10"))
 except (TypeError, ValueError):
@@ -121,21 +122,6 @@ def _format_notice(findings: list[Any], final_message: str) -> str:
     return "\n".join(lines)
 
 
-def _warn_output(notice: str) -> str:
-    """Return a non-blocking output with a user-visible system message."""
-    return dumps_hook_output({"systemMessage": notice})
-
-
-def _invalid_mode_output() -> str:
-    """Return a visible fail-open warning for an invalid scanner mode."""
-    configured_mode = _shorten(_MODE, 32) or "<empty>"
-    notice = (
-        f"[code-scanner] Invalid CODE_SCANNER_MODE {configured_mode!r}; expected "
-        "'observe', 'ask', or 'deny'. Falling back to observe mode; execution will continue."
-    )
-    return _warn_output(notice)
-
-
 def _format_decision(verdict: str, findings: list[Any]) -> str | None:
     """Map a scan-code verdict to Qoder PreToolUse output."""
     if verdict in {"pass", "error"} or not findings:
@@ -147,7 +133,7 @@ def _format_decision(verdict: str, findings: list[Any]) -> str | None:
             "ask",
             _format_notice(findings, "Review this command before execution."),
         )
-    if _MODE == "deny":
+    if _MODE == "block":
         return pre_tool_decision_output(
             "deny",
             _format_notice(findings, "This command was denied before execution."),
@@ -166,10 +152,6 @@ def main() -> None:
 
     command = _command_from_input(input_data)
     if command is None:
-        return
-
-    if _MODE not in _VALID_MODES:
-        print(_invalid_mode_output())
         return
 
     scan_result = _scan_code(input_data, command)

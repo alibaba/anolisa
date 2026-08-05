@@ -1,5 +1,10 @@
 import type { SecurityCapability } from "../types.js";
-import { buildTraceContext, callAgentSecCli, envFlagEnabled } from "../utils.js";
+import {
+  buildTraceContext,
+  callAgentSecCli,
+  envFlagEnabled,
+  normalizeHookPolicy,
+} from "../utils.js";
 
 export const codeScan: SecurityCapability = {
   id: "scan-code",
@@ -8,7 +13,12 @@ export const codeScan: SecurityCapability = {
   register(api) {
     const cfg = (api.pluginConfig as Record<string, any>) ?? {};
     const hookEnabled = envFlagEnabled("CODE_SCANNER_HOOK_ENABLED", true);
-    const requireApprovalEnabled = cfg.codeScanRequireApproval === true;
+    const fallbackPolicy = cfg.codeScanRequireApproval === true ? "ask" : "observe";
+    const configuredPolicy = normalizeHookPolicy(process.env.CODE_SCANNER_MODE, fallbackPolicy);
+    const policy =
+      configuredPolicy === "observe" || configuredPolicy === "ask"
+        ? configuredPolicy
+        : fallbackPolicy;
 
     api.on("before_tool_call", async (event: any, ctx: any) => {
       try {
@@ -55,8 +65,8 @@ export const codeScan: SecurityCapability = {
         const msg = `[code-scanner] Detected ${findings.length} issue(s):\n${descs.join("\n")}\n\nCommand: ${command}`;
 
         if (verdict === "deny") {
-          api.logger.warn(`[scan-code] DENY (requireApproval=${requireApprovalEnabled}) — ${msg}`);
-          if (requireApprovalEnabled) {
+          api.logger.warn(`[scan-code] DENY (policy=${policy}) — ${msg}`);
+          if (policy === "ask") {
             return {
               requireApproval: {
                 title: "Code Scanner Security Warning",
@@ -69,8 +79,8 @@ export const codeScan: SecurityCapability = {
         }
 
         if (verdict === "warn") {
-          api.logger.warn(`[scan-code] WARN (requireApproval=${requireApprovalEnabled}) — ${msg}`);
-          if (requireApprovalEnabled) {
+          api.logger.warn(`[scan-code] WARN (policy=${policy}) — ${msg}`);
+          if (policy === "ask") {
             return {
               requireApproval: {
                 title: "Code Scanner Security Warning",

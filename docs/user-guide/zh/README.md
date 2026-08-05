@@ -51,6 +51,7 @@ ANOLISA 为 AI Agent 提供完整的服务端运行时能力。通过 `anolisa` 
 | 文档 | 组件 | 说明 |
 |------|------|------|
 | [AgentSecCore](agent-security/agent-sec-core/QUICKSTART.md) | agent-sec-core | 系统加固、代码扫描、提示词扫描、技能账本 |
+| [Code Scanner Hook 配置](agent-security/agent-sec-core/code-scanner.md) | agent-sec-core | 各 Agent 的 hook 模式、环境变量与 fallback 行为 |
 | [PII 检测](agent-security/agent-sec-core/pii-checker.md) | agent-sec-core | 个人数据/凭证检测与脱敏 |
 | [Skill Ledger 用户指南](agent-security/agent-sec-core/skill-ledger.md) | agent-sec-core | 技能账本完整性链与签名工作流 |
 | [OpenClaw 兼容部署与升级](agent-security/agent-sec-core/openclaw-deploy.md) | agent-sec-core | OpenClaw 插件部署与升级指南 |

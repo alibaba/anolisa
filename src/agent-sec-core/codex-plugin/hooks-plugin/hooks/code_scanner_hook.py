@@ -8,8 +8,8 @@ HookOutput JSON to stdout.
 Modes (controlled by CODE_SCANNER_MODE env var, default: observe):
   - observe: silent pass-through, only audit trail via agent-sec-cli events.
             Even if dangerous commands are detected, they will NOT be blocked.
-  - deny: block execution with reason when risk is detected.
-          (agent-sec-cli's "warn" verdict is escalated to block in this mode)
+  - block: block execution with reason when risk is detected.
+           (agent-sec-cli's "warn" verdict is escalated to block in this mode)
 
 Self-protect: currently disabled — no codex-specific self-protect rule exists
 in agent-sec-cli yet. When shell-self-protect-codex is added, re-enable the
@@ -29,13 +29,15 @@ import os
 import subprocess
 import sys
 
-from hook_config import env_flag_enabled
+from hook_config import env_flag_enabled, normalize_hook_policy
 from trace_context import with_trace_context
 
 # -- config ----------------------------------------------------------------
 
 HOOK_ENABLED = env_flag_enabled("CODE_SCANNER_HOOK_ENABLED", True)
-MODE = os.environ.get("CODE_SCANNER_MODE", "observe").lower()
+MODE = normalize_hook_policy(os.environ.get("CODE_SCANNER_MODE"), "")
+if MODE not in {"observe", "block"}:
+    MODE = "observe"
 try:
     TIMEOUT = int(os.environ.get("CODE_SCANNER_TIMEOUT", "10"))
 except (ValueError, TypeError):
@@ -47,7 +49,7 @@ _DEFAULT_LANGUAGE = "bash"
 
 
 def _block(findings: list[dict]) -> None:
-    """Output block decision to prevent execution (mode=deny)."""
+    """Output block decision to prevent execution (mode=block)."""
     descs = [
         f"- {f.get('rule_id', 'unknown')}: {f.get('desc_zh', f.get('desc_en', ''))}"
         for f in findings
@@ -155,7 +157,7 @@ def main() -> None:
     # 只能 block 或放行，所以 warn 升级为 block（与 deny 同等对待）。
     if MODE == "observe":
         return  # observe 模式：不拦截，仅通过 agent-sec-cli events 审计
-    elif MODE == "deny":
+    elif MODE == "block":
         _block(findings)  # warn 和 deny 均拦截
     # else: unknown mode, fail-open
 

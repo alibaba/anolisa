@@ -98,6 +98,16 @@ agent-sec-cli skill-ledger show "${QWEN_HOME:-$HOME/.qwen}/skills/<skill>"
 `agent-sec-cli skill-ledger init --no-baseline`。`ask` 在 Qwen Code headless 或后台
 subagent 等无法交互的场景会按 Qwen Code 规则退化为拒绝。
 
+## Code Scanner 配置
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `CODE_SCANNER_HOOK_ENABLED` | `true` | `false` 时在读取 hook input 和调用 CLI 前短路；非法值等价于未设置 |
+| `CODE_SCANNER_MODE` | `observe` | 支持 `observe` / `ask` / `block`；`debug` 等价于 `observe`，`deny` 等价于 `block`；`warn` 及非法值等价于未设置 |
+| `CODE_SCANNER_TIMEOUT` | `10` | 保留现有 CLI 超时环境变量 |
+
+`ask` 和 `block` 复用现有 `permissionDecision=ask/deny` 交互，不新增 HookOutput 类型。scanner `warn` 与 `deny` 都进入所选交互。
+
 ## PII 扫描与阻断
 
 | Qwen Code event | 扫描内容 | `scan-pii --source` | 阻断边界 |
@@ -194,7 +204,7 @@ scanner 返回 `deny`，才会按上述点位阻断。
 
 Code scanner hook 与 observability hook 独立挂载，作为同步
 `PreToolUse` hook 仅处理 `run_shell_command`；默认 `CODE_SCANNER_MODE=observe` 不改变
-工具执行，设置为 `ask` 或 `deny` 时会按 Qwen Code 官方 `permissionDecision` 协议请求确认或拒绝本次命令。敏感指标在写入前由本地 `scan-pii` 脱敏；脱敏失败时直接丢弃
+工具执行，设置为 `ask` 或 `block` 时会按 Qwen Code 官方 `permissionDecision` 协议请求确认或拒绝本次命令。`deny` 继续作为 `block` 的兼容别名。敏感指标在写入前由本地 `scan-pii` 脱敏；脱敏失败时直接丢弃
 对应敏感字段。
 
 ## 测试
