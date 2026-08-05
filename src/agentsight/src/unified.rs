@@ -30,7 +30,7 @@ use crate::analyzer::Analyzer;
 use crate::config::AgentsightConfig;
 use crate::discovery::AgentScanner;
 use crate::event::Event;
-use crate::ffi::{FfiEvent, FfiEventSender};
+use crate::ffi::FfiEventSender;
 use crate::genai::semantic::GenAISemanticEvent;
 use crate::genai::{GenAIBuilder, GenAIExporter, LogtailExporter};
 use crate::interruption::{
@@ -846,7 +846,7 @@ impl AgentSight {
                             if let Some(ref sender) = self.ffi_sender {
                                 for event in &output.events {
                                     if let GenAISemanticEvent::LLMCall(call) = event {
-                                        sender.send(FfiEvent::Llm(call.clone()));
+                                        sender.send_llm(call);
                                     }
                                 }
                             }
@@ -1039,7 +1039,7 @@ impl AgentSight {
             // FFI mode: deliver LLMCall events via callback channel only.
             for event in events {
                 if let GenAISemanticEvent::LLMCall(call) = event {
-                    sender.send(FfiEvent::Llm(call.clone()));
+                    sender.send_llm(call);
                 }
             }
         } else {
@@ -2063,7 +2063,7 @@ fn complete_deferred_genai(
         if let Some(sender) = ffi_sender {
             for event in events {
                 if let GenAISemanticEvent::LLMCall(call) = event {
-                    sender.send(FfiEvent::Llm(call.clone()));
+                    sender.send_llm(call);
                 }
             }
         } else {
@@ -2078,7 +2078,7 @@ fn complete_deferred_genai(
         if let Some(sender) = ffi_sender {
             for event in events {
                 if let GenAISemanticEvent::LLMCall(call) = event {
-                    sender.send(FfiEvent::Llm(call.clone()));
+                    sender.send_llm(call);
                 }
             }
         } else {

@@ -148,6 +148,22 @@ impl FfiEventSender {
         }
         self.send(FfiEvent::Https(record.clone(), agent_name()));
     }
+
+    /// Enqueue an LLM call, lowercasing `agent_name` on the way in.
+    ///
+    /// The FFI already takes a clone here, so normalizing it costs nothing and keeps
+    /// the pipeline's own copy (dashboard, SQLite, `/api/agent-names`) at its original
+    /// config casing. Normalizing at this boundary rather than in each builder is what
+    /// makes the `agentsight_read_v2` envelope self-consistent: its `Llm` arm
+    /// serializes `LLMCall` verbatim, so a `Hermes` here would not group with the
+    /// `hermes` the raw-HTTPS arm reports for the very same process.
+    pub fn send_llm(&self, call: &LLMCall) {
+        let mut call = call.clone();
+        if let Some(name) = call.agent_name.as_mut() {
+            *name = name.to_lowercase();
+        }
+        self.send(FfiEvent::Llm(call));
+    }
 }
 
 // ===========================================================================
@@ -385,16 +401,67 @@ struct EventDataHolder {
     _payload_json: Vec<u8>,
 }
 
+/// Process attribution for a raw HTTP exchange, resolved from the pid.
+///
+/// Both consumer-facing shapes report these — the typed `AgentsightHttpsData` and
+/// the generic `AgentsightEvent` JSON envelope — so the resolution lives here once
+/// rather than being reimplemented per shape.
+struct HttpsProcessMeta {
+    /// Space-joined argv; empty once the process has exited.
+    cmdline: String,
+    container_id: Option<String>,
+    /// Lowercased at the FFI boundary so C consumers observe a consistent value
+    /// regardless of config-file casing (same as `build_llm_data`).
+    agent_name: Option<String>,
+}
+
+fn resolve_https_process_meta(pid: u32, agent_name: Option<&str>) -> HttpsProcessMeta {
+    HttpsProcessMeta {
+        cmdline: crate::discovery::scanner::read_cmdline(&format!("/proc/{pid}/cmdline")).join(" "),
+        container_id: crate::container::extract_container_id_cached(pid),
+        agent_name: agent_name.map(str::to_lowercase),
+    }
+}
+
+/// JSON payload for `AgentsightEventType::Https`: the `HttpRecord` fields plus the
+/// same process attribution the typed path carries. Without this wrapper the generic
+/// envelope would be strictly poorer than the typed one, because `HttpRecord` itself
+/// has no agent_name / cmdline / container_id field — whereas the `Llm` arm gets them
+/// for free from `LLMCall`. Absent values are omitted rather than serialized as null.
+#[derive(serde::Serialize)]
+struct HttpsEventPayload<'a> {
+    #[serde(flatten)]
+    record: &'a HttpRecord,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cmdline: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    container_id: Option<&'a str>,
+}
+
 fn build_event_data(event: &FfiEvent) -> Result<EventDataHolder, serde_json::Error> {
     let (event_type, timestamp_ns, payload_json) = match event {
-        // The resolved agent name is not serialized here: this path emits the
-        // HttpRecord itself as JSON, and HttpRecord has no agent_name field. Only
-        // the AgentsightHttpsData path carries it.
-        FfiEvent::Https(record, _) => (
-            AgentsightEventType::Https,
-            record.timestamp_ns,
-            serde_json::to_vec(record)?,
-        ),
+        FfiEvent::Https(record, agent_name) => {
+            // Re-resolved rather than shared with build_https_data: the two only ever
+            // run for the same event while a consumer is mid-migration and has both
+            // the generic and the typed callback registered. read_cmdline is one small
+            // /proc read and container id lookups are cached, so paying twice in that
+            // transitional window is cheaper than threading the meta through both
+            // dispatch paths.
+            let meta = resolve_https_process_meta(record.pid, agent_name.as_deref());
+            let payload = HttpsEventPayload {
+                record,
+                agent_name: meta.agent_name.as_deref(),
+                cmdline: Some(meta.cmdline.as_str()).filter(|s| !s.is_empty()),
+                container_id: meta.container_id.as_deref(),
+            };
+            (
+                AgentsightEventType::Https,
+                record.timestamp_ns,
+                serde_json::to_vec(&payload)?,
+            )
+        }
         FfiEvent::Llm(call) => (
             AgentsightEventType::Llm,
             call.start_timestamp_ns,
@@ -428,16 +495,13 @@ fn build_https_data(record: &HttpRecord, agent_name: Option<&str>) -> HttpsDataH
     let resp_headers = record.response_headers.as_bytes().to_vec();
     let resp_body = record.response_body.as_ref().map(|b| b.as_bytes().to_vec());
 
-    // Process metadata, resolved the same way as the LLM path (`build_llm_data`)
-    // so both event kinds report identical values for the same pid. agent_name is
-    // lowercased at the FFI boundary for the same reason it is there.
-    let agent_name = agent_name.map(|s| safe_cstring(&s.to_lowercase()));
-    let cmdline = copy_to_fixed_buf::<128>(
-        &crate::discovery::scanner::read_cmdline(&format!("/proc/{}/cmdline", record.pid))
-            .join(" "),
-    );
-    let container_id =
-        crate::container::extract_container_id_cached(record.pid).map(|s| safe_cstring(&s));
+    // Process metadata, resolved the same way as the LLM path (`build_llm_data`) so
+    // both event kinds report identical values for the same pid, and shared with the
+    // generic JSON envelope via `resolve_https_process_meta`.
+    let meta = resolve_https_process_meta(record.pid, agent_name);
+    let agent_name = meta.agent_name.as_deref().map(safe_cstring);
+    let container_id = meta.container_id.as_deref().map(safe_cstring);
+    let cmdline = copy_to_fixed_buf::<128>(&meta.cmdline);
 
     let c_data = AgentsightHttpsData {
         pid: record.pid as i32,
@@ -1828,6 +1892,85 @@ mod tests {
         let decoded: SecurityEvent =
             serde_json::from_slice(payload).expect("payload should be a SecurityEvent");
         assert_eq!(decoded, event);
+    }
+
+    fn envelope_payload(holder: &EventDataHolder) -> serde_json::Value {
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                holder.c_data.payload_json.cast::<u8>(),
+                holder.c_data.payload_json_len as usize,
+            )
+        };
+        serde_json::from_slice(bytes).expect("payload should be a JSON object")
+    }
+
+    #[test]
+    fn test_build_event_data_https_envelope_carries_process_metadata() {
+        // The generic envelope must not be poorer than the typed AgentsightHttpsData:
+        // agent_name / cmdline ride alongside the flattened HttpRecord fields.
+        let mut record = make_http_record(None, None);
+        record.pid = std::process::id();
+        let holder = build_event_data(&FfiEvent::Https(record, Some("Hermes".to_string())))
+            .expect("https event should serialize");
+
+        assert_eq!(holder.c_data.event_type, AgentsightEventType::Https);
+        assert_eq!(holder.c_data.schema_version, 1);
+        let payload = envelope_payload(&holder);
+        // Lowercased, matching the typed path and the gen_ai.agent.type convention.
+        assert_eq!(payload["agent_name"], "hermes");
+        // The current test process is alive, so cmdline resolves.
+        assert!(
+            payload["cmdline"].as_str().is_some_and(|s| !s.is_empty()),
+            "cmdline should be present for a live process, got {:?}",
+            payload["cmdline"]
+        );
+        // HttpRecord's own fields are still flattened in at the top level.
+        assert_eq!(payload["method"], "POST");
+        assert_eq!(payload["path"], "/raw");
+    }
+
+    #[test]
+    fn test_v2_envelope_agent_name_casing_agrees_across_event_kinds() {
+        // A v2 consumer groups raw HTTPS and LLM events for one process by agent_name,
+        // so the two arms must not disagree on casing. Config rules ship camel-cased
+        // ("Hermes", "Codex", "Cosh"), and the Llm arm serializes LLMCall verbatim —
+        // hence the normalization happens at the sender, not in the builders.
+        let (tx, rx) = mpsc::sync_channel(2);
+        let sender = FfiEventSender {
+            tx,
+            eventfd: -1,
+            enable_raw_https: true,
+            security_drops: Arc::new(SecurityDropState::default()),
+        };
+        sender.send_llm(&make_llm_call(Some("Hermes"), 1));
+        sender.send_https(&make_http_record(None, None), || Some("Hermes".to_string()));
+
+        let llm_event = rx.try_recv().expect("llm event should be queued");
+        let https_event = rx.try_recv().expect("https event should be queued");
+        let llm_payload =
+            envelope_payload(&build_event_data(&llm_event).expect("llm event should serialize"));
+        let https_payload = envelope_payload(
+            &build_event_data(&https_event).expect("https event should serialize"),
+        );
+
+        assert_eq!(llm_payload["agent_name"], "hermes");
+        assert_eq!(https_payload["agent_name"], "hermes");
+        assert_eq!(llm_payload["agent_name"], https_payload["agent_name"]);
+    }
+
+    #[test]
+    fn test_build_event_data_https_envelope_omits_absent_metadata() {
+        // Dead pid + no rule match: absent values are omitted, not serialized as null,
+        // so a consumer sees "key missing" rather than a null it has to special-case.
+        let mut record = make_http_record(None, None);
+        record.pid = u32::MAX;
+        let holder =
+            build_event_data(&FfiEvent::Https(record, None)).expect("https event should serialize");
+
+        let payload = envelope_payload(&holder);
+        assert!(payload.get("agent_name").is_none());
+        assert!(payload.get("cmdline").is_none());
+        assert!(payload.get("container_id").is_none());
     }
 
     #[test]
