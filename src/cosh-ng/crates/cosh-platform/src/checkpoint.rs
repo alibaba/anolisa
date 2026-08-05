@@ -19,6 +19,23 @@ const DEFAULT_TIMEOUT_MS: u64 = 5000;
 /// misbehaving or corrupted daemon.
 const MAX_RESPONSE_LEN: usize = 64 * 1024 * 1024;
 
+#[derive(Clone, Copy)]
+enum IoPhase {
+    Connect,
+    WriteRequest,
+    ReadResponseLength,
+    ReadResponsePayload,
+}
+
+#[derive(Clone, Copy)]
+enum ProtocolFailure {
+    TruncatedLength,
+    TruncatedPayload,
+    OversizedLength,
+    InvalidPayload,
+    UnexpectedResponse,
+}
+
 /// Client for ws-ckpt daemon IPC.
 pub struct CkptClient {
     socket_path: String,
@@ -147,7 +164,8 @@ impl CkptClient {
     pub fn restore(&self, workspace: &str, snapshot_id: &str) -> Result<CkptRestored, CoshError> {
         let req = WsCkptRequest::Rollback {
             workspace: workspace.to_string(),
-            to: snapshot_id.to_string(),
+            to: Some(snapshot_id.to_string()),
+            num_ancestors: None,
         };
         match self.send_request(&req)? {
             WsCkptResponse::RollbackOk { from, to } => Ok(CkptRestored { from, to }),
@@ -197,7 +215,7 @@ impl CkptClient {
         let req = WsCkptRequest::Diff {
             workspace: workspace.to_string(),
             from: from.to_string(),
-            to: to.to_string(),
+            to: Some(to.to_string()),
         };
         match self.send_request(&req)? {
             WsCkptResponse::DiffOk { changes } => Ok(CkptDiffResult { changes }),
@@ -234,7 +252,7 @@ impl CkptClient {
         if !Path::new(&self.socket_path).exists() {
             return Err(CoshError::new(
                 ErrorCode::CheckpointDaemonUnavailable,
-                format!("ws-ckpt daemon socket not found at {}", self.socket_path),
+                "ws-ckpt daemon socket is unavailable",
                 "checkpoint",
             )
             .with_hint("Start daemon with: systemctl start ws-ckpt")
@@ -243,7 +261,7 @@ impl CkptClient {
 
         // 2. Connect to Unix socket.
         let mut stream = UnixStream::connect(&self.socket_path)
-            .map_err(|e| classify_io_error(e, &self.socket_path, "connect to ws-ckpt daemon"))?;
+            .map_err(|error| classify_io_error(error, IoPhase::Connect))?;
 
         // 3. Apply configurable timeout to both read and write.
         let timeout = Duration::from_millis(self.timeout_ms);
@@ -254,31 +272,32 @@ impl CkptClient {
         let frame = encode_frame(req)?;
         stream
             .write_all(&frame)
-            .map_err(|e| classify_io_error(e, &self.socket_path, "write request frame"))?;
+            .map_err(|error| classify_io_error(error, IoPhase::WriteRequest))?;
 
         // 5. Read response length prefix (4 bytes, little-endian).
         let mut len_buf = [0u8; 4];
-        stream
-            .read_exact(&mut len_buf)
-            .map_err(|e| classify_io_error(e, &self.socket_path, "read response length"))?;
+        stream.read_exact(&mut len_buf).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                protocol_error(ProtocolFailure::TruncatedLength)
+            } else {
+                classify_io_error(error, IoPhase::ReadResponseLength)
+            }
+        })?;
         let resp_len = u32::from_le_bytes(len_buf) as usize;
 
         if resp_len > MAX_RESPONSE_LEN {
-            return Err(CoshError::new(
-                ErrorCode::Unknown,
-                format!(
-                    "Daemon response length {} exceeds maximum ({} bytes)",
-                    resp_len, MAX_RESPONSE_LEN
-                ),
-                "checkpoint",
-            ));
+            return Err(protocol_error(ProtocolFailure::OversizedLength));
         }
 
         // 6. Read response payload.
         let mut resp_buf = vec![0u8; resp_len];
-        stream
-            .read_exact(&mut resp_buf)
-            .map_err(|e| classify_io_error(e, &self.socket_path, "read response payload"))?;
+        stream.read_exact(&mut resp_buf).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                protocol_error(ProtocolFailure::TruncatedPayload)
+            } else {
+                classify_io_error(error, IoPhase::ReadResponsePayload)
+            }
+        })?;
 
         // 7. Decode response.
         decode_response(&resp_buf)
@@ -308,13 +327,7 @@ fn encode_frame<T: Serialize>(msg: &T) -> Result<Vec<u8>, CoshError> {
 
 /// Decode a bincode payload into a WsCkptResponse.
 fn decode_response(data: &[u8]) -> Result<WsCkptResponse, CoshError> {
-    bincode::deserialize(data).map_err(|e| {
-        CoshError::new(
-            ErrorCode::Unknown,
-            format!("Failed to parse daemon response: {}", e),
-            "checkpoint",
-        )
-    })
+    bincode::deserialize(data).map_err(|_| protocol_error(ProtocolFailure::InvalidPayload))
 }
 
 // ---------------------------------------------------------------------------
@@ -362,6 +375,11 @@ fn ws_error_to_cosh(code: WsCkptErrorCode, message: String) -> CoshError {
             ErrorCode::CheckpointCreateFailed,
             Some("Not enough disk space. Run 'cosh checkpoint cleanup' to free space"),
         ),
+        WsCkptErrorCode::CwdOccupied => (
+            ErrorCode::CheckpointRestoreFailed,
+            Some("Leave the workspace before retrying the restore"),
+        ),
+        WsCkptErrorCode::CwdScanFailed => (ErrorCode::CheckpointRestoreFailed, None),
     };
 
     let mut err = CoshError::new(error_code, message, "checkpoint");
@@ -372,63 +390,51 @@ fn ws_error_to_cosh(code: WsCkptErrorCode, message: String) -> CoshError {
 }
 
 fn unexpected_response() -> CoshError {
-    CoshError::new(
-        ErrorCode::Unknown,
-        "Unexpected response type from ws-ckpt daemon",
-        "checkpoint",
-    )
+    protocol_error(ProtocolFailure::UnexpectedResponse)
 }
 
-/// Classify an I/O error into a structured CoshError with specific handling
-/// for daemon crash (BrokenPipe / ConnectionReset) and timeout scenarios.
-fn classify_io_error(e: std::io::Error, socket_path: &str, context: &str) -> CoshError {
-    match e.kind() {
-        std::io::ErrorKind::BrokenPipe => CoshError::new(
-            ErrorCode::CheckpointDaemonUnavailable,
-            format!("ws-ckpt daemon crashed while {}: BrokenPipe", context),
-            "checkpoint",
-        )
-        .with_hint(
-            "ws-ckpt daemon process terminated unexpectedly. Restart with: systemctl start ws-ckpt",
-        )
-        .recoverable(true),
+fn protocol_error(failure: ProtocolFailure) -> CoshError {
+    let kind = match failure {
+        ProtocolFailure::TruncatedLength => "truncated_length",
+        ProtocolFailure::TruncatedPayload => "truncated_payload",
+        ProtocolFailure::OversizedLength => "oversized_length",
+        ProtocolFailure::InvalidPayload => "decode_failed",
+        ProtocolFailure::UnexpectedResponse => "unexpected_response",
+    };
+    CoshError::new(
+        ErrorCode::CheckpointProtocolError,
+        "Invalid response from ws-ckpt daemon",
+        "checkpoint",
+    )
+    .with_hint("Retry the operation; restart ws-ckpt if the problem persists")
+    .with_details(serde_json::json!({"phase": "response", "kind": kind}))
+}
 
-        std::io::ErrorKind::ConnectionReset => CoshError::new(
-            ErrorCode::CheckpointDaemonUnavailable,
-            format!("ws-ckpt daemon crashed while {}: ConnectionReset", context),
-            "checkpoint",
-        )
-        .with_hint(
-            "ws-ckpt daemon process terminated unexpectedly. Restart with: systemctl start ws-ckpt",
-        )
-        .recoverable(true),
-
-        std::io::ErrorKind::TimedOut => CoshError::new(
+fn classify_io_error(error: std::io::Error, phase: IoPhase) -> CoshError {
+    if error.kind() == std::io::ErrorKind::TimedOut {
+        return CoshError::new(
             ErrorCode::Timeout,
-            format!("Timeout while {} on {}", context, socket_path),
+            "Timed out while communicating with ws-ckpt daemon",
             "checkpoint",
         )
-        .with_hint("ws-ckpt daemon may be overloaded, retry later")
-        .recoverable(true),
-
-        std::io::ErrorKind::ConnectionRefused => CoshError::new(
-            ErrorCode::CheckpointDaemonUnavailable,
-            format!(
-                "Cannot connect to ws-ckpt daemon at {}: Connection refused",
-                socket_path
-            ),
-            "checkpoint",
-        )
-        .with_hint("Start daemon with: systemctl start ws-ckpt")
-        .recoverable(true),
-
-        _ => CoshError::new(
-            ErrorCode::CheckpointDaemonUnavailable,
-            format!("I/O error while {}: {} ({})", context, e, socket_path),
-            "checkpoint",
-        )
-        .recoverable(true),
+        .with_hint("ws-ckpt daemon may be overloaded; retry later")
+        .recoverable(true);
     }
+
+    let message = match phase {
+        IoPhase::Connect => "Cannot connect to ws-ckpt daemon",
+        IoPhase::WriteRequest => "ws-ckpt daemon became unavailable while sending a request",
+        IoPhase::ReadResponseLength | IoPhase::ReadResponsePayload => {
+            "ws-ckpt daemon became unavailable while receiving a response"
+        }
+    };
+    CoshError::new(
+        ErrorCode::CheckpointDaemonUnavailable,
+        message,
+        "checkpoint",
+    )
+    .with_hint("Start or restart ws-ckpt with: systemctl start ws-ckpt")
+    .recoverable(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +447,63 @@ mod tests {
     use std::thread;
 
     use super::*;
+
+    fn send_fake_response(response: Vec<u8>) -> (CoshError, String) {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut length = [0; 4];
+            stream.read_exact(&mut length).unwrap();
+            let mut request = vec![0; u32::from_le_bytes(length) as usize];
+            stream.read_exact(&mut request).unwrap();
+            stream.write_all(&response).unwrap();
+        });
+
+        let socket_path = socket_path.to_string_lossy().into_owned();
+        let error = CkptClient::new(&socket_path)
+            .send_request(&WsCkptRequest::Config)
+            .unwrap_err();
+        server.join().unwrap();
+        (error, socket_path)
+    }
+
+    fn assert_protocol_error(error: &CoshError, socket_path: &str) {
+        assert_eq!(error.code, ErrorCode::CheckpointProtocolError);
+        assert!(!error.message.contains(socket_path));
+        assert!(!error.message.contains("failed to fill whole buffer"));
+        assert!(!error.message.contains("invalid value"));
+    }
+
+    #[test]
+    fn response_truncated_length_is_protocol_error() {
+        let (error, socket_path) = send_fake_response(vec![1, 2]);
+        assert_protocol_error(&error, &socket_path);
+    }
+
+    #[test]
+    fn response_truncated_payload_is_protocol_error() {
+        let mut response = 8_u32.to_le_bytes().to_vec();
+        response.extend_from_slice(&[1, 2]);
+        let (error, socket_path) = send_fake_response(response);
+        assert_protocol_error(&error, &socket_path);
+    }
+
+    #[test]
+    fn response_oversized_length_is_protocol_error() {
+        let response = ((MAX_RESPONSE_LEN + 1) as u32).to_le_bytes().to_vec();
+        let (error, socket_path) = send_fake_response(response);
+        assert_protocol_error(&error, &socket_path);
+    }
+
+    #[test]
+    fn response_invalid_bincode_is_protocol_error() {
+        let mut response = 4_u32.to_le_bytes().to_vec();
+        response.extend_from_slice(&u32::MAX.to_le_bytes());
+        let (error, socket_path) = send_fake_response(response);
+        assert_protocol_error(&error, &socket_path);
+    }
 
     fn spawn_one_shot_daemon(
         response: WsCkptResponse,
@@ -601,12 +664,11 @@ mod tests {
     fn test_classify_broken_pipe() {
         let err = classify_io_error(
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe"),
-            "/tmp/test.sock",
-            "write request",
+            IoPhase::WriteRequest,
         );
         assert_eq!(err.code, ErrorCode::CheckpointDaemonUnavailable);
-        assert!(err.message.contains("crashed"));
-        assert!(err.message.contains("BrokenPipe"));
+        assert!(err.message.contains("unavailable"));
+        assert!(!err.message.contains("BrokenPipe"));
         assert!(err
             .hint
             .as_ref()
@@ -619,12 +681,11 @@ mod tests {
     fn test_classify_connection_reset() {
         let err = classify_io_error(
             std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset"),
-            "/tmp/test.sock",
-            "read response",
+            IoPhase::ReadResponsePayload,
         );
         assert_eq!(err.code, ErrorCode::CheckpointDaemonUnavailable);
-        assert!(err.message.contains("crashed"));
-        assert!(err.message.contains("ConnectionReset"));
+        assert!(err.message.contains("unavailable"));
+        assert!(!err.message.contains("ConnectionReset"));
         assert!(err.recoverable);
     }
 
@@ -632,8 +693,7 @@ mod tests {
     fn test_classify_timeout() {
         let err = classify_io_error(
             std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out"),
-            "/tmp/test.sock",
-            "read response",
+            IoPhase::ReadResponseLength,
         );
         assert_eq!(err.code, ErrorCode::Timeout);
         assert!(err.hint.as_ref().unwrap().contains("overloaded"));
@@ -644,8 +704,7 @@ mod tests {
     fn test_classify_connection_refused() {
         let err = classify_io_error(
             std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused"),
-            "/tmp/test.sock",
-            "connect",
+            IoPhase::Connect,
         );
         assert_eq!(err.code, ErrorCode::CheckpointDaemonUnavailable);
         assert!(err
@@ -659,8 +718,7 @@ mod tests {
     fn test_classify_other_io_error() {
         let err = classify_io_error(
             std::io::Error::other("something else"),
-            "/tmp/test.sock",
-            "do thing",
+            IoPhase::WriteRequest,
         );
         assert_eq!(err.code, ErrorCode::CheckpointDaemonUnavailable);
         assert!(err.recoverable);

@@ -9,6 +9,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Using a fresh provider turn for shell evidence recovery."
         }
         MessageId::AgentRecoveryContinuityBody => "Provider session continuity may be degraded.",
+        MessageId::AgentRecoveryTriggerLine => "Recovery trigger: {reason}",
+        MessageId::AgentRecoverySameSessionRetryLine => {
+            "Provider turn stalled; retrying with session history..."
+        }
         MessageId::AgentStatusTitle => "Agent",
         MessageId::AgentStillWorking => "Still working... {elapsed}s · {detail}",
         MessageId::AgentStatusFooter => "Ctrl+C cancels · [Cancel]",
@@ -66,6 +70,12 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentGovernanceToolSubject => "{tool} tool",
         MessageId::AgentGovernanceBlockedUserApprovalLine => "Blocked: user approval required",
         MessageId::AgentGovernanceQuestionLine => "Question: {question}",
+        MessageId::AgentGovernanceHookNotification => {
+            "Hook: {hook}\nMessage: {message}\nDecision: {decision}"
+        }
+        MessageId::AgentGovernanceHookUnknown => "unknown hook",
+        MessageId::AgentGovernanceHookNoMessage => "no message provided",
+        MessageId::AgentGovernanceHookDecisionUnspecified => "unspecified",
         MessageId::AgentRecommendedCommandsLabel => "recommended commands:",
         MessageId::InterceptNoticeTitle => "AI request",
         MessageId::InterceptNoticeBody => "Sending input to Agent: {input}",

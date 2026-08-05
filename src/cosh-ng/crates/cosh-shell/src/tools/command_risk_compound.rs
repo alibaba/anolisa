@@ -1,12 +1,15 @@
 use super::command_risk::{
-    assess_pipeline, assess_simple_command, insert_structural_reason, is_high_risk_explanation,
-    AssessmentConfidence, AssessmentPolicy, CommandAssessment, CommandShape, ExecutionDecision,
-    InteractionRequirement, OutputExposure, OutputStability, RiskImpact, SideEffectClass,
+    assess_simple_command, insert_structural_reason, is_high_risk_explanation,
+    AssessmentConfidence, AssessmentPolicy, AutoAllowEvidence, CommandAssessment, CommandShape,
+    ExecutionDecision, InteractionRequirement, OutputExposure, OutputStability, RiskImpact,
+    SideEffectClass,
 };
 use super::command_risk_build::{
     dedupe_reasons, max_output_exposure, max_output_stability, min_confidence,
 };
 use super::command_risk_parser::ParsedCommand;
+use super::command_risk_pipeline::assess_pipeline;
+use super::readonly_compound::build_readonly_compound_plan;
 
 /// Returns the per-segment pipeline stages for all compound commands
 /// (`&&`/`||`/`;`/newline separated, issue #1785): every segment is
@@ -41,8 +44,11 @@ pub(super) fn compound_segments(parsed: &ParsedCommand) -> Option<Vec<Vec<Vec<St
 /// run`, `awk system()`, `curl | sh`) and escalated benign arguments
 /// (`echo rm>/dev/null && true`).
 ///
-/// The compound execution boundary is unchanged: always `AskUser`, never
-/// auto-allow. Only the assessment precision is improved.
+/// The compound execution boundary is relaxed in exactly one case
+/// (issue #1882): a readonly-compound execution plan exists for the
+/// whole command (see `build_readonly_compound_plan`), granting
+/// `CompoundReadonly` evidence in auto mode. Every other compound keeps
+/// `AskUser`, never auto-allow. Assessment aggregation is unchanged.
 pub(super) fn assess_stripped_compound(
     command: &str,
     shape: CommandShape,
@@ -72,6 +78,7 @@ pub(super) fn assess_stripped_compound(
             stages: segment.clone(),
             null_redirections: 0,
             segments: Vec::new(),
+            segment_connectors: Vec::new(),
         };
         let assessed = if segment.len() > 1 {
             assess_pipeline(&segment_text, parsed, policy)
@@ -103,21 +110,32 @@ pub(super) fn assess_stripped_compound(
             reasons.insert(0, primary);
         }
     }
-    insert_structural_reason(
-        &mut reasons,
-        match shape {
-            CommandShape::AndOrList => "and-or-list-not-auto-executable",
-            CommandShape::Sequence => "sequence-not-auto-executable",
-            CommandShape::RedirectionRead => "read-redirection-not-auto-executable",
-            _ => "complex-shell-not-auto-executable",
-        },
-    );
+    let auto_allow = compound_readonly_evidence(command).filter(|_| policy.auto_mode);
+    if auto_allow.is_some() {
+        // The whole compound is auto-executable; the structural
+        // "not-auto-executable" reason no longer applies.
+        reasons.insert(0, "compound-readonly");
+    } else {
+        insert_structural_reason(
+            &mut reasons,
+            match shape {
+                CommandShape::AndOrList => "and-or-list-not-auto-executable",
+                CommandShape::Sequence => "sequence-not-auto-executable",
+                CommandShape::RedirectionRead => "read-redirection-not-auto-executable",
+                _ => "complex-shell-not-auto-executable",
+            },
+        );
+    }
 
     CommandAssessment {
         source: policy.source,
         command: command.to_string(),
         shape,
-        execution: ExecutionDecision::AskUser,
+        execution: if auto_allow.is_some() {
+            ExecutionDecision::AutoAllow
+        } else {
+            ExecutionDecision::AskUser
+        },
         impact,
         confidence: min_confidence(confidence, AssessmentConfidence::Medium),
         interaction,
@@ -125,8 +143,28 @@ pub(super) fn assess_stripped_compound(
         output_exposure,
         side_effects,
         reasons,
-        auto_allow: None,
+        auto_allow,
     }
+}
+
+/// Grants `CompoundReadonly` evidence (issue #1882) exactly when an
+/// execution plan exists for the compound: eligibility is decided by
+/// `build_readonly_compound_plan`, the same function the consumer uses
+/// to build the plan it runs, so the assessment path and the execution
+/// path can never disagree about what would run. The executor spawns
+/// parser tokens directly with `std::process::Command` — no shell
+/// parsing layer ever touches the assessed text, so quote/escape/newline
+/// forms stay eligible (the parser preserves token boundaries) and no
+/// expansion mechanism (history, glob, tilde, parameter, alias) can
+/// fire: the assessed token sequence *is* the executed argv.
+///
+/// Anything without a plan falls through to the unchanged `AskUser`
+/// path, so the worst case of an unenumerated form is over-conservatism.
+/// Short-circuit semantics only decide which segments run, never their
+/// argv, and every segment carries its own evidence, so any executed
+/// subset stays within the assessed set.
+fn compound_readonly_evidence(command: &str) -> Option<AutoAllowEvidence> {
+    build_readonly_compound_plan(command).map(|_| AutoAllowEvidence::CompoundReadonly)
 }
 
 /// Applies the conservative `Complex` classification: floor the impact

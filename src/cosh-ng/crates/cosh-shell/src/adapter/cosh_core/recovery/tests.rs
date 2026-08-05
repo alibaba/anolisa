@@ -177,9 +177,48 @@ fn context_limit_failure_retains_the_persisted_session_for_compaction() {
     let events = vec![AgentEvent::AgentFailed {
         run_id: "run-1".to_string(),
         error: "context_limit: effective context exceeds the emergency threshold".to_string(),
+        error_code: None,
+        max_turns: None,
     }];
 
-    assert!(retain_context_session(&events, None));
+    assert!(retain_context_session(&events, None, Some(true)));
+}
+
+#[test]
+fn max_turns_failure_retains_the_persisted_session_for_continuation() {
+    let events = vec![AgentEvent::AgentFailed {
+        run_id: "run-1".to_string(),
+        error: "Agent exceeded max turns (50)".to_string(),
+        error_code: Some("max_turns".to_string()),
+        max_turns: Some(50),
+    }];
+
+    assert!(retain_context_session(&events, None, Some(true)));
+    assert!(!retain_context_session(
+        &events,
+        Some("persist"),
+        Some(true)
+    ));
+    assert!(!retain_context_session(&events, None, None));
+    assert_eq!(max_turn_limit(&events), Some(50));
+}
+
+#[test]
+fn max_turn_limit_rejects_incomplete_or_invalid_metadata() {
+    for (error_code, max_turns) in [
+        (Some("max_turns"), Some(0)),
+        (Some("max_turns"), None),
+        (Some("provider"), Some(50)),
+        (None, Some(50)),
+    ] {
+        let events = vec![AgentEvent::AgentFailed {
+            run_id: "run-1".to_string(),
+            error: "arbitrary display text".to_string(),
+            error_code: error_code.map(str::to_string),
+            max_turns,
+        }];
+        assert_eq!(max_turn_limit(&events), None);
+    }
 }
 
 #[test]
@@ -187,9 +226,11 @@ fn ordinary_failure_does_not_retain_a_provider_session() {
     let events = vec![AgentEvent::AgentFailed {
         run_id: "run-1".to_string(),
         error: "API error 500".to_string(),
+        error_code: None,
+        max_turns: None,
     }];
 
-    assert!(!retain_context_session(&events, None));
+    assert!(!retain_context_session(&events, None, Some(true)));
 }
 
 #[test]
@@ -197,10 +238,12 @@ fn persist_failure_does_not_retain_a_context_limited_session() {
     let events = vec![AgentEvent::AgentFailed {
         run_id: "run-1".to_string(),
         error: "context_limit: effective context exceeds the emergency threshold".to_string(),
+        error_code: None,
+        max_turns: None,
     }];
     let state = Arc::new(Mutex::new(SessionRuntimeState::default()));
     let attempt = begin_session_attempt(&state, None, SCOPE);
-    let retain = retain_context_session(&events, Some("persist"));
+    let retain = retain_context_session(&events, Some("persist"), Some(true));
 
     assert!(!retain);
     assert_eq!(
@@ -259,6 +302,8 @@ fn active_load_failure_preserves_an_unrelated_selection() {
     let events = vec![AgentEvent::AgentFailed {
         run_id: "run".to_string(),
         error: "session load failed".to_string(),
+        error_code: None,
+        max_turns: None,
     }];
 
     invalidate_resume_on_session_failure(
@@ -293,6 +338,8 @@ fn provider_error_text_cannot_impersonate_a_session_load_failure() {
     let events = vec![AgentEvent::AgentFailed {
         run_id: "run".to_string(),
         error: "provider returned a user string containing [not_found]".to_string(),
+        error_code: None,
+        max_turns: None,
     }];
 
     invalidate_resume_on_session_failure(&attempt, None, None, &events, &state);
@@ -324,6 +371,8 @@ fn selected_structured_failures_preserve_typed_recovery_metadata() {
         let terminal_events = vec![AgentEvent::AgentFailed {
             run_id: "run".to_string(),
             error: message.to_string(),
+            error_code: None,
+            max_turns: None,
         }];
 
         invalidate_resume_on_session_failure(
@@ -499,6 +548,8 @@ fn replacing_selection_invalidates_every_terminal_from_the_old_attempt() {
         &[AgentEvent::AgentFailed {
             run_id: "old-run".to_string(),
             error: "old selected session disappeared".to_string(),
+            error_code: None,
+            max_turns: None,
         }],
         &state,
     );

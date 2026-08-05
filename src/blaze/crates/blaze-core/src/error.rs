@@ -52,6 +52,14 @@ pub enum BlazeError {
 
     #[error("storage error: {msg}")]
     StorageError { msg: String },
+
+    /// A previously allocated storage slot has lost a required artifact.
+    #[error("storage slot '{instance_id}' is incomplete: expected {expected} at {path}")]
+    StorageIncomplete {
+        instance_id: String,
+        path: PathBuf,
+        expected: &'static str,
+    },
 }
 
 /// Internal wrapper that lets [`BlazeError::ConfigError`] carry either a

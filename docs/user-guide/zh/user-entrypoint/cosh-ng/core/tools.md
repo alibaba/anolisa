@@ -97,4 +97,4 @@ cosh-core --headless --allowed-tools shell,edit
 
 MCP 工具只会在 `cosh-core --headless` 启动时动态发现。每个已配置的 Server 先接收
 `initialize`，再接收 `tools/list`；模型调用注册名称时会转发为 `tools/call`。受信任
-Server 配置、Streamable HTTP 与 OAuth 设置详见[配置说明](../configuration.md#mcp-servers)。
+Server 配置、Streamable HTTP 与 OAuth 设置详见[配置说明](../configuration.md#mcp-server)。

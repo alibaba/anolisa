@@ -68,6 +68,8 @@ impl ScopeFixture {
             sha256: None,
             kind: OwnedFileKind::File,
             referent: None,
+            mode: None,
+            capabilities: Vec::new(),
         });
         write_state(&user_layout, StateInstallMode::User, vec![user_component]);
         write_state(

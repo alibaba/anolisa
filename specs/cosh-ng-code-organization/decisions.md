@@ -83,3 +83,68 @@ always been shared.
 Revisit trigger: if a non-UI consumer ever needs to construct or branch
 on sets without rendering context, move the enum to `types/` as an
 explicit cross-module contract in a dedicated refactor.
+
+## D16: turn-extension approval orchestration (bounded exception)
+
+Registered: 2026-07-30, max-turn continuation.
+
+Decision: `agent/turn_extension.rs` may call approval request rendering and
+resolution helpers, while `approval/runtime.rs` may call the turn-extension
+resolver. This bidirectional edge is limited to the lifecycle of a retained
+max-turn run: record a continuation candidate, request explicit user consent,
+then resume the same provider session once.
+
+Reasons:
+
+- The approval owner remains responsible for presenting and recording the
+  decision; the agent owner remains responsible for starting the continuation.
+- Moving this single flow into a new coordinator would add another runtime
+  abstraction without removing state or policy from either owner.
+- The edge is confined to the turn-extension request kind and does not expose
+  provider protocol details or UI policy across owners.
+
+Removal condition: when a second cross-owner approval workflow needs the same
+lifecycle, introduce runtime domain commands and events for approval outcomes,
+move orchestration into that coordinator, and delete this exception.
+
+## D17: ApprovalLifecycleLedger lives in runtime/approval_ledger.rs (owner note)
+
+`ApprovalLifecycleLedger` (#1940) is a pure accounting index keyed by
+the #1939 identity contract (`run_id` + `request_id`): registered on
+first sight, marked on response, swept per run. It lives in `runtime/`
+because its owner is the run lifecycle, not approval policy — the
+ledger is held by `ControlState` (`runtime/state.rs`), and its two
+sweep triggers are runtime lifecycle events (`runtime/cancel.rs`,
+`runtime/evidence_delivery.rs`). It depends only on std and holds no
+policy: what a dropped request is denied *with* (message, audit
+drop-site, terminal deny) is decided by `approval/runtime.rs`, which
+consumes the ledger the same way it already consumes other
+`ControlState` accounting. Splitting the data structure from its
+`ControlState` host would recreate the cross-owner reach the note is
+about; the maintenance contract (every `control_response` exit must
+`mark_responded`) is documented in the module docs.
+
+Revisit trigger: if a second consumer beyond approval drain/sweep needs
+lifecycle bookkeeping, or the per-domain `ControlState` split lands,
+move the ledger into that extracted state module together with its
+host field.
+
+## D18: interactive-sentinel hint card renders inside shell_host (owner note)
+
+The #2025 interactive sentinel (`shell_host/raw_relay/interactive_sentinel.rs`)
+builds and emits its one-shot hint card itself — hand-assembled ANSI
+border, width clipping and i18n copy — instead of routing through the
+`ui/` renderer like the sibling #2161 timeout notice
+(`runtime/controller/input_wait.rs`, which goes through
+`RatatuiInlineRenderer::write_notice_panel`). The exception exists
+because the card must be spliced into the raw PTY byte relay at a
+precise stream position: the relay owns the display buffer, the
+alt-screen state and the in-stream timing (card + prompt-tail redraw
+must land between two output chunks), none of which are visible to the
+inline renderer, and handing the relay's byte stream to `ui/` would
+reverse the allowed dependency direction. The card model (kind →
+message IDs) stays declarative and the copy lives in `i18n/`.
+
+Removal condition: if a second in-stream card appears in `shell_host`,
+extract a shared presentation helper (e.g. `types/` card model +
+byte-emitting formatter) and move both emitters onto it.

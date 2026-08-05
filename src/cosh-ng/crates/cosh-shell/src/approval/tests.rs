@@ -7,6 +7,7 @@ use crate::approval::handoff::{
 use crate::approval::requests::{approval_request_from_governed_event, record_approval_requests};
 use crate::approval::resolution::{
     apply_approval_decision, approval_outcome_for_request, approval_resolution_agent_request,
+    should_send_approval_resolution_to_agent,
 };
 use crate::runtime::prelude::{
     AgentEvent, AgentRunHandle, AgentRunPoll, ApprovalDecision, CoshApprovalMode, CoshCoreAdapter,
@@ -630,6 +631,50 @@ fn control_shell_permission_missing_command_blocks_as_unsafe_binding() {
 }
 
 #[test]
+fn foreign_run_control_permission_never_surfaces_as_a_request() {
+    // #1940: a ToolPermissionRequest whose run id does not match the active
+    // run was already denied at the registration door (agent/poll.rs). The
+    // downstream request pipeline must never resurface it — as a pending
+    // card or an auto-approval — because either path would send a second,
+    // contradictory response for an already-terminated request.
+    let (mut state, _approval_rx) = state_with_active_control_run("run-1");
+    let mut foreign = governed_provider_tool_permission("ctrl-foreign", "toolu-foreign");
+    let AgentEvent::ToolPermissionRequest {
+        run_id: ref mut foreign_run_id,
+        ..
+    } = foreign.event
+    else {
+        panic!("expected tool permission request");
+    };
+    *foreign_run_id = "foreign-run".to_string();
+
+    assert!(
+        approval_request_from_governed_event(
+            &state,
+            &foreign,
+            None,
+            AgentRunOrigin::Standard,
+            false,
+        )
+        .is_none(),
+        "a foreign-run control approval must not become a request"
+    );
+
+    let ids = record_approval_requests(
+        &mut state,
+        &[foreign],
+        None,
+        AgentRunOrigin::Standard,
+        false,
+    );
+    assert!(ids.is_empty());
+    assert!(
+        state.approvals.requests.is_empty(),
+        "no pending card may be created for a foreign-run request"
+    );
+}
+
+#[test]
 fn non_shell_provider_permission_approval_stays_provider_owned() {
     let mut state = InlineState::default();
     state.approvals.requests.push(provider_tool_request(
@@ -1029,6 +1074,19 @@ exit 1
     panic!("mock provider did not emit tool permission");
 }
 
+fn state_with_active_control_run(
+    run_id: &str,
+) -> (
+    InlineState,
+    std::sync::mpsc::Receiver<crate::adapter::ApprovalChannelMessage>,
+) {
+    let (active_run, approval_rx) =
+        crate::agent::run::test_support::test_active_run_with_id(run_id);
+    let mut state = InlineState::default();
+    state.agent_run.active = Some(active_run);
+    (state, approval_rx)
+}
+
 fn governed_provider_tool_permission(request_id: &str, tool_use_id: &str) -> GovernedEvent {
     GovernedEvent {
         policy_decision: GovernancePolicyDecision::NeedsUserApproval,
@@ -1220,6 +1278,41 @@ fn approve_turn_blocked_request_does_not_grant_consent() {
     );
 }
 
+#[test]
+fn turn_extension_decisions_use_continuation_semantics() {
+    let mut approved_state = InlineState::default();
+    let mut approved = turn_request("req-cap", "run-cap", "continue", "low");
+    approved.kind = ApprovalRequestKind::TurnExtension;
+    approved_state.approvals.requests.push(approved);
+    assert!(
+        apply_approval_decision(&mut approved_state, 0, ApprovalCommandKind::ApproveTurn).is_none()
+    );
+
+    let decision = apply_approval_decision(&mut approved_state, 0, ApprovalCommandKind::Approve)
+        .expect("approved extension");
+    assert_eq!(decision.title, MessageId::ApprovalResolutionContinuingTitle);
+    assert_eq!(
+        decision.request.execution_path,
+        Some("provider_session_continuation")
+    );
+
+    let mut denied_state = InlineState::default();
+    let mut denied = turn_request("req-cap", "run-cap", "continue", "low");
+    denied.kind = ApprovalRequestKind::TurnExtension;
+    denied_state.approvals.requests.push(denied);
+    let decision = apply_approval_decision(&mut denied_state, 0, ApprovalCommandKind::Deny)
+        .expect("denied extension");
+    assert_eq!(decision.title, MessageId::ApprovalResolutionStoppedTitle);
+    assert_eq!(
+        decision.request.execution_path,
+        Some("not_executed_stopped")
+    );
+    assert!(!should_send_approval_resolution_to_agent(
+        &denied_state,
+        &decision.request
+    ));
+}
+
 /// 批量清扫决策复用同一管线，journal 逐条留痕 actor=batch_consent，
 /// preview/risk/run_id 完整（V2/G4/I3）。
 #[test]
@@ -1270,6 +1363,22 @@ fn stopping_active_run_clears_batch_consent() {
 /// Standard；hook 永远 Hook（SC7/SC8/V9/N8/N9）。
 #[test]
 fn approval_action_set_matrix() {
+    // Turn-extension cards always have the dedicated Continue/Stop set.
+    let mut extension = turn_request("req-cap", "run-cap", "continue", "low");
+    extension.kind = ApprovalRequestKind::TurnExtension;
+    assert_eq!(
+        approval_action_set_for(&extension, &[]),
+        ApprovalActionSet::TurnExtension
+    );
+    assert_eq!(
+        ApprovalActionSet::TurnExtension
+            .descriptors()
+            .iter()
+            .map(|descriptor| descriptor.action)
+            .collect::<Vec<_>>(),
+        vec![ApprovalPanelAction::Approve, ApprovalPanelAction::Deny]
+    );
+
     // 单卡轮次：Standard。
     let solo = vec![turn_request("req-1", "run-1", "git status", "medium")];
     assert_eq!(
@@ -1313,4 +1422,178 @@ fn approval_action_set_matrix() {
         approval_action_set_for(&hooked, &queued),
         ApprovalActionSet::Hook
     );
+}
+
+#[test]
+fn batch_drain_writes_drop_audit_before_responding() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "cosh-shell-approval-drop-audit-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).expect("create audit root");
+    #[cfg(unix)]
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .expect("private audit root");
+    let root = root.canonicalize().expect("canonical audit root");
+
+    let (active_run, approval_rx) =
+        crate::agent::run::test_support::test_active_run_with_id("request-1");
+
+    let mut state = InlineState::default();
+    state.agent_run.active = Some(active_run);
+    state.audit = Some(crate::journal::audit::ShellAuditRecorder::test_with_root(
+        &root,
+    ));
+    state
+        .control
+        .approval_ledger_mut()
+        .register("request-1", "ctrl-drop");
+
+    crate::approval::runtime::drain_unhomed_control_requests(&mut state);
+
+    // The terminal deny still goes out on the approval channel.
+    let responses: Vec<_> = approval_rx
+        .try_iter()
+        .filter_map(|message| match message {
+            crate::adapter::ApprovalChannelMessage::Response(response) => Some(response),
+            crate::adapter::ApprovalChannelMessage::Receipt { .. } => None,
+        })
+        .collect();
+    assert_eq!(responses.len(), 1, "{responses:?}");
+    assert!(matches!(
+        responses[0].decision,
+        ApprovalDecision::Deny { .. }
+    ));
+
+    // And the drop is auditable with its drop site attached.
+    drop(state);
+    let mut content = String::new();
+    for date in std::fs::read_dir(root.join("v1/segments")).expect("segments dir") {
+        for file in std::fs::read_dir(date.expect("date dir").path()).expect("segment files") {
+            content.push_str(
+                &std::fs::read_to_string(file.expect("segment file").path()).expect("segment text"),
+            );
+        }
+    }
+    assert!(content.contains("\"approval.dropped\""), "{content}");
+    assert!(content.contains("\"batch_drain\""), "{content}");
+    assert!(content.contains("\"ctrl-drop\""), "{content}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ─── High-risk AlwaysTrust hard constraint (issue #2064) ────────────
+
+/// High-risk requests resolve to the AlwaysTrust-free action sets in
+/// both solo and turn-consent shapes; medium risk keeps the shortcut.
+#[test]
+fn high_risk_requests_never_offer_always_trust() {
+    let solo = vec![turn_request("req-1", "run-1", "reboot", "high")];
+    let set = approval_action_set_for(&solo[0], &solo);
+    assert_eq!(set, ApprovalActionSet::StandardHighRisk);
+
+    let queued = vec![
+        turn_request("req-1", "run-1", "reboot", "high"),
+        turn_request("req-2", "run-1", "journalctl -u nginx -n 50", "medium"),
+    ];
+    assert_eq!(
+        approval_action_set_for(&queued[0], &queued),
+        ApprovalActionSet::TurnConsentHighRisk
+    );
+    // The medium-risk sibling in the same run keeps AlwaysTrust.
+    assert_eq!(
+        approval_action_set_for(&queued[1], &queued),
+        ApprovalActionSet::TurnConsent
+    );
+
+    for set in [
+        ApprovalActionSet::StandardHighRisk,
+        ApprovalActionSet::TurnConsentHighRisk,
+    ] {
+        assert!(
+            !set.descriptors()
+                .iter()
+                .any(|descriptor| descriptor.action == ApprovalPanelAction::AlwaysTrust),
+            "{set:?} must not offer AlwaysTrust"
+        );
+    }
+}
+
+/// Defense in depth: even if a CardAlwaysTrust event reaches a high-risk
+/// request (stale input, replay), no session trust key is minted and the
+/// receipt reads as a plain one-shot approval.
+#[test]
+fn always_trust_on_high_risk_request_does_not_mint_trust_key() {
+    let mut state = InlineState::default();
+    state
+        .approvals
+        .requests
+        .push(turn_request("req-1", "run-1", "reboot", "high"));
+
+    let decision = apply_approval_decision(&mut state, 0, ApprovalCommandKind::AlwaysTrust)
+        .expect("approval decision");
+
+    assert_eq!(decision.request.status, ApprovalRequestStatus::Approved);
+    assert_eq!(decision.title, MessageId::ApprovalResolutionApprovedTitle);
+    assert!(
+        state.control.trust.session_trusted_commands().is_empty(),
+        "high-risk AlwaysTrust must not persist a trust key"
+    );
+}
+
+/// Medium-risk AlwaysTrust behavior is unchanged: key persists and the
+/// receipt reads Trusted.
+#[test]
+fn always_trust_on_medium_risk_request_still_persists_key() {
+    let mut state = InlineState::default();
+    state
+        .approvals
+        .requests
+        .push(turn_request("req-1", "run-1", "npm test", "medium"));
+
+    let decision = apply_approval_decision(&mut state, 0, ApprovalCommandKind::AlwaysTrust)
+        .expect("approval decision");
+
+    assert_eq!(decision.request.status, ApprovalRequestStatus::Approved);
+    assert_eq!(decision.title, MessageId::ApprovalResolutionTrustedTitle);
+    assert!(state
+        .control
+        .trust
+        .session_trusted_commands()
+        .contains("npm test"));
+}
+
+/// End-to-end wiring pin (#2064 review follow-up): a real classifier
+/// verdict, summarized exactly as the runtime does it, must trip the
+/// panel's irrecoverable flag — including the sudo-wrapped form whose
+/// system-control reason is not the primary one in the trace.
+#[test]
+fn classifier_verdict_wires_irrecoverable_panel_flag() {
+    use crate::approval::panel::assessment_is_irrecoverable;
+    use crate::approval::requests::runtime_assessment_summary;
+    use crate::tools::command_risk::{assess_shell_command, AssessmentPolicy, AssessmentSource};
+
+    for command in ["reboot", "sudo reboot", "shutdown -r now"] {
+        let assessment = assess_shell_command(
+            command,
+            AssessmentPolicy::ask(AssessmentSource::ProviderShellTool),
+        );
+        let summary = runtime_assessment_summary(&assessment);
+        assert!(
+            assessment_is_irrecoverable(&summary),
+            "{command}: reason_trace={}",
+            summary.reason_trace
+        );
+    }
+
+    let benign = assess_shell_command(
+        "npm test",
+        AssessmentPolicy::ask(AssessmentSource::ProviderShellTool),
+    );
+    assert!(!assessment_is_irrecoverable(&runtime_assessment_summary(
+        &benign
+    )));
 }

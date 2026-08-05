@@ -30,6 +30,11 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ConfigLanguageKeysFooter => {
             "Keys: Left/Right select | Enter choose | Esc cancel"
         }
+        MessageId::CaptureInputRejectedTitle => "Input not delivered",
+        MessageId::CaptureInputRejectedBody => {
+            "Input typed while a card action was processing could not be \
+             delivered safely; please retype it."
+        }
         _ => return None,
     })
 }

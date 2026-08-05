@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # run-hook.sh — Locate and exec a shared tokenless hook script.
 #
-# Hosts (Claude Code, Qwen Code) copy the plugin/extension into a versioned
-# cache directory, so relative paths into common/ no longer resolve. We instead
-# look up the named hook under the FHS layout installed by the tokenless
-# RPM / Makefile.
+# Prefer hooks from the wrapper's own adapter tree so concurrent RPM, Makefile,
+# and raw installations cannot cross-load another version. Hosts that copy the
+# wrapper into a detached cache still use the historical FHS fallbacks.
 #
 # Usage:    run-hook.sh <hook-script-basename> [args...]
 # Examples: run-hook.sh rewrite_hook.py
@@ -23,6 +22,7 @@
 # upper bounds; observed runtimes are well under them.
 set -euo pipefail
 
+SCRIPT_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SCRIPT="${1:?usage: run-hook.sh <hook-script-basename> [args...]}"
 shift
 
@@ -37,6 +37,8 @@ case "$SCRIPT" in
 esac
 
 CANDIDATES=(
+    "${SCRIPT_DIR}/../../common/hooks/${SCRIPT}"
+    "/usr/local/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}"
     "/usr/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}"
     "${HOME}/.local/share/anolisa/adapters/tokenless/common/hooks/${SCRIPT}"
 )

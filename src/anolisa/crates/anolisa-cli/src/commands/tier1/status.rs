@@ -309,6 +309,7 @@ fn quarantine_reason_text(reason: &QuarantineReason) -> String {
 pub(crate) fn migrate_view_states(view: &mut StateView) {
     for root in &mut view.visible_roots {
         common::migrate_v3_symlinks(&mut root.state, &root.layout);
+        common::hydrate_owned_file_contracts(&mut root.state, &root.layout);
     }
     if let Some(root) = view.visible_roots.iter().find(|root| root.writable) {
         view.writable = root.clone();
@@ -1667,6 +1668,8 @@ mod tests {
             ),
             kind: OwnedFileKind::File,
             referent: None,
+            mode: None,
+            capabilities: Vec::new(),
         }];
         state.upsert_object(comp);
 
@@ -1708,6 +1711,8 @@ mod tests {
             sha256: Some("deadbeef".to_string()),
             kind: OwnedFileKind::File,
             referent: None,
+            mode: None,
+            capabilities: Vec::new(),
         }];
         state.upsert_object(comp);
 
@@ -1748,6 +1753,8 @@ mod tests {
             ),
             kind: OwnedFileKind::File,
             referent: None,
+            mode: None,
+            capabilities: Vec::new(),
         }];
         state.upsert_object(comp);
 
@@ -1787,6 +1794,8 @@ mod tests {
             sha256: None,
             kind: OwnedFileKind::File,
             referent: None,
+            mode: None,
+            capabilities: Vec::new(),
         }];
         state.upsert_object(comp);
 
@@ -1824,6 +1833,8 @@ mod tests {
             sha256: Some("deadbeef".to_string()),
             kind: OwnedFileKind::File,
             referent: None,
+            mode: None,
+            capabilities: Vec::new(),
         }];
         state.upsert_object(comp);
 
@@ -1866,6 +1877,8 @@ mod tests {
             sha256: Some("deadbeef".to_string()),
             kind: OwnedFileKind::File,
             referent: None,
+            mode: None,
+            capabilities: Vec::new(),
         }];
         state.upsert_object(comp);
 
@@ -2404,6 +2417,8 @@ mod tests {
             sha256: Some("deadbeef".to_string()),
             kind: OwnedFileKind::File,
             referent: None,
+            mode: None,
+            capabilities: Vec::new(),
         }];
         state.upsert_object(comp);
 

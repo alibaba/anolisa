@@ -1,12 +1,12 @@
 //! Bounded multi-file reads with optional glob expansion.
 
-use std::path::Path;
+use std::fs::File;
 
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::io::AsyncReadExt;
 
-use super::file_patterns::expand_file_patterns;
+use super::file_patterns::expand_file_paths;
 use super::{Tool, ToolContext, ToolKind, ToolResult};
 
 const MAX_FILES: usize = 50;
@@ -61,18 +61,41 @@ impl Tool for ReadManyFilesTool {
         }
 
         let cwd = ctx.cwd.clone();
-        let matches =
-            tokio::task::spawn_blocking(move || expand_file_patterns(&patterns, &cwd, MAX_FILES))
-                .await
-                .map_err(|error| format!("File discovery task failed: {error}"))??;
+        let workspace = ctx.workspace()?;
+        let discovery_workspace = workspace.clone();
+        let matches = tokio::task::spawn_blocking(move || {
+            expand_file_paths(&patterns, &cwd, &discovery_workspace, MAX_FILES)
+        })
+        .await
+        .map_err(|error| format!("File discovery task failed: {error}"))?;
+        let matches = match matches {
+            Ok(matches) => matches,
+            Err(error) => return Ok(ToolResult::error(error)),
+        };
+        let mut skipped = matches.skipped;
         if matches.paths.is_empty() {
-            return Ok(ToolResult::success("No matching files found."));
+            let mut output = no_matching_files_output(matches.truncated).to_string();
+            append_skipped_files(&mut output, &skipped);
+            return Ok(ToolResult::success(output));
         }
 
         let mut output = String::new();
-        let mut skipped = Vec::new();
-        for path in &matches.paths {
-            let (bytes, file_truncated) = match read_bounded(path).await {
+        for path in matches.paths {
+            let open_workspace = workspace.clone();
+            let open_path = path.clone();
+            let file = match tokio::task::spawn_blocking(move || {
+                open_workspace.open_display_file(&open_path)
+            })
+            .await
+            .map_err(|error| format!("File open task failed: {error}"))?
+            {
+                Ok(file) => file.file,
+                Err(error) => {
+                    skipped.push(format!("{}: {error}", path.display()));
+                    continue;
+                }
+            };
+            let (bytes, file_truncated) = match read_bounded(file).await {
                 Ok(result) => result,
                 Err(error) => {
                     skipped.push(format!("{}: {error}", path.display()));
@@ -104,17 +127,31 @@ impl Tool for ReadManyFilesTool {
         if matches.truncated || output.len() >= MAX_TOTAL_BYTES {
             output.push_str("\n[additional files omitted by output limits]\n");
         }
-        if !skipped.is_empty() {
-            output.push_str("\nSkipped files:\n");
-            output.push_str(&skipped.join("\n"));
-            output.push('\n');
-        }
+        append_skipped_files(&mut output, &skipped);
         Ok(ToolResult::success(output))
     }
 }
 
-async fn read_bounded(path: &Path) -> Result<(Vec<u8>, bool), std::io::Error> {
-    let file = tokio::fs::File::open(path).await?;
+fn append_skipped_files(output: &mut String, skipped: &[String]) {
+    if skipped.is_empty() {
+        return;
+    }
+    output.push_str("\nSkipped files:\n");
+    output.push_str(&skipped.join("\n"));
+    output.push('\n');
+}
+
+fn no_matching_files_output(truncated: bool) -> &'static str {
+    if truncated {
+        "No matching files found in the searched subset.\n\n\
+         [additional files omitted by output limits]\n"
+    } else {
+        "No matching files found."
+    }
+}
+
+async fn read_bounded(file: File) -> Result<(Vec<u8>, bool), std::io::Error> {
+    let file = tokio::fs::File::from_std(file);
     let mut reader = file.take((MAX_FILE_BYTES + 1) as u64);
     let mut bytes = Vec::with_capacity(MAX_FILE_BYTES + 1);
     reader.read_to_end(&mut bytes).await?;
@@ -138,6 +175,8 @@ fn text_prefix(bytes: &[u8]) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::symlink;
+
     use super::*;
 
     #[tokio::test]
@@ -145,11 +184,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "alpha").unwrap();
         std::fs::write(dir.path().join("b.txt"), "beta").unwrap();
-        let ctx = ToolContext {
-            cwd: dir.path().to_path_buf(),
-            session_id: "test".to_string(),
-            project_root: dir.path().to_path_buf(),
-        };
+        let ctx = ToolContext::new(
+            dir.path().to_path_buf(),
+            "test".to_string(),
+            dir.path().to_path_buf(),
+        );
 
         let result = ReadManyFilesTool
             .invoke(serde_json::json!({"paths": ["*.txt"]}), &ctx)
@@ -163,12 +202,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reads_file_limit_after_path_only_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..MAX_FILES {
+            std::fs::write(dir.path().join(format!("{index:02}.txt")), "text").unwrap();
+        }
+        let ctx = ToolContext::new(
+            dir.path().to_path_buf(),
+            "test".to_string(),
+            dir.path().to_path_buf(),
+        );
+
+        let result = ReadManyFilesTool
+            .invoke(serde_json::json!({"paths": ["."]}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(!result.is_error, "{}", result.output);
+        assert_eq!(result.output.matches("--- ").count(), MAX_FILES);
+        assert!(!result.output.contains("additional files omitted"));
+    }
+
+    #[tokio::test]
     async fn bounds_large_files_during_read() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("large.txt");
         std::fs::write(&path, vec![b'x'; MAX_FILE_BYTES * 4]).unwrap();
 
-        let (bytes, truncated) = read_bounded(&path).await.unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let (bytes, truncated) = read_bounded(file).await.unwrap();
 
         assert_eq!(bytes.len(), MAX_FILE_BYTES);
         assert!(truncated);
@@ -178,11 +240,11 @@ mod tests {
     async fn skips_binary_files() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("binary.dat"), [0, 159, 146, 150]).unwrap();
-        let ctx = ToolContext {
-            cwd: dir.path().to_path_buf(),
-            session_id: "test".to_string(),
-            project_root: dir.path().to_path_buf(),
-        };
+        let ctx = ToolContext::new(
+            dir.path().to_path_buf(),
+            "test".to_string(),
+            dir.path().to_path_buf(),
+        );
 
         let result = ReadManyFilesTool
             .invoke(serde_json::json!({"paths": ["binary.dat"]}), &ctx)
@@ -191,5 +253,96 @@ mod tests {
 
         assert!(result.output.contains("not a UTF-8 text file"));
         assert!(!result.output.contains('\u{fffd}'));
+    }
+
+    #[tokio::test]
+    async fn skips_unreadable_exact_file_and_reads_later_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if nix::unistd::Uid::effective().as_raw() == 0 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked.txt");
+        std::fs::write(&locked, "locked").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::write(dir.path().join("readable.txt"), "readable").unwrap();
+        let ctx = ToolContext::new(
+            dir.path().to_path_buf(),
+            "test".to_string(),
+            dir.path().to_path_buf(),
+        );
+
+        let result = ReadManyFilesTool
+            .invoke(
+                serde_json::json!({"paths": ["locked.txt", "readable.txt"]}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error, "{}", result.output);
+        assert!(result.output.contains("readable.txt ---\nreadable"));
+        assert!(result.output.contains("Skipped files:"));
+        assert!(result.output.contains("locked.txt: Permission denied"));
+    }
+
+    #[tokio::test]
+    async fn skips_unreadable_exact_directory_and_reads_later_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if nix::unistd::Uid::effective().as_raw() == 0 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked-dir");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o111)).unwrap();
+        std::fs::write(dir.path().join("readable.txt"), "readable").unwrap();
+        let ctx = ToolContext::new(
+            dir.path().to_path_buf(),
+            "test".to_string(),
+            dir.path().to_path_buf(),
+        );
+
+        let result = ReadManyFilesTool
+            .invoke(
+                serde_json::json!({"paths": ["locked-dir", "readable.txt"]}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(!result.is_error, "{}", result.output);
+        assert!(result.output.contains("readable.txt ---\nreadable"));
+        assert!(result.output.contains("Skipped files:"));
+        assert!(result.output.contains("locked-dir: Permission denied"));
+    }
+
+    #[tokio::test]
+    async fn rejects_exact_symlink_that_escapes_workspace() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(parent.path().join("outside.txt"), "outside").unwrap();
+        symlink(parent.path().join("outside.txt"), root.join("outside-link")).unwrap();
+        let ctx = ToolContext::new(root.clone(), "test".to_string(), root);
+
+        let result = ReadManyFilesTool
+            .invoke(serde_json::json!({"paths": ["outside-link"]}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.output.contains("escapes workspace root"));
+    }
+
+    #[test]
+    fn empty_truncated_discovery_is_not_definitive() {
+        let output = no_matching_files_output(true);
+
+        assert!(output.contains("searched subset"));
+        assert!(output.contains("additional files omitted"));
     }
 }

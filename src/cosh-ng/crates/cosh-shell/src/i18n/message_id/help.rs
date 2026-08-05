@@ -15,8 +15,6 @@ macro_rules! help_core_ids {
             HelpSummaryRecommendations,
             HelpSummaryModeApproval,
             HelpSummaryModeAnalysis,
-            HelpSummaryModePlan,
-            HelpSummaryPlan,
             HelpSummaryAgent,
             HelpSummaryExplain,
             HelpSummaryCancel,
@@ -85,6 +83,20 @@ macro_rules! help_registry_ids {
     };
 }
 
+// Trailing segment (issue #1747): appended after all existing segments so
+// every pre-existing MessageId discriminant stays stable, per the
+// stable-runtime-api trailing-segment contract established in #1721.
+macro_rules! mcp_registry_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            HelpSummaryMcp,
+            SlashMcpTitle,
+        );
+    };
+}
+
 macro_rules! slash_parse_error_ids {
     ($next:ident, $remaining:tt, $($ids:ident,)*) => {
         $next!(
@@ -144,6 +156,20 @@ macro_rules! prompt_soft_newline_ids {
             PromptDraftFooterEditing,
             PromptDraftFooterSubmitted,
             PromptDraftFooterCancelled,
+        );
+    };
+}
+
+// #1932 additions live in a trailing segment so the existing MessageId
+// discriminants (a registered stable runtime interface) never shift.
+macro_rules! multiline_entry_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            HelpGroupPrompt,
+            HelpSummaryDraft,
+            PromptMultilineEntryHint,
         );
     };
 }

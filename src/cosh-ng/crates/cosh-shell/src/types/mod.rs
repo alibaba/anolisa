@@ -16,11 +16,12 @@ pub use hooks::{
     HookFinding, HookProvenance, MemoryPressureFacts, MetricsConfidence, ProcessMemoryFact,
 };
 pub use shell_event_metadata::{ShellCaptureLifecycle, ShellCaptureMetadata, ShellRoutingMetadata};
-pub use shell_handoff::ShellHandoffRequest;
-pub(crate) use shell_handoff::SHELL_HANDOFF_UNTRACKED_STATUS;
+pub use shell_handoff::{ImplicitPagerPolicy, ShellHandoffRequest};
+pub(crate) use shell_handoff::{NON_INTERACTIVE_PAGER_PREFIX, SHELL_HANDOFF_UNTRACKED_STATUS};
 
 pub const COMMAND_OUTPUT_REF_MAX_BYTES: usize = 1024 * 1024;
 pub const SESSION_OUTPUT_REF_MAX_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const PROVIDER_TIMEOUT_ERROR_CODE: &str = "provider_timeout";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +58,11 @@ pub struct ShellCommandAuditIdentity {
     pub request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
+    /// One-time handoff claim token echoed back by the marker script (#2142).
+    /// Lets handoff closure match on identity instead of the possibly
+    /// redacted command text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_token: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,6 +368,26 @@ fn context_binding_from_hint(hint: &str) -> Option<AgentContextBinding> {
     }
 }
 
+/// In-band marker for requests whose input the shell-side secret gate
+/// flagged sensitive (#2138). `__cosh_` hints never reach provider
+/// prompts; durable sinks (personalization activity store) key off it
+/// to redact the whole input field instead of trusting sanitizer
+/// regexes to re-detect every shell-gate form.
+pub(crate) const SENSITIVE_INPUT_HINT: &str = "__cosh_sensitive_input=true";
+
+pub(crate) fn mark_request_sensitive_input(request: &mut AgentRequest) {
+    if !request_has_sensitive_input(request) {
+        request.context_hints.push(SENSITIVE_INPUT_HINT.to_string());
+    }
+}
+
+pub(crate) fn request_has_sensitive_input(request: &AgentRequest) -> bool {
+    request
+        .context_hints
+        .iter()
+        .any(|hint| hint == SENSITIVE_INPUT_HINT)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum QuestionSelectionMode {
@@ -438,6 +464,10 @@ pub enum AgentEvent {
     AgentFailed {
         run_id: String,
         error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_turns: Option<u32>,
     },
     AgentCancelled {
         run_id: String,

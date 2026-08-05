@@ -35,6 +35,7 @@ cosh-shell raw cosh-core --resume 2d711642-b726-4b04-8d2a-8a0470f4ed24
 |------|------|
 | `/session` | 打开按更新时间倒序排列的会话选择器 |
 | `/session list` | 不打开选择器，打印包含完整、可复制会话 UUID 的首个有界摘要分页 |
+| `/session list --all` | 打印同一存储根下所有工作空间的会话，按工作空间路径分组 |
 | `/session new` | 与当前 provider 对话分离，使下一次 Agent 请求开启全新对话 |
 | `/new` | `/session new` 的别名 |
 | `/session status` | 显示 Shell、已选择、恢复中和已激活的 provider 身份 |
@@ -47,6 +48,13 @@ cosh-shell raw cosh-core --resume 2d711642-b726-4b04-8d2a-8a0470f4ed24
 变为 `restoring`；只有恢复后的请求成功完成，状态才变为 `active`。恢复失败是
 可处理的，Shell 提示符仍然可用。直接恢复和选择器恢复都会在 Agent 运行或其他
 交互决策处于活动状态时拒绝变更选择。
+
+`/session list --all` 会列出同一存储根下所有工作空间的持久化会话，输出按规范
+工作空间路径分组，每组内按更新时间倒序排列。当前工作空间的分组标题会附加
+`(current)` 标记，方便快速定位可恢复的会话。属于其他工作空间的会话显示为
+`scope_mismatch`，便于识别，但 `/session resume <id>` 仍会拒绝恢复，也不会自动
+切换工作目录。`/session` 打开的交互式选择器仍保持当前工作空间作用域，不支持
+`--all` 模式。
 
 开启全新会话只会清除 Shell adapter 中 active 或 selected provider 会话的
 绑定，不会删除原有持久化会话、重启 Shell，也不会改变工作目录、Shell history

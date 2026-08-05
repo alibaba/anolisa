@@ -10,6 +10,10 @@ on:
         description: "Dry-run mode: build images but do NOT push to registries"
         type: boolean
         default: true
+      raw-repo-url:
+        description: "Raw repository root used by the anolisa lifecycle E2E"
+        type: string
+        default: "https://anolisa.oss-cn-hangzhou.aliyuncs.com/anolisa-releases/anolisa/v1/"
 
 permissions:
   contents: read
@@ -37,6 +41,7 @@ jobs:
       ws-ckpt-version: ${{ steps.ws-ckpt.outputs.version }}
       agent-memory-version: ${{ steps.agent-memory.outputs.version }}
       skillfs-version: ${{ steps.skillfs.outputs.version }}
+      anolisa-version: ${{ steps.anolisa.outputs.version }}
       image-version: ${{ steps.image.outputs.version }}
       image-version-tag: ${{ steps.image.outputs.version_tag }}
     steps:
@@ -120,6 +125,12 @@ jobs:
         with:
           tag-match: "skillfs/v*"
 
+      - name: "Version: anolisa"
+        id: anolisa
+        uses: ./.github/actions/calculate-version
+        with:
+          tag-match: "anolisa/v*"
+
       - name: Summary
         run: |
           echo "## Component Versions" >> $GITHUB_STEP_SUMMARY
@@ -133,6 +144,7 @@ jobs:
           echo "| ws-ckpt | \`${{ steps.ws-ckpt.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| agent-memory | \`${{ steps.agent-memory.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| skillfs | \`${{ steps.skillfs.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| anolisa | \`${{ steps.anolisa.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **image** | \`${{ steps.image.outputs.version }}\` (tag: \`${{ steps.image.outputs.version_tag }}\`) |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [ "${{ inputs.dry-run }}" = "true" ]; then
@@ -255,6 +267,29 @@ jobs:
         with:
           component: skillfs
           version: ${{ needs.versions.outputs.skillfs-version }}
+          artifact-suffix: ".nightly"
+          retention-days: "7"
+
+  package-anolisa:
+    name: "Package: anolisa"
+    runs-on: anolisa-k8s-amd-nightly
+    needs: versions
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/package-source
+        with:
+          component: anolisa
+          version: ${{ needs.versions.outputs.anolisa-version }}
+          artifact-suffix: ".nightly"
+          retention-days: "7"
+
+      - name: Package vendor archive
+        uses: ./.github/actions/package-vendor
+        with:
+          component: anolisa
+          version: ${{ needs.versions.outputs.anolisa-version }}
           artifact-suffix: ".nightly"
           retention-days: "7"
 
@@ -423,6 +458,21 @@ jobs:
       vendor-artifact: "skillfs-${{ needs.versions.outputs.skillfs-version }}.nightly-vendor"
       artifact-suffix: ".nightly"
 
+  rpm-anolisa:
+    name: "RPM: anolisa (${{ matrix.arch }})"
+    needs: [versions, package-anolisa]
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    uses: ./.github/workflows/_rpm-build.yaml
+    with:
+      component: anolisa
+      version: ${{ needs.versions.outputs.anolisa-version }}
+      arch: ${{ matrix.arch }}
+      source-artifact: "anolisa-${{ needs.versions.outputs.anolisa-version }}.nightly"
+      vendor-artifact: "anolisa-${{ needs.versions.outputs.anolisa-version }}.nightly-vendor"
+      artifact-suffix: ".nightly"
+
   # ===========================================================================
   # Job 4: Build and push Docker image
   # ===========================================================================
@@ -438,6 +488,7 @@ jobs:
       - rpm-ws-ckpt
       - rpm-agent-memory
       - rpm-skillfs
+      - rpm-anolisa
       - rpm-sight
     steps:
       - uses: actions/checkout@v4
@@ -550,3 +601,81 @@ jobs:
           echo "- \`${{ env.GHCR_IMAGE }}:nightly\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Platforms**: \`linux/amd64\`, \`linux/arm64\`" >> $GITHUB_STEP_SUMMARY
+
+  # ==========================================================================
+  # Job 5: Exercise the CLI from the image against the real raw repository
+  # ==========================================================================
+  anolisa-raw-lifecycle-e2e:
+    name: E2E anolisa raw lifecycle
+    if: github.event_name == 'schedule' || inputs.dry-run != true
+    runs-on: anolisa-k8s-amd-nightly
+    timeout-minutes: 30
+    needs:
+      - versions
+      - docker-build-push
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull the image built by this run
+        env:
+          IMAGE: ${{ env.GHCR_IMAGE }}:${{ needs.versions.outputs.image-version-tag }}
+        run: docker pull --platform linux/amd64 "$IMAGE"
+
+      - name: Verify anolisa CLI is installed
+        env:
+          IMAGE: ${{ env.GHCR_IMAGE }}:${{ needs.versions.outputs.image-version-tag }}
+        run: |
+          docker run --rm --platform linux/amd64 \
+            --entrypoint anolisa \
+            "$IMAGE" --version
+
+      - name: Run real raw install, update, and uninstall
+        env:
+          IMAGE: ${{ env.GHCR_IMAGE }}:${{ needs.versions.outputs.image-version-tag }}
+          RAW_REPO_URL: ${{ inputs.raw-repo-url || 'https://anolisa.oss-cn-hangzhou.aliyuncs.com/anolisa-releases/anolisa/v1/' }}
+        run: |
+          set -o pipefail
+          docker run --rm --platform linux/amd64 \
+            --entrypoint /bin/bash \
+            --env ANOLISA_RAW_REPO_URL="$RAW_REPO_URL" \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            "$IMAGE" \
+            /workspace/src/anolisa/tests/nightly/raw-lifecycle.sh \
+            2>&1 | tee anolisa-raw-lifecycle.log
+
+      - name: Publish E2E inventory summary
+        if: always()
+        env:
+          IMAGE: ${{ env.GHCR_IMAGE }}:${{ needs.versions.outputs.image-version-tag }}
+          RAW_REPO_URL: ${{ inputs.raw-repo-url || 'https://anolisa.oss-cn-hangzhou.aliyuncs.com/anolisa-releases/anolisa/v1/' }}
+        run: |
+          {
+            echo "## anolisa raw lifecycle E2E"
+            echo ""
+            echo "Image: \`${IMAGE}\`"
+            echo "Raw repository: \`${RAW_REPO_URL}\`"
+            echo ""
+            echo "| Component | Status | Reason |"
+            echo "|-----------|--------|--------|"
+            awk -F '\t' '
+              !/^#/ && NF >= 4 {
+                printf "| `%s` | %s | %s |\n", $1, $3, $4
+              }
+            ' src/anolisa/tests/nightly/raw-lifecycle-cases.tsv
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload E2E log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: anolisa-raw-lifecycle-${{ needs.versions.outputs.image-version-tag }}
+          path: anolisa-raw-lifecycle.log
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,5 +1,45 @@
 import { execFile } from "node:child_process";
 
+export type HookPolicy = "observe" | "warn" | "ask" | "block";
+
+const HOOK_POLICIES = new Set<HookPolicy>(["observe", "warn", "ask", "block"]);
+const HOOK_POLICY_ALIASES: Record<string, HookPolicy> = {
+  debug: "observe",
+  deny: "block",
+};
+
+export function envFlagEnabled(name: string, defaultValue = true): boolean {
+  const value = process.env[name];
+  if (value === undefined) {
+    return defaultValue;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true") {
+    return true;
+  }
+  if (normalized === "false") {
+    return false;
+  }
+  return defaultValue;
+}
+
+export function normalizeHookPolicy(value: unknown, defaultValue: HookPolicy): HookPolicy {
+  if (typeof value !== "string") return defaultValue;
+  const normalized = value.trim().toLowerCase();
+  const policy = HOOK_POLICY_ALIASES[normalized] ?? normalized;
+  return HOOK_POLICIES.has(policy as HookPolicy) ? (policy as HookPolicy) : defaultValue;
+}
+
+export function isHookPolicyValue(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized in HOOK_POLICY_ALIASES || HOOK_POLICIES.has(normalized as HookPolicy);
+}
+
+export function envHookPolicy(name: string, defaultValue: HookPolicy): HookPolicy {
+  return normalizeHookPolicy(process.env[name], defaultValue);
+}
+
 export type CliResult = {
   /** Raw stdout text (may be empty) */
   stdout: string;

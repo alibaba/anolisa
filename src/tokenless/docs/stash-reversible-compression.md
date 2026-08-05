@@ -91,18 +91,22 @@ echo '[...]' | tokenless compress-response --no-stash
 tokenless retrieve <hash> --stash-db ~/.tokenless/alt-stash.db
 ```
 
-`TOKENLESS_STASH_DB` mirrors `TOKENLESS_STATS_DB` as an env override.
+`TOKENLESS_DATA_DIR` relocates both SQLite databases, producing
+`$TOKENLESS_DATA_DIR/stash.db` and `$TOKENLESS_DATA_DIR/stats.db`.
+`TOKENLESS_STASH_DB` mirrors `TOKENLESS_STATS_DB` as a higher-priority
+single-file override.
 
 ## Security model
 
 The stash db path is resolved under the **trusted home directory** — derived
 from `getpwuid_r(getuid())`, never from `$HOME` (which a parent process can
 spoof to redirect state into attacker-writable paths). An override
-(`--stash-db` or `TOKENLESS_STASH_DB`) is validated by canonicalizing both the
-home anchor and the candidate and requiring the candidate to live under the
-home; a path outside home is rejected. This mirrors the stats DB trust model
-exactly, so an attacker cannot redirect the stash to a system-critical
-location.
+(`--stash-db`, `TOKENLESS_STASH_DB`, or `TOKENLESS_DATA_DIR`) is validated
+against the canonical home anchor and must remain under that home. For a data
+directory that does not exist yet, tokenless canonicalizes the nearest existing
+ancestor before checking that boundary; a path outside home is rejected. This
+mirrors the stats DB trust model exactly, so an attacker cannot redirect the
+stash to a system-critical location.
 
 `retrieve` queries are parameterized SQL; a malformed hash simply yields "no
 payload" rather than an injection.

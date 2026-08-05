@@ -5,10 +5,15 @@ use crate::approval::broker::{
     provider_deny_response, ApprovalExecutionMetadata, ApprovalOutcome, ApprovalOutcomeInput,
     ProviderApprovalStatus, ProviderResponseInput,
 };
+use crate::approval::handoff::shell_handoff_command_from_request;
 use crate::approval::journal::approval_audit_input;
 use crate::approval::provider::mark_provider_approval_resolved;
 use crate::approval::resolution::request_can_receive_host_executed_result;
+use crate::runtime::evidence_delivery::record_readonly_compound_completion;
 use crate::runtime::prelude::*;
+use crate::tools::command_risk::{RiskImpact, SideEffectClass};
+use crate::tools::readonly_compound::{build_readonly_compound_plan, run_readonly_compound};
+use crate::tools::{ReadonlyPipelineConfig, ReadonlyPipelineError, ReadonlyPipelineOutput};
 
 pub(crate) fn render_trusted_tool<W: Write>(
     state: &mut InlineState,
@@ -95,12 +100,39 @@ pub(crate) fn render_trusted_tool<W: Write>(
     Ok(false)
 }
 
+/// Only the irrecoverable verdicts stall the auto-approval paths: a
+/// confirmed SystemControl assessment, or an unresolvable launcher chain
+/// that may hide one. Neither Trust mode nor a session trust key may
+/// approve those (#2064). Other High verdicts (shell-syntax risk,
+/// ordinary privilege escalation) keep each mode's existing contract, so
+/// Trust mode still auto-runs its supported flows.
+fn assessment_requires_interactive_approval(assessment: &CommandAssessment) -> bool {
+    if assessment.execution == ExecutionDecision::Block {
+        return true;
+    }
+    if assessment.impact != RiskImpact::High {
+        return false;
+    }
+    assessment
+        .side_effects
+        .contains(&SideEffectClass::SystemControl)
+        || assessment.reasons.contains(&"unresolvable-launcher-chain")
+}
+
 fn trust_mode_blocks_shell_request(
     request: &mut RuntimeApprovalRequest,
     source: AssessmentSource,
 ) -> bool {
     refresh_shell_request_assessment(request, AssessmentPolicy::ask(source))
-        .is_some_and(|assessment| assessment.execution == ExecutionDecision::Block)
+        .is_some_and(|assessment| assessment_requires_interactive_approval(&assessment))
+}
+
+fn shell_command_requires_interactive_approval(request: &mut RuntimeApprovalRequest) -> bool {
+    refresh_shell_request_assessment(
+        request,
+        AssessmentPolicy::ask(AssessmentSource::ProviderShellTool),
+    )
+    .is_some_and(|assessment| assessment_requires_interactive_approval(&assessment))
 }
 
 pub(crate) fn render_auto_approved_tool<W: Write>(
@@ -115,6 +147,7 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
         return Ok(false);
     }
 
+    let mut blocked_approval_ids = Vec::new();
     for event in governed_events {
         let provider_tool_call_fallback = adapter.capabilities().control_protocol
             && matches!(event.event, AgentEvent::ToolCall { .. });
@@ -173,9 +206,24 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
             .strip_prefix("$ ")
             .unwrap_or(&request.preview);
 
-        if request_is_executable_bash_tool(&request)
-            && command_matches_trust_key(raw_cmd, state.control.trust.session_trusted_commands())
-        {
+        let trust_key_match = request_is_executable_bash_tool(&request)
+            && command_matches_trust_key(raw_cmd, state.control.trust.session_trusted_commands());
+        if trust_key_match && shell_command_requires_interactive_approval(&mut request) {
+            // A trust key can never override the high-risk gate: config
+            // may preload `reboot` via `trusted_commands`, and a key
+            // minted before this guard would otherwise replay (#2064).
+            // Leave a pending card; the tail record pass ignores tool
+            // calls under control-protocol adapters, so record here.
+            blocked_approval_ids.extend(record_approval_requests(
+                state,
+                std::slice::from_ref(event),
+                run_request,
+                origin,
+                false,
+            ));
+            continue;
+        }
+        if trust_key_match {
             if defer_fallback_bash_tool(state, request.clone(), output)? {
                 return Ok(true);
             }
@@ -203,8 +251,20 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
         ) else {
             continue;
         };
-        if auto_policy.route(&assessment) != AutoExecutionRoute::DirectReadonlyBroker {
-            continue;
+        // Issue #1882: a fully readonly compound runs through the
+        // dedicated argv executor instead of a shell handoff, so the
+        // executed argv never passes through a shell parsing layer.
+        match auto_policy.route(&assessment) {
+            AutoExecutionRoute::DirectReadonlyBroker => {}
+            AutoExecutionRoute::CompoundReadonlyExecutor => {
+                if run_auto_approved_readonly_compound(state, request, output)?
+                    == AutoApprovalFlow::Handled
+                {
+                    return Ok(true);
+                }
+                continue;
+            }
+            _ => continue,
         }
 
         if request_is_executable_bash_tool(&request)
@@ -229,6 +289,7 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
         }
     }
 
+    render_approval_requests(state, &blocked_approval_ids, output)?;
     Ok(false)
 }
 
@@ -273,19 +334,43 @@ fn shell_command_from_request_preview(request: &RuntimeApprovalRequest) -> &str 
         .unwrap_or(request.preview.as_str())
 }
 
+/// Receipt title for a provider replay of an already-executed shell tool
+/// (issue #2064): echo how the request was actually resolved instead of
+/// hard-coding "Auto-approved" — a manual Allow reads Approved, a
+/// turn-scope consent reads the turn title, and only genuinely automatic
+/// approvals (or no matching journal record: fail-safe) keep Auto-approved.
+pub(super) fn completed_provider_native_shell_title(
+    state: &InlineState,
+    request: &RuntimeApprovalRequest,
+) -> MessageId {
+    let resolved = state.approvals.journal.iter().rev().find(|entry| {
+        entry.run_id == request.run_id
+            && entry.decision == ApprovalRequestStatus::Approved
+            && match (&entry.tool_use_id, &request.tool_use_id) {
+                (Some(journal_id), Some(request_id)) => journal_id == request_id,
+                _ => entry.preview == request.preview,
+            }
+    });
+    match resolved.map(|entry| entry.actor) {
+        Some("user") => MessageId::ApprovalResolutionApprovedTitle,
+        Some("user_batch") | Some("batch_consent") => {
+            MessageId::ApprovalResolutionTurnApprovedTitle
+        }
+        _ => MessageId::ApprovalResolutionAutoApprovedTitle,
+    }
+}
+
 fn render_completed_provider_native_shell_request<W: Write>(
     state: &mut InlineState,
     request: RuntimeApprovalRequest,
     output: &mut W,
 ) -> std::io::Result<()> {
+    // Resolve the title before recording: recording journals this replay
+    // as agent-auto, which would shadow the user's original decision.
+    let title = completed_provider_native_shell_title(state, &request);
     let mut request = record_auto_approved_request(state, request);
     mark_provider_native_shell_execution(state, &mut request);
-    render_approval_resolution(
-        state,
-        &request,
-        MessageId::ApprovalResolutionAutoApprovedTitle,
-        output,
-    )
+    render_approval_resolution(state, &request, title, output)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,7 +388,7 @@ fn approval_outcome_for_auto_request(request: &RuntimeApprovalRequest) -> Approv
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShellRequestPolicyDecision {
+pub(super) enum ShellRequestPolicyDecision {
     Continue,
     DenyAnalysisOnly,
     DenyDuplicateHostExecuted,
@@ -327,7 +412,7 @@ fn handle_shell_request_policy(
     }
 }
 
-fn shell_request_policy_decision(
+pub(super) fn shell_request_policy_decision(
     state: &InlineState,
     run_request: Option<&AgentRequest>,
     request: &RuntimeApprovalRequest,
@@ -398,34 +483,18 @@ fn apply_auto_approved_request_outcome<W: Write>(
         )?;
         return Ok(AutoApprovalFlow::Handled);
     }
-    // DR-6: When hooks had something to say but the tool is auto-approved,
-    // render an independent hook notice panel before the tool call header
-    // so that the user is aware of the hook's intervention.
-    if !request.hook_warnings.is_empty() {
-        let mut body: Vec<String> = Vec::new();
-        for w in &request.hook_warnings {
-            let icon = hook_warning_icon(w.decision.as_deref());
-            body.push(format!("\u{2502} {icon} {}", w.hook_name));
-            for msg_line in w.message.lines() {
-                body.push(format!("\u{2502}   {msg_line}"));
-            }
-        }
-        let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
-        renderer.write_notice_panel(
-            output,
-            NoticePanelModel {
-                title: "Hook",
-                body,
-                footer: None,
-            },
-        )?;
-    }
+    render_hook_warning_notices(state, request, output)?;
     let outcome = approval_outcome_for_auto_request(request);
     if outcome == ApprovalOutcome::ForegroundShellHandoff {
         let authorized = state
             .audit
             .as_mut()
-            .map(|audit| audit.authorize_host_execution(approval_audit_input(request)))
+            .map(|audit| {
+                audit.authorize_host_execution(
+                    approval_audit_input(request),
+                    "shell_foreground_handoff",
+                )
+            })
             .transpose();
         if authorized.is_err() {
             request.status = ApprovalRequestStatus::Blocked;
@@ -462,6 +531,189 @@ fn apply_auto_approved_request_outcome<W: Write>(
             }
             Ok(AutoApprovalFlow::Handled)
         }
+    }
+}
+
+// DR-6: When hooks had something to say but the tool is auto-approved,
+// render an independent hook notice panel before the tool call header
+// so that the user is aware of the hook's intervention.
+fn render_hook_warning_notices<W: Write>(
+    state: &InlineState,
+    request: &RuntimeApprovalRequest,
+    output: &mut W,
+) -> std::io::Result<()> {
+    if request.hook_warnings.is_empty() {
+        return Ok(());
+    }
+    let mut body: Vec<String> = Vec::new();
+    for w in &request.hook_warnings {
+        let icon = hook_warning_icon(w.decision.as_deref());
+        body.push(format!("\u{2502} {icon} {}", w.hook_name));
+        for msg_line in w.message.lines() {
+            body.push(format!("\u{2502}   {msg_line}"));
+        }
+    }
+    let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
+    renderer.write_notice_panel(
+        output,
+        NoticePanelModel {
+            title: "Hook",
+            body,
+            footer: None,
+        },
+    )
+}
+
+/// Issue #1882: runs an auto-approved readonly compound through the
+/// dedicated argv executor. Eligibility and the executed plan come
+/// from the same predicate (`build_readonly_compound_plan`), so the
+/// assessment above and the execution here can never disagree about
+/// what would run.
+fn run_auto_approved_readonly_compound<W: Write>(
+    state: &mut InlineState,
+    request: RuntimeApprovalRequest,
+    output: &mut W,
+) -> std::io::Result<AutoApprovalFlow> {
+    let Ok(command) = shell_handoff_command_from_request(&request) else {
+        // The command text cannot be reconstructed from the request;
+        // fall back to the manual flow rather than executing anything.
+        return Ok(AutoApprovalFlow::Continue);
+    };
+    let Some(plan) = build_readonly_compound_plan(&command) else {
+        // Route and plan are built by the same predicate, so a miss
+        // here means the request changed between assessment and
+        // execution; fall back to the manual flow rather than
+        // executing anything.
+        return Ok(AutoApprovalFlow::Continue);
+    };
+    let Some(execution_cwd) = readonly_compound_execution_cwd(state, &request) else {
+        // No verifiable working directory for this session: guessing
+        // (e.g. the process launch directory after the user has cd'd
+        // away) could auto-execute in the wrong repository, so keep
+        // the manual AskUser flow.
+        return Ok(AutoApprovalFlow::Continue);
+    };
+
+    let mut request = record_auto_approved_request(state, request);
+    // Mirror the handoff path's status gate: when the audit recorder
+    // failed closed (blocked_audit_required) the approval is not
+    // durable, and a blocked request must never reach the executor.
+    let blocked_before_authorize = request.status != ApprovalRequestStatus::Approved;
+    let authorized = if blocked_before_authorize {
+        Ok(None)
+    } else {
+        state
+            .audit
+            .as_mut()
+            .map(|audit| {
+                audit.authorize_host_execution(
+                    approval_audit_input(&request),
+                    "readonly_compound_argv_executor",
+                )
+            })
+            .transpose()
+    };
+    if blocked_before_authorize || authorized.is_err() {
+        request.status = ApprovalRequestStatus::Blocked;
+        request.execution_path = Some("blocked_audit_required");
+        render_approval_resolution(
+            state,
+            &request,
+            MessageId::ApprovalResolutionBlockedTitle,
+            output,
+        )?;
+        return Ok(AutoApprovalFlow::Handled);
+    }
+    render_hook_warning_notices(state, &request, output)?;
+    render_approval_resolution(
+        state,
+        &request,
+        MessageId::ApprovalResolutionAutoApprovedTitle,
+        output,
+    )?;
+
+    let started = std::time::Instant::now();
+    let executed = run_readonly_compound(&plan, &ReadonlyPipelineConfig::default(), &execution_cwd);
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let status = readonly_compound_completion_status(&executed, &command);
+    let pipeline_output = executed.unwrap_or_else(|err| ReadonlyPipelineOutput {
+        exit_code: None,
+        stdout: String::new(),
+        stderr: format!(
+            "readonly compound executor error [{}]: {}",
+            err.reason, err.detail
+        ),
+    });
+    let evidence = record_readonly_compound_completion(
+        state,
+        &request,
+        &command,
+        &pipeline_output,
+        &execution_cwd,
+        status,
+        duration_ms,
+    );
+    mark_provider_approval_resolved(state);
+    if !evidence.provider_result_delivered
+        && !request_can_receive_host_executed_result(state, &request)
+    {
+        stop_active_agent_run_without_rendering(state, output)?;
+    }
+    Ok(AutoApprovalFlow::Handled)
+}
+
+/// Verifiable working directory for the executor route, or `None` when
+/// nothing trustworthy is available (the caller then keeps AskUser).
+/// Priority: an explicit request cwd wins when it names a real
+/// directory — and blocks when it does not (never silently replaced);
+/// a placeholder falls through to the shell's live cwd from the latest
+/// marker-tracked command block; with zero observed command activity,
+/// the shell's own latest prompt-time cwd report is used instead — a
+/// positive shell-side signal that also proves the marker channel
+/// works, and that a later line submission invalidates (dispatcher).
+/// There is no process-cwd guess: a session whose shell never
+/// reported anything stays on the manual flow (absent markers alone
+/// prove nothing about where the shell sits).
+fn readonly_compound_execution_cwd(
+    state: &InlineState,
+    request: &RuntimeApprovalRequest,
+) -> Option<std::path::PathBuf> {
+    let explicit = !request.cwd.is_empty() && request.cwd != "<unknown>";
+    if explicit {
+        let candidate = std::path::Path::new(&request.cwd);
+        return candidate.is_dir().then(|| candidate.to_path_buf());
+    }
+    if let Some(block) = state.session_blocks.last() {
+        let live = std::path::Path::new(&block.end_cwd);
+        if !block.end_cwd.is_empty() && live.is_dir() {
+            return Some(live.to_path_buf());
+        }
+        return None;
+    }
+    if state.shell_command_activity_observed {
+        return None;
+    }
+    let reported = std::path::Path::new(state.shell_prompt_cwd.as_deref()?);
+    reported.is_dir().then(|| reported.to_path_buf())
+}
+
+/// Completion status for the executor route, mirroring the handoff
+/// outcome contract (issue #1882, R6): a finished run classifies by its
+/// exit code (completed / failed / interrupted), executor timeouts
+/// report timed_out, and every other executor error reports
+/// not_executed — the provider must never mistake a failed or
+/// unfinished execution for success.
+pub(super) fn readonly_compound_completion_status(
+    executed: &Result<ReadonlyPipelineOutput, ReadonlyPipelineError>,
+    command: &str,
+) -> &'static str {
+    use crate::command::{classify_executed_command_outcome, CommandOutcome};
+    match executed {
+        Ok(output) => {
+            classify_executed_command_outcome(output.exit_code.unwrap_or(-1), command).status()
+        }
+        Err(err) if err.reason.contains("timeout") => CommandOutcome::TimedOut.status(),
+        Err(_) => CommandOutcome::NotExecuted.status(),
     }
 }
 
@@ -619,297 +871,4 @@ fn deny_duplicate_host_executed_shell_request(
     );
     let _ = active_run.handle.respond_approval(response);
     true
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn analysis_only_request() -> AgentRequest {
-        AgentRequest {
-            id: "agent-request-1".to_string(),
-            session_id: "session-1".to_string(),
-            command_block: CommandBlock {
-                id: "cmd-1".to_string(),
-                session_id: "session-1".to_string(),
-                command: "ShellCommandCompleted evidence".to_string(),
-                origin: Default::default(),
-                cwd: "/tmp".to_string(),
-                end_cwd: "/tmp".to_string(),
-                started_at_ms: 0,
-                ended_at_ms: 0,
-                duration_ms: 0,
-                exit_code: 0,
-                status: CommandStatus::Completed,
-                output: OutputRefs {
-                    terminal_output_ref: None,
-                    terminal_output_bytes: 0,
-                },
-                shell_environment_generation: None,
-                audit_identity: None,
-            },
-            context_blocks: Vec::new(),
-            context_hints: vec![
-                "analysis-only continuation after foreground shell handoff".to_string()
-            ],
-            user_input: Some("ShellCommandCompleted evidence".to_string()),
-            findings: Vec::new(),
-            mode: AgentMode::RecommendOnly,
-            user_confirmed: true,
-            hook_finding: None,
-            recommended_skill: None,
-        }
-    }
-
-    #[test]
-    fn analysis_only_continuation_blocks_streamed_shell_tool_fallback() {
-        let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
-        let mut state = InlineState {
-            approval_mode: CoshApprovalMode::Auto,
-            ..InlineState::default()
-        };
-        let governed = GovernedEvent {
-            decision: GovernanceDecision::Display,
-            policy_decision: GovernancePolicyDecision::NeedsUserApproval,
-            event: AgentEvent::ToolCall {
-                run_id: "run-1".to_string(),
-                tool_id: None,
-                name: "run_shell_command".to_string(),
-                input: r#"{"command":"df -h"}"#.to_string(),
-            },
-            reason: "visible streamed tool call".to_string(),
-            display_text: "visible streamed tool call".to_string(),
-            auto_execute: false,
-        };
-        let mut output = Vec::new();
-
-        let handled = render_auto_approved_tool(
-            &mut state,
-            &[governed],
-            Some(&analysis_only_request()),
-            AgentRunOrigin::Standard,
-            &mut output,
-            &adapter,
-        )
-        .expect("render auto approval");
-
-        assert!(handled);
-        assert!(state.approvals.requests.is_empty());
-        assert!(state.control.shell_handoff().approved_is_empty());
-    }
-
-    #[test]
-    fn trust_mode_routes_blocked_shell_request_batch_to_approval() {
-        let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
-        let mut state = InlineState {
-            approval_mode: CoshApprovalMode::Trust,
-            ..InlineState::default()
-        };
-        let governed = ["run-1", "run-2"].map(|run_id| GovernedEvent {
-            decision: GovernanceDecision::Display,
-            policy_decision: GovernancePolicyDecision::NeedsUserApproval,
-            event: AgentEvent::ToolCall {
-                run_id: run_id.to_string(),
-                tool_id: None,
-                name: "Bash".to_string(),
-                input: "printf blocked\0binding".to_string(),
-            },
-            reason: "blocked shell binding".to_string(),
-            display_text: "blocked shell binding".to_string(),
-            auto_execute: false,
-        });
-        let mut output = Vec::new();
-
-        crate::agent::events::render_agent_structured_events(
-            &mut state,
-            &governed,
-            None,
-            AgentRunOrigin::Standard,
-            &mut output,
-            &adapter,
-        )
-        .expect("render trusted approval");
-
-        assert_eq!(state.approvals.requests.len(), 2);
-        assert!(state.approvals.requests.iter().all(|request| {
-            request.status == ApprovalRequestStatus::Pending
-                && request
-                    .assessment
-                    .as_ref()
-                    .is_some_and(|assessment| assessment.execution == "block")
-        }));
-        assert_eq!(state.approvals.active_panel_id.as_deref(), Some("req-1"));
-        assert!(state.approvals.active_panel_height > 0);
-    }
-
-    #[test]
-    fn trust_mode_surfaces_hook_followup_approval_after_auto_approved_tool() {
-        // #1920 regression: after the trust path auto-approves the shell
-        // tool call, the sandbox-bypass follow-up approval reuses the same
-        // tool_use_id via the control protocol with hook_requires_approval
-        // set; it must surface as a pending card instead of being dropped.
-        let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
-        let mut state = InlineState {
-            approval_mode: CoshApprovalMode::Trust,
-            ..InlineState::default()
-        };
-        let tool_call = GovernedEvent {
-            decision: GovernanceDecision::Display,
-            policy_decision: GovernancePolicyDecision::NeedsUserApproval,
-            event: AgentEvent::ToolCall {
-                run_id: "run-1".to_string(),
-                tool_id: Some("toolu-1".to_string()),
-                name: "Bash".to_string(),
-                input: r#"{"command":"echo ok"}"#.to_string(),
-            },
-            reason: "provider tool call".to_string(),
-            display_text: "provider tool call".to_string(),
-            auto_execute: false,
-        };
-        let mut output = Vec::new();
-        crate::agent::events::render_agent_structured_events(
-            &mut state,
-            &[tool_call],
-            None,
-            AgentRunOrigin::Standard,
-            &mut output,
-            &adapter,
-        )
-        .expect("render trusted tool call");
-        assert_eq!(state.approvals.requests.len(), 1);
-        assert_eq!(
-            state.approvals.requests[0].status,
-            ApprovalRequestStatus::Approved
-        );
-
-        let followup = GovernedEvent {
-            decision: GovernanceDecision::Display,
-            policy_decision: GovernancePolicyDecision::NeedsUserApproval,
-            event: AgentEvent::ToolPermissionRequest {
-                run_id: "run-1".to_string(),
-                request_id: "ctrl-2".to_string(),
-                tool_name: "Bash".to_string(),
-                tool_input: serde_json::json!({ "command": "echo ok" }),
-                tool_use_id: "toolu-1".to_string(),
-                hook_requires_approval: true,
-                audit_ref: None,
-            },
-            reason: "sandbox bypass approval".to_string(),
-            display_text: "sandbox bypass approval".to_string(),
-            auto_execute: false,
-        };
-        crate::agent::events::render_agent_structured_events(
-            &mut state,
-            &[followup],
-            None,
-            AgentRunOrigin::Standard,
-            &mut output,
-            &adapter,
-        )
-        .expect("render hook follow-up approval");
-
-        let pending = state
-            .approvals
-            .requests
-            .iter()
-            .find(|request| request.request_id.as_deref() == Some("ctrl-2"))
-            .expect("hook follow-up approval must be recorded");
-        assert_eq!(pending.status, ApprovalRequestStatus::Pending);
-        assert!(pending.hook_requires_approval);
-        assert_eq!(pending.tool_use_id.as_deref(), Some("toolu-1"));
-        assert_eq!(
-            state.approvals.active_panel_id.as_deref(),
-            Some(pending.id.as_str())
-        );
-    }
-
-    #[test]
-    fn shell_request_policy_denies_duplicate_host_executed_request() {
-        let mut state = InlineState::default();
-        state
-            .control
-            .provider_tool_mut()
-            .claim_host_executed_shell_result("run-1", "ctrl-1", Some("toolu-1"))
-            .expect("claim host result");
-        let request = shell_request(
-            ProviderShellRequestKind::ControlPermission,
-            Some("ctrl-1"),
-            Some("toolu-1"),
-        );
-
-        assert_eq!(
-            shell_request_policy_decision(&state, None, &request),
-            ShellRequestPolicyDecision::DenyDuplicateHostExecuted
-        );
-
-        let mut next_run_request = request;
-        next_run_request.run_id = "run-2".to_string();
-        assert_eq!(
-            shell_request_policy_decision(&state, None, &next_run_request),
-            ShellRequestPolicyDecision::Continue
-        );
-    }
-
-    #[test]
-    fn shell_request_policy_denies_reentrant_fallback_after_handoff() {
-        let mut state = InlineState::default();
-        state.control.mark_provider_shell_handoff_run("run-1");
-        let request = shell_request(
-            ProviderShellRequestKind::StreamedToolCallFallback,
-            None,
-            None,
-        );
-
-        assert_eq!(
-            shell_request_policy_decision(&state, None, &request),
-            ShellRequestPolicyDecision::DenyAnalysisOnly
-        );
-    }
-
-    #[test]
-    fn shell_request_policy_allows_new_control_shell_request() {
-        let state = InlineState::default();
-        let request = shell_request(
-            ProviderShellRequestKind::ControlPermission,
-            Some("ctrl-2"),
-            Some("toolu-2"),
-        );
-
-        assert_eq!(
-            shell_request_policy_decision(&state, None, &request),
-            ShellRequestPolicyDecision::Continue
-        );
-    }
-
-    fn shell_request(
-        provider_shell_request_kind: ProviderShellRequestKind,
-        request_id: Option<&str>,
-        tool_use_id: Option<&str>,
-    ) -> RuntimeApprovalRequest {
-        RuntimeApprovalRequest {
-            id: "req-1".to_string(),
-            audit_ref: None,
-            run_id: "run-1".to_string(),
-            origin: AgentRunOrigin::Standard,
-            session_id: "sess-1".to_string(),
-            cwd: "/tmp".to_string(),
-            source: "test",
-            provider_shell_request_kind,
-            kind: ApprovalRequestKind::Tool,
-            subject: "run_shell_command".to_string(),
-            preview: "$ df -h".to_string(),
-            risk: "medium",
-            request_id: request_id.map(str::to_string),
-            tool_use_id: tool_use_id.map(str::to_string),
-            tool_input: Some(serde_json::json!({ "command": "df -h" })),
-            original_user_request: None,
-            status: ApprovalRequestStatus::Approved,
-            execution_path: None,
-            command_block_id: None,
-            redaction_status: None,
-            assessment: None,
-            hook_requires_approval: false,
-            hook_warnings: Vec::new(),
-        }
-    }
 }

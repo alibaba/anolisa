@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use crate::atif::{observation_looks_like_error, AtifStep, AtifTrajectory};
 use crate::types::{
     CostFinding, CostHeadroom, CostRatioMetrics, CostSegment, CostStats, LlmCall,
-    RedundantCallGroup, WasteCandidate, WasteCandidateSet,
+    RedundantCallGroup, TurnLedgerRow, WasteCandidate, WasteCandidateSet,
 };
 
 // ---------------------------------------------------------------------------
@@ -63,8 +63,18 @@ const PROMPT_COMPRESS_FRAC: f64 = 0.6;
 /// 统一噪声线: cited in prompts as a reference line and enforced only in
 /// cache-discount arbitration (agent-first: no Rust-side candidate filtering).
 pub(crate) const NOISE_LINE: f64 = 0.03;
+
+/// Materiality gate for detour findings: segments shorter than this are not
+/// worth a report row (deterministic arbitration, mirrors the prompt's own
+/// threshold so the model does not pad the report with 1-2 turn micro-pits).
+pub(crate) const MIN_DETOUR_TURNS: usize = 5;
 /// Cached tokens bill at roughly this fraction of the full input price.
 pub(crate) const CACHED_PRICE_RATIO: f64 = 0.25;
+/// When at least this fraction of agent steps are empty shells (no message,
+/// no reasoning, no tool calls/results, no usage), the assistant side of the
+/// trajectory was lost upstream and cost verdicts would rest on user/system
+/// bytes alone — treat the input as degraded and stay conservative.
+const DEGRADED_EMPTY_AGENT_RATIO: f64 = 0.8;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -192,58 +202,52 @@ pub fn compute_cost(trajectory: &AtifTrajectory) -> Result<CostStats> {
         .collect();
     redundant_calls.sort_by_key(|group| std::cmp::Reverse(group.count));
 
-    // Generate findings.
+    // Generate findings. Reserved for data-quality warnings only (degraded
+    // capture, below) — heuristic insights (tool dominance, redundant calls,
+    // thinking ratio) were dropped: they duplicated the flame chart / waste
+    // table and read like alarms above them.
     let mut findings = Vec::new();
-
-    // Finding: tool result dominance.
-    if total_chars > 0 && tool_result_chars as f64 / total_chars as f64 > 0.5 {
-        let pct = (tool_result_chars as f64 / total_chars as f64 * 100.0).round() as usize;
-        findings.push(CostFinding {
-            severity: "high".to_string(),
-            html: format!(
-                "工具返回占上下文的 <b>{}%</b>，是最大的体积来源。需检查是否有大体量输出未做摘要。",
-                pct
-            ),
-        });
-    }
-
-    // Finding: redundant calls.
-    if !redundant_calls.is_empty() {
-        let top = &redundant_calls[0];
-        findings.push(CostFinding {
-            severity: "high".to_string(),
-            html: format!(
-                "<b>{}×</b> 近乎相同的 <code>{}</code> {} 调用（占全部 {} 次工具的 {}%），是重复执行的主要泄漏点。",
-                top.count,
-                top.cmd_sig.chars().take(40).collect::<String>(),
-                top.name,
-                tool_sig_counts.values().sum::<usize>(),
-                if tool_sig_counts.values().sum::<usize>() > 0 {
-                    (top.count * 100) / tool_sig_counts.values().sum::<usize>()
-                } else { 0 },
-            ),
-        });
-    }
-
-    // Finding: thinking vs text ratio.
-    if thinking_chars > text_chars * 5 && thinking_chars > 1000 {
-        findings.push(CostFinding {
-            severity: "mid".to_string(),
-            html: format!(
-                "思考内容 (<b>{}</b> 字符) 是回复正文的 {} 倍，可能存在冗长推理链。",
-                thinking_chars,
-                thinking_chars
-                    .checked_div(text_chars)
-                    .unwrap_or(thinking_chars),
-            ),
-        });
-    }
 
     // Per-step replay model: the token flame chart data.
     let system_tokens = estimate_tokens_from_chars(system_chars);
-    let calls = compute_llm_calls(trajectory, system_tokens);
+    let mut calls = compute_llm_calls(trajectory, system_tokens);
     let model = trajectory.model_name();
-    let headroom = compute_headroom(&calls);
+
+    // Degraded capture: the replay model is built from user/system bytes only,
+    // so a headroom percentage would be confidently wrong (observed: 98%
+    // "optimizable" on trajectories whose assistant side was lost upstream).
+    // Totals stay (the replayed volume did happen); every "savable" quantity is
+    // zeroed so no card, step panel, or suggestion contradicts the warning.
+    let (agent_steps, empty_agent_steps) = empty_agent_stats(trajectory);
+    let degraded = agent_steps > 0
+        && empty_agent_steps as f64 / agent_steps as f64 >= DEGRADED_EMPTY_AGENT_RATIO;
+    let headroom = if degraded {
+        findings.insert(
+            0,
+            CostFinding {
+                severity: "high".to_string(),
+                html: format!(
+                    "<b>{}/{}</b> 个 agent 步无消息、无工具调用且无 usage（疑似采集不完整）。\
+                     体积与 token 数字仅反映用户/系统侧内容，<b>不可作为优化依据</b>。",
+                    empty_agent_steps, agent_steps
+                ),
+            },
+        );
+        for c in calls.iter_mut() {
+            c.cacheable = 0;
+            c.history_prunable = 0;
+            c.trimmable = 0;
+            c.prunable = 0;
+            c.removable_turn = false;
+        }
+        CostHeadroom {
+            total_input_tok: calls.iter().map(ctx_total).sum(),
+            total_output_tok: calls.iter().map(|c| c.output_tokens).sum(),
+            ..CostHeadroom::default()
+        }
+    } else {
+        compute_headroom(&calls)
+    };
 
     Ok(CostStats {
         total_events,
@@ -325,6 +329,37 @@ fn parse_usage(step: &AtifStep) -> Option<UsageBlock> {
         completion,
         cached,
     })
+}
+
+/// Count (agent steps, empty-shell agent steps). An empty shell carries no
+/// message, no reasoning, no tool calls/results, and no usage — the typical
+/// residue of an upstream capture failure that lost the assistant side.
+fn empty_agent_stats(traj: &AtifTrajectory) -> (usize, usize) {
+    let mut total = 0usize;
+    let mut empty = 0usize;
+    for step in &traj.steps {
+        if step.source.as_str() != "agent" {
+            continue;
+        }
+        total += 1;
+        let has_content = step
+            .reasoning_content
+            .as_deref()
+            .is_some_and(|s| !s.is_empty())
+            || step.message.as_deref().is_some_and(|s| !s.is_empty())
+            || !step.calls().is_empty()
+            || !step.results().is_empty();
+        if !has_content && parse_usage(step).is_none() {
+            empty += 1;
+        }
+    }
+    (total, empty)
+}
+
+/// Whether the assistant side of this trajectory is too incomplete to audit.
+pub(crate) fn is_content_degraded(traj: &AtifTrajectory) -> bool {
+    let (total, empty) = empty_agent_stats(traj);
+    total > 0 && empty as f64 / total as f64 >= DEGRADED_EMPTY_AGENT_RATIO
 }
 
 /// Per-turn metadata kept aside to compute `removable_turn` in a second pass.
@@ -710,6 +745,19 @@ fn compute_headroom(calls: &[LlmCall]) -> CostHeadroom {
         .sum::<usize>();
     let payload_cacheable_tok = calls.iter().map(|c| c.cacheable).sum::<usize>();
 
+    // Caching is a price discount, not deletion: only the part not already
+    // served from cache can still save, and it saves (1 − cached price) per
+    // token. Counting raw `cacheable` at face value showed "98% optimizable"
+    // on trajectories that were already hitting 90% cache.
+    let effective_cacheable_save = calls
+        .iter()
+        .map(|c| {
+            let already_cached = c.real_cached_tokens.unwrap_or(0) as usize;
+            let incremental = c.cacheable.saturating_sub(already_cached);
+            (incremental as f64 * (1.0 - CACHED_PRICE_RATIO)).round() as usize
+        })
+        .sum::<usize>();
+
     let orch_savable_tok = calls
         .iter()
         .filter(|c| c.removable_turn)
@@ -719,7 +767,7 @@ fn compute_headroom(calls: &[LlmCall]) -> CostHeadroom {
     let total_input_tok = calls.iter().map(ctx_total).sum::<usize>();
     let total_output_tok = calls.iter().map(|c| c.output_tokens).sum::<usize>();
 
-    let total_save_tok = payload_deletable_tok + payload_cacheable_tok + orch_savable_tok;
+    let total_save_tok = payload_deletable_tok + effective_cacheable_save + orch_savable_tok;
     let pct = if total_input_tok + total_output_tok > 0 {
         (total_save_tok as f64 / (total_input_tok + total_output_tok) as f64) * 100.0
     } else {
@@ -764,6 +812,255 @@ fn is_backtrack_cmd(cmd: &str) -> bool {
     .any(|k| c.contains(k))
 }
 
+// ---------------------------------------------------------------------------
+// 轮次账本 (turn ledger) — 预防型场景的输入与唯一步号口径
+// ---------------------------------------------------------------------------
+
+/// Tools whose target file identifies the artifact a turn produced.
+const WRITE_TOOLS: &[&str] = &[
+    "write",
+    "edit",
+    "multiedit",
+    "notebookedit",
+    "str_replace_editor",
+    "create_file",
+    "apply_patch",
+];
+
+/// Above this turn count the ledger switches to short heads to stay in context.
+const LEDGER_COMPACT_ABOVE: usize = 300;
+/// Error / user message head length in the rendered ledger (full mode).
+const LEDGER_HEAD_CHARS: usize = 80;
+/// Error / user message head length in the rendered ledger (compact mode).
+const LEDGER_HEAD_CHARS_COMPACT: usize = 40;
+
+/// Whether a tool name writes an artifact (identifies rework targets).
+pub(crate) fn is_write_tool(name: &str) -> bool {
+    WRITE_TOOLS.contains(&name.to_lowercase().as_str())
+}
+
+/// The file a call writes to, if it is a write-like tool.
+fn write_target(call: &crate::atif::AtifToolCall) -> Option<String> {
+    if !is_write_tool(&call.function_name) {
+        return None;
+    }
+    ["file_path", "path", "notebook_path", "filePath"]
+        .iter()
+        .find_map(|k| call.arguments.get(k).and_then(|v| v.as_str()))
+        .map(|p| p.to_string())
+}
+
+/// Collapse digit runs to `N` so that line numbers, ports, timestamps and
+/// retry counters do not split one recurring action into many signatures.
+fn mask_digits(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut in_digits = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_digit() {
+            if !in_digits {
+                out.push('N');
+                in_digits = true;
+            }
+        } else {
+            in_digits = false;
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Whether a command token looks like a filesystem path (→ masked as `<path>`).
+fn looks_like_path(token: &str) -> bool {
+    let t = token.trim_matches(|c| c == '"' || c == '\'');
+    t.contains('/') || (t.contains('.') && !t.starts_with('-') && !t.ends_with('.'))
+}
+
+/// Normalize a shell command into an action signature: first pipeline segment,
+/// path arguments masked, digits masked. `rg foo src/a.rs` and `rg foo src/b.rs`
+/// collapse to one signature, while `cargo test` stays distinct from `cargo build`.
+fn normalize_cmd(cmd: &str) -> String {
+    let head = cmd
+        .split("&&")
+        .next()
+        .unwrap_or(cmd)
+        .split("||")
+        .next()
+        .unwrap_or(cmd)
+        .split('|')
+        .next()
+        .unwrap_or(cmd)
+        .split(';')
+        .next()
+        .unwrap_or(cmd);
+    let masked: Vec<String> = head
+        .split_whitespace()
+        .take(6)
+        .map(|tok| {
+            if looks_like_path(tok) {
+                "<path>".to_string()
+            } else {
+                mask_digits(tok)
+            }
+        })
+        .collect();
+    trunc(&masked.join(" "), 60)
+}
+
+/// Stable action signature for one tool call —— the axis along which the LLM
+/// sees a pitfall recur. Normalization is what makes non-adjacent recurrence
+/// visible; comparing raw command strings only catches back-to-back spinning.
+pub(crate) fn normalize_action_sig(call: &crate::atif::AtifToolCall) -> String {
+    let tool = call.display_name();
+    let args = &call.arguments;
+    if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+        return format!("{tool}:{}", normalize_cmd(cmd));
+    }
+    let target = ["file_path", "path", "notebook_path", "pattern", "url"]
+        .iter()
+        .find_map(|k| args.get(k).and_then(|v| v.as_str()));
+    match target {
+        Some(t) => format!("{tool}:{}", trunc(&mask_digits(t), 60)),
+        None => tool,
+    }
+}
+
+/// Head+tail truncation for error text: Go/Rust error chains put the root
+/// cause last ("… Client.Timeout exceeded"), so a head-only cut hides exactly
+/// the part that separates a transient fault from a real pitfall.
+fn trunc_head_tail(raw: &str, head_chars: usize, tail_chars: usize) -> String {
+    let total: Vec<char> = raw.chars().collect();
+    if total.len() <= head_chars + tail_chars {
+        return raw.to_string();
+    }
+    let head: String = total[..head_chars].iter().collect();
+    let tail: String = total[total.len() - tail_chars..].iter().collect();
+    format!("{head}…{tail}")
+}
+
+/// Build the 轮次账本: one structured row per agent turn, **unfiltered**.
+///
+/// Deciding which turns were wasted is a semantic call
+/// (`prompts/waste_detour.md`);
+/// filtering here would cap recall at whatever keywords Rust knows about. Rust
+/// only supplies the structure and, later, the token math behind the verdict.
+pub(crate) fn build_turn_ledger(
+    cost: &CostStats,
+    trajectory: &AtifTrajectory,
+) -> Vec<TurnLedgerRow> {
+    let mut rows: Vec<TurnLedgerRow> = Vec::new();
+    let mut pending_user: Option<String> = None;
+    let mut turn: usize = 0;
+
+    for step in &trajectory.steps {
+        match step.source.as_str() {
+            "agent" => {
+                let tokens = cost
+                    .calls
+                    .iter()
+                    .find(|c| c.step_id == turn)
+                    .map(|c| ctx_total(c) + c.output_tokens)
+                    .unwrap_or(0);
+
+                let err = step
+                    .results()
+                    .iter()
+                    .find(|r| observation_looks_like_error(r.content.as_deref().unwrap_or("")));
+                let files: Vec<String> = step.calls().iter().filter_map(write_target).collect();
+                let backtrack = step
+                    .calls()
+                    .iter()
+                    .any(|c| is_backtrack_cmd(&c.command_summary(CMD_SIG_CHARS)));
+                let action_sig = step
+                    .calls()
+                    .first()
+                    .map(normalize_action_sig)
+                    .unwrap_or_else(|| "text-only".to_string());
+
+                let user_head = pending_user.take();
+                rows.push(TurnLedgerRow {
+                    turn,
+                    action_sig,
+                    is_error: err.is_some(),
+                    err_head: err
+                        .map(|r| trunc_head_tail(r.content.as_deref().unwrap_or(""), 40, 60))
+                        .unwrap_or_default(),
+                    files,
+                    tokens,
+                    after_user: user_head.is_some(),
+                    user_head: user_head.unwrap_or_default(),
+                    backtrack,
+                    say_head: trunc(step.message.as_deref().unwrap_or(""), LEDGER_HEAD_CHARS),
+                });
+                turn += 1;
+            }
+            "user" => {
+                pending_user = Some(trunc(
+                    step.message.as_deref().unwrap_or(""),
+                    LEDGER_HEAD_CHARS,
+                ));
+            }
+            _ => {}
+        }
+    }
+    rows
+}
+
+/// Render the ledger for a prompt. Rows are never dropped or windowed —— a
+/// pitfall recurring across a window boundary is exactly what must stay
+/// visible, so long trajectories shorten the text heads instead.
+pub(crate) fn render_ledger(rows: &[TurnLedgerRow]) -> String {
+    let head_max = if rows.len() > LEDGER_COMPACT_ABOVE {
+        LEDGER_HEAD_CHARS_COMPACT
+    } else {
+        LEDGER_HEAD_CHARS
+    };
+    let mut out = String::new();
+    for r in rows {
+        out.push_str(&format!(
+            "T{} | {} | {} tok",
+            r.turn, r.action_sig, r.tokens
+        ));
+        if r.is_error {
+            // err_head is already head+tail bounded at build time; a second
+            // head-only cut here would drop the tail that carries the root
+            // cause (timeout / rate-limit markers).
+            out.push_str(&format!(" | ERR: {}", r.err_head));
+        }
+        if !r.files.is_empty() {
+            out.push_str(&format!(" | FILES: {}", r.files.join(",")));
+        }
+        if r.backtrack {
+            out.push_str(" | BACKTRACK");
+        }
+        if r.after_user {
+            out.push_str(&format!(" | USER→: {}", trunc(&r.user_head, head_max)));
+        }
+        if !r.say_head.is_empty() {
+            out.push_str(&format!(" | SAYS: {}", trunc(&r.say_head, head_max)));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Sum the billing-caliber tokens of the given turns, ignoring turns that do
+/// not exist —— verdict step references are model output and must be validated.
+pub(crate) fn ledger_tokens_for(rows: &[TurnLedgerRow], turns: &[usize]) -> (usize, Vec<usize>) {
+    let mut valid: Vec<usize> = turns
+        .iter()
+        .filter(|t| rows.iter().any(|r| r.turn == **t))
+        .copied()
+        .collect();
+    valid.sort_unstable();
+    valid.dedup();
+    let tokens = valid
+        .iter()
+        .filter_map(|t| rows.iter().find(|r| r.turn == *t))
+        .map(|r| r.tokens)
+        .sum();
+    (tokens, valid)
+}
+
 /// Convert a char count to estimated tokens (used for system region injection).
 fn estimate_tokens_from_chars(chars: usize) -> usize {
     // Conservative: treat all as Latin (4 chars/tok) — system prompts are mostly code/English.
@@ -789,6 +1086,22 @@ pub(crate) fn extract_waste_candidates_from(
         return Ok(WasteCandidateSet::default());
     }
 
+    // Degraded capture: the assistant side is missing, so neither payload nor
+    // prevention judgments have the evidence they claim to rest on. Reporting
+    // "no waste" here would read as a clean trajectory; reporting waste from
+    // user/system bytes alone would be a fabricated verdict. Emit nothing and
+    // let the caller surface the data gap instead.
+    if is_content_degraded(trajectory) {
+        tracing::warn!(
+            "Cost: trajectory assistant side is degraded (empty agent steps), skipping waste candidates"
+        );
+        return Ok(WasteCandidateSet {
+            model: cost.model.clone(),
+            total_steps: calls.len(),
+            ..Default::default()
+        });
+    }
+
     let total_steps = calls.len();
     let total_output_tokens: usize = calls.iter().map(|c| c.output_tokens).sum();
     let total_input_tokens: usize = calls.iter().map(ctx_total).sum();
@@ -807,11 +1120,11 @@ pub(crate) fn extract_waste_candidates_from(
         }
     }
 
-    // Second pass over ATIF steps for evidence: tool outputs, large user
-    // inputs, backtracks. The agent-step ordinal is the replay step index.
+    // Second pass over ATIF steps for evidence: tool outputs and large user
+    // inputs. The agent-step ordinal is the replay step index. (Backtrack
+    // signals live in the turn ledger, keyed by the same ordinal.)
     let mut tool_outputs: Vec<(usize, String, usize, String)> = Vec::new(); // step, name, tokens, snippet
     let mut user_inputs: Vec<(usize, usize, String)> = Vec::new(); // step, tokens, snippet
-    let mut backtracks: Vec<(usize, String)> = Vec::new(); // step, cmd snippet
 
     let mut turn_idx: i64 = -1;
     for step in &trajectory.steps {
@@ -819,12 +1132,6 @@ pub(crate) fn extract_waste_candidates_from(
             "agent" => {
                 turn_idx += 1;
                 let step_no = turn_idx.max(0) as usize;
-                for call in step.calls() {
-                    let cmd = call.command_summary(CMD_SIG_CHARS);
-                    if is_backtrack_cmd(&cmd) {
-                        backtracks.push((step_no, trunc(&cmd, 80)));
-                    }
-                }
                 for result in step.results() {
                     let text = result.content.as_deref().unwrap_or("");
                     let toks = estimate_tokens(text);
@@ -1038,66 +1345,56 @@ pub(crate) fn extract_waste_candidates_from(
     // output cost — evidence too weak for an actionable verdict. Thinking share
     // stays observable in the breakdown and findings.
 
-    // ── 步骤冗余（预防性节省：防下次会话复发，非本次可回收）──
+    // ── 减轮次浪费（预防性节省：防下次会话复发，非本次可回收）──
+    //
+    // 弯路 replaces the former 试错型/返工型 pair. Direction-level detours
+    // (wrong hypothesis pursued for many turns) leave no error/backtrack
+    // signature at all, so any structural gate here caps recall at zero for
+    // exactly the biggest waste class. Rust therefore only requires that the
+    // trajectory is long enough to contain a reportable segment
+    // (MIN_DETOUR_TURNS) and hands the whole ledger — including the SAYS
+    // narration column — over for the semantic judgment.
+    let ledger = build_turn_ledger(cost, trajectory);
 
-    // 无效轮次消除 (playbook #14, merged retry + backtrack): both are wasted
-    // turns — spinning in place vs. exploring a dead end — with identical
-    // disposal (attribute first, then fix skill/prompt or archive the lesson).
-    // One candidate carries both signal lists so the LLM can cross-reference
-    // them (backtracks are often preceded by retries).
-    let removable: Vec<&LlmCall> = calls.iter().filter(|c| c.removable_turn).collect();
-    if !removable.is_empty() || !backtracks.is_empty() {
-        // Union of wasted steps; a backtrack turn may also be flagged removable.
-        let mut steps: Vec<usize> = removable.iter().map(|c| c.step_id).collect();
-        steps.extend(backtracks.iter().map(|b| b.0));
-        steps.sort_unstable();
-        steps.dedup();
-        let potential: usize = steps
-            .iter()
-            .filter_map(|s| calls.iter().find(|c| c.step_id == *s))
-            .map(|c| ctx_total(c) + c.output_tokens)
-            .sum();
-        let mut parts = vec![format!(
-            "M16 空转账单占比 {:.0}%",
-            metrics.m16_churn_share * 100.0
-        )];
-        if !removable.is_empty() {
-            let labels = removable
-                .iter()
-                .take(6)
-                .map(|c| c.label.clone())
-                .collect::<Vec<_>>()
-                .join(", ");
-            parts.push(format!(
-                "{} 轮疑似重复/报错重试（{}）",
-                removable.len(),
-                labels
-            ));
+    // Structure facts are advisory context for the prompt, not a gate.
+    let has_repeat = {
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        for r in ledger.iter().filter(|r| r.action_sig != "text-only") {
+            *seen.entry(r.action_sig.as_str()).or_insert(0) += 1;
         }
-        if !backtracks.is_empty() {
-            parts.push(format!(
-                "{} 处回退信号（{}）",
-                backtracks.len(),
-                backtracks
-                    .iter()
-                    .take(3)
-                    .map(|b| b.1.clone())
-                    .collect::<Vec<_>>()
-                    .join(" / ")
-            ));
-        }
-        parts.push("整轮重放".to_string());
+        seen.values().any(|n| *n > 1)
+    };
+
+    // Upper bound for ordering only — the reported saving is summed from the
+    // ledger over the turns the LLM points at (see cost::llm).
+    let prevention_ceiling: usize = ledger
+        .iter()
+        .filter(|r| r.is_error || r.backtrack || r.after_user)
+        .map(|r| r.tokens)
+        .sum();
+
+    if total_steps >= MIN_DETOUR_TURNS {
         candidates.push(WasteCandidate {
-            id: "churn".into(),
-            category: "步骤冗余".into(),
-            subtype: "无效轮次".into(),
-            optimization: "先归因：优化 Skill/提示词或沉淀经验".into(),
-            potential_save_tokens: potential,
+            id: "detour".into(),
+            category: "减轮次浪费".into(),
+            subtype: "弯路".into(),
+            optimization: "归因并沉淀修复方案".into(),
+            potential_save_tokens: prevention_ceiling,
             discount: false,
-            save_share: bill_share(potential),
+            save_share: bill_share(prevention_ceiling),
             savings_kind: "预防".into(),
-            steps,
-            facts: parts.join("；"),
+            steps: ledger
+                .iter()
+                .filter(|r| r.is_error || r.backtrack)
+                .map(|r| r.turn)
+                .collect(),
+            facts: format!(
+                "{} 轮报错，{} 处回退，重复动作签名{}；M16 空转账单占比 {:.0}%",
+                ledger.iter().filter(|r| r.is_error).count(),
+                ledger.iter().filter(|r| r.backtrack).count(),
+                if has_repeat { "存在" } else { "无" },
+                metrics.m16_churn_share * 100.0
+            ),
             snippet: String::new(),
         });
     }
@@ -1122,6 +1419,7 @@ pub(crate) fn extract_waste_candidates_from(
         total_output_tokens,
         metrics,
         candidates,
+        ledger,
     })
 }
 
@@ -1141,6 +1439,7 @@ fn fmt_k(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn traj(steps_json: &str) -> AtifTrajectory {
         AtifTrajectory::from_json(&format!(
@@ -1212,6 +1511,271 @@ mod tests {
     fn test_waste_candidates_empty() {
         let set = extract_waste_candidates(&traj("[]")).unwrap();
         assert!(set.candidates.is_empty());
+        assert!(set.ledger.is_empty());
+    }
+
+    /// Capture failures leave agent steps as empty shells. Reporting a headroom
+    /// percentage off user/system bytes alone reads as a real verdict, so the
+    /// degraded case must zero the headroom, flag the gap, and emit no candidates.
+    #[test]
+    fn degraded_capture_reports_gap_instead_of_headroom() {
+        let t = traj(
+            r#"[
+            {"step_id":1,"source":"system","timestamp":"2026-07-02T06:30:00.000Z","message":"你是一个助手，遵循以下规范……"},
+            {"step_id":2,"source":"user","timestamp":"2026-07-02T06:30:01.000Z","message":"帮我改代码"},
+            {"step_id":3,"source":"agent","timestamp":"2026-07-02T06:30:02.000Z"},
+            {"step_id":4,"source":"agent","timestamp":"2026-07-02T06:30:03.000Z"},
+            {"step_id":5,"source":"agent","timestamp":"2026-07-02T06:30:04.000Z"}
+        ]"#,
+        );
+        let cost = compute_cost(&t).unwrap();
+        assert_eq!(
+            cost.headroom.pct, 0.0,
+            "degraded input must not claim headroom"
+        );
+        assert!(
+            cost.headroom.total_input_tok > 0,
+            "totals must survive: the replayed volume did happen"
+        );
+        assert!(
+            cost.calls
+                .iter()
+                .all(|c| c.cacheable == 0 && c.trimmable == 0 && !c.removable_turn),
+            "per-step savable fields must be zeroed on degraded input"
+        );
+        assert!(
+            cost.findings
+                .first()
+                .is_some_and(|f| f.html.contains("采集不完整")),
+            "degraded input must surface the data gap first"
+        );
+
+        let set = extract_waste_candidates(&t).unwrap();
+        assert!(
+            set.candidates.is_empty(),
+            "degraded input must not produce waste candidates, got {:?}",
+            set.candidates.iter().map(|c| &c.id).collect::<Vec<_>>()
+        );
+    }
+
+    /// Prefix caching is a discount on the part *not yet cached*. A trajectory
+    /// already served mostly from cache has little left to gain, so its headroom
+    /// must stay far below the raw cacheable share.
+    #[test]
+    fn headroom_discounts_tokens_already_served_from_cache() {
+        let mut calls = vec![LlmCall {
+            step_id: 0,
+            time: "00:00".into(),
+            label: "text-only".into(),
+            system_prompt: 100_000,
+            skill_definitions: 0,
+            tool_definitions: 0,
+            user_messages: 100,
+            assistant_messages: 0,
+            tool_results: 0,
+            injected_context: 0,
+            output_tokens: 200,
+            cacheable: 100_000,
+            history_prunable: 0,
+            trimmable: 0,
+            prunable: 0,
+            removable_turn: false,
+            real_prompt_tokens: Some(100_100),
+            real_completion_tokens: Some(200),
+            real_cached_tokens: Some(95_000),
+        }];
+        let hit = compute_headroom(&calls);
+        assert!(
+            hit.pct < 10.0,
+            "already-cached prefix leaves little headroom, got {:.1}%",
+            hit.pct
+        );
+
+        calls[0].real_cached_tokens = Some(0);
+        let miss = compute_headroom(&calls);
+        assert!(
+            miss.pct > hit.pct,
+            "a cold cache must show more headroom than a warm one ({:.1}% vs {:.1}%)",
+            miss.pct,
+            hit.pct
+        );
+        assert!(
+            miss.pct < 100.0 * (1.0 - CACHED_PRICE_RATIO) + 1.0,
+            "caching is a discount, not deletion: {:.1}%",
+            miss.pct
+        );
+    }
+
+    // ── 轮次账本 ──
+
+    fn call(name: &str, args: serde_json::Value) -> crate::atif::AtifToolCall {
+        crate::atif::AtifToolCall {
+            tool_call_id: "c".into(),
+            function_name: name.into(),
+            arguments: args,
+        }
+    }
+
+    /// The whole point of normalization: the same action on different targets —
+    /// or with different line numbers — must collapse to one signature, so a
+    /// pitfall recurring far apart is visible. Raw command comparison (the old
+    /// `primary_sig`) only caught back-to-back repeats.
+    #[test]
+    fn action_sig_collapses_paths_and_digits() {
+        let a = normalize_action_sig(&call("Bash", json!({"command": "rg parse src/a.rs"})));
+        let b = normalize_action_sig(&call("Bash", json!({"command": "rg parse src/b.rs"})));
+        assert_eq!(a, b, "path args must collapse");
+
+        let c = normalize_action_sig(&call("Bash", json!({"command": "sed -n 1,80p src/x.rs"})));
+        let d = normalize_action_sig(&call("Bash", json!({"command": "sed -n 90,120p src/y.rs"})));
+        assert_eq!(c, d, "digit runs must collapse");
+
+        // Subcommands are semantics, not noise — they must stay distinct.
+        let test = normalize_action_sig(&call("Bash", json!({"command": "cargo test"})));
+        let build = normalize_action_sig(&call("Bash", json!({"command": "cargo build"})));
+        assert_ne!(test, build);
+
+        // Only the first pipeline segment matters for the action's identity.
+        let piped = normalize_action_sig(&call("Bash", json!({"command": "cargo test | tail -5"})));
+        assert_eq!(test, piped);
+    }
+
+    #[test]
+    fn action_sig_uses_file_target_for_write_tools() {
+        let sig = normalize_action_sig(&call("Edit", json!({"file_path": "src/p.rs"})));
+        assert_eq!(sig, "Edit:src/p.rs");
+    }
+
+    /// The ledger must cover every agent turn (no filtering), carry the canonical
+    /// turn ordinal, and attach the preceding user message to the turn it drove.
+    #[test]
+    fn ledger_covers_every_turn_with_error_and_user_context() {
+        let t = traj(
+            r#"[
+            {"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"命名要用 snake_case"},
+            {"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z",
+             "tool_calls":[{"tool_call_id":"c1","function_name":"Bash","arguments":{"command":"cargo test"}}],
+             "observation":{"results":[{"source_call_id":"c1","content":"error: cannot find value"}]}},
+            {"step_id":3,"source":"agent","timestamp":"2026-07-02T06:30:03.000Z",
+             "tool_calls":[{"tool_call_id":"c2","function_name":"Write","arguments":{"file_path":"src/p.rs"}}],
+             "observation":{"results":[{"source_call_id":"c2","content":"ok"}]}},
+            {"step_id":4,"source":"agent","timestamp":"2026-07-02T06:30:05.000Z",
+             "tool_calls":[{"tool_call_id":"c3","function_name":"Bash","arguments":{"command":"git reset --hard"}}],
+             "observation":{"results":[{"source_call_id":"c3","content":"HEAD is now at abc"}]}}
+        ]"#,
+        );
+        let cost = compute_cost(&t).unwrap();
+        let ledger = build_turn_ledger(&cost, &t);
+
+        assert_eq!(ledger.len(), 3, "every agent turn must have a row");
+        assert_eq!(
+            ledger.iter().map(|r| r.turn).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "turn must be the canonical ordinal, matching LlmCall::step_id"
+        );
+        assert!(ledger[0].is_error);
+        assert!(ledger[0].err_head.contains("error:"));
+        assert!(ledger[0].after_user);
+        assert!(ledger[0].user_head.contains("snake_case"));
+        assert_eq!(ledger[1].files, vec!["src/p.rs".to_string()]);
+        assert!(!ledger[1].is_error);
+        assert!(ledger[2].backtrack);
+        assert!(ledger.iter().all(|r| r.tokens > 0));
+
+        // Rendered form exposes T{n} only — the sole step numbering the prompts see.
+        let text = render_ledger(&ledger);
+        assert!(text.starts_with("T0 | Bash:cargo test |"));
+        assert!(text.contains("| ERR: error:"));
+        assert!(text.contains("| FILES: src/p.rs"));
+        assert!(text.contains("| BACKTRACK"));
+        assert!(text.contains("| USER→: 命名要用 snake_case"));
+    }
+
+    /// Model-supplied turn numbers are untrusted input: unknown turns are
+    /// dropped rather than silently summed as zero-token rows.
+    #[test]
+    fn ledger_tokens_ignore_unknown_turns() {
+        let rows = vec![
+            TurnLedgerRow {
+                turn: 0,
+                tokens: 100,
+                ..Default::default()
+            },
+            TurnLedgerRow {
+                turn: 1,
+                tokens: 250,
+                ..Default::default()
+            },
+        ];
+        let (tokens, valid) = ledger_tokens_for(&rows, &[1, 1, 7]);
+        assert_eq!(tokens, 250);
+        assert_eq!(valid, vec![1]);
+
+        let (tokens, valid) = ledger_tokens_for(&rows, &[9]);
+        assert_eq!(tokens, 0);
+        assert!(valid.is_empty());
+    }
+
+    /// The detour candidate fires on any trajectory long enough to contain a
+    /// reportable segment — direction-level detours leave no structural
+    /// signature, so cleanliness is not a gate. The judgment itself is the LLM's.
+    #[test]
+    fn test_waste_candidates_detour() {
+        let t = traj(
+            r#"[
+            {"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"加个解析器"},
+            {"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z",
+             "tool_calls":[{"tool_call_id":"c1","function_name":"Write","arguments":{"file_path":"src/p.rs"}}],
+             "observation":{"results":[{"source_call_id":"c1","content":"ok"}]}},
+            {"step_id":3,"source":"agent","timestamp":"2026-07-02T06:30:02.000Z",
+             "tool_calls":[{"tool_call_id":"c2","function_name":"Bash","arguments":{"command":"cargo test"}}],
+             "observation":{"results":[{"source_call_id":"c2","content":"error: mismatched types"}]}},
+            {"step_id":4,"source":"user","timestamp":"2026-07-02T06:30:03.000Z","message":"命名不符合规范"},
+            {"step_id":5,"source":"agent","timestamp":"2026-07-02T06:30:04.000Z",
+             "tool_calls":[{"tool_call_id":"c3","function_name":"Write","arguments":{"file_path":"src/p.rs"}}],
+             "observation":{"results":[{"source_call_id":"c3","content":"ok"}]}},
+            {"step_id":6,"source":"agent","timestamp":"2026-07-02T06:30:05.000Z","message":"找到根因了"},
+            {"step_id":7,"source":"agent","timestamp":"2026-07-02T06:30:06.000Z",
+             "tool_calls":[{"tool_call_id":"c4","function_name":"Bash","arguments":{"command":"cargo test"}}],
+             "observation":{"results":[{"source_call_id":"c4","content":"ok"}]}}
+        ]"#,
+        );
+        let set = extract_waste_candidates(&t).unwrap();
+        let ids: Vec<&str> = set.candidates.iter().map(|c| c.id.as_str()).collect();
+        assert!(ids.contains(&"detour"), "got {ids:?}");
+        assert!(!ids.contains(&"trial_error"), "trial_error is retired");
+        assert!(!ids.contains(&"rework"), "rework is retired");
+
+        let c = set.candidates.iter().find(|c| c.id == "detour").unwrap();
+        assert_eq!(c.savings_kind, "预防");
+        assert_eq!(c.category, "减轮次浪费");
+        assert_eq!(c.subtype, "弯路");
+        assert!(!c.discount);
+        assert_eq!(set.ledger.len(), 5);
+        // The SAYS narration column carries direction declarations.
+        assert!(render_ledger(&set.ledger).contains("SAYS: 找到根因了"));
+    }
+
+    /// Below MIN_DETOUR_TURNS a trajectory cannot contain a reportable segment,
+    /// so no LLM call is spent on the detour candidate at all.
+    #[test]
+    fn test_waste_candidates_detour_skipped_when_short() {
+        let t = traj(
+            r#"[
+            {"step_id":1,"source":"user","timestamp":"2026-07-02T06:30:00.000Z","message":"go"},
+            {"step_id":2,"source":"agent","timestamp":"2026-07-02T06:30:01.000Z",
+             "tool_calls":[{"tool_call_id":"c1","function_name":"Read","arguments":{"file_path":"a.rs"}}],
+             "observation":{"results":[{"source_call_id":"c1","content":"ok"}]}},
+            {"step_id":3,"source":"agent","timestamp":"2026-07-02T06:30:02.000Z",
+             "tool_calls":[{"tool_call_id":"c2","function_name":"Write","arguments":{"file_path":"b.rs"}}],
+             "observation":{"results":[{"source_call_id":"c2","content":"ok"}]}},
+            {"step_id":4,"source":"agent","timestamp":"2026-07-02T06:30:03.000Z","message":"still working"},
+            {"step_id":5,"source":"agent","timestamp":"2026-07-02T06:30:04.000Z","message":"done"}
+        ]"#,
+        );
+        let set = extract_waste_candidates(&t).unwrap();
+        let ids: Vec<&str> = set.candidates.iter().map(|c| c.id.as_str()).collect();
+        assert!(!ids.contains(&"detour"), "got {ids:?}");
     }
 
     /// Oversized user steps must fire the Prompt-Compression candidate.

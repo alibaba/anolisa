@@ -15,8 +15,8 @@ pub(crate) use self::compact::{
 use self::panel::{
     close_session_panel, core_adapter, partition_protected, redraw_session_panel,
     render_current_session_panel, render_not_ready, render_session_error, render_unavailable,
-    render_usage, session_card_action_from_event, session_list_lines, session_management_idle,
-    workspace_scope, SessionCardAction,
+    render_usage, session_all_workspaces_list_lines, session_card_action_from_event,
+    session_list_lines, session_management_idle, workspace_scope, SessionCardAction,
 };
 pub(crate) use self::state::{
     RuntimeSessionPanel, RuntimeSessionPanelPhase, SessionControlState, SessionLaunchRequest,
@@ -27,6 +27,9 @@ use crate::slash::panel::render_notice_panel;
 use crate::slash::prompt::write_shell_prompt;
 
 const SESSION_PAGE_SIZE: usize = 20;
+// Must stay in sync with cosh-core's MAX_LIST_LIMIT (currently 100). Core
+// clamps the requested limit to that range, so a value above it has no effect.
+const SESSION_ALL_PAGE_SIZE: usize = 100;
 const SESSION_PAGE_LOAD_AHEAD: usize = 4;
 
 pub(crate) fn render_session_command<W: Write>(
@@ -46,8 +49,8 @@ pub(crate) fn render_session_command<W: Write>(
             render_session_status(blocks, adapter, state, output)?;
             Ok(true)
         }
-        SessionCommand::List => {
-            render_session_list(blocks, adapter, state, output)?;
+        SessionCommand::List { all } => {
+            render_session_list(blocks, adapter, state, output, all)?;
             Ok(true)
         }
         SessionCommand::Resume(session_id) => {
@@ -144,7 +147,12 @@ pub(crate) fn render_session_card_actions<W: Write>(
                 };
                 let pagination_error = load_request.and_then(|(workspace, cursor, panel_id)| {
                     let core = core_adapter(adapter)?;
-                    match core.list_sessions_page(&workspace, SESSION_PAGE_SIZE, Some(&cursor)) {
+                    match core.list_sessions_page(
+                        &workspace,
+                        SESSION_PAGE_SIZE,
+                        Some(&cursor),
+                        false,
+                    ) {
                         Ok(page) => {
                             let panel = state.control.session_mut().pending_panel_mut().filter(
                                 |panel| {
@@ -338,7 +346,7 @@ fn open_session_manager<W: Write>(
         return Ok(true);
     };
     let workspace = workspace_scope(blocks);
-    let list = match core.list_sessions(&workspace) {
+    let list = match core.list_sessions(&workspace, false) {
         Ok(list) => list,
         Err(error) => {
             render_session_error(state, output, &error)?;
@@ -378,16 +386,25 @@ fn render_session_list<W: Write>(
     adapter: &AdapterInstance,
     state: &InlineState,
     output: &mut W,
+    all_workspaces: bool,
 ) -> std::io::Result<()> {
     let Some(core) = core_adapter(adapter) else {
         return render_unavailable(state, output);
     };
-    let list = match core.list_sessions(&workspace_scope(blocks)) {
+    let limit = if all_workspaces {
+        SESSION_ALL_PAGE_SIZE
+    } else {
+        SESSION_PAGE_SIZE
+    };
+    let workspace = workspace_scope(blocks);
+    let list = match core.list_sessions_page(&workspace, limit, None, all_workspaces) {
         Ok(list) => list,
         Err(error) => return render_session_error(state, output, &error),
     };
     let mut body = if list.sessions.is_empty() {
         vec![state.i18n().t(MessageId::SessionEmptyBody).to_string()]
+    } else if all_workspaces {
+        session_all_workspaces_list_lines(&list.sessions, &workspace)
     } else {
         list.sessions.iter().flat_map(session_list_lines).collect()
     };

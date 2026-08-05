@@ -154,7 +154,14 @@ read -r user_message
 case "$user_message" in
   *cosh-core-provider-write-pass-through*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-write","request":{"subtype":"can_use_tool","tool_name":"write_file","input":{"file_path":"/tmp/cosh-core-provider-smoke.txt","content":"SHOULD_NOT_LEAK_WRITE_CONTENT"},"tool_use_id":"toolu-cosh-core-write"}}'
-    if IFS= read -r response; then
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response; do
+      case "$response" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$response" ]; then
       case "$response" in
         *'"request_id":"ctrl-cosh-core-write"'*'"behavior":"allow"'*)
           printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-non-shell-pass-through","message":{"content":[{"type":"text","text":"Cosh-core non-shell write permission allowed through provider control protocol."}]}}'
@@ -232,7 +239,14 @@ read -r user_message
 case "$user_message" in
   *cosh-core-provider-write-details*)
     printf '%s\n' '{"type":"control_request","request_id":"ctrl-cosh-core-write-details","request":{"subtype":"can_use_tool","tool_name":"write_file","input":{"file_path":"/tmp/cosh-core-provider-details.txt","content":"SHOULD_NOT_LEAK_WRITE_DETAILS_CONTENT"},"tool_use_id":"toolu-cosh-core-write-details"}}'
-    if IFS= read -r response; then
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response; do
+      case "$response" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$response" ]; then
       case "$response" in
         *'"request_id":"ctrl-cosh-core-write-details"'*'"behavior":"deny"'*)
           printf '%s\n' '{"type":"assistant","session_id":"sess-cosh-core-write-details","message":{"content":[{"type":"text","text":"Cosh-core write details cancelled without content leak."}]}}'
@@ -309,7 +323,14 @@ read -r user_message
 case "$user_message" in
   *cosh-core-provider-write-deny*)
     printf '%s\n' '{{"type":"control_request","request_id":"ctrl-cosh-core-write-deny","request":{{"subtype":"can_use_tool","tool_name":"write_file","input":{{"file_path":"{denied_path}","content":"denied"}},"tool_use_id":"toolu-cosh-core-write-deny"}}}}'
-    if IFS= read -r response; then
+    # #1940: skip approval receipts that now precede the decision line.
+    while IFS= read -r response; do
+      case "$response" in
+        *'"type":"approval_receipt"'*) continue ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "$response" ]; then
       case "$response" in
         *'"request_id":"ctrl-cosh-core-write-deny"'*'"behavior":"deny"'*)
           printf '%s\n' '{{"type":"assistant","session_id":"sess-cosh-core-non-shell-deny","message":{{"content":[{{"type":"text","text":"Cosh-core non-shell write permission denied without host execution."}}]}}}}'

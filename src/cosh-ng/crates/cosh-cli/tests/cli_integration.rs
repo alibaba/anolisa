@@ -920,6 +920,110 @@ fn test_redacted_password_does_not_appear_in_log() {
 
 // --- Checkpoint: daemon unavailable graceful error ---
 
+fn checkpoint_diff_with_fake_response(response: Vec<u8>) -> (serde_json::Value, String, String) {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("test-ws");
+    std::fs::create_dir(&workspace).unwrap();
+    let socket_path = directory.path().join("daemon.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for cosh-cli to connect to fake ws-ckpt daemon"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("fake ws-ckpt daemon failed to accept connection: {error}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        let mut length = [0; 4];
+        stream.read_exact(&mut length).unwrap();
+        let mut request = vec![0; u32::from_le_bytes(length) as usize];
+        stream.read_exact(&mut request).unwrap();
+        stream.write_all(&response).unwrap();
+    });
+
+    let socket_path = socket_path.to_string_lossy().into_owned();
+    let output = cosh_bin()
+        .args([
+            "checkpoint",
+            "diff",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--from",
+            "snap-001",
+            "--to",
+            "snap-002",
+            "--socket",
+            &socket_path,
+        ])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let json = serde_json::from_str(&stdout).unwrap();
+    (json, stdout, socket_path)
+}
+
+fn assert_checkpoint_protocol_error(response: Vec<u8>, expected_kind: &str) {
+    let (json, stdout, socket_path) = checkpoint_diff_with_fake_response(response);
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "CheckpointProtocolError");
+    assert_eq!(json["error"]["subsystem"], "checkpoint");
+    assert_eq!(
+        json["error"]["details"],
+        serde_json::json!({
+            "phase": "response",
+            "kind": expected_kind,
+        })
+    );
+    assert_eq!(json["meta"]["subsystem"], "checkpoint");
+    for secret in [
+        socket_path.as_str(),
+        "failed to fill whole buffer",
+        "ConnectionReset",
+        "invalid value",
+        "bincode",
+    ] {
+        assert!(!stdout.contains(secret), "protocol detail leaked: {secret}");
+    }
+}
+
+#[test]
+fn test_checkpoint_diff_truncated_length_is_protocol_error() {
+    assert_checkpoint_protocol_error(vec![1, 2], "truncated_length");
+}
+
+#[test]
+fn test_checkpoint_diff_truncated_payload_is_protocol_error() {
+    let mut response = 8_u32.to_le_bytes().to_vec();
+    response.extend_from_slice(&[1, 2]);
+    assert_checkpoint_protocol_error(response, "truncated_payload");
+}
+
+#[test]
+fn test_checkpoint_diff_oversized_length_is_protocol_error() {
+    assert_checkpoint_protocol_error(
+        (64_u32 * 1024 * 1024 + 1).to_le_bytes().to_vec(),
+        "oversized_length",
+    );
+}
+
+#[test]
+fn test_checkpoint_diff_invalid_bincode_is_protocol_error() {
+    let mut response = 4_u32.to_le_bytes().to_vec();
+    response.extend_from_slice(&u32::MAX.to_le_bytes());
+    assert_checkpoint_protocol_error(response, "decode_failed");
+}
+
 #[test]
 fn test_checkpoint_create_skipped_is_success() {
     let reason = "workspace has no changes";
@@ -1209,6 +1313,28 @@ fn test_pkg_search_bash_matches_installed_package_list() {
         Some(bash_is_managed),
         "search installation state must match the active package manager"
     );
+}
+
+#[test]
+fn test_apt_pkg_search_glob_returns_only_matching_names() {
+    if pkg_manager_available().0 != "apt" {
+        return;
+    }
+
+    let output = cosh_bin().args(["pkg", "search", "lib*"]).output().unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let packages = json["data"]["packages"].as_array().unwrap();
+    assert!(
+        !packages.is_empty(),
+        "apt-cache should find library packages"
+    );
+    assert!(packages.iter().all(|package| {
+        package["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("lib"))
+    }));
 }
 
 // --- pkg list: JSON envelope ---

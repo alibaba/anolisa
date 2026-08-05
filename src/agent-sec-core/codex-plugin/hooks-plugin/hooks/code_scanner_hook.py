@@ -8,8 +8,8 @@ HookOutput JSON to stdout.
 Modes (controlled by CODE_SCANNER_MODE env var, default: observe):
   - observe: silent pass-through, only audit trail via agent-sec-cli events.
             Even if dangerous commands are detected, they will NOT be blocked.
-  - deny: block execution with reason when risk is detected.
-          (agent-sec-cli's "warn" verdict is escalated to block in this mode)
+  - block: block execution with reason when risk is detected.
+           (agent-sec-cli's "warn" verdict is escalated to block in this mode)
 
 Self-protect: currently disabled — no codex-specific self-protect rule exists
 in agent-sec-cli yet. When shell-self-protect-codex is added, re-enable the
@@ -29,23 +29,42 @@ import os
 import subprocess
 import sys
 
+from hook_config import env_flag_enabled, normalize_hook_policy
 from trace_context import with_trace_context
 
 # -- config ----------------------------------------------------------------
 
-MODE = os.environ.get("CODE_SCANNER_MODE", "observe").lower()
+HOOK_ENABLED = env_flag_enabled("CODE_SCANNER_HOOK_ENABLED", True)
+_DEFAULT_LANGUAGE = "bash"
+
+
+def _diagnostic(message: str) -> None:
+    print(f"[code-scanner] {' '.join(message.split())}", file=sys.stderr)
+
+
+def _read_mode() -> str:
+    raw = os.environ.get("CODE_SCANNER_MODE")
+    mode = normalize_hook_policy(raw, "")
+    if raw is not None and mode not in {"observe", "block"}:
+        _diagnostic(
+            f"invalid or unsupported CODE_SCANNER_MODE={raw[:32]!r}; using observe"
+        )
+        return "observe"
+    return mode or "observe"
+
+
+MODE = _read_mode()
 try:
     TIMEOUT = int(os.environ.get("CODE_SCANNER_TIMEOUT", "10"))
 except (ValueError, TypeError):
     TIMEOUT = 10
-_DEFAULT_LANGUAGE = "bash"
 
 
 # -- output helpers --------------------------------------------------------
 
 
 def _block(findings: list[dict]) -> None:
-    """Output block decision to prevent execution (mode=deny)."""
+    """Output block decision to prevent execution (mode=block)."""
     descs = [
         f"- {f.get('rule_id', 'unknown')}: {f.get('desc_zh', f.get('desc_en', ''))}"
         for f in findings
@@ -73,6 +92,9 @@ def _block_self_protect(command: str) -> None:
 
 
 def main() -> None:
+    if not HOOK_ENABLED:
+        return
+
     # 1. Read stdin JSON (fail-open: empty stdout = allow in Codex)
     try:
         input_data = json.load(sys.stdin)
@@ -150,7 +172,7 @@ def main() -> None:
     # 只能 block 或放行，所以 warn 升级为 block（与 deny 同等对待）。
     if MODE == "observe":
         return  # observe 模式：不拦截，仅通过 agent-sec-cli events 审计
-    elif MODE == "deny":
+    elif MODE == "block":
         _block(findings)  # warn 和 deny 均拦截
     # else: unknown mode, fail-open
 

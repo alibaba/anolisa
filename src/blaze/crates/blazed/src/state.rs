@@ -21,26 +21,26 @@ use uuid::Uuid;
 
 use crate::error::Result;
 use crate::metrics::Metrics;
-use crate::spawner::{DynSpawner, SpawnHandle};
+use crate::sandbox::{SandboxManager, SandboxManagerInit};
+use crate::spawner::SpawnerRegistry;
 
 /// All daemon mutable state. Cloning is via `Arc` (see the `state.clone()`
 /// idiom in `daemon.rs`); the struct itself is never `Clone`.
 pub struct ServerState {
     pub config: Mutex<DaemonConfig>,
     pub policy: Mutex<PolicyEngine>,
-    pub pool: Mutex<PoolManager>,
+    pub pool: Arc<Mutex<PoolManager>>,
     pub template: Mutex<TemplateRegistry>,
     pub hook: Mutex<HookRegistry>,
-    pub instances: Mutex<HashMap<Uuid, SandboxInstance>>,
-    pub spawn_handles: Mutex<HashMap<Uuid, SpawnHandle>>,
-    pub spawner: DynSpawner,
+    pub instances: Arc<Mutex<HashMap<Uuid, SandboxInstance>>>,
+    pub manager: SandboxManager,
     /// The backend kind that `build_spawner` actually probed and selected.
     /// API handlers use this to constrain availability to the single active
     /// backend rather than reporting all configured binaries.
     pub active_backend: BackendKind,
     pub storage: Arc<dyn StorageProvider>,
     pub state_dir: PathBuf,
-    pub metrics: Metrics,
+    pub metrics: Arc<Metrics>,
 }
 
 impl ServerState {
@@ -54,7 +54,7 @@ impl ServerState {
         pool: PoolManager,
         template: TemplateRegistry,
         hook: HookRegistry,
-        spawner: DynSpawner,
+        spawners: SpawnerRegistry,
         active_backend: BackendKind,
         storage: Arc<dyn StorageProvider>,
     ) -> Self {
@@ -63,21 +63,35 @@ impl ServerState {
             tracing::warn!(error = %err, "failed to scan state_dir, starting empty");
             HashMap::new()
         });
+        let (manager, resources) = SandboxManager::new(SandboxManagerInit {
+            instances,
+            pool,
+            spawners,
+            active_backend,
+            storage: storage.clone(),
+            state_dir: state_dir.clone(),
+            rootfs_size: config.storage.rootfs_size,
+            mem_size: config.storage.mem_size,
+        });
 
         Self {
             config: Mutex::new(config),
             policy: Mutex::new(policy),
-            pool: Mutex::new(pool),
+            pool: resources.pool,
             template: Mutex::new(template),
             hook: Mutex::new(hook),
-            instances: Mutex::new(instances),
-            spawn_handles: Mutex::new(HashMap::new()),
-            spawner,
+            instances: resources.instances,
+            manager,
             active_backend,
             storage,
             state_dir,
-            metrics: Metrics::new(),
+            metrics: resources.metrics,
         }
+    }
+
+    /// Return the async operation lock that serializes one sandbox mutation.
+    pub fn operation_lock(&self, id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+        self.manager.operation_lock(id)
     }
 }
 

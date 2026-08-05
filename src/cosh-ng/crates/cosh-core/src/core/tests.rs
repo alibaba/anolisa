@@ -233,6 +233,70 @@ async fn project_context_reaches_the_provider_boundary() {
         .contains("## Project Context\nprovider-visible marker"));
 }
 
+#[test]
+fn shell_cwd_does_not_replace_the_fixed_project_root() {
+    let mut core = CoshCore::new(
+        CoreConfig::default(),
+        Box::new(MockProvider::new(Vec::new())),
+        ToolRegistry::new(),
+    );
+    let project_root = core.project_root.clone();
+    let directory = tempfile::tempdir().unwrap();
+
+    core.shell_context = Some(ShellContext {
+        cwd: directory.path().to_path_buf(),
+        env: std::collections::HashMap::new(),
+        last_exit_code: 0,
+    });
+
+    assert_eq!(core.project_root, project_root);
+    assert_eq!(core.cwd(), directory.path());
+}
+
+#[test]
+fn fixed_project_root_is_the_cwd_without_shell_context() {
+    let mut core = CoshCore::new(
+        CoreConfig::default(),
+        Box::new(MockProvider::new(Vec::new())),
+        ToolRegistry::new(),
+    );
+    let project_root = tempfile::tempdir().unwrap();
+    core.project_root = project_root.path().to_path_buf();
+    core.shell_context = None;
+
+    assert_eq!(core.cwd(), project_root.path());
+}
+
+#[tokio::test]
+async fn user_provided_secret_reaches_the_provider_boundary() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        messages: Arc::clone(&captured),
+        ..RecordingProvider::default()
+    };
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    let mut core = CoshCore::new(config, Box::new(provider), ToolRegistry::new());
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+    let secret = "sk-user-provided-secret-value";
+
+    core.handle_user_message(
+        &format!("write api_key={secret} to the config"),
+        &mut reader,
+        &mut output,
+    )
+    .await
+    .unwrap();
+
+    let messages = captured.lock().unwrap();
+    let user_message = messages
+        .iter()
+        .find(|message| message.role == "user")
+        .expect("provider user message");
+    assert!(user_message.content.as_text().contains(secret));
+}
+
 fn find_declaration<'a>(
     declarations: &'a [crate::provider::ToolDeclaration],
     name: &str,
@@ -981,6 +1045,347 @@ async fn request_id_skips_mismatched() {
     assert!(matches!(result, ApprovalResult::Denied(_)));
 }
 
+/// Serializes the two tests that mutate the process-wide
+/// `COSH_CORE_APPROVAL_TIMEOUT_SECS`; without it a concurrent
+/// `remove_var` could send the hanging test back to the 6h default.
+static APPROVAL_TIMEOUT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test]
+async fn unanswered_approval_times_out_instead_of_hanging_forever() {
+    // #1940 residual guard: hours-scale by default, overridden here so the
+    // wait ends quickly. A peer that never answers and never closes the
+    // channel must not hang the turn forever.
+    let _guard = APPROVAL_TIMEOUT_ENV_LOCK.lock().await;
+    std::env::set_var("COSH_CORE_APPROVAL_TIMEOUT_SECS", "1");
+    let core = make_core(MockProvider::text_only(""));
+    let (client, _server) = tokio::io::duplex(64);
+    let mut reader = BufReader::new(client).lines();
+
+    let result = core
+        .wait_for_approval("expected-id", false, &mut reader)
+        .await;
+    std::env::remove_var("COSH_CORE_APPROVAL_TIMEOUT_SECS");
+    assert!(matches!(result, ApprovalResult::TimedOut));
+}
+
+#[tokio::test]
+async fn answered_approval_beats_the_residual_timeout() {
+    // A response that arrives normally must win over the deadline: the
+    // guard only fires when nothing ever comes back.
+    let _guard = APPROVAL_TIMEOUT_ENV_LOCK.lock().await;
+    std::env::set_var("COSH_CORE_APPROVAL_TIMEOUT_SECS", "1");
+    let core = make_core(MockProvider::text_only(""));
+    let (mut client, server) = tokio::io::duplex(256);
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let mut server = server;
+        server
+            .write_all(
+                br#"{"type":"control_response","response":{"subtype":"success","request_id":"expected-id","response":{"behavior":"allow"}}}
+"#,
+            )
+            .await
+            .expect("write response");
+    });
+    let mut reader = BufReader::new(&mut client).lines();
+
+    let result = core
+        .wait_for_approval("expected-id", false, &mut reader)
+        .await;
+    std::env::remove_var("COSH_CORE_APPROVAL_TIMEOUT_SECS");
+    assert!(matches!(result, ApprovalResult::Allowed));
+}
+
+#[tokio::test]
+async fn approval_receipt_disarms_the_residual_timeout_for_a_pending_card() {
+    // #1940 receipt protocol: once the shell acknowledges the request, a
+    // card waiting on the user may outlive the residual deadline — the
+    // shell owns the terminal state from that point on.
+    let _guard = APPROVAL_TIMEOUT_ENV_LOCK.lock().await;
+    std::env::set_var("COSH_CORE_APPROVAL_TIMEOUT_SECS", "1");
+    let core = make_core(MockProvider::text_only(""));
+    let (mut client, server) = tokio::io::duplex(512);
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let mut server = server;
+        server
+            .write_all(
+                br#"{"type":"approval_receipt","request_id":"expected-id"}
+"#,
+            )
+            .await
+            .expect("write receipt");
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        server
+            .write_all(
+                br#"{"type":"control_response","response":{"subtype":"success","request_id":"expected-id","response":{"behavior":"allow"}}}
+"#,
+            )
+            .await
+            .expect("write response");
+    });
+    let mut reader = BufReader::new(&mut client).lines();
+
+    let result = core
+        .wait_for_approval("expected-id", false, &mut reader)
+        .await;
+    std::env::remove_var("COSH_CORE_APPROVAL_TIMEOUT_SECS");
+    assert!(matches!(result, ApprovalResult::Allowed));
+}
+
+#[tokio::test]
+async fn approval_receipt_disarms_the_residual_timeout_for_a_slow_host_command() {
+    // Same disarm for a host-executed command finishing after the residual
+    // deadline: the executed result must reach the model, never a phantom
+    // "not executed" timeout.
+    let _guard = APPROVAL_TIMEOUT_ENV_LOCK.lock().await;
+    std::env::set_var("COSH_CORE_APPROVAL_TIMEOUT_SECS", "1");
+    let core = make_core(MockProvider::text_only(""));
+    let (mut client, server) = tokio::io::duplex(512);
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let mut server = server;
+        server
+            .write_all(
+                br#"{"type":"approval_receipt","request_id":"expected-id"}
+"#,
+            )
+            .await
+            .expect("write receipt");
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        server
+            .write_all(
+                br#"{"type":"control_response","response":{"subtype":"success","request_id":"expected-id","response":{"behavior":"host_executed_shell","result":{"llmContent":"command output","metadata":{"exit_code":0}}}}}
+"#,
+            )
+            .await
+            .expect("write response");
+    });
+    let mut reader = BufReader::new(&mut client).lines();
+
+    let result = core
+        .wait_for_approval("expected-id", true, &mut reader)
+        .await;
+    std::env::remove_var("COSH_CORE_APPROVAL_TIMEOUT_SECS");
+    assert!(matches!(
+        result,
+        ApprovalResult::HostExecutedShell {
+            exit_code: Some(0),
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn approval_receipt_for_a_different_request_keeps_the_residual_timeout() {
+    // A receipt only disarms the wait for its own request id; an unrelated
+    // receipt observed on the shared reader must not leak the disarm.
+    let _guard = APPROVAL_TIMEOUT_ENV_LOCK.lock().await;
+    std::env::set_var("COSH_CORE_APPROVAL_TIMEOUT_SECS", "1");
+    let core = make_core(MockProvider::text_only(""));
+    let (mut client, server) = tokio::io::duplex(256);
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let mut server = server;
+        server
+            .write_all(
+                br#"{"type":"approval_receipt","request_id":"other-id"}
+"#,
+            )
+            .await
+            .expect("write receipt");
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    });
+    let mut reader = BufReader::new(&mut client).lines();
+
+    let result = core
+        .wait_for_approval("expected-id", false, &mut reader)
+        .await;
+    std::env::remove_var("COSH_CORE_APPROVAL_TIMEOUT_SECS");
+    assert!(matches!(result, ApprovalResult::TimedOut));
+}
+
+#[tokio::test]
+async fn approval_timeout_fails_the_turn_without_a_second_generation() {
+    // #1940: a timed-out approval must end the turn. The mock peer keeps
+    // the channel open but never answers; after the residual deadline the
+    // turn fails — no second provider generation, the gated tool never
+    // runs, and a late response written afterwards is never consumed.
+    let _guard = APPROVAL_TIMEOUT_ENV_LOCK.lock().await;
+    std::env::set_var("COSH_CORE_APPROVAL_TIMEOUT_SECS", "1");
+    let shell_calls = Arc::new(AtomicUsize::new(0));
+    let provider = MockProvider::new(vec![
+        vec![
+            GenerateEvent::ToolCallStart {
+                index: 0,
+                id: "call-1".to_string(),
+                name: "shell".to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index: 0,
+                arguments_delta: r#"{"command":"echo must-not-run"}"#.to_string(),
+            },
+            GenerateEvent::ToolCallEnd { index: 0 },
+            GenerateEvent::MessageEnd,
+        ],
+        vec![
+            GenerateEvent::TextDelta("second generation must never happen".to_string()),
+            GenerateEvent::MessageEnd,
+        ],
+    ]);
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "suggest".to_string();
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(CountingShellTool {
+        calls: Arc::clone(&shell_calls),
+    }));
+    let mut core = CoshCore::new(config, Box::new(provider), tools);
+
+    let (client, mut server) = tokio::io::duplex(256);
+    let mut reader = BufReader::new(client).lines();
+    let mut output = Vec::new();
+
+    let result = core
+        .handle_user_message("run it", &mut reader, &mut output)
+        .await;
+    std::env::remove_var("COSH_CORE_APPROVAL_TIMEOUT_SECS");
+
+    // A late response written after the timeout has no waiter left: it must
+    // never turn into an execution.
+    use tokio::io::AsyncWriteExt;
+    server
+        .write_all(
+            br#"{"type":"control_response","response":{"subtype":"success","request_id":"req-0","response":{"behavior":"allow"}}}
+"#,
+        )
+        .await
+        .expect("write late response");
+
+    let error = result.expect_err("a timed-out approval must fail the turn");
+    assert!(
+        error.contains("timed out"),
+        "the failure must name the timeout: {error}"
+    );
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        !output_str.contains("second generation must never happen"),
+        "the turn must fail before another provider generation: {output_str}"
+    );
+    assert_eq!(
+        shell_calls.load(Ordering::SeqCst),
+        0,
+        "the gated tool must never execute"
+    );
+    let tool_result = core
+        .messages
+        .iter()
+        .find(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("call-1"))
+        .expect("the declared tool call keeps a paired result");
+    match &tool_result.content {
+        crate::provider::MessageContent::Text(content) => {
+            assert!(content.contains("approval timed out"), "{content}");
+        }
+        _ => panic!("expected text tool result"),
+    }
+}
+
+/// A post_tool_use_failure hook that requests a sandbox bypass and touches a
+/// marker file so the test can prove the hook actually ran.
+fn sandbox_bypass_hook(marker: &std::path::Path) -> crate::config::HookDefinition {
+    crate::config::HookDefinition {
+        command: format!(
+            "touch '{}' && printf '%s\\n' '{}'",
+            marker.display(),
+            r#"{"hookSpecificOutput":{"sandbox_bypass_request":{"original_command":"echo must-not-run","reason":"sandbox blocked"}}}"#
+        ),
+        name: Some("sandbox-bypass-hook".to_string()),
+        matcher: None,
+        timeout: Some(10_000),
+        sequential: None,
+        env: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn approval_timeout_suppresses_the_sandbox_bypass_reprompt() {
+    // #1940: once the policy approval times out the turn is fatal, so a
+    // post_tool_use_failure hook's sandbox-bypass request must not open a
+    // second approval — its Allowed arm would execute the tool behind the
+    // recorded "not executed" result.
+    let _guard = APPROVAL_TIMEOUT_ENV_LOCK.lock().await;
+    std::env::set_var("COSH_CORE_APPROVAL_TIMEOUT_SECS", "1");
+    let hook_marker = std::env::temp_dir().join(format!(
+        "cosh-bypass-hook-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&hook_marker);
+    let shell_calls = Arc::new(AtomicUsize::new(0));
+    let provider = MockProvider::new(vec![
+        vec![
+            GenerateEvent::ToolCallStart {
+                index: 0,
+                id: "call-1".to_string(),
+                name: "shell".to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index: 0,
+                arguments_delta: r#"{"command":"echo must-not-run"}"#.to_string(),
+            },
+            GenerateEvent::ToolCallEnd { index: 0 },
+            GenerateEvent::MessageEnd,
+        ],
+        vec![
+            GenerateEvent::TextDelta("second generation must never happen".to_string()),
+            GenerateEvent::MessageEnd,
+        ],
+    ]);
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "suggest".to_string();
+    config.hooks.enabled = true;
+    config.hooks.post_tool_use_failure = vec![sandbox_bypass_hook(&hook_marker)];
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(CountingShellTool {
+        calls: Arc::clone(&shell_calls),
+    }));
+    let mut core = CoshCore::new(config, Box::new(provider), tools);
+
+    let (client, _server) = tokio::io::duplex(256);
+    let mut reader = BufReader::new(client).lines();
+    let mut output = Vec::new();
+
+    let result = core
+        .handle_user_message("run it", &mut reader, &mut output)
+        .await;
+    std::env::remove_var("COSH_CORE_APPROVAL_TIMEOUT_SECS");
+
+    let error = result.expect_err("a timed-out approval must fail the turn");
+    assert!(error.contains("timed out"), "{error}");
+    assert!(
+        hook_marker.exists(),
+        "the failure hook must have run, otherwise this test proves nothing"
+    );
+    let output_str = String::from_utf8(output).unwrap();
+    assert!(
+        !output_str.contains("second generation must never happen"),
+        "the turn must fail before another provider generation: {output_str}"
+    );
+    assert_eq!(
+        output_str.matches("can_use_tool").count(),
+        1,
+        "only the policy approval may be emitted; the bypass reprompt must be suppressed: {output_str}"
+    );
+    assert_eq!(
+        shell_calls.load(Ordering::SeqCst),
+        0,
+        "the tool must never execute, not even behind a bypass approval"
+    );
+    let _ = std::fs::remove_file(&hook_marker);
+}
+
 #[tokio::test]
 async fn approval_flow_host_executed_shell_uses_tool_result() {
     let shell_calls = Arc::new(AtomicUsize::new(0));
@@ -1671,7 +2076,9 @@ fn unparseable_shell_turn(call_id: &str) -> Vec<GenerateEvent> {
     ]
 }
 
-async fn run_shell_turns(turns: Vec<Vec<GenerateEvent>>) -> (Result<(), String>, String) {
+async fn run_shell_turns(
+    turns: Vec<Vec<GenerateEvent>>,
+) -> (Result<AgentTurnOutcome, String>, String) {
     let mut config = CoreConfig::default();
     config.agent.approval_mode = "trust".to_string();
     let tools = ToolRegistry::with_defaults_for_test();
@@ -2421,5 +2828,531 @@ async fn cosh_question_text_with_valid_schema_still_asks() {
             .pointer("/request/question")
             .and_then(|v| v.as_str()),
         Some("Which branch?")
+    );
+}
+
+// ─── #1994: control transport failures must never precede a blocking read ───
+
+/// How a control-request write fails.
+#[derive(Clone, Copy)]
+enum FailStep {
+    /// The first `write` call fails outright.
+    Write,
+    /// The first `write` accepts a prefix, the next one fails: `write_all` has
+    /// already put bytes on the wire, so delivery is genuinely unknown.
+    PartialThenWrite,
+    /// Writes succeed, `flush` fails.
+    Flush,
+}
+
+/// A stdout whose write or flush fails, standing in for a broken pipe.
+struct FailingWriter {
+    fail_on: FailStep,
+    written: Vec<u8>,
+    writes: usize,
+}
+
+impl FailingWriter {
+    fn new(fail_on: FailStep) -> Self {
+        Self {
+            fail_on,
+            written: Vec::new(),
+            writes: 0,
+        }
+    }
+
+    fn broken_pipe(detail: &'static str) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::BrokenPipe, detail)
+    }
+}
+
+impl std::io::Write for FailingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.writes += 1;
+        match self.fail_on {
+            FailStep::Write => Err(Self::broken_pipe("broken pipe")),
+            FailStep::PartialThenWrite => {
+                if self.writes == 1 && buf.len() > 1 {
+                    let accepted = buf.len() / 2;
+                    self.written.extend_from_slice(&buf[..accepted]);
+                    Ok(accepted)
+                } else {
+                    Err(Self::broken_pipe("broken pipe after partial write"))
+                }
+            }
+            FailStep::Flush => {
+                self.written.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self.fail_on {
+            FailStep::Write | FailStep::PartialThenWrite => Ok(()),
+            FailStep::Flush => Err(Self::broken_pipe("flush failed")),
+        }
+    }
+}
+
+#[test]
+fn fatal_diagnostic_is_best_effort() {
+    let mut failing = FailingWriter::new(FailStep::Write);
+    emit_fatal_diagnostic(&mut failing, "transport failed");
+
+    let mut output = Vec::new();
+    emit_fatal_diagnostic(&mut output, "transport failed");
+    assert_eq!(
+        String::from_utf8(output).expect("diagnostic is UTF-8"),
+        "cosh-core fatal: transport failed\n"
+    );
+}
+
+/// A stdin that fails the test if the core reads it at all.
+///
+/// This is the #1994 assertion: once a control request could not be sent, the
+/// core must return, not park on a read that only a dead peer could end.
+struct NeverReadStdin;
+
+impl tokio::io::AsyncRead for NeverReadStdin {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        panic!("core read stdin after a control request it failed to send");
+    }
+}
+
+/// One shell call that needs approval, so the turn reaches the control request.
+fn approval_provider() -> MockProvider {
+    MockProvider::new(vec![vec![
+        GenerateEvent::ToolCallStart {
+            index: 0,
+            id: "call-1".to_string(),
+            name: "shell".to_string(),
+        },
+        GenerateEvent::ToolCallDelta {
+            index: 0,
+            arguments_delta: r#"{"command":"echo hi"}"#.to_string(),
+        },
+        GenerateEvent::ToolCallEnd { index: 0 },
+        GenerateEvent::MessageEnd,
+    ]])
+}
+
+fn approval_core(calls: Arc<AtomicUsize>) -> CoshCore {
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "suggest".to_string();
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(CountingShellTool { calls }));
+    let mut core = CoshCore::new(config, Box::new(approval_provider()), tools);
+    core.audit = CoreAuditRecorder::test_capture(&core.session_id);
+    core
+}
+
+async fn assert_approval_emit_failure_is_session_fatal(fail_on: FailStep, expected_reason: &str) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut core = approval_core(Arc::clone(&calls));
+    let mut reader = tokio::io::BufReader::new(NeverReadStdin).lines();
+    let mut writer = FailingWriter::new(fail_on);
+
+    let error = core
+        .handle_user_message("run echo hi", &mut reader, &mut writer)
+        .await
+        .expect_err("an unsent approval request must fail the turn");
+
+    assert!(
+        error.contains("control transport"),
+        "turn error must name the transport: {error}"
+    );
+    assert!(
+        core.control_transport_failure().is_some(),
+        "the failure must be session-fatal so the process exits non-zero"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a tool whose approval request could not be sent must not run"
+    );
+    assert_eq!(
+        core.metrics.approval_count, 0,
+        "a request that never entered the wait is not an approval interaction"
+    );
+    assert_eq!(core.metrics.approval_allow, 0);
+    assert_eq!(core.metrics.approval_deny, 0);
+
+    // The approval still owes a terminal audit event, and it must be
+    // distinguishable from a user decision.
+    let events = core.audit.captured_events();
+    let resolved = events
+        .iter()
+        .find(|event| event.event_type.as_str() == "approval.resolved")
+        .expect("an unsent approval must still be audited as resolved");
+    assert_eq!(
+        resolved.data().get("decision").and_then(|v| v.as_str()),
+        Some("emit_failed")
+    );
+    assert_eq!(
+        resolved.data().get("reason_code").and_then(|v| v.as_str()),
+        Some(expected_reason)
+    );
+    assert!(
+        resolved.identity.request_id.is_some(),
+        "the audit record must carry the request id"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type.as_str() == "approval.requested"),
+        "the request must still be audited before its failure"
+    );
+    // The turn owes a terminal event too, or audit shows a run that never ended.
+    let turn_failed = events
+        .iter()
+        .find(|event| event.event_type.as_str() == "turn.failed")
+        .expect("a transport-killed turn must be audited as failed");
+    assert_eq!(
+        turn_failed
+            .data()
+            .get("reason_code")
+            .and_then(|v| v.as_str()),
+        Some("control_transport_failed")
+    );
+    assert_eq!(
+        events.last().map(|event| event.event_type.as_str()),
+        Some("turn.failed"),
+        "the turn terminal must follow every child lifecycle event"
+    );
+}
+
+#[tokio::test]
+async fn approval_write_failure_never_waits_for_a_response() {
+    assert_approval_emit_failure_is_session_fatal(FailStep::Write, "control_transport_write").await;
+}
+
+#[tokio::test]
+async fn approval_partial_write_then_failure_never_waits_for_a_response() {
+    // Bytes did reach the wire, so delivery is unknown rather than absent. The
+    // core must still stop instead of waiting for a decision it cannot get.
+    assert_approval_emit_failure_is_session_fatal(
+        FailStep::PartialThenWrite,
+        "control_transport_write",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn approval_flush_failure_never_waits_for_a_response() {
+    assert_approval_emit_failure_is_session_fatal(FailStep::Flush, "control_transport_flush").await;
+}
+
+/// A PreToolUse hook that answers `ask`, so only the hook demands approval.
+fn ask_hook(name: &str) -> crate::config::HookDefinition {
+    crate::config::HookDefinition {
+        command: r#"python3 -c 'print("""{"decision":"ask","reason":"needs review"}""")'"#
+            .to_string(),
+        name: Some(name.to_string()),
+        matcher: None,
+        timeout: Some(10_000),
+        sequential: None,
+        env: Default::default(),
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hook_ask_writes_a_complete_can_use_tool_line_to_a_real_pipe() {
+    // The #1994 report claimed the request never reached stdout. Over a real
+    // kernel transport, with a stdin that never answers, the full JSONL record
+    // is there.
+    let provider = approval_provider();
+    let mut config = CoreConfig::default();
+    // Trust mode: only the hook asks, so this also pins that a hook `ask`
+    // cannot be auto-approved away.
+    config.agent.approval_mode = "trust".to_string();
+    config.hooks.enabled = true;
+    config.hooks.pre_tool_use = vec![ask_hook("ask-hook")];
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(CountingShellTool {
+        calls: Arc::clone(&calls),
+    }));
+    let mut core = CoshCore::new(config, Box::new(provider), tools);
+
+    // A socket pair rather than `std::io::pipe`: same kernel-buffered
+    // byte stream, without raising the toolchain this crate needs.
+    let (pipe_reader, pipe_writer) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+    let mut writer = std::io::BufWriter::new(pipe_writer);
+    // No approval response ever arrives: EOF, not a decision.
+    let mut reader = empty_reader().await;
+
+    core.handle_user_message("run echo hi", &mut reader, &mut writer)
+        .await
+        .expect("an unanswered approval ends the turn as interrupted, not as an error");
+
+    drop(writer);
+    let mut lines = std::io::BufRead::lines(std::io::BufReader::new(pipe_reader));
+    let request = lines
+        .by_ref()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(&line).ok())
+        .find(|value| value["request"]["subtype"] == "can_use_tool")
+        .expect("can_use_tool must reach the pipe even though stdin never answers");
+    assert_eq!(request["request"]["tool_name"], "shell");
+    assert_eq!(
+        request["request"]["hook_requires_approval"], true,
+        "a hook ask must be shown, not auto-approved in trust mode"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "no decision arrived, so the tool must not have run"
+    );
+    assert!(
+        core.control_transport_failure().is_none(),
+        "a healthy pipe is not a transport failure"
+    );
+}
+
+#[tokio::test]
+async fn evidence_emit_failure_never_waits_for_a_response() {
+    let core = make_core(MockProvider::new(vec![]));
+    let mut reader = tokio::io::BufReader::new(NeverReadStdin).lines();
+    let mut writer = FailingWriter::new(FailStep::Write);
+
+    let result = core
+        .handle_shell_evidence(
+            "call-evidence",
+            &serde_json::json!({"action":"list_commands"}),
+            &mut reader,
+            &mut writer,
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(
+        result.output.contains("delivery could not be confirmed"),
+        "{}",
+        result.output
+    );
+    assert!(
+        core.control_transport_failure().is_some(),
+        "the transport failure must end the session, not just this tool call"
+    );
+}
+
+#[tokio::test]
+async fn question_emit_failure_never_waits_for_an_answer() {
+    let core = make_core(MockProvider::new(vec![]));
+    let mut reader = tokio::io::BufReader::new(NeverReadStdin).lines();
+    let mut writer = FailingWriter::new(FailStep::Flush);
+
+    let result = core
+        .handle_ask_user(
+            &crate::tool::ask_user_question::AskUserQuestionParams {
+                question: "Which branch?".to_string(),
+                options: vec![],
+                allow_free_text: true,
+                multi_select: false,
+            },
+            &mut reader,
+            &mut writer,
+        )
+        .await;
+
+    assert!(result.is_error);
+    assert!(
+        result.output.contains("delivery could not be confirmed"),
+        "{}",
+        result.output
+    );
+    assert!(core.control_transport_failure().is_some());
+}
+
+#[tokio::test]
+async fn evidence_emit_failure_ends_the_turn_and_pairs_the_history() {
+    let provider = MockProvider::new(vec![vec![
+        GenerateEvent::ToolCallStart {
+            index: 0,
+            id: "call-evidence".to_string(),
+            name: "cosh_shell_evidence".to_string(),
+        },
+        GenerateEvent::ToolCallDelta {
+            index: 0,
+            arguments_delta: r#"{"action":"list_commands"}"#.to_string(),
+        },
+        GenerateEvent::ToolCallEnd { index: 0 },
+        GenerateEvent::MessageEnd,
+    ]]);
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(crate::tool::shell_evidence::ShellEvidenceTool));
+    let mut core = CoshCore::new(config, Box::new(provider), tools);
+    let mut reader = tokio::io::BufReader::new(NeverReadStdin).lines();
+    let mut writer = FailingWriter::new(FailStep::Write);
+
+    let error = core
+        .handle_user_message("what ran?", &mut reader, &mut writer)
+        .await
+        .expect_err("a dead transport must end the turn");
+
+    assert!(error.contains("control transport"), "{error}");
+    // Every declared call still owes a result, or the persisted transcript
+    // cannot be replayed.
+    let tool_results = core
+        .messages
+        .iter()
+        .filter(|message| message.role == "tool")
+        .count();
+    assert_eq!(tool_results, 1);
+}
+
+#[tokio::test]
+async fn user_prompt_submit_ask_emit_failure_never_waits_for_a_response() {
+    // The prompt-level hook panel gates a wait exactly like the tool-level one,
+    // and it happens before any transcript entry exists.
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    config.hooks.enabled = true;
+    config.hooks.user_prompt_submit = vec![ask_hook("prompt-ask-hook")];
+    let mut core = CoshCore::new(
+        config,
+        Box::new(MockProvider::text_only("must never be reached")),
+        ToolRegistry::new(),
+    );
+    core.audit = CoreAuditRecorder::test_capture(&core.session_id);
+    let mut reader = tokio::io::BufReader::new(NeverReadStdin).lines();
+    let mut writer = FailingWriter::new(FailStep::Write);
+
+    let error = core
+        .handle_user_message("do something", &mut reader, &mut writer)
+        .await
+        .expect_err("an unsent prompt approval must fail the turn");
+
+    assert!(error.contains("control transport"), "{error}");
+    assert!(core.control_transport_failure().is_some());
+    assert!(
+        core.messages.is_empty(),
+        "the prompt was never approved, so it must not enter the transcript"
+    );
+    let resolved = core
+        .audit
+        .captured_events()
+        .iter()
+        .find(|event| event.event_type.as_str() == "approval.resolved")
+        .expect("the prompt approval owes a terminal event")
+        .clone();
+    assert_eq!(
+        resolved.data().get("decision").and_then(|v| v.as_str()),
+        Some("emit_failed")
+    );
+}
+
+#[tokio::test]
+async fn transport_failure_on_one_call_skips_the_rest_of_the_batch() {
+    // The evidence path can only report the failure through the session flag,
+    // so without promoting it at the loop boundary the second call would run.
+    let provider = MockProvider::new(vec![vec![
+        GenerateEvent::ToolCallStart {
+            index: 0,
+            id: "call-evidence".to_string(),
+            name: "cosh_shell_evidence".to_string(),
+        },
+        GenerateEvent::ToolCallDelta {
+            index: 0,
+            arguments_delta: r#"{"action":"list_commands"}"#.to_string(),
+        },
+        GenerateEvent::ToolCallEnd { index: 0 },
+        GenerateEvent::ToolCallStart {
+            index: 1,
+            id: "call-shell".to_string(),
+            name: "shell".to_string(),
+        },
+        GenerateEvent::ToolCallDelta {
+            index: 1,
+            arguments_delta: r#"{"command":"echo hi"}"#.to_string(),
+        },
+        GenerateEvent::ToolCallEnd { index: 1 },
+        GenerateEvent::MessageEnd,
+    ]]);
+    let mut config = CoreConfig::default();
+    // Trust mode: the shell call would otherwise stop at an approval instead of
+    // proving that a skipped call is what kept it from running.
+    config.agent.approval_mode = "trust".to_string();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(crate::tool::shell_evidence::ShellEvidenceTool));
+    tools.register(Box::new(CountingShellTool {
+        calls: Arc::clone(&calls),
+    }));
+    let mut core = CoshCore::new(config, Box::new(provider), tools);
+    core.audit = CoreAuditRecorder::test_capture(&core.session_id);
+    let mut reader = tokio::io::BufReader::new(NeverReadStdin).lines();
+    let mut writer = FailingWriter::new(FailStep::Write);
+
+    let error = core
+        .handle_user_message("what ran?", &mut reader, &mut writer)
+        .await
+        .expect_err("a dead transport must end the turn");
+
+    assert!(error.contains("control transport"), "{error}");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "the second call must be skipped, not executed on a dead transport"
+    );
+    // Both declared calls still owe a result.
+    assert_eq!(
+        core.messages
+            .iter()
+            .filter(|message| message.role == "tool")
+            .count(),
+        2
+    );
+    assert_eq!(
+        core.audit
+            .captured_events()
+            .last()
+            .map(|event| event.event_type.as_str()),
+        Some("turn.failed"),
+        "all skipped tool terminals must precede the turn terminal"
+    );
+}
+
+#[tokio::test]
+async fn audit_failure_after_transport_failure_still_pairs_the_history() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut core = approval_core(Arc::clone(&calls));
+    // Required mode with a sink that always fails: the terminal approval record
+    // cannot be persisted either.
+    core.audit = CoreAuditRecorder::test_capture_except(
+        &core.session_id,
+        cosh_types::audit::KnownAuditEventType::ApprovalResolved,
+    );
+    let mut reader = tokio::io::BufReader::new(NeverReadStdin).lines();
+    let mut writer = FailingWriter::new(FailStep::Write);
+
+    let error = core
+        .handle_user_message("run echo hi", &mut reader, &mut writer)
+        .await
+        .expect_err("both failures are session-fatal");
+
+    assert!(
+        error.contains("control transport") && error.contains("audit record failed"),
+        "the turn error must report both failures: {error}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    // The point of the fix: the audit error must not escape before the declared
+    // tool call has its result, because headless persists this transcript.
+    assert_eq!(
+        core.messages
+            .iter()
+            .filter(|message| message.role == "tool")
+            .count(),
+        1,
+        "every declared tool call must still be answered: {:?}",
+        core.messages
     );
 }

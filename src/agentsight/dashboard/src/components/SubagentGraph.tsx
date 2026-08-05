@@ -92,8 +92,8 @@ export const SubagentGraph: React.FC<SubagentGraphProps> = ({ root, selectedPath
           共 {subagentCount} 个子代理 · 点击节点在下方查看其轨迹
         </span>
       </h3>
-      <div className="overflow-x-auto">
-        <svg width={layout.width} height={layout.height} className="block">
+      <div className="overflow-x-auto flex">
+        <svg width={layout.width} height={layout.height} className="block m-auto">
           {layout.edges.map(e => {
             const highlighted = onPath.has(e.fromKey) && onPath.has(e.toKey);
             return (

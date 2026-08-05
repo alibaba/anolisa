@@ -9,7 +9,7 @@ ANOLISA 是面向 AI Agent 工作负载的服务端操作系统层。通过统�
 ## 安装 CLI
 
 ```bash
-curl -fsSL https://agentic-os.sh/install.sh | bash
+curl -fsSL https://get.agentic-os.sh | bash
 ```
 
 > Alinux 4 用户也可通过 `sudo yum install anolisa` 安装。
@@ -38,11 +38,13 @@ anolisa list
 ```bash
 # Token 优化
 anolisa install tokenless
+# 或通过 npm：
+# npm install -g anolisa-tokenless
 
 # 工作区快照（基于 btrfs COW）
 sudo anolisa --install-mode system install ws-ckpt
 
-# 可观测性（需要 sudo — eBPF 依赖 root）
+# 可观测性（仅 Linux system mode；包含 agentsight-enforcer 服务）
 sudo anolisa --install-mode system install agentsight
 
 # 安全内核（需要 sudo）
@@ -128,7 +130,7 @@ anolisa adapter enable ws-ckpt hermes       # ws-ckpt → Hermes
 - [工作区快照](user-guide/zh/runtime/ws-ckpt.md)
 - [技能文件系统](user-guide/zh/runtime/skillfs.md)
 - [Token 优化](user-guide/zh/token-saving/tokenless/QUICKSTART.md)
-- [Agent 记忆](user-guide/zh/token-saving/agent-memory/QUICKSTART.md)
+- [Agent 记忆](user-guide/zh/token-saving/agent-memory.md)
 
 ### 可观测性与安全
 

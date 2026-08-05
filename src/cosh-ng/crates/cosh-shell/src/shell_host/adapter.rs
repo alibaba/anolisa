@@ -8,6 +8,7 @@ pub(super) trait ShellAdapter {
     fn executable<'a>(&self, config: &'a ShellHostConfig) -> &'a str;
     fn marker_filename(&self) -> &'static str;
     fn marker_script(&self) -> &'static str;
+    fn isolates_readline(&self) -> bool;
     fn configure_command(
         &self,
         command: &mut Command,
@@ -29,6 +30,10 @@ impl ShellAdapter for BashAdapter {
 
     fn marker_script(&self) -> &'static str {
         bash_marker_script()
+    }
+
+    fn isolates_readline(&self) -> bool {
+        true
     }
 
     fn configure_command(
@@ -64,6 +69,10 @@ impl ShellAdapter for ZshAdapter {
 
     fn marker_script(&self) -> &'static str {
         zsh_marker_script()
+    }
+
+    fn isolates_readline(&self) -> bool {
+        false
     }
 
     fn configure_command(

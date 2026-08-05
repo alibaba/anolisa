@@ -55,9 +55,6 @@
                     "github": "Forrest-ly"
                 },
                 {
-                    "github": "shiloong"
-                },
-                {
                     "github": "ikunkun-sys"
                 }
             ]
@@ -84,9 +81,6 @@
         {
             "label": "component:memory",
             "maintainers": [
-                {
-                    "github": "shiloong"
-                },
                 {
                     "github": "ikunkun-sys"
                 }
@@ -119,6 +113,22 @@
                 },
                 {
                     "github": "KaiLongZhou"
+                }
+            ]
+        },
+        {
+            "label": "component:blaze",
+            "maintainers": [
+                {
+                    "github": "casparant"
+                }
+            ]
+        },
+        {
+            "label": "component:ktuner",
+            "maintainers": [
+                {
+                    "github": "jfeng18"
                 }
             ]
         }

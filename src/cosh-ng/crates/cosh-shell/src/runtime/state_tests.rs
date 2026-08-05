@@ -3,13 +3,13 @@ use std::time::{Duration, Instant};
 use crate::agent::run::PendingAgentRequest;
 use crate::hooks::state::HookRuntimeState;
 use crate::raw_input::{PromptGhostCandidate, PromptGhostRoute};
+use crate::runtime::approval_state::ApprovalState;
 use crate::runtime::prelude::{
-    AgentMode, AgentRequest, AgentRunOrigin, CommandBlock, CommandStatus, OutputRefs,
+    AgentMode, AgentRequest, AgentRunOrigin, ApprovalRequestKind, ApprovalRequestStatus,
+    CommandBlock, CommandStatus, OutputRefs, ProviderShellRequestKind, RuntimeApprovalRequest,
 };
 use crate::runtime::state::{
-    ActivityState, AgentRunState, AnalysisThrottle, ApprovalRequestKind, ApprovalRequestStatus,
-    ApprovalState, ContinuityState, ControlState, ProviderShellRequestKind, QuestionState,
-    RuntimeApprovalRequest,
+    ActivityState, AgentRunState, AnalysisThrottle, ContinuityState, ControlState, QuestionState,
 };
 use crate::runtime::state::{InlineState, PendingInputGhostBinding};
 use crate::types::AgentContextBinding;

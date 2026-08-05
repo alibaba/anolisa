@@ -1,4 +1,7 @@
 use crate::runtime::prelude::*;
+use crate::tools::{classify_command_interaction, PtyRequirement};
+
+use super::handoff::shell_handoff_command_from_request;
 
 pub(crate) fn render_approval_journal<W: Write>(
     state: &InlineState,
@@ -55,11 +58,12 @@ pub(super) fn write_approval_receipt<W: Write>(
     );
 
     let message = if foreground_shell_handoff {
-        i18n.t(MessageId::ApprovalReceiptBashSentToShellMessage)
+        foreground_handoff_message(&i18n, request)
     } else if provider_native_shell {
         i18n.t(MessageId::ApprovalReceiptProviderNativeAllowedMessage)
+            .to_string()
     } else {
-        ""
+        String::new()
     };
 
     let kind = approval_receipt_kind(&i18n, request, foreground_shell_handoff);
@@ -82,10 +86,32 @@ pub(super) fn write_approval_receipt<W: Write>(
                 decision,
                 subject,
                 preview: &request.preview,
-                message,
+                message: &message,
             },
         )
         .map(|_| ())
+}
+
+/// Receipt message for a command handed to the foreground shell. Commands that
+/// need a terminal of their own get one extra sentence so the user knows their
+/// keystrokes now go to that program; ordinary agent forensics commands stay
+/// noise-free.
+fn foreground_handoff_message(i18n: &I18n, request: &RuntimeApprovalRequest) -> String {
+    let sent = i18n.t(MessageId::ApprovalReceiptBashSentToShellMessage);
+    if !handoff_runs_interactively(request) {
+        return sent.to_string();
+    }
+    format!(
+        "{sent} {}",
+        i18n.t(MessageId::ApprovalReceiptForegroundInteractiveHint)
+    )
+}
+
+fn handoff_runs_interactively(request: &RuntimeApprovalRequest) -> bool {
+    let Ok(command) = shell_handoff_command_from_request(request) else {
+        return false;
+    };
+    classify_command_interaction(&command).pty_requirement == PtyRequirement::Required
 }
 
 fn approval_receipt_is_negative(status: ApprovalRequestStatus) -> bool {
@@ -110,7 +136,10 @@ fn approval_receipt_decision<'a>(
                 i18n.t(MessageId::ApprovalReceiptDecisionSentToShell)
             } else if provider_native_shell {
                 i18n.t(MessageId::ApprovalReceiptDecisionProviderNativeAllowed)
-            } else if request.kind == ApprovalRequestKind::Tool {
+            } else if matches!(
+                request.kind,
+                ApprovalRequestKind::Tool | ApprovalRequestKind::TurnExtension
+            ) {
                 i18n.t(MessageId::ApprovalReceiptDecisionApproved)
             } else {
                 i18n.t(MessageId::ApprovalReceiptDecisionApprovedDisplayOnly)
@@ -135,6 +164,7 @@ fn approval_receipt_kind<'a>(
         ApprovalRequestKind::ShellCommand => {
             i18n.t(MessageId::ApprovalReceiptKindShellCommandRequest)
         }
+        ApprovalRequestKind::TurnExtension => i18n.t(MessageId::ApprovalReceiptKindTurnExtension),
     }
 }
 
@@ -162,6 +192,7 @@ pub(crate) fn render_approval_details<W: Write>(
     let preview_label = match request.kind {
         ApprovalRequestKind::Tool => i18n.t(MessageId::ApprovalToolInputLabel),
         ApprovalRequestKind::ShellCommand => i18n.t(MessageId::ApprovalCommandLabel),
+        ApprovalRequestKind::TurnExtension => i18n.t(MessageId::ApprovalTurnExtensionLabel),
     };
 
     RatatuiInlineRenderer::for_terminal()
@@ -295,5 +326,62 @@ mod tests {
             approval_receipt_subject(&i18n, &provider_native, false, true),
             "Bash tool: provider-native 执行"
         );
+    }
+
+    fn bash_request_with_command(command: &str) -> RuntimeApprovalRequest {
+        let mut request = approved_bash_request(None);
+        request.preview = format!("$ {command}");
+        request.tool_input = Some(serde_json::json!({ "command": command }));
+        request
+    }
+
+    #[test]
+    fn agent_forensics_receipt_stays_free_of_interactive_noise() {
+        for command in ["git log --oneline", "systemctl status nginx", "pwd"] {
+            let request = bash_request_with_command(command);
+
+            assert!(!handoff_runs_interactively(&request), "{command}");
+            for language in [Language::EnUs, Language::ZhCn] {
+                let message = foreground_handoff_message(&I18n::new(language), &request);
+                assert!(!message.contains('q'), "{command} / {message}");
+                assert!(!message.contains("分页器"), "{command} / {message}");
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_interactive_receipt_hints_before_the_handoff_in_both_languages() {
+        for command in ["less README.md", "man ls", "top"] {
+            let request = bash_request_with_command(command);
+            assert!(handoff_runs_interactively(&request), "{command}");
+
+            let en = foreground_handoff_message(&I18n::new(Language::EnUs), &request);
+            assert!(en.starts_with("Bash tool sent to shell "), "{en}");
+            assert!(
+                en.contains("keyboard input goes directly to it")
+                    && en.contains("Press q to leave a pager"),
+                "{en}"
+            );
+
+            let zh = foreground_handoff_message(&I18n::new(Language::ZhCn), &request);
+            assert!(zh.starts_with("Bash tool 已发送到 shell "), "{zh}");
+            assert!(
+                zh.contains("键盘输入会直接发送给它") && zh.contains("按 q 返回"),
+                "{zh}"
+            );
+        }
+    }
+
+    #[test]
+    fn interactive_receipt_never_exposes_the_pager_transport_prefix() {
+        let request = bash_request_with_command("less README.md");
+        let mut output = Vec::new();
+
+        write_approval_receipt(Language::EnUs, &request, "Approved", &mut output).unwrap();
+
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("$ less README.md"), "{text}");
+        assert!(!text.contains("PAGER=cat"), "{text}");
+        assert!(!text.contains("GIT_PAGER"), "{text}");
     }
 }

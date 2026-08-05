@@ -1,5 +1,14 @@
-// Owner: shell_host. Routing marker handling is isolated in osc/routing.rs.
+// Owner: shell_host. Routing marker handling is isolated in osc/routing.rs;
+// the pending-handoff claim slot (#2142) is owned by osc/handoff_claim.rs;
+// alt-screen tracking (#2025) is owned by osc/alt_screen.rs.
+mod alt_screen;
+mod handoff_claim;
 mod routing;
+
+use alt_screen::AltScreenTracker;
+use handoff_claim::{
+    claim_pending_command_origin, pending_origin_for_request, PendingCommandOrigin,
+};
 
 use std::collections::HashSet;
 use std::io;
@@ -71,8 +80,16 @@ pub(super) struct OscParser {
     intervention_display_cuts: Vec<(usize, DisplayCutKind)>,
     last_prompt_display_start: Option<usize>,
     prompt_ready_display_start: Option<usize>,
+    /// #1932: the soft-newline upgrade submitted a synthetic empty line so
+    /// bash repaints PS1; its visually blank accept echo is dropped at the
+    /// matching prompt boundary instead of surfacing as a blank line.
+    synthetic_prompt_repaint_armed: bool,
     pub(super) captured_output_ref_bytes: usize,
     pending_command_origin: Option<PendingCommandOrigin>,
+    /// Raised when a command-less prompt boundary expired an unclaimed
+    /// pending handoff (#2142 R4); the relay consumes it and removes the
+    /// staged request/token sidecars the shell never claimed.
+    expired_handoff_staging: bool,
     pending_handoff_echo: Option<PendingHandoffEcho>,
     pub(super) shell_environment_snapshot: Option<ShellEnvironmentSnapshot>,
     environment_observer: Option<ShellEnvironmentObserver>,
@@ -80,13 +97,12 @@ pub(super) struct OscParser {
     /// #1721 D16: shared "bash sits at PS1" gate consumed by the raw input
     /// relay; prompt_ready raises it, preexec lowers it.
     main_prompt_gate: crate::raw_input::MainPromptGate,
-}
-
-#[derive(Debug, Clone)]
-struct PendingCommandOrigin {
-    command: String,
-    origin: CommandOrigin,
-    audit_identity: ShellCommandAuditIdentity,
+    /// Collapses consecutive PTY input writes into one prompt-cwd
+    /// invalidation barrier; a fresh command-less prompt report
+    /// (`ShellReady`) re-arms it.
+    pty_input_barrier_pushed: bool,
+    /// #2025: alternate-screen tracking, owned by osc/alt_screen.rs.
+    alt_screen: AltScreenTracker,
 }
 
 #[derive(Debug, Clone)]
@@ -121,13 +137,17 @@ impl OscParser {
             intervention_display_cuts: Vec::new(),
             last_prompt_display_start: None,
             prompt_ready_display_start: None,
+            synthetic_prompt_repaint_armed: false,
             captured_output_ref_bytes: 0,
             pending_command_origin: None,
+            expired_handoff_staging: false,
             pending_handoff_echo: None,
             shell_environment_snapshot: None,
             environment_observer: None,
             history_file_observer: None,
             main_prompt_gate: crate::raw_input::MainPromptGate::default(),
+            pty_input_barrier_pushed: false,
+            alt_screen: AltScreenTracker::default(),
         }
     }
 
@@ -147,15 +167,15 @@ impl OscParser {
     }
 
     pub(super) fn register_pending_handoff_origin(&mut self, request: &ShellHandoffRequest) {
-        self.pending_command_origin = Some(PendingCommandOrigin {
-            command: request.command.clone(),
-            origin: command_origin_from_handoff_request(request),
-            audit_identity: ShellCommandAuditIdentity {
-                run_id: request.run_id.clone(),
-                request_id: request.request_id.clone(),
-                tool_use_id: request.tool_use_id.clone(),
-            },
-        });
+        self.pending_command_origin = Some(pending_origin_for_request(request));
+        // Fresh staging supersedes any stale expiry signal.
+        self.expired_handoff_staging = false;
+    }
+
+    /// Consumes the "an unclaimed handoff expired at a prompt boundary" flag
+    /// (#2142 R4); the relay clears the staged sidecar files in response.
+    pub(super) fn take_expired_handoff_staging(&mut self) -> bool {
+        std::mem::take(&mut self.expired_handoff_staging)
     }
 
     pub(super) fn feed(&mut self, data: &[u8]) -> io::Result<()> {
@@ -263,7 +283,11 @@ impl OscParser {
                 self.command_seq += 1;
                 let command_id = format!("cmd-{}", self.command_seq);
                 let cwd = marker.cwd.unwrap_or_default();
-                let (origin, audit_identity) = self.consume_pending_command_origin(&command);
+                let (origin, audit_identity) = claim_pending_command_origin(
+                    &mut self.pending_command_origin,
+                    &command,
+                    marker.handoff.as_deref(),
+                );
                 self.current = Some(CurrentCommand {
                     id: command_id.clone(),
                     command: command.clone(),
@@ -296,6 +320,19 @@ impl OscParser {
                     self.intervention_display_cuts
                         .push((self.display.len(), DisplayCutKind::PromptBoundary));
                     self.last_prompt_display_start = Some(self.display.len());
+                    // A fresh command-less prompt report re-arms the
+                    // PTY-input invalidation barrier: the cwd carried
+                    // here supersedes any earlier barrier.
+                    self.pty_input_barrier_pushed = false;
+                    // A command-less prompt boundary is exactly where the
+                    // runtime closes an unclaimed handoff as untracked
+                    // (#2142 review R4). Expire the pending claim slot and
+                    // ask the relay to remove the staged sidecars, so a later
+                    // same-text user command can neither adopt the closed
+                    // handoff's identity nor read its plaintext command.
+                    if self.pending_command_origin.take().is_some() {
+                        self.expired_handoff_staging = true;
+                    }
                     self.events.push(ShellEvent {
                         kind: ShellEventKind::ShellReady,
                         session_id,
@@ -417,20 +454,6 @@ impl OscParser {
         }
     }
 
-    fn consume_pending_command_origin(
-        &mut self,
-        command: &str,
-    ) -> (CommandOrigin, Option<ShellCommandAuditIdentity>) {
-        let Some(pending) = self.pending_command_origin.take() else {
-            return (CommandOrigin::UserInteractive, None);
-        };
-        if pending.command == command {
-            (pending.origin, Some(pending.audit_identity))
-        } else {
-            (CommandOrigin::Unknown, None)
-        }
-    }
-
     fn capture_command_output_ref(
         &mut self,
         command_id: &str,
@@ -460,8 +483,21 @@ impl OscParser {
         if data.is_empty() {
             return;
         }
+        self.alt_screen.observe(&data);
         self.display.extend_from_slice(&data);
         self.append_clean(&data);
+    }
+
+    /// #2025: whether the foreground application currently owns the
+    /// alternate screen (fullscreen TUI classification input).
+    pub(crate) fn alt_screen_active(&self) -> bool {
+        self.alt_screen.active()
+    }
+
+    /// #2025: origin of the command currently tracked between preexec and
+    /// precmd, used by the interactive sentinel's trigger gate.
+    pub(super) fn active_command_origin(&self) -> Option<CommandOrigin> {
+        self.current.as_ref().map(|current| current.origin)
     }
 
     fn filter_pending_handoff_echo(&mut self, data: &[u8]) -> Vec<u8> {
@@ -654,6 +690,17 @@ impl OscParser {
             .is_some_and(|start| start < self.display.len())
     }
 
+    /// Arms the one-shot blank-echo drop for the synthetic PS1 repaint
+    /// submitted by the soft-newline upgrade (#1932).
+    pub(super) fn arm_synthetic_prompt_repaint(&mut self) {
+        self.synthetic_prompt_repaint_armed = true;
+    }
+
+    /// Consumes the one-shot arm at the matching prompt boundary.
+    pub(super) fn take_synthetic_prompt_repaint(&mut self) -> bool {
+        std::mem::take(&mut self.synthetic_prompt_repaint_armed)
+    }
+
     pub(super) fn push_intercept_event(
         &mut self,
         session_id: &str,
@@ -661,7 +708,7 @@ impl OscParser {
         cwd: Option<String>,
         reason: &str,
     ) {
-        self.push_intercept_event_with_routing(session_id, input, cwd, reason, None, false);
+        self.push_intercept_event_with_routing(session_id, input, cwd, reason, None, false, false);
     }
 
     pub(super) fn push_control_event(&mut self, input: &str) {
@@ -679,6 +726,16 @@ impl OscParser {
         self.push_self_session_input_event(
             "soft_newline_shortcut",
             "soft-newline shortcut observed while relaying to bash",
+            None,
+        );
+    }
+
+    /// #1932 F5: a multi-line bracketed paste was relayed straight to bash;
+    /// the runtime may attach a multi-line entry hint to a failure insight.
+    pub(super) fn push_multiline_paste_event(&mut self) {
+        self.push_self_session_input_event(
+            "multiline_paste",
+            "multi-line bracketed paste relayed to bash",
             None,
         );
     }
@@ -701,6 +758,20 @@ impl OscParser {
         );
     }
 
+    /// User bytes were written to the shell's PTY: whatever the shell
+    /// does with them (a custom `accept-line` binding cannot be told
+    /// apart from editing keys in the byte stream), a previously
+    /// reported prompt cwd stops being provably current until a fresh
+    /// cwd-bearing marker arrives. Consecutive writes collapse into
+    /// one barrier event; a new prompt report re-arms it.
+    pub(super) fn push_shell_pty_input_event(&mut self) {
+        if self.pty_input_barrier_pushed {
+            return;
+        }
+        self.pty_input_barrier_pushed = true;
+        self.push_self_session_input_event("shell_pty_input", "write", None);
+    }
+
     pub(super) fn push_card_event(&mut self, action: &str, value: &str) {
         self.push_self_session_input_event("card", action, Some(value));
     }
@@ -717,6 +788,7 @@ impl OscParser {
             ShellCaptureLifecycle::Drained => "capture_drained",
             ShellCaptureLifecycle::Expired => "capture_expired",
             ShellCaptureLifecycle::Overflow => "capture_overflow",
+            ShellCaptureLifecycle::InputRejected => "capture_input_rejected",
         };
         self.events.push(ShellEvent {
             kind: ShellEventKind::UserInputIntercepted,
@@ -814,6 +886,9 @@ struct Marker {
     sensitive: Option<bool>,
     #[serde(rename = "unsafe")]
     unsafe_input: Option<bool>,
+    /// Handoff claim token echoed back by the marker script (#2142); absent
+    /// on every marker outside an approved handoff's preexec/precmd pair.
+    handoff: Option<String>,
 }
 
 fn command_finished_event(
@@ -889,17 +964,6 @@ fn normalize_absolute_path(value: &str) -> Option<String> {
         }
     }
     Some(normalized.to_string_lossy().into_owned())
-}
-
-fn command_origin_from_handoff_request(request: &ShellHandoffRequest) -> CommandOrigin {
-    match request.source.as_str() {
-        "send_to_shell" => CommandOrigin::UserSendToShell,
-        "user_analysis_action" => CommandOrigin::UserAnalysisAction,
-        "approved_provider_shell_tool" => CommandOrigin::ProviderTool,
-        "approved_fallback" => CommandOrigin::AgentHandoff,
-        "validation" => CommandOrigin::ShellInternal,
-        _ => CommandOrigin::Unknown,
-    }
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {

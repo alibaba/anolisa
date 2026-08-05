@@ -414,7 +414,8 @@ pub(crate) fn poll_background_compaction<W: Write>(
         output.flush()?;
     }
     runtime::maybe_start_pending_auto(state, adapter, output)?;
-    runtime::resume_queued_user_request_after_compaction(state, adapter, output)
+    runtime::resume_queued_user_request_after_compaction(state, adapter, output)?;
+    crate::agent::turn_extension::activate_pending_turn_extension(state, output).map(|_| ())
 }
 
 fn render_completion<W: Write>(

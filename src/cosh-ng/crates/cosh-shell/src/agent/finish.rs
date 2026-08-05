@@ -1,10 +1,12 @@
 use crate::agent::continuation::{
-    render_fresh_turn_recovery_notice, shell_handoff_resume_fallback_request,
+    render_fallback_recovery_notice, shell_handoff_recovery_approval_id,
+    shell_handoff_resume_fallback_request,
 };
 use crate::agent::events::{
     flush_cosh_request_filter_into_active_run, render_agent_structured_events,
     render_held_events_into_active_run, state_has_pending_interaction,
 };
+use crate::agent::governance::hook_notification_display_text;
 use crate::agent::run::{
     has_queued_run_before_held_text, start_agent_run_with_origin, start_pending_agent_run,
     ActiveAgentRun, PendingRequestClass,
@@ -15,6 +17,7 @@ use crate::runtime::evidence_requests::{
 };
 use crate::runtime::prelude::*;
 use crate::runtime::question_terminal::cleanup_question_for_terminal_owner;
+use crate::types::PROVIDER_TIMEOUT_ERROR_CODE;
 
 pub(crate) fn finish_active_agent_run<W: Write>(
     state: &mut InlineState,
@@ -30,7 +33,19 @@ pub(crate) fn finish_active_agent_run<W: Write>(
     cleanup_question_for_terminal_owner(state, output, &active_run.request.id)?;
     active_run.status_animation.clear(output)?;
     if !active_run.held_events.is_empty() {
-        if state_has_pending_interaction(state) || has_queued_run_before_held_text(state) {
+        if state
+            .control
+            .shell_handoff()
+            .has_active_handoff_for_run(&active_run.request.id)
+        {
+            // This run ended while its own foreground shell handoff was still
+            // outstanding, so its text cannot be based on the real command
+            // result. Drop it instead of rendering or transferring it; the
+            // shell-evidence continuation regenerates the answer once the result
+            // lands. Scoped to this run: another run's in-flight handoff says
+            // nothing about whether this text is stale.
+            active_run.held_events.clear();
+        } else if state_has_pending_interaction(state) || has_queued_run_before_held_text(state) {
             state
                 .agent_run
                 .held_events
@@ -44,15 +59,23 @@ pub(crate) fn finish_active_agent_run<W: Write>(
     active_run.markdown_stream.finish(output, None)?;
     let provider_timed_out = active_run_provider_timed_out(&active_run);
     record_finished_agent_run(state, &active_run.request, &active_run.governed_events);
-    let resume_fallback = if provider_timed_out {
-        shell_handoff_resume_fallback_request(&active_run)
-    } else {
-        None
-    };
-    if let Some((fallback, origin)) = resume_fallback {
+    let resume_fallback = shell_handoff_resume_fallback_request(&active_run);
+    if let Some((fallback, origin, reason)) = resume_fallback {
+        if let Some(approval_id) = shell_handoff_recovery_approval_id(&active_run.request) {
+            state.evidence.mark_recovery_reason(approval_id, reason);
+        }
         render_recovery_context_before_notice(state, &active_run, output, adapter)?;
-        render_fresh_turn_recovery_notice(state, output)?;
-        // Provider-timeout resume is an internal fallback continuation.
+        render_fallback_recovery_notice(state, &fallback, reason, output)?;
+        // #1940: the fallback abandons this run; sweep dropped control
+        // requests before starting its continuation so the ledger
+        // cannot grow across turns.
+        crate::approval::runtime::drain_unhomed_control_requests_with_handle(
+            state,
+            &active_run.request.id,
+            &active_run.handle,
+        );
+        // Failed provider resume escalates through the tier chain: a
+        // same-session retry first, then one fresh fallback.
         start_agent_run_with_origin(
             &fallback,
             origin,
@@ -66,7 +89,14 @@ pub(crate) fn finish_active_agent_run<W: Write>(
     }
     // Drain any unconsumed pending hook notifications into deferred_events
     // (orphan case: hook returned block, so no ToolPermissionRequest was emitted)
+    let i18n = I18n::new(active_run.language);
     for notification in active_run.pending_hook_notifications.drain(..) {
+        let display_text = hook_notification_display_text(
+            &notification.hook_name,
+            &notification.message,
+            notification.decision.as_deref(),
+            &i18n,
+        );
         active_run.deferred_events.push(GovernedEvent {
             decision: GovernanceDecision::Display,
             policy_decision: GovernancePolicyDecision::DisplayOnly,
@@ -78,7 +108,7 @@ pub(crate) fn finish_active_agent_run<W: Write>(
                 decision: notification.decision,
             },
             reason: "orphan hook notification".to_string(),
-            display_text: String::new(),
+            display_text,
             auto_execute: false,
         });
     }
@@ -110,6 +140,16 @@ pub(crate) fn finish_active_agent_run<W: Write>(
         output,
         adapter,
     )?;
+    // #1940 run-terminal sweep: the run is detached from InlineState here,
+    // so the batch drain in render_new_agent_structured_events no longer
+    // covers it; deny every registered control request that still has no
+    // home (e.g. trailing requests parked in deferred_events by the
+    // question-rejection path) and clear the run's ledger entries.
+    crate::approval::runtime::drain_unhomed_control_requests_with_handle(
+        state,
+        &active_run.request.id,
+        &active_run.handle,
+    );
     record_selectable_recommendations(
         state,
         &active_run.governed_events,
@@ -123,6 +163,11 @@ pub(crate) fn finish_active_agent_run<W: Write>(
         output,
     )?;
     record_agent_run_facts(state, &active_run);
+    crate::agent::turn_extension::note_capped_run(
+        state,
+        &active_run,
+        adapter.committed_session_id(),
+    );
     state.auth.state = None;
     if provider_timed_out {
         let dropped = trim_queued_requests_after_provider_timeout(state);
@@ -153,6 +198,11 @@ pub(crate) fn finish_active_agent_run<W: Write>(
             .agent_run
             .queued_requests
             .retain(|pending| pending.intent == AgentStartIntent::UserInitiated);
+        return Ok(());
+    }
+
+    if crate::agent::turn_extension::activate_pending_turn_extension(state, output)? {
+        output.flush()?;
         return Ok(());
     }
 
@@ -228,7 +278,8 @@ fn render_recovery_context_before_notice<W: Write>(
 fn governed_event_is_provider_timeout(event: &GovernedEvent) -> bool {
     matches!(
         &event.event,
-        AgentEvent::AgentFailed { error, .. } if error.contains("Agent timed out:")
+        AgentEvent::AgentFailed { error_code, .. }
+            if error_code.as_deref() == Some(PROVIDER_TIMEOUT_ERROR_CODE)
     )
 }
 
@@ -264,8 +315,10 @@ fn trim_queued_requests_after_provider_timeout(state: &mut InlineState) -> usize
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::*;
-    use crate::agent::run::{PendingAgentRequest, PendingRequestClass};
+    use crate::agent::run::{PendingAgentRequest, PendingHookNotification, PendingRequestClass};
     use crate::runtime::state::InlineState;
     use crate::types::{AgentMode, AgentRequest, CommandBlock, CommandStatus, OutputRefs};
 
@@ -311,6 +364,124 @@ mod tests {
             class,
             selectable_after_event_index: None,
             before_held_text: false,
+        }
+    }
+
+    // A provider that ends its turn while its own Bash handoff is still running
+    // produced that text without the command's result, so finishing the run must
+    // drop it instead of rendering it or moving it to the shell-wide hold. The
+    // shell-evidence continuation regenerates the answer.
+    #[test]
+    fn finish_drops_held_text_while_its_own_shell_handoff_is_still_outstanding() {
+        let (rendered, state) = finish_run_with_handoff_owned_by("run-1");
+
+        assert!(!rendered.contains("STALE ANSWER"), "{rendered}");
+        assert!(state.agent_run.held_events.is_empty());
+    }
+
+    // The drop is scoped to the run that owns the handoff: text from a run whose
+    // own work is complete must still be shown even while some other run's
+    // handoff is in flight.
+    #[test]
+    fn finish_keeps_held_text_when_another_run_owns_the_outstanding_handoff() {
+        let (rendered, _state) = finish_run_with_handoff_owned_by("unrelated-run");
+
+        assert!(rendered.contains("STALE ANSWER"), "{rendered}");
+    }
+
+    #[test]
+    fn finish_renders_orphan_hook_notification_with_fallbacks() {
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let mut state = InlineState::default();
+        let mut active_run = active_run(&adapter, "run-1", Language::ZhCn);
+        active_run
+            .pending_hook_notifications
+            .push(PendingHookNotification {
+                tool_use_id: Some("tool-1".to_string()),
+                hook_name: "  ".to_string(),
+                message: String::new(),
+                decision: Some("\n".to_string()),
+            });
+        state.agent_run.active = Some(active_run);
+        let mut output = Vec::new();
+
+        finish_active_agent_run(&mut state, &mut output, &adapter).expect("finish run");
+
+        let rendered = String::from_utf8_lossy(&output);
+        assert!(rendered.contains("Hook: 未知 Hook"), "{rendered}");
+        assert!(rendered.contains("消息: 未提供消息"), "{rendered}");
+        assert!(rendered.contains("决策: 未指定"), "{rendered}");
+        assert!(!rendered.contains("unknown hook"), "{rendered}");
+    }
+
+    // Finishes an active `run-1` holding one text delta, with an approved handoff
+    // owned by `handoff_run_id` still outstanding. Returns what was rendered plus
+    // the resulting state.
+    fn finish_run_with_handoff_owned_by(handoff_run_id: &str) -> (String, InlineState) {
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let mut state = InlineState::default();
+        let mut active_run = active_run(&adapter, "run-1", Language::EnUs);
+        active_run.held_events.push(GovernedEvent {
+            decision: GovernanceDecision::Display,
+            policy_decision: GovernancePolicyDecision::DisplayOnly,
+            event: AgentEvent::TextDelta {
+                run_id: "run-1".to_string(),
+                text: "STALE ANSWER".to_string(),
+            },
+            reason: "held".to_string(),
+            display_text: "STALE ANSWER".to_string(),
+            auto_execute: false,
+        });
+        state.agent_run.active = Some(active_run);
+        state.control.shell_handoff_mut().enqueue_approved_request(
+            ShellHandoffRequest::new(
+                "df -h",
+                "$ df -h",
+                "provider-tool-call",
+                "agent",
+                "req-1",
+                handoff_run_id,
+                1,
+            )
+            .expect("handoff"),
+        );
+        let mut output = Vec::new();
+
+        finish_active_agent_run(&mut state, &mut output, &adapter).expect("finish run");
+
+        (String::from_utf8_lossy(&output).to_string(), state)
+    }
+
+    fn active_run(adapter: &AdapterInstance, id: &str, language: Language) -> ActiveAgentRun {
+        let run_request = request(id);
+        let handle = adapter.start_cancellable(run_request.clone(), CoshApprovalMode::Recommend);
+        let renderer = RatatuiInlineRenderer::for_terminal().with_language(language);
+        ActiveAgentRun {
+            request: run_request,
+            origin: AgentRunOrigin::Standard,
+            handle,
+            provider_name: "fake",
+            language,
+            renderer: renderer.clone(),
+            status_animation: renderer.status_animation(),
+            markdown_stream: renderer.stream_markdown_agent(),
+            governed_events: Vec::new(),
+            deferred_events: Vec::new(),
+            held_events: Vec::new(),
+            cosh_request_filter: crate::evidence::stream::CoshRequestStreamFilter::default(),
+            pending_cosh_requests: Vec::new(),
+            pending_cosh_request_audits: Vec::new(),
+            rendered_governed_event_count: 0,
+            selectable_after_event_index: None,
+            started_at: Instant::now(),
+            last_activity_at: Instant::now(),
+            last_heartbeat_at: Instant::now(),
+            current_phase: String::new(),
+            current_message: String::new(),
+            has_visible_text_delta: false,
+            completed: true,
+            host_completed_tool_ids: Vec::new(),
+            pending_hook_notifications: Vec::new(),
         }
     }
 

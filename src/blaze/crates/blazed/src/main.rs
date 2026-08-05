@@ -8,8 +8,14 @@ mod api;
 mod cli;
 mod daemon;
 mod error;
+#[cfg(feature = "test-failpoints")]
+mod failpoint;
+#[cfg(not(feature = "test-failpoints"))]
+#[path = "failpoint_disabled.rs"]
+mod failpoint;
 mod file_provider;
 mod metrics;
+mod sandbox;
 mod spawner;
 mod state;
 
@@ -27,6 +33,7 @@ use crate::error::Result;
 #[tokio::main]
 async fn main() -> ExitCode {
     init_tracing();
+    failpoint::announce();
 
     let cli = Cli::parse();
     let outcome = run(cli).await;

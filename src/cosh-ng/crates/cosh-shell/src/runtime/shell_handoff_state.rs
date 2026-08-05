@@ -19,10 +19,17 @@ impl ShellHandoffState {
         });
     }
 
+    /// Emits one approved request only when no earlier request is still pending.
+    ///
+    /// The marker transport has one request sidecar and one parser claim slot,
+    /// so overlapping emissions would replace the first request's identity.
     /// `event_index` is the shell-event count observed when the handoff is
     /// written to the PTY; the untracked-closure fallback only considers
     /// `ShellReady` events strictly after this index.
     pub(crate) fn emit_next_approved(&mut self, event_index: usize) -> Option<ShellHandoffRequest> {
+        if !self.pending.is_empty() {
+            return None;
+        }
         let mut handoff = self.approved.pop_front()?;
         handoff.emitted_at = Some(Instant::now());
         handoff.emitted_at_event_index = Some(event_index);
@@ -44,6 +51,18 @@ impl ShellHandoffState {
         !self.approved.is_empty() || !self.pending.is_empty()
     }
 
+    /// Whether `run_id` still owns an approved-but-unfinished handoff.
+    ///
+    /// Callers that decide whether a specific run's output can already reflect
+    /// its command result must use this rather than [`Self::has_active_handoff`]:
+    /// a handoff belonging to some other run says nothing about this one.
+    pub(crate) fn has_active_handoff_for_run(&self, run_id: &str) -> bool {
+        self.approved
+            .iter()
+            .chain(self.pending.iter())
+            .any(|handoff| handoff.request.run_id == run_id)
+    }
+
     pub(crate) fn mark_timeout_interrupt_if_elapsed(&mut self, timeout: Duration) -> bool {
         let Some(handoff) = self.pending.front_mut() else {
             return false;
@@ -55,6 +74,21 @@ impl ShellHandoffState {
             return false;
         }
 
+        handoff.timeout_interrupt_sent = true;
+        true
+    }
+
+    /// #2161 input-wait timeout: marks the front emitted handoff as
+    /// interrupted once. Unlike [`Self::mark_timeout_interrupt_if_elapsed`]
+    /// the clock lives outside (the sentinel's input-wait episode), so this
+    /// only guards "emitted + not already interrupted".
+    pub(crate) fn mark_input_wait_interrupt(&mut self) -> bool {
+        let Some(handoff) = self.pending.front_mut() else {
+            return false;
+        };
+        if handoff.emitted_at.is_none() || handoff.timeout_interrupt_sent {
+            return false;
+        }
         handoff.timeout_interrupt_sent = true;
         true
     }

@@ -39,6 +39,7 @@ use crate::commands::common::RepoPersistPolicy;
 use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install;
 use crate::context::CliContext;
+use crate::progress::{self, Activity};
 use crate::response::{CliError, render_json, render_json_with_status};
 
 use super::types::InstallOutcome;
@@ -49,9 +50,9 @@ use super::{COMMAND, InstallArgs};
 // shared guards it mirrors.
 use super::io_util::now_iso8601;
 use super::{
-    PlannedComponent, PlannedRoute, handle_one, handle_one_with_planned_components, host_backends,
-    plan_component, quarantined, require_configured_rpm_backend, revalidate_native_absence,
-    step_label,
+    PlannedComponent, PlannedRoute, RpmdbProbe, handle_one, handle_one_with_planned_components,
+    host_backends, plan_component, quarantined, require_configured_rpm_backend,
+    revalidate_native_absence, step_label,
 };
 // ── --all support ───────────────────────────────────────────────────
 
@@ -87,8 +88,13 @@ pub(crate) struct AllSummaryPayload {
 }
 
 pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliError> {
+    let mut activity = Activity::start(
+        progress::feedback_for_stderr(ctx.json, ctx.quiet),
+        "Preparing batch installation...",
+    );
     let names = resolve_all_components(ctx, args.backend.as_deref())?;
     if names.is_empty() {
+        activity.finish();
         if !ctx.quiet && !ctx.json {
             let color = Palette::new(ctx.no_color);
             println!(
@@ -130,10 +136,19 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
     // is cheap next to a dnf run.
     let mut merged: Vec<MergedItem> = Vec::new();
     let mut per_item: Vec<String> = Vec::new();
-    for name in &names {
+    for (index, name) in names.iter().enumerate() {
+        activity.set_message(&format!(
+            "Planning {name} ({}/{})...",
+            index + 1,
+            names.len()
+        ));
         let per_args = per_component_args(name, &args);
+        let env = anolisa_env::EnvService::detect();
+        let rpmdb = RpmdbProbe::for_host(&env);
         let candidate = host_backends(name, &per_args, &suppressed_ctx)
-            .and_then(|(query, txn)| plan_component(name, &per_args, &suppressed_ctx, &query, &txn))
+            .and_then(|(query, txn)| {
+                plan_component(name, &per_args, &suppressed_ctx, &env, &rpmdb, &query, &txn)
+            })
             .ok()
             .and_then(|planned| {
                 merged_package(&planned).map(|package| MergedItem {
@@ -165,14 +180,21 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
     let mut fail_fast_tripped = false;
 
     if !merged.is_empty() {
+        let members = merged
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if ctx.dry_run {
+            activity.set_message(&format!("Preparing install plan for {members}..."));
+        } else {
+            activity.set_message(&format!("Installing {members}..."));
+        }
         if !ctx.quiet && !ctx.json {
             let color = Palette::new(ctx.no_color);
-            let members = merged
-                .iter()
-                .map(|item| item.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            println!("{} {members} (one rpm transaction)", color.label("==>"));
+            progress::suspend_output(|| {
+                println!("{} {members} (one rpm transaction)", color.label("==>"))
+            });
         }
         if ctx.dry_run {
             // Each member previews its own plan in the single-component
@@ -182,10 +204,12 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
                 let labels: Vec<String> =
                     item.planned.route.steps().iter().map(step_label).collect();
                 if !ctx.quiet && !ctx.json {
-                    println!("install {} (dry-run):", item.name);
-                    for label in &labels {
-                        println!("  - {label}");
-                    }
+                    progress::suspend_output(|| {
+                        println!("install {} (dry-run):", item.name);
+                        for label in &labels {
+                            println!("  - {label}");
+                        }
+                    });
                 }
                 results.insert(
                     item.name.clone(),
@@ -214,9 +238,14 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
         if fail_fast_tripped {
             break;
         }
+        if ctx.dry_run {
+            activity.set_message(&format!("Preparing install plan for {name}..."));
+        } else {
+            activity.set_message(&format!("Installing {name}..."));
+        }
         if !ctx.quiet && !ctx.json {
             let color = Palette::new(ctx.no_color);
-            println!("{} {name}", color.label("==>"));
+            progress::suspend_output(|| println!("{} {name}", color.label("==>")));
         }
         let per_args = per_component_args(name, &args);
         match handle_one_with_planned_components(
@@ -281,6 +310,8 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
         .count();
     let failed = items.iter().filter(|i| i.status == "failed").count();
     let skipped = items.iter().filter(|i| i.status == "skipped").count();
+
+    activity.finish();
 
     if ctx.json {
         // The batch summary is the single, complete JSON response.  We
@@ -533,9 +564,14 @@ fn execute_merged_group_with_deps(
             ));
             continue;
         }
-        if let Err(err) =
-            revalidate_native_absence(Some(&item.package), &provider, &now, target, BATCH_COMMAND)
-        {
+        if let Err(err) = revalidate_native_absence(
+            Some(&item.package),
+            &provider,
+            &now,
+            target,
+            BATCH_COMMAND,
+            None,
+        ) {
             items.push(failed_item(&item.name, err.reason().to_string()));
             continue;
         }
@@ -654,7 +690,7 @@ fn execute_merged_group_with_deps(
                             COMMAND,
                             ctx.packaged_data_probe(),
                         ) {
-                            eprintln!("warning: {warning}");
+                            progress::suspend_output(|| eprintln!("warning: {warning}"));
                         }
                         items.push(AllSummaryItem {
                             component: item.name.clone(),
@@ -688,7 +724,9 @@ fn execute_merged_group_with_deps(
             // Operation history is best-effort bookkeeping on top of the
             // committed records, exactly like the single-component path.
             if let Err(err) = store.save(&state_path) {
-                eprintln!("warning: failed to record operation history: {err}");
+                progress::suspend_output(|| {
+                    eprintln!("warning: failed to record operation history: {err}")
+                });
             }
             items
         }
@@ -722,10 +760,12 @@ fn execute_merged_group_with_deps(
                     .mark_failed(0, &reason)
                     .and_then(|()| journal.finish(journal_outcome))
                 {
-                    eprintln!(
-                        "warning: failed to journal the merged transaction outcome for '{}': {err}",
-                        item.name
-                    );
+                    progress::suspend_output(|| {
+                        eprintln!(
+                            "warning: failed to journal the merged transaction outcome for '{}': {err}",
+                            item.name
+                        )
+                    });
                 }
             }
             drop(store);
@@ -734,10 +774,12 @@ fn execute_merged_group_with_deps(
             if clean.is_empty() {
                 return items;
             }
-            eprintln!(
-                "warning: merged rpm transaction failed ({reason}); retrying {} component(s) individually",
-                clean.len()
-            );
+            progress::suspend_output(|| {
+                eprintln!(
+                    "warning: merged rpm transaction failed ({reason}); retrying {} component(s) individually",
+                    clean.len()
+                )
+            });
             let mut fail_fast_tripped = false;
             for name in clean {
                 if fail_fast_tripped {

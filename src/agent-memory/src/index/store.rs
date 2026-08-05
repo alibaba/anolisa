@@ -490,10 +490,13 @@ impl BM25Store {
     /// LIKE-based substring fallback for queries that the trigram tokenizer
     /// cannot serve (any term < 3 chars, e.g. short CJK words). AND-joins
     /// one `body LIKE ? ESCAPE '\'` clause per token so multi-term queries
-    /// keep "all terms must appear" semantics. `_` and `%` surviving
-    /// `sanitize_fts_query` are backslash-escaped so they match literally.
-    /// Scoring is a coarse term-frequency sum plus time decay — no BM25 is
-    /// available off the MATCH path, but recall (not ranking) is the goal.
+    /// keep "all terms must appear" semantics; when the AND query returns
+    /// zero rows and there are multiple tokens, retries with OR-joined
+    /// clauses so partial matches still surface (mirroring the BM25 path's
+    /// OR fallback). `_` and `%` surviving `sanitize_fts_query` are
+    /// backslash-escaped so they match literally. Scoring is a coarse
+    /// term-frequency sum plus time decay — no BM25 is available off the
+    /// MATCH path, but recall (not ranking) is the goal.
     fn search_like(
         &self,
         tokens: &[&str],
@@ -507,57 +510,106 @@ impl BM25Store {
         }
         let (agent_filter, agent_param) = agent_scope_sql_like(scope);
 
-        let like_clause = tokens
-            .iter()
-            .map(|_| "files_fts.body LIKE ? ESCAPE '\\'")
-            .collect::<Vec<_>>()
-            .join(" AND ");
+        let run_query =
+            |joiner: &str, pool: usize, rank_matches: bool| -> Result<Vec<(String, String, i64)>> {
+                let like_clause = tokens
+                    .iter()
+                    .map(|_| "files_fts.body LIKE ? ESCAPE '\\'")
+                    .collect::<Vec<_>>()
+                    .join(joiner);
 
-        let sql = format!(
-            r#"
-            SELECT f.path, files_fts.body, f.mtime_ms
-            FROM files_fts
-            JOIN files f ON f.rowid = files_fts.rowid
-            WHERE {like_clause} {cold_filter} {superseded_filter} {agent_filter}
-            LIMIT ?
-            "#
-        );
-        // No SQL ORDER BY: the LIKE path has no rank, and ordering by mtime
-        // would discard high-frequency old documents before Rust scoring.
-        // Fetch a generous pool (top_k * 4) and let Rust sort by score +
-        // truncate, so the scoring dimension (frequency) — not mtime —
-        // decides what survives.
+                // OR-joined queries match a superset of rows, so the pool cap
+                // would otherwise truncate arbitrarily (SQLite returns rows in
+                // unspecified order without ORDER BY) and could drop a strong
+                // multi-token match past the LIMIT. Rank by matched-token
+                // count (LIKE evaluates to 0/1 in SQLite) so LIMIT keeps the
+                // strongest rows; exact frequency scoring still happens in
+                // Rust below. The AND path skips this: every row already
+                // matches all tokens, so the count is a constant.
+                let order_clause = if rank_matches {
+                    let match_sum = tokens
+                        .iter()
+                        .map(|_| "(files_fts.body LIKE ? ESCAPE '\\')")
+                        .collect::<Vec<_>>()
+                        .join(" + ");
+                    format!("ORDER BY ({match_sum}) DESC")
+                } else {
+                    // No SQL ORDER BY on the AND path: the LIKE path has no
+                    // rank, and ordering by mtime would discard high-frequency
+                    // old documents before Rust scoring.
+                    String::new()
+                };
 
-        let like_patterns: Vec<String> = tokens.iter().map(|t| like_pattern(t)).collect();
-        let mut bind: Vec<rusqlite::types::Value> = like_patterns
-            .iter()
-            .map(|s| rusqlite::types::Value::Text(s.clone()))
-            .collect();
-        if let Some(ref agent_id) = agent_param {
-            bind.push(rusqlite::types::Value::Text(agent_id.clone()));
-        }
-        bind.push(rusqlite::types::Value::Integer((top_k * 4).max(1) as i64));
+                // Parenthesise the LIKE clause so OR-joined terms don't bind
+                // looser than the trailing AND filters.
+                let sql = format!(
+                    r#"
+                SELECT f.path, files_fts.body, f.mtime_ms
+                FROM files_fts
+                JOIN files f ON f.rowid = files_fts.rowid
+                WHERE ({like_clause}) {cold_filter} {superseded_filter} {agent_filter}
+                {order_clause}
+                LIMIT ?
+                "#
+                );
 
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(bind.iter()), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })?;
+                let like_patterns: Vec<String> = tokens.iter().map(|t| like_pattern(t)).collect();
+                let mut bind: Vec<rusqlite::types::Value> = like_patterns
+                    .iter()
+                    .map(|s| rusqlite::types::Value::Text(s.clone()))
+                    .collect();
+                if let Some(ref agent_id) = agent_param {
+                    bind.push(rusqlite::types::Value::Text(agent_id.clone()));
+                }
+                // ORDER BY comes after WHERE in the SQL text, so its pattern
+                // params bind after the WHERE + agent params.
+                if rank_matches {
+                    for s in &like_patterns {
+                        bind.push(rusqlite::types::Value::Text(s.clone()));
+                    }
+                }
+                bind.push(rusqlite::types::Value::Integer(pool.max(1) as i64));
 
-        // Anchor the snippet on the shortest token — it is the most
-        // specific term and the one the trigram path would have refused.
-        let needle = tokens
-            .iter()
-            .min_by_key(|t| t.chars().count())
-            .copied()
-            .unwrap_or("");
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map(rusqlite::params_from_iter(bind.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })?;
+                Ok(rows.flatten().collect())
+            };
+
+        let rows = run_query(" AND ", top_k * 4, false)?;
+        // OR fallback mirroring the BM25 MATCH path: AND semantics return
+        // zero rows when any single token is absent from the corpus, which
+        // is routine for auto-recall keyword queries carrying filler tokens
+        // (e.g. "um"). Retry with OR so partial matches surface; SQL-side
+        // ranking keeps the strongest rows within the pool and the
+        // frequency scoring below decides the final order. Pool widened to
+        // at least 50 rows (the `detect_conflicts_like` precedent) so the
+        // Rust scorer sees a broad candidate set.
+        let rows = if rows.is_empty() && tokens.len() > 1 {
+            run_query(" OR ", (top_k * 4).max(50), true)?
+        } else {
+            rows
+        };
 
         let mut out: Vec<SearchHit> = Vec::new();
-        for row in rows.flatten() {
-            let (path, body, mtime_ms) = row;
+        for (path, body, mtime_ms) in rows {
+            // Anchor the snippet on the shortest query token that actually
+            // occurs in this body. OR-fallback rows may lack the globally
+            // shortest token, which would degrade the snippet to the first
+            // 24 chars of the body — useless to the auto-recall adapter,
+            // which injects only the snippet. Matching is ASCII
+            // case-insensitive to mirror SQLite LIKE, and the needle is the
+            // body-cased occurrence so `make_snippet` can anchor on it.
+            let needle = tokens
+                .iter()
+                .filter_map(|t| ascii_ci_find(&body, t).map(|pos| &body[pos..pos + t.len()]))
+                .min_by_key(|m| m.chars().count())
+                .unwrap_or("");
             let snippet = make_snippet(&body, needle, 24);
             let suspicious =
                 crate::safety::looks_like_prompt_injection(&strip_snippet_markers(&snippet));
@@ -1106,6 +1158,21 @@ fn like_pattern(token: &str) -> String {
     }
     s.push('%');
     s
+}
+
+/// Byte-wise ASCII case-insensitive substring search, mirroring SQLite
+/// LIKE semantics (ASCII case-insensitive, exact bytes otherwise).
+/// Returned offsets are always char boundaries: a valid UTF-8 needle
+/// never starts or ends with a continuation byte, and ASCII case
+/// folding never maps to or from non-ASCII bytes, so a byte-level
+/// match cannot begin or end mid-character.
+fn ascii_ci_find(haystack: &str, needle: &str) -> Option<usize> {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() || n.len() > h.len() {
+        return None;
+    }
+    h.windows(n.len()).position(|w| w.eq_ignore_ascii_case(n))
 }
 
 /// Produce a snippet window of `radius` chars on each side of the first
@@ -1710,6 +1777,104 @@ mod tests {
             paths,
             vec!["both.md"],
             "LIKE path AND-joins short + long tokens"
+        );
+    }
+
+    #[test]
+    fn search_like_or_fallback_recalls_partial_matches() {
+        // Regression for issue #2040: auto-recall keyword queries like
+        // "um figure runs" contain a 2-char filler token ("um") that pulls
+        // the query into the LIKE path, and "um" appears in no memory —
+        // the AND query returns zero rows. The OR fallback must still
+        // recall the document matching the remaining tokens.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        s.upsert(
+            "billing.md",
+            0,
+            0,
+            "Billing system runs on PostgreSQL. The slow query on invoices \
+             was optimized with a composite index.",
+            None,
+        )
+        .unwrap();
+        s.upsert("other.md", 0, 0, "rate limiter token bucket", None)
+            .unwrap();
+
+        let hits = s.search("um figure runs query", 10, true).unwrap();
+        let paths: Vec<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["billing.md"],
+            "OR fallback must surface partial matches when AND finds none"
+        );
+
+        // Single-token miss: no OR retry possible, stays empty.
+        let hits = s.search("um", 10, true).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn search_like_or_fallback_ranks_before_pool_truncation() {
+        // Regression for review finding on #2040 fix: the OR retry has no
+        // natural SQL order, so LIMIT could drop a strong multi-token match
+        // while keeping weak single-token rows. With 60 weak rows (only
+        // "is" matches) and one strong row inserted last, the ORDER BY
+        // matched-token-count must pull the strong row into the pool.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        for i in 0..60 {
+            s.upsert(
+                &format!("weak-{i:02}.md"),
+                0,
+                0,
+                "this is filler content without the rare terms",
+                None,
+            )
+            .unwrap();
+        }
+        s.upsert(
+            "target.md",
+            0,
+            0,
+            "is needle one, needle two, needle three",
+            None,
+        )
+        .unwrap();
+
+        // "zz" is absent everywhere → AND returns 0 → OR retry. "is" is
+        // 2 chars so the query takes the LIKE path.
+        let hits = s.search("is needle zz", 5, true).unwrap();
+        assert_eq!(hits.len(), 5);
+        assert_eq!(
+            hits[0].path, "target.md",
+            "strong multi-token match must survive the OR pool limit"
+        );
+    }
+
+    #[test]
+    fn search_like_or_fallback_snippet_anchors_on_present_token() {
+        // Regression for review finding on #2040 fix: OR-fallback rows may
+        // lack the globally shortest token ("um"), and the old
+        // shortest-token needle degraded the snippet to the first 24 chars
+        // of the body. The needle must come from a token present in the
+        // row, so the auto-recall adapter (which injects only the snippet)
+        // shows matched content.
+        let mut s = BM25Store::open_in_memory().unwrap();
+        let preamble = "unrelated preamble text that goes on and on for quite a while before anything relevant shows up. ";
+        s.upsert(
+            "late-match.md",
+            0,
+            0,
+            &format!("{preamble}The Needle appears only here."),
+            None,
+        )
+        .unwrap();
+
+        let hits = s.search("um needle absentword", 5, true).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(
+            hits[0].snippet.contains("«Needle»"),
+            "snippet must anchor on the matched token (case-insensitive), got: {}",
+            hits[0].snippet
         );
     }
 

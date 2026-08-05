@@ -117,6 +117,190 @@ async function apiFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// ─── Enforcement APIs ───────────────────────────────────────────────────────
+
+export interface EnforcementHealth {
+  ready: boolean;
+  backend: string;
+  capabilities: EnforcementCapabilities;
+  message: string | null;
+}
+
+export interface EnforcementCapabilities {
+  max_active_bindings?: number | null;
+  credential_observe: boolean;
+  credential_audit: boolean;
+  credential_enforce: boolean;
+  policy_handoff: boolean;
+  alternate_pid_retarget: boolean;
+  test_development: boolean;
+}
+
+export interface EnforcementBinding {
+  request: {
+    binding_id: string;
+    agent_id: string;
+    session_id: string | null;
+    root_pid: number;
+    process_start_time: number;
+    policy_id: string;
+    policy_revision: string;
+    policy_dsl: string;
+    policy_mode?: EnforcementPolicyMode | null;
+  };
+  state: 'pending' | 'enforced' | 'failed' | 'degraded' | 'detaching' | 'detached';
+  message: string | null;
+  domain_id: number | null;
+}
+
+export interface EnforcementViolation {
+  event_id: string;
+  binding_id: string;
+  agent_id: string;
+  session_id: string | null;
+  policy_id: string;
+  policy_revision: string;
+  pid: number;
+  ppid: number | null;
+  process_start_time: number;
+  operation: string;
+  target: string;
+  effect: 'notify' | 'block' | 'kill';
+  blocked: boolean;
+  killed: boolean;
+  rule_id: string | null;
+  reason: string | null;
+  occurred_at_ns: number;
+  observed_at_ns: number;
+  actplane_revision: string;
+}
+
+export interface FileBindingInput {
+  agent_id: string;
+  session_id?: string;
+  root_pid: number;
+  path: string;
+}
+
+export type EnforcementPolicyMode = 'observe' | 'audit' | 'enforce';
+export type CredentialDestinationScope = 'public_ipv4';
+
+export function enforcementSupportsMode(
+  health: EnforcementHealth | null,
+  mode: EnforcementPolicyMode,
+): boolean {
+  if (health?.ready !== true) return false;
+  if (mode === 'observe') return health.capabilities.credential_observe;
+  if (mode === 'audit') return health.capabilities.credential_audit;
+  return health.capabilities.credential_enforce;
+}
+
+export function enforcementSupportsContainment(health: EnforcementHealth | null): boolean {
+  return health?.ready === true
+    && health.capabilities.credential_enforce
+    && health.capabilities.policy_handoff;
+}
+
+export function enforcementViolationTotal(
+  violations: ReadonlyArray<Pick<EnforcementViolation, 'blocked'>>,
+  health: EnforcementHealth | null,
+): number {
+  if (health?.capabilities.credential_enforce === true) {
+    return violations.filter((event) => event.blocked).length;
+  }
+  return violations.length;
+}
+
+export interface CredentialBindingInput {
+  agent_id: string;
+  session_id?: string;
+  root_pid: number;
+  source_path: string;
+  trusted_endpoint?: string;
+  revision: number;
+  mode: EnforcementPolicyMode;
+  taint_ttl_secs?: number;
+  destination_scope: CredentialDestinationScope;
+}
+
+export class EnforcementApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string,
+    message: string,
+    public readonly retryable: boolean,
+  ) {
+    super(message);
+    this.name = 'EnforcementApiError';
+  }
+}
+
+async function enforcementRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    credentials: 'same-origin',
+  });
+  if (res.status === 401) {
+    window.location.hash = '#/login';
+    throw new Error('Authentication required');
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => null) as {
+      error?: { code?: string; message?: string; retryable?: boolean };
+    } | null;
+    const error = body?.error;
+    if (error && typeof error.code === 'string' && typeof error.message === 'string') {
+      throw new EnforcementApiError(
+        res.status,
+        error.code,
+        error.message,
+        Boolean(error.retryable),
+      );
+    }
+    throw new EnforcementApiError(
+      res.status,
+      'enforcement_request_failed',
+      res.statusText || 'Enforcement request failed',
+      false,
+    );
+  }
+  if (res.status === 204) {
+    return undefined as T;
+  }
+  return res.json() as Promise<T>;
+}
+
+export const fetchEnforcementHealth = () =>
+  enforcementRequest<EnforcementHealth>('/api/enforcement/health');
+
+export const fetchEnforcementBindings = () =>
+  enforcementRequest<{ bindings: EnforcementBinding[] }>('/api/enforcement/bindings');
+
+export const fetchEnforcementViolations = (limit = 100) =>
+  enforcementRequest<{ violations: EnforcementViolation[] }>(
+    `/api/enforcement/violations?limit=${Math.min(1000, Math.max(1, limit))}`,
+  );
+
+export const createFileBinding = (input: FileBindingInput) =>
+  enforcementRequest<EnforcementBinding>('/api/enforcement/file-bindings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+
+export const createCredentialBinding = (input: CredentialBindingInput) =>
+  enforcementRequest<EnforcementBinding>('/api/enforcement/credential-bindings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+
+export const detachEnforcementBinding = (bindingId: string) =>
+  enforcementRequest<void>(
+    `/api/enforcement/bindings/${encodeURIComponent(bindingId)}`,
+    { method: 'DELETE' },
+  );
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /**
@@ -602,6 +786,31 @@ export async function fetchInterruptionStats(
   );
 }
 
+/**
+ * Fetch interruption events across all sessions within a time range.
+ * Omitted params fall back to server defaults (last 24 h, limit 200).
+ */
+export async function fetchInterruptions(opts?: {
+  startNs?: number;
+  endNs?: number;
+  agentName?: string;
+  interruptionType?: string;
+  severity?: string;
+  resolved?: boolean;
+  limit?: number;
+}): Promise<InterruptionRecord[]> {
+  const params = new URLSearchParams();
+  if (opts?.startNs !== undefined) params.set('start_ns', String(opts.startNs));
+  if (opts?.endNs !== undefined) params.set('end_ns', String(opts.endNs));
+  if (opts?.agentName) params.set('agent_name', opts.agentName);
+  if (opts?.interruptionType) params.set('interruption_type', opts.interruptionType);
+  if (opts?.severity) params.set('severity', opts.severity);
+  if (opts?.resolved !== undefined) params.set('resolved', String(opts.resolved));
+  if (opts?.limit !== undefined) params.set('limit', String(opts.limit));
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  return apiFetch<InterruptionRecord[]>(`${API_BASE}/api/interruptions${qs}`);
+}
+
 /** Per-(severity, type) detail returned by session/trace-counts endpoints. */
 export interface InterruptionTypeDetail {
   interruption_type: string;
@@ -875,6 +1084,9 @@ export interface SecuritySummary {
   by_result: Record<string, number>;
   affected_sessions: number;
   affected_runs: number;
+  risk_cases_total?: number;
+  risk_cases_open?: number;
+  risk_cases_blocked?: number;
   latest_events: SecurityEventRecord[];
   [key: string]: unknown;
 }
@@ -976,6 +1188,124 @@ export interface SecurityTimelineResponse {
   [key: string]: unknown;
 }
 
+export type SecurityReviewStatus =
+  | 'open'
+  | 'confirmed'
+  | 'false_positive'
+  | 'accepted_risk'
+  | 'resolved';
+
+export type SecurityRiskSeverity = 'low' | 'medium' | 'high' | 'critical';
+
+export interface SecurityRiskCase {
+  case_id: string;
+  policy_id: string;
+  policy_revision: number;
+  agent_id: string;
+  session_id?: string | null;
+  severity: SecurityRiskSeverity;
+  risk_score: number;
+  status: SecurityReviewStatus;
+  blocked: boolean;
+  opened_at_ns: number;
+  updated_at_ns: number;
+  summary: string;
+}
+
+export interface SecurityEvidenceEvent {
+  event_id: string;
+  event_type: string;
+  occurred_at_ns: number;
+  identity: {
+    pid: number;
+    session_id?: string | null;
+    tool_call_id?: string | null;
+    [key: string]: unknown;
+  };
+  event: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface SecurityRiskCaseDetail extends SecurityRiskCase {
+  evidence: SecurityEvidenceEvent[];
+  containment: SecurityContainmentAction | null;
+}
+
+export type SecurityContainmentLifecycle =
+  | 'pending'
+  | 'active'
+  | 'expiring'
+  | 'expired'
+  | 'failed';
+
+export interface SecurityContainmentCandidate {
+  agent_id: string;
+  root_pid: number;
+  process_start_time: number;
+  display_name: string;
+}
+
+export interface SecurityContainmentAction {
+  action_id: string;
+  case_id: string;
+  binding_id: string;
+  agent_id: string;
+  root_pid: number;
+  process_start_time: number;
+  duration_secs: number | null;
+  expires_at_ns: number | null;
+  lifecycle_state: SecurityContainmentLifecycle;
+  blocked_at_ns: number | null;
+  requested_by: string;
+  failure_stage: 'attach' | 'detach' | 'reconcile' | null;
+  failure_summary: string | null;
+  attempt_count: number;
+  next_retry_at_ns: number | null;
+  created_at_ns: number;
+  updated_at_ns: number;
+}
+
+export interface SecurityContainmentPlan {
+  case_id: string;
+  source_path: string;
+  original_target: SecurityContainmentCandidate | null;
+  original_target_valid: boolean;
+  candidates: SecurityContainmentCandidate[];
+  default_duration_secs: number;
+  min_duration_secs: number;
+  max_duration_secs: number;
+  existing_action: SecurityContainmentAction | null;
+}
+
+export function containmentTargetCandidates(
+  plan: SecurityContainmentPlan,
+  health: EnforcementHealth | null,
+): SecurityContainmentCandidate[] {
+  if (plan.original_target_valid && plan.original_target) {
+    return [plan.original_target];
+  }
+  if (
+    health?.ready !== true
+    || health.capabilities.alternate_pid_retarget !== true
+  ) {
+    return [];
+  }
+  return plan.candidates;
+}
+
+export function defaultContainmentTargetPid(
+  plan: SecurityContainmentPlan,
+  health: EnforcementHealth | null,
+): number | null {
+  const candidates = containmentTargetCandidates(plan, health);
+  return candidates.length === 1 ? candidates[0].root_pid : null;
+}
+
+export interface SecurityContainmentRequest {
+  root_pid: number;
+  duration_secs: number | null;
+}
+
 export type SecurityQueryValue = string | number | boolean | null | undefined;
 
 export interface SecurityTimeRangeParams {
@@ -1039,7 +1369,18 @@ function buildQuery(params?: object): string {
   return qs ? `?${qs}` : '';
 }
 
-async function securityFetch<T>(url: string): Promise<SecurityApiResponse<T>> {
+export async function securityFetch<T>(url: string): Promise<SecurityApiResponse<T>> {
+  return fetchSecurityApi<T>(url, false);
+}
+
+async function auditFetch<T>(url: string): Promise<SecurityApiResponse<T>> {
+  return fetchSecurityApi<T>(url, true);
+}
+
+async function fetchSecurityApi<T>(
+  url: string,
+  rejectHttpErrorBeforeState: boolean,
+): Promise<SecurityApiResponse<T>> {
   const res = await fetch(url, { credentials: 'same-origin' });
   if (res.status === 401) {
     window.location.hash = '#/login';
@@ -1053,6 +1394,17 @@ async function securityFetch<T>(url: string): Promise<SecurityApiResponse<T>> {
     } catch {
       body = text;
     }
+  }
+
+  if (!res.ok && rejectHttpErrorBeforeState) {
+    const errorBody = body && typeof body === 'object' && 'error' in body
+      ? (body as { error: SecurityRestError }).error
+      : {
+          code: 'security_api_error',
+          message: typeof body === 'string' && body ? body : res.statusText,
+          retryable: false,
+        };
+    throw new SecurityApiClientError(res.status, errorBody);
   }
 
   if (body && typeof body === 'object' && 'state' in body) {
@@ -1156,6 +1508,151 @@ export async function fetchSecurityTimeline(
   );
 }
 
+export async function fetchAuditSummary(
+  params?: SecurityTimeRangeParams & { limit?: number },
+): Promise<SecurityApiResponse<SecuritySummary>> {
+  return auditFetch<SecuritySummary>(
+    `${API_BASE}/api/audit/summary${buildQuery(params)}`,
+  );
+}
+
+export async function fetchAuditEvents(
+  params?: SecurityEventListParams,
+): Promise<SecurityApiResponse<SecurityPaginated<SecurityEventRecord>>> {
+  return auditFetch<SecurityPaginated<SecurityEventRecord>>(
+    `${API_BASE}/api/audit/events${buildQuery(params)}`,
+  );
+}
+
+export async function fetchAuditSessions(
+  params?: SecuritySessionListParams,
+): Promise<SecurityApiResponse<SecurityPaginated<SecuritySessionSummary>>> {
+  return auditFetch<SecurityPaginated<SecuritySessionSummary>>(
+    `${API_BASE}/api/audit/sessions${buildQuery(params)}`,
+  );
+}
+
+export async function fetchSecurityCases(
+  params?: { limit?: number; offset?: number },
+): Promise<SecurityApiResponse<SecurityPaginated<SecurityRiskCase>>> {
+  return auditFetch<SecurityPaginated<SecurityRiskCase>>(
+    `${API_BASE}/api/audit/cases${buildQuery(params)}`,
+  );
+}
+
+export async function fetchSecurityCase(
+  caseId: string,
+): Promise<SecurityApiResponse<SecurityRiskCaseDetail>> {
+  const response = await auditFetch<SecurityRiskCaseDetail>(
+    `${API_BASE}/api/audit/cases/${encodeURIComponent(caseId)}`,
+  );
+  if (!isSecurityRiskCaseDetail(response.data)) {
+    throw new SecurityApiClientError(200, {
+      code: 'malformed_security_case',
+      message: 'Security API returned a malformed case detail',
+      retryable: false,
+    });
+  }
+  return response;
+}
+
+function isSecurityRiskCaseDetail(value: unknown): value is SecurityRiskCaseDetail {
+  if (!isObjectRecord(value) || !Array.isArray(value.evidence)) return false;
+  const hasCaseFields = [
+    'case_id',
+    'policy_id',
+    'agent_id',
+    'severity',
+    'status',
+    'summary',
+  ].every((field) => typeof value[field] === 'string')
+    && typeof value.policy_revision === 'number'
+    && typeof value.risk_score === 'number'
+    && typeof value.blocked === 'boolean'
+    && typeof value.opened_at_ns === 'number'
+    && typeof value.updated_at_ns === 'number'
+    && (value.containment === null || isObjectRecord(value.containment));
+  return hasCaseFields && value.evidence.every((event) => (
+    isObjectRecord(event)
+      && typeof event.event_id === 'string'
+      && typeof event.event_type === 'string'
+      && typeof event.occurred_at_ns === 'number'
+      && isObjectRecord(event.identity)
+      && isObjectRecord(event.event)
+  ));
+}
+
+export async function fetchContainmentPlan(
+  caseId: string,
+): Promise<SecurityApiResponse<SecurityContainmentPlan>> {
+  return auditFetch<SecurityContainmentPlan>(
+    `${API_BASE}/api/audit/cases/${encodeURIComponent(caseId)}/containment-plan`,
+  );
+}
+
+export async function containSecurityCase(
+  caseId: string,
+  request: SecurityContainmentRequest,
+): Promise<SecurityApiResponse<SecurityContainmentAction>> {
+  const response = await fetch(
+    `${API_BASE}/api/audit/cases/${encodeURIComponent(caseId)}/contain`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    },
+  );
+  if (response.status === 401) {
+    window.location.hash = '#/login';
+    throw new Error('Authentication required');
+  }
+  const body = await response.json().catch(() => null) as
+    | SecurityApiResponse<SecurityContainmentAction>
+    | { error?: SecurityRestError }
+    | null;
+  if (!response.ok || !body || !('state' in body)) {
+    const error = body && 'error' in body ? body.error : undefined;
+    throw new SecurityApiClientError(response.status, error ?? {
+      code: 'containment_request_failed',
+      message: response.statusText || 'Containment request failed',
+      retryable: false,
+    });
+  }
+  return body;
+}
+
+export async function reviewSecurityCase(
+  caseId: string,
+  status: Exclude<SecurityReviewStatus, 'open'>,
+): Promise<SecurityApiResponse<SecurityRiskCase>> {
+  const response = await fetch(
+    `${API_BASE}/api/audit/cases/${encodeURIComponent(caseId)}/review`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    },
+  );
+  if (response.status === 401) {
+    window.location.hash = '#/login';
+    throw new Error('Authentication required');
+  }
+  const body = await response.json().catch(() => null) as SecurityApiResponse<SecurityRiskCase> | {
+    error?: SecurityRestError;
+  } | null;
+  if (!response.ok || !body || !('state' in body)) {
+    const error = body && 'error' in body ? body.error : undefined;
+    throw new SecurityApiClientError(response.status, error ?? {
+      code: 'security_review_failed',
+      message: response.statusText || 'Risk case review failed',
+      retryable: false,
+    });
+  }
+  return body;
+}
+
 // ─── Skill Metrics types ──────────────────────────────────────────────────────
 
 export interface SkillFirstSeen {
@@ -1243,8 +1740,22 @@ export async function fetchSkillMetrics(
 
 // ─── Authentication API ──────────────────────────────────────────────────────
 
+export type AppCapability =
+  | 'agent_observability'
+  | 'sessions'
+  | 'token_savings'
+  | 'optimization'
+  | 'skills'
+  | 'security'
+  | 'enforcement'
+  | 'atif'
+  | 'settings'
+  | 'agent_health';
+
 export interface AuthStatusResponse {
   auth_enabled: boolean;
+  mode?: 'linux' | 'local' | string;
+  capabilities?: AppCapability[];
 }
 
 export interface AuthVerifyResponse {

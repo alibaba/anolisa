@@ -194,7 +194,7 @@ stage-tools: ## Stage tools (sign-skill.sh) to BUILD_DIR
 .PHONY: stage-component-manifest
 stage-component-manifest: ## Stage component.toml into BUILD_DIR
 	install -d -m 0755 $(BUILD_DIR)/share/anolisa/components/sec-core
-	install -p -m 0644 adapters/component.toml \
+	install -p -m 0644 .anolisa/component.toml \
 		$(BUILD_DIR)/share/anolisa/components/sec-core/component.toml
 
 .PHONY: build-all
@@ -222,6 +222,62 @@ stage-cli: ## Install all wheels to local staging dir (requires uv)
 	uv pip install --target $(CLI_STAGED_SITE) --no-deps --no-cache --link-mode copy \
 		$(BUILD_DIR)/wheels/*.whl
 	rm -f $(CLI_STAGED_SITE)/.lock
+
+# =============================================================================
+# RAW PACKAGE
+# =============================================================================
+
+OUTPUT_DIR ?= $(BUILD_DIR)/raw
+TARGET_OS ?= linux
+TARGET_ARCH ?= $(shell uname -m)
+RAW_CONTRACT ?= .anolisa/component.toml
+RAW_PYTHON_VERSION := 3.11.6
+RAW_PYTHON_ENV ?= $(BUILD_DIR)/raw-python-env
+RAW_PYTHON_RUNTIME ?= $(BUILD_DIR)/python-runtime
+RAW_PYTHON_ARCHIVE ?= $(BUILD_DIR)/downloads/cpython-3.11.6+20231002-x86_64-unknown-linux-gnu-install_only.tar.gz
+
+.PHONY: prepare-raw-python
+prepare-raw-python: build-all ## Stage pinned Python and locked production dependencies for raw packaging
+	rm -rf $(CLI_STAGED_SITE) $(RAW_PYTHON_ENV)
+	./packaging/raw/prepare_python_runtime.sh \
+		"$(abspath $(RAW_PYTHON_RUNTIME))" "$(abspath $(RAW_PYTHON_ARCHIVE))"
+	cd agent-sec-cli && UV_PROJECT_ENVIRONMENT="$(abspath $(RAW_PYTHON_ENV))" \
+		uv sync --python "$(abspath $(RAW_PYTHON_RUNTIME))/bin/python3.11" \
+			--no-managed-python --frozen --no-dev --no-install-project --link-mode copy
+	@set -eu; \
+		python="$(abspath $(RAW_PYTHON_ENV))/bin/python3.11"; \
+		version="$$("$$python" -c 'import platform; print(platform.python_version())')"; \
+		[ "$$version" = "$(RAW_PYTHON_VERSION)" ] || { \
+			echo "ERROR: raw package requires Python $(RAW_PYTHON_VERSION), found $$version" >&2; \
+			exit 1; \
+		}
+	install -d -m 0755 $(CLI_STAGED_SITE)
+	cp -a $(RAW_PYTHON_ENV)/lib/python3.11/site-packages/. $(CLI_STAGED_SITE)/
+	@$(call require_single_cli_wheel,$(BUILD_DIR)/wheels) \
+		uv pip install --python $(RAW_PYTHON_ENV)/bin/python3.11 \
+			--target $(CLI_STAGED_SITE) --no-deps --no-cache --link-mode copy "$$1"
+	rm -rf $(CLI_STAGED_SITE)/bin
+	rm -f $(CLI_STAGED_SITE)/.lock
+	rm -rf $(RAW_PYTHON_ENV)
+
+.PHONY: stage-raw
+stage-raw: ## Stage built raw payload under DESTDIR (build outputs must already exist)
+	@BUILD_DIR="$(abspath $(BUILD_DIR))" \
+		DESTDIR="$(DESTDIR)" \
+		RAW_CONTRACT="$(abspath $(RAW_CONTRACT))" \
+		TARGET_OS="$(TARGET_OS)" \
+		TARGET_ARCH="$(TARGET_ARCH)" \
+		./packaging/raw/package.sh stage
+
+.PHONY: package-raw
+package-raw: prepare-raw-python ## Build deterministic raw tar archive in OUTPUT_DIR
+	@BUILD_DIR="$(abspath $(BUILD_DIR))" \
+		OUTPUT_DIR="$(abspath $(OUTPUT_DIR))" \
+		RAW_CONTRACT="$(abspath $(RAW_CONTRACT))" \
+		TARGET_OS="$(TARGET_OS)" \
+		TARGET_ARCH="$(TARGET_ARCH)" \
+		SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" \
+		./packaging/raw/package.sh package
 
 # =============================================================================
 # INSTALL
@@ -268,7 +324,9 @@ RPM_HERMES_PLUGIN_DIR ?= /opt/agent-sec/hermes-plugin
 RPM_QODER_PLUGIN_DIR  ?= /opt/agent-sec/qoder-plugin
 RPM_QWEN_CODE_EXTENSION_DIR ?= /opt/agent-sec/qwen-code-extension
 SYSTEMD_USER_UNIT_DIR ?= /usr/lib/systemd/user
-SYSTEMD_USER_UNIT_SOURCE ?= agent-sec-cli/config/systemd/agent-sec-core.service
+SYSTEMD_USER_UNIT_TEMPLATE ?= packaging/systemd/agent-sec-core.service.in
+SYSTEMD_SERVICE_BINDIR ?= /usr/bin
+SYSTEMD_SERVICE_DATADIR ?= /usr/share/anolisa
 
 .PHONY: install-sandbox
 install-sandbox: ## Install linux-sandbox binary only
@@ -378,13 +436,18 @@ install-cosh-hook: ## Install cosh hooks (linux-sandbox + extension)
 .PHONY: install-component-manifest
 install-component-manifest: ## Install component.toml to DESTDIR
 	install -d -m 0755 $(DESTDIR)$(COMPONENT_DIR)
-	install -m 0644 adapters/component.toml \
+	install -m 0644 .anolisa/component.toml \
 		$(DESTDIR)$(COMPONENT_DIR)/component.toml
 
 .PHONY: install-systemd-user
 install-systemd-user: ## Install agent-sec-core systemd user service
 	install -d -m 0755 $(DESTDIR)$(SYSTEMD_USER_UNIT_DIR)
-	install -p -m 0644 $(SYSTEMD_USER_UNIT_SOURCE) $(DESTDIR)$(SYSTEMD_USER_UNIT_DIR)/agent-sec-core.service
+	sed \
+		-e 's|{bindir}|$(SYSTEMD_SERVICE_BINDIR)|g' \
+		-e 's|{datadir}|$(SYSTEMD_SERVICE_DATADIR)|g' \
+		$(SYSTEMD_USER_UNIT_TEMPLATE) \
+		> $(DESTDIR)$(SYSTEMD_USER_UNIT_DIR)/agent-sec-core.service
+	chmod 0644 $(DESTDIR)$(SYSTEMD_USER_UNIT_DIR)/agent-sec-core.service
 
 .PHONY: install-all
 install-all: install-cli-venv install-cosh-hook install-codex-plugin install-qoder-plugin install-openclaw-plugin install-hermes-plugin install-qwen-code-extension install-skills ## Install all (user source build)

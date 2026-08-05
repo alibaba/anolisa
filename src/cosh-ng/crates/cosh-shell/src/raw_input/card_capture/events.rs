@@ -24,7 +24,7 @@ pub(super) fn cancel_event(capture: &RawInputCapture) -> RawInputEvent {
     }
 }
 
-pub(super) fn releases_capture(event: &RawInputEvent) -> bool {
+pub(in crate::raw_input) fn releases_capture(event: &RawInputEvent) -> bool {
     matches!(
         event,
         RawInputEvent::CardApprove(_)
@@ -126,5 +126,34 @@ pub(super) fn question_choice_count(capture: &RawInputCapture) -> usize {
         | RawInputCapture::Config { .. }
         | RawInputCapture::ConfigLanguage { .. }
         | RawInputCapture::PromptDraft { .. } => 0,
+    }
+}
+
+pub(super) fn capture_initial_selection(capture: &RawInputCapture) -> usize {
+    match capture {
+        RawInputCapture::Question { selected, .. } => {
+            (*selected).min(question_choice_count(capture).saturating_sub(1))
+        }
+        RawInputCapture::Mode {
+            selected,
+            option_count,
+            ..
+        }
+        | RawInputCapture::Config {
+            selected,
+            option_count,
+            ..
+        }
+        | RawInputCapture::ConfigLanguage {
+            selected,
+            option_count,
+            ..
+        }
+        | RawInputCapture::Session {
+            selected,
+            option_count,
+            ..
+        } => (*selected).min(option_count.saturating_sub(1)),
+        _ => 0,
     }
 }

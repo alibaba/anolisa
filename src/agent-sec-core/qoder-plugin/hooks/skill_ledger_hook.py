@@ -13,15 +13,18 @@ from typing import Any
 
 from qoder_hook_common import (
     dumps_hook_output,
+    env_flag_enabled,
+    env_hook_policy,
     jsonish_value,
     load_hook_input,
+    normalize_hook_policy,
     pre_tool_decision_output,
     with_trace_context,
 )
 
 _TOOL_NAME = "Skill"
 _DEFAULT_POLICY = "ask"
-_VALID_POLICIES = frozenset({"ask", "debug", "warn", "block"})
+_HOOK_ENABLED = env_flag_enabled("SKILL_LEDGER_HOOK_ENABLED", True)
 _DEFAULT_TIMEOUT = 5.0
 _VALID_STATUSES = frozenset(
     {"pass", "none", "drifted", "warn", "deny", "tampered", "error"}
@@ -85,14 +88,12 @@ def _debug(message: str) -> None:
 
 
 def _read_policy() -> str:
-    """Return the configured four-level hook policy."""
-    configured = (
-        os.environ.get("SKILL_LEDGER_HOOK_POLICY", _DEFAULT_POLICY).strip().lower()
-    )
-    if configured in _VALID_POLICIES:
-        return configured
-    _debug("invalid SKILL_LEDGER_HOOK_POLICY; using ask")
-    return _DEFAULT_POLICY
+    """Return the configured four-level Skill Ledger mode."""
+    raw = os.environ.get("SKILL_LEDGER_MODE")
+    policy = env_hook_policy("SKILL_LEDGER_MODE", _DEFAULT_POLICY)
+    if "SKILL_LEDGER_MODE" in os.environ and normalize_hook_policy(raw, "") == "":
+        _debug("invalid SKILL_LEDGER_MODE; using ask")
+    return policy
 
 
 def _read_timeout() -> float:
@@ -382,7 +383,7 @@ def _format_resolution_notice(issue: ResolutionIssue) -> str:
 
 def _policy_output(policy: str, notice: str) -> str | None:
     """Map a risky result to Qoder's four supported policy behaviors."""
-    if policy == "debug":
+    if policy in {"debug", "observe"}:
         _debug(notice)
         return None
     if policy == "warn":
@@ -394,6 +395,8 @@ def _policy_output(policy: str, notice: str) -> str | None:
 
 def main() -> None:
     """Validate a local Qoder Skill before the Skill tool executes."""
+    if not _HOOK_ENABLED:
+        return
     input_data = load_hook_input()
     if input_data is None:
         return

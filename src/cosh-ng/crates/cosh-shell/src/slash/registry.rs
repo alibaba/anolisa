@@ -49,6 +49,14 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
+            name: "/draft",
+            usage: "/draft",
+            summary_id: MessageId::HelpSummaryDraft,
+            group: Some("Prompt"),
+            scope: "read-only",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
             name: "/health",
             usage: "/health",
             summary_id: MessageId::HelpSummaryHealth,
@@ -98,7 +106,7 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
         },
         SlashCommandSpec {
             name: "/session",
-            usage: "/session [new|status|list|resume <id>|clear <id>...|clear --all|compact [status|cancel]]",
+            usage: "/session [new|status|list [--all]|resume <id>|clear <id>...|clear --all|compact [status|cancel]]",
             summary_id: MessageId::HelpSummarySession,
             group: Some("Sessions"),
             scope: "session",
@@ -222,6 +230,14 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             summary_id: MessageId::HelpSummarySkills,
             group: Some("Registry"),
             scope: "read-only",
+            state: SlashCommandState::Public,
+        },
+        SlashCommandSpec {
+            name: "/mcp",
+            usage: "/mcp [list|connect|inspect|refresh|disconnect|login|logout] [name]",
+            summary_id: MessageId::HelpSummaryMcp,
+            group: Some("Registry"),
+            scope: "config",
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
@@ -392,7 +408,7 @@ mod tests {
         assert!(visible.contains(&"/stats [model|tools]"));
         assert!(visible
             .iter()
-            .any(|usage| usage.starts_with("/session [new|status|list|resume")));
+            .any(|usage| usage.starts_with("/session [new|status|list [--all]|resume")));
         assert!(visible.contains(&"/mode approval [recommend|auto|trust]"));
         assert!(visible.contains(&"/mode analysis [smart|auto|manual]"));
         assert!(visible.contains(&"/hooks"));
@@ -481,39 +497,56 @@ mod tests {
     }
 
     #[test]
-    fn shell_marker_exact_tokens_match_registry() {
+    fn shell_marker_exact_tokens_match_registry_routing_c4_per_shell_registry() {
         let registry = exact_slash_control_commands().collect::<BTreeSet<_>>();
-        // Marker scripts live in per-shell owner files under shell_host/marker/.
-        let marker = concat!(
-            include_str!("../shell_host/marker/bash.rs"),
-            "\n",
-            include_str!("../shell_host/marker/zsh.rs")
-        );
-        let marker_tokens = marker
+        for (shell, marker) in [
+            ("bash", include_str!("../shell_host/marker/bash.rs")),
+            ("zsh", include_str!("../shell_host/marker/zsh.rs")),
+        ] {
+            let case_lines = marker
+                .lines()
+                .map(str::trim)
+                .filter(|line| {
+                    line.ends_with(')')
+                        && line
+                            .trim_end_matches(')')
+                            .split('|')
+                            .all(|token| token.trim().starts_with('/'))
+                })
+                .filter(|line| line.contains('|'))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                case_lines.len(),
+                1,
+                "expected one authoritative {shell} slash case list"
+            );
+            for line in case_lines {
+                let tokens = line
+                    .trim_end_matches(')')
+                    .split('|')
+                    .map(str::trim)
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(tokens, registry, "{shell} case list diverged from registry");
+            }
+        }
+    }
+
+    #[test]
+    fn routing_c4_zsh_stubs_match_registry() {
+        let registry = exact_slash_control_commands()
+            .map(|name| name.trim_start_matches('/'))
+            .collect::<BTreeSet<_>>();
+        let marker = include_str!("../shell_host/marker/zsh.rs");
+        let line = marker
             .lines()
             .map(str::trim)
-            .filter(|line| line.starts_with('/'))
-            .flat_map(|line| line.trim_end_matches(')').split('|'))
-            .map(str::trim)
-            .filter(|token| {
-                token
-                    .as_bytes()
-                    .get(1)
-                    .is_some_and(|byte| byte.is_ascii_alphabetic())
-            })
+            .find(|line| line.starts_with("for _cosh_sc in "))
+            .expect("zsh slash stub loop");
+        let stubs = line
+            .trim_start_matches("for _cosh_sc in ")
+            .trim_end_matches("; do")
+            .split_whitespace()
             .collect::<BTreeSet<_>>();
-
-        for token in &registry {
-            assert!(
-                marker_tokens.contains(token),
-                "shell marker is missing registry token {token}"
-            );
-        }
-        for token in &marker_tokens {
-            assert!(
-                registry.contains(token),
-                "shell marker has unregistered slash token {token}"
-            );
-        }
+        assert_eq!(stubs, registry, "zsh slash stubs diverged from registry");
     }
 }

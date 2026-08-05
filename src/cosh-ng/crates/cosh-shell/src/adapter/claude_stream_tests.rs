@@ -177,6 +177,28 @@ fn claude_stream_parser_carries_structured_session_error_code() {
 }
 
 #[test]
+fn claude_stream_parser_carries_structured_result_error_code() {
+    let mut parser = ClaudeStreamParser::new("run-result-error".to_string(), None);
+
+    let events = parser.parse_line(
+        r#"{"type":"result","subtype":"error","is_error":true,"errors":["turn limit"],"error_code":"max_turns","max_turns":50}"#,
+    );
+
+    assert!(matches!(
+        events.as_slice(),
+        [AgentEvent::AgentFailed {
+            error,
+            error_code,
+            max_turns,
+            ..
+        }] if error == "turn limit"
+            && error_code.as_deref() == Some("max_turns")
+            && *max_turns == Some(50)
+    ));
+    assert_eq!(parser.max_turns(), Some(50));
+}
+
+#[test]
 fn claude_stream_parser_extracts_tool_use_and_session_id() {
     let session = Arc::new(Mutex::new(None));
     let mut parser = ClaudeStreamParser::new("run-1".to_string(), Some(Arc::clone(&session)));

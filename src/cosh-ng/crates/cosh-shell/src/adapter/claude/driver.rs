@@ -9,7 +9,7 @@ use crate::types::AgentEvent;
 use super::super::{
     agent_event_is_provider_progress, commit_provider_session_if_completed, control_protocol,
     record_cancellation_pending_session, run_provider_process_loop, spawn_provider_child,
-    AdapterError, AgentRunHandle, ApprovalDecision, ApprovalResponse, ClaudeStreamParser,
+    AdapterError, AgentRunHandle, ApprovalChannelMessage, ApprovalDecision, ClaudeStreamParser,
     PreparedInvocation, ProviderCancellationArtifactStore, ProviderLineProgress,
     ProviderPromptArgMode, ProviderRunOutcome, ProviderStdinMode,
 };
@@ -120,7 +120,15 @@ pub(super) fn start_cancellable_claude_process(
             } => {
                 if !status.success() {
                     let error = stderr_tail.trim().to_string();
-                    send_agent_event(&sender, AgentEvent::AgentFailed { run_id, error });
+                    send_agent_event(
+                        &sender,
+                        AgentEvent::AgentFailed {
+                            run_id,
+                            error,
+                            error_code: None,
+                            max_turns: None,
+                        },
+                    );
                     return;
                 }
             }
@@ -167,7 +175,7 @@ pub(super) fn start_control_protocol_claude_process(
     session_state: Arc<Mutex<Option<String>>>,
 ) -> AgentRunHandle {
     let (event_tx, event_rx) = mpsc::channel();
-    let (approval_tx, approval_rx) = mpsc::channel::<ApprovalResponse>();
+    let (approval_tx, approval_rx) = mpsc::channel::<ApprovalChannelMessage>();
     let cancelled = Arc::new(AtomicBool::new(false));
     let writer_done = Arc::new(AtomicBool::new(false));
     let child_pid = Arc::new(Mutex::new(None::<u32>));
@@ -253,40 +261,43 @@ pub(super) fn start_control_protocol_claude_process(
             while !writer_done_for_thread.load(Ordering::SeqCst)
                 && !writer_cancelled.load(Ordering::SeqCst)
             {
-                let response = match approval_rx.recv_timeout(Duration::from_millis(100)) {
-                    Ok(response) => response,
+                let msg = match approval_rx.recv_timeout(Duration::from_millis(100)) {
+                    // Receipts exist only for cosh-core's residual approval
+                    // timeout; provider control protocols have no receipt
+                    // semantic, so consume them without touching the wire.
+                    Ok(ApprovalChannelMessage::Receipt { .. }) => continue,
+                    Ok(ApprovalChannelMessage::Response(response)) => match &response.decision {
+                        ApprovalDecision::Allow => match response.tool_input.as_ref() {
+                            Some(tool_input) => control_protocol::serialize_claude_allow(
+                                &response.request_id,
+                                tool_input,
+                            ),
+                            None => control_protocol::serialize_deny(
+                                &response.request_id,
+                                "Missing provider tool input",
+                            ),
+                        },
+                        ApprovalDecision::Deny { message } => {
+                            control_protocol::serialize_deny(&response.request_id, message)
+                        }
+                        ApprovalDecision::HostExecutedShell { result } => {
+                            control_protocol::serialize_host_executed_shell_result(
+                                &response.request_id,
+                                result,
+                            )
+                        }
+                        ApprovalDecision::Answer { answer } => {
+                            control_protocol::serialize_answer(&response.request_id, answer)
+                        }
+                        ApprovalDecision::ShellEvidence { result } => {
+                            control_protocol::serialize_shell_evidence_result(
+                                &response.request_id,
+                                result,
+                            )
+                        }
+                    },
                     Err(mpsc::RecvTimeoutError::Timeout) => continue,
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                };
-                let msg = match &response.decision {
-                    ApprovalDecision::Allow => match response.tool_input.as_ref() {
-                        Some(tool_input) => control_protocol::serialize_claude_allow(
-                            &response.request_id,
-                            tool_input,
-                        ),
-                        None => control_protocol::serialize_deny(
-                            &response.request_id,
-                            "Missing provider tool input",
-                        ),
-                    },
-                    ApprovalDecision::Deny { message } => {
-                        control_protocol::serialize_deny(&response.request_id, message)
-                    }
-                    ApprovalDecision::HostExecutedShell { result } => {
-                        control_protocol::serialize_host_executed_shell_result(
-                            &response.request_id,
-                            result,
-                        )
-                    }
-                    ApprovalDecision::Answer { answer } => {
-                        control_protocol::serialize_answer(&response.request_id, answer)
-                    }
-                    ApprovalDecision::ShellEvidence { result } => {
-                        control_protocol::serialize_shell_evidence_result(
-                            &response.request_id,
-                            result,
-                        )
-                    }
                 };
                 if writeln!(writer, "{msg}").is_err() {
                     break;
@@ -346,7 +357,8 @@ pub(super) fn start_control_protocol_claude_process(
                                     &tool_use_id,
                                 )
                             {
-                                let _ = approval_tx_for_loop.send(response);
+                                let _ = approval_tx_for_loop
+                                    .send(ApprovalChannelMessage::Response(response));
                                 return Ok(ProviderLineProgress::AwaitingApproval);
                             }
                             send_agent_event(
@@ -470,7 +482,15 @@ pub(super) fn start_control_protocol_claude_process(
                 if !status.success() {
                     writer_done.store(true, Ordering::SeqCst);
                     let error = stderr_tail.trim().to_string();
-                    send_agent_event(&event_tx, AgentEvent::AgentFailed { run_id, error });
+                    send_agent_event(
+                        &event_tx,
+                        AgentEvent::AgentFailed {
+                            run_id,
+                            error,
+                            error_code: None,
+                            max_turns: None,
+                        },
+                    );
                     return;
                 }
             }

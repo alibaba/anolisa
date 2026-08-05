@@ -18,6 +18,16 @@ impl EvidenceState {
         self.shell_command_completed.push(evidence);
     }
 
+    /// Claims **at most one** pending recovery, oldest first.
+    ///
+    /// A claim is irreversible — the evidence moves to `RecoveryQueued` and its
+    /// approval id enters the dedup set — so a caller may only claim what it can
+    /// start immediately. Starting one continuation polls the provider, which can
+    /// surface a compaction recommendation; every further internal run would then
+    /// be dropped by the start gate while already counting as claimed, losing
+    /// that recovery for good. One per idle boundary keeps claim and start
+    /// atomic; remaining recoveries are picked up at the next boundary. Same
+    /// contract as [`Self::claim_stalled_provider_shell_handoff_continuations`].
     pub(crate) fn claim_pending_shell_handoff_continuations(
         &mut self,
     ) -> Vec<RuntimeShellCommandCompleted> {
@@ -37,6 +47,7 @@ impl EvidenceState {
             }
             evidence.continuation_state = ShellEvidenceContinuationState::RecoveryQueued;
             requests.push(evidence.clone());
+            break;
         }
         requests
     }
@@ -62,6 +73,7 @@ impl EvidenceState {
             {
                 continue;
             }
+            evidence.recovery_reason = Some("evidence_idle_timeout");
             evidence.continuation_state = ShellEvidenceContinuationState::RecoveryQueued;
             requests.push(evidence.clone());
             break;
@@ -84,6 +96,20 @@ impl EvidenceState {
                 | ShellEvidenceContinuationState::RecoveryQueued
                 | ShellEvidenceContinuationState::Closed => {}
             }
+        }
+    }
+
+    pub(crate) fn mark_recovery_reason(&mut self, approval_id: &str, reason: &'static str) {
+        if let Some(evidence) = self
+            .shell_command_completed
+            .iter_mut()
+            .rev()
+            .find(|evidence| {
+                evidence.approval_id.as_deref() == Some(approval_id)
+                    && evidence.continuation_state == ShellEvidenceContinuationState::RecoveryQueued
+            })
+        {
+            evidence.recovery_reason = Some(reason);
         }
     }
 
@@ -160,6 +186,12 @@ pub(crate) struct RuntimeShellCommandCompleted {
     pub(crate) shell_session_id: String,
     pub(crate) command_block_id: String,
     pub(crate) command: String,
+    /// Provider-facing command text (#2142 D-6), already bounded. For a
+    /// handoff the provider authored this is the request's original text so
+    /// the model can correlate result with call even when `command` carries
+    /// the marker's redaction placeholder; every other source keeps the
+    /// redacted form. Durable surfaces must keep using `command`.
+    pub(crate) provider_command: String,
     pub(crate) cwd: String,
     pub(crate) end_cwd: String,
     pub(crate) status: &'static str,
@@ -181,6 +213,14 @@ impl RuntimeShellCommandCompleted {
         origin: AgentRunOrigin,
     ) -> Self {
         let delivery = ShellEvidenceDelivery::not_attempted();
+        // D-6 (#2142): the provider authored an approved_provider_shell_tool
+        // command, so its result echoes the request's original text
+        // (truncate-only); other sources keep the redacted block text.
+        let provider_command = if handoff.source == "approved_provider_shell_tool" {
+            crate::evidence::truncate_provider_authored_command_text(&handoff.command)
+        } else {
+            crate::evidence::redact_provider_command_text(&block.command)
+        };
         Self {
             approval_id: Some(handoff.approval_id.clone()),
             origin,
@@ -189,6 +229,7 @@ impl RuntimeShellCommandCompleted {
             shell_session_id: block.session_id.clone(),
             command_block_id: block.id.clone(),
             command: block.command.clone(),
+            provider_command,
             cwd: block.cwd.clone(),
             end_cwd: block.end_cwd.clone(),
             status,
@@ -268,6 +309,33 @@ mod tests {
 
         let second = state.claim_pending_shell_handoff_continuations();
         assert!(second.is_empty());
+    }
+
+    // Two handoffs can complete in one dispatch batch. Claiming both at once
+    // would gamble the second on a start path that may already be closed by the
+    // time it runs, and a lost claim can never be retried — so each boundary
+    // takes exactly one and the rest stay claimable.
+    #[test]
+    fn evidence_state_claims_one_pending_continuation_per_boundary() {
+        let mut state = EvidenceState::default();
+        for approval_id in ["req-1", "req-2"] {
+            state.record_shell_command_completed(shell_evidence(
+                Some(approval_id),
+                false,
+                "provider_run_not_active",
+                Some("provider run was not active"),
+            ));
+        }
+
+        let first = state.claim_pending_shell_handoff_continuations();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].approval_id.as_deref(), Some("req-1"));
+
+        let second = state.claim_pending_shell_handoff_continuations();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].approval_id.as_deref(), Some("req-2"));
+
+        assert!(state.claim_pending_shell_handoff_continuations().is_empty());
     }
 
     #[test]
@@ -364,6 +432,7 @@ mod tests {
         let first = state.claim_stalled_provider_shell_handoff_continuations();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].approval_id.as_deref(), Some("req-1"));
+        assert_eq!(first[0].recovery_reason, Some("evidence_idle_timeout"));
         assert_eq!(
             state.shell_command_completed[0].continuation_state,
             ShellEvidenceContinuationState::RecoveryQueued
@@ -376,6 +445,49 @@ mod tests {
         let second = state.claim_stalled_provider_shell_handoff_continuations();
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].approval_id.as_deref(), Some("req-2"));
+    }
+
+    #[test]
+    fn recovery_paths_share_one_claim_per_evidence() {
+        let mut state = EvidenceState::default();
+        state.record_shell_command_completed(shell_evidence(
+            Some("req-1"),
+            true,
+            "delivered",
+            None,
+        ));
+
+        assert_eq!(
+            state
+                .claim_stalled_provider_shell_handoff_continuations()
+                .len(),
+            1
+        );
+        assert!(state.claim_pending_shell_handoff_continuations().is_empty());
+        assert!(state
+            .claim_stalled_provider_shell_handoff_continuations()
+            .is_empty());
+    }
+
+    #[test]
+    fn failed_resume_updates_claimed_evidence_reason() {
+        let mut state = EvidenceState::default();
+        state.record_shell_command_completed(shell_evidence(
+            Some("req-1"),
+            false,
+            "provider_run_not_active",
+            Some("provider run was not active"),
+        ));
+        assert_eq!(state.claim_pending_shell_handoff_continuations().len(), 1);
+
+        state.mark_recovery_reason("req-1", "resume_failed");
+
+        assert_eq!(
+            state
+                .latest_recovery()
+                .and_then(|item| item.recovery_reason),
+            Some("resume_failed")
+        );
     }
 
     fn shell_evidence(
@@ -392,6 +504,7 @@ mod tests {
             shell_session_id: "raw-test".to_string(),
             command_block_id: "cmd-1".to_string(),
             command: "df -h".to_string(),
+            provider_command: "df -h".to_string(),
             cwd: "/tmp".to_string(),
             end_cwd: "/tmp".to_string(),
             status: "completed",

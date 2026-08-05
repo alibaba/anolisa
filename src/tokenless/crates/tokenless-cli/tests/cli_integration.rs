@@ -1,7 +1,183 @@
 use std::process::Command;
 
+use tokenless_stats::{OperationType, StatsRecord, StatsRecorder, get_home_dir};
+
 fn tokenless_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_tokenless"))
+}
+
+struct TempStatsDb {
+    dir: std::path::PathBuf,
+    path: std::path::PathBuf,
+    record_id: i64,
+}
+
+impl TempStatsDb {
+    fn new() -> Option<Self> {
+        let home = get_home_dir();
+        if home.is_empty() {
+            return None;
+        }
+        let unique = format!(
+            ".tokenless-cli-integration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_nanos()
+        );
+        let dir = std::path::PathBuf::from(home).join(unique);
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join("stats.db");
+        let recorder = StatsRecorder::new(&path).ok()?;
+        let record_id = recorder
+            .record(
+                &StatsRecord::new(
+                    OperationType::CompressResponse,
+                    "integration-agent".to_string(),
+                    17,
+                    10,
+                    9,
+                    5,
+                )
+                .with_session_id("integration-session")
+                .with_tool_use_id("integration-tool")
+                .with_text("keep\nremove\n".to_string(), "keep\n".to_string()),
+            )
+            .ok()?;
+        Some(Self {
+            dir,
+            path,
+            record_id,
+        })
+    }
+
+    fn command(&self) -> Command {
+        let mut command = tokenless_bin();
+        command.env("TOKENLESS_STATS_DB", &self.path);
+        command
+    }
+}
+
+impl Drop for TempStatsDb {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.dir).ok();
+    }
+}
+
+struct TempDataDir {
+    root: std::path::PathBuf,
+    data_dir: std::path::PathBuf,
+}
+
+impl TempDataDir {
+    fn new() -> Option<Self> {
+        let home = get_home_dir();
+        if home.is_empty() {
+            return None;
+        }
+        let unique = format!(
+            ".tokenless-data-dir-integration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_nanos()
+        );
+        let root = std::path::PathBuf::from(home).join(unique);
+        std::fs::create_dir_all(&root).ok()?;
+        let data_dir = root.join("databases");
+        Some(Self { root, data_dir })
+    }
+
+    fn command(&self) -> Command {
+        let mut command = tokenless_bin();
+        command
+            .env("TOKENLESS_DATA_DIR", &self.data_dir)
+            .env_remove("TOKENLESS_STATS_DB")
+            .env_remove("TOKENLESS_STASH_DB");
+        command
+    }
+}
+
+impl Drop for TempDataDir {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.root).ok();
+    }
+}
+
+#[test]
+fn data_dir_env_routes_stats_and_stash_databases() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+
+    let stats_output = fixture
+        .command()
+        .args(["stats", "summary"])
+        .output()
+        .unwrap();
+    assert!(
+        stats_output.status.success(),
+        "stats command failed: {}",
+        String::from_utf8_lossy(&stats_output.stderr)
+    );
+    assert!(fixture.data_dir.join("stats.db").is_file());
+
+    let stash_output = fixture
+        .command()
+        .args(["retrieve", "abcdef0123456789abcdef01"])
+        .output()
+        .unwrap();
+    assert!(!stash_output.status.success());
+    assert!(fixture.data_dir.join("stash.db").is_file());
+}
+
+#[test]
+fn stats_db_env_takes_precedence_over_data_dir() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let explicit_dir = fixture.root.join("explicit");
+    std::fs::create_dir_all(&explicit_dir).unwrap();
+    let explicit_db = explicit_dir.join("stats.db");
+
+    let output = fixture
+        .command()
+        .env("TOKENLESS_STATS_DB", &explicit_db)
+        .args(["stats", "summary"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stats command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(explicit_db.is_file());
+    assert!(!fixture.data_dir.join("stats.db").exists());
+}
+
+#[test]
+fn stash_db_env_takes_precedence_over_data_dir() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let explicit_dir = fixture.root.join("explicit");
+    std::fs::create_dir_all(&explicit_dir).unwrap();
+    let explicit_db = explicit_dir.join("stash.db");
+
+    let output = fixture
+        .command()
+        .env("TOKENLESS_STASH_DB", &explicit_db)
+        .args(["retrieve", "abcdef0123456789abcdef01"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(explicit_db.is_file());
+    assert!(!fixture.data_dir.join("stash.db").exists());
 }
 
 #[test]
@@ -261,4 +437,99 @@ fn stats_show_single_nonexistent() {
         .unwrap();
     // Should fail gracefully for nonexistent record
     let _ = output.status;
+}
+
+#[test]
+fn stats_diff_record_json_contains_structured_hunks() {
+    let db = match TempStatsDb::new() {
+        Some(db) => db,
+        None => return,
+    };
+    let output = db
+        .command()
+        .args(["stats", "diff", &db.record_id.to_string(), "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["schema_version"], "1.0");
+    assert_eq!(json["scope"]["kind"], "record");
+    assert_eq!(json["chains"][0]["diff"]["available"], true);
+    assert!(json["chains"][0]["diff"]["hunks"].is_array());
+}
+
+#[test]
+fn stats_diff_session_omits_content_hunks() {
+    let db = match TempStatsDb::new() {
+        Some(db) => db,
+        None => return,
+    };
+    let output = db
+        .command()
+        .args([
+            "stats",
+            "diff",
+            "--session",
+            "integration-session",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["scope"]["kind"], "session");
+    assert!(json["chains"][0].get("diff").is_none());
+}
+
+#[test]
+fn stats_diff_tool_use_renders_terminal_diff() {
+    let db = match TempStatsDb::new() {
+        Some(db) => db,
+        None => return,
+    };
+    let output = db
+        .command()
+        .args([
+            "stats",
+            "diff",
+            "--session",
+            "integration-session",
+            "--tool-use-id",
+            "integration-tool",
+            "--no-color",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Estimated tokens: 10 -> 5"));
+    assert!(stdout.contains("-remove"));
+    assert!(!stdout.contains("\u{1b}["));
+}
+
+#[test]
+fn stats_diff_invalid_scope_and_missing_record_use_expected_exit_codes() {
+    let invalid = tokenless_bin()
+        .args(["stats", "diff", "42", "--session", "session"])
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
+
+    let db = match TempStatsDb::new() {
+        Some(db) => db,
+        None => return,
+    };
+    let missing = db
+        .command()
+        .args(["stats", "diff", "999999"])
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(1));
 }

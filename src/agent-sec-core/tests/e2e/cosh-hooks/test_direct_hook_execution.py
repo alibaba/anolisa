@@ -4,11 +4,34 @@ import json
 import os
 import shlex
 import subprocess
+import sys
+import textwrap
 from pathlib import Path
+
+import pytest
 
 _SYSTEM_EXTENSION_DIR = Path("/usr/share/anolisa/extensions/agent-sec-core")
 _USER_EXTENSION_DIR = Path.home() / ".copilot-shell" / "extensions" / "agent-sec-core"
 _SOURCE_EXTENSION_DIR = Path(__file__).resolve().parents[3] / "cosh-extension"
+_CODE_SCANNER_HOOK = _SOURCE_EXTENSION_DIR / "hooks" / "code_scanner_hook.py"
+_PII_CHECKER_HOOK = _SOURCE_EXTENSION_DIR / "hooks" / "pii_checker_hook.py"
+
+
+_MOCK_CLI_SCRIPT = f"#!{sys.executable}\n" + textwrap.dedent("""\
+    import json
+    import os
+    import sys
+
+    capture_path = os.environ.get("_MOCK_CLI_CAPTURE")
+    if capture_path:
+        with open(capture_path, "w", encoding="utf-8") as handle:
+            json.dump({"argv": sys.argv[1:]}, handle)
+
+    output = os.environ.get("_MOCK_CLI_OUTPUT", "")
+    if output:
+        print(output)
+    sys.exit(0)
+    """)
 
 
 def _extension_dir() -> Path:
@@ -29,6 +52,205 @@ def _manifest_hook_commands(extension_dir: Path) -> list[str]:
                 if isinstance(command, str) and command.startswith("python3 "):
                     commands.add(command)
     return sorted(commands)
+
+
+def _run_code_scanner_hook(tmp_path: Path, env_extra: dict[str, str]):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    cli = bin_dir / "agent-sec-cli"
+    cli.write_text(_MOCK_CLI_SCRIPT)
+    cli.chmod(0o755)
+    capture = tmp_path / "capture.json"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+            "_MOCK_CLI_CAPTURE": str(capture),
+            "_MOCK_CLI_OUTPUT": json.dumps(
+                {"verdict": "deny", "findings": [{"desc_zh": "危险命令"}]}
+            ),
+        }
+    )
+    env.update(env_extra)
+    proc = subprocess.run(
+        [sys.executable, str(_CODE_SCANNER_HOOK)],
+        input=json.dumps(
+            {"tool_name": "shell", "tool_input": {"command": "rm -rf /secret/path"}}
+        ),
+        capture_output=True,
+        check=False,
+        env=env,
+        text=True,
+        timeout=15,
+    )
+    return proc, capture
+
+
+def _run_pii_checker_hook(
+    tmp_path: Path,
+    payload: dict[str, object],
+    policy: str,
+):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    cli = bin_dir / "agent-sec-cli"
+    cli.write_text(_MOCK_CLI_SCRIPT)
+    cli.chmod(0o755)
+    capture = tmp_path / "capture.json"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+            "_MOCK_CLI_CAPTURE": str(capture),
+            "_MOCK_CLI_OUTPUT": json.dumps(
+                {
+                    "verdict": "deny",
+                    "findings": [
+                        {
+                            "type": "email",
+                            "severity": "deny",
+                            "evidence_redacted": "a***@example.com",
+                            "raw_evidence": "alice@example.com",
+                        }
+                    ],
+                }
+            ),
+            "PII_CHECKER_HOOK_ENABLED": "true",
+            "PII_CHECKER_MODE": policy,
+        }
+    )
+    proc = subprocess.run(
+        [sys.executable, str(_PII_CHECKER_HOOK)],
+        input=json.dumps(payload),
+        capture_output=True,
+        check=False,
+        env=env,
+        text=True,
+        timeout=15,
+    )
+    return proc, capture
+
+
+def test_cosh_code_scanner_hook_enabled_false_allows_without_scan(
+    tmp_path: Path,
+) -> None:
+    proc, capture = _run_code_scanner_hook(
+        tmp_path,
+        {"CODE_SCANNER_HOOK_ENABLED": "false"},
+    )
+
+    assert proc.returncode == 0
+    assert json.loads(proc.stdout) == {"decision": "allow"}
+    assert proc.stderr == ""
+    assert not capture.exists()
+
+
+def test_cosh_code_scanner_invalid_enabled_value_defaults_to_enabled(
+    tmp_path: Path,
+) -> None:
+    proc, capture = _run_code_scanner_hook(
+        tmp_path,
+        {"CODE_SCANNER_HOOK_ENABLED": "maybe"},
+    )
+
+    assert proc.returncode == 0
+    assert json.loads(proc.stdout)["decision"] == "ask"
+    assert proc.stderr == ""
+    assert capture.exists()
+
+
+@pytest.mark.parametrize(
+    "mode", ["ask", "observe", "block", "debug", "deny", "warn", "invalid"]
+)
+def test_cosh_code_scanner_mode_never_changes_fixed_ask_behavior(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    proc, capture = _run_code_scanner_hook(
+        tmp_path,
+        {"CODE_SCANNER_MODE": mode},
+    )
+
+    assert proc.returncode == 0
+    assert json.loads(proc.stdout)["decision"] == "ask"
+    if mode == "ask":
+        assert proc.stderr == ""
+    else:
+        assert "CODE_SCANNER_MODE" in proc.stderr
+        assert mode in proc.stderr
+        assert "rm -rf /secret/path" not in proc.stderr
+    assert capture.exists()
+
+
+@pytest.mark.parametrize(
+    ("payload", "policy", "expected_decision", "message_fragment"),
+    [
+        (
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_input": {"command": "send alice@example.com"},
+            },
+            "ask",
+            "ask",
+            "需要确认",
+        ),
+        (
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_input": {"command": "send alice@example.com"},
+            },
+            "block",
+            "block",
+            "本次工具调用已被阻断",
+        ),
+        (
+            {
+                "hook_event_name": "PostToolUse",
+                "tool_response": {"stdout": "alice@example.com"},
+            },
+            "block",
+            "block",
+            "原始工具结果不会进入模型上下文",
+        ),
+        (
+            {
+                "hook_event_name": "AfterModel",
+                "llm_response": {"text": "Contact alice@example.com"},
+            },
+            "block",
+            "allow",
+            "fallback 为 warn",
+        ),
+    ],
+)
+def test_cosh_pii_policy_uses_event_level_decisions(
+    tmp_path: Path,
+    payload: dict[str, object],
+    policy: str,
+    expected_decision: str,
+    message_fragment: str,
+) -> None:
+    proc, capture = _run_pii_checker_hook(tmp_path, payload, policy)
+
+    assert proc.returncode == 0
+    output = json.loads(proc.stdout)
+    assert output["decision"] == expected_decision
+    assert message_fragment in output["reason"]
+    assert "a***@example.com" in output["reason"]
+    assert "alice@example.com" not in output["reason"]
+    assert proc.stderr == ""
+    assert capture.exists()
+    assert "scan-pii" in json.loads(capture.read_text(encoding="utf-8"))["argv"]
+
+    if expected_decision in {"ask", "block"}:
+        assert "将继续" not in output["reason"]
+    else:
+        assert "已被阻断" not in output["reason"]
+        assert "将继续" in output["reason"]
+
+    if payload.get("hook_event_name") == "PostToolUse":
+        assert "工具已经执行" in output["reason"]
+        assert "外部副作用不会撤销" in output["reason"]
 
 
 def test_cosh_manifest_hooks_are_directly_executable() -> None:

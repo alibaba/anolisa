@@ -50,6 +50,9 @@ pub enum Event {
         uid: u32,
         timestamp_ns: u64,
         comm: String,
+        /// Raw `task_struct->exit_code` in wait(2) encoding; decode with
+        /// [`crate::interruption::ProcessExitStatus::decode`].
+        exit_code: u32,
     },
 }
 
@@ -88,6 +91,7 @@ impl Event {
                 uid: raw.uid,
                 timestamp_ns: config::ktime_to_unix_ns(raw.timestamp_ns),
                 comm,
+                exit_code: raw.exit_code,
             }),
             _ => None,
         }
@@ -184,5 +188,56 @@ impl ProcMon {
 
         self._links = links;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Locks the C/Rust shared layout: exit_code fills the tail padding after
+    // comm[16], so the struct size must stay 56 bytes and any accidental
+    // mid-struct insertion (which would shift exit_code away from offset 52)
+    // fails here.
+    #[test]
+    fn test_procmon_event_layout() {
+        assert_eq!(std::mem::size_of::<ProcMonEvent>(), 56);
+        assert_eq!(std::mem::offset_of!(ProcMonEvent, comm), 36);
+        assert_eq!(std::mem::offset_of!(ProcMonEvent, exit_code), 52);
+    }
+
+    #[test]
+    fn test_exit_event_from_bytes_carries_exit_code() {
+        // SAFETY: procmon_event is a plain-old-data C struct; all-zero is valid.
+        let mut raw: ProcMonEvent = unsafe { std::mem::zeroed() };
+        raw.timestamp_ns = 1;
+        raw.pid = 42;
+        raw.tid = 42;
+        raw.ppid = 1;
+        raw.event_type = PROCMON_EVENT_EXIT;
+        raw.exit_code = 0x8b;
+        // c_char is i8 on x86_64 but u8 on aarch64; let inference pick.
+        for (i, &b) in b"cosh".iter().enumerate() {
+            raw.comm[i] = b as _;
+        }
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&raw as *const ProcMonEvent) as *const u8,
+                std::mem::size_of::<ProcMonEvent>(),
+            )
+        };
+        match Event::from_bytes(bytes) {
+            Some(Event::Exit {
+                pid,
+                comm,
+                exit_code,
+                ..
+            }) => {
+                assert_eq!(pid, 42);
+                assert_eq!(comm, "cosh");
+                assert_eq!(exit_code, 0x8b);
+            }
+            other => panic!("expected Exit event, got {other:?}"),
+        }
     }
 }

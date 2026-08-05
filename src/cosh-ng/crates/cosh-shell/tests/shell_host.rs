@@ -22,7 +22,8 @@ use cosh_shell::shell_host::{
     LineInteractiveOutput, ScriptedInput, ShellHostConfig, ShellHostOutput,
 };
 use cosh_shell::types::{
-    AgentEvent, GovernanceDecision, Policy, ShellEvent, ShellEventKind, ShellHandoffRequest,
+    AgentEvent, GovernanceDecision, ImplicitPagerPolicy, Policy, ShellEvent, ShellEventKind,
+    ShellHandoffRequest,
 };
 
 #[path = "support/shell_host.rs"]
@@ -76,11 +77,30 @@ fn shell_host_run_guard() -> MutexGuard<'static, ()> {
 
 fn shell_host_test_config(config: &ShellHostConfig) -> ShellHostConfig {
     let mut config = config.clone();
+    if !config.env_overrides.iter().any(|(key, _)| key == "INPUTRC") {
+        config = with_raw_byte_readline(config);
+    }
     if !config.env_overrides.iter().any(|(key, _)| key == "HOME") {
         config.env_overrides.push((
             "HOME".to_string(),
             config.work_dir.join("home").display().to_string(),
         ));
+    }
+    for (key, value) in [
+        ("HISTIGNORE", ""),
+        ("HISTSIZE", "1000"),
+        ("HISTFILESIZE", "1000"),
+        ("PROMPT_COMMAND", ""),
+    ] {
+        if !config
+            .env_overrides
+            .iter()
+            .any(|(existing, _)| existing == key)
+        {
+            config
+                .env_overrides
+                .push((key.to_string(), value.to_string()));
+        }
     }
     config
 }

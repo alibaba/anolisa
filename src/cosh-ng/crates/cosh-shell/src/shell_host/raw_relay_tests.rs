@@ -127,6 +127,112 @@ fn relay_write_event_expires_armed_prompt_replay() {
 }
 
 #[test]
+fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
+    // Production wiring: a PTY write with zero detected line submits
+    // (submit detection cannot see custom `accept-line` bindings)
+    // must still emit the shell_pty_input barrier event that the
+    // dispatcher consumes to invalidate the prompt-cwd report.
+    // Consecutive writes collapse into one event; a fresh
+    // command-less prompt report re-arms the barrier.
+    let mut parser = parser_for_test("pty-write-cwd-barrier");
+    let (generation, mut prompt_replay) = tracker_for_test();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut output = Vec::new();
+    let mut echoed = 0usize;
+
+    let barrier_count = |parser: &OscParser| {
+        parser
+            .events
+            .iter()
+            .filter(|event| {
+                event.component.as_deref() == Some("shell_pty_input")
+                    && event.message.as_deref() == Some("write")
+            })
+            .count()
+    };
+
+    for _ in 0..2 {
+        sender
+            .send(crate::raw_input::RawInputEvent::PtyUserWrite {
+                generation: generation.bump(),
+                line_submits: 0,
+            })
+            .expect("queue pty write");
+    }
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "prompt> ",
+        &mut echoed,
+        &mut prompt_replay,
+    )
+    .expect("drain pty writes");
+    assert_eq!(
+        barrier_count(&parser),
+        1,
+        "consecutive writes must collapse into one barrier event"
+    );
+
+    // A fresh command-less prompt report re-arms the barrier, so the
+    // next write emits a new invalidation event.
+    feed_shell_ready(&mut parser);
+    sender
+        .send(crate::raw_input::RawInputEvent::PtyUserWrite {
+            generation: generation.bump(),
+            line_submits: 0,
+        })
+        .expect("queue post-prompt write");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "prompt> ",
+        &mut echoed,
+        &mut prompt_replay,
+    )
+    .expect("drain post-prompt write");
+    assert_eq!(
+        barrier_count(&parser),
+        2,
+        "a fresh prompt report must re-arm the barrier"
+    );
+}
+
+#[test]
+fn candidate_hint_uses_terminfo_cursor_save_restore() {
+    let mut parser = parser_for_test("candidate-cursor-restore");
+    let (_generation, mut prompt_replay) = tracker_for_test();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut output = Vec::new();
+    let mut echoed = 0usize;
+
+    sender
+        .send(crate::raw_input::RawInputEvent::CandidateRedraw {
+            input: b"/m".to_vec(),
+            hint: Some("/mode approval [recommend|auto|trust]".to_string()),
+        })
+        .expect("queue candidate redraw");
+    drain_raw_input_events(
+        &receiver,
+        &mut parser,
+        &mut output,
+        "",
+        &mut echoed,
+        &mut prompt_replay,
+    )
+    .expect("draw candidate hint");
+
+    assert_eq!(
+        output,
+        b"\x1b[K/m\x1b7\x1b[2m /mode approval [recommend|auto|trust]\x1b[0m\x1b8"
+    );
+    assert_eq!(echoed, 2);
+    assert!(!output.windows(3).any(|window| window == b"\x1b[s"));
+    assert!(!output.windows(3).any(|window| window == b"\x1b[u"));
+}
+
+#[test]
 fn prompt_restore_refuses_to_arm_while_user_input_response_is_unparsed() {
     let (generation, mut prompt_replay) = tracker_for_test();
 
@@ -482,7 +588,7 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
     .expect("write prompt fragment");
 
     assert!(
-        output.ends_with(b"\x1b[s\x1b[2m objdump\x1b[0m\x1b[u"),
+        output.ends_with(b"\x1b7\x1b[2m objdump\x1b[0m\x1b8"),
         "{}",
         String::from_utf8_lossy(&output)
     );

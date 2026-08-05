@@ -1,168 +1,128 @@
-# Tokenless
+# Tokenless 快速开始
 
-Tokenless 是 ANOLISA 的 Token 优化组件。它自动压缩工具定义和模型响应内容，不修改任何业务逻辑，显著降低每轮对话的 Token 消耗。
+[English](../../../en/token-saving/tokenless/QUICKSTART.md)
 
----
+## 1. Tokenless 能做什么
 
-## 概述
+Tokenless 帮助 AI Agent 用更少的 Token 完成原来的工作。
 
-AI Agent 交互中通常包含大量工具 Schema 定义和冗长的 CLI 输出。Tokenless 在框架层拦截这些内容并进行无损/近无损压缩，透明地实现 30–70% 的 Token 节省。
+开启后，你不需要改变 Prompt，也不需要改变使用 Agent 的方式，Tokenless 会在后台自动工作。
 
-**核心能力：**
+你可能会感受到：
 
-- **上下文压缩** — 工具 Schema 精简、CLI 响应过滤、紧凑编码
-- **统计追踪** — 按会话和累计的 Token 节省指标
-- **透明集成** — 通过 hook/plugin 接入现有 Agent 框架，零代码修改
+- 冗长的中间结果占用更少 Token。
+- 长任务可以为真正有用的信息留出更多空间。
+- Agent 在决定下一步时，面对的信息更加简洁。
 
----
+不同任务的节省效果不同。较短或以对话为主的任务可能变化不明显，请使用自己的工作负载按[查看效果](#4-查看效果)进行确认。
 
-## 前置条件
+## 2. 安装 Tokenless
 
-- Linux（x86_64 或 aarch64）
-- 已安装 cosh、OpenClaw、Hermes、claude-code、codex 或 qwencode 之一（作为宿主 Agent 框架）
-
----
-
-## 安装
-
-### 方式一：anolisa CLI（推荐）
+先安装 anolisa CLI，再用它安装 Tokenless：
 
 ```bash
+curl -fsSL https://get.agentic-os.sh | bash
+anolisa --version
 anolisa install tokenless
+tokenless --version
 ```
 
-### 方式二：YUM（Alinux，需配置 ANOLISA YUM 源）
+## 3. 开始使用 Tokenless
+
+### 3.1 在 Agent 中使用
+
+Tokenless 可以用于：
+
+| Agent | 命令中使用的值 |
+|-------|----------------|
+| cosh / Copilot Shell | `cosh` |
+| OpenClaw | `openclaw` |
+| Hermes | `hermes` |
+| Qoder | `qoder` |
+| Claude Code | `claude-code` |
+| Codex | `codex` |
+| Qwen Code | `qwencode` |
+
+先查找 Agent，再为它开启 Tokenless：
 
 ```bash
-sudo yum install tokenless
+anolisa adapter scan
+anolisa adapter enable tokenless <agent>
+anolisa adapter status tokenless
 ```
 
-### 方式三：源码编译（开发者）
+开启 Tokenless 后，重启对应的 Agent CLI、IDE 或 Gateway。
+
+#### 3.1.1 示例：OpenClaw
+
+为 OpenClaw 开启 Tokenless，然后重启 OpenClaw Gateway：
 
 ```bash
-cd src/tokenless && cargo build --release
+anolisa adapter enable tokenless openclaw
+anolisa adapter status tokenless
 ```
 
----
+接着让 OpenClaw 完成一个正常任务：
 
-## 集成
+> 运行当前仓库的完整测试，只总结失败项。
 
-Tokenless 通过 adapter 脚本或 extension 与 Agent 框架集成。
+Prompt 中不需要提到 Tokenless。
 
-### OpenClaw
+如果 OpenClaw 在安全检查时拒绝安装，请按照 [OpenClaw 说明](framework-integration.md#openclaw)确认后再重试。
 
-安装 OpenClaw adapter：
+### 3.2 单独使用 CLI
+
+可以直接体验一次响应压缩：
 
 ```bash
-/usr/share/anolisa/adapters/tokenless/openclaw/scripts/install.sh
+printf '%s\n' \
+  '{"status":"ok","data":{"name":"demo","items":[1,2,3]},"debug":{"trace":"verbose"},"metadata":null}' \
+  | tokenless compress-response
 ```
 
-adapter 注册为 OpenClaw 工具管道中的中间件层。
+命令返回的仍是合法 JSON，其中 `debug`、`metadata` 等可移除字段会被省略。
+如果输出与输入完全相同，说明当前输入没有可压缩内容；请改用包含 `debug`、`null` 或长字符串的 JSON 重试。
 
-### Hermes
+## 4. 查看效果
 
-安装 Hermes adapter：
+在 Agent 中使用一次 Shell、API 或其他受支持的工具后，运行：
 
 ```bash
-/usr/share/anolisa/adapters/tokenless/hermes/scripts/install.sh
+tokenless stats list --limit 5
+tokenless stats summary
 ```
 
-### cosh（Copilot Shell）
+- `stats list` 显示最近被 Tokenless 变短的结果。需要查看某次结果时，从这里复制 record ID。
+- `stats summary` 显示 Tokenless 处理前后的 Token 估算值和总节省量。
 
-对于 cosh，Tokenless 以 extension 方式安装：
+对于上面的 OpenClaw 示例，可以找到包含 `openclaw` 的记录，并确认其中的 Token 数从左到右变小。
+
+查看某条记录具体改变了什么：
 
 ```bash
-# 通过 Makefile 目标
-make install-cosh-extension
+tokenless stats diff <record-id>
 ```
 
-将安装到 `~/.copilot-shell/extensions/tokenless/`。
+如果没有记录，可能是内容没有经过 Tokenless，或处理后没有变短。请参阅[开启后没有产生统计记录](troubleshooting.md#启用后没有产生统计记录)。
 
-### 其他 Adapter
+Token 数只是在 Tokenless 已处理内容范围内的估算值，不等于模型账单的直接变化。统计和 diff 可能包含原始工具内容；涉及敏感数据时不要分享输出。完整说明见[效果度量](measuring-savings.md)和[配置与数据隐私](configuration-and-privacy.md)。
 
-Tokenless 还支持 claude-code、codex 和 qwencode adapter。运行 `anolisa install tokenless` 查看可用的 adapter 选项。
+## 5. 平台适配性
 
----
+| 平台 | anolisa CLI 安装 |
+|------|------------------|
+| Linux x86_64/aarch64 | 支持 |
+| macOS Apple Silicon | 支持 |
+| macOS x86_64 | 暂不支持 |
+| Windows 或使用 musl 的 Linux（例如 Alpine） | 暂不支持 |
 
-## CLI 命令
+本页只提供 anolisa CLI 的安装路径。需要从源码构建独立 CLI 时，请参阅[用户手册 · 从源码构建独立 CLI](user-manual.md#从源码构建独立-cli)。
 
-| 命令 | 说明 |
-|------|------|
-| `tokenless compress-schema` | 压缩工具 Schema 定义 |
-| `tokenless compress-response` | 压缩 CLI/工具响应输出 |
-| `tokenless compress-toon` | 压缩为 TOON 格式 |
-| `tokenless decompress-toon` | 从 TOON 格式解压 |
-| `tokenless env-check` | 检查环境和集成状态 |
-| `tokenless stats` | 查看压缩统计 |
+## 6. 下一步
 
-### 查看压缩统计
-
-```bash
-tokenless stats
-```
-
-示例输出：
-
-```
-Session       Tokens Saved   Ratio    Timestamp
-────────────  ────────────   ─────    ──────────────────
-sess-a3f1     12,480         62.3%    2025-06-30 14:22
-sess-b7c2      8,912         48.7%    2025-06-30 15:01
-────────────────────────────────────────────────────────
-Total         21,392         56.1%
-```
-
----
-
-## AgentSight 集成
-
-当 Tokenless 和 AgentSight 同时安装时，压缩指标将自动上报到 AgentSight。可在 AgentSight Web Dashboard 的 **Token Accounting** 面板中查看 Token 节省数据。
-
-`sls_enabled` 为 true 时指标自动导出，无需额外配置。
-
----
-
-## 配置
-
-配置文件：`~/.tokenless/config.json`
-
-该文件为可选项。不存在时所有功能默认启用。
-
-```json
-{
-  "stats_enabled": true,
-  "sls_enabled": true,
-  "compression_enabled": true
-}
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `stats_enabled` | boolean | `true` | 启用本地统计收集（存储于 `~/.tokenless/stats.db`） |
-| `sls_enabled` | boolean | `true` | 启用指标导出到 AgentSight/SLS |
-| `compression_enabled` | boolean | `true` | 启用压缩（全局开关，非按工具粒度） |
-
-### 环境变量覆盖
-
-每个配置字段均可通过环境变量覆盖：
-
-- `TOKENLESS_STATS_ENABLED` — 覆盖 `stats_enabled`
-- `TOKENLESS_SLS_ENABLED` — 覆盖 `sls_enabled`
-- `TOKENLESS_COMPRESSION_ENABLED` — 覆盖 `compression_enabled`
-
-### 统计数据库
-
-本地统计数据存储于 `~/.tokenless/stats.db`。
-
----
-
-## 常见问题
-
-**Q：Tokenless 会修改实际的工具行为吗？**
-A：不会。Tokenless 仅压缩发送给模型的表示形式，工具执行逻辑不受影响。
-
-**Q：支持哪些框架？**
-A：cosh、OpenClaw、Hermes、claude-code、codex 和 qwencode。
-
-**Q：能否禁用压缩？**
-A：可以。将 `~/.tokenless/config.json` 中的 `compression_enabled` 设为 `false`，或设置环境变量 `TOKENLESS_COMPRESSION_ENABLED=false`。压缩是全局开关，不支持按工具排除。
+- [用户手册](user-manual.md)：能力边界和文档导航
+- [框架集成](framework-integration.md)：各 Agent 的启用、验证与禁用
+- [CLI 参考](cli-reference.md)：全部子命令和参数
+- [效果度量](measuring-savings.md)：统计、双跑对比和 AgentSight/SLS
+- [配置与数据隐私](configuration-and-privacy.md)：开关、存储和敏感数据
+- [故障排查](troubleshooting.md)：常见错误、升级和卸载

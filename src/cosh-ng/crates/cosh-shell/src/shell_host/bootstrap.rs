@@ -17,6 +17,7 @@ use super::model::ShellHostConfig;
 use super::osc::OscParser;
 
 const OUTPUT_REF_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+const ISOLATED_INPUTRC: &str = "set input-meta on\nset convert-meta off\nset output-meta on\n";
 
 pub(super) struct PtySession {
     pub(super) master: File,
@@ -62,6 +63,14 @@ fn start_shell_session(
         ),
     )?;
     fs::set_permissions(&rcfile, fs::Permissions::from_mode(0o600))?;
+    let isolated_inputrc = if config.native_mode || !adapter.isolates_readline() {
+        None
+    } else {
+        let path = config.work_dir.join("inputrc");
+        fs::write(&path, ISOLATED_INPUTRC)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        Some(path)
+    };
 
     let pty = openpty(Some(&config.winsize), None).map_err(nix_to_io)?;
     let master = unsafe { File::from_raw_fd(pty.master.into_raw_fd()) };
@@ -94,6 +103,9 @@ fn start_shell_session(
     }
     for (key, value) in &config.env_overrides {
         command.env(key, value);
+    }
+    if let Some(inputrc) = isolated_inputrc {
+        command.env("INPUTRC", inputrc);
     }
 
     unsafe {

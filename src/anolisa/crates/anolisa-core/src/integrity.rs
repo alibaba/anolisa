@@ -1,9 +1,10 @@
 //! Owned-file integrity checks.
 //!
 //! Single concern: given an [`OwnedFile`] from `installed.toml`, report
-//! whether the on-disk file still exists and matches the recorded
-//! sha256. Used by `anolisa status` to surface tampering / drift without
-//! relying on a component-supplied health probe.
+//! whether the on-disk file still exists and matches the recorded content,
+//! permission, and Linux file-capability contract. Used by `anolisa status`
+//! to surface tampering / drift without relying on a component-supplied
+//! health probe.
 //!
 //! The check is intentionally minimal — it does not consult the catalog,
 //! does not run manifest-declared health hooks, and does not touch any
@@ -39,6 +40,7 @@ use sha2::{Digest, Sha256};
 
 use anolisa_platform::fs_layout::FsLayout;
 
+use crate::capability::probe_file_capabilities;
 use crate::path_safety::{PathBoundaryError, validate_owned_path};
 use crate::state::{FileOwner, OwnedFile, OwnedFileKind};
 
@@ -53,7 +55,8 @@ const MAX_PROBE_BYTES: u64 = 256 * 1024 * 1024;
 ///
 /// Variants are ordered by severity so callers can fold via `max`:
 /// `Ok < Skipped < Unverified < OutOfBounds < Symlink < NotRegularFile
-/// < MissingFile < ReadError < ShaMismatch`.
+/// < MissingFile < ReadError < ModeMismatch < CapabilityMismatch
+/// < ShaMismatch`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IntegrityStatus {
     /// File exists and sha256 matches the recorded value.
@@ -87,6 +90,22 @@ pub enum IntegrityStatus {
         /// is not a symlink at all.
         actual: String,
     },
+    /// File content exists, but its Unix permission bits differ from the
+    /// install contract.
+    ModeMismatch {
+        /// Four-digit octal mode recorded in installed state.
+        expected: String,
+        /// Four-digit octal mode observed on disk.
+        actual: String,
+    },
+    /// Linux file capabilities differ from the set successfully applied
+    /// during install.
+    CapabilityMismatch {
+        /// Normalized capability assignment expected by the record.
+        expected: String,
+        /// Capability assignment decoded from `security.capability`.
+        actual: String,
+    },
     /// File exists, sha256 was recorded, and bytes diverged.
     ShaMismatch {
         /// Lowercase sha256 recorded in `installed.toml`.
@@ -109,6 +128,8 @@ impl IntegrityStatus {
             Self::MissingFile => "missing_file",
             Self::ReadError(_) => "read_error",
             Self::ReferentMismatch { .. } => "referent_mismatch",
+            Self::ModeMismatch { .. } => "mode_mismatch",
+            Self::CapabilityMismatch { .. } => "capability_mismatch",
             Self::ShaMismatch { .. } => "sha256_mismatch",
         }
     }
@@ -127,6 +148,8 @@ impl IntegrityStatus {
                 | Self::MissingFile
                 | Self::ReadError(_)
                 | Self::ReferentMismatch { .. }
+                | Self::ModeMismatch { .. }
+                | Self::CapabilityMismatch { .. }
                 | Self::ShaMismatch { .. }
         )
     }
@@ -181,6 +204,40 @@ pub fn check_owned_file(layout: &FsLayout, file: &OwnedFile) -> IntegrityStatus 
     if !meta.is_file() {
         return IntegrityStatus::NotRegularFile;
     }
+    if let Some(expected) = file.mode.as_deref() {
+        let expected_mode = match parse_recorded_mode(expected) {
+            Some(mode) => mode,
+            None => {
+                return IntegrityStatus::ReadError(format!(
+                    "recorded mode '{expected}' is not valid octal notation"
+                ));
+            }
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let actual_mode = meta.permissions().mode() & 0o7777;
+            if actual_mode != expected_mode {
+                return IntegrityStatus::ModeMismatch {
+                    expected: format!("{expected_mode:04o}"),
+                    actual: format!("{actual_mode:04o}"),
+                };
+            }
+        }
+    }
+    if !file.capabilities.is_empty() {
+        let expected = normalized_capability_assignment(&file.capabilities);
+        match probe_file_capabilities(&file.path) {
+            Ok(actual) if !actual.matches_requested(&file.capabilities) => {
+                return IntegrityStatus::CapabilityMismatch {
+                    expected,
+                    actual: actual.display(),
+                };
+            }
+            Ok(_) => {}
+            Err(err) => return IntegrityStatus::ReadError(err.to_string()),
+        }
+    }
     if meta.len() > MAX_PROBE_BYTES {
         return IntegrityStatus::ReadError(format!(
             "file size {} exceeds integrity probe ceiling {}",
@@ -197,6 +254,23 @@ pub fn check_owned_file(layout: &FsLayout, file: &OwnedFile) -> IntegrityStatus 
         Ok(actual) if actual != expected => IntegrityStatus::ShaMismatch { expected, actual },
         Ok(_) => IntegrityStatus::Ok,
     }
+}
+
+fn parse_recorded_mode(raw: &str) -> Option<u32> {
+    let trimmed = raw.trim();
+    let octal = trimmed.strip_prefix("0o").unwrap_or(trimmed);
+    let mode = u32::from_str_radix(octal, 8).ok()?;
+    (mode <= 0o7777).then_some(mode)
+}
+
+fn normalized_capability_assignment(caps: &[String]) -> String {
+    let mut caps = caps
+        .iter()
+        .map(|cap| cap.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    caps.sort();
+    caps.dedup();
+    format!("{}=ep", caps.join(","))
 }
 
 /// Verify a managed symlink entry: the path must be a symlink whose
@@ -326,6 +400,8 @@ mod tests {
             sha256,
             kind: OwnedFileKind::File,
             referent: None,
+            mode: None,
+            capabilities: Vec::new(),
         }
     }
 
@@ -342,6 +418,8 @@ mod tests {
             sha256: Some("deadbeef".to_string()),
             kind: OwnedFileKind::File,
             referent: None,
+            mode: None,
+            capabilities: Vec::new(),
         };
         assert_eq!(check_owned_file(&layout, &owned), IntegrityStatus::Skipped);
     }
@@ -414,6 +492,53 @@ mod tests {
             Some("239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5".to_string()),
         );
         assert_eq!(check_owned_file(&layout, &owned), IntegrityStatus::Ok);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn matching_content_with_wrong_mode_reports_mismatch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_under(tmp.path());
+        let path = layout.bin_dir.join("foo");
+        fs::write(&path, b"payload").expect("write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod");
+        let mut owned = anolisa_owned(
+            path,
+            Some("239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5".to_string()),
+        );
+        owned.mode = Some("0755".to_string());
+
+        assert_eq!(
+            check_owned_file(&layout, &owned),
+            IntegrityStatus::ModeMismatch {
+                expected: "0755".to_string(),
+                actual: "0644".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn missing_recorded_file_capability_reports_mismatch() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_under(tmp.path());
+        let path = layout.bin_dir.join("foo");
+        fs::write(&path, b"payload").expect("write");
+        let mut owned = anolisa_owned(
+            path,
+            Some("239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5".to_string()),
+        );
+        owned.capabilities = vec!["CAP_BPF".to_string()];
+
+        assert_eq!(
+            check_owned_file(&layout, &owned),
+            IntegrityStatus::CapabilityMismatch {
+                expected: "cap_bpf=ep".to_string(),
+                actual: "none".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -493,6 +618,20 @@ mod tests {
             .is_failure()
         );
         assert!(
+            IntegrityStatus::ModeMismatch {
+                expected: "0755".into(),
+                actual: "0644".into()
+            }
+            .is_failure()
+        );
+        assert!(
+            IntegrityStatus::CapabilityMismatch {
+                expected: "cap_bpf=ep".into(),
+                actual: "none".into()
+            }
+            .is_failure()
+        );
+        assert!(
             IntegrityStatus::ShaMismatch {
                 expected: "a".into(),
                 actual: "b".into()
@@ -515,6 +654,22 @@ mod tests {
             }
             .label(),
             "referent_mismatch"
+        );
+        assert_eq!(
+            IntegrityStatus::ModeMismatch {
+                expected: "0755".into(),
+                actual: "0644".into()
+            }
+            .label(),
+            "mode_mismatch"
+        );
+        assert_eq!(
+            IntegrityStatus::CapabilityMismatch {
+                expected: "cap_bpf=ep".into(),
+                actual: "none".into()
+            }
+            .label(),
+            "capability_mismatch"
         );
         assert_eq!(
             IntegrityStatus::ShaMismatch {
@@ -541,6 +696,8 @@ mod tests {
             sha256: None,
             kind: OwnedFileKind::Symlink,
             referent: Some(target),
+            mode: None,
+            capabilities: Vec::new(),
         };
         assert_eq!(check_owned_file(&layout, &owned), IntegrityStatus::Ok);
     }
@@ -562,6 +719,8 @@ mod tests {
             sha256: None,
             kind: OwnedFileKind::Symlink,
             referent: Some(recorded_target.clone()),
+            mode: None,
+            capabilities: Vec::new(),
         };
         match check_owned_file(&layout, &owned) {
             IntegrityStatus::ReferentMismatch { expected, actual } => {
@@ -586,6 +745,8 @@ mod tests {
             sha256: None,
             kind: OwnedFileKind::Symlink,
             referent: Some(target),
+            mode: None,
+            capabilities: Vec::new(),
         };
         match check_owned_file(&layout, &owned) {
             IntegrityStatus::ReadError(msg) => {

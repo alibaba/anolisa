@@ -38,21 +38,27 @@ function trajectoryLastActiveMs(t: TrajectorySummary): number | null {
   return t.collected_at_ns > 0 ? Math.floor(t.collected_at_ns / 1_000_000) : null;
 }
 
+/** Trailing 36-char UUID of a Codex rollout stem (`rollout-<ts>-<uuid>`). */
+const TRAILING_UUID_RE =
+  /([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+
 /**
  * Merge eBPF-captured sessions with log-collected trajectories by session_id.
  * Qoder sessions share the same UUID across both sources; on overlap, tokens /
  * model / count come from the eBPF side and project / source from the log side.
  */
 export function mergeSessions(
-  ebpf: SessionSummary[],
-  logs: TrajectorySummary[],
+  ebpf: SessionSummary[] = [],
+  logs: TrajectorySummary[] = [],
 ): MergedSession[] {
+  const ebpfRows = Array.isArray(ebpf) ? ebpf : [];
+  const logRows = Array.isArray(logs) ? logs : [];
   const byId = new Map<string, MergedSession>();
 
   // Count subagents per parent session. A subagent's session_id follows the
   // composite form "<parent>:subagent:<child>"; tally by the parent prefix.
   const subagentCount = new Map<string, number>();
-  for (const t of logs) {
+  for (const t of logRows) {
     if (!t.is_subagent) continue;
     const idx = t.session_id.indexOf(':subagent:');
     if (idx > 0) {
@@ -61,7 +67,7 @@ export function mergeSessions(
     }
   }
 
-  for (const s of ebpf) {
+  for (const s of ebpfRows) {
     byId.set(s.session_id, {
       session_id: s.session_id,
       sources: ['ebpf'],
@@ -78,7 +84,7 @@ export function mergeSessions(
     });
   }
 
-  for (const t of logs) {
+  for (const t of logRows) {
     // Subagent trajectories belong to their parent task — don't show them as
     // independent rows. They remain reachable via the parent's ATIF viewer
     // (breadcrumb navigation). Only keep orphaned subagents whose parent is
@@ -86,12 +92,17 @@ export function mergeSessions(
     if (t.is_subagent) {
       const idx = t.session_id.indexOf(':subagent:');
       const parentId = idx > 0 ? t.session_id.slice(0, idx) : null;
-      if (parentId && (byId.has(parentId) || logs.some((l) => l.session_id === parentId))) {
+      if (parentId && (byId.has(parentId) || logRows.some((l) => l.session_id === parentId))) {
         continue;
       }
     }
     const lastMs = trajectoryLastActiveMs(t);
-    const existing = byId.get(t.session_id);
+    // Codex rollout trajectories keep the full file stem (`rollout-<ts>-<uuid>`)
+    // as session_id while the eBPF side reports the bare trailing UUID; fall
+    // back to it so a session captured by both paths is merged, not duplicated.
+    const uuid = TRAILING_UUID_RE.exec(t.session_id)?.[1];
+    const existing =
+      byId.get(t.session_id) ?? (uuid && uuid !== t.session_id ? byId.get(uuid) : undefined);
     if (existing) {
       existing.sources.push('log');
       existing.project = t.project || existing.project;
@@ -155,20 +166,23 @@ const TIME_PRESETS = [
 
 const SOURCE_LABEL: Record<SessionSource, string> = { ebpf: 'eBPF', log: '日志' };
 
-const SourceBadge: React.FC<{ sources: SessionSource[] }> = ({ sources }) => (
-  <span className="inline-flex gap-1">
-    {sources.map((s) => (
-      <span
-        key={s}
-        className={`px-1.5 py-0.5 rounded text-xs font-medium ${
-          s === 'ebpf' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'
-        }`}
-      >
-        {SOURCE_LABEL[s]}
-      </span>
-    ))}
-  </span>
-);
+const SourceBadge: React.FC<{ sources?: SessionSource[] }> = ({ sources }) => {
+  const sourceRows = Array.isArray(sources) ? sources : [];
+  return (
+    <span className="inline-flex gap-1">
+      {sourceRows.map((s) => (
+        <span
+          key={s}
+          className={`px-1.5 py-0.5 rounded text-xs font-medium ${
+            s === 'ebpf' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'
+          }`}
+        >
+          {SOURCE_LABEL[s]}
+        </span>
+      ))}
+    </span>
+  );
+};
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
@@ -217,7 +231,7 @@ export const AgentSessionsPage: React.FC = () => {
   // Reset to page 1 when filters change
   useEffect(() => {
     setPage(1);
-  }, [sourceFilter, agentFilter, search]);
+  }, [sourceFilter, agentFilter, search, rangeMs]);
 
   // Agent filter options, deduplicated case-insensitively: the eBPF side
   // reports "Qoder" while the log collector writes "qoder" — they are the
@@ -234,8 +248,14 @@ export const AgentSessionsPage: React.FC = () => {
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
+    // /api/trajectories has no time-range support, so log-collected sessions
+    // must be pruned client-side to honour the selected range; otherwise the
+    // list appears unchanged when switching presets.
+    const rangeStartMs = Date.now() - rangeMs;
     return merged.filter((s) => {
-      if (sourceFilter !== 'all' && !s.sources.includes(sourceFilter)) return false;
+      if (s.last_active_ms !== null && s.last_active_ms < rangeStartMs) return false;
+      const sources = Array.isArray(s.sources) ? s.sources : [];
+      if (sourceFilter !== 'all' && !sources.includes(sourceFilter)) return false;
       if (
         agentFilter !== 'all' &&
         (s.agent_name ?? '').toLowerCase() !== agentFilter.toLowerCase()
@@ -254,7 +274,7 @@ export const AgentSessionsPage: React.FC = () => {
       }
       return true;
     });
-  }, [merged, sourceFilter, agentFilter, search]);
+  }, [merged, rangeMs, sourceFilter, agentFilter, search]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
@@ -265,7 +285,7 @@ export const AgentSessionsPage: React.FC = () => {
       {/* ── Toolbar: total + time range + refresh ── */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex flex-wrap items-center gap-4">
         <span className="text-sm text-gray-600">
-          共 <strong className="text-gray-900">{merged.length}</strong> 个会话
+          共 <strong className="text-gray-900">{filtered.length}</strong> 个会话
         </span>
         <div className="flex gap-2">
           {TIME_PRESETS.map(({ label, ms }) => (

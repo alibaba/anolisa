@@ -1,0 +1,70 @@
+{
+  "repository": "https://github.com/alibaba/anolisa",
+  "license": "Apache-2.0",
+  "components": {
+    "copilot-shell": {
+      "install_name": "cosh"
+    },
+    "agent-memory": {
+      "install_name": "agent-memory"
+    },
+    "agent-sec-core": {
+      "install_name": "sec-core"
+    },
+    "tokenless": {
+      "install": "npm install -g anolisa-tokenless",
+      "install_method": "npm",
+      "install_variants": [
+        {
+          "method": "cli",
+          "preferred": false,
+          "command": "anolisa install tokenless",
+          "platforms": [
+            {
+              "os": "linux",
+              "architectures": ["x86_64"]
+            },
+            {
+              "os": "macos",
+              "architectures": ["aarch64"]
+            }
+          ],
+          "requires": ["anolisa"],
+          "preflight": [
+            "anolisa --json env",
+            "anolisa --json list",
+            "anolisa --dry-run install tokenless"
+          ],
+          "verify": [
+            "anolisa --json adapter scan",
+            "anolisa --json status tokenless",
+            "anolisa --json doctor tokenless"
+          ]
+        },
+        {
+          "method": "npm",
+          "preferred": true,
+          "command": "npm install -g anolisa-tokenless",
+          "platforms": [
+            {
+              "os": "linux",
+              "architectures": ["x86_64", "aarch64"]
+            },
+            {
+              "os": "macos",
+              "architectures": ["x86_64", "aarch64"]
+            }
+          ],
+          "requires": ["node", "npm"],
+          "preflight": [
+            "command -v node",
+            "command -v npm"
+          ],
+          "verify": [
+            "tokenless env-check --all"
+          ]
+        }
+      ]
+    }
+  }
+}

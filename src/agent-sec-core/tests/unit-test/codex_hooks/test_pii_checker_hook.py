@@ -18,6 +18,7 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 from standalone_hook_test_loader import load_standalone_hook
@@ -129,6 +130,7 @@ _PII_FOUND_RESULT = json.dumps(
                 "type": "phone_cn",
                 "severity": "warn",
                 "evidence_redacted": "138****8000",
+                "raw_evidence": "13800138000",
             }
         ],
     }
@@ -142,18 +144,25 @@ _PII_DENY_RESULT = json.dumps(
                 "type": "credential",
                 "severity": "deny",
                 "evidence_redacted": "password=[REDACTED]",
+                "raw_evidence": "password=swordfish",
             }
         ],
     }
 )
 
 
-def _assert_warning_output(output: dict, hook_event: str) -> str:
+def _assert_warning_output(
+    output: dict,
+    hook_event: str,
+    *,
+    pii_type: str = "phone_cn",
+    redacted_evidence: str = "138****8000",
+) -> str:
     """Assert the common non-blocking warning contract."""
     assert set(output) == {"systemMessage"}
     message = output["systemMessage"]
-    assert "phone_cn" in message
-    assert "138****8000" in message
+    assert pii_type in message
+    assert redacted_evidence in message
     assert hook_event in message
     assert "执行将继续" in message
     return message
@@ -337,6 +346,136 @@ class TestObserveMode:
         assert output == {}
 
 
+def test_environment_disabled_short_circuits_before_input_and_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("PII_CHECKER_HOOK_ENABLED", "false")
+    disabled_hook = load_standalone_hook(
+        "codex_pii_checker_disabled_hook",
+        Path(_HOOK_SCRIPT),
+    )
+    monkeypatch.setattr(
+        disabled_hook.sys,
+        "stdin",
+        type(
+            "UnreadableInput",
+            (),
+            {"read": lambda *_args, **_kwargs: pytest.fail("input should not be read")},
+        )(),
+    )
+    monkeypatch.setattr(
+        disabled_hook.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("CLI should not be called"),
+    )
+
+    disabled_hook.main()
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+class TestUnifiedHookPolicyWarnings:
+    """Warnings preserve scanner verdict, policy, and actual fallback behavior."""
+
+    @pytest.mark.parametrize(
+        (
+            "policy",
+            "scan_output",
+            "expected_verdict",
+            "pii_type",
+            "redacted_evidence",
+            "expected_handling",
+        ),
+        (
+            (
+                "warn",
+                _PII_DENY_RESULT,
+                "deny",
+                "credential",
+                "password=[REDACTED]",
+                "实际处理：warn，执行将继续。",
+            ),
+            (
+                "ask",
+                _PII_DENY_RESULT,
+                "deny",
+                "credential",
+                "password=[REDACTED]",
+                "实际处理：当前 hook 不支持确认，fallback 为 warn，执行将继续。",
+            ),
+            (
+                "block",
+                _PII_FOUND_RESULT,
+                "warn",
+                "phone_cn",
+                "138****8000",
+                (
+                    "实际处理：scanner verdict 未达到 block 条件，"
+                    "fallback 为 warn，执行将继续。"
+                ),
+            ),
+            (
+                "warn",
+                _PII_FOUND_RESULT,
+                "warn",
+                "phone_cn",
+                "138****8000",
+                "实际处理：warn，执行将继续。",
+            ),
+        ),
+    )
+    def test_non_blocking_output_reports_actual_behavior(
+        self,
+        mock_cli,
+        policy,
+        scan_output,
+        expected_verdict,
+        pii_type,
+        redacted_evidence,
+        expected_handling,
+    ):
+        env = mock_cli(
+            output=scan_output,
+            extra={
+                "PII_CHECKER_HOOK_ENABLED": "true",
+                "PII_CHECKER_MODE": policy,
+            },
+        )
+
+        output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
+
+        message = _assert_warning_output(
+            output,
+            "UserPromptSubmit",
+            pii_type=pii_type,
+            redacted_evidence=redacted_evidence,
+        )
+        assert f"扫描判定：{expected_verdict}" in message
+        assert f"Hook 策略：{policy}" in message
+        assert expected_handling in message
+        assert "13800138000" not in message
+        assert "password=swordfish" not in message
+
+    def test_block_policy_still_blocks_deny_verdict(self, mock_cli):
+        env = mock_cli(
+            output=_PII_DENY_RESULT,
+            extra={
+                "PII_CHECKER_HOOK_ENABLED": "true",
+                "PII_CHECKER_MODE": "block",
+            },
+        )
+
+        output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
+
+        assert output["decision"] == "block"
+        assert "credential" in output["reason"]
+        assert "password=[REDACTED]" in output["reason"]
+        assert "password=swordfish" not in output["reason"]
+
+
 class TestDenyMode:
     """Deny mode preserves scanner warn and deny severity."""
 
@@ -404,7 +543,7 @@ class TestDenyMode:
         output = _run_hook(_PRE_TOOL_USE_EVENT, env_override=env)
         _assert_warning_output(output, "PreToolUse")
 
-    def test_unknown_verdict_with_findings_preserves_block(self, mock_cli):
+    def test_unknown_verdict_with_findings_fails_open(self, mock_cli: Any) -> None:
         env = mock_cli(
             output=json.dumps(
                 {
@@ -421,8 +560,7 @@ class TestDenyMode:
             extra={"PII_CHECKER_MODE": "deny"},
         )
         output = _run_hook(_PRE_TOOL_USE_EVENT, env_override=env)
-        assert output["decision"] == "block"
-        assert "PreToolUse" in output["reason"]
+        assert output == {}
 
 
 class TestUnknownMode:
@@ -432,6 +570,13 @@ class TestUnknownMode:
         env = mock_cli(output=_PII_FOUND_RESULT, extra={"PII_CHECKER_MODE": "banana"})
         output = _run_hook(_USER_PROMPT_EVENT, env_override=env)
         assert output == {}
+
+
+def test_invalid_mode_reports_observe_fallback(monkeypatch, capsys):
+    monkeypatch.setenv("PII_CHECKER_MODE", "banana")
+
+    assert pii_checker_hook._read_policy() == "observe"
+    assert "invalid PII_CHECKER_MODE; using observe" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -899,11 +1044,18 @@ class TestFormatWarningMessage:
             }
         ]
         message = pii_checker_hook._format_warning_message(
-            findings, "PreToolUse", "工具输入"
+            findings,
+            "PreToolUse",
+            "工具输入",
+            "warn",
+            "warn",
         )
         assert "隐私告警" in message
         assert "phone_cn" in message
         assert "138****8000" in message
         assert "13800138000" not in message
         assert "PreToolUse" in message
+        assert "扫描判定：warn" in message
+        assert "Hook 策略：warn" in message
+        assert "实际处理：warn" in message
         assert "执行将继续" in message

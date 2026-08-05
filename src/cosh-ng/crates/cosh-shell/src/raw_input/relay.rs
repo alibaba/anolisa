@@ -6,17 +6,15 @@ use std::sync::{Arc, Mutex};
 use crate::input::{InputClassifier, InputDecision, InterceptReason};
 
 use super::event_parser::{
-    candidate_inline_hint, candidate_line_status, escape_candidate_allows_soft_newline,
-    native_candidate_allows_soft_newline, native_candidate_should_return_to_shell,
-    redact_extension_setting_value, starts_intercept_candidate, starts_native_cjk_candidate,
-    starts_native_intercept_candidate, starts_native_partial_paste_opener,
-    starts_native_paste_opener, CandidateLineBuffer, CandidateLineStatus, NativeLineState,
+    candidate_inline_hint, candidate_line_status, native_candidate_allows_soft_newline,
+    native_candidate_should_return_to_shell, redact_extension_setting_value,
+    starts_native_intercept_candidate, CandidateLineBuffer, CandidateLineStatus, NativeLineState,
+    BRACKETED_PASTE_END, BRACKETED_PASTE_START,
 };
 use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
 use super::mode::new_delay_input_mode;
 use super::soft_newline::{
-    contains_soft_newline_sequence, draft_text_from_bytes, render_newline_markers,
-    render_soft_newline_markers,
+    contains_soft_newline_sequence, draft_text_from_bytes, render_soft_newline_markers,
 };
 use super::{write_all_pty, MainPromptGate, PromptGhostRoute, RawInputEvent, RawInputMode, CTRL_C};
 
@@ -31,6 +29,12 @@ pub(super) struct InputRelayContext<'a> {
     pub(super) native_line_state: &'a mut NativeLineState,
     pub(super) exit_tracker: &'a mut ExplicitExitTracker,
     pub(super) main_prompt_gate: &'a MainPromptGate,
+    /// Routes exact slash-control submissions through bash so they enter
+    /// native history (issue #1718); admission additionally requires the
+    /// main prompt gate, so any submission (slash or shell) lowers the gate
+    /// until the next prompt_ready marker and later bytes fall back to the
+    /// Rust intercept path instead of leaking into a foreground process.
+    pub(super) slash_route_enabled: bool,
 }
 
 /// Writes real user bytes to the PTY, bumping the shared input generation
@@ -70,6 +74,17 @@ pub(super) fn send_shell_input_state(empty: bool, input_events: &Sender<RawInput
     let _ = input_events.send(RawInputEvent::ShellInputActivity { empty });
 }
 
+fn observe_native_line(
+    state: &mut NativeLineState,
+    bytes: &[u8],
+    input_events: &Sender<RawInputEvent>,
+) {
+    state.observe_shell_bytes(bytes);
+    if state.take_multiline_paste_observed() {
+        let _ = input_events.send(RawInputEvent::MultilinePasteObserved);
+    }
+}
+
 pub(super) fn relay_passthrough_input(
     bytes: &[u8],
     relay: &mut InputRelayContext<'_>,
@@ -105,42 +120,7 @@ fn relay_passthrough_input_with_activity(
         redraw_candidate_line(relay.input_events, relay.line_buffer);
         return relay_candidate_line(relay, emit_activity);
     }
-    if relay.input_classifier.is_conservative() {
-        return relay_native_passthrough(bytes, relay, emit_activity);
-    }
-    if relay.line_buffer.is_active() || starts_intercept_candidate(bytes) {
-        // Slash commands never compose: pasted newlines keep the pre-#1721
-        // submit semantics (matrix #17 scope, same rule as native D10). The
-        // held partial delimiter must join the classification input so a
-        // split opener cannot mask a slash prefix (#1721).
-        let combined: Vec<u8> = [
-            relay.line_buffer.bytes.as_slice(),
-            relay.line_buffer.pending_partial_bytes(),
-            bytes,
-        ]
-        .concat();
-        relay.line_buffer.soft_newline_enabled = escape_candidate_allows_soft_newline(&combined);
-        relay.line_buffer.push(bytes);
-        redraw_candidate_line(relay.input_events, relay.line_buffer);
-        return relay_candidate_line(relay, emit_activity);
-    }
-
-    observe_passthrough_soft_newline(bytes, relay.input_events);
-    send_raw_input_events(bytes, relay.input_events);
-    relay.native_line_state.observe_shell_bytes(bytes);
-    if emit_activity && !bytes.is_empty() {
-        send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
-    }
-    relay.exit_tracker.observe_shell_bytes(bytes);
-    write_user_bytes_to_pty(
-        relay.master,
-        relay.input_generation,
-        relay.line_submits,
-        relay.input_events,
-        relay.main_prompt_gate,
-        bytes,
-    )?;
-    Ok(false)
+    relay_native_passthrough(bytes, relay, emit_activity)
 }
 
 pub(super) fn relay_prompt_ghost_input(
@@ -215,9 +195,11 @@ pub(super) fn relay_prompt_ghost_input(
                 if let Ok(mut mode) = relay.input_mode.lock() {
                     *mode = RawInputMode::RawPassthrough;
                 }
-                relay
-                    .native_line_state
-                    .observe_shell_bytes(ghost_text.as_bytes());
+                observe_native_line(
+                    relay.native_line_state,
+                    ghost_text.as_bytes(),
+                    relay.input_events,
+                );
                 relay
                     .exit_tracker
                     .observe_shell_bytes(ghost_text.as_bytes());
@@ -231,7 +213,7 @@ pub(super) fn relay_prompt_ghost_input(
                 )?;
                 if !remainder.is_empty() {
                     send_raw_input_events(remainder, relay.input_events);
-                    relay.native_line_state.observe_shell_bytes(remainder);
+                    observe_native_line(relay.native_line_state, remainder, relay.input_events);
                     relay.exit_tracker.observe_shell_bytes(remainder);
                     write_user_bytes_to_pty(
                         relay.master,
@@ -327,12 +309,12 @@ fn relay_native_passthrough(
     relay: &mut InputRelayContext<'_>,
     emit_activity: bool,
 ) -> io::Result<bool> {
+    let starts_paste = bytes.starts_with(BRACKETED_PASTE_START)
+        || (bytes.len() >= 2
+            && bytes.len() < BRACKETED_PASTE_START.len()
+            && BRACKETED_PASTE_START.starts_with(bytes));
     if relay.line_buffer.is_active()
-        || starts_native_intercept_candidate(bytes, relay.native_line_state)
-        || (relay.main_prompt_gate.is_at_prompt()
-            && (starts_native_cjk_candidate(bytes, relay.native_line_state)
-                || starts_native_paste_opener(bytes, relay.native_line_state)
-                || starts_native_partial_paste_opener(bytes, relay.native_line_state)))
+        || (!starts_paste && starts_native_intercept_candidate(bytes, relay.native_line_state))
     {
         // Route flags must consider the whole draft so far: a bracketed
         // paste opener may arrive as its own chunk (or split mid-delimiter,
@@ -355,9 +337,18 @@ fn relay_native_passthrough(
     }
     // Non-slash input: send directly to PTY. Shell marker's preexec/
     // command_not_found hooks handle NL/CJK intercept on the shell side.
+    // Same soft-newline handling as the escape path (#1932 F6).
+    let handled = handle_prompt_line_soft_newline(bytes, relay)?;
+    if matches!(handled, PromptLineSoftNewline::Upgraded) {
+        return Ok(true);
+    }
     observe_passthrough_soft_newline(bytes, relay.input_events);
+    let bytes = match &handled {
+        PromptLineSoftNewline::Stripped(stripped) => stripped.as_slice(),
+        _ => bytes,
+    };
     send_raw_input_events(bytes, relay.input_events);
-    relay.native_line_state.observe_shell_bytes(bytes);
+    observe_native_line(relay.native_line_state, bytes, relay.input_events);
     if emit_activity && !bytes.is_empty() {
         send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
     }
@@ -422,28 +413,20 @@ fn relay_candidate_line(
                 return Ok(true);
             }
             if line.contains('\n') {
-                // Soft newlines only originate from prompt composition inside
-                // the candidate buffer, so multi-line text always routes to
-                // the agent before classification (#1721 D7). Whitespace-only
-                // drafts are consumed instead of submitting an empty prompt.
                 if line.trim().is_empty() {
                     let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
                     send_shell_input_state(true, relay.input_events);
                 } else {
-                    let reason = if line.trim_start().starts_with("??") {
-                        InterceptReason::AgentMarker
-                    } else {
-                        InterceptReason::NaturalLanguage
-                    };
                     let _ = relay.input_events.send(RawInputEvent::CandidateCommit(
-                        render_newline_markers(&redact_extension_setting_value(line.as_bytes())),
+                        redact_extension_setting_value(line.as_bytes()),
                     ));
                     if let Ok(mut mode) = relay.input_mode.lock() {
                         *mode = new_delay_input_mode();
                     }
-                    let _ = relay
-                        .input_events
-                        .send(RawInputEvent::UserIntercept(line, reason));
+                    let _ = relay.input_events.send(RawInputEvent::UserIntercept(
+                        line,
+                        InterceptReason::AgentMarker,
+                    ));
                     send_shell_input_state(true, relay.input_events);
                 }
                 if !remainder.is_empty() {
@@ -451,8 +434,40 @@ fn relay_candidate_line(
                 }
                 return Ok(true);
             }
+            if line.trim() == "??" {
+                // A lone `??` submit opens an empty prompt draft (#1932):
+                // the terminal-agnostic entry into multi-line composition,
+                // mirroring the soft-newline upgrade in redraw_candidate_line.
+                let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
+                let _ = relay.input_events.send(RawInputEvent::PromptDraftOpen {
+                    text: String::new(),
+                });
+                send_shell_input_state(true, relay.input_events);
+                if !remainder.is_empty() {
+                    relay_passthrough_input_with_activity(&remainder, relay, emit_activity)?;
+                }
+                return Ok(true);
+            }
             match relay.input_classifier.classify(&line) {
                 InputDecision::Intercept { input, reason } => {
+                    if reason == InterceptReason::Slash
+                        && relay.slash_route_enabled
+                        && relay.main_prompt_gate.is_at_prompt()
+                        && relay.input_classifier.is_exact_slash_control_command(
+                            line.split_whitespace().next().unwrap_or_default(),
+                        )
+                    {
+                        // Submit the exact slash line through bash so
+                        // readline records it in native history (issue
+                        // #1718). The shell marker's DEBUG trap intercepts
+                        // it at the prompt boundary (#1724) and emits the
+                        // same UserInputIntercepted event as the Rust path
+                        // below. write_user_bytes_to_pty lowers the prompt
+                        // gate for this and every other line submission, so
+                        // follow-up slash bytes can never route into a
+                        // foreground process before the next prompt_ready.
+                        return submit_line_bytes_to_shell(relay, bytes, remainder, emit_activity);
+                    }
                     let _ = relay.input_events.send(RawInputEvent::CandidateCommit(
                         redact_extension_setting_value(line.as_bytes()),
                     ));
@@ -483,28 +498,7 @@ fn relay_candidate_line(
                         wrapped.extend_from_slice(b"\x1b[201~");
                         bytes = wrapped;
                     }
-                    let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
-                    send_raw_input_events(&bytes, relay.input_events);
-                    relay.native_line_state.observe_shell_bytes(&bytes);
-                    if emit_activity && !bytes.is_empty() {
-                        send_shell_input_state(
-                            relay.native_line_state.is_empty(),
-                            relay.input_events,
-                        );
-                    }
-                    relay.exit_tracker.observe_shell_bytes(&bytes);
-                    write_user_bytes_to_pty(
-                        relay.master,
-                        relay.input_generation,
-                        relay.line_submits,
-                        relay.input_events,
-                        relay.main_prompt_gate,
-                        &bytes,
-                    )?;
-                    if !remainder.is_empty() {
-                        relay_passthrough_input_with_activity(&remainder, relay, emit_activity)?;
-                    }
-                    Ok(false)
+                    submit_line_bytes_to_shell(relay, bytes, remainder, emit_activity)
                 }
                 InputDecision::Consume => {
                     let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
@@ -535,9 +529,21 @@ fn flush_candidate_line_to_shell(
         wrapped.extend_from_slice(b"\x1b[201~");
         bytes = wrapped;
     }
+    submit_line_bytes_to_shell(relay, bytes, Vec::new(), emit_activity)
+}
+
+/// Clears the cosh-echoed candidate line and writes the taken bytes to the
+/// PTY, then relays any remainder. Shared by SendToShell submissions, unsafe
+/// candidate flushes, and shell-routed slash submissions (issue #1718).
+fn submit_line_bytes_to_shell(
+    relay: &mut InputRelayContext<'_>,
+    bytes: Vec<u8>,
+    remainder: Vec<u8>,
+    emit_activity: bool,
+) -> io::Result<bool> {
     let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
     send_raw_input_events(&bytes, relay.input_events);
-    relay.native_line_state.observe_shell_bytes(&bytes);
+    observe_native_line(relay.native_line_state, &bytes, relay.input_events);
     if emit_activity && !bytes.is_empty() {
         send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
     }
@@ -550,6 +556,9 @@ fn flush_candidate_line_to_shell(
         relay.main_prompt_gate,
         &bytes,
     )?;
+    if !remainder.is_empty() {
+        relay_passthrough_input_with_activity(&remainder, relay, emit_activity)?;
+    }
     Ok(false)
 }
 
@@ -565,8 +574,14 @@ fn redraw_candidate_line(
     {
         // First soft newline upgrades the draft into the prompt card
         // (#1721 D13): erase the inline echo, hand the buffered text to the
-        // runtime, and let the capture own every following keystroke.
+        // runtime, and let the capture own every following keystroke. The
+        // leading `??` agent-marker is a routing gesture, not content
+        // (#1932): strip it so the card opens with the prompt itself.
         let text = draft_text_from_bytes(original);
+        let text = match text.strip_prefix("??") {
+            Some(rest) => rest.trim_start_matches(' ').to_string(),
+            None => text,
+        };
         let _ = input_events.send(RawInputEvent::CandidateClearLine);
         let _ = input_events.send(RawInputEvent::PromptDraftOpen { text });
         line_buffer.clear();
@@ -600,45 +615,10 @@ fn held_input_requests_cancel(bytes: &[u8]) -> bool {
         .any(|line| line.split_whitespace().next() == Some("/cancel"))
 }
 
-#[derive(Debug, Default)]
-pub(super) struct ExplicitExitTracker {
-    pending_line: Vec<u8>,
-    saw_explicit_exit: bool,
-}
-
-impl ExplicitExitTracker {
-    pub(super) fn observe_shell_bytes(&mut self, bytes: &[u8]) {
-        if self.saw_explicit_exit {
-            return;
-        }
-        self.pending_line.extend_from_slice(bytes);
-        while let Some(idx) = self
-            .pending_line
-            .iter()
-            .position(|byte| matches!(byte, b'\n' | b'\r'))
-        {
-            let line = self.pending_line.drain(..=idx).collect::<Vec<_>>();
-            if is_explicit_exit_line(&line) {
-                self.saw_explicit_exit = true;
-                self.pending_line.clear();
-                return;
-            }
-        }
-        if self.pending_line.len() > 4096 {
-            self.pending_line.clear();
-        }
-    }
-
-    pub(super) fn saw_explicit_exit(&self) -> bool {
-        self.saw_explicit_exit
-    }
-}
-
-fn is_explicit_exit_line(line: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(line);
-    let trimmed = text.trim();
-    trimmed == "exit" || trimmed.starts_with("exit ") || trimmed == "logout"
-}
+mod exit_tracker;
+mod soft_newline_upgrade;
+pub(super) use exit_tracker::ExplicitExitTracker;
+use soft_newline_upgrade::{handle_prompt_line_soft_newline, PromptLineSoftNewline};
 
 #[cfg(test)]
 #[path = "relay_tests.rs"]

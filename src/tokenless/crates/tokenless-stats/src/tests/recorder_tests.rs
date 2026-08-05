@@ -104,6 +104,150 @@ fn records_by_session_filters() {
 }
 
 #[test]
+fn records_for_diff_filters_tool_and_orders_oldest_first() {
+    let (rec, _dir) = new_recorder();
+    let first = sample(
+        OperationType::CompressResponse,
+        CompressionMode::Active,
+        "session-diff",
+    )
+    .with_tool_use_id("tool-a");
+    let second = sample(
+        OperationType::CompressToon,
+        CompressionMode::Active,
+        "session-diff",
+    )
+    .with_tool_use_id("tool-a");
+    let other = sample(
+        OperationType::CompressSchema,
+        CompressionMode::Active,
+        "session-diff",
+    )
+    .with_tool_use_id("tool-b");
+    let first_id = rec.record(&first).unwrap();
+    let second_id = rec.record(&second).unwrap();
+    rec.record(&other).unwrap();
+
+    let records = rec
+        .records_for_diff("session-diff", Some("tool-a"))
+        .unwrap();
+    assert_eq!(records.as_slice().len(), 2);
+    assert_eq!(records.as_slice()[0].id, first_id);
+    assert_eq!(records.as_slice()[1].id, second_id);
+
+    let session = rec.records_for_diff("session-diff", None).unwrap();
+    assert_eq!(session.as_slice().len(), 3);
+    assert!(
+        session
+            .as_slice()
+            .windows(2)
+            .all(|pair| pair[0].id < pair[1].id)
+    );
+}
+
+#[test]
+fn session_diff_avoids_loading_payloads_and_preserves_links() {
+    let (rec, _dir) = new_recorder();
+    let middle = "middle".repeat(350_000);
+    let first = sample(
+        OperationType::CompressResponse,
+        CompressionMode::Active,
+        "bounded-session",
+    )
+    .with_tool_use_id("tool-chain")
+    .with_text("before".to_string(), middle.clone());
+    let second = sample(
+        OperationType::CompressToon,
+        CompressionMode::Active,
+        "bounded-session",
+    )
+    .with_tool_use_id("tool-chain")
+    .with_text(middle, "after".to_string());
+    rec.record(&first).unwrap();
+    rec.record(&second).unwrap();
+
+    let records = rec.records_for_diff("bounded-session", None).unwrap();
+    assert!(records.as_slice().iter().all(|record| {
+        record.before_text.is_none()
+            && record.after_text.is_none()
+            && record.before_output.is_none()
+            && record.after_output.is_none()
+    }));
+
+    let report = crate::diff::session_report(
+        &records,
+        "bounded-session",
+        20,
+        crate::diff::DiffSort::Saved,
+    );
+    let json = serde_json::to_value(report).unwrap();
+    assert_eq!(json["chains"].as_array().unwrap().len(), 1);
+    assert_eq!(json["chains"][0]["status"], "linked");
+}
+
+#[test]
+fn session_diff_database_linking_matches_record_semantics() {
+    let (rec, _dir) = new_recorder();
+    let first = sample(
+        OperationType::RewriteCommand,
+        CompressionMode::Active,
+        "linked-session",
+    )
+    .with_tool_use_id("tool-chain")
+    .with_text("legacy before".to_string(), "legacy after".to_string())
+    .with_output("raw output".to_string(), "middle".to_string());
+    let second = sample(
+        OperationType::CompressResponse,
+        CompressionMode::Active,
+        "linked-session",
+    )
+    .with_tool_use_id("tool-chain")
+    .with_text("middle".to_string(), "short".to_string());
+    let dry_run = sample(
+        OperationType::CompressToon,
+        CompressionMode::DryRun,
+        "linked-session",
+    )
+    .with_tool_use_id("tool-chain")
+    .with_text("short".to_string(), "predicted".to_string());
+    rec.record(&first).unwrap();
+    rec.record(&second).unwrap();
+    rec.record(&dry_run).unwrap();
+
+    let records = rec.records_for_diff("linked-session", None).unwrap();
+    let report = crate::diff::session_report(
+        &records,
+        "linked-session",
+        20,
+        crate::diff::DiffSort::Time,
+    );
+    let json = serde_json::to_value(report).unwrap();
+
+    assert_eq!(json["chains"].as_array().unwrap().len(), 2);
+    assert_eq!(json["chains"][0]["status"], "standalone");
+    assert_eq!(json["chains"][0]["mode"], "dry-run");
+    assert_eq!(json["chains"][1]["status"], "linked");
+    assert_eq!(json["chains"][1]["stages"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn records_for_diff_caps_to_newest_records() {
+    let (rec, _dir) = new_recorder();
+    for _ in 0..(StatsRecorder::DEFAULT_LIMIT + 1) {
+        rec.record(&sample(
+            OperationType::CompressSchema,
+            CompressionMode::Active,
+            "large-session",
+        ))
+        .unwrap();
+    }
+
+    let records = rec.records_for_diff("large-session", None).unwrap();
+    assert_eq!(records.as_slice().len(), StatsRecorder::DEFAULT_LIMIT);
+    assert_eq!(records.as_slice()[0].id, 2);
+}
+
+#[test]
 fn count_returns_total_records() {
     let (rec, _dir) = new_recorder();
     assert_eq!(rec.count().unwrap(), 0);
@@ -268,6 +412,17 @@ fn schema_migration_adds_missing_columns() {
     let got = rec.record_by_id(id).unwrap().unwrap();
     assert_eq!(got.mode, CompressionMode::Active);
     assert_eq!(got.stash_writes, Some(1));
+
+    let conn = rec.lock_conn();
+    let mut stmt = conn
+        .prepare("SELECT name FROM pragma_index_info('idx_session_tool') ORDER BY seqno")
+        .unwrap();
+    let indexed_columns = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(indexed_columns, ["session_id", "tool_use_id"]);
 }
 
 #[test]

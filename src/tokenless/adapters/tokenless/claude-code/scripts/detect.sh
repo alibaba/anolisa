@@ -108,7 +108,8 @@ fi
 # Shared hook scripts live under FHS; warn when missing so user knows to run
 # `make install` (or install the RPM) before adapter actually fires.
 SHARED_HOOKS_DIR=""
-for d in /usr/share/anolisa/adapters/tokenless/common/hooks \
+for d in /usr/local/share/anolisa/adapters/tokenless/common/hooks \
+         /usr/share/anolisa/adapters/tokenless/common/hooks \
          "$HOME/.local/share/anolisa/adapters/tokenless/common/hooks"; do
     if [ -d "$d" ]; then SHARED_HOOKS_DIR="$d"; break; fi
 done

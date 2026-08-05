@@ -11,7 +11,7 @@ manager，并诊断或修复状态漂移。
 ### 方式 A：安装脚本（推荐）
 
 ```bash
-curl -fsSL https://agentic-os.sh | sh
+curl -fsSL https://get.agentic-os.sh | bash
 ```
 
 ### 方式 B：YUM（Alinux）
@@ -213,7 +213,7 @@ journal 会有意保持 pending，等待人工检查。
 ## 示例流程
 
 ```bash
-curl -fsSL https://agentic-os.sh | sh
+curl -fsSL https://get.agentic-os.sh | bash
 anolisa env
 anolisa install cosh
 anolisa install tokenless

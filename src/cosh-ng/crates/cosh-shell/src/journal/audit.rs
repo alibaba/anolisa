@@ -82,6 +82,42 @@ impl ShellAuditRecorder {
         recorder
     }
 
+    /// Test-only recorder in `Required` mode with no usable writer: every
+    /// governed boundary fails closed, letting production-chain tests
+    /// assert that blocked approvals never reach an execution path.
+    #[cfg(test)]
+    pub(crate) fn test_required_unavailable(shell_session_id: impl Into<String>) -> Self {
+        Self {
+            writer: None,
+            writer_root: None,
+            mode: AuditMode::Required,
+            shell_session_id: shell_session_id.into(),
+            seen_events: 0,
+            hash_salt: "test-salt".to_string(),
+            degraded: true,
+            warning_emitted: false,
+            owned_approvals: std::collections::HashSet::new(),
+            command_refs: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Builds a recorder rooted at a test-private directory.
+    #[cfg(test)]
+    pub(crate) fn test_with_root(root: &std::path::Path) -> Self {
+        Self {
+            writer: AuditSegmentWriter::create(root).ok(),
+            writer_root: Some(root.to_path_buf()),
+            mode: AuditMode::BestEffort,
+            shell_session_id: "audit-test-session".to_string(),
+            seen_events: 0,
+            hash_salt: "salt".to_string(),
+            degraded: false,
+            warning_emitted: false,
+            owned_approvals: std::collections::HashSet::new(),
+            command_refs: std::collections::HashMap::new(),
+        }
+    }
+
     /// Projects newly observed native command events exactly once.
     pub(crate) fn observe_shell_events(&mut self, events: &[ShellEvent]) {
         if self.seen_events > events.len() {
@@ -263,6 +299,53 @@ impl ShellAuditRecorder {
                 } else {
                     Ok(None)
                 }
+            }
+        }
+    }
+
+    /// #1940: durably records that a registered control approval was
+    /// dropped before any user decision, so production audits can
+    /// distinguish a user denial from a drain and can locate the exact
+    /// drop site. The drained request was never surfaced, so there is no
+    /// subject or preview to hash — only the ids and the drop site.
+    pub(crate) fn record_approval_dropped(
+        &mut self,
+        run_id: &str,
+        request_id: &str,
+        drop_site: &str,
+    ) -> Option<String> {
+        let event = AuditEventV1::shell(
+            "approval.dropped",
+            AuditIdentity {
+                shell_session_id: Some(self.shell_session_id.clone()),
+                run_id: Some(run_id.to_string()),
+                request_id: Some(request_id.to_string()),
+                ..AuditIdentity::default()
+            },
+            AuditEventOutcome {
+                status: AuditOutcomeStatus::Cancelled,
+                code: None,
+                retryable: false,
+            },
+            AuditSubject {
+                kind: "approval".to_string(),
+                name: None,
+            },
+            &AuditApprovalData {
+                decision: Some("dropped".to_string()),
+                reason_code: Some(drop_site.to_string()),
+                ..AuditApprovalData::default()
+            },
+            AuditRedaction::clean(),
+        );
+        match event {
+            Ok(event) => {
+                let event_id = event.event_id.clone();
+                self.append(event, false).then_some(event_id)
+            }
+            Err(error) => {
+                self.mark_degraded(&error);
+                None
             }
         }
     }

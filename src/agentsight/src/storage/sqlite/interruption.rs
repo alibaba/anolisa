@@ -74,7 +74,12 @@ impl InterruptionStore {
             CREATE INDEX IF NOT EXISTS idx_interruption_type     ON interruption_events(interruption_type);
             CREATE INDEX IF NOT EXISTS idx_interruption_agent    ON interruption_events(agent_name);
             CREATE INDEX IF NOT EXISTS idx_interruption_resolved ON interruption_events(resolved);
-            CREATE INDEX IF NOT EXISTS idx_interruption_conversation ON interruption_events(conversation_id);",
+            CREATE INDEX IF NOT EXISTS idx_interruption_conversation ON interruption_events(conversation_id);
+            CREATE TABLE IF NOT EXISTS process_exits (
+                pid           INTEGER PRIMARY KEY,
+                raw_exit_code INTEGER NOT NULL,
+                exited_at_ns  INTEGER NOT NULL
+            );",
         )?;
         // Migration: add conversation_id column for existing databases
         let _ =
@@ -534,6 +539,75 @@ impl InterruptionStore {
         )
         .unwrap_or(0)
             > 0
+    }
+
+    // ─── Process exit status (trace → serve channel) ───────────────────────
+
+    /// TTL for `process_exits` rows, pruned on every write. Must comfortably
+    /// exceed the HealthChecker offline-detection latency (30s cycle + 120s
+    /// lookup window) while keeping the table bounded.
+    const PROCESS_EXIT_TTL_SECS: i64 = 600;
+
+    /// Record the raw `task_struct->exit_code` (wait(2) encoding) observed by
+    /// trace mode when an agent process exits.
+    ///
+    /// trace and serve run as separate processes and only share the SQLite
+    /// files, so this table is the channel that lets the serve-mode
+    /// HealthChecker distinguish a trace-confirmed clean exit from a crash
+    /// (issue #1989). Keyed by pid via INSERT OR REPLACE so pid reuse keeps
+    /// only the latest exit; stale rows are pruned to bound growth.
+    pub fn record_process_exit(
+        &self,
+        pid: i32,
+        raw_exit_code: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT OR REPLACE INTO process_exits (pid, raw_exit_code, exited_at_ns)
+             VALUES (?1, ?2, ?3)",
+            params![pid, raw_exit_code as i64, now_ns],
+        )?;
+        conn.execute(
+            "DELETE FROM process_exits WHERE exited_at_ns < ?1",
+            params![now_ns - Self::PROCESS_EXIT_TTL_SECS * 1_000_000_000],
+        )?;
+        Ok(())
+    }
+
+    /// Return the raw exit code trace mode recorded for `pid` within the last
+    /// `window_secs`, or `None` when trace did not observe the exit (e.g. the
+    /// collector was not running) — callers must then keep their fallback
+    /// behavior.
+    pub fn get_process_exit_recent(&self, pid: i32, window_secs: u64) -> Option<u32> {
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        let cutoff_ns = now_ns - (window_secs as i64 * 1_000_000_000);
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.query_row(
+            "SELECT raw_exit_code FROM process_exits WHERE pid=?1 AND exited_at_ns > ?2",
+            params![pid, cutoff_ns],
+            |row| row.get::<_, i64>(0),
+        )
+        .ok()
+        .map(|v| v as u32)
+    }
+
+    /// Best-effort removal of the recorded exit status for `pid`.
+    ///
+    /// Called when `record_process_exit` fails: a stale row from a previous
+    /// process could otherwise be read for a reused pid within the lookup
+    /// window, misclassifying a real crash as a clean exit. Clearing restores
+    /// the safe "no record → fallback crash handling" semantics.
+    pub fn clear_process_exit(&self, pid: i32) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute("DELETE FROM process_exits WHERE pid=?1", params![pid])?;
+        Ok(())
     }
 
     /// Purge interruption events older than cutoff_ns.
@@ -1145,6 +1219,43 @@ mod tests {
 
         assert!(store.agent_crash_exists_recent(5555, 60));
         assert!(!store.agent_crash_exists_recent(6666, 60));
+    }
+
+    // ── process_exits (trace → serve exit-status channel) ───────────────────
+
+    #[test]
+    fn record_process_exit_roundtrip_replace_and_window() {
+        let store = temp_store();
+        assert!(store.get_process_exit_recent(7777, 60).is_none());
+
+        store.record_process_exit(7777, 0x0).unwrap();
+        assert_eq!(store.get_process_exit_recent(7777, 60), Some(0x0));
+
+        // pid reuse: the latest exit wins
+        store.record_process_exit(7777, 0x9).unwrap();
+        assert_eq!(store.get_process_exit_recent(7777, 60), Some(0x9));
+
+        // other pids and an expired window stay invisible
+        assert!(store.get_process_exit_recent(8888, 60).is_none());
+        assert!(store.get_process_exit_recent(7777, 0).is_none());
+    }
+
+    #[test]
+    fn clear_process_exit_removes_stale_record_for_reused_pid() {
+        let store = temp_store();
+
+        // A clean-exit row is left over from a previous process with this pid
+        // (write of the new exit status failed, so it was never replaced).
+        store.record_process_exit(9999, 0x0).unwrap();
+        assert_eq!(store.get_process_exit_recent(9999, 60), Some(0x0));
+
+        // Best-effort cleanup must drop the stale row so the serve-mode
+        // reader falls back to "no record → crash handling" for a reused pid.
+        store.clear_process_exit(9999).unwrap();
+        assert!(store.get_process_exit_recent(9999, 60).is_none());
+
+        // Clearing an absent pid is a no-op, not an error.
+        store.clear_process_exit(9999).unwrap();
     }
 
     // ── purge ────────────────────────────────────────────────────────────────

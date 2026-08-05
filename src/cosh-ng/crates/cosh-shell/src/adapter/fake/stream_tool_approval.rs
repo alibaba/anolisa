@@ -10,7 +10,7 @@ pub(super) fn emit_fake_tool_approval_stream(
     request: &AgentRequest,
     sink: &mut dyn FnMut(AgentEvent) -> Result<(), AdapterError>,
 ) -> Result<bool, AdapterError> {
-    let run_id = format!("fake-run-{}", request.command_block.id);
+    let run_id = request.id.clone();
     if input.contains("stream batch tool approval") {
         // Multi-request turn for turn-scope batch consent (issue #1773):
         // three distinct diagnostic commands queued in one run.
@@ -159,6 +159,39 @@ pub(super) fn emit_fake_tool_approval_stream(
         sink(AgentEvent::AgentCompleted {
             run_id,
             summary: "pager stream approval fake analysis completed".to_string(),
+        })?;
+        return Ok(true);
+    }
+
+    // Issue #1988: forensics command whose Git configuration asks for a pager.
+    // The global `-c`/`--paginate` flags keep it out of the readonly pipeline,
+    // so it travels the approval + foreground handoff path under test.
+    if input.contains("stream git pager tool approval") {
+        sink(AgentEvent::TextDelta {
+            run_id: run_id.clone(),
+            text: "Preparing a git log request before finishing.".to_string(),
+        })?;
+        emit_bash_tool_after_short_delay(
+            sink,
+            &run_id,
+            "git -c core.pager=fake-pager --paginate log -1 --format=%h",
+        )?;
+        sink(AgentEvent::AgentCompleted {
+            run_id,
+            summary: "git pager stream approval fake analysis completed".to_string(),
+        })?;
+        return Ok(true);
+    }
+
+    if input.contains("stream less tool approval") {
+        sink(AgentEvent::TextDelta {
+            run_id: run_id.clone(),
+            text: "Preparing a less request before finishing.".to_string(),
+        })?;
+        emit_bash_tool_after_short_delay(sink, &run_id, "less Cargo.toml")?;
+        sink(AgentEvent::AgentCompleted {
+            run_id,
+            summary: "less stream approval fake analysis completed".to_string(),
         })?;
         return Ok(true);
     }

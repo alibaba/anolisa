@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use nix::libc;
 
-use crate::types::AgentEvent;
+use crate::types::{AgentEvent, PROVIDER_TIMEOUT_ERROR_CODE};
 
 use super::{
     AdapterError, PreparedInvocation, ProviderCancellationArtifact,
@@ -245,6 +245,8 @@ pub(crate) fn run_provider_process_loop(
             let _ = sender.send(Ok(AgentEvent::AgentFailed {
                 run_id,
                 error: timeout_failure_message(provider_label, timeout, &stderr_tail.snapshot()),
+                error_code: Some(PROVIDER_TIMEOUT_ERROR_CODE.to_string()),
+                max_turns: None,
             }));
             return ProviderRunOutcome::Failed;
         }

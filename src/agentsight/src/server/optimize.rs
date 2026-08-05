@@ -2,11 +2,13 @@
 //! `agentsight-opt` accuracy/perf/cost analyzers.
 //!
 //! LLM credentials are configured at runtime from the Dashboard settings page
-//! and persisted to `optimization_config.json` next to the databases. Analysis
-//! results are persisted per session via `agentsight-opt-store`.
+//! and persisted to `optimization_config.json` next to the databases. The API
+//! key is sealed with machine-bound encryption (see [`super::secret`]) before
+//! it reaches disk. Analysis results are persisted per session via
+//! `agentsight-opt-store`.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use actix_web::{HttpResponse, Responder, get, post, web};
 use serde::{Deserialize, Serialize};
@@ -15,14 +17,21 @@ use agentsight_opt::{AnalyzePipeline, AtifTrajectory, LlmClient, TrajectoryRecor
 use agentsight_opt_store::{Dimension, OptimizationStore};
 use agentsight_trajectory_collector::{TrajectoryRecord, TrajectoryStore};
 
-use uuid::Uuid;
-
 use super::AppState;
+use super::secret;
 use crate::storage::sqlite::GenAISqliteStore;
 
 const CONFIG_FILE_NAME: &str = "optimization_config.json";
 const DB_FILE_NAME: &str = "optimization.db";
 const TRAJECTORIES_DIR_NAME: &str = "opt-trajectories";
+
+/// Directory holding the config file — where the sealing salt lives too.
+fn config_dir(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
+}
 
 // ─── LLM configuration ───────────────────────────────────────────────────────
 
@@ -38,18 +47,48 @@ pub struct OptLlmConfig {
 }
 
 impl OptLlmConfig {
-    fn load(path: &Path) -> Self {
-        match std::fs::read_to_string(path) {
+    /// Load from disk, unsealing the API key.
+    ///
+    /// The second value is true when the file held a legacy plaintext key
+    /// that must be resealed so the plaintext leaves the disk.
+    fn load(path: &Path) -> (Self, bool) {
+        let mut config: Self = match std::fs::read_to_string(path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-            Err(_) => Self::default(),
+            Err(_) => return (Self::default(), false),
+        };
+        let mut needs_reseal = false;
+        if let Some(stored) = config.api_key.take() {
+            if secret::is_sealed(&stored) {
+                match secret::unseal(&stored, &config_dir(path)) {
+                    Some(plain) => config.api_key = Some(plain),
+                    // Salt or machine-id changed (e.g. config copied from
+                    // another host) — treat as unconfigured, never as a key.
+                    None => log::warn!(
+                        "Cannot decrypt the stored optimization API key; \
+                         re-enter it in the dashboard settings"
+                    ),
+                }
+            } else {
+                // Pre-encryption config: keep the key usable and reseal at
+                // startup so the plaintext copy is overwritten.
+                config.api_key = Some(stored);
+                needs_reseal = true;
+            }
         }
+        (config, needs_reseal)
     }
 
     fn save(&self, path: &Path) -> std::io::Result<()> {
-        let json =
-            serde_json::to_string_pretty(self).map_err(|e| std::io::Error::other(e.to_string()))?;
+        // Never persist the API key as plaintext — 0o600 does not survive
+        // backups, snapshots, or root compromise (see super::secret).
+        let mut on_disk = self.clone();
+        if let Some(ref key) = on_disk.api_key {
+            on_disk.api_key = Some(secret::seal(key, &config_dir(path))?);
+        }
+        let json = serde_json::to_string_pretty(&on_disk)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         std::fs::write(path, json)?;
-        // Config contains an API key — restrict to owner.
+        // Defense in depth: keep the sealed config owner-only as well.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -104,13 +143,24 @@ pub struct OptimizeState {
     config_path: PathBuf,
     config: RwLock<OptLlmConfig>,
     store: Option<OptimizationStore>,
+    /// Serializes read-modify-write on the `opt:<target>` root trajectory so
+    /// parallel dimension handlers cannot lose each other's dispatch steps.
+    root_lock: Mutex<()>,
 }
 
 impl OptimizeState {
     /// Initialize from the storage base directory (where the .db files live).
     pub fn init(base_dir: &Path) -> Arc<Self> {
         let config_path = base_dir.join(CONFIG_FILE_NAME);
-        let config = OptLlmConfig::load(&config_path);
+        let (config, needs_reseal) = OptLlmConfig::load(&config_path);
+        if needs_reseal {
+            // One-shot migration of pre-encryption configs: rewrite the file
+            // so the plaintext API key no longer exists on disk.
+            match config.save(&config_path) {
+                Ok(()) => log::info!("Migrated optimization API key to encrypted storage"),
+                Err(e) => log::warn!("Failed to encrypt stored optimization API key: {e}"),
+            }
+        }
         let store = match OptimizationStore::new_with_path(&base_dir.join(DB_FILE_NAME)) {
             Ok(s) => Some(s),
             Err(e) => {
@@ -122,6 +172,7 @@ impl OptimizeState {
             config_path,
             config: RwLock::new(config),
             store,
+            root_lock: Mutex::new(()),
         })
     }
 
@@ -165,7 +216,7 @@ fn optimize_state(data: &AppState) -> Result<&Arc<OptimizeState>, HttpResponse> 
 /// ready-made ATIF v1.7 JSON.
 fn load_trajectory(
     db_path: &Path,
-    trajectory_store: Option<&TrajectoryStore>,
+    trajectory_store: Option<Arc<TrajectoryStore>>,
     session_id: &str,
 ) -> Result<AtifTrajectory, HttpResponse> {
     let store = GenAISqliteStore::new_with_path(db_path).map_err(|e| {
@@ -198,7 +249,7 @@ fn load_trajectory(
 /// persisted by the trajectory collector (log-collected Qoder/QoderWork
 /// sessions).
 fn load_collected_trajectory(
-    trajectory_store: Option<&TrajectoryStore>,
+    trajectory_store: Option<Arc<TrajectoryStore>>,
     session_id: &str,
 ) -> Result<AtifTrajectory, HttpResponse> {
     let Some(tstore) = trajectory_store else {
@@ -221,11 +272,25 @@ fn load_collected_trajectory(
     }
 }
 
+/// The dimension a dispatch step was generated for, from its `ToolCall(Agent)`.
+fn step_dimension(step: &agentsight_atif::Step) -> Option<&str> {
+    step.tool_calls
+        .as_ref()?
+        .first()?
+        .arguments
+        .get("subagent_type")?
+        .as_str()
+}
+
 /// Create or update the per-target optimization run root trajectory
-/// (`opt:<target>`). Each dimension analysis appends one dispatch step with a
-/// `ToolCall(Agent)` + `subagent_trajectory_ref` pointing at the dimension
-/// record (`opt:<target>:subagent:<dim>-<id>`), so the existing subagent
+/// (`opt:<target>`). Each dimension analysis contributes exactly one dispatch
+/// step with a `ToolCall(Agent)` + `subagent_trajectory_ref` pointing at the
+/// dimension record (`opt:<target>:subagent:<dim>`), so the existing subagent
 /// injection and session-list folding group all analyses under one row.
+///
+/// Re-running a dimension replaces its step (and its stored subagent row)
+/// rather than adding another, keeping the subagent graph at one node per
+/// dimension however often the analysis is re-triggered.
 fn upsert_opt_run_root(
     store: &TrajectoryStore,
     target_session_id: &str,
@@ -260,7 +325,18 @@ fn upsert_opt_run_root(
         root.agent.model_name = dim_doc.agent.model_name.clone();
     }
 
-    // Append one dispatch step for this dimension run.
+    let (dim_prompt, dim_completion) = dim_doc
+        .final_metrics
+        .as_ref()
+        .map(|m| {
+            (
+                m.total_prompt_tokens.unwrap_or(0),
+                m.total_completion_tokens.unwrap_or(0),
+            )
+        })
+        .unwrap_or((0, 0));
+
+    // Build the dispatch step for this dimension run.
     let sub_traj_id = dim_doc.trajectory_id.clone();
     let call_id = format!(
         "dispatch-{}",
@@ -271,8 +347,8 @@ fn upsert_opt_run_root(
         .last()
         .and_then(|s| s.timestamp.clone())
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-    root.steps.push(schema::Step {
-        step_id: root.steps.len() + 1,
+    let dispatch = schema::Step {
+        step_id: 0, // renumbered below, after the per-dimension collapse
         source: schema::StepSource::Agent,
         message: String::new(),
         timestamp: Some(ts),
@@ -301,44 +377,90 @@ fn upsert_opt_run_root(
                 extra: None,
             }],
         }),
-        metrics: None,
+        metrics: Some(schema::Metrics {
+            prompt_tokens: Some(dim_prompt),
+            completion_tokens: Some(dim_completion),
+            cached_tokens: None,
+            cost_usd: None,
+            logprobs: None,
+            completion_token_ids: None,
+            prompt_token_ids: None,
+            extra: None,
+        }),
         extra: None,
         llm_call_count: None,
         is_copied_context: None,
-    });
+    };
 
-    // Accumulate run totals across dimension analyses.
-    let (dim_prompt, dim_completion) = dim_doc
-        .final_metrics
-        .as_ref()
-        .map(|m| {
-            (
-                m.total_prompt_tokens.unwrap_or(0),
-                m.total_completion_tokens.unwrap_or(0),
-            )
-        })
-        .unwrap_or((0, 0));
-    let prev = root.final_metrics.take();
-    let prev_prompt = prev
-        .as_ref()
-        .and_then(|m| m.total_prompt_tokens)
-        .unwrap_or(0);
-    let prev_completion = prev
-        .as_ref()
-        .and_then(|m| m.total_completion_tokens)
-        .unwrap_or(0);
+    // Collapse to one dispatch step per dimension, newest run winning. This
+    // both folds in the step just built and heals roots written before the
+    // subagent ids were canonical (which held one step per *run*).
+    let mut steps: Vec<schema::Step> = Vec::new();
+    for step in root.steps.drain(..).chain(std::iter::once(dispatch)) {
+        let existing = step_dimension(&step)
+            .and_then(|dim| steps.iter().position(|s| step_dimension(s) == Some(dim)));
+        match existing {
+            Some(i) => steps[i] = step,
+            None => steps.push(step),
+        }
+    }
+    for (i, step) in steps.iter_mut().enumerate() {
+        step.step_id = i + 1;
+    }
+    root.steps = steps;
+
+    // Totals are recomputed from the per-dimension step metrics, so a re-run
+    // overwrites its dimension's contribution instead of double-counting it.
+    let (total_prompt, total_completion) =
+        root.steps
+            .iter()
+            .fold((0u64, 0u64), |(prompt, completion), step| {
+                let metrics = step.metrics.as_ref();
+                (
+                    prompt + metrics.and_then(|m| m.prompt_tokens).unwrap_or(0),
+                    completion + metrics.and_then(|m| m.completion_tokens).unwrap_or(0),
+                )
+            });
     root.final_metrics = Some(schema::FinalMetrics {
-        total_prompt_tokens: Some(prev_prompt + dim_prompt),
-        total_completion_tokens: Some(prev_completion + dim_completion),
+        total_prompt_tokens: Some(total_prompt),
+        total_completion_tokens: Some(total_completion),
         total_cached_tokens: None,
         total_cost_usd: None,
         total_steps: Some(root.steps.len()),
         extra: None,
     });
 
+    // Subagent rows the collapsed root still points at; everything else under
+    // `opt:<target>:subagent:%` is a superseded run and gets pruned below.
+    let mut keep = Vec::new();
+    for step in &root.steps {
+        for result in step.observation.iter().flat_map(|o| &o.results) {
+            for sub_ref in result.subagent_trajectory_ref.iter().flatten() {
+                if let Some(id) = &sub_ref.session_id {
+                    keep.push(id.clone());
+                }
+            }
+        }
+    }
+    // Canonical per-dimension ids are always kept: a sibling dimension may
+    // have persisted its row without having folded its dispatch into this
+    // root yet (its own root update runs later or failed). Pruning must only
+    // ever target legacy `<dim>-<uuid>` rows from superseded runs.
+    for dim in ALL_DIMENSIONS {
+        keep.push(format!("opt:{target_session_id}:subagent:{dim}"));
+    }
+
+    // Steps sit in first-seen dimension order, not chronological order, so the
+    // run window comes from the timestamp extremes rather than first/last step.
+    let timestamps: Vec<&String> = root
+        .steps
+        .iter()
+        .filter_map(|s| s.timestamp.as_ref())
+        .collect();
+
     let atif_json = serde_json::to_string(&root)?;
     let record = TrajectoryRecord {
-        session_id: root_id,
+        session_id: root_id.clone(),
         schema_version: root.schema_version.clone(),
         agent_name: "agentsight-opt".to_string(),
         model_name: root.agent.model_name.clone(),
@@ -353,8 +475,8 @@ fn upsert_opt_run_root(
             .as_ref()
             .and_then(|m| m.total_completion_tokens)
             .map(|v| v as i64),
-        start_time: root.steps.first().and_then(|s| s.timestamp.clone()),
-        end_time: root.steps.last().and_then(|s| s.timestamp.clone()),
+        start_time: timestamps.iter().min().map(|s| s.to_string()),
+        end_time: timestamps.iter().max().map(|s| s.to_string()),
         first_user_message: Some(format!("优化分析运行 · 目标会话 {target_session_id}")),
         last_user_message: Some(format!("最近维度: {dimension_raw}")),
         atif_json,
@@ -366,6 +488,15 @@ fn upsert_opt_run_root(
         file_mtime_ns: 0,
     };
     store.upsert_trajectory(&record)?;
+
+    // An empty keep-list would delete every child, so treat it as "nothing
+    // resolvable to prune against" rather than as a licence to wipe the run.
+    if !keep.is_empty() {
+        let pruned = store.retain_subagents(&root_id, &keep)?;
+        if pruned > 0 {
+            log::info!("Pruned {pruned} superseded opt subagent trajectories under {root_id}");
+        }
+    }
     Ok(())
 }
 
@@ -405,6 +536,17 @@ fn parse_dimension(raw: &str) -> Option<Dimension> {
     }
 }
 
+/// Every dimension id `parse_dimension` accepts (keep the two in sync). Used
+/// to shield canonical subagent rows from the superseded-run prune pass.
+const ALL_DIMENSIONS: &[&str] = &[
+    "perf",
+    "perf-issues",
+    "cost",
+    "cost-waste",
+    "accuracy",
+    "summary",
+];
+
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 /// POST /api/optimize/sessions/{session_id}/{dimension}
@@ -429,11 +571,8 @@ pub async fn run_optimization(
         }));
     };
 
-    let trajectory = match load_trajectory(
-        &data.storage_path,
-        data.trajectory_store.as_deref(),
-        &session_id,
-    ) {
+    let trajectory = match load_trajectory(&data.storage_path, data.trajectory_store(), &session_id)
+    {
         Ok(t) => t,
         Err(resp) => return resp,
     };
@@ -499,15 +638,16 @@ pub async fn run_optimization(
                 // Persist to trajectories.db for Dashboard query. The record
                 // becomes a subagent of the per-target run root (`opt:<target>`)
                 // so all dimension analyses of one session group under one row.
-                if let Some(ref traj_store) = data.trajectory_store {
+                if let Some(traj_store) = data.trajectory_store() {
                     let mut doc = recorder.to_atif();
-                    let run_suffix = format!(
-                        "{dimension_raw}-{}",
-                        &Uuid::new_v4().simple().to_string()[..8]
-                    );
-                    let record_session_id = format!("opt:{session_id}:subagent:{run_suffix}");
+                    // Id is keyed on the dimension alone: re-running an analysis
+                    // overwrites its row instead of adding a new subagent node.
+                    let record_session_id = format!("opt:{session_id}:subagent:{dimension_raw}");
                     doc.session_id = Some(record_session_id.clone());
-                    doc.trajectory_id = Some(run_suffix.clone());
+                    doc.trajectory_id = Some(dimension_raw.clone());
+                    // The graph labels nodes from `agent.name` minus the
+                    // `agentsight-opt:` prefix, so name it after the dimension.
+                    doc.agent.name = format!("agentsight-opt:{dimension_raw}");
                     let atif_json = serde_json::to_string(&doc).unwrap_or_default();
                     let (first_user_message, last_user_message) =
                         agentsight_trajectory_collector::store::extract_user_message_previews(
@@ -541,6 +681,11 @@ pub async fn run_optimization(
                         file_size: 0,
                         file_mtime_ns: 0,
                     };
+                    // Hold the lock across "write subagent row → update root →
+                    // prune": a parallel dimension's prune pass must never see
+                    // a sibling row its root does not reference yet, or it
+                    // would delete it and leave the root with a dangling ref.
+                    let _guard = state.root_lock.lock().unwrap_or_else(|e| e.into_inner());
                     if let Err(e) = traj_store.upsert_trajectory(&record) {
                         log::warn!("Failed to persist opt trajectory to SQLite: {e}");
                     } else if let Err(e) =
@@ -837,6 +982,75 @@ mod tests {
         assert_eq!(config.masked_api_key().as_deref(), Some("••••••"));
     }
 
+    /// The API key must reach disk sealed (issue: plaintext key protected
+    /// only by 0o600 leaks via backups/snapshots/root compromise).
+    #[test]
+    fn save_seals_api_key_and_load_restores_it() {
+        let dir = tmp_dir("sealed-config");
+        let path = dir.join(CONFIG_FILE_NAME);
+        let config = OptLlmConfig {
+            api_key: Some("sk-super-secret-key".into()),
+            base_url: Some("http://localhost/v1".into()),
+            model: Some("test-model".into()),
+        };
+        config.save(&path).unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("sk-super-secret-key"), "plaintext on disk");
+        assert!(raw.contains("enc:v1:"), "api_key must be sealed");
+        // Non-sensitive fields stay readable for debugging.
+        assert!(raw.contains("http://localhost/v1"));
+
+        let (loaded, needs_reseal) = OptLlmConfig::load(&path);
+        assert!(!needs_reseal);
+        assert_eq!(loaded.api_key.as_deref(), Some("sk-super-secret-key"));
+        assert_eq!(loaded.model.as_deref(), Some("test-model"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Legacy plaintext configs stay usable and are flagged for resealing.
+    #[test]
+    fn load_flags_legacy_plaintext_key_for_reseal() {
+        let dir = tmp_dir("legacy-config");
+        let path = dir.join(CONFIG_FILE_NAME);
+        std::fs::write(&path, r#"{"api_key":"sk-legacy-plain","model":"m"}"#).unwrap();
+
+        let (loaded, needs_reseal) = OptLlmConfig::load(&path);
+        assert!(needs_reseal);
+        assert_eq!(loaded.api_key.as_deref(), Some("sk-legacy-plain"));
+
+        // The migration path: saving removes the plaintext copy.
+        loaded.save(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("sk-legacy-plain"));
+        let (reloaded, needs_reseal) = OptLlmConfig::load(&path);
+        assert!(!needs_reseal);
+        assert_eq!(reloaded.api_key.as_deref(), Some("sk-legacy-plain"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An undecryptable envelope (foreign host / lost salt) must degrade to
+    /// "not configured" instead of surfacing ciphertext as an API key.
+    #[test]
+    fn load_drops_undecryptable_key() {
+        let dir = tmp_dir("undecryptable-config");
+        let path = dir.join(CONFIG_FILE_NAME);
+        std::fs::write(
+            &path,
+            r#"{"api_key":"enc:v1:AAAAAAAAAAAAAAAA:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","model":"m"}"#,
+        )
+        .unwrap();
+
+        let (loaded, needs_reseal) = OptLlmConfig::load(&path);
+        assert!(!needs_reseal);
+        assert_eq!(loaded.api_key, None);
+        assert_eq!(loaded.model.as_deref(), Some("m"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn parses_known_optimization_dimensions() {
         assert_eq!(parse_dimension("perf"), Some(Dimension::Perf));
@@ -887,7 +1101,7 @@ mod tests {
             .upsert_trajectory(&collected_record("log-1", atif))
             .unwrap();
 
-        let trajectory = load_trajectory(&db_path, Some(&tstore), "log-1").unwrap();
+        let trajectory = load_trajectory(&db_path, Some(Arc::new(tstore)), "log-1").unwrap();
         assert_eq!(trajectory.session_id, "log-1");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -900,7 +1114,7 @@ mod tests {
         let tstore = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
 
         // Store present but session absent → 404.
-        let resp = load_trajectory(&db_path, Some(&tstore), "nope").unwrap_err();
+        let resp = load_trajectory(&db_path, Some(Arc::new(tstore)), "nope").unwrap_err();
         assert_eq!(resp.status(), actix_web::http::StatusCode::NOT_FOUND);
 
         // No store at all → 404 as well.
@@ -919,7 +1133,7 @@ mod tests {
             .upsert_trajectory(&collected_record("bad-1", "not json"))
             .unwrap();
 
-        let resp = load_trajectory(&db_path, Some(&tstore), "bad-1").unwrap_err();
+        let resp = load_trajectory(&db_path, Some(Arc::new(tstore)), "bad-1").unwrap_err();
         assert_eq!(
             resp.status(),
             actix_web::http::StatusCode::UNPROCESSABLE_ENTITY
@@ -960,8 +1174,16 @@ mod tests {
         }
     }
 
+    /// The record a dimension run persists before `upsert_opt_run_root` folds
+    /// it into the root, mirroring the shape written by `run_llm_dimension`.
+    fn subagent_record(session_id: &str) -> TrajectoryRecord {
+        let mut record = collected_record(session_id, "{}");
+        record.is_subagent = true;
+        record
+    }
+
     #[test]
-    fn opt_run_root_accumulates_dimension_dispatches() {
+    fn opt_run_root_collects_one_dispatch_per_dimension() {
         let dir = tmp_dir("runroot");
         let tstore = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
 
@@ -969,29 +1191,21 @@ mod tests {
             &tstore,
             "target-1",
             "perf-issues",
-            &dimension_doc(
-                "perf-issues-abc",
-                "opt:target-1:subagent:perf-issues-abc",
-                100,
-            ),
+            &dimension_doc("perf-issues", "opt:target-1:subagent:perf-issues", 100),
         )
         .unwrap();
         upsert_opt_run_root(
             &tstore,
             "target-1",
             "cost-waste",
-            &dimension_doc(
-                "cost-waste-def",
-                "opt:target-1:subagent:cost-waste-def",
-                200,
-            ),
+            &dimension_doc("cost-waste", "opt:target-1:subagent:cost-waste", 200),
         )
         .unwrap();
 
         let json = tstore.get_atif_json("opt:target-1").unwrap().unwrap();
         let root: agentsight_atif::AtifTrajectory = serde_json::from_str(&json).unwrap();
 
-        // One dispatch step per dimension run; token totals accumulate.
+        // One dispatch step per dimension; totals sum the per-step metrics.
         assert_eq!(root.steps.len(), 2);
         assert_eq!(root.session_id.as_deref(), Some("opt:target-1"));
         let metrics = root.final_metrics.unwrap();
@@ -1006,10 +1220,140 @@ mod tests {
             .subagent_trajectory_ref
             .as_ref()
             .unwrap();
-        assert_eq!(refs[0].trajectory_id.as_deref(), Some("cost-waste-def"));
+        assert_eq!(refs[0].trajectory_id.as_deref(), Some("cost-waste"));
         assert_eq!(
             refs[0].session_id.as_deref(),
-            Some("opt:target-1:subagent:cost-waste-def")
+            Some("opt:target-1:subagent:cost-waste")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rerunning_a_dimension_replaces_its_dispatch_instead_of_appending() {
+        let dir = tmp_dir("rerun");
+        let tstore = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
+
+        for prompt in [100, 500] {
+            tstore
+                .upsert_trajectory(&subagent_record("opt:target-1:subagent:accuracy"))
+                .unwrap();
+            upsert_opt_run_root(
+                &tstore,
+                "target-1",
+                "accuracy",
+                &dimension_doc("accuracy", "opt:target-1:subagent:accuracy", prompt),
+            )
+            .unwrap();
+        }
+
+        let json = tstore.get_atif_json("opt:target-1").unwrap().unwrap();
+        let root: agentsight_atif::AtifTrajectory = serde_json::from_str(&json).unwrap();
+
+        // Second run overwrites the first: still one step, totals not doubled.
+        assert_eq!(root.steps.len(), 1);
+        assert_eq!(root.steps[0].step_id, 1);
+        let metrics = root.final_metrics.unwrap();
+        assert_eq!(metrics.total_prompt_tokens, Some(500));
+        assert_eq!(metrics.total_completion_tokens, Some(10));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opt_run_root_prunes_subagent_rows_from_superseded_runs() {
+        let dir = tmp_dir("prune");
+        let tstore = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
+
+        // Rows written by the pre-dedupe id scheme (`<dim>-<uuid>`), plus one
+        // belonging to a dimension that is not being re-run.
+        for (dim, legacy_id) in [
+            ("accuracy", "opt:target-1:subagent:accuracy-aaaaaaaa"),
+            ("accuracy", "opt:target-1:subagent:accuracy-bbbbbbbb"),
+            ("summary", "opt:target-1:subagent:summary-cccccccc"),
+        ] {
+            tstore
+                .upsert_trajectory(&subagent_record(legacy_id))
+                .unwrap();
+            upsert_opt_run_root(&tstore, "target-1", dim, &dimension_doc(dim, legacy_id, 10))
+                .unwrap();
+        }
+
+        tstore
+            .upsert_trajectory(&subagent_record("opt:target-1:subagent:accuracy"))
+            .unwrap();
+        upsert_opt_run_root(
+            &tstore,
+            "target-1",
+            "accuracy",
+            &dimension_doc("accuracy", "opt:target-1:subagent:accuracy", 100),
+        )
+        .unwrap();
+
+        // Both stale accuracy rows are gone; the untouched summary row stays.
+        let json = tstore.get_atif_json("opt:target-1").unwrap().unwrap();
+        let root: agentsight_atif::AtifTrajectory = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            root.steps.len(),
+            2,
+            "one step per dimension: accuracy, summary"
+        );
+        assert_eq!(
+            tstore
+                .get_subagent_atif_jsons("opt:target-1")
+                .unwrap()
+                .len(),
+            2,
+            "stale accuracy runs pruned, summary row retained"
+        );
+        assert!(
+            tstore
+                .get("opt:target-1:subagent:accuracy-aaaaaaaa")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            tstore
+                .get("opt:target-1:subagent:summary-cccccccc")
+                .unwrap()
+                .is_some()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn root_upsert_keeps_unlinked_sibling_dimension_rows() {
+        let dir = tmp_dir("sibling");
+        let tstore = TrajectoryStore::new_with_path(&dir.join("trajectories.db")).unwrap();
+
+        // Dimension B persisted its subagent row but has not folded its
+        // dispatch into the root yet — the interleaving the handler's
+        // root_lock serializes against, plus the error path where B's own
+        // root update failed after the row write.
+        tstore
+            .upsert_trajectory(&subagent_record("opt:target-1:subagent:cost-waste"))
+            .unwrap();
+
+        // Dimension A runs a full root upsert, including the prune pass.
+        tstore
+            .upsert_trajectory(&subagent_record("opt:target-1:subagent:accuracy"))
+            .unwrap();
+        upsert_opt_run_root(
+            &tstore,
+            "target-1",
+            "accuracy",
+            &dimension_doc("accuracy", "opt:target-1:subagent:accuracy", 100),
+        )
+        .unwrap();
+
+        // B's row survives: prune only targets legacy `<dim>-<uuid>` rows.
+        assert!(
+            tstore
+                .get("opt:target-1:subagent:cost-waste")
+                .unwrap()
+                .is_some(),
+            "sibling row written before its root update must not be pruned"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

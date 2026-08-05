@@ -473,6 +473,8 @@ fn question_activity_localizes_empty_question_fallback() {
 fn provider_status_activity_localizes_neutral_tokens() {
     let mut active_run = test_active_run();
     active_run.language = Language::ZhCn;
+    active_run.started_at = Instant::now() - Duration::from_secs(60);
+    active_run.last_activity_at = Instant::now() - Duration::from_secs(30);
     remember_agent_activity(
         &mut active_run,
         &[GovernedEvent {
@@ -491,6 +493,10 @@ fn provider_status_activity_localizes_neutral_tokens() {
 
     assert_eq!(active_run.current_phase, "正在思考");
     assert_eq!(active_run.current_message, "正在思考");
+    assert!(
+        active_run.last_activity_at.elapsed() < Duration::from_secs(1),
+        "status progress must refresh the provider idle clock"
+    );
 }
 
 #[test]

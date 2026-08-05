@@ -77,7 +77,8 @@ cosh-shell --resume <session-id> # 选择已知的 provider 会话
 ```
 
 在 cosh-shell 中，可使用 `/session` 浏览会话、`/session list` 复制完整会话
-ID，并通过 `/session status` 查看已选择和已激活的身份。`/session new`
+ID、`/session list --all` 列出同一存储根下所有工作空间的会话，并通过
+`/session status` 查看已选择和已激活的身份。`/session new`
 （或 `/new`）会与当前 provider 对话分离，使下一次 Agent 请求开启全新对话，
 而无需重启 Shell；`/session clear ...` 会在确认后清理旧记录。会话恢复会还原
 模型可见的对话上下文，但不会伪装成已恢复历史终端证据。`/session compact`
@@ -88,6 +89,24 @@ ID，并通过 `/session status` 查看已选择和已激活的身份。`/sessio
 详见
 [会话恢复指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/session-recovery.md)
 和[会话压缩指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/shell/session-compaction.md)。
+
+单次 Agent 请求默认为 50 个模型轮次。如果会话已经持久化后才达到上限，交互式
+shell 会请求批准，并在同一个 provider 对话中追加同等预算。可通过
+`agent.max_turns` 或 `COSH_MAX_TURNS` 覆盖该预算，详见
+[配置指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/configuration.md#agent-轮次预算)。
+
+`/auth` 选择器包含 Coding Plan 和 Token Plan。内置 endpoint 默认使用中国站；
+国际站设置 `COSH_SERVICE_SITE=international` 后使用国际站 endpoint 目录。
+可选别名和 fallback 行为见
+[配置指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/configuration.md#环境变量覆盖)。
+
+调用大模型时，不同推理请求可能出现输入内容的重叠（如多轮对话）。上下文缓存
+（Context Cache）可以缓存这些公共前缀，减少重复计算，提升响应速度并降低成本。
+DashScope 提供两种工作模式：显式缓存（需主动开启，5 分钟内确定性命中，创建
+成本较高但命中成本更低）和隐式缓存（默认自动模式，命中率不确定，命中成本
+略高）。在 `[ai.providers.dashscope]` 下设置 `explicit_cache = true` 可切换为
+显式缓存，详见
+[配置指南](../../docs/user-guide/zh/user-entrypoint/cosh-ng/configuration.md#cosh-core-配置)。
 
 Core 和 Shell 还会把脱敏、版本化的审计时间线写入
 `$XDG_STATE_HOME/cosh/audit` 或 `~/.local/state/cosh/audit`。既有

@@ -1,4 +1,5 @@
 pub(super) mod audit;
+pub(super) mod capture_notice;
 pub(super) mod commands;
 pub(super) mod config;
 pub(super) mod debug;
@@ -9,6 +10,7 @@ pub(super) mod health;
 pub(super) mod hooks;
 #[cfg(test)]
 mod hooks_tests;
+pub(super) mod mcp;
 pub(super) mod notices;
 pub(super) mod panel;
 pub(super) mod parser;

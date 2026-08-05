@@ -59,6 +59,14 @@ fn raw_cli_help_renders_slash_command_reference() {
         normalized.contains("/skills [list|detail] [name]"),
         "{output}"
     );
+    // /mcp renders as an indented Registry-group entry with its own summary
+    // line, like /extensions and /skills; Registry-group membership is pinned
+    // by the registry unit tests.
+    assert!(normalized.contains("│   /mcp"), "{output}");
+    assert!(
+        normalized.contains("│       manage MCP servers"),
+        "{output}"
+    );
     assert!(!output.contains("/agent"), "{output}");
     assert!(!output.contains("/explain"), "{output}");
     assert!(!output.contains("/cancel"), "{output}");
@@ -311,4 +319,136 @@ fn raw_cli_zsh_shell_arg_intercepts_fragmented_slash() {
         !output.contains("zsh: no such file or directory: /help"),
         "{output}"
     );
+}
+
+#[test]
+fn raw_cli_mcp_slash_is_intercepted() {
+    let output = run_raw_cli_with_env(
+        "fake",
+        "/mcp\n/mcp help\n/mcp list\necho after-mcp\nexit\n",
+        &[("COSH_SHELL_LANG", "en-US")],
+    );
+
+    // /mcp should be intercepted, not passed to bash
+    assert!(
+        !output.contains("bash: /mcp: No such file or directory"),
+        "/mcp reached bash: {output}"
+    );
+    assert!(
+        !output.contains("bash: /mcp:"),
+        "/mcp reached bash: {output}"
+    );
+    // /mcp help should show usage (handled in slash command, not backend)
+    assert!(output.contains("Usage: /mcp"), "{output}");
+    assert!(output.contains("list"), "{output}");
+    assert!(output.contains("connect"), "{output}");
+    assert!(output.contains("inspect"), "{output}");
+    // /mcp list with fake adapter shows backend requirement
+    assert!(
+        output.contains("This feature requires cosh-core backend"),
+        "/mcp should show backend requirement: {output}"
+    );
+    assert!(output.contains("after-mcp"), "{output}");
+}
+
+#[test]
+fn raw_cli_mcp_unknown_subcommand_shows_error() {
+    let output = run_raw_cli_with_env(
+        "fake",
+        "/mcp unknown\necho after-mcp-unknown\nexit\n",
+        &[("COSH_SHELL_LANG", "en-US")],
+    );
+
+    assert!(
+        output.contains("Unknown subcommand: unknown"),
+        "should show unknown subcommand error: {output}"
+    );
+    assert!(
+        output.contains("Run /mcp help for usage information"),
+        "should suggest help: {output}"
+    );
+    assert!(output.contains("after-mcp-unknown"), "{output}");
+}
+
+#[test]
+fn raw_cli_mcp_missing_server_argument_shows_error() {
+    let output = run_raw_cli_with_env(
+        "fake",
+        "/mcp connect\n/mcp inspect\n/mcp refresh\necho after-mcp-no-server\nexit\n",
+        &[("COSH_SHELL_LANG", "en-US")],
+    );
+
+    // Commands requiring server argument should show error when missing
+    assert!(
+        output.contains("error:") || output.contains("Error"),
+        "should show error for missing server: {output}"
+    );
+    assert!(output.contains("after-mcp-no-server"), "{output}");
+}
+
+#[test]
+fn raw_cli_mcp_login_redirects_to_shell() {
+    let output = run_raw_cli_with_env(
+        "fake",
+        "/mcp login myserver\necho after-mcp-login\nexit\n",
+        &[("COSH_SHELL_LANG", "en-US")],
+    );
+
+    // OAuth login cannot complete inside the synchronous TUI path; the
+    // command must short-circuit with shell guidance instead of spawning
+    // a subprocess that would time out.
+    assert!(
+        output.contains("cannot run inside the TUI"),
+        "login should be intercepted before the backend: {output}"
+    );
+    assert!(
+        output.contains("cosh-core mcp login myserver"),
+        "guidance should name the requested server: {output}"
+    );
+    assert!(
+        !output.contains("This feature requires cosh-core backend"),
+        "login guidance must not depend on the backend: {output}"
+    );
+    assert!(output.contains("after-mcp-login"), "{output}");
+}
+
+#[test]
+fn raw_cli_mcp_extra_argument_shows_error() {
+    let output = run_raw_cli_with_env(
+        "fake",
+        "/mcp connect one two\necho after-mcp-extra\nexit\n",
+        &[("COSH_SHELL_LANG", "en-US")],
+    );
+
+    assert!(
+        output.contains("unexpected argument: two"),
+        "trailing arguments must be rejected, not silently ignored: {output}"
+    );
+    assert!(output.contains("after-mcp-extra"), "{output}");
+}
+
+#[test]
+fn raw_cli_zsh_mcp_slash_is_intercepted() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &["--shell", "zsh"],
+        &[("COSH_SHELL_LANG", "en-US")],
+        vec![
+            (b"/mcp\n".to_vec(), Duration::ZERO),
+            (b"/mcp help\n".to_vec(), Duration::from_millis(100)),
+            (b"echo after-zsh-mcp\n".to_vec(), Duration::from_millis(100)),
+            (b"exit\n".to_vec(), Duration::from_millis(100)),
+        ],
+    );
+
+    assert!(
+        !output.contains("zsh: no such file or directory: /mcp"),
+        "/mcp reached zsh: {output}"
+    );
+    assert!(output.contains("Usage: /mcp"), "{output}");
+    assert!(output.contains("after-zsh-mcp"), "{output}");
 }

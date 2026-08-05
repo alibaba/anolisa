@@ -24,7 +24,14 @@ pub(crate) fn render_new_agent_structured_events<W: Write>(
         active_run.rendered_governed_event_count = end;
         (events, active_run.request.clone(), active_run.origin)
     };
-    render_agent_structured_events(state, &events, Some(&run_request), origin, output, adapter)
+    render_agent_structured_events(state, &events, Some(&run_request), origin, output, adapter)?;
+    // #1940 I1 batch drain assertion: whatever path the batch above took
+    // (question rejection, trust/auto early return, dedup skip), every
+    // control request registered by the poll loop must now have a home in
+    // approvals.requests or an already-sent response; leftovers were
+    // dropped mid-pipeline and are denied on the spot.
+    crate::approval::runtime::drain_unhomed_control_requests(state);
+    Ok(())
 }
 
 pub(crate) fn render_agent_structured_events<W: Write>(
@@ -65,6 +72,8 @@ pub(crate) fn render_agent_structured_events<W: Write>(
                 AgentEvent::AgentFailed {
                     run_id: active_run.request.id.clone(),
                     error: format!("cosh-core-question-protocol:{reason}"),
+                    error_code: None,
+                    max_turns: None,
                 },
                 output,
                 None,
@@ -156,10 +165,12 @@ mod tests {
 
     #[test]
     fn conflicting_core_question_discards_trailing_interactions_and_finishes_once() {
+        let (approval_tx, approval_rx) = std::sync::mpsc::channel();
         let mut state = InlineState::default();
         let adapter = AdapterInstance::Fake(FakeAgentAdapter);
         let mut active_run = test_active_run();
         active_run.provider_name = "cosh-core";
+        active_run.handle = AgentRunHandle::test_with_approval_sender(approval_tx);
         let run_request = active_run.request.clone();
         state.agent_run.active = Some(active_run);
         let mut output = Vec::new();
@@ -175,7 +186,7 @@ mod tests {
         .expect("render initial question");
         let trailing_tool = governed(
             AgentEvent::ToolPermissionRequest {
-                run_id: "run-1".to_string(),
+                run_id: "request-1".to_string(),
                 request_id: "approval-1".to_string(),
                 tool_name: "run_shell_command".to_string(),
                 tool_input: serde_json::json!({ "command": "rm -f /tmp/example" }),
@@ -187,7 +198,7 @@ mod tests {
         );
         let trailing_auth = governed(
             AgentEvent::AuthRequired {
-                run_id: "run-1".to_string(),
+                run_id: "request-1".to_string(),
                 request_id: "auth-1".to_string(),
                 reason: "credentials required".to_string(),
                 error_message: None,
@@ -195,6 +206,13 @@ mod tests {
             },
             GovernancePolicyDecision::DisplayOnly,
         );
+        // The poll loop registers control requests on first sight; this
+        // test drives the renderer directly, so it registers the same way
+        // to exercise the run-terminal sweep.
+        state
+            .control
+            .approval_ledger_mut()
+            .register("request-1", "approval-1");
         render_agent_structured_events(
             &mut state,
             &[
@@ -222,6 +240,30 @@ mod tests {
         assert!(state.activity.rows.is_empty());
         assert!(state.activity.tool_invocations.is_empty());
         assert!(!state_has_pending_interaction(&state));
+        // #1940: the discarded trailing approval still reaches a terminal
+        // state — exactly one deny response via the finish sweep.
+        // Receipts share the approval channel now; only responses are
+        // terminal for a request.
+        let responses: Vec<_> = approval_rx
+            .try_iter()
+            .filter_map(|message| match message {
+                crate::adapter::ApprovalChannelMessage::Response(response) => Some(response),
+                crate::adapter::ApprovalChannelMessage::Receipt { .. } => None,
+            })
+            .collect();
+        let terminal: Vec<_> = responses
+            .iter()
+            .filter(|response| response.request_id == "approval-1")
+            .collect();
+        assert_eq!(
+            terminal.len(),
+            1,
+            "dropped request must receive exactly one terminal response: {responses:?}"
+        );
+        assert!(matches!(
+            terminal[0].decision,
+            ApprovalDecision::Deny { .. }
+        ));
         let rendered = String::from_utf8(output).expect("UTF-8");
         assert_eq!(
             rendered.matches("Agent question unavailable").count(),
@@ -234,5 +276,131 @@ mod tests {
         );
         assert!(!rendered.contains("cancelled"), "{rendered}");
         assert!(!rendered.contains("rm -f /tmp/example"), "{rendered}");
+    }
+
+    #[test]
+    fn batch_drain_denies_control_request_dropped_by_question_rejection() {
+        let (approval_tx, approval_rx) = std::sync::mpsc::channel();
+        let mut state = InlineState::default();
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let mut active_run = test_active_run();
+        active_run.provider_name = "cosh-core";
+        active_run.handle = AgentRunHandle::test_with_approval_sender(approval_tx);
+        let run_request = active_run.request.clone();
+        state.agent_run.active = Some(active_run);
+        let mut output = Vec::new();
+
+        // Park a pending question so the next batch's question event takes
+        // the rejection path and defers its trailing approval.
+        render_agent_structured_events(
+            &mut state,
+            &[question("question-1", "First")],
+            Some(&run_request),
+            AgentRunOrigin::Standard,
+            &mut output,
+            &adapter,
+        )
+        .expect("render initial question");
+        // Mirror the poll loop: governed events are appended and control
+        // requests registered before the batch is rendered.
+        {
+            let active_run = state.agent_run.active.as_mut().expect("active run");
+            active_run
+                .governed_events
+                .push(question("question-2", "Second"));
+            active_run.governed_events.push(governed(
+                AgentEvent::ToolPermissionRequest {
+                    run_id: "request-1".to_string(),
+                    request_id: "approval-1".to_string(),
+                    tool_name: "run_shell_command".to_string(),
+                    tool_input: serde_json::json!({ "command": "echo probe" }),
+                    tool_use_id: "tool-1".to_string(),
+                    hook_requires_approval: false,
+                    audit_ref: None,
+                },
+                GovernancePolicyDecision::NeedsUserApproval,
+            ));
+        }
+        state
+            .control
+            .approval_ledger_mut()
+            .register("request-1", "approval-1");
+
+        render_new_agent_structured_events(&mut state, &mut output, &adapter)
+            .expect("render rejected batch");
+
+        // The I1 batch drain denies the dropped request immediately, long
+        // before any run-finish sweep.
+        // Receipts share the approval channel now; only responses are
+        // terminal for a request.
+        let responses: Vec<_> = approval_rx
+            .try_iter()
+            .filter_map(|message| match message {
+                crate::adapter::ApprovalChannelMessage::Response(response) => Some(response),
+                crate::adapter::ApprovalChannelMessage::Receipt { .. } => None,
+            })
+            .collect();
+        let terminal: Vec<_> = responses
+            .iter()
+            .filter(|response| response.request_id == "approval-1")
+            .collect();
+        assert_eq!(
+            terminal.len(),
+            1,
+            "dropped request must receive exactly one terminal response: {responses:?}"
+        );
+        assert!(matches!(
+            terminal[0].decision,
+            ApprovalDecision::Deny { .. }
+        ));
+        let active_run = state.agent_run.active.as_ref().expect("active run");
+        assert_eq!(active_run.deferred_events.len(), 1);
+        assert!(state.approvals.requests.is_empty());
+    }
+
+    #[test]
+    fn batch_drain_leaves_recorded_pending_card_untouched() {
+        let (approval_tx, approval_rx) = std::sync::mpsc::channel();
+        let mut state = InlineState::default();
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let mut active_run = test_active_run();
+        active_run.provider_name = "cosh-core";
+        active_run.handle = AgentRunHandle::test_with_approval_sender(approval_tx);
+        state.agent_run.active = Some(active_run);
+        let mut output = Vec::new();
+
+        state
+            .agent_run
+            .active
+            .as_mut()
+            .expect("active run")
+            .governed_events
+            .push(governed(
+                AgentEvent::ToolPermissionRequest {
+                    run_id: "request-1".to_string(),
+                    request_id: "approval-9".to_string(),
+                    tool_name: "run_shell_command".to_string(),
+                    tool_input: serde_json::json!({ "command": "echo keep" }),
+                    tool_use_id: "tool-9".to_string(),
+                    hook_requires_approval: false,
+                    audit_ref: None,
+                },
+                GovernancePolicyDecision::NeedsUserApproval,
+            ));
+        state
+            .control
+            .approval_ledger_mut()
+            .register("request-1", "approval-9");
+
+        render_new_agent_structured_events(&mut state, &mut output, &adapter)
+            .expect("render approval batch");
+
+        // The request found its home as a pending card, so the drain must
+        // not send any response for it.
+        assert_eq!(state.approvals.requests.len(), 1);
+        assert!(
+            approval_rx.try_iter().next().is_none(),
+            "a request with a pending card must never be drained"
+        );
     }
 }

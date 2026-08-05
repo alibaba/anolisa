@@ -2204,7 +2204,7 @@ fn shell_handoff_activity_ignores_stale_same_command_block_before_request() {
         id: "cmd-stale".to_string(),
         session_id: "session-1".to_string(),
         command: "df -h".to_string(),
-        origin: Default::default(),
+        origin: CommandOrigin::ProviderTool,
         cwd: "/tmp".to_string(),
         end_cwd: "/tmp".to_string(),
         started_at_ms: 100,
@@ -2225,6 +2225,114 @@ fn shell_handoff_activity_ignores_stale_same_command_block_before_request() {
     assert!(ids.is_empty(), "{ids:?}");
     assert!(state.activity.rows.is_empty(), "{:?}", state.activity.rows);
     assert!(state.control.shell_handoff().pending_front().is_some());
+}
+
+#[test]
+fn repeated_shell_handoff_uses_the_unhandled_current_block() {
+    let mut state = InlineState::default();
+    let first_request = ShellHandoffRequest::new(
+        "./changing_metric.sh",
+        "$ ./changing_metric.sh",
+        "approved_provider_shell_tool",
+        "user",
+        "req-1",
+        "run-1",
+        1_100,
+    )
+    .expect("first handoff request");
+    state
+        .control
+        .shell_handoff_mut()
+        .enqueue_approved_request(first_request);
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .expect("emit first handoff");
+    let first_block = CommandBlock {
+        id: "cmd-1".to_string(),
+        session_id: "session-1".to_string(),
+        command: "./changing_metric.sh".to_string(),
+        origin: CommandOrigin::ProviderTool,
+        cwd: "/tmp".to_string(),
+        end_cwd: "/tmp".to_string(),
+        started_at_ms: 1_000,
+        ended_at_ms: 1_000,
+        duration_ms: 0,
+        exit_code: 0,
+        status: CommandStatus::Completed,
+        output: OutputRefs {
+            terminal_output_ref: Some("/tmp/output-1001.txt".to_string()),
+            terminal_output_bytes: 20,
+        },
+        shell_environment_generation: None,
+        audit_identity: None,
+    };
+    assert_eq!(
+        record_approved_shell_handoff_blocks(&mut state, std::slice::from_ref(&first_block)),
+        vec!["handoff-1"]
+    );
+
+    let second_request = ShellHandoffRequest::new(
+        "./changing_metric.sh",
+        "$ ./changing_metric.sh",
+        "approved_provider_shell_tool",
+        "user",
+        "req-2",
+        "run-2",
+        1_500,
+    )
+    .expect("second handoff request");
+    state
+        .control
+        .shell_handoff_mut()
+        .enqueue_approved_request(second_request);
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .expect("emit second handoff");
+    let second_block = CommandBlock {
+        id: "cmd-2".to_string(),
+        session_id: "session-1".to_string(),
+        command: "./changing_metric.sh".to_string(),
+        origin: CommandOrigin::ProviderTool,
+        cwd: "/tmp".to_string(),
+        end_cwd: "/tmp".to_string(),
+        started_at_ms: 1_000,
+        ended_at_ms: 1_000,
+        duration_ms: 0,
+        exit_code: 0,
+        status: CommandStatus::Completed,
+        output: OutputRefs {
+            terminal_output_ref: Some("/tmp/output-1002.txt".to_string()),
+            terminal_output_bytes: 20,
+        },
+        shell_environment_generation: None,
+        audit_identity: None,
+    };
+
+    assert_eq!(
+        record_approved_shell_handoff_blocks(&mut state, &[first_block, second_block]),
+        vec!["handoff-2"]
+    );
+    let row = state
+        .activity
+        .rows
+        .iter()
+        .find(|row| row.id == "handoff-2")
+        .expect("second handoff row");
+    assert!(
+        row.detail.contains("command_block: cmd-2"),
+        "{}",
+        row.detail
+    );
+    assert!(
+        row.detail
+            .contains("output_id: terminal-output://session-1/cmd-2"),
+        "{}",
+        row.detail
+    );
 }
 
 fn untracked_test_event(kind: ShellEventKind, command_id: Option<&str>) -> ShellEvent {
@@ -2471,12 +2579,9 @@ fn untracked_shell_handoff_closure_leaves_interactive_handoffs_untouched() {
 }
 
 #[test]
-fn untracked_shell_handoffs_share_prompt_boundary_when_emitted_in_same_cycle() {
-    // Boundary contract: handoffs emitted within the same prompt cycle (no
-    // ShellReady between their emission points) legitimately share the next
-    // ShellReady as their closure boundary. Forcing a distinct boundary per
-    // handoff would pin later handoffs to unrelated future prompts and
-    // misreport the evidence timeline.
+fn untracked_shell_handoffs_close_on_distinct_prompt_boundaries() {
+    // The transport owns one request sidecar and claim slot, so the second
+    // request remains approved until the first closes at its prompt boundary.
     let mut state = InlineState::default();
     for (command, approval_id) in [("ls -la /root/", "req-a"), ("df -h", "req-b")] {
         let request = ShellHandoffRequest::new(
@@ -2499,20 +2604,33 @@ fn untracked_shell_handoffs_share_prompt_boundary_when_emitted_in_same_cycle() {
         .shell_handoff_mut()
         .emit_next_approved(2)
         .expect("emit first handoff");
-    state
+    assert!(state
         .control
         .shell_handoff_mut()
         .emit_next_approved(2)
-        .expect("emit second handoff");
-    let events = vec![
+        .is_none());
+    let mut events = vec![
         untracked_test_event(ShellEventKind::ShellReady, None),
         untracked_test_event(ShellEventKind::ShellReady, None),
         untracked_test_event(ShellEventKind::ShellReady, None),
     ];
 
-    let ids = close_untracked_shell_handoffs(&mut state, &events);
+    let first_ids = close_untracked_shell_handoffs(&mut state, &events);
+    assert_eq!(first_ids, vec!["handoff-1"]);
+    assert!(state.control.shell_handoff().pending_front().is_none());
 
-    assert_eq!(ids, vec!["handoff-1", "handoff-2"]);
+    let second = state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(events.len())
+        .expect("emit second handoff after first closure");
+    assert_eq!(second.approval_id, "req-b");
+    assert!(close_untracked_shell_handoffs(&mut state, &events).is_empty());
+
+    events.push(untracked_test_event(ShellEventKind::ShellReady, None));
+    let second_ids = close_untracked_shell_handoffs(&mut state, &events);
+
+    assert_eq!(second_ids, vec!["handoff-2"]);
     assert!(state.control.shell_handoff().pending_front().is_none());
     for id in ["handoff-1", "handoff-2"] {
         let row = state
@@ -2523,13 +2641,25 @@ fn untracked_shell_handoffs_share_prompt_boundary_when_emitted_in_same_cycle() {
             .expect("handoff row");
         assert_eq!(row.status, "completed_untracked");
     }
+    // Both closures produced recoverable evidence, and neither is lost.
     assert_eq!(
         state
             .evidence
             .claim_pending_shell_handoff_continuations()
             .len(),
-        2
+        1
     );
+    assert_eq!(
+        state
+            .evidence
+            .claim_pending_shell_handoff_continuations()
+            .len(),
+        1
+    );
+    assert!(state
+        .evidence
+        .claim_pending_shell_handoff_continuations()
+        .is_empty());
 }
 
 #[test]
@@ -2559,20 +2689,24 @@ fn untracked_shell_handoff_emitted_after_boundary_stays_pending() {
         .shell_handoff_mut()
         .emit_next_approved(1)
         .expect("emit first handoff");
-    state
-        .control
-        .shell_handoff_mut()
-        .emit_next_approved(3)
-        .expect("emit second handoff");
     let events = vec![
         untracked_test_event(ShellEventKind::ShellReady, None),
         untracked_test_event(ShellEventKind::ShellReady, None),
         untracked_test_event(ShellEventKind::ShellReady, None),
     ];
+    assert_eq!(
+        close_untracked_shell_handoffs(&mut state, &events),
+        vec!["handoff-1"]
+    );
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(3)
+        .expect("emit second handoff");
 
     let ids = close_untracked_shell_handoffs(&mut state, &events);
 
-    assert_eq!(ids, vec!["handoff-1"]);
+    assert!(ids.is_empty(), "{ids:?}");
     let pending = state
         .control
         .shell_handoff()
@@ -3029,4 +3163,189 @@ fn activity_records_terminal_output_read_misroute_for_fenced_fallback() {
     assert!(row
         .detail
         .contains("recommended_action: fenced_cosh_request_output"));
+}
+
+// #2142 review R5: a block carrying an explicit handoff token must decide by
+// that token alone. A block carrying another request's token must not be
+// text-matched against the pending request, even when the commands are equal.
+#[test]
+fn block_with_another_requests_token_does_not_close_the_front_handoff() {
+    let mut state = InlineState::default();
+    let command = "echo twin-handoff";
+    let mut requests = Vec::new();
+    for (approval, run) in [("req-a", "run-a"), ("req-b", "run-b")] {
+        let request = ShellHandoffRequest::new(
+            command,
+            format!("$ {command}"),
+            "approved_provider_shell_tool",
+            "user",
+            approval,
+            run,
+            0,
+        )
+        .expect("handoff request");
+        requests.push(request.clone());
+        if approval == "req-a" {
+            state
+                .control
+                .shell_handoff_mut()
+                .enqueue_approved_request(request);
+        }
+    }
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .expect("emit first handoff");
+    let block = CommandBlock {
+        id: "cmd-second".to_string(),
+        session_id: "session-1".to_string(),
+        command: command.to_string(),
+        origin: CommandOrigin::ProviderTool,
+        cwd: "/tmp".to_string(),
+        end_cwd: "/tmp".to_string(),
+        started_at_ms: 1,
+        ended_at_ms: 10,
+        duration_ms: 9,
+        exit_code: 0,
+        status: CommandStatus::Completed,
+        output: OutputRefs {
+            terminal_output_ref: None,
+            terminal_output_bytes: 0,
+        },
+        shell_environment_generation: None,
+        audit_identity: Some(crate::types::ShellCommandAuditIdentity {
+            run_id: "run-b".to_string(),
+            request_id: None,
+            tool_use_id: None,
+            handoff_token: Some(requests[1].token.clone()),
+        }),
+    };
+
+    let ids = record_approved_shell_handoff_blocks(&mut state, &[block]);
+
+    // The front (first) handoff stays pending: the tokened block belongs to
+    // the second request and must not be mis-paired by the text fallback.
+    assert!(ids.is_empty(), "{ids:?}");
+    let front = state
+        .control
+        .shell_handoff()
+        .pending_front()
+        .expect("first handoff still pending");
+    assert_eq!(front.request().approval_id, "req-a");
+}
+
+// #2142 review R5: the activity detail is a durable surface; the request
+// preview is built from the original command text and must never carry the
+// plaintext secret once a secret-bearing handoff closes normally.
+#[test]
+fn shell_handoff_activity_detail_redacts_the_secret_preview() {
+    let mut state = InlineState::default();
+    let command = r#"deploy --api-key "sk-live-secret-value""#;
+    let request = ShellHandoffRequest::new(
+        command,
+        format!("$ {command}"),
+        "approved_provider_shell_tool",
+        "user",
+        "req-secret",
+        "run-secret",
+        0,
+    )
+    .expect("handoff request");
+    let token = request.token.clone();
+    state
+        .control
+        .shell_handoff_mut()
+        .enqueue_approved_request(request);
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .expect("emit pending handoff");
+    let block = CommandBlock {
+        id: "cmd-secret".to_string(),
+        session_id: "session-1".to_string(),
+        command: "<redacted sensitive command>".to_string(),
+        origin: CommandOrigin::ProviderTool,
+        cwd: "/tmp".to_string(),
+        end_cwd: "/tmp".to_string(),
+        started_at_ms: 1,
+        ended_at_ms: 10,
+        duration_ms: 9,
+        exit_code: 1,
+        status: CommandStatus::Failed,
+        output: OutputRefs {
+            terminal_output_ref: None,
+            terminal_output_bytes: 0,
+        },
+        shell_environment_generation: None,
+        audit_identity: Some(crate::types::ShellCommandAuditIdentity {
+            run_id: "run-secret".to_string(),
+            request_id: None,
+            tool_use_id: None,
+            handoff_token: Some(token),
+        }),
+    };
+
+    let ids = record_approved_shell_handoff_blocks(&mut state, &[block]);
+
+    assert_eq!(ids.len(), 1, "{ids:?}");
+    let row = state
+        .activity
+        .rows
+        .iter()
+        .find(|row| row.id == ids[0])
+        .expect("activity row");
+    assert!(
+        !row.detail.contains("sk-live-secret-value"),
+        "activity detail leaked the plaintext secret: {}",
+        row.detail
+    );
+    assert!(
+        row.detail.contains("preview:"),
+        "preview line disappeared entirely: {}",
+        row.detail
+    );
+}
+
+// The untracked closure writes the same preview into its activity row.
+#[test]
+fn untracked_shell_handoff_activity_detail_redacts_the_secret_preview() {
+    let mut state = InlineState::default();
+    let command = r#"deploy --api-key "sk-live-secret-value""#;
+    let request = ShellHandoffRequest::new(
+        command,
+        format!("$ {command}"),
+        "approved_provider_shell_tool",
+        "user",
+        "req-secret-untracked",
+        "run-secret-untracked",
+        0,
+    )
+    .expect("handoff request");
+    state
+        .control
+        .shell_handoff_mut()
+        .enqueue_approved_request(request);
+    state
+        .control
+        .shell_handoff_mut()
+        .emit_next_approved(0)
+        .expect("emit pending handoff");
+    let events = vec![untracked_test_event(ShellEventKind::ShellReady, None)];
+
+    let ids = close_untracked_shell_handoffs(&mut state, &events);
+
+    assert_eq!(ids.len(), 1, "{ids:?}");
+    let row = state
+        .activity
+        .rows
+        .iter()
+        .find(|row| row.id == ids[0])
+        .expect("activity row");
+    assert!(
+        !row.detail.contains("sk-live-secret-value"),
+        "untracked activity detail leaked the plaintext secret: {}",
+        row.detail
+    );
 }

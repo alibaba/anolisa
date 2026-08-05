@@ -92,7 +92,7 @@ Savings apply to the tool responses entering the context, not to the whole
 session bill — the [Token-less README](src/tokenless/README.md) explains how to
 estimate the effect for a given workload.
 
-[Get started with Token-less →](docs/user-guide/en/token-saving/tokenless/QUICKSTART.md)
+[Read the Token-less user manual →](docs/user-guide/en/token-saving/tokenless/user-manual.md)
 
 <p align="center"><strong>03 · EXECUTION RUNTIME</strong></p>
 
@@ -110,7 +110,7 @@ ANOLISA CLI is the common installation entry point. Enable cosh-ng, Token-less,
 or other capabilities as needed.
 
 ```bash
-curl -fsSL https://agentic-os.sh/install.sh | bash
+curl -fsSL https://get.agentic-os.sh | bash
 
 anolisa install cosh-ng
 anolisa install tokenless

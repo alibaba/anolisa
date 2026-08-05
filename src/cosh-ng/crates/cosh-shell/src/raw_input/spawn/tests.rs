@@ -83,6 +83,7 @@ fn relay_uses_the_validated_mode_snapshot() {
         capture: RawInputCapture::Question {
             id: "later-capture".to_string(),
             option_count: 0,
+            selected: 0,
             allow_free_text: true,
             multiple: false,
             secret: false,
@@ -203,6 +204,7 @@ fn delayed_ghost_suffix_keeps_capture_generation_across_replacement() {
     let previous = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -210,6 +212,7 @@ fn delayed_ghost_suffix_keeps_capture_generation_across_replacement() {
     let next = RawInputCapture::Question {
         id: "q-2".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -265,6 +268,7 @@ fn delayed_ghost_suffix_keeps_capture_generation_across_replacement() {
         generation: 7,
         next_capture: Some(next),
         invalidated: false,
+        post_owner: PostCaptureOwner::MainPrompt,
     };
     let mode = current_raw_input_mode(&input_mode);
     flush_pending_replaced_prompt_ghost_suffix(
@@ -312,6 +316,7 @@ fn ghost_suffix_does_not_consume_input_from_a_new_capture_generation() {
         capture: RawInputCapture::Question {
             id: "q-2".to_string(),
             option_count: 0,
+            selected: 0,
             allow_free_text: true,
             multiple: false,
             secret: false,
@@ -354,6 +359,9 @@ fn ghost_suffix_does_not_consume_input_from_a_new_capture_generation() {
     );
     finish_input_relay(&mut master, &input_tx, &classifier, &input_mode, &mut state)
         .expect("finish relay");
+    let eof_events = input_rx.try_iter().collect::<Vec<_>>();
+    assert!(eof_events.contains(&RawInputEvent::CaptureDrained { generation: 8 }));
+    assert!(!eof_events.contains(&RawInputEvent::EofShutdownRequested));
     master.sync_all().expect("sync test output");
     assert_eq!(fs::read(&path).expect("read test output"), b"exit\n");
     fs::remove_file(path).ok();
@@ -375,6 +383,7 @@ fn delay_escape_does_not_cancel_a_later_capture() {
     let capture = RawInputCapture::Question {
         id: "new-question".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,

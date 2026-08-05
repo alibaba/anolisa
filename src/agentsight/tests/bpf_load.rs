@@ -9,11 +9,16 @@
 //! Each test names the probe it covers so a failure immediately identifies
 //! which BPF program the verifier rejected.
 
-use agentsight::probes::{
-    FileWatch, FileWriteProbe, Probes, ProcMon, ProcTrace, SharedMaps, SslSniff, TcpSniff, UdpDns,
+use agentsight::{
+    config,
+    probes::{
+        FileWatch, FileWriteProbe, Probes, ProcMon, ProcTrace, SharedMaps, SslSniff, TcpSniff,
+        UdpDns,
+    },
 };
 
 fn make_shared_maps() -> (ProcTrace, SharedMaps) {
+    config::set_verbose(true);
     let pt = ProcTrace::new().expect("proctrace open+load");
     let shared = SharedMaps::new(pt.rb_handle().expect("rb handle")).with_traced_processes(
         pt.traced_processes_handle()
@@ -25,12 +30,14 @@ fn make_shared_maps() -> (ProcTrace, SharedMaps) {
 #[test]
 #[ignore]
 fn proctrace_bpf_loads() {
+    config::set_verbose(true);
     ProcTrace::new().expect("proctrace BPF should load on this kernel");
 }
 
 #[test]
 #[ignore]
 fn sslsniff_bpf_loads() {
+    config::set_verbose(true);
     SslSniff::new().expect("sslsniff BPF should load on this kernel");
 }
 
@@ -72,6 +79,7 @@ fn tcpsniff_bpf_loads() {
 #[test]
 #[ignore]
 fn all_probes_load() {
+    config::set_verbose(true);
     Probes::new(&[], None, true, true, &[])
         .expect("unified Probes (all BPF programs) should load on this kernel");
 }

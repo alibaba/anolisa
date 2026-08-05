@@ -198,6 +198,9 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Thu Jul 30 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.6-1
+- fix(memory): recall partial short-token matches with OR fallback (#2040)
+
 * Mon Jul 27 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.2.5-1
 - fix(memory): improve auto-recall for long English and CJK prompts
 

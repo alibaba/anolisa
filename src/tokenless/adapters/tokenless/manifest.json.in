@@ -101,6 +101,7 @@
         "hooks": [
           "rewrite",
           "compress-response",
+          "compress-toon",
           "compress-schema",
           "tool-ready"
         ]

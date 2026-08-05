@@ -143,7 +143,27 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Mon Jul 27 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Mon Aug 03 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Component updates now report adapter bundles that need follow-up.
+- Raw installs now work without rpm tooling on deb-family hosts that have no rpm database.
+
+* Thu Jul 30 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.15-1
+- Interactive install and uninstall commands now report phase-based activity.
+- Human errors now use conventional labels while JSON retains machine codes.
+- Update notices now quote their recommended commands.
+
+* Wed Jul 29 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.14-1
+- Status and doctor now detect managed file mode and capability drift.
+- Repair now restores declared metadata without granting unconfirmed capabilities.
+
+* Tue Jul 28 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.13-1
+- Raw installs now protect packages reserved by pending RPM operations.
+- `cosh-ng` RPM installations now keep their stable component identity.
+- Raw rollback now restores file permissions and capabilities.
+- Tokenless adapters now support Qwencode and resolve Qoder hook paths.
+- The npm distribution now supports macOS arm64.
+
+* Mon Jul 27 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.12-1
 - Missing installed components now report `NOT_INSTALLED` in structured output.
 - Adapter status now ignores stale source directories and reports missing bundles as degraded.
 - Raw install dry-runs now validate component conflicts before execution.

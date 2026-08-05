@@ -154,6 +154,9 @@ fn raw_cli_agent_marker_invokes_adapter_without_failed_command() {
 
 #[test]
 fn raw_cli_zh_natural_language_intercept_skips_redundant_notice() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
         &[],
@@ -359,6 +362,9 @@ fn raw_cli_zsh_shell_marker_agent_response_does_not_duplicate_prompt() {
 
 #[test]
 fn raw_cli_bash_shell_marker_agent_response_does_not_duplicate_prompt() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
     let home = temp_shell_home("agent-shell-marker-bash");
     fs::write(home.join(".bashrc"), "PS1='BPROMPT> '\n").unwrap();
     let home_str = home.to_string_lossy().to_string();
@@ -419,6 +425,9 @@ fn raw_cli_empty_enter_and_ctrl_c_do_not_start_agent() {
 
 #[test]
 fn raw_cli_empty_enter_after_agent_response_does_not_retrigger() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
@@ -445,6 +454,9 @@ fn raw_cli_empty_enter_after_agent_response_does_not_retrigger() {
 
 #[test]
 fn raw_cli_non_ascii_agent_input_echoes_before_intercept() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
@@ -454,8 +466,12 @@ fn raw_cli_non_ascii_agent_input_echoes_before_intercept() {
             (b"exit\n".to_vec(), Duration::from_millis(300)),
         ],
     );
+    let normalized = strip_ansi_escape(&output);
 
-    assert!(output.contains("cosh-osc$ \u{4f60}\u{597d}"), "{output}");
+    assert!(
+        normalized.contains("cosh-osc$ \u{4f60}\u{597d}"),
+        "{output}"
+    );
     assert_eq!(
         count_occurrences(&output, "\n\u{4f60}\u{597d}"),
         0,
@@ -470,7 +486,10 @@ fn raw_cli_non_ascii_agent_input_echoes_before_intercept() {
 }
 
 #[test]
-fn raw_cli_non_ascii_candidate_input_supports_backspace() {
+fn raw_cli_non_ascii_shell_input_supports_backspace() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
@@ -481,8 +500,17 @@ fn raw_cli_non_ascii_candidate_input_supports_backspace() {
             (b"exit\n".to_vec(), Duration::from_millis(300)),
         ],
     );
+    let normalized = strip_ansi_escape(&output);
+    let response_pos = normalized
+        .find("Received shell prompt request")
+        .expect("agent response");
+    let echo = &normalized[..response_pos];
 
-    assert!(output.contains("cosh-osc$ \u{4f60}\u{5417}"), "{output}");
+    assert!(echo.contains("cosh-osc$"), "{output}");
+    assert!(
+        echo.contains('\u{4f60}') && echo.contains('\u{5417}'),
+        "{output}"
+    );
     assert!(
         output.contains("Received shell prompt request: \u{4f60}\u{5417}"),
         "{output}"
@@ -495,14 +523,12 @@ fn raw_cli_non_ascii_candidate_input_supports_backspace() {
 }
 
 #[test]
-fn raw_cli_soft_newline_shortcut_composes_multiline_prompt() {
-    // #1721 matrix #4/#15: Shift+Enter (CSI-u) inserts a soft newline inside
-    // the natural-language draft; Enter submits one multi-line prompt.
+fn routing_c3_explicit_draft_soft_newline_composes_multiline_prompt() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
             (
-                "\u{8bf7}\u{5e2e}\u{6211}\u{5206}\u{6790}"
+                "?? \u{8bf7}\u{5e2e}\u{6211}\u{5206}\u{6790}"
                     .as_bytes()
                     .to_vec(),
                 Duration::ZERO,
@@ -536,12 +562,11 @@ fn raw_cli_soft_newline_shortcut_composes_multiline_prompt() {
 }
 
 #[test]
-fn raw_cli_bracketed_paste_newlines_do_not_submit_early() {
-    // #1721 matrix #7: pasted newlines stay soft; the whole paste submits as
-    // one prompt only when the user presses Enter.
+fn routing_c3_explicit_draft_bracketed_paste_newlines_do_not_submit_early() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
+            (b"?? ".to_vec(), Duration::ZERO),
             (
                 {
                     let mut paste = b"\x1b[200~".to_vec();
@@ -572,10 +597,10 @@ fn raw_cli_bracketed_paste_newlines_do_not_submit_early() {
 }
 
 #[test]
-fn raw_cli_split_paste_opener_composes_in_card() {
-    // #1721 #1721: the bracketed-paste opener itself may
-    // split across PTY reads at line start; the partial delimiter is held
-    // at the relay entry so no payload line ever executes in bash.
+fn routing_c3_wrapped_paste_split_opener_stays_shell_owned() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
@@ -583,40 +608,34 @@ fn raw_cli_split_paste_opener_composes_in_card() {
             (
                 {
                     let mut tail = b"00~".to_vec();
-                    tail.extend_from_slice(
-                        "\u{5206}\u{6790}\u{8d1f}\u{8f7d}\r\n\u{7ed9}\u{51fa}\u{5efa}\u{8bae}"
-                            .as_bytes(),
-                    );
+                    tail.extend_from_slice(b"printf SPLIT_PASTE_OK");
                     tail.extend_from_slice(b"\x1b[201~");
                     tail
                 },
-                Duration::from_millis(400),
+                Duration::from_millis(10),
             ),
-            (b"\x1b".to_vec(), Duration::from_millis(500)),
-            (b"exit\n".to_vec(), Duration::from_millis(400)),
+            (b"\n".to_vec(), Duration::from_millis(100)),
+            (b"exit\n".to_vec(), Duration::from_millis(300)),
         ],
     );
 
     assert!(
-        output.contains("Prompt draft"),
-        "split opener paste must open the draft card: {output}"
+        output.contains("SPLIT_PASTE_OK"),
+        "split opener paste must execute through the shell: {output}"
     );
     assert!(
-        !output.contains("command not found"),
-        "no payload line may execute in bash: {output}"
+        !output.contains("Prompt draft"),
+        "ordinary paste must not open an Agent draft: {output}"
     );
 }
 
 #[test]
-fn raw_cli_soft_newline_draft_shows_composition_hint() {
-    // #1721 matrix #17 (D13): the first soft newline upgrades the draft into
-    // the prompt card; the card frame and its footer replace the old inline
-    // hint. Esc cancels and freezes the card (D15).
+fn routing_c3_explicit_draft_shows_composition_hint() {
     let output = run_raw_cli_with_delayed_input(
         "fake",
         vec![
             (
-                "\u{8bf7}\u{5e2e}\u{6211}\u{5206}\u{6790}"
+                "?? \u{8bf7}\u{5e2e}\u{6211}\u{5206}\u{6790}"
                     .as_bytes()
                     .to_vec(),
                 Duration::ZERO,

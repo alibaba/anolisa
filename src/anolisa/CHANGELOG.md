@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.16] - 2026-08-03
+
+### Added
+
+- Successful `anolisa update <component>` and `anolisa update all` operations
+  now report adapters whose resource bundles changed, with the exact
+  `anolisa adapter enable ...` or `anolisa adapter status ...` follow-up
+  command. JSON responses expose the same information through stable
+  `adapter_actions` arrays
+  ([#2018](https://github.com/alibaba/anolisa/pull/2018)).
+
+### Fixed
+
+- Raw system-scope installs on Debian-family hosts no longer fail with
+  `rpm not found on PATH` when both RPM tooling and an RPM database are absent.
+  An existing or newly appearing RPM database still stops the raw install
+  before files change
+  ([#2061](https://github.com/alibaba/anolisa/pull/2061)).
+
+## [0.2.15] - 2026-07-30
+
+### Added
+
+- Interactive `anolisa install`, `anolisa install --all`, and
+  `anolisa uninstall` now display phase-based activity during long-running
+  planning and execution. ANSI-capable terminals animate the current phase,
+  while limited interactive terminals print static phase lines
+  ([#2036](https://github.com/alibaba/anolisa/pull/2036)).
+
+### Changed
+
+- Human-readable failures now use conventional `error:` and `hint:` labels
+  without exposing machine codes. `--json` retains structured error codes, and
+  exit statuses remain unchanged.
+- Update notifications now quote the recommended `sudo anolisa upgrade` and
+  `anolisa update --check` commands so their boundaries are clear.
+
+## [0.2.14] - 2026-07-29
+
+### Fixed
+
+- `anolisa status` and `anolisa doctor` now detect Unix mode and Linux file
+  capability drift for raw-managed files, including installations recorded by
+  earlier releases, and recommend `anolisa repair` for recovery.
+- `anolisa repair` now replays raw-managed components when only file metadata
+  has drifted, restoring declared modes and confirmed capabilities. Failed
+  updates restore only capabilities known to have been active before the
+  operation, avoiding optional grants that never applied
+  ([#1987](https://github.com/alibaba/anolisa/pull/1987)).
+
+## [0.2.13] - 2026-07-28
+
+### Added
+
+- The `@anolisa/cli` npm package now supports macOS arm64 and selects the
+  matching native binary during installation.
+- Tokenless adapters now support Qwencode while keeping the Cosh extension
+  independent from shared hook assets.
+
+### Fixed
+
+- Raw installs now refuse to provision a system package reserved by another
+  pending RPM install and direct the user to `anolisa repair`, preventing
+  components from claiming or later removing each other's dependencies.
+- `cosh-ng` RPM installations now retain the `cosh-ng` component identity.
+  Unambiguous legacy records and recovery journals stored as `cosh` are
+  repaired so lifecycle commands target the correct component.
+- Failed raw updates and repairs now restore file permissions and capabilities
+  during rollback, keeping restored binaries executable.
+- Enabling the Tokenless Qoder adapter now resolves shared hook paths in the
+  cached plugin, preventing matching tool calls from failing because of broken
+  hook commands.
+
 ## [0.2.12] - 2026-07-27
 
 ### Changed
@@ -685,6 +758,67 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.16] - 2026-08-03
+
+### 新增
+
+- 成功执行的 `anolisa update <component>` 和 `anolisa update all` 现会报告
+  resource bundle 已变化的 adapter，并给出准确的 `anolisa adapter enable ...`
+  或 `anolisa adapter status ...` 后续命令。JSON 响应通过稳定的
+  `adapter_actions` 数组提供同样的信息
+  ([#2018](https://github.com/alibaba/anolisa/pull/2018))。
+
+### 修复
+
+- 在同时缺少 RPM 工具和 RPM database 的 Debian 系发行版上，system scope
+  raw 安装不再因 `rpm not found on PATH` 而失败。如果已有 RPM database，
+  或安装期间新出现 RPM database，仍会在任何文件变更前停止 raw 安装
+  ([#2061](https://github.com/alibaba/anolisa/pull/2061))。
+
+## [0.2.15] - 2026-07-30
+
+### 新增
+
+- 交互式 `anolisa install`、`anolisa install --all` 和 `anolisa uninstall`
+  现会在耗时的规划与执行阶段显示分阶段进度。支持 ANSI 的终端会动态显示当前阶段，
+  能力受限的交互式终端则输出静态阶段提示
+  ([#2036](https://github.com/alibaba/anolisa/pull/2036))。
+
+### 变更
+
+- 面向用户的失败信息现采用常规的 `error:` 和 `hint:` 标签，不再显示机器错误码；
+  `--json` 仍保留结构化错误码，退出状态保持不变。
+- 更新通知现会为建议运行的 `sudo anolisa upgrade` 和 `anolisa update --check`
+  命令加上引号，使命令边界更加清晰。
+
+## [0.2.14] - 2026-07-29
+
+### 修复
+
+- `anolisa status` 和 `anolisa doctor` 现可检测 raw 托管文件的 Unix mode 与
+  Linux file capability 漂移（包括由旧版本记录的安装），并建议运行
+  `anolisa repair` 进行恢复。
+- `anolisa repair` 现会在仅文件元数据漂移时重新部署 raw 托管组件，恢复声明的
+  mode 和已确认的 capability。更新失败后的回滚仅恢复操作前已确认生效的
+  capability，避免授予原安装中未成功应用的可选 capability
+  ([#1987](https://github.com/alibaba/anolisa/pull/1987))。
+
+## [0.2.13] - 2026-07-28
+
+### 新增
+
+- `@anolisa/cli` npm 软件包现支持 macOS arm64，并在安装时选择匹配的原生二进制。
+- Tokenless adapter 现支持 Qwencode，同时保持 Cosh extension 与共享 hook 资源相互独立。
+
+### 修复
+
+- raw 安装现拒绝 provision 被另一个 pending RPM 安装占用的系统软件包，并引导用户运行
+  `anolisa repair`，避免组件相互占用或在后续移除对方的依赖。
+- `cosh-ng` RPM 安装现保留 `cosh-ng` 组件身份。以 `cosh` 保存且可明确识别的旧记录和
+  recovery journal 会被修复，使 lifecycle 命令操作正确的组件。
+- raw 更新和修复失败后的回滚现会恢复文件权限和 capability，确保恢复的二进制仍可执行。
+- 启用 Tokenless Qoder adapter 时，现会解析缓存 plugin 中的共享 hook 路径，避免匹配的 tool call 因 hook 命令路径错误而失败。
 
 ## [0.2.12] - 2026-07-27
 

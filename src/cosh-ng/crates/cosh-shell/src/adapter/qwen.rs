@@ -211,6 +211,8 @@ impl AgentAdapter for QwenCliAdapter {
             sink(AgentEvent::AgentFailed {
                 run_id: request.id.clone(),
                 error: error.trim().to_string(),
+                error_code: None,
+                max_turns: None,
             })?;
             return Ok(());
         }
@@ -511,6 +513,29 @@ mod tests {
         let inv = adapter.prepare_invocation(&request, CoshApprovalMode::Auto);
         assert!(!inv.args.contains(&"--resume".to_string()));
         assert!(!inv.args.contains(&"prev-sess".to_string()));
+    }
+
+    // The same-session retry fallback (T2) does not carry the
+    // disable hint, so qwen keeps resuming the previous session like
+    // cosh-core does.
+    #[test]
+    fn mode_flags_same_session_retry_fallback_keeps_session_resume() {
+        let adapter = QwenCliAdapter {
+            program: "qwen".to_string(),
+            allow_model_call: false,
+            session_id: Arc::new(Mutex::new(Some("prev-sess".to_string()))),
+        };
+        let mut request = test_request();
+        request
+            .context_hints
+            .push("same-session retry for shell handoff fallback".to_string());
+        let inv = adapter.prepare_invocation(&request, CoshApprovalMode::Auto);
+        assert!(inv.args.contains(&"--resume".to_string()), "{:?}", inv.args);
+        assert!(
+            inv.args.contains(&"prev-sess".to_string()),
+            "{:?}",
+            inv.args
+        );
     }
 
     #[test]

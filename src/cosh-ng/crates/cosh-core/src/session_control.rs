@@ -26,6 +26,8 @@ enum SessionControlRequest {
         limit: usize,
         #[serde(default)]
         cursor: Option<String>,
+        #[serde(default)]
+        all_workspaces: bool,
     },
     Inspect {
         workspace_scope: String,
@@ -218,9 +220,10 @@ fn handle_request(
             workspace_scope,
             limit,
             cursor,
+            all_workspaces,
         } => {
             let store = store(config, &workspace_scope)?;
-            let (sessions, next_cursor) = store.list(limit, cursor.as_deref())?;
+            let (sessions, next_cursor) = store.list(limit, cursor.as_deref(), all_workspaces)?;
             Ok(SessionControlData::List {
                 sessions,
                 next_cursor,

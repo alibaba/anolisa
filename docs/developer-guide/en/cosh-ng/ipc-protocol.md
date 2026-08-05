@@ -163,7 +163,7 @@ invalid UTF-8, malformed JSON, and requests missing required fields return
 Requests use an `action` discriminator:
 
 ```json
-{"action":"list","workspace_scope":"/work/project","limit":20,"cursor":null}
+{"action":"list","workspace_scope":"/work/project","limit":20,"cursor":null,"all_workspaces":false}
 {"action":"inspect","workspace_scope":"/work/project","session_id":"2d711642-b726-4b04-8d2a-8a0470f4ed24"}
 {"action":"validate","workspace_scope":"/work/project","session_id":"2d711642-b726-4b04-8d2a-8a0470f4ed24"}
 {"action":"prepare_clear_all","workspace_scope":"/work/project","protected_session_ids":[],"limit":4096,"cursor":null}
@@ -172,7 +172,7 @@ Requests use an `action` discriminator:
 
 | Action | Contract |
 |--------|----------|
-| `list` | Returns newest-first summaries. `limit` defaults to 20 and is clamped to 1–100; pass the opaque `next_cursor` to read the next page. |
+| `list` | Returns newest-first summaries. `limit` defaults to 20 and is clamped to 1–100; pass the opaque `next_cursor` to read the next page. When `all_workspaces` is `true`, the shell requests a larger initial page size of 100 to reduce incomplete output, but it is still clamped to the same 1–100 core limit. Core enumerates every workspace-hash directory under the storage root, returns sessions from all workspaces, and marks foreign sessions with `scope_mismatch`. `all_workspaces` defaults to `false` for backward compatibility. |
 | `inspect` | Returns a summary even when health prevents recovery. |
 | `validate` | Fully loads the envelope and succeeds only for a resumable session. |
 | `prepare_clear_all` | Returns a lexicographically paged clearable/protected ID plan without loading or transferring summaries. `limit` is clamped to 1–4096; continue with `next_cursor`. Omitting `limit` is accepted only when the complete plan fits one 4096-ID page, preventing older clients from silently accepting a partial plan. |

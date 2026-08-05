@@ -213,10 +213,29 @@ port_busy() {
   ss -ltnH "sport = :$1" 2>/dev/null | grep -q .
 }
 
+kill_port() {
+  local port=$1 pids
+  # fuser 比 lsof 轻量，直接拿占用该端口的 PID
+  pids="$(fuser "$port/tcp" 2>/dev/null | tr -s ' ')" || true
+  if [ -n "${pids// /}" ]; then
+    warn "端口 $port 被占用 (pid${pids})，正在清理…"
+    kill -TERM $pids 2>/dev/null || true
+    sleep 1
+    # 仍存活则强杀
+    pids="$(fuser "$port/tcp" 2>/dev/null | tr -s ' ')" || true
+    [ -n "${pids// /}" ] && kill -KILL $pids 2>/dev/null || true
+    sleep 0.5
+    ok "端口 $port 已释放。"
+  fi
+}
+
 for p in $([ "$RUN_BACKEND" = 1 ] && echo "$BACKEND_PORT") \
          $([ "$RUN_FRONTEND" = 1 ] && echo "$FRONTEND_PORT"); do
   if port_busy "$p"; then
-    error "端口 $p 已被占用，请先释放或换端口（--port / --frontend-port）。"
+    kill_port "$p"
+  fi
+  if port_busy "$p"; then
+    error "端口 $p 清理后仍被占用，请手动释放。"
     exit 1
   fi
 done

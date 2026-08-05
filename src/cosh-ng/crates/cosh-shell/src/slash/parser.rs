@@ -15,6 +15,7 @@ pub(super) fn slash_input(event: &ShellEvent) -> Option<&str> {
 pub(super) enum SlashCommand<'a> {
     Noop,
     Help,
+    Draft,
     Auth,
     Audit(&'a str),
     Hooks(Option<&'a str>, Option<&'a str>, Option<&'a str>),
@@ -32,6 +33,7 @@ pub(super) enum SlashCommand<'a> {
     Unknown(&'a str),
     Extensions(&'a str),
     Skills(Option<&'a str>, Option<&'a str>),
+    Mcp(Option<&'a str>, Option<&'a str>, Option<&'a str>),
     Session(&'a str),
     Recommendations(Option<&'a str>, Option<&'a str>, Option<&'a str>),
 }
@@ -59,6 +61,7 @@ impl<'a> SlashCommand<'a> {
         }
         Ok(match token {
             "/help" => Some(Self::Help),
+            "/draft" => Some(Self::Draft),
             "/auth" => Some(Self::Auth),
             "/hooks" => {
                 let sub = parts.next();
@@ -103,6 +106,12 @@ impl<'a> SlashCommand<'a> {
                 let sub = parts.next();
                 let arg = parts.next();
                 Some(Self::Skills(sub, arg))
+            }
+            "/mcp" => {
+                let sub = parts.next();
+                let arg = parts.next();
+                let extra = parts.next();
+                Some(Self::Mcp(sub, arg, extra))
             }
             "/session" => Some(Self::Session(
                 input.strip_prefix("/session").unwrap_or_default().trim(),
@@ -159,6 +168,7 @@ fn parser_owned_command(token: &str) -> bool {
             | "/stats"
             | "/extensions"
             | "/skills"
+            | "/mcp"
             | "/session"
             | "/new"
             | "/resume"
@@ -189,6 +199,18 @@ pub(super) fn slash_command_hints(prefix: &str) -> Vec<&'static SlashCommandSpec
 #[cfg(test)]
 mod tests {
     use super::{RemovedCommand, SlashCommand, SlashCommandSpec, SlashParseError};
+
+    #[test]
+    fn routing_c4_draft_grammar_no_drift() {
+        assert!(matches!(
+            SlashCommand::parse("/draft extra"),
+            Ok(Some(SlashCommand::Draft))
+        ));
+        assert!(matches!(
+            SlashCommand::parse("/draft 'extra'"),
+            Ok(Some(SlashCommand::Draft))
+        ));
+    }
 
     #[test]
     fn removed_decision_commands_parse_as_removed_not_unknown() {
@@ -271,6 +293,8 @@ mod tests {
             "/health \"quick\"",
             "/stats \"model\"",
             "/recommendations \"on\"",
+            "/mcp connect \"my server\"",
+            "/mcp inspect 'my server'",
         ] {
             assert!(
                 matches!(

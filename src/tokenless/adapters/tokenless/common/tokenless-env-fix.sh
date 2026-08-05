@@ -559,7 +559,8 @@ fix_dep() {
       local fb_method fb_package fb_binary fb_source fb_manifest fb_features fb_url fb_args
       fb_method=$(echo "$fallbacks" | jq -r ".[$i].method // empty")
       fb_package=$(echo "$fallbacks" | jq -r ".[$i].package // empty")
-      fb_binary=$(echo "$fallbacks" | jq -r --arg def "$binary" ".[$i].binary // \$def")
+      fb_binary=$(echo "$fallbacks" | jq -r \
+        --arg default_binary "$binary" ".[$i].binary // \$default_binary")
       fb_source=$(echo "$fallbacks" | jq -r ".[$i].source // empty")
       fb_manifest=$(echo "$fallbacks" | jq -r ".[$i].manifest // empty")
       fb_features=$(echo "$fallbacks" | jq -r ".[$i].features // empty")

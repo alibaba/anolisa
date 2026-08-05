@@ -239,6 +239,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
             sink(AgentEvent::AgentFailed {
                 run_id: request.id.clone(),
                 error: error.trim().to_string(),
+                error_code: None,
+                max_turns: None,
             })?;
             return Ok(());
         }

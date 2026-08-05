@@ -1,15 +1,17 @@
 """skill-ledger CLI — Typer subcommand group.
 
 Mounted as a subcommand group under ``agent-sec-cli skill-ledger <cmd>``.
-All commands route through ``invoke("skill_ledger", command=..., ...)``
-to participate in the middleware lifecycle (tracing, event logging, error handling).
+Stateful commands route through ``invoke("skill_ledger", command=..., ...)``;
+``analyze`` intentionally bypasses that lifecycle to remain side-effect free.
 """
 
 import getpass
+import json
 import os
 from typing import Optional
 
 import typer
+from agent_sec_cli import __version__ as AGENT_SEC_VERSION
 from agent_sec_cli.security_middleware import invoke
 from agent_sec_cli.security_middleware.result import ActionResult
 
@@ -18,12 +20,13 @@ app = typer.Typer(
     help=(
         "Skill security management — track changes, verify integrity, and sign skills.\n\n"
         "Typical workflow:\n\n"
-        "  1. init      Initialize keys and baseline covered skills\n"
-        "  2. scan      Run built-in scanners and sign the manifest\n"
-        "  3. check     Verify a skill's integrity status\n"
-        "  4. certify   Import external findings and sign the manifest\n"
-        "  5. status    Show overall ledger health overview\n"
-        "  6. audit     Deep-verify the full version history\n\n"
+        "  1. analyze   Read-only content analysis without ledger state\n"
+        "  2. init      Initialize keys and baseline covered skills\n"
+        "  3. scan      Run built-in scanners and sign the manifest\n"
+        "  4. check     Verify a skill's integrity status\n"
+        "  5. certify   Import external findings and sign the manifest\n"
+        "  6. status    Show overall ledger health overview\n"
+        "  7. audit     Deep-verify the full version history\n\n"
         "Integrity statuses:\n\n"
         "  pass      Files unchanged, signature valid, scan clean\n"
         "  none      Never scanned — no signed manifest is available\n"
@@ -204,6 +207,67 @@ def cmd_check(
         all_skills=all_skills,
     )
     _forward(result)
+
+
+# ---------------------------------------------------------------------------
+# analyze
+# ---------------------------------------------------------------------------
+
+
+@app.command("analyze")
+def cmd_analyze(
+    skill_dir: Optional[str] = typer.Argument(
+        None,
+        help="Path to the Skill directory to analyze.",
+    ),
+    output_format: str = typer.Option(
+        "json",
+        "--format",
+        help="Output format. Version 1 supports only 'json'.",
+    ),
+) -> None:
+    """Analyze current Skill content without creating or updating Skill Ledger state."""
+    from agent_sec_cli.skill_ledger.analyze import (  # noqa: PLC0415
+        SCHEMA_VERSION,
+        analyze_skill,
+    )
+
+    if output_format.lower() != "json":
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "engine_version": AGENT_SEC_VERSION,
+            "status": "error",
+            "coverage_complete": False,
+            "scanners": [],
+            "errors": [
+                {
+                    "code": "unsupported-format",
+                    "message": "Output format must be 'json'.",
+                }
+            ],
+        }
+        typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=False))
+        raise typer.Exit(code=2)
+    if skill_dir is None:
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "engine_version": AGENT_SEC_VERSION,
+            "status": "error",
+            "coverage_complete": False,
+            "scanners": [],
+            "errors": [
+                {
+                    "code": "skill-root-required",
+                    "message": "Skill root argument is required.",
+                }
+            ],
+        }
+        typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=False))
+        raise typer.Exit(code=2)
+
+    payload, exit_code = analyze_skill(skill_dir)
+    typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=False))
+    raise typer.Exit(code=exit_code)
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,9 @@ use futures::{Stream, StreamExt};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde_json::{json, Value};
 
-use super::{expand_env_vars, oauth, validate_http_endpoint, MAX_MCP_MESSAGE_BYTES};
+use super::{
+    expand_env_vars, oauth, roots_response, validate_http_endpoint, MAX_MCP_MESSAGE_BYTES,
+};
 
 pub(super) const SESSION_EXPIRED_ERROR: &str = "MCP HTTP session expired";
 pub(super) const LEGACY_FALLBACK_ERROR: &str = "MCP server requires legacy HTTP+SSE transport";
@@ -21,6 +23,7 @@ pub(super) struct HttpConnection {
     session_id: Option<String>,
     initialized: bool,
     next_request_id: u64,
+    workspace_root: std::path::PathBuf,
 }
 
 impl HttpConnection {
@@ -30,6 +33,7 @@ impl HttpConnection {
         endpoint: &str,
         bearer_token: Option<&str>,
         oauth_resource: Option<&str>,
+        workspace_root: std::path::PathBuf,
     ) -> Result<Self, String> {
         let endpoint = validate_http_endpoint(&expand_env_vars(endpoint))?;
         let oauth_resource = oauth_resource.map(expand_env_vars);
@@ -52,6 +56,7 @@ impl HttpConnection {
             session_id: None,
             initialized: false,
             next_request_id: 1,
+            workspace_root,
         })
     }
 
@@ -373,14 +378,14 @@ impl HttpConnection {
             .get("method")
             .and_then(Value::as_str)
             .ok_or_else(|| "MCP server request has no method".to_string())?;
-        let response = if method == "ping" {
-            json!({ "jsonrpc": "2.0", "id": id, "result": {} })
-        } else {
-            json!({
+        let response = match method {
+            "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
+            "roots/list" => roots_response(&id, &self.workspace_root),
+            _ => json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "error": { "code": -32601, "message": "Method not found" }
-            })
+            }),
         };
         self.post(protocol_version, "server request response", response)
             .await
@@ -449,6 +454,7 @@ pub(super) struct LegacyHttpConnection {
     event_data: Vec<String>,
     event_name: Option<String>,
     next_request_id: u64,
+    workspace_root: std::path::PathBuf,
 }
 
 impl LegacyHttpConnection {
@@ -458,6 +464,7 @@ impl LegacyHttpConnection {
         endpoint: &str,
         bearer_token: Option<&str>,
         oauth_resource: Option<&str>,
+        workspace_root: std::path::PathBuf,
     ) -> Result<Self, String> {
         let sse_endpoint = validate_http_endpoint(&expand_env_vars(endpoint))?;
         let oauth_resource = oauth_resource.map(expand_env_vars);
@@ -482,6 +489,7 @@ impl LegacyHttpConnection {
             event_data: Vec::new(),
             event_name: None,
             next_request_id: 1,
+            workspace_root,
         };
         let response = connection.open_sse().await?;
         connection.sse_stream = Box::pin(response.bytes_stream().map(|chunk| {
@@ -696,14 +704,14 @@ impl LegacyHttpConnection {
             .get("method")
             .and_then(Value::as_str)
             .ok_or_else(|| "legacy MCP server request has no method".to_string())?;
-        let response = if method == "ping" {
-            json!({ "jsonrpc": "2.0", "id": id, "result": {} })
-        } else {
-            json!({
+        let response = match method {
+            "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
+            "roots/list" => roots_response(&id, &self.workspace_root),
+            _ => json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "error": { "code": -32601, "message": "Method not found" }
-            })
+            }),
         };
         self.post(response).await
     }
@@ -826,7 +834,13 @@ mod tests {
 
     #[test]
     fn rejects_non_http_endpoint() {
-        let error = match HttpConnection::new("test", "file:///tmp/server", None, None) {
+        let error = match HttpConnection::new(
+            "test",
+            "file:///tmp/server",
+            None,
+            None,
+            std::path::PathBuf::from("/tmp/workspace"),
+        ) {
             Ok(_) => panic!("non-HTTP endpoint should fail"),
             Err(error) => error,
         };
@@ -835,7 +849,13 @@ mod tests {
 
     #[test]
     fn rejects_insecure_remote_endpoint() {
-        let error = match HttpConnection::new("test", "http://mcp.example.com/mcp", None, None) {
+        let error = match HttpConnection::new(
+            "test",
+            "http://mcp.example.com/mcp",
+            None,
+            None,
+            std::path::PathBuf::from("/tmp/workspace"),
+        ) {
             Ok(_) => panic!("insecure remote endpoint should fail"),
             Err(error) => error,
         };
@@ -886,7 +906,8 @@ mod tests {
             startup_timeout_ms: 1_000,
             allowed_tools: None,
         };
-        let error = match McpClient::connect("test", &config).await {
+        let workspace = std::path::PathBuf::from("/tmp/test-workspace");
+        let error = match McpClient::connect("test", &config, &workspace).await {
             Ok(_) => panic!("redirected MCP endpoint should fail"),
             Err(error) => error,
         };
@@ -997,7 +1018,10 @@ mod tests {
             startup_timeout_ms: 1_000,
             allowed_tools: None,
         };
-        let (client, tools) = McpClient::connect("test", &config).await.unwrap();
+        let workspace = std::path::PathBuf::from("/tmp/test-workspace");
+        let (client, tools) = McpClient::connect("test", &config, &workspace)
+            .await
+            .unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(
             client.call_tool("echo", json!({})).await.unwrap().output,
@@ -1079,7 +1103,10 @@ mod tests {
             startup_timeout_ms: 1_000,
             allowed_tools: None,
         };
-        let (_, tools) = McpClient::connect("test", &config).await.unwrap();
+        let workspace = std::path::PathBuf::from("/tmp/test-workspace");
+        let (_, tools) = McpClient::connect("test", &config, &workspace)
+            .await
+            .unwrap();
         assert_eq!(tools.len(), 1);
         server.await.unwrap();
     }
@@ -1137,7 +1164,10 @@ mod tests {
             startup_timeout_ms: 1_000,
             allowed_tools: None,
         };
-        let (client, _) = McpClient::connect("test", &config).await.unwrap();
+        let workspace = std::path::PathBuf::from("/tmp/test-workspace");
+        let (client, _) = McpClient::connect("test", &config, &workspace)
+            .await
+            .unwrap();
         client.close().await.unwrap();
         server.await.unwrap();
     }
@@ -1207,7 +1237,10 @@ mod tests {
             startup_timeout_ms: 1_000,
             allowed_tools: None,
         };
-        let (_, tools) = McpClient::connect("test", &config).await.unwrap();
+        let workspace = std::path::PathBuf::from("/tmp/test-workspace");
+        let (_, tools) = McpClient::connect("test", &config, &workspace)
+            .await
+            .unwrap();
         assert_eq!(tools.len(), 1);
         server.await.unwrap();
     }

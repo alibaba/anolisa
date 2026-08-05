@@ -60,13 +60,16 @@ pub const STRATEGIES: &[CostStrategyDef] = &[
         judge_hint: "用户粘贴的长输入若含大量无关内容可压缩或引导转为文件提供",
         needs_confirm: true,
     },
+    // ── 减轮次浪费（prevention 类）──
+    // 判定走 `prompts/waste_detour.md`（全量轮次账本 + 反事实删除测试 + 归因），
+    // 不走本文件的 system prompt：这条不裁 payload，省的是下次会话少跑的整轮。
     CostStrategyDef {
-        id: "churn",
-        name: "无效轮次消除（Churn Elimination）",
-        admission: "看疑似空转轮列表与回退信号列表：对应轮次开销大且确属白做（原地重试空转，或走错方向整段回退）即适用",
-        not_recommended: "每次重试都在推进（参数在收敛、报错在变化）；回退是任务本身要求的操作（如用户主动要求撤销）",
-        method: "先归因再给方法：Skill 缺失/提示词误导 → 优化对应 Skill/提示词；环境问题（依赖、权限、外部服务）→ 沉淀经验条目防复发",
-        judge_hint: "S2 轮次是否白做：原地空转（重复同一动作无进展）或方向错误（整段探索后回退），两份信号可交叉印证。预防性节省，不删本次轨迹中的错误记录",
+        id: "detour",
+        name: "弯路 · 归因并沉淀修复方案",
+        admission: "轨迹里存在产出未进入最终结果因果链的轮段——报错反复、方向选错后被推翻、产物完成后被隐性规范打回，事后看整段可跳过",
+        not_recommended: "必要探索（排除选项且结论被后续引用）；删掉任务就失败的必要修复轮；少于 5 轮的孤立小坑（低于报表门槛）",
+        method: "对每段弯路先归因（可预知坑/隐性规范/方向选错/偶发故障/无意义重复），再从走通的回合反推修复方案与落点（Skill/项目规范/环境配置），偶发故障只计成本不出经验",
+        judge_hint: "核心是反事实删除测试——删掉这段，剩下的轨迹还能走到同样的终点吗；方向弯路看 SAYS 列的宣告-推翻对，坑的等价性按语义判，不看报错文本是否逐字相同",
         needs_confirm: true,
     },
 ];
@@ -183,6 +186,7 @@ mod tests {
                 m16_churn_share: 0.125,
             },
             candidates: vec![candidate()],
+            ledger: vec![],
         };
         let messages = build_strategy_prompt(
             &set,

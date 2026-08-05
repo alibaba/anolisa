@@ -377,14 +377,49 @@ impl TrajectoryStore {
     pub fn get_subagent_atif_jsons(&self, parent_session_id: &str) -> Result<Vec<String>> {
         let conn = self.lock_conn()?;
         let pattern = format!("{parent_session_id}:subagent:%");
-        let mut stmt =
-            conn.prepare("SELECT atif_json FROM collected_trajectories WHERE session_id LIKE ?1")?;
+        let mut stmt = conn.prepare(
+            "SELECT atif_json FROM collected_trajectories WHERE session_id LIKE ?1 \
+             ORDER BY session_id",
+        )?;
         let rows = stmt.query_map(params![pattern], |row| row.get(0))?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// Deletes the subagent rows of `parent_session_id` whose session ids are
+    /// not listed in `keep`, returning how many rows were removed.
+    ///
+    /// Used when a parent is re-generated with a canonical child set: rows left
+    /// over from superseded runs would otherwise keep showing up in the parent's
+    /// subagent list forever.
+    ///
+    /// # Errors
+    /// Returns an error on SQL failure or poisoned mutex.
+    pub fn retain_subagents(&self, parent_session_id: &str, keep: &[String]) -> Result<usize> {
+        let conn = self.lock_conn()?;
+        let pattern = format!("{parent_session_id}:subagent:%");
+        let mut stmt =
+            conn.prepare("SELECT session_id FROM collected_trajectories WHERE session_id LIKE ?1")?;
+        let existing: Vec<String> = stmt
+            .query_map(params![pattern], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        drop(stmt);
+
+        let mut removed = 0;
+        for session_id in existing {
+            if keep.contains(&session_id) {
+                continue;
+            }
+            conn.execute(
+                "DELETE FROM collected_trajectories WHERE session_id = ?1",
+                params![session_id],
+            )?;
+            removed += 1;
+        }
+        Ok(removed)
     }
 
     /// Returns distinct project / source / agent_name values for UI filters.
@@ -597,6 +632,32 @@ mod tests {
         let got = store.get("s-1").unwrap().unwrap();
         assert_eq!(got.num_steps, 5);
         assert_eq!(got.file_size, 2048);
+    }
+
+    #[test]
+    fn test_retain_subagents_deletes_only_unlisted_children() {
+        let store = TrajectoryStore::new_with_path(&tmp_db("retain")).unwrap();
+        for id in [
+            "p-1",
+            "p-1:subagent:keep",
+            "p-1:subagent:drop",
+            "p-2:subagent:other",
+        ] {
+            let mut rec = sample_record();
+            rec.session_id = id.into();
+            store.upsert_trajectory(&rec).unwrap();
+        }
+
+        let removed = store
+            .retain_subagents("p-1", &["p-1:subagent:keep".to_string()])
+            .unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(store.get("p-1:subagent:keep").unwrap().is_some());
+        assert!(store.get("p-1:subagent:drop").unwrap().is_none());
+        // The parent row itself and other parents' children are untouched.
+        assert!(store.get("p-1").unwrap().is_some());
+        assert!(store.get("p-2:subagent:other").unwrap().is_some());
     }
 
     #[test]

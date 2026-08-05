@@ -186,6 +186,22 @@ fn deliver_approval_decision<W: Write>(
     output: &mut W,
     render_next_card: bool,
 ) -> std::io::Result<()> {
+    if decision.request.kind == ApprovalRequestKind::TurnExtension {
+        clear_active_approval_panel(state, output)?;
+        render_approval_resolution(state, &decision.request, decision.title, output)?;
+        crate::agent::turn_extension::resolve_turn_extension(
+            &decision.request,
+            adapter,
+            state,
+            output,
+            event_index,
+        )?;
+        if render_next_card {
+            render_current_approval_request(state, output)?;
+        }
+        return Ok(());
+    }
+
     if let Some(ref ctrl_request_id) = decision.request.request_id {
         let outcome = approval_outcome_for_request(state, &decision.request);
         if outcome == ApprovalOutcome::ProviderNativeShellFallback {
@@ -350,10 +366,125 @@ fn respond_provider_approval_to_owner(
         return ProviderApprovalDelivery::OwnerUnavailable;
     }
     if respond_active_run_approval(active_run, response) {
+        // #1940: settle the lifecycle ledger so the drain sweeps know this
+        // control request reached its terminal state.
+        if let Some(request_id) = request.request_id.as_deref() {
+            state
+                .control
+                .approval_ledger_mut()
+                .mark_responded(&request.run_id, request_id);
+        }
         ProviderApprovalDelivery::Responded
     } else {
         ProviderApprovalDelivery::DeliveryFailed
     }
+}
+
+/// #1940 terminal-state guarantee: deny message for a control request the
+/// rendering pipeline dropped before it reached any decision surface.
+pub(crate) const DROPPED_CONTROL_REQUEST_DENY_MESSAGE: &str = "cosh-shell could not route this approval request to a decision surface, so it was denied by the terminal-state guarantee. The request was not executed; retry it in a new turn if still needed.";
+
+fn unhomed_control_request_ids(state: &InlineState, run_id: &str) -> Vec<String> {
+    state
+        .control
+        .approval_ledger()
+        .unresponded_for_run(run_id)
+        .into_iter()
+        .filter(|request_id| {
+            !state.approvals.requests.iter().any(|request| {
+                request.run_id == run_id
+                    && request.request_id.as_deref() == Some(request_id.as_str())
+            })
+        })
+        .collect()
+}
+
+fn dropped_control_request_deny_response(request_id: &str) -> ApprovalResponse {
+    crate::approval::broker::provider_deny_response(
+        crate::approval::broker::ProviderResponseInput {
+            request_id,
+            tool_use_id: None,
+            tool_input: None,
+        },
+        DROPPED_CONTROL_REQUEST_DENY_MESSAGE.to_string(),
+    )
+}
+
+/// #1940 terminal-state guarantee: deny message for a control request that
+/// arrived under a run id other than the active run. Every sweep is scoped
+/// to the owning run, so the shell can never take terminal ownership of
+/// such a request — it is rejected at the registration door instead.
+pub(crate) const FOREIGN_RUN_REQUEST_DENY_MESSAGE: &str = "cosh-shell rejected this approval request because it arrived under a run that does not own it (protocol violation). The request was not executed.";
+
+pub(crate) fn foreign_run_request_deny_response(request_id: &str) -> ApprovalResponse {
+    crate::approval::broker::provider_deny_response(
+        crate::approval::broker::ProviderResponseInput {
+            request_id,
+            tool_use_id: None,
+            tool_input: None,
+        },
+        FOREIGN_RUN_REQUEST_DENY_MESSAGE.to_string(),
+    )
+}
+
+/// #1940 I1 batch drain: after a governed-event batch settles, every
+/// registered control request must either have a home in
+/// `approvals.requests` (card flow, auto-approve, or decision pipeline own
+/// its response) or have been responded to already. Anything else was
+/// dropped mid-pipeline and is denied on the spot instead of silently
+/// starving the provider. Requests with a home are never touched here, so
+/// a surfaced card or a running host-executed command is never timed out
+/// or overridden.
+pub(crate) fn drain_unhomed_control_requests(state: &mut InlineState) {
+    let Some(run_id) = state
+        .agent_run
+        .active
+        .as_ref()
+        .map(|run| run.request.id.clone())
+    else {
+        return;
+    };
+    for request_id in unhomed_control_request_ids(state, &run_id) {
+        // Audit the drop before responding so a user denial and a
+        // dropped-before-decision request stay distinguishable, with the
+        // drop site attached.
+        if let Some(audit) = state.audit.as_mut() {
+            audit.record_approval_dropped(&run_id, &request_id, "batch_drain");
+        }
+        if let Some(active_run) = state.agent_run.active.as_ref() {
+            let _ = active_run
+                .handle
+                .respond_approval(dropped_control_request_deny_response(&request_id));
+        }
+        state
+            .control
+            .approval_ledger_mut()
+            .mark_responded(&run_id, &request_id);
+    }
+}
+
+/// #1940 run-terminal sweep: same contract as the batch drain, for the
+/// paths where the run has already been detached from `InlineState`
+/// (finish/stop/cancel). Also clears the run's ledger entries so the
+/// accounting index cannot grow across turns. Pending requests that still
+/// have a card keep their existing late-decision recovery path
+/// (`OwnerUnavailable` -> continuation) and are not denied here.
+pub(crate) fn drain_unhomed_control_requests_with_handle(
+    state: &mut InlineState,
+    run_id: &str,
+    handle: &AgentRunHandle,
+) {
+    for request_id in unhomed_control_request_ids(state, run_id) {
+        if let Some(audit) = state.audit.as_mut() {
+            audit.record_approval_dropped(run_id, &request_id, "run_terminal_sweep");
+        }
+        let _ = handle.respond_approval(dropped_control_request_deny_response(&request_id));
+        state
+            .control
+            .approval_ledger_mut()
+            .mark_responded(run_id, &request_id);
+    }
+    state.control.approval_ledger_mut().clear_run(run_id);
 }
 
 fn active_run_owns_provider_approval(
@@ -391,6 +522,9 @@ fn approval_resolution_needs_queue_slot(
     state: &InlineState,
     request: &RuntimeApprovalRequest,
 ) -> bool {
+    if request.kind == ApprovalRequestKind::TurnExtension {
+        return false;
+    }
     if crate::slash::session::compaction_pending_or_active(state) {
         return true;
     }

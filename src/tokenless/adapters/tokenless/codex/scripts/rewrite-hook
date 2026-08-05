@@ -90,6 +90,13 @@ try:
     _REAL_HOME = _pwd.getpwuid(os.getuid()).pw_dir
 except (ImportError, KeyError):
     _REAL_HOME = ""
+if not os.path.isabs(_REAL_HOME):
+    _REAL_HOME = ""
+
+
+def _user_path(*parts: str) -> str:
+    return os.path.join(_REAL_HOME, *parts) if _REAL_HOME else ""
+
 
 _HOOK_UTILS_CANDIDATES = [
     os.path.join(_HERE, "..", "..", "common", "hooks"),                   # source-tree / FHS
@@ -136,15 +143,25 @@ else:
 AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "codex")
 _MIN_RTK_VERSION = (0, 35, 0)
 
-# RTK binary search paths
+# RTK binary search paths. Codex can cache this script without common/hooks;
+# keep this standalone list aligned with hook_utils.py::_known_binary_paths.
 _RTK_FALLBACK = "/usr/libexec/anolisa/tokenless/rtk"
 _RTK_FALLBACK_DEBIAN = "/usr/lib/anolisa/tokenless/rtk"
-_RTK_LOCAL_SHARE = os.path.join(
-    os.path.expanduser("~"), ".local", "share", "anolisa", "tokenless", "rtk"
+_RTK_SYSTEM_BIN = "/usr/local/bin/rtk"
+_RTK_SYSTEM_LIBEXEC = "/usr/local/libexec/anolisa/tokenless/rtk"
+_RTK_RPM_BIN = "/usr/bin/rtk"
+_RTK_LOCAL_BIN = _user_path(".local", "bin", "rtk")
+_RTK_ANOLISA_USER = _user_path(
+    ".local",
+    "lib",
+    "anolisa",
+    "libexec",
+    "tokenless",
+    "rtk",
 )
-_RTK_LOCAL_LIB = os.path.join(
-    os.path.expanduser("~"), ".local", "lib", "anolisa", "tokenless", "rtk"
-)
+_RTK_MAKE_USER = _user_path(".local", "libexec", "anolisa", "tokenless", "rtk")
+_RTK_LOCAL_SHARE = _user_path(".local", "share", "anolisa", "tokenless", "rtk")
+_RTK_LOCAL_LIB = _user_path(".local", "lib", "anolisa", "tokenless", "rtk")
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -156,7 +173,18 @@ def _find_rtk() -> Optional[str]:
     path = shutil.which("rtk")
     if path:
         return path
-    for fp in (_RTK_FALLBACK, _RTK_FALLBACK_DEBIAN, _RTK_LOCAL_SHARE, _RTK_LOCAL_LIB):
+    for fp in (
+        _RTK_LOCAL_BIN,
+        _RTK_ANOLISA_USER,
+        _RTK_MAKE_USER,
+        _RTK_SYSTEM_BIN,
+        _RTK_SYSTEM_LIBEXEC,
+        _RTK_RPM_BIN,
+        _RTK_FALLBACK,
+        _RTK_FALLBACK_DEBIAN,
+        _RTK_LOCAL_SHARE,
+        _RTK_LOCAL_LIB,
+    ):
         if os.path.isfile(fp) and os.access(fp, os.X_OK):
             return fp
     return None

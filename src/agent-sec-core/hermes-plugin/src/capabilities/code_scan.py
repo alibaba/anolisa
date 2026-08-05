@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 from ..cli_runner import call_agent_sec_cli, trace_context
+from ..hook_config import (  # noqa: TID252 - standalone plugin package
+    env_flag_enabled,
+    normalize_hook_policy,
+)
 from .base import AgentSecCoreCapability
 
 logger = logging.getLogger("agent-sec-core")
@@ -29,13 +34,26 @@ class CodeScanCapability(AgentSecCoreCapability):
 
     def _on_register(self, config: dict) -> None:
         """Read code-scan specific config."""
-        self._enable_block = config.get("enable_block", False)
+        fallback_policy = "block" if config.get("enable_block", False) else "observe"
+        raw_policy = os.environ.get("CODE_SCANNER_MODE")
+        policy = normalize_hook_policy(raw_policy, "")
+        if raw_policy is not None and policy not in {"observe", "block"}:
+            logger.warning(
+                "[agent-sec-core] code-scan invalid or unsupported CODE_SCANNER_MODE=%r; using %s",
+                raw_policy[:32],
+                fallback_policy,
+            )
+        self._policy = policy if policy in {"observe", "block"} else fallback_policy
+        self._hook_enabled = env_flag_enabled("CODE_SCANNER_HOOK_ENABLED", True)
 
     def get_hooks_define(self) -> dict:
         return {"pre_tool_call": self._on_pre_tool_call}
 
     def _on_pre_tool_call(self, tool_name, args, **kwargs):
         """Hook handler: scan terminal/execute_code for security risks."""
+        if not getattr(self, "_hook_enabled", True):
+            return None
+
         # 1. Only intercept known tools
         tool_info = _TOOL_LANGUAGE_MAP.get(tool_name)
         if tool_info is None:
@@ -96,7 +114,7 @@ class CodeScanCapability(AgentSecCoreCapability):
             logger.warning(
                 f"[agent-sec-core] {self.id} DENY tool={tool_name} code={code[:120]} | {msg}"
             )
-            if self._enable_block:
+            if self._policy == "block":
                 return {"action": "block", "message": msg}
             return None
 
@@ -105,7 +123,7 @@ class CodeScanCapability(AgentSecCoreCapability):
             logger.warning(
                 f"[agent-sec-core] {self.id} WARN tool={tool_name} code={code[:120]} | {msg}"
             )
-            if self._enable_block:
+            if self._policy == "block":
                 return {"action": "block", "message": msg}
             return None
 

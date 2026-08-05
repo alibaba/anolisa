@@ -54,6 +54,8 @@ if command -v tokenless >/dev/null 2>&1; then
     TOKENLESS_BIN="$(command -v tokenless)"
 elif [[ -x "$BINDIR/tokenless" ]]; then
     TOKENLESS_BIN="$BINDIR/tokenless"
+elif [[ -x /usr/local/bin/tokenless ]]; then
+    TOKENLESS_BIN="/usr/local/bin/tokenless"
 elif [[ -x /usr/bin/tokenless ]]; then
     TOKENLESS_BIN="/usr/bin/tokenless"
 fi
@@ -69,7 +71,7 @@ if [[ -z "$TOKENLESS_BIN" ]]; then
     if [[ ! -f "$SRCDIR/Cargo.toml" ]]; then
         echo "[tokenless] ERROR: tokenless binary not found and no source tree at $SRCDIR" >&2
         echo "[tokenless] Install the tokenless RPM package first:" >&2
-        echo "[tokenless]   rpm -ivh tokenless-*.rpm" >&2
+        echo "[tokenless]   rpm -Uvh tokenless-*.rpm" >&2
         exit 1
     fi
 

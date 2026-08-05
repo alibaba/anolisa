@@ -98,10 +98,6 @@ pub(crate) fn run_raw(
             }
         }
     }
-    if config.native_mode {
-        config.input_classifier = config.input_classifier.with_conservative(true);
-    }
-
     let login = args.first().is_some_and(|a| a.starts_with('-'))
         || args.iter().any(|a| a == "--login" || a == "-l");
     config.login_shell = login;
@@ -122,6 +118,11 @@ pub(crate) fn run_raw(
     let adapter = build_adapter(kind);
     let mut inline_state = InlineState::with_raw_session_dir(&config.work_dir);
     inline_state.shell_session_id = Some(config.session_id.clone());
+    // #2161: share the relay-side input-wait clock and productized timeout.
+    inline_state.input_wait_status = config.input_wait_status.clone();
+    inline_state.input_wait_timeout = (cosh_config.input_wait_timeout_secs > 0)
+        .then(|| std::time::Duration::from_secs(cosh_config.input_wait_timeout_secs));
+    config.input_wait_timeout_secs = cosh_config.input_wait_timeout_secs;
     inline_state.audit = Some(crate::journal::audit::ShellAuditRecorder::initialize(
         config.session_id.clone(),
     ));
@@ -183,12 +184,28 @@ pub(crate) fn run_raw(
         inline_state.startup_health.pending =
             Some(spawn_startup_health_scan(cosh_config.health.clone()));
     }
+    // The credential probe only feeds startup-banner surfaces; without a
+    // banner it would just cost an extra cosh-core process per launch.
+    if cosh_config.ai_enabled && crate::runtime::startup::startup_banner_enabled() {
+        if let AdapterInstance::CoshCore(core) = &adapter {
+            let core = core.clone();
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            inline_state.startup_auth.pending = Some(receiver);
+            let _ = std::thread::Builder::new()
+                .name("cosh-startup-auth-probe".to_string())
+                .spawn(move || {
+                    let _ = sender.send(core.ai_configured().ok());
+                });
+        }
+    }
     let hook_feedback = load_hook_feedback_preferences();
     inline_state.hooks.feedback = hook_feedback.feedback;
     inline_state.hooks.noisy_groups = hook_feedback.noisy_groups;
     inline_state.language = parse_language_setting(&cosh_config.language)
         .map(resolve_language_setting)
         .unwrap_or_default();
+    // #2025: the relay renders the input-wait hint card itself.
+    config.hint_language = inline_state.language;
     match cosh_config.analysis_mode.as_str() {
         "auto" => inline_state.analysis_mode = AnalysisMode::Auto,
         "manual" => inline_state.analysis_mode = AnalysisMode::Manual,

@@ -865,6 +865,9 @@ fn zh_cards_keep_40_and_80_column_widths() {
                 selected_action: ApprovalPanelAction::Approve,
                 expanded: true,
                 turn_consent: false,
+                turn_extension: false,
+                deny_always_trust: false,
+                irrecoverable: false,
                 hook_warnings: Vec::new(),
             })
             .join("\n");

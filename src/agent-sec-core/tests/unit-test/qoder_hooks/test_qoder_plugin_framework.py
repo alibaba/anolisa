@@ -139,11 +139,16 @@ def test_plugin_manifest_declares_stable_name() -> None:
     assert manifest["version"] == _package_version()
 
 
-def test_component_manifest_does_not_declare_qoder_adapter() -> None:
-    component = tomllib.loads((_CORE_DIR / "adapters" / "component.toml").read_text())
-    frameworks = {adapter["framework"] for adapter in component.get("adapters", [])}
+def test_component_manifest_declares_native_qoder_bundle() -> None:
+    component = tomllib.loads((_CORE_DIR / ".anolisa" / "component.toml").read_text())
+    adapters = {
+        adapter["framework"]: adapter for adapter in component.get("adapters", [])
+    }
 
-    assert "qoder" not in frameworks
+    qoder = adapters["qoder"]
+    assert qoder["source"] == "adapters/sec-core/qoder"
+    assert qoder["bundle"]["entry"] == ".qoder-plugin/plugin.json"
+    assert qoder["backends"]["rpm"]["resource_root"] == "/opt/agent-sec/qoder-plugin/"
 
 
 def test_hooks_json_uses_qoder_plugin_wrapper() -> None:
@@ -163,6 +168,22 @@ def test_hooks_json_uses_qoder_plugin_wrapper() -> None:
     hook = skill_ledger["hooks"][0]
     assert hook["name"] == "agent-sec-skill-ledger"
     assert hook["args"] == ["${QODER_PLUGIN_ROOT}/hooks/skill_ledger_hook.py"]
+
+
+def test_env_flag_enabled_accepts_only_true_false(monkeypatch) -> None:
+    monkeypatch.delenv("AGENT_SEC_TEST_FLAG", raising=False)
+    assert qoder_hook_common.env_flag_enabled("AGENT_SEC_TEST_FLAG", True) is True
+    assert qoder_hook_common.env_flag_enabled("AGENT_SEC_TEST_FLAG", False) is False
+
+    monkeypatch.setenv("AGENT_SEC_TEST_FLAG", "true")
+    assert qoder_hook_common.env_flag_enabled("AGENT_SEC_TEST_FLAG", False) is True
+
+    monkeypatch.setenv("AGENT_SEC_TEST_FLAG", "false")
+    assert qoder_hook_common.env_flag_enabled("AGENT_SEC_TEST_FLAG", True) is False
+
+    monkeypatch.setenv("AGENT_SEC_TEST_FLAG", "maybe")
+    assert qoder_hook_common.env_flag_enabled("AGENT_SEC_TEST_FLAG", True) is True
+    assert qoder_hook_common.env_flag_enabled("AGENT_SEC_TEST_FLAG", False) is False
 
 
 def test_common_outputs_qoder_hook_shapes() -> None:

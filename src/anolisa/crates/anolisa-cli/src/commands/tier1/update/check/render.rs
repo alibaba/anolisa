@@ -72,7 +72,7 @@ pub(super) fn build_motd(report: &UpdateCheckReport) -> Option<String> {
         "ANOLISA toolchain update is available."
     };
     Some(format!(
-        "{headline}\n{}.\nRun: sudo anolisa upgrade to apply, or anolisa update --check for details",
+        "{headline}\n{}.\nRun: \"sudo anolisa upgrade\" to apply, or \"anolisa update --check\" for details",
         parts.join("; ")
     ))
 }

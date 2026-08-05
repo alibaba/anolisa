@@ -16,10 +16,10 @@ use crate::raw_input::{
 use crate::types::ShellEvent;
 
 use super::bootstrap::{start_bash_session, start_zsh_session, PtySession};
-use super::io_loop::{read_until_streaming, wait_child};
+use super::io_loop::{read_until_streaming, wait_child_preserving_signal};
 use super::lifecycle::{build_shell_host_output, push_shell_exited_event};
 use super::model::{ShellHostConfig, ShellHostOutput};
-use super::raw_relay::{read_raw_until_exit, RawActionWatchdog};
+use super::raw_relay::{read_raw_until_exit, DriverCompletion, RawActionWatchdog};
 
 pub fn run_raw_relay_bash<R, W>(
     config: &ShellHostConfig,
@@ -69,7 +69,8 @@ where
         event_observer,
         config.input_classifier.clone(),
         None,
-        |master, _, input_events, input_classifier, input_mode, input_generation, gate| {
+        config.slash_via_shell,
+        |master, _, input_events, input_classifier, input_mode, input_generation, gate, routed| {
             spawn_raw_input_relay(
                 input,
                 master,
@@ -78,6 +79,7 @@ where
                 input_mode,
                 input_generation,
                 gate,
+                routed,
             )
         },
     )
@@ -101,7 +103,8 @@ where
         event_observer,
         config.input_classifier.clone(),
         None,
-        |master, _, input_events, input_classifier, input_mode, input_generation, gate| {
+        false,
+        |master, _, input_events, input_classifier, input_mode, input_generation, gate, routed| {
             spawn_raw_input_relay(
                 input,
                 master,
@@ -110,6 +113,7 @@ where
                 input_mode,
                 input_generation,
                 gate,
+                routed,
             )
         },
     )
@@ -141,7 +145,15 @@ where
         |_, _| Ok(RawObserverAction::Continue),
         config.input_classifier.clone(),
         Some(config.raw_action_watchdog),
-        |master, child_pid, input_events, input_classifier, input_mode, input_generation, _gate| {
+        false,
+        |master,
+         child_pid,
+         input_events,
+         input_classifier,
+         input_mode,
+         input_generation,
+         gate,
+         routed| {
             spawn_raw_action_relay(
                 actions,
                 master,
@@ -150,6 +162,8 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
+                gate,
+                routed,
             )
         },
     )
@@ -176,7 +190,15 @@ where
         },
         config.input_classifier.clone(),
         Some(config.raw_action_watchdog),
-        |master, child_pid, input_events, input_classifier, input_mode, input_generation, _gate| {
+        config.slash_via_shell,
+        |master,
+         child_pid,
+         input_events,
+         input_classifier,
+         input_mode,
+         input_generation,
+         gate,
+         routed| {
             spawn_raw_action_relay(
                 actions,
                 master,
@@ -185,6 +207,8 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
+                gate,
+                routed,
             )
         },
     )
@@ -207,7 +231,15 @@ where
         event_observer,
         config.input_classifier.clone(),
         Some(config.raw_action_watchdog),
-        |master, child_pid, input_events, input_classifier, input_mode, input_generation, _gate| {
+        config.slash_via_shell,
+        |master,
+         child_pid,
+         input_events,
+         input_classifier,
+         input_mode,
+         input_generation,
+         gate,
+         routed| {
             spawn_raw_action_relay(
                 actions,
                 master,
@@ -216,6 +248,8 @@ where
                 input_classifier,
                 input_mode,
                 input_generation,
+                gate,
+                routed,
             )
         },
     )
@@ -228,6 +262,7 @@ fn run_raw_relay_with_driver<W, F, D>(
     mut event_observer: F,
     input_classifier: InputClassifier,
     action_watchdog: Option<Duration>,
+    slash_via_shell: bool,
     spawn_driver: D,
 ) -> io::Result<ShellHostOutput>
 where
@@ -241,6 +276,7 @@ where
         Arc<Mutex<RawInputMode>>,
         UserPtyInputGeneration,
         MainPromptGate,
+        bool,
     ) -> JoinHandle<io::Result<()>>,
 {
     let mut session = start_session(config)?;
@@ -270,6 +306,10 @@ where
     session
         .parser
         .set_main_prompt_gate(main_prompt_gate.clone());
+    // Slash-via-shell routing (issue #1718) needs a markered native session
+    // so the prompt gate can prove bash is at its prompt; everything else
+    // keeps the Rust intercept path.
+    let slash_route_enabled = slash_via_shell && config.native_mode;
     let driver_thread = spawn_driver(
         input_master,
         session.child.id(),
@@ -278,25 +318,26 @@ where
         Arc::clone(&input_mode),
         input_generation.clone(),
         main_prompt_gate,
+        slash_route_enabled,
     );
-    let watchdog = action_watchdog.map(|grace| {
-        let driver_done = Arc::new(Mutex::new(None));
-        let done_slot = Arc::clone(&driver_done);
-        thread::spawn(move || {
-            let _ = driver_thread.join();
-            if let Ok(mut done) = done_slot.lock() {
-                *done = Some(Instant::now());
-            }
+    let (driver_completion_sender, driver_completion_receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = driver_thread
+            .join()
+            .unwrap_or_else(|_| Err(io::Error::other("raw input driver panicked")));
+        let _ = driver_completion_sender.send(DriverCompletion {
+            result,
+            completed_at: Instant::now(),
         });
-        RawActionWatchdog::new(driver_done, grace)
     });
+    let watchdog = action_watchdog.map(RawActionWatchdog::new);
     let mut last_winsize = config.winsize;
     let relay_prompt = if config.native_mode {
         ""
     } else {
         &config.prompt
     };
-    read_raw_until_exit(
+    let eof_shutdown = read_raw_until_exit(
         &mut session.master,
         &session.terminal,
         &mut session.child,
@@ -304,6 +345,7 @@ where
         &mut output,
         &mut event_observer,
         &input_event_receiver,
+        &driver_completion_receiver,
         &input_mode,
         &input_generation,
         &mut last_winsize,
@@ -311,13 +353,16 @@ where
         &session.recovery_request_file,
         &session.handoff_request_file,
         watchdog.as_ref(),
+        &config.input_wait_status,
+        &crate::i18n::I18n::new(config.hint_language),
+        config.input_wait_timeout_secs,
     )?;
     let display_start = session.parser.display.len();
     session.parser.flush_pending();
     output.write_all(&session.parser.display[display_start..])?;
     output.flush()?;
 
-    let exit_status = wait_child(&mut session.child)?;
+    let exit_status = wait_child_preserving_signal(&mut session.child, eof_shutdown)?;
     push_shell_exited_event(&mut session.parser, config, exit_status)?;
     event_observer(&session.parser.events, &mut output)?;
     output.flush()?;
@@ -429,6 +474,26 @@ struct RawModeGuard {
 }
 
 impl RawModeGuard {
+    #[cfg(test)]
+    fn for_test(fd: i32, original_termios: Option<libc::termios>, original_flags: i32) -> Self {
+        Self {
+            fd,
+            original_termios,
+            original_flags,
+            active: true,
+        }
+    }
+
+    /// #1932 F4: modifyOtherKeys level 1 makes the terminal report
+    /// modifier-carrying editing keys (Shift+Enter -> `CSI 27;2;13~`)
+    /// that already sit on the soft-newline whitelist, with zero terminal
+    /// configuration. Level 1 leaves every conventionally-encoded key
+    /// (Esc, Alt+letter, Ctrl+letter) untouched, and terminals without
+    /// the feature ignore the sequence entirely. The enable is written on
+    /// the relay's ordered stdout path; this guard only owns the
+    /// withdrawal so the tty never keeps the mode after exit.
+    const MODIFY_OTHER_KEYS_DISABLE: &'static [u8] = b"\x1b[>4;0m";
+
     fn activate_stdin() -> io::Result<Option<Self>> {
         Self::activate_fd(0)
     }
@@ -480,11 +545,33 @@ impl RawModeGuard {
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
         if self.active {
+            // Clear O_NONBLOCK temporarily so the cleanup write and termios
+            // restore cannot be lost to EAGAIN. This is necessary even if the
+            // descriptor inherited O_NONBLOCK from the parent process, because
+            // original_flags would then still contain that bit and a plain
+            // restore would leave the fd non-blocking during the write.
+            // The actual original flags are restored after the cleanup.
+            unsafe {
+                libc::fcntl(
+                    self.fd,
+                    libc::F_SETFL,
+                    self.original_flags & !libc::O_NONBLOCK,
+                );
+            }
             if let Some(original) = &self.original_termios {
+                // Withdraw the keyboard negotiation before handing the tty
+                // back (#1932 F4); paired with the enable in activate_fd.
                 unsafe {
+                    libc::write(
+                        self.fd,
+                        Self::MODIFY_OTHER_KEYS_DISABLE.as_ptr().cast(),
+                        Self::MODIFY_OTHER_KEYS_DISABLE.len(),
+                    );
                     libc::tcsetattr(self.fd, libc::TCSANOW, original);
                 }
             }
+            // Restore the exact flags we inherited, even if they included
+            // O_NONBLOCK.
             unsafe {
                 libc::fcntl(self.fd, libc::F_SETFL, self.original_flags);
             }
@@ -536,6 +623,60 @@ mod tests {
 
         let restored = unsafe { libc::fcntl(fd, libc::F_GETFL) };
         assert_eq!(restored & libc::O_NONBLOCK, original & libc::O_NONBLOCK);
+    }
+
+    #[test]
+    fn raw_mode_guard_disable_write_survives_inherited_nonblocking_full_buffer() {
+        // PoC: inherited O_NONBLOCK + full buffer would lose the disable
+        // sequence to EAGAIN. A pipe gives deterministic "buffer full"; the
+        // guard is built with original_flags containing O_NONBLOCK and a fake
+        // termios so the cleanup write path runs. Without the fix the write
+        // returns EAGAIN; with the fix O_NONBLOCK is cleared, the write blocks
+        // until the drain thread frees space, and the disable sequence is
+        // delivered.
+        use std::thread;
+        use std::time::Duration;
+
+        let (read_fd_owned, write_fd_owned) = nix::unistd::pipe().expect("open pipe");
+        let read_fd = read_fd_owned.as_raw_fd();
+        let write_fd = write_fd_owned.as_raw_fd();
+
+        let original = unsafe { libc::fcntl(write_fd, libc::F_GETFL) };
+        unsafe { libc::fcntl(write_fd, libc::F_SETFL, original | libc::O_NONBLOCK) };
+        let chunk = [0_u8; 8192];
+        while unsafe { libc::write(write_fd, chunk.as_ptr().cast(), chunk.len()) } >= 0 {}
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EAGAIN),
+            "expected EAGAIN when the pipe buffer is full"
+        );
+
+        let fake_termios = unsafe { std::mem::zeroed::<libc::termios>() };
+        let guard =
+            RawModeGuard::for_test(write_fd, Some(fake_termios), original | libc::O_NONBLOCK);
+
+        let drain_handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            let mut all = Vec::new();
+            let mut buf = [0_u8; 4096];
+            loop {
+                let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
+                if n <= 0 {
+                    break;
+                }
+                all.extend_from_slice(&buf[..n as usize]);
+            }
+            all
+        });
+
+        drop(guard);
+        drop(write_fd_owned);
+        let drained = drain_handle.join().expect("drain thread");
+        let output = String::from_utf8_lossy(&drained);
+        assert!(
+            output.contains("\x1b[>4;0m"),
+            "disable sequence not found in pipe output: {output:?}"
+        );
     }
 
     fn termios_for_fd(fd: i32) -> libc::termios {

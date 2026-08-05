@@ -38,7 +38,36 @@ pub(super) fn soft_newline_sequence_len(bytes: &[u8]) -> Option<usize> {
 /// Whether any whitelisted soft-newline sequence occurs in `bytes`. Used by
 /// the observe-only passthrough tip (#1721 T-c); never consumes bytes.
 pub(super) fn contains_soft_newline_sequence(bytes: &[u8]) -> bool {
-    (0..bytes.len()).any(|idx| soft_newline_sequence_len(&bytes[idx..]).is_some())
+    first_soft_newline_position(bytes).is_some()
+}
+
+/// Byte offset of the first whitelisted soft-newline sequence in `bytes`,
+/// if any (#1932 F6): lets the prompt-line upgrade split the chunk around
+/// the shortcut.
+pub(super) fn first_soft_newline_position(bytes: &[u8]) -> Option<usize> {
+    (0..bytes.len()).find(|&idx| soft_newline_sequence_len(&bytes[idx..]).is_some())
+}
+
+/// Removes whitelisted soft-newline sequences from passthrough bytes
+/// (#1932): with modifyOtherKeys negotiated the terminal emits them on any
+/// line, and bash renders the unknown CSI tail as literal garbage
+/// (`;2;13~`). The observe-only tip still fires; best-effort single-chunk
+/// scan like the tip itself. Returns `None` when nothing needs stripping.
+pub(super) fn strip_soft_newline_sequences(bytes: &[u8]) -> Option<Vec<u8>> {
+    if !contains_soft_newline_sequence(bytes) {
+        return None;
+    }
+    let mut stripped = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some(len) = soft_newline_sequence_len(&bytes[index..]) {
+            index += len;
+            continue;
+        }
+        stripped.push(bytes[index]);
+        index += 1;
+    }
+    Some(stripped)
 }
 
 /// Returns the byte length of the soft-newline sequence terminating `bytes`,
@@ -66,21 +95,6 @@ pub(super) fn render_soft_newline_markers(bytes: &[u8]) -> Vec<u8> {
         }
         rendered.push(bytes[idx]);
         idx += 1;
-    }
-    rendered
-}
-
-/// Replaces real newlines in committed text with the display marker for the
-/// commit echo. Data events (`UserIntercept`) keep the real newlines.
-pub(super) fn render_newline_markers(bytes: &[u8]) -> Vec<u8> {
-    let marker = display_marker();
-    let mut rendered = Vec::with_capacity(bytes.len());
-    for byte in bytes {
-        if *byte == b'\n' {
-            rendered.extend_from_slice(marker);
-        } else {
-            rendered.push(*byte);
-        }
     }
     rendered
 }

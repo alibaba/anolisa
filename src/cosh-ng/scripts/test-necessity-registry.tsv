@@ -1,5 +1,6 @@
 rule	pattern	owner	layer	contract	failure	observable	minimum_layer	unique_dimension	evidence	cost	reliability	gate	disposition
 types-unit	crates/cosh-types/src/*	cosh-types	unit	wire-and-domain-types	serialization-or-domain-invariant-regression	value-or-wire-shape	unit	pure-type-boundaries	assertions	low	deterministic	fast	keep
+types-wire-conformance	crates/cosh-types/tests/*	cosh-types	integration	ws-ckpt-wire-protocol-conformance	silent-wire-encoding-drift-from-daemon	bincode-byte-layout	integration	authoritative-wire-encoding	byte-level-assertions	low	deterministic	fast	keep
 platform-unit	crates/cosh-platform/src/*	cosh-platform	unit	platform-routing-and-validation	wrong-backend-or-invalid-platform-action	selected-backend-or-validation-result	unit	platform-adapter-branch	assertions	low	deterministic	fast	keep
 cli-integration	crates/cosh-cli/tests/*	cosh-cli	integration	cli-json-envelope-and-exit	wrong-json-output-routing-or-exit	stdout-stderr-and-exit	integration	compiled-cli-boundary	process-assertions	medium	deterministic	integration	keep
 cli-unit	crates/cosh-cli/src/*	cosh-cli	unit	cli-argument-and-command-policy	wrong-parse-default-or-denial-routing	return-value-or-command-decision	unit	cli-command-branch	assertions	low	deterministic	fast	keep

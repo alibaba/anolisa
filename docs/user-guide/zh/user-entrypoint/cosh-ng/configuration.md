@@ -31,12 +31,18 @@ type = "dashscope"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 api_key = ""              # 或通过 DASHSCOPE_API_KEY
 model = "qwen-plus"
+# 显式缓存开关（仅 DashScope 生效）。
+# true  = 显式缓存：主动为 system 和最后一条消息注入 cache_control
+#         标记，5 分钟内确定性命中，创建部分按 125% 计费，命中部分按 10% 计费。
+# false = 隐式缓存（默认）：自动识别公共前缀，命中率不确定，命中部分按 20% 计费，无法关闭。
+# 参考：https://help.aliyun.com/zh/model-studio/context-cache
+explicit_cache = false
 
 [agent]
 # 审批模式：trust | auto | balanced | suggest | strict
 approval_mode = "balanced"
-# 最大对话轮次
-max_turns = 20
+# 单次 Agent 请求内的最大模型轮次
+max_turns = 50
 
 [hooks]
 enabled = true
@@ -88,6 +94,26 @@ level = "warn"
 项目配置层从 `<workspace>/.copilot-shell/config.toml` 加载，其中 `workspace`
 是 `--workspace` 或会话管理请求传入的路径。相对 `session.persist_dir` 从该
 工作空间解析，而不是从 Core 进程的启动目录解析。
+
+## Agent 轮次预算
+
+`agent.max_turns` 限制**单次** Agent 请求内消耗的模型轮次，不是整个会话的
+总配额：你每发送一条新消息，都会获得新的轮次预算。
+
+| 配置项 | 默认值 | 作用 |
+|--------|--------|------|
+| `agent.max_turns` | `50` | 单次 Agent 请求允许的模型轮次 |
+
+请求达到上限时，Core 会停止当前 run 并报告
+`Agent exceeded max turns (<实际配置的上限>)`，不会静默继续运行。在会话持久化
+已启用且成功的情况下，transcript 会在报告该上限之前写入，因此会话保持 active
+且可恢复。交互式 shell 随后会提供“继续”或“停止”：选择“继续”会在同一个
+provider 对话中启动新的 Agent 请求，并获得同等的配置预算；如果再次达到上限，
+仍需再次批准。选择“停止”后，会话仍可由后续手动消息继续。如果 `auto_persist`
+关闭，或会话持久化本身失败，则该 run 不可恢复。
+
+可以通过 `[agent]` 下的 `max_turns` 或 `COSH_MAX_TURNS` 环境变量覆盖该预算。
+无法解析的 `COSH_MAX_TURNS` 值会被忽略，保留配置文件已解析出的结果。
 
 ## 会话压缩
 
@@ -170,6 +196,11 @@ adapter_default = "cosh-core"
 analysis_mode = "smart"
 # 审批模式（recommend | auto | trust）
 approval_mode = "auto"
+# Agent 批准的前台命令等待终端输入超过该秒数后被打断（0 = 从不打断）。
+# 仅内核证据支撑的等待计时：会话 tty 上的密码提示、分页器与普通 stdin
+# 读取。全屏 TUI（vi、top）豁免，管道读取（如 `... | cat`）同样豁免。
+# 默认：120。
+input_wait_timeout_secs = 120
 ```
 
 ## 审计配置
@@ -197,15 +228,23 @@ max_disk_bytes = 1073741824
 | `COSH_AI_PROVIDER` | 覆盖活跃提供商 | `ai.active_provider` |
 | `COSH_OUTPUT_LANGUAGE` | 输出语言 | `ai.output_language` |
 | `COSH_MAX_TURNS` | 最大轮次 | `agent.max_turns` |
+| `COSH_SERVICE_SITE` | Coding Plan 和 Token Plan 的内置 endpoint 目录 | — |
 | `COSH_LOG` | 日志级别（全局） | `logging.level` |
 | `RUST_LOG` | Rust 日志过滤 | — |
 | `COSH_SHELL_ADAPTER` | Shell 适配器 | `shell.adapter_default` |
+| `COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | 输入等待超时（秒） | `shell.input_wait_timeout_secs` |
 | `COSH_SHELL_DEBUG` | 映射为 debug 级别 | `ui.log_level` |
 | `COSH_SHELL_LANG` | Shell 语言 | — |
 | `COSH_AUDIT_DIR` | 统一审计存储根目录 | — |
 | `ALIBABA_CLOUD_ACCESS_KEY_ID` | 阿里云 AK | `ai.providers.aliyun.access_key_id` |
 | `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | 阿里云 SK | `ai.providers.aliyun.access_key_secret` |
 | `DASHSCOPE_API_KEY` | DashScope API Key | provider 解析链 |
+
+`COSH_SERVICE_SITE` 支持 `china`/`cn` 和
+`international`/`intl`/`global`。未设置或无法识别时使用中国站目录。该变量只
+改变 `/auth` 提供的内置 endpoint，不会改写已保存的 provider URL。旧版
+OpenAI-compatible Plan provider 仅在 endpoint 与当前站点目录匹配时恢复为 Plan
+专用编辑表单，匹配时忽略末尾斜杠。
 
 ## 日志级别优先级
 

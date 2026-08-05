@@ -7,12 +7,12 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::raw_input::RawInputEvent;
 
-use super::{clear_prompt_ghost_line, OscParser, PromptReplayTracker};
+use super::{clear_prompt_ghost_line, OscParser, PromptReplayTracker, RESTORE_CURSOR, SAVE_CURSOR};
 
 /// Terminal display columns of candidate echo bytes: ANSI escape sequences
 /// are zero-width; other content is measured per Unicode width (CJK = 2).
 /// Keeps native erase math correct for multi-byte drafts (#1721 G9).
-fn candidate_display_columns(bytes: &[u8]) -> usize {
+pub(super) fn candidate_display_columns(bytes: &[u8]) -> usize {
     // Sums real display widths (east-asian wide chars count 2), so the
     // erase loop backspaces once per terminal column. Any terminal-specific
     // wide-char overwrite quirk is covered by the `\x1b[K` clear plus the
@@ -62,8 +62,9 @@ pub(super) fn drain_raw_input_events<W: Write>(
     prompt: &str,
     native_candidate_echoed_len: &mut usize,
     prompt_replay: &mut PromptReplayTracker,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let native_mode = prompt.is_empty();
+    let mut eof_shutdown_requested = false;
     while let Ok(event) = input_events.try_recv() {
         match event {
             RawInputEvent::ShellInputActivity { empty } => {
@@ -72,10 +73,22 @@ pub(super) fn drain_raw_input_events<W: Write>(
             RawInputEvent::PtyUserWrite {
                 generation,
                 line_submits,
-            } => prompt_replay.observe_user_write(generation, line_submits),
+            } => {
+                // Any user bytes reaching the PTY invalidate the
+                // prompt-cwd report: submit-detection is a documented
+                // heuristic (CR/LF/Ctrl-O only), so a custom
+                // `accept-line` binding must not slip past the
+                // barrier. The parser collapses consecutive writes
+                // into one event per prompt.
+                parser.push_shell_pty_input_event();
+                prompt_replay.observe_user_write(generation, line_submits)
+            }
             RawInputEvent::CtrlC => parser.push_control_event("ctrl_c"),
             RawInputEvent::Esc => parser.push_control_event("esc"),
             RawInputEvent::SoftNewlineShortcutObserved => parser.push_soft_newline_shortcut_event(),
+            RawInputEvent::MultilinePasteObserved => parser.push_multiline_paste_event(),
+            RawInputEvent::EofShutdownRequested => eof_shutdown_requested = true,
+            RawInputEvent::SyntheticPromptRepaint => parser.arm_synthetic_prompt_repaint(),
             RawInputEvent::PromptDraftOpen { text } => {
                 let payload = serde_json::json!({ "text": text }).to_string();
                 parser.push_prompt_draft_event("open", Some(&payload));
@@ -126,14 +139,14 @@ pub(super) fn drain_raw_input_events<W: Write>(
                     write!(output, "\x1b[K")?;
                     output.write_all(&input)?;
                     if let Some(hint) = hint {
-                        write!(output, "\x1b[s\x1b[2m {hint}\x1b[0m\x1b[u")?;
+                        write!(output, "{SAVE_CURSOR}\x1b[2m {hint}\x1b[0m{RESTORE_CURSOR}")?;
                     }
                     *native_candidate_echoed_len = candidate_display_columns(&input);
                 } else {
                     write!(output, "\r\x1b[2K{prompt}")?;
                     output.write_all(&input)?;
                     if let Some(hint) = hint {
-                        write!(output, "\x1b[s\x1b[2m {hint}\x1b[0m\x1b[u")?;
+                        write!(output, "{SAVE_CURSOR}\x1b[2m {hint}\x1b[0m{RESTORE_CURSOR}")?;
                     }
                 }
                 output.flush()?;
@@ -217,6 +230,12 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 None,
                 None,
             ),
+            RawInputEvent::CaptureInputRejected { generation, .. } => parser.push_capture_event(
+                crate::types::ShellCaptureLifecycle::InputRejected,
+                generation,
+                None,
+                None,
+            ),
             RawInputEvent::CardFocus(id, selected) => {
                 parser.push_card_event("focus", &format!("{id}:{selected}"))
             }
@@ -284,5 +303,5 @@ pub(super) fn drain_raw_input_events<W: Write>(
             RawInputEvent::SessionCancel(id) => parser.push_card_event("session_cancel", &id),
         }
     }
-    Ok(())
+    Ok(eof_shutdown_requested)
 }

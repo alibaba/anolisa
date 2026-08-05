@@ -47,15 +47,31 @@ function asText(content: unknown): string {
   }
 }
 
+function stepsOf(doc: AtifDocument | null | undefined): AtifStep[] {
+  return Array.isArray(doc?.steps) ? doc.steps : [];
+}
+
+function toolCallsOf(step: AtifStep): AtifToolCall[] {
+  return Array.isArray(step.tool_calls) ? step.tool_calls : [];
+}
+
+function observationResultsOf(step: AtifStep) {
+  return Array.isArray(step.observation?.results) ? step.observation.results : [];
+}
+
+function subagentRefsOf(result: { subagent_trajectory_ref?: SubagentTrajectoryRef[] }) {
+  return Array.isArray(result.subagent_trajectory_ref) ? result.subagent_trajectory_ref : [];
+}
+
 function highlightedSections(doc: AtifDocument, callId: string | null): Set<string> {
   const sections = new Set<string>();
   if (!callId) return sections;
 
-  for (const step of doc.steps ?? []) {
-    if (step.tool_calls?.some((toolCall) => toolCall.tool_call_id === callId)) {
+  for (const step of stepsOf(doc)) {
+    if (toolCallsOf(step).some((toolCall) => toolCall.tool_call_id === callId)) {
       sections.add(`${step.step_id}-toolcalls`);
     }
-    if (step.observation?.results.some((result) => result.source_call_id === callId)) {
+    if (observationResultsOf(step).some((result) => result.source_call_id === callId)) {
       sections.add(`${step.step_id}-observation`);
     }
   }
@@ -220,8 +236,10 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
   const toggle = (name: string) => onToggleSection(sectionKey(name));
 
   const hasReasoning = !!step.reasoning_content;
-  const hasToolCalls = !!step.tool_calls && step.tool_calls.length > 0;
-  const hasObservation = !!step.observation && step.observation.results.length > 0;
+  const toolCalls = toolCallsOf(step);
+  const observationResults = observationResultsOf(step);
+  const hasToolCalls = toolCalls.length > 0;
+  const hasObservation = observationResults.length > 0;
   const hasMetrics = !!step.metrics && (
     step.metrics.prompt_tokens != null ||
     step.metrics.completion_tokens != null
@@ -281,12 +299,12 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
                 <Collapsible
                   icon="🔧"
                   title="工具调用"
-                  count={step.tool_calls!.length}
+                  count={toolCalls.length}
                   isOpen={isOpen('toolcalls')}
                   onToggle={() => toggle('toolcalls')}
                 >
                   <div className="space-y-2">
-                    {step.tool_calls!.map((tc, i) => (
+                    {toolCalls.map((tc, i) => (
                       <ToolCallItem key={tc.tool_call_id || i} tc={tc} savingsMap={savingsMap} />
                     ))}
                   </div>
@@ -298,14 +316,15 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
                 <Collapsible
                   icon="📋"
                   title="观察结果"
-                  count={step.observation!.results.length}
+                  count={observationResults.length}
                   isOpen={isOpen('observation')}
                   onToggle={() => toggle('observation')}
                 >
                   <div className="space-y-2">
-                    {step.observation!.results.map((r, i) => {
+                    {observationResults.map((r, i) => {
                       const content = asText(r.content);
-                      const hasSubagentRef = r.subagent_trajectory_ref && r.subagent_trajectory_ref.length > 0;
+                      const subagentRefs = subagentRefsOf(r);
+                      const hasSubagentRef = subagentRefs.length > 0;
                       return (
                         <div key={i} className="border border-teal-100 rounded-lg overflow-hidden">
                           {r.source_call_id && (
@@ -315,7 +334,7 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
                           )}
                           {hasSubagentRef && (
                             <div className="px-3 py-2 bg-indigo-50 border-b border-indigo-100 flex flex-wrap gap-2">
-                              {r.subagent_trajectory_ref!.map((ref, ri) => (
+                              {subagentRefs.map((ref, ri) => (
                                 <button
                                   key={ri}
                                   onClick={() => onNavigateSubagent?.(ref)}
@@ -426,7 +445,7 @@ interface RoundStats {
 function roundStats(round: Round): RoundStats {
   let toolCallCount = 0, promptSum = 0, completionSum = 0;
   for (const s of round.steps) {
-    toolCallCount += s.tool_calls?.length ?? 0;
+    toolCallCount += toolCallsOf(s).length;
     promptSum += s.metrics?.prompt_tokens ?? 0;
     completionSum += s.metrics?.completion_tokens ?? 0;
   }
@@ -535,8 +554,8 @@ const RoundDetail: React.FC<RoundDetailProps> = ({
 // ─── AgentInfoCard ────────────────────────────────────────────────────────────
 
 const AgentInfoCard: React.FC<{ doc: AtifDocument }> = ({ doc }) => {
-  const { agent } = doc;
-  const toolCount = agent.tool_definitions?.length ?? 0;
+  const agent = doc.agent ?? { name: 'unknown', version: '—', model_name: undefined, tool_definitions: [] };
+  const toolCount = Array.isArray(agent.tool_definitions) ? agent.tool_definitions.length : 0;
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 lg:col-span-2">
@@ -574,19 +593,31 @@ const MetricCard: React.FC<{ label: string; value: string; color: string; sub?: 
 // same ATIF schema, so only the lookup differs — try the export first, since it
 // carries token metrics, then fall back for sessions never seen on the wire.
 
+function isAtifDocument(value: unknown): value is AtifDocument {
+  return !!value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && typeof (value as { schema_version?: unknown }).schema_version === 'string'
+    && String((value as { schema_version: string }).schema_version).startsWith('ATIF');
+}
+
 async function loadSessionDoc(sessionId: string): Promise<AtifDocument> {
   try {
-    return await fetchAtifBySession(sessionId);
+    const exported = await fetchAtifBySession(sessionId);
+    if (isAtifDocument(exported)) return exported;
   } catch (e: any) {
     if (e?.status !== 404) throw e;
-    try {
-      return await fetchTrajectoryAtif(sessionId);
-    } catch (fallbackErr: any) {
-      if (fallbackErr?.status === 404) {
-        throw new Error(`未找到该 Session：${sessionId}（既无 eBPF 捕获记录，也无采集轨迹）`);
-      }
-      throw fallbackErr;
+  }
+
+  try {
+    const collected = await fetchTrajectoryAtif(sessionId);
+    if (isAtifDocument(collected)) return collected;
+    throw new Error(`采集轨迹格式异常：${sessionId}`);
+  } catch (fallbackErr: any) {
+    if (fallbackErr?.status === 404) {
+      throw new Error(`未找到该 Session：${sessionId}（既无 eBPF 捕获记录，也无采集轨迹）`);
     }
+    throw fallbackErr;
   }
 }
 
@@ -641,7 +672,7 @@ export const AtifViewerPage: React.FC = () => {
     }
     setNodePath(node.path);
     setExpandedSections(new Set());
-    setSelectedRound(initialRound(groupIntoRounds(node.doc?.steps ?? []), new Set()));
+    setSelectedRound(initialRound(groupIntoRounds(stepsOf(node.doc)), new Set()));
     const next = new URLSearchParams(searchParamsRef.current);
     if (node.path.length > 0) next.set('node', encodeNodePath(node.path));
     else next.delete('node');
@@ -719,7 +750,7 @@ export const AtifViewerPage: React.FC = () => {
       const restoredDoc = restoredTree
         ? (findNodeByPath(restoredTree, initialPath).doc ?? data)
         : data;
-      setSelectedRound(initialRound(groupIntoRounds(restoredDoc.steps ?? []), sections));
+      setSelectedRound(initialRound(groupIntoRounds(stepsOf(restoredDoc)), sections));
       // Fetch savings data for the session
       if (data.session_id) {
         fetchSessionSavings(data.session_id)
@@ -741,7 +772,7 @@ export const AtifViewerPage: React.FC = () => {
     if (encodeNodePath(urlPath) === encodeNodePath(nodePath)) return;
     setNodePath(urlPath);
     setExpandedSections(new Set());
-    setSelectedRound(initialRound(groupIntoRounds(findNodeByPath(tree, urlPath).doc?.steps ?? []), new Set()));
+    setSelectedRound(initialRound(groupIntoRounds(stepsOf(findNodeByPath(tree, urlPath).doc)), new Set()));
   }, [searchParams, tree, nodePath]);
 
   // Auto-load from URL on mount
@@ -773,7 +804,7 @@ export const AtifViewerPage: React.FC = () => {
         setError(null);
         setQueryId(parsed.session_id ?? '');
         setExpandedSections(new Set());
-        setSelectedRound(initialRound(groupIntoRounds(parsed.steps ?? []), new Set()));
+        setSelectedRound(initialRound(groupIntoRounds(stepsOf(parsed as AtifDocument)), new Set()));
       } catch {
         setError('JSON 解析失败，请检查文件格式');
       }

@@ -96,7 +96,7 @@ fn stdout_device_failure_overrides_every_success_output_path() {
 
         assert_eq!(Some(1), output.status.code(), "stderr: {diagnostic}");
         assert!(
-            diagnostic.contains("error[EXECUTION_FAILED]: failed writing to stdout:"),
+            diagnostic.contains("error: failed writing to stdout:"),
             "stderr: {diagnostic}"
         );
     }

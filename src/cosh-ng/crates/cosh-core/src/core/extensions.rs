@@ -13,11 +13,15 @@ impl CoshCore {
             RuntimeGeneration::healthy(1, "startup"),
             Arc::clone(&tools),
         );
+        let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let workspace = SessionWorkspace::new(&project_root);
         Self::new_with_snapshot_and_session_id(
             config,
             provider,
             snapshot,
             uuid::Uuid::new_v4().to_string(),
+            project_root,
+            workspace,
         )
     }
 
@@ -27,11 +31,15 @@ impl CoshCore {
         provider: Box<dyn ContentGenerator>,
         snapshot: RuntimeSnapshot,
     ) -> Self {
+        let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let workspace = SessionWorkspace::new(&project_root);
         Self::new_with_snapshot_and_session_id(
             config,
             provider,
             snapshot,
             uuid::Uuid::new_v4().to_string(),
+            project_root,
+            workspace,
         )
     }
 
@@ -40,6 +48,8 @@ impl CoshCore {
         provider: Box<dyn ContentGenerator>,
         snapshot: RuntimeSnapshot,
         session_id: String,
+        project_root: PathBuf,
+        workspace: SessionWorkspace,
     ) -> Self {
         let model = config.resolve_provider().model;
         let (loaded_policy, warning) = LoadedPolicy::load();
@@ -53,9 +63,8 @@ impl CoshCore {
         let tools = Arc::clone(&snapshot.tools);
         let bound_extension_generation = snapshot.generation.id;
         let extension_generation = GenerationController::new(snapshot);
-        let workspace = std::env::current_dir().ok();
-        let audit = CoreAuditRecorder::initialize(&session_id, workspace.as_deref());
-
+        let audit_workspace = std::env::current_dir().ok();
+        let audit = CoreAuditRecorder::initialize(&session_id, audit_workspace.as_deref());
         Self {
             config,
             provider,
@@ -65,6 +74,8 @@ impl CoshCore {
             compaction: CompactionRuntime::default(),
             model,
             shell_context: None,
+            project_root,
+            workspace,
             extension_context,
             extra_params: None,
             hook_system,
@@ -76,6 +87,7 @@ impl CoshCore {
             request_counter: AtomicU32::new(0),
             truncator: OutputTruncator::default(),
             loop_detector: LoopDetector::new(),
+            control_transport_failure: std::sync::OnceLock::new(),
         }
     }
 

@@ -25,6 +25,8 @@ pub(super) struct ClaudeStreamParser {
     completed: bool,
     session_capture_enabled: bool,
     session_resumable: Option<bool>,
+    error_code: Option<String>,
+    max_turns: Option<u32>,
     session_error_code: Option<String>,
     session_error_phase: Option<String>,
 }
@@ -44,6 +46,8 @@ impl ClaudeStreamParser {
             completed: false,
             session_capture_enabled: true,
             session_resumable: None,
+            error_code: None,
+            max_turns: None,
             session_error_code: None,
             session_error_phase: None,
         }
@@ -53,8 +57,31 @@ impl ClaudeStreamParser {
         self.session_resumable
     }
 
+    pub(super) fn with_session_resumable(mut self, resumable: Option<bool>) -> Self {
+        if let Some(resumable) = resumable {
+            self.set_session_resumable(resumable);
+        }
+        self
+    }
+
+    fn set_session_resumable(&mut self, resumable: bool) {
+        self.session_capture_enabled = resumable;
+        self.session_resumable = Some(resumable);
+        if !resumable {
+            if let Some(state) = &self.session_state {
+                if let Ok(mut current) = state.lock() {
+                    *current = None;
+                }
+            }
+        }
+    }
+
     pub(super) fn session_error_code(&self) -> Option<&str> {
         self.session_error_code.as_deref()
+    }
+
+    pub(super) fn max_turns(&self) -> Option<u32> {
+        self.max_turns
     }
 
     pub(super) fn session_error_phase(&self) -> Option<&str> {
@@ -113,6 +140,14 @@ impl ClaudeStreamParser {
 
         if value.get("type").and_then(|value| value.as_str()) == Some("result") {
             self.completed = true;
+            self.error_code = value
+                .get("error_code")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            self.max_turns = value
+                .get("max_turns")
+                .and_then(|value| value.as_u64())
+                .and_then(|value| u32::try_from(value).ok());
             self.session_error_code = value
                 .get("session_error_code")
                 .and_then(|value| value.as_str())
@@ -127,6 +162,8 @@ impl ClaudeStreamParser {
                     error: extract_claude_error_text(&value)
                         .or_else(|| extract_claude_result_text(&value))
                         .unwrap_or_else(|| "analysis returned an error".to_string()),
+                    error_code: self.error_code.clone(),
+                    max_turns: self.max_turns,
                 });
             } else {
                 events.push(AgentEvent::AgentCompleted {
@@ -147,14 +184,8 @@ impl ClaudeStreamParser {
                 .get("session_resumable")
                 .and_then(|value| value.as_bool())
             {
-                self.session_capture_enabled = resumable;
-                self.session_resumable = Some(resumable);
+                self.set_session_resumable(resumable);
                 if !resumable {
-                    if let Some(state) = &self.session_state {
-                        if let Ok(mut current) = state.lock() {
-                            *current = None;
-                        }
-                    }
                     return;
                 }
             }

@@ -2,6 +2,13 @@ use std::sync::Mutex;
 
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
+fn default_path_resolver(home: &str) -> DatabasePathResolver {
+    DatabasePathResolver {
+        home: std::sync::OnceLock::from(home.to_string()),
+        data_dir: std::sync::OnceLock::from(Ok(format!("{home}/.tokenless"))),
+    }
+}
+
 struct TempDbGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     test_dir: String,
@@ -180,6 +187,79 @@ fn validate_db_path_rejects_parent_dir_bypass_with_nonexistent_parent() {
 }
 
 #[test]
+fn validate_data_dir_path_accepts_nonexistent_descendant() {
+    let home = temp_subdir("data-dir-home");
+    let candidate = home.join("nested/data");
+    let result =
+        validate_data_dir_path(candidate.to_str().unwrap(), home.to_str().unwrap()).unwrap();
+    assert_eq!(result, candidate.to_str().unwrap());
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn get_data_dir_rejects_empty_home() {
+    let err = get_data_dir("").unwrap_err();
+    assert!(err.contains("no trusted home"));
+}
+
+#[test]
+fn validate_data_dir_path_rejects_outside_home() {
+    let home = temp_subdir("data-dir-outside-home");
+    let outside = temp_subdir("data-dir-outside-candidate");
+    let err =
+        validate_data_dir_path(outside.to_str().unwrap(), home.to_str().unwrap()).unwrap_err();
+    assert!(err.contains("outside home"));
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&outside).ok();
+}
+
+#[test]
+fn validate_data_dir_path_rejects_relative_path() {
+    let home = temp_subdir("data-dir-relative");
+    let err = validate_data_dir_path("relative/data", home.to_str().unwrap()).unwrap_err();
+    assert!(err.contains("not absolute"));
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn validate_data_dir_path_rejects_symlink_escape() {
+    use std::os::unix::fs::symlink;
+
+    let home = temp_subdir("data-dir-symlink-home");
+    let outside = temp_subdir("data-dir-symlink-outside");
+    let link = home.join("redirect");
+    symlink(&outside, &link).unwrap();
+    let candidate = link.join("data");
+    let err =
+        validate_data_dir_path(candidate.to_str().unwrap(), home.to_str().unwrap()).unwrap_err();
+    assert!(err.contains("outside home"));
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&outside).ok();
+}
+
+#[test]
+fn validate_data_dir_path_rejects_parent_traversal() {
+    let home = temp_subdir("data-dir-traversal");
+    let candidate = home.join("nested/../data");
+    let err =
+        validate_data_dir_path(candidate.to_str().unwrap(), home.to_str().unwrap()).unwrap_err();
+    assert!(err.contains("parent traversal"));
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
+fn validate_data_dir_path_rejects_existing_file() {
+    let home = temp_subdir("data-dir-file");
+    let candidate = home.join("not-a-directory");
+    std::fs::write(&candidate, "").unwrap();
+    let err =
+        validate_data_dir_path(candidate.to_str().unwrap(), home.to_str().unwrap()).unwrap_err();
+    assert!(err.contains("not a directory"));
+    std::fs::remove_dir_all(&home).ok();
+}
+
+#[test]
 fn read_input_from_file() {
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("input.json");
@@ -252,7 +332,7 @@ fn get_stash_db_path_default() {
     if home.is_empty() {
         return;
     }
-    let path = get_stash_db_path(None);
+    let path = get_stash_db_path_with(&default_path_resolver(&home), None);
     assert!(path.is_some());
     assert!(path.unwrap().contains(".tokenless/stash.db"));
 }
@@ -262,7 +342,10 @@ fn get_stash_db_path_with_valid_override() {
     let guard = match TempDbGuard::new() { Some(g) => g, None => return };
     // Use the temp stash path as an explicit override; get_stash_db_path
     // validates it (under home via TempDbGuard) and returns it directly.
-    let result = get_stash_db_path(Some(guard.stash_db_path()));
+    let result = get_stash_db_path_with(
+        &DatabasePathResolver::default(),
+        Some(guard.stash_db_path()),
+    );
     assert_eq!(result, Some(guard.stash_db_path().to_string()));
 }
 
@@ -288,7 +371,7 @@ fn ensure_db_dir_creates_parent() {
 
     // ensure_db_dir is idempotent — calling it when the dir already exists
     // (which it does for most test envs) succeeds.
-    let result = ensure_db_dir();
+    let result = ensure_db_dir(&get_db_path_with(&DatabasePathResolver::default()));
     // With TempDbGuard the stats DB path points to a temp dir, so this succeeds.
     assert!(result.is_ok());
 }
@@ -303,6 +386,7 @@ fn record_compression_stats_skips_when_both_disabled() {
     // Should return immediately without touching DB
     record_compression_stats(
         &config,
+        &DatabasePathResolver::default(),
         OperationType::CompressSchema,
         Some("test".to_string()),
         None,
@@ -322,6 +406,7 @@ fn record_compression_stats_skips_when_no_savings() {
     // after is larger than before → no savings → skip
     record_compression_stats(
         &config,
+        &DatabasePathResolver::default(),
         OperationType::CompressSchema,
         Some("test".to_string()),
         None,
@@ -343,6 +428,7 @@ fn record_compression_stats_records_when_savings_exist() {
     let short_after = "y".repeat(50);
     record_compression_stats(
         &config,
+        &DatabasePathResolver::default(),
         OperationType::CompressSchema,
         Some("test-agent".to_string()),
         Some("session-1".to_string()),
@@ -364,6 +450,7 @@ fn record_compression_stats_records_dryrun_mode() {
     let short_after = "y".repeat(50);
     record_compression_stats(
         &config,
+        &DatabasePathResolver::default(),
         OperationType::CompressResponse,
         None,
         None,
@@ -380,7 +467,7 @@ fn record_compression_stats_records_dryrun_mode() {
 #[test]
 fn get_db_path_returns_valid_path() {
     let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
-    let db_path = get_db_path();
+    let db_path = get_db_path_with(&DatabasePathResolver::default());
     assert!(db_path.contains("stats.db"));
 }
 
@@ -662,6 +749,157 @@ fn run_command_stats_show_existing_record() {
 }
 
 #[test]
+fn run_command_stats_diff_existing_record() {
+    let _guard = match TempDbGuard::new() {
+        Some(g) => g,
+        None => return,
+    };
+    let recorder = match open_recorder() {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let record = StatsRecord::new(
+        OperationType::CompressResponse,
+        "test-agent".to_string(),
+        500,
+        125,
+        100,
+        25,
+    )
+    .with_session_id("diff-session")
+    .with_tool_use_id("diff-tool")
+    .with_text(
+        "line one\nline removed\n".to_string(),
+        "line one\n".to_string(),
+    );
+    let id = recorder.record(&record).unwrap();
+
+    let result = run_command(Commands::Stats(StatsCommands::Diff {
+        id: Some(id),
+        session: None,
+        tool_use_id: None,
+        limit: DEFAULT_DIFF_LIMIT,
+        sort: None,
+        context: 3,
+        no_color: true,
+        json: false,
+    }));
+    assert!(result.is_ok());
+}
+
+#[test]
+fn run_command_stats_diff_session_and_tool() {
+    let _guard = match TempDbGuard::new() {
+        Some(g) => g,
+        None => return,
+    };
+    let recorder = match open_recorder() {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    recorder
+        .record(
+            &StatsRecord::new(
+                OperationType::CompressResponse,
+                "test-agent".to_string(),
+                500,
+                125,
+                100,
+                25,
+            )
+            .with_session_id("diff-session")
+            .with_tool_use_id("diff-tool")
+            .with_text("before".to_string(), "after".to_string()),
+        )
+        .unwrap();
+
+    let session = run_command(Commands::Stats(StatsCommands::Diff {
+        id: None,
+        session: Some("diff-session".to_string()),
+        tool_use_id: None,
+        limit: DEFAULT_DIFF_LIMIT,
+        sort: Some(DiffSortArg::Saved),
+        context: 3,
+        no_color: true,
+        json: true,
+    }));
+    assert!(session.is_ok());
+
+    let tool = run_command(Commands::Stats(StatsCommands::Diff {
+        id: None,
+        session: Some("diff-session".to_string()),
+        tool_use_id: Some("diff-tool".to_string()),
+        limit: DEFAULT_DIFF_LIMIT,
+        sort: None,
+        context: 3,
+        no_color: true,
+        json: false,
+    }));
+    assert!(tool.is_ok());
+}
+
+#[test]
+fn stats_diff_cli_validates_scope_and_limit() {
+    let record = Cli::try_parse_from(["tokenless", "stats", "diff", "42"]).unwrap();
+    match record.command {
+        Commands::Stats(StatsCommands::Diff {
+            id,
+            session,
+            limit,
+            context,
+            ..
+        }) => {
+            assert_eq!(id, Some(42));
+            assert_eq!(session, None);
+            assert_eq!(limit, DEFAULT_DIFF_LIMIT);
+            assert_eq!(context, 3);
+        }
+        _ => panic!("expected stats diff"),
+    }
+
+    assert!(
+        Cli::try_parse_from([
+            "tokenless",
+            "stats",
+            "diff",
+            "42",
+            "--session",
+            "session-1"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from(["tokenless", "stats", "diff", "--session", "session-1", "-l", "0"])
+            .is_err()
+    );
+    assert!(
+        Cli::try_parse_from(["tokenless", "stats", "diff", "42", "--limit", "1"]).is_err()
+    );
+    assert!(
+        Cli::try_parse_from(["tokenless", "stats", "diff", "--tool-use-id", "tool-1"]).is_err()
+    );
+    let help = match Cli::try_parse_from(["tokenless", "stats", "diff", "--help"]) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("expected help output"),
+    };
+    assert!(help.contains("[default: 20]"));
+    assert!(
+        Cli::try_parse_from([
+            "tokenless",
+            "stats",
+            "diff",
+            "--session",
+            "session-1",
+            "--tool-use-id",
+            "tool-1",
+            "--sort",
+            "time"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn run_command_compress_response_large_with_truncation() {
     let _guard = TempDbGuard::new();
 
@@ -748,6 +986,56 @@ fn run_command_stats_show_nonexistent() {
 }
 
 #[test]
+fn run_command_stats_diff_nonexistent_scopes() {
+    let _guard = match TempDbGuard::new() {
+        Some(g) => g,
+        None => return,
+    };
+    let record = run_command(Commands::Stats(StatsCommands::Diff {
+        id: Some(999999),
+        session: None,
+        tool_use_id: None,
+        limit: DEFAULT_DIFF_LIMIT,
+        sort: None,
+        context: 3,
+        no_color: true,
+        json: false,
+    }))
+    .unwrap_err();
+    assert!(record.0.contains("not found"));
+    assert_eq!(record.1, 1);
+
+    let session = run_command(Commands::Stats(StatsCommands::Diff {
+        id: None,
+        session: Some("missing-session".to_string()),
+        tool_use_id: None,
+        limit: DEFAULT_DIFF_LIMIT,
+        sort: None,
+        context: 3,
+        no_color: true,
+        json: false,
+    }))
+    .unwrap_err();
+    assert!(session.0.contains("No records found"));
+    assert_eq!(session.1, 1);
+
+    let injected = run_command(Commands::Stats(StatsCommands::Diff {
+        id: None,
+        session: Some("missing\u{1b}]0;INJECTED\u{7}".to_string()),
+        tool_use_id: Some("tool\u{1b}]52;c;INJECTED\u{7}".to_string()),
+        limit: DEFAULT_DIFF_LIMIT,
+        sort: None,
+        context: 3,
+        no_color: true,
+        json: false,
+    }))
+    .unwrap_err();
+    assert!(!injected.0.contains('\u{1b}'));
+    assert!(!injected.0.contains('\u{7}'));
+    assert!(injected.0.contains("INJECTED"));
+}
+
+#[test]
 fn run_command_stats_clear_without_confirm() {
     // Clear with --yes to avoid interactive prompt
     let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
@@ -808,7 +1096,7 @@ fn get_stash_db_path_returns_valid() {
     if home.is_empty() {
         return;
     }
-    let path = get_stash_db_path(None);
+    let path = get_stash_db_path_with(&default_path_resolver(&home), None);
     assert!(path.is_some());
     assert!(path.unwrap().contains(".tokenless/stash.db"));
 }
@@ -820,7 +1108,10 @@ fn get_stash_db_path_with_bad_override() {
     if home.is_empty() {
         return;
     }
-    let path = get_stash_db_path(Some("/nonexistent/deep/dir/stash.db"));
+    let path = get_stash_db_path_with(
+        &default_path_resolver(&home),
+        Some("/nonexistent/deep/dir/stash.db"),
+    );
     // Bad override is rejected, falls back to default
     assert!(path.is_some());
     assert!(path.unwrap().contains(".tokenless/stash.db"));
@@ -884,6 +1175,7 @@ fn record_compression_stats_sls_only_path() {
     let short_after = "y".repeat(50);
     record_compression_stats(
         &config,
+        &DatabasePathResolver::default(),
         OperationType::CompressResponse,
         Some("sls-test".to_string()),
         Some("sls-session".to_string()),
@@ -905,6 +1197,7 @@ fn record_compression_stats_full_path() {
     let short_after = "w".repeat(100);
     record_compression_stats(
         &config,
+        &DatabasePathResolver::default(),
         OperationType::CompressSchema,
         Some("full-agent".to_string()),
         Some("full-session".to_string()),
@@ -923,6 +1216,7 @@ fn record_compression_stats_no_savings() {
     let config = TokenlessConfig { stats_enabled: true, ..Default::default() };
     record_compression_stats(
         &config,
+        &DatabasePathResolver::default(),
         OperationType::CompressResponse,
         None,
         None,

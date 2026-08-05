@@ -2,7 +2,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::cosh_core::{CoshCoreAdapter, SessionRecoveryState, SessionRuntimeState};
-use super::{AdapterError, AgentAdapter, AgentRunHandle, AgentRunPoll, FreshSessionOutcome};
+use super::{
+    AdapterError, AgentAdapter, AgentRunHandle, AgentRunPoll, ApprovalDecision, ApprovalResponse,
+    FreshSessionOutcome,
+};
 use crate::types::{
     AgentEvent, AgentMode, AgentRequest, CommandBlock, CommandStatus, CoshApprovalMode, OutputRefs,
 };
@@ -290,6 +293,47 @@ fn prepare_invocation_prompt_includes_cosh_shell_contract() {
         .contains("at most one primary recommendation command"));
 }
 
+// cosh-core recovers the raw user input from this envelope for session
+// summaries, so the anchors it matches on must keep their exact spelling and
+// order. Changing them silently degrades `/session list` previews.
+#[test]
+fn prepare_invocation_prompt_keeps_session_summary_anchors() {
+    const PREFIX: &str =
+        "Handle this natural-language shell prompt request for a Shell-first assistant.\n";
+    const INPUT_MARKER: &str = "\nuser_input: ";
+    const RUNTIME_MARKER: &str = "\n\nruntime_frame:\n";
+    const CONTRACT_MARKER: &str = "\n\ncosh-shell Agent contract:\n";
+    let mut request = test_request();
+    request.user_input = Some("查看当前目录下的文件".to_string());
+
+    let prompt = test_adapter()
+        .prepare_invocation(&request, CoshApprovalMode::Auto)
+        .prompt;
+
+    assert!(prompt.starts_with(PREFIX), "{prompt}");
+    let input_start = prompt.find(INPUT_MARKER).expect("input marker") + INPUT_MARKER.len();
+    let runtime_start = prompt.find(RUNTIME_MARKER).expect("runtime marker");
+    let contract_start = prompt.rfind(CONTRACT_MARKER).expect("contract marker");
+    assert!(input_start < runtime_start, "{prompt}");
+    assert!(runtime_start < contract_start, "{prompt}");
+    assert_eq!(
+        prompt[input_start..runtime_start].trim(),
+        "查看当前目录下的文件"
+    );
+}
+
+#[test]
+fn prepare_invocation_prompt_preserves_user_provided_secret() {
+    let secret = "api_key=sk-cosh-shell-runtime-secret";
+    let mut request = test_request();
+    request.user_input = Some(format!("write this exact value: {secret}"));
+
+    let inv = test_adapter().prepare_invocation(&request, CoshApprovalMode::Auto);
+
+    assert!(inv.prompt.contains(secret), "{}", inv.prompt);
+    assert!(!inv.prompt.contains("<redacted>"), "{}", inv.prompt);
+}
+
 #[test]
 fn prepare_invocation_prompt_uses_shell_output_tool_mode() {
     let mut request = test_request();
@@ -392,6 +436,54 @@ fn prepare_invocation_does_not_resume_across_cwd_scope() {
     assert!(!inv.args.contains(&"prev-sess".to_string()));
 }
 
+// The same-session retry fallback (T2) carries no
+// "disable provider resume" hint, so it must resume the active session;
+// the final fresh safety net (T3) carries the hint and must not.
+#[test]
+fn prepare_invocation_same_session_retry_fallback_resumes_active_session() {
+    let adapter = CoshCoreAdapter::new("cosh-core", false);
+    *adapter.session.lock().unwrap() =
+        SessionRuntimeState::with_active("prev-sess", test_workspace_scope());
+    let mut request = test_request();
+    request.context_hints = vec![
+        "analysis-only continuation after foreground shell handoff".to_string(),
+        "shell handoff recovery owner: req-1/<none>/toolu-1".to_string(),
+        "same-session retry for shell handoff fallback".to_string(),
+    ];
+    let inv = adapter.prepare_invocation(&request, CoshApprovalMode::Auto);
+    assert!(inv.args.contains(&"--resume".to_string()), "{:?}", inv.args);
+    assert!(
+        inv.args.contains(&"prev-sess".to_string()),
+        "{:?}",
+        inv.args
+    );
+}
+
+#[test]
+fn prepare_invocation_fresh_fallback_disables_resume() {
+    let adapter = CoshCoreAdapter::new("cosh-core", false);
+    *adapter.session.lock().unwrap() =
+        SessionRuntimeState::with_active("prev-sess", test_workspace_scope());
+    let mut request = test_request();
+    request.context_hints = vec![
+        "analysis-only continuation after foreground shell handoff".to_string(),
+        "shell handoff recovery owner: req-1/<none>/toolu-1".to_string(),
+        "same-session retry for shell handoff fallback".to_string(),
+        "disable provider resume for shell handoff fallback".to_string(),
+    ];
+    let inv = adapter.prepare_invocation(&request, CoshApprovalMode::Auto);
+    assert!(
+        !inv.args.contains(&"--resume".to_string()),
+        "{:?}",
+        inv.args
+    );
+    assert!(
+        !inv.args.contains(&"prev-sess".to_string()),
+        "{:?}",
+        inv.args
+    );
+}
+
 #[test]
 fn prepare_invocation_ignores_failed_selected_session() {
     let adapter = test_adapter();
@@ -472,12 +564,14 @@ esac
         ..test_adapter()
     };
 
-    let first = adapter.list_sessions("/tmp").expect("first session page");
+    let first = adapter
+        .list_sessions("/tmp", false)
+        .expect("first session page");
     let second = adapter
-        .list_sessions_page("/tmp", 100, first.next_cursor.as_deref())
+        .list_sessions_page("/tmp", 100, first.next_cursor.as_deref(), false)
         .expect("second session page");
     let third = adapter
-        .list_sessions_page("/tmp", 100, second.next_cursor.as_deref())
+        .list_sessions_page("/tmp", 100, second.next_cursor.as_deref(), false)
         .expect("third session page");
     let _ = std::fs::remove_file(&script);
 
@@ -814,6 +908,97 @@ fn cancellable_runs_and_registry_share_one_persistent_core() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+// #1940 regression: the persistent process announces `initialize` capabilities
+// once, on the first turn. Later turns must inherit them from the process
+// record — otherwise the receipt gate reads the default "not capable" and
+// silently stops emitting `approval_receipt` from the second turn on, leaving
+// the core's residual approval timeout armed against legitimate pending cards.
+#[test]
+fn persistent_core_keeps_receipt_capability_across_turns() {
+    let (script, root) = persistent_mock_paths("receipt-capability");
+    let receipts = root.join("receipts");
+    let source = r#"#!/bin/sh
+turns=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"subtype":"initialize"'*)
+      printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true,"can_handle_approval_receipt":true}}}}'
+      ;;
+    *'"type":"approval_receipt"'*)
+      printf '%s\n' "$line" >> "__RECEIPTS__"
+      ;;
+    *'"type":"user"'*)
+      turns=$((turns + 1))
+      printf '{"type":"control_request","request_id":"ctrl-%s","request":{"subtype":"can_use_tool","tool_name":"Read","input":{"path":"/tmp/receipt-capability"},"tool_use_id":"toolu-%s"}}\n' "$turns" "$turns"
+      ;;
+    *'"behavior":"allow"'*)
+      printf '{"type":"result","subtype":"success","session_id":"00000000-0000-4000-8000-000000000000","is_error":false,"result":"done"}\n'
+      ;;
+    *'"subtype":"shutdown"'*) exit 0;;
+  esac
+done
+"#
+    .replace("__RECEIPTS__", &receipts.to_string_lossy());
+    std::fs::write(&script, source).expect("write receipt capability mock");
+    let mut permissions = std::fs::metadata(&script)
+        .expect("receipt capability mock metadata")
+        .permissions();
+    use std::os::unix::fs::PermissionsExt;
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).expect("chmod receipt capability mock");
+    let adapter = CoshCoreAdapter::new(script.to_string_lossy(), true);
+
+    for turn in 1..=2u32 {
+        let mut request = test_request();
+        request.id = format!("test-{turn}");
+        let handle = adapter.start_cancellable(request, CoshApprovalMode::Auto);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let request_id = loop {
+            match handle
+                .poll_event_timeout(Duration::from_millis(100))
+                .expect("poll receipt capability run")
+            {
+                AgentRunPoll::Event(AgentEvent::ToolPermissionRequest { request_id, .. }) => {
+                    break request_id;
+                }
+                AgentRunPoll::Event(_) => {}
+                AgentRunPoll::Finished => {
+                    panic!("turn {turn} finished before its permission request")
+                }
+                AgentRunPoll::Timeout if Instant::now() < deadline => {}
+                AgentRunPoll::Timeout => panic!("no permission request on turn {turn}"),
+            }
+        };
+        assert_eq!(request_id, format!("ctrl-{turn}"));
+        handle
+            .send_approval_receipt(&request_id)
+            .expect("send approval receipt");
+        handle
+            .respond_approval(ApprovalResponse {
+                request_id: request_id.clone(),
+                tool_use_id: None,
+                tool_input: None,
+                decision: ApprovalDecision::Allow,
+            })
+            .expect("respond approval");
+        collect_cancellable_run(&handle);
+        let receipt_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let logged = std::fs::read_to_string(&receipts).unwrap_or_default();
+            if logged.contains(&format!("\"request_id\":\"ctrl-{turn}\"")) {
+                break;
+            }
+            assert!(
+                Instant::now() < receipt_deadline,
+                "turn {turn} receipt never reached the provider (logged: {logged:?})"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    drop(adapter);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn selecting_another_session_restarts_the_persistent_core() {
     let workspace = std::fs::canonicalize("/tmp")
@@ -901,6 +1086,102 @@ fn busy_external_mutation_reloads_live_core_at_safe_point() {
         .expect("query live registry after deferred reload");
     assert_eq!(live["transport"], "live");
     assert_eq!(live["reloads"], 1);
+    drop(adapter);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn mcp_mutation_reloads_live_core_at_safe_point() {
+    let (script, root) = persistent_mock_paths("mcp-deferred-reload");
+    let gate = root.join("gate");
+    let started = root.join("started");
+    write_persistent_mock(&script, &gate, &started);
+    let adapter = CoshCoreAdapter::new(script.to_string_lossy(), true);
+
+    let run = adapter.start_cancellable(test_request(), CoshApprovalMode::Auto);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !started.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        started.exists(),
+        "persistent mock did not enter the busy turn"
+    );
+
+    adapter.note_mcp_mutation();
+    std::fs::write(&gate, "continue").expect("release persistent mock turn");
+    let events = collect_cancellable_run(&run);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })));
+
+    let live = adapter
+        .registry_query("extensions", "info", serde_json::Value::Null)
+        .expect("query live registry after deferred mcp reload");
+    assert_eq!(live["transport"], "live");
+    assert_eq!(live["reloads"], 1);
+    drop(adapter);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn idle_mcp_mutation_reloads_before_the_next_turn_starts() {
+    let (script, root) = persistent_mock_paths("mcp-idle-reload");
+    // Embeds the reload counter into every turn result so the assertion can
+    // prove ordering: the reload must be consumed before the next user
+    // message reaches the mock, not merely at the end of that turn.
+    let source = r#"#!/bin/sh
+turns=0
+reloads=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"user"'*)
+      turns=$((turns + 1))
+      printf '{"type":"result","subtype":"success","session_id":"00000000-0000-4000-8000-000000000000","is_error":false,"result":"done-r%s"}\n' "$reloads"
+      ;;
+    *'"type":"registry_request"'*)
+      request_id=$(printf '%s\n' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      case "$line" in
+        *'"action":"reload"'*) reloads=$((reloads + 1));;
+      esac
+      printf '{"type":"registry_response","request_id":"%s","success":true,"data":{"turns":%s,"reloads":%s,"transport":"live"}}\n' "$request_id" "$turns" "$reloads"
+      ;;
+    *'"subtype":"shutdown"'*) exit 0;;
+  esac
+done
+"#;
+    std::fs::write(&script, source).expect("write idle-reload cosh-core mock");
+    let mut permissions = std::fs::metadata(&script)
+        .expect("idle-reload cosh-core mock metadata")
+        .permissions();
+    use std::os::unix::fs::PermissionsExt;
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).expect("chmod idle-reload cosh-core mock");
+    let adapter = CoshCoreAdapter::new(script.to_string_lossy(), true);
+
+    let first =
+        collect_cancellable_run(&adapter.start_cancellable(test_request(), CoshApprovalMode::Auto));
+    assert!(
+        first.iter().any(|event| matches!(
+            event,
+            AgentEvent::TextDelta { text, .. } if text == "done-r0"
+        )),
+        "{first:?}"
+    );
+
+    adapter.note_mcp_mutation();
+
+    let mut second_request = test_request();
+    second_request.id = "test-2".to_string();
+    let second =
+        collect_cancellable_run(&adapter.start_cancellable(second_request, CoshApprovalMode::Auto));
+    assert!(
+        second.iter().any(|event| matches!(
+            event,
+            AgentEvent::TextDelta { text, .. } if text == "done-r1"
+        )),
+        "reload must land before the next turn's user message: {second:?}"
+    );
     drop(adapter);
     let _ = std::fs::remove_dir_all(root);
 }

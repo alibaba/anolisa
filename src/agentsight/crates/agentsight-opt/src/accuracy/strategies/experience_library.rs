@@ -8,6 +8,12 @@
 //!
 //! No signals → skip LLM. LLM judges spinning vs progress and distills lesson
 //! entries (scene + wrong way + right way); the lesson text becomes `fix`. L1.
+//!
+//! TODO(#opt-experience-dedup): overlaps the cost dimension's detour
+//! candidate (`cost/prompts/detour.rs`), which judges the same pitfalls
+//! against a full turn ledger. Until converged, one pitfall can surface on both
+//! the accuracy and the cost page. Same overlap applies to the perf strategy of
+//! the same name.
 
 use std::collections::HashMap;
 

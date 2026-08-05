@@ -220,34 +220,13 @@ impl AtifStep {
 }
 
 impl AtifToolCall {
-    /// Short human-readable argument summary (command / file_path / url / query / regex …),
-    /// falling back to subagent descriptors, truncated UTF-8 safe.
+    /// Compact JSON of the tool call arguments, truncated UTF-8 safe.
     pub fn command_summary(&self, max_chars: usize) -> String {
-        let args = &self.arguments;
-        let primary = args
-            .get("command")
-            .or_else(|| args.get("file_path"))
-            .or_else(|| args.get("filePath"))
-            .or_else(|| args.get("url"))
-            .or_else(|| args.get("query"))
-            .or_else(|| args.get("regex"))
-            .or_else(|| args.get("pattern"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if !primary.is_empty() {
-            return truncate_chars(primary, max_chars);
+        let json = serde_json::to_string(&self.arguments).unwrap_or_default();
+        if json.is_empty() || json == "{}" || json == "null" {
+            return String::new();
         }
-        let stype = args.get("subagent_type").and_then(|v| v.as_str());
-        let desc = args.get("description").and_then(|v| v.as_str());
-        let prompt = args.get("prompt").and_then(|v| v.as_str());
-        let summary = match (stype, desc, prompt) {
-            (Some(t), Some(d), _) => format!("[{t}] {d}"),
-            (Some(t), None, Some(p)) => format!("[{t}] {p}"),
-            (None, Some(d), _) => d.to_string(),
-            (None, None, Some(p)) => p.to_string(),
-            _ => return String::new(),
-        };
-        truncate_chars(&summary, max_chars)
+        truncate_chars(&json, max_chars)
     }
 
     /// Tool name enriched with subagent type, e.g. `Agent(Explore)`.
@@ -397,35 +376,31 @@ mod tests {
             arguments: serde_json::json!({"subagent_type": "Explore", "description": "scan"}),
         };
         assert_eq!(call.display_name(), "Agent(Explore)");
-        assert_eq!(call.command_summary(50), "[Explore] scan");
+        assert_eq!(
+            call.command_summary(200),
+            r#"{"subagent_type":"Explore","description":"scan"}"#
+        );
     }
 
     #[test]
-    fn tool_call_summary_grep_regex() {
-        // Grep tool uses "regex" as primary arg — must not be empty.
+    fn tool_call_summary_is_json() {
         let call = AtifToolCall {
             tool_call_id: "c2".into(),
             function_name: "Grep".into(),
             arguments: serde_json::json!({"regex": "fn main\\(\\)", "path": "/src"}),
         };
-        assert_eq!(call.command_summary(50), "fn main\\(\\)");
+        assert_eq!(
+            call.command_summary(200),
+            r#"{"regex":"fn main\\(\\)","path":"/src"}"#
+        );
 
-        // LSP tool uses "filePath" — must be picked up.
+        // Empty object → empty string.
         let call2 = AtifToolCall {
             tool_call_id: "c3".into(),
-            function_name: "LSP".into(),
-            arguments: serde_json::json!({"filePath": "/src/main.rs", "operation": "goToDefinition"}),
+            function_name: "Noop".into(),
+            arguments: serde_json::json!({}),
         };
-        assert_eq!(call2.command_summary(50), "/src/main.rs");
-
-        // Glob tool uses "pattern" — must be picked up.
-        let call3 = AtifToolCall {
-            tool_call_id: "c4".into(),
-            function_name: "Glob".into(),
-            arguments: serde_json::json!({"pattern": "*.rs", "path": "/src"}),
-        };
-        // "pattern" is after "query" in the chain; Glob also has "query" semantics via pattern
-        assert_eq!(call3.command_summary(50), "*.rs");
+        assert_eq!(call2.command_summary(50), "");
     }
 
     #[test]
@@ -445,7 +420,7 @@ mod tests {
         );
         let traj = AtifTrajectory::from_json(&json).unwrap();
         let text = render_trimmed(&traj);
-        assert!(text.contains("tool_use Bash: ls"));
+        assert!(text.contains("tool_use Bash: {\"command\":\"ls\"}"));
         assert!(text.contains("[trimmed, 500 chars total]"));
         assert!(!text.contains(&"x".repeat(200)));
     }

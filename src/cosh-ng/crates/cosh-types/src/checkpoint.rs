@@ -28,7 +28,8 @@ pub enum WsCkptRequest {
     },
     Rollback {
         workspace: String,
-        to: String,
+        to: Option<String>,
+        num_ancestors: Option<u32>,
     },
     Delete {
         workspace: Option<String>,
@@ -42,7 +43,7 @@ pub enum WsCkptRequest {
     Diff {
         workspace: String,
         from: String,
-        to: String,
+        to: Option<String>,
     },
     Status {
         workspace: Option<String>,
@@ -53,10 +54,38 @@ pub enum WsCkptRequest {
     },
     Config,
     ReloadConfig,
+    ReloadGlobalConfig,
+    ReloadWorkspacePolicy {
+        workspace: String,
+    },
+    ConfigOverview,
     Recover {
         workspace: String,
     },
     HealthAdvisory,
+    GetWorkspacePolicy {
+        workspace: String,
+    },
+    ResetWorkspacePolicy {
+        workspace: String,
+    },
+    PatchWorkspacePolicy {
+        workspace: String,
+        auto_cleanup: PolicyFieldOp<bool>,
+        auto_cleanup_keep: PolicyFieldOp<CleanupRetention>,
+    },
+    RollbackPreview {
+        workspace: String,
+        to: Option<String>,
+        num_ancestors: Option<u32>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub enum PolicyFieldOp<T> {
+    #[default]
+    Unchanged,
+    Set(T),
 }
 
 /// Response received from ws-ckpt daemon (bincode wire format).
@@ -95,7 +124,9 @@ pub enum WsCkptResponse {
     ConfigOk {
         config: ConfigReport,
     },
-    ReloadConfigOk,
+    ReloadConfigOk {
+        config: ConfigReport,
+    },
     CheckpointSkipped {
         reason: String,
     },
@@ -106,6 +137,21 @@ pub enum WsCkptResponse {
         over_limit_workspace_count: u32,
         fs_total_bytes: u64,
         fs_used_bytes: u64,
+    },
+    WorkspacePolicyOk {
+        ws_id: String,
+        effective: EffectivePolicy,
+        local: WorkspacePolicy,
+        global: GlobalPolicySnapshot,
+    },
+    ConfigOverviewOk {
+        config: ConfigReport,
+        ws_total: usize,
+        ws_with_override: usize,
+    },
+    RollbackPreviewOk {
+        to: String,
+        changes: Vec<DiffEntry>,
     },
 }
 
@@ -124,6 +170,8 @@ pub enum WsCkptErrorCode {
     SnapshotAlreadyExists,
     WriteLockConflict,
     DiskSpaceInsufficient,
+    CwdOccupied,
+    CwdScanFailed,
 }
 
 // ===========================================================================
@@ -137,12 +185,43 @@ pub struct SnapshotEntry {
     pub meta: SnapshotMeta,
 }
 
+mod metadata_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde_json::Value;
+
+    pub fn serialize<S: Serializer>(v: &Option<Value>, s: S) -> Result<S::Ok, S::Error> {
+        let normalized = v.as_ref().filter(|value| !value.is_null());
+        if s.is_human_readable() {
+            normalized.serialize(s)
+        } else {
+            normalized.map(|value| value.to_string()).serialize(s)
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Value>, D::Error> {
+        if d.is_human_readable() {
+            Option::<Value>::deserialize(d)
+        } else {
+            Option::<String>::deserialize(d)?
+                .map(|value| serde_json::from_str(&value).map_err(serde::de::Error::custom))
+                .transpose()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotMeta {
     pub message: Option<String>,
+    #[serde(default, with = "metadata_serde")]
     pub metadata: Option<serde_json::Value>,
     pub pinned: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    pub missing: bool,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub child_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,10 +255,109 @@ pub struct WorkspaceInfo {
 }
 
 /// Cleanup retention policy — mirrors ws-ckpt-common exactly.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CleanupRetention {
     Count(u32),
     Age { raw: String, secs: u64 },
+}
+
+impl CleanupRetention {
+    pub fn age(raw: impl Into<String>) -> Result<Self, String> {
+        let raw = raw.into();
+        let secs = parse_duration_secs(&raw)?;
+        Ok(Self::Age { raw, secs })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+enum CleanupRetentionWire {
+    Count(u32),
+    Age(String),
+}
+
+impl Serialize for CleanupRetention {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            match self {
+                Self::Count(count) => serializer.serialize_u32(*count),
+                Self::Age { raw, .. } => serializer.serialize_str(raw),
+            }
+        } else {
+            match self {
+                Self::Count(count) => CleanupRetentionWire::Count(*count),
+                Self::Age { raw, .. } => CleanupRetentionWire::Age(raw.clone()),
+            }
+            .serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CleanupRetention {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if deserializer.is_human_readable() {
+            struct CleanupRetentionVisitor;
+
+            impl<'de> serde::de::Visitor<'de> for CleanupRetentionVisitor {
+                type Value = CleanupRetention;
+
+                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    formatter.write_str("a non-negative count or a duration string")
+                }
+
+                fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                    u32::try_from(value)
+                        .map(CleanupRetention::Count)
+                        .map_err(E::custom)
+                }
+
+                fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                    u32::try_from(value)
+                        .map(CleanupRetention::Count)
+                        .map_err(E::custom)
+                }
+
+                fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                    CleanupRetention::age(value).map_err(E::custom)
+                }
+
+                fn visit_string<E: serde::de::Error>(
+                    self,
+                    value: String,
+                ) -> Result<Self::Value, E> {
+                    CleanupRetention::age(value).map_err(E::custom)
+                }
+            }
+
+            deserializer.deserialize_any(CleanupRetentionVisitor)
+        } else {
+            match CleanupRetentionWire::deserialize(deserializer)? {
+                CleanupRetentionWire::Count(count) => Ok(Self::Count(count)),
+                CleanupRetentionWire::Age(raw) => Self::age(raw).map_err(serde::de::Error::custom),
+            }
+        }
+    }
+}
+
+fn parse_duration_secs(value: &str) -> Result<u64, String> {
+    let value = value.trim();
+    let mut chars = value.chars();
+    let unit = chars.next_back().ok_or("empty duration")?;
+    let count: u64 = chars
+        .as_str()
+        .parse()
+        .map_err(|_| format!("invalid duration: {value}"))?;
+    let seconds = match unit.to_ascii_lowercase() {
+        's' => count,
+        'm' => count.saturating_mul(60),
+        'h' => count.saturating_mul(3_600),
+        'd' => count.saturating_mul(86_400),
+        'w' => count.saturating_mul(604_800),
+        _ => return Err(format!("invalid duration unit: {unit}")),
+    };
+    if seconds > i64::MAX as u64 {
+        return Err("duration is too large".to_string());
+    }
+    Ok(seconds)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -191,9 +369,26 @@ pub struct ConfigReport {
     pub auto_cleanup_keep: CleanupRetention,
     pub auto_cleanup_interval_secs: u64,
     pub health_check_interval_secs: u64,
-    pub img_path: String,
     pub img_size: u64,
     pub img_max_percent: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorkspacePolicy {
+    pub auto_cleanup: Option<bool>,
+    pub auto_cleanup_keep: Option<CleanupRetention>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectivePolicy {
+    pub auto_cleanup: bool,
+    pub auto_cleanup_keep: CleanupRetention,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GlobalPolicySnapshot {
+    pub auto_cleanup: bool,
+    pub auto_cleanup_keep: CleanupRetention,
 }
 
 // ===========================================================================
@@ -314,7 +509,8 @@ mod tests {
             },
             WsCkptRequest::Rollback {
                 workspace: "/tmp/ws".into(),
-                to: "snap-001".into(),
+                to: Some("snap-001".into()),
+                num_ancestors: None,
             },
             WsCkptRequest::Delete {
                 workspace: Some("/tmp/ws".into()),
@@ -328,7 +524,7 @@ mod tests {
             WsCkptRequest::Diff {
                 workspace: "/tmp/ws".into(),
                 from: "snap-001".into(),
-                to: "snap-002".into(),
+                to: Some("snap-002".into()),
             },
             WsCkptRequest::Status { workspace: None },
             WsCkptRequest::Cleanup {
@@ -404,12 +600,23 @@ mod tests {
                     auto_cleanup_keep: CleanupRetention::Count(5),
                     auto_cleanup_interval_secs: 3600,
                     health_check_interval_secs: 60,
-                    img_path: "/var/lib/ws-ckpt/img".into(),
                     img_size: 10_737_418_240,
                     img_max_percent: 80.0,
                 },
             },
-            WsCkptResponse::ReloadConfigOk,
+            WsCkptResponse::ReloadConfigOk {
+                config: ConfigReport {
+                    mount_path: "/mnt/snapshots".into(),
+                    socket_path: "/run/ws-ckpt/ws-ckpt.sock".into(),
+                    log_level: "info".into(),
+                    auto_cleanup: true,
+                    auto_cleanup_keep: CleanupRetention::Count(5),
+                    auto_cleanup_interval_secs: 3600,
+                    health_check_interval_secs: 60,
+                    img_size: 10_737_418_240,
+                    img_max_percent: 80.0,
+                },
+            },
             WsCkptResponse::CheckpointSkipped {
                 reason: "no changes".into(),
             },
@@ -456,7 +663,8 @@ mod tests {
                 2,
                 WsCkptRequest::Rollback {
                     workspace: "/ws".into(),
-                    to: "snap".into(),
+                    to: Some("snap".into()),
+                    num_ancestors: None,
                 },
             ),
             (
@@ -479,7 +687,7 @@ mod tests {
                 WsCkptRequest::Diff {
                     workspace: "/ws".into(),
                     from: "a".into(),
-                    to: "b".into(),
+                    to: Some("b".into()),
                 },
             ),
             (6, WsCkptRequest::Status { workspace: None }),
@@ -492,13 +700,49 @@ mod tests {
             ),
             (8, WsCkptRequest::Config),
             (9, WsCkptRequest::ReloadConfig),
+            (10, WsCkptRequest::ReloadGlobalConfig),
             (
-                10,
+                11,
+                WsCkptRequest::ReloadWorkspacePolicy {
+                    workspace: "/ws".into(),
+                },
+            ),
+            (12, WsCkptRequest::ConfigOverview),
+            (
+                13,
                 WsCkptRequest::Recover {
                     workspace: "/ws".into(),
                 },
             ),
-            (11, WsCkptRequest::HealthAdvisory),
+            (14, WsCkptRequest::HealthAdvisory),
+            (
+                15,
+                WsCkptRequest::GetWorkspacePolicy {
+                    workspace: "/ws".into(),
+                },
+            ),
+            (
+                16,
+                WsCkptRequest::ResetWorkspacePolicy {
+                    workspace: "/ws".into(),
+                },
+            ),
+            (
+                17,
+                WsCkptRequest::PatchWorkspacePolicy {
+                    workspace: "/ws".into(),
+                    auto_cleanup: PolicyFieldOp::Set(true),
+                    auto_cleanup_keep: PolicyFieldOp::Set(CleanupRetention::Count(5)),
+                },
+            ),
+            (
+                18,
+                WsCkptRequest::RollbackPreview {
+                    workspace: "/ws".into(),
+                    to: Some("snap".into()),
+                    num_ancestors: None,
+                },
+            ),
         ];
 
         for (expected_idx, req) in &variants {
@@ -527,6 +771,8 @@ mod tests {
             WsCkptErrorCode::SnapshotAlreadyExists,
             WsCkptErrorCode::WriteLockConflict,
             WsCkptErrorCode::DiskSpaceInsufficient,
+            WsCkptErrorCode::CwdOccupied,
+            WsCkptErrorCode::CwdScanFailed,
         ];
 
         for (idx, code) in codes.iter().enumerate() {
@@ -565,6 +811,22 @@ mod tests {
     }
 
     #[test]
+    fn test_cleanup_retention_rejects_invalid_human_readable_values() {
+        for input in [
+            r#""""#,
+            r#""d""#,
+            r#""9223372036854775808s""#,
+            r#""30天""#,
+            r#""天""#,
+        ] {
+            assert!(
+                serde_json::from_str::<CleanupRetention>(input).is_err(),
+                "invalid retention value should fail: {input}"
+            );
+        }
+    }
+
+    #[test]
     fn test_config_report_bincode_roundtrip() {
         let report = ConfigReport {
             mount_path: "/mnt/ws-ckpt".into(),
@@ -574,7 +836,6 @@ mod tests {
             auto_cleanup_keep: CleanupRetention::Count(10),
             auto_cleanup_interval_secs: 3600,
             health_check_interval_secs: 60,
-            img_path: "/var/lib/ws-ckpt.img".into(),
             img_size: 536870912,
             img_max_percent: 80.0,
         };
@@ -587,7 +848,6 @@ mod tests {
         assert_eq!(decoded.auto_cleanup_keep, CleanupRetention::Count(10));
         assert_eq!(decoded.auto_cleanup_interval_secs, 3600);
         assert_eq!(decoded.health_check_interval_secs, 60);
-        assert_eq!(decoded.img_path, "/var/lib/ws-ckpt.img");
         assert_eq!(decoded.img_size, 536870912);
         assert_eq!(decoded.img_max_percent, 80.0);
     }

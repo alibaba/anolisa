@@ -28,6 +28,7 @@ _cosh_utf8_han_status() {
   local LC_ALL=C
   local index=0
   local length="${#value}"
+  local found_han=0
   local b1 b2 b3 b4 codepoint
   local _COSH_BYTE_AT_RESULT
 
@@ -80,22 +81,118 @@ _cosh_utf8_han_status() {
        || (codepoint >= 0x4E00 && codepoint <= 0x9FFF)
        || (codepoint >= 0xF900 && codepoint <= 0xFAFF)
        || (codepoint >= 0x20000 && codepoint <= 0x323AF) )); then
-      return 0
+      found_han=1
     fi
   done
 
+  (( found_han == 1 )) && return 0
   return 1
+}
+
+_cosh_literal_first_word_matches() {
+  local input="$1"
+  local attempt_token="$2"
+  local command="$3"
+  local LC_ALL=C
+  local quote=""
+  local normalized=""
+  local started=0
+  local index=0
+  local length="${#input}"
+  local byte
+
+  [[ -n "$input" && "$length" -le 4096 ]] || return 1
+  [[ "$attempt_token" == "$command" ]] && return 0
+
+  while (( index < length )); do
+    byte="${input:$index:1}"
+    (( index += 1 ))
+    if [[ "$quote" == "'" ]]; then
+      case "$byte" in
+        "'") quote="" ;;
+        *[[:cntrl:]]*) return 1 ;;
+        *) normalized+="$byte"; started=1 ;;
+      esac
+      continue
+    fi
+    if [[ "$quote" == '"' ]]; then
+      case "$byte" in
+        '"') quote="" ;;
+        '\'|'$'|'`'|*[[:cntrl:]]*) return 1 ;;
+        *) normalized+="$byte"; started=1 ;;
+      esac
+      continue
+    fi
+    case "$byte" in
+      ' '|$'\t') (( started == 1 )) && break ;;
+      "'") quote="'"; started=1 ;;
+      '"') quote='"'; started=1 ;;
+      '\'|'$'|'`'|'|'|'&'|';'|'<'|'>'|'('|')'|'*'|'?'|'~'|'{'|'}'|'['|']'|*[[:cntrl:]]*)
+        return 1
+        ;;
+      *) normalized+="$byte"; started=1 ;;
+    esac
+  done
+  [[ -z "$quote" && -n "$normalized" && "$normalized" == "$command" ]]
+}
+
+_cosh_arguments_have_no_unquoted_expansion() {
+  local input="$1"
+  local LC_ALL=C
+  local quote=""
+  local escaped=0
+  local after_first_word=0
+  local index=0
+  local length="${#input}"
+  local byte
+
+  while (( index < length )); do
+    byte="${input:$index:1}"
+    (( index += 1 ))
+    if [[ "$quote" == "'" ]]; then
+      [[ "$byte" == "'" ]] && quote=""
+      continue
+    fi
+    if (( escaped == 1 )); then
+      escaped=0
+      continue
+    fi
+    case "$byte" in
+      '\') escaped=1 ;;
+      "'") quote="'" ;;
+      '"')
+        if [[ "$quote" == '"' ]]; then quote=""; elif [[ -z "$quote" ]]; then quote='"'; fi
+        ;;
+      ' '|$'\t') [[ -z "$quote" ]] && after_first_word=1 ;;
+      '*'|'?'|'~'|'{'|'}'|'['|']')
+        (( after_first_word == 1 )) && [[ -z "$quote" ]] && return 1
+        ;;
+    esac
+  done
+  (( escaped == 0 )) && [[ -z "$quote" ]]
 }
 
 _cosh_command_veto() {
   local input="$1"
   local top_token="$2"
+  local context="${3:-}"
+  local top_han_status="${4:-1}"
   local scan="$input"
   local word name
 
   case "$top_token" in
-    /*|*/*|~/*|command|env|sudo|exec|nohup|time|xargs)
+    '~/'*|command|env|sudo|exec|nohup|time|xargs)
       return 0
+      ;;
+    /*|*/*)
+      # missing-path context (#1919): the caller has proven the
+      # slash-bearing first token does not resolve to an existing path
+      # (bash reports "No such file or directory" without consulting
+      # command_not_found_handle), so the slash shape alone no longer
+      # proves a command; every other veto rule below still applies.
+      if [[ "$context" != "missing_path" ]]; then
+        return 0
+      fi
       ;;
   esac
 
@@ -103,6 +200,50 @@ _cosh_command_veto() {
     *'?') scan="${scan%\?}" ;;
     *'？') scan="${scan%？}" ;;
   esac
+
+  if (( top_han_status == 0 )); then
+    case "$scan" in
+      *'|'*|*'&'*|*';'*|*'<'*|*'>'*|*'$'*|*'`'*|*[[:cntrl:]]*)
+        return 0
+        ;;
+    esac
+
+    local quote=""
+    local escaped=0
+    local index=0
+    local length="${#scan}"
+    local byte
+    while (( index < length )); do
+      byte="${scan:$index:1}"
+      (( index += 1 ))
+      if [[ "$quote" == "'" ]]; then
+        [[ "$byte" == "'" ]] && quote=""
+        continue
+      fi
+      if (( escaped == 1 )); then
+        escaped=0
+        continue
+      fi
+      case "$byte" in
+        '\') escaped=1 ;;
+        "'") quote="'" ;;
+        '"')
+          if [[ "$quote" == '"' ]]; then
+            quote=""
+          elif [[ -z "$quote" ]]; then
+            quote='"'
+          fi
+          ;;
+        '('|')')
+          [[ -z "$quote" ]] && return 0
+          ;;
+      esac
+    done
+    (( escaped == 1 )) && return 0
+    [[ -n "$quote" ]] && return 0
+    return 1
+  fi
+
   case "$scan" in
     *"'"*|*'"'*|*'\'*|*'|'*|*'&'*|*';'*|*'<'*|*'>'*|*'$'*|*'`'*|*'('*|*')'*|*'{'*|*'}'*|*'['*|*']'*|*'*'*|*'?'*|*'？'*|*'~'*|*[[:cntrl:]]*)
       return 0
@@ -129,6 +270,54 @@ _cosh_command_veto() {
   return 1
 }
 
+# Proves the path is missing with ENOENT semantics: walk the components
+# top-down; every existing ancestor must be a searchable directory and the
+# first missing component must be provably absent (neither -e nor -L) in a
+# readable parent. Dangling symlinks, permission-opaque directories, and
+# non-directory ancestors all return 1 (not provable), because bash would
+# report those as 126/127 path errors on a *real* path and interception
+# must never shadow that native outcome.
+_cosh_path_provably_missing() {
+  local path="$1"
+  local prefix rest component
+  case "$path" in
+    /*) prefix="/"; rest="${path#/}" ;;
+    *) prefix=""; rest="$path" ;;
+  esac
+  while [[ -n "$rest" ]]; do
+    component="${rest%%/*}"
+    if [[ "$rest" == */* ]]; then
+      rest="${rest#*/}"
+    else
+      rest=""
+    fi
+    [[ -n "$component" ]] || continue
+    local current="${prefix}${component}"
+    if [[ -L "$current" ]]; then
+      # Symlink component (dangling or not): resolution semantics belong
+      # to the kernel at execve time, never provably ENOENT here.
+      return 1
+    fi
+    if [[ -e "$current" ]]; then
+      if [[ -n "$rest" ]]; then
+        # An existing ancestor must be a searchable directory, otherwise
+        # bash would report ENOTDIR/EACCES for the real path.
+        [[ -d "$current" && -x "$current" ]] || return 1
+      fi
+      prefix="${current}/"
+      continue
+    fi
+    # First missing component: only provable in a readable+searchable
+    # parent (stat on an unsearchable directory fails with EACCES, which
+    # is indistinguishable from an existing file).
+    local parent="${prefix:-.}"
+    [[ -d "$parent" && -r "$parent" && -x "$parent" ]] || return 1
+    return 0
+  done
+  # The whole path exists.
+  return 1
+}
+
 _cosh_request_verb() {
   case "$1" in
     [Ee][Xx][Pp][Ll][Aa][Ii][Nn]|[Cc][Hh][Ee][Cc][Kk]|[Ss][Hh][Oo][Ww]|[Tt][Ee][Ll][Ll]|[Hh][Ee][Ll][Pp]|[Aa][Nn][Aa][Ll][Yy][Zz][Ee]|[Aa][Nn][Aa][Ll][Yy][Ss][Ee]|[Rr][Ee][Vv][Ii][Ee][Ww]|[Ff][Ii][Xx]|[Ss][Uu][Mm][Mm][Aa][Rr][Ii][Zz][Ee]|[Ss][Uu][Mm][Mm][Aa][Rr][Ii][Ss][Ee]|[Ii][Nn][Ss][Pp][Ee][Cc][Tt]|[Dd][Ii][Aa][Gg][Nn][Oo][Ss][Ee]|[Dd][Ee][Bb][Uu][Gg]|[Cc][Oo][Mm][Pp][Aa][Rr][Ee]|[Dd][Ee][Ss][Cc][Rr][Ii][Bb][Ee]|[Ll][Ii][Ss][Tt]|[Tt][Rr][Aa][Nn][Ss][Ll][Aa][Tt][Ee]|[Gg][Ee][Nn][Ee][Rr][Aa][Tt][Ee]|[Rr][Uu][Nn]|[Ff][Ii][Nn][Dd]|[Ss][Ee][Aa][Rr][Cc][Hh]|[Oo][Pp][Ee][Nn]|[Rr][Ee][Aa][Dd]|[Ee][Dd][Ii][Tt]|[Cc][Rr][Ee][Aa][Tt][Ee]|[Uu][Pp][Dd][Aa][Tt][Ee]|[Ww][Rr][Ii][Tt][Ee]|[Rr][Ee][Mm][Oo][Vv][Ee]|[Dd][Ee][Ll][Ee][Tt][Ee]|[Ii][Nn][Ss][Tt][Aa][Ll][Ll]|[Uu][Nn][Ii][Nn][Ss][Tt][Aa][Ll][Ll]|[Cc][Oo][Nn][Ff][Ii][Gg][Uu][Rr][Ee]|[Ss][Ee][Tt][Uu][Pp]|[Ss][Tt][Aa][Rr][Tt]|[Ss][Tt][Oo][Pp]|[Rr][Ee][Ss][Tt][Aa][Rr][Tt]|[Rr][Ee][Ll][Oo][Aa][Dd]|[Rr][Ee][Ss][Ee][Tt]|[Bb][Uu][Ii][Ll][Dd]|[Dd][Ee][Pp][Ll][Oo][Yy]|[Tt][Ee][Ss][Tt]|[Vv][Aa][Ll][Ii][Dd][Aa][Tt][Ee]|[Vv][Ee][Rr][Ii][Ff][Yy]|[Ii][Nn][Vv][Ee][Ss][Tt][Ii][Gg][Aa][Tt][Ee]|[Tt][Rr][Oo][Uu][Bb][Ll][Ee][Ss][Hh][Oo][Oo][Tt]|[Mm][Oo][Nn][Ii][Tt][Oo][Rr]|[Oo][Pp][Tt][Ii][Mm][Ii][Zz][Ee]|[Oo][Pp][Tt][Ii][Mm][Ii][Ss][Ee]|[Cc][Ll][Ee][Aa][Nn]|[Ff][Oo][Rr][Mm][Aa][Tt]|[Cc][Oo][Nn][Vv][Ee][Rr][Tt]|[Dd][Oo][Ww][Nn][Ll][Oo][Aa][Dd]|[Uu][Pp][Ll][Oo][Aa][Dd])
@@ -143,26 +332,35 @@ _cosh_classify_missing() {
   local original
   original="$(_cosh_ascii_trim "$1")"
   local top_token="$2"
-  local han_status had_question=0 polite=0
+  local context="${3:-}"
+  local original_han_status top_han_status had_question=0 polite=0
   local IFS=$' \t\n'
 
   if [[ -z "$original" || ${#original} -gt 4096 ]]; then
     printf '%s' "unsafe"
     return 0
   fi
-  if _cosh_command_veto "$original" "$top_token"; then
+  _cosh_utf8_han_status "$original"
+  original_han_status=$?
+  if (( original_han_status == 2 )); then
+    printf '%s' "unsafe"
+    return 0
+  fi
+
+  _cosh_utf8_han_status "$top_token"
+  top_han_status=$?
+  if (( top_han_status == 2 )); then
+    printf '%s' "unsafe"
+    return 0
+  fi
+
+  if _cosh_command_veto "$original" "$top_token" "$context" "$top_han_status"; then
     printf '%s' "command"
     return 0
   fi
 
-  _cosh_utf8_han_status "$original"
-  han_status=$?
-  if (( han_status == 0 )); then
+  if (( original_han_status == 0 )); then
     printf '%s' "natural_language"
-    return 0
-  fi
-  if (( han_status == 2 )); then
-    printf '%s' "unsafe"
     return 0
   fi
 

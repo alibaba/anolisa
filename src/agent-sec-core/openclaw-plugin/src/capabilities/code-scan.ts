@@ -1,5 +1,11 @@
 import type { SecurityCapability } from "../types.js";
-import { buildTraceContext, callAgentSecCli } from "../utils.js";
+import {
+  buildTraceContext,
+  callAgentSecCli,
+  envFlagEnabled,
+  isHookPolicyValue,
+  normalizeHookPolicy,
+} from "../utils.js";
 
 export const codeScan: SecurityCapability = {
   id: "scan-code",
@@ -7,10 +13,29 @@ export const codeScan: SecurityCapability = {
   hooks: ["before_tool_call"],
   register(api) {
     const cfg = (api.pluginConfig as Record<string, any>) ?? {};
-    const requireApprovalEnabled = cfg.codeScanRequireApproval === true;
+    const hookEnabled = envFlagEnabled("CODE_SCANNER_HOOK_ENABLED", true);
+    const fallbackPolicy = cfg.codeScanRequireApproval === true ? "ask" : "observe";
+    const rawPolicy = process.env.CODE_SCANNER_MODE;
+    const configuredPolicy = normalizeHookPolicy(rawPolicy, fallbackPolicy);
+    const policy =
+      configuredPolicy === "observe" || configuredPolicy === "ask"
+        ? configuredPolicy
+        : fallbackPolicy;
+    if (
+      rawPolicy !== undefined &&
+      (!isHookPolicyValue(rawPolicy) ||
+        (configuredPolicy !== "observe" && configuredPolicy !== "ask"))
+    ) {
+      api.logger.warn(
+        `[scan-code] invalid or unsupported CODE_SCANNER_MODE=${JSON.stringify(rawPolicy.slice(0, 32))}; using ${policy}`,
+      );
+    }
 
     api.on("before_tool_call", async (event: any, ctx: any) => {
       try {
+        if (!hookEnabled) {
+          return undefined;
+        }
 
         // 只拦截 shell 类工具
         const command = extractCommand(event);
@@ -51,8 +76,10 @@ export const codeScan: SecurityCapability = {
         const msg = `[code-scanner] Detected ${findings.length} issue(s):\n${descs.join("\n")}\n\nCommand: ${command}`;
 
         if (verdict === "deny") {
-          api.logger.warn(`[scan-code] DENY (requireApproval=${requireApprovalEnabled}) — ${msg}`);
-          if (requireApprovalEnabled) {
+          api.logger.warn(
+            `[scan-code] DENY (requireApproval=${policy === "ask" ? "true" : "false"}) — ${msg}`,
+          );
+          if (policy === "ask") {
             return {
               requireApproval: {
                 title: "Code Scanner Security Warning",
@@ -65,8 +92,8 @@ export const codeScan: SecurityCapability = {
         }
 
         if (verdict === "warn") {
-          api.logger.warn(`[scan-code] WARN (requireApproval=${requireApprovalEnabled}) — ${msg}`);
-          if (requireApprovalEnabled) {
+          api.logger.warn(`[scan-code] WARN (policy=${policy}) — ${msg}`);
+          if (policy === "ask") {
             return {
               requireApproval: {
                 title: "Code Scanner Security Warning",

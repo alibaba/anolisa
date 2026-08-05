@@ -11,7 +11,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.7.2"
+version = "0.7.4"
 edition = "2024"
 license = "MIT"
 
@@ -27,6 +27,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 blake3 = "1.5"
 dirs = "5.0"
 libc = "0.2"
+similar = "2"
 
 [profile.release]
 opt-level = 3

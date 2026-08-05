@@ -289,6 +289,8 @@ fn terminal_events(events: &[GovernedEvent]) -> Vec<AgentEvent> {
             AgentEvent::AgentFailed { .. } => Some(AgentEvent::AgentFailed {
                 run_id: String::new(),
                 error: String::new(),
+                error_code: None,
+                max_turns: None,
             }),
             AgentEvent::AgentCancelled { .. } => Some(AgentEvent::AgentCancelled {
                 run_id: String::new(),
@@ -343,6 +345,8 @@ mod tests {
             governed(AgentEvent::AgentFailed {
                 run_id: "run-1".into(),
                 error: "secret failure body".into(),
+                error_code: None,
+                max_turns: None,
             }),
         ];
 

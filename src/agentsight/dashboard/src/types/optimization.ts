@@ -186,6 +186,20 @@ export interface CostStats {
   headroom?: CostHeadroom;
 }
 
+/** 可复用经验：试错型填 applicability/pitfall/effective_path，返工型填 rule/example/scope。 */
+export interface WasteExperience {
+  applicability?: string;
+  pitfall?: string;
+  effective_path?: string;
+  rule?: string;
+  good_example?: string;
+  bad_example?: string;
+  scope?: string;
+  defect_type?: string;
+  root_cause?: string;
+  fix_locus?: string;
+}
+
 // LLM-judged waste row (Rust supplies candidates → LLM judges worth).
 export interface WasteItem {
   symptom: string;        // 现象
@@ -196,8 +210,10 @@ export interface WasteItem {
   save_tokens: number;    // 预计可省 token
   discount: boolean;      // 缓存类（省单价）
   confidence: string;     // 高 / 中 / 低
-  needs_confirm: boolean; // 编排层：建议·需确认
+  needs_confirm: boolean; // 编排层建议标记（后端仍下发，前端仅呈现、不再展示确认提示）
   savings_kind?: string;  // 节省口径：折价 / 可省 / 预防
+  steps?: number[];       // 涉及轮号（减轮次浪费类）
+  experience?: WasteExperience | null; // 可沉淀经验（减轮次浪费类）
 }
 
 export interface WasteReport {

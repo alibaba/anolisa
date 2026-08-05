@@ -427,7 +427,10 @@ fn shell_host_bash_sensitive_missing_emits_raw_free_provenance() {
         .find(|event| event.kind == ShellEventKind::CommandRoutingObserved)
         .unwrap_or_else(|| panic!("routing provenance: {:?}", output.events));
 
-    assert_eq!(routing.component.as_deref(), Some("ambiguous"));
+    // Post-#2138 the sensitive gate no longer short-circuits ahead of intent
+    // classification: `--token=...` vetoes to intent=command, which keeps the
+    // native error and emits raw-free provenance with the sensitive flag.
+    assert_eq!(routing.component.as_deref(), Some("command"));
     assert!(routing.routing.as_ref().is_some_and(|metadata| {
         metadata.generation == 1
             && metadata.top_level_missing
@@ -441,10 +444,78 @@ fn shell_host_bash_sensitive_missing_emits_raw_free_provenance() {
     assert!(String::from_utf8_lossy(&output.terminal_output).contains("command not found"));
 }
 
+/// #2138: natural-language input carrying a secret routes to the agent like
+/// regular NL (intercept event emitted, sensitive routing flag set) instead
+/// of being silently vetoed to the native command-not-found error. The
+/// harness returns journal-redacted events, so the intercept input must be
+/// the whole-field redaction and the raw key must never appear (V3); the raw
+/// text reaching the in-memory agent path is anchored in osc_tests.
 #[test]
-fn shell_host_missing_cksum_fails_closed_without_sensitive_provenance() {
+fn shell_host_sensitive_natural_language_routes_to_agent_with_flag() {
+    let issue_input = "帮我安装下openclaw,模型使用qwen3.8-max,API Key: sk-fbaa6";
+    let mut shells = Vec::new();
+    if bash_supports_command_not_found_handler() {
+        shells.push("bash");
+    }
+    if Command::new("zsh").arg("--version").output().is_ok() {
+        shells.push("zsh");
+    }
+    for shell in shells {
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-shell-{shell}-sensitive-nl-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let config = ShellHostConfig::new(format!("{shell}-sensitive-nl"), &work_dir);
+        let output = if shell == "bash" {
+            run_scripted_bash(&config, &[ScriptedInput::user_line(issue_input)])
+        } else {
+            run_scripted_zsh(&config, &[ScriptedInput::user_line(issue_input)])
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+
+        let terminal = String::from_utf8_lossy(&output.terminal_output);
+        assert!(
+            !terminal.contains("command not found") && !terminal.contains("未找到命令"),
+            "{shell}: {terminal}"
+        );
+        let intercept = output
+            .events
+            .iter()
+            .find(|event| {
+                event.kind == ShellEventKind::UserInputIntercepted
+                    && event.component.as_deref() == Some("natural_language")
+            })
+            .unwrap_or_else(|| panic!("{shell}: sensitive NL intercept: {:?}", output.events));
+        assert_eq!(intercept.input.as_deref(), Some("<redacted>"), "{shell}");
+        assert!(
+            intercept
+                .routing
+                .as_ref()
+                .is_some_and(|routing| routing.sensitive && routing.top_level_missing),
+            "{shell}: {intercept:?}"
+        );
+        assert!(
+            !format!("{:?}", output.events).contains("sk-fbaa6"),
+            "{shell}: {:?}",
+            output.events
+        );
+        let journal = std::fs::read_to_string(&output.journal_path).unwrap();
+        assert!(!journal.contains("sk-fbaa6"), "{shell}: {journal}");
+    }
+}
+
+#[test]
+fn shell_host_missing_cksum_keeps_raw_free_sensitive_provenance() {
+    // Post-#2138 the sensitive path shares the regular literal-first-word
+    // identity check and no longer depends on the cksum fingerprint, so a
+    // broken cksum only degrades the unsafe (invalid UTF-8) path. Sensitive
+    // provenance must still be emitted, raw-free, with the native error.
     let input = "missing_sensitive_cli --token=secretvalue";
-    let mut shells = vec!["bash"];
+    let mut shells = Vec::new();
+    if bash_supports_command_not_found_handler() {
+        shells.push("bash");
+    }
     if Command::new("zsh").arg("--version").output().is_ok() {
         shells.push("zsh");
     }
@@ -484,14 +555,20 @@ fn shell_host_missing_cksum_fails_closed_without_sensitive_provenance() {
         assert!(output.events.iter().any(|event| {
             event.kind == ShellEventKind::CommandFailed && event.exit_code == Some(127)
         }));
+        let routing = output
+            .events
+            .iter()
+            .find(|event| event.kind == ShellEventKind::CommandRoutingObserved)
+            .unwrap_or_else(|| panic!("{shell}: routing provenance: {:?}", output.events));
+        assert_eq!(routing.component.as_deref(), Some("command"), "{shell}");
         assert!(
-            !output
-                .events
-                .iter()
-                .any(|event| event.kind == ShellEventKind::CommandRoutingObserved),
-            "{shell}: {:?}",
-            output.events
+            routing.routing.as_ref().is_some_and(|metadata| {
+                metadata.top_level_missing && metadata.sensitive && !metadata.unsafe_input
+            }),
+            "{shell}: {routing:?}"
         );
+        assert!(routing.input.is_none(), "{shell}");
+        assert!(routing.command.is_none(), "{shell}");
         assert!(
             !format!("{:?}", output.events).contains("secretvalue"),
             "{shell}: {:?}",
@@ -1159,6 +1236,36 @@ fn shell_host_zsh_adapter_emits_shared_command_events() {
 }
 
 #[test]
+fn routing_c4_zsh_stubs_intercept_bypass_only_commands() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-c4-zsh-stubs-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("routing-c4-zsh-stubs", &work_dir);
+    let inputs = ["/draft", "/resume", "/session"];
+    let steps = inputs
+        .iter()
+        .map(|input| ScriptedInput::user_line(*input))
+        .collect::<Vec<_>>();
+    let output = run_scripted_zsh(&config, &steps).expect("scripted zsh slash stubs");
+
+    for input in inputs {
+        assert!(output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(input)
+                && event.component.as_deref() == Some("slash")
+        }));
+        assert!(!output.events.iter().any(|event| {
+            event.kind == ShellEventKind::CommandStarted && event.command.as_deref() == Some(input)
+        }));
+    }
+}
+
+#[test]
 fn shell_host_zsh_later_preexec_hook_fails_closed_for_path_generation() {
     if Command::new("zsh").arg("--version").output().is_err() {
         return;
@@ -1387,6 +1494,276 @@ fn shell_host_bash_debug_trap_children_never_see_exported_extdebug() {
     assert!(terminal.contains("shell-alive-ok"), "{terminal}");
 }
 
+// bash re-execs shebang-less scripts with --debugger only when built with
+// debugger support, and the startup failure is only visible on hosts without
+// the bashdb package. Probe the exact re-exec path so tests can skip
+// anywhere the regression cannot manifest (e.g. macOS bash 3.2).
+fn bash_reexecs_shebang_less_with_debugger(work_dir: &std::path::Path) -> bool {
+    let probe_path = work_dir.join("shebang-less-probe");
+    std::fs::write(&probe_path, "true\n").expect("probe script");
+    make_executable(&probe_path);
+    let probe = Command::new("bash")
+        .args(["--noprofile", "--norc", "-c"])
+        .arg(format!("shopt -s extdebug; {}", probe_path.display()))
+        .output()
+        .expect("debugger probe");
+    let stderr = String::from_utf8_lossy(&probe.stderr);
+    stderr.contains("bashdb") || stderr.contains("cannot start debugger")
+}
+
+#[test]
+fn shell_host_bash_shebang_less_prompt_hook_avoids_debugger_reexec() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-prompt-hook-debugger-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+
+    if !bash_reexecs_shebang_less_with_debugger(&work_dir) {
+        return;
+    }
+
+    // Hook mirroring Alinux /etc/sysconfig/bash-prompt-history: inherited
+    // PROMPT_COMMAND points at a shebang-less executable script, so the
+    // marker's eval can only run it through the ENOEXEC re-exec fallback.
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let hook_log = work_dir.join("hook-ran.log");
+    let hook_path = work_dir.join("bash-prompt-history");
+    std::fs::write(
+        &hook_path,
+        format!("echo prompt-hook-ran >> {}\n", hook_log.display()),
+    )
+    .expect("hook script");
+    make_executable(&hook_path);
+
+    let config = ShellHostConfig::new("prompt-hook-debugger-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("PROMPT_COMMAND", hook_path.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("echo ok"),
+            ScriptedInput::user_line("shopt -q extdebug; echo \"post-hook-extdebug-rc=$?\""),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    // The hook must still run — the fix silences the debugger re-exec,
+    // not the user prompt command.
+    let hook_ran = std::fs::read_to_string(&hook_log).unwrap_or_default();
+    assert!(hook_ran.contains("prompt-hook-ran"), "{terminal}");
+    assert!(!terminal.contains("bashdb"), "{terminal}");
+    assert!(!terminal.contains("cannot start debugger"), "{terminal}");
+    // extdebug must be back on for the next real command: the DEBUG trap
+    // return-1 suppression depends on it.
+    assert!(terminal.contains("post-hook-extdebug-rc=0"), "{terminal}");
+}
+
+#[test]
+fn shell_host_bash_shebang_less_prompt_hook_array_form_avoids_debugger_reexec() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+    // Array PROMPT_COMMAND only exists since bash 5.1.
+    let version_probe = Command::new("bash")
+        .args(["-c", "echo ${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}"])
+        .output();
+    let Ok(version_probe) = version_probe else {
+        return;
+    };
+    let version = String::from_utf8_lossy(&version_probe.stdout);
+    let mut parts = version
+        .split_whitespace()
+        .filter_map(|part| part.parse::<u32>().ok());
+    let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    if (major, minor) < (5, 1) {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-prompt-hook-array-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+
+    if !bash_reexecs_shebang_less_with_debugger(&work_dir) {
+        return;
+    }
+
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let hook_log = work_dir.join("hook-ran.log");
+    let hook_path = work_dir.join("bash-prompt-history");
+    std::fs::write(
+        &hook_path,
+        format!("echo array-hook-ran >> {}\n", hook_log.display()),
+    )
+    .expect("hook script");
+    make_executable(&hook_path);
+    // Array-form PROMPT_COMMAND captured from the user rcfile. The leading
+    // `return 0` element pins the eval helper frame: an early-returning hook
+    // must not skip the remaining elements or the extdebug restore.
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        format!("PROMPT_COMMAND=('return 0' '{}')\n", hook_path.display()),
+    )
+    .expect("bashrc");
+
+    let config = ShellHostConfig::new("prompt-hook-array-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("echo ok"),
+            ScriptedInput::user_line("shopt -q extdebug; echo \"post-hook-extdebug-rc=$?\""),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    let hook_ran = std::fs::read_to_string(&hook_log).unwrap_or_default();
+    assert!(hook_ran.contains("array-hook-ran"), "{terminal}");
+    assert!(!terminal.contains("bashdb"), "{terminal}");
+    assert!(!terminal.contains("cannot start debugger"), "{terminal}");
+    assert!(terminal.contains("post-hook-extdebug-rc=0"), "{terminal}");
+}
+
+fn bash_extdebug_clears_trace_options() -> bool {
+    // `shopt -u extdebug` also clears errtrace/functrace on every bash that
+    // implements the implication (4.4 through 5.x); skip only where bash is
+    // too old to link the flags at all.
+    Command::new("bash")
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            "set -E; set -T; shopt -s extdebug; shopt -u extdebug; \
+             [[ ! -o errtrace && ! -o functrace ]]",
+        ])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn shell_host_bash_prompt_hook_preserves_trace_option_inheritance() {
+    if !bash_extdebug_clears_trace_options() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-prompt-hook-trace-options-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    let trace_log = work_dir.join("trace-options.log");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        format!(
+            "trap 'printf \"ERR\\t%s\\t%s\\n\" \"$BASH_COMMAND\" \
+             \"${{FUNCNAME[*]}}\" >> {trace_log}' ERR\n\
+             trap 'printf \"DEBUG\\t%s\\t%s\\n\" \"$BASH_COMMAND\" \
+             \"${{FUNCNAME[*]}}\" >> {trace_log}' DEBUG\n\
+             _user_hook() {{\n\
+               false\n\
+             }}\n\
+             PROMPT_COMMAND=_user_hook\n",
+            trace_log = trace_log.display()
+        ),
+    )
+    .expect("bashrc");
+
+    let config = ShellHostConfig::new("prompt-hook-trace-options-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[ScriptedInput::user_line("echo trace-options-preserved")],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    let trace_log = std::fs::read_to_string(&trace_log).unwrap_or_default();
+    let has_hook_trace = |event: &str| {
+        let prefix = format!("{event}\tfalse\t");
+        trace_log.lines().any(|line| {
+            let Some(functions) = line.strip_prefix(&prefix) else {
+                return false;
+            };
+            functions
+                .split_whitespace()
+                .any(|function| function == "_user_hook")
+        })
+    };
+    assert!(
+        has_hook_trace("ERR"),
+        "ERR trap did not reach _user_hook false command\n{terminal}\n{trace_log}"
+    );
+    assert!(
+        has_hook_trace("DEBUG"),
+        "DEBUG trap did not reach _user_hook false command\n{terminal}\n{trace_log}"
+    );
+    assert!(terminal.contains("trace-options-preserved"), "{terminal}");
+}
+
+#[test]
+fn shell_host_bash_prompt_hook_survives_debug_trap_and_self_heals() {
+    if !bash_extdebug_clears_trace_options() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-prompt-hook-debug-trap-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    // A hook that installs a DEBUG trap ending in `return 0` unwinds every
+    // function frame past the in-function extdebug restore. The session must
+    // stay usable and extdebug must self-heal after the user clears the trap.
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        "_user_hook() {\n\
+           if [[ -z \"${_poisoned:-}\" ]]; then\n\
+             _poisoned=1\n\
+             trap 'return 0' DEBUG\n\
+           fi\n\
+         }\n\
+         PROMPT_COMMAND=_user_hook\n",
+    )
+    .expect("bashrc");
+
+    let config = ShellHostConfig::new("prompt-hook-debug-trap-test", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[
+            // Executes natively while the poisoned trap is live: with
+            // extdebug off the top-level `return` only prints an error and
+            // the command still runs — the session is not bricked.
+            ScriptedInput::user_line("trap - DEBUG; echo session-usable"),
+            // The prompt cycle after the trap removal ran the in-function
+            // restore again, so extdebug must be back on.
+            ScriptedInput::user_line("shopt -q extdebug; echo \"post-heal-extdebug-rc=$?\""),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("session-usable"), "{terminal}");
+    assert!(terminal.contains("post-heal-extdebug-rc=0"), "{terminal}");
+}
+
 #[test]
 fn shell_host_bash_alias_expanded_commands_keep_preexec_markers() {
     // BASH_ALIASES (bash 4+) is required for the alias-aware guard; on
@@ -1556,6 +1933,10 @@ fn shell_host_bash_stale_history_guard_still_intercepts_deduped_repeats() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
+    if !bash_supports_command_not_found_handler() {
+        eprintln!("SKIP: bash command_not_found_handle capability is unavailable");
+        return;
+    }
 
     let work_dir = std::env::temp_dir().join(format!(
         "cosh-shell-bash-histdedup-test-{}-{}",
@@ -1587,4 +1968,946 @@ fn shell_host_bash_stale_history_guard_still_intercepts_deduped_repeats() {
         })
         .count();
     assert_eq!(intercepts, 2, "{:?}", output.events);
+}
+
+// Issue #1919: a natural-language prompt whose IFS first token contains a
+// slash never reaches command_not_found_handle (bash executes the token as
+// a path), so the DEBUG trap reclassifies it with the missing-path context
+// and intercepts before execution.
+#[test]
+fn shell_host_bash_missing_path_natural_language_intercepts() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-missing-path-nl-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    // Pin a UTF-8 locale: a real terminal typing Chinese is UTF-8, while CI
+    // runners default to C, where readline mangles multi-byte input bytes
+    // before they ever reach the DEBUG trap (same precedent as
+    // governance.rs raw-hook-test).
+    let mut config = ShellHostConfig::new("missing-path-nl", &work_dir);
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let prompt = "你读一下，并安装这个skill：/nonexistent-cosh-1919-probe/SKILL.md";
+    let output =
+        run_scripted_bash(&config, &[ScriptedInput::user_line(prompt)]).expect("scripted bash pty");
+
+    let intercept = output
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(prompt)
+                && event.component.as_deref() == Some("natural_language")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "missing-path natural-language intercept: {:?}",
+                output.events
+            )
+        });
+    // Pre-execution intercepts are shaped like slash/agent-marker intercepts
+    // (no top_level_missing correlation: the command never started, so there
+    // is no in-flight attempt to correlate with).
+    assert!(intercept.routing.is_none(), "{:?}", output.events);
+    // Interception must prevent execution: no command block and no native
+    // bash path error may appear for the prompt (I4).
+    let ledger = build_command_blocks(&output.events);
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+    assert!(!ledger.blocks.iter().any(|block| block.command == prompt));
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(
+        !terminal.contains("No such file or directory"),
+        "{terminal}"
+    );
+}
+
+/// #2138 review round 2: the missing-path route (#1919) must not keep its
+/// own secret veto — a slash-bearing NL prompt carrying a key intercepts
+/// like the CNF route, with the sensitive routing flag and the journal
+/// whole-field redaction (raw key never reaches durable evidence).
+#[test]
+fn shell_host_bash_sensitive_missing_path_natural_language_intercepts() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-missing-path-sensitive-nl-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    let mut config = ShellHostConfig::new("missing-path-sensitive-nl", &work_dir);
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+
+    let prompt =
+        "你读一下，并安装这个skill：/nonexistent-cosh-1919-probe/SKILL.md API Key: sk-fbaa6";
+    let output =
+        run_scripted_bash(&config, &[ScriptedInput::user_line(prompt)]).expect("scripted bash pty");
+
+    let intercept = output
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.component.as_deref() == Some("natural_language")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "sensitive missing-path natural-language intercept: {:?}",
+                output.events
+            )
+        });
+    // The harness returns journal-redacted events: the sensitive flag must
+    // trigger the whole-field redaction and no correlation exists (the
+    // command never started, so top_level_missing stays false).
+    assert_eq!(intercept.input.as_deref(), Some("<redacted>"));
+    assert!(
+        intercept
+            .routing
+            .as_ref()
+            .is_some_and(|routing| routing.sensitive && !routing.top_level_missing),
+        "{intercept:?}"
+    );
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(
+        !terminal.contains("No such file or directory"),
+        "{terminal}"
+    );
+    assert!(
+        !format!("{:?}", output.events).contains("sk-fbaa6"),
+        "{:?}",
+        output.events
+    );
+    let journal = std::fs::read_to_string(&output.journal_path).unwrap();
+    assert!(!journal.contains("sk-fbaa6"), "{journal}");
+}
+
+#[test]
+fn routing_c1_cnf_han_tier_a_routes_to_agent() {
+    for shell in ["bash", "zsh"] {
+        if shell == "bash" && !bash_supports_command_not_found_handler() {
+            continue;
+        }
+        if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
+            continue;
+        }
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-routing-c1-cnf-{shell}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let mut config = ShellHostConfig::new(format!("routing-c1-cnf-{shell}"), &work_dir);
+        config.native_mode = false;
+        let mut inputs = vec![
+            "使用 git log --since=\"1 day ago\" --format=\"%h %s (%an, %ar)\" 总结",
+            "你还好吗？ 我想问问",
+        ];
+        if shell == "bash" {
+            inputs.push("你还好吗? 我想问问");
+        }
+        let steps = inputs
+            .iter()
+            .map(|input| ScriptedInput::user_line(*input))
+            .collect::<Vec<_>>();
+        let output = if shell == "bash" {
+            run_scripted_bash(&config, &steps)
+        } else {
+            run_scripted_zsh(&config, &steps)
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+        for input in inputs {
+            assert!(
+                output.events.iter().any(|event| {
+                    event.kind == ShellEventKind::UserInputIntercepted
+                        && event.input.as_deref() == Some(input)
+                        && event.component.as_deref() == Some("natural_language")
+                }),
+                "{shell}: {input:?}: {:?}\n{}",
+                output.events,
+                String::from_utf8_lossy(&output.terminal_output)
+            );
+        }
+    }
+}
+
+#[test]
+fn isolated_bash_ignores_inherited_prompt_and_history_filters() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+    let supports_command_not_found = bash_supports_command_not_found_handler();
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-isolated-prompt-command-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    let inherited_inputrc = work_dir.join("inherited-inputrc");
+    std::fs::write(
+        &inherited_inputrc,
+        "set input-meta off\nset convert-meta on\nset output-meta off\n",
+    )
+    .expect("inherited inputrc");
+    let inherited_marker = work_dir.join("inherited-prompt-command-ran");
+    let mut config = ShellHostConfig::new("isolated-prompt-command", &work_dir)
+        .with_env(
+            "PROMPT_COMMAND",
+            format!("printf inherited > {}", shell_arg(&inherited_marker)),
+        )
+        .with_env("HISTIGNORE", "*")
+        .with_env("HISTSIZE", "0")
+        .with_env("HISTFILESIZE", "0")
+        .with_env("INPUTRC", inherited_inputrc.display().to_string());
+    config.native_mode = false;
+    let input = "解释 inherited history filter";
+
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line(
+                "printf '__cosh_hist_limits__%s:%s\\n' \"$HISTSIZE\" \"$HISTFILESIZE\"",
+            ),
+            ScriptedInput::user_line(input),
+        ],
+    )
+    .expect("isolated scripted bash");
+
+    assert!(!inherited_marker.exists());
+    assert!(
+        String::from_utf8_lossy(&output.terminal_output).contains("__cosh_hist_limits__1000:1000")
+    );
+    if supports_command_not_found {
+        assert!(output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(input)
+                && event.component.as_deref() == Some("natural_language")
+        }));
+    }
+}
+
+#[test]
+fn isolated_zsh_preserves_inputrc_override() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-isolated-zsh-inputrc-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let inputrc = work_dir.join("custom-inputrc");
+    let mut config = ShellHostConfig::new("isolated-zsh-inputrc", &work_dir)
+        .with_env("INPUTRC", inputrc.display().to_string());
+    config.native_mode = false;
+
+    let output = run_scripted_zsh(
+        &config,
+        &[ScriptedInput::user_line(
+            "printf '__cosh_inputrc__%s\\n' \"$INPUTRC\"",
+        )],
+    )
+    .expect("isolated scripted zsh");
+
+    assert!(String::from_utf8_lossy(&output.terminal_output)
+        .contains(&format!("__cosh_inputrc__{}", inputrc.display())));
+}
+
+#[test]
+fn routing_c1_zsh_ascii_question_unmatched_routes_to_agent() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+    let input = "你还好吗? 我想问问";
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-routing-c1-zsh-question-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("routing-c1-zsh-question", &work_dir);
+    let output =
+        run_scripted_zsh(&config, &[ScriptedInput::user_line(input)]).expect("scripted zsh");
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some(input)
+            && event.component.as_deref() == Some("natural_language")
+    }));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn routing_c1_missing_path_han_tier_a_routes_to_agent() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
+    let input = "打开./不存在 --dry-run \"x (preview)\"";
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-routing-c1-missing-path-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("routing-c1-missing-path", &work_dir);
+    config.native_mode = false;
+    let output =
+        run_scripted_bash(&config, &[ScriptedInput::user_line(input)]).expect("scripted bash");
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some(input)
+            && event.component.as_deref() == Some("natural_language")
+    }));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn routing_c1_stale_history_repeated_han_prompt_routes_twice() {
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
+    let input = "解释 git log --format=\"%h (%an)\"";
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-routing-c1-stale-history-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(home_dir.join(".bashrc"), "HISTCONTROL=ignoredups\n").expect("bashrc");
+    let mut config = ShellHostConfig::new("routing-c1-stale-history", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+    config.native_mode = false;
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line(input),
+            ScriptedInput::user_line(input),
+        ],
+    )
+    .expect("scripted bash");
+    let intercepts = output
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(input)
+                && event.component.as_deref() == Some("natural_language")
+        })
+        .count();
+    assert_eq!(intercepts, 2, "{:?}", output.events);
+}
+
+#[test]
+fn routing_c1_tier_b_side_effect_stays_native() {
+    for shell in ["bash", "zsh"] {
+        if shell == "bash" && !bash_supports_command_not_found_handler() {
+            continue;
+        }
+        if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
+            continue;
+        }
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-routing-c1-tier-b-{shell}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        std::fs::create_dir_all(&work_dir).expect("work dir");
+        let side = work_dir.join("side-effect");
+        let input = format!("解释 \"$(touch {})\"", shell_arg(&side));
+        let config = ShellHostConfig::new(format!("routing-c1-tier-b-{shell}"), &work_dir);
+        let output = if shell == "bash" {
+            run_scripted_bash(&config, &[ScriptedInput::user_line(input.clone())])
+        } else {
+            run_scripted_zsh(&config, &[ScriptedInput::user_line(input.clone())])
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+        assert!(side.exists(), "{shell}: command substitution did not run");
+        assert!(!output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(input.as_str())
+        }));
+    }
+}
+
+#[test]
+fn routing_c1_zsh_glob_qualifier_stays_native() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-routing-c1-zsh-glob-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    std::fs::write(work_dir.join("entry"), "x\n").expect("glob entry");
+    let side = work_dir.join("glob-side-effect");
+    let input = format!("解释 *(e:'touch {}':)", side.display());
+    let config = ShellHostConfig::new("routing-c1-zsh-glob", &work_dir);
+    let output = run_scripted_zsh(&config, &[ScriptedInput::user_line(input.clone())])
+        .expect("scripted zsh");
+    assert!(side.exists(), "glob qualifier did not run");
+    assert!(!output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some(input.as_str())
+    }));
+}
+
+#[test]
+fn routing_c1_valid_han_command_stays_native() {
+    for shell in ["bash", "zsh"] {
+        if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
+            continue;
+        }
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-routing-c1-valid-han-{shell}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let bin_dir = work_dir.join("bin");
+        let home_dir = work_dir.join("home");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        std::fs::create_dir_all(&home_dir).expect("home dir");
+        let executable = bin_dir.join("解释");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '__han_exec__:%s\\n' \"$1\"\n",
+        )
+        .expect("han executable");
+        make_executable(&executable);
+        let path = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let rc = "解释函数() { printf '__han_function__:%s\\n' \"$1\"; }\n\
+                  alias 解释别名=\"printf '__han_alias__:%s\\n'\"\n";
+        std::fs::write(
+            home_dir.join(if shell == "bash" { ".bashrc" } else { ".zshrc" }),
+            rc,
+        )
+        .expect("shell rc");
+        let mut config = ShellHostConfig::new(format!("routing-c1-valid-han-{shell}"), &work_dir)
+            .with_env("PATH", path)
+            .with_env("HOME", home_dir.display().to_string());
+        if shell == "zsh" {
+            config = config.with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+        }
+        let inputs = ["解释 ok", "解释函数 ok", "解释别名 ok"];
+        let steps = inputs
+            .iter()
+            .map(|input| ScriptedInput::user_line(*input))
+            .collect::<Vec<_>>();
+        let output = if shell == "bash" {
+            run_scripted_bash(&config, &steps)
+        } else {
+            run_scripted_zsh(&config, &steps)
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+        let terminal = String::from_utf8_lossy(&output.terminal_output);
+        for marker in ["__han_exec__:ok", "__han_function__:ok", "__han_alias__:ok"] {
+            assert!(terminal.contains(marker), "{shell}: {marker}: {terminal}");
+        }
+        for input in inputs {
+            assert!(!output.events.iter().any(|event| {
+                event.kind == ShellEventKind::UserInputIntercepted
+                    && event.input.as_deref() == Some(input)
+            }));
+        }
+    }
+}
+
+fn assert_routing_c2_quote_cnf(shell: &str) {
+    if shell == "bash" && !bash_supports_command_not_found_handler() {
+        return;
+    }
+    if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+    let inputs = ["'子曰 三人行'后续 请解释", "\"子 曰\"后续 请解释"];
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-routing-c2-quote-{shell}-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new(format!("routing-c2-quote-{shell}"), &work_dir);
+    let steps = inputs
+        .iter()
+        .map(|input| ScriptedInput::user_line(*input))
+        .collect::<Vec<_>>();
+    let output = if shell == "bash" {
+        run_scripted_bash(&config, &steps)
+    } else {
+        run_scripted_zsh(&config, &steps)
+    }
+    .unwrap_or_else(|error| panic!("{shell}: {error}"));
+    for input in inputs {
+        assert!(
+            output.events.iter().any(|event| {
+                event.kind == ShellEventKind::UserInputIntercepted
+                    && event.input.as_deref() == Some(input)
+                    && event.component.as_deref() == Some("natural_language")
+            }),
+            "{shell}: {input:?}: {:?}\n{}",
+            output.events,
+            String::from_utf8_lossy(&output.terminal_output)
+        );
+    }
+}
+
+#[test]
+fn routing_c2_bash_quote_cnf_routes_to_agent() {
+    assert_routing_c2_quote_cnf("bash");
+}
+
+#[test]
+fn routing_c2_zsh_quote_cnf_routes_to_agent() {
+    assert_routing_c2_quote_cnf("zsh");
+}
+
+#[test]
+fn routing_c2_expansion_drift_and_matched_arguments_stay_native() {
+    for shell in ["bash", "zsh"] {
+        if shell == "bash" && !bash_supports_command_not_found_handler() {
+            continue;
+        }
+        if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
+            continue;
+        }
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-routing-c2-drift-{shell}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let home_dir = work_dir.join("home");
+        std::fs::create_dir_all(&home_dir).expect("home dir");
+        std::fs::write(work_dir.join("match.log"), "x\n").expect("glob match");
+        let side = work_dir.join("alias-side");
+        let rc = format!("alias 解释='解释; touch {}'\n", side.display());
+        std::fs::write(
+            home_dir.join(if shell == "bash" { ".bashrc" } else { ".zshrc" }),
+            rc,
+        )
+        .expect("shell rc");
+        let mut config = ShellHostConfig::new(format!("routing-c2-drift-{shell}"), &work_dir)
+            .with_env("HOME", home_dir.display().to_string());
+        if shell == "zsh" {
+            config = config.with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+        }
+        let alias_input = "解释";
+        let glob_input = "说明 *.log";
+        let cd_input = format!("cd {}", shell_arg(&work_dir));
+        let output = if shell == "bash" {
+            run_scripted_bash(
+                &config,
+                &[
+                    ScriptedInput::user_line(cd_input.clone()),
+                    ScriptedInput::user_line(alias_input),
+                    ScriptedInput::user_line(glob_input),
+                ],
+            )
+        } else {
+            run_scripted_zsh(
+                &config,
+                &[
+                    ScriptedInput::user_line(cd_input),
+                    ScriptedInput::user_line(alias_input),
+                    ScriptedInput::user_line(glob_input),
+                ],
+            )
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+        assert!(side.exists(), "{shell}: alias side effect missing");
+        for input in [alias_input, glob_input] {
+            assert!(
+                !output.events.iter().any(|event| {
+                    event.kind == ShellEventKind::UserInputIntercepted
+                        && event.input.as_deref() == Some(input)
+                }),
+                "{shell}: {input}: {:?}",
+                output.events
+            );
+        }
+    }
+}
+
+#[test]
+fn routing_c2_long_mixed_language_prompts_route_to_agent() {
+    // Issue #2053: zsh preexec abbreviates its second argument for long
+    // inputs; comparing the canonicalized command against it produced a
+    // false expansion-drift signal that pushed long CJK/ASCII prompts to
+    // the native command-not-found path instead of the Agent. Cover both
+    // sides of the abbreviated-text boundary plus a Chinese/English space
+    // variation, and keep bash as the consistency control.
+    let inputs = [
+        // Above the abbreviation boundary (the original user report).
+        "刚才没有恢复，不过 macOS 显示管理器认为屏幕在线",
+        // Space removed at the Chinese/English boundary.
+        "刚才没有恢复，不过macOS 显示管理器认为屏幕在线",
+        // Below the abbreviation boundary.
+        "刚才没有恢复 请解释",
+    ];
+    for shell in ["bash", "zsh"] {
+        if shell == "bash" && !bash_supports_command_not_found_handler() {
+            continue;
+        }
+        if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
+            continue;
+        }
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-routing-c2-long-nl-{shell}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let config = ShellHostConfig::new(format!("routing-c2-long-nl-{shell}"), &work_dir);
+        let steps = inputs
+            .iter()
+            .map(|input| ScriptedInput::user_line(*input))
+            .collect::<Vec<_>>();
+        let output = if shell == "bash" {
+            run_scripted_bash(&config, &steps)
+        } else {
+            run_scripted_zsh(&config, &steps)
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+        let terminal = String::from_utf8_lossy(&output.terminal_output);
+        for input in inputs {
+            let first_word = input.split_whitespace().next().expect("first word");
+            assert!(
+                !terminal.contains(&format!("command not found: {first_word}")),
+                "{shell}: {input:?} hit native command-not-found: {terminal}"
+            );
+            assert!(
+                output.events.iter().any(|event| {
+                    event.kind == ShellEventKind::UserInputIntercepted
+                        && event.input.as_deref() == Some(input)
+                        && event.component.as_deref() == Some("natural_language")
+                }),
+                "{shell}: {input:?}: {:?}\n{terminal}",
+                output.events
+            );
+            assert!(
+                !output.events.iter().any(|event| {
+                    event.kind == ShellEventKind::CommandFailed
+                        && event.command.as_deref() == Some(input)
+                        && event.exit_code == Some(127)
+                }),
+                "{shell}: {input:?} failed with exit 127: {:?}\n{terminal}",
+                output.events
+            );
+        }
+    }
+}
+
+#[test]
+fn routing_c2_nested_provenance_marks_only_the_outer_missing_command() {
+    let input = "解释 \"$(解释)\"";
+    for shell in ["bash", "zsh"] {
+        if shell == "bash" && !bash_supports_command_not_found_handler() {
+            continue;
+        }
+        if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
+            continue;
+        }
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-routing-c2-nested-{shell}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let config = ShellHostConfig::new(format!("routing-c2-nested-{shell}"), &work_dir);
+        let output = if shell == "bash" {
+            run_scripted_bash(&config, &[ScriptedInput::user_line(input)])
+        } else {
+            run_scripted_zsh(&config, &[ScriptedInput::user_line(input)])
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+        let proven = output
+            .events
+            .iter()
+            .filter(|event| {
+                event
+                    .routing
+                    .as_ref()
+                    .is_some_and(|routing| routing.top_level_missing && routing.proven)
+            })
+            .count();
+        assert_eq!(proven, 1, "{shell}: {:?}", output.events);
+        assert!(!output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(input)
+        }));
+    }
+}
+
+#[test]
+fn routing_c2_nested_provenance_rejects_same_token_from_shell_function() {
+    for shell in ["bash", "zsh"] {
+        if shell == "bash" && !bash_supports_command_not_found_handler() {
+            continue;
+        }
+        if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
+            continue;
+        }
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-routing-c2-function-nested-{shell}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let home_dir = work_dir.join("home");
+        std::fs::create_dir_all(&home_dir).expect("home dir");
+        let rc = if shell == "bash" {
+            "解释() { unset -f 解释; 解释; }\n"
+        } else {
+            "解释() { unfunction 解释; 解释; }\n"
+        };
+        std::fs::write(
+            home_dir.join(if shell == "bash" { ".bashrc" } else { ".zshrc" }),
+            rc,
+        )
+        .expect("shell rc");
+        let mut config =
+            ShellHostConfig::new(format!("routing-c2-function-nested-{shell}"), &work_dir)
+                .with_env("HOME", home_dir.display().to_string());
+        if shell == "zsh" {
+            config = config.with_env("COSH_ZDOTDIR_ORIG", home_dir.display().to_string());
+        }
+        let output = if shell == "bash" {
+            run_scripted_bash(&config, &[ScriptedInput::user_line("解释")])
+        } else {
+            run_scripted_zsh(&config, &[ScriptedInput::user_line("解释")])
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+        assert!(
+            !output.events.iter().any(|event| {
+                event.kind == ShellEventKind::UserInputIntercepted
+                    || event
+                        .routing
+                        .as_ref()
+                        .is_some_and(|routing| routing.top_level_missing && routing.proven)
+            }),
+            "{shell}: {:?}",
+            output.events
+        );
+    }
+}
+
+#[test]
+fn routing_c2_delegate_unsupported_escape_and_matched_glob() {
+    for shell in ["bash", "zsh"] {
+        if shell == "bash" && !bash_supports_command_not_found_handler() {
+            continue;
+        }
+        if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
+            continue;
+        }
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-routing-c2-unsupported-{shell}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        std::fs::create_dir_all(&work_dir).expect("work dir");
+        std::fs::write(work_dir.join("中文a"), "x\n").expect("glob match");
+        let inputs = [r"解释\ 一下", "中文?"];
+        let config = ShellHostConfig::new(format!("routing-c2-unsupported-{shell}"), &work_dir);
+        let mut steps = vec![ScriptedInput::user_line(format!(
+            "cd {}",
+            shell_arg(&work_dir)
+        ))];
+        steps.extend(inputs.iter().map(|input| ScriptedInput::user_line(*input)));
+        let output = if shell == "bash" {
+            run_scripted_bash(&config, &steps)
+        } else {
+            run_scripted_zsh(&config, &steps)
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+        for input in inputs {
+            assert!(
+                !output.events.iter().any(|event| {
+                    event.kind == ShellEventKind::UserInputIntercepted
+                        && event.input.as_deref() == Some(input)
+                }),
+                "{shell}: {input}: {:?}",
+                output.events
+            );
+        }
+    }
+}
+
+#[test]
+fn routing_c2_valid_quoted_command_and_inner_whitespace_keep_their_owners() {
+    for shell in ["bash", "zsh"] {
+        if shell == "zsh" && Command::new("zsh").arg("--version").output().is_err() {
+            continue;
+        }
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-routing-c2-valid-quoted-{shell}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let bin_dir = work_dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let executable = bin_dir.join("中文 命令");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '__quoted_exec__:%s\\n' \"$1\"\n",
+        )
+        .expect("quoted executable");
+        make_executable(&executable);
+        let path = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let config = ShellHostConfig::new(format!("routing-c2-valid-quoted-{shell}"), &work_dir)
+            .with_env("PATH", path);
+        let native = "\"中文 命令\" ok";
+        let natural = "解释  一下";
+        let output = if shell == "bash" {
+            run_scripted_bash(
+                &config,
+                &[
+                    ScriptedInput::user_line(native),
+                    ScriptedInput::user_line(natural),
+                ],
+            )
+        } else {
+            run_scripted_zsh(
+                &config,
+                &[
+                    ScriptedInput::user_line(native),
+                    ScriptedInput::user_line(natural),
+                ],
+            )
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+        assert!(
+            String::from_utf8_lossy(&output.terminal_output).contains("__quoted_exec__:ok"),
+            "{shell}: {}",
+            String::from_utf8_lossy(&output.terminal_output)
+        );
+        assert!(!output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some(native)
+        }));
+        if shell == "zsh" || bash_supports_command_not_found_handler() {
+            assert!(
+                output.events.iter().any(|event| {
+                    event.kind == ShellEventKind::UserInputIntercepted
+                        && event.input.as_deref() == Some(natural)
+                }),
+                "{shell}: {:?}",
+                output.events
+            );
+        }
+    }
+}
+
+// Issue #1919 fail-closed counterproofs: the missing-path branch must never
+// fire for existing paths (I1/D6) or plain-English typo paths (I2/D3) —
+// bash native behavior stays byte-identical. (The former I3 secret
+// counterproof is retired by #2138: secret-bearing missing-path NL now
+// intercepts with the sensitive flag, anchored in
+// shell_host_bash_sensitive_missing_path_natural_language_intercepts.)
+#[test]
+fn shell_host_bash_missing_path_counterproofs_stay_native() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-missing-path-native-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+    // I1: existing executable script keeps running natively.
+    let probe_path = work_dir.join("probe-1919.sh");
+    let executed_path = work_dir.join("probe-1919-executed");
+    std::fs::write(
+        &probe_path,
+        format!("#!/bin/sh\ntouch {}\n", executed_path.display()),
+    )
+    .expect("probe script");
+    make_executable(&probe_path);
+    // D6: existing but non-executable file as first word stays native.
+    let data_path = work_dir.join("data-1919.txt");
+    std::fs::write(&data_path, "plain data\n").expect("data file");
+    // Review counterproofs: dangling symlink and permission-opaque paths
+    // are not provably ENOENT, so the missing-path branch must stand down
+    // and leave the native 126/127 outcome untouched.
+    let dangling_path = work_dir.join("dangling-1919");
+    std::os::unix::fs::symlink(work_dir.join("no-such-target"), &dangling_path)
+        .expect("dangling symlink");
+    let opaque_dir = work_dir.join("opaque-1919");
+    std::fs::create_dir_all(&opaque_dir).expect("opaque dir");
+    let opaque_file = opaque_dir.join("real-file");
+    std::fs::write(&opaque_file, "x\n").expect("opaque file");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&opaque_dir, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod opaque");
+    }
+
+    // UTF-8 locale for the same readline multi-byte reason as the positive
+    // intercept case above.
+    let mut config = ShellHostConfig::new("missing-path-native", &work_dir);
+    config
+        .env_overrides
+        .push(("LANG".to_string(), "C.UTF-8".to_string()));
+    config
+        .env_overrides
+        .push(("LC_ALL".to_string(), "C.UTF-8".to_string()));
+    let existing_exec = probe_path.display().to_string();
+    let existing_data = format!("{} 帮我读一下", data_path.display());
+    let dangling_input = format!("{} 帮我读一下", dangling_path.display());
+    let opaque_input = format!("{} 帮我读一下", opaque_file.display());
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line(existing_exec.clone()),
+            ScriptedInput::user_line("/usr/bin/nonexistent-cosh-1919-probe"),
+            ScriptedInput::user_line(existing_data.clone()),
+            ScriptedInput::user_line(dangling_input.clone()),
+            ScriptedInput::user_line(opaque_input.clone()),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    // I1: the existing script actually executed.
+    assert!(
+        executed_path.exists(),
+        "existing script must run natively: {:?}",
+        output.events
+    );
+    // No missing-path input may surface as a natural-language intercept.
+    assert!(
+        !output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.component.as_deref() == Some("natural_language")
+        }),
+        "{:?}",
+        output.events
+    );
+    // I2: the plain-English typo path keeps the native bash error.
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("No such file or directory"), "{terminal}");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&opaque_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore opaque");
+    }
 }

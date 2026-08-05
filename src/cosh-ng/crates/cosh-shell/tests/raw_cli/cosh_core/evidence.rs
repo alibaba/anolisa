@@ -196,7 +196,13 @@ printf '%s\n' '{"type":"control_response","response":{"subtype":"success","reque
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-duplicate-read","model":"cosh-core-test"}'
 read -r user_message
 printf '%s\n' '{"type":"control_request","request_id":"ctrl-duplicate-read","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"i=1; while [ $i -le 120 ]; do printf \"duplicate-read-line-%03d xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n\" \"$i\"; i=$((i+1)); done"},"tool_use_id":"toolu-duplicate-read"}}'
-IFS= read -r response1 || exit 2
+# #1940: skip approval receipts that now precede the decision line.
+while IFS= read -r response1; do
+  case "$response1" in
+    *'"type":"approval_receipt"'*) continue ;;
+    *) break ;;
+  esac
+done
 case "$response1" in
   *'"behavior":"host_executed_shell"'*'ShellCommandCompleted evidence'*'output_id: terminal-output://raw-session-'*) ;;
   *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-duplicate-read","is_error":true,"result":"missing host-executed output id"}'; exit 1 ;;
@@ -349,7 +355,13 @@ printf '%s\n' '{"type":"control_response","response":{"subtype":"success","reque
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-cosh-core-bypass-read","model":"cosh-core-test"}'
 read -r user_message
 printf '%s\n' '{"type":"control_request","request_id":"ctrl-bypass-read","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"printf '\''bypass-one\\nbypass-two\\nbypass-three\\n'\''"},"tool_use_id":"toolu-bypass-read"}}'
-IFS= read -r response1 || exit 2
+# #1940: skip approval receipts that now precede the decision line.
+while IFS= read -r response1; do
+  case "$response1" in
+    *'"type":"approval_receipt"'*) continue ;;
+    *) break ;;
+  esac
+done
 case "$response1" in
   *'"behavior":"host_executed_shell"'*'ShellCommandCompleted evidence'*'output_id: terminal-output://raw-session-'*) ;;
   *) printf '%s\n' '{"type":"result","subtype":"error","session_id":"sess-cosh-core-bypass-read","is_error":true,"result":"missing bypass host-executed output id"}'; exit 1 ;;

@@ -35,8 +35,40 @@ const MAX_DISCOVERED_TOOL_BYTES: usize = 1024 * 1024;
 pub(super) fn initialize_params(protocol_version: &str) -> Value {
     json!({
         "protocolVersion": protocol_version,
-        "capabilities": {},
+        "capabilities": {
+            "roots": {}
+        },
         "clientInfo": { "name": CLIENT_NAME, "version": CLIENT_VERSION }
+    })
+}
+
+/// Builds a JSON-RPC response for a `roots/list` request from the server.
+///
+/// Returns the given workspace root as the sole entry. The caller must pass
+/// the session-level project root — not the process cwd — so that a
+/// filesystem server resolves the correct project when the shell's cwd
+/// differs from the cosh-core process directory.
+pub(super) fn roots_response(id: &Value, workspace_root: &std::path::Path) -> Value {
+    debug_assert!(
+        workspace_root.is_absolute(),
+        "workspace_root passed to roots_response must be absolute"
+    );
+
+    // Use Url::from_file_path for correct percent-encoding of special characters,
+    // matching copilot-shell's pathToFileURL() behaviour. Callers now absolutize
+    // via CliArgs::workspace_root(), so this conversion is expected to succeed.
+    let uri = reqwest::Url::from_file_path(workspace_root)
+        .expect("absolute workspace_root should produce a valid file:// URI")
+        .to_string();
+    let name = workspace_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("workspace")
+        .to_string();
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": { "roots": [{ "uri": uri, "name": name }] }
     })
 }
 
@@ -57,20 +89,27 @@ pub(super) fn validate_http_endpoint(endpoint: &str) -> Result<reqwest::Url, Str
 }
 
 /// Runs an explicit MCP management command without starting the agent runtime.
-pub(crate) async fn run_command(args: McpArgs, config: &CoreConfig) -> Result<(), String> {
+pub(crate) async fn run_command(
+    args: McpArgs,
+    config: &CoreConfig,
+    workspace_root: &std::path::Path,
+) -> Result<(), String> {
     match args.command {
         McpCommand::List => print_server_list(config),
         McpCommand::Connect { server } => {
-            let inspection = inspect_server(&server, config, "connected", true).await?;
+            let inspection =
+                inspect_server(&server, config, "connected", true, workspace_root).await?;
             state::remove_disabled(MCP_SERVERS_STATE, &server)?;
             print_json(&inspection)
         }
         McpCommand::Inspect { server } => {
-            let inspection = inspect_server(&server, config, "inspected", false).await?;
+            let inspection =
+                inspect_server(&server, config, "inspected", false, workspace_root).await?;
             print_json(&inspection)
         }
         McpCommand::Refresh { server } => {
-            let inspection = inspect_server(&server, config, "refreshed", false).await?;
+            let inspection =
+                inspect_server(&server, config, "refreshed", false, workspace_root).await?;
             print_json(&inspection)
         }
         McpCommand::Disconnect { server } => {
@@ -168,6 +207,7 @@ async fn inspect_server(
     config: &CoreConfig,
     action: &'static str,
     allow_disconnected: bool,
+    workspace_root: &std::path::Path,
 ) -> Result<McpServerInspection, String> {
     let server_config = configured_server(config, server)?;
     if !allow_disconnected && state::load_disabled(MCP_SERVERS_STATE).contains(server) {
@@ -175,7 +215,7 @@ async fn inspect_server(
             "MCP server '{server}' is disconnected; run 'cosh-core mcp connect {server}'"
         ));
     }
-    let (client, tools) = McpClient::connect(server, server_config).await?;
+    let (client, tools) = McpClient::connect(server, server_config, workspace_root).await?;
     let tools = tools
         .into_iter()
         .filter(|tool| tool_is_allowed(&tool.name, server_config.allowed_tools.as_deref()))
@@ -201,6 +241,7 @@ async fn inspect_server(
 pub async fn register_configured_tools(
     registry: &mut ToolRegistry,
     servers: &HashMap<String, McpServerConfig>,
+    workspace_root: &std::path::Path,
 ) {
     let disabled = state::load_disabled(MCP_SERVERS_STATE);
     let mut names: Vec<_> = servers.keys().collect();
@@ -214,7 +255,7 @@ pub async fn register_configured_tools(
         let Some(config) = servers.get(server_name) else {
             continue;
         };
-        match McpClient::connect(server_name, config).await {
+        match McpClient::connect(server_name, config, workspace_root).await {
             Ok((client, tools)) => {
                 let client = Arc::new(client);
                 for tool in tools {
@@ -331,6 +372,7 @@ impl McpClient {
     async fn connect(
         server_name: &str,
         config: &McpServerConfig,
+        workspace_root: &std::path::Path,
     ) -> Result<(Self, Vec<DiscoveredTool>), String> {
         if config.timeout_ms == 0 {
             return Err("MCP timeout_ms must be greater than zero".to_string());
@@ -351,12 +393,15 @@ impl McpClient {
                     url,
                     config.bearer_token.as_deref(),
                     config.oauth.resource.as_deref(),
+                    workspace_root.to_path_buf(),
                 )?),
                 HTTP_MCP_PROTOCOL_VERSION,
             ),
             (None, true) => return Err("MCP command or url must be configured".to_string()),
             (None, false) => (
-                McpConnection::Stdio(StdioConnection::spawn(config).await?),
+                McpConnection::Stdio(
+                    StdioConnection::spawn(config, workspace_root.to_path_buf()).await?,
+                ),
                 MCP_PROTOCOL_VERSION,
             ),
         };
@@ -381,6 +426,7 @@ impl McpClient {
                 url,
                 config.bearer_token.as_deref(),
                 config.oauth.resource.as_deref(),
+                workspace_root.to_path_buf(),
             )
             .await?;
             *client.connection.lock().await = McpConnection::LegacyHttp(legacy);
@@ -647,10 +693,14 @@ struct StdioConnection {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_request_id: u64,
+    workspace_root: std::path::PathBuf,
 }
 
 impl StdioConnection {
-    async fn spawn(config: &McpServerConfig) -> Result<Self, String> {
+    async fn spawn(
+        config: &McpServerConfig,
+        workspace_root: std::path::PathBuf,
+    ) -> Result<Self, String> {
         let executable = expand_env_vars(&config.command);
         let args: Vec<_> = config.args.iter().map(|arg| expand_env_vars(arg)).collect();
         let mut command = Command::new(&executable);
@@ -678,6 +728,7 @@ impl StdioConnection {
             stdin,
             stdout: BufReader::new(stdout),
             next_request_id: 1,
+            workspace_root,
         })
     }
 
@@ -785,14 +836,14 @@ impl StdioConnection {
             .get("method")
             .and_then(Value::as_str)
             .ok_or_else(|| "MCP server request has no method".to_string())?;
-        let response = if method == "ping" {
-            json!({ "jsonrpc": "2.0", "id": id, "result": {} })
-        } else {
-            json!({
+        let response = match method {
+            "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
+            "roots/list" => roots_response(&id, &self.workspace_root),
+            _ => json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "error": { "code": -32601, "message": "Method not found" }
-            })
+            }),
         };
         self.write_message(response).await
     }
@@ -934,11 +985,11 @@ mod tests {
     use super::*;
 
     fn test_context() -> ToolContext {
-        ToolContext {
-            cwd: PathBuf::from("/tmp"),
-            session_id: "test".to_string(),
-            project_root: PathBuf::from("/tmp"),
-        }
+        ToolContext::new(
+            PathBuf::from("/tmp"),
+            "test".to_string(),
+            PathBuf::from("/tmp"),
+        )
     }
 
     fn fake_server(script: &str) -> (tempfile::TempDir, McpServerConfig) {
@@ -1020,8 +1071,26 @@ mod tests {
             Value::String(HTTP_MCP_PROTOCOL_VERSION.to_string())
         );
         assert!(params["capabilities"].is_object());
+        assert!(params["capabilities"]["roots"].is_object());
         assert!(params["clientInfo"]["name"].is_string());
         assert!(params["clientInfo"]["version"].is_string());
+    }
+
+    #[test]
+    fn roots_response_returns_workspace_root() {
+        let workspace = std::path::PathBuf::from("/tmp/test-workspace");
+        let response = roots_response(&json!(42), &workspace);
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 42);
+        let roots = response["result"]["roots"]
+            .as_array()
+            .expect("roots should be an array");
+        assert_eq!(roots.len(), 1);
+        assert_eq!(
+            roots[0]["uri"].as_str().unwrap(),
+            "file:///tmp/test-workspace"
+        );
+        assert_eq!(roots[0]["name"].as_str().unwrap(), "test-workspace");
     }
 
     #[test]
@@ -1079,8 +1148,9 @@ done
         );
         let mut config = CoreConfig::default();
         config.mcp.servers.insert("fake".to_string(), server);
+        let workspace = std::path::PathBuf::from("/tmp/test-workspace");
 
-        let inspection = inspect_server("fake", &config, "inspected", false)
+        let inspection = inspect_server("fake", &config, "inspected", false, &workspace)
             .await
             .unwrap();
         assert_eq!(inspection.tools.len(), 1);
@@ -1093,14 +1163,17 @@ done
                 },
             },
             &config,
+            &workspace,
         )
         .await
         .unwrap();
         assert!(state::load_disabled(MCP_SERVERS_STATE).contains("fake"));
-        assert!(inspect_server("fake", &config, "inspected", false)
-            .await
-            .unwrap_err()
-            .contains("is disconnected"));
+        assert!(
+            inspect_server("fake", &config, "inspected", false, &workspace)
+                .await
+                .unwrap_err()
+                .contains("is disconnected")
+        );
 
         run_command(
             McpArgs {
@@ -1109,12 +1182,13 @@ done
                 },
             },
             &config,
+            &workspace,
         )
         .await
         .unwrap();
         assert!(!state::load_disabled(MCP_SERVERS_STATE).contains("fake"));
 
-        let refreshed = inspect_server("fake", &config, "refreshed", false)
+        let refreshed = inspect_server("fake", &config, "refreshed", false, &workspace)
             .await
             .unwrap();
         assert_eq!(refreshed.action, "refreshed");
@@ -1142,8 +1216,9 @@ done
         let mut servers = HashMap::new();
         servers.insert("fake".to_string(), config);
         let mut registry = ToolRegistry::new();
+        let workspace = std::path::PathBuf::from("/tmp/test-workspace");
 
-        register_configured_tools(&mut registry, &servers).await;
+        register_configured_tools(&mut registry, &servers, &workspace).await;
         let tool = registry
             .get("mcp__fake__echo")
             .expect("discovered MCP tool");
@@ -1180,7 +1255,10 @@ done
 "#,
         );
 
-        let (_, tools) = McpClient::connect("fake", &config).await.unwrap();
+        let workspace = std::path::PathBuf::from("/tmp/test-workspace");
+        let (_, tools) = McpClient::connect("fake", &config, &workspace)
+            .await
+            .unwrap();
         assert!(tools.is_empty());
     }
 
@@ -1203,7 +1281,8 @@ done
 "#,
         );
 
-        let error = match McpClient::connect("fake", &config).await {
+        let workspace = std::path::PathBuf::from("/tmp/test-workspace");
+        let error = match McpClient::connect("fake", &config, &workspace).await {
             Ok(_) => panic!("repeated cursor should fail MCP tool discovery"),
             Err(error) => error,
         };
@@ -1226,8 +1305,9 @@ done
         let mut registry = ToolRegistry::new();
         let mut servers = HashMap::new();
         servers.insert("fake".to_string(), config);
+        let workspace = std::path::PathBuf::from("/tmp/test-workspace");
 
-        register_configured_tools(&mut registry, &servers).await;
+        register_configured_tools(&mut registry, &servers, &workspace).await;
         assert!(registry.get("mcp__fake__echo").is_none());
     }
 
@@ -1242,10 +1322,32 @@ done
 "#,
         );
 
-        let error = match McpClient::connect("fake", &config).await {
+        let workspace = std::path::PathBuf::from("/tmp/test-workspace");
+        let error = match McpClient::connect("fake", &config, &workspace).await {
             Ok(_) => panic!("oversized MCP message should fail"),
             Err(error) => error,
         };
         assert!(error.contains("MCP message exceeds maximum size"));
+    }
+
+    #[test]
+    fn roots_response_uses_workspace_root_not_process_cwd() {
+        // Regression: roots/list must reflect the session workspace root passed
+        // by cosh-shell, not std::env::current_dir().
+        let workspace = std::path::PathBuf::from("/tmp/provided-workspace");
+        let cwd = std::env::current_dir().expect("cwd is available");
+        assert_ne!(
+            workspace, cwd,
+            "test requires workspace to differ from the cosh-core cwd"
+        );
+
+        let response = roots_response(&json!("request-id"), &workspace);
+        let roots = response["result"]["roots"].as_array().expect("roots array");
+        assert_eq!(roots.len(), 1);
+        assert_eq!(
+            roots[0]["uri"].as_str().unwrap(),
+            "file:///tmp/provided-workspace"
+        );
+        assert_eq!(roots[0]["name"].as_str().unwrap(), "provided-workspace");
     }
 }

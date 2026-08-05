@@ -248,6 +248,25 @@ fn governance_outputs_executable_policy_decisions() {
 }
 
 #[test]
+fn governance_preserves_hook_notification_context() {
+    let governed = govern_agent_events(
+        &[AgentEvent::HookNotification {
+            run_id: "run-1".to_string(),
+            hook_name: "sandbox-guard".to_string(),
+            message: "blocked reboot".to_string(),
+            tool_use_id: Some("tool-1".to_string()),
+            decision: Some("block".to_string()),
+        }],
+        &Policy::default(),
+    );
+
+    assert_eq!(
+        governed.events[0].display_text,
+        "Hook: sandbox-guard\nMessage: blocked reboot\nDecision: block"
+    );
+}
+
+#[test]
 fn governance_display_text_uses_requested_language_for_shell_owned_fallbacks() {
     let events = vec![
         AgentEvent::StatusChanged {
@@ -305,6 +324,15 @@ fn governance_display_text_uses_requested_language_for_shell_owned_fallbacks() {
         AgentEvent::AgentFailed {
             run_id: "run-1".to_string(),
             error: "analysis returned an error".to_string(),
+            error_code: None,
+            max_turns: None,
+        },
+        AgentEvent::HookNotification {
+            run_id: "run-1".to_string(),
+            hook_name: String::new(),
+            message: "  ".to_string(),
+            tool_use_id: Some("tool-1".to_string()),
+            decision: None,
         },
     ];
 
@@ -328,12 +356,18 @@ fn governance_display_text_uses_requested_language_for_shell_owned_fallbacks() {
     assert!(text.contains("Agent 已取消"), "{text}");
     assert!(text.contains("原因: 用户请求取消"), "{text}");
     assert!(text.contains("分析返回错误"), "{text}");
+    assert!(text.contains("Hook: 未知 Hook"), "{text}");
+    assert!(text.contains("消息: 未提供消息"), "{text}");
+    assert!(text.contains("决策: 未指定"), "{text}");
     assert!(!text.contains("Approval required:"), "{text}");
     assert!(!text.contains("analysis returned an error"), "{text}");
     assert!(!text.contains("Blocked: user approval required"), "{text}");
     assert!(!text.contains("recommended commands:"), "{text}");
     assert!(!text.contains("Tool output:"), "{text}");
     assert!(!text.contains("Question: Agent needs your input"), "{text}");
+    assert!(!text.contains("unknown hook"), "{text}");
+    assert!(!text.contains("no message provided"), "{text}");
+    assert!(!text.contains("unspecified"), "{text}");
 }
 
 #[test]

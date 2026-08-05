@@ -236,6 +236,8 @@ pub(in crate::adapter) fn terminal_events_for_session_commit(
                 terminal_events.push(AgentEvent::AgentFailed {
                     run_id: run_id.to_string(),
                     error: format!("[{}] {}", error.code, error.message),
+                    error_code: None,
+                    max_turns: None,
                 });
             }
             terminal_events
@@ -389,18 +391,46 @@ pub(in crate::adapter) fn commit_pending_session_for_scope(
 }
 
 /// Returns whether a failed turn still leaves a safely persisted session that
-/// must remain selectable for manual compaction.
+/// should remain active for continuation or manual compaction.
+///
+/// Context-limit and per-request turn-budget failures stop the current run only
+/// after cosh-core has already written the transcript, so the provider
+/// conversation stays usable: the next user message resumes it with a fresh turn
+/// budget. A persistence-phase failure proves the opposite, so it never
+/// qualifies.
 pub(in crate::adapter) fn retain_context_session(
     terminal_events: &[AgentEvent],
     session_error_phase: Option<&str>,
+    session_resumable: Option<bool>,
 ) -> bool {
-    session_error_phase != Some("persist")
+    session_resumable == Some(true)
+        && session_error_phase != Some("persist")
         && terminal_events.iter().any(|event| {
             matches!(
                 event,
-                AgentEvent::AgentFailed { error, .. } if error.starts_with("context_limit:")
+                AgentEvent::AgentFailed { error, error_code, .. }
+                    if error.starts_with("context_limit:")
+                        || error_code.as_deref() == Some("max_turns")
             )
         })
+}
+
+/// Returns the effective configured turn limit from structured failure metadata.
+pub(crate) fn max_turn_limit(terminal_events: &[AgentEvent]) -> Option<u32> {
+    terminal_events.iter().find_map(|event| {
+        let AgentEvent::AgentFailed {
+            error_code,
+            max_turns,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        (error_code.as_deref() == Some("max_turns"))
+            .then_some(*max_turns)
+            .flatten()
+            .filter(|limit| *limit > 0)
+    })
 }
 
 pub(in crate::adapter) fn invalidate_resume_on_session_failure(

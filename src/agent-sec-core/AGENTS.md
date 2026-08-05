@@ -377,12 +377,18 @@ enabled = true
 timeout = 10
 include_low_confidence = false
 warning_ttl_seconds = 300
+policy = "observe"
 ```
 
 - `enabled = false` → 能力完全不注册
-- `enable_block = false` → 检测到风险时仅记 WARNING 日志，不阻断工具调用
-- `enable_block = true` → 检测到 deny/warn 时阻断工具调用
-- `pii-scan-user-input` 仅扫描本轮用户输入，warning-only，不扫描 tool output
+- `code-scan.enable_block = false` → 检测到风险时仅记 WARNING 日志，不阻断工具调用
+- `code-scan.enable_block = true` → 检测到 deny/warn 时阻断工具调用
+- `pii-scan-user-input.policy` 支持 `observe`、`warn`、`ask`、`block`
+- PII scanner 覆盖本轮用户输入、tool 参数/结果和最终模型回复；不扫描 history、memory
+  或 RAG context
+- `block + deny` 在 `pre_tool_call` 返回原生 block；`ask` 以及
+  `pre_llm_call` / `post_tool_call` 的不可阻断边界 fallback 为 warn
+- 最终模型回复中的 PII 继续由 `transform_llm_output` 使用脱敏文本替换
 
 ### 7. 测试
 
@@ -453,7 +459,10 @@ Do NOT write guidelines from design intent or mental models. Write them AFTER ve
 ### Gotchas to Warn About
 - Code Scanner verdict enum defines `pass` / `warn` / `deny` / `error`. Built-in rules currently produce `warn` or `pass`; `deny` and `error` are available for custom/LLM-driven rules. Do not invent levels outside this enum (no "critical", no "info").
 - Skill Ledger has exactly 6 states: pass / none / drifted / warn / deny / tampered. The state table must always appear in full when documenting Skill Ledger.
-- Default plugin behavior is observe-only (fail-open). Users must explicitly enable blocking — always document both modes.
+- Default plugin behavior should minimize unexpected disruption. Any default behavior that
+  interrupts execution or requires user interaction must be an explicit capability-level product
+  decision, covered by tests and documented with host-specific fallbacks and non-interactive
+  behavior. Infrastructure failures should remain fail-open unless explicitly specified otherwise.
 
 ### Terminology
 - "Security Baseline" not "hardening scan" (the feature name in CLI is `harden`, but user docs should call the concept "Security Baseline")

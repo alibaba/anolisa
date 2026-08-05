@@ -829,12 +829,126 @@ pub struct CostRatioMetrics {
     pub m16_churn_share: f64,
 }
 
+/// One agent turn compressed to a single structured row —— the 轮次账本.
+///
+/// Rust fills every turn without filtering: which turns are wasted is a
+/// semantic call left to the LLM, so pre-filtering here would cap recall.
+/// `turn` is the canonical turn ordinal (identical to `LlmCall::step_id`), and
+/// it is the only step numbering the prevention prompts expose — verdict step
+/// references are validated against it before any token math.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TurnLedgerRow {
+    pub turn: usize,
+    /// Normalized action signature (tool + target, variable parts stripped) so
+    /// that a pitfall recurring many turns apart is visible as the same action.
+    pub action_sig: String,
+    /// Whether every tool call in this turn errored.
+    pub is_error: bool,
+    /// Head of the error text (empty when `is_error` is false).
+    pub err_head: String,
+    /// Files this turn wrote/edited (targets of write-like tools).
+    pub files: Vec<String>,
+    /// Billing-caliber tokens of this turn (replayed context + output).
+    pub tokens: usize,
+    /// Whether a user message immediately precedes this turn.
+    pub after_user: bool,
+    /// Head of that user message (empty when `after_user` is false).
+    pub user_head: String,
+    /// Turn contains a backtrack-looking command (git reset/revert/…).
+    pub backtrack: bool,
+    /// Head of the agent's own narration this turn — direction declarations
+    /// ("found the root cause", "换个思路") live here, and declare-then-overturn
+    /// pairs are the primary signal for direction-level detours.
+    pub say_head: String,
+}
+
+/// A reusable lesson distilled from a prevention-class waste finding.
+///
+/// Two shapes share one struct: 试错型 fills applicability/pitfall/effective_path,
+/// 返工型 fills rule/good_example/bad_example/scope. Empty fields are omitted so
+/// the frontend renders whichever shape came back.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WasteExperience {
+    // ── 试错型 ──
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub applicability: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pitfall: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub effective_path: String,
+    // ── 返工型 ──
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rule: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub good_example: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub bad_example: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scope: String,
+    // ── 共用：五字段归因（本期只进 JSON，不渲染）──
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub defect_type: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub root_cause: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub fix_locus: String,
+}
+
+/// One remediation attached to a detour finding — where to land the lesson
+/// and the paste-ready experience fields backing it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DetourFix {
+    /// 一句话可执行修复动作 (→ WasteItem.optimization).
+    #[serde(default)]
+    pub action: String,
+    /// 落点: Skill / 项目规范 / 系统提示词 / 环境配置 / 框架配置.
+    #[serde(default)]
+    pub locus: String,
+    #[serde(default)]
+    pub applicability: String,
+    #[serde(default)]
+    pub pitfall: String,
+    #[serde(default)]
+    pub effective_path: String,
+}
+
+/// One detour segment reported by the detour prompt.
+///
+/// `turns` carries turn ordinals only — token savings are summed by Rust from
+/// the ledger, never taken from the model.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DetourFinding {
+    #[serde(default)]
+    pub turns: Vec<usize>,
+    /// 一句话现象.
+    #[serde(default)]
+    pub what: String,
+    /// 归因: 可预知坑 / 隐性规范 / 方向选错 / 偶发故障 / 无意义重复.
+    #[serde(default)]
+    pub why: String,
+    /// 归因依据 — must cite turn numbers and ledger facts.
+    #[serde(default)]
+    pub why_detail: String,
+    /// Remediation; `None` is mandatory for 偶发故障 (enforced in Rust).
+    #[serde(default)]
+    pub fix: Option<DetourFix>,
+}
+
+/// LLM verdict for the detour candidate.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DetourVerdict {
+    #[serde(default)]
+    pub detected: bool,
+    #[serde(default)]
+    pub findings: Vec<DetourFinding>,
+}
+
 /// A structured waste candidate: Rust does the deterministic extraction
 /// (grouping, token math, evidence snippets); the LLM only judges whether it's
 /// worth optimizing. One candidate per applicable sub-type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WasteCandidate {
-    pub id: String,                   // stable id, e.g. "tool_output" / "churn"
+    pub id: String,                   // stable id, e.g. "tool_output" / "detour"
     pub category: String,             // 上下文臃肿 / 步骤冗余 / 推理开销
     pub subtype: String,              // 工具输出多 / 反复重试 …
     pub optimization: String,         // 工具输出截断 / 历史消息裁剪 …
@@ -863,6 +977,10 @@ pub struct WasteCandidateSet {
     #[serde(default)]
     pub metrics: CostRatioMetrics,
     pub candidates: Vec<WasteCandidate>,
+    /// 轮次账本 — per-turn structural rows feeding the prevention prompts and
+    /// the token math that backs their verdicts.
+    #[serde(default)]
+    pub ledger: Vec<TurnLedgerRow>,
 }
 
 /// LLM verdict for one candidate (one call per candidate/strategy, parallel).
@@ -896,6 +1014,12 @@ pub struct WasteItem {
     pub savings_kind: String,
     pub confidence: String,  // 高 / 中 / 低
     pub needs_confirm: bool, // 编排层：建议·需确认
+    /// Involved turn ordinals (prevention-class rows only; empty otherwise).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<usize>,
+    /// Reusable lesson distilled from a prevention-class finding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experience: Option<WasteExperience>,
 }
 
 /// Result of LLM cost-waste identification (→ frontend).

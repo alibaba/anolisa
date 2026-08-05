@@ -1,5 +1,5 @@
 diff --git a/src/core/tracking.rs b/src/core/tracking.rs
-index 359e4f6..c543753 100644
+index 359e4f6..0a7507b 100644
 --- a/src/core/tracking.rs
 +++ b/src/core/tracking.rs
 @@ -1358,6 +1358,9 @@ impl TimedExecution {
@@ -12,7 +12,7 @@ index 359e4f6..c543753 100644
          if let Ok(tracker) = Tracker::new() {
              let _ = tracker.record(
                  original_cmd,
-@@ -1419,6 +1422,159 @@ pub fn args_display(args: &[OsString]) -> String {
+@@ -1419,5 +1422,247 @@ pub fn args_display(args: &[OsString]) -> String {
          .join(" ")
  }
  
@@ -83,6 +83,98 @@ index 359e4f6..c543753 100644
 +        .unwrap_or(true)
 +}
 +
++#[cfg(unix)]
++#[allow(unsafe_code)] // libc is required to avoid trusting the mutable HOME environment variable.
++fn tokenless_trusted_home_dir() -> Option<std::path::PathBuf> {
++    use std::ffi::CStr;
++
++    // SAFETY: getuid is infallible. getpwuid_r receives valid pointers to a
++    // live passwd value and buffer, and cannot write beyond the given length.
++    let uid = unsafe { libc::getuid() };
++    let mut passwd: libc::passwd = unsafe { std::mem::zeroed() };
++    let mut buffer = vec![0u8; 4096];
++    let mut result: *mut libc::passwd = std::ptr::null_mut();
++    let status = unsafe {
++        libc::getpwuid_r(
++            uid,
++            &mut passwd,
++            buffer.as_mut_ptr().cast(),
++            buffer.len(),
++            &mut result,
++        )
++    };
++    if status != 0 || result.is_null() || passwd.pw_dir.is_null() {
++        return None;
++    }
++
++    // SAFETY: a successful getpwuid_r call provides a NUL-terminated pw_dir
++    // pointer backed by buffer, which remains alive for this conversion.
++    let home = unsafe { CStr::from_ptr(passwd.pw_dir) }.to_str().ok()?;
++    let path = std::path::PathBuf::from(home);
++    if home == "/" || !path.is_absolute() {
++        return None;
++    }
++    Some(path)
++}
++
++#[cfg(not(unix))]
++fn tokenless_trusted_home_dir() -> Option<std::path::PathBuf> {
++    None
++}
++
++fn tokenless_path_is_under_home(path: &std::path::Path, home: &std::path::Path) -> bool {
++    let Ok(canonical_home) = home.canonicalize() else {
++        return false;
++    };
++    let resolved = path.canonicalize().or_else(|_| {
++        path.parent()
++            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
++            .and_then(std::path::Path::canonicalize)
++    });
++    resolved.is_ok_and(|resolved| resolved.starts_with(canonical_home))
++}
++
++fn validate_tokenless_data_dir(
++    data_dir: &str,
++    home: &std::path::Path,
++) -> Option<std::path::PathBuf> {
++    let candidate = std::path::PathBuf::from(data_dir);
++    if !candidate.is_absolute()
++        || candidate
++            .components()
++            .any(|component| matches!(component, std::path::Component::ParentDir))
++        || (candidate.exists() && !candidate.is_dir())
++    {
++        return None;
++    }
++
++    let mut existing_ancestor = candidate.as_path();
++    while !existing_ancestor.exists() {
++        existing_ancestor = existing_ancestor.parent()?;
++    }
++    tokenless_path_is_under_home(existing_ancestor, home).then_some(candidate)
++}
++
++fn resolve_tokenless_stats_db() -> Option<std::path::PathBuf> {
++    let home = tokenless_trusted_home_dir()?;
++
++    if let Some(path) = std::env::var("TOKENLESS_STATS_DB")
++        .ok()
++        .filter(|path| !path.is_empty())
++        .map(std::path::PathBuf::from)
++        .filter(|path| tokenless_path_is_under_home(path, &home))
++    {
++        return Some(path);
++    }
++
++    let data_dir = std::env::var("TOKENLESS_DATA_DIR")
++        .ok()
++        .filter(|path| !path.is_empty())
++        .and_then(|path| validate_tokenless_data_dir(&path, &home))
++        .unwrap_or_else(|| home.join(".tokenless"));
++    Some(data_dir.join("stats.db"))
++}
++
 +/// Record RTK command output compression stats to the tokenless stats database.
 +///
 +/// Fails silently so RTK output is never blocked by database errors.
@@ -100,12 +192,9 @@ index 359e4f6..c543753 100644
 +
 +    let (agent_id, session_id, tool_use_id) = resolve_tokenless_context();
 +
-+    let db_path = std::env::var("TOKENLESS_STATS_DB").unwrap_or_else(|_| {
-+        format!(
-+            "{}/.tokenless/stats.db",
-+            std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
-+        )
-+    });
++    let Some(db_path) = resolve_tokenless_stats_db() else {
++        return;
++    };
 +
 +    let before_chars = raw_output.len();
 +    let after_chars = filtered_output.len();
@@ -119,7 +208,7 @@ index 359e4f6..c543753 100644
 +    }
 +
 +    let _ = (|| -> anyhow::Result<()> {
-+        if let Some(parent) = std::path::Path::new(&db_path).parent() {
++        if let Some(parent) = db_path.parent() {
 +            std::fs::create_dir_all(parent)?;
 +        }
 +        let conn = rusqlite::Connection::open(&db_path)?;
@@ -171,7 +260,40 @@ index 359e4f6..c543753 100644
 +
  #[cfg(test)]
  mod tests {
+@@ -1424 +1669,32 @@ mod tests {
      use super::*;
++
++    #[test]
++    fn tokenless_data_dir_accepts_nonexistent_descendant() {
++        let home = tempfile::tempdir().unwrap();
++        let candidate = home.path().join("nested/data");
++        let resolved =
++            validate_tokenless_data_dir(candidate.to_str().unwrap(), home.path()).unwrap();
++        assert_eq!(resolved, candidate);
++    }
++
++    #[test]
++    fn tokenless_data_dir_rejects_outside_home() {
++        let home = tempfile::tempdir().unwrap();
++        let outside = tempfile::tempdir().unwrap();
++        assert!(
++            validate_tokenless_data_dir(outside.path().to_str().unwrap(), home.path()).is_none()
++        );
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn tokenless_data_dir_rejects_symlink_escape() {
++        use std::os::unix::fs::symlink;
++
++        let home = tempfile::tempdir().unwrap();
++        let outside = tempfile::tempdir().unwrap();
++        let link = home.path().join("redirect");
++        symlink(outside.path(), &link).unwrap();
++        let candidate = link.join("data");
++        assert!(validate_tokenless_data_dir(candidate.to_str().unwrap(), home.path()).is_none());
++    }
++
 diff --git a/src/hooks/hook_check.rs b/src/hooks/hook_check.rs
 index 4dd26d8..3638321 100644
 --- a/src/hooks/hook_check.rs

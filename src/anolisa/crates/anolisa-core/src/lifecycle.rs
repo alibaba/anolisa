@@ -636,8 +636,13 @@ pub struct ResolvedLifecycleHooks {
 pub enum BackupArtifact {
     /// Regular file copied byte-for-byte; sha256 of those bytes.
     File {
-        /// Content hash recorded on the `RestoreFile` rollback action.
+        /// Content hash recorded on the rollback action.
         sha256: String,
+        /// Permission bits observed on the source, so rollback can put the
+        /// file back executable if it was executable. The full word
+        /// including setuid/setgid/sticky is reported; what a restore may
+        /// safely reproduce is the restore's decision, not the backup's.
+        mode: Option<u32>,
     },
     /// Symlink reproduced as an identical link. The referent is never
     /// read through, so there is no byte hash to verify on restore.
@@ -648,7 +653,16 @@ impl BackupArtifact {
     /// Hash to record on the rollback action; `None` for symlinks.
     pub fn into_sha256(self) -> Option<String> {
         match self {
-            Self::File { sha256 } => Some(sha256),
+            Self::File { sha256, .. } => Some(sha256),
+            Self::Symlink => None,
+        }
+    }
+
+    /// Permission bits observed on the source; `None` for symlinks (a
+    /// link's own mode is not meaningful on Linux).
+    pub fn mode(&self) -> Option<u32> {
+        match self {
+            Self::File { mode, .. } => *mode,
             Self::Symlink => None,
         }
     }
@@ -670,6 +684,15 @@ impl BackupArtifact {
 ///     a pre-placed symlink or stale file at the backup path fails the
 ///     open instead of being followed or overwritten (`symlink(2)` gives
 ///     the same EEXIST guarantee on the link branch).
+///   * The source's permission bits are *reported*, so rollback can put
+///     the file back with the mode it had instead of whatever the umask
+///     gives a fresh file. They are deliberately not reproduced on the
+///     copy: the backup tree is operation scratch that a failed plan
+///     leaves on disk for forensics, so a copy of a `4755` helper must not
+///     itself be a setuid binary sitting under the backup root, and a copy
+///     of a `0111` run-only file must stay readable to the process that
+///     has to read it back. The copy is owner-only instead — strictly
+///     tighter than the `0666 & ~umask` it used to get.
 ///   * Streaming read+hash so a multi-GB owned file does not have to fit
 ///     in RAM, and so the on-disk bytes match the recorded sha exactly.
 ///
@@ -739,12 +762,29 @@ pub fn prepare_backup(src: &Path, backup: &Path) -> Result<Option<BackupArtifact
         });
     }
 
+    // Read the mode off the open descriptor, not the path: the O_NOFOLLOW
+    // open above already pinned the inode, so this cannot be raced onto a
+    // different file between the check and the copy.
+    let src_mode = {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = src_f
+            .metadata()
+            .map_err(|source| LifecycleError::Filesystem {
+                path: src.to_path_buf(),
+                source,
+            })?;
+        Some(meta.permissions().mode() & 0o7777)
+    };
+
     let mut backup_opts = fs::OpenOptions::new();
     backup_opts.write(true).create_new(true);
-    #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         backup_opts.custom_flags(nix::libc::O_NOFOLLOW);
+        // Owner-only: the copy is scratch, not a mirror. It never needs to
+        // be executable, and a private source must not become readable to
+        // anyone else just because it passed through the backup tree.
+        backup_opts.mode(0o600);
     }
     let mut backup_f = match backup_opts.open(backup) {
         Ok(f) => f,
@@ -755,6 +795,49 @@ pub fn prepare_backup(src: &Path, backup: &Path) -> Result<Option<BackupArtifact
             });
         }
     };
+    {
+        // `mode` above is only the `open(2)` creation mask, which the umask
+        // subtracts from: under `umask 0400` the copy would land `0200` and
+        // rollback could not read back the very backup it just wrote.
+        // `fchmod` is not umask-filtered, so it pins the mode exactly.
+        use std::os::unix::fs::PermissionsExt;
+        let chmod_error = backup_f
+            .set_permissions(fs::Permissions::from_mode(0o600))
+            .err();
+
+        // Fail closed, unlike the restore path. This runs *before* the
+        // destructive steps, so nothing has been overwritten yet and a
+        // backup the rollback could not read back is worth refusing the
+        // operation over — registering it as compensatable would let the
+        // executor destroy the original against a promise it cannot keep.
+        // Restore is the mirror case: the damage is already done there, so
+        // the mode is best-effort and a warning.
+        //
+        // The gate is the resulting mode rather than whether `fchmod`
+        // reported success: a filesystem that cannot chmod but creates
+        // readable files is perfectly usable, and only an unreadable copy
+        // disqualifies the backup.
+        match backup_f
+            .metadata()
+            .map(|meta| meta.permissions().mode() & 0o400 != 0)
+        {
+            Ok(true) => {}
+            other => {
+                let _ = fs::remove_file(backup);
+                let source = chmod_error.or_else(|| other.err()).unwrap_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "backup copy is not readable by its owner, so a rollback could not \
+                             restore from it",
+                    )
+                });
+                return Err(LifecycleError::Filesystem {
+                    path: backup.to_path_buf(),
+                    source,
+                });
+            }
+        }
+    }
 
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
@@ -792,7 +875,10 @@ pub fn prepare_backup(src: &Path, backup: &Path) -> Result<Option<BackupArtifact
     for b in out {
         sha.push_str(&format!("{b:02x}"));
     }
-    Ok(Some(BackupArtifact::File { sha256: sha }))
+    Ok(Some(BackupArtifact::File {
+        sha256: sha,
+        mode: src_mode,
+    }))
 }
 
 #[cfg(test)]
@@ -847,6 +933,8 @@ mod tests {
                 sha256: Some("0".repeat(64)),
                 kind: OwnedFileKind::File,
                 referent: None,
+                mode: None,
+                capabilities: Vec::new(),
             }],
             external_modified_files: vec![ExternalModifiedFile {
                 path: external_path.to_path_buf(),
@@ -1082,6 +1170,173 @@ mod tests {
         let meta = std_fs::symlink_metadata(&backup).expect("backup exists");
         assert!(meta.file_type().is_symlink(), "backup must be a link");
         assert_eq!(std_fs::read_link(&backup).expect("read_link"), target);
+    }
+
+    /// The source's permission bits are reported so rollback can put the
+    /// file back executable; a backup that only carried bytes is the whole
+    /// of the restore-drops-the-executable-bit bug.
+    #[test]
+    #[cfg(unix)]
+    fn prepare_backup_reports_the_source_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().expect("tempdir");
+        let src = tmp.path().join("bin/tool");
+        std_fs::create_dir_all(src.parent().expect("parent")).expect("mkdir");
+        std_fs::write(&src, b"tool bytes").expect("write src");
+        std_fs::set_permissions(&src, std_fs::Permissions::from_mode(0o755)).expect("chmod src");
+        let backup = tmp.path().join("backup/0.bak");
+
+        let artifact = prepare_backup(&src, &backup)
+            .expect("backup ok")
+            .expect("src exists");
+
+        assert_eq!(artifact.mode(), Some(0o755));
+    }
+
+    /// The setuid bit is reported verbatim — deciding what may safely be
+    /// replayed belongs to the restore, which knows it cannot reproduce the
+    /// original owner. The copy itself must never become that setuid binary:
+    /// it sits in the backup tree, which a failed plan leaves on disk.
+    #[test]
+    #[cfg(unix)]
+    fn prepare_backup_reports_setuid_without_reproducing_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().expect("tempdir");
+        let src = tmp.path().join("libexec/helper");
+        std_fs::create_dir_all(src.parent().expect("parent")).expect("mkdir");
+        std_fs::write(&src, b"helper bytes").expect("write src");
+        std_fs::set_permissions(&src, std_fs::Permissions::from_mode(0o4755)).expect("chmod src");
+        let backup = tmp.path().join("backup/0.bak");
+
+        let artifact = prepare_backup(&src, &backup)
+            .expect("backup ok")
+            .expect("src exists");
+
+        assert_eq!(artifact.mode(), Some(0o4755));
+        let copy_mode = std_fs::metadata(&backup)
+            .expect("stat backup")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(
+            copy_mode & 0o7000,
+            0,
+            "a backup copy must never be setuid/setgid: {copy_mode:04o}"
+        );
+        assert_eq!(
+            copy_mode & 0o111,
+            0,
+            "a backup copy is inert data, not an executable: {copy_mode:04o}"
+        );
+    }
+
+    /// Whatever the source mode and whatever the umask, the copy is
+    /// owner-only: backing up a `0600` secret must not widen it, and
+    /// backing up a `0644` config must not leave a second readable copy
+    /// under the backup root.
+    #[test]
+    #[cfg(unix)]
+    fn prepare_backup_copies_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().expect("tempdir");
+        for (name, mode) in [("secret.toml", 0o600), ("config.toml", 0o644)] {
+            let src = tmp.path().join("etc").join(name);
+            std_fs::create_dir_all(src.parent().expect("parent")).expect("mkdir");
+            std_fs::write(&src, b"token = \"s3cr3t\"").expect("write src");
+            std_fs::set_permissions(&src, std_fs::Permissions::from_mode(mode)).expect("chmod src");
+            let backup = tmp.path().join("backup").join(name);
+
+            prepare_backup(&src, &backup)
+                .expect("backup ok")
+                .expect("src exists");
+
+            assert_eq!(
+                std_fs::metadata(&backup)
+                    .expect("stat backup")
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o600,
+                "the copy of a {mode:o} source must be owner-only"
+            );
+        }
+    }
+
+    /// The backup copy must stay owner-*readable* whatever umask the caller
+    /// runs under. `OpenOptions::mode` is only the `open(2)` creation mask,
+    /// which the umask subtracts from, so `umask 0400` turns a `0600` request
+    /// into a write-only `0200` copy — and then `restore_backup_file` cannot
+    /// read back the backup it just wrote, turning the compensation this
+    /// module exists to make whole into a partial one.
+    ///
+    /// umask is process-global, so the hostile value is set in a child
+    /// process running only this test; mutating it in-process would leak
+    /// into whatever tests happen to run beside it.
+    #[test]
+    #[cfg(unix)]
+    fn prepare_backup_copies_stay_readable_under_a_hostile_umask() {
+        const CHILD: &str = "ANOLISA_PREPARE_BACKUP_UMASK_CHILD";
+        const TEST: &str =
+            "lifecycle::tests::prepare_backup_copies_stay_readable_under_a_hostile_umask";
+
+        if std::env::var_os(CHILD).is_none() {
+            let out = std::process::Command::new(
+                std::env::current_exe().expect("locate the test binary"),
+            )
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .expect("re-exec the test binary");
+            let report = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            // A filter that matches nothing also exits 0, which would make
+            // this test vacuous; require the child to say it ran one test.
+            assert!(
+                report.contains("1 passed"),
+                "the child must actually run {TEST}: {report}"
+            );
+            assert!(out.status.success(), "child failed: {report}");
+            return;
+        }
+
+        use std::os::unix::fs::PermissionsExt;
+
+        // Lay the fixture down first: the source is what an earlier install
+        // left behind under a normal umask, so only the backup itself should
+        // meet the hostile one.
+        let tmp = tempdir().expect("tempdir");
+        let src = tmp.path().join("etc/secret.toml");
+        std_fs::create_dir_all(src.parent().expect("parent")).expect("mkdir");
+        std_fs::write(&src, b"token = \"s3cr3t\"").expect("write src");
+        std_fs::set_permissions(&src, std_fs::Permissions::from_mode(0o600)).expect("chmod src");
+        let backup = tmp.path().join("backup/0.bak");
+
+        // Only this test runs in the child, so the global umask is ours.
+        unsafe { nix::libc::umask(0o400) };
+
+        prepare_backup(&src, &backup)
+            .expect("backup ok")
+            .expect("src exists");
+
+        let mode = std_fs::metadata(&backup)
+            .expect("stat backup")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(
+            mode, 0o600,
+            "umask must not narrow the copy out of the owner's reach: {mode:04o}"
+        );
+        assert_eq!(
+            std_fs::read(&backup).expect("the rollback has to be able to read its own backup"),
+            b"token = \"s3cr3t\""
+        );
     }
 
     /// A pre-placed file at the backup leaf must fail the symlink backup

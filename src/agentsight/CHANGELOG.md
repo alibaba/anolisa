@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.9.1
+
+### Features
+- Add case containment lifecycle with policy handoff, no-gap replacement, dedicated API, and dashboard views.
+- Add system audit protocol, event storage, dashboard, and extract audit service into a dedicated crate.
+- Add ActPlane risk enforcement with enforcer service, hardened file controls, secure lifecycle, and risk enforcement dashboard.
+- Rework optimization dashboard views and add detour-based cost waste analysis.
+- Move agent health and interruptions to a dedicated dashboard page.
+
+### Fixes
+- Extract cache tokens for OpenAI (`prompt_tokens_details.cached_tokens`) and DashScope (top-level `cached_tokens`) responses, and extract real user query from cosh-ng adapter prompt template.
+- Capture Claude Code launched via absolute path or node wrapper.
+- Skip `agent_crash` detection on clean exit and flush deferred GenAI events on agent exit.
+- Skip message parse for non-LLM paths.
+- Encrypt optimization config API key.
+- Show known agent rules.
+- Map cosh session temporary file writes. (#2080)
+
+### CI
+- Pin eBPF build to clang 15 and use dedicated runner pools.
+
+## 0.9.0
+
+### Features
+- Add optimization analysis workspace, APIs, persistent analysis history, and dashboard pages for accuracy, performance, and cost reviews.
+- Add Qoder trajectory collection, ATIF v1.7 export, batch analysis tooling, and subagent trajectory navigation with topology-style views.
+- Add command-line discovery rules for CoshNG and normalize LLM event attribution with command-line context.
+- Add six new interruption types and fallback capture for unparsable LLM HTTPS traffic.
+
+### Fixes
+- Fix Anthropic SSE parsing, system prompt injection, and cache token accounting.
+- Fix ATIF batch output to use the shared ATIF v1.7 schema and drop stale v1.6 paths.
+- Fix optimization and trajectory collection edge cases, including stale conversation anchors and syscall tracepoint probe attach.
+- Fix dashboard empty states, error banner wording, auth loopback handling, and session navigation behavior.
+- Make raw HTTPS FFI output opt-in and skip duplicate SSE message parsing for OpenAI and Anthropic streams.
+
+### Changed
+- Group optimization dimension analyses under per-target run roots and represent parallel LLM calls as ATIF subagent trajectories.
+- Slim and gate default SLS output so trace content is not uploaded unless explicitly enabled.
+
 ## 0.8.1
 
 ### Fixes

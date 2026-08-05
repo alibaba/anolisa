@@ -101,6 +101,32 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalShellHandoffTimeoutInterruptBody => {
             "Sent interrupt to foreground PTY; waiting for shell evidence."
         }
+        MessageId::ApprovalShellHandoffInputWaitTimeoutTitle => "Command input-wait timeout",
+        MessageId::ApprovalShellHandoffInputWaitTimeoutExceededBody => {
+            "Foreground command waited for keyboard input over {seconds}s with no answer (input_wait_timeout_secs)."
+        }
+        MessageId::ApprovalShellHandoffInputWaitTimeoutInterruptBody => {
+            "Interrupted the command (like Ctrl+C); the agent receives the result and can retry non-interactively."
+        }
+        MessageId::ShellInputWaitHintTitle => "⏳ Command is waiting for input",
+        MessageId::ShellInputWaitHintPasswordBody => {
+            "The command is waiting for a password/hidden input."
+        }
+        MessageId::ShellInputWaitHintPagerBody => {
+            "Output is being paged; press q to quit the pager and continue."
+        }
+        MessageId::ShellInputWaitHintRawInteractiveBody => {
+            "An interactive program is waiting for keyboard input."
+        }
+        MessageId::ShellInputWaitHintStdinWaitBody => {
+            "The command is waiting for keyboard input/confirmation."
+        }
+        MessageId::ShellInputWaitHintGuidanceBody => {
+            "Type a reply directly, or press Ctrl+C to interrupt the command."
+        }
+        MessageId::ShellInputWaitHintTimeoutForecastBody => {
+            "Auto-interrupts after {seconds}s of unanswered input-wait."
+        }
         MessageId::ApprovalReceiptKindToolRequest => "tool request",
         MessageId::ApprovalReceiptKindShellCommandRequest => "shell command request",
         MessageId::ApprovalReceiptKindBashTool => "Bash tool",
@@ -119,6 +145,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Bash tool: provider-native execution"
         }
         MessageId::ApprovalReceiptBashSentToShellMessage => "Bash tool sent to shell",
+        MessageId::ApprovalReceiptForegroundInteractiveHint => {
+            "This command will run interactively in the foreground; keyboard input goes directly to it. Press q to leave a pager."
+        }
         MessageId::ApprovalReceiptProviderNativeAllowedMessage => {
             "Provider-native shell tool allowed"
         }
@@ -134,6 +163,10 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalRiskPhraseFilesystemWrite => "filesystem write",
         MessageId::ApprovalRiskPhrasePermissionChange => "permission change",
         MessageId::ApprovalRiskPhraseProcessControl => "process control",
+        MessageId::ApprovalRiskPhraseSystemControl => "system reboot/halt",
+        MessageId::ApprovalIrrecoverableWarningLine => {
+            "irrecoverable: reboots/halts this machine; SSH sessions drop and unsaved work is lost"
+        }
         MessageId::ApprovalRiskPhraseServiceControl => "service control",
         MessageId::ApprovalRiskPhraseServiceOrContainerControl => "service/container control",
         MessageId::ApprovalRiskPhrasePackageManagerMutation => "package mutation",
@@ -145,6 +178,20 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalRiskPhraseRedirectionWrite => "write redirection",
         MessageId::ApprovalRiskPhraseAwkShellExecution => "awk shell execution",
         MessageId::ApprovalRiskLevelUnknown => "unknown risk",
+        MessageId::ApprovalTurnExtensionSubject => "Agent turn budget",
+        MessageId::ApprovalTurnExtensionPreview => {
+            "The Agent used all {turns} configured turns. Continue the same task with {turns} more?"
+        }
+        MessageId::ApprovalTurnExtensionLabel => "Turn budget",
+        MessageId::ApprovalActionContinue => "Continue",
+        MessageId::ApprovalActionStop => "Stop",
+        MessageId::ApprovalResolutionContinuingTitle => "Continuing",
+        MessageId::ApprovalResolutionStoppedTitle => "Stopped",
+        MessageId::ApprovalReceiptKindTurnExtension => "turn budget extension",
+        MessageId::ApprovalTurnExtensionUnavailableTitle => "Cannot continue",
+        MessageId::ApprovalTurnExtensionUnavailableBody => {
+            "The persisted provider session changed before the extension was approved."
+        }
         _ => return None,
     })
 }

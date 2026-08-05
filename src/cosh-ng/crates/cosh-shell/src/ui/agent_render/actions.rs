@@ -40,6 +40,21 @@ pub const HOOK_APPROVAL_PANEL_ACTIONS: [ApprovalActionDescriptor; 3] = [
     },
 ];
 
+/// Actions for high-risk requests (issue #2064): irrecoverable and other
+/// high-impact commands must be explicitly approved every time, so the
+/// AlwaysTrust shortcut is never offered.
+pub const HIGH_RISK_APPROVAL_PANEL_ACTIONS: [ApprovalActionDescriptor; 3] = [
+    ApprovalActionDescriptor {
+        action: ApprovalPanelAction::Approve,
+    },
+    ApprovalActionDescriptor {
+        action: ApprovalPanelAction::Deny,
+    },
+    ApprovalActionDescriptor {
+        action: ApprovalPanelAction::Details,
+    },
+];
+
 /// Actions when turn-scope batch consent is offered (issue #1773): the
 /// multi-request turn adds "Allow all this turn" next to the single-shot
 /// approval while keeping AlwaysTrust visible.
@@ -61,6 +76,35 @@ pub const TURN_APPROVAL_PANEL_ACTIONS: [ApprovalActionDescriptor; 5] = [
     },
 ];
 
+/// Turn-consent variant for high-risk requests (issue #2064): the batch
+/// consent sweep already excludes high risk, and AlwaysTrust must not be
+/// offered either — only per-turn and single-shot approvals remain.
+pub const TURN_HIGH_RISK_APPROVAL_PANEL_ACTIONS: [ApprovalActionDescriptor; 4] = [
+    ApprovalActionDescriptor {
+        action: ApprovalPanelAction::Approve,
+    },
+    ApprovalActionDescriptor {
+        action: ApprovalPanelAction::ApproveTurn,
+    },
+    ApprovalActionDescriptor {
+        action: ApprovalPanelAction::Deny,
+    },
+    ApprovalActionDescriptor {
+        action: ApprovalPanelAction::Details,
+    },
+];
+
+/// Actions for a capped Agent run: explicitly continue with one more
+/// configured budget or stop without discarding the persisted session.
+pub const TURN_EXTENSION_PANEL_ACTIONS: [ApprovalActionDescriptor; 2] = [
+    ApprovalActionDescriptor {
+        action: ApprovalPanelAction::Approve,
+    },
+    ApprovalActionDescriptor {
+        action: ApprovalPanelAction::Deny,
+    },
+];
+
 /// Which action list an approval card offers. Resolved once per request
 /// (single source of truth) and shared by rendering, raw-input capture,
 /// and focus parsing.
@@ -68,7 +112,12 @@ pub const TURN_APPROVAL_PANEL_ACTIONS: [ApprovalActionDescriptor; 5] = [
 pub enum ApprovalActionSet {
     Hook,
     Standard,
+    /// Standard set minus AlwaysTrust for high-risk requests (#2064).
+    StandardHighRisk,
     TurnConsent,
+    /// Turn-consent set minus AlwaysTrust for high-risk requests (#2064).
+    TurnConsentHighRisk,
+    TurnExtension,
 }
 
 impl ApprovalActionSet {
@@ -76,7 +125,10 @@ impl ApprovalActionSet {
         match self {
             Self::Hook => &HOOK_APPROVAL_PANEL_ACTIONS,
             Self::Standard => &APPROVAL_PANEL_ACTIONS,
+            Self::StandardHighRisk => &HIGH_RISK_APPROVAL_PANEL_ACTIONS,
             Self::TurnConsent => &TURN_APPROVAL_PANEL_ACTIONS,
+            Self::TurnConsentHighRisk => &TURN_HIGH_RISK_APPROVAL_PANEL_ACTIONS,
+            Self::TurnExtension => &TURN_EXTENSION_PANEL_ACTIONS,
         }
     }
     pub fn action_at(self, index: usize) -> Option<ApprovalPanelAction> {

@@ -43,7 +43,7 @@ pub(crate) fn record_approval_requests(
                     let mut warnings = Vec::new();
                     active_run.pending_hook_notifications.retain(|n| {
                         if n.tool_use_id.as_deref() == Some(tool_use_id) {
-                            warnings.push(crate::runtime::state::HookWarning {
+                            warnings.push(crate::runtime::approval_state::HookWarning {
                                 hook_name: n.hook_name.clone(),
                                 message: n.message.clone(),
                                 decision: n.decision.clone(),
@@ -223,6 +223,25 @@ fn approval_request_from_event(
             hook_requires_approval,
             audit_ref,
         } => {
+            // #1940: a control approval whose run id does not match the
+            // active run was already denied at the registration door
+            // (agent/poll.rs). Never let it resurface downstream — as a
+            // pending card the user could approve, or as an auto-approval —
+            // because either path would send a second, contradictory
+            // response for a request the shell already terminated.
+            // When no run is active the ownership cannot be disproven here:
+            // a sandbox-bypass follow-up legitimately arrives after the
+            // fallback execution cleared the active run, so the request
+            // passes through and the respond path falls back to the
+            // owner-unavailable recovery if the owner is truly gone.
+            let foreign_to_active_run = state
+                .agent_run
+                .active
+                .as_ref()
+                .is_some_and(|run| &run.request.id != run_id);
+            if foreign_to_active_run {
+                return None;
+            }
             let input_str = serde_json::to_string(tool_input).unwrap_or_default();
             let presentation = presentation_for_tool(tool_name, &input_str);
             let (label, preview) = approval_tool_label_preview(&presentation);
@@ -407,7 +426,9 @@ fn shell_command_assessment(command: &str) -> CommandAssessment {
     )
 }
 
-fn runtime_assessment_summary(assessment: &CommandAssessment) -> RuntimeCommandAssessmentSummary {
+pub(super) fn runtime_assessment_summary(
+    assessment: &CommandAssessment,
+) -> RuntimeCommandAssessmentSummary {
     RuntimeCommandAssessmentSummary {
         impact: assessment.impact.legacy_risk(),
         execution: execution_label(assessment.execution),

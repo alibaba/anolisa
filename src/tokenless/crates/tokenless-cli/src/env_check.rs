@@ -364,7 +364,7 @@ fn normalize_dep(value: &Value) -> DepEntry {
     }
 }
 
-/// Normalize an array of dep values (strings or objects) into Vec<DepEntry>.
+/// Normalize an array of dep values (strings or objects) into `Vec<DepEntry>`.
 fn normalize_deps(array: &Value) -> Vec<DepEntry> {
     array
         .as_array()
@@ -500,57 +500,103 @@ fn version_ge(installed: &str, required: &str) -> bool {
     true
 }
 
-/// Check if a binary is available and meets version constraints.
-fn check_dep(dep: &DepEntry) -> DepStatus {
+// KEEP IN SYNC with common/hooks/hook_utils.py, tool_ready_hook.sh, OpenClaw's
+// fallback constants, and the Codex standalone scripts. Makefile and the
+// Anolisa component manifest define the supported layouts; the canonical
+// order is user, /usr/local, /usr, then legacy.
+fn binary_fallback_paths(binary: &str, home: &str) -> Vec<PathBuf> {
+    let mut components = std::path::Path::new(binary).components();
+    if !matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    ) {
+        return Vec::new();
+    }
+
+    let home = std::path::Path::new(home);
+    let user_home = (!home.as_os_str().is_empty() && home.is_absolute()).then_some(home);
+    let mut paths = Vec::new();
+    if let Some(home) = user_home {
+        paths.push(home.join(".local/bin").join(binary));
+        if matches!(binary, "rtk" | "toon") {
+            paths.extend([
+                // Anolisa CLI user mode.
+                home.join(".local/lib/anolisa/libexec/tokenless")
+                    .join(binary),
+                // Makefile user mode.
+                home.join(".local/libexec/anolisa/tokenless").join(binary),
+            ]);
+        }
+    }
+    paths.push(PathBuf::from("/usr/local/bin").join(binary));
+    if matches!(binary, "rtk" | "toon") {
+        // Anolisa CLI system mode.
+        paths.push(PathBuf::from("/usr/local/libexec/anolisa/tokenless").join(binary));
+    }
+    paths.push(PathBuf::from("/usr/bin").join(binary));
+    if matches!(binary, "rtk" | "toon") {
+        paths.extend([
+            // Makefile system mode and RPM.
+            PathBuf::from("/usr/libexec/anolisa/tokenless").join(binary),
+            // Debian and pre-layout-migration compatibility.
+            PathBuf::from("/usr/lib/anolisa/tokenless").join(binary),
+        ]);
+        if let Some(home) = user_home {
+            paths.extend([
+                home.join(".local/share/anolisa/tokenless").join(binary),
+                home.join(".local/lib/anolisa/tokenless").join(binary),
+            ]);
+        }
+    }
+
+    paths
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    if !path.is_file() || !is_trusted_path(path) {
+        return false;
+    }
+    std::fs::metadata(path)
+        .map(|metadata| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.permissions().mode() & 0o111 != 0
+            }
+            #[cfg(not(unix))]
+            true
+        })
+        .unwrap_or(false)
+}
+
+fn resolve_binary_path(binary: &str) -> Option<String> {
     let which_result = Command::new("sh")
-        .args(["-c", "command -v \"$1\"", "--", &dep.binary])
+        .args(["-c", "command -v \"$1\"", "--", binary])
         .output();
 
-    let binary_path: Option<String> = match which_result {
+    match which_result {
         Ok(output) if output.status.success() => {
-            Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (!path.is_empty()).then_some(path)
         }
         _ => {
-            // PATH lookup failed — try known install paths. Each candidate
-            // must clear is_trusted_path() before we report it as available:
-            // otherwise a spoofed $HOME / world-writable directory could let
-            // an attacker drop a malicious binary that we'd then exec when
-            // we run `--version` or any later invocation.
+            // PATH lookup failed — cover Makefile, Anolisa user/system, and
+            // package-manager layouts. Trust validation prevents a spoofed
+            // user path from supplying the executable used below.
             let home = crate::get_home_dir();
-            let candidates = [
-                format!("/usr/libexec/anolisa/tokenless/{}", dep.binary),
-                format!("/usr/lib/anolisa/tokenless/{}", dep.binary),
-                format!("{}/.local/bin/{}", home, dep.binary),
-                format!("{}/.local/lib/anolisa/tokenless/{}", home, dep.binary),
-            ];
-            candidates
-                .iter()
-                .find(|p| {
-                    let path = std::path::Path::new(p);
-                    if !path.exists() {
-                        return false;
-                    }
-                    if !is_trusted_path(path) {
-                        return false;
-                    }
-                    std::fs::metadata(path)
-                        .map(|m| {
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::fs::PermissionsExt;
-                                m.permissions().mode() & 0o111 != 0
-                            }
-                            #[cfg(not(unix))]
-                            true
-                        })
-                        .unwrap_or(false)
-                })
-                .cloned()
+            binary_fallback_paths(binary, &home)
+                .into_iter()
+                .find(|path| is_executable_file(path))
+                .map(|path| path.to_string_lossy().into_owned())
         }
-    };
+    }
+}
 
+/// Check if a binary is available and meets version constraints.
+fn check_dep(dep: &DepEntry) -> DepStatus {
+    let binary_path = resolve_binary_path(&dep.binary);
     match binary_path {
-        Some(path) if !path.is_empty() => {
+        Some(path) => {
             if let Some(ref version) = dep.version {
                 let required_version = extract_required_version(version);
                 let version_output = Command::new(&path).arg("--version").output();
@@ -627,11 +673,7 @@ fn check_permission(perm: &str) -> bool {
             }
             can_write
         }
-        "exec_shell" => Command::new("sh")
-            .args(["-c", "command -v bash"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false),
+        "exec_shell" => resolve_binary_path("bash").is_some(),
         _ => true,
     }
 }
@@ -895,34 +937,41 @@ fn generate_checklist(results: &[ToolReadyResult]) -> String {
     output
 }
 
+/// Build the ordered candidate list for `auto_fix`.
+///
+/// Order mirrors `spec_path_candidates`: env override → user dot-dir →
+/// user FHS → system FHS → legacy flat-layout mirrors.
+fn fix_script_candidates() -> Vec<String> {
+    let home = super::get_home_dir();
+    vec![
+        std::env::var("TOKENLESS_ENV_FIX_SCRIPT").ok(),
+        Some(format!("{home}/.tokenless/tokenless-env-fix.sh")),
+        Some(format!(
+            "{home}/.local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh"
+        )),
+        Some("/usr/local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh".into()),
+        Some("/usr/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh".into()),
+        Some(format!(
+            "{home}/.local/share/anolisa/adapters/tokenless/tokenless-env-fix.sh"
+        )),
+        Some("/usr/local/share/anolisa/adapters/tokenless/tokenless-env-fix.sh".into()),
+        Some("/usr/share/anolisa/adapters/tokenless/tokenless-env-fix.sh".into()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// Auto-fix missing dependencies via tokenless-env-fix.sh.
 fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
     let home = super::get_home_dir();
-    let fix_script_env = std::env::var("TOKENLESS_ENV_FIX_SCRIPT").ok();
-    let fix_script_candidates = [
-        fix_script_env,
-        Some(format!("{}/.tokenless/tokenless-env-fix.sh", home)),
-        Some(format!(
-            "{}/.local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh",
-            home
-        )),
-        Some("/usr/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh".to_string()),
-        // Legacy paths (pre-FHS refactor, flat layout without common/ subdir)
-        Some(format!(
-            "{}/.local/share/anolisa/adapters/tokenless/tokenless-env-fix.sh",
-            home
-        )),
-        Some("/usr/share/anolisa/adapters/tokenless/tokenless-env-fix.sh".to_string()),
-    ];
-    let fix_script = fix_script_candidates
-        .iter()
-        .flatten()
+    let fix_script = fix_script_candidates()
+        .into_iter()
         .find(|p| {
             let path = std::path::Path::new(p);
             path.exists() && is_trusted_path(path)
         })
-        .cloned()
-        .unwrap_or_else(|| format!("{}/.tokenless/tokenless-env-fix.sh", home));
+        .unwrap_or_else(|| format!("{home}/.tokenless/tokenless-env-fix.sh"));
 
     // Build JSON array of missing deps
     let deps_json: Vec<Value> = missing_deps
@@ -1054,47 +1103,44 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
     Ok(stdout)
 }
 
+/// Build the ordered candidate list for `find_spec_path`.
+///
+/// Order: env override → user dot-dir → user FHS → system FHS (usr/local,
+/// then usr) → legacy flat-layout mirrors of the same four roots.
+fn spec_path_candidates() -> Vec<String> {
+    let home = super::get_home_dir();
+    vec![
+        std::env::var("TOKENLESS_TOOL_READY_SPEC").ok(),
+        Some(format!("{home}/.tokenless/tool-ready-spec.json")),
+        Some(format!(
+            "{home}/.local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json"
+        )),
+        Some("/usr/local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json".into()),
+        Some("/usr/share/anolisa/adapters/tokenless/common/tool-ready-spec.json".into()),
+        Some(format!(
+            "{home}/.local/share/anolisa/adapters/tokenless/tool-ready-spec.json"
+        )),
+        Some("/usr/local/share/anolisa/adapters/tokenless/tool-ready-spec.json".into()),
+        Some("/usr/share/anolisa/adapters/tokenless/tool-ready-spec.json".into()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// Find the spec file path.
 fn find_spec_path() -> Result<PathBuf, String> {
-    let home = super::get_home_dir();
-    let candidates = [
-        std::env::var("TOKENLESS_TOOL_READY_SPEC")
-            .ok()
-            .map(PathBuf::from),
-        Some(PathBuf::from(format!(
-            "{}/.tokenless/tool-ready-spec.json",
-            home
-        ))),
-        Some(PathBuf::from(format!(
-            "{}/.local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json",
-            home
-        ))),
-        Some(PathBuf::from(
-            "/usr/share/anolisa/adapters/tokenless/common/tool-ready-spec.json",
-        )),
-        // Legacy paths (pre-FHS refactor, flat layout without common/ subdir)
-        Some(PathBuf::from(format!(
-            "{}/.local/share/anolisa/adapters/tokenless/tool-ready-spec.json",
-            home
-        ))),
-        Some(PathBuf::from(
-            "/usr/share/anolisa/adapters/tokenless/tool-ready-spec.json",
-        )),
-    ];
+    let candidates = spec_path_candidates();
 
-    for candidate in candidates.iter().flatten() {
-        if candidate.exists() && is_trusted_path(candidate) {
-            return Ok(candidate.clone());
+    for candidate in candidates.iter().map(PathBuf::from) {
+        if candidate.exists() && is_trusted_path(&candidate) {
+            return Ok(candidate);
         }
     }
 
-    let candidate_list: Vec<String> = candidates
-        .iter()
-        .filter_map(|c| c.as_ref().map(|p| p.display().to_string()))
-        .collect();
     Err(format!(
         "No spec file found in any candidate path: {}",
-        candidate_list.join(", ")
+        candidates.join(", ")
     ))
 }
 

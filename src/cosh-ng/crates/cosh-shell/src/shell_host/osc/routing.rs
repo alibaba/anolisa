@@ -26,6 +26,7 @@ impl OscParser {
             let reason = marker
                 .reason
                 .unwrap_or_else(|| "natural_language".to_string());
+            let sensitive = marker.sensitive.unwrap_or(false);
             self.intervention_cuts.push(self.clean.len());
             self.intervention_display_cuts
                 .push((self.display.len(), DisplayCutKind::Intercept));
@@ -43,6 +44,7 @@ impl OscParser {
                 &reason,
                 generation,
                 correlated,
+                sensitive,
             );
             if correlated {
                 self.current = None;
@@ -85,10 +87,21 @@ impl OscParser {
         reason: &str,
         generation: Option<u64>,
         top_level_missing: bool,
+        sensitive: bool,
     ) {
         let command_id = top_level_missing
             .then(|| self.current.as_ref().map(|command| command.id.clone()))
             .flatten();
+        // Sensitive intercepts always carry routing metadata (even without
+        // top-level-missing provenance) so the journal can redact the whole
+        // input field before it reaches disk.
+        let routing = (top_level_missing || sensitive).then_some(ShellRoutingMetadata {
+            generation: generation.unwrap_or_default(),
+            top_level_missing,
+            proven: top_level_missing,
+            sensitive,
+            unsafe_input: false,
+        });
         self.events.push(ShellEvent {
             kind: ShellEventKind::UserInputIntercepted,
             session_id: session_id.to_string(),
@@ -108,13 +121,7 @@ impl OscParser {
             command_origin: None,
             shell_environment_generation: None,
             audit_identity: None,
-            routing: top_level_missing.then_some(ShellRoutingMetadata {
-                generation: generation.unwrap_or_default(),
-                top_level_missing,
-                proven: top_level_missing,
-                sensitive: false,
-                unsafe_input: false,
-            }),
+            routing,
             capture: None,
         });
     }

@@ -7,6 +7,37 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-07-31
+
+### Added
+
+- Tokenless can now be installed from npm on Linux and macOS x64/arm64, including the `tokenless`, `rtk`, and `toon` binaries plus framework adapters ([#1929](https://github.com/alibaba/anolisa/pull/1929)).
+- `tokenless stats diff` now explains estimated savings for records, sessions, and tool uses with text or JSON reports and bounded unified diffs ([#1991](https://github.com/alibaba/anolisa/pull/1991)).
+- `TOKENLESS_DATA_DIR` now sets one trusted directory for both statistics and reversible-compression databases while preserving per-database overrides ([#2038](https://github.com/alibaba/anolisa/pull/2038)).
+
+### Fixed
+
+- The Qwencode adapter now declares its delivered `compress-toon` capability, keeping adapter discovery consistent with its compression behavior ([#1945](https://github.com/alibaba/anolisa/pull/1945)).
+- Hermes copy installations now resolve shared hook resources from trusted system, XDG, and user data paths with actionable diagnostics when no safe candidate exists ([#2058](https://github.com/alibaba/anolisa/pull/2058)).
+
+## [0.7.3] - 2026-07-28
+
+### Added
+
+- ANOLISA can now install Tokenless on macOS and enable Qwencode as an independent adapter ([#1964](https://github.com/alibaba/anolisa/pull/1964)).
+
+### Changed
+
+- Adapter hooks now discover `tokenless`, `rtk`, and `toon` across user, `/usr/local`, RPM, and legacy installation layouts ([#1957](https://github.com/alibaba/anolisa/pull/1957)).
+- Hook launchers now prefer resources from the active installation, preventing mixed versions when multiple Tokenless installations coexist ([#1964](https://github.com/alibaba/anolisa/pull/1964)).
+
+### Fixed
+
+- Tool schema compression now reads the canonical Cosh and Cosh-NG request field, so schemas are compressed instead of silently passing through unchanged ([#1894](https://github.com/alibaba/anolisa/pull/1894)).
+- Cosh-NG compression statistics are now attributed to `cosh-ng` when hook environment variables are present ([#1894](https://github.com/alibaba/anolisa/pull/1894)).
+- Qoder plugin installation now expands cached hook paths, preventing invalid `/rewrite_hook.py` commands from blocking tool calls; the user manual includes recovery steps for affected upgrades ([#1924](https://github.com/alibaba/anolisa/pull/1924)).
+- ANOLISA packages now include the shared hook resources required by Tokenless adapters ([#1964](https://github.com/alibaba/anolisa/pull/1964)).
+
 ## [0.7.2] - 2026-07-27
 
 ### Added
@@ -185,5 +216,7 @@ Releases from 0.7.2 onward follow
 
 - introduce tokenless into ANOLISA (#199)
 
-[Unreleased]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.2...HEAD
+[Unreleased]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.4...HEAD
+[0.7.4]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.3...tokenless/v0.7.4
+[0.7.3]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.2...tokenless/v0.7.3
 [0.7.2]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.1...tokenless/v0.7.2

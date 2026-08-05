@@ -318,7 +318,7 @@ fn bound_insight_in_recommend_mode_names_missing_evidence_without_requesting_too
 }
 
 #[test]
-fn provider_prompt_redacts_all_user_and_runtime_text_boundaries() {
+fn provider_prompt_preserves_user_input_and_redacts_runtime_text() {
     let github_token = "ghp_abcdefghijklmnopqrstuvwxyz123456";
     let request = AgentRequest {
         id: "agent-request-secret".to_string(),
@@ -347,17 +347,13 @@ fn provider_prompt_redacts_all_user_and_runtime_text_boundaries() {
 
     let prompt = prompt_from_request(&request);
 
-    for secret in [
-        "user-secret",
-        github_token,
-        "hint-secret",
-        "hook-secret",
-        "description-secret",
-    ] {
+    for secret in ["user-secret", github_token] {
+        assert!(prompt.contains(secret), "{prompt}");
+    }
+    for secret in ["hint-secret", "hook-secret", "description-secret"] {
         assert!(!prompt.contains(secret), "{prompt}");
     }
-    assert!(prompt.contains("password=<redacted>"), "{prompt}");
-    assert!(prompt.contains("api_key=<redacted>"), "{prompt}");
+    assert!(prompt.contains("<redacted>"), "{prompt}");
 }
 
 #[test]

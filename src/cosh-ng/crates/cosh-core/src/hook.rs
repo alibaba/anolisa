@@ -1443,6 +1443,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn user_prompt_hook_receives_redacted_input() {
+        let secret = "sk-user-prompt-hook-secret";
+        let config = HooksConfig {
+            enabled: true,
+            pre_tool_use: vec![],
+            post_tool_use: vec![],
+            post_tool_use_failure: vec![],
+            user_prompt_submit: vec![HookDefinition {
+                command: format!(
+                    r#"python3 -c 'import json,sys; prompt=json.load(sys.stdin)["prompt"]; redacted="<redacted>" in prompt and "{secret}" not in prompt; print(json.dumps({{"decision":"allow" if redacted else "block"}}))'"#
+                ),
+                name: Some("prompt-redaction-probe".to_string()),
+                matcher: None,
+                timeout: Some(5000),
+                sequential: None,
+                env: Default::default(),
+            }],
+            session_start: vec![],
+            stop: vec![],
+            before_model: vec![],
+            after_model: vec![],
+        };
+        let system = HookSystem::from_config(&config);
+
+        let result = system
+            .fire_user_prompt_submit(
+                "session-1",
+                "/tmp",
+                &format!("write api_key={secret} to the config"),
+            )
+            .await;
+
+        assert_eq!(result.decision, HookDecision::Allow);
+    }
+
+    #[tokio::test]
     async fn exit_code_2_means_block() {
         let config = HooksConfig {
             enabled: true,

@@ -76,9 +76,35 @@ fn doctor_fix_help_matches_reserved_behavior() {
     assert!(help.contains("returns `NOT_IMPLEMENTED`"));
     assert!(!help.contains("executes the fix plan"));
 
-    let fix = run(&["doctor", "--fix"]);
+    let fix = run(&["--no-color", "doctor", "--fix"]);
     assert_eq!(Some(64), fix.status.code());
-    assert!(String::from_utf8_lossy(&fix.stderr).contains("NOT_IMPLEMENTED"));
+    assert_eq!(
+        "error: command 'doctor' is not implemented\n\
+         hint: doctor is read-only in this release; rerun without --fix to inspect fix_plan suggestions\n",
+        String::from_utf8_lossy(&fix.stderr)
+    );
+}
+
+#[test]
+fn handler_errors_use_human_labels_without_exposing_machine_codes() {
+    let human = run(&["--no-color", "update"]);
+    let stderr = String::from_utf8_lossy(&human.stderr);
+
+    assert_eq!(Some(2), human.status.code());
+    assert!(human.stdout.is_empty());
+    assert!(
+        stderr.starts_with("error: specify a component to update"),
+        "stderr: {stderr}"
+    );
+    assert!(!stderr.contains("INVALID_ARGUMENT"), "stderr: {stderr}");
+
+    let json = run(&["--json", "update"]);
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&json.stdout).expect("error output must remain valid JSON");
+
+    assert_eq!(Some(2), json.status.code());
+    assert!(json.stderr.is_empty());
+    assert_eq!(Some("INVALID_ARGUMENT"), envelope["error"]["code"].as_str());
 }
 
 #[cfg(target_os = "linux")]
@@ -95,8 +121,5 @@ fn help_reports_stdout_failure_when_output_device_is_full() {
 
     // Then the CLI reports the failed stdout write instead of exiting successfully.
     assert_eq!(Some(1), output.status.code());
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("error[EXECUTION_FAILED]: failed writing to stdout:")
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("error: failed writing to stdout:"));
 }

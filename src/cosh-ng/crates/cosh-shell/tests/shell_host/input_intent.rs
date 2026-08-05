@@ -67,6 +67,66 @@ fn classify_with_context(
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+fn literal_first_word_matches(shell: &str, input: &str, attempt: &str, command: &str) -> bool {
+    let mut process = Process::new(shell);
+    if shell == "bash" {
+        process.args(["--noprofile", "--norc"]);
+    } else {
+        process.arg("-f");
+    }
+    let script = format!(
+        "{}\n_cosh_literal_first_word_matches \"$1\" \"$2\" \"$3\"",
+        shell_intent_helpers(),
+    );
+    process
+        .args(["-c", &script, "cosh-literal-test", input, attempt, command])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[test]
+fn routing_c2_matcher_table_covers_supported_quote_removal_subset() {
+    let accepted = [
+        (
+            "子曰\"三人行必有我师\"",
+            "子曰\"三人行必有我师\"",
+            "子曰三人行必有我师",
+        ),
+        ("子曰\" 三人行必有我师\"", "子曰\"", "子曰 三人行必有我师"),
+        ("'子曰 三人行'后续", "'子曰", "子曰 三人行后续"),
+        ("\"子 曰\"x", "\"子", "子 曰x"),
+        ("子曰'\"'后续", "子曰'\"'后续", "子曰\"后续"),
+        ("\"\"子曰", "\"\"子曰", "子曰"),
+        ("子曰?", "子曰?", "子曰?"),
+        ("   解释", "解释", "解释"),
+    ];
+    let rejected = [
+        ("\"\"", "\"\"", ""),
+        ("'子曰", "'子曰", "子曰"),
+        (r"子曰\ x", r"子曰\", "子曰 x"),
+        (r#"子曰"$HOME""#, r#"子曰"$HOME""#, "子曰/tmp"),
+        ("子曰$(id)", "子曰$(id)", "子曰uid"),
+        ("子曰*", "子曰*", "子曰a"),
+    ];
+    for shell in ["bash", "zsh"] {
+        if !shell_available(shell) {
+            continue;
+        }
+        for (input, attempt, command) in accepted {
+            assert!(
+                literal_first_word_matches(shell, input, attempt, command),
+                "{shell}: accepted {input:?}"
+            );
+        }
+        for (input, attempt, command) in rejected {
+            assert!(
+                !literal_first_word_matches(shell, input, attempt, command),
+                "{shell}: rejected {input:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn classification_is_locale_independent() {
     for shell in ["bash", "zsh"] {
@@ -133,22 +193,16 @@ fn long_ascii_input_avoids_per_byte_subprocess_cost() {
 }
 
 #[test]
-fn max_non_ascii_input_avoids_per_byte_subprocess_cost() {
+fn max_non_ascii_input_needs_no_byte_subprocess() {
     let input = "é".repeat(2048);
     for shell in ["bash", "zsh"] {
         if !shell_available(shell) {
             continue;
         }
-        let started = Instant::now();
         assert_eq!(
-            classify(shell, &input, &input).as_deref(),
+            classify_with_setup(shell, &input, &input, "PATH=/nonexistent").as_deref(),
             Some("ambiguous"),
             "{shell}"
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "{shell}: {:?}",
-            started.elapsed()
         );
     }
 }
@@ -210,6 +264,10 @@ fn strong_natural_language_matrix_is_consistent() {
         ),
         (
             "\u{5e2e}\u{6211}\u{770b} ./\u{65e5}\u{5fd7}",
+            "\u{5e2e}\u{6211}\u{770b}",
+        ),
+        (
+            "\u{5e2e}\u{6211}\u{770b} ./*.log",
             "\u{5e2e}\u{6211}\u{770b}",
         ),
         ("review ./report.log", "review"),
@@ -279,10 +337,6 @@ fn command_veto_matrix_is_consistent() {
             "\u{5e2e}\u{6211}\u{770b} \"$PATH\"",
             "\u{5e2e}\u{6211}\u{770b}",
         ),
-        (
-            "\u{5e2e}\u{6211}\u{770b} ./*.log",
-            "\u{5e2e}\u{6211}\u{770b}",
-        ),
         ("review --all", "review"),
         ("review FOO=bar", "review"),
         ("review this | cat", "review"),
@@ -350,4 +404,257 @@ fn han_core_boundaries_are_locale_independent() {
         let input = char::from_u32(codepoint).expect("valid non-Han codepoint");
         assert_bash_zsh(&input.to_string(), &input.to_string(), "ambiguous");
     }
+}
+
+// Missing-path context (#1919): the DEBUG trap caller has proven the
+// slash-bearing first token does not resolve to an existing path, so the
+// slash veto is lifted while every other veto rule stays active.
+fn classify_missing_path(shell: &str, input: impl AsRef<OsStr>, top_token: &str) -> Option<String> {
+    let mut command = Process::new(shell);
+    if shell == "bash" {
+        command.args(["--noprofile", "--norc"]);
+    } else {
+        command.arg("-f");
+    }
+    let script = format!(
+        "{}\n_cosh_classify_missing \"$1\" \"$2\" missing_path",
+        shell_intent_helpers(),
+    );
+    let output = command
+        .args(["-c", &script, "cosh-intent-test"])
+        .arg(input)
+        .arg(top_token)
+        .output()
+        .ok()?;
+    assert!(
+        output.status.success(),
+        "{shell}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn assert_bash_zsh_missing_path(input: &str, top_token: &str, expected: &str) {
+    for shell in ["bash", "zsh"] {
+        if !shell_available(shell) {
+            continue;
+        }
+        assert_eq!(
+            classify_missing_path(shell, input, top_token).as_deref(),
+            Some(expected),
+            "{shell}: {input:?}"
+        );
+    }
+}
+
+#[test]
+fn missing_path_context_lifts_slash_veto_for_natural_language() {
+    for (input, top_token) in [
+        // issue #1919 original prompt: full-width punctuation keeps the
+        // whole line one token, absolute path embedded
+        (
+            "你读一下，并安装这个skill：/usr/share/anolisa/runtime/skills/ws-ckpt/SKILL.md",
+            "你读一下，并安装这个skill：/usr/share/anolisa/runtime/skills/ws-ckpt/SKILL.md",
+        ),
+        // relative path glued to a Chinese verb, no ASCII space
+        ("打开./config.toml", "打开./config.toml"),
+        // slash-bearing first token followed by Chinese words
+        ("/usr/share/foo 帮我读一下", "/usr/share/foo"),
+        // parent-relative path glued to Chinese
+        ("看看../logs/app.log", "看看../logs/app.log"),
+    ] {
+        assert_bash_zsh_missing_path(input, top_token, "natural_language");
+    }
+}
+
+#[test]
+fn missing_path_context_keeps_conservative_vetoes() {
+    for (input, top_token, expected) in [
+        // tilde prefix keeps the unconditional veto (D4)
+        ("~/脚本啊", "~/脚本啊", "command"),
+        // plain-English typo path stays shell-owned (D3)
+        ("/usr/bin/gooo", "/usr/bin/gooo", "ambiguous"),
+        // bare URL carries no natural-language evidence (D3)
+        (
+            "https://example.com/foo",
+            "https://example.com/foo",
+            "ambiguous",
+        ),
+        // pipe metacharacter still vetoes
+        ("打开./config.toml | cat", "打开./config.toml", "command"),
+        // option token still vetoes
+        ("./run.sh --all", "./run.sh", "command"),
+        // Han-leading assignment syntax is Tier A.
+        ("打开./x FOO=bar", "打开./x", "natural_language"),
+    ] {
+        assert_bash_zsh_missing_path(input, top_token, expected);
+    }
+}
+
+#[test]
+fn missing_path_context_invalid_utf8_stays_unsafe() {
+    // ASCII prefix: the Han scan must reach the invalid byte and bail out
+    // as "unsafe" (a leading Han character short-circuits to
+    // natural_language first, same as the existing cnf-path semantics).
+    let mut bytes = "open./x".as_bytes().to_vec();
+    bytes.push(0xff);
+    let input = OsString::from_vec(bytes);
+    for shell in ["bash", "zsh"] {
+        if !shell_available(shell) {
+            continue;
+        }
+        assert_eq!(
+            classify_missing_path(shell, &input, "open./x").as_deref(),
+            Some("unsafe"),
+            "{shell}"
+        );
+    }
+}
+
+#[test]
+fn routing_c1_classifier_han_tier_matrix() {
+    for (input, top_token, expected) in [
+        (
+            "使用 git log --since=\"1 day ago\" --format=\"%h %s (%an, %ar)\" 总结",
+            "使用",
+            "natural_language",
+        ),
+        (
+            "解释 --all FOO=bar ./*.log {a,b} ~/x",
+            "解释",
+            "natural_language",
+        ),
+        ("解释一下 (quoted) 的含义", "解释一下", "command"),
+        (
+            "解释一下 \"(quoted)\" 的含义",
+            "解释一下",
+            "natural_language",
+        ),
+        ("你还好吗？ 我想问问", "你还好吗？", "natural_language"),
+        ("解释 ps aux | grep java", "解释", "command"),
+        ("解释 true && touch x", "解释", "command"),
+        ("解释 false || touch x", "解释", "command"),
+        ("解释 \"$HOME\"", "解释", "command"),
+        ("解释 'a>b'", "解释", "command"),
+        ("解释 $((1 + 1))", "解释", "command"),
+        ("解释 <(printf x)", "解释", "command"),
+        ("解释 `printf x`", "解释", "command"),
+        ("解释 \\", "解释", "command"),
+        ("解释 \"unterminated", "解释", "command"),
+        ("解释\t内容", "解释", "command"),
+    ] {
+        assert_bash_zsh(input, top_token, expected);
+    }
+}
+
+#[test]
+fn routing_c1_classifier_validates_full_utf8_before_han() {
+    let mut bytes = "解释".as_bytes().to_vec();
+    bytes.push(0xff);
+    let input = OsString::from_vec(bytes);
+    for shell in ["bash", "zsh"] {
+        if !shell_available(shell) {
+            continue;
+        }
+        assert_eq!(
+            classify(shell, &input, "解释").as_deref(),
+            Some("unsafe"),
+            "{shell}"
+        );
+    }
+}
+
+#[test]
+fn routing_c1_missing_path_allows_han_tier_a() {
+    assert_bash_zsh_missing_path(
+        "打开./不存在 --dry-run \"x (preview)\"",
+        "打开./不存在",
+        "natural_language",
+    );
+}
+
+// ENOENT-proof walk (issue #1919 review): dangling symlinks and
+// permission-opaque paths must never count as "provably missing" — bash
+// reports native 126/127 for them and interception must not shadow that.
+fn path_provably_missing(shell: &str, path: &std::path::Path) -> bool {
+    let mut command = Process::new(shell);
+    if shell == "bash" {
+        command.args(["--noprofile", "--norc"]);
+    } else {
+        command.arg("-f");
+    }
+    let script = format!(
+        "{}\n_cosh_path_provably_missing \"$1\"",
+        shell_intent_helpers(),
+    );
+    let output = command
+        .args(["-c", &script, "cosh-intent-test"])
+        .arg(path)
+        .output()
+        .expect("run shell");
+    output.status.success()
+}
+
+#[test]
+fn path_provably_missing_requires_enoent_proof() {
+    use crate::unique_suffix;
+    use std::os::unix::fs::PermissionsExt;
+
+    let requested_base = std::env::temp_dir().join(format!(
+        "cosh-path-proof-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&requested_base).expect("base dir");
+    let base = requested_base.canonicalize().expect("canonical base dir");
+    let existing = base.join("existing.txt");
+    std::fs::write(&existing, "x\n").expect("existing file");
+    let dangling = base.join("dangling-link");
+    std::os::unix::fs::symlink(base.join("no-such-target"), &dangling).expect("symlink");
+    let opaque_dir = base.join("opaque");
+    std::fs::create_dir_all(&opaque_dir).expect("opaque dir");
+    let opaque_file = opaque_dir.join("real-file");
+    std::fs::write(&opaque_file, "x\n").expect("opaque file");
+    std::fs::set_permissions(&opaque_dir, std::fs::Permissions::from_mode(0o000))
+        .expect("chmod opaque");
+
+    for shell in ["bash", "zsh"] {
+        if !shell_available(shell) {
+            continue;
+        }
+        // Plain missing path in a readable parent: provable.
+        assert!(
+            path_provably_missing(shell, &base.join("missing.txt")),
+            "{shell}: plain missing"
+        );
+        // Missing path whose missing ancestor also proves ENOENT.
+        assert!(
+            path_provably_missing(shell, &base.join("missing-dir/child")),
+            "{shell}: missing ancestor"
+        );
+        // Existing path: never provable.
+        assert!(
+            !path_provably_missing(shell, &existing),
+            "{shell}: existing"
+        );
+        // Dangling symlink: bash reports native 127, not provable.
+        assert!(
+            !path_provably_missing(shell, &dangling),
+            "{shell}: dangling symlink"
+        );
+        // File behind a permission-opaque directory: stat says EACCES (or
+        // succeeds as root), either way not provable.
+        assert!(
+            !path_provably_missing(shell, &opaque_file),
+            "{shell}: permission-opaque"
+        );
+        // Path routed through an existing regular file (ENOTDIR).
+        assert!(
+            !path_provably_missing(shell, &existing.join("child")),
+            "{shell}: ENOTDIR ancestor"
+        );
+    }
+
+    std::fs::set_permissions(&opaque_dir, std::fs::Permissions::from_mode(0o755))
+        .expect("restore opaque");
 }

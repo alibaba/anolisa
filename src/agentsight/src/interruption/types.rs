@@ -207,6 +207,38 @@ fn new_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
+/// Decoded `task_struct->exit_code` (wait(2) status encoding).
+///
+/// Assumes the Linux wait(2) encoding of the raw value; this matches the
+/// procmon BPF probe, which is Linux-only, so no other platform layout is
+/// supported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessExitStatus {
+    /// Terminating signal number; 0 when the process exited voluntarily.
+    pub signal: u32,
+    /// Whether the kernel produced a core dump.
+    pub core_dump: bool,
+    /// Exit code passed to exit(); meaningful only when `signal == 0`.
+    pub code: u32,
+}
+
+impl ProcessExitStatus {
+    /// Decode the raw kernel exit_code: low 7 bits = terminating signal,
+    /// bit 7 = core-dump flag, bits 8..=15 = exit code.
+    pub fn decode(raw: u32) -> Self {
+        Self {
+            signal: raw & 0x7f,
+            core_dump: (raw & 0x80) != 0,
+            code: (raw >> 8) & 0xff,
+        }
+    }
+
+    /// True when the process terminated voluntarily with exit code 0.
+    pub fn is_clean(self) -> bool {
+        self.signal == 0 && self.code == 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,5 +556,53 @@ mod tests {
             let back: Severity = serde_json::from_str(&json).unwrap();
             assert_eq!(s, back);
         }
+    }
+
+    // Raw values below were captured on a real kernel (issue #1989):
+    // exit 0 → 0x0, exit 3 → 0x300, SIGKILL → 0x9, SIGSEGV+core → 0x8b.
+
+    #[test]
+    fn test_decode_clean_exit() {
+        let s = ProcessExitStatus::decode(0x0);
+        assert_eq!(s.signal, 0);
+        assert!(!s.core_dump);
+        assert_eq!(s.code, 0);
+        assert!(s.is_clean());
+    }
+
+    #[test]
+    fn test_decode_nonzero_exit_code() {
+        let s = ProcessExitStatus::decode(0x300);
+        assert_eq!(s.signal, 0);
+        assert!(!s.core_dump);
+        assert_eq!(s.code, 3);
+        assert!(!s.is_clean());
+    }
+
+    #[test]
+    fn test_decode_sigkill() {
+        let s = ProcessExitStatus::decode(0x9);
+        assert_eq!(s.signal, 9);
+        assert!(!s.core_dump);
+        assert_eq!(s.code, 0);
+        assert!(!s.is_clean());
+    }
+
+    #[test]
+    fn test_decode_sigsegv_with_core_dump() {
+        let s = ProcessExitStatus::decode(0x8b);
+        assert_eq!(s.signal, 11);
+        assert!(s.core_dump);
+        assert_eq!(s.code, 0);
+        assert!(!s.is_clean());
+    }
+
+    #[test]
+    fn test_decode_exit_code_255_boundary() {
+        let s = ProcessExitStatus::decode(0xff00);
+        assert_eq!(s.signal, 0);
+        assert!(!s.core_dump);
+        assert_eq!(s.code, 255);
+        assert!(!s.is_clean());
     }
 }

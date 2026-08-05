@@ -60,6 +60,15 @@ impl CoshCoreAdapter {
         result
     }
 
+    /// Schedules a safe-point snapshot reload after an out-of-band MCP
+    /// mutation: `cosh-core mcp` subprocesses only touch on-disk state, and
+    /// the live core rebuilds MCP tools solely during extension snapshot
+    /// rebuilds, so without this the running agent would keep stale tools,
+    /// connections, and credentials until the next restart.
+    pub(crate) fn note_mcp_mutation(&self) {
+        self.runtime.note_external_mutation("extensions", "reload");
+    }
+
     fn registry_query_short(
         &self,
         domain: &str,

@@ -115,6 +115,49 @@ fn render_inline_guidance_from_batch<W: Write>(
     let ledger = build_command_blocks(events);
     record_completed_command_blocks(state, &ledger.blocks);
     state.session_blocks = ledger.blocks.clone();
+    // Positive evidence of command activity (R9): incomplete or
+    // unmatched markers produce ledger errors instead of blocks, so an
+    // empty `session_blocks` alone never proves the shell has not run
+    // (and cd'd inside) a command. `events` is the session's cumulative
+    // stream (the raw relay always passes the parser's full event vec,
+    // which is append-only), so once a command marker is present it is
+    // present in every later dispatch and this assignment never
+    // regresses to `false`.
+    state.shell_command_activity_observed = events.iter().any(|event| {
+        matches!(
+            event.kind,
+            ShellEventKind::CommandStarted
+                | ShellEventKind::CommandCompleted
+                | ShellEventKind::CommandFailed
+        )
+    });
+    // The shell's latest prompt-time cwd report: a `ShellReady` event
+    // is a precmd marker with no command in flight and carries the
+    // shell's `$PWD`, so it is positive evidence both that the marker
+    // channel works and of where the shell sits. Any later PTY input
+    // write invalidates the report — submit-detection in the byte
+    // stream is a documented heuristic (a custom `accept-line`
+    // binding is indistinguishable from editing keys), and the
+    // submitted line may have been a `cd` whose markers were lost
+    // entirely — so the report is only current while no user input
+    // follows it. Scanned newest first: the most recent decisive
+    // event wins, and an event-free dispatch never erases the last
+    // known state.
+    for event in events.iter().rev() {
+        if event.kind == ShellEventKind::UserInputIntercepted
+            && event.component.as_deref() == Some("shell_pty_input")
+            && event.message.as_deref() == Some("write")
+        {
+            state.shell_prompt_cwd = None;
+            break;
+        }
+        if event.kind == ShellEventKind::ShellReady {
+            if let Some(cwd) = event.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
+                state.shell_prompt_cwd = Some(cwd.to_string());
+                break;
+            }
+        }
+    }
     if state.shell_exited {
         if let Some(event) = events
             .iter()
@@ -211,15 +254,7 @@ fn render_inline_guidance_from_batch<W: Write>(
         output,
         event_index_base,
     )?;
-    let card_capture_pending = pending_card_capture(state).is_some();
-    let activity_actions = ActivityConsumer::consume(
-        events,
-        &ledger.blocks,
-        adapter,
-        state,
-        output,
-        card_capture_pending,
-    )?;
+    let activity_actions = ActivityConsumer::consume(events, &ledger.blocks, state, output)?;
     RuntimeDispatcher::apply_actions(activity_actions, state);
     let findings = findings_from_blocks(&ledger.blocks);
     record_blocks_followed_by_user_input(events, &ledger.blocks, state);
@@ -333,6 +368,12 @@ fn render_inline_guidance_from_batch<W: Write>(
         poll_active_agent_run(state, output, adapter)?;
     }
     flush_held_agent_events(state, output)?;
+    // Shell-evidence recovery is scheduled only after this batch's final agent
+    // poll. Claiming it earlier sees a run that is about to finish inside that
+    // poll as still active, which skips the pending continuation for this batch;
+    // it would then only be picked up if some later shell event triggered
+    // another one.
+    start_pending_shell_handoff_continuations(adapter, state, output)?;
     poll_background_compaction(state, output, adapter, false)?;
     render_soft_newline_tip(events, state, output)?;
     render_owned_shell_prompt(state, output)?;
@@ -340,7 +381,46 @@ fn render_inline_guidance_from_batch<W: Write>(
     Ok(())
 }
 
-fn update_personal_shell_input_state(events: &[ShellEvent], state: &mut InlineState) {
+/// Starts the shell-evidence continuation whose delivery to the owning provider
+/// run failed. Reuses the existing `PendingRecovery` claim, so a given approval
+/// recovers at most once.
+///
+/// Claiming is a one-way move (`PendingRecovery` -> `RecoveryQueued`, plus a
+/// dedup entry keyed by approval id), so it must not happen unless the run can
+/// actually start: a pending or active compaction makes
+/// `start_agent_run_with_origin` drop this `InternalBestEffort` request, which
+/// would leave the evidence claimed and unrecoverable. Hence the gate check
+/// before claiming, and — because starting a run polls the provider and can
+/// itself surface a compaction recommendation — at most one recovery per
+/// boundary. Any remaining recoveries are claimed at the next idle boundary.
+fn start_pending_shell_handoff_continuations<W: Write>(
+    adapter: &AdapterInstance,
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    if state.agent_run.active.is_some()
+        || pending_card_capture(state).is_some()
+        || crate::slash::session::compaction_pending_or_active(state)
+    {
+        return Ok(());
+    }
+    for (request, origin) in shell_handoff_continuation_requests(state) {
+        // Shell-handoff continuations are automatic conversation resumptions,
+        // not fresh user requests.
+        start_agent_run_with_origin(
+            &request,
+            origin,
+            AgentStartIntent::InternalBestEffort,
+            adapter,
+            state,
+            output,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn update_personal_shell_input_state(events: &[ShellEvent], state: &mut InlineState) {
     for event in events {
         match event.kind {
             ShellEventKind::ShellReady
@@ -359,7 +439,15 @@ fn update_personal_shell_input_state(events: &[ShellEvent], state: &mut InlineSt
 }
 
 fn update_soft_newline_tip_state(events: &[ShellEvent], state: &mut InlineState) {
-    if state.shown_soft_newline_tip {
+    // #1932 F5: remember a straight-to-bash multi-line paste for the
+    // failure-insight hint; consumed by render_pending_command_insight.
+    if events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.component.as_deref() == Some("multiline_paste")
+    }) {
+        state.prompt_entry_hints.multiline_paste_observed = true;
+    }
+    if state.prompt_entry_hints.shown_soft_newline_tip {
         return;
     }
     let observed = events.iter().any(|event| {
@@ -367,7 +455,7 @@ fn update_soft_newline_tip_state(events: &[ShellEvent], state: &mut InlineState)
             && event.component.as_deref() == Some("soft_newline_shortcut")
     });
     if observed {
-        state.pending_soft_newline_tip = true;
+        state.prompt_entry_hints.pending_soft_newline_tip = true;
     }
 }
 
@@ -380,7 +468,9 @@ fn render_soft_newline_tip<W: Write>(
     state: &mut InlineState,
     output: &mut W,
 ) -> std::io::Result<()> {
-    if !state.pending_soft_newline_tip || state.shown_soft_newline_tip {
+    if !state.prompt_entry_hints.pending_soft_newline_tip
+        || state.prompt_entry_hints.shown_soft_newline_tip
+    {
         return Ok(());
     }
     if !events
@@ -395,10 +485,14 @@ fn render_soft_newline_tip<W: Write>(
         return Ok(());
     }
     let tip = state.i18n().t(MessageId::PromptSoftNewlineTip);
-    write!(output, "\x1b[2m{tip}\x1b[0m\r\n")?;
+    // The cursor may sit anywhere on the echoed input line: move to a
+    // fresh line before the tip and repaint the prompt afterwards so the
+    // tip never splices into user input (#1932).
+    write!(output, "\r\n\x1b[2m{tip}\x1b[0m\r\n")?;
     output.flush()?;
-    state.pending_soft_newline_tip = false;
-    state.shown_soft_newline_tip = true;
+    state.trigger_pty_prompt = true;
+    state.prompt_entry_hints.pending_soft_newline_tip = false;
+    state.prompt_entry_hints.shown_soft_newline_tip = true;
     Ok(())
 }
 
@@ -498,129 +592,17 @@ impl ActivityConsumer {
     pub(crate) fn consume<W: Write>(
         events: &[ShellEvent],
         blocks: &[CommandBlock],
-        adapter: &AdapterInstance,
         state: &mut InlineState,
         output: &mut W,
-        card_capture_pending: bool,
     ) -> std::io::Result<Vec<RuntimeAction>> {
         let mut handoff_activity_ids = record_approved_shell_handoff_blocks(state, blocks);
         // Fallback: close emitted handoffs that reached a prompt boundary
         // without ever producing command tracking (lost preexec marker).
         handoff_activity_ids.extend(close_untracked_shell_handoffs(state, events));
         render_activity_rows(state, &handoff_activity_ids, output)?;
-        if !card_capture_pending && state.agent_run.active.is_none() {
-            for (request, origin) in shell_handoff_continuation_requests(state) {
-                // Shell-handoff continuations are automatic conversation
-                // resumptions, not fresh user requests.
-                start_agent_run_with_origin(
-                    &request,
-                    origin,
-                    AgentStartIntent::InternalBestEffort,
-                    adapter,
-                    state,
-                    output,
-                    None,
-                )?;
-            }
-        }
         Ok(Vec::new())
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::runtime::prelude::FakeAgentAdapter;
-
-    #[test]
-    fn dispatcher_advances_cursor_to_snapshot_end() {
-        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-        let mut state = InlineState::default();
-        let mut output = Vec::new();
-        let snapshot = ShellEventSnapshot::new(&[
-            ShellEvent::user_input_intercepted("s", "/help"),
-            ShellEvent::user_input_intercepted("s", "/help"),
-        ]);
-
-        let actions = RuntimeDispatcher::dispatch_inline_batch(
-            &snapshot,
-            &adapter,
-            "bash",
-            &mut state,
-            &mut output,
-        )
-        .expect("dispatch should render");
-        RuntimeDispatcher::apply_actions(actions, &mut state);
-
-        assert_eq!(
-            state.control.event_cursor().position(),
-            snapshot.cursor().position()
-        );
-    }
-
-    #[test]
-    fn stable_event_key_uses_marker_timestamp_when_available() {
-        let mut event = ShellEvent::user_input_intercepted("s", "/help");
-        assert_eq!(stable_event_key("slash", 7, &event), "slash:7");
-
-        event.started_at_ms = Some(123);
-        assert_eq!(stable_event_key("slash", 7, &event), "slash:123::/help");
-    }
-
-    #[test]
-    fn stable_event_key_does_not_retain_secret_card_input() {
-        let mut event = ShellEvent::user_input_intercepted("s", "auth-1:secret-value");
-        event.started_at_ms = Some(123);
-        event.component = Some("card_secret".to_string());
-
-        let key = stable_event_key("auth", 7, &event);
-
-        assert_eq!(key, "auth:123:card_secret:7");
-        assert!(!key.contains("secret-value"));
-    }
-
-    #[test]
-    fn personal_idle_tracks_whether_the_shell_input_line_is_empty() {
-        let mut state = InlineState::default();
-        let mut editing = ShellEvent::user_input_intercepted("s", "");
-        editing.component = Some("shell_input".to_string());
-        editing.message = Some("input editing".to_string());
-        update_personal_shell_input_state(&[editing], &mut state);
-        assert!(state.personalization.shell_input_active);
-
-        let mut empty = ShellEvent::user_input_intercepted("s", "");
-        empty.component = Some("shell_input".to_string());
-        empty.message = Some("input empty".to_string());
-        update_personal_shell_input_state(&[empty], &mut state);
-        assert!(!state.personalization.shell_input_active);
-    }
-
-    #[test]
-    fn busy_shell_updates_the_analyzer_foreground_gate() {
-        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-        let cancellation =
-            crate::recommendation::personal_analysis_runtime::AnalyzerCancellation::new();
-        let mut state = InlineState {
-            personalization: crate::recommendation::personal_state::PersonalizationState {
-                analyzer_cancellation: Some(cancellation.clone()),
-                ..Default::default()
-            },
-            ..InlineState::default()
-        };
-        let mut output = Vec::new();
-        let snapshot = ShellEventSnapshot::new(&[ShellEvent::command_started(
-            "session", "command", "sleep 1", "/tmp", 1,
-        )]);
-
-        RuntimeDispatcher::dispatch_inline_batch(
-            &snapshot,
-            &adapter,
-            "bash",
-            &mut state,
-            &mut output,
-        )
-        .expect("dispatch should render");
-
-        assert!(!cancellation.foreground_idle());
-    }
-}
+mod recovery_tests;

@@ -1,5 +1,5 @@
 use crate::evidence::{provider_safe_command_fact_line, terminal_output_id};
-use crate::types::{AgentEvent, AgentRequest, QuestionSelectionMode};
+use crate::types::{AgentEvent, AgentRequest, QuestionSelectionMode, PROVIDER_TIMEOUT_ERROR_CODE};
 
 use super::{AdapterError, AgentAdapter, AgentBackendCapabilities};
 use control_protocol::emit_fake_control_protocol_stream;
@@ -71,7 +71,7 @@ impl AgentAdapter for FakeAgentAdapter {
     fn run(&self, request: &AgentRequest) -> Result<Vec<AgentEvent>, AdapterError> {
         let language = crate::language_config_status().effective;
         if let Some(input) = &request.user_input {
-            let run_id = format!("fake-run-{}", request.command_block.id);
+            let run_id = request.id.clone();
             if let Some(answer) = extract_fake_pending_answer(input) {
                 return Ok(vec![
                     AgentEvent::StatusChanged {
@@ -134,9 +134,29 @@ impl AgentAdapter for FakeAgentAdapter {
                     return Ok(vec![AgentEvent::AgentFailed {
                         run_id,
                         error: "Agent timed out: No provider response within 20s".to_string(),
+                        error_code: Some(PROVIDER_TIMEOUT_ERROR_CODE.to_string()),
+                        max_turns: None,
+                    }]);
+                }
+                // Times out for the T1 continuation only, so the T2
+                // same-session retry succeeds (T2-success presentation path).
+                // Checked before the plain "trigger resume timeout" branch
+                // because that trigger is a substring of this one.
+                if input.contains("trigger resume timeout once")
+                    && !request.context_hints.iter().any(|hint| {
+                        hint.contains("disable provider resume")
+                            || hint.contains("same-session retry")
+                    })
+                {
+                    return Ok(vec![AgentEvent::AgentFailed {
+                        run_id,
+                        error: "Agent timed out: No provider response within 20s".to_string(),
+                        error_code: Some(PROVIDER_TIMEOUT_ERROR_CODE.to_string()),
+                        max_turns: None,
                     }]);
                 }
                 if input.contains("trigger resume timeout")
+                    && !input.contains("trigger resume timeout once")
                     && !request
                         .context_hints
                         .iter()
@@ -145,6 +165,8 @@ impl AgentAdapter for FakeAgentAdapter {
                     return Ok(vec![AgentEvent::AgentFailed {
                         run_id,
                         error: "Agent timed out: No provider response within 20s".to_string(),
+                        error_code: Some(PROVIDER_TIMEOUT_ERROR_CODE.to_string()),
+                        max_turns: None,
                     }]);
                 }
                 return Ok(vec![
@@ -288,6 +310,8 @@ impl AgentAdapter for FakeAgentAdapter {
                     AgentEvent::AgentFailed {
                         run_id,
                         error: "fake backend unavailable".to_string(),
+                        error_code: None,
+                        max_turns: None,
                     },
                 ]);
             }
@@ -647,6 +671,8 @@ impl AgentAdapter for FakeAgentAdapter {
                         run_id,
                         error: "recommend prompt exposed shell evidence request instructions"
                             .to_string(),
+                        error_code: None,
+                        max_turns: None,
                     }]);
                 }
                 return Ok(vec![
@@ -665,6 +691,8 @@ impl AgentAdapter for FakeAgentAdapter {
                     return Ok(vec![AgentEvent::AgentFailed {
                         run_id,
                         error: "list-only prompt included output excerpt".to_string(),
+                        error_code: None,
+                        max_turns: None,
                     }]);
                 }
                 return Ok(vec![
@@ -803,7 +831,7 @@ impl AgentAdapter for FakeAgentAdapter {
             ]);
         }
 
-        let run_id = format!("fake-run-{}", request.command_block.id);
+        let run_id = request.id.clone();
         Ok(vec![
             AgentEvent::StatusChanged {
                 run_id: run_id.clone(),

@@ -1207,6 +1207,285 @@ fn ordinary_provider_error_marker_cannot_release_active_resume() {
 }
 
 #[test]
+fn max_turn_failure_keeps_the_persistent_service_session_active_for_continuation() {
+    let spawn_log = std::env::temp_dir().join(format!(
+        "cosh-core-max-turns-spawns-{}.log",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&spawn_log);
+    let script = mock_provider_script(
+        "cosh-core-max-turns-continue",
+        &format!(
+            r#"echo "$$" >> '{log}'
+read -r init
+printf '%s\n' '{{"type":"control_response","response":{{"subtype":"success","request_id":"init-1","response":{{"subtype":"initialize","capabilities":{{}}}}}}}}'
+read -r first_message
+printf '%s\n' '{{"type":"system","subtype":"init","session_id":"{id}","session_resumable":true,"model":"mock","tools":[]}}'
+printf '%s\n' '{{"type":"result","subtype":"error","session_id":"{id}","is_error":true,"result":"Agent exceeded max turns (50)","error_code":"max_turns","max_turns":50}}'
+read -r second_message
+printf '%s\n' '{{"type":"system","subtype":"init","session_id":"{id}","session_resumable":true,"model":"mock","tools":[]}}'
+printf '%s\n' '{{"type":"result","subtype":"success","session_id":"{id}","is_error":false,"duration_ms":1,"result":"continued"}}'
+read -r _"#,
+            log = spawn_log.display(),
+            id = "00000000-0000-4000-8000-000000000000",
+        ),
+    );
+    let adapter = CoshCoreAdapter::new(script.display().to_string(), true);
+
+    let capped = adapter.start_cancellable(
+        make_request("cosh-core-max-turns-first"),
+        CoshApprovalMode::Auto,
+    );
+    let capped_events = collect_events_until_finished(&capped, Duration::from_secs(5));
+
+    // The user must still see why the run stopped.
+    assert!(
+        capped_events.iter().any(
+            |event| matches!(event, AgentEvent::AgentFailed { error, .. }
+                if error == "Agent exceeded max turns (50)")
+        ),
+        "max-turn failure was suppressed: {capped_events:?}"
+    );
+    assert!(
+        !capped_events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })),
+        "a capped run must not report completion: {capped_events:?}"
+    );
+    // cosh-core persisted the transcript before reporting the cap, so the
+    // session stays committed and resumable.
+    assert_eq!(
+        adapter.committed_session_id().as_deref(),
+        Some("00000000-0000-4000-8000-000000000000")
+    );
+    assert_eq!(
+        adapter.recovery_snapshot().state,
+        SessionRecoveryState::Active
+    );
+
+    let continued = adapter.start_cancellable(
+        make_request("cosh-core-max-turns-continue"),
+        CoshApprovalMode::Auto,
+    );
+    let continued_events = collect_events_until_finished(&continued, Duration::from_secs(5));
+
+    assert!(
+        continued_events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentCompleted { .. })),
+        "continuation did not complete: {continued_events:?}"
+    );
+    assert!(
+        !continued_events.iter().any(
+            |event| matches!(event, AgentEvent::AgentFailed { error, .. }
+                if error.contains("identity mismatch"))
+        ),
+        "continuation rejected the retained session identity: {continued_events:?}"
+    );
+    assert_eq!(
+        adapter.committed_session_id().as_deref(),
+        Some("00000000-0000-4000-8000-000000000000")
+    );
+    assert_eq!(
+        adapter.recovery_snapshot().state,
+        SessionRecoveryState::Active
+    );
+    // The retained session must be reached through the same long-lived core
+    // process; a reset would have spawned the mock a second time.
+    let spawns = fs::read_to_string(&spawn_log).expect("read mock spawn log");
+    assert_eq!(
+        spawns.lines().count(),
+        1,
+        "the persistent core process was respawned: {spawns:?}"
+    );
+
+    let _ = fs::remove_file(&spawn_log);
+    let _ = fs::remove_file(script);
+}
+
+#[test]
+fn non_resumable_max_turn_failure_commits_no_persistent_service_session() {
+    let script = mock_provider_script(
+        "cosh-core-max-turns-non-resumable",
+        r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","session_resumable":false,"model":"mock","tools":[]}'
+printf '%s\n' '{"type":"result","subtype":"error","session_id":"00000000-0000-4000-8000-000000000000","is_error":true,"result":"Agent exceeded max turns (50)","error_code":"max_turns","max_turns":50}'"#,
+    );
+    let adapter = CoshCoreAdapter::new(script.display().to_string(), true);
+
+    let handle = adapter.start_cancellable(
+        make_request("cosh-core-max-turns-non-resumable"),
+        CoshApprovalMode::Auto,
+    );
+    let events = collect_events_until_finished(&handle, Duration::from_secs(5));
+
+    assert!(
+        events.iter().any(
+            |event| matches!(event, AgentEvent::AgentFailed { error, .. }
+                if error == "Agent exceeded max turns (50)")
+        ),
+        "max-turn failure was suppressed: {events:?}"
+    );
+    assert_eq!(adapter.committed_session_id(), None);
+    let _ = fs::remove_file(script);
+}
+
+#[test]
+fn non_resumable_service_process_commits_no_session_on_later_turns() {
+    // cosh-core announces `session_resumable` once per process, so a second
+    // turn's stream carries no `system/init`. Neither a capped nor a successful
+    // later turn may commit a session whose persistence is disabled.
+    for (label, second_turn) in [
+        (
+            "max-turns",
+            r#"{"type":"result","subtype":"error","session_id":"00000000-0000-4000-8000-000000000000","is_error":true,"result":"Agent exceeded max turns (50)","error_code":"max_turns","max_turns":50}"#,
+        ),
+        (
+            "success",
+            r#"{"type":"result","subtype":"success","session_id":"00000000-0000-4000-8000-000000000000","is_error":false,"duration_ms":1,"result":"second"}"#,
+        ),
+    ] {
+        let script = mock_provider_script(
+            &format!("cosh-core-non-resumable-{label}"),
+            &format!(
+                r#"read -r init
+printf '%s\n' '{{"type":"control_response","response":{{"subtype":"success","request_id":"init-1","response":{{"subtype":"initialize","capabilities":{{}}}}}}}}'
+printf '%s\n' '{{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","session_resumable":false,"model":"mock","tools":[]}}'
+read -r first_message
+printf '%s\n' '{{"type":"result","subtype":"success","session_id":"00000000-0000-4000-8000-000000000000","is_error":false,"duration_ms":1,"result":"first"}}'
+read -r second_message
+printf '%s\n' '{second_turn}'
+read -r _"#
+            ),
+        );
+        let adapter = CoshCoreAdapter::new(script.display().to_string(), true);
+
+        let first = adapter.start_cancellable(
+            make_request(&format!("cosh-core-non-resumable-{label}-first")),
+            CoshApprovalMode::Auto,
+        );
+        let _ = collect_events_until_finished(&first, Duration::from_secs(5));
+        assert_eq!(
+            adapter.committed_session_id(),
+            None,
+            "{label}: a non-resumable session must not commit"
+        );
+
+        let second = adapter.start_cancellable(
+            make_request(&format!("cosh-core-non-resumable-{label}-second")),
+            CoshApprovalMode::Auto,
+        );
+        let _ = collect_events_until_finished(&second, Duration::from_secs(5));
+
+        assert_eq!(
+            second.pending_provider_session_id(),
+            None,
+            "{label}: a non-resumable session leaked into the pending run state"
+        );
+        assert_eq!(
+            adapter.committed_session_id(),
+            None,
+            "{label}: a later turn lost the process's non-resumable state"
+        );
+        let _ = fs::remove_file(script);
+    }
+}
+
+#[test]
+fn ordinary_service_failure_commits_no_persistent_session() {
+    let script = mock_provider_script(
+        "cosh-core-service-api-error",
+        r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","session_resumable":true,"model":"mock","tools":[]}'
+printf '%s\n' '{"type":"result","subtype":"error","session_id":"00000000-0000-4000-8000-000000000000","is_error":true,"result":"API error 500"}'"#,
+    );
+    let adapter = CoshCoreAdapter::new(script.display().to_string(), true);
+
+    let handle = adapter.start_cancellable(
+        make_request("cosh-core-service-api-error"),
+        CoshApprovalMode::Auto,
+    );
+    let events = collect_events_until_finished(&handle, Duration::from_secs(5));
+
+    assert!(
+        events.iter().any(
+            |event| matches!(event, AgentEvent::AgentFailed { error, .. }
+                if error == "API error 500")
+        ),
+        "provider failure was suppressed: {events:?}"
+    );
+    assert_eq!(adapter.committed_session_id(), None);
+    let _ = fs::remove_file(script);
+}
+
+#[test]
+fn persist_phase_max_turn_failure_commits_no_persistent_session() {
+    let script = mock_provider_script(
+        "cosh-core-max-turns-persist-failure",
+        r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","session_resumable":true,"model":"mock","tools":[]}'
+printf '%s\n' '{"type":"result","subtype":"error","session_id":"00000000-0000-4000-8000-000000000000","is_error":true,"result":"Agent exceeded max turns (50)","session_error_code":"conflict","session_error_phase":"persist"}'"#,
+    );
+    let adapter = CoshCoreAdapter::new(script.display().to_string(), true);
+
+    let handle = adapter.start_cancellable(
+        make_request("cosh-core-max-turns-persist-failure"),
+        CoshApprovalMode::Auto,
+    );
+    let events = collect_events_until_finished(&handle, Duration::from_secs(5));
+
+    assert!(
+        events.iter().any(
+            |event| matches!(event, AgentEvent::AgentFailed { error, .. }
+                if error == "Agent exceeded max turns (50)")
+        ),
+        "max-turn failure was suppressed: {events:?}"
+    );
+    // The transcript never reached the store, so nothing may be resumed.
+    assert_eq!(adapter.committed_session_id(), None);
+    let _ = fs::remove_file(script);
+}
+
+#[test]
+fn cancelled_max_turn_run_commits_no_fresh_persistent_session() {
+    let script = mock_provider_script(
+        "cosh-core-max-turns-then-cancel",
+        r#"printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","session_resumable":true,"model":"mock","tools":[]}'
+IFS= read -r _
+printf '%s\n' '{"type":"result","subtype":"error","session_id":"00000000-0000-4000-8000-000000000000","is_error":true,"result":"Agent exceeded max turns (50)","error_code":"max_turns","max_turns":50}'
+exec sleep 30"#,
+    );
+    let adapter = CoshCoreAdapter::new(script.display().to_string(), true);
+    let handle = adapter.start_cancellable(
+        make_request("cosh-core-max-turns-then-cancel"),
+        CoshApprovalMode::Auto,
+    );
+    let initialized = collect_events_until(
+        &handle,
+        Duration::from_secs(5),
+        |event| matches!(event, AgentEvent::StatusChanged { phase, .. } if phase == "initialized"),
+    );
+    assert!(
+        initialized.iter().any(
+            |event| matches!(event, AgentEvent::StatusChanged { phase, .. }
+                if phase == "initialized")
+        ),
+        "mock core never reported the session: {initialized:?}"
+    );
+
+    handle.cancel();
+    let cancelled = collect_events_until(&handle, Duration::from_secs(5), |event| {
+        matches!(event, AgentEvent::AgentCancelled { .. })
+    });
+
+    assert!(
+        cancelled
+            .iter()
+            .any(|event| matches!(event, AgentEvent::AgentCancelled { .. })),
+        "cancellation semantics were lost: {cancelled:?}"
+    );
+    assert_eq!(adapter.committed_session_id(), None);
+    let _ = fs::remove_file(script);
+}
+
+#[test]
 fn cosh_core_sync_reaps_descendant_that_inherits_output_pipes() {
     let pid_file = std::env::temp_dir().join(format!(
         "cosh-core-sync-descendant-{}.pid",

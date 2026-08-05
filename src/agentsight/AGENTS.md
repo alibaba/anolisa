@@ -318,7 +318,7 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 
 - Linux kernel >= 5.8（BTF 支持）
 - Rust >= 1.80
-- clang/llvm >= 11（eBPF 编译）
+- clang/llvm >= 15（eBPF 编译；14 及以下会优化掉长度钳制，sslsniff/tcpsniff 无法通过 verifier）
 - libbpf >= 0.8
 
 ## 14. User-Facing Documentation Guidelines

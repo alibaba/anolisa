@@ -1,39 +1,44 @@
 name: Question
-description: Ask a question about the project
-title: "docs: "
-labels: ["question"]
+description: Ask for help using or understanding ANOLISA
+labels: ["type:question"]
 body:
   - type: markdown
     attributes:
       value: |
-        Have a question? Please fill in the details below.
-        For general questions about ANOLISA, you can also check the [documentation](../docs/).
+        Ask a focused question and tell us what you have already tried.
+        Questions remain available here until GitHub Discussions is enabled.
+
   - type: dropdown
     id: component
     attributes:
       label: Component
-      description: Which component does your question relate to?
       options:
-        - cosh
-        - cosh-ng
-        - sec-core
-        - skill
-        - sight
-        - tokenless
-        - ckpt
-        - memory
         - anolisa
+        - tokenless
+        - cosh-ng
+        - cosh
         - skillfs
+        - sight
+        - sec-core
+        - memory
+        - ckpt
+        - skill
+        - project-wide
+        - not sure
         - other
+    validations:
+      required: true
+
   - type: textarea
     id: question
     attributes:
-      label: Your Question
-      description: Please describe your question in detail.
+      label: What do you need help with?
+      description: Include the goal, the command or workflow, and where you became blocked.
     validations:
       required: true
+
   - type: textarea
     id: context
     attributes:
-      label: Context
-      description: What have you already tried? What documentation have you read?
+      label: What have you tried?
+      description: Optional commands, documentation links, logs, or screenshots.

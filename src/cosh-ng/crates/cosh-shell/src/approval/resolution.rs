@@ -23,9 +23,25 @@ pub(crate) fn apply_approval_decision(
     kind: ApprovalCommandKind,
 ) -> Option<AppliedApprovalDecision> {
     let mut trust_key = None;
+    let turn_extension =
+        state.approvals.requests[request_index].kind == ApprovalRequestKind::TurnExtension;
+    if turn_extension
+        && !matches!(
+            kind,
+            ApprovalCommandKind::Approve | ApprovalCommandKind::Deny | ApprovalCommandKind::Cancel
+        )
+    {
+        return None;
+    }
     let (status, title) = match kind {
         ApprovalCommandKind::Approve => {
-            approval_status_for_allowed_request(&state.approvals.requests[request_index])
+            let (status, title) =
+                approval_status_for_allowed_request(&state.approvals.requests[request_index]);
+            if turn_extension {
+                (status, MessageId::ApprovalResolutionContinuingTitle)
+            } else {
+                (status, title)
+            }
         }
         ApprovalCommandKind::ApproveTurn => {
             let (status, _) =
@@ -35,17 +51,34 @@ pub(crate) fn apply_approval_decision(
         ApprovalCommandKind::AlwaysTrust => {
             let (status, _) =
                 approval_status_for_allowed_request(&state.approvals.requests[request_index]);
-            trust_key = trust_key_from_command(&state.approvals.requests[request_index].preview);
-            (status, MessageId::ApprovalResolutionTrustedTitle)
+            // Defense in depth for high-risk requests (issue #2064): the
+            // panel never offers AlwaysTrust for them, but a stale or
+            // replayed CardAlwaysTrust event must still not mint a session
+            // trust key — downgrade to a one-shot approval instead.
+            if state.approvals.requests[request_index].risk == "high" {
+                (status, MessageId::ApprovalResolutionApprovedTitle)
+            } else {
+                trust_key =
+                    trust_key_from_command(&state.approvals.requests[request_index].preview);
+                (status, MessageId::ApprovalResolutionTrustedTitle)
+            }
         }
-        ApprovalCommandKind::Deny => (
-            ApprovalRequestStatus::Denied,
-            MessageId::ApprovalResolutionDeniedTitle,
-        ),
-        ApprovalCommandKind::Cancel => (
-            ApprovalRequestStatus::Cancelled,
-            MessageId::ApprovalResolutionCancelledTitle,
-        ),
+        ApprovalCommandKind::Deny => {
+            let title = if turn_extension {
+                MessageId::ApprovalResolutionStoppedTitle
+            } else {
+                MessageId::ApprovalResolutionDeniedTitle
+            };
+            (ApprovalRequestStatus::Denied, title)
+        }
+        ApprovalCommandKind::Cancel => {
+            let title = if turn_extension {
+                MessageId::ApprovalResolutionStoppedTitle
+            } else {
+                MessageId::ApprovalResolutionCancelledTitle
+            };
+            (ApprovalRequestStatus::Cancelled, title)
+        }
         ApprovalCommandKind::Details => return None,
         ApprovalCommandKind::SendToShell => return None,
     };
@@ -136,7 +169,12 @@ fn finalize_approval_decision(
         let host_audit_result = state
             .audit
             .as_mut()
-            .map(|audit| audit.authorize_host_execution(approval_audit_input(&request)))
+            .map(|audit| {
+                audit.authorize_host_execution(
+                    approval_audit_input(&request),
+                    "shell_foreground_handoff",
+                )
+            })
             .transpose();
         if host_audit_result.is_err() {
             request.status = ApprovalRequestStatus::Blocked;
@@ -178,7 +216,17 @@ fn apply_approval_execution_metadata(
     request: &mut RuntimeApprovalRequest,
     metadata: ApprovalExecutionMetadata,
 ) {
-    request.execution_path = metadata.execution_path;
+    request.execution_path = if request.kind == ApprovalRequestKind::TurnExtension {
+        match request.status {
+            ApprovalRequestStatus::Approved => Some("provider_session_continuation"),
+            ApprovalRequestStatus::Denied | ApprovalRequestStatus::Cancelled => {
+                Some("not_executed_stopped")
+            }
+            _ => metadata.execution_path,
+        }
+    } else {
+        metadata.execution_path
+    };
     request.redaction_status = metadata.redaction_status;
 }
 
@@ -248,14 +296,16 @@ pub(crate) fn should_send_approval_resolution_to_agent(
     state: &InlineState,
     request: &RuntimeApprovalRequest,
 ) -> bool {
-    matches!(
-        request.status,
-        ApprovalRequestStatus::Denied | ApprovalRequestStatus::Cancelled
-    ) && !state
-        .approvals
-        .requests
-        .iter()
-        .any(|request| request.status == ApprovalRequestStatus::Pending)
+    request.kind != ApprovalRequestKind::TurnExtension
+        && matches!(
+            request.status,
+            ApprovalRequestStatus::Denied | ApprovalRequestStatus::Cancelled
+        )
+        && !state
+            .approvals
+            .requests
+            .iter()
+            .any(|request| request.status == ApprovalRequestStatus::Pending)
 }
 
 pub(crate) fn approval_resolution_agent_request(request: &RuntimeApprovalRequest) -> AgentRequest {

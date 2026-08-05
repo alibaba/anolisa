@@ -377,6 +377,8 @@ mod tests {
             .observe_terminal(&AgentEvent::AgentFailed {
                 run_id: "run".to_string(),
                 error: "failed".to_string(),
+                error_code: None,
+                max_turns: None,
             })
             .is_ok());
         assert_eq!(

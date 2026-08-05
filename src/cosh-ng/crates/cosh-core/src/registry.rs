@@ -248,7 +248,9 @@ pub async fn run(args: &CliArgs, mut config: CoreConfig) {
     let mut writer = io::BufWriter::new(stdout.lock());
 
     // --- Extension Manager setup (no LLM/provider init) ---
-    let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    // Prefer the workspace explicitly passed from the caller so the registry
+    // resolves the same project root as the interactive/headless runtime.
+    let project_root = args.workspace_root();
     let mut ext_manager = ExtensionManager::new(project_root.clone());
     if !args.bare {
         ext_manager.refresh();

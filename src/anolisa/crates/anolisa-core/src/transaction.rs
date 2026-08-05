@@ -762,6 +762,10 @@ impl Transaction {
     /// entry backed up as a link) is restored by recreating an identical
     /// link at `dest` — its bytes are never read through, so `sha256` is
     /// not applicable and is ignored.
+    ///
+    /// A journaled action carries no mode, so the restored file takes the
+    /// umask default. In-process compensation restores the observed mode
+    /// by calling [`restore_backup_file`] directly.
     pub fn restore_file(&self, rollback: &RollbackAction) -> Result<(), TransactionError> {
         if rollback.kind != RollbackActionKind::RestoreFile {
             return Err(TransactionError::Rollback(format!(
@@ -777,7 +781,7 @@ impl Transaction {
             .as_ref()
             .ok_or_else(|| TransactionError::Rollback("restore_file: missing dest".to_string()))?;
 
-        restore_backup_file(source, dest, rollback.sha256.as_deref())
+        restore_backup_file(source, dest, rollback.sha256.as_deref(), None).map(|_| ())
     }
 
     /// Load a previously-written journal. Returns
@@ -916,6 +920,24 @@ impl Transaction {
 /// sibling rename. A symlink backup is recreated as the same link. This is
 /// the shared rollback primitive for journaled and in-process compensation.
 ///
+/// Rollback must return the destination to its pre-operation state *mode
+/// for mode*, not just byte for byte: the atomic sibling would otherwise
+/// land at `0666 & ~umask`, silently stripping the executable bit off a
+/// restored binary and leaving the component unusable after a rollback the
+/// CLI reported as clean. `mode` is what [`crate::lifecycle::prepare_backup`]
+/// observed on the source; `None` restores the bytes and leaves the mode to
+/// the umask, as it always did.
+///
+/// Only the permission bits (`0o777`) are reproduced. Restore writes a new
+/// inode owned by the *restoring* process and cannot put back the original
+/// uid/gid, so replaying setuid/setgid onto it would mint a setuid binary
+/// owned by root that the pre-operation state never had. Those bits are
+/// dropped and reported in the returned warnings instead.
+///
+/// Applying the mode is best-effort: on a filesystem that cannot chmod, the
+/// bytes still land and the trouble is returned as a warning. Losing the
+/// file to protect its metadata inverts what a rollback is for.
+///
 /// # Errors
 ///
 /// Returns an IO error when the backup cannot be read or the destination
@@ -925,7 +947,8 @@ pub fn restore_backup_file(
     source: &Path,
     dest: &Path,
     expected_sha256: Option<&str>,
-) -> Result<(), TransactionError> {
+    mode: Option<u32>,
+) -> Result<Vec<String>, TransactionError> {
     let meta = fs::symlink_metadata(source)
         .map_err(|err| TransactionError::Io(source.to_path_buf(), err))?;
     if meta.file_type().is_symlink() {
@@ -944,7 +967,7 @@ pub fn restore_backup_file(
         }
         std::os::unix::fs::symlink(&referent, dest)
             .map_err(|err| TransactionError::Io(dest.to_path_buf(), err))?;
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let bytes = fs::read(source).map_err(|err| TransactionError::Io(source.to_path_buf(), err))?;
@@ -957,7 +980,32 @@ pub fn restore_backup_file(
             )));
         }
     }
-    write_atomic(dest, &bytes).map_err(|err| TransactionError::Rollback(err.to_string()))
+
+    let mut warnings = Vec::new();
+    let mode = mode.map(|mode| {
+        if mode & 0o7000 != 0 {
+            warnings.push(format!(
+                "{} was {:04o} before the operation; restoring it as {:03o} \
+                 because rollback cannot reproduce its original owner and a \
+                 setuid or setgid file owned by the restoring user would grant \
+                 more than the original did",
+                dest.display(),
+                mode,
+                mode & 0o777
+            ));
+        }
+        mode & 0o777
+    });
+    if let Some(err) = write_atomic_with_mode(dest, &bytes, mode)
+        .map_err(|err| TransactionError::Rollback(err.to_string()))?
+    {
+        warnings.push(format!(
+            "restored {} but could not set its mode to {:03o}: {err}",
+            dest.display(),
+            mode.unwrap_or_default()
+        ));
+    }
+    Ok(warnings)
 }
 
 /// Mint a fresh operation id outside a journal, in the same format
@@ -1007,13 +1055,39 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// same operation_id (or a stale tmp left behind by an earlier process)
 /// cannot collide on the same path.
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    // Journal and state writes take whatever the umask gives them; only
+    // the rollback path has a mode it must reproduce.
+    write_atomic_with_mode(path, bytes, None).map(|_| ())
+}
+
+/// [`write_atomic`] that lands the destination on `mode`.
+///
+/// The tmp sibling is created owner-only rather than at the umask default,
+/// because it holds the same bytes as the destination for the whole write:
+/// restoring a `0600` secret through a tmp that a crash could strand at
+/// `0644` would leak it. `fchmod` widens the tmp to `mode` only once the
+/// bytes are down, so the file is never more permissive than its final
+/// mode at any point. Mirrors `install_runner::write_dest_atomic`, which
+/// applies the manifest layout mode the same way on the install path —
+/// restore has to match it or a rollback downgrades the file.
+///
+/// Returns the `fchmod` error instead of propagating it: on a filesystem
+/// that cannot chmod, a restore that lands the bytes with the wrong mode
+/// still beats one that deletes the staged content and leaves nothing.
+fn write_atomic_with_mode(
+    path: &Path,
+    bytes: &[u8],
+    mode: Option<u32>,
+) -> io::Result<Option<io::Error>> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         fs::create_dir_all(parent)?;
     }
     let tmp = tmp_path_for(path);
-    let mut f = open_excl_nofollow(&tmp)?;
+    // Owner-only while the bytes are in flight when we know the target
+    // mode; `None` keeps the historical umask default for journal writes.
+    let mut f = open_excl_nofollow(&tmp, mode.map(|_| 0o600))?;
     if let Err(err) = f.write_all(bytes) {
         // Drop the half-written tmp so we don't leak it.
         let _ = fs::remove_file(&tmp);
@@ -1023,6 +1097,15 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     // install_runner.rs — a sync_all failure here is not fatal because
     // the rename below is the actual atomicity guarantee.
     let _ = f.sync_all();
+    let mut mode_error = None;
+    if let Some(mode) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        // `fchmod` on the descriptor, not the tmp path: nothing can be
+        // swapped in underneath between the write and the mode change.
+        if let Err(err) = f.set_permissions(fs::Permissions::from_mode(mode)) {
+            mode_error = Some(err);
+        }
+    }
     // Close before rename so the bytes are fully flushed to the
     // descriptor before another process can observe the renamed file.
     drop(f);
@@ -1030,25 +1113,43 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&tmp);
         return Err(err);
     }
-    Ok(())
+    Ok(mode_error)
 }
 
-/// Open `tmp` for writing with `O_CREAT|O_EXCL` (+ `O_NOFOLLOW` on Unix).
+/// Open `tmp` for writing with `O_CREAT|O_EXCL` (+ `O_NOFOLLOW` on Unix),
+/// at `create_mode` when the caller wants something tighter than the umask
+/// default.
 ///
 /// Extracted as a named helper so the symlink/TOCTOU hardening can be
 /// exercised directly from tests without having to race the random tmp
 /// suffix produced by [`tmp_path_for`]. Mirrors the pattern used by
 /// `download::stream_reader_and_hash` and
 /// `install_runner::stream_write_and_hash`.
-fn open_excl_nofollow(tmp: &Path) -> io::Result<File> {
+fn open_excl_nofollow(tmp: &Path, create_mode: Option<u32>) -> io::Result<File> {
     let mut opts = OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         opts.custom_flags(nix::libc::O_NOFOLLOW);
+        if let Some(mode) = create_mode {
+            opts.mode(mode);
+        }
     }
-    opts.open(tmp)
+    let file = opts.open(tmp)?;
+    #[cfg(unix)]
+    if let Some(mode) = create_mode {
+        // The `open(2)` creation mask is umask-filtered, so it can only be
+        // narrowed — under `umask 0400` a `0600` request lands `0200`. That
+        // is harmless for the staging window itself, but it would make the
+        // helper's "created at exactly `create_mode`" contract a lie for
+        // anyone reading back through this descriptor. `fchmod` is not
+        // umask-filtered. Best-effort: callers that need the final mode
+        // enforced apply and report it themselves.
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(fs::Permissions::from_mode(mode));
+    }
+    Ok(file)
 }
 
 /// Monotonic, process-wide counter mixed into [`tmp_path_for`] so that
@@ -1796,7 +1897,7 @@ journal_path = "/tmp/x.journal.toml"
         std_fs::write(&outside, b"outside bytes").expect("seed outside target");
         std::os::unix::fs::symlink(&outside, &dest).expect("plant destination symlink");
 
-        restore_backup_file(&backup, &dest, Some(&sha256_hex(b"owned bytes")))
+        restore_backup_file(&backup, &dest, Some(&sha256_hex(b"owned bytes")), None)
             .expect("restore backup");
 
         assert_eq!(
@@ -1813,6 +1914,125 @@ journal_path = "/tmp/x.journal.toml"
         assert_eq!(
             std_fs::read(&dest).expect("read restored file"),
             b"owned bytes"
+        );
+    }
+
+    /// Rollback restores mode for mode, not only byte for byte: the atomic
+    /// sibling lands at `0666 & ~umask`, so without an explicit chmod a
+    /// restored `0755` binary comes back non-executable.
+    #[test]
+    #[cfg(unix)]
+    fn restore_backup_file_reapplies_the_recorded_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().expect("tempdir");
+        let backup = tmp.path().join("backup/0.bak");
+        let dest = tmp.path().join("bin/tool");
+        std_fs::create_dir_all(backup.parent().expect("backup parent")).expect("mkdir backup");
+        std_fs::create_dir_all(dest.parent().expect("dest parent")).expect("mkdir dest");
+        std_fs::write(&backup, b"owned bytes").expect("seed backup");
+        std_fs::write(&dest, b"replaced bytes").expect("seed dest");
+
+        let warnings = restore_backup_file(
+            &backup,
+            &dest,
+            Some(&sha256_hex(b"owned bytes")),
+            Some(0o755),
+        )
+        .expect("restore backup");
+
+        assert!(warnings.is_empty(), "clean restore must not warn");
+        assert_eq!(
+            std_fs::read(&dest).expect("read restored file"),
+            b"owned bytes"
+        );
+        assert_eq!(
+            std_fs::metadata(&dest)
+                .expect("stat restored file")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o755,
+            "the recorded mode must survive the tmp+rename"
+        );
+    }
+
+    /// Restore writes a new inode owned by the restoring process, so
+    /// replaying setuid/setgid would hand out privileges the pre-operation
+    /// file never granted. Those bits are dropped, and the operator is told
+    /// rather than left to discover it from `ls`.
+    #[test]
+    #[cfg(unix)]
+    fn restore_backup_file_drops_setuid_and_says_so() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().expect("tempdir");
+        let backup = tmp.path().join("backup/0.bak");
+        let dest = tmp.path().join("libexec/helper");
+        std_fs::create_dir_all(backup.parent().expect("backup parent")).expect("mkdir backup");
+        std_fs::create_dir_all(dest.parent().expect("dest parent")).expect("mkdir dest");
+        std_fs::write(&backup, b"helper bytes").expect("seed backup");
+
+        let warnings =
+            restore_backup_file(&backup, &dest, None, Some(0o4755)).expect("restore backup");
+
+        let mode = std_fs::metadata(&dest)
+            .expect("stat restored file")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(
+            mode, 0o755,
+            "the executable bits come back, the setuid bit does not: {mode:04o}"
+        );
+        assert_eq!(warnings.len(), 1, "the dropped bit must be reported");
+        assert!(
+            warnings[0].contains("4755") && warnings[0].contains("755"),
+            "the warning must name both modes: {}",
+            warnings[0]
+        );
+    }
+
+    /// With no recorded mode the bytes still land; the destination simply
+    /// takes the umask default, exactly as it did before modes were carried.
+    #[test]
+    #[cfg(unix)]
+    fn restore_backup_file_without_a_mode_restores_bytes_only() {
+        let tmp = tempdir().expect("tempdir");
+        let backup = tmp.path().join("backup/0.bak");
+        let dest = tmp.path().join("bin/tool");
+        std_fs::create_dir_all(backup.parent().expect("backup parent")).expect("mkdir backup");
+        std_fs::create_dir_all(dest.parent().expect("dest parent")).expect("mkdir dest");
+        std_fs::write(&backup, b"owned bytes").expect("seed backup");
+
+        let warnings = restore_backup_file(&backup, &dest, None, None).expect("restore backup");
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            std_fs::read(&dest).expect("read restored file"),
+            b"owned bytes"
+        );
+    }
+
+    /// The tmp sibling holds the same bytes as the destination for the whole
+    /// write, so it must never be created at the umask default when the
+    /// caller knows the target mode — a crash between write and rename would
+    /// otherwise strand a world-readable copy of a private file.
+    #[test]
+    #[cfg(unix)]
+    fn write_atomic_with_mode_stages_the_tmp_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().expect("tempdir");
+        let target = tmp.path().join("etc/secret.toml");
+        std_fs::create_dir_all(target.parent().expect("parent")).expect("mkdir");
+
+        let staged = open_excl_nofollow(&tmp_path_for(&target), Some(0o600)).expect("open tmp");
+        let mode = staged.metadata().expect("stat tmp").permissions().mode() & 0o7777;
+
+        assert_eq!(
+            mode, 0o600,
+            "the staged tmp must be owner-only regardless of umask: {mode:04o}"
         );
     }
 
@@ -1902,7 +2122,7 @@ journal_path = "/tmp/x.journal.toml"
         let tmp_plant = dir.path().join(".target.tmp");
         std::os::unix::fs::symlink(&victim, &tmp_plant).expect("plant symlink");
 
-        let err = open_excl_nofollow(&tmp_plant).expect_err("must refuse symlink");
+        let err = open_excl_nofollow(&tmp_plant, None).expect_err("must refuse symlink");
         // Either ELOOP (NOFOLLOW kicked in) or EEXIST (EXCL kicked in) is
         // acceptable; both mean the bytes never touched the victim.
         let kind = err.kind();
@@ -1926,7 +2146,7 @@ journal_path = "/tmp/x.journal.toml"
         let tmp_plant = dir.path().join(".already-here.tmp");
         std_fs::write(&tmp_plant, b"stale").expect("seed stale tmp");
 
-        let err = open_excl_nofollow(&tmp_plant).expect_err("must refuse existing file");
+        let err = open_excl_nofollow(&tmp_plant, None).expect_err("must refuse existing file");
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
     }
 

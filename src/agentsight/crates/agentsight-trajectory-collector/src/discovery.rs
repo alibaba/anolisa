@@ -1,11 +1,68 @@
-//! QoderWork / Qoder session file discovery.
+//! Local agent session file discovery.
 //!
-//! Scans `<home>/.qoderwork/projects` and `<home>/.qoder/projects` for JSONL
-//! session files. Ported from AgentOpt's collector crate; home directories are
-//! enumerated explicitly (`/root` + `/home/*`) because the collector runs
-//! inside the root-owned `agentsight trace` process, not the agent's shell.
+//! Scans known local AI agent session roots and returns JSONL files that can be
+//! converted into ATIF. Qoder/QoderWork/Claude Code share the Claude-style JSONL
+//! schema; Codex/Cursor roots are discovered here so converter support can be
+//! added without changing the API surface.
 
 use std::path::{Path, PathBuf};
+
+/// Session file storage layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    /// `<root>/<project>/<session>.jsonl`, optionally with `transcript/` and
+    /// `<session>/subagents/agent-*.jsonl` children.
+    PerProject,
+    /// `<root>/<session>.jsonl`.
+    Flat,
+}
+
+/// Known local session roots relative to a home directory.
+struct SessionRoot {
+    rel_dir: &'static str,
+    source: &'static str,
+    layout: Layout,
+    scan_subdirs: &'static [&'static str],
+}
+
+const SESSION_ROOTS: &[SessionRoot] = &[
+    SessionRoot {
+        rel_dir: ".claude/projects",
+        source: "claude-code",
+        layout: Layout::PerProject,
+        scan_subdirs: &[],
+    },
+    SessionRoot {
+        rel_dir: ".qoderwork/projects",
+        source: "qoderwork",
+        layout: Layout::PerProject,
+        scan_subdirs: &["transcript"],
+    },
+    SessionRoot {
+        rel_dir: ".qoder/projects",
+        source: "qoder",
+        layout: Layout::PerProject,
+        scan_subdirs: &["transcript"],
+    },
+    SessionRoot {
+        rel_dir: ".codex/sessions",
+        source: "codex",
+        layout: Layout::Flat,
+        scan_subdirs: &[],
+    },
+    SessionRoot {
+        rel_dir: ".codex/archived_sessions",
+        source: "codex",
+        layout: Layout::Flat,
+        scan_subdirs: &[],
+    },
+    SessionRoot {
+        rel_dir: ".cursor/projects",
+        source: "cursor",
+        layout: Layout::PerProject,
+        scan_subdirs: &[],
+    },
+];
 
 /// A discovered session file.
 #[derive(Debug, Clone)]
@@ -23,31 +80,28 @@ pub struct DiscoveredSession {
     pub source: String,
 }
 
-/// Projects directory names relative to each home directory.
-const PROJECT_DIR_NAMES: &[&str] = &[".qoderwork/projects", ".qoder/projects"];
-
-/// Discover all QoderWork/Qoder sessions.
+/// Discover all supported local sessions.
 ///
-/// `scan_dirs` overrides the default scan roots; each entry is treated as a
-/// projects directory. When `None`, `/root` and every `/home/*` entry are
-/// probed for `.qoderwork/projects` / `.qoder/projects`.
+/// `scan_dirs` overrides the default scan roots. Each entry is interpreted by
+/// path (`.qoderwork`, `.qoder`, `.claude`, `.codex`, `.cursor`) to choose the
+/// source label and layout. When `None`, the current user's home directory is
+/// probed for all known roots.
 pub fn discover_sessions(scan_dirs: Option<&[PathBuf]>) -> Vec<DiscoveredSession> {
-    let dirs = match scan_dirs {
-        Some(list) => list.to_vec(),
-        None => default_projects_dirs(),
+    let roots = match scan_dirs {
+        Some(list) => list.iter().map(|dir| root_from_path(dir)).collect(),
+        None => default_scan_roots(),
     };
 
     let mut sessions = Vec::new();
-    for dir in dirs {
-        if !dir.exists() {
+    for root in roots {
+        if !root.dir.exists() {
             log::debug!(
                 "Trajectory scan: skipping non-existent dir {}",
-                dir.display()
+                root.dir.display()
             );
             continue;
         }
-        let source = source_from_path(&dir);
-        sessions.extend(discover_in_projects_dir(&dir, &source));
+        sessions.extend(discover_in_root(&root));
     }
 
     // Sort by path for stable output
@@ -55,47 +109,122 @@ pub fn discover_sessions(scan_dirs: Option<&[PathBuf]>) -> Vec<DiscoveredSession
     sessions
 }
 
-/// Default projects directories: `/root` + `/home/*`, each probed for the
-/// known Qoder/QoderWork layout.
-fn default_projects_dirs() -> Vec<PathBuf> {
-    let mut homes = vec![PathBuf::from("/root")];
-    if let Ok(entries) = std::fs::read_dir("/home") {
-        for entry in entries.flatten() {
-            homes.push(entry.path());
-        }
-    }
+struct ScanRoot {
+    dir: PathBuf,
+    source: String,
+    layout: Layout,
+    scan_subdirs: &'static [&'static str],
+}
 
-    let mut dirs = Vec::new();
-    for home in homes {
-        for name in PROJECT_DIR_NAMES {
-            let p = home.join(name);
-            if p.exists() {
-                dirs.push(p);
+/// Default session roots.
+///
+/// On Linux: scans `/root` + `/home/*` (all users, as before).
+/// On non-Linux: scans only the current user's home directory.
+fn default_scan_roots() -> Vec<ScanRoot> {
+    let mut homes: Vec<PathBuf> = Vec::new();
+
+    #[cfg(target_os = "linux")]
+    {
+        homes.push(PathBuf::from("/root"));
+        if let Ok(entries) = std::fs::read_dir("/home") {
+            for entry in entries.flatten() {
+                homes.push(entry.path());
             }
         }
     }
-    dirs
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        if let Some(home) = dirs::home_dir() {
+            homes.push(home);
+        }
+    }
+
+    let mut roots = Vec::new();
+    for home in homes {
+        for root in SESSION_ROOTS {
+            let dir = home.join(root.rel_dir);
+            if dir.exists() {
+                roots.push(ScanRoot {
+                    dir,
+                    source: root.source.to_string(),
+                    layout: root.layout,
+                    scan_subdirs: root.scan_subdirs,
+                });
+            }
+        }
+    }
+    roots
 }
 
-/// Derive the source label from a projects directory path.
+/// Infer the source and layout for a user-provided scan directory.
+fn root_from_path(dir: &Path) -> ScanRoot {
+    let path = dir.to_string_lossy().to_lowercase();
+    let matched = SESSION_ROOTS
+        .iter()
+        .find(|root| path.contains(root.rel_dir));
+    if let Some(root) = matched {
+        return ScanRoot {
+            dir: dir.to_path_buf(),
+            source: root.source.to_string(),
+            layout: root.layout,
+            scan_subdirs: root.scan_subdirs,
+        };
+    }
+
+    // Backward-compatible default: existing configs passed Qoder projects dirs.
+    ScanRoot {
+        dir: dir.to_path_buf(),
+        source: source_from_path(dir),
+        layout: if path.contains(".codex") {
+            Layout::Flat
+        } else {
+            Layout::PerProject
+        },
+        scan_subdirs: if path.contains(".codex") {
+            &[]
+        } else {
+            &["transcript"]
+        },
+    }
+}
+
+/// Derive the source label from a session root path.
 fn source_from_path(dir: &Path) -> String {
-    if dir.to_string_lossy().contains(".qoderwork") {
+    let path = dir.to_string_lossy().to_lowercase();
+    if path.contains(".qoderwork") {
         "qoderwork".to_string()
+    } else if path.contains(".qoder") {
+        "qoder".to_string()
+    } else if path.contains(".claude") {
+        "claude-code".to_string()
+    } else if path.contains(".codex") {
+        "codex".to_string()
+    } else if path.contains(".cursor") {
+        "cursor".to_string()
     } else {
         "qoder".to_string()
     }
 }
 
-/// Discover sessions within a single projects directory.
-fn discover_in_projects_dir(projects_dir: &Path, source: &str) -> Vec<DiscoveredSession> {
+/// Discover sessions within a single configured root.
+fn discover_in_root(root: &ScanRoot) -> Vec<DiscoveredSession> {
+    match root.layout {
+        Layout::PerProject => discover_in_projects_dir(root),
+        Layout::Flat => discover_in_flat_dir(root),
+    }
+}
+
+/// Discover sessions within a per-project root directory.
+fn discover_in_projects_dir(root: &ScanRoot) -> Vec<DiscoveredSession> {
     let mut sessions = Vec::new();
 
-    let entries = match std::fs::read_dir(projects_dir) {
+    let entries = match std::fs::read_dir(&root.dir) {
         Ok(e) => e,
         Err(err) => {
             log::warn!(
                 "Trajectory scan: failed to read {}: {err}",
-                projects_dir.display()
+                root.dir.display()
             );
             return sessions;
         }
@@ -108,10 +237,61 @@ fn discover_in_projects_dir(projects_dir: &Path, source: &str) -> Vec<Discovered
         }
 
         let project = decode_project_dir(&entry.file_name().to_string_lossy());
-        sessions.extend(discover_in_project_dir(&path, &project, source));
+        sessions.extend(discover_in_project_dir(
+            &path,
+            &project,
+            &root.source,
+            root.scan_subdirs,
+        ));
     }
 
     sessions
+}
+
+/// Discover sessions within a flat root directory.
+fn discover_in_flat_dir(root: &ScanRoot) -> Vec<DiscoveredSession> {
+    let mut sessions = Vec::new();
+    discover_in_flat_dir_recursive(&root.dir, "(default)", &root.source, &mut sessions);
+    sessions
+}
+
+fn discover_in_flat_dir_recursive(
+    dir: &Path,
+    project: &str,
+    source: &str,
+    sessions: &mut Vec<DiscoveredSession>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(err) => {
+            log::debug!("Trajectory scan: failed to read {}: {err}", dir.display());
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
+            discover_in_flat_dir_recursive(&path, project, source, sessions);
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".jsonl") {
+            continue;
+        }
+        let stem = name.trim_end_matches(".jsonl");
+        if stem.is_empty() {
+            continue;
+        }
+        sessions.push(DiscoveredSession {
+            path,
+            project: project.to_string(),
+            session_id: stem.to_string(),
+            is_subagent: false,
+            source: source.to_string(),
+        });
+    }
 }
 
 /// Discover sessions within a single project directory.
@@ -119,6 +299,7 @@ fn discover_in_project_dir(
     project_dir: &Path,
     project: &str,
     source: &str,
+    scan_subdirs: &[&str],
 ) -> Vec<DiscoveredSession> {
     let mut sessions = Vec::new();
 
@@ -138,11 +319,15 @@ fn discover_in_project_dir(
         let name = entry.file_name().to_string_lossy().to_string();
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
 
-        // Newer Qoder versions store sessions under a `transcript/` subdir;
-        // recurse one level so both layouts are covered (a transcript dir
-        // never nests another transcript dir).
-        if is_dir && name == "transcript" {
-            sessions.extend(discover_in_project_dir(&path, project, source));
+        // Some agents store sessions under a whitelisted subdir such as
+        // Qoder's `transcript/`; recurse one level so both layouts are covered.
+        if is_dir && scan_subdirs.contains(&name.as_str()) {
+            sessions.extend(discover_in_project_dir(
+                &path,
+                project,
+                source,
+                scan_subdirs,
+            ));
             continue;
         }
 
@@ -379,6 +564,38 @@ mod tests {
     }
 
     #[test]
+    fn test_discover_flat_recursive_layout() {
+        let base = tmp_projects_dir("flat");
+        let root = base.join(".codex").join("sessions");
+        let nested = root.join("2026").join("07").join("27");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("rollout-abc123.jsonl"), "{}\n").unwrap();
+
+        let sessions = discover_sessions(Some(std::slice::from_ref(&root)));
+        assert_eq!(sessions.len(), 1, "recursive flat layout: {sessions:?}");
+        assert_eq!(sessions[0].session_id, "rollout-abc123");
+        assert_eq!(sessions[0].source, "codex");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_discover_known_claude_root_source() {
+        let base = tmp_projects_dir("claude");
+        let root = base.join(".claude").join("projects");
+        let proj = root.join("-Users-alice-projects-demo");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join(format!("{UUID_A}.jsonl")), "{}\n").unwrap();
+
+        let sessions = discover_sessions(Some(std::slice::from_ref(&root)));
+        assert_eq!(sessions.len(), 1, "claude root: {sessions:?}");
+        assert_eq!(sessions[0].source, "claude-code");
+        assert_eq!(sessions[0].project, "demo");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn test_source_from_path() {
         assert_eq!(
             source_from_path(Path::new("/root/.qoderwork/projects")),
@@ -388,5 +605,73 @@ mod tests {
             source_from_path(Path::new("/home/u/.qoder/projects")),
             "qoder"
         );
+    }
+
+    #[test]
+    fn test_default_scan_roots_enumerates_linux_homes() {
+        // On Linux, default_scan_roots() must include /root and all /home/*
+        // users (multi-user collection). On other platforms it uses the
+        // current user's home directory only.
+        let roots = default_scan_roots();
+
+        #[cfg(target_os = "linux")]
+        {
+            let mut homes = vec![PathBuf::from("/root")];
+            if let Ok(entries) = std::fs::read_dir("/home") {
+                for entry in entries.flatten() {
+                    homes.push(entry.path());
+                }
+            }
+            let root_dirs: Vec<_> = roots.iter().map(|r| &r.dir).collect();
+            for home in &homes {
+                if !home.exists() {
+                    continue;
+                }
+                // Only assert if this home actually has session dirs;
+                // not every /home/* user will have .claude/.qoder etc.
+                let has_session_dir = SESSION_ROOTS.iter().any(|r| home.join(r.rel_dir).exists());
+                if has_session_dir {
+                    assert!(
+                        root_dirs.iter().any(|d| d.starts_with(home)),
+                        "scan roots should include entries under {}",
+                        home.display()
+                    );
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let home = dirs::home_dir().expect("home_dir should be available");
+            for root in &roots {
+                assert!(
+                    root.dir.starts_with(&home),
+                    "scan root {} should be under home {}",
+                    root.dir.display(),
+                    home.display(),
+                );
+            }
+        }
+
+        // discover_sessions(None) should not panic and should return a Vec.
+        let sessions = discover_sessions(None);
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let home = dirs::home_dir().expect("home_dir should be available");
+            for session in &sessions {
+                assert!(
+                    session.path.starts_with(&home),
+                    "discovered session {} should be under home {}",
+                    session.path.display(),
+                    home.display(),
+                );
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let _ = sessions; // just ensure it doesn't panic
+        }
     }
 }

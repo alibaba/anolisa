@@ -49,6 +49,7 @@ pub(crate) use crate::slash::registry::{
     active_slash_commands, visible_slash_commands, SlashCommandSpec,
 };
 pub(crate) use crate::tools::apply_readonly_config;
+pub(crate) use crate::tools::classification::agent_implicit_pager_policy;
 pub(crate) use crate::tools::{
     assess_shell_command, blocked_shell_binding_assessment, display::display_for_tool,
     is_readonly_builtin_tool_name, is_shell_tool_name, AssessmentConfidence, AssessmentPolicy,
@@ -112,14 +113,14 @@ pub(crate) use crate::question::runtime::{
 pub(crate) use crate::recommendation::runtime::{
     record_selectable_recommendations, render_selectable_recommendations,
 };
+pub(crate) use crate::runtime::approval_state::{
+    ApprovalRequestKind, ApprovalRequestStatus, ProviderShellRequestKind,
+    RuntimeApprovalJournalEntry, RuntimeApprovalRequest, RuntimeCommandAssessmentSummary,
+};
 pub(crate) use crate::runtime::continuity::{
     continuity_debug_lines, continuity_prompt_hint, record_agent_run_facts, record_user_intent,
 };
 pub(crate) use crate::runtime::details::render_runtime_details;
 pub(crate) use crate::runtime::dispatcher::stable_event_key;
 pub(crate) use crate::runtime::hooks::hook_routing_hints_for_block;
-pub(crate) use crate::runtime::state::{
-    AnalysisMode, ApprovalRequestKind, ApprovalRequestStatus, CoshApprovalMode, InlineState,
-    ProviderShellRequestKind, RuntimeApprovalJournalEntry, RuntimeApprovalRequest,
-    RuntimeCommandAssessmentSummary,
-};
+pub(crate) use crate::runtime::state::{AnalysisMode, CoshApprovalMode, InlineState};

@@ -51,6 +51,7 @@ mod tests {
         "activity",
         "agent",
         "approval",
+        "auth",
         "config",
         "debug",
         "health",
@@ -109,9 +110,9 @@ mod tests {
         for (ordinal, id) in MessageId::ALL.iter().copied().enumerate() {
             assert_eq!(id as usize, ordinal);
         }
-        assert_eq!(MessageId::AgentControlQueueFullBody as usize, 764);
-        assert_eq!(MessageId::SlashInvalidArgumentsTitle as usize, 765);
-        assert_eq!(MessageId::SlashQuotedArgumentsUnsupported as usize, 766);
+        assert_eq!(MessageId::AgentControlQueueFullBody as usize, 750);
+        assert_eq!(MessageId::SlashInvalidArgumentsTitle as usize, 751);
+        assert_eq!(MessageId::SlashQuotedArgumentsUnsupported as usize, 752);
         assert_eq!(
             MessageId::AgentQuestionUnavailableTitle as usize,
             MessageId::SlashQuotedArgumentsUnsupported as usize + 1
@@ -120,12 +121,90 @@ mod tests {
             MessageId::ApprovalTitle as usize,
             MessageId::QuestionNoPendingBody as usize + 1
         );
+        // The tool-argument status pair is a registered stable runtime
+        // interface: pin the discriminants with fixed values so a segment
+        // inserted ahead of them can never shift the tail unnoticed
+        // (new segments must append after mcp_registry_ids).
+        assert_eq!(MessageId::AgentStatusToolArguments as usize, 829);
+        assert_eq!(MessageId::AgentStatusGeneratingToolArguments as usize, 830);
+        assert_eq!(MessageId::HelpGroupPrompt as usize, 831);
+        // The #1747 trailing segment must stay appended after every earlier
+        // segment so pre-existing discriminants never shift.
+        assert_eq!(MessageId::HelpSummaryMcp as usize, 834);
+        assert_eq!(MessageId::SlashMcpTitle as usize, 835);
+        // The #1988 segment remains pinned ahead of the appended #2029
+        // turn-extension messages.
         assert_eq!(
-            MessageId::AgentStatusToolArguments as usize,
-            MessageId::ALL.len() - 2
+            MessageId::ApprovalReceiptForegroundInteractiveHint as usize,
+            836
+        );
+        // The #2029 turn-extension segment keeps its pinned discriminants.
+        assert_eq!(MessageId::ApprovalTurnExtensionSubject as usize, 837);
+        assert_eq!(
+            MessageId::ApprovalTurnExtensionUnavailableBody as usize,
+            846
+        );
+        // The #1913 capture-notice segment remains pinned ahead of the
+        // appended shell-recovery, auth, and hook-notification messages.
+        assert_eq!(MessageId::CaptureInputRejectedTitle as usize, 847);
+        assert_eq!(MessageId::CaptureInputRejectedBody as usize, 848);
+        assert_eq!(
+            MessageId::AgentRecoveryTriggerLine as usize,
+            MessageId::CaptureInputRejectedBody as usize + 1
+        );
+        // The #2031 recovery-retry segment remains pinned after auth.
+        assert_eq!(
+            MessageId::AuthSelectProviderQuestion as usize,
+            MessageId::AgentRecoveryTriggerLine as usize + 1
+        );
+        // The #2064 system-control segment is the current tail; the tail
+        // ownership assertions move with each appended segment.
+        assert_eq!(
+            MessageId::AgentRecoverySameSessionRetryLine as usize,
+            MessageId::AuthSelectProviderQuestion as usize + 1
+        );
+        // Hook-notification messages are the current tail; tail ownership
+        // assertions move with each appended segment.
+        assert_eq!(
+            MessageId::AgentGovernanceHookNotification as usize,
+            MessageId::AgentRecoverySameSessionRetryLine as usize + 1
+        );
+        // The #2064 system-control segment follows the hook-notification
+        // segment and keeps the tail; tail ownership assertions move with
+        // each appended segment.
+        assert_eq!(
+            MessageId::ApprovalRiskPhraseSystemControl as usize,
+            MessageId::AgentGovernanceHookDecisionUnspecified as usize + 1
+        );
+        // The #2025/#2161 input-wait segment follows the system-control
+        // segment; tail ownership assertions move with each appended segment.
+        assert_eq!(
+            MessageId::ApprovalShellHandoffInputWaitTimeoutTitle as usize,
+            MessageId::ApprovalIrrecoverableWarningLine as usize + 1
         );
         assert_eq!(
-            MessageId::AgentStatusGeneratingToolArguments as usize,
+            MessageId::ApprovalShellHandoffInputWaitTimeoutTitle as usize,
+            MessageId::ALL.len() - 25
+        );
+        assert_eq!(
+            MessageId::ShellInputWaitHintTimeoutForecastBody as usize,
+            MessageId::ALL.len() - 16
+        );
+        // The #2068 startup auth-hint segment precedes the appended #1961
+        // plan-mode segment; tail ownership assertions move with each
+        // appended segment.
+        assert_eq!(
+            MessageId::StartupAuthHintLine as usize,
+            MessageId::ALL.len() - 15
+        );
+        // The #1961 plan-mode workflow segment is the current tail; tail
+        // ownership assertions move with each appended segment.
+        assert_eq!(
+            MessageId::HelpSummaryModePlan as usize,
+            MessageId::ALL.len() - 14
+        );
+        assert_eq!(
+            MessageId::PlanModeUsageFooter as usize,
             MessageId::ALL.len() - 1
         );
     }

@@ -8,7 +8,7 @@
 //! executor with a [`StoreRecordSink`]. No lifecycle policy lives here.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anolisa_core::executor::{DelegatedExecutionTarget, execute_delegated_steps};
 use anolisa_core::facts::{
@@ -40,6 +40,7 @@ use crate::commands::common::RepoPersistPolicy;
 use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install;
 use crate::context::{CliContext, InstallMode};
+use crate::progress::{self, Activity, ProgressReporter};
 use crate::repo_config::{
     BackendConfig, HostVars, RepoConfig, RepoConfigError, normalize_override_url,
 };
@@ -67,8 +68,22 @@ pub(crate) fn handle_one(
     args: InstallArgs,
     ctx: &CliContext,
 ) -> Result<InstallOutcome, CliError> {
+    let mut activity = install_activity(&component, ctx);
     let (query, txn) = host_backends(&component, &args, ctx)?;
-    install_component_with_deps(&component, &args, ctx, &query, &txn, privilege::is_root())
+    let env = anolisa_env::EnvService::detect();
+    let rpmdb = RpmdbProbe::for_host(&env);
+    install_component_with_deps_and_planned(
+        &component,
+        &args,
+        ctx,
+        &env,
+        &rpmdb,
+        &query,
+        &txn,
+        privilege::is_root(),
+        &HashSet::new(),
+        &mut activity,
+    )
 }
 
 /// Dispatch one batch member while treating earlier successful dry-run
@@ -79,15 +94,28 @@ pub(crate) fn handle_one_with_planned_components(
     ctx: &CliContext,
     planned_components: &HashSet<String>,
 ) -> Result<InstallOutcome, CliError> {
+    let mut activity = install_activity(&component, ctx);
     let (query, txn) = host_backends(&component, &args, ctx)?;
+    let env = anolisa_env::EnvService::detect();
+    let rpmdb = RpmdbProbe::for_host(&env);
     install_component_with_deps_and_planned(
         &component,
         &args,
         ctx,
+        &env,
+        &rpmdb,
         &query,
         &txn,
         privilege::is_root(),
         planned_components,
+        &mut activity,
+    )
+}
+
+fn install_activity(component: &str, ctx: &CliContext) -> Activity {
+    Activity::start(
+        progress::feedback_for_stderr(ctx.json, ctx.quiet),
+        &format!("Preparing to install {component}..."),
     )
 }
 
@@ -262,6 +290,7 @@ impl PlannedRoute {
 
 /// Core of [`handle_one`] with the package backends injected so tests drive
 /// every branch without a live rpmdb/dnf or real privileges.
+#[cfg(test)]
 pub(crate) fn install_component_with_deps(
     input: &str,
     args: &InstallArgs,
@@ -270,20 +299,77 @@ pub(crate) fn install_component_with_deps(
     txn: &dyn PackageTransaction,
     is_root: bool,
 ) -> Result<InstallOutcome, CliError> {
-    install_component_with_deps_and_planned(input, args, ctx, query, txn, is_root, &HashSet::new())
+    let env = anolisa_env::EnvService::detect();
+    install_component_with_deps_and_env(
+        input,
+        args,
+        ctx,
+        &env,
+        &RpmdbProbe::absent(),
+        query,
+        txn,
+        is_root,
+    )
 }
 
+/// Test variant with the host facts injected, so family-sensitive branches
+/// (deb degrade, rpm fail-closed, unknown fail-closed) are covered
+/// deterministically instead of depending on the runner's /etc/os-release.
+#[cfg(test)]
+#[expect(clippy::too_many_arguments)]
+pub(crate) fn install_component_with_deps_and_env(
+    input: &str,
+    args: &InstallArgs,
+    ctx: &CliContext,
+    env: &anolisa_env::EnvFacts,
+    rpmdb: &RpmdbProbe,
+    query: &dyn PackageQuery,
+    txn: &dyn PackageTransaction,
+    is_root: bool,
+) -> Result<InstallOutcome, CliError> {
+    let mut activity = install_activity(input, ctx);
+    install_component_with_deps_and_planned(
+        input,
+        args,
+        ctx,
+        env,
+        rpmdb,
+        query,
+        txn,
+        is_root,
+        &HashSet::new(),
+        &mut activity,
+    )
+}
+
+// Tests vary each execution dependency independently; keeping them explicit
+// makes the host boundary visible instead of hiding it in an opaque test bag.
+#[expect(clippy::too_many_arguments)]
 fn install_component_with_deps_and_planned(
     input: &str,
     args: &InstallArgs,
     ctx: &CliContext,
+    env: &anolisa_env::EnvFacts,
+    rpmdb: &RpmdbProbe,
     query: &dyn PackageQuery,
     txn: &dyn PackageTransaction,
     is_root: bool,
     planned_components: &HashSet<String>,
+    reporter: &mut dyn ProgressReporter,
 ) -> Result<InstallOutcome, CliError> {
-    let planned = plan_component(input, args, ctx, query, txn)?;
-    execute_planned(planned, args, ctx, query, txn, is_root, planned_components)
+    let planned = plan_component(input, args, ctx, env, rpmdb, query, txn)?;
+    execute_planned(
+        planned,
+        args,
+        ctx,
+        env,
+        rpmdb,
+        query,
+        txn,
+        is_root,
+        planned_components,
+        reporter,
+    )
 }
 
 /// Planning prefix of an install: resolve the component and its provider
@@ -294,6 +380,8 @@ pub(crate) fn plan_component(
     input: &str,
     args: &InstallArgs,
     ctx: &CliContext,
+    env: &anolisa_env::EnvFacts,
+    rpmdb: &RpmdbProbe,
     query: &dyn PackageQuery,
     txn: &dyn PackageTransaction,
 ) -> Result<PlannedComponent, CliError> {
@@ -306,7 +394,6 @@ pub(crate) fn plan_component(
         InstallMode::User => InstallationScope::User { uid },
     };
     let now = now_iso8601();
-    let env = anolisa_env::EnvService::detect();
     let repo_config = common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::Require)?;
 
     // Resolve identity across all visible roots, but bind install planning to
@@ -319,7 +406,7 @@ pub(crate) fn plan_component(
     if let Some(explicit) = args.backend.as_deref()
         && let Some(warning) = RepoConfig::backend_name_deprecation_warning(explicit)
     {
-        eprintln!("warning: {warning}");
+        progress::suspend_output(|| eprintln!("warning: {warning}"));
     }
 
     let family = install_family(args, &store, &component, &repo_config);
@@ -398,7 +485,8 @@ pub(crate) fn plan_component(
                 InstallationScope::System => Some(system_probe_package(
                     args,
                     &layout,
-                    &env,
+                    env,
+                    rpmdb,
                     &repo_config,
                     &component,
                     query,
@@ -430,7 +518,7 @@ pub(crate) fn plan_component(
                 let fresh = resolve_fresh_delegated(
                     args,
                     &layout,
-                    &env,
+                    env,
                     &repo_config,
                     &component,
                     query,
@@ -454,23 +542,48 @@ pub(crate) fn plan_component(
     };
     // A missing rpm/dnf binary is a hard error whenever a probe was needed:
     // without it the host cannot prove the component is not an unobserved
-    // system RPM, and a raw install over one could corrupt it (I3).
-    let facts = assemble_facts(
+    // system RPM, and a raw install over one could corrupt it (I3). The one
+    // exception is the raw family on a host whose package authority is not
+    // RPM — there is no rpmdb to protect, so the facts degrade to NotProbed.
+    // The package identity is kept: the executor's locked recheck re-probes
+    // it and applies the same CommandMissing policy, so tooling (and an RPM)
+    // appearing between planning and placement is still caught.
+    let facts = match assemble_facts(
         &observe_request,
         &store,
         Some(&provider),
         &layout,
         &journal_dir,
-    )
-    .map_err(|err| match err {
-        FactsError::Probe(ProviderError::Query(PackageQueryError::CommandMissing {
+    ) {
+        Ok(facts) => facts,
+        Err(FactsError::Probe(ProviderError::Query(PackageQueryError::CommandMissing {
             command: bin,
-        })) => rpm_tooling_missing_error(&command, &bin, &component),
-        err => CliError::Runtime {
-            command: command.clone(),
-            reason: err.to_string(),
-        },
-    })?;
+        }))) => {
+            if family != "raw" || missing_rpm_tooling_is_fatal(env, rpmdb) {
+                return Err(rpm_tooling_missing_error(&command, &bin, &component));
+            }
+            let observe_request = ObserveRequest {
+                kind: ObjectKind::Component,
+                name: &component,
+                scope,
+                native_package: None,
+                observed_at: &now,
+                verify_owned_files: false,
+            };
+            assemble_facts(&observe_request, &store, None, &layout, &journal_dir).map_err(
+                |err| CliError::Runtime {
+                    command: command.clone(),
+                    reason: err.to_string(),
+                },
+            )?
+        }
+        Err(err) => {
+            return Err(CliError::Runtime {
+                command: command.clone(),
+                reason: err.to_string(),
+            });
+        }
+    };
 
     let request = InstallRequest {
         target,
@@ -520,17 +633,23 @@ pub(crate) fn plan_component(
     })
 }
 
-/// Execution half of [`install_component_with_deps`]: render the idempotent
+/// Execution half of [`handle_one`]: render the idempotent
 /// NoOp, place a resolved owned artifact, or run the delegated native
 /// transaction. Dry-run renders the plan and stops before any side effect.
+// Mirrors the explicit planner/executor dependency boundary above, with the
+// reporter added so terminal lifecycle remains injectable in tests.
+#[expect(clippy::too_many_arguments)]
 fn execute_planned(
     planned: PlannedComponent,
     args: &InstallArgs,
     ctx: &CliContext,
+    env: &anolisa_env::EnvFacts,
+    rpmdb: &RpmdbProbe,
     query: &dyn PackageQuery,
     txn: &dyn PackageTransaction,
     is_root: bool,
     planned_components: &HashSet<String>,
+    reporter: &mut dyn ProgressReporter,
 ) -> Result<InstallOutcome, CliError> {
     let PlannedComponent {
         command,
@@ -545,7 +664,6 @@ fn execute_planned(
         route,
     } = planned;
     let layout = common::resolve_layout(ctx);
-    let env = anolisa_env::EnvService::detect();
     let repo_config = common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::Require)?;
     let state_path = layout.state_dir.join("installed.toml");
     let journal_dir = rpm_install::journal_dir(&layout);
@@ -554,6 +672,7 @@ fn execute_planned(
     // planning refusal is independent of the raw repo being reachable.
     let (steps, resolution) = match route {
         PlannedRoute::AlreadyInstalled { version } => {
+            reporter.finish();
             render_result(
                 ctx,
                 &InstallResultPayload {
@@ -575,11 +694,12 @@ fn execute_planned(
         }
         PlannedRoute::Delegated { steps } => (steps, None),
         PlannedRoute::Owned { steps } => {
+            reporter.report(&format!("Resolving {component}..."));
             let resolution = resolve_owned_artifact(
                 args,
                 ctx,
                 &layout,
-                &env,
+                env,
                 &repo_config,
                 ResolvedInstallIdentity {
                     component: component.clone(),
@@ -602,6 +722,7 @@ fn execute_planned(
     };
 
     if ctx.dry_run {
+        reporter.finish();
         for warning in resolution.iter().flat_map(|r| r.warnings.iter()) {
             eprintln!("warning: {warning}");
         }
@@ -653,11 +774,13 @@ fn execute_planned(
     }
 
     if let Some(resolution) = resolution {
+        reporter.report(&format!("Downloading and verifying {component}..."));
         // Download, digest check, and contract validation run before the
         // lock: they are side-effect free outside the download cache, and a
         // contract refusal (mode mismatch, component conflict, malformed
         // hooks) is an argument error, not a failed transaction.
         let validated = validate_owned_install(ctx, &layout, &store, resolution, &command)?;
+        reporter.report(&format!("Installing {component}..."));
         let provider = DelegatedProvider::new(query, txn);
         return install_owned(
             &component,
@@ -672,11 +795,14 @@ fn execute_planned(
             validated,
             raw_pin.as_ref(),
             native_package.as_deref(),
+            (!missing_rpm_tooling_is_fatal(env, rpmdb)).then_some(rpmdb),
             &provider,
             &command,
+            reporter,
         );
     }
 
+    reporter.report(&format!("Installing {component}..."));
     let provider = DelegatedProvider::new(query, txn);
     let package = native_package.unwrap_or_else(|| component.clone());
     install_delegated(
@@ -695,6 +821,7 @@ fn execute_planned(
         &repo_config,
         is_root,
         &command,
+        reporter,
     )
 }
 
@@ -819,34 +946,131 @@ fn resolve_owned_artifact(
     .map_err(|err| err.with_command(command))
 }
 
+/// Whether missing rpm/dnf tooling is fatal for the system-RPM presence
+/// probe (planner rule I3).
+///
+/// The probe protects unobserved system RPMs, which can only exist where
+/// RPM is the host's package authority. When rpm tooling is present the
+/// probe always runs; this only decides what a missing binary means. A
+/// host whose `/etc/os-release` `ID`/`ID_LIKE` classifies as deb-family
+/// normally has no rpmdb to protect, so the probe degrades to NotProbed
+/// instead of demanding rpm/dnf the distro does not ship — unless an rpmdb
+/// exists on disk (RPMs were installed before the rpm binary went away),
+/// in which case there is a database to protect and the family inference
+/// yields to the filesystem evidence. Rpm-family and unrecognized hosts
+/// keep the hard error, so a genuinely rpm-based host with broken tooling
+/// still fails closed.
+pub(crate) fn missing_rpm_tooling_is_fatal(
+    env: &anolisa_env::EnvFacts,
+    rpmdb: &RpmdbProbe,
+) -> bool {
+    anolisa_env::package_family(env.os_id.as_deref(), env.os_id_like.as_deref()).as_deref()
+        != Some("deb")
+        || rpmdb.rpmdb_exists()
+}
+
+/// Where filesystem evidence of a host rpmdb is probed.
+///
+/// The probe targets the databases the host's `PackageQuery` would answer
+/// from — never the ANOLISA install layout: a `--prefix` relocates where
+/// components are placed, not where the host keeps its rpmdb. Beyond the
+/// two system locations, Debian's own rpm package defaults `%_dbpath` to
+/// `~/.rpmdb`, so the invoking user's home is probed as well. Deliberately
+/// file-based: the check must work exactly when the rpm binary does not.
+pub(crate) struct RpmdbProbe {
+    /// Host filesystem root holding `var/lib/rpm` and
+    /// `usr/lib/sysimage/rpm`; `/` in production.
+    system_root: PathBuf,
+    /// Home directory probed for Debian's `~/.rpmdb` default dbpath.
+    home: Option<PathBuf>,
+}
+
+impl RpmdbProbe {
+    /// Production probe: the real host root plus the invoking user's home.
+    pub(crate) fn for_host(env: &anolisa_env::EnvFacts) -> Self {
+        Self {
+            system_root: PathBuf::from("/"),
+            home: Some(env.home.clone()),
+        }
+    }
+
+    /// Probe against isolated roots, so tests never read the runner's
+    /// real rpmdb (or the developer's `~/.rpmdb`).
+    #[cfg(test)]
+    pub(crate) fn with_roots(system_root: PathBuf, home: Option<PathBuf>) -> Self {
+        Self { system_root, home }
+    }
+
+    /// Probe that never finds a database, for tests that assert behavior
+    /// on hosts without any rpmdb regardless of the runner's filesystem.
+    #[cfg(test)]
+    pub(crate) fn absent() -> Self {
+        Self {
+            system_root: PathBuf::from("/nonexistent-rpmdb-root"),
+            home: None,
+        }
+    }
+
+    /// Whether any known rpmdb location holds a database file, covering
+    /// the bdb, ndb, and sqlite backends.
+    fn rpmdb_exists(&self) -> bool {
+        let dirs = [
+            Some(self.system_root.join("var/lib/rpm")),
+            Some(self.system_root.join("usr/lib/sysimage/rpm")),
+            self.home.as_ref().map(|home| home.join(".rpmdb")),
+        ];
+        dirs.into_iter().flatten().any(|db| {
+            ["rpmdb.sqlite", "Packages", "Packages.db"]
+                .iter()
+                .any(|file| db.join(file).exists())
+        })
+    }
+}
+
 /// RPM package name a raw install probes for the planner's I3 rule.
+///
+/// When candidate resolution cannot settle on a single package — rpm
+/// tooling is missing on a host whose package authority is not RPM, or the
+/// candidates are not unique — an explicit `--package` override is already
+/// the known probe identity and wins over the component-name fallback, so
+/// the executor's locked recheck re-probes the exact RPM the user named.
+#[expect(clippy::too_many_arguments)]
 fn system_probe_package(
     args: &InstallArgs,
     layout: &FsLayout,
     env: &anolisa_env::EnvFacts,
+    rpmdb: &RpmdbProbe,
     repo_config: &RepoConfig,
     component: &str,
     query: &dyn PackageQuery,
     command: &str,
 ) -> Result<String, CliError> {
+    let fallback = || {
+        args.package
+            .clone()
+            .unwrap_or_else(|| component.to_string())
+    };
     let component_index = load_optional_component_index(layout, env, repo_config);
-    let candidates = rpm_package_candidates_with_index(
+    let candidates = match rpm_package_candidates_with_index(
         args.package.as_deref(),
         repo_config.backends.get("rpm"),
         component_index.as_ref(),
         query,
         component,
         ResolutionUse::Install,
-    )
-    .map_err(|err| match err {
-        PackageQueryError::CommandMissing { command: bin } => {
-            rpm_tooling_missing_error(command, &bin, component)
+    ) {
+        Ok(candidates) => candidates,
+        Err(PackageQueryError::CommandMissing { command: bin }) => {
+            if missing_rpm_tooling_is_fatal(env, rpmdb) {
+                return Err(rpm_tooling_missing_error(command, &bin, component));
+            }
+            return Ok(fallback());
         }
-        err => pkg_query_err(err, command),
-    })?;
+        Err(err) => return Err(pkg_query_err(err, command)),
+    };
     Ok(match candidates.as_slice() {
         [single] => single.package.clone(),
-        _ => component.to_string(),
+        _ => fallback(),
     })
 }
 
@@ -1002,8 +1226,10 @@ fn install_owned(
     validated: ValidatedInstall,
     raw_pin: Option<&RawPin>,
     native_package: Option<&str>,
+    degraded_rpmdb: Option<&RpmdbProbe>,
     provider: &DelegatedProvider,
     command: &str,
+    reporter: &mut dyn ProgressReporter,
 ) -> Result<InstallOutcome, CliError> {
     // No root pre-check for an owned install: `--prefix` may point at a
     // user-writable tree, and a genuine permission problem fails the exact
@@ -1029,7 +1255,14 @@ fn install_owned(
             ),
         });
     }
-    revalidate_native_absence(native_package, provider, now, target, command)?;
+    revalidate_native_absence(
+        native_package,
+        provider,
+        now,
+        target,
+        command,
+        degraded_rpmdb,
+    )?;
 
     let evidence = JournalEvidence::new(journal_dir, &store.operations);
     let mut journal_gate = LockedJournalGate::load(&_lock, evidence, command)?;
@@ -1058,6 +1291,8 @@ fn install_owned(
     let outcome =
         result.map_err(|err| owned_error_to_cli(err, target, scope, command, &retained_note))?;
 
+    reporter.report(&format!("Finalizing {target} installation..."));
+
     // Operation history is best-effort bookkeeping on top of the committed
     // record: the install already succeeded, so a history-write failure
     // degrades to a warning instead of unwinding anything.
@@ -1070,13 +1305,16 @@ fn install_owned(
         parent_operation_id: None,
     });
     if let Err(err) = store.save(state_path) {
-        eprintln!("warning: failed to record operation history: {err}");
+        progress::suspend_output(|| {
+            eprintln!("warning: failed to record operation history: {err}")
+        });
     }
 
     for warning in resolve_warnings.iter().chain(outcome.warnings.iter()) {
-        eprintln!("warning: {warning}");
+        progress::suspend_output(|| eprintln!("warning: {warning}"));
     }
 
+    reporter.finish();
     render_result(ctx, &{
         let mut payload = InstallResultPayload {
             component: target.to_string(),
@@ -1119,6 +1357,7 @@ fn install_delegated(
     repo_config: &RepoConfig,
     is_root: bool,
     command: &str,
+    reporter: &mut dyn ProgressReporter,
 ) -> Result<InstallOutcome, CliError> {
     // A fresh delegated install pulls from the configured ANOLISA RPM
     // repository; without one, dnf would resolve against arbitrary host
@@ -1150,7 +1389,7 @@ fn install_delegated(
             ),
         });
     }
-    revalidate_native_absence(Some(package), provider, now, target, command)?;
+    revalidate_native_absence(Some(package), provider, now, target, command, None)?;
 
     let evidence = JournalEvidence::new(journal_dir, &store.operations);
     let mut journal_gate = LockedJournalGate::load(&_lock, evidence, command)?;
@@ -1188,6 +1427,8 @@ fn install_delegated(
         ),
     })?;
 
+    reporter.report(&format!("Finalizing {target} installation..."));
+
     // Operation history is best-effort bookkeeping on top of the committed
     // record, exactly like the owned path.
     store.operations.push(OperationRecord {
@@ -1199,7 +1440,9 @@ fn install_delegated(
         parent_operation_id: None,
     });
     if let Err(err) = store.save(state_path) {
-        eprintln!("warning: failed to record operation history: {err}");
+        progress::suspend_output(|| {
+            eprintln!("warning: failed to record operation history: {err}")
+        });
     }
 
     // Best-effort: snapshot the datadir component contract so adapter
@@ -1211,7 +1454,7 @@ fn install_delegated(
         command,
         ctx.packaged_data_probe(),
     ) {
-        eprintln!("warning: {warning}");
+        progress::suspend_output(|| eprintln!("warning: {warning}"));
     }
 
     let version = outcome.observation.as_ref().map(|o| o.version.clone());
@@ -1232,20 +1475,41 @@ fn install_delegated(
     if let Some(pin) = delegated_pin {
         payload = payload.with_pin(pin);
     }
+    reporter.finish();
     render_result(ctx, &payload)?;
     Ok(InstallOutcome::Installed)
 }
 
+/// Locked recheck that the native package is still absent before mutation.
+///
+/// Presence evidence is never muted — when the probe can run and reports
+/// the package, the install refuses regardless of the host family.
+///
+/// `degraded` selects the CommandMissing policy: `None` keeps the hard
+/// error, while `Some(probe)` is the deb-family degrade. The degraded
+/// verdict is a planning-time snapshot, so it is re-verified against the
+/// filesystem under the lock: if an rpmdb has appeared since — an external
+/// process installed RPMs, whether or not this process can see the rpm
+/// binary, and whether or not the probe identity matches what that process
+/// installed — the vacuous-probe justification is gone and the install
+/// refuses. A retry re-plans against the now-present database with full
+/// candidate resolution.
 pub(crate) fn revalidate_native_absence(
     package: Option<&str>,
     provider: &DelegatedProvider,
     now: &str,
     target: &str,
     command: &str,
+    degraded: Option<&RpmdbProbe>,
 ) -> Result<(), CliError> {
     let Some(package) = package else {
         return Ok(());
     };
+    if let Some(rpmdb) = degraded
+        && rpmdb.rpmdb_exists()
+    {
+        return Err(rpmdb_appeared_error(command, target));
+    }
     match provider.observe(package, now) {
         Ok(NativeProbe::Absent) => Ok(()),
         Ok(NativeProbe::Present { .. } | NativeProbe::MultipleVersions { .. }) => {
@@ -1261,12 +1525,28 @@ pub(crate) fn revalidate_native_absence(
             reason: format!("locked system-RPM probe for '{package}' did not run"),
         }),
         Err(ProviderError::Query(PackageQueryError::CommandMissing { command: bin })) => {
-            Err(rpm_tooling_missing_error(command, &bin, target))
+            match degraded {
+                None => Err(rpm_tooling_missing_error(command, &bin, target)),
+                Some(rpmdb) if rpmdb.rpmdb_exists() => Err(rpmdb_appeared_error(command, target)),
+                Some(_) => Ok(()),
+            }
         }
         Err(err) => Err(CliError::Runtime {
             command: command.to_string(),
             reason: format!("locked rpm query failed for '{package}': {err}"),
         }),
+    }
+}
+
+/// Refusal when the locked recheck finds rpmdb evidence that was absent at
+/// planning time: the raw placement stops before any mutation and the retry
+/// re-runs the presence probe against the database.
+fn rpmdb_appeared_error(command: &str, target: &str) -> CliError {
+    CliError::InvalidArgument {
+        command: command.to_string(),
+        reason: format!(
+            "an rpm database appeared while '{target}' was being resolved; nothing was changed — retry `anolisa install {target}` so the system-RPM presence check runs against it"
+        ),
     }
 }
 
@@ -1662,7 +1942,236 @@ mod tests {
     use super::*;
     use crate::repo_config::RepoConfig;
     use anolisa_platform::fs_layout::FsLayout;
+    use std::cell::{Cell, RefCell};
     use tempfile::tempdir;
+
+    #[derive(Default)]
+    struct RecordingProgress {
+        messages: RefCell<Vec<String>>,
+        finished: Cell<bool>,
+    }
+
+    impl ProgressReporter for RecordingProgress {
+        fn report(&self, message: &str) {
+            self.messages.borrow_mut().push(message.to_string());
+        }
+
+        fn finish(&mut self) {
+            self.finished.set(true);
+        }
+    }
+
+    #[test]
+    fn missing_rpm_tooling_fatality_follows_host_package_family() {
+        let rpmdb = RpmdbProbe::absent();
+        let env = |id: Option<&str>, id_like: Option<&str>| anolisa_env::EnvFacts {
+            os_id: id.map(str::to_string),
+            os_id_like: id_like.map(str::to_string),
+            ..linux_env()
+        };
+        // rpm-family hosts must treat missing rpm/dnf as a hard I3 error.
+        assert!(missing_rpm_tooling_is_fatal(
+            &env(Some("alinux"), None),
+            &rpmdb
+        ));
+        assert!(missing_rpm_tooling_is_fatal(
+            &env(Some("fedora"), None),
+            &rpmdb
+        ));
+        // deb-family hosts have no rpmdb; the probe degrades to NotProbed.
+        assert!(!missing_rpm_tooling_is_fatal(
+            &env(Some("ubuntu"), None),
+            &rpmdb
+        ));
+        // A derivative declaring deb lineage via ID_LIKE also degrades.
+        assert!(!missing_rpm_tooling_is_fatal(
+            &env(Some("zorin"), Some("ubuntu debian")),
+            &rpmdb
+        ));
+        // Unrecognized or undetected hosts fail closed.
+        assert!(missing_rpm_tooling_is_fatal(
+            &env(Some("alpine"), Some("musl")),
+            &rpmdb
+        ));
+        assert!(missing_rpm_tooling_is_fatal(&env(None, None), &rpmdb));
+    }
+
+    #[test]
+    fn rpmdb_on_disk_overrides_the_deb_family_relaxation() {
+        // A deb-family host that installed RPMs before losing the rpm
+        // binary still owns a database the raw path could corrupt: the
+        // on-disk rpmdb evidence must win over the family inference, for
+        // every db backend and both host system locations.
+        let deb_env = anolisa_env::EnvFacts {
+            os_id: Some("ubuntu".to_string()),
+            os_id_like: Some("debian".to_string()),
+            ..linux_env()
+        };
+        for (dir, file) in [
+            ("var/lib/rpm", "rpmdb.sqlite"),
+            ("var/lib/rpm", "Packages"),
+            ("var/lib/rpm", "Packages.db"),
+            ("usr/lib/sysimage/rpm", "rpmdb.sqlite"),
+        ] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let rpmdb = RpmdbProbe::with_roots(tmp.path().to_path_buf(), None);
+            assert!(
+                !missing_rpm_tooling_is_fatal(&deb_env, &rpmdb),
+                "without an rpmdb the deb-family host degrades"
+            );
+            let db = tmp.path().join(dir);
+            std::fs::create_dir_all(&db).expect("rpmdb dir");
+            std::fs::write(db.join(file), b"").expect("rpmdb file");
+            assert!(
+                missing_rpm_tooling_is_fatal(&deb_env, &rpmdb),
+                "{dir}/{file} must force the hard error"
+            );
+        }
+    }
+
+    #[test]
+    fn debian_default_home_dbpath_also_counts_as_rpmdb_evidence() {
+        // Debian's own rpm package defaults %_dbpath to ~/.rpmdb, so a
+        // database in the invoking user's home is host evidence too.
+        let deb_env = anolisa_env::EnvFacts {
+            os_id: Some("debian".to_string()),
+            os_id_like: None,
+            ..linux_env()
+        };
+        let system = tempfile::tempdir().expect("system root");
+        let home = tempfile::tempdir().expect("home");
+        let rpmdb =
+            RpmdbProbe::with_roots(system.path().to_path_buf(), Some(home.path().to_path_buf()));
+        assert!(
+            !missing_rpm_tooling_is_fatal(&deb_env, &rpmdb),
+            "no database anywhere degrades"
+        );
+        let db = home.path().join(".rpmdb");
+        std::fs::create_dir_all(&db).expect("home rpmdb dir");
+        std::fs::write(db.join("Packages"), b"").expect("home rpmdb file");
+        assert!(
+            missing_rpm_tooling_is_fatal(&deb_env, &rpmdb),
+            "~/.rpmdb must force the hard error"
+        );
+    }
+
+    #[test]
+    fn rpmdb_evidence_ignores_the_install_prefix() {
+        // A --prefix relocates where components are placed, not where the
+        // host keeps its rpmdb: a database inside the install prefix is
+        // ANOLISA's own tree, while the host probe roots stay clean — the
+        // degrade must follow the host, not the layout.
+        let deb_env = anolisa_env::EnvFacts {
+            os_id: Some("ubuntu".to_string()),
+            os_id_like: Some("debian".to_string()),
+            ..linux_env()
+        };
+        let host_root = tempfile::tempdir().expect("host root");
+        let prefix = tempfile::tempdir().expect("install prefix");
+        let inside_prefix = prefix.path().join("var/lib/rpm");
+        std::fs::create_dir_all(&inside_prefix).expect("prefix rpm dir");
+        std::fs::write(inside_prefix.join("rpmdb.sqlite"), b"").expect("prefix file");
+        let rpmdb = RpmdbProbe::with_roots(host_root.path().to_path_buf(), None);
+        assert!(
+            !missing_rpm_tooling_is_fatal(&deb_env, &rpmdb),
+            "a file under the install prefix is not host rpmdb evidence"
+        );
+        // Conversely a host database keeps the hard error no matter what
+        // prefix the install targets.
+        let host_db = host_root.path().join("var/lib/rpm");
+        std::fs::create_dir_all(&host_db).expect("host rpm dir");
+        std::fs::write(host_db.join("rpmdb.sqlite"), b"").expect("host file");
+        assert!(
+            missing_rpm_tooling_is_fatal(&deb_env, &rpmdb),
+            "host rpmdb evidence is independent of the install prefix"
+        );
+    }
+
+    #[test]
+    fn locked_recheck_refuses_on_rpmdb_evidence_even_when_probe_reports_absent() {
+        // The essence of the planning-degrade races: under the lock the
+        // probe may answer Absent for a stale or fallback identity (e.g. a
+        // differently named provider was installed meanwhile), or still
+        // fail with CommandMissing while another process grew a database.
+        // With the degraded policy, on-disk rpmdb evidence must refuse
+        // regardless of what the per-package query reports.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let rpmdb = RpmdbProbe::with_roots(tmp.path().to_path_buf(), None);
+        let db = tmp.path().join("var/lib/rpm");
+        std::fs::create_dir_all(&db).expect("rpmdb dir");
+        std::fs::write(db.join("rpmdb.sqlite"), b"").expect("rpmdb file");
+        // The default FakeQuery reports every package as absent.
+        let q = FakeQuery::default();
+        let provider = DelegatedProvider::new(&q, &NoTxn);
+
+        let err = revalidate_native_absence(
+            Some("copilot-shell"),
+            &provider,
+            "2026-01-01T00:00:00Z",
+            "copilot-shell",
+            COMMAND,
+            Some(&rpmdb),
+        )
+        .expect_err("rpmdb evidence must refuse under the degraded policy");
+        assert!(
+            err.reason().contains("rpm database appeared"),
+            "got: {}",
+            err.reason()
+        );
+
+        // The same evidence with the fatal policy defers to the probe: the
+        // absent answer from working tooling is authoritative there.
+        revalidate_native_absence(
+            Some("copilot-shell"),
+            &provider,
+            "2026-01-01T00:00:00Z",
+            "copilot-shell",
+            COMMAND,
+            None,
+        )
+        .expect("the fatal policy trusts the probe answer");
+    }
+
+    #[test]
+    fn delegated_install_reports_execution_and_finalization() {
+        let (_tmp, mut ctx) = system_ctx_with_configured_rpm_repo(false);
+        ctx.quiet = true;
+        let fake = FakeInstaller::new(
+            "copilot-shell",
+            pkg_info("copilot-shell", "2.3.0", Some("1.al8"), "x86_64"),
+        )
+        .with_origin("anolisa");
+        let mut install_args = args("copilot-shell");
+        install_args.backend = Some("rpm".to_string());
+        let mut reporter = RecordingProgress::default();
+
+        let outcome = install_component_with_deps_and_planned(
+            "copilot-shell",
+            &install_args,
+            &ctx,
+            &linux_env(),
+            &RpmdbProbe::absent(),
+            &fake,
+            &fake,
+            true,
+            &HashSet::new(),
+            &mut reporter,
+        )
+        .expect("delegated install");
+
+        assert_eq!(outcome, InstallOutcome::Installed);
+        assert_eq!(
+            reporter.messages.borrow().as_slice(),
+            [
+                "Installing copilot-shell...",
+                "Finalizing copilot-shell installation...",
+            ]
+        );
+        assert!(
+            reporter.finished.get(),
+            "progress must stop before the final result is rendered"
+        );
+    }
 
     #[test]
     fn pinned_payload_json_exposes_requested_resolved_repo_and_artifact() {

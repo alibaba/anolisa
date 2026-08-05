@@ -17,6 +17,7 @@ use crate::auth::menu::{
 };
 use crate::auth::navigation::{step_back, BackOutcome};
 use crate::auth::prompt::{clear_active_auth_panel, render_current_auth_panel};
+use crate::auth::provider_display::auth_providers_for_display;
 use crate::auth::provider_management::{
     core_auth_activate, core_auth_configure, load_core_auth_state, provider_action_choice,
     ExistingProvider, ProviderAction,
@@ -169,7 +170,8 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
         }
     };
 
-    let providers = providers_with_provider_id_field(core_state.templates);
+    let providers =
+        auth_providers_for_display(&providers_with_provider_id_field(core_state.templates));
     let request_id = format!(
         "slash-auth-{}",
         std::time::SystemTime::now()
@@ -213,8 +215,14 @@ pub(crate) fn trigger_auth_from_slash<W: std::io::Write>(
     Ok(())
 }
 
-fn clear_observed_model_after_provider_change(state: &mut InlineState) {
+pub(super) fn clear_observed_model_after_provider_change(state: &mut InlineState) {
     state.personalization.foreground_model = None;
+    // Credentials just changed: drop the startup probe verdict so the
+    // no-auth surfaces re-resolve instead of trusting a pre-change
+    // snapshot (a stale `Some(false)` would keep suppressing the
+    // recommendation disclosure for the rest of the session).
+    state.startup_auth.pending = None;
+    state.startup_auth.resolved = None;
 }
 
 fn clear_observed_model_after_provider_delete(
@@ -459,10 +467,11 @@ fn handle_auth_answer<W: std::io::Write>(
                     let template_idx = auth
                         .providers
                         .iter()
-                        .position(|p| match provider_type {
-                            "dashscope" => p.id == "dashscope",
-                            "aliyun" => p.id == "aliyun",
-                            _ => p.id == "openai_compat",
+                        .position(|provider| provider.id == provider_type)
+                        .or_else(|| {
+                            auth.providers
+                                .iter()
+                                .position(|provider| provider.id == "openai_compat")
                         })
                         .unwrap_or(0);
 

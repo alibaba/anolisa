@@ -50,6 +50,8 @@ function execEvent(command: string) {
 /** Captured CLI args from last mock call. */
 let lastCliArgs: string[] | undefined;
 let lastCliOpts: { timeout?: number } | undefined;
+let previousCodeScannerHookEnabled: string | undefined;
+let previousCodeScannerMode: string | undefined;
 
 function mockCli(result: CliResult) {
   _setCliMock(async (args, opts) => {
@@ -73,10 +75,24 @@ describe("scan-code", () => {
   beforeEach(() => {
     lastCliArgs = undefined;
     lastCliOpts = undefined;
+    previousCodeScannerHookEnabled = process.env.CODE_SCANNER_HOOK_ENABLED;
+    previousCodeScannerMode = process.env.CODE_SCANNER_MODE;
+    delete process.env.CODE_SCANNER_HOOK_ENABLED;
+    delete process.env.CODE_SCANNER_MODE;
   });
 
   afterEach(() => {
     _resetCliMock();
+    if (previousCodeScannerHookEnabled === undefined) {
+      delete process.env.CODE_SCANNER_HOOK_ENABLED;
+    } else {
+      process.env.CODE_SCANNER_HOOK_ENABLED = previousCodeScannerHookEnabled;
+    }
+    if (previousCodeScannerMode === undefined) {
+      delete process.env.CODE_SCANNER_MODE;
+    } else {
+      process.env.CODE_SCANNER_MODE = previousCodeScannerMode;
+    }
   });
 
   // =========================================================================
@@ -103,6 +119,28 @@ describe("scan-code", () => {
   // Dimension 3a: Event-to-CLI Parameter Transformation
   // =========================================================================
   describe("event → CLI args transformation", () => {
+    it("CODE_SCANNER_HOOK_ENABLED=false → no CLI call", async () => {
+      process.env.CODE_SCANNER_HOOK_ENABLED = "false";
+      const { handler } = registerAndGetHandler();
+      mockCliNoCall();
+
+      const result = await handler(execEvent("rm -rf /"), {});
+
+      assert.equal(result, undefined);
+      assert.equal(lastCliArgs, undefined);
+    });
+
+    it("invalid CODE_SCANNER_HOOK_ENABLED value → defaults enabled silently", async () => {
+      process.env.CODE_SCANNER_HOOK_ENABLED = "maybe";
+      const { handler } = registerAndGetHandler();
+      mockCli({ exitCode: 0, stdout: '{"verdict":"pass","findings":[]}', stderr: "" });
+
+      const result = await handler(execEvent("echo hello"), {});
+
+      assert.equal(result, undefined);
+      assert.deepEqual(lastCliArgs?.slice(2), ["scan-code", "--code", "echo hello", "--language", "bash"]);
+    });
+
     it("exec tool with command → correct CLI args", async () => {
       const { handler } = registerAndGetHandler();
       mockCli({ exitCode: 0, stdout: '{"verdict":"pass","findings":[]}', stderr: "" });
@@ -282,6 +320,84 @@ describe("scan-code", () => {
       assert.equal(result.requireApproval.title, "Code Scanner Security Warning");
       assert.equal(result.requireApproval.severity, "warning");
       assert.ok(result.requireApproval.description.includes("- 注意"));
+    });
+
+    it("CODE_SCANNER_MODE=ask overrides disabled approval config", async () => {
+      process.env.CODE_SCANNER_MODE = "ask";
+      const { handler } = registerAndGetHandler({ codeScanRequireApproval: false });
+      mockCli({
+        exitCode: 0,
+        stdout: '{"verdict":"warn","findings":[{"desc_zh":"注意"}]}',
+        stderr: "",
+      });
+
+      const result = await handler(execEvent("risky-cmd"), {});
+
+      assert.ok(result.requireApproval);
+      assert.equal(result.block, undefined);
+    });
+
+    it("CODE_SCANNER_MODE=observe overrides enabled approval config", async () => {
+      process.env.CODE_SCANNER_MODE = "observe";
+      const { handler } = registerAndGetHandler({ codeScanRequireApproval: true });
+      mockCli({
+        exitCode: 0,
+        stdout: '{"verdict":"deny","findings":[{"desc_zh":"危险"}]}',
+        stderr: "",
+      });
+
+      const result = await handler(execEvent("risky-cmd"), {});
+
+      assert.equal(result, undefined);
+    });
+
+    it("unsupported block and deny modes use the original config fallback", async () => {
+      for (const mode of ["block", "deny"]) {
+        process.env.CODE_SCANNER_MODE = mode;
+        const { handler, logs } = registerAndGetHandler({ codeScanRequireApproval: true });
+        mockCli({
+          exitCode: 0,
+          stdout: '{"verdict":"deny","findings":[{"desc_zh":"危险"}]}',
+          stderr: "",
+        });
+
+        const result = await handler(execEvent("risky-cmd"), {});
+
+        assert.ok(result.requireApproval);
+        assert.equal(result.block, undefined);
+        assert.ok(logs.some((log) => log.includes("CODE_SCANNER_MODE") && log.includes(mode)));
+      }
+    });
+
+    it("debug alias selects the existing observe interaction", async () => {
+      process.env.CODE_SCANNER_MODE = "debug";
+      const { handler, logs } = registerAndGetHandler({ codeScanRequireApproval: true });
+      mockCli({
+        exitCode: 0,
+        stdout: '{"verdict":"warn","findings":[{"desc_zh":"注意"}]}',
+        stderr: "",
+      });
+
+      const result = await handler(execEvent("risky-cmd"), {});
+
+      assert.equal(result, undefined);
+      assert.equal(logs.some((log) => log.includes("CODE_SCANNER_MODE")), false);
+    });
+
+    it("invalid MODE is equivalent to an unset MODE", async () => {
+      process.env.CODE_SCANNER_MODE = "invalid";
+      const { handler, logs } = registerAndGetHandler({ codeScanRequireApproval: true });
+      mockCli({
+        exitCode: 0,
+        stdout: '{"verdict":"warn","findings":[{"desc_zh":"注意"}]}',
+        stderr: "",
+      });
+
+      const result = await handler(execEvent("risky-cmd"), {});
+
+      assert.ok(result.requireApproval);
+      assert.equal(result.block, undefined);
+      assert.ok(logs.some((log) => log.includes("CODE_SCANNER_MODE") && log.includes("invalid")));
     });
 
     it("deny but empty findings → undefined (findings.length === 0 gate)", async () => {

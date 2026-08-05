@@ -2,19 +2,20 @@
 mod env_check;
 mod mcp;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, IsTerminal as _, Read};
 use std::process;
 use std::sync::Arc;
 use tokenless_ccr::{SqliteStore, StashStore, extract_hash, is_valid_hash};
 use tokenless_schema::{ResponseCompressor, SchemaCompressor};
 use tokenless_stats::{
-    CompressionMode, OperationType, StatsRecord, StatsRecorder, TokenlessConfig,
+    CompressionMode, DiffSort, OperationType, StatsRecord, StatsRecorder, TokenlessConfig,
 };
 use tokenless_stats::{estimate_tokens, estimate_tokens_from_bytes};
 use tokenless_stats::{
-    format_compare, format_compare_json, format_list, format_show, format_summary,
+    format_compare, format_compare_json, format_diff_report, format_list, format_show,
+    format_summary, record_report, session_report, tool_use_report,
 };
 
 #[derive(Parser)]
@@ -51,7 +52,8 @@ enum Commands {
         /// flag makes truncation lossy (the pre-stash behavior).
         #[arg(long)]
         no_stash: bool,
-        /// Override the stash database path (default ~/.tokenless/stash.db).
+        /// Override the stash database path. Defaults to
+        /// $TOKENLESS_DATA_DIR/stash.db or ~/.tokenless/stash.db.
         /// Resolved under the trusted home directory; rejected if outside.
         #[arg(long)]
         stash_db: Option<String>,
@@ -83,7 +85,8 @@ enum Commands {
         /// flag makes truncation lossy (the pre-stash behavior).
         #[arg(long)]
         no_stash: bool,
-        /// Override the stash database path (default ~/.tokenless/stash.db).
+        /// Override the stash database path. Defaults to
+        /// $TOKENLESS_DATA_DIR/stash.db or ~/.tokenless/stash.db.
         /// Resolved under the trusted home directory; rejected if outside.
         #[arg(long)]
         stash_db: Option<String>,
@@ -94,7 +97,8 @@ enum Commands {
     Retrieve {
         /// The stash hash, or a line containing a `<<tokenless:HASH>>` marker.
         hash: String,
-        /// Override the stash database path (default ~/.tokenless/stash.db).
+        /// Override the stash database path. Defaults to
+        /// $TOKENLESS_DATA_DIR/stash.db or ~/.tokenless/stash.db.
         #[arg(long)]
         stash_db: Option<String>,
     },
@@ -150,6 +154,23 @@ enum McpCommands {
     Serve,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DiffSortArg {
+    Saved,
+    Time,
+}
+
+const DEFAULT_DIFF_LIMIT: usize = 20;
+
+impl From<DiffSortArg> for DiffSort {
+    fn from(value: DiffSortArg) -> Self {
+        match value {
+            DiffSortArg::Saved => DiffSort::Saved,
+            DiffSortArg::Time => DiffSort::Time,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum StatsCommands {
     /// Show summary statistics with breakdown by operation
@@ -174,6 +195,43 @@ enum StatsCommands {
         /// Record database ID
         id: i64,
     },
+    /// Explain estimated token savings with a unified content diff
+    Diff {
+        /// Record database ID
+        #[arg(
+            value_name = "RECORD_ID",
+            required_unless_present = "session",
+            conflicts_with = "session"
+        )]
+        id: Option<i64>,
+        /// Session ID to summarize or inspect
+        #[arg(long, required_unless_present = "id")]
+        session: Option<String>,
+        /// Restrict a session diff to one tool call
+        #[arg(long, requires = "session")]
+        tool_use_id: Option<String>,
+        /// Maximum number of chains in a session overview
+        #[arg(
+            short,
+            long,
+            default_value_t = DEFAULT_DIFF_LIMIT,
+            value_parser = parse_positive_usize,
+            conflicts_with_all = ["id", "tool_use_id"]
+        )]
+        limit: usize,
+        /// Session overview ordering
+        #[arg(long, value_enum, conflicts_with_all = ["id", "tool_use_id"])]
+        sort: Option<DiffSortArg>,
+        /// Unchanged lines around each content change
+        #[arg(short = 'U', long, default_value_t = 3)]
+        context: usize,
+        /// Disable ANSI colors even when stdout is a terminal
+        #[arg(long)]
+        no_color: bool,
+        /// Output machine-readable JSON with structured diff hunks
+        #[arg(long)]
+        json: bool,
+    },
     /// Clear all statistics
     Clear {
         #[arg(long)]
@@ -189,6 +247,16 @@ enum StatsCommands {
 
 /// Maximum input size (64 MiB) to prevent OOM on accidental large-file stdin.
 const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
+
+fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| format!("invalid positive integer: {value}"))?;
+    if parsed == 0 {
+        return Err("value must be greater than zero".to_string());
+    }
+    Ok(parsed)
+}
 
 fn read_input(file: &Option<String>) -> Result<String, String> {
     // Cap stream reads at MAX_INPUT_BYTES + 1 via Read::take so a hostile
@@ -246,13 +314,106 @@ pub fn get_home_dir() -> String {
     tokenless_stats::get_home_dir()
 }
 
+/// Validate a custom tokenless data directory against the user's home.
+///
+/// Unlike database file overrides, the directory may not exist yet. The
+/// nearest existing ancestor is canonicalized so a symlink cannot redirect
+/// the eventual directory outside the trusted home. Validation and later
+/// directory creation are separate filesystem operations, so callers must
+/// not treat this check as protection from concurrent path replacement.
+fn validate_data_dir_path(env_path: &str, home: &str) -> Result<String, String> {
+    if home.is_empty() {
+        return Err("no trusted home directory available".to_string());
+    }
+
+    let canonical_home = std::path::Path::new(home)
+        .canonicalize()
+        .map_err(|e| format!("home directory '{}' cannot be resolved: {}", home, e))?;
+    let candidate = std::path::Path::new(env_path);
+    if !candidate.is_absolute() {
+        return Err(format!("path '{}' is not absolute", env_path));
+    }
+    if candidate
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(format!("path '{}' contains parent traversal", env_path));
+    }
+    if candidate.exists() && !candidate.is_dir() {
+        return Err(format!("path '{}' is not a directory", env_path));
+    }
+
+    let mut existing_ancestor = candidate;
+    while !existing_ancestor.exists() {
+        existing_ancestor = existing_ancestor
+            .parent()
+            .ok_or_else(|| format!("path '{}' has no existing ancestor to validate", env_path))?;
+    }
+    let resolved_ancestor = existing_ancestor
+        .canonicalize()
+        .map_err(|e| format!("path '{}' cannot be resolved: {}", env_path, e))?;
+    if !resolved_ancestor.starts_with(&canonical_home) {
+        return Err(format!(
+            "path '{}' is outside home directory '{}'",
+            env_path, home
+        ));
+    }
+
+    Ok(env_path.to_string())
+}
+
+/// Resolve the directory containing tokenless SQLite databases.
+///
+/// `TOKENLESS_DATA_DIR` affects `stats.db` and `stash.db` only. Invalid
+/// overrides are ignored in favor of the existing `~/.tokenless` default.
+/// Returns an error when no trusted home anchor exists.
+fn get_data_dir(home: &str) -> Result<String, String> {
+    if home.is_empty() {
+        return Err("no trusted home directory available".to_string());
+    }
+
+    let data_dir = match std::env::var("TOKENLESS_DATA_DIR") {
+        Ok(env_path) if !env_path.is_empty() => match validate_data_dir_path(&env_path, home) {
+            Ok(path) => path,
+            Err(reason) => {
+                eprintln!("[tokenless] ignoring TOKENLESS_DATA_DIR: {}", reason);
+                format!("{}/.tokenless", home)
+            }
+        },
+        _ => format!("{}/.tokenless", home),
+    };
+    Ok(data_dir)
+}
+
+// Lazily snapshot path inputs for one command so stats and stash share the
+// same passwd lookup and data-directory validation without global caching.
+#[derive(Default)]
+struct DatabasePathResolver {
+    home: std::sync::OnceLock<String>,
+    data_dir: std::sync::OnceLock<Result<String, String>>,
+}
+
+impl DatabasePathResolver {
+    fn home(&self) -> &str {
+        self.home.get_or_init(get_home_dir)
+    }
+
+    fn data_dir(&self) -> Result<&str, &str> {
+        self.data_dir
+            .get_or_init(|| get_data_dir(self.home()))
+            .as_ref()
+            .map(String::as_str)
+            .map_err(String::as_str)
+    }
+}
+
 /// Resolve the database path. When `TOKENLESS_STATS_DB` is set, the path
 /// is validated to ensure it resides under the user's home directory;
-/// otherwise the env var is ignored and the default path is used. This
-/// prevents an attacker from redirecting the database to a system-critical
-/// location (e.g. `/etc/evil.db`).
-fn get_db_path() -> String {
-    let home = get_home_dir();
+/// otherwise `TOKENLESS_DATA_DIR` and then the default data directory are
+/// used. This prevents an attacker from redirecting the database to a
+/// system-critical location (e.g. `/etc/evil.db`).
+fn get_db_path_with(paths: &DatabasePathResolver) -> String {
+    let home = paths.home();
     // When no trusted home is available (empty string from passwd lookup
     // failure), return a path that will safely fail on open/create rather
     // than silently writing to / or CWD.
@@ -261,13 +422,23 @@ fn get_db_path() -> String {
         return "/dev/null/.tokenless/stats.db".to_string();
     }
     match std::env::var("TOKENLESS_STATS_DB") {
-        Ok(env_path) if !env_path.is_empty() => match validate_db_path(&env_path, &home) {
+        Ok(env_path) if !env_path.is_empty() => match validate_db_path(&env_path, home) {
             Ok(path) => return path,
             Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STATS_DB: {}", reason),
         },
         _ => {}
     }
-    format!("{}/.tokenless/stats.db", home)
+    let data_dir = match paths.data_dir() {
+        Ok(path) => path,
+        Err(reason) => {
+            eprintln!("[tokenless] {} — stats DB writes disabled", reason);
+            return "/dev/null/.tokenless/stats.db".to_string();
+        }
+    };
+    std::path::Path::new(&data_dir)
+        .join("stats.db")
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Validate a TOKENLESS_STATS_DB candidate against the user's home directory.
@@ -319,8 +490,7 @@ fn validate_db_path(env_path: &str, home: &str) -> Result<String, String> {
     }
 }
 
-fn ensure_db_dir() -> Result<(), (String, i32)> {
-    let db_path = get_db_path();
+fn ensure_db_dir(db_path: &str) -> Result<(), (String, i32)> {
     if let Some(parent) = std::path::Path::new(&db_path).parent() {
         fs::create_dir_all(parent)
             .map_err(|e| (format!("Failed to create database directory: {}", e), 1))?;
@@ -329,8 +499,13 @@ fn ensure_db_dir() -> Result<(), (String, i32)> {
 }
 
 fn open_recorder() -> Result<StatsRecorder, (String, i32)> {
-    ensure_db_dir()?;
-    StatsRecorder::new(get_db_path()).map_err(|e| (format!("Failed to open database: {}", e), 1))
+    open_recorder_with(&DatabasePathResolver::default())
+}
+
+fn open_recorder_with(paths: &DatabasePathResolver) -> Result<StatsRecorder, (String, i32)> {
+    let db_path = get_db_path_with(paths);
+    ensure_db_dir(&db_path)?;
+    StatsRecorder::new(db_path).map_err(|e| (format!("Failed to open database: {}", e), 1))
 }
 
 /// Resolve the stash database path under the trusted home directory.
@@ -341,8 +516,11 @@ fn open_recorder() -> Result<StatsRecorder, (String, i32)> {
 /// `None` when no trusted home anchor exists or an override is rejected —
 /// callers fail open (no stash, lossy truncation) rather than writing state
 /// to an untrusted location.
-fn get_stash_db_path(override_path: Option<&str>) -> Option<String> {
-    let home = get_home_dir();
+fn get_stash_db_path_with(
+    paths: &DatabasePathResolver,
+    override_path: Option<&str>,
+) -> Option<String> {
+    let home = paths.home();
     if home.is_empty() {
         eprintln!("[tokenless] no home directory available — stash disabled");
         return None;
@@ -352,28 +530,46 @@ fn get_stash_db_path(override_path: Option<&str>) -> Option<String> {
     // default under the trusted home (rather than silently disabling the
     // stash), so a typo doesn't quietly drop reversibility.
     if let Some(p) = override_path.filter(|s| !s.is_empty()) {
-        match validate_db_path(p, &home) {
+        match validate_db_path(p, home) {
             Ok(valid) => return Some(valid),
             Err(reason) => eprintln!("[tokenless] rejecting --stash-db {}: {}", p, reason),
         }
     }
-    match std::env::var("TOKENLESS_STASH_DB") {
-        Ok(env_path) if !env_path.is_empty() => match validate_db_path(&env_path, &home) {
-            Ok(path) => Some(path),
-            Err(reason) => {
-                eprintln!("[tokenless] ignoring TOKENLESS_STASH_DB: {}", reason);
-                Some(format!("{}/.tokenless/stash.db", home))
-            }
-        },
-        _ => Some(format!("{}/.tokenless/stash.db", home)),
+    if let Ok(env_path) = std::env::var("TOKENLESS_STASH_DB")
+        && !env_path.is_empty()
+    {
+        match validate_db_path(&env_path, home) {
+            Ok(path) => return Some(path),
+            Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STASH_DB: {}", reason),
+        }
     }
+    let data_dir = match paths.data_dir() {
+        Ok(path) => path,
+        Err(reason) => {
+            eprintln!("[tokenless] {} — stash disabled", reason);
+            return None;
+        }
+    };
+    Some(
+        std::path::Path::new(&data_dir)
+            .join("stash.db")
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 /// Open a stash store, returning the specific failure cause. Used by
 /// user-initiated paths (`retrieve`) where a generic "unavailable" message
 /// would hide the real reason (no home, path rejected, corrupt DB, …).
 fn open_stash_store_or_err(override_path: Option<&str>) -> Result<Arc<dyn StashStore>, String> {
-    let path = get_stash_db_path(override_path)
+    open_stash_store_or_err_with(&DatabasePathResolver::default(), override_path)
+}
+
+fn open_stash_store_or_err_with(
+    paths: &DatabasePathResolver,
+    override_path: Option<&str>,
+) -> Result<Arc<dyn StashStore>, String> {
+    let path = get_stash_db_path_with(paths, override_path)
         .ok_or_else(|| "no trusted home directory available for stash db".to_string())?;
     if let Some(parent) = std::path::Path::new(&path).parent() {
         fs::create_dir_all(parent)
@@ -388,7 +584,14 @@ fn open_stash_store_or_err(override_path: Option<&str>) -> Result<Arc<dyn StashS
 /// proceeds without stash (lossy truncation) when the home anchor is missing,
 /// the parent directory cannot be created, or the database cannot be opened.
 fn open_stash_store(override_path: Option<&str>) -> Option<Arc<dyn StashStore>> {
-    match open_stash_store_or_err(override_path) {
+    open_stash_store_with(&DatabasePathResolver::default(), override_path)
+}
+
+fn open_stash_store_with(
+    paths: &DatabasePathResolver,
+    override_path: Option<&str>,
+) -> Option<Arc<dyn StashStore>> {
+    match open_stash_store_or_err_with(paths, override_path) {
         Ok(store) => Some(store),
         Err(e) => {
             eprintln!("[tokenless] stash disabled: {}", e);
@@ -423,11 +626,12 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             // markers never reach the LLM (the original input is emitted),
             // orphaning them.
             let config = TokenlessConfig::load();
+            let database_paths = DatabasePathResolver::default();
             let compression_on = config.is_compression_enabled();
             let stash = if no_stash || !compression_on {
                 None
             } else {
-                open_stash_store(stash_db.as_deref())
+                open_stash_store_with(&database_paths, stash_db.as_deref())
             };
             let mut compressor = SchemaCompressor::new();
             if let Some(ref store) = stash {
@@ -473,6 +677,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
 
             record_compression_stats(
                 &config,
+                &database_paths,
                 OperationType::CompressSchema,
                 agent_id,
                 session_id,
@@ -516,11 +721,12 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             // markers never reach the LLM (the original input is emitted),
             // orphaning them.
             let config = TokenlessConfig::load();
+            let database_paths = DatabasePathResolver::default();
             let compression_on = config.is_compression_enabled();
             let stash = if no_stash || !compression_on {
                 None
             } else {
-                open_stash_store(stash_db.as_deref())
+                open_stash_store_with(&database_paths, stash_db.as_deref())
             };
             if let Some(ref store) = stash {
                 compressor = compressor.with_stash_store(store.clone());
@@ -574,6 +780,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
 
             record_compression_stats(
                 &config,
+                &database_paths,
                 OperationType::CompressResponse,
                 agent_id,
                 session_id,
@@ -676,6 +883,64 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                         .map_err(|e| (format!("Failed to query record: {}", e), 1))?
                         .ok_or_else(|| (format!("Record not found: {}", id), 1))?;
                     println!("{}", format_show(&record));
+                }
+                StatsCommands::Diff {
+                    id,
+                    session,
+                    tool_use_id,
+                    limit,
+                    sort,
+                    context,
+                    no_color,
+                    json,
+                } => {
+                    let report = match (id, session) {
+                        (Some(id), None) => {
+                            let record = recorder
+                                .record_by_id(id)
+                                .map_err(|e| (format!("Failed to query record: {}", e), 1))?
+                                .ok_or_else(|| (format!("Record not found: {}", id), 1))?;
+                            record_report(&record, context)
+                        }
+                        (None, Some(session_id)) => {
+                            let records = recorder
+                                .records_for_diff(&session_id, tool_use_id.as_deref())
+                                .map_err(|e| (format!("Failed to query diff records: {}", e), 1))?;
+                            if records.is_empty() {
+                                let scope = tool_use_id.as_deref().map_or_else(
+                                    || format!("session {session_id:?}"),
+                                    |tool| format!("tool use {tool:?} in session {session_id:?}"),
+                                );
+                                return Err((format!("No records found for {}", scope), 1));
+                            }
+                            if let Some(tool_use_id) = tool_use_id {
+                                tool_use_report(&records, &session_id, &tool_use_id, context)
+                            } else {
+                                session_report(
+                                    &records,
+                                    &session_id,
+                                    limit,
+                                    sort.map(DiffSort::from).unwrap_or_default(),
+                                )
+                            }
+                        }
+                        _ => {
+                            return Err((
+                                "Specify exactly one of RECORD_ID or --session".to_string(),
+                                2,
+                            ));
+                        }
+                    };
+                    if json {
+                        let output = serde_json::to_string_pretty(&report)
+                            .map_err(|e| (format!("Failed to serialize diff report: {}", e), 1))?;
+                        println!("{}", output);
+                    } else {
+                        let color = !no_color
+                            && std::env::var_os("NO_COLOR").is_none()
+                            && io::stdout().is_terminal();
+                        println!("{}", format_diff_report(&report, color));
+                    }
                 }
                 StatsCommands::Clear { yes } => {
                     if !yes {
@@ -793,8 +1058,10 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             // Recorded `after` = the predicted TOON result (or original when
             // TOON did not reduce size), so dry-run captures the prediction.
             let record_after = if no_savings { input.clone() } else { output };
+            let database_paths = DatabasePathResolver::default();
             record_compression_stats(
                 &config,
+                &database_paths,
                 OperationType::CompressToon,
                 agent_id,
                 session_id,
@@ -883,6 +1150,7 @@ fn warn_mode_mismatch(label: &str, records: &[StatsRecord], expected: Compressio
 #[allow(clippy::too_many_arguments)]
 fn record_compression_stats(
     config: &TokenlessConfig,
+    database_paths: &DatabasePathResolver,
     op: OperationType,
     agent_id: Option<String>,
     session_id: Option<String>,
@@ -937,7 +1205,7 @@ fn record_compression_stats(
 
     // SQLite stats recording — gated by stats_enabled
     if config.is_stats_enabled()
-        && let Ok(recorder) = open_recorder()
+        && let Ok(recorder) = open_recorder_with(database_paths)
     {
         let _ = recorder.record(&record);
     }
