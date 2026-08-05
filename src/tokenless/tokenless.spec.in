@@ -103,6 +103,7 @@ mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/commands
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/scripts
@@ -167,11 +168,12 @@ install -m 0755 adapters/tokenless/hermes/scripts/detect.sh %{buildroot}%{_datad
 install -m 0755 adapters/tokenless/hermes/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts/
 install -m 0755 adapters/tokenless/hermes/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts/
 
-# Install Qoder CLI plugin (manifest + hooks.json + install scripts).
-# Hook scripts themselves are shared from common/hooks/ — no duplication here.
+# Install the native Qoder CLI plugin. The wrapper resolves implementation
+# scripts from common/hooks/ so the hook logic remains shared.
 install -m 0644 adapters/tokenless/qoder/.qoder-plugin/plugin.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin/
-install -m 0644 adapters/tokenless/qoder/hooks.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/
-install -m 0644 adapters/tokenless/qoder/commands/tokenless-stats.toml %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/commands/
+install -m 0644 adapters/tokenless/qoder/hooks/hooks.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/hooks/
+install -m 0755 adapters/tokenless/qoder/hooks/run-hook.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/hooks/
+install -m 0644 adapters/tokenless/qoder/commands/tokenless-stats.md %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/commands/
 install -m 0755 adapters/tokenless/qoder/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
 install -m 0755 adapters/tokenless/qoder/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
 install -m 0755 adapters/tokenless/qoder/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
@@ -245,6 +247,7 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder/scripts
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder/commands
+%dir %{_datadir}/anolisa/adapters/tokenless/qoder/hooks
 %dir %{_datadir}/anolisa/adapters/tokenless/claude-code
 %dir %{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin
 %dir %{_datadir}/anolisa/adapters/tokenless/claude-code/hooks
@@ -276,10 +279,11 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/detect.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/install.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/uninstall.sh
-# Qoder CLI plugin — hook scripts reused from common/hooks/ (no duplication).
+# Qoder CLI plugin — native hook wrapper resolves scripts from common/hooks/.
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin/plugin.json
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/hooks.json
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/commands/tokenless-stats.toml
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/hooks/hooks.json
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/hooks/run-hook.sh
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/commands/tokenless-stats.md
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/detect.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/install.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/uninstall.sh
@@ -366,22 +370,11 @@ hash -r 2>/dev/null || true
 # On uninstall ($1=0): clean qodercli, codex, openclaw, and hermes plugins
 if [ $1 -eq 0 ]; then
     # --- Qoder CLI plugin cleanup ---
-    # Unregister plugin via qodercli and remove hooks from settings.json.
+    # Let qodercli remove the user-scoped native plugin and its cache.
     QODER_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/uninstall.sh"
     if [ -x "$QODER_SCRIPT" ]; then
         bash "$QODER_SCRIPT" || true
     fi
-    # Clean up plugin cache (qodercli's uninstall may leave orphaned cache).
-    # qodercli's cache key has been observed in two forms — the plugin's
-    # package name ("tokenless") and a target-suffixed variant
-    # ("tokenless-qoder"). Cover both so leftover caches don't shadow a
-    # fresh install on the next rpm upgrade.
-    for cache_dir in "$HOME/.qoder/plugins/cache/local/tokenless" \
-                     "$HOME/.qoder/plugins/cache/local/tokenless-qoder"; do
-        if [ -d "$cache_dir" ]; then
-            rm -rf "$cache_dir" || true
-        fi
-    done
 
     # --- Codex plugin cleanup ---
     # Remove codex marketplace entry + plugin cache.

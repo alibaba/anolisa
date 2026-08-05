@@ -316,14 +316,15 @@ interface ToolCategories {
 // to ensure consistent behavior across adapters even without the JSON file.
 const FALLBACK_SKIP_TOOLS: string[] = [
   "Read", "read", "read_file", "read_many_files",
-  "Glob", "glob", "list_directory",
-  "Grep", "grep", "grep_search", "search_files",
+  "Glob", "glob", "search_file", "list_directory", "list_dir",
+  "Grep", "grep", "grep_code", "grep_search", "search_files",
   "Lsp", "lsp",
   "NotebookRead", "notebook_read", "notebookread",
 ];
 const FALLBACK_SHELL_TOOLS: string[] = [
   "Bash", "bash", "Shell", "shell", "exec", "terminal",
-  "run_shell_command", "execute_command", "process",
+  "run_shell_command", "run_in_terminal", "get_terminal_output",
+  "execute_command", "process",
 ];
 
 function loadToolCategories(): ToolCategories {

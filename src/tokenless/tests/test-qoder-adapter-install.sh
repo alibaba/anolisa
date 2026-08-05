@@ -1,199 +1,260 @@
 #!/usr/bin/env bash
-# test-qoder-adapter-install.sh — Regression test for the qoder adapter installer.
-#
-# Regression covered: install.sh used to register a symlink to the raw
-# plugin directory, so the ${QODER_TOKENLESS_HOOKS} placeholder in
-# hooks.json reached the qodercli plugin cache unexpanded. Consumers that
-# load the cached hooks.json directly (the Qoder IDE shares ~/.qoder with
-# qodercli) never expand that variable, producing broken hook commands
-# like `python3 /rewrite_hook.py` whose non-zero exit is treated as a
-# tool-call block before the hook's own fail-open can run.
-#
-# The test sandboxes HOME, stubs qodercli's `plugins install` with the
-# real binary's observable behavior (verbatim copy into the plugin
-# cache), runs the installer, and asserts on the CACHED hooks.json —
-# not the source one.
-#
-# Usage: bash tests/test-qoder-adapter-install.sh [path-to-install.sh]
-# An alternative installer path may be passed to check other revisions,
-# e.g. one extracted via `git show HEAD~1:...` — the test must FAIL on
-# an installer that registers the raw plugin dir.
-
+# Regression tests for the native Qoder plugin lifecycle.
 set -uo pipefail
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-NC='\033[0m'
 
 PASS=0
 FAIL=0
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_pass() { echo -e "${GREEN}[PASS]${NC} $1"; ((PASS++)); }
-log_fail() { echo -e "${RED}[FAIL]${NC} $1"; ((FAIL++)); }
+
+pass() { echo "[PASS] $1"; PASS=$((PASS + 1)); }
+fail() { echo "[FAIL] $1" >&2; FAIL=$((FAIL + 1)); }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ADAPTER_DIR="$(cd "$SCRIPT_DIR/../adapters/tokenless" && pwd)"
-INSTALL_SH="${1:-$ADAPTER_DIR/qoder/scripts/install.sh}"
-
-[ -f "$INSTALL_SH" ] || { echo "installer not found: $INSTALL_SH" >&2; exit 1; }
-
-# install.sh hard-requires python3 (settings merge) and the stub uses it
-# for plugin.json version parsing. Check up front so a missing interpreter
-# fails the test with a clear cause instead of a misleading installer error.
-command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; }
-
+SOURCE_ADAPTER_DIR="$SCRIPT_DIR/../adapters/tokenless"
 SANDBOX="$(mktemp -d -t tokenless-qoder-install-test.XXXXXX)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
 FAKE_HOME="$SANDBOX/home"
-mkdir -p "$FAKE_HOME/.qoder/bin/qodercli"
+ADAPTER_DIR="$SANDBOX/adapter root"
+QODERCLI="$FAKE_HOME/.qoder/bin/qodercli/qodercli"
+mkdir -p "$FAKE_HOME/.qoder/bin/qodercli" "$ADAPTER_DIR"
+cp -R "$SOURCE_ADAPTER_DIR"/. "$ADAPTER_DIR"/
 
-# Stub qodercli: emulate `plugins install <dir>` with the real binary's
-# observable behavior — copy the plugin verbatim into the cache, named
-# after the directory, versioned by .qoder-plugin/plugin.json.
-cat > "$FAKE_HOME/.qoder/bin/qodercli/qodercli" <<'EOF'
+# Source checkouts contain the version template; packages contain the stamped
+# manifest. Stamp only the sandbox copy so this test never modifies the tree.
+PLUGIN_TEMPLATE="$ADAPTER_DIR/qoder/.qoder-plugin/plugin.json.in" \
+PLUGIN_JSON="$ADAPTER_DIR/qoder/.qoder-plugin/plugin.json" \
+python3 - <<'PYEOF'
+import os
+
+with open(os.environ["PLUGIN_TEMPLATE"], encoding="utf-8") as source:
+    content = source.read().replace("@VERSION@", "0.0.0-test")
+with open(os.environ["PLUGIN_JSON"], "w", encoding="utf-8") as target:
+    target.write(content)
+PYEOF
+
+cat > "$QODERCLI" <<'STUBEOF'
 #!/usr/bin/env bash
 set -euo pipefail
-if [ "${1:-}" = "plugins" ] && [ "${2:-}" = "install" ]; then
-    src="${3:?missing plugin dir}"
-    name="$(basename "$src")"
-    version="0.0.0"
-    pj="$src/.qoder-plugin/plugin.json"
-    if [ -f "$pj" ]; then
-        version="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('version','0.0.0'))" "$pj" 2>/dev/null || echo "0.0.0")"
+
+log="$HOME/.qoder/stub.log"
+marker="$HOME/.qoder/native-tokenless-installed"
+printf '%s\n' "$*" >> "$log"
+
+if [ "${1:-}" = "plugins" ] && [ "${3:-}" = "--help" ]; then
+    if [ "${2:-}" = "list" ] && [ "${QODER_STUB_MISSING_LIST:-0}" = "1" ]; then
+        exit 1
     fi
-    dest="$HOME/.qoder/plugins/cache/local/$name/$version"
-    mkdir -p "$dest"
-    cp -R "$src"/. "$dest/"
-    echo "Installed plugin $name@$version"
+    case "${2:-}" in
+        install|list|uninstall|validate) exit 0 ;;
+    esac
+fi
+
+if [ "${1:-}" = "plugins" ] && [ "${2:-}" = "validate" ]; then
+    plugin_root="${3:?plugin root required}"
+    PLUGIN_ROOT="$plugin_root" python3 - <<'PYEOF'
+import json
+import os
+import pathlib
+
+root = pathlib.Path(os.environ["PLUGIN_ROOT"])
+with (root / ".qoder-plugin/plugin.json").open(encoding="utf-8") as source:
+    manifest = json.load(source)
+assert manifest["name"] == "tokenless"
+assert not (root / "hooks.json").exists()
+with (root / "hooks/hooks.json").open(encoding="utf-8") as source:
+    hooks = json.load(source)["hooks"]
+assert hooks["PreToolUse"] and hooks["PostToolUse"]
+commands = list((root / "commands").iterdir())
+assert commands and all(path.suffix == ".md" for path in commands)
+
+adapter_root = root.parent
+with (adapter_root / "common/tool-ready-spec.json").open(encoding="utf-8") as source:
+    ready_spec = json.load(source)
+assert {"run_in_terminal", "get_terminal_output"} <= set(ready_spec["Shell"]["aliases"])
+assert {"grep_code", "search_file", "list_dir"} <= set(ready_spec["Read"]["aliases"])
+assert {"create_file", "search_replace", "delete_file"} <= set(ready_spec["Write"]["aliases"])
+assert {"search_web", "fetch_content"} <= set(ready_spec["WebFetch"]["aliases"])
+PYEOF
     exit 0
 fi
-echo "stub qodercli: unsupported command: $*" >&2
-exit 1
-EOF
-chmod +x "$FAKE_HOME/.qoder/bin/qodercli/qodercli"
 
-log_info "Running installer under test: $INSTALL_SH"
-install_out="$(HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" bash "$INSTALL_SH" 2>&1)"
-install_rc=$?
-echo "$install_out" | sed 's/^/    /'
-if [ $install_rc -eq 0 ]; then
-    log_pass "installer exits 0 with stub qodercli"
-else
-    log_fail "installer exited $install_rc"
-    echo ""
-    echo "Summary: $PASS passed, $FAIL failed"
-    exit 1
+if [ "${1:-}" = "plugins" ] && [ "${2:-}" = "install" ]; then
+    src="${3:?plugin path required}"
+    [ "${4:-}" = "--scope" ] && [ "${5:-}" = "user" ]
+    cache="$HOME/.qoder/plugins/cache/local/tokenless/0.0.0-test"
+    rm -rf "$cache"
+    mkdir -p "$cache"
+    cp -R "$src"/. "$cache"/
+    touch "$marker"
+    exit 0
 fi
 
-CACHE_HOOKS="$(ls -d "$FAKE_HOME"/.qoder/plugins/cache/local/tokenless/*/hooks.json 2>/dev/null | head -1 || true)"
-
-# 1. Plugin cache was populated.
-if [ -n "$CACHE_HOOKS" ] && [ -f "$CACHE_HOOKS" ]; then
-    log_pass "plugin cache populated with hooks.json"
-else
-    log_fail "plugin cache hooks.json missing"
-fi
-
-# 2. REGRESSION: cached hooks.json must not retain the placeholder.
-if [ -n "$CACHE_HOOKS" ] && grep -q 'QODER_TOKENLESS_HOOKS' "$CACHE_HOOKS"; then
-    log_fail 'cached hooks.json still contains ${QODER_TOKENLESS_HOOKS} placeholder'
-else
-    log_pass "cached hooks.json has no unexpanded placeholder"
-fi
-
-# 3. Cached hooks.json references the absolute hooks dir.
-if [ -n "$CACHE_HOOKS" ] && grep -qF "$ADAPTER_DIR/common/hooks" "$CACHE_HOOKS"; then
-    log_pass "cached hooks.json uses absolute hooks path"
-else
-    log_fail "cached hooks.json missing absolute path: $ADAPTER_DIR/common/hooks"
-fi
-
-# 4. Every script referenced by a cached hook command exists on disk.
-if [ -n "$CACHE_HOOKS" ]; then
-    missing="$(CACHE_HOOKS="$CACHE_HOOKS" python3 - <<'PYEOF'
-import json, os, shlex
-cfg = json.load(open(os.environ['CACHE_HOOKS']))
-missing = []
-for entries in cfg.get('hooks', {}).values():
-    for entry in entries:
-        for hook in entry.get('hooks') or []:
-            parts = shlex.split(hook.get('command', ''))
-            scripts = [p for p in parts if p.endswith(('.py', '.sh'))]
-            for script in scripts:
-                if not os.path.exists(script):
-                    missing.append(hook['command'])
-print('\n'.join(missing))
-PYEOF
-)"
-    if [ -z "$missing" ]; then
-        log_pass "all cached hook commands resolve to existing files"
+if [ "${1:-}" = "plugins" ] && [ "${2:-}" = "list" ] && [ "${3:-}" = "--json" ]; then
+    if [ ! -f "$marker" ]; then
+        echo '[]'
+    elif [ "${QODER_STUB_NO_HOOKS:-0}" = "1" ]; then
+        echo '[{"id":"tokenless@local","scope":"user","enabled":true,"resources":{"hooks":[]}}]'
     else
-        log_fail "hook commands reference missing files: $missing"
+        echo '[{"id":"tokenless@local","scope":"user","enabled":true,"resources":{"hooks":["hooks/hooks.json"]}}]'
     fi
+    exit 0
 fi
 
-# 5. settings.json merge still works and also carries absolute paths.
+if [ "${1:-}" = "plugins" ] && [ "${2:-}" = "uninstall" ]; then
+    [ "${3:-}" = "tokenless" ]
+    [ "${4:-}" = "--scope" ] && [ "${5:-}" = "user" ]
+    if [ ! -f "$marker" ]; then
+        echo 'Plugin "tokenless" is not installed.' >&2
+        exit 1
+    fi
+    if [ "${QODER_STUB_UNINSTALL_FAIL:-0}" = "1" ]; then
+        echo 'simulated uninstall failure' >&2
+        exit 1
+    fi
+    rm -f "$marker"
+    exit 0
+fi
+
+echo "unsupported qodercli invocation: $*" >&2
+exit 2
+STUBEOF
+chmod +x "$QODERCLI"
+
+INSTALL_SH="$ADAPTER_DIR/qoder/scripts/install.sh"
+UNINSTALL_SH="$ADAPTER_DIR/qoder/scripts/uninstall.sh"
+DETECT_SH="$ADAPTER_DIR/qoder/scripts/detect.sh"
+RUN_HOOK_SH="$ADAPTER_DIR/qoder/hooks/run-hook.sh"
 SETTINGS="$FAKE_HOME/.qoder/settings.json"
-if [ -f "$SETTINGS" ] && grep -qF "$ADAPTER_DIR/common/hooks" "$SETTINGS"; then
-    log_pass "settings.json hooks use absolute hooks path"
+
+cat > "$SETTINGS" <<'JSONEOF'
+{
+  "enabledPlugins": {"foreign@local": true},
+  "hooks": {"PreToolUse": [{"hooks": [{"command": "keep-me"}]}]}
+}
+JSONEOF
+settings_before="$(cksum "$SETTINGS")"
+
+if HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" bash "$DETECT_SH" >/dev/null; then
+    pass "detect accepts a CLI with the required plugin lifecycle"
 else
-    log_fail "settings.json missing absolute hook paths"
-fi
-if [ -f "$SETTINGS" ] && grep -qF 'tokenless@local' "$SETTINGS"; then
-    log_pass "settings.json enables tokenless@local plugin"
-else
-    log_fail "settings.json missing plugins.enabled entry"
+    fail "detect rejected a compatible qodercli"
 fi
 
-# 6. UPGRADE (upsert, not append): a re-install must refresh a stale managed
-#    hook whose command changed, and must never touch foreign hooks.
-python3 - "$SETTINGS" <<'PYEOF'
-import json, sys
-path = sys.argv[1]
-cfg = json.load(open(path))
-pre = cfg.setdefault('hooks', {}).setdefault('PreToolUse', [])
-# Make the managed rewrite hook look pre-upgrade (no --agent-id)...
-for entry in pre:
-    for hook in entry.get('hooks') or []:
-        if hook.get('name') == 'tokenless-rewrite':
-            hook['command'] = hook['command'].replace(' --agent-id qoder-cli', '')
-# ...and add a foreign hook the installer must preserve untouched.
-pre.append({
-    'matcher': '*',
-    'hooks': [{'type': 'command', 'name': 'foreign-guard', 'command': 'echo keep-me'}],
-})
-json.dump(cfg, open(path, 'w'), indent=2)
-PYEOF
-
-HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" bash "$INSTALL_SH" >/dev/null 2>&1
-reinstall_rc=$?
-upsert_problems="$(SETTINGS="$SETTINGS" python3 - <<'PYEOF'
-import json, os
-cfg = json.load(open(os.environ['SETTINGS']))
-pre = cfg.get('hooks', {}).get('PreToolUse', [])
-rewrites = [h for e in pre for h in (e.get('hooks') or []) if h.get('name') == 'tokenless-rewrite']
-foreign = [h for e in pre for h in (e.get('hooks') or []) if h.get('name') == 'foreign-guard']
-problems = []
-if len(rewrites) != 1:
-    problems.append(f'expected 1 tokenless-rewrite, found {len(rewrites)}')
-elif '--agent-id qoder-cli' not in rewrites[0].get('command', ''):
-    problems.append('tokenless-rewrite command was not refreshed with --agent-id')
-if len(foreign) != 1:
-    problems.append(f'foreign hook not preserved (found {len(foreign)})')
-print('; '.join(problems))
-PYEOF
-)"
-if [ $reinstall_rc -eq 0 ] && [ -z "$upsert_problems" ]; then
-    log_pass "re-install upserts stale managed hook and preserves foreign hooks"
+if HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" bash "$INSTALL_SH" >/dev/null; then
+    pass "native plugin installation succeeds"
 else
-    log_fail "upsert regression: ${upsert_problems:-installer exited $reinstall_rc}"
+    fail "native plugin installation failed"
+fi
+
+CACHE="$FAKE_HOME/.qoder/plugins/cache/local/tokenless/0.0.0-test"
+if [ -f "$CACHE/hooks/hooks.json" ] && [ ! -f "$CACHE/hooks.json" ]; then
+    pass "qodercli receives the native hooks/hooks.json layout"
+else
+    fail "cached plugin does not use the native hook layout"
+fi
+
+if grep -Fq '${QODER_PLUGIN_ROOT}/hooks/run-hook.sh' "$CACHE/hooks/hooks.json" && \
+        ! grep -Fq 'QODER_TOKENLESS_HOOKS' "$CACHE/hooks/hooks.json"; then
+    pass "hook commands preserve the Qoder runtime plugin-root placeholder"
+else
+    fail "hook commands do not use QODER_PLUGIN_ROOT correctly"
+fi
+
+if grep -Fqx "plugins install $ADAPTER_DIR/qoder --scope user" "$FAKE_HOME/.qoder/stub.log"; then
+    pass "installer registers the original plugin root at user scope"
+else
+    fail "installer used an unexpected plugin path or scope"
+fi
+
+if [ "$(cksum "$SETTINGS")" = "$settings_before" ]; then
+    pass "installer leaves settings.json untouched"
+else
+    fail "installer modified settings.json"
+fi
+
+if HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" bash "$INSTALL_SH" >/dev/null; then
+    pass "native plugin reinstallation is idempotent"
+else
+    fail "native plugin reinstallation failed"
+fi
+
+if HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+        QODER_STUB_NO_HOOKS=1 bash "$INSTALL_SH" >/dev/null 2>&1; then
+    fail "installer accepted an inventory entry with no loaded hooks"
+else
+    pass "installer rejects an installed plugin with no hook resources"
+fi
+
+if HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+        QODER_STUB_MISSING_LIST=1 bash "$DETECT_SH" >/dev/null 2>&1; then
+    fail "detect accepted a CLI without plugins list support"
+else
+    pass "detect rejects an incomplete plugin lifecycle"
+fi
+
+if HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" bash "$UNINSTALL_SH" >/dev/null; then
+    pass "native plugin uninstallation succeeds"
+else
+    fail "native plugin uninstallation failed"
+fi
+
+if [ ! -f "$FAKE_HOME/.qoder/native-tokenless-installed" ] && \
+        grep -Fqx "plugins uninstall tokenless --scope user" "$FAKE_HOME/.qoder/stub.log"; then
+    pass "uninstaller delegates user-scoped cleanup to qodercli"
+else
+    fail "uninstaller did not use the native qodercli lifecycle"
+fi
+
+uninstall_calls_before=$(grep -Fxc "plugins uninstall tokenless --scope user" \
+    "$FAKE_HOME/.qoder/stub.log")
+if HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" bash "$UNINSTALL_SH" >/dev/null; then
+    pass "repeated native plugin uninstallation succeeds"
+else
+    fail "repeated native plugin uninstallation was not idempotent"
+fi
+uninstall_calls_after=$(grep -Fxc "plugins uninstall tokenless --scope user" \
+    "$FAKE_HOME/.qoder/stub.log")
+if [ "$uninstall_calls_after" = "$uninstall_calls_before" ]; then
+    pass "uninstaller skips qodercli mutation when the user plugin is absent"
+else
+    fail "uninstaller retried mutation for an absent plugin"
+fi
+
+if ! HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" bash "$INSTALL_SH" >/dev/null; then
+    fail "failed to reinstall plugin for uninstall failure coverage"
+fi
+if HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" \
+        QODER_STUB_UNINSTALL_FAIL=1 bash "$UNINSTALL_SH" >/dev/null 2>&1; then
+    fail "uninstaller hid a real qodercli failure"
+elif [ -f "$FAKE_HOME/.qoder/native-tokenless-installed" ]; then
+    pass "uninstaller preserves and reports a real qodercli failure"
+else
+    fail "failed uninstall unexpectedly removed the plugin marker"
+fi
+if ! HOME="$FAKE_HOME" ANOLISA_ADAPTER_DIR="$ADAPTER_DIR" bash "$UNINSTALL_SH" >/dev/null; then
+    fail "failed to clean up plugin after uninstall failure coverage"
+fi
+
+if [ "$(cksum "$SETTINGS")" = "$settings_before" ]; then
+    pass "uninstaller leaves settings.json untouched"
+else
+    fail "uninstaller modified settings.json"
+fi
+
+if run_hook_out="$(env -u HOME bash "$RUN_HOOK_SH" missing-hook.py 2>/dev/null)" && \
+        [ "$run_hook_out" = "{}" ]; then
+    pass "hook wrapper fails open when HOME is unset"
+else
+    fail "hook wrapper did not fail open without HOME: ${run_hook_out:-<no output>}"
+fi
+
+if traversal_out="$(bash "$RUN_HOOK_SH" ../../../etc/passwd 2>/dev/null)" && \
+        [ "$traversal_out" = "{}" ]; then
+    pass "hook wrapper rejects paths outside the hook allowlist"
+else
+    fail "hook wrapper accepted a traversal path: ${traversal_out:-<no output>}"
 fi
 
 echo ""
-echo "============================================"
-echo "  Summary: $PASS passed, $FAIL failed"
-echo "============================================"
-[ "$FAIL" -gt 0 ] && exit 1
-echo -e "\n${GREEN}All tests passed!${NC}"
+echo "Qoder adapter tests: $PASS passed, $FAIL failed"
+[ "$FAIL" -eq 0 ]
