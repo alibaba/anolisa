@@ -94,6 +94,20 @@ agent-sec-cli scan-prompt warmup
 
 模型来源：ModelScope（Llama-Prompt-Guard-2-86M）。安装后执行 `scan-prompt warmup` 一次以消除冷启动延迟。
 
+#### 宿主 Hook Policy
+
+设置 `PROMPT_SCANNER_HOOK_ENABLED=false` 可完全跳过 prompt scanner hook。启用时，以下环境变量覆盖
+capability 配置：
+
+| 环境变量 | 默认值 | 行为 |
+|----------|--------|------|
+| `PROMPT_SCANNER_HOOK_ENABLED` | `true` | 设为 `false` 时在读取输入前跳过 hook |
+| `PROMPT_SCANNER_MODE` | `observe` | `observe` 静默审计；`warn` 告警；`ask`/`block` 执行或 fallback 为 `warn`；`deny` 等价于 `block` |
+| `PROMPT_SCANNER_SCAN_MODE` | `standard` | 扫描强度：`fast` / `standard` / `strict` |
+| `PROMPT_SCANNER_TIMEOUT` | `10` | Scanner 超时秒数 |
+
+完整 CLI 选项、verdict 语义和 Security Event 说明参见 [Prompt Scanner 用户使用指南](prompt-scanner.md)。
+
 ### Code Scanner（代码扫描）
 
 检测 bash 和 python 代码中的危险操作。判定枚举：`pass` / `warn` / `deny` / `error`；当前内置规则产生 `warn` 或 `pass`。
@@ -343,6 +357,11 @@ enable_block = false    # false=观察模式, true=阻断
 [capabilities.pii-scan-user-input]
 enabled = true
 timeout = 10
+
+[capabilities.prompt-scan-user-input]
+enabled = true
+timeout = 10
+enable_block = false    # false=观察模式, true=阻断
 
 [capabilities.skill-ledger]
 enabled = true

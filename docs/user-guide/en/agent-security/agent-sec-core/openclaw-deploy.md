@@ -163,6 +163,18 @@ Enable prompt blocking:
 openclaw config set plugins.entries.agent-sec.config.promptScanBlock true
 ```
 
+You can also override prompt scanner behavior at deployment time with environment variables. These
+take precedence over the OpenClaw capability configuration:
+
+| Environment variable | Default | Behavior |
+|----------------------|---------|----------|
+| `PROMPT_SCANNER_HOOK_ENABLED` | `true` | Set to `false` to skip prompt-scan hook registration entirely |
+| `PROMPT_SCANNER_MODE` | `observe` | Policy mode: `observe` / `warn` / `ask` / `block`; `deny` maps to `block` |
+| `PROMPT_SCANNER_SCAN_MODE` | `standard` | Scan strength passed to `scan-prompt`: `fast` / `standard` / `strict` |
+| `PROMPT_SCANNER_TIMEOUT` | `10` | Scanner timeout in seconds |
+
+Restart the OpenClaw gateway after changing these variables.
+
 Enable code-scan approval:
 
 ```bash

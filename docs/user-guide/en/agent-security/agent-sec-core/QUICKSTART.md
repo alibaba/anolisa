@@ -94,6 +94,21 @@ agent-sec-cli scan-prompt warmup
 
 Model source: models are downloaded from ModelScope (Llama-Prompt-Guard-2-86M). Run `scan-prompt warmup` once after installation to eliminate cold-start latency.
 
+#### Host hook policy
+
+Set `PROMPT_SCANNER_HOOK_ENABLED=false` to skip prompt scanner hooks entirely. When enabled, the
+following variables override capability configuration:
+
+| Environment variable | Default | Behavior |
+|----------------------|---------|----------|
+| `PROMPT_SCANNER_HOOK_ENABLED` | `true` | Set to `false` to short-circuit the hook before input is read |
+| `PROMPT_SCANNER_MODE` | `observe` | `observe` audits silently; `warn` warns; `ask`/`block` enforce or fall back to `warn`; `deny` maps to `block` |
+| `PROMPT_SCANNER_SCAN_MODE` | `standard` | Scan strength: `fast` / `standard` / `strict` |
+| `PROMPT_SCANNER_TIMEOUT` | `10` | Scanner timeout in seconds |
+
+See the [Prompt Scanner User Guide](prompt-scanner.md) for full CLI options, verdict semantics, and
+Security Event details.
+
 ### Code Scanner
 
 Detects dangerous operations in bash and python code. Verdict enum: `pass` / `warn` / `deny` / `error`; built-in rules currently produce `warn` or `pass`.
@@ -348,6 +363,11 @@ enable_block = false    # false=observe, true=block
 [capabilities.pii-scan-user-input]
 enabled = true
 timeout = 10
+
+[capabilities.prompt-scan-user-input]
+enabled = true
+timeout = 10
+enable_block = false    # false=observe, true=block
 
 [capabilities.skill-ledger]
 enabled = true
