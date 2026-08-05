@@ -86,9 +86,13 @@ shell; `/session clear ...` removes old entries after confirmation.
 `/session compact` summarizes any complete conversation prefix in the
 background, including a single completed Agent run, while the full transcript
 remains stored. Automatic compaction waits for both model-window pressure and
-a safe older-run boundary. Session recovery restores model-visible
-conversation context; historical terminal evidence is intentionally not
-restored. Records default to
+a safe older-run boundary. Core uses the same value for the reply space it
+reserves and the request's `max_tokens` cap. Without an override, a known model
+uses `min(model capability, 16384)` and an unknown model uses `4096`, with both
+limited to half the context window. Set
+`session.compaction.model_max_output_tokens` when a different reply allowance
+is needed. Session recovery restores model-visible conversation context;
+historical terminal evidence is intentionally not restored. Records default to
 `~/.copilot-shell/cosh-core/sessions/`; change the root with
 `session.persist_dir`. Project session settings and relative store paths are
 resolved from the workspace cosh-shell sends to Core. See the

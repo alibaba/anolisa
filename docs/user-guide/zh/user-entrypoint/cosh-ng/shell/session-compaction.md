@@ -7,7 +7,7 @@
 
 ## 手动压缩会话
 
-在 Shell 提示符中执行：
+在 Shell 提示符中执行下面的命令。
 
 ```text
 /session compact
@@ -20,7 +20,7 @@
 边界，必要时也可以摘要到最新已完成 run。未完成的用户轮次或 tool exchange
 不会进入摘要前缀。
 
-任务运行期间可使用：
+任务运行期间可以使用下面的命令。
 
 ```text
 /session compact status
@@ -38,9 +38,11 @@ Agent run，因此首次自动压缩通常至少需要三个完整 run。
 仅超过阈值还不够。如果不存在新的安全前缀，Core 会等待下一个完整 run，而不会
 启动一个最终以 `nothing_to_compact` 失败的后台任务。
 
-达到可用窗口的 90% 时，Core 会在下一次 provider 请求前同步执行保护。只有存在
-安全的已完成 Agent run 前缀时才会压缩；否则会返回类型化的上下文上限错误，而
-不会发送超出窗口的请求。
+达到可用窗口的 90% 时，Core 会在下一次 provider 请求前同步执行保护。它先按配置
+保留最近 run。当前安全边界腾出的空间仍然不够，Core 会改为只保留一个已完成 run，
+再尝试手动压缩使用的安全边界。整个过程中，进行中的 run 都会原样保留。压缩调用
+失败或所有安全边界都无法腾出足够空间时，Core 会在发送超大请求前返回类型化的
+上下文上限错误。
 
 ## 数据与安全保证
 
@@ -66,11 +68,18 @@ emergency_ratio = 0.90
 target_ratio = 0.30
 preserve_recent_runs = 2
 
-# 可选的模型级覆盖：
+# 可选的模型级覆盖
 # auto_compact_token_limit = 89600
 # model_context_window = 128000
 # model_max_output_tokens = 8192
 ```
 
-`preserve_recent_runs` 只作用于自动和 Emergency 压缩，不限制显式
-`/session compact`。完整配置参考见[配置](../configuration.md)。
+`preserve_recent_runs` 控制常规自动压缩。Emergency 保护先使用同一个值，再按上文的
+顺序逐步放宽保留范围。显式 `/session compact` 直接使用最后一级策略，可以摘要最新
+的已完成 run。这些路径都不会摘要进行中的 run。
+
+`model_max_output_tokens` 既是从模型窗口中预留的回复空间，也是发给 provider 的
+`max_tokens` 上限。未设置时，已知模型系列取
+`min(模型输出能力, 16384)`，未知模型取 `4096`。Core 会把这两个值都限制在已解析
+上下文窗口的一半以内。调低该配置会给历史留出更多空间，也会缩短单次回复的最长
+长度。完整配置参考见[配置](../configuration.md)。

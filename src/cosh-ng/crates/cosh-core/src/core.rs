@@ -12,7 +12,7 @@ use cosh_types::audit::{AuditOutcomeStatus, AuditProviderData, AuditToolData, Ou
 
 use crate::audit::{CoreAuditRecorder, CoreAuditScope};
 use crate::auth::is_auth_error;
-use crate::compaction::CompactionRuntime;
+use crate::compaction::{CompactionRuntime, ModelCapability};
 use crate::config::{self, CoreConfig};
 use crate::context::ContextBuilder;
 use crate::extension::{GenerationController, RuntimeGeneration, RuntimeSnapshot};
@@ -21,8 +21,7 @@ use crate::loop_detect::LoopDetector;
 use crate::metrics::TurnMetrics;
 use crate::protocol::{InputMessage, OutputMessage, ShellContext, ShellControlRequest};
 use crate::provider::{
-    token_limits::model_max_output_tokens, ContentGenerator, GenerateConfig, GenerateEvent,
-    Message, MAX_TOOL_CALL_INDEX,
+    ContentGenerator, GenerateConfig, GenerateEvent, Message, MAX_TOOL_CALL_INDEX,
 };
 use crate::tool::ask_user_question;
 use crate::tool::{SessionWorkspace, ToolContext, ToolKind, ToolRegistry, ToolResult};
@@ -443,9 +442,18 @@ impl CoshCore {
 
         let tool_decls = self.tools.declarations();
         let skill_summaries = self.tools.skill_summaries().await;
+        // One resolver drives both sides of the output accounting: the cap this
+        // request may spend and the `O` the compaction budget reserves for it.
+        // Deriving them separately let the budget reserve a model's whole output
+        // capability while the request still asked for it (#2240).
+        let capability = ModelCapability::resolve(
+            &self.config.session.compaction,
+            self.config.agent.session_token_limit,
+            &self.model,
+        );
         let generate_config = GenerateConfig {
             model: self.model.clone(),
-            max_tokens: model_max_output_tokens(&self.model).unwrap_or(4096),
+            max_tokens: capability.request_max_tokens(),
             temperature: None,
             // Usage reporting feeds compaction thresholds; the stream adapter
             // guarantees Usage is delivered before MessageEnd.

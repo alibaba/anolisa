@@ -124,10 +124,13 @@ ignored, leaving whatever the configuration files already resolved.
 
 ## Session Compaction
 
-Compaction keeps the persisted transcript complete and replaces only the
-model-visible prefix with a summary projection. The automatic and emergency
-paths retain recent runs according to `preserve_recent_runs`; an explicit
-`/session compact` may summarize the latest complete run.
+Long sessions eventually fill the model window with earlier replies and tool
+output. Compaction leaves the persisted transcript intact and replaces only an
+older, model-visible prefix with a summary. Normal automatic compaction keeps
+the number of recent runs set by `preserve_recent_runs`. Under emergency
+pressure, Core first uses that setting. When the safe boundary cannot reclaim
+enough space, it next protects one completed run and finally allows the latest
+completed run to be summarized. The active run always stays verbatim.
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
@@ -137,13 +140,32 @@ paths retain recent runs according to `preserve_recent_runs`; an explicit
 | `session.compaction.trigger_ratio` | `0.70` | Fraction of usable history that triggers automatic compaction |
 | `session.compaction.emergency_ratio` | `0.90` | Fraction that arms in-run emergency protection |
 | `session.compaction.target_ratio` | `0.30` | Best-effort retained-history target after compaction |
-| `session.compaction.preserve_recent_runs` | `2` | Complete recent runs kept verbatim by automatic and emergency compaction |
+| `session.compaction.preserve_recent_runs` | `2` | Complete recent runs kept verbatim during normal automatic compaction; emergency protection can retry with one and then with none reserved unconditionally |
 | `session.compaction.model_context_window` | model-derived | Explicit model context-window override |
-| `session.compaction.model_max_output_tokens` | model-derived | Explicit maximum-output reserve override |
+| `session.compaction.model_max_output_tokens` | see below | Explicit maximum model output size; sets both the reserved output budget and the `max_tokens` cap on the real provider request |
 
 Ratios must satisfy `target_ratio <= trigger_ratio <= emergency_ratio`.
-Invalid ratio groups fall back to the compiled defaults. See
-[Session Compaction](shell/session-compaction.md) for commands, safety
+Invalid ratio groups fall back to the compiled defaults.
+
+### Default output budget
+
+The reply budget does two jobs. Core subtracts it from the context window before
+pricing conversation history, and sends the same value to the provider as the
+`max_tokens` cap. The request limit therefore stays inside the output space
+already reserved for it. When `model_max_output_tokens` is unset, Core chooses
+the following default.
+
+| Case | Default |
+|------|---------|
+| Known model family | `min(model output capability, 16384)` |
+| Unknown model | `4096` |
+
+Core also limits the chosen value to half of the resolved context window. An
+explicit `model_max_output_tokens` replaces the table default but keeps this
+half-window limit. Raising it permits a longer reply and leaves less room for
+history. Lowering it gives history more room and shortens the longest reply.
+
+See [Session Compaction](shell/session-compaction.md) for commands, safety
 guarantees, and manual-versus-automatic behavior.
 
 ## MCP Servers

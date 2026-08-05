@@ -117,9 +117,11 @@ provider 对话中启动新的 Agent 请求，并获得同等的配置预算；�
 
 ## 会话压缩
 
-压缩会保留完整的持久化 transcript，只用摘要 projection 替换模型可见前缀。
-自动和 emergency 路径会按 `preserve_recent_runs` 保留最近 run；显式执行
-`/session compact` 时可以摘要最新的完整 run。
+会话跑久以后，早先的回复和工具输出会逐渐占满模型窗口。压缩不会删除持久化的完整
+transcript，它只把模型可见的较早前缀换成摘要。常规自动压缩会原样保留
+`preserve_recent_runs` 指定的最近 run。遇到 emergency 压力时，Core 先按这个配置
+尝试。当前安全边界腾出的空间仍然不够，它才会改为保留一个已完成 run，最后允许
+摘要最新的已完成 run。进行中的 run 始终原样保留。
 
 | 配置项 | 默认值 | 作用 |
 |--------|--------|------|
@@ -129,12 +131,31 @@ provider 对话中启动新的 Agent 请求，并获得同等的配置预算；�
 | `session.compaction.trigger_ratio` | `0.70` | 触发自动压缩的可用历史比例 |
 | `session.compaction.emergency_ratio` | `0.90` | 启用 run 内 emergency 保护的比例 |
 | `session.compaction.target_ratio` | `0.30` | 压缩后保留历史的尽力目标 |
-| `session.compaction.preserve_recent_runs` | `2` | 自动和 emergency 压缩原样保留的最近完整 run 数 |
+| `session.compaction.preserve_recent_runs` | `2` | 常规自动压缩原样保留的最近完整 run 数；emergency 保护可依次改为保留一个和不再无条件保留完整 run |
 | `session.compaction.model_context_window` | 根据模型确定 | 显式覆盖模型上下文窗口 |
-| `session.compaction.model_max_output_tokens` | 根据模型确定 | 显式覆盖最大输出预留 |
+| `session.compaction.model_max_output_tokens` | 见下文 | 显式覆盖模型最大输出规模；同时决定预留的输出预算和真实 provider 请求的 `max_tokens` 上限 |
 
 比例必须满足 `target_ratio <= trigger_ratio <= emergency_ratio`。非法比例组合会
-回退到编译时默认值。命令、安全保证以及手动与自动行为差异详见
+回退到编译时默认值。
+
+### 默认输出预算
+
+回复预算有两个用途。Core 会先从上下文窗口中扣掉这部分空间，再计算可用于会话历史
+的额度；它也会把同一个值作为 provider 请求的 `max_tokens` 上限。这样，请求上限
+不会超过已经预留的输出空间。未设置 `model_max_output_tokens` 时，Core 使用下表中的
+默认值。
+
+| 情况 | 默认值 |
+|------|--------|
+| 已知模型系列 | `min(模型输出能力, 16384)` |
+| 未知模型 | `4096` |
+
+Core 还会把选出的值限制在已解析上下文窗口的一半以内。显式设置
+`model_max_output_tokens` 会替换表中的默认值，但仍受这个半窗口上限约束。调高后，
+模型可以回复得更长，留给历史的空间会减少。调低后，历史空间会增加，单次回复的
+最长长度也会随之缩短。
+
+命令、安全保证以及手动与自动行为差异详见
 [会话压缩](shell/session-compaction.md)。
 
 ## MCP Server

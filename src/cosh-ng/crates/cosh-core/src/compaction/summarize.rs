@@ -371,7 +371,8 @@ mod tests {
     fn token_budget_derivation_reserves_prompt_output_and_margin() {
         let small = ModelCapability {
             context_window: 32_768,
-            max_output_tokens: 8_192,
+            output_capability_tokens: Some(8_192),
+            output_budget_tokens: 8_192,
             source: crate::compaction::budget::CapabilitySource::ProviderProfile,
         };
         let small_budget = summary_input_token_budget(&small);
@@ -382,7 +383,8 @@ mod tests {
         // A large-window model keeps a proportionally larger usable input.
         let large = ModelCapability {
             context_window: 200_000,
-            max_output_tokens: 8_192,
+            output_capability_tokens: Some(8_192),
+            output_budget_tokens: 8_192,
             source: crate::compaction::budget::CapabilitySource::ProviderProfile,
         };
         assert!(summary_input_token_budget(&large) > small_budget * 4);

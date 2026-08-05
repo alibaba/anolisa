@@ -8,7 +8,7 @@ whose command output and Agent exchanges accumulate substantial context.
 
 ## Compact a Session Manually
 
-Run this command at the shell prompt:
+Run this command at the shell prompt.
 
 ```text
 /session compact
@@ -23,7 +23,7 @@ boundary when that already meets the target, but it may summarize through the
 latest completed run when necessary. It never includes an incomplete user
 turn or unfinished tool exchange in the summarized prefix.
 
-Use these commands while the job is active:
+Use these commands while the job is active.
 
 ```text
 /session compact status
@@ -46,9 +46,12 @@ Core waits for another complete run instead of starting a background job that
 would fail with `nothing_to_compact`.
 
 At 90% of the usable window, Core runs synchronous protection before the next
-provider request. It compacts only when a safe completed Agent-run prefix is
-available; otherwise it returns a typed context-limit error instead of sending
-an oversized request.
+provider request. It starts with the configured recent-run protection. If the
+safe boundary cannot reclaim enough space, Core retries with one completed run
+protected and then with the same boundary used by manual compaction. The active
+run remains verbatim throughout. A failed compaction attempt or an exhausted
+set of safe boundaries returns a typed context-limit error before Core sends an
+oversized request.
 
 ## Data and Safety Guarantees
 
@@ -83,6 +86,15 @@ preserve_recent_runs = 2
 # model_max_output_tokens = 8192
 ```
 
-`preserve_recent_runs` applies to automatic and emergency compaction, not to
-an explicit `/session compact`. See [Configuration](../configuration.md) for
-the complete setting reference.
+`preserve_recent_runs` controls normal automatic compaction. Emergency
+protection starts with the same value, then follows the fallback sequence
+described above. An explicit `/session compact` starts at the final policy and
+may summarize the latest completed run. None of these paths summarizes the
+active run.
+
+`model_max_output_tokens` is both the reply space reserved from the model window
+and the `max_tokens` cap sent to the provider. When it is unset, a known model
+uses `min(model output capability, 16384)` and an unknown model uses `4096`.
+Core limits either value to half of the resolved context window. Lowering the
+setting leaves more room for history and also shortens the longest reply. See
+[Configuration](../configuration.md) for the complete setting reference.

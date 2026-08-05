@@ -83,7 +83,11 @@ ID、`/session list --all` 列出同一存储根下所有工作空间的会话�
 而无需重启 Shell；`/session clear ...` 会在确认后清理旧记录。会话恢复会还原
 模型可见的对话上下文，但不会伪装成已恢复历史终端证据。`/session compact`
 会在后台摘要任意完整对话前缀，包括仅有一个已完成 Agent run 的会话，同时保留
-完整 transcript。自动压缩则同时等待模型窗口压力和安全的旧 run 边界。记录默认保存在
+完整 transcript。自动压缩则同时等待模型窗口压力和安全的旧 run 边界。从模型窗口中
+预留的回复空间与请求发送的 `max_tokens` 上限使用同一个值。未设置覆盖值时，已知
+模型取 `min(模型能力, 16384)`，未知模型取 `4096`，两者都限制在上下文窗口的一半
+以内。需要调整单次回复额度时，可以设置
+`session.compaction.model_max_output_tokens`。记录默认保存在
 `~/.copilot-shell/cosh-core/sessions/`，可通过 `session.persist_dir` 修改
 根目录。项目会话配置和相对存储路径均从 cosh-shell 传给 Core 的工作空间解析。
 详见
