@@ -17,7 +17,7 @@ fallback snapshot 或 hidden。
 - 需要 default view 过滤，并通过 `skill-discover` 发现 secondary skills；
 - 生产访问需要 in-place policy 和 audit 覆盖；
 - 需要对接 Skill Ledger，提供 fallback / hidden 运行时视图；
-- 需要保护 `.skill-meta`，避免普通 Agent 进程读取元数据。
+- 启用 resolver 或 trusted writer 集成后，需要保护 `.skill-meta`，避免普通 Agent 进程读取元数据。
 
 不要直接对已有 hub workspace 做 in-place mount，尤其是该 workspace 同时包含
 `.hub` 目录、外部 manifest 或 registry 元数据时。推荐分离 hub workspace 和
@@ -64,8 +64,8 @@ SkillFS 期望 source 目录下每个子目录对应一个 skill：
 目录名是权威运行时 skill id。`SKILL.md` frontmatter 里的 `name` 字段是展示元数据，
 不会覆盖目录 key。
 
-不要把 `.skill-meta` 当作普通 Agent 数据使用。它保存 SkillFS 和 ledger 元数据，
-对普通调用方隐藏。
+不要把 `.skill-meta` 用作 Agent 业务数据。安全集成会在其中保存 SkillFS 和 ledger
+元数据；未配置这类集成时，为兼容性它仍是普通 POSIX passthrough 子树。
 
 ## 快速开始
 
@@ -215,7 +215,22 @@ default view 会直接出现在挂载后的 skill 视图中。Secondary views �
 In-place authoring 支持新建 skill 目录。刚创建但尚未写入 manifest 的目录不会暴露
 phantom `SKILL.md`；写入 `SKILL.md` 后，SkillFS 会重新解析并暴露编译后的视图。
 Pending 或 direct-final install 可以保留普通顶层 skill 目录的 mode、timestamp 和
-ownership 等元数据。`.skill-meta/**` 仍只允许 trusted metadata path 访问。
+ownership 等元数据。
+
+### Metadata 保护模式
+
+每次 mount 会根据已配置的安全集成选择 `.skill-meta/**` 模式；`--security-mode`
+只选择 in-place mount 拓扑。
+
+| Active resolver | 启用的 trusted writer | `.skill-meta/**` 行为 |
+| --- | --- | --- |
+| 否 | 否 | 普通 POSIX passthrough，包括 mutation、link 和 `user.*` xattr |
+| 是 | 任意 | Protected；对不可信调用方隐藏，mutation 必须走 trusted path |
+| 否 | 是 | Protected；普通调用方不可见，配置的 writer 可执行受支持的 metadata mutation |
+
+迁移提示：以前依赖 `.skill-meta` 被隐式隐藏的部署，在向 Agent 暴露 mount 前必须通过
+resolver/activation mode 启用 `--security`，或配置 trusted writer。两种信号都没有
+时，启动诊断会明确报告 passthrough 模式。
 
 无安全集成时，skill 默认读取 live source 树。启用 security activation 后，
 可见性受 active mapping 限制：
@@ -617,7 +632,7 @@ mount-session summary 仍共享同一个文件。
 | --- | --- |
 | `--foreground` | 前台运行 |
 | `--managed` | 启动 detached supervised mount |
-| `--security-mode` | 要求 source 和 mountpoint 是同一路径 |
+| `--security-mode` | 要求 source 和 mountpoint 是同一路径；本身不保护 `.skill-meta` |
 | `--skill-layout <MODE>` | `auto`（默认，按 source-root marker 探测 Hermes）、`flat` 或 `hermes`；`hermes` 与 `--decision-command` 互斥 |
 | `--security` | 启用安全集成 |
 | `--activation-mode file` | 消费 activation JSON/xattr 状态 |
@@ -650,7 +665,9 @@ state。检查 notify 投递和 activation reload events。
 这是预期行为。Fallback 读取 `.skill-meta` 下的可信 snapshot，而不是 live source。
 
 **看不到 `.skill-meta`。**
-普通调用方看不到该目录是预期行为。可信 peer 可以通过配置的 trusted path 访问元数据。
+Active resolver 或启用的 trusted writer 使 mount 进入 protected 模式。可信 peer
+可以通过配置的 trusted path 访问元数据。如果两种集成都未配置，`.skill-meta` 应为
+普通 passthrough 数据；若实际行为不同，请检查启动诊断。
 
 **日志里出现 notify socket 失败。**
 Notify 失败只是 warning，不会停止 FUSE 服务，但外部 daemon 可能收不到 mutation

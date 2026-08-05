@@ -79,6 +79,16 @@ impl SkillFs {
             _ => return None,
         };
 
+        // In the no-integration mount mode `.skill-meta/**` is an ordinary
+        // physical subtree. Bypass only this reserved-metadata gate; other
+        // lifecycle and path-safety checks remain in their callers.
+        if !self.protects_skill_meta()
+            && !self.policy_overridden
+            && is_skill_meta_path(relative_path)
+        {
+            return None;
+        }
+
         let ctx = PathPolicy::new(operation)
             .with_skill_name(Some(skill_name))
             .with_relative_path(Some(relative_path));
@@ -390,6 +400,9 @@ impl SkillFs {
         };
         if !is_skill_meta_path(relative_path) {
             return None;
+        }
+        if !self.protects_skill_meta() {
+            return Some(true);
         }
         Some(self.evaluate_trusted_writer(req).is_allowed())
     }

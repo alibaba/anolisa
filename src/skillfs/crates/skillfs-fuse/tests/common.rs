@@ -1,4 +1,4 @@
-//! Shared FUSE test harness for SkillFS Phase 1 acceptance tests.
+//! Shared FUSE test harness for SkillFS integration and acceptance tests.
 //!
 //! `MountFixture` owns the temp source dir, the optional separate mount-point,
 //! and the `MountHandle`. Drop verifies the FUSE mount is gone before `tempfile`
@@ -18,7 +18,9 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use skillfs_core::os_adapter::OsAdapterStage;
 use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
-use skillfs_fuse::security::SkillEventSink;
+use skillfs_fuse::security::{
+    ActiveSkillResolver, SecurityPolicy, SkillEventSink, enumerate_hermes_skill_ids,
+};
 use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -148,6 +150,129 @@ impl MountFixture {
         Self::mount_now(MountMode::Normal, source, Some(mountpoint))
     }
 
+    /// Mount in normal mode with kernel permission checks for cross-UID access.
+    pub fn normal_allow_other<F: FnOnce(&Path)>(seed: F) -> Self {
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        let mountpoint = tempfile::tempdir().expect("mount tempdir");
+        Self::mount_normal_configured(
+            source,
+            mountpoint,
+            MountOptions {
+                allow_other: true,
+                ..MountOptions::default()
+            },
+            MountConfig::default(),
+        )
+    }
+
+    /// Mount in normal mode with an explicitly injected security policy.
+    pub fn normal_with_policy<F: FnOnce(&Path)>(seed: F, policy: Arc<dyn SecurityPolicy>) -> Self {
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        let mountpoint = tempfile::tempdir().expect("mount tempdir");
+        Self::mount_normal_configured(
+            source,
+            mountpoint,
+            MountOptions::default(),
+            MountConfig {
+                policy: Some(policy),
+                ..MountConfig::default()
+            },
+        )
+    }
+
+    /// Mount a Hermes source on a separate normal-mode mountpoint.
+    pub fn normal_hermes<F: FnOnce(&Path)>(seed: F) -> Self {
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        let mountpoint = tempfile::tempdir().expect("mount tempdir");
+        Self::mount_normal_configured(
+            source,
+            mountpoint,
+            MountOptions::default(),
+            MountConfig {
+                skill_layout: Some(skillfs_fuse::SkillLayout::Hermes),
+                ..MountConfig::default()
+            },
+        )
+    }
+
+    /// Mount a Hermes source with every discovered skill pinned as Current.
+    pub fn normal_hermes_with_active_resolver<F: FnOnce(&Path)>(seed: F) -> Self {
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        let mountpoint = tempfile::tempdir().expect("mount tempdir");
+        let resolver = Arc::new(ActiveSkillResolver::new(source.path().to_path_buf()));
+        for skill_id in enumerate_hermes_skill_ids(source.path()) {
+            resolver.set(
+                &skill_id,
+                skillfs_fuse::security::ActiveTarget::Current {
+                    source_dir: source.path().join(&skill_id),
+                },
+            );
+        }
+        Self::mount_normal_configured(
+            source,
+            mountpoint,
+            MountOptions::default(),
+            MountConfig {
+                active_resolver: Some(resolver),
+                skill_layout: Some(skillfs_fuse::SkillLayout::Hermes),
+                ..MountConfig::default()
+            },
+        )
+    }
+
+    /// Mount in normal mode with an active resolver so reserved metadata stays
+    /// protected while the skill remains visible as `Current`.
+    pub fn normal_with_active_resolver<F: FnOnce(&Path)>(seed: F) -> Self {
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        let mountpoint = tempfile::tempdir().expect("mount tempdir");
+
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+        let resolver = Arc::new(ActiveSkillResolver::new(source.path().to_path_buf()));
+        for skill in std::fs::read_dir(source.path())
+            .expect("read source skills")
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+        {
+            let name = skill.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            resolver.set(
+                &name,
+                skillfs_fuse::security::ActiveTarget::Current {
+                    source_dir: skill.path(),
+                },
+            );
+        }
+        let handle = mount_background_configured(
+            mountpoint.path(),
+            source.path(),
+            shared,
+            MountOptions::default(),
+            false,
+            MountConfig {
+                active_resolver: Some(resolver),
+                ..MountConfig::default()
+            },
+        )
+        .expect("mount_background_configured");
+        std::thread::sleep(Duration::from_millis(300));
+
+        Self {
+            mode: MountMode::Normal,
+            source,
+            mountpoint: Some(mountpoint),
+            handle: Some(handle),
+        }
+    }
+
     /// Like [`MountFixture::normal`] but builds the source tempdir under the
     /// caller-supplied `parent` directory instead of `$TMPDIR`. Tests that
     /// need a specific substrate capability (T3 `user.*` xattr passthrough
@@ -186,6 +311,50 @@ impl MountFixture {
             None,
             None,
             None,
+        )
+    }
+
+    /// Mount a real in-place Hermes source with discovered skills Current.
+    pub fn in_place_hermes_with_active_resolver<F: FnOnce(&Path)>(
+        seed: F,
+    ) -> (Self, Arc<ActiveSkillResolver>) {
+        let source = tempfile::tempdir().expect("source tempdir");
+        seed(source.path());
+        let resolver = Arc::new(ActiveSkillResolver::new(source.path().to_path_buf()));
+        for skill_id in enumerate_hermes_skill_ids(source.path()) {
+            resolver.set(
+                &skill_id,
+                skillfs_fuse::security::ActiveTarget::Current {
+                    source_dir: source.path().join(&skill_id),
+                },
+            );
+        }
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+        let handle = mount_background_configured(
+            source.path(),
+            source.path(),
+            shared,
+            MountOptions::default(),
+            true,
+            MountConfig {
+                active_resolver: Some(Arc::clone(&resolver)),
+                skill_layout: Some(skillfs_fuse::SkillLayout::Hermes),
+                ..MountConfig::default()
+            },
+        )
+        .expect("mount_background_configured");
+        std::thread::sleep(Duration::from_millis(300));
+
+        (
+            Self {
+                mode: MountMode::InPlace,
+                source,
+                mountpoint: None,
+                handle: Some(handle),
+            },
+            resolver,
         )
     }
 
@@ -291,6 +460,33 @@ impl MountFixture {
         mountpoint: Option<tempfile::TempDir>,
     ) -> Self {
         Self::mount_now_with_layout(mode, source, mountpoint, None, None, None, None)
+    }
+
+    fn mount_normal_configured(
+        source: tempfile::TempDir,
+        mountpoint: tempfile::TempDir,
+        options: MountOptions,
+        config: MountConfig,
+    ) -> Self {
+        let mut store = SkillStore::new();
+        store.load_from_directory(source.path(), &ParseConfig::default());
+        let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+        let handle = mount_background_configured(
+            mountpoint.path(),
+            source.path(),
+            shared,
+            options,
+            false,
+            config,
+        )
+        .expect("mount_background_configured");
+        std::thread::sleep(Duration::from_millis(300));
+        Self {
+            mode: MountMode::Normal,
+            source,
+            mountpoint: Some(mountpoint),
+            handle: Some(handle),
+        }
     }
 
     fn mount_now_with_layout(

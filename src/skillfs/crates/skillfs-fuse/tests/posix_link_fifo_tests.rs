@@ -1,21 +1,25 @@
 //! T2 integration coverage for safe link + FIFO compatibility.
 //!
 //! Package T2 enables:
-//!   * `symlink()` for `PathType::Passthrough` leaves whose target lexically
-//!     resolves to the same skill — every other classification is rejected
-//!     with `EACCES`;
+//!   * `symlink()` for flat and Hermes nested passthrough leaves whose target
+//!     lexically resolves to the same skill — every other classification is
+//!     rejected with `EACCES`;
 //!   * `link()` (hardlink) for same-skill ordinary passthrough regular files;
 //!   * `mknod()` for FIFOs only — sockets and device nodes are rejected with
 //!     `EPERM`.
 //!
-//! All three callbacks continue to honor `.skill-meta`, lifecycle namespaces,
-//! and `skill-discover`'s virtual read-only semantics. The tests below exercise
-//! each rule end-to-end through a real FUSE mount.
+//! All three callbacks continue to honor lifecycle namespaces and
+//! `skill-discover`'s virtual read-only semantics. Metadata links use ordinary
+//! path rules when the mount has no active resolver or enabled trusted writer;
+//! resolver-enabled protection is covered by the trusted metadata tests.
 
 use std::ffi::CString;
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::Path;
+
+use skillfs_fuse::security::ActiveTarget;
 
 mod common;
 
@@ -182,52 +186,122 @@ fn test_relative_escape_symlink_rejected() {
 }
 
 #[test]
-fn test_symlink_into_skill_meta_rejected() {
+fn test_symlink_inside_skill_meta_allowed_in_passthrough_mode() {
     skip_if_no_fuse!();
 
     let fx = MountFixture::normal(|src| {
         create_skill_dir(src, "alpha");
-        // Seed `.skill-meta` on disk so the parent directory exists for
-        // kernel-level lookup; the policy must still refuse the symlink
-        // creation regardless.
-        std::fs::create_dir_all(src.join("alpha").join(".skill-meta"))
-            .expect("seed .skill-meta dir");
+        let meta = src.join("alpha").join(".skill-meta");
+        std::fs::create_dir_all(&meta).expect("seed .skill-meta dir");
+        std::fs::write(meta.join("manifest.json"), b"meta").expect("seed manifest");
     });
 
     let link = fx
         .skill_path("alpha")
         .join(".skill-meta")
         .join("planted_link");
-    let err = raw_errno(std::os::unix::fs::symlink("anywhere", &link));
-    assert!(
-        err == libc::ENOENT || err == libc::EACCES,
-        ".skill-meta symlink must be rejected, got {err}"
+    std::os::unix::fs::symlink("manifest.json", &link)
+        .expect("passthrough symlink inside .skill-meta");
+    assert_eq!(
+        std::fs::read_to_string(&link).expect("read symlink in .skill-meta"),
+        "meta"
     );
 }
 
 #[test]
-fn test_symlink_target_into_skill_meta_rejected() {
+fn test_symlink_target_into_skill_meta_allowed_in_passthrough_mode() {
     skip_if_no_fuse!();
 
     // The link path itself is OK (under an ordinary subdir), but the
-    // **target** lexically resolves to the skill's `.skill-meta/**`.
-    // Following the link from userspace would expose the protected
-    // payload via an unprotected name, so T2 refuses with `EACCES`.
+    // **target** lexically resolves to the skill's `.skill-meta/**`. In
+    // passthrough mode this is an ordinary same-skill symlink.
     let fx = MountFixture::normal(|src| {
         create_skill_dir(src, "alpha");
-        std::fs::create_dir_all(src.join("alpha").join(".skill-meta"))
-            .expect("seed .skill-meta dir");
+        let meta = src.join("alpha").join(".skill-meta");
+        std::fs::create_dir_all(&meta).expect("seed .skill-meta dir");
+        std::fs::write(meta.join("secret"), b"secret").expect("seed metadata");
     });
     std::fs::create_dir(fx.skill_path("alpha").join("sub")).expect("mkdir sub");
 
     let link = fx.skill_path("alpha").join("sub").join("leak");
-    let err = raw_errno(std::os::unix::fs::symlink("../.skill-meta/secret", &link));
+    std::os::unix::fs::symlink("../.skill-meta/secret", &link)
+        .expect("passthrough symlink target in .skill-meta");
     assert_eq!(
-        err,
-        libc::EACCES,
-        "same-skill symlink whose target lands in .skill-meta must be EACCES, got {err}"
+        std::fs::read_to_string(&link).expect("read symlink target in .skill-meta"),
+        "secret"
     );
-    assert!(std::fs::symlink_metadata(&link).is_err());
+}
+
+#[test]
+fn test_real_in_place_hermes_metadata_symlink_does_not_reenter_fuse() {
+    skip_if_no_fuse!();
+
+    let fx = MountFixture::in_place_hermes(|src| {
+        create_skill_dir(&src.join("apple"), "apple-notes");
+        std::fs::create_dir_all(src.join("apple/apple-notes/.skill-meta"))
+            .expect("seed Hermes metadata");
+        std::fs::write(
+            src.join("apple/apple-notes/.skill-meta/manifest.json"),
+            b"{}",
+        )
+        .expect("seed manifest");
+    });
+    let meta = fx.skill_path("apple/apple-notes").join(".skill-meta");
+    let link = meta.join("manifest-link.json");
+
+    std::os::unix::fs::symlink("manifest.json", &link)
+        .expect("in-place Hermes symlink must complete without FUSE recursion");
+    assert_eq!(
+        std::fs::read_to_string(&link).expect("read in-place Hermes link"),
+        "{}"
+    );
+}
+
+#[test]
+fn test_hermes_hidden_transition_rechecks_stale_link_endpoints() {
+    skip_if_no_fuse!();
+
+    let (fx, resolver) = MountFixture::in_place_hermes_with_active_resolver(|src| {
+        create_skill_dir(&src.join("apple"), "apple-notes");
+        std::fs::write(src.join("apple/apple-notes/payload.txt"), b"payload")
+            .expect("seed payload");
+    });
+    let skill = fx.skill_path("apple/apple-notes");
+    let dir = std::fs::File::open(&skill).expect("open Current skill directory");
+    std::fs::metadata(skill.join("payload.txt")).expect("prime Current source inode");
+
+    resolver.set(
+        "apple/apple-notes",
+        ActiveTarget::Hidden {
+            reason: "review regression".to_string(),
+        },
+    );
+
+    let target = CString::new("payload.txt").unwrap();
+    let symlink_name = CString::new("hidden-symlink").unwrap();
+    let rc = unsafe { libc::symlinkat(target.as_ptr(), dir.as_raw_fd(), symlink_name.as_ptr()) };
+    assert_eq!(rc, -1, "stale parent fd must not create a Hidden symlink");
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ENOENT)
+    );
+
+    let source_name = CString::new("payload.txt").unwrap();
+    let hardlink_name = CString::new("hidden-hardlink").unwrap();
+    let rc = unsafe {
+        libc::linkat(
+            dir.as_raw_fd(),
+            source_name.as_ptr(),
+            dir.as_raw_fd(),
+            hardlink_name.as_ptr(),
+            0,
+        )
+    };
+    assert_eq!(rc, -1, "stale endpoints must not create a Hidden hardlink");
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ENOENT)
+    );
 }
 
 #[test]
@@ -355,7 +429,7 @@ fn test_cross_skill_hardlink_rejected() {
 }
 
 #[test]
-fn test_hardlink_into_skill_meta_rejected() {
+fn test_hardlink_into_skill_meta_allowed_in_passthrough_mode() {
     skip_if_no_fuse!();
 
     let fx = MountFixture::normal(|src| {
@@ -367,10 +441,12 @@ fn test_hardlink_into_skill_meta_rejected() {
 
     let src = fx.skill_path("alpha").join("src.txt");
     let dst = fx.skill_path("alpha").join(".skill-meta").join("planted");
-    let err = raw_errno(std::fs::hard_link(&src, &dst));
-    assert!(
-        err == libc::ENOENT || err == libc::EACCES,
-        ".skill-meta hardlink must be rejected, got {err}"
+    std::fs::hard_link(&src, &dst).expect("metadata hardlink must use ordinary path rules");
+    assert_eq!(
+        std::fs::metadata(&dst)
+            .expect("hardlink destination")
+            .nlink(),
+        2
     );
 }
 

@@ -32,7 +32,7 @@ use skillfs_fuse::security::{
 };
 use skillfs_fuse::{MountConfig, MountOptions, mount_background_configured};
 
-#[path = "common/mod.rs"]
+#[path = "common.rs"]
 mod common;
 
 use crate::common::{create_skill_dir, fuse_available};
@@ -505,7 +505,9 @@ fn skill_meta_under_inbox_is_denied_for_ordinary_installers() {
         MountOptions::default(),
         false,
         MountConfig {
-            active_resolver: None,
+            active_resolver: Some(Arc::new(ActiveSkillResolver::new(
+                source.path().to_path_buf(),
+            ))),
             ..MountConfig::default()
         },
     )

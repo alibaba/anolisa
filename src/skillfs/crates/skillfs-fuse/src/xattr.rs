@@ -36,6 +36,7 @@ pub(crate) fn xattr_namespace(name: &std::ffi::OsStr) -> XattrNamespace {
 pub(crate) fn path_type_supports_xattr_passthrough(path_type: &PathType) -> bool {
     match path_type {
         PathType::Passthrough { skill_name, .. } => !is_skill_discover_path(skill_name),
+        PathType::NestedPassthrough { .. } => true,
         _ => false,
     }
 }

@@ -413,3 +413,41 @@ pub(crate) fn find_common_path_prefix(paths: &[std::path::PathBuf]) -> Option<st
 pub(crate) fn is_skill_discover_path(skill_name: &str) -> bool {
     skill_name == "skill-discover"
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::security::is_skill_meta_path;
+
+    #[test]
+    fn skill_meta_is_a_flat_skill_relative_path() {
+        assert!(matches!(
+            parse_path_with_layout(Path::new("/skills/demo/.skill-meta/manifest.json"), false, SkillLayout::Flat),
+            PathType::Passthrough { skill_name, relative_path }
+                if skill_name == "demo" && relative_path == PathBuf::from(".skill-meta/manifest.json")
+        ));
+        assert!(!matches!(
+            parse_path_with_layout(Path::new("/skills/demo/.skill-meta2/manifest.json"), false, SkillLayout::Flat),
+            PathType::Passthrough { relative_path, .. } if is_skill_meta_path(&relative_path)
+        ));
+        assert!(!matches!(
+            parse_path_with_layout(Path::new("/skills/demo/docs/.skill-meta/manifest.json"), false, SkillLayout::Flat),
+            PathType::Passthrough { relative_path, .. } if is_skill_meta_path(&relative_path)
+        ));
+    }
+
+    #[test]
+    fn skill_meta_is_a_nested_hermes_skill_relative_path() {
+        assert!(matches!(
+            parse_path_with_layout(
+                Path::new("/skills/tools/demo/.skill-meta/manifest.json"),
+                false,
+                SkillLayout::Hermes,
+            ),
+            PathType::NestedPassthrough { category, skill_name, relative_path }
+                if category == "tools"
+                    && skill_name == "demo"
+                    && is_skill_meta_path(&relative_path)
+        ));
+    }
+}

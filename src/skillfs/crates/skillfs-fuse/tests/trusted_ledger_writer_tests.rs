@@ -236,29 +236,23 @@ impl Drop for TrustedWriterFixture {
     }
 }
 
-/// Default-disabled config: `.skill-meta` access through the FUSE
-/// mount is hidden (ENOENT). Pre-existing deny is preserved; the
-/// view gate now hides `.skill-meta` entirely for untrusted callers.
+/// A present-but-disabled trusted-writer config does not enable protection;
+/// without an active resolver, `.skill-meta` is ordinary passthrough.
 #[test]
-fn default_disabled_config_keeps_skill_meta_denied() {
+fn default_disabled_config_keeps_skill_meta_in_passthrough_mode() {
     if !common::fuse_available() {
-        eprintln!("SKIP default_disabled_config_keeps_skill_meta_denied: FUSE not available");
+        eprintln!(
+            "SKIP default_disabled_config_keeps_skill_meta_in_passthrough_mode: FUSE not available"
+        );
         return;
     }
     let skill = "alpha";
     let fx = TrustedWriterFixture::mount_with_config(skill, None);
     let target = fx.skill_meta(skill).join("manifest.json");
-    let err =
-        std::fs::write(&target, b"{}\n").expect_err("write must fail with default-disabled gate");
-    assert_eq!(
-        err.raw_os_error(),
-        Some(libc::ENOENT),
-        "default-disabled gate must surface ENOENT, got {err:?}"
-    );
-    // The on-disk source must remain untouched.
+    std::fs::write(&target, b"{}\n").expect("disabled gate must pass through metadata writes");
     assert!(
-        !fx.source_skill_meta(skill).join("manifest.json").exists(),
-        "denied write must not have created the source-side file"
+        fx.source_skill_meta(skill).join("manifest.json").exists(),
+        "passthrough write must reach the source-side file"
     );
 }
 

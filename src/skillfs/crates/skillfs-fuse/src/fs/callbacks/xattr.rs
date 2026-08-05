@@ -29,6 +29,9 @@ impl SkillFs {
         if !path_type_supports_xattr_passthrough(&path_type) {
             return reply.error(libc::EOPNOTSUPP);
         }
+        if let Some(false) = self.is_trusted_skill_meta_access(&path_type, req) {
+            return reply.error(libc::ENOENT);
+        }
         if Self::lifecycle_reservation(&path_type).is_some() {
             return reply.error(libc::EOPNOTSUPP);
         }
@@ -72,6 +75,9 @@ impl SkillFs {
 
         if !path_type_supports_xattr_passthrough(&path_type) {
             return reply.error(libc::EOPNOTSUPP);
+        }
+        if let Some(false) = self.is_trusted_skill_meta_access(&path_type, req) {
+            return reply.error(libc::ENOENT);
         }
         if Self::lifecycle_reservation(&path_type).is_some() {
             return reply.error(libc::EOPNOTSUPP);

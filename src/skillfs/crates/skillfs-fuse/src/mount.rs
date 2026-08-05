@@ -23,6 +23,19 @@ use crate::security::{
 };
 use crate::{FuseError, MountHandle, MountOptions, SkillFs};
 
+fn fuse_mount_options(options: &MountOptions) -> Vec<fuser::MountOption> {
+    let mut fuse_opts = vec![fuser::MountOption::NoAtime];
+    if options.allow_other {
+        fuse_opts.push(fuser::MountOption::AllowOther);
+        // Once callers from other UIDs can reach the mount, the kernel must
+        // enforce the backing attributes returned by SkillFS. Otherwise FUSE
+        // callbacks perform I/O with the daemon's credentials and can bypass
+        // the caller's POSIX permissions, including on `.skill-meta`.
+        fuse_opts.push(fuser::MountOption::DefaultPermissions);
+    }
+    fuse_opts
+}
+
 /// Runtime configuration for mount security features.
 #[derive(Default)]
 pub struct MountConfig {
@@ -193,11 +206,7 @@ fn mount_inner(
         }
     }
 
-    let mut fuse_opts: Vec<fuser::MountOption> = vec![];
-    fuse_opts.push(fuser::MountOption::NoAtime);
-    if options.allow_other {
-        fuse_opts.push(fuser::MountOption::AllowOther);
-    }
+    let fuse_opts = fuse_mount_options(&options);
 
     // Start from an empty pipeline and enable stages from configuration below.
     // This keeps `EnvironmentProfile::detect()` gated on the directive stage
@@ -678,4 +687,39 @@ pub fn mount_background_with_security_active_resolver_demo_refresh_and_trusted_w
         mountpoint: mountpoint.to_path_buf(),
         session: Some(handle),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allow_other_also_enables_kernel_permission_checks() {
+        let options = fuse_mount_options(&MountOptions {
+            allow_other: true,
+            ..MountOptions::default()
+        });
+
+        assert!(
+            options
+                .iter()
+                .any(|option| matches!(option, fuser::MountOption::AllowOther))
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| matches!(option, fuser::MountOption::DefaultPermissions))
+        );
+    }
+
+    #[test]
+    fn private_mount_keeps_userspace_permission_handling() {
+        let options = fuse_mount_options(&MountOptions::default());
+
+        assert!(
+            !options
+                .iter()
+                .any(|option| matches!(option, fuser::MountOption::DefaultPermissions))
+        );
+    }
 }

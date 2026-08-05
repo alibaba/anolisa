@@ -13,6 +13,8 @@
 //!   files.
 //! * Symlink/hardlink/xattr boundaries remain unchanged.
 
+use std::ffi::CString;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,7 +28,7 @@ use skillfs_fuse::{
     MountConfig, MountHandle, MountOptions, SkillLayout, mount_background_configured,
 };
 
-#[path = "common/mod.rs"]
+#[path = "common.rs"]
 mod common;
 
 use crate::common::{create_skill_dir, fuse_available};
@@ -141,6 +143,50 @@ fn write_snapshot(
     dir
 }
 
+fn exercise_passthrough_metadata_lifecycle(meta: &Path) {
+    let versions = meta.join("versions");
+    let snapshot = versions.join("v000001");
+    std::fs::create_dir_all(&snapshot).expect("create .skill-meta snapshot tree");
+    std::fs::write(snapshot.join("SKILL.md"), b"snapshot body\n")
+        .expect("create snapshot metadata");
+
+    let listing = sorted_dir(&versions);
+    assert_eq!(listing, vec!["v000001"], "snapshot must be discoverable");
+
+    let current = meta.join("manifest.json");
+    let first = meta.join("manifest.json.tmp");
+    std::fs::write(&first, b"{\"version\":\"v000001\"}\n").expect("create metadata file");
+    std::fs::rename(&first, &current).expect("atomically publish metadata");
+
+    let current_c = CString::new(current.as_os_str().as_encoded_bytes())
+        .expect("metadata path must not contain NUL");
+    assert_eq!(
+        unsafe { libc::access(current_c.as_ptr(), libc::F_OK) },
+        0,
+        "access(F_OK) must see passthrough metadata"
+    );
+    std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o600))
+        .expect("set metadata permissions");
+
+    let next = meta.join("manifest.json.next");
+    std::fs::write(&next, b"{\"version\":\"v000002\"}\n").expect("update metadata");
+    std::fs::rename(&next, &current).expect("atomically replace metadata");
+    assert_eq!(
+        std::fs::read_to_string(&current).expect("read updated metadata"),
+        "{\"version\":\"v000002\"}\n"
+    );
+
+    std::fs::remove_file(&current).expect("delete metadata file");
+    std::fs::remove_file(snapshot.join("SKILL.md")).expect("delete snapshot payload");
+    std::fs::remove_dir(&snapshot).expect("remove snapshot directory");
+    std::fs::remove_dir(&versions).expect("remove versions directory");
+    std::fs::remove_dir(meta).expect("remove .skill-meta directory");
+    assert!(
+        !meta.exists(),
+        "metadata tree must be removable in passthrough"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Fixture
 // ─────────────────────────────────────────────────────────────────────────────
@@ -213,18 +259,18 @@ impl Drop for MetaViewFixture {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. Untrusted readdir does not show .skill-meta
+// 1. Without either integration signal, .skill-meta is ordinary passthrough
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn untrusted_readdir_hides_skill_meta() {
+fn passthrough_readdir_shows_skill_meta() {
     if !fuse_available() {
         eprintln!("SKIP: FUSE not available");
         return;
     }
     let fx = MetaViewFixture::new(
         |src| seed_skill_with_meta(src, "alpha"),
-        None, // no trusted writer
+        None, // no trusted writer: passthrough mode
         |_| None,
     );
     let listing = sorted_dir(&fx.skill_dir("alpha"));
@@ -233,38 +279,38 @@ fn untrusted_readdir_hides_skill_meta() {
         "SKILL.md must be visible, got {listing:?}"
     );
     assert!(
-        !listing.contains(&".skill-meta".to_string()),
-        ".skill-meta must be hidden from readdir, got {listing:?}"
+        listing.contains(&".skill-meta".to_string()),
+        ".skill-meta must be visible in passthrough mode, got {listing:?}"
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. Untrusted exact .skill-meta lookup/open/read is denied
+// 2. Passthrough mode permits exact .skill-meta lookup/open/read
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn untrusted_exact_skill_meta_lookup_denied() {
+fn passthrough_exact_skill_meta_lookup_read_and_write() {
     if !fuse_available() {
         eprintln!("SKIP: FUSE not available");
         return;
     }
     let fx = MetaViewFixture::new(|src| seed_skill_with_meta(src, "alpha"), None, |_| None);
     let meta_dir = fx.skill_meta("alpha");
-    let err =
-        std::fs::metadata(&meta_dir).expect_err("lookup of .skill-meta must fail for untrusted");
-    assert_eq!(
-        err.raw_os_error(),
-        Some(libc::ENOENT),
-        "expected ENOENT for untrusted .skill-meta lookup, got {err:?}"
-    );
+    std::fs::metadata(&meta_dir).expect("passthrough lookup of .skill-meta must succeed");
     let manifest = meta_dir.join("manifest.json");
-    let err = std::fs::read(&manifest)
-        .expect_err("read of .skill-meta/manifest.json must fail for untrusted");
-    assert_eq!(
-        err.raw_os_error(),
-        Some(libc::ENOENT),
-        "expected ENOENT for untrusted .skill-meta/manifest.json read, got {err:?}"
-    );
+    assert!(std::fs::read(&manifest).is_ok());
+    std::fs::write(&manifest, b"{\"updated\":true}\n")
+        .expect("passthrough write of .skill-meta must succeed");
+}
+
+#[test]
+fn passthrough_skill_meta_supports_full_metadata_lifecycle() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+    let fx = MetaViewFixture::new(|src| create_skill_dir(src, "alpha"), None, |_| None);
+    exercise_passthrough_metadata_lifecycle(&fx.skill_meta("alpha"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -630,16 +676,24 @@ fn trusted_inbox_skill_meta_read_succeeds() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 13. Untrusted parent listing still hides .skill-meta (regression guard)
+// 13. Active resolver keeps ordinary callers from seeing .skill-meta
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn untrusted_parent_listing_still_hides_skill_meta() {
+fn active_resolver_parent_listing_hides_skill_meta() {
     if !fuse_available() {
         eprintln!("SKIP: FUSE not available");
         return;
     }
-    let fx = MetaViewFixture::new(|src| seed_skill_with_meta(src, "alpha"), None, |_| None);
+    let fx = MetaViewFixture::new(
+        |src| seed_skill_with_meta(src, "alpha"),
+        None,
+        |src| {
+            let resolver = ActiveSkillResolver::new(src.to_path_buf());
+            resolver.set_from_resolve(&current_result("alpha")).unwrap();
+            Some(Arc::new(resolver))
+        },
+    );
     let listing = sorted_dir(&fx.skill_dir("alpha"));
     assert!(
         !listing.contains(&".skill-meta".to_string()),
@@ -733,11 +787,11 @@ impl Drop for HermesMetaViewFixture {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// H1. Untrusted readdir of category/skill hides .skill-meta
+// H1. Without either integration signal, Hermes .skill-meta is passthrough
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn hermes_untrusted_readdir_hides_skill_meta() {
+fn hermes_passthrough_readdir_shows_skill_meta() {
     if !fuse_available() {
         eprintln!("SKIP: FUSE not available");
         return;
@@ -753,18 +807,18 @@ fn hermes_untrusted_readdir_hides_skill_meta() {
         "SKILL.md must be visible, got {listing:?}"
     );
     assert!(
-        !listing.contains(&".skill-meta".to_string()),
-        ".skill-meta must be hidden from untrusted readdir, got {listing:?}"
+        listing.contains(&".skill-meta".to_string()),
+        ".skill-meta must be visible in passthrough mode, got {listing:?}"
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// H2. Untrusted exact path metadata/read for category/skill/.skill-meta/...
-//     returns ENOENT
+// H2. Passthrough exact path metadata/read for category/skill/.skill-meta/...
+//     succeeds
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn hermes_untrusted_exact_skill_meta_denied() {
+fn hermes_passthrough_exact_skill_meta_read_and_write() {
     if !fuse_available() {
         eprintln!("SKIP: FUSE not available");
         return;
@@ -775,12 +829,66 @@ fn hermes_untrusted_exact_skill_meta_denied() {
         |_| None,
     );
     let meta_dir = fx.nested_skill_meta("apple", "apple-notes");
-    let err = std::fs::metadata(&meta_dir).expect_err("untrusted .skill-meta lookup must fail");
-    assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+    std::fs::metadata(&meta_dir).expect("passthrough .skill-meta lookup must succeed");
     let manifest = meta_dir.join("manifest.json");
-    let err =
-        std::fs::read(&manifest).expect_err("untrusted .skill-meta/manifest.json read must fail");
-    assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+    assert!(std::fs::read(&manifest).is_ok());
+    std::fs::write(&manifest, b"{\"updated\":true}\n")
+        .expect("passthrough nested .skill-meta write must succeed");
+}
+
+#[test]
+fn hermes_passthrough_skill_meta_supports_full_metadata_lifecycle() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+    let fx = HermesMetaViewFixture::new(
+        |src| seed_hermes_with_meta(src, "apple", "apple-notes"),
+        None,
+        |_| None,
+    );
+    exercise_passthrough_metadata_lifecycle(&fx.nested_skill_meta("apple", "apple-notes"));
+}
+
+#[test]
+fn hermes_passthrough_skill_meta_links_use_ordinary_rules() {
+    if !fuse_available() {
+        eprintln!("SKIP: FUSE not available");
+        return;
+    }
+    let fx = HermesMetaViewFixture::new(
+        |src| {
+            seed_hermes_with_meta(src, "apple", "apple-notes");
+            std::fs::write(src.join("apple/apple-notes/regular.txt"), b"regular\n").unwrap();
+        },
+        None,
+        |_| None,
+    );
+    let skill = fx.nested_skill_dir("apple", "apple-notes");
+    let meta = fx.nested_skill_meta("apple", "apple-notes");
+
+    let inside_meta = meta.join("manifest-link");
+    std::os::unix::fs::symlink("manifest.json", &inside_meta)
+        .expect("nested passthrough symlink inside metadata");
+    assert!(std::fs::read(&inside_meta).is_ok());
+
+    let target_meta = skill.join("metadata-link");
+    std::os::unix::fs::symlink(".skill-meta/manifest.json", &target_meta)
+        .expect("nested passthrough symlink to metadata");
+    assert!(std::fs::read(&target_meta).is_ok());
+
+    let hardlink_into_meta = meta.join("regular-link");
+    std::fs::hard_link(skill.join("regular.txt"), &hardlink_into_meta)
+        .expect("nested hardlink into metadata");
+    let hardlink_out_of_meta = skill.join("manifest-copy.json");
+    std::fs::hard_link(meta.join("manifest.json"), &hardlink_out_of_meta)
+        .expect("nested hardlink out of metadata");
+    assert_eq!(
+        std::fs::metadata(&hardlink_into_meta)
+            .expect("metadata hardlink")
+            .nlink(),
+        2
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -896,11 +1004,11 @@ fn hermes_trusted_hidden_meta_no_ordinary_files() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// H5. Untrusted write/create under nested .skill-meta is rejected
+// H5. An active resolver keeps untrusted nested .skill-meta writes rejected
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn hermes_untrusted_write_nested_skill_meta_rejected() {
+fn hermes_active_resolver_write_nested_skill_meta_rejected() {
     if !fuse_available() {
         eprintln!("SKIP: FUSE not available");
         return;
@@ -908,7 +1016,16 @@ fn hermes_untrusted_write_nested_skill_meta_rejected() {
     let fx = HermesMetaViewFixture::new(
         |src| seed_hermes_with_meta(src, "apple", "apple-notes"),
         None,
-        |_| None,
+        |src| {
+            let resolver = ActiveSkillResolver::new(src.to_path_buf());
+            resolver.set(
+                "apple/apple-notes",
+                ActiveTarget::Current {
+                    source_dir: src.join("apple/apple-notes"),
+                },
+            );
+            Some(Arc::new(resolver))
+        },
     );
     let manifest = fx
         .nested_skill_meta("apple", "apple-notes")
@@ -950,8 +1067,8 @@ fn hermes_trusted_mutating_open_goes_through_policy() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// H7. Symlink/hardlink under nested .skill-meta remains rejected even for
-//     trusted writer, matching flat behavior
+// H7. Protected Hermes metadata still rejects symlink/hardlink operations,
+//     even when the trusted writer is configured
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
@@ -980,12 +1097,7 @@ fn hermes_trusted_meta_symlink_hardlink_rejected() {
         .join("link-to-regular");
     let err = std::os::unix::fs::symlink("../regular.txt", &link_path)
         .expect_err("symlink inside nested .skill-meta must be denied");
-    // Nested paths are rejected at the link-type gate (EROFS) since
-    // symlink_impl only accepts flat Passthrough targets.
-    assert!(
-        err.raw_os_error() == Some(libc::EACCES) || err.raw_os_error() == Some(libc::EROFS),
-        "expected EACCES or EROFS, got {err:?}"
-    );
+    assert_eq!(err.raw_os_error(), Some(libc::EACCES));
     let dst = fx
         .nested_skill_dir("apple", "apple-notes")
         .join("manifest-copy.json");
@@ -995,8 +1107,5 @@ fn hermes_trusted_meta_symlink_hardlink_rejected() {
         &dst,
     )
     .expect_err("hardlink from nested .skill-meta must be denied");
-    assert!(
-        err.raw_os_error() == Some(libc::EACCES) || err.raw_os_error() == Some(libc::EROFS),
-        "expected EACCES or EROFS, got {err:?}"
-    );
+    assert_eq!(err.raw_os_error(), Some(libc::EACCES));
 }

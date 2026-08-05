@@ -63,7 +63,7 @@ for the security-provider integration path.
 | mkdir/rmdir/unlink/rename | Supported | Includes store sync for skill-level changes and rename flags where supported. |
 | PATH_MAX fallback | Supported | Uses parent-fd `*at` fallbacks for long physical paths. |
 | readlink / symlink identity | Supported | Physical symlink identity and raw target are preserved. |
-| symlink creation | Supported with policy | Allows relative same-skill targets; rejects absolute, cross-skill, outside-source, `.skill-meta`, lifecycle, and virtual targets. |
+| symlink creation | Supported with policy | Allows relative same-skill targets; rejects absolute, cross-skill, outside-source, lifecycle, and virtual targets. `.skill-meta` follows the mount's passthrough/protected mode. |
 | hardlink creation | Supported with policy | Allows same-skill regular-file links; rejects cross-skill, virtual, sensitive, directory, symlink, FIFO, and special-file sources. |
 | FIFO creation | Supported | `mknod` accepts FIFO only. |
 | device/socket mknod | Rejected | Block/char/socket/special nodes remain intentionally unsupported. |
@@ -71,7 +71,7 @@ for the security-provider integration path.
 | fallocate | Not implemented | Deferred. |
 | lseek `SEEK_DATA` / `SEEK_HOLE` | Not implemented | Deferred. |
 | copy_file_range | Not implemented | Deferred. |
-| full per-caller uid/gid enforcement | Not implemented | Requires broader FUSE permission and identity design. |
+| per-caller uid/gid enforcement | Partial | `allow_other` mounts enable kernel `default_permissions`; private mounts retain existing userspace checks. Broader identity-aware policy is not implemented. |
 
 ## Security Integration Capability Matrix
 
@@ -82,7 +82,7 @@ and write the resulting activation state.
 | Area | Status | SkillFS responsibility |
 | --- | --- | --- |
 | Policy/event skeleton | Supported | `SecurityPolicy`, `SkillEvent`, event sink abstractions. |
-| `.skill-meta/**` protection | Supported | Ordinary callers cannot mutate security metadata. |
+| `.skill-meta/**` protection | Supported, integration-gated | No active resolver and no enabled trusted writer selects ordinary POSIX passthrough. Either signal selects protected mode, hiding metadata from ordinary callers and denying untrusted mutation. `--security-mode` alone does not change this mode. |
 | JSONL audit stream | Supported | Optional best-effort audit sink. |
 | Runtime audit wiring | Supported | CLI can opt into audit JSONL and queue capacity. |
 | Security mount mode | Supported | Can require in-place mount for stronger coverage. |

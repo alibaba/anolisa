@@ -346,7 +346,7 @@ impl SkillFs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::security::{ActiveSkillResolver, ActiveTarget};
+    use crate::security::{ActiveSkillResolver, ActiveTarget, TrustedWriterConfig};
     use crate::{MountConfig, MountOptions, mount_background_configured};
     use parking_lot::RwLock;
     use skillfs_core::transform::TransformPipeline;
@@ -403,6 +403,88 @@ mod tests {
             TransformPipeline::empty(),
         )
         .with_active_resolver(Arc::new(resolver))
+    }
+
+    #[test]
+    fn skill_meta_protection_is_fixed_by_mount_configuration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path();
+        let resolver = || Arc::new(ActiveSkillResolver::new(source.to_path_buf()));
+
+        let cases = [
+            (false, TrustedWriterConfig::disabled(), false),
+            (true, TrustedWriterConfig::disabled(), true),
+            (
+                false,
+                TrustedWriterConfig::with_process_name("ledger"),
+                true,
+            ),
+            (true, TrustedWriterConfig::with_process_name("ledger"), true),
+        ];
+
+        for (active_resolver, trusted_writer, protected) in cases {
+            let store: SharedSkillStore = Arc::new(RwLock::new(SkillStore::new()));
+            let mut fs = SkillFs::new_with_pipeline(
+                source.to_path_buf(),
+                source.to_path_buf(),
+                store,
+                false,
+                TransformPipeline::empty(),
+            );
+            if active_resolver {
+                fs = fs.with_active_resolver(resolver());
+            }
+            fs = fs.with_trusted_writer(trusted_writer);
+            assert_eq!(
+                fs.protects_skill_meta(),
+                protected,
+                "active_resolver={active_resolver}, expected_protected={protected}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolver_state_changes_do_not_change_mount_metadata_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path();
+        let resolver = Arc::new(ActiveSkillResolver::new(source.to_path_buf()));
+        let store: SharedSkillStore = Arc::new(RwLock::new(SkillStore::new()));
+        let fs = SkillFs::new_with_pipeline(
+            source.to_path_buf(),
+            source.to_path_buf(),
+            store,
+            false,
+            TransformPipeline::empty(),
+        )
+        .with_active_resolver(resolver.clone());
+
+        assert!(fs.protects_skill_meta());
+        resolver.set(
+            "alpha",
+            ActiveTarget::Current {
+                source_dir: source.join("alpha"),
+            },
+        );
+        assert!(fs.protects_skill_meta());
+        resolver.forget("alpha");
+        assert!(fs.protects_skill_meta());
+    }
+
+    #[test]
+    fn disabled_trusted_writer_configuration_keeps_passthrough_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path();
+        let store: SharedSkillStore = Arc::new(RwLock::new(SkillStore::new()));
+        let fs = SkillFs::new_with_pipeline(
+            source.to_path_buf(),
+            source.to_path_buf(),
+            store,
+            false,
+            TransformPipeline::empty(),
+        )
+        .with_trusted_writer(TrustedWriterConfig::disabled());
+
+        assert!(!fs.protects_skill_meta());
     }
 
     /// The single-read `resolve_skill_read_pinned` must return a target and a

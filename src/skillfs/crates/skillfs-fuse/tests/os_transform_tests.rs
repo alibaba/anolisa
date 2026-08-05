@@ -23,7 +23,7 @@ use skillfs_fuse::security::{
 };
 use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
 
-#[path = "common/mod.rs"]
+#[path = "common.rs"]
 mod common;
 
 use crate::common::MountFixture;

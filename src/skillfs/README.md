@@ -476,12 +476,15 @@ Two integration paths are supported:
 
 Related security surfaces:
 
-- `.skill-meta/**` is hidden from untrusted lookup/list/read paths and ordinary
-  mutation attempts are rejected. Trusted exact-path access can route to the
-  live source for metadata operations.
+- `.skill-meta/**` has a mount-scoped mode. It is ordinary POSIX passthrough
+  data when neither an active resolver nor an enabled trusted writer is
+  configured. Either integration signal enables protected mode: untrusted
+  lookup/list/read paths are hidden and ordinary mutations are rejected.
+  Trusted exact-path access can route to the live source for metadata work.
 - `--audit-log <PATH>` writes stable JSONL audit events.
 - `--security-mode` requires `SOURCE` and `MOUNTPOINT` to resolve to the same
-  directory so normal userspace access goes through FUSE policy and audit.
+  directory so normal userspace access goes through FUSE policy and audit. It
+  does not enable `.skill-meta` protected mode by itself.
 - `/.skillfs-inbox/<skill>/...` is an install/repair entry point for hidden or
   new skills; writes land in the source tree and completion can trigger the
   external security flow.

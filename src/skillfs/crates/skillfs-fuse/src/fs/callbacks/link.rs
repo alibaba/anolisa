@@ -16,6 +16,25 @@ use crate::symlink_policy;
 use crate::sys::errno;
 
 impl SkillFs {
+    fn should_reject_hidden_link_endpoint(&self, path_type: &PathType) -> bool {
+        match path_type {
+            PathType::Passthrough {
+                skill_name,
+                relative_path,
+            } => self.should_reject_hidden_write(skill_name, Some(relative_path)),
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => self.should_reject_hermes_nested_hidden_write(
+                category,
+                skill_name,
+                Some(relative_path),
+            ),
+            _ => false,
+        }
+    }
+
     pub(in crate::fs) fn readlink_impl(&mut self, req: &Request, ino: u64, reply: ReplyData) {
         debug!(ino, "readlink");
         let path = match self.inodes.get_path(ino) {
@@ -55,6 +74,15 @@ impl SkillFs {
                 skill_name,
                 relative_path,
             } => {
+                if let Some(false) = self.is_trusted_skill_meta_access(
+                    &PathType::Passthrough {
+                        skill_name: skill_name.clone(),
+                        relative_path: relative_path.clone(),
+                    },
+                    req,
+                ) {
+                    return reply.error(libc::ENOENT);
+                }
                 if is_skill_discover_path(&skill_name) {
                     // skill-discover virtual namespace contains no symlinks.
                     self.emit_event(
@@ -101,6 +129,15 @@ impl SkillFs {
                 skill_name,
                 relative_path,
             } => {
+                if let Some(false) = self.is_trusted_skill_meta_access(
+                    &PathType::InboxPassthrough {
+                        skill_name: skill_name.clone(),
+                        relative_path: relative_path.clone(),
+                    },
+                    req,
+                ) {
+                    return reply.error(libc::ENOENT);
+                }
                 if !Self::is_inbox_skill_name_allowed(&skill_name) {
                     self.emit_event(
                         SkillEvent::new(SkillEventKind::Readlink)
@@ -152,17 +189,39 @@ impl SkillFs {
             | PathType::CategoryPassthrough {
                 name,
                 relative_path,
-            }
-            | PathType::NestedPassthrough {
-                category: name,
-                skill_name: _,
-                relative_path,
             } => {
                 let physical = match self.resolve_physical_path(&path) {
                     Some(p) => p,
                     None => return reply.error(libc::ENOENT),
                 };
                 let _ = (&name, &relative_path);
+                match std::fs::read_link(&physical) {
+                    Ok(target) => {
+                        use std::os::unix::ffi::OsStrExt;
+                        reply.data(target.as_os_str().as_bytes());
+                    }
+                    Err(e) => reply.error(errno(&e)),
+                }
+            }
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => {
+                if let Some(false) = self.is_trusted_skill_meta_access(
+                    &PathType::NestedPassthrough {
+                        category: category.clone(),
+                        skill_name: skill_name.clone(),
+                        relative_path: relative_path.clone(),
+                    },
+                    req,
+                ) {
+                    return reply.error(libc::ENOENT);
+                }
+                let physical = match self.resolve_physical_path(&path) {
+                    Some(p) => p,
+                    None => return reply.error(libc::ENOENT),
+                };
                 match std::fs::read_link(&physical) {
                     Ok(target) => {
                         use std::os::unix::ffi::OsStrExt;
@@ -203,28 +262,45 @@ impl SkillFs {
         let path_type = self.parse_fuse_path(Path::new(&path_str));
         let target_str = target.display().to_string();
 
-        // Only Passthrough leaves under an ordinary skill may host a new
-        // symlink. Virtual paths keep their existing virtual semantics,
-        // which means SymlinkDir / SymlinkMd / Root / SkillsDir / Invalid
-        // remain EROFS as in S0.
-        let (skill_name, relative_path) = match &path_type {
-            PathType::Passthrough {
-                skill_name,
-                relative_path,
-            } => (skill_name.clone(), relative_path.clone()),
-            _ => {
-                self.ro_warn("symlink", &path_str);
-                self.emit_event(
-                    SkillEvent::new(SkillEventKind::SymlinkAttempt)
-                        .with_action(SkillEventAction::Rejected)
-                        .with_errno(libc::EROFS)
-                        .with_caller(req.uid(), req.gid())
-                        .with_detail(format!("class=virtual_link target={}", target_str)),
-                );
-                reply.error(libc::EROFS);
-                return;
-            }
-        };
+        // Only passthrough leaves under a real skill may host a new symlink.
+        // Virtual paths keep their existing virtual semantics, which means
+        // SymlinkDir / SymlinkMd / Root / SkillsDir / Invalid remain EROFS.
+        // Hermes nested skills use `category/skill` as their logical ID while
+        // retaining the nested physical root for boundary classification.
+        let (skill_name, relative_path, classification_root, classification_skill) =
+            match &path_type {
+                PathType::Passthrough {
+                    skill_name,
+                    relative_path,
+                } => (
+                    skill_name.clone(),
+                    relative_path.clone(),
+                    self.source_base(),
+                    skill_name.clone(),
+                ),
+                PathType::NestedPassthrough {
+                    category,
+                    skill_name,
+                    relative_path,
+                } => (
+                    Self::hermes_skill_id(category, skill_name),
+                    relative_path.clone(),
+                    self.source_base().join(category),
+                    skill_name.clone(),
+                ),
+                _ => {
+                    self.ro_warn("symlink", &path_str);
+                    self.emit_event(
+                        SkillEvent::new(SkillEventKind::SymlinkAttempt)
+                            .with_action(SkillEventAction::Rejected)
+                            .with_errno(libc::EROFS)
+                            .with_caller(req.uid(), req.gid())
+                            .with_detail(format!("class=virtual_link target={}", target_str)),
+                    );
+                    reply.error(libc::EROFS);
+                    return;
+                }
+            };
 
         // skill-discover is virtual and read-only regardless of the
         // physical layout, so refuse before any classifier work.
@@ -239,6 +315,14 @@ impl SkillFs {
                     .with_detail(format!("class=skill_discover target={}", target_str)),
             );
             reply.error(libc::EROFS);
+            return;
+        }
+
+        // A parent directory handle may outlive an activation transition.
+        // Recheck Hidden immediately before every link mutation instead of
+        // relying on the lookup that originally produced the handle.
+        if self.should_reject_hidden_link_endpoint(&path_type) {
+            reply.error(libc::ENOENT);
             return;
         }
 
@@ -304,23 +388,44 @@ impl SkillFs {
         // space sees when it constructs an absolute target, so we use it
         // for both. Relative targets are resolved against the parent of
         // the link path.
-        let source_root = self
-            .source
+        // Enumerate Hermes siblings through `source_base()` before
+        // canonicalization. In an in-place mount this stays on the pre-opened
+        // `/proc/self/fd/N` path and cannot recurse into the FUSE callback.
+        // Only real Skill leaves participate in cross-skill classification;
+        // ordinary category directories remain outside the Skill namespace.
+        let known_skill_names = if let PathType::NestedPassthrough { category, .. } = &path_type {
+            std::fs::read_dir(&classification_root)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| {
+                    let entry = entry.ok()?;
+                    let name = entry.file_name().into_string().ok()?;
+                    self.hermes_nested_is_skill(category, &name).then_some(name)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            let store_guard = self.store.read();
+            store_guard
+                .list()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let source_root = classification_root
             .canonicalize()
-            .unwrap_or_else(|_| self.source.clone());
+            .unwrap_or_else(|_| classification_root.clone());
         let link_parent_for_classifier = source_root
-            .join(&skill_name)
+            .join(&classification_skill)
             .join(relative_path.parent().unwrap_or(Path::new("")));
-        let store_guard = self.store.read();
-        let known_skill_names: Vec<&str> = store_guard.list();
+        let known_skill_name_refs: Vec<&str> =
+            known_skill_names.iter().map(String::as_str).collect();
         let class = symlink_policy::classify_symlink_target(
             &source_root,
-            &skill_name,
-            &known_skill_names,
+            &classification_skill,
+            &known_skill_name_refs,
             &link_parent_for_classifier,
             target,
         );
-        drop(store_guard);
 
         let class_label = symlink_policy::symlink_class_label(&class);
         if !matches!(class, symlink_policy::SymlinkTargetClass::SameSkill) {
@@ -344,15 +449,10 @@ impl SkillFs {
             return;
         }
 
-        // Even when the target classifies as SameSkill, refuse if the
-        // lexical resolution lands inside `.skill-meta/**` or under any
-        // lifecycle reserved root (`.staging`, `.certified`,
-        // `.quarantine`, `.archive`). The link path itself is gated
-        // earlier, but a same-skill target could still point a fresh
-        // link at protected metadata or a hidden lifecycle namespace —
-        // following such a link from userspace would expose the
-        // protected payload to readers that only see the unprotected
-        // link path.
+        // In protected mode, refuse a same-skill target inside
+        // `.skill-meta/**`; following such a link from userspace would expose
+        // protected payload through an otherwise unprotected link path.
+        // Lifecycle roots remain rejected in both modes.
         let link_relative_parent = relative_path
             .parent()
             .map(|p| p.to_path_buf())
@@ -369,8 +469,9 @@ impl SkillFs {
                 .as_deref()
                 .map(is_reserved_lifecycle_name)
                 .unwrap_or(false);
-            if lands_in_skill_meta || lands_in_lifecycle {
-                let sensitive_label = if lands_in_skill_meta {
+            let protected_skill_meta_target = lands_in_skill_meta && self.protects_skill_meta();
+            if protected_skill_meta_target || lands_in_lifecycle {
+                let sensitive_label = if protected_skill_meta_target {
                     "same_skill_sensitive_target_skill_meta"
                 } else {
                     "same_skill_sensitive_target_lifecycle"
@@ -496,12 +597,21 @@ impl SkillFs {
         };
         let source_path_type = self.parse_fuse_path(Path::new(&source_path_str));
 
-        // Destination must be a passthrough leaf.
+        // Destination must be a passthrough leaf under a real skill. Hermes
+        // nested paths use the canonical `category/skill` logical ID.
         let (dst_skill, dst_rel) = match &new_path_type {
             PathType::Passthrough {
                 skill_name,
                 relative_path,
             } => (skill_name.clone(), relative_path.clone()),
+            PathType::NestedPassthrough {
+                category,
+                skill_name,
+                relative_path,
+            } => (
+                Self::hermes_skill_id(category, skill_name),
+                relative_path.clone(),
+            ),
             _ => {
                 self.ro_warn("link", &new_path_str);
                 self.emit_event(
@@ -523,11 +633,13 @@ impl SkillFs {
         // virtual /skills entry). Hardlinks pointing at a virtual file
         // would either pin compiled content to a real inode or duplicate
         // a virtual file that has no on-disk identity.
-        let (src_skill, src_rel) = match &source_path_type {
-            PathType::Passthrough {
+        let src_skill = match &source_path_type {
+            PathType::Passthrough { skill_name, .. } => skill_name.clone(),
+            PathType::NestedPassthrough {
+                category,
                 skill_name,
-                relative_path,
-            } => (skill_name.clone(), relative_path.clone()),
+                ..
+            } => Self::hermes_skill_id(category, skill_name),
             _ => {
                 self.emit_event(
                     SkillEvent::new(SkillEventKind::HardlinkAttempt)
@@ -560,6 +672,17 @@ impl SkillFs {
                     )),
             );
             reply.error(libc::EROFS);
+            return;
+        }
+
+        // Revalidate both endpoints because either inode/parent handle may
+        // have been acquired before the resolver transitioned the skill to
+        // Hidden. Linking from Hidden would leak an inode; linking into Hidden
+        // would mutate its live backing tree.
+        if self.should_reject_hidden_link_endpoint(&source_path_type)
+            || self.should_reject_hidden_link_endpoint(&new_path_type)
+        {
+            reply.error(libc::ENOENT);
             return;
         }
 
@@ -622,8 +745,14 @@ impl SkillFs {
             return;
         }
 
-        let src_physical = self.source_base().join(&src_skill).join(&src_rel);
-        let dst_physical = self.source_base().join(&dst_skill).join(&dst_rel);
+        let src_physical = match self.resolve_physical_path(&source_path_str) {
+            Some(path) => path,
+            None => return reply.error(libc::ENOENT),
+        };
+        let dst_physical = match self.resolve_physical_path(&new_path_str) {
+            Some(path) => path,
+            None => return reply.error(libc::ENOENT),
+        };
 
         // T2 hardlink scope: same-skill **ordinary regular files only**.
         // `symlink_metadata` deliberately does NOT follow symlinks, so a

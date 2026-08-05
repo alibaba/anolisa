@@ -31,10 +31,98 @@
 use std::ffi::CString;
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
+use std::sync::Arc;
+
+use skillfs_fuse::security::{PathPolicy, PolicyDecision, SecurityPolicy, SkillEventKind};
 
 mod common;
 
 use common::{MountFixture, MountMode, create_skill_dir, list_dir_names};
+
+#[derive(Debug)]
+struct DenyMetadataCreatePolicy;
+
+impl SecurityPolicy for DenyMetadataCreatePolicy {
+    fn check_path(&self, ctx: &PathPolicy<'_>) -> PolicyDecision {
+        if ctx.operation == SkillEventKind::Create
+            && ctx
+                .relative_path
+                .is_some_and(|path| path.starts_with(".skill-meta"))
+        {
+            PolicyDecision::deny(libc::EPERM, "custom metadata create policy")
+        } else {
+            PolicyDecision::allow()
+        }
+    }
+}
+
+#[test]
+fn test_passthrough_metadata_still_honors_injected_policy() {
+    skip_if_no_fuse!();
+
+    let fx = MountFixture::normal_with_policy(
+        |src| {
+            create_skill_dir(src, "alpha");
+            std::fs::create_dir_all(src.join("alpha/.skill-meta"))
+                .expect("seed metadata directory");
+        },
+        Arc::new(DenyMetadataCreatePolicy),
+    );
+    let target = fx.passthrough_path("alpha", ".skill-meta/blocked.json");
+
+    let error = std::fs::write(&target, b"{}").expect_err("custom policy must still run");
+    assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+    assert!(
+        !fx.source_skill_path("alpha")
+            .join(".skill-meta/blocked.json")
+            .exists()
+    );
+}
+
+#[test]
+fn test_allow_other_enforces_metadata_permissions_for_other_uid() {
+    skip_if_no_fuse!();
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("SKIP: cross-UID allow_other regression requires root");
+        return;
+    }
+
+    let fx = MountFixture::normal_allow_other(|src| {
+        std::fs::set_permissions(src, std::fs::Permissions::from_mode(0o755))
+            .expect("make source traversable");
+        create_skill_dir(src, "alpha");
+        let skill = src.join("alpha");
+        std::fs::set_permissions(&skill, std::fs::Permissions::from_mode(0o755))
+            .expect("make skill traversable");
+        let meta = skill.join(".skill-meta");
+        std::fs::create_dir(&meta).expect("seed metadata");
+        std::fs::set_permissions(&meta, std::fs::Permissions::from_mode(0o755))
+            .expect("make metadata directory traversable");
+        let secret = meta.join("secret.json");
+        std::fs::write(&secret, b"owner-only").expect("seed secret");
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600))
+            .expect("make secret owner-only");
+    });
+    let target = fx.passthrough_path("alpha", ".skill-meta/secret.json");
+
+    let status = std::process::Command::new("/bin/sh")
+        .args(["-c", "printf bypassed > \"$1\"", "skillfs-review"])
+        .arg(&target)
+        .uid(65_534)
+        .gid(65_534)
+        .status()
+        .expect("run cross-UID writer");
+    assert!(!status.success(), "other UID must not bypass mode 0600");
+    assert_eq!(
+        std::fs::read(
+            fx.source_skill_path("alpha")
+                .join(".skill-meta/secret.json")
+        )
+        .expect("read backing secret"),
+        b"owner-only"
+    );
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // path/lookup (P0)
@@ -881,16 +969,15 @@ fn test_classify_symlink_target_relative_unknown_cases() {
 // Package S1: `.skill-meta` protection MVP
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// `.skill-meta/**` under each skill is read-visible but mutation-protected by
-// default. These tests pin the FUSE-level behavior: read/stat/readdir keep
-// working, every documented mutation surface is rejected with `EACCES`, and
-// non-`.skill-meta` passthrough operations stay unaffected.
+// `.skill-meta/**` under each skill is read-visible but mutation-protected when
+// an active resolver is configured. These tests pin that protected mode at the
+// FUSE level; passthrough mode is covered by the metadata view tests.
 
 /// Seed a skill containing a small `.skill-meta` directory with a manifest and
 /// a nested signatures payload. Returns the fixture so tests can drive it.
 fn fixture_with_skill_meta(skill: &str) -> MountFixture {
     let skill_owned = skill.to_string();
-    MountFixture::normal(move |src| {
+    MountFixture::normal_with_active_resolver(move |src| {
         create_skill_dir(src, &skill_owned);
         let meta = src.join(&skill_owned).join(".skill-meta");
         std::fs::create_dir_all(meta.join("signatures")).expect("mkdir .skill-meta");

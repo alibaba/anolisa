@@ -232,7 +232,9 @@ enum Commands {
         ///
         /// Use this when security policy or audit must cover normal source-path
         /// access. Without it, non-in-place mounts remain allowed but direct
-        /// writes to SOURCE bypass SkillFS.
+        /// writes to SOURCE bypass SkillFS. This flag selects mount topology;
+        /// `.skill-meta` protection additionally requires an active resolver
+        /// or enabled trusted writer.
         #[arg(long, help_heading = help_text::HEADING_SECURITY)]
         security_mode: bool,
 
@@ -1917,6 +1919,10 @@ async fn cmd_mount(
             }
             _ => None,
         };
+    let protects_skill_meta = active_resolver.is_some()
+        || trusted_writer_config
+            .as_ref()
+            .is_some_and(TrustedWriterConfig::is_enabled);
 
     // ── Trusted peer control socket: resolve the effective endpoint ──
     //
@@ -2035,11 +2041,20 @@ async fn cmd_mount(
         eprintln!("   or send SIGTERM / press Ctrl+C to stop this process.");
         if security_mode {
             eprintln!();
-            eprintln!("   --security-mode is enabled: SkillFS audit and policy now cover");
+            eprintln!("   --security-mode is enabled: source access now crosses SkillFS");
             eprintln!(
-                "   every read/write to '{}' that goes through userspace.",
+                "   for every userspace read/write to '{}'.",
                 source.display()
             );
+            if protects_skill_meta {
+                eprintln!("   '.skill-meta' protected mode is active because a security");
+                eprintln!("   resolver or trusted writer is enabled.");
+            } else {
+                eprintln!("⚠  No active resolver or trusted writer is enabled:");
+                eprintln!("   '.skill-meta' remains ordinary POSIX passthrough data.");
+                eprintln!("   Enable --security with a resolver/activation mode or configure");
+                eprintln!("   a trusted writer before relying on metadata protection.");
+            }
             if drift_enabled {
                 eprintln!(
                     "   --audit-log is also enabled: best-effort source drift observation is"
@@ -2056,8 +2071,8 @@ async fn cmd_mount(
         // Non-in-place / "compatibility" mount. SkillFS still serves the
         // virtual skill view at '{mountpoint}/skills/...', but the physical
         // source directory remains directly writable outside FUSE. Be
-        // explicit so an operator who relies on .skill-meta protection or
-        // the audit log knows where the boundary actually is.
+        // explicit so an operator who relies on policy or the audit log knows
+        // where the boundary actually is.
         warn!(
             source = %source.display(),
             mountpoint = %mountpoint.display(),
@@ -2068,7 +2083,7 @@ async fn cmd_mount(
         eprintln!("     source     = '{}'", source.display());
         eprintln!("     mountpoint = '{}'", mountpoint.display());
         eprintln!("   • Direct writes to the source path are NOT routed through SkillFS,");
-        eprintln!("     so '.skill-meta' protection and the audit log only cover");
+        eprintln!("     so SkillFS policy and the audit log only cover");
         eprintln!(
             "     operations that go through '{}'.",
             mountpoint.display()

@@ -432,11 +432,14 @@ SkillFS 不在文件系统核心中执行扫描、签名校验或风险判断。
 
 相关安全能力：
 
-- `.skill-meta/**` 对不可信 lookup/list/read 路径隐藏，普通 mutation 会被拒绝。
+- `.skill-meta/**` 使用 mount-scoped 模式。没有 active resolver 且没有启用的
+  trusted writer 时，它是普通 POSIX passthrough 数据；任一集成信号存在时进入
+  protected 模式，对不可信 lookup/list/read 路径隐藏并拒绝普通 mutation。
   可信 exact-path access 可把 metadata 操作路由到 live source。
 - `--audit-log <PATH>` 写稳定 JSONL audit events。
 - `--security-mode` 要求 `SOURCE` 和 `MOUNTPOINT` 指向同一目录，使普通
-  userspace 访问都经过 FUSE policy 和 audit。
+  userspace 访问都经过 FUSE policy 和 audit；它本身不会启用 `.skill-meta`
+  protected 模式。
 - `/.skillfs-inbox/<skill>/...` 是 hidden 或 new skill 的安装/修复入口；
   写入落到 source，完成信号可触发外部安全流程。
 - `--notify-socket <PATH>` 将 debounce 后的 skill mutation 通知发给外部 daemon。

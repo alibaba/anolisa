@@ -36,6 +36,12 @@ mod paths;
 mod policy;
 mod read_resolution;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkillMetaMode {
+    Passthrough,
+    Protected,
+}
+
 // ---------------------------------------------------------------------------
 // Filesystem Implementation
 // ---------------------------------------------------------------------------
@@ -72,9 +78,14 @@ pub struct SkillFs {
     sync_tx: Option<std::sync::mpsc::Sender<SyncEvent>>,
     /// Skill Security policy. The S1 default is
     /// [`SkillMetaProtectionPolicy`], which denies mutating operations
-    /// under `.skill-meta/**`. Embedders/tests can swap it for
+    /// under `.skill-meta/**` when the mount-scoped metadata mode is
+    /// protected. Embedders/tests can swap it for
     /// [`security::PermissivePolicy`] via [`SkillFs::with_policy`].
     policy: Arc<dyn SecurityPolicy>,
+    /// Whether an embedder explicitly replaced the default metadata policy.
+    /// Passthrough mode disables only the built-in `.skill-meta` rule; custom
+    /// policy decisions must still run for the now-ordinary subtree.
+    policy_overridden: bool,
     /// Skill Security event sink (Package S0 seam). Default drops events.
     event_sink: Arc<dyn SkillEventSink>,
     /// D1.1 ledger-driven active-skill mapping. When `Some`, the read
@@ -102,9 +113,7 @@ pub struct SkillFs {
     /// notifications to the external daemon. Notify failure is
     /// diagnostic only and never changes the active resolver.
     notify_controller: Option<Arc<NotifyController>>,
-    /// Trusted writer process gate. Default disabled, in
-    /// which case `.skill-meta/**` mutation falls through to the
-    /// existing [`SkillMetaProtectionPolicy`] deny path. When enabled
+    /// Trusted writer process gate. Default disabled. When enabled
     /// the gate compares the FUSE caller pid's resolved process name
     /// against the configured trusted writer name; on match,
     /// `.skill-meta/**` mutation is allowed and an audit
@@ -114,6 +123,10 @@ pub struct SkillFs {
     /// lifecycle reservation, virtual paths, `skill-discover`, or
     /// other policy.
     trusted_writer: TrustedWriterConfig,
+    /// Mount-scoped decision for the reserved metadata tree. This is derived
+    /// from integration state before the FUSE loop starts and never changes
+    /// in response to callback traffic or resolver socket activity.
+    skill_meta_mode: SkillMetaMode,
     /// Identity resolver paired with [`Self::trusted_writer`]. Default
     /// is the Linux `/proc/<pid>/comm` resolver; tests inject a
     /// deterministic in-memory resolver via
@@ -224,11 +237,13 @@ impl SkillFs {
             skill_layout: SkillLayout::Flat,
             sync_tx: Some(sync_tx),
             policy: Arc::new(SkillMetaProtectionPolicy),
+            policy_overridden: false,
             event_sink: Arc::new(NoopEventSink),
             active_resolver: None,
             refresh_controller: None,
             notify_controller: None,
             trusted_writer: TrustedWriterConfig::disabled(),
+            skill_meta_mode: SkillMetaMode::Passthrough,
             trusted_writer_identity: default_identity_resolver(),
             staging_matcher: None,
             staging_controller: None,
@@ -264,6 +279,7 @@ impl SkillFs {
     /// `SkillFs::new` callers that do not configure security.
     pub fn with_policy(mut self, policy: Arc<dyn SecurityPolicy>) -> Self {
         self.policy = policy;
+        self.policy_overridden = true;
         self
     }
 
@@ -306,6 +322,7 @@ impl SkillFs {
     /// live source and snapshots are strictly read-only.
     pub fn with_active_resolver(mut self, resolver: Arc<ActiveSkillResolver>) -> Self {
         self.active_resolver = Some(resolver);
+        self.update_skill_meta_mode();
         self
     }
 
@@ -343,7 +360,7 @@ impl SkillFs {
 
     /// Configure the Trusted writer gate.
     ///
-    /// When `config` is enabled (`expected_process_name = Some(...)`),
+    /// When `config` is enabled (`TrustedWriterConfig::is_enabled()`),
     /// `.skill-meta/**` mutation requests whose FUSE-caller pid
     /// resolves to the configured process name are allowed despite
     /// [`SkillMetaProtectionPolicy`] denying them. The bypass is
@@ -353,7 +370,21 @@ impl SkillFs {
     /// unaffected. Default is disabled.
     pub fn with_trusted_writer(mut self, config: TrustedWriterConfig) -> Self {
         self.trusted_writer = config;
+        self.update_skill_meta_mode();
         self
+    }
+
+    fn update_skill_meta_mode(&mut self) {
+        self.skill_meta_mode = if self.active_resolver.is_some() || self.trusted_writer.is_enabled()
+        {
+            SkillMetaMode::Protected
+        } else {
+            SkillMetaMode::Passthrough
+        };
+    }
+
+    pub(super) fn protects_skill_meta(&self) -> bool {
+        matches!(self.skill_meta_mode, SkillMetaMode::Protected)
     }
 
     /// Override the identity resolver used together with
@@ -892,11 +923,11 @@ impl Filesystem for SkillFs {
     // callers see a deterministic, non-leaking answer regardless of whether
     // a physical backing path happens to exist.
     //
-    // `.skill-meta/**` mutations route through the existing
-    // `SkillMetaProtectionPolicy` gate via `enforce_skill_meta`, which emits a
-    // `PolicyDenied` event and surfaces `EACCES`. Reads/list under
-    // `.skill-meta/**` follow physical errno so administrators can still
-    // inspect metadata xattrs through the mount.
+    // In protected mode, `.skill-meta/**` mutations route through the
+    // existing `SkillMetaProtectionPolicy` gate via `enforce_skill_meta`,
+    // which emits a `PolicyDenied` event and surfaces `EACCES`. In
+    // passthrough mode all metadata xattr operations follow the physical
+    // filesystem rules.
     //
     // Physical passthrough goes through the no-follow xattr syscalls
     // (`lgetxattr` / `lsetxattr` / `llistxattr` / `lremovexattr`) to match

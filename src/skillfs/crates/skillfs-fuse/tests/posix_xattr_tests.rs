@@ -3,8 +3,9 @@
 //! Package T3 enables Linux `user.*` xattrs on **ordinary passthrough leaves**
 //! under a normal skill. Every other surface — virtual paths, compiled
 //! `SKILL.md`, `skill-discover`, lifecycle reserved roots — keeps deterministic
-//! "unsupported" semantics, and `.skill-meta/**` mutations remain blocked by
-//! the existing `SkillMetaProtectionPolicy` gate. Other xattr namespaces
+//! "unsupported" semantics. Resolver-enabled mounts keep `.skill-meta/**`
+//! mutations blocked by the existing `SkillMetaProtectionPolicy` gate. Other
+//! xattr namespaces
 //! (`security.*`, `trusted.*`, `system.*`, missing prefix) are rejected up
 //! front with `EOPNOTSUPP` so SkillFS does not become a back door for kernel
 //! / LSM-owned categories.
@@ -322,6 +323,96 @@ fn test_user_xattr_set_get_list_remove_on_passthrough_file() {
     );
 }
 
+#[test]
+fn test_user_xattr_set_get_list_remove_on_passthrough_skill_meta() {
+    skip_if_no_fuse!();
+
+    let fx = match mount_xattr_capable(|src| {
+        create_skill_dir(src, "alpha");
+        std::fs::create_dir_all(src.join("alpha/.skill-meta")).expect("seed .skill-meta");
+        std::fs::write(src.join("alpha/.skill-meta/manifest.json"), b"{}\n")
+            .expect("seed metadata");
+    }) {
+        Some(fx) => fx,
+        None => return,
+    };
+    let source_meta = fx.source_skill_path("alpha").join(".skill-meta");
+    if skip_if_user_xattr_unsupported(&source_meta) {
+        return;
+    }
+
+    let meta = fx.passthrough_path("alpha", ".skill-meta");
+    lsetxattr(&meta, "user.skillfs.meta", b"meta-attr", 0)
+        .expect("setxattr on passthrough .skill-meta");
+    assert_eq!(
+        lgetxattr(&meta, "user.skillfs.meta").expect("getxattr on .skill-meta"),
+        b"meta-attr"
+    );
+    assert!(
+        llistxattr(&meta)
+            .expect("listxattr on .skill-meta")
+            .contains(&"user.skillfs.meta".to_string())
+    );
+    lremovexattr(&meta, "user.skillfs.meta").expect("removexattr on .skill-meta");
+    assert_eq!(
+        lgetxattr(&meta, "user.skillfs.meta").expect_err("getxattr after remove"),
+        libc::ENODATA
+    );
+}
+
+#[test]
+fn test_hermes_skill_meta_xattr_roundtrip_in_passthrough_mode() {
+    skip_if_no_fuse!();
+
+    let fx = MountFixture::normal_hermes(|src| {
+        create_skill_dir(&src.join("apple"), "apple-notes");
+        std::fs::create_dir_all(src.join("apple/apple-notes/.skill-meta"))
+            .expect("seed Hermes metadata");
+    });
+    let source_meta = fx
+        .source_skill_path("apple/apple-notes")
+        .join(".skill-meta");
+    if skip_if_user_xattr_unsupported(&source_meta) {
+        return;
+    }
+    let meta = fx.skill_path("apple/apple-notes").join(".skill-meta");
+
+    lsetxattr(&meta, "user.skillfs.hermes", b"nested", 0)
+        .expect("setxattr on nested passthrough metadata");
+    assert_eq!(
+        lgetxattr(&meta, "user.skillfs.hermes").expect("get nested metadata xattr"),
+        b"nested"
+    );
+    lremovexattr(&meta, "user.skillfs.hermes").expect("remove nested metadata xattr");
+    assert_eq!(
+        lgetxattr(&meta, "user.skillfs.hermes").expect_err("removed xattr must be absent"),
+        libc::ENODATA
+    );
+}
+
+#[test]
+fn test_hermes_skill_meta_xattr_hidden_in_protected_mode() {
+    skip_if_no_fuse!();
+
+    let fx = MountFixture::normal_hermes_with_active_resolver(|src| {
+        create_skill_dir(&src.join("apple"), "apple-notes");
+        std::fs::create_dir_all(src.join("apple/apple-notes/.skill-meta"))
+            .expect("seed Hermes metadata");
+    });
+    let meta = fx.skill_path("apple/apple-notes").join(".skill-meta");
+
+    assert_eq!(
+        lsetxattr(&meta, "user.skillfs.hermes", b"blocked", 0)
+            .expect_err("protected nested metadata must be hidden"),
+        libc::ENOENT
+    );
+    assert_eq!(
+        lgetxattr(&meta, "user.skillfs.hermes")
+            .expect_err("protected nested metadata xattr must be hidden"),
+        libc::ENOENT
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 2. Ordinary passthrough directory: full user.* roundtrip
 // ─────────────────────────────────────────────────────────────────────────────
@@ -423,16 +514,15 @@ fn test_unsupported_namespaces_rejected_deterministically() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. `.skill-meta/**` mutation rejected with EACCES even for user.*.
-//    Read/list passes through to the physical errno (T3 choice — see
-//    callback comment in `lib.rs`).
+// 4. `.skill-meta/**` mutation rejected with EACCES even for user.* when the
+//    active resolver enables protected mode.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
 fn test_skill_meta_xattr_mutation_rejected_with_eacces() {
     skip_if_no_fuse!();
 
-    let fx = MountFixture::normal(|src| {
+    let fx = MountFixture::normal_with_active_resolver(|src| {
         create_skill_dir(src, "alpha");
     });
     std::fs::create_dir_all(fx.source_skill_path("alpha").join(".skill-meta"))

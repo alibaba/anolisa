@@ -18,7 +18,7 @@ Use SkillFS when you need:
 - default-view filtering plus `skill-discover` for secondary skills;
 - in-place policy and audit coverage for production access;
 - Skill Ledger integration for fallback and hidden runtime views;
-- `.skill-meta` protection from ordinary agent processes.
+- `.skill-meta` protection when a resolver or trusted writer integration is enabled.
 
 Do not in-place mount an existing hub workspace directly when that workspace
 also contains registry metadata such as `.hub` directories or external
@@ -65,8 +65,9 @@ SkillFS expects a source directory with one skill per child directory:
 The directory name is the canonical runtime skill id. The `name` field inside
 `SKILL.md` is display metadata and does not override the directory key.
 
-Do not treat `.skill-meta` as ordinary agent data. It stores SkillFS and ledger
-metadata and is hidden from ordinary callers.
+Do not use `.skill-meta` for agent application data. Security integrations use
+it for SkillFS and ledger metadata; without such an integration it remains an
+ordinary POSIX passthrough subtree for compatibility.
 
 ## Quick Start
 
@@ -225,8 +226,23 @@ In-place authoring supports newly created skill directories. A fresh directory
 does not expose a phantom `SKILL.md` before the manifest exists; once
 `SKILL.md` is written, SkillFS reparses it and exposes the compiled view.
 Pending or direct-final installs can preserve ordinary top-level skill
-directory metadata such as mode, timestamps, and ownership. `.skill-meta/**`
-remains restricted to trusted metadata paths.
+directory metadata such as mode, timestamps, and ownership.
+
+### Metadata Protection Modes
+
+`.skill-meta/**` mode is selected once per mount from the configured security
+integrations; `--security-mode` only selects in-place mount topology.
+
+| Active resolver | Enabled trusted writer | `.skill-meta/**` behavior |
+| --- | --- | --- |
+| no | no | Ordinary POSIX passthrough, including mutation, links, and `user.*` xattrs |
+| yes | either | Protected; hidden from untrusted callers and mutations require the trusted path |
+| no | yes | Protected; ordinary callers are hidden and the configured writer can perform supported metadata mutations |
+
+Migration note: deployments that previously relied on `.skill-meta` being
+implicitly hidden must enable `--security` with a resolver/activation mode or
+configure a trusted writer before exposing the mount to an agent. Startup
+diagnostics explicitly report passthrough mode when neither signal is present.
 
 Without security integration, skills read from the live source tree. When
 security activation is enabled, visibility is constrained by the active
@@ -688,7 +704,7 @@ shares the same file for compatibility.
 | --- | --- |
 | `--foreground` | Run in the foreground |
 | `--managed` | Start a detached supervised mount |
-| `--security-mode` | Require source and mountpoint to be the same path |
+| `--security-mode` | Require source and mountpoint to be the same path; does not itself protect `.skill-meta` |
 | `--skill-layout <MODE>` | `auto` (default, detect Hermes from source-root markers), `flat`, or `hermes`; `hermes` is incompatible with `--decision-command` |
 | `--security` | Enable security integration |
 | `--activation-mode file` | Consume activation JSON/xattr state |
@@ -722,8 +738,10 @@ Fallback intentionally reads a trusted snapshot under `.skill-meta`, not the
 live source tree.
 
 **`.skill-meta` is not listed.**
-This is expected for ordinary callers. Trusted peers can access metadata through
-the configured trusted path.
+An active resolver or enabled trusted writer placed the mount in protected
+mode. Trusted peers can access metadata through the configured trusted path. If
+neither integration is configured, `.skill-meta` is ordinary passthrough data;
+check the startup diagnostic if that is not what you observe.
 
 **Notify socket failures appear in logs.**
 Notify failures are warnings and do not stop FUSE service, but the external

@@ -35,7 +35,8 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
 use skillfs_fuse::security::{
-    AuditRuntimeConfig, SecurityModeConfig, SecurityModeError, SkillEventSink,
+    ActiveSkillResolver, ActiveTarget, AuditRuntimeConfig, SecurityModeConfig, SecurityModeError,
+    SkillEventSink,
 };
 use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
 
@@ -78,6 +79,15 @@ impl SecurityModeMount {
         security: &SecurityModeConfig,
         audit: &AuditRuntimeConfig,
     ) -> Result<Self, SetupError> {
+        Self::in_place_with_protection(seed, security, audit, false)
+    }
+
+    fn in_place_with_protection(
+        seed: impl FnOnce(&Path),
+        security: &SecurityModeConfig,
+        audit: &AuditRuntimeConfig,
+        protect_skill_meta: bool,
+    ) -> Result<Self, SetupError> {
         let source = tempfile::tempdir().expect("source tempdir");
         seed(source.path());
         let mount_path = source.path().to_path_buf();
@@ -91,6 +101,16 @@ impl SecurityModeMount {
         let mut store = SkillStore::new();
         store.load_from_directory(source.path(), &ParseConfig::default());
         let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+        let active_resolver = protect_skill_meta.then(|| {
+            let resolver = ActiveSkillResolver::new(source.path().to_path_buf());
+            resolver.set(
+                "alpha",
+                ActiveTarget::Current {
+                    source_dir: source.path().join("alpha"),
+                },
+            );
+            Arc::new(resolver)
+        });
 
         let handle = mount_background_configured(
             &mount_path,
@@ -100,6 +120,7 @@ impl SecurityModeMount {
             true, // in_place
             MountConfig {
                 event_sink: sink,
+                active_resolver,
                 ..MountConfig::default()
             },
         )
@@ -227,6 +248,34 @@ fn security_mode_accepts_in_place_mount() {
     assert_eq!(read.as_slice(), b"hello");
 }
 
+/// `--security-mode` selects in-place topology; it does not by itself enable
+/// activation/trusted-writer metadata protection.
+#[test]
+fn security_mode_without_security_integration_passes_through_skill_meta() {
+    skip_if_no_fuse!();
+
+    let security = SecurityModeConfig::enabled_mode();
+    let audit = AuditRuntimeConfig::disabled();
+    let mount = SecurityModeMount::in_place(
+        |dir| {
+            create_skill_dir(dir, "alpha");
+            std::fs::create_dir_all(dir.join("alpha/.skill-meta"))
+                .expect("seed metadata directory");
+        },
+        &security,
+        &audit,
+    )
+    .expect("security mode must accept in-place mount");
+    let manifest = mount.skill_path("alpha").join(".skill-meta/manifest.json");
+
+    std::fs::write(&manifest, b"{\"mode\":\"passthrough\"}")
+        .expect("metadata is ordinary without a security integration");
+    assert_eq!(
+        std::fs::read_to_string(&manifest).expect("read metadata through mount"),
+        "{\"mode\":\"passthrough\"}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 2. Security mode rejects non-in-place mount BEFORE the FUSE event loop
 // ---------------------------------------------------------------------------
@@ -333,13 +382,14 @@ fn security_mode_composes_with_audit_runtime_config() {
     assert!(audit.is_enabled());
 
     {
-        let mount = SecurityModeMount::in_place(
+        let mount = SecurityModeMount::in_place_with_protection(
             |dir| {
                 create_skill_dir(dir, "alpha");
                 std::fs::create_dir_all(dir.join("alpha").join(".skill-meta")).unwrap();
             },
             &security,
             &audit,
+            true,
         )
         .expect("security mode + audit must compose on an in-place mount");
 

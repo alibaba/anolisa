@@ -156,9 +156,9 @@ fn default_runtime_config_does_not_enable_audit_logging() {
 /// Enabling audit through the runtime config records a representative event
 /// to the on-disk JSONL log via a real FUSE mount.
 ///
-/// We deliberately trigger an S1 `.skill-meta` denial because that path also
-/// exercises the policy → audit pipeline that S2's runtime wiring is meant
-/// to expose to operators.
+/// We deliberately write `.skill-meta` in the no-integration passthrough mode
+/// because that path exercises the runtime sink on the same metadata surface
+/// whose protected behavior is covered by resolver-enabled tests.
 #[test]
 fn explicit_audit_path_creates_jsonl_log_and_records_event() {
     skip_if_no_fuse!();
@@ -178,10 +178,10 @@ fn explicit_audit_path_creates_jsonl_log_and_records_event() {
         )
         .expect("enabled runtime config must mount cleanly");
 
-        // Untrusted .skill-meta access returns ENOENT.
+        // No resolver and no enabled trusted writer means metadata passes
+        // through as an ordinary physical subtree.
         let target = mount.passthrough("alpha", ".skill-meta/manifest.json");
-        let err = std::fs::write(&target, b"x").expect_err("must deny .skill-meta");
-        assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+        std::fs::write(&target, b"x").expect(".skill-meta passthrough write");
 
         // Produce a passthrough write to confirm allowed events flow
         // through the audit sink.
@@ -308,10 +308,9 @@ fn zero_queue_capacity_uses_default_capacity_through_runtime_helper() {
         )
         .expect("zero-capacity runtime config must mount cleanly");
 
-        // Untrusted .skill-meta access returns ENOENT.
+        // Metadata is also passthrough without either integration signal.
         let target = mount.passthrough("alpha", ".skill-meta/manifest.json");
-        let err = std::fs::write(&target, b"x").expect_err("must deny .skill-meta");
-        assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+        std::fs::write(&target, b"x").expect(".skill-meta passthrough write");
         // Trigger a passthrough event to confirm audit plumbing works.
         let _ = std::fs::write(mount.source_path().join("touchstone"), b"x");
         let path = mount.passthrough("alpha", "notes.txt");

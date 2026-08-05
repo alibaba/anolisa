@@ -28,8 +28,8 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
 use skillfs_fuse::security::{
-    AuditConfig, InMemoryEventSink, JsonlFileAuditSink, SkillEventAction, SkillEventKind,
-    SkillEventSink,
+    ActiveSkillResolver, ActiveTarget, AuditConfig, InMemoryEventSink, JsonlFileAuditSink,
+    SkillEventAction, SkillEventKind, SkillEventSink,
 };
 use skillfs_fuse::{MountConfig, MountHandle, MountOptions, mount_background_configured};
 
@@ -47,6 +47,18 @@ struct AuditedMount {
 
 impl AuditedMount {
     fn new(seed: impl FnOnce(&Path), sink: Arc<dyn SkillEventSink>) -> Self {
+        Self::new_with_resolver(seed, sink, None)
+    }
+
+    fn new_protected(seed: impl FnOnce(&Path), sink: Arc<dyn SkillEventSink>) -> Self {
+        Self::new_with_resolver(seed, sink, Some("alpha"))
+    }
+
+    fn new_with_resolver(
+        seed: impl FnOnce(&Path),
+        sink: Arc<dyn SkillEventSink>,
+        protected_skill: Option<&str>,
+    ) -> Self {
         let source = tempfile::tempdir().expect("source tempdir");
         seed(source.path());
         let mountpoint = tempfile::tempdir().expect("mount tempdir");
@@ -54,6 +66,16 @@ impl AuditedMount {
         let mut store = SkillStore::new();
         store.load_from_directory(source.path(), &ParseConfig::default());
         let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+        let active_resolver = protected_skill.map(|skill| {
+            let resolver = ActiveSkillResolver::new(source.path().to_path_buf());
+            resolver.set(
+                skill,
+                ActiveTarget::Current {
+                    source_dir: source.path().join(skill),
+                },
+            );
+            Arc::new(resolver)
+        });
 
         let handle = mount_background_configured(
             mountpoint.path(),
@@ -63,6 +85,7 @@ impl AuditedMount {
             false,
             MountConfig {
                 event_sink: Some(sink),
+                active_resolver,
                 ..MountConfig::default()
             },
         )
@@ -122,7 +145,7 @@ fn skill_meta_denial_records_policy_denied_event_with_attribution() {
     skip_if_no_fuse!();
 
     let sink = Arc::new(InMemoryEventSink::new());
-    let mount = AuditedMount::new(
+    let mount = AuditedMount::new_protected(
         |dir| {
             create_skill_dir(dir, "alpha");
             // Pre-create the meta dir on the source so the FUSE-level write
@@ -232,12 +255,11 @@ fn passthrough_behavior_unchanged_with_audit_sink_attached() {
     // Removing must succeed.
     std::fs::remove_file(&path).expect("plain unlink must succeed");
 
-    // Untrusted .skill-meta access returns ENOENT.
+    // Passthrough mode also applies to metadata when no integration signal is
+    // configured.
     std::fs::create_dir_all(mount.source_path().join("alpha").join(".skill-meta")).unwrap();
     let meta_target = mount.passthrough("alpha", ".skill-meta/sig.json");
-    let err =
-        std::fs::write(&meta_target, b"x").expect_err(".skill-meta write must still be denied");
-    assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+    std::fs::write(&meta_target, b"x").expect(".skill-meta write must pass through");
 }
 
 #[test]
@@ -252,7 +274,7 @@ fn jsonl_file_sink_records_events_through_real_mount() {
     );
 
     {
-        let mount = AuditedMount::new(
+        let mount = AuditedMount::new_protected(
             |dir| {
                 create_skill_dir(dir, "alpha");
                 std::fs::create_dir_all(dir.join("alpha").join(".skill-meta")).unwrap();

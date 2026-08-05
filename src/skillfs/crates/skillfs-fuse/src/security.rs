@@ -79,8 +79,9 @@
 //!   (see the CLI `--audit-log` flag).
 //!
 //! Package S0 added the seam. Package S1 plugs the first real policy,
-//! [`policy::SkillMetaProtectionPolicy`], into `SkillFs` as the default so
-//! `.skill-meta/**` is read-visible but mutation-protected by default.
+//! [`policy::SkillMetaProtectionPolicy`], into `SkillFs`; mount integration
+//! state now selects whether that metadata gate is protected or ordinary
+//! passthrough while the policy remains the default implementation.
 //! Package S2 adds the audit sink; the default `SkillFs` sink is still
 //! [`event::NoopEventSink`]. Package M0 layers the security-mode gate on
 //! top so audit/policy guarantees can be enforced by refusing to start a
