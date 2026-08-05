@@ -781,13 +781,69 @@ fn check_dep_missing_binary() {
 }
 
 #[test]
-fn find_spec_path_error_when_none_exists() {
-    // Override env to a nonexistent path and clear defaults
-    let _guard = EnvGuard::set_spec("/nonexistent/spec.json");
-    let result = find_spec_path();
-    // Result depends on whether any default path exists on the system;
-    // the test exercises the code path without asserting a fixed outcome.
-    let _ = result;
+fn spec_path_candidates_ordered_correctly() {
+    // Pure-function check: no file-system dependency, deterministic.
+    // Env override is first when set.
+    let _guard = EnvGuard::set_spec("/custom/spec.json");
+    let c = spec_path_candidates();
+    assert_eq!(c[0], "/custom/spec.json");
+
+    // All four /usr/local paths (FHS + legacy) must be present.
+    assert!(
+        c.iter()
+            .any(|p| p == "/usr/local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json"),
+        "missing /usr/local FHS path in {c:?}"
+    );
+    assert!(
+        c.iter()
+            .any(|p| p == "/usr/local/share/anolisa/adapters/tokenless/tool-ready-spec.json"),
+        "missing /usr/local legacy path in {c:?}"
+    );
+
+    // FHS paths must precede their legacy mirrors.
+    let fhs_local = c
+        .iter()
+        .position(|p| p.contains("/usr/local/share/anolisa/adapters/tokenless/common/"))
+        .unwrap();
+    let legacy_local = c
+        .iter()
+        .position(|p| p == "/usr/local/share/anolisa/adapters/tokenless/tool-ready-spec.json")
+        .unwrap();
+    assert!(
+        fhs_local < legacy_local,
+        "FHS /usr/local must come before legacy /usr/local"
+    );
+}
+
+#[test]
+fn fix_script_candidates_ordered_correctly() {
+    // Pure-function check: covers the auto_fix candidate list to prevent
+    // the two lists (spec + fix script) from drifting apart.
+    let c = fix_script_candidates();
+
+    assert!(
+        c.iter().any(|p| p
+            == "/usr/local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh"),
+        "missing /usr/local FHS fix-script path in {c:?}"
+    );
+    assert!(
+        c.iter().any(|p| p
+            == "/usr/local/share/anolisa/adapters/tokenless/tokenless-env-fix.sh"),
+        "missing /usr/local legacy fix-script path in {c:?}"
+    );
+
+    let fhs_local = c
+        .iter()
+        .position(|p| p.contains("/usr/local/share/anolisa/adapters/tokenless/common/"))
+        .unwrap();
+    let legacy_local = c
+        .iter()
+        .position(|p| p == "/usr/local/share/anolisa/adapters/tokenless/tokenless-env-fix.sh")
+        .unwrap();
+    assert!(
+        fhs_local < legacy_local,
+        "FHS /usr/local must come before legacy /usr/local"
+    );
 }
 
 #[test]

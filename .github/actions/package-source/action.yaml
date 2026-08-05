@@ -173,6 +173,13 @@ runs:
 
         rm -rf third_party/rtk/.git
 
+    - name: Generate tokenless component contract
+      if: inputs.component == 'tokenless'
+      shell: bash
+      run: |
+        set -euo pipefail
+        make -C /tmp/build/${ARCHIVE_NAME} generate-component-contract
+
     # -----------------------------------------------------------------
     # Step 3.2: Prepare generated plugin assets
     #
@@ -232,6 +239,24 @@ runs:
         mkdir -p /tmp/archives
         tar -czf "/tmp/archives/${ARCHIVE_FILE}" \
           -C /tmp/build "${ARCHIVE_NAME}"
+
+    - name: Verify tokenless component contract in archive
+      if: inputs.component == 'tokenless'
+      shell: bash
+      run: |
+        set -euo pipefail
+        ARCHIVE="/tmp/archives/${ARCHIVE_FILE}"
+        EXPECTED_VERSION=$(grep '^version' "/tmp/build/${ARCHIVE_NAME}/Cargo.toml" | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+        CONTRACT_VERSION=$(tar -O -xzf "$ARCHIVE" "${ARCHIVE_NAME}/.anolisa/component.toml" | sed -n 's/^version = "\([^"]*\)".*/\1/p' | head -1)
+        if [ -z "$CONTRACT_VERSION" ]; then
+          echo "ERROR: .anolisa/component.toml is missing from the archive or has no version"
+          exit 1
+        fi
+        if [ "$CONTRACT_VERSION" != "$EXPECTED_VERSION" ]; then
+          echo "ERROR: archive contract version ${CONTRACT_VERSION} does not match Cargo.toml ${EXPECTED_VERSION}"
+          exit 1
+        fi
+        echo "Archive contract version verified: ${CONTRACT_VERSION}"
 
     # -----------------------------------------------------------------
     # Step 4: Sign archive (os-skills only)

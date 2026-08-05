@@ -77,13 +77,34 @@ fn raw_cli_approval_application_cursor_arrow_updates_focus() {
 /// through the same resolution pipeline without further cards.
 #[test]
 fn raw_cli_turn_batch_consent_sweeps_queued_requests() {
-    let output = run_raw_cli_ask_with_delayed_input(vec![
-        (b"?? stream batch tool approval\n".to_vec(), Duration::ZERO),
-        // Move to "Allow all this turn" (index 1) once the card is up.
-        (b"\x1b[C".to_vec(), Duration::from_millis(5_000)),
-        (b"\n".to_vec(), Duration::from_millis(200)),
-        (b"exit\n".to_vec(), Duration::from_millis(3_000)),
-    ]);
+    assert_turn_batch_consent_serializes_handoffs(&[]);
+}
+
+#[test]
+fn raw_cli_zsh_turn_batch_consent_serializes_handoffs() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+    assert_turn_batch_consent_serializes_handoffs(&["--shell", "zsh"]);
+}
+
+fn assert_turn_batch_consent_serializes_handoffs(args: &[&str]) {
+    let output = run_raw_cli_ask_with_args_and_marker_input(
+        args,
+        &[
+            ("cosh-osc$", b"?? stream batch tool approval\n"),
+            // Move to "Allow all this turn" (index 1) once the card is up.
+            ("Approval req-1", b"\x1b[C\n"),
+            (
+                "Command result analysis for req-3",
+                b"?? batch-handoff-follow-up\n",
+            ),
+            (
+                "Received shell prompt request: ?? batch-handoff-follow-up",
+                b"exit\n",
+            ),
+        ],
+    );
 
     assert!(output.contains("Allow all this turn"), "{output}");
     assert!(output.contains("Approved for this turn req-1"), "{output}");
@@ -92,6 +113,10 @@ fn raw_cli_turn_batch_consent_sweeps_queued_requests() {
     // The swept requests never present their own cards.
     assert!(!output.contains("Approval req-2"), "{output}");
     assert!(!output.contains("Approval req-3"), "{output}");
+    assert!(
+        output.contains("Received shell prompt request: ?? batch-handoff-follow-up"),
+        "a follow-up Agent run must start after every batched handoff closes: {output}"
+    );
     assert!(!output.contains("bash:"));
 }
 

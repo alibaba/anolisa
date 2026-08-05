@@ -8,6 +8,7 @@
 //! (`running`) terminates the loop on shutdown.
 
 pub mod atif;
+pub mod codex;
 pub mod discovery;
 pub mod qoder;
 pub mod store;
@@ -130,7 +131,15 @@ fn process_session(store: &TrajectoryStore, session: &DiscoveredSession) -> Resu
         anyhow::bail!("no valid JSONL events");
     }
 
-    let mut trajectory = atif::convert_qoder_events(&events, &session.source)?;
+    // Codex rollout files use an envelope schema (`{timestamp,type,payload}`)
+    // that needs a dedicated converter; everything else shares the
+    // Claude-style converter.
+    let is_codex = session.source == "codex" || codex::is_codex_rollout(&events);
+    let mut trajectory = if is_codex {
+        codex::convert_codex_events(&events, &session.source)?
+    } else {
+        atif::convert_qoder_events(&events, &session.source)?
+    };
     if trajectory.steps.is_empty() {
         let _ = store.set_file_state(&file_path, file_size, file_mtime_ns);
         anyhow::bail!(
@@ -142,10 +151,21 @@ fn process_session(store: &TrajectoryStore, session: &DiscoveredSession) -> Resu
     // canonical per-file identity; keep the ATIF document aligned with the
     // primary-key column so both always agree.
     trajectory.session_id = Some(session.session_id.clone());
-    // Qoder-private info (cwd, message counts, project) rides in `extra`.
-    let private = qoder::extract_private_metadata(&events, &session.project);
+    // Agent-private info (cwd, message counts, project) rides in `extra`.
+    let private = if is_codex {
+        codex::extract_private_metadata(&events, &session.project)
+    } else {
+        qoder::extract_private_metadata(&events, &session.project)
+    };
     let extra = trajectory.extra.get_or_insert_with(Default::default);
     extra.extend(private);
+    // Codex's flat layout has no per-project directories; use the project
+    // derived from the session cwd instead of the "(default)" placeholder.
+    let project = extra
+        .get("project")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| session.project.clone());
 
     let atif_json = serde_json::to_string(&trajectory.to_json_value()?)?;
     // Derived preview columns reuse the same extractor as the legacy-row
@@ -176,7 +196,7 @@ fn process_session(store: &TrajectoryStore, session: &DiscoveredSession) -> Resu
         first_user_message,
         last_user_message,
         atif_json,
-        project: session.project.clone(),
+        project,
         source: session.source.clone(),
         is_subagent: session.is_subagent,
         file_path,
@@ -312,5 +332,41 @@ mod tests {
 
         scan_once(&store, &config);
         assert_eq!(store.count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_scan_once_routes_codex_rollout() {
+        let base = tmp_dir("codex-route");
+        // Flat Codex layout: <root>/.codex/sessions/YYYY/MM/rollout-*.jsonl
+        let sessions_root = base.join(".codex").join("sessions");
+        let nested = sessions_root.join("2026").join("08");
+        std::fs::create_dir_all(&nested).unwrap();
+        let content = concat!(
+            "{\"timestamp\":\"2026-08-03T09:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s-1\",\"cwd\":\"/w/demo-app\",\"cli_version\":\"0.146.0\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hi\"}}\n",
+            "{\"timestamp\":\"2026-08-03T09:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}}\n",
+        );
+        std::fs::write(nested.join("rollout-c0ffee.jsonl"), content).unwrap();
+
+        let store = TrajectoryStore::new_with_path(&base.join("t.db")).unwrap();
+        let config = CollectorConfig {
+            scan_interval_secs: 1,
+            scan_dirs: Some(vec![sessions_root]),
+            db_path: base.join("t.db"),
+        };
+
+        scan_once(&store, &config);
+        assert_eq!(store.count().unwrap(), 1);
+
+        let rec = store.get("rollout-c0ffee").unwrap().unwrap();
+        assert_eq!(rec.source, "codex");
+        // Codex has no per-project directories: the project column must come
+        // from the session cwd, not the "(default)" discovery placeholder.
+        assert_eq!(rec.project, "demo-app");
+        let doc: serde_json::Value = serde_json::from_str(&rec.atif_json).unwrap();
+        assert_eq!(doc["agent"]["version"], "0.146.0");
+        assert_eq!(doc["extra"]["cwd"], "/w/demo-app");
+        assert_eq!(doc["steps"].as_array().unwrap().len(), 2);
+        assert_eq!(rec.first_user_message.as_deref(), Some("hi"));
     }
 }

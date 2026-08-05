@@ -660,6 +660,33 @@ pub fn handle_one_with_query(
     install_component_with_deps(&component, &args, ctx, query, &txn, false)
 }
 
+/// [`handle_one_with_query`] with injected host facts, for tests pinning
+/// package-family-sensitive behavior (deb degrade vs rpm/unknown fail
+/// closed) independently of the runner's real /etc/os-release.
+pub fn handle_one_with_query_env(
+    component: String,
+    args: InstallArgs,
+    ctx: &CliContext,
+    env: &anolisa_env::EnvFacts,
+    query: &dyn PackageQuery,
+) -> Result<InstallOutcome, CliError> {
+    handle_one_with_query_env_rpmdb(component, args, ctx, env, &RpmdbProbe::absent(), query)
+}
+
+/// Variant with the host rpmdb evidence probe injected, for tests staging
+/// database files under isolated roots instead of the runner's real host.
+pub fn handle_one_with_query_env_rpmdb(
+    component: String,
+    args: InstallArgs,
+    ctx: &CliContext,
+    env: &anolisa_env::EnvFacts,
+    rpmdb: &RpmdbProbe,
+    query: &dyn PackageQuery,
+) -> Result<InstallOutcome, CliError> {
+    let txn = NoTxn;
+    install_component_with_deps_and_env(&component, &args, ctx, env, rpmdb, query, &txn, false)
+}
+
 /// Load the v5 store the pipeline writes, for post-install assertions.
 pub fn load_store(ctx: &CliContext) -> anolisa_core::state_store::StateStore {
     let layout = common::resolve_layout(ctx);
@@ -687,6 +714,15 @@ pub struct FakeInstaller {
     pub lock_probe: Option<PathBuf>,
     pub lock_was_held: Cell<bool>,
     package_appears_under_lock_path: Option<PathBuf>,
+    /// Lock path after which rpm tooling (and the external RPM) exists: every
+    /// query fails with `CommandMissing` until the install lock is held, then
+    /// behaves as if the package was installed while tooling was appearing.
+    tooling_appears_under_lock_path: Option<PathBuf>,
+    /// `(lock, rpmdb file)` simulating an external process that installs
+    /// RPMs with a binary this process cannot see: queries always fail with
+    /// `CommandMissing`, but once the install lock is held the rpmdb file
+    /// is written before the failure is returned.
+    rpmdb_appears_under_lock: Option<(PathBuf, PathBuf)>,
     /// Optional installed.toml path replaced with a directory after dnf.
     pub block_state_save: Option<PathBuf>,
     pending_race: Option<(PathBuf, PathBuf, String)>,
@@ -708,6 +744,8 @@ impl FakeInstaller {
             lock_probe: None,
             lock_was_held: Cell::new(false),
             package_appears_under_lock_path: None,
+            tooling_appears_under_lock_path: None,
+            rpmdb_appears_under_lock: None,
             block_state_save: None,
             pending_race: None,
             pending_race_injected: Cell::new(false),
@@ -740,6 +778,41 @@ impl FakeInstaller {
     pub fn package_appears_under_lock(mut self, path: PathBuf) -> Self {
         self.package_appears_under_lock_path = Some(path);
         self
+    }
+    /// Simulate a host without rpm tooling at planning time that gains both
+    /// the tooling and an external RPM before the install lock is taken.
+    pub fn tooling_appears_under_lock(mut self, path: PathBuf) -> Self {
+        self.tooling_appears_under_lock_path = Some(path);
+        self
+    }
+    /// Simulate an rpmdb growing behind this process's back: rpm tooling
+    /// stays invisible to every query, but under the install lock the
+    /// database file appears on disk.
+    pub fn rpmdb_appears_under_lock(mut self, lock: PathBuf, rpmdb_file: PathBuf) -> Self {
+        self.rpmdb_appears_under_lock = Some((lock, rpmdb_file));
+        self
+    }
+    /// `CommandMissing` while the install lock is free in the
+    /// tooling-appears-under-lock mode; `None` otherwise.
+    fn tooling_still_missing(&self) -> Option<PackageQueryError> {
+        if let Some((lock, rpmdb_file)) = &self.rpmdb_appears_under_lock {
+            if matches!(InstallLock::acquire(lock), Err(LockError::Held { .. })) {
+                std::fs::create_dir_all(rpmdb_file.parent().expect("rpmdb dir"))
+                    .expect("create rpmdb dir");
+                std::fs::write(rpmdb_file, b"").expect("write rpmdb file");
+            }
+            return Some(PackageQueryError::CommandMissing {
+                command: "rpm".to_string(),
+            });
+        }
+        let path = self.tooling_appears_under_lock_path.as_ref()?;
+        if matches!(InstallLock::acquire(path), Err(LockError::Held { .. })) {
+            None
+        } else {
+            Some(PackageQueryError::CommandMissing {
+                command: "rpm".to_string(),
+            })
+        }
     }
     pub fn failing_state_save(mut self, path: PathBuf) -> Self {
         self.block_state_save = Some(path);
@@ -780,8 +853,14 @@ impl FakeInstaller {
 impl PackageQuery for FakeInstaller {
     fn query_installed(&self, package: &str) -> Result<Option<PackageInfo>, PackageQueryError> {
         self.maybe_inject_pending_journal();
+        if let Some(err) = self.tooling_still_missing() {
+            return Err(err);
+        }
         if package != self.package {
             return Ok(None);
+        }
+        if self.tooling_appears_under_lock_path.is_some() {
+            *self.installed.borrow_mut() = Some(self.installs_to.clone());
         }
         if let Some(path) = &self.package_appears_under_lock_path
             && matches!(InstallLock::acquire(path), Err(LockError::Held { .. }))
@@ -806,6 +885,9 @@ impl PackageQuery for FakeInstaller {
     }
 
     fn what_provides_installed(&self, capability: &str) -> Result<Vec<String>, PackageQueryError> {
+        if let Some(err) = self.tooling_still_missing() {
+            return Err(err);
+        }
         if capability == self.component_capability() && self.installed.borrow().is_some() {
             Ok(vec![self.package.clone()])
         } else {
@@ -814,6 +896,9 @@ impl PackageQuery for FakeInstaller {
     }
 
     fn what_provides_available(&self, capability: &str) -> Result<Vec<String>, PackageQueryError> {
+        if let Some(err) = self.tooling_still_missing() {
+            return Err(err);
+        }
         if capability == self.component_capability() {
             Ok(vec![self.package.clone()])
         } else {
@@ -1126,6 +1211,7 @@ pub fn linux_env() -> anolisa_env::EnvFacts {
         kernel: Some("5.10.0".to_string()),
         pkg_base: Some("alinux4".to_string()),
         os_id: Some("alinux".to_string()),
+        os_id_like: None,
         os_version: Some("4".to_string()),
         btf: Some(true),
         cap_bpf: Some(true),
@@ -1133,6 +1219,44 @@ pub fn linux_env() -> anolisa_env::EnvFacts {
         user: "root".to_string(),
         uid: 0,
         home: PathBuf::from("/root"),
+    }
+}
+
+/// Host facts for a deb-family host (Ubuntu), with `os`/`arch` matching the
+/// running machine so raw artifact entries built by the repo fixtures still
+/// resolve. Injected into planning to cover the rpm-tooling degrade branch
+/// deterministically on any CI runner.
+pub fn deb_host_env() -> anolisa_env::EnvFacts {
+    anolisa_env::EnvFacts {
+        pkg_base: None,
+        os_id: Some("ubuntu".to_string()),
+        os_id_like: Some("debian".to_string()),
+        os_version: Some("24.04".to_string()),
+        ..anolisa_env::EnvService::detect()
+    }
+}
+
+/// Host facts for an rpm-family host (alinux), `os`/`arch` matching the
+/// running machine. The fail-closed counterpart of [`deb_host_env`].
+pub fn rpm_host_env() -> anolisa_env::EnvFacts {
+    anolisa_env::EnvFacts {
+        pkg_base: Some("alinux4".to_string()),
+        os_id: Some("alinux".to_string()),
+        os_id_like: None,
+        os_version: Some("4".to_string()),
+        ..anolisa_env::EnvService::detect()
+    }
+}
+
+/// Host facts for a distro outside the known rpm/deb families; missing rpm
+/// tooling must fail closed here.
+pub fn unknown_host_env() -> anolisa_env::EnvFacts {
+    anolisa_env::EnvFacts {
+        pkg_base: None,
+        os_id: Some("alpine".to_string()),
+        os_id_like: Some("musl".to_string()),
+        os_version: None,
+        ..anolisa_env::EnvService::detect()
     }
 }
 

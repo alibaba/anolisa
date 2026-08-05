@@ -1,14 +1,20 @@
-"""PII-scan capability — scans user input via agent-sec-cli."""
+"""PII-scan capability for Hermes input and output lifecycle hooks."""
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..cli_runner import call_agent_sec_cli, trace_context
+from ..hook_config import (  # noqa: TID252 - Hermes loads this as a standalone package.
+    env_flag_enabled,
+    env_hook_policy,
+    normalize_hook_policy,
+)
 from ..pii_text import extract_user_text, value_to_text
 from .base import AgentSecCoreCapability
 
@@ -35,19 +41,39 @@ class WarningBucket:
 
 
 class PiiScanCapability(AgentSecCoreCapability):
-    """Scan the current user turn for PII and show a non-blocking warning."""
+    """Scan Hermes input and output boundaries and enforce the configured policy."""
 
     id = "pii-scan-user-input"
     name = "PII Checker"
 
     def __init__(self):
         super().__init__()
+        self._hook_enabled = True
+        self._policy = "warn"
         self._include_low_confidence = False
         self._warning_ttl_seconds = _DEFAULT_WARNING_TTL_SECONDS
         self._warnings_by_key: dict[str, WarningBucket] = {}
 
     def _on_register(self, config: dict) -> None:
         """Read pii-scan specific config."""
+        self._hook_enabled = env_flag_enabled("PII_CHECKER_HOOK_ENABLED", True)
+        if "PII_CHECKER_MODE" in os.environ:
+            self._policy = env_hook_policy("PII_CHECKER_MODE", "observe")
+            if normalize_hook_policy(os.environ.get("PII_CHECKER_MODE"), "") == "":
+                logger.warning(
+                    "[agent-sec-core] pii-checker invalid PII_CHECKER_MODE; using observe"
+                )
+        else:
+            raw_policy = config.get("policy")
+            self._policy = normalize_hook_policy(raw_policy, "observe")
+            if (
+                isinstance(raw_policy, str)
+                and normalize_hook_policy(raw_policy, "") == ""
+            ):
+                logger.warning(
+                    "[agent-sec-core] pii-checker invalid capability policy=%r; using observe",
+                    raw_policy,
+                )
         self._include_low_confidence = bool(config.get("include_low_confidence", False))
         ttl = config.get("warning_ttl_seconds", _DEFAULT_WARNING_TTL_SECONDS)
         try:
@@ -67,6 +93,8 @@ class PiiScanCapability(AgentSecCoreCapability):
 
     def _on_pre_llm_call(self, messages=None, **kwargs):
         """Scan the current user input before the LLM turn starts."""
+        if not self._hook_enabled:
+            return None
         self._cleanup_expired()
 
         user_text = extract_user_text(messages, kwargs)
@@ -81,10 +109,11 @@ class PiiScanCapability(AgentSecCoreCapability):
             return None
 
         self._warnings_by_key.pop(cache_key, None)
-        self._scan_and_cache(
+        self._scan_and_handle(
             user_text,
             source=_USER_INPUT_SOURCE,
             cache_key=cache_key,
+            can_block=False,
             security_trace_context=trace_context(kwargs),
         )
         return None
@@ -95,26 +124,22 @@ class PiiScanCapability(AgentSecCoreCapability):
         tool_name: Any,
         args: Any,
         **kwargs: Any,
-    ):
+    ) -> dict[str, str] | None:
         """Scan tool arguments before execution."""
+        if not self._hook_enabled:
+            return None
         self._cleanup_expired()
         text = self._value_to_text(args)
         if not text.strip():
             return None
-        cache_key = self._cache_key(kwargs)
-        if cache_key is None:
-            logger.warning(
-                f"[agent-sec-core] {self.id} missing session/task key for tool input, fail-open"
-            )
-            return None
         data = {"tool_name": tool_name, "args": args, **kwargs}
-        self._scan_and_cache(
+        return self._scan_and_handle(
             text,
             source=_TOOL_INPUT_SOURCE,
-            cache_key=cache_key,
+            cache_key=self._cache_key(kwargs),
+            can_block=True,
             security_trace_context=trace_context(data),
         )
-        return None
 
     def _on_post_tool_call(
         self,
@@ -125,6 +150,8 @@ class PiiScanCapability(AgentSecCoreCapability):
         **kwargs: Any,
     ):
         """Scan tool output after execution."""
+        if not self._hook_enabled:
+            return None
         self._cleanup_expired()
         text = self._value_to_text(result)
         if not text.strip():
@@ -136,10 +163,11 @@ class PiiScanCapability(AgentSecCoreCapability):
             )
             return None
         data = {"tool_name": tool_name, "args": args, "result": result, **kwargs}
-        self._scan_and_cache(
+        self._scan_and_handle(
             text,
             source=_TOOL_OUTPUT_SOURCE,
             cache_key=cache_key,
+            can_block=False,
             security_trace_context=trace_context(data),
         )
         return None
@@ -151,6 +179,8 @@ class PiiScanCapability(AgentSecCoreCapability):
         **kwargs,
     ):
         """Prepend cached PII warnings to the final user-visible response."""
+        if not self._hook_enabled:
+            return response_text
         self._cleanup_expired()
         if not isinstance(response_text, str):
             return None
@@ -173,7 +203,12 @@ class PiiScanCapability(AgentSecCoreCapability):
                 verdict = self._safe_string(scan.get("verdict")) or "pass"
                 findings = self._as_list(scan.get("findings"))
                 if verdict in {"warn", "deny"} and findings:
-                    warnings.append(self._format_pii_warning(verdict, findings))
+                    if self._policy == "observe":
+                        logger.info(
+                            f"[agent-sec-core] {self.id} {verdict.upper()} model output observed"
+                        )
+                        return None
+                    warnings.append(self._format_pii_message(verdict, findings))
                     redacted_text = self._safe_string(scan.get("redacted_text"))
                     if redacted_text:
                         output_text = redacted_text
@@ -256,15 +291,16 @@ class PiiScanCapability(AgentSecCoreCapability):
             return None
         return scan
 
-    def _scan_and_cache(
+    def _scan_and_handle(
         self,
         text: str,
         *,
         source: str,
-        cache_key: str,
+        cache_key: str | None,
+        can_block: bool,
         security_trace_context: dict[str, str] | None,
-    ) -> None:
-        """Scan text and cache a minimal warning for warn/deny results."""
+    ) -> dict[str, str] | None:
+        """Scan text, returning a native block or caching a redacted warning."""
         scan = self._scan_text(
             text,
             source=source,
@@ -286,11 +322,32 @@ class PiiScanCapability(AgentSecCoreCapability):
             )
             return
 
-        warning = self._format_pii_warning(verdict, findings)
+        if self._policy == "observe":
+            return
+
+        if can_block and self._policy == "block" and verdict == "deny":
+            message = self._format_pii_message(
+                verdict,
+                findings,
+                outcome="本次工具调用已被阻断。",
+            )
+            logger.warning(
+                f"[agent-sec-core] {self.id} {verdict.upper()} blocked source={source}"
+            )
+            return {"action": "block", "message": message}
+
+        if cache_key is None:
+            logger.warning(
+                f"[agent-sec-core] {self.id} missing session/task key for {source} warning, fail-open"
+            )
+            return None
+
+        warning = self._format_pii_message(verdict, findings)
         self._push_warning(cache_key, warning)
         logger.warning(
             f"[agent-sec-core] {self.id} {verdict.upper()} warning cached key={cache_key} source={source}"
         )
+        return None
 
     def _value_to_text(self, value: Any) -> str:
         """Convert arbitrary hook values into scan text."""
@@ -354,8 +411,14 @@ class PiiScanCapability(AgentSecCoreCapability):
         for cache_key in expired:
             self._warnings_by_key.pop(cache_key, None)
 
-    def _format_pii_warning(self, verdict: str, findings: list[Any]) -> str:
-        """Build a minimal-disclosure warning from structured PII findings."""
+    def _format_pii_message(
+        self,
+        verdict: str,
+        findings: list[Any],
+        *,
+        outcome: str = "本轮请求将继续处理。",
+    ) -> str:
+        """Build a minimal-disclosure message from structured PII findings."""
         typed_findings = [item for item in findings if isinstance(item, dict)]
         pii_types = sorted(
             {
@@ -388,7 +451,7 @@ class PiiScanCapability(AgentSecCoreCapability):
             parts.append(f"严重级别：{', '.join(severities)}")
         if redacted_evidence:
             parts.append(f"脱敏示例：{', '.join(redacted_evidence)}")
-        parts.append("本轮请求将继续处理。")
+        parts.append(outcome)
         return "；".join(parts)
 
     def _shorten(self, value: str, limit: int = _MAX_EVIDENCE_CHARS) -> str:

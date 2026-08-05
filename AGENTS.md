@@ -382,6 +382,8 @@ Run the component's applicable formatter before every commit (e.g. `cargo fmt --
 
 ## 14. Responding to Review
 
+> **Recommended**: Reviewer-side methodology — deeper self-review checklists beyond CI gates — is defined in [`specs/independent-review-guide.md`](specs/independent-review-guide.md). This section covers the author side: triaging and responding to findings.
+
 ### Triage before acting
 
 AI reviewers (qoderai, qoder) generate findings automatically. Before fixing:

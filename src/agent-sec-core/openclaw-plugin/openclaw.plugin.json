@@ -50,6 +50,12 @@
             "type": "object",
             "properties": {
               "enabled": { "type": "boolean", "default": true },
+              "policy": {
+                "type": "string",
+                "enum": ["observe", "warn", "ask", "block", "debug", "deny"],
+                "default": "observe",
+                "description": "PII hook policy；ask 在支持确认的前置事件请求确认，其他不支持的边界降级为 warn"
+              },
               "enableBlock": {
                 "type": "boolean",
                 "default": false,
@@ -63,9 +69,9 @@
               "enabled": { "type": "boolean", "default": true },
               "policy": {
                 "type": "string",
-                "enum": ["ask", "debug", "warn", "block"],
+                "enum": ["observe", "warn", "ask", "block", "debug", "deny"],
                 "default": "ask",
-                "description": "控制已挂载 Skill Ledger hook 的用户可见行为：ask 优先要求确认，debug 仅调试日志，warn 告警放行，block 直接拒绝执行"
+                "description": "控制已挂载 Skill Ledger hook 的用户可见行为：observe 仅审计，warn 告警放行，ask 优先要求确认，block 直接拒绝执行"
               },
               "enableBlock": {
                 "type": "boolean",

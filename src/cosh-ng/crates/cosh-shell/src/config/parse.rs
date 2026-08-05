@@ -18,6 +18,13 @@ pub(super) fn parse_simple_config(content: &str, config: &mut CoshConfig) {
                 "shell.analysis_mode" => config.analysis_mode = value.into(),
                 "shell.approval_mode" => config.approval_mode = value.into(),
                 "shell.adapter_default" => config.adapter_default = value.into(),
+                // #2161: invalid values fall back to the built-in default
+                // (treat-as-unset), never to 0/disabled.
+                "shell.input_wait_timeout_secs" => {
+                    if let Ok(secs) = value.trim().parse::<u64>() {
+                        config.input_wait_timeout_secs = secs;
+                    }
+                }
                 "shell.trusted_command" if !value.is_empty() => {
                     config.trusted_commands.push(value.into());
                 }
@@ -114,6 +121,17 @@ fn parse_shell_toml_config(value: &toml::Value, config: &mut CoshConfig) {
     }
     if let Some(adapter_default) = shell.get("adapter_default").and_then(toml::Value::as_str) {
         config.adapter_default = adapter_default.to_string();
+    }
+    // #2161: `[shell]` table form of `input_wait_timeout_secs`. Invalid or
+    // non-integer values fall back to the built-in default (treat-as-unset),
+    // never to 0/disabled — same contract as the dotted-key form above.
+    if let Some(secs) = shell
+        .get("input_wait_timeout_secs")
+        .and_then(toml::Value::as_integer)
+    {
+        if let Ok(secs) = u64::try_from(secs) {
+            config.input_wait_timeout_secs = secs;
+        }
     }
     parse_recommendations_toml_config(shell, config);
     if let Some(commands) = shell.get("trusted_commands") {

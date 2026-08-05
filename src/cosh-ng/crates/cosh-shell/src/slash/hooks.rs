@@ -284,10 +284,26 @@ fn hooks_status_body(
 }
 
 fn hooks_usage_body(i18n: &I18n) -> Vec<String> {
-    [MessageId::SlashHooksUsageListLine]
-        .into_iter()
-        .map(|id| i18n.t(id).to_string())
-        .collect()
+    [
+        MessageId::SlashHooksUsageListLine,
+        MessageId::SlashHooksUsageHistoryLine,
+        MessageId::SlashHooksUsageEventsLine,
+        MessageId::SlashHooksUsageAnalyzeLine,
+        MessageId::SlashHooksUsageIgnoreLine,
+        MessageId::SlashHooksUsageDetailsLine,
+        MessageId::SlashHooksUsageFeedbackLine,
+        MessageId::SlashHooksUsageClearFeedbackLine,
+        MessageId::SlashHooksUsageMuteLine,
+        MessageId::SlashHooksUsageUnmuteLine,
+        MessageId::SlashHooksUsageTrustProjectLine,
+        MessageId::SlashHooksUsageUntrustProjectLine,
+        MessageId::SlashHooksUsageClearProjectTrustLine,
+        MessageId::SlashHooksUsageEnableLine,
+        MessageId::SlashHooksUsageDisableLine,
+    ]
+    .into_iter()
+    .map(|id| i18n.t(id).to_string())
+    .collect()
 }
 
 fn render_project_hook_trust<W: Write>(

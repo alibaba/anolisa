@@ -187,20 +187,28 @@ impl CliArgs {
     /// instead of lexically collapsing `..`, which would mis-handle symlinks.
     /// Falls back to the process cwd when no workspace is supplied.
     pub fn workspace_root(&self) -> std::path::PathBuf {
+        let absolute = self.workspace_path();
+        std::fs::canonicalize(&absolute).unwrap_or(absolute)
+    }
+
+    /// Returns the absolute workspace pathname without reopening it for identity.
+    ///
+    /// Agent startup passes this path directly to the single root-opening
+    /// operation and derives the canonical display identity from the pinned
+    /// descriptor.
+    pub(crate) fn workspace_path(&self) -> std::path::PathBuf {
         self.workspace
             .as_deref()
             .filter(|workspace| !workspace.is_empty())
             .map(std::path::PathBuf::from)
-            .and_then(|path| {
-                let absolute = if path.is_absolute() {
+            .map(|path| {
+                if path.is_absolute() {
                     path
                 } else {
-                    std::env::current_dir().ok()?.join(path)
-                };
-                // Prefer canonicalize for filesystem-correct symlink/..
-                // semantics. If the workspace does not exist, fall back to
-                // the absolute path without lexical normalization.
-                Some(std::fs::canonicalize(&absolute).unwrap_or(absolute))
+                    std::env::current_dir()
+                        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                        .join(path)
+                }
             })
             .unwrap_or_else(|| {
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -406,6 +414,7 @@ mod tests {
             args.workspace_root(),
             std::fs::canonicalize(&target).unwrap()
         );
+        assert_eq!(args.workspace_path(), link);
     }
 
     #[cfg(unix)]

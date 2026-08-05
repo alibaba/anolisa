@@ -935,6 +935,13 @@ mod tests {
             health_store: Arc::new(RwLock::new(crate::health::HealthStore::default())),
             interruption_store: None,
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&db_path).unwrap()),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
             security_observability: crate::server::SecurityObservabilityConfig::default(),
             auth: Arc::new(crate::server::auth::DashboardAuth::init(
                 &crate::config::ServerAuthConfig { enabled: false },

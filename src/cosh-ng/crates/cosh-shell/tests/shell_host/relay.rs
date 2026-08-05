@@ -745,6 +745,7 @@ fn raw_relay_capture_ack_replays_same_read_multiline_suffix() {
     let capture = RawInputCapture::Question {
         id: "question-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -811,6 +812,7 @@ fn raw_relay_capture_chain_discards_old_generation_suffix() {
     let first = RawInputCapture::Question {
         id: "question-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -818,6 +820,7 @@ fn raw_relay_capture_chain_discards_old_generation_suffix() {
     let second = RawInputCapture::Question {
         id: "question-2".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -880,6 +883,7 @@ fn raw_relay_capture_target_gone_discards_old_suffix_then_installs_new_target() 
     let first = RawInputCapture::Question {
         id: "question-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -887,6 +891,7 @@ fn raw_relay_capture_target_gone_discards_old_suffix_then_installs_new_target() 
     let second = RawInputCapture::Question {
         id: "question-2".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -894,6 +899,7 @@ fn raw_relay_capture_target_gone_discards_old_suffix_then_installs_new_target() 
     let third = RawInputCapture::Question {
         id: "question-3".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -981,6 +987,7 @@ fn raw_relay_capture_eof_discards_old_generation_suffix() {
     let first = RawInputCapture::Question {
         id: "question-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -988,6 +995,7 @@ fn raw_relay_capture_eof_discards_old_generation_suffix() {
     let second = RawInputCapture::Question {
         id: "question-2".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -1042,6 +1050,7 @@ fn raw_relay_capture_owned_input_overflow_is_visible_and_discarded() {
     let capture = RawInputCapture::Question {
         id: "question-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,

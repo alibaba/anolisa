@@ -23,6 +23,7 @@ fn generation_cutoff_does_not_retry_input_into_the_replacement_capture() {
     let previous = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -30,6 +31,7 @@ fn generation_cutoff_does_not_retry_input_into_the_replacement_capture() {
     let next = RawInputCapture::Question {
         id: "q-2".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,

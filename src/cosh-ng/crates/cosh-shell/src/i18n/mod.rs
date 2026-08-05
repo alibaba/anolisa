@@ -51,6 +51,7 @@ mod tests {
         "activity",
         "agent",
         "approval",
+        "auth",
         "config",
         "debug",
         "health",
@@ -143,17 +144,57 @@ mod tests {
             MessageId::ApprovalTurnExtensionUnavailableBody as usize,
             846
         );
-        // The #1913 capture-notice segment is the current tail; the tail
-        // ownership assertions move with each appended segment.
+        // The #1913 capture-notice segment remains pinned ahead of the
+        // appended shell-recovery, auth, and hook-notification messages.
         assert_eq!(MessageId::CaptureInputRejectedTitle as usize, 847);
         assert_eq!(MessageId::CaptureInputRejectedBody as usize, 848);
         assert_eq!(
-            MessageId::CaptureInputRejectedBody as usize,
-            MessageId::ALL.len() - 1
+            MessageId::AgentRecoveryTriggerLine as usize,
+            MessageId::CaptureInputRejectedBody as usize + 1
+        );
+        // The #2031 recovery-retry segment remains pinned after auth.
+        assert_eq!(
+            MessageId::AuthSelectProviderQuestion as usize,
+            MessageId::AgentRecoveryTriggerLine as usize + 1
+        );
+        // The #2064 system-control segment is the current tail; the tail
+        // ownership assertions move with each appended segment.
+        assert_eq!(
+            MessageId::AgentRecoverySameSessionRetryLine as usize,
+            MessageId::AuthSelectProviderQuestion as usize + 1
+        );
+        // Hook-notification messages are the current tail; tail ownership
+        // assertions move with each appended segment.
+        assert_eq!(
+            MessageId::AgentGovernanceHookNotification as usize,
+            MessageId::AgentRecoverySameSessionRetryLine as usize + 1
+        );
+        // The #2064 system-control segment follows the hook-notification
+        // segment and keeps the tail; tail ownership assertions move with
+        // each appended segment.
+        assert_eq!(
+            MessageId::ApprovalRiskPhraseSystemControl as usize,
+            MessageId::AgentGovernanceHookDecisionUnspecified as usize + 1
+        );
+        // The #2025/#2161 input-wait segment follows the system-control
+        // segment; tail ownership assertions move with each appended segment.
+        assert_eq!(
+            MessageId::ApprovalShellHandoffInputWaitTimeoutTitle as usize,
+            MessageId::ApprovalIrrecoverableWarningLine as usize + 1
         );
         assert_eq!(
-            MessageId::CaptureInputRejectedTitle as usize,
+            MessageId::ApprovalShellHandoffInputWaitTimeoutTitle as usize,
+            MessageId::ALL.len() - 11
+        );
+        assert_eq!(
+            MessageId::ShellInputWaitHintTimeoutForecastBody as usize,
             MessageId::ALL.len() - 2
+        );
+        // The #2068 startup auth-hint segment is the current tail; tail
+        // ownership assertions move with each appended segment.
+        assert_eq!(
+            MessageId::StartupAuthHintLine as usize,
+            MessageId::ALL.len() - 1
         );
     }
 

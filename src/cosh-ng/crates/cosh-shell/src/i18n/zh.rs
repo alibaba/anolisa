@@ -3,6 +3,7 @@ use super::MessageId;
 mod activity;
 mod agent;
 mod approval;
+mod auth;
 mod config;
 mod debug;
 mod health;
@@ -32,5 +33,6 @@ pub(super) fn message(id: MessageId) -> &'static str {
         .or_else(|| question::message(id))
         .or_else(|| approval::message(id))
         .or_else(|| session::message(id))
+        .or_else(|| auth::message(id))
         .unwrap_or_else(|| super::en::message(id))
 }

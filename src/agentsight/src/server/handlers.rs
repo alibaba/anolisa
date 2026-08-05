@@ -82,6 +82,7 @@ pub async fn auth_status(data: web::Data<AppState>) -> impl Responder {
             "optimization",
             "skills",
             "security",
+            "enforcement",
             "atif",
             "settings",
             "agent_health"
@@ -1091,6 +1092,13 @@ mod tests {
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
             evaluation_store: Arc::clone(&evaluation_store),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
@@ -1297,6 +1305,13 @@ mod tests {
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
@@ -1426,6 +1441,13 @@ mod tests {
             evaluation_store: Arc::new(
                 EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
             ),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms },
             auth,
             optimize: None,
@@ -1525,6 +1547,13 @@ mod tests {
             evaluation_store: Arc::new(
                 EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
             ),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
@@ -1663,6 +1692,13 @@ mod tests {
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
             evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
@@ -1686,6 +1722,13 @@ mod tests {
             evaluation_store: Arc::new(
                 EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
             ),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
@@ -1747,6 +1790,13 @@ mod tests {
             evaluation_store: Arc::new(
                 EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
             ),
+            enforcement: None,
+            containment: None,
+            audit_service: Arc::new(agentsight_audit::AuditService::new(
+                crate::security::SecurityStore::open_in_memory()
+                    .unwrap()
+                    .audit_store(),
+            )),
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
@@ -2052,6 +2102,13 @@ mod tests {
                     health_store: Arc::new(RwLock::new(HealthStore::new())),
                     interruption_store: Some(Arc::clone(&istore)),
                     evaluation_store: Arc::new(EvaluationStore::new_with_path(&db_path).unwrap()),
+                    enforcement: None,
+                    containment: None,
+                    audit_service: Arc::new(agentsight_audit::AuditService::new(
+                        crate::security::SecurityStore::open_in_memory()
+                            .unwrap()
+                            .audit_store(),
+                    )),
                     security_observability: super::super::SecurityObservabilityConfig {
                         timeout_ms: 0,
                     },
@@ -2502,6 +2559,13 @@ mod tests {
                     evaluation_store: Arc::new(
                         EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
                     ),
+                    enforcement: None,
+                    containment: None,
+                    audit_service: Arc::new(agentsight_audit::AuditService::new(
+                        crate::security::SecurityStore::open_in_memory()
+                            .unwrap()
+                            .audit_store(),
+                    )),
                     security_observability: super::super::SecurityObservabilityConfig {
                         timeout_ms: 0,
                     },

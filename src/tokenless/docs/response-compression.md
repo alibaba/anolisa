@@ -115,9 +115,9 @@ Step 2：tokenless compress-toon（无损 TOON 编码）
 
 ### 路径 4：Qoder CLI 插件（`PostToolUse` hook）
 
-使用共享的 `compress_response_hook.py`（与 copilot-shell 共用），通过 `hooks.json` 中的 `${QODER_TOKENLESS_HOOKS}` 变量引用共享 hook 路径。
+Qoder 通过原生插件目录 `hooks/hooks.json` 加载 hook，并在运行时展开 `${QODER_PLUGIN_ROOT}`。插件内的 `hooks/run-hook.sh` 再从 ANOLISA adapter 目录定位共享的 `compress_response_hook.py`，无需改写 `~/.qoder/settings.json` 或将机器相关绝对路径写入插件缓存。
 
-注意：对所有非 Claude Code 的 agent（路径 2/4 等共享该 hook 的运行时），`additionalContext` 中的载荷在 TOON 编码更小时是 **TOON 文本**而非 JSON。TOON 是面向 LLM 直接阅读的紧凑文本格式，集成方无需解码；仅在离线调试需要还原 JSON 时可用 `toon -d` 转换。
+Qoder CLI 支持对任意工具使用 `hookSpecificOutput.updatedToolOutput`，因此压缩结果会**替换**原始工具输出，`additionalContext` 只携带环境错误归因等追加信息。结构化响应沿用 Claude Code 的 schema 保留逻辑；字符串响应可使用更小的 TOON 文本。其他不支持输出替换的 agent 才使用 `additionalContext` 回退。
 
 ### 路径 5：Claude Code 插件（`PostToolUse` hook）
 
@@ -310,7 +310,7 @@ curl -s https://api.example.com/data | tokenless compress-response
 | OpenClaw 插件配置 | `adapters/tokenless/openclaw/openclaw.plugin.json` |
 | copilot-shell hook（响应+TOON 流水线） | `adapters/tokenless/common/hooks/compress_response_hook.py` |
 | Hermes 插件 | `adapters/tokenless/hermes/__init__.py` |
-| Qoder 插件配置 | `adapters/tokenless/qoder/hooks.json` |
+| Qoder 插件配置 | `adapters/tokenless/qoder/hooks/hooks.json` |
 | Claude Code 插件 | `adapters/tokenless/claude-code/hooks/run-hook.sh` |
 | Codex 压缩 hook | `adapters/tokenless/codex/scripts/compress-response` |
 | TOON 编解码器（crates.io toon-format） | `toon-format` crate v0.4.6 |
@@ -353,7 +353,7 @@ tokenless stats summary
 
 统计启用条件：`TOKENLESS_STATS_ENABLED` 环境变量未设为 `0`/`false`，或通过 `tokenless stats enable` 启用。
 
-> **SLS 日志记录（JSONL）**：除 SQLite 统计外，tokenless 默认还会将每次压缩以 SLS JSONL 记录写入 `/var/log/anolisa/sls/ops/tokenless.jsonl`（默认开启）。该文件由 **anolisa SLS 组件统一管理**，tokenless 不创建/删除，仅在文件存在时追加，不存在则跳过。开关字段 `~/.tokenless/config.json` 的 `sls_enabled`（默认 `true`），环境变量 `TOKENLESS_SLS_ENABLED` 优先；输出路径可用 `TOKENLESS_SLS_PATH` 覆盖（须位于 `/var/log/` 或 `/tmp/` 下）。仅记录度量，不含原文/敏感数据。详见用户手册 [SLS 日志记录](../../../docs/user-guide/zh/token-saving/tokenless/user-manual.md#sls-日志记录)。
+> **SLS 日志记录（JSONL）**：除 SQLite 统计外，tokenless 默认还会将每次压缩以 SLS JSONL 记录写入 `/var/log/anolisa/sls/ops/tokenless.jsonl`（默认开启）。该文件由 **anolisa SLS 组件统一管理**，tokenless 不创建/删除，仅在文件存在时追加，不存在则跳过。开关字段 `~/.tokenless/config.json` 的 `sls_enabled`（默认 `true`），环境变量 `TOKENLESS_SLS_ENABLED` 优先；输出路径可用 `TOKENLESS_SLS_PATH` 覆盖（须位于 `/var/log/` 或 `/tmp/` 下）。仅记录度量，不含原文/敏感数据。详见 [Tokenless 效果度量 · SLS JSONL](../../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md#sls-jsonl)。
 
 ### 9.3 压缩效果说明
 

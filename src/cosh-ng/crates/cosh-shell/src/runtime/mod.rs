@@ -1,3 +1,4 @@
+pub(crate) mod approval_ledger;
 pub(crate) mod approval_state;
 pub(crate) mod cancel;
 pub(crate) mod cli_args;
@@ -5,6 +6,8 @@ pub(crate) mod continuity;
 pub(crate) mod controller;
 pub(crate) mod details;
 pub(crate) mod dispatcher;
+#[cfg(test)]
+mod dispatcher_tests;
 pub(crate) mod doctor;
 pub(crate) mod events;
 pub(crate) mod evidence_delivery;

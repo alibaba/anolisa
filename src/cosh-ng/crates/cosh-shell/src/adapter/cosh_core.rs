@@ -92,29 +92,6 @@ impl CoshCoreAdapter {
         self
     }
 
-    /// Lists persisted sessions in a canonical workspace.
-    ///
-    /// # Errors
-    ///
-    /// Returns a recoverable management protocol error.
-    pub fn list_sessions(&self, workspace_scope: &str) -> Result<SessionList, SessionErrorInfo> {
-        self.list_sessions_page(workspace_scope, 20, None)
-    }
-
-    /// Lists one bounded page while preserving the core-owned opaque cursor.
-    ///
-    /// # Errors
-    ///
-    /// Returns a recoverable management protocol error.
-    pub fn list_sessions_page(
-        &self,
-        workspace_scope: &str,
-        limit: usize,
-        cursor: Option<&str>,
-    ) -> Result<SessionList, SessionErrorInfo> {
-        SessionManagementClient::new(self.program.clone()).list(workspace_scope, limit, cursor)
-    }
-
     /// Inspects a persisted session summary without selecting it.
     ///
     /// # Errors

@@ -11,7 +11,7 @@ import type {
   PluginHookToolContext,
 } from "openclaw/plugin-sdk/plugin-runtime";
 import type { SecurityCapability } from "../types.js";
-import { recordOpenClawObservability } from "../utils.js";
+import { envFlagEnabled, recordOpenClawObservability } from "../utils.js";
 import type { CliResult } from "../utils.js";
 import {
   OBSERVABILITY_HOOKS,
@@ -42,12 +42,13 @@ export const observability: SecurityCapability = {
   name: "OpenClaw Observability",
   hooks: [...OBSERVABILITY_HOOKS],
   register(api) {
+    const hookEnabled = envFlagEnabled("OBSERVABILITY_HOOK_ENABLED", true);
     api.on(
       "llm_input",
       (
         event: PluginHookLlmInputEvent,
         ctx: PluginHookAgentContext,
-      ) => observeHook(api, "llm_input", event, ctx),
+      ) => observeHook(api, hookEnabled, "llm_input", event, ctx),
       { priority: OBSERVABILITY_PRIORITY },
     );
     api.on(
@@ -55,7 +56,7 @@ export const observability: SecurityCapability = {
       (
         event: PluginHookModelCallStartedEvent,
         ctx: PluginHookAgentContext,
-      ) => observeHook(api, "model_call_started", event, ctx),
+      ) => observeHook(api, hookEnabled, "model_call_started", event, ctx),
       { priority: OBSERVABILITY_PRIORITY },
     );
     api.on(
@@ -63,7 +64,7 @@ export const observability: SecurityCapability = {
       (
         event: PluginHookModelCallEndedEvent,
         ctx: PluginHookAgentContext,
-      ) => observeHook(api, "model_call_ended", event, ctx),
+      ) => observeHook(api, hookEnabled, "model_call_ended", event, ctx),
       { priority: OBSERVABILITY_PRIORITY },
     );
     api.on(
@@ -71,7 +72,7 @@ export const observability: SecurityCapability = {
       (
         event: PluginHookLlmOutputEvent,
         ctx: PluginHookAgentContext,
-      ) => observeHook(api, "llm_output", event, ctx),
+      ) => observeHook(api, hookEnabled, "llm_output", event, ctx),
       { priority: OBSERVABILITY_PRIORITY },
     );
     api.on(
@@ -79,7 +80,7 @@ export const observability: SecurityCapability = {
       (
         event: PluginHookAgentEndEvent,
         ctx: PluginHookAgentContext,
-      ) => observeHook(api, "agent_end", event, ctx),
+      ) => observeHook(api, hookEnabled, "agent_end", event, ctx),
       { priority: OBSERVABILITY_PRIORITY },
     );
     api.on(
@@ -87,7 +88,7 @@ export const observability: SecurityCapability = {
       (
         event: PluginHookBeforeToolCallEvent,
         ctx: PluginHookToolContext,
-      ) => observeHook(api, "before_tool_call", event, ctx),
+      ) => observeHook(api, hookEnabled, "before_tool_call", event, ctx),
       { priority: OBSERVABILITY_LATE_PRIORITY },
     );
     api.on(
@@ -95,7 +96,7 @@ export const observability: SecurityCapability = {
       (
         event: PluginHookAfterToolCallEvent,
         ctx: PluginHookToolContext,
-      ) => observeHook(api, "after_tool_call", event, ctx),
+      ) => observeHook(api, hookEnabled, "after_tool_call", event, ctx),
       { priority: OBSERVABILITY_PRIORITY },
     );
   },
@@ -103,10 +104,15 @@ export const observability: SecurityCapability = {
 
 function observeHook(
   api: OpenClawPluginApi,
+  hookEnabled: boolean,
   hookName: ObservabilityHookName,
   event: ObservabilityHookEvent,
   ctx: ObservabilityHookContext,
 ): void {
+  if (!hookEnabled) {
+    return;
+  }
+
   try {
     const payload = buildOpenClawObservabilityRecord(hookName, event, ctx);
     if (payload === undefined) {

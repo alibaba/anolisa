@@ -350,8 +350,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
         "{output}"
     );
     assert!(
-        output.contains("latest recovery reason: provider run was not active")
-            || output.contains("latest recovery reason: provider approval channel closed"),
+        output.contains("latest recovery reason: resume_failed"),
         "{output}"
     );
     assert!(

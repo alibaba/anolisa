@@ -17,13 +17,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hook_config import env_flag_enabled, env_hook_policy, normalize_hook_policy
 from trace_context import trace_context, with_trace_context
 
 _TOOL_NAME = "skill"
 _CHECK_TIMEOUT_SECONDS = 5
 _INIT_TIMEOUT_SECONDS = 3
-_DEFAULT_POLICY = "debug"
-_VALID_POLICIES = frozenset({"ask", "debug", "warn", "block"})
+_DEFAULT_POLICY = "ask"
+_HOOK_ENABLED = env_flag_enabled("SKILL_LEDGER_HOOK_ENABLED", True)
 _LEDGER_STATUSES = frozenset({"pass", "none", "drifted", "warn", "deny", "tampered"})
 _MAX_FRONTMATTER_LINES = 128
 _ENV_VAR_PATTERN = re.compile(r"\$(?:(\w+)|{([^}]+)})", flags=re.ASCII)
@@ -89,17 +90,14 @@ def _diagnostic(
 
 
 def _read_policy(input_data: dict[str, Any]) -> str:
-    """Return the configured hook policy, defaulting invalid values to debug."""
-    policy = os.environ.get("SKILL_LEDGER_HOOK_POLICY", _DEFAULT_POLICY)
-    policy = policy.strip().lower()
-    if policy in _VALID_POLICIES:
-        return policy
-    _diagnostic(
-        "invalid_policy",
-        input_data,
-        detail=f"using {_DEFAULT_POLICY}",
-    )
-    return _DEFAULT_POLICY
+    """Return the configured Skill Ledger mode, defaulting invalid values to ask."""
+    raw = os.environ.get("SKILL_LEDGER_MODE")
+    policy = env_hook_policy("SKILL_LEDGER_MODE", _DEFAULT_POLICY)
+    if "SKILL_LEDGER_MODE" in os.environ and normalize_hook_policy(raw, "") == "":
+        _diagnostic(
+            "invalid_policy", input_data, detail="invalid SKILL_LEDGER_MODE; using ask"
+        )
+    return policy
 
 
 def _valid_skill_name(skill_name: str) -> bool:
@@ -637,8 +635,15 @@ def _format_qwen(
     input_data: dict[str, Any],
 ) -> str:
     """Map a managed Skill Ledger exposure message to Qwen HookOutput."""
-    if summary.get("managed") is not True:
+    # ``skill-ledger show`` marks only unmanaged results explicitly. Managed
+    # results omit the field, while accepting ``True`` keeps the hook compatible
+    # with callers that already provide an explicit marker.
+    managed = summary.get("managed")
+    if managed is False:
         _diagnostic("unmanaged", input_data, skill_name=skill_name)
+        return _noop()
+    if managed is not None and managed is not True:
+        _diagnostic("invalid_managed", input_data, skill_name=skill_name)
         return _noop()
 
     status_value = summary.get("latestStatus")
@@ -667,7 +672,7 @@ def _format_qwen(
         return _noop()
 
     reason = f"Skill Ledger [{status_value}] for '{skill_name}': {message.strip()}"
-    if policy == "debug":
+    if policy in {"debug", "observe"}:
         _diagnostic(
             "exposure_warning",
             input_data,
@@ -685,6 +690,9 @@ def _format_qwen(
 
 def main() -> None:
     """Read one Qwen HookInput and emit one fail-open HookOutput."""
+    if not _HOOK_ENABLED:
+        print(_noop())
+        return
     try:
         input_data = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError, ValueError):

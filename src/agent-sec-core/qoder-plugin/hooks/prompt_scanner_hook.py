@@ -9,10 +9,12 @@ from typing import Any
 from qoder_hook_common import (
     deny_output,
     dumps_hook_output,
+    env_flag_enabled,
     load_hook_input,
     with_trace_context,
 )
 
+_HOOK_ENABLED = env_flag_enabled("PROMPT_SCANNER_HOOK_ENABLED", True)
 _MODE = os.environ.get("PROMPT_SCANNER_MODE", "observe").strip().lower()
 _VALID_MODES = {"observe", "deny"}
 try:
@@ -123,6 +125,9 @@ def _scan_prompt(input_data: dict[str, Any], prompt_text: str) -> dict[str, Any]
 
 def main() -> None:
     """Run the Qoder prompt scanner hook."""
+    if not _HOOK_ENABLED:
+        return
+
     input_data = load_hook_input()
     if input_data is None:
         return

@@ -58,6 +58,7 @@ impl CoshCore {
                 &resolved.base_url,
                 &resolved.api_key,
                 profile,
+                resolved.explicit_cache,
             ));
         }
 

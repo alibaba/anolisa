@@ -196,7 +196,7 @@ tokenless stats diff 42 --json
 Session overviews contain metrics only. Record and tool-use reports include a
 unified content diff; consecutive active stages are linked only when their
 stored output/input content matches exactly, avoiding duplicate intermediate
-token counts. See the [user manual](../../docs/user-guide/en/token-saving/tokenless/user-manual.md#statistics--measurement)
+token counts. See [Measuring Tokenless Savings](../../docs/user-guide/en/token-saving/tokenless/measuring-savings.md)
 for options and measurement limits.
 
 ### Database location

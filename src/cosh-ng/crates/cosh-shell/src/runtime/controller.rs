@@ -12,6 +12,9 @@ use super::events::ShellEventSnapshot;
 use super::terminal::CrLfWriter;
 
 mod bootstrap;
+mod input_wait;
+
+use input_wait::input_wait_timeout_recovery_action;
 
 pub(crate) use bootstrap::{
     run_adapter_demo, run_demo, run_host_demo, run_interactive, run_interactive_demo, run_raw,
@@ -69,6 +72,11 @@ fn render_raw_inline_events<W: Write>(
     let shell_busy = shell_has_active_foreground_command(snapshot.events());
     if let Some(action) =
         shell_handoff_timeout_recovery_action(inline_state, shell_busy, &mut terminal_output)?
+    {
+        return Ok(action);
+    }
+    if let Some(action) =
+        input_wait_timeout_recovery_action(inline_state, shell_busy, &mut terminal_output)?
     {
         return Ok(action);
     }
@@ -369,6 +377,63 @@ mod tests {
                 .expect("keep handoff foreground protected");
 
         assert_eq!(second_action, RawObserverAction::RawPassthrough);
+    }
+
+    #[test]
+    fn pending_shell_handoff_serializes_approved_requests() {
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let mut state = InlineState::default();
+        state.agent_run.active = Some(test_active_run());
+        let first = ShellHandoffRequest::new(
+            "echo first",
+            "$ echo first",
+            "approved_provider_shell_tool",
+            "user",
+            "req-first",
+            "run-approved",
+            1,
+        )
+        .expect("first handoff request");
+        let second = ShellHandoffRequest::new(
+            "echo second",
+            "$ echo second",
+            "approved_provider_shell_tool",
+            "user",
+            "req-second",
+            "run-approved",
+            1,
+        )
+        .expect("second handoff request");
+        state
+            .control
+            .shell_handoff_mut()
+            .enqueue_approved_request(first.clone());
+        state
+            .control
+            .shell_handoff_mut()
+            .enqueue_approved_request(second.clone());
+
+        let first_action =
+            render_raw_inline_events(&[], &mut Vec::new(), &adapter, "zsh", &mut state)
+                .expect("emit first handoff");
+        assert_eq!(first_action, RawObserverAction::EmitToPty(first));
+
+        let second_action =
+            render_raw_inline_events(&[], &mut Vec::new(), &adapter, "zsh", &mut state)
+                .expect("hold second handoff until the first closes");
+
+        assert_eq!(second_action, RawObserverAction::RawPassthrough);
+
+        state
+            .control
+            .shell_handoff_mut()
+            .pop_pending()
+            .expect("close first handoff");
+        let third_action =
+            render_raw_inline_events(&[], &mut Vec::new(), &adapter, "zsh", &mut state)
+                .expect("emit second handoff after the first closes");
+
+        assert_eq!(third_action, RawObserverAction::EmitToPty(second));
     }
 
     #[test]

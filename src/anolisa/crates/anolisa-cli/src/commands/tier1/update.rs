@@ -36,12 +36,14 @@
 //! [`all`] module) plans every recorded component through the same decision
 //! rows and merges the delegated refreshes (U5) into one native transaction.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{SecondsFormat, Utc};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
+use anolisa_core::adapter::claim;
 use anolisa_core::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
 use anolisa_core::domain::{
     InstallationScope, ManagementRelation, NativePm, OwnedArtifact, ProviderBinding,
@@ -240,6 +242,287 @@ struct UpdateResultPayload {
     /// `None` on dry-run (nothing recorded).
     #[serde(skip_serializing_if = "Option::is_none")]
     operation_id: Option<String>,
+    /// Adapter follow-up actions produced by the update (issue #1885).
+    /// Always present so consumers can rely on the key; empty when no
+    /// adapter bundle changed (including no-op, dry-run, and failed updates).
+    adapter_actions: Vec<AdapterAction>,
+}
+
+/// One adapter follow-up action produced by a successful component update.
+/// Wire shape of the `adapter_actions` entries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct AdapterAction {
+    pub(crate) component: String,
+    pub(crate) framework: String,
+    pub(crate) reason: String,
+    pub(crate) command: String,
+}
+
+/// Trusted adapter bundle revisions captured from the component contract and
+/// ANOLISA-managed resource roots.
+pub(crate) type AdapterBundleSnapshot = BTreeMap<String, Option<String>>;
+
+const SYSTEM_BUNDLE_CHANGED_REASON: &str = "adapter bundle changed during system update";
+
+/// Capture every adapter bundle declared by `component` without consulting
+/// receipt state.
+///
+/// Contract resolution and destination expansion are scoped to the active
+/// layout's trusted state and datadir roots. The resulting paths are
+/// revalidated as ANOLISA-owned before they are read, so a privileged update
+/// never lets user-controlled receipt fields choose filesystem inputs.
+pub(crate) fn adapter_bundle_snapshot(
+    ctx: &CliContext,
+    layout: &FsLayout,
+    component: &str,
+) -> AdapterBundleSnapshot {
+    if ctx.install_mode != crate::context::InstallMode::System {
+        return AdapterBundleSnapshot::new();
+    }
+    // Environment-driven packaged-data overrides are intentionally excluded:
+    // a privileged update may read only its selected system layout and the
+    // fixed package datadir, never a caller-selected source root.
+    let mut datadir_roots = vec![layout.datadir.clone()];
+    if let Some(package_datadir) = layout.package_datadir()
+        && !datadir_roots.contains(&package_datadir)
+    {
+        datadir_roots.push(package_datadir);
+    }
+    let Ok(resolved) = anolisa_core::adapter::contract::resolve_component_contract_with_source(
+        component,
+        std::slice::from_ref(&layout.state_dir),
+        &datadir_roots,
+    ) else {
+        return AdapterBundleSnapshot::new();
+    };
+    if resolved.manifest.component.name != component {
+        return AdapterBundleSnapshot::new();
+    }
+
+    if let Some(contract_root) = anolisa_core::adapter::contract::infer_contract_datadir_root(
+        component,
+        &resolved.path,
+        &datadir_roots,
+    ) && let Some(index) = datadir_roots.iter().position(|root| root == &contract_root)
+    {
+        let preferred = datadir_roots.remove(index);
+        datadir_roots.insert(0, preferred);
+    }
+
+    let mut snapshot = AdapterBundleSnapshot::new();
+    for adapter in &resolved.manifest.adapters {
+        let Some(framework) = adapter
+            .framework
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let root = trusted_adapter_root(
+            layout,
+            component,
+            framework,
+            adapter.dest.as_deref(),
+            &datadir_roots,
+        );
+        snapshot.entry(framework.to_string()).or_insert_with(|| {
+            root.as_deref()
+                .and_then(|root| digest_bundle_tree(root, &datadir_roots))
+        });
+    }
+    snapshot
+}
+
+fn trusted_adapter_root(
+    layout: &FsLayout,
+    component: &str,
+    framework: &str,
+    dest: Option<&str>,
+    datadir_roots: &[PathBuf],
+) -> Option<PathBuf> {
+    for datadir in datadir_roots {
+        let mut scoped_layout = layout.clone();
+        scoped_layout.datadir = datadir.clone();
+        let path = match dest {
+            Some(template) => anolisa_core::expand_layout_placeholders(
+                template,
+                &scoped_layout,
+                &[("component", component)],
+            )
+            .ok()?,
+            None => datadir.join("adapters").join(component).join(framework),
+        };
+        if anolisa_core::path_safety::validate_owned_path(&scoped_layout, &path).is_ok()
+            && path.is_dir()
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// SHA-256 digest of a trusted adapter directory tree.
+///
+/// Symlink targets contribute both their path text and referent bytes, but
+/// only after the referent canonicalizes under a trusted datadir root. Reading
+/// the canonical referent instead of reopening the link keeps a link swap from
+/// redirecting the privileged read after validation.
+fn digest_bundle_tree(root: &Path, trusted_roots: &[PathBuf]) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                collect_files(&path, files)?;
+            } else if file_type.is_file() || file_type.is_symlink() {
+                files.push(path);
+            } else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    format!("unsupported adapter bundle entry '{}'", path.display()),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    let canonical_trusted_roots: Vec<PathBuf> = trusted_roots
+        .iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .collect();
+    let canonical_bundle_root = root.canonicalize().ok()?;
+    if !canonical_trusted_roots
+        .iter()
+        .any(|trusted_root| canonical_bundle_root.starts_with(trusted_root))
+    {
+        return None;
+    }
+
+    let mut files = Vec::new();
+    collect_files(root, &mut files).ok()?;
+    files.sort();
+    let mut hasher = Sha256::new();
+    for path in files {
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        let metadata = std::fs::symlink_metadata(&path).ok()?;
+        let (entry_type, link_target, bytes) = if metadata.file_type().is_symlink() {
+            let link_target = std::fs::read_link(&path).ok()?;
+            let target_path = if link_target.is_absolute() {
+                link_target.clone()
+            } else {
+                path.parent()?.join(&link_target)
+            };
+            let canonical_target = target_path.canonicalize().ok()?;
+            if !canonical_trusted_roots
+                .iter()
+                .any(|trusted_root| canonical_target.starts_with(trusted_root))
+            {
+                return None;
+            }
+            (
+                b"symlink".as_slice(),
+                Some(link_target.to_string_lossy().into_owned().into_bytes()),
+                std::fs::read(canonical_target).ok()?,
+            )
+        } else {
+            (b"file".as_slice(), None, std::fs::read(&path).ok()?)
+        };
+        hasher.update(relative.to_string_lossy().as_bytes());
+        hasher.update([0]);
+        hasher.update(entry_type);
+        hasher.update([0]);
+        if let Some(link_target) = link_target {
+            hasher.update((link_target.len() as u64).to_le_bytes());
+            hasher.update([0]);
+            hasher.update(link_target);
+        }
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update([0]);
+        hasher.update(bytes);
+    }
+    Some(format!("sha256:{:x}", hasher.finalize()))
+}
+
+/// Adapter actions a committed update of `component` leaves behind.
+///
+/// User updates may compare receipts owned by the same user. System updates
+/// never load receipt state; they compare trusted source snapshots and direct
+/// affected users to inspect their own receipts.
+pub(crate) fn adapter_actions_after_update(
+    ctx: &CliContext,
+    store: &StateStore,
+    component: &str,
+    before: &AdapterBundleSnapshot,
+) -> Vec<AdapterAction> {
+    if ctx.install_mode == crate::context::InstallMode::System {
+        let layout = common::resolve_layout(ctx);
+        return system_adapter_actions(
+            component,
+            before,
+            &adapter_bundle_snapshot(ctx, &layout, component),
+        );
+    }
+    receipt_adapter_actions(store, component)
+}
+
+fn receipt_adapter_actions(store: &StateStore, component: &str) -> Vec<AdapterAction> {
+    claim::stale_enabled_claims(&store.adapter_claims, component)
+        .into_iter()
+        .map(|receipt| AdapterAction {
+            component: receipt.component.clone(),
+            framework: receipt.framework.clone(),
+            reason: claim::BUNDLE_CHANGED_REASON.to_string(),
+            command: format!(
+                "anolisa adapter enable {} {}",
+                receipt.component, receipt.framework
+            ),
+        })
+        .collect()
+}
+
+fn system_adapter_actions(
+    component: &str,
+    before: &AdapterBundleSnapshot,
+    after: &AdapterBundleSnapshot,
+) -> Vec<AdapterAction> {
+    before
+        .iter()
+        .filter_map(|(framework, before_digest)| {
+            let changed = match (before_digest, after.get(framework)) {
+                (Some(before), Some(Some(after))) => before != after,
+                (Some(_), _) => true,
+                _ => false,
+            };
+            changed.then(|| AdapterAction {
+                component: component.to_string(),
+                framework: framework.clone(),
+                reason: SYSTEM_BUNDLE_CHANGED_REASON.to_string(),
+                command: format!("anolisa adapter status {component}"),
+            })
+        })
+        .collect()
+}
+
+/// Human-readable notices naming every adapter a successful update left
+/// with a stale resource bundle, each with its exact recovery command.
+pub(crate) fn render_adapter_action_notices(actions: &[AdapterAction], color: &Palette) {
+    for action in actions {
+        println!(
+            "{} adapter {}/{}: {}",
+            color.warn("⚠"),
+            action.component,
+            action.framework,
+            action.reason,
+        );
+        println!(
+            "  {} {}",
+            color.label("run:"),
+            color.command(&action.command)
+        );
+    }
 }
 
 /// Wire `update <component>` to the live host: a delegated record updates
@@ -295,6 +578,10 @@ pub(crate) enum UpdateOutcome {
     AlreadyCurrent,
 }
 
+/// What the single-component update pipeline reports to its caller: the
+/// transaction outcome plus any adapter follow-up actions (issue #1885).
+pub(crate) type ComponentUpdateResult = Result<(UpdateOutcome, Vec<AdapterAction>), CliError>;
+
 /// What the planning prefix decided for one component update, before any
 /// side effect ran. The single-component path executes it directly; batch
 /// orchestration classifies on the route to group delegated refreshes (U5)
@@ -332,13 +619,16 @@ pub(crate) enum PlannedUpdateRoute {
 /// sequence to the matching executor: a delegated plan re-runs `dnf update`
 /// through the delegated executor, an owned plan replaces the recorded files
 /// with the resolved latest published version through the owned executor.
+/// A committed update also reports the adapters it left with a stale
+/// resource bundle (issue #1885); no-op, dry-run, and failed updates report
+/// none.
 pub(crate) fn update_component_with_deps(
     input: &str,
     ctx: &CliContext,
     query: &dyn PackageQuery,
     txn: &dyn PackageTransaction,
     is_root: bool,
-) -> Result<UpdateOutcome, CliError> {
+) -> ComponentUpdateResult {
     let planned = plan_component_update(input, ctx, query, txn)?;
     execute_planned_update(planned, ctx, query, txn, is_root)
 }
@@ -527,13 +817,15 @@ pub(crate) fn plan_component_update(
 /// Execution half of [`update_component_with_deps`]: render the idempotent
 /// NoOp, replace an owned artifact's files, or run the delegated native
 /// transaction. Dry-run renders the plan and stops before any side effect.
+/// Returns the outcome plus any adapter follow-up actions (always empty on
+/// no-op, dry-run, and failure paths).
 fn execute_planned_update(
     planned: PlannedComponentUpdate,
     ctx: &CliContext,
     query: &dyn PackageQuery,
     txn: &dyn PackageTransaction,
     is_root: bool,
-) -> Result<UpdateOutcome, CliError> {
+) -> ComponentUpdateResult {
     let PlannedComponentUpdate {
         command,
         target,
@@ -571,8 +863,9 @@ fn execute_planned_update(
                 ctx.dry_run,
                 &[],
                 None,
+                &[],
             )?;
-            return Ok(UpdateOutcome::AlreadyCurrent);
+            return Ok((UpdateOutcome::AlreadyCurrent, Vec::new()));
         }
         PlannedUpdateRoute::Owned { steps } => {
             let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
@@ -593,8 +886,9 @@ fn execute_planned_update(
                     true,
                     &plan_labels,
                     None,
+                    &[],
                 )?;
-                return Ok(UpdateOutcome::Updated);
+                return Ok((UpdateOutcome::Updated, Vec::new()));
             }
             let (resolution, prior) = owned_execution.ok_or_else(|| CliError::Runtime {
                 command: command.clone(),
@@ -602,7 +896,7 @@ fn execute_planned_update(
                     "internal: planner produced an owned plan but no resolution was prepared for '{target}'"
                 ),
             })?;
-            update_owned(
+            let adapter_actions = update_owned(
                 target,
                 ctx,
                 &layout,
@@ -616,7 +910,7 @@ fn execute_planned_update(
                 prior,
                 &command,
             )?;
-            return Ok(UpdateOutcome::Updated);
+            return Ok((UpdateOutcome::Updated, adapter_actions));
         }
         PlannedUpdateRoute::Delegated { steps } => steps,
     };
@@ -634,8 +928,9 @@ fn execute_planned_update(
             true,
             &plan_labels,
             None,
+            &[],
         )?;
-        return Ok(UpdateOutcome::Updated);
+        return Ok((UpdateOutcome::Updated, Vec::new()));
     }
 
     // dnf transactions need root; check up front so the user gets an
@@ -675,6 +970,7 @@ fn execute_planned_update(
             ),
         });
     }
+    let prior_adapter_bundles = adapter_bundle_snapshot(ctx, &layout, target);
 
     let package = native_package.clone().unwrap_or_else(|| target.to_string());
     let evidence = JournalEvidence::new(&journal_dir, &store.operations);
@@ -777,6 +1073,15 @@ fn execute_planned_update(
         });
     }
 
+    // A no-op transaction changed nothing, so it cannot require adapter
+    // follow-up; a committed one may have replaced adapter resources
+    // (issue #1885).
+    let adapter_actions = if updated {
+        adapter_actions_after_update(ctx, &store, target, &prior_adapter_bundles)
+    } else {
+        Vec::new()
+    };
+
     render_result(
         ctx,
         target,
@@ -787,17 +1092,22 @@ fn execute_planned_update(
         false,
         &plan_labels,
         Some(&operation_id),
+        &adapter_actions,
     )?;
-    Ok(if updated {
-        UpdateOutcome::Updated
-    } else {
-        UpdateOutcome::AlreadyCurrent
-    })
+    Ok((
+        if updated {
+            UpdateOutcome::Updated
+        } else {
+            UpdateOutcome::AlreadyCurrent
+        },
+        adapter_actions,
+    ))
 }
 
 /// Execute an owned update plan (U3) through the raw backend: replace the
 /// recorded files with the resolved latest published version, compensating
-/// back to the previous files on failure.
+/// back to the previous files on failure. Returns any adapter follow-up
+/// actions the committed update produced (issue #1885).
 ///
 /// The store is re-read under the install lock so the backup/remove set can
 /// never come from a stale snapshot; a version drift under the lock aborts
@@ -816,7 +1126,7 @@ fn update_owned(
     resolution: RawResolution,
     prior: OwnedArtifact,
     command: &str,
-) -> Result<(), CliError> {
+) -> Result<Vec<AdapterAction>, CliError> {
     // No root pre-check: `--prefix` may point at a user-writable tree, and a
     // genuine permission problem fails the exact step and unwinds honestly
     // instead of a blanket refusal.
@@ -865,6 +1175,7 @@ fn update_owned(
             });
         }
     };
+    let prior_adapter_bundles = adapter_bundle_snapshot(ctx, layout, target);
 
     let evidence = JournalEvidence::new(journal_dir, &store.operations);
     let mut journal_gate = LockedJournalGate::load(&_lock, evidence, command)?;
@@ -927,6 +1238,8 @@ fn update_owned(
         None,
     );
 
+    let adapter_actions = adapter_actions_after_update(ctx, &store, target, &prior_adapter_bundles);
+
     render_result(
         ctx,
         target,
@@ -937,7 +1250,9 @@ fn update_owned(
         false,
         plan_labels,
         Some(&operation_id),
-    )
+        &adapter_actions,
+    )?;
+    Ok(adapter_actions)
 }
 
 /// Classify a resolved `candidate` version against the `installed` one,
@@ -1304,7 +1619,9 @@ pub(crate) fn append_update_log(
     }
 }
 
-/// Render the update result (or its dry-run preview).
+/// Render the update result (or its dry-run preview). `adapter_actions`
+/// lists follow-up from a committed update (issue #1885); `--quiet`
+/// suppresses the human notices while `--json` always carries them.
 #[expect(clippy::too_many_arguments)]
 fn render_result(
     ctx: &CliContext,
@@ -1316,6 +1633,7 @@ fn render_result(
     dry_run: bool,
     plan_labels: &[String],
     operation_id: Option<&str>,
+    adapter_actions: &[AdapterAction],
 ) -> Result<(), CliError> {
     if ctx.json {
         return response::render_json(
@@ -1329,6 +1647,7 @@ fn render_result(
                 dry_run,
                 plan: plan_labels.to_vec(),
                 operation_id: operation_id.map(str::to_string),
+                adapter_actions: adapter_actions.to_vec(),
             },
         );
     }
@@ -1380,6 +1699,7 @@ fn render_result(
     if let Some(id) = operation_id {
         println!("{} {}", color.label("operation_id:"), color.id(id));
     }
+    render_adapter_action_notices(adapter_actions, &color);
     Ok(())
 }
 
@@ -1815,6 +2135,89 @@ pub(crate) mod tests {
     use std::path::{Path, PathBuf};
 
     use anolisa_platform::pkg_query::PackageVersion;
+
+    /// Reproduce the persisted receipt digest without exposing the core
+    /// implementation as public API solely for cross-crate test fixtures.
+    pub(crate) fn receipt_digest(root: &Path) -> Option<String> {
+        use sha2::{Digest, Sha256};
+
+        fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+            for entry in std::fs::read_dir(dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if entry.file_type()?.is_dir() {
+                    collect_files(&path, files)?;
+                } else {
+                    files.push(path);
+                }
+            }
+            Ok(())
+        }
+
+        let mut files = Vec::new();
+        collect_files(root, &mut files).ok()?;
+        files.sort();
+        let mut hasher = Sha256::new();
+        for path in files {
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            let bytes = std::fs::read(&path).ok()?;
+            hasher.update(relative.to_string_lossy().as_bytes());
+            hasher.update([0]);
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update([0]);
+            hasher.update(bytes);
+        }
+        Some(format!("sha256:{:x}", hasher.finalize()))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_bundle_digest_tracks_bounded_symlink_contents() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let trusted_root = tmp.path().join("datadir");
+        let component_root = trusted_root.join("adapters/tokenless");
+        let bundle = component_root.join("claude-code");
+        let shared_hook = component_root.join("common/hooks/run-hook.sh");
+        std::fs::create_dir_all(bundle.join("hooks")).expect("bundle");
+        std::fs::create_dir_all(shared_hook.parent().expect("shared hook parent"))
+            .expect("shared hooks");
+        std::fs::write(&shared_hook, b"v1").expect("shared hook");
+        symlink(
+            "../../common/hooks/run-hook.sh",
+            bundle.join("hooks/run-hook.sh"),
+        )
+        .expect("symlink");
+
+        let first = digest_bundle_tree(&bundle, std::slice::from_ref(&trusted_root))
+            .expect("trusted symlink target is digestible");
+        std::fs::write(&shared_hook, b"v2").expect("updated shared hook");
+        let second = digest_bundle_tree(&bundle, std::slice::from_ref(&trusted_root))
+            .expect("updated trusted symlink target is digestible");
+
+        assert_ne!(first, second);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_bundle_digest_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let trusted_root = tmp.path().join("datadir");
+        let bundle = trusted_root.join("adapters/tokenless/claude-code");
+        std::fs::create_dir_all(&bundle).expect("bundle");
+        let outside = tmp.path().join("outside.sh");
+        std::fs::write(&outside, b"sensitive").expect("outside file");
+        symlink(&outside, bundle.join("run-hook.sh")).expect("symlink");
+
+        assert_eq!(
+            digest_bundle_tree(&bundle, std::slice::from_ref(&trusted_root)),
+            None,
+            "a privileged digest must not read a symlink target outside trusted roots"
+        );
+    }
 
     #[test]
     fn json_dry_run_reports_available_but_not_updated() {
@@ -2308,6 +2711,10 @@ pub(crate) mod tests {
         /// `true` makes the *post-update* `query_installed` report the package
         /// gone, modelling a failed rpmdb re-read after a successful dnf update.
         post_update_missing: bool,
+        /// Runs after a successful dnf update — models the RPM transaction
+        /// replacing package-owned files (e.g. an adapter resource bundle
+        /// under the datadir).
+        on_update: Option<Box<dyn Fn()>>,
         update_calls: Cell<usize>,
     }
 
@@ -2320,6 +2727,7 @@ pub(crate) mod tests {
                 update_succeeds: true,
                 multi_version: false,
                 post_update_missing: false,
+                on_update: None,
                 update_calls: Cell::new(0),
             }
         }
@@ -2337,6 +2745,10 @@ pub(crate) mod tests {
         }
         fn post_update_missing(mut self) -> Self {
             self.post_update_missing = true;
+            self
+        }
+        fn with_on_update(mut self, hook: Box<dyn Fn()>) -> Self {
+            self.on_update = Some(hook);
             self
         }
     }
@@ -2388,6 +2800,9 @@ pub(crate) mod tests {
             }
             if let Some(next) = &self.upgrade_to {
                 *self.installed.borrow_mut() = Some(next.clone());
+            }
+            if let Some(hook) = &self.on_update {
+                hook();
             }
             Ok(())
         }
@@ -4258,6 +4673,569 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
             owned_artifact(&find_component(&c, "copilot-shell")).version,
             "0.2.0",
             "the raw component must be updated to the published version"
+        );
+    }
+
+    // ── adapter receipts left stale by an update (issue #1885) ──
+
+    use anolisa_core::adapter::claim::{
+        AdapterClaim, CLAIM_SCHEMA_VERSION, ClaimStatus, CoshClaim, DRIVER_SCHEMA_VERSION,
+        DriverPayload,
+    };
+
+    /// An enabled receipt for `(component, framework)` pointing at
+    /// `resource_root`, carrying `bundle_digest` as its enable-time digest.
+    pub(crate) fn enabled_claim(
+        component: &str,
+        framework: &str,
+        resource_root: &Path,
+        bundle_digest: Option<&str>,
+    ) -> AdapterClaim {
+        AdapterClaim {
+            claim_schema: CLAIM_SCHEMA_VERSION,
+            component: component.to_string(),
+            framework: framework.to_string(),
+            plugin_id: None,
+            adapter_type: Some("extension".to_string()),
+            enabled_at: "2026-07-01T00:00:00Z".to_string(),
+            resource_root: resource_root.to_path_buf(),
+            bundle_digest: bundle_digest.map(str::to_string),
+            driver_schema: DRIVER_SCHEMA_VERSION,
+            status: ClaimStatus::Enabled,
+            notices: Vec::new(),
+            resources: Vec::new(),
+            driver_payload: DriverPayload::Cosh(CoshClaim {
+                extension_dir_resource: "cosh_extension_dir".to_string(),
+            }),
+        }
+    }
+
+    /// Upsert a receipt into `ctx`'s seeded state.
+    pub(crate) fn seed_claim(ctx: &CliContext, receipt: AdapterClaim) {
+        let layout = common::resolve_layout(ctx);
+        let state_path = layout.state_dir.join("installed.toml");
+        let mut store =
+            StateStore::load_for_layout(&state_path, 0, &layout).expect("load seeded state");
+        store.upsert_adapter_claim(receipt);
+        store.save(&state_path).expect("save state");
+    }
+
+    fn expected_action(component: &str, framework: &str) -> AdapterAction {
+        AdapterAction {
+            component: component.to_string(),
+            framework: framework.to_string(),
+            reason: "resource bundle changed since enable".to_string(),
+            command: format!("anolisa adapter enable {component} {framework}"),
+        }
+    }
+
+    fn expected_system_action(component: &str, framework: &str) -> AdapterAction {
+        AdapterAction {
+            component: component.to_string(),
+            framework: framework.to_string(),
+            reason: SYSTEM_BUNDLE_CHANGED_REASON.to_string(),
+            command: format!("anolisa adapter status {component}"),
+        }
+    }
+
+    /// `raw_manifest` plus an `[[adapters]]` entry so the artifact also
+    /// ships an adapter resource bundle under `adapters/<component>/openclaw/`.
+    pub(crate) fn raw_manifest_with_adapter(component: &str, version: &str) -> String {
+        format!(
+            r#"{base}
+[[adapters]]
+framework = "openclaw"
+adapter_type = "plugin"
+source = "adapters/{component}/openclaw"
+dest = "{{datadir}}/adapters/{{component}}/openclaw/"
+"#,
+            base = raw_manifest(component, version)
+        )
+    }
+
+    /// tar.gz carrying the with-adapter manifest, the binary it declares,
+    /// and an adapter bundle with the given `bundle` files.
+    fn raw_artifact_with_adapter(
+        component: &str,
+        version: &str,
+        body: &[u8],
+        bundle: &[(&str, &[u8])],
+    ) -> Vec<u8> {
+        let manifest = raw_manifest_with_adapter(component, version);
+        let mut entries: Vec<(String, Vec<u8>)> = vec![
+            (".anolisa/component.toml".to_string(), manifest.into_bytes()),
+            (format!("bin/{component}"), body.to_vec()),
+        ];
+        entries.extend(bundle.iter().map(|(path, data)| {
+            (
+                format!("adapters/{component}/openclaw/{path}"),
+                data.to_vec(),
+            )
+        }));
+        let refs: Vec<(&str, &[u8])> = entries
+            .iter()
+            .map(|(path, data)| (path.as_str(), data.as_slice()))
+            .collect();
+        tar_gz(&refs)
+    }
+
+    /// Seed the adapter bundle an earlier version shipped plus an enabled
+    /// receipt whose enable-time digest matches it; returns the bundle root.
+    fn seed_bundle_and_claim(ctx: &CliContext, component: &str, content: &[u8]) -> PathBuf {
+        let layout = common::resolve_layout(ctx);
+        let manifest_path =
+            FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+        std::fs::create_dir_all(manifest_path.parent().expect("manifest parent"))
+            .expect("manifest dir");
+        std::fs::write(
+            &manifest_path,
+            raw_manifest_with_adapter(component, "0.1.0"),
+        )
+        .expect("adapter manifest");
+        let bundle_root = layout
+            .datadir
+            .join("adapters")
+            .join(component)
+            .join("openclaw");
+        std::fs::create_dir_all(&bundle_root).expect("bundle root");
+        std::fs::write(bundle_root.join("plugin.json"), content).expect("bundle file");
+        let digest = receipt_digest(&bundle_root).expect("enable-time digest");
+        seed_claim(
+            ctx,
+            enabled_claim(component, "openclaw", &bundle_root, Some(&digest)),
+        );
+        bundle_root
+    }
+
+    /// Seed a raw-installed component that ships an adapter bundle: the
+    /// record owns the bundle file (as a real install with `[[adapters]]`
+    /// would), and an enabled receipt carries the enable-time digest of the
+    /// bundle root. Returns the bundle root.
+    fn seed_raw_component_with_bundle(
+        ctx: &CliContext,
+        component: &str,
+        version: &str,
+        body: &[u8],
+        bundle_content: &[u8],
+    ) -> PathBuf {
+        use sha2::{Digest, Sha256};
+        seed_installed_raw(ctx, component, version, body);
+        let layout = common::resolve_layout(ctx);
+        let manifest_path =
+            FsLayout::component_manifest_snapshot_path(&layout.state_dir, component);
+        std::fs::write(
+            &manifest_path,
+            raw_manifest_with_adapter(component, version),
+        )
+        .expect("adapter manifest");
+        let bundle_root = layout
+            .datadir
+            .join("adapters")
+            .join(component)
+            .join("openclaw");
+        std::fs::create_dir_all(&bundle_root).expect("bundle root");
+        std::fs::write(bundle_root.join("plugin.json"), bundle_content).expect("bundle file");
+
+        // Record the bundle file as owned so the update may replace it —
+        // placing over an unowned existing file is (rightly) refused. This
+        // must stay a v4 write: seeding the claim below migrates the file
+        // to v5.
+        let state_path = layout.state_dir.join("installed.toml");
+        let mut state = InstalledState::load(&state_path).expect("load seeded state");
+        let obj = state
+            .find_object_mut(ObjectKind::Component, component)
+            .expect("seeded object");
+        obj.files.push(OwnedFile {
+            path: bundle_root.join("plugin.json"),
+            owner: FileOwner::Anolisa,
+            sha256: Some(format!("{:x}", Sha256::digest(bundle_content))),
+            kind: OwnedFileKind::File,
+            referent: None,
+            mode: None,
+            capabilities: Vec::new(),
+        });
+        state.save(&state_path).expect("save state");
+
+        let digest = receipt_digest(&bundle_root).expect("enable-time digest");
+        seed_claim(
+            ctx,
+            enabled_claim(component, "openclaw", &bundle_root, Some(&digest)),
+        );
+        bundle_root
+    }
+
+    /// System updates must never inspect receipt-selected resource paths.
+    #[test]
+    fn system_update_actions_ignore_receipts() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("system"), InstallMode::System, false);
+        let bundle_root = tmp.path().join("receipt-controlled");
+        std::fs::create_dir_all(&bundle_root).expect("bundle root");
+        std::fs::write(bundle_root.join("plugin.json"), b"v1").expect("bundle file");
+        let digest = receipt_digest(&bundle_root).expect("enable-time digest");
+
+        let mut store = StateStore::empty();
+        store.upsert_adapter_claim(enabled_claim(
+            "tokenless",
+            "openclaw",
+            &bundle_root,
+            Some(&digest),
+        ));
+        std::fs::write(bundle_root.join("plugin.json"), b"v2").expect("updated bundle");
+
+        assert!(
+            adapter_actions_after_update(&c, &store, "tokenless", &AdapterBundleSnapshot::new())
+                .is_empty(),
+            "system mode must ignore receipt-controlled bundle paths"
+        );
+    }
+
+    /// A privileged source snapshot must not honor the caller-controlled
+    /// packaged-data override.
+    #[test]
+    fn system_bundle_snapshot_ignores_packaged_data_override() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let untrusted = tmp.path().join("caller-data");
+        let contract = FsLayout::component_contract_path(&untrusted, "tokenless");
+        std::fs::create_dir_all(contract.parent().expect("contract parent")).expect("contract dir");
+        std::fs::write(contract, raw_manifest_with_adapter("tokenless", "1.0.0"))
+            .expect("contract");
+        let bundle = untrusted.join("adapters/tokenless/openclaw");
+        std::fs::create_dir_all(&bundle).expect("bundle dir");
+        std::fs::write(bundle.join("plugin.json"), b"untrusted").expect("bundle");
+
+        let c = ctx(tmp.path().join("system"), InstallMode::System, false)
+            .with_packaged_data_root(untrusted);
+        let layout = common::resolve_layout(&c);
+
+        assert!(
+            adapter_bundle_snapshot(&c, &layout, "tokenless").is_empty(),
+            "system snapshots must ignore environment-selected data roots"
+        );
+    }
+
+    /// A trusted source revision change yields a generic status action without
+    /// loading any user's receipt.
+    #[test]
+    fn system_bundle_change_reports_status_action() {
+        let before =
+            AdapterBundleSnapshot::from([("openclaw".to_string(), Some("sha256:old".to_string()))]);
+        let after =
+            AdapterBundleSnapshot::from([("openclaw".to_string(), Some("sha256:new".to_string()))]);
+
+        assert_eq!(
+            system_adapter_actions("tokenless", &before, &after),
+            vec![expected_system_action("tokenless", "openclaw")]
+        );
+    }
+
+    #[test]
+    fn system_bundle_becoming_unavailable_reports_status_action() {
+        let before =
+            AdapterBundleSnapshot::from([("openclaw".to_string(), Some("sha256:old".to_string()))]);
+        let after = AdapterBundleSnapshot::from([("openclaw".to_string(), None)]);
+
+        assert_eq!(
+            system_adapter_actions("tokenless", &before, &after),
+            vec![expected_system_action("tokenless", "openclaw")]
+        );
+    }
+
+    /// A system raw update reports a trusted adapter source change without
+    /// consulting a receipt.
+    #[test]
+    fn raw_update_reports_adapter_action_when_bundle_changed() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        let bundle_root =
+            seed_raw_component_with_bundle(&c, "foo", "0.1.0", b"old v1 binary\n", b"v1");
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "foo",
+            "0.2.0",
+            &raw_artifact_with_adapter("foo", "0.2.0", b"new\n", &[("plugin.json", b"v2")]),
+        );
+        let rpm = FakeRpm::new("unused", None);
+
+        let (outcome, actions) =
+            update_component_with_deps("foo", &c, &rpm, &rpm, false).expect("update ok");
+
+        assert_eq!(outcome, UpdateOutcome::Updated);
+        assert_eq!(
+            std::fs::read(bundle_root.join("plugin.json")).expect("read bundle"),
+            b"v2",
+            "the update itself must have replaced the bundle"
+        );
+        assert_eq!(
+            actions,
+            vec![expected_system_action("foo", "openclaw")],
+            "one changed trusted bundle yields one system action"
+        );
+    }
+
+    /// The same update with an unchanged bundle reports nothing.
+    #[test]
+    fn raw_update_with_unchanged_bundle_reports_no_adapter_action() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        seed_raw_component_with_bundle(&c, "foo", "0.1.0", b"old v1 binary\n", b"v1");
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "foo",
+            "0.2.0",
+            &raw_artifact_with_adapter("foo", "0.2.0", b"new\n", &[("plugin.json", b"v1")]),
+        );
+        let rpm = FakeRpm::new("unused", None);
+
+        let (outcome, actions) =
+            update_component_with_deps("foo", &c, &rpm, &rpm, false).expect("update ok");
+
+        assert_eq!(outcome, UpdateOutcome::Updated);
+        assert!(
+            actions.is_empty(),
+            "an unchanged bundle must not report an action: {actions:?}"
+        );
+    }
+
+    /// An already-current update is a no-op and must not claim a
+    /// post-update mismatch — even when the receipt was already stale
+    /// before the update ran.
+    #[test]
+    fn already_current_update_reports_no_adapter_action_even_with_stale_receipt() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        seed_installed_raw(&c, "foo", "0.2.0", b"current binary\n");
+        let layout = common::resolve_layout(&c);
+        let bundle_root = layout.datadir.join("adapters/foo/openclaw");
+        std::fs::create_dir_all(&bundle_root).expect("bundle root");
+        std::fs::write(bundle_root.join("plugin.json"), b"v2").expect("bundle file");
+        // A receipt stale from an earlier drift — not from this update.
+        seed_claim(
+            &c,
+            enabled_claim(
+                "foo",
+                "openclaw",
+                &bundle_root,
+                Some("sha256:stale-enable-time"),
+            ),
+        );
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &layout,
+            "foo",
+            "0.2.0",
+            &raw_artifact("foo", "0.2.0", b"unused\n"),
+        );
+        let rpm = FakeRpm::new("unused", None);
+
+        let (outcome, actions) =
+            update_component_with_deps("foo", &c, &rpm, &rpm, false).expect("no-op ok");
+
+        assert_eq!(outcome, UpdateOutcome::AlreadyCurrent);
+        assert!(
+            actions.is_empty(),
+            "a no-op update must not report adapter actions: {actions:?}"
+        );
+    }
+
+    /// A failed update reports no action and leaves the receipt in place
+    /// so the retry (or `adapter status`) still sees it.
+    #[test]
+    fn failed_update_reports_no_adapter_action_and_keeps_receipt() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        seed_installed_raw(&c, "foo", "0.1.0", b"original v1 binary\n");
+        let layout = common::resolve_layout(&c);
+        let bundle_root = layout.datadir.join("adapters/foo/openclaw");
+        std::fs::create_dir_all(&bundle_root).expect("bundle root");
+        std::fs::write(bundle_root.join("plugin.json"), b"v1").expect("bundle file");
+        let receipt = enabled_claim(
+            "foo",
+            "openclaw",
+            &bundle_root,
+            Some("sha256:stale-enable-time"),
+        );
+        seed_claim(&c, receipt.clone());
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &layout,
+            "foo",
+            "0.2.0",
+            &raw_artifact_missing_binary("foo", "0.2.0"),
+        );
+        let rpm = FakeRpm::new("unused", None);
+
+        let err = update_component_with_deps("foo", &c, &rpm, &rpm, false)
+            .expect_err("the new artifact is broken; the update must fail");
+        assert_eq!(err.code(), "EXECUTION_FAILED");
+
+        let store = load_store(&c);
+        assert_eq!(
+            store.find_adapter_claim("foo", "openclaw"),
+            Some(&receipt),
+            "a failed update must not touch the receipt"
+        );
+    }
+
+    /// A successful update never rewrites the enable-time digest: the
+    /// framework side was not reapplied, so the receipt must stay stale
+    /// until an explicit `adapter enable`.
+    #[test]
+    fn successful_update_leaves_the_receipt_untouched() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().join("sys"), InstallMode::System, false);
+        let bundle_root =
+            seed_raw_component_with_bundle(&c, "foo", "0.1.0", b"old v1 binary\n", b"v1");
+        let receipt = {
+            let digest = receipt_digest(&bundle_root).expect("enable-time digest");
+            enabled_claim("foo", "openclaw", &bundle_root, Some(&digest))
+        };
+        publish_raw_repo(
+            &tmp.path().join("repo"),
+            &common::resolve_layout(&c),
+            "foo",
+            "0.2.0",
+            &raw_artifact_with_adapter("foo", "0.2.0", b"new\n", &[("plugin.json", b"v2")]),
+        );
+        let rpm = FakeRpm::new("unused", None);
+
+        let (_, actions) =
+            update_component_with_deps("foo", &c, &rpm, &rpm, false).expect("update ok");
+        assert_eq!(actions, vec![expected_system_action("foo", "openclaw")]);
+
+        let store = load_store(&c);
+        assert_eq!(
+            store.find_adapter_claim("foo", "openclaw"),
+            Some(&receipt),
+            "update must report the drift, not erase it"
+        );
+    }
+
+    /// A committed delegated (RPM) update whose package replaces the
+    /// adapter resources propagates the adapter action through the shared
+    /// completion.
+    #[test]
+    fn delegated_update_completion_propagates_adapter_actions() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &c,
+            rpm_object(
+                "copilot-shell",
+                "copilot-shell",
+                "1.0.0-1.al8",
+                Ownership::RpmManaged,
+                ObjectStatus::Installed,
+            ),
+        );
+        let bundle_root = seed_bundle_and_claim(&c, "copilot-shell", b"v1");
+
+        let replaced = bundle_root.clone();
+        let rpm = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "1.0.0", Some("1.al8"), "x86_64")),
+        )
+        .upgrading_to(pkg_info("copilot-shell", "1.1.0", Some("1.al8"), "x86_64"))
+        .with_on_update(Box::new(move || {
+            // The upgraded RPM replaces the datadir bundle.
+            std::fs::write(replaced.join("plugin.json"), b"v2").expect("bundle replaced");
+        }));
+
+        let (outcome, actions) =
+            update_component_with_deps("copilot-shell", &c, &rpm, &rpm, true).expect("update ok");
+
+        assert_eq!(outcome, UpdateOutcome::Updated);
+        assert_eq!(rpm.update_calls.get(), 1);
+        assert_eq!(
+            actions,
+            vec![expected_system_action("copilot-shell", "openclaw")],
+            "the delegated completion must surface the changed source bundle"
+        );
+        assert_eq!(update_operation_status(&c, "copilot-shell"), "ok");
+    }
+
+    /// A delegated no-op (dnf ran, nothing moved) changed no files, so it
+    /// reports no action even with a stale receipt present.
+    #[test]
+    fn delegated_noop_update_reports_no_adapter_action() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        seed(
+            &c,
+            rpm_object(
+                "copilot-shell",
+                "copilot-shell",
+                "1.0.0-1.al8",
+                Ownership::RpmManaged,
+                ObjectStatus::Installed,
+            ),
+        );
+        let layout = common::resolve_layout(&c);
+        let bundle_root = layout.datadir.join("adapters/copilot-shell/openclaw");
+        std::fs::create_dir_all(&bundle_root).expect("bundle root");
+        std::fs::write(bundle_root.join("plugin.json"), b"v1").expect("bundle file");
+        seed_claim(
+            &c,
+            enabled_claim(
+                "copilot-shell",
+                "openclaw",
+                &bundle_root,
+                Some("sha256:stale-enable-time"),
+            ),
+        );
+        // upgrade_to is None => dnf update is a no-op; EVR stays the same.
+        let rpm = FakeRpm::new(
+            "copilot-shell",
+            Some(pkg_info("copilot-shell", "1.0.0", Some("1.al8"), "x86_64")),
+        );
+
+        let (outcome, actions) =
+            update_component_with_deps("copilot-shell", &c, &rpm, &rpm, true).expect("update ok");
+
+        assert_eq!(outcome, UpdateOutcome::AlreadyCurrent);
+        assert!(
+            actions.is_empty(),
+            "a no-op update must not report adapter actions: {actions:?}"
+        );
+    }
+
+    /// The `adapter_actions` key is stable wire surface: always present,
+    /// with exactly `component`/`framework`/`reason`/`command` per entry
+    /// (issue #1885).
+    #[test]
+    fn update_result_json_carries_stable_adapter_actions_shape() {
+        let payload = UpdateResultPayload {
+            component: "foo".to_string(),
+            package: Some("foo".to_string()),
+            from_version: Some("0.1.0".to_string()),
+            to_version: Some("0.2.0".to_string()),
+            updated: true,
+            dry_run: false,
+            plan: vec!["place files".to_string()],
+            operation_id: Some("op-update-1".to_string()),
+            adapter_actions: vec![expected_action("foo", "openclaw")],
+        };
+        let json = serde_json::to_value(&payload).expect("serialize");
+        assert_eq!(
+            json["adapter_actions"],
+            serde_json::json!([{
+                "component": "foo",
+                "framework": "openclaw",
+                "reason": "resource bundle changed since enable",
+                "command": "anolisa adapter enable foo openclaw",
+            }]),
+            "{json}"
+        );
+
+        let mut empty = payload;
+        empty.adapter_actions = Vec::new();
+        let json = serde_json::to_value(&empty).expect("serialize");
+        assert_eq!(
+            json["adapter_actions"],
+            serde_json::json!([]),
+            "the key stays present and empty when no receipt went stale: {json}"
         );
     }
 

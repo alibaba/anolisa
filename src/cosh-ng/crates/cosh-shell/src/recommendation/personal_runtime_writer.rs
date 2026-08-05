@@ -447,7 +447,7 @@ fn resolve_auth_state_bounded(adapter: &CoshCoreAdapter) -> Result<bool, Persona
     thread::Builder::new()
         .name("cosh-recommendation-auth".to_string())
         .spawn(move || {
-            let _ = sender.send(current_ai_configured(&adapter));
+            let _ = sender.send(adapter.ai_configured());
         })
         .map_err(|error| {
             PersonalRuntimeError::Operation(format!("start auth resolver: {error}"))

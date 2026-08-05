@@ -48,6 +48,12 @@ mode = "0755"
 type = "executable"
 
 [[component.layout.files]]
+source = "bin/agentsight-enforcer"
+target = "{bindir}/agentsight-enforcer"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
 source = "bin/agentsight-start"
 target = "{bindir}/agentsight-start"
 mode = "0755"
@@ -58,10 +64,21 @@ source = "share/anolisa/agentsight/agentsight.service"
 target = "{unitdir}/agentsight.service"
 mode = "0644"
 
+[[component.layout.files]]
+source = "share/anolisa/agentsight/agentsight-enforcer.service"
+target = "{unitdir}/agentsight-enforcer.service"
+mode = "0644"
+
 [[component.capabilities]]
 path = "{bindir}/agentsight"
 caps = ["cap_bpf", "cap_perfmon"]
 optional = true
+
+[[component.services]]
+unit = "agentsight-enforcer.service"
+scope = "system"
+enable = false
+start = false
 
 [[component.services]]
 unit = "agentsight.service"

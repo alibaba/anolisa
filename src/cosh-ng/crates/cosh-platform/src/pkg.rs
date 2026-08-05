@@ -5,6 +5,7 @@ use std::process::Command;
 
 use cosh_types::error::{CoshError, ErrorCode};
 use cosh_types::pkg::*;
+use regex::Regex;
 
 use crate::detect::{Distro, PkgManager};
 use crate::{run_command, PKG_TIMEOUT};
@@ -118,17 +119,27 @@ pub fn pkg_install(
     }
 }
 
-/// Execute a package search operation using the selected backend's pattern semantics.
+/// Execute a package search operation using portable glob pattern semantics.
 ///
 /// The query is passed as one argument without shell expansion. CLI callers use
 /// [`crate::validate::validate_pkg_search_query`] to enforce a portable pattern
 /// subset; direct callers are responsible for choosing their validation policy.
-/// DNF glob matching and apt-cache regular-expression matching are not equivalent.
 pub fn pkg_search(distro: &Distro, query: &str) -> Result<PkgSearchResult, CoshError> {
     let mgr = distro.pkg_manager();
+    let apt_query = glob_to_apt_regex(query);
+    let apt_name_matcher = (mgr == PkgManager::Apt)
+        .then(|| Regex::new(&apt_query))
+        .transpose()
+        .map_err(|error| {
+            CoshError::new(
+                ErrorCode::InvalidInput,
+                format!("invalid package search pattern '{query}': {error}"),
+                "pkg",
+            )
+        })?;
     let (cmd, args) = match mgr {
         PkgManager::Dnf => ("dnf", vec!["search", "-q", query]),
-        PkgManager::Apt => ("apt-cache", vec!["search", query]),
+        PkgManager::Apt => ("apt-cache", vec!["search", "--names-only", &apt_query]),
         PkgManager::Zypper => ("zypper", vec!["search", query]),
         PkgManager::Brew => ("brew", vec!["search", query]),
         PkgManager::Unknown => {
@@ -150,6 +161,11 @@ pub fn pkg_search(distro: &Distro, query: &str) -> Result<PkgSearchResult, CoshE
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut packages = parse_search_output(&stdout, mgr);
+    if let Some(matcher) = apt_name_matcher {
+        // Apt may return virtual-package matches despite `--names-only`; retain
+        // only package names that satisfy the portable glob.
+        packages.retain(|package| matcher.is_match(&package.name));
+    }
 
     // Zypper natively includes install status in search output; for other
     // backends, cross-reference against the local installed package set.
@@ -162,6 +178,39 @@ pub fn pkg_search(distro: &Distro, query: &str) -> Result<PkgSearchResult, CoshE
 
     let total = packages.len();
     Ok(PkgSearchResult { packages, total })
+}
+
+// Search package names only and anchor both ends so the Apt regex preserves
+// the portable glob's whole-name matching semantics.
+fn glob_to_apt_regex(pattern: &str) -> String {
+    let mut regex = String::with_capacity(pattern.len() + 2);
+    regex.push('^');
+    let mut chars = pattern.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '*' => regex.push_str(".*"),
+            '?' => regex.push('.'),
+            '[' if chars.clone().any(|next| next == ']') => {
+                regex.push('[');
+                for class_char in chars.by_ref() {
+                    regex.push(class_char);
+                    if class_char == ']' {
+                        break;
+                    }
+                }
+            }
+            '[' => regex.push_str(r"\["),
+            '.' | '+' | '(' | ')' | '{' | '}' | '|' | '^' | '$' | '\\' | ']' => {
+                regex.push('\\');
+                regex.push(ch);
+            }
+            _ => regex.push(ch),
+        }
+    }
+
+    regex.push('$');
+    regex
 }
 
 fn check_search_status(
@@ -813,6 +862,19 @@ mod tests {
         let output = "some random line without separator";
         let results = parse_search_output(output, PkgManager::Apt);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_glob_to_apt_regex() {
+        for (glob, expected) in [
+            ("lib*", "^lib.*$"),
+            ("python-?", "^python-.$"),
+            ("lib[0-9]*", "^lib[0-9].*$"),
+            ("lib.foo+", r"^lib\.foo\+$"),
+            ("lib[", r"^lib\[$"),
+        ] {
+            assert_eq!(glob_to_apt_regex(glob), expected, "glob: {glob}");
+        }
     }
 
     // --- zypper search output parsing ---

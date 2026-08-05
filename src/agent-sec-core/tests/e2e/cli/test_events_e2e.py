@@ -17,6 +17,7 @@ import json
 import os
 import sqlite3
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from cli.conftest import iso_now, require_loongshield, run_cli
@@ -60,6 +61,10 @@ def _write_security_event_row(
     result: str,
     trace_id: str,
     details: dict,
+    session_id: str | None = None,
+    run_id: str | None = None,
+    timestamp: str = "2026-06-09T00:00:00+00:00",
+    timestamp_epoch: float = 1780963200.0,
 ) -> None:
     data_dir = Path(os.environ["AGENT_SEC_DATA_DIR"])
     db_path = data_dir / "security-events.db"
@@ -112,13 +117,13 @@ def _write_security_event_row(
                 event_type,
                 category,
                 result,
-                "2026-06-09T00:00:00+00:00",
-                1780963200.0,
+                timestamp,
+                timestamp_epoch,
                 trace_id,
                 os.getpid(),
                 os.getuid(),
-                None,
-                None,
+                session_id,
+                run_id,
                 None,
                 None,
                 _extract_verdict(details),
@@ -491,6 +496,174 @@ class TestFailedEventQuery:
         assert event["details"]["error"] == "loongshield not found"
         assert event["details"]["error_type"] == "FileNotFoundError"
         assert event["trace_id"] == "error-trace-123"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Session and run filters
+# ---------------------------------------------------------------------------
+
+
+def _write_session_run_filter_rows() -> None:
+    rows = [
+        ("target-event", "session-1", "run-1"),
+        ("same-session-event", "session-1", "run-2"),
+        ("same-run-event", "session-2", "run-1"),
+    ]
+    for event_id, session_id, run_id in rows:
+        _write_security_event_row(
+            event_id=event_id,
+            event_type="harden",
+            category="hardening",
+            result="succeeded",
+            trace_id=f"{event_id}-trace",
+            details={},
+            session_id=session_id,
+            run_id=run_id,
+        )
+
+
+class TestSessionRunFilters:
+    """Verify session and run filters use exact AND semantics."""
+
+    def test_individual_session_and_run_filters(self):
+        _write_session_run_filter_rows()
+
+        cases = [
+            (
+                "--session-id",
+                "session-1",
+                {"target-event", "same-session-event"},
+            ),
+            ("--run-id", "run-1", {"target-event", "same-run-event"}),
+        ]
+        for option, value, expected_event_ids in cases:
+            result = run_cli("events", option, value, "--output", "json")
+
+            assert result.returncode == 0, result.stderr
+            events = json.loads(result.stdout)
+            assert {event["event_id"] for event in events} == expected_event_ids
+            field = option.removeprefix("--").replace("-", "_")
+            assert all(event[field] == value for event in events)
+
+    def test_session_and_run_filters_match_intersection(self):
+        _write_session_run_filter_rows()
+
+        result = run_cli(
+            "events",
+            "--session-id",
+            "session-1",
+            "--run-id",
+            "run-1",
+            "--output",
+            "json",
+        )
+
+        assert result.returncode == 0, result.stderr
+        events = json.loads(result.stdout)
+        assert [event["event_id"] for event in events] == ["target-event"]
+
+        missing_result = run_cli(
+            "events",
+            "--session-id",
+            "session-1",
+            "--run-id",
+            "missing-run",
+            "--output",
+            "json",
+        )
+        assert missing_result.returncode == 0, missing_result.stderr
+        assert json.loads(missing_result.stdout) == []
+
+    def test_session_and_run_coexist_with_all_existing_filters(self):
+        matching_timestamp = "2026-06-09T01:00:00+00:00"
+        matching_epoch = 1780966800.0
+        common = {
+            "event_type": "harden",
+            "category": "hardening",
+            "result": "succeeded",
+            "trace_id": "target-trace",
+            "details": {},
+            "session_id": "session-1",
+            "run_id": "run-1",
+            "timestamp": matching_timestamp,
+            "timestamp_epoch": matching_epoch,
+        }
+        variants = [
+            ("target-event", {}),
+            ("wrong-session", {"session_id": "session-2"}),
+            ("wrong-run", {"run_id": "run-2"}),
+            ("wrong-trace", {"trace_id": "other-trace"}),
+            ("wrong-event-type", {"event_type": "verify"}),
+            ("wrong-category", {"category": "asset_verify"}),
+            (
+                "outside-time-range",
+                {
+                    "timestamp": "2026-06-08T01:00:00+00:00",
+                    "timestamp_epoch": 1780880400.0,
+                },
+            ),
+        ]
+        for event_id, overrides in variants:
+            _write_security_event_row(
+                event_id=event_id,
+                **{**common, **overrides},
+            )
+
+        result = run_cli(
+            "events",
+            "--session-id",
+            "session-1",
+            "--run-id",
+            "run-1",
+            "--event-type",
+            "harden",
+            "--category",
+            "hardening",
+            "--trace-id",
+            "target-trace",
+            "--since",
+            "2026-06-09T00:30:00+00:00",
+            "--until",
+            "2026-06-09T01:30:00+00:00",
+            "--output",
+            "json",
+        )
+
+        assert result.returncode == 0, result.stderr
+        events = json.loads(result.stdout)
+        assert [event["event_id"] for event in events] == ["target-event"]
+
+    def test_session_and_run_coexist_with_last_hours(self):
+        timestamp_epoch = time.time()
+        timestamp = datetime.fromtimestamp(timestamp_epoch, tz=timezone.utc).isoformat()
+        _write_security_event_row(
+            event_id="recent-target",
+            event_type="harden",
+            category="hardening",
+            result="succeeded",
+            trace_id="recent-target-trace",
+            details={},
+            session_id="session-1",
+            run_id="run-1",
+            timestamp=timestamp,
+            timestamp_epoch=timestamp_epoch,
+        )
+
+        result = run_cli(
+            "events",
+            "--session-id",
+            "session-1",
+            "--run-id",
+            "run-1",
+            "--last-hours",
+            "1",
+            "--output",
+            "json",
+        )
+
+        assert result.returncode == 0, result.stderr
+        events = json.loads(result.stdout)
+        assert [event["event_id"] for event in events] == ["recent-target"]
 
 
 # ---------------------------------------------------------------------------

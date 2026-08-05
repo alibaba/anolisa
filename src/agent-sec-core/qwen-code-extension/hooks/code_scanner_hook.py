@@ -7,21 +7,36 @@ import subprocess
 import sys
 from typing import Any
 
-from hook_config import env_flag_enabled
+from hook_config import env_flag_enabled, normalize_hook_policy
 from trace_context import with_trace_context
 
 _HOOK_ENABLED = env_flag_enabled("CODE_SCANNER_HOOK_ENABLED", True)
-_MODE = os.environ.get("CODE_SCANNER_MODE", "observe").strip().lower()
-_VALID_MODES = {"observe", "ask", "deny"}
-try:
-    _TIMEOUT = int(os.environ.get("CODE_SCANNER_TIMEOUT", "10"))
-except (TypeError, ValueError):
-    _TIMEOUT = 10
-
 _TOOL_NAME = "run_shell_command"
 _LANGUAGE = "bash"
 _MAX_FINDINGS_DISPLAY = 5
 _MAX_TEXT_CHARS = 120
+
+
+def _diagnostic(message: str) -> None:
+    print(f"[code-scanner] {' '.join(message.split())}", file=sys.stderr)
+
+
+def _read_mode() -> str:
+    raw = os.environ.get("CODE_SCANNER_MODE")
+    mode = normalize_hook_policy(raw, "")
+    if raw is not None and mode not in {"observe", "ask", "block"}:
+        _diagnostic(
+            f"invalid or unsupported CODE_SCANNER_MODE={raw[:32]!r}; using observe"
+        )
+        return "observe"
+    return mode or "observe"
+
+
+_MODE = _read_mode()
+try:
+    _TIMEOUT = int(os.environ.get("CODE_SCANNER_TIMEOUT", "10"))
+except (TypeError, ValueError):
+    _TIMEOUT = 10
 
 
 def _json_output(payload: dict[str, Any]) -> str:
@@ -142,7 +157,7 @@ def _format_decision(scan: dict[str, Any]) -> str | None:
             "ask",
             _format_message(scan, "Review this command before execution."),
         )
-    if _MODE == "deny":
+    if _MODE == "block":
         return _decision(
             "deny",
             _format_message(scan, "This command was denied before execution."),
@@ -163,19 +178,6 @@ def main() -> None:
     command = _extract_command(input_data)
     if command is None:
         print(_noop())
-        return
-
-    if _MODE not in _VALID_MODES:
-        print(
-            _json_output(
-                {
-                    "systemMessage": (
-                        f"[code-scanner] Invalid CODE_SCANNER_MODE {_compact_text(_MODE, 32) or '<empty>'!r}; "
-                        "expected 'observe', 'ask', or 'deny'. Falling back to observe mode; execution will continue."
-                    )
-                }
-            )
-        )
         return
 
     scan = _scan_code(input_data, command)

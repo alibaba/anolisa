@@ -1,192 +1,128 @@
-# Tokenless
+# Tokenless Quick Start
 
-Tokenless is ANOLISA's Token optimization component. It automatically compresses tool definitions and model response content without modifying business logic, significantly reducing Token consumption per conversation turn.
+[中文版](../../../zh/token-saving/tokenless/QUICKSTART.md)
 
----
+## 1. What Tokenless does
 
-## Overview
+Tokenless helps an AI agent complete the same work with fewer tokens.
 
-AI Agent interactions typically include large tool schemas and verbose CLI output. Tokenless compresses these at the framework layer and records payload-level statistics, so the effect can be measured in the current workload.
+After you turn it on, you do not need to change your prompts or the way you use the agent. Tokenless works automatically in the background.
 
-**Core Capabilities:**
+What you may notice:
 
-- **Context Compression** — tool schema compaction, CLI response filtering, compact encoding
-- **Statistics Tracking** — per-session and cumulative Token savings metrics
-- **Transparent Integration** — plugs into existing Agent frameworks via hooks/plugins with zero code changes
+- Less token usage on lengthy intermediate results.
+- More room for useful information during long tasks.
+- Cleaner information for the agent to use when deciding what to do next.
 
----
+Savings vary by task. Short tasks or tasks that are mostly conversation may show little change, so check the result with your own workload in [View the result](#4-view-the-result).
 
-## Prerequisites
+## 2. Install Tokenless
 
-- Linux (x86_64 or aarch64, glibc 2.17+) — npm supports both architectures; the ANOLISA CLI artifact is available for x86_64
-- macOS (x86_64 or Apple Silicon) — npm supports both architectures; the ANOLISA CLI artifact is available for Apple Silicon
-- One of: Cosh, OpenClaw, Hermes, Qoder, Claude Code, Codex, or Qwencode (as the host Agent framework; the frameworks are cross-platform and run on macOS)
-
----
-
-## Installation
-
-### Option 1: anolisa CLI (recommended)
+Install the anolisa CLI first, then use it to install Tokenless:
 
 ```bash
+curl -fsSL https://get.agentic-os.sh | bash
+anolisa --version
 anolisa install tokenless
+tokenless --version
 ```
 
-Use this path on Linux x86_64 or Apple Silicon macOS. On Linux aarch64 or
-Intel macOS, use npm.
+## 3. Start using Tokenless
 
-### Option 2: YUM (Alinux, requires ANOLISA YUM repo)
+### 3.1 Use Tokenless in your agent
+
+Tokenless can work with:
+
+| Agent | Value used in commands |
+|-------|------------------------|
+| cosh / Copilot Shell | `cosh` |
+| OpenClaw | `openclaw` |
+| Hermes | `hermes` |
+| Qoder | `qoder` |
+| Claude Code | `claude-code` |
+| Codex | `codex` |
+| Qwen Code | `qwencode` |
+
+Find your agent and turn on Tokenless:
 
 ```bash
-sudo yum install tokenless
+anolisa adapter scan
+anolisa adapter enable tokenless <agent>
+anolisa adapter status tokenless
 ```
 
-### Option 3: npm (Node.js users)
+Restart the agent CLI, IDE, or gateway after Tokenless is enabled.
+
+#### 3.1.1 Example: OpenClaw
+
+Turn on Tokenless and restart the OpenClaw gateway:
 
 ```bash
-npm install -g anolisa-tokenless
+anolisa adapter enable tokenless openclaw
+anolisa adapter status tokenless
 ```
 
-Prebuilt binaries for Linux (glibc) and macOS (x86_64, aarch64) are installed automatically, and the framework adapters are installed to `~/.local/share/anolisa/adapters/tokenless/` on both Linux and macOS. Register an adapter with your framework via its install script, e.g. `bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh`.
+Then ask OpenClaw to perform a normal task:
 
-### Option 4: Source build (developers, Linux only)
+> Run the full test suite for this repository and summarize only the failures.
+
+You do not need to mention Tokenless in the prompt.
+
+If OpenClaw rejects the installation during its security check, follow [the OpenClaw instructions](framework-integration.md#openclaw) before retrying.
+
+### 3.2 Use the standalone CLI
+
+You can try response compression directly:
 
 ```bash
-cd src/tokenless && cargo build --release
+printf '%s\n' \
+  '{"status":"ok","data":{"name":"demo","items":[1,2,3]},"debug":{"trace":"verbose"},"metadata":null}' \
+  | tokenless compress-response
 ```
 
-> Source builds are only supported on Linux. macOS users should use the npm
-> package, which provides cross-compiled macOS binaries.
+The command returns valid JSON with removable fields such as `debug` and `metadata` omitted.
+If the output is unchanged, the input has no compressible content; retry with JSON that contains `debug`, `null`, or a long string.
 
----
+## 4. View the result
 
-## Integration
-
-Tokenless integrates with Agent frameworks through adapter scripts or extensions.
-
-### OpenClaw
-
-Install the OpenClaw adapter:
+After using a Shell, API, or other supported tool in your agent, run:
 
 ```bash
-/usr/share/anolisa/adapters/tokenless/openclaw/scripts/install.sh
-```
-
-The adapter registers as a middleware layer in the OpenClaw tool pipeline.
-
-### Hermes
-
-Install the Hermes adapter:
-
-```bash
-/usr/share/anolisa/adapters/tokenless/hermes/scripts/install.sh
-```
-
-### cosh (Copilot Shell)
-
-For cosh, Tokenless is installed as an extension:
-
-```bash
-# Via Makefile target
-make install-cosh-extension
-```
-
-This installs the extension to `~/.copilot-shell/extensions/tokenless/`.
-
-### Other Adapters
-
-Tokenless also supports claude-code, codex, and qwencode adapters. See `anolisa install tokenless` for available adapter options.
-
----
-
-## CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `tokenless compress-schema` | Compress tool schema definitions |
-| `tokenless compress-response` | Compress CLI/tool response output |
-| `tokenless compress-toon` | Compress to TOON format |
-| `tokenless decompress-toon` | Decompress from TOON format |
-| `tokenless env-check` | Check environment and integration status |
-| `tokenless stats summary` | View a compression statistics summary |
-
-### View Compression Statistics
-
-```bash
+tokenless stats list --limit 5
 tokenless stats summary
 ```
 
-Sample output:
+- `stats list` shows recent results that Tokenless made shorter. Copy a record ID from this list when you want to inspect one result.
+- `stats summary` shows the estimated tokens before and after Tokenless processing and the total saved.
 
-```
-Session       Tokens Saved   Ratio    Timestamp
-────────────  ────────────   ─────    ──────────────────
-sess-a3f1     12,480         62.3%    2025-06-30 14:22
-sess-b7c2      8,912         48.7%    2025-06-30 15:01
-────────────────────────────────────────────────────────
-Total         21,392         56.1%
-```
+For the OpenClaw example above, look for a record containing `openclaw` and confirm that its token count decreases from left to right.
 
----
-
-## AgentSight Integration
-
-Tokenless reports compression metrics to AgentSight when both components are installed. View Token savings on the AgentSight web dashboard under the **Token Accounting** panel.
-
-No additional configuration is needed — metrics are exported automatically when `sls_enabled` is true.
-
----
-
-## Configuration
-
-Configuration file: `~/.tokenless/config.json`
-
-This file is optional. When absent, all features are enabled by default.
-
-```json
-{
-  "stats_enabled": true,
-  "sls_enabled": true,
-  "compression_enabled": true
-}
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `stats_enabled` | boolean | `true` | Enable local statistics collection (stored in `~/.tokenless/stats.db`) |
-| `sls_enabled` | boolean | `true` | Enable metrics export to AgentSight/SLS |
-| `compression_enabled` | boolean | `true` | Enable compression (all-or-nothing toggle) |
-
-### Environment Variable Overrides
-
-Each config field can be overridden via environment variables:
-
-- `TOKENLESS_STATS_ENABLED` — override `stats_enabled`
-- `TOKENLESS_SLS_ENABLED` — override `sls_enabled`
-- `TOKENLESS_COMPRESSION_ENABLED` — override `compression_enabled`
-- `TOKENLESS_DATA_DIR` — directory containing `stats.db` and `stash.db`
-
-### Local Databases
-
-Local statistics and reversible-compression data default to
-`~/.tokenless/stats.db` and `~/.tokenless/stash.db`. To relocate both:
+To see what changed in one record:
 
 ```bash
-export TOKENLESS_DATA_DIR="$HOME/path/to/tokenless-data"
+tokenless stats diff <record-id>
 ```
 
-The value must be an absolute path under the real user home. Per-file
-`TOKENLESS_STATS_DB` and `TOKENLESS_STASH_DB` overrides take precedence.
+If no record appears, the content may not have passed through Tokenless or may not have become shorter. See [No statistics appear after setup](troubleshooting.md#no-statistics-appear-after-enabling-the-adapter).
 
----
+Token counts are estimates for content processed by Tokenless, not a direct measurement of the model bill. Statistics and diffs may contain original tool content; avoid sharing their output when it contains sensitive data. See [Measuring savings](measuring-savings.md) and [Configuration and data privacy](configuration-and-privacy.md) for details.
 
-## FAQ
+## 5. Platform support
 
-**Q: Does Tokenless modify the actual tool behavior?**
-A: No. Tokenless only compresses the representation sent to the model. Tool execution is unchanged.
+| Platform | anolisa CLI installation |
+|----------|--------------------------|
+| Linux x86_64/aarch64 | Supported |
+| macOS Apple Silicon | Supported |
+| macOS x86_64 | Not currently supported |
+| Windows or Linux with musl, such as Alpine | Not currently supported |
 
-**Q: Which frameworks are supported?**
-A: cosh, OpenClaw, Hermes, claude-code, codex, and qwencode.
+This page covers installation with the anolisa CLI only. To build the standalone CLI from source, see [User manual · Build the standalone CLI from source](user-manual.md#build-the-standalone-cli-from-source).
 
-**Q: Can I disable compression?**
-A: Yes. Set `compression_enabled` to `false` in `~/.tokenless/config.json` or set `TOKENLESS_COMPRESSION_ENABLED=false` in the environment. Compression is an all-or-nothing toggle — there is no per-tool exclusion.
+## 6. Next steps
+
+- [User manual](user-manual.md): behavior boundaries and documentation map
+- [Framework integration](framework-integration.md): enable, verify, and disable each agent
+- [CLI reference](cli-reference.md): all subcommands and options
+- [Measuring savings](measuring-savings.md): statistics, dual runs, and AgentSight/SLS
+- [Configuration and data privacy](configuration-and-privacy.md): toggles, storage, and sensitive data
+- [Troubleshooting](troubleshooting.md): common errors, upgrades, and uninstall

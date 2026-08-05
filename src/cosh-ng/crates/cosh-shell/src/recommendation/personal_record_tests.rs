@@ -111,6 +111,37 @@ fn agent_request_keeps_sanitized_text_and_opaque_session_only() {
     );
 }
 
+/// The shell secret gate flagged this input sensitive (#2138): the
+/// personalization sink must whole-field redact instead of trusting the
+/// sanitizer regexes — `sk-fbaa6` is below the opaque-token minimum
+/// length and would survive `sanitize_agent_request` verbatim.
+#[test]
+fn agent_request_with_sensitive_hint_redacts_whole_input_field() {
+    let mut sensitive_request = request();
+    sensitive_request.user_input =
+        Some("帮我安装下openclaw,模型使用qwen3.8-max,API Key: sk-fbaa6".to_string());
+    crate::types::mark_request_sensitive_input(&mut sensitive_request);
+
+    let record = agent_request_record(
+        &sensitive_request,
+        AgentContextBinding::FreeForm,
+        "act-request",
+        "session-opaque",
+        "fingerprint-request",
+        "intent-opaque",
+        Default::default(),
+        None,
+    )
+    .expect("request activity");
+
+    let json = serde_json::to_string(&record).unwrap();
+    assert!(!json.contains("sk-fbaa6"), "{json}");
+    let ActivityPayload::AgentRequest { text, .. } = record.payload else {
+        panic!("agent request payload");
+    };
+    assert_eq!(text, "<redacted>");
+}
+
 #[test]
 fn control_continuations_are_not_new_user_intents() {
     for binding in [

@@ -65,7 +65,7 @@ impl Tool for WriteFileTool {
             }
         }
 
-        tokio::fs::write(&path, content)
+        super::atomic_file::replace(path.clone(), content.as_bytes().to_vec(), None)
             .await
             .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
 
@@ -109,14 +109,30 @@ fn placeholder_markers(content: &str) -> Vec<&'static str> {
 mod tests {
     use std::path::Path;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+    #[cfg(unix)]
+    use std::path::PathBuf;
+
     use super::*;
 
     fn test_ctx_in(dir: &Path) -> ToolContext {
-        ToolContext {
-            cwd: dir.to_path_buf(),
-            session_id: "test".to_string(),
-            project_root: dir.to_path_buf(),
+        ToolContext::new(dir.to_path_buf(), "test".to_string(), dir.to_path_buf())
+    }
+
+    #[cfg(unix)]
+    fn create_symlink_chain(dir: &Path, length: usize) -> (PathBuf, PathBuf) {
+        let target = dir.join("target.txt");
+        for index in (0..length).rev() {
+            let link = dir.join(format!("link-{index}.txt"));
+            let referent = if index + 1 == length {
+                PathBuf::from("target.txt")
+            } else {
+                PathBuf::from(format!("link-{}.txt", index + 1))
+            };
+            symlink(referent, link).unwrap();
         }
+        (dir.join("link-0.txt"), target)
     }
 
     #[tokio::test]
@@ -170,6 +186,88 @@ mod tests {
             .unwrap();
         assert!(!result.is_error);
         assert!(dir.path().join("relative.txt").exists());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn write_follows_relative_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target_dir = dir.path().join("target");
+        std::fs::create_dir(&target_dir).unwrap();
+        let link = dir.path().join("relative-link.txt");
+        let target = target_dir.join("created.txt");
+        symlink("target/created.txt", &link).unwrap();
+
+        let result = WriteFileTool
+            .invoke(
+                serde_json::json!({"path": link, "content": "relative target"}),
+                &test_ctx_in(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "relative target");
+        assert!(link.is_symlink());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn write_follows_absolute_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("absolute-link.txt");
+        let target = dir.path().join("created.txt");
+        symlink(&target, &link).unwrap();
+
+        let result = WriteFileTool
+            .invoke(
+                serde_json::json!({"path": link, "content": "absolute target"}),
+                &test_ctx_in(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "absolute target");
+        assert!(link.is_symlink());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn write_follows_symlink_chain_at_system_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (link, target) = create_symlink_chain(dir.path(), 40);
+
+        let result = WriteFileTool
+            .invoke(
+                serde_json::json!({"path": link, "content": "forty links"}),
+                &test_ctx_in(dir.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "forty links");
+        assert!(link.is_symlink());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn write_rejects_symlink_chain_over_system_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (link, target) = create_symlink_chain(dir.path(), 41);
+
+        let error = WriteFileTool
+            .invoke(
+                serde_json::json!({"path": link, "content": "forty-one links"}),
+                &test_ctx_in(dir.path()),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("too many symbolic links"));
+        assert!(!target.exists());
+        assert!(link.is_symlink());
     }
 
     #[tokio::test]

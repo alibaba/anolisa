@@ -2,7 +2,16 @@ import { existsSync } from "node:fs";
 import { resolve, dirname, basename } from "node:path";
 import { homedir } from "node:os";
 import type { SecurityCapability } from "../types.js";
-import { buildTraceContext, callAgentSecCli, type TraceContext } from "../utils.js";
+import {
+  buildTraceContext,
+  callAgentSecCli,
+  envFlagEnabled,
+  envHookPolicy,
+  isHookPolicyValue,
+  normalizeHookPolicy,
+  type HookPolicy,
+  type TraceContext,
+} from "../utils.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -15,7 +24,7 @@ type ExposureSummary = {
   [key: string]: unknown;
 };
 
-type SkillLedgerPolicy = "ask" | "debug" | "warn" | "block";
+type SkillLedgerPolicy = HookPolicy;
 
 type SkillLedgerConfig = {
   policy: SkillLedgerPolicy;
@@ -29,7 +38,6 @@ const READ_TOOL_NAMES = ["read"];
 const PATH_PARAM_NAMES = ["file_path", "path"];
 const DEFAULT_TIMEOUT_MS = 5_000;
 const DEFAULT_POLICY: SkillLedgerPolicy = "ask";
-const VALID_POLICIES = new Set<SkillLedgerPolicy>(["ask", "debug", "warn", "block"]);
 
 // ---------------------------------------------------------------------------
 // Confirmation policy
@@ -113,10 +121,18 @@ function readPolicy(
   capabilityConfig: Record<string, any>,
   api: any,
 ): SkillLedgerPolicy {
+  if (process.env.SKILL_LEDGER_MODE !== undefined) {
+    const rawPolicy = process.env.SKILL_LEDGER_MODE;
+    const policy = envHookPolicy("SKILL_LEDGER_MODE", DEFAULT_POLICY);
+    if (!isHookPolicyValue(rawPolicy)) {
+      api.logger.warn("[skill-ledger] invalid SKILL_LEDGER_MODE; using ask");
+    }
+    return policy;
+  }
+
   if (typeof capabilityConfig.policy === "string") {
-    const policy = capabilityConfig.policy.trim().toLowerCase();
-    if (VALID_POLICIES.has(policy as SkillLedgerPolicy)) {
-      return policy as SkillLedgerPolicy;
+    if (isHookPolicyValue(capabilityConfig.policy)) {
+      return normalizeHookPolicy(capabilityConfig.policy, DEFAULT_POLICY);
     }
     api.logger.warn(
       `[skill-ledger] invalid policy="${capabilityConfig.policy}"; using ${DEFAULT_POLICY}`,
@@ -143,7 +159,7 @@ function logDebug(api: any, message: string): void {
 }
 
 function logDiagnostic(api: any, cfg: SkillLedgerConfig, message: string): void {
-  if (cfg.policy === "debug") {
+  if (cfg.policy === "observe") {
     logDebug(api, message);
   } else {
     api.logger.warn(`[skill-ledger] ${message}`);
@@ -151,7 +167,7 @@ function logDiagnostic(api: any, cfg: SkillLedgerConfig, message: string): void 
 }
 
 function logLifecycle(api: any, cfg: SkillLedgerConfig, message: string): void {
-  if (cfg.policy === "debug") {
+  if (cfg.policy === "observe") {
     logDebug(api, message);
   } else {
     api.logger.info(`[skill-ledger] ${message}`);
@@ -167,6 +183,9 @@ export const skillLedger: SecurityCapability = {
   name: "Skill Ledger",
   hooks: ["before_tool_call"],
   register(api) {
+    if (!envFlagEnabled("SKILL_LEDGER_HOOK_ENABLED", true)) {
+      return;
+    }
     const cfg = readConfig((api.pluginConfig as Record<string, any>) ?? {}, api);
 
     /** Ensure signing keys exist; auto-init if missing. */
@@ -258,7 +277,7 @@ export const skillLedger: SecurityCapability = {
 
           const status = summary.latestStatus ?? "unknown";
           const message = `⚠️ Skill '${skillName}': ${summary.message}`;
-          if (cfg.policy === "debug") {
+          if (cfg.policy === "observe") {
             logDebug(api, `skill='${skillName}' status=${status}: ${message}`);
             return undefined;
           }

@@ -385,7 +385,11 @@ def _scan_symlink(
                     else "Symlink skipped"
                 ),
                 "remediation": "Replace symlinks with regular files inside the Skill directory.",
-                "target": str(target) if target is not None else "unresolved",
+                "target": (
+                    "unresolved"
+                    if target is None
+                    else "outside-root" if escapes_root else "inside-root"
+                ),
             },
         )
     )
@@ -530,6 +534,19 @@ def _read_optional_text(
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
+        findings.append(
+            _finding(
+                rule="file-decode-error",
+                severity="medium",
+                message="File is not valid UTF-8 text and could not be scanned.",
+                file=rel_path,
+                metadata={
+                    "category": "scanner_error",
+                    "title": "File decode error",
+                    "remediation": "Store text-like Skill files as UTF-8 text.",
+                },
+            )
+        )
         return None
 
 

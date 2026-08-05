@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{is_sensitive_target, strip_ansi};
@@ -121,23 +122,11 @@ fn run_plan(
             + config
                 .stage_timeout
                 .min(deadline.saturating_duration_since(Instant::now()));
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    final_exit_code = status.code();
-                    break;
-                }
-                Ok(None) if Instant::now() >= stage_deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    cleanup_paths(&cleanup);
-                    return Err(error("stage-timeout", stage.argv.join(" ")));
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-                Err(err) => {
-                    cleanup_paths(&cleanup);
-                    return Err(error("executor-wait", err.to_string()));
-                }
+        match wait_child_with_deadline(&mut child, stage_deadline, stage.argv.join(" ")) {
+            Ok(code) => final_exit_code = code,
+            Err(err) => {
+                cleanup_paths(&cleanup);
+                return Err(err);
             }
         }
 
@@ -287,25 +276,85 @@ fn push_token(tokens: &mut Vec<String>, token: &mut String) {
     }
 }
 
-fn temp_path(kind: &str, stage: usize) -> PathBuf {
+/// Waits for a spawned child, killing it once `stage_deadline` passes.
+/// Shared by the readonly pipeline and compound executors; the caller
+/// owns any temp-file cleanup on the error path.
+pub(crate) fn wait_child_with_deadline(
+    child: &mut std::process::Child,
+    stage_deadline: Instant,
+    timeout_detail: impl Into<String>,
+) -> Result<Option<i32>, ReadonlyPipelineError> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(Some(exit_code_with_signal(status))),
+            Ok(None) if Instant::now() >= stage_deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error("stage-timeout", timeout_detail));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(err) => return Err(error("executor-wait", err.to_string())),
+        }
+    }
+}
+
+/// Normalizes a finished child status to the shell exit-code contract: a
+/// process ended by a signal reports `128 + signum` (e.g. SIGTERM → 143),
+/// so list connectors (`&&`/`||`) evaluate the step as failed instead of
+/// mistaking the missing code for success.
+#[cfg(unix)]
+fn exit_code_with_signal(status: std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    status
+        .code()
+        .unwrap_or_else(|| 128 + status.signal().unwrap_or_default())
+}
+
+#[cfg(not(unix))]
+fn exit_code_with_signal(status: std::process::ExitStatus) -> i32 {
+    status.code().unwrap_or_default()
+}
+
+// Process-wide sequence keeping temp paths unique across concurrent
+// runs: wall-clock nanos can repeat between parallel callers (test
+// threads, sibling compounds), and a collided path lets one run's
+// cleanup delete a file another run is about to read.
+static TEMP_PATH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn temp_path(kind: &str, stage: usize) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
+    let sequence = TEMP_PATH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "cosh-readonly-pipeline-{}-{nanos}-{stage}-{kind}",
+        "cosh-readonly-pipeline-{}-{nanos}-{sequence}-{stage}-{kind}",
         std::process::id()
     ))
 }
 
-fn read_limited_clean(
+pub(crate) fn read_limited_clean(
     path: &Path,
     byte_limit: usize,
     line_limit: usize,
 ) -> Result<String, ReadonlyPipelineError> {
     let bytes = std::fs::read(path).map_err(|err| error("executor-io", err.to_string()))?;
+    Ok(limit_clean_text(&bytes, false, byte_limit, line_limit))
+}
+
+/// Canonical bounded-text shaping shared by the file-backed pipeline
+/// capture and the pipe-backed compound capture: lossy UTF-8 within the
+/// byte budget, ANSI stripped, line budget applied, and a single
+/// `<truncated>` marker when either budget (or the caller's own
+/// overflow signal) was exceeded.
+pub(crate) fn limit_clean_text(
+    bytes: &[u8],
+    overflowed: bool,
+    byte_limit: usize,
+    line_limit: usize,
+) -> String {
     let mut text = String::from_utf8_lossy(&bytes[..bytes.len().min(byte_limit)]).to_string();
-    if bytes.len() > byte_limit {
+    if overflowed || bytes.len() > byte_limit {
         text.push_str("\n<truncated>");
     }
     let mut text = strip_ansi(&text);
@@ -314,16 +363,16 @@ fn read_limited_clean(
         text = lines.join("\n");
         text.push_str("\n<truncated>");
     }
-    Ok(text)
+    text
 }
 
-fn cleanup_paths(paths: &[PathBuf]) {
+pub(crate) fn cleanup_paths(paths: &[PathBuf]) {
     for path in paths {
         let _ = std::fs::remove_file(path);
     }
 }
 
-fn error(reason: &'static str, detail: impl Into<String>) -> ReadonlyPipelineError {
+pub(crate) fn error(reason: &'static str, detail: impl Into<String>) -> ReadonlyPipelineError {
     ReadonlyPipelineError {
         reason,
         detail: detail.into(),

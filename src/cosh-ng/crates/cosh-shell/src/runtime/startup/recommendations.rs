@@ -51,6 +51,8 @@ pub(crate) fn render_startup_banner<W: Write>(
         i18n.format(MessageId::StartupCwdLine, &[("cwd", cwd)]),
         i18n.t(MessageId::StartupCommandsLine).to_string(),
     ];
+    state.startup_auth.wait_ready(STARTUP_AUTH_HINT_WAIT);
+    append_startup_auth_hint(state, &mut body);
     let recommendation_notice = append_recommendation_notice(state, &mut body);
     state.startup_health.wait_ready(STARTUP_HEALTH_ROW_WAIT);
     let suggestions = prepare_startup_suggestions(state, cwd);
@@ -123,6 +125,14 @@ pub(crate) fn render_pending_recommendation_notice<W: Write>(
     Ok(())
 }
 
+pub(super) fn append_startup_auth_hint(state: &mut InlineState, body: &mut Vec<String>) {
+    if state.personalization.ai_disabled || !state.startup_auth.ai_unconfigured() {
+        return;
+    }
+    body.push(String::new());
+    body.push(state.i18n().t(MessageId::StartupAuthHintLine).to_string());
+}
+
 fn append_recommendation_notice(state: &mut InlineState, body: &mut Vec<String>) -> bool {
     if !recommendation_notice_required(state) {
         return false;
@@ -137,6 +147,12 @@ fn recommendation_notice_required(state: &mut InlineState) -> bool {
         || state.analysis_mode == crate::runtime::state::AnalysisMode::Manual
         || state.personalization.ai_disabled
     {
+        return false;
+    }
+    // While no auth is configured the recommendation pipeline cannot run;
+    // stay quiet without consuming the first-time disclosure.
+    state.startup_auth.poll_ready();
+    if state.startup_auth.ai_unconfigured() {
         return false;
     }
     state.personalization.poll_ready();

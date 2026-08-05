@@ -19,6 +19,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::StartupSwitchHint => {
             "\u{1f4a1} 运行 \"cosh-switch\" 可在 cosh-ng 与 copilot-shell 之间切换"
         }
+        MessageId::StartupAuthHintLine => {
+            "\u{1f4a1} 尚未配置 AI：运行 /auth 即可解锁自然语言提问、失败分析与个性化推荐"
+        }
         _ => return None,
     })
 }

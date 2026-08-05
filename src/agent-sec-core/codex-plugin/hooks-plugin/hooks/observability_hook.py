@@ -14,7 +14,10 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from hook_config import env_flag_enabled
+
 _CLI_TIMEOUT_SECONDS = 3
+_HOOK_ENABLED = env_flag_enabled("OBSERVABILITY_HOOK_ENABLED", True)
 # Read one extra byte below to distinguish an exact-limit payload from truncation.
 _MAX_PAYLOAD_SIZE = 1024 * 1024
 _OBSERVABILITY_COMMAND = [
@@ -474,6 +477,10 @@ def _record_observability(record: dict[str, Any]) -> None:
 
 def main() -> None:
     """Read one Codex hook event, record it best-effort, and always continue."""
+    if not _HOOK_ENABLED:
+        print(_noop())
+        return
+
     try:
         payload = _read_stdin_payload()
         if payload is None:

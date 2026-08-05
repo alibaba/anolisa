@@ -8,7 +8,7 @@ use crate::runtime::state::InlineState;
 
 use super::menu::SysomMenu;
 use super::prompt::render_current_auth_panel;
-use super::provider_display::auth_required_providers_for_display;
+use super::provider_display::auth_providers_for_display;
 use super::runtime::{AuthBackend, AuthPhase, RuntimeAuthState};
 
 pub(crate) fn record_auth_required(
@@ -35,7 +35,7 @@ pub(crate) fn record_auth_required(
                 id: id.clone(),
                 request_id: request_id.clone(),
                 phase: AuthPhase::SelectingProvider,
-                providers: auth_required_providers_for_display(providers),
+                providers: auth_providers_for_display(providers),
                 selected_provider: 0,
                 current_field: 0,
                 collected_values: HashMap::new(),

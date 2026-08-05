@@ -176,6 +176,128 @@ fn host_executed_shell_result_uses_opaque_output_id_without_path() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// D-6 (#2142): the marker redacts a secret-bearing approved provider command
+// to a placeholder, but the provider authored that command — its result
+// metadata echoes the request's original text so the model can correlate
+// result with call. Durable evidence keeps the redacted block text.
+#[test]
+fn provider_authored_handoff_result_metadata_keeps_original_command_text() {
+    let command = "deploy --api-key sk-live-secret-value";
+    let mut handoff = ShellHandoffRequest::new(
+        command,
+        "$ deploy --api-key sk-live-secret-value",
+        "approved_provider_shell_tool",
+        "agent",
+        "req-1",
+        "run-1",
+        10,
+    )
+    .expect("handoff");
+    handoff.request_id = Some("ctrl-1".to_string());
+    handoff.tool_use_id = Some("toolu-1".to_string());
+    let block = CommandBlock {
+        id: "cmd-1".to_string(),
+        session_id: "raw-session".to_string(),
+        // The marker replaced the reported text; the token claim carried the
+        // block anyway.
+        command: "<redacted sensitive command>".to_string(),
+        origin: crate::types::CommandOrigin::ProviderTool,
+        cwd: "/repo".to_string(),
+        end_cwd: "/repo".to_string(),
+        started_at_ms: 10,
+        ended_at_ms: 20,
+        duration_ms: 10,
+        exit_code: 1,
+        status: CommandStatus::Failed,
+        output: OutputRefs {
+            terminal_output_ref: None,
+            terminal_output_bytes: 0,
+        },
+        shell_environment_generation: None,
+        audit_identity: Some(crate::types::ShellCommandAuditIdentity {
+            run_id: "run-1".to_string(),
+            request_id: Some("ctrl-1".to_string()),
+            tool_use_id: Some("toolu-1".to_string()),
+            handoff_token: Some(handoff.token.clone()),
+        }),
+    };
+
+    let evidence = RuntimeShellCommandCompleted::from_shell_handoff(
+        &handoff,
+        &block,
+        "failed",
+        AgentRunOrigin::Standard,
+    );
+
+    // Durable face: the redacted placeholder, never the original.
+    assert_eq!(evidence.command, "<redacted sensitive command>");
+    // Provider face: the request's original text, bounded but not redacted.
+    assert_eq!(evidence.provider_command, command);
+
+    let result = host_executed_shell_result(&handoff, &evidence);
+    assert_eq!(result.metadata.command, command);
+    // The provider summary body keeps the durable (redacted) text.
+    assert!(
+        !result.llm_content.contains("sk-live-secret-value"),
+        "{}",
+        result.llm_content
+    );
+}
+
+// A user-authored handoff source keeps full provider-face redaction even
+// when the block text survived unredacted.
+#[test]
+fn user_sourced_handoff_result_metadata_stays_redacted() {
+    let command = "df -h --token cli-secret";
+    let handoff = ShellHandoffRequest::new(
+        command,
+        "$ df -h --token cli-secret",
+        "send_to_shell",
+        "user",
+        "req-1",
+        "run-1",
+        10,
+    )
+    .expect("handoff");
+    let block = CommandBlock {
+        id: "cmd-1".to_string(),
+        session_id: "raw-session".to_string(),
+        command: command.to_string(),
+        origin: crate::types::CommandOrigin::UserSendToShell,
+        cwd: "/repo".to_string(),
+        end_cwd: "/repo".to_string(),
+        started_at_ms: 10,
+        ended_at_ms: 20,
+        duration_ms: 10,
+        exit_code: 0,
+        status: CommandStatus::Completed,
+        output: OutputRefs {
+            terminal_output_ref: None,
+            terminal_output_bytes: 0,
+        },
+        shell_environment_generation: None,
+        audit_identity: None,
+    };
+
+    let evidence = RuntimeShellCommandCompleted::from_shell_handoff(
+        &handoff,
+        &block,
+        "completed",
+        AgentRunOrigin::Standard,
+    );
+
+    assert!(
+        evidence.provider_command.contains("--token <redacted>"),
+        "{:?}",
+        evidence.provider_command
+    );
+    assert!(
+        !evidence.provider_command.contains("cli-secret"),
+        "{:?}",
+        evidence.provider_command
+    );
+}
+
 #[test]
 fn host_executed_shell_result_budget_does_not_duplicate_preview() {
     let dir = std::env::temp_dir().join(format!(
