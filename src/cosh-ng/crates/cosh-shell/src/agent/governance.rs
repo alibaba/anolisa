@@ -190,12 +190,15 @@ pub fn govern_agent_events_with_language(
                 false,
             ),
             AgentEvent::HookNotification {
-                hook_name, message, ..
+                hook_name,
+                message,
+                decision,
+                ..
             } => (
                 GovernanceDecision::Display,
                 GovernancePolicyDecision::DisplayOnly,
                 "hook notification is display-only".to_string(),
-                format!("{hook_name}: {message}"),
+                hook_notification_display_text(hook_name, message, decision.as_deref(), &i18n),
                 false,
             ),
         };
@@ -222,6 +225,39 @@ pub fn govern_agent_events_with_language(
         events: governed,
         audit,
     }
+}
+
+pub(crate) fn hook_notification_display_text(
+    hook_name: &str,
+    message: &str,
+    decision: Option<&str>,
+    i18n: &I18n,
+) -> String {
+    let hook_name = hook_name.trim();
+    let hook_name = if hook_name.is_empty() {
+        i18n.t(MessageId::AgentGovernanceHookUnknown)
+    } else {
+        hook_name
+    };
+    let message = message.trim();
+    let message = if message.is_empty() {
+        i18n.t(MessageId::AgentGovernanceHookNoMessage)
+    } else {
+        message
+    };
+    let decision = decision
+        .map(str::trim)
+        .filter(|decision| !decision.is_empty())
+        .unwrap_or_else(|| i18n.t(MessageId::AgentGovernanceHookDecisionUnspecified));
+
+    i18n.format(
+        MessageId::AgentGovernanceHookNotification,
+        &[
+            ("hook", hook_name),
+            ("message", message),
+            ("decision", decision),
+        ],
+    )
 }
 
 fn render_recommended_commands(commands: &[String], i18n: &I18n) -> String {

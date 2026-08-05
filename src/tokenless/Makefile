@@ -38,7 +38,7 @@ TOON_VER := 0.5.0
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
 .PHONY: build build-tokenless build-toon build-openclaw-plugin \
-        stamp-adapter-templates check-component-contract \
+        stamp-adapter-templates generate-component-contract \
         install uninstall test lint clean \
         install-binaries install-helpers install-adapter-resources install-cosh-extension \
         adapter-install adapter-uninstall adapter-scan \
@@ -72,6 +72,8 @@ build-toon:
 # Generate adapter config files from .in templates (VERSION from Cargo.toml).
 stamp-adapter-templates: $(ADAPTER_TEMPLATES) $(COMPONENT_CONTRACT)
 
+generate-component-contract: $(COMPONENT_CONTRACT)
+
 $(ADAPTER_SRC_DIR)/manifest.json: $(ADAPTER_SRC_DIR)/manifest.json.in Cargo.toml
 	@echo "==> Generating manifest.json (version=$(VERSION))..."
 	sed 's/@VERSION@/$(VERSION)/g' $< > $@
@@ -80,21 +82,6 @@ $(COMPONENT_CONTRACT): $(COMPONENT_CONTRACT).in Cargo.toml
 	@echo "==> Generating component contract (version=$(VERSION))..."
 	sed 's/@VERSION@/$(VERSION)/g' $< > $@
 
-check-component-contract:
-	@tmp=$$(mktemp); \
-		cp "$(COMPONENT_CONTRACT)" "$$tmp"; \
-		trap 'cp "$$tmp" "$(COMPONENT_CONTRACT)"; rm -f "$$tmp"' EXIT; \
-		$(MAKE) -B "$(COMPONENT_CONTRACT)"; \
-		cmp -s "$$tmp" "$(COMPONENT_CONTRACT)" || { \
-			diff -u "$$tmp" "$(COMPONENT_CONTRACT)"; \
-			exit 1; \
-		}
-	@catalog_version=$$(sed -n 's/^version = "\([^"]*\)"/\1/p' \
-		"$(ANOLISA_COMPONENT_MANIFEST)" | head -1); \
-		[ "$$catalog_version" = "$(VERSION)" ] || { \
-			echo "ANOLISA tokenless manifest version '$$catalog_version' does not match $(VERSION)"; \
-			exit 1; \
-		}
 
 $(ADAPTER_SRC_DIR)/openclaw/package.json: $(ADAPTER_SRC_DIR)/openclaw/package.json.in Cargo.toml
 	@echo "==> Generating openclaw/package.json (version=$(VERSION))..."
@@ -200,6 +187,9 @@ test-integration:
 	@echo "==> Testing hook integration (Python)..."
 	python3 tests/test_compress_response_hook.py
 	python3 tests/test_compress_schema_hook.py
+	python3 tests/test_hermes_plugin_import.py
+	python3 tests/test_rewrite_hook.py
+	python3 tests/test_resolve_agent_id.py
 
 test-adapters:
 	@echo "==> Testing qoder adapter installer..."
@@ -224,14 +214,29 @@ clean:
 	rm -f  $(OPENCLAW_PLUGIN_SRC_DIR)/package-lock.json
 	rm -f  $(ADAPTER_TEMPLATES) $(COMPONENT_CONTRACT)
 
-# Create source tarball (excludes build artifacts)
+# Create source tarball (excludes build artifacts).
+# `clean` must finish before the generated contract and adapter manifests
+# are re-stamped: as sibling prerequisites, `make -jN dist` may run the two
+# concurrently and the cleanup can delete the stamped files, shipping an
+# archive without the embedded install contract. Invoke the stamping
+# sequentially from the recipe instead.
 dist: clean
+	$(MAKE) stamp-adapter-templates
 	@echo "==> Creating tarball (with pre-patched rtk source)..."
 	just setup-rtk
 	tar czf ../tokenless-$(VERSION).tar.gz \
 	    --exclude='target' \
 	    --exclude='.git' \
 	    -C .. tokenless
+	@tar_list=$$(tar -tzf ../tokenless-$(VERSION).tar.gz); \
+	for required in \
+	    tokenless/.anolisa/component.toml \
+	    tokenless/adapters/tokenless/manifest.json; do \
+		echo "$$tar_list" | grep -q "^$$required$$" || { \
+			echo "ERROR: tokenless-$(VERSION).tar.gz is missing $$required" >&2; \
+			exit 1; \
+		}; \
+	done
 	@echo "==> Tarball: ../tokenless-$(VERSION).tar.gz"
 
 # Adapter management — invokes detect/install/uninstall action scripts per the

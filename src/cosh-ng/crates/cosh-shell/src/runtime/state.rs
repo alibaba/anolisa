@@ -16,6 +16,7 @@ use crate::question::runtime::RuntimeUserQuestion;
 use crate::raw_input::PromptGhostRoute;
 use crate::recommendation::personal_feedback::FrozenPromptBinding;
 use crate::recommendation::personal_state::PersonalizationState;
+use crate::runtime::approval_ledger::ApprovalLifecycleLedger;
 use crate::runtime::approval_state::ApprovalState;
 use crate::runtime::events::ShellEventCursor;
 use crate::runtime::evidence_requests::EvidenceRequestState;
@@ -96,6 +97,19 @@ pub(crate) struct InlineState {
     pub(crate) evidence_requests: EvidenceRequestState,
     pub(crate) shell_evidence: ShellEvidenceState,
     pub(crate) session_blocks: Vec<CommandBlock>,
+    /// Whether any shell command activity (started/completed/failed
+    /// marker events) was observed this session, including activity
+    /// that produced ledger errors instead of command blocks (R9).
+    pub(crate) shell_command_activity_observed: bool,
+    /// The shell's own latest working-directory report from a prompt
+    /// marker (a precmd with no command in flight): positive evidence
+    /// of where the shell sits, refreshed at every command-less
+    /// prompt and invalidated by any PTY input write (the input may
+    /// submit a cwd-changing line through a binding the byte-stream
+    /// heuristic cannot see, while its markers are lost). `None`
+    /// until the marker channel has proven itself — a session without
+    /// any marker traffic never gets a value here.
+    pub(crate) shell_prompt_cwd: Option<String>,
     pub(crate) shell_session_id: Option<String>,
     pub(crate) shell_exited: bool,
     pub(crate) language: Language,
@@ -116,8 +130,20 @@ pub(crate) struct InlineState {
     pub(crate) prompt_draft: Option<crate::runtime::prompt_draft::PromptDraftCardState>,
     pub(crate) prompt_draft_seq: u64,
     pub(crate) pending_shell_handoff_timeout_notice: Option<Duration>,
+    /// #2161: shared clock written by the relay's interactive sentinel;
+    /// read here to drive the input-wait interrupt.
+    pub(crate) input_wait_status: crate::shell_host::InputWaitStatus,
+    /// #2161: `shell.input_wait_timeout_secs` (None/0 = disabled).
+    pub(crate) input_wait_timeout: Option<Duration>,
+    /// #2161: waited duration captured at interrupt time, rendered as a
+    /// notice panel once the foreground is idle again.
+    pub(crate) pending_input_wait_timeout_notice: Option<Duration>,
+    /// #2161: per-approval input-wait facts (max waited + interrupted),
+    /// consumed into the host_executed_shell result on delivery.
+    pub(crate) input_wait_facts: HashMap<String, crate::adapter::HostExecutedInputWait>,
     pub(crate) continuity: ContinuityState,
     pub(crate) startup_health: StartupHealthState,
+    pub(crate) startup_auth: StartupAuthState,
     pub(crate) personalization: PersonalizationState,
     pub(crate) audit: Option<crate::journal::audit::ShellAuditRecorder>,
 }
@@ -181,6 +207,70 @@ impl StartupHealthState {
                 self.rendered = true;
             }
         }
+    }
+}
+
+/// Background probe of the effective AI credential state, resolved via
+/// cosh-core at bootstrap so the startup banner can hint `/auth` without
+/// blocking first paint. Fail-quiet: an error, timeout, or missing probe
+/// leaves `resolved` at `None` and nothing is shown.
+///
+/// Lifecycle: the `Default` state (no probe, no verdict) is the safe
+/// state — every consumer treats it as "not unconfigured", so an
+/// `InlineState` built without bootstrap wiring can never trigger the
+/// hint. Bootstrap installs `pending` only for the CoshCore adapter
+/// with AI enabled and the banner on; a successful `/auth` credential
+/// change resets the state to `Default` so no stale verdict outlives
+/// the credentials it described.
+#[derive(Default)]
+pub(crate) struct StartupAuthState {
+    pub(crate) pending: Option<mpsc::Receiver<Option<bool>>>,
+    pub(crate) resolved: Option<bool>,
+}
+
+impl StartupAuthState {
+    pub(crate) fn wait_ready(&mut self, timeout: Duration) {
+        if self.resolved.is_some() {
+            return;
+        }
+        let Some(receiver) = &self.pending else {
+            return;
+        };
+        match receiver.recv_timeout(timeout) {
+            Ok(resolved) => {
+                self.resolved = resolved;
+                self.pending = None;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                self.pending = None;
+            }
+        }
+    }
+
+    pub(crate) fn poll_ready(&mut self) {
+        if self.resolved.is_some() {
+            return;
+        }
+        let Some(receiver) = &self.pending else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(resolved) => {
+                self.resolved = resolved;
+                self.pending = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.pending = None;
+            }
+        }
+    }
+
+    /// True only when the authority explicitly reported "no usable
+    /// credentials"; uncertainty never shows the hint.
+    pub(crate) fn ai_unconfigured(&self) -> bool {
+        self.resolved == Some(false)
     }
 }
 
@@ -406,6 +496,7 @@ pub(crate) struct ControlState {
     handled_config_actions: HashSet<String>,
     session: SessionControlState,
     provider_tool: ProviderToolState,
+    approval_ledger: ApprovalLifecycleLedger,
     provider_shell_handoff_run_ids: HashSet<String>,
     interactive_shell_handoffs: Vec<PendingInteractiveShellHandoff>,
     shell_handoff: ShellHandoffState,
@@ -540,6 +631,12 @@ impl ControlState {
     }
     pub(crate) fn provider_tool_mut(&mut self) -> &mut ProviderToolState {
         &mut self.provider_tool
+    }
+    pub(crate) fn approval_ledger(&self) -> &ApprovalLifecycleLedger {
+        &self.approval_ledger
+    }
+    pub(crate) fn approval_ledger_mut(&mut self) -> &mut ApprovalLifecycleLedger {
+        &mut self.approval_ledger
     }
     pub(crate) fn provider_host_executed_shell_result_delivered(
         &self,

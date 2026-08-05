@@ -2,6 +2,7 @@ import Head from '@docusaurus/Head';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
+import ThemedImage from '@theme/ThemedImage';
 import CopyCommand from '../components/CopyCommand';
 import SiteLink from '../components/SiteLink';
 import {installCommand, type Locale} from '../../content.config';
@@ -10,8 +11,8 @@ const content = {
   en: {
     badge: 'Agentic OS 1.0',
     lead: 'An operating system layer built for agents.',
-    capabilities: 'Sandbox isolation. Kernel observability. Token efficiency.',
-    deployment: 'Managed as one system and deployed through one entry point.',
+    hook: 'Cut 30–70% of your agent’s tool-output tokens with one command.',
+    systemScope: 'Just one thing the OS does for your agent — it also runs, recovers, and secures it.',
     statement:
       'The users of operating systems have changed. ANOLISA makes agents first-class participants at the system layer.',
     installLabel: 'One entry point. Enable what you need.',
@@ -34,8 +35,8 @@ const content = {
   zh: {
     badge: 'Agentic OS 1.0',
     lead: 'Agent 原生的操作系统层。',
-    capabilities: '沙箱隔离、内核可观测、Token 优化。',
-    deployment: '由一个系统统一管理，通过一个入口完成部署。',
+    hook: '一条命令，让 Agent 少烧 30–70% 的工具输出 token。',
+    systemScope: '这只是操作系统为 Agent 做的一件事——它还让 Agent 跑得起、退得回、守得住。',
     statement: '操作系统的使用者已经改变。ANOLISA 让 Agent 成为系统中的一等公民。',
     installLabel: '一个入口，按需启用',
     agentLabel: '让你的 Agent 接入',
@@ -103,7 +104,7 @@ const scenarios = {
         },
         {
           label: 'Agent Memory',
-          href: '/docs/user-guide/token-saving/agent-memory/quickstart',
+          href: '/docs/user-guide/token-saving/agent-memory',
         },
         {
           label: 'AgentSight',
@@ -195,7 +196,7 @@ const scenarios = {
         },
         {
           label: 'Agent Memory',
-          href: '/docs/user-guide/token-saving/agent-memory/quickstart',
+          href: '/docs/user-guide/token-saving/agent-memory',
         },
         {
           label: 'AgentSight',
@@ -303,10 +304,11 @@ export default function Home() {
   const t = content[locale];
   const scenarioItems = scenarios[locale];
   const routeItems = routes[locale];
-  const heroGlyph = useBaseUrl('/img/brand/anolisa-glyph-signal.svg');
+  const lockupLight = useBaseUrl('/img/brand/anolisa-lockup-light.svg');
+  const lockupDark = useBaseUrl('/img/brand/anolisa-lockup-dark.svg');
 
   return (
-    <Layout title={t.lead} description={`${t.capabilities} ${t.deployment}`}>
+    <Layout title={t.lead} description={`${t.hook} ${t.systemScope}`}>
       <Head>
         <meta property="og:type" content="website" />
       </Head>
@@ -318,14 +320,16 @@ export default function Home() {
                 <span aria-hidden="true" />
                 {t.badge}
               </div>
-              <div className="heroIdentity">
-                <img src={heroGlyph} alt="" aria-hidden="true" />
-                <h1>ANOLISA</h1>
-              </div>
+              <h1 className="heroWordmark">
+                <ThemedImage
+                  alt="ANOLISA"
+                  sources={{light: lockupLight, dark: lockupDark}}
+                />
+              </h1>
               <div className="heroPositioning">
                 <p>{t.lead}</p>
-                <p>{t.capabilities}</p>
-                <p>{t.deployment}</p>
+                <p>{t.hook}</p>
+                <p>{t.systemScope}</p>
               </div>
               <p className="heroStatement">{t.statement}</p>
 

@@ -163,11 +163,25 @@ Enable prompt blocking:
 openclaw config set plugins.entries.agent-sec.config.promptScanBlock true
 ```
 
+You can also override prompt scanner behavior at deployment time with environment variables. These
+take precedence over the OpenClaw capability configuration:
+
+| Environment variable | Default | Behavior |
+|----------------------|---------|----------|
+| `PROMPT_SCANNER_HOOK_ENABLED` | `true` | Set to `false` to skip prompt-scan hook registration entirely |
+| `PROMPT_SCANNER_MODE` | `observe` | Policy mode: `observe` / `warn` / `ask` / `block`; `deny` maps to `block` |
+| `PROMPT_SCANNER_SCAN_MODE` | `standard` | Scan strength passed to `scan-prompt`: `fast` / `standard` / `strict` |
+| `PROMPT_SCANNER_TIMEOUT` | `10` | Scanner timeout in seconds |
+
+Restart the OpenClaw gateway after changing these variables.
+
 Enable code-scan approval:
 
 ```bash
 openclaw config set plugins.entries.agent-sec.config.codeScanRequireApproval true
 ```
+
+For deployment-level overrides, `CODE_SCANNER_HOOK_ENABLED=true|false` takes precedence over `capabilities["scan-code"].enabled`, and `CODE_SCANNER_MODE=observe|ask` takes precedence over `codeScanRequireApproval`. Invalid or unsupported values, including `block`/`deny`, are treated as unset and fall back to plugin configuration. Ordinary findings do not support direct block; the existing self-protect rule remains a forced-block exception. OpenClaw does not consume `CODE_SCANNER_TIMEOUT` and keeps its fixed 10-second timeout.
 
 Enable PII deny blocking:
 

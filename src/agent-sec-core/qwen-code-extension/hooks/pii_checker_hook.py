@@ -25,6 +25,7 @@ import subprocess
 import sys
 from typing import Any
 
+from hook_config import env_flag_enabled, env_hook_policy, normalize_hook_policy
 from pii_text import value_to_text
 from trace_context import with_trace_context
 
@@ -60,11 +61,17 @@ def _environment_bool(name: str, default: bool) -> bool:
     return default
 
 
+def _policy() -> str:
+    raw = os.environ.get("PII_CHECKER_MODE")
+    policy = env_hook_policy("PII_CHECKER_MODE", "observe")
+    if "PII_CHECKER_MODE" in os.environ and normalize_hook_policy(raw, "") == "":
+        print("[pii-checker] invalid PII_CHECKER_MODE; using observe", file=sys.stderr)
+    return policy
+
+
 def _mode() -> str:
-    value = os.environ.get("PII_CHECKER_MODE", "observe").strip().lower()
-    if value == "deny":
-        return "block"
-    return value if value in {"observe", "block"} else "observe"
+    """Return the configured PII Checker mode."""
+    return _policy()
 
 
 def _timeout_seconds() -> float:
@@ -206,9 +213,28 @@ def _decision(
         # events, so scanning remains audit-only instead of claiming a block.
         return _noop()
 
-    if verdict == "warn" or _mode() == "observe":
+    policy = _policy()
+    if policy == "observe":
+        return _noop()
+    if verdict == "warn" or policy == "warn":
         return {
             "systemMessage": _notice(evidence, "Execution will continue."),
+        }
+
+    if policy == "ask" and event_name == "PreToolUse":
+        reason = _notice(evidence, "Approval is required.")
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": event_name,
+                "permissionDecision": "ask",
+                "permissionDecisionReason": reason,
+            }
+        }
+    if policy == "ask":
+        return {
+            "systemMessage": _notice(
+                evidence, "Approval is unavailable here; execution continues."
+            )
         }
 
     if event_name == "UserPromptSubmit":
@@ -260,8 +286,16 @@ def _decision(
 def main() -> None:
     """Run the Qwen Code PII checker hook with fail-open behavior."""
     try:
+        if "PII_CHECKER_HOOK_ENABLED" in os.environ:
+            enabled = env_flag_enabled("PII_CHECKER_HOOK_ENABLED", True)
+        else:
+            enabled = _environment_bool("PII_CHECKER_ENABLED", True)
+        if not enabled:
+            print(json.dumps(_noop()))
+            return
+
         input_data = _read_hook_input()
-        if input_data is None or not _environment_bool("PII_CHECKER_ENABLED", True):
+        if input_data is None:
             print(json.dumps(_noop()))
             return
 

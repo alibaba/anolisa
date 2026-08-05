@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
+use super::atomic_file::{self, ReplaceError};
 use super::{Tool, ToolContext, ToolKind, ToolResult};
 
 pub struct EditTool;
@@ -45,6 +46,22 @@ impl Tool for EditTool {
     }
 
     async fn invoke(&self, params: Value, ctx: &ToolContext) -> Result<ToolResult, String> {
+        self.invoke_with_snapshot_hook(params, ctx, || async {})
+            .await
+    }
+}
+
+impl EditTool {
+    async fn invoke_with_snapshot_hook<AfterSnapshot, AfterSnapshotFuture>(
+        &self,
+        params: Value,
+        ctx: &ToolContext,
+        after_snapshot: AfterSnapshot,
+    ) -> Result<ToolResult, String>
+    where
+        AfterSnapshot: FnOnce() -> AfterSnapshotFuture,
+        AfterSnapshotFuture: std::future::Future<Output = ()>,
+    {
         let path_str = params
             .get("path")
             .and_then(|v| v.as_str())
@@ -71,9 +88,12 @@ impl Tool for EditTool {
             )));
         }
 
-        let content = tokio::fs::read_to_string(&path)
+        let snapshot = atomic_file::read_snapshot(path.clone())
             .await
             .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+        let content = std::str::from_utf8(snapshot.bytes())
+            .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+        after_snapshot().await;
 
         let count = content.matches(old_string).count();
         if count == 0 {
@@ -95,9 +115,14 @@ impl Tool for EditTool {
             content.replacen(old_string, new_string, 1)
         };
 
-        tokio::fs::write(&path, &new_content)
-            .await
-            .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+        if let Err(error) =
+            atomic_file::replace(path.clone(), new_content.into_bytes(), Some(snapshot)).await
+        {
+            if matches!(error, ReplaceError::Conflict { .. }) {
+                return Ok(ToolResult::error(error.to_string()));
+            }
+            return Err(format!("Failed to write {}: {error}", path.display()));
+        }
 
         Ok(ToolResult::success(format!(
             "Replaced {count} occurrence(s) in {}",
@@ -113,15 +138,15 @@ use super::resolve_path;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use tempfile::NamedTempFile;
+    use tokio::sync::Barrier;
 
     fn test_ctx() -> ToolContext {
-        ToolContext {
-            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp")),
-            session_id: "test".to_string(),
-            project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp")),
-        }
+        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp"));
+        ToolContext::new(root.clone(), "test".to_string(), root)
     }
 
     #[tokio::test]
@@ -211,5 +236,81 @@ mod tests {
 
         let content = std::fs::read_to_string(tmp.path()).unwrap();
         assert_eq!(content, "ccc bbb ccc");
+    }
+
+    #[tokio::test]
+    async fn edit_commit_rejects_an_intervening_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.rs");
+        fs::write(&path, "hello world").unwrap();
+        let snapshot = atomic_file::read_snapshot(path.clone()).await.unwrap();
+
+        let error = atomic_file::replace_with_before_commit_for_test(
+            &path,
+            b"goodbye world",
+            &snapshot,
+            |target, _| {
+                let replacement = target.with_extension("replacement");
+                fs::write(&replacement, "intervening content")?;
+                fs::rename(replacement, target)
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, ReplaceError::Conflict { .. }));
+        assert_eq!(fs::read_to_string(path).unwrap(), "intervening content");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_edit_invocations_allow_one_commit_and_one_conflict() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.rs");
+        fs::write(&path, "hello world").unwrap();
+        let tool = EditTool;
+        let context = test_ctx();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let first_barrier = Arc::clone(&barrier);
+        let second_barrier = Arc::clone(&barrier);
+        let (first, second) = tokio::join!(
+            tool.invoke_with_snapshot_hook(
+                serde_json::json!({
+                    "path": path,
+                    "old_string": "hello",
+                    "new_string": "first"
+                }),
+                &context,
+                move || async move {
+                    first_barrier.wait().await;
+                },
+            ),
+            tool.invoke_with_snapshot_hook(
+                serde_json::json!({
+                    "path": path,
+                    "old_string": "hello",
+                    "new_string": "second"
+                }),
+                &context,
+                move || async move {
+                    second_barrier.wait().await;
+                },
+            ),
+        );
+
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(
+            usize::from(!first.is_error) + usize::from(!second.is_error),
+            1
+        );
+        assert_eq!(
+            usize::from(first.output.starts_with("Edit conflict:"))
+                + usize::from(second.output.starts_with("Edit conflict:")),
+            1
+        );
+        assert!(matches!(
+            fs::read_to_string(path).unwrap().as_str(),
+            "first world" | "second world"
+        ));
     }
 }

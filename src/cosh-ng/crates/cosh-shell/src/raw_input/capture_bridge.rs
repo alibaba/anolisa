@@ -111,6 +111,7 @@ mod tests {
         RawInputCapture::Question {
             id: "question-1".to_string(),
             option_count: 0,
+            selected: 0,
             allow_free_text: true,
             multiple: false,
             secret: false,

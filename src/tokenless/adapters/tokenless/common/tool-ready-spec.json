@@ -50,7 +50,7 @@
   "Shell": {
     "_description": "Shell — base command execution environment for AI agents",
     "_compression_layer": "layer_2_shell",
-    "aliases": ["Bash", "bash", "Shell", "shell", "run_shell_command", "terminal", "exec", "execute_command", "process"],
+    "aliases": ["Bash", "bash", "Shell", "shell", "run_shell_command", "run_in_terminal", "get_terminal_output", "terminal", "exec", "execute_command", "process"],
     "required": [
       { "binary": "bash", "package": "bash", "manager": "rpm" },
       { "binary": "jq", "package": "jq", "manager": "rpm" }
@@ -80,7 +80,7 @@
   "WebFetch": {
     "_description": "WebFetch — web request tool for AI agents",
     "_compression_layer": "layer_3_api",
-    "aliases": ["WebFetch", "web_fetch", "WebSearch", "web_search", "web_extract", "x_search"],
+    "aliases": ["WebFetch", "web_fetch", "fetch_content", "WebSearch", "web_search", "search_web", "web_extract", "x_search"],
     "required": [
       { "binary": "curl", "package": "curl", "manager": "rpm" }
     ],
@@ -92,7 +92,7 @@
   "Read": {
     "_description": "Read — file read and search tool for AI agents",
     "_compression_layer": "layer_1_skip",
-    "aliases": ["Read", "read", "read_file", "read_many_files", "Glob", "glob", "list_directory", "Grep", "grep", "grep_search", "search_files", "Lsp", "lsp", "NotebookRead", "notebook_read", "notebookread"],
+    "aliases": ["Read", "read", "read_file", "read_many_files", "Glob", "glob", "search_file", "list_directory", "list_dir", "Grep", "grep", "grep_code", "grep_search", "search_files", "Lsp", "lsp", "NotebookRead", "notebook_read", "notebookread"],
     "required": [],
     "recommended": [],
     "config_files": [],
@@ -103,7 +103,7 @@
   "Write": {
     "_description": "Write — file write and edit tool for AI agents",
     "_compression_layer": "layer_3_api",
-    "aliases": ["Write", "write", "write_file", "Edit", "edit", "apply_patch", "patch"],
+    "aliases": ["Write", "write", "write_file", "create_file", "Edit", "edit", "edit_file", "search_replace", "delete_file", "apply_patch", "patch"],
     "required": [],
     "recommended": [],
     "config_files": [],

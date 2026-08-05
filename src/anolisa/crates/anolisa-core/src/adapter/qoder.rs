@@ -1,44 +1,19 @@
 //! Qoder (`qodercli`) framework driver.
 //!
-//! Qoder CLI installs a plugin from a directory whose name becomes the
-//! plugin id (`qodercli plugins install <dir>`), then activates it through
-//! two entries in `~/.qoder/settings.json`: the plugin's hooks under
-//! `.hooks`, and `<plugin>@local` under `.plugins.enabled`. ANOLISA
-//! reproduces the legacy install script's behavior entirely in this driver
-//! — it never shells out to `scripts/install.sh` / `uninstall.sh`:
+//! The driver supports two unambiguous bundle layouts. Native bundles carry
+//! `.qoder-plugin/plugin.json` plus `hooks/hooks.json`; their complete
+//! lifecycle is delegated to `qodercli plugins`, and registration,
+//! activation, and loaded hooks are verified from `plugins list --json`.
+//! ANOLISA installs the original resource root without staging or rewriting
+//! plugin files and never edits `~/.qoder/settings.json` for this mode.
 //!
-//! ```text
-//! qodercli plugins install <staging>/<plugin>   # staging = <data>/qoder-plugins
-//! # merge our hooks + <plugin>@local into ~/.qoder/settings.json in place
-//! ```
-//!
-//! The plugin bundle lives under a resource directory named `qoder`, but
-//! `qodercli` derives the plugin id from the *directory name*, so enable
-//! stages a real copy of the bundle under a directory named after the
-//! plugin id (`tokenless`) and installs from there — mirroring the legacy
-//! script's private tempdir. The staged copy's `hooks.json` is patched
-//! first: qodercli copies the plugin into its cache verbatim, and
-//! consumers that load the cached `hooks.json` directly (the Qoder IDE
-//! shares `~/.qoder` with qodercli) never expand
-//! `${QODER_TOKENLESS_HOOKS}` — staging a symlink to the raw bundle would
-//! leave them with broken hook commands whose non-zero exit is treated as
-//! a tool-call block. Staging is install-time only and is removed
-//! immediately after install.
-//!
-//! **settings.json is merged, then atomically swapped in via rename.** All
-//! reads and writes go through the Manager's controlled
-//! [`AdapterOps`](super::driver::AdapterOps); the driver only ever adds or
-//! removes ANOLISA-managed entries (the exact hook entries resolved from the
-//! bundle at enable time and persisted in the receipt, plus the
-//! `<plugin>@local` plugin entry). A settings file that exists but cannot be
-//! parsed is left untouched: enable fails closed and disable reports cleanup
-//! incomplete, so ANOLISA never clobbers a config it cannot safely merge.
-//!
-//! `qodercli plugins list` has been observed to omit freshly installed
-//! plugins, so `status` does **not** trust it: plugin registration is
-//! reported `Unknown` rather than faked healthy. The reliable, CLI-free
-//! signal is the presence of our managed entries in `settings.json`, which
-//! `status` verifies directly.
+//! Legacy bundles carry the same manifest plus a root-level `hooks.json`.
+//! That branch preserves the original Tokenless integration exactly: it
+//! stages a plugin-id-named copy, expands `${QODER_TOKENLESS_HOOKS}`, installs
+//! the copy, and atomically merges only its owned hooks and activation entry
+//! into `settings.json`. Legacy status remains settings-based because older
+//! qodercli inventories could omit freshly installed plugins, and legacy
+//! disable prunes only the exact entries persisted in its receipt.
 //!
 //! Env contract: `QODERCLI_BIN` overrides the executable (tests point it at
 //! a fake CLI); otherwise the binary is resolved in the legacy order
@@ -74,13 +49,17 @@ use settings::{
 /// Default timeout for a `qodercli` invocation.
 const CLI_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Qoder-native plugin manifest inside the bundle. The contract may override
-/// the entry, but this is the default the legacy layout ships.
+/// Qoder plugin manifest shared by native and legacy layouts.
 const QODER_PLUGIN_MANIFEST: &str = ".qoder-plugin/plugin.json";
 
-/// Hook declarations shipped alongside the plugin manifest, merged into the
-/// user's `settings.json` at enable time.
+/// Legacy hook declarations merged into the user's `settings.json`.
 const QODER_HOOKS_FILE: &str = "hooks.json";
+
+/// Qoder-native hook declarations auto-discovered by `qodercli`.
+const QODER_NATIVE_HOOKS_FILE: &str = "hooks/hooks.json";
+
+/// Native lifecycle mutations are always owned in Qoder's user scope.
+const QODER_NATIVE_SCOPE: &str = "user";
 
 /// Placeholder in `hooks.json` for the absolute hook-scripts directory,
 /// expanded to `<resource_root>/../common/hooks` before the entries are
@@ -90,6 +69,12 @@ const HOOKS_PLACEHOLDER: &str = "${QODER_TOKENLESS_HOOKS}";
 /// Resource ids used in Qoder receipts.
 const RES_PLUGIN: &str = "qoder_plugin";
 const RES_SETTINGS: &str = "qoder_settings";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QoderBundleKind {
+    Native,
+    Legacy,
+}
 
 /// Qoder driver. Stateless; all per-operation context arrives via
 /// [`DriverCtx`].
@@ -114,13 +99,11 @@ impl FrameworkDriver for QoderDriver {
     }
 
     fn probe_bundle(&self, resource_root: &Path, declared_entry: Option<&str>) -> bool {
-        // Mirrors read_bundle's mandatory checks: the plugin manifest (or
-        // the contract-declared entry) AND hooks.json must both be
-        // present — a manifest-only leftover is not a usable bundle.
-        resource_root
-            .join(declared_entry.unwrap_or(QODER_PLUGIN_MANIFEST))
-            .is_file()
-            && resource_root.join(QODER_HOOKS_FILE).is_file()
+        if declared_entry.is_some_and(|entry| entry != QODER_PLUGIN_MANIFEST) {
+            return false;
+        }
+        resource_root.join(QODER_PLUGIN_MANIFEST).is_file()
+            && classify_bundle(resource_root).is_ok()
     }
 
     fn detect(&self, env: &HostEnv) -> DetectResult {
@@ -161,10 +144,17 @@ impl FrameworkDriver for QoderDriver {
                 reason: "resource root does not exist or is not a directory".to_string(),
             });
         }
-        let manifest = ctx
-            .declared_bundle_entry
-            .as_deref()
-            .unwrap_or(QODER_PLUGIN_MANIFEST);
+        if let Some(entry) = ctx.declared_bundle_entry.as_deref()
+            && entry != QODER_PLUGIN_MANIFEST
+        {
+            return Err(AdapterError::BundleInvalid {
+                root: root.clone(),
+                reason: format!(
+                    "qoder bundle entry must be the native manifest '{QODER_PLUGIN_MANIFEST}', got '{entry}'"
+                ),
+            });
+        }
+        let manifest = QODER_PLUGIN_MANIFEST;
         if !root.join(manifest).is_file() {
             return Err(AdapterError::BundleInvalid {
                 root: root.clone(),
@@ -173,17 +163,18 @@ impl FrameworkDriver for QoderDriver {
                 ),
             });
         }
-        if !root.join(QODER_HOOKS_FILE).is_file() {
-            return Err(AdapterError::BundleInvalid {
-                root: root.clone(),
-                reason: format!("qoder '{QODER_HOOKS_FILE}' missing from resource root"),
-            });
-        }
-        let plugin_id = ctx
-            .declared_plugin_id
-            .clone()
-            .filter(|id| !id.is_empty())
-            .unwrap_or_else(|| ctx.component.clone());
+        let kind = classify_bundle(root).map_err(|reason| AdapterError::BundleInvalid {
+            root: root.clone(),
+            reason,
+        })?;
+        let plugin_id = match kind {
+            QoderBundleKind::Native => read_native_bundle(ctx, manifest)?,
+            QoderBundleKind::Legacy => ctx
+                .declared_plugin_id
+                .clone()
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| ctx.component.clone()),
+        };
         // Validate the resolved plugin id (including the component-name
         // default) before it can reach an argv or a staging directory name.
         validate_plugin_id(&plugin_id)?;
@@ -202,6 +193,26 @@ impl FrameworkDriver for QoderDriver {
         let plugin = plugin_name(bundle, ctx);
         let program =
             qodercli_program(ctx.user_home.as_deref()).unwrap_or_else(|| "qodercli".to_string());
+        let kind = classify_bundle(&bundle.resource_root).map_err(|reason| {
+            AdapterError::BundleInvalid {
+                root: bundle.resource_root.clone(),
+                reason,
+            }
+        })?;
+        if kind == QoderBundleKind::Native {
+            let install_cmd = build_native_install_cmd(&program, &bundle.resource_root);
+            return Ok(DriverPlan {
+                framework: self.name().to_string(),
+                component: ctx.component.clone(),
+                actions: vec![
+                    "validate the native Qoder plugin bundle and CLI capabilities".to_string(),
+                    format!("install and enable native Qoder plugin '{plugin}'"),
+                    "verify registration, activation, and loaded hooks via JSON inventory"
+                        .to_string(),
+                ],
+                register_command: Some(display_command(&install_cmd)),
+            });
+        }
         let staging = staging_symlink(ctx.user_home.as_deref(), &plugin);
         let staging_display = staging
             .as_ref()
@@ -241,6 +252,92 @@ impl FrameworkDriver for QoderDriver {
     ) -> Result<(AdapterClaim, PreparedEnable), AdapterError> {
         let plugin = plugin_name(bundle, ctx);
         validate_plugin_id(&plugin)?;
+        let kind = classify_bundle(&bundle.resource_root).map_err(|reason| {
+            AdapterError::BundleInvalid {
+                root: bundle.resource_root.clone(),
+                reason,
+            }
+        })?;
+        if kind == QoderBundleKind::Native {
+            let program = require_native_qodercli(ctx)?;
+            let validate_capability = ctx
+                .ops
+                .run_framework_cli(build_native_help_cmd(&program, "validate"))?;
+            for subcommand in ["install", "list", "uninstall"] {
+                require_cli_success(
+                    &program,
+                    &format!("plugins {subcommand} --help"),
+                    ctx.ops
+                        .run_framework_cli(build_native_help_cmd(&program, subcommand))?,
+                )?;
+            }
+            if validate_capability.success() {
+                require_cli_success(
+                    &program,
+                    "plugins validate",
+                    ctx.ops.run_framework_cli(build_native_validate_cmd(
+                        &program,
+                        &bundle.resource_root,
+                    ))?,
+                )?;
+            }
+            let inventory = ctx
+                .ops
+                .run_framework_cli_json(build_native_list_cmd(&program))?;
+            require_cli_success(&program, "plugins list --json", inventory.clone())?;
+            let expected = plugin_entry(&plugin);
+            let matching =
+                parse_native_plugin_matches(&inventory.stdout, &expected).map_err(|reason| {
+                    AdapterError::FrameworkCli {
+                        program: program.clone(),
+                        reason: format!(
+                            "Qoder native plugin inventory is unavailable ({reason}); upgrade Qoder"
+                        ),
+                    }
+                })?;
+            if !matching.non_user_scopes.is_empty() {
+                return Err(AdapterError::FrameworkCli {
+                    program,
+                    reason: format!(
+                        "refusing to install {expected} while matching non-user Qoder registration(s) exist in scope(s) {}; Qoder shares the local plugin cache across scopes",
+                        matching.non_user_scopes.join(", ")
+                    ),
+                });
+            }
+            let plugin_preexisting = matching.user.is_some();
+
+            let claim = AdapterClaim {
+                claim_schema: CLAIM_SCHEMA_VERSION,
+                component: ctx.component.clone(),
+                framework: self.name().to_string(),
+                plugin_id: Some(plugin.clone()),
+                adapter_type: ctx.adapter_type.clone(),
+                enabled_at: now_iso8601(),
+                resource_root: bundle.resource_root.clone(),
+                bundle_digest: bundle.digest.clone(),
+                driver_schema: DRIVER_SCHEMA_VERSION,
+                status: ClaimStatus::Enabled,
+                notices: Vec::new(),
+                resources: vec![ClaimResource {
+                    id: RES_PLUGIN.to_string(),
+                    purpose: "qoder_plugin".to_string(),
+                    kind: ClaimResourceKind::FrameworkPlugin {
+                        framework: self.name().to_string(),
+                        plugin_id: plugin,
+                    },
+                }],
+                driver_payload: DriverPayload::Qoder(QoderClaim {
+                    plugin_resource: RES_PLUGIN.to_string(),
+                    settings_resource: None,
+                    plugin_preexisting,
+                    plugin_install_confirmed: false,
+                    managed_hooks: Vec::new(),
+                    managed_hook_specs: Vec::new(),
+                }),
+            };
+            return Ok((claim, PreparedEnable::QoderNative { program }));
+        }
+
         let settings =
             settings_path(ctx.user_home.as_deref()).ok_or_else(|| AdapterError::FrameworkCli {
                 program: "qodercli".to_string(),
@@ -283,7 +380,9 @@ impl FrameworkDriver for QoderDriver {
                 resources,
                 driver_payload: DriverPayload::Qoder(QoderClaim {
                     plugin_resource: RES_PLUGIN.to_string(),
-                    settings_resource: RES_SETTINGS.to_string(),
+                    settings_resource: Some(RES_SETTINGS.to_string()),
+                    plugin_preexisting: false,
+                    plugin_install_confirmed: false,
                     managed_hooks,
                     managed_hook_specs,
                 }),
@@ -292,13 +391,127 @@ impl FrameworkDriver for QoderDriver {
         ))
     }
 
+    fn preserve_reenable_facts(
+        &self,
+        prior: &AdapterClaim,
+        next: &mut AdapterClaim,
+    ) -> Result<(), AdapterError> {
+        let prior_native = native_claim(prior)?;
+        let next_native = native_claim(next)?;
+        if prior_native != next_native {
+            let prior_kind = if prior_native { "native" } else { "legacy" };
+            let next_kind = if next_native { "native" } else { "legacy" };
+            return Err(AdapterError::BundleInvalid {
+                root: next.resource_root.clone(),
+                reason: format!(
+                    "qoder bundle lifecycle changed from {prior_kind} to {next_kind}; disable the existing adapter before re-enabling"
+                ),
+            });
+        }
+        if next_native {
+            let prior_plugin =
+                resolve_plugin(prior).ok_or_else(|| AdapterError::BundleInvalid {
+                    root: prior.resource_root.clone(),
+                    reason: "existing qoder receipt has no plugin resource".to_string(),
+                })?;
+            let next_plugin = resolve_plugin(next).ok_or_else(|| AdapterError::BundleInvalid {
+                root: next.resource_root.clone(),
+                reason: "new qoder receipt has no plugin resource".to_string(),
+            })?;
+            if prior_plugin != next_plugin {
+                return Err(AdapterError::BundleInvalid {
+                    root: next.resource_root.clone(),
+                    reason: format!(
+                        "qoder native plugin id changed from '{prior_plugin}' to '{next_plugin}'; disable the existing adapter before re-enabling"
+                    ),
+                });
+            }
+            let prior_payload =
+                qoder_payload(prior).ok_or_else(|| AdapterError::BundleInvalid {
+                    root: prior.resource_root.clone(),
+                    reason: "existing qoder receipt has a non-qoder driver payload".to_string(),
+                })?;
+            let prior_owned =
+                !prior_payload.plugin_preexisting && native_install_confirmed(prior, prior_payload);
+            let next_root = next.resource_root.clone();
+            let next_payload =
+                qoder_payload_mut(next).ok_or_else(|| AdapterError::BundleInvalid {
+                    root: next_root,
+                    reason: "new qoder receipt has a non-qoder driver payload".to_string(),
+                })?;
+            // Ownership can cross a same-ID re-enable only while the
+            // registration is still present and a prior install checkpoint
+            // proved ANOLISA created it. An absent registration starts a new
+            // unconfirmed write-ahead lifecycle.
+            if next_payload.plugin_preexisting && prior_owned {
+                next_payload.plugin_preexisting = false;
+                next_payload.plugin_install_confirmed = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_prepared_enable(&self, claim: &AdapterClaim) -> Result<(), AdapterError> {
+        if native_claim(claim)?
+            && qoder_payload(claim).is_some_and(|payload| payload.plugin_preexisting)
+        {
+            let plugin = resolve_plugin(claim).ok_or_else(|| AdapterError::BundleInvalid {
+                root: claim.resource_root.clone(),
+                reason: "qoder receipt has no plugin resource".to_string(),
+            })?;
+            return Err(AdapterError::FrameworkCli {
+                program: "qodercli".to_string(),
+                reason: format!(
+                    "refusing to replace pre-existing user-scope Qoder plugin '{}'; remove it explicitly before enabling",
+                    plugin_entry(&plugin)
+                ),
+            });
+        }
+        Ok(())
+    }
+
     fn apply_enable(
         &self,
         claim: &mut AdapterClaim,
-        _prepared: &PreparedEnable,
+        prepared: &PreparedEnable,
         ctx: &DriverCtx,
-        _progress: &mut dyn super::driver::EnableProgress,
+        progress: &mut dyn super::driver::EnableProgress,
     ) -> Result<(), AdapterError> {
+        if native_claim(claim)? {
+            let PreparedEnable::QoderNative { program } = prepared else {
+                return Err(AdapterError::BundleInvalid {
+                    root: claim.resource_root.clone(),
+                    reason: "native Qoder enable requires prepared CLI capabilities".to_string(),
+                });
+            };
+            let plugin = resolve_plugin(claim).ok_or_else(|| AdapterError::BundleInvalid {
+                root: claim.resource_root.clone(),
+                reason: "qoder receipt has no plugin resource".to_string(),
+            })?;
+            let output = ctx
+                .ops
+                .run_framework_cli(build_native_install_cmd(program, &claim.resource_root))?;
+            require_cli_success(program, "plugins install", output)?;
+            let root = claim.resource_root.clone();
+            let payload = qoder_payload_mut(claim).ok_or_else(|| AdapterError::BundleInvalid {
+                root,
+                reason: "qoder receipt has a non-qoder driver payload".to_string(),
+            })?;
+            payload.plugin_install_confirmed = true;
+            progress.persist_claim(claim)?;
+            return verify_native_plugin(ctx, program, &plugin).map_err(|reason| {
+                AdapterError::FrameworkCli {
+                    program: program.clone(),
+                    reason,
+                }
+            });
+        }
+        if !matches!(prepared, PreparedEnable::None) {
+            return Err(AdapterError::BundleInvalid {
+                root: claim.resource_root.clone(),
+                reason: "legacy Qoder enable received native CLI capabilities".to_string(),
+            });
+        }
         // Resolve plugin + settings strictly from the receipt's payload
         // references (Manager-validated), failing closed on a malformed
         // receipt rather than falling back to ctx-derived defaults.
@@ -378,6 +591,9 @@ impl FrameworkDriver for QoderDriver {
         claim: &AdapterClaim,
         ctx: &DriverCtx,
     ) -> Result<AdapterStatusReport, AdapterError> {
+        if native_claim(claim)? {
+            return native_status(claim, ctx);
+        }
         let mut conditions = Vec::new();
         let detect = self.detect(&HostEnv {
             user_home: ctx.user_home.clone(),
@@ -504,6 +720,9 @@ impl FrameworkDriver for QoderDriver {
         claim: &AdapterClaim,
         ctx: &DriverCtx,
     ) -> Result<DisableReport, AdapterError> {
+        if native_claim(claim)? {
+            return disable_native(claim, ctx);
+        }
         // Framework-side deregistration needs the CLI. Without it, the plugin
         // would stay in qodercli's cache, so keep the receipt for a retry
         // rather than pruning settings and pretending cleanup finished.
@@ -583,6 +802,80 @@ impl FrameworkDriver for QoderDriver {
 // ---------------------------------------------------------------------------
 // Pure path / identifier helpers
 // ---------------------------------------------------------------------------
+
+fn classify_bundle(resource_root: &Path) -> Result<QoderBundleKind, String> {
+    let legacy = resource_root.join(QODER_HOOKS_FILE).is_file();
+    let native = resource_root.join(QODER_NATIVE_HOOKS_FILE).is_file();
+    match (native, legacy) {
+        (true, false) => Ok(QoderBundleKind::Native),
+        (false, true) => Ok(QoderBundleKind::Legacy),
+        (true, true) => Err(format!(
+            "qoder bundle is ambiguous: both '{QODER_NATIVE_HOOKS_FILE}' and '{QODER_HOOKS_FILE}' exist"
+        )),
+        (false, false) => Err(format!(
+            "qoder bundle has neither '{QODER_NATIVE_HOOKS_FILE}' nor '{QODER_HOOKS_FILE}'"
+        )),
+    }
+}
+
+fn read_native_bundle(ctx: &DriverCtx, manifest: &str) -> Result<String, AdapterError> {
+    let root = &ctx.resource_root;
+    let manifest_path = root.join(manifest);
+    let bytes = ctx
+        .ops
+        .read_file(&manifest_path)?
+        .ok_or_else(|| AdapterError::BundleInvalid {
+            root: root.clone(),
+            reason: format!("qoder plugin manifest '{manifest}' is missing"),
+        })?;
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|source| AdapterError::BundleInvalid {
+            root: root.clone(),
+            reason: format!("failed to parse qoder plugin manifest '{manifest}': {source}"),
+        })?;
+    let manifest_name = value
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| AdapterError::BundleInvalid {
+            root: root.clone(),
+            reason: format!("qoder plugin manifest '{manifest}' has no non-empty 'name'"),
+        })?;
+    if let Some(declared) = ctx
+        .declared_plugin_id
+        .as_deref()
+        .filter(|declared| !declared.is_empty())
+        && declared != manifest_name
+    {
+        return Err(AdapterError::BundleInvalid {
+            root: root.clone(),
+            reason: format!(
+                "declared qoder plugin id '{declared}' does not match manifest name '{manifest_name}'"
+            ),
+        });
+    }
+
+    let hooks_path = root.join(QODER_NATIVE_HOOKS_FILE);
+    let hooks_bytes =
+        ctx.ops
+            .read_file(&hooks_path)?
+            .ok_or_else(|| AdapterError::BundleInvalid {
+                root: root.clone(),
+                reason: format!("native qoder hooks '{QODER_NATIVE_HOOKS_FILE}' are missing"),
+            })?;
+    let hooks: Value =
+        serde_json::from_slice(&hooks_bytes).map_err(|source| AdapterError::BundleInvalid {
+            root: root.clone(),
+            reason: format!("failed to parse {QODER_NATIVE_HOOKS_FILE}: {source}"),
+        })?;
+    if !hooks.get("hooks").is_some_and(Value::is_object) {
+        return Err(AdapterError::BundleInvalid {
+            root: root.clone(),
+            reason: format!("{QODER_NATIVE_HOOKS_FILE} lacks the top-level 'hooks' object"),
+        });
+    }
+    Ok(manifest_name.to_string())
+}
 
 /// Plugin name for the receipt: the bundle's resolved id, else component.
 fn plugin_name(bundle: &AdapterBundle, ctx: &DriverCtx) -> String {
@@ -678,6 +971,45 @@ fn qoder_payload(claim: &AdapterClaim) -> Option<&QoderClaim> {
     }
 }
 
+fn qoder_payload_mut(claim: &mut AdapterClaim) -> Option<&mut QoderClaim> {
+    match &mut claim.driver_payload {
+        DriverPayload::Qoder(qoder) => Some(qoder),
+        _ => None,
+    }
+}
+
+/// Only the explicit schema-v3 checkpoint proves ANOLISA installed a Native
+/// plugin. Older receipts were written as `Enabled` before mutation, so
+/// their status cannot safely imply ownership.
+fn native_install_confirmed(claim: &AdapterClaim, payload: &QoderClaim) -> bool {
+    claim.driver_schema >= DRIVER_SCHEMA_VERSION && payload.plugin_install_confirmed
+}
+
+/// Native receipts omit legacy settings ownership and hook specs.
+fn native_claim(claim: &AdapterClaim) -> Result<bool, AdapterError> {
+    let payload = qoder_payload(claim).ok_or_else(|| AdapterError::BundleInvalid {
+        root: claim.resource_root.clone(),
+        reason: "qoder receipt has a non-qoder driver payload".to_string(),
+    })?;
+    if payload.settings_resource.is_none()
+        && (!payload.managed_hooks.is_empty() || !payload.managed_hook_specs.is_empty())
+    {
+        return Err(AdapterError::BundleInvalid {
+            root: claim.resource_root.clone(),
+            reason: "qoder receipt is inconsistent: settings resource is absent while legacy managed hook facts remain"
+                .to_string(),
+        });
+    }
+    if payload.plugin_preexisting && payload.plugin_install_confirmed {
+        return Err(AdapterError::BundleInvalid {
+            root: claim.resource_root.clone(),
+            reason: "qoder receipt is inconsistent: a pre-existing plugin cannot have an ANOLISA install confirmation"
+                .to_string(),
+        });
+    }
+    Ok(payload.settings_resource.is_none())
+}
+
 /// Resolve the plugin name strictly from the payload's `plugin_resource`
 /// reference. Returns `None` (fail closed) when the payload is not Qoder's,
 /// the referenced resource is missing, or it is not a `FrameworkPlugin`.
@@ -711,12 +1043,11 @@ fn resolve_plugin(claim: &AdapterClaim) -> Option<String> {
 /// `ExternalPath`, or `user_home` is unknown.
 fn resolve_settings(claim: &AdapterClaim, user_home: Option<&Path>) -> Option<PathBuf> {
     let payload = qoder_payload(claim)?;
-    let recorded = claim
-        .resource(&payload.settings_resource)
-        .and_then(|r| match &r.kind {
-            ClaimResourceKind::ExternalPath { path } => Some(path.clone()),
-            _ => None,
-        })?;
+    let resource_id = payload.settings_resource.as_deref()?;
+    let recorded = claim.resource(resource_id).and_then(|r| match &r.kind {
+        ClaimResourceKind::ExternalPath { path } => Some(path.clone()),
+        _ => None,
+    })?;
     let expected = settings_path(user_home)?;
     (recorded == expected).then_some(recorded)
 }
@@ -724,6 +1055,425 @@ fn resolve_settings(claim: &AdapterClaim, user_home: Option<&Path>) -> Option<Pa
 /// Exact Qoder hook entries ANOLISA owns, persisted in the receipt payload.
 fn managed_hook_specs(claim: &AdapterClaim) -> Option<&[QoderManagedHook]> {
     qoder_payload(claim).map(|q| q.managed_hook_specs.as_slice())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativePluginInventory {
+    enabled: bool,
+    hooks_loaded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativePluginMatches {
+    user: Option<NativePluginInventory>,
+    non_user_scopes: Vec<String>,
+}
+
+fn parse_plugin_items(text: &str) -> Result<Vec<Value>, String> {
+    let root: Value =
+        serde_json::from_str(text).map_err(|source| format!("invalid JSON: {source}"))?;
+    if let Some(items) = root.as_array() {
+        return Ok(items.clone());
+    }
+    ["plugins", "installed", "items"]
+        .iter()
+        .find_map(|key| root.get(key).and_then(Value::as_array))
+        .cloned()
+        .ok_or_else(|| "plugin inventory root is not an array".to_string())
+}
+
+fn parse_native_plugin(
+    text: &str,
+    expected_id: &str,
+) -> Result<Option<NativePluginInventory>, String> {
+    Ok(parse_native_plugin_matches(text, expected_id)?.user)
+}
+
+fn parse_native_plugin_matches(
+    text: &str,
+    expected_id: &str,
+) -> Result<NativePluginMatches, String> {
+    let items = parse_plugin_items(text)?;
+    let matching = items
+        .iter()
+        .filter(|item| {
+            item.get("id").and_then(Value::as_str) == Some(expected_id)
+                || item.get("pluginId").and_then(Value::as_str) == Some(expected_id)
+        })
+        .map(|item| {
+            let scope = item
+                .get("scope")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("{expected_id} has no string 'scope' provenance"))?;
+            Ok((scope, item))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut non_user_scopes = matching
+        .iter()
+        .filter(|&(scope, _)| *scope != QODER_NATIVE_SCOPE)
+        .map(|(scope, _)| (*scope).to_string())
+        .collect::<Vec<_>>();
+    non_user_scopes.sort();
+    non_user_scopes.dedup();
+    let mut user_plugins = matching
+        .iter()
+        .filter_map(|(scope, item)| (*scope == QODER_NATIVE_SCOPE).then_some(*item));
+    let Some(plugin) = user_plugins.next() else {
+        return Ok(NativePluginMatches {
+            user: None,
+            non_user_scopes,
+        });
+    };
+    if user_plugins.next().is_some() {
+        return Err(format!(
+            "{expected_id} has multiple '{QODER_NATIVE_SCOPE}'-scope inventory entries"
+        ));
+    }
+    let enabled = plugin
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| format!("{expected_id} has no boolean 'enabled' state"))?;
+    let hooks_loaded = plugin
+        .get("resources")
+        .and_then(Value::as_object)
+        .and_then(|resources| resources.get("hooks"))
+        .and_then(Value::as_array)
+        .is_some_and(|hooks| !hooks.is_empty());
+    Ok(NativePluginMatches {
+        user: Some(NativePluginInventory {
+            enabled,
+            hooks_loaded,
+        }),
+        non_user_scopes,
+    })
+}
+
+fn require_cli_success(
+    program: &str,
+    action: &str,
+    output: super::driver::CliOutput,
+) -> Result<(), AdapterError> {
+    if output.success() {
+        Ok(())
+    } else {
+        Err(AdapterError::FrameworkCli {
+            program: program.to_string(),
+            reason: cli_failure_reason(action, &output),
+        })
+    }
+}
+
+fn require_native_qodercli(ctx: &DriverCtx) -> Result<String, AdapterError> {
+    qodercli_program(ctx.user_home.as_deref()).ok_or_else(|| AdapterError::FrameworkCli {
+        program: "qodercli".to_string(),
+        reason: "qodercli not found on PATH or under ~/.qoder/bin".to_string(),
+    })
+}
+
+fn verify_native_plugin(ctx: &DriverCtx, program: &str, plugin: &str) -> Result<(), String> {
+    let output = ctx
+        .ops
+        .run_framework_cli_json(build_native_list_cmd(program))
+        .map_err(|error| error.to_string())?;
+    if !output.success() {
+        return Err(cli_failure_reason("plugins list --json", &output));
+    }
+    let expected = plugin_entry(plugin);
+    let inventory = parse_native_plugin(&output.stdout, &expected)?
+        .ok_or_else(|| format!("{expected} is absent after install"))?;
+    if !inventory.enabled {
+        return Err(format!("{expected} is installed but disabled"));
+    }
+    if !inventory.hooks_loaded {
+        return Err(format!("{expected} reports no loaded hooks"));
+    }
+    Ok(())
+}
+
+fn native_status(
+    claim: &AdapterClaim,
+    ctx: &DriverCtx,
+) -> Result<AdapterStatusReport, AdapterError> {
+    let detect = QoderDriver.detect(&HostEnv {
+        user_home: ctx.user_home.clone(),
+    });
+    let mut conditions = vec![
+        AdapterCondition {
+            kind: AdapterConditionKind::FrameworkDetected,
+            status: bool_status(detect.detected),
+            reason: Some(detect.reason),
+            resource: None,
+        },
+        bundle_match_condition(claim),
+    ];
+    let Some(plugin) = resolve_plugin(claim) else {
+        push_native_conditions(
+            &mut conditions,
+            ConditionStatus::False,
+            ConditionStatus::False,
+            ConditionStatus::False,
+            ConditionStatus::False,
+            Some("receipt has no Qoder plugin resource".to_string()),
+        );
+        return Ok(AdapterStatusReport {
+            summary: summarize_native(claim.status, false, ConditionStatus::False),
+            conditions,
+        });
+    };
+    let Some(program) = qodercli_program(ctx.user_home.as_deref()) else {
+        push_native_conditions(
+            &mut conditions,
+            ConditionStatus::Unknown,
+            ConditionStatus::Unknown,
+            ConditionStatus::Unknown,
+            ConditionStatus::False,
+            Some("qodercli unavailable; plugin inventory cannot be read".to_string()),
+        );
+        return Ok(AdapterStatusReport {
+            summary: summarize_native(claim.status, false, ConditionStatus::False),
+            conditions,
+        });
+    };
+    let output = match ctx
+        .ops
+        .run_framework_cli_json(build_native_list_cmd(&program))
+    {
+        Ok(output) => output,
+        Err(error) => {
+            push_native_conditions(
+                &mut conditions,
+                ConditionStatus::Unknown,
+                ConditionStatus::Unknown,
+                ConditionStatus::Unknown,
+                ConditionStatus::False,
+                Some(format!("cannot read Qoder plugin inventory: {error}")),
+            );
+            return Ok(AdapterStatusReport {
+                summary: summarize_native(claim.status, true, ConditionStatus::Unknown),
+                conditions,
+            });
+        }
+    };
+    if !output.success() {
+        push_native_conditions(
+            &mut conditions,
+            ConditionStatus::Unknown,
+            ConditionStatus::Unknown,
+            ConditionStatus::Unknown,
+            ConditionStatus::False,
+            Some(cli_failure_reason("plugins list --json", &output)),
+        );
+        return Ok(AdapterStatusReport {
+            summary: summarize_native(claim.status, true, ConditionStatus::Unknown),
+            conditions,
+        });
+    }
+    let expected = plugin_entry(&plugin);
+    let inventory = match parse_native_plugin(&output.stdout, &expected) {
+        Ok(inventory) => inventory,
+        Err(reason) => {
+            push_native_conditions(
+                &mut conditions,
+                ConditionStatus::Unknown,
+                ConditionStatus::Unknown,
+                ConditionStatus::Unknown,
+                ConditionStatus::False,
+                Some(reason),
+            );
+            return Ok(AdapterStatusReport {
+                summary: summarize_native(claim.status, true, ConditionStatus::Unknown),
+                conditions,
+            });
+        }
+    };
+    let (registered, enabled, hooks, reason) = match inventory {
+        Some(inventory) => (
+            ConditionStatus::True,
+            bool_status(inventory.enabled),
+            bool_status(inventory.hooks_loaded),
+            (!inventory.hooks_loaded).then(|| format!("{expected} reports no loaded hooks")),
+        ),
+        None => (
+            ConditionStatus::False,
+            ConditionStatus::False,
+            ConditionStatus::False,
+            Some(format!("{expected} is absent")),
+        ),
+    };
+    push_native_conditions(
+        &mut conditions,
+        registered,
+        enabled,
+        hooks,
+        ConditionStatus::True,
+        reason,
+    );
+    let health = if registered == ConditionStatus::True
+        && enabled == ConditionStatus::True
+        && hooks == ConditionStatus::True
+    {
+        ConditionStatus::True
+    } else {
+        ConditionStatus::False
+    };
+    Ok(AdapterStatusReport {
+        summary: summarize_native(claim.status, true, health),
+        conditions,
+    })
+}
+
+fn push_native_conditions(
+    conditions: &mut Vec<AdapterCondition>,
+    registered: ConditionStatus,
+    enabled: ConditionStatus,
+    hooks: ConditionStatus,
+    verification: ConditionStatus,
+    reason: Option<String>,
+) {
+    for (kind, status) in [
+        (AdapterConditionKind::PluginRegistered, registered),
+        (AdapterConditionKind::ActivationEnabled, enabled),
+        (AdapterConditionKind::PluginResourcesLoaded, hooks),
+        (AdapterConditionKind::VerificationSupported, verification),
+    ] {
+        conditions.push(AdapterCondition {
+            kind,
+            status,
+            reason: reason.clone(),
+            resource: (kind != AdapterConditionKind::VerificationSupported).then(|| {
+                ClaimResourceRef {
+                    id: RES_PLUGIN.to_string(),
+                }
+            }),
+        });
+    }
+}
+
+fn summarize_native(
+    claim_status: ClaimStatus,
+    detected: bool,
+    health: ConditionStatus,
+) -> AdapterSummary {
+    if claim_status == ClaimStatus::CleanupFailed {
+        return AdapterSummary::CleanupFailed;
+    }
+    if !detected || health == ConditionStatus::False {
+        return AdapterSummary::Degraded;
+    }
+    match health {
+        ConditionStatus::True => AdapterSummary::Healthy,
+        ConditionStatus::Unknown => AdapterSummary::Unknown,
+        ConditionStatus::False => AdapterSummary::Degraded,
+    }
+}
+
+fn disable_native(claim: &AdapterClaim, ctx: &DriverCtx) -> Result<DisableReport, AdapterError> {
+    let Some(payload) = qoder_payload(claim) else {
+        return Ok(DisableReport {
+            cleanup_complete: false,
+            messages: vec![
+                "qoder receipt has a non-qoder driver payload; receipt kept".to_string(),
+            ],
+        });
+    };
+    let Some(plugin) = resolve_plugin(claim) else {
+        return Ok(DisableReport {
+            cleanup_complete: false,
+            messages: vec!["qoder receipt has no plugin resource; receipt kept".to_string()],
+        });
+    };
+    if payload.plugin_preexisting {
+        return Ok(DisableReport {
+            cleanup_complete: true,
+            messages: vec![format!(
+                "retained pre-existing native Qoder plugin '{}'; ANOLISA never owned this registration",
+                plugin_entry(&plugin)
+            )],
+        });
+    }
+    let Some(program) = qodercli_program(ctx.user_home.as_deref()) else {
+        return Ok(DisableReport {
+            cleanup_complete: false,
+            messages: vec!["qodercli unavailable; receipt kept for retry".to_string()],
+        });
+    };
+    let expected = plugin_entry(&plugin);
+    if !native_install_confirmed(claim, payload) {
+        let (cleanup_complete, message) = match ctx
+            .ops
+            .run_framework_cli_json(build_native_list_cmd(&program))
+        {
+            Ok(output) if output.success() => {
+                match parse_native_plugin(&output.stdout, &expected) {
+                    Ok(None) => (
+                        true,
+                        format!(
+                            "verified {expected} is absent; removed unconfirmed native Qoder receipt"
+                        ),
+                    ),
+                    Ok(Some(_)) => (
+                        false,
+                        format!(
+                            "{expected} is registered but ANOLISA install ownership was never confirmed; left it untouched and kept receipt"
+                        ),
+                    ),
+                    Err(reason) => (
+                        false,
+                        format!("cannot verify unconfirmed Qoder receipt: {reason}"),
+                    ),
+                }
+            }
+            Ok(output) => (false, cli_failure_reason("plugins list --json", &output)),
+            Err(error) => (false, format!("Qoder inventory could not run: {error}")),
+        };
+        return Ok(DisableReport {
+            cleanup_complete,
+            messages: vec![message],
+        });
+    }
+    let mut messages = Vec::new();
+    match ctx
+        .ops
+        .run_framework_cli(build_native_uninstall_cmd(&program, &plugin))
+    {
+        Ok(output) if output.success() => {
+            messages.push(format!("uninstalled native Qoder plugin '{plugin}'"));
+        }
+        Ok(output) => messages.push(cli_failure_reason("plugins uninstall", &output)),
+        Err(error) => messages.push(format!("plugins uninstall could not run: {error}")),
+    }
+
+    let cleanup_complete = match ctx
+        .ops
+        .run_framework_cli_json(build_native_list_cmd(&program))
+    {
+        Ok(output) if output.success() => match parse_native_plugin(&output.stdout, &expected) {
+            Ok(None) => {
+                messages.push(format!("verified {expected} is absent"));
+                true
+            }
+            Ok(Some(_)) => {
+                messages.push(format!("{expected} remains registered after uninstall"));
+                false
+            }
+            Err(reason) => {
+                messages.push(format!("cannot verify Qoder uninstall: {reason}"));
+                false
+            }
+        },
+        Ok(output) => {
+            messages.push(cli_failure_reason("plugins list --json", &output));
+            false
+        }
+        Err(error) => {
+            messages.push(format!("cannot verify Qoder uninstall: {error}"));
+            false
+        }
+    };
+    Ok(DisableReport {
+        cleanup_complete,
+        messages,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -865,6 +1615,65 @@ fn build_uninstall_cmd(program: &str, plugin: &str) -> FrameworkCommand {
     )
 }
 
+fn build_native_help_cmd(program: &str, subcommand: &str) -> FrameworkCommand {
+    base_cmd(
+        program,
+        vec![
+            "plugins".to_string(),
+            subcommand.to_string(),
+            "--help".to_string(),
+        ],
+    )
+}
+
+fn build_native_validate_cmd(program: &str, root: &Path) -> FrameworkCommand {
+    base_cmd(
+        program,
+        vec![
+            "plugins".to_string(),
+            "validate".to_string(),
+            root.to_string_lossy().into_owned(),
+        ],
+    )
+}
+
+fn build_native_install_cmd(program: &str, root: &Path) -> FrameworkCommand {
+    base_cmd(
+        program,
+        vec![
+            "plugins".to_string(),
+            "install".to_string(),
+            root.to_string_lossy().into_owned(),
+            "--scope".to_string(),
+            "user".to_string(),
+        ],
+    )
+}
+
+fn build_native_list_cmd(program: &str) -> FrameworkCommand {
+    base_cmd(
+        program,
+        vec![
+            "plugins".to_string(),
+            "list".to_string(),
+            "--json".to_string(),
+        ],
+    )
+}
+
+fn build_native_uninstall_cmd(program: &str, plugin: &str) -> FrameworkCommand {
+    base_cmd(
+        program,
+        vec![
+            "plugins".to_string(),
+            "uninstall".to_string(),
+            plugin.to_string(),
+            "--scope".to_string(),
+            "user".to_string(),
+        ],
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Status assembly
 // ---------------------------------------------------------------------------
@@ -934,6 +1743,127 @@ mod tests {
         );
         let uninstall = build_uninstall_cmd("qodercli", "tokenless");
         assert_eq!(uninstall.args, vec!["plugins", "uninstall", "tokenless"]);
+
+        let root = Path::new("/data/adapters/tokenless/qoder");
+        assert_eq!(
+            build_native_validate_cmd("qodercli", root).args,
+            vec!["plugins", "validate", "/data/adapters/tokenless/qoder"]
+        );
+        assert_eq!(
+            build_native_install_cmd("qodercli", root).args,
+            vec![
+                "plugins",
+                "install",
+                "/data/adapters/tokenless/qoder",
+                "--scope",
+                "user"
+            ]
+        );
+        assert_eq!(
+            build_native_list_cmd("qodercli").args,
+            vec!["plugins", "list", "--json"]
+        );
+        assert_eq!(
+            build_native_uninstall_cmd("qodercli", "tokenless").args,
+            vec!["plugins", "uninstall", "tokenless", "--scope", "user"]
+        );
+    }
+
+    #[test]
+    fn native_inventory_requires_enabled_plugin_with_hooks() {
+        let valid = r#"[{"id":"tokenless@local","scope":"user","enabled":true,"resources":{"hooks":[{}]}}]"#;
+        assert_eq!(
+            parse_native_plugin(valid, "tokenless@local"),
+            Ok(Some(NativePluginInventory {
+                enabled: true,
+                hooks_loaded: true,
+            }))
+        );
+        assert_eq!(
+            parse_native_plugin(r#"{"plugins":[]}"#, "tokenless@local"),
+            Ok(None)
+        );
+        assert!(parse_native_plugin("not-json", "tokenless@local").is_err());
+        assert!(
+            parse_native_plugin(
+                r#"[{"id":"tokenless@local","scope":"user","resources":{"hooks":[{}]}}]"#,
+                "tokenless@local"
+            )
+            .is_err()
+        );
+        assert_eq!(
+            parse_native_plugin(
+                r#"[{"pluginId":"tokenless@local","scope":"user","enabled":false,"resources":{"hooks":[]}}]"#,
+                "tokenless@local"
+            ),
+            Ok(Some(NativePluginInventory {
+                enabled: false,
+                hooks_loaded: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn native_inventory_preserves_cross_scope_conflicts() {
+        let mixed = r#"[
+            {"id":"tokenless@local","scope":"project","enabled":false,"resources":{"hooks":[]}},
+            {"id":"tokenless@local","scope":"user","enabled":true,"resources":{"hooks":[{}]}}
+        ]"#;
+        assert_eq!(
+            parse_native_plugin(mixed, "tokenless@local"),
+            Ok(Some(NativePluginInventory {
+                enabled: true,
+                hooks_loaded: true,
+            }))
+        );
+        assert_eq!(
+            parse_native_plugin_matches(mixed, "tokenless@local"),
+            Ok(NativePluginMatches {
+                user: Some(NativePluginInventory {
+                    enabled: true,
+                    hooks_loaded: true,
+                }),
+                non_user_scopes: vec!["project".to_string()],
+            })
+        );
+        assert_eq!(
+            parse_native_plugin(
+                r#"[{"id":"tokenless@local","scope":"project","enabled":true,"resources":{"hooks":[{}]}}]"#,
+                "tokenless@local"
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            parse_native_plugin_matches(
+                r#"[
+                    {"id":"tokenless@local","scope":"project"},
+                    {"id":"tokenless@local","scope":"local"},
+                    {"id":"tokenless@local","scope":"project"}
+                ]"#,
+                "tokenless@local"
+            ),
+            Ok(NativePluginMatches {
+                user: None,
+                non_user_scopes: vec!["local".to_string(), "project".to_string()],
+            })
+        );
+        assert!(
+            parse_native_plugin(
+                r#"[{"id":"tokenless@local","enabled":true,"resources":{"hooks":[{}]}}]"#,
+                "tokenless@local"
+            )
+            .is_err()
+        );
+        assert!(
+            parse_native_plugin(
+                r#"[
+                    {"id":"tokenless@local","scope":"user","enabled":true,"resources":{"hooks":[{}]}},
+                    {"id":"tokenless@local","scope":"user","enabled":true,"resources":{"hooks":[{}]}}
+                ]"#,
+                "tokenless@local"
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1001,8 +1931,8 @@ mod tests {
             fn create_symlink(&self, _: &Path, _: &Path) -> Result<(), AdapterError> {
                 unimplemented!()
             }
-            fn read_file(&self, _: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
-                unimplemented!()
+            fn read_file(&self, path: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
+                Ok(std::fs::read(path).ok())
             }
         }
         let ops = StubOps;
@@ -1032,9 +1962,69 @@ mod tests {
             .expect_err("hooks.json missing must fail");
         assert!(matches!(err, AdapterError::BundleInvalid { .. }));
 
-        // Both present -> ok.
+        // Legacy root hooks only -> ok.
         std::fs::write(root.join(QODER_HOOKS_FILE), b"{}").expect("write hooks");
-        let bundle = driver.read_bundle(&mk_ctx(&root)).expect("both present");
+        let bundle = driver.read_bundle(&mk_ctx(&root)).expect("legacy bundle");
         assert_eq!(bundle.plugin_id.as_deref(), Some("tokenless"));
+
+        // Qoder CLI ignores alternate manifest paths, so the driver must
+        // reject a contract that declares one even when the bundle is
+        // otherwise complete.
+        std::fs::write(root.join("custom.json"), br#"{"name":"tokenless"}"#)
+            .expect("write alternate manifest");
+        let mut alternate_ctx = mk_ctx(&root);
+        alternate_ctx.declared_bundle_entry = Some("custom.json".to_string());
+        assert!(!driver.probe_bundle(&root, Some("custom.json")));
+        let err = driver
+            .read_bundle(&alternate_ctx)
+            .expect_err("alternate manifest must be rejected");
+        assert!(matches!(err, AdapterError::BundleInvalid { .. }));
+
+        // Native nested hooks only -> manifest name is authoritative.
+        std::fs::remove_file(root.join(QODER_HOOKS_FILE)).expect("remove legacy hooks");
+        std::fs::create_dir_all(root.join("hooks")).expect("mkdir native hooks");
+        std::fs::write(
+            root.join(QODER_NATIVE_HOOKS_FILE),
+            br#"{"hooks":{"PreToolUse":[]}}"#,
+        )
+        .expect("write native hooks");
+        let bundle = driver.read_bundle(&mk_ctx(&root)).expect("native bundle");
+        assert_eq!(bundle.plugin_id.as_deref(), Some("tokenless"));
+
+        // Both layouts are ambiguous and fail closed in probe and read.
+        std::fs::write(root.join(QODER_HOOKS_FILE), b"{}").expect("write legacy hooks");
+        assert!(!driver.probe_bundle(&root, None));
+        assert!(matches!(
+            driver.read_bundle(&mk_ctx(&root)),
+            Err(AdapterError::BundleInvalid { .. })
+        ));
+        std::fs::remove_file(root.join(QODER_HOOKS_FILE)).expect("remove legacy hooks");
+
+        // Native hook JSON must parse and expose a top-level hooks object.
+        std::fs::write(root.join(QODER_NATIVE_HOOKS_FILE), b"not-json")
+            .expect("write invalid hooks");
+        assert!(matches!(
+            driver.read_bundle(&mk_ctx(&root)),
+            Err(AdapterError::BundleInvalid { .. })
+        ));
+        std::fs::write(root.join(QODER_NATIVE_HOOKS_FILE), br#"{"hooks":[]}"#)
+            .expect("write wrong hook shape");
+        assert!(matches!(
+            driver.read_bundle(&mk_ctx(&root)),
+            Err(AdapterError::BundleInvalid { .. })
+        ));
+
+        // Contract plugin_id and native manifest name must agree.
+        std::fs::write(
+            root.join(QODER_NATIVE_HOOKS_FILE),
+            br#"{"hooks":{"PreToolUse":[]}}"#,
+        )
+        .expect("restore native hooks");
+        std::fs::write(root.join(QODER_PLUGIN_MANIFEST), br#"{"name":"sec-core"}"#)
+            .expect("write mismatched manifest");
+        assert!(matches!(
+            driver.read_bundle(&mk_ctx(&root)),
+            Err(AdapterError::BundleInvalid { .. })
+        ));
     }
 }

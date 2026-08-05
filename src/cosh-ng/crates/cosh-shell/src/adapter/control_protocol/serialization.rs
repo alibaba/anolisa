@@ -26,6 +26,27 @@ pub struct HostExecutedShellMetadata {
     pub redaction_status: String,
     pub approval_id: Option<String>,
     pub tool_use_id: Option<String>,
+    /// #2161: kernel-evidenced input-wait facts observed while the command
+    /// ran; omitted entirely when no wait was detected (back compat).
+    pub input_wait: Option<HostExecutedInputWait>,
+}
+
+/// #2161 contract annotation: lets the provider know the command sat in an
+/// interactive input-wait, and whether the input-wait timeout interrupted
+/// it — actionable signal to retry non-interactively (`</dev/null`,
+/// prompt-skipping flags, or piping an answer).
+///
+/// Granularity contract (#2168 review): facts aggregate over the whole
+/// approval/handoff — the provider's retry unit. `waited_secs` is the
+/// longest single uninterrupted wait episode observed while the handoff
+/// ran; `interrupted=true` means the foreground group was interrupted at
+/// that point, so nothing after the interrupt executed. Steps that
+/// completed before the interrupt are reflected in the command's captured
+/// output/exit metadata, not re-attributed per sub-command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostExecutedInputWait {
+    pub waited_secs: u64,
+    pub interrupted: bool,
 }
 
 pub fn serialize_initialize(request_id: &str) -> String {
@@ -59,6 +80,19 @@ pub fn serialize_co_allow(request_id: &str) -> String {
                 "behavior": "allow"
             }
         }
+    })
+    .to_string()
+}
+
+/// #1940 receipt protocol: emitted as soon as a control approval request
+/// reaches the shell main thread. A core that announced
+/// `can_handle_approval_receipt` disarms its residual timeout for this
+/// request; writers skip the line entirely for providers without the
+/// capability, whose guard then stays armed.
+pub(crate) fn serialize_approval_receipt(request_id: &str) -> String {
+    json!({
+        "type": "approval_receipt",
+        "request_id": request_id
     })
     .to_string()
 }
@@ -97,6 +131,30 @@ pub fn serialize_host_executed_shell_result(
     request_id: &str,
     result: &HostExecutedShellResult,
 ) -> String {
+    let mut metadata = json!({
+        "command": result.metadata.command,
+        "status": result.metadata.status,
+        "exit_code": result.metadata.exit_code,
+        "signal": result.metadata.signal,
+        "cwd": result.metadata.cwd,
+        "end_cwd": result.metadata.end_cwd,
+        "duration_ms": result.metadata.duration_ms,
+        "output_ref": result.metadata.output_ref,
+        "redaction_status": result.metadata.redaction_status,
+        "approval_id": result.metadata.approval_id,
+        "tool_use_id": result.metadata.tool_use_id,
+    });
+    if let Some(input_wait) = &result.metadata.input_wait {
+        let mut facts = json!({
+            "detected": true,
+            "waited_secs": input_wait.waited_secs,
+            "interrupted": input_wait.interrupted,
+        });
+        if input_wait.interrupted {
+            facts["reason"] = Value::String("input-wait-timeout".to_string());
+        }
+        metadata["input_wait"] = facts;
+    }
     json!({
         "type": "control_response",
         "response": {
@@ -107,19 +165,7 @@ pub fn serialize_host_executed_shell_result(
                 "result": {
                     "llmContent": result.llm_content,
                     "returnDisplay": result.return_display,
-                    "metadata": {
-                        "command": result.metadata.command,
-                        "status": result.metadata.status,
-                        "exit_code": result.metadata.exit_code,
-                        "signal": result.metadata.signal,
-                        "cwd": result.metadata.cwd,
-                        "end_cwd": result.metadata.end_cwd,
-                        "duration_ms": result.metadata.duration_ms,
-                        "output_ref": result.metadata.output_ref,
-                        "redaction_status": result.metadata.redaction_status,
-                        "approval_id": result.metadata.approval_id,
-                        "tool_use_id": result.metadata.tool_use_id,
-                    }
+                    "metadata": metadata
                 }
             }
         }

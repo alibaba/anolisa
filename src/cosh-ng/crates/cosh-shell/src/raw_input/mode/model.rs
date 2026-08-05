@@ -194,6 +194,7 @@ pub enum RawInputCapture {
     Question {
         id: String,
         option_count: usize,
+        selected: usize,
         allow_free_text: bool,
         multiple: bool,
         secret: bool,

@@ -57,6 +57,49 @@ fn routing_markers_require_matching_attempt_generation() {
 }
 
 #[test]
+fn intercept_marker_sensitive_flag_reaches_routing_metadata() {
+    let mut parser = parser_for_test("routing-sensitive");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"preexec\",\"token\":\"test-marker-token\",\"session_id\":\"routing-sensitive\",\"command\":\"<redacted sensitive command>\",\"cwd\":\"/tmp\",\"generation\":1}\x07")
+        .expect("feed preexec");
+    parser
+        .feed("\x1b]1337;COSH;{\"event\":\"intercept\",\"token\":\"test-marker-token\",\"session_id\":\"routing-sensitive\",\"command\":\"帮我安装下openclaw,模型使用qwen3.8-max,API Key: sk-fbaa6\",\"reason\":\"natural_language\",\"generation\":1,\"top_level_missing\":true,\"sensitive\":true}\x07".as_bytes())
+        .expect("feed sensitive intercept");
+
+    let intercept = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::UserInputIntercepted)
+        .expect("sensitive intercept event");
+    // The raw input still reaches the agent path in memory; only durable
+    // sinks (journal) redact it, keyed off the sensitive routing flag.
+    assert!(intercept
+        .input
+        .as_deref()
+        .is_some_and(|input| input.contains("sk-fbaa6")));
+    assert!(intercept.routing.as_ref().is_some_and(|routing| {
+        routing.sensitive && routing.top_level_missing && routing.proven
+    }));
+}
+
+#[test]
+fn intercept_marker_without_sensitive_field_defaults_to_not_sensitive() {
+    let mut parser = parser_for_test("routing-legacy");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"intercept\",\"token\":\"test-marker-token\",\"session_id\":\"routing-legacy\",\"command\":\"/skills detail\",\"reason\":\"slash\",\"cwd\":\"/tmp\"}\x07")
+        .expect("feed legacy intercept");
+
+    let intercept = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::UserInputIntercepted)
+        .expect("legacy intercept event");
+    // Legacy markers (no sensitive field, no top-level-missing provenance)
+    // keep the pre-#2138 shape: no routing metadata at all.
+    assert!(intercept.routing.is_none());
+}
+
+#[test]
 fn trusted_history_file_marker_is_private_and_observed() {
     let observed = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&observed);
@@ -340,7 +383,7 @@ fn pending_handoff_origin_is_consumed_by_matching_preexec() {
 }
 
 #[test]
-fn pending_handoff_origin_mismatch_becomes_unknown() {
+fn pending_handoff_origin_mismatch_stays_user_and_keeps_the_slot() {
     let mut parser = parser_for_test("origin-mismatch");
     let request = ShellHandoffRequest::new(
         "echo expected".to_string(),
@@ -356,12 +399,25 @@ fn pending_handoff_origin_mismatch_becomes_unknown() {
 
     feed_preexec(&mut parser, "echo actual");
 
+    // #2142 S3: an unrelated tokenless preexec is ordinary user input and
+    // must not burn the pending slot.
     let event = parser
         .events
         .iter()
         .find(|event| event.kind == ShellEventKind::CommandStarted)
         .expect("command started");
-    assert_eq!(event.command_origin, Some(CommandOrigin::Unknown));
+    assert_eq!(event.command_origin, Some(CommandOrigin::UserInteractive));
+
+    feed_precmd(&mut parser, 0);
+    feed_preexec(&mut parser, "echo expected");
+
+    let event = parser
+        .events
+        .iter()
+        .filter(|event| event.kind == ShellEventKind::CommandStarted)
+        .nth(1)
+        .expect("second command started");
+    assert_eq!(event.command_origin, Some(CommandOrigin::ProviderTool));
 }
 
 #[test]
@@ -947,10 +1003,238 @@ fn parser_for_test(name: &str) -> OscParser {
     OscParser::new(name.to_string(), dir, TEST_MARKER_TOKEN.to_string())
 }
 
+// S3 (stall-class audit 20260803, fixed by #2142): the pending handoff
+// origin used to be a single `take()` slot consumed by the FIRST preexec
+// after registration, so any unrelated command racing ahead burned it and
+// the handoff's own block downgraded to UserInteractive — the same deadlock
+// shape as the secret-redaction FAIL baseline, reached without redaction.
+// Now the slot survives non-claiming preexecs.
+#[test]
+fn pending_handoff_origin_slot_survives_an_unrelated_preexec() {
+    let mut parser = parser_for_test("origin-slot-race");
+    let request = crate::types::ShellHandoffRequest::new(
+        "echo handoff-target",
+        "$ echo handoff-target",
+        "approved_provider_shell_tool",
+        "user",
+        "req-race",
+        "run-race",
+        0,
+    )
+    .expect("handoff request");
+    parser.register_pending_handoff_origin(&request);
+
+    // An unrelated command wins the race to the next preexec.
+    feed_preexec(&mut parser, "echo user-first");
+    feed_precmd(&mut parser, 0);
+    // The approved handoff command runs afterwards.
+    feed_preexec(&mut parser, "echo handoff-target");
+    feed_precmd(&mut parser, 0);
+
+    let started_origins: Vec<_> = parser
+        .events
+        .iter()
+        .filter(|event| event.kind == crate::types::ShellEventKind::CommandStarted)
+        .map(|event| (event.command.clone(), event.command_origin))
+        .collect();
+    assert_eq!(started_origins.len(), 2, "{started_origins:?}");
+    // The unrelated command is ordinary user input and leaves the slot alone.
+    assert_eq!(
+        started_origins[0],
+        (
+            Some("echo user-first".to_string()),
+            Some(crate::types::CommandOrigin::UserInteractive)
+        )
+    );
+    // The handoff's own block keeps ProviderTool, so the tracked closure
+    // path stays alive.
+    assert_eq!(
+        started_origins[1],
+        (
+            Some("echo handoff-target".to_string()),
+            Some(crate::types::CommandOrigin::ProviderTool)
+        )
+    );
+}
+
+// #2142 core mechanism: the marker echoes the staged claim token, so the
+// handoff block keeps its origin and audit identity even when the reported
+// command text was redacted by the marker script.
+#[test]
+fn handoff_token_claims_the_slot_despite_redacted_command_text() {
+    let mut parser = parser_for_test("token-claim-redacted");
+    let request = crate::types::ShellHandoffRequest::new(
+        "deploy --api-key sk-secret",
+        "$ deploy --api-key sk-secret",
+        "approved_provider_shell_tool",
+        "user",
+        "req-token",
+        "run-token",
+        0,
+    )
+    .expect("handoff request");
+    assert!(!request.token.is_empty(), "token minted at construction");
+    parser.register_pending_handoff_origin(&request);
+
+    feed_preexec_with_handoff(&mut parser, "<redacted sensitive command>", &request.token);
+
+    let event = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandStarted)
+        .expect("command started");
+    assert_eq!(
+        event.command_origin,
+        Some(crate::types::CommandOrigin::ProviderTool)
+    );
+    let audit = event.audit_identity.as_ref().expect("audit identity");
+    assert_eq!(audit.run_id, "run-token");
+    assert_eq!(audit.handoff_token.as_deref(), Some(request.token.as_str()));
+}
+
+// A marker carrying a token that matches nothing is a stale or forged claim:
+// it must neither adopt the handoff origin nor burn the slot silently.
+#[test]
+fn mismatched_handoff_token_reports_unknown_and_keeps_the_slot() {
+    let mut parser = parser_for_test("token-claim-mismatch");
+    let request = crate::types::ShellHandoffRequest::new(
+        "echo handoff-target",
+        "$ echo handoff-target",
+        "approved_provider_shell_tool",
+        "user",
+        "req-stale",
+        "run-stale",
+        0,
+    )
+    .expect("handoff request");
+    parser.register_pending_handoff_origin(&request);
+
+    feed_preexec_with_handoff(&mut parser, "echo somebody-else", "not-the-token");
+    feed_precmd(&mut parser, 0);
+    feed_preexec(&mut parser, "echo handoff-target");
+
+    let started_origins: Vec<_> = parser
+        .events
+        .iter()
+        .filter(|event| event.kind == crate::types::ShellEventKind::CommandStarted)
+        .map(|event| event.command_origin)
+        .collect();
+    assert_eq!(
+        started_origins,
+        vec![
+            Some(crate::types::CommandOrigin::Unknown),
+            Some(crate::types::CommandOrigin::ProviderTool),
+        ]
+    );
+}
+
+// An explicit token is exclusive: a marker reporting the *same text* as the
+// pending request but a wrong token is a replayed or forged claim for that
+// command line and must not fall back to the text match (#2142 review).
+#[test]
+fn mismatched_handoff_token_is_not_rescued_by_identical_command_text() {
+    let mut parser = parser_for_test("token-claim-mismatch-same-text");
+    let request = crate::types::ShellHandoffRequest::new(
+        "echo handoff-target",
+        "$ echo handoff-target",
+        "approved_provider_shell_tool",
+        "user",
+        "req-replay",
+        "run-replay",
+        0,
+    )
+    .expect("handoff request");
+    parser.register_pending_handoff_origin(&request);
+
+    feed_preexec_with_handoff(&mut parser, "echo handoff-target", "not-the-token");
+
+    let event = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandStarted)
+        .expect("command started");
+    assert_eq!(
+        event.command_origin,
+        Some(crate::types::CommandOrigin::Unknown),
+        "identical text must not rescue a wrong-token claim"
+    );
+    assert!(event.audit_identity.is_none(), "no identity adoption");
+
+    // The real handoff line (tokenless legacy shape) still claims afterwards.
+    feed_precmd(&mut parser, 0);
+    feed_preexec(&mut parser, "echo handoff-target");
+    let second = parser
+        .events
+        .iter()
+        .filter(|event| event.kind == ShellEventKind::CommandStarted)
+        .nth(1)
+        .expect("second command started");
+    assert_eq!(
+        second.command_origin,
+        Some(crate::types::CommandOrigin::ProviderTool)
+    );
+}
+
+// #2142 R4: a command-less prompt boundary is where the runtime closes an
+// unclaimed handoff as untracked; the parser must expire the pending claim
+// slot there and raise the staging-expiry flag, so a later user command with
+// the same text can neither adopt the closed handoff's identity nor be
+// misattributed to it.
+#[test]
+fn shell_ready_expires_an_unclaimed_pending_handoff_slot() {
+    let mut parser = parser_for_test("untracked-expiry");
+    let request = crate::types::ShellHandoffRequest::new(
+        "echo handoff-target",
+        "$ echo handoff-target",
+        "approved_provider_shell_tool",
+        "user",
+        "req-untracked",
+        "run-untracked",
+        0,
+    )
+    .expect("handoff request");
+    parser.register_pending_handoff_origin(&request);
+    assert!(!parser.take_expired_handoff_staging(), "fresh staging");
+    parser.register_pending_handoff_origin(&request);
+
+    // Command-less precmd: the preexec marker was lost, the shell is back at
+    // a prompt, and the runtime closes the handoff as untracked here.
+    feed_precmd(&mut parser, 0);
+
+    assert!(
+        parser.take_expired_handoff_staging(),
+        "expiry flag must ask the relay to clear the staged sidecars"
+    );
+    assert!(!parser.take_expired_handoff_staging(), "single shot");
+
+    // The same text typed later by the user is ordinary input: no origin
+    // adoption, no audit identity, no token.
+    feed_preexec(&mut parser, "echo handoff-target");
+    let event = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandStarted)
+        .expect("command started");
+    assert_eq!(
+        event.command_origin,
+        Some(crate::types::CommandOrigin::UserInteractive)
+    );
+    assert!(event.audit_identity.is_none(), "no stale identity adoption");
+}
+
 fn feed_preexec(parser: &mut OscParser, command: &str) {
     let marker = format!(
         "\x1b]1337;COSH;{{\"event\":\"preexec\",\"token\":\"test-marker-token\",\"command\":{command_json},\"cwd\":\"/tmp\"}}\x07",
         command_json = serde_json::to_string(command).expect("command json")
+    );
+    parser.feed(marker.as_bytes()).expect("feed preexec");
+}
+
+fn feed_preexec_with_handoff(parser: &mut OscParser, command: &str, handoff: &str) {
+    let marker = format!(
+        "\x1b]1337;COSH;{{\"event\":\"preexec\",\"token\":\"test-marker-token\",\"command\":{command_json},\"cwd\":\"/tmp\",\"handoff\":{handoff_json}}}\x07",
+        command_json = serde_json::to_string(command).expect("command json"),
+        handoff_json = serde_json::to_string(handoff).expect("handoff json")
     );
     parser.feed(marker.as_bytes()).expect("feed preexec");
 }

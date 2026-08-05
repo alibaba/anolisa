@@ -24,6 +24,21 @@ pub trait ProviderProfile: Send + Sync {
 
     fn adjust_request(&self, _body: &mut Value) {}
 
+    /// Whether this backend supports DashScope-style prompt caching.
+    ///
+    /// When `true` and `explicit_cache` is enabled, the provider injects
+    /// `X-DashScope-CacheControl: enable` and `cache_control` markers into the
+    /// request. Only DashScope supports this; OpenAI has automatic caching and
+    /// other backends have no cache API.
+    ///
+    /// New profiles must override this explicitly — the default is `false` to
+    /// avoid sending DashScope-specific headers to unrelated endpoints. Add the
+    /// new profile to `dashscope_profile_supports_cache_control` so the choice
+    /// is reviewed at test time.
+    fn supports_cache_control(&self) -> bool {
+        false
+    }
+
     fn auth_header_value(&self, api_key: &str) -> String {
         format!("Bearer {api_key}")
     }
@@ -49,6 +64,10 @@ impl ProviderProfile for DashScopeProfile {
     }
 
     fn supports_stream_usage(&self) -> bool {
+        true
+    }
+
+    fn supports_cache_control(&self) -> bool {
         true
     }
 }
@@ -87,7 +106,7 @@ impl ProviderProfile for DeepSeekProfile {
 
 pub fn profile_from_name(name: &str) -> Box<dyn ProviderProfile> {
     match name {
-        "dashscope" => Box::new(DashScopeProfile),
+        "dashscope" | "coding_plan" | "token_plan" => Box::new(DashScopeProfile),
         "openai" => Box::new(OpenAIProfile),
         "deepseek" => Box::new(DeepSeekProfile),
         _ => Box::new(GenericProfile),
@@ -131,6 +150,15 @@ mod tests {
     }
 
     #[test]
+    fn dashscope_profile_supports_cache_control() {
+        assert!(DashScopeProfile.supports_cache_control());
+        assert!(!GenericProfile.supports_cache_control());
+        assert!(!OpenAIProfile.supports_cache_control());
+        assert!(!DeepSeekProfile.supports_cache_control());
+        assert!(!profile_from_name("unknown").supports_cache_control());
+    }
+
+    #[test]
     fn stream_usage_support_is_opt_in() {
         // Generic endpoints must never receive stream_options; the named
         // profiles we integrate against do support usage telemetry.
@@ -144,6 +172,8 @@ mod tests {
     #[test]
     fn profile_from_name_routing() {
         assert_eq!(profile_from_name("dashscope").name(), "dashscope");
+        assert_eq!(profile_from_name("coding_plan").name(), "dashscope");
+        assert_eq!(profile_from_name("token_plan").name(), "dashscope");
         assert_eq!(profile_from_name("openai").name(), "openai");
         assert_eq!(profile_from_name("deepseek").name(), "deepseek");
         assert_eq!(profile_from_name("unknown").name(), "generic");

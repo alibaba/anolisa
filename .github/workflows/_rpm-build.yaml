@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       component:
-        description: "Component to build (copilot-shell, cosh-ng, agent-sec-core, agentsight, os-skills, tokenless, ws-ckpt, agent-memory, skillfs)"
+        description: "Component to build (copilot-shell, cosh-ng, agent-sec-core, agentsight, os-skills, tokenless, ws-ckpt, agent-memory, skillfs, anolisa)"
         required: true
         type: string
       version:
@@ -109,6 +109,12 @@ jobs:
         with:
           toolchain: '1.91.0'
 
+      - name: "Setup Rust toolchain (anolisa)"
+        if: inputs.component == 'anolisa'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.88.0'
+
       - name: "Setup Python + uv (agent-sec-core)"
         if: inputs.component == 'agent-sec-core'
         uses: astral-sh/setup-uv@v8.0.0
@@ -190,19 +196,38 @@ jobs:
 
             (
               cd "$SOURCE_ROOT"
-              make build-all NPM_REGISTRY=https://registry.npmmirror.com
+              make build-frontend NPM_REGISTRY=https://registry.npmmirror.com
+              make build
+              ./scripts/build-enforcer.sh
             )
 
             PACKAGE_DIR=$(mktemp -d)
             mkdir -p "$PACKAGE_DIR/${COMPONENT}-${VERSION}"
             cp -p "$SOURCE_ROOT/target/release/agentsight" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
+            cp -p "$SOURCE_ROOT/target/release/agentsight-enforcer" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
             cp -p "$SOURCE_ROOT/scripts/agentsight-start.sh" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/agentsight-start"
             cp -p "$SOURCE_ROOT/scripts/agentsight.service" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
+            cp -p "$SOURCE_ROOT/scripts/agentsight-enforcer.service" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
             cp -p "$SOURCE_ROOT/component.toml" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
             cp -p "$SOURCE_ROOT/README.md" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
             cp -p "$SOURCE_ROOT/README_zh.md" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
             cp -p "$SOURCE_ROOT/LICENSE" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
             tar -czf ~/rpmbuild/SOURCES/"${EXPECTED_TAR}" -C "$PACKAGE_DIR" "${COMPONENT}-${VERSION}"
+          fi
+
+          # The anolisa spec intentionally unpacks Source0 into `anolisa/`
+          # instead of the versioned directory emitted by package-source.
+          if [ "$COMPONENT" = "anolisa" ]; then
+            SOURCE_ROOT=$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | head -1)
+            if [ -z "$SOURCE_ROOT" ]; then
+              echo "ERROR: anolisa source root not found"
+              exit 1
+            fi
+
+            PACKAGE_DIR=$(mktemp -d)
+            mkdir -p "$PACKAGE_DIR/anolisa"
+            cp -a "$SOURCE_ROOT/." "$PACKAGE_DIR/anolisa/"
+            tar -czf ~/rpmbuild/SOURCES/"${EXPECTED_TAR}" -C "$PACKAGE_DIR" anolisa
           fi
 
           # Find and process spec template

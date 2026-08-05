@@ -41,7 +41,9 @@ function registerHandlers(pluginConfig: Record<string, any> = {}) {
   return { beforeToolCall, hooks, logs };
 }
 
-function policyConfig(policy: "ask" | "debug" | "warn" | "block"): Record<string, any> {
+function policyConfig(
+  policy: "observe" | "ask" | "debug" | "warn" | "block",
+): Record<string, any> {
   return {
     capabilities: {
       "skill-ledger": { policy },
@@ -140,12 +142,16 @@ function readSkillEvent(path = "/skills/risky/SKILL.md", runId = "run-1") {
 
 describe("skill-ledger", () => {
   beforeEach(() => {
+    delete process.env.SKILL_LEDGER_HOOK_ENABLED;
+    delete process.env.SKILL_LEDGER_MODE;
     checkCallCount = 0;
     lastCheckArgs = undefined;
     lastInitArgs = undefined;
   });
 
   afterEach(() => {
+    delete process.env.SKILL_LEDGER_HOOK_ENABLED;
+    delete process.env.SKILL_LEDGER_MODE;
     _resetCliMock();
   });
 
@@ -159,6 +165,26 @@ describe("skill-ledger", () => {
     );
     assert.equal(hooks[0].priority, 80);
     assert.deepEqual(skillLedger.hooks, ["before_tool_call"]);
+  });
+
+  it("does not initialize keys or register hooks when disabled", async () => {
+    process.env.SKILL_LEDGER_HOOK_ENABLED = "false";
+    mockSkillLedgerStatus("pass");
+    const pluginConfig = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("plugin config should not be read when disabled");
+        },
+      },
+    );
+    const { api, hooks } = createMockApi(pluginConfig);
+
+    skillLedger.register(api);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+
+    assert.deepEqual(hooks, []);
+    assert.equal(lastInitArgs, undefined);
   });
 
   it("logs key init failures without blocking registration", async () => {
@@ -496,6 +522,43 @@ describe("skill-ledger", () => {
         log.includes("[WARN] [skill-ledger] invalid policy=\"blcok\"; using ask"),
       ),
     );
+  });
+
+  it("lets the environment policy override capability configuration", async () => {
+    process.env.SKILL_LEDGER_MODE = "observe";
+    mockSkillLedgerStatus("deny", 1);
+    const { beforeToolCall, logs } = registerHandlers(policyConfig("block"));
+
+    const result = await beforeToolCall.handler(readSkillEvent("/skills/deny/SKILL.md"), {});
+
+    assert.equal(result, undefined);
+    assert.ok(logs.some((log) => log.includes("[DEBUG] [skill-ledger]")));
+  });
+
+  it("invalid environment mode falls back to default ask policy", async () => {
+    process.env.SKILL_LEDGER_MODE = "blcok";
+    mockSkillLedgerStatus("deny", 1);
+    const { beforeToolCall, logs } = registerHandlers(policyConfig("observe"));
+
+    const result = await beforeToolCall.handler(readSkillEvent("/skills/deny/SKILL.md"), {});
+
+    assert.ok(result?.requireApproval);
+    assert.ok(
+      logs.some((log) =>
+        log.includes("[WARN] [skill-ledger] invalid SKILL_LEDGER_MODE; using ask"),
+      ),
+    );
+  });
+
+  it("maps deny in the environment mode to block", async () => {
+    process.env.SKILL_LEDGER_MODE = "deny";
+    mockSkillLedgerStatus("deny", 1);
+    const { beforeToolCall } = registerHandlers(policyConfig("observe"));
+
+    const result = await beforeToolCall.handler(readSkillEvent("/skills/deny/SKILL.md"), {});
+
+    assert.equal(result?.block, true);
+    assert.match(result?.blockReason, /summary message for deny/);
   });
 
   it("block policy hard-blocks with the summary message", async () => {

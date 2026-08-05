@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::adapter::{SessionErrorInfo, SessionSummary};
@@ -181,6 +182,51 @@ fn session_notice_height(body: &[String], footer: Option<&str>) -> usize {
         lines.extend(renderer.markdown_text_lines(footer));
     }
     lines.len().max(1) + 2
+}
+
+/// Renders `/session list --all` output grouped by workspace_scope.
+///
+/// Workspaces are sorted alphabetically; sessions within each workspace are
+/// sorted newest-first, consistent with the default `/session list` order.
+/// The group for `current_workspace` is labelled with ` (current)` so users can
+/// locate resumable sessions without scanning individual health indicators.
+pub(super) fn session_all_workspaces_list_lines(
+    summaries: &[SessionSummary],
+    current_workspace: &str,
+) -> Vec<String> {
+    if summaries.is_empty() {
+        return Vec::new();
+    }
+
+    let mut groups: BTreeMap<&str, Vec<&SessionSummary>> = BTreeMap::new();
+    for summary in summaries {
+        groups
+            .entry(summary.workspace_scope.as_str())
+            .or_default()
+            .push(summary);
+    }
+
+    let mut lines = Vec::new();
+    for (workspace, group) in &groups {
+        if workspace == &current_workspace {
+            lines.push(format!("{workspace} (current)"));
+        } else {
+            lines.push(workspace.to_string());
+        }
+        let mut group = group.clone();
+        group.sort_by(|left, right| {
+            right
+                .updated_at_ms
+                .cmp(&left.updated_at_ms)
+                .then_with(|| left.session_id.as_str().cmp(right.session_id.as_str()))
+        });
+        for summary in group {
+            for line in session_list_lines(summary) {
+                lines.push(format!("  {line}"));
+            }
+        }
+    }
+    lines
 }
 
 /// Renders one `/session list` entry: the full canonical session ID leads so

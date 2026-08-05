@@ -78,8 +78,9 @@ cosh-shell --resume <session-id> # Select a known provider session
 ```
 
 Inside cosh-shell, use `/session` to browse sessions, `/session list` to copy
-complete session IDs, and `/session status` to inspect selected and active
-identities. `/session new` (or `/new`) detaches the current provider
+complete session IDs, `/session list --all` to list sessions across every
+workspace under the same storage root, and `/session status` to inspect selected
+and active identities. `/session new` (or `/new`) detaches the current provider
 conversation so the next Agent request starts fresh without restarting the
 shell; `/session clear ...` removes old entries after confirmation.
 `/session compact` summarizes any complete conversation prefix in the
@@ -99,6 +100,24 @@ session is persisted, the interactive shell offers another approved budget in
 the same provider conversation. Override the budget with `agent.max_turns` or
 `COSH_MAX_TURNS`; see the
 [configuration guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md#agent-turn-budget).
+
+The `/auth` picker includes Coding Plan and Token Plan. Their built-in
+endpoints default to the China service site; set
+`COSH_SERVICE_SITE=international` for the international endpoint catalog.
+See the
+[configuration guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md#environment-variable-overrides)
+for accepted aliases and fallback behavior.
+
+When calling LLMs, different inference requests may share overlapping input
+(e.g., multi-turn conversations). Context caching stores these common
+prefixes to reduce redundant computation, improving response speed and
+lowering cost. DashScope offers two modes: explicit caching (opt-in,
+deterministic 5-min TTL hits, higher creation cost but lower hit cost) and
+implicit caching (default automatic mode, non-deterministic hit rate,
+slightly higher hit cost). Set `explicit_cache = true` under
+`[ai.providers.dashscope]` to switch to explicit caching. See the
+[configuration guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/configuration.md#cosh-core-configuration)
+for billing details.
 
 Core and Shell also write a redacted, versioned audit timeline under
 `$XDG_STATE_HOME/cosh/audit` or `~/.local/state/cosh/audit`. The existing

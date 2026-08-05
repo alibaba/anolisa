@@ -94,7 +94,7 @@ tokenless stats diff 42 --json
 Session 总览只包含指标；单记录和 tool-use 报告包含 unified content
 diff。只有相邻 active 阶段的输出与输入内容完全一致时才会串成一条链，
 从而避免重复计算中间阶段的 Token。完整选项和度量限制见
-[用户手册](../../docs/user-guide/zh/token-saving/tokenless/user-manual.md#统计与效果度量)。
+[Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md)。
 
 ## 数据库位置
 

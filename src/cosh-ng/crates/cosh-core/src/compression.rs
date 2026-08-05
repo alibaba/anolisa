@@ -1,6 +1,8 @@
 use crate::provider::Message;
+use crate::truncator::truncate_to_byte_limit;
 
-const CHARS_PER_TOKEN: usize = 4;
+const BYTES_PER_TOKEN: usize = 4;
+const SUMMARY_MESSAGE_BYTES: usize = 200;
 
 pub struct ChatCompression {
     context_limit: u64,
@@ -16,11 +18,11 @@ impl ChatCompression {
     }
 
     pub fn estimate_tokens(messages: &[Message]) -> u64 {
-        let total_chars: usize = messages
+        let total_bytes: usize = messages
             .iter()
             .map(|m| m.content.as_text().len() + m.role.len() + 4)
             .sum();
-        (total_chars / CHARS_PER_TOKEN) as u64
+        (total_bytes / BYTES_PER_TOKEN) as u64
     }
 
     pub fn needs_compression(&self, messages: &[Message]) -> bool {
@@ -59,8 +61,11 @@ impl ChatCompression {
             if text.is_empty() {
                 continue;
             }
-            let truncated = if text.len() > 200 {
-                format!("{}...", &text[..200])
+            let truncated = if text.len() > SUMMARY_MESSAGE_BYTES {
+                format!(
+                    "{}...",
+                    truncate_to_byte_limit(&text, SUMMARY_MESSAGE_BYTES)
+                )
             } else {
                 text.to_string()
             };
@@ -133,5 +138,33 @@ mod tests {
         let summary = ChatCompression::build_summary(&messages);
         assert!(summary.contains("[user]"));
         assert!(summary.contains("[assistant]"));
+    }
+
+    fn assert_summary_truncation(input: &str, expected: &str) {
+        let summary = ChatCompression::build_summary(&[Message::user(input)]);
+        assert_eq!(summary, format!("[user] {expected}..."));
+    }
+
+    #[test]
+    fn summary_preserves_ascii_truncation_behavior() {
+        assert_summary_truncation(&"a".repeat(201), &"a".repeat(200));
+    }
+
+    #[test]
+    fn summary_truncates_multibyte_text_at_exact_utf8_boundaries() {
+        assert_summary_truncation(
+            &format!("{}中z", "a".repeat(197)),
+            &format!("{}中", "a".repeat(197)),
+        );
+        assert_summary_truncation(
+            &format!("{}😀z", "a".repeat(196)),
+            &format!("{}😀", "a".repeat(196)),
+        );
+    }
+
+    #[test]
+    fn summary_rounds_multibyte_limits_down_to_utf8_boundaries() {
+        assert_summary_truncation(&format!("{}中", "a".repeat(199)), &"a".repeat(199));
+        assert_summary_truncation(&format!("{}😀", "a".repeat(198)), &"a".repeat(198));
     }
 }

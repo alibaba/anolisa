@@ -415,12 +415,16 @@ fn question_panel_multiple_empty_feedback_replaces_heading() {
 #[test]
 fn question_panel_write_preserves_ratatui_styles_for_terminal_output() {
     let renderer = RatatuiInlineRenderer {
-        width: 100,
+        width: 60,
         plain: false,
         styled: true,
         language: crate::Language::EnUs,
     };
-    let options = vec!["Approve".to_string(), "Deny".to_string()];
+    let options = vec![
+        "Approve\n    For teams and companies • Usage-based billing with dedicated capacity"
+            .to_string(),
+        "Deny\nsecond line".to_string(),
+    ];
     let mut output = Vec::new();
 
     renderer
@@ -446,6 +450,13 @@ fn question_panel_write_preserves_ratatui_styles_for_terminal_output() {
     assert!(clean.contains("Agent question"), "{clean}");
     assert!(!clean.contains("Agent question q-1"), "{clean}");
     assert!(clean.contains("[2]"), "{clean}");
+
+    let gray_detail_rows = text
+        .lines()
+        .filter(|line| line.contains("\u{1b}[0;90m      "))
+        .count();
+    assert_eq!(gray_detail_rows, 2, "{text:?}");
+    assert!(!text.contains("\u{1b}[0;90m      second line"), "{text:?}");
 }
 
 #[test]

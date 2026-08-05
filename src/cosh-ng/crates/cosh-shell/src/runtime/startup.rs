@@ -44,12 +44,13 @@ const LOGO_COLORS: &[&str] = &[
 const RESET: &str = "\x1b[0m";
 const LOGO_MIN_WIDTH: u16 = 42;
 const STARTUP_HEALTH_ROW_WAIT: Duration = Duration::from_millis(150);
+const STARTUP_AUTH_HINT_WAIT: Duration = Duration::from_millis(150);
 
 mod recommendations;
 #[cfg(test)]
 use recommendations::{
-    plan_startup_for_render, record_visible_personal_impressions, visible_personal_candidates,
-    write_startup_suggestion_card,
+    append_startup_auth_hint, plan_startup_for_render, record_visible_personal_impressions,
+    visible_personal_candidates, write_startup_suggestion_card,
 };
 pub(crate) use recommendations::{
     render_pending_recommendation_notice, render_startup_banner, render_startup_health_banner,
@@ -105,7 +106,7 @@ fn health_report_supports_interactive_suggestions(report: &HealthScanReport) -> 
         })
 }
 
-fn startup_banner_enabled() -> bool {
+pub(crate) fn startup_banner_enabled() -> bool {
     match std::env::var("COSH_SHELL_STARTUP_BANNER") {
         Ok(value) => matches!(
             value.trim().to_ascii_lowercase().as_str(),

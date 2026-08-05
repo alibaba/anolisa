@@ -36,10 +36,12 @@ import subprocess
 import sys
 from typing import Any
 
+from hook_config import env_flag_enabled
 from trace_context import with_trace_context
 
 # -- config ----------------------------------------------------------------
 
+_HOOK_ENABLED = env_flag_enabled("PROMPT_SCANNER_HOOK_ENABLED", True)
 _MODE = os.environ.get("PROMPT_SCANNER_MODE", "observe").strip().lower()
 _VALID_MODES = {"observe", "deny"}
 try:
@@ -111,6 +113,10 @@ def _invalid_mode_output() -> str:
 
 
 def main() -> None:
+    if not _HOOK_ENABLED:
+        print(_noop())
+        return
+
     # 1. Read stdin JSON (fail-open)
     try:
         input_data = json.load(sys.stdin)

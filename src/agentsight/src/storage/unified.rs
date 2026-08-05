@@ -159,7 +159,6 @@ impl Storage {
         let http_store = HttpStore::with_table(&db_path, &config.http_table)?;
         let token_consumption_store =
             TokenConsumptionStore::with_table(&db_path, &config.token_consumption_table)?;
-
         Ok(Storage {
             backend: StorageBackend::Sqlite,
             audit_store,
@@ -192,7 +191,6 @@ impl Storage {
         let token_consumption_store =
             TokenConsumptionStore::with_table(&db_path, "token_consumption")
                 .expect("in-memory token_consumption store should always succeed");
-
         Storage {
             backend: StorageBackend::Noop,
             audit_store,

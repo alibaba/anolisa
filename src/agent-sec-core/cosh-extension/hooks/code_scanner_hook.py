@@ -15,11 +15,12 @@ This script is intentionally self-contained — it does NOT import any
 """
 
 import json
+import os
 import subprocess
 import sys
 
 # -- extract config (mirrors cosh/extractors.py TOOL_EXTRACTORS) ----------
-from hook_config import env_flag_enabled
+from hook_config import env_flag_enabled, normalize_hook_policy
 from trace_context import with_trace_context
 
 # cosh tool_name -> field in tool_input that carries the command
@@ -29,6 +30,22 @@ _TOOL_FIELD = {
 }
 _HOOK_ENABLED = env_flag_enabled("CODE_SCANNER_HOOK_ENABLED", True)
 _DEFAULT_LANGUAGE = "bash"
+
+
+def _diagnostic(message: str) -> None:
+    """Write debug-only hook details to stderr."""
+    print(f"[code-scanner] {message}", file=sys.stderr)
+
+
+def _read_mode() -> str:
+    raw = os.environ.get("CODE_SCANNER_MODE")
+    mode = normalize_hook_policy(raw, "")
+    if raw is not None and mode != "ask":
+        _diagnostic(f"invalid or unsupported CODE_SCANNER_MODE={raw[:32]!r}; using ask")
+    return "ask"
+
+
+_MODE = _read_mode()
 
 
 # -- helpers ---------------------------------------------------------------
@@ -50,9 +67,7 @@ def _format_cosh(scan_result: dict) -> str:
     descs = [f"- {f['desc_zh']}" for f in findings]
     msg = f"[code-scanner] Detected {len(findings)} issue(s):\n" + "\n".join(descs)
 
-    if verdict == "warn":
-        return json.dumps({"decision": "ask", "systemMessage": msg}, ensure_ascii=False)
-    if verdict == "deny":
+    if verdict in {"warn", "deny"} and _MODE == "ask":
         return json.dumps({"decision": "ask", "systemMessage": msg}, ensure_ascii=False)
     # error or unknown -> fail-open
     return json.dumps({"decision": "allow"})

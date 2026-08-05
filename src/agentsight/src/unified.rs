@@ -30,7 +30,7 @@ use crate::analyzer::Analyzer;
 use crate::config::AgentsightConfig;
 use crate::discovery::AgentScanner;
 use crate::event::Event;
-use crate::ffi::{FfiEvent, FfiEventSender};
+use crate::ffi::FfiEventSender;
 use crate::genai::semantic::GenAISemanticEvent;
 use crate::genai::{GenAIBuilder, GenAIExporter, LogtailExporter};
 use crate::interruption::{
@@ -846,7 +846,7 @@ impl AgentSight {
                             if let Some(ref sender) = self.ffi_sender {
                                 for event in &output.events {
                                     if let GenAISemanticEvent::LLMCall(call) = event {
-                                        sender.send(FfiEvent::Llm(call.clone()));
+                                        sender.send_llm(call);
                                     }
                                 }
                             }
@@ -867,7 +867,24 @@ impl AgentSight {
                 // raw HTTPS before cloning or enqueueing when it is disabled.
                 for ar in &analysis_results {
                     if let crate::analyzer::AnalysisResult::Http(record) = ar {
-                        sender.send_https(record);
+                        // Resolved here rather than in the FFI layer because the cache
+                        // lives on `self` and outlives the process, so an exited agent
+                        // still resolves. Same ladder as the LLM path in
+                        // `GenAICallBuilder::build` so both report the same value.
+                        //
+                        // Passed as a closure so `send_https` can skip it entirely when
+                        // raw HTTPS is disabled — the default — instead of paying two
+                        // `/proc` reads per non-LLM exchange for a value it drops.
+                        sender.send_https(record, || {
+                            Some(
+                                GenAIBuilder::resolve_agent_name(
+                                    &record.comm,
+                                    record.pid,
+                                    &self.pid_agent_name_cache,
+                                )
+                                .unwrap_or_else(|| record.comm.clone()),
+                            )
+                        });
                     }
                 }
             }
@@ -1022,7 +1039,7 @@ impl AgentSight {
             // FFI mode: deliver LLMCall events via callback channel only.
             for event in events {
                 if let GenAISemanticEvent::LLMCall(call) = event {
-                    sender.send(FfiEvent::Llm(call.clone()));
+                    sender.send_llm(call);
                 }
             }
         } else {
@@ -2046,7 +2063,7 @@ fn complete_deferred_genai(
         if let Some(sender) = ffi_sender {
             for event in events {
                 if let GenAISemanticEvent::LLMCall(call) = event {
-                    sender.send(FfiEvent::Llm(call.clone()));
+                    sender.send_llm(call);
                 }
             }
         } else {
@@ -2061,7 +2078,7 @@ fn complete_deferred_genai(
         if let Some(sender) = ffi_sender {
             for event in events {
                 if let GenAISemanticEvent::LLMCall(call) = event {
-                    sender.send(FfiEvent::Llm(call.clone()));
+                    sender.send_llm(call);
                 }
             }
         } else {

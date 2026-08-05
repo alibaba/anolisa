@@ -196,6 +196,7 @@ mod tests {
             shell_session_id: "raw-test".to_string(),
             command_block_id: "cmd-1".to_string(),
             command: "df -h".to_string(),
+            provider_command: "df -h".to_string(),
             cwd: "/tmp".to_string(),
             end_cwd: "/tmp".to_string(),
             status: "completed",

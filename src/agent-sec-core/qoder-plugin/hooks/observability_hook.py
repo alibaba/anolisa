@@ -14,9 +14,10 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from qoder_hook_common import trace_context
+from qoder_hook_common import env_flag_enabled, trace_context
 
 _CLI_TIMEOUT_SECONDS = 3
+_HOOK_ENABLED = env_flag_enabled("OBSERVABILITY_HOOK_ENABLED", True)
 _MAX_PAYLOAD_SIZE = 1024 * 1024
 # Qoder does not expose a stable run identifier across its hook events. Match
 # the Hermes/Qwen adapters and use a schema-compatible zero GUID rather than
@@ -520,6 +521,9 @@ def _record_observability(record: dict[str, Any], context: dict[str, str]) -> No
 
 def main() -> None:
     """Read one Qoder hook event and record it without affecting execution."""
+    if not _HOOK_ENABLED:
+        return
+
     input_data: Any = None
     try:
         try:

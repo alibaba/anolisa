@@ -17,6 +17,8 @@ fn turn_consent_model(next_label: Option<&str>) -> ApprovalPanelModel<'_> {
         expanded: false,
         turn_consent: true,
         turn_extension: false,
+        deny_always_trust: false,
+        irrecoverable: false,
         hook_warnings: Vec::new(),
     }
 }
@@ -126,6 +128,8 @@ fn approval_panel_renders_active_request_with_queue_summary() {
             expanded: false,
             turn_consent: false,
             turn_extension: false,
+            deny_always_trust: false,
+            irrecoverable: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -177,6 +181,8 @@ fn approval_panel_high_risk_shows_reason_continuation_line() {
             expanded: false,
             turn_consent: false,
             turn_extension: false,
+            deny_always_trust: false,
+            irrecoverable: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -232,6 +238,8 @@ fn approval_panel_high_risk_continuation_wraps_within_narrow_width() {
                 expanded: false,
                 turn_consent: false,
                 turn_extension: false,
+                deny_always_trust: false,
+                irrecoverable: false,
                 hook_warnings: Vec::new(),
             })
             .join("\n");
@@ -263,6 +271,8 @@ fn approval_panel_long_subject_never_hides_risk_badge() {
             expanded: false,
             turn_consent: false,
             turn_extension: false,
+            deny_always_trust: false,
+            irrecoverable: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -295,6 +305,8 @@ fn approval_panel_unknown_risk_value_falls_back_to_localized_label() {
             expanded: false,
             turn_consent: false,
             turn_extension: false,
+            deny_always_trust: false,
+            irrecoverable: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -323,6 +335,8 @@ fn approval_panel_uses_zh_labels_without_translating_command() {
             expanded: true,
             turn_consent: false,
             turn_extension: false,
+            deny_always_trust: false,
+            irrecoverable: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -363,6 +377,8 @@ fn approval_panel_keeps_focus_visible_and_caps_long_preview() {
             expanded: false,
             turn_consent: false,
             turn_extension: false,
+            deny_always_trust: false,
+            irrecoverable: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -393,6 +409,8 @@ fn approval_panel_keeps_cjk_and_emoji_borders_aligned() {
             expanded: true,
             turn_consent: false,
             turn_extension: false,
+            deny_always_trust: false,
+            irrecoverable: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -424,6 +442,8 @@ fn approval_panel_renders_shell_command_request_as_compact_command() {
             expanded: false,
             turn_consent: false,
             turn_extension: false,
+            deny_always_trust: false,
+            irrecoverable: false,
             hook_warnings: Vec::new(),
         })
         .join("\n");
@@ -470,6 +490,8 @@ fn approval_panel_write_preserves_ratatui_styles_for_terminal_output() {
                 expanded: false,
                 turn_consent: false,
                 turn_extension: false,
+                deny_always_trust: false,
+                irrecoverable: false,
                 hook_warnings: Vec::new(),
             },
         )
@@ -508,6 +530,8 @@ fn approval_panel_styles_selected_actions_by_decision_kind() {
             expanded: false,
             turn_consent: false,
             turn_extension: false,
+            deny_always_trust: false,
+            irrecoverable: false,
             hook_warnings: Vec::new(),
         },
     )
@@ -538,6 +562,8 @@ fn approval_panel_styles_selected_actions_by_decision_kind() {
             expanded: false,
             turn_consent: false,
             turn_extension: false,
+            deny_always_trust: false,
+            irrecoverable: false,
             hook_warnings: Vec::new(),
         },
     )
@@ -570,6 +596,8 @@ fn plain_approval_panel_keeps_queue_before_actions() {
         expanded: false,
         turn_consent: false,
         turn_extension: false,
+        deny_always_trust: false,
+        irrecoverable: false,
         hook_warnings: Vec::new(),
     });
     let text = lines.join("\n");
@@ -1554,4 +1582,107 @@ fn plain_approval_journal_panel_keeps_decision_history() {
     assert!(text.contains("Execution: not_executed_cancelled"), "{text}");
     assert!(text.contains("Command: git status"), "{text}");
     assert!(!text.contains('┌'), "{text}");
+}
+
+/// Irrecoverable command card (#2064): warning line renders between the
+/// risk metadata and the command, and the high-risk action set never
+/// offers AlwaysTrust.
+#[test]
+fn approval_panel_irrecoverable_command_warns_and_hides_always_trust() {
+    let renderer = RatatuiInlineRenderer::with_width(120);
+    let text = renderer
+        .approval_panel_lines(ApprovalPanelModel {
+            id: "req-1",
+            kind: "tool request",
+            risk: "high",
+            reason: Some("system reboot/halt"),
+            subject: "tool Bash",
+            preview_label: "Command",
+            preview: "reboot",
+            queue_position: 1,
+            queue_total: 1,
+            next_label: None,
+            selected_action: ApprovalPanelAction::Approve,
+            expanded: false,
+            turn_consent: false,
+            turn_extension: false,
+            deny_always_trust: true,
+            irrecoverable: true,
+            hook_warnings: Vec::new(),
+        })
+        .join("\n");
+
+    assert!(text.contains("irrecoverable"), "{text}");
+    assert!(text.contains("SSH sessions drop"), "{text}");
+    assert!(!text.contains("Always trust"), "{text}");
+    assert!(text.contains("Allow once"), "{text}");
+    assert!(text.contains("Deny"), "{text}");
+}
+
+/// Medium-risk cards keep today's shape: no warning line, AlwaysTrust
+/// stays offered.
+#[test]
+fn approval_panel_medium_risk_card_keeps_always_trust_and_no_warning() {
+    let renderer = RatatuiInlineRenderer::with_width(120);
+    let text = renderer
+        .approval_panel_lines(ApprovalPanelModel {
+            id: "req-1",
+            kind: "tool request",
+            risk: "medium",
+            reason: None,
+            subject: "tool Bash",
+            preview_label: "Command",
+            preview: "npm test",
+            queue_position: 1,
+            queue_total: 1,
+            next_label: None,
+            selected_action: ApprovalPanelAction::Approve,
+            expanded: false,
+            turn_consent: false,
+            turn_extension: false,
+            deny_always_trust: false,
+            irrecoverable: false,
+            hook_warnings: Vec::new(),
+        })
+        .join("\n");
+
+    assert!(!text.contains("irrecoverable"), "{text}");
+    assert!(text.contains("Always trust"), "{text}");
+}
+
+/// The generic (non-command-heading) card shape — what a provider
+/// control-permission request with subject "Bash" actually renders as at
+/// runtime — must carry the same irrecoverable warning and high-risk
+/// action set (#2064 acceptance regression: the warning was initially
+/// wired only into the command-heading panel).
+#[test]
+fn approval_panel_generic_card_irrecoverable_warning_and_no_trust() {
+    let renderer = RatatuiInlineRenderer::with_width(120);
+    let text = renderer
+        .approval_panel_lines(ApprovalPanelModel {
+            id: "req-1",
+            kind: "tool request",
+            risk: "high",
+            reason: Some("system reboot/halt"),
+            subject: "Bash",
+            preview_label: "Command",
+            preview: "$ reboot",
+            queue_position: 1,
+            queue_total: 1,
+            next_label: None,
+            selected_action: ApprovalPanelAction::Approve,
+            expanded: false,
+            turn_consent: false,
+            turn_extension: false,
+            deny_always_trust: true,
+            irrecoverable: true,
+            hook_warnings: Vec::new(),
+        })
+        .join("\n");
+
+    assert!(text.contains("high risk"), "{text}");
+    assert!(text.contains("irrecoverable"), "{text}");
+    assert!(text.contains("SSH sessions drop"), "{text}");
+    assert!(!text.contains("Always trust"), "{text}");
+    assert!(text.contains("Allow once"), "{text}");
 }

@@ -4,6 +4,7 @@ use super::super::tests::*;
 
 use anolisa_core::ComponentManifest;
 use anolisa_core::domain::{Installation, LifecycleStatus, OwnedArtifact, ProviderBinding};
+use anolisa_core::download::DownloadError;
 use anolisa_core::state::{
     InstallMode as StateInstallMode, InstalledObject, ObjectKind, ObjectStatus,
 };
@@ -14,6 +15,32 @@ use crate::commands::common;
 use crate::context::InstallMode;
 use crate::test_support::{TestContextOptions, TestSandbox};
 use tempfile::tempdir;
+
+const JSON_REASON_ENV: &str = "ANOLISA_TEST_MISSING_INDEX_REASON";
+const JSON_BEGIN: &str = "ANOLISA_TEST_JSON_BEGIN";
+const JSON_END: &str = "ANOLISA_TEST_JSON_END";
+
+#[test]
+#[ignore = "invoked as an isolated child by the missing-index regression"]
+fn render_missing_index_error_json_child() {
+    let reason = std::env::var(JSON_REASON_ENV)
+        .expect("missing-index JSON child must be invoked by its parent regression test");
+    let tmp = tempdir().expect("tmpdir");
+    let err = crate::response::CliError::Runtime {
+        command: "install agentsight".to_string(),
+        reason,
+    };
+
+    crate::output::flush_stdout();
+    crate::output::write_stdout(format_args!("{JSON_BEGIN}"), true);
+    crate::output::flush_stdout();
+    let exit_code =
+        crate::response::render_error(&ctx_with_prefix(true, Some(tmp.path().join("sys"))), &err);
+    crate::output::flush_stdout();
+    crate::output::write_stdout(format_args!("{JSON_END}"), true);
+    crate::output::flush_stdout();
+    assert_eq!(exit_code, std::process::ExitCode::from(1));
+}
 
 /// v5 store as the pipeline persisted it for a system-prefix layout.
 fn load_v5_store(layout: &FsLayout) -> StateStore {
@@ -106,6 +133,122 @@ fn install_dry_run_does_not_download_the_artifact() {
         cached_names.iter().any(|name| name.ends_with("meta.toml")),
         "dry-run must fetch the lightweight contract; cache entries: {cached_names:?}"
     );
+}
+
+#[test]
+fn install_reports_missing_local_repository_index() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_root = tmp.path().join("repo");
+    let repo_url = write_local_repo(&repo_root);
+    let index_path = repo_root.join("v1/index.toml");
+    std::fs::remove_dir_all(&repo_root).expect("remove repository directory");
+
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    let err = handle_with_fake_rpm(a, &ctx_with_prefix(false, Some(prefix.clone())))
+        .expect_err("missing repository index must fail");
+    let reason = err.reason();
+
+    assert_eq!(err.code(), "EXECUTION_FAILED");
+    assert_eq!(err.exit_code(), 1);
+    assert_eq!(err.command(), "install agentsight");
+    assert!(
+        reason.contains(&index_path.display().to_string()),
+        "missing-index diagnostic must identify {index_path:?}; got: {reason}"
+    );
+    assert!(
+        reason.contains("repo.toml"),
+        "missing-index diagnostic must name repo.toml; got: {reason}"
+    );
+    assert!(
+        reason.contains("--repo <URL>"),
+        "missing-index diagnostic must name the one-off override; got: {reason}"
+    );
+    assert!(
+        !reason.contains("failed to fetch distribution index"),
+        "missing-index diagnostic must not retain the generic wrapper; got: {reason}"
+    );
+
+    // Run this test executable as an isolated child so the production renderer's
+    // stdout can be asserted without replacing process-global output in-process.
+    let child_module = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_, module)| module);
+    let child_test = format!("{child_module}::render_missing_index_error_json_child");
+    let output = std::process::Command::new(std::env::current_exe().expect("current test binary"))
+        .args([child_test.as_str(), "--exact", "--ignored", "--nocapture"])
+        .env(JSON_REASON_ENV, &reason)
+        .output()
+        .expect("run isolated JSON renderer child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "JSON renderer child failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let (_, after_begin) = stdout
+        .split_once(JSON_BEGIN)
+        .expect("child stdout must contain the JSON start marker");
+    let (json, _) = after_begin
+        .split_once(JSON_END)
+        .expect("child stdout must contain the JSON end marker");
+    let parsed: serde_json::Value =
+        serde_json::from_str(json.trim()).expect("rendered error must be valid JSON");
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["schema_version"], crate::response::SCHEMA_VERSION);
+    assert_eq!(parsed["command"], "install agentsight");
+    assert_eq!(parsed["error"]["code"], "EXECUTION_FAILED");
+    assert_eq!(parsed["error"]["reason"], reason);
+    let error = parsed["error"]
+        .as_object()
+        .expect("rendered error payload must be an object");
+    assert!(!error.contains_key("hint"));
+}
+
+#[test]
+fn install_preserves_non_not_found_index_fetch_error() {
+    let tmp = tempdir().expect("tmpdir");
+    let index_path = tmp.path().join("repo/v1/index.toml");
+    let index_url = format!("file://{}", index_path.display());
+    let download_error = DownloadError::Io {
+        path: index_path,
+        source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "index access denied"),
+    };
+    let rendered_download_error = download_error.to_string();
+    let err = super::super::raw::index_fetch_error(&index_url, download_error);
+
+    assert_eq!(
+        err.reason(),
+        format!("failed to fetch distribution index {index_url}: {rendered_download_error}"),
+        "non-NotFound I/O errors must retain the generic diagnostic"
+    );
+    assert_eq!(err.code(), "EXECUTION_FAILED");
+    assert_eq!(err.exit_code(), 1);
+    assert!(!err.reason().contains("repo.toml"));
+    assert!(!err.reason().contains("--repo <URL>"));
+}
+
+#[test]
+fn install_preserves_not_found_away_from_index_path() {
+    let tmp = tempdir().expect("tmpdir");
+    let index_path = tmp.path().join("repo/v1/index.toml");
+    let other_path = tmp.path().join("cache/downloads");
+    let index_url = format!("file://{}", index_path.display());
+    let download_error = DownloadError::Io {
+        path: other_path,
+        source: std::io::Error::new(std::io::ErrorKind::NotFound, "cache path missing"),
+    };
+    let rendered_download_error = download_error.to_string();
+    let err = super::super::raw::index_fetch_error(&index_url, download_error);
+
+    assert_eq!(
+        err.reason(),
+        format!("failed to fetch distribution index {index_url}: {rendered_download_error}"),
+        "NotFound away from the index path must retain the generic diagnostic"
+    );
+    assert!(!err.reason().contains("repo.toml"));
+    assert!(!err.reason().contains("--repo <URL>"));
 }
 
 #[test]
@@ -338,6 +481,198 @@ fn system_raw_install_rechecks_native_absence_under_lock() {
     assert!(
         !layout.bin_dir.join("agentsight").exists(),
         "a refused race must not place owned files"
+    );
+    assert!(
+        load_v5_store(&layout)
+            .find(ObjectKind::Component, "agentsight")
+            .is_none(),
+        "a refused race must not claim an owned record"
+    );
+}
+
+#[test]
+fn deb_host_raw_install_rechecks_native_absence_under_lock() {
+    // The deb-family relaxation covers a missing rpm binary only. With
+    // working tooling on a deb-family host the planning probe resolves a
+    // native package, so an RPM appearing between planning and placement
+    // must still trip the locked recheck — the family never mutes obtained
+    // presence evidence.
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo(&tmp.path().join("repo"));
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix));
+    let fake = FakeInstaller::new(
+        "agentsight",
+        pkg_info("agentsight", "0.2.0", Some("1.al8"), "x86_64"),
+    )
+    .package_appears_under_lock(layout.lock_file.clone());
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+
+    let err = install_component_with_deps_and_env(
+        "agentsight",
+        &a,
+        &ctx,
+        &deb_host_env(),
+        &RpmdbProbe::absent(),
+        &fake,
+        &NoTxn,
+        true,
+    )
+    .expect_err("an external RPM appearing before raw placement must block install");
+
+    assert!(err.reason().contains("appeared"), "got: {}", err.reason());
+    assert!(
+        load_v5_store(&layout)
+            .find(ObjectKind::Component, "agentsight")
+            .is_none(),
+        "a refused race must not claim an owned record"
+    );
+}
+
+#[test]
+fn deb_host_tooling_appearing_under_lock_still_refuses() {
+    // The race the planning degrade must not hide: rpm tooling is missing
+    // while the deb-family plan resolves (CommandMissing degrades to
+    // NotProbed), then tooling plus an external same-named RPM appear
+    // before raw placement. The probe identity survives planning, so the
+    // locked recheck re-probes, obtains presence evidence, and refuses.
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo(&tmp.path().join("repo"));
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix));
+    let fake = FakeInstaller::new(
+        "agentsight",
+        pkg_info("agentsight", "0.2.0", Some("1.al8"), "x86_64"),
+    )
+    .tooling_appears_under_lock(layout.lock_file.clone());
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+
+    let err = install_component_with_deps_and_env(
+        "agentsight",
+        &a,
+        &ctx,
+        &deb_host_env(),
+        &RpmdbProbe::absent(),
+        &fake,
+        &NoTxn,
+        true,
+    )
+    .expect_err("presence evidence gained under the lock must block the raw install");
+
+    assert!(err.reason().contains("appeared"), "got: {}", err.reason());
+    assert!(
+        load_v5_store(&layout)
+            .find(ObjectKind::Component, "agentsight")
+            .is_none(),
+        "a refused race must not claim an owned record"
+    );
+}
+
+#[test]
+fn deb_host_rpmdb_growing_under_lock_still_refuses() {
+    // The degraded CommandMissing policy is a planning-time snapshot: an
+    // external process may install RPMs with a binary this process cannot
+    // see (absolute path outside PATH), so its queries keep failing while
+    // an rpmdb grows on disk. The locked recheck must re-verify the
+    // filesystem evidence instead of trusting the captured verdict.
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    // The rpmdb grows under the host probe root, deliberately separate
+    // from the install prefix: evidence follows the host, not the layout.
+    let host_root = tmp.path().join("host");
+    let repo_url = write_local_repo(&tmp.path().join("repo"));
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix.clone()));
+    let rpmdb = RpmdbProbe::with_roots(host_root.clone(), None);
+    let fake = FakeInstaller::new(
+        "agentsight",
+        pkg_info("agentsight", "0.2.0", Some("1.al8"), "x86_64"),
+    )
+    .rpmdb_appears_under_lock(
+        layout.lock_file.clone(),
+        host_root.join("var/lib/rpm/rpmdb.sqlite"),
+    );
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+
+    let err = install_component_with_deps_and_env(
+        "agentsight",
+        &a,
+        &ctx,
+        &deb_host_env(),
+        &rpmdb,
+        &fake,
+        &NoTxn,
+        true,
+    )
+    .expect_err("an rpmdb appearing under the lock must block the raw install");
+
+    assert!(
+        err.reason().contains("rpm database appeared"),
+        "got: {}",
+        err.reason()
+    );
+    assert!(
+        load_v5_store(&layout)
+            .find(ObjectKind::Component, "agentsight")
+            .is_none(),
+        "a refused race must not claim an owned record"
+    );
+}
+
+#[test]
+fn deb_host_package_override_survives_planning_degrade() {
+    // Same race as above but with an explicit `--package` naming an RPM
+    // that differs from the component: the override is already the known
+    // probe identity, so the CommandMissing degrade must not collapse it
+    // to the component name. The locked recheck then probes the RPM the
+    // user named, sees it appeared with the tooling, and refuses.
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo(&tmp.path().join("repo"));
+    // The raw index is keyed by the backend-native package name, so the
+    // override needs an alternate publication of the same artifact under
+    // `custom-rpm` for the pre-lock artifact resolution to succeed.
+    let index_path = tmp.path().join("repo/v1/index.toml");
+    let index = std::fs::read_to_string(&index_path).expect("read index");
+    let alternate = index
+        .split("[[entries]]")
+        .nth(1)
+        .expect("fixture entry")
+        .replace("component = \"agentsight\"", "component = \"custom-rpm\"");
+    std::fs::write(index_path, format!("{index}\n[[entries]]{alternate}"))
+        .expect("write alternate publication");
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix));
+    let fake = FakeInstaller::new(
+        "custom-rpm",
+        pkg_info("custom-rpm", "0.2.0", Some("1.al8"), "x86_64"),
+    )
+    .tooling_appears_under_lock(layout.lock_file.clone());
+    let mut a = args("agentsight");
+    a.repo = Some(repo_url);
+    a.package = Some("custom-rpm".to_string());
+
+    let err = install_component_with_deps_and_env(
+        "agentsight",
+        &a,
+        &ctx,
+        &deb_host_env(),
+        &RpmdbProbe::absent(),
+        &fake,
+        &NoTxn,
+        true,
+    )
+    .expect_err("the overridden RPM appearing under the lock must block the raw install");
+
+    assert!(
+        err.reason().contains("'custom-rpm' appeared"),
+        "the recheck must probe the --package identity, got: {}",
+        err.reason()
     );
     assert!(
         load_v5_store(&layout)

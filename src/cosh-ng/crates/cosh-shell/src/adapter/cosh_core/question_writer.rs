@@ -6,18 +6,19 @@ use std::thread;
 use std::time::Duration;
 
 use super::super::{
-    control_protocol, AdapterError, ApprovalDecision, ApprovalResponse, AuthResponse,
+    control_protocol, AdapterError, ApprovalChannelMessage, ApprovalDecision, AuthResponse,
 };
 use super::question_ingress::{protocol_error, CoreQuestionProtocolReason, CoshCoreQuestionGate};
 
 pub(crate) struct QuestionWriter {
     pub(crate) stdin: ChildStdin,
     pub(crate) prompt: String,
-    pub(crate) approval_rx: mpsc::Receiver<ApprovalResponse>,
+    pub(crate) approval_rx: mpsc::Receiver<ApprovalChannelMessage>,
     pub(crate) auth_rx: mpsc::Receiver<AuthResponse>,
     pub(crate) done: Arc<AtomicBool>,
     pub(crate) cancelled: Arc<AtomicBool>,
     pub(crate) gate: Arc<Mutex<CoshCoreQuestionGate>>,
+    pub(crate) capabilities: Arc<Mutex<control_protocol::ControlProtocolCapabilities>>,
     pub(crate) failure_tx: mpsc::Sender<AdapterError>,
     pub(crate) answer_confirmation_tx: mpsc::Sender<Result<String, AdapterError>>,
 }
@@ -41,7 +42,7 @@ impl QuestionWriter {
 
         while !self.done.load(Ordering::SeqCst) && !self.cancelled.load(Ordering::SeqCst) {
             let (message, answered_request_id) =
-                match Self::next_message(&self.approval_rx, &self.auth_rx) {
+                match Self::next_message(&self.approval_rx, &self.auth_rx, &self.capabilities) {
                     Ok(Some(message)) => message,
                     Ok(None) => continue,
                     Err(()) => break,
@@ -61,11 +62,24 @@ impl QuestionWriter {
     }
 
     fn next_message(
-        approval_rx: &mpsc::Receiver<ApprovalResponse>,
+        approval_rx: &mpsc::Receiver<ApprovalChannelMessage>,
         auth_rx: &mpsc::Receiver<AuthResponse>,
+        capabilities: &Arc<Mutex<control_protocol::ControlProtocolCapabilities>>,
     ) -> Result<Option<(String, Option<String>)>, ()> {
         match approval_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(response) => {
+            // #1940 receipt gate: skipped for providers that never announced
+            // `can_handle_approval_receipt` — they would misread the line, and
+            // a lost receipt only keeps the core's last-resort guard armed.
+            Ok(ApprovalChannelMessage::Receipt { request_id }) => {
+                if !control_protocol::receipt_capable(capabilities) {
+                    return Ok(None);
+                }
+                Ok(Some((
+                    control_protocol::serialize_approval_receipt(&request_id),
+                    None,
+                )))
+            }
+            Ok(ApprovalChannelMessage::Response(response)) => {
                 let answered_request_id =
                     matches!(response.decision, ApprovalDecision::Answer { .. })
                         .then(|| response.request_id.clone());

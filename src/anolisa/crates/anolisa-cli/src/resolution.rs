@@ -951,6 +951,7 @@ base_url = "file://{}"
             kernel: None,
             pkg_base: None,
             os_id: None,
+            os_id_like: None,
             os_version: None,
             btf: None,
             cap_bpf: None,

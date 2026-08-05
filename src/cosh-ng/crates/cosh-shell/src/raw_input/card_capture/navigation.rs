@@ -1,5 +1,6 @@
 //! Keyboard navigation shared by interactive card captures.
 
+use super::super::event_parser::is_csi_u_backspace_params;
 use super::{
     capture_action_set, is_csi_final_byte, question_choice_count, CardInputState, RawInputCapture,
     RawInputEvent,
@@ -41,6 +42,16 @@ impl CardInputState {
             (b"13;2" | b"13;3", b'u') if matches!(capture, RawInputCapture::PromptDraft { .. }) => {
                 self.draft.insert_newline();
                 events.extend(self.input_event(capture));
+            }
+            // CSI-u Backspace edits exactly like 0x7f (#2150): draft cards
+            // delete one character, free-text captures pop the buffer.
+            (params, b'u') if is_csi_u_backspace_params(params) => {
+                if matches!(capture, RawInputCapture::PromptDraft { .. }) {
+                    self.draft.backspace();
+                    events.extend(self.input_event(capture));
+                } else if self.free_text.pop().is_some() {
+                    events.extend(self.input_event(capture));
+                }
             }
             (b"27;2;13" | b"27;3;13", b'~')
                 if matches!(capture, RawInputCapture::PromptDraft { .. }) =>

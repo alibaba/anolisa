@@ -1,11 +1,14 @@
 use super::broker::can_run_approved_bash_tool;
 use super::command_risk_build::{
-    apply_null_redirection_policy, assessment, dedupe_reasons, high_risk_program,
-    high_risk_program_assessment, high_shell_syntax, max_output_exposure, max_output_stability,
-    min_confidence,
+    apply_null_redirection_policy, assessment, basename, command_requires_tty, dedupe_reasons,
+    downloaded_program_file, has_interpreter_inline_code, has_tty_arg, high_risk_program,
+    high_shell_syntax, interpreter_consumes_stdin_as_program, max_output_exposure,
+    max_output_stability, min_confidence, network_download_effect,
 };
 use super::command_risk_compound::{assess_stripped_compound, compound_segments, finalize_complex};
 use super::command_risk_parser::{is_env_assignment, parse_command, ParsedCommand};
+use super::command_risk_pipeline::assess_pipeline;
+use super::command_risk_verdict::high_risk_program_assessment;
 use super::guarded_diagnostic::validate_guarded_diagnostic;
 use super::is_sensitive_target;
 use super::readonly_pipeline::validate_readonly_pipeline;
@@ -215,8 +218,13 @@ pub(super) fn assess_simple_command(
         );
     }
 
-    if let Some(high) = high_risk_program_assessment(policy.source, command, parsed.shape, &program)
-    {
+    if let Some(high) = high_risk_program_assessment(
+        policy.source,
+        command,
+        parsed.shape,
+        &program,
+        command_tokens,
+    ) {
         return high;
     }
 
@@ -262,135 +270,6 @@ fn direct_readonly_evidence(command: &str) -> Option<ReadonlyEvidence> {
         .then_some(ReadonlyEvidence::DirectReadonlyBroker)
 }
 
-pub(super) fn assess_pipeline(
-    command: &str,
-    parsed: ParsedCommand,
-    policy: AssessmentPolicy,
-) -> CommandAssessment {
-    let mut impact = RiskImpact::Low;
-    let mut confidence = AssessmentConfidence::High;
-    let mut output_stability = OutputStability::StableSnapshot;
-    let mut output_exposure = OutputExposure::Normal;
-    let mut side_effects = Vec::new();
-    let mut reasons = Vec::new();
-    let mut any_unknown = false;
-    let mut all_diagnostic = true;
-    let mut has_network_producer = false;
-    let mut has_shell_consumer = false;
-
-    for stage_tokens in &parsed.stages {
-        let program = stage_tokens
-            .iter()
-            .position(|token| !is_env_assignment(token))
-            .and_then(|idx| stage_tokens.get(idx))
-            .map(|token| basename(token).to_string());
-        let Some(program) = program else {
-            any_unknown = true;
-            all_diagnostic = false;
-            continue;
-        };
-        if stage_tokens.iter().any(|token| is_sensitive_target(token)) {
-            impact = RiskImpact::High;
-            output_exposure = OutputExposure::MayContainSecrets;
-            side_effects.push(SideEffectClass::SensitiveDataRead);
-            reasons.push("sensitive-path");
-            all_diagnostic = false;
-            continue;
-        }
-        if let Some(high) = high_risk_program(&program) {
-            impact = RiskImpact::High;
-            side_effects.push(high.0);
-            reasons.push(high.1);
-            all_diagnostic = false;
-            continue;
-        }
-        if matches!(program.as_str(), "curl" | "wget") {
-            has_network_producer = true;
-        }
-        if matches!(program.as_str(), "sh" | "bash" | "zsh" | "fish") {
-            has_shell_consumer = true;
-        }
-        let stage = stage_assessment(&program, stage_tokens);
-        impact = impact.max(stage.impact);
-        confidence = min_confidence(confidence, stage.confidence);
-        output_stability = max_output_stability(output_stability, stage.output_stability);
-        output_exposure = max_output_exposure(output_exposure, stage.output_exposure);
-        side_effects.extend(stage.side_effects);
-        if !is_diagnostic_pipeline_stage(&program) {
-            all_diagnostic = false;
-        }
-        if stage.reasons.contains(&"unknown-command") {
-            any_unknown = true;
-        }
-        if stage.impact == RiskImpact::High {
-            // Keep a high-impact stage's named reason (e.g.
-            // `service-or-container-control`) in the verdict (PR #1790 review).
-            reasons.extend(stage.reasons);
-        }
-    }
-
-    let readonly_pipeline_evidence =
-        policy.readonly_pipeline_executor && validate_readonly_pipeline(command).is_ok();
-
-    if has_network_producer && has_shell_consumer {
-        impact = RiskImpact::High;
-        confidence = AssessmentConfidence::High;
-        side_effects.push(SideEffectClass::RemoteCodeExecution);
-        reasons.insert(0, "remote-code-execution");
-    } else if readonly_pipeline_evidence {
-        impact = RiskImpact::Low;
-        confidence = AssessmentConfidence::High;
-        reasons.insert(0, "readonly-pipeline-executor");
-    } else if impact == RiskImpact::High {
-        if reasons.is_empty() {
-            reasons.push("pipeline-high-impact-stage");
-        }
-    } else if all_diagnostic || looks_like_diagnostic_pipeline(command) {
-        impact = RiskImpact::Medium;
-        confidence = min_confidence(confidence, AssessmentConfidence::Medium);
-        reasons.insert(0, "diagnostic-pipeline-heuristic");
-    } else {
-        impact = RiskImpact::Medium;
-        confidence = min_confidence(confidence, AssessmentConfidence::Medium);
-        reasons.insert(0, "pipeline-not-auto-executable");
-    }
-    if any_unknown {
-        confidence = min_confidence(confidence, AssessmentConfidence::Medium);
-        reasons.push("unknown-stage");
-    }
-    reasons.push("pipeline-not-auto-executable");
-    if side_effects.is_empty() {
-        side_effects.push(SideEffectClass::None);
-    }
-
-    let auto_allow = if policy.auto_mode && readonly_pipeline_evidence && impact == RiskImpact::Low
-    {
-        Some(AutoAllowEvidence::ReadonlyPipelineExecutor)
-    } else {
-        None
-    };
-    let execution = if auto_allow.is_some() {
-        ExecutionDecision::AutoAllow
-    } else {
-        ExecutionDecision::AskUser
-    };
-
-    assessment(
-        policy.source,
-        command,
-        CommandShape::Pipeline,
-        execution,
-        impact,
-        confidence,
-        InteractionRequirement::None,
-        output_stability,
-        output_exposure,
-        side_effects,
-        dedupe_reasons(reasons),
-        auto_allow,
-    )
-}
-
 fn assess_first_stage(
     command: &str,
     parsed: &ParsedCommand,
@@ -405,6 +284,7 @@ fn assess_first_stage(
         stages: parsed.stages.first().cloned().into_iter().collect(),
         null_redirections: 0,
         segments: Vec::new(),
+        segment_connectors: Vec::new(),
     };
     assess_simple_command(command, simple, policy)
 }
@@ -441,24 +321,29 @@ fn finalize_simple(
 }
 
 #[derive(Debug, Clone)]
-struct StageAssessment {
-    impact: RiskImpact,
-    confidence: AssessmentConfidence,
-    interaction: InteractionRequirement,
-    output_stability: OutputStability,
-    output_exposure: OutputExposure,
-    side_effects: Vec<SideEffectClass>,
-    reasons: Vec<&'static str>,
+pub(super) struct StageAssessment {
+    pub(super) impact: RiskImpact,
+    pub(super) confidence: AssessmentConfidence,
+    pub(super) interaction: InteractionRequirement,
+    pub(super) output_stability: OutputStability,
+    pub(super) output_exposure: OutputExposure,
+    pub(super) side_effects: Vec<SideEffectClass>,
+    pub(super) reasons: Vec<&'static str>,
 }
 
-fn stage_assessment(program: &str, tokens: &[String]) -> StageAssessment {
-    if matches!(
-        program,
-        "less" | "more" | "man" | "htop" | "ssh" | "scp" | "sftp"
-    ) || matches!(program, "python" | "python3" | "node" | "irb" | "ruby")
-        && !has_eval_arg(tokens)
-        || matches!(program, "docker" | "podman" | "kubectl") && has_tty_arg(tokens)
-    {
+pub(super) fn stage_assessment(program: &str, tokens: &[String]) -> StageAssessment {
+    if has_interpreter_inline_code(program, tokens) {
+        return StageAssessment {
+            impact: RiskImpact::High,
+            confidence: AssessmentConfidence::High,
+            interaction: InteractionRequirement::None,
+            output_stability: OutputStability::PotentiallyLarge,
+            output_exposure: OutputExposure::Normal,
+            side_effects: vec![SideEffectClass::RemoteCodeExecution],
+            reasons: vec!["remote-code-execution"],
+        };
+    }
+    if command_requires_tty(program, tokens) {
         return StageAssessment {
             impact: RiskImpact::Medium,
             confidence: AssessmentConfidence::High,
@@ -639,49 +524,12 @@ fn assess_container_or_cluster(program: &str, tokens: &[String]) -> StageAssessm
     }
 }
 
-fn basename(program: &str) -> &str {
-    program
-        .rsplit_once('/')
-        .map(|(_, name)| name)
-        .unwrap_or(program)
-}
-
-fn has_eval_arg(tokens: &[String]) -> bool {
-    tokens
-        .iter()
-        .skip(1)
-        .any(|arg| matches!(arg.as_str(), "-c" | "-e" | "--eval" | "--command"))
-}
-
-fn has_tty_arg(tokens: &[String]) -> bool {
-    tokens.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "-it" | "-ti" | "-i" | "-t" | "--interactive" | "--tty"
-        ) || arg.starts_with("--interactive=")
-            || arg.starts_with("--tty=")
-    })
-}
-
 fn top_is_batch_snapshot(tokens: &[String]) -> bool {
     tokens.iter().any(|arg| arg == "-b" || arg == "-l")
 }
 
 fn is_safe_diagnostic_family(program: &str) -> bool {
     matches!(program, "df" | "ps" | "top")
-}
-
-fn is_diagnostic_pipeline_stage(program: &str) -> bool {
-    matches!(
-        program,
-        "df" | "ps" | "top" | "grep" | "rg" | "head" | "tail" | "sort" | "uniq" | "cut" | "wc"
-    )
-}
-
-fn looks_like_diagnostic_pipeline(command: &str) -> bool {
-    let lower = command.to_ascii_lowercase();
-    (lower.contains("ps ") || lower.starts_with("ps") || lower.contains("df "))
-        && (lower.contains("| head") || lower.contains("| grep") || lower.contains("| sort"))
 }
 
 fn is_secret_search_token(token: &str) -> bool {

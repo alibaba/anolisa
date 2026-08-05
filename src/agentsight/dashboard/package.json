@@ -5,7 +5,8 @@
     "dev": "webpack serve",
     "build": "webpack --mode production",
     "build:embed": "AGENTSIGHT_EMBED=1 webpack --mode production",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:api-client": "node tests/run-api-client-regression.cjs"
   },
   "dependencies": {
     "react": "^18.2.0",

@@ -57,6 +57,67 @@ Outputs JSON; the key field is `status`:
 
 ### 3. Quick Scan + Signed Certification
 
+For a machine-readable, read-only assessment before certification, run:
+
+```bash
+agent-sec-cli skill-ledger analyze /path/to/your-skill --format json
+```
+
+`analyze` runs both `code-scanner` and `static-scanner` against the current
+directory. It does not create keys, `.skill-meta`, manifests, snapshots,
+signatures, configuration entries, or security events. It is suitable as an
+incremental signal for submission services, but does not replace their existing
+content rules or approval policy.
+
+The process contract is:
+
+| Exit code | Meaning |
+|-----------|---------|
+| `0` | Coverage is complete; inspect `status` for `pass`, `warn`, or `deny` |
+| `1` | A scanner or file could not be covered; `status=error` and `coverage_complete=false` |
+| `2` | Invalid input or protocol usage, including a missing `SKILL.md` |
+
+Protocol errors include a missing Skill root argument (`skill-root-required`)
+and unsupported output formats (`unsupported-format`); both return exit code
+`2` with a JSON error payload.
+
+Callers must check the exit code, top-level `status`, and
+`coverage_complete`. Findings are sorted by `file`, `line`, and `rule`;
+scanner results are always ordered as `code-scanner`, then `static-scanner`.
+The bundled JSON Schema is
+`agent_sec_cli/skill_ledger/analyze.schema.json`.
+Analysis accepts at most 2,000 regular files, 50 MiB of aggregate file content,
+and 32 directory levels. Exceeding a limit returns incomplete coverage.
+
+Node.js subprocess example:
+
+```javascript
+import { spawn } from "node:child_process";
+
+const child = spawn(
+  "agent-sec-cli",
+  ["skill-ledger", "analyze", skillDir, "--format", "json"],
+  { stdio: ["ignore", "pipe", "pipe"] },
+);
+
+let stdout = "";
+child.stdout.setEncoding("utf8");
+child.stdout.on("data", (chunk) => {
+  stdout += chunk;
+});
+child.on("close", (code) => {
+  const result = JSON.parse(stdout);
+  if (code !== 0 || result.status === "error" || !result.coverage_complete) {
+    throw new Error("Skill analysis did not complete");
+  }
+  // Keep existing submission rules; consume result.scanners as extra evidence.
+});
+```
+
+`analyze` currently ships in the complete `agent-sec-cli` wheel and RPM. A
+future packaging change may extract the shared scanners into a scanner-only
+wheel or RPM subpackage; the scanner rules must remain single-source.
+
 The default certification path uses the built-in quick scanner and does not depend on an LLM. For a single Skill:
 
 ```bash
@@ -183,7 +244,7 @@ Skill Ledger is recommended in combination with SkillFS: SkillFS captures Skill 
 ```
 
 - **Recommended path — SkillFS + daemon activation**: SkillFS discovers Skill file changes; the daemon refreshes the executable activation target based on the latest signed manifest, user decisions, and the activation policy. The Agent runtime reads activation metadata instead of relying on host hook pre-checks by default.
-- **Compatibility path — host hook/capability policy**: OpenClaw, Hermes, and copilot-shell can call `agent-sec-cli skill-ledger show` before a Skill loads; Qoder CLI runs a read-only `agent-sec-cli skill-ledger check` on the resolved local absolute directory before the `Skill` tool executes. The default `ask` requests user confirmation; `warn` / `debug` / `block` can be configured explicitly.
+- **Compatibility path — host hook/capability policy**: OpenClaw, Hermes, copilot-shell, and Qwen Code call `agent-sec-cli skill-ledger show` before a Skill loads; Codex and Qoder CLI run a read-only `agent-sec-cli skill-ledger check` at their respective local Skill trigger boundaries. The default is `ask`; `observe` / `warn` / `block` can be configured explicitly, and legacy `debug` remains an alias for `observe`.
 - **Agent-driven scanning**: `scan` runs the built-in quick scan and signs the result; the `skill-ledger` Skill drives the full four-phase security review when the user requests a deep scan, importing results via `certify --findings`. **Triggered on demand**, initiated by user request.
 
 ### Recommended Path: SkillFS + Daemon Activation
@@ -237,24 +298,39 @@ boundaries, see
 [Skill Ledger's SkillFS integration design](../../../../../src/agent-sec-core/docs/design/SKILL_LEDGER_SKILLFS_INTEGRATION_zh.md)
 (Chinese only) and the [SkillFS user guide](../../runtime/skillfs.md).
 
+### Unified Host Hook Controls
+
+Host adapters use `SKILL_LEDGER_HOOK_ENABLED` as the kill switch and
+`SKILL_LEDGER_MODE` as the behavior selector. The switch defaults to `true`; the policy
+defaults to `ask` and accepts `observe`, `warn`, `ask`, or `block`. `observe` runs the check and
+audit path without a user-visible message. Legacy `debug` maps to `observe`, while legacy `deny`
+maps to `block`. An environment policy overrides Hermes or OpenClaw capability configuration.
+
+The host Agent reads these variables when it loads the plugin. Restart the Agent process that
+hosts the hook after changing them; the hook and agent-sec-core are not separate policy services.
+
+When a hook cannot request approval, `ask` falls back to `warn`. When a hook cannot enforce a
+block at its current boundary, `block` also falls back to `warn` and must not claim enforcement.
+Set `SKILL_LEDGER_HOOK_ENABLED=false` to skip input processing, key initialization, and CLI calls.
+
 ### Compatibility Path: Hook / Capability Policy
 
-When the Agent loads a Skill, the OpenClaw, Hermes, and copilot-shell hooks resolve the Skill directory, run `agent-sec-cli skill-ledger show <skill_dir>`, and let the unified `policy` control the user-visible behavior. These hooks consume only the `message` in the summary:
+When the Agent loads a Skill, the OpenClaw, Hermes, copilot-shell, and Qwen Code hooks resolve the Skill directory, run `agent-sec-cli skill-ledger show <skill_dir>`, and let the unified `policy` control the host-specific behavior. These hooks consume only the `message` in the summary:
 
 | Policy | Behavior |
 |--------|----------|
-| `ask` | Default. `message == null` passes silently; `message != null` requests user confirmation or uses the host approval UI. |
+| `observe` | `message != null` only writes audit/debug diagnostics and passes. |
 | `warn` | `message == null` passes silently; `message != null` shows a warning and passes. |
-| `debug` | `message != null` only writes debug diagnostics and passes. |
+| `ask` | Default. `message == null` passes silently; `message != null` requests user confirmation or uses the host approval UI. |
 | `block` | `message != null` blocks directly, using the message as the reason or alert text. |
 
 The trigger rules for `message` are decided uniformly by Skill Ledger: no prompt when the user already has an `allow` / `always_allow` / `rollback` / `block` decision; no prompt when latest is `pass` or `warn` and directly exposable; a prompt when there is no user decision and latest is `deny` / `none` / `drifted` / `tampered`, explaining whether the current active version is a fallback or a safe pending-review stub. `latestStatus=unmanaged` means the daemon cannot manage this root and cannot write `.skill-meta` or record user decisions, so it is returned as diagnostics only with `message=null`, and every hook policy including `block` passes silently.
 
-Qoder CLI is a low-level integrity gate: the plugin registers a dedicated `PreToolUse` hook for the `Skill` tool, builds user → project directory tables from the absolute `cwd` in the event, parses the `SKILL.md` frontmatter `name` (falling back to the directory name when frontmatter is absent), and after canonical-path and root-boundary validation runs `skill-ledger check <skill_dir>`. When frontmatter exists but `name` is missing, ambiguous, or uses a YAML scalar the hook cannot safely parse, the call is not downgraded to a non-local Skill — it is handled per the current policy. `pass` passes silently; `none` / `drifted` / `warn` / `deny` / `tampered` and `error` request confirmation, log debug only, warn-then-pass, or block per the `ask` / `debug` / `warn` / `block` policy. CLI unavailability, execution failure, timeout, or unparseable output is also handled by this four-level policy rather than a fixed fail-open.
+Codex and Qoder CLI are low-level integrity gates that run `skill-ledger check <skill_dir>` after canonical-path and root-boundary validation. Codex resolves `$skill-name` references at `UserPromptSubmit`; because that boundary cannot request approval, `ask` falls back to `warn`. Qoder CLI registers a dedicated `PreToolUse` hook for the `Skill` tool, builds user → project directory tables from the absolute `cwd` in the event, and parses the `SKILL.md` frontmatter `name` (falling back to the directory name when frontmatter is absent). When Qoder frontmatter exists but `name` is missing, ambiguous, or uses a YAML scalar the hook cannot safely parse, the call is not downgraded to a non-local Skill — it is handled per the current policy. `pass` passes silently; `none` / `drifted` / `warn` / `deny` / `tampered` and `error` are audited silently, warned and passed, sent for confirmation where supported, or blocked per the `observe` / `warn` / `ask` / `block` policy. Qoder CLI unavailability, execution failure, timeout, or unparseable output is also handled by this four-level policy rather than a fixed fail-open; legacy `debug` is only an alias for `observe`.
 
-OpenClaw defaults to `enabled=true, policy="ask"`; Hermes defaults to `enabled=true, policy="ask"`; copilot-shell and Qoder CLI register the Skill Ledger PreToolUse hook by default in their manifests, with the policy controlled via `SKILL_LEDGER_HOOK_POLICY`. Apart from the Qoder CLI low-level gate above, the other compatibility hooks remain fail-open when the CLI infrastructure misbehaves, avoiding blocked Skill loads.
+All six adapters enable Skill Ledger by default with policy `ask`; copilot-shell, Codex, Qoder CLI, and Qwen Code register their corresponding hook boundaries in their default manifests. OpenClaw and Hermes can also take capability configuration, while `SKILL_LEDGER_MODE` remains the deployment-level override. Apart from the explicitly documented Qoder CLI low-level gate above, the other compatibility hooks remain fail-open when the CLI infrastructure misbehaves, avoiding blocked Skill loads.
 
-The copilot-shell hook currently covers three directory classes — project / user / system: `<cwd>/.copilot-shell/skills/`, `~/.copilot-shell/skills/`, `/usr/share/anolisa/skills/`. Skills from custom, extension, remote, or other paths make the hook fail open and skip the skill-ledger check; the OpenClaw plugin extracts the Skill directory from the `SKILL.md` path it reads.
+The copilot-shell hook currently covers three directory classes — project / user / system: `<cwd>/.copilot-shell/skills/`, `~/.copilot-shell/skills/`, and the RPM and raw-install system roots `/usr/share/anolisa/skills/` and `/usr/local/share/anolisa/skills/`. Skills from custom, extension, remote, or other paths make the hook fail open and skip the skill-ledger check; the OpenClaw plugin extracts the Skill directory from the `SKILL.md` path it reads.
 
 For batch certification or post-install certification, complete directory resolution and certification before letting the Agent read uncertified Skill content: avoid proactively reading an uncertified Skill's `SKILL.md` or auxiliary files before batch certification; after a successful install, locate the final local directory, confirm it contains `SKILL.md`, then run quick-scan certification.
 
@@ -281,9 +357,9 @@ policy = "ask"
 enable_block = false
 ```
 
-**Configuring copilot-shell**: the default Cosh manifest already registers the `skill-ledger` hook. The default policy is `ask`; for warning-only, debug-only, or hard denial, set `SKILL_LEDGER_HOOK_POLICY=warn` / `debug` / `block`. This environment variable should be set by a trusted host or deployment environment — not by Skills, project scripts, or untrusted shell startup logic; to prevent policy downgrades via a tampered local shell profile, it should eventually move to a trusted host configuration source.
+**Configuring copilot-shell**: the default Cosh manifest already registers the `skill-ledger` hook. The default policy is `ask`; for observe-only, warning-only, or hard denial, set `SKILL_LEDGER_MODE=observe` / `warn` / `block`. The `debug` value remains an alias for `observe`. This environment variable should be set by a trusted host or deployment environment — not by Skills, project scripts, or untrusted shell startup logic; to prevent policy downgrades via a tampered local shell profile, it should eventually move to a trusted host configuration source.
 
-**Configuring Qoder CLI**: after installing `qoder-plugin`, the plugin automatically registers a `PreToolUse` hook with matcher `Skill`. The default policy is `ask`; a trusted launch environment may set `SKILL_LEDGER_HOOK_POLICY=debug` / `warn` / `block` and adjust the CLI timeout via `SKILL_LEDGER_TIMEOUT` (default 5 seconds). The hook covers local Skills under `~/.qoder/skills/` and `<cwd>/.qoder/skills/`, with user-level Skills of the same name taking precedence; only when both directory tables resolve trustworthily with no match is the call treated as a built-in, plugin, or remote Skill — passed and logged at debug. The hook never runs `init` or `scan` automatically; unsigned Skills enter the policy as `none`. After review, run `agent-sec-cli skill-ledger scan <skill_dir>` explicitly.
+**Configuring Qoder CLI**: after installing `qoder-plugin`, the plugin automatically registers a `PreToolUse` hook with matcher `Skill`. The default policy is `ask`; a trusted launch environment may set `SKILL_LEDGER_MODE=observe` / `warn` / `block` and adjust the CLI timeout via `SKILL_LEDGER_TIMEOUT` (default 5 seconds). The `debug` value remains an alias for `observe`. The hook covers local Skills under `~/.qoder/skills/` and `<cwd>/.qoder/skills/`, with user-level Skills of the same name taking precedence; only when both directory tables resolve trustworthily with no match is the call treated as a built-in, plugin, or remote Skill — passed and logged at debug. The hook never runs `init` or `scan` automatically; unsigned Skills enter the policy as `none`. After review, run `agent-sec-cli skill-ledger scan <skill_dir>` explicitly.
 
 The global Skill Ledger `activationPolicy` belongs to SkillFS/daemon activation; the hook `policy` here only controls the user-visible behavior and log level of host hooks/capabilities.
 
@@ -336,7 +412,7 @@ Note: a hook's `ask` confirmation only lets the current host operation continue 
 
 #### Configuring Skill Directories (for batch scans)
 
-Five built-in directories are included by default: `~/.openclaw/skills/*`, `~/.copilot-shell/skills/*`, `~/.hermes/skills/**`, `~/.qoder/skills/*`, `/usr/share/anolisa/skills/*`. Project-level Qoder directories are not relative defaults; after an explicit `scan` or `certify` on a project Skill, its absolute directory is written to `managedSkillDirs` via the auto-memoization mechanism. To add other directories, create or edit `~/.config/agent-sec/skill-ledger/config.json`:
+Six built-in directories are included by default: `~/.openclaw/skills/*`, `~/.copilot-shell/skills/*`, `~/.hermes/skills/**`, `~/.qoder/skills/*`, `/usr/share/anolisa/skills/*`, `/usr/local/share/anolisa/skills/*`. Project-level Qoder directories are not relative defaults; after an explicit `scan` or `certify` on a project Skill, its absolute directory is written to `managedSkillDirs` via the auto-memoization mechanism. To add other directories, create or edit `~/.config/agent-sec/skill-ledger/config.json`:
 
 ```json
 {

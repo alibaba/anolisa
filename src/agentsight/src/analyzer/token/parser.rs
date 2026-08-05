@@ -293,6 +293,57 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_openai_usage_with_cached_tokens() {
+        // OpenAI nests cache hits under prompt_tokens_details.cached_tokens.
+        let parser = TokenParser::new();
+        let data = r#"{
+            "id": "chatcmpl-456",
+            "model": "gpt-4o",
+            "usage": {
+                "prompt_tokens": 10000,
+                "completion_tokens": 50,
+                "total_tokens": 10050,
+                "prompt_tokens_details": {
+                    "cached_tokens": 8500
+                }
+            }
+        }"#;
+
+        let event = create_test_event(data);
+        let usage = parser.parse_event(&event).expect("should parse");
+        assert_eq!(usage.input_tokens, 10000);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.cache_read_input_tokens, Some(8500));
+        assert_eq!(usage.cache_creation_input_tokens, None);
+        assert_eq!(usage.provider, LLMProvider::OpenAI);
+    }
+
+    #[test]
+    fn test_parse_dashscope_usage_with_cached_tokens() {
+        // DashScope may surface cached_tokens at the top level of the usage
+        // object instead of nesting under prompt_tokens_details.
+        let parser = TokenParser::new();
+        let data = r#"{
+            "id": "chatcmpl-789",
+            "model": "qwen3.5-plus",
+            "usage": {
+                "prompt_tokens": 9800,
+                "completion_tokens": 120,
+                "total_tokens": 9920,
+                "cached_tokens": 9000
+            }
+        }"#;
+
+        let event = create_test_event(data);
+        let usage = parser.parse_event(&event).expect("should parse");
+        assert_eq!(usage.input_tokens, 9800);
+        assert_eq!(usage.output_tokens, 120);
+        assert_eq!(usage.cache_read_input_tokens, Some(9000));
+        assert_eq!(usage.cache_creation_input_tokens, None);
+        assert_eq!(usage.provider, LLMProvider::OpenAI);
+    }
+
+    #[test]
     fn test_skip_done_marker() {
         let parser = TokenParser::new();
 

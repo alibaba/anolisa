@@ -27,6 +27,8 @@ pub mod chrome_trace;
 pub mod config;
 pub mod ecs_metadata;
 mod logging;
+mod private_sqlite;
+pub mod security;
 pub mod tokenizer;
 pub mod utils;
 
@@ -44,6 +46,8 @@ pub(crate) mod background;
 pub mod container;
 #[cfg(target_os = "linux")]
 pub mod discovery;
+#[cfg(target_os = "linux")]
+pub mod enforcement;
 #[cfg(target_os = "linux")]
 pub mod event;
 #[cfg(target_os = "linux")]

@@ -1,6 +1,6 @@
 # AgentSight C FFI API
 
-本文档描述 AgentSight 提供的 C 语言接口。采用 **eventfd + read 模式**：AgentSight 内部通过 `eventfd` 通知调用方有新事件就绪，调用方可将该 fd 注册到自己的 epoll/select 事件循环中，被唤醒后调用 `agentsight_read()` 通过回调消费数据。
+本文档描述 AgentSight 提供的 C 语言接口。采用 **eventfd + read 模式**：AgentSight 内部通过一个有界队列和一个 `eventfd` 通知调用方有新事件就绪。旧调用方继续使用 `agentsight_read()`；需要系统安全审计的调用方使用 `agentsight_read_v2()`，不需要创建第二个 handle 或 eventfd。
 
 ## 1. C 数据结构
 
@@ -23,6 +23,11 @@ typedef struct {
     uint32_t    response_headers_len;
     const char* response_body;        /* JSON or raw text, may be NULL */
     uint32_t    response_body_len;    /* 0 when response_body is NULL */
+    /* 进程归属，与 AgentsightLLMData 中的同名字段同义。这三个字段追加在结构体
+       尾部，因此按旧 layout 编译的调用方无需改动即可继续工作。 */
+    char        cmdline[128];         /* 空格连接的 argv，截断到 127 字节；进程已退出时为空串 */
+    const char* agent_name;           /* may be NULL；统一为小写；未命中配置规则时回退为进程名 */
+    const char* container_id;         /* may be NULL；非容器进程为 NULL */
 } AgentsightHttpsData;
 
 /* LLM 语义层数据 — 仅当 HTTP 流量被识别为 LLM API 调用时产生 */
@@ -77,6 +82,21 @@ typedef struct {
     const char* input_message_delta;
     uint32_t    input_message_delta_len;
 } AgentsightLLMData;
+
+typedef enum {
+    AGENTSIGHT_EVENT_TYPE_HTTPS = 1,
+    AGENTSIGHT_EVENT_TYPE_LLM = 2,
+    AGENTSIGHT_EVENT_TYPE_SECURITY = 3,
+} AgentsightEventType;
+
+/* 通用版本化事件 envelope；payload_json 仅在回调期间有效。 */
+typedef struct {
+    AgentsightEventType event_type;
+    uint16_t            schema_version; /* 当前为 1 */
+    uint64_t            timestamp_ns;
+    const char*         payload_json;
+    uint32_t            payload_json_len;
+} AgentsightEvent;
 ```
 
 ## 2. C API 接口
@@ -91,14 +111,19 @@ const char* agentsight_last_error(void);
 AgentsightConfigHandle* agentsight_config_new(void);
 void agentsight_config_set_verbose(AgentsightConfigHandle* cfg, int verbose);
 void agentsight_config_set_log_path(AgentsightConfigHandle* cfg, const char* path);
+void agentsight_config_set_enable_raw_https(AgentsightConfigHandle* cfg, int enabled);
+void agentsight_config_set_enable_security_audit(AgentsightConfigHandle* cfg, int enabled);
+void agentsight_config_set_enforcer_socket(AgentsightConfigHandle* cfg, const char* path);
 void agentsight_config_add_cmdline_rule(AgentsightConfigHandle* cfg, const char* const* rule, const char* agent_name, int allow);
-void agentsight_config_add_domain_rule(AgentsightConfigHandle* cfg, const char* rule);
+void agentsight_config_add_https(AgentsightConfigHandle* cfg, const char* rule);
+int agentsight_config_add_http(AgentsightConfigHandle* cfg, const char* target);
 int agentsight_config_load_config(AgentsightConfigHandle* cfg, const char* json_str);
 void agentsight_config_free(AgentsightConfigHandle* cfg);
 
 /* ---- 回调类型 ---- */
 typedef void (*agentsight_https_callback_fn)(const AgentsightHttpsData* data, void* user_data);
 typedef void (*agentsight_llm_callback_fn)(const AgentsightLLMData* data, void* user_data);
+typedef void (*agentsight_event_callback_fn)(const AgentsightEvent* data, void* user_data);
 
 /* ---- 生命周期 ---- */
 AgentsightHandle* agentsight_new(AgentsightConfigHandle* cfg);
@@ -124,6 +149,15 @@ int agentsight_read(AgentsightHandle* h,
                     agentsight_https_callback_fn http_cb, void* http_ud,
                     agentsight_llm_callback_fn  llm_cb,  void* llm_ud,
                     int flags);
+
+/* 与 agentsight_read 使用同一队列。HTTP/LLM 仍可触发 typed callback，所有事件还会
+ * 触发 event_cb；调用方可只在 event_cb 中处理 SECURITY，平滑复用旧 LLM 映射。 */
+#define AGENTSIGHT_HAS_READ_V2 1
+int agentsight_read_v2(AgentsightHandle* h,
+                       agentsight_https_callback_fn http_cb, void* http_ud,
+                       agentsight_llm_callback_fn llm_cb, void* llm_ud,
+                       agentsight_event_callback_fn event_cb, void* event_ud,
+                       int flags);
 ```
 
 ### 2.1 返回值
@@ -136,10 +170,12 @@ int agentsight_read(AgentsightHandle* h,
 | `agentsight_stop` | `int` | 0=成功，<0=失败 |
 | `agentsight_get_eventfd` | `int` | >= 0 为有效 fd，< 0 表示不支持 eventfd |
 | `agentsight_read` | `int` | \>0=处理的事件数，0=无事件，<0=出错 |
+| `agentsight_read_v2` | `int` | 与 `agentsight_read` 相同；事件来自同一个有界队列 |
 | `agentsight_last_error` | `const char*` | 错误描述字符串，无错误时返回 NULL |
 | `agentsight_version` | `const char*` | 版本号字符串（如 `"0.2.2"`），静态存储，无需释放 |
 | `agentsight_config_add_cmdline_rule` | `void` | cfg 或 rule 为 NULL 时静默忽略 |
-| `agentsight_config_add_domain_rule` | `void` | cfg 或 rule 为 NULL 时静默忽略 |
+| `agentsight_config_add_https` | `void` | cfg 或 rule 为 NULL 时静默忽略 |
+| `agentsight_config_add_http` | `int` | 0=成功，<0=目标格式非法 |
 | `agentsight_config_load_config` | `int` | 0=成功，<0=失败（解析错误） |
 
 ### 2.2 线程安全
@@ -160,8 +196,20 @@ int agentsight_read(AgentsightHandle* h,
 | `cmdline_rules` | 空 | 用户自定义规则列表；allow=1 为进程白名单，allow=0 为进程黑名单 |
 | `domain_rules` | 空 | 域名白名单规则列表，DNS 阶段独立判定是否 attach |
 | raw HTTPS FFI 输出 | `false` | 仅通过 `agentsight_config_set_enable_raw_https` 显式开启 |
+| security audit FFI 输出 | `false` | 通过 `agentsight_config_set_enable_security_audit` 显式开启 |
+| enforcer socket | `/run/agentsight/enforcer.sock` | 可通过 `agentsight_config_set_enforcer_socket` 覆盖 |
 
-### 3.2 Cmdline Rule 配置
+### 3.2 系统安全审计订阅
+
+开启后，AgentSight 在同一个 handle 内启动一个独立的轻量订阅线程，从 enforcer 获取归一化 `SecurityEvent`，并写入与 LLM/HTTPS 共用的 FFI 有界队列。enforcer 未启动或连接断开时订阅线程会重连；该失败不会停止主 AgentSight pipeline，也不会影响 LLM 事件。
+
+`AGENTSIGHT_EVENT_TYPE_SECURITY` 的 `payload_json` 是 schema version 1 的完整 `SecurityEvent` JSON，覆盖 `file_action`、`taint_transition`、`network_action`、`policy_decision` 和 `enforcement_state`。FFI 不负责策略下发、阻断控制或持久化重放。
+
+`AGENTSIGHT_EVENT_TYPE_HTTPS` 的 `payload_json` 是内部 `HttpRecord` 的字段（`pid`、`comm`、`method`、`path`、`status_code`、请求/响应头与 body、`duration_ns`、`is_sse` 等）平铺在顶层，另外并列三个进程归属字段 `agent_name` / `cmdline` / `container_id`，语义与 `AgentsightHttpsData` 中的同名字段一致。**取不到的字段直接省略，不会序列化为 `null`**，因此调用方判断「键是否存在」即可，无需处理 null。
+
+`agent_name` 在 FFI 边界**统一小写**，`AGENTSIGHT_EVENT_TYPE_HTTPS` 与 `AGENTSIGHT_EVENT_TYPE_LLM` 两种 payload 一致（配置文件里写的是 `Hermes`，这里出来是 `hermes`）。因此调用方可以直接用 `agent_name` 把同一进程的 raw HTTPS 与 LLM 事件聚合到一起，无需自行做大小写归一。注意 AgentSight 自身的 Dashboard 与 SQLite 保留配置原始大小写，仅 FFI 输出做归一化。
+
+### 3.3 Cmdline Rule 配置
 
 通过 `agentsight_config_add_cmdline_rule()` 可添加用户自定义的进程匹配规则。`allow=1` 时添加进程白名单（匹配到的进程 attach SSL 探针）；`allow=0` 时添加进程黑名单（匹配到的进程不 attach）。
 
@@ -218,9 +266,9 @@ const char* deny[] = {"node", "*webpack*", NULL};
 agentsight_config_add_cmdline_rule(cfg, deny, NULL, 0);
 ```
 
-### 3.3 Domain Rule 配置
+### 3.4 HTTPS Rule 配置
 
-通过 `agentsight_config_add_domain_rule()` 可配置域名白名单规则，用于 DNS 阶段判定是否 attach SSL 探针。
+通过 `agentsight_config_add_https()` 可配置域名白名单规则，用于 DNS 阶段判定是否 attach SSL 探针。
 
 #### 设计动机
 
@@ -229,7 +277,7 @@ agentsight_config_add_cmdline_rule(cfg, deny, NULL, 0);
 #### 函数签名
 
 ```c
-void agentsight_config_add_domain_rule(
+void agentsight_config_add_https(
     AgentsightConfigHandle* cfg,
     const char* rule
 );
@@ -286,8 +334,8 @@ const char* deny[] = {"node", "*webpack*", NULL};
 agentsight_config_add_cmdline_rule(cfg, deny, NULL, 0);
 
 /* 域名白名单：仅 attach 这些域名的 SSL 连接 */
-agentsight_config_add_domain_rule(cfg, "*.openai.com");
-agentsight_config_add_domain_rule(cfg, "*.anthropic.com");
+agentsight_config_add_https(cfg, "*.openai.com");
+agentsight_config_add_https(cfg, "*.anthropic.com");
 
 AgentsightHandle* h = agentsight_new(cfg);
 agentsight_config_free(cfg);
@@ -301,7 +349,7 @@ agentsight_start(h);
 - 未知进程 DNS 解析 `api.openai.com` → attach（阶段二 domain_rule 命中，进程不在黑名单）
 - 未知进程 DNS 解析 `example.com` → 不 attach（两阶段都未命中）
 
-### 3.4 JSON 配置文件
+### 3.5 JSON 配置文件
 
 除了通过 C API 逐条配置，也可通过 JSON 字符串一次性加载所有规则。
 
@@ -371,14 +419,14 @@ if (agentsight_config_load_config(cfg, json) < 0) {
 }
 
 /* 也可继续通过 API 追加规则 */
-agentsight_config_add_domain_rule(cfg, "*.my-custom-llm.com");
+agentsight_config_add_https(cfg, "*.my-custom-llm.com");
 
 AgentsightHandle* h = agentsight_new(cfg);
 agentsight_config_free(cfg);
 agentsight_start(h);
 ```
 
-### 3.5 匹配判定逻辑
+### 3.6 匹配判定逻辑
 
 匹配分为两个独立阶段，均用于判定是否 attach SSL 探针：
 
@@ -422,7 +470,7 @@ DNS 事件到达
 - **cmdline_deny 两阶段都生效**：黑名单一票否决
 - **都不配置**：无事件输出
 
-### 3.6 Raw HTTPS FFI 输出
+### 3.7 Raw HTTPS FFI 输出
 
 raw HTTPS fallback 默认关闭。需要接收 `AgentsightHttpsData` 的 FFI 调用方必须在
 `agentsight_new()` 前显式开启：
@@ -590,3 +638,5 @@ make install            # 安装 agentsight CLI
 | v0.2.1 | 集成 CMake 构建系统（`ENABLE_AGENTSIGHT` 选项）；新增 C 示例程序 `tools/examples/agentsight/`；新增 `cbindgen.toml` 自动生成完整 C 头文件；新增 FFI API 文档 |
 | v0.3 | `agentsight_config_add_cmdline_rule()` 新增 `allow` 参数：allow=1 为进程白名单，allow=0 为进程黑名单 |
 | v0.4 | 新增 `agentsight_config_add_domain_rule()` 接口，支持域名白名单；新增 `agentsight_config_load_config()` 支持 JSON 字符串加载配置 |
+| dev | 新增 `agentsight_read_v2()` 版本化通用事件 envelope；可选订阅归一化系统安全审计事件，并与 HTTPS/LLM 共用 handle、队列和 eventfd |
+| dev | `AgentsightHttpsData` 尾部新增 `cmdline` / `agent_name` / `container_id`（追加不改动既有字段偏移）；`AGENTSIGHT_EVENT_TYPE_HTTPS` 的 `payload_json` 同步带上这三个字段 |
