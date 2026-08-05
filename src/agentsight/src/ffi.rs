@@ -29,7 +29,11 @@ use uuid::Uuid;
 /// Mutually exclusive: an HTTP exchange either becomes `Llm` (if recognised
 /// as an LLM API call) or `Https` (otherwise).  See §5 in c-ffi-api.md.
 pub(crate) enum FfiEvent {
-    Https(HttpRecord),
+    /// Raw HTTP exchange, plus the agent name resolved by the pipeline. The name
+    /// is passed in because it comes from `AgentSight`'s pid → agent_name cache,
+    /// which this layer cannot reach; resolving it here would miss processes that
+    /// have already exited (the cache outlives them).
+    Https(HttpRecord, Option<String>),
     Llm(LLMCall),
     Security(SecurityEvent),
 }
@@ -129,11 +133,20 @@ impl FfiEventSender {
         }
     }
 
-    pub fn send_https(&self, record: &HttpRecord) {
+    /// Enqueue a raw HTTP exchange, resolving its agent name only if the consumer
+    /// actually asked for raw HTTPS.
+    ///
+    /// `agent_name` is a closure rather than a value because resolving it costs two
+    /// `/proc` reads plus rule matching on a cache miss — and non-agent processes, which
+    /// is exactly what produces non-LLM traffic, always miss. Raw HTTPS is off by
+    /// default, so taking a resolved value here would burn that per event only to drop
+    /// it one line later. Keeping the gate ahead of the closure also keeps it in one
+    /// place instead of duplicating the condition at the call site.
+    pub fn send_https(&self, record: &HttpRecord, agent_name: impl FnOnce() -> Option<String>) {
         if !self.enable_raw_https {
             return;
         }
-        self.send(FfiEvent::Https(record.clone()));
+        self.send(FfiEvent::Https(record.clone(), agent_name()));
     }
 }
 
@@ -224,6 +237,14 @@ pub struct AgentsightHttpsData {
     pub response_headers_len: u32,
     pub response_body: *const c_char,
     pub response_body_len: u32,
+    /// Space-joined process command line (argv), truncated to 127 bytes.
+    /// Empty string when the process has already exited.
+    ///
+    /// This field and the two below were appended to the tail so a consumer
+    /// compiled against the older, shorter layout keeps working unchanged.
+    pub cmdline: [c_char; 128],
+    pub agent_name: *const c_char,
+    pub container_id: *const c_char,
 }
 
 /// LLM semantic layer data — only when the HTTP traffic is recognised as
@@ -338,6 +359,8 @@ struct HttpsDataHolder {
     _req_body: Option<Vec<u8>>,
     _resp_headers: Vec<u8>,
     _resp_body: Option<Vec<u8>>,
+    _agent_name: Option<CString>,
+    _container_id: Option<CString>,
 }
 
 struct LlmDataHolder {
@@ -364,7 +387,10 @@ struct EventDataHolder {
 
 fn build_event_data(event: &FfiEvent) -> Result<EventDataHolder, serde_json::Error> {
     let (event_type, timestamp_ns, payload_json) = match event {
-        FfiEvent::Https(record) => (
+        // The resolved agent name is not serialized here: this path emits the
+        // HttpRecord itself as JSON, and HttpRecord has no agent_name field. Only
+        // the AgentsightHttpsData path carries it.
+        FfiEvent::Https(record, _) => (
             AgentsightEventType::Https,
             record.timestamp_ns,
             serde_json::to_vec(record)?,
@@ -394,13 +420,24 @@ fn build_event_data(event: &FfiEvent) -> Result<EventDataHolder, serde_json::Err
     })
 }
 
-fn build_https_data(record: &HttpRecord) -> HttpsDataHolder {
+fn build_https_data(record: &HttpRecord, agent_name: Option<&str>) -> HttpsDataHolder {
     let method = safe_cstring(&record.method);
     let path = safe_cstring(&record.path);
     let req_headers = record.request_headers.as_bytes().to_vec();
     let req_body = record.request_body.as_ref().map(|b| b.as_bytes().to_vec());
     let resp_headers = record.response_headers.as_bytes().to_vec();
     let resp_body = record.response_body.as_ref().map(|b| b.as_bytes().to_vec());
+
+    // Process metadata, resolved the same way as the LLM path (`build_llm_data`)
+    // so both event kinds report identical values for the same pid. agent_name is
+    // lowercased at the FFI boundary for the same reason it is there.
+    let agent_name = agent_name.map(|s| safe_cstring(&s.to_lowercase()));
+    let cmdline = copy_to_fixed_buf::<128>(
+        &crate::discovery::scanner::read_cmdline(&format!("/proc/{}/cmdline", record.pid))
+            .join(" "),
+    );
+    let container_id =
+        crate::container::extract_container_id_cached(record.pid).map(|s| safe_cstring(&s));
 
     let c_data = AgentsightHttpsData {
         pid: record.pid as i32,
@@ -427,6 +464,9 @@ fn build_https_data(record: &HttpRecord) -> HttpsDataHolder {
             .as_ref()
             .map_or(ptr::null(), |s| s.as_ptr().cast()),
         response_body_len: resp_body.as_ref().map_or(0, |s| s.len() as u32),
+        cmdline,
+        agent_name: agent_name.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
+        container_id: container_id.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
     };
 
     HttpsDataHolder {
@@ -437,6 +477,8 @@ fn build_https_data(record: &HttpRecord) -> HttpsDataHolder {
         _req_body: req_body,
         _resp_headers: resp_headers,
         _resp_body: resp_body,
+        _agent_name: agent_name,
+        _container_id: container_id,
     }
 }
 
@@ -594,9 +636,9 @@ unsafe fn dispatch_event(
     llm_ud: *mut c_void,
 ) {
     match event {
-        FfiEvent::Https(record) => {
+        FfiEvent::Https(record, agent_name) => {
             if let Some(cb) = http_cb {
-                let holder = build_https_data(&record);
+                let holder = build_https_data(&record, agent_name.as_deref());
                 unsafe { cb(&holder.c_data, http_ud) };
             }
         }
@@ -1568,7 +1610,7 @@ mod tests {
         let mut record = make_http_record(Some(request_body.clone()), Some(response_body.clone()));
         record.request_headers = request_headers.clone();
         record.response_headers = response_headers.clone();
-        let holder = build_https_data(&record);
+        let holder = build_https_data(&record, None);
 
         let copied_request_headers = unsafe {
             std::slice::from_raw_parts(
@@ -1609,9 +1651,33 @@ mod tests {
             enable_raw_https: false,
             security_drops: Arc::new(SecurityDropState::default()),
         };
-        sender.send_https(&make_http_record(None, None));
+        sender.send_https(&make_http_record(None, None), || None);
         sender.send(FfiEvent::Llm(make_llm_call(None, 1)));
         assert!(matches!(rx.try_recv(), Ok(FfiEvent::Llm(_))));
+    }
+
+    #[test]
+    fn test_disabled_https_sender_does_not_resolve_agent_name() {
+        // Raw HTTPS is off by default while FFI mode is on, so this is the common case:
+        // every non-LLM exchange reaches send_https. Resolving the agent name costs two
+        // /proc reads plus rule matching on a cache miss — and non-agent processes always
+        // miss — so the resolver must not run at all when the consumer opted out.
+        let (tx, _rx) = mpsc::sync_channel(1);
+        let sender = FfiEventSender {
+            tx,
+            eventfd: -1,
+            enable_raw_https: false,
+            security_drops: Arc::new(SecurityDropState::default()),
+        };
+        let resolved = std::cell::Cell::new(false);
+        sender.send_https(&make_http_record(None, None), || {
+            resolved.set(true);
+            None
+        });
+        assert!(
+            !resolved.get(),
+            "agent name must not be resolved while raw HTTPS is disabled"
+        );
     }
 
     #[test]
@@ -1623,8 +1689,55 @@ mod tests {
             enable_raw_https: true,
             security_drops: Arc::new(SecurityDropState::default()),
         };
-        sender.send_https(&make_http_record(None, None));
-        assert!(matches!(rx.try_recv(), Ok(FfiEvent::Https(_))));
+        sender.send_https(&make_http_record(None, None), || Some("hermes".to_string()));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(FfiEvent::Https(_, Some(name))) if name == "hermes"
+        ));
+    }
+
+    #[test]
+    fn test_build_https_data_cmdline_live_process() {
+        // The current test process has a readable /proc/<pid>/cmdline, so the
+        // raw path must fill it just like the LLM path does.
+        let mut record = make_http_record(None, None);
+        record.pid = std::process::id();
+        let holder = build_https_data(&record, None);
+        let end = holder
+            .c_data
+            .cmdline
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(128);
+        assert!(end > 0, "cmdline should be non-empty for a live process");
+        assert!(
+            end < 128,
+            "cmdline must be NUL-terminated within the buffer"
+        );
+    }
+
+    #[test]
+    fn test_build_https_data_cmdline_dead_pid_empty() {
+        // A non-existent pid makes read_cmdline fail, yielding an empty buffer.
+        let mut record = make_http_record(None, None);
+        record.pid = u32::MAX;
+        let holder = build_https_data(&record, None);
+        assert_eq!(holder.c_data.cmdline[0], 0);
+    }
+
+    #[test]
+    fn test_build_https_data_lowercases_agent_name() {
+        // Matches build_llm_data: C consumers see one casing regardless of config.
+        let holder = build_https_data(&make_http_record(None, None), Some("Claude Code"));
+        assert!(!holder.c_data.agent_name.is_null());
+        let name = unsafe { CStr::from_ptr(holder.c_data.agent_name) };
+        assert_eq!(name.to_str().unwrap(), "claude code");
+    }
+
+    #[test]
+    fn test_build_https_data_agent_name_none_is_null() {
+        let holder = build_https_data(&make_http_record(None, None), None);
+        assert!(holder.c_data.agent_name.is_null());
     }
 
     fn make_llm_call(agent_name: Option<&str>, pid: i32) -> LLMCall {

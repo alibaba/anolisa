@@ -532,8 +532,12 @@ impl GenAIBuilder {
         Self::match_agent_by_ctx(&ctx)
     }
 
-    /// 通过进程名匹配 agent registry，返回已知 agent 名称
-    pub(super) fn resolve_agent_name(
+    /// Match the process against the agent registry and return the known agent name.
+    ///
+    /// `pub(crate)` rather than `pub(super)`: the raw HTTPS reporting path in
+    /// `unified.rs` resolves the name through this same ladder, so both event kinds
+    /// report one value per pid. See the `FfiEventSender::send_https` call site.
+    pub(crate) fn resolve_agent_name(
         comm: &str,
         pid: u32,
         cache: &impl PidAgentNameCache,

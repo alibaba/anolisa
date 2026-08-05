@@ -867,7 +867,24 @@ impl AgentSight {
                 // raw HTTPS before cloning or enqueueing when it is disabled.
                 for ar in &analysis_results {
                     if let crate::analyzer::AnalysisResult::Http(record) = ar {
-                        sender.send_https(record);
+                        // Resolved here rather than in the FFI layer because the cache
+                        // lives on `self` and outlives the process, so an exited agent
+                        // still resolves. Same ladder as the LLM path in
+                        // `GenAICallBuilder::build` so both report the same value.
+                        //
+                        // Passed as a closure so `send_https` can skip it entirely when
+                        // raw HTTPS is disabled — the default — instead of paying two
+                        // `/proc` reads per non-LLM exchange for a value it drops.
+                        sender.send_https(record, || {
+                            Some(
+                                GenAIBuilder::resolve_agent_name(
+                                    &record.comm,
+                                    record.pid,
+                                    &self.pid_agent_name_cache,
+                                )
+                                .unwrap_or_else(|| record.comm.clone()),
+                            )
+                        });
                     }
                 }
             }
