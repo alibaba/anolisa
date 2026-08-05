@@ -59,6 +59,8 @@ pub struct ProviderConfig {
     pub access_key_secret: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explicit_cache: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -859,6 +861,8 @@ impl CoreConfig {
             .map(expand_env_vars)
             .or_else(|| std::env::var("ALIBABA_CLOUD_SECURITY_TOKEN").ok());
 
+        let explicit_cache = provider_cfg.and_then(|p| p.explicit_cache).unwrap_or(false);
+
         ResolvedProvider {
             base_url,
             api_key,
@@ -869,6 +873,7 @@ impl CoreConfig {
             access_key_id,
             access_key_secret,
             security_token,
+            explicit_cache,
         }
     }
 }
@@ -884,6 +889,7 @@ pub struct ResolvedProvider {
     pub access_key_id: String,
     pub access_key_secret: String,
     pub security_token: Option<String>,
+    pub explicit_cache: bool,
 }
 
 impl ResolvedProvider {
@@ -1000,6 +1006,9 @@ fn persist_config_to_dir(config: &CoreConfig, dir: &std::path::Path) -> Result<(
         }
         if let Some(ref st) = provider.security_token {
             preserved.push_str(&format!("security_token = \"{}\"\n", escape_toml_value(st)));
+        }
+        if let Some(true) = provider.explicit_cache {
+            preserved.push_str("explicit_cache = true\n");
         }
         preserved.push('\n');
     }
@@ -1330,6 +1339,41 @@ model = "qwen3-235b-a22b"
         assert_eq!(resolved.base_url, "https://example.com/v1");
         assert_eq!(resolved.api_key, "sk-test");
         assert_eq!(resolved.model, "my-model");
+    }
+
+    #[test]
+    fn resolve_provider_reads_explicit_cache() {
+        let toml_str = r#"
+[ai]
+active_provider = "dashscope"
+
+[ai.providers.dashscope]
+type = "dashscope"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key = "sk-test"
+model = "qwen-max"
+explicit_cache = true
+"#;
+        let config: CoreConfig = toml::from_str(toml_str).unwrap();
+        let resolved = config.resolve_provider();
+        assert!(resolved.explicit_cache);
+    }
+
+    #[test]
+    fn resolve_provider_defaults_explicit_cache_to_false() {
+        let toml_str = r#"
+[ai]
+active_provider = "dashscope"
+
+[ai.providers.dashscope]
+type = "dashscope"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key = "sk-test"
+model = "qwen-max"
+"#;
+        let config: CoreConfig = toml::from_str(toml_str).unwrap();
+        let resolved = config.resolve_provider();
+        assert!(!resolved.explicit_cache);
     }
 
     #[test]

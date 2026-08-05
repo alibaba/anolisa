@@ -33,6 +33,7 @@ fn phrase_message_id(code: &str) -> Option<crate::MessageId> {
         "filesystem-write" => ApprovalRiskPhraseFilesystemWrite,
         "permission-change" => ApprovalRiskPhrasePermissionChange,
         "process-control" => ApprovalRiskPhraseProcessControl,
+        "system-control" => ApprovalRiskPhraseSystemControl,
         "service-control" => ApprovalRiskPhraseServiceControl,
         "service-or-container-control" => ApprovalRiskPhraseServiceOrContainerControl,
         "package-manager-mutation" => ApprovalRiskPhrasePackageManagerMutation,
@@ -45,6 +46,50 @@ fn phrase_message_id(code: &str) -> Option<crate::MessageId> {
         "awk-shell-execution" => ApprovalRiskPhraseAwkShellExecution,
         _ => return None,
     })
+}
+
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
+
+use super::approval::wrapped_preview_rows;
+
+/// V6a continuation line under the metadata row: `└ 风险: <phrase>`.
+/// `reason` is already the localized natural-language phrase (never a raw
+/// code) — the policy lives in `card_reason_phrase` above.
+pub(super) fn approval_reason_line(reason: &str, i18n: crate::I18n) -> String {
+    format!(
+        "\u{2514} {}{reason}",
+        i18n.t(crate::MessageId::ApprovalRiskDetailLabel)
+    )
+}
+
+pub(super) fn approval_reason_rows(reason: &str, width: usize, i18n: crate::I18n) -> Vec<String> {
+    wrapped_preview_rows(&approval_reason_line(reason, i18n), width, 2)
+}
+
+/// Styled continuation lines: label in the border color, phrase dimmed.
+pub(super) fn approval_reason_styled_lines(
+    reason_rows: Vec<String>,
+    border: Color,
+    i18n: crate::I18n,
+) -> Vec<Line<'static>> {
+    let label = format!(
+        "\u{2514} {}",
+        i18n.t(crate::MessageId::ApprovalRiskDetailLabel)
+    );
+    reason_rows
+        .into_iter()
+        .map(|row| {
+            if let Some(phrase) = row.strip_prefix(&label) {
+                Line::from(vec![
+                    Span::styled(label.clone(), Style::default().fg(border)),
+                    Span::styled(phrase.to_string(), Style::default().fg(Color::DarkGray)),
+                ])
+            } else {
+                Line::from(Span::styled(row, Style::default().fg(Color::DarkGray)))
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -86,6 +131,7 @@ mod tests {
             "unknown-command",
             "and-or-list-not-auto-executable",
             "pipeline-not-auto-executable",
+            "compound-readonly",
             "unsafe-binding",
             "parse-failed",
             "not-a-real-code",

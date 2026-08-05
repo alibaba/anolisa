@@ -39,7 +39,7 @@ printf '%s\n' '{"ok":true,"data":{"action":"list","sessions":[],"next_cursor":nu
     });
 
     let list = SessionManagementClient::new(program.to_string_lossy())
-        .list("/tmp", 1, None)
+        .list("/tmp", 1, None, false)
         .expect("retry session-control spawn");
     release_writer.join().expect("release executable writer");
     std::fs::remove_dir_all(&temp).expect("remove session-control tempdir");

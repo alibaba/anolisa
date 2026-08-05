@@ -25,6 +25,7 @@ fn summarize(events: &[GenerateEvent]) -> Vec<String> {
                 prompt_tokens,
                 completion_tokens,
                 total_tokens,
+                cached_tokens: _,
             } => format!("usage:{prompt_tokens}:{completion_tokens}:{total_tokens}"),
             GenerateEvent::MessageEnd => "message_end".to_string(),
             GenerateEvent::Cancelled => "cancelled".to_string(),
@@ -846,6 +847,36 @@ async fn eof_with_usage_keeps_usage_and_message_end() {
     );
 }
 
+#[test]
+fn sysom_extracts_cached_tokens_from_prompt_tokens_details() {
+    let mut state = SseParseState::default();
+    let mut usage_frame = message_frame(Some("done"), vec![]);
+    usage_frame["usage"] = serde_json::json!({
+        "prompt_tokens": 1000,
+        "completion_tokens": 50,
+        "total_tokens": 1050,
+        "prompt_tokens_details": {
+            "cached_tokens": 800
+        }
+    });
+
+    let mut events = parse_sysom_sse_events(&frame(usage_frame), &mut state).expect("frame parses");
+    events.extend(sysom_eof_events(&mut state));
+    assert!(matches!(
+        events.as_slice(),
+        [
+            GenerateEvent::TextDelta(text),
+            GenerateEvent::Usage {
+                prompt_tokens: 1000,
+                completion_tokens: 50,
+                total_tokens: 1050,
+                cached_tokens: 800,
+            },
+            GenerateEvent::MessageEnd,
+        ] if text == "done"
+    ));
+}
+
 #[tokio::test]
 async fn usage_only_final_frame_still_terminates_with_message_end() {
     let mut final_frame = message_frame(Some("hello"), vec![]);
@@ -986,7 +1017,7 @@ fn eof_closes_started_tools_before_usage_and_message_end() {
         ],
     ));
     assert_eq!(parse(&block, &mut state).len(), 4);
-    state.latest_usage = Some((1, 2, 3));
+    state.latest_usage = Some((1, 2, 3, 0));
 
     assert_eq!(
         summarize(&sysom_eof_events(&mut state)),
@@ -1002,6 +1033,28 @@ fn eof_closes_started_tools_before_usage_and_message_end() {
         summarize(&sysom_eof_events(&mut state)).eq(&["message_end".to_string()]),
         "tool ends and usage must not be emitted twice"
     );
+}
+
+#[test]
+fn eof_usage_preserves_cached_tokens() {
+    let mut state = SseParseState {
+        latest_usage: Some((1, 2, 3, 42)),
+        ..Default::default()
+    };
+
+    let events = sysom_eof_events(&mut state);
+    assert!(matches!(
+        events.as_slice(),
+        [
+            GenerateEvent::Usage {
+                prompt_tokens: 1,
+                completion_tokens: 2,
+                total_tokens: 3,
+                cached_tokens: 42,
+            },
+            GenerateEvent::MessageEnd,
+        ]
+    ));
 }
 
 /// The failure payload may hold credentials or the pending question, so no part of

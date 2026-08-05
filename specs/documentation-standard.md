@@ -250,7 +250,12 @@ AgentSight captures kernel-level events without modifying agent code...
 - Technical terms keep English form in Chinese docs (eBPF, Token, CLI)
 - Command examples identical across languages; only prose differs
 
-**Entry point convention:** each component directory in `docs/user-guide/` uses `QUICKSTART.md` as its entry point.
+**Entry point convention:** when one page is sufficient, use a flat
+`{component}.md` file directly under its capability directory. Create a
+component subdirectory only when it contains multiple user documents. Reserve
+`QUICKSTART.md` for cross-component journeys or components whose setup needs a
+distinct, short onboarding path; do not duplicate a component manual into a
+second quickstart.
 
 ## 5. PR Documentation Update Rules
 

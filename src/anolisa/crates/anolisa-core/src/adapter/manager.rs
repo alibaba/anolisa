@@ -55,6 +55,13 @@ const LOG_SOURCE: &str = "anolisa-cli";
 /// Output beyond this is drained (so the child never blocks on a full
 /// pipe) but discarded before logging.
 const OUTPUT_CAP: usize = 64 * 1024;
+/// Cap on stdout for framework commands that return structured JSON.
+///
+/// Inventory commands need substantially more than diagnostic commands:
+/// Qoder reports every plugin and its resources in one document. Four MiB
+/// covers thousands of ordinary entries while retaining a finite memory
+/// bound. Stderr remains subject to [`OUTPUT_CAP`].
+const JSON_OUTPUT_CAP: usize = 4 * 1024 * 1024;
 /// Outcome of [`AdapterManager::enable`].
 #[derive(Debug, Clone)]
 pub enum EnableOutcome {
@@ -775,6 +782,7 @@ impl AdapterManager {
             &claim_allowed_roots,
             &self.all_datadir_roots,
         )?;
+        driver.validate_prepared_enable(&claim)?;
 
         state.upsert_adapter_claim(claim.clone());
         state.save(&self.state_path)?;
@@ -1941,6 +1949,12 @@ impl AdapterOps for ManagerOps {
         Ok(output)
     }
 
+    fn run_framework_cli_json(&self, cmd: FrameworkCommand) -> Result<CliOutput, AdapterError> {
+        let output = run_capture_with_stdout_cap(&cmd, JSON_OUTPUT_CAP)?;
+        self.record(&cmd, &output);
+        Ok(output)
+    }
+
     fn copy_tree(&self, src: &Path, dst: &Path) -> Result<(), AdapterError> {
         validate_ops_path(src, &self.allowed_roots)?;
         validate_ops_path(dst, &self.allowed_roots)?;
@@ -2188,6 +2202,15 @@ fn symlink_file(_target: &Path, _link: &Path) -> std::io::Result<()> {
 /// truncated output. The child's stdout/stderr are drained on separate
 /// threads so a full pipe can never deadlock the wait loop.
 fn run_capture(cmd: &FrameworkCommand) -> Result<CliOutput, AdapterError> {
+    run_capture_with_stdout_cap(cmd, OUTPUT_CAP)
+}
+
+/// Run a framework CLI with a caller-selected bounded stdout capture.
+/// Stderr stays on the ordinary diagnostic cap regardless of stdout policy.
+fn run_capture_with_stdout_cap(
+    cmd: &FrameworkCommand,
+    stdout_cap: usize,
+) -> Result<CliOutput, AdapterError> {
     let mut command = Command::new(&cmd.program);
     command
         .args(&cmd.args)
@@ -2216,7 +2239,7 @@ fn run_capture(cmd: &FrameworkCommand) -> Result<CliOutput, AdapterError> {
         }
     })?;
 
-    let stdout_handle = child.stdout.take().map(|r| spawn_drain(r, OUTPUT_CAP));
+    let stdout_handle = child.stdout.take().map(|r| spawn_drain(r, stdout_cap));
     let stderr_handle = child.stderr.take().map(|r| spawn_drain(r, OUTPUT_CAP));
     let start = Instant::now();
     let mut stdin_handle = if let Some(input) = &cmd.stdin {

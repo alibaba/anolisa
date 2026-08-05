@@ -30,10 +30,12 @@ import os
 import subprocess
 import sys
 
+from hook_config import env_flag_enabled
 from trace_context import with_trace_context
 
 # -- config ----------------------------------------------------------------
 
+_HOOK_ENABLED = env_flag_enabled("PROMPT_SCANNER_HOOK_ENABLED", True)
 MODE = os.environ.get("PROMPT_SCANNER_MODE", "observe").lower()
 try:
     TIMEOUT = int(os.environ.get("PROMPT_SCANNER_TIMEOUT", "10"))
@@ -80,6 +82,9 @@ def _block(scan_result: dict) -> None:
 
 
 def main() -> None:
+    if not _HOOK_ENABLED:
+        return
+
     # 1. Read stdin JSON (fail-open: empty stdout = allow in Codex)
     try:
         input_data = json.load(sys.stdin)

@@ -11,11 +11,13 @@ import sys
 from datetime import datetime, timezone
 from typing import Any
 
+from hook_config import env_flag_enabled
 from pii_text import json_dumps as _json_dumps
 from pii_text import text_sha256, value_to_text
 from trace_context import trace_context, with_trace_context
 
 _CLI_TIMEOUT_SECONDS = 3
+_HOOK_ENABLED = env_flag_enabled("OBSERVABILITY_HOOK_ENABLED", True)
 # Read one extra byte below to distinguish an exact-limit payload from truncation.
 _MAX_PAYLOAD_SIZE = 1024 * 1024
 # Qwen Code HookInput does not currently expose one stable run identifier across
@@ -407,6 +409,10 @@ def _record_observability(record: dict[str, Any]) -> None:
 
 
 def main() -> None:
+    if not _HOOK_ENABLED:
+        print(_noop())
+        return
+
     try:
         payload = _read_stdin_payload()
         if payload is None:

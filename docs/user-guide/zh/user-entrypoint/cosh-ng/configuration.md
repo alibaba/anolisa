@@ -31,6 +31,12 @@ type = "dashscope"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 api_key = ""              # 或通过 DASHSCOPE_API_KEY
 model = "qwen-plus"
+# 显式缓存开关（仅 DashScope 生效）。
+# true  = 显式缓存：主动为 system 和最后一条消息注入 cache_control
+#         标记，5 分钟内确定性命中，创建部分按 125% 计费，命中部分按 10% 计费。
+# false = 隐式缓存（默认）：自动识别公共前缀，命中率不确定，命中部分按 20% 计费，无法关闭。
+# 参考：https://help.aliyun.com/zh/model-studio/context-cache
+explicit_cache = false
 
 [agent]
 # 审批模式：trust | auto | balanced | suggest | strict
@@ -190,6 +196,11 @@ adapter_default = "cosh-core"
 analysis_mode = "smart"
 # 审批模式（recommend | auto | trust）
 approval_mode = "auto"
+# Agent 批准的前台命令等待终端输入超过该秒数后被打断（0 = 从不打断）。
+# 仅内核证据支撑的等待计时：会话 tty 上的密码提示、分页器与普通 stdin
+# 读取。全屏 TUI（vi、top）豁免，管道读取（如 `... | cat`）同样豁免。
+# 默认：120。
+input_wait_timeout_secs = 120
 ```
 
 ## 审计配置
@@ -217,15 +228,23 @@ max_disk_bytes = 1073741824
 | `COSH_AI_PROVIDER` | 覆盖活跃提供商 | `ai.active_provider` |
 | `COSH_OUTPUT_LANGUAGE` | 输出语言 | `ai.output_language` |
 | `COSH_MAX_TURNS` | 最大轮次 | `agent.max_turns` |
+| `COSH_SERVICE_SITE` | Coding Plan 和 Token Plan 的内置 endpoint 目录 | — |
 | `COSH_LOG` | 日志级别（全局） | `logging.level` |
 | `RUST_LOG` | Rust 日志过滤 | — |
 | `COSH_SHELL_ADAPTER` | Shell 适配器 | `shell.adapter_default` |
+| `COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | 输入等待超时（秒） | `shell.input_wait_timeout_secs` |
 | `COSH_SHELL_DEBUG` | 映射为 debug 级别 | `ui.log_level` |
 | `COSH_SHELL_LANG` | Shell 语言 | — |
 | `COSH_AUDIT_DIR` | 统一审计存储根目录 | — |
 | `ALIBABA_CLOUD_ACCESS_KEY_ID` | 阿里云 AK | `ai.providers.aliyun.access_key_id` |
 | `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | 阿里云 SK | `ai.providers.aliyun.access_key_secret` |
 | `DASHSCOPE_API_KEY` | DashScope API Key | provider 解析链 |
+
+`COSH_SERVICE_SITE` 支持 `china`/`cn` 和
+`international`/`intl`/`global`。未设置或无法识别时使用中国站目录。该变量只
+改变 `/auth` 提供的内置 endpoint，不会改写已保存的 provider URL。旧版
+OpenAI-compatible Plan provider 仅在 endpoint 与当前站点目录匹配时恢复为 Plan
+专用编辑表单，匹配时忽略末尾斜杠。
 
 ## 日志级别优先级
 

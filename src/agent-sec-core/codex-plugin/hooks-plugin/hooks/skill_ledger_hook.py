@@ -8,11 +8,14 @@ HookOutput JSON to stdout.
 
 Hook point: **UserPromptSubmit** (no matcher — fires on every prompt)
 
-Modes (controlled by SKILL_LEDGER_MODE env var, default: observe):
+Policy (controlled by SKILL_LEDGER_MODE, default: ask):
   - observe: silent pass-through, only audit trail via agent-sec-cli events.
             Even if integrity check fails, it will NOT be blocked.
-  - deny: block the entire turn when any skill fails integrity check.
-          (status none/drifted/warn/deny/tampered all result in block)
+  - warn: show a warning and continue.
+  - ask: fall back to warn because this Codex hook cannot request confirmation.
+  - block: block the entire turn when any skill fails integrity check.
+
+The compatibility values debug and deny map to observe and block, respectively.
 
 Input schema::
 
@@ -26,12 +29,12 @@ Input schema::
         "prompt": "$my-skill 帮我重构代码"
     }
 
-Output mapping (mode=deny):
+Output mapping (policy=block):
 
     all skills pass          → (empty stdout — allow)
     any skill status in BLOCK_STATUSES → {"decision": "block", "reason": "..."}
 
-Output mapping (mode=observe):
+Output mapping (policy=observe):
 
     always                   → (empty stdout — allow, audit only)
 
@@ -52,11 +55,32 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from hook_config import env_flag_enabled, env_hook_policy, normalize_hook_policy
 from trace_context import with_trace_context
 
 # -- config ----------------------------------------------------------------
 
-MODE = os.environ.get("SKILL_LEDGER_MODE", "observe").lower()
+_HOOK_ENABLED = env_flag_enabled("SKILL_LEDGER_HOOK_ENABLED", True)
+MODE = os.environ.get("SKILL_LEDGER_MODE")
+
+
+def _read_policy() -> str:
+    """Read the configured Skill Ledger mode."""
+    raw = os.environ.get("SKILL_LEDGER_MODE")
+    policy = env_hook_policy("SKILL_LEDGER_MODE", "ask")
+    if "SKILL_LEDGER_MODE" in os.environ and normalize_hook_policy(raw, "") == "":
+        print("[skill-ledger] invalid SKILL_LEDGER_MODE; using ask", file=sys.stderr)
+    return policy
+
+
+_POLICY = _read_policy()
+
+
+def _effective_policy() -> str:
+    """Return policy while preserving module-level test overrides."""
+    return normalize_hook_policy(MODE, _POLICY)
+
+
 try:
     TIMEOUT = int(os.environ.get("SKILL_LEDGER_TIMEOUT", "5"))
 except (ValueError, TypeError):
@@ -339,10 +363,23 @@ def _block(failed_skills: list[tuple[str, str]]) -> None:
     print(json.dumps({"decision": "block", "reason": msg}, ensure_ascii=False))
 
 
+def _warn(failed_skills: list[tuple[str, str]]) -> None:
+    """Warn without claiming Codex can request confirmation at this hook."""
+    details = ", ".join(
+        f"{name}: {_STATUS_LABELS.get(status, status)}"
+        for name, status in failed_skills
+    )
+    message = f"[skill-ledger] Skill review required; execution continues: {details}"
+    print(json.dumps({"systemMessage": message}, ensure_ascii=False))
+
+
 # -- main ------------------------------------------------------------------
 
 
 def main() -> None:
+    if not _HOOK_ENABLED:
+        return
+
     # 1. Read stdin JSON (fail-open: empty stdout = allow in Codex)
     try:
         input_data = json.load(sys.stdin)
@@ -407,11 +444,13 @@ def main() -> None:
     # 7. Mode-based output
     # - observe: 不拦截，仅通过 agent-sec-cli events 审计
     # - deny: status 异常时拦截整个 turn（skill 内容不会注入模型上下文）
-    if MODE == "observe":
+    policy = _effective_policy()
+    if policy == "observe":
         return  # observe 模式：不拦截
-    elif MODE == "deny":
+    if policy == "block":
         _block(failed)
-    # else: unknown mode, fail-open
+        return
+    _warn(failed)  # Codex cannot request approval here; ask falls back to warn.
 
 
 if __name__ == "__main__":

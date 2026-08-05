@@ -985,11 +985,11 @@ mod tests {
     use super::*;
 
     fn test_context() -> ToolContext {
-        ToolContext {
-            cwd: PathBuf::from("/tmp"),
-            session_id: "test".to_string(),
-            project_root: PathBuf::from("/tmp"),
-        }
+        ToolContext::new(
+            PathBuf::from("/tmp"),
+            "test".to_string(),
+            PathBuf::from("/tmp"),
+        )
     }
 
     fn fake_server(script: &str) -> (tempfile::TempDir, McpServerConfig) {

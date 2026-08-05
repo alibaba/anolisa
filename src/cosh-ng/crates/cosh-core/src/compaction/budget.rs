@@ -10,6 +10,7 @@ use serde::Serialize;
 use crate::config::{
     CompactionConfig, DEFAULT_EMERGENCY_RATIO, DEFAULT_TARGET_RATIO, DEFAULT_TRIGGER_RATIO,
 };
+use crate::provider::token_limits::model_max_output_tokens;
 use crate::provider::Message;
 
 use super::projection::{TokenMeasurement, TokenMeasurementSource};
@@ -130,8 +131,14 @@ fn profile_context_window(model: &str) -> Option<u64> {
         .map(|(_, window)| *window)
 }
 
-fn profile_max_output(_model: &str) -> u64 {
-    FALLBACK_MAX_OUTPUT_TOKENS
+/// Output reserve for a model when the user has not supplied one explicitly.
+///
+/// Shares the same lookup table as `core.rs` so the budget's output reserve
+/// matches the `max_tokens` actually sent in the provider request.
+fn profile_max_output(model: &str) -> u64 {
+    model_max_output_tokens(model)
+        .map(|v| v as u64)
+        .unwrap_or(FALLBACK_MAX_OUTPUT_TOKENS)
 }
 
 /// Conservative token estimate for text that never splits UTF-8 code points.

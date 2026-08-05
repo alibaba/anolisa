@@ -218,24 +218,30 @@ fn hooks_history_and_events_empty_state_use_zh_catalog_text() {
 }
 
 #[test]
-fn hooks_usage_uses_zh_catalog_text() {
-    let mut state = zh_state();
+fn hooks_help_and_unknown_command_list_subcommands_in_zh() {
+    for subcommand in ["--help", "bogus"] {
+        let mut state = zh_state();
+        let output = render_hooks_test_command(Some(subcommand), None, None, &mut state);
 
-    let output = render_hooks_test_command(Some("bogus"), None, None, &mut state);
-
-    assert!(output.contains("用法"), "{output}");
-    assert!(
-        output.contains("/hooks                - 显示 Hook 状态"),
-        "{output}"
-    );
-    assert!(!output.contains("/hooks clear-project-trust"), "{output}");
-    assert!(!output.contains("/hooks feedback"), "{output}");
-    assert!(!output.contains("/hooks analyze"), "{output}");
-    assert!(!output.contains("show hook status"), "{output}");
-    assert!(
-        !output.contains("clear project hook trust store"),
-        "{output}"
-    );
+        assert!(output.contains("用法"), "{output}");
+        assert!(
+            output.contains("/hooks                - 显示 Hook 状态"),
+            "{output}"
+        );
+        assert!(output.contains("/hooks history"), "{output}");
+        assert!(output.contains("/hooks enable <id>"), "{output}");
+        assert!(output.contains("/hooks disable <id>"), "{output}");
+        assert!(output.contains("/hooks clear-project-trust"), "{output}");
+        assert!(
+            output.contains("/hooks feedback noisy|useful <id>"),
+            "{output}"
+        );
+        assert!(!output.contains("show hook status"), "{output}");
+        assert!(
+            !output.contains("clear project hook trust store"),
+            "{output}"
+        );
+    }
 }
 
 #[test]

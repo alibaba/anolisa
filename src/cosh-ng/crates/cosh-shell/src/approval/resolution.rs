@@ -51,8 +51,17 @@ pub(crate) fn apply_approval_decision(
         ApprovalCommandKind::AlwaysTrust => {
             let (status, _) =
                 approval_status_for_allowed_request(&state.approvals.requests[request_index]);
-            trust_key = trust_key_from_command(&state.approvals.requests[request_index].preview);
-            (status, MessageId::ApprovalResolutionTrustedTitle)
+            // Defense in depth for high-risk requests (issue #2064): the
+            // panel never offers AlwaysTrust for them, but a stale or
+            // replayed CardAlwaysTrust event must still not mint a session
+            // trust key — downgrade to a one-shot approval instead.
+            if state.approvals.requests[request_index].risk == "high" {
+                (status, MessageId::ApprovalResolutionApprovedTitle)
+            } else {
+                trust_key =
+                    trust_key_from_command(&state.approvals.requests[request_index].preview);
+                (status, MessageId::ApprovalResolutionTrustedTitle)
+            }
         }
         ApprovalCommandKind::Deny => {
             let title = if turn_extension {
@@ -160,7 +169,12 @@ fn finalize_approval_decision(
         let host_audit_result = state
             .audit
             .as_mut()
-            .map(|audit| audit.authorize_host_execution(approval_audit_input(&request)))
+            .map(|audit| {
+                audit.authorize_host_execution(
+                    approval_audit_input(&request),
+                    "shell_foreground_handoff",
+                )
+            })
             .transpose();
         if host_audit_result.is_err() {
             request.status = ApprovalRequestStatus::Blocked;

@@ -361,6 +361,9 @@ pub struct FirecrackerConfig {
     /// Enable virtio-vsock (Phase 2+; parsed today but not yet wired).
     #[serde(default)]
     pub enable_vsock: bool,
+    /// Create an isolated network namespace, veth uplink, tap, and NAT.
+    #[serde(default)]
+    pub enable_network: bool,
     /// Capture guest ttyS0 output (Firecracker stdout) to `serial.log`.
     #[serde(default)]
     pub serial_log: bool,
@@ -377,6 +380,7 @@ impl Default for FirecrackerConfig {
         Self {
             boot_args: default_fc_boot_args(),
             enable_vsock: false,
+            enable_network: false,
             serial_log: false,
             vcpus: None,
             memory: None,
@@ -817,6 +821,7 @@ memory = "4G"
 
 [backend.firecracker]
 boot_args = "console=ttyS0 reboot=k panic=1 pci=off"
+enable_network = true
 serial_log = true
 
 [hooks.on_create]
@@ -831,6 +836,13 @@ sequence = ["template-reg:bind-mm-template"]
         assert_eq!(pf.match_.workload_class, WorkloadClass::AgentRl);
         assert_eq!(pf.select.backend_priority[0], BackendKind::KataFc);
         assert!(pf.pool.as_ref().expect("pool").enabled);
+        assert!(
+            pf.backend
+                .firecracker
+                .as_ref()
+                .expect("firecracker")
+                .enable_network
+        );
     }
 
     #[test]
@@ -929,6 +941,7 @@ memory = "2G"
             .expect("firecracker config");
         assert_eq!(fc.vcpus, Some(2));
         assert_eq!(fc.memory, Some("2G".to_string()));
+        assert!(!fc.enable_network);
     }
 
     #[test]

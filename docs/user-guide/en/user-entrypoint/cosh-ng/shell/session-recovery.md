@@ -37,6 +37,7 @@ Use these commands from the shell prompt:
 |---------|----------|
 | `/session` | Open the newest-first session picker |
 | `/session list` | Print the first bounded summary page with complete, copyable session UUIDs |
+| `/session list --all` | Print sessions from every workspace, grouped by workspace path |
 | `/session new` | Detach the current provider conversation so the next Agent request starts fresh |
 | `/new` | Alias for `/session new` |
 | `/session status` | Show shell, selected, restoring, and active provider identities |
@@ -51,6 +52,16 @@ after the resumed request completes successfully. A failed restore remains
 recoverable and leaves the shell prompt usable. Direct and picker-based resume
 both refuse to change selection while an Agent run or another interactive
 decision is active.
+
+`/session list --all` lists persisted sessions across every workspace under the
+same storage root. Output is grouped by canonical workspace path, with each
+group sorted newest-first. The group for the current workspace is labelled with
+`(current)` so you can quickly locate resumable sessions. Sessions that belong to
+a workspace other than the current one are shown with `scope_mismatch`; they are
+visible so you can identify them, but `/session resume <id>` still refuses to
+restore them and does not change the working directory. The interactive picker
+opened by `/session` remains scoped to the current workspace and does not offer
+an `--all` mode.
 
 Starting a fresh session clears only the shell adapter's active or selected
 provider-session binding. It does not delete the previous persisted session,

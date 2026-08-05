@@ -3,13 +3,16 @@ use super::runtime::*;
 use super::validation::{record_field_edit, record_field_submission, FieldSubmission};
 use crate::runtime::prelude::{
     AgentEvent, AuthFieldInfo, AuthProviderInfo, GovernanceDecision, GovernancePolicyDecision,
-    GovernedEvent, InlineState, RawInputCapture,
+    GovernedEvent, InlineState, Language, RawInputCapture,
 };
 
 fn provider(id: &str, label: &str) -> AuthProviderInfo {
     AuthProviderInfo {
         id: id.into(),
         label: label.into(),
+        description: None,
+        description_zh_cn: None,
+        builtin_base_url: None,
         fields: Vec::new(),
     }
 }
@@ -61,7 +64,7 @@ fn retry_auth_request_surfaces_validation_error() {
 
 #[test]
 fn record_auth_required_promotes_aliyun_from_legacy_order() {
-    // cosh-core's control protocol still emits the legacy provider order.
+    // Keep new shells compatible with older cosh-core provider ordering.
     let legacy = vec![
         provider("dashscope", "DashScope (百炼)"),
         provider("openai_compat", "OpenAI Compatible"),
@@ -75,7 +78,29 @@ fn record_auth_required_promotes_aliyun_from_legacy_order() {
     let ids: Vec<&str> = stored.providers.iter().map(|p| p.id.as_str()).collect();
     // Aliyun promoted to front; other providers keep their original relative order.
     assert_eq!(ids, ["aliyun", "dashscope", "openai_compat"]);
-    assert!(stored.providers[0].label.contains("免费可用"));
+    assert_eq!(stored.providers[0].label, "Aliyun Authentication");
+}
+
+#[test]
+fn zh_cn_auth_picker_localizes_title_and_provider_guidance() {
+    let mut coding_plan = provider("coding_plan", "Coding Plan");
+    coding_plan.description = Some("For individual developers • Weekly quota included".to_string());
+    coding_plan.description_zh_cn = Some("面向个人开发者 • 包含每周额度".to_string());
+    let mut state = InlineState {
+        language: Language::ZhCn,
+        ..InlineState::default()
+    };
+    let ids = record_auth_required(&mut state, &[governed_auth_required(vec![coding_plan])]);
+    let mut output = Vec::new();
+
+    render_auth_panel(&mut state, &ids, &mut output).expect("render zh-CN auth picker");
+
+    let output = String::from_utf8(output).expect("utf8 auth panel");
+    assert!(output.contains("需要认证"), "{output}");
+    assert!(output.contains("选择 AI 服务"), "{output}");
+    assert!(output.contains("面向个人开发者 • 包含每周额度"), "{output}");
+    assert!(!output.contains("Authentication Required"), "{output}");
+    assert!(!output.contains("For individual developers"), "{output}");
 }
 
 #[test]
@@ -96,6 +121,24 @@ fn pending_auth_capture_marks_secret_fields() {
     assert!(matches!(
         pending_auth_capture(&state),
         Some(RawInputCapture::TextQuestion { secret: true, .. })
+    ));
+}
+
+#[test]
+fn pending_auth_capture_keeps_the_picker_selection() {
+    let providers = vec![
+        provider("aliyun", "Aliyun Authentication"),
+        provider("coding_plan", "Coding Plan"),
+        provider("token_plan", "Token Plan"),
+        provider("dashscope", "DashScope"),
+    ];
+    let mut state = InlineState::default();
+    record_auth_required(&mut state, &[governed_auth_required(providers)]);
+    state.auth.state.as_mut().unwrap().selected_provider = 2;
+
+    assert!(matches!(
+        pending_auth_capture(&state),
+        Some(RawInputCapture::Question { selected: 2, .. })
     ));
 }
 
@@ -507,4 +550,24 @@ fn failed_ecs_challenge_edit_retry_drops_the_ecs_auth_source() {
             .map(String::as_str),
         Some("\u{2022}\u{2022}\u{2022}")
     );
+}
+
+#[test]
+fn provider_change_drops_stale_startup_auth_verdict() {
+    let mut state = InlineState::default();
+    state.personalization.foreground_model = Some("stale-model".to_string());
+    state.startup_auth.resolved = Some(false);
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<Option<bool>>(1);
+    state.startup_auth.pending = Some(receiver);
+
+    clear_observed_model_after_provider_change(&mut state);
+
+    // A configured session must not keep suppressing no-auth surfaces
+    // with the pre-change verdict; the reset falls back to the safe
+    // "unknown" state instead of guessing the new credential outcome.
+    assert!(state.personalization.foreground_model.is_none());
+    assert!(state.startup_auth.resolved.is_none());
+    assert!(state.startup_auth.pending.is_none());
+    assert!(!state.startup_auth.ai_unconfigured());
+    drop(sender);
 }

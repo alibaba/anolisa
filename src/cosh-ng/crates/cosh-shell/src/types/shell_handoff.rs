@@ -54,6 +54,19 @@ pub struct ShellHandoffRequest {
     pub tool_use_id: Option<String>,
     pub created_at_ms: u64,
     pub preview_hash: String,
+    /// One-time claim token minted at construction (#2142). Staged next to the
+    /// request file, the marker script echoes it back in the preexec marker so
+    /// the OSC parser can claim the command block even when the reported
+    /// command text was redacted. Requests persisted before this field existed
+    /// deserialize with an empty token and keep text-based matching.
+    ///
+    /// Security assumptions: minted from the OS CSPRNG (uuid v4 via
+    /// getrandom); influences only which command block closes which handoff,
+    /// never an approval decision. Treat as immutable after construction —
+    /// rewriting it after staging would orphan the sidecar the marker echoes
+    /// back and mis-associate the claim.
+    #[serde(default)]
+    pub token: String,
     /// Implicit-pager handling for the PTY transport only. Defaults to
     /// [`ImplicitPagerPolicy::Inherit`] so previously persisted requests keep
     /// their original semantics.
@@ -83,6 +96,7 @@ impl ShellHandoffRequest {
             request_id: None,
             tool_use_id: None,
             created_at_ms,
+            token: uuid::Uuid::new_v4().to_string(),
             implicit_pager_policy: ImplicitPagerPolicy::default(),
         };
         request.validate()?;
@@ -270,5 +284,21 @@ mod tests {
         let request: ShellHandoffRequest = serde_json::from_str(json).expect("legacy request");
 
         assert_eq!(request.implicit_pager_policy, ImplicitPagerPolicy::Inherit);
+        assert!(
+            request.token.is_empty(),
+            "requests persisted before #2142 carry no token and keep text matching"
+        );
+    }
+
+    #[test]
+    fn shell_handoff_mints_a_unique_claim_token_per_request() {
+        let first = handoff("git log").expect("handoff request");
+        let second = handoff("git log").expect("handoff request");
+
+        assert!(!first.token.is_empty(), "token is minted at construction");
+        assert_ne!(
+            first.token, second.token,
+            "identical commands must not share a claim token"
+        );
     }
 }

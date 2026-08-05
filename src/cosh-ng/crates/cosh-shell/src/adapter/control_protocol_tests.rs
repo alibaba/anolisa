@@ -304,12 +304,13 @@ fn parse_non_control_request_returns_none() {
 
 #[test]
 fn parse_initialize_capabilities_from_success_response() {
-    let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true,"can_handle_shell_evidence_tool":true}}}}"#;
+    let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":true,"can_handle_shell_evidence_tool":true,"can_handle_approval_receipt":true}}}}"#;
     let capabilities = parse_initialize_capabilities(line).expect("capabilities");
     assert!(capabilities.provider_initialize_seen);
     assert!(capabilities.can_handle_can_use_tool);
     assert!(capabilities.can_handle_host_executed_shell_tool_result);
     assert!(capabilities.can_handle_shell_evidence_tool);
+    assert!(capabilities.can_handle_approval_receipt);
 }
 
 #[test]
@@ -320,6 +321,16 @@ fn parse_initialize_capabilities_defaults_missing_flags_to_false() {
     assert!(!capabilities.can_handle_can_use_tool);
     assert!(!capabilities.can_handle_host_executed_shell_tool_result);
     assert!(!capabilities.can_handle_shell_evidence_tool);
+    assert!(!capabilities.can_handle_approval_receipt);
+}
+
+#[test]
+fn receipt_capable_requires_the_announced_capability() {
+    use std::sync::{Arc, Mutex};
+    let capabilities = Arc::new(Mutex::new(ControlProtocolCapabilities::default()));
+    assert!(!receipt_capable(&capabilities));
+    capabilities.lock().unwrap().can_handle_approval_receipt = true;
+    assert!(receipt_capable(&capabilities));
 }
 
 #[test]
@@ -390,6 +401,7 @@ fn serialize_host_executed_shell_result_format() {
             redaction_status: "bounded".to_string(),
             approval_id: Some("req-1".to_string()),
             tool_use_id: Some("toolu-1".to_string()),
+            input_wait: None,
         },
     };
     let s = serialize_host_executed_shell_result("ctrl-1", &result);
@@ -431,6 +443,57 @@ fn serialize_host_executed_shell_result_format() {
         v["response"]["response"]["result"]["metadata"].get("provider_visible_chars"),
         None
     );
+    // #2161: no input-wait facts => the field is omitted entirely.
+    assert_eq!(
+        v["response"]["response"]["result"]["metadata"].get("input_wait"),
+        None
+    );
+}
+
+#[test]
+fn serialize_host_executed_shell_result_input_wait_forms() {
+    let mut result = HostExecutedShellResult {
+        llm_content: "ShellCommandCompleted evidence".to_string(),
+        return_display: None,
+        metadata: HostExecutedShellMetadata {
+            command: "bash repro.sh".to_string(),
+            status: "completed".to_string(),
+            exit_code: 130,
+            signal: None,
+            cwd: "/tmp".to_string(),
+            end_cwd: "/tmp".to_string(),
+            duration_ms: 121_000,
+            output_ref: None,
+            redaction_status: "bounded".to_string(),
+            approval_id: Some("req-1".to_string()),
+            tool_use_id: Some("toolu-1".to_string()),
+            input_wait: Some(HostExecutedInputWait {
+                waited_secs: 120,
+                interrupted: true,
+            }),
+        },
+    };
+    // Interrupted form: detected + waited + reason.
+    let v: Value =
+        serde_json::from_str(&serialize_host_executed_shell_result("ctrl-1", &result)).unwrap();
+    let facts = &v["response"]["response"]["result"]["metadata"]["input_wait"];
+    assert_eq!(facts["detected"], true);
+    assert_eq!(facts["waited_secs"], 120);
+    assert_eq!(facts["interrupted"], true);
+    assert_eq!(facts["reason"], "input-wait-timeout");
+
+    // Answered form: detected without interrupt carries no reason.
+    result.metadata.input_wait = Some(HostExecutedInputWait {
+        waited_secs: 7,
+        interrupted: false,
+    });
+    let v: Value =
+        serde_json::from_str(&serialize_host_executed_shell_result("ctrl-2", &result)).unwrap();
+    let facts = &v["response"]["response"]["result"]["metadata"]["input_wait"];
+    assert_eq!(facts["detected"], true);
+    assert_eq!(facts["waited_secs"], 7);
+    assert_eq!(facts["interrupted"], false);
+    assert_eq!(facts.get("reason"), None);
 }
 
 #[test]
@@ -838,7 +901,7 @@ fn serialize_user_message_format() {
 
 #[test]
 fn parse_auth_required() {
-    let line = r#"{"type":"control_request","request_id":"auth-init","request":{"subtype":"auth_required","reason":"not_configured","providers":[{"id":"dashscope","label":"DashScope","fields":[{"name":"api_key","label":"API Key","hint":"get from console","secret":true,"required":true}]},{"id":"openai_compat","label":"OpenAI","fields":[{"name":"base_url","label":"Base URL","secret":false,"required":true,"placeholder":"https://api.openai.com/v1"},{"name":"api_key","label":"Key","secret":true,"required":true}]}]}}"#;
+    let line = r#"{"type":"control_request","request_id":"auth-init","request":{"subtype":"auth_required","reason":"not_configured","providers":[{"id":"dashscope","label":"DashScope","description":"Use a Bailian API key","description_zh_cn":"使用百炼 API Key","builtin_base_url":"https://dashscope.example/v1","fields":[{"name":"api_key","label":"API Key","hint":"get from console","secret":true,"required":true}]},{"id":"openai_compat","label":"OpenAI","fields":[{"name":"base_url","label":"Base URL","secret":false,"required":true,"placeholder":"https://api.openai.com/v1"},{"name":"api_key","label":"Key","secret":true,"required":true}]}]}}"#;
     let req = parse_control_request(line).expect("should parse auth_required");
     match req {
         ControlRequest::AuthRequired {
@@ -853,6 +916,18 @@ fn parse_auth_required() {
             assert_eq!(providers.len(), 2);
             assert_eq!(providers[0].id, "dashscope");
             assert_eq!(providers[0].label, "DashScope");
+            assert_eq!(
+                providers[0].description.as_deref(),
+                Some("Use a Bailian API key")
+            );
+            assert_eq!(
+                providers[0].description_zh_cn.as_deref(),
+                Some("使用百炼 API Key")
+            );
+            assert_eq!(
+                providers[0].builtin_base_url.as_deref(),
+                Some("https://dashscope.example/v1")
+            );
             assert_eq!(providers[0].fields.len(), 1);
             assert_eq!(providers[0].fields[0].name, "api_key");
             assert!(providers[0].fields[0].secret);
@@ -862,6 +937,9 @@ fn parse_auth_required() {
                 Some("get from console")
             );
             assert_eq!(providers[1].id, "openai_compat");
+            assert!(providers[1].description.is_none());
+            assert!(providers[1].description_zh_cn.is_none());
+            assert!(providers[1].builtin_base_url.is_none());
             assert_eq!(providers[1].fields.len(), 2);
             assert_eq!(
                 providers[1].fields[0].placeholder.as_deref(),

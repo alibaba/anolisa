@@ -299,7 +299,7 @@ fn summaries_are_newest_first_and_derive_metadata() {
     newer.updated_at_ms = older.updated_at_ms.saturating_add(10);
     store.persist(&mut newer).unwrap();
 
-    let (summaries, cursor) = store.list(10, None).unwrap();
+    let (summaries, cursor) = store.list(10, None, false).unwrap();
 
     assert_eq!(summaries.len(), 2);
     assert_eq!(summaries[0].session_id, newer.session_id);
@@ -308,10 +308,10 @@ fn summaries_are_newest_first_and_derive_metadata() {
     assert_eq!(summaries[0].health, SessionHealth::Ready);
     assert!(cursor.is_none());
 
-    let (first_page, cursor) = store.list(1, None).unwrap();
+    let (first_page, cursor) = store.list(1, None, false).unwrap();
     assert_eq!(first_page.len(), 1);
     let cursor = cursor.expect("second page cursor");
-    let (second_page, final_cursor) = store.list(1, Some(&cursor)).unwrap();
+    let (second_page, final_cursor) = store.list(1, Some(&cursor), false).unwrap();
     assert_eq!(second_page.len(), 1);
     assert_ne!(first_page[0].session_id, second_page[0].session_id);
     assert!(final_cursor.is_none());
@@ -328,7 +328,7 @@ fn summaries_bound_untrusted_model_and_mismatched_workspace_metadata() {
     for summary in [
         store.inspect(&session.session_id).unwrap(),
         store.validate(&session.session_id).unwrap(),
-        store.list(1, None).unwrap().0.remove(0),
+        store.list(1, None, false).unwrap().0.remove(0),
     ] {
         let model = summary.model.expect("bounded model");
         assert!(model.len() <= MAX_SUMMARY_MODEL_BYTES);
@@ -349,7 +349,7 @@ fn summaries_bound_untrusted_model_and_mismatched_workspace_metadata() {
     assert!(inspected.workspace_scope.len() <= MAX_SUMMARY_WORKSPACE_BYTES);
     assert!(inspected.workspace_scope.ends_with('…'));
     let listed = store
-        .list(MAX_LIST_LIMIT, None)
+        .list(MAX_LIST_LIMIT, None, false)
         .unwrap()
         .0
         .into_iter()
@@ -370,12 +370,12 @@ fn stable_cursor_survives_deletion_of_previous_page() {
     newer.updated_at_ms = older.updated_at_ms.saturating_add(10);
     store.persist(&mut newer).unwrap();
 
-    let (first_page, cursor) = store.list(1, None).unwrap();
+    let (first_page, cursor) = store.list(1, None, false).unwrap();
     assert_eq!(first_page[0].session_id, newer.session_id);
     fs::remove_file(store.session_file(&newer.session_id)).unwrap();
 
     let (second_page, final_cursor) = store
-        .list(1, cursor.as_deref())
+        .list(1, cursor.as_deref(), false)
         .expect("stable second page");
 
     assert_eq!(second_page.len(), 1);
@@ -389,7 +389,7 @@ fn invalid_list_cursor_is_typed() {
     let store = store(&temp);
 
     assert!(matches!(
-        store.list(10, Some("not-a-cursor")),
+        store.list(10, Some("not-a-cursor"), false),
         Err(SessionError::InvalidCursor { .. })
     ));
 }
@@ -402,7 +402,7 @@ fn list_keeps_healthy_sessions_visible_beside_invalid_utf8() {
     store.persist(&mut healthy).unwrap();
     let corrupt = write_invalid_utf8_session(&store);
 
-    let (summaries, cursor) = store.list(10, None).unwrap();
+    let (summaries, cursor) = store.list(10, None, false).unwrap();
 
     assert_eq!(summaries.len(), 2);
     assert!(cursor.is_none());
@@ -415,7 +415,189 @@ fn list_keeps_healthy_sessions_visible_beside_invalid_utf8() {
 }
 
 #[test]
-fn list_skips_unreadable_uuid_entry_without_hiding_healthy_sessions() {
+fn list_all_workspaces_includes_foreign_sessions_as_scope_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let persist_dir = temp.path().join("sessions");
+    fs::create_dir_all(&persist_dir).unwrap();
+    let local_workspace = temp.path().join("local");
+    let foreign_workspace = temp.path().join("foreign");
+    fs::create_dir_all(&local_workspace).unwrap();
+    fs::create_dir_all(&foreign_workspace).unwrap();
+
+    let local_store =
+        SessionStore::for_workspace(persist_dir.to_str().unwrap(), &local_workspace).unwrap();
+    let foreign_store =
+        SessionStore::for_workspace(persist_dir.to_str().unwrap(), &foreign_workspace).unwrap();
+
+    let mut local = new_session(&local_store, "local prompt");
+    local_store.persist(&mut local).unwrap();
+    let mut foreign = new_session(&foreign_store, "foreign prompt");
+    foreign_store.persist(&mut foreign).unwrap();
+
+    // Default list remains workspace-scoped.
+    let (local_only, _) = local_store.list(10, None, false).unwrap();
+    assert_eq!(local_only.len(), 1);
+    assert_eq!(local_only[0].session_id, local.session_id);
+    assert_eq!(local_only[0].health, SessionHealth::Ready);
+
+    // --all aggregates across workspace-hash directories.
+    let (all, cursor) = local_store.list(10, None, true).unwrap();
+    assert_eq!(all.len(), 2);
+    assert!(cursor.is_none());
+
+    let local_summary = all
+        .iter()
+        .find(|s| s.session_id == local.session_id)
+        .unwrap();
+    assert_eq!(local_summary.workspace_scope, local_store.workspace_scope());
+    assert_eq!(local_summary.health, SessionHealth::Ready);
+
+    let foreign_summary = all
+        .iter()
+        .find(|s| s.session_id == foreign.session_id)
+        .unwrap();
+    assert_eq!(
+        foreign_summary.workspace_scope,
+        foreign_store.workspace_scope()
+    );
+    assert_eq!(foreign_summary.health, SessionHealth::ScopeMismatch);
+    // Foreign sessions should still show their real metadata so the picker
+    // row is consistent with local sessions.
+    assert_eq!(foreign_summary.model.as_deref(), Some("mock-model"));
+    assert_eq!(foreign_summary.message_count, 2);
+    assert_eq!(
+        foreign_summary.first_prompt.as_deref(),
+        Some("foreign prompt")
+    );
+}
+
+#[test]
+fn list_all_workspaces_returns_empty_page_when_root_is_missing() {
+    let temp = tempfile::tempdir().unwrap();
+    let persist_dir = temp.path().join("sessions");
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    // The persist root has never been created because no session was written.
+    assert!(!persist_dir.exists());
+
+    let store = SessionStore::for_workspace(persist_dir.to_str().unwrap(), &workspace).unwrap();
+    let (summaries, cursor) = store.list(10, None, true).unwrap();
+
+    assert!(summaries.is_empty());
+    assert!(cursor.is_none());
+}
+
+#[test]
+fn list_all_workspaces_pages_without_reading_off_page_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let persist_dir = temp.path().join("sessions");
+    let local_workspace = temp.path().join("local");
+    let foreign_workspace = temp.path().join("foreign");
+    fs::create_dir_all(&local_workspace).unwrap();
+    fs::create_dir_all(&foreign_workspace).unwrap();
+
+    let local_store =
+        SessionStore::for_workspace(persist_dir.to_str().unwrap(), &local_workspace).unwrap();
+    let foreign_store =
+        SessionStore::for_workspace(persist_dir.to_str().unwrap(), &foreign_workspace).unwrap();
+
+    let mut local = new_session(&local_store, "local prompt");
+    local_store.persist(&mut local).unwrap();
+    let mut foreign = new_session(&foreign_store, "foreign prompt");
+    foreign_store.persist(&mut foreign).unwrap();
+
+    reset_session_file_read_count();
+    let (first, cursor) = local_store.list(1, None, true).unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(session_file_read_count(), 1);
+
+    let (second, final_cursor) = local_store.list(1, cursor.as_deref(), true).unwrap();
+    assert_eq!(second.len(), 1);
+    assert_eq!(session_file_read_count(), 2);
+    assert!(final_cursor.is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn list_all_workspaces_skips_unreadable_workspace_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let persist_dir = temp.path().join("sessions");
+    let local_workspace = temp.path().join("local");
+    let foreign_workspace = temp.path().join("foreign");
+    fs::create_dir_all(&local_workspace).unwrap();
+    fs::create_dir_all(&foreign_workspace).unwrap();
+
+    let local_store =
+        SessionStore::for_workspace(persist_dir.to_str().unwrap(), &local_workspace).unwrap();
+    let foreign_store =
+        SessionStore::for_workspace(persist_dir.to_str().unwrap(), &foreign_workspace).unwrap();
+
+    let mut local = new_session(&local_store, "local prompt");
+    local_store.persist(&mut local).unwrap();
+    let mut foreign = new_session(&foreign_store, "foreign prompt");
+    foreign_store.persist(&mut foreign).unwrap();
+
+    // Remove read permissions from the foreign workspace scoped directory.
+    // The --all listing must skip it rather than fail entirely.
+    let foreign_scoped_dir = foreign_store.base_dir.clone();
+    fs::set_permissions(&foreign_scoped_dir, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let result = local_store.list(10, None, true);
+
+    // Restore permissions so tempfile can clean up.
+    fs::set_permissions(&foreign_scoped_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let (all, cursor) = result.expect("list --all should not fail because of one bad scope");
+    assert_eq!(all.len(), 1);
+    assert!(cursor.is_none());
+    assert_eq!(all[0].session_id, local.session_id);
+}
+
+#[test]
+fn list_all_workspaces_handles_many_sessions_without_fd_exhaustion() {
+    let temp = tempfile::tempdir().unwrap();
+    let persist_dir = temp.path().join("sessions");
+    let workspace_count = 5;
+    let sessions_per_workspace = 60;
+    let stores: Vec<SessionStore> = (0..workspace_count)
+        .map(|i| {
+            let workspace = temp.path().join(format!("workspace{i}"));
+            fs::create_dir_all(&workspace).unwrap();
+            SessionStore::for_workspace(persist_dir.to_str().unwrap(), &workspace).unwrap()
+        })
+        .collect();
+
+    for (i, store) in stores.iter().enumerate() {
+        for j in 0..sessions_per_workspace {
+            let mut session = new_session(store, &format!("prompt {i}-{j}"));
+            session.updated_at_ms = ((i * sessions_per_workspace + j) as u64) * 1000;
+            store.persist(&mut session).unwrap();
+        }
+    }
+
+    // With the old implementation this would clone the workspace directory
+    // handle once per session (300 fd) and could hit EMFILE on systems with
+    // a low soft fd limit. The new implementation keeps fd usage O(1).
+    let (page, cursor) = stores[0].list(10, None, true).unwrap();
+    assert_eq!(page.len(), 10);
+    assert!(cursor.is_some());
+
+    // Pagination should still work across the full set (clamped to 100/page).
+    let (second, cursor) = stores[0].list(100, cursor.as_deref(), true).unwrap();
+    assert_eq!(second.len(), 100);
+    assert!(cursor.is_some());
+
+    let (third, cursor) = stores[0].list(100, cursor.as_deref(), true).unwrap();
+    assert_eq!(third.len(), 100);
+    assert!(cursor.is_some());
+
+    let (fourth, final_cursor) = stores[0].list(100, cursor.as_deref(), true).unwrap();
+    assert_eq!(fourth.len(), 90);
+    assert!(final_cursor.is_none());
+}
+
+#[test]
+fn ps_unreadable_uuid_entry_without_hiding_healthy_sessions() {
     let temp = tempfile::tempdir().unwrap();
     let store = store(&temp);
     let mut healthy = new_session(&store, "healthy prompt");
@@ -423,7 +605,7 @@ fn list_skips_unreadable_uuid_entry_without_hiding_healthy_sessions() {
     let directory_id = ProviderSessionId::new();
     fs::create_dir(store.session_file(&directory_id)).unwrap();
 
-    let (summaries, cursor) = store.list(10, None).unwrap();
+    let (summaries, cursor) = store.list(10, None, false).unwrap();
 
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].session_id, healthy.session_id);
@@ -491,7 +673,8 @@ fn listing_distinguishes_persisted_shell_envelope_sessions() {
             "Handle this natural-language shell prompt request for a Shell-first assistant.\n\
              Decide based on user intent:\n\
              Do not mention Claude Code, plan mode, implementation status, or internal workflow.\n\n\
-             user_input: {input}\n\n\nruntime_frame:\ncwd: /root\n\n\
+             user_input: {input}\n\n\nruntime_frame:
+cwd: /root\n\n\
              cosh-shell Agent contract:\n- User modes: recommend and agent."
         )
     };
@@ -501,7 +684,7 @@ fn listing_distinguishes_persisted_shell_envelope_sessions() {
     newer.updated_at_ms = older.updated_at_ms.saturating_add(10);
     store.persist(&mut newer).unwrap();
 
-    let (summaries, _) = store.list(10, None).unwrap();
+    let (summaries, _) = store.list(10, None, false).unwrap();
 
     assert_eq!(
         summaries[0].first_prompt.as_deref(),
@@ -878,7 +1061,7 @@ fn relative_symlink_cannot_escape_workspace_for_legacy_lookup() {
         Err(SessionError::NotFound { .. })
     ));
     assert!(store.session_ids().unwrap().is_empty());
-    assert!(store.list(10, None).unwrap().0.is_empty());
+    assert!(store.list(10, None, false).unwrap().0.is_empty());
     assert!(matches!(
         store.clear(&id, &[]),
         Err(SessionError::NotFound { .. })
@@ -907,7 +1090,7 @@ fn scoped_directory_symlink_cannot_cross_workspace_on_clear() {
         Err(SessionError::Io { .. })
     ));
     assert!(matches!(
-        second.list(10, None),
+        second.list(10, None, false),
         Err(SessionError::Io { .. })
     ));
     assert!(matches!(second.session_ids(), Err(SessionError::Io { .. })));
@@ -988,7 +1171,7 @@ fn list_includes_workspace_owned_legacy_sessions() {
     let corrupt_id = ProviderSessionId::new();
     fs::write(legacy_dir.join(format!("{corrupt_id}.json")), b"{broken").unwrap();
 
-    let (summaries, cursor) = store.list(10, None).unwrap();
+    let (summaries, cursor) = store.list(10, None, false).unwrap();
 
     assert_eq!(summaries.len(), 3);
     assert!(cursor.is_none());
@@ -1020,7 +1203,7 @@ fn scoped_entry_shadows_legacy_copy_in_list() {
     )
     .unwrap();
 
-    let (summaries, _) = store.list(10, None).unwrap();
+    let (summaries, _) = store.list(10, None, false).unwrap();
 
     assert_eq!(summaries.len(), 1);
     assert_eq!(
@@ -1093,7 +1276,7 @@ fn list_shows_legacy_sessions_without_any_scoped_directory() {
     )
     .unwrap();
 
-    let (summaries, cursor) = store.list(10, None).unwrap();
+    let (summaries, cursor) = store.list(10, None, false).unwrap();
 
     assert_eq!(summaries.len(), 1);
     assert!(cursor.is_none());
@@ -1187,11 +1370,11 @@ fn list_bounds_each_page_and_marks_oversized_files_corrupt() {
     store.persist(&mut healthy).unwrap();
 
     reset_session_file_read_count();
-    let (first, cursor) = store.list(1, None).unwrap();
+    let (first, cursor) = store.list(1, None, false).unwrap();
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].session_id, healthy_id);
     assert_eq!(session_file_read_count(), 1);
-    let (second, final_cursor) = store.list(1, cursor.as_deref()).unwrap();
+    let (second, final_cursor) = store.list(1, cursor.as_deref(), false).unwrap();
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].session_id, oversized);
     assert_eq!(second[0].health, SessionHealth::Corrupt);

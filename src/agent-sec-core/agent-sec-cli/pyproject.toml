@@ -77,6 +77,7 @@ include = [
     "src/agent_sec_cli/prompt_scanner/rules/*.yaml",
     "src/agent_sec_cli/skill_ledger/scanner/builtins/cisco_static/NOTICE",
     "src/agent_sec_cli/skill_ledger/scanner/builtins/cisco_static/rules/*.yaml",
+    "src/agent_sec_cli/skill_ledger/analyze.schema.json",
 ]
 # Native module name (must match lib.rs function name)
 module-name = "agent_sec_cli._native"

@@ -19,6 +19,7 @@ pii_checker_hook = load_standalone_hook("qwen_pii_checker_hook", _HOOK_PATH)
 @pytest.fixture(autouse=True)
 def _clean_environment(monkeypatch):
     for name in (
+        "PII_CHECKER_HOOK_ENABLED",
         "PII_CHECKER_ENABLED",
         "PII_CHECKER_MODE",
         "PII_CHECKER_INCLUDE_LOW_CONFIDENCE",
@@ -234,6 +235,119 @@ def test_disabled_checker_skips_cli(monkeypatch, capsys, value):
     assert stderr == ""
 
 
+def test_new_disabled_switch_short_circuits_before_reading_input(monkeypatch, capsys):
+    monkeypatch.setenv("PII_CHECKER_HOOK_ENABLED", "false")
+    monkeypatch.setattr(
+        pii_checker_hook,
+        "_read_hook_input",
+        lambda: pytest.fail("input should not be read"),
+    )
+    monkeypatch.setattr(
+        pii_checker_hook.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("CLI should not be called"),
+    )
+
+    pii_checker_hook.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {}
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize("value", ["true", "invalid"])
+def test_new_enabled_switch_overrides_legacy_disabled_value(monkeypatch, capsys, value):
+    monkeypatch.setenv("PII_CHECKER_HOOK_ENABLED", value)
+    monkeypatch.setenv("PII_CHECKER_ENABLED", "false")
+    calls = []
+
+    def fake_run(*_args, **_kwargs):
+        calls.append(True)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(_scan_result()),
+            stderr="",
+        )
+
+    monkeypatch.setattr(pii_checker_hook.subprocess, "run", fake_run)
+
+    output, _stderr = _run_main(
+        monkeypatch,
+        capsys,
+        _base("UserPromptSubmit", prompt="alice@example.com"),
+    )
+
+    assert output == {}
+    assert calls == [True]
+
+
+def test_warn_policy_warns_and_continues(monkeypatch, capsys):
+    monkeypatch.setenv("PII_CHECKER_MODE", "warn")
+    monkeypatch.setattr(
+        pii_checker_hook.subprocess,
+        "run",
+        lambda args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(_scan_result("deny", "token=[REDACTED]")),
+            stderr="",
+        ),
+    )
+
+    output, _stderr = _run_main(
+        monkeypatch,
+        capsys,
+        _base("UserPromptSubmit", prompt="raw-secret-value"),
+    )
+
+    assert set(output) == {"systemMessage"}
+    assert "Execution will continue" in output["systemMessage"]
+
+
+def test_ask_policy_requests_pre_tool_approval(monkeypatch, capsys):
+    monkeypatch.setenv("PII_CHECKER_MODE", "ask")
+    monkeypatch.setattr(
+        pii_checker_hook.subprocess,
+        "run",
+        lambda args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(_scan_result("deny", "token=[REDACTED]")),
+            stderr="",
+        ),
+    )
+
+    output, _stderr = _run_main(
+        monkeypatch,
+        capsys,
+        _base("PreToolUse", tool_input={"token": "raw-secret-value"}),
+    )
+
+    assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+def test_ask_policy_falls_back_to_warning_without_confirmation(monkeypatch, capsys):
+    monkeypatch.setenv("PII_CHECKER_MODE", "ask")
+    monkeypatch.setattr(
+        pii_checker_hook.subprocess,
+        "run",
+        lambda args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(_scan_result("deny", "token=[REDACTED]")),
+            stderr="",
+        ),
+    )
+
+    output, _stderr = _run_main(
+        monkeypatch,
+        capsys,
+        _base("UserPromptSubmit", prompt="raw-secret-value"),
+    )
+
+    assert set(output) == {"systemMessage"}
+    assert (
+        "Approval is unavailable here; execution continues" in output["systemMessage"]
+    )
+
+
 def test_observe_deny_uses_only_redacted_evidence(monkeypatch, capsys):
     def fake_run(args, **kwargs):
         return SimpleNamespace(
@@ -250,13 +364,7 @@ def test_observe_deny_uses_only_redacted_evidence(monkeypatch, capsys):
         _base("PreToolUse", tool_input={"password": "raw-secret-value"}),
     )
 
-    assert set(output) == {"systemMessage"}
-    assert "password=[REDACTED]" in output["systemMessage"]
-    serialized = json.dumps(output)
-    assert "raw-secret-value" not in serialized
-    assert "credential" not in serialized
-    assert "severity" not in serialized
-    assert "permissionDecision" not in serialized
+    assert output == {}
     assert stderr == ""
 
 
@@ -362,8 +470,11 @@ def test_post_tool_use_warn_or_observe_does_not_stop(
         _base("PostToolUse", tool_response={"stdout": "raw-secret-value"}),
     )
 
-    assert set(output) == {"systemMessage"}
-    assert "continue" not in output
+    if mode == "observe":
+        assert output == {}
+    else:
+        assert set(output) == {"systemMessage"}
+        assert "continue" not in output
 
 
 @pytest.mark.parametrize("mode", ["observe", "block"])
@@ -594,3 +705,10 @@ def test_redacted_evidence_is_deduplicated_bounded_and_shortened():
     assert len(evidence) == 3
     assert len(evidence[0]) == 80
     assert evidence[0].endswith("...")
+
+
+def test_invalid_mode_reports_observe_fallback(monkeypatch, capsys):
+    monkeypatch.setenv("PII_CHECKER_MODE", "banana")
+
+    assert pii_checker_hook._policy() == "observe"
+    assert "invalid PII_CHECKER_MODE; using observe" in capsys.readouterr().err

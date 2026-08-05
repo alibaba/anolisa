@@ -920,11 +920,11 @@ for line in sys.stdin:
     }
 
     fn tool_context() -> ToolContext {
-        ToolContext {
-            cwd: PathBuf::from("/tmp"),
-            session_id: "test".to_string(),
-            project_root: PathBuf::from("/tmp"),
-        }
+        ToolContext::new(
+            PathBuf::from("/tmp"),
+            "test".to_string(),
+            PathBuf::from("/tmp"),
+        )
     }
 
     #[tokio::test]

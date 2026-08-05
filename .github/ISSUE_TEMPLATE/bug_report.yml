@@ -1,56 +1,73 @@
 name: Bug Report
-description: Report a bug to help us improve
-title: "bug: "
-labels: ["bug"]
+description: Report something that is not working
+labels: ["type:bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Please prefix the title with `[component]`, e.g. `[cosh] bug: login fails`.
+        Thanks for reporting a problem. A short, reproducible report is enough.
+        Please remove tokens, keys, private addresses, and other sensitive data.
 
-        **Tip:** Run `anolisa bug` to auto-generate diagnostic info, then paste the output into the "Diagnostic Output" field below.
   - type: dropdown
     id: component
     attributes:
       label: Component
-      description: Which component is affected?
+      description: Choose the closest area. Select "not sure" when the boundary is unclear.
       options:
         - anolisa
-        - cosh
-        - cosh-ng
-        - sec-core
-        - skill
-        - sight
         - tokenless
-        - ckpt
-        - memory
+        - cosh-ng
+        - cosh
         - skillfs
+        - sight
+        - sec-core
+        - memory
+        - ckpt
+        - skill
+        - project-wide
+        - not sure
         - other
     validations:
       required: true
+
   - type: textarea
-    id: description
+    id: problem
     attributes:
       label: What happened?
-      description: Describe the bug and how to reproduce it.
+      description: Briefly include the command or operation, the result, and what you expected.
       placeholder: |
-        Bug description:
+        I ran:
+          anolisa ...
 
-        Steps to reproduce:
-        1. Run `anolisa ...`
-        2. Observe ...
+        What happened:
+          ...
 
-        Expected behavior:
+        What I expected:
+          ...
     validations:
       required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How can we reproduce it?
+      description: A minimal example is enough. Skip details that are not relevant.
+      placeholder: |
+        1. Install or configure ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+
   - type: textarea
     id: diagnostics
     attributes:
-      label: Diagnostic Output
-      description: Paste the output of `anolisa bug` (or `anolisa bug --capability <name>`).
+      label: Diagnostic output
+      description: Optional. Run `anolisa bug` and remove any secrets or private addresses.
       render: shell
+
   - type: textarea
     id: additional
     attributes:
-      label: Additional Context
-      description: Screenshots, config snippets, or anything else that helps.
+      label: Anything else?
+      description: Optional logs, screenshots, configuration, or context.

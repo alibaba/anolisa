@@ -125,6 +125,56 @@ def test_default_config_registers_skill_ledger_hooks():
     assert ctx.hooks == ["pre_tool_call", "transform_llm_output"]
 
 
+def test_environment_enabled_overrides_disabled_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = _RecordingHermesContext()
+    config = load_config(_HERMES_PLUGIN_DIR / "src")
+    config["capabilities"]["skill-ledger"]["enabled"] = False
+    monkeypatch.setenv("SKILL_LEDGER_HOOK_ENABLED", "true")
+
+    register_capabilities(ctx, [SkillLedgerCapability()], config)
+
+    assert ctx.hooks == ["pre_tool_call", "transform_llm_output"]
+
+
+def test_environment_policy_overrides_capability_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SKILL_LEDGER_MODE", "observe")
+
+    capability = _make_capability(tmp_path, policy="block")
+
+    assert capability._policy == "observe"
+
+
+def test_environment_mode_deny_alias_overrides_capability_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SKILL_LEDGER_MODE", "deny")
+
+    capability = _make_capability(tmp_path, policy="observe")
+
+    assert capability._policy == "block"
+
+
+@patch("hermes_plugin_src.capabilities.skill_ledger.call_agent_sec_cli")
+def test_hook_disabled_short_circuits_before_resolving_or_calling_cli(
+    mock_cli,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SKILL_LEDGER_HOOK_ENABLED", "false")
+    capability = _make_capability(tmp_path)
+
+    with patch.object(capability, "_resolved_skills_dir") as resolve_root:
+        result = capability._on_pre_tool_call("skill_view", object())
+
+    assert result is None
+    resolve_root.assert_not_called()
+    mock_cli.assert_not_called()
+
+
 class TestSkillLedgerHooks:
     """Behavior tests for pre_tool_call and transform_llm_output."""
 

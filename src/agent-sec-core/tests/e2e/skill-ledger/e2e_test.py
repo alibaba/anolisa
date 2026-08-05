@@ -1172,7 +1172,7 @@ def _run_hook(input_data, env_extra=None):
 def _hook_env(env_extra: dict | None = None, *, policy: str) -> dict:
     """Return a hook environment with an explicit Skill Ledger hook policy."""
     env = dict(env_extra or {})
-    env["SKILL_LEDGER_HOOK_POLICY"] = policy
+    env["SKILL_LEDGER_MODE"] = policy
     return env
 
 

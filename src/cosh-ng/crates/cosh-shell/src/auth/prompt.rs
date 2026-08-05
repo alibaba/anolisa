@@ -3,13 +3,15 @@
 use std::io::{self, Write};
 
 use crate::runtime::prelude::{
-    QuestionInputFeedback, QuestionPanelModel, QuestionSelectionMode, RatatuiInlineRenderer,
+    I18n, MessageId, QuestionInputFeedback, QuestionPanelModel, QuestionSelectionMode,
+    RatatuiInlineRenderer,
 };
 use crate::runtime::state::InlineState;
 
 use super::capture::auth_capture_id;
 use super::delete_confirm::render_delete_confirmation;
 use super::menu::{existing_provider_label, management_options};
+use super::provider_display::provider_option;
 use super::provider_management::provider_action_options;
 use super::runtime::AuthPhase;
 
@@ -21,6 +23,7 @@ pub(super) fn render_current_auth_panel<W: Write>(
         return Ok(());
     };
     let renderer = RatatuiInlineRenderer::for_terminal().with_language(state.language);
+    let i18n = I18n::new(state.language);
     let panel_id = auth_capture_id(auth);
 
     match auth.phase {
@@ -79,11 +82,11 @@ pub(super) fn render_current_auth_panel<W: Write>(
             let options: Vec<String> = auth
                 .providers
                 .iter()
-                .map(|provider| provider.label.clone())
+                .map(|provider| provider_option(provider, state.language))
                 .collect();
             let model = QuestionPanelModel {
                 id: &panel_id,
-                question: "\u{1f511} Authentication Required \u{2014} Select your AI provider:",
+                question: i18n.t(MessageId::AuthSelectProviderQuestion),
                 options: &options,
                 selected_option: auth.selected_provider,
                 selected_options: &[],

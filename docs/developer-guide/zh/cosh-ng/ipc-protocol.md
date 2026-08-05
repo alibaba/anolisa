@@ -158,7 +158,7 @@ cargo test --locked -p cosh-platform -- checkpoint
 请求使用 `action` 区分：
 
 ```json
-{"action":"list","workspace_scope":"/work/project","limit":20,"cursor":null}
+{"action":"list","workspace_scope":"/work/project","limit":20,"cursor":null,"all_workspaces":false}
 {"action":"inspect","workspace_scope":"/work/project","session_id":"2d711642-b726-4b04-8d2a-8a0470f4ed24"}
 {"action":"validate","workspace_scope":"/work/project","session_id":"2d711642-b726-4b04-8d2a-8a0470f4ed24"}
 {"action":"prepare_clear_all","workspace_scope":"/work/project","protected_session_ids":[],"limit":4096,"cursor":null}
@@ -167,7 +167,7 @@ cargo test --locked -p cosh-platform -- checkpoint
 
 | 动作 | 契约 |
 |------|------|
-| `list` | 返回按更新时间倒序的摘要。`limit` 默认为 20，并限制在 1–100；使用 opaque `next_cursor` 读取下一页。 |
+| `list` | 返回按更新时间倒序的摘要。`limit` 默认为 20，并限制在 1–100；使用 opaque `next_cursor` 读取下一页。当 `all_workspaces` 为 `true` 时，Shell 客户端请求更大的初始页大小 100 以减少首页不完整输出，但仍受核心侧 1–100 的相同限制。Core 会枚举存储根下所有工作空间哈希目录，返回所有工作空间的会话，并将非当前工作空间的会话标记为 `scope_mismatch`。`all_workspaces` 默认值为 `false`，以保持向后兼容。 |
 | `inspect` | 即使健康状态不允许恢复，也返回摘要。 |
 | `validate` | 完整加载信封，只有可恢复会话才成功。 |
 | `prepare_clear_all` | 不加载或传输摘要，按 UUID 字典序分页返回可清理和受保护 ID。`limit` 限制在 1–4096；通过 `next_cursor` 继续。只有完整计划可放入单个 4096-ID 分页时才允许省略 `limit`，避免旧客户端静默接受不完整计划。 |

@@ -8,6 +8,8 @@
 #   - claude-code with undetectable/old version: fail open (pass-through,
 #     no duplicate injection)
 #   - non-beneficial compression: pass-through for every agent
+#   - qoder-cli: compressed payload replaces the tool result as JSON text
+#     without an additive duplicate
 #   - other agents: additionalContext contract unchanged
 #
 # Uses stub `tokenless` / `claude` binaries so no real installation is needed.
@@ -236,17 +238,44 @@ trimmed=$(echo "$out" | tr -d '[:space:]')
 [ "$trimmed" = "{}" ] && pass "qoder-cli passes through with {}" \
     || fail "expected {}, got: $out"
 
-# ===== 4. Other agents keep the additionalContext contract =====
-section "Test 4: non-claude agents unchanged"
+# ===== 4. Qoder uses native output replacement =====
+section "Test 4: Qoder output replacement"
 
-info "4.1: qoder-cli — compressed payload via additionalContext"
+info "4.1: qoder-cli — compressed payload via updatedToolOutput"
 out=$(run_hook qoder-cli "$STUB1" "$BASH_INPUT")
 extra=$(jget "$out" "hookSpecificOutput.additionalContext")
 updated=$(jget "$out" "hookSpecificOutput.updatedToolOutput")
-if echo "$extra" | grep -qF "$SENTINEL" && [ -z "$updated" ]; then
-    pass "qoder-cli keeps additionalContext, no updatedToolOutput"
+updated_stdout=$(jget "$updated" "stdout")
+if echo "$updated_stdout" | grep -qF "$SENTINEL" && \
+        ! echo "$extra" | grep -qF "$SENTINEL"; then
+    pass "qoder-cli replaces output without additive duplication"
 else
-    fail "qoder-cli contract changed: $out"
+    fail "qoder-cli replacement contract invalid: $out"
+fi
+
+info "4.2: qoder-cli — string contract and Bash output schema preserved"
+schema_ok=$(python3 -c '
+import json, sys
+try:
+    uto = json.loads(sys.argv[1])["hookSpecificOutput"]["updatedToolOutput"]
+    parsed = json.loads(uto)
+except Exception:
+    print("false"); sys.exit(0)
+keys = {"stdout", "stderr", "interrupted", "isImage"}
+print("true" if isinstance(uto, str) and isinstance(parsed, dict)
+      and keys <= set(parsed) else "false")
+' "$out")
+[ "$schema_ok" = "true" ] && pass "qoder-cli emits JSON text with Bash schema" \
+    || fail "qoder-cli string contract or schema invalid: $out"
+
+info "4.3: generic agents keep the additive context fallback"
+out=$(run_hook generic-agent "$STUB1" "$BASH_INPUT")
+extra=$(jget "$out" "hookSpecificOutput.additionalContext")
+updated=$(jget "$out" "hookSpecificOutput.updatedToolOutput")
+if echo "$extra" | grep -qF "$SENTINEL" && [ -z "$updated" ]; then
+    pass "generic agents keep additionalContext fallback"
+else
+    fail "generic agent fallback changed: $out"
 fi
 
 # ===== 5. Env attribution stays additive-only on the replacement path =====
@@ -279,8 +308,13 @@ echo "$BASH_INPUT" | HOME="$home" PATH="$STUB1:$PATH" \
     TOKENLESS_AGENT_ID=claude-code python3 "$HOOK" >/dev/null 2>&1
 cache="$home/.tokenless/.claude-version"
 if [ -f "$cache" ]; then
-    dir_mode=$(stat -c '%a' "$home/.tokenless")
-    file_mode=$(stat -c '%a' "$cache")
+    if stat -c '%a' "$cache" >/dev/null 2>&1; then
+        dir_mode=$(stat -c '%a' "$home/.tokenless")
+        file_mode=$(stat -c '%a' "$cache")
+    else
+        dir_mode=$(stat -f '%Lp' "$home/.tokenless")
+        file_mode=$(stat -f '%Lp' "$cache")
+    fi
     [ "$file_mode" = "600" ] && [ "$dir_mode" = "700" ] \
         && pass "cache dir=700 file=600" \
         || fail "unexpected modes: dir=$dir_mode file=$file_mode"

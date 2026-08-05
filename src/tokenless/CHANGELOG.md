@@ -7,6 +7,19 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-07-31
+
+### Added
+
+- Tokenless can now be installed from npm on Linux and macOS x64/arm64, including the `tokenless`, `rtk`, and `toon` binaries plus framework adapters ([#1929](https://github.com/alibaba/anolisa/pull/1929)).
+- `tokenless stats diff` now explains estimated savings for records, sessions, and tool uses with text or JSON reports and bounded unified diffs ([#1991](https://github.com/alibaba/anolisa/pull/1991)).
+- `TOKENLESS_DATA_DIR` now sets one trusted directory for both statistics and reversible-compression databases while preserving per-database overrides ([#2038](https://github.com/alibaba/anolisa/pull/2038)).
+
+### Fixed
+
+- The Qwencode adapter now declares its delivered `compress-toon` capability, keeping adapter discovery consistent with its compression behavior ([#1945](https://github.com/alibaba/anolisa/pull/1945)).
+- Hermes copy installations now resolve shared hook resources from trusted system, XDG, and user data paths with actionable diagnostics when no safe candidate exists ([#2058](https://github.com/alibaba/anolisa/pull/2058)).
+
 ## [0.7.3] - 2026-07-28
 
 ### Added
@@ -203,6 +216,7 @@ Releases from 0.7.2 onward follow
 
 - introduce tokenless into ANOLISA (#199)
 
-[Unreleased]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.3...HEAD
+[Unreleased]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.4...HEAD
+[0.7.4]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.3...tokenless/v0.7.4
 [0.7.3]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.2...tokenless/v0.7.3
 [0.7.2]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.1...tokenless/v0.7.2

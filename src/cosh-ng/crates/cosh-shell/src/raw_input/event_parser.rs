@@ -130,6 +130,14 @@ impl CandidateLineBuffer {
                     }
                 }
             }
+            // CSI-u Backspace deletes like 0x7f (#2150): terminals speaking
+            // the extended keyboard protocol encode Backspace as `ESC [ 127 u`
+            // with an optional numeric modifier.
+            if let Some(len) = csi_u_backspace_len(&bytes[idx..]) {
+                self.pop_visible_char();
+                idx += len;
+                continue;
+            }
             match bytes[idx] {
                 CTRL_U => {
                     self.clear();
@@ -454,6 +462,37 @@ fn is_partial_paste_delimiter(suffix: &[u8]) -> bool {
     !suffix.is_empty()
         && suffix.len() < BRACKETED_PASTE_START.len()
         && (BRACKETED_PASTE_START.starts_with(suffix) || BRACKETED_PASTE_END.starts_with(suffix))
+}
+
+/// Length of a whole CSI-u Backspace sequence at the head of `bytes`
+/// (#2150): `ESC [ 127 u` or `ESC [ 127 ; <digits> u`. Any other
+/// codepoint, colon sub-parameters, or a sequence split across reads
+/// stays unrecognized and keeps the fail-closed Unsafe route.
+pub(super) fn csi_u_backspace_len(bytes: &[u8]) -> Option<usize> {
+    if !bytes.starts_with(b"\x1b[") {
+        return None;
+    }
+    let param_len = bytes[2..]
+        .iter()
+        .take_while(|byte| matches!(byte, b'0'..=b'9' | b';'))
+        .count();
+    if bytes.get(2 + param_len) != Some(&b'u') {
+        return None;
+    }
+    is_csi_u_backspace_params(&bytes[2..2 + param_len]).then_some(2 + param_len + 1)
+}
+
+/// CSI parameter body of a CSI-u Backspace (#2150): `127` alone or with
+/// one numeric modifier (`127;<digits>`); readline does not distinguish
+/// Backspace modifiers either, so all variants delete one character.
+pub(super) fn is_csi_u_backspace_params(params: &[u8]) -> bool {
+    match params.strip_prefix(b"127") {
+        Some(b"") => true,
+        Some([b';', modifier @ ..]) => {
+            !modifier.is_empty() && modifier.iter().all(u8::is_ascii_digit)
+        }
+        _ => false,
+    }
 }
 
 /// Only an explicit `??` candidate may compose soft newlines.

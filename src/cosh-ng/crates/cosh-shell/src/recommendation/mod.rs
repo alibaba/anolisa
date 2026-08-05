@@ -4,7 +4,6 @@ pub(crate) mod personal_context;
 #[cfg(test)]
 mod personal_context_tests;
 pub(crate) mod personal_crypto;
-pub(crate) mod personal_effective_config;
 pub(crate) mod personal_feedback;
 pub(crate) mod personal_history;
 pub(crate) mod personal_integration;

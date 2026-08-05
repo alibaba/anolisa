@@ -243,6 +243,43 @@ fn parse_boolean_fields() {
     assert!(cfg.debug);
 }
 
+// #2161: both config forms must reach `input_wait_timeout_secs`; invalid
+// values are treat-as-unset (built-in default), never 0/disabled.
+#[test]
+fn parse_input_wait_timeout_simple_key() {
+    let mut cfg = CoshConfig::default();
+    parse_simple_config("shell.input_wait_timeout_secs = 15\n", &mut cfg);
+    assert_eq!(cfg.input_wait_timeout_secs, 15);
+
+    let mut cfg = CoshConfig::default();
+    parse_simple_config("shell.input_wait_timeout_secs = 0\n", &mut cfg);
+    assert_eq!(cfg.input_wait_timeout_secs, 0);
+
+    let mut cfg = CoshConfig::default();
+    parse_simple_config("shell.input_wait_timeout_secs = nonsense\n", &mut cfg);
+    assert_eq!(cfg.input_wait_timeout_secs, 120);
+}
+
+#[test]
+fn parse_input_wait_timeout_shell_table() {
+    let mut cfg = CoshConfig::default();
+    parse_toml_config("[shell]\ninput_wait_timeout_secs = 15\n", &mut cfg);
+    assert_eq!(cfg.input_wait_timeout_secs, 15);
+
+    let mut cfg = CoshConfig::default();
+    parse_toml_config("[shell]\ninput_wait_timeout_secs = 0\n", &mut cfg);
+    assert_eq!(cfg.input_wait_timeout_secs, 0);
+
+    // Negative and non-integer values are treat-as-unset.
+    let mut cfg = CoshConfig::default();
+    parse_toml_config("[shell]\ninput_wait_timeout_secs = -5\n", &mut cfg);
+    assert_eq!(cfg.input_wait_timeout_secs, 120);
+
+    let mut cfg = CoshConfig::default();
+    parse_toml_config("[shell]\ninput_wait_timeout_secs = \"soon\"\n", &mut cfg);
+    assert_eq!(cfg.input_wait_timeout_secs, 120);
+}
+
 #[test]
 fn parse_toml_ui_language_and_booleans() {
     let content = r#"

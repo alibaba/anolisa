@@ -73,7 +73,7 @@ fn trusted_project_hook_executes_after_match() {
 
 #[cfg(unix)]
 #[test]
-fn trusted_project_hook_skips_non_user_interactive_origin() {
+fn trusted_project_hook_runs_only_for_user_shell_origins() {
     let project = std::env::temp_dir().join("cosh_hook_test_project_origin_gate");
     let hooks_dir = project.join(".cosh/hooks");
     let _ = fs::remove_dir_all(&project);
@@ -94,7 +94,6 @@ fn trusted_project_hook_skips_non_user_interactive_origin() {
     engine.load_project_hooks_from_root(&project, true);
 
     for origin in [
-        crate::types::CommandOrigin::UserSendToShell,
         crate::types::CommandOrigin::UserAnalysisAction,
         crate::types::CommandOrigin::AgentHandoff,
         crate::types::CommandOrigin::ProviderTool,
@@ -110,13 +109,23 @@ fn trusted_project_hook_skips_non_user_interactive_origin() {
         assert!(!marker.exists(), "origin {origin:?} executed project hook");
     }
 
-    let findings = engine.evaluate_with_disabled_and_origin(
-        &make_block("echo hi"),
-        &HashSet::new(),
+    for origin in [
         crate::types::CommandOrigin::UserInteractive,
-    );
-    assert_eq!(findings.len(), 1);
-    assert!(marker.exists());
+        crate::types::CommandOrigin::UserSendToShell,
+    ] {
+        let findings = engine.evaluate_with_disabled_and_origin(
+            &make_block("echo hi"),
+            &HashSet::new(),
+            origin,
+        );
+        assert_eq!(
+            findings.len(),
+            1,
+            "origin {origin:?} should run project hook"
+        );
+        assert!(marker.exists(), "origin {origin:?} skipped project hook");
+        let _ = fs::remove_file(&marker);
+    }
 
     let _ = fs::remove_dir_all(&project);
 }

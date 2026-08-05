@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use crate::types::AgentEvent;
 
 use super::super::claude::send_agent_event;
-use super::super::{control_protocol, AdapterError};
+use super::super::{control_protocol, AdapterError, ApprovalChannelMessage};
 use super::RunCommand;
 
 pub(super) fn handle_control_request(
@@ -37,7 +37,9 @@ pub(super) fn handle_control_request(
                 &tool_input,
                 &tool_use_id,
             ) {
-                let _ = command.internal_response_tx.send(response);
+                let _ = command
+                    .internal_response_tx
+                    .send(ApprovalChannelMessage::Response(response));
                 return true;
             }
             send_agent_event(

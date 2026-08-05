@@ -38,6 +38,10 @@ function trajectoryLastActiveMs(t: TrajectorySummary): number | null {
   return t.collected_at_ns > 0 ? Math.floor(t.collected_at_ns / 1_000_000) : null;
 }
 
+/** Trailing 36-char UUID of a Codex rollout stem (`rollout-<ts>-<uuid>`). */
+const TRAILING_UUID_RE =
+  /([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+
 /**
  * Merge eBPF-captured sessions with log-collected trajectories by session_id.
  * Qoder sessions share the same UUID across both sources; on overlap, tokens /
@@ -93,7 +97,12 @@ export function mergeSessions(
       }
     }
     const lastMs = trajectoryLastActiveMs(t);
-    const existing = byId.get(t.session_id);
+    // Codex rollout trajectories keep the full file stem (`rollout-<ts>-<uuid>`)
+    // as session_id while the eBPF side reports the bare trailing UUID; fall
+    // back to it so a session captured by both paths is merged, not duplicated.
+    const uuid = TRAILING_UUID_RE.exec(t.session_id)?.[1];
+    const existing =
+      byId.get(t.session_id) ?? (uuid && uuid !== t.session_id ? byId.get(uuid) : undefined);
     if (existing) {
       existing.sources.push('log');
       existing.project = t.project || existing.project;
@@ -222,7 +231,7 @@ export const AgentSessionsPage: React.FC = () => {
   // Reset to page 1 when filters change
   useEffect(() => {
     setPage(1);
-  }, [sourceFilter, agentFilter, search]);
+  }, [sourceFilter, agentFilter, search, rangeMs]);
 
   // Agent filter options, deduplicated case-insensitively: the eBPF side
   // reports "Qoder" while the log collector writes "qoder" — they are the
@@ -239,7 +248,12 @@ export const AgentSessionsPage: React.FC = () => {
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
+    // /api/trajectories has no time-range support, so log-collected sessions
+    // must be pruned client-side to honour the selected range; otherwise the
+    // list appears unchanged when switching presets.
+    const rangeStartMs = Date.now() - rangeMs;
     return merged.filter((s) => {
+      if (s.last_active_ms !== null && s.last_active_ms < rangeStartMs) return false;
       const sources = Array.isArray(s.sources) ? s.sources : [];
       if (sourceFilter !== 'all' && !sources.includes(sourceFilter)) return false;
       if (
@@ -260,7 +274,7 @@ export const AgentSessionsPage: React.FC = () => {
       }
       return true;
     });
-  }, [merged, sourceFilter, agentFilter, search]);
+  }, [merged, rangeMs, sourceFilter, agentFilter, search]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
@@ -271,7 +285,7 @@ export const AgentSessionsPage: React.FC = () => {
       {/* ── Toolbar: total + time range + refresh ── */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex flex-wrap items-center gap-4">
         <span className="text-sm text-gray-600">
-          共 <strong className="text-gray-900">{merged.length}</strong> 个会话
+          共 <strong className="text-gray-900">{filtered.length}</strong> 个会话
         </span>
         <div className="flex gap-2">
           {TIME_PRESETS.map(({ label, ms }) => (

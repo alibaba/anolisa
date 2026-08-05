@@ -1,121 +1,106 @@
 #!/usr/bin/env bash
-# uninstall.sh — Remove tokenless plugin from Qoder CLI.
+# uninstall.sh — Remove the native Tokenless plugin from Qoder CLI.
 set -euo pipefail
 
 AGENT="${ANOLISA_TARGET:-qoder}"
 COMPONENT="${ANOLISA_COMPONENT:-tokenless}"
-SETTINGS_PATH="$HOME/.qoder/settings.json"
 
-# Find qodercli binary. Mirrors install.sh: highest versioned binary
-# first (sort -V), then unversioned, then PATH.
-QODERCLI=""
-versioned_glob="$HOME/.qoder/bin/qodercli/qodercli-${ANOLISA_QODER_VERSION:-*}"
-# shellcheck disable=SC2086  # intentional glob expansion
-latest_versioned="$(ls -d $versioned_glob 2>/dev/null | sort -V | tail -1 || true)"
+find_qodercli() {
+    local versioned_glob latest_versioned candidate
+    versioned_glob="$HOME/.qoder/bin/qodercli/qodercli-${ANOLISA_QODER_VERSION:-*}"
+    # shellcheck disable=SC2086 # Intentional version glob expansion.
+    latest_versioned="$(ls -d $versioned_glob 2>/dev/null | sort -V | tail -1 || true)"
 
-for candidate in "$latest_versioned" \
-                 "$HOME/.qoder/bin/qodercli/qodercli" \
-                 "qodercli"; do
-    [ -z "$candidate" ] && continue
-    if [ -x "$candidate" ] || command -v "$candidate" &>/dev/null; then
-        QODERCLI="$candidate"
-        break
-    fi
-done
+    for candidate in "$latest_versioned" \
+                     "$HOME/.qoder/bin/qodercli/qodercli" \
+                     "qodercli"; do
+        [ -n "$candidate" ] || continue
+        if [ -x "$candidate" ] || command -v "$candidate" >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
 
+QODERCLI="$(find_qodercli || true)"
 echo "[${COMPONENT}] Removing ${AGENT} plugin..."
 
-# Unregister plugin via qodercli standard command
-if [ -n "$QODERCLI" ]; then
-    "$QODERCLI" plugins uninstall tokenless || true
-else
-    echo "[${COMPONENT}] WARNING: qodercli not found, cannot unregister plugin"
-fi
-
-# Remove hooks from settings.json. Match by hook "name" prefix "tokenless-"
-# rather than substring search in "command" — the latter would also nuke
-# any user-defined hook whose command merely mentions tokenless.
-if [ ! -f "$SETTINGS_PATH" ]; then
-    echo "[${COMPONENT}] ${AGENT} plugin removed."
+if [ -z "$QODERCLI" ]; then
+    echo "[${COMPONENT}] WARNING: qodercli not found, cannot unregister plugin" >&2
     exit 0
 fi
-
-if ! command -v python3 &>/dev/null; then
-    echo "[${COMPONENT}] WARNING: python3 not found, cannot prune hooks from ${SETTINGS_PATH}" >&2
-    echo "[${COMPONENT}] ${AGENT} plugin removed (hooks left in place)."
-    exit 0
+for subcommand in list uninstall; do
+    if ! "$QODERCLI" plugins "$subcommand" --help >/dev/null 2>&1; then
+        echo "[${COMPONENT}] ERROR: qodercli lacks required 'plugins ${subcommand}' support" >&2
+        exit 1
+    fi
+done
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "[${COMPONENT}] ERROR: python3 is required to verify Qoder plugin state" >&2
+    exit 1
 fi
 
-if ! SETTINGS_PATH="$SETTINGS_PATH" COMPONENT="$COMPONENT" python3 - <<'PYEOF'
-import json, os, sys
+read_plugin_state() {
+    local plugin_list_out
+    if ! plugin_list_out="$("$QODERCLI" plugins list --json 2>&1)"; then
+        echo "[${COMPONENT}] ERROR: qodercli plugins list failed during uninstall" >&2
+        echo "    Output: $plugin_list_out" >&2
+        return 1
+    fi
 
-settings_path = os.environ['SETTINGS_PATH']
-component = os.environ.get('COMPONENT', 'tokenless')
+    QODER_PLUGIN_LIST="$plugin_list_out" python3 - <<'PYEOF'
+import json
+import os
+import sys
 
 try:
-    with open(settings_path) as f:
-        cfg = json.load(f)
-except (OSError, json.JSONDecodeError) as e:
-    print(f'[{component}] WARNING: cannot parse {settings_path}: {e}', file=sys.stderr)
+    inventory = json.loads(os.environ["QODER_PLUGIN_LIST"])
+except json.JSONDecodeError as error:
+    print(f"invalid JSON from qodercli plugins list: {error}", file=sys.stderr)
     sys.exit(1)
 
-hooks = cfg.get('hooks', {})
-if not isinstance(hooks, dict):
-    sys.exit(0)
+if isinstance(inventory, dict):
+    inventory = inventory.get("plugins")
+if not isinstance(inventory, list):
+    print("qodercli plugin inventory is not a list", file=sys.stderr)
+    sys.exit(1)
 
-removed = False
-for event in list(hooks.keys()):
-    keep = []
-    for entry in hooks[event]:
-        owned = any(
-            (h.get('name') or '').startswith('tokenless-')
-            for h in (entry.get('hooks') or [])
-        )
-        if owned:
-            removed = True
-        else:
-            keep.append(entry)
-    if keep:
-        hooks[event] = keep
-    else:
-        del hooks[event]
-        removed = True
-
-# Remove tokenless@local from plugins.enabled — install.sh writes it
-# because qodercli plugins install does not touch settings.json's
-# plugins.enabled. Clean up our own state unconditionally: must run
-# regardless of remaining user hooks, and even when no tokenless hook
-# entries needed pruning (prior partial uninstall, manual edit).
-plugins_cfg = cfg.get('plugins')
-if isinstance(plugins_cfg, dict):
-    enabled = plugins_cfg.get('enabled')
-    if isinstance(enabled, list):
-        plugin_id = 'tokenless@local'
-        if plugin_id in enabled:
-            enabled.remove(plugin_id)
-            removed = True
-        if not enabled:
-            plugins_cfg.pop('enabled', None)
-    if not plugins_cfg:
-        cfg.pop('plugins', None)
-
-if not removed:
-    sys.exit(0)
-
-if hooks:
-    cfg['hooks'] = hooks
-else:
-    cfg.pop('hooks', None)
-
-# Atomic write
-tmp_path = settings_path + '.tmp'
-with open(tmp_path, 'w') as f:
-    json.dump(cfg, f, indent=2)
-os.replace(tmp_path, settings_path)
-print(f'[{component}] Removed tokenless hooks from settings.json')
+matches = [
+    item
+    for item in inventory
+    if isinstance(item, dict)
+    and item.get("id") == "tokenless@local"
+    and item.get("scope") == "user"
+]
+if len(matches) > 1:
+    print("multiple user-scoped tokenless@local entries found", file=sys.stderr)
+    sys.exit(1)
+print("present" if matches else "absent")
 PYEOF
-then
-    echo "[${COMPONENT}] WARNING: failed to update ${SETTINGS_PATH}" >&2
+}
+
+if ! PLUGIN_STATE="$(read_plugin_state)"; then
+    exit 1
+fi
+if [ "$PLUGIN_STATE" = "absent" ]; then
+    echo "[${COMPONENT}] ${AGENT} plugin is already absent."
+    exit 0
+fi
+
+if ! UNINSTALL_OUT="$("$QODERCLI" plugins uninstall tokenless --scope user 2>&1)"; then
+    echo "[${COMPONENT}] ERROR: qodercli plugins uninstall failed" >&2
+    echo "    Output: $UNINSTALL_OUT" >&2
+    exit 1
+fi
+[ -z "$UNINSTALL_OUT" ] || echo "$UNINSTALL_OUT"
+
+if ! PLUGIN_STATE="$(read_plugin_state)"; then
+    exit 1
+fi
+if [ "$PLUGIN_STATE" != "absent" ]; then
+    echo "[${COMPONENT}] ERROR: user-scoped tokenless plugin remains after uninstall" >&2
+    exit 1
 fi
 
 echo "[${COMPONENT}] ${AGENT} plugin removed."

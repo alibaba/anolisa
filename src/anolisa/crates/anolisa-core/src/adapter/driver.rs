@@ -164,6 +164,11 @@ pub enum PreparedEnable {
         /// claiming an entry until its `config set` command succeeds.
         selected_config_indices: Vec<usize>,
     },
+    /// Qoder native-plugin capabilities resolved before installation.
+    QoderNative {
+        /// Exact qodercli program selected during the read-only preflight.
+        program: String,
+    },
 }
 
 /// Manager-owned persistence channel for resources applied incrementally.
@@ -264,6 +269,8 @@ pub enum AdapterConditionKind {
     ResourceBundleMatches,
     /// The plugin is still present in the framework registry.
     PluginRegistered,
+    /// The framework reports the plugin's declared resources as loaded.
+    PluginResourcesLoaded,
     /// The framework-native activation policy currently enables the plugin.
     ActivationEnabled,
     /// A marketplace source is still registered (future drivers).
@@ -365,6 +372,23 @@ pub trait AdapterOps {
     /// A non-zero exit or a timeout is reported through [`CliOutput`], not
     /// as an error, so the driver decides how to interpret it.
     fn run_framework_cli(&self, cmd: FrameworkCommand) -> Result<CliOutput, AdapterError>;
+
+    /// Spawn a framework CLI whose stdout is structured JSON that must be
+    /// captured beyond the ordinary diagnostic-output limit. The Manager
+    /// still applies a larger finite bound and keeps stderr at the normal
+    /// cap, so unexpectedly large framework output cannot grow without
+    /// limit.
+    ///
+    /// Custom operation providers default to the ordinary runner; the
+    /// production Manager overrides this method with the structured-output
+    /// capture policy.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::FrameworkCli`] when the process cannot be spawned.
+    fn run_framework_cli_json(&self, cmd: FrameworkCommand) -> Result<CliOutput, AdapterError> {
+        self.run_framework_cli(cmd)
+    }
 
     /// Recursively copy a directory tree from `src` to `dst`. The Manager
     /// validates that `dst` is under an allowed external root before
@@ -534,6 +558,21 @@ pub trait FrameworkDriver: Send + Sync {
         _prior: &AdapterClaim,
         _next: &mut AdapterClaim,
     ) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    /// Validate the final prepared receipt after re-enable facts have been
+    /// preserved, but before the Manager persists it or mutates framework
+    /// state.
+    ///
+    /// Drivers can use this hook for ownership conflicts that are visible
+    /// during read-only preparation but may be resolved by a validated prior
+    /// receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns a driver-specific ownership or receipt consistency error.
+    fn validate_prepared_enable(&self, _claim: &AdapterClaim) -> Result<(), AdapterError> {
         Ok(())
     }
 

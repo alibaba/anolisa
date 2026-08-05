@@ -275,7 +275,7 @@ pub fn agent_request_from_intercepted_input(
         .unwrap_or_else(|| "<unknown>".to_string());
     let block_id = format!("input-{sequence}");
 
-    Some(AgentRequest {
+    let mut request = AgentRequest {
         id: format!("agent-request-{block_id}"),
         session_id: event.session_id.clone(),
         command_block: CommandBlock {
@@ -305,7 +305,17 @@ pub fn agent_request_from_intercepted_input(
         user_confirmed: true,
         hook_finding: None,
         recommended_skill: None,
-    })
+    };
+    // Carry the shell-side sensitive flag so durable sinks past the
+    // journal (personalization activity store) can whole-field redact.
+    if event
+        .routing
+        .as_ref()
+        .is_some_and(|routing| routing.sensitive)
+    {
+        crate::types::mark_request_sensitive_input(&mut request);
+    }
+    Some(request)
 }
 
 pub fn agent_request_confirmed_by_events(events: &[ShellEvent]) -> bool {
@@ -600,6 +610,29 @@ mod tests {
             .context_hints
             .iter()
             .any(|hint| hint == "__cosh_context_binding=failed_command"));
+    }
+
+    /// #2138: the sensitive routing flag on an intercept event must land
+    /// on the request as the in-band hint so durable sinks past the
+    /// journal can whole-field redact; unflagged intercepts stay clean.
+    #[test]
+    fn intercepted_input_request_carries_sensitive_hint_from_routing() {
+        let mut event = ShellEvent::user_input_intercepted("session-1", "带 key 的句子");
+        event.routing = Some(crate::types::ShellRoutingMetadata {
+            generation: 1,
+            top_level_missing: false,
+            proven: false,
+            sensitive: true,
+            unsafe_input: false,
+        });
+        let request = super::agent_request_from_intercepted_input(&event, 1, true)
+            .expect("sensitive request");
+        assert!(crate::types::request_has_sensitive_input(&request));
+
+        let plain_event = ShellEvent::user_input_intercepted("session-1", "普通句子");
+        let plain_request = super::agent_request_from_intercepted_input(&plain_event, 2, true)
+            .expect("plain request");
+        assert!(!crate::types::request_has_sensitive_input(&plain_request));
     }
 
     #[test]

@@ -129,6 +129,7 @@ function beforeToolCallEvent() {
 let capturedArgs: string[] | undefined;
 let capturedStdin: string | undefined;
 let capturedRecords: { args: string[]; stdin: string | undefined }[] = [];
+let previousObservabilityHookEnabled: string | undefined;
 
 function mockCli(
   result: CliResult = { exitCode: 0, stdout: "", stderr: "" },
@@ -172,10 +173,17 @@ describe("observability", () => {
     capturedArgs = undefined;
     capturedStdin = undefined;
     capturedRecords = [];
+    previousObservabilityHookEnabled = process.env.OBSERVABILITY_HOOK_ENABLED;
+    delete process.env.OBSERVABILITY_HOOK_ENABLED;
   });
 
   afterEach(() => {
     _resetCliMock();
+    if (previousObservabilityHookEnabled === undefined) {
+      delete process.env.OBSERVABILITY_HOOK_ENABLED;
+    } else {
+      process.env.OBSERVABILITY_HOOK_ENABLED = previousObservabilityHookEnabled;
+    }
   });
 
   it("registers the configured observability hooks when enabled by default", () => {
@@ -187,6 +195,42 @@ describe("observability", () => {
     assert.equal(hooks.some((hook) => hook.hookName === "before_model_resolve"), false);
     assert.equal(hooks.find((hook) => hook.hookName === "before_tool_call")?.priority, -10_000);
     assert.equal(hooks.find((hook) => hook.hookName === "llm_input")?.priority, 1000);
+  });
+
+  it("skips all observability hook work when disabled by environment", async () => {
+    process.env.OBSERVABILITY_HOOK_ENABLED = "false";
+    let cliCalls = 0;
+    _setCliMock(async () => {
+      cliCalls++;
+      return { exitCode: 0, stdout: "", stderr: "" };
+    });
+    const { api, hooks } = createMockApi();
+    observability.register(api);
+    const event = {
+      sessionId: "session-disabled",
+      runId: "run-disabled",
+      callId: "call-disabled",
+      toolCallId: "tool-disabled",
+      provider: "openai",
+      model: "gpt-test",
+      prompt: "hello",
+      durationMs: 1,
+      outcome: "success",
+      assistantTexts: ["done"],
+      success: true,
+      toolName: "exec",
+      params: { command: "true" },
+      result: { content: "ok" },
+    };
+    const ctx = { sessionId: "session-disabled", runId: "run-disabled" };
+
+    for (const hook of hooks) {
+      assert.equal(hook.handler(event, ctx), undefined);
+    }
+    await flushObservabilityWork();
+
+    assert.equal(cliCalls, 0);
+    assert.deepEqual(capturedRecords, []);
   });
 
   it("emits the expected CLI payload for before_tool_call", async () => {

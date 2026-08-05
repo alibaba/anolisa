@@ -48,6 +48,7 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertIn("~/.hermes/skills/**", dirs)
         self.assertIn("~/.qoder/skills/*", dirs)
         self.assertIn("/usr/share/anolisa/skills/*", dirs)
+        self.assertIn("/usr/local/share/anolisa/skills/*", dirs)
         self.assertNotIn(".qoder/skills/*", dirs)
         self.assertTrue(_DEFAULT_CONFIG["enableDefaultSkillDirs"])
         self.assertEqual(_DEFAULT_CONFIG["managedSkillDirs"], [])

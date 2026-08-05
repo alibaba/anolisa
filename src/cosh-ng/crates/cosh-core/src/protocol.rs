@@ -34,6 +34,12 @@ pub struct AuthField {
 pub struct AuthProvider {
     pub id: String,
     pub label: String,
+    /// Short guidance shown under the provider label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Simplified Chinese guidance shown when the shell uses zh-CN.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description_zh_cn: Option<String>,
     pub fields: Vec<AuthField>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub builtin_base_url: Option<String>,
@@ -68,6 +74,13 @@ pub enum InputMessage {
 
     #[serde(rename = "control_response")]
     ControlResponse { response: ControlResponsePayload },
+
+    /// #1940 receipt protocol: the shell emits this as soon as a control
+    /// approval request reaches its main thread, proving the request has an
+    /// owner for its terminal state. Cores that predate the receipt simply
+    /// fail to deserialize this line and keep their residual guard.
+    #[serde(rename = "approval_receipt")]
+    ApprovalReceipt { request_id: String },
 
     #[serde(rename = "registry_request")]
     RegistryRequest {
@@ -251,6 +264,11 @@ pub struct CoreControlCapabilities {
     pub can_handle_can_use_tool: bool,
     pub can_handle_host_executed_shell_tool_result: bool,
     pub can_handle_shell_evidence_tool: bool,
+    /// #1940 receipt protocol: the core consumes `approval_receipt` lines to
+    /// disarm its last-resort approval timeout. Announced so the shell only
+    /// sends receipts to a core that understands them; older or mock
+    /// providers without this capability never see receipt lines.
+    pub can_handle_approval_receipt: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -454,6 +472,7 @@ impl OutputMessage {
                         can_handle_can_use_tool: true,
                         can_handle_host_executed_shell_tool_result: true,
                         can_handle_shell_evidence_tool,
+                        can_handle_approval_receipt: true,
                     },
                 },
             },
@@ -923,6 +942,10 @@ mod tests {
         assert_eq!(
             v["response"]["response"]["capabilities"]["can_handle_shell_evidence_tool"],
             false
+        );
+        assert_eq!(
+            v["response"]["response"]["capabilities"]["can_handle_approval_receipt"],
+            true
         );
         assert!(v["response"]["response"]["capabilities"]
             .get("can_handle_shell_output_evidence_tool")

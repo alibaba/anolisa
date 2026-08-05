@@ -14,7 +14,7 @@ pub(super) fn emit_fake_stale_question_stream(
         return Ok(false);
     }
 
-    let run_id = format!("fake-run-{}", request.command_block.id);
+    let run_id = request.id.clone();
     sink(AgentEvent::StatusChanged {
         run_id: run_id.clone(),
         phase: "question".to_string(),
@@ -49,7 +49,7 @@ pub(super) fn emit_fake_late_card_or_artifact_stream(
         return Ok(false);
     }
 
-    let run_id = format!("fake-run-{}", request.command_block.id);
+    let run_id = request.id.clone();
     sink(AgentEvent::StatusChanged {
         run_id: run_id.clone(),
         phase: "thinking".to_string(),
@@ -92,7 +92,7 @@ pub(super) fn emit_fake_slow_stream(
     request: &AgentRequest,
     sink: &mut dyn FnMut(AgentEvent) -> Result<(), AdapterError>,
 ) -> Result<(), AdapterError> {
-    let run_id = format!("fake-run-{}", request.command_block.id);
+    let run_id = request.id.clone();
     if input.contains("text then wait") {
         sink(AgentEvent::StatusChanged {
             run_id: run_id.clone(),

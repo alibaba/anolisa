@@ -34,6 +34,12 @@ pub const DEFAULT_CONFIG_PATH: &str = "/etc/agentsight/config.json";
 /// Falls back to defaults if the file cannot be read or parsed.
 #[cfg(all(feature = "server", target_os = "linux"))]
 pub fn load_server_auth_config(config_path: &str) -> agentsight::config::ServerAuthConfig {
+    load_server_config(config_path).server_auth
+}
+
+/// Loads the server configuration, falling back to safe defaults.
+#[cfg(all(feature = "server", target_os = "linux"))]
+pub fn load_server_config(config_path: &str) -> agentsight::config::AgentsightConfig {
     use agentsight::config::{AgentsightConfig, ensure_default_agents_config};
 
     let path = std::path::Path::new(config_path);
@@ -41,14 +47,14 @@ pub fn load_server_auth_config(config_path: &str) -> agentsight::config::ServerA
 
     if let Err(e) = ensure_default_agents_config(path) {
         log::warn!("Failed to ensure default config at {config_path:?}: {e}, using defaults");
-        return config.server_auth;
+        return config;
     }
 
     if let Err(e) = config.load_from_file(path) {
         log::warn!("Failed to load config from {config_path:?}: {e}, using defaults");
     }
 
-    config.server_auth
+    config
 }
 
 /// Parse period string into TimePeriod

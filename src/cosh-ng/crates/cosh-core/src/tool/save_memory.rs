@@ -174,11 +174,7 @@ mod tests {
     use std::path::Path;
 
     fn context(dir: &Path) -> ToolContext {
-        ToolContext {
-            cwd: dir.to_path_buf(),
-            session_id: "test".to_string(),
-            project_root: dir.to_path_buf(),
-        }
+        ToolContext::new(dir.to_path_buf(), "test".to_string(), dir.to_path_buf())
     }
 
     #[tokio::test]

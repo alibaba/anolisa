@@ -44,6 +44,10 @@ esac
             ("COSH_CORE_PATH", &core_str),
             ("COSH_CORE_PROCESS_LOG", &process_log_str),
             ("COSH_CORE_REQUEST_LOG", &request_log_str),
+            // Keep the process count scoped to agent-run lifecycles: the
+            // startup banner's credential probe would add a one-shot
+            // `cosh-core --registry` spawn unrelated to this contract.
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
         ],
         Path::new(env!("CARGO_MANIFEST_DIR")),
         &[

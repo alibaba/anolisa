@@ -9,48 +9,13 @@ use crate::{run_command, SVC_TIMEOUT};
 
 /// Get structured status of a systemd service.
 pub fn svc_status(name: &str) -> Result<SvcStatus, CoshError> {
-    // Use systemctl show for machine-readable output
-    let output = run_command(
-        Command::new("systemctl").args(["show", name, "--no-pager"]),
-        SVC_TIMEOUT,
-        "svc",
-    )?;
-
-    if !output.status.success() {
-        return Err(CoshError::new(
-            ErrorCode::SvcNotFound,
-            format!("Service '{}' not found", name),
-            "svc",
-        )
-        .with_hint("Try 'cosh svc list' to see available services".to_string()));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let props = parse_systemctl_show(&stdout);
-
-    // systemctl show returns exit 0 even for nonexistent units — detect via LoadState.
-    let load_state = props.get("LoadState").map(|s| s.as_str()).unwrap_or("");
-    if load_state == "not-found" {
-        return Err(CoshError::new(
-            ErrorCode::SvcNotFound,
-            format!("Service '{}' not found (unit not loaded)", name),
-            "svc",
-        )
-        .with_hint("Try 'cosh svc list' to see available services"));
-    }
+    let props = load_service_properties(name)?;
 
     let active_state = props
         .get("ActiveState")
         .map(|s| s.as_str())
         .unwrap_or("unknown");
-    let state = match active_state {
-        "active" => SvcState::Running,
-        "inactive" => SvcState::Stopped,
-        "failed" => SvcState::Failed,
-        "activating" => SvcState::Activating,
-        "deactivating" => SvcState::Deactivating,
-        other => SvcState::Unknown(other.to_string()),
-    };
+    let state = state_from_properties(&props);
 
     let pid = props
         .get("MainPID")
@@ -110,8 +75,7 @@ pub fn svc_action(name: &str, action: &str, dry_run: bool) -> Result<SvcActionRe
         });
     }
 
-    let before = svc_status(name)?;
-    let previous_state = before.state.clone();
+    let previous_state = svc_state(name)?;
 
     let output = run_command(
         Command::new("systemctl").args([action, name]),
@@ -132,24 +96,14 @@ pub fn svc_action(name: &str, action: &str, dry_run: bool) -> Result<SvcActionRe
     }
 
     // Get new state after action
-    let after = svc_status(name).unwrap_or(SvcStatus {
-        name: name.to_string(),
-        active: false,
-        enabled: false,
-        state: SvcState::Unknown("query-failed".to_string()),
-        pid: None,
-        uptime_secs: None,
-        memory_bytes: None,
-        description: None,
-        recent_logs: vec![],
-    });
+    let new_state = svc_state(name).unwrap_or(SvcState::Unknown("query-failed".to_string()));
 
     Ok(SvcActionResult {
         name: name.to_string(),
         action: action.to_string(),
         success: true,
         previous_state,
-        new_state: after.state,
+        new_state,
     })
 }
 
@@ -254,6 +208,59 @@ fn validate_state_filter(state: &str) -> Result<(), CoshError> {
 }
 
 // --- Internal helpers ---
+
+fn svc_state(name: &str) -> Result<SvcState, CoshError> {
+    Ok(state_from_properties(&load_service_properties(name)?))
+}
+
+fn load_service_properties(
+    name: &str,
+) -> Result<std::collections::HashMap<String, String>, CoshError> {
+    let output = run_command(
+        Command::new("systemctl").args(["show", name, "--no-pager"]),
+        SVC_TIMEOUT,
+        "svc",
+    )?;
+
+    if !output.status.success() {
+        return Err(CoshError::new(
+            ErrorCode::SvcNotFound,
+            format!("Service '{}' not found", name),
+            "svc",
+        )
+        .with_hint("Try 'cosh svc list' to see available services"));
+    }
+
+    let props = parse_systemctl_show(&String::from_utf8_lossy(&output.stdout));
+    if props
+        .get("LoadState")
+        .is_some_and(|state| state == "not-found")
+    {
+        return Err(CoshError::new(
+            ErrorCode::SvcNotFound,
+            format!("Service '{}' not found (unit not loaded)", name),
+            "svc",
+        )
+        .with_hint("Try 'cosh svc list' to see available services"));
+    }
+
+    Ok(props)
+}
+
+fn state_from_properties(props: &std::collections::HashMap<String, String>) -> SvcState {
+    match props
+        .get("ActiveState")
+        .map(String::as_str)
+        .unwrap_or("unknown")
+    {
+        "active" => SvcState::Running,
+        "inactive" => SvcState::Stopped,
+        "failed" => SvcState::Failed,
+        "activating" => SvcState::Activating,
+        "deactivating" => SvcState::Deactivating,
+        other => SvcState::Unknown(other.to_string()),
+    }
+}
 
 fn parse_systemctl_show(output: &str) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
@@ -366,108 +373,42 @@ mod tests {
     #[test]
     fn test_svc_state_active() {
         let props = parse_systemctl_show("ActiveState=active");
-        let active_state = props
-            .get("ActiveState")
-            .map(|s| s.as_str())
-            .unwrap_or("unknown");
-        let state = match active_state {
-            "active" => SvcState::Running,
-            "inactive" => SvcState::Stopped,
-            "failed" => SvcState::Failed,
-            "activating" => SvcState::Activating,
-            "deactivating" => SvcState::Deactivating,
-            other => SvcState::Unknown(other.to_string()),
-        };
+        let state = state_from_properties(&props);
         assert_eq!(state, SvcState::Running);
     }
 
     #[test]
     fn test_svc_state_inactive() {
         let props = parse_systemctl_show("ActiveState=inactive");
-        let active_state = props
-            .get("ActiveState")
-            .map(|s| s.as_str())
-            .unwrap_or("unknown");
-        let state = match active_state {
-            "active" => SvcState::Running,
-            "inactive" => SvcState::Stopped,
-            "failed" => SvcState::Failed,
-            "activating" => SvcState::Activating,
-            "deactivating" => SvcState::Deactivating,
-            other => SvcState::Unknown(other.to_string()),
-        };
+        let state = state_from_properties(&props);
         assert_eq!(state, SvcState::Stopped);
     }
 
     #[test]
     fn test_svc_state_failed() {
         let props = parse_systemctl_show("ActiveState=failed");
-        let active_state = props
-            .get("ActiveState")
-            .map(|s| s.as_str())
-            .unwrap_or("unknown");
-        let state = match active_state {
-            "active" => SvcState::Running,
-            "inactive" => SvcState::Stopped,
-            "failed" => SvcState::Failed,
-            "activating" => SvcState::Activating,
-            "deactivating" => SvcState::Deactivating,
-            other => SvcState::Unknown(other.to_string()),
-        };
+        let state = state_from_properties(&props);
         assert_eq!(state, SvcState::Failed);
     }
 
     #[test]
     fn test_svc_state_activating() {
         let props = parse_systemctl_show("ActiveState=activating");
-        let active_state = props
-            .get("ActiveState")
-            .map(|s| s.as_str())
-            .unwrap_or("unknown");
-        let state = match active_state {
-            "active" => SvcState::Running,
-            "inactive" => SvcState::Stopped,
-            "failed" => SvcState::Failed,
-            "activating" => SvcState::Activating,
-            "deactivating" => SvcState::Deactivating,
-            other => SvcState::Unknown(other.to_string()),
-        };
+        let state = state_from_properties(&props);
         assert_eq!(state, SvcState::Activating);
     }
 
     #[test]
     fn test_svc_state_unknown() {
         let props = parse_systemctl_show("ActiveState=maintenance");
-        let active_state = props
-            .get("ActiveState")
-            .map(|s| s.as_str())
-            .unwrap_or("unknown");
-        let state = match active_state {
-            "active" => SvcState::Running,
-            "inactive" => SvcState::Stopped,
-            "failed" => SvcState::Failed,
-            "activating" => SvcState::Activating,
-            "deactivating" => SvcState::Deactivating,
-            other => SvcState::Unknown(other.to_string()),
-        };
+        let state = state_from_properties(&props);
         assert_eq!(state, SvcState::Unknown("maintenance".to_string()));
     }
 
     #[test]
     fn test_svc_state_missing_defaults_to_unknown() {
         let props = parse_systemctl_show("MainPID=0");
-        let active_state = props
-            .get("ActiveState")
-            .map(|s| s.as_str())
-            .unwrap_or("unknown");
-        let state = match active_state {
-            "active" => SvcState::Running,
-            "inactive" => SvcState::Stopped,
-            "failed" => SvcState::Failed,
-            "activating" => SvcState::Activating,
-            "deactivating" => SvcState::Deactivating,
-            other => SvcState::Unknown(other.to_string()),
-        };
+        let state = state_from_properties(&props);
         assert_eq!(state, SvcState::Unknown("unknown".to_string()));
     }
 

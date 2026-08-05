@@ -106,6 +106,7 @@ memory = "1G"
 [backend.firecracker]
 boot_args = "console=ttyS0 reboot=k panic=1 pci=off"
 enable_vsock = false  # parsed but not yet wired (Phase 2+)
+enable_network = false # opt in to a per-sandbox netns, tap, veth, and NAT
 memory = "2G"
 vcpus = 2
 serial_log = false

@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { isCapabilityEnabled } from "../../src/registration.js";
 import type { SecurityCapability } from "../../src/types.js";
 import { skillLedger } from "../../src/capabilities/skill-ledger.js";
+import { piiScan } from "../../src/capabilities/pii-scan.js";
 
 const OPENCLAW_COMPAT_FLOOR = ">=2026.4.14";
 
@@ -39,6 +40,57 @@ describe("capability registration defaults", () => {
     );
   });
 
+  it("lets hook environment switches override capability enabled values", () => {
+    process.env.SKILL_LEDGER_HOOK_ENABLED = "true";
+    process.env.PII_CHECKER_HOOK_ENABLED = "false";
+    try {
+      assert.equal(
+        isCapabilityEnabled(skillLedger, { "skill-ledger": { enabled: false } }),
+        true,
+      );
+      assert.equal(
+        isCapabilityEnabled(piiScan, { "pii-scan-user-input": { enabled: true } }),
+        false,
+      );
+    } finally {
+      delete process.env.SKILL_LEDGER_HOOK_ENABLED;
+      delete process.env.PII_CHECKER_HOOK_ENABLED;
+    }
+  });
+
+  it("lets code scanner environment switches override capability enabled values", () => {
+    process.env.CODE_SCANNER_HOOK_ENABLED = "true";
+    try {
+      assert.equal(
+        isCapabilityEnabled(capability("scan-code"), { "scan-code": { enabled: false } }),
+        true,
+      );
+      process.env.CODE_SCANNER_HOOK_ENABLED = "false";
+      assert.equal(
+        isCapabilityEnabled(capability("scan-code"), { "scan-code": { enabled: true } }),
+        false,
+      );
+    } finally {
+      delete process.env.CODE_SCANNER_HOOK_ENABLED;
+    }
+  });
+
+  it("ignores invalid code scanner enabled values", () => {
+    process.env.CODE_SCANNER_HOOK_ENABLED = "invalid";
+    try {
+      assert.equal(
+        isCapabilityEnabled(capability("scan-code"), { "scan-code": { enabled: false } }),
+        false,
+      );
+      assert.equal(
+        isCapabilityEnabled(capability("scan-code"), { "scan-code": { enabled: true } }),
+        true,
+      );
+    } finally {
+      delete process.env.CODE_SCANNER_HOOK_ENABLED;
+    }
+  });
+
   it("does not give deprecated skill-ledger enableBlock a schema default", () => {
     const manifest = readJson("openclaw.plugin.json");
     const enableBlock =
@@ -57,6 +109,34 @@ describe("capability registration defaults", () => {
       ].properties.policy;
 
     assert.equal(policy.default, "ask");
+  });
+
+  it("defaults PII hook policy to observe", () => {
+    const manifest = readJson("openclaw.plugin.json");
+    const policy =
+      manifest.configSchema.properties.capabilities.properties[
+        "pii-scan-user-input"
+      ].properties.policy;
+
+    assert.equal(policy.default, "observe");
+    assert.deepEqual(policy.enum, [
+      "observe",
+      "warn",
+      "ask",
+      "block",
+      "debug",
+      "deny",
+    ]);
+  });
+
+  it("keeps deprecated policy aliases schema-valid", () => {
+    const manifest = readJson("openclaw.plugin.json");
+    const capabilities = manifest.configSchema.properties.capabilities.properties;
+
+    for (const capabilityId of ["pii-scan-user-input", "skill-ledger"]) {
+      assert.ok(capabilities[capabilityId].properties.policy.enum.includes("debug"));
+      assert.ok(capabilities[capabilityId].properties.policy.enum.includes("deny"));
+    }
   });
 
   it("declares the OpenClaw install and plugin API compatibility floor", () => {

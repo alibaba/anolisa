@@ -48,6 +48,17 @@ def _install_gateway_session_context(monkeypatch, session_id: str) -> None:
     monkeypatch.setitem(sys.modules, "gateway.session_context", session_context_module)
 
 
+def _register_policy(
+    capability: PiiScanCapability,
+    monkeypatch: pytest.MonkeyPatch,
+    policy: str,
+) -> None:
+    """Register a capability policy without ambient environment overrides."""
+    monkeypatch.delenv("PII_CHECKER_HOOK_ENABLED", raising=False)
+    monkeypatch.delenv("PII_CHECKER_MODE", raising=False)
+    capability._on_register({"policy": policy})
+
+
 @pytest.fixture
 def capability():
     """Create a default PII scan capability."""
@@ -68,6 +79,117 @@ class TestPiiScanCapability:
             "transform_llm_output",
             "on_session_end",
         ]
+
+    def test_environment_policy_overrides_capability_policy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PII_CHECKER_MODE", "observe")
+        capability = PiiScanCapability()
+
+        capability._on_register({"policy": "block"})
+
+        assert capability._policy == "observe"
+
+    def test_environment_mode_deny_alias_overrides_capability_policy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PII_CHECKER_MODE", "deny")
+        capability = PiiScanCapability()
+
+        capability._on_register({"policy": "observe"})
+
+        assert capability._policy == "block"
+
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
+    def test_observe_scans_model_output_without_mutating_it(
+        self, mock_cli: MagicMock
+    ) -> None:
+        capability = PiiScanCapability()
+        capability._timeout = 5.0
+        capability._on_register({"policy": "observe"})
+        mock_cli.return_value = CliResult(
+            stdout=json.dumps(
+                {
+                    "verdict": "warn",
+                    "findings": [
+                        {
+                            "type": "email",
+                            "severity": "warn",
+                            "evidence_redacted": "a***@example.com",
+                        }
+                    ],
+                    "redacted_text": "Contact a***@example.com",
+                }
+            ),
+            stderr="",
+            exit_code=0,
+        )
+
+        result = capability._on_transform_llm_output(
+            "Contact alice@example.com", session_id="session-1"
+        )
+
+        assert result is None
+        mock_cli.assert_called_once()
+
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
+    def test_environment_switch_disables_before_input_scan(
+        self, mock_cli: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PII_CHECKER_HOOK_ENABLED", "false")
+        capability = PiiScanCapability()
+        capability._on_register({})
+        monkeypatch.setattr(
+            "hermes_plugin_src.capabilities.pii_scan.extract_user_text",
+            lambda *_args, **_kwargs: pytest.fail("input should not be read"),
+        )
+
+        result = capability._on_pre_llm_call(
+            user_message="password=secret", session_id="session-1"
+        )
+
+        assert result is None
+        mock_cli.assert_not_called()
+
+    @pytest.mark.parametrize("policy", ["warn", "ask", "block"])
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
+    def test_non_observe_policies_warn_and_continue(
+        self,
+        mock_cli: MagicMock,
+        policy: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("PII_CHECKER_MODE", raising=False)
+        capability = PiiScanCapability()
+        capability._timeout = 5.0
+        capability._on_register({"policy": policy})
+        mock_cli.side_effect = [
+            _scan_result(
+                "deny",
+                [
+                    {
+                        "type": "credential",
+                        "severity": "deny",
+                        "evidence_redacted": "token=[REDACTED]",
+                    }
+                ],
+            ),
+            _scan_result("pass"),
+        ]
+
+        capability._on_pre_llm_call(
+            user_message="token=raw-secret-value",
+            session_id="session-1",
+        )
+        output = capability._on_transform_llm_output(
+            "assistant reply",
+            session_id="session-1",
+        )
+
+        assert output is not None
+        assert "token=[REDACTED]" in output
+        assert output.endswith("\n\nassistant reply")
+        assert "blocked" not in output.lower()
 
     @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_empty_input_passthrough(self, mock_cli, capability):
@@ -522,6 +644,152 @@ class TestPiiScanCapability:
             "--source",
             "tool_input",
         ]
+
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
+    def test_block_deny_pre_tool_returns_native_action_without_caching(
+        self,
+        mock_cli: MagicMock,
+        capability: PiiScanCapability,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A deny verdict should block a pre-tool call without caching a warning."""
+        _register_policy(capability, monkeypatch, "block")
+        mock_cli.return_value = _scan_result(
+            "deny",
+            [
+                {
+                    "type": "api_key",
+                    "severity": "deny",
+                    "evidence_redacted": "sk-a...[REDACTED]...1234",
+                    "raw_evidence": "sk-abcdefghijklmnop1234",
+                }
+            ],
+        )
+
+        result = capability._on_pre_tool_call(
+            tool_name="terminal",
+            args={"command": "API_KEY=sk-abcdefghijklmnop1234"},
+            session_id="session-1",
+            tool_call_id="tool-1",
+        )
+
+        assert result is not None
+        assert result["action"] == "block"
+        assert "sk-a...[REDACTED]...1234" in result["message"]
+        assert "sk-abcdefghijklmnop1234" not in result["message"]
+        assert "raw_evidence" not in result["message"]
+        assert "继续处理" not in result["message"]
+        assert capability._warnings_by_key == {}
+
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
+    def test_block_deny_pre_tool_does_not_require_cache_key(
+        self,
+        mock_cli: MagicMock,
+        capability: PiiScanCapability,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A missing correlation key must not disable native pre-tool blocking."""
+        _register_policy(capability, monkeypatch, "block")
+        mock_cli.return_value = _scan_result(
+            "deny",
+            [
+                {
+                    "type": "credential",
+                    "severity": "deny",
+                    "evidence_redacted": "token=[REDACTED]",
+                }
+            ],
+        )
+
+        result = capability._on_pre_tool_call(
+            tool_name="terminal",
+            args={"command": "TOKEN=raw-secret-value"},
+        )
+
+        assert result is not None
+        assert result["action"] == "block"
+        assert "token=[REDACTED]" in result["message"]
+        assert "raw-secret-value" not in result["message"]
+        assert capability._warnings_by_key == {}
+        mock_cli.assert_called_once()
+
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
+    def test_block_warn_pre_tool_caches_warning_and_continues(
+        self,
+        mock_cli: MagicMock,
+        capability: PiiScanCapability,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A warn verdict must not be upgraded to a block by hook policy."""
+        _register_policy(capability, monkeypatch, "block")
+        mock_cli.side_effect = [
+            _scan_result(
+                "warn",
+                [
+                    {
+                        "type": "email",
+                        "severity": "warn",
+                        "evidence_redacted": "a***@example.com",
+                    }
+                ],
+            ),
+            _scan_result("pass"),
+        ]
+
+        pre_result = capability._on_pre_tool_call(
+            tool_name="terminal",
+            args={"command": "echo alice@example.com"},
+            session_id="session-1",
+        )
+        output = capability._on_transform_llm_output(
+            "assistant reply",
+            session_id="session-1",
+        )
+
+        assert pre_result is None
+        assert output is not None
+        assert "a***@example.com" in output
+        assert "alice@example.com" not in output
+        assert "继续处理" in output
+
+    @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
+    def test_ask_deny_pre_tool_falls_back_to_cached_warning(
+        self,
+        mock_cli: MagicMock,
+        capability: PiiScanCapability,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Hermes ask policy should remain a warning-only pre-tool fallback."""
+        _register_policy(capability, monkeypatch, "ask")
+        mock_cli.side_effect = [
+            _scan_result(
+                "deny",
+                [
+                    {
+                        "type": "credential",
+                        "severity": "deny",
+                        "evidence_redacted": "token=[REDACTED]",
+                    }
+                ],
+            ),
+            _scan_result("pass"),
+        ]
+
+        pre_result = capability._on_pre_tool_call(
+            tool_name="terminal",
+            args={"command": "TOKEN=raw-secret-value"},
+            session_id="session-1",
+        )
+        output = capability._on_transform_llm_output(
+            "assistant reply",
+            session_id="session-1",
+        )
+
+        assert pre_result is None
+        assert output is not None
+        assert "token=[REDACTED]" in output
+        assert "raw-secret-value" not in output
+        assert "继续处理" in output
 
     @patch("hermes_plugin_src.capabilities.pii_scan.call_agent_sec_cli")
     def test_runtime_hermes_session_context_bridges_missing_tool_session_id(

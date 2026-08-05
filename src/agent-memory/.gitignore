@@ -4,3 +4,4 @@ agentic-os-memory.spec
 .cargo/config.toml
 vendor/
 agent-memory.spec
+.anolisa/component.toml

@@ -94,7 +94,7 @@ impl CoshCore {
             // Token usage
             "session.tokens.input": self.metrics.tokens_input,
             "session.tokens.output": self.metrics.tokens_output,
-            "session.tokens.cached": 0,  // Phase 2
+            "session.tokens.cached": self.metrics.tokens_cached,
             "session.tokens.total": self.metrics.tokens_total,
 
             // API stats
@@ -251,5 +251,65 @@ mod tests {
         let record = serde_json::json!({"test": true});
         // Should not panic
         append_sls_log_to("/nonexistent/path/cosh.jsonl", &record);
+    }
+
+    /// Multiple provider calls in one turn (tool call triggers second call)
+    /// must accumulate cached_tokens across calls. Also covers the single-call
+    /// case: if the first call's value (30) were dropped, the sum would be 20
+    /// instead of 50.
+    #[tokio::test]
+    async fn sls_record_accumulates_cached_tokens_across_tool_calls() {
+        use crate::provider::GenerateEvent;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let provider = crate::provider::mock::MockProvider::new(vec![
+            vec![
+                GenerateEvent::TextDelta("Running".to_string()),
+                GenerateEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-1".to_string(),
+                    name: "shell".to_string(),
+                },
+                GenerateEvent::ToolCallDelta {
+                    index: 0,
+                    arguments_delta: r#"{"command":"echo hello"}"#.to_string(),
+                },
+                GenerateEvent::ToolCallEnd { index: 0 },
+                GenerateEvent::Usage {
+                    prompt_tokens: 100,
+                    completion_tokens: 10,
+                    total_tokens: 110,
+                    cached_tokens: 30,
+                },
+                GenerateEvent::MessageEnd,
+            ],
+            vec![
+                GenerateEvent::TextDelta("Done".to_string()),
+                GenerateEvent::Usage {
+                    prompt_tokens: 200,
+                    completion_tokens: 20,
+                    total_tokens: 220,
+                    cached_tokens: 20,
+                },
+                GenerateEvent::MessageEnd,
+            ],
+        ]);
+
+        let mut config = crate::config::CoreConfig::default();
+        config.agent.approval_mode = "trust".to_string();
+        let tools = crate::tool::ToolRegistry::with_defaults_for_test();
+        let mut engine = CoshCore::new(config, Box::new(provider), tools);
+
+        let mut reader = BufReader::new(&b""[..]).lines();
+        let mut output = Vec::new();
+        engine
+            .handle_user_message("run echo hello", &mut reader, &mut output)
+            .await
+            .unwrap();
+
+        let record = engine.build_sls_record(Duration::from_secs(2));
+        assert_eq!(record["session.tokens.cached"], 50);
+        assert_eq!(record["session.tokens.input"], 300);
+        assert_eq!(record["session.tokens.output"], 30);
     }
 }

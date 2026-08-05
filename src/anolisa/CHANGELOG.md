@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.16] - 2026-08-03
+
+### Added
+
+- Successful `anolisa update <component>` and `anolisa update all` operations
+  now report adapters whose resource bundles changed, with the exact
+  `anolisa adapter enable ...` or `anolisa adapter status ...` follow-up
+  command. JSON responses expose the same information through stable
+  `adapter_actions` arrays
+  ([#2018](https://github.com/alibaba/anolisa/pull/2018)).
+
+### Fixed
+
+- Raw system-scope installs on Debian-family hosts no longer fail with
+  `rpm not found on PATH` when both RPM tooling and an RPM database are absent.
+  An existing or newly appearing RPM database still stops the raw install
+  before files change
+  ([#2061](https://github.com/alibaba/anolisa/pull/2061)).
+
 ## [0.2.15] - 2026-07-30
 
 ### Added
@@ -739,6 +758,23 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.16] - 2026-08-03
+
+### 新增
+
+- 成功执行的 `anolisa update <component>` 和 `anolisa update all` 现会报告
+  resource bundle 已变化的 adapter，并给出准确的 `anolisa adapter enable ...`
+  或 `anolisa adapter status ...` 后续命令。JSON 响应通过稳定的
+  `adapter_actions` 数组提供同样的信息
+  ([#2018](https://github.com/alibaba/anolisa/pull/2018))。
+
+### 修复
+
+- 在同时缺少 RPM 工具和 RPM database 的 Debian 系发行版上，system scope
+  raw 安装不再因 `rpm not found on PATH` 而失败。如果已有 RPM database，
+  或安装期间新出现 RPM database，仍会在任何文件变更前停止 raw 安装
+  ([#2061](https://github.com/alibaba/anolisa/pull/2061))。
 
 ## [0.2.15] - 2026-07-30
 

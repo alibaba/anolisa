@@ -44,6 +44,10 @@ function enableBlockConfig(enableBlock: boolean): Record<string, any> {
   };
 }
 
+function policyConfig(policy: "observe" | "warn" | "ask" | "block"): Record<string, any> {
+  return { capabilities: { "pii-scan-user-input": { policy } } };
+}
+
 let lastCliArgs: string[] | undefined;
 let lastCliOpts: CliCallOptions | undefined;
 
@@ -85,11 +89,15 @@ const denyFinding = {
 
 describe("pii-scan-user-input", () => {
   beforeEach(() => {
+    delete process.env.PII_CHECKER_HOOK_ENABLED;
+    delete process.env.PII_CHECKER_MODE;
     lastCliArgs = undefined;
     lastCliOpts = undefined;
   });
 
   afterEach(() => {
+    delete process.env.PII_CHECKER_HOOK_ENABLED;
+    delete process.env.PII_CHECKER_MODE;
     _resetCliMock();
   });
 
@@ -182,15 +190,14 @@ describe("pii-scan-user-input", () => {
     });
   }
 
-  it("deny verdict defaults to log and allow", async () => {
+  it("deny verdict defaults to observe without a user-visible warning", async () => {
     const { beforeDispatch, logs } = registerHandlers();
     mockCli(scanResult("deny", [denyFinding]));
 
     const result = await beforeDispatch.handler({ content: "password=secret" });
 
     assert.equal(result, undefined);
-    assert.ok(logs.some((log) => log.includes("[pii-checker] DENY")));
-    assert.ok(logs.some((log) => log.includes("enableBlock=false")));
+    assert.ok(!logs.some((log) => log.includes("[pii-checker] DENY")));
   });
 
   it("deny verdict blocks when enableBlock=true and omits raw evidence", async () => {
@@ -209,8 +216,8 @@ describe("pii-scan-user-input", () => {
     assert.doesNotMatch(result?.text, /raw_evidence/);
   });
 
-  it("blocks before_tool_call deny when enableBlock=true", async () => {
-    const { hooks } = registerHandlers(enableBlockConfig(true));
+  it("block policy blocks a before_tool_call deny verdict", async () => {
+    const { hooks } = registerHandlers(policyConfig("block"));
     const beforeToolCall = hooks.find((hook) => hook.hookName === "before_tool_call");
     assert.ok(beforeToolCall);
     mockCli(scanResult("deny", [denyFinding]));
@@ -247,8 +254,40 @@ describe("pii-scan-user-input", () => {
     assert.equal(lastCliOpts?.stdin, '{"command":"password=secret"}');
   });
 
+  it("ask policy requests approval for a before_tool_call deny verdict", async () => {
+    const { hooks } = registerHandlers(policyConfig("ask"));
+    const beforeToolCall = hooks.find((hook) => hook.hookName === "before_tool_call");
+    assert.ok(beforeToolCall);
+    mockCli(scanResult("deny", [denyFinding]));
+
+    const result = await beforeToolCall.handler(
+      {
+        toolName: "exec",
+        params: { command: "password=secret" },
+      },
+      {},
+    );
+
+    assert.equal(result?.requireApproval?.title, "PII Checker Security Review");
+    assert.equal(result?.requireApproval?.severity, "critical");
+    assert.match(result?.requireApproval?.description, /password=\[REDACTED\]/);
+    assert.doesNotMatch(result?.requireApproval?.description, /password=secret/);
+  });
+
+  it("ask policy falls back to a warning before dispatch", async () => {
+    const { beforeDispatch, logs } = registerHandlers(policyConfig("ask"));
+    mockCli(scanResult("deny", [denyFinding]));
+
+    const result = await beforeDispatch.handler({ content: "password=secret" });
+
+    assert.equal(result, undefined);
+    assert.ok(logs.some((log) => log.includes("DENY (policy=ask)")));
+    assert.ok(logs.some((log) => log.includes("本轮请求将继续处理")));
+    assert.ok(!logs.some((log) => log.includes("本轮请求已被阻断")));
+  });
+
   it("after_tool_call logs warning without raw evidence", async () => {
-    const { hooks, logs } = registerHandlers();
+    const { hooks, logs } = registerHandlers(policyConfig("warn"));
     const afterToolCall = hooks.find((hook) => hook.hookName === "after_tool_call");
     assert.ok(afterToolCall);
     mockCli(scanResult("warn", [warnFinding]));
@@ -269,8 +308,28 @@ describe("pii-scan-user-input", () => {
     assert.equal(lastCliArgs?.at(-1), "tool_output");
   });
 
+  it("block policy falls back to a warning after tool execution", async () => {
+    const { hooks, logs } = registerHandlers(policyConfig("block"));
+    const afterToolCall = hooks.find((hook) => hook.hookName === "after_tool_call");
+    assert.ok(afterToolCall);
+    mockCli(scanResult("deny", [denyFinding]));
+
+    const result = await afterToolCall.handler(
+      {
+        result: { content: "password=secret" },
+        sessionId: "session-1",
+      },
+      {},
+    );
+
+    assert.equal(result, undefined);
+    assert.ok(logs.some((log) => log.includes("DENY (policy=block)")));
+    assert.ok(logs.some((log) => log.includes("本轮请求将继续处理")));
+    assert.ok(!logs.some((log) => log.includes("已被阻断")));
+  });
+
   it("llm_output logs warning without raw evidence", async () => {
-    const { hooks, logs } = registerHandlers();
+    const { hooks, logs } = registerHandlers(policyConfig("warn"));
     const llmOutput = hooks.find((hook) => hook.hookName === "llm_output");
     assert.ok(llmOutput);
     mockCli(scanResult("warn", [warnFinding]));
@@ -307,5 +366,68 @@ describe("pii-scan-user-input", () => {
 
     assert.equal(result, undefined);
     assert.ok(logs.some((log) => log.includes("CLI returned invalid JSON")));
+  });
+
+  it("short-circuits before config access when the environment switch is false", () => {
+    process.env.PII_CHECKER_HOOK_ENABLED = "false";
+    mockCliNoCall();
+    const pluginConfig = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("plugin config should not be read when disabled");
+        },
+      },
+    );
+    const { api, hooks } = createMockApi(pluginConfig);
+
+    piiScan.register(api);
+
+    assert.deepEqual(hooks, []);
+    assert.equal(lastCliArgs, undefined);
+  });
+
+  it("lets the environment switch override legacy piiScanUserInput=false", () => {
+    process.env.PII_CHECKER_HOOK_ENABLED = "true";
+    const { hooks } = registerHandlers({ piiScanUserInput: false });
+
+    assert.equal(hooks.length, 4);
+  });
+
+  it("lets the environment policy override capability configuration", async () => {
+    process.env.PII_CHECKER_MODE = "observe";
+    const { beforeDispatch, logs } = registerHandlers(policyConfig("block"));
+    mockCli(scanResult("deny", [denyFinding]));
+
+    const result = await beforeDispatch.handler({ content: "password=secret" });
+
+    assert.equal(result, undefined);
+    assert.ok(!logs.some((log) => log.includes("[pii-checker] DENY")));
+  });
+
+  it("invalid environment mode falls back to observe", async () => {
+    process.env.PII_CHECKER_MODE = "blcok";
+    const { beforeDispatch, logs } = registerHandlers(policyConfig("block"));
+    mockCli(scanResult("deny", [denyFinding]));
+
+    const result = await beforeDispatch.handler({ content: "password=secret" });
+
+    assert.equal(result, undefined);
+    assert.ok(
+      logs.some((log) =>
+        log.includes("[WARN] [pii-checker] invalid PII_CHECKER_MODE; using observe"),
+      ),
+    );
+    assert.ok(!logs.some((log) => log.includes("[pii-checker] DENY")));
+  });
+
+  it("maps deny in the environment mode to block", async () => {
+    process.env.PII_CHECKER_MODE = "deny";
+    const { beforeDispatch } = registerHandlers(policyConfig("observe"));
+    mockCli(scanResult("deny", [denyFinding]));
+
+    const result = await beforeDispatch.handler({ content: "password=secret" });
+
+    assert.equal(result?.handled, true);
   });
 });

@@ -183,7 +183,7 @@ pub(crate) fn approval_shell_handoff_validation_message(i18n: &I18n, message: &s
         .unwrap_or_else(|| message.to_string())
 }
 
-pub(super) fn shell_handoff_command_from_request(
+pub(crate) fn shell_handoff_command_from_request(
     request: &RuntimeApprovalRequest,
 ) -> Result<String, String> {
     if request.request_id.is_none() {

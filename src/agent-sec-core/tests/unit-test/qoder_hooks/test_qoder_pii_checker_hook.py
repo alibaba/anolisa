@@ -9,6 +9,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from standalone_hook_test_loader import load_standalone_hook
 
 _PLUGIN_DIR = Path(__file__).resolve().parents[3] / "qoder-plugin"
 _HOOK_SCRIPT = _PLUGIN_DIR / "hooks" / "pii_checker_hook.py"
@@ -124,6 +125,33 @@ def test_invalid_json_fails_open(mock_cli) -> None:
     assert proc.stdout == ""
 
 
+def test_environment_disabled_short_circuits_before_input_and_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("PII_CHECKER_HOOK_ENABLED", "false")
+    disabled_hook = load_standalone_hook(
+        "qoder_pii_checker_disabled_hook",
+        _HOOK_SCRIPT,
+    )
+    monkeypatch.setattr(
+        disabled_hook,
+        "load_hook_input",
+        lambda: pytest.fail("input should not be read"),
+    )
+    monkeypatch.setattr(
+        disabled_hook.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("CLI should not be called"),
+    )
+
+    disabled_hook.main()
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
 def test_user_prompt_observe_scans_and_allows_silently(mock_cli) -> None:
     env, capture = mock_cli(output=_PII_DENY_RESULT)
 
@@ -142,6 +170,67 @@ def test_user_prompt_observe_scans_and_allows_silently(mock_cli) -> None:
     assert "--source" in captured["argv"]
     assert captured["argv"][captured["argv"].index("--source") + 1] == "user_input"
     assert captured["stdin"] == "phone 13800138000"
+
+
+def test_warn_policy_warns_and_continues(mock_cli) -> None:
+    env, _capture = mock_cli(
+        output=_PII_DENY_RESULT,
+        extra={"PII_CHECKER_MODE": "warn"},
+    )
+
+    output = _stdout_json(
+        _run_hook(
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "api key sk-live-secret",
+            },
+            env,
+        )
+    )
+
+    assert output["decision"] == "allow"
+    assert "Execution will continue" in output["systemMessage"]
+
+
+def test_ask_policy_requests_pre_tool_approval(mock_cli) -> None:
+    env, _capture = mock_cli(
+        output=_PII_DENY_RESULT,
+        extra={"PII_CHECKER_MODE": "ask"},
+    )
+
+    output = _stdout_json(
+        _run_hook(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_input": {"token": "sk-live-secret"},
+            },
+            env,
+        )
+    )
+
+    assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+def test_ask_policy_falls_back_to_warning_without_confirmation(mock_cli) -> None:
+    env, _capture = mock_cli(
+        output=_PII_DENY_RESULT,
+        extra={"PII_CHECKER_MODE": "ask"},
+    )
+
+    output = _stdout_json(
+        _run_hook(
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "api key sk-live-secret",
+            },
+            env,
+        )
+    )
+
+    assert output["decision"] == "allow"
+    assert (
+        "Approval is unavailable here; execution continues" in output["systemMessage"]
+    )
 
 
 def test_hook_trace_context_contains_only_host_correlation_ids(mock_cli) -> None:
@@ -331,3 +420,22 @@ def test_cli_failure_fails_open(mock_cli) -> None:
     assert proc.returncode == 0
     assert proc.stdout == ""
     assert "sk-live-secret" not in proc.stderr
+
+
+def test_invalid_mode_reports_observe_fallback(mock_cli) -> None:
+    env, _capture = mock_cli(
+        output=_PII_WARN_RESULT,
+        extra={"PII_CHECKER_MODE": "banana"},
+    )
+
+    proc = _run_hook(
+        {
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "alice@example.com",
+        },
+        env,
+    )
+    output = _stdout_json(proc)
+
+    assert output["decision"] == "allow"
+    assert "invalid PII_CHECKER_MODE" in output["systemMessage"]

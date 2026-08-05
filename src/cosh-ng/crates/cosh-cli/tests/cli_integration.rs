@@ -1315,6 +1315,28 @@ fn test_pkg_search_bash_matches_installed_package_list() {
     );
 }
 
+#[test]
+fn test_apt_pkg_search_glob_returns_only_matching_names() {
+    if pkg_manager_available().0 != "apt" {
+        return;
+    }
+
+    let output = cosh_bin().args(["pkg", "search", "lib*"]).output().unwrap();
+    assert!(output.status.success());
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let packages = json["data"]["packages"].as_array().unwrap();
+    assert!(
+        !packages.is_empty(),
+        "apt-cache should find library packages"
+    );
+    assert!(packages.iter().all(|package| {
+        package["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("lib"))
+    }));
+}
+
 // --- pkg list: JSON envelope ---
 
 #[test]

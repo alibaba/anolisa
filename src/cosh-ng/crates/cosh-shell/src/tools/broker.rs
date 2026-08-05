@@ -53,7 +53,7 @@ fn readonly_tokens(command: &str) -> Result<Vec<String>, String> {
     }
 }
 
-fn configured_readonly_command(tokens: &[String]) -> bool {
+pub(crate) fn configured_readonly_command(tokens: &[String]) -> bool {
     if let Some(lock) = READONLY_CONFIG.get() {
         return match lock.read() {
             Ok(config) => readonly_rules::is_readonly_command_with_config(tokens, &config),

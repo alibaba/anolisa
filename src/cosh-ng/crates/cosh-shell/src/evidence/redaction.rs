@@ -25,6 +25,14 @@ pub fn redact_provider_command_text(command: &str) -> String {
     truncate_provider_command(redact_sensitive_text(command).0)
 }
 
+/// Provider-facing text for a handoff command the provider itself authored
+/// (#2142 D-6): the original text already sits in the model transcript, so
+/// re-redacting it here only breaks result-to-call correlation. Length is
+/// still bounded; durable surfaces keep the redacted form.
+pub fn truncate_provider_authored_command_text(command: &str) -> String {
+    truncate_provider_command(command.to_string())
+}
+
 fn truncate_provider_command(mut command: String) -> String {
     const MARKER: &str = " ... <truncated>";
     if command.len() <= PROVIDER_COMMAND_MAX_BYTES {
@@ -192,7 +200,8 @@ fn sensitive_flag_pattern() -> &'static Regex {
                 (?:^|\s)
                 --(?:password|passwd|passphrase|token|access[_-]?token|refresh[_-]?token|
                      id[_-]?token|secret|client[_-]?secret|api[_-]?key|apikey|
-                     access[_-]?key[_-]?secret|security[_-]?token|authorization)
+                     access[_-]?key[_-]?(?:id|secret)|security[_-]?token|authorization|
+                     cookie|set[_-]?cookie)
                 (?:=|\s+)
             )
             (?:
@@ -221,7 +230,8 @@ fn sensitive_assignment_pattern() -> &'static Regex {
                    dashscope[_-]?api[_-]?key|openai[_-]?api[_-]?key|
                    client[_-]?secret|security[_-]?token|refresh[_-]?token|
                    access[_-]?token|github[_-]?token|id[_-]?token|
-                   password|passphrase|passwd|api[_-]?key|apikey|token|secret)
+                   password|passphrase|passwd|api[_-]?key|apikey|token|secret|
+                   cookie|set[_-]?cookie)
                 ["']?
                 \s*(?:=|:)\s*
             )
@@ -251,7 +261,7 @@ fn opaque_token_pattern() -> &'static Regex {
     PATTERN.get_or_init(|| {
         // The pattern is a compile-time constant covered by the tests below.
         Regex::new(
-            r"\b(?:sk-[A-Za-z0-9_-]{10,}|sk_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{10,}|npm_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})\b",
+            r"\b(?:sk-[A-Za-z0-9_-]{10,}|sk_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{10,}|npm_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{20,}|(?i:xox.)-[A-Za-z0-9-]{10,})\b",
         )
         .unwrap_or_else(|_| unreachable!("static opaque token pattern must compile"))
     })
@@ -333,6 +343,9 @@ mod tests {
             "ALIBABA_CLOUD_ACCESS_KEY_ID=LTAIexampleaccesskey ",
             "OPENAI_API_KEY=sk-example-secret ",
             "curl --password 'hunter2' --access-token=token-value ",
+            "--access-key-id flag-id --cookie flag-cookie ",
+            "--set-cookie=flag-set-cookie authorization=assignment-auth ",
+            "cookie=assignment-cookie set-cookie=assignment-set-cookie ",
             "'https://example.test/?client_secret=query-value&next=ok'\n",
             "https://user:url-password@example.test/path\n",
             r#"{"api_key":"json-value","password":"json-password"}"#,
@@ -348,6 +361,12 @@ mod tests {
             "LTAIexampleaccesskey",
             "hunter2",
             "token-value",
+            "flag-id",
+            "flag-cookie",
+            "flag-set-cookie",
+            "assignment-auth",
+            "assignment-cookie",
+            "assignment-set-cookie",
             "query-value",
             "url-password",
             "json-value",
@@ -359,6 +378,10 @@ mod tests {
             assert!(!redacted.contains(secret), "{redacted}");
         }
         assert!(redacted.contains("next=ok"), "{redacted}");
+        assert!(
+            redacted.contains("Authorization: Basic <redacted>"),
+            "{redacted}"
+        );
     }
 
     #[test]
@@ -415,8 +438,9 @@ mod tests {
     #[test]
     fn redacts_multiple_opaque_token_shapes() {
         let slack_token = ["xoxb", "1234567890", "abcdefghijklmnop"].join("-");
+        let marker_wildcard_slack_token = "xoxc-123456789012345";
         let input = format!(
-            "{}{slack_token} {}",
+            "{}{slack_token} {marker_wildcard_slack_token} {}",
             concat!(
                 "Bearer first.secret.value and bearer second-secret ",
                 "ghp_abcdefghijklmnopqrstuvwxyz123456 ",
@@ -448,6 +472,7 @@ mod tests {
             "npm_",
             "hf_",
             "xoxb-",
+            marker_wildcard_slack_token,
             "eyJhbGciOiJIUzI1NiJ9",
         ] {
             assert!(!redacted.contains(secret), "{redacted}");

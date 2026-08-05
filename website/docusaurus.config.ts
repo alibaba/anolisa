@@ -100,7 +100,6 @@ const config: Config = {
       },
       hideOnScroll: false,
       items: [
-        {to: '/docs', label: 'Docs', position: 'left'},
         {to: '/docs/user-guide', label: 'User Guide', position: 'left'},
         {to: '/docs/developer-guide', label: 'Developer Guide', position: 'left'},
         {to: '/changelog', label: 'Changelog', position: 'left'},
@@ -109,6 +108,8 @@ const config: Config = {
           href: 'https://github.com/alibaba/anolisa',
           label: 'GitHub',
           position: 'right',
+          className: 'headerGithubLink',
+          'aria-label': 'ANOLISA GitHub repository',
         },
         {type: 'localeDropdown', position: 'right'},
       ],

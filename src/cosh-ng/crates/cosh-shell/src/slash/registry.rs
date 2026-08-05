@@ -106,7 +106,7 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
         },
         SlashCommandSpec {
             name: "/session",
-            usage: "/session [new|status|list|resume <id>|clear <id>...|clear --all|compact [status|cancel]]",
+            usage: "/session [new|status|list [--all]|resume <id>|clear <id>...|clear --all|compact [status|cancel]]",
             summary_id: MessageId::HelpSummarySession,
             group: Some("Sessions"),
             scope: "session",
@@ -392,7 +392,7 @@ mod tests {
         assert!(visible.contains(&"/stats [model|tools]"));
         assert!(visible
             .iter()
-            .any(|usage| usage.starts_with("/session [new|status|list|resume")));
+            .any(|usage| usage.starts_with("/session [new|status|list [--all]|resume")));
         assert!(visible.contains(&"/mode approval [recommend|auto|trust]"));
         assert!(visible.contains(&"/mode analysis [smart|auto|manual]"));
         assert!(visible.contains(&"/hooks"));

@@ -43,10 +43,13 @@ impl ServeCommand {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(GenAISqliteStore::default_path);
 
-            let auth_config = super::load_server_auth_config(&self.config);
+            let server_config = super::load_server_config(&self.config);
+            let auth_config = server_config.server_auth;
+            let retention_days = server_config.retention_days;
 
             actix_web::rt::System::new().block_on(async move {
-                if let Err(e) = run_server(&host, port, db_path, auth_config).await {
+                if let Err(e) = run_server(&host, port, db_path, auth_config, retention_days).await
+                {
                     eprintln!("Server error: {e}");
                     std::process::exit(1);
                 }

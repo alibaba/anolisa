@@ -937,35 +937,41 @@ fn generate_checklist(results: &[ToolReadyResult]) -> String {
     output
 }
 
+/// Build the ordered candidate list for `auto_fix`.
+///
+/// Order mirrors `spec_path_candidates`: env override → user dot-dir →
+/// user FHS → system FHS → legacy flat-layout mirrors.
+fn fix_script_candidates() -> Vec<String> {
+    let home = super::get_home_dir();
+    vec![
+        std::env::var("TOKENLESS_ENV_FIX_SCRIPT").ok(),
+        Some(format!("{home}/.tokenless/tokenless-env-fix.sh")),
+        Some(format!(
+            "{home}/.local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh"
+        )),
+        Some("/usr/local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh".into()),
+        Some("/usr/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh".into()),
+        Some(format!(
+            "{home}/.local/share/anolisa/adapters/tokenless/tokenless-env-fix.sh"
+        )),
+        Some("/usr/local/share/anolisa/adapters/tokenless/tokenless-env-fix.sh".into()),
+        Some("/usr/share/anolisa/adapters/tokenless/tokenless-env-fix.sh".into()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// Auto-fix missing dependencies via tokenless-env-fix.sh.
 fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
     let home = super::get_home_dir();
-    let fix_script_env = std::env::var("TOKENLESS_ENV_FIX_SCRIPT").ok();
-    let fix_script_candidates = [
-        fix_script_env,
-        Some(format!("{}/.tokenless/tokenless-env-fix.sh", home)),
-        Some(format!(
-            "{}/.local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh",
-            home
-        )),
-        Some("/usr/local/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh".to_string()),
-        Some("/usr/share/anolisa/adapters/tokenless/common/tokenless-env-fix.sh".to_string()),
-        // Legacy paths (pre-FHS refactor, flat layout without common/ subdir)
-        Some(format!(
-            "{}/.local/share/anolisa/adapters/tokenless/tokenless-env-fix.sh",
-            home
-        )),
-        Some("/usr/share/anolisa/adapters/tokenless/tokenless-env-fix.sh".to_string()),
-    ];
-    let fix_script = fix_script_candidates
-        .iter()
-        .flatten()
+    let fix_script = fix_script_candidates()
+        .into_iter()
         .find(|p| {
             let path = std::path::Path::new(p);
             path.exists() && is_trusted_path(path)
         })
-        .cloned()
-        .unwrap_or_else(|| format!("{}/.tokenless/tokenless-env-fix.sh", home));
+        .unwrap_or_else(|| format!("{home}/.tokenless/tokenless-env-fix.sh"));
 
     // Build JSON array of missing deps
     let deps_json: Vec<Value> = missing_deps
@@ -1097,50 +1103,44 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
     Ok(stdout)
 }
 
+/// Build the ordered candidate list for `find_spec_path`.
+///
+/// Order: env override → user dot-dir → user FHS → system FHS (usr/local,
+/// then usr) → legacy flat-layout mirrors of the same four roots.
+fn spec_path_candidates() -> Vec<String> {
+    let home = super::get_home_dir();
+    vec![
+        std::env::var("TOKENLESS_TOOL_READY_SPEC").ok(),
+        Some(format!("{home}/.tokenless/tool-ready-spec.json")),
+        Some(format!(
+            "{home}/.local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json"
+        )),
+        Some("/usr/local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json".into()),
+        Some("/usr/share/anolisa/adapters/tokenless/common/tool-ready-spec.json".into()),
+        Some(format!(
+            "{home}/.local/share/anolisa/adapters/tokenless/tool-ready-spec.json"
+        )),
+        Some("/usr/local/share/anolisa/adapters/tokenless/tool-ready-spec.json".into()),
+        Some("/usr/share/anolisa/adapters/tokenless/tool-ready-spec.json".into()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// Find the spec file path.
 fn find_spec_path() -> Result<PathBuf, String> {
-    let home = super::get_home_dir();
-    let candidates = [
-        std::env::var("TOKENLESS_TOOL_READY_SPEC")
-            .ok()
-            .map(PathBuf::from),
-        Some(PathBuf::from(format!(
-            "{}/.tokenless/tool-ready-spec.json",
-            home
-        ))),
-        Some(PathBuf::from(format!(
-            "{}/.local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json",
-            home
-        ))),
-        Some(PathBuf::from(
-            "/usr/local/share/anolisa/adapters/tokenless/common/tool-ready-spec.json",
-        )),
-        Some(PathBuf::from(
-            "/usr/share/anolisa/adapters/tokenless/common/tool-ready-spec.json",
-        )),
-        // Legacy paths (pre-FHS refactor, flat layout without common/ subdir)
-        Some(PathBuf::from(format!(
-            "{}/.local/share/anolisa/adapters/tokenless/tool-ready-spec.json",
-            home
-        ))),
-        Some(PathBuf::from(
-            "/usr/share/anolisa/adapters/tokenless/tool-ready-spec.json",
-        )),
-    ];
+    let candidates = spec_path_candidates();
 
-    for candidate in candidates.iter().flatten() {
-        if candidate.exists() && is_trusted_path(candidate) {
-            return Ok(candidate.clone());
+    for candidate in candidates.iter().map(PathBuf::from) {
+        if candidate.exists() && is_trusted_path(&candidate) {
+            return Ok(candidate);
         }
     }
 
-    let candidate_list: Vec<String> = candidates
-        .iter()
-        .filter_map(|c| c.as_ref().map(|p| p.display().to_string()))
-        .collect();
     Err(format!(
         "No spec file found in any candidate path: {}",
-        candidate_list.join(", ")
+        candidates.join(", ")
     ))
 }
 

@@ -35,7 +35,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::SessionCancelledTitle => "会话管理已关闭",
         MessageId::SessionCancelledBody => "模型会话和持久化文件均未改变。",
         MessageId::SessionUsageBody => {
-            "用法：/session [new|status|list|resume <id>|clear <id>...|clear --all|compact [status|cancel]]"
+            "用法：/session [new|status|list [--all]|resume <id>|clear <id>...|clear --all|compact [status|cancel]]"
         }
         MessageId::SessionNewTitle => "全新会话",
         MessageId::SessionNewDetachedBody => {

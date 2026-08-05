@@ -2,6 +2,9 @@ blank_issues_enabled: false
 
 contact_links:
   - name: 📖 Documentation / 文档
-    url: https://github.com/alibaba/anolisa/tree/main/docs
-    about: |
-      Check documentation before opening an issue.
+    url: https://agentic-os.sh/docs
+    about: Check the documentation before opening an issue.
+
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/alibaba/anolisa/security/advisories/new
+    about: Report vulnerabilities privately. Do not include security details in a public issue.

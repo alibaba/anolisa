@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from ..cli_runner import call_agent_sec_cli, trace_context
+from ..hook_config import (  # noqa: TID252 - Hermes loads this as a standalone package.
+    env_flag_enabled,
+    env_hook_policy,
+    normalize_hook_policy,
+)
 from .base import AgentSecCoreCapability
 
 logger = logging.getLogger("agent-sec-core")
@@ -19,11 +24,10 @@ _TOOL_NAME = "skill_view"
 _SKILL_MANIFEST = "SKILL.md"
 _DEFAULT_HERMES_SKILLS_DIR = Path("~/.hermes/skills")
 _POLICY_ASK = "ask"
-_POLICY_DEBUG = "debug"
+_POLICY_DEBUG = "observe"
 _POLICY_WARN = "warn"
 _POLICY_BLOCK = "block"
 _DEFAULT_POLICY = _POLICY_ASK
-_VALID_POLICIES = frozenset({_POLICY_ASK, _POLICY_DEBUG, _POLICY_WARN, _POLICY_BLOCK})
 _SKIP_DIRS = frozenset({".git", ".github", ".hub", ".archive", ".skill-meta"})
 _CONTEXT_KEY_FIELDS = ("session_id", "task_id", "run_id")
 _HERMES_SESSION_ENV = "HERMES_SESSION_ID"
@@ -64,6 +68,7 @@ class SkillLedgerCapability(AgentSecCoreCapability):
 
     def _on_register(self, config: dict) -> None:
         """Read skill-ledger specific config."""
+        self._hook_enabled = env_flag_enabled("SKILL_LEDGER_HOOK_ENABLED", True)
         self._policy = self._read_policy(config)
         self._skills_dir = _DEFAULT_HERMES_SKILLS_DIR
         self._max_warnings_per_turn = self._read_int_config(
@@ -81,6 +86,8 @@ class SkillLedgerCapability(AgentSecCoreCapability):
 
     def _on_pre_tool_call(self, tool_name, args, **kwargs):
         """Run skill-ledger exposure summary before Hermes reads a skill."""
+        if not self._hook_enabled:
+            return None
         if tool_name != _TOOL_NAME:
             return None
         if not isinstance(args, dict):
@@ -155,6 +162,8 @@ class SkillLedgerCapability(AgentSecCoreCapability):
         **kwargs,
     ):
         """Prepend user-visible skill-ledger warnings to the final response."""
+        if not self._hook_enabled:
+            return response_text
         if self._policy not in {_POLICY_ASK, _POLICY_WARN}:
             return None
         if self._max_warnings_per_turn == 0:
@@ -359,10 +368,19 @@ class SkillLedgerCapability(AgentSecCoreCapability):
 
     @staticmethod
     def _read_policy(config: dict) -> str:
+        if "SKILL_LEDGER_MODE" in os.environ:
+            raw_policy = os.environ.get("SKILL_LEDGER_MODE")
+            policy = env_hook_policy("SKILL_LEDGER_MODE", _DEFAULT_POLICY)
+            if normalize_hook_policy(raw_policy, "") == "":
+                logger.warning(
+                    "[agent-sec-core] skill-ledger invalid SKILL_LEDGER_MODE; using ask"
+                )
+            return policy
+
         raw_policy = config.get("policy")
         if isinstance(raw_policy, str) and raw_policy.strip():
-            policy = raw_policy.strip().lower()
-            if policy in _VALID_POLICIES:
+            policy = normalize_hook_policy(raw_policy, "")
+            if policy:
                 return policy
             logger.debug(
                 "[agent-sec-core] skill-ledger invalid policy=%r; using %s",

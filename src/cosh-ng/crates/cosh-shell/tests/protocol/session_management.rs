@@ -109,7 +109,7 @@ esac
     fs::set_permissions(&script, permissions).expect("chmod");
 
     let client = SessionManagementClient::new(script.display().to_string());
-    let page = client.list("/tmp", 1, None).expect("list page");
+    let page = client.list("/tmp", 1, None, false).expect("list page");
     assert_eq!(page.sessions.len(), 1);
     assert_eq!(page.sessions[0].health, SessionHealth::Ready);
     assert_eq!(
@@ -441,7 +441,7 @@ printf '%s\n' '{{"ok":true,"data":{{"action":"list","sessions":[],"next_cursor":
     fs::set_permissions(&script, permissions).expect("chmod");
 
     let client = SessionManagementClient::new(script.display().to_string());
-    let page = client.list("/tmp", 10, None).expect("list page");
+    let page = client.list("/tmp", 10, None, false).expect("list page");
 
     assert!(page.sessions.is_empty());
     assert_eq!(page.next_cursor, None);
@@ -488,7 +488,7 @@ exec sleep 30
             .with_timeout(Duration::from_secs(2));
         let started = std::time::Instant::now();
         let error = client
-            .list("/tmp", 10, None)
+            .list("/tmp", 10, None, false)
             .expect_err("oversized output must fail");
 
         assert_eq!(error.code, "transport");
@@ -540,7 +540,7 @@ exec sleep 30
     let client = SessionManagementClient::new(script.display().to_string())
         .with_timeout(Duration::from_millis(500));
     let error = client
-        .list("/tmp", 10, None)
+        .list("/tmp", 10, None, false)
         .expect_err("hung management process must time out");
 
     assert_eq!(error.code, "transport");
@@ -639,7 +639,7 @@ exit 0
     let client = SessionManagementClient::new(script.display().to_string())
         .with_timeout(Duration::from_millis(500));
     let error = client
-        .list("/tmp", 10, None)
+        .list("/tmp", 10, None, false)
         .expect_err("empty wrapper response is invalid");
 
     assert_eq!(error.code, "transport");
@@ -686,7 +686,7 @@ exit 0
         .with_timeout(Duration::from_secs(2));
     let started = std::time::Instant::now();
     let error = client
-        .list("/tmp", 10, None)
+        .list("/tmp", 10, None, false)
         .expect_err("empty wrapper response is invalid");
     let elapsed = started.elapsed();
     // The wrapper only exits after the marker exists, but a deadline kill on

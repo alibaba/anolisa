@@ -331,6 +331,7 @@ fn submitted_capture_discards_a_later_owned_read_when_the_chain_ends() {
     let first = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -338,6 +339,7 @@ fn submitted_capture_discards_a_later_owned_read_when_the_chain_ends() {
     let second = RawInputCapture::Question {
         id: "q-2".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -428,6 +430,7 @@ fn input_obtained_before_capture_replacement_does_not_enter_the_new_capture() {
     let first = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -435,6 +438,7 @@ fn input_obtained_before_capture_replacement_does_not_enter_the_new_capture() {
     let second = RawInputCapture::Question {
         id: "q-2".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -532,6 +536,7 @@ fn input_obtained_after_capture_install_enters_the_new_capture() {
     let capture = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -624,6 +629,7 @@ fn passthrough_owned_input_does_not_enter_a_later_capture() {
             &RawObserverAction::CaptureInput(RawInputCapture::Question {
                 id: "q-1".to_string(),
                 option_count: 0,
+                selected: 0,
                 allow_free_text: true,
                 multiple: false,
                 secret: false,
@@ -686,6 +692,7 @@ fn delay_owned_escape_does_not_reach_a_later_capture_or_shell() {
         &RawObserverAction::CaptureInput(RawInputCapture::Question {
             id: "q-1".to_string(),
             option_count: 0,
+            selected: 0,
             allow_free_text: true,
             multiple: false,
             secret: false,
@@ -720,6 +727,7 @@ fn capture_owned_input_does_not_enter_later_passthrough() {
         capture: RawInputCapture::Question {
             id: "q-1".to_string(),
             option_count: 0,
+            selected: 0,
             allow_free_text: true,
             multiple: false,
             secret: false,
@@ -1072,6 +1080,7 @@ fn stale_generation_reads_are_discarded_without_affecting_the_next_capture() {
         capture: RawInputCapture::Question {
             id: "q-2".to_string(),
             option_count: 0,
+            selected: 0,
             allow_free_text: true,
             multiple: false,
             secret: false,
@@ -1133,6 +1142,7 @@ fn active_capture_eof_drains_the_generation_without_input() {
         capture: RawInputCapture::Question {
             id: "q-1".to_string(),
             option_count: 0,
+            selected: 0,
             allow_free_text: true,
             multiple: false,
             secret: false,
@@ -1689,6 +1699,7 @@ fn selection_pending_escape_does_not_cancel_a_new_capture() {
         capture: RawInputCapture::Question {
             id: "q-1".to_string(),
             option_count: 0,
+            selected: 0,
             allow_free_text: true,
             multiple: false,
             secret: false,
@@ -1768,6 +1779,7 @@ fn selection_split_shift_tab_suffix_does_not_enter_a_new_capture() {
         capture: RawInputCapture::Question {
             id: "q-1".to_string(),
             option_count: 0,
+            selected: 0,
             allow_free_text: true,
             multiple: false,
             secret: false,

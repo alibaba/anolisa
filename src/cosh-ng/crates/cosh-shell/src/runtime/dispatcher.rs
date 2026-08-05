@@ -115,6 +115,49 @@ fn render_inline_guidance_from_batch<W: Write>(
     let ledger = build_command_blocks(events);
     record_completed_command_blocks(state, &ledger.blocks);
     state.session_blocks = ledger.blocks.clone();
+    // Positive evidence of command activity (R9): incomplete or
+    // unmatched markers produce ledger errors instead of blocks, so an
+    // empty `session_blocks` alone never proves the shell has not run
+    // (and cd'd inside) a command. `events` is the session's cumulative
+    // stream (the raw relay always passes the parser's full event vec,
+    // which is append-only), so once a command marker is present it is
+    // present in every later dispatch and this assignment never
+    // regresses to `false`.
+    state.shell_command_activity_observed = events.iter().any(|event| {
+        matches!(
+            event.kind,
+            ShellEventKind::CommandStarted
+                | ShellEventKind::CommandCompleted
+                | ShellEventKind::CommandFailed
+        )
+    });
+    // The shell's latest prompt-time cwd report: a `ShellReady` event
+    // is a precmd marker with no command in flight and carries the
+    // shell's `$PWD`, so it is positive evidence both that the marker
+    // channel works and of where the shell sits. Any later PTY input
+    // write invalidates the report — submit-detection in the byte
+    // stream is a documented heuristic (a custom `accept-line`
+    // binding is indistinguishable from editing keys), and the
+    // submitted line may have been a `cd` whose markers were lost
+    // entirely — so the report is only current while no user input
+    // follows it. Scanned newest first: the most recent decisive
+    // event wins, and an event-free dispatch never erases the last
+    // known state.
+    for event in events.iter().rev() {
+        if event.kind == ShellEventKind::UserInputIntercepted
+            && event.component.as_deref() == Some("shell_pty_input")
+            && event.message.as_deref() == Some("write")
+        {
+            state.shell_prompt_cwd = None;
+            break;
+        }
+        if event.kind == ShellEventKind::ShellReady {
+            if let Some(cwd) = event.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
+                state.shell_prompt_cwd = Some(cwd.to_string());
+                break;
+            }
+        }
+    }
     if state.shell_exited {
         if let Some(event) = events
             .iter()
@@ -377,7 +420,7 @@ fn start_pending_shell_handoff_continuations<W: Write>(
     Ok(())
 }
 
-fn update_personal_shell_input_state(events: &[ShellEvent], state: &mut InlineState) {
+pub(super) fn update_personal_shell_input_state(events: &[ShellEvent], state: &mut InlineState) {
     for event in events {
         match event.kind {
             ShellEventKind::ShellReady
@@ -563,101 +606,3 @@ impl ActivityConsumer {
 
 #[cfg(test)]
 mod recovery_tests;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::runtime::prelude::FakeAgentAdapter;
-
-    #[test]
-    fn dispatcher_advances_cursor_to_snapshot_end() {
-        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-        let mut state = InlineState::default();
-        let mut output = Vec::new();
-        let snapshot = ShellEventSnapshot::new(&[
-            ShellEvent::user_input_intercepted("s", "/help"),
-            ShellEvent::user_input_intercepted("s", "/help"),
-        ]);
-
-        let actions = RuntimeDispatcher::dispatch_inline_batch(
-            &snapshot,
-            &adapter,
-            "bash",
-            &mut state,
-            &mut output,
-        )
-        .expect("dispatch should render");
-        RuntimeDispatcher::apply_actions(actions, &mut state);
-
-        assert_eq!(
-            state.control.event_cursor().position(),
-            snapshot.cursor().position()
-        );
-    }
-
-    #[test]
-    fn stable_event_key_uses_marker_timestamp_when_available() {
-        let mut event = ShellEvent::user_input_intercepted("s", "/help");
-        assert_eq!(stable_event_key("slash", 7, &event), "slash:7");
-
-        event.started_at_ms = Some(123);
-        assert_eq!(stable_event_key("slash", 7, &event), "slash:123::/help");
-    }
-
-    #[test]
-    fn stable_event_key_does_not_retain_secret_card_input() {
-        let mut event = ShellEvent::user_input_intercepted("s", "auth-1:secret-value");
-        event.started_at_ms = Some(123);
-        event.component = Some("card_secret".to_string());
-
-        let key = stable_event_key("auth", 7, &event);
-
-        assert_eq!(key, "auth:123:card_secret:7");
-        assert!(!key.contains("secret-value"));
-    }
-
-    #[test]
-    fn personal_idle_tracks_whether_the_shell_input_line_is_empty() {
-        let mut state = InlineState::default();
-        let mut editing = ShellEvent::user_input_intercepted("s", "");
-        editing.component = Some("shell_input".to_string());
-        editing.message = Some("input editing".to_string());
-        update_personal_shell_input_state(&[editing], &mut state);
-        assert!(state.personalization.shell_input_active);
-
-        let mut empty = ShellEvent::user_input_intercepted("s", "");
-        empty.component = Some("shell_input".to_string());
-        empty.message = Some("input empty".to_string());
-        update_personal_shell_input_state(&[empty], &mut state);
-        assert!(!state.personalization.shell_input_active);
-    }
-
-    #[test]
-    fn busy_shell_updates_the_analyzer_foreground_gate() {
-        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
-        let cancellation =
-            crate::recommendation::personal_analysis_runtime::AnalyzerCancellation::new();
-        let mut state = InlineState {
-            personalization: crate::recommendation::personal_state::PersonalizationState {
-                analyzer_cancellation: Some(cancellation.clone()),
-                ..Default::default()
-            },
-            ..InlineState::default()
-        };
-        let mut output = Vec::new();
-        let snapshot = ShellEventSnapshot::new(&[ShellEvent::command_started(
-            "session", "command", "sleep 1", "/tmp", 1,
-        )]);
-
-        RuntimeDispatcher::dispatch_inline_batch(
-            &snapshot,
-            &adapter,
-            "bash",
-            &mut state,
-            &mut output,
-        )
-        .expect("dispatch should render");
-
-        assert!(!cancellation.foreground_idle());
-    }
-}

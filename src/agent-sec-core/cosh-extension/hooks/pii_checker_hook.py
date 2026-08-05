@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Cosh hook script for PIIChecker.
 
-Reads a cosh UserPromptSubmit JSON from stdin, extracts the user prompt,
-invokes ``agent-sec-cli scan-pii`` via subprocess, and writes a cosh
-HookOutput JSON to stdout.
+Reads a supported cosh hook event JSON from stdin, extracts the relevant text,
+invokes ``agent-sec-cli scan-pii`` via subprocess, and writes a cosh HookOutput
+JSON to stdout.
 
 This script is intentionally self-contained — it does NOT import any
 ``agent_sec_cli`` package. All it needs is the standard library and the
@@ -11,12 +11,26 @@ This script is intentionally self-contained — it does NOT import any
 """
 
 import json
+import os
 import subprocess
 import sys
 from typing import Any
 
+from hook_config import env_flag_enabled, env_hook_policy, normalize_hook_policy
 from pii_text import value_to_text
 from trace_context import with_trace_context
+
+_HOOK_ENABLED = env_flag_enabled("PII_CHECKER_HOOK_ENABLED", True)
+
+
+def _read_policy() -> str:
+    """Read the configured PII Checker mode."""
+    raw = os.environ.get("PII_CHECKER_MODE")
+    policy = env_hook_policy("PII_CHECKER_MODE", "observe")
+    if "PII_CHECKER_MODE" in os.environ and normalize_hook_policy(raw, "") == "":
+        print("[pii-checker] invalid PII_CHECKER_MODE; using observe", file=sys.stderr)
+    return policy
+
 
 _USER_INPUT_SOURCE = "user_input"
 _TOOL_INPUT_SOURCE = "tool_input"
@@ -46,7 +60,11 @@ def _shorten(value: str, limit: int = _MAX_EVIDENCE_CHARS) -> str:
     return value[: limit - 1] + "…"
 
 
-def _format_pii_warning(verdict: str, findings: list[Any]) -> str:
+def _format_pii_warning(
+    verdict: str,
+    findings: list[Any],
+    action_message: str = "本轮请求将继续处理。",
+) -> str:
     """Build a minimal-disclosure warning from structured PII findings."""
     typed_findings = [item for item in findings if isinstance(item, dict)]
     count = len(typed_findings)
@@ -81,7 +99,7 @@ def _format_pii_warning(verdict: str, findings: list[Any]) -> str:
         parts.append(f"严重级别：{', '.join(severities)}")
     if redacted_evidence:
         parts.append(f"脱敏示例：{', '.join(redacted_evidence)}")
-    parts.append("本轮请求将继续处理。")
+    parts.append(action_message)
     return "；".join(parts)
 
 
@@ -158,13 +176,21 @@ def _extract_response_text(llm_response: Any) -> str:
     return "".join(parts)
 
 
-def _extract_scan_target(input_data: dict[str, Any]) -> tuple[str, str]:
-    """Return text and source for supported Cosh hook events."""
+def _hook_event_name(input_data: dict[str, Any]) -> str:
+    """Return the canonical Cosh event name, preserving legacy input behavior."""
     event_name = _safe_text(input_data.get("hook_event_name"))
     if not event_name:
         event_name = _safe_text(input_data.get("hookEventName"))
+    return event_name or "UserPromptSubmit"
 
-    if event_name in {"", "UserPromptSubmit"}:
+
+def _extract_scan_target(
+    input_data: dict[str, Any], event_name: str | None = None
+) -> tuple[str, str]:
+    """Return text and source for supported Cosh hook events."""
+    event_name = event_name or _hook_event_name(input_data)
+
+    if event_name == "UserPromptSubmit":
         return _safe_text(input_data.get("prompt")), _USER_INPUT_SOURCE
 
     if event_name == "PreToolUse":
@@ -189,13 +215,17 @@ def _extract_scan_target(input_data: dict[str, Any]) -> tuple[str, str]:
     return "", "unknown"
 
 
-def _format_cosh(scan_result: dict[str, Any]) -> str:
+def _format_cosh(
+    scan_result: dict[str, Any],
+    policy: str = "warn",
+    event_name: str = "UserPromptSubmit",
+) -> str:
     """Convert a scan-pii result dict into a cosh HookOutput JSON string.
 
     Mapping:
         verdict == "pass" -> decision "allow"
-        verdict == "warn" -> decision "allow" with reason
-        verdict == "deny" -> decision "allow" with high-risk reason
+        verdict == "warn" -> decision "allow" with a warning when policy is active
+        verdict == "deny" -> event-specific ask/block or a warning fallback
         verdict == "error" or unknown -> fail-open "allow"
     """
     verdict = _safe_text(scan_result.get("verdict")) or "pass"
@@ -204,16 +234,56 @@ def _format_cosh(scan_result: dict[str, Any]) -> str:
     if verdict == "pass" or not findings:
         return _allow()
 
-    if verdict in {"warn", "deny"}:
-        return json.dumps(
-            {"decision": "allow", "reason": _format_pii_warning(verdict, findings)},
-            ensure_ascii=False,
-        )
+    if policy == "observe" or verdict not in {"warn", "deny"}:
+        return _allow()
 
-    return _allow()
+    decision = "allow"
+    action_message = "本轮请求将继续处理。"
+
+    # A scanner warning never escalates into confirmation or blocking.
+    if verdict == "deny" and policy == "ask":
+        if event_name == "UserPromptSubmit":
+            decision = "ask"
+            action_message = "需要确认后才能继续处理本轮请求。"
+        elif event_name == "PreToolUse":
+            decision = "ask"
+            action_message = "需要确认后才能执行本次工具调用。"
+        else:
+            action_message = (
+                "当前 hook 不支持确认，已 fallback 为 warn；本轮处理将继续。"
+            )
+    elif verdict == "deny" and policy == "block":
+        if event_name == "UserPromptSubmit":
+            decision = "block"
+            action_message = "本轮请求已被阻断。"
+        elif event_name == "PreToolUse":
+            decision = "block"
+            action_message = "本次工具调用已被阻断。"
+        elif event_name == "PostToolUse":
+            decision = "block"
+            action_message = (
+                "工具已经执行；原始工具结果不会进入模型上下文，"
+                "已发生的外部副作用不会撤销。"
+            )
+        else:
+            action_message = (
+                "当前 hook 不支持阻断，已 fallback 为 warn；本轮处理将继续。"
+            )
+
+    return json.dumps(
+        {
+            "decision": decision,
+            "reason": _format_pii_warning(verdict, findings, action_message),
+        },
+        ensure_ascii=False,
+    )
 
 
 def main() -> None:
+    if not _HOOK_ENABLED:
+        print(_allow())
+        return
+
     try:
         input_data = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError, ValueError):
@@ -224,7 +294,8 @@ def main() -> None:
         print(_allow())
         return
 
-    scan_text, source = _extract_scan_target(input_data)
+    event_name = _hook_event_name(input_data)
+    scan_text, source = _extract_scan_target(input_data, event_name)
     if not isinstance(scan_text, str) or not scan_text.strip():
         print(_allow())
         return
@@ -233,7 +304,7 @@ def main() -> None:
     if scan_result is None:
         print(_allow())
         return
-    print(_format_cosh(scan_result))
+    print(_format_cosh(scan_result, _read_policy(), event_name))
 
 
 if __name__ == "__main__":

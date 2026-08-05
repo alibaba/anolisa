@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use super::CoshCoreAdapter;
+
 const DEFAULT_SESSION_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 const CLEAR_PLAN_PAGE_SIZE: usize = 4096;
 const CLEAR_REQUEST_BATCH_SIZE: usize = 128;
@@ -196,7 +198,10 @@ impl SessionManagementClient {
         self
     }
 
-    /// Lists a bounded, cursor-addressed page for one workspace.
+    /// Lists a bounded, cursor-addressed page.
+    ///
+    /// When `all_workspaces` is true, the request asks cosh-core to aggregate
+    /// sessions from every workspace-scoped store.
     ///
     /// # Errors
     ///
@@ -206,12 +211,14 @@ impl SessionManagementClient {
         workspace_scope: &str,
         limit: usize,
         cursor: Option<&str>,
+        all_workspaces: bool,
     ) -> Result<SessionList, SessionErrorInfo> {
         let data: ListData = self.request(json!({
             "action": "list",
             "workspace_scope": workspace_scope,
             "limit": limit,
-            "cursor": cursor
+            "cursor": cursor,
+            "all_workspaces": all_workspaces
         }))?;
         if data.action != "list" {
             return Err(SessionErrorInfo::transport(
@@ -427,6 +434,44 @@ impl SessionManagementClient {
         serde_json::from_value(data).map_err(|error| {
             SessionErrorInfo::transport(format!("invalid cosh-core session response data: {error}"))
         })
+    }
+}
+
+impl CoshCoreAdapter {
+    /// Lists persisted sessions in a canonical workspace.
+    ///
+    /// When `all_workspaces` is true, summaries from every workspace-scoped
+    /// store are returned; foreign workspaces are marked `scope_mismatch`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a recoverable management protocol error.
+    pub fn list_sessions(
+        &self,
+        workspace_scope: &str,
+        all_workspaces: bool,
+    ) -> Result<SessionList, SessionErrorInfo> {
+        self.list_sessions_page(workspace_scope, 20, None, all_workspaces)
+    }
+
+    /// Lists one bounded page while preserving the core-owned opaque cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns a recoverable management protocol error.
+    pub fn list_sessions_page(
+        &self,
+        workspace_scope: &str,
+        limit: usize,
+        cursor: Option<&str>,
+        all_workspaces: bool,
+    ) -> Result<SessionList, SessionErrorInfo> {
+        SessionManagementClient::new(self.program.clone()).list(
+            workspace_scope,
+            limit,
+            cursor,
+            all_workspaces,
+        )
     }
 }
 

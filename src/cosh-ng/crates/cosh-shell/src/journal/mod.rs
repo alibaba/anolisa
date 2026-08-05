@@ -42,6 +42,15 @@ fn redacted_event(event: &ShellEvent) -> ShellEvent {
     event.terminal_output_ref = event.terminal_output_ref.as_deref().map(redact);
     if event.component.as_deref() == Some("card_secret") {
         event.input = event.input.as_ref().map(|_| "<redacted>".to_string());
+    } else if event
+        .routing
+        .as_ref()
+        .is_some_and(|routing| routing.sensitive)
+    {
+        // The shell-side secret gate marked this input sensitive; redact the
+        // whole field rather than trusting the regex patterns to re-detect
+        // every form the gate matched (e.g. short keys like `sk-fbaa6`).
+        event.input = event.input.as_ref().map(|_| "<redacted>".to_string());
     } else if event.component.as_deref() == Some("slash") {
         event.input = event.input.as_deref().map(redact_slash_input);
     } else {
@@ -92,7 +101,7 @@ fn json_to_io(err: serde_json::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{read_shell_events, write_shell_events};
-    use crate::types::ShellEvent;
+    use crate::types::{ShellEvent, ShellRoutingMetadata};
 
     #[test]
     fn journal_redacts_commands_prompts_and_secret_card_input() {
@@ -176,6 +185,113 @@ mod tests {
             events[3].input.as_deref(),
             Some("/extensions settings set fixture endpoint **********************")
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Inputs the shell secret gate marked sensitive are redacted as a whole
+    /// field, including short-key forms the regex patterns do not match
+    /// (#2138: `sk-fbaa6` is below the opaque-token minimum length).
+    #[test]
+    fn journal_redacts_sensitive_routed_input_whole_field() {
+        let path = std::env::temp_dir().join(format!(
+            "cosh-shell-sensitive-routing-journal-{}-{}.jsonl",
+            std::process::id(),
+            now_nanos()
+        ));
+        let input = "帮我安装下openclaw,模型使用qwen3.8-max,API Key: sk-fbaa6";
+        let mut sensitive = ShellEvent::user_input_intercepted("session-1", input);
+        sensitive.component = Some("natural_language".to_string());
+        sensitive.routing = Some(ShellRoutingMetadata {
+            generation: 3,
+            top_level_missing: true,
+            proven: true,
+            sensitive: true,
+            unsafe_input: false,
+        });
+
+        write_shell_events(&path, &[sensitive]).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(!content.contains("sk-fbaa6"), "{content}");
+        let events = read_shell_events(&path).unwrap();
+        assert_eq!(events[0].input.as_deref(), Some("<redacted>"));
+        assert!(events[0].routing.as_ref().is_some_and(|r| r.sensitive));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// T0.1 matrix: one representative per `_cosh_command_has_secret`
+    /// pattern family. Whole-field redaction keyed off the sensitive
+    /// routing flag must hide every form the shell gate matches, without
+    /// relying on the regex patterns to re-detect them.
+    #[test]
+    fn journal_redacts_every_shell_gate_pattern_family() {
+        let path = std::env::temp_dir().join(format!(
+            "cosh-shell-gate-matrix-journal-{}-{}.jsonl",
+            std::process::id(),
+            now_nanos()
+        ));
+        let family_inputs = [
+            "帮我配好 API Key: sk-fbaa6",             // opaque sk- short key
+            "用这个 token ghp_matrixtoken 部署",      // github token prefix
+            "调用时带 bearer matrix-bearer-value 头", // bearer
+            "连接 https://user:matrixurlpass@db.example.com 看看", // URL password
+            "跑 deploy --password matrixflagvalue 试试", // sensitive flag
+            "环境里 access_key_secret=matrixassign 生效吗", // sensitive assignment
+            "AK 是 LTAImatrixakvalue0 请检查",        // alibaba access key
+            "迁移 AKIAMATRIXKEY0123456 这个账号",     // aws access key
+        ];
+        let secrets = [
+            "sk-fbaa6",
+            "ghp_matrixtoken",
+            "matrix-bearer-value",
+            "matrixurlpass",
+            "matrixflagvalue",
+            "matrixassign",
+            "LTAImatrixakvalue0",
+            "AKIAMATRIXKEY0123456",
+        ];
+        let events = family_inputs
+            .iter()
+            .map(|input| {
+                let mut event = ShellEvent::user_input_intercepted("session-1", *input);
+                event.component = Some("natural_language".to_string());
+                event.routing = Some(ShellRoutingMetadata {
+                    generation: 1,
+                    top_level_missing: true,
+                    proven: true,
+                    sensitive: true,
+                    unsafe_input: false,
+                });
+                event
+            })
+            // The sensitive + unsafe_input combination must redact the same
+            // way: whole-field redaction keys off `sensitive` alone.
+            .chain(std::iter::once({
+                let mut event = ShellEvent::user_input_intercepted(
+                    "session-1",
+                    "环境里 access_key_secret=matrixassign 生效吗",
+                );
+                event.component = Some("natural_language".to_string());
+                event.routing = Some(ShellRoutingMetadata {
+                    generation: 1,
+                    top_level_missing: true,
+                    proven: false,
+                    sensitive: true,
+                    unsafe_input: true,
+                });
+                event
+            }))
+            .collect::<Vec<_>>();
+
+        write_shell_events(&path, &events).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        for secret in secrets {
+            assert!(!content.contains(secret), "{secret} leaked: {content}");
+        }
+        for event in read_shell_events(&path).unwrap() {
+            assert_eq!(event.input.as_deref(), Some("<redacted>"));
+        }
         let _ = std::fs::remove_file(path);
     }
 

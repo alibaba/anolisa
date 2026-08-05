@@ -4,14 +4,22 @@ import {exists, repoRoot, toPosix, walkFiles, writeGenerated} from './lib.mjs';
 
 const componentChangelogs = (await walkFiles(path.join(repoRoot, 'src'), (file) => path.basename(file) === 'CHANGELOG.md'))
   .filter((file) => path.relative(path.join(repoRoot, 'src'), file).split(path.sep).length === 2);
+const sourceLocaleLink = /^\[(?:中文版|English)\]\(CHANGELOG(?:_zh)?\.md\)\r?\n(?:\r?\n)?/m;
 
 function displayName(source) {
   if (source === 'CHANGELOG.md' || source === 'CHANGELOG_zh.md') return 'ANOLISA';
   return path.posix.basename(path.posix.dirname(source));
 }
 
+function stripSourceLocaleLink(markdown) {
+  return markdown.replace(sourceLocaleLink, '');
+}
+
 async function document(source, language) {
-  const markdown = await readFile(path.join(repoRoot, source), 'utf8');
+  const markdown = stripSourceLocaleLink(await readFile(path.join(repoRoot, source), 'utf8'));
+  if (sourceLocaleLink.test(markdown)) {
+    throw new Error(`${source}: source locale link leaked into generated changelog`);
+  }
   return {
     name: displayName(source),
     source,

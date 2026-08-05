@@ -30,6 +30,14 @@ type = "dashscope"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 api_key = ""              # Or via DASHSCOPE_API_KEY
 model = "qwen-plus"
+# Explicit cache toggle (DashScope only).
+# true  = Explicit caching: injects cache_control markers into the system
+#         and last message. Deterministic 5-min TTL hits. Cache creation
+#         billed at 125%, hits at 10%.
+# false = Implicit caching (default): auto-detects common prefixes, hit rate
+#         is non-deterministic. Hits billed at 20%. Cannot be disabled.
+# See: https://help.aliyun.com/zh/model-studio/context-cache
+explicit_cache = false
 
 [agent]
 # Approval mode: trust | auto | balanced | suggest | strict
@@ -206,6 +214,12 @@ adapter_default = "cosh-core"
 analysis_mode = "smart"
 # Approval mode (recommend | auto | trust)
 approval_mode = "auto"
+# Seconds an agent-approved foreground command may wait for terminal
+# input before it is interrupted (0 = never interrupt). Only waits backed
+# by kernel evidence count: password prompts, pagers and plain stdin
+# reads on the session tty. Fullscreen TUIs (vi, top) are exempt, and so
+# are pipeline reads (e.g. `... | cat`). Default: 120.
+input_wait_timeout_secs = 120
 ```
 
 ## Audit Configuration
@@ -234,15 +248,24 @@ max_disk_bytes = 1073741824
 | `COSH_AI_PROVIDER` | Override active provider | `ai.active_provider` |
 | `COSH_OUTPUT_LANGUAGE` | Output language | `ai.output_language` |
 | `COSH_MAX_TURNS` | Maximum turns | `agent.max_turns` |
+| `COSH_SERVICE_SITE` | Built-in Coding Plan and Token Plan endpoint catalog | — |
 | `COSH_LOG` | Log level (global) | `logging.level` |
 | `RUST_LOG` | Rust log filter | — |
 | `COSH_SHELL_ADAPTER` | Shell adapter | `shell.adapter_default` |
+| `COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | Input-wait timeout (seconds) | `shell.input_wait_timeout_secs` |
 | `COSH_SHELL_DEBUG` | Maps to debug level | `ui.log_level` |
 | `COSH_SHELL_LANG` | Shell language | — |
 | `COSH_AUDIT_DIR` | Unified audit storage root | — |
 | `ALIBABA_CLOUD_ACCESS_KEY_ID` | Alibaba Cloud AK | `ai.providers.aliyun.access_key_id` |
 | `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | Alibaba Cloud SK | `ai.providers.aliyun.access_key_secret` |
 | `DASHSCOPE_API_KEY` | DashScope API Key | Provider resolution chain |
+
+`COSH_SERVICE_SITE` accepts `china`/`cn` and
+`international`/`intl`/`global`. An unset or unrecognized value uses the
+China catalog. It changes the built-in endpoints offered by `/auth`; it does
+not rewrite saved provider URLs. Legacy OpenAI-compatible plan providers are
+restored to a plan-specific edit form only when their endpoint matches the
+selected catalog, ignoring a trailing slash.
 
 ## Log Level Priority
 

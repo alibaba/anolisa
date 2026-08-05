@@ -14,7 +14,7 @@ pub(super) fn emit_fake_control_protocol_stream(
         return Ok(false);
     }
 
-    let run_id = format!("fake-run-{}", request.command_block.id);
+    let run_id = request.id.clone();
     if input.contains("provider native tool") {
         sink(AgentEvent::StatusChanged {
             run_id: run_id.clone(),

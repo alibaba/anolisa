@@ -47,9 +47,9 @@ dest = "{datadir}/adapters/{component}/qoder/"
 [adapters.bundle]
 # Qoder-native plugin manifest inside the bundle directory. The built-in
 # qoder driver reads this to confirm the bundle is a valid Qoder plugin and
-# requires hooks.json beside it. The legacy scripts/install.sh and
-# uninstall.sh ship in the same bundle as publishing assets, but the ANOLISA
-# driver never invokes them — enable/disable behavior is built into Rust.
+# requires hooks/hooks.json. The scripts/install.sh and uninstall.sh ship in
+# the same bundle for direct Makefile installs, but the ANOLISA driver never
+# invokes them — enable/disable behavior is built into Rust.
 entry = ".qoder-plugin/plugin.json"
 
 [[adapters]]

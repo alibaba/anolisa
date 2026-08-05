@@ -50,9 +50,9 @@ use super::{COMMAND, InstallArgs};
 // shared guards it mirrors.
 use super::io_util::now_iso8601;
 use super::{
-    PlannedComponent, PlannedRoute, handle_one, handle_one_with_planned_components, host_backends,
-    plan_component, quarantined, require_configured_rpm_backend, revalidate_native_absence,
-    step_label,
+    PlannedComponent, PlannedRoute, RpmdbProbe, handle_one, handle_one_with_planned_components,
+    host_backends, plan_component, quarantined, require_configured_rpm_backend,
+    revalidate_native_absence, step_label,
 };
 // ── --all support ───────────────────────────────────────────────────
 
@@ -143,8 +143,12 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
             names.len()
         ));
         let per_args = per_component_args(name, &args);
+        let env = anolisa_env::EnvService::detect();
+        let rpmdb = RpmdbProbe::for_host(&env);
         let candidate = host_backends(name, &per_args, &suppressed_ctx)
-            .and_then(|(query, txn)| plan_component(name, &per_args, &suppressed_ctx, &query, &txn))
+            .and_then(|(query, txn)| {
+                plan_component(name, &per_args, &suppressed_ctx, &env, &rpmdb, &query, &txn)
+            })
             .ok()
             .and_then(|planned| {
                 merged_package(&planned).map(|package| MergedItem {
@@ -560,9 +564,14 @@ fn execute_merged_group_with_deps(
             ));
             continue;
         }
-        if let Err(err) =
-            revalidate_native_absence(Some(&item.package), &provider, &now, target, BATCH_COMMAND)
-        {
+        if let Err(err) = revalidate_native_absence(
+            Some(&item.package),
+            &provider,
+            &now,
+            target,
+            BATCH_COMMAND,
+            None,
+        ) {
             items.push(failed_item(&item.name, err.reason().to_string()));
             continue;
         }

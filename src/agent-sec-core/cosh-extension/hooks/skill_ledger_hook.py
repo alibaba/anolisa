@@ -21,7 +21,7 @@ Output mapping:
 
     summary.message is null → { "decision": "allow" }
     policy "ask" (default)   → summary.message asks for confirmation
-    policy "debug"           → summary.message only writes debug stderr
+    policy "observe"         → summary.message only writes audit/debug stderr
     policy "warn"            → summary.message allows with visible reason
     policy "block"           → summary.message blocks execution
 
@@ -53,6 +53,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from hook_config import env_flag_enabled, env_hook_policy, normalize_hook_policy
 from trace_context import with_trace_context
 
 # -- constants ---------------------------------------------------------------
@@ -62,7 +63,7 @@ _CHECK_TIMEOUT = 5  # seconds for the CLI show call
 _INIT_TIMEOUT = 3  # seconds for key initialization
 
 _DEFAULT_POLICY = "ask"
-_VALID_POLICIES = frozenset({"ask", "debug", "warn", "block"})
+_HOOK_ENABLED = env_flag_enabled("SKILL_LEDGER_HOOK_ENABLED", True)
 
 # -- helpers -----------------------------------------------------------------
 
@@ -99,16 +100,12 @@ def _allow_or_warn(reason: str, _policy: str) -> str:
 
 
 def _read_policy() -> str:
-    """Return the configured hook policy."""
-    policy = os.environ.get("SKILL_LEDGER_HOOK_POLICY", _DEFAULT_POLICY).strip().lower()
-    if policy in _VALID_POLICIES:
-        return policy
-    _debug(
-        "invalid SKILL_LEDGER_HOOK_POLICY={!r}; using {}".format(
-            policy, _DEFAULT_POLICY
-        )
-    )
-    return _DEFAULT_POLICY
+    """Return the configured Skill Ledger mode."""
+    raw = os.environ.get("SKILL_LEDGER_MODE")
+    policy = env_hook_policy("SKILL_LEDGER_MODE", _DEFAULT_POLICY)
+    if "SKILL_LEDGER_MODE" in os.environ and normalize_hook_policy(raw, "") == "":
+        _debug("invalid SKILL_LEDGER_MODE; using ask")
+    return policy
 
 
 def _supported_skill_bases(cwd: str) -> list[Path]:
@@ -116,12 +113,14 @@ def _supported_skill_bases(cwd: str) -> list[Path]:
 
     Current scope is intentionally limited to:
     project (.copilot-shell/skills/) → user (~/.copilot-shell/skills/)
-    → system (/usr/share/anolisa/skills/).
+    → system (/usr/share/anolisa/skills/) → raw system
+    (/usr/local/share/anolisa/skills/).
     """
     return [
         Path(cwd) / ".copilot-shell" / "skills",
         Path.home() / ".copilot-shell" / "skills",
         Path("/usr/share/anolisa/skills"),
+        Path("/usr/local/share/anolisa/skills"),
     ]
 
 
@@ -200,7 +199,8 @@ def _resolve_skill_dir(skill_name: str, cwd: str) -> tuple[str | None, bool]:
 
     Current hook scope is intentionally limited to:
     project (.copilot-shell/skills/) → user (~/.copilot-shell/skills/)
-    → system (/usr/share/anolisa/skills/).
+    → system (/usr/share/anolisa/skills/) → raw system
+    (/usr/local/share/anolisa/skills/).
 
     Returns ``(path, traversal_detected)``:
     - ``(str, False)`` — resolved successfully.
@@ -267,7 +267,7 @@ def _format_cosh(summary: dict, skill_name: str, policy: str) -> str:
         return _allow()
 
     reason = f"\u26a0\ufe0f Skill '{skill_name}': {message}"
-    if policy == "debug":
+    if policy == "observe":
         _debug(reason)
         return _allow()
     if policy == "warn":
@@ -282,6 +282,9 @@ def _format_cosh(summary: dict, skill_name: str, policy: str) -> str:
 
 def main() -> None:
     """Entry point — read stdin, summarize skill exposure, write stdout."""
+    if not _HOOK_ENABLED:
+        print(_allow())
+        return
     # 1. Read stdin JSON (PreToolUse event)
     try:
         input_data = json.load(sys.stdin)

@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use super::{
-    extract_bootstrap_path, merge_path_lists, plan_startup_for_render, raw_passthrough_args,
-    record_visible_personal_impressions, render_pending_recommendation_notice,
-    startup_suggestion_mode, visible_personal_candidates, write_startup_suggestion_card,
-    StartupSuggestionMode,
+    append_startup_auth_hint, extract_bootstrap_path, merge_path_lists, plan_startup_for_render,
+    raw_passthrough_args, record_visible_personal_impressions,
+    render_pending_recommendation_notice, startup_suggestion_mode, visible_personal_candidates,
+    write_startup_suggestion_card, StartupSuggestionMode,
 };
 use crate::config::Language;
 use crate::diagnostics::health::{
@@ -19,7 +19,9 @@ use crate::recommendation::personal_model::{
 };
 use crate::recommendation::personal_planner::{PlannerCandidate, PlannerContext};
 use crate::recommendation::personal_runtime::PersonalRuntime;
-use crate::runtime::state::{AnalysisMode, InlineState, PendingInputGhostBinding};
+use crate::runtime::state::{
+    AnalysisMode, InlineState, PendingInputGhostBinding, StartupAuthState,
+};
 use crate::ui::RatatuiInlineRenderer;
 use crate::I18n;
 
@@ -562,4 +564,111 @@ fn raw_passthrough_args_preserves_shell_option() {
             "echo ok".to_string()
         ])
     );
+}
+
+#[test]
+fn startup_auth_hint_appends_only_when_probe_reports_unconfigured() {
+    let mut state = InlineState::default();
+    let mut body = vec!["/help".to_string()];
+
+    // Unresolved probe stays quiet.
+    append_startup_auth_hint(&mut state, &mut body);
+    assert_eq!(body.len(), 1);
+
+    // Configured credentials stay quiet.
+    state.startup_auth.resolved = Some(true);
+    append_startup_auth_hint(&mut state, &mut body);
+    assert_eq!(body.len(), 1);
+
+    // Explicitly unconfigured credentials add the /auth hint line.
+    state.startup_auth.resolved = Some(false);
+    append_startup_auth_hint(&mut state, &mut body);
+    assert_eq!(body.len(), 3);
+    assert_eq!(body[1], "");
+    assert!(body[2].contains("/auth"), "{:?}", body[2]);
+    assert!(body[2].contains("AI not configured"), "{:?}", body[2]);
+
+    // AI disabled by config suppresses the hint even when unconfigured.
+    let mut disabled = InlineState::default();
+    disabled.personalization.ai_disabled = true;
+    disabled.startup_auth.resolved = Some(false);
+    let mut quiet = Vec::new();
+    append_startup_auth_hint(&mut disabled, &mut quiet);
+    assert!(quiet.is_empty());
+}
+
+#[test]
+fn startup_auth_state_resolves_bounded_and_fails_quiet() {
+    // Result arrives within the wait budget.
+    let mut ready = StartupAuthState::default();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    ready.pending = Some(receiver);
+    sender.send(Some(false)).unwrap();
+    ready.wait_ready(Duration::from_millis(150));
+    assert!(ready.ai_unconfigured());
+    assert!(ready.pending.is_none());
+
+    // Timeout leaves the probe unresolved without consuming it.
+    let mut slow = StartupAuthState::default();
+    let (slow_sender, receiver) = std::sync::mpsc::sync_channel(1);
+    slow.pending = Some(receiver);
+    slow.wait_ready(Duration::from_millis(10));
+    assert!(!slow.ai_unconfigured());
+    assert!(slow.pending.is_some());
+    // A late result is still picked up by a later non-blocking poll.
+    slow_sender.send(Some(false)).unwrap();
+    slow.poll_ready();
+    assert!(slow.ai_unconfigured());
+
+    // A dropped probe (failed thread) resolves to quiet, not to a hint.
+    let mut dropped = StartupAuthState::default();
+    let (broken_sender, receiver) = std::sync::mpsc::sync_channel::<Option<bool>>(1);
+    dropped.pending = Some(receiver);
+    drop(broken_sender);
+    dropped.wait_ready(Duration::from_millis(150));
+    assert!(!dropped.ai_unconfigured());
+    assert!(dropped.pending.is_none());
+}
+
+#[test]
+fn recommendation_notice_is_suppressed_while_auth_is_unconfigured() {
+    let root = std::env::temp_dir().join(format!(
+        "cosh-startup-notice-noauth-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let writer = PersonalRuntime::open(true, &root, 1)
+        .unwrap()
+        .spawn_writer()
+        .unwrap();
+    wait_for_writer(|| writer.poll_snapshot());
+    let mut state = InlineState {
+        personalization: crate::recommendation::personal_state::PersonalizationState {
+            writer: Some(writer),
+            ..Default::default()
+        },
+        analysis_mode: AnalysisMode::Smart,
+        ..InlineState::default()
+    };
+    state.startup_auth.resolved = Some(false);
+
+    let mut suppressed = Vec::new();
+    render_pending_recommendation_notice(&mut state, &mut suppressed).unwrap();
+    assert!(suppressed.is_empty());
+    // The first-time disclosure is preserved for a later configured startup.
+    assert!(!state.personalization.notice_shown);
+
+    state.startup_auth.resolved = Some(true);
+    let mut shown = Vec::new();
+    render_pending_recommendation_notice(&mut state, &mut shown).unwrap();
+    let text = String::from_utf8(shown).unwrap();
+    assert!(text.contains("Prompt recommendations are on"));
+    assert!(state.personalization.notice_shown);
+
+    let mut writer = state.personalization.writer.take().unwrap();
+    writer.shutdown(1, Duration::from_secs(5)).unwrap();
+    let _ = std::fs::remove_dir_all(root);
 }

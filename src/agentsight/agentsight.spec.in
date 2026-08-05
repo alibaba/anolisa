@@ -39,8 +39,10 @@ install -d -m 0755 %{buildroot}%{_datadir}/anolisa/components/agentsight
 install -d -m 0755 %{buildroot}%{_sysconfdir}/agentsight
 
 install -p -m 0755 agentsight %{buildroot}/usr/local/bin/
+install -p -m 0755 agentsight-enforcer %{buildroot}/usr/local/bin/
 install -p -m 0755 agentsight-start %{buildroot}/usr/local/bin/
 install -p -m 0644 agentsight.service %{buildroot}%{_unitdir}/
+install -p -m 0644 agentsight-enforcer.service %{buildroot}%{_unitdir}/
 install -p -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/agentsight/component.toml
 install -p -m 0644 agentsight.json %{buildroot}%{_sysconfdir}/agentsight/config.json
 install -p -m 0644 README.md %{buildroot}%{_docdir}/agentsight/
@@ -48,20 +50,25 @@ install -p -m 0644 README_zh.md %{buildroot}%{_docdir}/agentsight/
 install -p -m 0644 LICENSE %{buildroot}%{_docdir}/agentsight/
 
 %post
+%systemd_post agentsight-enforcer.service
 %systemd_post agentsight.service
 
 %preun
 %systemd_preun agentsight.service
+%systemd_preun agentsight-enforcer.service
 
 %postun
 %systemd_postun agentsight.service
+%systemd_postun agentsight-enforcer.service
 
 %files
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) /usr/local/bin/agentsight
+%attr(0755,root,root) /usr/local/bin/agentsight-enforcer
 %attr(0755,root,root) /usr/local/bin/agentsight-start
 %config(noreplace) %{_sysconfdir}/agentsight/config.json
 %{_unitdir}/agentsight.service
+%{_unitdir}/agentsight-enforcer.service
 %{_datadir}/anolisa/components/agentsight/component.toml
 %doc %{_docdir}/agentsight/README.md
 %doc %{_docdir}/agentsight/README_zh.md

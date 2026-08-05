@@ -48,6 +48,7 @@ pub(crate) fn pending_question_capture(state: &InlineState) -> Option<RawInputCa
             return Some(RawInputCapture::Question {
                 id: question.id.clone(),
                 option_count: question.options.len(),
+                selected: question.selected_option,
                 allow_free_text: question.allow_free_text,
                 multiple: question.selection_mode == QuestionSelectionMode::Multiple,
                 secret: false,

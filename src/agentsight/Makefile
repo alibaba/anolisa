@@ -12,6 +12,12 @@ build: ## Build agentsight binary
 		LIBBPF_SYS_LIBRARY_PATH="$(LIBBPF_SYS_LIBRARY_PATH)" \
 		cargo build --release
 
+.PHONY: build-enforcer
+build-enforcer: ## Build the privileged ActPlane enforcement daemon
+	env -u DESTDIR -u MAKEFLAGS -u MFLAGS -u MAKEOVERRIDES \
+		LIBBPF_SYS_LIBRARY_PATH="$(LIBBPF_SYS_LIBRARY_PATH)" \
+		./scripts/build-enforcer.sh
+
 .PHONY: build-frontend
 build-frontend: ## Build and embed frontend into frontend-dist/
 	cd dashboard && npm install \
@@ -20,7 +26,7 @@ build-frontend: ## Build and embed frontend into frontend-dist/
 		&& npm run build:embed
 
 .PHONY: build-all
-build-all: build-frontend build ## Build frontend then Rust binary (with embedded UI)
+build-all: build-frontend build build-enforcer ## Build frontend, AgentSight, and enforcer
 
 .PHONY: build-mac
 build-mac: build-frontend ## Build macOS local viewer (serve only; no eBPF)
@@ -57,6 +63,7 @@ install: build-all ## Build and install agentsight binary and set BPF capabiliti
 	install -d -m 0755 $(DESTDIR)$(BINDIR)
 	install -d -m 0755 $(DESTDIR)$(SYSCONFDIR)/agentsight
 	install -p -m 0755 target/release/agentsight $(DESTDIR)$(BINDIR)/
+	install -p -m 0755 target/release/agentsight-enforcer $(DESTDIR)$(BINDIR)/
 	install -p -m 0644 agentsight.json $(DESTDIR)$(SYSCONFDIR)/agentsight/config.json
 	@if [ "$(SETCAP)" = "1" ] || { [ "$(SETCAP)" = "auto" ] && [ "$(INSTALL_PROFILE)" = "system" ] && [ -z "$(DESTDIR)" ] && command -v setcap >/dev/null 2>&1; }; then \
 		setcap cap_bpf,cap_perfmon=ep $(DESTDIR)$(BINDIR)/agentsight; \
@@ -68,13 +75,18 @@ install: build-all ## Build and install agentsight binary and set BPF capabiliti
 		install -p -m 0755 scripts/agentsight-start.sh $(DESTDIR)$(BINDIR)/agentsight-start; \
 		sed 's|/usr/local/bin/agentsight-start|$(SERVICE_BINDIR)/agentsight-start|g' \
 			scripts/agentsight.service > $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight.service; \
+		sed 's|/usr/local/bin/agentsight-enforcer|$(SERVICE_BINDIR)/agentsight-enforcer|g' \
+			scripts/agentsight-enforcer.service > $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight-enforcer.service; \
 		chmod 0644 $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight.service; \
+		chmod 0644 $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight-enforcer.service; \
 	fi
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/agentsight
+	rm -f $(DESTDIR)$(BINDIR)/agentsight-enforcer
 	rm -f $(DESTDIR)$(BINDIR)/agentsight-start
 	rm -f $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight.service
+	rm -f $(DESTDIR)$(SYSTEMD_SYSTEM_DIR)/agentsight-enforcer.service
 	rm -f $(DESTDIR)$(SYSCONFDIR)/agentsight/config.json
 
 # =============================================================================
@@ -82,8 +94,12 @@ uninstall:
 # =============================================================================
 
 .PHONY: test
-test: ## Run unit tests (fast, no coverage)
+test: test-rpm-packaging ## Run unit tests (fast, no coverage)
 	cd $(CURDIR) && cargo test
+
+.PHONY: test-rpm-packaging
+test-rpm-packaging: ## Validate the portable RPM payload contract
+	cd $(CURDIR) && bash scripts/test-rpm-packaging.sh
 
 .PHONY: lint
 lint: ## Check formatting + clippy

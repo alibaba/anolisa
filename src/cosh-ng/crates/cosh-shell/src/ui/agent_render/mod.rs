@@ -18,6 +18,7 @@ mod approval_details;
 mod approval_journal;
 mod approval_reason;
 mod approval_receipt;
+mod approval_warning;
 mod card;
 mod consultation;
 mod health;

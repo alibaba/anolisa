@@ -33,6 +33,7 @@ pub(crate) fn pending_auth_capture(state: &InlineState) -> Option<RawInputCaptur
         AuthPhase::ManagingProviders => Some(RawInputCapture::Question {
             id: auth_capture_id(auth),
             option_count: management_entry_count(&auth.sysom, auth.existing_providers.len()),
+            selected: auth.selected_provider,
             allow_free_text: false,
             multiple: false,
             secret: false,
@@ -48,6 +49,7 @@ pub(crate) fn pending_auth_capture(state: &InlineState) -> Option<RawInputCaptur
             Some(RawInputCapture::Question {
                 id: auth_capture_id(auth),
                 option_count,
+                selected: auth.selected_provider,
                 allow_free_text: false,
                 multiple: false,
                 secret: false,
@@ -56,6 +58,7 @@ pub(crate) fn pending_auth_capture(state: &InlineState) -> Option<RawInputCaptur
         AuthPhase::ConfirmDelete { .. } => Some(RawInputCapture::Question {
             id: auth_capture_id(auth),
             option_count: DELETE_CONFIRM_OPTION_COUNT,
+            selected: auth.selected_provider,
             allow_free_text: false,
             multiple: false,
             secret: false,
@@ -63,6 +66,7 @@ pub(crate) fn pending_auth_capture(state: &InlineState) -> Option<RawInputCaptur
         AuthPhase::SelectingProvider => Some(RawInputCapture::Question {
             id: auth_capture_id(auth),
             option_count: auth.providers.len(),
+            selected: auth.selected_provider,
             allow_free_text: false,
             multiple: false,
             secret: false,
@@ -82,6 +86,7 @@ pub(crate) fn pending_auth_capture(state: &InlineState) -> Option<RawInputCaptur
         AuthPhase::AliyunEcsChallenge { .. } => Some(RawInputCapture::Question {
             id: auth_capture_id(auth),
             option_count: 1,
+            selected: 0,
             allow_free_text: false,
             multiple: false,
             secret: false,

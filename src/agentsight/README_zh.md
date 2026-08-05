@@ -262,6 +262,30 @@ sudo apt install -y pkg-config libssl-dev libelf-dev libbpf-dev clang llvm linux
 | clang / llvm | >= 11（用于 eBPF 编译） |
 | libbpf | >= 0.8 |
 
+### 通过 Anolisa 安装
+
+```bash
+sudo anolisa --install-mode system install agentsight
+```
+
+AgentSight 需要 Linux system mode。该命令会一并安装 AgentSight 服务和
+`agentsight-enforcer` 服务。
+
+### 通过 RPM 安装
+
+```bash
+sudo yum install agentsight
+```
+
+安装内容：
+- `/usr/local/bin/agentsight` — CLI 可执行文件
+- `/usr/local/bin/agentsight-enforcer` — ActPlane 强制执行引擎
+- `/usr/lib/systemd/system/agentsight.service` — AgentSight systemd 单元
+- `/usr/lib/systemd/system/agentsight-enforcer.service` — 强制执行 systemd 单元
+
+RPM 是 Linux system 包。两个单元会随包安装，但默认不会启用；当两个单元都运行时，
+AgentSight 会排在 enforcer 之后启动。
+
 ### 从源码构建
 
 ```bash
@@ -270,11 +294,14 @@ cd src/agentsight
 # 验证依赖（推荐）
 ./scripts/check-deps.sh
 
-# 构建
-cargo build --release
+# 构建内嵌 Dashboard 的 Rust 二进制
+make build-all
 ```
 
-二进制文件输出至 `target/release/agentsight`。
+二进制文件输出至 `target/release/agentsight`。在受支持的 Linux 系统上，
+`make build-all` 还会调用 `scripts/build-enforcer.sh`，以构建经验证的
+ActPlane `target/release/agentsight-enforcer` 二进制。`make build-mac` 不会构建
+enforcer。
 
 ### macOS 构建
 
@@ -315,15 +342,6 @@ agentsight serve --host 0.0.0.0 --port 8080
 打开 `http://127.0.0.1:7396` 查看 Dashboard。`trace` 扫描本地 AI Agent 会话文件（Claude Code、Qoder、Codex、Cursor），转换为 ATIF 轨迹存入 `trajectories.db`。`serve` 从同一数据库读取数据展示。
 
 > **macOS 限制**：eBPF 相关命令（`discover`、`token`、`audit`、`metrics`、`interruption`、`skill-metrics`、`summary`）仅 Linux 可用。`--db` 和 `--config` 参数也仅 Linux 可用。macOS 上 `trace` 仅采集轨迹（无 eBPF），`serve` 从 `trajectories.db` 读取数据。
-
-### 通过 RPM 安装
-
-```bash
-sudo yum install agentsight
-```
-
-安装内容：
-- `/usr/local/bin/agentsight` — CLI 可执行文件
 
 ### 开始追踪
 

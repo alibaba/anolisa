@@ -185,7 +185,7 @@ struct SseParseState {
     /// returns `None` after draining what is already queued.
     stream_ended: bool,
     /// Latest usage info (SysOM repeats it per frame, emitted once at EOF).
-    latest_usage: Option<(u32, u32, u32)>,
+    latest_usage: Option<(u32, u32, u32, u32)>,
 }
 
 impl SseParseState {
@@ -307,7 +307,8 @@ fn parse_sysom_sse_events(
             .get("total_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
-        state.latest_usage = Some((prompt, completion, total));
+        let cached = crate::provider::extract_cached_tokens(usage);
+        state.latest_usage = Some((prompt, completion, total, cached));
     }
 
     Ok(events)
@@ -461,11 +462,14 @@ fn sysom_eof_events(state: &mut SseParseState) -> Vec<GenerateEvent> {
             events.push(GenerateEvent::ToolCallEnd { index: tool.index });
         }
     }
-    if let Some((prompt_tokens, completion_tokens, total_tokens)) = state.latest_usage.take() {
+    if let Some((prompt_tokens, completion_tokens, total_tokens, cached_tokens)) =
+        state.latest_usage.take()
+    {
         events.push(GenerateEvent::Usage {
             prompt_tokens,
             completion_tokens,
             total_tokens,
+            cached_tokens,
         });
     }
     events.push(GenerateEvent::MessageEnd);

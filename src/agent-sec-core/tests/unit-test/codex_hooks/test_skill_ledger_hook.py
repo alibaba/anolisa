@@ -128,6 +128,33 @@ def _make_skill_dir(parent, name="test-skill"):
 class TestFailOpen:
     """Every error must produce empty stdout (= allow)."""
 
+    def test_hook_disabled_short_circuits_before_work(self, monkeypatch, capsys):
+        monkeypatch.setattr(skill_ledger_hook, "_HOOK_ENABLED", False)
+        monkeypatch.setattr(
+            skill_ledger_hook.json,
+            "load",
+            lambda _stream: pytest.fail("input should not be read"),
+        )
+        monkeypatch.setattr(
+            skill_ledger_hook,
+            "_extract_skill_mentions",
+            lambda *_args: pytest.fail("skills should not be parsed"),
+        )
+        monkeypatch.setattr(
+            skill_ledger_hook,
+            "_ensure_keys",
+            lambda *_args: pytest.fail("keys should not be initialized"),
+        )
+        monkeypatch.setattr(
+            skill_ledger_hook.subprocess,
+            "run",
+            lambda *_args, **_kwargs: pytest.fail("CLI should not be called"),
+        )
+
+        skill_ledger_hook.main()
+
+        assert capsys.readouterr().out == ""
+
     def test_invalid_json_allows(self):
         output = _run_hook("not-json")
         assert output == {}
@@ -763,7 +790,14 @@ class TestUnknownMode:
             },
             env_override=env,
         )
-        assert output == {}
+        assert "execution continues" in output["systemMessage"]
+
+
+def test_invalid_mode_reports_ask_fallback(monkeypatch, capsys):
+    monkeypatch.setenv("SKILL_LEDGER_MODE", "banana")
+
+    assert skill_ledger_hook._read_policy() == "ask"
+    assert "invalid SKILL_LEDGER_MODE; using ask" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

@@ -384,11 +384,8 @@ def test_qwen_pii_hook_sources_and_security_events(tmp_path) -> None:
         assert proc.stderr == ""
         assert secret not in proc.stdout
         output = json.loads(proc.stdout)
-        if payload["hook_event_name"] in {"PostToolUseFailure", "StopFailure"}:
-            assert output == {}
-        else:
-            assert set(output) == {"systemMessage"}
-            assert "[REDACTED]" in output["systemMessage"]
+        # Observe keeps scanner evidence without surfacing a user-visible warning.
+        assert output == {}
 
     observability_proc = _run_hook(
         extension_dir,
@@ -555,7 +552,7 @@ def test_qwen_pii_hook_blocks_deny_verdicts(tmp_path) -> None:
     ]
 
 
-def test_qwen_skill_ledger_hook_uses_qwen_home_and_records_managed_show(
+def test_qwen_skill_ledger_hook_uses_qwen_home_and_blocks_managed_drift(
     tmp_path,
 ) -> None:
     extension_dir = _extension_dir()
@@ -583,7 +580,7 @@ def test_qwen_skill_ledger_hook_uses_qwen_home_and_records_managed_show(
             "AGENT_SEC_DATA_DIR": str(data_dir),
             "XDG_DATA_HOME": str(xdg_data),
             "XDG_CONFIG_HOME": str(xdg_config),
-            "SKILL_LEDGER_HOOK_POLICY": "block",
+            "SKILL_LEDGER_MODE": "block",
         }
     )
     _ensure_agent_sec_cli(env, tmp_path)
@@ -607,6 +604,9 @@ def test_qwen_skill_ledger_hook_uses_qwen_home_and_records_managed_show(
     )
     assert str(skill_dir.resolve()) in config["managedSkillDirs"]
 
+    with (skill_dir / "SKILL.md").open("a", encoding="utf-8") as stream:
+        stream.write("\nChanged after certification.\n")
+
     payload = {
         "session_id": "qwen-skill-session",
         "cwd": str(project_dir),
@@ -625,7 +625,11 @@ def test_qwen_skill_ledger_hook_uses_qwen_home_and_records_managed_show(
         hook_name="agent-sec-skill-ledger",
     )
     assert hook.returncode == 0, hook.stderr
-    assert json.loads(hook.stdout) == {}
+    hook_output = json.loads(hook.stdout)
+    hook_specific = hook_output["hookSpecificOutput"]
+    assert hook_specific["hookEventName"] == "PreToolUse"
+    assert hook_specific["permissionDecision"] == "deny"
+    assert "Skill Ledger [drifted]" in hook_specific["permissionDecisionReason"]
 
     events = [
         json.loads(line)
@@ -642,7 +646,7 @@ def test_qwen_skill_ledger_hook_uses_qwen_home_and_records_managed_show(
     ]
     assert len(correlated) == 1
     assert correlated[0]["details"]["request"]["command"] == "show"
-    assert correlated[0]["details"]["result"]["latest_status"] in {"pass", "warn"}
+    assert correlated[0]["details"]["result"]["latest_status"] == "drifted"
 
 
 def test_qwen_disabled_skill_skips_ledger_show_under_block_policy(tmp_path) -> None:
@@ -676,7 +680,7 @@ def test_qwen_disabled_skill_skips_ledger_show_under_block_policy(tmp_path) -> N
             "AGENT_SEC_DATA_DIR": str(data_dir),
             "XDG_DATA_HOME": str(xdg_data),
             "XDG_CONFIG_HOME": str(xdg_config),
-            "SKILL_LEDGER_HOOK_POLICY": "block",
+            "SKILL_LEDGER_MODE": "block",
         }
     )
     _ensure_agent_sec_cli(env, tmp_path)

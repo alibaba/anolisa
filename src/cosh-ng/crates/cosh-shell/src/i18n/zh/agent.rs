@@ -7,6 +7,8 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentRecoveryTitle => "Agent 恢复",
         MessageId::AgentRecoveryFreshTurnBody => "正在使用新的 provider 轮次恢复 shell evidence。",
         MessageId::AgentRecoveryContinuityBody => "Provider 会话连续性可能降低。",
+        MessageId::AgentRecoveryTriggerLine => "恢复触发原因：{reason}",
+        MessageId::AgentRecoverySameSessionRetryLine => "Provider 轮次无响应，正带会话历史重试...",
         MessageId::AgentStatusTitle => "Agent",
         MessageId::AgentStillWorking => "仍在处理... {elapsed}s · {detail}",
         MessageId::AgentStatusFooter => "Ctrl+C 取消 · [Cancel]",
@@ -62,6 +64,12 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AgentGovernanceToolSubject => "{tool} tool",
         MessageId::AgentGovernanceBlockedUserApprovalLine => "已阻止: 需要用户审批",
         MessageId::AgentGovernanceQuestionLine => "问题: {question}",
+        MessageId::AgentGovernanceHookNotification => {
+            "Hook: {hook}\n消息: {message}\n决策: {decision}"
+        }
+        MessageId::AgentGovernanceHookUnknown => "未知 Hook",
+        MessageId::AgentGovernanceHookNoMessage => "未提供消息",
+        MessageId::AgentGovernanceHookDecisionUnspecified => "未指定",
         MessageId::AgentRecommendedCommandsLabel => "推荐命令:",
         MessageId::InterceptNoticeTitle => "AI 请求",
         MessageId::InterceptNoticeBody => "正在把输入交给 Agent: {input}",

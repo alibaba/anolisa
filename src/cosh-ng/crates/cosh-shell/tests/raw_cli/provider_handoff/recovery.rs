@@ -32,11 +32,107 @@ fn raw_cli_shell_handoff_resume_timeout_retries_without_timeout_card() {
         output.contains("Provider session continuity may be degraded."),
         "{output}"
     );
+    assert!(
+        output.contains("Recovery trigger: provider_timeout"),
+        "{output}"
+    );
     assert!(!output.contains("Agent timed out:"), "{output}");
     assert!(
         !output.contains("No provider response within 20s"),
         "{output}"
     );
+}
+
+// The first fallback turn (T2) retries within the same provider
+// session, so the "Agent recovery" fresh-turn panel (whose copy claims a
+// fresh provider turn and degraded continuity) must not be shown for it;
+// T2 renders the trigger-reason and retry status lines instead. The fake
+// adapter keeps timing out until resume is disabled, so the chain escalates
+// to the final fresh safety net (T3), which renders the panel exactly once,
+// after the T2 lines.
+#[test]
+fn raw_cli_shell_handoff_fallback_chain_renders_retry_line_then_single_panel() {
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[("COSH_SHELL_LANG", "en-US")],
+        vec![
+            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
+            (
+                b"?? provider resume timeout shell trigger resume timeout\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"\n".to_vec(), Duration::from_millis(2_000)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(6_000)),
+        ],
+    );
+
+    // T2 renders the trigger reason plus the same-session retry line before
+    // any panel (a successful T2 never reaches the T3 panel, so the reason
+    // must already be visible here).
+    assert_ordered(
+        &output,
+        &[
+            "Recovery trigger: provider_timeout",
+            "Provider turn stalled; retrying with session history...",
+            "Using a fresh provider turn for shell evidence recovery.",
+        ],
+    );
+    // The fresh-turn panel appears exactly once (T3 only, never for T2).
+    assert_eq!(
+        count_occurrences(
+            &output,
+            "Using a fresh provider turn for shell evidence recovery."
+        ),
+        1,
+        "{output}"
+    );
+    assert_eq!(
+        count_occurrences(&output, "Provider session continuity may be degraded."),
+        1,
+        "{output}"
+    );
+}
+
+// When the T2 same-session retry succeeds,
+// the chain never reaches the T3 panel, so the recovery trigger reason must
+// already be part of the T2 notice; the fresh-turn panel must not render.
+#[test]
+fn raw_cli_shell_handoff_retry_success_shows_reason_without_panel() {
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[("COSH_SHELL_LANG", "en-US")],
+        vec![
+            (b"/mode approval auto\n".to_vec(), Duration::ZERO),
+            (
+                b"?? provider resume timeout shell trigger resume timeout once\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"\n".to_vec(), Duration::from_millis(2_000)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(6_000)),
+        ],
+    );
+
+    // T1 times out once; T2 succeeds with the reason line + retry line.
+    assert_ordered(
+        &output,
+        &[
+            "Recovery trigger: provider_timeout",
+            "Provider turn stalled; retrying with session history...",
+            "Command result analysis for req-1: foreground shell evidence received",
+        ],
+    );
+    // The T3 fresh-turn panel copy must never appear on the success path.
+    assert!(
+        !output.contains("Using a fresh provider turn for shell evidence recovery."),
+        "{output}"
+    );
+    assert!(
+        !output.contains("Provider session continuity may be degraded."),
+        "{output}"
+    );
+    assert!(!output.contains("Agent timed out:"), "{output}");
 }
 
 #[test]
@@ -81,6 +177,14 @@ fn raw_cli_shell_handoff_resume_timeout_renders_structured_context_before_recove
             "Using a fresh provider turn for shell evidence recovery."
         ),
         1,
+        "{output}"
+    );
+    // The trigger reason renders once in the T2 same-session retry notice
+    // and once inside the T3 fresh-turn panel (a successful T2 must already
+    // show the reason, so the full chain shows it twice).
+    assert_eq!(
+        count_occurrences(&output, "Recovery trigger: provider_timeout"),
+        2,
         "{output}"
     );
     assert!(!output.contains("Agent timed out:"), "{output}");
@@ -130,6 +234,10 @@ fn raw_cli_shell_handoff_recovery_uses_zh_language_env() {
         "{output}"
     );
     assert!(output.contains("Provider 会话连续性可能降低。"), "{output}");
+    assert!(
+        output.contains("恢复触发原因：provider_timeout"),
+        "{output}"
+    );
     assert!(
         !output.contains("Using a fresh provider turn for shell evidence recovery."),
         "{output}"

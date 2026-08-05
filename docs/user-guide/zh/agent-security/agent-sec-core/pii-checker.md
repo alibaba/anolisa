@@ -67,6 +67,20 @@ Scanner 将 findings 聚合为一个 verdict：
 `--raw-evidence` 仅用于本地排查，原始 evidence 永远不会写入 Security Event。各宿主集成消费相同的
 verdict 和 finding schema；宿主只观察 finding 还是阻断操作，由该宿主配置的 PII policy 决定。
 
+## 宿主 Hook Policy
+
+设置 `PII_CHECKER_HOOK_ENABLED=false` 可完全跳过宿主 PII hook。启用后，
+`PII_CHECKER_MODE` 支持 `observe`、`warn`、`ask`、`block`，默认 `observe`。
+当宿主或 hook 事件无法执行确认或阻断时，`ask`/`block` fallback 为 `warn`；后置 hook
+不会声称撤销已经发生的外部副作用。环境变量 policy 优先于 Hermes/OpenClaw capability
+配置。`debug` 映射为 `observe`，`deny` 映射为 `block`。仅 Qwen Code 在未设置
+`PII_CHECKER_HOOK_ENABLED` 时额外兼容旧开关 `PII_CHECKER_ENABLED`。
+
+宿主 Agent 在加载插件时读取这些变量。修改后需重启承载该 hook 的 Agent 进程；
+hook 和 agent-sec-core 并不是需要单独重启的 policy 服务。
+
+scanner verdict `deny` 描述扫描风险，hook policy `block` 决定 adapter 是否执行阻断。
+
 ## 自定义正则规则
 
 PII Checker 可从一个固定的用户级文件加载业务自定义类型：

@@ -4,7 +4,15 @@ import {
   inboundPiiScanText,
   valueToText,
 } from "../helpers/pii-text.js";
-import { buildTraceContext, callAgentSecCli } from "../utils.js";
+import {
+  buildTraceContext,
+  callAgentSecCli,
+  envFlagEnabled,
+  envHookPolicy,
+  isHookPolicyValue,
+  normalizeHookPolicy,
+  type HookPolicy,
+} from "../utils.js";
 
 const CLI_TIMEOUT_MS = 10_000;
 const MAX_EVIDENCE_ITEMS = 3;
@@ -14,16 +22,35 @@ const BEFORE_DISPATCH_PRIORITY = 200;
 type PiiScanConfig = {
   scanUserInput: boolean;
   includeLowConfidence: boolean;
-  enableBlock: boolean;
+  policy: HookPolicy;
 };
 
-function readConfig(pluginConfig: Record<string, any>): PiiScanConfig {
+function readConfig(pluginConfig: Record<string, any>, api: any): PiiScanConfig {
   const capabilityConfig =
     pluginConfig.capabilities?.["pii-scan-user-input"] ?? {};
+  let policy: HookPolicy = "observe";
+  if (process.env.PII_CHECKER_MODE !== undefined) {
+    policy = envHookPolicy("PII_CHECKER_MODE", "observe");
+    if (!isHookPolicyValue(process.env.PII_CHECKER_MODE)) {
+      api.logger.warn("[pii-checker] invalid PII_CHECKER_MODE; using observe");
+    }
+  } else if (typeof capabilityConfig.policy === "string") {
+    policy = normalizeHookPolicy(capabilityConfig.policy, "observe");
+    if (!isHookPolicyValue(capabilityConfig.policy)) {
+      api.logger.warn(
+        `[pii-checker] invalid capability policy="${capabilityConfig.policy}"; using observe`,
+      );
+    }
+  } else if (typeof capabilityConfig.enableBlock === "boolean") {
+    policy = capabilityConfig.enableBlock ? "block" : "warn";
+  }
   return {
-    scanUserInput: pluginConfig.piiScanUserInput !== false,
+    scanUserInput:
+      process.env.PII_CHECKER_HOOK_ENABLED !== undefined
+        ? envFlagEnabled("PII_CHECKER_HOOK_ENABLED", true)
+        : pluginConfig.piiScanUserInput !== false,
     includeLowConfidence: pluginConfig.piiIncludeLowConfidence === true,
-    enableBlock: capabilityConfig.enableBlock === true,
+    policy,
   };
 }
 
@@ -171,7 +198,7 @@ function logPiiWarning(
 ): string {
   const warning = formatPiiWarning(verdict, findings, finalMessage);
   api.logger.warn(
-    `[pii-checker] ${verdict.toUpperCase()} (enableBlock=${cfg.enableBlock}) — ${warning}`,
+    `[pii-checker] ${verdict.toUpperCase()} (policy=${cfg.policy}) — ${warning}`,
   );
   return warning;
 }
@@ -179,15 +206,18 @@ function logPiiWarning(
 /**
  * 用户输入 PII / 凭据检测。
  *
- * Scans the current inbound user text before dispatch. When enableBlock is
- * true, a deny verdict handles the turn with a user-visible block message.
+ * Scans PII at the boundaries exposed by OpenClaw and applies the configured
+ * policy. Unsupported confirmation or post-action boundaries fail open with a warning.
  */
 export const piiScan: SecurityCapability = {
   id: "pii-scan-user-input",
   name: "PII Checker",
   hooks: ["before_dispatch", "before_tool_call", "after_tool_call", "llm_output"],
   register(api) {
-    const cfg = readConfig((api.pluginConfig as Record<string, any>) ?? {});
+    if (!envFlagEnabled("PII_CHECKER_HOOK_ENABLED", true)) {
+      return;
+    }
+    const cfg = readConfig((api.pluginConfig as Record<string, any>) ?? {}, api);
     if (!cfg.scanUserInput) {
       api.logger.info("[pii-checker] piiScanUserInput=false, capability disabled");
       return;
@@ -215,14 +245,15 @@ export const piiScan: SecurityCapability = {
             return undefined;
           }
 
+          if (cfg.policy === "observe") return undefined;
           const warning = logPiiWarning(
             api,
             verdict,
             findings,
             cfg,
-            verdict === "deny" && cfg.enableBlock ? "本轮请求已被阻断。" : undefined,
+            verdict === "deny" && cfg.policy === "block" ? "本轮请求已被阻断。" : undefined,
           );
-          if (verdict === "deny" && cfg.enableBlock) {
+          if (verdict === "deny" && cfg.policy === "block") {
             return {
               handled: true,
               text: warning,
@@ -250,14 +281,26 @@ export const piiScan: SecurityCapability = {
           const { verdict, findings } = scanResult;
           if (verdict === "pass" || findings.length === 0) return undefined;
           if (verdict !== "warn" && verdict !== "deny") return undefined;
+          if (cfg.policy === "observe") return undefined;
           const warning = logPiiWarning(
             api,
             verdict,
             findings,
             cfg,
-            verdict === "deny" && cfg.enableBlock ? "本次工具调用已被阻断。" : undefined,
+            verdict === "deny" && cfg.policy === "block"
+              ? "本次工具调用已被阻断。"
+              : undefined,
           );
-          if (verdict === "deny" && cfg.enableBlock) {
+          if (verdict === "deny" && cfg.policy === "ask") {
+            return {
+              requireApproval: {
+                title: "PII Checker Security Review",
+                description: warning,
+                severity: "critical",
+              },
+            };
+          }
+          if (verdict === "deny" && cfg.policy === "block") {
             return { block: true, blockReason: warning };
           }
           return undefined;
@@ -280,7 +323,7 @@ export const piiScan: SecurityCapability = {
         const { verdict, findings } = scanResult;
         if (verdict === "pass" || findings.length === 0) return undefined;
         if (verdict !== "warn" && verdict !== "deny") return undefined;
-        logPiiWarning(api, verdict, findings, cfg);
+        if (cfg.policy !== "observe") logPiiWarning(api, verdict, findings, cfg);
         return undefined;
       } catch (error) {
         api.logger.warn(
@@ -299,7 +342,7 @@ export const piiScan: SecurityCapability = {
         const { verdict, findings } = scanResult;
         if (verdict === "pass" || findings.length === 0) return undefined;
         if (verdict !== "warn" && verdict !== "deny") return undefined;
-        logPiiWarning(api, verdict, findings, cfg);
+        if (cfg.policy !== "observe") logPiiWarning(api, verdict, findings, cfg);
         return undefined;
       } catch (error) {
         api.logger.warn(

@@ -1,28 +1,52 @@
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 /// Operating system / distribution variants supported by cosh.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Distro {
-    Alinux { version: String },
-    Ubuntu { version: String },
-    Debian { version: String },
-    CentOS { version: String },
-    Fedora { version: String },
-    OpenSUSE { version: String },
-    MacOS { version: String },
+    Alinux {
+        version: String,
+    },
+    Ubuntu {
+        version: String,
+    },
+    Debian {
+        version: String,
+    },
+    CentOS {
+        version: String,
+    },
+    Fedora {
+        version: String,
+    },
+    OpenSUSE {
+        version: String,
+    },
+    MacOS {
+        version: String,
+    },
+    /// An unlisted distribution with a supported package-manager family.
+    Compatible {
+        id: String,
+        version: String,
+        pkg_manager: PkgManager,
+    },
     Unknown(String),
 }
 
 impl Distro {
     /// Detect the current OS. On macOS uses `sw_vers`; on Linux reads
-    /// /etc/os-release.
+    /// /etc/os-release, falling back to /usr/lib/os-release.
     pub fn detect() -> Self {
         // Check macOS first (compile-time or runtime)
         if cfg!(target_os = "macos") {
             return Self::detect_macos();
         }
-        Self::detect_from_path("/etc/os-release")
+        Self::detect_from_paths(
+            Path::new("/etc/os-release"),
+            Path::new("/usr/lib/os-release"),
+        )
     }
 
     /// Detect macOS version via `sw_vers -productVersion`.
@@ -42,15 +66,23 @@ impl Distro {
         Distro::MacOS { version }
     }
 
-    fn detect_from_path(path: &str) -> Self {
-        match fs::read_to_string(path) {
+    fn detect_from_paths(primary: &Path, fallback: &Path) -> Self {
+        match fs::read_to_string(primary) {
             Ok(content) => Self::detect_from_content(&content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // os-release gives /etc exclusive precedence whenever it exists.
+                match fs::read_to_string(fallback) {
+                    Ok(content) => Self::detect_from_content(&content),
+                    Err(_) => Self::Unknown("unknown".into()),
+                }
+            }
             Err(_) => Self::Unknown("unknown".into()),
         }
     }
 
     pub(crate) fn detect_from_content(content: &str) -> Self {
         let mut id = None;
+        let mut id_like = None;
         let mut version_id = None;
 
         for line in content.lines() {
@@ -61,10 +93,12 @@ impl Distro {
 
             if let Some((key, value)) = line.split_once('=') {
                 let key = key.trim();
-                let value = value.trim().trim_matches('"');
+                let value = strip_matching_outer_quotes(value.trim());
 
                 if key.eq_ignore_ascii_case("ID") {
                     id = Some(value.to_lowercase());
+                } else if key.eq_ignore_ascii_case("ID_LIKE") {
+                    id_like = Some(value.to_lowercase());
                 } else if key.eq_ignore_ascii_case("VERSION_ID") {
                     version_id = Some(value.to_string());
                 }
@@ -73,18 +107,49 @@ impl Distro {
 
         let version = version_id.unwrap_or_else(|| "unknown".into());
 
-        match id.as_deref() {
-            Some("alinux") => Distro::Alinux { version },
-            Some("ubuntu") => Distro::Ubuntu { version },
-            Some("debian") => Distro::Debian { version },
-            Some("centos") => Distro::CentOS { version },
-            Some("fedora") => Distro::Fedora { version },
-            Some("opensuse-leap") | Some("opensuse-tumbleweed") | Some("sles") => {
-                Distro::OpenSUSE { version }
-            }
-            Some(other) => Distro::Unknown(other.into()),
-            None => Distro::Unknown("unknown".into()),
+        let id = id.unwrap_or_else(|| "linux".into());
+
+        if let Some(distro) = Self::from_known_id(&id, &version) {
+            return distro;
         }
+
+        if let Some(pkg_manager) = id_like
+            .as_deref()
+            .and_then(|ids| ids.split_whitespace().find_map(pkg_manager_from_id_like))
+        {
+            return Distro::Compatible {
+                id,
+                version,
+                pkg_manager,
+            };
+        }
+
+        Distro::Unknown(id)
+    }
+
+    fn from_known_id(id: &str, version: &str) -> Option<Self> {
+        let distro = match id {
+            "alinux" => Distro::Alinux {
+                version: version.into(),
+            },
+            "ubuntu" => Distro::Ubuntu {
+                version: version.into(),
+            },
+            "debian" => Distro::Debian {
+                version: version.into(),
+            },
+            "centos" => Distro::CentOS {
+                version: version.into(),
+            },
+            "fedora" => Distro::Fedora {
+                version: version.into(),
+            },
+            "opensuse-leap" | "opensuse-tumbleweed" | "sles" => Distro::OpenSUSE {
+                version: version.into(),
+            },
+            _ => return None,
+        };
+        Some(distro)
     }
 
     /// Returns the distro identifier string for JSON output.
@@ -97,6 +162,7 @@ impl Distro {
             Distro::Fedora { .. } => "fedora",
             Distro::OpenSUSE { .. } => "opensuse",
             Distro::MacOS { .. } => "macos",
+            Distro::Compatible { id, .. } => id,
             Distro::Unknown(id) => id,
         }
     }
@@ -111,6 +177,7 @@ impl Distro {
             Distro::Fedora { version } => format!("Fedora {}", version),
             Distro::OpenSUSE { version } => format!("openSUSE {}", version),
             Distro::MacOS { version } => format!("macOS {}", version),
+            Distro::Compatible { id, version, .. } => format!("{} {}", id, version),
             Distro::Unknown(id) => format!("Unknown ({})", id),
         }
     }
@@ -124,8 +191,32 @@ impl Distro {
             Distro::Ubuntu { .. } | Distro::Debian { .. } => PkgManager::Apt,
             Distro::OpenSUSE { .. } => PkgManager::Zypper,
             Distro::MacOS { .. } => PkgManager::Brew,
+            Distro::Compatible { pkg_manager, .. } => *pkg_manager,
             Distro::Unknown(_) => PkgManager::Unknown,
         }
+    }
+}
+
+fn strip_matching_outer_quotes(value: &str) -> &str {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2
+        && matches!(
+            (bytes[0], bytes[bytes.len() - 1]),
+            (b'\'', b'\'') | (b'"', b'"')
+        )
+    {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    }
+}
+
+fn pkg_manager_from_id_like(id: &str) -> Option<PkgManager> {
+    match id {
+        "alinux" | "centos" | "fedora" | "rhel" => Some(PkgManager::Dnf),
+        "debian" | "ubuntu" => Some(PkgManager::Apt),
+        "opensuse" | "suse" => Some(PkgManager::Zypper),
+        _ => None,
     }
 }
 
@@ -241,10 +332,10 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_id() {
+    fn test_missing_id_defaults_to_linux() {
         let content = "NAME=\"Some Distro\"\nVERSION_ID=\"42\"\n";
         let distro = Distro::detect_from_content(content);
-        assert_eq!(distro, Distro::Unknown("unknown".into()));
+        assert_eq!(distro, Distro::Unknown("linux".into()));
     }
 
     #[test]
@@ -283,7 +374,7 @@ mod tests {
     fn test_empty_content() {
         let content = "";
         let distro = Distro::detect_from_content(content);
-        assert_eq!(distro, Distro::Unknown("unknown".into()));
+        assert_eq!(distro, Distro::Unknown("linux".into()));
     }
 
     #[test]
@@ -366,6 +457,78 @@ mod tests {
         let distro = Distro::detect_from_content(content);
         assert_eq!(distro, Distro::Unknown("arch".into()));
         assert_eq!(distro.pkg_manager(), PkgManager::Unknown);
+    }
+
+    #[test]
+    fn test_detect_uses_id_like_for_compatible_distro() {
+        let content = "ID=rocky\nID_LIKE=\"rhel fedora\"\nVERSION_ID=9.5\n";
+        let distro = Distro::detect_from_content(content);
+        assert_eq!(
+            distro,
+            Distro::Compatible {
+                id: "rocky".into(),
+                version: "9.5".into(),
+                pkg_manager: PkgManager::Dnf,
+            }
+        );
+        assert_eq!(distro.id_str(), "rocky");
+        assert_eq!(distro.pkg_manager(), PkgManager::Dnf);
+    }
+
+    #[test]
+    fn test_detect_uses_single_quoted_id_like() {
+        let content = "ID=rocky\nID_LIKE='rhel fedora'\nVERSION_ID=9.5\n";
+        let distro = Distro::detect_from_content(content);
+        assert_eq!(distro.pkg_manager(), PkgManager::Dnf);
+    }
+
+    #[test]
+    fn test_detect_uses_id_like_when_id_is_missing() {
+        let content = "ID_LIKE=debian\nVERSION_ID=1\n";
+        let distro = Distro::detect_from_content(content);
+        assert_eq!(
+            distro,
+            Distro::Compatible {
+                id: "linux".into(),
+                version: "1".into(),
+                pkg_manager: PkgManager::Apt,
+            }
+        );
+    }
+
+    #[test]
+    fn test_detect_uses_first_supported_id_like() {
+        let content = "ID=custom\nID_LIKE=\"unknown debian rhel\"\nVERSION_ID=1\n";
+        let distro = Distro::detect_from_content(content);
+        assert_eq!(distro.pkg_manager(), PkgManager::Apt);
+    }
+
+    #[test]
+    fn test_detect_falls_back_to_usr_lib_os_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let etc_os_release = dir.path().join("etc-os-release");
+        let usr_os_release = dir.path().join("usr-lib-os-release");
+        fs::write(&usr_os_release, "ID=debian\nVERSION_ID=12\n").unwrap();
+
+        let distro = Distro::detect_from_paths(&etc_os_release, &usr_os_release);
+        assert_eq!(
+            distro,
+            Distro::Debian {
+                version: "12".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_detect_does_not_fallback_when_primary_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let etc_os_release = dir.path().join("etc-os-release");
+        let usr_os_release = dir.path().join("usr-lib-os-release");
+        fs::create_dir(&etc_os_release).unwrap();
+        fs::write(&usr_os_release, "ID=debian\nVERSION_ID=12\n").unwrap();
+
+        let distro = Distro::detect_from_paths(&etc_os_release, &usr_os_release);
+        assert_eq!(distro, Distro::Unknown("unknown".into()));
     }
 
     #[test]

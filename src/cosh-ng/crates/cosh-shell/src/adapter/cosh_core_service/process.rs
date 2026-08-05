@@ -16,8 +16,8 @@ use super::super::cosh_core::question_ingress::{
     protocol_error, CoreQuestionProtocolReason, CoshCoreQuestionGate,
 };
 use super::super::{
-    control_protocol, spawn_provider_child, AdapterError, ApprovalDecision, ApprovalResponse,
-    AuthResponse, PreparedInvocation, ProviderPromptArgMode, ProviderStdinMode,
+    control_protocol, spawn_provider_child, AdapterError, ApprovalChannelMessage, ApprovalDecision,
+    ApprovalResponse, AuthResponse, PreparedInvocation, ProviderPromptArgMode, ProviderStdinMode,
 };
 use super::{
     registry_timeout, PersistentCoshCoreRuntime, RegistryCommand, RegistryQueryError,
@@ -53,15 +53,25 @@ pub(super) struct PersistentProcess {
     /// a per-turn stream parser only observes it on the first turn. Later turns
     /// read it from here instead of defaulting to "unknown".
     pub(super) session_resumable: Option<bool>,
+    /// Control-protocol capabilities announced by this process.
+    ///
+    /// Like `session_resumable`, the `initialize` response arrives once per
+    /// process, so only the first turn parses it. Later turns seed their
+    /// per-run capability set from here; otherwise the #1940 receipt gate
+    /// would fall back to "not capable" and stop emitting `approval_receipt`
+    /// from the second turn on.
+    pub(super) control_capabilities: control_protocol::ControlProtocolCapabilities,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_response_writer(
     stdin: Arc<Mutex<BufWriter<ChildStdin>>>,
     done: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
-    approval_rx: mpsc::Receiver<ApprovalResponse>,
+    approval_rx: mpsc::Receiver<ApprovalChannelMessage>,
     auth_rx: mpsc::Receiver<AuthResponse>,
     question_gate: Arc<Mutex<CoshCoreQuestionGate>>,
+    capabilities: Arc<Mutex<control_protocol::ControlProtocolCapabilities>>,
     failure_tx: mpsc::Sender<AdapterError>,
     answer_confirmation_tx: mpsc::Sender<Result<String, AdapterError>>,
 ) -> thread::JoinHandle<()> {
@@ -71,7 +81,26 @@ pub(super) fn spawn_response_writer(
         while !done.load(Ordering::SeqCst) && !cancelled.load(Ordering::SeqCst) {
             if approval_open {
                 match approval_rx.recv_timeout(Duration::from_millis(25)) {
-                    Ok(response) => {
+                    Ok(ApprovalChannelMessage::Receipt { request_id }) => {
+                        // #1940 receipt protocol: only providers that announce
+                        // `can_handle_approval_receipt` understand this line;
+                        // for the rest the receipt is skipped and the core-side
+                        // last-resort guard stays armed (the designed
+                        // degradation for a lost receipt).
+                        if !control_protocol::receipt_capable(&capabilities) {
+                            continue;
+                        }
+                        if send_json(
+                            &stdin,
+                            &control_protocol::serialize_approval_receipt(&request_id),
+                        )
+                        .is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+                    Ok(ApprovalChannelMessage::Response(response)) => {
                         let message = approval_message(&response);
                         if matches!(&response.decision, ApprovalDecision::Answer { .. }) {
                             let write_result =
@@ -206,6 +235,7 @@ pub(super) fn spawn_process(
         session_id: None,
         workspace_scope: String::new(),
         session_resumable: None,
+        control_capabilities: control_protocol::ControlProtocolCapabilities::default(),
     })
 }
 

@@ -1,4 +1,5 @@
 pub(crate) mod ask_user_question;
+mod atomic_file;
 pub mod edit;
 mod file_patterns;
 mod glob;
@@ -13,11 +14,13 @@ pub mod shell_evidence;
 pub mod skill;
 pub mod todo;
 mod web_fetch;
+mod workspace_fs;
 pub mod write_file;
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -88,6 +91,99 @@ pub struct ToolContext {
     pub session_id: String,
     #[allow(dead_code)]
     pub project_root: PathBuf,
+    workspace: SessionWorkspace,
+}
+
+#[derive(Clone)]
+pub(crate) struct SessionWorkspace {
+    root: Arc<PathBuf>,
+    pinned: Arc<OnceLock<Arc<workspace_fs::WorkspaceFs>>>,
+    permanent_error: Option<Arc<str>>,
+    retry_missing: bool,
+}
+
+impl SessionWorkspace {
+    pub(crate) fn try_new(root: &Path) -> Result<Self, String> {
+        let workspace = Self::new(root);
+        if let Some(error) = &workspace.permanent_error {
+            Err(error.to_string())
+        } else {
+            Ok(workspace)
+        }
+    }
+
+    pub(crate) fn new(root: &Path) -> Self {
+        let pinned = Arc::new(OnceLock::new());
+        let (permanent_error, retry_missing) = match workspace_fs::WorkspaceFs::open_root(root) {
+            Ok(workspace) => {
+                let _ = pinned.set(Arc::new(workspace));
+                (None, false)
+            }
+            Err(workspace_fs::WorkspaceRootError::Missing(_)) => (None, true),
+            Err(workspace_fs::WorkspaceRootError::Permanent(error)) => (Some(error.into()), false),
+        };
+        Self {
+            root: Arc::new(root.to_path_buf()),
+            pinned,
+            permanent_error,
+            retry_missing,
+        }
+    }
+
+    /// Returns the identity derived from the pinned root when available.
+    pub(crate) fn root(&self) -> &Path {
+        self.pinned
+            .get()
+            .map_or(self.root.as_path(), |workspace| workspace.root())
+    }
+
+    fn get(&self) -> Result<Arc<workspace_fs::WorkspaceFs>, String> {
+        if let Some(workspace) = self.pinned.get() {
+            return Ok(Arc::clone(workspace));
+        }
+        if let Some(error) = &self.permanent_error {
+            return Err(error.to_string());
+        }
+        if !self.retry_missing {
+            return Err("workspace root is unavailable".to_string());
+        }
+
+        let workspace = Arc::new(
+            workspace_fs::WorkspaceFs::open_root(&self.root).map_err(|error| error.to_string())?,
+        );
+        let _ = self.pinned.set(Arc::clone(&workspace));
+        Ok(self.pinned.get().map_or(workspace, Arc::clone))
+    }
+}
+
+impl ToolContext {
+    pub(crate) fn new(cwd: PathBuf, session_id: String, project_root: PathBuf) -> Self {
+        let workspace = SessionWorkspace::new(&project_root);
+        Self {
+            cwd,
+            session_id,
+            project_root,
+            workspace,
+        }
+    }
+
+    pub(crate) fn with_workspace(
+        cwd: PathBuf,
+        session_id: String,
+        project_root: PathBuf,
+        workspace: SessionWorkspace,
+    ) -> Self {
+        Self {
+            cwd,
+            session_id,
+            project_root,
+            workspace,
+        }
+    }
+
+    fn workspace(&self) -> Result<Arc<workspace_fs::WorkspaceFs>, String> {
+        self.workspace.get()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -435,17 +531,30 @@ mod tests {
     #[tokio::test]
     async fn tool_invoke() {
         let tool = DummyTool;
-        let ctx = ToolContext {
-            cwd: PathBuf::from("/tmp"),
-            session_id: "test".to_string(),
-            project_root: PathBuf::from("/tmp"),
-        };
+        let ctx = ToolContext::new(
+            PathBuf::from("/tmp"),
+            "test".to_string(),
+            PathBuf::from("/tmp"),
+        );
         let result = tool
             .invoke(serde_json::json!({"input": "hello"}), &ctx)
             .await
             .unwrap();
         assert_eq!(result.output, "echo: hello");
         assert!(!result.is_error);
+    }
+
+    #[test]
+    fn missing_workspace_is_pinned_after_creation() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("workspace");
+        let workspace = SessionWorkspace::new(&root);
+        assert!(workspace.get().is_err());
+
+        std::fs::create_dir(&root).unwrap();
+        let pinned = workspace.get().unwrap();
+
+        assert!(pinned.open_directory(&root, ".").is_ok());
     }
 
     #[test]

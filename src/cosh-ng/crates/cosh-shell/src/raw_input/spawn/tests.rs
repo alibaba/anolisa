@@ -83,6 +83,7 @@ fn relay_uses_the_validated_mode_snapshot() {
         capture: RawInputCapture::Question {
             id: "later-capture".to_string(),
             option_count: 0,
+            selected: 0,
             allow_free_text: true,
             multiple: false,
             secret: false,
@@ -203,6 +204,7 @@ fn delayed_ghost_suffix_keeps_capture_generation_across_replacement() {
     let previous = RawInputCapture::Question {
         id: "q-1".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -210,6 +212,7 @@ fn delayed_ghost_suffix_keeps_capture_generation_across_replacement() {
     let next = RawInputCapture::Question {
         id: "q-2".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,
@@ -313,6 +316,7 @@ fn ghost_suffix_does_not_consume_input_from_a_new_capture_generation() {
         capture: RawInputCapture::Question {
             id: "q-2".to_string(),
             option_count: 0,
+            selected: 0,
             allow_free_text: true,
             multiple: false,
             secret: false,
@@ -379,6 +383,7 @@ fn delay_escape_does_not_cancel_a_later_capture() {
     let capture = RawInputCapture::Question {
         id: "new-question".to_string(),
         option_count: 0,
+        selected: 0,
         allow_free_text: true,
         multiple: false,
         secret: false,

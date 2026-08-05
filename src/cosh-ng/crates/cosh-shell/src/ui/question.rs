@@ -28,6 +28,9 @@ pub use cursor::QuestionCursorPlacement;
 mod styles;
 use styles::{option_heading_style, option_marker_style, render_custom_option_lines};
 
+/// Separates an option label from secondary text rendered in dark gray.
+pub(crate) const OPTION_DETAIL_SEPARATOR: &str = "\n    ";
+
 #[derive(Debug, Clone)]
 pub struct QuestionPanelModel<'a> {
     pub id: &'a str,
@@ -468,11 +471,17 @@ fn render_wrapped_option(
     prefix_style: Style,
     width: usize,
 ) -> Vec<Line<'static>> {
+    let detail_start = text
+        .split_once(OPTION_DETAIL_SEPARATOR)
+        .map(|(label, _)| wrap_option_text(prefix, label, width).len());
+    let detail_style = Style::default().fg(Color::DarkGray);
     wrap_option_text(prefix, text, width)
         .into_iter()
         .enumerate()
         .map(|(idx, line)| {
-            if idx == 0 {
+            if detail_start.is_some_and(|start| idx >= start) {
+                Line::from(Span::styled(line, detail_style))
+            } else if idx == 0 {
                 let prefix_len = prefix.len().min(line.len());
                 let (prefix, rest) = line.split_at(prefix_len);
                 Line::from(vec![

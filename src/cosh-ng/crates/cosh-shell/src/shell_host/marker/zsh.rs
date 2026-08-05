@@ -101,7 +101,13 @@ _cosh_emit_marker() {
   local path_trusted="${4:-false}"
   local timestamp
   timestamp="$(_cosh_now_ms)"
-  printf '\033]1337;COSH;{"event":"%s","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","status":%s,"path":"%s","path_trusted":%s,"generation":%s}\a' \
+  # Optional handoff-claim fragment (#2142): only approved-handoff preexec
+  # lines carry a token, every other marker stays byte-identical.
+  local handoff_fragment=""
+  if [[ -n "${_COSH_HANDOFF_TOKEN:-}" ]]; then
+    handoff_fragment=",\"handoff\":\"$(_cosh_json_escape "$_COSH_HANDOFF_TOKEN")\""
+  fi
+  printf '\033]1337;COSH;{"event":"%s","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","status":%s,"path":"%s","path_trusted":%s,"generation":%s%s}\a' \
     "$(_cosh_json_escape "$event")" \
     "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
     "$(_cosh_json_escape "$COSH_SESSION_ID")" \
@@ -111,15 +117,17 @@ _cosh_emit_marker() {
     "$exit_status" \
     "$(_cosh_json_escape "$PATH")" \
     "$path_trusted" \
-    "${_COSH_ATTEMPT_GENERATION:-0}"
+    "${_COSH_ATTEMPT_GENERATION:-0}" \
+    "$handoff_fragment"
 }
 _cosh_emit_intercept_marker() {
   local input="$1"
   local reason="$2"
   local top_level_missing="${3:-false}"
+  local sensitive="${4:-false}"
   local timestamp
   timestamp="$(_cosh_now_ms)"
-  printf '\033]1337;COSH;{"event":"intercept","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","reason":"%s","status":0,"generation":%s,"top_level_missing":%s}\a' \
+  printf '\033]1337;COSH;{"event":"intercept","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","reason":"%s","status":0,"generation":%s,"top_level_missing":%s,"sensitive":%s}\a' \
     "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
     "$(_cosh_json_escape "$COSH_SESSION_ID")" \
     "$timestamp" \
@@ -127,7 +135,8 @@ _cosh_emit_intercept_marker() {
     "$(_cosh_json_escape "$input")" \
     "$(_cosh_json_escape "$reason")" \
     "${_COSH_ATTEMPT_GENERATION:-0}" \
-    "$top_level_missing"
+    "$top_level_missing" \
+    "$sensitive"
 }
 _cosh_emit_top_level_missing_marker() {
   local intent="$1"
@@ -201,6 +210,22 @@ _cosh_clear_handoff_request() {
   if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}"
      && -f "${COSH_HANDOFF_REQUEST_FILE}.no-pager" ]]; then
     rm -f -- "${COSH_HANDOFF_REQUEST_FILE}.no-pager" 2>/dev/null || true
+  fi
+  if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}"
+     && -f "${COSH_HANDOFF_REQUEST_FILE}.token" ]]; then
+    rm -f -- "${COSH_HANDOFF_REQUEST_FILE}.token" 2>/dev/null || true
+  fi
+}
+# One-time claim token for the approved handoff (#2142). Staged by the Rust
+# transport next to the request file; carried back on the preexec/precmd
+# markers so the parser can claim the command block even when the reported
+# command text is redacted. Missing sidecar leaves the token empty, which
+# keeps the marker JSON byte-identical to the pre-token format.
+_cosh_load_handoff_token() {
+  _COSH_HANDOFF_TOKEN=""
+  if [[ -n "${COSH_HANDOFF_REQUEST_FILE:-}"
+     && -f "${COSH_HANDOFF_REQUEST_FILE}.token" ]]; then
+    _COSH_HANDOFF_TOKEN="$(cat -- "${COSH_HANDOFF_REQUEST_FILE}.token" 2>/dev/null)" || _COSH_HANDOFF_TOKEN=""
   fi
 }
 # Implicit-pager policy for one approved handoff. The sidecar file is written by
@@ -370,8 +395,6 @@ _cosh_begin_attempt() {
   _COSH_ATTEMPT_TOKEN_FINGERPRINT=
   if _cosh_command_has_secret "$input"; then
     _COSH_ATTEMPT_SENSITIVE=1
-    _COSH_ATTEMPT_TOKEN_FINGERPRINT="$(_cosh_token_fingerprint "$top_token")" || _COSH_ATTEMPT_ACTIVE=0
-    return 0
   fi
   _cosh_utf8_han_status "$input"
   utf8_status=$?
@@ -431,7 +454,7 @@ command_not_found_handler() {
     _cosh_delegate_zsh_command_not_found "$command" "$@"
     return $?
   fi
-  if [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1 || "${_COSH_ATTEMPT_UNSAFE:-0}" == 1 ]]; then
+  if [[ "${_COSH_ATTEMPT_UNSAFE:-0}" == 1 ]]; then
     local command_fingerprint
     command_fingerprint="$(_cosh_token_fingerprint "$command")"
     if [[ -z "$command_fingerprint"
@@ -441,10 +464,8 @@ command_not_found_handler() {
     fi
     _COSH_ATTEMPT_ACTIVE=0
     local sensitive=false
-    local unsafe=false
     [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1 ]] && sensitive=true
-    [[ "${_COSH_ATTEMPT_UNSAFE:-0}" == 1 ]] && unsafe=true
-    _cosh_emit_top_level_missing_marker "ambiguous" "$sensitive" "$unsafe"
+    _cosh_emit_top_level_missing_marker "ambiguous" "$sensitive" true
     _cosh_delegate_zsh_command_not_found "$command" "$@"
     return $?
   fi
@@ -459,29 +480,36 @@ command_not_found_handler() {
     return $?
   fi
   _COSH_ATTEMPT_ACTIVE=0
+  local sensitive=false
+  [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1 ]] && sensitive=true
   local reason
   if reason="$(_cosh_should_intercept_unknown "$command" "$original" "$(($# + 1))")"; then
-    _cosh_emit_intercept_marker "$original" "$reason"
+    _cosh_emit_intercept_marker "$original" "$reason" false "$sensitive"
     return 0
   fi
   local intent
   intent="$(_cosh_classify_missing "$original" "$command")"
   if [[ "$intent" == "natural_language" && "${_COSH_AI_ENABLED:-1}" == 1 ]]; then
     if [[ "${_COSH_HAS_USER_COMMAND_NOT_FOUND:-0}" == 1 ]]; then
-      _cosh_emit_top_level_missing_marker "$intent" false false
+      _cosh_emit_top_level_missing_marker "$intent" "$sensitive" false
       _cosh_delegate_zsh_command_not_found "$command" "$@"
       return $?
     fi
-    _cosh_emit_intercept_marker "$original" "natural_language" true
+    _cosh_emit_intercept_marker "$original" "natural_language" true "$sensitive"
     return 0
   fi
-  _cosh_emit_top_level_missing_marker "$intent" false false
+  _cosh_emit_top_level_missing_marker "$intent" "$sensitive" false
   _cosh_delegate_zsh_command_not_found "$command" "$@"
   return $?
 }
 _cosh_preexec_marker() {
   local command="$1"
-  local expanded_command="${2:-$1}"
+  # zsh passes the abbreviated, size-limited form in $2 and the full text of
+  # the command being executed in $3. Long inputs truncate $2, so comparing
+  # against it produces a false expansion-drift signal that misroutes long
+  # natural-language prompts to the native command-not-found path (#2053).
+  # Prefer $3; keep $2/$1 as defensive fallbacks for hosts that omit it.
+  local expanded_command="${3:-${2:-$1}}"
   local canonical_command="${(j: :)${(z)command}}"
   local expansion_drift=0
   [[ "$canonical_command" != "$expanded_command" ]] && expansion_drift=1
@@ -495,18 +523,36 @@ _cosh_preexec_marker() {
   fi
   if _cosh_is_handoff_wrapper "$command"; then
     display_command="$(_cosh_unwrap_handoff_command "$command")"
-    _COSH_HANDOFF_ACTIVE=1
-    _cosh_apply_handoff_pager_policy
+    # Handoff treatment (active flag, pager policy, token) applies only
+    # when the unwrapped text matches the staged request: a user-typed
+    # bypass-prefixed line racing ahead must not steal the claim, and its
+    # precmd must not see the active flag and clear the staged sidecars
+    # the real handoff line is about to consume (#2142 review).
+    if _cosh_is_pending_handoff_command "$display_command"; then
+      _COSH_HANDOFF_ACTIVE=1
+      _cosh_apply_handoff_pager_policy
+      _cosh_load_handoff_token
+      _cosh_clear_handoff_request
+    fi
     if _cosh_command_has_secret "$display_command"; then
       display_command="<redacted sensitive command>"
     fi
     _COSH_HANDOFF_HISTORY_COMMAND="$display_command"
   elif _cosh_is_pending_handoff_command "$command"; then
     _COSH_HANDOFF_ACTIVE=1
+    _cosh_load_handoff_token
     _cosh_apply_handoff_pager_policy
-  else
+    # Consume-then-clear: the claim is single-shot, and clearing here
+    # (not in unrelated branches) is what keeps it alive across
+    # command-ahead races.
     _cosh_clear_handoff_request
+  else
+    # Deliberately no _cosh_clear_handoff_request here: an unrelated
+    # command racing ahead of an approved handoff must leave the staged
+    # request/token sidecars for the handoff line that follows; the Rust
+    # transport owns cleanup for abandoned handoffs (#2142 review).
     unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
+    unset _COSH_HANDOFF_TOKEN 2>/dev/null || true
     unset _COSH_HANDOFF_HISTORY_COMMAND 2>/dev/null || true
     local command_word_source="$command"
     while [[ "$command_word_source" == ' '* || "$command_word_source" == $'\t'* ]]; do
@@ -520,7 +566,9 @@ _cosh_preexec_marker() {
     fi
     local reason
     if reason="$(_cosh_should_intercept_unknown "$first_word" "$command" "$argc")"; then
-      _cosh_emit_intercept_marker "$command" "$reason"
+      local intercept_sensitive=false
+      _cosh_command_has_secret "$command" && intercept_sensitive=true
+      _cosh_emit_intercept_marker "$command" "$reason" false "$intercept_sensitive"
       return 1
     fi
     _cosh_begin_attempt "$command" "$first_word" "$expansion_drift"
@@ -538,11 +586,20 @@ _cosh_precmd_marker() {
   setopt NO_PROMPT_SP 2>/dev/null || true
   _cosh_apply_internal_recovery
   _cosh_add_handoff_history
-  _cosh_clear_handoff_request
+  # Only the handoff's own prompt boundary may clear the staged files: an
+  # unrelated command finishing while a handoff is still pending must not
+  # destroy the request/token sidecars it is about to consume (#2142 review).
+  if [[ "${_COSH_HANDOFF_ACTIVE:-0}" == 1 ]]; then
+    _cosh_clear_handoff_request
+  fi
   _cosh_restore_handoff_pager_policy
   unset _COSH_HANDOFF_ACTIVE 2>/dev/null || true
   _COSH_ATTEMPT_ACTIVE=0
+  # The precmd marker still carries the handoff token (#2142): it closes the
+  # same command the preexec claimed. Cleared right after so the following
+  # prompt_ready and ordinary markers stay token-free.
   _cosh_emit_marker "precmd" "" "$exit_status" false
+  unset _COSH_HANDOFF_TOKEN 2>/dev/null || true
   # Only claim prompt readiness while this remains the final precmd hook.
   # Hooks appended later may still emit output or block before zsh paints.
   if [[ "${precmd_functions[-1]:-}" == "_cosh_precmd_marker" ]]; then

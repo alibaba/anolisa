@@ -9,16 +9,20 @@ from typing import Any
 from qoder_hook_common import (
     deny_output,
     dumps_hook_output,
+    env_flag_enabled,
     jsonish_value,
     load_hook_input,
+    normalize_hook_policy,
     post_tool_output_replacement,
     pre_tool_decision_output,
     value_to_text,
     with_trace_context,
 )
 
-_MODE = os.environ.get("PII_CHECKER_MODE", "observe").strip().lower()
-_VALID_MODES = {"observe", "deny"}
+_HOOK_ENABLED = env_flag_enabled("PII_CHECKER_HOOK_ENABLED", True)
+_POLICY_ENV_NAME = "PII_CHECKER_MODE"
+_POLICY_RAW = os.environ.get(_POLICY_ENV_NAME)
+_POLICY = normalize_hook_policy(_POLICY_RAW, "observe")
 try:
     _TIMEOUT = int(os.environ.get("PII_CHECKER_TIMEOUT", "5"))
 except (TypeError, ValueError):
@@ -169,12 +173,12 @@ def _warn_output(notice: str) -> str:
     return dumps_hook_output({"decision": "allow", "systemMessage": notice})
 
 
-def _invalid_mode_output() -> str:
-    """Return a visible fail-open warning for an invalid checker mode."""
-    configured_mode = _shorten(_MODE, 32) or "<empty>"
+def _invalid_policy_output() -> str:
+    """Return a visible fail-open warning for an invalid checker policy."""
+    configured_mode = _shorten(_safe_string(_POLICY_RAW), 32) or "<empty>"
     notice = (
-        f"[pii-checker] Invalid PII_CHECKER_MODE {configured_mode!r}; expected "
-        "'observe' or 'deny'. Falling back to observe mode; execution will continue."
+        f"[pii-checker] invalid {_POLICY_ENV_NAME} {configured_mode!r}; expected "
+        "observe, warn, ask, or block. Falling back to observe; execution will continue."
     )
     return _warn_output(notice)
 
@@ -190,16 +194,29 @@ def _format_decision(
         return None
     if verdict not in {"warn", "deny"}:
         return None
-    if _MODE != "deny":
+    if _POLICY == "observe":
         return None
 
     event_name = _hook_event(input_data)
-    if verdict == "warn":
+    if verdict == "warn" or _POLICY == "warn":
         notice = _format_notice(
             verdict,
             findings,
             source_desc,
             "Execution will continue.",
+        )
+        return _warn_output(notice)
+
+    if _POLICY == "ask" and event_name == "PreToolUse":
+        notice = _format_notice(verdict, findings, source_desc, "Approval is required.")
+        return pre_tool_decision_output("ask", notice)
+
+    if _POLICY == "ask":
+        notice = _format_notice(
+            verdict,
+            findings,
+            source_desc,
+            "Approval is unavailable here; execution continues.",
         )
         return _warn_output(notice)
 
@@ -235,6 +252,9 @@ def _format_decision(
 
 def main() -> None:
     """Run the Qoder PII hook."""
+    if not _HOOK_ENABLED:
+        return
+
     input_data = load_hook_input()
     if input_data is None:
         return
@@ -245,8 +265,8 @@ def main() -> None:
     text, source, source_desc = target
 
     scan_result = _scan_pii(input_data, text, source)
-    if _MODE not in _VALID_MODES:
-        print(_invalid_mode_output())
+    if _POLICY_RAW is not None and normalize_hook_policy(_POLICY_RAW, "") == "":
+        print(_invalid_policy_output())
         return
     if scan_result is None:
         return

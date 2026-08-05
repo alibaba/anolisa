@@ -81,9 +81,160 @@ class TestFormatCosh:
         result = json.loads(_format_cosh({"verdict": verdict, "findings": [{}]}))
         assert result == {"decision": "allow"}
 
+    @pytest.mark.parametrize("verdict", ["warn", "deny"])
+    def test_observe_is_silent(self, verdict):
+        result = json.loads(
+            _format_cosh(
+                {
+                    "verdict": verdict,
+                    "findings": [
+                        {
+                            "type": "credential",
+                            "severity": "deny",
+                            "evidence_redacted": "token=[REDACTED]",
+                        }
+                    ],
+                },
+                "observe",
+                "PreToolUse",
+            )
+        )
+
+        assert result == {"decision": "allow"}
+
+    @pytest.mark.parametrize(
+        "event_name",
+        [
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "AfterModel",
+            "PostToolUseFailure",
+        ],
+    )
+    @pytest.mark.parametrize("policy", ["warn", "ask", "block"])
+    def test_scanner_warn_never_escalates(self, event_name, policy):
+        result = json.loads(
+            _format_cosh(
+                {
+                    "verdict": "warn",
+                    "findings": [
+                        {
+                            "type": "email",
+                            "severity": "warn",
+                            "evidence_redacted": "a***@example.com",
+                            "raw_evidence": "alice@example.com",
+                        }
+                    ],
+                },
+                policy,
+                event_name,
+            )
+        )
+
+        assert result["decision"] == "allow"
+        assert "a***@example.com" in result["reason"]
+        assert "本轮请求将继续处理" in result["reason"]
+        assert "fallback" not in result["reason"]
+        assert "alice@example.com" not in result["reason"]
+
+    @pytest.mark.parametrize(
+        ("event_name", "policy", "expected_decision", "message_fragment"),
+        [
+            ("UserPromptSubmit", "ask", "ask", "需要确认"),
+            ("UserPromptSubmit", "block", "block", "本轮请求已被阻断"),
+            ("PreToolUse", "ask", "ask", "需要确认"),
+            ("PreToolUse", "block", "block", "本次工具调用已被阻断"),
+            ("PostToolUse", "ask", "allow", "fallback 为 warn"),
+            ("PostToolUse", "block", "block", "原始工具结果不会进入模型上下文"),
+            ("AfterModel", "ask", "allow", "fallback 为 warn"),
+            ("AfterModel", "block", "allow", "fallback 为 warn"),
+            ("PostToolUseFailure", "ask", "allow", "fallback 为 warn"),
+            ("PostToolUseFailure", "block", "allow", "fallback 为 warn"),
+        ],
+    )
+    def test_deny_uses_event_level_policy(
+        self,
+        event_name,
+        policy,
+        expected_decision,
+        message_fragment,
+    ):
+        result = json.loads(
+            _format_cosh(
+                {
+                    "verdict": "deny",
+                    "findings": [
+                        {
+                            "type": "credential",
+                            "severity": "deny",
+                            "evidence_redacted": "token=[REDACTED]",
+                            "raw_evidence": "raw-secret-value",
+                        }
+                    ],
+                },
+                policy,
+                event_name,
+            )
+        )
+
+        assert result["decision"] == expected_decision
+        assert message_fragment in result["reason"]
+        assert "token=[REDACTED]" in result["reason"]
+        assert "raw-secret-value" not in result["reason"]
+        assert "raw_evidence" not in result["reason"]
+        if expected_decision in {"ask", "block"}:
+            assert "将继续" not in result["reason"]
+        else:
+            assert "已被阻断" not in result["reason"]
+            assert "将继续" in result["reason"]
+
+    def test_post_tool_block_describes_content_boundary(self):
+        result = json.loads(
+            _format_cosh(
+                {
+                    "verdict": "deny",
+                    "findings": [
+                        {
+                            "type": "credential",
+                            "severity": "deny",
+                            "evidence_redacted": "token=[REDACTED]",
+                        }
+                    ],
+                },
+                "block",
+                "PostToolUse",
+            )
+        )
+
+        assert result["decision"] == "block"
+        assert "工具已经执行" in result["reason"]
+        assert "不会进入模型上下文" in result["reason"]
+        assert "外部副作用不会撤销" in result["reason"]
+        assert "将继续处理" not in result["reason"]
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"prompt": "hello"}, "UserPromptSubmit"),
+        ({"hookEventName": "PreToolUse"}, "PreToolUse"),
+        (
+            {
+                "hook_event_name": "PostToolUse",
+                "hookEventName": "PreToolUse",
+            },
+            "PostToolUse",
+        ),
+    ],
+)
+def test_hook_event_name_supports_both_fields_and_legacy_default(payload, expected):
+    assert pii_checker_hook._hook_event_name(payload) == expected
+
 
 class TestCoshHookMain:
-    def _run_main(self, monkeypatch, capsys, input_data):
+    def _run_main(self, monkeypatch, capsys, input_data, policy="warn"):
+        monkeypatch.setenv("PII_CHECKER_MODE", policy)
         monkeypatch.setattr(pii_checker_hook.sys, "stdin", io.StringIO(input_data))
         pii_checker_hook.main()
         return json.loads(capsys.readouterr().out)
@@ -169,6 +320,41 @@ class TestCoshHookMain:
         assert output["decision"] == "allow"
         assert "phone_cn" in output["reason"]
 
+    def test_missing_event_defaults_to_user_prompt_policy_mapping(
+        self, monkeypatch, capsys
+    ):
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "verdict": "deny",
+                        "findings": [
+                            {
+                                "type": "email",
+                                "severity": "deny",
+                                "evidence_redacted": "a***@example.com",
+                            }
+                        ],
+                    }
+                ),
+                stderr="",
+            )
+
+        monkeypatch.setattr(pii_checker_hook.subprocess, "run", fake_run)
+
+        output = self._run_main(
+            monkeypatch,
+            capsys,
+            json.dumps({"prompt": "Contact alice@example.com"}),
+            policy="ask",
+        )
+
+        assert output["decision"] == "ask"
+        assert "需要确认" in output["reason"]
+        assert "alice@example.com" not in output["reason"]
+
     def test_injects_trace_context_into_scan_pii_command(self, monkeypatch, capsys):
         captured = {}
 
@@ -229,7 +415,7 @@ class TestCoshHookMain:
         ("payload", "expected_stdin", "expected_source"),
         [
             (
-                {"hook_event_name": "PreToolUse", "tool_input": {"command": "echo ok"}},
+                {"hookEventName": "PreToolUse", "tool_input": {"command": "echo ok"}},
                 '{"command":"echo ok"}',
                 "tool_input",
             ),
@@ -344,7 +530,38 @@ class TestCoshHookMain:
         assert output == {"decision": "allow"}
 
 
-def test_manifest_registers_only_user_prompt_submit_for_pii():
+def test_environment_disabled_short_circuits_before_input_and_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("PII_CHECKER_HOOK_ENABLED", "false")
+    disabled_hook = load_standalone_hook(
+        "cosh_pii_checker_disabled_hook",
+        Path(_COSH_HOOK),
+    )
+    monkeypatch.setattr(
+        disabled_hook.sys,
+        "stdin",
+        type(
+            "UnreadableInput",
+            (),
+            {"read": lambda *_args, **_kwargs: pytest.fail("input should not be read")},
+        )(),
+    )
+    monkeypatch.setattr(
+        disabled_hook.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("CLI should not be called"),
+    )
+
+    disabled_hook.main()
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"decision": "allow"}
+    assert captured.err == ""
+
+
+def test_manifest_registers_all_supported_pii_events():
     manifest_path = (
         Path(__file__).resolve().parents[2]
         / ".."
@@ -367,3 +584,10 @@ def test_manifest_registers_only_user_prompt_submit_for_pii():
         "PostToolUse",
         "PostToolUseFailure",
     ]
+
+
+def test_invalid_mode_reports_observe_fallback(monkeypatch, capsys):
+    monkeypatch.setenv("PII_CHECKER_MODE", "banana")
+
+    assert pii_checker_hook._read_policy() == "observe"
+    assert "invalid PII_CHECKER_MODE; using observe" in capsys.readouterr().err

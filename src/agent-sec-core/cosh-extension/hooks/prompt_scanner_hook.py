@@ -35,10 +35,12 @@ import os
 import subprocess
 import sys
 
+from hook_config import env_flag_enabled
 from trace_context import with_trace_context
 
 # -- config ----------------------------------------------------------------
 
+_HOOK_ENABLED = env_flag_enabled("PROMPT_SCANNER_HOOK_ENABLED", True)
 _RAW_SCAN_MODE = os.environ.get("PROMPT_SCANNER_SCAN_MODE", "standard").strip().lower()
 _DEFAULT_MODE = _RAW_SCAN_MODE
 if _DEFAULT_MODE not in {"fast", "standard", "strict"}:
@@ -116,6 +118,10 @@ def _format_cosh(scan_result: dict) -> str:
 
 
 def main() -> None:
+    if not _HOOK_ENABLED:
+        print(_allow())
+        return
+
     # 1. Read stdin JSON (UserPromptSubmit event)
     try:
         input_data = json.load(sys.stdin)

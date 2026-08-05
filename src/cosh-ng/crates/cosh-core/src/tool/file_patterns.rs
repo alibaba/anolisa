@@ -1,95 +1,208 @@
-//! Shared path expansion for file-discovery tools.
+//! Shared descriptor-relative discovery for file-reading tools.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use glob::{glob_with, MatchOptions, Pattern};
+use glob::{MatchOptions, Pattern};
+
+use super::workspace_fs::{WorkspaceBatchNode, WorkspaceFs, WorkspaceNode, WorkspacePathNode};
 
 const MAX_MATCHES: usize = 100;
 
+pub(super) struct FileMatch {
+    pub path: PathBuf,
+    pub file: Result<File, String>,
+}
+
 pub(super) struct FileMatches {
+    pub files: Vec<FileMatch>,
+    pub truncated: bool,
+}
+
+pub(super) struct FilePathMatches {
     pub paths: Vec<PathBuf>,
     pub truncated: bool,
+    pub skipped: Vec<String>,
 }
 
 pub(super) fn expand_file_patterns(
     patterns: &[String],
     cwd: &Path,
+    workspace: &WorkspaceFs,
     max_matches: usize,
 ) -> Result<FileMatches, String> {
-    let mut matches = BTreeSet::new();
+    let mut matches = BTreeMap::new();
     let mut truncated = false;
     let max_matches = max_matches.min(MAX_MATCHES);
 
-    for pattern in patterns {
-        if expand_pattern(pattern, cwd, &mut matches, max_matches)? {
-            truncated = true;
+    for (pattern_index, pattern) in patterns.iter().enumerate() {
+        if pattern.trim().is_empty() {
+            return Err("file pattern must not be empty".to_string());
+        }
+        if let Some(node) = workspace.try_open_batch_node(cwd, pattern)? {
+            match node {
+                WorkspaceBatchNode::Node(WorkspaceNode::File(file)) => {
+                    if insert_match(&mut matches, file.display_path, Ok(file.file), max_matches) {
+                        truncated = true;
+                    }
+                }
+                WorkspaceBatchNode::Node(WorkspaceNode::Directory(directory)) => {
+                    let walked = workspace.walk_files(directory, max_matches, |_| true)?;
+                    truncated |= walked.truncated;
+                    for file in walked.files {
+                        if insert_match(&mut matches, file.display_path, Ok(file.file), max_matches)
+                        {
+                            truncated = true;
+                            break;
+                        }
+                    }
+                }
+                WorkspaceBatchNode::InaccessibleFile {
+                    display_path,
+                    error,
+                } => {
+                    if insert_match(&mut matches, display_path, Err(error), max_matches) {
+                        truncated = true;
+                    }
+                }
+            }
+        } else if pattern.chars().any(is_glob_char) {
+            let (base, suffix) = split_path_pattern(pattern);
+            let base = if base.is_empty() { "." } else { base };
+            let matcher = Pattern::new(&suffix)
+                .map_err(|error| format!("invalid glob pattern '{pattern}': {error}"))?;
+            let directory = match workspace.try_open_node(cwd, base)? {
+                Some(WorkspaceNode::Directory(directory)) => directory,
+                Some(WorkspaceNode::File(file)) => {
+                    return Err(format!("Not a directory: {}", file.display_path.display()));
+                }
+                None => continue,
+            };
+            let options = match_options();
+            let walked = workspace.walk_files(directory, max_matches, |path| {
+                matcher.matches_path_with(path, options)
+            })?;
+            truncated |= walked.truncated;
+            for file in walked.files {
+                if insert_match(&mut matches, file.display_path, Ok(file.file), max_matches) {
+                    truncated = true;
+                    break;
+                }
+            }
+        }
+        if truncated {
+            break;
+        }
+        if matches.len() >= max_matches {
+            truncated = pattern_index + 1 < patterns.len();
             break;
         }
     }
 
     Ok(FileMatches {
-        paths: matches.into_iter().collect(),
+        files: matches
+            .into_iter()
+            .map(|(path, file)| FileMatch { path, file })
+            .collect(),
         truncated,
     })
 }
 
-fn expand_pattern(
-    pattern: &str,
+pub(super) fn expand_file_paths(
+    patterns: &[String],
     cwd: &Path,
-    matches: &mut BTreeSet<PathBuf>,
+    workspace: &WorkspaceFs,
     max_matches: usize,
-) -> Result<bool, String> {
-    if pattern.trim().is_empty() {
-        return Err("file pattern must not be empty".to_string());
-    }
+) -> Result<FilePathMatches, String> {
+    let mut matches = BTreeSet::new();
+    let mut truncated = false;
+    let mut skipped = Vec::new();
+    let max_matches = max_matches.min(MAX_MATCHES);
 
-    let candidate = resolve_path(pattern, cwd);
-    if candidate.is_file() {
-        return Ok(insert_match(matches, candidate, max_matches));
-    }
-
-    let glob_pattern = if candidate.is_dir() {
-        join_glob(&candidate, "**/*")?
-    } else if candidate.is_absolute() {
-        let (base_str, glob_suffix) = split_path_pattern(pattern);
-        let base = resolve_path(base_str, cwd);
-        let escaped = Pattern::escape(
-            base.to_str()
-                .ok_or_else(|| format!("file pattern is not valid UTF-8: {}", base.display()))?,
-        );
-        if glob_suffix.is_empty() {
-            escaped
-        } else {
-            let sep = if escaped.ends_with(std::path::MAIN_SEPARATOR) {
-                ""
-            } else {
-                std::path::MAIN_SEPARATOR_STR
-            };
-            format!("{escaped}{sep}{glob_suffix}")
+    for (pattern_index, pattern) in patterns.iter().enumerate() {
+        if pattern.trim().is_empty() {
+            return Err("file pattern must not be empty".to_string());
         }
-    } else {
-        join_glob(cwd, pattern)?
-    };
-    expand_glob(&glob_pattern, matches, max_matches)
+        if let Some(node) = workspace.try_open_path_node(cwd, pattern)? {
+            match node {
+                WorkspacePathNode::File(path) => {
+                    if insert_path_match(&mut matches, path, max_matches) {
+                        truncated = true;
+                    }
+                }
+                WorkspacePathNode::Directory(directory) => {
+                    let walked = workspace.walk_file_paths(directory, max_matches, |_| true)?;
+                    truncated |= walked.truncated;
+                    for path in walked.paths {
+                        if insert_path_match(&mut matches, path, max_matches) {
+                            truncated = true;
+                            break;
+                        }
+                    }
+                }
+                WorkspacePathNode::InaccessibleDirectory {
+                    display_path,
+                    error,
+                } => skipped.push(format!("{}: {error}", display_path.display())),
+            }
+        } else if pattern.chars().any(is_glob_char) {
+            let (base, suffix) = split_path_pattern(pattern);
+            let base = if base.is_empty() { "." } else { base };
+            let matcher = Pattern::new(&suffix)
+                .map_err(|error| format!("invalid glob pattern '{pattern}': {error}"))?;
+            let directory = match workspace.try_open_path_node(cwd, base)? {
+                Some(WorkspacePathNode::Directory(directory)) => directory,
+                Some(WorkspacePathNode::File(path)) => {
+                    return Err(format!("Not a directory: {}", path.display()));
+                }
+                Some(WorkspacePathNode::InaccessibleDirectory {
+                    display_path,
+                    error,
+                }) => {
+                    skipped.push(format!("{}: {error}", display_path.display()));
+                    continue;
+                }
+                None => continue,
+            };
+            let options = match_options();
+            let walked = workspace.walk_file_paths(directory, max_matches, |path| {
+                matcher.matches_path_with(path, options)
+            })?;
+            truncated |= walked.truncated;
+            for path in walked.paths {
+                if insert_path_match(&mut matches, path, max_matches) {
+                    truncated = true;
+                    break;
+                }
+            }
+        }
+        if truncated {
+            break;
+        }
+        if matches.len() >= max_matches {
+            truncated = pattern_index + 1 < patterns.len();
+            break;
+        }
+    }
+
+    Ok(FilePathMatches {
+        paths: matches.into_iter().collect(),
+        truncated,
+        skipped,
+    })
 }
 
-/// Split a user-supplied pattern into `(literal_base, glob_suffix)`.
-///
-/// Splits the pattern at the first path segment that contains glob
-/// metacharacters (`*`, `?`, `[`, `]`).  Everything above that segment
-/// becomes the literal base (to be resolved and escaped); everything
-/// from that segment onward is the glob suffix (preserved verbatim).
-///
-/// If no segment contains glob metacharacters, the entire pattern is
-/// the literal base and the glob suffix is empty.
-fn split_path_pattern(pattern: &str) -> (&str, String) {
-    let sep = std::path::MAIN_SEPARATOR;
-    let sep_len = sep.len_utf8();
-    let is_glob_char = |c: char| matches!(c, '*' | '?' | '[' | ']');
+fn is_glob_char(character: char) -> bool {
+    matches!(character, '*' | '?' | '[' | ']')
+}
 
+/// Splits a pattern into its literal base and glob suffix.
+fn split_path_pattern(pattern: &str) -> (&str, String) {
+    let separator = std::path::MAIN_SEPARATOR;
+    let separator_len = separator.len_utf8();
     let Some(glob_index) = pattern
-        .split(sep)
+        .split(separator)
         .position(|segment| segment.chars().any(is_glob_char))
     else {
         return (pattern, String::new());
@@ -99,13 +212,12 @@ fn split_path_pattern(pattern: &str) -> (&str, String) {
     }
 
     let suffix_start = pattern
-        .split(sep)
+        .split(separator)
         .take(glob_index)
-        .map(|segment| segment.len() + sep_len)
+        .map(|segment| segment.len() + separator_len)
         .sum::<usize>();
-    let base_end = suffix_start.saturating_sub(sep_len);
-    // A leading separator forms the literal base when the first path component is a glob.
-    let base = if base_end == 0 && pattern.starts_with(sep) {
+    let base_end = suffix_start.saturating_sub(separator_len);
+    let base = if base_end == 0 && pattern.starts_with(separator) {
         std::path::MAIN_SEPARATOR_STR
     } else {
         &pattern[..base_end]
@@ -113,49 +225,31 @@ fn split_path_pattern(pattern: &str) -> (&str, String) {
     (base, pattern[suffix_start..].to_string())
 }
 
-fn join_glob(base: &Path, pattern: &str) -> Result<String, String> {
-    let base = base
-        .to_str()
-        .ok_or_else(|| format!("file pattern is not valid UTF-8: {}", base.display()))?;
-    let base = Pattern::escape(base);
-    let separator = if base.ends_with(std::path::MAIN_SEPARATOR) {
-        ""
-    } else {
-        std::path::MAIN_SEPARATOR_STR
-    };
-    Ok(format!("{base}{separator}{pattern}"))
-}
-
-fn expand_glob(
-    pattern: &str,
-    matches: &mut BTreeSet<PathBuf>,
-    max_matches: usize,
-) -> Result<bool, String> {
-    Pattern::new(pattern).map_err(|error| format!("invalid glob pattern '{pattern}': {error}"))?;
-
-    let options = MatchOptions {
+fn match_options() -> MatchOptions {
+    MatchOptions {
         case_sensitive: !cfg!(any(target_os = "macos", target_os = "windows")),
         require_literal_separator: false,
         require_literal_leading_dot: false,
-    };
-    let entries = glob_with(pattern, options)
-        .map_err(|error| format!("invalid glob pattern '{pattern}': {error}"))?;
-
-    for entry in entries {
-        match entry {
-            Ok(path) if path.is_file() => {
-                if insert_match(matches, path, max_matches) {
-                    return Ok(true);
-                }
-            }
-            Ok(_) => {}
-            Err(_) => continue,
-        }
     }
-    Ok(false)
 }
 
-fn insert_match(matches: &mut BTreeSet<PathBuf>, path: PathBuf, max_matches: usize) -> bool {
+fn insert_match(
+    matches: &mut BTreeMap<PathBuf, Result<File, String>>,
+    path: PathBuf,
+    file: Result<File, String>,
+    max_matches: usize,
+) -> bool {
+    if matches.contains_key(&path) {
+        return false;
+    }
+    if matches.len() >= max_matches {
+        return true;
+    }
+    matches.insert(path, file);
+    false
+}
+
+fn insert_path_match(matches: &mut BTreeSet<PathBuf>, path: PathBuf, max_matches: usize) -> bool {
     if matches.contains(&path) {
         return false;
     }
@@ -166,60 +260,79 @@ fn insert_match(matches: &mut BTreeSet<PathBuf>, path: PathBuf, max_matches: usi
     false
 }
 
-// resolve_path is provided by the parent module (super::resolve_path)
-// and supports ~ expansion.
-pub(super) use super::resolve_path;
-
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::symlink;
+
     use super::*;
+
+    fn expand(
+        patterns: &[String],
+        cwd: &Path,
+        root: &Path,
+        max_matches: usize,
+    ) -> Result<FileMatches, String> {
+        let workspace = WorkspaceFs::new(root)?;
+        expand_file_patterns(patterns, cwd, &workspace, max_matches)
+    }
 
     #[test]
     fn expands_exact_files_and_globs_without_duplicates() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("src/nested")).unwrap();
-        std::fs::write(dir.path().join("src/lib.rs"), "lib").unwrap();
-        std::fs::write(dir.path().join("src/nested/mod.rs"), "mod").unwrap();
-        std::fs::write(dir.path().join("src/readme.md"), "readme").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join("src/nested")).unwrap();
+        std::fs::write(directory.path().join("src/lib.rs"), "lib").unwrap();
+        std::fs::write(directory.path().join("src/nested/mod.rs"), "mod").unwrap();
+        std::fs::write(directory.path().join("src/readme.md"), "readme").unwrap();
 
-        let matches = expand_file_patterns(
+        let matches = expand(
             &[
                 "src/**/*.rs".to_string(),
                 "src/lib.rs".to_string(),
                 "src/readme.md".to_string(),
             ],
-            dir.path(),
+            directory.path(),
+            directory.path(),
             10,
         )
         .unwrap();
 
-        assert_eq!(matches.paths.len(), 3);
+        assert_eq!(matches.files.len(), 3);
         assert!(!matches.truncated);
     }
 
     #[test]
     fn caps_matches() {
-        let dir = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().unwrap();
         for index in 0..3 {
-            std::fs::write(dir.path().join(format!("{index}.txt")), "text").unwrap();
+            std::fs::write(directory.path().join(format!("{index}.txt")), "text").unwrap();
         }
 
-        let matches = expand_file_patterns(&["*.txt".to_string()], dir.path(), 2).unwrap();
+        let matches = expand(
+            &["*.txt".to_string()],
+            directory.path(),
+            directory.path(),
+            2,
+        )
+        .unwrap();
 
-        assert_eq!(matches.paths.len(), 2);
+        assert_eq!(matches.files.len(), 2);
         assert!(matches.truncated);
     }
 
     #[test]
-    fn treats_glob_metacharacters_in_base_path_as_literals() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = dir.path().join("work[tree]");
+    fn treats_glob_metacharacters_in_cwd_as_literals() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().join("work[tree]");
         std::fs::create_dir(&base).unwrap();
         std::fs::write(base.join("lib.rs"), "lib").unwrap();
 
-        let matches = expand_file_patterns(&["*.rs".to_string()], &base, 10).unwrap();
+        let matches = expand(&["*.rs".to_string()], &base, &base, 10).unwrap();
 
-        assert_eq!(matches.paths, [base.join("lib.rs")]);
+        assert_eq!(matches.files.len(), 1);
+        assert_eq!(
+            matches.files[0].path,
+            base.canonicalize().unwrap().join("lib.rs")
+        );
     }
 
     #[test]
@@ -233,27 +346,91 @@ mod tests {
 
     #[test]
     fn absolute_glob_uses_resolved_literal_base() {
-        let dir = tempfile::tempdir().unwrap();
-        let sub = dir.path().join("src");
-        std::fs::create_dir_all(&sub).unwrap();
-        std::fs::write(sub.join("lib.rs"), "lib").unwrap();
-        std::fs::write(sub.join("main.rs"), "main").unwrap();
-        std::fs::write(dir.path().join("readme.md"), "readme").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("src");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("lib.rs"), "lib").unwrap();
+        std::fs::write(source.join("main.rs"), "main").unwrap();
+        std::fs::write(directory.path().join("readme.md"), "readme").unwrap();
+        let pattern = source.join("*.rs").to_str().unwrap().to_string();
 
-        let abs_glob = dir.path().join("src").join("*.rs");
-        let pattern = abs_glob.to_str().unwrap().to_string();
+        let matches = expand(&[pattern], Path::new("/nonexistent"), directory.path(), 10).unwrap();
 
-        let matches = expand_file_patterns(&[pattern], &PathBuf::from("/nonexistent"), 10).unwrap();
+        assert_eq!(matches.files.len(), 2);
+        let source = source.canonicalize().unwrap();
+        assert!(matches
+            .files
+            .iter()
+            .all(|file| file.path.starts_with(&source)));
+    }
 
-        assert_eq!(matches.paths.len(), 2);
-        for p in &matches.paths {
-            assert!(
-                p.starts_with(&sub),
-                "path {:?} should be under {:?}",
-                p,
-                sub
-            );
-            assert!(p.extension().is_some_and(|e| e == "rs"));
-        }
+    #[test]
+    fn skips_symlinks_that_escape_during_discovery() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("inside.txt"), "inside").unwrap();
+        std::fs::write(parent.path().join("outside.txt"), "outside").unwrap();
+        symlink(
+            parent.path().join("outside.txt"),
+            root.join("outside-link.txt"),
+        )
+        .unwrap();
+
+        let matches = expand(&["*.txt".to_string()], &root, &root, 10).unwrap();
+
+        assert_eq!(matches.files.len(), 1);
+        assert!(matches.files[0].path.ends_with("inside.txt"));
+    }
+
+    #[test]
+    fn existing_path_with_glob_characters_takes_precedence() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("report[1].txt"), "literal").unwrap();
+        std::fs::write(directory.path().join("report1.txt"), "glob").unwrap();
+
+        let matches = expand(
+            &["report[1].txt".to_string()],
+            directory.path(),
+            directory.path(),
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(matches.files.len(), 1);
+        assert!(matches.files[0].path.ends_with("report[1].txt"));
+    }
+
+    #[test]
+    fn invalid_globs_are_rejected_before_missing_base_lookup() {
+        let directory = tempfile::tempdir().unwrap();
+        let patterns = ["missing/[".to_string()];
+        let readable_error = expand(&patterns, directory.path(), directory.path(), 10)
+            .err()
+            .unwrap();
+        let workspace = WorkspaceFs::new(directory.path()).unwrap();
+        let path_error = expand_file_paths(&patterns, directory.path(), &workspace, 10)
+            .err()
+            .unwrap();
+
+        assert!(readable_error.contains("invalid glob pattern"));
+        assert!(path_error.contains("invalid glob pattern"));
+    }
+
+    #[test]
+    fn unprocessed_exact_paths_mark_results_truncated() {
+        let directory = tempfile::tempdir().unwrap();
+        let patterns = (0..3)
+            .map(|index| {
+                let name = format!("{index}.txt");
+                std::fs::write(directory.path().join(&name), "text").unwrap();
+                name
+            })
+            .collect::<Vec<_>>();
+
+        let matches = expand(&patterns, directory.path(), directory.path(), 2).unwrap();
+
+        assert_eq!(matches.files.len(), 2);
+        assert!(matches.truncated);
     }
 }

@@ -128,3 +128,32 @@ pub(super) fn question_choice_count(capture: &RawInputCapture) -> usize {
         | RawInputCapture::PromptDraft { .. } => 0,
     }
 }
+
+pub(super) fn capture_initial_selection(capture: &RawInputCapture) -> usize {
+    match capture {
+        RawInputCapture::Question { selected, .. } => {
+            (*selected).min(question_choice_count(capture).saturating_sub(1))
+        }
+        RawInputCapture::Mode {
+            selected,
+            option_count,
+            ..
+        }
+        | RawInputCapture::Config {
+            selected,
+            option_count,
+            ..
+        }
+        | RawInputCapture::ConfigLanguage {
+            selected,
+            option_count,
+            ..
+        }
+        | RawInputCapture::Session {
+            selected,
+            option_count,
+            ..
+        } => (*selected).min(option_count.saturating_sub(1)),
+        _ => 0,
+    }
+}

@@ -1,5 +1,5 @@
 import type { SecurityCapability } from "../types.js";
-import { buildTraceContext, callAgentSecCli } from "../utils.js";
+import { buildTraceContext, callAgentSecCli, envFlagEnabled } from "../utils.js";
 
 /**
  * 用户输入 Prompt 注入 / 越狱检测。
@@ -24,6 +24,9 @@ export const promptScan: SecurityCapability = {
   name: "Prompt Injection Scanner",
   hooks: ["before_dispatch"],
   register(api) {
+    if (!envFlagEnabled("PROMPT_SCANNER_HOOK_ENABLED", true)) {
+      return;
+    }
     const cfg = (api.pluginConfig as Record<string, any>) ?? {};
     api.on("before_dispatch", async (event: any, ctx: any) => {
       try {

@@ -43,6 +43,12 @@ pub struct EnvFacts {
     /// `"ubuntu"`, `"debian"`, `"anolis"`). `None` on non-Linux hosts
     /// or when `/etc/os-release` is missing / unreadable.
     pub os_id: Option<String>,
+    /// Raw `ID_LIKE` field from `/etc/os-release` (e.g. `"debian"`,
+    /// `"rhel fedora"`). `None` when unavailable. Defaulted on
+    /// deserialization so snapshots written before this field existed
+    /// keep loading.
+    #[serde(default)]
+    pub os_id_like: Option<String>,
     /// Raw `VERSION_ID` field from `/etc/os-release` (e.g. `"4"`,
     /// `"24.04"`, `"12"`). `None` when unavailable.
     pub os_version: Option<String>,
@@ -76,6 +82,9 @@ pub struct EnvFacts {
 pub struct OsReleaseInfo {
     /// Raw `ID` field (e.g. `"alinux"`, `"ubuntu"`, `"anolis"`).
     pub id: Option<String>,
+    /// Raw `ID_LIKE` field (e.g. `"debian"`, `"rhel fedora"`), used to
+    /// classify derivatives whose `ID` is not individually known.
+    pub id_like: Option<String>,
     /// Raw `VERSION_ID` field (e.g. `"4"`, `"24.04"`, `"23"`).
     pub version_id: Option<String>,
     /// Anolis-family package base hint (`"anolis23"`, `"anolis8"`,
@@ -116,6 +125,7 @@ impl EnvService {
             kernel,
             pkg_base: os_release.pkg_base,
             os_id: os_release.id,
+            os_id_like: os_release.id_like,
             os_version: os_release.version_id,
             btf,
             cap_bpf,
@@ -210,6 +220,7 @@ pub fn parse_os_release(content: &str) -> OsReleaseInfo {
 
     OsReleaseInfo {
         id,
+        id_like,
         version_id,
         pkg_base,
     }
@@ -230,6 +241,22 @@ pub fn pkg_base_from_id(id: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Classify the host package family (`"rpm"` / `"deb"`) from the raw
+/// `/etc/os-release` `ID` and `ID_LIKE` fields.
+///
+/// `ID` wins when it is individually known; otherwise every whitespace
+/// token of `ID_LIKE` is tried in order, so derivatives that declare
+/// their lineage (e.g. `ID=pop`, `ID_LIKE="ubuntu debian"`) classify
+/// without being listed by name. Returns `None` when neither field
+/// names a known rpm/deb family member — callers must treat that as
+/// "unknown", not as a third family.
+pub fn package_family(id: Option<&str>, id_like: Option<&str>) -> Option<String> {
+    if let Some(family) = id.and_then(pkg_base_from_id) {
+        return Some(family);
+    }
+    id_like?.split_whitespace().find_map(pkg_base_from_id)
 }
 
 fn version_major(version_id: &str) -> Option<String> {
@@ -500,6 +527,44 @@ mod tests {
         assert!(pkg_base_from_id("arch").is_none());
         assert!(pkg_base_from_id("gentoo").is_none());
         assert!(pkg_base_from_id("").is_none());
+    }
+
+    #[test]
+    fn parse_os_release_keeps_id_like() {
+        let content = "ID=pop\nID_LIKE=\"ubuntu debian\"\n";
+        let info = parse_os_release(content);
+        assert_eq!(info.id.as_deref(), Some("pop"));
+        assert_eq!(info.id_like.as_deref(), Some("ubuntu debian"));
+    }
+
+    #[test]
+    fn package_family_prefers_known_id() {
+        assert_eq!(
+            package_family(Some("alinux"), Some("debian")).as_deref(),
+            Some("rpm"),
+            "a known ID must not be overridden by ID_LIKE",
+        );
+        assert_eq!(package_family(Some("ubuntu"), None).as_deref(), Some("deb"));
+    }
+
+    #[test]
+    fn package_family_falls_back_to_id_like_tokens() {
+        // A derivative unknown by name classifies through its lineage.
+        assert_eq!(
+            package_family(Some("zorin"), Some("ubuntu debian")).as_deref(),
+            Some("deb"),
+        );
+        assert_eq!(
+            package_family(Some("openeuler"), Some("rhel fedora")).as_deref(),
+            Some("rpm"),
+        );
+    }
+
+    #[test]
+    fn package_family_unknown_everywhere_is_none() {
+        assert!(package_family(Some("arch"), None).is_none());
+        assert!(package_family(Some("alpine"), Some("musl")).is_none());
+        assert!(package_family(None, None).is_none());
     }
 
     #[test]

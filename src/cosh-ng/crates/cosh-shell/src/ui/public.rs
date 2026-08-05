@@ -6,4 +6,5 @@ mod question;
 mod renderer;
 
 pub(crate) use agent_render::*;
+pub(crate) use question::OPTION_DETAIL_SEPARATOR;
 pub(crate) use renderer::render_transcript;

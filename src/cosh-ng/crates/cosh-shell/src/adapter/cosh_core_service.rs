@@ -1,5 +1,6 @@
 //! Long-lived cosh-core JSONL process shared by Agent turns and registry requests.
 
+mod command;
 mod control;
 mod process;
 mod question;
@@ -30,7 +31,7 @@ use super::cosh_core_registry::{
 };
 use super::{
     control_protocol, record_cancellation_pending_session, AdapterError, AgentRunHandle,
-    ApprovalResponse, AuthResponse, ClaudeStreamParser, PreparedInvocation,
+    ApprovalChannelMessage, ApprovalResponse, AuthResponse, ClaudeStreamParser, PreparedInvocation,
     ProviderCancellationArtifactStore,
 };
 use process::{
@@ -274,32 +275,7 @@ enum ServiceCommand {
     Shutdown,
 }
 
-struct RunCommand {
-    run_id: String,
-    prepared: PreparedInvocation,
-    mode: CoshApprovalMode,
-    session_state: Arc<Mutex<SessionRuntimeState>>,
-    session_scope: String,
-    resume_attempt: SessionResumeAttempt,
-    event_tx: mpsc::Sender<Result<AgentEvent, AdapterError>>,
-    internal_response_tx: mpsc::Sender<ApprovalResponse>,
-    approval_rx: Option<mpsc::Receiver<ApprovalResponse>>,
-    auth_rx: Option<mpsc::Receiver<AuthResponse>>,
-    answer_confirmation_tx: mpsc::Sender<Result<String, AdapterError>>,
-    pending_session: Arc<Mutex<Option<String>>>,
-    cancellation_artifacts: ProviderCancellationArtifactStore,
-    control_capabilities: Arc<Mutex<control_protocol::ControlProtocolCapabilities>>,
-    cancelled: Arc<AtomicBool>,
-    run_done: Arc<AtomicBool>,
-}
-
-struct RegistryCommand {
-    request_id: String,
-    domain: String,
-    action: String,
-    params: Value,
-    response_tx: mpsc::Sender<Result<Value, RegistryQueryError>>,
-}
+use command::{RegistryCommand, RunCommand};
 
 fn service_loop(
     receiver: mpsc::Receiver<ServiceCommand>,
@@ -410,6 +386,13 @@ fn run_turn(
             &control_protocol::serialize_initialize("init-1"),
         )?;
         process.initialized = true;
+    } else if process.control_capabilities.provider_initialize_seen {
+        // The initialize response arrives once per process; later turns seed
+        // their per-run capability set from the process record so the #1940
+        // receipt gate keeps emitting `approval_receipt` after the first turn.
+        if let Ok(mut current) = command.control_capabilities.lock() {
+            *current = process.control_capabilities;
+        }
     }
     // Consume a reload noted while the core sat idle before the next user
     // message goes out; otherwise the coming turn would still run on the
@@ -451,6 +434,7 @@ fn run_turn(
             .take()
             .ok_or_else(|| "auth receiver is unavailable".to_string())?,
         Arc::clone(&question_gate),
+        Arc::clone(&command.control_capabilities),
         writer_failure_tx,
         command.answer_confirmation_tx.clone(),
     );
@@ -519,6 +503,10 @@ fn run_turn(
             }
         }
         if let Some(capabilities) = control_protocol::parse_initialize_capabilities(&line) {
+            // Announced once per process: keep the durable copy on the
+            // process record so later turns inherit it (mirrors
+            // `session_resumable`).
+            process.control_capabilities = capabilities;
             if let Ok(mut current) = command.control_capabilities.lock() {
                 *current = capabilities;
             }

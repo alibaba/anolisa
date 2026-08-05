@@ -445,7 +445,18 @@ impl GenAIBuilder {
 
     /// 去除 user message 中的 metadata 前缀，只保留用户实际输入的文本
     ///
-    /// OpenClaw 等 Agent 会在 user message 前面加上元数据，格式如：
+    /// 支持的 Agent prompt 模板格式：
+    ///
+    /// **cosh-ng**: user_input 标记行
+    /// ```text
+    /// Handle this natural-language shell prompt request ...
+    /// ...
+    /// user_input: 查看一下系统状态
+    ///
+    /// runtime_frame:
+    /// ```
+    ///
+    /// **OpenClaw**: 时间戳方括号
     /// ```text
     /// Sender (untrusted metadata):
     /// ```json
@@ -455,7 +466,21 @@ impl GenAIBuilder {
     /// [Tue 2026-03-31 17:19 GMT+8] 用户实际输入
     /// ```
     pub(super) fn strip_user_query_prefix(text: &str) -> String {
-        // 查找最后一个 [timestamp] 模式，取其后的内容
+        // cosh-ng: find a line starting with "user_input:" (after trimming)
+        // and extract its value. This line-by-line approach tolerates template
+        // adjustments such as indentation changes, missing leading newlines,
+        // or extra whitespace around the marker.
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if let Some(value) = trimmed.strip_prefix("user_input:") {
+                let extracted = value.trim();
+                if !extracted.is_empty() {
+                    return extracted.to_string();
+                }
+            }
+        }
+
+        // OpenClaw: 查找最后一个 [timestamp] 模式，取其后的内容
         // 格式: [Day YYYY-MM-DD HH:MM TZ] 或 [Day, DD Mon YYYY HH:MM:SS TZ]
         if let Some(pos) = text.rfind(']') {
             // 确认 ] 前面有对应的 [
@@ -507,8 +532,12 @@ impl GenAIBuilder {
         Self::match_agent_by_ctx(&ctx)
     }
 
-    /// 通过进程名匹配 agent registry，返回已知 agent 名称
-    pub(super) fn resolve_agent_name(
+    /// Match the process against the agent registry and return the known agent name.
+    ///
+    /// `pub(crate)` rather than `pub(super)`: the raw HTTPS reporting path in
+    /// `unified.rs` resolves the name through this same ladder, so both event kinds
+    /// report one value per pid. See the `FfiEventSender::send_https` call site.
+    pub(crate) fn resolve_agent_name(
         comm: &str,
         pid: u32,
         cache: &impl PidAgentNameCache,
@@ -756,6 +785,28 @@ mod tests {
     fn test_strip_user_query_prefix_with_timestamp() {
         let text = "Sender (untrusted metadata):\n```json\n{}\n```\n\n[Tue 2026-03-31 17:19 GMT+8] hello world";
         assert_eq!(GenAIBuilder::strip_user_query_prefix(text), "hello world");
+    }
+
+    #[test]
+    fn test_strip_user_query_prefix_cosh_ng_user_input() {
+        let text = "Handle this natural-language shell prompt request for a Shell-first assistant.\n\
+                     Decide based on user intent:\n\
+                     - If the user wants to DO something...\n\n\
+                     user_input: 查看一下系统状态\n\n\
+                     runtime_frame:\n\
+                     cwd: ~\n\n\
+                     cosh-shell Agent contract:";
+        assert_eq!(
+            GenAIBuilder::strip_user_query_prefix(text),
+            "查看一下系统状态"
+        );
+    }
+
+    #[test]
+    fn test_strip_user_query_prefix_cosh_ng_indented() {
+        // Template with indentation before user_input: marker
+        let text = "  Some preamble text\n  user_input: 检查磁盘空间\n\nruntime_frame:";
+        assert_eq!(GenAIBuilder::strip_user_query_prefix(text), "检查磁盘空间");
     }
 
     #[test]

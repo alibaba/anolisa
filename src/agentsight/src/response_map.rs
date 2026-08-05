@@ -6,8 +6,11 @@
 //! # Data Flow
 //!
 //! ```text
-//! FileWriteEvent { filename: "<UUID>.jsonl", buf: JSONL bytes }
-//!     → parse filename to extract UUID as session_id
+//! FileWriteEvent { filename: session file (see shapes below), buf: JSONL bytes }
+//!     → parse filename to extract UUID as session_id:
+//!         `<UUID>.jsonl`                → the UUID stem
+//!         `rollout-<ts>-<UUID>.jsonl`   → the trailing UUID
+//!         `.<UUID>.<UUID>.tmp`          → the first UUID
 //!     → parse buf lines as JSON, extract "responseId" field
 //!     → store responseId → sessionId in LRU cache
 //! ```
@@ -16,6 +19,11 @@
 //! not embed an LLM `response_id` inside the JSONL, so we instead remember
 //! the most-recent UUID per writing pid and look it up by the HTTP call's
 //! pid as a fallback.
+//!
+//! cosh-core persists sessions atomically: content is written to a temp file
+//! named `.<session-UUID>.<random-UUID>.tmp` and then renamed to
+//! `<session-UUID>.json`, so vfs_write only ever sees the temp name and the
+//! session id must be recovered from its first UUID.
 
 use std::num::NonZeroUsize;
 
@@ -111,7 +119,8 @@ impl ResponseSessionMapper {
             Some(id) => id,
             None => {
                 log::trace!(
-                    "ResponseSessionMapper: filename not UUID.jsonl format: {}",
+                    "ResponseSessionMapper: filename not a recognized session file \
+                     (UUID.jsonl, rollout-*.jsonl, or .<UUID>.<UUID>.tmp): {}",
                     event.filename
                 );
                 return;
@@ -163,11 +172,30 @@ impl ResponseSessionMapper {
     }
 
     /// Extract UUID from a filename like `<UUID>.jsonl` or `/path/to/<UUID>.jsonl`.
-    /// Also recognizes Codex CLI's `rollout-<ts>-<UUID>.jsonl` form by
-    /// extracting the trailing 36-char UUID.
+    /// Also recognizes Codex CLI's `rollout-<ts>-<UUID>.jsonl` form (trailing
+    /// 36-char UUID) and cosh-core's atomic-write temp form
+    /// `.<session-UUID>.<random-UUID>.tmp` (first UUID is the session id).
     fn extract_session_id(filename: &str) -> Option<String> {
         // Take the last path component
         let basename = filename.rsplit('/').next().unwrap_or(filename);
+
+        // cosh-core atomic writes: the final `<UUID>.json` is produced by
+        // rename and never hits vfs_write, so the temp name is the only place
+        // the session id appears. Match the full pattern strictly (mirrors the
+        // BPF-side filter) to avoid picking up unrelated dotfile temp names.
+        if let Some(stem) = basename
+            .strip_prefix('.')
+            .and_then(|rest| rest.strip_suffix(".tmp"))
+        {
+            // stem = "<UUID>.<UUID>" (36 + 1 + 36 chars)
+            if stem.len() == 73 && stem.as_bytes()[36] == b'.' {
+                let (session, random) = (&stem[..36], &stem[37..]);
+                if Self::is_uuid(session) && Self::is_uuid(random) {
+                    return Some(session.to_string());
+                }
+            }
+            return None;
+        }
 
         // Strip .jsonl suffix
         let stem = basename.strip_suffix(".jsonl")?;
@@ -182,6 +210,16 @@ impl ResponseSessionMapper {
             .captures(stem)
             .and_then(|cap| cap.get(1))
             .map(|m| m.as_str().to_string())
+    }
+
+    /// Canonical 36-char UUID shape check: hyphens at 8/13/18/23, hex elsewhere.
+    /// Mirrors `is_uuid` in `filewrite.bpf.c` so both sides accept the same set.
+    fn is_uuid(s: &str) -> bool {
+        s.len() == 36
+            && s.bytes().enumerate().all(|(i, b)| match i {
+                8 | 13 | 18 | 23 => b == b'-',
+                _ => b.is_ascii_hexdigit(),
+            })
     }
 
     /// Extract "responseId" or "response_id" value from a single JSONL line using regex.
@@ -273,6 +311,97 @@ mod tests {
     #[test]
     fn test_extract_session_id_wrong_length() {
         assert!(ResponseSessionMapper::extract_session_id("short.jsonl").is_none());
+    }
+
+    #[test]
+    fn test_extract_session_id_cosh_tmp() {
+        // cosh-core atomic-write temp file: first UUID is the session id.
+        let id = ResponseSessionMapper::extract_session_id(
+            ".550e8400-e29b-41d4-a716-446655440000.0198f00d-1a2b-4c3d-8e4f-556677889900.tmp",
+        );
+        assert_eq!(id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+    }
+
+    #[test]
+    fn test_extract_session_id_cosh_tmp_with_path() {
+        let id = ResponseSessionMapper::extract_session_id(
+            "/home/user/.cosh/sessions/.550e8400-e29b-41d4-a716-446655440000.0198f00d-1a2b-4c3d-8e4f-556677889900.tmp",
+        );
+        assert_eq!(id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+    }
+
+    #[test]
+    fn test_extract_session_id_cosh_tmp_requires_leading_dot() {
+        // Same shape without the leading dot must not match the tmp branch.
+        assert!(
+            ResponseSessionMapper::extract_session_id(
+                "550e8400-e29b-41d4-a716-446655440000.0198f00d-1a2b-4c3d-8e4f-556677889900.tmp",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn test_extract_session_id_cosh_tmp_rejects_bad_uuid_length() {
+        // First segment is 35 chars (truncated UUID) — must not match.
+        assert!(
+            ResponseSessionMapper::extract_session_id(
+                ".550e8400-e29b-41d4-a716-44665544000.0198f00d-1a2b-4c3d-8e4f-556677889900.tmp",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn test_extract_session_id_cosh_tmp_rejects_non_hex_uuid() {
+        // Second segment contains 'g' — not a valid UUID.
+        assert!(
+            ResponseSessionMapper::extract_session_id(
+                ".550e8400-e29b-41d4-a716-446655440000.0198f00g-1a2b-4c3d-8e4f-556677889900.tmp",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn test_extract_session_id_cosh_tmp_rejects_wrong_suffix() {
+        assert!(
+            ResponseSessionMapper::extract_session_id(
+                ".550e8400-e29b-41d4-a716-446655440000.0198f00d-1a2b-4c3d-8e4f-556677889900.txt",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn test_process_and_query_cosh_tmp() {
+        // End-to-end: a cosh-core temp-file write maps response_id to the
+        // session UUID taken from the temp filename's first UUID.
+        let mut mapper = ResponseSessionMapper::new();
+        let event = FileWriteEvent {
+            pid: 4321,
+            tid: 4321,
+            uid: 1000,
+            timestamp_ns: 0,
+            write_size: 0,
+            comm: "cosh".to_string(),
+            filename: ".550e8400-e29b-41d4-a716-446655440000.0198f00d-1a2b-4c3d-8e4f-556677889900.tmp"
+                .to_string(),
+            cgroup_id: 0,
+            buf: br#"{"response_id":"chatcmpl-11112222-3333-4444-5555-666677778888","model":"qwen-plus"}
+"#
+            .to_vec(),
+        };
+        mapper.process_filewrite(&event);
+
+        assert_eq!(
+            mapper.get_session_by_response_id("chatcmpl-11112222-3333-4444-5555-666677778888"),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert_eq!(
+            mapper.get_session_by_pid(4321),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
     }
 
     #[test]

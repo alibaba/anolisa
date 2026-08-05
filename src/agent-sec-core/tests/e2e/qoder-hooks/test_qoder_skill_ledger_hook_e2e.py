@@ -46,7 +46,7 @@ def test_unsigned_project_skill_is_audited_with_qoder_trace(tmp_path: Path) -> N
         **os.environ,
         "HOME": str(home),
         "AGENT_SEC_DATA_DIR": str(event_data),
-        "SKILL_LEDGER_HOOK_POLICY": "warn",
+        "SKILL_LEDGER_MODE": "warn",
     }
 
     proc = subprocess.run(
@@ -105,7 +105,7 @@ def test_signed_skill_passes_then_drift_blocks(tmp_path: Path) -> None:
         "XDG_DATA_HOME": str(tmp_path / "xdg-data"),
         "XDG_CONFIG_HOME": str(tmp_path / "xdg-config"),
         "AGENT_SEC_DATA_DIR": str(event_data),
-        "SKILL_LEDGER_HOOK_POLICY": "block",
+        "SKILL_LEDGER_MODE": "block",
     }
     scan = subprocess.run(
         [_CLI_BIN, "skill-ledger", "scan", str(skill_dir), "--force"],
@@ -195,7 +195,7 @@ def test_same_named_user_skill_is_checked_before_clean_project_copy(
         "XDG_DATA_HOME": str(tmp_path / "xdg-data"),
         "XDG_CONFIG_HOME": str(tmp_path / "xdg-config"),
         "AGENT_SEC_DATA_DIR": str(event_data),
-        "SKILL_LEDGER_HOOK_POLICY": "block",
+        "SKILL_LEDGER_MODE": "block",
     }
     for skill_dir in (project_skill, user_skill):
         scan = subprocess.run(

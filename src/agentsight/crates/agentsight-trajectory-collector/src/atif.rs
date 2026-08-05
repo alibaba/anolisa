@@ -174,14 +174,19 @@ pub fn convert_qoder_events(
                 if let Some(usage) = msg.get("usage") {
                     let pt = usage.get("input_tokens").and_then(|v| v.as_u64());
                     let ct = usage.get("output_tokens").and_then(|v| v.as_u64());
-                    let cache = usage
+                    let cache_read = usage
                         .get("cache_read_input_tokens")
                         .and_then(|v| v.as_u64())
-                        .or_else(|| {
-                            usage
-                                .get("cache_creation_input_tokens")
-                                .and_then(|v| v.as_u64())
-                        });
+                        .unwrap_or(0);
+                    let cache_creation = usage
+                        .get("cache_creation_input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    // Claude-style usage reports `input_tokens` EXCLUDING the
+                    // cache portions; normalize to the OpenAI convention
+                    // (prompt includes cached) so all sources display alike.
+                    let pt = pt.map(|v| v + cache_read + cache_creation);
+                    let cache = (cache_read > 0).then_some(cache_read);
                     if pt.is_some() || ct.is_some() {
                         let m = step_metrics.get_or_insert_with(|| Metrics {
                             prompt_tokens: Some(0),
@@ -638,6 +643,23 @@ mod tests {
         let obs = traj.steps[0].observation.as_ref().unwrap();
         let extra = obs.results[0].extra.as_ref().unwrap();
         assert_eq!(extra["is_error"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn test_convert_normalizes_claude_cached_prompt_tokens() {
+        // Claude usage excludes cache tokens from input_tokens; the converter
+        // must fold them back so prompt >= cached always holds in the UI.
+        let content = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"claude\",",
+            "\"usage\":{\"input_tokens\":3,\"cache_creation_input_tokens\":7000,\"cache_read_input_tokens\":19000,\"output_tokens\":452},",
+            "\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}\n",
+        );
+        let events = load_jsonl_events(content);
+        let traj = convert_qoder_events(&events, "claude-code").unwrap();
+        let m = traj.steps[0].metrics.as_ref().unwrap();
+        assert_eq!(m.prompt_tokens, Some(3 + 7000 + 19000));
+        assert_eq!(m.completion_tokens, Some(452));
+        assert_eq!(m.cached_tokens, Some(19000));
     }
 
     #[test]

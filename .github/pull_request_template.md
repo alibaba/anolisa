@@ -1,76 +1,33 @@
-## Description
+## Why
 
-<!-- Provide a clear and concise description of the changes. Include motivation and context. -->
+<!-- What problem does this change solve? Why is it needed now? -->
 
-## Related Issue
+## What changed
 
-<!--
-  REQUIRED: Every PR must be linked to an existing issue.
-  Use one of the closing keywords so the issue closes automatically on merge:
+<!-- Keep this focused on one logical change. -->
 
-    closes #<number>
-    fixes #<number>
-    resolves #<number>
+## Related issue
 
-  If this is a trivial typo / doc-only fix with no issue, write:
-    no-issue: <reason>
--->
+<!-- Use `closes #123`, `fixes #123`, or `resolves #123`.
+For a genuinely trivial change, use `no-issue: <brief reason>`. -->
 
-closes #
+## User / Agent impact
 
-## Type of Change
+<!-- Describe visible behavior changes. Write "None" when there is no user-facing impact. -->
 
-<!-- Check all that apply. -->
+## Risk and compatibility
 
-- [ ] Bug fix (non-breaking change that fixes an issue)
-- [ ] New feature (non-breaking change that adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
-- [ ] Documentation update
-- [ ] Refactoring (no functional change)
-- [ ] Performance improvement
-- [ ] CI/CD or build changes
+- [ ] Public CLI, API, configuration, or documented behavior changed
+- [ ] Privileged or security-sensitive behavior changed
+- [ ] Cross-component contract changed
+- [ ] Migration or rollback guidance is needed
 
-## Scope
+<!-- Explain any checked item, or write "Low risk" when none apply. -->
 
-<!-- Which sub-project does this PR affect? -->
+## Validation
 
-- [ ] `cosh` (copilot-shell)
-- [ ] `cosh-ng` (cosh-ng)
-- [ ] `sec-core` (agent-sec-core)
-- [ ] `skill` (os-skills)
-- [ ] `sight` (agentsight)
-- [ ] `tokenless` (tokenless)
-- [ ] `ckpt` (ws-ckpt)
-- [ ] `memory` (agent-memory)
-- [ ] `anolisa` (anolisa-cli)
-- [ ] `skillfs` (SkillFS)
-- [ ] `blaze` (blaze)
-- [ ] Multiple / Project-wide
+<!-- List the relevant tests, commands, environments, or manual checks. -->
 
-## Checklist
+## Documentation and rollback
 
-<!-- Check all that apply. -->
-
-- [ ] I have read the [Contributing Guide](../CONTRIBUTING.md)
-- [ ] My code follows the project's code style
-- [ ] I have added tests that prove my fix is effective or that my feature works
-- [ ] I have updated the documentation accordingly
-- [ ] For `cosh`: Lint passes, type check passes, and tests pass
-- [ ] For `cosh-ng`: `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` pass
-- [ ] For `sec-core` (Rust): `cargo clippy -- -D warnings` and `cargo fmt --check` pass
-- [ ] For `sec-core` (Python): Ruff format and pytest pass
-- [ ] For `skill`: Skill directory structure is valid and shell scripts pass syntax check
-- [ ] For `sight`: `cargo clippy -- -D warnings` and `cargo fmt --check` pass
-- [ ] For `tokenless`: `cargo clippy -- -D warnings` and `cargo fmt --check` pass
-- [ ] For `memory` (Linux only): `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and `cargo test` pass
-- [ ] For `anolisa`: `cargo clippy --all-targets --locked -- -D warnings`, `cargo fmt --all --check`, and `cargo test --locked` pass
-- [ ] For `skillfs`: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` pass
-- [ ] Lock files are up to date (`package-lock.json` / `Cargo.lock`)
-
-## Testing
-
-<!-- Describe the tests you ran and how to reproduce them. -->
-
-## Additional Notes
-
-<!-- Any additional information, screenshots, or context. -->
+<!-- What documentation changed? How can this be reverted or disabled? -->

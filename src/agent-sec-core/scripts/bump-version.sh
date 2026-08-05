@@ -18,7 +18,7 @@
 #   6. openclaw-plugin/openclaw.plugin.json  ("version" field)
 #   7. cosh-extension/cosh-extension.json    ("version" field)
 #   8. hermes-plugin/src/plugin.yaml        (version field)
-#   9. adapters/component.toml              (component.version)
+#   9. .anolisa/component.toml              (component.version)
 #  10. codex-plugin/hooks-plugin/.codex-plugin/plugin.json ("version" field)
 #  11. qoder-plugin/.qoder-plugin/plugin.json ("version" field)
 #  12. qwen-code-extension/qwen-extension.json ("version" field)
@@ -43,6 +43,17 @@ log()  { echo -e "${CYAN}[INFO]${NC} $*"; }
 ok()   { echo -e "${GREEN}[ OK ]${NC} $*"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+
+replace_in_file() {
+    local expression="$1"
+    local file="$2"
+
+    if sed --version >/dev/null 2>&1; then
+        sed -i "$expression" "$file"
+    else
+        sed -i '' "$expression" "$file"
+    fi
+}
 
 # -----------------------------------------------------------------------------
 # Validate arguments
@@ -108,7 +119,7 @@ bump_file() {
     fi
 
     if grep -q "$pattern" "$file"; then
-        sed -i '' "s|$pattern|$replacement|" "$file"
+        replace_in_file "s|$pattern|$replacement|" "$file"
         ok "$label"
     else
         warn "Pattern not found in $file: $pattern"
@@ -145,7 +156,7 @@ bump_file "$PROJECT_ROOT/agent-sec-cli/src/agent_sec_cli/__init__.py" \
 CLI_PY="$PROJECT_ROOT/agent-sec-cli/src/agent_sec_cli/cli.py"
 if [[ -f "$CLI_PY" ]]; then
     if grep -q "\"$OLD_VERSION\"" "$CLI_PY"; then
-        sed -i '' "s|\"$OLD_VERSION\"|\"$NEW_VERSION\"|" "$CLI_PY"
+        replace_in_file "s|\"$OLD_VERSION\"|\"$NEW_VERSION\"|" "$CLI_PY"
         ok "agent-sec-cli/src/agent_sec_cli/cli.py (fallback)"
     else
         warn "Old version not found in cli.py fallback"
@@ -185,12 +196,12 @@ bump_file "$PROJECT_ROOT/hermes-plugin/src/plugin.yaml" \
     "hermes-plugin/src/plugin.yaml"
 
 # -----------------------------------------------------------------------------
-# 9. adapters/component.toml
+# 9. .anolisa/component.toml
 # -----------------------------------------------------------------------------
-bump_file "$PROJECT_ROOT/adapters/component.toml" \
+bump_file "$PROJECT_ROOT/.anolisa/component.toml" \
     "^version = \"$OLD_VERSION\"" \
     "version = \"$NEW_VERSION\"" \
-    "adapters/component.toml"
+    ".anolisa/component.toml"
 
 # -----------------------------------------------------------------------------
 # 10. codex-plugin/hooks-plugin/.codex-plugin/plugin.json
@@ -223,7 +234,12 @@ log "Regenerating lock files..."
 
 # Cargo.lock
 if command -v cargo &>/dev/null; then
-    (cd "$PROJECT_ROOT/agent-sec-cli" && cargo update --workspace 2>/dev/null || cargo generate-lockfile 2>/dev/null)
+    (
+        cd "$PROJECT_ROOT/agent-sec-cli"
+        if ! cargo update --workspace 2>/dev/null; then
+            cargo generate-lockfile 2>/dev/null
+        fi
+    )
     ok "agent-sec-cli/Cargo.lock"
 else
     warn "cargo not found, skipping Cargo.lock update"

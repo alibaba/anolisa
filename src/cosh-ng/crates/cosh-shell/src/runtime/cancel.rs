@@ -126,6 +126,14 @@ fn cancel_active_agent_run<W: Write>(
         active_run.handle.pending_provider_session_id(),
         active_run.handle.cancellation_artifact_store(),
     );
+    // #1940 run-terminal sweep before the handle is cancelled (G1 D2):
+    // the interrupt already unblocks cosh-core, but the sweep keeps the
+    // terminal-state invariant uniform without relying on peer behavior.
+    crate::approval::runtime::drain_unhomed_control_requests_with_handle(
+        state,
+        &active_run.request.id,
+        &active_run.handle,
+    );
     active_run.handle.cancel();
     active_run.status_animation.clear(output)?;
     active_run.held_events.clear();

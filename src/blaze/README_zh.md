@@ -12,12 +12,14 @@ Prometheus 指标导出，设计为 E2B 类编排平台的单机执行代理。
 
 - **HTTP API** — Unix domain socket (`/run/blaze/api.sock`) + TCP (`:14159`)
 - **策略驱动后端选择** — workload class → 后端优先级列表
-- **生命周期状态机** — 8 种状态（Pending → Creating → Running → Paused → Checkpointed → Reset → Warm → Destroyed）
+- **生命周期状态机** — 9 种状态：Pending、Creating、Running、Paused、
+  Checkpointed、RecoveryRequired、Reset、Warm 和 Destroyed
 - **Warm pool 管理** — 预热实例 + 基于 TTL 的 GC
 - **模板注册表** — 内存中模板追踪，支持空闲驱逐
 - **内核 hook 注册** — 前/后置 hook 状态追踪
 - **Prometheus 指标** — 请求计数、实例 gauge、池大小
 - **Spawner 后端** — FirecrackerSpawner、BubblewrapSpawner、MockSpawner
+- **可选 VM 网络** — 每台 Firecracker VM 独立使用 netns、tap、veth 和 NAT
 
 ## 快速开始
 
@@ -37,7 +39,7 @@ sudo ./target/release/blazed daemon start --config examples/config.toml
 curl --unix-socket /run/blaze/api.sock http://localhost/v1/health
 
 # 创建 sandbox
-curl -X POST --unix-socket /run/blaze/api.sock http://localhost/v1/instances \
+curl -X POST --unix-socket /run/blaze/api.sock http://localhost/v1/sandboxes \
   -H 'Content-Type: application/json' \
   -d '{"workload_class":"agent-rl","image_digest":"sha256:..."}'
 ```
@@ -75,7 +77,16 @@ memory = "512Mi"
 [backend.firecracker]
 vcpus = 4        # 仅对 Firecracker 覆盖 [vm].vcpus
 memory = "1Gi"   # 仅对 Firecracker 覆盖 [vm].memory
+enable_network = false
 ```
+
+设置 `enable_network = true` 后，每台 Firecracker VM 会获得独立的网络
+slot。显式销毁 sandbox 和启动失败补偿会在进程确认终止后删除对应的 netns、
+tap 和 veth。daemon 重启后再次销毁时可以根据记录恢复清理，但不会在后台
+自动扫描。slot 创建和删除使用主机级锁，避免多个 daemon 同时分配相同的主机
+设备名。加载的 Firecracker 策略启用该选项时，backend probe 还会检查所需
+命令和主机权限；网络关闭时跳过这些检查。上游路由和 DNS 仍由主机运维方
+配置。
 
 ### 存储配置
 
@@ -99,12 +110,17 @@ images_dir = "/var/lib/blaze/images"
 | 方法 | 路径 | 说明 |
 |--------|------|-------------|
 | GET | `/v1/health` | 健康检查 |
-| GET | `/v1/instances` | 列出所有实例 |
-| POST | `/v1/instances` | 创建新 sandbox 实例 |
-| GET | `/v1/instances/{id}` | 获取实例详情 |
-| POST | `/v1/instances/{id}/checkpoint` | 对实例做 checkpoint |
-| POST | `/v1/instances/{id}/reset` | 将实例重置到 checkpoint |
-| POST | `/v1/instances/{id}/destroy` | 销毁实例 |
+| GET | `/v1/sandboxes` | 列出所有 sandbox |
+| POST | `/v1/sandboxes` | 创建 sandbox |
+| GET | `/v1/sandboxes/{id}` | 获取 sandbox 详情 |
+| DELETE | `/v1/sandboxes/{id}` | 销毁 sandbox |
+| GET | `/v1/instances` | 列出 sandbox 的兼容入口 |
+| POST | `/v1/instances` | 创建 sandbox 的兼容入口 |
+| GET | `/v1/instances/{id}` | 获取 sandbox 详情的兼容入口 |
+| DELETE | `/v1/instances/{id}` | 销毁 sandbox 的兼容入口 |
+| POST | `/v1/instances/{id}/destroy` | 保留的销毁 action |
+| POST | `/v1/instances/{id}/checkpoint` | 记录 checkpoint 状态 |
+| POST | `/v1/instances/{id}/reset` | 记录 reset 并返回 warm pool |
 | GET | `/v1/pools` | 列出 warm pool |
 | GET | `/v1/pools/{backend}/{class}` | 获取 pool 状态 |
 | POST | `/v1/pools/{backend}/{class}/drain` | 排空 pool |
@@ -116,6 +132,20 @@ images_dir = "/var/lib/blaze/images"
 | GET | `/v1/hooks` | 列出内核 hook |
 | GET | `/v1/metrics` | Prometheus 指标 |
 | POST | `/v1/admin/reload` | 热加载策略 |
+
+### 生命周期管理与恢复
+
+创建和销毁会在修改存储或后端资源之前记录当前操作。创建成功后状态为
+`Running`，销毁成功后状态为 `Destroyed`。如果失败补偿不能释放全部已有
+资源，sandbox 会保留为可查询的 `RecoveryRequired`，后续可以再次执行销毁。
+
+daemon 启动时会逐个处理未结束的 sandbox。单个 sandbox 清理失败不会阻止
+其他记录继续处理，也不会阻止 API 启动。
+
+操作记录只保存操作类型和开始时间，不记录每个资源步骤是否已经完成。中断的
+创建会被清理而不是从原位置继续，重启后也不会接管先前的后端进程。恢复失败
+后目前没有后台循环自动重试。checkpoint 和 reset 接口保持原有的元数据状态
+变化；这里的恢复流程没有增加后端 snapshot 或 restore 操作。
 
 #### 健康检查
 
@@ -145,6 +175,7 @@ src/blaze/
 
 - Rust 1.88+（参见 `src/blaze/rust-toolchain.toml`）
 - 具有 root 权限的 Linux 主机（sandbox 后端需要）
+- 启用 VM 网络时需要 `ip`、`iptables`、`sysctl` 和 netns 管理权限
 
 ## 许可证
 

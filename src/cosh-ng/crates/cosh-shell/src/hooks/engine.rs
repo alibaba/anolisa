@@ -237,13 +237,18 @@ impl HookEngine {
     }
 }
 
+/// Origins where the command was explicitly typed or confirmed by the user
+/// at their own shell prompt, as opposed to agent/internal automation paths.
+fn is_user_shell_origin(origin: CommandOrigin) -> bool {
+    matches!(
+        origin,
+        CommandOrigin::UserInteractive | CommandOrigin::UserSendToShell
+    )
+}
+
 fn external_hook_allowed_for_origin(config: &ExternalHookConfig, origin: CommandOrigin) -> bool {
     match config.source {
-        ExternalHookSource::User => matches!(
-            origin,
-            CommandOrigin::UserInteractive | CommandOrigin::UserSendToShell
-        ),
-        ExternalHookSource::Project => matches!(origin, CommandOrigin::UserInteractive),
+        ExternalHookSource::User | ExternalHookSource::Project => is_user_shell_origin(origin),
     }
 }
 

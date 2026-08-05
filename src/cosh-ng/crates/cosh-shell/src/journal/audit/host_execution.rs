@@ -8,9 +8,13 @@ use crate::types::audit::{
 
 impl ShellAuditRecorder {
     /// Durably authorizes a Core Tool whose side effect is hosted by Shell.
+    /// `execution_path` names the actual execution boundary
+    /// (`shell_foreground_handoff` or `readonly_compound_argv_executor`)
+    /// so later security investigations can tell the two routes apart.
     pub(crate) fn authorize_host_execution(
         &mut self,
         request: ShellApprovalAuditInput<'_>,
+        execution_path: &'static str,
     ) -> Result<(), String> {
         if self.owned_approvals.contains(request.id) {
             // Shell-owned approvals were made durable by record_approval_resolved.
@@ -41,7 +45,7 @@ impl ShellAuditRecorder {
             },
             &AuditToolData {
                 tool_kind: request.subject.to_string(),
-                execution_path: Some("shell_foreground_handoff".to_string()),
+                execution_path: Some(execution_path.to_string()),
                 ..AuditToolData::default()
             },
             // This boundary never receives raw Tool input, so nothing is omitted.
