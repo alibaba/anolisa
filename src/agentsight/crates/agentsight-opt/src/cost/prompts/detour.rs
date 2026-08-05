@@ -17,7 +17,7 @@ use crate::cost::render_ledger;
 use crate::llm::ChatMessage;
 use crate::types::{WasteCandidate, WasteCandidateSet};
 
-const DETOUR_PROMPT: &str = include_str!("../../../prompts/waste_detour.md");
+const DETOUR_PROMPT: &str = include_str!("../../../prompts/detour.md");
 
 /// Argument text kept per artifact-editing call (Edit args carry old/new text,
 /// which is the 改前 → 改后 evidence the 隐性规范 attribution needs).

@@ -201,12 +201,12 @@ export interface ExperiencePlaybook {
 }
 
 /**
- * 可复用经验两路。lesson 必有（后端丢弃缺 lesson 的 finding），playbook 可缺。
+ * 可复用经验两路。failure_lesson 必有（后端丢弃缺它的 finding），success_playbook 可缺。
  * 旧 cost_waste payload 用的是扁平形状，两路会是 undefined —— 重跑分析即恢复。
  */
 export interface WasteExperience {
-  lesson?: ExperienceLesson | null;
-  playbook?: ExperiencePlaybook | null;
+  failure_lesson?: ExperienceLesson | null;
+  success_playbook?: ExperiencePlaybook | null;
   defect_type?: string;
   root_cause?: string;
   fix_locus?: string;

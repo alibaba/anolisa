@@ -890,8 +890,8 @@ pub struct ExperiencePlaybook {
 
 /// A reusable lesson distilled from a prevention-class waste finding.
 ///
-/// 两路独立存在：`lesson`（失败教训）是必要条件 —— 报一段弯路就得说清那个坑，
-/// 缺了整条 finding 不报；`playbook`（成功经验）可缺 —— 坑是环境抖动时，走通的
+/// 两路独立存在：`failure_lesson`（失败教训）是必要条件 —— 报一段弯路就得说清那个坑，
+/// 缺了整条 finding 不报；`success_playbook`（成功经验）可缺 —— 坑是环境抖动时，走通的
 /// 回合沉淀不出可复用做法，宁缺毋滥。
 ///
 /// 历史 `cost_waste` payload 用的是旧的扁平形状（applicability/pitfall/…）。两路
@@ -899,9 +899,9 @@ pub struct ExperiencePlaybook {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WasteExperience {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lesson: Option<ExperienceLesson>,
+    pub failure_lesson: Option<ExperienceLesson>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub playbook: Option<ExperiencePlaybook>,
+    pub success_playbook: Option<ExperiencePlaybook>,
     // ── 五字段归因（本期只进 JSON，不渲染）──
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub defect_type: String,
@@ -923,10 +923,10 @@ pub struct DetourFix {
     pub locus: String,
     /// 失败教训。缺失时整条 finding 不报。
     #[serde(default)]
-    pub lesson: Option<ExperienceLesson>,
+    pub failure_lesson: Option<ExperienceLesson>,
     /// 成功经验。允许缺失。
     #[serde(default)]
-    pub playbook: Option<ExperiencePlaybook>,
+    pub success_playbook: Option<ExperiencePlaybook>,
 }
 
 /// One detour segment reported by the detour prompt.

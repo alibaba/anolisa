@@ -285,7 +285,7 @@ function experienceText(it: WasteItem): string {
   if (!e) return '';
   const blocks: string[] = [];
 
-  const lesson = e.lesson;
+  const lesson = e.failure_lesson;
   if (lesson?.instead) {
     const lines = ['【失败教训】'];
     if (lesson.title) lines.push(lesson.title);
@@ -294,7 +294,7 @@ function experienceText(it: WasteItem): string {
     blocks.push(lines.join('\n'));
   }
 
-  const playbook = e.playbook;
+  const playbook = e.success_playbook;
   if (playbook?.how) {
     const lines = ['【成功经验】'];
     if (playbook.title) lines.push(playbook.title);

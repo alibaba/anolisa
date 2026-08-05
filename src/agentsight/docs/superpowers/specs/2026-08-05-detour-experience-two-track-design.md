@@ -6,14 +6,14 @@
 
 离线 skill `pr-cost/distill-experience-from-trajectories/criteria.md` 定义了一套经验沉淀
 准入判据,产出**成功经验**与**失败教训**两路。产品侧的 cost 维度已经在做同一件事
-(`prompts/waste_detour.md` 的 `fix` 字段),但结构不同:它把经验塞进一个扁平结构的
+(`prompts/detour.md` 的 `fix` 字段),但结构不同:它把经验塞进一个扁平结构的
 两种"形状"里。
 
 审计发现该结构有一半是死的:
 
 | 层 | 试错型<br>`applicability/pitfall/effective_path` | 返工型<br>`rule/good_example/bad_example/scope` |
 |---|---|---|
-| LLM 输出契约 `waste_detour.md` | 有 | **无** |
+| LLM 输出契约 `detour.md` | 有 | **无** |
 | LLM 输入类型 `DetourFix` | 有 | **无** |
 | Rust 映射 `cost/llm.rs:303` | 填 | **`..Default::default()`** |
 | 存储类型 `types.rs:881` | 有 | 有 |
@@ -45,7 +45,7 @@
 
 ## 设计
 
-### 1. LLM 输出契约(`prompts/waste_detour.md`)
+### 1. LLM 输出契约(`prompts/detour.md`)
 
 `fix` 由扁平 5 字段改为两路嵌套:
 
@@ -53,12 +53,12 @@
 "fix": {
   "action": "一句话可执行修复动作",
   "locus": "Skill",
-  "lesson": {
+  "failure_lesson": {
     "title": "一句话点出这个坑",
     "when": "什么场景/触发条件下会踩",
     "instead": "别这么做 __,改这么做 __"
   },
-  "playbook": {
+  "success_playbook": {
     "title": "一句话点出这条做法",
     "when": "什么场景下适用",
     "how": "可执行的「这么做」"
@@ -67,8 +67,8 @@
 ```
 
 - `action` / `locus` 保留:`WasteItem.optimization` 与 `WasteExperience.fix_locus` 依赖它们。
-- `lesson` **必填**。填不出就整条 finding 不报(沿用"归因不出来的段不许报")。
-- `playbook` **可选**(允许 null)。走通的回合不一定沉淀得出可复用做法——坑是环境抖动时
+- `failure_lesson` **必填**。填不出就整条 finding 不报(沿用"归因不出来的段不许报")。
+- `success_playbook` **可选**(允许 null)。走通的回合不一定沉淀得出可复用做法——坑是环境抖动时
   就没有。宁缺毋滥。
 
 ### 2. 准入判据落点
@@ -93,18 +93,18 @@ prompt 净增"非显然"一条,约 8 行。
 
 `types.rs`:
 
-- 新增 `ExperienceLesson { title, when, instead }` 与 `ExperiencePlaybook { title, when, how }`。
+- 新增 `ExperienceLesson (failure_lesson)` 与 `ExperiencePlaybook (success_playbook)`。
   `when` 与 Rust 关键字冲突,用 `#[serde(rename = "when")] pub when_: String`。
 - `WasteExperience` 的 7 个形状字段替换为 `lesson: Option<ExperienceLesson>` +
   `playbook: Option<ExperiencePlaybook>`;三个归因字段(`defect_type`/`root_cause`/`fix_locus`)不动。
-- `DetourFix` 的 `applicability`/`pitfall`/`effective_path` 替换为 `lesson`/`playbook`。
+- `DetourFix` 的 `applicability`/`pitfall`/`effective_path` 替换为 `failure_lesson`/`success_playbook`。
 
 `cost/llm.rs`(`expand_detour_items`)保留两条现有不变量:
 
-- **偶发故障 → 两路都剥除**。现规则是剥 `fix`;新结构下 `lesson` 与 `playbook` 一并剥除
+- **偶发故障 → 两路都剥除**。现规则是剥 `fix`;新结构下 `failure_lesson` 与 `success_playbook` 一并剥除
   (随机故障既没有可绕开的坑,也没有可复用的路)。
 - **节省量仍由 `ledger_tokens_for` 从账本求和**,`turns` 锚不动。
-- **新增**:`lesson` 缺失的 finding 整条不报。
+- **新增**:`failure_lesson` 缺失的 finding 整条不报。
 
 ### 4. 兼容与迁移
 
@@ -123,9 +123,9 @@ prompt 净增"非显然"一条,约 8 行。
 
 | 用例 | 断言 |
 |---|---|
-| `方向选错` / `可预知坑` / `隐性规范` | `lesson` 必有,`playbook` 可选 |
+| `方向选错` / `可预知坑` / `隐性规范` | `failure_lesson` 必有,`success_playbook` 可选 |
 | `偶发故障` | 两路均被剥除,`optimization` 回落到候选默认值 |
-| `lesson` 缺失 | 整条 finding 不报 |
+| `failure_lesson` 缺失 | 整条 finding 不报 |
 | 旧 JSON(试错型字段)反序列化 | 不 panic,两路为 `None` |
 | turns 求和 | 沿用 `sums_savings_from_ledger_not_from_model`,节省量不变 |
 | 轮数门槛 | 沿用 `short_or_unpriceable_findings_are_dropped` |

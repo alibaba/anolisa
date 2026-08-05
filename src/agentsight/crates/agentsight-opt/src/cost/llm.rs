@@ -309,14 +309,14 @@ fn expand_detour_items(
 
         // 失败教训是报一段弯路的必要条件：说不清那个坑，这条经验就是死记录。
         // 偶发故障豁免 —— 它按上面的规则本就不带经验。
-        if !transient && fix.as_ref().is_none_or(|fx| fx.lesson.is_none()) {
+        if !transient && fix.as_ref().is_none_or(|fx| fx.failure_lesson.is_none()) {
             tracing::info!("Cost: 弯路 finding 缺失败教训，不报：{}", f.what);
             continue;
         }
 
         let experience = fix.as_ref().map(|fx| WasteExperience {
-            lesson: fx.lesson.clone(),
-            playbook: fx.playbook.clone(),
+            failure_lesson: fx.failure_lesson.clone(),
+            success_playbook: fx.success_playbook.clone(),
             root_cause: f.why.clone(),
             fix_locus: fx.locus.clone(),
             ..Default::default()
@@ -416,8 +416,8 @@ mod tests {
             fix: Some(DetourFix {
                 action: "假设验证前置".into(),
                 locus: "Skill".into(),
-                lesson: Some(lesson()),
-                playbook: Some(playbook()),
+                failure_lesson: Some(lesson()),
+                success_playbook: Some(playbook()),
             }),
         }
     }
@@ -453,10 +453,10 @@ mod tests {
         assert_eq!(exp.fix_locus, "Skill");
         assert_eq!(exp.root_cause, "方向选错");
         // 两路各自落到自己的结构，不再挤进一个扁平形状。
-        let les = exp.lesson.as_ref().expect("失败教训必有");
+        let les = exp.failure_lesson.as_ref().expect("失败教训必有");
         assert_eq!(les.when_, "形成根因假设准备动手时");
         assert!(les.instead.contains("别凭阅读推断"));
-        let pb = exp.playbook.as_ref().expect("本例有成功经验");
+        let pb = exp.success_playbook.as_ref().expect("本例有成功经验");
         assert_eq!(pb.how, "先用 nm/perf 等廉价手段实测验证");
     }
 
@@ -464,22 +464,22 @@ mod tests {
     #[test]
     fn playbook_is_optional_lesson_is_not() {
         let mut no_pb = finding(vec![0, 1, 2, 3, 4]);
-        no_pb.fix.as_mut().expect("fix present").playbook = None;
+        no_pb.fix.as_mut().expect("fix present").success_playbook = None;
         let rows = expand(DetourVerdict {
             detected: true,
             findings: vec![no_pb],
         });
         assert_eq!(rows.len(), 1, "缺成功经验不影响 finding 成立");
         let exp = rows[0].experience.as_ref().expect("experience present");
-        assert!(exp.lesson.is_some());
-        assert!(exp.playbook.is_none());
+        assert!(exp.failure_lesson.is_some());
+        assert!(exp.success_playbook.is_none());
     }
 
     /// 失败教训是报一段弯路的必要条件：说不清那个坑就整条不报。
     #[test]
     fn finding_without_lesson_is_dropped() {
         let mut no_lesson = finding(vec![0, 1, 2, 3, 4]);
-        no_lesson.fix.as_mut().expect("fix present").lesson = None;
+        no_lesson.fix.as_mut().expect("fix present").failure_lesson = None;
         let rows = expand(DetourVerdict {
             detected: true,
             findings: vec![no_lesson],
@@ -501,8 +501,8 @@ mod tests {
         }"#;
         let exp: crate::types::WasteExperience =
             serde_json::from_str(legacy).expect("旧 payload 必须仍可反序列化");
-        assert!(exp.lesson.is_none());
-        assert!(exp.playbook.is_none());
+        assert!(exp.failure_lesson.is_none());
+        assert!(exp.success_playbook.is_none());
         // 归因字段未变形状，继续可读。
         assert_eq!(exp.root_cause, "方向选错");
         assert_eq!(exp.fix_locus, "Skill");
