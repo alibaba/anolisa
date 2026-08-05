@@ -23,6 +23,11 @@ typedef struct {
     uint32_t    response_headers_len;
     const char* response_body;        /* JSON or raw text, may be NULL */
     uint32_t    response_body_len;    /* 0 when response_body is NULL */
+    /* 进程归属，与 AgentsightLLMData 中的同名字段同义。这三个字段追加在结构体
+       尾部，因此按旧 layout 编译的调用方无需改动即可继续工作。 */
+    char        cmdline[128];         /* 空格连接的 argv，截断到 127 字节；进程已退出时为空串 */
+    const char* agent_name;           /* may be NULL；统一为小写；未命中配置规则时回退为进程名 */
+    const char* container_id;         /* may be NULL；非容器进程为 NULL */
 } AgentsightHttpsData;
 
 /* LLM 语义层数据 — 仅当 HTTP 流量被识别为 LLM API 调用时产生 */
@@ -199,6 +204,10 @@ int agentsight_read_v2(AgentsightHandle* h,
 开启后，AgentSight 在同一个 handle 内启动一个独立的轻量订阅线程，从 enforcer 获取归一化 `SecurityEvent`，并写入与 LLM/HTTPS 共用的 FFI 有界队列。enforcer 未启动或连接断开时订阅线程会重连；该失败不会停止主 AgentSight pipeline，也不会影响 LLM 事件。
 
 `AGENTSIGHT_EVENT_TYPE_SECURITY` 的 `payload_json` 是 schema version 1 的完整 `SecurityEvent` JSON，覆盖 `file_action`、`taint_transition`、`network_action`、`policy_decision` 和 `enforcement_state`。FFI 不负责策略下发、阻断控制或持久化重放。
+
+`AGENTSIGHT_EVENT_TYPE_HTTPS` 的 `payload_json` 是内部 `HttpRecord` 的字段（`pid`、`comm`、`method`、`path`、`status_code`、请求/响应头与 body、`duration_ns`、`is_sse` 等）平铺在顶层，另外并列三个进程归属字段 `agent_name` / `cmdline` / `container_id`，语义与 `AgentsightHttpsData` 中的同名字段一致。**取不到的字段直接省略，不会序列化为 `null`**，因此调用方判断「键是否存在」即可，无需处理 null。
+
+`agent_name` 在 FFI 边界**统一小写**，`AGENTSIGHT_EVENT_TYPE_HTTPS` 与 `AGENTSIGHT_EVENT_TYPE_LLM` 两种 payload 一致（配置文件里写的是 `Hermes`，这里出来是 `hermes`）。因此调用方可以直接用 `agent_name` 把同一进程的 raw HTTPS 与 LLM 事件聚合到一起，无需自行做大小写归一。注意 AgentSight 自身的 Dashboard 与 SQLite 保留配置原始大小写，仅 FFI 输出做归一化。
 
 ### 3.3 Cmdline Rule 配置
 
@@ -630,3 +639,4 @@ make install            # 安装 agentsight CLI
 | v0.3 | `agentsight_config_add_cmdline_rule()` 新增 `allow` 参数：allow=1 为进程白名单，allow=0 为进程黑名单 |
 | v0.4 | 新增 `agentsight_config_add_domain_rule()` 接口，支持域名白名单；新增 `agentsight_config_load_config()` 支持 JSON 字符串加载配置 |
 | dev | 新增 `agentsight_read_v2()` 版本化通用事件 envelope；可选订阅归一化系统安全审计事件，并与 HTTPS/LLM 共用 handle、队列和 eventfd |
+| dev | `AgentsightHttpsData` 尾部新增 `cmdline` / `agent_name` / `container_id`（追加不改动既有字段偏移）；`AGENTSIGHT_EVENT_TYPE_HTTPS` 的 `payload_json` 同步带上这三个字段 |
