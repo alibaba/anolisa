@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.17] - 2026-08-05
+
+### Added
+
+- Raw installs can now render layout placeholders such as `{bindir}` and
+  `{datadir}` inside declared text files before placement, so shared package
+  templates follow the selected install scope and prefix. Integrity checks and
+  repair use the rendered bytes
+  ([#2222](https://github.com/alibaba/anolisa/pull/2222)).
+
+### Changed
+
+- Raw repository resolution now prefers the generation-2 index when published
+  and enforces each component's minimum CLI version. Incompatible entries fail
+  with an `anolisa update self` hint instead of silently installing an older or
+  malformed result, while generation-1 repositories remain compatible
+  ([#2222](https://github.com/alibaba/anolisa/pull/2222)).
+- RPM-backed adapter scan, status, and enable operations now use a declared
+  package-owned resource root and report a missing or invalid root instead of
+  falling back to stale raw files. Codex adapters that target an external RPM
+  root record a trust anchor; disable them before downgrading to `0.2.16`
+  ([#2222](https://github.com/alibaba/anolisa/pull/2222)).
+
+### Fixed
+
+- Qoder native plugin bundles now use Qoder's own plugin lifecycle instead of
+  being copied or rewritten as legacy hook bundles. Existing same-ID plugins
+  across user and project scopes are protected, and unverified installs or
+  removals retain a retryable receipt rather than claiming or deleting user
+  state
+  ([#2221](https://github.com/alibaba/anolisa/pull/2221)).
+
 ## [0.2.16] - 2026-08-03
 
 ### Added
@@ -758,6 +790,35 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.17] - 2026-08-05
+
+### 新增
+
+- Raw 安装现可在放置声明的文本文件前渲染其中的 `{bindir}`、`{datadir}` 等
+  layout placeholder，使共享的软件包模板遵循所选安装 scope 与 prefix。
+  完整性检查和 repair 使用渲染后的字节
+  ([#2222](https://github.com/alibaba/anolisa/pull/2222))。
+
+### 变更
+
+- Raw repository 解析现会在已发布时优先使用第二代 index，并强制检查各组件的
+  CLI 最低版本。不兼容的条目会给出 `anolisa update self` 提示并失败，而不会
+  静默安装较旧或格式错误的结果，同时保持对第一代 repository 的兼容
+  ([#2222](https://github.com/alibaba/anolisa/pull/2222))。
+- RPM-backed adapter 的 scan、status 和 enable 操作现使用声明的软件包自有
+  resource root；root 缺失或无效时会明确报告，而不会回退到过期的 raw 文件。
+  目标位于外部 RPM root 的 Codex adapter 会记录 trust anchor；降级到
+  `0.2.16` 前需先 disable 这些 adapter
+  ([#2222](https://github.com/alibaba/anolisa/pull/2222))。
+
+### 修复
+
+- Qoder native plugin bundle 现使用 Qoder 自身的 plugin lifecycle，不再按
+  legacy hook bundle 复制或改写。User scope 和 project scope 中已有的同 ID
+  plugin 会受到保护；无法确认的安装或移除会保留可重试的 receipt，而不会认领或
+  删除用户状态
+  ([#2221](https://github.com/alibaba/anolisa/pull/2221))。
 
 ## [0.2.16] - 2026-08-03
 
