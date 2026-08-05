@@ -59,6 +59,7 @@ tokenless 只优化**工具调用响应**进入 LLM 上下文前的冗余，不�
 - **Qoder CLI 插件** — Tool Ready + 命令重写 + 响应压缩
 - **Claude Code 插件** — Tool Ready + 命令重写 + 响应压缩 + TOON
 - **Codex 插件** — Tool Ready + 命令重写 + 响应压缩 + TOON
+- **OpenCode 插件** — Tool Ready + 命令重写 + Schema/响应压缩 + TOON
 
 ## 快速开始
 
@@ -68,6 +69,21 @@ make setup
 ```
 
 安装完成后 `tokenless` 命令位于 `~/.local/bin`，RTK/TOON 辅助二进制同目录。
+
+### OpenCode 安装
+
+OpenCode 适配器通过 `tool.execute.before/after` 原生插件事件执行 Tool Ready、
+RTK 命令重写和响应/TOON 压缩，并通过 `tool.definition` 压缩工具 Schema。
+压缩后的响应会替换原始模型可见输出，避免重复占用上下文。
+
+```bash
+make opencode-install
+```
+
+安装器会在 OpenCode 全局 `plugins/` 目录中创建 `tokenless.js` 符号链接，
+不会覆盖同名的非托管文件。配置目录支持 `OPENCODE_CONFIG_DIR`、
+`XDG_CONFIG_HOME` 和显式的 `TOKENLESS_OPENCODE_CONFIG_DIR` 覆盖。
+安装后重启 OpenCode 即可加载插件。
 
 ## npm 安装
 
@@ -115,7 +131,7 @@ export TOKENLESS_DATA_DIR="$HOME/path/to/tokenless-data"
 - `crates/tokenless-schema/` — 核心库：SchemaCompressor + ResponseCompressor
 - `crates/tokenless-ccr/` — 可逆压缩缓存（Compress-Cache-Retrieve）
 - `crates/tokenless-cli/` — CLI 二进制
-- `adapters/tokenless/` — 适配器包（OpenClaw / Hermes / Qoder / Claude Code / Codex）
+- `adapters/tokenless/` — 适配器包（OpenClaw / Hermes / Qoder / Claude Code / Codex / OpenCode）
 - `third_party/rtk/` — RTK 命令重写引擎（vendored）
 
 ## 许可证

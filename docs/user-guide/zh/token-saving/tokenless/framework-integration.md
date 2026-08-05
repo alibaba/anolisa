@@ -14,11 +14,14 @@ Tokenless 通过 Adapter 把压缩、命令重写和环境检查接入 Agent。�
 | Qoder | `qoder` | ✅ | 输出改写后的 Shell 输入 | 输出 `additionalContext` | 在响应压缩后尝试 | — |
 | Claude Code | `claude-code` | ✅ | 替换 Bash 输入 | 2.1.121 及以上替换输出；否则透传 | 仅在替换结果可保持文本时使用 | — |
 | Codex | `codex` | ✅ | 替换受支持的 Shell 输入 | 保留原文，追加分析或压缩备选内容 | 用于生成该备选内容 | — |
+| OpenCode | `opencode` | ✅ | 替换 Bash 输入 | 替换工具输出 | 在响应压缩后尝试 | ✅ |
 | Qwen Code | `qwencode` | ✅ | 输出改写后的 Shell 输入 | 输出 `additionalContext` | 在响应压缩后尝试 | ✅ |
 
 “—”表示当前 Adapter 没有注册此能力；对应的 Tokenless CLI 命令仍可能可用。
 
 `additionalContext` 是追加型 Hook 字段。在这些路径上，Tokenless 源码本身不会删除原始结果，最终处理方式还取决于宿主实现。统计记录只能证明压缩候选内容变小了，不能证明宿主已经从模型请求中移除原文。
+
+OpenCode 当前使用下文说明的随附生命周期脚本；本版本尚未把它注册到 `anolisa adapter enable` 的驱动集合。
 
 ## Adapter 处理规则
 
@@ -63,6 +66,8 @@ anolisa adapter enable tokenless qwencode
 ```
 
 只需启用实际使用的框架。为多个框架启用时，应逐个执行并分别验证。
+
+OpenCode 不适用本节，应使用 [npm 安装后的手动接入](#npm-安装后的手动接入)中的随附安装脚本。
 
 对于 OpenClaw，anolisa 会先尝试普通安装，默认不会加入 unsafe-install 覆盖参数。如果 OpenClaw 的安全扫描拒绝此 Plugin，应先阅读其报告；确认接受风险后，才显式重试：
 
@@ -112,7 +117,7 @@ npm 的 postinstall 脚本会尝试把 Adapter 资源复制到：
 
 应确认该目录确实存在。Adapter 复制属于补充步骤，失败时只输出警告，不会让二进制安装失败；因此可能出现命令可用但这里没有资源副本的情况。目录缺失时应检查 npm postinstall 警告，并优先改用 anolisa 管理的安装。
 
-npm 安装不会创建 anolisa 组件安装记录，因此不要假设 `anolisa adapter enable` 能管理这次安装。OpenClaw、Hermes、Qoder、Claude Code、Codex 和 Qwen Code 可以运行各自的安装脚本：
+npm 安装不会创建 anolisa 组件安装记录，因此不要假设 `anolisa adapter enable` 能管理这次安装。OpenClaw、Hermes、Qoder、Claude Code、Codex、OpenCode 和 Qwen Code 可以运行各自的安装脚本：
 
 ```bash
 bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh
@@ -122,6 +127,7 @@ bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh
 
 ```bash
 bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh
+bash ~/.local/share/anolisa/adapters/tokenless/opencode/scripts/install.sh
 ```
 
 卸载相同 Adapter：
@@ -173,6 +179,10 @@ Marketplace Plugin 在 Claude Code 重启后生效，也可以按照安装脚本
 ### Codex
 
 Plugin 在新的 Codex 会话中加载。关闭旧会话并重新启动后验证统计。它的 PostToolUse Hook 是追加型的：统计只能作为压缩候选遥测，不能证明原始 Codex 工具结果已离开 Prompt。
+
+### OpenCode
+
+OpenCode 会在启动时发现全局 Local Plugin。使用上文说明的 Tokenless 生命周期脚本安装或移除后应重启 OpenCode，再执行一次工具调用并检查 `tokenless stats list`。脚本依次从 `TOKENLESS_OPENCODE_CONFIG_DIR`、`OPENCODE_CONFIG_DIR`、`XDG_CONFIG_HOME/opencode`、`~/.config/opencode` 解析配置目录。安装只会创建托管的 `plugins/tokenless.js` 符号链接，若该路径已有无关文件则拒绝覆盖。
 
 ### Qwen Code
 

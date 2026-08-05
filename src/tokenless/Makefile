@@ -48,6 +48,7 @@ VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1
         qoder-install qoder-uninstall \
         claude-code-install claude-code-uninstall \
         codex-install codex-uninstall \
+        opencode-install opencode-uninstall \
         qwencode-install qwencode-uninstall \
         setup help \
         npm-package npm-package-all npm-publish \
@@ -193,6 +194,9 @@ test-integration:
 test-adapters:
 	@echo "==> Testing qoder adapter installer..."
 	bash tests/test-qoder-adapter-install.sh
+	@echo "==> Testing OpenCode adapter..."
+	bash tests/test-opencode-adapter-install.sh
+	node tests/test-opencode-plugin.mjs
 
 # Lint (rtk excluded — vendored third-party source)
 lint:
@@ -245,9 +249,9 @@ ADAPTER_ENV = ANOLISA_PREFIX=$(HOME)/.local \
               ANOLISA_COMPONENT=tokenless \
               ANOLISA_VERSION=$(VERSION)
 
-adapter-install: cosh-extension-install openclaw-install hermes-install qoder-install claude-code-install codex-install qwencode-install
+adapter-install: cosh-extension-install openclaw-install hermes-install qoder-install claude-code-install codex-install opencode-install qwencode-install
 
-adapter-uninstall: cosh-extension-uninstall openclaw-uninstall hermes-uninstall qoder-uninstall claude-code-uninstall codex-uninstall qwencode-uninstall
+adapter-uninstall: cosh-extension-uninstall openclaw-uninstall hermes-uninstall qoder-uninstall claude-code-uninstall codex-uninstall opencode-uninstall qwencode-uninstall
 
 adapter-scan:
 	@echo "=== Tokenless Adapter Manifest ==="
@@ -336,6 +340,18 @@ codex-uninstall:
 	@echo "==> Uninstalling Codex plugin..."
 	@$(ADAPTER_ENV) ANOLISA_TARGET=codex bash $(CODEX_ADAPTER_DIR)/scripts/uninstall.sh
 
+# --- OpenCode ---
+OPENCODE_ADAPTER_DIR = $(SHARE_DIR)/opencode
+
+opencode-install:
+	@echo "==> Installing OpenCode plugin..."
+	@$(ADAPTER_ENV) ANOLISA_TARGET=opencode bash $(OPENCODE_ADAPTER_DIR)/scripts/detect.sh || true
+	@$(ADAPTER_ENV) ANOLISA_TARGET=opencode bash $(OPENCODE_ADAPTER_DIR)/scripts/install.sh
+
+opencode-uninstall:
+	@echo "==> Uninstalling OpenCode plugin..."
+	@$(ADAPTER_ENV) ANOLISA_TARGET=opencode bash $(OPENCODE_ADAPTER_DIR)/scripts/uninstall.sh
+
 # --- Qwen Code ---
 QWENCODE_ADAPTER_DIR = $(SHARE_DIR)/qwencode
 
@@ -363,7 +379,7 @@ setup: install adapter-install
 	@echo "  Adapter (FHS):"
 	@echo "    $(SHARE_DIR)/"
 	@echo "  Registered:"
-	@echo "    cosh, openclaw, hermes, qoder, claude-code, codex, qwencode"
+	@echo "    cosh, openclaw, hermes, qoder, claude-code, codex, opencode, qwencode"
 	@echo ""
 	@echo "Verify:"
 	@echo "  tokenless --version"
@@ -426,7 +442,7 @@ help:
 	@echo "  fmt               Format code"
 	@echo "  clean             Clean build artifacts"
 	@echo "  adapter-scan      List registered adapter capabilities"
-	@echo "  adapter-install   Register all adapters (cosh+openclaw+hermes+qoder+claude-code+codex+qwencode)"
+	@echo "  adapter-install   Register all adapters (cosh+openclaw+hermes+qoder+claude-code+codex+opencode+qwencode)"
 	@echo "  adapter-uninstall Unregister all adapters"
 	@echo "  cosh-extension-install  Install cosh extension"
 	@echo "  cosh-extension-uninstall Uninstall cosh extension"
@@ -440,6 +456,8 @@ help:
 	@echo "  claude-code-uninstall Unregister Claude Code plugin"
 	@echo "  codex-install     Register Codex plugin via codex CLI"
 	@echo "  codex-uninstall   Unregister Codex plugin"
+	@echo "  opencode-install  Register OpenCode local plugin"
+	@echo "  opencode-uninstall Unregister OpenCode local plugin"
 	@echo "  qwencode-install  Register Qwen Code plugin via qwen CLI"
 	@echo "  qwencode-uninstall Unregister Qwen Code plugin"
 	@echo "  setup             Full setup: build + install + register adapters"
