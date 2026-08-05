@@ -421,8 +421,10 @@ Default behavior:
 
 Deployment environment variables override capability configuration. Use
 `SKILL_LEDGER_HOOK_ENABLED`, `PII_CHECKER_HOOK_ENABLED`,
-`SKILL_LEDGER_MODE`, and `PII_CHECKER_MODE` for deployment-level
-control. Disabling Skill Ledger short-circuits before key initialization.
+`PROMPT_SCANNER_HOOK_ENABLED`, `SKILL_LEDGER_MODE`,
+`PII_CHECKER_MODE`, and `PROMPT_SCANNER_MODE` for deployment-level
+control. Disabling Skill Ledger short-circuits before key initialization;
+disabling prompt-scan short-circuits before hook registration.
   `blockStatuses` is accepted as deprecated configuration metadata but no longer controls runtime decisions.
 
 Set `policy: "warn"` when wanting visible diagnostics without approval:

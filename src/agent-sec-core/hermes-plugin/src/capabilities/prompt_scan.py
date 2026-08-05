@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..cli_runner import call_agent_sec_cli, trace_context
+from ..hook_config import env_flag_enabled
 from .base import AgentSecCoreCapability
 
 logger = logging.getLogger("agent-sec-core")
@@ -43,11 +44,13 @@ class PromptScanCapability(AgentSecCoreCapability):
 
     def __init__(self) -> None:
         super().__init__()
+        self._hook_enabled: bool = True
         self._warning_ttl_seconds: float = _DEFAULT_WARNING_TTL_SECONDS
         self._warnings_by_key: dict[str, WarningBucket] = {}
 
     def _on_register(self, config: dict[str, Any]) -> None:
         """Read prompt-scan specific config."""
+        self._hook_enabled = env_flag_enabled("PROMPT_SCANNER_HOOK_ENABLED", True)
         ttl = config.get("warning_ttl_seconds", _DEFAULT_WARNING_TTL_SECONDS)
         try:
             parsed_ttl = float(ttl)
@@ -68,6 +71,8 @@ class PromptScanCapability(AgentSecCoreCapability):
 
     def _on_pre_llm_call(self, messages: Any = None, **kwargs: Any) -> None:
         """Scan the current user input before the LLM turn starts."""
+        if not self._hook_enabled:
+            return None
         self._cleanup_expired()
 
         user_text = self._extract_user_text(messages, kwargs)

@@ -249,6 +249,8 @@ timeout = 15
 warning_ttl_seconds = 300
 ```
 
+环境变量 `PROMPT_SCANNER_HOOK_ENABLED` 可覆盖 capability 开关：设为 `false` 时完全跳过 prompt 扫描（默认 `true`）。`PROMPT_SCANNER_SCAN_MODE` 控制扫描强度，`fast` / `standard` / `strict`（默认 `standard`）。
+
 ## 开发与调试
 
 ### 本地测试

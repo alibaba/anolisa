@@ -188,7 +188,9 @@ agent/tool run；后续应先扩展 schema，再单独挂载。
 扫描事件且不阻断；设置为 `deny` 后，`agent-sec-cli scan-prompt` 返回 `warn` 或 `deny`
 时会向 Qwen Code 返回拒绝决策并阻断该 prompt。`PROMPT_SCANNER_TIMEOUT` 控制内部
 `agent-sec-cli` 调用超时，默认 10 秒；外层 manifest 为 prompt scanner 预留 15 秒
-command-hook 超时。
+command-hook 超时。`PROMPT_SCANNER_HOOK_ENABLED` 设为 `false` 时完全跳过 prompt scanner
+（默认 `true`）。`PROMPT_SCANNER_SCAN_MODE` 控制扫描强度，`fast` / `standard` / `strict`
+（默认 `standard`）。
 
 `agent-sec-pii-checker` 也是同步安全 hook，但默认 `observe`；只有显式配置 block 且
 scanner 返回 `deny`，才会按上述点位阻断。
