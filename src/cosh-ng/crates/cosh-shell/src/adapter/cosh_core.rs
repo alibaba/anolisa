@@ -291,6 +291,7 @@ impl CoshCoreAdapter {
         };
         let mut args = vec![
             "--headless".to_string(),
+            "--cosh-shell-transport".to_string(),
             "--enable-shell-evidence-tool".to_string(),
             "--approval-mode".to_string(),
             approval_mode.to_string(),
@@ -323,9 +324,11 @@ impl CoshCoreAdapter {
         }
 
         let resume_attempt = self.begin_resume_attempt(&mut prepared, &session_scope);
+        let raw_user_input = request.user_input.clone();
         self.runtime.start_run(
             request.id,
             prepared,
+            raw_user_input,
             mode,
             Arc::clone(&self.session),
             session_scope,

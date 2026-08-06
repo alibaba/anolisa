@@ -28,6 +28,8 @@ use super::{
     ProviderRunOutcome, ProviderStdinMode,
 };
 
+mod input;
+
 pub(super) fn run_sync_cosh_core_process(
     request: &AgentRequest,
     prepared: &PreparedInvocation,
@@ -45,16 +47,10 @@ pub(super) fn run_sync_cosh_core_process(
             phase: "starting".to_string(),
             message: "starting cosh-core headless backend".to_string(),
         })?;
-
-        let mut child = spawn_provider_child(
-            prepared,
-            "cosh-core",
-            ProviderStdinMode::Null,
-            ProviderPromptArgMode::TrailingArgIfNonEmpty,
-        )?;
+        let sync_child =
+            input::spawn_sync_cosh_core_child(prepared, request.user_input.as_deref())?;
+        let (mut child, writer_failure, writer) = sync_child.into_parts();
         let child_pid = Arc::new(Mutex::new(Some(child.id())));
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let cancellation_artifacts = ProviderCancellationArtifactStore::default();
         let mut parser =
             ClaudeStreamParser::new(request.id.clone(), Some(Arc::clone(&pending_session)));
         let mut completed = false;
@@ -66,10 +62,11 @@ pub(super) fn run_sync_cosh_core_process(
             "cosh-core",
             &mut child,
             child_pid,
-            cancelled,
-            cancellation_artifacts,
+            Arc::new(AtomicBool::new(false)),
+            ProviderCancellationArtifactStore::default(),
             &process_tx,
             |line| {
+                input::check_writer_failure(&writer_failure)?;
                 let events = parser.parse_line(&line);
                 observed_resumability = parser.session_resumable();
                 let progressed = events.iter().any(agent_event_is_provider_progress);
@@ -83,10 +80,15 @@ pub(super) fn run_sync_cosh_core_process(
                 }
                 Ok(line_progress(progressed))
             },
-            || Ok(Vec::new()),
+            || {
+                input::check_writer_failure(&writer_failure)?;
+                Ok(Vec::new())
+            },
         );
-        let (process_events, transport_error) = drain_process_events(&process_rx);
-        let transport_failed = matches!(outcome, ProviderRunOutcome::Failed);
+        let (process_events, mut transport_error) = drain_process_events(&process_rx);
+        transport_error = transport_error.or(writer.finish());
+        let transport_failed =
+            matches!(outcome, ProviderRunOutcome::Failed) || transport_error.is_some();
         let exit_failure = match outcome {
             ProviderRunOutcome::Cancelled => {
                 let _ = commit_pending_session_for_scope(
