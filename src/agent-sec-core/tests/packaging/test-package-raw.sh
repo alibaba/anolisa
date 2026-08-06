@@ -26,7 +26,9 @@ install -d -m 0755 \
     "$BUILD/qoder-plugin/.qoder-plugin" \
     "$BUILD/qoder-plugin/hooks" \
     "$BUILD/qwen-code-extension/hooks" \
+    "$BUILD/qwen-code-extension/hooks/__pycache__" \
     "$BUILD/cosh-extension/hooks" \
+    "$BUILD/cosh-extension/hooks/__pycache__" \
     "$BUILD/skills/code-scanner" \
     "$BUILD/skills/prompt-scanner" \
     "$BUILD/skills/skill-ledger/references"
@@ -111,6 +113,13 @@ printf 'print("fixture")\n' > "$BUILD/qwen-code-extension/hooks/hook.py"
 cp "$ROOT/cosh-extension/cosh-extension.json" "$BUILD/cosh-extension/"
 printf 'print("fixture")\n' > "$BUILD/cosh-extension/hooks/hook.py"
 
+# A dirty worktree: bytecode beside the plugin sources the staging sweep must
+# drop before it reaches the tarball.
+printf '\xcb\r\r\nfixture' \
+    > "$BUILD/qwen-code-extension/hooks/__pycache__/hook.cpython-311.pyc"
+printf '\xcb\r\r\nfixture' \
+    > "$BUILD/cosh-extension/hooks/__pycache__/hook.cpython-311.pyc"
+
 for skill in code-scanner prompt-scanner skill-ledger; do
     printf '# %s\n' "$skill" > "$BUILD/skills/$skill/SKILL.md"
 done
@@ -147,6 +156,24 @@ test "$(stat -c '%a' \
     "$STAGE/lib/anolisa/sec-core/python3.11/runtime/bin/python3.11")" = "755"
 test "$(stat -c '%a' "$STAGE/.anolisa/component.toml")" = "644"
 test -z "$(find "$STAGE" -type l -print -quit)"
+
+# The `post_install` lifecycle hook and the sweeper it execs must ship, and
+# ship executable: they are the raw backend's only trigger for clearing
+# pre-`python3 -B` bytecode out of adapter resource roots (issue #2252).
+test "$(stat -c '%a' "$STAGE/share/anolisa/hooks/sec-core/post-install.sh")" = "755"
+test "$(stat -c '%a' \
+    "$STAGE/share/anolisa/hooks/sec-core/clean-adapter-bytecode.sh")" = "755"
+# No staged adapter payload may carry bytecode: it would enter the digest
+# ANOLISA records at enable time and be re-imported despite `-B`.
+if [ -n "$(find "$STAGE/adapters" -type d -name __pycache__ -print -quit)" ]; then
+    echo "ERROR: staged adapters carry __pycache__" >&2
+    exit 1
+fi
+if [ -n "$(find "$STAGE/adapters" -type f \
+    \( -name '*.pyc' -o -name '*.pyo' \) -print -quit)" ]; then
+    echo "ERROR: staged adapters carry Python bytecode" >&2
+    exit 1
+fi
 
 RPM_STAGE="$TMP/rpm-stage"
 MANIFEST_STAGE="$TMP/manifest-stage"

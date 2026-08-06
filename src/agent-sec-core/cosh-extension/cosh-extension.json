@@ -9,7 +9,7 @@
           {
             "type": "command",
             "name": "skill-ledger",
-            "command": "python3 ${extensionPath}/hooks/skill_ledger_hook.py",
+            "command": "python3 -B ${extensionPath}/hooks/skill_ledger_hook.py",
             "timeout": 5000
           }
         ]
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${extensionPath}/hooks/code_scanner_hook.py",
+            "command": "python3 -B ${extensionPath}/hooks/code_scanner_hook.py",
             "name": "code-scanner",
             "description": "Scans tool code for security vulnerabilities",
             "timeout": 5000
@@ -31,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${extensionPath}/hooks/sandbox-guard.py",
+            "command": "python3 -B ${extensionPath}/hooks/sandbox-guard.py",
             "name": "sandbox-guard"
           }
         ]
@@ -41,7 +41,7 @@
           {
             "type": "command",
             "name": "pii-checker",
-            "command": "python3 ${extensionPath}/hooks/pii_checker_hook.py",
+            "command": "python3 -B ${extensionPath}/hooks/pii_checker_hook.py",
             "description": "Scans tool inputs for PII and credentials.",
             "timeout": 10000
           }
@@ -52,7 +52,7 @@
           {
             "type": "command",
             "name": "observability-hook",
-            "command": "python3 ${extensionPath}/hooks/observability_hook.py",
+            "command": "python3 -B ${extensionPath}/hooks/observability_hook.py",
             "description": "Records cosh hook observability metrics.",
             "timeout": 5000
           }
@@ -65,14 +65,14 @@
           {
             "type": "command",
             "name": "prompt-scanner",
-            "command": "python3 ${extensionPath}/hooks/prompt_scanner_hook.py",
+            "command": "python3 -B ${extensionPath}/hooks/prompt_scanner_hook.py",
             "description": "Scans user prompts for prompt injection and jailbreak attempts.",
             "timeout": 10000
           },
           {
             "type": "command",
             "name": "pii-checker",
-            "command": "python3 ${extensionPath}/hooks/pii_checker_hook.py",
+            "command": "python3 -B ${extensionPath}/hooks/pii_checker_hook.py",
             "description": "Scans user prompts for PII and credentials.",
             "timeout": 10000
           }
@@ -83,7 +83,7 @@
           {
             "type": "command",
             "name": "observability-hook",
-            "command": "python3 ${extensionPath}/hooks/observability_hook.py",
+            "command": "python3 -B ${extensionPath}/hooks/observability_hook.py",
             "description": "Records cosh hook observability metrics.",
             "timeout": 5000
           }
@@ -96,7 +96,7 @@
           {
             "type": "command",
             "name": "observability-hook",
-            "command": "python3 ${extensionPath}/hooks/observability_hook.py",
+            "command": "python3 -B ${extensionPath}/hooks/observability_hook.py",
             "description": "Records cosh hook observability metrics.",
             "timeout": 5000
           }
@@ -109,7 +109,7 @@
           {
             "type": "command",
             "name": "pii-checker",
-            "command": "python3 ${extensionPath}/hooks/pii_checker_hook.py",
+            "command": "python3 -B ${extensionPath}/hooks/pii_checker_hook.py",
             "description": "Scans model responses for PII and credentials.",
             "timeout": 10000
           }
@@ -120,7 +120,7 @@
           {
             "type": "command",
             "name": "observability-hook",
-            "command": "python3 ${extensionPath}/hooks/observability_hook.py",
+            "command": "python3 -B ${extensionPath}/hooks/observability_hook.py",
             "description": "Records cosh hook observability metrics.",
             "timeout": 5000
           }
@@ -133,7 +133,7 @@
           {
             "type": "command",
             "name": "pii-checker",
-            "command": "python3 ${extensionPath}/hooks/pii_checker_hook.py",
+            "command": "python3 -B ${extensionPath}/hooks/pii_checker_hook.py",
             "description": "Scans tool outputs for PII and credentials.",
             "timeout": 10000
           }
@@ -144,7 +144,7 @@
           {
             "type": "command",
             "name": "observability-hook",
-            "command": "python3 ${extensionPath}/hooks/observability_hook.py",
+            "command": "python3 -B ${extensionPath}/hooks/observability_hook.py",
             "description": "Records cosh hook observability metrics.",
             "timeout": 5000
           }
@@ -157,7 +157,7 @@
           {
             "type": "command",
             "name": "pii-checker",
-            "command": "python3 ${extensionPath}/hooks/pii_checker_hook.py",
+            "command": "python3 -B ${extensionPath}/hooks/pii_checker_hook.py",
             "description": "Scans tool errors for PII and credentials.",
             "timeout": 10000
           }
@@ -168,7 +168,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${extensionPath}/hooks/sandbox-failure-handler.py",
+            "command": "python3 -B ${extensionPath}/hooks/sandbox-failure-handler.py",
             "name": "sandbox-failure-handler"
           }
         ]
@@ -178,7 +178,7 @@
           {
             "type": "command",
             "name": "observability-hook",
-            "command": "python3 ${extensionPath}/hooks/observability_hook.py",
+            "command": "python3 -B ${extensionPath}/hooks/observability_hook.py",
             "description": "Records cosh hook observability metrics.",
             "timeout": 5000
           }
@@ -191,7 +191,7 @@
           {
             "type": "command",
             "name": "observability-hook",
-            "command": "python3 ${extensionPath}/hooks/observability_hook.py",
+            "command": "python3 -B ${extensionPath}/hooks/observability_hook.py",
             "description": "Records cosh hook observability metrics.",
             "timeout": 5000
           }

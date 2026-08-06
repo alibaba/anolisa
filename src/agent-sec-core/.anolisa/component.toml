@@ -134,6 +134,31 @@ source = "share/doc/sec-core/LICENSE"
 target = "{datadir}/doc/sec-core/LICENSE"
 mode = "0644"
 
+# Bytecode sweeper plus the lifecycle wrapper that invokes it. Delivered as
+# executables under the ANOLISA-owned hooks directory because `[[component
+# .hooks]]` scripts are path-validated against that root before they run.
+[[component.layout.files]]
+source = "share/anolisa/hooks/sec-core/clean-adapter-bytecode.sh"
+target = "{datadir}/hooks/{component}/clean-adapter-bytecode.sh"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "share/anolisa/hooks/sec-core/post-install.sh"
+target = "{datadir}/hooks/{component}/post-install.sh"
+mode = "0755"
+type = "executable"
+
+# One-shot sweep of pre-`python3 -B` bytecode left in adapter resource roots.
+# `strict` because the alternative is recording a healthy install whose
+# adapters then report drift over caches nobody removed; the RPM backend does
+# the same work from each hook subpackage's %post.
+[[component.hooks]]
+phase = "post_install"
+script = "{datadir}/hooks/{component}/post-install.sh"
+timeout_secs = 60
+strict = true
+
 [[component.services]]
 unit = "agent-sec-core.service"
 scope = "user"

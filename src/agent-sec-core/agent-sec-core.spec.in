@@ -26,6 +26,18 @@
 %global __requires_exclude_from /opt/agent-sec/lib/python3\.11/site-packages/.*
 %global __provides_exclude_from /opt/agent-sec/lib/python3\.11/site-packages/.*
 
+# One-shot __pycache__ sweep for an adapter resource root, run from each Python
+# hook subpackage's %%post so it happens on install AND upgrade, after the new
+# files land and before ANOLISA recomputes the adapter bundle digest.
+#
+# The hooks launch with `python3 -B`, which stops new caches from being
+# written, but `-B` does not stop CPython from importing bytecode already on
+# disk — pre-`-B` caches must be removed, not just prevented. If the sweep
+# fails, rpm reports the scriptlet failure and the caches stay, so the bundle
+# digest keeps reporting drift: never a silently healthy adapter sitting on
+# bytecode that nothing verified.
+%global sec_core_clean_bytecode /usr/local/libexec/anolisa/sec-core/clean-adapter-bytecode.sh
+
 Name:           agent-sec-core
 Version:        @VERSION@
 Release:        %{anolis_release}%{?dist}
@@ -84,6 +96,11 @@ Built with maturin as a Rust native Python extension.
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) /usr/bin/agent-sec-cli
 %attr(0755,root,root) /usr/bin/agent-sec-daemon
+# Shared by every hook subpackage's %%post; owned here because they all
+# already Require agent-sec-cli.
+%attr(0755,root,root) /usr/local/libexec/anolisa/sec-core/clean-adapter-bytecode.sh
+%dir /usr/local/libexec/anolisa
+%dir /usr/local/libexec/anolisa/sec-core
 %{_userunitdir}/agent-sec-core.service
 /opt/agent-sec/lib/python3.11/site-packages/*
 %dir %{_datadir}/anolisa
@@ -121,6 +138,9 @@ The linux-sandbox binary provides secure sandboxed execution environments.
 %attr(0755,root,root) /usr/share/anolisa/extensions/agent-sec-core/hooks/*.py
 /usr/share/anolisa/extensions/agent-sec-core/
 %license LICENSE
+
+%post -n agent-sec-cosh-hook
+%{sec_core_clean_bytecode} /usr/share/anolisa/extensions/agent-sec-core
 
 # =============================================================================
 # Subpackage 3: agent-sec-openclaw-hook
@@ -182,6 +202,9 @@ managed Skill Ledger validation through Qwen Code command hooks.
 /opt/agent-sec/qwen-code-extension/
 %license LICENSE
 
+%post -n agent-sec-qwen-code-hook
+%{sec_core_clean_bytecode} /opt/agent-sec/qwen-code-extension
+
 # =============================================================================
 # Subpackage 6: agent-sec-skills
 # =============================================================================
@@ -217,6 +240,9 @@ and skill ledger verification for Codex agent.
 /opt/agent-sec/codex-plugin/
 %license LICENSE
 
+%post -n agent-sec-codex-hook
+%{sec_core_clean_bytecode} /opt/agent-sec/codex-plugin
+
 # =============================================================================
 # Subpackage 8: agent-sec-qoder-hook
 # =============================================================================
@@ -234,6 +260,9 @@ Qoder CLI security hooks providing agent-sec-core protection for Qoder agents.
 %attr(0755,root,root) /opt/agent-sec/qoder-plugin/install.sh
 /opt/agent-sec/qoder-plugin/
 %license LICENSE
+
+%post -n agent-sec-qoder-hook
+%{sec_core_clean_bytecode} /opt/agent-sec/qoder-plugin
 
 # =============================================================================
 # Main package has no files (metapackage)

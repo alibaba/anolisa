@@ -550,7 +550,7 @@ def test_hooks_config_registers_observability_for_all_supported_events() -> None
         "Stop",
         "StopFailure",
     }
-    expected_args = ["${QODER_PLUGIN_ROOT}/hooks/observability_hook.py"]
+    expected_args = ["-B", "${QODER_PLUGIN_ROOT}/hooks/observability_hook.py"]
 
     assert set(config["hooks"]) == expected_events
     for event_name in expected_events:

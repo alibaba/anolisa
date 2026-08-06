@@ -167,7 +167,10 @@ def test_hooks_json_uses_qoder_plugin_wrapper() -> None:
     skill_ledger = next(entry for entry in pre_tool if entry["matcher"] == "Skill")
     hook = skill_ledger["hooks"][0]
     assert hook["name"] == "agent-sec-skill-ledger"
-    assert hook["args"] == ["${QODER_PLUGIN_ROOT}/hooks/skill_ledger_hook.py"]
+    assert hook["args"] == [
+        "-B",
+        "${QODER_PLUGIN_ROOT}/hooks/skill_ledger_hook.py",
+    ]
 
 
 def test_env_flag_enabled_accepts_only_true_false(monkeypatch) -> None:

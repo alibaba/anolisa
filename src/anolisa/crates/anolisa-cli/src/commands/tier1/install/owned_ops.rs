@@ -31,10 +31,10 @@ use anolisa_core::state::{FileOwner, ObjectKind, OwnedFile, OwnedFileKind, Servi
 use anolisa_core::state_store::StateStore;
 use anolisa_core::transaction::restore_backup_file;
 use anolisa_core::{
-    CapabilityRequest, FileKind, ResolvedInstallFile, ResolvedLifecycleHooks, ServiceActivation,
-    ServiceRequest, ServiceRunOutcome, ServiceScope, apply_capabilities, apply_services,
-    capability_for_install_mode, deactivate_services, run_hooks, service_for_install_mode,
-    user_service_for_install_mode,
+    CapabilityRequest, FileKind, HookPhase, ResolvedInstallFile, ResolvedLifecycleHooks,
+    ServiceActivation, ServiceRequest, ServiceRunOutcome, ServiceScope, apply_capabilities,
+    apply_services, capability_for_install_mode, deactivate_services, resolve_manifest_hooks,
+    run_hooks, service_for_install_mode, user_service_for_install_mode,
 };
 use anolisa_platform::fs_layout::FsLayout;
 
@@ -99,6 +99,10 @@ pub(crate) struct RawReplayOps<'a> {
     /// Prepared artifact + resolved contract, set by `download_verify`.
     prepared: Option<PreparedInstall>,
     prepared_files: Option<PreparedFileSet>,
+    /// Incoming contract's `post_install` hooks, resolved by
+    /// `download_verify` so a contract authoring error fails before the
+    /// replay touches the host.
+    post_install_hooks: Vec<anolisa_core::HookSpec>,
     /// Files this run placed, set by `place_files`.
     placed: Vec<InstalledFile>,
     /// Manifest snapshot this run wrote, set by `place_files`.
@@ -145,6 +149,7 @@ impl<'a> RawReplayOps<'a> {
             prior,
             prepared: None,
             prepared_files: None,
+            post_install_hooks: Vec::new(),
             placed: Vec::new(),
             manifest_path: None,
             applied_capabilities: Vec::new(),
@@ -264,14 +269,28 @@ impl OwnedOps for RawReplayOps<'_> {
                 &prepared.files,
             )
             .map_err(|err| OwnedOpError(format!("failed to inspect verified payload: {err}")))?;
+        let manifest = anolisa_core::ComponentManifest::from_toml_str(&prepared.manifest_toml)
+            .map_err(|err| OwnedOpError(format!("failed to parse component manifest: {err}")))?;
+        // Resolve the incoming contract's post-install hooks here, while the
+        // host is still untouched: this step runs before `remove_owned_files`
+        // and `place_files`, so a pure contract error (unknown placeholder, a
+        // script path outside ANOLISA's roots) aborts without having modified
+        // anything — the same "contract error aborts before IO" property the
+        // fresh-install path gets from resolving hooks pre-lock.
+        self.post_install_hooks = resolve_manifest_hooks(
+            &manifest.install.hooks,
+            self.layout,
+            &self.component,
+            HookPhase::PostInstall,
+        )
+        .map_err(|err| {
+            OwnedOpError(format!(
+                "component '{}' has an invalid [[component.hooks]] script path: {err}",
+                self.component
+            ))
+        })?;
         let mut warnings = Vec::new();
         if self.runtime_preflight {
-            let manifest = anolisa_core::ComponentManifest::from_toml_str(&prepared.manifest_toml)
-                .map_err(|err| {
-                    OwnedOpError(format!(
-                        "failed to parse component manifest for preflight: {err}"
-                    ))
-                })?;
             warnings = super::provision::run_runtime_preflight(&manifest, &self.env, "update")
                 .map_err(|err| OwnedOpError(err.reason()))?;
         }
@@ -284,8 +303,41 @@ impl OwnedOps for RawReplayOps<'_> {
         Self::not_wired("runtime-dependency provisioning")
     }
 
+    /// Executes the `post_install` hooks resolved by `download_verify`.
+    ///
+    /// Only the *update* plan carries this step today; the repair plan
+    /// (`owned_replay_steps`) does not, so a repair still runs no hooks.
+    /// `post_install` is the phase that can repair state the new payload does
+    /// not overwrite: `remove_owned_files` drops only the files the prior
+    /// record tracked, leaving anything a component generated at runtime
+    /// (Python bytecode beside an installed Hook, for instance) in place. The
+    /// specs come from the *incoming* contract, not the prior one, so an
+    /// upgrade that newly declares the hook still gets it.
+    ///
+    /// `pre_install` stays unwired on purpose: no replay plan asks for it, and
+    /// a pre-phase hook would have to reason about a half-replaced tree.
     fn run_hook(&mut self, kind: HookKind) -> Result<StepSuccess, OwnedOpError> {
-        Self::not_wired(&format!("the {kind:?} hook phase"))
+        if kind != HookKind::PostInstall {
+            return Self::not_wired(&format!("the {kind:?} hook phase"));
+        }
+        if self.prepared.is_none() {
+            return Err(OwnedOpError(
+                "internal: post-install hook ran before payload preparation".to_string(),
+            ));
+        }
+        let specs = std::mem::take(&mut self.post_install_hooks);
+        let run = run_hooks(
+            &specs,
+            self.layout,
+            Some(&self.log),
+            &self.operation_id,
+            "cli",
+            self.ctx.install_mode.as_str(),
+        );
+        if let Some(failure) = run.hard_failure {
+            return Err(OwnedOpError(failure.summary()));
+        }
+        Ok(StepSuccess::with_warnings(run.warnings))
     }
 
     fn backup_files(&mut self) -> Result<StepSuccess, OwnedOpError> {

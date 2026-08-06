@@ -142,7 +142,7 @@ def test_manifest_mounts_code_scanner_as_independent_sync_pre_tool_hook() -> Non
     assert scanner_entry["matcher"] == "^run_shell_command$"
     scanner_hook = scanner_entry["hooks"][0]
     assert scanner_hook["command"] == (
-        'python3 "${extensionPath}${/}hooks${/}code_scanner_hook.py"'
+        'python3 -B "${extensionPath}${/}hooks${/}code_scanner_hook.py"'
     )
     assert scanner_hook["timeout"] == 10000
     assert "async" not in scanner_hook

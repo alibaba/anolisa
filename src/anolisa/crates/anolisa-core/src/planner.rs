@@ -566,6 +566,14 @@ fn plan_update(req: &UpdateRequest, facts: &Facts) -> Result<Plan, PlanError> {
                         Step::RemoveOwnedFiles,
                         Step::PlaceFiles,
                         Step::SetCapabilities,
+                        // Same slot as the install plan (after files and
+                        // capabilities, before services): `RemoveOwnedFiles`
+                        // only drops files the record tracks, so a component
+                        // whose payload leaves derived artifacts behind — e.g.
+                        // Python bytecode written next to an installed Hook —
+                        // needs its `post_install` hook on the update path too,
+                        // not just on first install.
+                        Step::RunHook(HookKind::PostInstall),
                         Step::RestartServices,
                         Step::WriteRecord(RecordWrite::Owned),
                     ])),
@@ -1252,6 +1260,10 @@ mod tests {
                 Step::RemoveOwnedFiles,
                 Step::PlaceFiles,
                 Step::SetCapabilities,
+                // Present on the update path, not just on install: an upgrade
+                // must be able to clean up artifacts the payload does not own
+                // (see the `post_install` slot in the install plan).
+                Step::RunHook(HookKind::PostInstall),
                 Step::RestartServices,
                 Step::WriteRecord(RecordWrite::Owned),
             ]

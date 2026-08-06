@@ -388,7 +388,7 @@ def test_hooks_config_registers_observability_for_four_codex_events():
         "PostToolUse",
         "Stop",
     }
-    command = "python3 ${PLUGIN_ROOT}/hooks/observability_hook.py"
+    command = "python3 -B ${PLUGIN_ROOT}/hooks/observability_hook.py"
 
     registered_events = set()
     for event_name, entries in config["hooks"].items():

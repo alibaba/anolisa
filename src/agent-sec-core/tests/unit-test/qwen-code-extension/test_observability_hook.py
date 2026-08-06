@@ -505,7 +505,7 @@ def test_manifest_mounts_skill_ledger_code_scanner_observability_and_pii_hooks()
     assert skill_hook["name"] == "agent-sec-skill-ledger"
     assert "async" not in skill_hook
     assert skill_hook["command"] == (
-        'python3 "${extensionPath}${/}hooks${/}skill_ledger_hook.py"'
+        'python3 -B "${extensionPath}${/}hooks${/}skill_ledger_hook.py"'
     )
 
     scanner_group = pre_tool_entries[1]
@@ -515,7 +515,7 @@ def test_manifest_mounts_skill_ledger_code_scanner_observability_and_pii_hooks()
     scanner_hook = scanner_hooks[0]
     assert scanner_hook["name"] == "agent-sec-code-scan-shell-command"
     assert scanner_hook["command"] == (
-        'python3 "${extensionPath}${/}hooks${/}code_scanner_hook.py"'
+        'python3 -B "${extensionPath}${/}hooks${/}code_scanner_hook.py"'
     )
     assert scanner_hook["timeout"] == 10000
     assert "async" not in scanner_hook
@@ -533,7 +533,7 @@ def test_manifest_mounts_skill_ledger_code_scanner_observability_and_pii_hooks()
             prompt_scanner = hooks_by_name["agent-sec-prompt-scanner"]
             assert prompt_scanner.get("async") is None
             assert prompt_scanner["command"] == (
-                'python3 "${extensionPath}${/}hooks${/}prompt_scanner_hook.py"'
+                'python3 -B "${extensionPath}${/}hooks${/}prompt_scanner_hook.py"'
             )
             assert prompt_scanner["timeout"] == 15000
 
@@ -541,13 +541,13 @@ def test_manifest_mounts_skill_ledger_code_scanner_observability_and_pii_hooks()
         observability = hooks_by_name["agent-sec-observability"]
         assert observability["async"] is True
         assert observability["command"] == (
-            'python3 "${extensionPath}${/}hooks${/}observability_hook.py"'
+            'python3 -B "${extensionPath}${/}hooks${/}observability_hook.py"'
         )
         pii_checker = hooks_by_name["agent-sec-pii-checker"]
         assert "async" not in pii_checker
         assert pii_checker["timeout"] == 10000
         assert pii_checker["command"] == (
-            'python3 "${extensionPath}${/}hooks${/}pii_checker_hook.py"'
+            'python3 -B "${extensionPath}${/}hooks${/}pii_checker_hook.py"'
         )
         if event_name != "PreToolUse":
             assert len(entries) == 1

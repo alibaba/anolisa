@@ -310,6 +310,11 @@ endif
 
 COMPONENT_DIR       ?= $(ANOLISA_DATADIR)/components/sec-core
 
+# Bounded __pycache__ sweeper. Run from the source tree (not BUILD_DIR) so it
+# is available to every install path, including rpmbuild's %install, which
+# stages via build-all and never runs stage-tools.
+CLEAN_ADAPTER_BYTECODE ?= tools/clean-adapter-bytecode.sh
+
 BINDIR              ?= $(PREFIX)/bin
 LIBDIR              ?= $(PREFIX)/lib/anolisa/sec-core
 LIBEXECDIR          ?= $(PREFIX)/libexec/anolisa/sec-core
@@ -412,12 +417,14 @@ install-qwen-code-extension: ## Install Qwen Code extension to target directory
 	chmod 0755 $(DESTDIR)$(QWEN_CODE_EXTENSION_DIR)/scripts/*.sh
 	chmod 0755 $(DESTDIR)$(QWEN_CODE_EXTENSION_DIR)/hooks/observability_hook.py
 	chmod 0755 $(DESTDIR)$(QWEN_CODE_EXTENSION_DIR)/hooks/skill_ledger_hook.py
+	$(CLEAN_ADAPTER_BYTECODE) $(DESTDIR)$(QWEN_CODE_EXTENSION_DIR)
 
 .PHONY: install-codex-plugin
 install-codex-plugin: ## Install codex-plugin hooks and install script
 	install -d -m 0755 $(DESTDIR)$(CODEX_PLUGIN_DIR)
 	cp -rp $(BUILD_DIR)/codex-plugin/. $(DESTDIR)$(CODEX_PLUGIN_DIR)/
 	chmod 0755 $(DESTDIR)$(CODEX_PLUGIN_DIR)/install.sh
+	$(CLEAN_ADAPTER_BYTECODE) $(DESTDIR)$(CODEX_PLUGIN_DIR)
 
 .PHONY: install-qoder-plugin
 install-qoder-plugin: ## Install qoder-plugin hooks and install script
@@ -425,6 +432,7 @@ install-qoder-plugin: ## Install qoder-plugin hooks and install script
 	cp -rp $(BUILD_DIR)/qoder-plugin/. $(DESTDIR)$(QODER_PLUGIN_DIR)/
 	chmod 0755 $(DESTDIR)$(QODER_PLUGIN_DIR)/install.sh
 	chmod 0755 $(DESTDIR)$(QODER_PLUGIN_DIR)/hooks/*.py
+	$(CLEAN_ADAPTER_BYTECODE) $(DESTDIR)$(QODER_PLUGIN_DIR)
 
 .PHONY: install-cosh-hook
 install-cosh-hook: ## Install cosh hooks (linux-sandbox + extension)
@@ -432,6 +440,20 @@ install-cosh-hook: ## Install cosh hooks (linux-sandbox + extension)
 	install -p -m 0755 $(BUILD_DIR)/linux-sandbox $(DESTDIR)$(BINDIR)/
 	install -d -m 0755 $(DESTDIR)$(EXTENSIONDIR)
 	cp -rp $(BUILD_DIR)/cosh-extension/. $(DESTDIR)$(EXTENSIONDIR)/
+	$(CLEAN_ADAPTER_BYTECODE) $(DESTDIR)$(EXTENSIONDIR)
+
+.PHONY: install-adapter-bytecode-tool
+install-adapter-bytecode-tool: ## Install the adapter bytecode sweeper to LIBEXECDIR
+	install -d -m 0755 $(DESTDIR)$(LIBEXECDIR)
+	install -p -m 0755 $(CLEAN_ADAPTER_BYTECODE) $(DESTDIR)$(LIBEXECDIR)/
+
+.PHONY: clean-adapter-bytecode
+clean-adapter-bytecode: ## Sweep __pycache__ bytecode from installed adapter roots
+	$(CLEAN_ADAPTER_BYTECODE) \
+		$(DESTDIR)$(QWEN_CODE_EXTENSION_DIR) \
+		$(DESTDIR)$(CODEX_PLUGIN_DIR) \
+		$(DESTDIR)$(QODER_PLUGIN_DIR) \
+		$(DESTDIR)$(EXTENSIONDIR)
 
 .PHONY: install-component-manifest
 install-component-manifest: ## Install component.toml to DESTDIR
@@ -450,7 +472,7 @@ install-systemd-user: ## Install agent-sec-core systemd user service
 	chmod 0644 $(DESTDIR)$(SYSTEMD_USER_UNIT_DIR)/agent-sec-core.service
 
 .PHONY: install-all
-install-all: install-cli-venv install-cosh-hook install-codex-plugin install-qoder-plugin install-openclaw-plugin install-hermes-plugin install-qwen-code-extension install-skills ## Install all (user source build)
+install-all: install-cli-venv install-cosh-hook install-codex-plugin install-qoder-plugin install-openclaw-plugin install-hermes-plugin install-qwen-code-extension install-skills install-adapter-bytecode-tool ## Install all (user source build)
 
 .PHONY: install-all-for-rpmbuild
 install-all-for-rpmbuild: OPENCLAW_PLUGIN_DIR := $(RPM_OPENCLAW_PLUGIN_DIR)
@@ -458,7 +480,7 @@ install-all-for-rpmbuild: HERMES_PLUGIN_DIR := $(RPM_HERMES_PLUGIN_DIR)
 install-all-for-rpmbuild: QWEN_CODE_EXTENSION_DIR := $(RPM_QWEN_CODE_EXTENSION_DIR)
 install-all-for-rpmbuild: CODEX_PLUGIN_DIR := $(RPM_CODEX_PLUGIN_DIR)
 install-all-for-rpmbuild: QODER_PLUGIN_DIR := $(RPM_QODER_PLUGIN_DIR)
-install-all-for-rpmbuild: install-cli-site install-cosh-hook install-codex-plugin install-qoder-plugin install-openclaw-plugin install-hermes-plugin install-qwen-code-extension install-skills install-component-manifest install-systemd-user ## Install all (RPM build)
+install-all-for-rpmbuild: install-cli-site install-cosh-hook install-codex-plugin install-qoder-plugin install-openclaw-plugin install-hermes-plugin install-qwen-code-extension install-skills install-component-manifest install-systemd-user install-adapter-bytecode-tool ## Install all (RPM build)
 
 # =============================================================================
 # UNINSTALL

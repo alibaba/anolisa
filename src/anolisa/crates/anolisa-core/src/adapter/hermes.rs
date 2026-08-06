@@ -18,8 +18,6 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sha2::{Digest, Sha256};
-
 use super::AdapterError;
 use super::claim::{
     AdapterClaim, CLAIM_SCHEMA_VERSION, ClaimResource, ClaimResourceKind, ClaimStatus,
@@ -30,6 +28,7 @@ use super::driver::{
     ClaimResourceRef, ConditionStatus, DetectResult, DisableReport, DriverCtx, DriverPlan,
     FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable, find_binary_in_path,
 };
+use super::util::digest_tree;
 
 /// Default timeout for a Hermes CLI invocation.
 const CLI_TIMEOUT: Duration = Duration::from_secs(60);
@@ -791,43 +790,6 @@ fn summarize(
     }
 }
 
-/// SHA-256 digest of a directory tree, stable across runs: files are
-/// hashed in sorted relative-path order as `path\0len\0bytes`. Returns
-/// `None` on any IO error so callers fall back to `Unknown` rather than a
-/// wrong verdict.
-fn digest_tree(root: &Path) -> Option<String> {
-    let mut files: Vec<PathBuf> = Vec::new();
-    collect_files(root, &mut files).ok()?;
-    files.sort();
-    let mut hasher = Sha256::new();
-    for path in &files {
-        let rel = path.strip_prefix(root).unwrap_or(path);
-        let bytes = std::fs::read(path).ok()?;
-        hasher.update(rel.to_string_lossy().as_bytes());
-        hasher.update([0u8]);
-        hasher.update((bytes.len() as u64).to_le_bytes());
-        hasher.update([0u8]);
-        hasher.update(&bytes);
-    }
-    Some(format!("sha256:{:x}", hasher.finalize()))
-}
-
-/// Recursively collect regular-file paths under `dir`. Symlinks are not
-/// followed into directories (their link path is recorded as a file).
-fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let ft = entry.file_type()?;
-        if ft.is_dir() {
-            collect_files(&path, out)?;
-        } else {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
 /// ISO 8601 UTC timestamp, second precision.
 fn now_iso8601() -> String {
     use chrono::{SecondsFormat, Utc};
@@ -988,22 +950,6 @@ mod tests {
             summarize(ClaimStatus::Enabled, true, ConditionStatus::Unknown),
             AdapterSummary::Unknown
         );
-    }
-
-    #[test]
-    fn digest_tree_is_stable_and_detects_change() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("a.txt"), b"hello").expect("write");
-        std::fs::create_dir(dir.path().join("sub")).expect("mkdir");
-        std::fs::write(dir.path().join("sub/b.txt"), b"world").expect("write");
-
-        let d1 = digest_tree(dir.path()).expect("digest");
-        let d2 = digest_tree(dir.path()).expect("digest again");
-        assert_eq!(d1, d2, "digest must be stable");
-
-        std::fs::write(dir.path().join("sub/b.txt"), b"WORLD").expect("rewrite");
-        let d3 = digest_tree(dir.path()).expect("digest after change");
-        assert_ne!(d1, d3, "digest must change when a file changes");
     }
 
     // -- review fix coverage: lazy plugin_id, YAML entry, skills allowlist --

@@ -59,6 +59,7 @@ normalize_modes() {
     find "$stage/lib/anolisa/sec-core/python3.11/runtime/bin" \
         -type f -exec chmod 0755 {} +
     find "$stage/adapters" "$stage/share/anolisa/skills" \
+        "$stage/share/anolisa/hooks" \
         -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod 0755 {} +
 }
 
@@ -82,6 +83,7 @@ stage_payload() {
         "$stage/adapters/sec-core/cosh" \
         "$stage/share/anolisa/skills" \
         "$stage/share/anolisa/sec-core" \
+        "$stage/share/anolisa/hooks/sec-core" \
         "$stage/share/doc/sec-core"
 
     install -p -m 0644 "$CONTRACT" "$stage/.anolisa/component.toml"
@@ -96,6 +98,11 @@ stage_payload() {
         "$ROOT/packaging/systemd/agent-sec-core.service.in" \
         "$stage/share/anolisa/sec-core/agent-sec-core.service.in"
     install -p -m 0644 "$ROOT/LICENSE" "$stage/share/doc/sec-core/LICENSE"
+    # The `post_install` lifecycle hook and the sweeper it drives.
+    install -p -m 0755 "$ROOT/tools/clean-adapter-bytecode.sh" \
+        "$stage/share/anolisa/hooks/sec-core/clean-adapter-bytecode.sh"
+    install -p -m 0755 "$ROOT/packaging/raw/hooks/post-install.sh" \
+        "$stage/share/anolisa/hooks/sec-core/post-install.sh"
 
     copy_tree "$BUILD_DIR/site-packages" \
         "$stage/lib/anolisa/sec-core/python3.11/site-packages"
@@ -118,6 +125,18 @@ stage_payload() {
         -type d -name __pycache__ -prune -exec rm -rf {} +
     find "$stage/lib/anolisa/sec-core/python3.11" \
         -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+    # Adapter resource roots must ship without bytecode: a cache copied out of
+    # a dirty worktree would land in the digest ANOLISA records at enable time,
+    # and would be re-imported by CPython even though hooks now run with `-B`.
+    "$ROOT/tools/clean-adapter-bytecode.sh" \
+        "$stage/adapters/sec-core/openclaw" \
+        "$stage/adapters/sec-core/hermes" \
+        "$stage/adapters/sec-core/codex" \
+        "$stage/adapters/sec-core/qoder" \
+        "$stage/adapters/sec-core/qwencode" \
+        "$stage/adapters/sec-core/cosh" \
+        "$stage/share/anolisa/skills" ||
+        die "adapter bytecode sweep failed for $stage"
     validate_bundled_python \
         "$stage/lib/anolisa/sec-core/python3.11/runtime"
     if [ -n "$(find "$stage/lib/anolisa/sec-core/python3.11/runtime" \

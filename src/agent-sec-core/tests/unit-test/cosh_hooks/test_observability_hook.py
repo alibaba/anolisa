@@ -517,5 +517,5 @@ def test_extension_registers_observability_hook_for_supported_events():
             if hook.get("name") == "observability-hook"
         ]
         assert commands == [
-            "python3 ${extensionPath}/hooks/observability_hook.py",
+            "python3 -B ${extensionPath}/hooks/observability_hook.py",
         ]
