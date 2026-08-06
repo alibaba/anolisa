@@ -125,3 +125,55 @@ Leave `listen.http_addr` disabled in production until
 [issue #2223](https://github.com/alibaba/anolisa/issues/2223) is resolved.
 Daemon shutdown also does not yet wait for every active HTTP handler or release
 all runtime owners, so an in-flight request may observe a closed connection.
+
+## Storage Artifact Synchronization
+
+Blaze can periodically persist the already-written host artifacts and directory
+metadata owned by running sandboxes. The worker is disabled by default, so
+existing deployments retain their previous behavior until an interval is
+configured.
+
+### Configuration
+
+Set the interval and per-sandbox deadline in the daemon configuration:
+
+```toml
+[storage]
+sync_interval = "30s"
+sync_timeout = "10s"
+```
+
+`sync_interval = "disabled"` stops the periodic worker. `sync_timeout`
+bounds how long the scheduler waits for one complete provider attempt:
+reconstructing its storage slot and synchronizing that slot.
+
+Each storage-provider synchronization call persists the already-written bytes
+and directory metadata visible to that call. Concurrent artifact updates may
+become visible in the current attempt or a later one.
+
+### Runtime behavior
+
+Each sweep selects sandboxes that are running and still own a complete storage
+slot. A sandbox whose operation lock is already held is deferred without
+waiting, allowing the sweep to continue to later sandboxes. Lifecycle changes,
+guest requests, and storage artifact synchronization share this lock. After acquiring
+an available lock, the worker rechecks lifecycle state before calling the
+storage provider. A record that still says `Running` after the lock is acquired
+but retains an unfinished operation or non-running backend ownership is
+inconsistent and is reported as failed rather than deferred.
+The first sweep starts after one complete configured interval. Missed timer
+ticks are skipped instead of queued, preventing a slow sweep from accumulating
+work.
+
+A completed failure affects only that sandbox. Blaze retains storage ownership
+and leaves lifecycle state unchanged, so a later sweep or destroy can retry.
+If filesystem work cannot stop at the deadline, it keeps the sandbox operation
+lock and the single synchronization permit until completion. Later attempts
+are deferred instead of accumulating additional blocking work. Guest and
+lifecycle operations that arrive while the lock is retained wait for the
+provider work to finish; `sync_timeout` bounds scheduler waiting, not those
+operations.
+
+When the service loop stops, Blaze cancels and joins the periodic scheduler.
+Provider work that cannot be cancelled remains under its sandbox lock until it
+completes. Daemon-wide connection draining and runtime cleanup remain separate.

@@ -105,10 +105,18 @@ provider = "file"       # 存储 provider 选择。当前支持："file"、"auto
 images_dir = "/var/lib/blaze/images"
 # pool_size = 0           # [Reserved] 预热存储槽位数（尚未启用）
 # prefork = false         # [Reserved] 是否在槽位中预启动 VM（尚未启用）
-# flush_interval = "30s"  # [Reserved] 脏数据刷盘周期（尚未启用）
+sync_interval = "disabled" # 设置正数 duration 后持久化 slot 中已经写入的制品。
+sync_timeout = "30s"       # scheduler 等待 slot 重建与制品同步的最长时间。
 ```
 
 `file` provider 使用标准文件系统操作管理 sandbox 存储。`auto` 按优先级探测可用 provider（当前等同于 `file`）。无法识别的值将记录告警并回退到 `file`。
+启用周期同步后，已经返回的 provider 失败不会中断后续 sandbox。如果 provider
+在 deadline 到达时仍无法停止文件系统操作，该操作会继续持有 sandbox operation
+lock 和唯一的同步许可直至完成；后续同步会被推迟而不会不断累积。service loop
+结束时，worker 会停止调度新任务。
+
+[存储制品同步用户指南](../../docs/user-guide/zh/runtime/blaze.md#存储制品同步)进一步说明
+配置、选择、重试和 worker 关闭行为。
 
 ## API 端点
 

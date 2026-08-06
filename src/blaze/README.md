@@ -110,10 +110,20 @@ provider = "file"       # Storage provider selection. Currently supported: "file
 images_dir = "/var/lib/blaze/images"
 # pool_size = 0           # [Reserved] Warm pool slots (not yet active)
 # prefork = false         # [Reserved] Pre-start VMs in pool (not yet active)
-# flush_interval = "30s"  # [Reserved] Dirty data flush period (not yet active)
+sync_interval = "disabled" # Set a positive duration to persist already-written slot artifacts.
+sync_timeout = "30s"       # Maximum scheduler wait for reconstruction plus artifact sync.
 ```
 
 The `file` provider uses standard filesystem operations for sandbox storage. The `auto` provider probes available backends in priority order (currently equivalent to `file`). Unrecognized values will log a warning and fall back to `file`.
+When periodic synchronization is enabled, a completed provider failure is
+isolated from later sandboxes. If a provider cannot stop its filesystem work at
+the deadline, that work keeps the sandbox operation lock and the single
+synchronization permit until completion; later attempts are deferred instead
+of accumulating. The worker stops scheduling new work when the service loop
+ends.
+
+See the [Storage Artifact Synchronization user guide](../../docs/user-guide/en/runtime/blaze.md#storage-artifact-synchronization)
+for configuration, selection, retry, and worker shutdown behavior.
 
 ## API Endpoints
 

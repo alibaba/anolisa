@@ -109,3 +109,47 @@ read 响应过大时返回 HTTP 502 和
 [issue #2223](https://github.com/alibaba/anolisa/issues/2223) 解决前，生产配置应
 保持 `listen.http_addr` 关闭。Daemon 停止时也不会等待全部 HTTP handler 或
 释放所有 runtime owner，因此正在执行的请求可能看到连接关闭。
+
+## 存储制品同步
+
+Blaze 可以定期持久化 running sandbox 中已经写入的宿主机制品和目录元数据。
+该 worker 默认关闭；只有配置同步周期后，现有部署的行为才会改变。
+
+### 配置方法
+
+在 daemon 配置中设置同步周期和单个 sandbox 的执行时限：
+
+```toml
+[storage]
+sync_interval = "30s"
+sync_timeout = "10s"
+```
+
+`sync_interval = "disabled"` 会关闭周期 worker。`sync_timeout` 限制
+scheduler 等待单个完整 provider attempt 的时间，包括重建 storage slot 和
+同步该 slot。
+
+每次 storage-provider 同步调用会持久化本次调用可见、且已经写入的字节与目录
+元数据。并发发生的制品更新可能在本次或后续 attempt 中变为可见。
+
+### 运行行为
+
+每轮 sweep 会选择处于 running 状态且仍持有完整 storage slot 的 sandbox。它会
+对 operation lock 已被占用的 sandbox 直接推迟本轮处理，而不等待该 lock，使
+sweep 可以继续处理后续 sandbox。Lifecycle 变更、guest 请求和存储制品同步共用这把
+lock。取得可用 lock 后，worker 会在调用 storage provider 前再次检查 lifecycle
+状态。如果取得 lock 后记录仍为 `Running`，但保留了未完成的 operation 或非
+running 的 backend ownership，该记录属于不一致状态，会记为失败而不是推迟。
+第一次 sweep 会在完整的配置周期过去后启动，而不是在 worker 启动时立即执行。
+定时器错过的 tick 会被跳过而不是排队，避免慢速 sweep 累积任务。
+
+已经返回的失败只影响对应 sandbox。Blaze 会保留 storage slot 的 ownership，
+且不改变 lifecycle 状态，因此后续 sweep 或 destroy 仍可重试。如果文件系统
+操作在 deadline 到达时无法停止，它会继续持有 sandbox operation lock 和唯一
+的同步许可直至完成；后续 attempt 会被推迟，而不会累积更多 blocking 任务。
+在此期间到达的 guest 和 lifecycle 操作会等待 provider 工作完成；
+`sync_timeout` 只限制 scheduler 的等待时间，不限制这些操作的等待时间。
+
+service loop 停止时，Blaze 会取消并等待周期 scheduler 退出。无法取消的
+provider 工作会继续由对应 sandbox lock 持有直至完成；daemon 级连接排空和
+runtime 清理仍属于独立职责。

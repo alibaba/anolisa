@@ -76,7 +76,7 @@ ANOLISA provides a complete server-side runtime for AI Agent workloads. Componen
 
 | Document | Component | Description |
 |----------|-----------|-------------|
-| [Blaze Firecracker Networking](runtime/blaze.md) | blaze | Opt-in per-sandbox VM networking, host requirements, lifecycle, and operator boundary |
+| [Blaze Sandbox Runtime](runtime/blaze.md) | blaze | Opt-in VM networking and periodic storage artifact synchronization for managed sandboxes |
 | [Workspace Checkpoints](runtime/ws-ckpt.md) | ws-ckpt | Instant snapshot/rollback via btrfs COW |
 | [Skill Filesystem](runtime/skillfs.md) | skillfs | FUSE virtual views with progressive disclosure |
 
