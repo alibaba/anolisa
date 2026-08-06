@@ -272,10 +272,15 @@ pub fn check_owned_file(layout: &FsLayout, file: &OwnedFile) -> IntegrityStatus 
             Err(err) => return IntegrityStatus::ReadError(err.to_string()),
         }
     }
-    // Size gate before the digest gate: a file too large to hash reports
-    // the budget outcome whether or not a digest was recorded, so the
-    // wire surface never conflates "no digest on file" with "digest not
-    // checked this run".
+    // Digest gate BEFORE the size gate, so each label keeps the meaning its
+    // documentation promises: `Unverified` means no digest was ever
+    // recorded, `ProbeLimitExceeded` means one was recorded but this run
+    // did not check it. Gating on size first would collapse both into the
+    // latter and tell operators a baseline exists where none does.
+    let Some(expected) = file.sha256.clone() else {
+        return IntegrityStatus::Unverified;
+    };
+
     if meta.len() > MAX_PROBE_BYTES {
         return IntegrityStatus::ProbeLimitExceeded {
             size: meta.len(),
@@ -283,9 +288,6 @@ pub fn check_owned_file(layout: &FsLayout, file: &OwnedFile) -> IntegrityStatus 
         };
     }
 
-    let Some(expected) = file.sha256.clone() else {
-        return IntegrityStatus::Unverified;
-    };
     match hash_file_sha256(&file.path) {
         Err(HashError::Io(err)) => IntegrityStatus::ReadError(err.to_string()),
         // The file grew past the ceiling between stat and read. Same
@@ -584,6 +586,26 @@ mod tests {
         );
         assert!(!status.is_failure(), "must degrade, not fail");
         assert_eq!(status.label(), "probe_limit_exceeded");
+    }
+
+    /// An oversized file with no recorded digest must report `Unverified`,
+    /// not `ProbeLimitExceeded`: the latter's contract is "a digest exists
+    /// but this run skipped it", and reporting it here would tell operators
+    /// an integrity baseline exists where none was ever recorded.
+    #[test]
+    fn oversized_file_without_recorded_digest_is_unverified() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_under(tmp.path());
+        let path = layout.bin_dir.join("huge-legacy-blob");
+        let f = fs::File::create(&path).expect("create");
+        f.set_len(MAX_PROBE_BYTES + 1).expect("set_len");
+        drop(f);
+
+        let owned = anolisa_owned(path, None);
+        assert_eq!(
+            check_owned_file(&layout, &owned),
+            IntegrityStatus::Unverified,
+        );
     }
 
     /// The budget outcome sorts with the other "not proved either way"

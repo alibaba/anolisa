@@ -823,11 +823,21 @@ fn integrity_probe(
             // proves damage, so they degrade rather than fail.
             had_unverified = true;
         }
+        // Spell the budget stop out. On its own the label reads like "this
+        // file is outside integrity policy", when in fact a digest is on
+        // record and only this run declined to re-read it.
+        let reason = match &result {
+            IntegrityStatus::ProbeLimitExceeded { size, limit } => Some(format!(
+                "file size {size} exceeds the {limit}-byte integrity probe ceiling; \
+                 the recorded digest was not re-checked this run"
+            )),
+            _ => None,
+        };
         entries.push(HealthEntry {
             name: format!("integrity:{}", file.path.display()),
             status: result.label().to_string(),
             checked_at: checked_at.clone(),
-            reason: None,
+            reason,
         });
     }
 
