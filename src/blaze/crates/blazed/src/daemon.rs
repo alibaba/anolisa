@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Daemon runtime: bind UDS, accept connections, wire signal handlers.
 
+use std::convert::Infallible;
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -12,14 +14,18 @@ use blaze_core::pool::PoolManager;
 use blaze_core::storage::StorageProvider;
 use blaze_core::template::TemplateRegistry;
 use http_body_util::Full;
-use hyper::body::Bytes;
+use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
+use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::task::{JoinError, JoinSet};
+use tokio_util::sync::CancellationToken;
 
 use crate::api;
+use crate::daemon_socket::{DaemonLock, DaemonSocket};
 use crate::error::{BlazeDaemonError, Result};
 use crate::spawner::{
     BubblewrapSpawner, DynSpawner, FirecrackerSpawner, MockSpawner, SpawnerRegistry,
@@ -33,6 +39,8 @@ pub async fn run(config_path: &Path) -> Result<()> {
     tracing::info!(?config_path, "loaded daemon config");
 
     ensure_dirs(&config)?;
+    let socket_path = config.daemon.socket.clone();
+    let daemon_lock = DaemonLock::acquire(&config.daemon.state_dir, &socket_path)?;
     let policy = load_policy_engine(&config)?;
     let pool = PoolManager::new();
     let template = TemplateRegistry::new();
@@ -77,7 +85,6 @@ pub async fn run(config_path: &Path) -> Result<()> {
         Arc::new(fp)
     };
 
-    let socket_path = config.daemon.socket.clone();
     let http_addr = config.listen.http_addr.clone();
     let state = Arc::new(ServerState::build(
         config,
@@ -104,13 +111,7 @@ pub async fn run(config_path: &Path) -> Result<()> {
         );
     }
 
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path)?;
-    }
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let listener = UnixListener::bind(&socket_path)?;
+    let listener = DaemonSocket::bind(daemon_lock).await?;
     tracing::info!(socket = %socket_path.display(), "blaze UDS API listening");
 
     // Optional TCP listener for remote platform API
@@ -247,13 +248,18 @@ fn load_policy_engine(cfg: &DaemonConfig) -> Result<PolicyEngine> {
     }
 }
 
-async fn serve(uds: UnixListener, tcp: Option<TcpListener>, state: Arc<ServerState>) -> Result<()> {
+async fn serve(
+    mut uds: DaemonSocket,
+    tcp: Option<TcpListener>,
+    state: Arc<ServerState>,
+) -> Result<()> {
     let mut sighup = signal(SignalKind::hangup())
         .map_err(|e| BlazeDaemonError::Internal(format!("install SIGHUP handler: {e}")))?;
     let mut sigterm = signal(SignalKind::terminate())
         .map_err(|e| BlazeDaemonError::Internal(format!("install SIGTERM handler: {e}")))?;
     let mut sigint = signal(SignalKind::interrupt())
         .map_err(|e| BlazeDaemonError::Internal(format!("install SIGINT handler: {e}")))?;
+    let mut connections = ConnectionTasks::new();
 
     loop {
         tokio::select! {
@@ -265,7 +271,7 @@ async fn serve(uds: UnixListener, tcp: Option<TcpListener>, state: Arc<ServerSta
                         continue;
                     }
                 };
-                spawn_conn(TokioIo::new(stream), state.clone());
+                spawn_conn(&mut connections, TokioIo::new(stream), state.clone());
             }
             res = async { match &tcp { Some(l) => l.accept().await, None => std::future::pending().await }}, if tcp.is_some() => {
                 let (stream, peer) = match res {
@@ -276,7 +282,10 @@ async fn serve(uds: UnixListener, tcp: Option<TcpListener>, state: Arc<ServerSta
                     }
                 };
                 tracing::debug!(?peer, "TCP connection");
-                spawn_conn(TokioIo::new(stream), state.clone());
+                spawn_conn(&mut connections, TokioIo::new(stream), state.clone());
+            }
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                report_connection_result(result);
             }
             _ = sighup.recv() => {
                 tracing::info!("SIGHUP received: reloading policies");
@@ -295,24 +304,89 @@ async fn serve(uds: UnixListener, tcp: Option<TcpListener>, state: Arc<ServerSta
         }
     }
 
+    uds.stop_accepting();
+    drop(tcp);
+    connections.graceful_shutdown().await;
     tracing::info!("blaze daemon stopped");
     Ok(())
 }
 
-fn spawn_conn<I>(io: TokioIo<I>, state: Arc<ServerState>)
+struct ConnectionTasks {
+    tasks: JoinSet<()>,
+    shutdown: CancellationToken,
+}
+
+impl ConnectionTasks {
+    fn new() -> Self {
+        Self {
+            tasks: JoinSet::new(),
+            shutdown: CancellationToken::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
+    fn join_next(
+        &mut self,
+    ) -> impl Future<Output = Option<std::result::Result<(), JoinError>>> + '_ {
+        self.tasks.join_next()
+    }
+
+    fn spawn<F>(&mut self, task: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.tasks.spawn(task);
+    }
+
+    async fn graceful_shutdown(&mut self) {
+        self.shutdown.cancel();
+        while let Some(result) = self.tasks.join_next().await {
+            report_connection_result(result);
+        }
+    }
+}
+
+fn spawn_conn<I>(connections: &mut ConnectionTasks, io: TokioIo<I>, state: Arc<ServerState>)
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    tokio::spawn(async move {
-        let svc = service_fn(move |req| {
-            let state = state.clone();
-            async move { api::handle(req, state).await }
-        });
-        if let Err(err) = http1::Builder::new().serve_connection(io, svc).await {
+    spawn_conn_with_handler(connections, io, move |req| {
+        let state = state.clone();
+        async move { api::handle(req, state).await }
+    });
+}
+
+fn spawn_conn_with_handler<I, F, Fut>(connections: &mut ConnectionTasks, io: TokioIo<I>, handler: F)
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    F: Fn(Request<Incoming>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = std::result::Result<Response<Full<Bytes>>, Infallible>> + Send + 'static,
+{
+    let shutdown = connections.shutdown.clone();
+    connections.spawn(async move {
+        let connection = http1::Builder::new().serve_connection(io, service_fn(handler));
+        tokio::pin!(connection);
+
+        let result = tokio::select! {
+            result = &mut connection => result,
+            () = shutdown.cancelled() => {
+                connection.as_mut().graceful_shutdown();
+                connection.await
+            }
+        };
+        if let Err(err) = result {
             tracing::debug!(?err, "connection closed with error");
         }
-        let _: Option<Full<Bytes>> = None;
     });
+}
+
+fn report_connection_result(result: std::result::Result<(), JoinError>) {
+    if let Err(error) = result {
+        tracing::warn!(?error, "connection task failed");
+    }
 }
 
 fn reload_policies(state: &Arc<ServerState>) -> Result<()> {
@@ -334,4 +408,67 @@ fn reload_policies(state: &Arc<ServerState>) -> Result<()> {
     }
     tracing::info!(policies = count, "policy engine reloaded via SIGHUP");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use http_body_util::Full;
+    use tokio::io::AsyncWriteExt;
+    use tokio::sync::{Notify, oneshot};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn ownership_is_retained_until_inflight_request_finishes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("api.sock");
+        let lock = DaemonLock::acquire(temp.path(), &socket_path).expect("claim daemon state");
+        let mut connections = ConnectionTasks::new();
+        let shutdown = connections.shutdown.clone();
+        let (server, mut client) = tokio::io::duplex(1024);
+        let (started_tx, started_rx) = oneshot::channel();
+        let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+        let release = Arc::new(Notify::new());
+        let handler_release = release.clone();
+
+        spawn_conn_with_handler(&mut connections, TokioIo::new(server), move |_request| {
+            let started_tx = started_tx.clone();
+            let release = handler_release.clone();
+            async move {
+                if let Some(started_tx) = started_tx.lock().expect("started lock").take() {
+                    started_tx.send(()).expect("publish request start");
+                }
+                release.notified().await;
+                Ok(Response::new(Full::new(Bytes::from_static(b"done"))))
+            }
+        });
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("send request");
+        started_rx.await.expect("request entered handler");
+
+        let owner = tokio::spawn(async move {
+            let _lock = lock;
+            connections.graceful_shutdown().await;
+        });
+        shutdown.cancelled().await;
+
+        let error = DaemonLock::acquire(temp.path(), &socket_path)
+            .err()
+            .expect("in-flight request must retain daemon ownership");
+        assert!(matches!(
+            error,
+            BlazeDaemonError::DaemonStateAlreadyOwned { .. }
+        ));
+
+        release.notify_one();
+        owner.await.expect("daemon shutdown task");
+
+        let recovered =
+            DaemonLock::acquire(temp.path(), &socket_path).expect("ownership releases after drain");
+        drop(recovered);
+    }
 }

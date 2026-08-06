@@ -7,6 +7,7 @@
 mod api;
 mod cli;
 mod daemon;
+mod daemon_socket;
 mod error;
 #[cfg(feature = "test-failpoints")]
 mod failpoint;
