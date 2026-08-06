@@ -2,7 +2,7 @@
 pub(super) use crate::adapter::AdapterInstance;
 #[cfg(test)]
 pub(super) use crate::adapter::{prompt_from_request, FakeAgentAdapter};
-pub(super) use crate::command::first_program_token;
+pub(super) use crate::command::{first_program_token, interactive_cancel_output};
 pub(super) use crate::config::Language;
 pub(super) use crate::config::{load_hook_feedback_preference_details, HookFeedbackPreference};
 pub(super) use crate::evidence::{

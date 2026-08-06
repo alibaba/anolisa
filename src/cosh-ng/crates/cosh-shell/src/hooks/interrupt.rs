@@ -1,7 +1,8 @@
 use std::fs;
 
 use super::prelude::{
-    classify_command_interaction, CommandBlock, PtyRequirement, ShellEvent, ShellEventKind,
+    classify_command_interaction, interactive_cancel_output, CommandBlock, PtyRequirement,
+    ShellEvent, ShellEventKind,
 };
 
 pub(crate) fn command_should_skip_failure_analysis(
@@ -47,24 +48,6 @@ fn output_preview(block: &CommandBlock) -> String {
         return String::new();
     };
     content.chars().take(4096).collect()
-}
-
-fn interactive_cancel_output(output: &str) -> bool {
-    let normalized = output.to_ascii_lowercase();
-    [
-        "sudo: a password is required",
-        "a password is required",
-        "a terminal is required",
-        "operation cancelled",
-        "operation canceled",
-        "keyboardinterrupt",
-        "interrupted",
-        "access key id",
-        "access key secret",
-        "default region id",
-    ]
-    .iter()
-    .any(|needle| normalized.contains(needle))
 }
 
 fn prompt_like_output(output: &str) -> bool {
@@ -156,6 +139,68 @@ mod tests {
         block.output.terminal_output_ref = Some(write_output("Access Key Id []:"));
 
         assert!(command_should_skip_failure_analysis(&[], &block));
+    }
+
+    #[test]
+    fn detects_bare_interrupted_line_as_cancel() {
+        let mut block = block();
+        block.command = "pip install requests".to_string();
+        block.output.terminal_output_ref = Some(write_output("Collecting requests\nInterrupted\n"));
+
+        assert!(command_should_skip_failure_analysis(&[], &block));
+    }
+
+    #[test]
+    fn detects_ansi_colored_interrupted_line_as_cancel() {
+        let mut block = block();
+        block.command = "pip install requests".to_string();
+        block.output.terminal_output_ref = Some(write_output(
+            "Collecting requests\n\x1b[31mInterrupted\x1b[0m\n",
+        ));
+
+        assert!(command_should_skip_failure_analysis(&[], &block));
+    }
+
+    #[test]
+    fn detects_ansi_colored_credential_prompt_as_cancel() {
+        let mut block = block();
+        block.command = "aliyun configure".to_string();
+        block.output.terminal_output_ref = Some(write_output("\x1b[36mAccess Key Id []:\x1b[0m"));
+
+        assert!(command_should_skip_failure_analysis(&[], &block));
+    }
+
+    #[test]
+    fn keeps_credential_error_header_analyzable() {
+        let mut block = block();
+        block.command = "ossutil ls oss://bucket".to_string();
+        block.output.terminal_output_ref = Some(write_output(
+            "Error: failed to validate access key id:\n  the key contains invalid characters\n",
+        ));
+
+        assert!(!command_should_skip_failure_analysis(&[], &block));
+    }
+
+    #[test]
+    fn keeps_failures_with_interrupted_substring_analyzable() {
+        let mut block = block();
+        block.command = "curl https://example.com/api".to_string();
+        block.output.terminal_output_ref = Some(write_output(
+            "curl: (18) transfer was interrupted by peer\n",
+        ));
+
+        assert!(!command_should_skip_failure_analysis(&[], &block));
+    }
+
+    #[test]
+    fn keeps_failures_mentioning_access_key_analyzable() {
+        let mut block = block();
+        block.command = "ossutil cp local oss://bucket/key".to_string();
+        block.output.terminal_output_ref = Some(write_output(
+            "Error: InvalidAccessKeyId, the access key id you provided does not exist\n",
+        ));
+
+        assert!(!command_should_skip_failure_analysis(&[], &block));
     }
 
     #[test]

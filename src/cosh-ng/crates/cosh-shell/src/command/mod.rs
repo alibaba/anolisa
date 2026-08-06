@@ -10,6 +10,7 @@ pub(crate) use exit_classify::{
 };
 #[allow(unused_imports)]
 pub(crate) use failure_semantics::{
-    classify_failure, BuildOrTestFamily, FailureAutoEligibility, FailureClass, FailureConfidence,
-    FailureExcerptDirection, FailureReason, FailureSemantics, FailureTerminalSignature,
+    classify_failure, interactive_cancel_output, BuildOrTestFamily, FailureAutoEligibility,
+    FailureClass, FailureConfidence, FailureExcerptDirection, FailureReason, FailureSemantics,
+    FailureTerminalSignature,
 };
