@@ -265,6 +265,22 @@ include = [
 
 ---
 
+## raw packaging
+
+### Adapter Python hooks
+
+- Keep Python hook commands in shared JSON manifests in the existing
+  `"command": "python3 ..."` form. `packaging/raw/adapt_payload.py` relies on that
+  form to rewrite staged raw hooks to `agent-sec-python`.
+- When adding, renaming, or removing a Python hook manifest, update
+  `RAW_HOOK_MANIFESTS` in both `packaging/raw/adapt_payload.py` and
+  `packaging/raw/verify_release.py`, plus the source/raw manifest lists and bypass
+  cases in `tests/packaging/test-package-raw.sh`.
+- Run `bash tests/packaging/test-package-raw.sh` after changing an adapter manifest
+  or the raw manifest inventory.
+
+---
+
 ## hermes-plugin
 
 ### 1. 项目概述

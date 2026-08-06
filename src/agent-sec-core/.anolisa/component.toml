@@ -13,7 +13,7 @@ repository = "https://github.com/alibaba/anolisa"
 
 [component.contract]
 schema_version = "1.0"
-min_anolisa_version = "0.2.16"
+min_anolisa_version = "0.2.17"
 
 [backends.rpm]
 package = "agent-sec-core"
@@ -52,13 +52,6 @@ name = "jq"
 kind = "system-package"
 probe = "jq --version"
 packages = { rpm = "jq", deb = "jq" }
-
-[[component.dependencies]]
-name = "python3"
-kind = "language-runtime"
-version = ">=3.11,<3.12"
-probe = "python3 --version"
-source = "system"
 
 [component.layout]
 modes = ["system"]
