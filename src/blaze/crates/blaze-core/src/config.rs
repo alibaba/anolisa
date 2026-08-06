@@ -26,8 +26,12 @@ pub struct DaemonConfig {
     pub policy: PolicySection,
     #[serde(default)]
     pub storage: StorageSection,
-    #[serde(default)]
-    pub pool: PoolSection,
+    /// Legacy `[pool]` input retained for package-upgrade compatibility.
+    ///
+    /// The exact defaults shipped by older packages are accepted but ignored.
+    /// Serialization omits the section, and any other value fails validation.
+    #[serde(default, skip_serializing)]
+    pub pool: Option<toml::Value>,
     #[serde(default)]
     pub template: TemplateSection,
     #[serde(default)]
@@ -85,23 +89,6 @@ impl Default for PolicySection {
 pub enum PolicyLoadErrorMode {
     Fail,
     Warn,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PoolSection {
-    #[serde(default = "default_pool_warm_ttl")]
-    pub default_warm_ttl: String,
-    #[serde(default = "default_pool_gc_interval")]
-    pub gc_interval: String,
-}
-
-impl Default for PoolSection {
-    fn default() -> Self {
-        Self {
-            default_warm_ttl: default_pool_warm_ttl(),
-            gc_interval: default_pool_gc_interval(),
-        }
-    }
 }
 
 /// Published template catalog and its local import boundary.
@@ -176,15 +163,17 @@ pub struct StorageSection {
     #[serde(default = "default_storage_provider")]
     pub provider: String,
 
-    /// Warm pool target size (0 = no pool).
-    /// NOTE: Reserved for future use. Not yet wired into runtime.
-    #[serde(default)]
-    pub pool_size: usize,
+    /// Legacy `storage.pool_size` input retained for an explicit validation error.
+    ///
+    /// Serialization omits the value, and validation fails whenever it is present.
+    #[serde(default, skip_serializing)]
+    pub pool_size: Option<usize>,
 
-    /// Whether to pre-start VMs in pool slots.
-    /// NOTE: Reserved for future use. Not yet wired into runtime.
-    #[serde(default)]
-    pub prefork: bool,
+    /// Legacy `storage.prefork` input retained for an explicit validation error.
+    ///
+    /// Serialization omits the value, and validation fails whenever it is present.
+    #[serde(default, skip_serializing)]
+    pub prefork: Option<bool>,
 
     /// Interval for persisting already-written provider-owned artifacts.
     ///
@@ -211,8 +200,8 @@ impl Default for StorageSection {
             images_dir: default_images_dir(),
             instances_dir: default_instances_dir(),
             provider: default_storage_provider(),
-            pool_size: 0,
-            prefork: false,
+            pool_size: None,
+            prefork: None,
             sync_interval: default_sync_interval(),
             sync_timeout: default_sync_timeout(),
             rootfs_size: default_rootfs_size(),
@@ -257,12 +246,29 @@ impl DaemonConfig {
         let raw = fs::read_to_string(path)?;
         let cfg: DaemonConfig = toml::from_str(&raw)?;
         cfg.validate()?;
+        if cfg.pool.is_some() {
+            tracing::warn!(
+                path = %path.display(),
+                "ignoring legacy packaged [pool] defaults; remove this section because reusable-instance management is unavailable"
+            );
+        }
         tracing::info!(path = %path.display(), "loaded blaze daemon config");
         Ok(cfg)
     }
 
     /// Validate cross-field invariants that serde cannot express.
     pub fn validate(&self) -> Result<()> {
+        if let Some(pool) = &self.pool {
+            if !is_legacy_packaged_pool_defaults(pool) {
+                return Err(unsupported_pool_config("[pool]"));
+            }
+        }
+        if self.storage.pool_size.is_some() {
+            return Err(unsupported_pool_config("storage.pool_size"));
+        }
+        if self.storage.prefork.is_some() {
+            return Err(unsupported_pool_config("storage.prefork"));
+        }
         validate_storage_paths(&self.storage.images_dir, &self.storage.instances_dir)?;
         self.storage.sync_schedule()?;
         self.storage.sync_timeout_duration()?;
@@ -323,6 +329,23 @@ impl DaemonConfig {
             });
         }
         Ok(())
+    }
+}
+
+fn is_legacy_packaged_pool_defaults(value: &toml::Value) -> bool {
+    let Some(table) = value.as_table() else {
+        return false;
+    };
+    table.len() == 2
+        && table.get("default_warm_ttl").and_then(toml::Value::as_str) == Some("30m")
+        && table.get("gc_interval").and_then(toml::Value::as_str) == Some("5m")
+}
+
+fn unsupported_pool_config(field: &str) -> BlazeError {
+    BlazeError::ConfigError {
+        source: ConfigErrorSource::InvalidValue(format!(
+            "{field} is not supported because warm pool management is not implemented"
+        )),
     }
 }
 
@@ -499,12 +522,6 @@ fn default_policy_dir() -> PathBuf {
 fn default_on_load_error() -> PolicyLoadErrorMode {
     PolicyLoadErrorMode::Fail
 }
-fn default_pool_warm_ttl() -> String {
-    "30m".to_string()
-}
-fn default_pool_gc_interval() -> String {
-    "5m".to_string()
-}
 fn default_template_dir() -> PathBuf {
     PathBuf::from("/var/lib/blaze/templates")
 }
@@ -587,6 +604,60 @@ mod tests {
         assert_eq!(cfg.daemon.log_level, "debug");
         assert_eq!(cfg.policy.on_load_error, PolicyLoadErrorMode::Warn);
         assert_eq!(cfg.backends.len(), 2);
+    }
+
+    #[test]
+    fn rejects_unsupported_pool_configuration() {
+        for input in [
+            "[pool]\n",
+            "[pool]\ndefault_warm_ttl = \"30m\"\n",
+            "[pool]\ngc_interval = \"5m\"\n",
+            "[pool]\ndefault_warm_ttl = \"31m\"\ngc_interval = \"5m\"\n",
+            "[pool]\ndefault_warm_ttl = \"30m\"\ngc_interval = \"6m\"\n",
+            "[pool]\ndefault_warm_ttl = 30\ngc_interval = \"5m\"\n",
+            "[pool]\ndefault_warm_ttl = \"30m\"\ngc_interval = \"5m\"\nextra = true\n",
+            "[storage]\npool_size = 0\n",
+            "[storage]\nprefork = false\n",
+        ] {
+            let cfg: DaemonConfig = toml::from_str(input).expect("compatibility parse");
+            let error = cfg.validate().expect_err("unsupported pool setting");
+            assert!(
+                error
+                    .to_string()
+                    .contains("warm pool management is not implemented"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_only_the_legacy_packaged_pool_defaults_without_serializing_them() {
+        let cfg: DaemonConfig =
+            toml::from_str("[pool]\ndefault_warm_ttl = \"30m\"\ngc_interval = \"5m\"\n")
+                .expect("legacy packaged configuration parses");
+
+        cfg.validate()
+            .expect("legacy packaged defaults remain upgrade-compatible");
+        let serialized = toml::to_string(&cfg).expect("serialize configuration");
+        assert!(!serialized.contains("[pool]"));
+        assert!(!serialized.contains("default_warm_ttl"));
+        assert!(!serialized.contains("gc_interval"));
+    }
+
+    #[test]
+    fn load_accepts_a_preserved_packaged_pool_section() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[daemon]\nlog_level = \"debug\"\n\n[pool]\ndefault_warm_ttl = \"30m\"\ngc_interval = \"5m\"\n",
+        )
+        .expect("write legacy packaged configuration");
+
+        let cfg = DaemonConfig::load(&path).expect("load preserved packaged configuration");
+
+        assert!(cfg.pool.is_some());
+        assert_eq!(cfg.daemon.log_level, "debug");
     }
 
     #[test]

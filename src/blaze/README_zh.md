@@ -5,20 +5,18 @@
 面向 AI Agent 工作负载的单机 sandbox 编排 daemon。
 
 Blaze 通过 HTTP API 管理 sandbox 实例的完整生命周期，支持策略驱动的后端选择。
-它提供 warm pool 预分配、多后端回退（Firecracker → Bubblewrap → Mock）以及
-Prometheus 指标导出，设计为 E2B 类编排平台的单机执行代理。
+它提供多后端回退（Firecracker → Bubblewrap → Mock）和 Prometheus 指标导出，
+设计为 E2B 类编排平台的单机执行代理。
 
 ## 特性
 
 - **HTTP API** — Unix domain socket (`/run/blaze/api.sock`) + TCP (`:14159`)
 - **策略驱动后端选择** — workload class → 后端优先级列表
-- **生命周期状态机** — 9 种状态：Pending、Creating、Running、Paused、
-  Checkpointed、RecoveryRequired、Reset、Warm 和 Destroyed
+- **生命周期状态机** — 持久化状态，并支持重启恢复
 - **Guest 操作** — 对提供 guest endpoint 的运行中后端执行有界命令和文件传输
-- **Warm pool 管理** — 预热实例 + 基于 TTL 的 GC
 - **Template catalog** — 有界导入并原子发布可复用 artifact
 - **内核 hook 注册** — 前/后置 hook 状态追踪
-- **Prometheus 指标** — 请求计数、实例 gauge、池大小
+- **Prometheus 指标** — 请求和实例计数
 - **Spawner 后端** — FirecrackerSpawner、BubblewrapSpawner、MockSpawner
 - **可选 VM 网络** — 每台 Firecracker VM 独立使用 netns、tap、veth 和 NAT
 
@@ -103,11 +101,20 @@ provider = "file"       # 存储 provider 选择。当前支持："file"、"auto
                         # "auto" 按优先级探测可用 provider（当前等同于 "file"）。
                         # 其他值将记录告警并回退到 file。
 images_dir = "/var/lib/blaze/images"
-# pool_size = 0           # [Reserved] 预热存储槽位数（尚未启用）
-# prefork = false         # [Reserved] 是否在槽位中预启动 VM（尚未启用）
 sync_interval = "disabled" # 设置正数 duration 后持久化 slot 中已经写入的制品。
 sync_timeout = "30s"       # scheduler 等待 slot 重建与制品同步的最长时间。
 ```
+
+Blaze 当前不支持可复用实例设置。`storage.pool_size` 和 `storage.prefork`
+始终会导致配置校验失败；除历史软件包的精确默认值外，任何 `[pool]` 配置段
+也会失败。软件包升级时有一项临时例外：旧版 `config.toml`、`agent-rl.toml` 和
+`agent-tool.toml` 原样附带的 `[pool]` 默认值会被接受并忽略，同时记录警告。
+这样，RPM 通过 `%config(noreplace)` 保留的管理员自定义文件不会阻止新版服务
+启动，但也不会启用尚未完整实现的功能。管理员应合并对应的 `.rpmnew` 文件，
+或删除旧 `[pool]` 配置段；后续版本可能取消这项兼容。其他策略 `[pool]` 配置
+会导致策略加载失败。启动时，`policy.on_load_error = "fail"` 会让守护进程停止，
+`"warn"` 则会使用空策略集继续启动。通过管理接口或信号重新加载策略失败时，
+当前生效的策略保持不变。
 
 `file` provider 使用标准文件系统操作管理 sandbox 存储。`auto` 按优先级探测可用 provider（当前等同于 `file`）。无法识别的值将记录告警并回退到 `file`。
 启用周期同步后，已经返回的 provider 失败不会中断后续 sandbox。如果 provider
@@ -139,11 +146,11 @@ lock 和唯一的同步许可直至完成；后续同步会被推迟而不会不
 | POST | `/v1/instances/{id}/read` | Guest 文件读取兼容入口 |
 | POST | `/v1/instances/{id}/write` | Guest 文件写入兼容入口 |
 | POST | `/v1/instances/{id}/checkpoint` | 记录 checkpoint 状态 |
-| POST | `/v1/instances/{id}/reset` | 记录 reset 并返回 warm pool |
-| GET | `/v1/pools` | 列出 warm pool |
-| GET | `/v1/pools/{backend}/{class}` | 获取 pool 状态 |
-| POST | `/v1/pools/{backend}/{class}/drain` | 排空 pool |
-| PUT | `/v1/pools/{backend}/{class}/sizing` | 调整 pool 大小 |
+| POST | `/v1/instances/{id}/reset` | 运行中实例的预留接口；运行时和存储重置实现前返回 `501` |
+| GET | `/v1/pools` | 预留接口；返回 `501` |
+| GET | `/v1/pools/{backend}/{class}` | 预留接口；返回 `501` |
+| POST | `/v1/pools/{backend}/{class}/drain` | 预留接口；返回 `501` |
+| PUT | `/v1/pools/{backend}/{class}/sizing` | 预留接口；返回 `501` |
 | GET | `/v1/templates` | 列出已发布 template 的名称 |
 | GET | `/v1/templates/{name}` | 查看已发布 template 的 metadata |
 | POST | `/v1/templates/import` | 从配置的导入根目录发布 template |
@@ -151,6 +158,38 @@ lock 和唯一的同步许可直至完成；后续同步会被推迟而不会不
 | GET | `/v1/hooks` | 列出内核 hook |
 | GET | `/v1/metrics` | Prometheus 指标 |
 | POST | `/v1/admin/reload` | 热加载策略 |
+
+重置请求中的实例编号格式错误时返回 `400`，实例不存在时返回 `404`，实例
+不处于运行状态时返回 `422`。运行中的实例返回 `501`，且不会改变其生命周期
+状态，也不会改变其运行环境和存储资源。需要全新沙箱的客户端必须先成功销毁
+旧沙箱，再创建新沙箱；`501` 不表示重置已经完成。
+
+升级兼容仅接受并忽略以下内容完全一致的 daemon `[pool]` 配置段：
+
+```toml
+[pool]
+default_warm_ttl = "30m"
+gc_interval = "5m"
+```
+
+可以接受的策略配置必须恰好包含六个字段，并且属于以下两个软件包内置策略之一：
+
+| 策略名称 | 工作负载类型 | `min` | `target` | `max` |
+|---|---|---:|---:|---:|
+| `agent-rl-default` | `agent-rl` | 4 | 16 | 64 |
+| `agent-tool-default` | `agent-tool` | 2 | 8 | 32 |
+
+两行都要求 `enabled = true`、`warm_ttl = "30m"` 和
+`reset_mode = "full-recreate"`。缺少或增加字段、改变值或类型、策略名称或工作
+负载类型不同、任何其他 `[pool]` 配置，以及所有 `storage.pool_size` 或
+`storage.prefork` 设置都会被拒绝。接受这些值不会启用实例复用；序列化配置时也会
+省略这些值。
+
+Blaze 仍可读取旧版本写入的 `Reset`、`Warm` 和 `start_path = "warm"` 持久化
+值。启动恢复会把包含这些值的未终止记录作为清理对象，且不会复用这些记录。
+清理失败时，内存记录会保留为 `RecoveryRequired`，并尝试持久化该状态。如果
+持久化也失败，启动警告会记录附加错误，磁盘上的记录可能仍是先前状态。其他已通过
+校验的记录仍会继续恢复。
 
 `/v1/templates` 是唯一面向运维人员的 template catalog。导入条目目前不会让
 sandbox create 自动选择它；后续 create 支持会从同一个 catalog 解析可选名称。
@@ -180,13 +219,14 @@ daemon 才会逐个处理未结束的 sandbox。后续逐项恢复期间，如�
 也会持有进程内 ownership map 锁直至发布。绕过 state root 锁直接修改文件的外部
 进程不在支持范围内。
 
-写入协调、清单发布和失败边界参见
-[生命周期状态一致性设计](docs/design/lifecycle-state-consistency_zh.md)。
+写入协调、清单发布、重置拒绝、旧状态清理和失败边界参见
+[生命周期状态一致性与兼容性设计](docs/design/lifecycle-state-consistency_zh.md)。
 
 操作记录只保存操作类型和开始时间，不记录每个资源步骤是否已经完成。中断的
 创建会被清理而不是从原位置继续，重启后也不会接管先前的后端进程。恢复失败
-后目前没有后台循环自动重试。checkpoint 和 reset 接口保持原有的元数据状态
-变化；这里的恢复流程没有增加后端 snapshot 或 restore 操作。
+后目前没有后台循环自动重试。检查点接口保持原有的元数据状态变化。重置接口
+在运行环境和存储能够一起重置前不可用；这里的恢复流程没有增加后端快照或
+恢复操作。
 
 ### Guest 操作
 
@@ -197,13 +237,13 @@ daemon 才会逐个处理未结束的 sandbox。后续逐项恢复期间，如�
 
 #### 健康检查
 
-`GET /v1/health` 返回 daemon 状态，包含存储池就绪信息：
+`GET /v1/health` 返回 daemon 状态，包含存储容量信息：
 
 ```json
 {
   "status": "ok",
   "version": "0.3.0",
-  "storage_pool": { "ready": 0, "capacity": 0, "pending": 0 }
+  "storage_pool": { "ready": 0, "capacity": 0, "pending": 0, "quarantined": 0 }
 }
 ```
 
@@ -212,7 +252,7 @@ daemon 才会逐个处理未结束的 sandbox。后续逐项恢复期间，如�
 ```
 src/blaze/
 ├── crates/
-│   ├── blaze-core/   # 库：策略、生命周期、池、模板、内核、配置
+│   ├── blaze-core/   # 库：策略、生命周期、模板、内核、配置
 │   └── blazed/       # 二进制：daemon、API server、spawner、指标
 ├── examples/         # config.toml、policies/
 ├── dist/             # blazed.service、blaze.spec、tmpfiles

@@ -47,31 +47,6 @@ templates = []
 fallback_on_missing_hook = "fail"
 
 # ---------------------------------------------------------------------------
-# Warm-pool configuration.
-# ---------------------------------------------------------------------------
-[pool]
-# Whether the warm pool is enabled for this policy.  Default: false.
-enabled = true
-
-# Minimum number of warm instances to maintain.  Default: 0.
-min = 2
-
-# Target pool size the autoscaler aims for.  Default: 0.
-target = 8
-
-# Maximum pool size (hard cap).  Default: 0.
-max = 32
-
-# Time-to-live for idle warm instances before the GC reclaims them.
-# Format: duration string (e.g. "30m", "1h").  Default: "30m".
-warm_ttl = "30m"
-
-# How the pool resets an instance after use.
-# Options: "mm-template", "overlayfs-rollback", "full-recreate".
-# Default: "mm-template".
-reset_mode = "full-recreate"
-
-# ---------------------------------------------------------------------------
 # Resource quotas (cgroup v2 knobs). Optional; omit to leave uncapped.
 # ---------------------------------------------------------------------------
 [quota]

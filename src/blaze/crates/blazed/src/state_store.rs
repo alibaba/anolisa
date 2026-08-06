@@ -999,7 +999,6 @@ impl OwnedRunDir {
 #[cfg(test)]
 mod tests {
     use blaze_core::backend::BackendKind;
-    use blaze_core::lifecycle::StartPath;
     use blaze_core::policy::WorkloadClass;
 
     use super::*;
@@ -1009,7 +1008,6 @@ mod tests {
             BackendKind::Mock,
             WorkloadClass::AgentTool,
             "sha256:test".into(),
-            StartPath::Cold,
             "default".into(),
         )
     }

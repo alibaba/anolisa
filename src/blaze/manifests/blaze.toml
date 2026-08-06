@@ -37,8 +37,3 @@ runtime = ["firecracker", "bubblewrap"]
 name = "function_tier"
 label = "Linux-sandbox function tier backend"
 default = true
-
-[[features]]
-name = "warm_pool"
-label = "Warm sandbox pool management"
-default = true

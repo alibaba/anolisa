@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Recoverable sandbox create, warm activation, destroy, and startup cleanup.
+//! Recoverable sandbox create, destroy, and startup cleanup.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -8,11 +8,8 @@ use std::time::Duration;
 
 use blaze_core::BlazeError;
 use blaze_core::backend::{BackendKind, SpawnRequest};
-use blaze_core::lifecycle::{
-    BackendOwnership, OperationKind, SandboxInstance, SandboxState, StartPath,
-};
+use blaze_core::lifecycle::{BackendOwnership, OperationKind, SandboxInstance, SandboxState};
 use blaze_core::policy::RuntimeDecision;
-use blaze_core::pool::{PoolKey, PoolManager};
 use blaze_core::storage::{AcquireOpts, StorageProvider, StorageSlot};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -34,7 +31,7 @@ const GUEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct CreateSandbox {
     /// Policy decision for this request.
     pub decision: RuntimeDecision,
-    /// Image identity used by storage and warm-pool matching.
+    /// Image identity used by storage allocation.
     pub image_digest: String,
     /// Concrete backend selected from the policy and daemon availability.
     pub runtime_backend: BackendKind,
@@ -74,7 +71,7 @@ pub struct ReconcileReport {
 /// Owns durable lifecycle metadata and non-serializable runtime handles.
 ///
 /// The maps are shared with read-only and non-lifecycle API paths. All
-/// create, warm activation, destroy, and restart cleanup mutations enter
+/// Create, destroy, and restart cleanup mutations enter
 /// through this type and are serialized by a per-sandbox async lock.
 pub struct SandboxManager {
     instances: Arc<Mutex<HashMap<Uuid, SandboxInstance>>>,
@@ -82,7 +79,6 @@ pub struct SandboxManager {
     operation_locks: Mutex<HashMap<Uuid, Arc<AsyncMutex<()>>>>,
     pub(super) storage_sync_inflight: Arc<Mutex<HashSet<Uuid>>>,
     pub(super) storage_sync_permits: Arc<Semaphore>,
-    pool: Arc<Mutex<PoolManager>>,
     spawners: Arc<SpawnerRegistry>,
     active_backend: BackendKind,
     storage: Arc<dyn StorageProvider>,
@@ -96,7 +92,6 @@ pub struct SandboxManager {
 /// Construction inputs grouped to keep daemon wiring explicit.
 pub struct SandboxManagerInit {
     pub instances: HashMap<Uuid, SandboxInstance>,
-    pub pool: PoolManager,
     pub spawners: SpawnerRegistry,
     pub active_backend: BackendKind,
     pub storage: Arc<dyn StorageProvider>,
@@ -110,7 +105,6 @@ pub struct SandboxManagerInit {
 /// ownership, such as checkpoint and reset.
 pub struct SandboxManagerResources {
     pub instances: Arc<Mutex<HashMap<Uuid, SandboxInstance>>>,
-    pub pool: Arc<Mutex<PoolManager>>,
     pub metrics: Arc<Metrics>,
 }
 
@@ -119,7 +113,6 @@ impl SandboxManager {
     pub fn new(init: SandboxManagerInit) -> (Self, SandboxManagerResources) {
         let SandboxManagerInit {
             instances,
-            pool,
             spawners,
             active_backend,
             storage,
@@ -135,11 +128,9 @@ impl SandboxManager {
             .collect();
         let instances = Arc::new(Mutex::new(instances));
         let backend_instances = Arc::new(Mutex::new(HashMap::new()));
-        let pool = Arc::new(Mutex::new(pool));
         let metrics = Arc::new(Metrics::new());
         let resources = SandboxManagerResources {
             instances: instances.clone(),
-            pool: pool.clone(),
             metrics: metrics.clone(),
         };
         (
@@ -151,7 +142,6 @@ impl SandboxManager {
                 // The periodic worker is sequential. Retain that bound when a
                 // timed-out provider operation has to finish in the background.
                 storage_sync_permits: Arc::new(Semaphore::new(1)),
-                pool,
                 spawners: Arc::new(spawners),
                 active_backend,
                 storage,
@@ -262,26 +252,12 @@ impl SandboxManager {
             .map_err(BlazeDaemonError::from)
     }
 
-    /// Create a cold sandbox or activate a compatible warm runtime.
+    /// Create a sandbox from a fresh runtime allocation.
     pub async fn create(&self, request: CreateSandbox) -> Result<CreateSandboxResult> {
-        let pool_key = PoolKey::new(
-            request.runtime_backend,
-            request.decision.workload_class,
-            request.image_digest.clone(),
-        );
-        if request.decision.pool_eligible {
-            if let Some(result) = self.activate_warm(&pool_key).await? {
-                self.metrics.inc(&self.metrics.pool_hits);
-                return Ok(result);
-            }
-            self.metrics.inc(&self.metrics.pool_misses);
-        }
-
         let mut instance = SandboxInstance::new(
             request.runtime_backend,
             request.decision.workload_class,
             request.image_digest,
-            StartPath::Cold,
             request.decision.policy_name.clone(),
         );
         let operation_lock = self.operation_lock(instance.id);
@@ -497,269 +473,6 @@ impl SandboxManager {
             instance,
             selected_backend: actual_backend,
         })
-    }
-
-    async fn activate_warm(&self, key: &PoolKey) -> Result<Option<CreateSandboxResult>> {
-        let candidate = self.pool.lock().map_err(|_| poisoned("pool"))?.lookup(key);
-        let Some(id) = candidate else {
-            return Ok(None);
-        };
-        let operation_lock = self.operation_lock(id);
-        let _operation = operation_lock.lock().await;
-
-        let instance = self
-            .instances
-            .lock()
-            .map_err(|_| poisoned("instances"))?
-            .get(&id)
-            .cloned();
-        let backend = self
-            .backend_instances
-            .lock()
-            .map_err(|_| poisoned("backend_instances"))?
-            .get(&id)
-            .cloned();
-
-        let invalid_reason = match (&instance, &backend) {
-            (None, _) => Some("lifecycle metadata is missing".to_string()),
-            (_, None) => Some("backend owner is missing".to_string()),
-            (Some(instance), Some(_))
-                if instance.state != SandboxState::Warm || instance.operation.is_some() =>
-            {
-                Some(format!("lifecycle state is {}", instance.state))
-            }
-            (Some(instance), Some(backend)) if backend.backend() != instance.backend => {
-                Some(format!(
-                    "backend owner is {}, metadata is {}",
-                    backend.backend(),
-                    instance.backend
-                ))
-            }
-            (_, Some(backend)) => match backend.try_wait().await {
-                Ok(None) => None,
-                Ok(Some(status)) => Some(format!("backend exited: {status:?}")),
-                Err(error) => Some(format!("backend liveness check failed: {error}")),
-            },
-        };
-        if let Some(reason) = invalid_reason {
-            self.quarantine_warm(key, id, instance, backend, &reason)
-                .await;
-            return Ok(None);
-        }
-
-        let original = instance.expect("validated warm metadata");
-        match self.storage.reconstruct(&id.to_string()).await {
-            Ok(_) => {}
-            Err(error @ BlazeError::StorageIncomplete { .. }) => {
-                self.quarantine_warm(
-                    key,
-                    id,
-                    Some(original),
-                    backend,
-                    &format!("storage validation failed: {error}"),
-                )
-                .await;
-                return Ok(None);
-            }
-            Err(error) => {
-                return Err(self.restore_warm_claim(key, original, error.into()));
-            }
-        }
-
-        let mut activating = original.clone();
-        activating.begin_operation(OperationKind::Create);
-        if let Err(error) = crate::failpoint::state("warm-intent-state-commit")
-            .and_then(|_| self.state_store.persist(&activating))
-        {
-            return Err(self.restore_warm_claim(key, original, error));
-        }
-        if let Some(error) = self.retain_instance(activating.clone()) {
-            return Err(self.restore_warm_claim(key, original, BlazeDaemonError::Internal(error)));
-        }
-
-        crate::failpoint::pause("warm-before-state-commit").await;
-        let selected_backend = backend.expect("validated warm backend").backend();
-        if let Err(error) = activating
-            .transition(SandboxState::Creating)
-            .and_then(|_| activating.transition(SandboxState::Running))
-        {
-            return Err(self.restore_warm_claim(key, original, error.into()));
-        }
-        activating.finish_operation();
-        if let Err(error) = crate::failpoint::state("warm-final-state-commit")
-            .and_then(|_| self.state_store.persist(&activating))
-        {
-            return Err(self.restore_warm_claim(key, original, error));
-        }
-        if let Some(error) = self.retain_instance(activating.clone()) {
-            return Err(self.restore_warm_claim(key, original, BlazeDaemonError::Internal(error)));
-        }
-        Ok(Some(CreateSandboxResult {
-            instance: activating,
-            selected_backend,
-        }))
-    }
-
-    fn restore_warm_claim(
-        &self,
-        key: &PoolKey,
-        instance: SandboxInstance,
-        cause: BlazeDaemonError,
-    ) -> BlazeDaemonError {
-        let id = instance.id;
-        let mut errors = Vec::new();
-        if let Err(error) = self.state_store.persist(&instance) {
-            errors.push(format!("restore warm state persistence failed: {error}"));
-        }
-        if let Some(error) = self.retain_instance(instance) {
-            errors.push(error);
-        }
-        match self.pool.lock() {
-            Ok(mut pool) => pool.restore_lookup(key.clone(), id),
-            Err(poisoned) => {
-                poisoned.into_inner().restore_lookup(key.clone(), id);
-                errors.push("pool lock poisoned while restoring warm claim".to_string());
-            }
-        }
-        let details = if errors.is_empty() {
-            "warm claim restored for retry".to_string()
-        } else {
-            format!("warm claim restored with errors: {}", errors.join("; "))
-        };
-        BlazeDaemonError::RecoveryRequired(format!("{cause}; instance {id}: {details}"))
-    }
-
-    async fn quarantine_warm(
-        &self,
-        key: &PoolKey,
-        id: Uuid,
-        mut instance: Option<SandboxInstance>,
-        backend: Option<DynBackendInstance>,
-        reason: &str,
-    ) {
-        match self.pool.lock() {
-            Ok(mut pool) => pool.quarantine(key, id),
-            Err(poisoned) => poisoned.into_inner().quarantine(key, id),
-        }
-        tracing::warn!(instance = %id, reason, "warm instance validation failed");
-
-        let Some(metadata) = instance.as_mut() else {
-            if let Some(backend) = backend.as_ref()
-                && let Err(error) = backend.kill().await
-            {
-                tracing::error!(
-                    instance = %id,
-                    %error,
-                    "quarantined backend cleanup failed"
-                );
-            }
-            tracing::error!(
-                instance = %id,
-                "quarantined lifecycle metadata missing; retaining storage"
-            );
-            return;
-        };
-        metadata.begin_operation(OperationKind::Destroy);
-        if let Err(error) = self.state_store.persist(metadata) {
-            tracing::error!(instance = %id, %error, "quarantine intent commit failed");
-            return;
-        }
-        if let Some(error) = self.retain_instance(metadata.clone()) {
-            tracing::error!(instance = %id, %error, "quarantine intent retention failed");
-            return;
-        }
-
-        let backend_stopped = match backend.as_ref() {
-            Some(backend) => match backend.kill().await {
-                Ok(()) => true,
-                Err(error) => {
-                    tracing::error!(instance = %id, %error, "quarantined backend cleanup failed");
-                    false
-                }
-            },
-            None if matches!(
-                metadata.backend_ownership,
-                BackendOwnership::NotStarted | BackendOwnership::Stopped
-            ) =>
-            {
-                true
-            }
-            None => match self.spawners.get(metadata.backend) {
-                Some(spawner) => match self.state_store.run_dir(id) {
-                    Ok(run_dir) => match spawner.cleanup_orphan(id, &run_dir).await {
-                        Ok(()) => true,
-                        Err(error) => {
-                            tracing::error!(
-                                instance = %id,
-                                %error,
-                                "quarantined orphan cleanup failed"
-                            );
-                            false
-                        }
-                    },
-                    Err(error) => {
-                        tracing::error!(
-                            instance = %id,
-                            %error,
-                            "quarantined run-directory ownership failed"
-                        );
-                        false
-                    }
-                },
-                None => {
-                    tracing::error!(
-                        instance = %id,
-                        backend = %metadata.backend,
-                        "quarantined backend has no recovery spawner"
-                    );
-                    false
-                }
-            },
-        };
-        if !backend_stopped {
-            let _ = self.mark_recovery(id);
-            return;
-        }
-
-        metadata.backend_ownership = BackendOwnership::Stopped;
-        if let Err(error) = self.state_store.persist(metadata) {
-            tracing::error!(instance = %id, %error, "quarantined stop state commit failed");
-            let _ = self.mark_recovery(id);
-            return;
-        }
-        if let Some(error) = self.retain_instance(metadata.clone()) {
-            tracing::error!(instance = %id, %error, "quarantined stop state retention failed");
-            let _ = self.mark_recovery(id);
-            return;
-        }
-        if let Err(error) = self.storage.release_by_id(&id.to_string()).await {
-            tracing::error!(instance = %id, %error, "quarantined storage cleanup failed");
-            let _ = self.mark_recovery(id);
-            return;
-        }
-
-        if metadata.state != SandboxState::Destroyed
-            && let Err(error) = metadata.transition(SandboxState::Destroyed)
-        {
-            tracing::error!(instance = %id, %error, "quarantined lifecycle cleanup failed");
-            let _ = self.mark_recovery(id);
-            return;
-        }
-        metadata.finish_operation();
-        if let Err(error) = self.state_store.persist(metadata) {
-            tracing::error!(instance = %id, %error, "quarantined state commit failed");
-            let _ = self.mark_recovery(id);
-            return;
-        }
-        let _ = self.retain_instance(metadata.clone());
-        match self.backend_instances.lock() {
-            Ok(mut instances) => {
-                instances.remove(&id);
-            }
-            Err(poisoned) => {
-                poisoned.into_inner().remove(&id);
-            }
-        }
     }
 
     /// Idempotently destroy one sandbox and its owned runtime resources.

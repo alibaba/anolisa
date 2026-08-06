@@ -9,7 +9,6 @@ use blaze_core::backend::BackendKind;
 use blaze_core::config::{DaemonConfig, PolicyLoadErrorMode, StorageSyncSchedule};
 use blaze_core::kernel::HookRegistry;
 use blaze_core::policy::PolicyEngine;
-use blaze_core::pool::PoolManager;
 use blaze_core::storage::StorageProvider;
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -50,6 +49,12 @@ fn load_daemon_config(config_path: &Path) -> Result<LoadedDaemonConfig> {
     let mut config: DaemonConfig = toml::from_str(&raw).map_err(blaze_core::BlazeError::from)?;
     absolutize_backend_paths(&mut config)?;
     config.validate()?;
+    if config.pool.is_some() {
+        tracing::warn!(
+            path = %config_path.display(),
+            "ignoring legacy packaged [pool] defaults; remove this section because reusable-instance management is unavailable"
+        );
+    }
     tracing::info!(?config_path, "loaded daemon config");
     Ok(LoadedDaemonConfig { config, source })
 }
@@ -87,7 +92,6 @@ async fn run_loaded_config(loaded: LoadedDaemonConfig) -> Result<()> {
     // storage initialization so later code cannot reopen a replacement path.
     let state_store = StateStore::open(config.daemon.state_dir.clone())?;
     let policy = load_policy_engine(&config, policy_load)?;
-    let pool = PoolManager::new();
     let hook = HookRegistry::new();
     let network_required = policy.policies().iter().any(|policy| {
         policy
@@ -134,7 +138,6 @@ async fn run_loaded_config(loaded: LoadedDaemonConfig) -> Result<()> {
     let state = Arc::new(ServerState::build_with_store(
         config,
         policy,
-        pool,
         hook,
         spawners,
         active_backend,
@@ -932,6 +935,23 @@ backend_priority = ["bubblewrap"]
             loaded.config.backends.get("future-backend"),
             Some(&current_dir.join(relative_binary))
         );
+    }
+
+    #[test]
+    fn config_load_accepts_a_preserved_packaged_pool_section() {
+        let current_dir = std::env::current_dir().expect("current directory");
+        let temp = tempfile::tempdir_in(&current_dir).expect("tempdir below current directory");
+        let config_path = temp.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[daemon]\nlog_level = \"debug\"\n\n[pool]\ndefault_warm_ttl = \"30m\"\ngc_interval = \"5m\"\n",
+        )
+        .expect("write legacy packaged configuration");
+
+        let loaded = load_daemon_config(&config_path).expect("load preserved package config");
+
+        assert!(loaded.config.pool.is_some());
+        assert_eq!(loaded.config.daemon.log_level, "debug");
     }
 
     #[tokio::test]

@@ -2,7 +2,7 @@
 //! Generic storage provider abstraction.
 //!
 //! Different providers may offer different performance characteristics
-//! (warm pools, copy-on-write, content-addressable dedup) but present
+//! (copy-on-write, content-addressable dedup) but present
 //! a uniform interface to the daemon layer.
 
 use std::path::PathBuf;
@@ -32,13 +32,13 @@ pub struct StorageSlot {
     pub instance_dir: PathBuf,
 }
 
-/// Pool readiness status.
+/// Storage provider capacity reported by the health endpoint.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct PoolStatus {
     pub ready: usize,
     pub capacity: usize,
     pub pending: usize,
-    /// Slots retained because backend or storage cleanup must be retried.
+    /// Slots retained because cleanup must be retried.
     pub quarantined: usize,
 }
 
@@ -101,7 +101,7 @@ pub trait StorageProvider: Send + Sync {
     /// Probe whether this provider is available in the current environment.
     async fn probe(&self) -> Result<bool>;
 
-    /// Acquire a ready storage slot (may come from a warm pool).
+    /// Acquire a storage slot for one sandbox.
     async fn acquire(
         &self,
         opts: &AcquireOpts,
@@ -136,9 +136,6 @@ pub trait StorageProvider: Send + Sync {
     /// synchronization or cleanup must remain safe after completion.
     async fn sync_artifacts(&self, slot: &StorageSlot) -> Result<()>;
 
-    /// Query warm pool status.
+    /// Return the provider's current storage capacity.
     fn pool_status(&self) -> PoolStatus;
-
-    /// Drain all ready slots from the warm pool.
-    async fn drain_pool(&self) -> Result<usize>;
 }

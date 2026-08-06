@@ -450,11 +450,8 @@ mod tests {
     use blaze_core::backend::{BackendKind, SpawnRequest};
     use blaze_core::config::TemplateSection;
     use blaze_core::error::{BlazeError, Result as CoreResult};
-    use blaze_core::lifecycle::{
-        BackendOwnership, OperationKind, SandboxInstance, SandboxState, StartPath,
-    };
+    use blaze_core::lifecycle::{BackendOwnership, OperationKind, SandboxInstance, SandboxState};
     use blaze_core::policy::{BackendConfigs, WorkloadClass};
-    use blaze_core::pool::PoolManager;
     use blaze_core::storage::{
         AcquireOpts, PoolStatus, StorageAcquireError, StorageProvider, StorageSlot,
     };
@@ -637,10 +634,6 @@ mod tests {
         fn pool_status(&self) -> PoolStatus {
             self.inner.pool_status()
         }
-
-        async fn drain_pool(&self) -> CoreResult<usize> {
-            self.inner.drain_pool().await
-        }
     }
 
     fn manager(
@@ -665,7 +658,6 @@ mod tests {
         spawners.insert(BackendKind::Mock, Arc::new(MockSpawner));
         let (manager, resources) = SandboxManager::new(SandboxManagerInit {
             instances: HashMap::new(),
-            pool: PoolManager::new(),
             spawners,
             active_backend: BackendKind::Mock,
             storage,
@@ -725,7 +717,6 @@ mod tests {
             BackendKind::Mock,
             WorkloadClass::AgentTool,
             "sha256:sync-test".into(),
-            StartPath::Cold,
             "sync-test".into(),
         );
         metadata.id = id;

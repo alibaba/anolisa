@@ -8,7 +8,6 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use base64::Engine;
@@ -17,7 +16,6 @@ use blaze_core::backend::{BackendKind, BackendStatus, select_backend};
 use blaze_core::kernel::HookKind;
 use blaze_core::lifecycle::{SandboxInstance, SandboxState, StartPath};
 use blaze_core::policy::{ImageMetadata, RuntimeDecision, WorkloadClass};
-use blaze_core::pool::{PoolConfig, PoolKey};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Body, Bytes, Incoming};
 use hyper::header::CONTENT_TYPE;
@@ -161,12 +159,10 @@ async fn dispatch(
         ("DELETE", ["v1", "instances", id])
         | ("DELETE", ["v1", "sandboxes", id])
         | ("POST", ["v1", "instances", id, "destroy"]) => destroy_instance(state, id).await,
-        ("GET", ["v1", "pools"]) => list_pools(state),
-        ("GET", ["v1", "pools", backend, class]) => pool_status(state, backend, class),
-        ("POST", ["v1", "pools", backend, class, "drain"]) => drain_pool(state, backend, class),
-        ("PUT", ["v1", "pools", backend, class, "sizing"]) => {
-            resize_pool(state, backend, class, &body)
-        }
+        ("GET", ["v1", "pools"])
+        | ("GET", ["v1", "pools", _, _])
+        | ("POST", ["v1", "pools", _, _, "drain"])
+        | ("PUT", ["v1", "pools", _, _, "sizing"]) => pool_operation_unavailable(),
         ("GET", ["v1", "templates"]) => list_templates(state).await,
         ("GET", ["v1", "templates", name]) => get_template(state, name).await,
         ("POST", ["v1", "templates", "import"]) => import_template(state, &body).await,
@@ -367,34 +363,24 @@ async fn reset_instance(state: &Arc<ServerState>, id: &str) -> Result<Response<F
     let uuid = parse_uuid(id)?;
     let operation_lock = state.operation_lock(uuid);
     let _operation = operation_lock.lock().await;
-    let mut map = state
+    let map = state
         .instances
         .lock()
         .map_err(|_| BlazeDaemonError::Internal("instances lock poisoned".into()))?;
     let inst = map
-        .get_mut(&uuid)
+        .get(&uuid)
         .ok_or_else(|| BlazeDaemonError::NotFound(format!("instance {uuid}")))?;
-    // TODO(v0.2): perform actual data-plane reset (full-recreate or
-    // mm-template rollback per policy reset_mode) before returning to
-    // pool. Current implementation is control-plane state only.
-    inst.transition(SandboxState::Reset)?;
-    inst.transition(SandboxState::Warm)?;
-    state.state_store.persist(inst)?;
-
-    // return to pool keyed on (backend, class, image_digest)
-    let key = PoolKey::new(inst.backend, inst.workload_class, inst.image_digest.clone());
-    let inst_id = inst.id;
-    let snapshot = inst.clone();
-    drop(map);
-    {
-        let mut pool = state
-            .pool
-            .lock()
-            .map_err(|_| BlazeDaemonError::Internal("pool lock poisoned".into()))?;
-        pool.return_to_pool(key, inst_id);
+    if inst.state != SandboxState::Running {
+        return Err(blaze_core::BlazeError::InvalidStateTransition {
+            from: inst.state.to_string(),
+            to: SandboxState::Reset.to_string(),
+        }
+        .into());
     }
-    state.metrics.inc(&state.metrics.instances_resets);
-    json_ok(&snapshot)
+
+    Err(BlazeDaemonError::UnsupportedOperation(format!(
+        "instance {uuid} cannot be reset until its runtime and storage can be reset together"
+    )))
 }
 
 async fn destroy_instance(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>>> {
@@ -513,139 +499,10 @@ fn decode_guest_file(encoded: &str, limit: usize) -> Result<Vec<u8>> {
     Ok(data)
 }
 
-// ---------------------------------------------------------------------------
-// Pools
-// ---------------------------------------------------------------------------
-
-fn list_pools(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
-    let pool = state
-        .pool
-        .lock()
-        .map_err(|_| BlazeDaemonError::Internal("pool lock poisoned".into()))?;
-    let listed: Vec<_> = pool
-        .list_pools()
-        .into_iter()
-        .map(|(k, s)| {
-            json!({
-                "key": {
-                    "backend": k.backend.as_str(),
-                    "workload_class": k.workload_class.as_str(),
-                    "image_digest": k.image_digest,
-                },
-                "stats": s,
-            })
-        })
-        .collect();
-    json_ok(&listed)
-}
-
-fn pool_status(
-    state: &Arc<ServerState>,
-    backend: &str,
-    class: &str,
-) -> Result<Response<Full<Bytes>>> {
-    let pool = state
-        .pool
-        .lock()
-        .map_err(|_| BlazeDaemonError::Internal("pool lock poisoned".into()))?;
-    let backend_kind = BackendKind::from_str(backend)
-        .map_err(|e| BlazeDaemonError::BadRequest(format!("backend: {e}")))?;
-    let class_kind = WorkloadClass::from_str(class)
-        .map_err(|e| BlazeDaemonError::BadRequest(format!("class: {e}")))?;
-
-    let listed: Vec<_> = pool
-        .list_pools()
-        .into_iter()
-        .filter(|(k, _)| k.backend == backend_kind && k.workload_class == class_kind)
-        .map(|(k, s)| {
-            json!({
-                "key": {
-                    "backend": k.backend.as_str(),
-                    "workload_class": k.workload_class.as_str(),
-                    "image_digest": k.image_digest,
-                },
-                "stats": s,
-            })
-        })
-        .collect();
-    json_ok(&listed)
-}
-
-fn drain_pool(
-    state: &Arc<ServerState>,
-    backend: &str,
-    class: &str,
-) -> Result<Response<Full<Bytes>>> {
-    let backend_kind = BackendKind::from_str(backend)
-        .map_err(|e| BlazeDaemonError::BadRequest(format!("backend: {e}")))?;
-    let class_kind = WorkloadClass::from_str(class)
-        .map_err(|e| BlazeDaemonError::BadRequest(format!("class: {e}")))?;
-    // TODO(v0.2): after removing instance IDs from the pool, walk
-    // spawn_handles and kill the underlying processes so that drain
-    // actually frees host resources.
-    let drained = {
-        let mut pool = state
-            .pool
-            .lock()
-            .map_err(|_| BlazeDaemonError::Internal("pool lock poisoned".into()))?;
-        pool.drain(backend_kind, class_kind)
-    };
-    json_ok(&json!({
-        "drained": drained,
-        "count": drained.len(),
-    }))
-}
-
-#[derive(Debug, Deserialize)]
-struct ResizeReq {
-    #[serde(default)]
-    enabled: Option<bool>,
-    min: u32,
-    target: u32,
-    max: u32,
-    #[serde(default)]
-    image_digest: Option<String>,
-    #[serde(default)]
-    warm_ttl_secs: Option<u64>,
-}
-
-fn resize_pool(
-    state: &Arc<ServerState>,
-    backend: &str,
-    class: &str,
-    body: &[u8],
-) -> Result<Response<Full<Bytes>>> {
-    let req: ResizeReq = serde_json::from_slice(body)
-        .map_err(|e| BlazeDaemonError::BadRequest(format!("invalid resize body: {e}")))?;
-    let backend_kind = BackendKind::from_str(backend)
-        .map_err(|e| BlazeDaemonError::BadRequest(format!("backend: {e}")))?;
-    let class_kind = WorkloadClass::from_str(class)
-        .map_err(|e| BlazeDaemonError::BadRequest(format!("class: {e}")))?;
-    let key = PoolKey::new(
-        backend_kind,
-        class_kind,
-        req.image_digest.clone().unwrap_or_default(),
-    );
-    let cfg = PoolConfig {
-        enabled: req.enabled.unwrap_or(true),
-        min: req.min,
-        target: req.target,
-        max: req.max,
-        warm_ttl: std::time::Duration::from_secs(req.warm_ttl_secs.unwrap_or(30 * 60)),
-        reset_mode: blaze_core::policy::ResetMode::default(),
-    };
-    {
-        let mut pool = state
-            .pool
-            .lock()
-            .map_err(|_| BlazeDaemonError::Internal("pool lock poisoned".into()))?;
-        pool.resize(&key, cfg);
-    }
-    json_ok(&json!({
-        "resized": true,
-        "backend": backend,
-        "class": class,
-    }))
+fn pool_operation_unavailable() -> Result<Response<Full<Bytes>>> {
+    Err(BlazeDaemonError::UnsupportedOperation(
+        "warm pool management is not implemented".to_string(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -784,9 +641,8 @@ mod tests {
     use blaze_core::lifecycle::{BackendOwnership, OperationKind};
     use blaze_core::policy::{
         BackendConfigs, FallbackOnMissingHook, PolicyEngine, PolicyFile, PolicyHooks, PolicyMatch,
-        PolicyPool, PolicySelect, ResetMode, WorkloadClass,
+        PolicySelect, WorkloadClass,
     };
-    use blaze_core::pool::PoolManager;
     use blaze_core::storage::{
         AcquireOpts, PoolStatus, StorageAcquireError, StorageProvider, StorageSlot,
     };
@@ -823,7 +679,7 @@ mod tests {
         config
     }
 
-    fn test_policy(kind: BackendKind, pooled: bool) -> PolicyFile {
+    fn test_policy(kind: BackendKind) -> PolicyFile {
         PolicyFile {
             manifest_version: 1,
             policy_name: "ownership-test".into(),
@@ -838,14 +694,7 @@ mod tests {
                 templates: vec![],
                 fallback_on_missing_hook: FallbackOnMissingHook::default(),
             },
-            pool: pooled.then_some(PolicyPool {
-                enabled: true,
-                min: 0,
-                target: 0,
-                max: 1,
-                warm_ttl: "30m".into(),
-                reset_mode: ResetMode::FullRecreate,
-            }),
+            pool: None,
             checkpoint: None,
             quota: None,
             hooks: PolicyHooks::default(),
@@ -873,7 +722,6 @@ mod tests {
             ServerState::build(
                 config,
                 PolicyEngine::with_policies(vec![policy]),
-                PoolManager::new(),
                 HookRegistry::new(),
                 registry,
                 active_backend,
@@ -884,7 +732,7 @@ mod tests {
     }
 
     #[cfg(feature = "test-failpoints")]
-    fn mock_state(temp: &tempfile::TempDir, pooled: bool) -> Arc<ServerState> {
+    fn mock_state(temp: &tempfile::TempDir) -> Arc<ServerState> {
         let config = test_config(temp);
         let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
             config.storage.images_dir.clone(),
@@ -892,7 +740,7 @@ mod tests {
         ));
         build_test_state(
             config,
-            test_policy(BackendKind::Mock, pooled),
+            test_policy(BackendKind::Mock),
             spawners(BackendKind::Mock, Arc::new(MockSpawner)),
             BackendKind::Mock,
             storage,
@@ -900,7 +748,7 @@ mod tests {
     }
 
     #[cfg(feature = "test-failpoints")]
-    fn guest_mock_state(temp: &tempfile::TempDir, pooled: bool) -> Arc<ServerState> {
+    fn guest_mock_state(temp: &tempfile::TempDir) -> Arc<ServerState> {
         let config = test_config(temp);
         let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
             config.storage.images_dir.clone(),
@@ -908,7 +756,7 @@ mod tests {
         ));
         build_test_state(
             config,
-            test_policy(BackendKind::Mock, pooled),
+            test_policy(BackendKind::Mock),
             spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
             BackendKind::Mock,
             storage,
@@ -974,63 +822,6 @@ mod tests {
         (status, value)
     }
 
-    struct TransientReconstructStorage {
-        inner: FileStorageProvider,
-        fail_reconstruct: AtomicBool,
-    }
-
-    impl TransientReconstructStorage {
-        fn new(images_dir: std::path::PathBuf, instances_dir: std::path::PathBuf) -> Self {
-            Self {
-                inner: FileStorageProvider::with_images(images_dir, instances_dir),
-                fail_reconstruct: AtomicBool::new(false),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl StorageProvider for TransientReconstructStorage {
-        async fn probe(&self) -> blaze_core::Result<bool> {
-            self.inner.probe().await
-        }
-
-        async fn acquire(
-            &self,
-            opts: &AcquireOpts,
-        ) -> std::result::Result<StorageSlot, StorageAcquireError> {
-            self.inner.acquire(opts).await
-        }
-
-        async fn release(&self, slot: StorageSlot) -> blaze_core::Result<()> {
-            self.inner.release(slot).await
-        }
-
-        async fn release_by_id(&self, instance_id: &str) -> blaze_core::Result<()> {
-            self.inner.release_by_id(instance_id).await
-        }
-
-        async fn reconstruct(&self, instance_id: &str) -> blaze_core::Result<StorageSlot> {
-            if self.fail_reconstruct.load(Ordering::Acquire) {
-                return Err(BlazeError::StorageError {
-                    msg: "transient reconstruct failure".into(),
-                });
-            }
-            self.inner.reconstruct(instance_id).await
-        }
-
-        async fn sync_artifacts(&self, slot: &StorageSlot) -> blaze_core::Result<()> {
-            self.inner.sync_artifacts(slot).await
-        }
-
-        fn pool_status(&self) -> PoolStatus {
-            self.inner.pool_status()
-        }
-
-        async fn drain_pool(&self) -> blaze_core::Result<usize> {
-            self.inner.drain_pool().await
-        }
-    }
-
     struct OwnershipObservingStorage {
         inner: FileStorageProvider,
         state_dir: PathBuf,
@@ -1077,10 +868,6 @@ mod tests {
 
         fn pool_status(&self) -> PoolStatus {
             self.inner.pool_status()
-        }
-
-        async fn drain_pool(&self) -> blaze_core::Result<usize> {
-            self.inner.drain_pool().await
         }
     }
 
@@ -1371,10 +1158,6 @@ mod tests {
         fn pool_status(&self) -> PoolStatus {
             self.inner.pool_status()
         }
-
-        async fn drain_pool(&self) -> blaze_core::Result<usize> {
-            self.inner.drain_pool().await
-        }
     }
 
     #[cfg(feature = "test-failpoints")]
@@ -1399,7 +1182,7 @@ mod tests {
         });
         let state = build_test_state(
             config,
-            test_policy(BackendKind::Mock, false),
+            test_policy(BackendKind::Mock),
             spawners(
                 BackendKind::Mock,
                 Arc::new(CountingSpawner {
@@ -1423,7 +1206,7 @@ mod tests {
         ));
         let state = build_test_state(
             config,
-            test_policy(BackendKind::Mock, false),
+            test_policy(BackendKind::Mock),
             spawners(BackendKind::Mock, Arc::new(MockSpawner)),
             BackendKind::Mock,
             storage,
@@ -1459,6 +1242,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reserved_pool_routes_return_not_implemented() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+
+        for (method, path) in [
+            (Method::GET, "/v1/pools"),
+            (Method::GET, "/v1/pools/mock/agent-tool"),
+            (Method::POST, "/v1/pools/mock/agent-tool/drain"),
+            (Method::PUT, "/v1/pools/mock/agent-tool/sizing"),
+        ] {
+            let (status, body) = handled_json(&state, method, path, Vec::new()).await;
+            assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{path}");
+            assert_eq!(body["status"], 501, "{path}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .expect("error")
+                    .contains("warm pool management is not implemented"),
+                "{path}"
+            );
+        }
+
+        let (status, body) = handled_json(&state, Method::GET, "/v1/pools/mock", Vec::new()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["status"], 404);
+    }
+
+    #[tokio::test]
+    async fn health_keeps_storage_pool_status() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+
+        let (status, body) = handled_json(&state, Method::GET, "/v1/health", Vec::new()).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["storage_pool"]["ready"], 0);
+        assert_eq!(body["storage_pool"]["capacity"], 0);
+        assert_eq!(body["storage_pool"]["pending"], 0);
+        assert_eq!(body["storage_pool"]["quarantined"], 0);
+    }
+
+    #[tokio::test]
     async fn destroy_route_forms_share_managed_cleanup() {
         let temp = tempfile::tempdir().expect("temp");
         let config = test_config(&temp);
@@ -1468,7 +1316,7 @@ mod tests {
         ));
         let state = build_test_state(
             config,
-            test_policy(BackendKind::Mock, false),
+            test_policy(BackendKind::Mock),
             spawners(BackendKind::Mock, Arc::new(MockSpawner)),
             BackendKind::Mock,
             storage,
@@ -1566,7 +1414,6 @@ mod tests {
             ServerState::build(
                 config,
                 engine,
-                PoolManager::new(),
                 HookRegistry::new(),
                 spawners(BackendKind::Firecracker, spawner),
                 BackendKind::Firecracker,
@@ -1601,123 +1448,125 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn warm_claim_validates_runtime_and_quarantines_dead_owner() {
+    async fn reset_never_reports_success_without_runtime_and_storage_reset() {
         let temp = tempfile::tempdir().expect("temp");
-        let mut config = DaemonConfig::default();
-        config.daemon.state_dir = temp.path().join("state");
-        config.storage.images_dir = temp.path().join("images");
-        config.storage.instances_dir = temp.path().join("instances");
-        config.template.dir = temp.path().join("templates");
-        std::fs::create_dir_all(&config.daemon.state_dir).expect("state");
-        std::fs::create_dir_all(&config.storage.images_dir).expect("images");
-        std::fs::create_dir_all(&config.storage.instances_dir).expect("instances");
-
-        let policy = PolicyFile {
-            manifest_version: 1,
-            policy_name: "warm-validation".into(),
-            priority: 100,
-            match_: PolicyMatch {
-                workload_class: WorkloadClass::AgentTool,
-                image_labels: HashMap::new(),
-            },
-            select: PolicySelect {
-                backend_priority: vec![BackendKind::Mock],
-                kernel_hooks: vec![],
-                templates: vec![],
-                fallback_on_missing_hook: FallbackOnMissingHook::default(),
-            },
-            pool: Some(PolicyPool {
-                enabled: true,
-                min: 0,
-                target: 0,
-                max: 1,
-                warm_ttl: "30m".into(),
-                reset_mode: ResetMode::FullRecreate,
-            }),
-            checkpoint: None,
-            quota: None,
-            hooks: PolicyHooks::default(),
-            backend: BackendConfigs::default(),
-            vm: None,
-        };
-        let storage: Arc<dyn blaze_core::storage::StorageProvider> =
-            Arc::new(FileStorageProvider::with_images(
-                config.storage.images_dir.clone(),
-                config.storage.instances_dir.clone(),
-            ));
-        let state = Arc::new(
-            ServerState::build(
-                config,
-                PolicyEngine::with_policies(vec![policy]),
-                PoolManager::new(),
-                HookRegistry::new(),
-                spawners(BackendKind::Mock, Arc::new(MockSpawner)),
-                BackendKind::Mock,
-                storage,
-            )
-            .expect("state"),
-        );
-        let request = serde_json::to_vec(&json!({
-            "workload_class": "agent-tool",
-            "image_digest": "sha256:warm-validation"
-        }))
-        .expect("request");
-
-        let cold = create_instance(&state, &request)
-            .await
-            .expect("cold create");
-        let cold: serde_json::Value =
-            serde_json::from_slice(&cold.into_body().collect().await.expect("body").to_bytes())
-                .expect("cold json");
-        let id = cold["instance"]["id"].as_str().expect("id").to_string();
-        reset_instance(&state, &id).await.expect("return to pool");
-
-        let warm = create_instance(&state, &request)
-            .await
-            .expect("warm create");
-        let warm: serde_json::Value =
-            serde_json::from_slice(&warm.into_body().collect().await.expect("body").to_bytes())
-                .expect("warm json");
-        assert_eq!(warm["instance"]["id"], id);
-        assert_eq!(warm["start_path"], "warm");
-
-        reset_instance(&state, &id)
-            .await
-            .expect("return live owner");
-        let owner = state
-            .manager
-            .backend_owner(Uuid::parse_str(&id).expect("uuid"))
-            .expect("owner");
-        owner.kill().await.expect("simulate backend exit");
-
-        let replacement = create_instance(&state, &request)
-            .await
-            .expect("cold fallback");
-        let replacement: serde_json::Value = serde_json::from_slice(
-            &replacement
-                .into_body()
-                .collect()
-                .await
-                .expect("body")
-                .to_bytes(),
-        )
-        .expect("replacement json");
-        assert_ne!(replacement["instance"]["id"], id);
-        assert_eq!(replacement["start_path"], "cold");
-        let key = PoolKey::new(
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
             BackendKind::Mock,
-            WorkloadClass::AgentTool,
-            "sha256:warm-validation".into(),
+            storage,
+        );
+
+        let (status, body) = handled_json(
+            &state,
+            Method::POST,
+            "/v1/instances/not-a-uuid/reset",
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+
+        let missing_id = Uuid::nil();
+        let (status, body) = handled_json(
+            &state,
+            Method::POST,
+            &format!("/v1/instances/{missing_id}/reset"),
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["status"], 404);
+
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+
+        let (status, body) = handled_json(
+            &state,
+            Method::POST,
+            &format!("/v1/instances/{id}/reset"),
+            Vec::new(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(body["status"], 501);
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("error")
+                .contains("runtime and storage")
         );
         assert_eq!(
-            state
-                .pool
-                .lock()
-                .expect("pool")
-                .stats(&key)
-                .quarantine_count,
-            1
+            state.instances.lock().expect("instances")[&uuid].state,
+            SandboxState::Running
         );
+        let persisted = state
+            .state_store
+            .load(uuid)
+            .expect("persisted running state");
+        assert_eq!(persisted.state, SandboxState::Running);
+        assert!(state.manager.backend_owner(uuid).is_some());
+    }
+
+    #[tokio::test]
+    async fn reset_preserves_invalid_state_error_and_persisted_state() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        {
+            let mut instances = state.instances.lock().expect("instances");
+            let instance = instances.get_mut(&uuid).expect("instance");
+            instance.transition(SandboxState::Paused).expect("pause");
+            state.state_store.persist(instance).expect("persist pause");
+        }
+
+        let (status, body) = handled_json(
+            &state,
+            Method::POST,
+            &format!("/v1/instances/{id}/reset"),
+            Vec::new(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["status"], 422);
+        assert!(
+            body["error"]
+                .as_str()
+                .expect("error")
+                .contains("paused -> reset")
+        );
+        assert_eq!(
+            state.instances.lock().expect("instances")[&uuid].state,
+            SandboxState::Paused
+        );
+        let persisted = state
+            .state_store
+            .load(uuid)
+            .expect("persisted paused state");
+        assert_eq!(persisted.state, SandboxState::Paused);
+        assert!(state.manager.backend_owner(uuid).is_some());
     }
 
     #[tokio::test]
@@ -1730,7 +1579,7 @@ mod tests {
         ));
         let state = build_test_state(
             config,
-            test_policy(BackendKind::Mock, false),
+            test_policy(BackendKind::Mock),
             spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
             BackendKind::Mock,
             storage,
@@ -1829,7 +1678,7 @@ mod tests {
         ));
         let state = build_test_state(
             config,
-            test_policy(BackendKind::Mock, false),
+            test_policy(BackendKind::Mock),
             spawners(BackendKind::Mock, Arc::new(MockSpawner)),
             BackendKind::Mock,
             storage,
@@ -1864,7 +1713,7 @@ mod tests {
         ));
         let state = build_test_state(
             config,
-            test_policy(BackendKind::Mock, false),
+            test_policy(BackendKind::Mock),
             spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
             BackendKind::Mock,
             storage,
@@ -1928,7 +1777,7 @@ mod tests {
         ));
         let state = build_test_state(
             config,
-            test_policy(BackendKind::Mock, false),
+            test_policy(BackendKind::Mock),
             spawners(BackendKind::Mock, Arc::new(MockSpawner)),
             BackendKind::Mock,
             storage,
@@ -2056,7 +1905,7 @@ mod tests {
         });
         let state = build_test_state(
             config,
-            test_policy(BackendKind::Mock, false),
+            test_policy(BackendKind::Mock),
             spawners(BackendKind::Mock, Arc::new(MockSpawner)),
             BackendKind::Mock,
             storage,
@@ -2083,7 +1932,7 @@ mod tests {
         let reached = Arc::new(Notify::new());
         let state = build_test_state(
             config.clone(),
-            test_policy(BackendKind::Bubblewrap, false),
+            test_policy(BackendKind::Bubblewrap),
             spawners(
                 BackendKind::Bubblewrap,
                 Arc::new(PreSpawnBoundarySpawner {
@@ -2141,7 +1990,7 @@ mod tests {
             ));
         let recovered = build_test_state(
             config.clone(),
-            test_policy(BackendKind::Bubblewrap, false),
+            test_policy(BackendKind::Bubblewrap),
             spawners(BackendKind::Bubblewrap, Arc::new(BubblewrapSpawner)),
             BackendKind::Bubblewrap,
             recovered_storage,
@@ -2199,7 +2048,6 @@ mod tests {
             BackendKind::Bubblewrap,
             WorkloadClass::AgentTool,
             "sha256:locked-handoff".into(),
-            StartPath::Cold,
             "pid-handoff-test".into(),
         );
         instance
@@ -2238,7 +2086,7 @@ mod tests {
         );
         let state = build_test_state(
             config.clone(),
-            test_policy(BackendKind::Bubblewrap, false),
+            test_policy(BackendKind::Bubblewrap),
             spawners(BackendKind::Bubblewrap, Arc::new(BubblewrapSpawner)),
             BackendKind::Bubblewrap,
             storage,
@@ -2298,38 +2146,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mock_fallback_uses_runtime_backend_for_warm_reuse() {
-        let temp = tempfile::tempdir().expect("temp");
-        let config = test_config(&temp);
-        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
-            config.storage.images_dir.clone(),
-            config.storage.instances_dir.clone(),
-        ));
-        let state = build_test_state(
-            config,
-            test_policy(BackendKind::Firecracker, true),
-            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
-            BackendKind::Mock,
-            storage,
-        );
-        let request = test_request();
-
-        let cold = created_json(&state, &request).await;
-        let id = cold["instance"]["id"].as_str().expect("id").to_string();
-        assert_eq!(cold["instance"]["backend"], "mock");
-        assert_eq!(cold["selected_backend"], "mock");
-        assert!(cold["instance"]["operation"].is_null());
-
-        reset_instance(&state, &id).await.expect("return to pool");
-        let warm = created_json(&state, &request).await;
-        assert_eq!(warm["instance"]["id"], id);
-        assert_eq!(warm["instance"]["backend"], "mock");
-        assert_eq!(warm["selected_backend"], "mock");
-        assert_eq!(warm["start_path"], "warm");
-        assert!(warm["instance"]["operation"].is_null());
-    }
-
-    #[tokio::test]
     async fn partial_spawn_failure_retains_owner_and_storage_for_destroy() {
         let temp = tempfile::tempdir().expect("temp");
         let config = test_config(&temp);
@@ -2340,7 +2156,7 @@ mod tests {
         ));
         let state = build_test_state(
             config,
-            test_policy(BackendKind::Mock, false),
+            test_policy(BackendKind::Mock),
             spawners(BackendKind::Mock, Arc::new(PartialSpawnSpawner)),
             BackendKind::Mock,
             storage,
@@ -2395,7 +2211,6 @@ mod tests {
             BackendKind::Bubblewrap,
             WorkloadClass::AgentTool,
             "sha256:recovery".into(),
-            StartPath::Cold,
             "recovery-test".into(),
         );
         instance
@@ -2430,7 +2245,7 @@ mod tests {
         );
         let state = build_test_state(
             config,
-            test_policy(BackendKind::Mock, false),
+            test_policy(BackendKind::Mock),
             registry,
             BackendKind::Mock,
             storage,
@@ -2454,7 +2269,7 @@ mod tests {
         ));
         let initial_state = build_test_state(
             config.clone(),
-            test_policy(BackendKind::Firecracker, false),
+            test_policy(BackendKind::Firecracker),
             spawners(BackendKind::Mock, Arc::new(MockSpawner)),
             BackendKind::Mock,
             initial_storage,
@@ -2486,7 +2301,7 @@ mod tests {
             ));
         let restarted = build_test_state(
             config,
-            test_policy(BackendKind::Firecracker, false),
+            test_policy(BackendKind::Firecracker),
             registry,
             BackendKind::Mock,
             restarted_storage,
@@ -2509,7 +2324,6 @@ mod tests {
             BackendKind::Mock,
             WorkloadClass::AgentTool,
             "sha256:write-ahead".into(),
-            StartPath::Cold,
             "write-ahead-test".into(),
         );
         instance
@@ -2528,7 +2342,7 @@ mod tests {
         ));
         let restarted = build_test_state(
             config,
-            test_policy(BackendKind::Mock, false),
+            test_policy(BackendKind::Mock),
             spawners(
                 BackendKind::Mock,
                 Arc::new(RecordingSpawner {
@@ -2550,220 +2364,12 @@ mod tests {
         assert!(!instances_dir.join(id.to_string()).exists());
     }
 
-    #[tokio::test]
-    async fn warm_reconstruct_restores_transient_failure_for_retry() {
-        let temp = tempfile::tempdir().expect("temp");
-        let config = test_config(&temp);
-        let storage = Arc::new(TransientReconstructStorage::new(
-            config.storage.images_dir.clone(),
-            config.storage.instances_dir.clone(),
-        ));
-        let state = build_test_state(
-            config,
-            test_policy(BackendKind::Mock, true),
-            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
-            BackendKind::Mock,
-            storage.clone(),
-        );
-        let request = test_request();
-        let cold = created_json(&state, &request).await;
-        let id = cold["instance"]["id"].as_str().expect("id").to_string();
-        reset_instance(&state, &id).await.expect("warm");
-
-        storage.fail_reconstruct.store(true, Ordering::Release);
-        let error = create_instance(&state, &request)
-            .await
-            .expect_err("transient error must preserve claim");
-        assert!(matches!(error, BlazeDaemonError::RecoveryRequired(_)));
-        let uuid = Uuid::parse_str(&id).expect("uuid");
-        assert_eq!(
-            state.instances.lock().expect("instances")[&uuid].state,
-            SandboxState::Warm
-        );
-        let key = PoolKey::new(
-            BackendKind::Mock,
-            WorkloadClass::AgentTool,
-            "sha256:ownership-test".into(),
-        );
-        assert_eq!(state.pool.lock().expect("pool").stats(&key).warm_count, 1);
-
-        storage.fail_reconstruct.store(false, Ordering::Release);
-        let retried = created_json(&state, &request).await;
-        assert_eq!(retried["instance"]["id"], id);
-        assert_eq!(retried["start_path"], "warm");
-    }
-
-    #[tokio::test]
-    async fn warm_reconstruct_quarantines_an_incomplete_slot() {
-        let temp = tempfile::tempdir().expect("temp");
-        let config = test_config(&temp);
-        let instances_dir = config.storage.instances_dir.clone();
-        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
-            config.storage.images_dir.clone(),
-            instances_dir.clone(),
-        ));
-        let state = build_test_state(
-            config,
-            test_policy(BackendKind::Mock, true),
-            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
-            BackendKind::Mock,
-            storage,
-        );
-        let request = test_request();
-        let cold = created_json(&state, &request).await;
-        let id = cold["instance"]["id"].as_str().expect("id").to_string();
-        reset_instance(&state, &id).await.expect("warm");
-        std::fs::remove_file(instances_dir.join(&id).join("mem.bin")).expect("remove artifact");
-
-        let replacement = created_json(&state, &request).await;
-        assert_ne!(replacement["instance"]["id"], id);
-        assert_eq!(replacement["start_path"], "cold");
-        let uuid = Uuid::parse_str(&id).expect("uuid");
-        let replacement_id = Uuid::parse_str(
-            replacement["instance"]["id"]
-                .as_str()
-                .expect("replacement id"),
-        )
-        .expect("replacement uuid");
-        assert_eq!(
-            state.instances.lock().expect("instances")[&uuid].state,
-            SandboxState::Destroyed
-        );
-        assert!(matches!(
-            state.state_store.run_dir(uuid),
-            Err(BlazeDaemonError::NotFound(_))
-        ));
-        assert!(state.state_store.run_dir(replacement_id).is_ok());
-    }
-
-    #[tokio::test]
-    async fn warm_quarantine_cleanup_failure_retains_resources_for_destroy_retry() {
-        let temp = tempfile::tempdir().expect("temp");
-        let config = test_config(&temp);
-        let instances_dir = config.storage.instances_dir.clone();
-        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
-            config.storage.images_dir.clone(),
-            instances_dir.clone(),
-        ));
-        let state = build_test_state(
-            config,
-            test_policy(BackendKind::Mock, true),
-            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
-            BackendKind::Mock,
-            storage,
-        );
-        let request = test_request();
-        let cold = created_json(&state, &request).await;
-        let id = cold["instance"]["id"].as_str().expect("id").to_string();
-        let uuid = Uuid::parse_str(&id).expect("uuid");
-        reset_instance(&state, &id).await.expect("warm");
-        state
-            .manager
-            .insert_backend_owner(
-                uuid,
-                Arc::new(FailOnceOwner {
-                    instance_id: uuid,
-                    attempts: AtomicUsize::new(0),
-                }),
-            )
-            .expect("replace backend owner");
-        std::fs::remove_file(instances_dir.join(&id).join("mem.bin")).expect("remove artifact");
-
-        let replacement = created_json(&state, &request).await;
-
-        assert_ne!(replacement["instance"]["id"], id);
-        let retained = state.instances.lock().expect("instances")[&uuid].clone();
-        assert_eq!(retained.state, SandboxState::RecoveryRequired);
-        assert_eq!(retained.backend_ownership, BackendOwnership::Running);
-        assert_eq!(
-            retained.operation.as_ref().map(|operation| operation.kind),
-            Some(OperationKind::Destroy)
-        );
-        assert!(state.manager.backend_owner(uuid).is_some());
-        assert!(state.state_store.run_dir(uuid).is_ok());
-        assert!(instances_dir.join(&id).is_dir());
-
-        destroy_instance(&state, &id)
-            .await
-            .expect("retry quarantined destroy");
-
-        assert_eq!(
-            state.instances.lock().expect("instances")[&uuid].state,
-            SandboxState::Destroyed
-        );
-        assert!(state.manager.backend_owner(uuid).is_none());
-        assert!(matches!(
-            state.state_store.run_dir(uuid),
-            Err(BlazeDaemonError::NotFound(_))
-        ));
-        assert!(!instances_dir.join(&id).exists());
-    }
-
-    #[cfg(feature = "test-failpoints")]
-    async fn assert_warm_state_commit_failure_restores_claim(failpoint: &'static str) {
-        let temp = tempfile::tempdir().expect("temp");
-        let state = mock_state(&temp, true);
-        let request = test_request();
-        let cold = created_json(&state, &request).await;
-        let id = cold["instance"]["id"].as_str().expect("id").to_string();
-        let uuid = Uuid::parse_str(&id).expect("uuid");
-        reset_instance(&state, &id).await.expect("warm");
-        let owner = state.manager.backend_owner(uuid).expect("backend owner");
-        let key = PoolKey::new(
-            BackendKind::Mock,
-            WorkloadClass::AgentTool,
-            "sha256:ownership-test".into(),
-        );
-
-        let hook = crate::failpoint::TestFailpoint::new(&[failpoint]);
-        let error = hook
-            .run(create_instance(&state, &request))
-            .await
-            .expect_err("state commit failure");
-
-        assert!(matches!(error, BlazeDaemonError::RecoveryRequired(_)));
-        let restored = state.instances.lock().expect("instances")[&uuid].clone();
-        assert_eq!(restored.state, SandboxState::Warm);
-        assert!(restored.operation.is_none());
-        let persisted = state.state_store.load(uuid).expect("persisted warm state");
-        assert_eq!(persisted.state, SandboxState::Warm);
-        assert_eq!(persisted.backend_ownership, BackendOwnership::Running);
-        assert!(persisted.operation.is_none());
-        let retained_owner = state.manager.backend_owner(uuid).expect("retained owner");
-        assert!(Arc::ptr_eq(&owner, &retained_owner));
-        assert_eq!(state.pool.lock().expect("pool").stats(&key).warm_count, 1);
-        assert!(retained_owner.try_wait().await.expect("liveness").is_none());
-
-        let retried = created_json(&state, &request).await;
-        assert_eq!(retried["instance"]["id"], id);
-        assert_eq!(retried["start_path"], "warm");
-        let persisted = state
-            .state_store
-            .load(uuid)
-            .expect("persisted running state");
-        assert_eq!(persisted.state, SandboxState::Running);
-        assert_eq!(persisted.backend_ownership, BackendOwnership::Running);
-        assert!(persisted.operation.is_none());
-    }
-
-    #[cfg(feature = "test-failpoints")]
-    #[tokio::test]
-    async fn warm_intent_commit_failure_restores_the_claim() {
-        assert_warm_state_commit_failure_restores_claim("warm-intent-state-commit").await;
-    }
-
-    #[cfg(feature = "test-failpoints")]
-    #[tokio::test]
-    async fn warm_final_commit_failure_restores_the_claim() {
-        assert_warm_state_commit_failure_restores_claim("warm-final-state-commit").await;
-    }
-
     #[cfg(feature = "test-failpoints")]
     #[tokio::test]
     async fn guest_readiness_failure_compensates_owned_resources() {
         let request = test_request();
         let temp = tempfile::tempdir().expect("temp");
-        let state = guest_mock_state(&temp, false);
+        let state = guest_mock_state(&temp);
         let hook = crate::failpoint::TestFailpoint::new(&["create-guest-ready"]);
 
         hook.run(create_instance(&state, &request))
@@ -2795,7 +2401,7 @@ mod tests {
         let request = test_request();
 
         let spawn_temp = tempfile::tempdir().expect("temp");
-        let spawn_state = mock_state(&spawn_temp, false);
+        let spawn_state = mock_state(&spawn_temp);
         let spawn_hook = crate::failpoint::TestFailpoint::new(&["create-spawn"]);
         spawn_hook
             .run(create_instance(&spawn_state, &request))
@@ -2812,7 +2418,7 @@ mod tests {
         assert_eq!(spawn_instance.state, SandboxState::Destroyed);
 
         let commit_temp = tempfile::tempdir().expect("temp");
-        let commit_state = mock_state(&commit_temp, false);
+        let commit_state = mock_state(&commit_temp);
         let commit_hook = crate::failpoint::TestFailpoint::new(&["create-state-commit"]);
         commit_hook
             .run(create_instance(&commit_state, &request))
@@ -2835,7 +2441,7 @@ mod tests {
         );
 
         let destroy_temp = tempfile::tempdir().expect("temp");
-        let destroy_state = mock_state(&destroy_temp, false);
+        let destroy_state = mock_state(&destroy_temp);
         let created = created_json(&destroy_state, &request).await;
         let id = created["instance"]["id"].as_str().expect("id").to_string();
         let kill_hook = crate::failpoint::TestFailpoint::new(&["destroy-kill"]);
@@ -2859,7 +2465,7 @@ mod tests {
             .expect("destroy retry");
 
         let release_temp = tempfile::tempdir().expect("temp");
-        let release_state = mock_state(&release_temp, false);
+        let release_state = mock_state(&release_temp);
         let created = created_json(&release_state, &request).await;
         let id = created["instance"]["id"].as_str().expect("id").to_string();
         let release_hook = crate::failpoint::TestFailpoint::new(&["storage-release"]);
@@ -2889,7 +2495,7 @@ mod tests {
         failpoints: &'static [&'static str],
     ) {
         let temp = tempfile::tempdir().expect("temp");
-        let state = mock_state(&temp, false);
+        let state = mock_state(&temp);
         let hook = crate::failpoint::TestFailpoint::new(failpoints);
 
         let error = hook
@@ -2947,7 +2553,7 @@ mod tests {
     #[tokio::test]
     async fn initial_publication_failure_before_publish_touches_no_resources() {
         let temp = tempfile::tempdir().expect("temp");
-        let state = mock_state(&temp, false);
+        let state = mock_state(&temp);
         let hook = crate::failpoint::TestFailpoint::new(&["state-before-first-publication"]);
 
         hook.run(create_instance(&state, &test_request()))
@@ -2977,7 +2583,7 @@ mod tests {
     #[tokio::test]
     async fn initial_publication_sync_failure_is_rolled_back_terminally() {
         let temp = tempfile::tempdir().expect("temp");
-        let state = mock_state(&temp, false);
+        let state = mock_state(&temp);
         let hook = crate::failpoint::TestFailpoint::new(&["state-first-publication-root-sync"]);
 
         hook.run(create_instance(&state, &test_request()))
@@ -3020,7 +2626,7 @@ mod tests {
     #[tokio::test]
     async fn unconfirmed_initial_publication_is_retained_for_recovery() {
         let temp = tempfile::tempdir().expect("temp");
-        let state = mock_state(&temp, false);
+        let state = mock_state(&temp);
         let hook = crate::failpoint::TestFailpoint::new(&["state-post-publication-identity"]);
 
         let error = hook
@@ -3092,7 +2698,7 @@ mod tests {
     #[tokio::test]
     async fn unconfirmed_publication_rejects_a_replaced_directory_on_retry() {
         let temp = tempfile::tempdir().expect("temp");
-        let state = mock_state(&temp, false);
+        let state = mock_state(&temp);
         let hook = crate::failpoint::TestFailpoint::new(&["state-post-publication-identity"]);
 
         hook.run(create_instance(&state, &test_request()))
@@ -3332,7 +2938,7 @@ mod tests {
     #[tokio::test]
     async fn acquire_rollback_failure_retains_a_destroyable_record() {
         let temp = tempfile::tempdir().expect("temp");
-        let state = mock_state(&temp, false);
+        let state = mock_state(&temp);
         let acquire_hook = crate::failpoint::TestFailpoint::new(&[
             "storage-acquire-artifacts",
             "storage-acquire-rollback",
@@ -3380,7 +2986,7 @@ mod tests {
         ));
         let initial_state = build_test_state(
             config.clone(),
-            test_policy(BackendKind::Mock, false),
+            test_policy(BackendKind::Mock),
             spawners(BackendKind::Mock, Arc::new(MockSpawner)),
             BackendKind::Mock,
             initial_storage,
@@ -3437,7 +3043,7 @@ mod tests {
             ));
         let restarted = build_test_state(
             config,
-            test_policy(BackendKind::Mock, false),
+            test_policy(BackendKind::Mock),
             spawners(
                 BackendKind::Mock,
                 Arc::new(RecordingSpawner {
@@ -3466,54 +3072,6 @@ mod tests {
         assert!(!instances_dir.join(id.to_string()).exists());
     }
 
-    #[cfg(feature = "test-failpoints")]
-    #[tokio::test]
-    async fn warm_activation_and_destroy_are_serialized_per_instance() {
-        let temp = tempfile::tempdir().expect("temp");
-        let state = mock_state(&temp, true);
-        let request = test_request();
-        let cold = created_json(&state, &request).await;
-        let id = cold["instance"]["id"].as_str().expect("id").to_string();
-        reset_instance(&state, &id).await.expect("warm");
-
-        let pause_hook = crate::failpoint::TestFailpoint::new(&["warm-before-state-commit"]);
-        let create_state = state.clone();
-        let create_request = request.clone();
-        let activation_hook = pause_hook.clone();
-        let activation = tokio::spawn(async move {
-            activation_hook
-                .run(create_instance(&create_state, &create_request))
-                .await
-        });
-        pause_hook.wait_until_paused().await;
-        let uuid = Uuid::parse_str(&id).expect("uuid");
-        assert_eq!(
-            state.instances.lock().expect("instances")[&uuid]
-                .operation
-                .as_ref()
-                .map(|operation| operation.kind),
-            Some(OperationKind::Create)
-        );
-
-        let destroy_state = state.clone();
-        let destroy_id = id.clone();
-        let destroy =
-            tokio::spawn(async move { destroy_instance(&destroy_state, &destroy_id).await });
-        tokio::task::yield_now().await;
-        assert!(!destroy.is_finished(), "destroy must wait for activation");
-
-        pause_hook.release();
-        activation
-            .await
-            .expect("activation task")
-            .expect("activation");
-        destroy.await.expect("destroy task").expect("destroy");
-        assert_eq!(
-            state.instances.lock().expect("instances")[&uuid].state,
-            SandboxState::Destroyed
-        );
-    }
-
     #[tokio::test]
     async fn startup_reconciliation_continues_after_one_cleanup_failure() {
         let temp = tempfile::tempdir().expect("temp");
@@ -3529,7 +3087,6 @@ mod tests {
                 BackendKind::Mock,
                 WorkloadClass::AgentTool,
                 "sha256:reconcile".into(),
-                StartPath::Cold,
                 "reconcile-test".into(),
             );
             instance.id = id;
@@ -3551,7 +3108,7 @@ mod tests {
         let cleanup_count = Arc::new(AtomicUsize::new(0));
         let state = build_test_state(
             config.clone(),
-            test_policy(BackendKind::Mock, false),
+            test_policy(BackendKind::Mock),
             spawners(
                 BackendKind::Mock,
                 Arc::new(SelectiveCleanupSpawner {
@@ -3602,6 +3159,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_reconciliation_destroys_legacy_reset_and_warm_records() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let release_count = Arc::new(AtomicUsize::new(0));
+        let storage: Arc<dyn StorageProvider> = Arc::new(CountingStorage {
+            inner: FileStorageProvider::with_images(
+                config.storage.images_dir.clone(),
+                config.storage.instances_dir.clone(),
+            ),
+            release_count: release_count.clone(),
+        });
+        let mut ids = Vec::new();
+        for state_name in ["reset", "warm"] {
+            let id = Uuid::new_v4();
+            ids.push(id);
+            let now = chrono::Utc::now();
+            let record = json!({
+                "id": id,
+                "state": state_name,
+                "backend": "mock",
+                "workload_class": "agent-tool",
+                "image_digest": "sha256:legacy",
+                "start_path": "warm",
+                "created_at": now,
+                "updated_at": now,
+                "policy_name": "legacy",
+                "backend_ownership": "running"
+            });
+            let run_dir = config.daemon.state_dir.join(id.to_string());
+            std::fs::create_dir(&run_dir).expect("legacy run directory");
+            std::fs::write(
+                run_dir.join("state.json"),
+                serde_json::to_vec_pretty(&record).expect("legacy state JSON"),
+            )
+            .expect("legacy state record");
+            storage
+                .acquire(&AcquireOpts {
+                    instance_id: id.to_string(),
+                    rootfs_size: 64,
+                    mem_size: 32,
+                })
+                .await
+                .expect("legacy storage");
+        }
+
+        let kill_count = Arc::new(AtomicUsize::new(0));
+        let orphan_cleanup_count = Arc::new(AtomicUsize::new(0));
+        let state = build_test_state(
+            config.clone(),
+            test_policy(BackendKind::Mock),
+            spawners(
+                BackendKind::Mock,
+                Arc::new(CountingSpawner {
+                    kill_count: kill_count.clone(),
+                    orphan_cleanup_count: orphan_cleanup_count.clone(),
+                }),
+            ),
+            BackendKind::Mock,
+            storage,
+        );
+
+        let report = state.manager.reconcile_startup().await;
+
+        assert_eq!(report.attempted, 2);
+        assert_eq!(report.completed, 2);
+        assert!(report.failures.is_empty());
+        assert_eq!(kill_count.load(Ordering::Acquire), 0);
+        assert_eq!(orphan_cleanup_count.load(Ordering::Acquire), 2);
+        assert_eq!(release_count.load(Ordering::Acquire), 2);
+        for id in ids {
+            assert_eq!(
+                state.instances.lock().expect("instances")[&id].state,
+                SandboxState::Destroyed
+            );
+            assert!(!config.storage.instances_dir.join(id.to_string()).exists());
+            assert!(matches!(
+                state.state_store.run_dir(id),
+                Err(BlazeDaemonError::NotFound(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn startup_reconciliation_skips_cleanup_for_known_stopped_states() {
         let temp = tempfile::tempdir().expect("temp");
         let config = test_config(&temp);
@@ -3620,7 +3260,6 @@ mod tests {
             BackendKind::Mock,
             WorkloadClass::AgentTool,
             "sha256:not-started".into(),
-            StartPath::Cold,
             "reconcile-test".into(),
         );
         not_started.id = not_started_id;
@@ -3635,7 +3274,6 @@ mod tests {
             BackendKind::Mock,
             WorkloadClass::AgentTool,
             "sha256:stopped".into(),
-            StartPath::Cold,
             "reconcile-test".into(),
         );
         stopped.id = stopped_id;
@@ -3660,7 +3298,7 @@ mod tests {
         let orphan_cleanup_count = Arc::new(AtomicUsize::new(0));
         let state = build_test_state(
             config,
-            test_policy(BackendKind::Mock, false),
+            test_policy(BackendKind::Mock),
             spawners(
                 BackendKind::Mock,
                 Arc::new(CountingSpawner {
@@ -3724,7 +3362,6 @@ mod tests {
             ServerState::build(
                 config,
                 PolicyEngine::with_policies(Vec::new()),
-                PoolManager::new(),
                 HookRegistry::new(),
                 spawners(BackendKind::Mock, Arc::new(MockSpawner)),
                 BackendKind::Mock,

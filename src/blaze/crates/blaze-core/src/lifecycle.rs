@@ -69,12 +69,16 @@ impl std::fmt::Display for SandboxState {
     }
 }
 
-/// Whether a request entered `creating` from cold boot or via a warm
-/// pool reuse — used as the primary latency / capacity SLO dimension.
+/// Persisted record of whether sandbox startup used a reusable instance.
+///
+/// New instances always use [`StartPath::Cold`]. [`StartPath::Warm`] remains
+/// readable so startup reconciliation can clean records written by older releases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StartPath {
+    /// Sandbox creation started without a reusable instance.
     Cold,
+    /// Legacy reusable-instance start retained only for persisted-state compatibility.
     Warm,
 }
 
@@ -113,14 +117,11 @@ pub struct SandboxInstance {
 }
 
 impl SandboxInstance {
-    /// Create a new instance in [`SandboxState::Pending`] with `start_path`
-    /// pre-classified by the caller (cold for fresh boots, warm for
-    /// pool reuses).
+    /// Create a new instance in [`SandboxState::Pending`].
     pub fn new(
         backend: BackendKind,
         workload_class: WorkloadClass,
         image_digest: String,
-        start_path: StartPath,
         policy_name: String,
     ) -> Self {
         let now = Utc::now();
@@ -130,7 +131,7 @@ impl SandboxInstance {
             backend,
             workload_class,
             image_digest,
-            start_path,
+            start_path: StartPath::Cold,
             created_at: now,
             updated_at: now,
             policy_name,
@@ -167,15 +168,6 @@ impl SandboxInstance {
         let prev = self.state;
         self.state = target;
         self.updated_at = Utc::now();
-        // entering `creating` re-classifies the start path: warm-pool
-        // reuse goes warm → creating, fresh boots go pending → creating.
-        if target == SandboxState::Creating {
-            self.start_path = if prev == SandboxState::Warm {
-                StartPath::Warm
-            } else {
-                StartPath::Cold
-            };
-        }
         tracing::info!(
             instance = %self.id,
             from = %prev,
@@ -217,7 +209,7 @@ impl SandboxInstance {
 
 fn is_valid_transition(from: SandboxState, to: SandboxState) -> bool {
     use SandboxState::{
-        Checkpointed, Creating, Destroyed, Paused, Pending, RecoveryRequired, Reset, Running, Warm,
+        Checkpointed, Creating, Destroyed, Paused, Pending, RecoveryRequired, Running,
     };
     if to == Destroyed {
         // `* → destroyed` is always valid (terminal sink).
@@ -230,11 +222,8 @@ fn is_valid_transition(from: SandboxState, to: SandboxState) -> bool {
         (Pending, Creating) => true,
         (Creating, Running) => true,
         (Running, Paused) => true,
-        (Running, Reset) => true,
         (Paused, Checkpointed) => true,
         (Paused, Running) => true, // resume
-        (Reset, Warm) => true,
-        (Warm, Creating) => true, // pool reuse / warm path
         _ => false,
     }
 }
@@ -248,7 +237,6 @@ mod tests {
             BackendKind::KataFc,
             WorkloadClass::AgentRl,
             "sha256:deadbeef".into(),
-            StartPath::Cold,
             "agent-rl-default".into(),
         )
     }
@@ -266,18 +254,6 @@ mod tests {
             inst.transition(target).expect("legal transition");
             assert_eq!(inst.state, target);
         }
-    }
-
-    #[test]
-    fn happy_path_warm_reuse() {
-        let mut inst = fresh();
-        inst.transition(SandboxState::Creating).expect("ok");
-        inst.transition(SandboxState::Running).expect("ok");
-        inst.transition(SandboxState::Reset).expect("ok");
-        inst.transition(SandboxState::Warm).expect("ok");
-        // warm → creating must flip start_path to Warm.
-        inst.transition(SandboxState::Creating).expect("ok");
-        assert_eq!(inst.start_path, StartPath::Warm);
     }
 
     #[test]
@@ -322,23 +298,14 @@ mod tests {
     }
 
     #[test]
-    fn illegal_running_to_warm() {
+    fn reset_and_warm_are_not_runtime_transition_targets() {
         let mut inst = fresh();
         inst.transition(SandboxState::Creating).expect("ok");
         inst.transition(SandboxState::Running).expect("ok");
-        let err = inst.transition(SandboxState::Warm).expect_err("illegal");
-        assert!(matches!(err, BlazeError::InvalidStateTransition { .. }));
-    }
-
-    #[test]
-    fn illegal_warm_to_running() {
-        let mut inst = fresh();
-        inst.transition(SandboxState::Creating).expect("ok");
-        inst.transition(SandboxState::Running).expect("ok");
-        inst.transition(SandboxState::Reset).expect("ok");
-        inst.transition(SandboxState::Warm).expect("ok");
-        let err = inst.transition(SandboxState::Running).expect_err("illegal");
-        assert!(matches!(err, BlazeError::InvalidStateTransition { .. }));
+        for target in [SandboxState::Reset, SandboxState::Warm] {
+            let error = inst.transition(target).expect_err("legacy-only state");
+            assert!(matches!(error, BlazeError::InvalidStateTransition { .. }));
+        }
     }
 
     #[test]
@@ -371,6 +338,27 @@ mod tests {
         let loaded: SandboxInstance = serde_json::from_value(value).expect("legacy state");
         assert!(loaded.operation.is_none());
         assert_eq!(loaded.backend_ownership, BackendOwnership::Unknown);
+    }
+
+    #[test]
+    fn legacy_reset_and_warm_states_deserialize() {
+        let inst = fresh();
+        for state in ["reset", "warm"] {
+            let value = serde_json::json!({
+                "id": inst.id,
+                "state": state,
+                "backend": "mock",
+                "workload_class": "agent-rl",
+                "image_digest": "sha256:old",
+                "start_path": "warm",
+                "created_at": inst.created_at,
+                "updated_at": inst.updated_at,
+                "policy_name": "legacy"
+            });
+            let loaded: SandboxInstance = serde_json::from_value(value).expect("legacy state");
+            assert_eq!(loaded.state.as_str(), state);
+            assert_eq!(loaded.start_path, StartPath::Warm);
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! File-based storage provider: creates per-instance directories with
 //! rootfs and memory files on a local filesystem. Base images and mutable
-//! instance slots use separate roots; runtime pooling is owned by the daemon.
+//! instance slots use separate roots.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -349,10 +349,6 @@ impl StorageProvider for FileStorageProvider {
     fn pool_status(&self) -> PoolStatus {
         PoolStatus::default()
     }
-
-    async fn drain_pool(&self) -> Result<usize> {
-        Ok(0)
-    }
 }
 
 async fn open_required_slot_path<F>(
@@ -503,15 +499,15 @@ mod tests {
         assert!(!dir.exists());
     }
 
-    #[tokio::test]
-    async fn pool_status_returns_defaults() {
+    #[test]
+    fn pool_status_returns_current_capacity() {
         let tmp = tempfile::TempDir::new().unwrap();
         let provider = FileStorageProvider::new(tmp.path().to_path_buf());
         let status = provider.pool_status();
         assert_eq!(status.ready, 0);
         assert_eq!(status.capacity, 0);
         assert_eq!(status.pending, 0);
-        assert_eq!(provider.drain_pool().await.unwrap(), 0);
+        assert_eq!(status.quarantined, 0);
     }
 
     #[tokio::test]

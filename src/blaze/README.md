@@ -5,22 +5,20 @@
 Per-host sandbox orchestrator daemon for AI Agent workloads.
 
 Blaze manages sandbox instance lifecycles via HTTP API with policy-driven
-backend selection. It supports warm-pool pre-allocation, multi-backend
-fallback (Firecracker → Bubblewrap → Mock), and Prometheus metrics export.
+backend selection. It supports multi-backend fallback
+(Firecracker → Bubblewrap → Mock) and Prometheus metrics export.
 Designed as the per-host agent for E2B-style orchestrator platforms.
 
 ## Features
 
 - **HTTP API** — Unix domain socket (`/run/blaze/api.sock`) + TCP (`:14159`)
 - **Policy-driven backend selection** — workload class → backend priority list
-- **Lifecycle state machine** — 9 states: Pending, Creating, Running, Paused,
-  Checkpointed, RecoveryRequired, Reset, Warm, and Destroyed
+- **Lifecycle state machine** — durable state with restart recovery
 - **Guest operations** — bounded command execution and file transfer for
   running backends that expose a guest endpoint
-- **Warm pool management** — pre-warmed instances with TTL-based GC
 - **Template catalog** — bounded import and atomic publication of reusable artifacts
 - **Kernel hook registry** — state tracking for pre/post hooks
-- **Prometheus metrics** — request counts, instance gauges, pool sizes
+- **Prometheus metrics** — request and instance counters
 - **Spawners** — FirecrackerSpawner, BubblewrapSpawner, MockSpawner
 - **Optional VM networking** — isolated namespace, tap, veth, and NAT per Firecracker VM
 
@@ -108,11 +106,22 @@ provider = "file"       # Storage provider selection. Currently supported: "file
                         # "auto" probes available providers in priority order (currently equivalent to "file").
                         # Other values will log a warning and fall back to file.
 images_dir = "/var/lib/blaze/images"
-# pool_size = 0           # [Reserved] Warm pool slots (not yet active)
-# prefork = false         # [Reserved] Pre-start VMs in pool (not yet active)
 sync_interval = "disabled" # Set a positive duration to persist already-written slot artifacts.
 sync_timeout = "30s"       # Maximum scheduler wait for reconstruction plus artifact sync.
 ```
+
+Reusable-instance settings are not supported. Blaze rejects
+`storage.pool_size`, `storage.prefork`, and every `[pool]` section except the
+exact historical package defaults. Blaze temporarily accepts and ignores those
+defaults from older `config.toml`,
+`agent-rl.toml`, and `agent-tool.toml` files, and logs a warning. This lets an
+administrator-modified file retained by RPM `%config(noreplace)` reach the new
+daemon without enabling an incomplete feature. Merge the corresponding
+`.rpmnew` file or remove the old `[pool]` section; later releases may remove
+this exception. Any other policy `[pool]` section fails policy loading. At
+startup, `policy.on_load_error = "fail"` stops the daemon, while `"warn"` starts
+with an empty policy set. A failed administrative or signal-driven reload
+keeps the currently active policies unchanged.
 
 The `file` provider uses standard filesystem operations for sandbox storage. The `auto` provider probes available backends in priority order (currently equivalent to `file`). Unrecognized values will log a warning and fall back to `file`.
 When periodic synchronization is enabled, a completed provider failure is
@@ -146,11 +155,11 @@ for configuration, selection, retry, and worker shutdown behavior.
 | POST | `/v1/instances/{id}/read` | Compatible guest file read action |
 | POST | `/v1/instances/{id}/write` | Compatible guest file write action |
 | POST | `/v1/instances/{id}/checkpoint` | Record checkpoint state |
-| POST | `/v1/instances/{id}/reset` | Record reset and return to the warm pool |
-| GET | `/v1/pools` | List warm pools |
-| GET | `/v1/pools/{backend}/{class}` | Get pool status |
-| POST | `/v1/pools/{backend}/{class}/drain` | Drain a pool |
-| PUT | `/v1/pools/{backend}/{class}/sizing` | Resize a pool |
+| POST | `/v1/instances/{id}/reset` | Reserved for running instances; returns `501` until runtime and storage reset are implemented |
+| GET | `/v1/pools` | Reserved; returns `501` |
+| GET | `/v1/pools/{backend}/{class}` | Reserved; returns `501` |
+| POST | `/v1/pools/{backend}/{class}/drain` | Reserved; returns `501` |
+| PUT | `/v1/pools/{backend}/{class}/sizing` | Reserved; returns `501` |
 | GET | `/v1/templates` | List published template names |
 | GET | `/v1/templates/{name}` | Inspect published template metadata |
 | POST | `/v1/templates/import` | Publish a template from the configured import root |
@@ -158,6 +167,45 @@ for configuration, selection, retry, and worker shutdown behavior.
 | GET | `/v1/hooks` | List kernel hooks |
 | GET | `/v1/metrics` | Prometheus metrics |
 | POST | `/v1/admin/reload` | Hot-reload policies |
+
+For reset requests, a malformed instance identifier returns `400`, an unknown
+instance returns `404`, and an instance that is not running returns `422`. A
+running instance returns `501` without changing its lifecycle state or its
+runtime and storage resources. Clients that require a fresh sandbox must
+successfully destroy the old sandbox and create a new one; `501` does not mean
+that reset completed.
+
+Upgrade compatibility accepts and ignores only this exact daemon section:
+
+```toml
+[pool]
+default_warm_ttl = "30m"
+gc_interval = "5m"
+```
+
+An accepted policy section must contain exactly these six fields and belong to
+one of the two packaged policy identities:
+
+| Policy name | Workload class | `min` | `target` | `max` |
+|---|---|---:|---:|---:|
+| `agent-rl-default` | `agent-rl` | 4 | 16 | 64 |
+| `agent-tool-default` | `agent-tool` | 2 | 8 | 32 |
+
+Both rows require `enabled = true`, `warm_ttl = "30m"`, and
+`reset_mode = "full-recreate"`. A missing or additional field, a changed value
+or type, a different policy name or workload class, any other `[pool]` section,
+and every `storage.pool_size` or `storage.prefork` setting are rejected. The
+accepted values do not enable reusable instances and are omitted when the
+configuration is serialized.
+
+Blaze continues to decode persisted `Reset`, `Warm`, and
+`start_path = "warm"` values written by earlier releases. Startup
+reconciliation treats non-terminal records containing those values as cleanup
+candidates and never reuses them. A failed cleanup retains the in-memory record
+as `RecoveryRequired` and attempts to persist that state. If persistence also
+fails, the startup warning includes the additional error and the durable record
+may still contain its previous state. Reconciliation continues with other
+accepted records.
 
 The `/v1/templates` routes are the single operator-facing template catalog.
 Importing an entry does not yet make sandbox creation select it; future create
@@ -196,15 +244,17 @@ map lock until publication. Direct file changes by a process that bypasses the
 state-root lock are unsupported.
 
 See the
-[lifecycle state consistency design](docs/design/lifecycle-state-consistency.md)
-for the writer-coordination, inventory-publication, and failure boundaries.
+[lifecycle state consistency and compatibility design](docs/design/lifecycle-state-consistency.md)
+for writer coordination, inventory publication, reset rejection, legacy-state
+cleanup, and failure boundaries.
 
 The operation journal records the operation and start time, not completion of
 each resource step. An interrupted create is cleaned up rather than resumed,
 and an existing backend process is not adopted after restart. Failed recovery
-does not run in a background retry loop. The checkpoint and reset endpoints
-retain their existing metadata transitions; this recovery flow does not add
-backend snapshot or restore operations.
+does not run in a background retry loop. The checkpoint endpoint retains its
+existing metadata transition. Reset remains unavailable until runtime and
+storage can be reset together; this recovery flow does not add backend snapshot
+or restore operations.
 
 ### Guest operations
 
@@ -217,13 +267,13 @@ boundaries.
 
 #### Health Check
 
-`GET /v1/health` returns daemon status including storage pool readiness:
+`GET /v1/health` returns daemon status including storage capacity:
 
 ```json
 {
   "status": "ok",
   "version": "0.3.0",
-  "storage_pool": { "ready": 0, "capacity": 0, "pending": 0 }
+  "storage_pool": { "ready": 0, "capacity": 0, "pending": 0, "quarantined": 0 }
 }
 ```
 
@@ -232,7 +282,7 @@ boundaries.
 ```
 src/blaze/
 ├── crates/
-│   ├── blaze-core/   # Library: policy, lifecycle, pool, template, kernel, config
+│   ├── blaze-core/   # Library: policy, lifecycle, template, kernel, config
 │   └── blazed/       # Binary: daemon, API server, spawners, metrics
 ├── examples/         # config.toml, policies/
 ├── dist/             # blazed.service, blaze.spec, tmpfiles

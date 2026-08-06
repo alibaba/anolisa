@@ -104,12 +104,7 @@ Guest operations are available only while a sandbox is `Running` and its
 backend reports a compatible guest endpoint. A cold create that reports such
 an endpoint waits for the guest agent before publishing `Running`. Backends
 without an endpoint, including production mock fallback, skip that wait and
-return HTTP 409 for guest operations. Warm-pool activation validates the
-retained backend owner and storage before publishing `Running`, but it does
-not repeat the guest readiness probe. `Running` on this path therefore does
-not guarantee that the guest endpoint is still responsive: the first guest
-request performs the normal bounded connection and can return a guest error.
-Callers should apply the retry and outcome rules below to that first request.
+return HTTP 409 for guest operations.
 
 Guest operations and lifecycle changes use the same per-sandbox operation
 lock. After obtaining the lock, the manager checks `Running` again so a request
@@ -157,6 +152,64 @@ Leave `listen.http_addr` disabled in production until
 [issue #2223](https://github.com/alibaba/anolisa/issues/2223) is resolved.
 Daemon shutdown also does not yet wait for every active HTTP handler or release
 all runtime owners, so an in-flight request may observe a closed connection.
+
+## Reset and Reusable-Instance Management
+
+`POST /v1/instances/{id}/reset` does not report success until Blaze can reset
+both runtime and storage. A malformed identifier returns HTTP 400, an unknown
+instance returns HTTP 404, an instance that is not running returns HTTP 422,
+and a running instance returns HTTP 501 without changing its state or owned
+resources.
+
+The four `/v1/pools` management routes also return HTTP 501. Blaze rejects
+`storage.pool_size`, `storage.prefork`, and every `[pool]` section except the
+exact historical package defaults. During an upgrade, it temporarily accepts
+and ignores only those defaults from the older daemon configuration and two
+default policy files, and logs a warning. This exception prevents an
+administrator-modified file retained by RPM `%config(noreplace)` from blocking
+the new daemon. It does not enable reusable instances. Merge each `.rpmnew`
+file or remove the legacy section; later releases may remove this exception.
+Any other policy `[pool]` section fails policy loading. At startup,
+`policy.on_load_error = "fail"` stops the daemon, while `"warn"` starts with an
+empty policy set. A failed administrative or signal-driven reload keeps the
+currently active policies unchanged.
+
+The accepted daemon section is exactly:
+
+```toml
+[pool]
+default_warm_ttl = "30m"
+gc_interval = "5m"
+```
+
+An accepted policy section must contain exactly these six fields and belong to
+one of the two packaged policy identities:
+
+| Policy name | Workload class | `min` | `target` | `max` |
+|---|---|---:|---:|---:|
+| `agent-rl-default` | `agent-rl` | 4 | 16 | 64 |
+| `agent-tool-default` | `agent-tool` | 2 | 8 | 32 |
+
+Both rows require `enabled = true`, `warm_ttl = "30m"`, and
+`reset_mode = "full-recreate"`. A missing or additional field, a changed value
+or type, a different policy name or workload class, or any other `[pool]`
+section is rejected. Accepted compatibility values are ignored and omitted
+when configuration is serialized.
+
+Blaze continues to decode persisted `Reset`, `Warm`, and
+`start_path = "warm"` values written by earlier releases. Startup
+reconciliation treats non-terminal records containing those values as cleanup
+candidates and never reuses them. A failed cleanup retains the in-memory record
+as `RecoveryRequired` and attempts to persist that state. If persistence also
+fails, the startup warning includes the additional error and the durable record
+may still contain its previous state. Reconciliation continues with other
+accepted records.
+The metrics endpoint no longer publishes `blaze_instances_resets_total`,
+`blaze_pool_hits_total`, or `blaze_pool_misses_total`.
+
+The lifecycle invariants behind these compatibility responses are recorded in
+the
+[lifecycle state consistency and compatibility design](../../../../src/blaze/docs/design/lifecycle-state-consistency.md).
 
 ## Storage Artifact Synchronization
 

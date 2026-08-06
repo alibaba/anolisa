@@ -12,7 +12,7 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, BlazeDaemonError>;
 
 #[derive(Debug, Error)]
-pub enum BlazeDaemonError {
+pub(crate) enum BlazeDaemonError {
     #[error("core error: {0}")]
     Core(#[from] blaze_core::BlazeError),
 
@@ -53,6 +53,9 @@ pub enum BlazeDaemonError {
 
     #[error("not found: {0}")]
     NotFound(String),
+
+    #[error("unsupported operation: {0}")]
+    UnsupportedOperation(String),
 
     #[error("conflict: {0}")]
     Conflict(String),
@@ -107,6 +110,7 @@ impl BlazeDaemonError {
         match self {
             BlazeDaemonError::BadRequest(_) => 400,
             BlazeDaemonError::NotFound(_) => 404,
+            BlazeDaemonError::UnsupportedOperation(_) => 501,
             BlazeDaemonError::Conflict(_) => 409,
             BlazeDaemonError::ServiceUnavailable(_) => 503,
             BlazeDaemonError::PayloadTooLarge { .. } => 413,

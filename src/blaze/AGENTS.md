@@ -8,7 +8,7 @@ blaze is a **daemon-only** per-host sandbox orchestrator. All sandbox management
 
 Two-crate workspace:
 
-- **blaze-core** (library): policy engine, lifecycle state machine, backend selector, pool manager, kernel hook registry, config schema. Zero I/O beyond local TOML/JSON parsing.
+- **blaze-core** (library): policy engine, lifecycle state machine, backend selector, kernel hook registry, config schema. Zero I/O beyond local TOML/JSON parsing.
 - **blazed** (binary): daemon HTTP server (UDS + TCP), spawner implementations, metrics endpoint, CLI for daemon lifecycle commands.
 
 Dependency direction: `blazed` → `blaze-core`. No reverse dependency.
@@ -26,12 +26,12 @@ Platform: Linux (x86_64 + aarch64) for production. macOS builds succeed but spaw
 
 ## Key Design Constraints
 
-- **Daemon-only API model**: No CLI client for sandbox operations. All instance/pool/template management is done via HTTP endpoints on UDS (`/run/blaze/api.sock`) or TCP (`:14159`). The CLI subcommands (`daemon start`, `daemon reload`, `daemon doctor`) only manage daemon lifecycle.
+- **Daemon-only API model**: No CLI client for sandbox operations. All instance and template management is done via HTTP endpoints on UDS (`/run/blaze/api.sock`) or TCP (`:14159`). The CLI subcommands (`daemon start`, `daemon reload`, `daemon doctor`) only manage daemon lifecycle.
 - **BackendSpawner trait**: All backend-specific process management is behind `BackendSpawner`. Adding a new backend means implementing `spawn()`, `wait()`, `kill()`, `probe()` and registering it in `daemon::build_spawner()`.
 - **Policy-driven backend selection**: Workload class → policy file → prioritized backend list. The daemon probes backends at startup and selects the first available. Never hardcode backend preference in application logic.
 - **Lifecycle state machine**: 9 states. The main branches are Pending →
-  Creating → Running, Running ↔ Paused → Checkpointed, and Running → Reset →
-  Warm → Creating. Any non-terminal state can enter Destroyed; incomplete
+  Creating → Running and Running ↔ Paused → Checkpointed. Any non-terminal
+  state can enter Destroyed; incomplete
   cleanup enters RecoveryRequired. State transitions are enforced by
   `blaze_core::lifecycle`. Do not bypass via direct field mutation.
 - **MockSpawner fallback**: When the configured backend binary is missing or fails `probe()`, the daemon auto-downgrades to `MockSpawner` with a warning. This keeps API/integration tests functional without a real backend.
