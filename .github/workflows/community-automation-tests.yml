@@ -1,0 +1,58 @@
+name: Community Automation Tests
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/scripts/issue-claim.js"
+      - ".github/scripts/issue-claim.test.js"
+      - ".github/scripts/issue-triage.js"
+      - ".github/scripts/issue-triage.test.js"
+      - ".github/scripts/dingtalk_notification.py"
+      - ".github/scripts/test_dingtalk_notification.py"
+      - ".github/workflows/community-automation-tests.yml"
+      - ".github/workflows/issue-automation.yml"
+      - ".github/workflows/issue-claim.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/scripts/issue-claim.js"
+      - ".github/scripts/issue-claim.test.js"
+      - ".github/scripts/issue-triage.js"
+      - ".github/scripts/issue-triage.test.js"
+      - ".github/scripts/dingtalk_notification.py"
+      - ".github/scripts/test_dingtalk_notification.py"
+      - ".github/workflows/community-automation-tests.yml"
+      - ".github/workflows/issue-automation.yml"
+      - ".github/workflows/issue-claim.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: community-automation-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test issue triage and claim state machines
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check JavaScript syntax
+        run: |
+          node --check .github/scripts/issue-triage.js
+          node --check .github/scripts/issue-claim.js
+
+      - name: Run state-machine regression tests
+        run: |
+          node --test \
+            .github/scripts/issue-triage.test.js \
+            .github/scripts/issue-claim.test.js
+          python3 .github/scripts/test_dingtalk_notification.py
