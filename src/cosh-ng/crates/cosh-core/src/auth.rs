@@ -290,14 +290,52 @@ pub(crate) fn apply_auth_credentials(
         ),
     };
 
+    let existing_provider = config.ai.providers.get(&response.provider_id);
+
+    // cosh-shell pre-fills secret fields with bullets (U+2022) for
+    // display when editing a provider. If the user does not retype a
+    // new value, the masked bullets reach us here; preserve the
+    // existing secret instead of overwriting it with bullets in
+    // config.toml.
+    let resolve_secret = |field: &str, existing: Option<&String>| -> String {
+        let incoming = response.values.get(field).cloned().unwrap_or_default();
+        if is_masked_secret(&incoming) {
+            existing.cloned().unwrap_or_default()
+        } else {
+            incoming
+        }
+    };
+
     let user_model = response
         .values
         .get("model")
         .filter(|m| !m.is_empty())
         .cloned();
-    let final_model = user_model.or(default_model);
+    // If the incoming model contains the existing model repeated (e.g.
+    // tripled "qwen3.7-maxqwen3.7-maxqwen3.7-max" from multiple edit
+    // cycles), fall back to the single existing value.
+    let final_model = {
+        let existing_model = existing_provider.and_then(|p| p.model.as_deref());
+        if let Some(em) = existing_model {
+            if let Some(ref um) = user_model {
+                if um == em || (um.contains(em) && um.matches(em).count() > 1) {
+                    Some(em.to_string())
+                } else {
+                    user_model
+                }
+            } else {
+                user_model
+            }
+        } else {
+            user_model
+        }
+    }
+    .or(default_model);
 
-    let api_key = response.values.get("api_key").cloned().unwrap_or_default();
+    let api_key = resolve_secret(
+        "api_key",
+        existing_provider.and_then(|p| p.api_key.as_ref()),
+    );
 
     // Aliyun provider uses AK/SK instead of API key
     let auth_source = response.values.get("auth_source").cloned();
@@ -305,17 +343,26 @@ pub(crate) fn apply_auth_credentials(
     let access_key_id = if is_ecs_ram_role {
         None
     } else {
-        response.values.get("access_key_id").cloned()
+        Some(resolve_secret(
+            "access_key_id",
+            existing_provider.and_then(|p| p.access_key_id.as_ref()),
+        ))
     };
     let access_key_secret = if is_ecs_ram_role {
         None
     } else {
-        response.values.get("access_key_secret").cloned()
+        Some(resolve_secret(
+            "access_key_secret",
+            existing_provider.and_then(|p| p.access_key_secret.as_ref()),
+        ))
     };
     let security_token = if is_ecs_ram_role {
         None
     } else {
-        response.values.get("security_token").cloned()
+        Some(resolve_secret(
+            "security_token",
+            existing_provider.and_then(|p| p.security_token.as_ref()),
+        ))
     };
 
     // Preserve explicit_cache across auth refresh so a 401/403
@@ -353,6 +400,16 @@ pub(crate) fn apply_auth_credentials(
     }
     Ok(())
 }
+
+/// Returns true if the value consists entirely of bullet characters
+/// (U+2022), indicating it is a masked secret pre-filled by the auth
+/// form for display. When the user does not retype a new secret, the
+/// bullets reach `apply_auth_credentials` and must not overwrite the
+/// real credential in config.toml.
+fn is_masked_secret(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| c == '\u{2022}')
+}
+
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RemoveAuthProviderError {
