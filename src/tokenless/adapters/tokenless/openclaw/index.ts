@@ -178,6 +178,78 @@ function checkTokenless(): boolean {
   return tokenlessAvailable;
 }
 
+// Shell connectives that end a command-list / pipeline segment.
+const SEGMENT_OPS = new Set(["&&", "||", ";", "|", "&"]);
+
+function isEnvAssignment(token: string): boolean {
+  const eq = token.indexOf("=");
+  if (eq <= 0) return false;
+  const name = token.slice(0, eq);
+  if (!/^[A-Za-z_]/.test(name)) return false;
+  return /^[A-Za-z0-9_]+$/.test(name);
+}
+
+/**
+ * Replace bare `rtk` wrapper tokens with the resolved binary path.
+ *
+ * Ports Python hook_utils.anchor_rtk_prefix. Tokenises with a minimal
+ * shell-aware lexer (preserves quotes/globs verbatim, disables comment
+ * stripping) and replaces the first unquoted `rtk` in each pipeline
+ * segment with the absolute resolved path, making the rewritten command
+ * self-contained regardless of the agent tool-shell's PATH.
+ */
+export function anchorRtkPrefix(rewritten: string, resolvedRtkPath: string): string {
+  // Tokenise: split on whitespace, but keep quoted spans together and
+  // preserve all non-whitespace characters (globs, redirections, etc.).
+  const tokens: string[] = [];
+  let i = 0;
+  while (i < rewritten.length) {
+    // Skip whitespace
+    if (rewritten[i] === " " || rewritten[i] === "\t") {
+      i++;
+      continue;
+    }
+    // Quoted span — collect until matching close quote
+    if (rewritten[i] === "'" || rewritten[i] === '"') {
+      const q = rewritten[i];
+      let j = i + 1;
+      while (j < rewritten.length && rewritten[j] !== q) j++;
+      tokens.push(rewritten.slice(i, j + 1));
+      i = j + 1;
+      continue;
+    }
+    // Unquoted token — collect until whitespace
+    let j = i;
+    while (j < rewritten.length && rewritten[j] !== " " && rewritten[j] !== "\t") {
+      if (rewritten[j] === "'" || rewritten[j] === '"') break; // switch to quoted
+      j++;
+    }
+    tokens.push(rewritten.slice(i, j));
+    i = j;
+  }
+
+  // Shell-quote the resolved binary path only if it contains special chars
+  const quoted = /[\s'"\\$`!#&;|<>(){}]/.test(resolvedRtkPath)
+    ? `'${resolvedRtkPath.replace(/'/g, "'\\''")}'`
+    : resolvedRtkPath;
+
+  let wrapped = false;
+  for (let idx = 0; idx < tokens.length; idx++) {
+    const tok = tokens[idx];
+    if (SEGMENT_OPS.has(tok)) {
+      wrapped = false;
+      continue;
+    }
+    if (isEnvAssignment(tok)) continue;
+    if (!wrapped && tok === "rtk") {
+      tokens[idx] = quoted;
+      wrapped = true;
+    }
+  }
+
+  return tokens.join(" ");
+}
+
 // ---- Subprocess helpers -------------------------------------------------------
 
 function tryRtkRewrite(command: string): string | null {
@@ -197,7 +269,7 @@ function tryRtkRewrite(command: string): string | null {
     //       user confirmation; in non-interactive hook context, treat as valid
     //       rewrite since the intent is token optimization, not permission gating)
     if ((result.status === 0 || result.status === 3) && rewritten && rewritten !== command) {
-      return rewritten;
+      return anchorRtkPrefix(rewritten, rtkPath);
     }
     return null;
   } catch {

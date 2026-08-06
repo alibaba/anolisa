@@ -159,6 +159,7 @@ from hook_utils import (
     _RTK_FALLBACK,
     _RTK_LOCAL_SHARE,
     _RTK_LOCAL_LIB,
+    anchor_rtk_prefix,
     resolve_binary,
     warn as _warn_shared,
     try_parse_json as _try_parse_json,
@@ -410,6 +411,7 @@ def _try_rewrite(
     if not rewritten or rewritten == command:
         return None
 
+    rewritten = anchor_rtk_prefix(rewritten, rtk_bin)
     logger.info("tokenless: rtk rewrite %s → %s", command, rewritten)
     return {
         "action": "block",

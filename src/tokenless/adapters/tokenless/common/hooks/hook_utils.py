@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -48,6 +49,49 @@ _RTK_LOCAL_SHARE = _user_path(
 _RTK_LOCAL_LIB = _user_path(".local", "lib", "anolisa", "tokenless", "rtk")
 
 _TOKENLESS_HELPER_BINARIES = frozenset({"rtk", "toon"})
+
+# Shell connectives that terminate a command-list / pipeline segment.
+_SEGMENT_OPS = frozenset({"&&", "||", ";", "|", "&"})
+
+
+def _is_env_assignment(token: str) -> bool:
+    """Return True for a leading shell variable assignment (NAME=value)."""
+    name, sep, _ = token.partition("=")
+    if not sep or not name:
+        return False
+    if not (name[0].isalpha() or name[0] == "_"):
+        return False
+    return all(c.isalnum() or c == "_" for c in name)
+
+
+def anchor_rtk_prefix(rewritten: str, rtk_bin: str) -> str:
+    """Replace bare ``rtk`` wrapper tokens with the resolved binary path.
+
+    Shared implementation used by rewrite_hook.py and hermes/__init__.py.
+    See rewrite_hook._anchor_rtk_prefix for the full docstring.
+    """
+    lexer = shlex.shlex(rewritten, posix=False)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return rewritten
+
+    quoted = shlex.quote(rtk_bin)
+    result = list(tokens)
+    wrapped = False
+    for i, token in enumerate(tokens):
+        if token in _SEGMENT_OPS:
+            wrapped = False
+            continue
+        if _is_env_assignment(token):
+            continue
+        if not wrapped and token == "rtk":
+            result[i] = quoted
+            wrapped = True
+
+    return " ".join(result)
 
 
 def _known_binary_paths(name: str, home: str | None = None) -> tuple[str, ...]:
