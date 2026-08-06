@@ -97,18 +97,20 @@ sudo agentsight trace --daemon \
 
 Query token consumption data.
 
+When the Linux systemd service owns the data, run these queries with `sudo`:
+
 ```bash
 # Today's token usage
-agentsight token
+sudo agentsight token
 
 # This week, compared to last week
-agentsight token --period week --compare
+sudo agentsight token --period week --compare
 
 # Detailed breakdown by role and type
-agentsight token --detail
+sudo agentsight token --detail
 
 # JSON output
-agentsight token --json
+sudo agentsight token --json
 ```
 
 ### `agentsight audit`
@@ -184,11 +186,14 @@ make build-all
 Run the tracer and the API server in two separate terminals:
 
 ```bash
+# Stop the packaged tracer before starting a foreground tracer
+sudo systemctl stop agentsight.service
+
 # Terminal 1: start eBPF tracing (writes to SQLite)
 sudo agentsight trace
 
 # Terminal 2: start the API server (reads from the same SQLite)
-agentsight serve
+sudo agentsight serve
 ```
 
 **macOS** (trajectory collector only):
@@ -310,6 +315,11 @@ sudo systemctl status agentsight.service
 The main unit runs eBPF tracing and the Dashboard together and starts the
 enforcer dependency in the required order. Open `http://localhost:7396` after
 the service becomes active.
+
+The unit runs as root with `UMask=0077`, so its data under
+`/var/log/sysak/.agentsight` is private. Use `sudo` for CLI queries and
+Dashboard access commands that read service-owned data. Stop the unit before
+starting a foreground tracer.
 
 ### Build from Source
 

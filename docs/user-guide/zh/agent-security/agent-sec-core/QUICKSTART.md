@@ -17,7 +17,8 @@ AgentSecCore 是面向 AI Agent 的全本地安全内核，零 Token 消耗。�
 
 ## 前置条件
 
-- ANOLISA raw 包支持 Linux x86_64
+- 源码和 RPM 安装支持 Linux x86_64、aarch64
+- ANOLISA raw 包仅支持 Linux x86_64 和 system mode
 - Python 3.11.6（固定版本）
 - ANOLISA CLI 0.2.17 或更高版本
 - 安装需要 root 权限（system mode）
@@ -42,14 +43,22 @@ agent-sec-cli --version
 `agent-sec-core`。
 
 ```bash
-sudo yum install agent-sec-core
+sudo yum install anolisa agent-sec-core
+sudo anolisa --install-mode system adopt sec-core
 ```
+
+从 YUM 安装 CLI 后，`sudo` 可以从系统路径找到 `anolisa`。`adopt` 会把 RPM
+写入 system 状态，adapter 管理器随后才能读取已安装组件的契约。
 
 从源码构建时，使用仓库级统一入口。
 
 ```bash
 ./scripts/build-all.sh --component sec-core
 ```
+
+源码构建会把运行时和集成资源安装到用户目录，但不会在 ANOLISA 状态中注册
+`sec-core`。这种安装方式不能继续执行 `anolisa adapter enable`，请使用下文的
+源码集成脚本。
 
 ## 快速开始
 
@@ -326,8 +335,9 @@ agent-sec-cli events --summary
 
 ## Agent 框架集成
 
-安装包会放置可用的 adapter，但不会直接改动 Agent 框架的用户配置。
-请用拥有该框架配置的用户执行 adapter 命令。
+通过 ANOLISA 管理的 raw 包或已执行 `adopt` 的 RPM 会放置可用 adapter，
+但不会直接改动 Agent 框架的用户配置。请用拥有该框架配置的用户执行
+adapter 命令。
 
 ```bash
 anolisa adapter scan
@@ -336,6 +346,29 @@ anolisa adapter enable sec-core openclaw
 
 其他已打包的集成可以把 `openclaw` 换成 `hermes`、`qwencode`、`cosh`、
 `codex` 或 `qoder`。
+
+### 源码集成入口
+
+默认源码构建会把 cosh 扩展直接安装到
+`~/.copilot-shell/extensions/agent-sec-core`，无需再执行启用命令。其他集成请
+运行用户目录中对应的脚本。
+
+```bash
+# OpenClaw
+bash ~/.local/lib/anolisa/sec-core/openclaw-plugin/scripts/deploy.sh
+
+# Hermes
+bash ~/.local/lib/anolisa/sec-core/hermes-plugin/scripts/deploy.sh
+
+# Qwen Code
+bash ~/.local/lib/anolisa/sec-core/qwen-code-extension/scripts/deploy.sh
+
+# Codex
+bash ~/.local/lib/anolisa/sec-core/codex-plugin/install.sh
+
+# Qoder
+bash ~/.local/lib/anolisa/sec-core/qoder-plugin/install.sh
+```
 
 ### OpenClaw
 

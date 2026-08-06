@@ -63,12 +63,60 @@ tokenless 只优化**工具调用响应**进入 LLM 上下文前的冗余，不�
 
 ## 快速开始
 
+首选 ANOLISA CLI 安装已发布的组件。
+
+安装脚本会把 `anolisa` 放到 `~/.local/bin`。user mode 安装的 `tokenless`、
+`rtk` 和 `toon` 也在这个目录。如果当前 Shell 还找不到命令，先把该目录加入
+`PATH`。
+
 ```bash
-# 完整安装：构建 + 安装二进制 + 部署所有适配器
+curl -fsSL https://get.agentic-os.sh | bash
+
+# 让默认安装目录在当前 Shell 中生效
+export PATH="$HOME/.local/bin:$PATH"
+anolisa --version
+anolisa install tokenless
+tokenless --version
+```
+
+已配置 YUM 源的 Alinux 用户也可以安装 RPM 包。
+
+```bash
+sudo yum install anolisa tokenless
+sudo anolisa --install-mode system adopt tokenless
+```
+
+从同一 YUM 源安装 CLI 后，`sudo` 可以从系统路径找到 `anolisa`。`adopt` 会把
+直接安装的 RPM 写入 system 状态，adapter 命令随后才能读取组件契约。
+
+当前公开软件包支持 Linux x86_64、aarch64 和 macOS Apple Silicon。Intel
+Mac 暂无已发布的软件包。仓库中的 npm packaging 目录用于构建发布产物，
+目前不能通过公开的 `anolisa-tokenless` npm 包安装。源码中保留的
+`@anolisa/tokenless-darwin-x64` optional dependency 只是发布构建目标，
+不代表 registry 中已有可安装的软件包。
+
+通过 ANOLISA 管理的安装或已执行 `adopt` 的 RPM 会放置可用 adapter，但不会
+直接改动 Agent 框架的用户配置。请用拥有该配置的用户执行以下命令，并且只启用
+准备使用的 adapter。
+
+```bash
+anolisa adapter scan
+anolisa adapter enable tokenless openclaw
+anolisa adapter status tokenless
+```
+
+从源码构建适合开发者。
+
+```bash
+git clone <repo-url>
+cd Token-Less
+
+# 完整安装，构建并安装二进制，随后部署所有 adapter
 make setup
 ```
 
-安装完成后 `tokenless` 命令位于 `~/.local/bin`，RTK/TOON 辅助二进制同目录。
+源码安装会把 `tokenless` 放在 `~/.local/bin`，`rtk` 和 `toon` 辅助
+二进制也位于同一个目录，并部署开发所需的全部 adapter。
 
 ### OpenCode 安装
 
@@ -84,15 +132,6 @@ make opencode-install
 不会覆盖同名的非托管文件。配置目录支持 `OPENCODE_CONFIG_DIR`、
 `XDG_CONFIG_HOME` 和显式的 `TOKENLESS_OPENCODE_CONFIG_DIR` 覆盖。
 安装后重启 OpenCode 即可加载插件。
-
-## npm 安装
-
-```bash
-npm install -g anolisa-tokenless
-```
-
-自动安装适合您平台的预编译二进制文件（`tokenless`、`rtk`、`toon`）。
-支持 Linux 和 macOS 的 x86_64 和 arm64 架构。
 
 ## 查看 Token 节省明细
 

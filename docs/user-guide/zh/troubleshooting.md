@@ -100,7 +100,8 @@ anolisa env
 anolisa --verbose install tokenless
 
 # 替代方式：使用 YUM
-sudo yum install tokenless
+sudo yum install anolisa tokenless
+sudo anolisa --install-mode system adopt tokenless
 ```
 
 ---

@@ -167,7 +167,8 @@ variable to `true` does not re-enable a capability disabled in plugin configurat
 
 ### Install AgentSecCore
 
-The published ANOLISA raw package supports Linux x86_64 and requires CLI
+Source and RPM installations support Linux x86_64 and aarch64. The published
+ANOLISA raw package is limited to Linux x86_64 in system mode and requires CLI
 version 0.2.17 or later. Update the CLI through its installation owner:
 
 ```bash
@@ -185,8 +186,13 @@ sudo anolisa status sec-core
 `agent-sec-core`:
 
 ```bash
-sudo yum install agent-sec-core
+sudo yum install anolisa agent-sec-core
+sudo anolisa --install-mode system adopt sec-core
 ```
+
+Installing the CLI from YUM makes it available on sudo's system path. Adoption
+records the directly installed RPM in system state so adapter commands can read
+its component contract.
 
 Developers building from source should use the repository-level entry point:
 
@@ -194,8 +200,13 @@ Developers building from source should use the repository-level entry point:
 ./scripts/build-all.sh --component sec-core
 ```
 
-Package installation places the framework adapters. Enable one as the user
-who owns the target framework configuration:
+The source build installs runtime and integration resources in user paths but
+does not register the component in ANOLISA state. Use the installed integration
+scripts instead of `anolisa adapter enable`; see
+[Source-build Integration](../../docs/user-guide/en/agent-security/agent-sec-core/QUICKSTART.md#source-build-integration).
+
+An ANOLISA-managed raw package or adopted RPM places the framework adapters.
+Enable one as the user who owns the target framework configuration:
 
 ```bash
 anolisa adapter scan

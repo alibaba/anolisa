@@ -22,10 +22,15 @@ Tokenless 帮助 AI Agent 用更少的 Token 完成原来的工作。
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
 anolisa --version
 anolisa install tokenless
 tokenless --version
 ```
+
+如果 `anolisa --version` 能正常返回，可以直接从 `anolisa install tokenless`
+开始。上面的 PATH 设置会让默认安装目录在当前 Shell 中立即生效，新的登录 Shell
+可能已经包含 `~/.local/bin`。
 
 ## 3. 开始使用 Tokenless
 

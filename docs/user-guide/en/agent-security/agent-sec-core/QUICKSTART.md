@@ -17,7 +17,8 @@ AgentSecCore is an all-local security kernel for AI Agents. It runs entirely on 
 
 ## Prerequisites
 
-- Linux x86_64 for the ANOLISA raw package
+- Linux x86_64 or aarch64 for source and RPM installations
+- Linux x86_64 with system mode for the ANOLISA raw package
 - Python 3.11.6 (pinned)
 - ANOLISA CLI 0.2.17 or later
 - Root privileges for system-mode install
@@ -43,14 +44,23 @@ agent-sec-cli --version
 name, `agent-sec-core`:
 
 ```bash
-sudo yum install agent-sec-core
+sudo yum install anolisa agent-sec-core
+sudo anolisa --install-mode system adopt sec-core
 ```
+
+Installing the CLI from YUM makes it available on sudo's system path. Adoption
+records the RPM in system state so the adapter manager can read the installed
+component contract.
 
 Developers building from source should use the repository-level entry point:
 
 ```bash
 ./scripts/build-all.sh --component sec-core
 ```
+
+The source build installs the runtime and integration resources in user paths,
+but it does not register `sec-core` in ANOLISA state. Do not follow it with
+`anolisa adapter enable`; use the source integration scripts documented below.
 
 ## Quick Start
 
@@ -333,9 +343,9 @@ agent-sec-cli events --summary
 
 ## Agent Framework Integration
 
-Package installation places the available adapters but does not change an
-agent framework's user configuration. Run adapter commands as the user who
-owns that framework's configuration:
+For an ANOLISA-managed raw package or an adopted RPM, installation places the
+available adapters but does not change an agent framework's user configuration.
+Run adapter commands as the user who owns that framework's configuration:
 
 ```bash
 anolisa adapter scan
@@ -344,6 +354,29 @@ anolisa adapter enable sec-core openclaw
 
 Replace `openclaw` with `hermes`, `qwencode`, `cosh`, `codex`, or `qoder` for
 the other packaged integrations.
+
+### Source-build Integration
+
+The default source build installs the cosh extension directly under
+`~/.copilot-shell/extensions/agent-sec-core`, so no separate cosh enable step
+is needed. Deploy another integration with its installed user-path script:
+
+```bash
+# OpenClaw
+bash ~/.local/lib/anolisa/sec-core/openclaw-plugin/scripts/deploy.sh
+
+# Hermes
+bash ~/.local/lib/anolisa/sec-core/hermes-plugin/scripts/deploy.sh
+
+# Qwen Code
+bash ~/.local/lib/anolisa/sec-core/qwen-code-extension/scripts/deploy.sh
+
+# Codex
+bash ~/.local/lib/anolisa/sec-core/codex-plugin/install.sh
+
+# Qoder
+bash ~/.local/lib/anolisa/sec-core/qoder-plugin/install.sh
+```
 
 ### OpenClaw
 

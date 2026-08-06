@@ -114,6 +114,32 @@ async function rewriteLinks(markdown, source) {
   return output;
 }
 
+function stripLocaleSwitchLinks(markdown) {
+  let inFence = false;
+  let dropFollowingBlank = false;
+  return markdown
+    .split('\n')
+    .filter((line) => {
+      if (/^\s*(```|~~~)/.test(line)) {
+        inFence = !inFence;
+        dropFollowingBlank = false;
+        return true;
+      }
+      if (inFence) return true;
+      if (dropFollowingBlank && /^[ \t]*\r?$/.test(line)) {
+        dropFollowingBlank = false;
+        return false;
+      }
+      dropFollowingBlank = false;
+      if (/^\[(?:中文版|English)\]\([^)]+\)[ \t]*\r?$/.test(line)) {
+        dropFollowingBlank = true;
+        return false;
+      }
+      return true;
+    })
+    .join('\n');
+}
+
 function makeMdxSafe(markdown) {
   let inFence = false;
   return markdown
@@ -243,7 +269,10 @@ const categoryPositions = {
 
 const documentPositions = {
   'user-guide/installation.md': 2,
+  'user-guide/user-entrypoint/copilot-shell/quickstart.md': 1,
   'user-guide/user-entrypoint/cosh-ng/quickstart.md': 2,
+  'user-guide/token-saving/tokenless/quickstart.md': 1,
+  'user-guide/agent-security/agent-sec-core/quickstart.md': 1,
   'user-guide/user-entrypoint/cosh-ng/mcp.md': 4,
   'user-guide/user-entrypoint/cosh-ng/configuration.md': 7,
   'user-guide/user-entrypoint/cosh-ng/supported-distros.md': 8,
@@ -290,7 +319,8 @@ async function writeCategories(outputRoot, documents, locale) {
 async function prepareLocale(documents, outputRoot, locale) {
   for (const document of documents) {
     const sourceMarkdown = await readFile(path.join(repoRoot, document.source), 'utf8');
-    const markdown = makeMdxSafe(await rewriteLinks(sourceMarkdown, document.source));
+    const websiteMarkdown = stripLocaleSwitchLinks(sourceMarkdown);
+    const markdown = makeMdxSafe(await rewriteLinks(websiteMarkdown, document.source));
     const output = path.join(outputRoot, document.target);
     await mkdir(path.dirname(output), {recursive: true});
     await writeFile(output, `${frontMatter(document, sourceMarkdown, locale)}${markdown}`);

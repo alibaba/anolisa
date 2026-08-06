@@ -24,10 +24,12 @@ anolisa --dry-run install tokenless
 anolisa --dry-run --verbose install tokenless
 ```
 
-For a system-mode install, keep the same scope on all mutating anolisa commands:
+Run adapter diagnostics as the user who owns the target Agent configuration and
+adapter receipt. That user can inspect both user state and readable system
+state:
 
 ```bash
-sudo anolisa doctor tokenless
+anolisa doctor tokenless
 ```
 
 ## `tokenless: command not found`
@@ -100,7 +102,8 @@ Confirm that:
 
 - The target framework is detected.
 - The Tokenless adapter is enabled.
-- The adapter and component use the same user/system scope.
+- Adapter commands run as the user who owns the target framework configuration
+  and adapter receipt.
 - The agent CLI or IDE was restarted after enabling.
 
 ### 3. Verify the agent task
@@ -121,7 +124,9 @@ Common causes:
 
 - The target agent framework is not installed or detected.
 - The framework version does not meet the adapter requirement.
-- Tokenless is installed in system scope but the adapter mutation uses user scope, or vice versa.
+- The adapter command ran as a different user from the one that owns the target
+  framework configuration or adapter receipt.
+- A directly installed Tokenless RPM has not been adopted into ANOLISA state.
 - An npm installation has no anolisa component record, but `anolisa adapter enable` was used.
 - OpenClaw security policy rejected the plugin's required unsafe-install override.
 
@@ -133,6 +138,14 @@ anolisa --verbose adapter enable tokenless <framework>
 ```
 
 For npm installations, use [Framework integration · Manual integration after npm installation](framework-integration.md#manual-integration-after-npm-installation).
+
+For a directly installed RPM, create the missing state record, then rerun the
+adapter command as the target framework user:
+
+```bash
+sudo yum install anolisa
+sudo anolisa --install-mode system adopt tokenless
+```
 
 For an anolisa-managed installation, the first attempt does not bypass OpenClaw's safety scan. If the error specifically recommends it, review the findings and retry with:
 
@@ -261,14 +274,15 @@ No output is expected. Fully exit and restart Qoder IDE afterwards.
 If `dnf remove` or `rpm -e` was run directly:
 
 ```bash
-sudo anolisa repair tokenless
+sudo yum install anolisa
+sudo anolisa --install-mode system repair tokenless
 ```
 
 Follow the repair plan. Only when the RPM is still present and the output explicitly asks to recreate the record, run:
 
 ```bash
-sudo anolisa forget tokenless
-sudo anolisa adopt tokenless
+sudo anolisa --install-mode system forget tokenless
+sudo anolisa --install-mode system adopt tokenless
 ```
 
 `forget` deletes only anolisa state; it does not uninstall the RPM.

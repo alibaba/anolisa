@@ -165,8 +165,9 @@ capability。
 
 ### 安装 AgentSecCore
 
-已发布的 ANOLISA raw 包支持 Linux x86_64，需要使用 0.2.17 或更高版本的 CLI。
-请根据 CLI 的安装来源完成更新。
+源码和 RPM 安装支持 Linux x86_64、aarch64。已发布的 ANOLISA raw 包仅支持
+Linux x86_64 和 system mode，需要使用 0.2.17 或更高版本的 CLI。请根据 CLI
+的安装来源完成更新。
 
 ```bash
 # 通过 get.agentic-os.sh 安装的 CLI
@@ -182,8 +183,12 @@ sudo anolisa status sec-core
 `sec-core` 是 ANOLISA 中的组件名，RPM 继续使用包名 `agent-sec-core`。
 
 ```bash
-sudo yum install agent-sec-core
+sudo yum install anolisa agent-sec-core
+sudo anolisa --install-mode system adopt sec-core
 ```
+
+从 YUM 安装 CLI 后，`sudo` 可以从系统路径找到 `anolisa`。`adopt` 会把直接
+安装的 RPM 写入 system 状态，adapter 命令随后才能读取组件契约。
 
 从源码构建时，使用仓库级统一入口。
 
@@ -191,7 +196,12 @@ sudo yum install agent-sec-core
 ./scripts/build-all.sh --component sec-core
 ```
 
-安装包会放置框架 adapter。请用拥有目标框架配置的用户启用 adapter。
+源码构建会把运行时和集成资源安装到用户目录，但不会在 ANOLISA 状态中注册
+组件。请使用已安装的集成脚本，不要继续执行 `anolisa adapter enable`。具体入口见
+[源码集成入口](../../docs/user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md#源码集成入口)。
+
+通过 ANOLISA 管理的 raw 包或已执行 `adopt` 的 RPM 会放置框架 adapter。
+请用拥有目标框架配置的用户启用 adapter。
 
 ```bash
 anolisa adapter scan

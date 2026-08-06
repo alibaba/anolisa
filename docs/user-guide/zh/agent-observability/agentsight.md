@@ -59,20 +59,26 @@ sudo systemctl status agentsight.service
 systemd 自带的启动脚本会让 Dashboard 监听 `0.0.0.0`。主机接入不可信
 网络以前，请先通过防火墙或安全组限制 7396 端口。
 
-前台排查需要两个终端，两条命令也要使用同一个用户。
-`agentsight trace` 会一直占用前台，在同一个终端里顺序输入两条命令时，
-第二条命令不会开始运行。
+服务会以 root 身份和私有 umask 运行，数据保存在
+`/var/log/sysak/.agentsight`。CLI 查询和 Dashboard 访问命令读取这些数据时
+也要使用 `sudo`。
+
+前台排查前先停止 systemd 服务，避免两个 tracer 同时采集。随后打开两个
+终端，并以 root 身份运行两条命令。`agentsight trace` 会一直占用前台，
+在同一个终端里顺序输入两条命令时，第二条命令不会开始运行。
 
 ```bash
+sudo systemctl stop agentsight.service
+
 # 终端 1
 sudo agentsight trace
 
-# 终端 2: 启动 Dashboard
-agentsight serve
+# 终端 2，启动 Dashboard
+sudo agentsight serve
 # 浏览器访问 http://localhost:7396
 
-# 查看 Dashboard 访问地址与认证 Token
-agentsight dashboard
+# 输出 Dashboard 访问地址与 Token，再用桌面用户打开
+sudo agentsight dashboard --no-open
 ```
 
 > 本机（localhost）访问免认证；远程访问需要携带 Token，见[Dashboard 访问与认证](#dashboard-访问与认证)。
@@ -88,16 +94,16 @@ sudo agentsight trace
 ```
 
 > 需要 root 权限。捕获 SSL/TLS 流量、进程事件和文件操作。
-> 如果 `agentsight.service` 正在运行，先停止服务，再启动第二个前台 tracer。
+> 启动前台 tracer 前，先执行 `sudo systemctl stop agentsight.service`。
 
 ### agentsight serve — 启动 API 及 Dashboard
 
 ```bash
 # 默认绑定 127.0.0.1:7396
-agentsight serve
+sudo agentsight serve
 
 # 绑定所有接口（远程访问）
-agentsight serve --host 0.0.0.0 --port 7396
+sudo agentsight serve --host 0.0.0.0 --port 7396
 ```
 
 `serve` 和 `trace` 使用同一个运行用户时，才会解析到同一个数据目录。
@@ -111,7 +117,7 @@ Dashboard Token 认证默认开启：
 - **本机访问**（loopback）自动免认证，直接打开 `http://127.0.0.1:7396` 即可。
 - **远程访问**需携带 Token：浏览器 URL 追加 `?token=<TOKEN>`，或 HTTP 请求头设置 `Authorization: Bearer <TOKEN>`。
 - Token 在首次启动 `serve` 时自动生成（64 位十六进制），持久化于数据库同目录的 `.dashboard_token` 文件（默认 `/var/log/sysak/.agentsight/.dashboard_token`），重启后复用。
-- 使用 `agentsight dashboard` 命令可直接查看访问地址与 Token。
+- 使用 `sudo agentsight dashboard --no-open` 输出服务生成的访问地址与 Token，再用桌面用户打开该地址。
 
 如需关闭认证（仅建议在可信内网使用），在配置文件中设置：
 
@@ -126,11 +132,8 @@ Dashboard Token 认证默认开启：
 显示 Dashboard 访问地址、认证 Token，并尝试打开浏览器。在 ECS 实例上还会输出安全组放行指引。
 
 ```bash
-# 查看访问地址与 Token（需要 serve 已启动）
-agentsight dashboard
-
-# 仅显示信息，不打开浏览器
-agentsight dashboard --no-open
+# 输出访问地址与 Token，不以 root 身份打开浏览器
+sudo agentsight dashboard --no-open
 ```
 
 ### agentsight summary — 统一概览
@@ -151,14 +154,13 @@ agentsight summary --last 168 --json
 
 ```bash
 # 今日用量
-agentsight token
+sudo agentsight token
 
 # 本周 vs 上周对比
-agentsight token --period week --compare
-
+sudo agentsight token --period week --compare
 
 # JSON 格式输出
-agentsight token --json
+sudo agentsight token --json
 ```
 
 ### agentsight audit — 查询审计事件

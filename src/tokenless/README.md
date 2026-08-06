@@ -106,6 +106,52 @@ Token-Less/
 
 ## Quick Start
 
+Install the published component with the ANOLISA CLI:
+
+The install script places `anolisa` in `~/.local/bin`, and a user-mode
+Tokenless installation places `tokenless`, `rtk`, and `toon` in that same
+directory. Export it once if the current shell has not picked it up yet.
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash
+
+# Make the default install directory available in this shell
+export PATH="$HOME/.local/bin:$PATH"
+anolisa --version
+anolisa install tokenless
+tokenless --version
+```
+
+Alinux users with the YUM repository configured may install the RPM instead:
+
+```bash
+sudo yum install anolisa tokenless
+sudo anolisa --install-mode system adopt tokenless
+```
+
+Installing the CLI from the same YUM repository makes it available on sudo's
+system path. `adopt` then records the directly installed RPM in system state so
+adapter commands can use its component contract.
+
+Current public packages support Linux x86_64/aarch64 and macOS Apple Silicon.
+Intel macOS does not currently have a published package. The repository's npm
+packaging sources are for release construction and are not a public
+`anolisa-tokenless` installation route. The retained
+`@anolisa/tokenless-darwin-x64` optional-dependency entry describes a release
+build target; it does not indicate registry availability.
+
+ANOLISA-managed and adopted RPM installations place the available adapters
+without changing an Agent framework's user configuration. Run these commands
+as the user who owns that configuration, and enable only the adapter you need:
+
+```bash
+anolisa adapter scan
+anolisa adapter enable tokenless openclaw
+anolisa adapter status tokenless
+```
+
+Developers building from source can use:
+
 ```bash
 # Clone repo (no submodules needed)
 git clone <repo-url>
@@ -115,7 +161,8 @@ cd Token-Less
 make setup
 ```
 
-Both methods install `tokenless` to `~/.local/bin`, helper binaries `rtk`/`toon` alongside it, and deploy the adapters (hooks + OpenClaw plugin + Hermes plugin).
+The source setup installs `tokenless` to `~/.local/bin`, places the `rtk` and
+`toon` helpers alongside it, and deploys all adapters for development.
 
 ## CLI Usage
 
@@ -424,15 +471,6 @@ The installer creates a `tokenless.js` symbolic link in OpenCode's global
 `OPENCODE_CONFIG_DIR`, `XDG_CONFIG_HOME`, and the explicit
 `TOKENLESS_OPENCODE_CONFIG_DIR` override.
 
-
-## npm Install
-
-```bash
-npm install -g anolisa-tokenless
-```
-
-This automatically installs the correct prebuilt binaries (`tokenless`, `rtk`, `toon`) for your platform.
-Supports Linux and macOS on x86_64 and arm64.
 
 ## Build
 

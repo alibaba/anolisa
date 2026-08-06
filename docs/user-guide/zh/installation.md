@@ -28,6 +28,20 @@ sudo yum install anolisa
 anolisa --version
 ```
 
+如果当前 CLI 较旧，先根据它的安装来源完成自更新，再安装使用新版 raw
+包契约的组件。
+
+```bash
+# 通过 get.agentic-os.sh 安装的 CLI
+anolisa update self
+
+# 由 RPM 管理的 CLI
+sudo anolisa update self
+```
+
+AgentSecCore 要求 `anolisa` 0.2.17 或更高版本。CLI 无法安全读取契约时，
+会先给出更新提示并停止安装，不会改动主机。
+
 ---
 
 ## 第二步 环境检测
@@ -68,7 +82,7 @@ anolisa install <component>
 | `skillfs` | FUSE 虚拟技能文件系统 | **system** |
 | `agent-memory` | 基于 MCP 的持久化记忆 | user、system |
 | `agentsight` | eBPF 追踪与 Dashboard | **system** |
-| `agent-sec-core` | 安全加固 | **system** |
+| `sec-core` | 本地安全运行时、scanner 和 adapter | **system** |
 
 > **注意** 仅支持 system 模式的组件需要 `sudo`，并且必须显式选择 system 范围。
 > ```bash
@@ -82,6 +96,20 @@ sudo anolisa --install-mode system install cosh-ng
 cosh
 ```
 
+ANOLISA CLI 使用组件名 `sec-core`。Alinux 的 RPM 包名仍然是
+`agent-sec-core`。
+
+```bash
+sudo anolisa --install-mode system install sec-core
+
+# 如果直接安装 RPM，配置 adapter 前先让 ANOLISA 记录该组件
+sudo yum install anolisa agent-sec-core
+sudo anolisa --install-mode system adopt sec-core
+```
+
+随后进入[第四步](#第四步-配置适配器)，由拥有目标 Agent 配置的用户执行
+`anolisa adapter enable sec-core <framework>`。
+
 ### 安装全部组件
 
 ```bash
@@ -90,10 +118,13 @@ anolisa install --all
 
 ### YUM 替代方式（Alinux）
 
-每个组件也可通过 YUM 安装。
+每个组件也可通过 YUM 安装。请在同一条命令中安装 system CLI，避免 `sudo`
+依赖用户目录中的 `PATH`。直接安装 RPM 不会生成 ANOLISA 状态记录，继续使用
+组件生命周期或 adapter 命令前，需要先执行 `adopt`。
 
 ```bash
-sudo yum install <component>
+sudo yum install anolisa <rpm-package>
+sudo anolisa --install-mode system adopt <component>
 ```
 
 ---
@@ -121,11 +152,44 @@ ws-ckpt plugin install --runtime openclaw
 
 # ws-ckpt Hermes 插件
 ws-ckpt plugin install --runtime hermes
+
+# AgentSecCore OpenClaw 插件
+anolisa adapter enable sec-core openclaw
+```
+
+system 安装负责管理组件文件。adapter 需要写入当前用户的 Agent 配置，
+普通的 user scope 框架安装不需要 `sudo`。
+
+---
+
+## 第五步 启动常驻服务
+
+安装组件和启动常驻服务是两个动作。AgentSight 会安装
+`agentsight.service` 及其 enforcer 依赖，两个单元默认都不启用。
+主机准备开始采集时，再启动主服务。
+
+```bash
+sudo systemctl enable --now agentsight.service
+sudo systemctl status agentsight.service
+```
+
+主服务以 root 身份运行 eBPF trace 和 Dashboard，数据保存在仅 root 可读的
+`/var/log/sysak/.agentsight`。查询服务数据时也要使用 `sudo`。如需前台排查，
+先停止服务，再在两个终端中分别以 root 身份启动 tracer 和 server。
+
+```bash
+sudo systemctl stop agentsight.service
+
+# 终端 1
+sudo agentsight trace
+
+# 终端 2
+sudo agentsight serve
 ```
 
 ---
 
-## 第五步 验证安装
+## 第六步 验证安装
 
 查看所有已安装组件的状态。
 
@@ -173,8 +237,8 @@ anolisa update <component>
 anolisa update all
 ```
 
-`update all` 只更新已记录的组件，不更新 CLI；更新 CLI 请使用
-`anolisa update self`。
+`update all` 只更新已记录的组件，不更新 CLI。脚本安装的 CLI 使用
+`anolisa update self`，RPM 管理的 CLI 使用 `sudo anolisa update self`。
 
 ---
 

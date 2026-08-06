@@ -2,7 +2,12 @@
 
 LLM token optimization toolkit — schema/response compression, command rewriting, and tool environment readiness.
 
-## Install
+> **Release status:** These npm packages are private and are not currently
+> published to the public registry. This document describes the intended
+> package layout and post-publication workflow; its platform rows are build
+> targets, not a list of packages that users can install today.
+
+## Install after publication
 
 ```bash
 npm install -g anolisa-tokenless
