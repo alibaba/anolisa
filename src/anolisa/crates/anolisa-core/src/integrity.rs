@@ -79,8 +79,9 @@ pub enum IntegrityStatus {
     /// proved either way, so we degrade rather than claim health.
     Unverified,
     /// File exists and passed every cheap check (regular file, mode,
-    /// capabilities), but its size is above [`MAX_PROBE_BYTES`] so the
-    /// content hash was never computed.
+    /// capabilities), but its size is above the probe's per-file read
+    /// ceiling so the content hash was never computed. The ceiling is an
+    /// internal constant; `limit` below reports the value that applied.
     ///
     /// This is a *budget* outcome, not a *read* outcome: the probe chose
     /// not to spend the time, as opposed to trying and failing. Nothing
@@ -91,7 +92,7 @@ pub enum IntegrityStatus {
     ProbeLimitExceeded {
         /// Size observed on disk, in bytes.
         size: u64,
-        /// Ceiling that was exceeded ([`MAX_PROBE_BYTES`]), in bytes.
+        /// Per-file read ceiling that was exceeded, in bytes.
         limit: u64,
     },
     /// Path escapes the ANOLISA-owned roots in the active [`FsLayout`].
@@ -288,14 +289,10 @@ pub fn check_owned_file(layout: &FsLayout, file: &OwnedFile) -> IntegrityStatus 
         };
     }
 
-    match hash_file_sha256(&file.path) {
-        Err(HashError::Io(err)) => IntegrityStatus::ReadError(err.to_string()),
-        // The file grew past the ceiling between stat and read. Same
-        // budget outcome as the size gate — we stopped early by choice.
-        Err(HashError::LimitExceeded { size }) => IntegrityStatus::ProbeLimitExceeded {
-            size,
-            limit: MAX_PROBE_BYTES,
-        },
+    // The size just observed is the read budget. Growth past it means the
+    // file changed under the probe, which is a finding, not a budget stop.
+    match hash_file_sha256(&file.path, meta.len()) {
+        Err(err) => IntegrityStatus::ReadError(err.to_string()),
         Ok(actual) if actual != expected => IntegrityStatus::ShaMismatch { expected, actual },
         Ok(_) => IntegrityStatus::Ok,
     }
@@ -391,37 +388,35 @@ fn open_nofollow(path: &std::path::Path) -> std::io::Result<fs::File> {
     fs::File::open(path)
 }
 
-/// Why [`hash_file_sha256`] produced no digest. The two arms drive
-/// different verdicts, so they must stay distinguishable: a genuine IO
-/// error is an integrity failure, while running out of read budget is not.
-enum HashError {
-    /// The read itself failed (permissions, IO error, vanished file).
-    Io(std::io::Error),
-    /// The file grew past [`MAX_PROBE_BYTES`] while being read, so hashing
-    /// stopped early. `size` is the byte count reached before the stop.
-    LimitExceeded {
-        /// Bytes consumed before the ceiling tripped.
-        size: u64,
-    },
-}
-
 /// Stream `path` through sha256 with a fixed 8 KiB buffer, so peak memory
-/// is constant regardless of file size. Bails once the ceiling is passed —
-/// `stat` already gated on size, but the file can grow between the two.
-fn hash_file_sha256(path: &std::path::Path) -> Result<String, HashError> {
+/// is constant regardless of file size.
+///
+/// `expected_len` is the length `stat` reported moments earlier, and it is
+/// the read budget: reading more than that means the file grew *while the
+/// probe was streaming it*. That is a concurrent modification, not a budget
+/// stop, and it fails hard. Treating it as a budget stop would hand a
+/// writer an evasion — append past the ceiling mid-read and the digest
+/// comparison never completes, so tampering reports as merely unverified.
+///
+/// Anchoring on the observed length rather than the ceiling also catches
+/// growth that stays under the ceiling, which a ceiling test would miss.
+fn hash_file_sha256(path: &std::path::Path, expected_len: u64) -> std::io::Result<String> {
     use std::io::Read;
-    let mut f = open_nofollow(path).map_err(HashError::Io)?;
+    let mut f = open_nofollow(path)?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 8 * 1024];
     let mut total: u64 = 0;
     loop {
-        let n = f.read(&mut buf).map_err(HashError::Io)?;
+        let n = f.read(&mut buf)?;
         if n == 0 {
             break;
         }
         total += n as u64;
-        if total > MAX_PROBE_BYTES {
-            return Err(HashError::LimitExceeded { size: total });
+        if total > expected_len {
+            return Err(std::io::Error::other(format!(
+                "file grew past its observed size of {expected_len} bytes during the \
+                 integrity read"
+            )));
         }
         hasher.update(&buf[..n]);
     }
@@ -606,6 +601,45 @@ mod tests {
             check_owned_file(&layout, &owned),
             IntegrityStatus::Unverified,
         );
+    }
+
+    /// A file that grows while the probe streams it must fail hard, not
+    /// degrade. Otherwise a process with write access could dodge the digest
+    /// comparison by appending mid-read: the hash never completes and the
+    /// tampered file would report as merely unverified.
+    ///
+    /// The guard is anchored on the length `stat` observed, so this is
+    /// exercised by handing `hash_file_sha256` a budget smaller than the
+    /// file — deterministic, and equivalent to the file having grown by that
+    /// difference between the stat and the read.
+    #[test]
+    fn growth_during_read_is_a_hard_failure_not_a_budget_stop() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_under(tmp.path());
+        let path = layout.bin_dir.join("grows");
+        fs::write(&path, vec![b'x'; 4096]).expect("write");
+
+        // stat said 1024; the read finds 4096.
+        let err = hash_file_sha256(&path, 1024).expect_err("must refuse to hash");
+        assert!(err.to_string().contains("grew past"), "msg: {err}");
+
+        // And that error class is decisive, not a degradation.
+        assert!(IntegrityStatus::ReadError(err.to_string()).is_failure());
+    }
+
+    /// Growth that stays under the ceiling is caught too — the budget is the
+    /// observed length, not the 2 GiB ceiling, so a small file cannot be
+    /// padded to hide a content change.
+    #[test]
+    fn growth_below_the_ceiling_is_still_caught() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_under(tmp.path());
+        let path = layout.bin_dir.join("small-but-grown");
+        fs::write(&path, b"payload-plus-appended-junk").expect("write");
+
+        assert!(hash_file_sha256(&path, 7).is_err());
+        // Same file hashed within its observed length succeeds.
+        assert!(hash_file_sha256(&path, 26).is_ok());
     }
 
     /// The budget outcome sorts with the other "not proved either way"
