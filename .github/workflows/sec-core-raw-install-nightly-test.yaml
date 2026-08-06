@@ -1,0 +1,48 @@
+name: sec-core-raw-install-nightly-test
+
+on:
+  pull_request:
+    branches:
+      - main
+  schedule:
+    # UTC 16:00 = Beijing 00:00
+    - cron: "0 16 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-ubuntu-raw:
+    name: E2E sec-core install (Ubuntu 22.04 / raw)
+    runs-on: anolisa-k8s-general-ci-x64
+    timeout-minutes: 60
+    steps:
+      - name: Prepare Ubuntu 22.04
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl git make tar python3-pip
+
+      - uses: actions/checkout@v4
+
+      - name: Install anolisa CLI
+        run: |
+          curl -fsSL https://get.agentic-os.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/anolisa" --version
+
+      - name: Install sec-core with anolisa
+        run: sudo "$HOME/.local/bin/anolisa" --install-mode system install sec-core --backend raw
+
+      - name: Verify sec-core installation
+        run: |
+          sudo "$HOME/.local/bin/anolisa" --install-mode system status sec-core
+          agent-sec-cli --version
+          agent-sec-daemon --help >/dev/null
+          linux-sandbox --help >/dev/null
+
+      - name: Install E2E test dependency
+        run: python3 -m pip install --quiet pytest
+
+      - name: Run sec-core E2E tests
+        run: make -C src/agent-sec-core test-e2e-rpm
