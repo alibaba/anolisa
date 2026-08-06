@@ -39,7 +39,10 @@ use super::driver::{
     ClaimResourceRef, ConditionStatus, DetectResult, DisableReport, DriverCtx, DriverPlan,
     FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable, find_binary_in_path,
 };
-use super::util::{bool_status, cli_failure_reason, digest_tree, display_command, now_iso8601};
+use super::util::{
+    SealVerdict, bool_status, cli_failure_reason, digest_tree, display_command, now_iso8601,
+    verify_seal,
+};
 
 const CLI_TIMEOUT: Duration = Duration::from_secs(60);
 // tokenless declares the same floor; earlier Qwen releases expose the
@@ -1159,11 +1162,19 @@ fn parse_qwen_version(output: &str) -> Option<Version> {
 
 fn bundle_match_condition(claim: &AdapterClaim) -> (AdapterCondition, ConditionStatus) {
     let kind = AdapterConditionKind::ResourceBundleMatches;
-    let (status, reason) = match (&claim.bundle_digest, digest_tree(&claim.resource_root)) {
-        (Some(recorded), Some(current)) if recorded == &current => (ConditionStatus::True, None),
-        (Some(_), Some(_)) => (
+    let (status, reason) = match claim
+        .bundle_digest
+        .as_deref()
+        .and_then(|recorded| verify_seal(recorded, &claim.resource_root))
+    {
+        Some(SealVerdict::Matched) => (ConditionStatus::True, None),
+        Some(SealVerdict::Changed) => (
             ConditionStatus::False,
             Some("resource bundle changed since enable".to_string()),
+        ),
+        Some(SealVerdict::LegacyUndecidable) => (
+            ConditionStatus::Unknown,
+            Some("sealed by an earlier ANOLISA release and runtime caches changed since; re-enable to refresh the seal".to_string()),
         ),
         _ => (
             ConditionStatus::Unknown,

@@ -367,14 +367,28 @@ fn trusted_adapter_root(
 /// only after the referent canonicalizes under a trusted datadir root. Reading
 /// the canonical referent instead of reopening the link keeps a link swap from
 /// redirecting the privileged read after validation.
+///
+/// Runtime-derived Python bytecode caches (`__pycache__/`, `*.pyc`) are
+/// excluded, mirroring the receipt digest (#2252): a hook run between the
+/// before/after snapshots must not register as a bundle change.
 fn digest_bundle_tree(root: &Path, trusted_roots: &[PathBuf]) -> Option<String> {
     use sha2::{Digest, Sha256};
+
+    fn is_python_bytecode(path: &Path, is_dir: bool) -> bool {
+        if is_dir {
+            return path.file_name().is_some_and(|name| name == "__pycache__");
+        }
+        path.extension().is_some_and(|ext| ext == "pyc")
+    }
 
     fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
             let file_type = entry.file_type()?;
+            if is_python_bytecode(&path, file_type.is_dir()) {
+                continue;
+            }
             if file_type.is_dir() {
                 collect_files(&path, files)?;
             } else if file_type.is_file() || file_type.is_symlink() {

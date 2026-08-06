@@ -819,6 +819,188 @@ resource_root = "{root_b}/"
     assert!(!marketplace_root.exists());
 }
 
+/// Regression for #2252: codex (like qwencode) executes the resource root
+/// in place, so a hook run writes `__pycache__` bytecode caches into the
+/// very tree the enable-time digest sealed. The digest must ignore them —
+/// a healthy adapter must not degrade because its hooks ran.
+#[test]
+fn codex_status_stays_healthy_when_hooks_write_bytecode_caches() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    let (_log, _marketplace_root) = apply_codex_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable");
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+
+    // First hook run: CPython derives bytecode caches in the executed root.
+    let pycache = world.resource_root.join("hooks").join("__pycache__");
+    std::fs::create_dir_all(&pycache).expect("pycache dir");
+    std::fs::write(pycache.join("hook_config.cpython-311.pyc"), b"bytecode").expect("pyc");
+
+    let status = manager
+        .status(Some(COMPONENT))
+        .expect("status after pycache");
+    assert_eq!(
+        status.entries[0].report.summary,
+        AdapterSummary::Healthy,
+        "runtime-derived bytecode caches must not degrade the adapter"
+    );
+    assert!(
+        status.entries[0]
+            .report
+            .conditions
+            .iter()
+            .any(|c| c.kind == AdapterConditionKind::ResourceBundleMatches
+                && c.status == ConditionStatus::True),
+        "the bundle condition must stay True"
+    );
+}
+
+/// A receipt sealed by a pre-exclusion release — with `__pycache__`
+/// already in the tree, as the #2252 re-enable workaround produced — must
+/// keep reporting Healthy after the ANOLISA upgrade: the digest comparison
+/// accepts a match under either the old (bytecode included) or the new
+/// (bytecode excluded) semantics. Genuine changes still degrade.
+#[test]
+fn codex_status_accepts_receipts_sealed_with_pre_exclusion_digests() {
+    /// The pre-exclusion digest algorithm: every file, no bytecode skip.
+    fn legacy_digest_tree(root: &Path) -> String {
+        use sha2::{Digest, Sha256};
+        fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read_dir") {
+                let entry = entry.expect("entry");
+                let path = entry.path();
+                if entry.file_type().expect("file_type").is_dir() {
+                    collect(&path, out);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        collect(root, &mut files);
+        files.sort();
+        let mut hasher = Sha256::new();
+        for path in &files {
+            let rel = path.strip_prefix(root).unwrap_or(path);
+            let bytes = std::fs::read(path).expect("read file");
+            hasher.update(rel.to_string_lossy().as_bytes());
+            hasher.update([0u8]);
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update([0u8]);
+            hasher.update(&bytes);
+        }
+        format!("sha256:{:x}", hasher.finalize())
+    }
+
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_bundle,
+    );
+    // Bytecode caches already exist at enable time: the tree state the
+    // pre-exclusion release sealed.
+    let pycache = world.resource_root.join("hooks").join("__pycache__");
+    std::fs::create_dir_all(&pycache).expect("pycache dir");
+    std::fs::write(pycache.join("hook_config.cpython-311.pyc"), b"bytecode").expect("pyc");
+
+    let fake = write_fake_codex(&world.prefix);
+    let (_log, _marketplace_root) = apply_codex_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable");
+
+    // Rewrite the receipt digest to what the pre-exclusion release would
+    // have recorded for this exact tree (bytecode included).
+    let state_path = world.layout.state_dir.join("installed.toml");
+    let mut state = world.load_state();
+    let claim = state
+        .adapter_claims
+        .iter_mut()
+        .find(|claim| claim.component == COMPONENT && claim.framework == "codex")
+        .expect("codex claim");
+    claim.bundle_digest = Some(legacy_digest_tree(&world.resource_root));
+    state.save(&state_path).expect("save legacy-sealed receipt");
+
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(
+        status.entries[0].report.summary,
+        AdapterSummary::Healthy,
+        "an unchanged tree must not degrade because the seal predates the exclusion"
+    );
+
+    // A later hook run regenerates the bytecode cache (cache A -> cache B).
+    // The legacy seal committed to cache A, which is gone — churn and drift
+    // are indistinguishable, so the honest verdict is Unknown with the
+    // re-enable remedy, never a false Degraded.
+    std::fs::write(pycache.join("hook_config.cpython-311.pyc"), b"cache B")
+        .expect("regenerate pyc");
+    let status = manager.status(Some(COMPONENT)).expect("status after churn");
+    assert_ne!(
+        status.entries[0].report.summary,
+        AdapterSummary::Degraded,
+        "bytecode cache churn must not degrade a legacy-sealed receipt"
+    );
+    let bundle = status.entries[0]
+        .report
+        .conditions
+        .iter()
+        .find(|c| c.kind == AdapterConditionKind::ResourceBundleMatches)
+        .expect("bundle condition present");
+    assert_eq!(bundle.status, ConditionStatus::Unknown);
+    assert!(
+        bundle
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.contains("re-enable")),
+        "the verdict must name the remedy: {:?}",
+        bundle.reason
+    );
+
+    // Re-enable reseals with the marked v2 semantics: cache churn becomes
+    // invisible and real drift detection returns.
+    manager
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("re-enable");
+    std::fs::write(pycache.join("hook_config.cpython-311.pyc"), b"cache C").expect("churn again");
+    let status = manager
+        .status(Some(COMPONENT))
+        .expect("status after reseal");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+
+    std::fs::write(
+        world.resource_root.join("README.md"),
+        b"tampered plugin readme\n",
+    )
+    .expect("modify managed file");
+    let status = manager
+        .status(Some(COMPONENT))
+        .expect("status after change");
+    assert!(
+        status.entries[0]
+            .report
+            .conditions
+            .iter()
+            .any(|c| c.kind == AdapterConditionKind::ResourceBundleMatches
+                && c.status == ConditionStatus::False),
+        "real changes must fail the bundle condition on a v2 seal"
+    );
+}
+
 #[test]
 fn codex_dry_run_enable_writes_nothing() {
     let guard = EnvGuard::acquire();

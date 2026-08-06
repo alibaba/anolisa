@@ -442,17 +442,27 @@ impl HermesDriver {
     /// resource root and comparing to the enable-time digest.
     fn bundle_match_condition(&self, claim: &AdapterClaim) -> AdapterCondition {
         let kind = AdapterConditionKind::ResourceBundleMatches;
-        match (&claim.bundle_digest, digest_tree(&claim.resource_root)) {
-            (Some(recorded), Some(current)) if recorded == &current => AdapterCondition {
+        match claim
+            .bundle_digest
+            .as_deref()
+            .and_then(|recorded| super::util::verify_seal(recorded, &claim.resource_root))
+        {
+            Some(super::util::SealVerdict::Matched) => AdapterCondition {
                 kind,
                 status: ConditionStatus::True,
                 reason: None,
                 resource: None,
             },
-            (Some(_), Some(_)) => AdapterCondition {
+            Some(super::util::SealVerdict::Changed) => AdapterCondition {
                 kind,
                 status: ConditionStatus::False,
                 reason: Some("resource bundle changed since enable".to_string()),
+                resource: None,
+            },
+            Some(super::util::SealVerdict::LegacyUndecidable) => AdapterCondition {
+                kind,
+                status: ConditionStatus::Unknown,
+                reason: Some("sealed by an earlier ANOLISA release and runtime caches changed since; re-enable to refresh the seal".to_string()),
                 resource: None,
             },
             _ => AdapterCondition {
@@ -792,9 +802,10 @@ fn summarize(
 }
 
 /// SHA-256 digest of a directory tree, stable across runs: files are
-/// hashed in sorted relative-path order as `path\0len\0bytes`. Returns
-/// `None` on any IO error so callers fall back to `Unknown` rather than a
-/// wrong verdict.
+/// hashed in sorted relative-path order as `path\0len\0bytes`.
+/// Runtime-derived Python bytecode caches are excluded (see
+/// [`super::util::is_python_bytecode`], #2252). Returns `None` on any IO
+/// error so callers fall back to `Unknown` rather than a wrong verdict.
 fn digest_tree(root: &Path) -> Option<String> {
     let mut files: Vec<PathBuf> = Vec::new();
     collect_files(root, &mut files).ok()?;
@@ -819,6 +830,9 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         let entry = entry?;
         let path = entry.path();
         let ft = entry.file_type()?;
+        if super::util::is_python_bytecode(&path, ft.is_dir()) {
+            continue;
+        }
         if ft.is_dir() {
             collect_files(&path, out)?;
         } else {

@@ -30,7 +30,7 @@ use super::driver::{
     ClaimResourceRef, ConditionStatus, DetectResult, DisableReport, DriverCtx, DriverPlan,
     FrameworkDriver, HostEnv, PreparedEnable, find_binary_in_path,
 };
-use super::util::{bool_status, digest_tree, now_iso8601};
+use super::util::{SealVerdict, bool_status, digest_tree, now_iso8601, verify_seal};
 
 /// Candidate binary names that indicate cosh is installed. `co` and
 /// `copilot` are the short/legacy aliases of the `cosh` CLI.
@@ -432,17 +432,27 @@ fn claim_extension_dir(claim: &AdapterClaim) -> Option<PathBuf> {
 /// root and comparing to the enable-time digest.
 fn bundle_match_condition(claim: &AdapterClaim) -> AdapterCondition {
     let kind = AdapterConditionKind::ResourceBundleMatches;
-    match (&claim.bundle_digest, digest_tree(&claim.resource_root)) {
-        (Some(recorded), Some(current)) if recorded == &current => AdapterCondition {
+    match claim
+        .bundle_digest
+        .as_deref()
+        .and_then(|recorded| verify_seal(recorded, &claim.resource_root))
+    {
+        Some(SealVerdict::Matched) => AdapterCondition {
             kind,
             status: ConditionStatus::True,
             reason: None,
             resource: None,
         },
-        (Some(_), Some(_)) => AdapterCondition {
+        Some(SealVerdict::Changed) => AdapterCondition {
             kind,
             status: ConditionStatus::False,
             reason: Some("resource bundle changed since enable".to_string()),
+            resource: None,
+        },
+        Some(SealVerdict::LegacyUndecidable) => AdapterCondition {
+            kind,
+            status: ConditionStatus::Unknown,
+            reason: Some("sealed by an earlier ANOLISA release and runtime caches changed since; re-enable to refresh the seal".to_string()),
             resource: None,
         },
         _ => AdapterCondition {

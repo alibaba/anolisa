@@ -34,7 +34,7 @@ use serde_json::Value;
 use crate::path_safety::{PathBoundaryError, canonicalize_nearest_existing, validate_owned_path};
 use anolisa_platform::fs_layout::FsLayout;
 
-use super::util::digest_tree;
+use super::util::{SealVerdict, verify_seal};
 
 /// Schema version for the generic claim shape and [`ClaimResource`].
 /// Persisted in every receipt so a future on-disk migration can branch.
@@ -121,10 +121,14 @@ impl AdapterClaim {
     /// adapter actions branch on the same verdict, so the comparison lives
     /// with the receipt schema instead of being re-derived per caller.
     pub fn bundle_match(&self) -> BundleMatch {
-        match (&self.bundle_digest, digest_tree(&self.resource_root)) {
-            (Some(recorded), Some(current)) if recorded == &current => BundleMatch::Matched,
-            (Some(_), Some(_)) => BundleMatch::Changed,
-            _ => BundleMatch::Unknown,
+        match self
+            .bundle_digest
+            .as_deref()
+            .and_then(|recorded| verify_seal(recorded, &self.resource_root))
+        {
+            Some(SealVerdict::Matched) => BundleMatch::Matched,
+            Some(SealVerdict::Changed) => BundleMatch::Changed,
+            Some(SealVerdict::LegacyUndecidable) | None => BundleMatch::Unknown,
         }
     }
 
@@ -1025,6 +1029,7 @@ pub fn validate_config_key(key: &str) -> Result<(), super::AdapterError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::util::digest_tree;
 
     fn sample_claim() -> AdapterClaim {
         AdapterClaim {
