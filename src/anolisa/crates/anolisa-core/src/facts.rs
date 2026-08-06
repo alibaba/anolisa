@@ -380,9 +380,12 @@ pub fn assemble_facts(
 /// that verdict is the evidence repair's R6 exit (rebuild the owned record)
 /// consumes.
 ///
-/// `Skipped` (not ANOLISA-owned) and `Unverified` (no recorded digest) are
-/// healthy: neither proves drift, and treating absence of evidence as
-/// damage would route every digest-less install into repair.
+/// `Skipped` (not ANOLISA-owned), `Unverified` (no recorded digest), and
+/// `ProbeLimitExceeded` (too large to hash within the probe budget) are
+/// healthy: none proves drift, and treating absence of evidence as
+/// damage would route every digest-less install into repair — and, for
+/// the last one, would make owning a large intact artifact trigger repair
+/// on every run.
 fn verify_owned_files(
     record: &RecordFacts,
     store: &StateStore,
@@ -410,7 +413,10 @@ fn verify_owned_files(
     let all_healthy = files.iter().all(|file| {
         matches!(
             check_owned_file(layout, file),
-            IntegrityStatus::Ok | IntegrityStatus::Skipped | IntegrityStatus::Unverified
+            IntegrityStatus::Ok
+                | IntegrityStatus::Skipped
+                | IntegrityStatus::Unverified
+                | IntegrityStatus::ProbeLimitExceeded { .. }
         )
     });
     Some(all_healthy)

@@ -783,7 +783,8 @@ fn record_version(installation: &Installation) -> Option<String> {
 ///
 /// Escalation rules (only move toward more-broken, never back):
 /// - any [`IntegrityStatus::is_failure`] result → `"failed"`
-/// - any [`IntegrityStatus::Unverified`] result on an otherwise-clean
+/// - any [`IntegrityStatus::Unverified`] or
+///   [`IntegrityStatus::ProbeLimitExceeded`] result on an otherwise-clean
 ///   component → `"degraded"`
 /// - otherwise the base status (`installed`/`disabled`/etc) is preserved
 ///
@@ -813,7 +814,13 @@ fn integrity_probe(
         }
         if result.is_failure() {
             had_failure = true;
-        } else if matches!(result, IntegrityStatus::Unverified) {
+        } else if matches!(
+            result,
+            IntegrityStatus::Unverified | IntegrityStatus::ProbeLimitExceeded { .. }
+        ) {
+            // Both mean "content not proved intact" — no digest recorded,
+            // or one recorded but the file was too large to hash. Neither
+            // proves damage, so they degrade rather than fail.
             had_unverified = true;
         }
         entries.push(HealthEntry {
