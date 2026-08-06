@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.18] - 2026-08-06
+
+### Changed
+
+- Telemetry upload now treats `SLS_PROJECT_PREFIX` as an SLS project prefix
+  and appends the detected region, for example `anolisa-cn-hangzhou`.
+  Deployments that set the legacy `SLS_PROJECT` must migrate to
+  `SLS_PROJECT_PREFIX` so uploads reach their region-specific project
+  ([#2260](https://github.com/alibaba/anolisa/pull/2260)).
+
+### Fixed
+
+- Raw installs now stream only selected archive payloads through private,
+  disk-backed staging instead of retaining uncompressed contents in memory.
+  Large packages can install with bounded payload memory while preserving
+  atomic placement, rollback, cleanup, and digest verification
+  ([#2250](https://github.com/alibaba/anolisa/pull/2250)).
+- `anolisa status` and `anolisa doctor` now hash ANOLISA-owned files up to
+  2 GiB and treat larger files as unchecked and degraded instead of failed.
+  Intact components with large artifacts no longer appear damaged or trigger
+  spurious repair, while recovery still fails closed when verification is
+  required
+  ([#2271](https://github.com/alibaba/anolisa/pull/2271)).
+- Enabling a Codex adapter that declares hooks now discovers the installed
+  plugin's hook identities and atomically persists their trusted hashes, so
+  non-interactive `codex exec` sessions can run them. Missing hooks or
+  overridden trust settings stop enablement with actionable diagnostics
+  ([#2281](https://github.com/alibaba/anolisa/pull/2281)).
+
 ## [0.2.17] - 2026-08-05
 
 ### Added
@@ -790,6 +819,33 @@ Initial alpha release of the ANOLISA CLI.
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [未发布]
+
+## [0.2.18] - 2026-08-06
+
+### 变更
+
+- Telemetry 上传现将 `SLS_PROJECT_PREFIX` 视为 SLS project prefix，并附加
+  检测到的 region，例如 `anolisa-cn-hangzhou`。设置旧 `SLS_PROJECT` 的部署
+  必须迁移至 `SLS_PROJECT_PREFIX`，以便将数据上传到相应 region 的 project
+  ([#2260](https://github.com/alibaba/anolisa/pull/2260))。
+
+### 修复
+
+- Raw 安装现仅将选中的 archive payload 通过私有、disk-backed staging 流式
+  处理，不再将解压后的内容保留在内存中。大型 package 可以使用有界的 payload
+  内存完成安装，同时保留 atomic placement、rollback、cleanup 和 digest
+  verification
+  ([#2250](https://github.com/alibaba/anolisa/pull/2250))。
+- `anolisa status` 和 `anolisa doctor` 现会 hash 最大 2 GiB 的 ANOLISA-owned
+  file，并将更大的 file 视为未检查和 degraded，而不是 failed。包含大型 artifact
+  的完整组件不再显示为损坏或触发多余的 repair，同时在必须完成 verification 的
+  recovery 场景中仍会 fail closed
+  ([#2271](https://github.com/alibaba/anolisa/pull/2271))。
+- Enable 声明了 hook 的 Codex adapter 时，现会发现已安装 plugin 的 hook
+  identity，并以 atomic 方式持久化其 trusted hash，使 non-interactive
+  `codex exec` session 可以运行这些 hook。缺失 hook 或被覆盖的 trust setting
+  会以可操作的诊断信息中止 enable
+  ([#2281](https://github.com/alibaba/anolisa/pull/2281))。
 
 ## [0.2.17] - 2026-08-05
 
