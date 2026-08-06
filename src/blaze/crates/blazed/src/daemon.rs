@@ -3,9 +3,10 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use blaze_core::backend::BackendKind;
-use blaze_core::config::{DaemonConfig, PolicyLoadErrorMode};
+use blaze_core::config::{DaemonConfig, PolicyLoadErrorMode, StorageSyncSchedule};
 use blaze_core::kernel::HookRegistry;
 use blaze_core::policy::PolicyEngine;
 use blaze_core::pool::PoolManager;
@@ -21,6 +22,7 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::api;
 use crate::error::{BlazeDaemonError, Result};
+use crate::sandbox::StorageSyncLoop;
 use crate::spawner::{
     BubblewrapSpawner, DynSpawner, FirecrackerSpawner, MockSpawner, SpawnerRegistry,
 };
@@ -30,6 +32,8 @@ use crate::state::ServerState;
 /// bind the API socket, and run the accept loop until SIGTERM/SIGINT.
 pub async fn run(config_path: &Path) -> Result<()> {
     let config = DaemonConfig::load(config_path)?;
+    let sync_schedule = config.storage.sync_schedule()?;
+    let sync_timeout = config.storage.sync_timeout_duration()?;
     tracing::info!(?config_path, "loaded daemon config");
 
     ensure_dirs(&config)?;
@@ -124,7 +128,7 @@ pub async fn run(config_path: &Path) -> Result<()> {
         None
     };
 
-    serve(listener, tcp_listener, state).await
+    serve(listener, tcp_listener, state, sync_schedule, sync_timeout).await
 }
 
 fn ensure_dirs(cfg: &DaemonConfig) -> Result<()> {
@@ -247,16 +251,38 @@ fn load_policy_engine(cfg: &DaemonConfig) -> Result<PolicyEngine> {
     }
 }
 
-async fn serve(uds: UnixListener, tcp: Option<TcpListener>, state: Arc<ServerState>) -> Result<()> {
+async fn serve(
+    uds: UnixListener,
+    tcp: Option<TcpListener>,
+    state: Arc<ServerState>,
+    sync_schedule: StorageSyncSchedule,
+    sync_timeout: Duration,
+) -> Result<()> {
     let mut sighup = signal(SignalKind::hangup())
         .map_err(|e| BlazeDaemonError::Internal(format!("install SIGHUP handler: {e}")))?;
     let mut sigterm = signal(SignalKind::terminate())
         .map_err(|e| BlazeDaemonError::Internal(format!("install SIGTERM handler: {e}")))?;
     let mut sigint = signal(SignalKind::interrupt())
         .map_err(|e| BlazeDaemonError::Internal(format!("install SIGINT handler: {e}")))?;
+    let mut sync_loop = match sync_schedule {
+        StorageSyncSchedule::Disabled => {
+            tracing::info!("periodic storage artifact synchronization is disabled");
+            None
+        }
+        StorageSyncSchedule::Every(interval) => Some(
+            state
+                .manager
+                .start_storage_sync_loop(interval, sync_timeout),
+        ),
+    };
+    let mut service_result = Ok(());
 
     loop {
         tokio::select! {
+            result = observe_storage_sync_exit(&mut sync_loop), if sync_loop.is_some() => {
+                service_result = result;
+                break;
+            }
             res = uds.accept() => {
                 let (stream, _peer) = match res {
                     Ok(s) => s,
@@ -295,8 +321,33 @@ async fn serve(uds: UnixListener, tcp: Option<TcpListener>, state: Arc<ServerSta
         }
     }
 
+    if let Some(sync_loop) = sync_loop.as_mut() {
+        service_result = merge_stage_result(
+            service_result,
+            "storage artifact synchronization shutdown",
+            sync_loop.shutdown().await,
+        );
+    }
     tracing::info!("blaze daemon stopped");
-    Ok(())
+    service_result
+}
+
+async fn observe_storage_sync_exit(sync_loop: &mut Option<StorageSyncLoop>) -> Result<()> {
+    sync_loop
+        .as_mut()
+        .expect("storage sync loop exists while its select branch is enabled")
+        .observe_exit()
+        .await
+}
+
+fn merge_stage_result(current: Result<()>, stage: &str, next: Result<()>) -> Result<()> {
+    match (current, next) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(previous), Err(next)) => Err(BlazeDaemonError::RecoveryRequired(format!(
+            "service failed: {previous}; {stage} failed: {next}"
+        ))),
+    }
 }
 
 fn spawn_conn<I>(io: TokioIo<I>, state: Arc<ServerState>)
@@ -334,4 +385,35 @@ fn reload_policies(state: &Arc<ServerState>) -> Result<()> {
     }
     tracing::info!(policies = count, "policy engine reloaded via SIGHUP");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_and_worker_shutdown_failures_are_both_retained() {
+        let service = Err(BlazeDaemonError::Internal(
+            "storage synchronization worker failed".to_string(),
+        ));
+        let shutdown = Err(BlazeDaemonError::Internal(
+            "worker shutdown failed".to_string(),
+        ));
+
+        let error = merge_stage_result(
+            service,
+            "storage artifact synchronization shutdown",
+            shutdown,
+        )
+        .expect_err("both failures must be reported");
+
+        assert!(error.to_string().contains("service failed"));
+        assert!(error.to_string().contains("synchronization worker failed"));
+        assert!(
+            error
+                .to_string()
+                .contains("storage artifact synchronization shutdown")
+        );
+        assert!(error.to_string().contains("worker shutdown failed"));
+    }
 }

@@ -4,8 +4,10 @@
 //! instance slots use separate roots; runtime pooling is owned by the daemon.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use rustix::fs::{Mode, OFlags, open, openat};
 
 use blaze_core::error::{BlazeError, Result};
 use blaze_core::storage::{
@@ -17,6 +19,32 @@ use blaze_core::storage::{
 pub struct FileStorageProvider {
     images_dir: PathBuf,
     instances_dir: PathBuf,
+    #[cfg(test)]
+    artifact_sync_open_hook: Option<std::sync::Arc<ArtifactSyncOpenHook>>,
+}
+
+#[cfg(test)]
+pub(crate) struct ArtifactSyncOpenHook {
+    opened: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl ArtifactSyncOpenHook {
+    pub(crate) fn new() -> Self {
+        Self {
+            opened: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+        }
+    }
+
+    pub(crate) async fn wait_until_open(&self) {
+        self.opened.notified().await;
+    }
+
+    pub(crate) fn resume(&self) {
+        self.resume.notify_one();
+    }
 }
 
 impl FileStorageProvider {
@@ -29,6 +57,7 @@ impl FileStorageProvider {
         Self {
             images_dir: instances_dir.clone(),
             instances_dir,
+            artifact_sync_open_hook: None,
         }
     }
 
@@ -37,6 +66,21 @@ impl FileStorageProvider {
         Self {
             images_dir,
             instances_dir,
+            #[cfg(test)]
+            artifact_sync_open_hook: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_artifact_sync_open_hook(
+        images_dir: PathBuf,
+        instances_dir: PathBuf,
+        hook: std::sync::Arc<ArtifactSyncOpenHook>,
+    ) -> Self {
+        Self {
+            images_dir,
+            instances_dir,
+            artifact_sync_open_hook: Some(hook),
         }
     }
 
@@ -234,24 +278,44 @@ impl StorageProvider for FileStorageProvider {
         // Never trust paths carried by a runtime or persisted slot. Rebuild
         // the complete provider-owned artifact set from the validated ID.
         let canonical = self.slot_for_id(&slot.id)?;
-        for path in [
-            &canonical.rootfs_path,
-            &canonical.mem_path,
-            &canonical.mem_diff_path,
-            &canonical.rootfs_diff_path,
+        let instance_dir = canonical.instance_dir.clone();
+        let directory_fd = open_required_slot_path(
+            &slot.id,
+            &canonical.instance_dir,
+            RequiredPathType::Directory,
+            move || {
+                open(
+                    &instance_dir,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+            },
+        )
+        .await?;
+        #[cfg(test)]
+        if let Some(hook) = &self.artifact_sync_open_hook {
+            hook.opened.notify_one();
+            hook.resume.notified().await;
+        }
+        let directory_fd = Arc::new(directory_fd);
+        for (name, path) in [
+            ("rootfs.ext4", &canonical.rootfs_path),
+            ("mem.bin", &canonical.mem_path),
+            ("mem.diff", &canonical.mem_diff_path),
+            ("rootfs.diff", &canonical.rootfs_diff_path),
         ] {
-            let file = tokio::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(path)
-                .await
-                .map_err(|error| BlazeError::StorageError {
-                    msg: format!(
-                        "sync artifacts '{}': open {}: {error}",
-                        slot.id,
-                        path.display()
-                    ),
-                })?;
+            let open_directory_fd = Arc::clone(&directory_fd);
+            let file_fd =
+                open_required_slot_path(&slot.id, path, RequiredPathType::File, move || {
+                    openat(
+                        &*open_directory_fd,
+                        name,
+                        OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                        Mode::empty(),
+                    )
+                })
+                .await?;
+            let file = tokio::fs::File::from_std(std::fs::File::from(file_fd));
             file.sync_all()
                 .await
                 .map_err(|error| BlazeError::StorageError {
@@ -262,15 +326,13 @@ impl StorageProvider for FileStorageProvider {
                     ),
                 })?;
         }
-        let directory = tokio::fs::File::open(&canonical.instance_dir)
-            .await
-            .map_err(|error| BlazeError::StorageError {
-                msg: format!(
-                    "sync artifacts '{}': open directory {}: {error}",
-                    slot.id,
-                    canonical.instance_dir.display()
-                ),
-            })?;
+        let directory_fd = Arc::try_unwrap(directory_fd).map_err(|_| BlazeError::StorageError {
+            msg: format!(
+                "sync artifacts '{}': directory descriptor remained shared after opening artifacts",
+                slot.id
+            ),
+        })?;
+        let directory = tokio::fs::File::from_std(std::fs::File::from(directory_fd));
         directory
             .sync_all()
             .await
@@ -291,6 +353,64 @@ impl StorageProvider for FileStorageProvider {
     async fn drain_pool(&self) -> Result<usize> {
         Ok(0)
     }
+}
+
+async fn open_required_slot_path<F>(
+    instance_id: &str,
+    path: &Path,
+    required_type: RequiredPathType,
+    open_path: F,
+) -> Result<std::os::fd::OwnedFd>
+where
+    F: FnOnce() -> rustix::io::Result<std::os::fd::OwnedFd> + Send + 'static,
+{
+    let task_instance_id = instance_id.to_string();
+    let task_path = path.to_path_buf();
+    let join_instance_id = task_instance_id.clone();
+    let join_path = task_path.clone();
+    tokio::task::spawn_blocking(move || {
+        let file = open_path().map_err(|error| {
+            if matches!(
+                error,
+                rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR | rustix::io::Errno::LOOP
+            ) {
+                BlazeError::StorageIncomplete {
+                    instance_id: task_instance_id.clone(),
+                    path: task_path.clone(),
+                    expected: required_type.description(),
+                }
+            } else {
+                BlazeError::StorageError {
+                    msg: format!(
+                        "sync artifacts '{task_instance_id}': open {}: {error}",
+                        task_path.display()
+                    ),
+                }
+            }
+        })?;
+        let file = std::fs::File::from(file);
+        let metadata = file.metadata().map_err(|error| BlazeError::StorageError {
+            msg: format!(
+                "sync artifacts '{task_instance_id}': inspect {}: {error}",
+                task_path.display()
+            ),
+        })?;
+        if !required_type.matches(&metadata) {
+            return Err(BlazeError::StorageIncomplete {
+                instance_id: task_instance_id,
+                path: task_path,
+                expected: required_type.description(),
+            });
+        }
+        Ok(file.into())
+    })
+    .await
+    .map_err(|error| BlazeError::StorageError {
+        msg: format!(
+            "sync artifacts '{join_instance_id}': open task for {} failed: {error}",
+            join_path.display()
+        ),
+    })?
 }
 
 async fn create_or_copy(
@@ -606,6 +726,77 @@ mod tests {
                 .is_symlink()
         );
         assert!(external.is_file());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn slot_open_does_not_block_async_runtime() -> Result<()> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("artifact");
+        tokio::fs::write(&path, b"artifact").await?;
+
+        let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let watchdog_release = release_tx.clone();
+        let (watchdog_cancel_tx, watchdog_cancel_rx) = mpsc::channel();
+        let watchdog_fired = Arc::new(AtomicBool::new(false));
+        let watchdog_state = Arc::clone(&watchdog_fired);
+        let watchdog = std::thread::spawn(move || {
+            if watchdog_cancel_rx
+                .recv_timeout(Duration::from_secs(2))
+                .is_err()
+            {
+                watchdog_state.store(true, Ordering::SeqCst);
+                let _ = watchdog_release.send(());
+            }
+        });
+
+        let path_to_open = path.clone();
+        let open_future = open_required_slot_path(
+            "runtime-progress",
+            &path,
+            RequiredPathType::File,
+            move || {
+                let _ = opened_tx.send(());
+                if release_rx.recv().is_err() {
+                    return Err(rustix::io::Errno::INTR);
+                }
+                open(
+                    &path_to_open,
+                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+            },
+        );
+        let runtime_progress = async {
+            let opened = tokio::time::timeout(Duration::from_secs(4), opened_rx).await;
+            assert!(
+                matches!(opened, Ok(Ok(()))),
+                "blocking slot open did not start"
+            );
+            tokio::task::yield_now().await;
+            assert!(
+                !watchdog_fired.load(Ordering::SeqCst),
+                "blocking slot open stalled the current-thread runtime"
+            );
+            assert!(release_tx.send(()).is_ok(), "release slot open");
+            assert!(
+                watchdog_cancel_tx.send(()).is_ok(),
+                "cancel slot-open watchdog"
+            );
+        };
+
+        let (open_result, ()) = tokio::join!(open_future, runtime_progress);
+        assert!(watchdog.join().is_ok(), "slot-open watchdog panicked");
+        assert!(
+            !watchdog_fired.load(Ordering::SeqCst),
+            "slot-open watchdog released a blocked runtime"
+        );
+        open_result?;
+        Ok(())
     }
 
     #[tokio::test]

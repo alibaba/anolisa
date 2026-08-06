@@ -141,6 +141,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Recoverable sandbox create, warm activation, destroy, and startup cleanup.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -14,7 +14,7 @@ use blaze_core::lifecycle::{
 use blaze_core::policy::RuntimeDecision;
 use blaze_core::pool::{PoolKey, PoolManager};
 use blaze_core::storage::{AcquireOpts, StorageProvider, StorageSlot};
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -76,6 +76,8 @@ pub struct SandboxManager {
     instances: Arc<Mutex<HashMap<Uuid, SandboxInstance>>>,
     backend_instances: Arc<Mutex<HashMap<Uuid, DynBackendInstance>>>,
     operation_locks: Mutex<HashMap<Uuid, Arc<AsyncMutex<()>>>>,
+    pub(super) storage_sync_inflight: Arc<Mutex<HashSet<Uuid>>>,
+    pub(super) storage_sync_permits: Arc<Semaphore>,
     pool: Arc<Mutex<PoolManager>>,
     spawners: Arc<SpawnerRegistry>,
     active_backend: BackendKind,
@@ -138,6 +140,10 @@ impl SandboxManager {
                 instances,
                 backend_instances,
                 operation_locks: Mutex::new(operation_locks),
+                storage_sync_inflight: Arc::new(Mutex::new(HashSet::new())),
+                // The periodic worker is sequential. Retain that bound when a
+                // timed-out provider operation has to finish in the background.
+                storage_sync_permits: Arc::new(Semaphore::new(1)),
                 pool,
                 spawners: Arc::new(spawners),
                 active_backend,
@@ -166,8 +172,7 @@ impl SandboxManager {
         }
     }
 
-    #[cfg(test)]
-    pub fn backend_owner(&self, id: Uuid) -> Option<DynBackendInstance> {
+    pub(crate) fn backend_owner(&self, id: Uuid) -> Option<DynBackendInstance> {
         match self.backend_instances.lock() {
             Ok(instances) => instances.get(&id).cloned(),
             Err(poisoned) => poisoned.into_inner().get(&id).cloned(),
@@ -175,12 +180,23 @@ impl SandboxManager {
     }
 
     #[cfg(test)]
-    pub fn insert_backend_owner(&self, id: Uuid, owner: DynBackendInstance) -> Result<()> {
+    pub(crate) fn insert_backend_owner(&self, id: Uuid, owner: DynBackendInstance) -> Result<()> {
         self.backend_instances
             .lock()
             .map_err(|_| poisoned("backend_instances"))?
             .insert(id, owner);
         Ok(())
+    }
+
+    pub(super) async fn reconstruct_storage(&self, id: Uuid) -> Result<StorageSlot> {
+        self.storage
+            .reconstruct(&id.to_string())
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(super) async fn sync_storage(&self, slot: &StorageSlot) -> Result<()> {
+        self.storage.sync_artifacts(slot).await.map_err(Into::into)
     }
 
     /// Return all persisted sandbox metadata.

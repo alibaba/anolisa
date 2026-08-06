@@ -31,6 +31,7 @@ hyper-util = { workspace = true }
 http-body-util = { workspace = true }
 async-trait = { workspace = true }
 libc = { workspace = true }
+rustix = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
@@ -39,3 +40,4 @@ base64 = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }

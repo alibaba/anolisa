@@ -130,6 +130,10 @@ pub trait StorageProvider: Send + Sync {
     /// This operation persists the files and directory metadata that already
     /// belong to `slot` and are visible to the provider call. Artifact updates
     /// that race with one call may become visible in that call or a later one.
+    ///
+    /// The daemon may stop waiting at its configured deadline, but keeps the
+    /// future supervised under slot ownership until it completes. A later
+    /// synchronization or cleanup must remain safe after completion.
     async fn sync_artifacts(&self, slot: &StorageSlot) -> Result<()>;
 
     /// Query warm pool status.
