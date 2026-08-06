@@ -40,11 +40,24 @@ fn picker_footer_keeps_resume_and_clear_semantics_distinct() {
     assert!(en.contains("Esc cancel"), "{en}");
     assert!(!en.contains("Space mark for clear"), "{en}");
 
+    let marked = I18n::new(Language::EnUs).t(MessageId::SessionPickerMarkedFooter);
+    assert!(marked.contains("Enter review clear"), "{marked}");
+    assert!(marked.contains("Space toggle clear mark"), "{marked}");
+    assert!(marked.contains("d review clear"), "{marked}");
+    assert!(marked.contains("Esc cancel"), "{marked}");
+    assert!(!marked.contains("Enter resume"), "{marked}");
+
     let zh = I18n::new(Language::ZhCn).t(MessageId::SessionPickerFooter);
     assert!(zh.contains("Enter 恢复"), "{zh}");
     assert!(zh.contains("Space 切换清理标记"), "{zh}");
     assert!(zh.contains("d 打开清理确认"), "{zh}");
     assert!(zh.contains("Esc 取消"), "{zh}");
+
+    let marked_zh = I18n::new(Language::ZhCn).t(MessageId::SessionPickerMarkedFooter);
+    assert!(marked_zh.contains("Enter 打开清理确认"), "{marked_zh}");
+    assert!(marked_zh.contains("Space 切换清理标记"), "{marked_zh}");
+    assert!(marked_zh.contains("d 打开清理确认"), "{marked_zh}");
+    assert!(marked_zh.contains("Esc 取消"), "{marked_zh}");
 
     // The confirmation-phase footer stays a separate message: y/Enter only
     // deletes after `d` has opened the confirmation.
