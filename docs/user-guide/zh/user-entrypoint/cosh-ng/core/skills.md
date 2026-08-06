@@ -2,35 +2,34 @@
 
 [English](../../../../en/user-entrypoint/cosh-ng/core/skills.md)
 
-Skills 把反复使用的操作方法整理成 Agent 可以按需加载的指令。Agent 平时只读取名称和
-简介，任务需要时才加载完整内容。
+Skills 是可复用的操作指令，用于处理重复任务。添加 Skill 后，任务匹配时 Agent 会加载它。
 
-## 在 cosh 中使用 Skills
+## 在 cosh 中管理 Skills
 
 ```text
-/skills                     列出最终生效的 Skills
-/skills detail <name>       查看一个 Skill 及其来源层级
-/skills enable <name>       让被禁用的 Skill 重新可用
-/skills disable <name>      对 Agent 隐藏一个 Skill
+/skills
+/skills detail <name>
+/skills enable <name>
+/skills disable <name>
 ```
 
-## 搜索顺序
+名称冲突时使用 `detail` 查看最终采用的来源。被禁用的 Skill 不会提供给 Agent。
 
-多个位置存在同名 Skill 时，排在前面的版本生效。
+## Skill 的搜索位置
 
-| 优先级 | 位置 |
-|---:|---|
-| 1 | `<workspace>/.copilot-shell/skills/` |
-| 2 | `skills.custom_paths` 中的路径 |
-| 3 | `~/.copilot-shell/skills/` |
-| 4 | Extensions 提供的 Skill 目录 |
-| 5 | `/usr/share/anolisa/skills/` |
+同名 Skill 按下面的顺序查找，先找到的版本生效：
 
-运行时会监视已有的搜索目录，文件变化后自动刷新 Skill 缓存。
+1. `<workspace>/.copilot-shell/skills/`
+2. `skills.custom_paths` 中的路径
+3. `~/.copilot-shell/skills/`
+4. Extensions 提供的 Skill 目录
+5. `/usr/share/anolisa/skills/`
 
-## Skill 格式
+已有目录会被监视，文件变化后自动重新扫描。
 
-推荐使用 `<skill-name>/SKILL.md` 目录布局。
+## 创建 Skill
+
+推荐使用 `<skill-name>/SKILL.md` 目录布局，也兼容 `<name>.md` 单文件。
 
 ```markdown
 ---
@@ -46,18 +45,15 @@ Inspect status and recent logs before proposing a change. Ask for approval
 before restarting the service.
 ```
 
-`name` 和 `description` 用于识别 Skill。`allowedTools` 可省略，可以使用 YAML 列表或
-逗号分隔字符串。系统仍兼容旧的 `<name>.md` 单文件格式，但推荐使用目录布局，以便携带
-其他资源。
+`name` 和 `description` 必填。`allowedTools` 可省略，可以使用 YAML 列表或逗号分隔字符串。
 
-## 配置
+## 添加共享目录
 
-共享只读目录可以直接加入搜索路径，无需复制到用户目录。
+使用 `skills.custom_paths` 搜索团队维护的目录，无需复制文件：
 
 ```toml
 [skills]
 custom_paths = ["~/team-skills", "/opt/company/skills"]
 ```
 
-项目 Skills 和项目配置都以启动工作区为基准解析。存在同名 Skill 时，使用
-`/skills detail <name>` 查看最终采用的版本和来源。
+路径支持展开 `~`、`${VAR}` 和 `$VAR`。项目路径以 Core 启动时的工作空间为基准。

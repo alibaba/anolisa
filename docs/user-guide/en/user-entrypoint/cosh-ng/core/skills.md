@@ -2,37 +2,37 @@
 
 [中文版](../../../../zh/user-entrypoint/cosh-ng/core/skills.md)
 
-Skills turn repeatable operating knowledge into reusable Agent instructions.
-The Agent sees compact Skill metadata and loads the full instructions only when
-the task needs them.
+Skills are reusable instructions for recurring operating tasks. Add a Skill,
+then let the Agent load it when the task matches.
 
-## Use Skills from cosh
+## Manage Skills in cosh
 
 ```text
-/skills                     list effective Skills
-/skills detail <name>       show one Skill and its source level
-/skills enable <name>       make a disabled Skill available
-/skills disable <name>      hide a Skill from the Agent
+/skills
+/skills detail <name>
+/skills enable <name>
+/skills disable <name>
 ```
 
-## Search order
+Use `detail` to check which source won when names collide. Disabled Skills are
+not offered to the Agent.
 
-When multiple levels contain the same name, the first level wins:
+## Where Skills are loaded
 
-| Priority | Location |
-|---:|---|
-| 1 | `<workspace>/.copilot-shell/skills/` |
-| 2 | Paths in `skills.custom_paths` |
-| 3 | `~/.copilot-shell/skills/` |
-| 4 | Skill directories contributed by extensions |
-| 5 | `/usr/share/anolisa/skills/` |
+The first matching name wins, in this order:
 
-The runtime watches existing search directories and refreshes the Skill cache
-after filesystem changes.
+1. `<workspace>/.copilot-shell/skills/`
+2. Paths in `skills.custom_paths`
+3. `~/.copilot-shell/skills/`
+4. Skill directories from Extensions
+5. `/usr/share/anolisa/skills/`
 
-## Skill format
+Existing directories are watched and rescanned after changes.
 
-The preferred layout is `<skill-name>/SKILL.md`:
+## Create a Skill
+
+The preferred layout is `<skill-name>/SKILL.md`; a flat `<name>.md` file is
+also supported.
 
 ```markdown
 ---
@@ -48,20 +48,18 @@ Inspect status and recent logs before proposing a change. Ask for approval
 before restarting the service.
 ```
 
-`name` and `description` identify the Skill. `allowedTools` is optional and can
-be a YAML list or comma-separated string. A legacy flat `<name>.md` file is
-still read, but directory layout is preferred because it can contain supporting
-resources.
+`name` and `description` are required. `allowedTools` is optional and may be a
+YAML list or a comma-separated string.
 
-## Configuration
+## Add shared directories
 
-Add shared read-only directories without copying them into the user store:
+Use `skills.custom_paths` to search team-maintained directories without copying
+their files:
 
 ```toml
 [skills]
 custom_paths = ["~/team-skills", "/opt/company/skills"]
 ```
 
-Project Skills and project configuration are evaluated relative to the
-workspace sent by cosh-shell. Use `/skills detail <name>` when you need to
-confirm which level won a name conflict.
+Paths expand `~`, `${VAR}`, and `$VAR`. Project paths are relative to the
+workspace where Core starts.

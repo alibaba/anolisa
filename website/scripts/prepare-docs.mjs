@@ -148,6 +148,21 @@ function sidebarLabel(document, title, locale) {
   if (document.target.endsWith('/quickstart.md')) return locale === 'zh' ? '快速开始' : 'Quickstart';
   if (document.target.endsWith('/agent-memory.md')) return 'Agent Memory';
   if (document.target.endsWith('/tokenless.md')) return 'Tokenless';
+  const coshNgLabels = {
+    en: {
+      'user-guide/user-entrypoint/cosh-ng/mcp.md': 'MCP Integration',
+      'user-guide/user-entrypoint/cosh-ng/configuration.md': 'Configuration',
+      'user-guide/user-entrypoint/cosh-ng/supported-distros.md': 'Platform Support',
+      'user-guide/user-entrypoint/cosh-ng/output-format.md': 'Output Format',
+    },
+    zh: {
+      'user-guide/user-entrypoint/cosh-ng/mcp.md': '接入 MCP',
+      'user-guide/user-entrypoint/cosh-ng/configuration.md': '配置',
+      'user-guide/user-entrypoint/cosh-ng/supported-distros.md': '平台支持',
+      'user-guide/user-entrypoint/cosh-ng/output-format.md': '输出格式',
+    },
+  };
+  if (coshNgLabels[locale][document.target]) return coshNgLabels[locale][document.target];
   return title;
 }
 
@@ -197,15 +212,17 @@ const categoryNames = {
 const categoryPathNames = {
   en: {
     'user-guide/user-entrypoint/cosh-ng': 'cosh-ng',
-    'user-guide/user-entrypoint/cosh-ng/shell': 'Work in the Terminal',
-    'user-guide/user-entrypoint/cosh-ng/core': 'Add Capabilities and Integrate',
-    'user-guide/user-entrypoint/cosh-ng/cli': 'Manage System Operations',
+    'user-guide/user-entrypoint/cosh-ng/shell': 'Terminal',
+    'user-guide/user-entrypoint/cosh-ng/core': 'Automation and Integration',
+    'user-guide/user-entrypoint/cosh-ng/cli': 'System Operations',
+    'developer-guide/cosh-ng': 'cosh-ng',
   },
   zh: {
     'user-guide/user-entrypoint/cosh-ng': 'cosh-ng',
-    'user-guide/user-entrypoint/cosh-ng/shell': '在终端中工作',
-    'user-guide/user-entrypoint/cosh-ng/core': '加入能力与集成',
-    'user-guide/user-entrypoint/cosh-ng/cli': '管理系统操作',
+    'user-guide/user-entrypoint/cosh-ng/shell': '终端',
+    'user-guide/user-entrypoint/cosh-ng/core': '自动化与集成',
+    'user-guide/user-entrypoint/cosh-ng/cli': '系统操作',
+    'developer-guide/cosh-ng': 'cosh-ng',
   },
 };
 
@@ -287,6 +304,78 @@ await prepareLocale(englishDocuments, docsOutput, 'en');
 await prepareLocale(chineseDocuments, i18nOutput, 'zh');
 
 const translationRoot = path.join(generatedDir, 'i18n', 'zh');
+const docsTranslationRoot = path.join(translationRoot, 'docusaurus-plugin-content-docs');
+await mkdir(docsTranslationRoot, {recursive: true});
+await writeFile(
+  path.join(docsTranslationRoot, 'current.json'),
+  `${JSON.stringify(
+    {
+      'version.label': {message: '当前版本', description: 'The label for version current'},
+      'sidebar.userGuide.category.User Entry Points': {
+        message: '用户入口',
+        description: "The label for category 'User Entry Points' in sidebar 'userGuide'",
+      },
+      'sidebar.userGuide.category.category-user-guide-user-entrypoint-cosh-ng': {
+        message: 'cosh-ng',
+        description: "The label for category 'cosh-ng' in sidebar 'userGuide'",
+      },
+      'sidebar.userGuide.category.category-user-guide-user-entrypoint-cosh-ng-shell': {
+        message: '终端',
+        description: "The label for the cosh-ng terminal category in sidebar 'userGuide'",
+      },
+      'sidebar.userGuide.category.category-user-guide-user-entrypoint-cosh-ng-core': {
+        message: '自动化与集成',
+        description: "The label for the cosh-ng integration category in sidebar 'userGuide'",
+      },
+      'sidebar.userGuide.category.category-user-guide-user-entrypoint-cosh-ng-cli': {
+        message: '系统操作',
+        description: "The label for the cosh-ng system operations category in sidebar 'userGuide'",
+      },
+      'sidebar.userGuide.category.category-user-guide-user-entrypoint-copilot-shell': {
+        message: 'Copilot Shell',
+        description: "The label for category 'Copilot Shell' in sidebar 'userGuide'",
+      },
+      'sidebar.userGuide.category.Token Efficiency': {
+        message: 'Token 效率',
+        description: "The label for category 'Token Efficiency' in sidebar 'userGuide'",
+      },
+      'sidebar.userGuide.category.category-user-guide-token-saving-tokenless': {
+        message: 'Tokenless',
+        description: "The label for category 'Tokenless' in sidebar 'userGuide'",
+      },
+      'sidebar.userGuide.category.Runtime': {
+        message: '运行时',
+        description: "The label for category 'Runtime' in sidebar 'userGuide'",
+      },
+      'sidebar.userGuide.category.Observability': {
+        message: '可观测性',
+        description: "The label for category 'Observability' in sidebar 'userGuide'",
+      },
+      'sidebar.userGuide.category.Security': {
+        message: '安全',
+        description: "The label for category 'Security' in sidebar 'userGuide'",
+      },
+      'sidebar.userGuide.category.category-user-guide-agent-security-agent-sec-core': {
+        message: 'Agent Sec Core',
+        description: "The label for category 'Agent Sec Core' in sidebar 'userGuide'",
+      },
+      'sidebar.developerGuide.category.Copilot Shell': {
+        message: 'Copilot Shell',
+        description: "The label for category 'Copilot Shell' in sidebar 'developerGuide'",
+      },
+      'sidebar.developerGuide.category.category-developer-guide-copilot-shell-hooks': {
+        message: 'Hooks',
+        description: "The label for category 'Hooks' in sidebar 'developerGuide'",
+      },
+      'sidebar.developerGuide.category.Cosh-ng': {
+        message: 'cosh-ng',
+        description: "The label for category 'Cosh-ng' in sidebar 'developerGuide'",
+      },
+    },
+    null,
+    2,
+  )}\n`,
+);
 const themeTranslationRoot = path.join(translationRoot, 'docusaurus-theme-classic');
 await mkdir(themeTranslationRoot, {recursive: true});
 await writeFile(
@@ -294,7 +383,6 @@ await writeFile(
   `${JSON.stringify(
     {
       title: {message: 'ANOLISA', description: 'The title in the navbar'},
-      'item.label.Docs': {message: '文档', description: 'Navbar item with label Docs'},
       'item.label.User Guide': {message: '用户指南', description: 'Navbar item with label User Guide'},
       'item.label.Developer Guide': {message: '开发者指南', description: 'Navbar item with label Developer Guide'},
       'item.label.Changelog': {message: '变更日志', description: 'Navbar item with label Changelog'},

@@ -2,103 +2,43 @@
 
 [中文版](../../../../zh/user-entrypoint/cosh-ng/shell/approval.md)
 
-cosh shows approval cards before an Agent performs guarded work. The card tells
-you which tool will run, what it will receive, and which risks or Hook findings
-need attention.
+cosh may show an approval card before an Agent uses a guarded tool. Review the tool, its input, the risk, and any Hook warning before allowing the action.
 
 ## Choose an approval mode
 
 Switch with `/mode approval <mode>` or set `shell.approval_mode`.
 
-| Mode | Meaning | Mapping to cosh-core |
-|------|---------|---------------------|
-| `recommend` | Read-only work can run; calls that change state or cross an external boundary ask | `strict` |
-| `auto` | Default; eligible low-risk and file-edit tools run, while shell, network, MCP, and external tools ask | `auto` |
-| `trust` | Routine calls run without cards after explicit confirmation | `trust` |
+| Mode | Behavior |
+|------|----------|
+| `recommend` | Explain and suggest only; no tool calls are emitted. |
+| `auto` | Default. Eligible read-only or low-risk tools can run automatically; risky, guarded, or external work asks first. |
+| `trust` | Provider tool requests run automatically for this session after explicit confirmation. |
 
-Switching to trust mode requires secondary confirmation:
+Enable trust mode with a second confirmation:
 
-```
+```text
 /mode approval trust confirm
 ```
 
-Trust is not a blanket bypass. Irrecoverable system-control commands such as
-reboot, shutdown, and halt still require an explicit card, including wrapped
-or pre-trusted forms. High-risk cards cannot create a persistent trust key.
+Trust mode is not a blanket bypass. Irrecoverable system-control commands such as `reboot`, `shutdown`, and `halt` still require an approval card, and high-risk requests cannot create a persistent trust key.
 
-## Read an approval card
+## Read and answer a card
 
-When a tool requires approval, cosh-shell renders an inline approval panel:
+Check the tool name, input preview, risk, and Hook warnings. Choose **Approve** or **Deny**; use **Details** when the preview is shortened. If requests are queued, the card shows the queue position.
 
-```
-┌─────────────────────────────────────────┐
-│ 🔧 Tool: shell                    [1/3] │
-│ Risk: medium                            │
-│─────────────────────────────────────────│
-│ Command:                                │
-│   rm -rf /tmp/old-build                 │
-│─────────────────────────────────────────│
-│ ⚠ Hook: sandbox-guard                   │
-│   "Command matches risk pattern"         │
-│─────────────────────────────────────────│
-│ [✓ Approve]  [ Deny ]  [ Details ]      │
-└─────────────────────────────────────────┘
-```
+When you approve a `shell` tool, cosh runs the command in the foreground bash or zsh. Its output and interactive prompts stay visible, and `Ctrl+C` can interrupt it. Approved foreground commands run one at a time.
 
-Check the tool name, input preview, risk, and Hook warnings before choosing
-Approve or Deny. Use Details when the preview is shortened. If several requests
-are waiting, the counter in the upper-right corner shows the queue position.
+If an approved command waits for password input, a pager, or plain terminal input, cosh can show a hint and interrupt it after 120 seconds by default. Set `shell.input_wait_timeout_secs = 0` to disable this timeout. Fullscreen TUIs and pipeline reads are exempt.
 
-## Run approved Shell commands
-
-After you approve a `shell` tool, cosh sends the command to the foreground
-Shell.
-
-```
-User approves shell command
-       │
-       ▼
-cosh-shell injects command into PTY
-       │
-       ▼
-bash/zsh executes in foreground (user can interact)
-       │
-       ▼
-Execution result returned via OSC markers
-```
-
-The command behaves like one you typed yourself.
-
-- Command output is displayed directly in the terminal
-- User can interact in real-time (e.g., confirmation prompts)
-- Ctrl+C can interrupt execution
-
-Approved handoffs run one at a time. When a command waits for terminal input,
-cosh can show a prompt-tail hint and interrupts eligible password, pager, or
-plain-stdin waits after `shell.input_wait_timeout_secs` (120 seconds by
-default). Set the value to `0` to disable the timeout. Fullscreen TUIs and
-pipeline reads are exempt.
-
-## Review earlier decisions
-
-cosh records approval decisions in its runtime journal. When audit logging is
-enabled, a redacted copy is also written to the durable audit timeline. Use the
-[audit guide](../cli/audit.md) when you need to investigate an earlier action.
+Approval decisions are kept in the runtime journal. When audit logging is enabled, a redacted copy is also available in the audit timeline; see the [audit guide](../cli/audit.md).
 
 ## Configuration
 
 ```toml
 [shell]
-# Approval mode: recommend | auto | trust
 approval_mode = "auto"
-
-# Exact command trust keys
 trusted_commands = ["ls", "cat", "echo"]
-
-# Input-wait timeout for approved foreground commands; 0 disables it
 input_wait_timeout_secs = 120
 ```
 
-`trusted_commands` uses exact trust keys, not arbitrary shell substrings, and
-never overrides the irrecoverable-command gate. See
-[Configuration](../configuration.md) for environment overrides.
+`trusted_commands` matches exact trust keys, not arbitrary command substrings, and does not override the irrecoverable-command gate. See [Configuration](../configuration.md) for environment overrides.

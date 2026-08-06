@@ -1,23 +1,12 @@
-# 接入 MCP server
+# 接入 MCP 服务
 
 [English](../../../en/user-entrypoint/cosh-ng/mcp.md)
 
-MCP server 可以把本地进程或远程服务提供的工具交给 Agent。完成下面的步骤后，
-`/mcp list` 会列出这个 server，`/mcp inspect` 可以看到它提供的工具，Agent 也能在任务中
-请求调用这些工具。
+MCP server 可以为 Agent 添加本地进程或远程 Streamable HTTP 服务提供的工具。完成一次配置后，从 `cosh` 连接并检查工具名称，再让 Agent 使用它们。
 
-## 开始前的准备
+## 配置本地 stdio server
 
-先安装并启动一次 cosh-ng。你还需要 MCP server 提供方给出的启动命令或 Streamable
-HTTP URL。下面的本地示例使用 `npx`，运行这个示例前需要准备 Node.js。
-
-把 MCP 定义写入 `~/.copilot-shell/config.toml`。管理员也可以写入
-`/etc/copilot-shell/config.toml`。项目配置不能添加 MCP server，打开一个仓库时不会因此
-启动外部程序或向它提供凭据。
-
-## 接入本地 stdio server
-
-在配置中写入 `command` 和参数。把工作区路径换成允许 server 读取的目录。
+将 server 定义写入 `~/.copilot-shell/config.toml` 或 `/etc/copilot-shell/config.toml`。项目配置不能添加 MCP server。
 
 ```toml
 [mcp.servers.filesystem]
@@ -28,16 +17,18 @@ timeout_ms = 10000
 allowed_tools = ["read_file", "list_directory"]
 ```
 
-cosh 会直接启动这个命令，不经过 Shell。server 需要环境变量时，在配置中明确写出。
+命令会直接启动，不经过交互式 Shell。需要环境变量时，在配置中明确传入：
 
 ```toml
 [mcp.servers.filesystem.env]
 SERVICE_TOKEN = "${FILESYSTEM_MCP_TOKEN}"
 ```
 
-## 接入远程 HTTP server
+`allowed_tools` 可以列出已发现的工具名；省略表示暴露全部工具，设为 `[]` 表示不暴露工具。
 
-Streamable HTTP endpoint 使用 `url`。同一个 server 只能配置 `command` 或 `url`。
+## 配置远程 server
+
+Streamable HTTP endpoint 使用 `url`，不使用 `command`：
 
 ```toml
 [mcp.servers.search]
@@ -48,14 +39,17 @@ allowed_tools = ["query"]
 scopes = ["search"]
 ```
 
-服务提供静态 token 时，删除 OAuth 配置，并加入
-`bearer_token = "${SEARCH_MCP_TOKEN}"`。使用 OAuth 登录时不能同时配置
-`bearer_token`。远程 endpoint 必须使用 HTTPS，本地开发使用的 loopback 地址可以使用
-HTTP。
+使用静态 token 时，删除 OAuth 表并设置：
 
-## 连接并检查工具
+```toml
+bearer_token = "${SEARCH_MCP_TOKEN}"
+```
 
-进入 server 应当访问的工作区，随后启动 `cosh`。在 cosh 提示符中运行下面的命令。
+远程 endpoint 使用 HTTPS。只有 `localhost`、`127.0.0.1` 或 `::1` 等 loopback 主机允许 HTTP。每个 server 必须且只能设置 `command` 或 `url` 之一。
+
+## 连接并检查
+
+在 server 应访问的工作空间启动 `cosh`，然后运行：
 
 ```text
 /mcp list
@@ -63,59 +57,34 @@ HTTP。
 /mcp inspect filesystem
 ```
 
-`list` 用来确认 cosh 已读取配置。`connect` 会启动或连接 server，并发现它提供的工具。
-`inspect` 会显示发现的工具名和 Agent 可见的名称，不会打印凭据。
+`list` 确认已读取定义；`connect` 启动或连接 server 并发现工具；`inspect` 显示发现的工具和 Agent 可见的名称，不会打印凭据。MCP 工具名称形如 `mcp__<server>__<tool>`，仍受审批规则约束。
 
-HTTP server 使用 OAuth 时，先运行下面的 slash 命令。
+OAuth 登录需要在 Shell 中运行（交互式 `/mcp login` 只会显示这条提示）：
 
-```text
-/mcp login search
+```bash
+cosh-core mcp login search
 ```
 
-cosh 会显示一条需要在 Shell 提示符中运行的命令。运行这条命令并在浏览器完成授权，
-随后连接 server。
+完成浏览器授权后，再回到 `cosh` 连接并检查 server。
 
-```text
-/mcp connect search
-/mcp inspect search
-```
-
-## 在任务中使用 MCP 工具
-
-描述任务时可以写明要使用哪个已连接的服务，方便 Agent 选择工具。
-
-```text
-$ use the filesystem MCP tools to list Markdown files in this workspace; do not modify them
-```
-
-当前模式需要确认时，审批卡片会在执行前显示 MCP 工具及其输入。`allowed_tools` 决定
-哪些已发现工具对 Agent 可见，它不会取消原有的审批要求。
-
-## 刷新或断开 server
-
-server 调整了工具列表后运行 `refresh`。不再使用某个 server 时，可以断开连接。
+## 刷新或断开
 
 ```text
 /mcp refresh filesystem
 /mcp disconnect filesystem
+/mcp logout search
 ```
 
-`disconnect` 会禁用 server，并删除保存的 OAuth 凭据。再次运行
-`/mcp connect <server>` 可以启用它。`/mcp logout <server>` 只删除 OAuth 凭据，不修改
-server 定义。
+`refresh` 重新发现工具；`disconnect` 禁用启动时连接并删除保存的 OAuth 凭据，再次 `connect` 可重新启用；`logout` 只删除 OAuth 凭据，不修改定义。任务正在运行时，连接变化会在下一项 Agent 任务生效。
 
-Agent 任务正在执行时，cosh 会等到安全边界再应用连接变化。下一项任务会使用刷新后的
-工具列表。
+## 排查
 
-## 排查连接问题
-
-| 现象 | 检查内容 |
+| 现象 | 检查 |
 |---|---|
-| `/mcp list` 没有列出 server | 确认配置位于系统或用户配置文件中，项目配置不会生效 |
-| 本地 server 无法启动 | 检查程序路径、参数、明确传入的环境变量和 `startup_timeout_ms` |
-| 已连接但没有可用工具 | 检查 `allowed_tools`，空列表不会暴露任何工具 |
-| 远程 server 被拒绝 | 检查 HTTPS、token 和 OAuth 设置，只有 loopback 地址可以使用 HTTP |
-| OAuth 登录无法开始 | 删除 `bearer_token`，运行 `/mcp login <server>`，再按终端中的提示操作 |
+| `/mcp list` 为空 | 使用系统或用户配置，不要使用项目配置 |
+| 本地 server 无法启动 | 检查程序、参数、`env` 和 `startup_timeout_ms` |
+| 已连接但没有工具 | 检查 `allowed_tools`（`[]` 不暴露任何工具） |
+| 远程 endpoint 被拒绝 | 使用 HTTPS；HTTP 只允许 loopback；检查 token/OAuth 设置 |
+| `cosh` 中 OAuth 无法启动 | 在 Shell 运行 `cosh-core mcp login <server>`，再连接 |
 
-进入 Agent 上下文的 MCP 工具输出最多保留 64 KiB。外部工具提供的说明不会降低当前
-审批要求。
+进入 Agent 上下文的 MCP 输出上限为 64 KiB。

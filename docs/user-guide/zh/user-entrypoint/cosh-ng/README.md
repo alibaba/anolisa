@@ -2,50 +2,47 @@
 
 [English](../../../en/user-entrypoint/cosh-ng/README.md)
 
-cosh-ng 把日常 Shell 操作和 Agent 任务放在同一个 Linux 终端里。这份手册先按你要完成的
-工作给出入口，需要查命令或集成细节时再进入参考页。
+cosh-ng 是一个 AI 原生 Linux 终端，让日常 Shell 操作和 Agent 任务在同一个终端中完成。先阅读快速开始，再按下面的任务导航查找所需功能或命令。
 
 ## 从这里开始
 
-- [安装并完成第一个任务](QUICKSTART.md)
-- [选择模型 Provider 并登录](core/providers.md)
-- [了解配置文件和覆盖顺序](configuration.md)
-- [确认支持的平台](supported-distros.md)
+- [快速开始](QUICKSTART.md)：安装 cosh-ng 并完成第一个任务。
+- [模型提供商](core/providers.md)：配置认证并选择模型提供商。
+- [配置](configuration.md)：了解配置文件、设置项和优先级。
+- [支持的平台](supported-distros.md)：确认软件包和服务后端。
 
-## 在终端中工作
+## 在终端工作
 
-| 你要完成的事 | 继续阅读 |
+| 目标 | 继续阅读 |
 |---|---|
-| 混合使用 Shell 命令和自然语言任务 | [交互式终端](shell/overview.md) |
-| 决定哪些 Agent 操作需要确认 | [工具审批](shell/approval.md) |
-| 接着处理之前的工作 | [会话恢复](shell/session-recovery.md) |
-| 让长会话保持在模型窗口内 | [会话压缩](shell/session-compaction.md) |
-| 查询 slash 命令和按键行为 | [交互行为](shell/interactive-mode.md) |
+| 在同一会话中运行 Shell 命令和自然语言任务 | [交互式终端](shell/overview.md) |
+| 选择 Agent 工具调用何时需要确认 | [工具审批](shell/approval.md) |
+| 恢复或压缩会话 | [会话恢复](shell/session-recovery.md) |
+| 了解斜杠命令和按键行为 | [交互行为](shell/interactive-mode.md) |
 
-## 加入可复用能力
+## 添加可复用能力
 
-| 你要加入的能力 | 继续阅读 |
+| 目标 | 继续阅读 |
 |---|---|
-| 团队或项目共享的操作说明 | [Skills](core/skills.md) |
-| 本地进程或远程服务提供的工具 | [接入 MCP server](mcp.md) |
-| 打包好的 Skills、Hooks、设置和工具 | [Extensions](core/extensions.md) |
-| 在 Agent 事件前后执行的检查 | [Hooks](core/hooks.md) |
+| 在项目或团队之间共享操作说明 | [Skills](core/skills.md) |
+| 接入本地进程或远程服务提供的工具 | [接入 MCP 服务](mcp.md) |
+| 打包 Skills、Hooks、设置和工具 | [Extensions](core/extensions.md) |
+| 在 Agent 生命周期事件前后运行检查 | [Hooks](core/hooks.md) |
 
 ## 管理系统操作
 
-先运行只读命令。操作支持 `--dry-run` 时，先看预览结果。修改软件包和服务通常需要
-root 权限。
+先运行只读命令。对支持的包管理或服务变更先加 `--dry-run` 预览；这类操作通常需要 root 权限。
 
-| 任务 | 继续阅读 |
+| 目标 | 继续阅读 |
 |---|---|
-| 安装、删除或查找软件包 | [包管理](cli/package-management.md) |
+| 查找、安装或删除软件包 | [软件包管理](cli/package-management.md) |
 | 查看或修改 systemd 服务 | [服务管理](cli/service-management.md) |
-| 保存和恢复工作区状态 | [工作区快照](cli/checkpoint.md) |
-| 检查策略和审计记录 | [安全审计](cli/audit.md) |
+| 保存、比较、恢复或清理工作区快照 | [工作区快照](cli/checkpoint.md) |
+| 查看策略决策和审计事件 | [安全审计](cli/audit.md) |
 
 ## 集成与自动化
 
-- [结构化 OS CLI](cli/overview.md)介绍稳定的 JSON 接口。
-- [输出格式](output-format.md)说明成功和失败响应。
-- [Headless 模式](core/headless-mode.md)面向其他前端和 JSONL 集成。
-- [Agent 工具](core/tools.md)说明工具边界和审批行为。
+- [结构化 OS CLI](cli/overview.md)：命令域和安全的自动化方式。
+- [输出格式](output-format.md)：`CoshResponse<T>` 成功和失败响应封装。
+- [无界面模式](core/headless-mode.md)：供其他前端使用的 JSONL 集成。
+- [Agent 工具](core/tools.md)：工具边界和审批行为。

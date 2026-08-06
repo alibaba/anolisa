@@ -8,22 +8,17 @@ API so each boundary can be tested and integrated independently.
 ## System view
 
 ```text
-                         JSONL + control/registry protocol
-┌─────────────────┐       stdin/stdout        ┌──────────────────┐
-│ cosh-shell      │ ────────────────────────► │ cosh-core        │
-│ PTY + UI owner  │ ◄──────────────────────── │ Agent owner      │
-└────────┬────────┘       stream + cards       └────────┬─────────┘
-         │                                               │
-         ▼                                               ▼
-    bash or zsh                                  provider / tools / MCP
+bash/zsh <--- cosh-shell
+                  |
+                  | JSONL
+                  v
+              cosh-core
+                  |
+                  +--> provider / tools / MCP
+                  |
+                  +--> cosh-platform ---> cosh-types
 
-┌─────────────────┐      Rust calls       ┌──────────────────┐
-│ cosh-cli        │ ─────────────────────► │ cosh-platform    │
-│ JSON CLI owner  │                        │ OS adapter owner │
-└─────────────────┘                        └────────┬─────────┘
-                                                   ▼
-                                             cosh-types
-                                          wire/output contracts
+caller ---> cosh-cli ---> cosh-platform ---> cosh-types
 ```
 
 The launcher installed as `cosh` normally executes `cosh-shell raw cosh-core`.

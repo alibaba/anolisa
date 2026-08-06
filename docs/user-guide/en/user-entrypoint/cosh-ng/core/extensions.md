@@ -2,12 +2,13 @@
 
 [中文版](../../../../zh/user-entrypoint/cosh-ng/core/extensions.md)
 
-Extensions package one or more Skills, hooks, MCP servers, settings, context
-files, or Agent definitions. Manage them from the interactive terminal so cosh
-can show capability changes and request consent before activating executable
-behavior.
+An Extension packages reusable capabilities such as Skills, Hooks, MCP
+servers, settings, context, or Agent definitions. Install only Extensions you
+trust because they can add executable commands and external tools.
 
-## Common commands
+## Install or link an Extension
+
+Run these commands at the `cosh` prompt:
 
 ```text
 /extensions list
@@ -20,20 +21,15 @@ behavior.
 /extensions update <name>
 /extensions update --all
 /extensions uninstall <name>
-
-/extensions enable <name>
-/extensions disable <name>
-/extensions reload
 ```
 
-Use `install` for a managed copy and `link` for local extension development.
-HTTPS Git sources may select a ref. Run `/extensions help` for the exact syntax
-supported by the installed version.
+`install` copies a package into the managed user store. `link` keeps using the
+local directory, which is useful while developing. HTTPS Git sources may use
+`--ref`. Run `/extensions help` for the installed version's syntax.
 
-## Consent flow
+## Review and activate changes
 
-Install, link, uninstall, and capability-changing updates may return a pending
-operation instead of mutating immediately:
+Operations that add or change executable capabilities may wait for consent:
 
 ```text
 /extensions operation <operation-id>
@@ -41,11 +37,17 @@ operation instead of mutating immediately:
 /extensions cancel <operation-id>
 ```
 
-Review the source, version, and capability diff before consent. Capability
-fingerprints include executable hook commands and their declared environment;
-changing either requires fresh consent.
+Inspect the source and capability diff before consenting. Use
+`/extensions enable <name>`, `/extensions disable <name>`, and
+`/extensions reload` to control an installed package. If the same Extension is
+found in system and user stores, choose one explicitly:
 
-## Settings
+```text
+/extensions select-source <name> user
+/extensions select-source <name> system
+```
+
+## Extension settings
 
 ```text
 /extensions settings list <name> [--scope user|workspace]
@@ -54,44 +56,19 @@ changing either requires fresh consent.
 /extensions settings unset <name> <key> --scope workspace
 ```
 
-Sensitive values are stored in the operating-system secret store and rendered
-as `[redacted]`. Workspace settings apply only to an already trusted project.
+Sensitive settings use the operating-system secret store and display as
+`[redacted]`; they cannot use workspace scope. Workspace settings require a
+trusted project.
 
-## Source priority
+## Create a scaffold
 
-System extensions normally live under `/usr/share/anolisa/extensions/`; user
-extensions live under `~/.copilot-shell/extensions/`. When both provide the
-same identity, cosh reports the ambiguity and can select an explicit source:
+Extension authors can create a starter package and validate it:
 
 ```text
-/extensions select-source <name> user
-/extensions select-source <name> system
+/extensions new <path> --template minimal
+/extensions doctor <name>
 ```
 
-## Activation model
-
-cosh builds a candidate registry generation before activation. An unhealthy
-candidate is rejected without replacing the current generation. A healthy
-candidate activates immediately when no Agent run is active; otherwise one
-reload waits for the next safe point, and the active run stays pinned to its
-original generation.
-
-Linked extensions are checked for source drift. `/extensions doctor` reports
-invalid manifests, stale consent, missing files, source conflicts, and runtime
-load failures.
-
-## Capability boundaries
-
-- Local stdio MCP tools use the full
-  `<extension>/mcp/<server>/<tool>` namespace and retain normal approval.
-- Hook `env` values apply only to the hook child process; they never mutate the
-  host process.
-- Extension context is bounded and inserted after project context.
-- Agent definitions are validated and listed, but report `executable=false`
-  until the unified subagent executor is available.
-- Disabling an extension removes its runtime capabilities at the next healthy
-  generation boundary; it does not delete the installed package.
-
-Authors can use `/extensions new <path> --template <name>` to create a current
-manifest scaffold, where `<name>` is `minimal`, `skill`, `hook`, `mcp`,
-`context`, or `agent`; then validate it with `/extensions doctor`.
+Templates include `minimal`, `skill`, `hook`, `mcp`, `context`, and `agent`.
+Extension Hooks and tools follow the same approval rules as configured Hooks
+and MCP servers.

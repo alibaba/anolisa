@@ -2,11 +2,11 @@
 
 [English](../../../../en/user-entrypoint/cosh-ng/core/extensions.md)
 
-Extensions 可以打包 Skills、Hooks、MCP 服务、设置、上下文文件和 Agent 定义。通过
-交互式终端管理 Extension 时，系统会展示新增或变化的能力，并在启用可执行内容前请求
-确认。
+Extension 可以打包 Skills、Hooks、MCP server、设置、上下文或 Agent 定义。Extension 可能加入可执行命令和外部工具，只应安装可信来源的 Extension。
 
-## 常用命令
+## 安装或链接 Extension
+
+在 `cosh` 提示符中运行：
 
 ```text
 /extensions list
@@ -19,18 +19,13 @@ Extensions 可以打包 Skills、Hooks、MCP 服务、设置、上下文文件�
 /extensions update <name>
 /extensions update --all
 /extensions uninstall <name>
-
-/extensions enable <name>
-/extensions disable <name>
-/extensions reload
 ```
 
-需要由系统管理副本时使用 `install`，开发本地 Extension 时使用 `link`。HTTPS Git
-地址可以指定 ref。运行 `/extensions help` 查看当前版本支持的完整语法。
+`install` 会把软件包复制到托管的用户目录；`link` 保持使用本地目录，适合开发。HTTPS Git 源可以使用 `--ref`。运行 `/extensions help` 查看当前版本的语法。
 
-## 确认变更
+## 审查并启用变更
 
-安装、链接、卸载或改变能力的更新可能先生成一项待确认操作。
+添加或改变可执行能力的操作可能需要先确认：
 
 ```text
 /extensions operation <operation-id>
@@ -38,10 +33,14 @@ Extensions 可以打包 Skills、Hooks、MCP 服务、设置、上下文文件�
 /extensions cancel <operation-id>
 ```
 
-确认前请检查来源、版本和能力差异。能力指纹包含可执行的 Hook 命令及其环境变量，任一
-内容变化都需要重新确认。
+确认前检查来源和能力差异。使用 `/extensions enable <name>`、`/extensions disable <name>` 和 `/extensions reload` 控制已安装的软件包。如果系统目录和用户目录同时找到同一个 Extension，请明确选择来源：
 
-## 设置
+```text
+/extensions select-source <name> user
+/extensions select-source <name> system
+```
+
+## Extension 设置
 
 ```text
 /extensions settings list <name> [--scope user|workspace]
@@ -50,39 +49,15 @@ Extensions 可以打包 Skills、Hooks、MCP 服务、设置、上下文文件�
 /extensions settings unset <name> <key> --scope workspace
 ```
 
-敏感值保存在操作系统密钥存储中，显示时会替换为 `[redacted]`。工作区设置只对已经
-信任的项目生效。
+敏感设置使用操作系统密钥存储，显示为 `[redacted]`，不能使用 workspace 作用域。Workspace 设置要求项目已受信任。
 
-## 来源优先级
+## 创建脚手架
 
-系统 Extensions 通常位于 `/usr/share/anolisa/extensions/`，用户 Extensions 位于
-`~/.copilot-shell/extensions/`。两处出现同一个 Extension 时，系统会提示来源冲突，
-此时可以手动选择。
+Extension 作者可以创建并检查一个起始软件包：
 
 ```text
-/extensions select-source <name> user
-/extensions select-source <name> system
+/extensions new <path> --template minimal
+/extensions doctor <name>
 ```
 
-## 激活模型
-
-系统会先构建并检查一份新的 Extension 注册表。检查失败时，当前版本继续工作。没有
-正在运行的 Agent 任务时，新版本立即启用。有任务运行时，重载会等到安全时机，当前
-任务继续使用启动时的版本。
-
-链接的 Extension 会检查源文件是否发生变化。`/extensions doctor` 会报告无效清单、
-确认过期、文件缺失、来源冲突和加载失败。
-
-## 能力边界
-
-- 本地 stdio MCP 工具使用完整 `<extension>/mcp/<server>/<tool>` 命名空间，并保留正常
-  审批。
-- Hook `env` 只作用于 Hook 子进程，不会修改宿主进程。
-- Extension 上下文有大小限制，并放在项目上下文之后。
-- Agent 定义会被校验和列出，在统一的子 Agent 执行器可用前报告
-  `executable=false`。
-- 禁用 Extension 会在下一次安全重载时移除运行时能力，不会删除已安装的软件包。
-
-作者可使用 `/extensions new <path> --template <name>` 创建清单骨架。`<name>` 可选
-`minimal`、`skill`、`hook`、`mcp`、`context` 或 `agent`，完成后运行
-`/extensions doctor` 检查。
+模板包括 `minimal`、`skill`、`hook`、`mcp`、`context` 和 `agent`。Extension Hook 和工具使用与配置文件 Hook、MCP server 相同的审批规则。

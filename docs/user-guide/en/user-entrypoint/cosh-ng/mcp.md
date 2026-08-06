@@ -1,27 +1,15 @@
-# Connect an MCP Server
+# Connect an MCP server
 
 [中文版](../../../zh/user-entrypoint/cosh-ng/mcp.md)
 
-An MCP server gives the Agent tools supplied by a local process or remote
-service. After this guide, the server will appear in `/mcp list`, its tools
-will be visible in `/mcp inspect`, and the Agent can request them during a
-task.
+MCP servers add tools from a local process or a remote Streamable HTTP service.
+Configure them once, connect them from `cosh`, then inspect the names before
+asking the Agent to use them.
 
-## Before you begin
+## Configure a local stdio server
 
-Install and start cosh-ng once. You also need the command or Streamable HTTP
-URL supplied by the MCP server owner. The local example below uses `npx`, so
-Node.js must be available for that example.
-
-Put MCP definitions in `~/.copilot-shell/config.toml`. Administrators may use
-`/etc/copilot-shell/config.toml`. Project configuration cannot add MCP servers
-because opening a repository must not start an external program or grant it
-credentials.
-
-## Add a local stdio server
-
-Add a server with a `command` and its arguments. Replace the workspace path
-with a directory the server is allowed to read.
+Put server definitions in `~/.copilot-shell/config.toml` or
+`/etc/copilot-shell/config.toml`. Project config cannot add an MCP server.
 
 ```toml
 [mcp.servers.filesystem]
@@ -32,18 +20,20 @@ timeout_ms = 10000
 allowed_tools = ["read_file", "list_directory"]
 ```
 
-cosh starts this command directly without a Shell. Add required environment
-variables explicitly when the server needs them.
+The command is started directly, not through the interactive Shell. Add child
+environment variables explicitly:
 
 ```toml
 [mcp.servers.filesystem.env]
 SERVICE_TOKEN = "${FILESYSTEM_MCP_TOKEN}"
 ```
 
-## Add a remote HTTP server
+`allowed_tools` may list discovered tool names; omit it to expose all tools or
+set `[]` to expose none.
 
-Use `url` for a Streamable HTTP endpoint. A server must use either `command`
-or `url`.
+## Configure a remote server
+
+Use `url` instead of `command` for a Streamable HTTP endpoint:
 
 ```toml
 [mcp.servers.search]
@@ -54,15 +44,19 @@ allowed_tools = ["query"]
 scopes = ["search"]
 ```
 
-For a service that gives you a static token, replace the OAuth section with
-`bearer_token = "${SEARCH_MCP_TOKEN}"`. OAuth login requires that
-`bearer_token` is absent. Remote endpoints require HTTPS, while loopback HTTP
-is accepted for local development.
+For a static token, remove the OAuth table and set:
 
-## Connect and inspect the tools
+```toml
+bearer_token = "${SEARCH_MCP_TOKEN}"
+```
 
-Start `cosh` in the workspace the server should receive through MCP roots.
-Run these commands at the cosh prompt.
+Use HTTPS for remote endpoints. HTTP is accepted only for loopback hosts such
+as `localhost`, `127.0.0.1`, or `::1`. A server must define exactly one of
+`command` and `url`.
+
+## Connect and inspect
+
+Start `cosh` in the workspace the server should receive, then run:
 
 ```text
 /mcp list
@@ -70,63 +64,41 @@ Run these commands at the cosh prompt.
 /mcp inspect filesystem
 ```
 
-`list` confirms that cosh loaded the definition. `connect` starts or contacts
-the server and discovers its tools. `inspect` shows the discovered names and
-the names exposed to the Agent. Credentials are not printed.
+`list` confirms the definition was loaded. `connect` starts or contacts the
+server and discovers tools. `inspect` shows the discovered and Agent-visible
+names without printing credentials. MCP tools are exposed as
+`mcp__<server>__<tool>` and remain subject to approval.
 
-For an HTTP server that uses OAuth, begin with the slash command below.
+For OAuth, run the login command in a Shell (the interactive `/mcp login`
+command prints this instruction):
 
-```text
-/mcp login search
+```bash
+cosh-core mcp login search
 ```
 
-cosh displays the command that must run at the Shell prompt for the interactive
-browser flow. Run that command, finish authorization, then connect the server.
+Finish the browser flow, then connect and inspect the server from `cosh`.
 
-```text
-/mcp connect search
-/mcp inspect search
-```
-
-## Use an MCP tool
-
-Describe the task and name the connected service when it helps the Agent pick
-the right tool.
-
-```text
-$ use the filesystem MCP tools to list Markdown files in this workspace; do not modify them
-```
-
-The approval card shows the MCP tool and its input before execution when the
-current mode requires consent. `allowed_tools` controls which discovered tools
-are exposed to the Agent. It does not remove the normal approval boundary.
-
-## Refresh or disconnect a server
-
-Run `refresh` after the server changes its tool list. Disconnect a server when
-you no longer want cosh to start or contact it.
+## Refresh or disconnect
 
 ```text
 /mcp refresh filesystem
 /mcp disconnect filesystem
+/mcp logout search
 ```
 
-`disconnect` disables the server and removes saved OAuth credentials. Use
-`/mcp connect <server>` to enable it again. `/mcp logout <server>` removes OAuth
-credentials without changing the server definition.
+`refresh` rediscovers tools. `disconnect` disables startup connection and
+removes saved OAuth credentials; `connect` enables it again. `logout` removes
+OAuth credentials without changing the definition. Changes take effect for the
+next Agent task when a task is already running.
 
-If an Agent task is active, cosh waits for a safe boundary before applying a
-connection change. The next task sees the refreshed tool set.
+## Troubleshoot
 
-## Troubleshooting
-
-| What you see | What to check |
+| Symptom | Check |
 |---|---|
-| `/mcp list` shows no servers | Confirm that the definition is in the system or user configuration, not project configuration |
-| A local server does not start | Check the executable path, arguments, explicit environment, and `startup_timeout_ms` |
-| The server connects but exposes no tools | Check `allowed_tools`; an empty list exposes none |
-| A remote server is rejected | Use HTTPS unless the endpoint is loopback, then check its token or OAuth settings |
-| OAuth login cannot start | Remove `bearer_token`, run `/mcp login <server>`, and follow the displayed Shell instruction |
+| `/mcp list` is empty | Use system or user config, not project config |
+| Local server will not start | Check executable, arguments, `env`, and `startup_timeout_ms` |
+| Connected server exposes no tools | Check `allowed_tools` (`[]` exposes none) |
+| Remote endpoint is rejected | Use HTTPS, or HTTP only on loopback; check token/OAuth settings |
+| OAuth login cannot start in `cosh` | Run `cosh-core mcp login <server>` in a Shell, then connect |
 
-MCP tool output entering Agent context is limited to 64 KiB. External tool
-descriptions never lower the current approval policy.
+MCP output entering Agent context is limited to 64 KiB.

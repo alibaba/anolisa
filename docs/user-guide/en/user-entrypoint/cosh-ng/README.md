@@ -2,52 +2,47 @@
 
 [中文版](../../../zh/user-entrypoint/cosh-ng/README.md)
 
-cosh-ng keeps everyday Shell work and Agent tasks in one Linux terminal. This
-guide starts with what you want to accomplish, then points to command and
-integration references when you need more detail.
+cosh-ng is an AI-native Linux terminal that keeps normal Shell work and Agent tasks together. Start with the quick start, then use the task-based links below for the feature or command you need.
 
 ## Start here
 
-- [Install and run your first task](QUICKSTART.md)
-- [Choose a model provider and sign in](core/providers.md)
-- [Review configuration and file precedence](configuration.md)
-- [Check supported platforms](supported-distros.md)
+- [Quick start](QUICKSTART.md) — install cosh-ng and run a first task.
+- [Model providers](core/providers.md) — configure authentication and select a provider.
+- [Configuration](configuration.md) — review files, settings, and precedence.
+- [Supported platforms](supported-distros.md) — check package and service backends.
 
 ## Work in the terminal
 
-| What you want to do | Read next |
+| Goal | Read next |
 |---|---|
-| Mix Shell commands with natural-language tasks | [Interactive terminal](shell/overview.md) |
-| Decide which Agent actions need confirmation | [Tool approval](shell/approval.md) |
-| Resume earlier work | [Session recovery](shell/session-recovery.md) |
-| Keep a long conversation within the model window | [Session compaction](shell/session-compaction.md) |
-| Understand slash commands and keyboard behavior | [Interactive behavior](shell/interactive-mode.md) |
+| Run Shell commands and natural-language tasks together | [Interactive terminal](shell/overview.md) |
+| Choose when Agent tool calls require confirmation | [Tool approval](shell/approval.md) |
+| Resume or compact a conversation | [Session recovery](shell/session-recovery.md) |
+| Learn slash commands and keyboard behavior | [Interactive behavior](shell/interactive-mode.md) |
 
-## Add reusable capabilities
+## Add capabilities
 
-| What you want to add | Read next |
+| Goal | Read next |
 |---|---|
-| Instructions shared by a team or project | [Skills](core/skills.md) |
-| Tools from a local process or remote service | [Connect an MCP server](mcp.md) |
-| Packaged Skills, Hooks, settings, and tools | [Extensions](core/extensions.md) |
-| Checks that run around Agent events | [Hooks](core/hooks.md) |
+| Share instructions across a project or team | [Skills](core/skills.md) |
+| Connect tools from a local process or remote service | [Connect an MCP server](mcp.md) |
+| Bundle Skills, Hooks, settings, and tools | [Extensions](core/extensions.md) |
+| Run checks around Agent lifecycle events | [Hooks](core/hooks.md) |
 
 ## Manage system operations
 
-Start with read-only commands or `--dry-run` whenever the operation supports
-it. Package and service changes usually require root privileges.
+Use read-only commands first. Add `--dry-run` to a supported package or service mutation before making a change; these operations usually need root privileges.
 
-| Task | Read next |
+| Goal | Read next |
 |---|---|
-| Install, remove, or find packages | [Package management](cli/package-management.md) |
+| Find, install, or remove packages | [Package management](cli/package-management.md) |
 | Inspect or change systemd services | [Service management](cli/service-management.md) |
-| Save and restore workspace state | [Workspace checkpoints](cli/checkpoint.md) |
-| Review policy and audit records | [Security audit](cli/audit.md) |
+| Save, compare, restore, or clean workspace snapshots | [Workspace checkpoints](cli/checkpoint.md) |
+| Check policy decisions and audit events | [Security audit](cli/audit.md) |
 
 ## Integrate and automate
 
-- [Structured OS CLI](cli/overview.md) explains the stable JSON interface.
-- [Output format](output-format.md) documents success and error envelopes.
-- [Headless mode](core/headless-mode.md) is for other frontends and JSONL
-  integrations.
-- [Agent tools](core/tools.md) documents tool boundaries and approval behavior.
+- [Structured OS CLI](cli/overview.md) — command domains and safe automation patterns.
+- [Output format](output-format.md) — the `CoshResponse<T>` success and error envelope.
+- [Headless mode](core/headless-mode.md) — JSONL integration for other frontends.
+- [Agent tools](core/tools.md) — tool boundaries and approval behavior.

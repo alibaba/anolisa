@@ -1,132 +1,43 @@
-# 包管理
+# 软件包管理
 
 [English](../../../../en/user-entrypoint/cosh-ng/cli/package-management.md)
 
-`cosh-cli pkg` 子系统在 Linux 和 macOS 上提供结构化软件包操作。macOS 使用
-Homebrew，Linux 使用 dnf、apt 或 zypper，也支持通过 `ID_LIKE` 声明的兼容衍生版。
+`cosh-cli pkg` 提供结构化的软件包操作，会根据平台检测结果选择 dnf、apt、zypper 或 Homebrew，并返回统一的 JSON 响应。
 
-## 命令列表
+## 命令
 
-| 命令 | 说明 |
-|------|------|
-| `cosh-cli pkg install <name>` | 安装软件包 |
-| `cosh-cli pkg remove <name>` | 卸载软件包 |
-| `cosh-cli pkg search <query>` | 搜索软件包 |
-| `cosh-cli pkg list --installed` | 列出已安装包 |
+| 命令 | 用途 |
+|---|---|
+| `cosh-cli pkg install <package>` | 安装软件包 |
+| `cosh-cli pkg remove <package>` | 删除软件包 |
+| `cosh-cli pkg search <query>` | 搜索软件包名称 |
+| `cosh-cli pkg list --installed` | 列出已安装的软件包 |
 
-## install
+## 安装或删除
 
-安装指定的软件包。
+执行变更前先预览：
 
 ```bash
-cosh-cli pkg install nginx
 cosh-cli pkg install nginx --dry-run
-```
-
-成功输出示例
-
-```json
-{
-  "ok": true,
-  "data": {
-    "package": "nginx",
-    "version": "1.24.0",
-    "already_installed": false,
-    "dependencies_installed": []
-  },
-  "meta": { "subsystem": "pkg", "duration_ms": 5200, "distro": "alinux", "dry_run": false }
-}
-```
-
-若包已安装，`already_installed` 为 `true`，命令仍返回成功。
-
-## remove
-
-卸载指定的软件包。
-
-```bash
-cosh-cli pkg remove nginx
 cosh-cli pkg remove nginx --dry-run
 ```
 
-成功输出示例
+去掉 `--dry-run` 才会真正执行。软件包操作通常需要 root 权限；安装时如果软件包已经存在，命令仍会成功，并在响应中将 `already_installed` 标记为 `true`。
 
-```json
-{
-  "ok": true,
-  "data": {
-    "package": "nginx",
-    "version_removed": "1.24.0",
-    "dependencies_removed": []
-  },
-  "meta": { "subsystem": "pkg", "duration_ms": 2100, "distro": "ubuntu", "dry_run": false }
-}
-```
+## 搜索
 
-## search
-
-使用便携 glob 子集 `*`、`?` 和方括号字符类搜索软件包名。返回结果包含安装状态。
+查询会作为一个参数传递，并使用可移植的软件包名称模式。允许的软件包名称字符之外，还可以使用 `*`、`?`、`[` 和 `]`：
 
 ```bash
 cosh-cli pkg search 'libssl*'
+cosh-cli pkg search 'python3-?'
+cosh-cli pkg search 'lib[0-9]*'
 ```
 
-输出示例
+特定后端的正则表达式、Shell 元字符、空查询以及以 `-` 开头的查询都会被拒绝。`cosh-cli` 会在支持的后端之间保持完整软件包名称的匹配语义一致。
 
-```json
-{
-  "ok": true,
-  "data": {
-    "packages": [
-      { "name": "libssl3", "version": "3.0.2", "summary": "...", "installed": true },
-      { "name": "libssl-dev", "summary": "...", "installed": false }
-    ],
-    "total": 2
-  },
-  "meta": { "subsystem": "pkg", "duration_ms": 800, "distro": "ubuntu", "dry_run": false }
-}
-```
+## 列表和错误
 
-Query 会作为单个参数传递，不经过 Shell 展开。系统会拒绝 backend-specific regex，
-并转换便携 pattern，让各个受支持的后端使用一致的完整软件包名语义。
+`list --installed` 返回软件包名称和版本。搜索结果还会报告每个软件包是否已安装；后端无法提供时，搜索结果中的版本以及软件包列表中的架构或仓库字段可能省略。
 
-## list
-
-列出已安装的软件包。
-
-```bash
-cosh-cli pkg list --installed
-```
-
-输出示例
-
-```json
-{
-  "ok": true,
-  "data": {
-    "packages": [
-      { "name": "nginx", "version": "1.24.0" },
-      { "name": "curl", "version": "8.5.0" }
-    ],
-    "total": 2
-  },
-  "meta": { "subsystem": "pkg", "duration_ms": 300, "distro": "centos", "dry_run": false }
-}
-```
-
-## 后端映射
-
-| 操作 | dnf | apt | zypper | Homebrew |
-|------|-----|-----|--------|----------|
-| install | `dnf install -y` | `apt-get install -y` | `zypper install -y` | `brew install` |
-| remove | `dnf remove -y` | `apt-get remove -y` | `zypper remove -y` | `brew uninstall` |
-| search | `dnf search -q` | `apt-cache search --names-only` | `zypper search` | `brew search` |
-| list | `dnf list installed -q` | `dpkg-query -W` | `zypper se --installed-only` | `brew list --versions` |
-
-## 错误处理
-
-- 软件包不存在时返回 `PkgNotFound`，`hint` 建议搜索。
-- 包管理器执行失败返回 `PkgBackendError`，并设置 `recoverable: true`。
-- 没有直接 ID 或兼容 `ID_LIKE` 家族的发行版返回 `UnsupportedDistro`。
-
-路由和支持边界见[支持的平台](../supported-distros.md)。
+常见错误包括 `PkgNotFound`、`PkgBackendError`、`UnsupportedDistro` 和 `PermissionDenied`。请根据响应中的 `error.hint` 采取下一步操作。路由详情见[支持的平台](../supported-distros.md)，响应封装见[输出格式](../output-format.md)。

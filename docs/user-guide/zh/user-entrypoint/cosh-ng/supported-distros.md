@@ -1,49 +1,34 @@
-# 支持的平台与 Linux 发行版
+# 支持的平台与Linux发行版
 
 [English](../../../en/user-entrypoint/cosh-ng/supported-distros.md)
 
-cosh-ng 源码可在 Linux 和 macOS 上构建。交互式终端在两个平台上都会使用系统已有的
-Bash 或 Zsh。macOS 软件包操作使用 Homebrew，Linux 软件包操作使用发行版对应的
-后端。服务操作目前需要 Linux 和 systemd。
+cosh-ng的交互式终端可在Linux和macOS上运行。软件包和服务命令使用主机原生的管理工具。
 
-## macOS
+| 平台 | 交互式Shell | 软件包命令 | 服务命令 |
+|---|---|---|---|
+| Linux | Bash或zsh | dnf、apt或zypper | systemd |
+| macOS | Bash或zsh | Homebrew | 不可用 |
 
-cosh-ng 通过 `sw_vers` 检测 macOS 版本，并把 `cosh-cli pkg` 命令交给 Homebrew。
-当前安装脚本和 RPM 面向 Linux，macOS 用户需要从源码构建。`cosh-cli svc` 使用
-`systemctl`，因此不能在 macOS 上使用。
+## Linux发行版
 
-## Linux 支持矩阵
+以下`/etc/os-release` ID有内置路由：
 
-| `/etc/os-release` ID | 包管理器 | 服务管理器 |
-|----------------------|----------|------------|
-| `alinux`、`centos`、`fedora` | dnf | systemd |
-| `ubuntu`、`debian` | apt | systemd |
-| `opensuse-leap`、`opensuse-tumbleweed`、`sles` | zypper | systemd |
+| ID | 包管理器 |
+|---|---|
+| `alinux`、`centos`、`fedora` | dnf |
+| `ubuntu`、`debian` | apt |
+| `opensuse-leap`、`opensuse-tumbleweed`、`sles` | zypper |
 
-未单独列出的 Linux 发行版可以通过 `ID_LIKE` 复用已支持的软件包家族。
+未列出的发行版如果`ID_LIKE`包含以下值之一，可以复用对应的软件包家族：
 
-| `ID_LIKE` 家族 | 包管理器 | 示例 |
-|---|---|---|
-| `alinux`、`centos`、`fedora`、`rhel` | dnf | Rocky Linux |
-| `debian`、`ubuntu` | apt | Debian 兼容衍生版 |
-| `opensuse`、`suse` | zypper | SUSE 兼容衍生版 |
+| `ID_LIKE`家族 | 包管理器 |
+|---|---|
+| `alinux`、`centos`、`fedora`、`rhel` | dnf |
+| `debian`、`ubuntu` | apt |
+| `opensuse`、`suse` | zypper |
 
-JSON 元数据仍保留发行版的真实 `ID`。家族路由只表示包管理后端兼容，
-不代表对每个衍生版或版本做完整认证。
+家族路由只表示软件包后端兼容，不代表对每个衍生版或版本做认证。未知软件包家族会返回结构化的`UnsupportedDistro`错误。
 
-这不代表 cosh-ng 承诺支持上述发行版的每一个版本。安装前先运行 `anolisa env`，
-并在目标主机上用 `cosh-cli` 的只读命令确认软件包或服务后端。
+## 修改主机前
 
-## 检测与路由
-
-`Distro::detect()` 读取 `/etc/os-release`，仅在主文件不存在时回退到
-`/usr/lib/os-release`。它会规范化 `ID`、保留 `VERSION_ID`，并在 ID 未内置时
-检查 `ID_LIKE`。没有兼容家族的 ID 保持为 `Unknown`；软件包操作随后返回
-结构化的 `UnsupportedDistro` 错误。
-
-软件包命令会调用 `dnf`、`apt-get`、`apt-cache` 或 `zypper`，服务命令使用
-`systemctl`。软件包安装、卸载和服务变更支持 `--dry-run`，请用对应操作的 `--help`
-确认准确参数。
-
-新增 Linux 发行版支持请参见
-[开发者指南](../../../../developer-guide/zh/cosh-ng/adding-distros.md)。
+安装前运行`anolisa env`。在目标主机上，先使用`cosh-cli`只读命令和对应操作的`--dry-run`选项确认路由，再执行软件包或服务变更。服务命令需要Linux和systemd；macOS用户可以通过Homebrew使用软件包命令，但不能使用`cosh-cli svc`。

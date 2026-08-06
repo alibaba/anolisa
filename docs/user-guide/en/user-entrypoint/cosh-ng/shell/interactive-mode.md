@@ -1,79 +1,51 @@
-# Interactive Behavior and Commands
+# Interactive Commands
 
 [中文版](../../../../zh/user-entrypoint/cosh-ng/shell/interactive-mode.md)
 
-This page is a compact reference for starting cosh and controlling a running
-session. Run `/help` for the exact command set supported by the installed
-version.
+Use this page to start `cosh` and control a running session. Run `/help` to see the exact commands supported by the installed version.
 
-## Launch modes
+## Start `cosh`
 
-| Command | Behavior |
+| Command | Use |
 |---|---|
-| `cosh` | Start the configured bash/zsh and Agent adapter |
-| `cosh --shell zsh` | Select the underlying shell |
-| `cosh --isolated` | Skip user rcfiles for an isolated session |
-| `cosh --login` | Start a login shell |
-| `cosh --resume [id]` | Pick or select a persisted Agent conversation |
-| `cosh -c '<command>'` | Execute through the underlying shell and exit |
-| `cosh -- <program> [args...]` | Execute a program directly and exit |
+| `cosh` | Start the configured bash or zsh and Agent adapter. |
+| `cosh --shell zsh` | Select zsh explicitly. |
+| `cosh --isolated` | Skip user rcfiles. |
+| `cosh --login` | Start a login shell. |
+| `cosh --resume [id]` | Open the session picker or resume the given session. |
+| `cosh -c '<command>'` | Run one command through the shell and exit. |
+| `cosh -- <program> [args...]` | Run a program directly and exit. |
+
+If no shell is selected, `cosh` uses its configured or detected bash/zsh and falls back to bash.
 
 ## Input and editing
 
-- Shell syntax is sent to the foreground bash/zsh process.
-- Natural-language input starts an Agent turn in `smart` or `auto` analysis
-  mode.
-- A leading slash invokes a cosh control command. Natural-language sentences
-  that merely contain a slash are not misclassified as control commands.
-- `Shift+Enter` inserts a newline when the terminal supports the negotiated key
-  protocol; multiline paste is preserved as one logical submission.
-- Up-arrow history includes both shell and slash-command input.
-
-cosh marks command boundaries with private OSC messages injected into the child
-shell. This lets it associate command text, exit status, working directory, and
-captured output without parsing the prompt itself.
+- Shell syntax is sent to the foreground bash or zsh.
+- A natural-language request starts an Agent request. Analysis mode controls proactive failure assistance, not explicit requests.
+- A leading `/` runs a cosh control command; a slash inside an ordinary sentence does not.
+- `Shift+Enter` inserts a newline when supported. Multiline paste remains one submission.
+- Up-arrow history includes shell input and slash commands. `Ctrl+C` cancels the active command or Agent request.
 
 ## Public slash commands
 
 | Command | Purpose |
 |---|---|
-| `/help` | Show commands supported by the running version |
-| `/draft` | Open the prompt draft workflow |
-| `/health` | Run local health collectors |
-| `/status` (`/about`) | Show runtime, provider, and session status; `/about` is an alias |
-| `/stats [model\|tools]` | Show runtime model identity or current tool activity |
-| `/auth` | Choose or update provider authentication |
-| `/config language [auto\|en-US\|zh-CN]` | Inspect or set UI language |
-| `/mode approval [recommend\|auto\|trust]` | Inspect or change approval behavior |
-| `/mode analysis [smart\|auto\|manual]` | Inspect or change analysis routing |
-| `/session ...` | Create, list (including `--all`), resume, clear, or compact conversations |
-| `/recommendations [on\|off\|status\|privacy\|clear]` | Control local prompt recommendations |
-| `/hooks <command>` | Inspect findings, state, feedback, and project Hook trust |
-| `/extensions <command>` | Manage extension packages and settings |
-| `/skills [list\|detail\|enable\|disable]` | Manage reusable Skills |
-| `/mcp [list\|connect\|inspect\|refresh\|disconnect\|login\|logout]` | Manage MCP servers |
+| `/help` | Show the installed command set. |
+| `/draft` | Compose a multiline Agent request. |
+| `/health` | Run local health checks. |
+| `/status` (`/about`) | Show runtime, provider, and session status. |
+| `/stats [model\|tools]` | Show model identity or tool activity. |
+| `/auth` | Choose or update provider authentication. |
+| `/config language [auto\|en-US\|zh-CN]` | Inspect or set the UI language. |
+| `/mode approval [recommend\|auto\|trust]` | Inspect or change tool approval. |
+| `/mode analysis [smart\|auto\|manual]` | Inspect or change proactive analysis. |
+| `/session ...` | Create, list, resume, clear, or compact sessions. |
+| `/recommendations [on\|off\|status\|privacy\|clear]` | Manage local prompt recommendations. |
+| `/hooks <command>` | Inspect Hook findings and trust state. |
+| `/extensions <command>` | Manage extension packages and settings. |
+| `/skills [list\|detail\|enable\|disable]` | Manage Skills. |
+| `/mcp [list\|connect\|inspect\|refresh\|disconnect\|login\|logout]` | Manage MCP servers. |
 
-Some commands such as `/details`, `/audit`, and `/send-to-shell` appear only
-when the current card or run provides the required context. Diagnostic and
-compatibility commands are intentionally omitted from normal help.
+Commands such as `/details`, `/audit`, and `/send-to-shell` appear only when the current card or run provides their required context. `/mcp login` requires the shell-based OAuth flow described by the MCP guide.
 
-## Skills
-
-```text
-/skills detail service-health
-/skills disable service-health
-/skills enable service-health
-```
-
-`/skills` requires the default cosh-core adapter. Skill state is resolved for
-the canonical workspace and becomes visible to subsequent Agent turns.
-
-## Terminal recovery
-
-cosh restores terminal settings on normal exit, panic, `SIGTERM`, `SIGHUP`, or
-`SIGQUIT`. If a terminal still looks corrupted after a hard kill, run `reset`
-from the parent shell.
-
-For conversation persistence and deletion guarantees, see
-[Session recovery](session-recovery.md). For card behavior, see
-[Tool approval](approval.md).
+For approval behavior, see [Tool approval](approval.md). For proactive failure help, see [AI analysis](ai-analysis.md).
