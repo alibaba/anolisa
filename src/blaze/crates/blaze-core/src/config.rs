@@ -160,10 +160,10 @@ pub struct StorageSection {
     #[serde(default)]
     pub prefork: bool,
 
-    /// Interval for flushing dirty data.
+    /// Interval for synchronizing provider-owned storage artifacts.
     /// NOTE: Reserved for future use. Not yet wired into runtime.
-    #[serde(default = "default_flush_interval")]
-    pub flush_interval: String,
+    #[serde(default = "default_sync_interval", alias = "flush_interval")]
+    pub sync_interval: String,
 
     /// Logical size of file-provider root filesystem slots.
     #[serde(default = "default_rootfs_size")]
@@ -182,7 +182,7 @@ impl Default for StorageSection {
             provider: default_storage_provider(),
             pool_size: 0,
             prefork: false,
-            flush_interval: default_flush_interval(),
+            sync_interval: default_sync_interval(),
             rootfs_size: default_rootfs_size(),
             mem_size: default_mem_size(),
         }
@@ -266,7 +266,7 @@ fn default_instances_dir() -> PathBuf {
 fn default_storage_provider() -> String {
     "file".to_string()
 }
-fn default_flush_interval() -> String {
+fn default_sync_interval() -> String {
     "30s".to_string()
 }
 fn default_rootfs_size() -> u64 {
@@ -324,5 +324,36 @@ mod tests {
             let error = cfg.validate().expect_err("overlapping paths");
             assert!(error.to_string().contains("must be disjoint"));
         }
+    }
+
+    #[test]
+    fn storage_sync_interval_accepts_legacy_input_alias() {
+        let cfg: DaemonConfig = toml::from_str(
+            r#"
+                [storage]
+                flush_interval = "15s"
+            "#,
+        )
+        .expect("legacy interval key parses");
+
+        assert_eq!(cfg.storage.sync_interval, "15s");
+        let encoded = toml::to_string(&cfg).expect("config serializes");
+        assert!(encoded.contains("sync_interval = \"15s\""), "{encoded}");
+        assert!(!encoded.contains("flush_interval"), "{encoded}");
+    }
+
+    #[test]
+    fn storage_sync_interval_rejects_duplicate_aliases() {
+        let error = toml::from_str::<DaemonConfig>(
+            r#"
+                [storage]
+                flush_interval = "15s"
+                sync_interval = "30s"
+            "#,
+        )
+        .expect_err("legacy and canonical interval keys must not coexist");
+
+        assert!(error.to_string().contains("duplicate field"), "{error}");
+        assert!(error.to_string().contains("sync_interval"), "{error}");
     }
 }

@@ -1021,8 +1021,8 @@ mod tests {
             self.inner.reconstruct(instance_id).await
         }
 
-        async fn flush_dirty(&self, slot: &StorageSlot) -> blaze_core::Result<()> {
-            self.inner.flush_dirty(slot).await
+        async fn sync_artifacts(&self, slot: &StorageSlot) -> blaze_core::Result<()> {
+            self.inner.sync_artifacts(slot).await
         }
 
         fn pool_status(&self) -> PoolStatus {
@@ -1074,8 +1074,8 @@ mod tests {
             self.inner.reconstruct(instance_id).await
         }
 
-        async fn flush_dirty(&self, slot: &StorageSlot) -> blaze_core::Result<()> {
-            self.inner.flush_dirty(slot).await
+        async fn sync_artifacts(&self, slot: &StorageSlot) -> blaze_core::Result<()> {
+            self.inner.sync_artifacts(slot).await
         }
 
         fn pool_status(&self) -> PoolStatus {
@@ -1367,8 +1367,8 @@ mod tests {
             self.inner.reconstruct(instance_id).await
         }
 
-        async fn flush_dirty(&self, slot: &StorageSlot) -> blaze_core::Result<()> {
-            self.inner.flush_dirty(slot).await
+        async fn sync_artifacts(&self, slot: &StorageSlot) -> blaze_core::Result<()> {
+            self.inner.sync_artifacts(slot).await
         }
 
         fn pool_status(&self) -> PoolStatus {

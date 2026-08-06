@@ -229,8 +229,8 @@ impl StorageProvider for FileStorageProvider {
         Ok(slot)
     }
 
-    async fn flush_dirty(&self, slot: &StorageSlot) -> Result<()> {
-        crate::failpoint::storage("flush-storage")?;
+    async fn sync_artifacts(&self, slot: &StorageSlot) -> Result<()> {
+        crate::failpoint::storage("sync-artifacts")?;
         // Never trust paths carried by a runtime or persisted slot. Rebuild
         // the complete provider-owned artifact set from the validated ID.
         let canonical = self.slot_for_id(&slot.id)?;
@@ -246,19 +246,27 @@ impl StorageProvider for FileStorageProvider {
                 .open(path)
                 .await
                 .map_err(|error| BlazeError::StorageError {
-                    msg: format!("flush '{}': open {}: {error}", slot.id, path.display()),
+                    msg: format!(
+                        "sync artifacts '{}': open {}: {error}",
+                        slot.id,
+                        path.display()
+                    ),
                 })?;
             file.sync_all()
                 .await
                 .map_err(|error| BlazeError::StorageError {
-                    msg: format!("flush '{}': sync {}: {error}", slot.id, path.display()),
+                    msg: format!(
+                        "sync artifacts '{}': sync {}: {error}",
+                        slot.id,
+                        path.display()
+                    ),
                 })?;
         }
         let directory = tokio::fs::File::open(&canonical.instance_dir)
             .await
             .map_err(|error| BlazeError::StorageError {
                 msg: format!(
-                    "flush '{}': open directory {}: {error}",
+                    "sync artifacts '{}': open directory {}: {error}",
                     slot.id,
                     canonical.instance_dir.display()
                 ),
@@ -268,7 +276,7 @@ impl StorageProvider for FileStorageProvider {
             .await
             .map_err(|error| BlazeError::StorageError {
                 msg: format!(
-                    "flush '{}': sync directory {}: {error}",
+                    "sync artifacts '{}': sync directory {}: {error}",
                     slot.id,
                     canonical.instance_dir.display()
                 ),
@@ -601,12 +609,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flush_rederives_canonical_paths_from_slot_id() {
+    async fn sync_artifacts_rederives_canonical_paths_from_slot_id() {
         let temp = tempfile::TempDir::new().unwrap();
         let provider = FileStorageProvider::new(temp.path().to_path_buf());
         let slot = provider
             .acquire(&AcquireOpts {
-                instance_id: "flush-canonical".into(),
+                instance_id: "sync-canonical".into(),
                 rootfs_size: 64,
                 mem_size: 32,
             })
@@ -627,18 +635,18 @@ mod tests {
         forged.instance_dir = PathBuf::from("/must/not/be/opened");
 
         provider
-            .flush_dirty(&forged)
+            .sync_artifacts(&forged)
             .await
             .expect("provider uses canonical paths");
     }
 
     #[tokio::test]
-    async fn flush_rejects_incomplete_provider_slot() {
+    async fn sync_artifacts_rejects_incomplete_provider_slot() {
         let temp = tempfile::TempDir::new().unwrap();
         let provider = FileStorageProvider::new(temp.path().to_path_buf());
         let slot = provider
             .acquire(&AcquireOpts {
-                instance_id: "flush-incomplete".into(),
+                instance_id: "sync-incomplete".into(),
                 rootfs_size: 64,
                 mem_size: 32,
             })
@@ -647,7 +655,7 @@ mod tests {
         tokio::fs::remove_file(&slot.mem_diff_path).await.unwrap();
 
         let error = provider
-            .flush_dirty(&slot)
+            .sync_artifacts(&slot)
             .await
             .expect_err("missing artifact must fail the sweep item");
         assert!(error.to_string().contains("mem.diff"), "{error}");
