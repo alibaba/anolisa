@@ -22,11 +22,13 @@ AgentSight provides full-stack observability for AI Agents running on Linux:
 | OS | Linux |
 | Kernel | >= 5.8 (BTF support required) |
 | Privileges | root or CAP_BPF (for eBPF probes) |
-| Architecture | x86_64 / aarch64 |
+| ANOLISA raw package | Linux x86_64, system mode |
 
 > **macOS**: On macOS, AgentSight provides two commands — `trace` (trajectory collector that scans local JSONL session files, no eBPF) and `serve` (Dashboard viewer). All other eBPF-dependent commands are Linux-only.
 
 ## Installation
+
+Install the published component with the ANOLISA CLI:
 
 ```bash
 # Recommended (system mode required — eBPF needs root)
@@ -43,8 +45,27 @@ cd src/agentsight && make build-all
 
 ## Quick Start
 
+Use the systemd unit for a normal deployment. It runs eBPF tracing and the
+Dashboard together and starts the enforcer dependency in the required order:
+
 ```bash
-# Terminal 1: Start eBPF tracing (requires root)
+sudo systemctl enable --now agentsight.service
+sudo systemctl status agentsight.service
+```
+
+Open `http://localhost:7396` after the service becomes active. Enabling the
+main unit also keeps AgentSight available after a reboot.
+
+The bundled systemd launcher binds the Dashboard to `0.0.0.0`. Restrict port
+7396 with a firewall or security group before exposing the host to an
+untrusted network.
+
+For foreground troubleshooting, use two terminals and run both commands as
+the same user. The second command is not reached if both are entered
+sequentially because `agentsight trace` stays in the foreground:
+
+```bash
+# Terminal 1
 sudo agentsight trace
 
 # Terminal 2: Start Dashboard
@@ -68,6 +89,7 @@ sudo agentsight trace
 ```
 
 > Requires root privileges. Captures SSL/TLS traffic, process events, and file operations.
+> Stop `agentsight.service` before starting a second foreground tracer.
 
 ### agentsight serve — Start API & Dashboard
 
@@ -79,7 +101,9 @@ agentsight serve
 agentsight serve --host 0.0.0.0 --port 7396
 ```
 
-> Ensure your firewall allows access to port 7396 if accessing remotely.
+Run `serve` as the same user that runs `trace` so both commands resolve the
+same data directory. Binding to `0.0.0.0` exposes the Dashboard on every
+interface; restrict network access before using that form.
 
 #### Dashboard Access & Authentication
 

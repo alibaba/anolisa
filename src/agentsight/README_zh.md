@@ -286,6 +286,18 @@ sudo yum install agentsight
 RPM 是 Linux system 包。两个单元会随包安装，但默认不会启用；当两个单元都运行时，
 AgentSight 会排在 enforcer 之后启动。
 
+### 启动服务
+
+两种包安装都会让单元保持停止且不启用。准备开始采集时，再启动主服务。
+
+```bash
+sudo systemctl enable --now agentsight.service
+sudo systemctl status agentsight.service
+```
+
+主服务会一起运行 eBPF trace 和 Dashboard，并按顺序带起 enforcer 依赖。
+服务进入 active 状态后，打开 `http://localhost:7396`。
+
 ### 从源码构建
 
 ```bash

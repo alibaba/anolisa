@@ -22,11 +22,13 @@ AgentSight 为运行在 Linux 上的 AI Agent 提供全栈可观测能力：
 | OS | Linux |
 | 内核 | >= 5.8（需要 BTF 支持） |
 | 权限 | root 或 CAP_BPF（eBPF 探针） |
-| 架构 | x86_64 / aarch64 |
+| ANOLISA raw 包 | Linux x86_64，system mode |
 
 > **macOS**：AgentSight 在 macOS 上提供 `trace`（轨迹采集器，扫描本地 JSONL 会话文件，无 eBPF）和 `serve`（Dashboard 查看器）两个命令；其余依赖 eBPF 的命令仅 Linux 可用。
 
 ## 安装
+
+首选 ANOLISA CLI 安装已发布的组件。
 
 ```bash
 # 首选（需要 system mode — eBPF 依赖 root）
@@ -43,8 +45,26 @@ cd src/agentsight && make build-all
 
 ## 快速开始
 
+普通部署直接使用 systemd。这个服务会一起运行 eBPF trace 和
+Dashboard，并按顺序带起 enforcer 依赖。
+
 ```bash
-# 终端 1: 启动 eBPF 追踪（需要 root）
+sudo systemctl enable --now agentsight.service
+sudo systemctl status agentsight.service
+```
+
+服务进入 active 状态后，打开 `http://localhost:7396`。启用主服务后，
+主机重启也会自动拉起 AgentSight。
+
+systemd 自带的启动脚本会让 Dashboard 监听 `0.0.0.0`。主机接入不可信
+网络以前，请先通过防火墙或安全组限制 7396 端口。
+
+前台排查需要两个终端，两条命令也要使用同一个用户。
+`agentsight trace` 会一直占用前台，在同一个终端里顺序输入两条命令时，
+第二条命令不会开始运行。
+
+```bash
+# 终端 1
 sudo agentsight trace
 
 # 终端 2: 启动 Dashboard
@@ -68,6 +88,7 @@ sudo agentsight trace
 ```
 
 > 需要 root 权限。捕获 SSL/TLS 流量、进程事件和文件操作。
+> 如果 `agentsight.service` 正在运行，先停止服务，再启动第二个前台 tracer。
 
 ### agentsight serve — 启动 API 及 Dashboard
 
@@ -79,7 +100,9 @@ agentsight serve
 agentsight serve --host 0.0.0.0 --port 7396
 ```
 
-> 远程访问时请确保防火墙已放行对应端口。
+`serve` 和 `trace` 使用同一个运行用户时，才会解析到同一个数据目录。
+绑定 `0.0.0.0` 会将 Dashboard 暴露给所有网卡。在使用这种方式之前，
+需要先限制网络访问。
 
 #### Dashboard 访问与认证
 

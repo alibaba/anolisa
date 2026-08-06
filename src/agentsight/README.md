@@ -297,6 +297,20 @@ Installs:
 The RPM is a Linux system package. Its units are installed but not enabled by
 default; when both units run, AgentSight is ordered after the enforcer.
 
+### Start the Service
+
+Both package routes leave the units stopped and disabled. Start the main unit
+when you are ready to begin collection:
+
+```bash
+sudo systemctl enable --now agentsight.service
+sudo systemctl status agentsight.service
+```
+
+The main unit runs eBPF tracing and the Dashboard together and starts the
+enforcer dependency in the required order. Open `http://localhost:7396` after
+the service becomes active.
+
 ### Build from Source
 
 ```bash
