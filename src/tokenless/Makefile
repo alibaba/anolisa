@@ -267,9 +267,12 @@ dist: clean
 # non-destructive or staged installs, use `make install` directly.
 #
 # Pre-flight guards: the release target refuses to build on non-Linux
-# platforms and rejects Cargo configuration files (.cargo/config.toml,
-# $CARGO_HOME/config.toml) that override [build] target or target-dir,
-# since those would change the artifact paths the packaging step relies on.
+# platforms and rejects Cargo configuration overrides of [build] target or
+# target-dir — in $CARGO_HOME/config{,.toml}, in any .cargo/config{,.toml}
+# from the working directory up to the filesystem root (all locations Cargo
+# merges), and via CARGO_BUILD_TARGET / CARGO_TARGET_DIR /
+# CARGO_BUILD_TARGET_DIR environment variables — since those would change
+# the artifact paths the packaging step relies on.
 #
 # Build all binaries and package into a release tarball.
 # Produces dist/tokenless-$(VERSION)-$(ARCH).tar.gz containing:
@@ -291,21 +294,33 @@ release:
 	    exit 1; \
 	fi
 	@# [Guard] Cargo config files can override target/target-dir via config
-	@# rather than environment variables. Detect and reject those.
-	@CARGO_HOME="$${CARGO_HOME:-$$HOME/.cargo}"; \
-	for cfg in ".cargo/config.toml" ".cargo/config" \
-	           "$$CARGO_HOME/config.toml" "$$CARGO_HOME/config"; do \
-	    if [ -f "$$cfg" ]; then \
-	        if grep -qE '^\s*target\s*=' "$$cfg" 2>/dev/null; then \
-	            echo "ERROR: Cargo config $$cfg sets [build] target."; \
-	            echo "       release builds require the default target. Remove or rename $$cfg."; \
-	            exit 1; \
-	        fi; \
-	        if grep -qE '^\s*target-dir\s*=' "$$cfg" 2>/dev/null; then \
-	            echo "ERROR: Cargo config $$cfg sets [build] target-dir."; \
-	            echo "       release builds require the default target-dir. Remove or rename $$cfg."; \
-	            exit 1; \
-	        fi; \
+	@# rather than environment variables. Cargo merges config from
+	@# $CARGO_HOME plus every .cargo/config{,.toml} from the CWD up to the
+	@# filesystem root, so all those locations are scanned (target_dir, the
+	@# underscore spelling cargo also accepts, is rejected as well).
+	@CFG_FILES=""; \
+	CARGO_HOME_DIR="$${CARGO_HOME:-$$HOME/.cargo}"; \
+	for f in "$$CARGO_HOME_DIR/config.toml" "$$CARGO_HOME_DIR/config"; do \
+	    [ -f "$$f" ] && CFG_FILES="$$CFG_FILES$$f "; \
+	done; \
+	d=$$(pwd); \
+	while :; do \
+	    for f in "$$d/.cargo/config.toml" "$$d/.cargo/config"; do \
+	        [ -f "$$f" ] && CFG_FILES="$$CFG_FILES$$f "; \
+	    done; \
+	    case "$$d" in /) break ;; esac; \
+	    d=$${d%/*}; [ -n "$$d" ] || d=/; \
+	done; \
+	for cfg in $$CFG_FILES; do \
+	    if grep -qE '^[[:space:]]*target[[:space:]]*=' "$$cfg" 2>/dev/null; then \
+	        echo "ERROR: Cargo config $$cfg sets [build] target."; \
+	        echo "       release builds require the default target. Remove or rename $$cfg."; \
+	        exit 1; \
+	    fi; \
+	    if grep -qE '^[[:space:]]*target[-_]dir[[:space:]]*=' "$$cfg" 2>/dev/null; then \
+	        echo "ERROR: Cargo config $$cfg sets [build] target-dir."; \
+	        echo "       release builds require the default target-dir. Remove or rename $$cfg."; \
+	        exit 1; \
 	    fi; \
 	done
 	@# [Guard] Environment variable checks
@@ -320,6 +335,12 @@ release:
 	    echo "ERROR: CARGO_TARGET_DIR is set to $$CARGO_TARGET_DIR."; \
 	    echo "       release builds always read from target/release/ — custom target dirs are not supported."; \
 	    echo "       Unset CARGO_TARGET_DIR before running make release."; \
+	    exit 1; \
+	fi; \
+	if [ -n "$$CARGO_BUILD_TARGET_DIR" ]; then \
+	    echo "ERROR: CARGO_BUILD_TARGET_DIR is set to $$CARGO_BUILD_TARGET_DIR."; \
+	    echo "       release builds always read from target/release/ — custom target dirs are not supported."; \
+	    echo "       Unset CARGO_BUILD_TARGET_DIR before running make release."; \
 	    exit 1; \
 	fi; \
 	if [ "$(ARCH)" != "$$HOST_ARCH" ]; then \
@@ -344,13 +365,15 @@ release:
 	@STAGING=$$(mktemp -d); \
 	trap 'rm -rf "$$STAGING"' EXIT; \
 	if ! cargo install toon-format --version $(TOON_VER) --locked --root "$$STAGING" 2>"$$STAGING/install.err"; then \
-	    echo "WARNING: toon install failed — skipping (see $$STAGING/install.err)"; \
+	    echo "ERROR: toon install failed — a release tarball must bundle the toon from this build."; \
 	    cat "$$STAGING/install.err" >&2; \
+	    exit 1; \
 	elif [ ! -x "$$STAGING/bin/toon" ]; then \
-	    echo "WARNING: toon binary not found at staging path — skipping"; \
+	    echo "ERROR: toon binary not found at staging path $$STAGING/bin/toon — refusing to package."; \
+	    exit 1; \
 	else \
 	    install -m 0755 "$$STAGING/bin/toon" dist/tokenless-$(VERSION)/libexec/toon; \
-	    echo "==> Bundled toon $$(toon --version 2>/dev/null || echo $(TOON_VER))"; \
+	    echo "==> Bundled toon $$("$$STAGING/bin/toon" --version 2>/dev/null || echo $(TOON_VER))"; \
 	fi
 	tar -cf - -C $(ADAPTER_SRC_DIR) \
 	    --exclude='node_modules' \
@@ -376,17 +399,28 @@ release:
 # Helper target: verify no Cargo config overrides are active.
 # Can be called independently in CI.
 release-check-cargo-config:
-	@CARGO_HOME="$${CARGO_HOME:-$$HOME/.cargo}"; \
+	@# Scan every location Cargo merges: $CARGO_HOME plus all ancestor
+	@# .cargo/config{,.toml} from the CWD up to the filesystem root.
+	@CFG_FILES=""; \
+	CARGO_HOME_DIR="$${CARGO_HOME:-$$HOME/.cargo}"; \
+	for f in "$$CARGO_HOME_DIR/config.toml" "$$CARGO_HOME_DIR/config"; do \
+	    [ -f "$$f" ] && CFG_FILES="$$CFG_FILES$$f "; \
+	done; \
+	d=$$(pwd); \
+	while :; do \
+	    for f in "$$d/.cargo/config.toml" "$$d/.cargo/config"; do \
+	        [ -f "$$f" ] && CFG_FILES="$$CFG_FILES$$f "; \
+	    done; \
+	    case "$$d" in /) break ;; esac; \
+	    d=$${d%/*}; [ -n "$$d" ] || d=/; \
+	done; \
 	FAIL=0; \
-	for cfg in ".cargo/config.toml" ".cargo/config" \
-	           "$$CARGO_HOME/config.toml" "$$CARGO_HOME/config"; do \
-	    if [ -f "$$cfg" ]; then \
-	        if grep -qE '^\s*target\s*=' "$$cfg" 2>/dev/null; then \
-	            echo "FAIL: $$cfg sets [build] target"; FAIL=1; \
-	        fi; \
-	        if grep -qE '^\s*target-dir\s*=' "$$cfg" 2>/dev/null; then \
-	            echo "FAIL: $$cfg sets [build] target-dir"; FAIL=1; \
-	        fi; \
+	for cfg in $$CFG_FILES; do \
+	    if grep -qE '^[[:space:]]*target[[:space:]]*=' "$$cfg" 2>/dev/null; then \
+	        echo "FAIL: $$cfg sets [build] target"; FAIL=1; \
+	    fi; \
+	    if grep -qE '^[[:space:]]*target[-_]dir[[:space:]]*=' "$$cfg" 2>/dev/null; then \
+	        echo "FAIL: $$cfg sets [build] target-dir"; FAIL=1; \
 	    fi; \
 	done; \
 	if [ "$$FAIL" -ne 0 ]; then exit 1; fi; \
@@ -421,6 +455,19 @@ release-install-script:
 	@echo '# --- Preflight: ensure BINDIR parent is a directory ---' >> dist/tokenless-$(VERSION)/install.sh
 	@echo 'if [ -e "$$PREFIX/bin" ] && [ ! -d "$$PREFIX/bin" ]; then' >> dist/tokenless-$(VERSION)/install.sh
 	@echo '    echo "ERROR: $$PREFIX/bin exists but is not a directory"; exit 1' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'fi' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '# --- Preflight: rtk/toon entries must be replaceable by symlinks ---' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '# ln -sf cannot overwrite a directory; reject before writing anything.' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'for entry in "$$PREFIX/bin/rtk" "$$PREFIX/bin/toon"; do' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    if [ -d "$$entry" ] && [ ! -L "$$entry" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '        echo "ERROR: $$entry is a directory — remove it before installing."; exit 1' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    fi' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'done' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '# --- Preflight: an existing PREFIX must be writable ---' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'if [ -d "$$PREFIX" ] && [ ! -w "$$PREFIX" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    echo "ERROR: $$PREFIX is not writable — re-run with sudo or choose a writable PREFIX"; exit 1' >> dist/tokenless-$(VERSION)/install.sh
 	@echo 'fi' >> dist/tokenless-$(VERSION)/install.sh
 	@echo '' >> dist/tokenless-$(VERSION)/install.sh
 	@echo '# Path layout — keep in sync with Makefile' >> dist/tokenless-$(VERSION)/install.sh

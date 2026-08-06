@@ -784,7 +784,8 @@ jobs:
           INSTALL_SH=$(ls dist/tokenless-*/install.sh)
           grep -q 'PREFIX must be an absolute path' "$INSTALL_SH" || { echo "FAIL: missing PREFIX validation"; exit 1; }
           grep -q 'cp -r ' "$INSTALL_SH" || { echo "FAIL: missing cp -r"; exit 1; }
-          grep -qv 'cp -pr ' "$INSTALL_SH" || { echo "FAIL: still uses cp -pr"; exit 1; }
+          if grep -q 'cp -pr ' "$INSTALL_SH"; then echo "FAIL: still uses cp -pr"; exit 1; fi
+          grep -q 'is a directory' "$INSTALL_SH" || { echo "FAIL: missing bin-entry directory preflight"; exit 1; }
           grep -q 'COSH_EXT_DIR' "$INSTALL_SH" || { echo "FAIL: missing cosh extension deployment"; exit 1; }
           grep -q 'cosh-extension.json' "$INSTALL_SH" || { echo "FAIL: missing cosh-extension.json deployment"; exit 1; }
           echo "install.sh content validation: OK"
@@ -816,6 +817,28 @@ jobs:
           rm -f .cargo/config.toml
           rmdir .cargo 2>/dev/null || true
 
+          # Test Cargo config guard: config in a PARENT directory (Cargo merges
+          # every .cargo/config{,.toml} from the CWD up to the filesystem root)
+          mkdir -p ../.cargo
+          echo '[build]' > ../.cargo/config.toml
+          echo 'target = "x86_64-unknown-linux-gnu"' >> ../.cargo/config.toml
+          if make release 2>&1 | grep -q "Cargo config.*sets.*target"; then
+            echo "Cargo config parent-dir guard: OK"
+          else
+            echo "FAIL: Cargo config parent-dir guard not triggered"
+            exit 1
+          fi
+          rm -f ../.cargo/config.toml
+          rmdir ../.cargo 2>/dev/null || true
+
+          # Test env guard: CARGO_BUILD_TARGET_DIR also relocates artifacts
+          if CARGO_BUILD_TARGET_DIR=/tmp/custom-target make release 2>&1 | grep -q "CARGO_BUILD_TARGET_DIR is set"; then
+            echo "CARGO_BUILD_TARGET_DIR env guard: OK"
+          else
+            echo "FAIL: CARGO_BUILD_TARGET_DIR env guard not triggered"
+            exit 1
+          fi
+
           # Test install.sh PREFIX validation (relative path should fail)
           make release-install-script
           INSTALL_SH=$(ls dist/tokenless-*/install.sh)
@@ -833,6 +856,15 @@ jobs:
             echo "install.sh relative PREFIX rejection: OK"
           else
             echo "FAIL: install.sh did not reject relative PREFIX"
+            exit 1
+          fi
+          # Test preflight rejection when $PREFIX/bin/rtk is a directory
+          # (ln -sf cannot replace a directory; must fail before writing)
+          mkdir -p "$TMPDIR/rtkdir/usr/local/bin/rtk"
+          if PREFIX="$TMPDIR/rtkdir/usr/local" bash "$INSTALL_SH" 2>&1 | grep -q "is a directory"; then
+            echo "install.sh rtk-directory preflight rejection: OK"
+          else
+            echo "FAIL: install.sh did not reject a directory at bin/rtk"
             exit 1
           fi
           # Test successful install with absolute PREFIX
