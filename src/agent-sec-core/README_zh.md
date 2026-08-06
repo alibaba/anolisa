@@ -163,6 +163,41 @@ capability。
 | **Python3** | >= 3.6 |
 | **Rust** | >= 1.91（用于构建 linux-sandbox） |
 
+### 安装 AgentSecCore
+
+已发布的 ANOLISA raw 包支持 Linux x86_64，需要使用 0.2.17 或更高版本的 CLI。
+请根据 CLI 的安装来源完成更新。
+
+```bash
+# 通过 get.agentic-os.sh 安装的 CLI
+anolisa update self
+
+# 由 RPM 管理的 CLI
+sudo anolisa update self
+
+sudo anolisa --install-mode system install sec-core
+sudo anolisa status sec-core
+```
+
+`sec-core` 是 ANOLISA 中的组件名，RPM 继续使用包名 `agent-sec-core`。
+
+```bash
+sudo yum install agent-sec-core
+```
+
+从源码构建时，使用仓库级统一入口。
+
+```bash
+./scripts/build-all.sh --component sec-core
+```
+
+安装包会放置框架 adapter。请用拥有目标框架配置的用户启用 adapter。
+
+```bash
+anolisa adapter scan
+anolisa adapter enable sec-core openclaw
+```
+
 ### 执行安全工作流
 
 ```bash
@@ -197,12 +232,6 @@ make build-sandbox
 
 二进制文件输出到 `linux-sandbox/target/release/linux-sandbox`。
 
-### RPM 安装
-
-```bash
-sudo yum install agent-sec-core
-```
-
 ### 防止 Qwen Code 泄露 PII
 
 Qwen Code extension 默认以 `PII_CHECKER_MODE=observe` 扫描用户输入、工具
@@ -214,8 +243,8 @@ Qwen Code 在新 enabled 开关缺失时
 失败时仍保持 fail-open。
 
 ```bash
-export PII_CHECKER_MODE=block
-./qwen-code-extension/scripts/deploy.sh
+anolisa adapter enable sec-core qwencode
+PII_CHECKER_MODE=block qwen
 ```
 
 配置项及工具/模型后置输出的阻断边界见

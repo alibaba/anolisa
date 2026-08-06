@@ -165,6 +165,43 @@ variable to `true` does not re-enable a capability disabled in plugin configurat
 | **Python3** | >= 3.6 |
 | **Rust** | >= 1.91 (for building linux-sandbox) |
 
+### Install AgentSecCore
+
+The published ANOLISA raw package supports Linux x86_64 and requires CLI
+version 0.2.17 or later. Update the CLI through its installation owner:
+
+```bash
+# CLI installed by get.agentic-os.sh
+anolisa update self
+
+# RPM-owned CLI
+sudo anolisa update self
+
+sudo anolisa --install-mode system install sec-core
+sudo anolisa status sec-core
+```
+
+`sec-core` is the ANOLISA component name. The RPM keeps the package name
+`agent-sec-core`:
+
+```bash
+sudo yum install agent-sec-core
+```
+
+Developers building from source should use the repository-level entry point:
+
+```bash
+./scripts/build-all.sh --component sec-core
+```
+
+Package installation places the framework adapters. Enable one as the user
+who owns the target framework configuration:
+
+```bash
+anolisa adapter scan
+anolisa adapter enable sec-core openclaw
+```
+
 ### Run the Security Workflow
 
 ```bash
@@ -199,12 +236,6 @@ make build-sandbox
 
 The binary is output to `linux-sandbox/target/release/linux-sandbox`.
 
-### Install via RPM
-
-```bash
-sudo yum install agent-sec-core
-```
-
 ### Protect Qwen Code from PII leakage
 
 The Qwen Code extension scans user input, tool input/output, and final model output
@@ -216,8 +247,8 @@ legacy `PII_CHECKER_ENABLED` switch when the new enabled switch is absent. Faile
 are audit-only in Qwen Code 0.19.9, and scanner failures remain fail-open.
 
 ```bash
-export PII_CHECKER_MODE=block
-./qwen-code-extension/scripts/deploy.sh
+anolisa adapter enable sec-core qwencode
+PII_CHECKER_MODE=block qwen
 ```
 
 See [the Qwen Code extension guide](qwen-code-extension/README.md) for configuration and

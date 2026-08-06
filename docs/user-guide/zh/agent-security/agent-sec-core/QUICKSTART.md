@@ -17,21 +17,38 @@ AgentSecCore 是面向 AI Agent 的全本地安全内核，零 Token 消耗。�
 
 ## 前置条件
 
-- Linux（x86_64 或 aarch64）
+- ANOLISA raw 包支持 Linux x86_64
 - Python 3.11.6（固定版本）
+- ANOLISA CLI 0.2.17 或更高版本
 - 安装需要 root 权限（system mode）
 
 ## 安装
 
+先根据 CLI 的安装来源完成更新，再用 system mode 安装组件。
+
 ```bash
-# 首选（需要 system mode）
-sudo anolisa install agent-sec-core
+# 通过 get.agentic-os.sh 安装的 CLI
+anolisa update self
 
-# 备选（Alinux，需配置 YUM 源）
+# 由 RPM 管理的 CLI
+sudo anolisa update self
+
+sudo anolisa --install-mode system install sec-core
+sudo anolisa status sec-core
+agent-sec-cli --version
+```
+
+`sec-core` 是 ANOLISA 中的组件名。RPM 继续使用原有包名
+`agent-sec-core`。
+
+```bash
 sudo yum install agent-sec-core
+```
 
-# 源码编译（仅开发者）
-cd src/agent-sec-core && make build-cli
+从源码构建时，使用仓库级统一入口。
+
+```bash
+./scripts/build-all.sh --component sec-core
 ```
 
 ## 快速开始
@@ -204,9 +221,9 @@ Qwen Code extension 会扫描用户输入、工具输入、成功及失败的工
 脱敏 evidence。
 
 ```bash
-# 在可执行阻断的 hook 边界显式阻断 scanner deny verdict
-export PII_CHECKER_MODE=block
-./qwen-code-extension/scripts/deploy.sh
+# 启用扩展，再以阻断模式启动 Qwen Code
+anolisa adapter enable sec-core qwencode
+PII_CHECKER_MODE=block qwen
 ```
 
 | 环境变量 | 默认值 | 行为 |
@@ -309,16 +326,23 @@ agent-sec-cli events --summary
 
 ## Agent 框架集成
 
-### OpenClaw
-
-通过 deploy 脚本部署：
+安装包会放置可用的 adapter，但不会直接改动 Agent 框架的用户配置。
+请用拥有该框架配置的用户执行 adapter 命令。
 
 ```bash
-# 从已安装路径（RPM）
-/opt/agent-sec/openclaw-plugin/scripts/deploy.sh
+anolisa adapter scan
+anolisa adapter enable sec-core openclaw
+```
 
-# 从源码
-./openclaw-plugin/scripts/deploy.sh
+其他已打包的集成可以把 `openclaw` 换成 `hermes`、`qwencode`、`cosh`、
+`codex` 或 `qoder`。
+
+### OpenClaw
+
+使用 ANOLISA 启用 adapter。
+
+```bash
+anolisa adapter enable sec-core openclaw
 ```
 
 部署后配置：
@@ -336,14 +360,10 @@ openclaw gateway restart
 
 ### Hermes
 
-通过 deploy 脚本部署：
+使用 ANOLISA 启用 adapter。
 
 ```bash
-# 从已安装路径（RPM）
-/opt/agent-sec/hermes-plugin/scripts/deploy.sh
-
-# 从源码
-./hermes-plugin/scripts/deploy.sh
+anolisa adapter enable sec-core hermes
 ```
 
 插件配置位于 `~/.hermes/plugins/agent-sec-core-hermes-plugin/config.toml`：
@@ -371,14 +391,10 @@ policy = "ask"          # observe | warn | ask（默认）| block
 
 ### Qwen Code
 
-部署并启用 user scope 扩展：
+使用 ANOLISA 启用 user scope 扩展。
 
 ```bash
-# 从已安装路径（RPM）
-/opt/agent-sec/qwen-code-extension/scripts/deploy.sh
-
-# 从源码
-./qwen-code-extension/scripts/deploy.sh
+anolisa adapter enable sec-core qwencode
 ```
 
 同步 `PreToolUse` hook 只保护由模型触发的 Qwen Code `skill` Tool 调用，且仅覆盖
@@ -424,7 +440,13 @@ CLI 或密钥缺失、初始化失败、路径或 settings 不可访问或歧义
 
 ### Copilot Shell（cosh）
 
-cosh 扩展在 `make install` 或 RPM 安装时自动部署，无需手动启用 — cosh 启动时自动加载 hook。
+通过安装包部署时，在目标用户的配置中启用 adapter。
+
+```bash
+anolisa adapter enable sec-core cosh
+```
+
+cosh 启动时会加载 hook。
 
 扩展路径：
 - 用户安装：`~/.copilot-shell/extensions/agent-sec-core/`

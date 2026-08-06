@@ -6,7 +6,7 @@ Code Scanner hook 会在 shell 或代码工具执行前进行检查，并复用�
 
 ```bash
 # 首选（需要 system mode）
-sudo anolisa install agent-sec-core
+sudo anolisa --install-mode system install sec-core
 
 # 备选（已配置 YUM 源的 Alinux 系统）
 sudo yum install agent-sec-core

@@ -17,21 +17,39 @@ AgentSecCore is an all-local security kernel for AI Agents. It runs entirely on 
 
 ## Prerequisites
 
-- Linux (x86_64 or aarch64)
+- Linux x86_64 for the ANOLISA raw package
 - Python 3.11.6 (pinned)
+- ANOLISA CLI 0.2.17 or later
 - Root privileges for system-mode install
 
 ## Installation
 
+Update the CLI through its installation owner, then install the component in
+system mode:
+
 ```bash
-# Recommended (system mode required)
-sudo anolisa install agent-sec-core
+# CLI installed by get.agentic-os.sh
+anolisa update self
 
-# Alternative (Alinux, requires YUM repo)
+# RPM-owned CLI
+sudo anolisa update self
+
+sudo anolisa --install-mode system install sec-core
+sudo anolisa status sec-core
+agent-sec-cli --version
+```
+
+`sec-core` is the ANOLISA component name. The RPM keeps its existing package
+name, `agent-sec-core`:
+
+```bash
 sudo yum install agent-sec-core
+```
 
-# Source build (developers only)
-cd src/agent-sec-core && make build-cli
+Developers building from source should use the repository-level entry point:
+
+```bash
+./scripts/build-all.sh --component sec-core
 ```
 
 ## Quick Start
@@ -206,9 +224,9 @@ default; raw scan content is passed to `scan-pii` only through stdin, and notice
 only redacted evidence.
 
 ```bash
-# Explicitly block scanner deny verdicts at enforceable hook boundaries
-export PII_CHECKER_MODE=block
-./qwen-code-extension/scripts/deploy.sh
+# Enable the extension, then start Qwen Code with blocking enabled
+anolisa adapter enable sec-core qwencode
+PII_CHECKER_MODE=block qwen
 ```
 
 | Environment variable | Default | Behavior |
@@ -315,16 +333,24 @@ agent-sec-cli events --summary
 
 ## Agent Framework Integration
 
-### OpenClaw
-
-Deploy via script:
+Package installation places the available adapters but does not change an
+agent framework's user configuration. Run adapter commands as the user who
+owns that framework's configuration:
 
 ```bash
-# From installed path (RPM)
-/opt/agent-sec/openclaw-plugin/scripts/deploy.sh
+anolisa adapter scan
+anolisa adapter enable sec-core openclaw
+```
 
-# From source
-./openclaw-plugin/scripts/deploy.sh
+Replace `openclaw` with `hermes`, `qwencode`, `cosh`, `codex`, or `qoder` for
+the other packaged integrations.
+
+### OpenClaw
+
+Enable the adapter with ANOLISA:
+
+```bash
+anolisa adapter enable sec-core openclaw
 ```
 
 After deployment, configure:
@@ -342,14 +368,10 @@ openclaw gateway restart
 
 ### Hermes
 
-Deploy via script:
+Enable the adapter with ANOLISA:
 
 ```bash
-# From installed path (RPM)
-/opt/agent-sec/hermes-plugin/scripts/deploy.sh
-
-# From source
-./hermes-plugin/scripts/deploy.sh
+anolisa adapter enable sec-core hermes
 ```
 
 Plugin config at `~/.hermes/plugins/agent-sec-core-hermes-plugin/config.toml`:
@@ -377,14 +399,10 @@ policy = "ask"          # observe | warn | ask (default) | block
 
 ### Qwen Code
 
-Deploy and enable the user-scoped extension:
+Enable the user-scoped extension with ANOLISA:
 
 ```bash
-# From installed path (RPM)
-/opt/agent-sec/qwen-code-extension/scripts/deploy.sh
-
-# From source
-./qwen-code-extension/scripts/deploy.sh
+anolisa adapter enable sec-core qwencode
 ```
 
 The synchronous `PreToolUse` hook protects only model-triggered Qwen Code
@@ -437,7 +455,13 @@ preflight, background scan, cache, or automatic configuration repair.
 
 ### Copilot Shell (cosh)
 
-The cosh extension is installed automatically during `make install` or via RPM. No manual enablement required — hooks are loaded at cosh startup.
+For a package install, enable the adapter in the target user's configuration:
+
+```bash
+anolisa adapter enable sec-core cosh
+```
+
+Hooks are loaded when cosh starts.
 
 Extension path:
 - User install: `~/.copilot-shell/extensions/agent-sec-core/`
