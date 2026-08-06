@@ -25,7 +25,7 @@
 //!    directory wins.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::{self, JoinHandle};
@@ -38,7 +38,7 @@ use super::claim::{AdapterClaim, ClaimStatus};
 use super::driver::{
     AdapterCondition, AdapterConditionKind, AdapterOps, AdapterStatusReport, AdapterSummary,
     CliOutput, ConditionStatus, DisableReport, DriverCtx, DriverPlan, EnableProgress,
-    FrameworkCommand, HostEnv,
+    FrameworkCommand, FrameworkRpcSession, HostEnv,
 };
 use super::registry::DriverRegistry;
 use crate::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
@@ -2363,6 +2363,12 @@ impl AdapterOps for ManagerOps {
         Ok(output)
     }
 
+    fn run_framework_rpc(&self, session: FrameworkRpcSession) -> Result<CliOutput, AdapterError> {
+        let output = run_rpc_capture(&session, JSON_OUTPUT_CAP)?;
+        self.record(&session.command, &output);
+        Ok(output)
+    }
+
     fn copy_tree(&self, src: &Path, dst: &Path) -> Result<(), AdapterError> {
         validate_ops_path(src, &self.allowed_roots)?;
         validate_ops_path(dst, &self.allowed_roots)?;
@@ -2728,6 +2734,269 @@ fn run_capture_with_stdout_cap(
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
     })
+}
+
+/// Drive a line-delimited JSON-RPC session, holding the server's stdin open
+/// until `session.expected_responses` id-bearing replies have been read (or
+/// the command timeout elapses), then closing it so the child exits.
+///
+/// stdout is read line-by-line on a worker thread rather than drained to EOF,
+/// because the close decision depends on what has already been answered — a
+/// server that only exits once its stdin closes would otherwise deadlock
+/// against a drain-to-EOF reader.
+fn run_rpc_capture(
+    session: &FrameworkRpcSession,
+    stdout_cap: usize,
+) -> Result<CliOutput, AdapterError> {
+    let cmd = &session.command;
+    let mut command = Command::new(&cmd.program);
+    command
+        .args(&cmd.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    for key in &cmd.env_remove {
+        command.env_remove(key);
+    }
+    for (key, value) in &cmd.env_set {
+        command.env(key, value);
+    }
+    if !cmd.path_prepend.is_empty() {
+        command.env("PATH", prepend_path(&cmd.path_prepend));
+    }
+
+    let mut child = crate::process::spawn_retry_etxtbsy(&mut command).map_err(|source| {
+        AdapterError::FrameworkCli {
+            program: cmd.program.clone(),
+            reason: format!("failed to spawn: {source}"),
+        }
+    })?;
+
+    let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(AdapterError::FrameworkCli {
+            program: cmd.program.clone(),
+            reason: "failed to open child stdio pipes".to_string(),
+        });
+    };
+    let stderr_handle = child.stderr.take().map(|r| spawn_drain(r, OUTPUT_CAP));
+
+    // The writer thread owns stdin and only drops it (signalling EOF) once
+    // `close_tx` is dropped by this thread.
+    let (close_tx, close_rx) = std::sync::mpsc::channel::<()>();
+    let payload: Vec<u8> = session
+        .requests
+        .iter()
+        .flat_map(|line| {
+            line.as_bytes()
+                .iter()
+                .copied()
+                .chain(std::iter::once(b'\n'))
+        })
+        .collect();
+    let writer = thread::spawn(move || {
+        let mut stdin = stdin;
+        let result = stdin.write_all(&payload).and_then(|()| stdin.flush());
+        // Park until the reader is done; `recv` returns Err on sender drop.
+        let _ = close_rx.recv();
+        result
+    });
+
+    enum RpcStdoutEvent {
+        Line(String),
+        LimitExceeded,
+        ReadFailed(String),
+    }
+
+    // A rendezvous channel prevents the reader from queuing output faster
+    // than this thread can account for it.
+    let (line_tx, line_rx) = std::sync::mpsc::sync_channel::<RpcStdoutEvent>(0);
+    let reader = thread::spawn(move || {
+        // Read at most one byte beyond the cap so overflow is detectable
+        // without allocating an arbitrarily large unterminated JSONL line.
+        let limit = (stdout_cap as u64).saturating_add(1);
+        let mut reader = std::io::BufReader::new(stdout).take(limit);
+        let mut total = 0usize;
+        let mut drain_after_disconnect = false;
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(read) => {
+                    total = total.saturating_add(read);
+                    if total > stdout_cap {
+                        drain_after_disconnect =
+                            line_tx.send(RpcStdoutEvent::LimitExceeded).is_err();
+                        break;
+                    }
+                    if line.ends_with('\n') {
+                        line.pop();
+                        if line.ends_with('\r') {
+                            line.pop();
+                        }
+                    }
+                    if line_tx.send(RpcStdoutEvent::Line(line)).is_err() {
+                        drain_after_disconnect = true;
+                        break;
+                    }
+                }
+                Err(source) => {
+                    let _ = line_tx.send(RpcStdoutEvent::ReadFailed(source.to_string()));
+                    break;
+                }
+            }
+        }
+        if drain_after_disconnect {
+            let mut reader = reader.into_inner();
+            let mut chunk = [0u8; 8192];
+            while reader.read(&mut chunk).is_ok_and(|read| read != 0) {
+                // Keep draining after the RPC exchange completes so the child
+                // can flush and exit without retaining any additional output.
+            }
+        }
+    });
+
+    let start = Instant::now();
+    let mut kept = String::new();
+    let mut answered = 0usize;
+    let mut timed_out = false;
+    let mut stdout_failure = None;
+    while answered < session.expected_responses {
+        let Some(remaining) = cmd.timeout.checked_sub(start.elapsed()) else {
+            timed_out = true;
+            break;
+        };
+        match line_rx.recv_timeout(remaining) {
+            Ok(RpcStdoutEvent::Line(line)) => {
+                if kept.len().saturating_add(line.len()).saturating_add(1) > stdout_cap {
+                    stdout_failure = Some(format!(
+                        "app-server stdout exceeded the {stdout_cap}-byte limit"
+                    ));
+                    break;
+                }
+                if is_rpc_response(&line) {
+                    answered += 1;
+                }
+                kept.push_str(&line);
+                kept.push('\n');
+            }
+            Ok(RpcStdoutEvent::LimitExceeded) => {
+                stdout_failure = Some(format!(
+                    "app-server stdout exceeded the {stdout_cap}-byte limit"
+                ));
+                break;
+            }
+            Ok(RpcStdoutEvent::ReadFailed(reason)) => {
+                stdout_failure = Some(format!("failed to read app-server stdout: {reason}"));
+                break;
+            }
+            // The server closed stdout (or died) before answering.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                timed_out = true;
+                break;
+            }
+        }
+    }
+
+    // Unblock a reader waiting to publish another event. It will drain the
+    // pipe without retaining output once all expected replies are complete.
+    drop(line_rx);
+    // Closing stdin lets a well-behaved server flush and exit. If the
+    // exchange is incomplete, terminate the child before joining the writer:
+    // it may be blocked in `write_all` on a full pipe that the server stopped
+    // reading, and waiting for it first would defeat the session timeout.
+    drop(close_tx);
+    let incomplete = answered < session.expected_responses || stdout_failure.is_some();
+    let mut status = if incomplete {
+        match child.try_wait() {
+            Ok(Some(status)) => Some(status),
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                child.wait().ok()
+            }
+        }
+    } else {
+        None
+    };
+    let write_result = writer.join();
+    if !incomplete {
+        status = wait_bounded(&mut child, start, cmd.timeout);
+        if status.is_none() {
+            timed_out = true;
+        }
+    }
+    let _ = reader.join();
+    let mut stderr = String::from_utf8_lossy(&collect_drain(stderr_handle)).into_owned();
+
+    // A failed stdin write is a symptom, not the diagnosis: a server that does
+    // not implement the subcommand exits before the request lands, and EPIPE
+    // would mask its exit code and stderr. Note it and let the caller judge
+    // the exchange by the replies it did or did not get.
+    let write_note = match write_result {
+        Ok(Err(source)) => Some(format!("failed to write server stdin: {source}")),
+        Err(_) => Some("stdin writer thread panicked".to_string()),
+        Ok(Ok(())) => None,
+    };
+    if let Some(note) = write_note.filter(|_| answered < session.expected_responses) {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str(&note);
+    }
+
+    if let Some(reason) = stdout_failure {
+        return Err(AdapterError::FrameworkCli {
+            program: cmd.program.clone(),
+            reason,
+        });
+    }
+
+    Ok(CliOutput {
+        status: status.and_then(|s| s.code()),
+        timed_out,
+        stdout: kept,
+        stderr,
+    })
+}
+
+/// Whether a server stdout line is a JSON-RPC *response* (carries an `id`)
+/// rather than a notification. Only responses count toward the session's
+/// expected reply count.
+fn is_rpc_response(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|value| value.get("id").cloned())
+        .is_some_and(|id| !id.is_null())
+}
+
+/// Reap `child` within what remains of `timeout` measured from `start`,
+/// killing it on expiry. Returns `None` when the child had to be killed.
+fn wait_bounded(
+    child: &mut std::process::Child,
+    start: Instant,
+    timeout: Duration,
+) -> Option<std::process::ExitStatus> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 /// Build a `PATH` value with `prepend` dirs in front of the current one.
@@ -3791,6 +4060,235 @@ mod tests {
         };
         let err = run_capture(&cmd).expect_err("spawn must fail");
         assert!(matches!(err, AdapterError::FrameworkCli { .. }));
+    }
+
+    // -- run_rpc_capture ------------------------------------------------------
+
+    /// A server that answers one line per request while stdin stays open, then
+    /// exits on EOF — the shape `codex app-server --stdio` has.
+    fn echo_rpc_session(
+        requests: Vec<String>,
+        expected: usize,
+        timeout: Duration,
+    ) -> FrameworkRpcSession {
+        FrameworkRpcSession {
+            command: FrameworkCommand {
+                program: "/bin/sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    r#"while IFS= read -r line; do
+                         id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+                         printf '{"method":"notify"}\n'
+                         printf '{"id":%s,"result":{}}\n' "$id"
+                       done"#
+                        .to_string(),
+                ],
+                stdin: None,
+                env_set: Vec::new(),
+                env_remove: Vec::new(),
+                path_prepend: Vec::new(),
+                timeout,
+            },
+            requests,
+            expected_responses: expected,
+        }
+    }
+
+    #[test]
+    fn run_rpc_capture_collects_every_reply_and_reaps_the_server() {
+        // The point of the RPC runner: a request written after `initialize`
+        // still gets answered, because stdin is held open until the replies
+        // arrive. Writing both lines and closing stdin — what
+        // `FrameworkCommand::stdin` does — loses the second one.
+        let session = echo_rpc_session(
+            vec![
+                r#"{"jsonrpc":"2.0","id":0,"method":"initialize"}"#.to_string(),
+                r#"{"jsonrpc":"2.0","id":1,"method":"hooks/list"}"#.to_string(),
+            ],
+            2,
+            Duration::from_secs(10),
+        );
+        let out = run_rpc_capture(&session, JSON_OUTPUT_CAP).expect("session runs");
+        assert!(!out.timed_out, "server must exit once stdin closes");
+        assert_eq!(out.status, Some(0));
+        let ids: Vec<Option<u64>> = out
+            .stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|msg| msg.get("id").is_some())
+            .map(|msg| msg["id"].as_u64())
+            .collect();
+        assert_eq!(ids, vec![Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn run_rpc_capture_times_out_on_a_silent_server() {
+        let session = FrameworkRpcSession {
+            command: FrameworkCommand {
+                program: "/bin/sh".to_string(),
+                // Replace the shell so killing the child also closes the
+                // captured pipes; the app-server itself is likewise the
+                // direct child in production.
+                args: vec!["-c".to_string(), "exec sleep 30".to_string()],
+                stdin: None,
+                env_set: Vec::new(),
+                env_remove: Vec::new(),
+                path_prepend: Vec::new(),
+                timeout: Duration::from_millis(150),
+            },
+            requests: vec![r#"{"jsonrpc":"2.0","id":1,"method":"hooks/list"}"#.to_string()],
+            expected_responses: 1,
+        };
+        let out = run_rpc_capture(&session, JSON_OUTPUT_CAP).expect("session runs");
+        assert!(out.timed_out, "a server that never answers must time out");
+        assert!(out.stdout.is_empty());
+    }
+
+    #[test]
+    fn run_rpc_capture_timeout_unblocks_a_full_stdin_pipe() {
+        let session = FrameworkRpcSession {
+            command: FrameworkCommand {
+                program: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "while :; do :; done".to_string()],
+                stdin: None,
+                env_set: Vec::new(),
+                env_remove: Vec::new(),
+                path_prepend: Vec::new(),
+                timeout: Duration::from_millis(150),
+            },
+            // Larger than ordinary pipe capacity: a server that never reads
+            // stdin leaves the writer blocked until the child is killed.
+            requests: vec!["x".repeat(2 * 1024 * 1024)],
+            expected_responses: 1,
+        };
+        let started = Instant::now();
+        let out = run_rpc_capture(&session, JSON_OUTPUT_CAP).expect("session runs");
+        assert!(out.timed_out);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "writer join exceeded the bounded timeout: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn run_rpc_capture_returns_when_the_server_dies_early() {
+        // A codex too old to know `app-server` exits immediately. The runner
+        // must return the (empty) output rather than block for the timeout, so
+        // the driver can report the missing capability.
+        let session = FrameworkRpcSession {
+            command: FrameworkCommand {
+                program: "/bin/sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    "echo 'unrecognized subcommand' >&2; exit 2".to_string(),
+                ],
+                stdin: None,
+                env_set: Vec::new(),
+                env_remove: Vec::new(),
+                path_prepend: Vec::new(),
+                timeout: Duration::from_secs(30),
+            },
+            requests: vec![r#"{"jsonrpc":"2.0","id":1,"method":"hooks/list"}"#.to_string()],
+            expected_responses: 1,
+        };
+        let out = run_rpc_capture(&session, JSON_OUTPUT_CAP).expect("session runs");
+        assert!(!out.timed_out, "must not wait out the timeout");
+        assert_eq!(out.status, Some(2));
+        assert!(out.stderr.contains("unrecognized subcommand"));
+    }
+
+    #[test]
+    fn run_rpc_capture_rejects_stdout_over_limit() {
+        let session = FrameworkRpcSession {
+            command: FrameworkCommand {
+                program: "/bin/sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    r#"IFS= read -r _; printf '{"id":1,"result":{"padding":"xxxxxxxx"}}\n'"#
+                        .to_string(),
+                ],
+                stdin: None,
+                env_set: Vec::new(),
+                env_remove: Vec::new(),
+                path_prepend: Vec::new(),
+                timeout: Duration::from_secs(10),
+            },
+            requests: vec![r#"{"jsonrpc":"2.0","id":1,"method":"hooks/list"}"#.to_string()],
+            expected_responses: 1,
+        };
+        let error = run_rpc_capture(&session, 16).expect_err("oversized response must fail");
+        assert!(error.to_string().contains("exceeded the 16-byte limit"));
+    }
+
+    #[test]
+    fn run_rpc_capture_rejects_unterminated_stdout_over_limit() {
+        let session = FrameworkRpcSession {
+            command: FrameworkCommand {
+                program: "/bin/sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    "IFS= read -r _; printf '12345'; exec sleep 30".to_string(),
+                ],
+                stdin: None,
+                env_set: Vec::new(),
+                env_remove: Vec::new(),
+                path_prepend: Vec::new(),
+                timeout: Duration::from_secs(10),
+            },
+            requests: vec![r#"{"jsonrpc":"2.0","id":1,"method":"hooks/list"}"#.to_string()],
+            expected_responses: 1,
+        };
+        let started = Instant::now();
+        let error = run_rpc_capture(&session, 4).expect_err("unterminated stdout must fail");
+        assert!(error.to_string().contains("exceeded the 4-byte limit"));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "overflow handling exceeded the bounded timeout: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn rpc_response_detection_ignores_notifications() {
+        assert!(is_rpc_response(r#"{"id":1,"result":{}}"#));
+        assert!(is_rpc_response(r#"{"id":1,"error":{"code":-1}}"#));
+        assert!(!is_rpc_response(r#"{"method":"configWarning"}"#));
+        assert!(!is_rpc_response(r#"{"id":null,"result":{}}"#));
+        assert!(!is_rpc_response("not json at all"));
+    }
+
+    #[test]
+    fn default_ops_refuse_rpc_sessions_rather_than_degrading() {
+        struct PlainOps;
+        impl AdapterOps for PlainOps {
+            fn run_framework_cli(&self, _cmd: FrameworkCommand) -> Result<CliOutput, AdapterError> {
+                unreachable!("not exercised")
+            }
+            fn copy_tree(&self, _src: &Path, _dst: &Path) -> Result<(), AdapterError> {
+                unreachable!("not exercised")
+            }
+            fn copy_file(&self, _src: &Path, _dst: &Path) -> Result<(), AdapterError> {
+                unreachable!("not exercised")
+            }
+            fn remove_tree(&self, _path: &Path) -> Result<bool, AdapterError> {
+                unreachable!("not exercised")
+            }
+            fn write_file(&self, _path: &Path, _contents: &[u8]) -> Result<(), AdapterError> {
+                unreachable!("not exercised")
+            }
+            fn create_symlink(&self, _link: &Path, _target: &Path) -> Result<(), AdapterError> {
+                unreachable!("not exercised")
+            }
+            fn read_file(&self, _path: &Path) -> Result<Option<Vec<u8>>, AdapterError> {
+                unreachable!("not exercised")
+            }
+        }
+        let session = echo_rpc_session(Vec::new(), 0, Duration::from_secs(1));
+        let err = PlainOps
+            .run_framework_rpc(session)
+            .expect_err("the default must refuse");
+        assert!(err.to_string().contains("JSON-RPC"), "{err}");
     }
 
     // -- declared_adapter_type ------------------------------------------------

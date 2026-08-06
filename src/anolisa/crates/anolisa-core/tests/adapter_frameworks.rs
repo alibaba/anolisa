@@ -495,6 +495,16 @@ fn stage_codex_bundle(root: &Path) {
     std::fs::write(root.join("README.md"), b"codex plugin\n").expect("readme");
 }
 
+fn stage_codex_hook_bundle(root: &Path) {
+    stage_codex_bundle(root);
+    std::fs::create_dir_all(root.join("hooks")).expect("hooks directory");
+    std::fs::write(
+        root.join("hooks/hooks.json"),
+        br#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"true"}]}]}}"#,
+    )
+    .expect("hooks.json");
+}
+
 /// Fake `codex` CLI: appends each argv line to `$FAKE_CODEX_LOG` and keeps
 /// marketplace/plugin registries under `$FAKE_CODEX_STATE` so `list`
 /// reflects prior `add`/`remove` calls.
@@ -505,6 +515,27 @@ fn write_fake_codex(dir: &Path) -> PathBuf {
         r#"#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_CODEX_LOG"
 st="$FAKE_CODEX_STATE"; mkdir -p "$st" 2>/dev/null
+if [ "$1" = "app-server" ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"method":"initialize"'*) printf '{"id":0,"result":{}}\n' ;;
+      *'"method":"hooks/list"'*)
+        if [ "$FAKE_CODEX_FAIL" = "hooks" ]; then
+          printf '{"id":1,"result":{"data":[{"hooks":[],"warnings":[],"errors":[]}]}}\n'
+        else
+          printf '{"id":1,"result":{"data":[{"hooks":[{"key":"tokenless@anolisa-tokenless:hooks/hooks.json:pre_tool_use:0:0","currentHash":"sha256:trusted","source":"plugin","pluginId":"tokenless@anolisa-tokenless","isManaged":false}],"warnings":[],"errors":[]}]}}\n'
+        fi ;;
+      *'"method":"config/batchWrite"'*)
+        printf '%s\n' "$line" > "$st/trust-request"
+        if [ "$FAKE_CODEX_FAIL" = "write-overridden" ]; then
+          printf '{"id":1,"result":{"status":"okOverridden","overriddenMetadata":{"message":"hooks.state is managed","overridingLayer":{"name":"sessionFlags","version":"test"},"effectiveValue":{}}}}\n'
+        else
+          printf '{"id":1,"result":{"status":"ok"}}\n'
+        fi ;;
+    esac
+  done
+  exit 0
+fi
 if [ "$1" = "plugin" ] && [ "$2" = "marketplace" ]; then
   case "$3" in
     add)
@@ -629,6 +660,79 @@ fn codex_enable_records_argv_and_builds_marketplace() {
             .lines()
             .any(|l| l == "plugin marketplace remove anolisa-tokenless"),
         "disable must run `plugin marketplace remove`: {log_text}"
+    );
+}
+
+#[test]
+fn codex_enable_trusts_declared_hooks() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_hook_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+
+    world
+        .manager()
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable");
+
+    let request: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(world.prefix.join("codex-state/trust-request"))
+            .expect("trust request"),
+    )
+    .expect("valid request");
+    assert_eq!(request["method"], "config/batchWrite");
+    assert_eq!(
+        request["params"]["edits"][0]["value"]["tokenless@anolisa-tokenless:hooks/hooks.json:pre_tool_use:0:0"]
+            ["trusted_hash"],
+        "sha256:trusted"
+    );
+}
+
+#[test]
+fn codex_enable_fails_when_declared_hooks_are_not_discovered() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_hook_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+    guard.set("FAKE_CODEX_FAIL", Path::new("hooks"));
+
+    let error = world
+        .manager()
+        .enable(COMPONENT, Some("codex"), false)
+        .expect_err("missing hooks must fail enable");
+    assert!(error.to_string().contains("reported no hooks"), "{error}");
+}
+
+#[test]
+fn codex_enable_fails_when_hook_trust_is_overridden() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_hook_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+    guard.set("FAKE_CODEX_FAIL", Path::new("write-overridden"));
+
+    let error = world
+        .manager()
+        .enable(COMPONENT, Some("codex"), false)
+        .expect_err("overridden hook trust must fail enable");
+    assert!(
+        error.to_string().contains("sessionFlags"),
+        "overriding layer must be actionable: {error}"
     );
 }
 

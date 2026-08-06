@@ -11,6 +11,9 @@
 //! codex plugin add <plugin>@<marketplace>
 //! ```
 //!
+//! After installation, hook-bearing plugins are trusted through Codex's
+//! app-server so they also work in non-interactive `codex exec` sessions.
+//!
 //! `disable` reverses this via `codex plugin remove` /
 //! `codex plugin marketplace remove` and then removes the marketplace
 //! directory (which contains the symlink). All CLI, file, and symlink IO
@@ -18,6 +21,8 @@
 //!
 //! Env contract: `CODEX_BIN` overrides the executable (tests point it at a
 //! fake CLI); `XDG_DATA_HOME` relocates the marketplace base.
+
+mod hook_trust;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -146,7 +151,7 @@ impl FrameworkDriver for CodexDriver {
         let layout = MarketplaceLayout::resolve(bundle, ctx)?;
         let add_cmd = build_marketplace_add_cmd(&layout.root);
         let plugin_cmd = build_plugin_add_cmd(&layout.plugin_ref());
-        let actions = vec![
+        let mut actions = vec![
             format!(
                 "write codex marketplace manifest {}",
                 layout.manifest().display()
@@ -159,6 +164,12 @@ impl FrameworkDriver for CodexDriver {
             format!("register codex marketplace '{}'", layout.marketplace),
             format!("add codex plugin '{}'", layout.plugin_ref()),
         ];
+        if bundle_declares_hooks(bundle, ctx) {
+            actions.push(format!(
+                "trust hooks declared by codex plugin '{}'",
+                layout.plugin_ref()
+            ));
+        }
         Ok(DriverPlan {
             framework: self.name().to_string(),
             component: ctx.component.clone(),
@@ -280,6 +291,12 @@ impl FrameworkDriver for CodexDriver {
                 program,
                 reason: cli_failure_reason("plugin add", &output),
             });
+        }
+        if bundle_declares_hooks_for_root(
+            &claim.resource_root,
+            ctx.declared_bundle_entry.as_deref(),
+        ) {
+            establish_hook_trust(ctx, &layout)?;
         }
         Ok(())
     }
@@ -574,6 +591,37 @@ impl MarketplaceLayout {
     fn plugin_ref(&self) -> String {
         format!("{}@{}", self.plugin, self.marketplace)
     }
+}
+
+fn bundle_declares_hooks(bundle: &AdapterBundle, ctx: &DriverCtx) -> bool {
+    bundle_declares_hooks_for_root(&bundle.resource_root, ctx.declared_bundle_entry.as_deref())
+}
+
+fn bundle_declares_hooks_for_root(resource_root: &Path, declared_entry: Option<&str>) -> bool {
+    hook_trust::bundle_declares_hooks(
+        resource_root,
+        &resource_root.join(declared_entry.unwrap_or(CODEX_PLUGIN_MANIFEST)),
+    )
+}
+
+/// Trust only the hooks Codex attributes to the plugin just installed.
+fn establish_hook_trust(ctx: &DriverCtx, layout: &MarketplaceLayout) -> Result<(), AdapterError> {
+    let program = codex_bin();
+    let output = ctx.ops.run_framework_rpc(hook_trust::list_session(
+        program.clone(),
+        CLI_TIMEOUT,
+        &layout.root,
+    ))?;
+    let Some(state) = hook_trust::plugin_trust_state(&program, &output, &layout.plugin_ref())?
+    else {
+        return Ok(());
+    };
+    let output = ctx.ops.run_framework_rpc(hook_trust::write_session(
+        program.clone(),
+        CLI_TIMEOUT,
+        state,
+    ))?;
+    hook_trust::confirm_write(&program, &output)
 }
 
 // ---------------------------------------------------------------------------
