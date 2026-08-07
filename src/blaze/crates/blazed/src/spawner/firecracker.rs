@@ -195,7 +195,12 @@ impl FirecrackerSpawner {
             None
         };
 
-        let mut command = build_launch_command(&request.binary_path, network.as_ref(), &api_socket);
+        let mut command = build_launch_command(
+            &request.binary_path,
+            network.as_ref(),
+            &api_socket,
+            request.instance_id,
+        );
         let config_path = match write_vm_config(
             &self.images_dir,
             &request,
@@ -629,6 +634,7 @@ fn build_launch_command(
     binary: &Path,
     network: Option<&NetworkSlot>,
     api_socket: &Path,
+    instance_id: Uuid,
 ) -> Command {
     #[cfg(target_os = "linux")]
     let mut command = if let Some(network) = network {
@@ -660,14 +666,7 @@ fn build_launch_command(
         Command::new(binary)
     };
     command.arg("--api-sock").arg(api_socket);
-    command.arg("--id").arg(format!(
-        "fc-{}",
-        api_socket
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(std::ffi::OsStr::to_str)
-            .unwrap_or("blaze")
-    ));
+    command.arg("--id").arg(format!("fc-{instance_id}"));
     command
 }
 
@@ -986,6 +985,25 @@ mod tests {
     fn version_parser_rejects_missing_or_ambiguous_version() {
         assert!(parse_backend_version(b"Firecracker exiting successfully\n").is_err());
         assert!(parse_backend_version(b"Firecracker v1.15.0\nFirecracker v1.16.0\n").is_err());
+    }
+
+    #[test]
+    fn launch_command_uses_the_sandbox_uuid_as_the_backend_id() {
+        let instance_id = Uuid::new_v4();
+        let command = build_launch_command(
+            Path::new("/usr/bin/firecracker"),
+            None,
+            Path::new("/proc/self/fd/17/api.sock"),
+            instance_id,
+        );
+        let arguments = command.as_std().get_args().collect::<Vec<_>>();
+        let id_index = arguments
+            .iter()
+            .position(|argument| *argument == "--id")
+            .expect("--id argument");
+        let expected = format!("fc-{instance_id}");
+
+        assert_eq!(arguments.get(id_index + 1), Some(&expected.as_ref()));
     }
 
     #[test]

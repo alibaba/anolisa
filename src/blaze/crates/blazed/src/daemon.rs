@@ -30,6 +30,7 @@ use crate::spawner::{
     BubblewrapSpawner, DynSpawner, FirecrackerSpawner, MockSpawner, SpawnerRegistry,
 };
 use crate::state::ServerState;
+use crate::state_store::StateStore;
 
 /// Boot the daemon: load config + policies, prepare state directories,
 /// bind the API socket, and run the accept loop until SIGTERM/SIGINT.
@@ -82,6 +83,9 @@ async fn run_loaded_config(loaded: LoadedDaemonConfig) -> Result<()> {
     let policy_load = template_roots.policy_load_disposition();
     let template_catalog = TemplateCatalog::open_validated(&config.template, template_roots)?;
     ensure_dirs(&config)?;
+    // Retain the accepted state-root object before policy, backend, and
+    // storage initialization so later code cannot reopen a replacement path.
+    let state_store = StateStore::open(config.daemon.state_dir.clone())?;
     let policy = load_policy_engine(&config, policy_load)?;
     let pool = PoolManager::new();
     let hook = HookRegistry::new();
@@ -127,7 +131,7 @@ async fn run_loaded_config(loaded: LoadedDaemonConfig) -> Result<()> {
 
     let socket_path = config.daemon.socket.clone();
     let http_addr = config.listen.http_addr.clone();
-    let state = Arc::new(ServerState::build_with_template_catalog(
+    let state = Arc::new(ServerState::build_with_store(
         config,
         policy,
         pool,
@@ -136,6 +140,7 @@ async fn run_loaded_config(loaded: LoadedDaemonConfig) -> Result<()> {
         active_backend,
         storage,
         template_catalog,
+        state_store,
     )?);
     let reconciliation = state.manager.reconcile_startup().await;
     tracing::info!(
