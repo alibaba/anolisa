@@ -1,0 +1,55 @@
+name: Repository Metadata
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/components.json"
+      - ".github/labels.json"
+      - ".github/CODEOWNERS"
+      - ".github/maintainers.json"
+      - ".github/commitlint.config.json"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/scripts/validate-repository-metadata.py"
+      - ".github/scripts/test_validate_repository_metadata.py"
+      - ".github/workflows/ci.yaml"
+      - ".github/workflows/prelint.yml"
+      - ".github/workflows/release.yaml"
+      - ".github/workflows/repository-metadata.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/components.json"
+      - ".github/labels.json"
+      - ".github/CODEOWNERS"
+      - ".github/maintainers.json"
+      - ".github/commitlint.config.json"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/scripts/validate-repository-metadata.py"
+      - ".github/scripts/test_validate_repository_metadata.py"
+      - ".github/workflows/ci.yaml"
+      - ".github/workflows/prelint.yml"
+      - ".github/workflows/release.yaml"
+      - ".github/workflows/repository-metadata.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repository-metadata-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate governance metadata
+    runs-on: anolisa-k8s-general-ci-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate component, label, and routing metadata
+        run: |
+          python3 -m unittest discover \
+            -s .github/scripts \
+            -p 'test_validate_repository_metadata.py'
+          python3 .github/scripts/validate-repository-metadata.py

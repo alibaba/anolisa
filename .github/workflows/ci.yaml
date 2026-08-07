@@ -119,7 +119,7 @@ jobs:
           SKILLFS=false
           COSH_NG=false
           KTUNER=false
-          ANVIL=false
+          BLAZE=false
 
           # Path-based detection
           if echo "$CHANGED" | grep -q "^src/copilot-shell/"; then
@@ -152,8 +152,8 @@ jobs:
           if echo "$CHANGED" | grep -q "^src/ktuner/"; then
             KTUNER=true
           fi
-          if echo "$CHANGED" | grep -qE "^src/(anvil|blaze)/"; then
-            ANVIL=true
+          if echo "$CHANGED" | grep -q "^src/blaze/"; then
+            BLAZE=true
           fi
 
           # Manual override via workflow_dispatch
@@ -188,7 +188,7 @@ jobs:
             KTUNER=true
           fi
           if [[ "${{ inputs.run_blaze }}" == "true" ]]; then
-            ANVIL=true
+            BLAZE=true
           fi
 
           echo "copilot_shell=$COPILOT_SHELL" >> $GITHUB_OUTPUT
@@ -201,7 +201,7 @@ jobs:
           echo "skillfs=$SKILLFS" >> $GITHUB_OUTPUT
           echo "cosh_ng=$COSH_NG" >> $GITHUB_OUTPUT
           echo "ktuner=$KTUNER" >> $GITHUB_OUTPUT
-          echo "blaze=$ANVIL" >> $GITHUB_OUTPUT
+          echo "blaze=$BLAZE" >> $GITHUB_OUTPUT
 
           echo "### Change Detection Results" >> $GITHUB_STEP_SUMMARY
           echo "| Component | Changed |" >> $GITHUB_STEP_SUMMARY
@@ -216,7 +216,7 @@ jobs:
           echo "| SkillFS | $SKILLFS |" >> $GITHUB_STEP_SUMMARY
           echo "| cosh-ng | $COSH_NG |" >> $GITHUB_STEP_SUMMARY
           echo "| ktuner | $KTUNER |" >> $GITHUB_STEP_SUMMARY
-          echo "| blaze | $ANVIL |" >> $GITHUB_STEP_SUMMARY
+          echo "| blaze | $BLAZE |" >> $GITHUB_STEP_SUMMARY
 
   # =========================================================================
   # Step 2: Validate component version metadata

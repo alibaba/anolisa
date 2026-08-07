@@ -4,7 +4,7 @@
 
 We welcome contributions! This document covers the basics of contributing to the project.
 
-> **Done coding?** Ask your AI assistant: *"Read AGENT.md and help me generate a commit message and PR description."*
+> **Done coding?** Ask your AI assistant: *"Read AGENTS.md and help me generate a commit message and PR description."*
 
 ## Development Environment
 
@@ -110,6 +110,7 @@ docs(docs): update installation guide
 | Scope | Covers |
 |-------|--------|
 | `cosh` | `src/copilot-shell/` |
+| `cosh-ng` | `src/cosh-ng/` |
 | `sec-core` | `src/agent-sec-core/` |
 | `skill` | `src/os-skills/` |
 | `sight` | `src/agentsight/` |
@@ -118,10 +119,28 @@ docs(docs): update installation guide
 | `memory` | `src/agent-memory/` |
 | `anolisa` | `src/anolisa/` |
 | `skillfs` | `src/skillfs/` |
+| `ktuner` | `src/ktuner/` |
+| `blaze` | `src/blaze/` |
 | `ci` | `.github/workflows/` |
 | `docs` | `docs/` or documentation updates |
 | `deps` | Dependency version bumps (lock files) |
 | `chore` | Other maintenance (config, scripts, tooling) |
+
+If **Commit Message Lint** rejects an existing commit, update the message and
+publish the rewritten branch safely:
+
+```bash
+# Update the latest commit.
+git commit --amend
+git push --force-with-lease
+
+# Update one of the last N commits: select "reword" for the target commit.
+git rebase -i HEAD~N
+git push --force-with-lease
+```
+
+Do not use plain `git push --force`; `--force-with-lease` refuses to overwrite
+remote work that you have not seen.
 
 ### Branch Naming
 
@@ -142,7 +161,7 @@ When you open a PR, the following checks run automatically:
 | Check | Level | How to fix |
 |-------|-------|------------|
 | Commit scope missing | **Error** (blocks merge) | Add `(scope)` to every commit message, e.g. `fix(cosh): ...` |
-| Commit scope not in allowed list | Warning | Use one of the scopes above: `cosh`, `sec-core`, `skill`, `sight`, `tokenless`, `ckpt`, `memory`, `anolisa`, `skillfs`, `ci`, `docs`, `deps`, `chore` |
+| Commit scope not in allowed list | Warning | Use one of the scopes in the table above |
 | PR title format | Warning | Follow `type(scope): description` — same as commit messages |
 | Branch name convention | Warning | Follow `feature/<scope>/<desc>` — not required for forks |
 | PR not linked to an issue | Warning | Add `closes #<n>` to your PR description, or `no-issue: <reason>` |

@@ -109,6 +109,7 @@ docs(docs): update installation guide
 | Scope | 覆盖范围 |
 |-------|---------|
 | `cosh` | `src/copilot-shell/` |
+| `cosh-ng` | `src/cosh-ng/` |
 | `sec-core` | `src/agent-sec-core/` |
 | `skill` | `src/os-skills/` |
 | `sight` | `src/agentsight/` |
@@ -117,10 +118,28 @@ docs(docs): update installation guide
 | `memory` | `src/agent-memory/` |
 | `anolisa` | `src/anolisa/` |
 | `skillfs` | `src/skillfs/` |
+| `ktuner` | `src/ktuner/` |
+| `blaze` | `src/blaze/` |
 | `ci` | `.github/workflows/` |
 | `docs` | `docs/` 或文档更新 |
 | `deps` | 依赖版本升级（lock 文件） |
 | `chore` | 其他维护（配置、脚本、工具） |
+
+如果 **Commit Message Lint** 拒绝已有提交，请修改 commit message，并安全地
+推送改写后的分支：
+
+```bash
+# 修改最新提交。
+git commit --amend
+git push --force-with-lease
+
+# 修改最近 N 个提交中的一个：将目标 commit 标记为 "reword"。
+git rebase -i HEAD~N
+git push --force-with-lease
+```
+
+不要使用普通的 `git push --force`；`--force-with-lease` 会在远端出现本地未知
+提交时拒绝覆盖。
 
 ### 分支命名
 
