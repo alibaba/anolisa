@@ -466,6 +466,7 @@ mod tests {
     use crate::spawner::{
         BackendInstance, BackendSpawner, MockSpawner, SpawnResult, SpawnerRegistry,
     };
+    use crate::state_store::StateStore;
 
     use super::*;
 
@@ -667,7 +668,7 @@ mod tests {
             spawners,
             active_backend: BackendKind::Mock,
             storage,
-            state_dir,
+            state_store: StateStore::new(state_dir),
             rootfs_size: 64,
             mem_size: 32,
             template_catalog,

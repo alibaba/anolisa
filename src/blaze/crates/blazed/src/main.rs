@@ -19,6 +19,7 @@ mod metrics;
 mod sandbox;
 mod spawner;
 mod state;
+mod state_store;
 
 use std::process::ExitCode;
 

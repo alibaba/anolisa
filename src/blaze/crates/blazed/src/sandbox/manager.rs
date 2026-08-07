@@ -23,6 +23,7 @@ use crate::guest::{GuestClient, GuestExecResult, MAX_GUEST_FILE_BYTES};
 use crate::metrics::Metrics;
 use crate::sandbox::template::TemplateCatalog;
 use crate::spawner::{DynBackendInstance, SpawnerRegistry};
+use crate::state_store::StateStore;
 
 const GUEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -83,7 +84,7 @@ pub struct SandboxManager {
     spawners: Arc<SpawnerRegistry>,
     active_backend: BackendKind,
     storage: Arc<dyn StorageProvider>,
-    state_dir: PathBuf,
+    state_store: StateStore,
     rootfs_size: u64,
     mem_size: u64,
     metrics: Arc<Metrics>,
@@ -97,7 +98,7 @@ pub struct SandboxManagerInit {
     pub spawners: SpawnerRegistry,
     pub active_backend: BackendKind,
     pub storage: Arc<dyn StorageProvider>,
-    pub state_dir: PathBuf,
+    pub state_store: StateStore,
     pub rootfs_size: u64,
     pub mem_size: u64,
     pub template_catalog: TemplateCatalog,
@@ -120,7 +121,7 @@ impl SandboxManager {
             spawners,
             active_backend,
             storage,
-            state_dir,
+            state_store,
             rootfs_size,
             mem_size,
             template_catalog,
@@ -152,7 +153,7 @@ impl SandboxManager {
                 spawners: Arc::new(spawners),
                 active_backend,
                 storage,
-                state_dir,
+                state_store,
                 rootfs_size,
                 mem_size,
                 metrics,
@@ -287,7 +288,7 @@ impl SandboxManager {
         instance.begin_operation(OperationKind::Create);
 
         // Publish the stable identity and create intent before allocation.
-        instance.persist(&self.state_dir)?;
+        self.state_store.persist(&instance)?;
         if let Some(error) = self.retain_instance(instance.clone()) {
             return Err(BlazeDaemonError::RecoveryRequired(format!(
                 "create {}: {error}",
@@ -312,7 +313,7 @@ impl SandboxManager {
         };
         crate::failpoint::pause("create-after-storage-acquire").await;
 
-        let work_dir = self.state_dir.join(instance.id.to_string());
+        let work_dir = self.state_store.run_dir(instance.id);
         let spawner = match self.spawners.get(self.active_backend) {
             Some(spawner) => spawner,
             None => {
@@ -337,10 +338,10 @@ impl SandboxManager {
         }
 
         instance.backend_ownership = BackendOwnership::Starting;
-        if let Err(error) = instance.persist(&self.state_dir) {
+        if let Err(error) = self.state_store.persist(&instance) {
             instance.backend_ownership = BackendOwnership::NotStarted;
             return Err(self
-                .cleanup_failed_create(&mut instance, storage, None, false, error.into())
+                .cleanup_failed_create(&mut instance, storage, None, false, error)
                 .await);
         }
         if let Some(error) = self.retain_instance(instance.clone()) {
@@ -437,7 +438,7 @@ impl SandboxManager {
         }
         instance.finish_operation();
         if let Err(error) = crate::failpoint::state("create-state-commit")
-            .and_then(|_| instance.persist(&self.state_dir).map_err(Into::into))
+            .and_then(|_| self.state_store.persist(&instance))
         {
             return Err(self
                 .cleanup_failed_create(&mut instance, storage, None, true, error)
@@ -530,11 +531,9 @@ impl SandboxManager {
 
         let mut activating = original.clone();
         activating.begin_operation(OperationKind::Create);
-        if let Err(error) = crate::failpoint::state("warm-intent-state-commit").and_then(|_| {
-            activating
-                .persist(&self.state_dir)
-                .map_err(BlazeDaemonError::from)
-        }) {
+        if let Err(error) = crate::failpoint::state("warm-intent-state-commit")
+            .and_then(|_| self.state_store.persist(&activating))
+        {
             return Err(self.restore_warm_claim(key, original, error));
         }
         if let Some(error) = self.retain_instance(activating.clone()) {
@@ -550,11 +549,9 @@ impl SandboxManager {
             return Err(self.restore_warm_claim(key, original, error.into()));
         }
         activating.finish_operation();
-        if let Err(error) = crate::failpoint::state("warm-final-state-commit").and_then(|_| {
-            activating
-                .persist(&self.state_dir)
-                .map_err(BlazeDaemonError::from)
-        }) {
+        if let Err(error) = crate::failpoint::state("warm-final-state-commit")
+            .and_then(|_| self.state_store.persist(&activating))
+        {
             return Err(self.restore_warm_claim(key, original, error));
         }
         if let Some(error) = self.retain_instance(activating.clone()) {
@@ -574,7 +571,7 @@ impl SandboxManager {
     ) -> BlazeDaemonError {
         let id = instance.id;
         let mut errors = Vec::new();
-        if let Err(error) = instance.persist(&self.state_dir) {
+        if let Err(error) = self.state_store.persist(&instance) {
             errors.push(format!("restore warm state persistence failed: {error}"));
         }
         if let Some(error) = self.retain_instance(instance) {
@@ -626,7 +623,7 @@ impl SandboxManager {
             return;
         };
         metadata.begin_operation(OperationKind::Destroy);
-        if let Err(error) = metadata.persist(&self.state_dir) {
+        if let Err(error) = self.state_store.persist(metadata) {
             tracing::error!(instance = %id, %error, "quarantine intent commit failed");
             return;
         }
@@ -652,7 +649,7 @@ impl SandboxManager {
             }
             None => match self.spawners.get(metadata.backend) {
                 Some(spawner) => match spawner
-                    .cleanup_orphan(id, &self.state_dir.join(id.to_string()))
+                    .cleanup_orphan(id, &self.state_store.run_dir(id))
                     .await
                 {
                     Ok(()) => true,
@@ -681,7 +678,7 @@ impl SandboxManager {
         }
 
         metadata.backend_ownership = BackendOwnership::Stopped;
-        if let Err(error) = metadata.persist(&self.state_dir) {
+        if let Err(error) = self.state_store.persist(metadata) {
             tracing::error!(instance = %id, %error, "quarantined stop state commit failed");
             let _ = self.mark_recovery(id);
             return;
@@ -705,7 +702,7 @@ impl SandboxManager {
             return;
         }
         metadata.finish_operation();
-        if let Err(error) = metadata.persist(&self.state_dir) {
+        if let Err(error) = self.state_store.persist(metadata) {
             tracing::error!(instance = %id, %error, "quarantined state commit failed");
             let _ = self.mark_recovery(id);
             return;
@@ -739,11 +736,9 @@ impl SandboxManager {
         {
             original.begin_operation(OperationKind::Destroy);
         }
-        if let Err(error) = crate::failpoint::state("destroy-intent-state-commit").and_then(|_| {
-            original
-                .persist(&self.state_dir)
-                .map_err(BlazeDaemonError::from)
-        }) {
+        if let Err(error) = crate::failpoint::state("destroy-intent-state-commit")
+            .and_then(|_| self.state_store.persist(&original))
+        {
             let _ = self.mark_recovery(id);
             return Err(BlazeDaemonError::RecoveryRequired(format!(
                 "destroy {id}: intent persistence failed: {error}; resources retained"
@@ -775,7 +770,7 @@ impl SandboxManager {
                     match self.spawners.get(original.backend) {
                         Some(spawner) => {
                             spawner
-                                .cleanup_orphan(id, &self.state_dir.join(id.to_string()))
+                                .cleanup_orphan(id, &self.state_store.run_dir(id))
                                 .await
                         }
                         None => Err(BlazeError::BackendError {
@@ -800,11 +795,9 @@ impl SandboxManager {
         }
 
         original.backend_ownership = BackendOwnership::Stopped;
-        if let Err(error) = crate::failpoint::state("destroy-stop-state-commit").and_then(|_| {
-            original
-                .persist(&self.state_dir)
-                .map_err(BlazeDaemonError::from)
-        }) {
+        if let Err(error) = crate::failpoint::state("destroy-stop-state-commit")
+            .and_then(|_| self.state_store.persist(&original))
+        {
             let recovery = self.mark_instance_recovery(original.clone()).err();
             return Err(BlazeDaemonError::RecoveryRequired(format!(
                 "destroy {id}: backend stopped but stop state persistence failed: {error}; \
@@ -838,11 +831,9 @@ impl SandboxManager {
             destroyed.transition(SandboxState::Destroyed)?;
         }
         destroyed.finish_operation();
-        if let Err(error) = crate::failpoint::state("destroy-final-state-commit").and_then(|_| {
-            destroyed
-                .persist(&self.state_dir)
-                .map_err(BlazeDaemonError::from)
-        }) {
+        if let Err(error) = crate::failpoint::state("destroy-final-state-commit")
+            .and_then(|_| self.state_store.persist(&destroyed))
+        {
             let recovery = self.mark_recovery(id).err();
             return Err(BlazeDaemonError::RecoveryRequired(format!(
                 "destroy {id}: resources released but final state persistence failed: {error}{}",
@@ -1020,7 +1011,7 @@ impl SandboxManager {
             } else {
                 instance.finish_operation();
             }
-            if let Err(error) = instance.persist(&self.state_dir) {
+            if let Err(error) = self.state_store.persist(instance) {
                 cleanup_errors.push(format!("state persistence failed: {error}"));
             }
             if let Some(error) = self.retain_instance(instance.clone()) {
@@ -1046,7 +1037,7 @@ impl SandboxManager {
         {
             cleanup_errors.push(format!("recovery state update failed: {error}"));
         }
-        if let Err(error) = instance.persist(&self.state_dir) {
+        if let Err(error) = self.state_store.persist(instance) {
             cleanup_errors.push(format!("state persistence failed: {error}"));
         }
         if let Some(error) = self.retain_instance(instance.clone()) {
@@ -1071,7 +1062,7 @@ impl SandboxManager {
             {
                 errors.push(format!("recovery state update failed: {error}"));
             }
-            if let Err(error) = instance.persist(&self.state_dir) {
+            if let Err(error) = self.state_store.persist(instance) {
                 errors.push(format!("state persistence failed: {error}"));
             }
             if let Some(error) = self.retain_instance(instance.clone()) {
@@ -1098,7 +1089,7 @@ impl SandboxManager {
         } else {
             instance.finish_operation();
         }
-        if let Err(error) = instance.persist(&self.state_dir) {
+        if let Err(error) = self.state_store.persist(instance) {
             errors.push(format!("state persistence failed: {error}"));
         }
         if let Some(error) = self.retain_instance(instance.clone()) {
@@ -1122,11 +1113,11 @@ impl SandboxManager {
         if instance.state != SandboxState::RecoveryRequired {
             instance.transition(SandboxState::RecoveryRequired)?;
         }
-        let persist = instance.persist(&self.state_dir);
+        let persist = self.state_store.persist(&instance);
         let retained = self.retain_instance(instance);
         match (persist, retained) {
             (Ok(()), None) => Ok(()),
-            (Err(error), None) => Err(error.into()),
+            (Err(error), None) => Err(error),
             (Ok(()), Some(error)) => Err(BlazeDaemonError::Internal(error)),
             (Err(persist), Some(retain)) => Err(BlazeDaemonError::RecoveryRequired(format!(
                 "recovery state persistence failed: {persist}; {retain}"

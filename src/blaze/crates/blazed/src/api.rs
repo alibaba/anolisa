@@ -354,7 +354,7 @@ async fn checkpoint(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<
         inst.transition(SandboxState::Paused)?;
     }
     inst.transition(SandboxState::Checkpointed)?;
-    inst.persist(&state.state_dir)?;
+    state.state_store.persist(inst)?;
 
     let checkpoint_id = format!("ckpt-{}-{}", inst.id, chrono::Utc::now().timestamp());
     json_ok(&json!({
@@ -379,7 +379,7 @@ async fn reset_instance(state: &Arc<ServerState>, id: &str) -> Result<Response<F
     // pool. Current implementation is control-plane state only.
     inst.transition(SandboxState::Reset)?;
     inst.transition(SandboxState::Warm)?;
-    inst.persist(&state.state_dir)?;
+    state.state_store.persist(inst)?;
 
     // return to pool keyed on (backend, class, image_digest)
     let key = PoolKey::new(inst.backend, inst.workload_class, inst.image_digest.clone());
@@ -2629,8 +2629,7 @@ mod tests {
         let restored = state.instances.lock().expect("instances")[&uuid].clone();
         assert_eq!(restored.state, SandboxState::Warm);
         assert!(restored.operation.is_none());
-        let persisted =
-            SandboxInstance::load(&state.state_dir, uuid).expect("persisted warm state");
+        let persisted = state.state_store.load(uuid).expect("persisted warm state");
         assert_eq!(persisted.state, SandboxState::Warm);
         assert_eq!(persisted.backend_ownership, BackendOwnership::Running);
         assert!(persisted.operation.is_none());
@@ -2642,8 +2641,10 @@ mod tests {
         let retried = created_json(&state, &request).await;
         assert_eq!(retried["instance"]["id"], id);
         assert_eq!(retried["start_path"], "warm");
-        let persisted =
-            SandboxInstance::load(&state.state_dir, uuid).expect("persisted running state");
+        let persisted = state
+            .state_store
+            .load(uuid)
+            .expect("persisted running state");
         assert_eq!(persisted.state, SandboxState::Running);
         assert_eq!(persisted.backend_ownership, BackendOwnership::Running);
         assert!(persisted.operation.is_none());
@@ -2809,8 +2810,10 @@ mod tests {
         let retained = state.instances.lock().expect("instances")[&uuid].clone();
         assert_eq!(retained.state, SandboxState::RecoveryRequired);
         assert!(retained.operation.is_none());
-        let persisted =
-            SandboxInstance::load(&state.state_dir, uuid).expect("persisted recovery state");
+        let persisted = state
+            .state_store
+            .load(uuid)
+            .expect("persisted recovery state");
         assert_eq!(persisted.state, SandboxState::RecoveryRequired);
         assert_eq!(persisted.backend_ownership, BackendOwnership::Running);
         assert!(persisted.operation.is_none());
@@ -2823,8 +2826,10 @@ mod tests {
             state.instances.lock().expect("instances")[&uuid].state,
             SandboxState::Destroyed
         );
-        let persisted =
-            SandboxInstance::load(&state.state_dir, uuid).expect("persisted destroyed state");
+        let persisted = state
+            .state_store
+            .load(uuid)
+            .expect("persisted destroyed state");
         assert_eq!(persisted.state, SandboxState::Destroyed);
         assert!(persisted.operation.is_none());
     }
@@ -2855,8 +2860,10 @@ mod tests {
             retained.operation.as_ref().map(|operation| operation.kind),
             Some(OperationKind::Destroy)
         );
-        let persisted =
-            SandboxInstance::load(&state.state_dir, uuid).expect("persisted recovery state");
+        let persisted = state
+            .state_store
+            .load(uuid)
+            .expect("persisted recovery state");
         assert_eq!(persisted.state, SandboxState::RecoveryRequired);
         assert_eq!(persisted.backend_ownership, BackendOwnership::Stopped);
         assert_eq!(
@@ -2868,8 +2875,10 @@ mod tests {
         destroy_instance(&state, &id).await.expect("destroy retry");
         assert_eq!(kill_count.load(Ordering::Acquire), 1);
         assert_eq!(release_count.load(Ordering::Acquire), 1);
-        let persisted =
-            SandboxInstance::load(&state.state_dir, uuid).expect("persisted destroyed state");
+        let persisted = state
+            .state_store
+            .load(uuid)
+            .expect("persisted destroyed state");
         assert_eq!(persisted.state, SandboxState::Destroyed);
         assert!(persisted.operation.is_none());
     }
@@ -2901,8 +2910,10 @@ mod tests {
             retained.operation.as_ref().map(|operation| operation.kind),
             Some(OperationKind::Destroy)
         );
-        let persisted =
-            SandboxInstance::load(&state.state_dir, uuid).expect("persisted recovery state");
+        let persisted = state
+            .state_store
+            .load(uuid)
+            .expect("persisted recovery state");
         assert_eq!(persisted.state, SandboxState::RecoveryRequired);
         assert_eq!(persisted.backend_ownership, BackendOwnership::Stopped);
         assert_eq!(
@@ -2916,8 +2927,10 @@ mod tests {
         let destroyed = state.instances.lock().expect("instances")[&uuid].clone();
         assert_eq!(destroyed.state, SandboxState::Destroyed);
         assert!(destroyed.operation.is_none());
-        let persisted =
-            SandboxInstance::load(&state.state_dir, uuid).expect("persisted destroyed state");
+        let persisted = state
+            .state_store
+            .load(uuid)
+            .expect("persisted destroyed state");
         assert_eq!(persisted.state, SandboxState::Destroyed);
         assert!(persisted.operation.is_none());
     }

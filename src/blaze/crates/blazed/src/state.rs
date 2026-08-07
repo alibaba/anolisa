@@ -6,7 +6,6 @@
 //! are never held across `.await` boundaries.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use blaze_core::backend::BackendKind;
@@ -25,6 +24,7 @@ use crate::sandbox::template::TemplateCatalog;
 use crate::sandbox::template::validate_template_roots;
 use crate::sandbox::{SandboxManager, SandboxManagerInit};
 use crate::spawner::SpawnerRegistry;
+use crate::state_store::StateStore;
 
 /// All daemon mutable state. Cloning is via `Arc` (see the `state.clone()`
 /// idiom in `daemon.rs`); the struct itself is never `Clone`.
@@ -40,7 +40,7 @@ pub struct ServerState {
     /// backend rather than reporting all configured binaries.
     pub active_backend: BackendKind,
     pub storage: Arc<dyn StorageProvider>,
-    pub state_dir: PathBuf,
+    pub state_store: StateStore,
     pub metrics: Arc<Metrics>,
 }
 
@@ -93,8 +93,8 @@ impl ServerState {
         storage: Arc<dyn StorageProvider>,
         template_catalog: TemplateCatalog,
     ) -> Result<Self> {
-        let state_dir = config.daemon.state_dir.clone();
-        let instances = scan_state_dir(&state_dir).unwrap_or_else(|err| {
+        let state_store = StateStore::new(config.daemon.state_dir.clone());
+        let instances = state_store.scan().unwrap_or_else(|err| {
             tracing::warn!(error = %err, "failed to scan state_dir, starting empty");
             HashMap::new()
         });
@@ -104,7 +104,7 @@ impl ServerState {
             spawners,
             active_backend,
             storage: storage.clone(),
-            state_dir: state_dir.clone(),
+            state_store: state_store.clone(),
             rootfs_size: config.storage.rootfs_size,
             mem_size: config.storage.mem_size,
             template_catalog,
@@ -119,7 +119,7 @@ impl ServerState {
             manager: Arc::new(manager),
             active_backend,
             storage,
-            state_dir,
+            state_store,
             metrics: resources.metrics,
         })
     }
@@ -128,36 +128,4 @@ impl ServerState {
     pub fn operation_lock(&self, id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
         self.manager.operation_lock(id)
     }
-}
-
-/// Best-effort: walk `{state_dir}/<uuid>/state.json` and rebuild the
-/// instance map. Used both at boot and (in the future) by `daemon doctor`.
-fn scan_state_dir(state_dir: &Path) -> Result<HashMap<Uuid, SandboxInstance>> {
-    let mut out = HashMap::new();
-    if !state_dir.exists() {
-        return Ok(out);
-    }
-    for entry in std::fs::read_dir(state_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(name_str) = name.to_str() else {
-            continue;
-        };
-        let Ok(id) = Uuid::parse_str(name_str) else {
-            continue;
-        };
-        match SandboxInstance::load(state_dir, id) {
-            Ok(inst) => {
-                out.insert(id, inst);
-            }
-            Err(err) => {
-                tracing::warn!(instance = %id, error = %err, "skipping corrupt instance state");
-            }
-        }
-    }
-    tracing::info!(instances = out.len(), "rehydrated instances from state_dir");
-    Ok(out)
 }
