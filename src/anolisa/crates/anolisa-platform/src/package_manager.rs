@@ -27,6 +27,21 @@ pub struct DnfBackend;
 /// APT backend for DEB-based distros (Ubuntu, Debian).
 pub struct AptBackend;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PackageManagerKind {
+    Dnf,
+    Apt,
+}
+
+impl PackageManagerKind {
+    fn into_manager(self) -> Box<dyn PackageManager> {
+        match self {
+            Self::Dnf => Box::new(DnfBackend),
+            Self::Apt => Box::new(AptBackend),
+        }
+    }
+}
+
 impl PackageManager for DnfBackend {
     fn install(&self, packages: &[&str]) -> Result<(), PkgError> {
         if packages.is_empty() {
@@ -137,42 +152,39 @@ fn run_with_progress_to(command: &mut Command, progress: OwnedFd) -> io::Result<
 /// Detect the appropriate package manager for the current system.
 ///
 /// Uses `pkg_base` from `EnvFacts` to select the backend. Falls back to
-/// checking binary availability if `pkg_base` is `None`.
+/// checking binary availability when the hint is absent or unrecognized.
 pub fn detect_package_manager(pkg_base: Option<&str>) -> Result<Box<dyn PackageManager>, PkgError> {
-    match pkg_base {
-        Some(base) if base.starts_with("anolis") || base.starts_with("alinux") => {
-            Ok(Box::new(DnfBackend))
-        }
-        Some(base)
-            if base.starts_with("rhel")
-                || base.starts_with("centos")
-                || base.starts_with("fedora") =>
-        {
-            Ok(Box::new(DnfBackend))
-        }
-        Some(base) if base.starts_with("ubuntu") || base.starts_with("debian") => {
-            Ok(Box::new(AptBackend))
-        }
-        Some(base) => {
-            // Fallback: try to detect from binary availability
-            if command_exists("dnf") || command_exists("yum") {
-                Ok(Box::new(DnfBackend))
-            } else if command_exists("apt-get") {
-                Ok(Box::new(AptBackend))
-            } else {
-                Err(PkgError::Unsupported(base.to_string()))
-            }
-        }
-        None => {
-            // No pkg_base info; probe binaries
-            if command_exists("dnf") || command_exists("yum") {
-                Ok(Box::new(DnfBackend))
-            } else if command_exists("apt-get") {
-                Ok(Box::new(AptBackend))
-            } else {
-                Err(PkgError::Unsupported("unknown".to_string()))
-            }
-        }
+    if let Some(kind) = pkg_base.and_then(package_manager_kind) {
+        return Ok(kind.into_manager());
+    }
+
+    // Unknown families may still be installable when the host exposes a
+    // supported package manager under a nonstandard distro identifier.
+    if command_exists("dnf") || command_exists("yum") {
+        Ok(Box::new(DnfBackend))
+    } else if command_exists("apt-get") {
+        Ok(Box::new(AptBackend))
+    } else {
+        Err(PkgError::Unsupported(
+            pkg_base.unwrap_or("unknown").to_string(),
+        ))
+    }
+}
+
+fn package_manager_kind(pkg_base: &str) -> Option<PackageManagerKind> {
+    if pkg_base == "rpm"
+        || pkg_base.starts_with("anolis")
+        || pkg_base.starts_with("alinux")
+        || pkg_base.starts_with("rhel")
+        || pkg_base.starts_with("centos")
+        || pkg_base.starts_with("fedora")
+    {
+        Some(PackageManagerKind::Dnf)
+    } else if pkg_base == "deb" || pkg_base.starts_with("ubuntu") || pkg_base.starts_with("debian")
+    {
+        Some(PackageManagerKind::Apt)
+    } else {
+        None
     }
 }
 
@@ -206,6 +218,28 @@ mod tests {
 
     fn unique_fixture(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("anolisa-pkg-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn package_family_hints_select_expected_backends() {
+        assert_eq!(package_manager_kind("rpm"), Some(PackageManagerKind::Dnf));
+        assert_eq!(package_manager_kind("deb"), Some(PackageManagerKind::Apt));
+    }
+
+    #[test]
+    fn distro_hints_keep_selecting_expected_backends() {
+        for pkg_base in ["anolis23", "alinux4", "rhel9", "centos9", "fedora42"] {
+            assert_eq!(
+                package_manager_kind(pkg_base),
+                Some(PackageManagerKind::Dnf)
+            );
+        }
+        for pkg_base in ["ubuntu24", "debian12"] {
+            assert_eq!(
+                package_manager_kind(pkg_base),
+                Some(PackageManagerKind::Apt)
+            );
+        }
     }
 
     #[cfg(unix)]
