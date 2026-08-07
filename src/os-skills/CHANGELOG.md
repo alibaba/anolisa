@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.2
+
+- Added the `ktuner` skill for deterministic kernel diagnosis, tuning, and rollback. (#1278)
+- Removed legacy OpenClaw and Hermes adapter scripts from source and RPM installs. (#1172)
+- Updated `anolisa-guide` with authenticated Skill Ledger recovery and tamper detection. (#2185)
+
 ## 0.6.1
 
 - Rewrote `sysom-diagnosis` skill and removed legacy CLI. (#1241)
