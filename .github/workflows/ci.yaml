@@ -767,7 +767,8 @@ jobs:
         with:
           workspaces: |
             src/tokenless
-            src/tokenless/benchmark
+            src/tokenless/benchmark/l1-compressor
+            src/tokenless/benchmark/l2-module
 
       - name: Check formatting
         run: |
@@ -784,28 +785,47 @@ jobs:
           cd src/tokenless
           cargo test --workspace -- --test-threads=1
 
-      # The benchmark suite is a standalone workspace (empty [workspace] in
-      # src/tokenless/benchmark/Cargo.toml), so the --workspace commands above
-      # never touch it. Exercise it explicitly: fmt, clippy and the 96
-      # quality/adversarial tests, all with --locked so a stale Cargo.lock
-      # fails fast. Criterion benches stay a manual/periodic task.
-      - name: Check benchmark suite formatting (L1)
+      # The benchmark suite is split into two standalone workspaces (each with an
+      # empty [workspace] table in its Cargo.toml), so the --workspace commands
+      # above never touch them. Exercise both explicitly: fmt, clippy and the
+      # quality/adversarial tests, all with --locked so a stale Cargo.lock fails
+      # fast. Criterion benches stay a manual/periodic task.
+      - name: Check L1 benchmark suite formatting
         run: |
-          cd src/tokenless/benchmark
+          cd src/tokenless/benchmark/l1-compressor
           cargo fmt --all -- --check
 
-      - name: Lint benchmark suite (L1)
+      - name: Lint L1 benchmark suite
         run: |
-          cd src/tokenless/benchmark
+          cd src/tokenless/benchmark/l1-compressor
           cargo clippy --all-targets --locked -- -D warnings
 
-      - name: Test benchmark suite (L1)
+      - name: Test L1 benchmark suite
         env:
           # Deep-recursion adversarial tests overflow the default Linux
           # thread stack; give test threads 16 MiB.
           RUST_MIN_STACK: '16777216'
         run: |
-          cd src/tokenless/benchmark
+          cd src/tokenless/benchmark/l1-compressor
+          cargo test --release --locked
+
+      - name: Check L2 benchmark suite formatting
+        run: |
+          cd src/tokenless/benchmark/l2-module
+          cargo fmt --all -- --check
+
+      - name: Lint L2 benchmark suite
+        run: |
+          cd src/tokenless/benchmark/l2-module
+          cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test L2 benchmark suite
+        env:
+          # Deep-recursion adversarial tests overflow the default Linux
+          # thread stack; give test threads 16 MiB.
+          RUST_MIN_STACK: '16777216'
+        run: |
+          cd src/tokenless/benchmark/l2-module
           cargo test --release --locked
 
       - name: Run hook integration tests (Python)

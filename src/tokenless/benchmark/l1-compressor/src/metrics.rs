@@ -85,6 +85,10 @@ fn is_executable(p: &Path) -> bool {
 /// crate, or `rtk` on `PATH`. Shared by the in-crate reports and the
 /// `l1_rtk_format_compat` integration tests so discovery never drifts between
 /// the two. Returns `None` when none is runnable.
+///
+/// `l2-module/src/metrics.rs` carries a byte-identical copy — the two benchmark
+/// workspaces are independent, so changing the discovery order here means
+/// changing it there too.
 pub fn find_rtk_binary() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("RTK_BIN") {
         let pb = PathBuf::from(p);
@@ -93,7 +97,7 @@ pub fn find_rtk_binary() -> Option<PathBuf> {
         }
     }
     let vendored =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../third_party/rtk/target/release/rtk");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../third_party/rtk/target/release/rtk");
     if is_executable(&vendored) {
         return Some(vendored);
     }
