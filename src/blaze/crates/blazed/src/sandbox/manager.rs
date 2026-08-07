@@ -22,7 +22,9 @@ use crate::error::{BlazeDaemonError, Result};
 use crate::guest::{GuestClient, GuestExecResult, MAX_GUEST_FILE_BYTES};
 use crate::metrics::Metrics;
 use crate::sandbox::template::TemplateCatalog;
-use crate::spawner::{DynBackendInstance, SpawnerRegistry};
+use crate::spawner::{
+    BackendSpawnRequest, DynBackendInstance, SpawnerRegistry, spawn_with_runtime_directory,
+};
 use crate::state_store::StateStore;
 
 const GUEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -359,7 +361,7 @@ impl SandboxManager {
                     .await);
             }
         };
-        if let Err(error) = spawner.prepare_spawn(work_dir.path()).await {
+        if let Err(error) = spawner.prepare_spawn(&work_dir).await {
             return Err(self
                 .cleanup_failed_create(&mut instance, storage, None, false, error.into())
                 .await);
@@ -385,22 +387,28 @@ impl SandboxManager {
                 .await);
         }
 
-        let spawn = match crate::failpoint::backend("create-spawn") {
-            Ok(()) => {
-                spawner
-                    .spawn(SpawnRequest {
-                        instance_id: instance.id,
-                        run_dir: work_dir.path().to_path_buf(),
-                        binary_path: request.binary_path,
-                        storage: storage.clone(),
-                        backend: request.decision.backend,
-                        vm: request.decision.vm,
-                    })
-                    .await
+        let backend_request = match BackendSpawnRequest::new(
+            SpawnRequest {
+                instance_id: instance.id,
+                binary_path: request.binary_path,
+                storage: storage.clone(),
+                backend: request.decision.backend,
+                vm: request.decision.vm,
+            },
+            work_dir.clone(),
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                instance.backend_ownership = BackendOwnership::NotStarted;
+                return Err(self
+                    .cleanup_failed_create(&mut instance, storage, None, false, error.into())
+                    .await);
             }
+        };
+        let spawn = match crate::failpoint::backend("create-spawn") {
+            Ok(()) => spawn_with_runtime_directory(spawner.as_ref(), backend_request).await,
             Err(error) => Err(crate::spawner::SpawnFailure::clean(error)),
         };
-        drop(work_dir);
         let actual_backend = match spawn {
             Ok(backend_instance) => {
                 instance.backend_ownership = BackendOwnership::Running;
@@ -678,7 +686,7 @@ impl SandboxManager {
             }
             None => match self.spawners.get(metadata.backend) {
                 Some(spawner) => match self.state_store.run_dir(id) {
-                    Ok(run_dir) => match spawner.cleanup_orphan(id, run_dir.path()).await {
+                    Ok(run_dir) => match spawner.cleanup_orphan(id, &run_dir).await {
                         Ok(()) => true,
                         Err(error) => {
                             tracing::error!(
@@ -805,7 +813,7 @@ impl SandboxManager {
                 } else {
                     match self.spawners.get(original.backend) {
                         Some(spawner) => match self.state_store.run_dir(id) {
-                            Ok(run_dir) => spawner.cleanup_orphan(id, run_dir.path()).await,
+                            Ok(run_dir) => spawner.cleanup_orphan(id, &run_dir).await,
                             Err(error) => Err(BlazeError::BackendError {
                                 msg: format!(
                                     "open owned run directory for persisted instance {id}: {error}"
@@ -881,11 +889,7 @@ impl SandboxManager {
                     .unwrap_or_default()
             )));
         }
-        if let Some(error) = self.retain_instance(destroyed) {
-            return Err(BlazeDaemonError::RecoveryRequired(format!(
-                "destroy {id}: resources released but {error}"
-            )));
-        }
+        let retention_error = self.retain_instance(destroyed);
         match self.backend_instances.lock() {
             Ok(mut instances) => {
                 instances.remove(&id);
@@ -893,6 +897,11 @@ impl SandboxManager {
             Err(poisoned) => {
                 poisoned.into_inner().remove(&id);
             }
+        }
+        if let Some(error) = retention_error {
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "destroy {id}: resources released but {error}"
+            )));
         }
         self.metrics.inc(&self.metrics.instances_destroyed);
         Ok(true)

@@ -84,13 +84,11 @@ impl FromStr for BackendKind {
     }
 }
 
-/// Complete input for starting a backend instance.
+/// Portable parameters for starting a backend instance.
 #[derive(Debug, Clone)]
 pub struct SpawnRequest {
     /// Stable sandbox identifier.
     pub instance_id: Uuid,
-    /// Provider-owned runtime directory.
-    pub run_dir: PathBuf,
     /// Backend executable selected during daemon startup.
     pub binary_path: PathBuf,
     /// Storage resources owned by this sandbox.

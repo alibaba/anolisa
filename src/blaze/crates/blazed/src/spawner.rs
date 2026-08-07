@@ -6,6 +6,7 @@ mod netns;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -28,6 +29,8 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+use crate::state_store::OwnedRunDir;
 
 pub use firecracker::FirecrackerSpawner;
 
@@ -75,6 +78,100 @@ pub trait BackendInstance: Send + Sync {
 
 /// Shared backend instance handle stored in the daemon runtime map.
 pub type DynBackendInstance = Arc<dyn BackendInstance>;
+
+/// Backend launch inputs paired with the opened runtime-directory owner.
+///
+/// The portable request remains in `blaze-core`; this daemon-local wrapper
+/// prevents backend implementations from reconstructing the runtime directory
+/// from a configured pathname.
+#[derive(Debug, Clone)]
+pub struct BackendSpawnRequest {
+    request: SpawnRequest,
+    /// Opened directory used for all backend runtime artifacts.
+    pub run_dir: OwnedRunDir,
+}
+
+impl BackendSpawnRequest {
+    pub(crate) fn new(request: SpawnRequest, run_dir: OwnedRunDir) -> Result<Self> {
+        if request.instance_id != run_dir.instance_id() {
+            return Err(BlazeError::BackendError {
+                msg: format!(
+                    "backend request for {} does not match runtime-directory owner for {}",
+                    request.instance_id,
+                    run_dir.instance_id()
+                ),
+            });
+        }
+        Ok(Self { request, run_dir })
+    }
+}
+
+impl Deref for BackendSpawnRequest {
+    type Target = SpawnRequest;
+
+    fn deref(&self) -> &Self::Target {
+        &self.request
+    }
+}
+
+/// Runtime owner that keeps the opened sandbox directory alive for as long as
+/// any backend handle can still use paths derived from it.
+struct RuntimeOwnedBackend {
+    inner: DynBackendInstance,
+    _run_dir: OwnedRunDir,
+}
+
+#[async_trait]
+impl BackendInstance for RuntimeOwnedBackend {
+    fn backend(&self) -> BackendKind {
+        self.inner.backend()
+    }
+
+    fn guest_socket_path(&self) -> &Path {
+        self.inner.guest_socket_path()
+    }
+
+    async fn try_wait(&self) -> Result<Option<SpawnResult>> {
+        self.inner.try_wait().await
+    }
+
+    async fn kill(&self) -> Result<()> {
+        self.inner.kill().await
+    }
+}
+
+/// Attach runtime-directory ownership to a successful or partially started
+/// backend handle before it enters lifecycle management.
+pub(crate) fn bind_runtime_directory(
+    inner: DynBackendInstance,
+    run_dir: OwnedRunDir,
+) -> DynBackendInstance {
+    Arc::new(RuntimeOwnedBackend {
+        inner,
+        _run_dir: run_dir,
+    })
+}
+
+/// Start one backend while attaching the runtime-directory owner to every
+/// returned process owner, including a partial owner carried by a failure.
+pub(crate) async fn spawn_with_runtime_directory(
+    spawner: &dyn BackendSpawner,
+    request: BackendSpawnRequest,
+) -> std::result::Result<DynBackendInstance, SpawnFailure> {
+    let run_dir = request.run_dir.clone();
+    match spawner.spawn(request).await {
+        Ok(owner) => Ok(bind_runtime_directory(owner, run_dir)),
+        Err(error) => {
+            let (source, owner) = error.into_parts();
+            Err(match owner {
+                Some(owner) => {
+                    SpawnFailure::with_owner(source, bind_runtime_directory(owner, run_dir))
+                }
+                None => SpawnFailure::clean(source),
+            })
+        }
+    }
+}
 
 /// Backend start failure that may retain ownership of a started process.
 pub struct SpawnFailure {
@@ -156,14 +253,14 @@ impl From<std::io::Error> for SpawnFailure {
 #[async_trait]
 pub trait BackendSpawner: Send + Sync {
     /// Persist backend-specific pre-spawn ownership metadata.
-    async fn prepare_spawn(&self, _run_dir: &Path) -> Result<()> {
+    async fn prepare_spawn(&self, _run_dir: &OwnedRunDir) -> Result<()> {
         Ok(())
     }
 
     /// Start a new sandbox.
     async fn spawn(
         &self,
-        request: SpawnRequest,
+        request: BackendSpawnRequest,
     ) -> std::result::Result<DynBackendInstance, SpawnFailure>;
 
     /// Probe whether the configured backend executable is usable.
@@ -171,7 +268,7 @@ pub trait BackendSpawner: Send + Sync {
 
     /// Clean up a backend process and resources whose in-memory handle was
     /// lost across daemon restart.
-    async fn cleanup_orphan(&self, instance_id: Uuid, run_dir: &Path) -> Result<()>;
+    async fn cleanup_orphan(&self, instance_id: Uuid, run_dir: &OwnedRunDir) -> Result<()>;
 }
 
 /// Shared backend spawner selected during daemon startup.
@@ -205,18 +302,16 @@ pub struct BubblewrapSpawner;
 
 #[async_trait]
 impl BackendSpawner for BubblewrapSpawner {
-    async fn prepare_spawn(&self, run_dir: &Path) -> Result<()> {
-        tokio::fs::create_dir_all(run_dir).await?;
-        prepare_pid_handoff(&run_dir.join("backend.pid"))
+    async fn prepare_spawn(&self, run_dir: &OwnedRunDir) -> Result<()> {
+        prepare_pid_handoff(&run_dir.path().join("backend.pid"))
     }
 
     async fn spawn(
         &self,
-        request: SpawnRequest,
+        request: BackendSpawnRequest,
     ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
-        tokio::fs::create_dir_all(&request.run_dir).await?;
-        remove_file_if_exists(&request.run_dir.join(STOPPED_MARKER)).await?;
-        let pid_file = request.run_dir.join("backend.pid");
+        remove_file_if_exists(&request.run_dir.path().join(STOPPED_MARKER)).await?;
+        let pid_file = request.run_dir.path().join("backend.pid");
         let mut command = Command::new(&request.binary_path);
         command
             .args([
@@ -243,7 +338,7 @@ impl BackendSpawner for BubblewrapSpawner {
         let child = command.spawn();
         drop(pid_handoff);
         let child = child?;
-        let stopped_marker = request.run_dir.join(STOPPED_MARKER);
+        let stopped_marker = request.run_dir.path().join(STOPPED_MARKER);
         let instance = ProcessInstance::new(
             request.instance_id,
             BackendKind::Bubblewrap,
@@ -258,8 +353,8 @@ impl BackendSpawner for BubblewrapSpawner {
         Ok(binary_path.is_file())
     }
 
-    async fn cleanup_orphan(&self, instance_id: Uuid, run_dir: &Path) -> Result<()> {
-        cleanup_process_run_dir(instance_id, run_dir, "bubblewrap").await
+    async fn cleanup_orphan(&self, instance_id: Uuid, run_dir: &OwnedRunDir) -> Result<()> {
+        cleanup_process_run_dir(instance_id, run_dir.path(), "bubblewrap").await
     }
 }
 
@@ -340,9 +435,9 @@ pub struct MockSpawner;
 impl BackendSpawner for MockSpawner {
     async fn spawn(
         &self,
-        request: SpawnRequest,
+        request: BackendSpawnRequest,
     ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
-        spawn_mock_instance(request.instance_id, request.run_dir)
+        spawn_mock_instance(request.instance_id)
             .await
             .map_err(SpawnFailure::from)
     }
@@ -351,7 +446,7 @@ impl BackendSpawner for MockSpawner {
         Ok(true)
     }
 
-    async fn cleanup_orphan(&self, _instance_id: Uuid, _run_dir: &Path) -> Result<()> {
+    async fn cleanup_orphan(&self, _instance_id: Uuid, _run_dir: &OwnedRunDir) -> Result<()> {
         // Mock owners are in-process tasks and cannot survive daemon exit.
         Ok(())
     }
@@ -364,8 +459,7 @@ struct MockInstance {
     killed: AtomicBool,
 }
 
-async fn spawn_mock_instance(instance_id: Uuid, run_dir: PathBuf) -> Result<DynBackendInstance> {
-    tokio::fs::create_dir_all(&run_dir).await?;
+async fn spawn_mock_instance(instance_id: Uuid) -> Result<DynBackendInstance> {
     let cancellation = CancellationToken::new();
     let task_token = cancellation.clone();
     let task = tokio::spawn(async move { task_token.cancelled().await });
@@ -434,9 +528,9 @@ pub(crate) struct GuestMockSpawner;
 impl BackendSpawner for GuestMockSpawner {
     async fn spawn(
         &self,
-        request: SpawnRequest,
+        request: BackendSpawnRequest,
     ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
-        spawn_guest_mock_instance(request.instance_id, request.run_dir)
+        spawn_guest_mock_instance(request.instance_id, &request.run_dir)
             .await
             .map_err(SpawnFailure::from)
     }
@@ -445,7 +539,7 @@ impl BackendSpawner for GuestMockSpawner {
         Ok(true)
     }
 
-    async fn cleanup_orphan(&self, _instance_id: Uuid, _run_dir: &Path) -> Result<()> {
+    async fn cleanup_orphan(&self, _instance_id: Uuid, _run_dir: &OwnedRunDir) -> Result<()> {
         Ok(())
     }
 }
@@ -462,10 +556,9 @@ struct GuestMockInstance {
 #[cfg(test)]
 async fn spawn_guest_mock_instance(
     instance_id: Uuid,
-    run_dir: PathBuf,
+    run_dir: &OwnedRunDir,
 ) -> Result<DynBackendInstance> {
-    tokio::fs::create_dir_all(&run_dir).await?;
-    let socket = run_dir.join("vsock.uds");
+    let socket = run_dir.path().join("vsock.uds");
     if socket.exists() {
         tokio::fs::remove_file(&socket).await?;
     }
@@ -1056,24 +1149,116 @@ mod tests {
 
     use super::*;
 
-    fn request(root: &Path) -> SpawnRequest {
+    fn request(root: &Path) -> BackendSpawnRequest {
         let id = Uuid::new_v4();
         let slot_dir = root.join("slot");
-        SpawnRequest {
-            instance_id: id,
-            run_dir: root.join("run"),
-            binary_path: PathBuf::new(),
-            storage: StorageSlot {
-                id: id.to_string(),
-                rootfs_path: slot_dir.join("rootfs.ext4"),
-                mem_path: slot_dir.join("mem.bin"),
-                mem_diff_path: slot_dir.join("mem.diff"),
-                rootfs_diff_path: slot_dir.join("rootfs.diff"),
-                instance_dir: slot_dir,
+        BackendSpawnRequest::new(
+            SpawnRequest {
+                instance_id: id,
+                binary_path: PathBuf::new(),
+                storage: StorageSlot {
+                    id: id.to_string(),
+                    rootfs_path: slot_dir.join("rootfs.ext4"),
+                    mem_path: slot_dir.join("mem.bin"),
+                    mem_diff_path: slot_dir.join("mem.diff"),
+                    rootfs_diff_path: slot_dir.join("rootfs.diff"),
+                    instance_dir: slot_dir,
+                },
+                backend: BackendConfigs::default(),
+                vm: None,
             },
-            backend: BackendConfigs::default(),
-            vm: None,
+            OwnedRunDir::for_test(id, root.join("run")),
+        )
+        .expect("matching backend request")
+    }
+
+    #[test]
+    fn backend_request_rejects_a_mismatched_runtime_owner() {
+        let temp = tempfile::tempdir().expect("temp");
+        let mut request = request(temp.path());
+        request.request.instance_id = Uuid::new_v4();
+        assert!(
+            BackendSpawnRequest::new(request.request.clone(), request.run_dir.clone()).is_err()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    struct PartialPathOwner {
+        marker: PathBuf,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[async_trait]
+    impl BackendInstance for PartialPathOwner {
+        fn backend(&self) -> BackendKind {
+            BackendKind::Mock
         }
+
+        async fn try_wait(&self) -> Result<Option<SpawnResult>> {
+            Ok(None)
+        }
+
+        async fn kill(&self) -> Result<()> {
+            std::fs::write(&self.marker, b"partial owner")?;
+            Ok(())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    struct PartialPathSpawner;
+
+    #[cfg(target_os = "linux")]
+    #[async_trait]
+    impl BackendSpawner for PartialPathSpawner {
+        async fn spawn(
+            &self,
+            request: BackendSpawnRequest,
+        ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
+            let owner: DynBackendInstance = Arc::new(PartialPathOwner {
+                marker: request.run_dir.path().join("partial-owner-marker"),
+            });
+            Err(SpawnFailure::with_owner(
+                BlazeError::BackendError {
+                    msg: "injected partial start".into(),
+                },
+                owner,
+            ))
+        }
+
+        async fn probe(&self, _binary_path: &Path) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn cleanup_orphan(&self, _instance_id: Uuid, _run_dir: &OwnedRunDir) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn partial_spawn_failure_retains_the_runtime_directory_owner() {
+        let temp = tempfile::tempdir().expect("temp");
+        let request = request(temp.path());
+        let failure = match spawn_with_runtime_directory(&PartialPathSpawner, request).await {
+            Ok(_) => panic!("partial spawn must fail"),
+            Err(failure) => failure,
+        };
+        let (source, owner) = failure.into_parts();
+        assert!(source.to_string().contains("injected partial start"));
+        let owner = owner.expect("partial backend owner");
+
+        let configured_run_dir = temp.path().join("run");
+        let owned_run_dir = temp.path().join("owned-partial-run");
+        std::fs::rename(&configured_run_dir, &owned_run_dir).expect("move owned runtime directory");
+        std::fs::create_dir(&configured_run_dir).expect("replacement runtime directory");
+
+        owner.kill().await.expect("use retained runtime owner");
+
+        assert_eq!(
+            std::fs::read(owned_run_dir.join("partial-owner-marker")).expect("owned marker"),
+            b"partial owner"
+        );
+        assert!(!configured_run_dir.join("partial-owner-marker").exists());
     }
 
     #[cfg(target_os = "linux")]
@@ -1114,12 +1299,19 @@ mod tests {
     #[tokio::test]
     async fn test_guest_instance_supports_io_and_idempotent_kill() {
         let temp = tempfile::tempdir().expect("temp");
-        let instance = GuestMockSpawner
-            .spawn(request(temp.path()))
+        let request = request(temp.path());
+        let run_dir = request.run_dir.clone();
+        let instance = spawn_with_runtime_directory(&GuestMockSpawner, request)
             .await
             .expect("spawn");
+        drop(run_dir);
+        let configured_run_dir = temp.path().join("run");
+        let owned_run_dir = temp.path().join("owned-run");
+        std::fs::rename(&configured_run_dir, &owned_run_dir).expect("move owned runtime directory");
+        std::fs::create_dir(&configured_run_dir).expect("replacement runtime directory");
+        assert_eq!(instance.backend(), BackendKind::Mock);
         let client = GuestClient::new(
-            temp.path().join("run/vsock.uds"),
+            instance.guest_socket_path().to_path_buf(),
             Duration::from_secs(1),
             1024,
         );
@@ -1131,6 +1323,8 @@ mod tests {
             client.read_file("/tmp/value".into()).await.expect("read"),
             b"hello"
         );
+        assert!(owned_run_dir.join("vsock.uds").exists());
+        assert!(!configured_run_dir.join("vsock.uds").exists());
         assert_eq!(instance.try_wait().await.expect("try wait"), None);
         instance.kill().await.expect("kill");
         assert!(instance.try_wait().await.expect("try wait").is_some());

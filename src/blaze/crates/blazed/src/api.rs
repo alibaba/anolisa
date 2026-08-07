@@ -778,7 +778,7 @@ mod tests {
 
     use async_trait::async_trait;
     use blaze_core::BlazeError;
-    use blaze_core::backend::{BackendKind, SpawnRequest};
+    use blaze_core::backend::BackendKind;
     use blaze_core::config::DaemonConfig;
     use blaze_core::kernel::HookRegistry;
     use blaze_core::lifecycle::{BackendOwnership, OperationKind};
@@ -795,10 +795,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     use crate::spawner::BubblewrapSpawner;
     use crate::spawner::{
-        BackendInstance, BackendSpawner, DynBackendInstance, DynSpawner, GuestMockSpawner,
-        MockSpawner, SpawnFailure, SpawnResult, SpawnerRegistry,
+        BackendInstance, BackendSpawnRequest, BackendSpawner, DynBackendInstance, DynSpawner,
+        GuestMockSpawner, MockSpawner, SpawnFailure, SpawnResult, SpawnerRegistry,
     };
     use crate::state::ServerState;
+    use crate::state_store::OwnedRunDir;
     #[cfg(target_os = "linux")]
     use tokio::sync::Notify;
 
@@ -1114,7 +1115,7 @@ mod tests {
     impl BackendSpawner for PartialSpawnSpawner {
         async fn spawn(
             &self,
-            request: SpawnRequest,
+            request: BackendSpawnRequest,
         ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
             let owner: DynBackendInstance = Arc::new(FailOnceOwner {
                 instance_id: request.instance_id,
@@ -1135,7 +1136,7 @@ mod tests {
         async fn cleanup_orphan(
             &self,
             _instance_id: Uuid,
-            _run_dir: &Path,
+            _run_dir: &OwnedRunDir,
         ) -> blaze_core::Result<()> {
             Err(BlazeError::BackendError {
                 msg: "partial owner must remain registered".into(),
@@ -1151,13 +1152,13 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[async_trait]
     impl BackendSpawner for PreSpawnBoundarySpawner {
-        async fn prepare_spawn(&self, run_dir: &Path) -> blaze_core::Result<()> {
+        async fn prepare_spawn(&self, run_dir: &OwnedRunDir) -> blaze_core::Result<()> {
             BubblewrapSpawner.prepare_spawn(run_dir).await
         }
 
         async fn spawn(
             &self,
-            _request: SpawnRequest,
+            _request: BackendSpawnRequest,
         ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
             self.reached.notify_one();
             std::future::pending().await
@@ -1170,7 +1171,7 @@ mod tests {
         async fn cleanup_orphan(
             &self,
             instance_id: Uuid,
-            run_dir: &Path,
+            run_dir: &OwnedRunDir,
         ) -> blaze_core::Result<()> {
             BubblewrapSpawner.cleanup_orphan(instance_id, run_dir).await
         }
@@ -1184,7 +1185,7 @@ mod tests {
     impl BackendSpawner for RecordingSpawner {
         async fn spawn(
             &self,
-            _request: SpawnRequest,
+            _request: BackendSpawnRequest,
         ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
             Err(SpawnFailure::clean(BlazeError::BackendError {
                 msg: "spawn not used".into(),
@@ -1198,7 +1199,7 @@ mod tests {
         async fn cleanup_orphan(
             &self,
             _instance_id: Uuid,
-            _run_dir: &Path,
+            _run_dir: &OwnedRunDir,
         ) -> blaze_core::Result<()> {
             self.cleanup_count.fetch_add(1, Ordering::AcqRel);
             Ok(())
@@ -1214,7 +1215,7 @@ mod tests {
     impl BackendSpawner for SelectiveCleanupSpawner {
         async fn spawn(
             &self,
-            request: SpawnRequest,
+            request: BackendSpawnRequest,
         ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
             MockSpawner.spawn(request).await
         }
@@ -1226,7 +1227,7 @@ mod tests {
         async fn cleanup_orphan(
             &self,
             instance_id: Uuid,
-            _run_dir: &Path,
+            _run_dir: &OwnedRunDir,
         ) -> blaze_core::Result<()> {
             self.cleanup_count.fetch_add(1, Ordering::AcqRel);
             if instance_id == self.failed_id {
@@ -1275,7 +1276,7 @@ mod tests {
     impl BackendSpawner for CountingSpawner {
         async fn spawn(
             &self,
-            request: SpawnRequest,
+            request: BackendSpawnRequest,
         ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
             Ok(Arc::new(CountingOwner {
                 instance_id: request.instance_id,
@@ -1291,7 +1292,7 @@ mod tests {
         async fn cleanup_orphan(
             &self,
             _instance_id: Uuid,
-            _run_dir: &Path,
+            _run_dir: &OwnedRunDir,
         ) -> blaze_core::Result<()> {
             self.orphan_cleanup_count.fetch_add(1, Ordering::AcqRel);
             Ok(())
@@ -2206,10 +2207,12 @@ mod tests {
             .expect("creating");
         instance.begin_operation(OperationKind::Create);
         let run_dir = config.daemon.state_dir.join(instance.id.to_string());
+        let run_dir_owner = OwnedRunDir::for_test(instance.id, run_dir.clone());
         BubblewrapSpawner
-            .prepare_spawn(&run_dir)
+            .prepare_spawn(&run_dir_owner)
             .await
             .expect("prepare PID handoff");
+        drop(run_dir_owner);
         instance.backend_ownership = BackendOwnership::Starting;
         instance
             .persist(&config.daemon.state_dir)
@@ -2363,11 +2366,17 @@ mod tests {
         );
         assert!(instances_dir.join(instance.id.to_string()).is_dir());
         assert!(state.manager.backend_owner(instance.id).is_some());
+        assert!(state.state_store.run_dir(instance.id).is_ok());
 
         destroy_instance(&state, &instance.id.to_string())
             .await
             .expect("retry destroy");
         assert!(!instances_dir.join(instance.id.to_string()).exists());
+        assert!(state.manager.backend_owner(instance.id).is_none());
+        assert!(matches!(
+            state.state_store.run_dir(instance.id),
+            Err(BlazeDaemonError::NotFound(_))
+        ));
         assert_eq!(
             state.instances.lock().expect("instances")[&instance.id].state,
             SandboxState::Destroyed
@@ -2610,10 +2619,84 @@ mod tests {
         assert_ne!(replacement["instance"]["id"], id);
         assert_eq!(replacement["start_path"], "cold");
         let uuid = Uuid::parse_str(&id).expect("uuid");
+        let replacement_id = Uuid::parse_str(
+            replacement["instance"]["id"]
+                .as_str()
+                .expect("replacement id"),
+        )
+        .expect("replacement uuid");
         assert_eq!(
             state.instances.lock().expect("instances")[&uuid].state,
             SandboxState::Destroyed
         );
+        assert!(matches!(
+            state.state_store.run_dir(uuid),
+            Err(BlazeDaemonError::NotFound(_))
+        ));
+        assert!(state.state_store.run_dir(replacement_id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn warm_quarantine_cleanup_failure_retains_resources_for_destroy_retry() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let instances_dir = config.storage.instances_dir.clone();
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config,
+            test_policy(BackendKind::Mock, true),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+        let request = test_request();
+        let cold = created_json(&state, &request).await;
+        let id = cold["instance"]["id"].as_str().expect("id").to_string();
+        let uuid = Uuid::parse_str(&id).expect("uuid");
+        reset_instance(&state, &id).await.expect("warm");
+        state
+            .manager
+            .insert_backend_owner(
+                uuid,
+                Arc::new(FailOnceOwner {
+                    instance_id: uuid,
+                    attempts: AtomicUsize::new(0),
+                }),
+            )
+            .expect("replace backend owner");
+        std::fs::remove_file(instances_dir.join(&id).join("mem.bin")).expect("remove artifact");
+
+        let replacement = created_json(&state, &request).await;
+
+        assert_ne!(replacement["instance"]["id"], id);
+        let retained = state.instances.lock().expect("instances")[&uuid].clone();
+        assert_eq!(retained.state, SandboxState::RecoveryRequired);
+        assert_eq!(retained.backend_ownership, BackendOwnership::Running);
+        assert_eq!(
+            retained.operation.as_ref().map(|operation| operation.kind),
+            Some(OperationKind::Destroy)
+        );
+        assert!(state.manager.backend_owner(uuid).is_some());
+        assert!(state.state_store.run_dir(uuid).is_ok());
+        assert!(instances_dir.join(&id).is_dir());
+
+        destroy_instance(&state, &id)
+            .await
+            .expect("retry quarantined destroy");
+
+        assert_eq!(
+            state.instances.lock().expect("instances")[&uuid].state,
+            SandboxState::Destroyed
+        );
+        assert!(state.manager.backend_owner(uuid).is_none());
+        assert!(matches!(
+            state.state_store.run_dir(uuid),
+            Err(BlazeDaemonError::NotFound(_))
+        ));
+        assert!(!instances_dir.join(&id).exists());
     }
 
     #[cfg(feature = "test-failpoints")]
@@ -3113,6 +3196,7 @@ mod tests {
         assert_eq!(persisted.backend_ownership, BackendOwnership::Running);
         assert!(persisted.operation.is_none());
         assert!(temp.path().join("instances").join(&id).is_dir());
+        assert!(state.state_store.run_dir(uuid).is_ok());
 
         destroy_instance(&state, &id).await.expect("destroy retry");
         assert_eq!(kill_count.load(Ordering::Acquire), 1);
@@ -3127,6 +3211,10 @@ mod tests {
             .expect("persisted destroyed state");
         assert_eq!(persisted.state, SandboxState::Destroyed);
         assert!(persisted.operation.is_none());
+        assert!(matches!(
+            state.state_store.run_dir(uuid),
+            Err(BlazeDaemonError::NotFound(_))
+        ));
     }
 
     #[cfg(feature = "test-failpoints")]
@@ -3166,6 +3254,7 @@ mod tests {
             Some(OperationKind::Destroy)
         );
         assert!(temp.path().join("instances").join(&id).is_dir());
+        assert!(state.state_store.run_dir(uuid).is_ok());
 
         destroy_instance(&state, &id).await.expect("destroy retry");
         assert_eq!(kill_count.load(Ordering::Acquire), 1);
@@ -3176,6 +3265,10 @@ mod tests {
             .expect("persisted destroyed state");
         assert_eq!(persisted.state, SandboxState::Destroyed);
         assert!(persisted.operation.is_none());
+        assert!(matches!(
+            state.state_store.run_dir(uuid),
+            Err(BlazeDaemonError::NotFound(_))
+        ));
     }
 
     #[cfg(feature = "test-failpoints")]
@@ -3215,6 +3308,7 @@ mod tests {
             persisted.operation.as_ref().map(|operation| operation.kind),
             Some(OperationKind::Destroy)
         );
+        assert!(state.state_store.run_dir(uuid).is_ok());
 
         destroy_instance(&state, &id).await.expect("destroy retry");
         assert_eq!(kill_count.load(Ordering::Acquire), 1);
@@ -3228,6 +3322,10 @@ mod tests {
             .expect("persisted destroyed state");
         assert_eq!(persisted.state, SandboxState::Destroyed);
         assert!(persisted.operation.is_none());
+        assert!(matches!(
+            state.state_store.run_dir(uuid),
+            Err(BlazeDaemonError::NotFound(_))
+        ));
     }
 
     #[cfg(feature = "test-failpoints")]

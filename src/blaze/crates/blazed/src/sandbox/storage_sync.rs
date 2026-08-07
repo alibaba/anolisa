@@ -464,9 +464,10 @@ mod tests {
     use crate::sandbox::manager::{SandboxManagerInit, SandboxManagerResources};
     use crate::sandbox::template::TemplateCatalog;
     use crate::spawner::{
-        BackendInstance, BackendSpawner, MockSpawner, SpawnResult, SpawnerRegistry,
+        BackendInstance, BackendSpawnRequest, MockSpawner, SpawnResult, SpawnerRegistry,
+        spawn_with_runtime_directory,
     };
-    use crate::state_store::StateStore;
+    use crate::state_store::{OwnedRunDir, StateStore};
 
     use super::*;
 
@@ -752,17 +753,24 @@ mod tests {
                 rootfs_diff_path: PathBuf::new(),
                 instance_dir: PathBuf::new(),
             });
-            let owner = MockSpawner
-                .spawn(SpawnRequest {
-                    instance_id: id,
-                    run_dir,
-                    binary_path: PathBuf::new(),
-                    storage: slot,
-                    backend: BackendConfigs::default(),
-                    vm: None,
-                })
-                .await
-                .expect("mock owner");
+            let run_dir = OwnedRunDir::for_test(id, run_dir);
+            let owner = spawn_with_runtime_directory(
+                &MockSpawner,
+                BackendSpawnRequest::new(
+                    SpawnRequest {
+                        instance_id: id,
+                        binary_path: PathBuf::new(),
+                        storage: slot,
+                        backend: BackendConfigs::default(),
+                        vm: None,
+                    },
+                    run_dir.clone(),
+                )
+                .expect("matching backend request"),
+            )
+            .await
+            .expect("mock owner");
+            drop(run_dir);
             manager
                 .insert_backend_owner(id, owner)
                 .expect("register owner");

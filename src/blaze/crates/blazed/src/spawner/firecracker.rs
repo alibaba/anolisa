@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use blaze_core::backend::{BackendKind, SpawnRequest};
+use blaze_core::backend::BackendKind;
+#[cfg(test)]
+use blaze_core::backend::SpawnRequest;
 use blaze_core::policy::{FirecrackerConfig, VmConfig, parse_memory_value, to_mib_ceil};
 use blaze_core::{BlazeError, Result};
 use tokio::net::UnixStream;
@@ -21,9 +23,9 @@ use super::netns::{NetworkManager, NetworkSlot};
 #[cfg(target_os = "linux")]
 use super::terminate_recorded_process;
 use super::{
-    BackendInstance, BackendSpawner, DynBackendInstance, SpawnFailure, SpawnResult,
-    configure_pid_handoff, prepare_pid_handoff, record_backend_stopped, remove_file_if_exists,
-    spawn_result, stopped_marker, terminate_child,
+    BackendInstance, BackendSpawnRequest, BackendSpawner, DynBackendInstance, OwnedRunDir,
+    SpawnFailure, SpawnResult, configure_pid_handoff, prepare_pid_handoff, record_backend_stopped,
+    remove_file_if_exists, spawn_result, stopped_marker, terminate_child,
 };
 
 const NETWORK_BOOT_IP: &str = "ip=169.254.0.2::169.254.0.1:255.255.255.252::eth0:off";
@@ -84,17 +86,16 @@ impl FirecrackerSpawner {
 
     async fn start(
         &self,
-        request: SpawnRequest,
+        request: BackendSpawnRequest,
     ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
         validate_regular_file(&request.binary_path, "firecracker binary")?;
         validate_regular_file(&request.storage.rootfs_path, "rootfs")?;
         validate_regular_file(&self.images_dir.join("vmlinux"), "vmlinux")?;
-        tokio::fs::create_dir_all(&request.run_dir).await?;
-        let api_socket = request.run_dir.join("api.sock");
-        let guest_socket = request.run_dir.join("vsock.uds");
-        let pid_file = request.run_dir.join("firecracker.pid");
-        let stopped_marker = stopped_marker(&request.run_dir);
-        let network_file = request.run_dir.join("network.json");
+        let api_socket = request.run_dir.path().join("api.sock");
+        let guest_socket = request.run_dir.path().join("vsock.uds");
+        let pid_file = request.run_dir.path().join("firecracker.pid");
+        let stopped_marker = stopped_marker(request.run_dir.path());
+        let network_file = request.run_dir.path().join("network.json");
         let network_temp_file = network_metadata_temp(&network_file);
         remove_if_exists(&api_socket).await?;
         remove_if_exists(&guest_socket).await?;
@@ -201,6 +202,7 @@ impl FirecrackerSpawner {
             &api_socket,
             request.instance_id,
         );
+        request.run_dir.inherit_into(&mut command);
         let config_path = match write_vm_config(
             &self.images_dir,
             &request,
@@ -227,7 +229,9 @@ impl FirecrackerSpawner {
             }
         };
         command.arg("--config-file").arg(config_path);
-        if let Err(error) = configure_logs(&mut command, &request.run_dir, fc_config.serial_log) {
+        if let Err(error) =
+            configure_logs(&mut command, request.run_dir.path(), fc_config.serial_log)
+        {
             return Err(self
                 .compensate_before_spawn(
                     request.instance_id,
@@ -362,14 +366,13 @@ impl FirecrackerSpawner {
 
 #[async_trait]
 impl BackendSpawner for FirecrackerSpawner {
-    async fn prepare_spawn(&self, run_dir: &Path) -> Result<()> {
-        tokio::fs::create_dir_all(run_dir).await?;
-        prepare_pid_handoff(&run_dir.join("firecracker.pid"))
+    async fn prepare_spawn(&self, run_dir: &OwnedRunDir) -> Result<()> {
+        prepare_pid_handoff(&run_dir.path().join("firecracker.pid"))
     }
 
     async fn spawn(
         &self,
-        request: SpawnRequest,
+        request: BackendSpawnRequest,
     ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
         self.start(request).await
     }
@@ -393,8 +396,8 @@ impl BackendSpawner for FirecrackerSpawner {
         }
     }
 
-    async fn cleanup_orphan(&self, instance_id: Uuid, run_dir: &Path) -> Result<()> {
-        cleanup_orphan_run_dir_with(instance_id, run_dir, &self.network).await
+    async fn cleanup_orphan(&self, instance_id: Uuid, run_dir: &OwnedRunDir) -> Result<()> {
+        cleanup_orphan_run_dir_with(instance_id, run_dir.path(), &self.network).await
     }
 }
 
@@ -542,7 +545,7 @@ impl FirecrackerInstance {
 
 fn write_vm_config(
     images_dir: &Path,
-    request: &SpawnRequest,
+    request: &BackendSpawnRequest,
     config: &FirecrackerConfig,
     guest_socket: &Path,
     network: Option<&NetworkSlot>,
@@ -607,7 +610,7 @@ fn write_vm_config(
             "host_dev_name": network.tap_name()
         }]);
     }
-    let path = request.run_dir.join("vmconfig.json");
+    let path = request.run_dir.path().join("vmconfig.json");
     std::fs::write(
         &path,
         serde_json::to_vec_pretty(&value).map_err(|error| BlazeError::BackendError {
@@ -1684,26 +1687,28 @@ mod tests {
         assert!(!pid_file.exists());
     }
 
-    fn spawn_request(root: &Path) -> SpawnRequest {
+    fn spawn_request(root: &Path) -> BackendSpawnRequest {
         let instance_id = Uuid::new_v4();
         let run_dir = root.join("run");
-        std::fs::create_dir_all(&run_dir).expect("run dir");
         let slot_dir = root.join("slot");
-        SpawnRequest {
-            instance_id,
-            run_dir,
-            binary_path: root.join("firecracker"),
-            storage: StorageSlot {
-                id: instance_id.to_string(),
-                rootfs_path: slot_dir.join("rootfs.ext4"),
-                mem_path: slot_dir.join("mem.bin"),
-                mem_diff_path: slot_dir.join("mem.diff"),
-                rootfs_diff_path: slot_dir.join("rootfs.diff"),
-                instance_dir: slot_dir,
+        BackendSpawnRequest::new(
+            SpawnRequest {
+                instance_id,
+                binary_path: root.join("firecracker"),
+                storage: StorageSlot {
+                    id: instance_id.to_string(),
+                    rootfs_path: slot_dir.join("rootfs.ext4"),
+                    mem_path: slot_dir.join("mem.bin"),
+                    mem_diff_path: slot_dir.join("mem.diff"),
+                    rootfs_diff_path: slot_dir.join("rootfs.diff"),
+                    instance_dir: slot_dir,
+                },
+                backend: blaze_core::policy::BackendConfigs::default(),
+                vm: None,
             },
-            backend: blaze_core::policy::BackendConfigs::default(),
-            vm: None,
-        }
+            OwnedRunDir::for_test(instance_id, run_dir),
+        )
+        .expect("matching backend request")
     }
 
     #[derive(Default)]

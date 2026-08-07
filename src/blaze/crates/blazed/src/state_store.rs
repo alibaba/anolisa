@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Daemon-owned access to persisted sandbox lifecycle state.
+//! Daemon-owned access to persisted sandbox state and runtime directories.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -27,7 +27,7 @@ const TEMP_STATE_FILE: &str = "state.json.tmp";
 /// Central access point for the daemon state directory.
 ///
 /// The store holds the opened state-root object for its complete lifetime.
-/// Record I/O and stable per-sandbox paths are derived from that object rather
+/// Record I/O and runtime-directory paths are derived from that object rather
 /// than reopening the configured pathname.
 #[derive(Clone)]
 pub struct StateStore {
@@ -46,11 +46,11 @@ enum RunDirEntry {
     Released,
 }
 
-/// A cloneable owner of one sandbox lifecycle-record directory.
+/// A cloneable owner of one sandbox runtime directory.
 ///
-/// The handle keeps the opened directory object alive while lifecycle records
-/// are read or replaced. Existing path-based backend callers receive an alias
-/// that resolves through the retained descriptor.
+/// The handle keeps the opened directory object alive while lifecycle and
+/// backend work use it. Its stable path resolves through that descriptor on
+/// Linux, so replacing the configured pathname cannot redirect later work.
 #[derive(Clone)]
 pub(crate) struct OwnedRunDir {
     inner: Arc<OwnedRunDirInner>,
@@ -675,11 +675,7 @@ fn is_state_staging_name(name: &str) -> bool {
 impl OwnedRunDir {
     fn new(instance_id: Uuid, configured_path: PathBuf, directory: OwnedFd) -> Self {
         #[cfg(target_os = "linux")]
-        let stable_path = PathBuf::from(format!(
-            "/proc/{}/fd/{}",
-            std::process::id(),
-            directory.as_raw_fd()
-        ));
+        let stable_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
         #[cfg(not(target_os = "linux"))]
         let stable_path = configured_path.clone();
         Self {
@@ -693,12 +689,50 @@ impl OwnedRunDir {
         }
     }
 
+    pub(crate) fn path(&self) -> &Path {
+        &self.inner.stable_path
+    }
+
+    pub(crate) fn instance_id(&self) -> Uuid {
+        self.inner.instance_id
+    }
+
     fn same_object(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
-    pub(crate) fn path(&self) -> &Path {
-        &self.inner.stable_path
+    #[cfg(target_os = "linux")]
+    pub(crate) fn inherit_into(&self, command: &mut tokio::process::Command) {
+        use std::os::unix::process::CommandExt;
+
+        let owner = self.clone();
+        // SAFETY: `fcntl` is async-signal-safe. The closure only changes the
+        // child-side copy of a descriptor retained through the spawn call.
+        unsafe {
+            command.as_std_mut().pre_exec(move || {
+                let descriptor = owner.inner.directory.as_raw_fd();
+                if libc::fcntl(descriptor, libc::F_SETFD, 0) == -1 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn inherit_into(&self, _command: &mut tokio::process::Command) {}
+
+    #[cfg(test)]
+    pub(crate) fn for_test(instance_id: Uuid, path: PathBuf) -> Self {
+        std::fs::create_dir_all(&path).expect("test runtime directory");
+        let directory = open(
+            &path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("open test runtime directory");
+        Self::new(instance_id, path, directory)
     }
 }
 
@@ -1057,7 +1091,13 @@ mod tests {
         store.persist(&instance).expect("persist recovery record");
 
         assert_eq!(store.retained_run_dir_count(), 1);
-        assert!(store.run_dir(instance.id).is_ok());
+        assert_eq!(
+            store
+                .run_dir(instance.id)
+                .expect("recovery runtime owner")
+                .instance_id(),
+            instance.id
+        );
     }
 
     #[test]
@@ -1136,6 +1176,42 @@ mod tests {
                 Err(BlazeDaemonError::NotFound(_))
             ));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn child_inherits_the_owned_runtime_directory() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("state");
+        std::fs::create_dir(&root).expect("state directory");
+        let store = StateStore::new(root.clone());
+        let instance = instance();
+        store.persist(&instance).expect("initial persist");
+        let runtime_owner = store.run_dir(instance.id).expect("runtime owner");
+
+        let configured_run_dir = root.join(instance.id.to_string());
+        let owned_run_dir = root.join("owned-child-run-dir");
+        std::fs::rename(&configured_run_dir, &owned_run_dir).expect("move owned run directory");
+        std::fs::create_dir(&configured_run_dir).expect("replacement run directory");
+
+        let marker = runtime_owner.path().join("child-marker");
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("printf child > \"$1\"")
+            .arg("sh")
+            .arg(marker);
+        runtime_owner.inherit_into(&mut command);
+        drop(runtime_owner);
+        drop(store);
+        let status = command.status().await.expect("run child");
+
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read(owned_run_dir.join("child-marker")).expect("owned child marker"),
+            b"child"
+        );
+        assert!(!configured_run_dir.join("child-marker").exists());
     }
 
     #[test]
