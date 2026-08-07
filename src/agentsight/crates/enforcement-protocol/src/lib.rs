@@ -721,6 +721,7 @@ mod tests {
             PolicyDecision {
                 policy_id: "credential-exfiltration".into(),
                 policy_revision: 1,
+                rule_id: None,
                 source_event_id: Uuid::new_v4(),
                 sink_event_id: Uuid::new_v4(),
                 mode: PolicyMode::Audit,

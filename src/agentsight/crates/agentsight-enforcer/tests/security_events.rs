@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use agentsight_enforcement_protocol::{
     ApplyCredentialPolicy, ApplyPolicy, Command, CredentialExfiltrationPolicy, DestinationClass,
-    DestinationScope, PolicyMode, Request, Response, ResponseBody, SecurityEvent,
-    SecurityEventKind, read_frame, write_frame,
+    DestinationScope, PolicyMode, ProductPolicyClassification, Request, Response, ResponseBody,
+    SecurityEvent, SecurityEventKind, read_frame, write_frame,
 };
 use agentsight_enforcer::{EnforcementBackend, EnforcerService, MockBackend};
 use uuid::Uuid;
@@ -145,6 +145,73 @@ fn product_policy(mode: PolicyMode, taint_ttl_secs: u64) -> ApplyCredentialPolic
             mode,
             classification: None,
         },
+    }
+}
+
+#[test]
+fn product_policy_preserves_agentloop_classification_on_every_system_fact() {
+    let backend = MockBackend::new();
+    let mut request = product_policy(PolicyMode::Audit, 60);
+    request.policy.policy_id = "agentloop-sensitive-data-outbound".into();
+    request.policy.classification = Some(ProductPolicyClassification {
+        rule_id: "cloud-credential-to-public-network".into(),
+        risk_type: "sensitive_data_outbound_exposure".into(),
+        risk_subtype: "secret.cloud_access_key".into(),
+    });
+    let binding_id = request.binding_id;
+    backend
+        .apply_credential_policy(request)
+        .expect("AgentLoop policy should apply");
+    let receiver = backend.subscribe_security_events();
+
+    backend
+        .emit_credential_exfiltration(binding_id, "/home/test/.aws/credentials", "8.8.8.8:443")
+        .expect("canonical chain should emit");
+
+    let events = (0..4)
+        .map(|_| receiver.recv().expect("canonical event should arrive"))
+        .collect::<Vec<_>>();
+    for event in &events {
+        match &event.kind {
+            SecurityEventKind::FileAction(action) => {
+                assert_eq!(action.policy_id, "agentloop-sensitive-data-outbound");
+                assert_eq!(action.policy_revision, 4);
+                assert_eq!(action.resource_class, "secret.cloud_access_key");
+                assert_eq!(
+                    action.rule_id.as_deref(),
+                    Some("cloud-credential-to-public-network")
+                );
+            }
+            SecurityEventKind::TaintTransition(transition) => {
+                assert_eq!(transition.policy_id, "agentloop-sensitive-data-outbound");
+                assert_eq!(transition.policy_revision, 4);
+                assert_eq!(
+                    transition.rule_id.as_deref(),
+                    Some("cloud-credential-to-public-network")
+                );
+            }
+            SecurityEventKind::NetworkAction(action) => {
+                assert_eq!(action.policy_id, "agentloop-sensitive-data-outbound");
+                assert_eq!(action.policy_revision, 4);
+                assert_eq!(
+                    action.rule_id.as_deref(),
+                    Some("cloud-credential-to-public-network")
+                );
+            }
+            SecurityEventKind::PolicyDecision(decision) => {
+                assert_eq!(decision.policy_id, "agentloop-sensitive-data-outbound");
+                assert_eq!(decision.policy_revision, 4);
+                assert_eq!(
+                    decision.rule_id.as_deref(),
+                    Some("cloud-credential-to-public-network")
+                );
+                assert_eq!(decision.mode, PolicyMode::Audit);
+                assert!(!decision.blocked);
+            }
+            SecurityEventKind::EnforcementState(_) => {
+                panic!("canonical credential chain must not emit an enforcement state")
+            }
+        }
     }
 }
 

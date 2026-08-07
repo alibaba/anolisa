@@ -134,6 +134,9 @@ pub struct TaintTransition {
     pub policy_id: String,
     /// Immutable numeric policy revision.
     pub policy_revision: u64,
+    /// Product rule identifier when supplied by the policy owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
     /// Stable taint label name.
     pub label: String,
     /// Label lifecycle operation.
@@ -285,6 +288,9 @@ pub struct PolicyDecision {
     pub policy_id: String,
     /// Immutable numeric policy revision.
     pub policy_revision: u64,
+    /// Product rule identifier when supplied by the policy owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
     /// File event that introduced the sensitive label.
     pub source_event_id: Uuid,
     /// Network event that triggered evaluation.
@@ -585,6 +591,7 @@ mod tests {
             PolicyDecision {
                 policy_id: "credential-exfiltration".into(),
                 policy_revision: 3,
+                rule_id: Some("cloud-credential-to-public-network".into()),
                 source_event_id: Uuid::new_v4(),
                 sink_event_id: Uuid::new_v4(),
                 mode: PolicyMode::Enforce,
@@ -677,6 +684,7 @@ mod tests {
             PolicyDecision {
                 policy_id: "credential-exfiltration".into(),
                 policy_revision: 3,
+                rule_id: None,
                 source_event_id: Uuid::new_v4(),
                 sink_event_id: Uuid::new_v4(),
                 mode: PolicyMode::Audit,

@@ -388,6 +388,7 @@ mod tests {
             SecurityEventKind::TaintTransition(TaintTransition {
                 policy_id: "policy".into(),
                 policy_revision: 1,
+                rule_id: None,
                 label: "SENSITIVE".into(),
                 transition: TaintTransitionKind::Inherit,
                 source_pid: from.0,
