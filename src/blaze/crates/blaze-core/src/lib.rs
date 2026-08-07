@@ -9,6 +9,7 @@
 //! - [`config`]: daemon TOML configuration
 //! - [`policy`]: workload class + policy file schema
 //! - [`backend`]: backend kinds + selection / fallback
+//! - [`guest_protocol`]: guest-agent wire DTOs
 //! - [`lifecycle`]: sandbox state machine + JSON persistence
 //! - [`pool`]: warm-pool key/stat/manager
 //! - [`template`]: template registry + refcnt + GC
@@ -18,6 +19,7 @@
 pub mod backend;
 pub mod config;
 pub mod error;
+pub mod guest_protocol;
 pub mod kernel;
 pub mod lifecycle;
 pub mod policy;

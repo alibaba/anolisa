@@ -163,11 +163,25 @@ openclaw config get plugins.entries.agent-sec.hooks.allowConversationAccess
 openclaw config set plugins.entries.agent-sec.config.promptScanBlock true
 ```
 
+你也可以通过环境变量在部署层覆盖 prompt scanner 行为，这些变量优先于 OpenClaw capability
+配置：
+
+| 环境变量 | 默认值 | 行为 |
+|----------|--------|------|
+| `PROMPT_SCANNER_HOOK_ENABLED` | `true` | 设为 `false` 时完全跳过 prompt-scan hook 注册 |
+| `PROMPT_SCANNER_MODE` | `observe` | 策略模式：`observe` / `warn` / `ask` / `block`；`deny` 等价于 `block` |
+| `PROMPT_SCANNER_SCAN_MODE` | `standard` | 传给 `scan-prompt` 的扫描强度：`fast` / `standard` / `strict` |
+| `PROMPT_SCANNER_TIMEOUT` | `10` | Scanner 超时秒数 |
+
+修改这些变量后需重启 OpenClaw gateway。
+
 启用代码扫描审批：
 
 ```bash
 openclaw config set plugins.entries.agent-sec.config.codeScanRequireApproval true
 ```
+
+如需部署级覆盖，`CODE_SCANNER_HOOK_ENABLED=true|false` 的优先级高于 `capabilities["scan-code"].enabled`，`CODE_SCANNER_MODE=observe|ask|block` 的优先级高于 `codeScanRequireApproval`。`debug` 是 `observe` 的别名，`deny` 是 `block` 的别名，`warn` 或非法值等价于未设置，并回到插件配置。在 `ask` 模式下，普通 findings 返回 `requireApproval`；在 `block` 模式下，普通 findings 返回 `{ block: true, blockReason }`。已有 self-protect 规则仍是不受模式影响的强制 block 例外。OpenClaw 不消费 `CODE_SCANNER_TIMEOUT`，继续使用固定 10 秒超时。
 
 启用 PII deny 阻断：
 

@@ -167,14 +167,17 @@ impl Aggregator {
     ///
     /// Used by crash detection on `ProcMon::Exit` to immediately extract
     /// in-flight connections before the periodic drain check runs.
-    pub fn drain_connections_for_pid(&mut self, pid: u32) -> Vec<(ConnectionId, ConnectionState)> {
+    pub(crate) fn drain_connections_for_pid(
+        &mut self,
+        pid: u32,
+    ) -> Vec<(ConnectionId, ConnectionState)> {
         self.http.drain_connections_for_pid(pid)
     }
 
     /// Drain connections whose PID is no longer alive.
     ///
     /// Delegates to the HTTP aggregator's dead-PID drain.
-    pub fn drain_dead_pid_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
+    pub(crate) fn drain_dead_pid_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
         self.http.drain_dead_pid_connections()
     }
 
@@ -182,7 +185,7 @@ impl Aggregator {
     ///
     /// Used to persist evidence for manually interrupted streams where the
     /// agent process remains alive, so dead-PID draining would never run.
-    pub fn snapshot_idle_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
+    pub(crate) fn snapshot_idle_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
         self.http.snapshot_idle_connections()
     }
 }

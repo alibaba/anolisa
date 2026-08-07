@@ -13,15 +13,24 @@
  *      Response Compression strips noise → TOON eliminates JSON format overhead.
  *
  * Stats are recorded automatically by tokenless compress-response.
- * Context is passed to subprocesses via a per-call env merge (buildEnv()) instead
- * of mutating process.env. Note: envContext itself is a module-level singleton,
- * so concurrent before_tool_call callbacks can still race on agentId/toolCallId.
- * Acceptable today because OpenClaw dispatches tool calls sequentially per
- * session; revisit if that changes.
+ * RTK rewrite and proxy processes receive the same per-call context snapshot;
+ * the rewrite-context file remains a compatibility fallback for launch paths
+ * that do not preserve exec environment overrides.
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, statSync, readFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fchmodSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
 
 // ---- Session ID mapping --------------------------------------------------------
@@ -33,16 +42,45 @@ const sessionMap: Map<string, string> = new Map();
 
 // ---- In-memory env context (replaces global process.env mutation) -------------
 
-const envContext: { agentId: string; sessionId: string; toolCallId: string } = {
+interface TokenlessCallContext {
+  agentId: string;
+  sessionId: string;
+  toolCallId: string;
+}
+
+const envContext: TokenlessCallContext = {
   agentId: "openclaw", sessionId: "", toolCallId: "",
 };
 
-function buildEnv(): Record<string, string> {
+function buildEnv(context: TokenlessCallContext = envContext): Record<string, string> {
   return {
     ...process.env as Record<string, string>,
-    TOKENLESS_AGENT_ID: envContext.agentId,
-    TOKENLESS_SESSION_ID: envContext.sessionId,
-    TOKENLESS_TOOL_USE_ID: envContext.toolCallId,
+    ...buildContextEnv(context),
+  };
+}
+
+function buildContextEnv(context: TokenlessCallContext): Record<string, string> {
+  return {
+    TOKENLESS_AGENT_ID: context.agentId,
+    TOKENLESS_SESSION_ID: context.sessionId,
+    TOKENLESS_TOOL_USE_ID: context.toolCallId,
+  };
+}
+
+function mergeExecContextEnv(
+  params: Record<string, unknown>,
+  context: TokenlessCallContext,
+): Record<string, string> {
+  const existingEnv = params.env;
+  const normalizedEnv = typeof existingEnv === "object"
+    && existingEnv !== null
+    && !Array.isArray(existingEnv)
+    ? existingEnv as Record<string, string>
+    : {};
+
+  return {
+    ...normalizedEnv,
+    ...buildContextEnv(context),
   };
 }
 
@@ -71,6 +109,10 @@ const SYSTEM_BIN = "/usr/local/bin";
 const SYSTEM_LIBEXEC = "/usr/local/libexec/anolisa/tokenless";
 const RPM_BIN = "/usr/bin";
 const USER_HOME = process.env.HOME && isAbsolute(process.env.HOME) ? process.env.HOME : null;
+const REWRITE_CONTEXT_DIR = USER_HOME ? join(USER_HOME, ".tokenless") : null;
+const REWRITE_CONTEXT_FILE = REWRITE_CONTEXT_DIR
+  ? join(REWRITE_CONTEXT_DIR, ".rewrite-context")
+  : null;
 const LOCAL_BIN = USER_HOME ? join(USER_HOME, ".local", "bin") : null;
 const LOCAL_ANOLISA_LIBEXEC = USER_HOME
   ? join(USER_HOME, ".local", "lib", "anolisa", "libexec", "tokenless")
@@ -180,13 +222,13 @@ function checkTokenless(): boolean {
 
 // ---- Subprocess helpers -------------------------------------------------------
 
-function tryRtkRewrite(command: string): string | null {
+function tryRtkRewrite(command: string, context: TokenlessCallContext): string | null {
   try {
     const result = spawnSync(rtkPath, ["rewrite", command], {
       encoding: "utf-8",
       timeout: 2000,
       stdio: ["ignore", "pipe", "pipe"],
-      env: buildEnv(),
+      env: buildEnv(context),
     });
     const rewritten = result.stdout?.trim();
     // Exit code protocol (from rtk rewrite_cmd.rs):
@@ -202,6 +244,49 @@ function tryRtkRewrite(command: string): string | null {
     return null;
   } catch {
     return null;
+  }
+}
+
+function writeRewriteContext(context: TokenlessCallContext): void {
+  if (!REWRITE_CONTEXT_DIR || !REWRITE_CONTEXT_FILE) {
+    console.warn("[tokenless:rtk] cannot persist rewrite context: HOME is unavailable");
+    return;
+  }
+
+  let fd: number | null = null;
+  try {
+    mkdirSync(REWRITE_CONTEXT_DIR, { recursive: true, mode: 0o700 });
+    // O_NOFOLLOW protects only the final component, so reject a symlinked parent.
+    if (!lstatSync(REWRITE_CONTEXT_DIR).isDirectory()) {
+      throw new Error(`rewrite context directory is not a directory: ${REWRITE_CONTEXT_DIR}`);
+    }
+    fd = openSync(
+      REWRITE_CONTEXT_FILE,
+      constants.O_WRONLY
+        | constants.O_CREAT
+        | constants.O_TRUNC
+        | constants.O_NOFOLLOW,
+      0o600,
+    );
+    // The open mode protects new files; fchmod also tightens an existing file.
+    fchmodSync(fd, 0o600);
+    writeFileSync(
+      fd,
+      `${context.agentId}\n${context.sessionId}\n${context.toolCallId}\n`,
+      "utf-8",
+    );
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    const suffix = code ? ` (${code})` : "";
+    console.warn(`[tokenless:rtk] cannot persist rewrite context${suffix}`);
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        // The rewrite must proceed even if closing the fail-soft stats context fails.
+      }
+    }
   }
 }
 
@@ -316,14 +401,15 @@ interface ToolCategories {
 // to ensure consistent behavior across adapters even without the JSON file.
 const FALLBACK_SKIP_TOOLS: string[] = [
   "Read", "read", "read_file", "read_many_files",
-  "Glob", "glob", "list_directory",
-  "Grep", "grep", "grep_search", "search_files",
+  "Glob", "glob", "search_file", "list_directory", "list_dir",
+  "Grep", "grep", "grep_code", "grep_search", "search_files",
   "Lsp", "lsp",
   "NotebookRead", "notebook_read", "notebookread",
 ];
 const FALLBACK_SHELL_TOOLS: string[] = [
   "Bash", "bash", "Shell", "shell", "exec", "terminal",
-  "run_shell_command", "execute_command", "process",
+  "run_shell_command", "run_in_terminal", "get_terminal_output",
+  "execute_command", "process",
 ];
 
 function loadToolCategories(): ToolCategories {
@@ -478,19 +564,35 @@ export default {
         const command = event.params?.command;
         if (typeof command !== "string") return;
 
-        // Update env context for RTK and response compression
-        envContext.agentId = "openclaw";
-        if (ctx?.sessionId) envContext.sessionId = ctx.sessionId;
-        if (ctx?.toolCallId) envContext.toolCallId = ctx.toolCallId;
+        // Snapshot each call so a missing ID never inherits the previous tool call.
+        const callContext: TokenlessCallContext = {
+          agentId: "openclaw",
+          sessionId: ctx?.sessionId
+            || (ctx?.sessionKey && sessionMap.get(ctx.sessionKey))
+            || "",
+          toolCallId: ctx?.toolCallId || "",
+        };
+        Object.assign(envContext, callContext);
 
-        const rewritten = tryRtkRewrite(command);
+        const rewritten = tryRtkRewrite(command, callContext);
         if (!rewritten) return;
+
+        // Keep the established file protocol for older launch paths. Current
+        // OpenClaw exec processes receive the same context directly below, so
+        // concurrent sessions do not depend on this last-write-wins fallback.
+        writeRewriteContext(callContext);
 
         if (verbose) {
           console.log(`[tokenless:rtk] rewrite: ${command} -> ${rewritten}`);
         }
 
-        return { params: { ...event.params, command: rewritten } };
+        return {
+          params: {
+            ...event.params,
+            command: rewritten,
+            env: mergeExecContextEnv(event.params, callContext),
+          },
+        };
       },
       { priority: 10 },
     );

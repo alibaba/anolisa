@@ -43,7 +43,7 @@ VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1
 ARCH ?= $(shell rustc -vV 2>/dev/null | sed -n 's/^host: *\([^ -]*\).*/\1/p' || uname -m)
 
 .PHONY: build build-tokenless build-toon build-openclaw-plugin \
-        stamp-adapter-templates check-component-contract \
+        stamp-adapter-templates generate-component-contract \
         install uninstall test lint clean \
         install-binaries install-helpers install-adapter-resources install-cosh-extension \
         adapter-install adapter-uninstall adapter-scan \
@@ -53,6 +53,7 @@ ARCH ?= $(shell rustc -vV 2>/dev/null | sed -n 's/^host: *\([^ -]*\).*/\1/p' || 
         qoder-install qoder-uninstall \
         claude-code-install claude-code-uninstall \
         codex-install codex-uninstall \
+        opencode-install opencode-uninstall \
         qwencode-install qwencode-uninstall \
         setup help \
         test-hooks \
@@ -78,6 +79,8 @@ build-toon:
 # Generate adapter config files from .in templates (VERSION from Cargo.toml).
 stamp-adapter-templates: $(ADAPTER_TEMPLATES) $(COMPONENT_CONTRACT)
 
+generate-component-contract: $(COMPONENT_CONTRACT)
+
 $(ADAPTER_SRC_DIR)/manifest.json: $(ADAPTER_SRC_DIR)/manifest.json.in Cargo.toml
 	@echo "==> Generating manifest.json (version=$(VERSION))..."
 	sed 's/@VERSION@/$(VERSION)/g' $< > $@
@@ -86,21 +89,6 @@ $(COMPONENT_CONTRACT): $(COMPONENT_CONTRACT).in Cargo.toml
 	@echo "==> Generating component contract (version=$(VERSION))..."
 	sed 's/@VERSION@/$(VERSION)/g' $< > $@
 
-check-component-contract:
-	@tmp=$$(mktemp); \
-		cp "$(COMPONENT_CONTRACT)" "$$tmp"; \
-		trap 'cp "$$tmp" "$(COMPONENT_CONTRACT)"; rm -f "$$tmp"' EXIT; \
-		$(MAKE) -B "$(COMPONENT_CONTRACT)"; \
-		cmp -s "$$tmp" "$(COMPONENT_CONTRACT)" || { \
-			diff -u "$$tmp" "$(COMPONENT_CONTRACT)"; \
-			exit 1; \
-		}
-	@catalog_version=$$(sed -n 's/^version = "\([^"]*\)"/\1/p' \
-		"$(ANOLISA_COMPONENT_MANIFEST)" | head -1); \
-		[ "$$catalog_version" = "$(VERSION)" ] || { \
-			echo "ANOLISA tokenless manifest version '$$catalog_version' does not match $(VERSION)"; \
-			exit 1; \
-		}
 
 $(ADAPTER_SRC_DIR)/openclaw/package.json: $(ADAPTER_SRC_DIR)/openclaw/package.json.in Cargo.toml
 	@echo "==> Generating openclaw/package.json (version=$(VERSION))..."
@@ -206,12 +194,18 @@ test-integration:
 	@echo "==> Testing hook integration (Python)..."
 	python3 tests/test_compress_response_hook.py
 	python3 tests/test_compress_schema_hook.py
+	python3 tests/test_hermes_plugin_import.py
 	python3 tests/test_rewrite_hook.py
 	python3 tests/test_resolve_agent_id.py
 
-test-adapters:
+test-adapters: build-openclaw-plugin
+	@echo "==> Testing openclaw RTK context propagation..."
+	node --test tests/test-openclaw-rtk-context.mjs
 	@echo "==> Testing qoder adapter installer..."
 	bash tests/test-qoder-adapter-install.sh
+	@echo "==> Testing OpenCode adapter..."
+	bash tests/test-opencode-adapter-install.sh
+	node tests/test-opencode-plugin.mjs
 
 # Lint (rtk excluded — vendored third-party source)
 lint:
@@ -232,8 +226,14 @@ clean:
 	rm -f  $(OPENCLAW_PLUGIN_SRC_DIR)/package-lock.json
 	rm -f  $(ADAPTER_TEMPLATES) $(COMPONENT_CONTRACT)
 
-# Create source tarball (excludes build artifacts)
+# Create source tarball (excludes build artifacts).
+# `clean` must finish before the generated contract and adapter manifests
+# are re-stamped: as sibling prerequisites, `make -jN dist` may run the two
+# concurrently and the cleanup can delete the stamped files, shipping an
+# archive without the embedded install contract. Invoke the stamping
+# sequentially from the recipe instead.
 dist: clean
+	$(MAKE) stamp-adapter-templates
 	@echo "==> Creating tarball (with pre-patched rtk source)..."
 	just setup-rtk
 	tar czf ../tokenless-$(VERSION).tar.gz \
@@ -243,6 +243,15 @@ dist: clean
 	    --exclude='node_modules' \
 	    --exclude='__pycache__' \
 	    -C .. tokenless
+	@tar_list=$$(tar -tzf ../tokenless-$(VERSION).tar.gz); \
+	for required in \
+	    tokenless/.anolisa/component.toml \
+	    tokenless/adapters/tokenless/manifest.json; do \
+		echo "$$tar_list" | grep -q "^$$required$$" || { \
+			echo "ERROR: tokenless-$(VERSION).tar.gz is missing $$required" >&2; \
+			exit 1; \
+		}; \
+	done
 	@echo "==> Tarball: ../tokenless-$(VERSION).tar.gz"
 
 # Path variables used by the embedded install.sh.
@@ -587,9 +596,9 @@ ADAPTER_ENV = ANOLISA_PREFIX=$(HOME)/.local \
               ANOLISA_COMPONENT=tokenless \
               ANOLISA_VERSION=$(VERSION)
 
-adapter-install: cosh-extension-install openclaw-install hermes-install qoder-install claude-code-install codex-install qwencode-install
+adapter-install: cosh-extension-install openclaw-install hermes-install qoder-install claude-code-install codex-install opencode-install qwencode-install
 
-adapter-uninstall: cosh-extension-uninstall openclaw-uninstall hermes-uninstall qoder-uninstall claude-code-uninstall codex-uninstall qwencode-uninstall
+adapter-uninstall: cosh-extension-uninstall openclaw-uninstall hermes-uninstall qoder-uninstall claude-code-uninstall codex-uninstall opencode-uninstall qwencode-uninstall
 
 adapter-scan:
 	@echo "=== Tokenless Adapter Manifest ==="
@@ -678,6 +687,18 @@ codex-uninstall:
 	@echo "==> Uninstalling Codex plugin..."
 	@$(ADAPTER_ENV) ANOLISA_TARGET=codex bash $(CODEX_ADAPTER_DIR)/scripts/uninstall.sh
 
+# --- OpenCode ---
+OPENCODE_ADAPTER_DIR = $(SHARE_DIR)/opencode
+
+opencode-install:
+	@echo "==> Installing OpenCode plugin..."
+	@$(ADAPTER_ENV) ANOLISA_TARGET=opencode bash $(OPENCODE_ADAPTER_DIR)/scripts/detect.sh || true
+	@$(ADAPTER_ENV) ANOLISA_TARGET=opencode bash $(OPENCODE_ADAPTER_DIR)/scripts/install.sh
+
+opencode-uninstall:
+	@echo "==> Uninstalling OpenCode plugin..."
+	@$(ADAPTER_ENV) ANOLISA_TARGET=opencode bash $(OPENCODE_ADAPTER_DIR)/scripts/uninstall.sh
+
 # --- Qwen Code ---
 QWENCODE_ADAPTER_DIR = $(SHARE_DIR)/qwencode
 
@@ -705,7 +726,7 @@ setup: install adapter-install
 	@echo "  Adapter (FHS):"
 	@echo "    $(SHARE_DIR)/"
 	@echo "  Registered:"
-	@echo "    cosh, openclaw, hermes, qoder, claude-code, codex, qwencode"
+	@echo "    cosh, openclaw, hermes, qoder, claude-code, codex, opencode, qwencode"
 	@echo ""
 	@echo "Verify:"
 	@echo "  tokenless --version"
@@ -768,7 +789,7 @@ help:
 	@echo "  fmt               Format code"
 	@echo "  clean             Clean build artifacts"
 	@echo "  adapter-scan      List registered adapter capabilities"
-	@echo "  adapter-install   Register all adapters (cosh+openclaw+hermes+qoder+claude-code+codex+qwencode)"
+	@echo "  adapter-install   Register all adapters (cosh+openclaw+hermes+qoder+claude-code+codex+opencode+qwencode)"
 	@echo "  adapter-uninstall Unregister all adapters"
 	@echo "  cosh-extension-install  Install cosh extension"
 	@echo "  cosh-extension-uninstall Uninstall cosh extension"
@@ -782,6 +803,8 @@ help:
 	@echo "  claude-code-uninstall Unregister Claude Code plugin"
 	@echo "  codex-install     Register Codex plugin via codex CLI"
 	@echo "  codex-uninstall   Unregister Codex plugin"
+	@echo "  opencode-install  Register OpenCode local plugin"
+	@echo "  opencode-uninstall Unregister OpenCode local plugin"
 	@echo "  qwencode-install  Register Qwen Code plugin via qwen CLI"
 	@echo "  qwencode-uninstall Unregister Qwen Code plugin"
 	@echo "  setup             Full setup: build + install + register adapters"

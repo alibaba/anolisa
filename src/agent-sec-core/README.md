@@ -134,6 +134,24 @@ agent-sec-core/
 └── README_zh.md
 ```
 
+## Observability Hook Toggle
+
+The OpenClaw, Hermes, cosh, Qwen Code, Qoder, and Codex integrations enable
+their observability hooks by default. To disable them, set this variable before
+starting the host:
+
+```bash
+export OBSERVABILITY_HOOK_ENABLED=false
+```
+
+The variable accepts only `true` / `false` (ignoring case and surrounding
+whitespace). An unset or invalid value keeps the hook enabled. Restart the host
+after changing it.
+
+For OpenClaw and Hermes, the existing observability capability `enabled` setting
+remains an independent gate. Either switch can disable recording; setting this
+variable to `true` does not re-enable a capability disabled in plugin configuration.
+
 ## Quick Start
 
 ### Prerequisites
@@ -261,6 +279,7 @@ For the complete guide (manual key management, custom skills, CI/CD, troubleshoo
 ## Skill Ledger
 
 Ed25519-based integrity ledger for skill directories. Tracks file hashes, version chains, and scan results in `.skill-meta/` manifests — all managed via the `agent-sec-cli skill-ledger` subcommand.
+For an existing manifest, authenticity is verified before file drift; an unsigned existing manifest is reported as `tampered`.
 
 ### Key Commands
 

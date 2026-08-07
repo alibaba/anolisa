@@ -197,7 +197,7 @@ EOF
 cat > "$SOURCE_DIR/tertiary-skill/SKILL.md" <<'EOF'
 ---
 name: tertiary-skill
-description: Another hidden skill to keep source_path relative to the source root.
+description: Another skill in the secondary view.
 version: 1.0.0
 tags: [secondary]
 enabled: true
@@ -227,6 +227,7 @@ printf 'passthrough-ok\n' > "$SOURCE_DIR/primary-skill/assets/info.txt"
 info "启动 FUSE 挂载"
 "$BIN" mount "$SOURCE_DIR" "$MOUNT_DIR" \
 	--foreground \
+	--skill-discover-root "$MOUNT_DIR/skills" \
 	--pid-file "$PID_FILE" \
 	--log-file "$LOG_FILE" \
 	>/dev/null 2>&1 &
@@ -256,7 +257,10 @@ assert_contains "$DISCOVER_MD" "## other" "discover 包含 secondary view 章节
 assert_contains "$DISCOVER_MD" "secondary-skill" "discover 列出隐藏技能"
 assert_contains "$DISCOVER_MD" "tertiary-skill" "discover 列出全部 secondary 技能"
 assert_contains "$DISCOVER_MD" "| name | description | source_path |" "discover 暴露 source_path 列"
-assert_contains "$DISCOVER_MD" "secondary-skill/SKILL.md" "discover source_path 相对路径正确"
+DISCOVERED_SECONDARY="$MOUNT_DIR/skills/secondary-skill/SKILL.md"
+assert_contains "$DISCOVER_MD" "$DISCOVERED_SECONDARY" "discover 输出可读挂载路径"
+SECONDARY_MD="$(cat "$DISCOVERED_SECONDARY")"
+assert_contains "$SECONDARY_MD" "name: secondary-skill" "discover 路径可直接读取隐藏技能"
 
 info "发送 SIGTERM 触发卸载"
 kill -TERM "$(cat "$PID_FILE")" >/dev/null 2>&1 || kill -TERM "$MOUNT_PID" >/dev/null 2>&1 || true

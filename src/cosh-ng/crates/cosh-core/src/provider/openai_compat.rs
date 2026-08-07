@@ -157,6 +157,12 @@ impl OpenAICompatProvider {
 
         self.add_cache_control(&mut body);
 
+        // Last word on the output cap: `extra_params` above may have replaced
+        // the resolved `max_tokens` (or introduced the `max_completion_tokens`
+        // alias), which would let the wire request outspend the output reserve
+        // the compaction budget priced this request against (#2240).
+        super::clamp_output_cap_fields(&mut body, config.max_tokens);
+
         body
     }
 }
@@ -1167,6 +1173,90 @@ mod tests {
         let body = provider.build_request_body(&[], &[], &config);
         assert_eq!(body["enable_thinking"], true);
         assert_eq!(body["thinking_budget"], 4096);
+    }
+
+    #[test]
+    fn extra_params_cannot_raise_the_wire_output_cap() {
+        // Regression (#2240): the compaction budget reserves `O` from the same
+        // resolver that produced `max_tokens`, so the serialized request must
+        // never be able to spend more than that reserve. Both cap aliases are
+        // clamped because a backend may honor either one.
+        let provider = OpenAICompatProvider::new_generic("https://example.com/v1", "sk-test");
+        let config = GenerateConfig {
+            model: "test".to_string(),
+            max_tokens: 16_384,
+            extra_params: Some(serde_json::json!({
+                "max_tokens": 65_536u32,
+                "max_completion_tokens": 65_536u32,
+            })),
+            ..Default::default()
+        };
+
+        let body = provider.build_request_body(&[], &[], &config);
+
+        assert_eq!(body["max_tokens"], 16_384);
+        assert_eq!(body["max_completion_tokens"], 16_384);
+    }
+
+    #[test]
+    fn extra_params_cannot_raise_the_wire_cap_on_the_alias_field_profile() {
+        // The OpenAI profile serializes `max_completion_tokens`; extra_params
+        // must not raise it, nor sneak an unbounded `max_tokens` past the cap.
+        let provider = OpenAICompatProvider::new(
+            "https://api.openai.com/v1",
+            "sk-test",
+            Box::new(super::super::profile::OpenAIProfile),
+            false,
+        );
+        let config = GenerateConfig {
+            model: "o3".to_string(),
+            max_tokens: 8_192,
+            extra_params: Some(serde_json::json!({
+                "max_completion_tokens": 65_536u32,
+                "max_tokens": 65_536u32,
+            })),
+            ..Default::default()
+        };
+
+        let body = provider.build_request_body(&[], &[], &config);
+
+        assert_eq!(body["max_completion_tokens"], 8_192);
+        assert_eq!(body["max_tokens"], 8_192);
+    }
+
+    #[test]
+    fn extra_params_may_still_lower_the_wire_output_cap() {
+        // Asking for less than the reserve is always safe and is preserved.
+        let provider = OpenAICompatProvider::new_generic("https://example.com/v1", "sk-test");
+        let config = GenerateConfig {
+            model: "test".to_string(),
+            max_tokens: 16_384,
+            extra_params: Some(serde_json::json!({"max_tokens": 512u32})),
+            ..Default::default()
+        };
+
+        let body = provider.build_request_body(&[], &[], &config);
+
+        assert_eq!(body["max_tokens"], 512);
+        // The alias is not invented for a backend that never received it.
+        assert!(body.get("max_completion_tokens").is_none(), "{body}");
+    }
+
+    #[test]
+    fn non_numeric_extra_params_cap_is_replaced_by_the_reserve() {
+        // A string or null cap could be coerced by a backend; fail closed to
+        // the resolved reserve instead of forwarding it.
+        let provider = OpenAICompatProvider::new_generic("https://example.com/v1", "sk-test");
+        let config = GenerateConfig {
+            model: "test".to_string(),
+            max_tokens: 4_096,
+            extra_params: Some(serde_json::json!({"max_tokens": "65536"})),
+            ..Default::default()
+        };
+
+        let body = provider.build_request_body(&[], &[], &config);
+
+        assert_eq!(body["max_tokens"], 4_096);
     }
 
     #[test]

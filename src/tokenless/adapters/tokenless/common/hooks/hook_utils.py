@@ -127,14 +127,15 @@ _TOOL_CATEGORIES_PATH = os.path.join(os.path.dirname(__file__), "tool_categories
 # introduced, ensuring content-retrieval tools are never accidentally compressed.
 _FALLBACK_SKIP_TOOLS = [
     "Read", "read", "read_file", "read_many_files",
-    "Glob", "glob", "list_directory",
-    "Grep", "grep", "grep_search", "search_files",
+    "Glob", "glob", "search_file", "list_directory", "list_dir",
+    "Grep", "grep", "grep_code", "grep_search", "search_files",
     "Lsp", "lsp",
     "NotebookRead", "notebook_read", "notebookread",
 ]
 _FALLBACK_SHELL_TOOLS = [
     "Bash", "bash", "Shell", "shell", "exec", "terminal",
-    "run_shell_command", "execute_command", "process",
+    "run_shell_command", "run_in_terminal", "get_terminal_output",
+    "execute_command", "process",
 ]
 
 

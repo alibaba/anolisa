@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Recoverable sandbox create, warm activation, destroy, and startup cleanup.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use blaze_core::BlazeError;
 use blaze_core::backend::{BackendKind, SpawnRequest};
@@ -13,12 +14,16 @@ use blaze_core::lifecycle::{
 use blaze_core::policy::RuntimeDecision;
 use blaze_core::pool::{PoolKey, PoolManager};
 use blaze_core::storage::{AcquireOpts, StorageProvider, StorageSlot};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, Semaphore};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::error::{BlazeDaemonError, Result};
+use crate::guest::{GuestClient, GuestExecResult, MAX_GUEST_FILE_BYTES};
 use crate::metrics::Metrics;
 use crate::spawner::{DynBackendInstance, SpawnerRegistry};
+
+const GUEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Inputs already parsed and policy-evaluated by the API.
 #[derive(Debug, Clone)]
@@ -71,6 +76,8 @@ pub struct SandboxManager {
     instances: Arc<Mutex<HashMap<Uuid, SandboxInstance>>>,
     backend_instances: Arc<Mutex<HashMap<Uuid, DynBackendInstance>>>,
     operation_locks: Mutex<HashMap<Uuid, Arc<AsyncMutex<()>>>>,
+    pub(super) storage_sync_inflight: Arc<Mutex<HashSet<Uuid>>>,
+    pub(super) storage_sync_permits: Arc<Semaphore>,
     pool: Arc<Mutex<PoolManager>>,
     spawners: Arc<SpawnerRegistry>,
     active_backend: BackendKind,
@@ -133,6 +140,10 @@ impl SandboxManager {
                 instances,
                 backend_instances,
                 operation_locks: Mutex::new(operation_locks),
+                storage_sync_inflight: Arc::new(Mutex::new(HashSet::new())),
+                // The periodic worker is sequential. Retain that bound when a
+                // timed-out provider operation has to finish in the background.
+                storage_sync_permits: Arc::new(Semaphore::new(1)),
                 pool,
                 spawners: Arc::new(spawners),
                 active_backend,
@@ -161,12 +172,31 @@ impl SandboxManager {
         }
     }
 
-    #[cfg(test)]
-    pub fn backend_owner(&self, id: Uuid) -> Option<DynBackendInstance> {
+    pub(crate) fn backend_owner(&self, id: Uuid) -> Option<DynBackendInstance> {
         match self.backend_instances.lock() {
             Ok(instances) => instances.get(&id).cloned(),
             Err(poisoned) => poisoned.into_inner().get(&id).cloned(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_backend_owner(&self, id: Uuid, owner: DynBackendInstance) -> Result<()> {
+        self.backend_instances
+            .lock()
+            .map_err(|_| poisoned("backend_instances"))?
+            .insert(id, owner);
+        Ok(())
+    }
+
+    pub(super) async fn reconstruct_storage(&self, id: Uuid) -> Result<StorageSlot> {
+        self.storage
+            .reconstruct(&id.to_string())
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(super) async fn sync_storage(&self, slot: &StorageSlot) -> Result<()> {
+        self.storage.sync_artifacts(slot).await.map_err(Into::into)
     }
 
     /// Return all persisted sandbox metadata.
@@ -188,6 +218,40 @@ impl SandboxManager {
             .get(&id)
             .cloned()
             .ok_or_else(|| BlazeDaemonError::NotFound(format!("instance {id}")))
+    }
+
+    /// Execute one command through the running sandbox guest.
+    pub async fn exec(
+        &self,
+        id: Uuid,
+        command: String,
+        cwd: Option<String>,
+        env: Option<HashMap<String, String>>,
+        timeout_secs: u32,
+    ) -> Result<GuestExecResult> {
+        let _operation = self.lock_running(id).await?;
+        self.guest_client(id)?
+            .exec(command, cwd, env, timeout_secs)
+            .await
+            .map_err(BlazeDaemonError::from)
+    }
+
+    /// Read one file through the running sandbox guest.
+    pub async fn read_file(&self, id: Uuid, path: String) -> Result<Vec<u8>> {
+        let _operation = self.lock_running(id).await?;
+        self.guest_client(id)?
+            .read_file(path)
+            .await
+            .map_err(BlazeDaemonError::from)
+    }
+
+    /// Replace one file through the running sandbox guest.
+    pub async fn write_file(&self, id: Uuid, path: String, data: &[u8]) -> Result<()> {
+        let _operation = self.lock_running(id).await?;
+        self.guest_client(id)?
+            .write_file(path, data)
+            .await
+            .map_err(BlazeDaemonError::from)
     }
 
     /// Create a cold sandbox or activate a compatible warm runtime.
@@ -243,6 +307,30 @@ impl SandboxManager {
         };
         crate::failpoint::pause("create-after-storage-acquire").await;
 
+        let work_dir = self.state_dir.join(instance.id.to_string());
+        let spawner = match self.spawners.get(self.active_backend) {
+            Some(spawner) => spawner,
+            None => {
+                return Err(self
+                    .cleanup_failed_create(
+                        &mut instance,
+                        storage,
+                        None,
+                        false,
+                        BlazeDaemonError::Internal(format!(
+                            "active backend {} has no registered spawner",
+                            self.active_backend
+                        )),
+                    )
+                    .await);
+            }
+        };
+        if let Err(error) = spawner.prepare_spawn(&work_dir).await {
+            return Err(self
+                .cleanup_failed_create(&mut instance, storage, None, false, error.into())
+                .await);
+        }
+
         instance.backend_ownership = BackendOwnership::Starting;
         if let Err(error) = instance.persist(&self.state_dir) {
             instance.backend_ownership = BackendOwnership::NotStarted;
@@ -263,30 +351,12 @@ impl SandboxManager {
                 .await);
         }
 
-        let spawner = match self.spawners.get(self.active_backend) {
-            Some(spawner) => spawner,
-            None => {
-                instance.backend_ownership = BackendOwnership::NotStarted;
-                return Err(self
-                    .cleanup_failed_create(
-                        &mut instance,
-                        storage,
-                        None,
-                        false,
-                        BlazeDaemonError::Internal(format!(
-                            "active backend {} has no registered spawner",
-                            self.active_backend
-                        )),
-                    )
-                    .await);
-            }
-        };
         let spawn = match crate::failpoint::backend("create-spawn") {
             Ok(()) => {
                 spawner
                     .spawn(SpawnRequest {
                         instance_id: instance.id,
-                        run_dir: self.state_dir.join(instance.id.to_string()),
+                        run_dir: work_dir,
                         binary_path: request.binary_path,
                         storage: storage.clone(),
                         backend: request.decision.backend,
@@ -300,6 +370,20 @@ impl SandboxManager {
             Ok(backend_instance) => {
                 instance.backend_ownership = BackendOwnership::Running;
                 let actual_backend = backend_instance.backend();
+                if let Err(error) = self
+                    .wait_for_guest_ready(&backend_instance, "create-guest-ready")
+                    .await
+                {
+                    return Err(self
+                        .cleanup_failed_create(
+                            &mut instance,
+                            storage,
+                            Some(backend_instance),
+                            false,
+                            error.into(),
+                        )
+                        .await);
+                }
                 let mut backend_instance = Some(backend_instance);
                 let registered = match self.backend_instances.lock() {
                     Ok(mut instances) => {
@@ -818,6 +902,59 @@ impl SandboxManager {
             }
         }
         report
+    }
+
+    async fn lock_running(&self, id: Uuid) -> Result<OwnedMutexGuard<()>> {
+        let operation = self.operation_lock(id).lock_owned().await;
+        let instance = self.get(id)?;
+        if instance.state != SandboxState::Running || instance.operation.is_some() {
+            return Err(BlazeDaemonError::Conflict(format!(
+                "instance {id} is not available for guest operations"
+            )));
+        }
+        Ok(operation)
+    }
+
+    fn guest_client(&self, id: Uuid) -> Result<GuestClient> {
+        let backend = self
+            .backend_instances
+            .lock()
+            .map_err(|_| poisoned("backend_instances"))?
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| {
+                BlazeDaemonError::Conflict(format!("instance {id} has no backend owner"))
+            })?;
+        let socket = backend.guest_socket_path();
+        if socket.as_os_str().is_empty() {
+            return Err(BlazeDaemonError::Conflict(format!(
+                "instance {id} has no guest transport"
+            )));
+        }
+        Ok(GuestClient::new(
+            socket.to_path_buf(),
+            GUEST_REQUEST_TIMEOUT,
+            MAX_GUEST_FILE_BYTES,
+        ))
+    }
+
+    async fn wait_for_guest_ready(
+        &self,
+        backend: &DynBackendInstance,
+        failpoint: &str,
+    ) -> crate::guest::Result<()> {
+        let socket = backend.guest_socket_path();
+        if socket.as_os_str().is_empty() {
+            return Ok(());
+        }
+        crate::failpoint::guest(failpoint)?;
+        GuestClient::new(
+            socket.to_path_buf(),
+            GUEST_REQUEST_TIMEOUT,
+            MAX_GUEST_FILE_BYTES,
+        )
+        .wait_ready(GUEST_REQUEST_TIMEOUT, &CancellationToken::new())
+        .await
     }
 
     async fn cleanup_failed_create(

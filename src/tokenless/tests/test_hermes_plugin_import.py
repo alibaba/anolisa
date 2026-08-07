@@ -24,8 +24,6 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PLUGIN_SRC = os.path.join(_REPO_ROOT, "adapters", "tokenless", "hermes", "__init__.py")
 _HOOKS_SRC = os.path.join(_REPO_ROOT, "adapters", "tokenless", "common", "hooks")
 
-_needs_py39 = sys.version_info < (3, 9)
-
 
 def _load_plugin(path: str, name: str):
     """Load a copy of the Hermes plugin module under a unique name."""
@@ -33,7 +31,11 @@ def _load_plugin(path: str, name: str):
     sys.modules.pop("hook_utils", None)
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    pre_path = sys.path[:]
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path[:] = pre_path
     return module
 
 
@@ -47,7 +49,6 @@ def _make_hooks_dir(base: str) -> str:
     return hooks
 
 
-@unittest.skipIf(_needs_py39, "hermes plugin requires Python 3.9+")
 class ValidateHooksDirTest(unittest.TestCase):
     """Unit tests for _validate_hooks_dir (loaded from the source tree)."""
 
@@ -107,7 +108,6 @@ class ValidateHooksDirTest(unittest.TestCase):
             self.assertTrue(os.path.isabs(candidate) or candidate.startswith(self.plugin._HERE))
 
 
-@unittest.skipIf(_needs_py39, "hermes plugin requires Python 3.9+")
 class CopyInstallResolutionTest(unittest.TestCase):
     """End-to-end: plugin copied to a bare dir (anolisa driver behavior)."""
 

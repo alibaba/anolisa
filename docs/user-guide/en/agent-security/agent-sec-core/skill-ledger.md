@@ -11,7 +11,7 @@ Skill Ledger is the security subsystem of agent-sec-core that maintains a versio
 | Concept | Description |
 |---------|-------------|
 | **Manifest** | JSON record (`.skill-meta/latest.json`) containing file hashes, scan results, and digital signatures; created and updated by `scan`, `certify`, or the `init` baseline |
-| **Version chain** | Append-only ledger — each version links to its predecessor via `previousManifestSignature`, forming a tamper-evident history |
+| **Version chain** | Append-only ledger — each non-root version names an authenticated parent through `previousVersionId` and `previousManifestSignature`; recovery can start a new signed chain segment |
 | **Status** | Per-Skill security state: `pass` ✅ · `none` 🆕 · `drifted` 🔄 · `warn` ⚠️ · `deny` 🚨 · `tampered` 🔴 |
 
 ### 1. Initialize Signing Keys
@@ -48,12 +48,14 @@ Outputs JSON; the key field is `status`:
 
 | Status | Meaning |
 |--------|---------|
-| `none` 🆕 | Never scanned — no verifiable signed manifest |
-| `pass` ✅ | Files unchanged + signature valid + scan passed |
-| `drifted` 🔄 | Skill files have changed (fileHashes mismatch) |
-| `warn` ⚠️ | Signature valid, but the last scan has low-risk findings |
-| `deny` 🚨 | Signature valid, but the last scan has high-risk findings |
-| `tampered` 🔴 | Manifest signature verification failed — metadata may be forged |
+| `none` 🆕 | Neither `latest.json` nor any version JSON/snapshot artifact exists, or an authenticated matching manifest has `scanStatus=none` |
+| `pass` ✅ | Manifest authenticity valid + files unchanged + scan passed |
+| `drifted` 🔄 | Manifest authenticity valid, but the live Skill differs from the signed file hashes; this is an unscanned divergence, not a scanner-confirmed risk verdict |
+| `warn` ⚠️ | Manifest authenticity valid, but the last scan has low-risk findings |
+| `deny` 🚨 | Manifest authenticity valid, but the last scan has high-risk findings |
+| `tampered` 🔴 | Ledger metadata failed schema, hash, signature, signed-identity, or latest/version-artifact consistency validation, including a missing `latest.json` while version artifacts remain, a missing signature, or signed latest replay |
+
+Skill Ledger authenticates an existing manifest and binds `latest.json` to the newest verified version artifact before comparing its file hashes with the live Skill. A missing `latest.json` is `none` only when no version JSON or snapshot artifact remains; otherwise the incomplete ledger is `tampered`. A missing or invalid signature, or replay of an older signed latest pointer, is also `tampered`, even when the live files have changed; only a verified current manifest can produce `drifted`.
 
 ### 3. Quick Scan + Signed Certification
 
@@ -141,10 +143,12 @@ agent-sec-cli skill-ledger certify /path/to/your-skill \
 
 `scan` runs the built-in quick scanner and signs the result into the ledger; `certify` only imports external findings. `certify` performs, in order:
 
-1. Verifies file consistency (automatically creates a new version if files changed)
+1. Authenticates any existing manifest, then verifies file consistency (automatically creates a new version if files changed or the manifest is invalid)
 2. Normalizes findings and merges them into the manifest's `scans[]` array
 3. Aggregates `scanStatus` (`pass` / `warn` / `deny`)
 4. Re-signs and writes `.skill-meta/latest.json`
+
+An invalid or unsigned existing manifest is never signed in place and none of its scan results or decisions are inherited. Recovery creates a new version linked only to the newest historical version whose identity, hash, signature, and snapshot all verify. If no such parent exists, the new signed version starts a new chain segment with both previous-version fields set to `null`.
 
 Example output:
 
@@ -181,7 +185,7 @@ With `--verbose`, an additional `results` array contains detailed check results 
 
 ### 5. Audit the Full Version Chain
 
-Deep-verify all historical versions — hash integrity, signature validity, and version chain links:
+Deep-verify all historical versions — schema, hash, signature, signed identity, and explicit parent links. A parent link must point to an earlier authenticated version and carry its exact signature; a signed version with both previous-version fields set to `null` is a valid chain-segment root. Invalid historical versions still make the overall audit fail.
 
 ```bash
 agent-sec-cli skill-ledger audit /path/to/your-skill
@@ -256,7 +260,7 @@ With SkillFS enabled, the runtime entry point of Skill Ledger is handled by the 
 1. SkillFS captures Skill directory creation, updates, deletion, or content changes.
 2. SkillFS notifies the Skill Ledger daemon's `skill_ledger.skillfs_notify_change` interface.
 3. The daemon refreshes `.skill-meta/activation.json` based on the signed manifest, current file state, user decisions, and the activation policy, and writes xattr on a best-effort basis.
-4. If the current risky version cannot be activated directly, the activation metadata points to the previous trusted `pass` / `warn` snapshot; if no trusted fallback exists, it points to a safe pending-review stub; `target: null` is written only for user `block` decisions or fail-safe scenarios.
+4. If the current version cannot be activated directly, the activation metadata points to the previous trusted `pass` / `warn` snapshot; if no trusted fallback exists, it points to a safe pending-review stub; `target: null` is written only for user `block` decisions or fail-safe scenarios.
 
 **Version requirement: SkillFS must be 0.4.0 or newer.**
 
@@ -330,7 +334,7 @@ Codex and Qoder CLI are low-level integrity gates that run `skill-ledger check <
 
 All six adapters enable Skill Ledger by default with policy `ask`; copilot-shell, Codex, Qoder CLI, and Qwen Code register their corresponding hook boundaries in their default manifests. OpenClaw and Hermes can also take capability configuration, while `SKILL_LEDGER_MODE` remains the deployment-level override. Apart from the explicitly documented Qoder CLI low-level gate above, the other compatibility hooks remain fail-open when the CLI infrastructure misbehaves, avoiding blocked Skill loads.
 
-The copilot-shell hook currently covers three directory classes — project / user / system: `<cwd>/.copilot-shell/skills/`, `~/.copilot-shell/skills/`, `/usr/share/anolisa/skills/`. Skills from custom, extension, remote, or other paths make the hook fail open and skip the skill-ledger check; the OpenClaw plugin extracts the Skill directory from the `SKILL.md` path it reads.
+The copilot-shell hook currently covers three directory classes — project / user / system: `<cwd>/.copilot-shell/skills/`, `~/.copilot-shell/skills/`, and the RPM and raw-install system roots `/usr/share/anolisa/skills/` and `/usr/local/share/anolisa/skills/`. Skills from custom, extension, remote, or other paths make the hook fail open and skip the skill-ledger check; the OpenClaw plugin extracts the Skill directory from the `SKILL.md` path it reads.
 
 For batch certification or post-install certification, complete directory resolution and certification before letting the Agent read uncertified Skill content: avoid proactively reading an uncertified Skill's `SKILL.md` or auxiliary files before batch certification; after a successful install, locate the final local directory, confirm it contains `SKILL.md`, then run quick-scan certification.
 
@@ -359,11 +363,11 @@ enable_block = false
 
 **Configuring copilot-shell**: the default Cosh manifest already registers the `skill-ledger` hook. The default policy is `ask`; for observe-only, warning-only, or hard denial, set `SKILL_LEDGER_MODE=observe` / `warn` / `block`. The `debug` value remains an alias for `observe`. This environment variable should be set by a trusted host or deployment environment — not by Skills, project scripts, or untrusted shell startup logic; to prevent policy downgrades via a tampered local shell profile, it should eventually move to a trusted host configuration source.
 
-**Configuring Qoder CLI**: after installing `qoder-plugin`, the plugin automatically registers a `PreToolUse` hook with matcher `Skill`. The default policy is `ask`; a trusted launch environment may set `SKILL_LEDGER_MODE=observe` / `warn` / `block` and adjust the CLI timeout via `SKILL_LEDGER_TIMEOUT` (default 5 seconds). The `debug` value remains an alias for `observe`. The hook covers local Skills under `~/.qoder/skills/` and `<cwd>/.qoder/skills/`, with user-level Skills of the same name taking precedence; only when both directory tables resolve trustworthily with no match is the call treated as a built-in, plugin, or remote Skill — passed and logged at debug. The hook never runs `init` or `scan` automatically; unsigned Skills enter the policy as `none`. After review, run `agent-sec-cli skill-ledger scan <skill_dir>` explicitly.
+**Configuring Qoder CLI**: after installing `qoder-plugin`, the plugin automatically registers a `PreToolUse` hook with matcher `Skill`. The default policy is `ask`; a trusted launch environment may set `SKILL_LEDGER_MODE=observe` / `warn` / `block` and adjust the CLI timeout via `SKILL_LEDGER_TIMEOUT` (default 5 seconds). The `debug` value remains an alias for `observe`. The hook covers local Skills under `~/.qoder/skills/` and `<cwd>/.qoder/skills/`, with user-level Skills of the same name taking precedence; only when both directory tables resolve trustworthily with no match is the call treated as a built-in, plugin, or remote Skill — passed and logged at debug. The hook never runs `init` or `scan` automatically. A Skill with neither `latest.json` nor any version JSON/snapshot artifact enters the policy as `none`. A missing `latest.json` while history remains, or an existing latest manifest with a missing or invalid signature, enters as `tampered`. After review, run `agent-sec-cli skill-ledger scan <skill_dir>` explicitly.
 
 The global Skill Ledger `activationPolicy` belongs to SkillFS/daemon activation; the hook `policy` here only controls the user-visible behavior and log level of host hooks/capabilities.
 
-### Reviewing and Deciding on Risky Skills
+### Reviewing and Deciding on Non-Pass Skills
 
 When a hook or `show` indicates the current skill needs user review, start with the unified exposure summary:
 
@@ -381,7 +385,7 @@ Key fields:
 | `userDecision` | Currently matched user decision; `null` means no decision yet |
 | `message` | Information to surface to the user; hooks stay silent when `null` |
 
-To fully review a risky version that is not exposed, export the latest snapshot, manifest, and findings:
+To fully review a version that is not exposed, export the latest snapshot, manifest, and findings:
 
 ```bash
 agent-sec-cli skill-ledger export /path/to/skill --version latest --output /tmp/skill-review
@@ -412,7 +416,7 @@ Note: a hook's `ask` confirmation only lets the current host operation continue 
 
 #### Configuring Skill Directories (for batch scans)
 
-Five built-in directories are included by default: `~/.openclaw/skills/*`, `~/.copilot-shell/skills/*`, `~/.hermes/skills/**`, `~/.qoder/skills/*`, `/usr/share/anolisa/skills/*`. Project-level Qoder directories are not relative defaults; after an explicit `scan` or `certify` on a project Skill, its absolute directory is written to `managedSkillDirs` via the auto-memoization mechanism. To add other directories, create or edit `~/.config/agent-sec/skill-ledger/config.json`:
+Six built-in directories are included by default: `~/.openclaw/skills/*`, `~/.copilot-shell/skills/*`, `~/.hermes/skills/**`, `~/.qoder/skills/*`, `/usr/share/anolisa/skills/*`, `/usr/local/share/anolisa/skills/*`. Project-level Qoder directories are not relative defaults; after an explicit `scan` or `certify` on a project Skill, its absolute directory is written to `managedSkillDirs` via the auto-memoization mechanism. To add other directories, create or edit `~/.config/agent-sec/skill-ledger/config.json`:
 
 ```json
 {
@@ -504,7 +508,7 @@ agent-sec-cli skill-ledger check /path/to/my-skill
 # → {"status": "drifted", "added": [...], "modified": [...]}
 ```
 
-The status becomes `drifted` after updating the Skill. Trigger a re-scan to restore `pass`:
+The status becomes `drifted` after updating the Skill. This only reports that the live root differs from the signed version; it is not a scanner-confirmed risk result. Trigger a re-scan to certify the new content and obtain its current scan status:
 
 ```
 Scan /path/to/my-skill
@@ -516,7 +520,7 @@ Scan /path/to/my-skill
 agent-sec-cli skill-ledger audit /path/to/my-skill --verify-snapshots
 ```
 
-Per-version verification: hash integrity → signature validity → version chain links → snapshot consistency.
+Per-version verification: schema → hash integrity → signature validity → signed identity → explicit parent links → snapshot consistency.
 
 ---
 

@@ -164,6 +164,11 @@ pub enum PreparedEnable {
         /// claiming an entry until its `config set` command succeeds.
         selected_config_indices: Vec<usize>,
     },
+    /// Qoder native-plugin capabilities resolved before installation.
+    QoderNative {
+        /// Exact qodercli program selected during the read-only preflight.
+        program: String,
+    },
 }
 
 /// Manager-owned persistence channel for resources applied incrementally.
@@ -264,6 +269,8 @@ pub enum AdapterConditionKind {
     ResourceBundleMatches,
     /// The plugin is still present in the framework registry.
     PluginRegistered,
+    /// The framework reports the plugin's declared resources as loaded.
+    PluginResourcesLoaded,
     /// The framework-native activation policy currently enables the plugin.
     ActivationEnabled,
     /// A marketplace source is still registered (future drivers).
@@ -322,6 +329,30 @@ pub struct FrameworkCommand {
     pub timeout: Duration,
 }
 
+/// One line-delimited JSON-RPC session with a framework server that speaks
+/// stdio.
+///
+/// Distinct from [`FrameworkCommand::stdin`], which writes its bytes and
+/// immediately closes the pipe: a request/response server treats that EOF as
+/// a shutdown signal and may drop requests it has not dispatched yet (Codex's
+/// `app-server` answers only `initialize` before tearing down). The runner
+/// therefore keeps stdin open until [`Self::expected_responses`] id-bearing
+/// replies have been read, then closes it so the child exits.
+#[derive(Debug, Clone)]
+pub struct FrameworkRpcSession {
+    /// Command that starts the server in stdio mode. Its
+    /// [`FrameworkCommand::timeout`] bounds the whole session, and its
+    /// [`FrameworkCommand::stdin`] is ignored in favor of
+    /// [`Self::requests`].
+    pub command: FrameworkCommand,
+    /// Serialized JSON-RPC request objects, written in order, one per line.
+    pub requests: Vec<String>,
+    /// How many id-bearing responses to await before closing the child's
+    /// stdin. A session that times out before reaching this count still
+    /// returns whatever was read, with `timed_out` set.
+    pub expected_responses: usize,
+}
+
 /// Captured output of a [`FrameworkCommand`]. stdout/stderr are truncated
 /// to a bounded size before being returned and logged.
 #[derive(Debug, Clone)]
@@ -353,6 +384,9 @@ impl CliOutput {
 /// Codex/Claude Code drivers, and [`read_file`](AdapterOps::read_file)
 /// landed with the Qoder driver (which must read the user's
 /// `settings.json` back before merging into it).
+/// [`run_framework_rpc`](AdapterOps::run_framework_rpc) landed with Codex
+/// hook trust, whose framework-side read and write are only reachable through
+/// the `codex app-server` JSON-RPC protocol.
 pub trait AdapterOps {
     /// Spawn a framework CLI with a timeout, capture and truncate its
     /// output, and record the invocation in the central log. The argv is
@@ -365,6 +399,44 @@ pub trait AdapterOps {
     /// A non-zero exit or a timeout is reported through [`CliOutput`], not
     /// as an error, so the driver decides how to interpret it.
     fn run_framework_cli(&self, cmd: FrameworkCommand) -> Result<CliOutput, AdapterError>;
+
+    /// Spawn a framework CLI whose stdout is structured JSON that must be
+    /// captured beyond the ordinary diagnostic-output limit. The Manager
+    /// still applies a larger finite bound and keeps stderr at the normal
+    /// cap, so unexpectedly large framework output cannot grow without
+    /// limit.
+    ///
+    /// Custom operation providers default to the ordinary runner; the
+    /// production Manager overrides this method with the structured-output
+    /// capture policy.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::FrameworkCli`] when the process cannot be spawned.
+    fn run_framework_cli_json(&self, cmd: FrameworkCommand) -> Result<CliOutput, AdapterError> {
+        self.run_framework_cli(cmd)
+    }
+
+    /// Drive a line-delimited JSON-RPC session against a framework server,
+    /// holding the child's stdin open until the expected replies arrive (see
+    /// [`FrameworkRpcSession`]). Returns the collected stdout lines under the
+    /// same bounded structured-output policy as
+    /// [`Self::run_framework_cli_json`].
+    ///
+    /// The default implementation refuses rather than degrading to
+    /// write-then-EOF, which would silently drop requests: an operation
+    /// provider that has not opted in must fail loudly.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::FrameworkCli`] when the process cannot be spawned or
+    /// the provider does not support RPC sessions.
+    fn run_framework_rpc(&self, session: FrameworkRpcSession) -> Result<CliOutput, AdapterError> {
+        Err(AdapterError::FrameworkCli {
+            program: session.command.program,
+            reason: "this operation provider does not support stdio JSON-RPC sessions".to_string(),
+        })
+    }
 
     /// Recursively copy a directory tree from `src` to `dst`. The Manager
     /// validates that `dst` is under an allowed external root before
@@ -534,6 +606,21 @@ pub trait FrameworkDriver: Send + Sync {
         _prior: &AdapterClaim,
         _next: &mut AdapterClaim,
     ) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    /// Validate the final prepared receipt after re-enable facts have been
+    /// preserved, but before the Manager persists it or mutates framework
+    /// state.
+    ///
+    /// Drivers can use this hook for ownership conflicts that are visible
+    /// during read-only preparation but may be resolved by a validated prior
+    /// receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns a driver-specific ownership or receipt consistency error.
+    fn validate_prepared_enable(&self, _claim: &AdapterClaim) -> Result<(), AdapterError> {
         Ok(())
     }
 

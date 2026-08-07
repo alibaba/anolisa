@@ -10,8 +10,11 @@ use crate::config::DEFAULT_CONNECTION_CAPACITY;
 use crate::parser::http::{ParsedRequest, ParsedResponse};
 use crate::parser::sse::{ParsedSseEvent, SseParser};
 use crate::probes::sslsniff::SslEvent;
+use crate::utils::decompress::ZstdStreamDecoder;
 use lru::LruCache;
+use std::cell::RefCell;
 use std::num::NonZeroUsize;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 /// Hard cap on a *compressed* SSE buffer awaiting completion. A malicious or
@@ -40,9 +43,18 @@ impl ConnectionId {
 }
 
 /// Connection state machine
+///
+/// `pub(crate)`: this is aggregation-internal state (review F3) — no
+/// crate-external consumer exists, and keeping it crate-private lets fields
+/// evolve (e.g. the incremental zstd decoder) without breaking the lib API.
 #[derive(Debug, Clone)]
-pub enum ConnectionState {
+pub(crate) enum ConnectionState {
     /// Idle - waiting for request
+    ///
+    /// Never constructed by the live state machine (states are removed, not
+    /// reset, on completion) but still matched by drain/snapshot paths and
+    /// constructed by tests; kept so the machine stays explicit about it.
+    #[allow(dead_code)]
     Idle,
     /// Request pending - waiting for response
     RequestPending { request: ParsedRequest },
@@ -64,6 +76,14 @@ pub enum ConnectionState {
         compressed_buffer: Option<Vec<u8>>,
         /// Response `Content-Encoding`, used to decode `compressed_buffer`.
         content_encoding: Option<String>,
+        /// Incremental zstd decoder fed as compressed fragments arrive, so a
+        /// stream whose frame never closes (HTTP/2 framing, missing chunked
+        /// terminator) still decodes from the blocks flushed so far (#2267).
+        /// `Rc<RefCell<..>>` because this enum must stay `Clone` for the
+        /// snapshot/drain paths while the underlying zstd context is not
+        /// clonable — clones deliberately share the one live decoder, which
+        /// is also what lets a drain snapshot see the latest decoded bytes.
+        zstd_decoder: Option<Rc<RefCell<ZstdStreamDecoder>>>,
     },
 }
 
@@ -252,7 +272,7 @@ impl HttpConnectionAggregator {
     /// These states can represent manually interrupted or abandoned LLM
     /// streams. Returning cloned states lets the caller persist a pending GenAI
     /// row while keeping the live connection available if the stream resumes.
-    pub fn snapshot_idle_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
+    pub(crate) fn snapshot_idle_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
         let now = Instant::now();
         let timeout = self.idle_timeout;
         let keys: Vec<ConnectionId> = self
@@ -295,7 +315,12 @@ impl HttpConnectionAggregator {
     }
 
     /// Backward-compatible alias for idle snapshots.
-    pub fn drain_idle_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
+    ///
+    /// No in-crate caller today; kept (dead_code-allowed) because narrowing
+    /// visibility for review F3 must not silently drop API surface that the
+    /// alias was published for.
+    #[allow(dead_code)]
+    pub(crate) fn drain_idle_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
         self.snapshot_idle_connections()
     }
 
@@ -336,31 +361,63 @@ impl HttpConnectionAggregator {
 
     /// Decide the initial SSE state from response headers.
     ///
-    /// Returns `(initial_sse_events, compressed_buffer, content_encoding)`.
-    /// `compressed_buffer == Some(..)` marks a *compressed* stream whose body must
-    /// be buffered and decoded at completion; `None` keeps the legacy live-parse
-    /// path for uncompressed streams. Compression is detected from the
-    /// `Content-Encoding` header, with a magic-byte fallback (gzip `1f 8b`,
-    /// zstd `28 b5 2f fd`) for cases where the header is absent.
+    /// Returns `(initial_sse_events, compressed_buffer, content_encoding,
+    /// zstd_decoder)`. `compressed_buffer == Some(..)` marks a *compressed*
+    /// stream whose body must be buffered and decoded at completion; `None`
+    /// keeps the legacy live-parse path for uncompressed streams. Compression
+    /// is detected from the `Content-Encoding` header, with a magic-byte
+    /// fallback (gzip `1f 8b`, zstd `28 b5 2f fd`) for cases where the header
+    /// is absent. `zstd_decoder == Some(..)` additionally enables incremental
+    /// decoding for non-chunked zstd streams (#2267).
     fn sse_entry_state(
         response: &ParsedResponse,
-    ) -> (Vec<ParsedSseEvent>, Option<Vec<u8>>, Option<String>) {
+    ) -> (
+        Vec<ParsedSseEvent>,
+        Option<Vec<u8>>,
+        Option<String>,
+        Option<Rc<RefCell<ZstdStreamDecoder>>>,
+    ) {
         let enc = response.content_encoding().map(|e| e.trim().to_lowercase());
         let initial = response.body();
-        let compressed = matches!(
+        // Magic-byte sniffing exists for HPACK-stateless HTTP/2 where the
+        // header is unresolvable — it must not override an explicit non-zstd
+        // Content-Encoding whose payload happens to start with the zstd magic
+        // (review F2: that would route gzip/br bodies into the zstd decoder).
+        let header_says_other = matches!(
             enc.as_deref(),
-            Some("gzip") | Some("x-gzip") | Some("deflate") | Some("zstd") | Some("br")
-        ) || (initial.len() >= 2 && initial[0] == 0x1f && initial[1] == 0x8b)
-            || (initial.len() >= 4
+            Some("gzip") | Some("x-gzip") | Some("deflate") | Some("br")
+        );
+        let is_zstd = enc.as_deref() == Some("zstd")
+            || (!header_says_other
+                && initial.len() >= 4
                 && initial[0] == 0x28
                 && initial[1] == 0xb5
                 && initial[2] == 0x2f
                 && initial[3] == 0xfd);
+        let compressed = matches!(
+            enc.as_deref(),
+            Some("gzip") | Some("x-gzip") | Some("deflate") | Some("zstd") | Some("br")
+        ) || (initial.len() >= 2 && initial[0] == 0x1f && initial[1] == 0x8b)
+            || is_zstd;
 
         if compressed {
-            (Vec::new(), Some(initial.to_vec()), enc)
+            // Without chunked framing the raw bytes are a bare zstd stream, so
+            // fragments can be decoded incrementally as they arrive. Deferred
+            // whole-buffer decoding would need the frame epilogue, which a
+            // gateway flushing per event only emits at stream end — or never,
+            // when the stream is finalized by a drain path (#2267). The
+            // chunk-framed path keeps the legacy decode-at-terminator flow
+            // because its bytes are interleaved with chunk-size framing.
+            let zstd_decoder = if is_zstd && !Self::is_chunked_response(response) {
+                let mut decoder = ZstdStreamDecoder::new();
+                decoder.feed(initial);
+                Some(Rc::new(RefCell::new(decoder)))
+            } else {
+                None
+            };
+            (Vec::new(), Some(initial.to_vec()), enc, zstd_decoder)
         } else {
-            (Self::initial_sse_events(response), None, enc)
+            (Self::initial_sse_events(response), None, enc, None)
         }
     }
 
@@ -376,6 +433,7 @@ impl HttpConnectionAggregator {
         raw_buffer: &[u8],
         content_encoding: Option<&str>,
         is_chunked: bool,
+        zstd_decoder: Option<&RefCell<ZstdStreamDecoder>>,
         src: &SslEvent,
     ) -> Vec<ParsedSseEvent> {
         let body = if is_chunked {
@@ -383,7 +441,17 @@ impl HttpConnectionAggregator {
         } else {
             raw_buffer.to_vec()
         };
-        let decompressed = crate::utils::decompress::decompress_body(&body, content_encoding);
+        // Prefer the incremental decoder output: it recovers every block the
+        // gateway flushed even when the zstd frame never closed, which
+        // whole-buffer decompression cannot (#2267). Empty output means the
+        // decoder never produced anything (init failure or poisoned before
+        // the first block), so fall back to whole-buffer decoding, which
+        // still handles the closed-frame case.
+        let decoder_output = zstd_decoder.map(|d| d.borrow_mut().decoded_output());
+        let decompressed = match decoder_output {
+            Some(out) if !out.is_empty() => out,
+            _ => crate::utils::decompress::decompress_body(&body, content_encoding),
+        };
         let synthetic = std::rc::Rc::new(SslEvent {
             source: src.source,
             timestamp_ns: src.timestamp_ns,
@@ -416,12 +484,14 @@ impl HttpConnectionAggregator {
         response_headers: ParsedResponse,
         content_encoding: Option<String>,
         raw_buffer: Vec<u8>,
+        zstd_decoder: Option<Rc<RefCell<ZstdStreamDecoder>>>,
     ) -> AggregatedResult {
         let is_chunked = Self::is_chunked_response(&response_headers);
         let sse_events = Self::decode_compressed_sse(
             &raw_buffer,
             content_encoding.as_deref(),
             is_chunked,
+            zstd_decoder.as_deref(),
             &response_headers.source_event,
         );
         log::debug!(
@@ -531,7 +601,7 @@ impl HttpConnectionAggregator {
 
                 if response.is_sse() {
                     let mut response_headers = response;
-                    let (sse_events, compressed_buffer, content_encoding) =
+                    let (sse_events, compressed_buffer, content_encoding, zstd_decoder) =
                         Self::sse_entry_state(&response_headers);
                     response_headers.body_len = 0;
                     if let Some(buf) = &compressed_buffer {
@@ -542,6 +612,7 @@ impl HttpConnectionAggregator {
                                 response_headers,
                                 content_encoding,
                                 buf.clone(),
+                                zstd_decoder,
                             ));
                         }
                     }
@@ -553,6 +624,7 @@ impl HttpConnectionAggregator {
                             sse_events,
                             compressed_buffer,
                             content_encoding,
+                            zstd_decoder,
                         },
                     );
                     None
@@ -569,7 +641,7 @@ impl HttpConnectionAggregator {
                         response.status_code,
                     );
                     let mut response_headers = response;
-                    let (sse_events, compressed_buffer, content_encoding) =
+                    let (sse_events, compressed_buffer, content_encoding, zstd_decoder) =
                         Self::sse_entry_state(&response_headers);
                     response_headers.body_len = 0;
                     // Transition to SSE active state, wait for SSE events
@@ -581,6 +653,7 @@ impl HttpConnectionAggregator {
                                 response_headers,
                                 content_encoding,
                                 buf.clone(),
+                                zstd_decoder,
                             ));
                         }
                     }
@@ -592,6 +665,7 @@ impl HttpConnectionAggregator {
                             sse_events,
                             compressed_buffer,
                             content_encoding,
+                            zstd_decoder,
                         },
                     );
 
@@ -616,7 +690,7 @@ impl HttpConnectionAggregator {
                         response.status_code
                     );
                     let mut response_headers = response;
-                    let (sse_events, compressed_buffer, content_encoding) =
+                    let (sse_events, compressed_buffer, content_encoding, zstd_decoder) =
                         Self::sse_entry_state(&response_headers);
                     response_headers.body_len = 0;
                     if let Some(buf) = &compressed_buffer {
@@ -627,6 +701,7 @@ impl HttpConnectionAggregator {
                                 response_headers,
                                 content_encoding,
                                 buf.clone(),
+                                zstd_decoder,
                             ));
                         }
                     }
@@ -638,6 +713,7 @@ impl HttpConnectionAggregator {
                             sse_events,
                             compressed_buffer,
                             content_encoding,
+                            zstd_decoder,
                         },
                     );
                     None
@@ -730,11 +806,19 @@ impl HttpConnectionAggregator {
                 sse_events,
                 compressed_buffer: Some(mut buf),
                 content_encoding,
+                zstd_decoder,
             } => {
                 // Compressed SSE body bytes: the parser forwards them as RawData
                 // because they don't parse as SSE text. Buffer until the chunked
                 // terminator, then de-frame + decompress + parse.
                 let data = &ssl_event.buf[..ssl_event.buf_size() as usize];
+                // Also decode incrementally so a zstd frame that never closes
+                // (HTTP/2, missing terminator) still yields its events (#2267).
+                // The raw buffer is kept in parallel: it feeds the chunked
+                // completion check and the whole-buffer fallback.
+                if let Some(decoder) = &zstd_decoder {
+                    decoder.borrow_mut().feed(data);
+                }
                 buf.extend_from_slice(data);
                 if buf.len() > MAX_COMPRESSED_SSE_BUFFER {
                     log::warn!(
@@ -746,6 +830,7 @@ impl HttpConnectionAggregator {
                         response_headers,
                         content_encoding,
                         buf,
+                        zstd_decoder,
                     ));
                 }
                 if crate::utils::decompress::chunked_stream_complete(&buf) {
@@ -755,6 +840,7 @@ impl HttpConnectionAggregator {
                         response_headers,
                         content_encoding,
                         buf,
+                        zstd_decoder,
                     ))
                 } else {
                     self.insert(
@@ -765,6 +851,7 @@ impl HttpConnectionAggregator {
                             sse_events,
                             compressed_buffer: Some(buf),
                             content_encoding,
+                            zstd_decoder,
                         },
                     );
                     None
@@ -819,6 +906,7 @@ impl HttpConnectionAggregator {
                 mut sse_events,
                 compressed_buffer,
                 content_encoding,
+                zstd_decoder,
             } => {
                 // Compressed streams are decoded at completion, not live. A done
                 // marker (e.g. a standalone "0\r\n\r\n" chunk terminator surfaced
@@ -831,6 +919,7 @@ impl HttpConnectionAggregator {
                             response_headers,
                             content_encoding,
                             buf,
+                            zstd_decoder,
                         ));
                     }
                     self.insert(
@@ -841,6 +930,7 @@ impl HttpConnectionAggregator {
                             sse_events,
                             compressed_buffer: Some(buf),
                             content_encoding,
+                            zstd_decoder,
                         },
                     );
                     return None;
@@ -924,6 +1014,7 @@ impl HttpConnectionAggregator {
                             sse_events,
                             compressed_buffer: None,
                             content_encoding,
+                            zstd_decoder: None,
                         },
                     );
 
@@ -977,7 +1068,11 @@ impl HttpConnectionAggregator {
     }
 
     /// Drain all connections (for force complete)
-    pub fn drain_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
+    ///
+    /// No in-crate caller today; kept (dead_code-allowed) through the review
+    /// F3 visibility narrowing for force-complete tooling.
+    #[allow(dead_code)]
+    pub(crate) fn drain_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
         self.connections
             .iter_mut()
             .map(|(k, v)| (*k, v.clone()))
@@ -996,7 +1091,10 @@ impl HttpConnectionAggregator {
     /// Returns `(ConnectionId, ConnectionState)` for entries that were in
     /// `RequestPending` or `SseActive` state.  `Idle` entries are silently
     /// discarded.  Used by crash detection on `ProcMon::Exit`.
-    pub fn drain_connections_for_pid(&mut self, pid: u32) -> Vec<(ConnectionId, ConnectionState)> {
+    pub(crate) fn drain_connections_for_pid(
+        &mut self,
+        pid: u32,
+    ) -> Vec<(ConnectionId, ConnectionState)> {
         let keys: Vec<ConnectionId> = self
             .connections
             .iter()
@@ -1045,7 +1143,7 @@ impl HttpConnectionAggregator {
     /// were in `RequestPending` or `SseActive` state.  `Idle` entries are
     /// silently discarded.  This allows the caller to persist orphaned
     /// in-flight requests before they are lost.
-    pub fn drain_dead_pid_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
+    pub(crate) fn drain_dead_pid_connections(&mut self) -> Vec<(ConnectionId, ConnectionState)> {
         use std::collections::HashSet;
 
         // 1. Collect unique PIDs
@@ -1642,7 +1740,7 @@ mod tests {
             body_len: chunked.len(),
             source_event: event,
         };
-        let (sse_events, buf, enc) = HttpConnectionAggregator::sse_entry_state(&response);
+        let (sse_events, buf, enc, _decoder) = HttpConnectionAggregator::sse_entry_state(&response);
         assert!(buf.is_some(), "compressed buffer should be Some for zstd");
         assert!(sse_events.is_empty());
         assert_eq!(enc.as_deref(), Some("zstd"));
@@ -1664,8 +1762,39 @@ mod tests {
             body_len: compressed.len(),
             source_event: event,
         };
-        let (_, buf, _) = HttpConnectionAggregator::sse_entry_state(&response);
+        let (_, buf, _, _) = HttpConnectionAggregator::sse_entry_state(&response);
         assert!(buf.is_some(), "should detect zstd via magic bytes");
+    }
+
+    #[test]
+    fn test_sse_entry_state_gzip_header_never_builds_zstd_decoder() {
+        // Review F2: an explicit non-zstd Content-Encoding must win over the
+        // magic sniff even when the payload bytes collide with the zstd magic.
+        // Behavior must stay identical to origin/main: buffer-until-complete,
+        // no incremental decoder.
+        let mut body = vec![0x28, 0xb5, 0x2f, 0xfd]; // zstd magic collision
+        body.extend_from_slice(b"rest-of-gzip-payload");
+        let event = create_mock_ssl_event_with_buf(1, 0x102, body.clone(), 0);
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        headers.insert("content-encoding".to_string(), "gzip".to_string());
+        let response = ParsedResponse {
+            version: 11,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers,
+            body_offset: 0,
+            body_len: body.len(),
+            source_event: event,
+        };
+        let (sse_events, buf, enc, decoder) = HttpConnectionAggregator::sse_entry_state(&response);
+        assert!(buf.is_some(), "gzip stream must still buffer as compressed");
+        assert!(sse_events.is_empty());
+        assert_eq!(enc.as_deref(), Some("gzip"));
+        assert!(
+            decoder.is_none(),
+            "gzip header must never enable the zstd incremental decoder"
+        );
     }
 
     #[test]
@@ -1683,7 +1812,7 @@ mod tests {
             body_len: body.len(),
             source_event: event,
         };
-        let (_, buf, _) = HttpConnectionAggregator::sse_entry_state(&response);
+        let (_, buf, _, _) = HttpConnectionAggregator::sse_entry_state(&response);
         assert!(buf.is_none(), "uncompressed SSE should have no buffer");
     }
 
@@ -1831,8 +1960,13 @@ mod tests {
         // The shared decode reused by both the live finalizer and the drain path.
         let (_plain, chunked) = make_zstd_chunked_sse();
         let src = create_mock_ssl_event(11, 0xB00);
-        let events =
-            HttpConnectionAggregator::decode_compressed_sse(&chunked, Some("zstd"), true, &src);
+        let events = HttpConnectionAggregator::decode_compressed_sse(
+            &chunked,
+            Some("zstd"),
+            true,
+            None,
+            &src,
+        );
         assert!(
             !events.is_empty(),
             "must decode chunked zstd SSE into parsed events"
@@ -2193,6 +2327,7 @@ mod tests {
             response_headers,
             Some("zstd".to_string()),
             compressed,
+            None,
         );
         match result {
             AggregatedResult::ResponseOnly { response, .. } => {
@@ -2200,6 +2335,225 @@ mod tests {
             }
             other => panic!("expected ResponseOnly, got {other:?}"),
         }
+    }
+
+    // ── Fragmented zstd streaming tests (issue #2267) ────────────────────
+
+    /// Build a realistic Anthropic SSE stream compressed the way a streaming
+    /// gateway does: ONE zstd frame, flushed per event so the client can
+    /// decode incrementally, and never finished while the response is open.
+    /// Returns `(plain, compressed)` where `compressed` has no frame epilogue.
+    fn make_streaming_zstd_sse() -> (Vec<u8>, Vec<u8>) {
+        use std::io::Write;
+        let events: [&[u8]; 3] = [
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01ABC\",\"model\":\"claude-sonnet-4\",\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}\n\n",
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
+            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}\n\n",
+        ];
+        let mut plain = Vec::new();
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+        for ev in events {
+            plain.extend_from_slice(ev);
+            encoder.write_all(ev).unwrap();
+            // Per-event flush ends the current block and emits it, exactly
+            // like a live gateway; the frame itself stays open.
+            encoder.flush().unwrap();
+        }
+        let compressed = encoder.get_ref().clone();
+        (plain, compressed)
+    }
+
+    #[test]
+    fn fragmented_zstd_stream_without_terminator_decodes_incrementally() {
+        // issue #2267: a gateway that zstd-compresses a streamed SSE response
+        // delivers one long open frame in many fragments (HTTP/2 style — no
+        // chunked terminator, no frame epilogue mid-stream). Whole-buffer
+        // decompression fails with UnexpectedEof "incomplete frame" and the
+        // raw compressed bytes silently reach the SSE parser: events=0, all
+        // usage lost. Incremental decoding must recover every flushed event.
+        let mut aggregator = HttpConnectionAggregator::new();
+        let (plain, compressed) = make_streaming_zstd_sse();
+
+        let req_event = create_mock_ssl_event(40, 0xF000);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            version: 2,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: req_event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        // HTTP/2-style response: zstd content-encoding, NO transfer-encoding.
+        let resp_event = create_mock_ssl_event_with_buf(40, 0xF000, Vec::new(), 0);
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        headers.insert("content-encoding".to_string(), "zstd".to_string());
+        let response = ParsedResponse {
+            version: 2,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers,
+            body_offset: 0,
+            body_len: 0,
+            source_event: resp_event,
+        };
+        assert!(aggregator.process_response(response).is_none());
+
+        // Feed the compressed frame in small fragments, as TLS records arrive.
+        for frag in compressed.chunks(11) {
+            let result = aggregator.process_raw_body_data(&raw_frag(40, 0xF000, frag.to_vec()));
+            assert!(result.is_none(), "fragments must keep buffering");
+        }
+
+        // Stream-end signal: a chunked terminator never arrives on this path.
+        let conn_id = ConnectionId {
+            pid: 40,
+            ssl_ptr: 0xF000,
+        };
+        let done_event =
+            create_mock_ssl_event_with_buf(40, 0xF000, b"data: [DONE]\n\n".to_vec(), 0);
+        let done = ParsedSseEvent::new_done_marker(done_event);
+        let pair = match aggregator.process_sse_event(&conn_id, done) {
+            Some(AggregatedResult::SseComplete(pair)) => pair,
+            other => panic!("expected SseComplete, got {other:?}"),
+        };
+
+        // Full-fidelity check: the decoded stream must parse into exactly the
+        // same events as the original plaintext would (not merely "some
+        // events"), so a decoder that silently drops a lagging block or
+        // corrupts a boundary cannot pass.
+        let expected =
+            SseParser::new().parse(create_mock_ssl_event_with_buf(40, 0xF000, plain.clone(), 0));
+        assert!(!expected.is_empty(), "precondition: plaintext parses");
+        assert_eq!(
+            pair.response.sse_event_count(),
+            expected.len(),
+            "decoded stream must yield exactly the plaintext's event count"
+        );
+        for (got, want) in pair.response.sse_events.iter().zip(&expected) {
+            assert_eq!(got.event, want.event, "event name must survive");
+            assert_eq!(got.body_str(), want.body_str(), "data must be byte-equal");
+        }
+        let all_data: String = pair
+            .response
+            .sse_events
+            .iter()
+            .map(|e| e.body_str().to_string())
+            .collect();
+        assert!(
+            all_data.contains("\"input_tokens\":25"),
+            "message_start usage must survive decompression: {all_data:?}"
+        );
+        assert!(
+            all_data.contains("\"output_tokens\":42"),
+            "message_delta usage must survive decompression: {all_data:?}"
+        );
+        // Review F4: response id and finish reason feed builder.rs recovery,
+        // so pin them explicitly.
+        assert!(
+            all_data.contains("\"id\":\"msg_01ABC\""),
+            "response id must survive decompression: {all_data:?}"
+        );
+        assert!(
+            all_data.contains("\"stop_reason\":\"end_turn\""),
+            "finish reason must survive decompression: {all_data:?}"
+        );
+    }
+
+    /// Drive one full fragmented zstd SSE request/response cycle on the given
+    /// connection and assert full-fidelity decoding (issue #2267 plumbing,
+    /// shared by the keep-alive and HTTP/1.1 variants). `version` is the HTTP
+    /// version marker carried by both request and response.
+    fn run_fragmented_zstd_cycle(
+        aggregator: &mut HttpConnectionAggregator,
+        pid: u32,
+        ssl_ptr: u64,
+        version: u8,
+    ) {
+        let (plain, compressed) = make_streaming_zstd_sse();
+
+        let req_event = create_mock_ssl_event(pid, ssl_ptr);
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            version,
+            headers: HashMap::new(),
+            body_offset: 0,
+            body_len: 0,
+            source_event: req_event,
+            reassembled_body: None,
+        };
+        aggregator.process_request(request);
+
+        // zstd content-encoding, NO transfer-encoding: no chunked terminator
+        // will ever arrive, so only incremental decoding can recover events.
+        let resp_event = create_mock_ssl_event_with_buf(pid, ssl_ptr, Vec::new(), 0);
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/event-stream".to_string());
+        headers.insert("content-encoding".to_string(), "zstd".to_string());
+        let response = ParsedResponse {
+            version,
+            status_code: 200,
+            reason: "OK".to_string(),
+            headers,
+            body_offset: 0,
+            body_len: 0,
+            source_event: resp_event,
+        };
+        assert!(aggregator.process_response(response).is_none());
+
+        for frag in compressed.chunks(11) {
+            let result = aggregator.process_raw_body_data(&raw_frag(pid, ssl_ptr, frag.to_vec()));
+            assert!(result.is_none(), "fragments must keep buffering");
+        }
+
+        let conn_id = ConnectionId { pid, ssl_ptr };
+        let done_event =
+            create_mock_ssl_event_with_buf(pid, ssl_ptr, b"data: [DONE]\n\n".to_vec(), 0);
+        let done = ParsedSseEvent::new_done_marker(done_event);
+        let pair = match aggregator.process_sse_event(&conn_id, done) {
+            Some(AggregatedResult::SseComplete(pair)) => pair,
+            other => panic!("expected SseComplete, got {other:?}"),
+        };
+
+        let expected =
+            SseParser::new().parse(create_mock_ssl_event_with_buf(pid, ssl_ptr, plain, 0));
+        assert_eq!(
+            pair.response.sse_event_count(),
+            expected.len(),
+            "decoded stream must yield exactly the plaintext's event count"
+        );
+        for (got, want) in pair.response.sse_events.iter().zip(&expected) {
+            assert_eq!(got.event, want.event, "event name must survive");
+            assert_eq!(got.body_str(), want.body_str(), "data must be byte-equal");
+        }
+    }
+
+    #[test]
+    fn keepalive_second_zstd_response_gets_fresh_decoder() {
+        // Review F6: completing the first stream pops the SseActive entry
+        // without re-inserting it, dropping the aggregator's Rc to the first
+        // decoder; the second response then builds a brand-new decoder in
+        // sse_entry_state. If the first stream's decoder leaked into the
+        // second, its open-frame state would reject the second frame header
+        // (poison) and the full-fidelity assertions inside the cycle would
+        // fail — so two clean back-to-back cycles prove the isolation.
+        let mut aggregator = HttpConnectionAggregator::new();
+        run_fragmented_zstd_cycle(&mut aggregator, 50, 0xAB00, 2);
+        run_fragmented_zstd_cycle(&mut aggregator, 50, 0xAB00, 2);
+    }
+
+    #[test]
+    fn http11_non_chunked_zstd_stream_decodes_incrementally() {
+        // Review F7: HTTP/1.1 without Transfer-Encoding rides the same
+        // no-terminator path as HTTP/2 framing and must equally benefit from
+        // incremental decoding.
+        let mut aggregator = HttpConnectionAggregator::new();
+        run_fragmented_zstd_cycle(&mut aggregator, 51, 0xAC00, 11);
     }
 
     // ── OpenAI Responses API SSE continuation buffer tests ───────────────

@@ -1085,6 +1085,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn git_file_marks_worktree_as_a_repository() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join(".git"), "gitdir: ../metadata\n").unwrap();
+        std::fs::write(directory.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(directory.path().join("ignored.txt"), "hit ignored\n").unwrap();
+        std::fs::write(directory.path().join("visible.txt"), "hit visible\n").unwrap();
+
+        let result = GrepTool
+            .invoke(
+                serde_json::json!({"pattern": "hit", "path": "."}),
+                &test_ctx_in(directory.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error, "{}", result.output);
+        assert!(!result.output.contains("ignored.txt"));
+        assert!(result.output.contains("visible.txt"));
+    }
+
+    #[tokio::test]
     async fn nested_git_repository_stops_parent_gitignore_rules() {
         let directory = tempfile::tempdir().unwrap();
         mark_git_repository(directory.path());

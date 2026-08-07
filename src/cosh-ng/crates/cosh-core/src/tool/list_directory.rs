@@ -161,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_unknown_directory_entry_types() {
+    fn unknown_search_only_directory_is_classified_without_read_access() {
         use std::os::unix::fs::PermissionsExt;
 
         let directory = tempfile::tempdir().unwrap();
@@ -170,12 +170,13 @@ mod tests {
         std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o111)).unwrap();
         let workspace = WorkspaceFs::new(directory.path()).unwrap();
 
-        assert!(is_directory_entry(
+        let is_directory = is_directory_entry(
             &workspace,
             Path::new("."),
             &OsString::from("nested"),
             FileType::Unknown,
-        ));
+        );
+        assert!(is_directory);
         std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 }

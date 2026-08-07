@@ -329,7 +329,10 @@ mod tests {
         let matches = expand(&["*.rs".to_string()], &base, &base, 10).unwrap();
 
         assert_eq!(matches.files.len(), 1);
-        assert_eq!(matches.files[0].path, base.join("lib.rs"));
+        assert_eq!(
+            matches.files[0].path,
+            base.canonicalize().unwrap().join("lib.rs")
+        );
     }
 
     #[test]
@@ -354,6 +357,7 @@ mod tests {
         let matches = expand(&[pattern], Path::new("/nonexistent"), directory.path(), 10).unwrap();
 
         assert_eq!(matches.files.len(), 2);
+        let source = source.canonicalize().unwrap();
         assert!(matches
             .files
             .iter()

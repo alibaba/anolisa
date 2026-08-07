@@ -134,6 +134,22 @@ agent-sec-core/
 └── README_zh.md
 ```
 
+## Observability Hook 开关
+
+OpenClaw、Hermes、cosh、Qwen Code、Qoder 和 Codex 集成默认都会启用
+Observability hook。若需关闭，请在启动对应宿主前设置：
+
+```bash
+export OBSERVABILITY_HOOK_ENABLED=false
+```
+
+该变量仅接受 `true` / `false`（忽略大小写和首尾空白）；未设置或值无效时保持默认开启。
+修改后需重启对应宿主进程。
+
+对于 OpenClaw 和 Hermes，原有 Observability capability 的 `enabled` 配置仍是独立开关。
+任一开关关闭都会停止记录；将该环境变量设为 `true`，不会重新启用已在插件配置中关闭的
+capability。
+
 ## 快速开始
 
 ### 前置条件
@@ -261,6 +277,7 @@ agent-sec-cli verify
 ## Skill Ledger
 
 基于 Ed25519 的 Skill 目录完整性账本。在 `.skill-meta/` 中记录文件哈希、版本链和扫描结果，通过 `agent-sec-cli skill-ledger` 子命令统一管理。
+对于已有 manifest，Skill Ledger 会先验真、再检查文件漂移；已有但未签名的 manifest 会报告为 `tampered`。
 
 ### 核心命令
 

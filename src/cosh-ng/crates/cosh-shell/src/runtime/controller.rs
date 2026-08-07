@@ -380,6 +380,63 @@ mod tests {
     }
 
     #[test]
+    fn pending_shell_handoff_serializes_approved_requests() {
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let mut state = InlineState::default();
+        state.agent_run.active = Some(test_active_run());
+        let first = ShellHandoffRequest::new(
+            "echo first",
+            "$ echo first",
+            "approved_provider_shell_tool",
+            "user",
+            "req-first",
+            "run-approved",
+            1,
+        )
+        .expect("first handoff request");
+        let second = ShellHandoffRequest::new(
+            "echo second",
+            "$ echo second",
+            "approved_provider_shell_tool",
+            "user",
+            "req-second",
+            "run-approved",
+            1,
+        )
+        .expect("second handoff request");
+        state
+            .control
+            .shell_handoff_mut()
+            .enqueue_approved_request(first.clone());
+        state
+            .control
+            .shell_handoff_mut()
+            .enqueue_approved_request(second.clone());
+
+        let first_action =
+            render_raw_inline_events(&[], &mut Vec::new(), &adapter, "zsh", &mut state)
+                .expect("emit first handoff");
+        assert_eq!(first_action, RawObserverAction::EmitToPty(first));
+
+        let second_action =
+            render_raw_inline_events(&[], &mut Vec::new(), &adapter, "zsh", &mut state)
+                .expect("hold second handoff until the first closes");
+
+        assert_eq!(second_action, RawObserverAction::RawPassthrough);
+
+        state
+            .control
+            .shell_handoff_mut()
+            .pop_pending()
+            .expect("close first handoff");
+        let third_action =
+            render_raw_inline_events(&[], &mut Vec::new(), &adapter, "zsh", &mut state)
+                .expect("emit second handoff after the first closes");
+
+        assert_eq!(third_action, RawObserverAction::EmitToPty(second));
+    }
+
+    #[test]
     #[allow(clippy::field_reassign_with_default)]
     fn pending_shell_handoff_restores_prompt_with_first_emit() {
         let adapter = AdapterInstance::Fake(FakeAgentAdapter);

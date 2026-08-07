@@ -14,6 +14,7 @@ Prometheus 指标导出，设计为 E2B 类编排平台的单机执行代理。
 - **策略驱动后端选择** — workload class → 后端优先级列表
 - **生命周期状态机** — 9 种状态：Pending、Creating、Running、Paused、
   Checkpointed、RecoveryRequired、Reset、Warm 和 Destroyed
+- **Guest 操作** — 对提供 guest endpoint 的运行中后端执行有界命令和文件传输
 - **Warm pool 管理** — 预热实例 + 基于 TTL 的 GC
 - **模板注册表** — 内存中模板追踪，支持空闲驱逐
 - **内核 hook 注册** — 前/后置 hook 状态追踪
@@ -41,8 +42,12 @@ curl --unix-socket /run/blaze/api.sock http://localhost/v1/health
 # 创建 sandbox
 curl -X POST --unix-socket /run/blaze/api.sock http://localhost/v1/sandboxes \
   -H 'Content-Type: application/json' \
-  -d '{"workload_class":"agent-rl","image_digest":"sha256:..."}'
+  -d '{"workload_class":"agent-tool","image_digest":"sha256:..."}'
 ```
+
+快速开始使用关闭 Firecracker guest transport 的示例策略，因此没有兼容
+guest agent 的镜像不会等待 guest 就绪。只有镜像运行了对应 agent 时才应
+启用该 transport。
 
 ## 配置
 
@@ -100,10 +105,18 @@ provider = "file"       # 存储 provider 选择。当前支持："file"、"auto
 images_dir = "/var/lib/blaze/images"
 # pool_size = 0           # [Reserved] 预热存储槽位数（尚未启用）
 # prefork = false         # [Reserved] 是否在槽位中预启动 VM（尚未启用）
-# flush_interval = "30s"  # [Reserved] 脏数据刷盘周期（尚未启用）
+sync_interval = "disabled" # 设置正数 duration 后持久化 slot 中已经写入的制品。
+sync_timeout = "30s"       # scheduler 等待 slot 重建与制品同步的最长时间。
 ```
 
 `file` provider 使用标准文件系统操作管理 sandbox 存储。`auto` 按优先级探测可用 provider（当前等同于 `file`）。无法识别的值将记录告警并回退到 `file`。
+启用周期同步后，已经返回的 provider 失败不会中断后续 sandbox。如果 provider
+在 deadline 到达时仍无法停止文件系统操作，该操作会继续持有 sandbox operation
+lock 和唯一的同步许可直至完成；后续同步会被推迟而不会不断累积。service loop
+结束时，worker 会停止调度新任务。
+
+[存储制品同步用户指南](../../docs/user-guide/zh/runtime/blaze.md#存储制品同步)进一步说明
+配置、选择、重试和 worker 关闭行为。
 
 ## API 端点
 
@@ -114,11 +127,17 @@ images_dir = "/var/lib/blaze/images"
 | POST | `/v1/sandboxes` | 创建 sandbox |
 | GET | `/v1/sandboxes/{id}` | 获取 sandbox 详情 |
 | DELETE | `/v1/sandboxes/{id}` | 销毁 sandbox |
+| POST | `/v1/sandboxes/{id}/exec` | 执行 guest 命令 |
+| POST | `/v1/sandboxes/{id}/read` | 读取 guest 文件 |
+| POST | `/v1/sandboxes/{id}/write` | 替换 guest 文件 |
 | GET | `/v1/instances` | 列出 sandbox 的兼容入口 |
 | POST | `/v1/instances` | 创建 sandbox 的兼容入口 |
 | GET | `/v1/instances/{id}` | 获取 sandbox 详情的兼容入口 |
 | DELETE | `/v1/instances/{id}` | 销毁 sandbox 的兼容入口 |
 | POST | `/v1/instances/{id}/destroy` | 保留的销毁 action |
+| POST | `/v1/instances/{id}/exec` | Guest 命令兼容入口 |
+| POST | `/v1/instances/{id}/read` | Guest 文件读取兼容入口 |
+| POST | `/v1/instances/{id}/write` | Guest 文件写入兼容入口 |
 | POST | `/v1/instances/{id}/checkpoint` | 记录 checkpoint 状态 |
 | POST | `/v1/instances/{id}/reset` | 记录 reset 并返回 warm pool |
 | GET | `/v1/pools` | 列出 warm pool |
@@ -146,6 +165,13 @@ daemon 启动时会逐个处理未结束的 sandbox。单个 sandbox 清理失�
 创建会被清理而不是从原位置继续，重启后也不会接管先前的后端进程。恢复失败
 后目前没有后台循环自动重试。checkpoint 和 reset 接口保持原有的元数据状态
 变化；这里的恢复流程没有增加后端 snapshot 或 restore 操作。
+
+### Guest 操作
+
+当 backend 提供兼容的 guest endpoint 时，运行中的 sandbox 可以执行有界
+命令和文件传输。生产环境的 mock fallback 不会声明该能力。请求格式、上限、
+就绪检查、错误处理和当前关闭边界参见
+[Blaze 用户指南](../../docs/user-guide/zh/runtime/blaze.md#guest-操作)。
 
 #### 健康检查
 

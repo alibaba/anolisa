@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use anolisa_core::adapter::AdapterError;
-use anolisa_core::adapter::claim::{ClaimResourceKind, ClaimStatus};
+use anolisa_core::adapter::claim::{ClaimResourceKind, ClaimStatus, DriverPayload};
 use anolisa_core::adapter::driver::{AdapterConditionKind, AdapterSummary, ConditionStatus};
 use anolisa_core::adapter::manager::{AdapterManager, EnableOutcome};
 use anolisa_platform::fs_layout::FsLayout;
@@ -46,6 +46,9 @@ const MANAGED_ENV: &[&str] = &[
     "FAKE_QODER_LOG",
     "FAKE_QODER_CACHE",
     "FAKE_QODER_FAIL",
+    "FAKE_QODER_LARGE_INVENTORY",
+    "FAKE_QODER_PLUGIN_ID",
+    "FAKE_QODER_PROJECT_PLUGIN",
 ];
 
 struct EnvGuard {
@@ -211,6 +214,100 @@ fn expand_dest(dest: &str, datadir: &Path) -> PathBuf {
         .replace("{datadir}", &datadir.to_string_lossy())
         .replace("{component}", COMPONENT);
     PathBuf::from(expanded)
+}
+
+/// Stage a world whose component is RPM-installed (delegated provenance)
+/// and whose contract declares an `[adapters.backends.rpm].resource_root`
+/// outside every datadir root. The bundle exists only at that RPM root —
+/// the raw `dest` was never laid down, exactly like an RPM-only install.
+fn stage_rpm_backend(
+    framework: &str,
+    adapter_type: &str,
+    dest: &str,
+    stage_bundle: impl Fn(&Path),
+) -> World {
+    let root = tempfile::tempdir().expect("tempdir");
+    let prefix = root.path().to_path_buf();
+    let layout = FsLayout::system(Some(prefix.clone()));
+    let user_home = prefix.join("home");
+    std::fs::create_dir_all(&user_home).expect("home");
+
+    let resource_root = prefix.join("opt").join("tokenless-plugin");
+    std::fs::create_dir_all(&resource_root).expect("rpm root");
+    stage_bundle(&resource_root);
+
+    // RPM provenance: adopted object delegated to the rpm backend.
+    let state_path = layout.state_dir.join("installed.toml");
+    std::fs::create_dir_all(state_path.parent().unwrap()).expect("state dir");
+    std::fs::write(
+        &state_path,
+        format!(
+            r#"schema_version = 2
+updated_at = "2026-07-04T00:00:00Z"
+install_mode = "system"
+prefix = "{prefix}"
+anolisa_version = "0.1.20"
+
+[[objects]]
+kind = "component"
+name = "{COMPONENT}"
+version = "0.6.0"
+status = "adopted"
+install_backend = "rpm"
+ownership = "rpm_observed"
+managed = false
+adopted = true
+installed_at = "2026-07-04T00:00:00Z"
+"#,
+            prefix = prefix.display(),
+        ),
+    )
+    .expect("seed state");
+
+    let contract = format!(
+        r#"[component]
+name = "{COMPONENT}"
+version = "0.6.0"
+
+[component.layout]
+modes = ["system"]
+
+[[adapters]]
+framework = "{framework}"
+adapter_type = "{adapter_type}"
+plugin_id = "{COMPONENT}"
+dest = "{dest}"
+
+[adapters.backends.rpm]
+resource_root = "{rpm_root}/"
+"#,
+        rpm_root = resource_root.display(),
+    );
+    // Both discovery paths an adopted component may be read from: the
+    // saved manifest snapshot and the datadir contract the RPM ships.
+    for path in [
+        layout
+            .state_dir
+            .join("component-manifests")
+            .join(COMPONENT)
+            .join("component.toml"),
+        layout
+            .datadir
+            .join("components")
+            .join(COMPONENT)
+            .join("component.toml"),
+    ] {
+        std::fs::create_dir_all(path.parent().unwrap()).expect("contract dir");
+        std::fs::write(&path, &contract).expect("seed contract");
+    }
+
+    World {
+        _root: root,
+        prefix,
+        layout,
+        user_home,
+        resource_root,
+    }
 }
 
 fn write_exec(path: &Path, body: &str) {
@@ -398,6 +495,16 @@ fn stage_codex_bundle(root: &Path) {
     std::fs::write(root.join("README.md"), b"codex plugin\n").expect("readme");
 }
 
+fn stage_codex_hook_bundle(root: &Path) {
+    stage_codex_bundle(root);
+    std::fs::create_dir_all(root.join("hooks")).expect("hooks directory");
+    std::fs::write(
+        root.join("hooks/hooks.json"),
+        br#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"true"}]}]}}"#,
+    )
+    .expect("hooks.json");
+}
+
 /// Fake `codex` CLI: appends each argv line to `$FAKE_CODEX_LOG` and keeps
 /// marketplace/plugin registries under `$FAKE_CODEX_STATE` so `list`
 /// reflects prior `add`/`remove` calls.
@@ -408,6 +515,27 @@ fn write_fake_codex(dir: &Path) -> PathBuf {
         r#"#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_CODEX_LOG"
 st="$FAKE_CODEX_STATE"; mkdir -p "$st" 2>/dev/null
+if [ "$1" = "app-server" ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"method":"initialize"'*) printf '{"id":0,"result":{}}\n' ;;
+      *'"method":"hooks/list"'*)
+        if [ "$FAKE_CODEX_FAIL" = "hooks" ]; then
+          printf '{"id":1,"result":{"data":[{"hooks":[],"warnings":[],"errors":[]}]}}\n'
+        else
+          printf '{"id":1,"result":{"data":[{"hooks":[{"key":"tokenless@anolisa-tokenless:hooks/hooks.json:pre_tool_use:0:0","currentHash":"sha256:trusted","source":"plugin","pluginId":"tokenless@anolisa-tokenless","isManaged":false}],"warnings":[],"errors":[]}]}}\n'
+        fi ;;
+      *'"method":"config/batchWrite"'*)
+        printf '%s\n' "$line" > "$st/trust-request"
+        if [ "$FAKE_CODEX_FAIL" = "write-overridden" ]; then
+          printf '{"id":1,"result":{"status":"okOverridden","overriddenMetadata":{"message":"hooks.state is managed","overridingLayer":{"name":"sessionFlags","version":"test"},"effectiveValue":{}}}}\n'
+        else
+          printf '{"id":1,"result":{"status":"ok"}}\n'
+        fi ;;
+    esac
+  done
+  exit 0
+fi
 if [ "$1" = "plugin" ] && [ "$2" = "marketplace" ]; then
   case "$3" in
     add)
@@ -536,6 +664,266 @@ fn codex_enable_records_argv_and_builds_marketplace() {
 }
 
 #[test]
+fn codex_enable_trusts_declared_hooks() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_hook_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+
+    world
+        .manager()
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable");
+
+    let request: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(world.prefix.join("codex-state/trust-request"))
+            .expect("trust request"),
+    )
+    .expect("valid request");
+    assert_eq!(request["method"], "config/batchWrite");
+    assert_eq!(
+        request["params"]["edits"][0]["value"]["tokenless@anolisa-tokenless:hooks/hooks.json:pre_tool_use:0:0"]
+            ["trusted_hash"],
+        "sha256:trusted"
+    );
+}
+
+#[test]
+fn codex_enable_fails_when_declared_hooks_are_not_discovered() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_hook_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+    guard.set("FAKE_CODEX_FAIL", Path::new("hooks"));
+
+    let error = world
+        .manager()
+        .enable(COMPONENT, Some("codex"), false)
+        .expect_err("missing hooks must fail enable");
+    assert!(error.to_string().contains("reported no hooks"), "{error}");
+}
+
+#[test]
+fn codex_enable_fails_when_hook_trust_is_overridden() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_hook_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+    guard.set("FAKE_CODEX_FAIL", Path::new("write-overridden"));
+
+    let error = world
+        .manager()
+        .enable(COMPONENT, Some("codex"), false)
+        .expect_err("overridden hook trust must fail enable");
+    assert!(
+        error.to_string().contains("sessionFlags"),
+        "overriding layer must be actionable: {error}"
+    );
+}
+
+/// Regression for the unified raw/RPM contract: an RPM-installed component
+/// whose contract declares `[adapters.backends.rpm].resource_root` outside
+/// every datadir must enable through the real production path — the
+/// receipt's marketplace symlink targets the external RPM root, and that
+/// target validates against contract-derived trust (never the receipt
+/// itself). status and disable keep working over the persisted receipt.
+#[test]
+fn codex_enable_rpm_backend_root_outside_datadir() {
+    let guard = EnvGuard::acquire();
+    let world = stage_rpm_backend(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    let (_log, marketplace_root) = apply_codex_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    let claim = match manager
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable must accept the contract-declared RPM root")
+    {
+        EnableOutcome::Enabled(c) => *c,
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
+    };
+
+    // The marketplace symlink targets the external RPM root.
+    let symlink = marketplace_root.join(COMPONENT);
+    assert_eq!(
+        std::fs::read_link(&symlink).expect("symlink"),
+        world.resource_root,
+        "symlink must point at the RPM-provided root"
+    );
+    assert!(
+        claim.resources.iter().any(|r| matches!(
+            &r.kind,
+            ClaimResourceKind::Symlink { target, .. } if target == &world.resource_root
+        )),
+        "receipt must record the RPM root as the symlink target"
+    );
+
+    // The persisted receipt keeps validating on the read paths.
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+
+    let disabled = manager
+        .disable(COMPONENT, Some("codex"), false)
+        .expect("disable");
+    assert!(disabled.claim_removed);
+    assert!(
+        !marketplace_root.exists(),
+        "marketplace dir removed on disable"
+    );
+    assert!(
+        world
+            .resource_root
+            .join(".codex-plugin/plugin.json")
+            .is_file(),
+        "disable must never touch the RPM-owned root"
+    );
+}
+
+/// Regression for RPM root migration: enable on root A, then an RPM update
+/// moves the payload to root B and refreshes the contract snapshot (A is
+/// removed). The enabled receipt still points at A — it must stay
+/// manageable: status keeps reporting (degraded, not an error), re-enable
+/// migrates the symlink to B, and disable cleans up. The enable-time trust
+/// anchor — not the receipt — is what keeps A trusted.
+#[test]
+fn codex_receipt_survives_rpm_root_migration() {
+    let guard = EnvGuard::acquire();
+    let world = stage_rpm_backend(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    let (_log, marketplace_root) = apply_codex_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable on root A");
+
+    // RPM update: payload moves A -> B (with updated content), contract
+    // snapshots point at B, A disappears.
+    let root_b = world.prefix.join("opt").join("tokenless-plugin-v2");
+    std::fs::create_dir_all(&root_b).expect("root B");
+    stage_codex_bundle(&root_b);
+    std::fs::write(root_b.join("README.md"), b"codex plugin v2\n").expect("v2 readme");
+    let contract = format!(
+        r#"[component]
+name = "{COMPONENT}"
+version = "0.7.0"
+
+[component.layout]
+modes = ["system"]
+
+[[adapters]]
+framework = "codex"
+adapter_type = "plugin"
+plugin_id = "{COMPONENT}"
+dest = "{{datadir}}/adapters/{{component}}/codex/"
+
+[adapters.backends.rpm]
+resource_root = "{root_b}/"
+"#,
+        root_b = root_b.display(),
+    );
+    for path in [
+        world
+            .layout
+            .state_dir
+            .join("component-manifests")
+            .join(COMPONENT)
+            .join("component.toml"),
+        world
+            .layout
+            .datadir
+            .join("components")
+            .join(COMPONENT)
+            .join("component.toml"),
+    ] {
+        std::fs::write(&path, &contract).expect("refresh contract");
+    }
+    std::fs::remove_dir_all(&world.resource_root).expect("remove root A");
+
+    // status must keep reporting the stale receipt, never fail claim
+    // validation — the receipt would otherwise be unmanageable. The
+    // summary must degrade: the marketplace symlink dangles at the
+    // vanished root A, so codex cannot actually serve the plugin no
+    // matter what its registration lists say.
+    let status = manager
+        .status(Some(COMPONENT))
+        .expect("status must survive the root migration");
+    assert_eq!(status.entries.len(), 1);
+    assert_eq!(
+        status.entries[0].report.summary,
+        AdapterSummary::Degraded,
+        "a receipt pointing at a vanished root must not report Healthy"
+    );
+    let bundle = status.entries[0]
+        .report
+        .conditions
+        .iter()
+        .find(|c| c.kind == AdapterConditionKind::ResourceBundleMatches)
+        .expect("bundle condition present");
+    assert_ne!(
+        bundle.status,
+        ConditionStatus::True,
+        "vanished enable-time root must not verify as matching"
+    );
+
+    // re-enable migrates the marketplace symlink to root B.
+    let claim = match manager
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("re-enable must migrate to root B")
+    {
+        EnableOutcome::Enabled(c) => *c,
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
+    };
+    assert_eq!(
+        std::fs::read_link(marketplace_root.join(COMPONENT)).expect("symlink"),
+        root_b,
+        "symlink must be rewritten to the new RPM root"
+    );
+    assert!(claim.resources.iter().any(|r| matches!(
+        &r.kind,
+        ClaimResourceKind::Symlink { target, .. } if target == &root_b
+    )));
+
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(
+        status.entries[0].report.summary,
+        AdapterSummary::Healthy,
+        "re-enable on root B must restore Healthy"
+    );
+
+    let disabled = manager
+        .disable(COMPONENT, Some("codex"), false)
+        .expect("disable");
+    assert!(disabled.claim_removed);
+    assert!(!marketplace_root.exists());
+}
+
+#[test]
 fn codex_dry_run_enable_writes_nothing() {
     let guard = EnvGuard::acquire();
     let world = stage(
@@ -655,6 +1043,139 @@ fn codex_forged_resource_root_and_symlink_target_rejected() {
     assert!(
         matches!(err, AdapterError::ClaimValidation(_)),
         "got {err:?}"
+    );
+}
+
+/// A forged state file that plants both a trust anchor at /etc and a
+/// receipt symlink target inside it must still be rejected: the anchor is
+/// only honoured when the on-disk contract grants external-root trust for
+/// this provenance (RPM provenance + declared RPM root). For a raw
+/// component the state file alone is not a trust source.
+#[test]
+fn codex_forged_anchor_does_not_authorize_forged_target() {
+    let guard = EnvGuard::acquire();
+    // Real RPM provenance and a contract-declared external root: the one
+    // branch where the enable-time anchor is honoured. A forged anchor
+    // must still authorize nothing beneath itself — it is an
+    // exact-equality allowance, never a root.
+    let world = stage_rpm_backend(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable");
+
+    // Tamper: replace the legitimate anchor with /etc AND point the
+    // symlink resource below it.
+    let state_path = world.layout.state_dir.join("installed.toml");
+    let mut state = world.load_state();
+    state.upsert_adapter_trust_root(COMPONENT, "codex", PathBuf::from("/etc"));
+    {
+        let claim = state
+            .adapter_claims
+            .iter_mut()
+            .find(|c| c.component == COMPONENT)
+            .expect("claim");
+        for res in &mut claim.resources {
+            if let ClaimResourceKind::Symlink { target, .. } = &mut res.kind {
+                *target = PathBuf::from("/etc/cron.d/evil");
+            }
+        }
+    }
+    state.save(&state_path).expect("save tampered state");
+
+    let err = manager
+        .status(Some(COMPONENT))
+        .expect_err("forged anchor must not authorize a target beneath it");
+    assert!(
+        matches!(err, AdapterError::ClaimValidation(_)),
+        "got {err:?}"
+    );
+    let err = manager
+        .disable(COMPONENT, Some("codex"), false)
+        .expect_err("disable must refuse the forged target too");
+    assert!(
+        matches!(err, AdapterError::ClaimValidation(_)),
+        "got {err:?}"
+    );
+}
+
+/// Reverse lifecycle hole: after the RPM component is gone — bundle root,
+/// contract snapshots and installation record all removed — the enable-time
+/// anchor must keep the stale external-root receipt reportable and
+/// disable must clean it up rather than wedge on `ClaimValidation`.
+#[test]
+fn codex_stale_external_receipt_cleans_up_after_component_removal() {
+    let guard = EnvGuard::acquire();
+    let world = stage_rpm_backend(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    let (_log, marketplace_root) = apply_codex_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable");
+
+    // Simulate `rpm -e` plus `anolisa uninstall`: bundle root, both
+    // contract copies and the installation record disappear; only the
+    // adapter receipt and its anchor remain.
+    std::fs::remove_dir_all(&world.resource_root).expect("remove rpm root");
+    for path in [
+        world
+            .layout
+            .state_dir
+            .join("component-manifests")
+            .join(COMPONENT)
+            .join("component.toml"),
+        world
+            .layout
+            .datadir
+            .join("components")
+            .join(COMPONENT)
+            .join("component.toml"),
+    ] {
+        std::fs::remove_file(&path).expect("remove contract");
+    }
+    let state_path = world.layout.state_dir.join("installed.toml");
+    let mut state = world.load_state();
+    state.installations.retain(|i| i.name != COMPONENT);
+    state.save(&state_path).expect("save uninstalled state");
+
+    // status: reportable, not a validation failure.
+    let status = manager
+        .status(Some(COMPONENT))
+        .expect("status must survive component removal");
+    assert_eq!(status.entries.len(), 1);
+
+    // disable: cleans up receipt, anchor and framework registration.
+    let outcome = manager
+        .disable(COMPONENT, Some("codex"), false)
+        .expect("disable must clean up the stale receipt");
+    assert!(outcome.claim_removed, "receipt must be removed");
+    let state = world.load_state();
+    assert!(
+        state.find_adapter_claim(COMPONENT, "codex").is_none(),
+        "receipt must be gone"
+    );
+    assert!(
+        state.find_adapter_trust_root(COMPONENT, "codex").is_none(),
+        "anchor must not outlive its receipt"
+    );
+    assert!(
+        !marketplace_root.join(COMPONENT).exists(),
+        "marketplace symlink must be cleaned up"
     );
 }
 
@@ -1013,13 +1534,62 @@ fn stage_qoder_bundle(root: &Path) {
     .expect("hooks.json");
 }
 
-/// Fake `qodercli`: records each argv line to `$FAKE_QODER_LOG` and mirrors
-/// qodercli's plugin cache under `$FAKE_QODER_CACHE` — `plugins install`
-/// copies the staged plugin dir verbatim, like the real CLI — so the
-/// driver's cache-based removal check reflects prior install/uninstall
-/// calls and tests can assert on the cached bundle contents.
-/// `$FAKE_QODER_FAIL=uninstall` fails the uninstall without clearing the
-/// cache, so the driver cannot confirm removal.
+/// Qoder-native fixture using the same nested hook layout as sec-core.
+fn stage_native_qoder_bundle(root: &Path) {
+    std::fs::create_dir_all(root.join(".qoder-plugin")).expect("qoder-plugin");
+    std::fs::create_dir_all(root.join("hooks")).expect("hooks");
+    std::fs::write(
+        root.join(".qoder-plugin/plugin.json"),
+        br#"{"name":"tokenless","version":"0.6.0"}"#,
+    )
+    .expect("plugin.json");
+    std::fs::write(
+        root.join("hooks/hooks.json"),
+        br#"{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "", "hooks": [
+        { "type": "command", "command": "python3",
+          "args": ["${QODER_PLUGIN_ROOT}/hooks/observability_hook.py"] } ] }
+    ]
+  }
+}
+"#,
+    )
+    .expect("hooks/hooks.json");
+    std::fs::write(
+        root.join("hooks/observability_hook.py"),
+        b"print('observability')\n",
+    )
+    .expect("observability hook");
+}
+
+fn set_native_qoder_plugin_id(world: &World, plugin_id: &str) {
+    std::fs::write(
+        world.resource_root.join(".qoder-plugin/plugin.json"),
+        format!(r#"{{"name":"{plugin_id}","version":"0.6.0"}}"#),
+    )
+    .expect("replace native plugin id");
+
+    let contract_path = world
+        .layout
+        .state_dir
+        .join("component-manifests")
+        .join(COMPONENT)
+        .join("component.toml");
+    let contract = std::fs::read_to_string(&contract_path).expect("read component contract");
+    let prior = format!("plugin_id = \"{COMPONENT}\"");
+    assert_eq!(contract.matches(&prior).count(), 1);
+    std::fs::write(
+        contract_path,
+        contract.replace(&prior, &format!("plugin_id = \"{plugin_id}\"")),
+    )
+    .expect("replace contract plugin id");
+}
+
+/// Fake `qodercli`: records argv, mirrors the local plugin cache, and emits
+/// the JSON inventory used by the native lifecycle. Failure modes cover
+/// read-only preflight, post-install verification, and uninstall retention.
 fn write_fake_qodercli(dir: &Path) -> PathBuf {
     let path = dir.join("qodercli");
     write_exec(
@@ -1027,13 +1597,68 @@ fn write_fake_qodercli(dir: &Path) -> PathBuf {
         r#"#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_QODER_LOG"
 cache="$FAKE_QODER_CACHE"
+plugin="${FAKE_QODER_PLUGIN_ID:-tokenless}"
 if [ "$1" = "plugins" ]; then
+  if [ "$3" = "--help" ]; then
+    [ "$FAKE_QODER_FAIL" = "help-$2" ] && { echo "unsupported $2" >&2; exit 1; }
+    exit 0
+  fi
   case "$2" in
-    install) mkdir -p "$cache" && cp -R "$3" "$cache/" 2>/dev/null ;;
+    validate)
+      [ "$FAKE_QODER_FAIL" = "validate" ] && { echo "validate boom" >&2; exit 1; } ;;
+    install)
+      [ "$FAKE_QODER_FAIL" = "install" ] && { echo "install boom" >&2; exit 1; }
+      mkdir -p "$cache"
+      if [ "$4" = "--scope" ]; then
+        rm -rf "$cache/$plugin"
+        cp -R "$3" "$cache/$plugin" 2>/dev/null
+        : > "$cache/.user-$plugin"
+      else
+        cp -R "$3" "$cache/" 2>/dev/null
+      fi ;;
     uninstall)
       [ "$FAKE_QODER_FAIL" = "uninstall" ] && { echo "uninstall boom" >&2; exit 1; }
-      rm -rf "$cache/$3" 2>/dev/null || true ;;
-    list) ;;
+      [ "$FAKE_QODER_FAIL" = "uninstall-retain" ] && exit 0
+      rm -f "$cache/.user-$3"
+      if [ "$FAKE_QODER_PROJECT_PLUGIN" != "1" ]; then
+        rm -rf "$cache/$3" 2>/dev/null || true
+      fi ;;
+    list)
+      [ "$FAKE_QODER_FAIL" = "list" ] && { echo "list boom" >&2; exit 1; }
+      if [ "$FAKE_QODER_FAIL" = "list-invalid" ]; then
+        printf '%s\n' '{invalid'
+      elif [ "$FAKE_QODER_FAIL" = "post-list-fail" ] && [ -d "$cache/$plugin" ]; then
+        echo "post-install list boom" >&2
+        exit 1
+      elif [ "$FAKE_QODER_LARGE_INVENTORY" = "1" ]; then
+        printf '['
+        i=0
+        while [ "$i" -lt 900 ]; do
+          [ "$i" -gt 0 ] && printf ','
+          printf '{"id":"filler-%s@local","scope":"user","enabled":true,"resources":{"hooks":[{}]}}' "$i"
+          i=$((i + 1))
+        done
+        if [ -d "$cache/$plugin" ]; then
+          printf ',{"id":"%s@local","scope":"user","enabled":true,"resources":{"hooks":[{}]}}' "$plugin"
+        fi
+        printf ']\n'
+      elif [ "$FAKE_QODER_PROJECT_PLUGIN" = "1" ]; then
+        if [ -f "$cache/.user-$plugin" ]; then
+          printf '[{"id":"%s@local","scope":"project","enabled":true,"resources":{"hooks":[{}]}},{"id":"%s@local","scope":"user","enabled":true,"resources":{"hooks":[{}]}}]\n' "$plugin" "$plugin"
+        else
+          printf '[{"id":"%s@local","scope":"project","enabled":true,"resources":{"hooks":[{}]}}]\n' "$plugin"
+        fi
+      elif [ ! -d "$cache/$plugin" ] || [ "$FAKE_QODER_FAIL" = "post-list-absent" ]; then
+        printf '%s\n' '[]'
+      elif [ "$FAKE_QODER_FAIL" = "post-list-invalid" ]; then
+        printf '%s\n' '{invalid'
+      elif [ "$FAKE_QODER_FAIL" = "post-list-disabled" ]; then
+        printf '[{"id":"%s@local","scope":"user","enabled":false,"resources":{"hooks":[{}]}}]\n' "$plugin"
+      elif [ "$FAKE_QODER_FAIL" = "post-list-no-hooks" ]; then
+        printf '[{"id":"%s@local","scope":"user","enabled":true,"resources":{"hooks":[]}}]\n' "$plugin"
+      else
+        printf '[{"id":"%s@local","scope":"user","enabled":true,"resources":{"hooks":[{}]}}]\n' "$plugin"
+      fi ;;
   esac
   exit 0
 fi
@@ -1103,6 +1728,960 @@ fn enabled_plugins(settings: &serde_json::Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[test]
+fn qoder_native_enable_status_disable_uses_cli_lifecycle() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, settings, cache, staging) = apply_qoder_env(&guard, &world, &fake);
+    let original_settings = b"{\n  \"theme\": \"night\"\n}\n";
+    std::fs::create_dir_all(settings.parent().expect("settings parent")).expect("mkdir .qoder");
+    std::fs::write(&settings, original_settings).expect("seed settings");
+
+    let manager = world.manager();
+    let claim = match manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable native plugin")
+    {
+        EnableOutcome::Enabled(claim) => *claim,
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
+    };
+
+    assert_eq!(claim.driver_schema, 3);
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    for command in [
+        "plugins validate --help".to_string(),
+        "plugins install --help".to_string(),
+        "plugins list --help".to_string(),
+        "plugins uninstall --help".to_string(),
+        format!("plugins validate {}", world.resource_root.display()),
+        format!(
+            "plugins install {} --scope user",
+            world.resource_root.display()
+        ),
+    ] {
+        assert!(
+            log_text.lines().any(|line| line == command),
+            "missing native command {command:?} in {log_text}"
+        );
+    }
+    assert!(
+        !staging.exists(),
+        "native install must not create a staging copy"
+    );
+    assert_eq!(
+        std::fs::read(&settings).expect("settings unchanged"),
+        original_settings,
+        "native lifecycle must leave settings.json byte-for-byte unchanged"
+    );
+    let source_hooks = std::fs::read_to_string(world.resource_root.join("hooks/hooks.json"))
+        .expect("source hooks");
+    let cached_hooks =
+        std::fs::read_to_string(cache.join("tokenless/hooks/hooks.json")).expect("cached hooks");
+    assert!(source_hooks.contains("${QODER_PLUGIN_ROOT}"));
+    assert!(cached_hooks.contains("${QODER_PLUGIN_ROOT}"));
+
+    assert_eq!(claim.resources.len(), 1);
+    assert!(matches!(
+        &claim.resources[0].kind,
+        ClaimResourceKind::FrameworkPlugin { framework, plugin_id }
+            if framework == "qoder" && plugin_id == "tokenless"
+    ));
+    let DriverPayload::Qoder(payload) = &claim.driver_payload else {
+        panic!("expected Qoder receipt payload");
+    };
+    assert!(payload.settings_resource.is_none());
+    assert!(!payload.plugin_preexisting);
+    assert!(payload.plugin_install_confirmed);
+    assert!(payload.managed_hooks.is_empty());
+    assert!(payload.managed_hook_specs.is_empty());
+
+    let status = manager.status(Some(COMPONENT)).expect("native status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+    for kind in [
+        AdapterConditionKind::PluginRegistered,
+        AdapterConditionKind::ActivationEnabled,
+        AdapterConditionKind::PluginResourcesLoaded,
+        AdapterConditionKind::VerificationSupported,
+    ] {
+        assert!(status.entries[0].report.conditions.iter().any(|condition| {
+            condition.kind == kind && condition.status == ConditionStatus::True
+        }));
+    }
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable native plugin");
+    assert!(disabled.claim_removed);
+    assert!(disabled.report.cleanup_complete);
+    assert!(!cache.join("tokenless").exists());
+    assert_eq!(
+        std::fs::read(&settings).expect("settings unchanged after disable"),
+        original_settings
+    );
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert!(
+        log_text
+            .lines()
+            .any(|line| line == "plugins uninstall tokenless --scope user")
+    );
+}
+
+#[test]
+fn qoder_native_enable_tolerates_unavailable_validate_command() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, _cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    guard.set("FAKE_QODER_FAIL", Path::new("help-validate"));
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("native install does not require validate support");
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert!(
+        log_text
+            .lines()
+            .any(|line| line == "plugins validate --help")
+    );
+    assert!(
+        !log_text
+            .lines()
+            .any(|line| { line == format!("plugins validate {}", world.resource_root.display()) }),
+        "unsupported validate command must not be invoked: {log_text}"
+    );
+    assert!(log_text.lines().any(|line| {
+        line == format!(
+            "plugins install {} --scope user",
+            world.resource_root.display()
+        )
+    }));
+    assert!(
+        manager
+            .disable(COMPONENT, Some("qoder"), false)
+            .expect("disable")
+            .claim_removed
+    );
+}
+
+#[test]
+fn qoder_native_enable_rejects_same_id_project_scope_with_shared_cache() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    guard.set("FAKE_QODER_PROJECT_PLUGIN", Path::new("1"));
+    let shared_cache = cache.join("tokenless");
+    std::fs::create_dir_all(&shared_cache).expect("project plugin shared cache");
+    std::fs::write(shared_cache.join("owner.txt"), b"project-owned\n")
+        .expect("project ownership marker");
+
+    let manager = world.manager();
+    let error = manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("project registration must block the shared-cache install");
+    assert!(
+        matches!(&error, AdapterError::FrameworkCli { reason, .. }
+            if reason.contains("matching non-user Qoder registration")
+                && reason.contains("project")
+                && reason.contains("shares the local plugin cache")),
+        "unexpected project-scope conflict: {error:?}"
+    );
+    assert!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .is_none(),
+        "scope conflict must fail before the write-ahead receipt"
+    );
+    assert_eq!(
+        std::fs::read(shared_cache.join("owner.txt")).expect("project marker retained"),
+        b"project-owned\n"
+    );
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert!(
+        !log_text.lines().any(|line| {
+            (line.starts_with("plugins install ") || line.starts_with("plugins uninstall "))
+                && line.ends_with(" --scope user")
+        }),
+        "scope conflict must not mutate the shared cache: {log_text}"
+    );
+}
+
+#[test]
+fn qoder_native_lifecycle_reads_inventory_larger_than_default_capture() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (_log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    guard.set("FAKE_QODER_LARGE_INVENTORY", Path::new("1"));
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable must parse the target after more than 64 KiB of inventory");
+    assert!(cache.join("tokenless").exists());
+    assert_eq!(
+        manager.status(Some(COMPONENT)).expect("status").entries[0]
+            .report
+            .summary,
+        AdapterSummary::Healthy
+    );
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable must verify absence in the large inventory");
+    assert!(disabled.claim_removed);
+    assert!(disabled.report.cleanup_complete);
+    assert!(!cache.join("tokenless").exists());
+}
+
+#[test]
+fn qoder_native_preflight_failures_do_not_write_receipts() {
+    let guard = EnvGuard::acquire();
+    for failure in ["help-install", "validate", "list", "list-invalid"] {
+        let world = stage(
+            "qoder",
+            "plugin",
+            "{datadir}/adapters/{component}/qoder/",
+            stage_native_qoder_bundle,
+        );
+        let fake = write_fake_qodercli(&world.prefix);
+        let (_log, settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+        guard.set("FAKE_QODER_FAIL", Path::new(failure));
+
+        world
+            .manager()
+            .enable(COMPONENT, Some("qoder"), false)
+            .expect_err("native preflight must fail");
+        assert!(
+            world
+                .load_state()
+                .find_adapter_claim(COMPONENT, "qoder")
+                .is_none(),
+            "preflight failure {failure} must not persist a receipt"
+        );
+        assert!(!cache.join("tokenless").exists());
+        assert!(!settings.exists());
+    }
+}
+
+#[test]
+fn qoder_native_apply_failures_keep_write_ahead_receipt() {
+    let guard = EnvGuard::acquire();
+    for failure in [
+        "install",
+        "post-list-fail",
+        "post-list-invalid",
+        "post-list-absent",
+        "post-list-disabled",
+        "post-list-no-hooks",
+    ] {
+        let world = stage(
+            "qoder",
+            "plugin",
+            "{datadir}/adapters/{component}/qoder/",
+            stage_native_qoder_bundle,
+        );
+        let fake = write_fake_qodercli(&world.prefix);
+        let (log, settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+        let original_settings = b"{\"keep\":true}\n";
+        std::fs::create_dir_all(settings.parent().expect("settings parent")).expect("mkdir .qoder");
+        std::fs::write(&settings, original_settings).expect("seed settings");
+        guard.set("FAKE_QODER_FAIL", Path::new(failure));
+
+        world
+            .manager()
+            .enable(COMPONENT, Some("qoder"), false)
+            .expect_err("native apply must fail");
+        let claim = world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .cloned()
+            .expect("write-ahead receipt kept");
+        assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+        let DriverPayload::Qoder(payload) = &claim.driver_payload else {
+            panic!("expected Qoder receipt payload");
+        };
+        assert_eq!(
+            payload.plugin_install_confirmed,
+            failure != "install",
+            "only a successful install command may confirm ownership"
+        );
+        assert_eq!(
+            std::fs::read(&settings).expect("settings unchanged"),
+            original_settings
+        );
+        assert_eq!(
+            cache.join("tokenless").exists(),
+            failure != "install",
+            "post-install failures keep qodercli's installed plugin"
+        );
+        let log_text = std::fs::read_to_string(&log).expect("qoder log");
+        assert!(
+            !log_text
+                .lines()
+                .any(|line| line == "plugins uninstall tokenless --scope user"),
+            "enable verification failure must not guess whether uninstall is safe"
+        );
+    }
+}
+
+#[test]
+fn qoder_native_failed_install_never_adopts_later_user_plugin() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    guard.set("FAKE_QODER_FAIL", Path::new("install"));
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("initial install fails before creating a plugin");
+
+    let failed_claim = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "qoder")
+        .cloned()
+        .expect("failed write-ahead receipt retained");
+    assert_eq!(failed_claim.status, ClaimStatus::CleanupFailed);
+    let DriverPayload::Qoder(payload) = &failed_claim.driver_payload else {
+        panic!("expected Qoder receipt payload");
+    };
+    assert!(!payload.plugin_preexisting);
+    assert!(!payload.plugin_install_confirmed);
+
+    let user_plugin = cache.join("tokenless");
+    std::fs::create_dir_all(&user_plugin).expect("user-installed plugin");
+    std::fs::write(user_plugin.join("owner.txt"), b"user-owned\n").expect("user ownership marker");
+    guard.set("FAKE_QODER_FAIL", Path::new(""));
+
+    let retry_error = manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("retry must not adopt the user's plugin");
+    assert!(
+        matches!(&retry_error, AdapterError::FrameworkCli { reason, .. }
+            if reason.contains("pre-existing user-scope")),
+        "unexpected retry error: {retry_error:?}"
+    );
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable fails closed for unconfirmed ownership");
+    assert!(!disabled.claim_removed);
+    assert!(!disabled.report.cleanup_complete);
+    assert_eq!(
+        std::fs::read(user_plugin.join("owner.txt")).expect("user plugin retained"),
+        b"user-owned\n"
+    );
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert_eq!(
+        log_text
+            .lines()
+            .filter(|line| {
+                line.starts_with("plugins install ") && line.ends_with(" --scope user")
+            })
+            .count(),
+        1,
+        "retry must not run another install: {log_text}"
+    );
+    assert!(
+        !log_text
+            .lines()
+            .any(|line| line == "plugins uninstall tokenless --scope user"),
+        "disable must not uninstall an unconfirmed registration: {log_text}"
+    );
+
+    std::fs::remove_dir_all(&user_plugin).expect("user removes their plugin");
+    let cleaned = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("absence permits receipt cleanup");
+    assert!(cleaned.claim_removed);
+    assert!(cleaned.report.cleanup_complete);
+}
+
+#[test]
+fn qoder_native_post_install_failure_keeps_confirmed_cleanup_ownership() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    guard.set("FAKE_QODER_FAIL", Path::new("post-list-disabled"));
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("post-install verification fails");
+    let claim = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "qoder")
+        .cloned()
+        .expect("cleanup receipt retained");
+    let DriverPayload::Qoder(payload) = &claim.driver_payload else {
+        panic!("expected Qoder receipt payload");
+    };
+    assert!(payload.plugin_install_confirmed);
+
+    guard.set("FAKE_QODER_FAIL", Path::new(""));
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("confirmed install remains eligible for cleanup");
+    assert!(disabled.claim_removed);
+    assert!(disabled.report.cleanup_complete);
+    assert!(!cache.join("tokenless").exists());
+    assert!(
+        std::fs::read_to_string(&log)
+            .expect("qoder log")
+            .lines()
+            .any(|line| line == "plugins uninstall tokenless --scope user")
+    );
+}
+
+#[test]
+fn qoder_native_v2_preapply_receipt_never_claims_later_user_plugin() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    guard.set("FAKE_QODER_FAIL", Path::new("install"));
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("create an unconfirmed write-ahead receipt without a plugin");
+
+    let state_path = world.layout.state_dir.join("installed.toml");
+    let mut state = world.load_state();
+    let claim = state
+        .adapter_claims
+        .iter_mut()
+        .find(|claim| claim.component == COMPONENT && claim.framework == "qoder")
+        .expect("qoder claim");
+    // Schema v2 had no durable post-install checkpoint. `Enabled` is the
+    // exact pre-apply state the Manager persisted, so a crash could leave
+    // this value even though qodercli never created the registration.
+    claim.driver_schema = 2;
+    claim.status = ClaimStatus::Enabled;
+    let DriverPayload::Qoder(payload) = &mut claim.driver_payload else {
+        panic!("expected Qoder receipt payload");
+    };
+    payload.plugin_install_confirmed = false;
+    state.save(&state_path).expect("save v2 receipt fixture");
+
+    let user_plugin = cache.join("tokenless");
+    std::fs::create_dir_all(&user_plugin).expect("later user plugin");
+    std::fs::write(user_plugin.join("owner.txt"), b"user-owned\n").expect("user ownership marker");
+    guard.set("FAKE_QODER_FAIL", Path::new(""));
+
+    let retry_error = manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("v2 receipt must not authorize replacing the later user plugin");
+    assert!(
+        matches!(&retry_error, AdapterError::FrameworkCli { reason, .. }
+            if reason.contains("pre-existing user-scope")),
+        "unexpected v2 retry error: {retry_error:?}"
+    );
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("v2 receipt must keep unconfirmed registration untouched");
+    assert!(!disabled.claim_removed);
+    assert!(!disabled.report.cleanup_complete);
+    assert_eq!(
+        std::fs::read(user_plugin.join("owner.txt")).expect("user marker retained"),
+        b"user-owned\n"
+    );
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert_eq!(
+        log_text
+            .lines()
+            .filter(|line| {
+                line.starts_with("plugins install ") && line.ends_with(" --scope user")
+            })
+            .count(),
+        1,
+        "retry must not run a second install: {log_text}"
+    );
+    assert!(
+        !log_text
+            .lines()
+            .any(|line| line == "plugins uninstall tokenless --scope user"),
+        "disable must not uninstall the later user registration: {log_text}"
+    );
+}
+
+#[test]
+fn qoder_native_enable_rejects_unowned_preexisting_user_plugin() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    let preexisting = cache.join("tokenless");
+    std::fs::create_dir_all(&preexisting).expect("pre-existing plugin cache");
+    std::fs::write(preexisting.join("owner.txt"), b"user-owned\n").expect("ownership marker");
+    std::fs::write(preexisting.join("version.txt"), b"0.9.0\n").expect("pre-existing version");
+    std::fs::write(world.resource_root.join("version.txt"), b"9.9.9\n")
+        .expect("replacement version");
+
+    let manager = world.manager();
+    let error = manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("unowned user plugin must block enable");
+    assert!(
+        matches!(&error, AdapterError::FrameworkCli { reason, .. } if reason.contains("pre-existing user-scope")),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .is_none(),
+        "ownership conflict must fail before receipt persistence"
+    );
+    assert_eq!(
+        std::fs::read(preexisting.join("version.txt")).expect("pre-existing version retained"),
+        b"0.9.0\n"
+    );
+    assert_eq!(
+        std::fs::read(preexisting.join("owner.txt")).expect("pre-existing plugin retained"),
+        b"user-owned\n"
+    );
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable without receipt is a no-op");
+    assert!(!disabled.claim_removed);
+    assert!(disabled.report.cleanup_complete);
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert!(
+        !log_text
+            .lines()
+            .any(|line| line.starts_with("plugins install ") && line.ends_with(" --scope user")),
+        "enable must not replace a pre-existing plugin: {log_text}"
+    );
+    assert!(
+        !log_text
+            .lines()
+            .any(|line| line == "plugins uninstall tokenless --scope user"),
+        "disable must not uninstall a pre-existing plugin: {log_text}"
+    );
+}
+
+#[test]
+fn qoder_native_reenable_can_replace_anolisa_owned_user_plugin() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    std::fs::write(world.resource_root.join("generation.txt"), b"first\n")
+        .expect("first generation");
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("initial enable");
+    std::fs::write(world.resource_root.join("generation.txt"), b"second\n")
+        .expect("second generation");
+    let claim = match manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("owned re-enable")
+    {
+        EnableOutcome::Enabled(claim) => *claim,
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
+    };
+    let DriverPayload::Qoder(payload) = &claim.driver_payload else {
+        panic!("expected Qoder receipt payload");
+    };
+    assert!(!payload.plugin_preexisting);
+    assert!(payload.plugin_install_confirmed);
+    assert_eq!(
+        std::fs::read(cache.join("tokenless/generation.txt")).expect("cached generation"),
+        b"second\n"
+    );
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert_eq!(
+        log_text
+            .lines()
+            .filter(|line| {
+                line.starts_with("plugins install ") && line.ends_with(" --scope user")
+            })
+            .count(),
+        2
+    );
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable owned plugin");
+    assert!(disabled.claim_removed);
+    assert!(disabled.report.cleanup_complete);
+}
+
+#[test]
+fn qoder_native_reenable_rejects_preexisting_different_plugin_id() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("initial native enable");
+
+    let replacement = cache.join("replacement");
+    std::fs::create_dir_all(&replacement).expect("pre-existing replacement plugin");
+    std::fs::write(replacement.join("owner.txt"), b"user-owned\n")
+        .expect("replacement ownership marker");
+    set_native_qoder_plugin_id(&world, "replacement");
+    guard.set("FAKE_QODER_PLUGIN_ID", Path::new("replacement"));
+
+    let error = manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("a different pre-existing plugin id must not inherit ownership");
+    assert!(
+        matches!(&error, AdapterError::BundleInvalid { reason, .. }
+            if reason.contains("changed from 'tokenless' to 'replacement'")),
+        "unexpected error: {error:?}"
+    );
+    let retained = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "qoder")
+        .cloned()
+        .expect("original receipt retained");
+    assert_eq!(retained.plugin_id.as_deref(), Some("tokenless"));
+    assert_eq!(
+        std::fs::read(replacement.join("owner.txt")).expect("replacement plugin retained"),
+        b"user-owned\n"
+    );
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert_eq!(
+        log_text
+            .lines()
+            .filter(|line| {
+                line.starts_with("plugins install ") && line.ends_with(" --scope user")
+            })
+            .count(),
+        1,
+        "re-enable must not install the replacement plugin: {log_text}"
+    );
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("original plugin cleanup remains available");
+    assert!(disabled.claim_removed);
+    assert!(!cache.join("tokenless").exists());
+    assert_eq!(
+        std::fs::read(replacement.join("owner.txt")).expect("replacement remains after cleanup"),
+        b"user-owned\n"
+    );
+}
+
+#[test]
+fn qoder_native_reenable_rejects_absent_different_plugin_id() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("initial native enable");
+
+    set_native_qoder_plugin_id(&world, "replacement");
+    guard.set("FAKE_QODER_PLUGIN_ID", Path::new("replacement"));
+    let error = manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("an absent different plugin id must not replace the cleanup claim");
+    assert!(
+        matches!(&error, AdapterError::BundleInvalid { reason, .. }
+            if reason.contains("changed from 'tokenless' to 'replacement'")),
+        "unexpected error: {error:?}"
+    );
+    assert!(!cache.join("replacement").exists());
+    let retained = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "qoder")
+        .cloned()
+        .expect("original receipt retained");
+    assert_eq!(retained.plugin_id.as_deref(), Some("tokenless"));
+    let log_text = std::fs::read_to_string(&log).expect("qoder log");
+    assert_eq!(
+        log_text
+            .lines()
+            .filter(|line| {
+                line.starts_with("plugins install ") && line.ends_with(" --scope user")
+            })
+            .count(),
+        1,
+        "re-enable must not install the replacement plugin: {log_text}"
+    );
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("original plugin cleanup remains available");
+    assert!(disabled.claim_removed);
+    assert!(!cache.join("tokenless").exists());
+    assert!(!cache.join("replacement").exists());
+}
+
+#[test]
+fn qoder_native_rejects_custom_manifest_before_cli_or_receipt() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let manifest_path = world
+        .layout
+        .state_dir
+        .join("component-manifests")
+        .join(COMPONENT)
+        .join("component.toml");
+    let mut contract = std::fs::read_to_string(&manifest_path).expect("read contract");
+    contract.push_str("\n[adapters.bundle]\nentry = \"custom.json\"\n");
+    std::fs::write(&manifest_path, contract).expect("write custom entry");
+    std::fs::remove_file(world.resource_root.join(".qoder-plugin/plugin.json"))
+        .expect("remove native manifest");
+    std::fs::write(
+        world.resource_root.join("custom.json"),
+        br#"{"name":"tokenless","version":"9.9.9"}"#,
+    )
+    .expect("write ignored custom manifest");
+    let fake = write_fake_qodercli(&world.prefix);
+    let (log, _settings, cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    let error = manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("custom manifest must fail before qodercli install");
+    assert!(
+        matches!(&error, AdapterError::BundleInvalid { reason, .. } if reason.contains(".qoder-plugin/plugin.json")),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .is_none()
+    );
+    assert!(!cache.join("tokenless").exists());
+    assert!(
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .all(|line| !line.starts_with("plugins install "))
+    );
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable without receipt is a no-op");
+    assert!(!disabled.claim_removed);
+    assert!(disabled.report.cleanup_complete);
+}
+
+#[test]
+fn qoder_native_disable_keeps_receipt_until_absence_is_verified() {
+    let guard = EnvGuard::acquire();
+    for failure in ["uninstall", "uninstall-retain", "list", "list-invalid"] {
+        let world = stage(
+            "qoder",
+            "plugin",
+            "{datadir}/adapters/{component}/qoder/",
+            stage_native_qoder_bundle,
+        );
+        let fake = write_fake_qodercli(&world.prefix);
+        apply_qoder_env(&guard, &world, &fake);
+        guard.set("FAKE_QODER_FAIL", Path::new(""));
+        let manager = world.manager();
+        manager
+            .enable(COMPONENT, Some("qoder"), false)
+            .expect("enable native plugin");
+        guard.set("FAKE_QODER_FAIL", Path::new(failure));
+
+        let disabled = manager
+            .disable(COMPONENT, Some("qoder"), false)
+            .expect("disable returns a cleanup report");
+        assert!(!disabled.claim_removed, "receipt kept for {failure}");
+        assert!(!disabled.report.cleanup_complete);
+        let claim = world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .cloned()
+            .expect("receipt kept");
+        assert_eq!(claim.status, ClaimStatus::CleanupFailed);
+    }
+}
+
+#[test]
+fn qoder_cross_layout_reenable_preserves_legacy_receipt_for_cleanup() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    let (_log, settings, _cache, _staging) = apply_qoder_env(&guard, &world, &fake);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("legacy enable");
+
+    std::fs::remove_file(world.resource_root.join("hooks.json")).expect("remove legacy hooks");
+    stage_native_qoder_bundle(&world.resource_root);
+    let error = manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect_err("cross-layout re-enable must be explicit");
+    assert!(
+        matches!(error, AdapterError::BundleInvalid { .. }),
+        "unexpected error: {error:?}"
+    );
+    let claim = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, "qoder")
+        .cloned()
+        .expect("legacy receipt retained");
+    let DriverPayload::Qoder(payload) = &claim.driver_payload else {
+        panic!("expected Qoder receipt payload");
+    };
+    assert!(payload.settings_resource.is_some());
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("legacy cleanup remains available");
+    assert!(disabled.claim_removed);
+    let settings = read_json(&settings);
+    assert!(!enabled_plugins(&settings).contains(&"tokenless@local".to_string()));
+    assert!(hook_names(&settings, "PreToolUse").is_empty());
+}
+
+#[test]
+fn qoder_native_disable_without_cli_keeps_receipt() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    apply_qoder_env(&guard, &world, &fake);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable native plugin");
+    guard.set("QODERCLI_BIN", &world.prefix.join("missing-qodercli"));
+
+    let disabled = manager
+        .disable(COMPONENT, Some("qoder"), false)
+        .expect("disable returns a cleanup report");
+    assert!(!disabled.claim_removed);
+    assert!(!disabled.report.cleanup_complete);
+    assert_eq!(
+        world
+            .load_state()
+            .find_adapter_claim(COMPONENT, "qoder")
+            .expect("receipt kept")
+            .status,
+        ClaimStatus::CleanupFailed
+    );
+}
+
+#[test]
+fn qoder_native_status_fails_closed_for_unverifiable_or_inconsistent_state() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "qoder",
+        "plugin",
+        "{datadir}/adapters/{component}/qoder/",
+        stage_native_qoder_bundle,
+    );
+    let fake = write_fake_qodercli(&world.prefix);
+    apply_qoder_env(&guard, &world, &fake);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("qoder"), false)
+        .expect("enable native plugin");
+
+    guard.set("FAKE_QODER_FAIL", Path::new("list-invalid"));
+    let status = manager.status(Some(COMPONENT)).expect("status report");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Unknown);
+    assert!(status.entries[0].report.conditions.iter().any(|condition| {
+        condition.kind == AdapterConditionKind::VerificationSupported
+            && condition.status == ConditionStatus::False
+    }));
+
+    guard.set("FAKE_QODER_FAIL", Path::new(""));
+    let state_path = world.layout.state_dir.join("installed.toml");
+    let mut state = world.load_state();
+    let claim = state
+        .adapter_claims
+        .iter_mut()
+        .find(|claim| claim.component == COMPONENT)
+        .expect("claim");
+    let DriverPayload::Qoder(payload) = &mut claim.driver_payload else {
+        panic!("expected Qoder receipt payload");
+    };
+    payload.managed_hooks.push("forged-hook".to_string());
+    state.save(&state_path).expect("save forged receipt");
+    assert!(matches!(
+        manager.status(Some(COMPONENT)),
+        Err(AdapterError::BundleInvalid { .. })
+    ));
 }
 
 #[test]
@@ -1932,5 +3511,157 @@ fn qoder_forged_settings_redirect_within_qoder_home_rejected() {
         std::fs::read_to_string(&decoy).expect("read decoy"),
         "{\"user\":\"data\"}",
         "the redirected file must be left untouched"
+    );
+}
+
+/// Anchors are for *external* roots only. An RPM-provenance contract whose
+/// `resource_root` lives inside the datadir is already covered by the
+/// static trust boundary — writing an anchor for it would needlessly bump
+/// the state schema to v6 and lock released 0.2.16 CLIs out of every state
+/// command on a path that never needed trust migration. The external-root
+/// counterpart must keep anchoring (and bumping to v6) as designed.
+#[test]
+fn codex_datadir_rpm_root_keeps_state_anchor_free_at_v5() {
+    let guard = EnvGuard::acquire();
+
+    // In-datadir declaration: RPM provenance, but the bundle sits under
+    // the always-trusted datadir.
+    let world = stage_rpm_backend(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_bundle,
+    );
+    let datadir_root = world
+        .layout
+        .datadir
+        .join("adapters")
+        .join(COMPONENT)
+        .join("codex");
+    std::fs::create_dir_all(&datadir_root).expect("datadir bundle dir");
+    stage_codex_bundle(&datadir_root);
+    let contract = format!(
+        r#"[component]
+name = "{COMPONENT}"
+version = "0.6.0"
+
+[component.layout]
+modes = ["system"]
+
+[[adapters]]
+framework = "codex"
+adapter_type = "plugin"
+plugin_id = "{COMPONENT}"
+dest = "{{datadir}}/adapters/{{component}}/codex/"
+
+[adapters.backends.rpm]
+resource_root = "{{datadir}}/adapters/{{component}}/codex/"
+"#
+    );
+    for path in [
+        world
+            .layout
+            .state_dir
+            .join("component-manifests")
+            .join(COMPONENT)
+            .join("component.toml"),
+        world
+            .layout
+            .datadir
+            .join("components")
+            .join(COMPONENT)
+            .join("component.toml"),
+    ] {
+        std::fs::write(&path, &contract).expect("rewrite contract");
+    }
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+    world
+        .manager()
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable with in-datadir rpm root");
+    let state = world.load_state();
+    assert!(
+        state.find_adapter_trust_root(COMPONENT, "codex").is_none(),
+        "an in-datadir root must not be anchored"
+    );
+    let state_text = std::fs::read_to_string(world.layout.state_dir.join("installed.toml"))
+        .expect("read state file");
+    assert!(
+        state_text.contains("schema_version = 5"),
+        "anchor-free state must stay at v5, got:\n{}",
+        state_text.lines().take(3).collect::<Vec<_>>().join("\n")
+    );
+}
+
+/// External-root counterpart of
+/// [`codex_datadir_rpm_root_keeps_state_anchor_free_at_v5`]: a package-owned
+/// root outside the datadir still records its anchor and bumps to v6.
+#[test]
+fn codex_external_rpm_root_still_anchors_state_at_v6() {
+    let guard = EnvGuard::acquire();
+    let world = stage_rpm_backend(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+    world
+        .manager()
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable with external rpm root");
+    let state = world.load_state();
+    assert_eq!(
+        state
+            .find_adapter_trust_root(COMPONENT, "codex")
+            .map(|p| p.to_path_buf()),
+        Some(world.resource_root.clone()),
+        "an external root must be anchored"
+    );
+    let state_text = std::fs::read_to_string(world.layout.state_dir.join("installed.toml"))
+        .expect("read state file");
+    assert!(
+        state_text.contains("schema_version = 6"),
+        "anchored state must be written at v6, got:\n{}",
+        state_text.lines().take(3).collect::<Vec<_>>().join("\n")
+    );
+}
+
+/// The anchor is consumed only for symlink *targets*
+/// (`ClaimResourceKind::Symlink`), which today only Codex receipts
+/// contain. A claude-code receipt over the same kind of external RPM root
+/// records no symlink — an anchor for it would never be read back, only
+/// bump the state schema to v6 and lock released 0.2.16 CLIs out of every
+/// state command. It must stay anchor-free at v5.
+#[test]
+fn claude_code_external_rpm_root_needs_no_anchor_stays_v5() {
+    let guard = EnvGuard::acquire();
+    let world = stage_rpm_backend(
+        "claude-code",
+        "plugin",
+        "{datadir}/adapters/{component}/claude-code/",
+        stage_claude_bundle,
+    );
+    let fake = write_fake_claude(&world.prefix);
+    apply_claude_env(&guard, &world, &fake);
+    world
+        .manager()
+        .enable(COMPONENT, Some("claude-code"), false)
+        .expect("enable with external rpm root");
+    let state = world.load_state();
+    assert!(
+        state
+            .find_adapter_trust_root(COMPONENT, "claude-code")
+            .is_none(),
+        "a receipt without symlink resources must not be anchored"
+    );
+    let state_text = std::fs::read_to_string(world.layout.state_dir.join("installed.toml"))
+        .expect("read state file");
+    assert!(
+        state_text.contains("schema_version = 5"),
+        "anchor-free state must stay at v5, got:\n{}",
+        state_text.lines().take(3).collect::<Vec<_>>().join("\n")
     );
 }

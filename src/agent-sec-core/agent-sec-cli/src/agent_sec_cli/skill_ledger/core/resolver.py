@@ -83,13 +83,13 @@ def ensure_pending_decision_stub(skill_dir: str | Path) -> Path:
             "---\n"
             "# Pending Skill Ledger Review\n\n"
             "This is a safe placeholder. The real skill version is not exposed "
-            "because Skill Ledger found a risk and no trusted fallback version "
-            "is available.\n\n"
+            "because it is not currently eligible for exposure and no trusted "
+            "fallback version is available.\n\n"
             "Run `agent-sec-cli skill-ledger show <skill_dir>` to inspect the "
-            "status, `agent-sec-cli skill-ledger export <skill_dir> --version "
-            "latest --output <path>` to review the hidden version, then run "
-            "`agent-sec-cli skill-ledger decide <skill_dir> --action allow`, "
-            "`rollback`, or `block` before retrying.\n"
+            "status and follow its recovery guidance. Use `scan` or `certify` "
+            "to establish a trusted scanned version, or run `agent-sec-cli "
+            "skill-ledger decide` to choose `allow` / `block` only when the "
+            "latest metadata is trusted.\n"
         ),
         encoding="utf-8",
     )

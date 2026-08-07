@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate version-bearing metadata used by component-owned raw packaging."""
+"""Validate source metadata and staged output for raw packaging."""
 
 import argparse
 import json
@@ -13,20 +13,16 @@ SEMVER_PATTERN = re.compile(
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
 
+NATIVE_PYTHON_PATTERN = re.compile(
+    r"(?<![\w./-])(?:[\w./-]+/)?python(?:\d+(?:\.\d+)*)?(?=$|[\s;&|()])"
+)
+
 REQUIRED_RUNTIME_DEPENDENCIES = {
     "bubblewrap",
     "gnupg",
     "jq",
     "nodejs",
-    "python3",
     "systemd",
-}
-
-PYTHON_RUNTIME_FIELDS = {
-    "kind": "language-runtime",
-    "version": ">=3.11,<3.12",
-    "probe": "python3 --version",
-    "source": "system",
 }
 
 RPM_RESOURCE_ROOTS = {
@@ -37,6 +33,13 @@ RPM_RESOURCE_ROOTS = {
     "qwencode": "/opt/agent-sec/qwen-code-extension/",
     "cosh": "{datadir}/extensions/agent-sec-core/",
 }
+
+RAW_HOOK_MANIFESTS = (
+    Path("adapters/sec-core/codex/hooks/hooks.json"),
+    Path("adapters/sec-core/qoder/hooks/hooks.json"),
+    Path("adapters/sec-core/qwencode/qwen-extension.json"),
+    Path("adapters/sec-core/cosh/cosh-extension.json"),
+)
 
 
 def read_toml(path: Path) -> dict[str, object]:
@@ -87,14 +90,10 @@ def verify_contract_metadata(contract: dict[str, object], contract_path: Path) -
             + ", ".join(missing_dependencies)
         )
 
-    python_runtime = dependencies_by_name["python3"]
-    for field, expected in PYTHON_RUNTIME_FIELDS.items():
-        actual = python_runtime.get(field)
-        if actual != expected:
-            raise SystemExit(
-                f"ERROR: {contract_path} python3 dependency {field} is "
-                f"{actual!r}, expected {expected!r}"
-            )
+    if "python3" in dependencies_by_name:
+        raise SystemExit(
+            f"ERROR: {contract_path} must not declare the bundled Python as a dependency"
+        )
 
     adapters = contract.get("adapters")
     if not isinstance(adapters, list):
@@ -181,18 +180,123 @@ def verify_versions(source_root: Path, contract_path: Path) -> str:
     return expected
 
 
+def collect_python_hook_commands(
+    document: object, location: str = "$"
+) -> list[tuple[str, str]]:
+    """Collect Python hook commands and native launchers in their arguments."""
+    commands: list[tuple[str, str]] = []
+    if isinstance(document, dict):
+        command = document.get("command")
+        args = document.get("args")
+        has_python_arg = isinstance(args, list) and any(
+            isinstance(arg, str) and ".py" in arg for arg in args
+        )
+        if isinstance(command, str) and (
+            ".py" in command
+            or has_python_arg
+            or NATIVE_PYTHON_PATTERN.search(command) is not None
+        ):
+            commands.append((f"{location}.command", command))
+        if isinstance(args, list):
+            commands.extend(
+                (f"{location}.args[{index}]", arg)
+                for index, arg in enumerate(args)
+                if isinstance(arg, str)
+                and NATIVE_PYTHON_PATTERN.search(arg) is not None
+            )
+        for key, value in document.items():
+            commands.extend(collect_python_hook_commands(value, f"{location}.{key}"))
+    elif isinstance(document, list):
+        for index, value in enumerate(document):
+            commands.extend(collect_python_hook_commands(value, f"{location}[{index}]"))
+    return commands
+
+
+def verify_raw_contract(payload_root: Path) -> None:
+    """Verify the staged raw contract does not require system Python."""
+    contract_path = payload_root / ".anolisa" / "component.toml"
+    contract = read_toml(contract_path)
+    component = contract.get("component")
+    dependencies = (
+        component.get("dependencies") if isinstance(component, dict) else None
+    )
+    if not isinstance(dependencies, list):
+        raise SystemExit(f"ERROR: {contract_path} has no component dependencies")
+    if any(
+        isinstance(dependency, dict) and dependency.get("name") == "python3"
+        for dependency in dependencies
+    ):
+        raise SystemExit(f"ERROR: {contract_path} still requires system python3")
+
+
+def verify_raw_hook_manifests(payload_root: Path) -> None:
+    """Verify every staged Python hook uses the bundled runtime launcher."""
+    adapter_root = payload_root / "adapters"
+    manifest_paths = sorted(adapter_root.rglob("*.json"))
+    expected_paths = {payload_root / relative for relative in RAW_HOOK_MANIFESTS}
+    missing_paths = sorted(
+        path for path in expected_paths if path not in manifest_paths
+    )
+    if missing_paths:
+        raise SystemExit(
+            "ERROR: raw payload is missing hook manifests: "
+            + ", ".join(str(path) for path in missing_paths)
+        )
+
+    hook_counts = dict.fromkeys(expected_paths, 0)
+    for manifest_path in manifest_paths:
+        try:
+            document = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            raise SystemExit(
+                f"ERROR: invalid JSON in {manifest_path}: {error}"
+            ) from error
+        for location, command in collect_python_hook_commands(document):
+            if NATIVE_PYTHON_PATTERN.search(command) is not None:
+                raise SystemExit(
+                    f"ERROR: {manifest_path} {location} bypasses agent-sec-python "
+                    f"with native Python: {command!r}"
+                )
+            if command != "agent-sec-python" and not command.startswith(
+                "agent-sec-python "
+            ):
+                raise SystemExit(
+                    f"ERROR: {manifest_path} {location} bypasses agent-sec-python: "
+                    f"{command!r}"
+                )
+            if manifest_path in hook_counts:
+                hook_counts[manifest_path] += 1
+
+    empty_manifests = sorted(path for path, count in hook_counts.items() if count == 0)
+    if empty_manifests:
+        raise SystemExit(
+            "ERROR: raw hook manifests declare no Python hooks: "
+            + ", ".join(str(path) for path in empty_manifests)
+        )
+
+
+def verify_raw_payload(payload_root: Path) -> None:
+    """Verify raw-only contract and adapter launcher invariants."""
+    verify_raw_contract(payload_root)
+    verify_raw_hook_manifests(payload_root)
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument("source_root", type=Path)
     parser.add_argument("contract", type=Path)
+    parser.add_argument("--payload-root", type=Path)
     return parser.parse_args()
 
 
 def main() -> int:
     """Validate release metadata and print the canonical version."""
     args = parse_args()
-    print(verify_versions(args.source_root.resolve(), args.contract.resolve()))
+    version = verify_versions(args.source_root.resolve(), args.contract.resolve())
+    if args.payload_root is not None:
+        verify_raw_payload(args.payload_root.resolve())
+    print(version)
     return 0
 
 

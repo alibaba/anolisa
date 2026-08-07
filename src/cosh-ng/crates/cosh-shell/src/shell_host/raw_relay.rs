@@ -40,6 +40,11 @@ use pty_emit::restore_prompt_display_before_handoff;
 use terminal_recovery::{restore_terminal_after_interrupted_command, PendingTerminalRecovery};
 use terminal_size::sync_outer_terminal_winsize;
 
+// DECSC/DECRC are the terminfo `sc`/`rc` sequences for xterm-compatible
+// terminals. Unlike CSI s/u, they also restore the cursor in macOS Terminal.
+const SAVE_CURSOR: &str = "\x1b7";
+const RESTORE_CURSOR: &str = "\x1b8";
+
 pub(super) struct RawActionWatchdog {
     grace: Duration,
 }
@@ -564,7 +569,10 @@ fn write_pending_display_preserving_prompt_ghost<W: Write>(
 
 fn write_prompt_ghost<W: Write>(output: &mut W, text: &str, selection: bool) -> io::Result<()> {
     let marker = if selection { " ›" } else { "" };
-    write!(output, "\x1b[s\x1b[2m{marker} {text}\x1b[0m\x1b[u")
+    write!(
+        output,
+        "{SAVE_CURSOR}\x1b[2m{marker} {text}\x1b[0m{RESTORE_CURSOR}"
+    )
 }
 
 fn write_display_slice<W: Write>(

@@ -29,11 +29,20 @@ use crate::state::{
 use crate::state_identity::repair_known_installation_identities;
 use crate::state_migration::{MigrationRule, QuarantinedObject, migrate_state};
 
-/// Schema version this store reads natively and always writes.
+/// Baseline schema version: what this store writes when no schema-v6
+/// feature is in use, and the newest version pre-anchor readers accept.
 pub const STORE_SCHEMA_VERSION: u32 = 5;
 
-/// v5 on-disk wire shape. Kept private: the store is the API, the file
-/// layout is an implementation detail.
+/// Schema version written when [`StateStore::adapter_trust_roots`] is
+/// non-empty. Same wire shape as v5 plus the anchor array — bumped so
+/// pre-anchor writers (≤ 0.2.16) hit their `NewerSchema` guard and refuse
+/// the file instead of silently dropping the security-critical anchors on
+/// their next save.
+pub const STORE_SCHEMA_VERSION_ANCHORED: u32 = 6;
+
+/// v5/v6 on-disk wire shape. Kept private: the store is the API, the file
+/// layout is an implementation detail. v6 is v5 plus `adapter_trust_roots`;
+/// the version number on disk tracks whether that array is populated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StateFileV5 {
     schema_version: u32,
@@ -51,6 +60,36 @@ struct StateFileV5 {
     operations: Vec<OperationRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     adapter_claims: Vec<AdapterClaim>,
+    /// See [`AdapterTrustRoot`]. `default` keeps pre-anchor v5 files
+    /// loading; `skip_serializing_if` keeps files without anchors
+    /// byte-identical to before the field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    adapter_trust_roots: Vec<AdapterTrustRoot>,
+}
+
+/// Manager-written record of the external adapter resource root that was
+/// contract-validated at the receipt's last successful enable.
+///
+/// Receipt symlink targets are never trusted from the receipt itself (a
+/// forged receipt must not self-authorize). But a legitimate RPM update
+/// may move the resource root and refresh the contract snapshot while an
+/// enabled receipt still points at the old root — without this anchor,
+/// that receipt could no longer be validated for status/disable/re-enable
+/// and became permanently stuck. Only the Manager writes this record
+/// (enable upserts, disable removes); drivers never see it.
+///
+/// Despite the type name, validation consumes the anchor as an
+/// **exact-equality** symlink-target allowance, never as a root: a
+/// state-resident path (forgeable in user mode) authorizes only itself,
+/// nothing beneath it, and no write outside anolisa's own layout.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdapterTrustRoot {
+    /// Component the anchored receipt belongs to.
+    pub component: String,
+    /// Framework of the anchored receipt.
+    pub framework: String,
+    /// The contract-validated resource root at enable time.
+    pub root: PathBuf,
 }
 
 /// Minimal probe to route a file to the right parser without committing to
@@ -78,6 +117,9 @@ pub struct StateStore {
     pub operations: Vec<OperationRecord>,
     /// Adapter receipts written by `anolisa adapter enable`.
     pub adapter_claims: Vec<AdapterClaim>,
+    /// Enable-time trust anchors for adapter receipts (see
+    /// [`AdapterTrustRoot`]). Manager-written, never driver-supplied.
+    pub adapter_trust_roots: Vec<AdapterTrustRoot>,
     /// Audit trail of the load-boundary migration, when one ran.
     pub migration_audit: Vec<(String, MigrationRule)>,
     /// Names of legacy capability objects the migration dropped.
@@ -97,6 +139,7 @@ impl StateStore {
             backups: Vec::new(),
             operations: Vec::new(),
             adapter_claims: Vec::new(),
+            adapter_trust_roots: Vec::new(),
             migration_audit: Vec::new(),
             dropped_capabilities: Vec::new(),
             migrated_from_legacy: false,
@@ -197,16 +240,18 @@ impl StateStore {
 
         // Refuse files from a newer schema: serde would silently drop the
         // fields that schema keeps its records in, and the next save would
-        // rewrite the file as v5 — destroying data the newer writer owned.
-        if probe.schema_version > STORE_SCHEMA_VERSION {
+        // rewrite the file at our version — destroying data the newer
+        // writer owned.
+        if probe.schema_version > STORE_SCHEMA_VERSION_ANCHORED {
             return Err(StateError::NewerSchema {
                 path: path.to_path_buf(),
                 found: probe.schema_version,
-                supported: STORE_SCHEMA_VERSION,
+                supported: STORE_SCHEMA_VERSION_ANCHORED,
             });
         }
 
-        if probe.schema_version == STORE_SCHEMA_VERSION {
+        // v6 shares the v5 wire shape (plus anchors), so both parse here.
+        if probe.schema_version >= STORE_SCHEMA_VERSION {
             let file: StateFileV5 =
                 toml::from_str(&content).map_err(|source| StateError::Parse {
                     path: path.to_path_buf(),
@@ -222,6 +267,7 @@ impl StateStore {
                 backups: file.backups,
                 operations: file.operations,
                 adapter_claims: file.adapter_claims,
+                adapter_trust_roots: file.adapter_trust_roots,
                 migration_audit: Vec::new(),
                 dropped_capabilities: Vec::new(),
                 migrated_from_legacy: false,
@@ -248,6 +294,9 @@ impl StateStore {
             backups: legacy.backups,
             operations: legacy.operations,
             adapter_claims: legacy.adapter_claims,
+            // Legacy schemas predate trust anchors; receipts they carry
+            // resolve inside datadir roots, which need no anchor.
+            adapter_trust_roots: Vec::new(),
             migration_audit: migration.audit,
             dropped_capabilities: migration.dropped_capabilities,
             migrated_from_legacy: true,
@@ -260,7 +309,10 @@ impl StateStore {
         self.migrated_from_legacy
     }
 
-    /// Atomically persist the store as schema v5.
+    /// Atomically persist the store: schema v6 when trust anchors are
+    /// present (so pre-anchor writers refuse the file instead of dropping
+    /// them — see [`STORE_SCHEMA_VERSION_ANCHORED`]), plain v5 otherwise
+    /// (anchor-free files stay fully interchangeable with 0.2.16).
     ///
     /// If the on-disk file is still legacy (schema ≤ 4), its original bytes
     /// are first preserved as a `.v4.bak` sibling — exactly once: an
@@ -270,7 +322,11 @@ impl StateStore {
         self.backup_legacy_file(path)?;
 
         let file = StateFileV5 {
-            schema_version: STORE_SCHEMA_VERSION,
+            schema_version: if self.adapter_trust_roots.is_empty() {
+                STORE_SCHEMA_VERSION
+            } else {
+                STORE_SCHEMA_VERSION_ANCHORED
+            },
             updated_at: now_iso8601(),
             install_mode: self.install_mode,
             prefix: self.prefix.clone(),
@@ -280,6 +336,7 @@ impl StateStore {
             backups: self.backups.clone(),
             operations: self.operations.clone(),
             adapter_claims: self.adapter_claims.clone(),
+            adapter_trust_roots: self.adapter_trust_roots.clone(),
         };
         let content = toml::to_string_pretty(&file)?;
         write_atomic(path, content.as_bytes()).map_err(|source| StateError::Io {
@@ -415,6 +472,39 @@ impl StateStore {
             .iter()
             .position(|c| c.component == component && c.framework == framework)?;
         Some(self.adapter_claims.remove(idx))
+    }
+
+    /// Find the enable-time trust anchor for `(component, framework)`.
+    pub fn find_adapter_trust_root(&self, component: &str, framework: &str) -> Option<&Path> {
+        self.adapter_trust_roots
+            .iter()
+            .find(|a| a.component == component && a.framework == framework)
+            .map(|a| a.root.as_path())
+    }
+
+    /// Insert or replace the trust anchor for `(component, framework)`.
+    /// Called by the Manager only, with a contract-validated root.
+    pub fn upsert_adapter_trust_root(&mut self, component: &str, framework: &str, root: PathBuf) {
+        if let Some(slot) = self
+            .adapter_trust_roots
+            .iter_mut()
+            .find(|a| a.component == component && a.framework == framework)
+        {
+            slot.root = root;
+        } else {
+            self.adapter_trust_roots.push(AdapterTrustRoot {
+                component: component.to_string(),
+                framework: framework.to_string(),
+                root,
+            });
+        }
+    }
+
+    /// Drop the trust anchor for `(component, framework)`. Called when the
+    /// receipt it anchored is removed.
+    pub fn remove_adapter_trust_root(&mut self, component: &str, framework: &str) {
+        self.adapter_trust_roots
+            .retain(|a| !(a.component == component && a.framework == framework));
     }
 
     /// All adapter receipts for a component, across frameworks.
@@ -684,31 +774,80 @@ source_repo = "anolisa"
         assert_eq!(store.migration_audit.len(), 4);
     }
 
-    /// A file written by a newer schema must be refused, not read as v5:
-    /// serde would drop the newer schema's fields and the next save would
-    /// rewrite the file as v5, silently destroying that data.
+    /// A file written by a newer schema must be refused, not read as the
+    /// current shape: serde would drop the newer schema's fields and the
+    /// next save would rewrite the file, silently destroying that data.
     #[test]
     fn newer_schema_file_is_refused_and_left_untouched() {
         let tmp = tempfile::tempdir().expect("tmpdir");
-        let future_v6 = "schema_version = 6\n\
+        let future_v7 = "schema_version = 7\n\
                          updated_at = \"2026-07-20T00:00:00Z\"\n\
                          install_mode = \"system\"\n\
                          prefix = \"/\"\n\
                          anolisa_version = \"future\"\n\
                          future_only = \"must-survive\"\n";
-        let path = write_file(tmp.path(), "installed.toml", future_v6);
+        let path = write_file(tmp.path(), "installed.toml", future_v7);
 
-        let err = StateStore::load(&path, 1000).expect_err("v6 must be refused");
+        let err = StateStore::load(&path, 1000).expect_err("v7 must be refused");
         assert!(matches!(
             err,
             StateError::NewerSchema {
-                found: 6,
-                supported: STORE_SCHEMA_VERSION,
+                found: 7,
+                supported: STORE_SCHEMA_VERSION_ANCHORED,
                 ..
             }
         ));
         // Refusal is read-only: the newer writer's bytes are untouched.
-        assert_eq!(fs::read_to_string(&path).expect("read back"), future_v6);
+        assert_eq!(fs::read_to_string(&path).expect("read back"), future_v7);
+    }
+
+    /// Anchors force the schema to v6 on disk, so pre-anchor writers
+    /// (≤ 0.2.16, which refuse schemas newer than v5) fail closed instead
+    /// of silently deleting the security-critical anchor on their next
+    /// save. The anchors themselves must round-trip.
+    #[test]
+    fn anchored_state_round_trips_at_v6() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("installed.toml");
+        let mut store = StateStore::empty();
+        store.install_mode = InstallMode::System;
+        store.prefix = PathBuf::from("/");
+        store.upsert_adapter_trust_root("sec-core", "codex", PathBuf::from("/opt/sec-core"));
+        store.save(&path).expect("save anchored");
+
+        let content = fs::read_to_string(&path).expect("read back");
+        assert!(
+            content.contains("schema_version = 6"),
+            "anchored state must be marked v6, got:\n{content}"
+        );
+
+        let loaded = StateStore::load(&path, 0).expect("reload v6");
+        assert_eq!(
+            loaded.find_adapter_trust_root("sec-core", "codex"),
+            Some(Path::new("/opt/sec-core")),
+            "anchor must survive the round-trip"
+        );
+    }
+
+    /// Without anchors nothing changed on the wire: the file stays v5 and
+    /// fully interchangeable with pre-anchor writers.
+    #[test]
+    fn anchor_free_state_still_writes_v5() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("installed.toml");
+        let mut store = StateStore::empty();
+        store.install_mode = InstallMode::System;
+        store.prefix = PathBuf::from("/");
+        store.upsert_adapter_trust_root("sec-core", "codex", PathBuf::from("/opt/sec-core"));
+        store.remove_adapter_trust_root("sec-core", "codex");
+        store.save(&path).expect("save");
+
+        let content = fs::read_to_string(&path).expect("read back");
+        assert!(
+            content.contains("schema_version = 5"),
+            "anchor-free state must stay v5, got:\n{content}"
+        );
+        assert!(!content.contains("adapter_trust_roots"));
     }
 
     #[test]

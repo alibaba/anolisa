@@ -1657,3 +1657,212 @@ fn install_no_conflict_when_conflicting_component_not_installed() {
     assert_eq!(installation.status, LifecycleStatus::Installed);
     assert_eq!(owned_artifact(installation).version, "0.11.0");
 }
+
+/// A future-shaped row for the *queried* component must refuse resolution
+/// instead of silently answering with an older parsable version: with
+/// 1.0.0 parsable and 2.0.0 unparsable, "latest" would otherwise select
+/// 1.0.0 — a silent downgrade for update, a stale install for install.
+#[test]
+fn skipped_newer_entry_refuses_latest_instead_of_downgrading() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo_component_versions(
+        &tmp.path().join("repo"),
+        "sec-core",
+        &["1.0.0"],
+        &["system"],
+    );
+    // Publish 2.0.0 with an entry shape this build cannot represent.
+    let env = anolisa_env::EnvService::detect();
+    let index_path = tmp.path().join("repo/v1/index.toml");
+    let mut index = std::fs::read_to_string(&index_path).expect("read index");
+    index.push_str(&format!(
+        r#"
+[[entries]]
+component = "sec-core"
+version = "2.0.0"
+channel = "stable"
+artifact_type = "hologram_v9"
+backend = "raw"
+url = "sec-core-2.0.0.tar.gz"
+os = "{os}"
+arch = "{arch}"
+install_modes = ["system"]
+"#,
+        os = env.os,
+        arch = env.arch,
+    ));
+    std::fs::write(&index_path, index).expect("write index");
+
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix));
+    let inputs = |version: Option<&'static str>| ResolveInputs {
+        component: "sec-core".to_string(),
+        package: "sec-core".to_string(),
+        backend: "raw".to_string(),
+        base_url: repo_url.clone(),
+        version,
+        warnings: Vec::new(),
+    };
+
+    // Latest: refuse — the unreadable 2.0.0 may be the answer.
+    let err = match resolve_raw(&ctx, &layout, &env, inputs(None)) {
+        Ok(_) => panic!("latest must refuse, not fall back to 1.0.0"),
+        Err(err) => err,
+    };
+    assert!(
+        err.reason().contains("cannot parse") && err.reason().contains("self-update"),
+        "refusal must explain the unparsable entry and hint self-update, got: {}",
+        err.reason()
+    );
+    assert!(
+        !err.reason().contains("not found"),
+        "must be a refusal, not a not-found, got: {}",
+        err.reason()
+    );
+
+    // Pinned 2.0.0: equally refused (that exact row is unreadable).
+    let err = match resolve_raw(&ctx, &layout, &env, inputs(Some("2.0.0"))) {
+        Ok(_) => panic!("pinned 2.0.0 must refuse"),
+        Err(err) => err,
+    };
+    assert!(
+        err.reason().contains("cannot parse"),
+        "got: {}",
+        err.reason()
+    );
+
+    // Pinned 1.0.0: an explicit choice of the parsable version resolves,
+    // and the skipped row stays visible as a warning.
+    let resolution =
+        resolve_raw(&ctx, &layout, &env, inputs(Some("1.0.0"))).expect("pinned 1.0.0 resolves");
+    assert_eq!(resolution.entry.version, "1.0.0");
+    assert!(
+        resolution
+            .warnings
+            .iter()
+            .any(|w| w.contains("skipped index entry")),
+        "skipped row must surface as a warning, got: {:?}",
+        resolution.warnings
+    );
+}
+
+/// A future-shaped row for an unrelated component neither blocks nor
+/// degrades resolution of the queried one; it only surfaces as a warning.
+#[test]
+fn skipped_unrelated_entry_keeps_component_resolvable() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo_component_versions(
+        &tmp.path().join("repo"),
+        "cosh",
+        &["1.2.3"],
+        &["system"],
+    );
+    let env = anolisa_env::EnvService::detect();
+    let index_path = tmp.path().join("repo/v1/index.toml");
+    let mut index = std::fs::read_to_string(&index_path).expect("read index");
+    index.push_str(&format!(
+        r#"
+[[entries]]
+component = "future-thing"
+version = "0.1.0"
+channel = "stable"
+artifact_type = "hologram_v9"
+backend = "raw"
+url = "future-thing-0.1.0.tar.gz"
+os = "{os}"
+arch = "{arch}"
+install_modes = ["system"]
+"#,
+        os = env.os,
+        arch = env.arch,
+    ));
+    std::fs::write(&index_path, index).expect("write index");
+
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix));
+    let resolution = resolve_raw(
+        &ctx,
+        &layout,
+        &env,
+        ResolveInputs {
+            component: "cosh".to_string(),
+            package: "cosh".to_string(),
+            backend: "raw".to_string(),
+            base_url: repo_url,
+            version: None,
+            warnings: Vec::new(),
+        },
+    )
+    .expect("unrelated skipped row must not block");
+    assert_eq!(resolution.entry.version, "1.2.3");
+    assert!(
+        resolution
+            .warnings
+            .iter()
+            .any(|w| w.contains("future-thing")),
+        "skipped row must surface as a warning, got: {:?}",
+        resolution.warnings
+    );
+}
+
+/// A skipped row whose selectors are damaged (valid TOML, wrong shape —
+/// here `install_modes = [1]`) must still block "latest" for its
+/// component: partial recovery of the selector would under-block and
+/// reopen the silent downgrade this gate exists to prevent.
+#[test]
+fn skipped_row_with_malformed_selector_still_blocks_latest() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let repo_url = write_local_repo_component_versions(
+        &tmp.path().join("repo"),
+        "sec-core",
+        &["1.0.0"],
+        &["system"],
+    );
+    let env = anolisa_env::EnvService::detect();
+    let index_path = tmp.path().join("repo/v1/index.toml");
+    let mut index = std::fs::read_to_string(&index_path).expect("read index");
+    index.push_str(&format!(
+        r#"
+[[entries]]
+component = "sec-core"
+version = "2.0.0"
+channel = "stable"
+artifact_type = "hologram_v9"
+backend = "raw"
+url = "sec-core-2.0.0.tar.gz"
+os = "{os}"
+arch = "{arch}"
+install_modes = [1]
+"#,
+        os = env.os,
+        arch = env.arch,
+    ));
+    std::fs::write(&index_path, index).expect("write index");
+
+    let ctx = ctx_with_prefix(false, Some(prefix.clone()));
+    let layout = FsLayout::system(Some(prefix));
+    let err = match resolve_raw(
+        &ctx,
+        &layout,
+        &env,
+        ResolveInputs {
+            component: "sec-core".to_string(),
+            package: "sec-core".to_string(),
+            backend: "raw".to_string(),
+            base_url: repo_url,
+            version: None,
+            warnings: Vec::new(),
+        },
+    ) {
+        Ok(_) => panic!("malformed selector must not unblock a silent downgrade to 1.0.0"),
+        Err(err) => err,
+    };
+    assert!(
+        err.reason().contains("cannot parse") && err.reason().contains("self-update"),
+        "got: {}",
+        err.reason()
+    );
+}

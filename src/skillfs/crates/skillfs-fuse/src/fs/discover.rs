@@ -13,8 +13,9 @@ impl SkillFs {
     ///
     /// When views are configured, the body lists every secondary view as a
     /// section with a table of `name | description | source_path` rows.
-    /// The `source_path` is the real physical path to each skill's SKILL.md,
-    /// enabling the AI to open it directly via `read_file`.
+    /// By default, `source_path` points to each physical `SKILL.md`. A
+    /// configured reader-visible root instead maps every path into the FUSE
+    /// view so a reader in another mount namespace can open it directly.
     ///
     /// When no views config is present, falls back to a simple listing of all
     /// skills in the store.
@@ -35,12 +36,18 @@ impl SkillFs {
                 .filter(|name| store.get(name).is_some())
                 .collect();
 
-            // Collect all source paths to find a common prefix.
+            // Physical paths use a common prefix to keep the table compact.
+            // Reader-visible paths stay absolute because the consumer may
+            // have no access to the physical source mount namespace.
             let all_paths: Vec<std::path::PathBuf> = hidden_names
                 .iter()
                 .filter_map(|name| store.get(name).map(|e| e.source_path.clone()))
                 .collect();
-            let common_prefix = find_common_path_prefix(&all_paths);
+            let common_prefix = if self.skill_discover_root.is_none() {
+                find_common_path_prefix(&all_paths)
+            } else {
+                None
+            };
 
             let frontmatter = format!(
                 "---\nname: skill-discover\ndescription: 'Hidden skills: {}'\nversion: 0.1.0\ntags: [meta, discovery]\nenabled: true\n---\n",
@@ -49,8 +56,12 @@ impl SkillFs {
 
             let mut body = String::from("\n# Secondary Skill Views\n\n");
 
-            // Show base path hint once so individual paths stay short.
-            if let Some(ref prefix) = common_prefix {
+            if self.skill_discover_root.is_some() {
+                body.push_str(
+                    "The `source_path` values below are absolute paths in the readable SkillFS \
+view. Use `read_file` on any path to read the skill and learn how to use it.\n\n",
+                );
+            } else if let Some(ref prefix) = common_prefix {
                 body.push_str(&format!(
                     "Base path: `{}`\n\nPaths below are relative to the base path. \
 Use `read_file` on any `source_path` to read the skill and learn how to use it.\n\n",
@@ -80,13 +91,17 @@ Use `read_file` on any `source_path` to read the skill and learn how to use it.\
                             .unwrap_or("")
                             .trim()
                             .replace('|', r"\|");
-                        let display_path = match &common_prefix {
-                            Some(prefix) => entry
-                                .source_path
-                                .strip_prefix(prefix)
-                                .map(|p| p.display().to_string())
-                                .unwrap_or_else(|_| entry.source_path.display().to_string()),
-                            None => entry.source_path.display().to_string(),
+                        let display_path = if let Some(root) = &self.skill_discover_root {
+                            root.join(skill_name).join("SKILL.md").display().to_string()
+                        } else {
+                            match &common_prefix {
+                                Some(prefix) => entry
+                                    .source_path
+                                    .strip_prefix(prefix)
+                                    .map(|p| p.display().to_string())
+                                    .unwrap_or_else(|_| entry.source_path.display().to_string()),
+                                None => entry.source_path.display().to_string(),
+                            }
                         };
                         body.push_str(&format!(
                             "| {} | {} | {} |\n",
@@ -141,5 +156,91 @@ enabled: true
 ",
             body
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use parking_lot::RwLock;
+    use skillfs_core::{ParseConfig, SharedSkillStore, store::SkillStore};
+
+    use super::SkillFs;
+
+    fn write_skill(source: &Path, name: &str) {
+        let dir = source.join(name);
+        std::fs::create_dir_all(&dir).expect("create skill directory");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!(
+                "---\nname: {name}\ndescription: Test skill.\nversion: 1.0.0\n\
+                 enabled: true\n---\n\n# Test\n"
+            ),
+        )
+        .expect("write SKILL.md");
+    }
+
+    fn discover_fixture() -> (tempfile::TempDir, SkillFs) {
+        let source = tempfile::tempdir().expect("source tempdir");
+        write_skill(source.path(), "primary");
+        write_skill(source.path(), "reserve");
+        std::fs::write(
+            source.path().join("skillfs-views.toml"),
+            r#"[[view]]
+name = "default"
+default = true
+skills = ["primary"]
+
+[[view]]
+name = "reserve"
+default = false
+skills = ["reserve"]
+"#,
+        )
+        .expect("write views config");
+
+        let mut store = SkillStore::new();
+        let errors = store.load_from_directory(source.path(), &ParseConfig::default());
+        assert!(errors.is_empty(), "load errors: {errors:?}");
+        let shared: SharedSkillStore = Arc::new(RwLock::new(store));
+        let fs = SkillFs::new(
+            source.path().join("mount"),
+            source.path().to_path_buf(),
+            shared,
+            false,
+        );
+        (source, fs)
+    }
+
+    #[test]
+    fn default_discover_paths_remain_physical_and_relative() {
+        let (source, fs) = discover_fixture();
+        let content = fs.get_skill_discover_content();
+
+        assert!(
+            content.contains(&format!(
+                "Base path: `{}`",
+                source.path().join("reserve").display()
+            )),
+            "expected physical source base, got:\n{content}"
+        );
+        assert!(content.contains("| reserve | Test skill. | SKILL.md |"));
+    }
+
+    #[test]
+    fn discover_root_emits_reader_visible_absolute_paths() {
+        let (source, fs) = discover_fixture();
+        let content = fs
+            .with_skill_discover_root("/workload/skills".into())
+            .get_skill_discover_content();
+
+        assert!(content.contains("| reserve | Test skill. | /workload/skills/reserve/SKILL.md |"));
+        assert!(!content.contains("Base path:"));
+        assert!(
+            !content.contains(&source.path().display().to_string()),
+            "physical source path leaked into reader-visible output: {content}"
+        );
     }
 }

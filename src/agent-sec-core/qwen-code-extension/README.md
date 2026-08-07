@@ -98,6 +98,16 @@ agent-sec-cli skill-ledger show "${QWEN_HOME:-$HOME/.qwen}/skills/<skill>"
 `agent-sec-cli skill-ledger init --no-baseline`。`ask` 在 Qwen Code headless 或后台
 subagent 等无法交互的场景会按 Qwen Code 规则退化为拒绝。
 
+## Code Scanner 配置
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `CODE_SCANNER_HOOK_ENABLED` | `true` | `false` 时在读取 hook input 和调用 CLI 前短路；非法值等价于未设置 |
+| `CODE_SCANNER_MODE` | `observe` | 支持 `observe` / `ask` / `block`；`debug` 等价于 `observe`，`deny` 等价于 `block`；`warn` 及非法值等价于未设置，并向 stderr 写入 bounded diagnostic |
+| `CODE_SCANNER_TIMEOUT` | `10` | 保留现有 CLI 超时环境变量 |
+
+`ask` 和 `block` 复用现有 `permissionDecision=ask/deny` 交互，不新增 HookOutput 类型。scanner `warn` 与 `deny` 都进入所选交互。
+
 ## PII 扫描与阻断
 
 | Qwen Code event | 扫描内容 | `scan-pii --source` | 阻断边界 |
@@ -178,7 +188,9 @@ agent/tool run；后续应先扩展 schema，再单独挂载。
 扫描事件且不阻断；设置为 `deny` 后，`agent-sec-cli scan-prompt` 返回 `warn` 或 `deny`
 时会向 Qwen Code 返回拒绝决策并阻断该 prompt。`PROMPT_SCANNER_TIMEOUT` 控制内部
 `agent-sec-cli` 调用超时，默认 10 秒；外层 manifest 为 prompt scanner 预留 15 秒
-command-hook 超时。
+command-hook 超时。`PROMPT_SCANNER_HOOK_ENABLED` 设为 `false` 时完全跳过 prompt scanner
+（默认 `true`）。`PROMPT_SCANNER_SCAN_MODE` 控制扫描强度，`fast` / `standard` / `strict`
+（默认 `standard`）。
 
 `agent-sec-pii-checker` 也是同步安全 hook，但默认 `observe`；只有显式配置 block 且
 scanner 返回 `deny`，才会按上述点位阻断。
@@ -188,11 +200,13 @@ scanner 返回 `deny`，才会按上述点位阻断。
 
 `agent-sec-observability` 仍异步执行并保持 fail-open：任何脚本、PII 扫描或记录写入异常
 都不会改变 Qwen Code 的执行决策。敏感指标在写入前由本地 `scan-pii` 脱敏；脱敏失败时
-直接丢弃对应敏感字段。
+直接丢弃对应敏感字段。Observability hook 默认开启；启动 Qwen Code 前设置
+`OBSERVABILITY_HOOK_ENABLED=false` 可将其关闭，未设置或值无效时仍保持开启。修改后需
+重启 Qwen Code。
 
 Code scanner hook 与 observability hook 独立挂载，作为同步
 `PreToolUse` hook 仅处理 `run_shell_command`；默认 `CODE_SCANNER_MODE=observe` 不改变
-工具执行，设置为 `ask` 或 `deny` 时会按 Qwen Code 官方 `permissionDecision` 协议请求确认或拒绝本次命令。敏感指标在写入前由本地 `scan-pii` 脱敏；脱敏失败时直接丢弃
+工具执行，设置为 `ask` 或 `block` 时会按 Qwen Code 官方 `permissionDecision` 协议请求确认或拒绝本次命令。`deny` 继续作为 `block` 的兼容别名。敏感指标在写入前由本地 `scan-pii` 脱敏；脱敏失败时直接丢弃
 对应敏感字段。
 
 ## 测试

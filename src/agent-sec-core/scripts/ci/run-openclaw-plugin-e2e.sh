@@ -48,6 +48,7 @@ Environment:
   EXPECT_UNSAFE_INSTALL_FLAG    Optional true/false assertion for deploy.sh.
   OPENCLAW_E2E_RESULT_ROOT      Result root; defaults to target/openclaw-e2e/results.
   OPENCLAW_E2E_SKIP_NPM_CI      Set to 1 to skip npm ci.
+  OPENCLAW_E2E_NPM_RETRIES      Number of retries for npm install/ci (default: 3).
   OPENCLAW_E2E_DRY_RUN          Set to 1 for dry-run.
 USAGE
 }
@@ -89,6 +90,22 @@ run() {
         return 0
     fi
     "$@"
+}
+
+run_with_retries() {
+    local max_retries="${1:-3}"
+    shift
+    local i
+    for ((i = 1; i <= max_retries; i++)); do
+        if run "$@"; then
+            return 0
+        fi
+        if [[ "$i" -lt "$max_retries" ]]; then
+            log "$* failed, retrying ($i/$max_retries) in 5s..."
+            sleep 5
+        fi
+    done
+    return 1
 }
 
 require_command() {
@@ -331,7 +348,7 @@ install_openclaw() {
     require_command npm
     local install_dir="$tools_root/openclaw-$openclaw_label"
     run mkdir -p "$install_dir"
-    run npm install --prefix "$install_dir" --no-save "openclaw@$OPENCLAW_REQUESTED_VERSION"
+    run_with_retries "${OPENCLAW_E2E_NPM_RETRIES:-3}" npm install --prefix "$install_dir" --no-save "openclaw@$OPENCLAW_REQUESTED_VERSION"
     OPENCLAW_BIN="$install_dir/node_modules/.bin/openclaw"
 }
 
@@ -359,7 +376,7 @@ install_plugin_dependencies() {
         log "skipping npm ci because OPENCLAW_E2E_SKIP_NPM_CI=1"
         return
     fi
-    run npm ci --prefix "$plugin_root"
+    run_with_retries "${OPENCLAW_E2E_NPM_RETRIES:-3}" npm ci --prefix "$plugin_root"
 }
 
 run_pilot() {

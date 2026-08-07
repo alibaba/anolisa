@@ -4,10 +4,12 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{BlazeError, ConfigErrorSource, Result};
+use crate::policy::parse_duration;
 
 /// Top-level daemon configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -160,10 +162,15 @@ pub struct StorageSection {
     #[serde(default)]
     pub prefork: bool,
 
-    /// Interval for flushing dirty data.
-    /// NOTE: Reserved for future use. Not yet wired into runtime.
-    #[serde(default = "default_flush_interval")]
-    pub flush_interval: String,
+    /// Interval for persisting already-written provider-owned artifacts.
+    ///
+    /// The literal `disabled` turns off periodic synchronization.
+    #[serde(default = "default_sync_interval", alias = "flush_interval")]
+    pub sync_interval: String,
+
+    /// Maximum time the scheduler waits for one artifact synchronization attempt.
+    #[serde(default = "default_sync_timeout")]
+    pub sync_timeout: String,
 
     /// Logical size of file-provider root filesystem slots.
     #[serde(default = "default_rootfs_size")]
@@ -182,10 +189,41 @@ impl Default for StorageSection {
             provider: default_storage_provider(),
             pool_size: 0,
             prefork: false,
-            flush_interval: default_flush_interval(),
+            sync_interval: default_sync_interval(),
+            sync_timeout: default_sync_timeout(),
             rootfs_size: default_rootfs_size(),
             mem_size: default_mem_size(),
         }
+    }
+}
+
+/// Parsed periodic storage-artifact synchronization policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageSyncSchedule {
+    /// Do not run periodic storage-artifact synchronization.
+    Disabled,
+    /// Run one sweep after every configured interval.
+    Every(Duration),
+}
+
+impl StorageSection {
+    /// Parse the periodic storage-artifact synchronization setting.
+    pub fn sync_schedule(&self) -> Result<StorageSyncSchedule> {
+        if self.sync_interval == "disabled" {
+            return Ok(StorageSyncSchedule::Disabled);
+        }
+        let duration = parse_duration(&self.sync_interval)
+            .ok_or_else(|| invalid_storage_duration("sync_interval", &self.sync_interval, true))?;
+        validate_storage_clock_duration("sync_interval", &self.sync_interval, duration)?;
+        Ok(StorageSyncSchedule::Every(duration))
+    }
+
+    /// Parse the maximum duration of one artifact synchronization attempt.
+    pub fn sync_timeout_duration(&self) -> Result<Duration> {
+        let duration = parse_duration(&self.sync_timeout)
+            .ok_or_else(|| invalid_storage_duration("sync_timeout", &self.sync_timeout, false))?;
+        validate_storage_clock_duration("sync_timeout", &self.sync_timeout, duration)?;
+        Ok(duration)
     }
 }
 
@@ -201,8 +239,35 @@ impl DaemonConfig {
 
     /// Validate cross-field invariants that serde cannot express.
     pub fn validate(&self) -> Result<()> {
-        validate_storage_paths(&self.storage.images_dir, &self.storage.instances_dir)
+        validate_storage_paths(&self.storage.images_dir, &self.storage.instances_dir)?;
+        self.storage.sync_schedule()?;
+        self.storage.sync_timeout_duration()?;
+        Ok(())
     }
+}
+
+fn invalid_storage_duration(name: &str, value: &str, allow_disabled: bool) -> BlazeError {
+    let expected = if allow_disabled {
+        "a positive duration or \"disabled\""
+    } else {
+        "a positive duration"
+    };
+    BlazeError::ConfigError {
+        source: ConfigErrorSource::InvalidValue(format!(
+            "storage.{name} ({value:?}) must be {expected}"
+        )),
+    }
+}
+
+fn validate_storage_clock_duration(name: &str, value: &str, duration: Duration) -> Result<()> {
+    if std::time::Instant::now().checked_add(duration).is_none() {
+        return Err(BlazeError::ConfigError {
+            source: ConfigErrorSource::InvalidValue(format!(
+                "storage.{name} ({value:?}) exceeds the monotonic clock range"
+            )),
+        });
+    }
+    Ok(())
 }
 
 /// Reject storage roots whose ownership domains overlap.
@@ -266,7 +331,10 @@ fn default_instances_dir() -> PathBuf {
 fn default_storage_provider() -> String {
     "file".to_string()
 }
-fn default_flush_interval() -> String {
+fn default_sync_interval() -> String {
+    "disabled".to_string()
+}
+fn default_sync_timeout() -> String {
     "30s".to_string()
 }
 fn default_rootfs_size() -> u64 {
@@ -287,6 +355,10 @@ mod tests {
         assert_eq!(cfg.policy.on_load_error, PolicyLoadErrorMode::Fail);
         assert!(cfg.backends.is_empty());
         assert_ne!(cfg.storage.images_dir, cfg.storage.instances_dir);
+        assert_eq!(
+            cfg.storage.sync_schedule().expect("sync schedule"),
+            StorageSyncSchedule::Disabled
+        );
     }
 
     #[test]
@@ -323,6 +395,97 @@ mod tests {
             cfg.storage.instances_dir = PathBuf::from(instances);
             let error = cfg.validate().expect_err("overlapping paths");
             assert!(error.to_string().contains("must be disjoint"));
+        }
+    }
+
+    #[test]
+    fn storage_sync_schedule_accepts_disabled_or_positive_duration() {
+        let mut cfg = DaemonConfig::default();
+        cfg.storage.sync_interval = "disabled".into();
+        cfg.validate().expect("disabled schedule");
+        assert_eq!(
+            cfg.storage.sync_schedule().expect("schedule"),
+            StorageSyncSchedule::Disabled
+        );
+
+        cfg.storage.sync_interval = "15s".into();
+        cfg.validate().expect("positive schedule");
+        assert_eq!(
+            cfg.storage.sync_schedule().expect("schedule"),
+            StorageSyncSchedule::Every(Duration::from_secs(15))
+        );
+    }
+
+    #[test]
+    fn storage_sync_interval_accepts_legacy_input_alias() {
+        let cfg: DaemonConfig = toml::from_str(
+            r#"
+                [storage]
+                flush_interval = "15s"
+            "#,
+        )
+        .expect("legacy interval key parses");
+
+        assert_eq!(cfg.storage.sync_interval, "15s");
+        assert_eq!(
+            cfg.storage.sync_schedule().expect("schedule"),
+            StorageSyncSchedule::Every(Duration::from_secs(15))
+        );
+    }
+
+    #[test]
+    fn storage_sync_interval_rejects_duplicate_aliases() {
+        let error = toml::from_str::<DaemonConfig>(
+            r#"
+                [storage]
+                flush_interval = "15s"
+                sync_interval = "30s"
+            "#,
+        )
+        .expect_err("legacy and canonical interval keys must not coexist");
+
+        assert!(error.to_string().contains("duplicate field"), "{error}");
+        assert!(error.to_string().contains("sync_interval"), "{error}");
+    }
+
+    #[test]
+    fn storage_sync_schedule_rejects_invalid_values() {
+        for interval in ["0s", "not-a-duration"] {
+            let mut cfg = DaemonConfig::default();
+            cfg.storage.sync_interval = interval.into();
+            let error = cfg.validate().expect_err("invalid sync interval");
+            assert!(
+                error.to_string().contains("storage.sync_interval"),
+                "{error}"
+            );
+        }
+
+        for timeout in ["0s", "disabled", "not-a-duration"] {
+            let mut cfg = DaemonConfig::default();
+            cfg.storage.sync_timeout = timeout.into();
+            let error = cfg.validate().expect_err("invalid sync timeout");
+            assert!(
+                error.to_string().contains("storage.sync_timeout"),
+                "{error}"
+            );
+        }
+
+        for (field, value) in [
+            ("sync_interval", "18446744073709551615s"),
+            ("sync_timeout", "18446744073709551615s"),
+        ] {
+            let mut cfg = DaemonConfig::default();
+            if field == "sync_interval" {
+                cfg.storage.sync_interval = value.into();
+            } else {
+                cfg.storage.sync_timeout = value.into();
+            }
+            let error = cfg.validate().expect_err("clock range overflow");
+            assert!(error.to_string().contains(field), "{error}");
+            assert!(
+                error.to_string().contains("monotonic clock range"),
+                "{error}"
+            );
         }
     }
 }

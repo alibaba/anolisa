@@ -465,7 +465,39 @@ impl StorageBackend for BtrfsLoopBackend {
             .context("Failed to create mount point directory")?;
 
         let mount_path_str = self.mount_path.to_string_lossy().to_string();
-        if !is_mounted(&mount_path_str).await? {
+        let mounted = is_mounted(&mount_path_str).await?;
+        let needs_mount = if mounted {
+            // Check if our img is already the one mounted here (inode-based).
+            let our_loop = find_loop_device_for(&img_path_str).await.ok();
+            let mounted_source = run_command("findmnt", &["-no", "SOURCE", &mount_path_str])
+                .await
+                .ok()
+                .map(|s| last_nonempty_line(&s).to_string());
+            match (&our_loop, &mounted_source) {
+                (Some(ours), Some(src)) if ours == src => {
+                    info!("Already mounted at {:?} (loop {})", self.mount_path, ours);
+                    false
+                }
+                _ => {
+                    info!(
+                        "{} mounted by {:?} but our img loop is {:?}; overmounting",
+                        mount_path_str, mounted_source, our_loop
+                    );
+                    true
+                }
+            }
+        } else {
+            // Detach orphan loop from a prior failed mount attempt before re-attaching.
+            if let Ok(orphan) = find_loop_device_for(&img_path_str).await {
+                warn!(
+                    "Found orphan loop {} for img (attached but not mounted); detaching",
+                    orphan
+                );
+                let _ = run_command_checked("losetup", &["-d", &orphan]).await;
+            }
+            true
+        };
+        if needs_mount {
             let loop_device = run_command("losetup", &["--find", "--show", &img_path_str])
                 .await
                 .context("Failed to setup loop device")?;
@@ -483,8 +515,6 @@ impl StorageBackend for BtrfsLoopBackend {
                 return Err(e).context("Failed to mount btrfs image");
             }
             info!("Mounted {} at {}", loop_device, mount_path_str);
-        } else {
-            info!("Already mounted at {:?}", self.mount_path);
         }
 
         if img_existed_before {
@@ -534,14 +564,13 @@ impl StorageBackend for BtrfsLoopBackend {
 ///
 /// Decision tree:
 ///
-/// 1. `mount_path` already mounted — look up backing via `findmnt` + `losetup`.
-///    - Backing == target: return target.
-///    - Backing == legacy: try in-place relocation (umount → rename → remount).
+/// 1. `mount_path` already mounted — classify via `losetup -j` (inode-based):
+///    - Ours (target): return target.
+///    - OursLegacy: try in-place relocation (umount → rename → remount).
 ///      Pre-rename failure (busy / cross-fs / cmd error) → fall back to legacy.
 ///      Post-rename failure (losetup/mount) → return target; bootstrap will mount.
-///    - Lookup itself failed: bail loud — guessing risks reconciling a stale
-///      target while live data still sits on legacy.
-/// 2. Cold path (mount not active):
+///    - External / Stale / probe error: fall through to cold path.
+/// 2. Cold path (mount not active or not ours):
 ///    - target exists → use target.
 ///    - target missing && legacy exists → attempt migration.
 ///      - success → use target.
@@ -555,12 +584,16 @@ pub async fn decide_effective_img_path(
 ) -> anyhow::Result<PathBuf> {
     let mount_path_str = mount_path.to_string_lossy().to_string();
     match is_mounted(&mount_path_str).await {
-        Ok(true) => match find_backing_file(&mount_path_str).await {
-            Ok((loop_dev, backing)) => {
-                if backing == legacy {
+        Ok(true) => {
+            match classify_mount(&mount_path_str, target, legacy).await {
+                Ok(MountDisposition::Ours(loop_dev)) => {
+                    info!("Mount at {} is ours (loop {})", mount_path_str, loop_dev);
+                    return Ok(target.to_path_buf());
+                }
+                Ok(MountDisposition::OursLegacy(loop_dev)) => {
                     info!(
-                        "Backing {:?} is at legacy path; attempting live relocation to {:?}",
-                        legacy, target
+                        "Mount at {} backs legacy img; attempting live relocation",
+                        mount_path_str
                     );
                     match try_relocate_active_legacy_mount(
                         &mount_path_str,
@@ -576,30 +609,42 @@ pub async fn decide_effective_img_path(
                         }
                         Err(e) => {
                             error!(
-                                "In-place relocation from legacy {:?} -> target {:?} aborted: {:#}. \
-                                 Daemon will keep serving on legacy this run; migration will retry \
-                                 on next start once the mount is idle.",
+                                "In-place relocation from legacy {:?} -> target {:?} \
+                                 aborted: {:#}. Daemon will keep serving on legacy this \
+                                 run; migration will retry on next start once the mount \
+                                 is idle.",
                                 legacy, target, e
                             );
                             return Ok(legacy.to_path_buf());
                         }
                     }
                 }
-                return Ok(backing);
+                Ok(MountDisposition::Stale(loop_dev)) => {
+                    warn!(
+                        "Mount at {} uses loop {} which doesn't back target or legacy; \
+                         bootstrap will overmount",
+                        mount_path_str, loop_dev
+                    );
+                    // Don't umount here — stacked mount removal can cascade via
+                    // propagation and destroy our own underlying mount. Bootstrap
+                    // will overmount on top of the stale layer safely.
+                }
+                Ok(MountDisposition::External) => {
+                    info!(
+                        "{} has an external (non-btrfs-loop) mount; \
+                         bootstrap will overmount with our btrfs image",
+                        mount_path_str
+                    );
+                    // Fall through to cold path.
+                }
+                Err(e) => {
+                    warn!(
+                        "classify_mount({}) failed: {:#}; falling through to cold path",
+                        mount_path_str, e
+                    );
+                }
             }
-            Err(e) => {
-                bail!(
-                    "{} is mounted but backing-file lookup failed ({:#}). Refusing to \
-                     guess which img file backs the mount — picking the wrong file \
-                     would let bootstrap reconcile a stale image and let the next \
-                     cold start mount empty data, silently hiding the live workspace. \
-                     Diagnose with `findmnt -no SOURCE {0}` and `losetup -l <loop>`, \
-                     then restart the daemon.",
-                    mount_path_str,
-                    e
-                );
-            }
-        },
+        }
         Ok(false) => {}
         Err(e) => {
             // /proc/mounts being unreadable is a degenerate state that downstream
@@ -654,23 +699,69 @@ pub async fn decide_effective_img_path(
     Ok(target.to_path_buf())
 }
 
-/// Resolve the loop device and its backing file for the mount at `mount_path`.
-async fn find_backing_file(mount_path: &str) -> anyhow::Result<(String, PathBuf)> {
-    let src = run_command("findmnt", &["-no", "SOURCE", mount_path])
+/// Mount ownership classification for `mount_path`.
+enum MountDisposition {
+    /// External mount (non-btrfs, or btrfs on a non-loop block device).
+    External,
+    /// Our btrfs-loop: the loop device backing `target` is what's mounted.
+    Ours(String),
+    /// Our btrfs-loop backing `legacy` img (needs migration).
+    OursLegacy(String),
+    /// A loop-backed btrfs mount that doesn't match target or legacy (stale).
+    Stale(String),
+}
+
+/// Classify the mount at `mount_path` using inode-based ownership detection.
+///
+/// Instead of reading BACK-FILE (which breaks across mount namespaces due to
+/// kernel `d_path()` rendering), we use `losetup -j <img>` which matches by
+/// st_dev+st_ino — correct regardless of which namespace the loop was created in.
+async fn classify_mount(
+    mount_path: &str,
+    target: &Path,
+    legacy: &Path,
+) -> anyhow::Result<MountDisposition> {
+    let raw = run_command("findmnt", &["-no", "FSTYPE,SOURCE", mount_path])
         .await
-        .context("findmnt failed")?;
-    let loop_dev = src.trim().to_string();
-    if loop_dev.is_empty() {
-        bail!("findmnt returned no SOURCE for {}", mount_path);
+        .context("findmnt FSTYPE,SOURCE failed")?;
+    let line = last_nonempty_line(&raw);
+    if line.is_empty() {
+        return Ok(MountDisposition::External);
     }
-    let out = run_command("losetup", &["-nl", "--output", "BACK-FILE", &loop_dev])
-        .await
-        .context("losetup -l failed")?;
-    let back = out.trim();
-    if back.is_empty() {
-        bail!("losetup returned empty BACK-FILE for {}", loop_dev);
+    let mut parts = line.splitn(2, char::is_whitespace);
+    let fstype = parts.next().unwrap_or("");
+    let source = parts.next().unwrap_or("").trim();
+
+    if fstype != "btrfs" || !source.starts_with("/dev/loop") {
+        return Ok(MountDisposition::External);
     }
-    Ok((loop_dev, PathBuf::from(back)))
+
+    // source is /dev/loopN. Check ownership via inode-based losetup -j.
+    let target_str = target.to_string_lossy();
+    if let Ok(dev) = find_loop_device_for(&target_str).await {
+        if dev == source {
+            return Ok(MountDisposition::Ours(source.to_string()));
+        }
+    }
+    let legacy_str = legacy.to_string_lossy();
+    if let Ok(dev) = find_loop_device_for(&legacy_str).await {
+        if dev == source {
+            return Ok(MountDisposition::OursLegacy(source.to_string()));
+        }
+    }
+
+    // Loop device at mount_path doesn't match target or legacy — stale.
+    Ok(MountDisposition::Stale(source.to_string()))
+}
+
+/// Extract the last non-empty line from command output.
+/// Stacked mounts produce multiple findmnt lines; the last is the topmost.
+fn last_nonempty_line(s: &str) -> &str {
+    s.lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim())
+        .unwrap_or("")
 }
 
 /// Live-mount migration legacy → target: idle-check, umount, rename, remount.

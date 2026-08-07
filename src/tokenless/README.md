@@ -11,7 +11,7 @@ Token-Less combines complementary strategies to minimize LLM token consumption:
 - **Command Rewriting** — Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI command output, eliminating noise that would otherwise waste 60–90% of tokens.
 - **Tool Ready** — Pre-checks tool execution environments (binaries, configs, permissions, network), auto-fixes missing dependencies, and classifies execution failures as environment issues vs logic errors — reducing wasted retry tokens.
 
-Three integration paths are available:
+Framework integrations are available for:
 
 - **OpenClaw plugin** — covers command rewriting, response compression, and schema compression in one plugin.
 - **copilot-shell hook** — intercepts Shell commands via a PreToolUse hook and delegates to RTK for command rewriting + output filtering.
@@ -19,6 +19,7 @@ Three integration paths are available:
 - **Qoder CLI plugin** — Tool Ready, command rewriting, and response compression via Qoder's native hook system.
 - **Claude Code plugin** — RTK command rewriting, response/TOON compression, and Tool Ready via Claude Code's official plugin marketplace.
 - **Codex plugin** — response compression, TOON encoding, Tool Ready, and command rewriting via Codex's native hook system.
+- **OpenCode plugin** — schema/response/TOON compression, Tool Ready, and command rewriting via OpenCode's local plugin API.
 
 ## Features
 
@@ -36,6 +37,7 @@ Three integration paths are available:
 | Qoder CLI plugin | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅ |
 | Claude Code plugin | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅, TOON ✅ |
 | Codex plugin | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅, TOON ✅ |
+| OpenCode plugin | — | Tool Ready ✅, Command rewriting ✅, Schema compression ✅, Response compression ✅, TOON ✅ |
 | Zero runtime deps | — | Pure Rust, single static binary |
 
 ## Applicable Scenarios & Expected Effects
@@ -82,8 +84,8 @@ Token-Less/
 ├── crates/tokenless-schema/   # Core library: SchemaCompressor + ResponseCompressor
 ├── crates/tokenless-ccr/      # Reversible compression stash (Compress-Cache-Retrieve)
 ├── crates/tokenless-cli/      # CLI binary: `tokenless` command (env-check, compress, retrieve, stats)
-├── adapters/tokenless/        # FHS adapter bundle (manifest, common, openclaw, hermes, qoder, claude-code, codex)
-│   ├── manifest.json            # Adapter manifest (cosh + openclaw + hermes + qoder + claude-code + codex)
+├── adapters/tokenless/        # FHS adapter bundle (manifest + framework integrations)
+│   ├── manifest.json            # Adapter manifest for supported frameworks
 │   ├── common/                  # Shared: hooks, spec, env-fix, commands, cosh-extension
 │   │   ├── hooks/               # copilot-shell hooks (tool-ready + rewrite + compression)
 │   │   ├── cosh-extension.json  # copilot-shell extension manifest (references common/hooks/)
@@ -94,7 +96,8 @@ Token-Less/
 │   ├── hermes/                  # Hermes Agent plugin + scripts
 │   ├── qoder/                   # Qoder CLI plugin + scripts
 │   ├── claude-code/             # Claude Code plugin + marketplace + hooks
-│   └── codex/                   # Codex plugin + scripts
+│   ├── codex/                   # Codex plugin + scripts
+│   └── opencode/                # OpenCode local plugin + scripts
 ├── third_party/rtk/           # RTK vendored source (justfile clone+patch from GitHub)
 ├── third_party/patches/      # Patches for vendored third_party sources
 ├── Makefile                   # Unified build system
@@ -398,6 +401,29 @@ The plugin registers hooks at four Codex events, covering four strategies:
 make codex-install
 ```
 
+## OpenCode Plugin
+
+The local plugin uses OpenCode's mutable tool hooks, so compressed output
+replaces the original model-visible response instead of being appended to it.
+
+| Strategy | Event | Action | Status |
+|---|---|---|---|
+| Tool Ready | `tool.execute.before` | Checks dependencies and blocks calls that cannot run | ✅ Active |
+| Command rewriting | `tool.execute.before` (bash) | Rewrites shell commands via RTK | ✅ Active |
+| Response + TOON compression | `tool.execute.after` | Replaces structured tool output with a smaller representation | ✅ Active |
+| Schema compression | `tool.definition` | Compresses tool descriptions and JSON Schemas | ✅ Active |
+
+Install the plugin globally, then restart OpenCode:
+
+```bash
+make opencode-install
+```
+
+The installer creates a `tokenless.js` symbolic link in OpenCode's global
+`plugins/` directory and never overwrites an existing unmanaged file. It honors
+`OPENCODE_CONFIG_DIR`, `XDG_CONFIG_HOME`, and the explicit
+`TOKENLESS_OPENCODE_CONFIG_DIR` override.
+
 
 ## npm Install
 
@@ -421,7 +447,7 @@ Supports Linux and macOS on x86_64 and arm64.
 | `make lint` | Run clippy checks |
 | `make fmt` | Format code |
 | `make clean` | Clean build artifacts |
-| `make adapter-install` | Install all adapters (cosh + openclaw + hermes) |
+| `make adapter-install` | Install all available framework adapters |
 | `make adapter-uninstall` | Remove all adapters |
 | `make cosh-extension-install` | Install Copilot Shell extension |
 | `make cosh-extension-uninstall` | Remove Copilot Shell extension |
@@ -435,6 +461,8 @@ Supports Linux and macOS on x86_64 and arm64.
 | `make claude-code-uninstall` | Remove Claude Code plugin |
 | `make codex-install` | Install Codex plugin |
 | `make codex-uninstall` | Remove Codex plugin |
+| `make opencode-install` | Install OpenCode local plugin |
+| `make opencode-uninstall` | Remove OpenCode local plugin |
 | `make setup` | Full setup: build + install + all adapters |
 
 Override install paths:
@@ -454,6 +482,7 @@ make install BIN_DIR=/usr/local/bin
 | `adapters/tokenless/qoder/` | Qoder CLI adapter — plugin + detect/install/uninstall scripts |
 | `adapters/tokenless/claude-code/` | Claude Code adapter — marketplace + plugin + hooks dispatcher |
 | `adapters/tokenless/codex/` | Codex adapter — plugin + Python hook scripts |
+| `adapters/tokenless/opencode/` | OpenCode adapter — local JavaScript plugin + lifecycle scripts |
 | `third_party/rtk/` | RTK vendored source — command rewriting engine (justfile clone+patch) |
 | `third_party/patches/` | Patches for vendored third_party sources |
 | `Makefile` | Unified build system for the entire workspace |

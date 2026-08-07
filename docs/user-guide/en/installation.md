@@ -1,5 +1,7 @@
 # Installation Guide
 
+[中文版](../zh/installation.md)
+
 This guide covers the progressive installation of ANOLISA — from the CLI tool to individual components and adapter setup.
 
 ---
@@ -58,6 +60,7 @@ anolisa install <component>
 | Component | Description | Supported modes |
 |-----------|-------------|-----------------|
 | `cosh` | Copilot Shell — AI terminal assistant | user, system |
+| `cosh-ng` | AI-native Linux terminal and deterministic Agent runtime (experimental) | **system** |
 | `os-skills` | System management and DevOps skills | user, system |
 | `tokenless` | Token optimization (compression) | user, system |
 | `ws-ckpt` | Workspace checkpoint/rollback | **system** |
@@ -70,6 +73,13 @@ anolisa install <component>
 > ```bash
 > sudo anolisa --install-mode system install agentsight
 > ```
+
+Install cosh-ng in system mode, then start the terminal with `cosh`:
+
+```bash
+sudo anolisa --install-mode system install cosh-ng
+cosh
+```
 
 ### Install All Components
 
@@ -171,5 +181,6 @@ anolisa update all
 ## Next Steps
 
 - [anolisa CLI Reference](user-entrypoint/anolisa-cli.md)
+- [cosh-ng Quick Start](user-entrypoint/cosh-ng/QUICKSTART.md)
 - [Copilot Shell](user-entrypoint/copilot-shell/QUICKSTART.md)
 - [Troubleshooting](troubleshooting.md)

@@ -1,13 +1,15 @@
-# Output Format
+# CLI Output Format
 
-All cosh-cli commands output a unified JSON envelope `CoshResponse<T>`, making it easy for AI Agents to parse.
+[中文版](../../../zh/user-entrypoint/cosh-ng/output-format.md)
 
-## Success Response
+Each parsed `cosh-cli` action returns a JSON envelope. Parse the envelope first, then handle the operation-specific `data` or `error` object.
+
+## Success
 
 ```json
 {
   "ok": true,
-  "data": { ... },
+  "data": { "packages": [] },
   "meta": {
     "subsystem": "pkg",
     "duration_ms": 342,
@@ -17,7 +19,7 @@ All cosh-cli commands output a unified JSON envelope `CoshResponse<T>`, making i
 }
 ```
 
-## Error Response
+## Failure
 
 ```json
 {
@@ -25,8 +27,8 @@ All cosh-cli commands output a unified JSON envelope `CoshResponse<T>`, making i
   "error": {
     "code": "PkgNotFound",
     "message": "package 'nginx-extra' not found",
-    "recoverable": true,
-    "hint": "try 'cosh-cli pkg search nginx'",
+    "recoverable": false,
+    "hint": "Try 'cosh pkg search nginx' to check availability",
     "subsystem": "pkg"
   },
   "meta": {
@@ -38,46 +40,23 @@ All cosh-cli commands output a unified JSON envelope `CoshResponse<T>`, making i
 }
 ```
 
-## Key Fields
+## Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `ok` | bool | Whether the operation succeeded |
-| `data` | object | Business data carried on success |
-| `error.code` | string | Error code enum (see below) |
-| `error.recoverable` | bool | Whether the Agent should retry |
-| `error.hint` | string | Suggested next action |
-| `meta.subsystem` | string | Source subsystem (pkg/svc/checkpoint/audit) |
-| `meta.duration_ms` | u64 | Operation duration (milliseconds) |
-| `meta.distro` | string | Detected distribution |
-| `meta.dry_run` | bool | Whether this was a preview |
+| Field | Meaning |
+|---|---|
+| `ok` | `true` for success, `false` for failure. |
+| `data` | Operation result; present on success. |
+| `error` | Failure details: `code`, `message`, `recoverable`, optional `hint` and `details`, and `subsystem`. |
+| `meta.subsystem` | `pkg`, `svc`, `checkpoint`, or `audit`. |
+| `meta.duration_ms` | Elapsed operation time in milliseconds. |
+| `meta.distro` | Detected platform ID when available. |
+| `meta.dry_run` | `true` means the operation was previewed, not applied. |
+| `meta.warning` | Optional warning accompanying the result. |
 
-## Error Codes
+Error codes are stable strings such as `PkgNotFound`, `UnsupportedDistro`, `SvcNotFound`, `CheckpointNotFound`, `AuditDenied`, `Timeout`, and `PermissionDenied`; use `error.code` and `error.hint` instead of parsing the message.
 
-| Error Code | Subsystem | Meaning |
-|-----------|-----------|---------|
-| `PkgNotFound` | pkg | Package does not exist |
-| `PkgBackendError` | pkg | Package manager execution failed |
-| `UnsupportedDistro` | pkg/svc | Unsupported distribution |
-| `SvcNotFound` | svc | Service does not exist |
-| `SvcStartFailed` | svc | Service start failed |
-| `SvcStopFailed` | svc | Service stop failed |
-| `CheckpointDaemonUnavailable` | checkpoint | ws-ckpt daemon not running |
-| `CheckpointNotFound` | checkpoint | Snapshot does not exist |
-| `AuditDenied` | audit | Policy denied |
-| `Timeout` | * | Command execution timed out |
-| `PermissionDenied` | * | Insufficient permissions |
+## Exit codes and Agent handling
 
-## Exit Codes
-
-- `0` — Operation successful (`ok: true`)
-- `1` — Operation failed (`ok: false`)
-
-## Agent Integration Pattern
-
-For AI Agents consuming cosh-cli output, the recommended pattern is:
-
-1. Parse JSON, check the `ok` field
-2. If `ok: false`, read `error.recoverable` to decide whether to retry
-3. If not recoverable, display `error.hint` to the user or execute the suggested command
-4. When `meta.dry_run` is `true`, this is a preview result and the actual operation has not been executed
+- Exit code `0` means `ok: true`; exit code `1` means `ok: false`.
+- For a failure, inspect `error.recoverable` before retrying and show `error.hint` when present.
+- When `meta.dry_run` is `true`, report the preview without claiming that the host changed.

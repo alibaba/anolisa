@@ -50,6 +50,23 @@ pub enum AdapterError {
         template: String,
     },
 
+    /// A contract path template expanded to a relative path. Resolving it
+    /// would depend on the process working directory — whoever controls
+    /// the CWD would control which bundle is read — so the expansion is
+    /// rejected before any filesystem probe. Layout placeholders always
+    /// expand to absolute directories; a relative result means the
+    /// template was a bare relative path.
+    #[error(
+        "template \"{template}\" expands to the relative path \"{}\"; contract paths must be absolute or start with a layout placeholder",
+        .path.display()
+    )]
+    RelativeTemplateExpansion {
+        /// The template as declared in the contract.
+        template: String,
+        /// The relative expansion result.
+        path: PathBuf,
+    },
+
     /// No driver is registered for the requested framework.
     #[error("no built-in driver for framework '{framework}'")]
     UnknownFramework {
@@ -428,6 +445,19 @@ pub fn expand_layout_placeholders(
     layout: &FsLayout,
     extra_vars: &[(&str, &str)],
 ) -> Result<PathBuf, AdapterError> {
+    expand_layout_placeholders_str(template, layout, extra_vars).map(PathBuf::from)
+}
+
+/// String-level core of [`expand_layout_placeholders`].
+///
+/// Shared by path expansion (which wraps the result in a [`PathBuf`]) and
+/// file *content* rendering (`render = "anolisa-paths-v1"` layout entries),
+/// so both consume the identical placeholder vocabulary and cannot drift.
+pub fn expand_layout_placeholders_str(
+    template: &str,
+    layout: &FsLayout,
+    extra_vars: &[(&str, &str)],
+) -> Result<String, AdapterError> {
     let mut replacements: BTreeMap<&str, &Path> = BTreeMap::new();
 
     replacements.insert("bindir", &layout.bin_dir);
@@ -479,7 +509,7 @@ pub fn expand_layout_placeholders(
         }
     }
 
-    Ok(PathBuf::from(result))
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------

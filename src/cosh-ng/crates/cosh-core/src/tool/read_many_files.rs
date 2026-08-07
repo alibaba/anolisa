@@ -256,7 +256,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skips_unreadable_exact_file_and_reads_later_paths() {
+    async fn skips_unreadable_exact_file_and_reads_later_files() {
         use std::os::unix::fs::PermissionsExt;
 
         if nix::unistd::Uid::effective().as_raw() == 0 {
@@ -288,7 +288,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skips_unreadable_exact_directory_and_reads_later_paths() {
+    async fn skips_unreadable_exact_directory_and_reads_later_files() {
         use std::os::unix::fs::PermissionsExt;
 
         if nix::unistd::Uid::effective().as_raw() == 0 {

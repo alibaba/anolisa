@@ -60,6 +60,9 @@ CLI, or run the install script: claude-code/scripts/install.sh
 Qwen Code plugin (RTK command rewriting, response/TOON compression, and Tool Ready
 environment pre-check) is available under /usr/share/anolisa/adapters/tokenless/qwencode/.
 Register it with `qwen extensions link`, or run the install script: qwencode/scripts/install.sh
+OpenCode plugin (schema/response/TOON compression, RTK command rewriting, and Tool
+Ready) is available under /usr/share/anolisa/adapters/tokenless/opencode/.
+Register it by running the install script: opencode/scripts/install.sh
 
 %prep
 %setup -q -n %{name}-%{version}
@@ -103,12 +106,14 @@ mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/commands
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/claude-code/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/.codex-plugin
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/opencode/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwencode/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qwencode/scripts
 mkdir -p %{buildroot}%{_docdir}/tokenless
@@ -167,11 +172,12 @@ install -m 0755 adapters/tokenless/hermes/scripts/detect.sh %{buildroot}%{_datad
 install -m 0755 adapters/tokenless/hermes/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts/
 install -m 0755 adapters/tokenless/hermes/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts/
 
-# Install Qoder CLI plugin (manifest + hooks.json + install scripts).
-# Hook scripts themselves are shared from common/hooks/ — no duplication here.
+# Install the native Qoder CLI plugin. The wrapper resolves implementation
+# scripts from common/hooks/ so the hook logic remains shared.
 install -m 0644 adapters/tokenless/qoder/.qoder-plugin/plugin.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin/
-install -m 0644 adapters/tokenless/qoder/hooks.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/
-install -m 0644 adapters/tokenless/qoder/commands/tokenless-stats.toml %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/commands/
+install -m 0644 adapters/tokenless/qoder/hooks/hooks.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/hooks/
+install -m 0755 adapters/tokenless/qoder/hooks/run-hook.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/hooks/
+install -m 0644 adapters/tokenless/qoder/commands/tokenless-stats.md %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/commands/
 install -m 0755 adapters/tokenless/qoder/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
 install -m 0755 adapters/tokenless/qoder/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
 install -m 0755 adapters/tokenless/qoder/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/
@@ -197,6 +203,12 @@ install -m 0755 adapters/tokenless/codex/scripts/tool-ready %{buildroot}%{_datad
 install -m 0755 adapters/tokenless/codex/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
 install -m 0755 adapters/tokenless/codex/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
 install -m 0755 adapters/tokenless/codex/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
+
+# Install OpenCode plugin (local JavaScript plugin + lifecycle scripts).
+install -m 0644 adapters/tokenless/opencode/plugin.js %{buildroot}%{_datadir}/anolisa/adapters/tokenless/opencode/
+install -m 0755 adapters/tokenless/opencode/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/opencode/scripts/
+install -m 0755 adapters/tokenless/opencode/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/opencode/scripts/
+install -m 0755 adapters/tokenless/opencode/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/opencode/scripts/
 
 # Install Qwen Code plugin (extension manifest + hooks + scripts).
 # qwen-extension.json is stamped from .in by `make stamp-adapter-templates`
@@ -245,6 +257,7 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder/scripts
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder/commands
+%dir %{_datadir}/anolisa/adapters/tokenless/qoder/hooks
 %dir %{_datadir}/anolisa/adapters/tokenless/claude-code
 %dir %{_datadir}/anolisa/adapters/tokenless/claude-code/.claude-plugin
 %dir %{_datadir}/anolisa/adapters/tokenless/claude-code/hooks
@@ -253,6 +266,8 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %dir %{_datadir}/anolisa/adapters/tokenless/codex/.codex-plugin
 %dir %{_datadir}/anolisa/adapters/tokenless/codex/hooks
 %dir %{_datadir}/anolisa/adapters/tokenless/codex/scripts
+%dir %{_datadir}/anolisa/adapters/tokenless/opencode
+%dir %{_datadir}/anolisa/adapters/tokenless/opencode/scripts
 %dir %{_datadir}/anolisa/adapters/tokenless/qwencode
 %dir %{_datadir}/anolisa/adapters/tokenless/qwencode/hooks
 %dir %{_datadir}/anolisa/adapters/tokenless/qwencode/scripts
@@ -276,10 +291,11 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/detect.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/install.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/uninstall.sh
-# Qoder CLI plugin — hook scripts reused from common/hooks/ (no duplication).
+# Qoder CLI plugin — native hook wrapper resolves scripts from common/hooks/.
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin/plugin.json
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/hooks.json
-%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/commands/tokenless-stats.toml
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/hooks/hooks.json
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/hooks/run-hook.sh
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/commands/tokenless-stats.md
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/detect.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/install.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qoder/scripts/uninstall.sh
@@ -301,6 +317,11 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/detect.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/install.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/uninstall.sh
+# OpenCode plugin — local JavaScript plugin + lifecycle scripts.
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/opencode/plugin.js
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/opencode/scripts/detect.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/opencode/scripts/install.sh
+%attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/opencode/scripts/uninstall.sh
 # Qwen Code plugin — extension manifest + hooks + scripts.
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/qwencode/qwen-extension.json
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/qwencode/hooks/run-hook.sh
@@ -360,28 +381,26 @@ if [ -f "$OPENCLAW_CFG" ] && command -v jq &>/dev/null; then
         rm -f "${OPENCLAW_CFG}.tmp" 2>/dev/null || true
     fi
 fi
+# Remove stale user-manual doc files from pre-migration RPMs (<= 0.6.x).
+# The docs migration (0.7.0) moved user manuals to the repository-level
+# docs/user-guide tree. RPM should remove old %doc files on upgrade, but
+# when both old and new packages are installed concurrently (e.g. rpm -ivh
+# instead of rpm -Uvh), the stale doc files persist. Clean them up here.
+rm -f "%{_docdir}/tokenless/tokenless-user-manual-en.md" 2>/dev/null || true
+rm -f "%{_docdir}/tokenless/tokenless-user-manual-zh.md" 2>/dev/null || true
+rm -f "%{_docdir}/tokenless/tokenless-user-manual-cn.md" 2>/dev/null || true
+
 hash -r 2>/dev/null || true
 
 %preun
-# On uninstall ($1=0): clean qodercli, codex, openclaw, and hermes plugins
+# On uninstall ($1=0): clean registered framework plugins.
 if [ $1 -eq 0 ]; then
     # --- Qoder CLI plugin cleanup ---
-    # Unregister plugin via qodercli and remove hooks from settings.json.
+    # Let qodercli remove the user-scoped native plugin and its cache.
     QODER_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/qoder/scripts/uninstall.sh"
     if [ -x "$QODER_SCRIPT" ]; then
         bash "$QODER_SCRIPT" || true
     fi
-    # Clean up plugin cache (qodercli's uninstall may leave orphaned cache).
-    # qodercli's cache key has been observed in two forms — the plugin's
-    # package name ("tokenless") and a target-suffixed variant
-    # ("tokenless-qoder"). Cover both so leftover caches don't shadow a
-    # fresh install on the next rpm upgrade.
-    for cache_dir in "$HOME/.qoder/plugins/cache/local/tokenless" \
-                     "$HOME/.qoder/plugins/cache/local/tokenless-qoder"; do
-        if [ -d "$cache_dir" ]; then
-            rm -rf "$cache_dir" || true
-        fi
-    done
 
     # --- Codex plugin cleanup ---
     # Remove codex marketplace entry + plugin cache.
@@ -396,6 +415,12 @@ if [ $1 -eq 0 ]; then
             rm -rf "$cache_dir" || true
         fi
     done
+
+    # --- OpenCode plugin cleanup ---
+    OPENCODE_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/opencode/scripts/uninstall.sh"
+    if [ -x "$OPENCODE_SCRIPT" ]; then
+        bash "$OPENCODE_SCRIPT" || true
+    fi
 
     # --- Qwen Code plugin cleanup ---
     QWENCODE_SCRIPT="%{_datadir}/anolisa/adapters/tokenless/qwencode/scripts/uninstall.sh"

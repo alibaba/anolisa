@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tokenless response compression hook with Cosh-NG and Claude Code compatibility.
+"""Tokenless response compression hook for Cosh-NG, Claude Code, Qoder, and OpenCode.
 
 Reads a PostToolUse JSON from stdin, compresses the tool response
 via ``tokenless compress-response``, then optionally re-encodes to TOON
@@ -26,6 +26,14 @@ Output contract per agent:
     diagnostics (environment attribution). Older Claude Code versions fail
     open: compression is disabled instead of injecting a duplicate payload
     (issue #1645).
+  - qoder-cli: the compressed payload replaces the response via the string
+    field ``hookSpecificOutput.updatedToolOutput``. Structured responses are
+    serialized as compact JSON because Qoder rejects object and array values.
+    Qoder supports replacement for every tool, so compressed data is never
+    appended beside the original.
+  - opencode: the adapter translates ``updatedToolOutput`` to OpenCode's
+    mutable ``tool.execute.after`` output. ``additionalContext`` remains
+    reserved for additive readiness and environment diagnostics.
   - cosh-ng: the compressed payload replaces the response via
     ``hookSpecificOutput.updatedToolResponse``.  Extract only ``llmContent``
     from wrapped responses; never include ``returnDisplay``.  Keep
@@ -39,6 +47,8 @@ The agent ID is read from the TOKENLESS_AGENT_ID environment variable
 agent ID is overridden to ``cosh-ng`` for correct stats attribution.
 Fallback paths follow the ANOLISA FHS spec: /usr/bin/tokenless.
 """
+
+from __future__ import annotations
 
 import json
 import os
@@ -76,6 +86,8 @@ _MIN_RESPONSE_CHARS = 200
 # the additive additionalContext, which would duplicate the payload.
 _CLAUDE_AGENT_ID = "claude-code"
 _CLAUDE_MIN_REPLACE_VERSION = (2, 1, 121)
+_QODER_AGENT_ID = "qoder-cli"
+_OPENCODE_AGENT_ID = "opencode"
 
 # Cache for `claude --version`, keyed on binary path+mtime+size so upgrades
 # invalidate it. Hooks run as a fresh process per tool call and spawning the
@@ -190,6 +202,39 @@ def _restore_dropped_schema_fields(original: dict, compressed: dict) -> dict:
         if value is None or value == "" or value == {} or value == []:
             restored[key] = value
     return restored
+
+
+def _build_replacement_output(
+    tool_response_raw: object,
+    tool_response: str,
+    compressed: str,
+    final_output: str,
+    used_resp_compression: bool,
+) -> tuple[bool, object]:
+    """Build a schema-safe replacement for runtimes that support one."""
+    if not isinstance(tool_response_raw, (dict, list)):
+        return True, final_output
+
+    # TOON text cannot replace a structured response without changing the
+    # host tool schema, so this path requires a real JSON compression win.
+    if not used_resp_compression:
+        return False, None
+
+    compressed_parsed = try_parse_json(compressed)
+    if isinstance(tool_response_raw, dict) and isinstance(compressed_parsed, dict):
+        updated_output = _restore_dropped_schema_fields(
+            tool_response_raw, compressed_parsed
+        )
+    elif compressed_parsed is not None:
+        updated_output = compressed_parsed
+    else:
+        return False, None
+
+    # Restoring empty schema fields can cancel out a marginal win.
+    serialized = json.dumps(updated_output, separators=(",", ":"))
+    if len(serialized) >= len(tool_response):
+        return False, None
+    return True, updated_output
 
 
 # -- main --------------------------------------------------------------------
@@ -371,47 +416,33 @@ def main() -> None:
 
     # 17. Build response — dispatch by agent runtime.
     #
-    # Claude Code: additionalContext is *additive* — the model would see both
-    # the original tool result and the compressed copy, inflating the context
-    # instead of shrinking it (issue #1645). Replace the tool result via
-    # updatedToolOutput (>= 2.1.121) and keep additionalContext for additive
-    # diagnostics only. Unsupported versions fail open via pass-through.
-    if agent_id == _CLAUDE_AGENT_ID:
-        if not _claude_supports_replacement():
+    # Claude Code, Qoder, and OpenCode support real tool-output replacement. Keep
+    # additionalContext for additive diagnostics only; using it for compressed
+    # data would leave the original result in context and increase token use.
+    if agent_id in {_CLAUDE_AGENT_ID, _QODER_AGENT_ID, _OPENCODE_AGENT_ID}:
+        if agent_id == _CLAUDE_AGENT_ID and not _claude_supports_replacement():
             warn(
                 "Claude Code < 2.1.121 (or version unknown): "
                 "updatedToolOutput unsupported, response compression disabled."
             )
             _emit_attribution_or_skip(env_attribution)
 
-        if isinstance(tool_response_raw, (dict, list)):
-            # Structured original: the replacement must preserve the built-in
-            # tool output schema, so TOON (a text encoding) is not applicable
-            # and only a genuine compress-response win qualifies.
-            if not used_resp_compression:
-                _emit_attribution_or_skip(env_attribution)
-            compressed_parsed = try_parse_json(compressed)
-            if isinstance(tool_response_raw, dict) and isinstance(
-                compressed_parsed, dict
-            ):
-                updated_output = _restore_dropped_schema_fields(
-                    tool_response_raw, compressed_parsed
-                )
-            elif compressed_parsed is not None:
-                updated_output = compressed_parsed
-            else:
-                _emit_attribution_or_skip(env_attribution)
-            # Restoring empty schema fields can cancel out a marginal win;
-            # only replace when the result is strictly smaller than the
-            # original serialized response.
-            if len(json.dumps(updated_output, separators=(",", ":"))) >= len(
-                tool_response
-            ):
-                _emit_attribution_or_skip(env_attribution)
-        else:
-            # String original (JSON-in-string): replace with the smallest
-            # text form (TOON when it won, compressed JSON otherwise).
-            updated_output = final_output
+        replace, updated_output = _build_replacement_output(
+            tool_response_raw,
+            tool_response,
+            compressed,
+            final_output,
+            used_resp_compression,
+        )
+        if not replace:
+            _emit_attribution_or_skip(env_attribution)
+
+        # Qoder validates updatedToolOutput as a string even when the original
+        # tool response is structured. Preserve the compact schema as JSON text.
+        if agent_id == _QODER_AGENT_ID and not isinstance(updated_output, str):
+            updated_output = json.dumps(
+                updated_output, separators=(",", ":"), ensure_ascii=False
+            )
 
         hook_output = {
             "hookEventName": "PostToolUse",

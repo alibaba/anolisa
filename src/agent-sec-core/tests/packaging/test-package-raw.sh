@@ -45,7 +45,7 @@ cat > "$BUILD/python-runtime/bin/python3.11.real" <<'EOF'
 if [ "${1:-}" = "-c" ]; then
     case "${2:-}" in
         *platform.python_version*)
-            [ "${PYTHONDONTWRITEBYTECODE:-}" = "1" ] || exit 9
+            [ -z "${PYTHONDONTWRITEBYTECODE:-}" ] || exit 9
             printf '3.11.6\n'
             exit 0
             ;;
@@ -147,6 +147,7 @@ test "$(stat -c '%a' \
     "$STAGE/lib/anolisa/sec-core/python3.11/runtime/bin/python3.11")" = "755"
 test "$(stat -c '%a' "$STAGE/.anolisa/component.toml")" = "644"
 test -z "$(find "$STAGE" -type l -print -quit)"
+cmp "$ROOT/.anolisa/component.toml" "$STAGE/.anolisa/component.toml"
 
 RPM_STAGE="$TMP/rpm-stage"
 MANIFEST_STAGE="$TMP/manifest-stage"
@@ -180,25 +181,70 @@ test "$(cat "$PYTHON_LOG.home")" = \
 test "$(cat "$PYTHON_LOG.path")" = \
     "$STAGE/lib/anolisa/sec-core/python3.11/site-packages"
 
-cmp "$ROOT/codex-plugin/hooks-plugin/hooks/hooks.json" \
+SOURCE_HOOK_MANIFESTS=(
+    "$ROOT/codex-plugin/hooks-plugin/hooks/hooks.json"
+    "$ROOT/qoder-plugin/hooks/hooks.json"
+    "$ROOT/qwen-code-extension/qwen-extension.json"
+    "$ROOT/cosh-extension/cosh-extension.json"
+)
+RAW_HOOK_MANIFESTS=(
     "$STAGE/adapters/sec-core/codex/hooks/hooks.json"
-cmp "$ROOT/qoder-plugin/hooks/hooks.json" \
     "$STAGE/adapters/sec-core/qoder/hooks/hooks.json"
-cmp "$ROOT/qwen-code-extension/qwen-extension.json" \
     "$STAGE/adapters/sec-core/qwencode/qwen-extension.json"
-cmp "$ROOT/cosh-extension/cosh-extension.json" \
     "$STAGE/adapters/sec-core/cosh/cosh-extension.json"
-for manifest in \
-    "$STAGE/adapters/sec-core/codex/hooks/hooks.json" \
-    "$STAGE/adapters/sec-core/qoder/hooks/hooks.json" \
-    "$STAGE/adapters/sec-core/qwencode/qwen-extension.json" \
-    "$STAGE/adapters/sec-core/cosh/cosh-extension.json"; do
-    grep -q '"command": "python3' "$manifest"
-    if grep -q '"command": "agent-sec-python' "$manifest"; then
-        echo "ERROR: staged adapter rewrote its native Python command: $manifest" >&2
+)
+for index in "${!RAW_HOOK_MANIFESTS[@]}"; do
+    source_manifest="${SOURCE_HOOK_MANIFESTS[$index]}"
+    raw_manifest="${RAW_HOOK_MANIFESTS[$index]}"
+    grep -Fq '"command": "python3' "$source_manifest"
+    if grep -Fq '"command": "agent-sec-python' "$source_manifest"; then
+        echo "ERROR: shared adapter source uses the raw launcher: $source_manifest" >&2
+        exit 1
+    fi
+    grep -Fq '"command": "agent-sec-python' "$raw_manifest"
+    if grep -Fq '"command": "python3' "$raw_manifest"; then
+        echo "ERROR: staged raw adapter still uses native Python: $raw_manifest" >&2
+        exit 1
+    fi
+    if cmp -s "$source_manifest" "$raw_manifest"; then
+        echo "ERROR: staged raw adapter was not adapted: $raw_manifest" >&2
         exit 1
     fi
 done
+
+if grep -Fq 'name = "python3"' "$STAGE/.anolisa/component.toml"; then
+    echo "ERROR: staged raw contract still requires system Python" >&2
+    exit 1
+fi
+if grep -Fq 'name = "python3"' "$ROOT/.anolisa/component.toml"; then
+    echo "ERROR: component contract still requires system Python" >&2
+    exit 1
+fi
+grep -Fq 'Requires:       python3 >= 3.11' "$ROOT/agent-sec-core.spec.in"
+grep -Fq 'Requires:       python3 < 3.12' "$ROOT/agent-sec-core.spec.in"
+
+FAKE_BIN="$TMP/fake-bin"
+FAKE_PYTHON_LOG="$TMP/fake-python.log"
+install -d -m 0755 "$FAKE_BIN"
+cat > "$FAKE_BIN/python3" <<'EOF'
+#!/bin/sh
+printf 'called\n' >> "$ANOLISA_FAKE_PYTHON_LOG"
+exit 99
+EOF
+chmod 0755 "$FAKE_BIN/python3"
+for hook in \
+    "$STAGE/adapters/sec-core/codex/hooks/hook.py" \
+    "$STAGE/adapters/sec-core/qoder/hooks/hook.py" \
+    "$STAGE/adapters/sec-core/qwencode/hooks/hook.py" \
+    "$STAGE/adapters/sec-core/cosh/hooks/hook.py"; do
+    ANOLISA_FAKE_PYTHON_LOG="$FAKE_PYTHON_LOG" \
+    ANOLISA_TEST_PYTHON_LOG="$PYTHON_LOG" \
+    PATH="$FAKE_BIN:$STAGE/bin:$PATH" \
+        agent-sec-python "$hook"
+    test "$(cat "$PYTHON_LOG")" = \
+        "$STAGE/lib/anolisa/sec-core/python3.11/runtime/bin/python3.11"
+done
+test ! -e "$FAKE_PYTHON_LOG"
 
 LIST="$TMP/tar-list.txt"
 tar -tzf "$OUT_ONE/$ARTIFACT" > "$LIST"
@@ -257,26 +303,37 @@ tar -xzOf "$OUT_ONE/$ARTIFACT" \
     ./adapters/sec-core/qwencode/qwen-extension.json > "$TMP/qwen-extension.json"
 tar -xzOf "$OUT_ONE/$ARTIFACT" \
     ./adapters/sec-core/cosh/cosh-extension.json > "$TMP/cosh-extension.json"
-cmp "$ROOT/codex-plugin/hooks-plugin/hooks/hooks.json" "$TMP/codex-hooks.json"
-cmp "$ROOT/qoder-plugin/hooks/hooks.json" "$TMP/qoder-hooks.json"
-cmp "$ROOT/qwen-code-extension/qwen-extension.json" "$TMP/qwen-extension.json"
-cmp "$ROOT/cosh-extension/cosh-extension.json" "$TMP/cosh-extension.json"
+for manifest in \
+    "$TMP/codex-hooks.json" \
+    "$TMP/qoder-hooks.json" \
+    "$TMP/qwen-extension.json" \
+    "$TMP/cosh-extension.json"; do
+    grep -Fq '"command": "agent-sec-python' "$manifest"
+    if grep -Fq '"command": "python3' "$manifest"; then
+        echo "ERROR: packaged raw adapter still uses native Python: $manifest" >&2
+        exit 1
+    fi
+done
 grep -Fq 'agent-sec-python' "$TMP/agent-sec-cli"
 grep -Fq 'lib/anolisa/sec-core/python3.11/runtime' "$TMP/agent-sec-python"
 grep -Fq 'lib/anolisa/sec-core/python3.11/site-packages' "$TMP/agent-sec-python"
+if grep -Fq 'PYTHONDONTWRITEBYTECODE' "$TMP/agent-sec-python"; then
+    echo "ERROR: packaged Python wrapper disables bytecode persistence" >&2
+    exit 1
+fi
 grep -Fq 'ExecStart="{bindir}/agent-sec-daemon" serve' "$TMP/service"
 grep -Fq 'ReadWritePaths="{datadir}"' "$TMP/service"
 grep -Fq 'render = "anolisa-paths-v1"' "$TMP/contract.toml"
-grep -Fq 'min_anolisa_version = "0.2.16"' "$TMP/contract.toml"
+grep -Fq 'min_anolisa_version = "0.2.17"' "$TMP/contract.toml"
 grep -Fq 'framework_version = ">=2026.4.14"' "$TMP/contract.toml"
 grep -Fq 'framework_version = ">=2026.4.24"' "$TMP/contract.toml"
 grep -Fq 'name = "systemd"' "$TMP/contract.toml"
 grep -Fq 'name = "nodejs"' "$TMP/contract.toml"
 grep -Fq 'name = "jq"' "$TMP/contract.toml"
-grep -Fq 'name = "python3"' "$TMP/contract.toml"
-grep -Fq 'kind = "language-runtime"' "$TMP/contract.toml"
-grep -Fq 'version = ">=3.11,<3.12"' "$TMP/contract.toml"
-grep -Fq 'probe = "python3 --version"' "$TMP/contract.toml"
+if grep -Fq 'name = "python3"' "$TMP/contract.toml"; then
+    echo "ERROR: packaged raw contract still requires system Python" >&2
+    exit 1
+fi
 test "$(grep -c 'min_anolisa_version' "$TMP/contract.toml")" = "1"
 if grep -Eq '/opt/agent-sec|/usr/(local/)?share/anolisa|/usr/local/bin' \
     "$TMP/agent-sec-cli" "$TMP/service"; then
@@ -298,6 +355,38 @@ if BUILD_DIR="$BAD_PYTHON_BUILD" \
     exit 1
 fi
 grep -Fq "bundled Python license manifest is invalid" "$TMP/bad-python.err"
+
+assert_raw_hook_bypass_rejected() {
+    local name="$1"
+    local hook_entry="$2"
+    local bad_build="$TMP/bad-hook-$name-build"
+
+    cp -a "$BUILD" "$bad_build"
+    printf '{"hooks":[%s]}\n' "$hook_entry" > \
+        "$bad_build/qwen-code-extension/unexpected-hooks.json"
+    if BUILD_DIR="$bad_build" \
+        DESTDIR="$TMP/bad-hook-$name-stage" \
+        TARGET_OS=linux \
+        TARGET_ARCH=x86_64 \
+            "$ROOT/packaging/raw/package.sh" stage \
+            > "$TMP/bad-hook-$name.out" 2> "$TMP/bad-hook-$name.err"; then
+        echo "ERROR: raw hook bypass unexpectedly succeeded: $name" >&2
+        exit 1
+    fi
+    grep -Fq "bypasses agent-sec-python" "$TMP/bad-hook-$name.err"
+}
+
+assert_raw_hook_bypass_rejected \
+    compound \
+    '{"command":"agent-sec-python hook.py && python3 -m unexpected_hook"}'
+assert_raw_hook_bypass_rejected \
+    env-command '{"command":"env python3 -m unexpected_hook"}'
+assert_raw_hook_bypass_rejected \
+    plain-python '{"command":"python -m unexpected_hook"}'
+assert_raw_hook_bypass_rejected \
+    env-args '{"command":"env","args":["python3","-m","unexpected_hook"]}'
+assert_raw_hook_bypass_rejected \
+    shell-args '{"command":"sh","args":["-c","python3 -m unexpected_hook"]}'
 
 VERIFY_SOURCE="$TMP/verify-source"
 VERSION_FILES=(
@@ -352,14 +441,22 @@ if python3 "$ROOT/packaging/raw/verify_release.py" \
 fi
 grep -Fq "missing runtime dependencies: systemd" "$TMP/bad.err"
 
-sed '/version = ">=3.11,<3.12"/d' \
-    "$ROOT/.anolisa/component.toml" > "$BAD_CONTRACT"
+cp "$ROOT/.anolisa/component.toml" "$BAD_CONTRACT"
+cat >> "$BAD_CONTRACT" <<'EOF'
+
+[[component.dependencies]]
+name = "python3"
+kind = "language-runtime"
+version = ">=3.11,<3.12"
+probe = "python3 --version"
+source = "system"
+EOF
 if python3 "$ROOT/packaging/raw/verify_release.py" \
     "$VERIFY_SOURCE" "$BAD_CONTRACT" > "$TMP/bad.out" 2> "$TMP/bad.err"; then
-    echo "ERROR: incomplete Python runtime dependency unexpectedly succeeded" >&2
+    echo "ERROR: system Python dependency unexpectedly succeeded" >&2
     exit 1
 fi
-grep -Fq "python3 dependency version is None" "$TMP/bad.err"
+grep -Fq "must not declare the bundled Python as a dependency" "$TMP/bad.err"
 
 sed '\|resource_root = "/opt/agent-sec/qoder-plugin/"|d' \
     "$ROOT/.anolisa/component.toml" > "$BAD_CONTRACT"

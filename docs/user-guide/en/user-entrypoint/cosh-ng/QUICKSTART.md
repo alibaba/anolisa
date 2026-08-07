@@ -1,84 +1,88 @@
-# Quick Start
+# cosh-ng Quick Start
 
-cosh-ng (Computable Operating System Harness) provides deterministic cross-distribution system operation interfaces for AI Agents. It consists of three binaries:
+[中文版](../../../zh/user-entrypoint/cosh-ng/QUICKSTART.md)
 
-- **cosh-cli** — Structured JSON CLI covering package management, service management, workspace checkpoints, and security auditing
-- **cosh-core** — Headless JSONL backend integrating LLM providers, hooks, tools, and skills
-- **cosh-shell** — AI-enhanced interactive terminal with PTY host, streaming analysis, and tool approval
+cosh-ng adds an Agent to a normal bash or zsh session. Start `cosh`, run Shell commands as usual, and describe a larger task in natural language when you need help.
 
-## Prerequisites
+## 1. Install
 
-- Linux (Alinux / CentOS / Ubuntu / Debian / Fedora / openSUSE) or macOS (limited functionality)
-- Rust 1.74+
-- pkg/svc commands require root or sudo privileges
-- checkpoint commands require a running ws-ckpt daemon
-
-## Build
+Install the ANOLISA CLI and cosh-ng:
 
 ```bash
-cd src/cosh-ng
-cargo build --workspace
+curl -fsSL https://get.agentic-os.sh | bash
+sudo anolisa --install-mode system install cosh-ng
 ```
 
-Build artifacts are located under `target/debug/`: `cosh-cli`, `cosh-core`, `cosh-shell`.
-
-Release build:
+Alibaba Cloud Linux users can install the RPM instead:
 
 ```bash
-cargo build --workspace --release
+sudo yum install cosh-ng
 ```
 
-## First Run
-
-### cosh-cli: Structured System Operations
+Verify both user-facing commands:
 
 ```bash
-# Install a package (JSON output)
-cosh-cli pkg install nginx
-# → {"ok":true,"data":{"package":"nginx","version":"1.24.0","already_installed":false},...}
-
-# Preview mode (no actual execution)
-cosh-cli pkg install nginx --dry-run
-
-# Check service status
-cosh-cli svc status nginx
-# → {"ok":true,"data":{"name":"nginx","active":true,"enabled":true,"recent_logs":[...]},...}
+cosh --version
+cosh-cli --version
 ```
 
-### cosh-core: AI Agent Backend
+Package and service changes normally need root privileges. Workspace checkpoint commands also need a running `ws-ckpt` daemon.
+
+These packaged paths target Linux. Source builds are for contributors; follow the [developer setup](../../../../developer-guide/en/cosh-ng/getting-started.md) after the packaged options above.
+
+## 2. Start the terminal
+
+Start `cosh` in the project or system directory where the Agent should work:
 
 ```bash
-# Single prompt execution
-cosh-core --headless "Check disk usage"
-
-# Or pipe into headless mode
-echo '{"type":"user","message":{"role":"user","content":"List files in current directory"}}' | cosh-core --headless
+cd your-project
+cosh
 ```
 
-### cosh-shell: Interactive Terminal
+Run commands in the same session, and describe a larger task as ordinary input:
 
-```bash
-# Start interactive AI Shell
-cosh-shell
-
-# Browse resumable conversations for the current workspace
-cosh-shell --resume
-
-# Or select a known provider session directly
-cosh-shell --resume <session-id>
+```text
+$ git status
 ```
 
-## Configuration
+For example, ask the Agent to investigate the last failed deployment and inspect it without making changes.
 
-Configuration file is located at `~/.copilot-shell/config.toml`. A default configuration is automatically created on first run.
+When an operation needs consent, cosh shows an approval or question card before it proceeds.
 
-See [Configuration](configuration.md) for details.
+Useful first commands:
 
-## Next Steps
+```text
+/auth
+/help
+/status
+/mode approval recommend
+/session list
+```
 
-- [cosh-cli Overview](cli/overview.md) — Learn about the CLI subsystems
-- [cosh-core Overview](core/overview.md) — Learn about headless mode and LLM integration
-- [cosh-shell Overview](shell/overview.md) — Learn about the interactive terminal
-- [Session Recovery](shell/session-recovery.md) — Resume, inspect, and safely clear Agent conversations
-- [Session Compaction](shell/session-compaction.md) — Reduce model-visible context without deleting the transcript
-- [Output Format](output-format.md) — Understand the JSON envelope and error codes
+`/auth` chooses or updates provider authentication, `/help` lists slash commands, `/status` shows runtime and session status, `/mode approval recommend` asks for confirmation before each Agent tool call, and `/session list` lists resumable conversations in this workspace.
+
+Use `/session list --all` to include conversations from other workspaces. Resume a conversation from the workspace where it was created.
+
+## 3. Reuse Skills
+
+List and inspect Skills available to the current workspace:
+
+```text
+/skills list
+/skills detail service-health
+```
+
+Workspace, user, extension, and system Skill directories are merged by priority. See [Skills](core/skills.md) for the search order and file format.
+
+## 4. Continue with a task
+
+| Goal | Read next |
+|---|---|
+| Control approval and safety | [Tool approval](shell/approval.md) |
+| Resume or compact conversations | [Session recovery](shell/session-recovery.md) |
+| Choose a model and authenticate | [Model providers](core/providers.md) |
+| Connect tools from another service | [Connect an MCP server](mcp.md) |
+| Automate package, service, checkpoint, or audit work | [Structured OS CLI](cli/overview.md) |
+| Integrate another frontend | [Headless mode](core/headless-mode.md) |
+
+The [full user guide](README.md) is organized by task.

@@ -298,7 +298,7 @@ class TestBinaryFallbackPaths(unittest.TestCase):
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
 class TestReplacementProtocol(unittest.TestCase):
-    """Verify updatedToolOutput replacement semantics for Claude Code."""
+    """Verify updatedToolOutput replacement semantics."""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -334,6 +334,66 @@ class TestReplacementProtocol(unittest.TestCase):
                        "Claude Code should use updatedToolOutput for replacement")
         self.assertNotIn("additionalContext", hso,
                          "Compressed content must not be in additionalContext (duplication)")
+
+    def test_qoder_cli_uses_updated_tool_output(self):
+        """Qoder CLI should replace tool output without version gating."""
+        large_payload = _make_large_json_payload()
+
+        result = _run_hook(
+            {
+                "tool_name": "run_in_terminal",
+                "tool_response": large_payload,
+                "session_id": "test-session",
+                "tool_use_id": "toolu_test",
+            },
+            agent_id="qoder-cli",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertEqual(hso.get("hookEventName"), "PostToolUse")
+        self.assertIn("updatedToolOutput", hso,
+                      "Qoder CLI should use updatedToolOutput for replacement")
+        updated_output = hso["updatedToolOutput"]
+        self.assertIsInstance(
+            updated_output,
+            str,
+            "Qoder CLI requires updatedToolOutput to be a string",
+        )
+        compressed_data = json.loads(updated_output)
+        self.assertEqual(compressed_data["stdout"], "x" * 20)
+        self.assertEqual(compressed_data["stderr"], "")
+        self.assertEqual(compressed_data["exit_code"], 0)
+        self.assertFalse(compressed_data["interrupted"])
+        self.assertNotIn("additionalContext", hso,
+                         "Qoder compressed content must not be additive")
+
+    def test_opencode_uses_string_replacement(self):
+        """OpenCode should receive a replacement that its plugin can apply."""
+        large_payload = _make_large_json_payload()
+
+        result = _run_hook(
+            {
+                "tool_name": "bash",
+                "tool_response": json.dumps(large_payload),
+                "session_id": "test-session",
+                "tool_use_id": "toolu_test",
+            },
+            agent_id="opencode",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertEqual(hso.get("hookEventName"), "PostToolUse")
+        self.assertIsInstance(hso.get("updatedToolOutput"), str)
+        self.assertNotIn("additionalContext", hso,
+                         "OpenCode compressed content must not be additive")
 
     def test_replacement_is_smaller(self):
         """The replacement output should be smaller than the original."""

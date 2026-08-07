@@ -373,15 +373,23 @@ pub fn assemble_facts(
 
 /// Integrity verdict over a record's owned file list: `Some(true)` when
 /// every probe is healthy, `Some(false)` on any hard finding, `None` when
-/// there is nothing to verify (no record, delegated binding, empty file
-/// list).
+/// the list cannot be judged — nothing to verify (no record, delegated
+/// binding, empty file list), or at least one file was too large to hash.
 ///
 /// A quarantined record is verified against the legacy record's file list —
 /// that verdict is the evidence repair's R6 exit (rebuild the owned record)
-/// consumes.
+/// consumes. R6 treats `Some(true)` as a positive assertion that the
+/// original file list still checks out, so a run that skipped a file must
+/// not report it: an over-limit file yields `None`, which fails R6 closed
+/// (`RecordUnrecoverable`) rather than laundering unread bytes back into an
+/// active record.
 ///
-/// `Skipped` (not ANOLISA-owned) and `Unverified` (no recorded digest) are
-/// healthy: neither proves drift, and treating absence of evidence as
+/// For an active record the caller only acts on `Some(false)` (replay), so
+/// `None` and `Some(true)` behave alike there — an over-limit file does not
+/// trigger a spurious reinstall.
+///
+/// `Skipped` (not ANOLISA-owned) and `Unverified` (no recorded digest) count
+/// as healthy: neither proves drift, and treating absence of evidence as
 /// damage would route every digest-less install into repair.
 fn verify_owned_files(
     record: &RecordFacts,
@@ -407,13 +415,20 @@ fn verify_owned_files(
     if files.is_empty() {
         return None;
     }
-    let all_healthy = files.iter().all(|file| {
-        matches!(
-            check_owned_file(layout, file),
-            IntegrityStatus::Ok | IntegrityStatus::Skipped | IntegrityStatus::Unverified
-        )
-    });
-    Some(all_healthy)
+    let mut skipped_a_file = false;
+    for file in files {
+        match check_owned_file(layout, file) {
+            IntegrityStatus::Ok | IntegrityStatus::Skipped | IntegrityStatus::Unverified => {}
+            // The bytes were never read, so this file can be neither
+            // vouched for nor condemned. Downgrade the whole verdict to
+            // "cannot judge" instead of letting it pass as verified.
+            IntegrityStatus::ProbeLimitExceeded { .. } => skipped_a_file = true,
+            // Any hard finding is decisive on its own — report damage even
+            // if another file was skipped.
+            _ => return Some(false),
+        }
+    }
+    (!skipped_a_file).then_some(true)
 }
 
 /// First pending journal attributed to `subject`, if any.
@@ -1166,6 +1181,88 @@ mod tests {
         store.quarantined.push(quarantined("cosh", Vec::new()));
         let facts = assemble_facts(&req, &store, None, &layout, &journal_dir).expect("facts");
         assert_eq!(facts.owned_files_verified, None);
+    }
+
+    /// A quarantined record whose file list contains an over-limit file must
+    /// not reach repair's R6 exit. `ProbeLimitExceeded` means the bytes were
+    /// never read, so reporting `Some(true)` would let R6 rebuild an active
+    /// owned record on the strength of a digest nobody checked — tampered
+    /// content would be laundered straight back into service.
+    ///
+    /// The fixture is sparse: `set_len` sets the inode size without
+    /// allocating blocks, and the probe's size gate fires before any read.
+    #[test]
+    fn quarantined_record_with_over_limit_file_fails_r6_closed() {
+        use crate::planner::{Intent, PlanError, plan};
+        use crate::state::{InstalledObject, ObjectStatus, SubscriptionScope};
+        use crate::state_migration::{QuarantineReason, QuarantinedObject};
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let layout = layout_under(tmp.path());
+        let journal_dir = tmp.path().join("journal");
+
+        let path = layout.bin_dir.join("huge");
+        let f = fs::File::create(&path).expect("create");
+        // Comfortably past the probe ceiling; the exact value is irrelevant
+        // because the gate compares against the constant, not a threshold
+        // this test owns.
+        f.set_len(4 * 1024 * 1024 * 1024).expect("set_len");
+        drop(f);
+
+        let over_limit = OwnedFile {
+            path,
+            owner: FileOwner::Anolisa,
+            // A digest IS recorded — that is precisely the case where the
+            // probe reports a budget stop rather than `Unverified`.
+            sha256: Some("deadbeef".to_string()),
+            kind: OwnedFileKind::File,
+            referent: None,
+            mode: None,
+            capabilities: Vec::new(),
+        };
+
+        let mut store = StateStore::empty();
+        store.quarantined.push(QuarantinedObject {
+            record: InstalledObject {
+                kind: ObjectKind::Component,
+                name: "cosh".to_string(),
+                version: "1.0.0".to_string(),
+                status: ObjectStatus::Installed,
+                manifest_digest: None,
+                distribution_source: None,
+                raw_package: None,
+                install_backend: None,
+                ownership: None,
+                rpm_metadata: None,
+                installed_at: NOW.to_string(),
+                last_operation_id: None,
+                managed: true,
+                adopted: false,
+                subscription_scope: SubscriptionScope::None,
+                enabled_features: Vec::new(),
+                component_refs: Vec::new(),
+                files: vec![over_limit],
+                external_modified_files: Vec::new(),
+                services: Vec::new(),
+                health: Vec::new(),
+                provisioned_packages: Vec::new(),
+            },
+            reason: QuarantineReason::NoEvidence,
+        });
+
+        let req = ObserveRequest {
+            verify_owned_files: true,
+            ..request("cosh", None)
+        };
+        let facts = assemble_facts(&req, &store, None, &layout, &journal_dir).expect("facts");
+
+        // "Cannot judge" — not "verified".
+        assert_eq!(facts.owned_files_verified, None);
+        // And the planner refuses the quarantine exit rather than rebuilding.
+        assert_eq!(
+            plan(&Intent::Repair, &facts),
+            Err(PlanError::RecordUnrecoverable)
+        );
     }
 
     #[test]

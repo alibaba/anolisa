@@ -24,6 +24,8 @@ AgentSight 为运行在 Linux 上的 AI Agent 提供全栈可观测能力：
 | 权限 | root 或 CAP_BPF（eBPF 探针） |
 | 架构 | x86_64 / aarch64 |
 
+> **macOS**：AgentSight 在 macOS 上提供 `trace`（轨迹采集器，扫描本地 JSONL 会话文件，无 eBPF）和 `serve`（Dashboard 查看器）两个命令；其余依赖 eBPF 的命令仅 Linux 可用。
+
 ## 安装
 
 ```bash
@@ -34,8 +36,10 @@ sudo anolisa install agentsight
 sudo yum install agentsight
 
 # 源码编译（仅开发者）
-cd src/agentsight && make build
+cd src/agentsight && make build-all
 ```
+
+> 源码编译请使用 `make build-all`：它会依次构建 Dashboard 前端、主二进制和 `agentsight-enforcer`。仅执行 `make build` 不会构建 enforcer，`serve` 运行时会持续输出 `AgentSight enforcement unavailable` 日志。
 
 ## 快速开始
 
@@ -46,7 +50,12 @@ sudo agentsight trace
 # 终端 2: 启动 Dashboard
 agentsight serve
 # 浏览器访问 http://localhost:7396
+
+# 查看 Dashboard 访问地址与认证 Token
+agentsight dashboard
 ```
+
+> 本机（localhost）访问免认证；远程访问需要携带 Token，见[Dashboard 访问与认证](#dashboard-访问与认证)。
 
 ## 使用详解
 
@@ -71,6 +80,49 @@ agentsight serve --host 0.0.0.0 --port 7396
 ```
 
 > 远程访问时请确保防火墙已放行对应端口。
+
+#### Dashboard 访问与认证
+
+Dashboard Token 认证默认开启：
+
+- **本机访问**（loopback）自动免认证，直接打开 `http://127.0.0.1:7396` 即可。
+- **远程访问**需携带 Token：浏览器 URL 追加 `?token=<TOKEN>`，或 HTTP 请求头设置 `Authorization: Bearer <TOKEN>`。
+- Token 在首次启动 `serve` 时自动生成（64 位十六进制），持久化于数据库同目录的 `.dashboard_token` 文件（默认 `/var/log/sysak/.agentsight/.dashboard_token`），重启后复用。
+- 使用 `agentsight dashboard` 命令可直接查看访问地址与 Token。
+
+如需关闭认证（仅建议在可信内网使用），在配置文件中设置：
+
+```json
+{
+  "server": { "auth": { "enabled": false } }
+}
+```
+
+### agentsight dashboard — 查看 Dashboard 访问信息
+
+显示 Dashboard 访问地址、认证 Token，并尝试打开浏览器。在 ECS 实例上还会输出安全组放行指引。
+
+```bash
+# 查看访问地址与 Token（需要 serve 已启动）
+agentsight dashboard
+
+# 仅显示信息，不打开浏览器
+agentsight dashboard --no-open
+```
+
+### agentsight summary — 统一概览
+
+汇总最近时间窗口内的会话与 Token 用量、按严重级别统计的中断事件，以及 Tokenless 节省数据，一条命令查看整体运行状况。
+
+```bash
+# 最近 24 小时概览（默认）
+agentsight summary
+
+# 最近 7 天，JSON 格式输出
+agentsight summary --last 168 --json
+```
+
+> 各数据源相互独立：某个数据库缺失时对应部分显示为 0，不影响其余输出。
 
 ### agentsight token — 查询 Token 用量
 
@@ -132,6 +184,13 @@ agentsight interruption stats
 
 # 按严重级别统计
 agentsight interruption count
+
+# 按 ID 查看单个事件详情
+agentsight interruption get <ID>
+
+# 查看指定会话 / 对话的全部中断事件
+agentsight interruption session <SESSION_ID>
+agentsight interruption conversation <CONVERSATION_ID>
 
 # 标记为已解决
 agentsight interruption resolve <ID>

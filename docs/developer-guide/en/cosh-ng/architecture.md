@@ -1,92 +1,112 @@
-# Architecture
+# cosh-ng Architecture
 
-cosh-ng uses a 5-crate Rust workspace architecture, version 0.11.0, requiring Rust 1.74+.
+[中文版](../../zh/cosh-ng/architecture.md)
 
-## Crate Dependency Graph
+cosh-ng separates the interactive terminal, Agent runtime, and deterministic OS
+API so each boundary can be tested and integrated independently.
 
-```
-cosh-types          cosh-platform          cosh-cli / cosh-core
-  (pure types)    ← (distro detection +  ← (CLI entry / Agent core)
-  zero side effects   backend routing)
+## System view
 
-cosh-shell
-  (independent crate, no internal dependencies)
+```text
+bash/zsh <--- cosh-shell
+                  |
+                  | JSONL
+                  v
+              cosh-core
+                  |
+                  +--> provider / tools / MCP
+                  |
+                  +--> cosh-platform ---> cosh-types
 
-Dependency direction: cosh-cli / cosh-core → cosh-platform → cosh-types
-                     cosh-shell is independent (communicates with cosh-core process via stdin/stdout)
-```
-
-## Crate Responsibilities
-
-| Crate | Binary | Responsibility |
-|-------|--------|---------------|
-| `cosh-types` | — | Pure data types, zero side effects. Defines CoshResponse envelope, CoshError, ws-ckpt IPC types |
-| `cosh-platform` | — | Platform abstraction layer. Distro detection, package manager routing, systemd adapter, ws-ckpt IPC client, audit system |
-| `cosh-cli` | `cosh-cli` | CLI entry. 4 command domains (pkg/svc/checkpoint/audit), JSON output |
-| `cosh-core` | `cosh-core` | Agent core. Headless JSONL backend, LLM integration, hooks, tools, skills, extensions, sessions |
-| `cosh-shell` | `cosh-shell` | Interactive terminal. PTY host, OSC markers, AI adapters, approval control, TUI rendering |
-
-## Directory Layout
-
-```
-cosh-ng/
-├── crates/
-│   ├── cosh-types/       # Pure type definitions
-│   │   └── src/          # audit.rs, checkpoint.rs, config.rs, error.rs, output.rs, pkg.rs, svc.rs
-│   ├── cosh-platform/    # Platform abstraction
-│   │   └── src/          # audit/, checkpoint.rs, detect.rs, pkg.rs, svc.rs, validate.rs
-│   ├── cosh-cli/         # CLI binary
-│   │   ├── src/          # main.rs, cmd/{pkg,svc,checkpoint,audit}.rs
-│   │   └── tests/        # Integration tests
-│   ├── cosh-core/        # Agent core binary
-│   │   └── src/          # main.rs, core.rs, headless.rs, hook.rs, provider/, tool/, skill/, extension/
-│   └── cosh-shell/       # Interactive terminal binary
-│       ├── src/          # main.rs, adapter/, agent/, approval/, hooks/, shell_host/, tools/, ui/
-│       └── tests/        # Layered tests
-├── Cargo.toml            # Workspace configuration
-└── rust-toolchain.toml
+caller ---> cosh-cli ---> cosh-platform ---> cosh-types
 ```
 
-## Data Flow
+The launcher installed as `cosh` normally executes `cosh-shell raw cosh-core`.
+`cosh-shell` is compile-time independent of the other workspace crates, but it
+owns a long-lived cosh-core child at runtime. The stdin/stdout protocol between
+them must remain backward-aware because either side can fail or restart
+independently.
 
-### cosh-cli Execution Flow
+## Crate responsibilities
 
+| Crate | Binary | Owns | Must not own |
+|---|---|---|---|
+| `cosh-types` | — | Side-effect-free response, error, config, audit, and checkpoint wire types | OS access or runtime policy |
+| `cosh-platform` | — | Distro detection, package/service adapters, audit policy/store, ws-ckpt client | CLI rendering or Agent UX |
+| `cosh-cli` | `cosh-cli` | Clap commands, JSON envelope, exit status | Distro-specific branching outside platform adapters |
+| `cosh-core` | `cosh-core` | Providers, tool loop, hooks, Skills, MCP, extensions, registry, sessions, and compaction | Terminal ownership or foreground PTY interaction |
+| `cosh-shell` | `cosh-shell` | PTY host, input routing, cards, approvals, evidence, UI, core process lifecycle | Provider implementation or direct OS API abstraction |
+
+## Interactive data flow
+
+1. `cosh-shell` starts bash/zsh in a PTY and installs OSC lifecycle markers.
+2. Input routing sends shell syntax to the PTY, slash commands to the local
+   control surface, and natural language to the Agent adapter.
+3. The default adapter maintains a cosh-core process and sends one JSONL user
+   message per Agent turn.
+4. cosh-core resolves workspace config, the provider, Skills, extensions, MCP
+   tools, and session state, then streams events back.
+5. cosh-shell governs those events and renders text, question cards, or approval
+   cards.
+6. Approved shell execution is handed back to the foreground PTY. OSC evidence
+   is correlated with the Agent run and returned to core when requested.
+7. Registry mutations such as extension reload use the same long-lived core
+   and publish changes at a safe generation boundary.
+
+## Deterministic CLI data flow
+
+```text
+Clap command
+  → command module validates arguments
+  → cosh-platform selects the backend
+  → backend returns typed data or CoshError
+  → cosh-cli emits CoshResponse<T>
+  → exit 0 on success, exit 1 on operation failure
 ```
-User command → clap parsing → cmd module routing → cosh-platform backend execution → CoshResponse<T> JSON output
-```
 
-### cosh-core Headless Flow
+Package and service writes support `--dry-run`. Checkpoint calls cross a Unix
+socket using bincode with a four-byte little-endian length prefix.
 
-```
-stdin JSONL → message parsing → UserPromptSubmit hook → LLM generation → tool calls → approval protocol → stdout JSONL
-```
+## cosh-shell ownership map
 
-### cosh-shell Interactive Flow
+| Owner | Responsibility |
+|---|---|
+| `shell_host/` | PTY lifecycle, OSC parsing, shell integration, raw relay |
+| `raw_input/` and `input/` | terminal modes, multiline input, input relay |
+| `slash/` | slash parser, registry, and command-specific presentation |
+| `adapter/` | provider/core adapters and control protocol transport |
+| `agent/` | Agent run lifecycle and governed events |
+| `runtime/` | orchestration, shared state, dispatch, and startup |
+| `approval/` and `question/` | user decisions and control responses |
+| `hooks/` | hook policy and execution; hands mutations to runtime boundaries |
+| `tools/` | command risk model, read-only rules, tool presentation |
+| `ui/` | terminal rendering and card components |
+| `evidence/`, `journal/`, `ledger/` | bounded evidence and decision records |
 
-```
-User input → PTY host → OSC boundary detection → AI adapter (launches cosh-core subprocess)
-           → streaming response → approval card rendering → tool execution result display
-```
+New implementation files do not belong at the `cosh-shell/src/` root. Keep
+owner boundaries visible and run `crates/cosh-shell/scripts/check-layout.sh`
+after structural changes.
 
-## Key Design Constraints
+## Compatibility and safety contracts
 
-- **ws-ckpt IPC wire format** — bincode + 4-byte little-endian length prefix. Enum variant order is the binary contract, cannot be reordered
-- **Unified JSON envelope** — All cosh-cli commands return `CoshResponse<T>` (ok + data/error + meta)
-- **Cross-distro routing** — `Distro::detect()` reads `/etc/os-release` to route to correct backend
-- **Tool classification** — ReadOnly / FileEdit / ShellExec / ShellEvidence, approval mode decides based on this
-- **Hook aliasing** — cosh-ng internal tool names map bidirectionally with copilot-shell standard names
+- `CoshResponse<T>` is the stable automation envelope.
+- ws-ckpt enum order is part of the binary wire format.
+- cosh-core messages are newline-delimited JSON; stdout must not contain logs or
+  UI prose in headless mode.
+- A running Agent turn is pinned to its registry generation. A healthy candidate
+  activates immediately only when idle; otherwise it waits for a safe point.
+- Session state is workspace-scoped. Recovery restores model-visible
+  conversation, not historical terminal evidence.
+- Core read tools are pinned to the canonical startup workspace. A later `cd`
+  changes the shell directory, not the read boundary; path and mount escapes
+  fail closed.
+- Foreground shell handoffs are serialized. Input-wait timeouts apply only when
+  kernel evidence shows a foreground process waiting for input; pipelines and
+  full-screen programs are exempt.
+- Linux package routing may use the first recognized `ID_LIKE` family while
+  preserving the distribution's real `ID` in typed and JSON output.
+- Tool auto-approval fails closed. Raw command substring matching is not a
+  security boundary.
 
-## Dependency Management
-
-All third-party dependencies declare versions in `[workspace.dependencies]`, sub-crates reference via `dep = { workspace = true }`. Key dependencies:
-
-| Dependency | Purpose |
-|-----------|---------|
-| `serde` / `serde_json` | Serialization |
-| `clap` | CLI argument parsing |
-| `tokio` | Async runtime (cosh-core) |
-| `reqwest` | HTTP client (LLM API) |
-| `tracing` | Structured logging |
-| `ratatui` | TUI rendering (cosh-shell) |
-| `nix` | Unix system calls |
-| `bincode` | ws-ckpt IPC serialization |
+Continue with [Developing cosh-ng](getting-started.md), [IPC protocols](ipc-protocol.md),
+and [Testing](testing.md).

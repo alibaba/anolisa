@@ -1848,7 +1848,11 @@ fn health_from_entry(entry: &HealthEntry) -> DoctorHealthCheck {
 
 fn severity_for_health_status(status: &str) -> Option<FindingSeverity> {
     match status {
-        "ok" | "skipped" | "unverified" => None,
+        // `probe_limit_exceeded` sits with `unverified`: the bytes were
+        // never examined, so there is no defect to report. The entry still
+        // appears verbatim in `health_checks` above, so the operator can
+        // see the file went unhashed without it being raised as a fault.
+        "ok" | "skipped" | "unverified" | "probe_limit_exceeded" => None,
         "not_supported" | "unsupported" | "unsupported_kind" | "out_of_bounds"
         | "unsupported_target" | "not_regular_file" | "timeout" => Some(FindingSeverity::Warning),
         _ => Some(FindingSeverity::Error),

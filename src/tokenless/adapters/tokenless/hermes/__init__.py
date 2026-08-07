@@ -95,53 +95,62 @@ def _validate_hooks_dir(path: str) -> str | None:
     return None
 
 
-# Resolve real home from passwd DB for user-install fallback path
-# (NOT $HOME — env-controllable).
-try:
-    import pwd as _pwd
-    _REAL_HOME = _pwd.getpwuid(os.getuid()).pw_dir
-except (ImportError, KeyError):
-    _REAL_HOME = ""
-if not os.path.isabs(_REAL_HOME):
-    _REAL_HOME = ""
+def _resolve_hook_utils() -> tuple[str, list[str]]:
+    """Locate a trusted shared hooks directory and make it importable.
 
-_HOOK_UTILS_CANDIDATES = [
-    os.path.join(_HERE, "..", "common", "hooks"),                          # source-tree / symlink install
-    "/usr/share/anolisa/adapters/tokenless/common/hooks",                  # RPM system
-    "/usr/local/share/anolisa/adapters/tokenless/common/hooks",            # manual system
-]
-# XDG user data dir first (anolisa FsLayout::user precedence), then the
-# passwd-home default. XDG_DATA_HOME is env-controllable, but candidates
-# still pass the full ownership/permission validation above.
-_xdg_data = os.environ.get("XDG_DATA_HOME", "")
-if _xdg_data and os.path.isabs(_xdg_data):
-    _HOOK_UTILS_CANDIDATES.append(
-        os.path.join(_xdg_data, "anolisa", "adapters", "tokenless", "common", "hooks"))
-if _REAL_HOME:
-    _HOOK_UTILS_CANDIDATES.append(
-        os.path.join(_REAL_HOME, ".local", "share",
-                     "anolisa", "adapters", "tokenless", "common", "hooks"))
+    Returns ``(resolved_path, candidate_list)``.  The resolved path is
+    inserted at the front of ``sys.path`` so the shared ``hook_utils``
+    module can be imported.  Raises :exc:`ImportError` when no candidate
+    passes the trust policy.
+    """
+    # Resolve real home from passwd DB for user-install fallback path
+    # (NOT $HOME — env-controllable).
+    try:
+        import pwd as _pwd
+        real_home = _pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, KeyError):
+        real_home = ""
+    if not os.path.isabs(real_home):
+        real_home = ""
 
-_HOOK_UTILS_RESOLVED = ""
-_rejections: list[str] = []
-for _c in _HOOK_UTILS_CANDIDATES:
-    _reason = _validate_hooks_dir(_c)
-    if _reason is None:
-        _HOOK_UTILS_RESOLVED = os.path.realpath(_c)
-        sys.path.insert(0, _HOOK_UTILS_RESOLVED)
-        break
-    _rejections.append(f"  - {_c}: {_reason}")
+    candidates = [
+        os.path.join(_HERE, "..", "common", "hooks"),                          # source-tree / symlink install
+        "/usr/share/anolisa/adapters/tokenless/common/hooks",                  # RPM system
+        "/usr/local/share/anolisa/adapters/tokenless/common/hooks",            # manual system
+    ]
+    # XDG user data dir first (anolisa FsLayout::user precedence), then the
+    # passwd-home default. XDG_DATA_HOME is env-controllable, but candidates
+    # still pass the full ownership/permission validation above.
+    xdg_data = os.environ.get("XDG_DATA_HOME", "")
+    if xdg_data and os.path.isabs(xdg_data):
+        candidates.append(
+            os.path.join(xdg_data, "anolisa", "adapters", "tokenless", "common", "hooks"))
+    if real_home:
+        candidates.append(
+            os.path.join(real_home, ".local", "share",
+                         "anolisa", "adapters", "tokenless", "common", "hooks"))
 
-if not _HOOK_UTILS_RESOLVED:
+    rejections: list[str] = []
+    for candidate in candidates:
+        reason = _validate_hooks_dir(candidate)
+        if reason is None:
+            resolved = os.path.realpath(candidate)
+            sys.path.insert(0, resolved)
+            return resolved, candidates
+        rejections.append(f"  - {candidate}: {reason}")
+
     raise ImportError(
         "tokenless: no trusted shared hook_utils module (common/hooks/) found.\n"
-        "Candidates checked (in order):\n" + "\n".join(_rejections) + "\n"
+        "Candidates checked (in order):\n" + "\n".join(rejections) + "\n"
         "Note: a candidate may be rejected by the trust policy (ownership or "
         "permissions) even though the path exists — see the reason next to "
         "each path. Install the tokenless common hooks (anolisa install "
         "tokenless) or re-run adapters/tokenless/hermes/scripts/install.sh "
         "from a complete adapter tree."
     )
+
+
+_HOOK_UTILS_RESOLVED, _HOOK_UTILS_CANDIDATES = _resolve_hook_utils()
 
 from hook_utils import (
     _TOKENLESS_FALLBACK,

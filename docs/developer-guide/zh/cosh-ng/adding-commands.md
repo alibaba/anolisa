@@ -1,14 +1,17 @@
 # 新增 CLI 命令
 
+[English](../../en/cosh-ng/adding-commands.md)
+
 ## 概述
 
-cosh-cli 使用 clap 构建命令树，每个子系统对应一个 `cmd/<subsystem>.rs` 模块。新增命令需要修改三层：类型定义（cosh-types）→ 平台实现（cosh-platform）→ CLI 入口（cosh-cli）。
+cosh-cli 使用 clap 构建命令树，每个子系统对应一个 `cmd/<subsystem>.rs` 模块。新增命令
+需要依次修改 cosh-types 中的类型、cosh-platform 中的平台实现和 cosh-cli 入口。
 
 ## 步骤
 
 ### 1. 定义响应类型（cosh-types）
 
-在 `crates/cosh-types/src/` 中新增或扩展数据类型：
+在 `crates/cosh-types/src/` 中新增或扩展数据类型。
 
 ```rust
 // crates/cosh-types/src/my_subsystem.rs
@@ -25,7 +28,7 @@ pub struct MyResult {
 
 ### 2. 实现平台逻辑（cosh-platform）
 
-在 `crates/cosh-platform/src/` 中实现实际操作：
+在 `crates/cosh-platform/src/` 中实现实际操作。
 
 ```rust
 // crates/cosh-platform/src/my_subsystem.rs
@@ -45,7 +48,7 @@ pub fn my_action(distro: &Distro, param: &str, dry_run: bool) -> Result<MyResult
 
 ### 3. 注册 CLI 命令（cosh-cli）
 
-创建 `crates/cosh-cli/src/cmd/my_subsystem.rs`：
+创建 `crates/cosh-cli/src/cmd/my_subsystem.rs`。
 
 ```rust
 use std::time::Instant;
@@ -80,13 +83,13 @@ pub fn run(action: MyCommands, distro: &Distro, start: Instant) -> i32 {
 }
 ```
 
-在 `cmd/mod.rs` 中注册：
+在 `cmd/mod.rs` 中注册模块。
 
 ```rust
 pub mod my_subsystem;
 ```
 
-在 `main.rs` 中添加子命令：
+在 `main.rs` 中添加子命令。
 
 ```rust
 #[derive(Subcommand)]
@@ -100,7 +103,7 @@ enum Commands {
 }
 ```
 
-并在 `match cli.command` 中添加分支：
+随后在 `match cli.command` 中添加分支。
 
 ```rust
 Commands::My { action } => cmd::my_subsystem::run(action, &distro, start),
@@ -108,7 +111,7 @@ Commands::My { action } => cmd::my_subsystem::run(action, &distro, start),
 
 ### 4. 添加集成测试
 
-在 `crates/cosh-cli/tests/cli_integration.rs` 中添加测试：
+在 `crates/cosh-cli/tests/cli_integration.rs` 中添加测试。
 
 ```rust
 #[test]
@@ -127,7 +130,7 @@ fn test_my_command_json_envelope() {
 |------|------|
 | JSON 输出 | 始终使用 `CoshResponse<T>` 信封 |
 | 退出码 | 成功 = 0，失败 = 1 |
-| `--dry-run` | 所有写操作必须支持 |
+| `--dry-run` | 仅在后端能提供真正无副作用的预览时添加；它是 action flag，不是 CLI 全局承诺 |
 | 输入验证 | 在执行前使用 `validate_*` 检查参数 |
 | subsystem 字段 | `meta.subsystem` 必须与命令名一致 |
 | 发行版路由 | 需要区分发行版的逻辑放在 `cosh-platform` |

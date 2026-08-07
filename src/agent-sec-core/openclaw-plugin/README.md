@@ -325,6 +325,8 @@ Set `codeScanRequireApproval: true` to enable approval mode, which pops a confir
 openclaw config set plugins.entries.agent-sec.config.codeScanRequireApproval true
 ```
 
+`CODE_SCANNER_HOOK_ENABLED=true|false` overrides `capabilities["scan-code"].enabled`, and `CODE_SCANNER_MODE=observe|ask|block` overrides `codeScanRequireApproval`. `debug` aliases `observe`; `deny` aliases `block`. `ask` returns `requireApproval` for scanner `warn` / `deny` verdicts, while `block` returns OpenClaw's existing `{ block: true, blockReason }` response for those ordinary findings. `warn` and invalid values are treated as unset, emit a bounded host-logger diagnostic, and use the original plugin configuration. The existing self-protect finding remains a forced-block exception regardless of mode. OpenClaw keeps its fixed 10-second timeout and does not read `CODE_SCANNER_TIMEOUT`.
+
 ### Configuring `pii-scan-user-input`
 
 The `pii-scan-user-input` capability scans the current inbound user text in `before_dispatch`, tool parameters in `before_tool_call`, tool results/errors in `after_tool_call`, and assistant text in `llm_output`. It intentionally does not scan assembled prompt history, memory, or RAG context, so older PII does not trigger repeated warnings on later turns.
@@ -338,6 +340,12 @@ The `observability` capability is enabled by default and invokes:
 ```bash
 agent-sec-cli observability record --format json --stdin
 ```
+
+Set `OBSERVABILITY_HOOK_ENABLED=false` before starting the OpenClaw gateway to
+disable all observability hook work without changing plugin configuration. An
+unset or invalid value keeps it enabled; restart the gateway after changing the
+variable. Setting `capabilities.observability.enabled` to `false` also disables
+the capability, so either setting can turn observability off.
 
 Each hook emits one JSON record with `hook`, `observedAt`, `metadata`, and hook-specific `metrics`. The plugin registers OpenClaw hook names, but sends the generic `agent-sec-cli` hook name in `payload.hook`. Failures, missing CLI, malformed output, and timeouts are fail-open and never block OpenClaw behavior.
 
@@ -413,8 +421,10 @@ Default behavior:
 
 Deployment environment variables override capability configuration. Use
 `SKILL_LEDGER_HOOK_ENABLED`, `PII_CHECKER_HOOK_ENABLED`,
-`SKILL_LEDGER_MODE`, and `PII_CHECKER_MODE` for deployment-level
-control. Disabling Skill Ledger short-circuits before key initialization.
+`PROMPT_SCANNER_HOOK_ENABLED`, `SKILL_LEDGER_MODE`,
+`PII_CHECKER_MODE`, and `PROMPT_SCANNER_MODE` for deployment-level
+control. Disabling Skill Ledger short-circuits before key initialization;
+disabling prompt-scan short-circuits before hook registration.
   `blockStatuses` is accepted as deprecated configuration metadata but no longer controls runtime decisions.
 
 Set `policy: "warn"` when wanting visible diagnostics without approval:

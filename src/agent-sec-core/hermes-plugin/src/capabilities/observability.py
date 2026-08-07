@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..cli_runner import record_hermes_observability
+from ..hook_config import env_flag_enabled
 from ..observability.record import build_record
 from .base import AgentSecCoreCapability
 
@@ -40,7 +41,7 @@ class ObservabilityCapability(AgentSecCoreCapability):
     name = "Observability"
 
     def _on_register(self, config: dict) -> None:
-        pass
+        self._hook_enabled = env_flag_enabled("OBSERVABILITY_HOOK_ENABLED", True)
 
     def get_hooks_define(self) -> dict[str, Callable]:
         return {
@@ -53,6 +54,9 @@ class ObservabilityCapability(AgentSecCoreCapability):
         }
 
     def _emit(self, hook_name: str, data: dict[str, Any]) -> None:
+        if not getattr(self, "_hook_enabled", True):
+            return
+
         record = build_record(hook_name, data)
         if record is None:
             return
