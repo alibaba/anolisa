@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy,
-    DestinationScope, PolicyMode, PolicyValidationError,
+    DestinationScope, PolicyMode, PolicyValidationError, ProductPolicyClassification,
 };
 
 const CREDENTIAL_POLICY_SNAPSHOT_VERSION: u32 = 1;
@@ -38,6 +38,7 @@ struct StrictCredentialPolicy {
     taint_ttl_secs: u64,
     destination_scope: DestinationScope,
     mode: PolicyMode,
+    classification: Option<ProductPolicyClassification>,
 }
 
 impl<'de> Deserialize<'de> for CredentialPolicySnapshot {
@@ -57,6 +58,7 @@ impl<'de> Deserialize<'de> for CredentialPolicySnapshot {
                 taint_ttl_secs: wire.policy.taint_ttl_secs,
                 destination_scope: wire.policy.destination_scope,
                 mode: wire.policy.mode,
+                classification: wire.policy.classification,
             },
         })
     }

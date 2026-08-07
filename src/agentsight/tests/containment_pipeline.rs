@@ -769,6 +769,7 @@ fn credential_policy(
         taint_ttl_secs,
         destination_scope: DestinationScope::PublicIpv4,
         mode,
+        classification: None,
     }
 }
 

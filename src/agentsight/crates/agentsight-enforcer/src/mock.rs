@@ -664,6 +664,7 @@ mod tests {
             taint_ttl_secs: 900,
             destination_scope: agentsight_enforcement_protocol::DestinationScope::PublicIpv4,
             mode: PolicyMode::Audit,
+            classification: None,
         };
         let source = backend
             .apply_credential_policy(ApplyCredentialPolicy {
@@ -719,6 +720,7 @@ mod tests {
             taint_ttl_secs: 300,
             destination_scope: agentsight_enforcement_protocol::DestinationScope::PublicIpv4,
             mode: PolicyMode::Audit,
+            classification: None,
         };
         let source_apply = ApplyCredentialPolicy {
             binding_id: source_request.binding_id,

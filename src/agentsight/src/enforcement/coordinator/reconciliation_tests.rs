@@ -259,6 +259,7 @@ fn credential_request(id: &str, ttl_secs: u64) -> ApplyCredentialPolicy {
             taint_ttl_secs: ttl_secs,
             destination_scope: DestinationScope::PublicIpv4,
             mode: PolicyMode::Audit,
+            classification: None,
         },
     }
 }

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use actix_web::{HttpResponse, delete, get, post, web};
 use agentsight_enforcement_protocol::{
     ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy,
-    DestinationScope, HealthStatus, PolicyMode,
+    DestinationScope, HealthStatus, PolicyMode, ProductPolicyClassification,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -53,6 +53,10 @@ pub(super) struct CredentialBindingRequest {
     mode: PolicyMode,
     taint_ttl_secs: Option<u64>,
     destination_scope: DestinationScope,
+    #[serde(default)]
+    policy_id: Option<String>,
+    #[serde(default)]
+    classification: Option<ProductPolicyClassification>,
 }
 
 /// Returns privileged backend readiness.
@@ -349,7 +353,13 @@ fn build_credential_binding(
         .into_iter()
         .collect();
     let policy = CredentialExfiltrationPolicy {
-        policy_id: "agentsight-credential-exfiltration".into(),
+        policy_id: request
+            .policy_id
+            .and_then(|value| {
+                let value = value.trim();
+                (!value.is_empty()).then(|| value.to_string())
+            })
+            .unwrap_or_else(|| "agentsight-credential-exfiltration".into()),
         revision: request.revision,
         source_patterns: vec![source_path],
         trusted_endpoints,
@@ -357,6 +367,7 @@ fn build_credential_binding(
         taint_ttl_secs: request.taint_ttl_secs.unwrap_or(900),
         destination_scope: request.destination_scope,
         mode: request.mode,
+        classification: request.classification,
     };
     policy.validate().map_err(|error| error.to_string())?;
     Ok(ApplyCredentialPolicy {
@@ -548,6 +559,12 @@ mod tests {
             mode: PolicyMode::Audit,
             taint_ttl_secs: None,
             destination_scope: DestinationScope::PublicIpv4,
+            policy_id: Some(" agentloop-sensitive-data-outbound ".into()),
+            classification: Some(ProductPolicyClassification {
+                rule_id: "cloud-credential-to-public-network".into(),
+                risk_type: "sensitive_data_outbound_exposure".into(),
+                risk_subtype: "secret.cloud_access_key".into(),
+            }),
         })
         .expect("valid credential policy should build");
 
@@ -556,7 +573,19 @@ mod tests {
         assert_eq!(binding.conversation_id.as_deref(), Some("conversation-1"));
         assert_eq!(binding.tool_call_id.as_deref(), Some("tool-call-1"));
         assert_eq!(binding.policy.mode, PolicyMode::Audit);
+        assert_eq!(
+            binding.policy.policy_id,
+            "agentloop-sensitive-data-outbound"
+        );
         assert_eq!(binding.policy.revision, 3);
+        assert_eq!(
+            binding.policy.classification,
+            Some(ProductPolicyClassification {
+                rule_id: "cloud-credential-to-public-network".into(),
+                risk_type: "sensitive_data_outbound_exposure".into(),
+                risk_subtype: "secret.cloud_access_key".into(),
+            })
+        );
         assert_eq!(binding.policy.taint_label, "CREDENTIAL");
         assert_eq!(binding.policy.taint_ttl_secs, 900);
         assert_eq!(
@@ -572,6 +601,62 @@ mod tests {
         child.kill().expect("fixture process should stop");
         child.wait().expect("fixture process should exit");
         fs::remove_file(path).expect("fixture file should be removed");
+    }
+
+    #[test]
+    fn credential_binding_request_defaults_missing_product_metadata() {
+        let request: CredentialBindingRequest = serde_json::from_value(json!({
+            "agent_id": "legacy-agent",
+            "root_pid": 42,
+            "source_path": "/tmp/legacy-credential",
+            "revision": 3,
+            "mode": "audit",
+            "destination_scope": "public_ipv4"
+        }))
+        .expect("legacy request should deserialize");
+
+        assert_eq!(request.policy_id, None);
+        assert_eq!(request.classification, None);
+    }
+
+    #[test]
+    fn credential_binding_request_defaults_blank_policy_id() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("fixture process should start");
+        let path = std::env::temp_dir().join(format!(
+            "agentsight-credential-binding-blank-policy-{}",
+            std::process::id()
+        ));
+        fs::write(&path, b"credential").expect("fixture file should be created");
+
+        let result = build_credential_binding(CredentialBindingRequest {
+            agent_id: "legacy-agent".into(),
+            root_pid: child.id() as i32,
+            session_id: None,
+            conversation_id: None,
+            tool_call_id: None,
+            source_path: path.clone(),
+            trusted_endpoint: None,
+            revision: 3,
+            mode: PolicyMode::Audit,
+            taint_ttl_secs: None,
+            destination_scope: DestinationScope::PublicIpv4,
+            policy_id: Some("   ".into()),
+            classification: None,
+        });
+
+        child.kill().expect("fixture process should stop");
+        child.wait().expect("fixture process should exit");
+        fs::remove_file(path).expect("fixture file should be removed");
+
+        let binding = result.expect("blank policy id should use the legacy default");
+
+        assert_eq!(
+            binding.policy.policy_id,
+            "agentsight-credential-exfiltration"
+        );
     }
 
     #[test]

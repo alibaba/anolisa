@@ -51,6 +51,7 @@ fn credential_request(binding_id: Uuid, mode: PolicyMode) -> ApplyCredentialPoli
             taint_ttl_secs: 900,
             destination_scope: DestinationScope::PublicIpv4,
             mode,
+            classification: None,
         },
     }
 }

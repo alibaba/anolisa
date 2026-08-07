@@ -596,6 +596,7 @@ mod tests {
                 taint_ttl_secs: 900,
                 destination_scope: DestinationScope::PublicIpv4,
                 mode: PolicyMode::Audit,
+                classification: None,
             },
         }
     }
@@ -764,6 +765,7 @@ mod tests {
                     taint_ttl_secs: 900,
                     destination_scope: DestinationScope::PublicIpv4,
                     mode: PolicyMode::Audit,
+                    classification: None,
                 },
             },
             required_subscription_id: Uuid::new_v4(),

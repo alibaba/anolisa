@@ -143,6 +143,7 @@ fn product_policy(mode: PolicyMode, taint_ttl_secs: u64) -> ApplyCredentialPolic
             taint_ttl_secs,
             destination_scope: DestinationScope::PublicIpv4,
             mode,
+            classification: None,
         },
     }
 }

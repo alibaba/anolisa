@@ -791,6 +791,7 @@ fn source_policy() -> CredentialExfiltrationPolicy {
         taint_ttl_secs: 300,
         destination_scope: DestinationScope::PublicIpv4,
         mode: PolicyMode::Audit,
+        classification: None,
     }
 }
 
