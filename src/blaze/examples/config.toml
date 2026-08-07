@@ -131,6 +131,7 @@ max_files = 32
 max_bytes = 274877906944
 max_metadata_bytes = 1048576
 max_total_bytes = 1099511627776
+max_entries = 128
 
 # ---------------------------------------------------------------------------
 # Metrics / observability.
