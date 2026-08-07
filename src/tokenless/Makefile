@@ -192,7 +192,9 @@ test-integration:
 	python3 tests/test_rewrite_hook.py
 	python3 tests/test_resolve_agent_id.py
 
-test-adapters:
+test-adapters: build-openclaw-plugin
+	@echo "==> Testing openclaw RTK context propagation..."
+	node --test tests/test-openclaw-rtk-context.mjs
 	@echo "==> Testing qoder adapter installer..."
 	bash tests/test-qoder-adapter-install.sh
 	@echo "==> Testing OpenCode adapter..."
