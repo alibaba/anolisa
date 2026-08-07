@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Daemon-wide shared state: configuration, policy engine, pool, template
-//! and hook registries, and the in-memory instance map. All API handlers
+//! Daemon-wide shared state: configuration, policy engine, pool, hook registry,
+//! and the in-memory instance map. All API handlers
 //! receive an [`Arc<ServerState>`] and acquire the relevant `Mutex<...>`
 //! lock just long enough to read or mutate the piece they need — locks
 //! are never held across `.await` boundaries.
@@ -16,11 +16,13 @@ use blaze_core::lifecycle::SandboxInstance;
 use blaze_core::policy::PolicyEngine;
 use blaze_core::pool::PoolManager;
 use blaze_core::storage::StorageProvider;
-use blaze_core::template::TemplateRegistry;
 use uuid::Uuid;
 
 use crate::error::Result;
 use crate::metrics::Metrics;
+use crate::sandbox::template::TemplateCatalog;
+#[cfg(test)]
+use crate::sandbox::template::validate_template_roots;
 use crate::sandbox::{SandboxManager, SandboxManagerInit};
 use crate::spawner::SpawnerRegistry;
 
@@ -30,7 +32,6 @@ pub struct ServerState {
     pub config: Mutex<DaemonConfig>,
     pub policy: Mutex<PolicyEngine>,
     pub pool: Arc<Mutex<PoolManager>>,
-    pub template: Mutex<TemplateRegistry>,
     pub hook: Mutex<HookRegistry>,
     pub instances: Arc<Mutex<HashMap<Uuid, SandboxInstance>>>,
     pub manager: Arc<SandboxManager>,
@@ -48,16 +49,50 @@ impl ServerState {
     /// `instances` map from previous runs (best-effort; corrupt entries
     /// are skipped with a warning).
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub fn build(
         config: DaemonConfig,
         policy: PolicyEngine,
         pool: PoolManager,
-        template: TemplateRegistry,
         hook: HookRegistry,
         spawners: SpawnerRegistry,
         active_backend: BackendKind,
         storage: Arc<dyn StorageProvider>,
-    ) -> Self {
+    ) -> Result<Self> {
+        let template_roots = validate_template_roots(
+            &config.template,
+            &config.storage.images_dir,
+            &config.storage.instances_dir,
+            &config.policy.dir,
+            &config.backends,
+            &config.daemon.state_dir,
+            &config.daemon.socket,
+            None,
+        )?;
+        let template_catalog = TemplateCatalog::open_validated(&config.template, template_roots)?;
+        Self::build_with_template_catalog(
+            config,
+            policy,
+            pool,
+            hook,
+            spawners,
+            active_backend,
+            storage,
+            template_catalog,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_with_template_catalog(
+        config: DaemonConfig,
+        policy: PolicyEngine,
+        pool: PoolManager,
+        hook: HookRegistry,
+        spawners: SpawnerRegistry,
+        active_backend: BackendKind,
+        storage: Arc<dyn StorageProvider>,
+        template_catalog: TemplateCatalog,
+    ) -> Result<Self> {
         let state_dir = config.daemon.state_dir.clone();
         let instances = scan_state_dir(&state_dir).unwrap_or_else(|err| {
             tracing::warn!(error = %err, "failed to scan state_dir, starting empty");
@@ -72,13 +107,13 @@ impl ServerState {
             state_dir: state_dir.clone(),
             rootfs_size: config.storage.rootfs_size,
             mem_size: config.storage.mem_size,
+            template_catalog,
         });
 
-        Self {
+        Ok(Self {
             config: Mutex::new(config),
             policy: Mutex::new(policy),
             pool: resources.pool,
-            template: Mutex::new(template),
             hook: Mutex::new(hook),
             instances: resources.instances,
             manager: Arc::new(manager),
@@ -86,7 +121,7 @@ impl ServerState {
             storage,
             state_dir,
             metrics: resources.metrics,
-        }
+        })
     }
 
     /// Return the async operation lock that serializes one sandbox mutation.

@@ -35,6 +35,13 @@ const TERMINATION_GRACE: Duration = Duration::from_secs(5);
 #[cfg(target_os = "linux")]
 const PID_HANDOFF_GRACE: Duration = Duration::from_secs(1);
 const STOPPED_MARKER: &str = "backend.stopped";
+/// Fixed host-wide lock used to serialize network slot allocation.
+pub(crate) const HOST_NETWORK_COORDINATION_PATH: &str = "/run/lock/blaze-network.lock";
+/// Conventional host directories containing named network namespace objects.
+///
+/// Upstream iproute2 defaults to `/var/run/netns`, while distributions may
+/// compile the same facility to use `/run/netns` directly.
+pub(crate) const HOST_NAMED_NETWORK_NAMESPACE_PATHS: [&str; 2] = ["/var/run/netns", "/run/netns"];
 
 /// Result reported when a backend process exits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

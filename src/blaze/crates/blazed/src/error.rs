@@ -57,6 +57,12 @@ pub enum BlazeDaemonError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    #[error("service unavailable: {0}")]
+    ServiceUnavailable(String),
+
+    #[error("request body too large: {actual} bytes exceeds {limit}")]
+    PayloadTooLarge { actual: u64, limit: usize },
+
     #[error("operation requires recovery: {0}")]
     RecoveryRequired(String),
 
@@ -102,6 +108,8 @@ impl BlazeDaemonError {
             BlazeDaemonError::BadRequest(_) => 400,
             BlazeDaemonError::NotFound(_) => 404,
             BlazeDaemonError::Conflict(_) => 409,
+            BlazeDaemonError::ServiceUnavailable(_) => 503,
+            BlazeDaemonError::PayloadTooLarge { .. } => 413,
             BlazeDaemonError::RecoveryRequired(_) => 500,
             BlazeDaemonError::HttpStatus { status, .. } => *status,
             BlazeDaemonError::Core(blaze_core::BlazeError::PolicyEvalError { .. })
