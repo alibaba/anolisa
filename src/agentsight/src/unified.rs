@@ -1516,6 +1516,7 @@ impl AgentSight {
                     compressed_buffer: Some(buf),
                     content_encoding,
                     response_headers,
+                    zstd_decoder,
                 } if sse_events.is_empty() && !buf.is_empty() => {
                     // fix(#973): decode the unfinalized compressed buffer
                     // so drain-path token extraction can proceed.
@@ -1528,6 +1529,7 @@ impl AgentSight {
                             &buf,
                             content_encoding.as_deref(),
                             is_chunked,
+                            zstd_decoder.as_deref(),
                             &response_headers.source_event,
                         );
                     ("SseActive", req, decoded)
