@@ -67,6 +67,26 @@ Token-less 去掉工具 Schema 和响应中的冗余，[Agent Memory](src/agent-
 Skills，只把用得到的技能放进上下文，[AgentSight](src/agentsight/README_zh.md)
 记录 Token 实际花在哪。
 
+<table align="center" cellpadding="0" cellspacing="0">
+  <tr>
+    <td>
+      <video
+        controls
+        muted
+        src="https://github.com/user-attachments/assets/1c416b99-2bbb-41c1-b754-fe9af634779c"
+      ></video>
+    </td>
+  </tr>
+</table>
+
+<p align="center">
+  <sub>
+    在一次编码任务的单次观测中，Token-less 节省了 317K Tokens（40.5%，
+    基于 AgentSight 观测）。
+    实际效果因工作负载而异。
+  </sub>
+</p>
+
 <p align="center">
   <img
     src="docs/images/readme/tokenless-response.png"

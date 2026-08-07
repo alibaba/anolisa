@@ -72,6 +72,26 @@ Token-less removes redundancy from tool schemas and responses.
 demand so only the relevant ones enter the context, and
 [AgentSight](src/agentsight/README.md) records where Tokens are actually spent.
 
+<table align="center" cellpadding="0" cellspacing="0">
+  <tr>
+    <td>
+      <video
+        controls
+        muted
+        src="https://github.com/user-attachments/assets/1c416b99-2bbb-41c1-b754-fe9af634779c"
+      ></video>
+    </td>
+  </tr>
+</table>
+
+<p align="center">
+  <sub>
+    In one observed coding task, Token-less saved 317K Tokens (40.5%), based
+    on AgentSight measurements.
+    Results vary by workload.
+  </sub>
+</p>
+
 <p align="center">
   <img
     src="docs/images/readme/tokenless-response.png"
