@@ -15,8 +15,13 @@ use super::{
     ProviderCancellationArtifactKind, ProviderCancellationArtifactStore,
 };
 
+mod driver;
 mod watchdog;
 
+pub(crate) use driver::{
+    start_cancellable_provider_process, start_control_protocol_provider_process,
+    ProviderDriverSpec, ProviderStreamParser,
+};
 use watchdog::{
     AgentProcessTimeout, AgentProcessTimeoutKind, AgentProcessTimeouts, AgentProcessWatchdog,
 };
