@@ -1,5 +1,6 @@
 use crate::runtime::state::PendingInteractiveShellHandoff;
 use crate::tools::display::{presentation_for_tool, ToolPresentation};
+use crate::tools::{known_provider_tool, KnownProviderTool};
 
 use crate::runtime::prelude::*;
 
@@ -568,7 +569,7 @@ fn terminal_output_misroute_detail(
 }
 
 fn terminal_output_id_from_read_tool_input(tool_name: &str, input: &str) -> Option<String> {
-    if !matches!(tool_name, "Read" | "read_file") {
+    if known_provider_tool(tool_name) != Some(KnownProviderTool::ReadFile) {
         return None;
     }
     let value = serde_json::from_str::<serde_json::Value>(input).ok()?;

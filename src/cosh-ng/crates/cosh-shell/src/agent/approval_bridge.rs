@@ -12,6 +12,7 @@ use crate::approval::resolution::request_can_receive_host_executed_result;
 use crate::runtime::evidence_delivery::record_readonly_compound_completion;
 use crate::runtime::prelude::*;
 use crate::tools::command_risk::{RiskImpact, SideEffectClass};
+use crate::tools::known_provider_tool;
 use crate::tools::readonly_compound::{build_readonly_compound_plan, run_readonly_compound};
 use crate::tools::{ReadonlyPipelineConfig, ReadonlyPipelineError, ReadonlyPipelineOutput};
 
@@ -42,6 +43,12 @@ pub(crate) fn render_trusted_tool<W: Write>(
         };
         // Hook ask decisions must never be auto-approved
         if request.hook_requires_approval {
+            continue;
+        }
+        // Trust may bypass approval only for identities in the explicit
+        // provider catalog. Unknown provider tools stay pending for an
+        // explicit user decision instead of inheriting Trust implicitly.
+        if event_tool_name(event).is_some_and(|name| known_provider_tool(name).is_none()) {
             continue;
         }
         if provider_tool_call_fallback && !request_is_executable_bash_tool(&request) {
@@ -98,6 +105,14 @@ pub(crate) fn render_trusted_tool<W: Write>(
 
     render_approval_requests(state, &blocked_approval_ids, output)?;
     Ok(false)
+}
+
+fn event_tool_name(event: &GovernedEvent) -> Option<&str> {
+    match &event.event {
+        AgentEvent::ToolCall { name, .. } => Some(name),
+        AgentEvent::ToolPermissionRequest { tool_name, .. } => Some(tool_name),
+        _ => None,
+    }
 }
 
 /// Only the irrecoverable verdicts stall the auto-approval paths: a

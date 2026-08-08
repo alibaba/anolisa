@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::tools::is_shell_tool_name;
+use crate::tools::{is_shell_tool_name, known_provider_tool, KnownProviderTool};
 use crate::types::{AgentEvent, QuestionSelectionMode};
 
 mod auth;
@@ -378,8 +378,8 @@ fn provider_tool_result_id(event: &AgentEvent) -> Option<&str> {
     }
 }
 
-fn is_control_backed_tool_name(name: &str) -> bool {
-    is_shell_tool_name(name) || name == "cosh_shell_evidence"
+pub(crate) fn is_control_backed_tool_name(name: &str) -> bool {
+    known_provider_tool(name).is_some_and(KnownProviderTool::is_control_backed)
 }
 
 fn is_terminal_agent_event(event: &AgentEvent) -> bool {

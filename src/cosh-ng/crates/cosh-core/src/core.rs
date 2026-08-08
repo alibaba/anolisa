@@ -232,14 +232,14 @@ impl CoshCore {
     fn classify_tool(&self, tool_name: &str, params: &serde_json::Value) -> Outcome {
         let mode = self.config.agent.approval_mode;
 
-        if mode == ApprovalMode::Trust {
-            return Outcome::Allow;
-        }
-
         let tool = match self.tools.get(tool_name) {
             Some(t) => t,
             None => return Outcome::Deny,
         };
+
+        if mode == ApprovalMode::Trust {
+            return Outcome::Allow;
+        }
 
         if self.config.agent.allowed_tools.contains(tool_name) {
             return Outcome::Allow;

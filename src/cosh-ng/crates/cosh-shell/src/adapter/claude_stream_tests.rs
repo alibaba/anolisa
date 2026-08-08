@@ -566,7 +566,7 @@ fn claude_stream_parser_bounds_large_tool_result() {
 }
 
 #[test]
-fn claude_stream_parser_maps_ask_user_question_to_question_event() {
+fn claude_stream_parser_keeps_native_and_control_question_paths_distinct() {
     let mut parser = ClaudeStreamParser::new("run-1".to_string(), None);
 
     let events = parser.parse_line(
@@ -585,6 +585,14 @@ fn claude_stream_parser_maps_ask_user_question_to_question_event() {
             && options == &vec!["Green".to_string(), "Blue".to_string()]
             && !allow_free_text
             && *selection_mode == QuestionSelectionMode::Single
+    ));
+
+    let events = parser.parse_line(
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-core-ask","name":"ask_user_question","input":{"question":"Handled by control"}}]}}"#,
+    );
+    assert!(matches!(
+        &events[..],
+        [AgentEvent::ToolCall { name, .. }] if name == "ask_user_question"
     ));
 }
 

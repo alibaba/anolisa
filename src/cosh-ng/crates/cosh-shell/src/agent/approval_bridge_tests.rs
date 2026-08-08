@@ -736,6 +736,52 @@ fn trust_mode_routes_blocked_shell_request_batch_to_approval() {
 }
 
 #[test]
+fn trust_mode_keeps_unknown_provider_tool_pending() {
+    let adapter = AdapterInstance::QwenCli(QwenCliAdapter::default());
+    let mut state = InlineState {
+        approval_mode: CoshApprovalMode::Trust,
+        ..InlineState::default()
+    };
+    let governed = [GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::NeedsUserApproval,
+        event: AgentEvent::ToolPermissionRequest {
+            run_id: "run-1".to_string(),
+            request_id: "ctrl-unknown".to_string(),
+            tool_name: "CustomProviderTool".to_string(),
+            tool_input: serde_json::json!({"operation": "mutate"}),
+            tool_use_id: "toolu-unknown".to_string(),
+            hook_requires_approval: false,
+            audit_ref: None,
+        },
+        reason: "unknown provider tool".to_string(),
+        display_text: "unknown provider tool".to_string(),
+        auto_execute: false,
+    }];
+    let mut output = Vec::new();
+
+    crate::agent::events::render_agent_structured_events(
+        &mut state,
+        &governed,
+        None,
+        AgentRunOrigin::Standard,
+        &mut output,
+        &adapter,
+    )
+    .expect("render unknown provider approval");
+
+    assert_eq!(state.approvals.requests.len(), 1);
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Pending
+    );
+    assert_eq!(
+        state.approvals.requests[0].request_id.as_deref(),
+        Some("ctrl-unknown")
+    );
+}
+
+#[test]
 fn trust_mode_leaves_high_risk_shell_request_pending() {
     // #2064: Trust mode auto-approves ordinary commands, but an
     // irrecoverable one must still raise a per-dispatch approval card

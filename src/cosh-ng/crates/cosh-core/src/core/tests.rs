@@ -421,6 +421,7 @@ fn approval_mode_covers_every_registered_tool_kind() {
                 Outcome::Allow,
                 Outcome::Allow,
             ),
+            ("grep", ToolKind::ReadOnly, Outcome::Allow, Outcome::Allow),
             (
                 "web_fetch",
                 ToolKind::Network,
@@ -429,6 +430,12 @@ fn approval_mode_covers_every_registered_tool_kind() {
             ),
             (
                 "edit",
+                ToolKind::FileEdit,
+                Outcome::RequireApproval,
+                Outcome::Allow,
+            ),
+            (
+                "save_memory",
                 ToolKind::FileEdit,
                 Outcome::RequireApproval,
                 Outcome::Allow,
@@ -463,6 +470,12 @@ fn approval_mode_covers_every_registered_tool_kind() {
                 Outcome::RequireApproval,
                 Outcome::Allow,
             ),
+            (
+                "skill",
+                ToolKind::Other,
+                Outcome::RequireApproval,
+                Outcome::Allow,
+            ),
         ] {
             assert_eq!(core.tools.get(name).expect("registered tool").kind(), kind);
             let expected = match mode {
@@ -476,6 +489,33 @@ fn approval_mode_covers_every_registered_tool_kind() {
                 "unexpected {kind:?} policy in {mode} mode"
             );
         }
+    }
+}
+
+#[test]
+fn unknown_tools_are_denied_in_every_approval_mode() {
+    for mode in [
+        ApprovalMode::Recommend,
+        ApprovalMode::Auto,
+        ApprovalMode::Trust,
+    ] {
+        let mut config = CoreConfig::default();
+        config.agent.approval_mode = mode;
+        config
+            .agent
+            .allowed_tools
+            .insert("unknown_provider_tool".to_string());
+        let core = CoshCore::new(
+            config,
+            Box::new(MockProvider::new(Vec::new())),
+            ToolRegistry::with_defaults_for_test(),
+        );
+
+        assert_eq!(
+            core.classify_tool("unknown_provider_tool", &serde_json::json!({})),
+            Outcome::Deny,
+            "unknown tool must fail closed in {mode} mode"
+        );
     }
 }
 

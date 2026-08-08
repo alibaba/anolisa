@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::classification::is_shell_tool_name;
+use super::classification::{known_provider_tool, KnownProviderTool};
 
 /// Longest tool name drawn on a status surface.
 const MAX_DISPLAY_TOOL_NAME_CHARS: usize = 64;
@@ -113,38 +113,56 @@ pub fn display_for_tool(name: &str, input_json: &str) -> ToolDisplayInfo {
 pub fn presentation_for_tool(name: &str, input_json: &str) -> ToolPresentation {
     let parsed = serde_json::from_str::<Value>(input_json).ok();
 
-    if is_shell_tool_name(name) {
-        return presentation_bash(name, &parsed, input_json);
-    }
-
-    match name {
-        "Read" | "read_file" => presentation_read(name, &parsed, input_json),
-        "Write" | "write_file" => presentation_write(name, &parsed, input_json),
-        "Edit" | "replace" | "NotebookEdit" => presentation_edit(name, &parsed, input_json),
-        "Grep" | "grep" | "grep_search" | "search_file_content" | "FileSearch" | "file_search" => {
-            presentation_grep(name, &parsed, input_json)
+    match known_provider_tool(name) {
+        Some(KnownProviderTool::Shell) => presentation_bash(name, &parsed, input_json),
+        Some(KnownProviderTool::ReadFile) => presentation_read(name, &parsed, input_json),
+        Some(KnownProviderTool::WriteFile) => presentation_write(name, &parsed, input_json),
+        Some(KnownProviderTool::Edit) => presentation_edit(name, "Edit", &parsed, input_json),
+        Some(KnownProviderTool::NotebookEdit) => {
+            presentation_edit(name, "Notebook edit", &parsed, input_json)
         }
-        "Glob" | "glob" | "FindFiles" => presentation_glob(name, &parsed, input_json),
-        "LS" | "list_directory" | "ReadFolder" => presentation_ls(name, &parsed, input_json),
-        "read_many_files" => presentation_many_files(name, &parsed, input_json),
-        "LSP" => presentation_lsp(name, &parsed, input_json),
-        "WebFetch" | "web_fetch" => presentation_web_fetch(name, &parsed, input_json),
-        "WebSearch" | "google_web_search" => presentation_web_search(name, &parsed, input_json),
-        "Skill" | "skill" | "read_skill" | "ReadSkill" => {
-            presentation_skill(name, &parsed, input_json)
+        Some(KnownProviderTool::Grep) => presentation_grep(name, &parsed, input_json),
+        Some(KnownProviderTool::Glob) => presentation_glob(name, &parsed, input_json),
+        Some(KnownProviderTool::ListDirectory) => presentation_ls(name, &parsed, input_json),
+        Some(KnownProviderTool::ReadManyFiles) => {
+            presentation_many_files(name, &parsed, input_json)
         }
-        "Agent" | "Workflow" | "SendMessage" | "Task" | "Subagent" | "Delegate" => {
-            presentation_agent(name, &parsed, input_json)
+        Some(KnownProviderTool::Lsp) => presentation_lsp(name, &parsed, input_json),
+        Some(KnownProviderTool::WebFetch) => presentation_web_fetch(name, &parsed, input_json),
+        Some(KnownProviderTool::WebSearch) => presentation_web_search(name, &parsed, input_json),
+        Some(KnownProviderTool::Skill) => presentation_skill(name, &parsed, input_json),
+        Some(
+            tool @ (KnownProviderTool::Agent
+            | KnownProviderTool::Workflow
+            | KnownProviderTool::SendMessage
+            | KnownProviderTool::Task
+            | KnownProviderTool::Subagent
+            | KnownProviderTool::Delegate),
+        ) => presentation_agent(name, agent_label(tool), &parsed, input_json),
+        Some(
+            tool @ (KnownProviderTool::SaveMemory
+            | KnownProviderTool::Todo
+            | KnownProviderTool::TodoWrite
+            | KnownProviderTool::TaskCreate
+            | KnownProviderTool::TaskUpdate
+            | KnownProviderTool::TaskList
+            | KnownProviderTool::TaskGet
+            | KnownProviderTool::TaskStop
+            | KnownProviderTool::CronCreate
+            | KnownProviderTool::CronDelete
+            | KnownProviderTool::CronList
+            | KnownProviderTool::ScheduleWakeup),
+        ) => {
+            let (label, receipt) = memory_tool_receipt(tool);
+            presentation_memory(name, label, receipt, &parsed, input_json)
         }
-        "save_memory" | "TodoWrite" | "TaskCreate" | "TaskUpdate" | "TaskList" | "TaskGet"
-        | "TaskStop" | "CronCreate" | "CronDelete" | "CronList" | "ScheduleWakeup" => {
-            presentation_memory(name, &parsed, input_json)
-        }
-        "AskUserQuestion" | "ask_user_question" | "ask_user" | "AskUser" => {
+        Some(KnownProviderTool::AskUserQuestion) => {
             presentation_question(name, &parsed, input_json)
         }
-        "cosh_shell_evidence" => presentation_shell_evidence(name, &parsed, input_json),
-        _ => presentation_custom(name, &parsed, input_json),
+        Some(KnownProviderTool::ShellEvidence) => {
+            presentation_shell_evidence(name, &parsed, input_json)
+        }
+        None => presentation_custom(name, &parsed, input_json),
     }
 }
 
@@ -282,6 +300,7 @@ fn presentation_write(
 
 fn presentation_edit(
     original_name: &str,
+    canonical_name: &str,
     parsed: &Option<Value>,
     input_json: &str,
 ) -> ToolPresentation {
@@ -301,11 +320,7 @@ fn presentation_edit(
 
     base_presentation(
         original_name,
-        if original_name == "NotebookEdit" {
-            "Notebook edit"
-        } else {
-            "Edit"
-        },
+        canonical_name,
         ToolPresentationKind::FileEdit,
         ToolImpact::Write,
         Some(file_path.to_string()),
@@ -539,6 +554,7 @@ fn presentation_skill(
 
 fn presentation_agent(
     original_name: &str,
+    canonical_name: &str,
     parsed: &Option<Value>,
     input_json: &str,
 ) -> ToolPresentation {
@@ -549,15 +565,9 @@ fn presentation_agent(
         .or_else(|| str_field(parsed, "subagent"))
         .or_else(|| str_field(parsed, "name"))
         .unwrap_or("agent");
-    let canonical = match original_name {
-        "Task" => "Task",
-        "Subagent" => "Subagent",
-        "Delegate" => "Delegate",
-        _ => "Agent",
-    };
     base_presentation(
         original_name,
-        canonical,
+        canonical_name,
         ToolPresentationKind::Agent,
         ToolImpact::ContextMutation,
         Some(truncate(agent, 80)),
@@ -569,6 +579,8 @@ fn presentation_agent(
 
 fn presentation_memory(
     original_name: &str,
+    canonical_name: &str,
+    receipt: &str,
     parsed: &Option<Value>,
     input_json: &str,
 ) -> ToolPresentation {
@@ -581,10 +593,9 @@ fn presentation_memory(
         .or_else(|| str_field(parsed, "fact"))
         .or_else(|| str_field(parsed, "time"))
         .unwrap_or("context");
-    let (canonical, receipt) = memory_tool_receipt(original_name);
     base_presentation(
         original_name,
-        canonical,
+        canonical_name,
         ToolPresentationKind::Memory,
         ToolImpact::ContextMutation,
         Some(truncate(target, 80)),
@@ -594,20 +605,29 @@ fn presentation_memory(
     )
 }
 
-fn memory_tool_receipt(name: &str) -> (&str, &'static str) {
-    match name {
-        "TodoWrite" => ("Todo", "updated"),
-        "TaskCreate" => ("Task", "created"),
-        "TaskUpdate" => ("Task", "updated"),
-        "TaskList" => ("Task", "listed"),
-        "TaskGet" => ("Task", "loaded"),
-        "TaskStop" => ("Task", "stopped"),
-        "CronCreate" => ("Cron", "created"),
-        "CronDelete" => ("Cron", "deleted"),
-        "CronList" => ("Cron", "listed"),
-        "ScheduleWakeup" => ("Wakeup", "scheduled"),
-        "save_memory" => ("Memory", "saved"),
-        _ => (name, "updated"),
+fn agent_label(tool: KnownProviderTool) -> &'static str {
+    match tool {
+        KnownProviderTool::Task => "Task",
+        KnownProviderTool::Subagent => "Subagent",
+        KnownProviderTool::Delegate => "Delegate",
+        _ => "Agent",
+    }
+}
+
+fn memory_tool_receipt(tool: KnownProviderTool) -> (&'static str, &'static str) {
+    match tool {
+        KnownProviderTool::SaveMemory => ("Memory", "saved"),
+        KnownProviderTool::Todo | KnownProviderTool::TodoWrite => ("Todo", "updated"),
+        KnownProviderTool::TaskCreate => ("Task", "created"),
+        KnownProviderTool::TaskUpdate => ("Task", "updated"),
+        KnownProviderTool::TaskList => ("Task", "listed"),
+        KnownProviderTool::TaskGet => ("Task", "loaded"),
+        KnownProviderTool::TaskStop => ("Task", "stopped"),
+        KnownProviderTool::CronCreate => ("Cron", "created"),
+        KnownProviderTool::CronDelete => ("Cron", "deleted"),
+        KnownProviderTool::CronList => ("Cron", "listed"),
+        KnownProviderTool::ScheduleWakeup => ("Wakeup", "scheduled"),
+        _ => unreachable!("only memory identities reach receipt rendering"),
     }
 }
 

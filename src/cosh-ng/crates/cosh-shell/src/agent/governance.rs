@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::tools::is_shell_tool_name;
 use crate::{
     config::Language,
     i18n::{I18n, MessageId},
@@ -415,7 +416,7 @@ fn render_blocked_shell_command(command: &str, i18n: &I18n) -> String {
 }
 
 fn user_facing_tool_name(name: &str, i18n: &I18n) -> String {
-    if name.eq_ignore_ascii_case("bash") || name.eq_ignore_ascii_case("shell") {
+    if is_shell_tool_name(name) {
         i18n.t(MessageId::AgentGovernanceBashCommandSubject)
             .to_string()
     } else {

@@ -248,6 +248,13 @@ fn tool_presentation_covers_spec_tool_aliases() {
             "Notebook edit",
         ),
         (
+            "edit",
+            r#"{"file_path":"notes.md","old_string":"a","new_string":"b"}"#,
+            ToolPresentationKind::FileEdit,
+            ToolImpact::Write,
+            "Edit",
+        ),
+        (
             "web_fetch",
             r#"{"url":"https://example.com"}"#,
             ToolPresentationKind::WebFetch,
@@ -277,6 +284,13 @@ fn tool_presentation_covers_spec_tool_aliases() {
         ),
         (
             "TodoWrite",
+            r#"{"task_id":"task-1"}"#,
+            ToolPresentationKind::Memory,
+            ToolImpact::ContextMutation,
+            "Todo",
+        ),
+        (
+            "todo",
             r#"{"task_id":"task-1"}"#,
             ToolPresentationKind::Memory,
             ToolImpact::ContextMutation,

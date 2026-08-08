@@ -704,6 +704,31 @@ fn pending_control_tool_call_drops_matching_shell_snapshot() {
 }
 
 #[test]
+fn control_staging_uses_the_canonical_provider_catalog() {
+    for name in [
+        "Bash",
+        "shell",
+        "run_shell_command",
+        "tool Bash",
+        "cosh_shell_evidence",
+    ] {
+        assert!(is_control_backed_tool_name(name), "{name}");
+    }
+
+    for name in [
+        "grep",
+        "edit",
+        "web_fetch",
+        "save_memory",
+        "todo",
+        "skill",
+        "CustomTool",
+    ] {
+        assert!(!is_control_backed_tool_name(name), "{name}");
+    }
+}
+
+#[test]
 fn pending_control_tool_call_drops_matching_shell_evidence_snapshot_and_result() {
     let mut pending = PendingControlProtocolToolCall::default();
 
