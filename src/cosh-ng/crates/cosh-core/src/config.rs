@@ -136,6 +136,10 @@ pub struct HookDefinition {
     pub timeout: Option<u64>,
     #[serde(default)]
     pub sequential: Option<bool>,
+    /// Allow this hook to fail open. The default is fail closed because a
+    /// PreToolUse hook failure must never silently authorize a tool call.
+    #[serde(default)]
+    pub fail_open: bool,
     /// Environment variables injected into this hook's child process only.
     /// The child inherits the parent environment first, so an entry here
     /// overrides an inherited value of the same name. The host never calls

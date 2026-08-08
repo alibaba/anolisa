@@ -16,7 +16,7 @@ use crate::compaction::{CompactionRuntime, ModelCapability};
 use crate::config::{self, CoreConfig};
 use crate::context::ContextBuilder;
 use crate::extension::{GenerationController, RuntimeGeneration, RuntimeSnapshot};
-use crate::hook::{HookDecision, HookNotification, HookSystem};
+use crate::hook::{HookDecision, HookNotification, HookSystem, PreToolUseResult};
 use crate::loop_detect::LoopDetector;
 use crate::metrics::TurnMetrics;
 use crate::protocol::{InputMessage, OutputMessage, ShellContext, ShellControlRequest};
@@ -1198,15 +1198,16 @@ impl CoshCore {
                     )
                     .await;
                 self.emit_hook_notifications(writer, &hook_result.notifications, Some(&tc.id));
+                let (hook_status, hook_decision) = pre_tool_hook_audit(&hook_result);
                 self.audit.record_hook_decision(
                     tool_scope,
                     "pre_tool_use",
-                    hook_outcome(&hook_result.decision),
-                    hook_decision_name(&hook_result.decision),
+                    hook_status,
+                    hook_decision,
                 );
 
                 let (outcome, params) = match hook_result.decision {
-                    HookDecision::Block(reason) => {
+                    HookDecision::Block(reason) | HookDecision::HookFailure(reason) => {
                         // ─── SLS: hook-blocked tool call counts as total + fail ───
                         self.metrics.tool_calls_total += 1;
                         self.metrics.tool_calls_fail += 1;
@@ -2206,8 +2207,26 @@ fn hook_decision_name(decision: &HookDecision) -> &'static str {
     match decision {
         HookDecision::Allow => "allow",
         HookDecision::Block(_) => "block",
+        HookDecision::HookFailure(_) => "hook_failure",
         HookDecision::Ask => "ask",
         HookDecision::Passthrough => "passthrough",
+    }
+}
+
+fn pre_tool_hook_audit(result: &PreToolUseResult) -> (AuditOutcomeStatus, &'static str) {
+    if !result.hook_failures.is_empty()
+        && matches!(
+            result.decision,
+            HookDecision::Allow | HookDecision::Passthrough
+        )
+    {
+        // A fail-open hook failed and no stronger decision stopped the tool.
+        (AuditOutcomeStatus::Failed, "hook_failure")
+    } else {
+        (
+            hook_outcome(&result.decision),
+            hook_decision_name(&result.decision),
+        )
     }
 }
 
@@ -2215,6 +2234,7 @@ fn hook_outcome(decision: &HookDecision) -> AuditOutcomeStatus {
     match decision {
         HookDecision::Allow | HookDecision::Passthrough => AuditOutcomeStatus::Allowed,
         HookDecision::Block(_) => AuditOutcomeStatus::Denied,
+        HookDecision::HookFailure(_) => AuditOutcomeStatus::Failed,
         HookDecision::Ask => AuditOutcomeStatus::Started,
     }
 }

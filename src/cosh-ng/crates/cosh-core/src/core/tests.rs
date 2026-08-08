@@ -19,6 +19,55 @@ fn make_core(provider: MockProvider) -> CoshCore {
     CoshCore::new(config, Box::new(provider), tools)
 }
 
+#[test]
+fn hook_failure_audit_is_distinct_from_real_allow() {
+    let allow = crate::hook::PreToolUseResult {
+        decision: crate::hook::HookDecision::Allow,
+        tool_input_patch: None,
+        notifications: Vec::new(),
+        hook_failures: Vec::new(),
+    };
+    assert_eq!(
+        pre_tool_hook_audit(&allow),
+        (cosh_types::audit::AuditOutcomeStatus::Allowed, "allow")
+    );
+
+    let fail_open = crate::hook::PreToolUseResult {
+        decision: crate::hook::HookDecision::Allow,
+        tool_input_patch: None,
+        notifications: Vec::new(),
+        hook_failures: vec![crate::hook::HookFailure {
+            hook_name: "probe".to_string(),
+            kind: crate::hook::HookFailureKind::InvalidJson,
+        }],
+    };
+    assert_eq!(
+        pre_tool_hook_audit(&fail_open),
+        (
+            cosh_types::audit::AuditOutcomeStatus::Failed,
+            "hook_failure"
+        )
+    );
+
+    let blocked_with_fail_open_failure = crate::hook::PreToolUseResult {
+        decision: crate::hook::HookDecision::Block("policy denied".to_string()),
+        ..fail_open.clone()
+    };
+    assert_eq!(
+        pre_tool_hook_audit(&blocked_with_fail_open_failure),
+        (cosh_types::audit::AuditOutcomeStatus::Denied, "block")
+    );
+
+    let ask_with_fail_open_failure = crate::hook::PreToolUseResult {
+        decision: crate::hook::HookDecision::Ask,
+        ..fail_open
+    };
+    assert_eq!(
+        pre_tool_hook_audit(&ask_with_fail_open_failure),
+        (cosh_types::audit::AuditOutcomeStatus::Started, "ask")
+    );
+}
+
 struct CountingShellTool {
     calls: Arc<AtomicUsize>,
 }
@@ -337,6 +386,7 @@ async fn raw_shell_input_reaches_prompt_hook_without_changing_provider_content()
         matcher: None,
         timeout: Some(5_000),
         sequential: None,
+        fail_open: false,
         env: Default::default(),
     }];
     let mut core = CoshCore::new(config, Box::new(provider), ToolRegistry::new());
@@ -374,6 +424,7 @@ async fn prompt_hook_falls_back_to_content_without_raw_shell_input() {
         matcher: None,
         timeout: Some(5_000),
         sequential: None,
+        fail_open: false,
         env: Default::default(),
     }];
     let mut core = CoshCore::new(config, Box::new(provider), ToolRegistry::new());
@@ -476,6 +527,7 @@ fn compress_schema_hook(command: &str) -> crate::config::HookDefinition {
         matcher: None,
         timeout: Some(10_000),
         sequential: None,
+        fail_open: false,
         env: Default::default(),
     }
 }
@@ -1462,6 +1514,7 @@ fn sandbox_bypass_hook(marker: &std::path::Path) -> crate::config::HookDefinitio
         matcher: None,
         timeout: Some(10_000),
         sequential: None,
+        fail_open: false,
         env: Default::default(),
     }
 }
@@ -2008,6 +2061,7 @@ async fn cosh_shell_evidence_bypasses_normal_tool_hooks() {
             matcher: Some("cosh_shell_evidence".to_string()),
             timeout: Some(5000),
             sequential: None,
+            fail_open: false,
             env: Default::default(),
         }],
         post_tool_use: vec![config::HookDefinition {
@@ -2017,6 +2071,7 @@ async fn cosh_shell_evidence_bypasses_normal_tool_hooks() {
             matcher: Some("cosh_shell_evidence".to_string()),
             timeout: Some(5000),
             sequential: None,
+            fail_open: false,
             env: Default::default(),
         }],
         ..Default::default()
@@ -3216,6 +3271,7 @@ fn ask_hook(name: &str) -> crate::config::HookDefinition {
         matcher: None,
         timeout: Some(10_000),
         sequential: None,
+        fail_open: false,
         env: Default::default(),
     }
 }

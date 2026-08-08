@@ -85,6 +85,9 @@ pub struct CommandHookConfig {
     pub description: Option<String>,
     #[serde(default)]
     pub timeout: Option<u64>,
+    /// Explicitly permit this hook to fail open.
+    #[serde(default)]
+    pub fail_open: bool,
     /// Environment variables for this hook's child process. Passed through to
     /// [`HookDefinition::env`] verbatim; see there for the scoping guarantees.
     #[serde(default)]
@@ -124,6 +127,7 @@ impl HookGroup {
                 matcher: self.matcher.clone(),
                 timeout: h.timeout,
                 sequential: self.sequential,
+                fail_open: h.fail_open,
                 env: h.env.clone(),
             })
             .collect()
@@ -282,6 +286,7 @@ mod tests {
                     name: Some("hook-a".to_string()),
                     description: None,
                     timeout: Some(3000),
+                    fail_open: false,
                     env: BTreeMap::from([("TOKENLESS_AGENT_ID".to_string(), "cosh".to_string())]),
                 }],
             },
@@ -294,6 +299,7 @@ mod tests {
                     name: None,
                     description: None,
                     timeout: None,
+                    fail_open: false,
                     env: BTreeMap::new(),
                 }],
             },
