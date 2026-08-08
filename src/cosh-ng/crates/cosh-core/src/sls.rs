@@ -12,6 +12,8 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::time::Duration;
 
+#[cfg(test)]
+use crate::config::ApprovalMode;
 use crate::core::CoshCore;
 
 const DEFAULT_SLS_LOG_PATH: &str = "/var/log/anolisa/sls/ops/cosh.jsonl";
@@ -296,7 +298,7 @@ mod tests {
         ]);
 
         let mut config = crate::config::CoreConfig::default();
-        config.agent.approval_mode = "trust".to_string();
+        config.agent.approval_mode = ApprovalMode::Trust;
         let tools = crate::tool::ToolRegistry::with_defaults_for_test();
         let mut engine = CoshCore::new(config, Box::new(provider), tools);
 

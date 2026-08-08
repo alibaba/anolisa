@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::ApprovalMode;
+
 use super::identity::{validate_local_id, CapabilityId, CapabilityKind};
 use super::{Extension, ExtensionDiagnostic, ExtensionManager};
 
@@ -116,7 +118,7 @@ impl AgentRegistry {
         manager: &ExtensionManager,
         globally_allowed_tools: &BTreeSet<String>,
         workspace_trusted: bool,
-        approval_mode: &str,
+        approval_mode: ApprovalMode,
     ) -> Self {
         let mut registry = Self::default();
         for extension in manager
@@ -366,7 +368,7 @@ fn resolve_agent(
     agent: ParsedAgent,
     globally_allowed_tools: &BTreeSet<String>,
     workspace_trusted: bool,
-    approval_mode: &str,
+    approval_mode: ApprovalMode,
 ) -> AgentDefinition {
     let declared_skills = extension
         .capabilities
@@ -461,8 +463,8 @@ fn mutating_tool(tool: &str) -> bool {
     matches!(tool, "shell" | "write_file" | "edit")
 }
 
-fn approval_mode_restricts_mutation(mode: &str) -> bool {
-    matches!(mode, "suggest" | "strict" | "recommend")
+fn approval_mode_restricts_mutation(mode: ApprovalMode) -> bool {
+    mode == ApprovalMode::Recommend
 }
 
 #[cfg(test)]
@@ -531,7 +533,7 @@ mod tests {
             .into_iter()
             .map(str::to_string)
             .collect();
-        let registry = AgentRegistry::build(&manager, &allowed, true, "balanced");
+        let registry = AgentRegistry::build(&manager, &allowed, true, ApprovalMode::Auto);
         let agent = &registry.list()[0];
         assert_eq!(agent.id, "example.ops/agent/reviewer");
         assert!(!agent.executable);
@@ -561,7 +563,7 @@ mod tests {
             .into_iter()
             .map(str::to_string)
             .collect();
-        let registry = AgentRegistry::build(&manager, &allowed, false, "suggest");
+        let registry = AgentRegistry::build(&manager, &allowed, false, ApprovalMode::Recommend);
         let agent = &registry.list()[0];
         assert_eq!(agent.effective_tools, ["read_file"]);
         assert!(agent.effective_mcp_servers.is_empty());
@@ -583,7 +585,7 @@ mod tests {
             .into_iter()
             .map(str::to_string)
             .collect();
-        let registry = AgentRegistry::build(&manager, &allowed, true, "recommend");
+        let registry = AgentRegistry::build(&manager, &allowed, true, ApprovalMode::Recommend);
         let agent = &registry.list()[0];
         assert_eq!(agent.effective_tools, ["read_file"]);
         assert!(agent.denied.iter().any(|denial| {

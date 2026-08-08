@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::types::CoshApprovalMode;
+
 use super::hook_feedback::{
     hook_feedback_store_path_in_dir, read_hook_feedback_from_store_path,
     write_hook_feedback_entries_to_store_path, write_hook_feedback_to_store_path,
@@ -49,7 +51,7 @@ fn default_config_values() {
     let cfg = CoshConfig::default();
     assert_eq!(cfg.shell_default, "auto");
     assert_eq!(cfg.analysis_mode, "smart");
-    assert_eq!(cfg.approval_mode, "auto");
+    assert_eq!(cfg.approval_mode, CoshApprovalMode::Auto);
     assert_eq!(cfg.adapter_default, "cosh-core");
     assert_eq!(cfg.language, "auto");
     assert!(cfg.startup_banner);
@@ -219,9 +221,29 @@ ui.language = zh-CN
     parse_simple_config(content, &mut cfg);
     assert_eq!(cfg.shell_default, "zsh");
     assert_eq!(cfg.analysis_mode, "conservative");
-    assert_eq!(cfg.approval_mode, "recommend");
+    assert_eq!(cfg.approval_mode, CoshApprovalMode::Recommend);
     assert_eq!(cfg.adapter_default, "qwen");
     assert_eq!(cfg.language, "zh-CN");
+
+    for value in ["balanced", "strict", "suggest"] {
+        let mut simple = CoshConfig::default();
+        parse_simple_config(&format!("shell.approval_mode = {value}\n"), &mut simple);
+        assert_eq!(simple.approval_mode, CoshApprovalMode::Recommend);
+
+        let mut toml = CoshConfig::default();
+        parse_toml_config(
+            &format!("[shell]\napproval_mode = \"{value}\"\n"),
+            &mut toml,
+        );
+        assert_eq!(toml.approval_mode, CoshApprovalMode::Recommend);
+    }
+
+    let mut config = CoshConfig {
+        approval_mode: CoshApprovalMode::Trust,
+        ..Default::default()
+    };
+    parse_simple_config("shell.approval_mode = invalid\n", &mut config);
+    assert_eq!(config.approval_mode, CoshApprovalMode::Recommend);
 }
 
 #[test]

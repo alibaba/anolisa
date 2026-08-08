@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
 
+use crate::config::ApprovalMode;
+
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Manage configured MCP servers.
@@ -68,9 +70,9 @@ pub struct CliArgs {
     #[arg(long)]
     pub model: Option<String>,
 
-    /// Override approval mode (trust|auto|balanced|strict)
+    /// Override approval mode (recommend|auto|trust)
     #[arg(long, value_name = "MODE")]
-    pub approval_mode: Option<String>,
+    pub approval_mode: Option<ApprovalMode>,
 
     /// Comma-separated list of auto-approved tools
     #[arg(long, value_name = "TOOLS")]
@@ -311,6 +313,23 @@ mod tests {
 
         assert_eq!(default_args.tools.as_deref(), Some("default"));
         assert_eq!(empty_args.tools.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn approval_mode_cli_uses_canonical_type() {
+        for (value, expected) in [
+            ("recommend", ApprovalMode::Recommend),
+            ("balanced", ApprovalMode::Recommend),
+            ("strict", ApprovalMode::Recommend),
+            ("suggest", ApprovalMode::Recommend),
+            ("auto", ApprovalMode::Auto),
+            ("trust", ApprovalMode::Trust),
+        ] {
+            let args = CliArgs::try_parse_from(["cosh-core", "--approval-mode", value])
+                .expect("parse approval mode");
+            assert_eq!(args.approval_mode, Some(expected));
+        }
+        assert!(CliArgs::try_parse_from(["cosh-core", "--approval-mode", "invalid"]).is_err());
     }
 
     #[test]

@@ -58,7 +58,8 @@ $ /session status
 
 Use `/auth` to choose a supported provider plan, `/help` to list current slash
 commands, and `/mode approval recommend` when every Agent tool call should wait
-for confirmation.
+for confirmation. Approval settings use `recommend`, `auto`, or `trust` across
+the shell and Core.
 
 ## Documentation
 

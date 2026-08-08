@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use super::language::apply_language_value;
 use super::readonly::{parse_disabled_rules, parse_runtime_spec, string_array};
 use super::{CoshConfig, HealthServiceConfig, HealthServiceExpectedState};
+use crate::types::CoshApprovalMode;
 
 pub(super) fn parse_simple_config(content: &str, config: &mut CoshConfig) {
     for line in content.lines() {
@@ -16,7 +17,9 @@ pub(super) fn parse_simple_config(content: &str, config: &mut CoshConfig) {
             match key {
                 "shell.default" => config.shell_default = value.into(),
                 "shell.analysis_mode" => config.analysis_mode = value.into(),
-                "shell.approval_mode" => config.approval_mode = value.into(),
+                "shell.approval_mode" => {
+                    config.approval_mode = CoshApprovalMode::from_config(value)
+                }
                 "shell.adapter_default" => config.adapter_default = value.into(),
                 // #2161: invalid values fall back to the built-in default
                 // (treat-as-unset), never to 0/disabled.
@@ -117,7 +120,7 @@ fn parse_shell_toml_config(value: &toml::Value, config: &mut CoshConfig) {
         config.analysis_mode = analysis_mode.to_string();
     }
     if let Some(approval_mode) = shell.get("approval_mode").and_then(toml::Value::as_str) {
-        config.approval_mode = approval_mode.to_string();
+        config.approval_mode = CoshApprovalMode::from_config(approval_mode);
     }
     if let Some(adapter_default) = shell.get("adapter_default").and_then(toml::Value::as_str) {
         config.adapter_default = adapter_default.to_string();

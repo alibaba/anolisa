@@ -5,7 +5,7 @@ use crate::question::runtime::pending_question_capture;
 use crate::runtime::approval_state::ApprovalRequestStatus;
 use crate::runtime::prelude::*;
 use crate::runtime::question_terminal::redraw_active_question_if_width_changed;
-use crate::runtime::state::{CoshApprovalMode, InlineState};
+use crate::runtime::state::InlineState;
 
 use super::dispatcher::RuntimeDispatcher;
 use super::events::ShellEventSnapshot;
@@ -194,14 +194,6 @@ pub(crate) fn render_inline_guidance<W: Write>(
     Ok(())
 }
 
-fn approval_mode_from_config(value: &str) -> CoshApprovalMode {
-    match value {
-        "recommend" | "suggest" => CoshApprovalMode::Recommend,
-        "trust" => CoshApprovalMode::Trust,
-        _ => CoshApprovalMode::Auto,
-    }
-}
-
 pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCapture> {
     // #1721 D13: an open draft card owns every keystroke until submit/cancel.
     if let Some(draft) = state.prompt_draft.as_ref() {
@@ -317,21 +309,6 @@ mod tests {
     use super::*;
     use crate::agent::run::ActiveAgentRun;
     use std::time::Instant;
-
-    #[test]
-    fn approval_mode_config_keeps_legacy_suggest_as_recommend() {
-        assert_eq!(
-            approval_mode_from_config("recommend"),
-            CoshApprovalMode::Recommend
-        );
-        assert_eq!(
-            approval_mode_from_config("suggest"),
-            CoshApprovalMode::Recommend
-        );
-        assert_eq!(approval_mode_from_config("trust"), CoshApprovalMode::Trust);
-        assert_eq!(approval_mode_from_config("auto"), CoshApprovalMode::Auto);
-        assert_eq!(approval_mode_from_config("unknown"), CoshApprovalMode::Auto);
-    }
 
     #[test]
     fn active_foreground_command_keeps_raw_passthrough_even_when_agent_running() {

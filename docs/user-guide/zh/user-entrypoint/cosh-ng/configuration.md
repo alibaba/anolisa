@@ -29,7 +29,7 @@ api_key = "${DASHSCOPE_API_KEY}"
 model = "qwen3.7-plus"
 
 [agent]
-approval_mode = "balanced"
+approval_mode = "recommend"
 max_turns = 50
 max_tool_calls_per_turn = 10
 
@@ -64,9 +64,12 @@ Core 审批模式适用于直接集成：
 |---|---|---|---|
 | `trust` | 执行 | 执行 | 执行 |
 | `auto` | 执行 | 执行 | 询问 |
-| `balanced`、`suggest`、`strict` | 执行 | 询问 | 询问 |
+| `recommend` | 执行 | 询问 | 询问 |
 
-Shell 提供 `recommend`、`auto` 和 `trust`；`recommend` 使用 Core 的严格行为。`agent.max_turns` 限制一次 Agent 请求（默认 `50`），`max_tool_calls_per_turn` 默认 `10`。每次新 prompt 都会重新开始轮次预算。
+Core 和 Shell 统一使用 `recommend`、`auto` 和 `trust`。已有的 `balanced`、
+`suggest` 和 `strict` 会按 `recommend` 读取；非法配置值也会回退到
+`recommend`。`agent.max_turns` 限制一次 Agent 请求（默认 `50`），
+`max_tool_calls_per_turn` 默认 `10`。每次新 prompt 都会重新开始轮次预算。
 
 ## 会话与压缩
 

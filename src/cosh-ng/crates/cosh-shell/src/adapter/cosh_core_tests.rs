@@ -248,7 +248,7 @@ fn agent_request_does_not_serialize_internal_context_binding() {
 #[test]
 fn prepare_invocation_approval_modes() {
     let recommend = test_adapter().prepare_invocation(&test_request(), CoshApprovalMode::Recommend);
-    assert!(recommend.args.contains(&"strict".to_string()));
+    assert!(recommend.args.contains(&"recommend".to_string()));
 
     let auto = test_adapter().prepare_invocation(&test_request(), CoshApprovalMode::Auto);
     assert!(auto.args.contains(&"auto".to_string()));
@@ -258,7 +258,7 @@ fn prepare_invocation_approval_modes() {
 }
 
 #[test]
-fn shell_handoff_continuation_keeps_strict_args_without_recommend_claim() {
+fn shell_handoff_continuation_keeps_recommend_args_without_recommend_claim() {
     let mut request = test_request();
     request.context_hints = vec![
         crate::types::SHELL_HANDOFF_CONTINUATION_HINT.to_string(),
@@ -266,7 +266,7 @@ fn shell_handoff_continuation_keeps_strict_args_without_recommend_claim() {
     ];
     let inv = test_adapter().prepare_invocation(&request, CoshApprovalMode::Recommend);
 
-    assert!(inv.args.contains(&"strict".to_string()));
+    assert!(inv.args.contains(&"recommend".to_string()));
     assert!(!inv.prompt.contains("recommend mode"), "{}", inv.prompt);
     assert!(
         inv.prompt

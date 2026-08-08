@@ -168,6 +168,24 @@ fn raw_cli_startup_banner_reports_effective_modes() {
 }
 
 #[test]
+fn raw_cli_startup_approval_alias_and_invalid_value_fail_closed() {
+    for value in ["balanced", "invalid"] {
+        let output = run_raw_cli_with_env(
+            "fake",
+            "exit\n",
+            &[
+                ("COSH_SHELL_STARTUP_BANNER", "1"),
+                ("COSH_SHELL_APPROVAL_MODE", value),
+                ("TERM", "xterm-256color"),
+            ],
+        );
+
+        assert!(output.contains("Approval: recommend"), "{value}: {output}");
+        assert!(!output.contains("Approval: auto"), "{value}: {output}");
+    }
+}
+
+#[test]
 fn raw_cli_plain_startup_banner_keeps_both_modes() {
     let output = run_raw_cli_with_env(
         "fake",

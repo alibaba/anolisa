@@ -507,6 +507,27 @@ pub enum CoshApprovalMode {
 }
 
 impl CoshApprovalMode {
+    /// Parses canonical names and read-only legacy aliases.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "recommend" | "balanced" | "strict" | "suggest" => Some(Self::Recommend),
+            "auto" => Some(Self::Auto),
+            "trust" => Some(Self::Trust),
+            _ => None,
+        }
+    }
+
+    /// Parses configuration input and falls back to the safest mode.
+    pub fn from_config(value: &str) -> Self {
+        match Self::parse(value) {
+            Some(mode) => mode,
+            None => {
+                eprintln!("[cosh-shell] Warning: invalid approval mode {value:?}; using recommend");
+                Self::Recommend
+            }
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Recommend => "recommend",
@@ -577,7 +598,30 @@ impl Default for Policy {
 
 #[cfg(test)]
 mod tests {
-    use super::ShellEvent;
+    use super::{CoshApprovalMode, ShellEvent};
+
+    #[test]
+    fn approval_mode_parses_canonical_and_legacy_names() {
+        for value in ["recommend", "balanced", "strict", "suggest"] {
+            assert_eq!(
+                CoshApprovalMode::parse(value),
+                Some(CoshApprovalMode::Recommend)
+            );
+        }
+        assert_eq!(
+            CoshApprovalMode::parse("auto"),
+            Some(CoshApprovalMode::Auto)
+        );
+        assert_eq!(
+            CoshApprovalMode::parse("trust"),
+            Some(CoshApprovalMode::Trust)
+        );
+        assert_eq!(CoshApprovalMode::parse("unknown"), None);
+        assert_eq!(
+            CoshApprovalMode::from_config("unknown"),
+            CoshApprovalMode::Recommend
+        );
+    }
 
     #[test]
     fn shell_event_without_environment_generation_remains_compatible() {

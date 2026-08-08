@@ -5,6 +5,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::cli::CliArgs;
 use crate::compaction::{ContextBudget, ModelCapability};
+#[cfg(test)]
+use crate::config::ApprovalMode;
 use crate::config::CoreConfig;
 use crate::core::{AgentTurnOutcome, CoshCore};
 use crate::extension::{ExtensionManager, RuntimeSnapshotBuilder};
@@ -782,7 +784,7 @@ fn apply_cli_overrides(args: &CliArgs, config: &mut CoreConfig) {
         config.ai.active_model = Some(model.clone());
     }
     if let Some(ref mode) = args.approval_mode {
-        config.agent.approval_mode = mode.clone();
+        config.agent.approval_mode = *mode;
     }
     if let Some(ref tools) = args.allowed_tools {
         config.agent.allowed_tools = tools
@@ -850,7 +852,7 @@ mod tests {
 
         let config = load_runtime_config(&args, workspace.path());
 
-        assert_ne!(config.agent.approval_mode, "project-only-mode");
+        assert_eq!(config.agent.approval_mode, ApprovalMode::Recommend);
         assert!(!config.session.auto_persist);
     }
 }

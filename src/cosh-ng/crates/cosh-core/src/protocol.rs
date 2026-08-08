@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::config::ApprovalMode;
+
 /// Exact shell-to-core control protocol version supported by this binary.
 pub const CONTROL_PROTOCOL_VERSION: u32 = 1;
 
@@ -141,7 +143,7 @@ pub enum ShellControlRequest {
     #[serde(rename = "config_override")]
     ConfigOverride {
         #[serde(default)]
-        approval_mode: Option<String>,
+        approval_mode: Option<ApprovalMode>,
         #[serde(default)]
         allowed_tools: Option<Vec<String>>,
     },
@@ -927,6 +929,36 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn config_override_uses_typed_approval_mode() {
+        for (value, expected) in [
+            ("recommend", ApprovalMode::Recommend),
+            ("balanced", ApprovalMode::Recommend),
+            ("strict", ApprovalMode::Recommend),
+            ("suggest", ApprovalMode::Recommend),
+            ("auto", ApprovalMode::Auto),
+            ("trust", ApprovalMode::Trust),
+        ] {
+            let json = format!(
+                r#"{{"request_id":"cfg-1","type":"control_request","request":{{"subtype":"config_override","approval_mode":"{value}"}}}}"#
+            );
+            let message: InputMessage = serde_json::from_str(&json).expect("typed override");
+            assert!(matches!(
+                message,
+                InputMessage::ControlRequest {
+                    request: ShellControlRequest::ConfigOverride {
+                        approval_mode: Some(mode),
+                        ..
+                    },
+                    ..
+                } if mode == expected
+            ));
+        }
+
+        let invalid = r#"{"request_id":"cfg-1","type":"control_request","request":{"subtype":"config_override","approval_mode":"invalid"}}"#;
+        assert!(serde_json::from_str::<InputMessage>(invalid).is_err());
     }
 
     #[test]

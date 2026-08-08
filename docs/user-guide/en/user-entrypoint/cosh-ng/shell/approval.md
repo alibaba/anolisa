@@ -42,3 +42,7 @@ input_wait_timeout_secs = 120
 ```
 
 `trusted_commands` matches exact trust keys, not arbitrary command substrings, and does not override the irrecoverable-command gate. See [Configuration](../configuration.md) for environment overrides.
+
+Configuration and environment overrides also accept the legacy values
+`balanced`, `suggest`, and `strict` as `recommend`. Invalid values fail closed
+to `recommend`; `/mode` accepts only the three canonical names.

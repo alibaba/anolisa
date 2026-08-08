@@ -35,7 +35,7 @@ api_key = "${DASHSCOPE_API_KEY}"
 model = "qwen3.7-plus"
 
 [agent]
-approval_mode = "balanced"
+approval_mode = "recommend"
 max_turns = 50
 max_tool_calls_per_turn = 10
 
@@ -71,10 +71,12 @@ Core approval modes apply to direct integrations:
 |---|---|---|---|
 | `trust` | Run | Run | Run |
 | `auto` | Run | Run | Ask |
-| `balanced`, `suggest`, `strict` | Run | Ask | Ask |
+| `recommend` | Run | Ask | Ask |
 
-The shell exposes `recommend`, `auto`, and `trust`; `recommend` uses strict
-Core behavior. `agent.max_turns` limits one Agent request (default `50`), while
+Core and the shell use the same canonical names: `recommend`, `auto`, and
+`trust`. Existing `balanced`, `suggest`, and `strict` values are read as
+`recommend`; invalid configuration values also fall back to `recommend`.
+`agent.max_turns` limits one Agent request (default `50`), while
 `max_tool_calls_per_turn` defaults to `10`. A new prompt starts a fresh turn
 budget.
 

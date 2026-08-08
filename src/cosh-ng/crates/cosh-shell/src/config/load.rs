@@ -4,6 +4,7 @@ use super::language::apply_language_value;
 use super::parse::{parse_bool_value, parse_simple_config, parse_toml_config};
 use super::trust::{load_project_trust_store, project_trust_store_path};
 use super::CoshConfig;
+use crate::types::CoshApprovalMode;
 
 pub fn load_config() -> CoshConfig {
     let mut config = CoshConfig::default();
@@ -54,7 +55,7 @@ fn apply_env_overrides(config: &mut CoshConfig) {
         config.analysis_mode = v;
     }
     if let Ok(v) = std::env::var("COSH_SHELL_APPROVAL_MODE") {
-        config.approval_mode = v;
+        config.approval_mode = CoshApprovalMode::from_config(&v);
     }
     if let Ok(v) = std::env::var("COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS") {
         if let Ok(secs) = v.trim().parse::<u64>() {

@@ -28,7 +28,7 @@ stdin 不是 TTY 时，`cosh-core` 会自动选择 headless 模式。在 headles
 | 选项 | 用途 |
 |---|---|
 | `--model <name>` | 为本次进程覆盖配置中的模型 |
-| `--approval-mode <mode>` | 选择 `trust`、`auto`、`balanced` 或 `strict` |
+| `--approval-mode <mode>` | 选择 `recommend`、`auto` 或 `trust` |
 | `--allowed-tools <names>` | 让精确匹配的工具名跳过审批 |
 | `--tools <selection>` | 暴露 `default`、`empty` 或逗号分隔的工具子集 |
 | `--bare` | 忽略项目配置、Hooks、Skills、Extensions 和持久化 |

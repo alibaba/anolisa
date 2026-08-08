@@ -270,17 +270,12 @@ impl CoshCoreAdapter {
             })
         };
 
-        let approval_mode = match mode {
-            CoshApprovalMode::Recommend => "strict",
-            CoshApprovalMode::Auto => "auto",
-            CoshApprovalMode::Trust => "trust",
-        };
         let mut args = vec![
             "--headless".to_string(),
             "--cosh-shell-transport".to_string(),
             "--enable-shell-evidence-tool".to_string(),
             "--approval-mode".to_string(),
-            approval_mode.to_string(),
+            mode.label().to_string(),
             "--workspace".to_string(),
             session_scope,
         ];

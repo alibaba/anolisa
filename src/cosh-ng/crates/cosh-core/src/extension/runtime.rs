@@ -149,7 +149,7 @@ impl<'a> RuntimeSnapshotBuilder<'a> {
             self.manager,
             &allowed_tools,
             workspace_trusted,
-            &self.config.agent.approval_mode,
+            self.config.agent.approval_mode,
         );
         diagnostics.extend(agents.diagnostics().iter().cloned());
 

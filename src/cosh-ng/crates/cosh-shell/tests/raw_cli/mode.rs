@@ -327,6 +327,7 @@ fn raw_cli_mode_slash_updates_approval_mode_with_feedback() {
          /help\n\
          /approval-mode recommend\n\
          /mode auto\n\
+         /mode approval invalid\n\
          /mode invalid\n\
          echo after-mode\n\
          exit\n",

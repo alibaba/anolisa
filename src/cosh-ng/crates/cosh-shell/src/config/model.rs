@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 
 use crate::tools::readonly_rules::RuntimeReadonlyConfig;
+use crate::types::CoshApprovalMode;
 
 #[derive(Debug, Clone)]
 pub struct CoshConfig {
     pub shell_default: String,
     pub analysis_mode: String,
-    pub approval_mode: String,
+    pub approval_mode: CoshApprovalMode,
     pub adapter_default: String,
     pub language: String,
     pub startup_banner: bool,
@@ -89,7 +90,7 @@ impl Default for CoshConfig {
         Self {
             shell_default: "auto".into(),
             analysis_mode: "smart".into(),
-            approval_mode: "auto".into(),
+            approval_mode: CoshApprovalMode::Auto,
             adapter_default: "cosh-core".into(),
             language: "auto".into(),
             startup_banner: true,

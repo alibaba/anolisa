@@ -55,7 +55,8 @@ $ /session status
 ```
 
 用 `/auth` 选择 provider，用 `/help` 查看当前版本支持的命令。如果希望每次 Agent
-调用工具前都等待确认，运行 `/mode approval recommend`。
+调用工具前都等待确认，运行 `/mode approval recommend`。Shell 和 Core 的审批设置
+统一使用 `recommend`、`auto` 或 `trust`。
 
 ## 文档
 

@@ -13,7 +13,7 @@ use cosh_types::audit::{AuditOutcomeStatus, AuditProviderData, AuditToolData, Ou
 use crate::audit::{CoreAuditRecorder, CoreAuditScope};
 use crate::auth::is_auth_error;
 use crate::compaction::{CompactionRuntime, ModelCapability};
-use crate::config::{self, CoreConfig};
+use crate::config::{self, ApprovalMode, CoreConfig};
 use crate::context::ContextBuilder;
 use crate::extension::{GenerationController, RuntimeGeneration, RuntimeSnapshot};
 use crate::hook::{HookDecision, HookNotification, HookSystem, PreToolUseResult};
@@ -215,7 +215,7 @@ impl CoshCore {
             &self.cwd(),
             &self.tool_names(),
             &[],
-            &self.config.agent.approval_mode,
+            self.config.agent.approval_mode.label(),
             self.config.ai.output_language.as_deref(),
             self.extension_context.as_deref(),
         );
@@ -230,9 +230,9 @@ impl CoshCore {
     }
 
     fn classify_tool(&self, tool_name: &str, params: &serde_json::Value) -> Outcome {
-        let mode = self.config.agent.approval_mode.as_str();
+        let mode = self.config.agent.approval_mode;
 
-        if mode == "trust" {
+        if mode == ApprovalMode::Trust {
             return Outcome::Allow;
         }
 
@@ -245,46 +245,19 @@ impl CoshCore {
             return Outcome::Allow;
         }
 
-        if is_sensitive_write(tool_name, params) && mode == "auto" {
+        if is_sensitive_write(tool_name, params) && mode == ApprovalMode::Auto {
             return Outcome::RequireApproval;
         }
 
-        let kind = tool.kind();
-
-        if kind == ToolKind::ReadOnly {
-            return Outcome::Allow;
-        }
-
-        if kind == ToolKind::Network {
-            return Outcome::RequireApproval;
-        }
-
-        // MCP servers are external programs. Do not infer their side effects
-        // from a server-provided description or schema.
-        if kind == ToolKind::Mcp {
-            return Outcome::RequireApproval;
-        }
-
-        if kind == ToolKind::External {
-            return Outcome::RequireApproval;
-        }
-
-        if mode == "suggest" {
-            return Outcome::RequireApproval;
-        }
-
-        if kind == ToolKind::ShellExec {
-            return Outcome::RequireApproval;
-        }
-
-        if kind == ToolKind::FileEdit && mode == "auto" {
-            return Outcome::Allow;
-        }
-
-        if mode == "auto" {
-            Outcome::Allow
-        } else {
-            Outcome::RequireApproval
+        match (mode, tool.kind()) {
+            (_, ToolKind::ReadOnly) => Outcome::Allow,
+            (
+                ApprovalMode::Auto,
+                ToolKind::FileEdit | ToolKind::ShellEvidence | ToolKind::Other,
+            ) => Outcome::Allow,
+            // MCP, network, and extension tools are external boundaries. Do
+            // not infer their side effects from descriptions or schemas.
+            _ => Outcome::RequireApproval,
         }
     }
 
@@ -498,7 +471,7 @@ impl CoshCore {
             &self.cwd(),
             &self.tool_names(),
             &skill_summaries,
-            &self.config.agent.approval_mode,
+            self.config.agent.approval_mode.label(),
             self.config.ai.output_language.as_deref(),
             self.extension_context.as_deref(),
         );

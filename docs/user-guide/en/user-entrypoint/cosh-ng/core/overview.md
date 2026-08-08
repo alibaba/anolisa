@@ -32,7 +32,7 @@ configured log file or stderr.
 | Option | Use |
 |---|---|
 | `--model <name>` | Override the configured model for this process |
-| `--approval-mode <mode>` | Select `trust`, `auto`, `balanced`, or `strict` |
+| `--approval-mode <mode>` | Select `recommend`, `auto`, or `trust` |
 | `--allowed-tools <names>` | Let exact tool names bypass approval |
 | `--tools <selection>` | Expose `default`, `empty`, or a comma-separated subset |
 | `--bare` | Ignore project config, Hooks, Skills, Extensions, and persistence |

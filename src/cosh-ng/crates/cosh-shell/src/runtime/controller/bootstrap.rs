@@ -16,7 +16,7 @@ use crate::runtime::prelude::*;
 use crate::runtime::startup::bootstrap_process_path_from_shell;
 use crate::runtime::state::{AnalysisMode, InlineState};
 
-use super::{approval_mode_from_config, render_raw_inline_events};
+use super::render_raw_inline_events;
 
 fn build_adapter(kind: AdapterKind) -> AdapterInstance {
     match adapter_for_kind(kind) {
@@ -212,7 +212,7 @@ pub(crate) fn run_raw(
         _ => {}
     }
     inline_state.debug = cosh_config.debug;
-    inline_state.approval_mode = approval_mode_from_config(&cosh_config.approval_mode);
+    inline_state.approval_mode = cosh_config.approval_mode;
     for cmd in &cosh_config.trusted_commands {
         if let Some(key) = trust_key_from_command(cmd) {
             inline_state.control.trust.trust_session_command(key);

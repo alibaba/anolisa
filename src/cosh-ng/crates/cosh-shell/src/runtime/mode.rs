@@ -531,7 +531,7 @@ fn approval_mode_from_index(index: usize) -> CoshApprovalMode {
         0 => CoshApprovalMode::Recommend,
         1 => CoshApprovalMode::Auto,
         2 => CoshApprovalMode::Trust,
-        _ => CoshApprovalMode::Auto,
+        _ => CoshApprovalMode::Recommend,
     }
 }
 

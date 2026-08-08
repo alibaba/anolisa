@@ -25,10 +25,11 @@ allow-lists, and Hooks still decide whether a call runs.
 |---|---|---|---|
 | `trust` | Run | Run | Run |
 | `auto` | Run | Run | Ask |
-| `balanced`, `suggest`, `strict` | Run | Ask | Ask |
+| `recommend` | Run | Ask | Ask |
 
-Unknown tool names are denied. The interactive shell maps `recommend` to strict
-approval, `auto` to auto, and `trust` to trust.
+Unknown tool names are denied. Core and the interactive shell use
+`recommend`, `auto`, and `trust`; legacy `balanced`, `suggest`, and `strict`
+inputs normalize to `recommend`.
 
 ## Limit what the model sees
 
