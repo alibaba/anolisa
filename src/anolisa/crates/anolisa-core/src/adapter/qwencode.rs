@@ -39,7 +39,10 @@ use super::driver::{
     ClaimResourceRef, ConditionStatus, DetectResult, DisableReport, DriverCtx, DriverPlan,
     FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable, find_binary_in_path,
 };
-use super::util::{bool_status, cli_failure_reason, digest_tree, display_command, now_iso8601};
+use super::util::{
+    bool_status, bundle_match_condition, cli_failure_reason, digest_tree, display_command,
+    hash_bundle_files, now_iso8601,
+};
 
 const CLI_TIMEOUT: Duration = Duration::from_secs(60);
 // tokenless declares the same floor; earlier Qwen releases expose the
@@ -151,6 +154,7 @@ impl FrameworkDriver for QwenCodeDriver {
         Ok(AdapterBundle {
             resource_root: root.clone(),
             digest: digest_tree(root),
+            files: hash_bundle_files(root).unwrap_or_default(),
             plugin_id: Some(plugin),
         })
     }
@@ -222,6 +226,7 @@ impl FrameworkDriver for QwenCodeDriver {
             enabled_at: now_iso8601(),
             resource_root: bundle.resource_root.clone(),
             bundle_digest: bundle.digest.clone(),
+            bundle_files: bundle.files.clone(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -329,7 +334,8 @@ impl FrameworkDriver for QwenCodeDriver {
         let detect = self.detect(&HostEnv {
             user_home: ctx.user_home.clone(),
         });
-        let (bundle_condition, bundle_status) = bundle_match_condition(claim);
+        let bundle_condition = bundle_match_condition(claim);
+        let bundle_status = bundle_condition.status;
         let registration = probe_registration(&layout, claim, ctx)?;
         let registration_status = registration.status();
         let activation = probe_activation(&layout, ctx)?;
@@ -1157,30 +1163,6 @@ fn parse_qwen_version(output: &str) -> Option<Version> {
     })
 }
 
-fn bundle_match_condition(claim: &AdapterClaim) -> (AdapterCondition, ConditionStatus) {
-    let kind = AdapterConditionKind::ResourceBundleMatches;
-    let (status, reason) = match (&claim.bundle_digest, digest_tree(&claim.resource_root)) {
-        (Some(recorded), Some(current)) if recorded == &current => (ConditionStatus::True, None),
-        (Some(_), Some(_)) => (
-            ConditionStatus::False,
-            Some("resource bundle changed since enable".to_string()),
-        ),
-        _ => (
-            ConditionStatus::Unknown,
-            Some("no digest recorded or resource root unavailable".to_string()),
-        ),
-    };
-    (
-        AdapterCondition {
-            kind,
-            status,
-            reason,
-            resource: None,
-        },
-        status,
-    )
-}
-
 fn summarize(
     claim_status: ClaimStatus,
     framework_detected: bool,
@@ -1555,6 +1537,87 @@ mod tests {
             condition.kind == AdapterConditionKind::ActivationEnabled
                 && condition.status == ConditionStatus::True
         }));
+    }
+
+    #[test]
+    fn status_stays_healthy_after_a_hook_writes_bytecode() {
+        let guard = EnvGuard::acquire();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let user_home = tmp.path().join("home");
+        std::fs::create_dir_all(&user_home).expect("home");
+        guard.set_bin(&fake_qwen(tmp.path()));
+        let home = user_home.join(".qwen");
+        let resource = resource_root(tmp.path());
+        let ops = SimOps::new(home, user_home.clone());
+        let layout = anolisa_platform::fs_layout::FsLayout::user(user_home.clone());
+        let ctx = ctx(&resource, &user_home, &ops, &layout);
+        let driver = QwenCodeDriver::new();
+        let mut claim = prepare_claim(&driver, &ctx).expect("claim");
+        driver
+            .apply_enable(&mut claim, &PreparedEnable::None, &ctx, &mut ())
+            .expect("enable");
+        assert_eq!(
+            driver.status(&claim, &ctx).expect("status").summary,
+            AdapterSummary::Healthy
+        );
+
+        // What CPython leaves in the resource root the first time a bundled
+        // hook is imported. The header is a structurally real PEP 3147 one
+        // (3.11 magic, timestamp invalidation) so the fixture matches what
+        // the interpreter would actually load; the payload is opaque because
+        // nothing here executes it. The registry verdict does not depend on
+        // the contents anyway — every unregistered `__pycache__` member takes
+        // the same path — which is precisely the exposure this exemption
+        // carries until bytecode is registered at enable time.
+        let cache = resource.join("hooks").join("__pycache__");
+        std::fs::create_dir_all(&cache).expect("mkdir cache");
+        let mut pyc = vec![0xA7, 0x0D, 0x0D, 0x0A];
+        pyc.extend_from_slice(&0u32.to_le_bytes()); // timestamp invalidation
+        pyc.extend_from_slice(&0u32.to_le_bytes()); // source mtime
+        pyc.extend_from_slice(&0u32.to_le_bytes()); // source size
+        pyc.extend_from_slice(b"\xe3opaque code object");
+        std::fs::write(cache.join("pii_text.cpython-311.pyc"), &pyc).expect("write pyc");
+
+        let report = driver.status(&claim, &ctx).expect("status after hook run");
+        assert_eq!(
+            report.summary,
+            AdapterSummary::Healthy,
+            "running an installed hook must not degrade the adapter"
+        );
+        let bundle = report
+            .conditions
+            .iter()
+            .find(|c| c.kind == AdapterConditionKind::ResourceBundleMatches)
+            .expect("bundle condition");
+        assert_eq!(bundle.status, ConditionStatus::True);
+        // The cache is unverified, not vetted: status has to say so out loud.
+        let reason = bundle.reason.as_deref().unwrap_or_default();
+        assert!(
+            reason.contains("unregistered") && reason.contains("__pycache__"),
+            "the unverified cache must be disclosed, got: {reason:?}"
+        );
+
+        std::fs::write(
+            resource.join("hooks/run-hook.sh"),
+            b"#!/bin/sh\nexfiltrate\n",
+        )
+        .expect("tamper with hook");
+        let report = driver.status(&claim, &ctx).expect("status after tampering");
+        let bundle = report
+            .conditions
+            .iter()
+            .find(|c| c.kind == AdapterConditionKind::ResourceBundleMatches)
+            .expect("bundle condition");
+        assert_eq!(bundle.status, ConditionStatus::False);
+        assert!(
+            bundle
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("hooks/run-hook.sh"),
+            "drift must name the file that moved"
+        );
+        assert_eq!(report.summary, AdapterSummary::Degraded);
     }
 
     #[test]

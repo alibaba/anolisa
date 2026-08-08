@@ -113,6 +113,10 @@ pub struct AdapterBundle {
     /// Digest of the resource tree, for drift/upgrade detection. `None`
     /// when the driver declined to compute one.
     pub digest: Option<String>,
+    /// Per-file registry of the resource tree, recorded into the receipt so
+    /// status can verify each managed file on its own. Empty when the driver
+    /// declined to compute one.
+    pub files: Vec<crate::adapter::claim::ClaimFile>,
     /// Framework-native plugin id resolved from the bundle (or the
     /// manifest-declared fallback).
     pub plugin_id: Option<String>,

@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use anolisa_core::adapter::claim::{
-    AdapterClaim, CLAIM_SCHEMA_VERSION, ClaimStatus, CoshClaim, DRIVER_SCHEMA_VERSION,
-    DriverPayload,
+    AdapterClaim, BundleMatch, CLAIM_SCHEMA_VERSION, ClaimFile, ClaimStatus, CoshClaim,
+    DRIVER_SCHEMA_VERSION, DriverPayload,
 };
 use anolisa_core::state_store::StateStore;
 use anolisa_core::{
@@ -122,8 +122,29 @@ struct UpdateFixture {
     enable_digest: String,
 }
 
+/// How the fixture's receipt records the bundle, and what the published
+/// upgrade does to it.
+#[derive(Clone, Copy)]
+enum BundleShape {
+    /// Pre-registry receipt (whole-tree digest only); upgrade rewrites a file.
+    LegacyDigestChangedFile,
+    /// Registry receipt; upgrade only adds a file, touching nothing recorded.
+    RegistryAddedFile,
+}
+
 impl UpdateFixture {
     fn new() -> Self {
+        Self::build(BundleShape::LegacyDigestChangedFile)
+    }
+
+    /// A receipt carrying a per-file registry, against an upgrade that only
+    /// *adds* a bundle file. Nothing registered moves, so this is the case a
+    /// registry could silently stop reporting as stale.
+    fn with_registry_and_added_file() -> Self {
+        Self::build(BundleShape::RegistryAddedFile)
+    }
+
+    fn build(shape: BundleShape) -> Self {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
         let system_prefix = root.join("system");
@@ -232,6 +253,19 @@ impl UpdateFixture {
             enabled_at: "2026-07-01T00:00:00Z".to_string(),
             resource_root: bundle_root.clone(),
             bundle_digest: Some(enable_digest.clone()),
+            bundle_files: match shape {
+                BundleShape::LegacyDigestChangedFile => Vec::new(),
+                BundleShape::RegistryAddedFile => {
+                    // Must match the production format written by
+                    // `adapter::util::hash_bundle_files`; a bare hex digest
+                    // would read as "already modified" and mask whether the
+                    // added file is what triggers the stale action.
+                    vec![ClaimFile {
+                        path: "plugin.json".to_string(),
+                        sha256: format!("sha256:{}", sha(&bundle_root.join("plugin.json"))),
+                    }]
+                }
+            },
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -252,18 +286,37 @@ impl UpdateFixture {
         .expect("user state");
         write_state(&system_layout, StateInstallMode::System, Vec::new());
 
-        // A raw repo publishing v0.2.0 with a changed bundle.
-        let artifact = tar_gz(&[
-            (
-                ".anolisa/component.toml",
-                manifest("0.2.0", true).as_bytes(),
-            ),
-            (format!("bin/{COMPONENT}").as_str(), b"v2 binary\n"),
-            (
-                format!("adapters/{COMPONENT}/openclaw/plugin.json").as_str(),
-                b"v2",
-            ),
-        ]);
+        // A raw repo publishing v0.2.0. The legacy shape rewrites the bundle
+        // file; the registry shape leaves it byte-identical and only adds a
+        // second one, so drift can only be seen by noticing the new file.
+        let artifact = match shape {
+            BundleShape::LegacyDigestChangedFile => tar_gz(&[
+                (
+                    ".anolisa/component.toml",
+                    manifest("0.2.0", true).as_bytes(),
+                ),
+                (format!("bin/{COMPONENT}").as_str(), b"v2 binary\n"),
+                (
+                    format!("adapters/{COMPONENT}/openclaw/plugin.json").as_str(),
+                    b"v2",
+                ),
+            ]),
+            BundleShape::RegistryAddedFile => tar_gz(&[
+                (
+                    ".anolisa/component.toml",
+                    manifest("0.2.0", true).as_bytes(),
+                ),
+                (format!("bin/{COMPONENT}").as_str(), b"v2 binary\n"),
+                (
+                    format!("adapters/{COMPONENT}/openclaw/plugin.json").as_str(),
+                    b"v1",
+                ),
+                (
+                    format!("adapters/{COMPONENT}/openclaw/extra_hook.py").as_str(),
+                    b"value = 1\n",
+                ),
+            ]),
+        };
         publish_raw_repo(&root.join("repo"), &user_layout, "0.2.0", &artifact);
 
         Self {
@@ -389,6 +442,55 @@ fn assert_success(output: &Output) {
         output.status.code(),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// A per-file registry must not weaken stale detection: an upgrade that only
+/// adds a bundle file leaves every registered file byte-identical, so this is
+/// exactly the case a registry could silently stop reporting.
+#[test]
+fn update_lists_stale_adapter_when_registry_receipt_gains_a_file() {
+    let fixture = UpdateFixture::with_registry_and_added_file();
+
+    // Pin the starting point: the registry agrees with what is on disk. If
+    // this drifted to Changed, the assertion below would pass for the wrong
+    // reason and never exercise the added-file path at all.
+    let before = fixture
+        .load_store()
+        .find_adapter_claim(COMPONENT, "openclaw")
+        .expect("receipt must exist before update")
+        .clone();
+    assert_eq!(
+        before.bundle_match(),
+        BundleMatch::Matched,
+        "fixture must start clean, otherwise this test proves nothing"
+    );
+
+    let output = fixture.run_update(&[]);
+    assert_success(&output);
+    let out = stdout(&output);
+    assert!(
+        out.contains("stale-demo/openclaw"),
+        "an added bundle file must still mark the receipt stale: {out}"
+    );
+    assert!(
+        out.contains("anolisa adapter enable stale-demo openclaw"),
+        "the recovery command must still be offered: {out}"
+    );
+
+    // And the upgrade really did only add a file — every registered file is
+    // still byte-identical, so `added` is the sole cause of the verdict.
+    let after = fixture
+        .load_store()
+        .find_adapter_claim(COMPONENT, "openclaw")
+        .expect("receipt must survive")
+        .clone();
+    let inspection = after.inspect_bundle();
+    assert!(
+        inspection.modified.is_empty(),
+        "no registered file may have changed: {:?}",
+        inspection.modified
+    );
+    assert_eq!(inspection.added, vec!["extra_hook.py"]);
 }
 
 #[test]

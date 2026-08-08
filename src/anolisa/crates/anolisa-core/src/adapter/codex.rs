@@ -37,7 +37,10 @@ use super::driver::{
     ClaimResourceRef, ConditionStatus, DetectResult, DisableReport, DriverCtx, DriverPlan,
     FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable, find_binary_in_path,
 };
-use super::util::{bool_status, cli_failure_reason, digest_tree, display_command, now_iso8601};
+use super::util::{
+    bool_status, bundle_match_condition, cli_failure_reason, digest_tree, display_command,
+    hash_bundle_files, now_iso8601,
+};
 
 /// Default timeout for a Codex CLI invocation.
 const CLI_TIMEOUT: Duration = Duration::from_secs(60);
@@ -139,6 +142,7 @@ impl FrameworkDriver for CodexDriver {
         Ok(AdapterBundle {
             resource_root: root.clone(),
             digest: digest_tree(root),
+            files: hash_bundle_files(root).unwrap_or_default(),
             plugin_id,
         })
     }
@@ -235,6 +239,7 @@ impl FrameworkDriver for CodexDriver {
                 enabled_at: now_iso8601(),
                 resource_root: bundle.resource_root.clone(),
                 bundle_digest: bundle.digest.clone(),
+                bundle_files: bundle.files.clone(),
                 driver_schema: DRIVER_SCHEMA_VERSION,
                 status: ClaimStatus::Enabled,
                 notices: Vec::new(),
@@ -797,31 +802,6 @@ fn claim_symlink(claim: &AdapterClaim) -> Option<(PathBuf, PathBuf)> {
         ClaimResourceKind::Symlink { link, target } => Some((link.clone(), target.clone())),
         _ => None,
     })
-}
-
-/// Build the `ResourceBundleMatches` condition.
-fn bundle_match_condition(claim: &AdapterClaim) -> AdapterCondition {
-    let kind = AdapterConditionKind::ResourceBundleMatches;
-    match (&claim.bundle_digest, digest_tree(&claim.resource_root)) {
-        (Some(recorded), Some(current)) if recorded == &current => AdapterCondition {
-            kind,
-            status: ConditionStatus::True,
-            reason: None,
-            resource: None,
-        },
-        (Some(_), Some(_)) => AdapterCondition {
-            kind,
-            status: ConditionStatus::False,
-            reason: Some("resource bundle changed since enable".to_string()),
-            resource: None,
-        },
-        _ => AdapterCondition {
-            kind,
-            status: ConditionStatus::Unknown,
-            reason: Some("no digest recorded or resource root unavailable".to_string()),
-            resource: None,
-        },
-    }
 }
 
 /// Roll signals into a summary. Healthy requires the framework detected,

@@ -4700,6 +4700,7 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
             enabled_at: "2026-07-01T00:00:00Z".to_string(),
             resource_root: resource_root.to_path_buf(),
             bundle_digest: bundle_digest.map(str::to_string),
+            bundle_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),

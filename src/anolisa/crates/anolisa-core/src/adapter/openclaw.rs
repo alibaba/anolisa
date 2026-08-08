@@ -33,8 +33,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sha2::{Digest, Sha256};
-
 use super::AdapterError;
 use super::claim::{
     AdapterClaim, CLAIM_SCHEMA_VERSION, ClaimResource, ClaimResourceKind, ClaimStatus,
@@ -46,6 +44,7 @@ use super::driver::{
     DriverPlan, EnableProgress, FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable,
     find_binary_in_path,
 };
+use super::util::{bundle_match_condition, digest_tree, hash_bundle_files};
 use crate::manifest::AdapterConfigSetSpec;
 
 /// Default timeout for an OpenClaw CLI invocation.
@@ -146,6 +145,7 @@ impl FrameworkDriver for OpenClawDriver {
         Ok(AdapterBundle {
             resource_root: root.clone(),
             digest: digest_tree(root),
+            files: hash_bundle_files(root).unwrap_or_default(),
             plugin_id,
         })
     }
@@ -287,6 +287,7 @@ impl FrameworkDriver for OpenClawDriver {
             enabled_at: now_iso8601(),
             resource_root: bundle.resource_root.clone(),
             bundle_digest: bundle.digest.clone(),
+            bundle_files: bundle.files.clone(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -498,7 +499,7 @@ impl FrameworkDriver for OpenClawDriver {
         });
 
         // 2. Resource bundle still matches the enable-time digest?
-        conditions.push(self.bundle_match_condition(claim));
+        conditions.push(bundle_match_condition(claim));
 
         // 3. Plugin still registered? Skill-only receipts have no plugin
         //    registry entry by design, so status does not require one.
@@ -652,32 +653,6 @@ impl FrameworkDriver for OpenClawDriver {
 }
 
 impl OpenClawDriver {
-    /// Build the `ResourceBundleMatches` condition by re-digesting the
-    /// resource root and comparing to the enable-time digest.
-    fn bundle_match_condition(&self, claim: &AdapterClaim) -> AdapterCondition {
-        let kind = AdapterConditionKind::ResourceBundleMatches;
-        match (&claim.bundle_digest, digest_tree(&claim.resource_root)) {
-            (Some(recorded), Some(current)) if recorded == &current => AdapterCondition {
-                kind,
-                status: ConditionStatus::True,
-                reason: None,
-                resource: None,
-            },
-            (Some(_), Some(_)) => AdapterCondition {
-                kind,
-                status: ConditionStatus::False,
-                reason: Some("resource bundle changed since enable".to_string()),
-                resource: None,
-            },
-            _ => AdapterCondition {
-                kind,
-                status: ConditionStatus::Unknown,
-                reason: Some("no digest recorded or resource root unavailable".to_string()),
-                resource: None,
-            },
-        }
-    }
-
     /// Run `openclaw plugins list` and decide whether `plugin_id` is still
     /// registered. Returns `(plugin_condition, verification_condition,
     /// plugin_registered_status)`.
@@ -2570,43 +2545,6 @@ fn summarize(
     }
 }
 
-/// SHA-256 digest of a directory tree, stable across runs: files are
-/// hashed in sorted relative-path order as `path\0len\0bytes`. Returns
-/// `None` on any IO error so callers fall back to `Unknown` rather than a
-/// wrong verdict.
-fn digest_tree(root: &Path) -> Option<String> {
-    let mut files: Vec<PathBuf> = Vec::new();
-    collect_files(root, &mut files).ok()?;
-    files.sort();
-    let mut hasher = Sha256::new();
-    for path in &files {
-        let rel = path.strip_prefix(root).unwrap_or(path);
-        let bytes = std::fs::read(path).ok()?;
-        hasher.update(rel.to_string_lossy().as_bytes());
-        hasher.update([0u8]);
-        hasher.update((bytes.len() as u64).to_le_bytes());
-        hasher.update([0u8]);
-        hasher.update(&bytes);
-    }
-    Some(format!("sha256:{:x}", hasher.finalize()))
-}
-
-/// Recursively collect regular-file paths under `dir`. Symlinks are not
-/// followed into directories (their link path is recorded as a file).
-fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let ft = entry.file_type()?;
-        if ft.is_dir() {
-            collect_files(&path, out)?;
-        } else {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
 /// Build `openclaw config set <key> <value>`.
 fn build_config_set_cmd(
     key: &str,
@@ -3308,22 +3246,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn digest_tree_is_stable_and_detects_change() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("a.txt"), b"hello").expect("write");
-        std::fs::create_dir(dir.path().join("sub")).expect("mkdir");
-        std::fs::write(dir.path().join("sub/b.txt"), b"world").expect("write");
-
-        let d1 = digest_tree(dir.path()).expect("digest");
-        let d2 = digest_tree(dir.path()).expect("digest again");
-        assert_eq!(d1, d2, "digest must be stable");
-
-        std::fs::write(dir.path().join("sub/b.txt"), b"WORLD").expect("rewrite");
-        let d3 = digest_tree(dir.path()).expect("digest after change");
-        assert_ne!(d1, d3, "digest must change when a file changes");
-    }
-
     // -- config set cmd -------------------------------------------------
 
     #[test]
@@ -3393,6 +3315,7 @@ mod tests {
             enabled_at: "2026-01-01T00:00:00Z".to_string(),
             resource_root: PathBuf::from("/tmp"),
             bundle_digest: None,
+            bundle_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::CleanupFailed,
             notices: Vec::new(),
@@ -3583,6 +3506,7 @@ mod tests {
             enabled_at: "2026-01-01T00:00:00Z".to_string(),
             resource_root: PathBuf::from("/tmp/test-home/resource"),
             bundle_digest: None,
+            bundle_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),

@@ -480,6 +480,7 @@ mod tests {
             enabled_at: "2026-06-01T10:00:00Z".to_string(),
             resource_root: PathBuf::from("/tmp/anolisa-forget-test"),
             bundle_digest: None,
+            bundle_files: Vec::new(),
             driver_schema: 1,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),

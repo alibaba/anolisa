@@ -34,7 +34,7 @@ use serde_json::Value;
 use crate::path_safety::{PathBoundaryError, canonicalize_nearest_existing, validate_owned_path};
 use anolisa_platform::fs_layout::FsLayout;
 
-use super::util::digest_tree;
+use super::util::{digest_tree, hash_bundle_files};
 
 /// Schema version for the generic claim shape and [`ClaimResource`].
 /// Persisted in every receipt so a future on-disk migration can branch.
@@ -84,8 +84,23 @@ pub struct AdapterClaim {
     pub resource_root: PathBuf,
     /// Digest of the resource tree at enable time, for drift/upgrade
     /// detection. Optional: a driver may decline to compute one.
+    ///
+    /// Superseded by [`Self::bundle_files`] for receipts written by this
+    /// version onward, but still written and still used as the fallback
+    /// comparison for receipts that predate the per-file registry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_digest: Option<String>,
+    /// Per-file registry of the resource tree at enable time: every managed
+    /// file with its own digest.
+    ///
+    /// A whole-tree digest can only answer "did anything change"; this can
+    /// separate "a registered file was modified" from "a file appeared that
+    /// enable never registered", which the drift verdict treats very
+    /// differently. Empty for receipts written before this field existed —
+    /// [`Self::inspect_bundle`] falls back to [`Self::bundle_digest`] then,
+    /// so old receipts keep their previous verdict exactly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bundle_files: Vec<ClaimFile>,
     /// [`DriverPayload`] schema version ([`DRIVER_SCHEMA_VERSION`] at write
     /// time).
     pub driver_schema: u32,
@@ -113,18 +128,93 @@ impl AdapterClaim {
         self.adapter_type.as_deref() == Some("skill_bundle")
     }
 
-    /// Compare the enable-time [`Self::bundle_digest`] against a fresh digest
-    /// of [`Self::resource_root`].
+    /// Drift verdict for [`Self::resource_root`] as of now.
     ///
-    /// This is the drift/upgrade detection the `bundle_digest` field exists
-    /// for; the drivers' `ResourceBundleMatches` condition and post-update
-    /// adapter actions branch on the same verdict, so the comparison lives
-    /// with the receipt schema instead of being re-derived per caller.
+    /// The drivers' `ResourceBundleMatches` condition and post-update adapter
+    /// actions branch on this, so the comparison lives with the receipt
+    /// schema instead of being re-derived per caller. See
+    /// [`Self::inspect_bundle`] for the file-level detail behind the verdict.
     pub fn bundle_match(&self) -> BundleMatch {
-        match (&self.bundle_digest, digest_tree(&self.resource_root)) {
-            (Some(recorded), Some(current)) if recorded == &current => BundleMatch::Matched,
-            (Some(_), Some(_)) => BundleMatch::Changed,
-            _ => BundleMatch::Unknown,
+        self.inspect_bundle().verdict
+    }
+
+    /// Compare the enable-time registry against the resource tree on disk.
+    ///
+    /// Registered files are verified individually: a modified or vanished one
+    /// is drift. A file that enable never registered is drift too — a
+    /// component upgrade that only adds a hook must still mark the receipt
+    /// stale.
+    ///
+    /// The one exception is a `__pycache__` member, which lands in
+    /// [`BundleInspection::unverified_cache`] and is kept out of the verdict:
+    /// running an installed hook makes CPython write one, and that is the
+    /// adapter working rather than changing.
+    ///
+    /// That exception is a real hole, not a proof of safety. A `.pyc` is
+    /// loadable whenever its header matches the adjacent source's mtime and
+    /// size, both forgeable, so anyone who can write into the resource root
+    /// can swap bytecode without touching a registered file. Callers must
+    /// surface `unverified_cache` rather than discard it. Closing the hole
+    /// means registering bytecode at enable time by precompiling it, which
+    /// needs the component to declare its interpreter.
+    ///
+    /// Receipts with an empty registry fall back to the whole-tree
+    /// [`Self::bundle_digest`], preserving the pre-registry verdict.
+    pub fn inspect_bundle(&self) -> BundleInspection {
+        if self.bundle_files.is_empty() {
+            let verdict = match (&self.bundle_digest, digest_tree(&self.resource_root)) {
+                (Some(recorded), Some(current)) if recorded == &current => BundleMatch::Matched,
+                (Some(_), Some(_)) => BundleMatch::Changed,
+                _ => BundleMatch::Unknown,
+            };
+            return BundleInspection {
+                verdict,
+                modified: Vec::new(),
+                added: Vec::new(),
+                unverified_cache: Vec::new(),
+            };
+        }
+
+        // A resource root that cannot be walked leaves drift undecidable —
+        // never report Changed off a reading we could not take.
+        let Some(current) = hash_bundle_files(&self.resource_root) else {
+            return BundleInspection {
+                verdict: BundleMatch::Unknown,
+                modified: Vec::new(),
+                added: Vec::new(),
+                unverified_cache: Vec::new(),
+            };
+        };
+
+        let mut modified = Vec::new();
+        for registered in &self.bundle_files {
+            let matches = current
+                .iter()
+                .find(|f| f.path == registered.path)
+                .is_some_and(|f| f.sha256 == registered.sha256);
+            if !matches {
+                modified.push(registered.path.clone());
+            }
+        }
+        // An unregistered file is drift by default — a component upgrade that
+        // only adds a hook must still mark the receipt stale. The single
+        // exception is the interpreter's own bytecode cache, which a hook run
+        // creates without anything having actually changed.
+        let (unverified_cache, added): (Vec<String>, Vec<String>) = current
+            .iter()
+            .filter(|f| !self.bundle_files.iter().any(|r| r.path == f.path))
+            .map(|f| f.path.clone())
+            .partition(|path| is_interpreter_cache(path));
+
+        BundleInspection {
+            verdict: if modified.is_empty() && added.is_empty() {
+                BundleMatch::Matched
+            } else {
+                BundleMatch::Changed
+            },
+            modified,
+            added,
+            unverified_cache,
         }
     }
 
@@ -274,6 +364,47 @@ impl AdapterClaim {
 /// the post-update adapter actions share this wording so `adapter status`
 /// and `update` name the same problem identically.
 pub const BUNDLE_CHANGED_REASON: &str = "resource bundle changed since enable";
+
+/// One file registered at enable time, with its own digest.
+///
+/// `path` is relative to [`AdapterClaim::resource_root`] and always uses
+/// `/` separators so a receipt stays comparable across platforms.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClaimFile {
+    /// Path relative to the resource root, `/`-separated.
+    pub path: String,
+    /// `sha256:<hex>` digest of the file's contents.
+    pub sha256: String,
+}
+
+/// File-level detail behind a [`BundleMatch`] verdict.
+///
+/// Drivers turn this into the `ResourceBundleMatches` condition reason, which
+/// is the only place an operator sees *which* files moved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundleInspection {
+    /// The drift verdict itself.
+    pub verdict: BundleMatch,
+    /// Registered files that are now missing or have different contents.
+    pub modified: Vec<String>,
+    /// Files present that enable never registered, excluding interpreter
+    /// caches. Counted as drift: a component upgrade that only adds a hook
+    /// changes what the framework loads just as much as editing one.
+    pub added: Vec<String>,
+    /// Unregistered interpreter bytecode caches, kept out of the verdict
+    /// because running an installed hook creates them.
+    ///
+    /// Unverified, not vetted — see [`AdapterClaim::inspect_bundle`].
+    pub unverified_cache: Vec<String>,
+}
+
+/// Whether `path` sits inside a CPython bytecode cache directory.
+///
+/// Narrow on purpose: only `__pycache__` members are exempt from the drift
+/// verdict, so anything else appearing in the resource root still counts.
+fn is_interpreter_cache(path: &str) -> bool {
+    path.split('/').any(|segment| segment == "__pycache__")
+}
 
 /// How a receipt's enable-time bundle digest compares to the resource tree
 /// currently on disk.
@@ -1036,6 +1167,7 @@ mod tests {
             enabled_at: "2026-06-12T10:30:45Z".to_string(),
             resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/openclaw"),
             bundle_digest: Some("sha256:abc".to_string()),
+            bundle_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -1119,6 +1251,128 @@ mod tests {
         // verdict must never rest on a digest that could not be computed.
         std::fs::remove_dir_all(dir.path()).expect("remove bundle root");
         assert_eq!(claim.bundle_match(), BundleMatch::Unknown);
+    }
+
+    fn registered_claim(root: &Path) -> AdapterClaim {
+        let mut claim = sample_claim();
+        claim.resource_root = root.to_path_buf();
+        claim.bundle_digest = digest_tree(root);
+        claim.bundle_files = hash_bundle_files(root).expect("registry");
+        claim
+    }
+
+    /// The registry exists to tell "a managed file moved" apart from "the
+    /// interpreter wrote its cache". Both used to collapse into one
+    /// whole-tree digest change.
+    #[test]
+    fn inspect_bundle_exempts_bytecode_cache_but_not_other_new_files() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir(&hooks).expect("mkdir hooks");
+        std::fs::write(hooks.join("pii_text.py"), b"value = 1\n").expect("write hook");
+        let claim = registered_claim(dir.path());
+        assert_eq!(claim.bundle_match(), BundleMatch::Matched);
+
+        // What a hook's first import leaves behind.
+        let cache = hooks.join("__pycache__");
+        std::fs::create_dir(&cache).expect("mkdir cache");
+        std::fs::write(cache.join("pii_text.cpython-311.pyc"), b"\x00bytecode").expect("write pyc");
+        let inspection = claim.inspect_bundle();
+        assert_eq!(
+            inspection.verdict,
+            BundleMatch::Matched,
+            "running an installed hook is not drift"
+        );
+        assert!(inspection.modified.is_empty() && inspection.added.is_empty());
+        assert_eq!(
+            inspection.unverified_cache,
+            vec!["hooks/__pycache__/pii_text.cpython-311.pyc"],
+            "the cache is unverified and must be surfaced, not accepted silently"
+        );
+
+        // A registered file that changed is drift, named precisely.
+        std::fs::write(hooks.join("pii_text.py"), b"value = 666\n").expect("tamper");
+        let inspection = claim.inspect_bundle();
+        assert_eq!(inspection.verdict, BundleMatch::Changed);
+        assert_eq!(inspection.modified, vec!["hooks/pii_text.py"]);
+    }
+
+    /// A component upgrade that only *adds* files must still mark the receipt
+    /// stale, or `anolisa update` stops telling anyone to re-enable. The
+    /// exemption covers bytecode caches and nothing else.
+    #[test]
+    fn inspect_bundle_treats_an_added_file_as_drift() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir(&hooks).expect("mkdir hooks");
+        std::fs::write(hooks.join("pii_text.py"), b"value = 1\n").expect("write hook");
+        let claim = registered_claim(dir.path());
+
+        // An upgrade ships a new helper next to the existing one.
+        std::fs::write(hooks.join("trace_context.py"), b"value = 2\n").expect("add helper");
+        let inspection = claim.inspect_bundle();
+        assert_eq!(
+            inspection.verdict,
+            BundleMatch::Changed,
+            "a newly added hook is drift even though nothing registered moved"
+        );
+        assert_eq!(inspection.added, vec!["hooks/trace_context.py"]);
+        assert!(inspection.modified.is_empty());
+        assert!(inspection.unverified_cache.is_empty());
+    }
+
+    /// A `.pyc` outside `__pycache__` is a sourceless module CPython will
+    /// import directly, so the narrow exemption must not cover it.
+    #[test]
+    fn inspect_bundle_does_not_exempt_bytecode_outside_a_cache_dir() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir(&hooks).expect("mkdir hooks");
+        std::fs::write(hooks.join("pii_text.py"), b"value = 1\n").expect("write hook");
+        let claim = registered_claim(dir.path());
+
+        std::fs::write(hooks.join("sneaky.pyc"), b"\x00bytecode").expect("write loose pyc");
+        let inspection = claim.inspect_bundle();
+        assert_eq!(inspection.verdict, BundleMatch::Changed);
+        assert_eq!(inspection.added, vec!["hooks/sneaky.pyc"]);
+    }
+
+    #[test]
+    fn inspect_bundle_treats_a_vanished_registered_file_as_drift() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        std::fs::write(dir.path().join("bundle.json"), b"v1").expect("write bundle");
+        let claim = registered_claim(dir.path());
+
+        std::fs::remove_file(dir.path().join("bundle.json")).expect("remove");
+        let inspection = claim.inspect_bundle();
+        assert_eq!(inspection.verdict, BundleMatch::Changed);
+        assert_eq!(inspection.modified, vec!["bundle.json"]);
+
+        // A root that cannot be walked stays undecidable.
+        std::fs::remove_dir_all(dir.path()).expect("remove root");
+        assert_eq!(claim.bundle_match(), BundleMatch::Unknown);
+    }
+
+    /// Receipts written before the registry existed must keep the verdict
+    /// they had, so upgrading ANOLISA cannot silently reinterpret them.
+    #[test]
+    fn legacy_receipts_without_a_registry_keep_whole_tree_comparison() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir(&hooks).expect("mkdir hooks");
+        std::fs::write(hooks.join("pii_text.py"), b"value = 1\n").expect("write hook");
+        let claim = bundle_claim(dir.path(), digest_tree(dir.path()));
+        assert!(claim.bundle_files.is_empty());
+        assert_eq!(claim.bundle_match(), BundleMatch::Matched);
+
+        let cache = hooks.join("__pycache__");
+        std::fs::create_dir(&cache).expect("mkdir cache");
+        std::fs::write(cache.join("pii_text.cpython-311.pyc"), b"\x00bytecode").expect("write pyc");
+        assert_eq!(
+            claim.bundle_match(),
+            BundleMatch::Changed,
+            "a pre-registry receipt still compares the whole tree"
+        );
     }
 
     #[test]
@@ -1232,6 +1486,7 @@ mod tests {
             enabled_at: "2026-06-22T10:30:45Z".to_string(),
             resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/agent-sec/hermes"),
             bundle_digest: Some("sha256:def".to_string()),
+            bundle_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -1346,6 +1601,7 @@ mod tests {
             enabled_at: "2026-06-22T12:00:00Z".to_string(),
             resource_root: PathBuf::from("/data/adapters/sec-core/openclaw"),
             bundle_digest: None,
+            bundle_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -1439,6 +1695,7 @@ mod tests {
             enabled_at: "2026-07-04T10:30:45Z".to_string(),
             resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/codex"),
             bundle_digest: Some("sha256:c0de".to_string()),
+            bundle_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -1528,6 +1785,7 @@ mod tests {
             enabled_at: "2026-07-04T10:30:45Z".to_string(),
             resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/common"),
             bundle_digest: Some("sha256:c05h".to_string()),
+            bundle_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -1564,6 +1822,7 @@ mod tests {
             enabled_at: "2026-07-04T10:30:45Z".to_string(),
             resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/claude-code"),
             bundle_digest: None,
+            bundle_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -1605,6 +1864,7 @@ mod tests {
             enabled_at: "2026-07-08T10:30:45Z".to_string(),
             resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/qoder"),
             bundle_digest: Some("sha256:90de".to_string()),
+            bundle_files: Vec::new(),
             driver_schema: 1,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -1759,6 +2019,7 @@ mod tests {
             enabled_at: "2026-07-16T10:30:45Z".to_string(),
             resource_root: PathBuf::from("/usr/local/share/anolisa/adapters/tokenless/qwencode"),
             bundle_digest: Some("sha256:0wen".to_string()),
+            bundle_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),

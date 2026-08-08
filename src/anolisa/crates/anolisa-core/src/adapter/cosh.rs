@@ -30,7 +30,9 @@ use super::driver::{
     ClaimResourceRef, ConditionStatus, DetectResult, DisableReport, DriverCtx, DriverPlan,
     FrameworkDriver, HostEnv, PreparedEnable, find_binary_in_path,
 };
-use super::util::{bool_status, digest_tree, now_iso8601};
+use super::util::{
+    bool_status, bundle_match_condition, digest_tree, hash_bundle_files, now_iso8601,
+};
 
 /// Candidate binary names that indicate cosh is installed. `co` and
 /// `copilot` are the short/legacy aliases of the `cosh` CLI.
@@ -141,6 +143,7 @@ impl FrameworkDriver for CoshDriver {
         Ok(AdapterBundle {
             resource_root: root.clone(),
             digest: digest_tree(root),
+            files: hash_bundle_files(root).unwrap_or_default(),
             plugin_id,
         })
     }
@@ -185,6 +188,7 @@ impl FrameworkDriver for CoshDriver {
                 enabled_at: now_iso8601(),
                 resource_root: bundle.resource_root.clone(),
                 bundle_digest: bundle.digest.clone(),
+                bundle_files: bundle.files.clone(),
                 driver_schema: DRIVER_SCHEMA_VERSION,
                 status: ClaimStatus::Enabled,
                 notices: Vec::new(),
@@ -426,32 +430,6 @@ fn claim_extension_dir(claim: &AdapterClaim) -> Option<PathBuf> {
         ClaimResourceKind::ExternalPath { path } => Some(path.clone()),
         _ => None,
     })
-}
-
-/// Build the `ResourceBundleMatches` condition by re-digesting the resource
-/// root and comparing to the enable-time digest.
-fn bundle_match_condition(claim: &AdapterClaim) -> AdapterCondition {
-    let kind = AdapterConditionKind::ResourceBundleMatches;
-    match (&claim.bundle_digest, digest_tree(&claim.resource_root)) {
-        (Some(recorded), Some(current)) if recorded == &current => AdapterCondition {
-            kind,
-            status: ConditionStatus::True,
-            reason: None,
-            resource: None,
-        },
-        (Some(_), Some(_)) => AdapterCondition {
-            kind,
-            status: ConditionStatus::False,
-            reason: Some("resource bundle changed since enable".to_string()),
-            resource: None,
-        },
-        _ => AdapterCondition {
-            kind,
-            status: ConditionStatus::Unknown,
-            reason: Some("no digest recorded or resource root unavailable".to_string()),
-            resource: None,
-        },
-    }
 }
 
 /// Roll the detect and tree-present signals into a summary, honoring a
