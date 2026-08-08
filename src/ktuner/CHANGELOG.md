@@ -10,4 +10,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Initial kernel-tuning engine: `check`/`tune`/`fix`/`why`/`rollback` commands
   evaluate 207 rules and output structured JSON tuning recommendations.
-- RPM packaging and ANOLISA distribution registration.
