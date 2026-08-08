@@ -73,6 +73,7 @@ mod tests {
     use crate::runtime::state::ContinuityFactKind;
     use crate::slash::debug::render_debug_command;
     use crate::slash::hooks::render_hooks_command;
+    use crate::slash::hooks_tests::TestHookFixture;
     use crate::types::{FindingSeverity, HookFinding};
     use std::sync::{Arc, Mutex};
 
@@ -348,10 +349,12 @@ mod tests {
 
     #[test]
     fn hooks_root_renders_status_without_source_paths() {
+        let user_hook = TestHookFixture::new("hooks-status-user");
+        let project_hook = TestHookFixture::new("hooks-status-project");
         let mut state = InlineState::default();
         state.hooks.disabled.insert("project-hook".to_string());
         state.hooks.engine.register_external(ExternalHookConfig {
-            path: std::path::PathBuf::from("/tmp/user-hook.sh"),
+            path: user_hook.path.clone(),
             matcher: HookMatcher {
                 id: "user-hook".to_string(),
                 commands: vec!["echo".to_string()],
@@ -367,7 +370,7 @@ mod tests {
             trusted: true,
         });
         state.hooks.engine.register_external(ExternalHookConfig {
-            path: std::path::PathBuf::from("/tmp/project/.cosh/hooks/project.sh"),
+            path: project_hook.path.clone(),
             matcher: HookMatcher {
                 id: "project-hook".to_string(),
                 commands: vec!["echo".to_string()],
@@ -379,7 +382,7 @@ mod tests {
             },
             timeout_ms: 1000,
             source: ExternalHookSource::Project,
-            project_root: Some(std::path::PathBuf::from("/tmp/project")),
+            project_root: Some(project_hook.root.clone()),
             trusted: false,
         });
         let mut output = Vec::new();
@@ -401,8 +404,14 @@ mod tests {
             rendered.contains("Project trust: trusted=0; untrusted=1."),
             "{rendered}"
         );
-        assert!(!rendered.contains("/tmp/user-hook.sh"), "{rendered}");
-        assert!(!rendered.contains("/tmp/project/.cosh/hooks"), "{rendered}");
+        assert!(
+            !rendered.contains(user_hook.path.to_string_lossy().as_ref()),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains(project_hook.root.to_string_lossy().as_ref()),
+            "{rendered}"
+        );
         assert!(
             !rendered.contains("project-hook external project"),
             "{rendered}"
@@ -412,6 +421,7 @@ mod tests {
     #[test]
     fn hooks_trust_project_and_untrust_project_update_session_state() {
         let _env_lock = env_lock();
+        let project_hook = TestHookFixture::new("hooks-trust-project");
         let store = std::env::temp_dir().join(format!(
             "cosh-shell-slash-trust-store-{}.txt",
             std::process::id()
@@ -420,7 +430,7 @@ mod tests {
         std::env::set_var("COSH_SHELL_PROJECT_TRUST_STORE", &store);
         let mut state = InlineState::default();
         state.hooks.engine.register_external(ExternalHookConfig {
-            path: std::path::PathBuf::from("/tmp/project/.cosh/hooks/project.sh"),
+            path: project_hook.path.clone(),
             matcher: HookMatcher {
                 id: "project-hook".to_string(),
                 commands: vec!["echo".to_string()],
@@ -432,7 +442,7 @@ mod tests {
             },
             timeout_ms: 1000,
             source: ExternalHookSource::Project,
-            project_root: Some(std::path::PathBuf::from("/tmp/project")),
+            project_root: Some(project_hook.root.clone()),
             trusted: false,
         });
         let mut output = Vec::new();
@@ -448,7 +458,10 @@ mod tests {
         .expect("trust project hooks");
         assert!(state.hooks.engine.external_hooks()[0].trusted);
         let persisted = std::fs::read_to_string(&store).expect("read trust store");
-        assert!(persisted.contains("/tmp/project"), "{persisted}");
+        assert!(
+            persisted.contains(project_hook.root.to_string_lossy().as_ref()),
+            "{persisted}"
+        );
 
         render_hooks_test_command(None, None, None, &[], &mut state, &mut output)
             .expect("show hook status");
@@ -469,7 +482,10 @@ mod tests {
         .expect("untrust project hooks");
         assert!(!state.hooks.engine.external_hooks()[0].trusted);
         let persisted = std::fs::read_to_string(&store).expect("read trust store");
-        assert!(!persisted.contains("/tmp/project"), "{persisted}");
+        assert!(
+            !persisted.contains(project_hook.root.to_string_lossy().as_ref()),
+            "{persisted}"
+        );
         let rendered = String::from_utf8(output.clone()).expect("utf8");
         assert!(
             rendered.contains("1 project hook(s) marked untrusted."),
@@ -487,7 +503,10 @@ mod tests {
         .expect("trust project hooks again");
         assert!(state.hooks.engine.external_hooks()[0].trusted);
         let persisted = std::fs::read_to_string(&store).expect("read trust store");
-        assert!(persisted.contains("/tmp/project"), "{persisted}");
+        assert!(
+            persisted.contains(project_hook.root.to_string_lossy().as_ref()),
+            "{persisted}"
+        );
 
         render_hooks_test_command(
             Some("clear-project-trust"),
@@ -500,7 +519,10 @@ mod tests {
         .expect("clear project trust store");
         assert!(!state.hooks.engine.external_hooks()[0].trusted);
         let persisted = std::fs::read_to_string(&store).expect("read trust store");
-        assert!(!persisted.contains("/tmp/project"), "{persisted}");
+        assert!(
+            !persisted.contains(project_hook.root.to_string_lossy().as_ref()),
+            "{persisted}"
+        );
         assert!(
             persisted.contains("cosh-shell trusted project hook roots"),
             "{persisted}"

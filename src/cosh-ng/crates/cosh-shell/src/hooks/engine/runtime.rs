@@ -1,5 +1,9 @@
 use std::fs;
+#[cfg(unix)]
+use std::io;
 use std::io::Write;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -12,6 +16,11 @@ use crate::types::CommandBlock;
 use crate::types::HookFinding;
 
 use super::ExternalHookConfig;
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const PINNED_HOOK_FD_ROOT: &str = "/proc/self/fd";
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+const PINNED_HOOK_FD_ROOT: &str = "/dev/fd";
 
 pub(super) fn hook_input_from_block(block: &CommandBlock) -> HookInput {
     let output_preview = block
@@ -65,12 +74,26 @@ fn read_preview(path: &str, max_lines: usize) -> Option<String> {
 
 pub(super) fn run_external_hook(
     config: &ExternalHookConfig,
+    #[cfg(unix)] executable: &fs::File,
     input: &HookInput,
 ) -> Option<HookFinding> {
     let input_json = serde_json::to_string(input).ok()?;
     let safe_path = redact(&config.path.to_string_lossy());
 
-    let mut child = Command::new(&config.path)
+    #[cfg(unix)]
+    let (mut command, _inherited_executable) = command_for_pinned_hook(executable)
+        .map_err(|error| {
+            tracing::error!(
+                target: "cosh_hook",
+                path = %safe_path,
+                "external hook descriptor preparation failed: {error}"
+            );
+        })
+        .ok()?;
+    #[cfg(not(unix))]
+    let mut command = Command::new(&config.path);
+
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -190,6 +213,19 @@ pub(super) fn run_external_hook(
             );
         })
         .ok()
+}
+
+#[cfg(unix)]
+fn command_for_pinned_hook(executable: &fs::File) -> io::Result<(Command, fs::File)> {
+    let fd = nix::unistd::dup(executable.as_raw_fd())
+        .map_err(|error| io::Error::from_raw_os_error(error as i32))?;
+    // `dup` clears CLOEXEC. Script interpreters must inherit this descriptor
+    // so the platform's descriptor path remains valid through exec.
+    let inherited = unsafe { fs::File::from_raw_fd(fd) };
+    Ok((
+        Command::new(format!("{PINNED_HOOK_FD_ROOT}/{fd}")),
+        inherited,
+    ))
 }
 
 /// Delivers the hook's stdin payload on a background thread; the receiver

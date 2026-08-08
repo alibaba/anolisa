@@ -63,6 +63,34 @@ struct EnvLock {
     path: std::path::PathBuf,
 }
 
+pub(super) struct TestHookFixture {
+    pub(super) root: std::path::PathBuf,
+    pub(super) path: std::path::PathBuf,
+}
+
+impl TestHookFixture {
+    pub(super) fn new(label: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("cosh-shell-slash-{label}-{}", std::process::id()));
+        let hooks_dir = root.join(".cosh/hooks");
+        let path = hooks_dir.join("project.sh");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&hooks_dir).expect("create test hook directory");
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write test hook");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("make test hook executable");
+        Self { root, path }
+    }
+}
+
+impl Drop for TestHookFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
 impl Drop for EnvLock {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
@@ -94,9 +122,10 @@ fn env_lock() -> EnvLock {
     }
 }
 
-fn register_project_hook(state: &mut InlineState) {
+fn register_project_hook(state: &mut InlineState) -> TestHookFixture {
+    let fixture = TestHookFixture::new("hooks-trust");
     state.hooks.engine.register_external(ExternalHookConfig {
-        path: std::path::PathBuf::from("/tmp/project/.cosh/hooks/project.sh"),
+        path: fixture.path.clone(),
         matcher: HookMatcher {
             id: "project-hook".to_string(),
             commands: vec!["echo".to_string()],
@@ -108,9 +137,10 @@ fn register_project_hook(state: &mut InlineState) {
         },
         timeout_ms: 1000,
         source: ExternalHookSource::Project,
-        project_root: Some(std::path::PathBuf::from("/tmp/project")),
+        project_root: Some(fixture.root.clone()),
         trusted: false,
     });
+    fixture
 }
 
 fn hook_hint() -> RuntimeHookFinding {
@@ -298,7 +328,7 @@ fn hooks_project_trust_uses_zh_catalog_text() {
     let _ = std::fs::remove_file(&store);
     std::env::set_var("COSH_SHELL_PROJECT_TRUST_STORE", &store);
     let mut state = zh_state();
-    register_project_hook(&mut state);
+    let _hook = register_project_hook(&mut state);
 
     let trusted = render_hooks_test_command(Some("trust-project"), None, None, &mut state);
     assert!(trusted.contains("项目 Hook 已信任"), "{trusted}");
