@@ -99,6 +99,23 @@ pub(crate) fn render_intercept_agent_guidance<W: Write>(
             ),
         };
         if let Some(mut request) = request {
+            if let Some(submission) = state.pending_agent_composer_submission.take() {
+                if request.user_input.as_deref() == Some(submission.text.trim()) {
+                    if let Some(cwd) = submission.workspace_cwd.as_deref() {
+                        request.command_block.cwd = cwd.to_string();
+                        request.command_block.end_cwd = cwd.to_string();
+                    }
+                    let feedback = crate::agent::composer::attach_submission(
+                        &mut request,
+                        submission.workspace_cwd.as_deref(),
+                    );
+                    crate::runtime::prompt_draft::render_agent_composer_rejections(
+                        state,
+                        output,
+                        &feedback.rejected_references,
+                    )?;
+                }
+            }
             let user_input = request.user_input.clone();
             if let Some(input) = user_input.as_deref() {
                 bind_pending_input_ghost_context(&mut request, state, event);

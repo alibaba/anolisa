@@ -67,7 +67,7 @@ fn raw_cli_help_renders_slash_command_reference() {
         normalized.contains("│       manage MCP servers"),
         "{output}"
     );
-    assert!(!output.contains("/agent"), "{output}");
+    assert!(normalized.contains("/agent"), "{output}");
     assert!(!output.contains("/explain"), "{output}");
     assert!(!output.contains("/cancel"), "{output}");
     assert!(!output.contains("/details"), "{output}");

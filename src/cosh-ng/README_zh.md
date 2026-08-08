@@ -50,13 +50,16 @@ cosh
 ```text
 $ git status
 $ 分析这个服务为什么反复重启，并展示判断依据
+$ /agent
 $ /skills list
 $ /session status
 ```
 
 用 `/auth` 选择 provider，用 `/help` 查看当前版本支持的命令。如果希望每次 Agent
 调用工具前都等待确认，运行 `/mode approval recommend`。Shell 和 Core 的审批设置
-统一使用 `recommend`、`auto` 或 `trust`。
+统一使用 `recommend`、`auto` 或 `trust`。使用 cosh-core runtime 时，`/agent`
+会打开一次性 Composer，可在开头指定 `/skill:<name>`，并添加经过验证的工作空间内
+`@路径`引用。旧的`/draft`写法仍作为隐藏兼容别名保留，不会出现在帮助或命令联想中。
 
 ## 文档
 

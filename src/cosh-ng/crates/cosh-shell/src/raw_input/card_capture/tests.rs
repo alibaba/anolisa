@@ -1019,7 +1019,26 @@ fn draft_capture() -> RawInputCapture {
     RawInputCapture::PromptDraft {
         id: "draft-1".to_string(),
         initial_text: "第一行".to_string(),
+        completion: None,
     }
+}
+
+#[test]
+fn draft_tab_accepts_the_runtime_completion() {
+    let capture = RawInputCapture::PromptDraft {
+        id: "draft-1".to_string(),
+        initial_text: "review @sr".to_string(),
+        completion: Some("@src/".into()),
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&capture);
+
+    let events = state.consume(&capture, b"\t");
+    let text = events.iter().find_map(|event| match event {
+        RawInputEvent::PromptDraftChanged { text, .. } => Some(text.as_str()),
+        _ => None,
+    });
+    assert_eq!(text, Some("review @src/"));
 }
 
 // Split legacy Alt+Enter (#1721): a trailing bare ESC is held (possible split legacy Alt+Enter);

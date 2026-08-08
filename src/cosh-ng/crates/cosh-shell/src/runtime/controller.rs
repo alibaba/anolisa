@@ -200,6 +200,10 @@ pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCaptur
         return Some(RawInputCapture::PromptDraft {
             id: draft.id.clone(),
             initial_text: draft.text.clone(),
+            completion: draft
+                .completions
+                .first()
+                .map(|completion| completion.replacement.clone().into_boxed_str()),
         });
     }
     if let Some(session_panel) = state.control.session().pending_panel() {

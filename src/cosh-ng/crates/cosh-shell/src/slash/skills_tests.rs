@@ -1,4 +1,6 @@
-use super::skills::{format_skill_detail, format_skills_list, render_skills_command};
+use super::skills::{
+    completion_skill_names, format_skill_detail, format_skills_list, render_skills_command,
+};
 use crate::runtime::prelude::*;
 
 fn zh_state() -> InlineState {
@@ -158,4 +160,18 @@ esac"#,
     assert!(output.contains("agentsight"), "{output}");
     assert!(output.contains("system"), "{output}");
     assert!(!output.contains("DESCRIPTION_MUST_NOT_LEAK"), "{output}");
+}
+
+#[test]
+fn completion_names_are_sorted_unique_and_enabled() {
+    let data = serde_json::json!([
+        {"name": "repo-review", "disabled": false},
+        {"name": "disabled", "disabled": true},
+        {"name": "release-notes"},
+        {"name": "repo-review"}
+    ]);
+    assert_eq!(
+        completion_skill_names(&data),
+        vec!["release-notes".to_string(), "repo-review".to_string()]
+    );
 }

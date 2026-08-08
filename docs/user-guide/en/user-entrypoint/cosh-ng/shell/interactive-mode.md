@@ -31,7 +31,7 @@ If no shell is selected, `cosh` uses its configured or detected bash/zsh and fal
 | Command | Purpose |
 |---|---|
 | `/help` | Show the installed command set. |
-| `/draft` | Compose a multiline Agent request. |
+| `/agent` | Compose a one-shot cosh-core request with optional Skill and workspace references. |
 | `/health` | Run local health checks. |
 | `/status` (`/about`) | Show runtime, provider, and session status. |
 | `/stats [model\|tools]` | Show model identity or tool activity. |
@@ -47,5 +47,41 @@ If no shell is selected, `cosh` uses its configured or detected bash/zsh and fal
 | `/mcp [list\|connect\|inspect\|refresh\|disconnect\|login\|logout]` | Manage MCP servers. |
 
 Commands such as `/details`, `/audit`, and `/send-to-shell` appear only when the current card or run provides their required context. `/mcp login` requires the shell-based OAuth flow described by the MCP guide.
+
+## Compose a one-shot Agent request
+
+Run `/agent` when the configured runtime is cosh-core. The Agent Composer opens
+as a multiline editor without changing how later shell input is routed. Enter
+sends the request, `Shift+Enter` adds a line, and `Esc` cancels it and restores
+the shell prompt.
+
+The first token may select one Skill, and any later whitespace-separated token
+that starts with `@` requests a file or directory from the current workspace:
+
+```text
+/skill:repo-review inspect @Cargo.toml @src
+```
+
+- `/skill:<name>` must be the first token. The selected Skill is invoked before
+  other Agent tools.
+- `@path` must name an existing file or directory inside the workspace. Absolute
+  paths, parent traversal, workspace-escaping symlinks, and unsupported paths
+  are rejected.
+- A submission accepts at most 16 valid references. Directory references are
+  non-recursive unless the request explicitly asks for traversal.
+- cosh-ng sends only validated path metadata. It does not read or embed file
+  contents while building the request.
+- Rejected references are shown with their path and reason before the Agent
+  turn starts, and are omitted from its structured reference context.
+
+Plain text without a Skill or references is also valid. Other provider runtimes
+leave `/agent` unavailable; use an ordinary natural-language request or
+multiline input instead.
+
+`/draft` remains accepted as a hidden compatibility alias and is omitted from
+help and command completion. With cosh-core it opens the same Agent Composer as
+`/agent`; the Fake testing adapter follows the same route. With other provider
+runtimes it retains the legacy multiline draft editor. Existing scripts may
+migrate to `/agent` while this compatibility phase remains in place.
 
 For approval behavior, see [Tool approval](approval.md). For proactive failure help, see [AI analysis](ai-analysis.md).

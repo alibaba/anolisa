@@ -105,4 +105,6 @@ collect_message_ids!([
     input_wait_hint_ids,
     startup_auth_hint_ids,
     session_picker_footer_ids,
+    agent_composer_ids,
+    approval_trust_catalog_ids,
 ],);

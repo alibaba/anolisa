@@ -184,20 +184,40 @@ mod tests {
         );
         assert_eq!(
             MessageId::ApprovalShellHandoffInputWaitTimeoutTitle as usize,
-            MessageId::ALL.len() - 12
+            MessageId::ALL.len() - 23
         );
         assert_eq!(
             MessageId::ShellInputWaitHintTimeoutForecastBody as usize,
-            MessageId::ALL.len() - 3
+            MessageId::ALL.len() - 14
         );
         // The #2068 startup auth-hint segment remains ahead of the appended
-        // session-picker footer segment.
+        // session-picker footer, Agent Composer, and Trust-catalog segments.
         assert_eq!(
             MessageId::StartupAuthHintLine as usize,
-            MessageId::ALL.len() - 2
+            MessageId::ALL.len() - 13
         );
         assert_eq!(
             MessageId::SessionPickerMarkedFooter as usize,
+            MessageId::ALL.len() - 12
+        );
+        assert_eq!(
+            MessageId::AgentComposerTitle as usize,
+            MessageId::SessionPickerMarkedFooter as usize + 1
+        );
+        assert_eq!(
+            MessageId::AgentComposerFooterEditing as usize,
+            MessageId::ALL.len() - 9
+        );
+        assert_eq!(
+            MessageId::AgentComposerRejectedTitle as usize,
+            MessageId::AgentComposerFooterEditing as usize + 1
+        );
+        assert_eq!(
+            MessageId::AgentComposerRejectedFooter as usize,
+            MessageId::ApprovalTrustUnknownToolReason as usize - 1
+        );
+        assert_eq!(
+            MessageId::ApprovalTrustUnknownToolReason as usize,
             MessageId::ALL.len() - 1
         );
     }

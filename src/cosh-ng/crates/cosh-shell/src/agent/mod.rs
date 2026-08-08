@@ -1,6 +1,9 @@
 pub(crate) mod approval_bridge;
 #[cfg(test)]
 mod approval_bridge_tests;
+pub(crate) mod composer;
+#[cfg(test)]
+mod composer_tests;
 pub(crate) mod continuation;
 mod display;
 pub(crate) mod events;

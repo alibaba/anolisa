@@ -166,6 +166,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalTurnExtensionUnavailableBody => {
             "批准扩容前，已持久化的 provider 会话发生了变化。"
         }
+        MessageId::ApprovalTrustUnknownToolReason => {
+            "不在受信任工具目录中；Trust 模式下仍需显式审批"
+        }
         _ => return None,
     })
 }

@@ -24,3 +24,4 @@ pub(crate) use implementation::{
 };
 
 pub(crate) use implementation::audit;
+pub(crate) use implementation::composer;

@@ -192,6 +192,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalTurnExtensionUnavailableBody => {
             "The persisted provider session changed before the extension was approved."
         }
+        MessageId::ApprovalTrustUnknownToolReason => {
+            "Outside the trusted tool catalog; explicit approval is required in Trust mode"
+        }
         _ => return None,
     })
 }

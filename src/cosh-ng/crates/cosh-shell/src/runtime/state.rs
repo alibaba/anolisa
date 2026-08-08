@@ -129,6 +129,9 @@ pub(crate) struct InlineState {
     /// #1721 D13: active multi-line prompt draft card, if any.
     pub(crate) prompt_draft: Option<crate::runtime::prompt_draft::PromptDraftCardState>,
     pub(crate) prompt_draft_seq: u64,
+    /// Submitted `/agent` card awaiting its paired intercept event.
+    pub(crate) pending_agent_composer_submission:
+        Option<crate::runtime::prompt_draft::PendingAgentComposerSubmission>,
     pub(crate) pending_shell_handoff_timeout_notice: Option<Duration>,
     /// #2161: shared clock written by the relay's interactive sentinel;
     /// read here to drive the input-wait interrupt.

@@ -10,10 +10,11 @@ use crate::slash::mcp::render_mcp_command;
 use crate::slash::notices::{
     render_help, render_hint, render_info, render_removed_command, render_unknown,
 };
+use crate::slash::panel::render_notice_panel;
 use crate::slash::parser::SlashCommand;
 use crate::slash::recommendations::render_recommendations_command;
 use crate::slash::session::render_session_command;
-use crate::slash::skills::render_skills_command;
+use crate::slash::skills::{completion_skill_names, render_skills_command};
 use crate::slash::status::{render_stats_command, render_status_command};
 
 pub(super) fn render_slash_command<W: Write>(
@@ -40,10 +41,58 @@ pub(super) fn render_slash_command<W: Write>(
             Ok(true)
         }
         SlashCommand::Draft => {
-            // #1932: terminal-agnostic entry into multi-line composition;
-            // the pending card capture picks the draft up right after.
-            crate::runtime::prompt_draft::open_prompt_draft(state, output, String::new(), false)?;
-            Ok(true)
+            if let Some((workspace_cwd, skill_names)) =
+                agent_composer_context(adapter, state, shell_cwd)
+            {
+                crate::runtime::prompt_draft::open_agent_composer(
+                    state,
+                    output,
+                    adapter.name(),
+                    workspace_cwd.as_deref(),
+                    skill_names,
+                )?;
+                // `/draft` remains accepted as a compatibility alias, but it
+                // must share the Composer terminal lifecycle with `/agent`.
+                Ok(false)
+            } else {
+                // Preserve the legacy multi-provider draft for adapters that
+                // do not expose cosh-core Composer metadata.
+                crate::runtime::prompt_draft::open_prompt_draft(
+                    state,
+                    output,
+                    String::new(),
+                    false,
+                    adapter.name(),
+                )?;
+                Ok(true)
+            }
+        }
+        SlashCommand::Agent => {
+            let Some((workspace_cwd, skill_names)) =
+                agent_composer_context(adapter, state, shell_cwd)
+            else {
+                render_notice_panel(
+                    output,
+                    state.i18n().t(MessageId::AgentComposerTitle),
+                    vec![state
+                        .i18n()
+                        .t(MessageId::SlashRegistryUnavailable)
+                        .to_string()],
+                    None,
+                )?;
+                return Ok(true);
+            };
+            crate::runtime::prompt_draft::open_agent_composer(
+                state,
+                output,
+                adapter.name(),
+                workspace_cwd.as_deref(),
+                skill_names,
+            )?;
+            // The draft capture owns the terminal until submit/cancel. A
+            // restored PTY prompt would sit below the card and corrupt the
+            // cursor origin used for every in-place redraw.
+            Ok(false)
         }
         SlashCommand::Hooks(sub, arg, extra) => {
             render_hooks_command(sub, arg, extra, blocks, adapter, state, output)?;
@@ -105,4 +154,23 @@ pub(super) fn render_slash_command<W: Write>(
             Ok(true)
         }
     }
+}
+
+fn agent_composer_context(
+    adapter: &AdapterInstance,
+    state: &InlineState,
+    shell_cwd: Option<&str>,
+) -> Option<(Option<String>, Vec<String>)> {
+    let skill_names = match adapter {
+        AdapterInstance::CoshCore(cosh_core) => cosh_core
+            .registry_query("skills", "list", serde_json::Value::Null)
+            .map(|data| completion_skill_names(&data))
+            .unwrap_or_default(),
+        AdapterInstance::Fake(_) => Vec::new(),
+        _ => return None,
+    };
+    let workspace_cwd = shell_cwd
+        .map(str::to_string)
+        .or_else(|| state.shell_prompt_cwd.clone());
+    Some((workspace_cwd, skill_names))
 }

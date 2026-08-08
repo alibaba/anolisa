@@ -16,6 +16,7 @@ pub(super) enum SlashCommand<'a> {
     Noop,
     Help,
     Draft,
+    Agent,
     Auth,
     Audit(&'a str),
     Hooks(Option<&'a str>, Option<&'a str>, Option<&'a str>),
@@ -61,6 +62,7 @@ impl<'a> SlashCommand<'a> {
         Ok(match token {
             "/help" => Some(Self::Help),
             "/draft" => Some(Self::Draft),
+            "/agent" => Some(Self::Agent),
             "/auth" => Some(Self::Auth),
             "/hooks" => {
                 let sub = parts.next();
@@ -129,7 +131,7 @@ impl<'a> SlashCommand<'a> {
                 parts.next(),
                 parts.next(),
             )),
-            "/agent" | "/cancel" | "/clear" | "/copy" | "/details" | "/explain" | "/select"
+            "/cancel" | "/clear" | "/copy" | "/details" | "/explain" | "/select"
             | "/send-to-shell" | "/shell" => None,
             "/" => Some(Self::Noop),
             token if token.starts_with('/') => {
@@ -148,6 +150,7 @@ fn parser_owned_command(token: &str) -> bool {
     matches!(
         token,
         "/help"
+            | "/agent"
             | "/auth"
             | "/hooks"
             | "/mode"
@@ -206,6 +209,10 @@ mod tests {
         assert!(matches!(
             SlashCommand::parse("/draft 'extra'"),
             Ok(Some(SlashCommand::Draft))
+        ));
+        assert!(matches!(
+            SlashCommand::parse("/agent"),
+            Ok(Some(SlashCommand::Agent))
         ));
     }
 
@@ -344,6 +351,7 @@ mod tests {
                         | "/extensions"
                         | "/skills"
                         | "/auth"
+                        | "/agent"
                 )),
                 "{prefix} returned non-public hints: {:?}",
                 hints.iter().map(|hint| hint.name).collect::<Vec<_>>()

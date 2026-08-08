@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 mod agent_status;
 pub mod audit;
+pub(crate) mod composer;
 mod continuation;
 pub mod hooks;
 mod shell_event_metadata;

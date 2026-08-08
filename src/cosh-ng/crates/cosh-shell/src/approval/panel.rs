@@ -1,4 +1,5 @@
 use crate::runtime::prelude::*;
+use crate::tools::known_provider_tool;
 
 /// Irrecoverable warning trigger (#2064): anchored on the classifier
 /// verdict (`system-control` in the assessment reason trace), never on
@@ -137,11 +138,22 @@ pub(crate) fn render_current_approval_request<W: Write>(
         .assessment
         .as_ref()
         .is_some_and(assessment_is_irrecoverable);
-    // Card-facing reason policy (ARP): only High risk with a whitelisted
-    // primary reason yields a natural-language phrase; everything else is
-    // fail-quiet. Raw codes stay in details/journal only.
-    let card_reason = request.assessment.as_ref().and_then(|assessment| {
-        crate::ui::card_reason_phrase(request.risk, assessment.primary_reason, state.i18n())
+    // Unknown tools are the one medium-risk exception to the fail-quiet ARP:
+    // Trust mode deliberately stops at this boundary, so the card must tell
+    // the user why an otherwise trusted turn is waiting.
+    let card_reason = (state.approval_mode == CoshApprovalMode::Trust
+        && request.kind == ApprovalRequestKind::Tool
+        && known_provider_tool(&request.subject).is_none())
+    .then(|| {
+        state
+            .i18n()
+            .t(MessageId::ApprovalTrustUnknownToolReason)
+            .to_string()
+    })
+    .or_else(|| {
+        request.assessment.as_ref().and_then(|assessment| {
+            crate::ui::card_reason_phrase(request.risk, assessment.primary_reason, state.i18n())
+        })
     });
     let height = RatatuiInlineRenderer::for_terminal()
         .with_language(state.language)

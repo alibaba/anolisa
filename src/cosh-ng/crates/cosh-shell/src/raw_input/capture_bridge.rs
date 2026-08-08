@@ -298,6 +298,7 @@ mod tests {
         let capture = RawInputCapture::PromptDraft {
             id: "draft-1".to_string(),
             initial_text: String::new(),
+            completion: None,
         };
         let input_mode = Arc::new(Mutex::new(RawInputMode::Capture {
             capture: capture.clone(),
@@ -333,6 +334,7 @@ mod tests {
         let capture = RawInputCapture::PromptDraft {
             id: "draft-1".to_string(),
             initial_text: "hello".to_string(),
+            completion: None,
         };
         let input_mode = Arc::new(Mutex::new(RawInputMode::Capture {
             capture: capture.clone(),

@@ -3,6 +3,7 @@ use std::io::Write;
 use crate::activity::runtime::{
     close_untracked_shell_handoffs, record_approved_shell_handoff_blocks, render_activity_rows,
 };
+use crate::adapter::AgentAdapter;
 use crate::agent::events::flush_held_agent_events;
 use crate::agent::failed_command::{
     block_end_event_index, collect_failed_command_insights, failed_command_candidate,
@@ -231,7 +232,12 @@ fn render_inline_guidance_from_batch<W: Write>(
     render_pending_recommendation_notice(state, output)?;
     update_personal_shell_input_state(action_events, state);
     update_soft_newline_tip_state(action_events, state);
-    crate::runtime::prompt_draft::handle_prompt_draft_events(action_events, state, output)?;
+    crate::runtime::prompt_draft::handle_prompt_draft_events(
+        action_events,
+        state,
+        output,
+        adapter.name(),
+    )?;
     let personal_idle = state.agent_run.active.is_none()
         && !state.personalization.shell_input_active
         && !action_events

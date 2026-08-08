@@ -29,6 +29,7 @@ pub(super) struct CardInputState {
     /// Bracketed paste passthrough inside the draft card: newlines paste as
     /// draft newlines instead of submitting.
     draft_paste: bool,
+    draft_completion: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +72,7 @@ enum CardInputKind {
 
 impl CardInputState {
     pub(super) fn apply_capture(&mut self, capture: &RawInputCapture) {
+        self.refresh_draft_completion(capture);
         let kind = match capture {
             RawInputCapture::Question {
                 id,

@@ -779,6 +779,11 @@ fn trust_mode_keeps_unknown_provider_tool_pending() {
         state.approvals.requests[0].request_id.as_deref(),
         Some("ctrl-unknown")
     );
+    let rendered = String::from_utf8(output).expect("approval output");
+    assert!(
+        rendered.contains("Outside the trusted tool catalog"),
+        "{rendered}"
+    );
 }
 
 #[test]

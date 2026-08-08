@@ -461,7 +461,7 @@ fn matches_failure_analysis_slash(input: Option<&str>) -> bool {
         .split_whitespace()
         .next()
         .unwrap_or_default();
-    matches!(first_token, "/explain" | "/agent")
+    first_token == "/explain"
 }
 
 fn matches_cancel_slash(input: Option<&str>) -> bool {

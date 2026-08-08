@@ -24,6 +24,8 @@ mod auth;
 mod cancellation;
 #[path = "raw_cli/compaction.rs"]
 mod compaction;
+#[path = "raw_cli/composer.rs"]
+mod composer;
 #[path = "raw_cli/config.rs"]
 mod config;
 #[path = "raw_cli/cosh_core/mod.rs"]

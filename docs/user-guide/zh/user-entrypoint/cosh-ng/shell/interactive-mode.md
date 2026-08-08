@@ -31,7 +31,7 @@
 | 命令 | 用途 |
 |---|---|
 | `/help` | 查看已安装版本支持的命令。 |
-| `/draft` | 编辑多行Agent请求。 |
+| `/agent` | 编辑一次性 cosh-core 请求，可选择 Skill 并引用工作空间路径。 |
 | `/health` | 运行本地健康检查。 |
 | `/status`（`/about`） | 查看运行时、Provider和会话状态。 |
 | `/stats [model\|tools]` | 查看模型身份或工具活动。 |
@@ -47,5 +47,34 @@
 | `/mcp [list\|connect\|inspect\|refresh\|disconnect\|login\|logout]` | 管理MCP服务器。 |
 
 `/details`、`/audit`和`/send-to-shell`等命令只有在当前卡片或任务提供所需上下文时才会出现。`/mcp login`需要按MCP指南说明在Shell中完成OAuth流程。
+
+## 编辑一次性 Agent 请求
+
+配置使用 cosh-core runtime 时，可以运行 `/agent`。Agent Composer 会打开多行
+编辑器，但不会改变后续 Shell 输入的路由方式。按 Enter 发送请求，按
+`Shift+Enter`插入换行，按`Esc`取消并恢复 Shell prompt。
+
+第一个 token 可以选择一个 Skill，后续任何以`@`开头、由空白分隔的 token 都可以
+引用当前工作空间内的文件或目录。
+
+```text
+/skill:repo-review inspect @Cargo.toml @src
+```
+
+- `/skill:<name>`必须是第一个 token。所选 Skill 会在其他 Agent tool 之前调用。
+- `@路径`必须指向工作空间内现有的文件或目录。绝对路径、父目录跳转、通过符号链接
+  逃出工作空间的路径和不支持的路径都会被拒绝。
+- 每次提交最多接受 16 个有效引用。目录默认不递归，除非请求明确要求遍历。
+- cosh-ng 只发送验证后的路径元数据，在构建请求时不会读取或嵌入文件内容。
+- Agent turn 开始前，界面会显示每个被拒绝引用的路径和原因；这些引用不会进入
+  结构化引用上下文。
+
+不指定 Skill 或引用的纯文本请求同样有效。其他 provider runtime 不提供`/agent`；
+此时可直接输入自然语言请求或使用多行输入。
+
+`/draft`仍作为隐藏兼容别名被接受，但不会出现在帮助和命令联想中。使用 cosh-core
+时，它与`/agent`打开同一个 Agent Composer，Fake 测试 adapter 也使用相同路由；使用
+其他 provider runtime 时，它继续打开旧版多行 Draft Editor。兼容阶段内，已有脚本
+可以逐步迁移到`/agent`。
 
 审批行为见[工具审批](approval.md)，主动的失败帮助见[AI分析](ai-analysis.md)。

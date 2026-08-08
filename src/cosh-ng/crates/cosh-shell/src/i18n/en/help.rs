@@ -15,6 +15,30 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::PromptDraftFooterSubmitted => "Sent to agent",
         MessageId::PromptDraftFooterCancelled => "Draft cancelled",
+        MessageId::AgentComposerTitle => "Agent Composer",
+        MessageId::PromptDraftRuntimeLabel => "Runtime",
+        MessageId::AgentComposerFooterEditing => {
+            "Enter send · Shift+Enter newline · Tab complete · @path · /skill:name · Esc cancel"
+        }
+        MessageId::AgentComposerRejectedTitle => "References skipped",
+        MessageId::AgentComposerRejectedInvalidPathLine => {
+            "{path}: invalid workspace-relative path"
+        }
+        MessageId::AgentComposerRejectedUnavailablePathLine => {
+            "{path}: path does not exist or is not a file or directory"
+        }
+        MessageId::AgentComposerRejectedOutsideWorkspaceLine => {
+            "{path}: resolved path leaves the workspace"
+        }
+        MessageId::AgentComposerRejectedWorkspaceUnavailableLine => {
+            "{path}: shell workspace is unavailable"
+        }
+        MessageId::AgentComposerRejectedLimitLine => {
+            "{path}: the 16-reference limit was reached"
+        }
+        MessageId::AgentComposerRejectedFooter => {
+            "Skipped references were not sent as Agent context."
+        }
         MessageId::HelpGroupPrompt => "Prompt",
         MessageId::HelpSummaryDraft => "open the multi-line prompt draft card (same as ?? + Enter)",
         MessageId::PromptMultilineEntryHint => {
@@ -34,7 +58,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpSummaryModeAnalysis => {
             "choose suggested mode, automatic analysis, or no proactive assistance; controls passive suggestions and failure insights after failed commands"
         }
-        MessageId::HelpSummaryAgent => "start an explicit Agent request",
+        MessageId::HelpSummaryAgent => "compose a one-shot Agent request",
         MessageId::HelpSummaryExplain => "analyze the last failed command",
         MessageId::HelpSummaryCancel => "cancel active Agent work",
         MessageId::HelpSummaryDetails => "inspect approval/activity details",

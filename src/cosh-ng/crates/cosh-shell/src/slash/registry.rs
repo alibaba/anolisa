@@ -49,12 +49,14 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
+            // Compatibility alias: keep exact routing while `/agent` is the
+            // only discoverable Composer entry during the migration window.
             name: "/draft",
             usage: "/draft",
             summary_id: MessageId::HelpSummaryDraft,
             group: Some("Prompt"),
-            scope: "read-only",
-            state: SlashCommandState::Public,
+            scope: "session",
+            state: SlashCommandState::Hidden,
         },
         SlashCommandSpec {
             name: "/health",
@@ -156,9 +158,9 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             name: "/agent",
             usage: "/agent",
             summary_id: MessageId::HelpSummaryAgent,
-            group: None,
+            group: Some("Prompt"),
             scope: "session",
-            state: SlashCommandState::Hidden,
+            state: SlashCommandState::Public,
         },
         SlashCommandSpec {
             name: "/explain",
@@ -397,7 +399,16 @@ mod tests {
         assert!(visible.contains(&"/mode analysis [smart|auto|manual]"));
         assert!(visible.contains(&"/hooks"));
         assert!(visible.contains(&"/recommendations [on|off|status|privacy|clear]"));
-        assert!(!visible.iter().any(|usage| usage.starts_with("/agent")));
+        assert!(visible.contains(&"/agent"));
+        assert!(!visible.contains(&"/draft"));
+        let draft = slash_command_registry()
+            .iter()
+            .find(|spec| spec.name == "/draft")
+            .expect("draft compatibility alias");
+        assert_eq!(draft.state, SlashCommandState::Hidden);
+        assert!(exact_slash_control_commands().any(|name| name == "/draft"));
+        assert!(!active_slash_commands().any(|name| name == "/draft"));
+        assert!(!active_slash_hint_commands().any(|name| name == "/draft"));
         assert!(!visible.iter().any(|usage| usage.starts_with("/explain")));
         assert!(!visible.iter().any(|usage| usage.starts_with("/cancel")));
         assert!(!visible.iter().any(|usage| usage.starts_with("/details")));
@@ -435,7 +446,6 @@ mod tests {
             ));
         }
         for hidden in [
-            "/agent",
             "/explain",
             "/cancel",
             "/details",
