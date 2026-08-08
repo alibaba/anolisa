@@ -12,7 +12,9 @@ pub fn load_config() -> CoshConfig {
         load_config_file_into(&path, &mut config);
     }
     if let Some(path) = project_trust_store_path() {
-        load_project_trust_store(&mut config, &path);
+        if let Err(error) = load_project_trust_store(&mut config, &path) {
+            tracing::error!("load project trust store failed: {error}");
+        }
     }
 
     apply_env_overrides(&mut config);
