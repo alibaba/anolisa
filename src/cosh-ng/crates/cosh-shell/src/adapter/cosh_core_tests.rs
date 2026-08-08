@@ -155,6 +155,10 @@ turns=0
 reloads=0
 while IFS= read -r line; do
   case "$line" in
+    *'"subtype":"initialize"'*)
+      request_id=$(printf '%s\n' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"subtype":"initialize","protocol_version":1,"capabilities":{}}}}\n' "$request_id"
+      ;;
     *'"type":"user"'*)
       turns=$((turns + 1))
       if [ "$turns" -eq 1 ] && [ ! -f "__GATE__" ]; then
@@ -652,6 +656,10 @@ if [ "$1" = "--session-control" ]; then
 fi
 while IFS= read -r line; do
   case "$line" in
+    *'"subtype":"initialize"'*)
+      request_id=$(printf '%s\n' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      printf '{{"type":"control_response","response":{{"subtype":"success","request_id":"%s","response":{{"subtype":"initialize","protocol_version":1,"capabilities":{{}}}}}}}}\n' "$request_id"
+      ;;
     *'"type":"user"'*)
       printf '%s\n' '{{"type":"result","subtype":"success","session_id":"00000000-0000-4000-8000-000000000000","is_error":false,"duration_ms":1,"result":"done"}}'
       ;;
@@ -1139,6 +1147,10 @@ turns=0
 reloads=0
 while IFS= read -r line; do
   case "$line" in
+    *'"subtype":"initialize"'*)
+      request_id=$(printf '%s\n' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+      printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"subtype":"initialize","protocol_version":1,"capabilities":{}}}}\n' "$request_id"
+      ;;
     *'"type":"user"'*)
       turns=$((turns + 1))
       printf '{"type":"result","subtype":"success","session_id":"00000000-0000-4000-8000-000000000000","is_error":false,"result":"done-r%s"}\n' "$reloads"

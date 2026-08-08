@@ -36,7 +36,7 @@ use super::{
 };
 use process::{
     control_request, execute_registry, flush_pending_reload, process_error, reset_process,
-    send_json, spawn_process, spawn_response_writer, stop_process, user_message_with_raw_input,
+    send_json, send_user_turn, spawn_process, spawn_response_writer, stop_process,
     PersistentProcess,
 };
 
@@ -383,12 +383,12 @@ fn run_turn(
         }
     }
     let process = process.as_mut().expect("process is available");
-    if !process.initialized {
+    let awaiting_initialize = !process.initialized;
+    if awaiting_initialize {
         send_json(
             &process.stdin,
-            &control_protocol::serialize_initialize("init-1"),
+            &control_protocol::serialize_cosh_core_initialize("init-1"),
         )?;
-        process.initialized = true;
     } else if process.control_capabilities.provider_initialize_seen {
         // The initialize response arrives once per process; later turns seed
         // their per-run capability set from the process record so the #1940
@@ -397,21 +397,9 @@ fn run_turn(
             *current = process.control_capabilities;
         }
     }
-    // Consume a reload noted while the core sat idle before the next user
-    // message goes out; otherwise the coming turn would still run on the
-    // stale snapshot and only reload afterwards. The end-of-turn check stays
-    // for mutations that land while a turn is in flight.
-    flush_pending_reload(process, reload_pending, &command.run_id, &command.event_tx);
-    let session_id = process.session_id.clone();
-    send_json(
-        &process.stdin,
-        &user_message_with_raw_input(
-            &command.prepared.prompt,
-            command.raw_user_input.as_deref(),
-            session_id.as_deref(),
-            &command.session_scope,
-        ),
-    )?;
+    if !awaiting_initialize {
+        send_user_turn(process, command, reload_pending)?;
+    }
 
     send_agent_event(
         &command.event_tx,
@@ -454,6 +442,7 @@ fn run_turn(
     let mut terminal_events = Vec::new();
     let mut transport_error = None;
     let mut reset_after_turn = false;
+    let mut user_turn_sent = !awaiting_initialize;
 
     'output: while terminal_events.is_empty() {
         let line = match process.output_rx.recv_timeout(PROCESS_POLL_INTERVAL) {
@@ -506,13 +495,28 @@ fn run_turn(
                 break;
             }
         }
-        if let Some(capabilities) = control_protocol::parse_initialize_capabilities(&line) {
+        if let Some(response) = control_protocol::parse_initialize_response(&line, "init-1") {
+            let capabilities = match response {
+                Ok(capabilities) => capabilities,
+                Err(error) => {
+                    transport_error = Some(error);
+                    break;
+                }
+            };
             // Announced once per process: keep the durable copy on the
             // process record so later turns inherit it (mirrors
             // `session_resumable`).
             process.control_capabilities = capabilities;
             if let Ok(mut current) = command.control_capabilities.lock() {
                 *current = capabilities;
+            }
+            if awaiting_initialize && !user_turn_sent {
+                process.initialized = true;
+                if let Err(error) = send_user_turn(process, command, reload_pending) {
+                    transport_error = Some(error);
+                    break;
+                }
+                user_turn_sent = true;
             }
             continue;
         }

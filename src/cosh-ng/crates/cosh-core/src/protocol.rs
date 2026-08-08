@@ -4,6 +4,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Exact shell-to-core control protocol version supported by this binary.
+pub const CONTROL_PROTOCOL_VERSION: u32 = 1;
+
 // =====================================================================
 // Auth types (used by CoreControlRequest::AuthRequired)
 // =====================================================================
@@ -124,6 +127,9 @@ pub enum ShellControlRequest {
         /// positional invocation did not emit startup hooks.
         #[serde(default = "default_fire_session_start")]
         fire_session_start: bool,
+        /// Missing or null only for legacy shells that predate negotiation.
+        #[serde(default)]
+        protocol_version: Option<u32>,
     },
 
     #[serde(rename = "interrupt")]
@@ -273,7 +279,11 @@ pub struct CoreControlResponsePayload {
 #[derive(Debug, Clone, Serialize)]
 pub struct CoreControlResponseBody {
     pub subtype: String,
-    pub capabilities: CoreControlCapabilities,
+    pub protocol_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<CoreControlCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -485,12 +495,32 @@ impl OutputMessage {
                 request_id: request_id.to_string(),
                 response: CoreControlResponseBody {
                     subtype: "initialize".to_string(),
-                    capabilities: CoreControlCapabilities {
+                    protocol_version: CONTROL_PROTOCOL_VERSION,
+                    capabilities: Some(CoreControlCapabilities {
                         can_handle_can_use_tool: true,
                         can_handle_host_executed_shell_tool_result: true,
                         can_handle_shell_evidence_tool,
                         can_handle_approval_receipt: true,
-                    },
+                    }),
+                    error: None,
+                },
+            },
+        }
+    }
+
+    /// Builds a fail-loud initialize response for an unsupported exact version.
+    pub fn initialize_version_error(request_id: &str, received_version: u32) -> Self {
+        Self::ControlResponse {
+            response: CoreControlResponsePayload {
+                subtype: "error".to_string(),
+                request_id: request_id.to_string(),
+                response: CoreControlResponseBody {
+                    subtype: "initialize".to_string(),
+                    protocol_version: CONTROL_PROTOCOL_VERSION,
+                    capabilities: None,
+                    error: Some(format!(
+                        "unsupported control protocol version {received_version}; expected exact version {CONTROL_PROTOCOL_VERSION}"
+                    )),
                 },
             },
         }
@@ -853,7 +883,8 @@ mod tests {
             msg,
             InputMessage::ControlRequest {
                 request: ShellControlRequest::Initialize {
-                    fire_session_start: false
+                    fire_session_start: false,
+                    ..
                 },
                 ..
             }
@@ -873,12 +904,29 @@ mod tests {
                 assert!(matches!(
                     request,
                     ShellControlRequest::Initialize {
-                        fire_session_start: true
+                        fire_session_start: true,
+                        protocol_version: None,
                     }
                 ));
             }
             _ => panic!("expected ControlRequest variant"),
         }
+    }
+
+    #[test]
+    fn parse_versioned_initialize_request() {
+        let json = r#"{"request_id":"init-1","type":"control_request","request":{"subtype":"initialize","protocol_version":1}}"#;
+        let msg: InputMessage = serde_json::from_str(json).expect("should parse initialize");
+        assert!(matches!(
+            msg,
+            InputMessage::ControlRequest {
+                request: ShellControlRequest::Initialize {
+                    protocol_version: Some(CONTROL_PROTOCOL_VERSION),
+                    ..
+                },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -983,6 +1031,10 @@ mod tests {
         assert_eq!(v["response"]["request_id"], "init-1");
         assert_eq!(v["response"]["response"]["subtype"], "initialize");
         assert_eq!(
+            v["response"]["response"]["protocol_version"],
+            CONTROL_PROTOCOL_VERSION
+        );
+        assert_eq!(
             v["response"]["response"]["capabilities"]["can_handle_can_use_tool"],
             true
         );
@@ -1001,6 +1053,23 @@ mod tests {
         assert!(v["response"]["response"]["capabilities"]
             .get("can_handle_shell_output_evidence_tool")
             .is_none());
+    }
+
+    #[test]
+    fn serialize_initialize_version_error() {
+        let msg = OutputMessage::initialize_version_error("init-1", 9);
+        let v = serde_json::to_value(msg).unwrap();
+        assert_eq!(v["response"]["subtype"], "error");
+        assert_eq!(v["response"]["response"]["subtype"], "initialize");
+        assert_eq!(
+            v["response"]["response"]["protocol_version"],
+            CONTROL_PROTOCOL_VERSION
+        );
+        assert!(v["response"]["response"]["capabilities"].is_null());
+        assert!(v["response"]["response"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported control protocol version 9"));
     }
 
     #[test]

@@ -137,6 +137,7 @@ fn deadline_flush_times_out_when_stdin_stays_blocked() {
 fn maps_core_jsonl_without_exposing_stderr() {
     let script = r#"
         IFS= read -r init
+        case "$init" in *'"protocol_version":1'*) ;; *) exit 2 ;; esac
         printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"recommendation-init","response":{"subtype":"initialize","capabilities":{}}}}'
         printf '%s\n' '{"type":"system","subtype":"init","session_id":"s1","model":"m","tools":[]}'
         IFS= read -r user
@@ -303,6 +304,23 @@ fn rejects_failed_initialize_response_immediately() {
     let script = r#"
         IFS= read -r init
         printf '%s\n' '{"type":"control_response","response":{"subtype":"error","request_id":"recommendation-init","response":{"subtype":"initialize","capabilities":{}}}}'
+        sleep 2
+    "#;
+    let mut process = CoshCoreAnalyzerProcess::spawn(fixture(script)).expect("spawn fixture");
+
+    assert_eq!(
+        process.initialize(Duration::from_secs(1)),
+        Err(ProcessFailure::Transport)
+    );
+    process.cancel();
+}
+
+#[test]
+fn rejects_unsupported_initialize_version_immediately() {
+    let script = r#"
+        IFS= read -r init
+        printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"recommendation-init","response":{"subtype":"initialize","protocol_version":9,"capabilities":{}}}}'
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"s1","model":"m","tools":[]}'
         sleep 2
     "#;
     let mut process = CoshCoreAnalyzerProcess::spawn(fixture(script)).expect("spawn fixture");

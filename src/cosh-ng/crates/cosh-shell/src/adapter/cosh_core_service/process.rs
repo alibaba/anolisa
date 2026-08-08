@@ -20,7 +20,7 @@ use super::super::{
     ApprovalResponse, AuthResponse, PreparedInvocation, ProviderPromptArgMode, ProviderStdinMode,
 };
 use super::{
-    registry_timeout, PersistentCoshCoreRuntime, RegistryCommand, RegistryQueryError,
+    registry_timeout, PersistentCoshCoreRuntime, RegistryCommand, RegistryQueryError, RunCommand,
     ServiceCommand,
 };
 
@@ -298,6 +298,25 @@ pub(super) fn flush_pending_reload(
             );
         }
     }
+}
+
+pub(super) fn send_user_turn(
+    process: &mut PersistentProcess,
+    command: &RunCommand,
+    reload_pending: &Arc<AtomicBool>,
+) -> Result<(), String> {
+    // Apply mutations observed while idle before the user turn is admitted.
+    flush_pending_reload(process, reload_pending, &command.run_id, &command.event_tx);
+    let session_id = process.session_id.clone();
+    send_json(
+        &process.stdin,
+        &user_message_with_raw_input(
+            &command.prepared.prompt,
+            command.raw_user_input.as_deref(),
+            session_id.as_deref(),
+            &command.session_scope,
+        ),
+    )
 }
 
 pub(super) fn execute_registry(

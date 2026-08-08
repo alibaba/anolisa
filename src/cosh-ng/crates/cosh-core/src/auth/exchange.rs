@@ -8,6 +8,7 @@ use tokio::io::AsyncBufReadExt;
 use crate::config::CoreConfig;
 use crate::protocol::{
     AuthReason, ControlResponseBody, InputMessage, OutputMessage, ShellControlRequest,
+    CONTROL_PROTOCOL_VERSION,
 };
 
 use super::{apply_auth_credentials, builtin_auth_providers, AuthResponse};
@@ -92,6 +93,19 @@ async fn wait_for_auth_response<R: AsyncBufReadExt + Unpin>(
                     }
                 }
                 InputMessage::ControlRequest { request, .. } => {
+                    if matches!(
+                        &request,
+                        ShellControlRequest::Initialize {
+                            protocol_version: Some(version),
+                            ..
+                        } if *version != CONTROL_PROTOCOL_VERSION
+                    ) {
+                        // Replay through the headless dispatcher immediately;
+                        // it emits the version error and terminates before any
+                        // buffered user message can start a provider turn.
+                        buffered_lines.push(line);
+                        return None;
+                    }
                     if matches!(request, ShellControlRequest::Interrupt) {
                         return None;
                     }
@@ -169,6 +183,22 @@ mod tests {
 
         assert_eq!(result.buffered_lines, vec!["token=must-not-echo"]);
         assert!(result.response.is_some(), "expected auth response");
+    }
+
+    #[tokio::test]
+    async fn returns_unsupported_initialize_for_immediate_replay() {
+        let (mut input, output) = tokio::io::duplex(1024);
+        let line = r#"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize","protocol_version":9}}"#;
+        input
+            .write_all(format!("{line}\n").as_bytes())
+            .await
+            .expect("write initialize request");
+
+        let mut lines = tokio::io::BufReader::new(output).lines();
+        let result = wait_for_auth_response("auth-init", &mut lines).await;
+
+        assert_eq!(result.buffered_lines, vec![line]);
+        assert!(result.response.is_none());
     }
 
     #[tokio::test]

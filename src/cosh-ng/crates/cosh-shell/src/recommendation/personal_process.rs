@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use crate::adapter::{parse_initialize_response_value, CONTROL_PROTOCOL_VERSION};
+
 pub(crate) use super::personal_process_group::{
     analyzer_process_is_gone, process_start_identity_token, verified_terminate_process_group,
     ProcessGroupIdentity,
@@ -152,7 +154,10 @@ impl AnalyzerProcess for CoshCoreAnalyzerProcess {
             json!({
                 "type": "control_request",
                 "request_id": INITIALIZE_REQUEST_ID,
-                "request": { "subtype": "initialize" }
+                "request": {
+                    "subtype": "initialize",
+                    "protocol_version": CONTROL_PROTOCOL_VERSION
+                }
             }),
             deadline,
         )?;
@@ -434,15 +439,10 @@ fn initialize_acknowledged(message: &Value) -> Result<bool, ProcessFailure> {
     {
         return Ok(false);
     }
-    if message
-        .pointer("/response/response/subtype")
-        .and_then(Value::as_str)
-        != Some("initialize")
-        || message.pointer("/response/subtype").and_then(Value::as_str) != Some("success")
-    {
-        return Err(ProcessFailure::Transport);
+    match parse_initialize_response_value(message, INITIALIZE_REQUEST_ID) {
+        Some(Ok(_)) => Ok(true),
+        Some(Err(_)) | None => Err(ProcessFailure::Transport),
     }
-    Ok(true)
 }
 
 fn initialize_config(message: &Value) -> Result<Option<(String, Vec<String>)>, ProcessFailure> {

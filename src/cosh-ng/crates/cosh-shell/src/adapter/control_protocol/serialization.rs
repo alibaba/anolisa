@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
-use super::ShellEvidenceResult;
+use super::{ShellEvidenceResult, CONTROL_PROTOCOL_VERSION};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostExecutedShellResult {
@@ -66,6 +66,20 @@ pub(crate) fn serialize_initialize_without_session_start(request_id: &str) -> St
         "request": {
             "subtype": "initialize",
             "fire_session_start": false,
+            "protocol_version": CONTROL_PROTOCOL_VERSION,
+        }
+    })
+    .to_string()
+}
+
+/// Encodes the versioned initialize handshake used by persistent cosh-core.
+pub fn serialize_cosh_core_initialize(request_id: &str) -> String {
+    json!({
+        "request_id": request_id,
+        "type": "control_request",
+        "request": {
+            "subtype": "initialize",
+            "protocol_version": CONTROL_PROTOCOL_VERSION
         }
     })
     .to_string()

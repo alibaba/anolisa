@@ -29,6 +29,25 @@ fn run_with_input_at_home_args(
     args: &[&str],
     lines: &[&str],
 ) -> Vec<Value> {
+    let output = run_process_at_home_args(home, args, lines);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<Value>(l).unwrap_or_else(|e| panic!("bad JSON: {e}: {l}")))
+        .collect()
+}
+
+fn run_process_at_home(home: &std::path::Path, lines: &[&str]) -> std::process::Output {
+    run_process_at_home_args(home, &[], lines)
+}
+
+fn run_process_at_home_args(
+    home: &std::path::Path,
+    args: &[&str],
+    lines: &[&str],
+) -> std::process::Output {
     let bin = binary_path();
     let mut command = Command::new(&bin);
     command
@@ -48,14 +67,7 @@ fn run_with_input_at_home_args(
         }
     }
 
-    let output = child.wait_with_output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    stdout
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str::<Value>(l).unwrap_or_else(|e| panic!("bad JSON: {e}: {l}")))
-        .collect()
+    child.wait_with_output().unwrap()
 }
 
 #[test]
@@ -180,6 +192,7 @@ fn initialize_returns_system_init() {
             ["can_handle_host_executed_shell_tool_result"],
         true
     );
+    assert_eq!(capability["response"]["response"]["protocol_version"], 1);
 
     let init = msgs
         .iter()
@@ -188,6 +201,58 @@ fn initialize_returns_system_init() {
     assert!(init["session_id"].is_string());
     assert!(init["model"].is_string());
     assert!(init["tools"].is_array());
+}
+
+#[test]
+fn versioned_initialize_returns_negotiated_version() {
+    let msgs = run_with_input(&[
+        r#"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize","protocol_version":1}}"#,
+        r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
+    ]);
+
+    let response = msgs
+        .iter()
+        .find(|message| message["type"] == "control_response")
+        .expect("initialize response");
+    assert_eq!(response["response"]["subtype"], "success");
+    assert_eq!(response["response"]["response"]["protocol_version"], 1);
+    assert!(msgs
+        .iter()
+        .any(|message| message["type"] == "system" && message["subtype"] == "init"));
+}
+
+#[test]
+fn unsupported_initialize_version_fails_loud() {
+    let home = tempfile::tempdir().expect("temp home");
+    let output = run_process_at_home(
+        home.path(),
+        &[
+            r#"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize","protocol_version":9}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"must not run"}}"#,
+        ],
+    );
+    assert_eq!(output.status.code(), Some(65));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let messages = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("valid JSONL"))
+        .collect::<Vec<_>>();
+    let response = messages
+        .iter()
+        .find(|message| message["type"] == "control_response")
+        .expect("version error response");
+    assert_eq!(response["response"]["subtype"], "error");
+    assert_eq!(response["response"]["response"]["protocol_version"], 1);
+    assert!(response["response"]["response"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("unsupported control protocol version 9"));
+    assert!(!messages
+        .iter()
+        .any(|message| message["type"] == "system" && message["subtype"] == "init"));
+    assert!(!messages
+        .iter()
+        .any(|message| matches!(message["type"].as_str(), Some("assistant" | "result"))));
 }
 
 #[test]

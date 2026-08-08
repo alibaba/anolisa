@@ -37,7 +37,11 @@ fn mock_provider_script(name: &str, body: &str) -> PathBuf {
         std::process::id()
     ));
     let persistent_handshake = if name.starts_with("cosh-core-") && !body.contains("read -r init") {
-        "IFS= read -r _\nIFS= read -r _\n"
+        concat!(
+            "IFS= read -r _\n",
+            "printf '%s\\n' '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"init-1\",\"response\":{\"subtype\":\"initialize\",\"capabilities\":{}}}}'\n",
+            "IFS= read -r _\n",
+        )
     } else {
         ""
     };
@@ -1791,6 +1795,72 @@ exec sleep 30"#,
         SessionRecoveryState::Failed
     );
     let _ = fs::remove_file(pid_file);
+    let _ = fs::remove_file(script);
+}
+
+#[test]
+fn cosh_core_rejects_unsupported_initialize_before_user_turn() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let pid_file = std::env::temp_dir().join(format!(
+        "cosh-core-version-error-{}-{nonce}.pid",
+        std::process::id()
+    ));
+    let user_file = std::env::temp_dir().join(format!(
+        "cosh-core-version-user-{}-{nonce}.txt",
+        std::process::id()
+    ));
+    let script = mock_provider_script(
+        "cosh-core-version-error",
+        &format!(
+            r#"printf '%s\n' "$$" > "{}"
+IFS= read -r init
+case "$init" in
+  *'"protocol_version":1'*) ;;
+  *) exit 3 ;;
+esac
+printf '%s\n' '{{"type":"control_response","response":{{"subtype":"success","request_id":"init-1","response":{{"subtype":"initialize","protocol_version":9,"capabilities":{{}}}}}}}}'
+if IFS= read -r unexpected; then
+  printf '%s\n' "$unexpected" > "{}"
+fi
+exec sleep 30"#,
+            pid_file.display(),
+            user_file.display()
+        ),
+    );
+    let adapter = CoshCoreAdapter::new(script.display().to_string(), true);
+    let handle = adapter.start_cancellable(
+        make_request("cosh-core-version-error"),
+        CoshApprovalMode::Auto,
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut events = Vec::new();
+    let mut errors = Vec::new();
+    loop {
+        assert!(Instant::now() < deadline, "version failure did not finish");
+        match handle.poll_event_timeout(Duration::from_millis(100)) {
+            Ok(AgentRunPoll::Event(event)) => events.push(event),
+            Ok(AgentRunPoll::Timeout) => {}
+            Ok(AgentRunPoll::Finished) => break,
+            Err(error) => errors.push(error.message),
+        }
+    }
+
+    assert_eq!(errors.len(), 1, "unexpected errors: {errors:?}");
+    assert!(errors[0].contains("unsupported control protocol version 9"));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AgentEvent::AgentCompleted { .. }
+            | AgentEvent::AgentFailed { .. }
+            | AgentEvent::AgentCancelled { .. }
+    )));
+    assert_eq!(adapter.committed_session_id(), None);
+    assert_recorded_process_is_gone(&pid_file);
+    assert!(!user_file.exists(), "user turn was sent before version ack");
+    let _ = fs::remove_file(pid_file);
+    let _ = fs::remove_file(user_file);
     let _ = fs::remove_file(script);
 }
 

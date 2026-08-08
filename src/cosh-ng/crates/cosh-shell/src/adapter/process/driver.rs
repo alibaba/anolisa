@@ -397,7 +397,9 @@ pub(crate) fn start_control_protocol_provider_process<S: ProviderDriverSpec>(
             cancellation_artifacts_for_thread.clone(),
             &event_tx,
             |line| {
-                if let Some(capabilities) = control_protocol::parse_initialize_capabilities(&line) {
+                if let Some(response) = control_protocol::parse_initialize_response(&line, "init-1")
+                {
+                    let capabilities = response.map_err(|message| AdapterError { message })?;
                     if let Ok(mut current) = control_capabilities_for_loop.lock() {
                         *current = S::map_capabilities(capabilities);
                     }
