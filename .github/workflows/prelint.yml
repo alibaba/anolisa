@@ -5,7 +5,7 @@
 # advisory so external contributors receive guidance without being blocked.
 ###############################################################################
 
-name: 🔍 PR Lint
+name: CI / PR Lint
 
 on:
   pull_request:

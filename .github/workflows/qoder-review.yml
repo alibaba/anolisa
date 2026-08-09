@@ -1,4 +1,4 @@
-name: Qoder AI Review
+name: AI / Qoder Review
 
 on:
   pull_request_target:

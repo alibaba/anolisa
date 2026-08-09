@@ -6,7 +6,7 @@
 # them as formal assignees.
 ###############################################################################
 
-name: 🙋 Issue Claim
+name: Automation / Issue Claim
 
 on:
   issue_comment:

@@ -9,7 +9,7 @@
 # component owners in the same run.
 ###############################################################################
 
-name: 🔀 Issue Router
+name: Automation / Issue Router
 
 on:
   workflow_dispatch:
