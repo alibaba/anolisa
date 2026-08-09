@@ -23,15 +23,21 @@ try {
       'es2020,dom',
       'src/utils/apiClient.ts',
       'src/utils/containmentLifecycle.ts',
+      'src/utils/atifSource.ts',
       'tests/apiClient-globals.d.ts',
     ],
     { stdio: 'inherit' },
   );
-  execFileSync('node', ['--test', 'tests/apiClient-regression.test.cjs'], {
+  execFileSync('node', [
+    '--test',
+    'tests/apiClient-regression.test.cjs',
+    'tests/atifSource-regression.test.cjs',
+  ], {
     env: {
       ...process.env,
       AGENTSIGHT_API_CLIENT_BUILD: join(outputDir, 'utils', 'apiClient.js'),
       AGENTSIGHT_CONTAINMENT_LIFECYCLE_BUILD: join(outputDir, 'utils', 'containmentLifecycle.js'),
+      AGENTSIGHT_ATIF_SOURCE_BUILD: join(outputDir, 'utils', 'atifSource.js'),
     },
     stdio: 'inherit',
   });

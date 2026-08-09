@@ -3,10 +3,13 @@ import { useNavigate } from 'react-router-dom';
 import { fetchSessions, fetchTrajectories } from '../utils/apiClient';
 import type { SessionSummary, TrajectorySummary } from '../utils/apiClient';
 import { CopyButton } from '../components/CopyButton';
+import { SOURCE_LABEL, SOURCE_BADGE_CLASS } from '../utils/atifSource';
+import type { AtifSource } from '../utils/atifSource';
 
 // ─── Merged session model ─────────────────────────────────────────────────────
 
-export type SessionSource = 'ebpf' | 'log';
+/** Which store a session was seen in. Shared with the trajectory viewer. */
+export type SessionSource = AtifSource;
 
 /** One row in the unified session list, merged from both data sources. */
 export interface MergedSession {
@@ -164,21 +167,30 @@ const TIME_PRESETS = [
   { label: '最近 30d', ms: 30 * 24 * 3600 * 1000 },
 ];
 
-const SOURCE_LABEL: Record<SessionSource, string> = { ebpf: 'eBPF', log: '日志' };
-
-const SourceBadge: React.FC<{ sources?: SessionSource[] }> = ({ sources }) => {
+/**
+ * The badges double as per-source entry points: clicking one opens the trajectory
+ * viewer pinned to that store, while clicking the row leaves the source to the
+ * viewer's content-based default.
+ */
+const SourceBadge: React.FC<{ sources?: SessionSource[]; sessionId: string }> = ({ sources, sessionId }) => {
   const sourceRows = Array.isArray(sources) ? sources : [];
   return (
     <span className="inline-flex gap-1">
       {sourceRows.map((s) => (
-        <span
+        <button
           key={s}
-          className={`px-1.5 py-0.5 rounded text-xs font-medium ${
-            s === 'ebpf' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'
-          }`}
+          onClick={(e) => {
+            e.stopPropagation();
+            window.open(
+              `#/atif?type=session&id=${encodeURIComponent(sessionId)}&source=${s}`,
+              '_blank',
+            );
+          }}
+          title={`查看该会话的${SOURCE_LABEL[s]}来源轨迹`}
+          className={`px-1.5 py-0.5 rounded text-xs font-medium hover:ring-1 hover:ring-gray-300 transition-shadow ${SOURCE_BADGE_CLASS[s]}`}
         >
           {SOURCE_LABEL[s]}
-        </span>
+        </button>
       ))}
     </span>
   );
@@ -398,7 +410,7 @@ export const AgentSessionsPage: React.FC = () => {
                   onClick={() => window.open(`#/atif?type=session&id=${encodeURIComponent(s.session_id)}`, '_blank')}
                   title="点击在新窗口查看轨迹详情"
                 >
-                  <td className="px-4 py-3"><SourceBadge sources={s.sources} /></td>
+                  <td className="px-4 py-3"><SourceBadge sources={s.sources} sessionId={s.session_id} /></td>
                   <td className="px-4 py-3">
                     <div className="text-gray-800">{s.agent_name ?? '-'}</div>
                   </td>

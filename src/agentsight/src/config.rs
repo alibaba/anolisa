@@ -6,8 +6,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 // ==================== Default Constants ====================
 
-/// Default LRU cache capacity for HTTP connections
-pub const DEFAULT_CONNECTION_CAPACITY: usize = 24;
+/// Default LRU cache capacity for HTTP connections.
+///
+/// This budget is shared by every traced process, not per process. A single
+/// agent keeps a pool of keep-alive connections open, and a long SSE response
+/// occupies its slot for the whole generation — so a host running a handful of
+/// agents at once blew through the previous value of 24 and evicted requests
+/// before their responses arrived, recording the call with an empty response.
+/// Each idle slot costs only its buffered body, which `max_connection_body_mb`
+/// already bounds. Override via `runtime_limits.connection_capacity`.
+pub const DEFAULT_CONNECTION_CAPACITY: usize = 256;
 
 /// Default poll timeout for ring buffer polling (milliseconds)
 pub const DEFAULT_POLL_TIMEOUT_MS: u64 = 100;
@@ -391,6 +399,10 @@ pub struct JsonRuntimeLimits {
     pub pending_genai_max_bytes_mb: Option<usize>,
     pub pid_cache_size: Option<usize>,
     pub max_connection_body_mb: Option<usize>,
+    /// LRU capacity for concurrently tracked HTTP connections. Shared across
+    /// every traced process, so a host running several agents at once needs
+    /// considerably more than one agent's worth.
+    pub connection_capacity: Option<usize>,
     pub connection_idle_timeout_secs: Option<u64>,
     /// eBPF ring buffer size in MiB. Must be a power-of-two multiple of the page
     /// size (common valid values: 8, 16, 32, 64). Loaded from `agentsight.json`
@@ -1245,6 +1257,13 @@ impl AgentsightConfig {
                     .unwrap_or(DEFAULT_CONNECTION_IDLE_TIMEOUT_SECS),
                 ring_buffer_mb: limits.ring_buffer_mb.unwrap_or(DEFAULT_RING_BUFFER_MB),
             };
+            // The connection LRU lives on AgentsightConfig (it is handed to the
+            // aggregator separately from RuntimeLimits), but from a user's point
+            // of view it belongs with the other runtime limits, so it is read
+            // out of that block.
+            if let Some(capacity) = limits.connection_capacity {
+                self.connection_capacity = capacity.max(1);
+            }
         }
 
         // Parse server auth configuration
@@ -1477,7 +1496,7 @@ mod tests {
 
     #[test]
     fn test_default_constants() {
-        assert_eq!(DEFAULT_CONNECTION_CAPACITY, 24);
+        assert_eq!(DEFAULT_CONNECTION_CAPACITY, 256);
         assert_eq!(DEFAULT_POLL_TIMEOUT_MS, 100);
         assert_eq!(DEFAULT_MIN_DUR_US, 10_000);
         assert_eq!(DEFAULT_MAX_BODY_LEN, 64 * 1024);
@@ -1520,7 +1539,7 @@ mod tests {
     fn test_config_new_defaults() {
         let config = AgentsightConfig::new();
         assert_eq!(config.db_name, "agentsight.db");
-        assert_eq!(config.connection_capacity, 24);
+        assert_eq!(config.connection_capacity, 256);
         assert_eq!(config.poll_timeout_ms, 100);
         assert_eq!(config.min_duration_us, 10_000);
         assert_eq!(config.max_headers, 64);
@@ -1946,6 +1965,7 @@ mod tests {
                 "pending_genai_max_bytes_mb": 32,
                 "pid_cache_size": 256,
                 "max_connection_body_mb": 4,
+                "connection_capacity": 512,
                 "connection_idle_timeout_secs": 30,
                 "ring_buffer_mb": 16
             }
@@ -1968,6 +1988,10 @@ mod tests {
             4 * 1024 * 1024
         );
         assert_eq!(config.runtime_limits.connection_idle_timeout_secs, 30);
+        assert_eq!(
+            config.connection_capacity, 512,
+            "runtime_limits.connection_capacity must reach the aggregator's LRU"
+        );
         assert_eq!(config.runtime_limits.ring_buffer_mb, 16);
     }
 
