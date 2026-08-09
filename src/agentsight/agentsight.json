@@ -49,6 +49,7 @@
     "pending_genai_max_bytes_mb": 64,
     "pid_cache_size": 1024,
     "max_connection_body_mb": 8,
+    "connection_capacity": 256,
     "connection_idle_timeout_secs": 60,
     "ring_buffer_mb": 32
   },

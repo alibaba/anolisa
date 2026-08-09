@@ -309,7 +309,14 @@ fn expand_detour_items(
 
         // 失败教训是报一段弯路的必要条件：说不清那个坑，这条经验就是死记录。
         // 偶发故障豁免 —— 它按上面的规则本就不带经验。
-        if !transient && fix.as_ref().is_none_or(|fx| fx.failure_lesson.is_none()) {
+        // 空对象（serde 解析为 Default）同样不通过：必须有实质规避动作。
+        if !transient
+            && fix.as_ref().is_none_or(|fx| {
+                fx.failure_lesson
+                    .as_ref()
+                    .is_none_or(|l| l.instead.is_empty())
+            })
+        {
             tracing::info!("Cost: 弯路 finding 缺失败教训，不报：{}", f.what);
             continue;
         }

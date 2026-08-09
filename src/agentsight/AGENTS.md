@@ -292,6 +292,7 @@ Agent 规则配置文件路径：`/etc/agentsight/config.json`（可通过 `--co
 | `pending_genai_max_bytes_mb` | 64 | 等待 session_id 的最大字节数 |
 | `pid_cache_size` | 1,024 | PID → agent_name LRU 缓存 |
 | `max_connection_body_mb` | 8 | 单 HTTP 连接 body 缓冲上限 |
+| `connection_capacity` | 256 | 并发跟踪的 HTTP 连接 LRU 容量（多 Agent 主机需调大） |
 | `connection_idle_timeout_secs` | 60 | HTTP 连接 idle 超时 |
 | `ring_buffer_mb` | 32 | eBPF Ring Buffer 大小（必须为 2 的幂） |
 

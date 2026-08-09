@@ -30,6 +30,9 @@ export interface MergedSession {
   last_active_ms: number | null;
   /** Number of subagent trajectories spawned by this session. */
   subagent_count: number;
+  /** Collected trajectory session_id when it differs from the eBPF session_id
+   *  (e.g. Codex rollout uses `rollout-<ts>-<uuid>` while eBPF reports bare UUID). */
+  log_session_id?: string;
 }
 
 /** Last activity of a log-collected trajectory in epoch milliseconds. */
@@ -108,6 +111,10 @@ export function mergeSessions(
       byId.get(t.session_id) ?? (uuid && uuid !== t.session_id ? byId.get(uuid) : undefined);
     if (existing) {
       existing.sources.push('log');
+      // Preserve the collected key when it differs (Codex rollout fallback).
+      if (t.session_id !== existing.session_id) {
+        existing.log_session_id = t.session_id;
+      }
       existing.project = t.project || existing.project;
       existing.agent_name = existing.agent_name || t.agent_name;
       existing.model = existing.model || t.model_name;
@@ -172,7 +179,7 @@ const TIME_PRESETS = [
  * viewer pinned to that store, while clicking the row leaves the source to the
  * viewer's content-based default.
  */
-const SourceBadge: React.FC<{ sources?: SessionSource[]; sessionId: string }> = ({ sources, sessionId }) => {
+const SourceBadge: React.FC<{ sources?: SessionSource[]; sessionId: string; logSessionId?: string }> = ({ sources, sessionId, logSessionId }) => {
   const sourceRows = Array.isArray(sources) ? sources : [];
   return (
     <span className="inline-flex gap-1">
@@ -181,8 +188,9 @@ const SourceBadge: React.FC<{ sources?: SessionSource[]; sessionId: string }> = 
           key={s}
           onClick={(e) => {
             e.stopPropagation();
+            const id = s === 'log' && logSessionId ? logSessionId : sessionId;
             window.open(
-              `#/atif?type=session&id=${encodeURIComponent(sessionId)}&source=${s}`,
+              `#/atif?type=session&id=${encodeURIComponent(id)}&source=${s}`,
               '_blank',
             );
           }}
@@ -410,7 +418,7 @@ export const AgentSessionsPage: React.FC = () => {
                   onClick={() => window.open(`#/atif?type=session&id=${encodeURIComponent(s.session_id)}`, '_blank')}
                   title="点击在新窗口查看轨迹详情"
                 >
-                  <td className="px-4 py-3"><SourceBadge sources={s.sources} sessionId={s.session_id} /></td>
+                  <td className="px-4 py-3"><SourceBadge sources={s.sources} sessionId={s.session_id} logSessionId={s.log_session_id} /></td>
                   <td className="px-4 py-3">
                     <div className="text-gray-800">{s.agent_name ?? '-'}</div>
                   </td>
