@@ -105,10 +105,13 @@ export function resolveLocale(
 ): Locale {
   if (isSupportedLocale(persistedLocale)) return persistedLocale;
 
-  const preferredLanguage = browserLanguages.find(Boolean);
-  return preferredLanguage?.toLowerCase().startsWith('zh')
-    ? 'zh-CN'
-    : DEFAULT_LOCALE;
+  for (const browserLanguage of browserLanguages) {
+    const normalizedLanguage = browserLanguage.toLowerCase();
+    if (normalizedLanguage.startsWith('zh')) return 'zh-CN';
+    if (normalizedLanguage.startsWith('en')) return 'en-US';
+  }
+
+  return DEFAULT_LOCALE;
 }
 
 function resolveInitialLocale(): Locale {
