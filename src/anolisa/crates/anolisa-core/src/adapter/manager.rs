@@ -740,8 +740,8 @@ impl AdapterManager {
     /// [`AdapterError::AmbiguousFramework`], [`AdapterError::UnsupportedAdapterType`],
     /// [`AdapterError::ResourceRootNotFound`],
     /// [`AdapterError::FrameworkNotDetected`], [`AdapterError::BundleInvalid`],
-    /// [`AdapterError::FrameworkCli`], [`AdapterError::ClaimValidation`], or
-    /// state/lock/log errors.
+    /// [`AdapterError::FrameworkCli`], [`AdapterError::ClaimValidation`],
+    /// [`AdapterError::ReenableCleanupIncomplete`], or state/lock/log errors.
     pub fn enable(
         &self,
         component: &str,
@@ -956,7 +956,18 @@ impl AdapterManager {
         let bundle = driver.read_bundle(&ctx)?;
 
         if dry_run {
-            let plan = driver.plan_enable(&bundle, &ctx)?;
+            let mut plan = driver.plan_enable(&bundle, &ctx)?;
+            if let Some(prior) = state.find_adapter_claim(component, &framework) {
+                let claim_allowed_roots = driver.allowed_external_roots(&ctx);
+                prior.validate_with_trust(
+                    &self.layout,
+                    &claim_allowed_roots,
+                    &trust.target_roots,
+                    trust.exact_targets(),
+                )?;
+                let cleanup_actions = driver.plan_reenable_cleanup(prior, &ctx)?;
+                plan.actions.splice(0..0, cleanup_actions);
+            }
             let notices = declared_notices(
                 &manifest,
                 &framework,
@@ -982,7 +993,8 @@ impl AdapterManager {
         // Inert text — never expanded or executed.
         claim.notices = all_notices;
         let claim_allowed_roots = driver.allowed_external_roots(&ctx);
-        if let Some(prior) = state.find_adapter_claim(component, &framework).cloned() {
+        let prior = state.find_adapter_claim(component, &framework).cloned();
+        if let Some(prior) = &prior {
             // A forged prior receipt must not gain authority merely because a
             // driver preserves facts from it during re-enable.
             prior.validate_with_trust(
@@ -991,7 +1003,7 @@ impl AdapterManager {
                 &trust.target_roots,
                 trust.exact_targets(),
             )?;
-            driver.preserve_reenable_facts(&prior, &mut claim)?;
+            driver.preserve_reenable_facts(prior, &mut claim)?;
         }
         // Defense in depth: the driver must not emit a claim that points
         // outside its own declared roots. Reject before persisting.
@@ -1002,6 +1014,26 @@ impl AdapterManager {
             trust.exact_targets(),
         )?;
         driver.validate_prepared_enable(&claim)?;
+
+        if let Some(prior) = &prior {
+            // Do not overwrite the only durable ownership record until the
+            // driver has released resources the replacement cannot describe.
+            // A failed cleanup leaves the validated prior receipt untouched,
+            // so disable or a later re-enable can retry safely.
+            let report = driver.cleanup_replaced_claim(prior, &claim, &ctx)?;
+            if !report.cleanup_complete {
+                let reason = if report.messages.is_empty() {
+                    "driver reported incomplete cleanup without details".to_string()
+                } else {
+                    report.messages.join("; ")
+                };
+                return Err(AdapterError::ReenableCleanupIncomplete {
+                    component: component.to_string(),
+                    framework: framework.clone(),
+                    reason,
+                });
+            }
+        }
 
         state.upsert_adapter_claim(claim.clone());
         // Anchor lifecycle shares the trust decision above: it is recorded

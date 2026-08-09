@@ -569,6 +569,25 @@ pub trait FrameworkDriver: Send + Sync {
         ctx: &DriverCtx,
     ) -> Result<DriverPlan, AdapterError>;
 
+    /// Describe cleanup that will run before a validated prior receipt is
+    /// replaced during re-enable.
+    ///
+    /// The Manager prepends these descriptions to the ordinary enable plan,
+    /// preserving the real execution order. Implementations must remain
+    /// read-only; the default represents drivers whose replacement happens in
+    /// place and requires no separate cleanup.
+    ///
+    /// # Errors
+    ///
+    /// Returns a driver-specific receipt consistency error.
+    fn plan_reenable_cleanup(
+        &self,
+        _prior: &AdapterClaim,
+        _ctx: &DriverCtx,
+    ) -> Result<Vec<String>, AdapterError> {
+        Ok(Vec::new())
+    }
+
     /// Build the pure-data receipt for a future enable operation without
     /// mutating framework state, together with any driver-private
     /// [`PreparedEnable`] state (host capabilities resolved by read-only
@@ -607,6 +626,31 @@ pub trait FrameworkDriver: Send + Sync {
         _next: &mut AdapterClaim,
     ) -> Result<(), AdapterError> {
         Ok(())
+    }
+
+    /// Release prior resources that the replacement receipt cannot continue
+    /// to own.
+    ///
+    /// The Manager calls this only after validating both receipts and keeps
+    /// the prior receipt durable until cleanup completes. Drivers should make
+    /// the operation idempotent and return `cleanup_complete = false` rather
+    /// than abandon any resource still requiring a later disable retry. The
+    /// default keeps existing re-enable behavior for drivers whose new receipt
+    /// fully supersedes the old one in place.
+    ///
+    /// # Errors
+    ///
+    /// Returns a driver-specific cleanup error.
+    fn cleanup_replaced_claim(
+        &self,
+        _prior: &AdapterClaim,
+        _next: &AdapterClaim,
+        _ctx: &DriverCtx,
+    ) -> Result<DisableReport, AdapterError> {
+        Ok(DisableReport {
+            cleanup_complete: true,
+            messages: Vec::new(),
+        })
     }
 
     /// Validate the final prepared receipt after re-enable facts have been
