@@ -471,6 +471,13 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Mon Aug 10 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.5-1
+- feat(tokenless): add an OpenCode adapter with shared compression hooks
+- fix(tokenless): support native Qoder plugins and in-place compressed output
+- fix(tokenless): anchor rewritten commands to the resolved RTK binary
+- fix(tokenless): preserve Qoder and OpenClaw attribution across rewrite boundaries
+- fix(tokenless): support legacy /usr/local layouts and clean stale RPM documentation
+
 * Fri Jul 31 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.4-1
 - feat(tokenless): distribute prebuilt binaries and adapters through npm for Linux and macOS x64/arm64
 - feat(tokenless): add `tokenless stats diff` reports for records, sessions, and tool uses
