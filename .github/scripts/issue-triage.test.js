@@ -34,6 +34,7 @@ function inputEnv(overrides = {}) {
     INPUT_CONFIDENCE: '0.96',
     INPUT_SUMMARY: 'The report references AgentSight symbol resolution.',
     INPUT_EVIDENCE: 'src/agentsight and the [sight] title prefix',
+    INPUT_DECISION_SOURCE: 'classifier',
     INPUT_DECISION_ID: 'anolisa-2262-v1',
     INPUT_APPLY: 'true',
     AUTOMATION_MODE: 'apply',
@@ -128,6 +129,14 @@ test('parses a valid decision', () => {
   assert.equal(decision.issueNumber, 2262);
   assert.equal(decision.component, 'sight');
   assert.equal(decision.confidence, 0.96);
+  assert.equal(decision.source, 'classifier');
+});
+
+test('rejects an unknown decision source', () => {
+  assert.throws(
+    () => triage.parseDecision(inputEnv({ INPUT_DECISION_SOURCE: 'manual' })),
+    /decision_source must be classifier or structured-form/
+  );
 });
 
 test('rejects internal components', () => {
@@ -161,6 +170,18 @@ test('rejects an invalid external assignment policy', () => {
     () => triage.parsePolicy('{invalid'),
     /ISSUE_TRIAGE_POLICY must be valid JSON/
   );
+});
+
+test('reports the repository path when component metadata cannot be read', async () => {
+  const harness = makeHarness();
+  harness.github.rest.repos.getContent = async () => {
+    throw new Error('Not Found');
+  };
+  await assert.rejects(
+    () => triage.run({ ...harness, env: inputEnv() }),
+    /failed to read alibaba\/anolisa:\.github\/components\.json: Not Found/
+  );
+  assert.deepEqual(harness.calls, []);
 });
 
 test('dry run performs no GitHub mutations', async () => {
@@ -228,6 +249,30 @@ test('assigns component owners for an allowlisted reporter', async () => {
     ['addLabels', 'addAssignees', 'createComment']
   );
   assert.equal(harness.outputs.assigned, 'chengshuyi,jfeng18');
+});
+
+test('applies structured form routing only for an allowlisted reporter', async () => {
+  const harness = makeHarness({ author: 'trusted-reporter' });
+  await triage.run({
+    ...harness,
+    env: inputEnv({ INPUT_DECISION_SOURCE: 'structured-form' }),
+  });
+  const comment = harness.calls.find(([name]) => name === 'createComment')[1];
+  assert.match(comment.body, /ANOLISA Issue Router/);
+  assert.doesNotMatch(comment.body, /Routing source/);
+  assert.doesNotMatch(comment.body, /assistance/);
+});
+
+test('rejects structured form routing for an external reporter', async () => {
+  const harness = makeHarness();
+  await assert.rejects(
+    () => triage.run({
+      ...harness,
+      env: inputEnv({ INPUT_DECISION_SOURCE: 'structured-form' }),
+    }),
+    /requires an allowlisted reporter/
+  );
+  assert.deepEqual(harness.calls, []);
 });
 
 test('reports only owners accepted by GitHub as assignees', async () => {
@@ -358,7 +403,7 @@ test('refuses to record notification state on an untrusted comment', async () =>
   );
 });
 
-test('escapes claim markers in Codex-authored public text', async () => {
+test('escapes claim markers in classifier-authored public text', async () => {
   const harness = makeHarness();
   const marker = '<!-- anolisa-claim owner=attacker state=claimed -->';
   await triage.run({

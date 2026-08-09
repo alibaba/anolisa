@@ -2,6 +2,7 @@
 
 const DECISION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const TRUSTED_BOT_LOGIN = 'github-actions[bot]';
+const DECISION_SOURCES = new Set(['classifier', 'structured-form']);
 
 function unique(values) {
   return [...new Set((values || []).filter(Boolean))];
@@ -63,6 +64,7 @@ function parseDecision(env) {
   const component = String(env.INPUT_COMPONENT || '').trim().toLowerCase();
   const summary = String(env.INPUT_SUMMARY || '').trim();
   const evidence = String(env.INPUT_EVIDENCE || '').trim();
+  const source = String(env.INPUT_DECISION_SOURCE || 'classifier').trim();
   const decisionId = String(env.INPUT_DECISION_ID || '').trim();
 
   if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
@@ -78,6 +80,9 @@ function parseDecision(env) {
   if (evidence.length > 2000) {
     throw new Error('evidence must contain at most 2000 characters');
   }
+  if (!DECISION_SOURCES.has(source)) {
+    throw new Error('decision_source must be classifier or structured-form');
+  }
   if (!DECISION_ID_RE.test(decisionId)) {
     throw new Error('decision_id must be a safe identifier of at most 128 characters');
   }
@@ -88,6 +93,7 @@ function parseDecision(env) {
     component,
     summary,
     evidence,
+    source,
     decisionId,
     applyRequested: String(env.INPUT_APPLY).toLowerCase() === 'true',
   };
@@ -127,11 +133,26 @@ function selectTriagers(metadata, component) {
 }
 
 async function readJsonFile(github, owner, repo, path) {
-  const response = await github.rest.repos.getContent({ owner, repo, path });
-  if (Array.isArray(response.data) || response.data.type !== 'file') {
-    throw new Error(`${path} is not a regular file`);
+  let response;
+  try {
+    response = await github.rest.repos.getContent({ owner, repo, path });
+  } catch (error) {
+    throw new Error(
+      `failed to read ${owner}/${repo}:${path}: ${error.message}`
+    );
   }
-  return JSON.parse(Buffer.from(response.data.content, 'base64').toString('utf8'));
+  if (Array.isArray(response.data) || response.data.type !== 'file') {
+    throw new Error(`${owner}/${repo}:${path} is not a regular file`);
+  }
+  try {
+    return JSON.parse(
+      Buffer.from(response.data.content, 'base64').toString('utf8')
+    );
+  } catch (error) {
+    throw new Error(
+      `${owner}/${repo}:${path} must contain valid JSON: ${error.message}`
+    );
+  }
 }
 
 async function ensureLabel(github, owner, repo, name, displayName) {
@@ -158,7 +179,7 @@ function setIssueOutputs(core, issue, componentLabel) {
 
 async function writeSummary(core, rows) {
   await core.summary
-    .addHeading('AI issue triage', 3)
+    .addHeading('Issue router', 3)
     .addTable([
       [
         { data: 'Field', header: true },
@@ -231,6 +252,14 @@ async function run({ github, context, core, env }) {
   const issue = response.data;
   if (issue.pull_request) throw new Error('issue_number refers to a pull request');
   if (issue.state !== 'open') throw new Error('issue_number refers to a closed issue');
+  if (
+    decision.source === 'structured-form' &&
+    !shouldAutoAssign(policy, issue.user?.login || '')
+  ) {
+    throw new Error(
+      'structured-form routing requires an allowlisted reporter'
+    );
+  }
 
   setIssueOutputs(core, issue, component.label);
   core.setOutput('owners', owners.join(','));
@@ -257,7 +286,8 @@ async function run({ github, context, core, env }) {
       ['Status', 'manual override'],
       ['Issue', `#${decision.issueNumber}`],
       ['Existing components', conflictingComponents.join(', ')],
-      ['Codex component', component.label],
+      ['Routing component', component.label],
+      ['Source', decision.source],
     ]);
     return;
   }
@@ -269,6 +299,7 @@ async function run({ github, context, core, env }) {
       ['Status', status],
       ['Issue', `#${decision.issueNumber}`],
       ['Component', component.label],
+      ['Source', decision.source],
       ['Confidence', decision.confidence.toFixed(2)],
       ['Minimum confidence', minimumConfidence.toFixed(2)],
     ]);
@@ -335,7 +366,7 @@ async function run({ github, context, core, env }) {
     : 'No assignee was added; assignment records active implementation ownership.';
   const comment = [
     marker,
-    '## 🔀 Issue Triage',
+    '## 🔀 Issue Router',
     '',
     `- Component: \`${component.id}\``,
     `- Confidence: \`${Math.round(decision.confidence * 100)}%\``,
@@ -347,7 +378,7 @@ async function run({ github, context, core, env }) {
       ? ['', `Evidence: ${sanitizePublicText(decision.evidence)}`]
       : []),
     '',
-    '_This routing was produced with Codex assistance and applied by GitHub Actions._',
+    '_This routing was applied by the ANOLISA Issue Router through GitHub Actions._',
   ].join('\n');
 
   const commentResponse = await github.rest.issues.createComment({
@@ -365,6 +396,7 @@ async function run({ github, context, core, env }) {
     ['Status', 'applied'],
     ['Issue', `#${decision.issueNumber}`],
     ['Component', component.label],
+    ['Source', decision.source],
     ['Confidence', decision.confidence.toFixed(2)],
     ['Owners', owners.join(', ') || 'none'],
     ['Assigned', assigned.join(', ') || 'none'],

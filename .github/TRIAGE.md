@@ -9,9 +9,9 @@ ANOLISA separates routing, triage, implementation ownership, and code review.
 - **Claimant** is the person actively working on an accepted community task.
 - **Code owner** reviews the resulting pull request.
 
-A new issue is classified by a dedicated Codex runtime and then routed through a
-parameterized GitHub Actions workflow. Assignees represent people actively
-implementing the work, not notification targets.
+A new issue passes through the ANOLISA Issue Router before a parameterized
+GitHub Actions workflow applies the validated result. Assignees represent people
+actively implementing the work, not notification targets.
 
 ## Status labels
 
@@ -29,11 +29,12 @@ Only one `status:*` label should describe the current workflow state.
 
 ## New issue flow
 
-1. The Issue Form may supply a component hint, but the field is optional and is
-   never treated as authoritative.
-2. The external dispatcher discovers the issue and asks the dedicated Codex
-   triager for a component, confidence, public summary, and evidence.
-3. The dispatcher invokes `AI Issue Triage` through `workflow_dispatch`.
+1. The Issue Form may supply a component hint. It is authoritative only for a
+   structured report whose author passes the private fast-path policy.
+2. The external dispatcher discovers the issue, uses the structured fast path
+   when eligible, or requests a component classification with a public summary
+   and evidence.
+3. The dispatcher invokes `Issue Router` through `workflow_dispatch`.
 4. The workflow validates the component against `.github/components.json` and
    preserves any conflicting component label already applied by a maintainer.
 5. Decisions below the configured confidence threshold remain non-mutating.
@@ -48,7 +49,7 @@ a JSON object whose optional `auto_assign_authors` field is an array of GitHub
 logins. An absent secret safely disables automatic assignment.
 
 Only a first-line decision marker authored by `github-actions[bot]` is trusted
-for idempotency. Codex-authored summary and evidence text is HTML-escaped before
+for idempotency. Router summary and evidence text is HTML-escaped before
 publication so it cannot create workflow markers. Owner notification has a
 separate marker on the trusted triage comment: a failed notification remains
 pending and is retried by rerunning the workflow. If delivery succeeds but
@@ -111,6 +112,6 @@ claim workflows:
 Any other value is rejected without changing the issue. This fail-closed
 behavior prevents a misspelled incident-response setting from enabling writes.
 
-`AI Issue Triage` also accepts an `apply` input. Set it to `false` for a single
+`Issue Router` also accepts an `apply` input. Set it to `false` for a single
 dry run even when the repository mode is `apply`. The default repository mode
 is `apply`; set it to `shadow` for incident response or a non-mutating trial.
