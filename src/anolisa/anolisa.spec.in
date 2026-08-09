@@ -143,7 +143,12 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Thu Aug 06 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Mon Aug 10 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Raw dependency provisioning now recognizes RPM and DEB family hints without `which`.
+- Sandbox-list and registration-status JSON now use the standard response envelope.
+- OpenClaw adapters now honor configured state directories and migrate legacy installs safely.
+
+* Thu Aug 06 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.18-1
 - Raw installs now use bounded-memory, disk-backed payload staging.
 - Telemetry now derives region-specific SLS projects from a project prefix.
 - Large intact artifacts no longer cause false integrity failures.
