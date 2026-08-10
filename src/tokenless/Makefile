@@ -29,17 +29,20 @@ ADAPTER_TEMPLATES := \
     $(ADAPTER_SRC_DIR)/claude-code/.claude-plugin/plugin.json \
     $(ADAPTER_SRC_DIR)/codex/.codex-plugin/plugin.json \
     $(ADAPTER_SRC_DIR)/qwencode/qwen-extension.json
-# Component contract (publishing/plugin metadata) — kept separate from the
-# adapter payload tree so the contract is not mixed with adapter resources.
-# Shipped to %{_datadir}/anolisa/components/tokenless/component.toml.
+# Canonical RPM/raw component contract — kept separate from the adapter
+# payload tree and stamped from the workspace version before packaging.
+# Shipped to %{_datadir}/anolisa/components/tokenless/component.toml and
+# embedded in raw archives as .anolisa/component.toml.
 COMPONENT_CONTRACT := .anolisa/component.toml
-ANOLISA_COMPONENT_MANIFEST := ../anolisa/manifests/components/tokenless/component.toml
 TOON_VER := 0.5.0
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+NATIVE_NPM_TARGET := $(shell node -p 'process.platform + "-" + process.arch')
+NATIVE_NPM_INPUT_DIR := $(CURDIR)/target/npm-prebuilt/$(NATIVE_NPM_TARGET)
 
 .PHONY: build build-tokenless build-toon build-openclaw-plugin \
         stamp-adapter-templates generate-component-contract \
-        install uninstall test lint clean \
+        install uninstall test lint clean package-raw stage-raw \
+        test-raw-package test-npm-package \
         install-binaries install-helpers install-adapter-resources install-cosh-extension \
         adapter-install adapter-uninstall adapter-scan \
         cosh-extension-install cosh-extension-uninstall \
@@ -51,7 +54,7 @@ VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1
         opencode-install opencode-uninstall \
         qwencode-install qwencode-uninstall \
         setup help \
-        npm-package npm-package-all npm-publish \
+        npm-package npm-package-all npm-publish prepare-npm-native-binaries \
         test-hooks
 
 # Default target
@@ -172,7 +175,8 @@ uninstall:
 	rm -rf $(DESTDIR)$(COSH_EXTENSION_DIR)
 
 # Run tests
-test: test-tokenless test-hooks test-integration test-adapters
+test: test-tokenless test-hooks test-integration test-adapters \
+      test-raw-package test-npm-package
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
@@ -200,6 +204,24 @@ test-adapters: build-openclaw-plugin
 	@echo "==> Testing OpenCode adapter..."
 	bash tests/test-opencode-adapter-install.sh
 	node tests/test-opencode-plugin.mjs
+
+# These targets only assemble the prebuilt BIN_DIR/{tokenless,rtk,toon} files
+# into the portable raw-package contract maintained by this component.
+package-raw:
+	@$(MAKE) -B stamp-adapter-templates
+	@$(MAKE) build-openclaw-plugin
+	@./packaging/raw/package.sh package
+
+stage-raw:
+	@$(MAKE) -B stamp-adapter-templates
+	@$(MAKE) build-openclaw-plugin
+	@./packaging/raw/package.sh stage
+
+test-raw-package:
+	@bash tests/test-package-raw.sh
+
+test-npm-package:
+	@bash tests/test-package-npm-prebuilt.sh
 
 # Lint (rtk excluded — vendored third-party source)
 lint:
@@ -391,12 +413,22 @@ setup: install adapter-install
 	@echo "  make adapter-scan"
 
 # --- npm Packaging ---
-# Package for current platform only
-npm-package:
+# Preserve the convenient native entry point while keeping package-npm.js a
+# pure validator/assembler.
+prepare-npm-native-binaries: build-tokenless build-toon
+	@install -d -m 0755 "$(NATIVE_NPM_INPUT_DIR)"
+	@install -p -m 0755 \
+		target/release/tokenless \
+		third_party/rtk/target/release/rtk \
+		"$(HOME)/.cargo/bin/toon" \
+		"$(NATIVE_NPM_INPUT_DIR)/"
+
+# Build and package the current host.
+npm-package: prepare-npm-native-binaries
 	@echo "==> Packaging anolisa-tokenless for npm (current platform)..."
 	node npm/scripts/package-npm.js
 
-# Package for all supported targets (requires cross-compilation toolchain)
+# Package all four prebuilt target directories from target/npm-prebuilt.
 npm-package-all:
 	@echo "==> Packaging anolisa-tokenless for npm (all platforms)..."
 	node npm/scripts/package-npm.js --all
@@ -464,9 +496,11 @@ help:
 	@echo "  qwencode-install  Register Qwen Code plugin via qwen CLI"
 	@echo "  qwencode-uninstall Unregister Qwen Code plugin"
 	@echo "  setup             Full setup: build + install + register adapters"
-	@echo "  npm-package       Package for npm (current platform)"
-	@echo "  npm-package-all   Package for npm (all platforms)"
+	@echo "  npm-package       Build and package the current host"
+	@echo "  npm-package-all   Package target/npm-prebuilt target directories"
 	@echo "  npm-publish       Build and publish all npm packages"
+	@echo "  package-raw       Package prebuilt BIN_DIR binaries for one raw target"
+	@echo "  stage-raw         Stage one raw payload into DESTDIR"
 	@echo "  help              Show this help"
 	@echo ""
 	@echo "Variables:"
@@ -477,3 +511,7 @@ help:
 	@echo "  LIBEXECDIR       Helper binary install path"
 	@echo "  SHARE_DIR        Adapter resources path"
 	@echo "  COSH_EXTENSION_DIR  Cosh extension path"
+	@echo "  BIN_DIR          Directory containing prebuilt tokenless, rtk, and toon"
+	@echo "  TARGET_OS        Raw target OS: linux or macos"
+	@echo "  TARGET_ARCH      Raw target arch: x86_64 or aarch64"
+	@echo "  OUTPUT_DIR       Raw artifact output directory (default: target/raw)"

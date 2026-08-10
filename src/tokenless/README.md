@@ -485,6 +485,7 @@ The installer creates a `tokenless.js` symbolic link in OpenCode's global
 | `make lint` | Run clippy checks |
 | `make fmt` | Format code |
 | `make clean` | Clean build artifacts |
+| `make package-raw` | Package prebuilt target binaries as an ANOLISA raw archive |
 | `make adapter-install` | Install all available framework adapters |
 | `make adapter-uninstall` | Remove all adapters |
 | `make cosh-extension-install` | Install Copilot Shell extension |
@@ -509,6 +510,39 @@ Override install paths:
 make install BIN_DIR=/usr/local/bin
 ```
 
+## Raw Packaging
+
+Raw packaging accepts already-built `tokenless`, `rtk`, and `toon`
+executables in one directory and applies the stable component payload layout:
+
+```bash
+make package-raw \
+  BIN_DIR="$PWD/target/release-bins" \
+  TARGET_OS=linux \
+  TARGET_ARCH=aarch64 \
+  OUTPUT_DIR="$PWD/dist"
+```
+
+Supported raw targets are `linux-x86_64`, `linux-aarch64`, and
+`macos-aarch64`. `darwin`/`arm64` and `amd64`/`x64` are accepted as input
+aliases, while artifact names always use the canonical ANOLISA labels. The
+packer verifies the ELF or Mach-O architecture without executing cross-target
+binaries, embeds the component-owned `.anolisa/component.toml`, materializes
+adapter hook symlinks, and emits a reproducible
+`tokenless-<version>-<os>-<arch>.tar.gz` archive. Set `SOURCE_DATE_EPOCH` when
+the caller needs an epoch other than the source commit time.
+
+npm packaging also accepts prebuilt `linux-x64`, `linux-arm64`, `darwin-x64`,
+and `darwin-arm64` binary directories under `target/npm-prebuilt`. The packer
+validates and assembles them:
+
+```bash
+node npm/scripts/package-npm.js --all
+```
+
+See [npm/README.md](npm/README.md#packaging-for-npm) for the fixed directory
+layout and single-target interface.
+
 ## Project Structure
 
 | Path | Description |
@@ -523,6 +557,7 @@ make install BIN_DIR=/usr/local/bin
 | `adapters/tokenless/opencode/` | OpenCode adapter — local JavaScript plugin + lifecycle scripts |
 | `third_party/rtk/` | RTK vendored source — command rewriting engine (justfile clone+patch) |
 | `third_party/patches/` | Patches for vendored third_party sources |
+| `packaging/raw/` | Component-owned ANOLISA raw packer and target validation |
 | `Makefile` | Unified build system for the entire workspace |
 
 ## Prerequisites
