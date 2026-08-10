@@ -353,6 +353,8 @@ agent-sec-cli capabilities --agent hermes --capability pii-check --output json
 
 支持的 capability 名称固定为：`code-scan`、`prompt-scan`、`pii-check`、`skill-ledger` 和 `observability`。CLI 过滤参数不接受 `scan-code` 或 `pii-scan-user-input` 等插件内部 ID。
 
+表格输出仅包含稳定的用户可见列：`CAPABILITY`、`ENABLED`、`MODE`、`SCAN_MODE`、`TIMEOUT(s)` 和 `DIAGNOSTICS`。JSON 输出保留同样的用户字段，并额外包含经过脱敏投影的 `env` 条目，其中只含 `effective` 和 `default`。两种格式都不会暴露 hook matcher 列表、source 标签、Agent config 内容、config 路径或原始环境变量值。诊断信息只说明哪个设置无效及 fallback 行为，不回显原始值。
+
 ## 审计日志
 
 所有安全事件以 JSONL 格式记录至 `/var/log/agent-sec/security-events.jsonl`（回退路径：`~/.agent-sec-core/security-events.jsonl`）：

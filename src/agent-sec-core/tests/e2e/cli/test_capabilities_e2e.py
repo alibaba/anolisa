@@ -44,7 +44,8 @@ def test_capabilities_json_uses_cli_process_environment() -> None:
     assert payload[0]["timeout"] == "10"
     assert "hooks" not in payload[0]
     assert "source" not in payload[0]
-    assert payload[0]["env"]["CODE_SCANNER_HOOK_ENABLED"]["raw"] == "false"
+    assert "raw" not in payload[0]["env"]["CODE_SCANNER_HOOK_ENABLED"]
+    assert payload[0]["env"]["CODE_SCANNER_HOOK_ENABLED"]["effective"] is False
 
 
 def test_capabilities_json_reads_new_hook_enabled_environment() -> None:
@@ -64,9 +65,10 @@ def test_capabilities_json_reads_new_hook_enabled_environment() -> None:
     assert payload[0]["enabled"] == "disabled"
     assert payload[0]["mode"] == "observe"
     assert payload[0]["scan_mode"] == "standard"
-    assert payload[0]["config"] == {}
-    assert payload[0]["config_path"] is None
-    assert payload[0]["env"]["PROMPT_SCANNER_HOOK_ENABLED"]["raw"] == "false"
+    assert "config" not in payload[0]
+    assert "config_path" not in payload[0]
+    assert "raw" not in payload[0]["env"]["PROMPT_SCANNER_HOOK_ENABLED"]
+    assert payload[0]["env"]["PROMPT_SCANNER_HOOK_ENABLED"]["effective"] is False
 
 
 def test_capabilities_rejects_noncanonical_capability_name() -> None:

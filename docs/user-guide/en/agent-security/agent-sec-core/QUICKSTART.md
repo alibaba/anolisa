@@ -336,7 +336,7 @@ agent-sec-cli capabilities --agent hermes --capability code-scan
 agent-sec-cli capabilities --agent qwen --capability pii-check --output json
 ```
 
-Supported capability names are exactly `code-scan`, `prompt-scan`, `pii-check`, `skill-ledger`, and `observability`; plugin-internal IDs such as `scan-code`, `prompt-scan-user-input`, or `pii-scan-user-input` are rejected. Table output is grouped by Agent and includes `CAPABILITY`, `ENABLED`, `MODE`, `SCAN_MODE`, `TIMEOUT(s)`, and `DIAGNOSTICS`; `MODE` is the hook interaction mode, while `SCAN_MODE` is the prompt scanner engine mode (`fast`, `standard`, or `strict`). JSON output uses the same user-facing fields and also includes the current CLI process environment values and diagnostics.
+Supported capability names are exactly `code-scan`, `prompt-scan`, `pii-check`, `skill-ledger`, and `observability`; plugin-internal IDs such as `scan-code`, `prompt-scan-user-input`, or `pii-scan-user-input` are rejected. Table output is grouped by Agent and includes only `CAPABILITY`, `ENABLED`, `MODE`, `SCAN_MODE`, `TIMEOUT(s)`, and `DIAGNOSTICS`; `MODE` is the hook interaction mode, while `SCAN_MODE` is the prompt scanner engine mode (`fast`, `standard`, or `strict`). JSON output uses the same user-facing fields and sanitized `env` entries containing only `effective` and `default` values. Neither format exposes hook matcher lists, source labels, Agent config contents, config paths, or raw environment variable values. Diagnostics name the invalid setting and fallback behavior without echoing the original value.
 
 View source and limits:
 

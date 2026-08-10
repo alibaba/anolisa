@@ -74,9 +74,13 @@ class CapabilityRecord:
             "mode": self.mode,
             "scan_mode": self.scan_mode,
             "timeout": self.timeout,
-            "config": self.config,
-            "env": self.env,
-            "config_path": self.config_path,
+            "env": {
+                name: {
+                    "effective": value["effective"],
+                    "default": value["default"],
+                }
+                for name, value in self.env.items()
+            },
             "diagnostics": self.diagnostics,
         }
 
@@ -185,7 +189,12 @@ _COSH_HOOKS = {
 _OPENCLAW_HOOKS = {
     "code-scan": ("before_tool_call",),
     "prompt-scan": ("before_dispatch",),
-    "pii-check": ("before_dispatch", "before_tool_call", "after_tool_call", "llm_output"),
+    "pii-check": (
+        "before_dispatch",
+        "before_tool_call",
+        "after_tool_call",
+        "llm_output",
+    ),
     "skill-ledger": ("before_tool_call",),
     "observability": (
         "llm_input",
@@ -437,10 +446,30 @@ def _normalize_filter(
         return None
     normalized = value.strip().lower()
     if normalized not in allowed:
+        display_value = _safe_cli_value(value)
         raise CapabilityViewError(
-            f"unknown {field_name}: {value}. Allowed values: {', '.join(allowed)}"
+            f"unknown {field_name}: {display_value}. Allowed values: {', '.join(allowed)}"
         )
     return normalized
+
+
+def _safe_cli_value(value: str, limit: int = 80) -> str:
+    escaped: list[str] = []
+    for char in value:
+        if char.isprintable():
+            escaped.append(char)
+        else:
+            code_point = ord(char)
+            if code_point <= 0xFF:
+                escaped.append(f"\\x{code_point:02x}")
+            elif code_point <= 0xFFFF:
+                escaped.append(f"\\u{code_point:04x}")
+            else:
+                escaped.append(f"\\U{code_point:08x}")
+    display_value = "".join(escaped)
+    if len(display_value) > limit:
+        return f"{display_value[: limit - 1]}…"
+    return display_value
 
 
 def _agent_records(agent: str, env: Mapping[str, str]) -> list[CapabilityRecord]:
@@ -482,9 +511,7 @@ def _resolve_env(
             effective = raw.strip().lower()
             effective = spec.aliases.get(effective, effective)
             if spec.valid_values is not None and effective not in spec.valid_values:
-                diagnostics.append(
-                    f"{spec.name}={raw!r} invalid; using {spec.default!r}"
-                )
+                diagnostics.append(_fallback_diagnostic(spec))
                 effective = spec.default
         values[spec.name] = {
             "raw": raw,
@@ -506,7 +533,7 @@ def _resolve_bool(spec: EnvSpec, raw: str | None, diagnostics: list[str]) -> boo
             return True
         if normalized in _BOOLEAN_FALSE_VALUES:
             return False
-    diagnostics.append(f"{spec.name}={raw!r} invalid; using {spec.default!r}")
+    diagnostics.append(_fallback_diagnostic(spec))
     return bool(spec.default)
 
 
@@ -518,18 +545,24 @@ def _resolve_timeout(spec: EnvSpec, raw: str | None, diagnostics: list[str]) -> 
         if spec.value_kind == "int":
             value = int(text)
             if value <= 0:
-                raise ValueError
+                diagnostics.append(
+                    f"{spec.name} is nonpositive; the hook subprocess may fail open"
+                )
             return str(value)
         value = float(text)
     except (TypeError, ValueError):
-        diagnostics.append(f"{spec.name}={raw!r} invalid; using {spec.default!r}")
+        diagnostics.append(_fallback_diagnostic(spec))
         return str(spec.default)
     if not math.isfinite(value) or value <= 0:
-        diagnostics.append(f"{spec.name}={raw!r} invalid; using {spec.default!r}")
+        diagnostics.append(_fallback_diagnostic(spec))
         return str(spec.default)
     if spec.max_value is not None:
         value = min(value, spec.max_value)
     return _format_number(value)
+
+
+def _fallback_diagnostic(spec: EnvSpec) -> str:
+    return f"{spec.name} has an invalid value; using {spec.default!r}"
 
 
 def _format_number(value: float) -> str:

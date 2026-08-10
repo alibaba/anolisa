@@ -330,7 +330,7 @@ agent-sec-cli capabilities --agent hermes --capability code-scan
 agent-sec-cli capabilities --agent qwen --capability pii-check --output json
 ```
 
-支持的 capability 名称只能是 `code-scan`、`prompt-scan`、`pii-check`、`skill-ledger` 和 `observability`；`scan-code`、`prompt-scan-user-input`、`pii-scan-user-input` 等插件内部 ID 会被拒绝。表格输出按 Agent 分块展示，每个分块包含 `CAPABILITY`、`ENABLED`、`MODE`、`SCAN_MODE`、`TIMEOUT(s)` 和 `DIAGNOSTICS`；`MODE` 表示 hook 交互方式，`SCAN_MODE` 表示 prompt scanner 引擎档位（`fast`、`standard` 或 `strict`）。JSON 输出使用同样的用户可见字段，并额外包含当前 CLI 进程可见的环境变量值和诊断信息。
+支持的 capability 名称只能是 `code-scan`、`prompt-scan`、`pii-check`、`skill-ledger` 和 `observability`；`scan-code`、`prompt-scan-user-input`、`pii-scan-user-input` 等插件内部 ID 会被拒绝。表格输出按 Agent 分块展示，仅包含 `CAPABILITY`、`ENABLED`、`MODE`、`SCAN_MODE`、`TIMEOUT(s)` 和 `DIAGNOSTICS`；`MODE` 表示 hook 交互方式，`SCAN_MODE` 表示 prompt scanner 引擎档位（`fast`、`standard` 或 `strict`）。JSON 输出使用同样的用户可见字段，并包含经过脱敏投影的 `env` 条目，其中只含 `effective` 和 `default`。两种格式都不会暴露 hook matcher 列表、source 标签、Agent config 内容、config 路径或原始环境变量值。诊断信息只说明哪个设置无效及 fallback 行为，不回显原始值。
 
 视图来源和限制：
 

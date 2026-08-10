@@ -1,7 +1,6 @@
 """Typer command for the agent capability configuration view."""
 
 import typer
-
 from agent_sec_cli.capabilities.view import (
     AGENTS,
     CANONICAL_CAPABILITIES,

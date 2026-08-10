@@ -48,7 +48,9 @@ def _load_qwen_pii_module() -> ModuleType:
     hook_dir = _SEC_CORE_ROOT / "qwen-code-extension" / "hooks"
     for name in ("hook_config", "pii_text", "trace_context"):
         sys.modules.pop(name, None)
-    return _load_module(hook_dir / "pii_checker_hook.py", "qwen_pii_checker_hook_for_caps")
+    return _load_module(
+        hook_dir / "pii_checker_hook.py", "qwen_pii_checker_hook_for_caps"
+    )
 
 
 def _table_section(table: str, agent: str) -> list[str]:
@@ -145,7 +147,9 @@ def test_cli_strict_enabled_matches_python_hook_helpers(
     assert record.env[env_name]["effective"] is expected
     assert record.effective == ("enabled" if expected else "disabled")
     has_diagnostic = any(env_name in item for item in record.diagnostics)
-    assert has_diagnostic is (raw not in {None, "true", "TRUE", " true ", "false", "FALSE", " false "})
+    assert has_diagnostic is (
+        raw not in {None, "true", "TRUE", " true ", "false", "FALSE", " false "}
+    )
 
 
 def test_static_agent_code_scanner_enabled_env_controls_effective() -> None:
@@ -190,8 +194,22 @@ def test_invalid_timeout_values_fall_back_with_diagnostic() -> None:
     assert any("PII_CHECKER_TIMEOUT" in item for item in record.diagnostics)
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "inf", "bad"])
-def test_non_positive_or_non_numeric_timeout_values_fall_back(value: str) -> None:
+@pytest.mark.parametrize(("value", "expected"), [("0", "0"), ("-1", "-1")])
+def test_non_positive_int_timeout_matches_hook_runtime(
+    value: str, expected: str
+) -> None:
+    record = _single_record(
+        "qoder",
+        "code-scan",
+        {"CODE_SCANNER_TIMEOUT": value},
+    )
+
+    assert record.timeout == expected
+    assert any("may fail open" in item for item in record.diagnostics)
+
+
+@pytest.mark.parametrize("value", ["inf", "bad", "1.5"])
+def test_invalid_int_timeout_values_fall_back(value: str) -> None:
     record = _single_record(
         "qoder",
         "code-scan",
@@ -303,9 +321,13 @@ def test_cosh_prompt_scan_scan_mode_does_not_change_interaction_mode() -> None:
     assert record.env["PROMPT_SCANNER_SCAN_MODE"]["effective"] == "strict"
 
 
-def test_agent_home_and_config_files_do_not_affect_environment_view(tmp_path: Path) -> None:
+def test_agent_home_and_config_files_do_not_affect_environment_view(
+    tmp_path: Path,
+) -> None:
     openclaw_config = tmp_path / "openclaw.json"
-    hermes_config = tmp_path / "hermes" / "plugins" / "agent-sec-core-hermes-plugin" / "config.toml"
+    hermes_config = (
+        tmp_path / "hermes" / "plugins" / "agent-sec-core-hermes-plugin" / "config.toml"
+    )
     openclaw_config.write_text(
         json.dumps(
             {
@@ -313,7 +335,9 @@ def test_agent_home_and_config_files_do_not_affect_environment_view(tmp_path: Pa
                     "entries": {
                         "agent-sec": {
                             "enabled": False,
-                            "config": {"capabilities": {"prompt-scan": {"enabled": False}}},
+                            "config": {
+                                "capabilities": {"prompt-scan": {"enabled": False}}
+                            },
                         }
                     }
                 }
@@ -322,7 +346,9 @@ def test_agent_home_and_config_files_do_not_affect_environment_view(tmp_path: Pa
         encoding="utf-8",
     )
     hermes_config.parent.mkdir(parents=True)
-    hermes_config.write_text("[capabilities.prompt-scan-user-input]\nenabled = false\n", encoding="utf-8")
+    hermes_config.write_text(
+        "[capabilities.prompt-scan-user-input]\nenabled = false\n", encoding="utf-8"
+    )
 
     env = {
         "HOME": str(tmp_path / "home"),
@@ -419,22 +445,56 @@ def test_render_table_shows_code_scan_env_disable_per_agent() -> None:
         ]
 
 
+def test_public_outputs_do_not_expose_raw_environment_values() -> None:
+    sensitive_value = "token-like-sensitive-value"
+    records = query_capabilities(
+        agent="qwen",
+        capability="prompt-scan",
+        env={"PROMPT_SCANNER_MODE": sensitive_value},
+    )
+
+    payload = json.loads(render_json(records))
+    table = render_table(records)
+
+    assert sensitive_value not in json.dumps(payload)
+    assert sensitive_value not in table
+    assert "raw" not in payload[0]["env"]["PROMPT_SCANNER_MODE"]
+    assert payload[0]["env"]["PROMPT_SCANNER_MODE"] == {
+        "effective": "observe",
+        "default": "observe",
+    }
+    assert payload[0]["diagnostics"] == [
+        "PROMPT_SCANNER_MODE has an invalid value; using 'observe'"
+    ]
+
+
 def test_renderers_emit_stable_shapes() -> None:
     records = query_capabilities(agent="cosh", capability="code-scan", env={})
 
     payload = json.loads(render_json(records))
     table = render_table(records)
 
+    assert set(payload[0]) == {
+        "agent",
+        "capability",
+        "enabled",
+        "mode",
+        "scan_mode",
+        "timeout",
+        "env",
+        "diagnostics",
+    }
     assert payload[0]["agent"] == "cosh"
     assert payload[0]["capability"] == "code-scan"
     assert payload[0]["enabled"] == "enabled"
     assert payload[0]["mode"] == "ask"
     assert payload[0]["scan_mode"] == "-"
     assert payload[0]["timeout"] == "10"
-    assert payload[0]["config"] == {}
-    assert payload[0]["config_path"] is None
+    assert "raw" not in payload[0]["env"]["CODE_SCANNER_HOOK_ENABLED"]
     assert "hooks" not in payload[0]
     assert "source" not in payload[0]
+    assert "config" not in payload[0]
+    assert "config_path" not in payload[0]
     lines = table.splitlines()
     assert lines[0] == "[cosh]"
     assert lines[1].startswith("CAPABILITY")

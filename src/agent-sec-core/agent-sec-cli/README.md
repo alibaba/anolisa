@@ -119,6 +119,8 @@ Run it from the same shell/container/service environment that starts the target 
 
 Supported capability filters are fixed to `code-scan`, `prompt-scan`, `pii-check`, `skill-ledger`, and `observability`; plugin-internal IDs are not accepted as aliases.
 
+Table output is limited to the stable user-facing columns `CAPABILITY`, `ENABLED`, `MODE`, `SCAN_MODE`, `TIMEOUT(s)`, and `DIAGNOSTICS`. JSON output uses the same user-facing fields plus sanitized `env` entries with `effective` and `default` values. Neither format exposes hook matcher lists, source labels, Agent config contents, config paths, or raw environment variable values. Diagnostics name the invalid setting and fallback behavior without echoing the original value.
+
 ### Observability Records
 
 `agent-sec-cli observability record` accepts one JSON object from stdin and writes

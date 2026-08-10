@@ -538,7 +538,22 @@ def test_capabilities_json_filter_outputs_current_environment(monkeypatch):
     assert payload[0]["timeout"] == "10"
     assert "hooks" not in payload[0]
     assert "source" not in payload[0]
+    assert "config" not in payload[0]
+    assert "config_path" not in payload[0]
+    assert "raw" not in payload[0]["env"]["CODE_SCANNER_HOOK_ENABLED"]
     assert payload[0]["env"]["CODE_SCANNER_HOOK_ENABLED"]["effective"] is False
+
+
+def test_capabilities_rejects_control_characters_without_terminal_escape():
+    result = CliRunner().invoke(
+        app,
+        ["capabilities", "--agent", "\x1b[31m" + "x" * 100],
+    )
+
+    assert result.exit_code == 1
+    assert "\x1b" not in result.output
+    assert "\\x1b[31m" in result.output
+    assert "x" * 80 not in result.output
 
 
 def test_capabilities_default_table_output(monkeypatch):
