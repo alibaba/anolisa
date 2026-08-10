@@ -200,6 +200,8 @@ sequenceDiagram
 
 **实现**: `src/unified.rs:AgentSight::handle_procmon_event()` — 由 ProcMon 事件驱动，调用 `AgentScanner::on_process_create()`。
 
+两条发现路径都用事件里的 pid 去解析 `/proc`，因此该 pid 必须是**用户态所在 pid namespace** 的编号，而不是目标进程最内层 namespace 的编号 —— 二者在容器场景下会不同。约定与实现见 [ebpf-probes.md](design-docs/ebpf-probes.md) 的「PID 命名空间约定」。
+
 ### 3. Dual Export Path: AnalysisResult vs GenAISemanticEvent
 
 `Analyzer` 输出原始 `AnalysisResult`（Token/Audit/Http），`GenAIBuilder` 将其转换为高抽象的 `GenAISemanticEvent`（LLMCall/ToolUse/AgentInteraction）。两条路径独立存储，前者用于本地查询，后者用于远程导出和语义分析。

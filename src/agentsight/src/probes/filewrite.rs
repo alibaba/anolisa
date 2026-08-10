@@ -11,6 +11,7 @@ use libbpf_rs::{
 };
 use std::mem::MaybeUninit;
 
+use super::pidns::observer_in_init_pidns;
 use super::shared_maps::{MapKind, SharedMaps};
 
 // ─── Generated skeleton ───────────────────────────────────────────────────────
@@ -118,6 +119,9 @@ impl FileWrite {
 
         // Cgroup filter flag
         open_skel.rodata_mut().filter_cgroup_enabled = shared.cgroup_filter_enabled();
+
+        // Tell BPF which namespace to report event pids in.
+        open_skel.rodata_mut().observer_pidns_is_init = observer_in_init_pidns();
 
         // Detect cgroup v2 and pass to BPF via rodata.
         open_skel.rodata_mut().cgroup_v2_mode =
