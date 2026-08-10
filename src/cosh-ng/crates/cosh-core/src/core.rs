@@ -37,6 +37,14 @@ mod auth;
 mod extensions;
 mod tool_execution;
 
+fn is_sensitive_write(tool_name: &str, params: &serde_json::Value) -> bool {
+    tool_name == "write_file"
+        && params
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(crate::redaction::contains_sensitive_text)
+}
+
 /// Typed terminal state for one user-request loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentTurnOutcome {
@@ -221,7 +229,7 @@ impl CoshCore {
             .effective_history_tokens(&self.messages, prefix_tokens)
     }
 
-    fn classify_tool(&self, tool_name: &str, _params: &serde_json::Value) -> Outcome {
+    fn classify_tool(&self, tool_name: &str, params: &serde_json::Value) -> Outcome {
         let mode = self.config.agent.approval_mode.as_str();
 
         if mode == "trust" {
@@ -235,6 +243,10 @@ impl CoshCore {
 
         if self.config.agent.allowed_tools.contains(tool_name) {
             return Outcome::Allow;
+        }
+
+        if is_sensitive_write(tool_name, params) && mode == "auto" {
+            return Outcome::RequireApproval;
         }
 
         let kind = tool.kind();
@@ -1069,6 +1081,11 @@ impl CoshCore {
                         Ok(params) => hash_json(params),
                         Err(_) => hash_bytes(tc.arguments.as_bytes()),
                     }),
+                    execution_path: parsed_params
+                        .as_ref()
+                        .ok()
+                        .filter(|params| is_sensitive_write(&tc.name, params))
+                        .map(|_| "sensitive_write".to_string()),
                     ..AuditToolData::default()
                 };
                 self.audit

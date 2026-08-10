@@ -182,6 +182,120 @@ fn allowlisted_tools_bypass_strict_approval() {
 }
 
 #[test]
+fn sensitive_write_requires_auto_approval_but_preserves_bypass_modes() {
+    let sensitive = serde_json::json!({
+        "path": "settings.env",
+        "content": "AWS_ACCESS_KEY_ID=AKIA1234567890ABCDEF"
+    });
+    let ordinary = serde_json::json!({"path": "settings.env", "content": "safe=true"});
+
+    for (mode, expected) in [
+        ("trust", Outcome::Allow),
+        ("auto", Outcome::RequireApproval),
+        ("balanced", Outcome::RequireApproval),
+        ("suggest", Outcome::RequireApproval),
+        ("strict", Outcome::RequireApproval),
+    ] {
+        let mut config = CoreConfig::default();
+        config.agent.approval_mode = mode.to_string();
+        let core = CoshCore::new(
+            config,
+            Box::new(MockProvider::new(Vec::new())),
+            ToolRegistry::with_defaults_for_test(),
+        );
+
+        assert_eq!(
+            core.classify_tool("write_file", &sensitive),
+            expected,
+            "unexpected sensitive write policy in {mode} mode"
+        );
+    }
+
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "auto".to_string();
+    let core = CoshCore::new(
+        config,
+        Box::new(MockProvider::new(Vec::new())),
+        ToolRegistry::with_defaults_for_test(),
+    );
+    assert_eq!(
+        core.classify_tool("write_file", &ordinary),
+        Outcome::Allow,
+        "ordinary auto-mode writes remain allowed"
+    );
+
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "strict".to_string();
+    config.agent.allowed_tools.insert("write_file".to_string());
+    let core = CoshCore::new(
+        config,
+        Box::new(MockProvider::new(Vec::new())),
+        ToolRegistry::with_defaults_for_test(),
+    );
+    assert_eq!(
+        core.classify_tool("write_file", &sensitive),
+        Outcome::Allow,
+        "explicit allowlist entries remain authoritative"
+    );
+}
+
+#[tokio::test]
+async fn sensitive_write_audit_uses_generic_execution_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret = "AKIA1234567890ABCDEF";
+    let provider = MockProvider::new(vec![
+        vec![
+            GenerateEvent::ToolCallStart {
+                index: 0,
+                id: "call-sensitive-write".to_string(),
+                name: "write_file".to_string(),
+            },
+            GenerateEvent::ToolCallDelta {
+                index: 0,
+                arguments_delta: format!(
+                    r#"{{"path":"settings.env","content":"AWS_ACCESS_KEY_ID={secret}"}}"#
+                ),
+            },
+            GenerateEvent::ToolCallEnd { index: 0 },
+            GenerateEvent::MessageEnd,
+        ],
+        vec![
+            GenerateEvent::TextDelta("done".to_string()),
+            GenerateEvent::MessageEnd,
+        ],
+    ]);
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    let mut core = CoshCore::new(
+        config,
+        Box::new(provider),
+        ToolRegistry::with_defaults_for_test(),
+    );
+    core.project_root = dir.path().to_path_buf();
+    core.workspace = crate::tool::SessionWorkspace::new(dir.path());
+    core.audit = CoreAuditRecorder::test_capture(&core.session_id);
+
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+    core.handle_user_message("write the file", &mut reader, &mut output)
+        .await
+        .expect("sensitive write turn");
+
+    let event = core
+        .audit
+        .captured_events()
+        .iter()
+        .find(|event| {
+            event.event_type.as_str() == "tool.requested"
+                && event.identity.tool_use_id.as_deref() == Some("call-sensitive-write")
+        })
+        .expect("sensitive write audit event");
+    let serialized = serde_json::to_value(event).unwrap();
+    assert_eq!(serialized["data"]["execution_path"], "sensitive_write");
+    assert!(!serialized.to_string().contains(secret));
+}
+
+#[test]
 fn mcp_tools_require_approval_outside_trust_mode() {
     for mode in ["auto", "balanced", "suggest", "strict"] {
         let mut config = CoreConfig::default();

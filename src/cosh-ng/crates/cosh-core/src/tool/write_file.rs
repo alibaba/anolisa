@@ -54,6 +54,7 @@ impl Tool for WriteFileTool {
                 placeholders.join(", "),
             )));
         }
+        let contains_sensitive = crate::redaction::contains_sensitive_text(content);
 
         let workspace = match ctx.workspace() {
             Ok(workspace) => workspace,
@@ -82,9 +83,14 @@ impl Tool for WriteFileTool {
 
         let lines = content.lines().count();
         let bytes = content.len();
+        let warning = if contains_sensitive {
+            "\nWarning: content appears to contain sensitive material; verify the destination and access permissions."
+        } else {
+            ""
+        };
         Ok(ToolResult::success(format!(
-            "Wrote {bytes} bytes ({lines} lines) to {}",
-            display_path.display()
+            "Wrote {bytes} bytes ({lines} lines) to {}{warning}",
+            display_path.display(),
         )))
     }
 }
@@ -95,6 +101,9 @@ fn placeholder_markers(content: &str) -> Vec<&'static str> {
 
     if upper.contains("<REDACTED") {
         markers.push("<redacted>");
+    }
+    if upper.contains("<SECRET>") {
+        markers.push("<secret>");
     }
     if upper.contains("[REDACTED:") {
         markers.push("[REDACTED:...]");
@@ -107,6 +116,18 @@ fn placeholder_markers(content: &str) -> Vec<&'static str> {
         })
     {
         markers.push("YOUR_*_KEY/TOKEN/SECRET");
+    }
+    if upper
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|word| {
+            word.starts_with("XXX_")
+                && word.ends_with("_XXX")
+                && ["_KEY_", "_TOKEN_", "_SECRET_"]
+                    .iter()
+                    .any(|marker| word.contains(marker))
+        })
+    {
+        markers.push("XXX_*_(KEY|TOKEN|SECRET)_XXX");
     }
 
     markers
@@ -573,6 +594,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_new_placeholders_is_refused_before_fs_side_effects() {
+        for (name, content) in [
+            ("secret.txt", "value=<SeCrEt>"),
+            ("token.txt", "value=XXX_SERVICE_TOKEN_XXX"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let parent = dir.path().join("new");
+            let path = parent.join(name);
+
+            let result = WriteFileTool
+                .invoke(
+                    serde_json::json!({"path": path, "content": content}),
+                    &test_ctx_in(dir.path()),
+                )
+                .await
+                .unwrap();
+
+            assert!(result.is_error, "{content} should be refused");
+            assert!(result.output.starts_with("Write refused:"));
+            assert!(!path.exists());
+            assert!(!parent.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn write_sensitive_content_warns_without_echoing_it() {
+        for (name, content) in [
+            ("aws.env", "AWS_ACCESS_KEY_ID=AKIA1234567890ABCDEF"),
+            ("sts.env", "AWS_ACCESS_KEY_ID=ASIA1234567890ABCDEF"),
+            (
+                "key.pem",
+                "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+            ),
+            (
+                "orphan-key-end.pem",
+                "MII...\n-----END RSA PRIVATE KEY-----",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(name);
+
+            let result = WriteFileTool
+                .invoke(
+                    serde_json::json!({"path": path, "content": content}),
+                    &test_ctx_in(dir.path()),
+                )
+                .await
+                .unwrap();
+
+            assert!(!result.is_error, "{content}");
+            assert!(result.output.contains("sensitive material"));
+            assert!(!result.output.contains(content));
+            assert_eq!(std::fs::read_to_string(path).unwrap(), content);
+        }
+    }
+
+    #[tokio::test]
     async fn refused_write_does_not_overwrite_existing_file() {
         let dir = tempfile::tempdir().unwrap();
         let tool = WriteFileTool;
@@ -598,13 +676,20 @@ mod tests {
     #[test]
     fn detects_supported_placeholder_markers() {
         let markers = placeholder_markers(
-            "<REDACTED private key block> [redacted: token] YOUR_API_KEY YOUR_ACCESS_TOKEN \
-             YOUR_DB_SECRET",
+            "<REDACTED private key block> [redacted: token] <secret> YOUR_API_KEY \
+             YOUR_ACCESS_TOKEN YOUR_DB_SECRET XXX_API_KEY_XXX XXX_SERVICE_TOKEN_XXX \
+             XXX_CLIENT_SECRET_XXX",
         );
 
         assert_eq!(
             markers,
-            vec!["<redacted>", "[REDACTED:...]", "YOUR_*_KEY/TOKEN/SECRET"]
+            vec![
+                "<redacted>",
+                "<secret>",
+                "[REDACTED:...]",
+                "YOUR_*_KEY/TOKEN/SECRET",
+                "XXX_*_(KEY|TOKEN|SECRET)_XXX"
+            ]
         );
     }
 
