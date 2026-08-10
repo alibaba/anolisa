@@ -52,11 +52,16 @@ pub(super) struct CredentialBindingRequest {
     revision: u64,
     mode: PolicyMode,
     taint_ttl_secs: Option<u64>,
+    #[serde(default = "default_destination_scope")]
     destination_scope: DestinationScope,
     #[serde(default)]
     policy_id: Option<String>,
     #[serde(default)]
     classification: Option<ProductPolicyClassification>,
+}
+
+fn default_destination_scope() -> DestinationScope {
+    DestinationScope::PublicIpv4
 }
 
 /// Returns privileged backend readiness.
@@ -610,11 +615,11 @@ mod tests {
             "root_pid": 42,
             "source_path": "/tmp/legacy-credential",
             "revision": 3,
-            "mode": "audit",
-            "destination_scope": "public_ipv4"
+            "mode": "audit"
         }))
         .expect("legacy request should deserialize");
 
+        assert_eq!(request.destination_scope, DestinationScope::PublicIpv4);
         assert_eq!(request.policy_id, None);
         assert_eq!(request.classification, None);
     }
