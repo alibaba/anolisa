@@ -16,8 +16,7 @@ use crate::provider::ContentGenerator;
 use crate::session::{PersistedSession, ProviderSessionId, SessionError, SessionStore};
 
 use super::boundary::{
-    group_agent_runs, select_compacted_through_after, select_manual_compacted_through_after,
-    BoundaryError,
+    group_agent_runs, select_compacted_through_after, BoundaryError, PreservationPolicy,
 };
 use super::budget::{
     estimate_messages_tokens, estimate_text_tokens, measure_history, ContextBudget, ModelCapability,
@@ -71,6 +70,18 @@ impl CompactionTrigger {
             Self::Manual => "manual",
             Self::Auto => "auto",
             Self::Emergency => "emergency",
+        }
+    }
+
+    /// Default preservation policy for this trigger.
+    ///
+    /// Automatic and emergency compaction start from the configured recent-run
+    /// protection so a normal soft-threshold compaction stays quality-first;
+    /// the emergency preflight owns its own stricter fallbacks from there.
+    fn preservation(&self, preserve_recent_runs: usize) -> PreservationPolicy {
+        match self {
+            Self::Manual => PreservationPolicy::ThroughLatestCompletedRun,
+            Self::Auto | Self::Emergency => PreservationPolicy::RecentRuns(preserve_recent_runs),
         }
     }
 }
@@ -281,19 +292,12 @@ pub async fn compact_session(
         .as_ref()
         .map(|state| state.compacted_through)
         .unwrap_or(0);
-    let cut = match trigger {
-        CompactionTrigger::Manual => select_manual_compacted_through_after(
-            &session.messages,
-            budget.target_tokens,
-            previous_cut,
-        ),
-        CompactionTrigger::Auto | CompactionTrigger::Emergency => select_compacted_through_after(
-            &session.messages,
-            policy.preserve_recent_runs,
-            budget.target_tokens,
-            previous_cut,
-        ),
-    }?
+    let cut = select_compacted_through_after(
+        &session.messages,
+        trigger.preservation(policy.preserve_recent_runs),
+        budget.target_tokens,
+        previous_cut,
+    )?
     .ok_or(CompactionError::NothingToCompact)?;
 
     // 3. Bound the summarizer input by the summarizer model's own context
@@ -372,12 +376,19 @@ pub async fn compact_session(
 /// running process is the session's only writer; the resulting projection is
 /// committed together with the run's transcript at the next persist.
 ///
+/// `preservation` is supplied by the caller rather than read from the policy so
+/// the emergency preflight can degrade its protection step by step over the
+/// same selection and summarization engine the manual path uses.
+///
 /// `previous_revision` is the runtime's durable revision clock, which outlives
 /// any projection dropped by sanitization; the candidate takes the next value.
 ///
-/// Returns `None` when no safe cut exists, the revision clock is exhausted, or
-/// the candidate fails validation; the caller keeps its previous projection in
-/// every case.
+/// # Errors
+///
+/// Returns the [`CompactionError`] that stopped the attempt so the caller can
+/// distinguish "this policy protects every remaining run"
+/// ([`CompactionError::NothingToCompact`]) from a summarizer failure. The
+/// caller keeps its previous projection in every error case.
 pub(crate) async fn compact_in_memory(
     messages: &[crate::provider::Message],
     previous: Option<&CompactionState>,
@@ -386,23 +397,19 @@ pub(crate) async fn compact_in_memory(
     model: &str,
     config: &CoreConfig,
     target_tokens: u64,
-) -> Option<CompactionState> {
+    preservation: PreservationPolicy,
+) -> Result<CompactionState, CompactionError> {
     let policy = &config.session.compaction;
     if !policy.enabled {
-        return None;
+        return Err(CompactionError::Disabled);
     }
-    // Fail closed before any provider work; the caller's existing emergency
-    // path already treats `None` as "keep the current projection".
-    let revision = previous_revision.checked_add(1)?;
+    // Fail closed before any provider work.
+    let revision = previous_revision
+        .checked_add(1)
+        .ok_or(CompactionError::RevisionExhausted)?;
     let previous_cut = previous.map(|state| state.compacted_through).unwrap_or(0);
-    let cut = select_compacted_through_after(
-        messages,
-        policy.preserve_recent_runs,
-        target_tokens,
-        previous_cut,
-    )
-    .ok()
-    .flatten()?;
+    let cut = select_compacted_through_after(messages, preservation, target_tokens, previous_cut)?
+        .ok_or(CompactionError::NothingToCompact)?;
     // Emergency compaction shares the exact model-aware input budget used by
     // the manual/automatic engine path, so the three triggers cannot drift.
     let capability = ModelCapability::resolve(policy, config.agent.session_token_limit, model);
@@ -412,10 +419,9 @@ pub(crate) async fn compact_in_memory(
         previous_cut,
         cut,
         summary_input_token_budget(&capability),
-    )
-    .ok()?;
+    )?;
     let digest = source_digest(&messages[..cut]);
-    let summary = generate_summary(provider, model, &input).await.ok()?;
+    let summary = generate_summary(provider, model, &input).await?;
 
     let estimated_before = estimate_messages_tokens(&effective_messages(messages, previous));
     let candidate = CompactionState {
@@ -431,11 +437,11 @@ pub(crate) async fn compact_in_memory(
     };
     let estimated_after = estimate_messages_tokens(&effective_messages(messages, Some(&candidate)));
     if estimated_after >= estimated_before {
-        return None;
+        return Err(CompactionError::NotReducing);
     }
     let mut candidate = candidate;
     candidate.tokens_after = Some(measure_history(None, estimated_after));
-    Some(candidate)
+    Ok(candidate)
 }
 
 /// Clamps a selected cut so the projection never covers messages that the

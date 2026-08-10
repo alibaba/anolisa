@@ -146,6 +146,7 @@ impl IdResolver {
             first_user_text,
             response_id,
             None, // session_id 不设 TTL，见模块文档
+            0,    // session key 不受同 prompt 重复问题影响
         )
     }
 
@@ -156,6 +157,8 @@ impl IdResolver {
     /// - `last_user_text`：当前请求中"最后一条 user message"的原始文本，
     ///   作为 conversation_key 的素材。空字符串返回 `None`。
     /// - `response_id`：当前调用的 response_id；空字符串返回 `None`。
+    /// - `user_message_count`：请求中"真正的用户消息"条数，用于区分同进程
+    ///   内相同文本的不同轮次对话。
     ///
     /// 锚定记录受滑动窗口 TTL（[`conversation_max_age`]）约束：命中即续期，
     /// 静默超龄则重新锚定，作为 `finish_conversation` 的兜底时间防线。
@@ -165,6 +168,7 @@ impl IdResolver {
         pid: i32,
         last_user_text: &str,
         response_id: &str,
+        user_message_count: usize,
     ) -> Option<String> {
         Self::resolve(
             &self.conv_first_resp,
@@ -174,6 +178,7 @@ impl IdResolver {
             last_user_text,
             response_id,
             Some(conversation_max_age()),
+            user_message_count,
         )
     }
 
@@ -191,12 +196,13 @@ impl IdResolver {
         text: &str,
         response_id: &str,
         max_age: Option<Duration>,
+        user_message_count: usize,
     ) -> Option<String> {
         if text.is_empty() || response_id.is_empty() {
             return None;
         }
 
-        let key = compose_key(agent_name, pid, text);
+        let key = compose_key(agent_name, pid, text, user_message_count);
         let now = Instant::now();
         let anchored_response_id = {
             let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -240,6 +246,7 @@ impl IdResolver {
             pid,
             first_user_text,
             None, // session_id 不设 TTL
+            0,    // session key 不受同 prompt 重复问题影响
         )
     }
 
@@ -251,6 +258,7 @@ impl IdResolver {
         agent_name: &str,
         pid: i32,
         last_user_text: &str,
+        user_message_count: usize,
     ) -> Option<String> {
         Self::peek(
             &self.conv_first_resp,
@@ -259,6 +267,7 @@ impl IdResolver {
             pid,
             last_user_text,
             Some(conversation_max_age()),
+            user_message_count,
         )
     }
 
@@ -281,11 +290,17 @@ impl IdResolver {
     /// 调用方应在检测到本轮对话的终止信号（例如 `finish_reason` 不是
     /// `tool_calls`/`tool_use` 等表示流程继续的取值）后调用本方法，显式结束该 key
     /// 的锚定，使后续相同文本重新开启一轮对话。
-    pub fn finish_conversation(&self, agent_name: &str, pid: i32, last_user_text: &str) {
+    pub fn finish_conversation(
+        &self,
+        agent_name: &str,
+        pid: i32,
+        last_user_text: &str,
+        user_message_count: usize,
+    ) {
         if last_user_text.is_empty() {
             return;
         }
-        let key = compose_key(agent_name, pid, last_user_text);
+        let key = compose_key(agent_name, pid, last_user_text, user_message_count);
         let mut guard = self
             .conv_first_resp
             .lock()
@@ -304,11 +319,12 @@ impl IdResolver {
         pid: i32,
         text: &str,
         max_age: Option<Duration>,
+        user_message_count: usize,
     ) -> Option<String> {
         if text.is_empty() {
             return None;
         }
-        let key = compose_key(agent_name, pid, text);
+        let key = compose_key(agent_name, pid, text, user_message_count);
         let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
         // `LruCache::peek` 不会提升条目顺序，适合 crash 路径“只读不写”。
         let anchor = guard.peek(&key)?;
@@ -324,15 +340,22 @@ impl IdResolver {
 /// crash-drain 路径专用 fallback ID。
 ///
 /// 仅在 PID 第一个请求就崩、`peek_*` 未命中 LRU 时使用。调用方需传入：
-/// - `domain`: "session" 或 "conversation"（函数内部会加 "crash-" 前缀做域隔离）
+/// - `domain`: “session” 或 “conversation”（函数内部会加 “crash-” 前缀做域隔离）
 /// - `agent_name`/`pid`: 与正常路径 LRU key 维度一致，隔离同机不同 agent
 /// - `user_text`: session 传 first_user_text；conversation 传 last_user_text，
-///   跟正常路径“一个 user_query 一个 conversation”的语义对齐。
+///   跟正常路径”一个 user_query 一个 conversation”的语义对齐。
+/// - `user_message_count`: conversation 域传入真实用户消息计数；session 域传 0。
 ///
-/// 输出 = `SHA256("crash-{domain}|agent_name|pid|user_text")[..32]`。
+/// 输出 = `SHA256(“crash-{domain}|agent_name|pid|user_text|user_message_count”)[..32]`。
 /// `crash-` 前缀与正常路径的 `session`/`conversation` 前缀做域分离，避免
 /// crash 兑底 ID 与正常调用 ID 碰撞。
-pub fn crash_fallback_id(domain: &str, agent_name: &str, pid: i32, user_text: &str) -> String {
+pub fn crash_fallback_id(
+    domain: &str,
+    agent_name: &str,
+    pid: i32,
+    user_text: &str,
+    user_message_count: usize,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(format!("crash-{domain}").as_bytes());
     hasher.update(b"|");
@@ -341,22 +364,31 @@ pub fn crash_fallback_id(domain: &str, agent_name: &str, pid: i32, user_text: &s
     hasher.update(pid.to_string().as_bytes());
     hasher.update(b"|");
     hasher.update(user_text.as_bytes());
+    hasher.update(b"|");
+    hasher.update(user_message_count.to_string().as_bytes());
     let digest = hasher.finalize();
     let full = format!("{digest:x}");
     full[..32].to_string()
 }
 
-/// 组装 LRU key：SHA256(agent_name + "|" + pid + "|" + text) 的 hex。
+/// 组装 LRU key：SHA256(agent_name + "|" + pid + "|" + text + "|" + user_message_count)
+/// 的 hex。
+///
+/// `user_message_count` 是请求中"真正的用户消息"条数（role=user 且含非空文本，
+/// 排除仅含 tool_result 的消息）。同一轮工具循环内该值不变，用户发新消息时
+/// 必然 +1，从而在不依赖 finish_reason 的前提下结构性避免不同轮次撞 key。
 ///
 /// 使用哈希后的定长字符串作为 key，避免原始 user message 过长占用内存；
 /// `|` 作为字段分隔符避免 "a"+"|b" 与 "a|"+"b" 这类拼接哈希冲突。
-fn compose_key(agent_name: &str, pid: i32, text: &str) -> String {
+fn compose_key(agent_name: &str, pid: i32, text: &str, user_message_count: usize) -> String {
     let mut hasher = Sha256::new();
     hasher.update(agent_name.as_bytes());
     hasher.update(b"|");
     hasher.update(pid.to_string().as_bytes());
     hasher.update(b"|");
     hasher.update(text.as_bytes());
+    hasher.update(b"|");
+    hasher.update(user_message_count.to_string().as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
@@ -411,10 +443,10 @@ mod tests {
     fn resolve_conversation_id_changes_with_last_user_text() {
         let resolver = IdResolver::new();
         let a = resolver
-            .resolve_conversation_id(A, P, "turn-1", "resp-1")
+            .resolve_conversation_id(A, P, "turn-1", "resp-1", 1)
             .unwrap();
         let b = resolver
-            .resolve_conversation_id(A, P, "turn-2", "resp-2")
+            .resolve_conversation_id(A, P, "turn-2", "resp-2", 1)
             .unwrap();
         assert_ne!(a, b);
         assert_eq!(a.len(), 32);
@@ -429,20 +461,20 @@ mod tests {
         let recap_text = "The user stepped away and is coming back. Recap...";
 
         let turn1 = resolver
-            .resolve_conversation_id(A, P, recap_text, "resp-turn1")
+            .resolve_conversation_id(A, P, recap_text, "resp-turn1", 1)
             .unwrap();
         // 模拟同一轮内的后续 LLM 调用（工具调用循环），conversation_id 应保持稳定。
         let turn1_again = resolver
-            .resolve_conversation_id(A, P, recap_text, "resp-turn1-followup")
+            .resolve_conversation_id(A, P, recap_text, "resp-turn1-followup", 1)
             .unwrap();
         assert_eq!(turn1, turn1_again, "同一轮内多次调用应共享 conversation_id");
 
         // 检测到本轮 finish_reason=stop（非 tool_calls），显式结束该轮锚定。
-        resolver.finish_conversation(A, P, recap_text);
+        resolver.finish_conversation(A, P, recap_text, 1);
 
         // 数十分钟后，同一段固定文本触发了一轮全新的真实对话。
         let turn2 = resolver
-            .resolve_conversation_id(A, P, recap_text, "resp-turn2")
+            .resolve_conversation_id(A, P, recap_text, "resp-turn2", 1)
             .unwrap();
         assert_ne!(
             turn1, turn2,
@@ -454,9 +486,9 @@ mod tests {
     fn finish_conversation_on_unseen_key_is_noop() {
         // 从未 resolve 过的 key 调用 finish_conversation 不应 panic 或产生副作用。
         let resolver = IdResolver::new();
-        resolver.finish_conversation(A, P, "never-seen");
+        resolver.finish_conversation(A, P, "never-seen", 1);
         let id = resolver
-            .resolve_conversation_id(A, P, "never-seen", "resp-1")
+            .resolve_conversation_id(A, P, "never-seen", "resp-1", 1)
             .unwrap();
         assert_eq!(id.len(), 32);
     }
@@ -468,7 +500,7 @@ mod tests {
         let resolver = IdResolver::new();
         let text = "hello";
         let session1 = resolver.resolve_session_id(A, P, text, "resp-1").unwrap();
-        resolver.finish_conversation(A, P, text);
+        resolver.finish_conversation(A, P, text, 1);
         let session2 = resolver.resolve_session_id(A, P, text, "resp-2").unwrap();
         assert_eq!(
             session1, session2,
@@ -482,7 +514,7 @@ mod tests {
         assert!(resolver.resolve_session_id(A, P, "user-A", "").is_none());
         assert!(
             resolver
-                .resolve_conversation_id(A, P, "turn-1", "")
+                .resolve_conversation_id(A, P, "turn-1", "", 1)
                 .is_none()
         );
     }
@@ -493,7 +525,7 @@ mod tests {
         assert!(resolver.resolve_session_id(A, P, "", "resp-1").is_none());
         assert!(
             resolver
-                .resolve_conversation_id(A, P, "", "resp-1")
+                .resolve_conversation_id(A, P, "", "resp-1", 1)
                 .is_none()
         );
     }
@@ -506,7 +538,9 @@ mod tests {
         let text = "single-turn";
         let resp = "resp-1";
         let s = resolver.resolve_session_id(A, P, text, resp).unwrap();
-        let c = resolver.resolve_conversation_id(A, P, text, resp).unwrap();
+        let c = resolver
+            .resolve_conversation_id(A, P, text, resp, 1)
+            .unwrap();
         assert_ne!(s, c, "域前缀应保证两类 ID 不会碰撞");
     }
 
@@ -526,10 +560,10 @@ mod tests {
         assert_ne!(openclaw, cosh, "同机不同 agent 不可联合为同一 session");
 
         let openclaw_conv = resolver
-            .resolve_conversation_id("openclaw", 1001, "今天天气", "chatcmpl-A")
+            .resolve_conversation_id("openclaw", 1001, "今天天气", "chatcmpl-A", 1)
             .unwrap();
         let cosh_conv = resolver
-            .resolve_conversation_id("cosh", 2002, "今天天气", "chatcmpl-B")
+            .resolve_conversation_id("cosh", 2002, "今天天气", "chatcmpl-B", 1)
             .unwrap();
         assert_ne!(openclaw_conv, cosh_conv);
     }
@@ -576,7 +610,7 @@ mod tests {
     fn peek_session_id_returns_none_when_lru_empty() {
         let resolver = IdResolver::new();
         assert!(resolver.peek_session_id(A, P, "unseen").is_none());
-        assert!(resolver.peek_conversation_id(A, P, "unseen").is_none());
+        assert!(resolver.peek_conversation_id(A, P, "unseen", 1).is_none());
     }
 
     #[test]
@@ -591,9 +625,9 @@ mod tests {
         assert_eq!(normal, peeked, "peek 应返回与正常路径一致的 session_id");
 
         let normal_conv = resolver
-            .resolve_conversation_id(A, P, "world", "chatcmpl-B")
+            .resolve_conversation_id(A, P, "world", "chatcmpl-B", 1)
             .unwrap();
-        let peeked_conv = resolver.peek_conversation_id(A, P, "world").unwrap();
+        let peeked_conv = resolver.peek_conversation_id(A, P, "world", 1).unwrap();
         assert_eq!(normal_conv, peeked_conv);
     }
 
@@ -603,23 +637,23 @@ mod tests {
         // 即使 LRU 中有条目，空 text 仍返回 None
         let _ = resolver.resolve_session_id(A, P, "x", "resp");
         assert!(resolver.peek_session_id(A, P, "").is_none());
-        assert!(resolver.peek_conversation_id(A, P, "").is_none());
+        assert!(resolver.peek_conversation_id(A, P, "", 1).is_none());
     }
 
     // ── crash_fallback_id 测试 ──
 
     #[test]
     fn crash_fallback_id_stable_for_same_inputs() {
-        let a = crash_fallback_id("session", "openclaw", 1001, "hello");
-        let b = crash_fallback_id("session", "openclaw", 1001, "hello");
+        let a = crash_fallback_id("session", "openclaw", 1001, "hello", 0);
+        let b = crash_fallback_id("session", "openclaw", 1001, "hello", 0);
         assert_eq!(a, b);
         assert_eq!(a.len(), 32);
     }
 
     #[test]
     fn crash_fallback_id_diverges_session_vs_conversation() {
-        let s = crash_fallback_id("session", "openclaw", 1001, "hello");
-        let c = crash_fallback_id("conversation", "openclaw", 1001, "hello");
+        let s = crash_fallback_id("session", "openclaw", 1001, "hello", 0);
+        let c = crash_fallback_id("conversation", "openclaw", 1001, "hello", 0);
         assert_ne!(s, c, "同输入下 session/conversation 域返回不同值");
     }
 
@@ -627,8 +661,8 @@ mod tests {
     fn crash_fallback_id_diverges_with_different_user_text() {
         // 验证 user_query 粒度分桶：同 PID 同 agent，但不同 user_text
         // 产生不同的 crash fallback ID。
-        let a = crash_fallback_id("session", "openclaw", 1001, "query-A");
-        let b = crash_fallback_id("session", "openclaw", 1001, "query-B");
+        let a = crash_fallback_id("session", "openclaw", 1001, "query-A", 0);
+        let b = crash_fallback_id("session", "openclaw", 1001, "query-B", 0);
         assert_ne!(a, b);
     }
 
@@ -659,7 +693,7 @@ mod tests {
         assert!(result2.is_err(), "Mutex should be poisoned");
 
         let cid = resolver
-            .resolve_conversation_id(A, P, "poison-conv", "resp-2")
+            .resolve_conversation_id(A, P, "poison-conv", "resp-2", 1)
             .unwrap();
         assert_eq!(cid.len(), 32);
     }
@@ -672,7 +706,7 @@ mod tests {
         let normal = resolver
             .resolve_session_id("openclaw", 1001, "hello", "chatcmpl-A")
             .unwrap();
-        let crash = crash_fallback_id("session", "openclaw", 1001, "hello");
+        let crash = crash_fallback_id("session", "openclaw", 1001, "hello", 0);
         assert_ne!(
             normal, crash,
             "正常 ID 与 crash fallback 需严格隔离以避免下游聚合错乱"
@@ -695,6 +729,7 @@ mod tests {
             "recap nudge",
             "resp-1",
             Some(ttl),
+            1,
         )
         .unwrap();
         // TTL=0：哪怕紧接着的下一次调用，也应视为已经超龄，重新锚定。
@@ -707,6 +742,7 @@ mod tests {
             "recap nudge",
             "resp-2",
             Some(ttl),
+            1,
         )
         .unwrap();
         assert_ne!(
@@ -729,6 +765,7 @@ mod tests {
             "hello",
             "resp-1",
             Some(ttl),
+            1,
         )
         .unwrap();
         for _ in 0..3 {
@@ -740,6 +777,7 @@ mod tests {
                 "hello",
                 "resp-ignored",
                 Some(ttl),
+                1,
             )
             .unwrap();
             assert_eq!(turn1, hit, "TTL 内命中应保持稳定，并刷新续期");
@@ -758,6 +796,7 @@ mod tests {
             "hello",
             "resp-1",
             Some(ttl),
+            1,
         )
         .unwrap();
         std::thread::sleep(Duration::from_millis(2));
@@ -769,6 +808,7 @@ mod tests {
                 P,
                 "hello",
                 Some(ttl),
+                1,
             )
             .is_none(),
             "过期锚点应被 peek 视为未命中"
@@ -788,5 +828,108 @@ mod tests {
             .resolve_session_id(A, P, "hello", "resp-2")
             .unwrap();
         assert_eq!(s1, s2, "session_id 不设 TTL，应保持稳定");
+    }
+
+    // ── user_message_count 维度测试 ──
+
+    #[test]
+    fn resolve_conversation_id_same_text_different_count_gives_different_ids() {
+        // 同一文本、不同 user_message_count 应落入不同 LRU bucket，各自锚定
+        // 独立的 first_response_id，从而产生不同的 conversation_id。
+        let resolver = IdResolver::new();
+        let id1 = resolver
+            .resolve_conversation_id(A, P, "hello", "resp-1", 1)
+            .unwrap();
+        let id2 = resolver
+            .resolve_conversation_id(A, P, "hello", "resp-2", 2)
+            .unwrap();
+        assert_ne!(
+            id1, id2,
+            "同文本不同 user_message_count 应产生不同的 conversation_id"
+        );
+    }
+
+    #[test]
+    fn resolve_conversation_id_same_text_same_count_stable() {
+        // 同一文本、同一 user_message_count，即使 response_id 变化，
+        // 仍应返回首次锚定的 conversation_id（LRU 命中续期）。
+        let resolver = IdResolver::new();
+        let first = resolver
+            .resolve_conversation_id(A, P, "hello", "resp-1", 1)
+            .unwrap();
+        let again = resolver
+            .resolve_conversation_id(A, P, "hello", "resp-2", 1)
+            .unwrap();
+        assert_eq!(
+            first, again,
+            "同文本同 count 多次调用应锁定同一 conversation_id"
+        );
+    }
+
+    #[test]
+    fn finish_conversation_with_count_evicts_correct_bucket() {
+        // finish_conversation 应仅驱逐指定 count 的锚点，不影响其他 count 的
+        // 锚点。验证 count=1 被驱逐后重新 resolve 得到新 ID，而 count=2 不受影响。
+        let resolver = IdResolver::new();
+        let text = "shared prompt";
+
+        let id_count1 = resolver
+            .resolve_conversation_id(A, P, text, "resp-1", 1)
+            .unwrap();
+        let id_count2 = resolver
+            .resolve_conversation_id(A, P, text, "resp-2", 2)
+            .unwrap();
+        assert_ne!(id_count1, id_count2);
+
+        // 仅结束 count=1 的轮次。
+        resolver.finish_conversation(A, P, text, 1);
+
+        // count=2 的锚点应不受影响。
+        let id_count2_again = resolver
+            .resolve_conversation_id(A, P, text, "resp-2-followup", 2)
+            .unwrap();
+        assert_eq!(
+            id_count2, id_count2_again,
+            "finish_conversation(count=1) 不应影响 count=2 的锚点"
+        );
+
+        // count=1 重新 resolve 应得到全新的 conversation_id。
+        let id_count1_new = resolver
+            .resolve_conversation_id(A, P, text, "resp-3", 1)
+            .unwrap();
+        assert_ne!(
+            id_count1, id_count1_new,
+            "finish_conversation 后 count=1 应重新锚定"
+        );
+    }
+
+    #[test]
+    fn peek_conversation_id_with_count_matches_resolve() {
+        // peek 带匹配 count 应返回与 resolve 相同的 ID；
+        // peek 带不同 count 应返回 None（该 bucket 不存在）。
+        let resolver = IdResolver::new();
+        let resolved = resolver
+            .resolve_conversation_id(A, P, "query", "resp-1", 1)
+            .unwrap();
+
+        let peeked = resolver.peek_conversation_id(A, P, "query", 1).unwrap();
+        assert_eq!(resolved, peeked, "peek(count=1) 应与 resolve(count=1) 一致");
+
+        assert!(
+            resolver.peek_conversation_id(A, P, "query", 2).is_none(),
+            "peek(count=2) 在仅 resolve(count=1) 后应返回 None"
+        );
+    }
+
+    #[test]
+    fn crash_fallback_id_diverges_with_different_count() {
+        // 同一文本、不同 user_message_count 应产生不同的 crash fallback ID，
+        // 确保 crash 路径也按 count 维度隔离。
+        let id1 = crash_fallback_id("conversation", A, P, "hello", 1);
+        let id2 = crash_fallback_id("conversation", A, P, "hello", 2);
+        assert_ne!(
+            id1, id2,
+            "不同 user_message_count 的 crash fallback ID 不可碰撞"
+        );
     }
 }

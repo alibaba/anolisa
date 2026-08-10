@@ -125,8 +125,16 @@ pub trait StorageProvider: Send + Sync {
     /// root and must not trust persisted path strings.
     async fn reconstruct(&self, instance_id: &str) -> Result<StorageSlot>;
 
-    /// Flush dirty data to persistent storage (implementation may be no-op).
-    async fn flush_dirty(&self, slot: &StorageSlot) -> Result<()>;
+    /// Synchronize already-written provider artifacts to persistent storage.
+    ///
+    /// This operation persists the files and directory metadata that already
+    /// belong to `slot` and are visible to the provider call. Artifact updates
+    /// that race with one call may become visible in that call or a later one.
+    ///
+    /// The daemon may stop waiting at its configured deadline, but keeps the
+    /// future supervised under slot ownership until it completes. A later
+    /// synchronization or cleanup must remain safe after completion.
+    async fn sync_artifacts(&self, slot: &StorageSlot) -> Result<()>;
 
     /// Query warm pool status.
     fn pool_status(&self) -> PoolStatus;

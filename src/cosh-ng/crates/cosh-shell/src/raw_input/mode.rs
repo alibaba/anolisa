@@ -105,6 +105,16 @@ pub(crate) fn update_locked_input_mode(
             return;
         }
     }
+    if let (RawInputMode::Capture { capture, .. }, RawObserverAction::CaptureInput(next_capture)) =
+        (&mut *mode, action)
+    {
+        if capture.is_session_mark_refresh(next_capture) {
+            // Mark redraws do not change key routing, so in-flight input still
+            // belongs to this session card.
+            *capture = next_capture.clone();
+            return;
+        }
+    }
     if let RawInputMode::Capture {
         capture,
         generation,
@@ -475,6 +485,7 @@ mod tests {
             id: "session-panel".to_string(),
             option_count: 2,
             selected: 0,
+            marked_for_clear: vec![false; 2],
             confirming_clear: false,
         };
         update_input_mode(
@@ -493,6 +504,7 @@ mod tests {
             id: "session-panel".to_string(),
             option_count: 2,
             selected: 0,
+            marked_for_clear: vec![false; 2],
             confirming_clear: true,
         };
 

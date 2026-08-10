@@ -1,4 +1,4 @@
-name: sec-core-source-code-build
+name: CI / sec-core Source Build
 
 on:
   pull_request:

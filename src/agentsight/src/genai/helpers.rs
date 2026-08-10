@@ -21,7 +21,6 @@ pub(super) enum CallKind {
 }
 
 impl CallKind {
-    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             CallKind::Main => "main",
@@ -35,7 +34,11 @@ impl CallKind {
 ///
 /// Conservative: unmatched → Main (zero false positives > recall).
 /// Signatures are from real captures (case-sensitive .contains()).
-#[allow(dead_code)]
+///
+/// **Best-effort matching**: patterns are tied to specific agent prompt text
+/// (e.g., QwenCode's "Managed memory has TWO directories"). When agents update
+/// their prompts, these patterns may need extending. Consider moving to
+/// config-driven rules if the list grows beyond a handful of agents.
 pub(super) fn classify_call_kind(request: &LLMRequest) -> CallKind {
     // Collect system instructions text
     let system_text: String = request
@@ -62,6 +65,10 @@ pub(super) fn classify_call_kind(request: &LLMRequest) -> CallKind {
         if system_text.contains("specialized context summarizer") {
             return CallKind::Recap;
         }
+        // QwenCode memory extraction subagent
+        if system_text.contains("managed memory extraction subagent") {
+            return CallKind::Recap;
+        }
     }
 
     // ② Check first-user text (Claude Code patterns + Cosh tool-output)
@@ -83,6 +90,14 @@ pub(super) fn classify_call_kind(request: &LLMRequest) -> CallKind {
                 .contains("Your task is to create a detailed summary of the conversation so far")
                 && text.contains("Do NOT call any tools"))
         {
+            return CallKind::Recap;
+        }
+        // QwenCode memory extraction subagent
+        if text.starts_with("Managed memory has TWO directories") {
+            return CallKind::Recap;
+        }
+        // QwenCode suggestion subagent
+        if text.starts_with("[SUGGESTION MODE:") {
             return CallKind::Recap;
         }
         // Claude Code web_search
@@ -143,10 +158,13 @@ pub(super) fn classify_call_kind_from_raw(
     if (sys_text.contains("summarizes internal chat history")
         && sys_text.contains("<state_snapshot>"))
         || sys_text.contains("specialized context summarizer")
+        || sys_text.contains("managed memory extraction subagent")
         || first_user_text.starts_with("Summarize the following tool output to be a maximum of")
         || (first_user_text
             .contains("Your task is to create a detailed summary of the conversation so far")
             && first_user_text.contains("Do NOT call any tools"))
+        || first_user_text.starts_with("Managed memory has TWO directories")
+        || first_user_text.starts_with("[SUGGESTION MODE:")
     {
         "recap"
     } else if first_user_text.contains("Perform a web search for the query:") {
@@ -438,6 +456,25 @@ impl GenAIBuilder {
             })
     }
 
+    /// 统计请求中"真正的用户消息"条数：role=user 且包含至少一个非空 Text 部分。
+    ///
+    /// 仅含 `ToolCallResponse` 部分的 user message（Anthropic 风格的工具返回）不计入。
+    /// 同一轮工具调用循环内该值不变（工具结果是 role=tool 或仅含 tool_result 的
+    /// role=user），用户发送新消息时必然 +1，用于 conversation bucket key 的
+    /// 结构性去重。
+    pub(super) fn count_real_user_messages(request: &LLMRequest) -> usize {
+        request
+            .messages
+            .iter()
+            .filter(|m| {
+                m.role == "user"
+                    && m.parts
+                        .iter()
+                        .any(|p| matches!(p, MessagePart::Text { content } if !content.is_empty()))
+            })
+            .count()
+    }
+
     /// 提取清理后的 user query（去除 metadata 前缀，用于展示）
     pub(super) fn extract_last_user_query(request: &LLMRequest) -> Option<String> {
         Self::extract_last_user_raw(request).map(|raw| Self::strip_user_query_prefix(&raw))
@@ -464,6 +501,13 @@ impl GenAIBuilder {
     /// ```
     ///
     /// [Tue 2026-03-31 17:19 GMT+8] 用户实际输入
+    /// ```
+    ///
+    /// **QwenCode**: `<system-reminder>` 标签块
+    /// ```text
+    /// <system-reminder>...skills...</system-reminder>
+    /// <system-reminder>...context...</system-reminder>
+    /// 用户实际输入
     /// ```
     pub(super) fn strip_user_query_prefix(text: &str) -> String {
         // cosh-ng: find a line starting with "user_input:" (after trimming)
@@ -497,7 +541,32 @@ impl GenAIBuilder {
                 }
             }
         }
+
+        // QwenCode: strip <system-reminder>...</system-reminder> blocks
+        if text.contains("<system-reminder>") {
+            let stripped = Self::strip_system_reminder_tags(text);
+            if !stripped.is_empty() {
+                return stripped;
+            }
+        }
+
         text.to_string()
+    }
+
+    /// Remove all `<system-reminder>...</system-reminder>` blocks from text.
+    fn strip_system_reminder_tags(text: &str) -> String {
+        let mut result = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(start) = rest.find("<system-reminder>") {
+            result.push_str(&rest[..start]);
+            if let Some(end_offset) = rest[start..].find("</system-reminder>") {
+                rest = &rest[start + end_offset + "</system-reminder>".len()..];
+            } else {
+                break;
+            }
+        }
+        result.push_str(rest);
+        result.trim().to_string()
     }
 
     /// Match a process context against the configured cmdline rules.
@@ -829,6 +898,41 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_user_query_prefix_qwencode_system_reminder() {
+        let text = "<system-reminder>\nskills list here\n</system-reminder>\
+                     <system-reminder>\nfolder structure\n</system-reminder>\
+                     1+1等于几";
+        assert_eq!(GenAIBuilder::strip_user_query_prefix(text), "1+1等于几");
+    }
+
+    #[test]
+    fn test_strip_user_query_prefix_qwencode_single_block() {
+        let text = "<system-reminder>context</system-reminder>hello world";
+        assert_eq!(GenAIBuilder::strip_user_query_prefix(text), "hello world");
+    }
+
+    #[test]
+    fn test_strip_user_query_prefix_qwencode_unclosed_tag() {
+        // Unclosed tag — should still strip what it can
+        let text =
+            "<system-reminder>some context</system-reminder><system-reminder>no end tag user input";
+        assert_eq!(
+            GenAIBuilder::strip_user_query_prefix(text),
+            "<system-reminder>no end tag user input"
+        );
+    }
+
+    #[test]
+    fn test_strip_user_query_prefix_qwencode_only_unclosed_tag() {
+        // No closing tag at all — nothing to strip, returns original trimmed
+        let text = "<system-reminder>some context without end tag and user input";
+        assert_eq!(
+            GenAIBuilder::strip_user_query_prefix(text),
+            "<system-reminder>some context without end tag and user input"
+        );
+    }
+
+    #[test]
     fn test_extract_last_user_query() {
         let req = LLMRequest {
             messages: vec![
@@ -862,6 +966,142 @@ mod tests {
         assert_eq!(
             GenAIBuilder::extract_last_user_query(&req),
             Some("hi".to_string())
+        );
+    }
+
+    #[test]
+    fn test_count_real_user_messages_empty() {
+        let req = LLMRequest {
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: false,
+            tools: None,
+            raw_body: None,
+        };
+        assert_eq!(GenAIBuilder::count_real_user_messages(&req), 0);
+    }
+
+    #[test]
+    fn test_count_real_user_messages_single_user() {
+        let req = LLMRequest {
+            messages: vec![InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::Text {
+                    content: "hello".to_string(),
+                }],
+                name: None,
+            }],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: false,
+            tools: None,
+            raw_body: None,
+        };
+        assert_eq!(GenAIBuilder::count_real_user_messages(&req), 1);
+    }
+
+    #[test]
+    fn test_count_real_user_messages_tool_result_only() {
+        let req = LLMRequest {
+            messages: vec![InputMessage {
+                role: "user".to_string(),
+                parts: vec![MessagePart::ToolCallResponse {
+                    id: Some("tool-1".to_string()),
+                    response: serde_json::json!({"result": "ok"}),
+                }],
+                name: None,
+            }],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: false,
+            tools: None,
+            raw_body: None,
+        };
+        assert_eq!(
+            GenAIBuilder::count_real_user_messages(&req),
+            0,
+            "tool-result-only user messages should not count"
+        );
+    }
+
+    #[test]
+    fn test_count_real_user_messages_mixed() {
+        let req = LLMRequest {
+            messages: vec![
+                InputMessage {
+                    role: "system".to_string(),
+                    parts: vec![MessagePart::Text {
+                        content: "sys".to_string(),
+                    }],
+                    name: None,
+                },
+                InputMessage {
+                    role: "user".to_string(),
+                    parts: vec![MessagePart::Text {
+                        content: "first question".to_string(),
+                    }],
+                    name: None,
+                },
+                InputMessage {
+                    role: "assistant".to_string(),
+                    parts: vec![MessagePart::ToolCall {
+                        id: Some("tc-1".to_string()),
+                        name: "search".to_string(),
+                        arguments: None,
+                    }],
+                    name: None,
+                },
+                InputMessage {
+                    role: "user".to_string(),
+                    parts: vec![MessagePart::ToolCallResponse {
+                        id: Some("tc-1".to_string()),
+                        response: serde_json::json!({"data": "result"}),
+                    }],
+                    name: None,
+                },
+                InputMessage {
+                    role: "user".to_string(),
+                    parts: vec![MessagePart::Text {
+                        content: "second question".to_string(),
+                    }],
+                    name: None,
+                },
+            ],
+            temperature: None,
+            max_tokens: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            top_p: None,
+            top_k: None,
+            seed: None,
+            stop_sequences: None,
+            stream: false,
+            tools: None,
+            raw_body: None,
+        };
+        assert_eq!(
+            GenAIBuilder::count_real_user_messages(&req),
+            2,
+            "2 text-bearing user msgs, 1 tool-result-only, should count 2"
         );
     }
 

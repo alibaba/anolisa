@@ -13,10 +13,11 @@ use thiserror::Error;
 use tokio::process::Command;
 use uuid::Uuid;
 
+use super::HOST_NETWORK_COORDINATION_PATH;
+
 const NET_VETH_BASE: usize = 4;
 const NET_VETH_TOP: usize = 0x1_0000;
 const NET_MAX_SLOT: usize = (NET_VETH_TOP - NET_VETH_BASE) / 4;
-const HOST_NETWORK_LOCK: &str = "/run/lock/blaze-network.lock";
 const HOST_LOCK_RETRY: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Default)]
@@ -104,7 +105,7 @@ impl Default for NetworkManager {
             state: Mutex::new(SlotState::default()),
             command_timeout: Duration::from_secs(5),
             runner: Arc::new(SystemIpCommandRunner),
-            coordination_file: Some(PathBuf::from(HOST_NETWORK_LOCK)),
+            coordination_file: Some(PathBuf::from(HOST_NETWORK_COORDINATION_PATH)),
         }
     }
 }

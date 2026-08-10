@@ -22,10 +22,15 @@ Install the anolisa CLI first, then use it to install Tokenless:
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
 anolisa --version
 anolisa install tokenless
 tokenless --version
 ```
+
+If `anolisa --version` succeeds, start with `anolisa install tokenless`. The
+PATH update above makes a fresh default installation available in the current
+shell; new login shells may already include `~/.local/bin`.
 
 ## 3. Start using Tokenless
 

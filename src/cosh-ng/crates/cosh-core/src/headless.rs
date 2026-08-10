@@ -326,7 +326,7 @@ where
             request_id,
             request,
         } => match request {
-            ShellControlRequest::Initialize => {
+            ShellControlRequest::Initialize { fire_session_start } => {
                 engine.emit(
                     writer,
                     &OutputMessage::initialize_success(
@@ -342,32 +342,37 @@ where
                 );
                 engine.emit(writer, &init_msg);
 
-                // ─── Hook: SessionStart ───
-                let cwd_str = engine.cwd().to_string_lossy().to_string();
-                let ss_result = engine
-                    .hook_system
-                    .fire_session_start(&engine.session_id, &cwd_str)
-                    .await;
-                engine
-                    .audit
-                    .record_session_hook_decision("session_start", "observed");
-                for n in &ss_result.notifications {
-                    engine.emit(
-                        writer,
-                        &OutputMessage::hook_notification(
-                            &n.hook_name,
-                            &n.message,
-                            None,
-                            n.decision.as_deref(),
-                        ),
-                    );
-                }
-                if let Some(ref ctx) = ss_result.additional_context {
+                // Only the shell-owned transport may suppress SessionStart.
+                // Generic headless clients keep the historical lifecycle even
+                // if they send the optional control field themselves.
+                if fire_session_start || !args.cosh_shell_transport {
+                    // ─── Hook: SessionStart ───
+                    let cwd_str = engine.cwd().to_string_lossy().to_string();
+                    let ss_result = engine
+                        .hook_system
+                        .fire_session_start(&engine.session_id, &cwd_str)
+                        .await;
                     engine
-                        .messages
-                        .push(crate::provider::Message::system(&format!(
-                            "[Hook context] {ctx}"
-                        )));
+                        .audit
+                        .record_session_hook_decision("session_start", "observed");
+                    for n in &ss_result.notifications {
+                        engine.emit(
+                            writer,
+                            &OutputMessage::hook_notification(
+                                &n.hook_name,
+                                &n.message,
+                                None,
+                                n.decision.as_deref(),
+                            ),
+                        );
+                    }
+                    if let Some(ref ctx) = ss_result.additional_context {
+                        engine
+                            .messages
+                            .push(crate::provider::Message::system(&format!(
+                                "[Hook context] {ctx}"
+                            )));
+                    }
                 }
 
                 // A resumed session may already exceed the soft threshold;
@@ -431,8 +436,12 @@ where
             engine.metrics = TurnMetrics::default();
             let start = std::time::Instant::now();
 
+            let raw_user_input = args
+                .cosh_shell_transport
+                .then_some(message.raw_user_input.as_deref())
+                .flatten();
             let turn_result = engine
-                .handle_user_message(&message.content, lines, writer)
+                .handle_user_message_with_raw_input(&message.content, raw_user_input, lines, writer)
                 .await;
             let persist_result = session.persist(engine);
             match combine_turn_and_persist(turn_result, persist_result) {

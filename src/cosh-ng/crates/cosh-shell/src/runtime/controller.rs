@@ -215,6 +215,15 @@ pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCaptur
             id: session_panel.id.clone(),
             option_count: session_panel.sessions.len(),
             selected: session_panel.selected_option,
+            marked_for_clear: session_panel
+                .sessions
+                .iter()
+                .map(|session| {
+                    session_panel
+                        .selected_for_clear
+                        .contains(&session.session_id)
+                })
+                .collect(),
             confirming_clear: matches!(
                 session_panel.phase,
                 crate::slash::session::RuntimeSessionPanelPhase::ConfirmClear

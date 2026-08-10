@@ -487,6 +487,7 @@ async function runCodeApprovalPolicyCase({
   });
 
   {
+    const expectedPolicy = codeScanRequireApproval ? "ask" : "observe";
     const approvalPolls = [];
     const cliCallStart = await countJsonLines(cliLogPath);
     const modelRequestStart = mockModel.requests.length;
@@ -516,7 +517,7 @@ async function runCodeApprovalPolicyCase({
         await waitForGatewayLogSignals(gatewayLogPaths, DEFAULT_GATEWAY_TURN_TIMEOUT_MS, {
           scanCodeDeny: {
             command: POLICY_CODE_DENY_COMMAND,
-            requireApproval: codeScanRequireApproval,
+            policy: expectedPolicy,
           },
         })
       ).scanCodeDeny;
@@ -574,7 +575,7 @@ async function runCodeApprovalPolicyCase({
         await waitForGatewayLogSignals(gatewayLogPaths, 15_000, {
           scanCodeDeny: {
             command: POLICY_CODE_DENY_COMMAND,
-            requireApproval: codeScanRequireApproval,
+            policy: expectedPolicy,
           },
         })
       ).scanCodeDeny;
@@ -1164,9 +1165,9 @@ async function waitForGatewayLogSignals(logPaths, timeoutMs, expected = {}) {
       codeScanPass: /\[scan-code\].*pass/u.test(text),
     };
     if (expected.scanCodeDeny) {
-      const { command, requireApproval } = expected.scanCodeDeny;
+      const { command, policy } = expected.scanCodeDeny;
       if (
-        text.includes(`[scan-code] DENY (requireApproval=${requireApproval ? "true" : "false"})`) &&
+        text.includes(`[scan-code] DENY (policy=${policy})`) &&
         text.includes(`Command: ${command}`)
       ) {
         return {
@@ -1174,7 +1175,7 @@ async function waitForGatewayLogSignals(logPaths, timeoutMs, expected = {}) {
           scanCodeDeny: {
             observedAt: new Date().toISOString(),
             verdict: "deny",
-            requireApproval,
+            policy,
             command,
             logFiles: logPaths,
           },
@@ -1188,9 +1189,9 @@ async function waitForGatewayLogSignals(logPaths, timeoutMs, expected = {}) {
   }
   text = (await Promise.all(logPaths.map((file) => readTextIfExists(file)))).join("\n");
   if (expected.scanCodeDeny) {
-    const { command, requireApproval } = expected.scanCodeDeny;
+    const { command, policy } = expected.scanCodeDeny;
     throw new Error(
-      `gateway logs did not contain scan-code DENY requireApproval=${requireApproval} command=${JSON.stringify(command)}; files=${logPaths.join(", ")} tail=${text.slice(-2000)}`,
+      `gateway logs did not contain scan-code DENY policy=${policy} command=${JSON.stringify(command)}; files=${logPaths.join(", ")} tail=${text.slice(-2000)}`,
     );
   }
   throw new Error(

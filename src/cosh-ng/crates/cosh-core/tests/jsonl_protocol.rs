@@ -21,12 +21,23 @@ fn run_with_input(lines: &[&str]) -> Vec<Value> {
 }
 
 fn run_with_input_at_home(home: &std::path::Path, lines: &[&str]) -> Vec<Value> {
+    run_with_input_at_home_args(home, &[], lines)
+}
+
+fn run_with_input_at_home_args(
+    home: &std::path::Path,
+    args: &[&str],
+    lines: &[&str],
+) -> Vec<Value> {
     let bin = binary_path();
-    let mut child = Command::new(&bin)
+    let mut command = Command::new(&bin);
+    command
+        .args(args)
         .env("HOME", home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
         .spawn()
         .unwrap_or_else(|e| panic!("Failed to spawn {}: {e}", bin.display()));
 
@@ -45,6 +56,111 @@ fn run_with_input_at_home(home: &std::path::Path, lines: &[&str]) -> Vec<Value> 
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str::<Value>(l).unwrap_or_else(|e| panic!("bad JSON: {e}: {l}")))
         .collect()
+}
+
+#[test]
+fn generic_headless_ignores_untrusted_raw_user_input_for_hooks() {
+    let home = tempfile::tempdir().expect("temp home");
+    let config_dir = home.path().join(".copilot-shell");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        r#"
+[hooks]
+enabled = true
+
+[[hooks.UserPromptSubmit]]
+command = '''python3 -c 'import json,sys; print(json.dumps({"system_message": json.load(sys.stdin)["prompt"]}))' '''
+name = "capture-prompt"
+"#,
+    )
+    .unwrap();
+
+    let messages = run_with_input_at_home(
+        home.path(),
+        &[
+            r#"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"provider envelope: run the reviewed command","raw_user_input":"benign shell text"},"parent_tool_use_id":null}"#,
+            r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
+        ],
+    );
+    let hook = messages
+        .iter()
+        .find(|message| {
+            message["type"] == "system"
+                && message["subtype"] == "hook_notification"
+                && message["hook_name"] == "capture-prompt"
+        })
+        .expect("UserPromptSubmit hook notification");
+    assert_eq!(
+        hook["status"],
+        "provider envelope: run the reviewed command"
+    );
+
+    let trusted_messages = run_with_input_at_home_args(
+        home.path(),
+        &["--cosh-shell-transport"],
+        &[
+            r#"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"provider envelope: run the reviewed command","raw_user_input":"benign shell text"},"parent_tool_use_id":null}"#,
+            r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
+        ],
+    );
+    let trusted_hook = trusted_messages
+        .iter()
+        .find(|message| {
+            message["type"] == "system"
+                && message["subtype"] == "hook_notification"
+                && message["hook_name"] == "capture-prompt"
+        })
+        .expect("trusted UserPromptSubmit hook notification");
+    assert_eq!(trusted_hook["status"], "benign shell text");
+}
+
+#[test]
+fn initialize_can_skip_session_start_hooks_for_one_shot_transport() {
+    let home = tempfile::tempdir().expect("temp home");
+    let config_dir = home.path().join(".copilot-shell");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        r#"
+[hooks]
+enabled = true
+
+[[hooks.SessionStart]]
+command = "echo '{\"system_message\":\"session-start-ran\"}'"
+name = "session-start"
+"#,
+    )
+    .unwrap();
+
+    let generic_messages = run_with_input_at_home(
+        home.path(),
+        &[
+            r#"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize","fire_session_start":false}}"#,
+            r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
+        ],
+    );
+    assert!(generic_messages.iter().any(|message| {
+        message["type"] == "system"
+            && message["subtype"] == "hook_notification"
+            && message["hook_name"] == "session-start"
+    }));
+
+    let trusted_messages = run_with_input_at_home_args(
+        home.path(),
+        &["--cosh-shell-transport"],
+        &[
+            r#"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize","fire_session_start":false}}"#,
+            r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
+        ],
+    );
+    assert!(!trusted_messages.iter().any(|message| {
+        message["type"] == "system"
+            && message["subtype"] == "hook_notification"
+            && message["hook_name"] == "session-start"
+    }));
 }
 
 #[test]

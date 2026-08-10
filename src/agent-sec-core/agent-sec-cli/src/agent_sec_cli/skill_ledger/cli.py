@@ -29,11 +29,11 @@ app = typer.Typer(
         "  7. audit     Deep-verify the full version history\n\n"
         "Integrity statuses:\n\n"
         "  pass      Files unchanged, signature valid, scan clean\n"
-        "  none      Never scanned — no signed manifest is available\n"
+        "  none      No ledger artifacts, or verified scan status is none\n"
         "  drifted   Skill files changed since last certification\n"
         "  warn      Scan found low-risk issues\n"
         "  deny      Scan found high-risk issues\n"
-        "  tampered  Manifest signature verification failed"
+        "  tampered  Ledger metadata is incomplete or fails authenticity checks"
     ),
     add_completion=True,
 )
@@ -181,11 +181,11 @@ def cmd_check(
     the digital signature. Possible statuses:
 
       pass      Files unchanged, signature valid, scan clean
-      none      Never scanned — no signed manifest is available
+      none      No ledger artifacts, or verified scan status is none
       drifted   Skill files changed since last certification
       warn      Signature valid, but scan found low-risk issues
       deny      Signature valid, but scan found high-risk issues
-      tampered  Manifest signature verification failed — possible forgery
+      tampered  Ledger metadata is incomplete or fails authenticity checks
 
     Use --all to check every registered skill and receive a JSON array of
     enriched results. Skill discovery uses built-in default directories plus

@@ -89,7 +89,7 @@ pub use config::{AgentsightConfig, default_base_path};
 #[cfg(target_os = "linux")]
 pub use aggregator::{
     AggregatedProcess, AggregatedResponse, AggregatedResult, Aggregator, ConnectionId,
-    ConnectionState, HttpConnectionAggregator, HttpPair, ProcessEventAggregator,
+    HttpConnectionAggregator, HttpPair, ProcessEventAggregator,
 };
 #[cfg(target_os = "linux")]
 pub use analyzer::{

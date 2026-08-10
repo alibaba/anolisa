@@ -1,6 +1,8 @@
 """File hashing and diff utilities for skill directories."""
 
 import hashlib
+import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -51,25 +53,40 @@ def compute_snapshot_file_hashes(snapshot_dir: str | Path) -> dict[str, str]:
     metadata directory means the snapshot is not a valid activation target.
     """
     root_path = Path(snapshot_dir)
-    if root_path.is_symlink():
+    try:
+        root_mode = root_path.lstat().st_mode
+    except FileNotFoundError as exc:
+        raise ValueError("snapshot root is not a directory") from exc
+    if stat.S_ISLNK(root_mode):
         raise ValueError("snapshot root is a symbolic link")
-    if not root_path.is_dir():
+    if not stat.S_ISDIR(root_mode):
         raise ValueError("snapshot root is not a directory")
     root = root_path.resolve()
     hashes: dict[str, str] = {}
 
-    for entry in sorted(root.rglob("*")):
-        rel = entry.relative_to(root)
-        rel_str = str(rel)
-        if any(part in _SNAPSHOT_FORBIDDEN_DIRS for part in rel.parts):
-            raise ValueError(f"snapshot contains forbidden metadata path: {rel_str}")
-        if entry.is_symlink():
-            raise ValueError(f"snapshot contains symbolic link: {rel_str}")
-        if entry.is_dir():
-            continue
-        if not entry.is_file():
-            raise ValueError(f"snapshot contains special file: {rel_str}")
-        hashes[rel_str] = compute_file_hash(entry)
+    def walk(directory: Path) -> None:
+        # pathlib glob deliberately suppresses some traversal errors. Explicit
+        # scandir keeps unreadable storage distinct from an invalid snapshot.
+        with os.scandir(directory) as entries:
+            for entry in sorted(entries, key=lambda item: item.name):
+                path = Path(entry.path)
+                rel = path.relative_to(root)
+                rel_str = str(rel)
+                if any(part in _SNAPSHOT_FORBIDDEN_DIRS for part in rel.parts):
+                    raise ValueError(
+                        f"snapshot contains forbidden metadata path: {rel_str}"
+                    )
+                mode = entry.stat(follow_symlinks=False).st_mode
+                if stat.S_ISLNK(mode):
+                    raise ValueError(f"snapshot contains symbolic link: {rel_str}")
+                if stat.S_ISDIR(mode):
+                    walk(path)
+                    continue
+                if not stat.S_ISREG(mode):
+                    raise ValueError(f"snapshot contains special file: {rel_str}")
+                hashes[rel_str] = compute_file_hash(path)
+
+    walk(root)
 
     return hashes
 

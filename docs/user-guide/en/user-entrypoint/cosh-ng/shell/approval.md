@@ -1,118 +1,44 @@
 # Tool Approval
 
-cosh-shell's tool approval system presents operation details as visual cards when an AI adapter requests tool execution, letting the user decide whether to allow it.
+[中文版](../../../../zh/user-entrypoint/cosh-ng/shell/approval.md)
 
-## Approval Modes
+cosh may show an approval card before an Agent uses a guarded tool. Review the tool, its input, the risk, and any Hook warning before allowing the action.
 
-Switch via `/mode approval <mode>` or configure `shell.approval_mode`:
+## Choose an approval mode
 
-| Mode | Meaning | Mapping to cosh-core |
-|------|---------|---------------------|
-| `recommend` | Recommend mode: all tool calls require approval | `strict` |
-| `auto` | Auto mode (default): only shell commands require approval | `auto` |
-| `trust` | Trust mode: all tools auto-execute (requires `confirm`) | `trust` |
+Switch with `/mode approval <mode>` or set `shell.approval_mode`.
 
-Switching to trust mode requires secondary confirmation:
+| Mode | Behavior |
+|------|----------|
+| `recommend` | Explain and suggest only; no tool calls are emitted. |
+| `auto` | Default. Eligible read-only or low-risk tools can run automatically; risky, guarded, or external work asks first. |
+| `trust` | Provider tool requests run automatically for this session after explicit confirmation. |
 
-```
+Enable trust mode with a second confirmation:
+
+```text
 /mode approval trust confirm
 ```
 
-## Approval Cards
+Trust mode is not a blanket bypass. Irrecoverable system-control commands such as `reboot`, `shutdown`, and `halt` still require an approval card, and high-risk requests cannot create a persistent trust key.
 
-When a tool requires approval, cosh-shell renders an inline approval panel:
+## Read and answer a card
 
-```
-┌─────────────────────────────────────────┐
-│ 🔧 Tool: shell                    [1/3] │
-│ Risk: medium                            │
-│─────────────────────────────────────────│
-│ Command:                                │
-│   rm -rf /tmp/old-build                 │
-│─────────────────────────────────────────│
-│ ⚠ Hook: sandbox-guard                   │
-│   "Command matches risk pattern"         │
-│─────────────────────────────────────────│
-│ [✓ Approve]  [ Deny ]  [ Details ]      │
-└─────────────────────────────────────────┘
-```
+Check the tool name, input preview, risk, and Hook warnings. Choose **Approve** or **Deny**; use **Details** when the preview is shortened. If requests are queued, the card shows the queue position.
 
-### Card Elements
+When you approve a `shell` tool, cosh runs the command in the foreground bash or zsh. Its output and interactive prompts stay visible, and `Ctrl+C` can interrupt it. Approved foreground commands run one at a time.
 
-| Element | Description |
-|---------|-------------|
-| Tool | Tool name |
-| Risk | Risk level (assessed by hooks) |
-| Queue | Queue position (when multiple requests are queued) |
-| Command/Input | Tool input preview |
-| Hook warnings | Warning messages from hooks |
-| Actions | Available action buttons |
+If an approved command waits for password input, a pager, or plain terminal input, cosh can show a hint and interrupt it after 120 seconds by default. Set `shell.input_wait_timeout_secs = 0` to disable this timeout. Fullscreen TUIs and pipeline reads are exempt.
 
-### User Actions
-
-| Action | Description |
-|--------|-------------|
-| Approve | Allow execution |
-| Deny | Reject execution |
-| Details | Expand full input content |
-
-## Shell Command Handoff
-
-When the approved tool is of `shell` type and the user approves, the command is "handed off" to the foreground PTY for execution (rather than being executed by cosh-core in the background):
-
-```
-User approves shell command
-       │
-       ▼
-cosh-shell injects command into PTY
-       │
-       ▼
-bash/zsh executes in foreground (user can interact)
-       │
-       ▼
-Execution result returned via OSC markers
-```
-
-This means:
-- Command output is displayed directly in the terminal
-- User can interact in real-time (e.g., confirmation prompts)
-- Ctrl+C can interrupt execution
-
-## Approval Journal
-
-All approval decisions are recorded in an in-memory journal:
-
-| Field | Description |
-|-------|-------------|
-| `id` | Approval request unique identifier |
-| `run_id` | Associated Agent run ID |
-| `kind` | Request type (Tool / ShellCommand) |
-| `risk` | Risk level |
-| `decision` | Final decision (Allow / Deny / Cancel) |
-| `subject` | Tool name |
-| `preview` | Operation preview |
-
-## Relationship with cosh-core Approval Protocol
-
-cosh-shell's approval system is the frontend implementation of the `can_use_tool` control request in the cosh-core JSONL protocol:
-
-```
-Core → Shell:  {"type":"control_request","request_id":"apr-1","request":{"subtype":"can_use_tool",...}}
-                       │
-                       ▼
-              cosh-shell renders approval card
-                       │
-                       ▼ (user decision)
-Shell → Core:  {"type":"control_response","response":{"subtype":"tool_approval","request_id":"apr-1","response":{"behavior":"allow"}}}
-```
+Approval decisions are kept in the runtime journal. When audit logging is enabled, a redacted copy is also available in the audit timeline; see the [audit guide](../cli/audit.md).
 
 ## Configuration
 
 ```toml
 [shell]
-# Approval mode: recommend | auto | trust
 approval_mode = "auto"
-
-# Trusted command list (always auto-approved)
 trusted_commands = ["ls", "cat", "echo"]
+input_wait_timeout_secs = 120
 ```
+
+`trusted_commands` matches exact trust keys, not arbitrary command substrings, and does not override the irrecoverable-command gate. See [Configuration](../configuration.md) for environment overrides.

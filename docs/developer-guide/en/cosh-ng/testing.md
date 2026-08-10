@@ -1,117 +1,121 @@
-# Testing
+# Testing cosh-ng
 
-## Running Tests
+[中文版](../../zh/cosh-ng/testing.md)
 
-```bash
-cd src/cosh-ng
+cosh-ng uses layered deterministic tests. Start at the cheapest layer that can
+prove the behavior, then widen coverage in proportion to process, PTY, wire, or
+security risk. Do not use exact test counts as documentation; inventory floors
+change as the implementation grows.
 
-# All tests
-cargo test --locked
+## Fast feedback
 
-# By crate
-cargo test --locked -p cosh-types      # Pure types, no tests
-cargo test --locked -p cosh-platform   # 174 unit tests
-cargo test --locked -p cosh-cli        # 55 integration tests
-cargo test --locked -p cosh-core       # Unit + integration tests
-cargo test --locked -p cosh-shell      # Unit + integration (includes PTY tests, slower)
-
-# Run a single test
-cargo test --locked -p cosh-platform test_detect_alinux
-
-# Run a specific test file
-cargo test --locked -p cosh-cli --test cli_integration
-```
-
-## Test Layers
-
-### cosh-types
-
-Pure type definitions, typically no tests. Serialization/deserialization correctness is covered by upper-layer crate tests.
-
-### cosh-platform
-
-Unit tests cover:
-- Distribution detection (mocking `/etc/os-release`)
-- Package manager command generation
-- Audit policy rule matching
-- ws-ckpt IPC protocol encoding/decoding
+Run from `src/cosh-ng`:
 
 ```bash
+cargo test --locked -p cosh-types
 cargo test --locked -p cosh-platform
-# ~174 tests, < 1s
+cargo test --locked -p cosh-cli --test cli_integration
+cargo test --locked -p cosh-core --lib
+cargo test --locked -p cosh-shell --lib
 ```
 
-### cosh-cli
-
-Integration tests (`crates/cosh-cli/tests/cli_integration.rs`):
-- JSON output envelope format validation
-- `--dry-run` behavior
-- Argument parsing for each subcommand
-- Error code mapping
+Use a test-name filter while iterating:
 
 ```bash
-cargo test --locked -p cosh-cli
-# ~55 tests, ~4s
+cargo test --locked -p cosh-core session_recovery
+cargo test --locked -p cosh-shell --test logic slash_registry
 ```
 
-### cosh-core
+## Shell integration layers
 
-| Test File | Coverage |
-|-----------|----------|
-| `tests/jsonl_protocol.rs` | JSONL message serialization/deserialization |
-| `tests/registry_protocol.rs` | Registry mode request-response |
-| `tests/tool_approval.rs` | Tool approval protocol |
-| `tests/sls_integration.rs` | SLS logging integration |
+| Target | Put a test here when it proves | Typical cost |
+|---|---|---|
+| `--lib` | Private pure logic or a lightweight component | Lowest |
+| `--test logic` | Public multi-module behavior without process transport | Low |
+| `--test protocol` | Adapter/control serialization and state transitions | Low to medium |
+| `--test raw_cli` | A spawned shell binary, cards, provider handoff, or scripted raw input | Medium |
+| `--test shell_host` | PTY, OSC, termios, native shell, or foreground-program behavior | Highest default layer |
 
-Unit tests distributed across modules:
-- `extension/` — Configuration parsing, variable substitution, extension loading
-- `state.rs` — State file read/write
-- `hook.rs` — Hook protocol
+Examples:
 
 ```bash
-cargo test --locked -p cosh-core
+cargo test --locked -p cosh-shell --test logic
+cargo test --locked -p cosh-shell --test protocol -- --test-threads=4
+cargo test --locked -p cosh-shell --test raw_cli <test-name> -- --exact
+cargo test --locked -p cosh-shell --test shell_host -- --test-threads=4
 ```
 
-### cosh-shell
+Do not put real-provider, visual, or manual-terminal checks into the default
+Cargo gate. Such validation must be explicitly requested and reported
+separately from deterministic behavior.
 
-Most complex test structure, divided into three layers:
+## Core integration targets
 
-**Integration tests** (`crates/cosh-shell/tests/`):
+Core tests are organized by contract rather than one monolithic suite:
 
-| Directory | Coverage |
-|-----------|----------|
-| `logic/` | Command classification, failure analysis, agent event handling |
-| `protocol/` | Adapter protocol, control messages |
-| `raw_cli/` | Raw mode CLI behavior |
-| `shell_host/` | PTY sessions, OSC marker parsing |
+| Target | Contract |
+|---|---|
+| `jsonl_protocol` | Headless message and streaming behavior |
+| `registry_protocol` | Skills, extensions, auth, and registry actions |
+| `tool_approval` | Tool decision protocol |
+| `session_recovery` | Persisted conversation lifecycle |
+| `compaction_lifecycle` | Manual and automatic compaction |
+| `oauth_mcp` | MCP OAuth control flow |
+| `sls_integration` | Export integration with deterministic fixtures |
+| `sigint` | Process interruption behavior |
 
-**Inline unit tests** (`#[cfg(test)]` modules in `src/`):
+Run the target closest to the change, then the complete core package when the
+change affects shared runtime state.
 
-| Module | Coverage |
-|--------|----------|
-| `approval/tests.rs` | Approval decision logic |
-| `hooks/` | Hook engine, runtime behavior |
-| `runtime/` | State machine, evidence requests |
-| `shell_host/osc_tests.rs` | OSC escape sequence parsing |
-| `tools/` | Tool risk analysis, display |
+## Canonical gates
+
+The repository scripts avoid duplicate lib/bin executions and audit test/layout
+inventory:
 
 ```bash
-cargo test --locked -p cosh-shell
-# Slower (PTY tests require fork + terminal interaction)
+scripts/run-test-gates.sh fast         # local iteration and focused handoff
+scripts/run-test-gates.sh integration  # all process/protocol integration targets
+scripts/run-test-gates.sh all          # canonical deterministic suite
+scripts/run-test-gates.sh heavy        # selected ignored manual-grade cases
 ```
 
-## Test Utilities
+`scripts/check-test-inventory.sh` enforces regression floors and ignored-test
+ceilings. `scripts/check-test-necessity.sh` checks whether a change that needs a
+test has one. `crates/cosh-shell/scripts/check-layout.sh` audits source and test
+placement. Do not lower these baselines in a feature or fix merely to pass CI.
 
-| Utility | Purpose |
-|---------|---------|
-| `tempfile` | Create temporary directories for isolated tests |
-| `COSH_STATES_DIR` | Environment variable to override state directory |
-| `ExtensionManager::new_isolated()` | Test-specific constructor |
+## Broader local gates
 
-## Writing Tests Guide
+For ordinary code changes, stop after the formatter and tests closest to the
+changed behavior. Run the complete local gate only for large or cross-cutting
+code changes when the task explicitly asks for that depth; otherwise CI owns
+broad regression coverage.
 
-1. Integration tests go in `tests/` directory, unit tests inline in modules
-2. Test function naming: `test_<behavior_under_test>_<scenario>`
-3. Use `tempfile::tempdir()` to isolate filesystem side effects
-4. Do not depend on network (LLM API tests use mocks)
-5. PTY tests annotated with `#[ignore]` (if they require a real terminal environment)
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+scripts/run-test-gates.sh all
+cargo build --workspace --release
+```
+
+Add `cargo doc --workspace --no-deps` when changing public API or rustdoc.
+Documentation-only changes need link, formatting, command, and bilingual parity
+checks rather than Rust tests.
+
+## Test design rules
+
+- Use temporary directories and test-only path overrides; never depend on a
+  developer's real home, config, keyring, or session store.
+- Mock providers and transports. A network credential is not a test fixture.
+- Verify the public boundary: JSON envelope, JSONL message, terminal output,
+  filesystem permission, exit status, or protocol bytes.
+- For safety fixes, include the benign control case and the adversarial input
+  that previously bypassed the gate.
+- Keep PTY timing bounded and wait on observable state instead of arbitrary
+  sleeps.
+- Never remove assertions, ignore tests, or broaden timeouts without explaining
+  the behavioral reason.
+
+The optional `e2e/run.py` runner validates installed launchers and real PTY
+paths under named profiles. It is a later system gate, not a substitute for the
+scoped Cargo tests above.

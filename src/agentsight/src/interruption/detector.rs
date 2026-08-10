@@ -12,10 +12,14 @@ use super::types::{InterruptionEvent, InterruptionType};
 use crate::genai::semantic::{LLMCall, MessagePart, ToolUse};
 
 /// Whether the finish reason indicates a normal (non-truncated) end of generation.
+///
+/// `pause_turn` (Anthropic) means a long-running turn was paused by the server
+/// and will be resumed by the client; the SSE stream itself completed normally,
+/// so it must not be treated as truncation.
 fn is_normal_finish(reason: Option<&str>) -> bool {
     matches!(
         reason,
-        Some("stop" | "tool_calls" | "end_turn" | "tool_use" | "stop_sequence")
+        Some("stop" | "tool_calls" | "end_turn" | "tool_use" | "stop_sequence" | "pause_turn")
     )
 }
 
@@ -574,7 +578,7 @@ impl InterruptionDetector {
 
         // ── 8. SSE truncated ──────────────────────────────────────────────────
         // 严格条件：SSE 流 + 持续时间 >= 阈值 + 无正常终止标志 + 非 token-limit
-        // 正常终止标志：finish_reason 为 stop/tool_calls/end_turn/tool_use/stop_sequence
+        // 正常终止标志：finish_reason 为 stop/tool_calls/end_turn/tool_use/stop_sequence/pause_turn
         // token-limit (length/max_tokens) 由 rule 9/10 单独处理
         if is_sse
             && !is_normal_finish(finish_reason)
@@ -1453,6 +1457,54 @@ mod tests {
                 .iter()
                 .all(|e| e.interruption_type != InterruptionType::SseTruncated),
             "stop_sequence should not trigger SseTruncated"
+        );
+    }
+
+    #[test]
+    fn test_pause_turn_sse_not_reported_as_truncated() {
+        // SSE + finish_reason="pause_turn"（Anthropic 长轮次暂停，流是完整的）
+        // → 不产生 SseTruncated
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 2_000_000_000;
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("pause_turn".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.interruption_type != InterruptionType::SseTruncated),
+            "pause_turn should not trigger SseTruncated"
+        );
+    }
+
+    #[test]
+    fn test_sse_unknown_finish_reason_still_truncated() {
+        // 守护 #1023 原行为：SSE + 非白名单 finish_reason（None 场景由
+        // test_detect_sse_truncated 覆盖，这里覆盖 Some(未知值)）仍报 SseTruncated
+        let detector = InterruptionDetector::default();
+        let mut call = make_base_call();
+        call.metadata
+            .insert("is_sse".to_string(), "true".to_string());
+        call.duration_ns = 2_000_000_000;
+        call.response.messages = vec![OutputMessage {
+            role: "assistant".to_string(),
+            parts: vec![],
+            name: None,
+            finish_reason: Some("some_unknown_reason".to_string()),
+        }];
+        let events = detector.detect(&call);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.interruption_type == InterruptionType::SseTruncated),
+            "non-whitelisted finish_reason should still trigger SseTruncated"
         );
     }
 

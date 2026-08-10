@@ -101,6 +101,10 @@ impl GenAIBuilder {
         let user_query = Self::extract_last_user_query(&request);
         let first_user_raw = Self::extract_first_user_raw(&request).unwrap_or_default();
         let last_user_raw = Self::extract_last_user_raw(&request).unwrap_or_default();
+        let user_message_count = Self::count_real_user_messages(&request);
+
+        // Classify call kind (main / recap / web_search) from request content
+        let call_kind = super::helpers::classify_call_kind(&request).as_str();
 
         // 提取 LLM API 的 response_id（如 chatcmpl-xxx），用作 trace_id
         // 同时作为 call_id 的首选值：trace_id 有值时直接复用，避免两套 ID；
@@ -141,6 +145,7 @@ impl GenAIBuilder {
             pid_i32,
             &last_user_raw,
             &response_id,
+            user_message_count,
         );
 
         // 若本次响应的 finish_reason 表明本轮对话已经结束（非 tool_calls/tool_use 等
@@ -154,8 +159,31 @@ impl GenAIBuilder {
             .and_then(|m| m.finish_reason.as_deref())
         {
             if Self::is_turn_terminal_finish_reason(reason) {
-                self.id_resolver
-                    .finish_conversation(&agent_name, pid_i32, &last_user_raw);
+                // Some providers (e.g. DashScope with forced tool_choice) report
+                // finish_reason "stop" even when the response carries tool calls.
+                // A response that still asks for tool execution means the turn is
+                // not over, so keep the conversation anchor alive.
+                // Both finish_reason and the tool-call probe read the last output
+                // message: for multi-choice responses the last choice is decisive,
+                // matching the SSE aggregation semantics (finish_reason comes from
+                // the last chunk).
+                let has_tool_call = response
+                    .messages
+                    .last()
+                    .map(|m| {
+                        m.parts
+                            .iter()
+                            .any(|p| matches!(p, MessagePart::ToolCall { .. }))
+                    })
+                    .unwrap_or(false);
+                if !has_tool_call {
+                    self.id_resolver.finish_conversation(
+                        &agent_name,
+                        pid_i32,
+                        &last_user_raw,
+                        user_message_count,
+                    );
+                }
             }
         }
 
@@ -287,21 +315,28 @@ impl GenAIBuilder {
                     meta.insert("session_id".to_string(), sid.clone());
                 }
                 meta.insert("pending_match_key".to_string(), pending_match_key);
+                // call_kind: main / recap / web_search
+                meta.insert("call_kind".to_string(), call_kind.to_string());
                 meta
             },
         })
     }
 
-    /// 判断 `finish_reason` 是否意味着本轮对话已经结束。
+    /// Returns whether a `finish_reason` value *by itself* marks the end of a turn.
     ///
-    /// `tool_calls`（OpenAI）/`tool_use`（Anthropic）/`function_call`（旧式 OpenAI）
-    /// 表示模型请求了工具调用，对话仍将在同一轮内继续；其余取值（`stop` /
-    /// `end_turn` / `length` / `max_tokens` / `content_filter` / `stop_sequence` 等）均意味着
-    /// 本轮对话已经得到最终回复，应视为轮结束。
+    /// `tool_calls` (OpenAI) / `tool_use` (Anthropic) / `function_call` (legacy
+    /// OpenAI) mean the model requested tool execution; `pause_turn` (Anthropic)
+    /// means a long-running turn was paused and will resume. Anything else
+    /// (`stop`, `end_turn`, `length`, ...) is treated as terminal.
+    ///
+    /// Note: the eviction site additionally checks whether the last assistant
+    /// message still carries a `MessagePart::ToolCall`; if so, the conversation
+    /// anchor is kept alive even for a terminal `finish_reason` (some providers,
+    /// e.g. DashScope with forced `tool_choice`, report `"stop"` for tool calls).
     fn is_turn_terminal_finish_reason(reason: &str) -> bool {
         !matches!(
             reason.to_ascii_lowercase().as_str(),
-            "tool_calls" | "tool_use" | "function_call"
+            "tool_calls" | "tool_use" | "function_call" | "pause_turn"
         )
     }
 
@@ -1656,5 +1691,296 @@ mod tests {
         let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
         assert!(call.request.messages.is_empty());
         assert!(!call.request.stream);
+    }
+
+    #[test]
+    fn test_build_llm_call_call_kind_main() {
+        let builder = GenAIBuilder::new();
+        let body = serde_json::json!({
+            "model": "qwen3.6-plus",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "hello"}
+            ]
+        })
+        .to_string();
+        let http = make_http("/v1/chat/completions", Some(body), None);
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        assert_eq!(
+            call.metadata.get("call_kind").map(|s| s.as_str()),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn test_build_llm_call_call_kind_recap_memory_subagent() {
+        let builder = GenAIBuilder::new();
+        let body = serde_json::json!({
+            "model": "qwen3.6-plus",
+            "messages": [
+                {"role": "system", "content": "You are now acting as the managed memory extraction subagent."},
+                {"role": "user", "content": "Managed memory has TWO directories. Choose which one to write each memory into."}
+            ]
+        })
+        .to_string();
+        let http = make_http("/v1/chat/completions", Some(body), None);
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        assert_eq!(
+            call.metadata.get("call_kind").map(|s| s.as_str()),
+            Some("recap")
+        );
+    }
+
+    #[test]
+    fn test_build_llm_call_call_kind_recap_suggestion_subagent() {
+        let builder = GenAIBuilder::new();
+        let body = serde_json::json!({
+            "model": "qwen3.6-plus",
+            "messages": [
+                {"role": "user", "content": "[SUGGESTION MODE: Suggest what the user might naturally type next.]"}
+            ]
+        })
+        .to_string();
+        let http = make_http("/v1/chat/completions", Some(body), None);
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        assert_eq!(
+            call.metadata.get("call_kind").map(|s| s.as_str()),
+            Some("recap")
+        );
+    }
+
+    // ── Turn eviction vs. tool calls (issue #2262) ──────────────────────
+    //
+    // The conversation anchor must survive a response that still requests
+    // tool execution, even when the provider mislabels it with a terminal
+    // finish_reason such as "stop" (e.g. DashScope with forced tool_choice).
+
+    /// Builds an OpenAI-style request/response pair: a single user message
+    /// plus an assistant reply with the given finish_reason and tool_calls.
+    fn openai_turn_results(
+        user_text: &str,
+        response_id: &str,
+        finish_reason: &str,
+        tool_calls: Option<Vec<serde_json::Value>>,
+    ) -> Vec<AnalysisResult> {
+        let request = OpenAIRequest {
+            model: "gpt-4".to_string(),
+            messages: vec![empty_chat_msg(MessageRole::User, Some(user_text))],
+            temperature: None,
+            max_tokens: None,
+            stream: None,
+            top_p: None,
+            n: None,
+            stop: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            user: None,
+            tools: None,
+            tool_choice: None,
+            response_format: None,
+            seed: None,
+            logprobs: None,
+            top_logprobs: None,
+            parallel_tool_calls: None,
+        };
+        let mut assistant_msg = empty_chat_msg(MessageRole::Assistant, Some("ok"));
+        assistant_msg.tool_calls = tool_calls;
+        let response = OpenAIResponse {
+            id: response_id.to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "gpt-4".to_string(),
+            choices: vec![OpenAIChoice {
+                index: 0,
+                message: assistant_msg,
+                finish_reason: Some(finish_reason.to_string()),
+                logprobs: None,
+            }],
+            usage: None,
+            system_fingerprint: None,
+        };
+        let parsed = ParsedApiMessage::OpenAICompletion {
+            request: Some(request),
+            response: Some(response),
+        };
+        let http = make_http("/v1/chat/completions", None, None);
+        vec![AnalysisResult::Http(http), AnalysisResult::Message(parsed)]
+    }
+
+    fn conv_id(builder: &GenAIBuilder, results: &[AnalysisResult]) -> String {
+        build_call(builder, results)
+            .unwrap()
+            .metadata
+            .get("conversation_id")
+            .unwrap()
+            .clone()
+    }
+
+    fn sample_tool_calls() -> Vec<serde_json::Value> {
+        vec![serde_json::json!({
+            "id": "tc_1",
+            "type": "function",
+            "function": {"name": "run_cmd", "arguments": "{}"}
+        })]
+    }
+
+    #[test]
+    fn test_tool_call_with_stop_finish_reason_keeps_turn_open() {
+        let builder = GenAIBuilder::new();
+        let user = "same user text";
+        let first = conv_id(
+            &builder,
+            &openai_turn_results(user, "resp-1", "stop", Some(sample_tool_calls())),
+        );
+        let second = conv_id(
+            &builder,
+            &openai_turn_results(user, "resp-2", "stop", Some(sample_tool_calls())),
+        );
+        assert_eq!(
+            first, second,
+            "a response carrying tool calls must not evict the conversation anchor"
+        );
+    }
+
+    #[test]
+    fn test_pure_text_stop_finish_reason_ends_turn() {
+        let builder = GenAIBuilder::new();
+        let user = "same user text";
+        let first = conv_id(&builder, &openai_turn_results(user, "resp-1", "stop", None));
+        let second = conv_id(&builder, &openai_turn_results(user, "resp-2", "stop", None));
+        assert_ne!(
+            first, second,
+            "a pure-text terminal response must still evict the conversation anchor"
+        );
+    }
+
+    #[test]
+    fn test_empty_tool_calls_with_stop_ends_turn() {
+        let builder = GenAIBuilder::new();
+        let user = "same user text";
+        let first = conv_id(
+            &builder,
+            &openai_turn_results(user, "resp-1", "stop", Some(vec![])),
+        );
+        let second = conv_id(
+            &builder,
+            &openai_turn_results(user, "resp-2", "stop", Some(vec![])),
+        );
+        assert_ne!(
+            first, second,
+            "an empty tool_calls array yields no ToolCall part and must still end the turn"
+        );
+    }
+
+    #[test]
+    fn test_pause_turn_finish_reason_keeps_turn_open() {
+        let builder = GenAIBuilder::new();
+        let user = "same user text";
+        let first = conv_id(
+            &builder,
+            &openai_turn_results(user, "resp-1", "pause_turn", None),
+        );
+        let second = conv_id(
+            &builder,
+            &openai_turn_results(user, "resp-2", "pause_turn", None),
+        );
+        assert_eq!(
+            first, second,
+            "pause_turn means the turn will resume, so the anchor must survive"
+        );
+    }
+
+    /// Builds an OpenAI SSE exchange: request body with a single user message
+    /// and a streamed response whose tool_call arrives as fragmented deltas,
+    /// with the last chunk reporting finish_reason "stop".
+    fn sse_stop_tool_call_results(user_text: &str, response_id: &str) -> Vec<AnalysisResult> {
+        let request_body = serde_json::json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": user_text}]
+        })
+        .to_string();
+        let sse_body = format!(
+            concat!(
+                r#"[{{"id":"{rid}","choices":[{{"delta":{{"tool_calls":"#,
+                r#"[{{"index":0,"id":"tc_1","function":{{"name":"run_cmd","arguments":"{{\"c"}}}}]}},"#,
+                r#""finish_reason":null}}]}},"#,
+                r#"{{"id":"{rid}","choices":[{{"delta":{{"tool_calls":"#,
+                r#"[{{"index":0,"function":{{"arguments":"md\":1}}"}}}}]}},"finish_reason":"stop"}}]}}]"#
+            ),
+            rid = response_id
+        );
+        let mut http = make_http("/v1/chat/completions", Some(request_body), Some(sse_body));
+        http.is_sse = true;
+        vec![AnalysisResult::Http(http)]
+    }
+
+    #[test]
+    fn test_sse_tool_call_with_stop_keeps_turn_open() {
+        let builder = GenAIBuilder::new();
+        let user = "same user text";
+        let first = conv_id(&builder, &sse_stop_tool_call_results(user, "sse-resp-1"));
+        let second = conv_id(&builder, &sse_stop_tool_call_results(user, "sse-resp-2"));
+        assert_eq!(
+            first, second,
+            "an SSE-aggregated tool call with finish_reason stop must not evict the anchor"
+        );
+    }
+
+    /// Builds a SysOM exchange with a single user message and a tool_use
+    /// response; the SysOM path hardcodes finish_reason "stop".
+    fn sysom_tool_use_results(user_text: &str) -> Vec<AnalysisResult> {
+        let request = SysomRequest {
+            params: SysomLlmParams {
+                model: "qwen".to_string(),
+                messages: vec![SysMsg {
+                    role: "user".to_string(),
+                    content: user_text.to_string(),
+                    tool_call_id: None,
+                    name: None,
+                    tool_calls: None,
+                }],
+                stream: false,
+                temperature: None,
+                max_tokens: None,
+                top_p: None,
+                tools: None,
+                use_dashscope: None,
+            },
+        };
+        let response = SysomResponse {
+            id: Some("chatcmpl-xx".to_string()),
+            choices: vec![SysomResponseChoice {
+                message: SysomResponseMessage {
+                    content: "answer".to_string(),
+                    tool_use: Some(vec![SysomToolUseItem {
+                        index: 0,
+                        id: "tu_1".to_string(),
+                        item_type: "function".to_string(),
+                        function: SysomFunction {
+                            name: "calc".to_string(),
+                            arguments: r#"{"x":1}"#.to_string(),
+                        },
+                    }]),
+                },
+            }],
+        };
+        let parsed = ParsedApiMessage::SysomMessage {
+            request: Some(request),
+            response: Some(response),
+        };
+        let http = make_http("/api/v1/copilot/generate_copilot", None, None);
+        vec![AnalysisResult::Http(http), AnalysisResult::Message(parsed)]
+    }
+
+    #[test]
+    fn test_sysom_tool_use_with_stop_keeps_turn_open() {
+        let builder = GenAIBuilder::new();
+        let user = "same user text";
+        let first = conv_id(&builder, &sysom_tool_use_results(user));
+        let second = conv_id(&builder, &sysom_tool_use_results(user));
+        assert_eq!(
+            first, second,
+            "a SysOM tool_use response (hardcoded finish_reason stop) must not evict the anchor"
+        );
     }
 }

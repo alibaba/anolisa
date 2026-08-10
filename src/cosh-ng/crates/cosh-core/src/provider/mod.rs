@@ -195,6 +195,43 @@ impl Default for GenerateConfig {
     }
 }
 
+/// Request fields an OpenAI-compatible backend may honor as the output cap.
+///
+/// Both are clamped: a backend that ignores one may still honor the other, so
+/// leaving either unbounded would let the real request outspend the reserve.
+const OUTPUT_CAP_FIELDS: [&str; 2] = ["max_tokens", "max_completion_tokens"];
+
+/// Clamps every output-cap field already present in a serialized request body
+/// to `max_tokens`.
+///
+/// Request builders merge user-supplied `extra_params` into the body, and that
+/// merge can replace the resolved cap (`extra_params.max_tokens = 65536` while
+/// the compaction budget reserved 16K). Because the reserve `O` and this cap
+/// come from one resolver, a request permitted to exceed it would reintroduce
+/// the context-overflow mismatch. Call this *last*, after every merge, so the
+/// serialized value is authoritative.
+///
+/// A field that is absent stays absent — adding an alias could break a backend
+/// that rejects unknown fields. A lower explicit value is preserved (asking for
+/// less than the reserve is always safe); anything higher, or any non-numeric
+/// value, is replaced by `max_tokens`.
+pub(crate) fn clamp_output_cap_fields(body: &mut Value, max_tokens: u32) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    for field in OUTPUT_CAP_FIELDS {
+        let Some(value) = object.get_mut(field) else {
+            continue;
+        };
+        let within_cap = value
+            .as_u64()
+            .is_some_and(|requested| requested <= u64::from(max_tokens));
+        if !within_cap {
+            *value = Value::from(max_tokens);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum GenerateEvent {
     TextDelta(String),

@@ -84,13 +84,13 @@ function packageTemplate(path, expectedName) {
 function platformPackageTemplate(path, expectedName) {
   const template = packageTemplate(path, expectedName);
   if (
-    template.bin?.anolisa !== 'bin/anolisa' ||
+    template.bin !== undefined ||
     !Array.isArray(template.files) ||
     !template.files.includes('bin/') ||
     template.preferUnplugged !== true
   ) {
     throw new Error(
-      `npm platform template must package the native binary without modification: ${path}`,
+      `npm platform template must be a command-free native payload: ${path}`,
     );
   }
   return template;

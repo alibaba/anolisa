@@ -25,6 +25,93 @@ struct CountingShellTool {
 
 struct ExternalTool;
 
+/// Records the `GenerateConfig` of every agent-turn request it serves.
+struct ConfigRecordingProvider {
+    configs: Arc<Mutex<Vec<crate::provider::GenerateConfig>>>,
+}
+
+#[async_trait]
+impl crate::provider::ContentGenerator for ConfigRecordingProvider {
+    async fn generate(
+        &self,
+        _messages: &[crate::provider::Message],
+        _tools: &[crate::provider::ToolDeclaration],
+        config: &crate::provider::GenerateConfig,
+    ) -> Result<crate::provider::GenerateStream, String> {
+        self.configs.lock().unwrap().push(config.clone());
+        Ok(Box::pin(futures::stream::iter([
+            crate::provider::GenerateEvent::TextDelta("done".to_string()),
+            crate::provider::GenerateEvent::MessageEnd,
+        ])))
+    }
+
+    fn cancel(&self) {}
+}
+
+/// Runs one turn against `model` and returns the `max_tokens` actually sent
+/// together with the output reserve the compaction budget charged for it.
+async fn requested_and_reserved_output_tokens(
+    model: &str,
+    compaction: crate::config::CompactionConfig,
+) -> (u32, u64) {
+    let configs = Arc::new(Mutex::new(Vec::new()));
+    let provider = ConfigRecordingProvider {
+        configs: Arc::clone(&configs),
+    };
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    config.session.compaction = compaction.clone();
+    let session_token_limit = config.agent.session_token_limit;
+    let mut core = CoshCore::new(config, Box::new(provider), ToolRegistry::new());
+    core.model = model.to_string();
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+    core.handle_user_message("hello", &mut reader, &mut output)
+        .await
+        .expect("turn completes");
+
+    let capability =
+        crate::compaction::ModelCapability::resolve(&compaction, session_token_limit, model);
+    let budget = crate::compaction::ContextBudget::compute(capability, 1_000, &compaction);
+    let sent = configs.lock().unwrap();
+    assert_eq!(sent.len(), 1, "exactly one provider request per turn");
+    (sent[0].max_tokens, budget.output_reserve)
+}
+
+#[tokio::test]
+async fn request_max_tokens_matches_the_reserved_output_budget() {
+    // #2240: the request used to ask for the model's whole 65 536-token output
+    // capability while the budget reserved the same amount, leaving a
+    // 131 072-token window with only ~52K of usable history. Both sides now read
+    // one resolver, so they can never disagree.
+    let (requested, reserved) = requested_and_reserved_output_tokens(
+        "qwen3.7-max",
+        crate::config::CompactionConfig::default(),
+    )
+    .await;
+    assert_eq!(requested, 16_384, "max_tokens actually sent");
+    assert_eq!(u64::from(requested), reserved);
+
+    // An unknown model shares the conservative default on both sides.
+    let (requested, reserved) = requested_and_reserved_output_tokens(
+        "brand-new-model",
+        crate::config::CompactionConfig::default(),
+    )
+    .await;
+    assert_eq!(requested, 4_096);
+    assert_eq!(u64::from(requested), reserved);
+
+    // An explicit override raises both, never only one.
+    let overridden = crate::config::CompactionConfig {
+        model_max_output_tokens: Some(24_000),
+        ..Default::default()
+    };
+    let (requested, reserved) =
+        requested_and_reserved_output_tokens("qwen3.7-max", overridden).await;
+    assert_eq!(requested, 24_000);
+    assert_eq!(u64::from(requested), reserved);
+}
+
 #[derive(Default)]
 struct RecordingProvider {
     messages: Arc<Mutex<Vec<crate::provider::Message>>>,
@@ -231,6 +318,79 @@ async fn project_context_reaches_the_provider_boundary() {
         .content
         .as_text()
         .contains("## Project Context\nprovider-visible marker"));
+}
+
+#[tokio::test]
+async fn raw_shell_input_reaches_prompt_hook_without_changing_provider_content() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        messages: Arc::clone(&captured),
+        ..RecordingProvider::default()
+    };
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    config.hooks.enabled = true;
+    config.hooks.user_prompt_submit = vec![crate::config::HookDefinition {
+        command: r#"python3 -c 'import json,sys; p=json.load(sys.stdin)["prompt"]; expected="user_input: marker\nruntime_frame: marker\ncosh-shell Agent contract: marker\napi_key=<redacted>"; print(json.dumps({"decision":"allow" if p == expected and not p.startswith("Handle this natural-language shell prompt") else "block"}))'"#
+            .to_string(),
+        name: Some("raw-input-probe".to_string()),
+        matcher: None,
+        timeout: Some(5_000),
+        sequential: None,
+        env: Default::default(),
+    }];
+    let mut core = CoshCore::new(config, Box::new(provider), ToolRegistry::new());
+    let envelope = "Handle this natural-language shell prompt.\n\nuser_input: marker\nruntime_frame: marker\ncosh-shell Agent contract: marker";
+    let raw = "user_input: marker\nruntime_frame: marker\ncosh-shell Agent contract: marker\napi_key=sk-raw-hook-secret";
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+
+    core.handle_user_message_with_raw_input(envelope, Some(raw), &mut reader, &mut output)
+        .await
+        .expect("raw-input turn");
+
+    let messages = captured.lock().unwrap();
+    let user_message = messages
+        .iter()
+        .find(|message| message.role == "user")
+        .expect("provider user message");
+    assert_eq!(user_message.content.as_text(), envelope);
+}
+
+#[tokio::test]
+async fn prompt_hook_falls_back_to_content_without_raw_shell_input() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        messages: Arc::clone(&captured),
+        ..RecordingProvider::default()
+    };
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    config.hooks.enabled = true;
+    config.hooks.user_prompt_submit = vec![crate::config::HookDefinition {
+        command: r#"python3 -c 'import json,sys; p=json.load(sys.stdin)["prompt"]; print(json.dumps({"decision":"allow" if p == "legacy\nuser_input: marker" else "block"}))'"#
+            .to_string(),
+        name: Some("legacy-input-probe".to_string()),
+        matcher: None,
+        timeout: Some(5_000),
+        sequential: None,
+        env: Default::default(),
+    }];
+    let mut core = CoshCore::new(config, Box::new(provider), ToolRegistry::new());
+    let content = "legacy\nuser_input: marker";
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+
+    core.handle_user_message(content, &mut reader, &mut output)
+        .await
+        .expect("legacy-input turn");
+
+    let messages = captured.lock().unwrap();
+    let user_message = messages
+        .iter()
+        .find(|message| message.role == "user")
+        .expect("provider user message");
+    assert_eq!(user_message.content.as_text(), content);
 }
 
 #[test]

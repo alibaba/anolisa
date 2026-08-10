@@ -20,6 +20,18 @@ Verify:
 anolisa --version
 ```
 
+AgentSecCore's raw package requires `anolisa` 0.2.17 or later. Updating the
+CLI first lets it read the current component contract and choose the published
+raw package correctly:
+
+```bash
+# CLI installed by get.agentic-os.sh
+anolisa update self
+
+# RPM-owned CLI
+sudo anolisa update self
+```
+
 ---
 
 ## Explore Your Environment
@@ -36,24 +48,22 @@ anolisa list
 
 ## Install Components
 
-Install components on demand. The current `agentsight`, `agent-sec-core`,
+Install components on demand. The current `cosh-ng`, `agentsight`, `sec-core`,
 `ws-ckpt`, and `skillfs` artifacts require system mode; the other examples
 below support user mode.
 
 ```bash
 # Token optimization (via anolisa CLI)
 anolisa install tokenless
-# Or via npm:
-# npm install -g anolisa-tokenless
 
 # Workspace checkpoints (btrfs COW)
 sudo anolisa --install-mode system install ws-ckpt
 
-# Observability (Linux system mode; includes the agentsight-enforcer service)
+# Observability (Linux system mode)
 sudo anolisa --install-mode system install agentsight
 
-# Security (requires sudo)
-sudo anolisa --install-mode system install agent-sec-core
+# Security runtime and adapter resources (Linux x86_64 system mode)
+sudo anolisa --install-mode system install sec-core
 
 # Persistent memory (MCP file-based)
 anolisa install agent-memory
@@ -64,8 +74,11 @@ sudo anolisa --install-mode system install skillfs
 # OS skill library
 anolisa install os-skills
 
-# Copilot Shell (AI terminal gateway)
+# Copilot Shell
 anolisa install cosh
+
+# cosh-ng (AI-native Linux terminal)
+sudo anolisa --install-mode system install cosh-ng
 ```
 
 Check health:
@@ -74,6 +87,18 @@ Check health:
 anolisa status
 ```
 
+System services are placed during installation but are not started or enabled
+automatically. Start AgentSight under systemd when you are ready to collect
+events:
+
+```bash
+sudo systemctl enable --now agentsight.service
+sudo systemctl status agentsight.service
+```
+
+The main service starts tracing and the Dashboard together and brings up
+`agentsight-enforcer.service` as its dependency.
+
 ---
 
 ## Use Components
@@ -81,7 +106,7 @@ anolisa status
 After installation, each component operates independently:
 
 ```bash
-# Copilot Shell — AI terminal assistant
+# Start the installed terminal
 cosh
 
 # Token optimization — compress tool schemas and command output
@@ -92,10 +117,9 @@ tokenless env-check --all
 ws-ckpt checkpoint -w ~/project -s v1 -m "initial"
 ws-ckpt rollback -w ~/project -s v1
 
-# Observability — trace Agent Token consumption
-sudo agentsight trace
-agentsight token --period week
-agentsight serve   # Web Dashboard: http://localhost:7396
+# Observability (the system service stores data as root)
+sudo agentsight token --period week
+# Web Dashboard: http://localhost:7396
 
 # Security — system hardening and skill verification
 agent-sec-cli harden --scan --config agentos_baseline
@@ -112,6 +136,7 @@ Bridge installed components to Agent frameworks (cosh / OpenClaw / Hermes):
 anolisa adapter scan                        # Discover installed frameworks
 anolisa adapter enable tokenless openclaw   # tokenless → OpenClaw
 anolisa adapter enable ws-ckpt hermes       # ws-ckpt → Hermes
+anolisa adapter enable sec-core openclaw    # AgentSecCore → OpenClaw
 ```
 
 ---
@@ -127,6 +152,7 @@ anolisa adapter enable ws-ckpt hermes       # ws-ckpt → Hermes
 ### User Entry Points
 
 - [anolisa CLI Reference](user-guide/en/user-entrypoint/anolisa-cli.md)
+- [cosh-ng AI-native Terminal](user-guide/en/user-entrypoint/cosh-ng/QUICKSTART.md)
 - [Copilot Shell](user-guide/en/user-entrypoint/copilot-shell/QUICKSTART.md)
 - [OS Skills](user-guide/en/user-entrypoint/os-skills.md)
 

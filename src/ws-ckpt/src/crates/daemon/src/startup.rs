@@ -109,7 +109,7 @@ async fn resolve_from_persisted(
         .await
         .context("Failed to bootstrap backend during state recovery")?;
 
-    Ok(Arc::new(
+    let state = Arc::new(
         DaemonState::rebuild_from_persisted(
             state_file,
             config.clone(),
@@ -119,7 +119,9 @@ async fn resolve_from_persisted(
         )
         .await
         .context("Failed to rebuild daemon state from persisted state.json")?,
-    ))
+    );
+    state.mark_bootstrapped();
+    Ok(state)
 }
 
 /// Fresh start: detect backend, bootstrap, optionally migrate legacy indexes.
@@ -188,6 +190,7 @@ async fn resolve_fresh(
             .context("Failed to rebuild daemon state from disk on fresh install")?,
         )
     };
+    state.mark_bootstrapped();
 
     Ok(state)
 }

@@ -137,7 +137,6 @@ Strict [Conventional Commits](https://www.conventionalcommits.org/):
 - `type` is limited to `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, and `chore`. **Do not use `harden:` / `cleanup:`** — map them to a standard type.
 - `[crate_scope]` names the affected crate or crates, such as `[core]`, `[shell]`, or `[cli,platform]`.
 - The complete subject line is imperative, has no trailing period, and subject 不超过 50 字符；body 每行不超过 100 字符。
-- Detect the active Codex version at commit time and place `Assisted-by: Codex:<version>` above the `Signed-off-by` trailer generated from Git config.
 
 ## Git History Hygiene
 

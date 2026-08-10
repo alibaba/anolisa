@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{
     config::Language,
     i18n::{I18n, MessageId},
@@ -258,6 +260,116 @@ pub(crate) fn hook_notification_display_text(
             ("decision", decision),
         ],
     )
+}
+
+/// Builds the throwaway Governance-panel projection for one batch of governed
+/// events, collapsing repeated permissive hook notices into one weak line each.
+///
+/// Permissive notices (`allow` / `approve`) carry no decision for the user to
+/// make, so a hook that fires on every tool call floods the panel with byte
+/// identical three-line blocks (issue #2197). They collapse to
+/// `• {hook}: {message}` plus a ` ×N` hit count; every other decision —
+/// including an absent or unrecognized one — keeps the full multi-line form so
+/// blocked and asked-about actions stay equally prominent.
+///
+/// The returned events are for rendering only: callers must keep the input
+/// slice intact, because approval-card linking and the audit trail still need
+/// every original notification.
+// The lib facade compiles this module without the binary's `agent::finish`, so
+// the only non-test caller is invisible from that target.
+#[allow(dead_code)]
+pub(crate) fn project_hook_notifications_for_display(
+    events: &[GovernedEvent],
+    i18n: &I18n,
+) -> Vec<GovernedEvent> {
+    let mut projected: Vec<GovernedEvent> = Vec::with_capacity(events.len());
+    // Aggregation key -> (index into `projected`, hit count). Keyed on the
+    // normalized message rather than a digit-generalized shape: numbers such as
+    // the `[REDACTED_CARD:2603]` sample distinguish separate security hits and
+    // must never be merged away.
+    let mut collapsed: HashMap<(String, String), (usize, usize)> = HashMap::new();
+
+    for event in events {
+        let Some((hook_name, message)) = permissive_hook_notification_parts(event) else {
+            projected.push(event.clone());
+            continue;
+        };
+
+        let key = (
+            hook_name.trim().to_string(),
+            normalize_hook_message(hook_name, message),
+        );
+        if let Some((_, hits)) = collapsed.get_mut(&key) {
+            *hits += 1;
+            continue;
+        }
+
+        // First occurrence keeps its original position, so panel order still
+        // matches the order the hooks actually fired in.
+        let mut summary = event.clone();
+        summary.display_text = hook_notification_summary_line(&key.0, &key.1, i18n);
+        collapsed.insert(key, (projected.len(), 1));
+        projected.push(summary);
+    }
+
+    for (index, hits) in collapsed.into_values() {
+        if hits > 1 {
+            projected[index].display_text.push_str(&format!(" ×{hits}"));
+        }
+    }
+
+    projected
+}
+
+/// Returns the raw `(hook_name, message)` when this event is a hook
+/// notification whose decision only confirms that the run continued.
+fn permissive_hook_notification_parts(event: &GovernedEvent) -> Option<(&str, &str)> {
+    let AgentEvent::HookNotification {
+        hook_name,
+        message,
+        decision,
+        ..
+    } = &event.event
+    else {
+        return None;
+    };
+
+    let decision = decision.as_deref()?.trim();
+    (decision.eq_ignore_ascii_case("allow") || decision.eq_ignore_ascii_case("approve"))
+        .then_some((hook_name.as_str(), message.as_str()))
+}
+
+/// Normalizes a hook message for aggregation and single-line display: collapse
+/// whitespace runs, then drop a leading `[hook_name]` that exactly repeats the
+/// hook name the panel already prints.
+fn normalize_hook_message(hook_name: &str, message: &str) -> String {
+    let collapsed = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hook_name = hook_name.trim();
+    if hook_name.is_empty() {
+        return collapsed;
+    }
+
+    if let Some(rest) = collapsed.strip_prefix(&format!("[{hook_name}]")) {
+        return rest.trim_start().to_string();
+    }
+    collapsed
+}
+
+/// Renders one collapsed permissive notice, reusing the localized fallbacks for
+/// an empty hook name or message.
+fn hook_notification_summary_line(hook_name: &str, message: &str, i18n: &I18n) -> String {
+    let hook_name = if hook_name.is_empty() {
+        i18n.t(MessageId::AgentGovernanceHookUnknown)
+    } else {
+        hook_name
+    };
+    let message = if message.is_empty() {
+        i18n.t(MessageId::AgentGovernanceHookNoMessage)
+    } else {
+        message
+    };
+
+    format!("• {hook_name}: {message}")
 }
 
 fn render_recommended_commands(commands: &[String], i18n: &I18n) -> String {

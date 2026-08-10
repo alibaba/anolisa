@@ -3,8 +3,9 @@
 //! Exposes skills as a virtual filesystem. The default view (from
 //! \`skillfs-views.toml\`) is shown directly under \`/skills/\`. Secondary
 //! views are accessible via the always-visible \`skill-discover\` virtual
-//! skill, which lists their real source paths so the AI can open them
-//! directly.
+//! skill, which lists readable paths for opening them directly. Paths point
+//! to the physical source by default and can be mapped into a shared FUSE view
+//! for readers in another mount namespace.
 #![allow(clippy::too_many_arguments)]
 
 use std::path::PathBuf;
@@ -52,6 +53,8 @@ pub enum FuseError {
     UnmountFailed(String),
     #[error("invalid mount point: {0}")]
     InvalidMountPoint(String),
+    #[error("invalid skill-discover root: {0}")]
+    InvalidSkillDiscoverRoot(String),
     #[error("permission denied: {0}")]
     PermissionDenied(String),
     #[error("io error: {0}")]
@@ -250,6 +253,30 @@ mod tests {
     #[test]
     fn test_parse_path_root() {
         assert_eq!(parse_path(Path::new("/"), false), PathType::Root);
+    }
+
+    #[test]
+    fn configured_mount_rejects_relative_skill_discover_root() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let mountpoint = tempfile::tempdir().expect("mountpoint tempdir");
+        let store = std::sync::Arc::new(parking_lot::RwLock::new(
+            skillfs_core::store::SkillStore::new(),
+        ));
+
+        let error = mount_configured(
+            mountpoint.path(),
+            source.path(),
+            store,
+            MountOptions::default(),
+            false,
+            MountConfig {
+                skill_discover_root: Some("relative/skills".into()),
+                ..MountConfig::default()
+            },
+        )
+        .expect_err("relative discover root must fail before FUSE");
+
+        assert!(matches!(error, FuseError::InvalidSkillDiscoverRoot(_)));
     }
 
     #[test]

@@ -7,14 +7,14 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "macos")]
-use rustix::fs::open;
+use rustix::fs::{mkdirat, open, openat, readlinkat, statat, AtFlags};
 #[cfg(target_os = "linux")]
-use rustix::fs::{openat2, readlinkat, ResolveFlags, CWD};
+use rustix::fs::{mkdirat, openat2, readlinkat, ResolveFlags, CWD};
 use rustix::fs::{Dir, FileType, Mode, OFlags};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -24,7 +24,6 @@ use super::expand_tilde;
 const MAX_WALK_ENTRIES: usize = 10_000;
 const MAX_IGNORE_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_IGNORE_TOTAL_BYTES: u64 = 4 * 1024 * 1024;
-#[cfg(target_os = "linux")]
 const MAX_SYMLINKS: usize = 40;
 #[cfg(target_os = "linux")]
 const RESOLVE_FLAGS: ResolveFlags = ResolveFlags::BENEATH
@@ -100,6 +99,30 @@ pub(super) struct WorkspaceFile {
     pub relative_path: PathBuf,
     pub display_path: PathBuf,
     pub file: File,
+}
+
+/// A write target whose parent directory is pinned by descriptor.
+pub(super) struct WorkspaceWriteTarget {
+    pub parent: File,
+    pub name: OsString,
+    pub display_path: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+enum ResolveMode {
+    Readable,
+    Pinned,
+    Write {
+        create_parents: bool,
+        must_be_directory: bool,
+    },
+}
+
+#[cfg(target_os = "linux")]
+enum ResolvedBeneath {
+    Node(Option<File>),
+    Write(WorkspaceWriteTarget),
 }
 
 /// A directory opened beneath the workspace root.
@@ -305,6 +328,249 @@ impl WorkspaceFs {
         self.root.join(relative_path)
     }
 
+    #[cfg(target_os = "linux")]
+    pub(super) fn prepare_write(
+        &self,
+        cwd: &Path,
+        path: &str,
+        create_parents: bool,
+    ) -> Result<WorkspaceWriteTarget, String> {
+        let must_be_directory = path_requires_directory(Path::new(path));
+        let relative_path = self.resolve_user_path(cwd, path)?;
+        match self.resolve_beneath(
+            &relative_path,
+            ResolveMode::Write {
+                create_parents,
+                must_be_directory,
+            },
+        ) {
+            Ok(ResolvedBeneath::Write(target)) => Ok(target),
+            Ok(ResolvedBeneath::Node(_)) => Err(format!(
+                "Path does not name a writable file: {}",
+                self.display_path(&relative_path).display()
+            )),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn prepare_write(
+        &self,
+        cwd: &Path,
+        path: &str,
+        create_parents: bool,
+    ) -> Result<WorkspaceWriteTarget, String> {
+        let must_be_directory = path_requires_directory(Path::new(path));
+        let relative_path = self.resolve_user_path(cwd, path)?;
+        self.prepare_write_beneath(&relative_path, create_parents, must_be_directory)
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn prepare_write_beneath(
+        &self,
+        relative_path: &Path,
+        create_parents: bool,
+        must_be_directory: bool,
+    ) -> Result<WorkspaceWriteTarget, WorkspaceOpenError> {
+        let display_path = self.display_path(relative_path);
+        let mut remaining = RemainingPath::new(relative_path, must_be_directory)?;
+        let root = self.directory.try_clone().map_err(|error| {
+            WorkspaceOpenError::Other(format!(
+                "Failed to clone workspace root descriptor {}: {error}",
+                self.root.display()
+            ))
+        })?;
+        let mut directories = vec![root];
+        let root_device = directories[0]
+            .metadata()
+            .map_err(|error| {
+                WorkspaceOpenError::Other(format!(
+                    "Failed to inspect pinned workspace root {}: {error}",
+                    self.root.display()
+                ))
+            })?
+            .dev();
+        let mut followed_symlinks = 0;
+
+        loop {
+            let Some(component) = remaining.pop_front() else {
+                return Err(WorkspaceOpenError::Other(format!(
+                    "Path must name a file: {}",
+                    display_path.display()
+                )));
+            };
+            if component == "." {
+                continue;
+            }
+            if component == ".." {
+                if directories.len() == 1 {
+                    return Err(WorkspaceOpenError::Escape(display_path));
+                }
+                directories.pop();
+                continue;
+            }
+
+            let current = directories.last().expect("workspace root descriptor");
+            let metadata = match statat(current, &component, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(metadata) => metadata,
+                Err(rustix::io::Errno::NOENT) if remaining.is_empty() => {
+                    if remaining.must_be_directory() {
+                        return Err(WorkspaceOpenError::Other(format!(
+                            "Not a directory: {}",
+                            display_path.display()
+                        )));
+                    }
+                    return Ok(WorkspaceWriteTarget {
+                        parent: current.try_clone().map_err(|error| {
+                            WorkspaceOpenError::Other(format!(
+                                "Failed to clone parent directory for {}: {error}",
+                                display_path.display()
+                            ))
+                        })?,
+                        name: component,
+                        display_path,
+                    });
+                }
+                Err(rustix::io::Errno::NOENT) if create_parents => {
+                    match mkdirat(current, &component, Mode::from_raw_mode(0o777)) {
+                        Ok(()) | Err(rustix::io::Errno::EXIST) => {
+                            remaining.push_front(component);
+                            continue;
+                        }
+                        Err(error) => {
+                            return Err(WorkspaceOpenError::Other(format!(
+                                "Failed to create parent directory {}: {error}",
+                                display_path.display()
+                            )));
+                        }
+                    }
+                }
+                Err(rustix::io::Errno::NOENT) => {
+                    return Err(WorkspaceOpenError::Other(format!(
+                        "Path not found: {}",
+                        display_path.display()
+                    )));
+                }
+                Err(rustix::io::Errno::ACCESS | rustix::io::Errno::PERM) => {
+                    return Err(WorkspaceOpenError::Inaccessible(display_path));
+                }
+                Err(error) => {
+                    return Err(WorkspaceOpenError::Other(format!(
+                        "Failed to inspect {}: {error}",
+                        display_path.display()
+                    )));
+                }
+            };
+            let file_type = FileType::from_raw_mode(metadata.st_mode);
+
+            if file_type == FileType::Symlink {
+                followed_symlinks += 1;
+                if followed_symlinks > MAX_SYMLINKS {
+                    return Err(WorkspaceOpenError::SymlinkLoop(display_path));
+                }
+                let target = readlinkat(current, &component, Vec::new()).map_err(|error| {
+                    WorkspaceOpenError::Other(format!(
+                        "Failed to read symbolic link {}: {error}",
+                        display_path.display()
+                    ))
+                })?;
+                let verified = statat(current, &component, AtFlags::SYMLINK_NOFOLLOW)
+                    .map_err(|_| WorkspaceOpenError::Escape(display_path.clone()))?;
+                if FileType::from_raw_mode(verified.st_mode) != FileType::Symlink
+                    || metadata.st_dev != verified.st_dev
+                    || metadata.st_ino != verified.st_ino
+                {
+                    return Err(WorkspaceOpenError::Escape(display_path));
+                }
+
+                let target = PathBuf::from(OsString::from_vec(target.into_bytes()));
+                let target_must_be_directory = path_requires_directory(&target);
+                let target = if target.is_absolute() {
+                    let target = self
+                        .strip_root_prefix(&target)
+                        .map_err(|_| WorkspaceOpenError::Escape(display_path.clone()))?;
+                    directories.truncate(1);
+                    target
+                } else {
+                    target.as_path()
+                };
+                remaining.prepend(target, target_must_be_directory)?;
+                continue;
+            }
+
+            if metadata.st_dev as u64 != root_device {
+                return Err(WorkspaceOpenError::Escape(display_path));
+            }
+
+            if remaining.is_empty() {
+                if remaining.must_be_directory() && file_type != FileType::Directory {
+                    return Err(WorkspaceOpenError::Other(format!(
+                        "Not a directory: {}",
+                        display_path.display()
+                    )));
+                }
+                return if file_type == FileType::RegularFile {
+                    Ok(WorkspaceWriteTarget {
+                        parent: current.try_clone().map_err(|error| {
+                            WorkspaceOpenError::Other(format!(
+                                "Failed to clone parent directory for {}: {error}",
+                                display_path.display()
+                            ))
+                        })?,
+                        name: component,
+                        display_path,
+                    })
+                } else if file_type == FileType::Directory {
+                    Err(WorkspaceOpenError::Other(format!(
+                        "Not a file: {}",
+                        display_path.display()
+                    )))
+                } else {
+                    Err(WorkspaceOpenError::Unsupported(display_path))
+                };
+            }
+            if file_type != FileType::Directory {
+                return Err(WorkspaceOpenError::Other(format!(
+                    "Not a directory: {}",
+                    display_path.display()
+                )));
+            }
+
+            let flags = OFlags::RDONLY
+                | OFlags::DIRECTORY
+                | OFlags::CLOEXEC
+                | OFlags::NOFOLLOW
+                | OFlags::NONBLOCK;
+            let directory = match openat(current, &component, flags, Mode::empty()) {
+                Ok(directory) => directory,
+                Err(rustix::io::Errno::LOOP) => {
+                    return Err(WorkspaceOpenError::Escape(display_path));
+                }
+                Err(error) => {
+                    return Err(WorkspaceOpenError::Other(format!(
+                        "Failed to open parent directory {}: {error}",
+                        display_path.display()
+                    )));
+                }
+            };
+            let directory = File::from(directory);
+            let opened = directory.metadata().map_err(|error| {
+                WorkspaceOpenError::Other(format!(
+                    "Failed to inspect parent directory {}: {error}",
+                    display_path.display()
+                ))
+            })?;
+            if opened.dev() != root_device
+                || opened.dev() != metadata.st_dev as u64
+                || opened.ino() != metadata.st_ino as u64
+            {
+                return Err(WorkspaceOpenError::Escape(display_path));
+            }
+            directories.push(directory);
+        }
+    }
+
     fn strip_root_prefix<'a>(&self, path: &'a Path) -> Result<&'a Path, ()> {
         path.strip_prefix(&self.root)
             .or_else(|_| path.strip_prefix(&self.requested_root))
@@ -468,7 +734,10 @@ impl WorkspaceFs {
 
     #[cfg(target_os = "linux")]
     fn open_beneath(&self, relative_path: &Path) -> Result<Option<File>, WorkspaceOpenError> {
-        self.resolve_beneath(relative_path, true)
+        match self.resolve_beneath(relative_path, ResolveMode::Readable)? {
+            ResolvedBeneath::Node(node) => Ok(node),
+            ResolvedBeneath::Write(_) => unreachable!("read resolution returned a write target"),
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -478,17 +747,26 @@ impl WorkspaceFs {
 
     #[cfg(target_os = "linux")]
     fn pin_beneath(&self, relative_path: &Path) -> Result<Option<File>, WorkspaceOpenError> {
-        self.resolve_beneath(relative_path, false)
+        match self.resolve_beneath(relative_path, ResolveMode::Pinned)? {
+            ResolvedBeneath::Node(node) => Ok(node),
+            ResolvedBeneath::Write(_) => unreachable!("pin resolution returned a write target"),
+        }
     }
 
     #[cfg(target_os = "linux")]
     fn resolve_beneath(
         &self,
         relative_path: &Path,
-        readable: bool,
-    ) -> Result<Option<File>, WorkspaceOpenError> {
+        mode: ResolveMode,
+    ) -> Result<ResolvedBeneath, WorkspaceOpenError> {
         let display_path = self.display_path(relative_path);
-        let mut remaining = path_components(relative_path)?;
+        let must_be_directory = match mode {
+            ResolveMode::Write {
+                must_be_directory, ..
+            } => must_be_directory,
+            ResolveMode::Readable | ResolveMode::Pinned => path_requires_directory(relative_path),
+        };
+        let mut remaining = RemainingPath::new(relative_path, must_be_directory)?;
         let root = self.directory.try_clone().map_err(|error| {
             WorkspaceOpenError::Other(format!(
                 "Failed to clone workspace root descriptor {}: {error}",
@@ -500,14 +778,17 @@ impl WorkspaceFs {
 
         loop {
             let Some(component) = remaining.pop_front() else {
-                return if readable {
-                    reopen_pinned(
+                return match mode {
+                    ResolveMode::Readable => Ok(ResolvedBeneath::Node(reopen_pinned(
                         directories.last().expect("workspace root descriptor"),
                         &display_path,
                         true,
-                    )
-                } else {
-                    Ok(directories.pop())
+                    )?)),
+                    ResolveMode::Pinned => Ok(ResolvedBeneath::Node(directories.pop())),
+                    ResolveMode::Write { .. } => Err(WorkspaceOpenError::Other(format!(
+                        "Path must name a file: {}",
+                        display_path.display()
+                    ))),
                 };
             };
             if component == "." {
@@ -524,11 +805,62 @@ impl WorkspaceFs {
             let current = directories.last().expect("workspace root descriptor");
             // Pin before inspecting so a concurrent rename cannot change which
             // symlink target or directory the remainder is resolved against.
-            let Some(pinned) =
-                open_component(current, Path::new(&component), &display_path, PIN_FLAGS)?
-            else {
-                return Ok(None);
-            };
+            let pinned =
+                match open_component(current, Path::new(&component), &display_path, PIN_FLAGS)? {
+                    Some(pinned) => pinned,
+                    None => {
+                        if remaining.is_empty() && matches!(mode, ResolveMode::Write { .. }) {
+                            if remaining.must_be_directory() {
+                                return Err(WorkspaceOpenError::Other(format!(
+                                    "Not a directory: {}",
+                                    display_path.display()
+                                )));
+                            }
+                            return Ok(ResolvedBeneath::Write(WorkspaceWriteTarget {
+                                parent: current.try_clone().map_err(|error| {
+                                    WorkspaceOpenError::Other(format!(
+                                        "Failed to clone parent directory for {}: {error}",
+                                        display_path.display()
+                                    ))
+                                })?,
+                                name: component,
+                                display_path,
+                            }));
+                        }
+                        if !matches!(
+                            mode,
+                            ResolveMode::Write {
+                                create_parents: true,
+                                ..
+                            }
+                        ) {
+                            return match mode {
+                                ResolveMode::Readable | ResolveMode::Pinned => {
+                                    Ok(ResolvedBeneath::Node(None))
+                                }
+                                ResolveMode::Write { .. } => Err(WorkspaceOpenError::Other(
+                                    format!("Path not found: {}", display_path.display()),
+                                )),
+                            };
+                        }
+                        match mkdirat(current, &component, Mode::from_raw_mode(0o777)) {
+                            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                            Err(error) => {
+                                return Err(WorkspaceOpenError::Other(format!(
+                                    "Failed to create parent directory {}: {error}",
+                                    display_path.display()
+                                )))
+                            }
+                        }
+                        open_component(current, Path::new(&component), &display_path, PIN_FLAGS)?
+                            .ok_or_else(|| {
+                                WorkspaceOpenError::Other(format!(
+                                    "Parent directory disappeared while opening {}",
+                                    display_path.display()
+                                ))
+                            })?
+                    }
+                };
             let metadata = pinned.metadata().map_err(|error| {
                 WorkspaceOpenError::Other(format!(
                     "Failed to inspect {}: {error}",
@@ -548,6 +880,7 @@ impl WorkspaceFs {
                     ))
                 })?;
                 let target = PathBuf::from(OsString::from_vec(target.into_bytes()));
+                let target_must_be_directory = path_requires_directory(&target);
                 let target = if target.is_absolute() {
                     // The kernel cannot reinterpret a host-absolute target for
                     // RESOLVE_BENEATH, so reroot only lexically internal targets.
@@ -559,7 +892,7 @@ impl WorkspaceFs {
                 } else {
                     target.as_path()
                 };
-                prepend_components(&mut remaining, target)?;
+                remaining.prepend(target, target_must_be_directory)?;
                 continue;
             }
 
@@ -574,14 +907,38 @@ impl WorkspaceFs {
                 continue;
             }
 
-            return if readable && metadata.is_file() {
-                reopen_pinned(&pinned, &display_path, false)
-            } else if readable && metadata.is_dir() {
-                reopen_pinned(&pinned, &display_path, true)
-            } else if readable {
-                Err(WorkspaceOpenError::Unsupported(display_path))
-            } else {
-                Ok(Some(pinned))
+            if remaining.must_be_directory() && !metadata.is_dir() {
+                return Err(WorkspaceOpenError::Other(format!(
+                    "Not a directory: {}",
+                    display_path.display()
+                )));
+            }
+
+            return match mode {
+                ResolveMode::Readable if metadata.is_file() => Ok(ResolvedBeneath::Node(
+                    reopen_pinned(&pinned, &display_path, false)?,
+                )),
+                ResolveMode::Readable if metadata.is_dir() => Ok(ResolvedBeneath::Node(
+                    reopen_pinned(&pinned, &display_path, true)?,
+                )),
+                ResolveMode::Readable => Err(WorkspaceOpenError::Unsupported(display_path)),
+                ResolveMode::Pinned => Ok(ResolvedBeneath::Node(Some(pinned))),
+                ResolveMode::Write { .. } if metadata.is_file() => {
+                    Ok(ResolvedBeneath::Write(WorkspaceWriteTarget {
+                        parent: current.try_clone().map_err(|error| {
+                            WorkspaceOpenError::Other(format!(
+                                "Failed to clone parent directory for {}: {error}",
+                                display_path.display()
+                            ))
+                        })?,
+                        name: component,
+                        display_path,
+                    }))
+                }
+                ResolveMode::Write { .. } if metadata.is_dir() => Err(WorkspaceOpenError::Other(
+                    format!("Not a file: {}", display_path.display()),
+                )),
+                ResolveMode::Write { .. } => Err(WorkspaceOpenError::Unsupported(display_path)),
             };
         }
     }
@@ -1548,36 +1905,68 @@ fn root_path_from_descriptor(
     Ok(root)
 }
 
-#[cfg(target_os = "linux")]
-fn path_components(path: &Path) -> Result<VecDeque<OsString>, WorkspaceOpenError> {
-    let mut components = VecDeque::new();
-    prepend_components(&mut components, path)?;
-    Ok(components)
+struct RemainingPath {
+    components: VecDeque<OsString>,
+    must_be_directory: bool,
 }
 
-#[cfg(target_os = "linux")]
-fn prepend_components(
-    remaining: &mut VecDeque<OsString>,
-    path: &Path,
-) -> Result<(), WorkspaceOpenError> {
-    let mut components = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => components.push(OsString::from(".")),
-            std::path::Component::ParentDir => components.push(OsString::from("..")),
-            std::path::Component::Normal(component) => components.push(component.to_os_string()),
-            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
-                return Err(WorkspaceOpenError::Other(format!(
-                    "Workspace-relative path must not be absolute: {}",
-                    path.display()
-                )));
+impl RemainingPath {
+    fn new(path: &Path, must_be_directory: bool) -> Result<Self, WorkspaceOpenError> {
+        let mut remaining = Self {
+            components: VecDeque::new(),
+            must_be_directory,
+        };
+        remaining.prepend(path, false)?;
+        Ok(remaining)
+    }
+
+    fn prepend(&mut self, path: &Path, must_be_directory: bool) -> Result<(), WorkspaceOpenError> {
+        if self.components.is_empty() {
+            self.must_be_directory |= must_be_directory;
+        }
+
+        let mut components = Vec::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => components.push(OsString::from(".")),
+                std::path::Component::ParentDir => components.push(OsString::from("..")),
+                std::path::Component::Normal(component) => {
+                    components.push(component.to_os_string());
+                }
+                std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                    return Err(WorkspaceOpenError::Other(format!(
+                        "Workspace-relative path must not be absolute: {}",
+                        path.display()
+                    )));
+                }
             }
         }
+        for component in components.into_iter().rev() {
+            self.components.push_front(component);
+        }
+        Ok(())
     }
-    for component in components.into_iter().rev() {
-        remaining.push_front(component);
+
+    fn pop_front(&mut self) -> Option<OsString> {
+        self.components.pop_front()
     }
-    Ok(())
+
+    fn push_front(&mut self, component: OsString) {
+        self.components.push_front(component);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.components.is_empty()
+    }
+
+    fn must_be_directory(&self) -> bool {
+        self.must_be_directory
+    }
+}
+
+fn path_requires_directory(path: &Path) -> bool {
+    let bytes = path.as_os_str().as_bytes();
+    bytes.ends_with(b"/") || bytes == b"." || bytes.ends_with(b"/.")
 }
 
 #[cfg(target_os = "linux")]

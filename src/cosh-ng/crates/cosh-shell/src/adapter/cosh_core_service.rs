@@ -36,7 +36,8 @@ use super::{
 };
 use process::{
     control_request, execute_registry, flush_pending_reload, process_error, reset_process,
-    send_json, spawn_process, spawn_response_writer, stop_process, user_message, PersistentProcess,
+    send_json, spawn_process, spawn_response_writer, stop_process, user_message_with_raw_input,
+    PersistentProcess,
 };
 
 const CANCEL_GRACE: Duration = Duration::from_secs(2);
@@ -61,6 +62,7 @@ impl PersistentCoshCoreRuntime {
         &self,
         run_id: String,
         prepared: PreparedInvocation,
+        raw_user_input: Option<String>,
         mode: CoshApprovalMode,
         session_state: Arc<Mutex<SessionRuntimeState>>,
         session_scope: String,
@@ -141,6 +143,7 @@ impl PersistentCoshCoreRuntime {
         let command = RunCommand {
             run_id,
             prepared,
+            raw_user_input,
             mode,
             session_state,
             session_scope,
@@ -402,8 +405,9 @@ fn run_turn(
     let session_id = process.session_id.clone();
     send_json(
         &process.stdin,
-        &user_message(
+        &user_message_with_raw_input(
             &command.prepared.prompt,
+            command.raw_user_input.as_deref(),
             session_id.as_deref(),
             &command.session_scope,
         ),

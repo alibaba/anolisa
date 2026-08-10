@@ -66,6 +66,8 @@ physical skills directory
 2. FUSE 根据 views 决定 `/skills` 或 in-place 根目录中哪些技能可见。
 3. `skill-discover` 始终可见，用于暴露 secondary views。
 4. in-place 模式会预打开 source dir fd，并通过 `/proc/self/fd/{n}` 访问底层真实目录。
+5. `--skill-discover-root` 可将 discover 路径映射到 reader 可见的 FUSE view；
+   未设置时保留物理 source path。
 
 ### 3.3 Read
 
@@ -136,6 +138,8 @@ flowchart TD
 - 默认 view 技能集合。
 - secondary views 技能集合。
 - `skill-discover` 展示内容。
+- 可选的 `--skill-discover-root` 决定 discover 输出物理 source path，还是
+  reader 可见的 FUSE view path。
 
 注意：当前 store 同步不会自动修改或热重载 `skillfs-views.toml`；views 仍然是挂载时加载的配置快照。
 
