@@ -7,9 +7,6 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
-from click import unstyle
-from typer.testing import CliRunner
-
 from agent_sec_cli.cli import (
     _extract_trace_context_arg,
     _is_read_only_skill_analyze,
@@ -23,6 +20,8 @@ from agent_sec_cli.correlation_context import (
     get_current_trace_context,
 )
 from agent_sec_cli.security_middleware.result import ActionResult
+from click import unstyle
+from typer.testing import CliRunner
 
 
 @patch("agent_sec_cli.cli.invoke")

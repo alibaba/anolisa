@@ -8,7 +8,6 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
-
 from agent_sec_cli.capabilities.view import (
     CapabilityViewError,
     query_capabilities,
