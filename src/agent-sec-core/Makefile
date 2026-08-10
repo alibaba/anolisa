@@ -235,6 +235,7 @@ RAW_PYTHON_VERSION := 3.11.6
 RAW_PYTHON_ENV ?= $(BUILD_DIR)/raw-python-env
 RAW_PYTHON_RUNTIME ?= $(BUILD_DIR)/python-runtime
 RAW_PYTHON_ARCHIVE ?= $(BUILD_DIR)/downloads/cpython-3.11.6+20231002-x86_64-unknown-linux-gnu-install_only.tar.gz
+RAW_REPO_DIR ?= $(BUILD_DIR)/raw-repo
 
 .PHONY: prepare-raw-python
 prepare-raw-python: build-all ## Stage pinned Python and locked production dependencies for raw packaging
@@ -278,6 +279,15 @@ package-raw: prepare-raw-python ## Build deterministic raw tar archive in OUTPUT
 		TARGET_ARCH="$(TARGET_ARCH)" \
 		SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" \
 		./packaging/raw/package.sh package
+
+.PHONY: raw-repo
+raw-repo: package-raw ## Publish the built raw archive as a local file:// repo for 'anolisa install --repo'
+	@OUTPUT_DIR="$(abspath $(OUTPUT_DIR))" \
+		REPO_DIR="$(abspath $(RAW_REPO_DIR))" \
+		RAW_CONTRACT="$(abspath $(RAW_CONTRACT))" \
+		TARGET_OS="$(TARGET_OS)" \
+		TARGET_ARCH="$(TARGET_ARCH)" \
+		./scripts/ci/local_repo.sh
 
 # =============================================================================
 # INSTALL
