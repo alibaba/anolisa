@@ -160,7 +160,7 @@ agentsight discover --verbose
 
 ## Dashboard
 
-Dashboard 是基于 React 的 Web 可视化界面，用于查看对话历史、Trace 详情和 Token 统计数据。它在编译时嵌入到 `agentsight serve` 二进制文件中。
+Dashboard 是基于 React 的 Web 可视化界面，用于查看对话历史、Trace 详情和 Token 统计数据。它在编译时嵌入到 `agentsight serve` 二进制文件中。Dashboard 默认根据浏览器语言选择 UI 语言；你可以手动切换语言，选择会被持久化并在刷新后保持。
 
 ### 构建 Dashboard
 

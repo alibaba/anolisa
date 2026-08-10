@@ -14,3 +14,12 @@ test('resolveLocale keeps a supported persisted locale as the highest priority',
   assert.equal(resolveLocale('zh-CN', ['en-US']), 'zh-CN');
   assert.equal(resolveLocale('en-US', ['zh-CN']), 'en-US');
 });
+
+test('resolveLocale rejects an unsupported persisted locale', () => {
+  assert.equal(resolveLocale('fr-FR', ['en-US']), 'en-US');
+});
+
+test('resolveLocale skips falsy browser languages', () => {
+  assert.equal(resolveLocale(null, [undefined, 'zh-CN']), 'zh-CN');
+  assert.equal(resolveLocale(null, [undefined]), 'en-US');
+});

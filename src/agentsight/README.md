@@ -160,7 +160,7 @@ agentsight discover --verbose
 
 ## Dashboard
 
-The Dashboard is a React-based web UI for visualizing conversation history, trace details, and token statistics. It is embedded into the `agentsight serve` binary at compile time.
+The Dashboard is a React-based web UI for visualizing conversation history, trace details, and token statistics. It is embedded into the `agentsight serve` binary at compile time. By default, the Dashboard follows the browser language; you can switch languages manually, and the choice is persisted across refreshes.
 
 ### Build the Dashboard
 

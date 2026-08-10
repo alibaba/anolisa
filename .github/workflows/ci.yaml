@@ -644,6 +644,20 @@ jobs:
         with:
           python-version: '3.11.6'
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: src/agentsight/dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: src/agentsight/dashboard
+        run: npm ci --no-audit --no-fund
+
+      - name: Run dashboard i18n regression
+        working-directory: src/agentsight/dashboard
+        run: npm run test:i18n
+
       - name: Install eBPF build dependencies
         run: |
           sudo apt-get update

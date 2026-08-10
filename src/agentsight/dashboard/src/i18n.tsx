@@ -106,6 +106,7 @@ export function resolveLocale(
   if (isSupportedLocale(persistedLocale)) return persistedLocale;
 
   for (const browserLanguage of browserLanguages) {
+    if (!browserLanguage) continue;
     const normalizedLanguage = browserLanguage.toLowerCase();
     if (normalizedLanguage.startsWith('zh')) return 'zh-CN';
     if (normalizedLanguage.startsWith('en')) return 'en-US';
