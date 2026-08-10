@@ -199,14 +199,25 @@ fn picker_panel_shows_short_ids_marked_count_and_key_semantics() {
         });
     let mut output = Vec::new();
 
+    assert!(matches!(
+        crate::runtime::controller::pending_card_capture(&state),
+        Some(crate::raw_input::RawInputCapture::Session {
+            marked_for_clear,
+            ..
+        }) if marked_for_clear == vec![true]
+    ));
     render_current_session_panel(&adapter, &mut state, &mut output).expect("render picker panel");
 
-    // Collapse renderer wrapping so contract assertions stay width-agnostic.
+    // Strip per-line borders before joining so wrapped footer text stays width-agnostic.
     let rendered = String::from_utf8(output).expect("UTF-8 picker panel");
-    let flat = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = rendered
+        .lines()
+        .map(|line| line.trim_matches(|ch: char| ch == '│' || ch.is_whitespace()))
+        .collect::<Vec<_>>()
+        .join(" ");
     assert!(flat.contains("[x] 00000000… · first prompt"), "{rendered}");
     assert!(flat.contains("1/1 · 1 marked"), "{rendered}");
-    assert!(flat.contains("Enter resume"), "{rendered}");
+    assert!(flat.contains("Enter review clear"), "{rendered}");
     assert!(flat.contains("Space toggle clear mark"), "{rendered}");
     assert!(flat.contains("d review clear"), "{rendered}");
     assert!(!flat.contains("Space mark for clear"), "{rendered}");

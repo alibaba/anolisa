@@ -1,4 +1,4 @@
-name: OpenClaw Plugin E2E
+name: CI / OpenClaw Plugin E2E
 
 on:
   pull_request:

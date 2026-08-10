@@ -35,7 +35,7 @@ const content = {
   zh: {
     badge: 'Agentic OS 1.0',
     lead: 'Agent 原生的操作系统层。',
-    hook: '一条命令，让 Agent 少烧 30–70% 的工具输出 token。',
+    hook: '一条命令，让 Agent 少烧 30～70% 的工具输出 token。',
     systemScope: '这只是操作系统为 Agent 做的一件事——它还让 Agent 跑得起、退得回、守得住。',
     statement: '操作系统的使用者已经改变。ANOLISA 让 Agent 成为系统中的一等公民。',
     installLabel: '一个入口，按需启用',
@@ -183,7 +183,7 @@ const scenarios = {
       name: 'Token Flow',
       title: '让 Token 消耗可测、可省',
       surfaceTitle: '不换 Harness，一行命令开始节省 Token',
-      proof: '30–70% 工具输出压缩*',
+      proof: '30～70% 工具输出压缩*',
       surfaceBody: '支持 Claude Code、Codex、Qoder 等，压缩后仍可取回原文。',
       body:
         '从上下文压缩、记忆复用到开销追踪，Token Flow 让 Agent 的 Token 使用更高效、更透明，并可按需接入现有工作流。',

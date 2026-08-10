@@ -18,13 +18,12 @@ export const codeScan: SecurityCapability = {
     const rawPolicy = process.env.CODE_SCANNER_MODE;
     const configuredPolicy = normalizeHookPolicy(rawPolicy, fallbackPolicy);
     const policy =
-      configuredPolicy === "observe" || configuredPolicy === "ask"
+      configuredPolicy === "observe" || configuredPolicy === "ask" || configuredPolicy === "block"
         ? configuredPolicy
         : fallbackPolicy;
     if (
       rawPolicy !== undefined &&
-      (!isHookPolicyValue(rawPolicy) ||
-        (configuredPolicy !== "observe" && configuredPolicy !== "ask"))
+      (!isHookPolicyValue(rawPolicy) || configuredPolicy === "warn")
     ) {
       api.logger.warn(
         `[scan-code] invalid or unsupported CODE_SCANNER_MODE=${JSON.stringify(rawPolicy.slice(0, 32))}; using ${policy}`,
@@ -77,8 +76,11 @@ export const codeScan: SecurityCapability = {
 
         if (verdict === "deny") {
           api.logger.warn(
-            `[scan-code] DENY (requireApproval=${policy === "ask" ? "true" : "false"}) — ${msg}`,
+            `[scan-code] DENY (policy=${policy}) — ${msg}`,
           );
+          if (policy === "block") {
+            return { block: true, blockReason: msg };
+          }
           if (policy === "ask") {
             return {
               requireApproval: {
@@ -93,6 +95,9 @@ export const codeScan: SecurityCapability = {
 
         if (verdict === "warn") {
           api.logger.warn(`[scan-code] WARN (policy=${policy}) — ${msg}`);
+          if (policy === "block") {
+            return { block: true, blockReason: msg };
+          }
           if (policy === "ask") {
             return {
               requireApproval: {

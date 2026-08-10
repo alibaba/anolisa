@@ -50,9 +50,9 @@ else
 fi
 LOCK_SHA=$(sha256_of "$SCRIPT_DIR/Cargo.lock" || echo "unknown")
 FIXTURES_SHA=$(cat "$SCRIPT_DIR"/fixtures/*.json 2>/dev/null | sha256_of /dev/stdin || echo "unknown")
-RTK_BIN_PATH="${RTK_BIN:-$SCRIPT_DIR/../third_party/rtk/target/release/rtk}"
+RTK_BIN_PATH="${RTK_BIN:-$SCRIPT_DIR/../../third_party/rtk/target/release/rtk}"
 RTK_VERSION=$("$RTK_BIN_PATH" --version 2>/dev/null | head -1 || echo "unavailable")
-TOKENLESS_VERSION=$(grep -m1 '^version' "$SCRIPT_DIR/../Cargo.toml" 2>/dev/null | sed 's/.*"\(.*\)".*/\1/' || echo "unknown")
+TOKENLESS_VERSION=$(grep -m1 '^version' "$SCRIPT_DIR/../../Cargo.toml" 2>/dev/null | sed 's/.*"\(.*\)".*/\1/' || echo "unknown")
 cat > "$IDENTITY_FILE" <<EOF
 {
   "git_rev": "$GIT_REV",

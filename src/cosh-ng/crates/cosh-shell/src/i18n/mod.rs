@@ -184,27 +184,32 @@ mod tests {
         );
         assert_eq!(
             MessageId::ApprovalShellHandoffInputWaitTimeoutTitle as usize,
-            MessageId::ALL.len() - 25
+            MessageId::ALL.len() - 26
         );
         assert_eq!(
             MessageId::ShellInputWaitHintTimeoutForecastBody as usize,
-            MessageId::ALL.len() - 16
+            MessageId::ALL.len() - 17
         );
         // The #2068 startup auth-hint segment precedes the appended #1961
         // plan-mode segment; tail ownership assertions move with each
         // appended segment.
         assert_eq!(
             MessageId::StartupAuthHintLine as usize,
-            MessageId::ALL.len() - 15
+            MessageId::ALL.len() - 16
         );
-        // The #1961 plan-mode workflow segment is the current tail; tail
-        // ownership assertions move with each appended segment.
+        // The #1961 plan-mode workflow segment precedes the appended
+        // session-picker footer segment; tail ownership assertions move
+        // with each appended segment.
         assert_eq!(
             MessageId::HelpSummaryModePlan as usize,
-            MessageId::ALL.len() - 14
+            MessageId::ALL.len() - 15
         );
         assert_eq!(
             MessageId::PlanModeUsageFooter as usize,
+            MessageId::ALL.len() - 2
+        );
+        assert_eq!(
+            MessageId::SessionPickerMarkedFooter as usize,
             MessageId::ALL.len() - 1
         );
     }

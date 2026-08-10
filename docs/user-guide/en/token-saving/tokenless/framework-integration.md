@@ -14,11 +14,14 @@ Tokenless uses adapters to connect compression, command rewriting, and environme
 | Qoder | `qoder` | ✅ | Emits rewritten shell input | Emits `additionalContext` | Attempted after response compression | — |
 | Claude Code | `claude-code` | ✅ | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Used only when the replacement can remain text | — |
 | Codex | `codex` | ✅ | Replaces supported shell input | Keeps the original and adds analysis or a compressed alternative | Used to build that alternative | — |
+| OpenCode | `opencode` | ✅ | Replaces Bash input | Replaces tool output | Attempted after response compression | ✅ |
 | Qwen Code | `qwencode` | ✅ | Emits rewritten shell input | Emits `additionalContext` | Attempted after response compression | ✅ |
 
 “—” means that the current adapter does not register that capability. The corresponding Tokenless CLI command may still be available.
 
 `additionalContext` is an additive hook field. The Tokenless source does not remove the original result on those paths; the final treatment also depends on the host implementation. A statistics record proves that a candidate became smaller, not that the host removed the original from its model request.
+
+OpenCode currently uses the bundled lifecycle scripts documented below. It is not registered with the `anolisa adapter enable` driver set in this release.
 
 ## Adapter processing rules
 
@@ -35,6 +38,21 @@ The shared response hook, OpenClaw, and Hermes skip inputs shorter than 200 char
 Claude Code requires version 2.1.121 or later for `updatedToolOutput`. On older or unknown versions, response compression is disabled to avoid duplicating the original. Structured tool outputs preserve their host schema and do not switch to textual TOON; JSON carried as a string can use TOON when it is smaller.
 
 ## Manage adapters with anolisa (recommended)
+
+These commands require an ANOLISA component record. If Tokenless was installed
+directly with YUM, record the RPM once before continuing:
+
+```bash
+sudo yum install anolisa
+sudo anolisa --install-mode system adopt tokenless
+```
+
+The YUM-installed CLI is available on sudo's system path; the user-local CLI
+installed by `get.agentic-os.sh` may be hidden by sudo's `secure_path`.
+
+Run the adapter commands below as the user who owns the target Agent
+configuration. A user-scoped adapter operation can discover the adopted system
+package while keeping the framework mutation in that user's configuration.
 
 ### 1. Scan frameworks
 
@@ -64,6 +82,8 @@ anolisa adapter enable tokenless qwencode
 
 Enable only frameworks that you use. When enabling more than one, run and verify each command separately.
 
+OpenCode is the exception to this section; use its bundled install script under [Manual integration after npm installation](#manual-integration-after-npm-installation).
+
 For OpenClaw, anolisa first attempts a normal install and does not add an unsafe-install bypass by default. If OpenClaw rejects the plugin on its safety scan, read the reported findings. Only after accepting them, retry explicitly:
 
 ```bash
@@ -73,11 +93,9 @@ anolisa adapter enable tokenless openclaw \
 
 On OpenClaw releases where the underlying bypass is unsupported or a deprecated no-op, anolisa refuses this option; follow the error's `security.installPolicy` guidance instead.
 
-If Tokenless was installed in system mode, use the same scope:
-
-```bash
-sudo anolisa adapter enable tokenless <framework>
-```
+The component package may be system-scoped while the adapter receipt remains
+user-scoped. Use `sudo` only when the target framework configuration and its
+adapter receipt are intentionally owned by root.
 
 ### 3. Check status
 
@@ -94,11 +112,8 @@ Restart the target agent CLI or IDE afterwards. A running session normally does 
 anolisa adapter disable tokenless <framework>
 ```
 
-For system mode:
-
-```bash
-sudo anolisa adapter disable tokenless <framework>
-```
+Disable the adapter with the same user that enabled it. A root-owned receipt is
+the exception and requires `sudo` for both operations.
 
 Restart the target agent after disabling. All enabled adapters must be released before Tokenless can be uninstalled.
 
@@ -112,7 +127,7 @@ The npm postinstall script attempts to copy adapter resources under:
 
 Confirm that this directory exists. Adapter copying is supplementary and fails open with a warning; a successful binary install can therefore exist without this copy. If it is absent, review the npm postinstall warning and prefer an anolisa-managed installation.
 
-An npm install does not create an anolisa component installation record, so do not assume that `anolisa adapter enable` can manage it. OpenClaw, Hermes, Qoder, Claude Code, Codex, and Qwen Code provide their own install scripts:
+An npm install does not create an anolisa component installation record, so do not assume that `anolisa adapter enable` can manage it. OpenClaw, Hermes, Qoder, Claude Code, Codex, OpenCode, and Qwen Code provide their own install scripts:
 
 ```bash
 bash ~/.local/share/anolisa/adapters/tokenless/<framework>/scripts/install.sh
@@ -122,6 +137,7 @@ For example:
 
 ```bash
 bash ~/.local/share/anolisa/adapters/tokenless/claude-code/scripts/install.sh
+bash ~/.local/share/anolisa/adapters/tokenless/opencode/scripts/install.sh
 ```
 
 Uninstall the same adapter with:
@@ -173,6 +189,10 @@ The marketplace plugin takes effect after restarting Claude Code. The install sc
 ### Codex
 
 The plugin loads in a new Codex session. Close the old session and start a new one before verifying statistics. Its PostToolUse hook is additive: use statistics as candidate-compression telemetry, not as proof that the original Codex tool output left the prompt.
+
+### OpenCode
+
+OpenCode discovers global local plugins at startup. Use the bundled Tokenless lifecycle script described above, restart OpenCode after installation or removal, then run a tool call and inspect `tokenless stats list`. The script resolves the configuration directory from `TOKENLESS_OPENCODE_CONFIG_DIR`, then `OPENCODE_CONFIG_DIR`, then `XDG_CONFIG_HOME/opencode`, and finally `~/.config/opencode`. Installation creates only `plugins/tokenless.js` as a managed symlink and refuses to replace an unrelated file at that path.
 
 ### Qwen Code
 

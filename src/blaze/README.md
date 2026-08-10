@@ -15,8 +15,10 @@ Designed as the per-host agent for E2B-style orchestrator platforms.
 - **Policy-driven backend selection** — workload class → backend priority list
 - **Lifecycle state machine** — 9 states: Pending, Creating, Running, Paused,
   Checkpointed, RecoveryRequired, Reset, Warm, and Destroyed
+- **Guest operations** — bounded command execution and file transfer for
+  running backends that expose a guest endpoint
 - **Warm pool management** — pre-warmed instances with TTL-based GC
-- **Template registry** — in-memory template tracking with idle eviction
+- **Template catalog** — bounded import and atomic publication of reusable artifacts
 - **Kernel hook registry** — state tracking for pre/post hooks
 - **Prometheus metrics** — request counts, instance gauges, pool sizes
 - **Spawners** — FirecrackerSpawner, BubblewrapSpawner, MockSpawner
@@ -42,8 +44,12 @@ curl --unix-socket /run/blaze/api.sock http://localhost/v1/health
 # Create a sandbox
 curl -X POST --unix-socket /run/blaze/api.sock http://localhost/v1/sandboxes \
   -H 'Content-Type: application/json' \
-  -d '{"workload_class":"agent-rl","image_digest":"sha256:..."}'
+  -d '{"workload_class":"agent-tool","image_digest":"sha256:..."}'
 ```
+
+The quick-start request uses an example policy with Firecracker guest transport
+disabled, so an image without the compatible guest agent does not wait for guest
+readiness. Enable the transport only for images that run that agent.
 
 ## Configuration
 
@@ -104,10 +110,20 @@ provider = "file"       # Storage provider selection. Currently supported: "file
 images_dir = "/var/lib/blaze/images"
 # pool_size = 0           # [Reserved] Warm pool slots (not yet active)
 # prefork = false         # [Reserved] Pre-start VMs in pool (not yet active)
-# flush_interval = "30s"  # [Reserved] Dirty data flush period (not yet active)
+sync_interval = "disabled" # Set a positive duration to persist already-written slot artifacts.
+sync_timeout = "30s"       # Maximum scheduler wait for reconstruction plus artifact sync.
 ```
 
 The `file` provider uses standard filesystem operations for sandbox storage. The `auto` provider probes available backends in priority order (currently equivalent to `file`). Unrecognized values will log a warning and fall back to `file`.
+When periodic synchronization is enabled, a completed provider failure is
+isolated from later sandboxes. If a provider cannot stop its filesystem work at
+the deadline, that work keeps the sandbox operation lock and the single
+synchronization permit until completion; later attempts are deferred instead
+of accumulating. The worker stops scheduling new work when the service loop
+ends.
+
+See the [Storage Artifact Synchronization user guide](../../docs/user-guide/en/runtime/blaze.md#storage-artifact-synchronization)
+for configuration, selection, retry, and worker shutdown behavior.
 
 ## API Endpoints
 
@@ -118,24 +134,36 @@ The `file` provider uses standard filesystem operations for sandbox storage. The
 | POST | `/v1/sandboxes` | Create a sandbox |
 | GET | `/v1/sandboxes/{id}` | Get sandbox details |
 | DELETE | `/v1/sandboxes/{id}` | Destroy a sandbox |
+| POST | `/v1/sandboxes/{id}/exec` | Execute a guest command |
+| POST | `/v1/sandboxes/{id}/read` | Read a guest file |
+| POST | `/v1/sandboxes/{id}/write` | Replace a guest file |
 | GET | `/v1/instances` | Alias for listing sandboxes |
 | POST | `/v1/instances` | Alias for creating a sandbox |
 | GET | `/v1/instances/{id}` | Alias for sandbox details |
 | DELETE | `/v1/instances/{id}` | Alias for destroying a sandbox |
 | POST | `/v1/instances/{id}/destroy` | Compatible destroy action |
+| POST | `/v1/instances/{id}/exec` | Compatible guest command action |
+| POST | `/v1/instances/{id}/read` | Compatible guest file read action |
+| POST | `/v1/instances/{id}/write` | Compatible guest file write action |
 | POST | `/v1/instances/{id}/checkpoint` | Record checkpoint state |
 | POST | `/v1/instances/{id}/reset` | Record reset and return to the warm pool |
 | GET | `/v1/pools` | List warm pools |
 | GET | `/v1/pools/{backend}/{class}` | Get pool status |
 | POST | `/v1/pools/{backend}/{class}/drain` | Drain a pool |
 | PUT | `/v1/pools/{backend}/{class}/sizing` | Resize a pool |
-| GET | `/v1/templates` | List templates |
-| GET | `/v1/templates/{id}` | Inspect a template |
-| POST | `/v1/templates/gc` | Trigger template GC |
+| GET | `/v1/templates` | List published template names |
+| GET | `/v1/templates/{name}` | Inspect published template metadata |
+| POST | `/v1/templates/import` | Publish a template from the configured import root |
 | GET | `/v1/policies` | List loaded policies |
 | GET | `/v1/hooks` | List kernel hooks |
 | GET | `/v1/metrics` | Prometheus metrics |
 | POST | `/v1/admin/reload` | Hot-reload policies |
+
+The `/v1/templates` routes are the single operator-facing template catalog.
+Importing an entry does not yet make sandbox creation select it; future create
+support will resolve optional names from this same catalog. See the
+[template catalog user guide](../../docs/user-guide/en/runtime/blaze.md#template-catalog)
+for configuration, accepted artifacts, limits, and publication rules.
 
 ### Managed lifecycle and recovery
 
@@ -154,6 +182,15 @@ and an existing backend process is not adopted after restart. Failed recovery
 does not run in a background retry loop. The checkpoint and reset endpoints
 retain their existing metadata transitions; this recovery flow does not add
 backend snapshot or restore operations.
+
+### Guest operations
+
+Running sandboxes can execute bounded commands and transfer bounded files when
+their backend exposes a compatible guest endpoint. Production mock fallback
+does not advertise this capability. See the
+[Blaze user guide](../../docs/user-guide/en/runtime/blaze.md#guest-operations)
+for request formats, limits, readiness, error handling, and current shutdown
+boundaries.
 
 #### Health Check
 

@@ -28,12 +28,10 @@ from agent_sec_cli.skill_ledger.core.live_root import (
     validate_resolved_skill_root,
 )
 from agent_sec_cli.skill_ledger.core.manifest_helpers import (
-    safe_load_latest_manifest,
+    load_verified_version_manifest,
     snapshot_matches_manifest,
     user_decision_to_dict,
-)
-from agent_sec_cli.skill_ledger.core.manifest_integrity import (
-    verify_manifest_integrity,
+    verify_latest_manifest_artifact,
 )
 from agent_sec_cli.skill_ledger.core.resolver import (
     resolve_activation,
@@ -43,7 +41,6 @@ from agent_sec_cli.skill_ledger.core.version_chain import (
     ensure_skill_meta,
     list_version_ids,
     load_latest_manifest,
-    load_version_manifest,
     save_manifest,
     snapshot_dir_path,
 )
@@ -129,16 +126,7 @@ def clear_decision(
     validate_resolved_skill_root(root)
     io_skill_dir = str(root.io_dir)
     with _skill_decision_lock(io_skill_dir):
-        manifest = load_latest_manifest(io_skill_dir)
-        if manifest is None:
-            raise SkillLedgerError(
-                "cannot clear decision: skill has no signed manifest"
-            )
-        valid, error = verify_manifest_integrity(manifest, backend)
-        if not valid:
-            raise SkillLedgerError(
-                f"cannot clear decision on untrusted manifest: {error}"
-            )
+        manifest = _load_latest_verified_manifest(root, backend)
         manifest.userDecision = None
         _sign_and_save(io_skill_dir, manifest, backend)
         activation = _refresh_activation(root, backend)
@@ -163,26 +151,24 @@ def rollback_skill(
     validate_resolved_skill_root(root)
     io_skill_dir = str(root.io_dir)
     with _skill_decision_lock(io_skill_dir):
-        target_manifest = _load_trusted_version(
+        _load_trusted_version(
             io_skill_dir,
             target_version_id,
             backend,
+            expected_skill_name=root.skill_name,
         )
         target_snapshot = snapshot_dir_path(io_skill_dir, target_version_id)
-        if not target_snapshot.is_dir():
-            raise SkillLedgerError(f"rollback snapshot not found: {target_version_id}")
-        if not snapshot_matches_manifest(target_snapshot, target_manifest):
-            raise SkillLedgerError(
-                f"rollback snapshot does not match manifest: {target_version_id}"
-            )
 
         backup_dir = _backup_root(io_skill_dir)
         try:
             _replace_root_from_snapshot(io_skill_dir, target_snapshot)
             scan_skill(root, backend, force=True)
-            manifest = load_latest_manifest(io_skill_dir)
-            if manifest is None:
-                raise SkillLedgerError("rollback scan did not create a manifest")
+            manifest = _load_latest_verified_manifest(root, backend)
+            current_hashes = compute_file_hashes(io_skill_dir)
+            if not diff_file_hashes(manifest.fileHashes, current_hashes)["match"]:
+                raise SkillLedgerError(
+                    "rollback scan did not certify the restored skill root"
+                )
             manifest.userDecision = UserDecision(
                 action="rollback",
                 targetVersionId=target_version_id,
@@ -235,10 +221,17 @@ def show_skill(
         backend,
         status_result=status_result,
     )
-    latest_manifest = safe_load_latest_manifest(io_skill_dir)
+    latest_manifest = _verified_latest_for_show(root, backend, status_result)
     active_version = summary.get("activeVersionId")
     active_manifest = (
-        load_version_manifest(io_skill_dir, active_version) if active_version else None
+        load_verified_version_manifest(
+            io_skill_dir,
+            active_version,
+            backend,
+            expected_skill_name=root.skill_name,
+        )
+        if active_version
+        else None
     )
     root_matches_active = _root_matches_manifest(io_skill_dir, active_manifest)
     consistency_reason = _show_consistency_reason(
@@ -315,13 +308,15 @@ def export_skill(
     validate_resolved_skill_root(root)
     io_skill_dir = str(root.io_dir)
     version_id = _resolve_export_version(root, backend, version, policy=policy)
-    manifest = _load_trusted_version(io_skill_dir, version_id, backend)
+    manifest = _load_trusted_version(
+        io_skill_dir,
+        version_id,
+        backend,
+        expected_skill_name=root.skill_name,
+    )
     snapshot = snapshot_dir_path(io_skill_dir, version_id)
-    if not snapshot.is_dir():
-        raise SkillLedgerError(f"snapshot not found for version {version_id}")
-    if not snapshot_matches_manifest(snapshot, manifest):
-        raise SkillLedgerError(f"export snapshot does not match manifest: {version_id}")
     out_dir = Path(output)
+    out_dir_created = not out_dir.exists()
     if out_dir.exists() and any(out_dir.iterdir()):
         raise SkillLedgerError(
             f"export output already exists and is not empty: {out_dir}"
@@ -331,6 +326,13 @@ def export_skill(
     if snapshot_out.exists():
         shutil.rmtree(snapshot_out)
     shutil.copytree(snapshot, snapshot_out)
+    if not snapshot_matches_manifest(snapshot_out, manifest):
+        shutil.rmtree(snapshot_out)
+        if out_dir_created:
+            out_dir.rmdir()
+        raise SkillLedgerError(
+            f"exported snapshot does not match manifest: {version_id}"
+        )
     (out_dir / "manifest.json").write_text(manifest.to_json() + "\n", encoding="utf-8")
     findings = _collect_findings(manifest)
     (out_dir / "findings.json").write_text(
@@ -352,20 +354,7 @@ def _load_latest_decidable_manifest(
     root: ResolvedSkillRoot,
     backend: SigningBackend,
 ) -> tuple[SignedManifest, dict[str, Any]]:
-    io_skill_dir = str(root.io_dir)
-    manifest = load_latest_manifest(io_skill_dir)
-    if manifest is None:
-        raise SkillLedgerError("cannot decide: skill has no signed manifest")
-    valid, error = verify_manifest_integrity(manifest, backend)
-    if not valid:
-        raise SkillLedgerError(f"cannot decide on untrusted manifest: {error}")
-    if not snapshot_matches_manifest(
-        snapshot_dir_path(io_skill_dir, manifest.versionId),
-        manifest,
-    ):
-        raise SkillLedgerError(
-            f"cannot decide: snapshot does not match manifest: {manifest.versionId}"
-        )
+    manifest = _load_latest_verified_manifest(root, backend)
     status_result = manifest_only_status(root, backend)
     if status_result.get("status") not in _TRUSTED_CURRENT_STATUSES:
         raise SkillLedgerError(
@@ -373,6 +362,42 @@ def _load_latest_decidable_manifest(
             f"{status_result.get('status')}"
         )
     return manifest, status_result
+
+
+def _load_latest_verified_manifest(
+    root: ResolvedSkillRoot,
+    backend: SigningBackend,
+) -> SignedManifest:
+    """Load latest only when its stored version artifact is exactly trusted."""
+    io_skill_dir = str(root.io_dir)
+    manifest = load_latest_manifest(io_skill_dir)
+    if manifest is None:
+        raise SkillLedgerError("skill has no signed manifest")
+    valid, error = verify_latest_manifest_artifact(
+        io_skill_dir,
+        manifest,
+        backend,
+        expected_skill_name=root.skill_name,
+    )
+    if not valid:
+        raise SkillLedgerError(f"untrusted latest manifest: {error}")
+    return manifest
+
+
+def _verified_latest_for_show(
+    root: ResolvedSkillRoot,
+    backend: SigningBackend,
+    status_result: dict[str, Any],
+) -> SignedManifest | None:
+    """Return the same verified latest manifest described by ``status_result``."""
+    expected_version = status_result.get("versionId")
+    if not isinstance(expected_version, str):
+        return None
+    try:
+        manifest = _load_latest_verified_manifest(root, backend)
+    except SkillLedgerError:
+        return None
+    return manifest if manifest.versionId == expected_version else None
 
 
 def _default_rollback_target(
@@ -398,15 +423,19 @@ def _load_trusted_version(
     skill_dir: str,
     version_id: str,
     backend: SigningBackend,
+    *,
+    expected_skill_name: str,
 ) -> SignedManifest:
-    manifest = load_version_manifest(skill_dir, version_id)
-    if manifest is None:
+    if version_id not in list_version_ids(skill_dir):
         raise SkillLedgerError(f"unknown skill version: {version_id}")
-    if manifest.versionId != version_id:
-        raise SkillLedgerError(f"version manifest id mismatch: {version_id}")
-    valid, error = verify_manifest_integrity(manifest, backend)
-    if not valid:
-        raise SkillLedgerError(f"untrusted version {version_id}: {error}")
+    manifest = load_verified_version_manifest(
+        skill_dir,
+        version_id,
+        backend,
+        expected_skill_name=expected_skill_name,
+    )
+    if manifest is None:
+        raise SkillLedgerError(f"untrusted version artifact: {version_id}")
     return manifest
 
 
@@ -662,40 +691,6 @@ def _display_value(value: Any, *, default: str = "none") -> str:
     return text or default
 
 
-def _newest_trusted_decision(
-    skill_dir: str,
-    backend: SigningBackend,
-) -> tuple[str, UserDecision] | None:
-    saw_newer_trusted_version = False
-    for version_id in reversed(list_version_ids(skill_dir)):
-        try:
-            manifest = load_version_manifest(skill_dir, version_id)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if manifest is None:
-            continue
-        if manifest.versionId != version_id:
-            continue
-        valid, _ = verify_manifest_integrity(manifest, backend)
-        if not valid:
-            continue
-        if not snapshot_matches_manifest(
-            snapshot_dir_path(skill_dir, version_id),
-            manifest,
-        ):
-            continue
-        decision = manifest.userDecision
-        if decision is None:
-            saw_newer_trusted_version = True
-            continue
-        if decision.action == "block" and saw_newer_trusted_version:
-            return None
-        if decision.action == "block" or decision.action in _ALLOWING_DECISIONS:
-            return version_id, decision
-        saw_newer_trusted_version = True
-    return None
-
-
 def _root_matches_manifest(
     skill_dir: str,
     manifest: SignedManifest | None,
@@ -718,10 +713,7 @@ def _resolve_export_version(
 ) -> str:
     io_skill_dir = str(root.io_dir)
     if version == "latest":
-        manifest = load_latest_manifest(io_skill_dir)
-        if manifest is None:
-            raise SkillLedgerError("skill has no latest version to export")
-        return manifest.versionId
+        return _load_latest_verified_manifest(root, backend).versionId
     if version == "active":
         activation = resolve_activation(
             root,

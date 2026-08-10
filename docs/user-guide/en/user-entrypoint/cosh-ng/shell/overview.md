@@ -1,98 +1,48 @@
-# cosh-shell Overview
+# Interactive Terminal
 
-cosh-shell is the AI-enhanced interactive terminal of cosh-ng. It layers AI analysis capabilities, tool approval controls, and inline card rendering on top of a native bash/zsh PTY, providing users with a secure and observable Agent interaction experience.
+[中文版](../../../../zh/user-entrypoint/cosh-ng/shell/overview.md)
 
-## Positioning
+`cosh` is a bash or zsh terminal with an Agent available for natural-language work. Use ordinary shell syntax for commands you know, and describe larger tasks when you want the Agent to investigate or act.
 
-cosh-shell is the user-facing frontend layer:
+## A typical workflow
 
-- Manages the PTY host (bash/zsh subprocess)
-- Connects to backends via AI adapters (default: cosh-core)
-- Renders approval cards and AI analysis results
-- Implements tool approval control protocol
+1. Change to the target directory and run `cosh`.
+2. Run familiar commands normally.
+3. Describe an investigation or task in natural language, including constraints such as “inspect only” or “ask before changing files.”
+4. Review approval cards before allowing side effects.
+5. Use `/session status` before leaving a long-running investigation.
 
-## Run Modes
+Useful starts:
 
 ```bash
-# Default startup (uses configured adapter and shell)
-cosh-shell
-
-# Explicitly specify adapter (positional argument)
-cosh-shell raw cosh-core
-cosh-shell raw claude
-cosh-shell raw qwen
-
-# Specify underlying shell
-cosh-shell --shell zsh
-cosh-shell raw co --shell bash
-
-# Pass-through mode: execute single command then exit
-cosh-shell -c 'ls -la'
-cosh-shell -- git status
-
-# Login shell mode
-cosh-shell --login
-cosh-shell -l
-
-# Isolated mode (skip user rcfile)
-cosh-shell --isolated
+cosh
+cosh --shell zsh
+cosh --resume
 ```
 
-## Supported AI Adapters
+## How input is routed
 
-| Adapter | Backend | Description |
-|---------|---------|-------------|
-| `cosh-core` | cosh-core process | Default adapter, full control protocol |
-| `claude` | Claude Code CLI | Claude adapter |
-| `qwen` | Qwen Code CLI | Qwen adapter |
-| `fake` | Mock | For development testing, no backend required |
+| Input | Result |
+|---|---|
+| `git status` | Runs in the foreground shell. |
+| `why did the last command fail?` | Starts an Agent request with recent terminal evidence. |
+| `/session list` | Runs a cosh control command. |
+| Agent tool request | Runs automatically or shows an approval card according to the approval mode. |
 
-## Adapter Capabilities
+Approved shell commands stay in the foreground shell, so prompts, output, job control, and `Ctrl+C` remain usable. See [Tool approval](approval.md) for the safety rules.
 
-| Capability | Description |
-|-----------|-------------|
-| `text_stream` | Text streaming output |
-| `thinking_stream` | Thinking process streaming output |
-| `session_resume` | Session resume |
-| `tool_intent` | Tool call intent awareness |
-| `user_question` | Ask user questions |
-| `cancellable` | Supports cancelling running requests |
-| `control_protocol` | Full control protocol support |
+## Sessions and proactive help
 
-## Core Features
+- Sessions are persisted by cosh-core and scoped to the workspace where cosh started. Recovery restores model-visible conversation context, not terminal processes or old terminal output. See [Session recovery](session-recovery.md).
+- `smart` is the default analysis mode. Use [AI analysis](ai-analysis.md) to choose how much proactive failure help appears.
+- `/help` is the source of truth for commands in the installed version; use [Interactive commands](interactive-mode.md) for a concise reference.
 
-| Feature | Description | Documentation |
-|---------|-------------|---------------|
-| PTY Interaction | Native bash/zsh terminal | [interactive-mode.md](interactive-mode.md) |
-| AI Analysis | Streaming command analysis | [ai-analysis.md](ai-analysis.md) |
-| Tool Approval | Visual approval cards | [approval.md](approval.md) |
+## Next steps
 
-## Architecture Overview
-
-```
-┌────────────────────────────────────────────┐
-│                 cosh-shell                 │
-│  ┌───────────┐  ┌──────────┐  ┌─────────┐  │
-│  │ PTY Host  │  │ Adapter  │  │   UI    │  │
-│  │ (bash/zsh)│  │(cosh-core│  │(ratatui)│  │
-│  └───────────┘  │/claude..)│  └─────────┘  │
-│  ┌───────────┐  └──────────┘  ┌─────────┐  │
-│  │  Hooks    │  ┌──────────┐  │Approval │  │
-│  │  Engine   │  │  Tools   │  │ Broker  │  │
-│  └───────────┘  └──────────┘  └─────────┘  │
-└────────────────────────────────────────────┘
-         │                │
-         ▼                ▼
-    bash/zsh PTY     cosh-core process
-```
-
-## Configuration
-
-cosh-shell specific configuration is in the `[ui]` and `[shell]` sections of `~/.copilot-shell/config.toml`. See [Configuration](../configuration.md) for details.
-
-## Project Trust
-
-cosh-shell maintains project-level trust storage. On first launch in a new project directory, it prompts the user to confirm whether to trust the project. Trust status determines:
-
-- Whether to load `.cosh/hooks` from the project directory
-- Whether to apply project-level configuration overrides
+- [Tool approval](approval.md)
+- [AI analysis](ai-analysis.md)
+- [Session recovery](session-recovery.md)
+- [Session compaction](session-compaction.md)
+- [Skills](../core/skills.md)
+- [MCP](../mcp.md)
+- [Extensions](../core/extensions.md)

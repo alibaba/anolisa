@@ -61,6 +61,9 @@ pub struct SkillFs {
     transform_pipeline: TransformPipeline,
     /// View configuration loaded from skillfs-views.toml (if present).
     views_config: Option<ViewsConfig>,
+    /// Optional reader-visible root for paths emitted by `skill-discover`.
+    /// `None` keeps the physical source-path output used by local mounts.
+    skill_discover_root: Option<PathBuf>,
     /// Pre-opened fd to source dir (in-place mode). Bypasses the FUSE mount
     /// layer so file reads still reach the real inode after over-mounting.
     source_dirfd: Option<std::fs::File>,
@@ -219,6 +222,7 @@ impl SkillFs {
             inodes: InodeManager::new(),
             transform_pipeline,
             views_config,
+            skill_discover_root: None,
             source_dirfd,
             in_place,
             skill_layout: SkillLayout::Flat,
@@ -270,6 +274,17 @@ impl SkillFs {
     /// Override the Skill Security event sink. Default is [`NoopEventSink`].
     pub fn with_event_sink(mut self, sink: Arc<dyn SkillEventSink>) -> Self {
         self.event_sink = sink;
+        self
+    }
+
+    /// Advertise secondary skills through a reader-visible view root.
+    ///
+    /// Each `skill-discover` `source_path` becomes
+    /// `<root>/<skill-name>/SKILL.md`. This is useful when readers share the
+    /// FUSE view but cannot access the physical source directory. Without this
+    /// override, `skill-discover` retains its physical-path output.
+    pub fn with_skill_discover_root(mut self, root: PathBuf) -> Self {
+        self.skill_discover_root = Some(root);
         self
     }
 

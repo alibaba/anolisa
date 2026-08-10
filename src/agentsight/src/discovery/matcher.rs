@@ -387,4 +387,55 @@ mod tests {
             Some("Claude")
         );
     }
+
+    #[test]
+    fn test_default_rules_capture_qwencode_bare_name() {
+        assert_eq!(
+            match_default_rules(&["qwen"], "").as_deref(),
+            Some("QwenCode")
+        );
+    }
+
+    #[test]
+    fn test_default_rules_capture_qwencode_absolute_path() {
+        assert_eq!(
+            match_default_rules(&["/usr/local/bin/qwen"], "").as_deref(),
+            Some("QwenCode")
+        );
+        assert_eq!(
+            match_default_rules(&["/home/user/.local/bin/qwen-code"], "").as_deref(),
+            Some("QwenCode")
+        );
+    }
+
+    #[test]
+    fn test_default_rules_capture_qwencode_node_wrapper() {
+        assert_eq!(
+            match_default_rules(
+                &[
+                    "node",
+                    "/usr/local/lib/node_modules/@qwen-code/cli/index.js"
+                ],
+                ""
+            )
+            .as_deref(),
+            Some("QwenCode")
+        );
+    }
+
+    #[test]
+    fn test_default_rules_capture_qwencode_node_with_expose_gc() {
+        assert_eq!(
+            match_default_rules(
+                &[
+                    "/root/.local/lib/qwen-code/node/bin/node",
+                    "--expose-gc",
+                    "/root/.local/lib/qwen-code/lib/cli.js",
+                ],
+                ""
+            )
+            .as_deref(),
+            Some("QwenCode")
+        );
+    }
 }

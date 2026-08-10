@@ -781,7 +781,7 @@ def test_check_after_file_remove_drifted(ws):
 
 
 def test_check_tampered_manifest_hash(ws):
-    """Tamper with latest.json without re-hashing → status=tampered, exit 1."""
+    """Tampering wins over simultaneous live-tree drift."""
     skill = make_skill(ws.skills_dir, "check-tamper", {"f.txt": "safe"})
     env = ws.env()
 
@@ -800,12 +800,29 @@ def test_check_tampered_manifest_hash(ws):
     latest = skill / ".skill-meta" / "latest.json"
     data = json.loads(latest.read_text())
     data["scanStatus"] = "deny"  # tamper without re-hashing
+    data["userDecision"] = {
+        "action": "always_allow",
+        "reason": "attacker-controlled",
+    }
     latest.write_text(json.dumps(data))
+    (skill / "f.txt").write_text("changed")
 
     r = run_skill_ledger(["check", str(skill)], env_extra=env)
     assert r.returncode == 1, f"expected exit 1 for tampered, got {r.returncode}"
     out = parse_json_output(r.stdout)
     assert out["status"] == "tampered", f"expected tampered, got {out}"
+    for field in (
+        "versionId",
+        "createdAt",
+        "updatedAt",
+        "fileCount",
+        "manifestHash",
+        "userDecision",
+    ):
+        assert out[field] is None
+    assert "added" not in out
+    assert "removed" not in out
+    assert "modified" not in out
 
 
 def test_check_tampered_writes_security_event(ws):
@@ -867,8 +884,23 @@ def test_scan_recovers_tampered_latest_with_audit_event_and_valid_chain(ws):
 
     latest = skill / ".skill-meta" / "latest.json"
     data = json.loads(latest.read_text())
-    data["scanStatus"] = "deny"
+    trusted_v1 = read_latest_manifest(skill)
+    data["userDecision"] = {
+        "action": "always_allow",
+        "reason": "forged allow",
+    }
+    data["scans"] = [
+        {
+            "scanner": "forged-scanner",
+            "version": "attacker",
+            "status": "pass",
+            "findings": [],
+            "scannedAt": "attacker-time",
+        }
+    ]
+    data["scanStatus"] = "pass"
     latest.write_text(json.dumps(data))
+    (skill / "main.py").write_text("# changed\n")
 
     r2 = run_skill_ledger(
         ["scan", str(skill), "--scanners", "code-scanner"], env_extra=env
@@ -881,7 +913,13 @@ def test_scan_recovers_tampered_latest_with_audit_event_and_valid_chain(ws):
     assert event["fromStatus"] == "tampered"
     assert event["toStatus"] == out["scanStatus"]
     assert event["versionId"] == out["versionId"]
-    assert "auditEvents" not in read_latest_manifest(skill)
+    recovered = read_latest_manifest(skill)
+    assert recovered["versionId"] == "v000002"
+    assert recovered["previousVersionId"] == "v000001"
+    assert recovered["previousManifestSignature"] == trusted_v1["signature"]["value"]
+    assert recovered["userDecision"] is None
+    assert "forged-scanner" not in {scan["scanner"] for scan in recovered["scans"]}
+    assert "auditEvents" not in recovered
 
     audit_result = run_skill_ledger(["audit", str(skill)], env_extra=env)
     assert audit_result.returncode == 0, audit_result.stderr
@@ -901,17 +939,17 @@ def test_scan_recovers_tampered_latest_with_audit_event_and_valid_chain(ws):
     assert scan_event_result["audit_events"][0]["to_status"] == out["scanStatus"]
 
 
-def test_certify_recovers_tampered_latest_with_audit_event(ws):
-    """certify records tampered recovery when imported findings are signed."""
-    skill = make_skill(ws.skills_dir, "certify-tamper-recover", {"main.py": "# ok\n"})
-    event_data = ws.root / "events_certify_tamper_recover"
+def test_certify_recovers_missing_latest_with_audit_event(ws):
+    """certify treats a missing latest with history as tampered recovery."""
+    skill = make_skill(ws.skills_dir, "certify-missing-latest", {"main.py": "# ok\n"})
+    event_data = ws.root / "events_certify_missing_latest"
     event_data.mkdir()
     env = ws.env({"AGENT_SEC_DATA_DIR": str(event_data)})
     reset_security_event_writers()
 
     first_findings = write_findings_file(
         ws.fixtures,
-        "certify-tamper-recover-first.json",
+        "certify-missing-latest-first.json",
         [{"rule": "ok", "level": "pass", "message": "pass"}],
     )
     r1 = run_skill_ledger(
@@ -920,13 +958,20 @@ def test_certify_recovers_tampered_latest_with_audit_event(ws):
     assert r1.returncode == 0, f"initial certify failed: {r1.stderr}"
 
     latest = skill / ".skill-meta" / "latest.json"
-    data = json.loads(latest.read_text())
-    data["scanStatus"] = "deny"
-    latest.write_text(json.dumps(data))
+    trusted_v1 = read_latest_manifest(skill)
+    latest.unlink()
+
+    checked = run_skill_ledger(["check", str(skill)], env_extra=env)
+    assert checked.returncode == 1
+    checked_out = parse_json_output(checked.stdout)
+    assert checked_out["status"] == "tampered"
+    assert (
+        checked_out["reason"] == "latest.json is missing while version artifacts exist"
+    )
 
     second_findings = write_findings_file(
         ws.fixtures,
-        "certify-tamper-recover-second.json",
+        "certify-missing-latest-second.json",
         [{"rule": "ok", "level": "pass", "message": "pass"}],
     )
     r2 = run_skill_ledger(
@@ -937,7 +982,16 @@ def test_certify_recovers_tampered_latest_with_audit_event(ws):
     event = out["auditEvents"][0]
     assert event["type"] == "tampered_recovered"
     assert event["operation"] == "certify"
+    assert event["fromStatus"] == "tampered"
     assert event["toStatus"] == out["scanStatus"]
+    recovered = read_latest_manifest(skill)
+    assert recovered["versionId"] == "v000002"
+    assert recovered["previousVersionId"] == "v000001"
+    assert recovered["previousManifestSignature"] == trusted_v1["signature"]["value"]
+
+    audit_result = run_skill_ledger(["audit", str(skill)], env_extra=env)
+    assert audit_result.returncode == 0, audit_result.stderr
+    assert parse_json_output(audit_result.stdout)["valid"] is True
 
     events = read_security_events(event_data)
     reset_security_event_writers()
@@ -2542,6 +2596,48 @@ def test_show_reports_active_latest_decision_and_root_match(ws):
     assert out["warnings"] == [out["message"]]
 
 
+def test_show_does_not_expose_tampered_latest_metadata(ws):
+    """The human-facing summary cannot reintroduce fields hidden by check."""
+    skill = make_skill(ws.skills_dir, "decision-show-tampered", {"data.txt": "v1"})
+    env = ws.env()
+    findings = write_findings_file(
+        ws.fixtures,
+        "decision-show-tampered-pass.json",
+        [{"rule": "ok", "level": "pass", "message": "pass"}],
+    )
+    run_skill_ledger(
+        ["certify", str(skill), "--findings", str(findings)], env_extra=env
+    )
+    latest_path = skill / ".skill-meta" / "latest.json"
+    latest = json.loads(latest_path.read_text())
+    latest["versionId"] = "v999999"
+    latest["updatedAt"] = "attacker-sentinel"
+    latest["userDecision"] = {
+        "action": "always_allow",
+        "reason": "attacker-sentinel",
+    }
+    latest_path.write_text(json.dumps(latest))
+
+    r = run_skill_ledger(["show", str(skill)], env_extra=env)
+
+    assert r.returncode == 0, r.stderr
+    out = parse_json_output(r.stdout)
+    assert out["latestStatus"] == "tampered"
+    assert out["latestVersionId"] is None
+    assert out["latest"] is None
+    assert out["userDecision"] is None
+    assert "attacker-sentinel" not in r.stdout
+
+    export_dir = ws.root / "exported-tampered-latest"
+    exported = run_skill_ledger(
+        ["export", str(skill), "--version", "latest", "--output", str(export_dir)],
+        env_extra=env,
+    )
+    assert exported.returncode != 0
+    assert not export_dir.exists()
+    assert "attacker-sentinel" not in exported.stderr
+
+
 def test_show_event_flows_through_jsonl_sqlite_and_dashboard(ws, monkeypatch):
     skill = make_skill(ws.skills_dir, "dashboard-show", {"data.txt": "safe"})
     findings = write_findings_file(
@@ -3055,7 +3151,7 @@ def test_export_latest_from_fuse_view_uses_signed_snapshot(ws, monkeypatch):
     assert json.loads((out_dir / "manifest.json").read_text())["scanStatus"] == "deny"
 
 
-def test_export_rejects_snapshot_hash_mismatch(ws):
+def test_export_latest_rejects_invalid_snapshot_artifact(ws):
     skill = make_skill(ws.skills_dir, "decision-export-tampered", {"data.txt": "risk"})
     env = ws.env()
     findings = write_findings_file(
@@ -3083,7 +3179,7 @@ def test_export_rejects_snapshot_hash_mismatch(ws):
     )
 
     assert r.returncode != 0
-    assert "snapshot does not match manifest" in r.stderr
+    assert "untrusted latest manifest" in r.stderr
 
 
 def test_export_active_rejects_pending_stub_without_real_active_version(ws):

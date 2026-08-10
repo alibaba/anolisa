@@ -97,18 +97,20 @@ sudo agentsight trace --daemon \
 
 查询 Token 用量数据。
 
+Linux systemd 服务写入的数据由 root 管理，查询时需要使用 `sudo`。
+
 ```bash
 # 查看今日 Token 用量
-agentsight token
+sudo agentsight token
 
 # 本周用量，与上周对比
-agentsight token --period week --compare
+sudo agentsight token --period week --compare
 
 # 按角色和类型的详细分解
-agentsight token --detail
+sudo agentsight token --detail
 
 # JSON 格式输出
-agentsight token --json
+sudo agentsight token --json
 ```
 
 ### `agentsight audit`
@@ -160,7 +162,7 @@ agentsight discover --verbose
 
 ## Dashboard
 
-Dashboard 是基于 React 的 Web 可视化界面，用于查看对话历史、Trace 详情和 Token 统计数据。它在编译时嵌入到 `agentsight serve` 二进制文件中。
+Dashboard 是基于 React 的 Web 可视化界面，用于查看对话历史、Trace 详情和 Token 统计数据。它在编译时嵌入到 `agentsight serve` 二进制文件中。Dashboard 默认根据浏览器语言选择 UI 语言；你可以手动切换语言，选择会被持久化并在刷新后保持。
 
 ### 构建 Dashboard
 
@@ -184,11 +186,14 @@ make build-all
 在两个终端中分别运行追踪器和 API 服务器：
 
 ```bash
+# 启动前台 tracer 前，先停止软件包提供的服务
+sudo systemctl stop agentsight.service
+
 # 终端 1：启动 eBPF 追踪（写入 SQLite）
 sudo agentsight trace
 
 # 终端 2：启动 API 服务器（读取同一 SQLite 文件）
-agentsight serve
+sudo agentsight serve
 ```
 
 **macOS**（仅轨迹采集）：
@@ -285,6 +290,22 @@ sudo yum install agentsight
 
 RPM 是 Linux system 包。两个单元会随包安装，但默认不会启用；当两个单元都运行时，
 AgentSight 会排在 enforcer 之后启动。
+
+### 启动服务
+
+两种包安装都会让单元保持停止且不启用。准备开始采集时，再启动主服务。
+
+```bash
+sudo systemctl enable --now agentsight.service
+sudo systemctl status agentsight.service
+```
+
+主服务会一起运行 eBPF trace 和 Dashboard，并按顺序带起 enforcer 依赖。
+服务进入 active 状态后，打开 `http://localhost:7396`。
+
+该单元以 root 身份和 `UMask=0077` 运行，因此
+`/var/log/sysak/.agentsight` 中的数据仅 root 可读。查询服务数据或读取
+Dashboard 访问信息时需要使用 `sudo`。启动前台 tracer 前也要先停止该单元。
 
 ### 从源码构建
 

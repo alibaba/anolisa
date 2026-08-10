@@ -1,27 +1,22 @@
 ###############################################################################
-# PR Lint gate — Commit Message + PR Title + Branch Name + Issue Link
+# PR metadata checks
 #
-# Jobs:
-#   commit-lint  — requires checkout; runs independently
-#   pr-checks    — all github-script checks consolidated into one runner
-#                  (PR title, branch name, linked issue)
+# Commit messages are a hard gate. PR title, branch name, and issue linkage are
+# advisory so external contributors receive guidance without being blocked.
 ###############################################################################
 
-name: 🔍 PR Lint
+name: CI / PR Lint
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
-    branches: [main, 'feature/**', 'release/**']
+    branches: [main, "feature/**", "release/**"]
 
 permissions:
   contents: read
   pull-requests: read
 
 jobs:
-  # =========================================================================
-  # Job 1: Commit Message Lint
-  # =========================================================================
   commit-lint:
     name: 📝 Commit Message Lint
     runs-on: anolisa-k8s-general-ci-x64
@@ -35,176 +30,132 @@ jobs:
         with:
           configFile: .github/commitlint.config.json
 
-  # =========================================================================
-  # Job 2: PR Checks (title + branch name + linked issue + merge hint)
-  # All steps run with continue-on-error so every check is always reported
-  # in one pass — contributors see all warnings at once, not one at a time.
-  # None of these checks block the PR (warnings only); only commit scope
-  # enforcement (commitlint) is a hard error.
-  # =========================================================================
+      - name: Explain how to fix commit messages
+        if: failure()
+        env:
+          DOCS_REVISION: ${{ github.event.pull_request.head.sha }}
+        run: |
+          docs_url="https://github.com/${GITHUB_REPOSITORY}/blob/${DOCS_REVISION}"
+          {
+            printf '%s\n' '## Commit message check failed' ''
+            printf '%s\n' \
+              'Each commit must use `type(scope): imperative description`.' \
+              'Example: `fix(cosh): handle empty configuration`' ''
+            printf '%s\n' 'To update the latest commit:' '```bash' \
+              'git commit --amend' 'git push --force-with-lease' '```' ''
+            printf '%s\n' 'To update an older commit, select `reword` in:' \
+              '```bash' 'git rebase -i HEAD~N' \
+              'git push --force-with-lease' '```' ''
+            printf '%s\n' \
+              "- [English contribution guide](${docs_url}/CONTRIBUTING.md#commit-messages)" \
+              "- [中文贡献指南](${docs_url}/CONTRIBUTING_zh.md#commit-规范)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   pr-checks:
     name: 🔍 PR Checks
     runs-on: anolisa-k8s-general-ci-x64
     steps:
-      # -----------------------------------------------------------------------
-      # Step 1: PR Title Validation (warning only)
-      # -----------------------------------------------------------------------
-      - name: 📋 Validate PR title
-        continue-on-error: true
+      - name: Checkout governance metadata
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/components.json
+          sparse-checkout-cone-mode: false
+
+      - name: Validate PR metadata
         uses: actions/github-script@v7
         with:
           script: |
-            const title = context.payload.pull_request.title;
-            console.log(`PR Title: "${title}"`);
+            const fs = require('fs');
+            const metadata = JSON.parse(
+              fs.readFileSync('.github/components.json', 'utf8')
+            );
 
-            // Conventional Commits pattern: type(scope): description
-            // Optional ! for breaking changes
-            const pattern = /^(feat|fix|refactor|perf|docs|chore|test|ci|build|style|revert)(\(.+\))!?: .+/;
+            const componentScopes = metadata.components
+              .flatMap((component) => [
+                component.commit_scope,
+                ...(component.commit_scope_aliases || []),
+              ])
+              .filter(Boolean);
+            const validScopes = [
+              ...new Set([...componentScopes, 'deps', 'ci', 'docs', 'chore']),
+            ].sort();
 
-            if (!pattern.test(title)) {
-              core.warning(
-                `PR title does not follow Conventional Commits format.\n` +
-                `Expected: type(scope): description\n` +
-                `Examples: feat(cosh): add json output\n` +
-                `          fix(sec-core): handle sandbox escape\n` +
-                `Valid types: feat, fix, refactor, perf, docs, chore, test, ci, build, style, revert\n` +
-                `Valid scopes: cosh, sec-core, skill, sight, tokenless, ckpt, memory, anolisa, skillfs, ktuner, blaze, deps, ci, docs, chore\n` +
-                `See CONTRIBUTING.md or AGENT.md for details.`
+            const warnings = [];
+            const pr = context.payload.pull_request;
+            const title = pr.title || '';
+            const branch = pr.head.ref || '';
+            const body = pr.body || '';
+
+            const titleMatch = title.match(
+              /^(feat|fix|refactor|perf|docs|chore|test|ci|build|style|revert)(\(([^)]+)\))!?: .+/
+            );
+            if (!titleMatch) {
+              warnings.push(
+                'PR title should use `type(scope): description`, for example ' +
+                '`feat(tokenless): add adapter diagnostics`.'
               );
-              return;
+            } else if (!validScopes.includes(titleMatch[3])) {
+              warnings.push(
+                `PR title scope "${titleMatch[3]}" is not recognized. ` +
+                `Recommended scopes: ${validScopes.join(', ')}.`
+              );
             }
 
-            // Validate scope (also accept legacy long names for forward compatibility)
-            const scopeMatch = title.match(/^\w+(\([^)]+\))/);
-            if (scopeMatch) {
-              const scope = scopeMatch[1].slice(1, -1);
-              const validScopes = [
-                'cosh', 'sec-core', 'skill', 'sight', 'tokenless', 'ckpt', 'memory', 'anolisa', 'skillfs', 'ktuner', 'blaze',
-                'agent-sec-core', 'agentsight', 'os-skills', 'ws-ckpt', 'agent-memory', // legacy aliases
-                'deps', 'ci', 'docs', 'chore'
-              ];
-              if (!validScopes.includes(scope)) {
-                core.warning(
-                  `Scope "${scope}" in PR title is not in the recommended list.\n` +
-                  `Recommended scopes: ${validScopes.join(', ')}\n` +
-                  `See CONTRIBUTING.md for the scope-to-path mapping.`
-                );
-                return;
-              }
-            }
-
-            console.log('✅ PR title format is valid');
-
-      # -----------------------------------------------------------------------
-      # Step 2: Branch Name Validation (warning only, non-blocking for forks)
-      # -----------------------------------------------------------------------
-      - name: 🌿 Validate branch name
-        continue-on-error: true
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const branch = context.payload.pull_request.head.ref;
-            const baseBranch = context.payload.pull_request.base.ref;
-            console.log(`Head branch: "${branch}"`);
-            console.log(`Base branch: "${baseBranch}"`);
-
-            // Whitelist: these branches are always allowed
-            const whitelist = [
+            const alwaysAllowed = [
               /^main$/,
               /^dependabot\/.+/,
               /^renovate\/.+/,
               /^revert-.+/,
-              /^chore\/changelog-.+/,  // created by changelog.yml workflow
+              /^agent\/[a-z0-9][a-z0-9._-]*$/,
+              /^chore\/changelog-.+/,
             ];
+            const scopePattern = validScopes
+              .map((scope) => scope.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+              .join('|');
+            const namedPatterns = [
+              new RegExp(`^feature/(${scopePattern})/[a-z0-9][a-z0-9._-]*$`),
+              new RegExp(`^feature/(${scopePattern})/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$`),
+              new RegExp(`^fix/(${scopePattern})/[a-z0-9][a-z0-9._-]*$`),
+              new RegExp(`^hotfix/(${scopePattern})/[a-z0-9][a-z0-9._-]*$`),
+              new RegExp(`^release/(${scopePattern})/v\\d+\\.\\d+$`),
+            ];
+            if (
+              !alwaysAllowed.some((pattern) => pattern.test(branch)) &&
+              !namedPatterns.some((pattern) => pattern.test(branch))
+            ) {
+              warnings.push(
+                `Branch "${branch}" does not follow the recommended naming ` +
+                'pattern. Fork contributors may ignore this advisory.'
+              );
+            }
 
-            for (const pattern of whitelist) {
-              if (pattern.test(branch)) {
-                console.log(`✅ Branch "${branch}" is whitelisted`);
-                return;
+            const closingKeyword =
+              /\b(closes|fixes|resolves|close|fix|resolve)\s+#\d+/i;
+            const exemption = body.match(/no-issue\s*:\s*(.+)/i);
+            if (!closingKeyword.test(body) && !exemption?.[1]?.trim()) {
+              warnings.push(
+                'Link an issue with `closes #123`, or add ' +
+                '`no-issue: <brief reason>` for a genuinely trivial change.'
+              );
+            }
+
+            if (warnings.length === 0) {
+              core.notice('PR metadata follows the recommended conventions.');
+            } else {
+              for (const warning of warnings) {
+                core.warning(warning);
               }
             }
 
-            // Valid scopes — short names preferred; legacy long names accepted for forward compatibility
-            const validScopes = ['cosh', 'sec-core', 'skill', 'sight', 'tokenless', 'ckpt', 'memory', 'anolisa', 'skillfs', 'ktuner', 'blaze', 'agent-sec-core', 'agentsight', 'os-skills', 'ws-ckpt', 'agent-memory', 'ci', 'docs', 'deps'];
-            const scopePattern = validScopes.join('|');
-
-            // Valid branch patterns per development spec
-            const validPatterns = [
-              // feature/<scope>/<desc>
-              new RegExp(`^feature/(${scopePattern})/[a-z0-9][a-z0-9._-]*$`),
-              // feature/<scope>/<feature-name>/<task> (collaborative track)
-              new RegExp(`^feature/(${scopePattern})/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$`),
-              // fix/<scope>/<desc>
-              new RegExp(`^fix/(${scopePattern})/[a-z0-9][a-z0-9._-]*$`),
-              // release/<scope>/vX.Y
-              new RegExp(`^release/(${scopePattern})/v\\d+\\.\\d+$`),
-              // hotfix/<scope>/<desc>
-              new RegExp(`^hotfix/(${scopePattern})/[a-z0-9][a-z0-9._-]*$`),
-            ];
-
-            const isValid = validPatterns.some(p => p.test(branch));
-
-            if (!isValid) {
-              core.warning(
-                `Branch "${branch}" does not match the recommended naming convention (non-blocking).\n` +
-                `Recommended formats:\n` +
-                `  feature/<scope>/<short-desc>  e.g. feature/cosh/json-output\n` +
-                `  fix/<scope>/<short-desc>      e.g. fix/sec-core/sandbox-escape\n` +
-                `  hotfix/<scope>/<short-desc>   e.g. hotfix/skill/broken-load\n` +
-                `Valid scopes: ${validScopes.join(', ')}\n` +
-                `Fork contributors may use any branch name freely.`
-              );
-              return;
-            }
-
-            console.log('✅ Branch name is valid');
-
-      # -----------------------------------------------------------------------
-      # Step 3: Linked Issue Check (warning only)
-      # -----------------------------------------------------------------------
-      - name: 🔗 Check linked issue
-        continue-on-error: true
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const body = context.payload.pull_request.body || '';
-
-            // Accept standard GitHub closing keywords linking to an issue number
-            const closingKeywords = /\b(closes|fixes|resolves|close|fix|resolve)\s+#\d+/i;
-
-            // Accept explicit exemption: no-issue: <reason>
-            const noIssueExemption = /no-issue\s*:/i;
-
-            if (closingKeywords.test(body)) {
-              const match = body.match(/(?:closes|fixes|resolves|close|fix|resolve)\s+#(\d+)/i);
-              console.log(`✅ PR is linked to issue #${match[1]}`);
-              return;
-            }
-
-            if (noIssueExemption.test(body)) {
-              const exemptMatch = body.match(/no-issue\s*:\s*(.+)/i);
-              console.log(`✅ Issue link exempted: ${exemptMatch?.[1]?.trim() || '(no reason given)'}`);
-              return;
-            }
-
-            core.warning(
-              `This PR does not reference a linked issue.\n` +
-              `Add one of the following to your PR description:\n` +
-              `  closes #<number>  /  fixes #<number>  /  resolves #<number>\n` +
-              `If there is genuinely no applicable issue, add:\n` +
-              `  no-issue: <brief reason>\n` +
-              `Create an issue first: https://github.com/alibaba/anolisa/issues/new`
-            );
-
-      # -----------------------------------------------------------------------
-      # Step 4: Summary — always runs, prints consolidated status
-      # -----------------------------------------------------------------------
-      - name: 📊 PR Checks Summary
-        if: always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            console.log('=== PR Checks Summary ===');
-            console.log('All checks completed. Any warnings above are non-blocking suggestions.');
-            console.log('The only hard error that blocks merging is a missing commit scope.');
-            console.log('See CONTRIBUTING.md or AGENT.md for guidance on commit messages and PR conventions.');
+            await core.summary
+              .addHeading('PR metadata guidance', 3)
+              .addRaw(
+                warnings.length === 0
+                  ? 'No metadata warnings.'
+                  : warnings.map((warning) => `- ${warning}`).join('\n')
+              )
+              .addRaw(
+                '\n\nThese checks are advisory. Commit message lint remains the hard gate. ' +
+                'See CONTRIBUTING.md and AGENTS.md.'
+              )
+              .write();

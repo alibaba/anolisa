@@ -135,6 +135,15 @@ fn bulky_prompt(index: usize) -> String {
     )
 }
 
+/// A prompt large enough that two of them cross a 16 000-token window's
+/// emergency threshold on their own.
+fn huge_prompt(index: usize) -> String {
+    format!(
+        "operations step {index}: {}",
+        "inspect memory pressure 排查内存 ".repeat(600)
+    )
+}
+
 const MANUAL_POLICY: &str = r#"
 [session.compaction]
 enabled = true
@@ -513,6 +522,71 @@ auto_compact_token_limit = 1
         compaction_recommendation(&third).is_some(),
         "a newly eligible complete run should trigger compaction: {third:?}"
     );
+}
+
+#[test]
+fn emergency_preflight_recovers_under_the_default_recent_run_protection() {
+    let fixture = fixture();
+    // Exactly two Agent runs exist at the second turn's preflight: one complete
+    // run plus the in-flight prompt. `preserve_recent_runs = 2` therefore offers
+    // no candidate cut at all, which used to fail closed with `context_limit:`
+    // even though `/session compact` would have succeeded (#2240). The ladder
+    // must degrade to one protected run and recover.
+    configure(
+        &fixture,
+        "mock-compact-summary",
+        r#"
+[session.compaction]
+enabled = true
+auto = false
+preserve_recent_runs = 2
+model_context_window = 16000
+"#,
+    );
+
+    let first = json_lines(&run_core(&fixture, &[huge_prompt(0).as_str()]));
+    let session_id = session_id_of(&first);
+
+    let output = run_core(
+        &fixture,
+        &["--resume", session_id.as_str(), huge_prompt(1).as_str()],
+    );
+    let messages = json_lines(&output);
+    let statuses: Vec<&str> = messages
+        .iter()
+        .filter(|message| message["type"] == "system")
+        .filter_map(|message| message["status"].as_str())
+        .collect();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Self-validating: without this the assertions below would pass vacuously.
+    assert!(
+        statuses.contains(&"compaction_emergency_started"),
+        "the scenario never reached the emergency threshold: {statuses:?}"
+    );
+    assert!(
+        statuses.contains(&"compaction_emergency_completed"),
+        "emergency compaction did not degrade past preserve_recent_runs = 2: \
+         {statuses:?}\n{stdout}"
+    );
+    assert!(
+        !statuses
+            .iter()
+            .any(|status| status.starts_with("compaction_emergency_failed")),
+        "{statuses:?}"
+    );
+    assert!(!stdout.contains("context_limit:"), "{stdout}");
+
+    // The transcript stays complete; compaction only added a projection whose
+    // cut lands on the run boundary before the in-flight prompt.
+    let envelope = persisted_envelope(&fixture.store);
+    let transcript = envelope["messages"].as_array().expect("messages").len();
+    assert_eq!(transcript, 4);
+    let projection = envelope
+        .get("compaction")
+        .expect("a projection was committed");
+    assert_eq!(projection["revision"], 1);
+    assert_eq!(projection["compacted_through"], 2);
 }
 
 #[test]

@@ -114,6 +114,8 @@ stage_payload() {
     copy_tree "$BUILD_DIR/cosh-extension" "$stage/adapters/sec-core/cosh"
     copy_tree "$BUILD_DIR/skills" "$stage/share/anolisa/skills"
 
+    python3 "$ROOT/packaging/raw/adapt_payload.py" "$stage"
+
     find "$stage/lib/anolisa/sec-core/python3.11" \
         -type d -name __pycache__ -prune -exec rm -rf {} +
     find "$stage/lib/anolisa/sec-core/python3.11" \
@@ -125,6 +127,8 @@ stage_payload() {
         die "bundled Python runtime contains a symbolic link"
     fi
     normalize_modes "$stage"
+    python3 "$ROOT/packaging/raw/verify_release.py" \
+        "$ROOT" "$CONTRACT" --payload-root "$stage" > /dev/null
 }
 
 resolve_epoch() {

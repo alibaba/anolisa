@@ -1,5 +1,7 @@
 # Adding CLI Commands
 
+[中文版](../../zh/cosh-ng/adding-commands.md)
+
 ## Overview
 
 cosh-cli uses clap to build its command tree, with each subsystem corresponding to a `cmd/<subsystem>.rs` module. Adding a new command requires modifications across three layers: type definitions (cosh-types) → platform implementation (cosh-platform) → CLI entry (cosh-cli).
@@ -127,7 +129,7 @@ fn test_my_command_json_envelope() {
 |------|-------------|
 | JSON output | Always use `CoshResponse<T>` envelope |
 | Exit codes | Success = 0, Failure = 1 |
-| `--dry-run` | All write operations must support |
+| `--dry-run` | Add it only when the backend can provide a genuinely non-mutating preview; it is an action flag, not a global CLI promise |
 | Input validation | Use `validate_*` to check parameters before execution |
 | subsystem field | `meta.subsystem` must match the command name |
 | Distribution routing | Logic that needs to distinguish distributions goes in `cosh-platform` |
