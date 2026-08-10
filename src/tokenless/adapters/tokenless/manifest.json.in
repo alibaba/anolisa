@@ -95,6 +95,23 @@
         "uninstall": "codex/scripts/uninstall.sh"
       }
     },
+    "opencode": {
+      "compatibleVersions": ">=1.0.0",
+      "capabilities": {
+        "hooks": [
+          "tool-ready",
+          "rewrite",
+          "compress-response",
+          "compress-toon",
+          "compress-schema"
+        ]
+      },
+      "actions": {
+        "detect":    "opencode/scripts/detect.sh",
+        "install":   "opencode/scripts/install.sh",
+        "uninstall": "opencode/scripts/uninstall.sh"
+      }
+    },
     "qwencode": {
       "compatibleVersions": ">=0.17.0",
       "capabilities": {

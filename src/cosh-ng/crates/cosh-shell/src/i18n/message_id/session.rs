@@ -98,3 +98,15 @@ macro_rules! session_fresh_ids {
         );
     };
 }
+
+// Keep this new picker footer message in its own trailing segment so every
+// existing MessageId discriminant remains stable.
+macro_rules! session_picker_footer_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            SessionPickerMarkedFooter,
+        );
+    };
+}

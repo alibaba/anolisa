@@ -244,6 +244,7 @@ impl GenAIBuilder {
         &self,
         request: &ParsedRequest,
         conn_id: &ConnectionId,
+        response_mapper: &ResponseSessionMapper,
         pid_agent_name_cache: &impl PidAgentNameCache,
     ) -> Option<PendingCallInfo> {
         // Only process known LLM API paths
@@ -288,64 +289,73 @@ impl GenAIBuilder {
         // 正常响应到达后 `complete_pending` 仍会用 `IdResolver::resolve_*`
         // 重新计算并 UPDATE 正常 ID，只有 crash 路径才会保留这里写入的
         // peek/fallback 值。
-        let (user_query, input_messages, system_instructions, first_user_text, last_user_text) =
-            if let Some(view) = body.as_ref().and_then(Self::extract_messages_view) {
-                let (messages, instructions_text) = view;
+        let (
+            user_query,
+            input_messages,
+            system_instructions,
+            first_user_text,
+            last_user_text,
+            user_message_count,
+        ) = if let Some(view) = body.as_ref().and_then(Self::extract_messages_view) {
+            let (messages, instructions_text) = view;
 
-                // First user message raw text — used as `session_key` material
-                // for IdResolver peek / crash fallback.
-                let first_user_text = messages
-                    .iter()
-                    .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-                    .find_map(Self::extract_message_text)
-                    .unwrap_or_default();
+            // First user message raw text — used as `session_key` material
+            // for IdResolver peek / crash fallback.
+            let first_user_text = messages
+                .iter()
+                .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                .find_map(Self::extract_message_text)
+                .unwrap_or_default();
 
-                // Last user message raw text — used for user_query (display text)
-                // 以及 conversation_key (peek / crash fallback)。
-                let last_user_raw = messages
-                    .iter()
-                    .rev()
-                    .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-                    .find_map(Self::extract_message_text);
-                let last_user_text = last_user_raw.clone().unwrap_or_default();
+            // Last user message raw text — used for user_query (display text)
+            // 以及 conversation_key (peek / crash fallback)。
+            let last_user_raw = messages
+                .iter()
+                .rev()
+                .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                .find_map(Self::extract_message_text);
+            let last_user_text = last_user_raw.clone().unwrap_or_default();
 
-                // user_query: last user message text, stripped of metadata prefix
-                let user_query = last_user_raw.as_deref().map(Self::strip_user_query_prefix);
+            let user_message_count = Self::count_real_user_messages_from_json(&messages);
 
-                // Serialise message subsets for the pending record
-                let sys: Vec<_> = messages
-                    .iter()
-                    .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
-                    .collect();
-                let non_sys: Vec<_> = messages
-                    .iter()
-                    .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
-                    .collect();
+            // user_query: last user message text, stripped of metadata prefix
+            let user_query = last_user_raw.as_deref().map(Self::strip_user_query_prefix);
 
-                let input_messages = if non_sys.is_empty() {
-                    None
-                } else {
-                    serde_json::to_string(&non_sys).ok()
-                };
-                let system_instructions = if sys.is_empty() {
-                    // Responses API carries the system prompt at the top level
-                    // via "instructions". Fall back to that when the messages
-                    // array has no system role.
-                    instructions_text.map(|s| serde_json::to_string(&s).unwrap_or(s))
-                } else {
-                    serde_json::to_string(&sys).ok()
-                };
+            // Serialise message subsets for the pending record
+            let sys: Vec<_> = messages
+                .iter()
+                .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+                .collect();
+            let non_sys: Vec<_> = messages
+                .iter()
+                .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
+                .collect();
 
-                (
-                    user_query,
-                    input_messages,
-                    system_instructions,
-                    first_user_text,
-                    last_user_text,
-                )
+            let input_messages = if non_sys.is_empty() {
+                None
             } else {
-                (None, None, None, String::new(), String::new())
+                serde_json::to_string(&non_sys).ok()
             };
+            let system_instructions = if sys.is_empty() {
+                // Responses API carries the system prompt at the top level
+                // via "instructions". Fall back to that when the messages
+                // array has no system role.
+                instructions_text.map(|s| serde_json::to_string(&s).unwrap_or(s))
+            } else {
+                serde_json::to_string(&sys).ok()
+            };
+
+            (
+                user_query,
+                input_messages,
+                system_instructions,
+                first_user_text,
+                last_user_text,
+                user_message_count,
+            )
+        } else {
+            (None, None, None, String::new(), String::new(), 0)
+        };
 
         // Classify call_kind from request content
         let call_kind =
@@ -388,6 +398,22 @@ impl GenAIBuilder {
 
         let session_id = metadata_session
             .or_else(|| {
+                // Mapper first (same order as call_builder.rs): a FileWrite
+                // from this pid already revealed the real session UUID, which
+                // groups the crash-drain record with the normal calls of the
+                // same session instead of an isolated crash bucket (#2059).
+                //
+                // Known limitation: pid_map has no lifecycle bound, so a
+                // recycled pid whose new process has not yet written a session
+                // file can surface the previous process's mapping here. This
+                // mis-groups only orphan calls that would otherwise get a
+                // synthetic crash hash, and needs pid reuse + zero FileWrite +
+                // drain to coincide — accepted instead of lifecycle tracking.
+                response_mapper
+                    .get_session_by_pid(conn_id.pid)
+                    .map(str::to_string)
+            })
+            .or_else(|| {
                 self.id_resolver
                     .peek_session_id(agent_name_str, pid_i32, &first_user_text)
             })
@@ -397,17 +423,19 @@ impl GenAIBuilder {
                     agent_name_str,
                     pid_i32,
                     &first_user_text,
+                    0,
                 ))
             });
         let conversation_id = self
             .id_resolver
-            .peek_conversation_id(agent_name_str, pid_i32, &last_user_text)
+            .peek_conversation_id(agent_name_str, pid_i32, &last_user_text, user_message_count)
             .or_else(|| {
                 Some(super::id_resolver::crash_fallback_id(
                     "conversation",
                     agent_name_str,
                     pid_i32,
                     &last_user_text,
+                    user_message_count,
                 ))
             });
 
@@ -417,8 +445,12 @@ impl GenAIBuilder {
         // 驱逐锚点，给这两类中断场景提供与 call_builder.rs 中 finish_reason
         // 终止态同等的轮结束信号，避免未来同 PID 复用相同固定文案（如系统
         // recap nudge、或用户重发一模一样的 prompt）时被归入同一轮。
-        self.id_resolver
-            .finish_conversation(agent_name_str, pid_i32, &last_user_text);
+        self.id_resolver.finish_conversation(
+            agent_name_str,
+            pid_i32,
+            &last_user_text,
+            user_message_count,
+        );
 
         Some(PendingCallInfo {
             call_id,
@@ -545,6 +577,22 @@ impl GenAIBuilder {
         })
     }
 
+    /// Count "real" user messages from a raw JSON messages array.
+    ///
+    /// A real user message has `role="user"` AND content that is either a
+    /// non-empty string, or an array containing at least one item with type
+    /// `"text"`, `"input_text"`, or `"output_text"` and non-empty text.
+    /// Mirrors the text detection logic from `extract_message_text`.
+    fn count_real_user_messages_from_json(messages: &[serde_json::Value]) -> usize {
+        messages
+            .iter()
+            .filter(|m| {
+                m.get("role").and_then(|r| r.as_str()) == Some("user")
+                    && Self::extract_message_text(m).is_some()
+            })
+            .count()
+    }
+
     /// Generate globally unique ID (unique across restarts)
     pub(super) fn generate_id(&self) -> String {
         let seq = self.call_counter.fetch_add(1, Ordering::Relaxed);
@@ -612,9 +660,10 @@ mod tests {
         let builder = GenAIBuilder::new();
         let body = r#"{"model":"gpt-4","messages":[{"role":"system","content":"sys"},{"role":"user","content":"hello"}]}"#;
         let req = make_request("/v1/chat/completions", body);
+        let mapper = ResponseSessionMapper::new();
         let cache = std::collections::HashMap::new();
         let pending = builder
-            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &cache)
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
             .unwrap();
         assert_eq!(pending.model.as_deref(), Some("gpt-4"));
         assert_eq!(pending.provider.as_deref(), Some("openai"));
@@ -628,9 +677,10 @@ mod tests {
         let builder = GenAIBuilder::new();
         let body = r#"{"model":"gpt-4","input":[{"role":"user","content":"hello"}],"instructions":"sys prompt"}"#;
         let req = make_request("/v1/responses", body);
+        let mapper = ResponseSessionMapper::new();
         let cache = std::collections::HashMap::new();
         let pending = builder
-            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &cache)
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
             .unwrap();
         assert_eq!(pending.model.as_deref(), Some("gpt-4"));
         assert_eq!(pending.provider.as_deref(), Some("openai"));
@@ -643,10 +693,16 @@ mod tests {
         let builder = GenAIBuilder::new();
         let body = r#"{"model":"gpt-4","messages":[]}"#;
         let req = make_request("/api/health", body);
+        let mapper = ResponseSessionMapper::new();
         let cache = std::collections::HashMap::new();
         assert!(
             builder
-                .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &cache)
+                .build_pending_from_request(
+                    &req,
+                    &ConnectionId { pid: 1, ssl_ptr: 2 },
+                    &mapper,
+                    &cache
+                )
                 .is_none()
         );
     }
@@ -657,9 +713,10 @@ mod tests {
         // LLM path but body lacks both "messages" and "input".
         let body = r#"{"model":"gpt-4","stream":true}"#;
         let req = make_request("/v1/chat/completions", body);
+        let mapper = ResponseSessionMapper::new();
         let cache = std::collections::HashMap::new();
         let pending = builder
-            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &cache)
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
             .expect("LLM path should still create pending even without messages");
         assert_eq!(pending.model.as_deref(), Some("gpt-4"));
         assert!(pending.user_query.is_none());
@@ -679,6 +736,7 @@ mod tests {
         let text = "hello";
         let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}"#;
         let req = make_request("/v1/chat/completions", body);
+        let mapper = ResponseSessionMapper::new();
         let cache = std::collections::HashMap::new();
 
         // 先跑一次拿到 build_pending_from_request 实际解析出的 agent_name
@@ -686,29 +744,119 @@ mod tests {
         // 不一定是 make_request 里设置的 "test"，所以直接从返回值里读，
         // 保证后面手动调用 `resolve_conversation_id` 时用的 key 与它一致）。
         let pending = builder
-            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &cache)
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
             .expect("LLM path should create pending");
         let agent_name = pending.agent_name.clone().unwrap_or_default();
 
         // 1. 模拟同轮内一次正常完成的 LLM 调用，锚定一个 conversation_id。
         let turn1 = builder
             .id_resolver
-            .resolve_conversation_id(&agent_name, pid, text, "resp-1")
+            .resolve_conversation_id(&agent_name, pid, text, "resp-1", 1)
             .unwrap();
 
         // 2. 该轮后续调用超时/进程崩溃，确认不会再有 finish_reason。
         builder
-            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &cache)
+            .build_pending_from_request(&req, &ConnectionId { pid: 1, ssl_ptr: 2 }, &mapper, &cache)
             .expect("LLM path should create pending");
 
         // 3. 数十分钟后同一段固定文本触发了一轮全新的真实对话，应得到不同的 conversation_id。
         let turn2 = builder
             .id_resolver
-            .resolve_conversation_id(&agent_name, pid, text, "resp-2")
+            .resolve_conversation_id(&agent_name, pid, text, "resp-2", 1)
             .unwrap();
         assert_ne!(
             turn1, turn2,
             "build_pending_from_request 应驱逐锚点，让相同文本开启新的一轮对话"
+        );
+    }
+
+    /// A pid → session UUID mapping registered by a FileWrite event must win
+    /// over the peek/crash-fallback chain in the crash-drain path (#2059).
+    /// Reverting the mapper lookup in `build_pending_from_request` makes this
+    /// test fail (session_id would become the 32-hex crash fallback).
+    #[test]
+    fn test_build_pending_from_request_uses_mapper_pid_session() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}"#;
+        let req = make_request("/v1/chat/completions", body);
+        let cache = std::collections::HashMap::new();
+
+        // Pre-seed pid 4242 → session UUID via a cosh-core atomic-write temp
+        // file, the same way the filewrite probe feeds the mapper at runtime.
+        let mut mapper = ResponseSessionMapper::new();
+        mapper.process_filewrite(&crate::probes::FileWriteEvent {
+            pid: 4242,
+            tid: 4242,
+            uid: 0,
+            timestamp_ns: 0,
+            write_size: 0,
+            comm: "cosh-core".to_string(),
+            filename:
+                ".550e8400-e29b-41d4-a716-446655440000.0198f00d-1a2b-4c3d-8e4f-556677889900.tmp"
+                    .to_string(),
+            cgroup_id: 0,
+            buf: Vec::new(),
+        });
+
+        let pending = builder
+            .build_pending_from_request(
+                &req,
+                &ConnectionId {
+                    pid: 4242,
+                    ssl_ptr: 2,
+                },
+                &mapper,
+                &cache,
+            )
+            .expect("LLM path should create pending");
+        assert_eq!(
+            pending.session_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000"),
+            "mapper pid → session UUID must win over the crash fallback"
+        );
+    }
+
+    /// Without a mapper hit the crash-drain path must keep its previous
+    /// behavior: fall back to the 32-hex `crash_fallback_id` (peek misses on
+    /// a fresh builder).
+    #[test]
+    fn test_build_pending_from_request_falls_back_without_mapper_hit() {
+        let builder = GenAIBuilder::new();
+        let body = r#"{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}"#;
+        let req = make_request("/v1/chat/completions", body);
+        let cache = std::collections::HashMap::new();
+        // Mapper knows a different pid only.
+        let mut mapper = ResponseSessionMapper::new();
+        mapper.process_filewrite(&crate::probes::FileWriteEvent {
+            pid: 9999,
+            tid: 9999,
+            uid: 0,
+            timestamp_ns: 0,
+            write_size: 0,
+            comm: "cosh-core".to_string(),
+            filename:
+                ".550e8400-e29b-41d4-a716-446655440000.0198f00d-1a2b-4c3d-8e4f-556677889900.tmp"
+                    .to_string(),
+            cgroup_id: 0,
+            buf: Vec::new(),
+        });
+
+        let pending = builder
+            .build_pending_from_request(
+                &req,
+                &ConnectionId {
+                    pid: 4242,
+                    ssl_ptr: 2,
+                },
+                &mapper,
+                &cache,
+            )
+            .expect("LLM path should create pending");
+        let session_id = pending.session_id.expect("fallback session_id");
+        assert_eq!(
+            session_id.len(),
+            32,
+            "unmapped pid must keep the 32-hex crash fallback, got {session_id}"
         );
     }
 }

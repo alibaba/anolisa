@@ -10,9 +10,9 @@
 //! only builds argv arrays from validated data.
 //!
 //! The CLI env contract mirrors `openclaw/scripts/install.sh`: unset
-//! `OPENCLAW_HOME`, set `OPENCLAW_STATE_DIR` to the resolved home, and
-//! prepend the standard bin dirs to `PATH`. `OPENCLAW_BIN` overrides the
-//! executable (used by tests to point at a fake CLI).
+//! `OPENCLAW_HOME`, set `OPENCLAW_STATE_DIR` to the resolved state directory,
+//! and prepend the standard bin dirs to `PATH`. `OPENCLAW_BIN` overrides
+//! the executable (used by tests to point at a fake CLI).
 //!
 //! Before the first framework mutation — during `prepare_enable` (and, for
 //! `--dry-run`, `plan_enable`) — `enable` builds a read-only
@@ -30,7 +30,8 @@
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -101,10 +102,7 @@ impl FrameworkDriver for OpenClawDriver {
     }
 
     fn allowed_external_roots(&self, ctx: &DriverCtx) -> Vec<PathBuf> {
-        // The only external root OpenClaw writes is its own home/state dir.
-        openclaw_home(ctx.user_home.as_deref())
-            .into_iter()
-            .collect()
+        openclaw_allowed_roots(ctx.user_home.as_deref())
     }
 
     fn read_bundle(&self, ctx: &DriverCtx) -> Result<AdapterBundle, AdapterError> {
@@ -205,6 +203,33 @@ impl FrameworkDriver for OpenClawDriver {
             actions,
             register_command,
         })
+    }
+
+    fn plan_reenable_cleanup(
+        &self,
+        prior: &AdapterClaim,
+        ctx: &DriverCtx,
+    ) -> Result<Vec<String>, AdapterError> {
+        let prior_home = claim_state_dir(prior)?;
+        if prior_home == require_home(ctx)? {
+            return Ok(Vec::new());
+        }
+
+        let mut actions = Vec::new();
+        if let Some(plugin_id) = claim_plugin_id(prior) {
+            validate_plugin_id(&plugin_id)?;
+            actions.push(format!(
+                "unregister prior openclaw plugin '{plugin_id}' from {}",
+                prior_home.display()
+            ));
+        }
+        for skill_name in claim_skill_resources(prior) {
+            actions.push(format!(
+                "remove prior openclaw skill '{skill_name}' from {}",
+                prior_home.join("skills").join(&skill_name).display()
+            ));
+        }
+        Ok(actions)
     }
 
     fn prepare_enable(
@@ -313,6 +338,25 @@ impl FrameworkDriver for OpenClawDriver {
         next: &mut AdapterClaim,
     ) -> Result<(), AdapterError> {
         preserve_openclaw_config_facts(prior, next)
+    }
+
+    fn cleanup_replaced_claim(
+        &self,
+        prior: &AdapterClaim,
+        next: &AdapterClaim,
+        ctx: &DriverCtx,
+    ) -> Result<DisableReport, AdapterError> {
+        if claim_state_dir(prior)? == claim_state_dir(next)? {
+            return Ok(DisableReport {
+                cleanup_complete: true,
+                messages: Vec::new(),
+            });
+        }
+
+        // A state-directory migration creates a separate OpenClaw registry
+        // and skills tree. Release the prior installation while its validated
+        // receipt is still durable, before the Manager replaces ownership.
+        self.disable(prior, ctx)
     }
 
     fn apply_enable(
@@ -566,7 +610,11 @@ impl FrameworkDriver for OpenClawDriver {
         claim: &AdapterClaim,
         ctx: &DriverCtx,
     ) -> Result<DisableReport, AdapterError> {
-        let home = require_home(ctx)?;
+        // Disable must clean the state directory recorded at enable time. In
+        // particular, pre-fix receipts can point at the legacy resolver's
+        // directory while the caller's active OPENCLAW_STATE_DIR points
+        // elsewhere.
+        let home = claim_state_dir(claim)?;
         let mut messages = Vec::new();
         let mut cleanup_complete = true;
 
@@ -586,6 +634,10 @@ impl FrameworkDriver for OpenClawDriver {
             let output = ctx.ops.run_framework_cli(cmd)?;
             if output.success() {
                 messages.push(format!("unregistered openclaw plugin '{plugin_id}'"));
+            } else if uninstall_reports_missing_plugin(&output, &plugin_id) {
+                messages.push(format!(
+                    "openclaw plugin '{plugin_id}' was already unregistered"
+                ));
             } else {
                 return Ok(DisableReport {
                     cleanup_complete: false,
@@ -1988,18 +2040,101 @@ fn openclaw_bin() -> String {
         .unwrap_or_else(|| "openclaw".to_string())
 }
 
-/// Resolve the OpenClaw home (also the state dir): `OPENCLAW_HOME`, else
-/// `<user_home>/.openclaw`. Trailing slashes are trimmed to match the
-/// official script.
+/// Resolve the OpenClaw state directory using the runtime's whitespace,
+/// tilde-expansion, and absolute-path semantics. `OPENCLAW_HOME` remains a
+/// direct state-directory fallback for compatibility with earlier releases.
 fn openclaw_home(user_home: Option<&Path>) -> Option<PathBuf> {
-    if let Some(h) = std::env::var_os("OPENCLAW_HOME") {
-        let s = h.to_string_lossy();
-        let trimmed = s.trim_end_matches('/');
+    let home_override = std::env::var_os("OPENCLAW_HOME")
+        .and_then(|value| resolve_openclaw_path(&value, user_home));
+    let tilde_home = home_override.as_deref().or(user_home);
+
+    if let Some(state_dir) = std::env::var_os("OPENCLAW_STATE_DIR")
+        && let Some(state_dir) = resolve_openclaw_path(&state_dir, tilde_home)
+    {
+        return Some(state_dir);
+    }
+
+    home_override
+        .or_else(|| user_home.and_then(|home| absolute_normalized_path(home.join(".openclaw"))))
+}
+
+/// External roots accepted for current receipts plus the exact root the
+/// pre-fix resolver could have persisted. The compatibility root is rebuilt
+/// from trusted process/user context, never from receipt contents.
+fn openclaw_allowed_roots(user_home: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(current) = openclaw_home(user_home) {
+        roots.push(current);
+    }
+    if let Some(legacy) = legacy_openclaw_home(user_home)
+        && !roots.contains(&legacy)
+    {
+        roots.push(legacy);
+    }
+    roots
+}
+
+/// Reproduce the old resolver only to validate receipts it created. New CLI
+/// operations and receipts always use [`openclaw_home`].
+fn legacy_openclaw_home(user_home: Option<&Path>) -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("OPENCLAW_HOME") {
+        let home = home.to_string_lossy();
+        let trimmed = home.trim_end_matches('/');
         if !trimmed.is_empty() {
             return Some(PathBuf::from(trimmed));
         }
     }
     user_home.map(|h| h.join(".openclaw"))
+}
+
+/// Match OpenClaw's `resolveUserPath`: trim, expand a leading `~`, resolve
+/// relative paths from the current directory, and normalize lexically.
+fn resolve_openclaw_path(value: &OsStr, tilde_home: Option<&Path>) -> Option<PathBuf> {
+    let value = value.to_string_lossy();
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let path = if value == "~" {
+        tilde_home
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())?
+    } else if let Some(rest) = value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix("~\\"))
+    {
+        tilde_home
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())?
+            .join(rest)
+    } else {
+        PathBuf::from(value)
+    };
+    absolute_normalized_path(path)
+}
+
+fn absolute_normalized_path(path: PathBuf) -> Option<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    Some(normalize_lexically(&absolute))
+}
+
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 /// PATH prefix dirs, mirroring `install.sh`:
@@ -2014,8 +2149,8 @@ fn path_prepend(home: &Path, user_home: Option<&Path>) -> Vec<PathBuf> {
     v
 }
 
-/// Shared env contract for every OpenClaw invocation: unset
-/// `OPENCLAW_HOME`, set `OPENCLAW_STATE_DIR` to the home, prepend PATH.
+/// Keep every OpenClaw invocation on the resolved state directory while
+/// suppressing the legacy home override.
 fn base_cmd(args: Vec<String>, home: &Path, user_home: Option<&Path>) -> FrameworkCommand {
     FrameworkCommand {
         program: openclaw_bin(),
@@ -2474,12 +2609,13 @@ fn require_plugin_id(bundle: &AdapterBundle) -> Result<String, AdapterError> {
         })
 }
 
-/// OpenClaw home, or [`AdapterError::FrameworkCli`] when `$HOME` is
-/// unresolvable (no `user_home`, no `OPENCLAW_HOME`).
+/// OpenClaw state directory, or [`AdapterError::FrameworkCli`] when no
+/// explicit state/home override or user home is available.
 fn require_home(ctx: &DriverCtx) -> Result<PathBuf, AdapterError> {
     openclaw_home(ctx.user_home.as_deref()).ok_or_else(|| AdapterError::FrameworkCli {
         program: openclaw_bin(),
-        reason: "cannot resolve OpenClaw home (no $HOME and no OPENCLAW_HOME)".to_string(),
+        reason: "cannot resolve OpenClaw state directory (no OPENCLAW_STATE_DIR, OPENCLAW_HOME, or $HOME)"
+            .to_string(),
     })
 }
 
@@ -2647,6 +2783,62 @@ fn config_value_display(value: &toml::Value) -> String {
     }
 }
 
+/// Resolve the state directory from a manager-validated OpenClaw receipt.
+fn claim_state_dir(claim: &AdapterClaim) -> Result<PathBuf, AdapterError> {
+    let DriverPayload::OpenClaw(payload) = &claim.driver_payload else {
+        return Err(invalid_state_dir_claim(
+            claim,
+            "receipt payload is not OpenClaw",
+        ));
+    };
+    let resource = claim.resource(&payload.state_dir_resource).ok_or_else(|| {
+        invalid_state_dir_claim(
+            claim,
+            &format!(
+                "state directory resource '{}' is missing",
+                payload.state_dir_resource
+            ),
+        )
+    })?;
+    match &resource.kind {
+        ClaimResourceKind::ExternalPath { path } => Ok(path.clone()),
+        _ => Err(invalid_state_dir_claim(
+            claim,
+            &format!(
+                "state directory resource '{}' is not an external path",
+                payload.state_dir_resource
+            ),
+        )),
+    }
+}
+
+fn invalid_state_dir_claim(claim: &AdapterClaim, reason: &str) -> AdapterError {
+    AdapterError::BundleInvalid {
+        root: claim.resource_root.clone(),
+        reason: format!("invalid OpenClaw state directory receipt: {reason}"),
+    }
+}
+
+/// True only for OpenClaw's exact idempotent-uninstall failure. Other
+/// non-zero exits must keep the receipt so cleanup can be retried.
+fn uninstall_reports_missing_plugin(output: &CliOutput, plugin_id: &str) -> bool {
+    if output.timed_out {
+        return false;
+    }
+    let expected = format!("plugin not found: {}", plugin_id.to_ascii_lowercase());
+    let combined = format!(
+        "{}\n{}",
+        strip_ansi(&output.stdout),
+        strip_ansi(&output.stderr)
+    );
+    let mut lines = combined
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_ascii_lowercase);
+    matches!(lines.next(), Some(line) if line == expected) && lines.next().is_none()
+}
+
 /// Extract skill names from a claim's `skill_resources` by parsing the
 /// resource ids. Each id has the form `openclaw_skill_<name>`, and we
 /// extract `<name>` as the directory name under `<home>/skills/`.
@@ -2812,6 +3004,41 @@ mod tests {
         assert_eq!(strip_ansi("\x1b[1mbold\x1b[0m"), "bold");
         assert_eq!(strip_ansi("\x1b[32mgreen\x1b[0m text"), "green text");
         assert_eq!(strip_ansi("no escapes here"), "no escapes here");
+    }
+
+    #[test]
+    fn missing_plugin_uninstall_is_idempotent_only_for_exact_error() {
+        let missing = CliOutput {
+            status: Some(1),
+            timed_out: false,
+            stdout: String::new(),
+            stderr: "\x1b[31mPlugin not found: tokenless\x1b[0m\n".to_string(),
+        };
+        assert!(uninstall_reports_missing_plugin(&missing, "tokenless"));
+
+        let additional_error = CliOutput {
+            stderr: "Plugin not found: tokenless\nUnable to update registry\n".to_string(),
+            ..missing.clone()
+        };
+        assert!(!uninstall_reports_missing_plugin(
+            &additional_error,
+            "tokenless"
+        ));
+
+        let wrong_plugin = CliOutput {
+            stderr: "Plugin not found: other-plugin\n".to_string(),
+            ..missing.clone()
+        };
+        assert!(!uninstall_reports_missing_plugin(
+            &wrong_plugin,
+            "tokenless"
+        ));
+
+        let timed_out = CliOutput {
+            timed_out: true,
+            ..missing
+        };
+        assert!(!uninstall_reports_missing_plugin(&timed_out, "tokenless"));
     }
 
     #[test]

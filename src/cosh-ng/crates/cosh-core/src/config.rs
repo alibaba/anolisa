@@ -273,15 +273,26 @@ pub struct CompactionConfig {
     /// Best-effort post-compaction fraction of the usable history budget.
     #[serde(default = "default_target_ratio")]
     pub target_ratio: f64,
-    /// Minimum recent complete Agent runs kept verbatim by automatic and
-    /// emergency compaction; at least one is always retained. Explicit manual
-    /// compaction may summarize the latest complete run.
+    /// Minimum recent complete Agent runs kept verbatim by normal automatic
+    /// compaction.
+    ///
+    /// Explicit manual compaction may summarize the latest complete run. So may
+    /// emergency protection as a last resort: rather than failing the request,
+    /// its fallback ladder degrades this value to one and then to
+    /// manual-compaction semantics, which reserves no complete run
+    /// unconditionally. The in-flight (incomplete) run is never summarized by
+    /// any path.
     #[serde(default = "default_preserve_recent_runs")]
     pub preserve_recent_runs: usize,
     /// Explicit user override for the model context window, in tokens.
     #[serde(default)]
     pub model_context_window: Option<u64>,
-    /// Explicit user override for the maximum model output reserve, in tokens.
+    /// Explicit user override for the model's maximum output size, in tokens.
+    ///
+    /// Drives both sides of the output accounting from one value: the reserve
+    /// `O` subtracted from the usable history budget, and the `max_tokens` cap
+    /// sent on the real provider request. Lowering it therefore frees history
+    /// budget *and* shortens the longest reply the model may produce.
     #[serde(default)]
     pub model_max_output_tokens: Option<u64>,
 }

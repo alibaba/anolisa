@@ -8,8 +8,10 @@
    environments should serialise access externally (e.g. ``flock``).
 """
 
+import os
 import re
 import shutil
+import stat
 from pathlib import Path
 
 from agent_sec_cli.skill_ledger.errors import SkillLedgerError
@@ -24,6 +26,8 @@ VERSIONS_DIR = "versions"
 LATEST_JSON = "latest.json"
 
 _VERSION_RE = re.compile(r"^v(\d{6})\.json$")
+_SNAPSHOT_RE = re.compile(r"^v(\d{6})\.snapshot$")
+_VERSION_ID_RE = re.compile(r"^v\d{6}$")
 
 # Directories excluded when creating a snapshot of the skill directory.
 _SNAPSHOT_EXCLUDED = frozenset({".skill-meta", ".git"})
@@ -76,33 +80,72 @@ def ensure_skill_meta(skill_dir: str | Path) -> Path:
 def list_version_ids(skill_dir: str | Path) -> list[str]:
     """Return sorted list of existing version IDs (e.g. ``["v000001", "v000002"]``)."""
     vdir = versions_dir_path(skill_dir)
-    if not vdir.is_dir():
+    try:
+        mode = vdir.stat().st_mode
+    except FileNotFoundError:
+        return []
+    if not stat.S_ISDIR(mode):
         return []
     ids: list[str] = []
-    for entry in vdir.iterdir():
-        m = _VERSION_RE.match(entry.name)
-        if m:
-            ids.append(f"v{m.group(1)}")
+    with os.scandir(vdir) as entries:
+        for entry in entries:
+            match = _VERSION_RE.match(entry.name)
+            if match:
+                ids.append(f"v{match.group(1)}")
     ids.sort()
     return ids
 
 
-def next_version_id(skill_dir: str | Path) -> str:
-    """Return the next sequential version ID (``v000001`` if none exist).
+def list_version_artifact_ids(skill_dir: str | Path) -> list[str]:
+    """Return IDs reserved by a version JSON or snapshot path.
+
+    Snapshot-only slots still represent historical evidence and must never be
+    reused after a partial write or manual damage removes the matching JSON.
+    """
+    vdir = versions_dir_path(skill_dir)
+    try:
+        mode = vdir.stat().st_mode
+    except FileNotFoundError:
+        return []
+    if not stat.S_ISDIR(mode):
+        return []
+
+    ids: set[str] = set()
+    with os.scandir(vdir) as entries:
+        for entry in entries:
+            match = _VERSION_RE.match(entry.name) or _SNAPSHOT_RE.match(entry.name)
+            if match:
+                ids.add(f"v{match.group(1)}")
+    return sorted(ids)
+
+
+def is_version_id(value: str) -> bool:
+    """Return whether *value* is a canonical six-digit version ID."""
+    return _VERSION_ID_RE.fullmatch(value) is not None
+
+
+def next_version_id(
+    skill_dir: str | Path,
+    *,
+    after_version_id: str | None = None,
+) -> str:
+    """Return the first unused ID after the newest verified predecessor.
+
+    Version JSON and snapshot names reserve their own slots, but an unverified
+    high-numbered artifact cannot force recovery to skip lower free slots.
 
     Raises :class:`SkillLedgerError` if the maximum version (999999) is reached.
     """
-    existing = list_version_ids(skill_dir)
-    if not existing:
-        return "v000001"
-    last = existing[-1]
-    num = int(last[1:])
-    if num >= 999999:
-        raise SkillLedgerError(
-            "Version ID overflow — maximum 999999 versions reached for "
-            f"{Path(skill_dir).name}"
-        )
-    return f"v{num + 1:06d}"
+    existing = set(list_version_artifact_ids(skill_dir))
+    start = int(after_version_id[1:]) + 1 if after_version_id is not None else 1
+    for number in range(start, 1_000_000):
+        candidate = f"v{number:06d}"
+        if candidate not in existing:
+            return candidate
+    raise SkillLedgerError(
+        "Version ID overflow — maximum 999999 versions reached for "
+        f"{Path(skill_dir).name}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +156,11 @@ def next_version_id(skill_dir: str | Path) -> str:
 def load_latest_manifest(skill_dir: str | Path) -> SignedManifest | None:
     """Load ``latest.json`` if it exists, else return ``None``."""
     path = latest_json_path(skill_dir)
-    if not path.is_file():
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(mode):
         return None
     return SignedManifest.from_file(str(path))
 
@@ -141,25 +188,13 @@ def load_version_manifest(
 ) -> SignedManifest | None:
     """Load a specific version manifest, or ``None`` if it does not exist."""
     path = version_json_path(skill_dir, version_id)
-    if not path.is_file():
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(mode):
         return None
     return SignedManifest.from_file(str(path))
-
-
-# ---------------------------------------------------------------------------
-# Previous manifest signature extraction
-# ---------------------------------------------------------------------------
-
-
-def get_previous_signature(skill_dir: str | Path) -> str | None:
-    """Return the ``signature.value`` of the most recent version, or ``None``."""
-    ids = list_version_ids(skill_dir)
-    if not ids:
-        return None
-    last = load_version_manifest(skill_dir, ids[-1])
-    if last is None or last.signature is None:
-        return None
-    return last.signature.value
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +213,7 @@ def create_snapshot(skill_dir: str | Path, version_id: str) -> Path:
     src = Path(skill_dir).resolve()
     dst = snapshot_dir_path(skill_dir, version_id)
     if dst.exists():
-        shutil.rmtree(dst)
+        raise SkillLedgerError(f"snapshot already exists for version {version_id}")
     dst.mkdir(parents=True)
 
     for entry in sorted(src.rglob("*")):

@@ -9,20 +9,20 @@
 //! - [`config`]: daemon TOML configuration
 //! - [`policy`]: workload class + policy file schema
 //! - [`backend`]: backend kinds + selection / fallback
+//! - [`guest_protocol`]: guest-agent wire DTOs
 //! - [`lifecycle`]: sandbox state machine + JSON persistence
 //! - [`pool`]: warm-pool key/stat/manager
-//! - [`template`]: template registry + refcnt + GC
 //! - [`kernel`]: kernel hook registry, per-hook mutex
 //! - [`error`]: unified [`BlazeError`] error enum
 
 pub mod backend;
 pub mod config;
 pub mod error;
+pub mod guest_protocol;
 pub mod kernel;
 pub mod lifecycle;
 pub mod policy;
 pub mod pool;
 pub mod storage;
-pub mod template;
 
 pub use error::{BlazeError, Result};

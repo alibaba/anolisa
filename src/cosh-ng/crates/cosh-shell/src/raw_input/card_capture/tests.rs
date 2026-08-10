@@ -592,6 +592,7 @@ fn session_capture_navigates_toggles_deletes_and_resumes() {
         id: "session-panel".to_string(),
         option_count: 3,
         selected: 0,
+        marked_for_clear: vec![false; 3],
         confirming_clear: false,
     };
     let mut state = CardInputState::default();
@@ -606,12 +607,52 @@ fn session_capture_navigates_toggles_deletes_and_resumes() {
         ]
     );
 
+    state.reset();
     state.apply_capture(&capture);
     assert_eq!(
         state.consume(&capture, b"\x1b[B\n"),
         vec![
-            RawInputEvent::SessionFocus("session-panel".to_string(), 2),
-            RawInputEvent::SessionResume("session-panel".to_string(), 2),
+            RawInputEvent::SessionFocus("session-panel".to_string(), 1),
+            RawInputEvent::SessionResume("session-panel".to_string(), 1),
+        ]
+    );
+}
+
+#[test]
+fn session_toggle_then_enter_uses_effective_marks_within_the_chunk() {
+    let unmarked = RawInputCapture::Session {
+        id: "session-panel".to_string(),
+        option_count: 2,
+        selected: 0,
+        marked_for_clear: vec![false, false],
+        confirming_clear: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&unmarked);
+
+    assert_eq!(
+        state.consume(&unmarked, b" \n"),
+        vec![
+            RawInputEvent::SessionToggle("session-panel".to_string(), 0),
+            RawInputEvent::SessionDelete("session-panel".to_string()),
+        ]
+    );
+
+    let marked = RawInputCapture::Session {
+        id: "session-panel".to_string(),
+        option_count: 2,
+        selected: 0,
+        marked_for_clear: vec![true, false],
+        confirming_clear: false,
+    };
+    let mut state = CardInputState::default();
+    state.apply_capture(&marked);
+
+    assert_eq!(
+        state.consume(&marked, b" \n"),
+        vec![
+            RawInputEvent::SessionToggle("session-panel".to_string(), 0),
+            RawInputEvent::SessionResume("session-panel".to_string(), 0),
         ]
     );
 }
@@ -622,6 +663,7 @@ fn session_clear_confirmation_accepts_and_cancels() {
         id: "session-panel".to_string(),
         option_count: 0,
         selected: 0,
+        marked_for_clear: Vec::new(),
         confirming_clear: true,
     };
     let mut state = CardInputState::default();

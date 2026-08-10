@@ -16,7 +16,7 @@ mounted filesystem while ordinary skill files remain backed by the source tree.
 - Uses `skillfs-views.toml` to choose the default view and secondary views.
 - Shows default-view skills directly in the mounted agent view.
 - Always exposes the virtual `skill-discover` skill so agents can discover
-  skills from secondary views and their source paths.
+  skills from secondary views and open their advertised paths.
 - Compiles `SKILL.md` on read, including conditional blocks and command
   normalization.
 - Passes ordinary files and subdirectories through to the physical source tree.
@@ -194,7 +194,7 @@ After mounting:
 
 - `/skills` shows skills from the default view.
 - `skill-discover/SKILL.md` lists skills from secondary views and their
-  `source_path`.
+  readable `source_path` values.
 
 ## `SKILL.md` Format
 
@@ -396,6 +396,8 @@ crates/
   skillfs-core/   parser, store, views, compiler, env, watcher
   skillfs-fuse/   FUSE filesystem and POSIX passthrough layer
   skillfs-cli/    mount / stop / classify / validate / list
+container/        sidecar image: Dockerfile, entrypoint, preflight, mount probe
+deploy/kubernetes/  Kubernetes sidecar manifests and example skill source
 docs/specs/       implementation specifications
 docs/security/    external decision and runtime activation docs
 docs/testing/     POSIX acceptance and external harness docs
@@ -411,11 +413,33 @@ scripts/          build.sh, test.sh, and optional POSIX harness
   - Creates a temporary skill source directory and `skillfs-views.toml`.
   - Verifies that the FUSE mount starts.
   - Verifies that `/skills` exposes default-view skills.
-  - Verifies that `skill-discover` lists secondary views and `source_path`.
+  - Verifies that `skill-discover` paths open secondary skills.
   - Verifies passthrough reads for physical files inside a skill directory.
   - Verifies clean unmount through `SIGTERM`.
 - [scripts/posix/run_pjdfstest.sh](scripts/posix/run_pjdfstest.sh)
   - Optional external POSIX harness; normal `cargo test` does not depend on it.
+
+## Kubernetes Sidecar
+
+SkillFS can expose its FUSE view to a non-privileged workload from a privileged
+sidecar. This requires Kubernetes 1.29+, `/dev/fuse`, and permission to run the
+sidecar as privileged.
+
+```bash
+cd src/skillfs
+IMAGE=registry.example.com/anolisa/skillfs-sidecar:0.4.0
+docker build -f container/Dockerfile -t "$IMAGE" .
+docker push "$IMAGE"
+kubectl apply -f deploy/kubernetes/00-namespace.yaml
+kubectl apply -f deploy/kubernetes/10-example-configmap.yaml
+sed "s|skillfs-sidecar:dev|$IMAGE|g" deploy/kubernetes/20-pod.yaml |
+  kubectl apply -f -
+```
+
+See the
+[Kubernetes sidecar user guide](../../docs/user-guide/en/runtime/skillfs-kubernetes-sidecar.md)
+([中文](../../docs/user-guide/zh/runtime/skillfs-kubernetes-sidecar.md)) for
+deployment, `skill-discover` verification, troubleshooting, and cleanup.
 
 ## Test Coverage
 
@@ -532,6 +556,8 @@ Related security surfaces:
 
 ## Documentation
 
+- [Kubernetes sidecar deployment guide](../../docs/user-guide/en/runtime/skillfs-kubernetes-sidecar.md) -
+  Build, deploy, verify, and clean up SkillFS in Kubernetes.
 - [docs/specs/skillfs-spec.md](docs/specs/skillfs-spec.md) - Architecture,
   runtime consistency boundaries, and deployment scenarios.
 - [docs/specs/core-spec.md](docs/specs/core-spec.md) - `skillfs-core`

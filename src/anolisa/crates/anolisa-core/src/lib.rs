@@ -54,7 +54,10 @@ pub use adapter::manager::{
     AdapterManager, DisableOutcome, EnableOutcome, ScanReport, StatusReport,
 };
 pub use adapter::registry::DriverRegistry;
-pub use adapter::{AdapterError, DetectResult, detect_framework, expand_layout_placeholders};
+pub use adapter::{
+    AdapterError, DetectResult, detect_framework, expand_layout_placeholders,
+    expand_layout_placeholders_str,
+};
 pub use backup::{BackupEntry, BackupSet};
 pub use capability::{
     CapabilityError, CapabilityManager, CapabilityOutcome, CapabilityRequest, CapabilityRunOutcome,
@@ -80,7 +83,8 @@ pub use hooks::{
     run_hook, run_hooks,
 };
 pub use install_runner::{
-    InstallError, InstallOutcome, InstallRunner, InstalledFile, ResolvedInstallFile,
+    InstallError, InstallOutcome, InstallRunner, InstalledFile, RenderMode, RenderSpec,
+    ResolvedInstallFile,
 };
 pub use integrity::{IntegrityStatus, check_owned_file};
 pub use lifecycle::{

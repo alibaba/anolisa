@@ -122,6 +122,16 @@ pub(crate) fn storage(name: &str) -> blaze_core::Result<()> {
     Ok(())
 }
 
+/// Return a guest-domain error when `name` is currently armed.
+pub(crate) fn guest(name: &str) -> crate::guest::Result<()> {
+    if hit(name) {
+        return Err(crate::guest::GuestError::Rejected(format!(
+            "test failpoint '{name}' triggered"
+        )));
+    }
+    Ok(())
+}
+
 /// Return a daemon state-commit error when `name` is currently armed.
 pub(crate) fn state(name: &str) -> crate::error::Result<()> {
     if hit(name) {

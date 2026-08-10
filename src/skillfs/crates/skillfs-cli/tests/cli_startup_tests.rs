@@ -80,6 +80,34 @@ fn empty_source() -> tempfile::TempDir {
     dir
 }
 
+#[test]
+fn relative_skill_discover_root_fails_before_mount() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--skill-discover-root",
+            "relative/skills",
+        ])
+        .output()
+        .expect("invoke skillfs");
+
+    assert!(!out.status.success(), "relative root must be rejected");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        combined.contains("--skill-discover-root must be absolute"),
+        "expected absolute-path error, got: {combined}"
+    );
+    assert!(!is_mounted(mount.path()), "validation must run before FUSE");
+}
+
 /// Connect to a control socket, send `ping`, and return the one-line
 /// response. Proves the server is alive; the response is either a `pong`
 /// or a `permission_denied` (the test binary may fail peer verification),

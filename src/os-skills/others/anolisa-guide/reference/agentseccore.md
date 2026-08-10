@@ -332,12 +332,12 @@ skill-ledger 是面向 Agent Skill 的安全认证与完整性治理能力。适
 
 | 状态  | 含义  | 建议处置 |
 | --- | --- | --- |
-| `pass` | 文件未变 + 签名有效 + 扫描通过 | 可正常使用 |
-| `none` | 从未经过安全扫描 | 完成首次扫描 + 认证再使用 |
-| `drifted` | 文件已变，与签名 manifest 不一致（含新增/删除/修改） | 重新扫描 + 认证 |
+| `pass` | manifest 验真成功 + 文件未变 + 扫描通过 | 可正常使用 |
+| `none` | `latest.json` 与任何版本 JSON/snapshot artifact 均不存在，或已验真 manifest 的 `scanStatus=none` | 完成首次扫描 + 认证再使用 |
+| `drifted` | manifest 验真成功，但 live 文件与已签名版本不同（含新增/删除/修改）；这是尚未扫描的内容分歧，不是 scanner 已确认的风险结论 | 重新扫描 + 认证，或手工恢复预期文件后再扫描 |
 | `warn` | 扫描存在低风险发现 | 审查并按需重新扫描 |
 | `deny` | 扫描存在高危发现 | 立即修复或禁用该 Skill |
-| `tampered` | 文件未变但签名校验失败，疑似认证元数据被篡改 | 进入安全复核或阻断流程 |
+| `tampered` | Ledger metadata 的 schema、哈希、签名、已签名身份或 latest/版本 artifact 上下文无效（含历史 artifact 仍存在但 `latest.json` 缺失、缺少签名或回放旧 latest） | 审计后执行 `scan`，或用 `certify --findings` 创建新的可信记录 |
 
 #### 安全扫描能力（skill-vetter）
 
@@ -358,7 +358,7 @@ Skill Ledger 支持 skill-vetter 深度安全审查协议。skill-vetter 是一�
 
 **场景 2：Skill 更新或被手工修改后识别内容漂移**
 
-如果 Skill 文件在认证后发生变化，skill-ledger 会将状态标记为 `drifted`。这能帮助客户发现"旧认证结果覆盖新文件内容"的问题，避免 Agent 在不知情的情况下继续使用已经变化的 Skill。客户可以据此触发重新扫描，让认证结果与当前文件内容重新对齐。
+如果 Skill 文件在认证后发生变化，skill-ledger 会将状态标记为 `drifted`。这能帮助客户发现"旧认证结果覆盖新文件内容"的问题，避免 Agent 在不知情的情况下继续使用已经变化的 Skill。`drifted` 本身不是 scanner 已确认的风险结论；客户应触发重新扫描，让认证结果与当前文件内容重新对齐，或先手工恢复预期文件再扫描。
 
 **场景 3：企业统一管理多来源 Skill**
 
@@ -370,7 +370,7 @@ Skill Ledger 支持 skill-vetter 深度安全审查协议。skill-vetter 是一�
 
 **场景 5：出现疑似篡改时进行追溯**
 
-当 Skill 出现 `tampered`、异常漂移或高风险发现时，客户可以利用签名 Manifest、版本链和 `audit` 能力追溯历史状态，判断是正常更新、文件被改动，还是认证元数据被人为修改。这对安全排查、责任界定和后续处置都很有价值。
+当 Skill 出现 `tampered`、未扫描的文件分歧或高风险发现时，客户可以利用签名 Manifest、版本链和 `audit` 能力追溯历史状态，判断是正常更新、文件被改动，还是认证元数据被人为修改。这对安全排查、责任界定和后续处置都很有价值。
 
 #### 通过 Agent 使用（推荐）
 
@@ -431,10 +431,10 @@ Agent 会对指定或全部 Skill 执行安全扫描并写入签名认证结果�
     
 -   **OpenClaw**：通过安全插件在 read SKILL.md 门禁路径上执行检查。pass 状态正常放行，warn 状态记录风险并继续执行；当 Block/Approval 策略开启时，none / drifted / deny / tampered 会触发审批或确认。当前说明仅覆盖已验证的 read SKILL.md 路径，不扩大表述为所有文件访问路径。
     
--   **Hermes**（V0.5.0 新增）：通过 agent-sec-core capability 在 skill\_view 场景中检查 Skill 状态。默认配置下不会直接阻断回答，但会把非 pass 状态以前置 warning 的形式展示给用户；如开启 enable\_block 并配置阻断状态，则可对指定风险状态直接阻断。
+-   **Hermes**（V0.5.0 新增）：通过 agent-sec-core capability 在 skill\_view 场景中检查 Skill 状态。默认配置下不会直接阻断回答，但会把非 pass 状态以前置 warning 的形式展示给用户；如开启 enable\_block 并配置阻断状态，则可对指定状态直接阻断。
     
 
-Skill Ledger 的 Hook 用来控制 Agent 在读取或调用 Skill 前如何处理非 pass 状态。推荐默认先用观察模式上线，确认误报和业务影响后，再对 none / drifted / deny / tampered 开启强门禁。 **OpenClaw 场景** OpenClaw 通过 enableBlock 控制门禁策略。开启后，Agent 读取非 pass Skill 时会返回 requireApproval，用户需要在支持审批卡片的 Dashboard、WebChat 或 Control UI 中确认后继续；关闭后，风险只进入日志和审计，不阻断本轮读取。
+Skill Ledger 的 Hook 用来控制 Agent 在读取或调用 Skill 前如何处理非 pass 状态。推荐默认先用观察模式上线，确认误报和业务影响后，再对 none / drifted / deny / tampered 开启强门禁。 **OpenClaw 场景** OpenClaw 通过 enableBlock 控制门禁策略。开启后，Agent 读取非 pass Skill 时会返回 requireApproval，用户需要在支持审批卡片的 Dashboard、WebChat 或 Control UI 中确认后继续；关闭后，状态与告警只进入日志和审计，不阻断本轮读取。
 
 ```
 # 开启强门禁
@@ -480,12 +480,13 @@ max_warning_contexts = 128
 | --- | --- |
 | init | 初始化 Skill Ledger 配置和 Ed25519 签名密钥；默认会对已发现的 Skill 执行 baseline scan。 |
 | init --no-baseline | 只初始化密钥，不扫描 Skill；适合只想先完成密钥准备的场景。 |
-| check <路径> | 检查指定 Skill 的完整性状态，不执行安全扫描；首次检查无 manifest 的 Skill 时会创建未签名 baseline，状态为 none。 |
+| check <路径> | 只读检查指定 Skill 的完整性状态，不执行安全扫描，也不创建 manifest 或 baseline。 |
 | check --all | 批量检查所有已发现 Skill 的完整性状态。 |
 | scan <路径> | 对指定 Skill 执行快速安全扫描，并写入签名认证结果。 |
 | scan --all | 批量扫描所有已发现 Skill，并写入签名认证结果。 |
 | certify <路径> --findings <文件> | 将外部扫描或 Agent 深度审查产生的 findings 写入签名版本链。 |
 | status | 查看密钥、配置和 Skill 健康度。 |
+| decide <路径> --action allow\|always_allow\|block\|rollback | 记录用户决策并刷新 activation。 |
 | audit <路径> | 审计指定 Skill 的版本链完整性。 |
 | list-scanners | 列出已注册扫描器。 |
 
@@ -544,7 +545,7 @@ agent-sec-cli skill-ledger check /path/to/your-skill
 agent-sec-cli skill-ledger check --all
 ```
 
-首次检查会自动创建基线 manifest（状态为 `none`），后续检查将报告文件变更、签名状态和扫描结果。
+`check` 始终只读。`latest.json` 与任何版本 JSON/snapshot artifact 均不存在时返回 `none`，但不创建基线；历史 artifact 仍存在但 latest 缺失时返回 `tampered`。执行 `scan`、`certify` 或带 baseline 的 `init` 后，后续检查才会报告已签名状态和文件变更。
 
 | 参数  | 说明  |
 | --- | --- |
@@ -1246,7 +1247,7 @@ Suggested actions:
 
 ### Q6：Skill 状态出现 `tampered` 怎么办？
 
-**A**：`tampered` 表示文件未变但签名校验失败，疑似认证元数据被篡改。建议：
+**A**：`tampered` 表示 Ledger metadata 不完整（例如历史 artifact 仍存在但 `latest.json` 缺失），或未通过 schema、manifestHash、签名、已签名身份及 latest/版本 artifact 上下文校验，与 Skill 文件是否同时变更无关。建议：
 
 1.  立即停用相关 Skill；
     
@@ -1254,7 +1255,7 @@ Suggested actions:
     
 3.  复核签名密钥是否被替换或私钥泄漏；
     
-4.  重新执行扫描 + `certify` 写入新版本。
+4.  执行 `scan`，或使用已有审查结果运行 `certify --findings`，写入新的可信版本。
     
 
 ### Q7：可观测事件的关联是强匹配还是弱匹配？

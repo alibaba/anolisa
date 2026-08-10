@@ -183,6 +183,37 @@ impl AdapterClaim {
         allowed_external_roots: &[PathBuf],
         extra_owned_roots: &[PathBuf],
     ) -> Result<(), ClaimValidationError> {
+        self.validate_with_trust(layout, allowed_external_roots, extra_owned_roots, &[])
+    }
+
+    /// Like [`Self::validate_with_owned_roots`], with one more allowance:
+    /// a symlink target that is byte-for-byte **equal** to an entry of
+    /// `exact_symlink_targets` validates even though it is under none of
+    /// the owned roots.
+    ///
+    /// This carries the enable-time anchor (see
+    /// `StateStore::find_adapter_trust_root`): after an RPM update moves a
+    /// contract's external resource root, the prior receipt's target is no
+    /// longer derivable from the current contract, yet status/disable must
+    /// still be able to report and clean it up, and re-enable must migrate
+    /// it. Exact equality is deliberate — an entry here authorizes one
+    /// path, never a subtree, so a forged anchor (e.g. `/etc`) cannot
+    /// widen validation to paths beneath it (e.g. `/etc/cron.d/evil`).
+    /// Relative entries never match: anchors are recorded absolute.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`ClaimValidationError`] encountered: an owned
+    /// path outside ANOLISA roots, an external path outside every
+    /// `allowed_external_roots` entry, a traversal/symlink escape, or an
+    /// invalid plugin id.
+    pub fn validate_with_trust(
+        &self,
+        layout: &FsLayout,
+        allowed_external_roots: &[PathBuf],
+        extra_owned_roots: &[PathBuf],
+        exact_symlink_targets: &[PathBuf],
+    ) -> Result<(), ClaimValidationError> {
         if let Some(pid) = &self.plugin_id {
             validate_plugin_id(pid)?;
         }
@@ -191,6 +222,7 @@ impl AdapterClaim {
                 layout,
                 allowed_external_roots,
                 extra_owned_roots,
+                exact_symlink_targets,
             )?;
             match &resource.kind {
                 ClaimResourceKind::FrameworkPlugin { framework, .. }
@@ -208,6 +240,32 @@ impl AdapterClaim {
             }
         }
         Ok(())
+    }
+
+    /// True when validating this receipt actually depends on external
+    /// symlink-target trust: some [`ClaimResourceKind::Symlink`] resource
+    /// has a *target* that does not validate as ANOLISA-owned (primary
+    /// layout roots plus `trusted_owned_roots`).
+    ///
+    /// This is the Manager's anchor-persistence criterion. A receipt whose
+    /// symlink targets all re-validate from the static boundary on every
+    /// run — or one with no symlink resources at all (every driver but
+    /// Codex today) — never reads an anchor back, so persisting one would
+    /// only bump the state schema for nothing. The check reuses the same
+    /// owned-target validation as [`ClaimResource::validate_with_owned_roots`],
+    /// so the persistence condition cannot drift from the consumption
+    /// condition.
+    pub fn requires_external_symlink_trust(
+        &self,
+        layout: &FsLayout,
+        trusted_owned_roots: &[PathBuf],
+    ) -> bool {
+        self.resources.iter().any(|res| match &res.kind {
+            ClaimResourceKind::Symlink { target, .. } => {
+                validate_owned_symlink_target(layout, target, trusted_owned_roots).is_err()
+            }
+            _ => false,
+        })
     }
 }
 
@@ -290,12 +348,13 @@ impl ClaimResource {
         layout: &FsLayout,
         allowed_external_roots: &[PathBuf],
     ) -> Result<(), ClaimValidationError> {
-        self.validate_with_owned_roots(layout, allowed_external_roots, &[])
+        self.validate_with_owned_roots(layout, allowed_external_roots, &[], &[])
     }
 
     /// Like [`Self::validate`], but trusts `extra_owned_roots` as additional
-    /// ANOLISA-owned locations for a symlink *target*. See
-    /// [`AdapterClaim::validate_with_owned_roots`] for the trust contract.
+    /// ANOLISA-owned locations for a symlink *target*, and
+    /// `exact_symlink_targets` as byte-for-byte target allowances. See
+    /// [`AdapterClaim::validate_with_trust`] for the trust contract.
     ///
     /// # Errors
     ///
@@ -305,6 +364,7 @@ impl ClaimResource {
         layout: &FsLayout,
         allowed_external_roots: &[PathBuf],
         extra_owned_roots: &[PathBuf],
+        exact_symlink_targets: &[PathBuf],
     ) -> Result<(), ClaimValidationError> {
         match &self.kind {
             ClaimResourceKind::OwnedPath { path } => {
@@ -343,6 +403,16 @@ impl ClaimResource {
                         source,
                     },
                 )?;
+                // Anchor allowance: equality only, absolute only — an
+                // anchored path never authorizes anything beneath it. See
+                // [`AdapterClaim::validate_with_trust`].
+                if target.is_absolute()
+                    && exact_symlink_targets
+                        .iter()
+                        .any(|allowed| allowed == target)
+                {
+                    return Ok(());
+                }
                 validate_owned_symlink_target(layout, target, extra_owned_roots).map_err(|source| {
                     ClaimValidationError::OwnedPath {
                         id: self.id.clone(),
@@ -1789,6 +1859,34 @@ mod tests {
             matches!(err, ClaimValidationError::OwnedPath { .. }),
             "got {err:?}"
         );
+    }
+
+    /// The anchor-persistence criterion: only a symlink *target* outside
+    /// the static owned boundary requires external trust. Receipts whose
+    /// targets validate as owned — or without symlink resources at all
+    /// (every driver but Codex) — never do, so the Manager persists no
+    /// anchor for them.
+    #[test]
+    fn requires_external_symlink_trust_only_for_out_of_boundary_targets() {
+        let layout = FsLayout::system(None);
+        // The sample target lives under the primary layout's owned roots.
+        assert!(!sample_codex_claim().requires_external_symlink_trust(&layout, &[]));
+
+        let mut claim = sample_codex_claim();
+        for res in &mut claim.resources {
+            if let ClaimResourceKind::Symlink { target, .. } = &mut res.kind {
+                *target = PathBuf::from("/opt/vendor/plugin");
+            }
+        }
+        assert!(claim.requires_external_symlink_trust(&layout, &[]));
+        // A Manager-trusted extra owned root covering the target lifts it.
+        assert!(!claim.requires_external_symlink_trust(&layout, &[PathBuf::from("/opt/vendor")]));
+
+        // No symlink resources left: external trust is never required.
+        claim
+            .resources
+            .retain(|r| !matches!(r.kind, ClaimResourceKind::Symlink { .. }));
+        assert!(!claim.requires_external_symlink_trust(&layout, &[]));
     }
 
     /// A forged receipt cannot self-authorize a symlink target by also

@@ -1,4 +1,4 @@
-name: Qoder AI Review
+name: AI / Qoder Review
 
 on:
   pull_request_target:
@@ -842,7 +842,7 @@ jobs:
             if grep -qE '^src/os-skills/' "$files_file"; then [[ "$component" == "general" ]] && component="os-skills"; fi
             if grep -qE '^src/copilot-shell/' "$files_file"; then [[ "$component" == "general" ]] && component="copilot-shell"; fi
             if grep -qE '^src/cosh-ng/' "$files_file"; then [[ "$component" == "general" ]] && component="cosh-ng"; fi
-            if grep -qE '^src/(anvil|blaze)/' "$files_file"; then [[ "$component" == "general" ]] && component="blaze"; fi
+            if grep -qE '^src/blaze/' "$files_file"; then [[ "$component" == "general" ]] && component="blaze"; fi
             if grep -qE '^src/ktuner/' "$files_file"; then [[ "$component" == "general" ]] && component="ktuner"; fi
           else
             add_component_context "$component"

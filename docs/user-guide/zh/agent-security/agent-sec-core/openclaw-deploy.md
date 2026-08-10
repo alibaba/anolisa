@@ -181,7 +181,7 @@ openclaw config set plugins.entries.agent-sec.config.promptScanBlock true
 openclaw config set plugins.entries.agent-sec.config.codeScanRequireApproval true
 ```
 
-如需部署级覆盖，`CODE_SCANNER_HOOK_ENABLED=true|false` 的优先级高于 `capabilities["scan-code"].enabled`，`CODE_SCANNER_MODE=observe|ask` 的优先级高于 `codeScanRequireApproval`。非法或不支持的值（包括 `block`/`deny`）等价于未设置，并回到插件配置。普通 findings 不支持直接 block；已有 self-protect 规则仍是强制 block 例外。OpenClaw 不消费 `CODE_SCANNER_TIMEOUT`，继续使用固定 10 秒超时。
+如需部署级覆盖，`CODE_SCANNER_HOOK_ENABLED=true|false` 的优先级高于 `capabilities["scan-code"].enabled`，`CODE_SCANNER_MODE=observe|ask|block` 的优先级高于 `codeScanRequireApproval`。`debug` 是 `observe` 的别名，`deny` 是 `block` 的别名，`warn` 或非法值等价于未设置，并回到插件配置。在 `ask` 模式下，普通 findings 返回 `requireApproval`；在 `block` 模式下，普通 findings 返回 `{ block: true, blockReason }`。已有 self-protect 规则仍是不受模式影响的强制 block 例外。OpenClaw 不消费 `CODE_SCANNER_TIMEOUT`，继续使用固定 10 秒超时。
 
 启用 PII deny 阻断：
 

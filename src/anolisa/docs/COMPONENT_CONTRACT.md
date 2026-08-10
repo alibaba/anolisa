@@ -176,6 +176,165 @@ Display behavior:
 - `--dry-run` previews the notices that a real operation would show, labeled
   as a preview; nothing is executed.
 
+## Content Rendering (`render`)
+
+A `[[component.layout.files]]` entry may request that ANOLISA render the
+file *content* against the final filesystem layout before placing it:
+
+```toml
+[[component.layout.files]]
+source = "share/anolisa/sec-core/agent-sec-core.service.in"
+target = "{userunitdir}/agent-sec-core.service"
+mode = "0644"
+render = "anolisa-paths-v1"
+```
+
+`anolisa-paths-v1` substitutes the same placeholder vocabulary used for
+destination paths — `{bindir}`, `{libdir}`, `{libexecdir}`, `{datadir}`,
+`{etcdir}`, `{statedir}`, `{logdir}`, `{cachedir}`, `{unitdir}`,
+`{userunitdir}` (and underscore aliases), plus `{component}` — inside the
+file content. This makes shipped templates such as systemd units
+relocatable: the rendered `ExecStart` and `ReadWritePaths` follow the
+install mode and any custom `--prefix` instead of hard-coding
+`/usr/local`.
+
+Rules:
+
+- `render` applies to a single regular file. Directory sources and
+  symlink entries must not declare it.
+- The content must be valid UTF-8; an unknown `{...}` token in the
+  content fails the install. Rendering is opt-in per entry, so files that
+  legitimately contain braces are unaffected unless they declare
+  `render`.
+- The value is versioned. An installer that does not implement the
+  declared value refuses the install rather than copying the template
+  verbatim; pair new `render` values with a matching
+  `min_anolisa_version`.
+- The recorded file digest covers the rendered bytes, so integrity
+  verification and repair operate on what is actually on disk.
+
+The RPM backend does not render: RPM packages expand paths in their spec
+at build time. `render` exists so the same source template serves both
+packagings.
+
+## Minimum CLI Version Gate
+
+`[component.contract].min_anolisa_version` declares the oldest ANOLISA
+CLI that can install the contract:
+
+```toml
+[component.contract]
+schema_version = "1.0"
+min_anolisa_version = "0.2.17"
+```
+
+Raw install and update compare it (SemVer) against the running CLI and
+refuse the operation when the CLI is older, pointing the operator at
+`anolisa self-update`. A value that is not valid SemVer is also refused.
+There is no override flag: manifest parsing is tolerant, so an older CLI
+would otherwise silently drop fields such as `render` and install a
+broken result. Set the field to the **first released ANOLISA version
+that ships** whichever contract behavior the component depends on —
+never an earlier release that merely parses the field. Content
+rendering, this gate, and backend-specific adapter roots all ship in
+0.2.17; a contract using any of them must declare at least that.
+
+### Bootstrap: protecting CLIs older than the gate itself
+
+The gate only works once a CLI that evaluates it is running — released
+CLIs ≤ 0.2.16 parse tolerantly, so they would ignore both
+`min_anolisa_version` and `render` and install the raw template as-is.
+No contract-side hook can stop them (verified against a real 0.2.16
+build — repo `index.toml` `schema_version`, `components.toml` schema,
+and the manifest's own tolerant `schema_version` all do **not** stop an
+old CLI), so the protection lives in the distribution layout instead:
+
+- `v1/index.toml` — the generation-1 index. Must only ever contain
+  entries whose contracts pre-0.2.17 CLIs install correctly. This is
+  the only file those released binaries read, and they parse it
+  atomically: one entry shape they cannot represent would take every
+  unrelated component down with it.
+- `v1/index-v2.toml` — the complete generation-2 index (a full world
+  view, not a delta; publish both files from the same pipeline run).
+  Entries whose contracts depend on ≥ 0.2.17 semantics are published
+  **only** here. 0.2.17+ CLIs read this file when present and fall
+  back to `index.toml` when it is not.
+
+An old CLI therefore keeps installing unrelated components untouched
+and resolves a gated component as not-found — fail closed, no silent
+mis-install and no collateral breakage. From 0.2.17 the index is also
+parsed entry-tolerantly: a row this build cannot represent is skipped
+with a warning, and any request that row may have answered (same
+component and target; any version for "latest", the exact version when
+pinned) is refused with a `self-update` hint rather than answered from
+older parsable rows — skipping must never turn into a silent downgrade.
+This split is a one-time measure: future entry shapes will not need an
+`index-v3.toml`.
+
+### Downgrade and rollback with trust anchors
+
+Enabling an adapter whose resources live at an external RPM root
+records a trust anchor in `installed.toml` and bumps its schema to
+v6. Anchors are recorded only when the enabled receipt actually
+depends on external trust: it must contain a symlink resource whose
+*target* lies outside the trusted layout and datadir roots (today only
+the Codex driver records such a symlink). An RPM contract whose
+`resource_root` resolves inside the datadir, or an adapter whose
+receipt carries no symlink resources, needs no trust migration and
+keeps state at v5. Released
+0.2.16 binaries refuse a v6 state file read-only (by
+design — they would otherwise silently drop the anchor), so a direct
+binary downgrade while an anchored receipt exists leaves state
+commands refusing until the newer CLI runs again. The supported
+downgrade path is: `anolisa adapter disable` any adapters of
+RPM-provenance components with a declared
+`[adapters.backends.rpm].resource_root`, which removes their anchors
+— an anchor-free state is written back at schema v5, byte-compatible
+with 0.2.16 — then downgrade the binary. No data is lost either way;
+the v6 refusal is deliberate fail-closed, not corruption.
+
+## Backend-Specific Adapter Resource Roots
+
+For a unified raw/RPM contract, the adapter `dest` describes where a
+*raw* install lays the bundle — and, for raw installs, where
+`adapter enable` later reads it. An RPM package may carry the same
+bundle at a package-owned path instead. Declare that path per backend:
+
+```toml
+[[adapters]]
+framework = "openclaw"
+source = "adapters/sec-core/openclaw"
+dest = "{datadir}/adapters/{component}/openclaw/"
+
+[adapters.backends.rpm]
+resource_root = "/opt/agent-sec/openclaw-plugin/"
+```
+
+Selection follows the component's installed provenance recorded in
+state:
+
+- RPM-installed (managed, adopted, or observed) with a declared
+  `resource_root`: scan/status/enable read the bundle from that root. It
+  is read-only — ANOLISA never writes under it — and must be an
+  absolute path or a `{datadir}`-rooted template (plus `{component}`).
+  Other layout placeholders (`{bindir}`, `{libexecdir}`, …) are
+  rejected: they would expand against the *consuming* scope's layout
+  rather than the contract's — a user-mode manager consuming a system
+  RPM contract would resolve them under the user prefix. A template
+  whose expansion is not an absolute path is likewise rejected before
+  any filesystem probe: a relative root would resolve against the
+  process working directory.
+- RPM-installed without a declared `resource_root`: resolution falls
+  back to `dest` and convention discovery, as before.
+- Raw-installed: `dest` semantics are unchanged; the RPM root is
+  ignored.
+
+A declared root is authoritative for its backend. When the directory is
+missing or holds no valid bundle, the operation reports the expected
+path instead of silently falling back — a missing RPM payload is a
+packaging defect that must surface, not be masked by a stale raw
+leftover in `{datadir}`.
+
 ## Contract Template
 
 Use a shipped component manifest such as

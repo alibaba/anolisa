@@ -1,4 +1,4 @@
-name: Qoder Assistant
+name: AI / Qoder Assistant
 
 on:
   issue_comment:

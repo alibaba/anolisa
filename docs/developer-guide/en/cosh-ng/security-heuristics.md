@@ -1,5 +1,7 @@
 # Security Heuristics
 
+[中文版](../../zh/cosh-ng/security-heuristics.md)
+
 ## Overview
 
 The cosh-ng audit subsystem implements a PEP→PDP→Log three-stage security decision pipeline. Each command undergoes structured parsing, policy matching, and logging before execution, resulting in one of three dispositions: Allow / Deny / RequireApproval.

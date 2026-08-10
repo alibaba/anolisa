@@ -371,6 +371,30 @@ class TestReplacementProtocol(unittest.TestCase):
         self.assertNotIn("additionalContext", hso,
                          "Qoder compressed content must not be additive")
 
+    def test_opencode_uses_string_replacement(self):
+        """OpenCode should receive a replacement that its plugin can apply."""
+        large_payload = _make_large_json_payload()
+
+        result = _run_hook(
+            {
+                "tool_name": "bash",
+                "tool_response": json.dumps(large_payload),
+                "session_id": "test-session",
+                "tool_use_id": "toolu_test",
+            },
+            agent_id="opencode",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertEqual(hso.get("hookEventName"), "PostToolUse")
+        self.assertIsInstance(hso.get("updatedToolOutput"), str)
+        self.assertNotIn("additionalContext", hso,
+                         "OpenCode compressed content must not be additive")
+
     def test_replacement_is_smaller(self):
         """The replacement output should be smaller than the original."""
         large_payload = _make_large_json_payload(1000)

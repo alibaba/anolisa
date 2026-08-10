@@ -7,7 +7,9 @@ mod pair;
 mod response;
 
 // Re-export main types
-pub use aggregator::{ConnectionId, ConnectionState, HttpConnectionAggregator};
+pub use aggregator::{ConnectionId, HttpConnectionAggregator};
+// Crate-internal: connection state machine (see review F3 note on the enum).
+pub(crate) use aggregator::ConnectionState;
 pub use pair::HttpPair;
 pub use response::AggregatedResponse;
 

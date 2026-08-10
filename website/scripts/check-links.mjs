@@ -37,6 +37,13 @@ for (const htmlFile of htmlFiles) {
     errors.push(`${path.relative(buildDir, htmlFile)}: duplicate DOM id "${id}"`);
   }
 
+  const article = html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/)?.[1] ?? '';
+  if (/<a\b[^>]*>\s*(?:中文版|English)\s*<\/a>/.test(article)) {
+    errors.push(
+      `${path.relative(buildDir, htmlFile)}: inline locale switch duplicates the navbar`,
+    );
+  }
+
   for (const match of html.matchAll(/<a\b[^>]*\shref="([^"]+)"/g)) {
     const href = match[1];
     if (/^(?:https?:|mailto:|tel:|javascript:)/.test(href)) continue;

@@ -17,6 +17,9 @@ pub use serialization::{
     serialize_shell_evidence_result, serialize_user_message, HostExecutedInputWait,
     HostExecutedShellMetadata, HostExecutedShellResult,
 };
+pub(crate) use serialization::{
+    serialize_cosh_core_user_message, serialize_initialize_without_session_start,
+};
 
 const SHELL_HANDOFF_EVIDENCE_PROMPT_MARKER: &str = "ShellCommandCompleted";
 const SHELL_HANDOFF_CONTINUATION_HINT: &str =

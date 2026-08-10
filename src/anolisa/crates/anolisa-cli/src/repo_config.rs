@@ -674,6 +674,22 @@ pub fn raw_index_url(base_url: &str) -> String {
     format!("{}/index.toml", raw_root(base_url))
 }
 
+/// Generation-2 index location under the same raw distribution root.
+///
+/// `index-v2.toml` is a complete index (not a delta): clients that
+/// understand it read only this file, falling back to `index.toml` when the
+/// repository has not published one. Split-index bootstrap: entries whose
+/// embedded contract depends on ≥ 0.2.17 semantics (`render`,
+/// `min_anolisa_version` enforcement, backend adapter roots) are published
+/// only here, so released pre-0.2.17 CLIs — which parse the shared index
+/// atomically and would fail it wholesale on any entry shape they cannot
+/// represent — never observe them: they keep installing unrelated
+/// components from `index.toml` and resolve gated components as not-found
+/// (fail closed).
+pub fn raw_index_v2_url(base_url: &str) -> String {
+    format!("{}/index-v2.toml", raw_root(base_url))
+}
+
 /// Component identity index location under the raw repository root.
 ///
 /// `components.toml` is separate from raw `index.toml`: the former resolves a

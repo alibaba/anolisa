@@ -1,85 +1,60 @@
-# cosh-core Overview
+# Integrate another frontend
 
-cosh-core is the AI Agent runtime core of cosh-ng. It provides a headless JSONL backend integrating LLM providers, hook system, tool execution, skill management, and session persistence.
+[中文版](../../../../zh/user-entrypoint/cosh-ng/core/overview.md)
 
-## Positioning
+`cosh-core` runs an Agent without the interactive terminal UI. Start `cosh` for
+normal terminal use; call `cosh-core` directly when another frontend needs a
+JSONL process, a one-shot prompt, or session management.
 
-cosh-core serves as the backend engine for cosh-shell. cosh-shell communicates with the cosh-core process via stdin/stdout (JSONL protocol). cosh-core can also be used independently:
-
-- **Single prompt mode** — Pass in a prompt directly, exit after execution
-- **Headless mode** — Long-running process, continuously receiving JSONL messages
-- **Registry mode** — Process registry requests only, then exit
-
-## Run Modes
+## Start a core process
 
 ```bash
-# Single prompt (requires explicit --headless)
-cosh-core --headless "Check system load"
+# One prompt, then exit
+cosh-core --headless "Inspect disk usage; do not modify anything"
 
-# Long-running headless mode (receives JSONL via stdin)
+# Long-running JSONL process
 cosh-core --headless
 
-# Registry mode
-cosh-core --registry
-
-# Override model
-cosh-core --headless --model qwen-max "Analyze this code"
-
-# Override approval mode
-cosh-core --headless --approval-mode trust "Install nginx"
-
-# Resume session
+# Resume or compact a saved conversation
 cosh-core --headless --resume <session-id>
+cosh-core --headless --resume <session-id> --compact
+
+# Handle one provider-free registry request from stdin
+cosh-core --registry
 ```
 
-## CLI Arguments
+When stdin is not a TTY, `cosh-core` selects headless mode automatically. In
+headless and registry modes, stdout is JSONL protocol output; logs go to the
+configured log file or stderr.
 
-| Argument | Description |
-|----------|-------------|
-| `--headless` | Force headless JSONL mode |
-| `--model <name>` | Override configured model |
-| `--approval-mode <mode>` | Override approval mode (trust/auto/balanced/strict) |
-| `--allowed-tools <tools>` | Comma-separated list of auto-approved tools |
-| `--resume <session-id>` | Resume an existing session |
-| `--verbose` | Increase log verbosity |
-| `--registry` | Registry mode |
-| `--enable-shell-evidence-tool` | Enable terminal output evidence tool |
+## Options used by integrations
 
-## Core Capabilities
+| Option | Use |
+|---|---|
+| `--model <name>` | Override the configured model for this process |
+| `--approval-mode <mode>` | Select `trust`, `auto`, `balanced`, or `strict` |
+| `--allowed-tools <names>` | Let exact tool names bypass approval |
+| `--tools <selection>` | Expose `default`, `empty`, or a comma-separated subset |
+| `--bare` | Ignore project config, Hooks, Skills, Extensions, and persistence |
+| `--resume <id>` | Select a saved conversation for the current workspace |
+| `--compact` | Compact the selected conversation and exit |
+| `--enable-shell-evidence-tool` | Expose bounded terminal evidence to cosh-shell |
 
-| Capability | Description | Documentation |
-|-----------|-------------|---------------|
-| LLM Providers | OpenAI compatible / Aliyun SysOM | [providers.md](providers.md) |
-| Hook System | 8 event points, extensible | [hooks.md](hooks.md) |
-| Tool Execution | Built-in tools + custom tools | [tools.md](tools.md) |
-| Skill Management | Markdown skill definitions | [skills.md](skills.md) |
-| Extension Loading | cosh-extension.json | [extensions.md](extensions.md) |
-| Session Persistence | JSON format session storage | — |
+`--tools` controls what the model can see. `--allowed-tools` changes the
+approval boundary; allow-listing a tool can grant real execution authority.
 
-## Architecture Overview
+## Connect a frontend
 
-```
-stdin (JSONL)                stdout (JSONL)
-     │                            ▲
-     ▼                            │
-┌────────────────────────────────────────┐
-│              cosh-core                 │
-│  ┌──────┐  ┌──────────┐  ┌──────────┐  │
-│  │ Auth │  │ Provider │  │  Tools   │  │
-│  └──────┘  └──────────┘  └──────────┘  │
-│  ┌──────┐  ┌──────────┐  ┌──────────┐  │
-│  │Hooks │  │ Session  │  │  Skills  │  │
-│  └──────┘  └──────────┘  └──────────┘  │
-└────────────────────────────────────────┘
-```
+1. Start `cosh-core --headless` and keep stdin/stdout open.
+2. Send a `control_request` with `subtype: "initialize"`, then send `user`
+   messages as JSON objects, one per line.
+3. Read streamed output and answer Core `control_request` messages with the
+   same request ID. A client must handle tool approval, user questions, and
+   authentication when they occur.
+4. Send `subtype: "shutdown"` when the frontend is done.
 
-## Authentication Flow
-
-If no API key is configured, cosh-core sends an `auth_required` control request on startup:
-
-1. Core sends `AuthRequired`, listing available authentication providers
-2. Shell (or external client) displays authentication UI
-3. User selects a provider and fills in credentials
-4. Shell sends back `ControlResponse` containing credentials
-5. Core applies credentials, optionally persists to config.toml
-6. Core sends `auth_ok` status, begins normal operation
+See [Headless mode](headless-mode.md) for message examples and
+[the IPC protocol reference](../../../../../developer-guide/en/cosh-ng/ipc-protocol.md)
+for the complete schema. Configure credentials in [Providers](providers.md),
+and see [Configuration](../configuration.md) for workspace and persistence
+settings.

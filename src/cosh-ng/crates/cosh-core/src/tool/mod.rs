@@ -60,16 +60,6 @@ pub(super) fn expand_tilde(path_str: &str) -> PathBuf {
     }
 }
 
-/// Resolve a path string, expanding `~` and relative paths against `cwd`.
-pub(super) fn resolve_path(path_str: &str, cwd: &std::path::Path) -> PathBuf {
-    let expanded = expand_tilde(path_str);
-    if expanded.is_absolute() {
-        expanded
-    } else {
-        cwd.join(expanded)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolKind {
     ReadOnly,
@@ -630,21 +620,5 @@ mod tests {
     fn expand_tilde_no_tilde_passthrough() {
         let result = expand_tilde("relative/path");
         assert_eq!(result, PathBuf::from("relative/path"));
-    }
-
-    #[test]
-    fn resolve_path_tilde_is_absolute() {
-        let cwd = std::path::Path::new("/tmp");
-        let result = resolve_path("~/test.rs", cwd);
-        assert!(result.is_absolute());
-        assert!(!result.starts_with(cwd));
-        assert!(result.ends_with("test.rs"));
-    }
-
-    #[test]
-    fn resolve_path_relative_joins_cwd() {
-        let cwd = std::path::Path::new("/workspace");
-        let result = resolve_path("src/main.rs", cwd);
-        assert_eq!(result, PathBuf::from("/workspace/src/main.rs"));
     }
 }

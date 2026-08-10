@@ -8,7 +8,7 @@ blaze is a **daemon-only** per-host sandbox orchestrator. All sandbox management
 
 Two-crate workspace:
 
-- **blaze-core** (library): policy engine, lifecycle state machine, backend selector, pool manager, template registry, kernel hook registry, config schema. Zero I/O beyond local TOML/JSON parsing.
+- **blaze-core** (library): policy engine, lifecycle state machine, backend selector, pool manager, kernel hook registry, config schema. Zero I/O beyond local TOML/JSON parsing.
 - **blazed** (binary): daemon HTTP server (UDS + TCP), spawner implementations, metrics endpoint, CLI for daemon lifecycle commands.
 
 Dependency direction: `blazed` → `blaze-core`. No reverse dependency.

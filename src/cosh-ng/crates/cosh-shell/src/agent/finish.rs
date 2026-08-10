@@ -6,10 +6,12 @@ use crate::agent::events::{
     flush_cosh_request_filter_into_active_run, render_agent_structured_events,
     render_held_events_into_active_run, state_has_pending_interaction,
 };
-use crate::agent::governance::hook_notification_display_text;
+use crate::agent::governance::{
+    hook_notification_display_text, project_hook_notifications_for_display,
+};
 use crate::agent::run::{
     has_queued_run_before_held_text, start_agent_run_with_origin, start_pending_agent_run,
-    ActiveAgentRun, PendingRequestClass,
+    ActiveAgentRun, PendingHookNotification, PendingRequestClass,
 };
 use crate::recommendation::personal_integration::record_finished_agent_run;
 use crate::runtime::evidence_requests::{
@@ -90,32 +92,24 @@ pub(crate) fn finish_active_agent_run<W: Write>(
     // Drain any unconsumed pending hook notifications into deferred_events
     // (orphan case: hook returned block, so no ToolPermissionRequest was emitted)
     let i18n = I18n::new(active_run.language);
+    let run_id = active_run.request.id.clone();
     for notification in active_run.pending_hook_notifications.drain(..) {
-        let display_text = hook_notification_display_text(
-            &notification.hook_name,
-            &notification.message,
-            notification.decision.as_deref(),
-            &i18n,
-        );
-        active_run.deferred_events.push(GovernedEvent {
-            decision: GovernanceDecision::Display,
-            policy_decision: GovernancePolicyDecision::DisplayOnly,
-            event: AgentEvent::HookNotification {
-                run_id: active_run.request.id.clone(),
-                hook_name: notification.hook_name,
-                message: notification.message,
-                tool_use_id: notification.tool_use_id,
-                decision: notification.decision,
-            },
-            reason: "orphan hook notification".to_string(),
-            display_text,
-            auto_execute: false,
-        });
+        active_run
+            .deferred_events
+            .push(pending_hook_notification_event(
+                &run_id,
+                &notification,
+                &i18n,
+            ));
     }
     if !active_run.deferred_events.is_empty() {
+        // Projection is throwaway and display-only: `deferred_events` itself
+        // still holds every original notification for approval linking and
+        // audit.
+        let displayed = project_hook_notifications_for_display(&active_run.deferred_events, &i18n);
         active_run
             .renderer
-            .write_governed_events(output, &active_run.deferred_events)?;
+            .write_governed_events(output, &displayed)?;
     }
     let evidence_requests = record_cosh_requests_from_active_run(state, &mut active_run);
     for notice in &evidence_requests.notices {
@@ -240,16 +234,52 @@ fn render_recovery_deferred_context<W: Write>(
     active_run: &ActiveAgentRun,
     output: &mut W,
 ) -> std::io::Result<()> {
-    let events = active_run
+    let i18n = I18n::new(active_run.language);
+    let mut events = active_run
         .deferred_events
         .iter()
         .filter(|event| !governed_event_is_provider_timeout(event))
         .cloned()
         .collect::<Vec<_>>();
+    events.extend(
+        active_run
+            .pending_hook_notifications
+            .iter()
+            .map(|notification| {
+                pending_hook_notification_event(&active_run.request.id, notification, &i18n)
+            }),
+    );
     if events.is_empty() {
         return Ok(());
     }
+    let events = project_hook_notifications_for_display(&events, &i18n);
     active_run.renderer.write_governed_events(output, &events)
+}
+
+fn pending_hook_notification_event(
+    run_id: &str,
+    notification: &PendingHookNotification,
+    i18n: &I18n,
+) -> GovernedEvent {
+    GovernedEvent {
+        decision: GovernanceDecision::Display,
+        policy_decision: GovernancePolicyDecision::DisplayOnly,
+        event: AgentEvent::HookNotification {
+            run_id: run_id.to_string(),
+            hook_name: notification.hook_name.clone(),
+            message: notification.message.clone(),
+            tool_use_id: notification.tool_use_id.clone(),
+            decision: notification.decision.clone(),
+        },
+        reason: "orphan hook notification".to_string(),
+        display_text: hook_notification_display_text(
+            &notification.hook_name,
+            &notification.message,
+            notification.decision.as_deref(),
+            i18n,
+        ),
+        auto_execute: false,
+    }
 }
 
 fn render_recovery_context_before_notice<W: Write>(
@@ -318,7 +348,8 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::agent::run::{PendingAgentRequest, PendingHookNotification, PendingRequestClass};
+    use crate::agent::events::render_active_agent_event;
+    use crate::agent::run::{PendingAgentRequest, PendingRequestClass};
     use crate::runtime::state::InlineState;
     use crate::types::{AgentMode, AgentRequest, CommandBlock, CommandStatus, OutputRefs};
 
@@ -412,6 +443,88 @@ mod tests {
         assert!(rendered.contains("消息: 未提供消息"), "{rendered}");
         assert!(rendered.contains("决策: 未指定"), "{rendered}");
         assert!(!rendered.contains("unknown hook"), "{rendered}");
+    }
+
+    // #2197: a hook that fires on every tool call used to dump one three-line
+    // block per hit into the same Governance panel. The finish path must render
+    // the collapsed projection while `deferred_events` keeps every original.
+    #[test]
+    fn finish_collapses_repeated_allow_hook_notifications_into_one_line() {
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let mut state = InlineState::default();
+        let mut active_run = active_run(&adapter, "run-1", Language::EnUs);
+        for _ in 0..3 {
+            active_run
+                .pending_hook_notifications
+                .push(PendingHookNotification {
+                    tool_use_id: Some("tool-1".to_string()),
+                    hook_name: "pii-checker".to_string(),
+                    message: "[pii-checker] card hit".to_string(),
+                    decision: Some("allow".to_string()),
+                });
+        }
+        state.agent_run.active = Some(active_run);
+        let mut output = Vec::new();
+
+        finish_active_agent_run(&mut state, &mut output, &adapter).expect("finish run");
+
+        let rendered = String::from_utf8_lossy(&output);
+        assert_eq!(rendered.matches("pii-checker").count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("• pii-checker: card hit ×3"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("Decision: allow"), "{rendered}");
+    }
+
+    #[test]
+    fn recovery_context_collapses_allow_notices_and_omits_provider_timeout() {
+        let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+        let mut active_run = active_run(&adapter, "run-1", Language::EnUs);
+        let mut ingress_output = Vec::new();
+        for _ in 0..3 {
+            render_active_agent_event(
+                &mut active_run,
+                AgentEvent::HookNotification {
+                    run_id: "run-1".to_string(),
+                    hook_name: "pii-checker".to_string(),
+                    message: "[pii-checker] card hit".to_string(),
+                    tool_use_id: Some("tool-1".to_string()),
+                    decision: Some("allow".to_string()),
+                },
+                &mut ingress_output,
+                None,
+            )
+            .expect("ingest hook notification");
+        }
+        render_active_agent_event(
+            &mut active_run,
+            AgentEvent::AgentFailed {
+                run_id: "run-1".to_string(),
+                error: "PROVIDER TIMEOUT MUST STAY HIDDEN".to_string(),
+                error_code: Some(PROVIDER_TIMEOUT_ERROR_CODE.to_string()),
+                max_turns: None,
+            },
+            &mut ingress_output,
+            None,
+        )
+        .expect("ingest provider timeout");
+        assert_eq!(active_run.pending_hook_notifications.len(), 3);
+        let mut output = Vec::new();
+
+        render_recovery_deferred_context(&active_run, &mut output)
+            .expect("render recovery context");
+
+        let rendered = String::from_utf8_lossy(&output);
+        assert_eq!(rendered.matches("pii-checker").count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("• pii-checker: card hit ×3"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("PROVIDER TIMEOUT MUST STAY HIDDEN"),
+            "{rendered}"
+        );
     }
 
     // Finishes an active `run-1` holding one text delta, with an approved handoff

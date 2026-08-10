@@ -228,6 +228,7 @@ pub enum RawInputCapture {
         id: String,
         option_count: usize,
         selected: usize,
+        marked_for_clear: Vec<bool>,
         confirming_clear: bool,
     },
     Consultation {
@@ -243,4 +244,31 @@ pub enum RawInputCapture {
         id: String,
         initial_text: String,
     },
+}
+
+impl RawInputCapture {
+    pub(super) fn is_session_mark_refresh(&self, next: &Self) -> bool {
+        matches!(
+            (self, next),
+            (
+                Self::Session {
+                    id: current_id,
+                    option_count: current_option_count,
+                    selected: current_selected,
+                    confirming_clear: current_confirming_clear,
+                    ..
+                },
+                Self::Session {
+                    id: next_id,
+                    option_count: next_option_count,
+                    selected: next_selected,
+                    confirming_clear: next_confirming_clear,
+                    ..
+                }
+            ) if current_id == next_id
+                && current_option_count == next_option_count
+                && current_selected == next_selected
+                && current_confirming_clear == next_confirming_clear
+        )
+    }
 }

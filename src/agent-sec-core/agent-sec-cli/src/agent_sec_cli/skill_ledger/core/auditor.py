@@ -4,7 +4,7 @@ Implements ``agent-sec-cli skill-ledger audit <skill_dir> [--verify-snapshots]``
 
 1. Load all public keys (key.pub + keyring/)
 2. Walk versions/ chronologically
-3. Verify each manifest's hash, signature, and chain linkage
+3. Verify each manifest's authenticity and explicit parent linkage
 4. Optionally verify snapshot file hashes
 """
 
@@ -22,15 +22,17 @@ from agent_sec_cli.skill_ledger.core.live_root import (
 )
 from agent_sec_cli.skill_ledger.core.manifest_integrity import (
     MISSING_SIGNATURE_ERROR,
-    manifest_hash_error,
-    verify_manifest_signature,
+    verify_manifest_authenticity,
 )
 from agent_sec_cli.skill_ledger.core.version_chain import (
-    list_version_ids,
+    latest_json_path,
+    list_version_artifact_ids,
     load_latest_manifest,
     load_version_manifest,
     snapshot_dir_path,
 )
+from agent_sec_cli.skill_ledger.errors import KeyNotFoundError
+from agent_sec_cli.skill_ledger.models.manifest import SignedManifest
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
 from pydantic import ValidationError
 
@@ -40,6 +42,15 @@ def _public_manifest_error(error: ValueError) -> str:
     if isinstance(error, ValidationError):
         return "schema validation failed"
     return str(error)
+
+
+def _authenticity_error(error: str | None) -> str:
+    """Return a stable audit diagnostic without interpreting untrusted fields."""
+    if error == MISSING_SIGNATURE_ERROR:
+        return MISSING_SIGNATURE_ERROR
+    if error is None:
+        return "Manifest authenticity verification failed"
+    return f"Manifest authenticity invalid: {error}"
 
 
 @canonical_skill_operation
@@ -57,24 +68,17 @@ def audit(
     io_skill_dir = str(root.io_dir)
 
     errors: list[dict[str, Any]] = []
-    version_ids = list_version_ids(io_skill_dir)
+    version_ids = list_version_artifact_ids(io_skill_dir)
 
-    if not version_ids:
-        return {
-            "canonicalSkillDir": str(root.canonical_dir),
-            "skillName": root.skill_name,
-            "valid": True,
-            "versions_checked": 0,
-            "errors": [],
-            "message": "No versions found — nothing to audit",
-        }
-
-    prev_signature: str | None = None
+    manifests: dict[str, SignedManifest | None] = {}
+    authenticated: dict[str, bool] = {}
 
     for vid in version_ids:
         try:
             manifest = load_version_manifest(io_skill_dir, vid)
         except (ValueError, ValidationError) as exc:
+            manifests[vid] = None
+            authenticated[vid] = False
             errors.append(
                 {
                     "versionId": vid,
@@ -84,72 +88,38 @@ def audit(
                     ),
                 }
             )
-            prev_signature = None
             continue
 
         if manifest is None:
+            manifests[vid] = None
+            authenticated[vid] = False
             errors.append(
                 {"versionId": vid, "error": f"Version file {vid}.json is missing"}
             )
-            prev_signature = None
             continue
 
-        # 3a: Verify manifestHash
-        hash_error = manifest_hash_error(manifest)
-        if hash_error is not None:
+        manifests[vid] = manifest
+        try:
+            authenticity_valid, authenticity_error = verify_manifest_authenticity(
+                manifest,
+                backend,
+                expected_skill_name=root.skill_name,
+                expected_version_id=vid,
+            )
+        except KeyNotFoundError:
+            authenticity_valid = False
+            authenticity_error = "manifest signature could not be verified"
+        authenticated[vid] = authenticity_valid
+        if not authenticity_valid:
             errors.append(
                 {
                     "versionId": vid,
-                    "error": hash_error,
+                    "error": _authenticity_error(authenticity_error),
                 }
             )
 
-        # 3b: Verify signature
-        signature_valid, signature_error = verify_manifest_signature(manifest, backend)
-        if not signature_valid:
-            if signature_error == MISSING_SIGNATURE_ERROR:
-                errors.append({"versionId": vid, "error": "Missing signature"})
-            else:
-                errors.append(
-                    {"versionId": vid, "error": f"Signature invalid: {signature_error}"}
-                )
-
-        # 3c: Verify previousManifestSignature chain
-        if prev_signature is not None:
-            if manifest.previousManifestSignature != prev_signature:
-                errors.append(
-                    {
-                        "versionId": vid,
-                        "error": (
-                            "previousManifestSignature does not match "
-                            "the prior version's signature — chain broken"
-                        ),
-                    }
-                )
-        else:
-            if vid == version_ids[0]:
-                # First version: previousManifestSignature should be None
-                if manifest.previousManifestSignature is not None:
-                    errors.append(
-                        {
-                            "versionId": vid,
-                            "error": "First version should have null previousManifestSignature",
-                        }
-                    )
-            else:
-                # Previous version was missing — cannot verify chain linkage
-                errors.append(
-                    {
-                        "versionId": vid,
-                        "error": (
-                            "Cannot verify previousManifestSignature — "
-                            "prior version manifest is missing"
-                        ),
-                    }
-                )
-
-        # 3d: Optional snapshot verification
-        if verify_snapshots:
+        # Never compare a snapshot against attacker-controlled fileHashes.
+        if verify_snapshots and authenticity_valid:
             snap_path = snapshot_dir_path(io_skill_dir, vid)
             if snap_path.is_dir():
                 try:
@@ -181,13 +151,75 @@ def audit(
                     }
                 )
 
-        # Track signature for chain verification
-        if manifest.signature is not None:
-            prev_signature = manifest.signature.value
-        else:
-            prev_signature = None
+    version_positions = {
+        version_id: index for index, version_id in enumerate(version_ids)
+    }
+    for vid in version_ids:
+        manifest = manifests.get(vid)
+        if manifest is None or not authenticated.get(vid, False):
+            continue
+
+        parent_id = manifest.previousVersionId
+        parent_signature = manifest.previousManifestSignature
+        if parent_id is None and parent_signature is None:
+            # A valid signer may intentionally start a new segment after corrupt history.
+            continue
+        if parent_id is None or parent_signature is None:
+            errors.append(
+                {
+                    "versionId": vid,
+                    "error": (
+                        "previousVersionId and previousManifestSignature must both be null "
+                        "or both be set — chain broken"
+                    ),
+                }
+            )
+            continue
+
+        parent_position = version_positions.get(parent_id)
+        if parent_position is None:
+            errors.append(
+                {
+                    "versionId": vid,
+                    "error": "Referenced parent version does not exist — chain broken",
+                }
+            )
+            continue
+        if parent_position >= version_positions[vid]:
+            errors.append(
+                {
+                    "versionId": vid,
+                    "error": "previousVersionId must reference an earlier version — chain broken",
+                }
+            )
+            continue
+
+        parent = manifests.get(parent_id)
+        if parent is None or not authenticated.get(parent_id, False):
+            errors.append(
+                {
+                    "versionId": vid,
+                    "error": (
+                        "Cannot authenticate referenced parent — "
+                        "prior version manifest is missing or invalid; chain broken"
+                    ),
+                }
+            )
+            continue
+
+        if parent.signature is None or parent_signature != parent.signature.value:
+            errors.append(
+                {
+                    "versionId": vid,
+                    "error": (
+                        "previousManifestSignature does not match the referenced "
+                        "parent version's signature — chain broken"
+                    ),
+                }
+            )
 
     # Verify latest.json consistency
+    latest_exists = latest_json_path(io_skill_dir).is_file()
     try:
         latest = load_latest_manifest(io_skill_dir)
     except (ValueError, ValidationError) as exc:
@@ -198,18 +230,75 @@ def audit(
             }
         )
         latest = None
-    if latest is not None and version_ids:
-        expected_latest_vid = version_ids[-1]
-        if latest.versionId != expected_latest_vid:
+    if latest is not None:
+        try:
+            latest_valid, latest_error = verify_manifest_authenticity(
+                latest,
+                backend,
+                expected_skill_name=root.skill_name,
+            )
+        except KeyNotFoundError:
+            latest_valid = False
+            latest_error = "manifest signature could not be verified"
+        if not latest_valid:
             errors.append(
                 {
                     "versionId": "latest.json",
-                    "error": (
-                        f"latest.json points to {latest.versionId} "
-                        f"but latest version is {expected_latest_vid}"
-                    ),
+                    "error": _authenticity_error(latest_error),
                 }
             )
+        else:
+            verified_version_ids = [
+                version_id
+                for version_id in version_ids
+                if authenticated.get(version_id, False)
+            ]
+            expected_latest_vid = (
+                verified_version_ids[-1] if verified_version_ids else None
+            )
+            if expected_latest_vid is None:
+                errors.append(
+                    {
+                        "versionId": "latest.json",
+                        "error": (
+                            "latest.json exists but no authenticated "
+                            "version artifact was found"
+                        ),
+                    }
+                )
+            elif latest.versionId != expected_latest_vid:
+                errors.append(
+                    {
+                        "versionId": "latest.json",
+                        "error": (
+                            f"latest.json points to {latest.versionId} "
+                            f"but latest verified version is {expected_latest_vid}"
+                        ),
+                    }
+                )
+            else:
+                stored_latest = manifests.get(expected_latest_vid)
+                if (
+                    stored_latest is None
+                    or not authenticated.get(expected_latest_vid, False)
+                    or stored_latest != latest
+                ):
+                    errors.append(
+                        {
+                            "versionId": "latest.json",
+                            "error": (
+                                "latest.json does not match its authenticated "
+                                "version artifact"
+                            ),
+                        }
+                    )
+    elif version_ids and not latest_exists:
+        errors.append(
+            {
+                "versionId": "latest.json",
+                "error": "latest.json is missing while version artifacts exist",
+            }
+        )
 
     result = {
         "canonicalSkillDir": str(root.canonical_dir),
@@ -218,4 +307,6 @@ def audit(
         "versions_checked": len(version_ids),
         "errors": errors,
     }
+    if not version_ids and not errors:
+        result["message"] = "No versions found — nothing to audit"
     return root.canonicalize_payload(result)

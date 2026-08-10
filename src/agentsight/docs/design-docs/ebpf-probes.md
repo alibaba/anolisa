@@ -153,6 +153,25 @@ BPF hash map, key=PID, value=1. Used by:
 
 **Dynamic update**: `Probes::add_traced_pid()` / `Probes::remove_traced_pid()` at runtime.
 
+### PID 命名空间约定
+
+事件里的 pid、以及注册进 `traced_processes` 的 key，**都以"用户态所在的 pid namespace"为基准**。这不是风格问题：用户态拿到 pid 后都要回头解析自己的 `/proc`（cmdline、exe、maps、cgroup，以及 uprobe attach 用的 `/proc/<pid>/root/...`），而 `/proc` 是按**读取者**所在 namespace 编号的。BPF 上报的编号必须落在同一个 namespace，否则解析到的是另一个进程。
+
+`current_observer_pid()`（`src/bpf/common.h`）负责这件事，靠一个 rodata 开关分流：
+
+| 用户态位置 | rodata `observer_pidns_is_init` | 上报的 pid |
+|---|---|---|
+| 初始 pid namespace（宿主机进程，或 DaemonSet + `hostPID: true`） | `true` | host tgid |
+| 某个 pid namespace 内（sidecar + `shareProcessNamespace`） | `false` | 目标最内层 namespace 的 pid |
+
+开关由 `probes::pidns::observer_in_init_pidns()` 在 `open()` 与 `load()` 之间写入每个 skeleton 的 rodata，判定方式是比较 `/proc/self/ns/pid` 的 inode 与内核固定值 `PROC_PID_INIT_INO`。
+
+上表两种情形下，"目标最内层 pid"与"用户态视角 pid"恰好相等，所以历史实现（无条件取最内层）在宿主机和 sidecar 下都是对的；它只在**用户态处于初始 namespace 而目标在容器内**时出错 —— 那时最内层 pid 是个容器内编号，在宿主机上要么不存在，要么属于另一个无关进程。
+
+注意 `bpf_get_ns_current_pid_tgid()` 解决不了这个问题：除非 (dev, ino) 指的就是**当前任务自己**的 namespace，它一律返回 `-EINVAL`，并不会翻译到祖先 namespace。
+
+已知限制：用户态本身在某个 namespace 内、而目标在更深的嵌套 namespace 时，上报的仍是目标最内层 pid，用户态无法解析。此时 `AgentScanner::on_dns_event()` 的空 cmdline 检查会拒绝 attach（fail-closed），不会误挂到别的进程上。
+
 ## Build-Time Code Generation
 
 `build.rs` uses `libbpf-cargo` at compile time to:

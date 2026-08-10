@@ -344,6 +344,65 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_dashscope_prompt_tokens_details_cache_creation() {
+        // DashScope nests cache_creation_input_tokens under prompt_tokens_details
+        // rather than at the top level of the usage object.
+        let parser = TokenParser::new();
+        let data = r#"{
+            "id": "chatcmpl-ds-001",
+            "model": "qwen3.6-plus",
+            "usage": {
+                "prompt_tokens": 29719,
+                "completion_tokens": 435,
+                "total_tokens": 30154,
+                "completion_tokens_details": {
+                    "reasoning_tokens": 382,
+                    "text_tokens": 435
+                },
+                "prompt_tokens_details": {
+                    "text_tokens": 29719,
+                    "cache_creation": {
+                        "ephemeral_5m_input_tokens": 29713
+                    },
+                    "cache_creation_input_tokens": 29713,
+                    "cache_type": "ephemeral",
+                    "cached_tokens": 0
+                }
+            }
+        }"#;
+
+        let event = create_test_event(data);
+        let usage = parser.parse_event(&event).expect("should parse");
+        assert_eq!(usage.input_tokens, 29719);
+        assert_eq!(usage.output_tokens, 435);
+        assert_eq!(usage.cache_creation_input_tokens, Some(29713));
+        assert_eq!(usage.cache_read_input_tokens, Some(0));
+    }
+
+    #[test]
+    fn test_parse_dashscope_usage_without_prompt_tokens_details() {
+        // DashScope response lacking prompt_tokens_details — cache fields
+        // must remain None, preserving pre-fix behavior.
+        let parser = TokenParser::new();
+        let data = r#"{
+            "id": "chatcmpl-ds-002",
+            "model": "qwen3.6-plus",
+            "usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": 50,
+                "total_tokens": 550
+            }
+        }"#;
+
+        let event = create_test_event(data);
+        let usage = parser.parse_event(&event).expect("should parse");
+        assert_eq!(usage.input_tokens, 500);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.cache_creation_input_tokens, None);
+        assert_eq!(usage.cache_read_input_tokens, None);
+    }
+
+    #[test]
     fn test_skip_done_marker() {
         let parser = TokenParser::new();
 

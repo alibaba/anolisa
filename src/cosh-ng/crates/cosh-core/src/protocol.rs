@@ -96,6 +96,11 @@ pub enum InputMessage {
 pub struct UserMessageContent {
     pub role: String,
     pub content: String,
+    /// Original user text supplied by cosh-shell for hook compatibility.
+    ///
+    /// Older clients omit this field; callers must fall back to `content`.
+    #[serde(default)]
+    pub raw_user_input: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -111,7 +116,15 @@ pub struct ShellContext {
 #[serde(tag = "subtype")]
 pub enum ShellControlRequest {
     #[serde(rename = "initialize")]
-    Initialize,
+    Initialize {
+        /// Whether this initialization should run SessionStart hooks.
+        ///
+        /// The default keeps older clients compatible. cosh-shell's one-shot
+        /// transport disables the lifecycle event because its former
+        /// positional invocation did not emit startup hooks.
+        #[serde(default = "default_fire_session_start")]
+        fire_session_start: bool,
+    },
 
     #[serde(rename = "interrupt")]
     Interrupt,
@@ -132,6 +145,10 @@ pub enum ShellControlRequest {
 
     #[serde(rename = "reload_config")]
     ReloadConfig,
+}
+
+fn default_fire_session_start() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -808,10 +825,39 @@ mod tests {
             } => {
                 assert_eq!(message.role, "user");
                 assert_eq!(message.content, "hello world");
+                assert_eq!(message.raw_user_input, None);
                 assert_eq!(session_id.as_deref(), Some("default"));
             }
             _ => panic!("expected User variant"),
         }
+    }
+
+    #[test]
+    fn parse_user_message_preserves_optional_raw_input() {
+        let json = r#"{"type":"user","message":{"role":"user","content":"envelope","raw_user_input":"raw"}}"#;
+        let msg: InputMessage = serde_json::from_str(json).expect("should parse raw user input");
+        match msg {
+            InputMessage::User { message, .. } => {
+                assert_eq!(message.content, "envelope");
+                assert_eq!(message.raw_user_input.as_deref(), Some("raw"));
+            }
+            _ => panic!("expected User variant"),
+        }
+    }
+
+    #[test]
+    fn parse_initialize_can_disable_session_start() {
+        let json = r#"{"request_id":"init-1","type":"control_request","request":{"subtype":"initialize","fire_session_start":false}}"#;
+        let msg: InputMessage = serde_json::from_str(json).expect("should parse initialize");
+        assert!(matches!(
+            msg,
+            InputMessage::ControlRequest {
+                request: ShellControlRequest::Initialize {
+                    fire_session_start: false
+                },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -824,7 +870,12 @@ mod tests {
                 request,
             } => {
                 assert_eq!(request_id, "init-1");
-                assert!(matches!(request, ShellControlRequest::Initialize));
+                assert!(matches!(
+                    request,
+                    ShellControlRequest::Initialize {
+                        fire_session_start: true
+                    }
+                ));
             }
             _ => panic!("expected ControlRequest variant"),
         }

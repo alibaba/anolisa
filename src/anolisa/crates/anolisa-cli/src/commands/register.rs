@@ -7,7 +7,7 @@ use std::io::IsTerminal;
 
 use crate::commands::telemetry;
 use crate::context::CliContext;
-use crate::response::CliError;
+use crate::response::{CliError, render_json};
 
 #[derive(Parser)]
 #[command(args_conflicts_with_subcommands = true)]
@@ -181,8 +181,7 @@ fn handle_status(mgr: &RegistrationManager, json: bool) -> Result<(), CliError> 
     let sysom_active = mgr.is_sysom_registered();
 
     if json {
-        print_status_json(&state, &rec, &product_type, sysom_active);
-        return Ok(());
+        return print_status_json(&state, &rec, &product_type, sysom_active);
     }
 
     println!(
@@ -270,7 +269,7 @@ fn print_status_json(
     rec: &Option<anolisa_core::RegisterRecord>,
     product_type: &anolisa_core::ProductType,
     sysom_active: bool,
-) {
+) -> Result<(), CliError> {
     let state_str = if sysom_active && state != &ConsentState::Registered {
         "registered"
     } else {
@@ -307,7 +306,7 @@ fn print_status_json(
         obj["sysom_services_active"] = serde_json::Value::Bool(true);
     }
 
-    println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
+    render_json("register status", obj)
 }
 
 // ── Utility functions ────────────────────────────────────────────────────────

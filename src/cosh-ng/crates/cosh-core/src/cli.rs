@@ -133,6 +133,15 @@ pub struct CliArgs {
     #[arg(long, hide = true)]
     pub session_control: bool,
 
+    /// Accept cosh-shell's structured raw prompt field for hook input.
+    ///
+    /// This is intentionally hidden and is only added by the cosh-shell
+    /// adapter when it launches the trusted shell-to-core transport. Generic
+    /// headless clients must not be able to select a hook prompt separately
+    /// from the provider-facing content.
+    #[arg(long, hide = true)]
+    pub cosh_shell_transport: bool,
+
     /// Increase stderr log verbosity
     #[arg(long)]
     pub verbose: bool,

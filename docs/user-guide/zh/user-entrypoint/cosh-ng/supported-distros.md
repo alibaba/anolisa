@@ -1,43 +1,34 @@
-# 支持的发行版
+# 支持的平台与Linux发行版
 
-cosh-ng 通过读取 `/etc/os-release`（Linux）或调用 `sw_vers`（macOS）自动检测
-当前操作系统，并路由到对应的包管理器和服务管理器后端。
+[English](../../../en/user-entrypoint/cosh-ng/supported-distros.md)
 
-## 支持矩阵
+cosh-ng的交互式终端可在Linux和macOS上运行。软件包和服务命令使用主机原生的管理工具。
 
-| 发行版 | 包管理器 | 服务管理器 | 备注 |
-|--------|----------|------------|------|
-| Alinux (2/3/4) | dnf | systemd | 阿里云原生 Linux |
-| CentOS 7/8/9 | dnf | systemd | |
-| Fedora | dnf | systemd | |
-| Ubuntu | apt-get | systemd | |
-| Debian | apt-get | systemd | |
-| openSUSE Leap/Tumbleweed | zypper | systemd | |
-| macOS | brew | — | 仅 pkg 子系统可用 |
+| 平台 | 交互式Shell | 软件包命令 | 服务命令 |
+|---|---|---|---|
+| Linux | Bash或zsh | dnf、apt或zypper | systemd |
+| macOS | Bash或zsh | Homebrew | 不可用 |
 
-## 检测逻辑
+## Linux发行版
 
-发行版检测通过 `Distro::detect()` 实现：
+以下`/etc/os-release` ID有内置路由：
 
-1. 编译目标为 macOS 时，调用 `sw_vers -productVersion` 获取版本
-2. Linux 系统读取 `/etc/os-release`，解析 `ID` 和 `VERSION_ID` 字段
-3. 根据 `ID` 映射到已知发行版变体
-4. 未识别的 `ID` 归入 `Unknown`，大多数操作返回 `UnsupportedDistro` 错误
+| ID | 包管理器 |
+|---|---|
+| `alinux`、`centos`、`fedora` | dnf |
+| `ubuntu`、`debian` | apt |
+| `opensuse-leap`、`opensuse-tumbleweed`、`sles` | zypper |
 
-## 包管理器映射
+未列出的发行版如果`ID_LIKE`包含以下值之一，可以复用对应的软件包家族：
 
-| 发行版 ID | 包管理器 | 安装命令 | 搜索命令 |
-|-----------|----------|----------|----------|
-| alinux / centos / fedora | Dnf | `dnf install -y` | `dnf search -q` |
-| ubuntu / debian | Apt | `apt-get install -y` | `apt-cache search` |
-| opensuse-leap / opensuse-tumbleweed / sles | Zypper | `zypper install -y` | `zypper search` |
-| macOS | Brew | `brew install` | `brew search` |
+| `ID_LIKE`家族 | 包管理器 |
+|---|---|
+| `alinux`、`centos`、`fedora`、`rhel` | dnf |
+| `debian`、`ubuntu` | apt |
+| `opensuse`、`suse` | zypper |
 
-## 服务管理器
+家族路由只表示软件包后端兼容，不代表对每个衍生版或版本做认证。未知软件包家族会返回结构化的`UnsupportedDistro`错误。
 
-所有 Linux 发行版统一使用 systemd（`systemctl`）。macOS 不支持 svc 子系统。
+## 修改主机前
 
-## 添加新发行版支持
-
-如需支持新的发行版，参见开发者文档
-[新增发行版适配指南](../../../../developer-guide/zh/cosh-ng/adding-distros.md)。
+安装前运行`anolisa env`。在目标主机上，先使用`cosh-cli`只读命令和对应操作的`--dry-run`选项确认路由，再执行软件包或服务变更。服务命令需要Linux和systemd；macOS用户可以通过Homebrew使用软件包命令，但不能使用`cosh-cli svc`。

@@ -96,7 +96,11 @@ in-place mount 模式：
 ### 4.2 `skill-discover`
 
 - 当存在 secondary views 时，`skill-discover/SKILL.md` 会列出这些 view 中的技能。
-- 列表里包含 `source_path`，供上层 agent 直接打开真实文件。
+- 列表里包含 `source_path`，供上层 agent 直接打开技能。
+- 默认输出物理 source path。设置 `--skill-discover-root` 后，输出改为
+  `<root>/<skill-name>/SKILL.md`，用于只共享 FUSE view 的独立 mount namespace。
+- Secondary skill 不出现在 `/skills` 的目录枚举中，但配置为 view root 的路径
+  仍可直接 lookup 和读取。
 - 当没有 views 配置时，`skill-discover` 退化为简单的全部技能列表。
 
 ### 4.3 Write Path

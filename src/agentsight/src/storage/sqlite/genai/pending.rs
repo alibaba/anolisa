@@ -689,6 +689,45 @@ impl GenAISqliteStore {
         )?;
         Ok(())
     }
+
+    /// Retroactively replace a fallback session_id after the real session
+    /// UUID became known via a late FileWrite mapping (issue #2059).
+    ///
+    /// Only rows still carrying the 32-char lowercase-hex fallback shape are
+    /// touched — both `crash_fallback_id` and `domain_hash` (id_resolver.rs)
+    /// emit `format!("{digest:x}")`, i.e. lowercase hex, truncated to 32.
+    /// Anything else — 36-char mapper or metadata UUIDs, or a future
+    /// non-UUID "real" session id — must not be overwritten by a later,
+    /// possibly different, pid mapping.
+    ///
+    /// Returns the number of rows updated (0 or 1 — call_id is unique).
+    ///
+    /// Named distinctly from `update_session_id` (session.rs), which is the
+    /// unguarded variant used by the drain-path reconciliation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SQLite connection lock cannot be acquired
+    /// or the UPDATE statement fails to execute.
+    pub fn update_fallback_session_id(
+        &self,
+        call_id: &str,
+        new_session_id: &str,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // GLOB is case-sensitive (unlike LIKE), so uppercase hex fails the
+        // guard by design; a NULL session_id yields NULL and never matches.
+        let updated = conn.execute(
+            "UPDATE genai_events
+             SET session_id = ?1
+             WHERE call_id = ?2
+               AND session_id != ?1
+               AND length(session_id) = 32
+               AND session_id NOT GLOB '*[^0-9a-f]*'",
+            params![new_session_id, call_id],
+        )?;
+        Ok(updated)
+    }
 }
 
 // ─── Helper for loop detection ───────────────────────────────────────────────

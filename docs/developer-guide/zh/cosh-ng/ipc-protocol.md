@@ -1,5 +1,7 @@
 # ws-ckpt 与会话管理 IPC 协议
 
+[English](../../en/cosh-ng/ipc-protocol.md)
+
 ## 概述
 
 cosh-ng 通过 Unix Domain Socket 与 ws-ckpt 守护进程通信，实现工作空间快照管理。
@@ -24,7 +26,7 @@ cosh-cli / cosh-core          ws-ckpt daemon
 
 ## 帧格式
 
-每个消息由两部分组成：
+每条消息由两部分组成。
 
 ```
 ┌──────────────────┬───────────────────────────────┐
@@ -33,9 +35,9 @@ cosh-cli / cosh-core          ws-ckpt daemon
 └──────────────────┴───────────────────────────────┘
 ```
 
-- 长度前缀：小端序无符号 32 位整数，表示后续 bincode 载荷的字节数
-- 最大响应限制：64 MiB（防止 OOM）
-- 默认超时：5000ms（可通过 `CkptClient::with_timeout()` 配置）
+- 长度前缀使用小端序无符号 32 位整数，表示后续 bincode 载荷的字节数
+- 最大响应限制为 64 MiB，避免耗尽内存
+- 默认超时为 5000 ms，可通过 `CkptClient::with_timeout()` 配置
 
 ## 请求类型（WsCkptRequest）
 
@@ -155,7 +157,7 @@ cargo test --locked -p cosh-platform -- checkpoint
 
 ### 请求动作
 
-请求使用 `action` 区分：
+请求使用 `action` 区分。
 
 ```json
 {"action":"list","workspace_scope":"/work/project","limit":20,"cursor":null,"all_workspaces":false}
@@ -167,14 +169,14 @@ cargo test --locked -p cosh-platform -- checkpoint
 
 | 动作 | 契约 |
 |------|------|
-| `list` | 返回按更新时间倒序的摘要。`limit` 默认为 20，并限制在 1–100；使用 opaque `next_cursor` 读取下一页。当 `all_workspaces` 为 `true` 时，Shell 客户端请求更大的初始页大小 100 以减少首页不完整输出，但仍受核心侧 1–100 的相同限制。Core 会枚举存储根下所有工作空间哈希目录，返回所有工作空间的会话，并将非当前工作空间的会话标记为 `scope_mismatch`。`all_workspaces` 默认值为 `false`，以保持向后兼容。 |
+| `list` | 返回按更新时间倒序的摘要。`limit` 默认为 20，并限制在 1 至 100；使用 opaque `next_cursor` 读取下一页。当 `all_workspaces` 为 `true` 时，Shell 客户端请求更大的初始页大小 100 以减少首页不完整输出，但仍受核心侧 1 至 100 的相同限制。Core 会枚举存储根下所有工作空间哈希目录，返回所有工作空间的会话，并将非当前工作空间的会话标记为 `scope_mismatch`。`all_workspaces` 默认值为 `false`，以保持向后兼容。 |
 | `inspect` | 即使健康状态不允许恢复，也返回摘要。 |
 | `validate` | 完整加载信封，只有可恢复会话才成功。 |
-| `prepare_clear_all` | 不加载或传输摘要，按 UUID 字典序分页返回可清理和受保护 ID。`limit` 限制在 1–4096；通过 `next_cursor` 继续。只有完整计划可放入单个 4096-ID 分页时才允许省略 `limit`，避免旧客户端静默接受不完整计划。 |
+| `prepare_clear_all` | 不加载或传输摘要，按 UUID 字典序分页返回可清理和受保护 ID。`limit` 限制在 1 至 4096；通过 `next_cursor` 继续。只有完整计划可放入单个 4096-ID 分页时才允许省略 `limit`，避免旧客户端静默接受不完整计划。 |
 | `clear` | 独立删除每个请求 ID，并返回逐项跳过错误。每个请求最多接受 128 个 ID。 |
 
 摘要包括 `session_id`、`workspace_scope`、创建和更新时间、模型、消息数、首条
-提示、schema 版本，以及以下健康状态之一：`ready`、`corrupt`、
+提示、schema 版本，以及以下健康状态之一，即 `ready`、`corrupt`、
 `incompatible` 或 `scope_mismatch`。
 首条提示预览会在序列化前规范为单行，并限制为 160 个 Unicode 字符。列表先
 使用有界文件系统元数据对 UUID 文件排序，再只读取当前请求分页，不会在每次
@@ -186,7 +188,7 @@ cargo test --locked -p cosh-platform -- checkpoint
 
 ### 响应信封
 
-成功数据使用对应动作标记：
+成功数据使用对应动作标记。
 
 ```json
 {
@@ -199,7 +201,7 @@ cargo test --locked -p cosh-platform -- checkpoint
 }
 ```
 
-请求级错误以状态码 1 退出：
+请求级错误以状态码 1 退出。
 
 ```json
 {
@@ -292,7 +294,7 @@ legacy 副本，因此 legacy 权限错误不会删除较新的 scoped 历史或
 JSONL headless 协议和本管理协议共用 `SessionStore::load`；交互式选择无法绕过
 直接 `cosh-core --resume` 使用的验证逻辑。
 
-JSONL result 会明确标记会话加载失败：
+JSONL result 会明确标记会话加载失败。
 
 ```json
 {"type":"result","is_error":true,"errors":["session recovery failed [not_found]: session not found"],"session_error_code":"not_found","session_error_phase":"load","session_id":"..."}
@@ -310,7 +312,7 @@ attempt 会进入 `failed`，同时保留结构化 code、provider 原始 messag
 hint 会省略 `--resume`，但不会消费用户尚未执行的选择。
 
 JSONL `system/init` 消息包含 `session_resumable`。值为 `false` 表示禁用了
-`session.auto_persist`：消费方不得捕获输出的 UUID，而且只有本次调用确实通过
+`session.auto_persist`。消费方不得捕获输出的 UUID，而且只有本次调用确实通过
 `--resume` 携带某个身份时，才能使该身份失效。一次 fresh fallback 因此不能
 清除无关的 selected ID 或旧 active ID。即使本轮随后失败、被取消或异常退出，
 该规则仍适用。为兼容尚未实现该扩展的 provider，此字段为可选；字段缺失时

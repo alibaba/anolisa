@@ -1,13 +1,15 @@
-# 输出格式
+# 命令行输出格式
 
-cosh-cli 的所有命令输出统一的 JSON 信封 `CoshResponse<T>`，方便 AI Agent 解析。
+[English](../../../en/user-entrypoint/cosh-ng/output-format.md)
+
+每个已解析的`cosh-cli`操作都会返回一个JSON信封。先解析信封，再处理操作对应的`data`或`error`对象。
 
 ## 成功响应
 
 ```json
 {
   "ok": true,
-  "data": { ... },
+  "data": { "packages": [] },
   "meta": {
     "subsystem": "pkg",
     "duration_ms": 342,
@@ -17,7 +19,7 @@ cosh-cli 的所有命令输出统一的 JSON 信封 `CoshResponse<T>`，方便 A
 }
 ```
 
-## 错误响应
+## 失败响应
 
 ```json
 {
@@ -25,8 +27,8 @@ cosh-cli 的所有命令输出统一的 JSON 信封 `CoshResponse<T>`，方便 A
   "error": {
     "code": "PkgNotFound",
     "message": "package 'nginx-extra' not found",
-    "recoverable": true,
-    "hint": "try 'cosh-cli pkg search nginx'",
+    "recoverable": false,
+    "hint": "Try 'cosh pkg search nginx' to check availability",
     "subsystem": "pkg"
   },
   "meta": {
@@ -38,46 +40,23 @@ cosh-cli 的所有命令输出统一的 JSON 信封 `CoshResponse<T>`，方便 A
 }
 ```
 
-## 关键字段
+## 字段
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `ok` | bool | 操作是否成功 |
-| `data` | object | 成功时携带的业务数据 |
-| `error.code` | string | 错误码枚举（详见下方） |
-| `error.recoverable` | bool | Agent 是否值得重试 |
-| `error.hint` | string | 建议的下一步操作 |
-| `meta.subsystem` | string | 来源子系统（pkg/svc/checkpoint/audit） |
-| `meta.duration_ms` | u64 | 操作耗时（毫秒） |
-| `meta.distro` | string | 当前检测到的发行版 |
-| `meta.dry_run` | bool | 是否为预览模式 |
+| 字段 | 含义 |
+|---|---|
+| `ok` | 成功为`true`，失败为`false`。 |
+| `data` | 操作结果，成功时存在。 |
+| `error` | 失败详情：`code`、`message`、`recoverable`、可选的`hint`和`details`，以及`subsystem`。 |
+| `meta.subsystem` | `pkg`、`svc`、`checkpoint`或`audit`。 |
+| `meta.duration_ms` | 操作耗时，单位为毫秒。 |
+| `meta.distro` | 可用时返回检测到的平台ID。 |
+| `meta.dry_run` | `true`表示预览，实际操作未执行。 |
+| `meta.warning` | 随结果返回的可选警告。 |
 
-## 错误码
+错误码是稳定字符串，例如`PkgNotFound`、`UnsupportedDistro`、`SvcNotFound`、`CheckpointNotFound`、`AuditDenied`、`Timeout`和`PermissionDenied`；请使用`error.code`和`error.hint`，不要解析错误消息文本。
 
-| 错误码 | 子系统 | 含义 |
-|--------|--------|------|
-| `PkgNotFound` | pkg | 包不存在 |
-| `PkgBackendError` | pkg | 包管理器执行失败 |
-| `UnsupportedDistro` | pkg/svc | 不支持的发行版 |
-| `SvcNotFound` | svc | 服务不存在 |
-| `SvcStartFailed` | svc | 服务启动失败 |
-| `SvcStopFailed` | svc | 服务停止失败 |
-| `CheckpointDaemonUnavailable` | checkpoint | ws-ckpt 守护进程未运行 |
-| `CheckpointNotFound` | checkpoint | 快照不存在 |
-| `AuditDenied` | audit | 策略拒绝 |
-| `Timeout` | * | 命令执行超时 |
-| `PermissionDenied` | * | 权限不足 |
+## 退出码和Agent处理
 
-## 退出码
-
-- `0` — 操作成功（`ok: true`）
-- `1` — 操作失败（`ok: false`）
-
-## Agent 对接模式
-
-对于 AI Agent 消费 cosh-cli 输出，推荐以下模式：
-
-1. 解析 JSON，检查 `ok` 字段
-2. 若 `ok: false`，读取 `error.recoverable` 决定是否重试
-3. 若不可恢复，展示 `error.hint` 给用户或执行 hint 中的建议命令
-4. `meta.dry_run` 为 `true` 时，表示这是预览结果，实际操作尚未执行
+- 退出码`0`表示`ok: true`；退出码`1`表示`ok: false`。
+- 失败时先检查`error.recoverable`再决定是否重试，并在有`error.hint`时展示它。
+- `meta.dry_run`为`true`时，只报告预览结果，不要声称主机已发生变化。

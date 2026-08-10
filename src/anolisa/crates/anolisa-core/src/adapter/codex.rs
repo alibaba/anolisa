@@ -11,6 +11,9 @@
 //! codex plugin add <plugin>@<marketplace>
 //! ```
 //!
+//! After installation, hook-bearing plugins are trusted through Codex's
+//! app-server so they also work in non-interactive `codex exec` sessions.
+//!
 //! `disable` reverses this via `codex plugin remove` /
 //! `codex plugin marketplace remove` and then removes the marketplace
 //! directory (which contains the symlink). All CLI, file, and symlink IO
@@ -18,6 +21,8 @@
 //!
 //! Env contract: `CODEX_BIN` overrides the executable (tests point it at a
 //! fake CLI); `XDG_DATA_HOME` relocates the marketplace base.
+
+mod hook_trust;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -146,7 +151,7 @@ impl FrameworkDriver for CodexDriver {
         let layout = MarketplaceLayout::resolve(bundle, ctx)?;
         let add_cmd = build_marketplace_add_cmd(&layout.root);
         let plugin_cmd = build_plugin_add_cmd(&layout.plugin_ref());
-        let actions = vec![
+        let mut actions = vec![
             format!(
                 "write codex marketplace manifest {}",
                 layout.manifest().display()
@@ -159,6 +164,12 @@ impl FrameworkDriver for CodexDriver {
             format!("register codex marketplace '{}'", layout.marketplace),
             format!("add codex plugin '{}'", layout.plugin_ref()),
         ];
+        if bundle_declares_hooks(bundle, ctx) {
+            actions.push(format!(
+                "trust hooks declared by codex plugin '{}'",
+                layout.plugin_ref()
+            ));
+        }
         Ok(DriverPlan {
             framework: self.name().to_string(),
             component: ctx.component.clone(),
@@ -281,6 +292,12 @@ impl FrameworkDriver for CodexDriver {
                 reason: cli_failure_reason("plugin add", &output),
             });
         }
+        if bundle_declares_hooks_for_root(
+            &claim.resource_root,
+            ctx.declared_bundle_entry.as_deref(),
+        ) {
+            establish_hook_trust(ctx, &layout)?;
+        }
         Ok(())
     }
 
@@ -299,7 +316,9 @@ impl FrameworkDriver for CodexDriver {
             reason: Some(detect.reason.clone()),
             resource: None,
         });
-        conditions.push(bundle_match_condition(claim));
+        let bundle_condition = bundle_match_condition(claim);
+        let bundle_status = bundle_condition.status;
+        conditions.push(bundle_condition);
 
         // Symlink presence is a reliable filesystem check independent of
         // the CLI.
@@ -309,7 +328,8 @@ impl FrameworkDriver for CodexDriver {
         conditions.push(AdapterCondition {
             kind: AdapterConditionKind::SymlinkPresent,
             status: bool_status(symlink_ok),
-            reason: (!symlink_ok).then(|| "plugin symlink missing or retargeted".to_string()),
+            reason: (!symlink_ok)
+                .then(|| "plugin symlink missing, retargeted, or dangling".to_string()),
             resource: Some(ClaimResourceRef {
                 id: RES_SYMLINK.to_string(),
             }),
@@ -376,7 +396,14 @@ impl FrameworkDriver for CodexDriver {
             (ConditionStatus::Unknown, ConditionStatus::Unknown)
         };
 
-        let summary = summarize(claim.status, detect.detected, mkt_status, plugin_status);
+        let summary = summarize(
+            claim.status,
+            detect.detected,
+            bool_status(symlink_ok),
+            bundle_status,
+            mkt_status,
+            plugin_status,
+        );
         Ok(AdapterStatusReport {
             summary,
             conditions,
@@ -566,6 +593,37 @@ impl MarketplaceLayout {
     }
 }
 
+fn bundle_declares_hooks(bundle: &AdapterBundle, ctx: &DriverCtx) -> bool {
+    bundle_declares_hooks_for_root(&bundle.resource_root, ctx.declared_bundle_entry.as_deref())
+}
+
+fn bundle_declares_hooks_for_root(resource_root: &Path, declared_entry: Option<&str>) -> bool {
+    hook_trust::bundle_declares_hooks(
+        resource_root,
+        &resource_root.join(declared_entry.unwrap_or(CODEX_PLUGIN_MANIFEST)),
+    )
+}
+
+/// Trust only the hooks Codex attributes to the plugin just installed.
+fn establish_hook_trust(ctx: &DriverCtx, layout: &MarketplaceLayout) -> Result<(), AdapterError> {
+    let program = codex_bin();
+    let output = ctx.ops.run_framework_rpc(hook_trust::list_session(
+        program.clone(),
+        CLI_TIMEOUT,
+        &layout.root,
+    ))?;
+    let Some(state) = hook_trust::plugin_trust_state(&program, &output, &layout.plugin_ref())?
+    else {
+        return Ok(());
+    };
+    let output = ctx.ops.run_framework_rpc(hook_trust::write_session(
+        program.clone(),
+        CLI_TIMEOUT,
+        state,
+    ))?;
+    hook_trust::confirm_write(&program, &output)
+}
+
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
@@ -723,10 +781,13 @@ fn list_contains_token(stdout: &str, token: &str) -> bool {
         .any(|line| line.split_whitespace().any(|t| t == token))
 }
 
-/// True when `link` is a symlink resolving to `target`.
+/// True when `link` is a symlink resolving to `target` and the target
+/// still exists. A dangling link — exactly what an RPM update that moves
+/// the resource root leaves behind — must not count as present: codex
+/// cannot load plugin files through it.
 fn symlink_points_to(link: &Path, target: &Path) -> bool {
     std::fs::read_link(link)
-        .map(|dest| dest == target)
+        .map(|dest| dest == target && target.exists())
         .unwrap_or(false)
 }
 
@@ -763,11 +824,16 @@ fn bundle_match_condition(claim: &AdapterClaim) -> AdapterCondition {
     }
 }
 
-/// Roll signals into a summary. Healthy requires the framework detected and
-/// both marketplace and plugin verified present.
+/// Roll signals into a summary. Healthy requires the framework detected,
+/// the plugin symlink functional, the resource bundle verified unchanged,
+/// and both marketplace and plugin verified present — a broken symlink or
+/// a drifted/vanished bundle means codex is not actually serving this
+/// plugin, so registration alone must not report Healthy.
 fn summarize(
     claim_status: ClaimStatus,
     detected: bool,
+    symlink: ConditionStatus,
+    bundle: ConditionStatus,
     marketplace: ConditionStatus,
     plugin: ConditionStatus,
 ) -> AdapterSummary {
@@ -777,11 +843,14 @@ fn summarize(
     if !detected {
         return AdapterSummary::Degraded;
     }
-    match (marketplace, plugin) {
-        (ConditionStatus::True, ConditionStatus::True) => AdapterSummary::Healthy,
-        (ConditionStatus::False, _) | (_, ConditionStatus::False) => AdapterSummary::Degraded,
-        _ => AdapterSummary::Unknown,
+    let signals = [symlink, bundle, marketplace, plugin];
+    if signals.contains(&ConditionStatus::False) {
+        return AdapterSummary::Degraded;
     }
+    if signals.contains(&ConditionStatus::Unknown) {
+        return AdapterSummary::Unknown;
+    }
+    AdapterSummary::Healthy
 }
 
 #[cfg(test)]
@@ -860,6 +929,46 @@ mod tests {
             "anolisa-tokenless"
         ));
         assert!(!list_contains_token("", "anolisa-tokenless"));
+    }
+
+    #[test]
+    fn summarize_folds_symlink_and_bundle_signals() {
+        use ConditionStatus::{False, True, Unknown};
+        let s = |symlink, bundle, mkt, plugin| {
+            summarize(ClaimStatus::Enabled, true, symlink, bundle, mkt, plugin)
+        };
+        // Registration alone must not report Healthy: a broken symlink or
+        // a drifted bundle degrades even with both registrations intact.
+        assert_eq!(s(False, Unknown, True, True), AdapterSummary::Degraded);
+        assert_eq!(s(True, False, True, True), AdapterSummary::Degraded);
+        // Undecidable drift is Unknown, not Healthy.
+        assert_eq!(s(True, Unknown, True, True), AdapterSummary::Unknown);
+        assert_eq!(s(True, True, True, True), AdapterSummary::Healthy);
+        // CleanupFailed and framework-missing keep their priority.
+        assert_eq!(
+            summarize(ClaimStatus::CleanupFailed, true, True, True, True, True),
+            AdapterSummary::CleanupFailed
+        );
+        assert_eq!(
+            summarize(ClaimStatus::Enabled, false, True, True, True, True),
+            AdapterSummary::Degraded
+        );
+    }
+
+    #[test]
+    fn dangling_symlink_does_not_count_as_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("bundle");
+        std::fs::create_dir(&target).expect("target");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        assert!(symlink_points_to(&link, &target));
+        // An RPM update that moves the root leaves exactly this behind.
+        std::fs::remove_dir(&target).expect("remove target");
+        assert!(
+            !symlink_points_to(&link, &target),
+            "dangling symlink must not count as present"
+        );
     }
 
     #[test]

@@ -55,13 +55,14 @@ fn raw_cli_session_list_prints_full_canonical_ids() {
 }
 
 #[test]
-fn raw_cli_session_picker_space_then_enter_resumes_without_deleting() {
+fn raw_cli_session_picker_space_then_enter_confirms_and_deletes_without_resuming() {
     let fixture = SessionFixture::new("picker-space-enter", FixtureMode::Ready);
     let output = fixture.run(
         &[],
         vec![
             (b"/session\n".to_vec(), Duration::from_millis(400)),
             (b" ".to_vec(), Duration::from_millis(300)),
+            (b"\n".to_vec(), Duration::from_millis(300)),
             (b"\n".to_vec(), Duration::from_millis(300)),
             (
                 b"echo after-space-enter\nexit\n".to_vec(),
@@ -70,11 +71,15 @@ fn raw_cli_session_picker_space_then_enter_resumes_without_deleting() {
         ],
     );
 
-    assert!(output.contains("Session selected"), "{output}");
-    assert!(output.contains(SESSION_ONE), "{output}");
-    assert!(!output.contains("Confirm session clear"), "{output}");
+    let request = fs::read_to_string(&fixture.clear_log).expect("clear request log");
+    assert!(output.contains("Confirm session clear"), "{output}");
+    assert!(request.contains(SESSION_ONE), "{request}");
+    assert!(!output.contains("Session selected"), "{output}");
+    assert!(
+        output.contains("Deleted 1 persisted session(s)"),
+        "{output}"
+    );
     assert!(output.contains("after-space-enter"), "{output}");
-    assert!(!fixture.clear_log.exists());
 }
 
 #[test]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tokenless response compression hook for Cosh-NG, Claude Code, and Qoder.
+"""Tokenless response compression hook for Cosh-NG, Claude Code, Qoder, and OpenCode.
 
 Reads a PostToolUse JSON from stdin, compresses the tool response
 via ``tokenless compress-response``, then optionally re-encodes to TOON
@@ -31,6 +31,9 @@ Output contract per agent:
     serialized as compact JSON because Qoder rejects object and array values.
     Qoder supports replacement for every tool, so compressed data is never
     appended beside the original.
+  - opencode: the adapter translates ``updatedToolOutput`` to OpenCode's
+    mutable ``tool.execute.after`` output. ``additionalContext`` remains
+    reserved for additive readiness and environment diagnostics.
   - cosh-ng: the compressed payload replaces the response via
     ``hookSpecificOutput.updatedToolResponse``.  Extract only ``llmContent``
     from wrapped responses; never include ``returnDisplay``.  Keep
@@ -84,6 +87,7 @@ _MIN_RESPONSE_CHARS = 200
 _CLAUDE_AGENT_ID = "claude-code"
 _CLAUDE_MIN_REPLACE_VERSION = (2, 1, 121)
 _QODER_AGENT_ID = "qoder-cli"
+_OPENCODE_AGENT_ID = "opencode"
 
 # Cache for `claude --version`, keyed on binary path+mtime+size so upgrades
 # invalidate it. Hooks run as a fresh process per tool call and spawning the
@@ -412,10 +416,10 @@ def main() -> None:
 
     # 17. Build response — dispatch by agent runtime.
     #
-    # Claude Code and Qoder support real tool-output replacement. Keep
+    # Claude Code, Qoder, and OpenCode support real tool-output replacement. Keep
     # additionalContext for additive diagnostics only; using it for compressed
     # data would leave the original result in context and increase token use.
-    if agent_id in {_CLAUDE_AGENT_ID, _QODER_AGENT_ID}:
+    if agent_id in {_CLAUDE_AGENT_ID, _QODER_AGENT_ID, _OPENCODE_AGENT_ID}:
         if agent_id == _CLAUDE_AGENT_ID and not _claude_supports_replacement():
             warn(
                 "Claude Code < 2.1.121 (or version unknown): "

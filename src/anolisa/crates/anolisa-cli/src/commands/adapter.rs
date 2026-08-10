@@ -605,6 +605,7 @@ fn handle_status(ctx: &CliContext, component: Option<&str>) -> Result<(), CliErr
 fn map_err(command: &str, err: AdapterError) -> CliError {
     match err {
         AdapterError::UnknownPlaceholder { .. }
+        | AdapterError::RelativeTemplateExpansion { .. }
         | AdapterError::UnknownFramework { .. }
         | AdapterError::AmbiguousFramework { .. }
         | AdapterError::UnsupportedAdapterType { .. }
@@ -630,6 +631,7 @@ fn map_err(command: &str, err: AdapterError) -> CliError {
         AdapterError::AdapterManifest { .. }
         | AdapterError::MissingAdapterManifest { .. }
         | AdapterError::FrameworkCli { .. }
+        | AdapterError::ReenableCleanupIncomplete { .. }
         | AdapterError::Lock(_)
         | AdapterError::State(_)
         | AdapterError::Log(_)
@@ -779,6 +781,19 @@ mod tests {
             AdapterError::FrameworkCli {
                 program: "openclaw".to_string(),
                 reason: "boom".to_string(),
+            },
+        );
+        assert!(matches!(err, CliError::Runtime { .. }));
+    }
+
+    #[test]
+    fn reenable_cleanup_failure_maps_to_runtime() {
+        let err = map_err(
+            "adapter enable",
+            AdapterError::ReenableCleanupIncomplete {
+                component: "tokenless".to_string(),
+                framework: "openclaw".to_string(),
+                reason: "uninstall failed".to_string(),
             },
         );
         assert!(matches!(err, CliError::Runtime { .. }));

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -17,20 +16,16 @@ from agent_sec_cli.skill_ledger.core.live_root import (
     validate_resolved_skill_root,
 )
 from agent_sec_cli.skill_ledger.core.manifest_helpers import (
-    safe_load_latest_manifest,
-    snapshot_matches_manifest,
+    load_verified_version_manifest,
     user_decision_to_dict,
-)
-from agent_sec_cli.skill_ledger.core.manifest_integrity import (
-    verify_manifest_integrity,
 )
 from agent_sec_cli.skill_ledger.core.version_chain import (
     SKILL_META_DIR,
     VERSIONS_DIR,
+    list_version_artifact_ids,
     list_version_ids,
-    load_version_manifest,
-    snapshot_dir_path,
 )
+from agent_sec_cli.skill_ledger.errors import KeyNotFoundError
 from agent_sec_cli.skill_ledger.models.manifest import (
     SignedManifest,
     UserDecision,
@@ -63,10 +58,13 @@ def build_exposure_summary(
     if status_result is None:
         status_result = manifest_only_status(root, backend)
     latest_status = str(status_result.get("status", "unknown"))
-    latest_manifest = safe_load_latest_manifest(io_skill_dir)
-    latest_version = _latest_version_id(status_result, latest_manifest)
+    latest_version = _latest_version_id(status_result)
 
-    decision_candidate = _find_user_decision_candidate(io_skill_dir, backend)
+    decision_candidate = _find_user_decision_candidate(
+        io_skill_dir,
+        backend,
+        expected_skill_name=root.skill_name,
+    )
     if decision_candidate is _BLOCKED_BY_USER:
         return _with_identity(
             root,
@@ -74,7 +72,11 @@ def build_exposure_summary(
                 latest_status=latest_status,
                 latest_version=latest_version,
                 active_version=None,
-                user_decision=_newest_block_decision(io_skill_dir, backend),
+                user_decision=_newest_block_decision(
+                    io_skill_dir,
+                    backend,
+                    expected_skill_name=root.skill_name,
+                ),
                 reason_code="user_block",
                 message=None,
             ),
@@ -93,7 +95,11 @@ def build_exposure_summary(
             ),
         )
 
-    candidate = _find_policy_candidate(io_skill_dir, backend)
+    candidate = _find_policy_candidate(
+        io_skill_dir,
+        backend,
+        expected_skill_name=root.skill_name,
+    )
     active_version = candidate[0] if candidate is not None else None
 
     if latest_status in {"pass", "warn"}:
@@ -239,29 +245,36 @@ def _activation_message(prefix: str, active_version: str | None) -> str:
 
 def _latest_version_id(
     status_result: dict[str, Any],
-    latest_manifest: SignedManifest | None,
 ) -> str | None:
+    if status_result.get("status") == "tampered":
+        return None
     value = status_result.get("versionId")
     if isinstance(value, str) and value:
         return value
-    if latest_manifest is not None:
-        return latest_manifest.versionId
     return None
 
 
 def _find_user_decision_candidate(
     skill_dir: str | Path,
     backend: SigningBackend,
+    *,
+    expected_skill_name: str,
 ) -> tuple[str, UserDecision] | object | None:
     saw_newer_trusted_version = False
-    for version_id in reversed(list_version_ids(skill_dir)):
-        manifest = _load_trusted_activation_manifest(
-            skill_dir,
-            version_id,
-            backend,
-            allowed_statuses=_USER_DECISION_STATUSES,
-        )
-        if manifest is None:
+    saw_invalid_artifact = False
+    for version_id in reversed(list_version_artifact_ids(skill_dir)):
+        try:
+            manifest = load_verified_version_manifest(
+                skill_dir,
+                version_id,
+                backend,
+                expected_skill_name=expected_skill_name,
+            )
+        except KeyNotFoundError:
+            saw_invalid_artifact = True
+            continue
+        if manifest is None or manifest.scanStatus not in _USER_DECISION_STATUSES:
+            saw_invalid_artifact = True
             continue
         decision = manifest.userDecision
         if decision is None:
@@ -270,6 +283,8 @@ def _find_user_decision_candidate(
         if decision.action == "block":
             return None if saw_newer_trusted_version else _BLOCKED_BY_USER
         if decision.action in _ALLOWING_USER_DECISIONS:
+            if saw_invalid_artifact:
+                return None
             return version_id, decision
         saw_newer_trusted_version = True
     return None
@@ -278,12 +293,15 @@ def _find_user_decision_candidate(
 def _newest_block_decision(
     skill_dir: str | Path,
     backend: SigningBackend,
+    *,
+    expected_skill_name: str,
 ) -> UserDecision | None:
     for version_id in reversed(list_version_ids(skill_dir)):
         manifest = _load_trusted_activation_manifest(
             skill_dir,
             version_id,
             backend,
+            expected_skill_name=expected_skill_name,
             allowed_statuses=_USER_DECISION_STATUSES,
         )
         if manifest is None:
@@ -299,12 +317,15 @@ def _newest_block_decision(
 def _find_policy_candidate(
     skill_dir: str | Path,
     backend: SigningBackend,
+    *,
+    expected_skill_name: str,
 ) -> tuple[str, str] | None:
     for version_id in reversed(list_version_ids(skill_dir)):
         manifest = _load_trusted_activation_manifest(
             skill_dir,
             version_id,
             backend,
+            expected_skill_name=expected_skill_name,
             allowed_statuses=_EXPOSABLE_STATUSES,
         )
         if manifest is None:
@@ -318,23 +339,20 @@ def _load_trusted_activation_manifest(
     version_id: str,
     backend: SigningBackend,
     *,
+    expected_skill_name: str,
     allowed_statuses: frozenset[str],
 ) -> SignedManifest | None:
     try:
-        manifest = load_version_manifest(skill_dir, version_id)
-    except (json.JSONDecodeError, ValueError):
+        manifest = load_verified_version_manifest(
+            skill_dir,
+            version_id,
+            backend,
+            expected_skill_name=expected_skill_name,
+        )
+    except KeyNotFoundError:
         return None
     if manifest is None:
         return None
-    if manifest.versionId != version_id:
-        return None
     if manifest.scanStatus not in allowed_statuses:
-        return None
-    valid, _ = verify_manifest_integrity(manifest, backend)
-    if not valid:
-        return None
-    if not snapshot_matches_manifest(
-        snapshot_dir_path(skill_dir, version_id), manifest
-    ):
         return None
     return manifest

@@ -1266,3 +1266,97 @@ fn poison_recovery_flush_still_operational() {
 
     cleanup_db(&path);
 }
+
+// ─── update_fallback_session_id (retroactive session fix-up, issue #2059) ─────────────
+
+/// Read the current session_id of a call directly from the table.
+fn session_id_of(store: &GenAISqliteStore, call_id: &str) -> Option<String> {
+    let conn = store.conn.lock().unwrap();
+    conn.query_row(
+        "SELECT session_id FROM genai_events WHERE call_id = ?1",
+        rusqlite::params![call_id],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn test_update_fallback_session_id_replaces_hash_fallback() {
+    // 32-hex fallback (id_resolver shape) must be replaced by the real UUID.
+    let store = make_store_with_pending(&[(
+        "c1",
+        "0123456789abcdef0123456789abcdef",
+        "conv-1",
+        "main",
+        1000,
+    )]);
+    let uuid = "550e8400-e29b-41d4-a716-446655440000";
+    let updated = store.update_fallback_session_id("c1", uuid).unwrap();
+    assert_eq!(updated, 1, "hash-shaped session_id must be updated");
+    assert_eq!(session_id_of(&store, "c1").as_deref(), Some(uuid));
+}
+
+#[test]
+fn test_update_fallback_session_id_keeps_uuid_session() {
+    // A 36-char session_id is a trusted mapper/metadata UUID — never overwrite.
+    let existing = "11111111-2222-4333-8444-555555555555";
+    let store = make_store_with_pending(&[("c1", existing, "conv-1", "main", 1000)]);
+    let updated = store
+        .update_fallback_session_id("c1", "550e8400-e29b-41d4-a716-446655440000")
+        .unwrap();
+    assert_eq!(
+        updated, 0,
+        "existing UUID session_id must not be overwritten"
+    );
+    assert_eq!(session_id_of(&store, "c1").as_deref(), Some(existing));
+}
+
+#[test]
+fn test_update_fallback_session_id_unknown_call_id() {
+    let store = make_store_with_pending(&[(
+        "c1",
+        "0123456789abcdef0123456789abcdef",
+        "conv-1",
+        "main",
+        1000,
+    )]);
+    let updated = store
+        .update_fallback_session_id("no-such-call", "550e8400-e29b-41d4-a716-446655440000")
+        .unwrap();
+    assert_eq!(updated, 0, "unknown call_id must update nothing");
+}
+
+#[test]
+fn test_update_fallback_session_id_keeps_other_lengths() {
+    // Anything that is not the 32-hex fallback shape — e.g. a 20-char custom
+    // session id — must be left alone, not just 36-char UUIDs.
+    let existing = "custom-session-20ch!";
+    assert_eq!(existing.len(), 20);
+    let store = make_store_with_pending(&[("c1", existing, "conv-1", "main", 1000)]);
+    let updated = store
+        .update_fallback_session_id("c1", "550e8400-e29b-41d4-a716-446655440000")
+        .unwrap();
+    assert_eq!(updated, 0, "non-32-char session_id must not be overwritten");
+    assert_eq!(session_id_of(&store, "c1").as_deref(), Some(existing));
+}
+
+#[test]
+fn test_update_fallback_session_id_keeps_non_hex_32_chars() {
+    // 32 chars but not lowercase hex ('Z' and uppercase) — not a fallback
+    // shape, must be left alone. Reverting the NOT GLOB guard fails this.
+    for existing in [
+        "Z123456789abcdef0123456789abcdef",
+        "0123456789ABCDEF0123456789abcdef",
+    ] {
+        assert_eq!(existing.len(), 32);
+        let store = make_store_with_pending(&[("c1", existing, "conv-1", "main", 1000)]);
+        let updated = store
+            .update_fallback_session_id("c1", "550e8400-e29b-41d4-a716-446655440000")
+            .unwrap();
+        assert_eq!(
+            updated, 0,
+            "non-hex 32-char session_id must not be overwritten"
+        );
+        assert_eq!(session_id_of(&store, "c1").as_deref(), Some(existing));
+    }
+}

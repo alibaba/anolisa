@@ -9,6 +9,7 @@
 | Rust toolchain | stable (managed by `rust-toolchain.toml`) |
 | Minimum Rust version | 1.74 |
 | Components | rustfmt + clippy |
+| Supported platforms | Linux (full); macOS (limited functionality) |
 
 ```bash
 cd src/cosh-ng
@@ -30,23 +31,35 @@ cargo build --bin cosh-core
 cargo build --bin cosh-shell
 ```
 
-## Code Quality Checks
+## Validation
 
-All of the following checks must pass before committing:
+Use checks proportional to the change:
 
 ```bash
-# Format check
+# Ordinary code changes: format and run the closest tests
 cargo fmt --all -- --check
+cargo test --locked -p cosh-platform test_detect  # example
 
-# Clippy (warnings treated as errors)
-cargo clippy --all-targets --locked -- -D warnings
-
-# Tests
-cargo test --locked
-
-# Documentation build (when modifying pub API)
+# Public API or rustdoc changes
 cargo doc --workspace --no-deps
 ```
+
+Documentation-only changes need link, formatting, command, and bilingual parity
+checks; they do not require Rust tests. Add targeted Clippy, integration tests,
+or the shell layout audit only when relevant to the changed behavior.
+
+Full local gates and persistent ECS validation are reserved for large or
+cross-cutting code changes when the current task explicitly requests that
+depth. Otherwise CI provides broad regression coverage:
+
+```bash
+scripts/run-test-gates.sh all    # full deterministic gate
+cargo build --workspace --release --locked
+crates/cosh-shell/scripts/check-layout.sh
+```
+
+See the [developer getting-started guide](../../docs/developer-guide/en/cosh-ng/getting-started.md)
+for code ownership and test-target selection.
 
 ## Workspace Structure
 
@@ -109,24 +122,23 @@ src/extension/mod.rs
 
 ## Commit Standards
 
-Format: `type(scope): imperative description`
+Format: `type(cosh-ng): [crate_scope] imperative description`
 
 - Types: feat / fix / refactor / docs / test / ci / chore
-- Scope: `cosh-ng` maps to `cosh` (when changes span multiple crates)
+- Scope: `cosh-ng`
+- Crate scope: `[core]`, `[shell]`, `[cli,platform]`, or another precise list
 - Within 50 characters, English, imperative mood, lowercase first letter, no period
-- Requires `Signed-off-by` trailer
+- Requires a `Signed-off-by` trailer
 
 ```bash
-git commit \
-  --trailer "Assisted-by: Qoder:1.7.0" \
-  --trailer "Signed-off-by: $(git config user.name) <$(git config user.email)>" \
-  -m 'feat(cosh): add registry list action for hooks'
+git commit -s -m 'feat(cosh-ng): [core] add hook registry list'
 ```
 
 ## PR Process
 
 1. Branch from latest main
-2. Follow branch naming: `feature/cosh/<short-desc>`
-3. Ensure all checks pass before pushing
+2. Follow branch naming: `feature/cosh-ng/<short-desc>`
+3. Ensure all applicable checks pass before pushing
 4. PR title follows commit message format
-5. Fill in PR template (Description / Testing / Related Issue)
+5. Fill in every applicable PR template section, including risk, validation,
+   documentation, and rollback

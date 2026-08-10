@@ -1,0 +1,99 @@
+# ws-ckpt K8s sidecar example.
+#
+# Two containers share a pod:
+#   daemon  — privileged, runs ws-ckpt daemon (losetup + btrfs mount)
+#   app     — unprivileged workload, sees btrfs via mountPropagation
+#
+# Shared volumes:
+#   sock          — emptyDir, daemon <-> app UDS communication
+#   dev           — hostPath /dev, gives daemon access to loop devices
+#   ws-state      — hostPath, persists daemon state across pod restarts
+#   ws-ckpt-mount — hostPath anchor, daemon overmounts btrfs here;
+#                   Bidirectional propagation carries the mount to app
+#   data          — emptyDir, workspace parent directory (/data/workspace)
+#
+# Notes:
+# - shareProcessNamespace: true so fuser -m (used by rollback/recover/shrink)
+#   can see app container processes when checking mount busy state.
+# - If the host's /var/lib is on native btrfs, auto_detect picks BtrfsBase
+#   (no loop device needed); the overmount path only activates on ext4/xfs hosts.
+# - daemon does NOT umount/losetup -d on SIGTERM; preStop hook handles cleanup
+#   to prevent loop device leaks across pod restarts.
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: wsckpt-smoke
+  labels:
+    app: wsckpt-smoke
+spec:
+  shareProcessNamespace: true
+  restartPolicy: Never
+  volumes:
+    - name: sock
+      emptyDir: {}
+    - name: dev
+      hostPath:
+        path: /dev
+        type: Directory
+    - name: ws-state
+      hostPath:
+        path: /var/lib/ws-ckpt
+        type: DirectoryOrCreate
+    # Mount anchor: daemon overmounts btrfs here; propagation carries it to app.
+    - name: ws-ckpt-mount
+      hostPath:
+        path: /var/lib/wsckpt/mount-anchor
+        type: DirectoryOrCreate
+    - name: data                         # workspace parent dir; workspace uses subdir /data/workspace. Container rootfs dirs are private — only shared volumes align app writes with daemon operations
+      emptyDir: {}                       # avoids ws-ckpt bug (mount point rename EBUSY)
+  containers:
+    - name: daemon
+      image: localhost/ws-ckpt:smoke
+      imagePullPolicy: Never             # locally imported image, no remote pull
+      securityContext:
+        privileged: true                 # required for losetup/mount/mkfs.btrfs
+      command:
+        - ws-ckpt
+        - daemon
+        - --mount-path=/opt/ws-ckpt-mount   # must match ws-ckpt-mount volumeMount path exactly
+        - --log-level=debug
+      volumeMounts:
+        - name: sock
+          mountPath: /run/ws-ckpt
+        - name: dev
+          mountPath: /dev                # passthrough host /dev/loop-control and /dev/loop*
+        - name: ws-state
+          mountPath: /var/lib/ws-ckpt
+          mountPropagation: Bidirectional
+        - name: ws-ckpt-mount
+          mountPath: /opt/ws-ckpt-mount
+          mountPropagation: Bidirectional
+        - name: data
+          mountPath: /data
+      # Clean orphan loop devices on pod teardown. Dead containers leave
+      # host-scoped loops pointing at phantom paths (container rootfs gone but
+      # loop persists). Without this, the next pod sees a stale btrfs mount.
+      lifecycle:
+        preStop:
+          exec:
+            command:
+              - /bin/sh
+              - -c
+              - |
+                umount /opt/ws-ckpt-mount 2>/dev/null || true
+                losetup -ln -O NAME,BACK-FILE | while read dev file; do
+                  [ -e "$file" ] || losetup -d "$dev" 2>/dev/null
+                done
+    - name: app
+      image: localhost/ws-ckpt:smoke
+      imagePullPolicy: Never
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - name: sock
+          mountPath: /run/ws-ckpt        # communicates with daemon via UDS
+        - name: ws-ckpt-mount
+          mountPath: /opt/ws-ckpt-mount
+          mountPropagation: HostToContainer
+        - name: data
+          mountPath: /data               # workspace at subdir /data/workspace

@@ -783,7 +783,8 @@ fn record_version(installation: &Installation) -> Option<String> {
 ///
 /// Escalation rules (only move toward more-broken, never back):
 /// - any [`IntegrityStatus::is_failure`] result → `"failed"`
-/// - any [`IntegrityStatus::Unverified`] result on an otherwise-clean
+/// - any [`IntegrityStatus::Unverified`] or
+///   [`IntegrityStatus::ProbeLimitExceeded`] result on an otherwise-clean
 ///   component → `"degraded"`
 /// - otherwise the base status (`installed`/`disabled`/etc) is preserved
 ///
@@ -813,14 +814,30 @@ fn integrity_probe(
         }
         if result.is_failure() {
             had_failure = true;
-        } else if matches!(result, IntegrityStatus::Unverified) {
+        } else if matches!(
+            result,
+            IntegrityStatus::Unverified | IntegrityStatus::ProbeLimitExceeded { .. }
+        ) {
+            // Both mean "content not proved intact" — no digest recorded,
+            // or one recorded but the file was too large to hash. Neither
+            // proves damage, so they degrade rather than fail.
             had_unverified = true;
         }
+        // Spell the budget stop out. On its own the label reads like "this
+        // file is outside integrity policy", when in fact a digest is on
+        // record and only this run declined to re-read it.
+        let reason = match &result {
+            IntegrityStatus::ProbeLimitExceeded { size, limit } => Some(format!(
+                "file size {size} exceeds the {limit}-byte integrity probe ceiling; \
+                 the recorded digest was not re-checked this run"
+            )),
+            _ => None,
+        };
         entries.push(HealthEntry {
             name: format!("integrity:{}", file.path.display()),
             status: result.label().to_string(),
             checked_at: checked_at.clone(),
-            reason: None,
+            reason,
         });
     }
 

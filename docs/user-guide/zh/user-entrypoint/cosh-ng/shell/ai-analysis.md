@@ -1,90 +1,39 @@
 # AI 分析
 
-cosh-shell 在检测到命令失败时，可自动或按需调用 AI 适配器分析失败原因并给出建议。
+[English](../../../../en/user-entrypoint/cosh-ng/shell/ai-analysis.md)
 
-## 分析模式
+`cosh`可以检查命令失败和有价值的诊断输出，然后建议下一步或启动Agent分析。分析模式只控制主动帮助；任何模式都可以显式请求Agent。
 
-通过 `/mode analysis <mode>` 或配置 `shell.analysis_mode` 切换：
+## 选择模式
 
-| 模式 | 说明 |
+运行时使用`/mode analysis <mode>`切换，也可以设置`shell.analysis_mode`。
+
+| 模式 | 行为 |
 |------|------|
-| `smart` | 智能模式：严重错误显示操作卡片，一般错误提示可分析 |
-| `auto` | 自动模式：检测到失败立即自动分析 |
-| `manual` | 手动模式：显示操作卡片，等待用户确认后分析 |
+| `smart` | 默认模式。评估失败和诊断输出，并展示有用的洞察供你复核。 |
+| `auto` | 只对少量高置信失败自动启动分析；其他情况仍先提供建议。 |
+| `manual` | 关闭主动建议、失败洞察、自动分析和个性化输入建议；需要时显式请求分析。 |
 
-## 失败分类
+示例：
 
-cosh-shell 对命令退出码和输出进行语义分析，将失败归类：
-
-| 分类 | 示例 | 说明 |
-|------|------|------|
-| `CommandNotFound` | `command not found` | 命令不存在 |
-| `PermissionDenied` | `Permission denied` | 权限不足 |
-| `BuildOrTestFailure` | `error[E0308]` | 编译/测试错误 |
-| `AbnormalSignal` | SIGSEGV | 异常信号终止 |
-| `GenericRuntimeFailure` | 非零退出码 | 一般运行时错误 |
-| `UsageOrHelp` | `Usage:` 输出 | 用法错误 |
-| `UnknownFailure` | 其他 | 未分类失败 |
-
-以下分类视为"非真正失败"，不触发分析：
-- `Success` — 实际成功
-- `InteractiveCancel` — 用户主动中断
-- `UserInterrupt` — Ctrl+C
-- `PipelineNormal` — 管道正常退出码
-- `ProviderOrInternalArtifact` — 内部工具产生的退出码
-
-## 分析处置矩阵
-
-| 失败分类 | Auto 模式 | Smart 模式 | Manual 模式 |
-|----------|-----------|------------|-------------|
-| CommandNotFound / PermissionDenied / AbnormalSignal / BuildOrTestFailure | 自动分析 | 操作卡片 | 操作卡片 |
-| GenericRuntimeFailure | 自动分析 | 提示 | 操作卡片 |
-| UnknownFailure | 操作卡片 | 提示 | 提示 |
-| UsageOrHelp | 提示 | 静默 | 静默 |
-
-处置类型说明：
-- **自动分析** — 立即调用 AI 适配器分析
-- **操作卡片** — 渲染交互卡片，用户可选择"分析"或"跳过"
-- **提示** — 显示简短提示，用户可输入 slash 命令触发分析
-- **静默** — 仅记录，不干扰用户
-
-## 分析流程
-
-```
-命令执行失败（exit code ≠ 0）
-       │
-       ▼
-  失败语义分类
-       │
-       ▼
-  处置决策（按分析模式）
-       │
-       ├── AutoAnalyze → 直接启动 Agent 分析
-       ├── ActionCard  → 渲染操作卡片 → 等待用户确认
-       ├── Hint        → 显示简短提示
-       └── SilentRecord → 静默记录
-```
-
-## Agent 分析过程
-
-1. 收集失败上下文：命令文本、退出码、输出摘录（最多 8KB）
-2. 构造 prompt 发送到 AI 适配器（cosh-core）
-3. 适配器流式返回分析结果
-4. cosh-shell 以 Markdown 格式渲染分析内容
-5. 用户可在分析过程中 Ctrl+C 取消
-
-## 配置
-
-```toml
-[shell]
-# 分析模式：smart | auto | manual
-analysis_mode = "smart"
-```
-
-运行时切换：
-
-```
+```text
 /mode analysis smart
 /mode analysis auto
 /mode analysis manual
 ```
+
+## 运行时行为
+
+- 命令失败不一定会启动Agent请求。`cosh`会先判断失败是否可操作，以及现有证据是否可靠。
+- 建议或操作卡片会让你决定是否分析；选择**跳过**即可保留当前命令结果。
+- 分析会使用命令、退出状态和有界输出摘录，并在终端中流式显示结果。
+- 分析进行时可按`Ctrl+C`取消。
+
+用下面的配置设置默认模式：
+
+```toml
+[shell]
+analysis_mode = "smart"
+```
+
+其他斜杠命令见[交互命令](interactive-mode.md)，环境变量覆盖见[配置](../configuration.md)。

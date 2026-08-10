@@ -44,19 +44,31 @@ use crate::capability::probe_file_capabilities;
 use crate::path_safety::{PathBoundaryError, validate_owned_path};
 use crate::state::{FileOwner, OwnedFile, OwnedFileKind};
 
-/// Maximum bytes the integrity probe will read for one file. Owned
-/// artifacts in ANOLISA's catalogue are binaries / small data files; a
-/// 256 MiB ceiling stops a forged `installed.toml` from making `status`
-/// stream a multi-gigabyte path. Anything above this returns
-/// [`IntegrityStatus::ReadError`] rather than blocking the CLI.
-const MAX_PROBE_BYTES: u64 = 256 * 1024 * 1024;
+/// Maximum bytes the integrity probe will read for one file, bounding the
+/// wall-clock a single `status` / `doctor` run can spend hashing one path.
+/// Hashing itself streams through a fixed 8 KiB buffer, so the ceiling
+/// costs no memory — it only caps time and page-cache churn.
+///
+/// The bound is deliberately above the largest artifacts ANOLISA actually
+/// ships: raw installs vendor native ML runtimes whose shared objects run
+/// to hundreds of megabytes (`libtorch_cpu.so` is ~440 MB, CUDA builds
+/// larger still). A ceiling below those would leave first-party components
+/// permanently unverified, which is worse than the multi-second hash it
+/// would save.
+///
+/// Exceeding it is **not** an integrity failure: the bytes were never
+/// examined, so nothing was disproved. It reports
+/// [`IntegrityStatus::ProbeLimitExceeded`], which degrades rather than
+/// fails. Note this is a per-file bound and the probe applies it to every
+/// owned file in turn — it caps the cost of one path, not of one run.
+const MAX_PROBE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Result of a single integrity probe against one [`OwnedFile`].
 ///
 /// Variants are ordered by severity so callers can fold via `max`:
-/// `Ok < Skipped < Unverified < OutOfBounds < Symlink < NotRegularFile
-/// < MissingFile < ReadError < ModeMismatch < CapabilityMismatch
-/// < ShaMismatch`.
+/// `Ok < Skipped < Unverified < ProbeLimitExceeded < OutOfBounds < Symlink
+/// < NotRegularFile < MissingFile < ReadError < ModeMismatch
+/// < CapabilityMismatch < ShaMismatch`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IntegrityStatus {
     /// File exists and sha256 matches the recorded value.
@@ -66,6 +78,23 @@ pub enum IntegrityStatus {
     /// File exists but no sha256 was ever recorded — drift cannot be
     /// proved either way, so we degrade rather than claim health.
     Unverified,
+    /// File exists and passed every cheap check (regular file, mode,
+    /// capabilities), but its size is above the probe's per-file read
+    /// ceiling so the content hash was never computed. The ceiling is an
+    /// internal constant; `limit` below reports the value that applied.
+    ///
+    /// This is a *budget* outcome, not a *read* outcome: the probe chose
+    /// not to spend the time, as opposed to trying and failing. Nothing
+    /// about the bytes was disproved, so — like [`Self::Unverified`] —
+    /// it degrades instead of failing. Keeping it distinct from
+    /// `Unverified` tells operators which of the two holds: no digest was
+    /// ever recorded, or one was recorded but not checked this run.
+    ProbeLimitExceeded {
+        /// Size observed on disk, in bytes.
+        size: u64,
+        /// Per-file read ceiling that was exceeded, in bytes.
+        limit: u64,
+    },
     /// Path escapes the ANOLISA-owned roots in the active [`FsLayout`].
     /// Probe is refused without any filesystem touch; this strongly
     /// suggests a forged or corrupted `installed.toml`.
@@ -122,6 +151,7 @@ impl IntegrityStatus {
             Self::Ok => "ok",
             Self::Skipped => "skipped",
             Self::Unverified => "unverified",
+            Self::ProbeLimitExceeded { .. } => "probe_limit_exceeded",
             Self::OutOfBounds => "out_of_bounds",
             Self::Symlink => "symlink_refused",
             Self::NotRegularFile => "not_regular_file",
@@ -135,10 +165,15 @@ impl IntegrityStatus {
     }
 
     /// `true` when the probe found a real integrity problem (vs. ok /
-    /// skipped / unverified). Drives status escalation in `status`.
+    /// skipped / unverified / probe-limit-exceeded). Drives status
+    /// escalation in `status`.
     /// Out-of-bounds / symlink / not-regular-file all count as failures
     /// because they signal either tampering or a corrupted state file —
     /// neither is "merely degraded".
+    ///
+    /// [`Self::ProbeLimitExceeded`] is deliberately absent: an unread file
+    /// is not a damaged one, and reporting the component `failed` for
+    /// owning a large-but-intact artifact was the bug behind #2251.
     pub fn is_failure(&self) -> bool {
         matches!(
             self,
@@ -238,18 +273,25 @@ pub fn check_owned_file(layout: &FsLayout, file: &OwnedFile) -> IntegrityStatus 
             Err(err) => return IntegrityStatus::ReadError(err.to_string()),
         }
     }
-    if meta.len() > MAX_PROBE_BYTES {
-        return IntegrityStatus::ReadError(format!(
-            "file size {} exceeds integrity probe ceiling {}",
-            meta.len(),
-            MAX_PROBE_BYTES
-        ));
-    }
-
+    // Digest gate BEFORE the size gate, so each label keeps the meaning its
+    // documentation promises: `Unverified` means no digest was ever
+    // recorded, `ProbeLimitExceeded` means one was recorded but this run
+    // did not check it. Gating on size first would collapse both into the
+    // latter and tell operators a baseline exists where none does.
     let Some(expected) = file.sha256.clone() else {
         return IntegrityStatus::Unverified;
     };
-    match hash_file_sha256(&file.path) {
+
+    if meta.len() > MAX_PROBE_BYTES {
+        return IntegrityStatus::ProbeLimitExceeded {
+            size: meta.len(),
+            limit: MAX_PROBE_BYTES,
+        };
+    }
+
+    // The size just observed is the read budget. Growth past it means the
+    // file changed under the probe, which is a finding, not a budget stop.
+    match hash_file_sha256(&file.path, meta.len()) {
         Err(err) => IntegrityStatus::ReadError(err.to_string()),
         Ok(actual) if actual != expected => IntegrityStatus::ShaMismatch { expected, actual },
         Ok(_) => IntegrityStatus::Ok,
@@ -346,7 +388,19 @@ fn open_nofollow(path: &std::path::Path) -> std::io::Result<fs::File> {
     fs::File::open(path)
 }
 
-fn hash_file_sha256(path: &std::path::Path) -> std::io::Result<String> {
+/// Stream `path` through sha256 with a fixed 8 KiB buffer, so peak memory
+/// is constant regardless of file size.
+///
+/// `expected_len` is the length `stat` reported moments earlier, and it is
+/// the read budget: reading more than that means the file grew *while the
+/// probe was streaming it*. That is a concurrent modification, not a budget
+/// stop, and it fails hard. Treating it as a budget stop would hand a
+/// writer an evasion — append past the ceiling mid-read and the digest
+/// comparison never completes, so tampering reports as merely unverified.
+///
+/// Anchoring on the observed length rather than the ceiling also catches
+/// growth that stays under the ceiling, which a ceiling test would miss.
+fn hash_file_sha256(path: &std::path::Path, expected_len: u64) -> std::io::Result<String> {
     use std::io::Read;
     let mut f = open_nofollow(path)?;
     let mut hasher = Sha256::new();
@@ -358,9 +412,10 @@ fn hash_file_sha256(path: &std::path::Path) -> std::io::Result<String> {
             break;
         }
         total += n as u64;
-        if total > MAX_PROBE_BYTES {
+        if total > expected_len {
             return Err(std::io::Error::other(format!(
-                "file grew past integrity probe ceiling {MAX_PROBE_BYTES} during read"
+                "file grew past its observed size of {expected_len} bytes during the \
+                 integrity read"
             )));
         }
         hasher.update(&buf[..n]);
@@ -494,6 +549,119 @@ mod tests {
         assert_eq!(check_owned_file(&layout, &owned), IntegrityStatus::Ok);
     }
 
+    /// Regression for #2251: `sec-core` installed via the raw backend owns
+    /// `libtorch_cpu.so` (~440 MB). Exceeding the probe budget must not be
+    /// reported as `read_error`, because `read_error` is a failure and the
+    /// component was marked `failed` for owning a large, intact file.
+    ///
+    /// The fixture is sparse — `set_len` sets the inode size without
+    /// allocating blocks — and the size gate fires before any read, so the
+    /// test neither allocates nor hashes the nominal byte count.
+    #[test]
+    fn file_over_probe_ceiling_reports_budget_not_read_error() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_under(tmp.path());
+        let path = layout.bin_dir.join("libtorch_cpu.so");
+        let f = fs::File::create(&path).expect("create");
+        let size = MAX_PROBE_BYTES + 1;
+        f.set_len(size).expect("set_len");
+        drop(f);
+
+        // A digest IS recorded — install hashed this file with no ceiling.
+        // The probe declining to re-read it must not read as damage.
+        let owned = anolisa_owned(path, Some("deadbeef".to_string()));
+        let status = check_owned_file(&layout, &owned);
+
+        assert_eq!(
+            status,
+            IntegrityStatus::ProbeLimitExceeded {
+                size,
+                limit: MAX_PROBE_BYTES,
+            }
+        );
+        assert!(!status.is_failure(), "must degrade, not fail");
+        assert_eq!(status.label(), "probe_limit_exceeded");
+    }
+
+    /// An oversized file with no recorded digest must report `Unverified`,
+    /// not `ProbeLimitExceeded`: the latter's contract is "a digest exists
+    /// but this run skipped it", and reporting it here would tell operators
+    /// an integrity baseline exists where none was ever recorded.
+    #[test]
+    fn oversized_file_without_recorded_digest_is_unverified() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_under(tmp.path());
+        let path = layout.bin_dir.join("huge-legacy-blob");
+        let f = fs::File::create(&path).expect("create");
+        f.set_len(MAX_PROBE_BYTES + 1).expect("set_len");
+        drop(f);
+
+        let owned = anolisa_owned(path, None);
+        assert_eq!(
+            check_owned_file(&layout, &owned),
+            IntegrityStatus::Unverified,
+        );
+    }
+
+    /// A file that grows while the probe streams it must fail hard, not
+    /// degrade. Otherwise a process with write access could dodge the digest
+    /// comparison by appending mid-read: the hash never completes and the
+    /// tampered file would report as merely unverified.
+    ///
+    /// The guard is anchored on the length `stat` observed, so this is
+    /// exercised by handing `hash_file_sha256` a budget smaller than the
+    /// file — deterministic, and equivalent to the file having grown by that
+    /// difference between the stat and the read.
+    #[test]
+    fn growth_during_read_is_a_hard_failure_not_a_budget_stop() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_under(tmp.path());
+        let path = layout.bin_dir.join("grows");
+        fs::write(&path, vec![b'x'; 4096]).expect("write");
+
+        // stat said 1024; the read finds 4096.
+        let err = hash_file_sha256(&path, 1024).expect_err("must refuse to hash");
+        assert!(err.to_string().contains("grew past"), "msg: {err}");
+
+        // And that error class is decisive, not a degradation.
+        assert!(IntegrityStatus::ReadError(err.to_string()).is_failure());
+    }
+
+    /// Growth that stays under the ceiling is caught too — the budget is the
+    /// observed length, not the 2 GiB ceiling, so a small file cannot be
+    /// padded to hide a content change.
+    #[test]
+    fn growth_below_the_ceiling_is_still_caught() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_under(tmp.path());
+        let path = layout.bin_dir.join("small-but-grown");
+        fs::write(&path, b"payload-plus-appended-junk").expect("write");
+
+        assert!(hash_file_sha256(&path, 7).is_err());
+        // Same file hashed within its observed length succeeds.
+        assert!(hash_file_sha256(&path, 26).is_ok());
+    }
+
+    /// The budget outcome sorts with the other "not proved either way"
+    /// states, below every real finding — callers fold via `max`, so a
+    /// misplaced variant would let an oversized file mask a sha mismatch.
+    #[test]
+    fn probe_limit_sorts_above_unverified_and_below_failures() {
+        let limited = IntegrityStatus::ProbeLimitExceeded {
+            size: MAX_PROBE_BYTES + 1,
+            limit: MAX_PROBE_BYTES,
+        };
+        assert!(limited > IntegrityStatus::Unverified);
+        assert!(limited < IntegrityStatus::OutOfBounds);
+        assert!(
+            limited
+                < IntegrityStatus::ShaMismatch {
+                    expected: "a".into(),
+                    actual: "b".into(),
+                }
+        );
+    }
+
     #[test]
     #[cfg(unix)]
     fn matching_content_with_wrong_mode_reports_mismatch() {
@@ -599,11 +767,18 @@ mod tests {
 
     #[test]
     fn label_and_is_failure_match_severity_intent() {
-        // Ok / Skipped / Unverified are NOT failures — they don't escalate
-        // status past Installed/Degraded respectively.
+        // Ok / Skipped / Unverified / ProbeLimitExceeded are NOT failures —
+        // they don't escalate status past Installed/Degraded respectively.
         assert!(!IntegrityStatus::Ok.is_failure());
         assert!(!IntegrityStatus::Skipped.is_failure());
         assert!(!IntegrityStatus::Unverified.is_failure());
+        assert!(
+            !IntegrityStatus::ProbeLimitExceeded {
+                size: MAX_PROBE_BYTES + 1,
+                limit: MAX_PROBE_BYTES,
+            }
+            .is_failure()
+        );
         // All of the path-safety / IO refusals ARE failures.
         assert!(IntegrityStatus::OutOfBounds.is_failure());
         assert!(IntegrityStatus::Symlink.is_failure());
@@ -642,6 +817,10 @@ mod tests {
         assert_eq!(IntegrityStatus::Ok.label(), "ok");
         assert_eq!(IntegrityStatus::Skipped.label(), "skipped");
         assert_eq!(IntegrityStatus::Unverified.label(), "unverified");
+        assert_eq!(
+            IntegrityStatus::ProbeLimitExceeded { size: 1, limit: 0 }.label(),
+            "probe_limit_exceeded"
+        );
         assert_eq!(IntegrityStatus::OutOfBounds.label(), "out_of_bounds");
         assert_eq!(IntegrityStatus::Symlink.label(), "symlink_refused");
         assert_eq!(IntegrityStatus::NotRegularFile.label(), "not_regular_file");

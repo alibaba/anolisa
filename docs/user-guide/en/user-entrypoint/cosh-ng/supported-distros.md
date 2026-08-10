@@ -1,42 +1,34 @@
-# Supported Distributions
+# Supported Platforms and Linux Distributions
 
-cosh-ng automatically detects the current operating system by reading `/etc/os-release` (Linux) or calling `sw_vers` (macOS), and routes to the corresponding package manager and service manager backend.
+[中文版](../../../zh/user-entrypoint/cosh-ng/supported-distros.md)
 
-## Support Matrix
+cosh-ng can run the interactive terminal on Linux and macOS. Package and service commands use the host's native management tools.
 
-| Distribution | Package Manager | Service Manager | Notes |
-|-------------|----------------|-----------------|-------|
-| Alinux (2/3/4) | dnf | systemd | Alibaba Cloud native Linux |
-| CentOS 7/8/9 | dnf | systemd | |
-| Fedora | dnf | systemd | |
-| Ubuntu | apt-get | systemd | |
-| Debian | apt-get | systemd | |
-| openSUSE Leap/Tumbleweed | zypper | systemd | |
-| macOS | brew | — | Only pkg subsystem available |
+| Platform | Interactive shell | Package commands | Service commands |
+|---|---|---|---|
+| Linux | Bash or zsh | dnf, apt, or zypper | systemd |
+| macOS | Bash or zsh | Homebrew | Not available |
 
-## Detection Logic
+## Linux distributions
 
-Distribution detection is implemented via `Distro::detect()`:
+These `/etc/os-release` IDs have built-in routing:
 
-1. When the compile target is macOS, calls `sw_vers -productVersion` to get the version
-2. On Linux, reads `/etc/os-release` and parses the `ID` and `VERSION_ID` fields
-3. Maps `ID` to a known distribution variant
-4. Unrecognized `ID` values fall into `Unknown`, and most operations return `UnsupportedDistro` error
+| ID | Package manager |
+|---|---|
+| `alinux`, `centos`, `fedora` | dnf |
+| `ubuntu`, `debian` | apt |
+| `opensuse-leap`, `opensuse-tumbleweed`, `sles` | zypper |
 
-## Package Manager Mapping
+An unlisted distribution can use a package family when its `ID_LIKE` contains one of these values:
 
-| Distribution ID | Package Manager | Install Command | Search Command |
-|----------------|----------------|-----------------|----------------|
-| alinux / centos / fedora | Dnf | `dnf install -y` | `dnf search -q` |
-| ubuntu / debian | Apt | `apt-get install -y` | `apt-cache search` |
-| opensuse-leap / opensuse-tumbleweed / sles | Zypper | `zypper install -y` | `zypper search` |
-| macOS | Brew | `brew install` | `brew search` |
+| `ID_LIKE` family | Package manager |
+|---|---|
+| `alinux`, `centos`, `fedora`, `rhel` | dnf |
+| `debian`, `ubuntu` | apt |
+| `opensuse`, `suse` | zypper |
 
-## Service Manager
+Family routing means the package backend is compatible; it is not certification of every derivative or release. An unknown package family returns a structured `UnsupportedDistro` error.
 
-All Linux distributions use systemd (`systemctl`) uniformly. macOS does not support the svc subsystem.
+## Before changing the host
 
-## Adding New Distribution Support
-
-To add support for a new distribution, see the developer documentation
-[Adding Distribution Support Guide](../../../../developer-guide/en/cosh-ng/adding-distros.md).
+Run `anolisa env` before installation. On the target host, use read-only `cosh-cli` commands and the action's `--dry-run` option to verify routing before package or service mutations. Service commands require Linux with systemd; macOS users can use package commands through Homebrew but not `cosh-cli svc`.

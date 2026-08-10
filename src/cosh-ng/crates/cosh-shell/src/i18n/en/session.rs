@@ -26,6 +26,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
             "Up/Down or j/k move · Enter resume · Space toggle clear mark · d review clear · Esc cancel"
         }
         MessageId::SessionPickerMarkedCount => "{count} marked",
+        MessageId::SessionPickerMarkedFooter => {
+            "Up/Down or j/k move · Enter review clear · Space toggle clear mark · d review clear · Esc cancel"
+        }
         MessageId::SessionClearConfirmTitle => "Confirm session clear",
         MessageId::SessionClearConfirmCountLine => {
             "The following {count} persisted session(s) will be deleted:"

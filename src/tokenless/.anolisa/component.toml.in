@@ -1,12 +1,81 @@
-# Tokenless RPM component contract (source template).
-# The version field below is substituted from Cargo.toml by `make` (sed).
-# This is publishing/plugin metadata only — framework execution (config
-# writes, skill delivery, CLI argv, scripts) belongs to built-in framework
-# drivers, not generic manifest keys.
-# Installed to: %{_datadir}/anolisa/components/tokenless/component.toml
 [component]
 name = "tokenless"
 version = "@VERSION@"
+domain = "optimization"
+display_name = "Tokenless"
+description = "LLM token optimization toolkit - schema/response compression, command rewriting"
+license = "Apache-2.0"
+repository = "https://github.com/alibaba/anolisa"
+
+[component.contract]
+schema_version = "1.0"
+min_anolisa_version = "0.1.16"
+
+[component.platform]
+# min_kernel is intentionally omitted: tokenless has no kernel capability
+# dependency, and the schema would apply the constraint to Linux and macOS.
+os = ["linux", "macos"]
+arch = ["x86_64", "aarch64"]
+
+[[component.dependencies]]
+name = "python3"
+kind = "system-package"
+probe = "python3 --version"
+packages = { rpm = "python3", deb = "python3" }
+
+[[component.dependencies]]
+name = "bash"
+kind = "system-package"
+probe = "bash --version"
+packages = { rpm = "bash", deb = "bash" }
+
+[component.layout]
+modes = ["user", "system"]
+
+[[component.layout.files]]
+source = ".anolisa/component.toml"
+target = "{datadir}/components/tokenless/component.toml"
+mode = "0644"
+
+[[component.layout.files]]
+source = "bin/tokenless"
+target = "{bindir}/tokenless"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "libexec/anolisa/tokenless/rtk"
+target = "{libexecdir}/tokenless/rtk"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "libexec/anolisa/tokenless/toon"
+target = "{libexecdir}/tokenless/toon"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
+source = "{libexecdir}/tokenless/rtk"
+target = "{bindir}/rtk"
+type = "symlink"
+
+[[component.layout.files]]
+source = "{libexecdir}/tokenless/toon"
+target = "{bindir}/toon"
+type = "symlink"
+
+# Shared hooks are interpreter-loaded resources, so the common tree stays
+# non-executable. Cosh uses its separately staged extension bundle.
+[[component.layout.files]]
+source = "adapters/common/"
+target = "{datadir}/adapters/{component}/common/"
+mode = "0644"
+
+[component.health_check]
+type = "binary_version"
+binary = "{bindir}/tokenless"
+timeout_secs = 5
 
 [[adapters]]
 framework = "openclaw"
@@ -14,12 +83,9 @@ adapter_type = "plugin"
 plugin_id = "tokenless"
 source = "adapters/openclaw"
 dest = "{datadir}/adapters/{component}/openclaw/"
+detect = { binary = "openclaw" }
 
 [adapters.bundle]
-# Entry-point manifest inside the bundle directory (the file the OpenClaw
-# driver reads to identify the plugin). Declared explicitly rather than
-# relying on the driver's "openclaw.plugin.json" default, so the contract is
-# self-describing and survives driver default changes.
 entry = "openclaw.plugin.json"
 
 [[adapters]]
@@ -28,13 +94,9 @@ adapter_type = "plugin"
 plugin_id = "tokenless"
 source = "adapters/hermes"
 dest = "{datadir}/adapters/{component}/hermes/"
+detect = { binary = "hermes" }
 
 [adapters.bundle]
-# Hermes-native plugin manifest at the bundle root. The driver scans this
-# file for the plugin id when plugin_id is not declared; we declare
-# plugin_id above so the driver need not parse it, but keep entry explicit
-# so the contract names the platform entry manifest (matches the file
-# shipped at the dest root: adapters/<component>/hermes/plugin.yaml).
 entry = "plugin.yaml"
 
 [[adapters]]
@@ -47,9 +109,9 @@ dest = "{datadir}/adapters/{component}/qoder/"
 [adapters.bundle]
 # Qoder-native plugin manifest inside the bundle directory. The built-in
 # qoder driver reads this to confirm the bundle is a valid Qoder plugin and
-# requires hooks/hooks.json. The scripts/install.sh and uninstall.sh ship in
-# the same bundle for direct Makefile installs, but the ANOLISA driver never
-# invokes them — enable/disable behavior is built into Rust.
+# requires hooks.json beside it. The legacy scripts/install.sh and
+# uninstall.sh ship in the same bundle as publishing assets, but the ANOLISA
+# driver never invokes them — enable/disable behavior is built into Rust.
 entry = ".qoder-plugin/plugin.json"
 
 [[adapters]]
@@ -76,7 +138,7 @@ entry = ".codex-plugin/plugin.json"
 framework = "cosh"
 adapter_type = "extension"
 plugin_id = "tokenless"
-source = "adapters/common"
+source = "extensions/tokenless"
 dest = "{datadir}/extensions/{component}/"
 
 [adapters.bundle]

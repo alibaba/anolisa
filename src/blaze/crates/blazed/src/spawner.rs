@@ -16,7 +16,13 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use blaze_core::backend::{BackendKind, SpawnRequest};
+#[cfg(test)]
+use blaze_core::guest_protocol::DEFAULT_MAX_RESPONSE_BYTES;
 use blaze_core::{BlazeError, Result};
+#[cfg(test)]
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+#[cfg(test)]
+use tokio::net::UnixListener;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -26,7 +32,16 @@ use uuid::Uuid;
 pub use firecracker::FirecrackerSpawner;
 
 const TERMINATION_GRACE: Duration = Duration::from_secs(5);
+#[cfg(target_os = "linux")]
+const PID_HANDOFF_GRACE: Duration = Duration::from_secs(1);
 const STOPPED_MARKER: &str = "backend.stopped";
+/// Fixed host-wide lock used to serialize network slot allocation.
+pub(crate) const HOST_NETWORK_COORDINATION_PATH: &str = "/run/lock/blaze-network.lock";
+/// Conventional host directories containing named network namespace objects.
+///
+/// Upstream iproute2 defaults to `/var/run/netns`, while distributions may
+/// compile the same facility to use `/run/netns` directly.
+pub(crate) const HOST_NAMED_NETWORK_NAMESPACE_PATHS: [&str; 2] = ["/var/run/netns", "/run/netns"];
 
 /// Result reported when a backend process exits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +59,10 @@ pub struct SpawnResult {
 pub trait BackendInstance: Send + Sync {
     /// Concrete backend implementation.
     fn backend(&self) -> BackendKind;
+    /// Guest transport endpoint, or an empty path for guestless backends.
+    fn guest_socket_path(&self) -> &Path {
+        Path::new("")
+    }
     /// Report an observed backend exit without waiting.
     ///
     /// `None` means the owned process or task was running when checked.
@@ -136,6 +155,11 @@ impl From<std::io::Error> for SpawnFailure {
 /// Factory for owned backend runtime instances.
 #[async_trait]
 pub trait BackendSpawner: Send + Sync {
+    /// Persist backend-specific pre-spawn ownership metadata.
+    async fn prepare_spawn(&self, _run_dir: &Path) -> Result<()> {
+        Ok(())
+    }
+
     /// Start a new sandbox.
     async fn spawn(
         &self,
@@ -181,13 +205,20 @@ pub struct BubblewrapSpawner;
 
 #[async_trait]
 impl BackendSpawner for BubblewrapSpawner {
+    async fn prepare_spawn(&self, run_dir: &Path) -> Result<()> {
+        tokio::fs::create_dir_all(run_dir).await?;
+        prepare_pid_handoff(&run_dir.join("backend.pid"))
+    }
+
     async fn spawn(
         &self,
         request: SpawnRequest,
     ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
         tokio::fs::create_dir_all(&request.run_dir).await?;
         remove_file_if_exists(&request.run_dir.join(STOPPED_MARKER)).await?;
-        let child = Command::new(&request.binary_path)
+        let pid_file = request.run_dir.join("backend.pid");
+        let mut command = Command::new(&request.binary_path);
+        command
             .args([
                 "--ro-bind",
                 "/",
@@ -207,22 +238,12 @@ impl BackendSpawner for BubblewrapSpawner {
             ])
             .env("BLAZE_INSTANCE_ID", request.instance_id.to_string())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let pid_file = request.run_dir.join("backend.pid");
+            .stderr(Stdio::null());
+        let pid_handoff = configure_pid_handoff(&mut command, &pid_file)?;
+        let child = command.spawn();
+        drop(pid_handoff);
+        let child = child?;
         let stopped_marker = request.run_dir.join(STOPPED_MARKER);
-        if let Some(pid) = child.id()
-            && let Err(error) = tokio::fs::write(&pid_file, format!("{pid}\n")).await
-        {
-            let owner: DynBackendInstance = Arc::new(ProcessInstance::new(
-                request.instance_id,
-                BackendKind::Bubblewrap,
-                child,
-                pid_file,
-                stopped_marker,
-            ));
-            return Err(SpawnFailure::compensate_started(error.into(), owner).await);
-        }
         let instance = ProcessInstance::new(
             request.instance_id,
             BackendKind::Bubblewrap,
@@ -404,6 +425,220 @@ impl BackendInstance for MockInstance {
     }
 }
 
+/// Guest-capable mock used only by unit and integration tests.
+#[cfg(test)]
+pub(crate) struct GuestMockSpawner;
+
+#[cfg(test)]
+#[async_trait]
+impl BackendSpawner for GuestMockSpawner {
+    async fn spawn(
+        &self,
+        request: SpawnRequest,
+    ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
+        spawn_guest_mock_instance(request.instance_id, request.run_dir)
+            .await
+            .map_err(SpawnFailure::from)
+    }
+
+    async fn probe(&self, _binary_path: &Path) -> Result<bool> {
+        Ok(true)
+    }
+
+    async fn cleanup_orphan(&self, _instance_id: Uuid, _run_dir: &Path) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+struct GuestMockInstance {
+    instance_id: Uuid,
+    guest_socket_path: PathBuf,
+    cancellation: CancellationToken,
+    task: Mutex<Option<JoinHandle<()>>>,
+    killed: AtomicBool,
+}
+
+#[cfg(test)]
+async fn spawn_guest_mock_instance(
+    instance_id: Uuid,
+    run_dir: PathBuf,
+) -> Result<DynBackendInstance> {
+    tokio::fs::create_dir_all(&run_dir).await?;
+    let socket = run_dir.join("vsock.uds");
+    if socket.exists() {
+        tokio::fs::remove_file(&socket).await?;
+    }
+    let listener = UnixListener::bind(&socket)?;
+    let cancellation = CancellationToken::new();
+    let task_token = cancellation.clone();
+    let files = Arc::new(Mutex::new(HashMap::new()));
+    let task_files = files.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = task_token.cancelled() => break,
+                accepted = listener.accept() => {
+                    let Ok((stream, _)) = accepted else {
+                        break;
+                    };
+                    let files = task_files.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = serve_mock_guest(stream, files).await {
+                            tracing::debug!(%error, "test guest connection ended");
+                        }
+                    });
+                }
+            }
+        }
+    });
+    Ok(Arc::new(GuestMockInstance {
+        instance_id,
+        guest_socket_path: socket,
+        cancellation,
+        task: Mutex::new(Some(task)),
+        killed: AtomicBool::new(false),
+    }))
+}
+
+#[cfg(test)]
+#[async_trait]
+impl BackendInstance for GuestMockInstance {
+    fn backend(&self) -> BackendKind {
+        BackendKind::Mock
+    }
+
+    fn guest_socket_path(&self) -> &Path {
+        &self.guest_socket_path
+    }
+
+    async fn try_wait(&self) -> Result<Option<SpawnResult>> {
+        let mut task = self.task.lock().await;
+        match task.as_ref() {
+            Some(handle) if !handle.is_finished() => Ok(None),
+            Some(_) => {
+                if let Some(handle) = task.take() {
+                    let _ = handle.await;
+                }
+                Ok(Some(SpawnResult {
+                    instance_id: self.instance_id,
+                    exit_code: Some(0),
+                    signal: None,
+                }))
+            }
+            None => Ok(Some(SpawnResult {
+                instance_id: self.instance_id,
+                exit_code: Some(0),
+                signal: None,
+            })),
+        }
+    }
+
+    async fn kill(&self) -> Result<()> {
+        if self.killed.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let mut task = self.task.lock().await;
+        if self.killed.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.cancellation.cancel();
+        if let Some(task) = task.take() {
+            let _ = task.await;
+        }
+        if self.guest_socket_path.exists() {
+            tokio::fs::remove_file(&self.guest_socket_path).await?;
+        }
+        self.killed.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+async fn serve_mock_guest(
+    mut stream: tokio::net::UnixStream,
+    files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+) -> std::io::Result<()> {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    let connect = read_mock_line(&mut stream, 128).await?;
+    if !connect.starts_with(b"CONNECT ") {
+        return Ok(());
+    }
+    stream.write_all(b"OK 5000\n").await?;
+    let request = read_mock_line(&mut stream, DEFAULT_MAX_RESPONSE_BYTES).await?;
+    let request: serde_json::Value = match serde_json::from_slice(&request) {
+        Ok(request) => request,
+        Err(_) => return Ok(()),
+    };
+    let id = request.get("id").cloned().unwrap_or_default();
+    let response = match request.get("op").and_then(serde_json::Value::as_str) {
+        Some("exec") => {
+            let command = request
+                .get("cmd")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            serde_json::json!({
+                "id": id,
+                "ok": true,
+                "rc": 0,
+                "stdout_b64": BASE64.encode(command.as_bytes()),
+                "stderr_b64": ""
+            })
+        }
+        Some("read") => {
+            let path = request
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let data = files.lock().await.get(path).cloned().unwrap_or_default();
+            serde_json::json!({"id": id, "ok": true, "data_b64": BASE64.encode(data)})
+        }
+        Some("write") => {
+            let path = request
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let data = request
+                .get("data_b64")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|encoded| BASE64.decode(encoded).ok())
+                .unwrap_or_default();
+            files.lock().await.insert(path, data);
+            serde_json::json!({"id": id, "ok": true})
+        }
+        _ => serde_json::json!({"id": id, "ok": true}),
+    };
+    let mut encoded = serde_json::to_vec(&response).unwrap_or_else(|_| b"{}".to_vec());
+    encoded.push(b'\n');
+    stream.write_all(&encoded).await
+}
+
+#[cfg(test)]
+async fn read_mock_line<R>(stream: &mut R, limit: usize) -> std::io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut reader = BufReader::new(stream).take(limit.saturating_add(1) as u64);
+    let mut output = Vec::with_capacity(limit.min(8192));
+    reader.read_until(b'\n', &mut output).await?;
+    if output.last() == Some(&b'\n') {
+        output.pop();
+        if output.len() <= limit {
+            return Ok(output);
+        }
+    }
+    if output.len() > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "mock guest line too long",
+        ));
+    }
+    Ok(output)
+}
+
 pub(super) async fn terminate_child(child: &mut Child, backend: &str) -> Result<()> {
     if child.try_wait()?.is_some() {
         return Ok(());
@@ -447,6 +682,147 @@ pub(super) fn stopped_marker(run_dir: &Path) -> PathBuf {
     run_dir.join(STOPPED_MARKER)
 }
 
+#[cfg(unix)]
+pub(super) struct PidHandoff {
+    _file: std::fs::File,
+}
+
+#[cfg(not(unix))]
+pub(super) struct PidHandoff;
+
+#[cfg(unix)]
+pub(super) fn prepare_pid_handoff(pid_file: &Path) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let pid_path =
+        CString::new(pid_file.as_os_str().as_bytes()).map_err(|_| BlazeError::BackendError {
+            msg: format!("PID file path contains a NUL byte: {}", pid_file.display()),
+        })?;
+    let fd = unsafe {
+        libc::open(
+            pid_path.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    file.sync_all()?;
+    if let Some(parent) = pid_file.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(super) fn prepare_pid_handoff(pid_file: &Path) -> Result<()> {
+    let file = std::fs::File::create(pid_file)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(super) fn configure_pid_handoff(command: &mut Command, pid_file: &Path) -> Result<PidHandoff> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::process::CommandExt;
+
+    let pid_path =
+        CString::new(pid_file.as_os_str().as_bytes()).map_err(|_| BlazeError::BackendError {
+            msg: format!("PID file path contains a NUL byte: {}", pid_file.display()),
+        })?;
+    let fd = unsafe {
+        libc::open(
+            pid_path.as_ptr(),
+            libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let child_fd = file.as_raw_fd();
+    // SAFETY: the closure calls only async-signal-safe libc functions and does
+    // not allocate after fork. The returned guard keeps `child_fd` open and
+    // locked until `Command::spawn` completes.
+    unsafe {
+        command
+            .as_std_mut()
+            .pre_exec(move || write_current_pid(child_fd));
+    }
+    Ok(PidHandoff { _file: file })
+}
+
+#[cfg(not(unix))]
+pub(super) fn configure_pid_handoff(
+    _command: &mut Command,
+    _pid_file: &Path,
+) -> Result<PidHandoff> {
+    Ok(PidHandoff)
+}
+
+#[cfg(unix)]
+fn write_current_pid(fd: libc::c_int) -> std::io::Result<()> {
+    if unsafe { libc::lseek(fd, 0, libc::SEEK_SET) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::ftruncate(fd, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    write_pid_and_sync(fd)
+}
+
+#[cfg(unix)]
+fn write_pid_and_sync(fd: libc::c_int) -> std::io::Result<()> {
+    let mut buffer = [0_u8; 16];
+    let mut cursor = buffer.len();
+    cursor -= 1;
+    buffer[cursor] = b'\n';
+    let mut pid = unsafe { libc::getpid() } as u32;
+    loop {
+        cursor -= 1;
+        buffer[cursor] = b'0' + (pid % 10) as u8;
+        pid /= 10;
+        if pid == 0 {
+            break;
+        }
+    }
+
+    let mut remaining = &buffer[cursor..];
+    while !remaining.is_empty() {
+        let written = unsafe {
+            libc::write(
+                fd,
+                remaining.as_ptr().cast::<libc::c_void>(),
+                remaining.len(),
+            )
+        };
+        if written < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if written == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        remaining = &remaining[written as usize..];
+    }
+    if unsafe { libc::fsync(fd) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 async fn cleanup_process_run_dir(instance_id: Uuid, run_dir: &Path, backend: &str) -> Result<()> {
     let stopped_marker = stopped_marker(run_dir);
     if stopped_marker.is_file() {
@@ -478,17 +854,9 @@ pub(super) async fn terminate_recorded_process(
     pid_file: &Path,
     backend: &str,
 ) -> Result<()> {
-    let raw = match tokio::fs::read_to_string(pid_file).await {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(BlazeError::BackendError {
-                msg: format!(
-                    "cannot confirm {backend} instance {instance_id} stopped: missing PID metadata {}",
-                    pid_file.display()
-                ),
-            });
-        }
-        Err(error) => return Err(error.into()),
+    let raw = match wait_for_pid_handoff(pid_file).await? {
+        Some(raw) => raw,
+        None => return Ok(()),
     };
     let pid: u32 = raw
         .trim()
@@ -536,6 +904,74 @@ pub(super) async fn terminate_recorded_process(
         });
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_pid_handoff(pid_file: &Path) -> Result<Option<String>> {
+    let deadline = Instant::now() + PID_HANDOFF_GRACE;
+    loop {
+        match read_pid_handoff(pid_file)? {
+            PidHandoffState::NotStarted => return Ok(None),
+            PidHandoffState::Missing => {
+                return Err(BlazeError::BackendError {
+                    msg: format!(
+                        "cannot confirm backend process ownership: missing PID handoff {}",
+                        pid_file.display()
+                    ),
+                });
+            }
+            PidHandoffState::Ready(raw) => return Ok(Some(raw)),
+            PidHandoffState::InProgress => {}
+        }
+        if Instant::now() >= deadline {
+            return Err(BlazeError::BackendError {
+                msg: format!(
+                    "cannot confirm backend process ownership: PID handoff is still in progress at {}",
+                    pid_file.display()
+                ),
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[cfg(target_os = "linux")]
+enum PidHandoffState {
+    Missing,
+    NotStarted,
+    InProgress,
+    Ready(String),
+}
+
+#[cfg(target_os = "linux")]
+fn read_pid_handoff(pid_file: &Path) -> Result<PidHandoffState> {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::os::fd::AsRawFd;
+
+    let mut file = match std::fs::OpenOptions::new().read(true).open(pid_file) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PidHandoffState::Missing);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EAGAIN)
+            || error.raw_os_error() == Some(libc::EWOULDBLOCK)
+        {
+            return Ok(PidHandoffState::InProgress);
+        }
+        return Err(error.into());
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut raw = String::new();
+    file.read_to_string(&mut raw)?;
+    if raw.trim().is_empty() {
+        Ok(PidHandoffState::NotStarted)
+    } else {
+        Ok(PidHandoffState::Ready(raw))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -616,6 +1052,8 @@ mod tests {
     use blaze_core::policy::BackendConfigs;
     use blaze_core::storage::StorageSlot;
 
+    use crate::guest::GuestClient;
+
     use super::*;
 
     fn request(root: &Path) -> SpawnRequest {
@@ -661,12 +1099,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mock_instance_reports_liveness_and_supports_idempotent_kill() {
+    async fn production_mock_does_not_advertise_guest_transport() {
         let temp = tempfile::tempdir().expect("temp");
         let instance = MockSpawner
             .spawn(request(temp.path()))
             .await
             .expect("spawn");
+
+        assert!(instance.guest_socket_path().as_os_str().is_empty());
+        assert!(!temp.path().join("run/vsock.uds").exists());
+        instance.kill().await.expect("kill");
+    }
+
+    #[tokio::test]
+    async fn test_guest_instance_supports_io_and_idempotent_kill() {
+        let temp = tempfile::tempdir().expect("temp");
+        let instance = GuestMockSpawner
+            .spawn(request(temp.path()))
+            .await
+            .expect("spawn");
+        let client = GuestClient::new(
+            temp.path().join("run/vsock.uds"),
+            Duration::from_secs(1),
+            1024,
+        );
+        client
+            .write_file("/tmp/value".into(), b"hello")
+            .await
+            .expect("write");
+        assert_eq!(
+            client.read_file("/tmp/value".into()).await.expect("read"),
+            b"hello"
+        );
         assert_eq!(instance.try_wait().await.expect("try wait"), None);
         instance.kill().await.expect("kill");
         assert!(instance.try_wait().await.expect("try wait").is_some());
@@ -721,19 +1185,90 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn orphan_cleanup_rejects_missing_pid_without_stop_record() {
+    async fn orphan_cleanup_accepts_pre_spawn_handoff_without_pid() {
+        let temp = tempfile::tempdir().expect("temp");
+        prepare_pid_handoff(&temp.path().join("backend.pid")).expect("prepare handoff");
+        cleanup_process_run_dir(Uuid::new_v4(), temp.path(), "test")
+            .await
+            .expect("an unlocked empty handoff proves the backend was not started");
+        assert!(stopped_marker(temp.path()).is_file());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn orphan_cleanup_rejects_missing_pid_handoff() {
         let temp = tempfile::tempdir().expect("temp");
         let error = cleanup_process_run_dir(Uuid::new_v4(), temp.path(), "test")
             .await
-            .expect_err("missing metadata cannot prove termination");
-        assert!(error.to_string().contains("missing PID metadata"));
+            .expect_err("missing handoff cannot prove backend ownership");
 
-        record_backend_stopped(&stopped_marker(temp.path()))
+        assert!(error.to_string().contains("missing PID handoff"));
+        assert!(!stopped_marker(temp.path()).exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn orphan_cleanup_retains_an_active_pid_handoff() {
+        let temp = tempfile::tempdir().expect("temp");
+        let pid_file = temp.path().join("backend.pid");
+        prepare_pid_handoff(&pid_file).expect("prepare handoff");
+        let mut command = Command::new("sleep");
+        let handoff = configure_pid_handoff(&mut command, &pid_file).expect("configure handoff");
+
+        let error = cleanup_process_run_dir(Uuid::new_v4(), temp.path(), "test")
             .await
-            .expect("record stopped");
-        cleanup_process_run_dir(Uuid::new_v4(), temp.path(), "test")
+            .expect_err("an active handoff cannot prove the backend absent");
+
+        assert!(
+            error
+                .to_string()
+                .contains("PID handoff is still in progress")
+        );
+        assert!(!stopped_marker(temp.path()).exists());
+        drop(handoff);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn pid_handoff_is_visible_when_spawn_returns() {
+        let temp = tempfile::tempdir().expect("temp");
+        let instance_id = Uuid::new_v4();
+        let pid_file = temp.path().join("backend.pid");
+        prepare_pid_handoff(&pid_file).expect("prepare handoff");
+        let mut command = Command::new("sleep");
+        command
+            .arg("60")
+            .env("BLAZE_INSTANCE_ID", instance_id.to_string());
+        let handoff = configure_pid_handoff(&mut command, &pid_file).expect("configure handoff");
+        let mut child = command.spawn().expect("spawn child");
+        drop(handoff);
+        wait_for_instance_marker(&child, instance_id).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&pid_file)
+                .expect("pid handoff")
+                .trim(),
+            child.id().expect("child pid").to_string()
+        );
+        terminate_recorded_process(instance_id, &pid_file, "test")
             .await
-            .expect("durable stop record proves termination");
+            .expect("terminate handed-off process");
+        child.wait().await.expect("reap child");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn failed_pid_handoff_preparation_does_not_start_backend() {
+        let temp = tempfile::tempdir().expect("temp");
+        let instance_id = Uuid::new_v4();
+        let pid_file = temp.path().join("missing").join("backend.pid");
+        let mut command = Command::new("sleep");
+        command
+            .arg("60")
+            .env("BLAZE_INSTANCE_ID", instance_id.to_string());
+
+        assert!(configure_pid_handoff(&mut command, &pid_file).is_err());
+        assert!(!pid_file.exists());
     }
 
     #[cfg(target_os = "linux")]

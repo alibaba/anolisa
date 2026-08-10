@@ -1,90 +1,39 @@
 # AI Analysis
 
-cosh-shell can automatically or on-demand invoke the AI adapter to analyze failure causes and provide suggestions when a command failure is detected.
+[中文版](../../../../zh/user-entrypoint/cosh-ng/shell/ai-analysis.md)
 
-## Analysis Modes
+cosh can review command failures and useful diagnostic output, then suggest a next step or start an Agent analysis. The analysis mode controls proactive help; an explicit Agent request is still available in every mode.
 
-Switch via `/mode analysis <mode>` or configure `shell.analysis_mode`:
+## Choose a mode
 
-| Mode | Description |
-|------|-------------|
-| `smart` | Smart mode: severe errors show action cards, general errors show hints |
-| `auto` | Auto mode: immediately auto-analyze on detected failure |
-| `manual` | Manual mode: show action cards, wait for user confirmation before analysis |
+Set the mode at runtime with `/mode analysis <mode>` or in `shell.analysis_mode`.
 
-## Failure Classification
+| Mode | Behavior |
+|------|----------|
+| `smart` | Default. Evaluate failures and diagnostic output, then show useful insights for review. |
+| `auto` | Automatically start analysis only for a narrow set of high-confidence failures; other cases remain suggestions. |
+| `manual` | Disable proactive suggestions, failure insights, automatic analysis, and personalized prompt recommendations. Request analysis explicitly when needed. |
 
-cosh-shell performs semantic analysis on command exit codes and output, classifying failures:
+Examples:
 
-| Classification | Example | Description |
-|---------------|---------|-------------|
-| `CommandNotFound` | `command not found` | Command does not exist |
-| `PermissionDenied` | `Permission denied` | Insufficient permissions |
-| `BuildOrTestFailure` | `error[E0308]` | Compilation/test error |
-| `AbnormalSignal` | SIGSEGV | Abnormal signal termination |
-| `GenericRuntimeFailure` | Non-zero exit code | General runtime error |
-| `UsageOrHelp` | `Usage:` output | Usage error |
-| `UnknownFailure` | Other | Unclassified failure |
-
-The following classifications are considered "not real failures" and do not trigger analysis:
-- `Success` — Actually succeeded
-- `InteractiveCancel` — User actively cancelled
-- `UserInterrupt` — Ctrl+C
-- `PipelineNormal` — Normal pipeline exit code
-- `ProviderOrInternalArtifact` — Exit code from internal tools
-
-## Analysis Disposition Matrix
-
-| Failure Classification | Auto Mode | Smart Mode | Manual Mode |
-|-----------------------|-----------|------------|-------------|
-| CommandNotFound / PermissionDenied / AbnormalSignal / BuildOrTestFailure | Auto-analyze | Action card | Action card |
-| GenericRuntimeFailure | Auto-analyze | Hint | Action card |
-| UnknownFailure | Action card | Hint | Hint |
-| UsageOrHelp | Hint | Silent | Silent |
-
-Disposition type descriptions:
-- **Auto-analyze** — Immediately invoke AI adapter for analysis
-- **Action card** — Render interactive card, user can choose "Analyze" or "Skip"
-- **Hint** — Display brief hint, user can trigger analysis via slash command
-- **Silent** — Log only, do not disturb user
-
-## Analysis Flow
-
-```
-Command execution failed (exit code ≠ 0)
-       │
-       ▼
-  Failure semantic classification
-       │
-       ▼
-  Disposition decision (based on analysis mode)
-       │
-       ├── AutoAnalyze → Directly start Agent analysis
-       ├── ActionCard  → Render action card → Wait for user confirmation
-       ├── Hint        → Display brief hint
-       └── SilentRecord → Silent log
-```
-
-## Agent Analysis Process
-
-1. Collect failure context: command text, exit code, output excerpt (up to 8KB)
-2. Construct prompt and send to AI adapter (cosh-core)
-3. Adapter streams back analysis results
-4. cosh-shell renders analysis content in Markdown format
-5. User can Ctrl+C to cancel during analysis
-
-## Configuration
-
-```toml
-[shell]
-# Analysis mode: smart | auto | manual
-analysis_mode = "smart"
-```
-
-Runtime switching:
-
-```
+```text
 /mode analysis smart
 /mode analysis auto
 /mode analysis manual
 ```
+
+## What to expect
+
+- A failed command does not always start an Agent request. cosh first checks whether the failure is actionable and the available evidence is reliable.
+- A suggestion or action card lets you decide whether to analyze; choose **Skip** to leave the command result unchanged.
+- Analysis uses the command, exit status, and a bounded output excerpt. The result is streamed in the terminal.
+- Press `Ctrl+C` to cancel an analysis that is in progress.
+
+Configure the default mode with:
+
+```toml
+[shell]
+analysis_mode = "smart"
+```
+
+See [Interactive commands](interactive-mode.md) for the other slash commands and [Configuration](../configuration.md) for environment overrides.

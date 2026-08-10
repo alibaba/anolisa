@@ -59,24 +59,109 @@ tokenless 只优化**工具调用响应**进入 LLM 上下文前的冗余，不�
 - **Qoder CLI 插件** — Tool Ready + 命令重写 + 响应压缩
 - **Claude Code 插件** — Tool Ready + 命令重写 + 响应压缩 + TOON
 - **Codex 插件** — Tool Ready + 命令重写 + 响应压缩 + TOON
+- **OpenCode 插件** — Tool Ready + 命令重写 + Schema/响应压缩 + TOON
 
 ## 快速开始
 
+首选 ANOLISA CLI 安装已发布的组件。
+
+安装脚本会把 `anolisa` 放到 `~/.local/bin`。user mode 安装的 `tokenless`、
+`rtk` 和 `toon` 也在这个目录。如果当前 Shell 还找不到命令，先把该目录加入
+`PATH`。
+
 ```bash
-# 完整安装：构建 + 安装二进制 + 部署所有适配器
+curl -fsSL https://get.agentic-os.sh | bash
+
+# 让默认安装目录在当前 Shell 中生效
+export PATH="$HOME/.local/bin:$PATH"
+anolisa --version
+anolisa install tokenless
+tokenless --version
+```
+
+已配置 YUM 源的 Alinux 用户也可以安装 RPM 包。
+
+```bash
+sudo yum install anolisa tokenless
+sudo anolisa --install-mode system adopt tokenless
+```
+
+从同一 YUM 源安装 CLI 后，`sudo` 可以从系统路径找到 `anolisa`。`adopt` 会把
+直接安装的 RPM 写入 system 状态，adapter 命令随后才能读取组件契约。
+
+当前公开软件包支持 Linux x86_64、aarch64 和 macOS Apple Silicon。Intel
+Mac 暂无已发布的软件包。仓库中的 npm packaging 目录用于构建发布产物，
+目前不能通过公开的 `anolisa-tokenless` npm 包安装。源码中保留的
+`@anolisa/tokenless-darwin-x64` optional dependency 只是发布构建目标，
+不代表 registry 中已有可安装的软件包。
+
+通过 ANOLISA 管理的安装或已执行 `adopt` 的 RPM 会放置可用 adapter，但不会
+直接改动 Agent 框架的用户配置。请用拥有该配置的用户执行以下命令，并且只启用
+准备使用的 adapter。
+
+```bash
+anolisa adapter scan
+anolisa adapter enable tokenless openclaw
+anolisa adapter status tokenless
+```
+
+从源码构建适合开发者。
+
+```bash
+git clone <repo-url>
+cd Token-Less
+
+# 完整安装，构建并安装二进制，随后部署所有 adapter
 make setup
 ```
 
-安装完成后 `tokenless` 命令位于 `~/.local/bin`，RTK/TOON 辅助二进制同目录。
+源码安装会把 `tokenless` 放在 `~/.local/bin`，`rtk` 和 `toon` 辅助
+二进制也位于同一个目录，并部署开发所需的全部 adapter。
 
-## npm 安装
+### OpenCode 安装
+
+OpenCode 适配器通过 `tool.execute.before/after` 原生插件事件执行 Tool Ready、
+RTK 命令重写和响应/TOON 压缩，并通过 `tool.definition` 压缩工具 Schema。
+压缩后的响应会替换原始模型可见输出，避免重复占用上下文。
 
 ```bash
-npm install -g anolisa-tokenless
+make opencode-install
 ```
 
-自动安装适合您平台的预编译二进制文件（`tokenless`、`rtk`、`toon`）。
-支持 Linux 和 macOS 的 x86_64 和 arm64 架构。
+安装器会在 OpenCode 全局 `plugins/` 目录中创建 `tokenless.js` 符号链接，
+不会覆盖同名的非托管文件。配置目录支持 `OPENCODE_CONFIG_DIR`、
+`XDG_CONFIG_HOME` 和显式的 `TOKENLESS_OPENCODE_CONFIG_DIR` 覆盖。
+安装后重启 OpenCode 即可加载插件。
+
+## Raw 打包
+
+Raw 打包接收同一目录中已经构建好的 `tokenless`、`rtk`、`toon`，并按照
+组件维护的稳定目录结构生成制品：
+
+```bash
+make package-raw \
+  BIN_DIR="$PWD/target/release-bins" \
+  TARGET_OS=linux \
+  TARGET_ARCH=aarch64 \
+  OUTPUT_DIR="$PWD/dist"
+```
+
+Raw 支持矩阵为 `linux-x86_64`、`linux-aarch64` 和 `macos-aarch64`。
+输入可使用 `darwin`/`arm64`、`amd64`/`x64` 别名，产物名始终采用 ANOLISA
+规范名称。脚本不会执行跨平台二进制，而是直接检查 ELF 或 Mach-O 架构，
+并负责嵌入组件自维护的 `.anolisa/component.toml`、展开适配器 Hook 符号链接、
+统一权限以及生成可复现的
+`tokenless-<version>-<os>-<arch>.tar.gz`。需要固定其他时间戳时可传入
+`SOURCE_DATE_EPOCH`。
+
+npm 打包同样从 `target/npm-prebuilt` 下读取预构建的 `linux-x64`、
+`linux-arm64`、`darwin-x64`、`darwin-arm64` 四个二进制目录，并负责校验和组装：
+
+```bash
+node npm/scripts/package-npm.js --all
+```
+
+固定目录结构和单目标接口见 [npm/README.md](npm/README.md#packaging-for-npm)。
 
 ## 查看 Token 节省明细
 
@@ -115,8 +200,9 @@ export TOKENLESS_DATA_DIR="$HOME/path/to/tokenless-data"
 - `crates/tokenless-schema/` — 核心库：SchemaCompressor + ResponseCompressor
 - `crates/tokenless-ccr/` — 可逆压缩缓存（Compress-Cache-Retrieve）
 - `crates/tokenless-cli/` — CLI 二进制
-- `adapters/tokenless/` — 适配器包（OpenClaw / Hermes / Qoder / Claude Code / Codex）
+- `adapters/tokenless/` — 适配器包（OpenClaw / Hermes / Qoder / Claude Code / Codex / OpenCode）
 - `third_party/rtk/` — RTK 命令重写引擎（vendored）
+- `packaging/raw/` — Tokenless 自维护的 ANOLISA Raw 打包与目标校验
 
 ## 许可证
 

@@ -12,6 +12,7 @@ use libbpf_rs::{
 };
 use procfs::process::Process;
 
+use super::pidns::observer_in_init_pidns;
 use super::shared_maps::{MapKind, SharedMaps};
 use std::{
     collections::{HashMap, HashSet},
@@ -266,6 +267,9 @@ impl SslSniff {
         // Keep MaybeUninit on the heap so its address is stable.
         let open_object = Box::new(MaybeUninit::<libbpf_rs::OpenObject>::uninit());
         let mut open_skel = builder.open().context("failed to open BPF object")?;
+
+        // Tell BPF which namespace to report event pids in.
+        open_skel.rodata_mut().observer_pidns_is_init = observer_in_init_pidns();
 
         // Reuse shared maps when running under the unified manager.
         if let Some(shared) = shared {

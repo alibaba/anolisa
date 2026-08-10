@@ -148,7 +148,9 @@ impl ScopeFixture {
             SystemStateFailure::FutureSchema => {
                 let state =
                     std::fs::read_to_string(&self.system_state_path).expect("read system state");
-                let future = state.replacen("schema_version = 4", "schema_version = 6", 1);
+                // 7 is one past the newest schema this CLI accepts (v6,
+                // the anchored store format).
+                let future = state.replacen("schema_version = 4", "schema_version = 7", 1);
                 assert_ne!(future, state, "fixture must start at schema 4");
                 std::fs::write(&self.system_state_path, future).expect("future system state");
             }

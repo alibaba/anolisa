@@ -16,6 +16,11 @@ pub(crate) fn storage(_name: &str) -> blaze_core::Result<()> {
     Ok(())
 }
 
+/// Leave guest operations unchanged in production builds.
+pub(crate) fn guest(_name: &str) -> crate::guest::Result<()> {
+    Ok(())
+}
+
 /// Leave state commits unchanged in production builds.
 pub(crate) fn state(_name: &str) -> crate::error::Result<()> {
     Ok(())
@@ -31,6 +36,7 @@ mod tests {
         super::announce();
         super::backend("any").expect("backend hook");
         super::storage("any").expect("storage hook");
+        super::guest("any").expect("guest hook");
         super::state("any").expect("state hook");
         super::pause("any").await;
     }

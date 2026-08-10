@@ -32,9 +32,10 @@ pub use result::AggregatedResult;
 
 // Re-export HTTP types
 pub use http::{
-    AggregatedResponse, ConnectionId, ConnectionState, HttpConnectionAggregator, HttpPair,
-    ParsedRequest,
+    AggregatedResponse, ConnectionId, HttpConnectionAggregator, HttpPair, ParsedRequest,
 };
+// Crate-internal: connection state machine (see review F3 note on the enum).
+pub(crate) use http::ConnectionState;
 
 // Re-export HTTP/2 types
 pub use http2::{Http2Stream, Http2StreamAggregator, Http2StreamState, StreamDirection, StreamId};

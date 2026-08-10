@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.10.0
+
+**Agent Hook Policy Controls**
+
+- Added code scanner enable flags for agent hooks. (#2001)
+- Unified hook policy controls across agent integrations. (#2141)
+- Added an observability hook environment toggle. (#2199)
+- Restored scanner mode environment variable names. (#2212)
+- Aligned code scanner hook flags across supported agent integrations. (#2229)
+- Added environment-based prompt scanner gating. (#2239)
+
+**OpenClaw Hook Integration**
+
+- Added block mode support for the OpenClaw code scanner hook. (#2242)
+
+**Prompt Scanner**
+
+- Widened prompt scan inbound text field coverage. (#2277)
+
+**Skill Ledger Runtime**
+
+- Added read-only skill analysis. (#2044)
+- Included raw skill directories in skill ledger checks. (#2201)
+- Authenticated manifests before loading skill package contents. (#2185)
+
+**Security Events & CLI**
+
+- Added session and run filters to agent-sec-cli events queries. (#2132)
+
+**Raw Packaging**
+
+- Added component-owned raw package build targets and archive validation. (#2133)
+- Updated raw hooks to use the bundled Python launcher. (#2255)
+
 ## 0.9.0
 
 **Qoder CLI & Qwen Code Hook Capability Expansion**

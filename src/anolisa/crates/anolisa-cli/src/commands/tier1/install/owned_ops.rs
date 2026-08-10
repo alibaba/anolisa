@@ -1628,6 +1628,7 @@ mod tests {
                 dest: binary.clone(),
                 mode: Some("0755".to_string()),
                 kind: FileKind::Executable,
+                render: None,
             }],
             &capabilities,
         );

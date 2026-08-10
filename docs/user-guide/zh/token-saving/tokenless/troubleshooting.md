@@ -24,10 +24,11 @@ anolisa --dry-run install tokenless
 anolisa --dry-run --verbose install tokenless
 ```
 
-system mode 安装应在所有 anolisa 修改命令中保持相同 scope：
+请用拥有目标 Agent 配置和 adapter receipt 的用户运行 adapter 诊断。该用户
+可以同时查看 user 状态和可读的 system 状态。
 
 ```bash
-sudo anolisa doctor tokenless
+anolisa doctor tokenless
 ```
 
 ## `tokenless: command not found`
@@ -100,7 +101,7 @@ anolisa adapter status tokenless
 
 - 目标框架已被检测。
 - Tokenless Adapter 已启用。
-- Adapter 与组件使用相同的 user/system scope。
+- adapter 命令由目标框架配置和 receipt 的所属用户执行。
 - 启用后已经重启 Agent CLI 或 IDE。
 
 ### 3. 验证 Agent 任务
@@ -121,7 +122,8 @@ env | grep '^TOKENLESS_'
 
 - 目标 Agent 框架未安装或未被扫描到。
 - 框架版本不满足 Adapter 要求。
-- Tokenless 安装在 system scope，但用 user scope 修改 Adapter，反之亦然。
+- adapter 命令的执行用户与目标框架配置或 receipt 的所属用户不同。
+- 直接安装的 Tokenless RPM 尚未写入 ANOLISA 状态。
 - npm 安装没有 anolisa 组件记录，却尝试使用 `anolisa adapter enable`。
 - OpenClaw 安全策略拒绝 Plugin 所需的 unsafe-install 覆盖参数。
 
@@ -133,6 +135,14 @@ anolisa --verbose adapter enable tokenless <framework>
 ```
 
 npm 安装请使用[框架集成 · npm 安装后的手动接入](framework-integration.md#npm-安装后的手动接入)。
+
+直接安装 RPM 后，请先补充状态记录，再用拥有目标框架配置的用户重试 adapter
+命令。
+
+```bash
+sudo yum install anolisa
+sudo anolisa --install-mode system adopt tokenless
+```
 
 由 anolisa 管理的安装第一次不会绕过 OpenClaw 安全扫描。只有错误明确给出此建议时，才应在审查报告后重试：
 
@@ -261,14 +271,15 @@ grep -R -n 'QODER_TOKENLESS_HOOKS' \
 如果曾直接运行 `dnf remove` 或 `rpm -e`：
 
 ```bash
-sudo anolisa repair tokenless
+sudo yum install anolisa
+sudo anolisa --install-mode system repair tokenless
 ```
 
 按照 repair 输出的计划操作。只有在 RPM 仍存在且输出明确要求重建记录时，才依次执行：
 
 ```bash
-sudo anolisa forget tokenless
-sudo anolisa adopt tokenless
+sudo anolisa --install-mode system forget tokenless
+sudo anolisa --install-mode system adopt tokenless
 ```
 
 `forget` 只删除 anolisa 状态，不卸载 RPM。

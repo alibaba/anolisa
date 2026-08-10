@@ -1,4 +1,4 @@
-name: sec-core-rpmbuild
+name: CI / sec-core RPM Build
 
 on:
   pull_request:

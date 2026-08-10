@@ -1,4 +1,4 @@
-name: AgentSight Full Runner Test
+name: Infra / AgentSight Kernel Validation
 
 on:
   push:
@@ -163,3 +163,4 @@ jobs:
               exec "$CARGO_BIN" test --test bpf_load -- \
                 --ignored --nocapture --test-threads=1
             '
+

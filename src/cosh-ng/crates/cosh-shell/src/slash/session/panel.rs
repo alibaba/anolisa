@@ -66,7 +66,12 @@ pub(super) fn render_current_session_panel<W: Write>(
                     ));
                 }
                 footer.push_str(" · ");
-                footer.push_str(state.i18n().t(MessageId::SessionPickerFooter));
+                let footer_message = if panel.selected_for_clear.is_empty() {
+                    MessageId::SessionPickerFooter
+                } else {
+                    MessageId::SessionPickerMarkedFooter
+                };
+                footer.push_str(state.i18n().t(footer_message));
                 (
                     state.i18n().t(MessageId::SessionTitle).to_string(),
                     body,

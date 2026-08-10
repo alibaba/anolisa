@@ -216,6 +216,100 @@ fn expand_dest(dest: &str, datadir: &Path) -> PathBuf {
     PathBuf::from(expanded)
 }
 
+/// Stage a world whose component is RPM-installed (delegated provenance)
+/// and whose contract declares an `[adapters.backends.rpm].resource_root`
+/// outside every datadir root. The bundle exists only at that RPM root —
+/// the raw `dest` was never laid down, exactly like an RPM-only install.
+fn stage_rpm_backend(
+    framework: &str,
+    adapter_type: &str,
+    dest: &str,
+    stage_bundle: impl Fn(&Path),
+) -> World {
+    let root = tempfile::tempdir().expect("tempdir");
+    let prefix = root.path().to_path_buf();
+    let layout = FsLayout::system(Some(prefix.clone()));
+    let user_home = prefix.join("home");
+    std::fs::create_dir_all(&user_home).expect("home");
+
+    let resource_root = prefix.join("opt").join("tokenless-plugin");
+    std::fs::create_dir_all(&resource_root).expect("rpm root");
+    stage_bundle(&resource_root);
+
+    // RPM provenance: adopted object delegated to the rpm backend.
+    let state_path = layout.state_dir.join("installed.toml");
+    std::fs::create_dir_all(state_path.parent().unwrap()).expect("state dir");
+    std::fs::write(
+        &state_path,
+        format!(
+            r#"schema_version = 2
+updated_at = "2026-07-04T00:00:00Z"
+install_mode = "system"
+prefix = "{prefix}"
+anolisa_version = "0.1.20"
+
+[[objects]]
+kind = "component"
+name = "{COMPONENT}"
+version = "0.6.0"
+status = "adopted"
+install_backend = "rpm"
+ownership = "rpm_observed"
+managed = false
+adopted = true
+installed_at = "2026-07-04T00:00:00Z"
+"#,
+            prefix = prefix.display(),
+        ),
+    )
+    .expect("seed state");
+
+    let contract = format!(
+        r#"[component]
+name = "{COMPONENT}"
+version = "0.6.0"
+
+[component.layout]
+modes = ["system"]
+
+[[adapters]]
+framework = "{framework}"
+adapter_type = "{adapter_type}"
+plugin_id = "{COMPONENT}"
+dest = "{dest}"
+
+[adapters.backends.rpm]
+resource_root = "{rpm_root}/"
+"#,
+        rpm_root = resource_root.display(),
+    );
+    // Both discovery paths an adopted component may be read from: the
+    // saved manifest snapshot and the datadir contract the RPM ships.
+    for path in [
+        layout
+            .state_dir
+            .join("component-manifests")
+            .join(COMPONENT)
+            .join("component.toml"),
+        layout
+            .datadir
+            .join("components")
+            .join(COMPONENT)
+            .join("component.toml"),
+    ] {
+        std::fs::create_dir_all(path.parent().unwrap()).expect("contract dir");
+        std::fs::write(&path, &contract).expect("seed contract");
+    }
+
+    World {
+        _root: root,
+        prefix,
+        layout,
+        user_home,
+        resource_root,
+    }
+}
+
 fn write_exec(path: &Path, body: &str) {
     std::fs::write(path, body).expect("write script");
     let mut perms = std::fs::metadata(path).expect("meta").permissions();
@@ -401,6 +495,16 @@ fn stage_codex_bundle(root: &Path) {
     std::fs::write(root.join("README.md"), b"codex plugin\n").expect("readme");
 }
 
+fn stage_codex_hook_bundle(root: &Path) {
+    stage_codex_bundle(root);
+    std::fs::create_dir_all(root.join("hooks")).expect("hooks directory");
+    std::fs::write(
+        root.join("hooks/hooks.json"),
+        br#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"true"}]}]}}"#,
+    )
+    .expect("hooks.json");
+}
+
 /// Fake `codex` CLI: appends each argv line to `$FAKE_CODEX_LOG` and keeps
 /// marketplace/plugin registries under `$FAKE_CODEX_STATE` so `list`
 /// reflects prior `add`/`remove` calls.
@@ -411,6 +515,27 @@ fn write_fake_codex(dir: &Path) -> PathBuf {
         r#"#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_CODEX_LOG"
 st="$FAKE_CODEX_STATE"; mkdir -p "$st" 2>/dev/null
+if [ "$1" = "app-server" ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"method":"initialize"'*) printf '{"id":0,"result":{}}\n' ;;
+      *'"method":"hooks/list"'*)
+        if [ "$FAKE_CODEX_FAIL" = "hooks" ]; then
+          printf '{"id":1,"result":{"data":[{"hooks":[],"warnings":[],"errors":[]}]}}\n'
+        else
+          printf '{"id":1,"result":{"data":[{"hooks":[{"key":"tokenless@anolisa-tokenless:hooks/hooks.json:pre_tool_use:0:0","currentHash":"sha256:trusted","source":"plugin","pluginId":"tokenless@anolisa-tokenless","isManaged":false}],"warnings":[],"errors":[]}]}}\n'
+        fi ;;
+      *'"method":"config/batchWrite"'*)
+        printf '%s\n' "$line" > "$st/trust-request"
+        if [ "$FAKE_CODEX_FAIL" = "write-overridden" ]; then
+          printf '{"id":1,"result":{"status":"okOverridden","overriddenMetadata":{"message":"hooks.state is managed","overridingLayer":{"name":"sessionFlags","version":"test"},"effectiveValue":{}}}}\n'
+        else
+          printf '{"id":1,"result":{"status":"ok"}}\n'
+        fi ;;
+    esac
+  done
+  exit 0
+fi
 if [ "$1" = "plugin" ] && [ "$2" = "marketplace" ]; then
   case "$3" in
     add)
@@ -539,6 +664,266 @@ fn codex_enable_records_argv_and_builds_marketplace() {
 }
 
 #[test]
+fn codex_enable_trusts_declared_hooks() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_hook_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+
+    world
+        .manager()
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable");
+
+    let request: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(world.prefix.join("codex-state/trust-request"))
+            .expect("trust request"),
+    )
+    .expect("valid request");
+    assert_eq!(request["method"], "config/batchWrite");
+    assert_eq!(
+        request["params"]["edits"][0]["value"]["tokenless@anolisa-tokenless:hooks/hooks.json:pre_tool_use:0:0"]
+            ["trusted_hash"],
+        "sha256:trusted"
+    );
+}
+
+#[test]
+fn codex_enable_fails_when_declared_hooks_are_not_discovered() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_hook_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+    guard.set("FAKE_CODEX_FAIL", Path::new("hooks"));
+
+    let error = world
+        .manager()
+        .enable(COMPONENT, Some("codex"), false)
+        .expect_err("missing hooks must fail enable");
+    assert!(error.to_string().contains("reported no hooks"), "{error}");
+}
+
+#[test]
+fn codex_enable_fails_when_hook_trust_is_overridden() {
+    let guard = EnvGuard::acquire();
+    let world = stage(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_hook_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+    guard.set("FAKE_CODEX_FAIL", Path::new("write-overridden"));
+
+    let error = world
+        .manager()
+        .enable(COMPONENT, Some("codex"), false)
+        .expect_err("overridden hook trust must fail enable");
+    assert!(
+        error.to_string().contains("sessionFlags"),
+        "overriding layer must be actionable: {error}"
+    );
+}
+
+/// Regression for the unified raw/RPM contract: an RPM-installed component
+/// whose contract declares `[adapters.backends.rpm].resource_root` outside
+/// every datadir must enable through the real production path — the
+/// receipt's marketplace symlink targets the external RPM root, and that
+/// target validates against contract-derived trust (never the receipt
+/// itself). status and disable keep working over the persisted receipt.
+#[test]
+fn codex_enable_rpm_backend_root_outside_datadir() {
+    let guard = EnvGuard::acquire();
+    let world = stage_rpm_backend(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    let (_log, marketplace_root) = apply_codex_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    let claim = match manager
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable must accept the contract-declared RPM root")
+    {
+        EnableOutcome::Enabled(c) => *c,
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
+    };
+
+    // The marketplace symlink targets the external RPM root.
+    let symlink = marketplace_root.join(COMPONENT);
+    assert_eq!(
+        std::fs::read_link(&symlink).expect("symlink"),
+        world.resource_root,
+        "symlink must point at the RPM-provided root"
+    );
+    assert!(
+        claim.resources.iter().any(|r| matches!(
+            &r.kind,
+            ClaimResourceKind::Symlink { target, .. } if target == &world.resource_root
+        )),
+        "receipt must record the RPM root as the symlink target"
+    );
+
+    // The persisted receipt keeps validating on the read paths.
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+
+    let disabled = manager
+        .disable(COMPONENT, Some("codex"), false)
+        .expect("disable");
+    assert!(disabled.claim_removed);
+    assert!(
+        !marketplace_root.exists(),
+        "marketplace dir removed on disable"
+    );
+    assert!(
+        world
+            .resource_root
+            .join(".codex-plugin/plugin.json")
+            .is_file(),
+        "disable must never touch the RPM-owned root"
+    );
+}
+
+/// Regression for RPM root migration: enable on root A, then an RPM update
+/// moves the payload to root B and refreshes the contract snapshot (A is
+/// removed). The enabled receipt still points at A — it must stay
+/// manageable: status keeps reporting (degraded, not an error), re-enable
+/// migrates the symlink to B, and disable cleans up. The enable-time trust
+/// anchor — not the receipt — is what keeps A trusted.
+#[test]
+fn codex_receipt_survives_rpm_root_migration() {
+    let guard = EnvGuard::acquire();
+    let world = stage_rpm_backend(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    let (_log, marketplace_root) = apply_codex_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable on root A");
+
+    // RPM update: payload moves A -> B (with updated content), contract
+    // snapshots point at B, A disappears.
+    let root_b = world.prefix.join("opt").join("tokenless-plugin-v2");
+    std::fs::create_dir_all(&root_b).expect("root B");
+    stage_codex_bundle(&root_b);
+    std::fs::write(root_b.join("README.md"), b"codex plugin v2\n").expect("v2 readme");
+    let contract = format!(
+        r#"[component]
+name = "{COMPONENT}"
+version = "0.7.0"
+
+[component.layout]
+modes = ["system"]
+
+[[adapters]]
+framework = "codex"
+adapter_type = "plugin"
+plugin_id = "{COMPONENT}"
+dest = "{{datadir}}/adapters/{{component}}/codex/"
+
+[adapters.backends.rpm]
+resource_root = "{root_b}/"
+"#,
+        root_b = root_b.display(),
+    );
+    for path in [
+        world
+            .layout
+            .state_dir
+            .join("component-manifests")
+            .join(COMPONENT)
+            .join("component.toml"),
+        world
+            .layout
+            .datadir
+            .join("components")
+            .join(COMPONENT)
+            .join("component.toml"),
+    ] {
+        std::fs::write(&path, &contract).expect("refresh contract");
+    }
+    std::fs::remove_dir_all(&world.resource_root).expect("remove root A");
+
+    // status must keep reporting the stale receipt, never fail claim
+    // validation — the receipt would otherwise be unmanageable. The
+    // summary must degrade: the marketplace symlink dangles at the
+    // vanished root A, so codex cannot actually serve the plugin no
+    // matter what its registration lists say.
+    let status = manager
+        .status(Some(COMPONENT))
+        .expect("status must survive the root migration");
+    assert_eq!(status.entries.len(), 1);
+    assert_eq!(
+        status.entries[0].report.summary,
+        AdapterSummary::Degraded,
+        "a receipt pointing at a vanished root must not report Healthy"
+    );
+    let bundle = status.entries[0]
+        .report
+        .conditions
+        .iter()
+        .find(|c| c.kind == AdapterConditionKind::ResourceBundleMatches)
+        .expect("bundle condition present");
+    assert_ne!(
+        bundle.status,
+        ConditionStatus::True,
+        "vanished enable-time root must not verify as matching"
+    );
+
+    // re-enable migrates the marketplace symlink to root B.
+    let claim = match manager
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("re-enable must migrate to root B")
+    {
+        EnableOutcome::Enabled(c) => *c,
+        EnableOutcome::Planned { .. } => panic!("expected enabled"),
+    };
+    assert_eq!(
+        std::fs::read_link(marketplace_root.join(COMPONENT)).expect("symlink"),
+        root_b,
+        "symlink must be rewritten to the new RPM root"
+    );
+    assert!(claim.resources.iter().any(|r| matches!(
+        &r.kind,
+        ClaimResourceKind::Symlink { target, .. } if target == &root_b
+    )));
+
+    let status = manager.status(Some(COMPONENT)).expect("status");
+    assert_eq!(
+        status.entries[0].report.summary,
+        AdapterSummary::Healthy,
+        "re-enable on root B must restore Healthy"
+    );
+
+    let disabled = manager
+        .disable(COMPONENT, Some("codex"), false)
+        .expect("disable");
+    assert!(disabled.claim_removed);
+    assert!(!marketplace_root.exists());
+}
+
+#[test]
 fn codex_dry_run_enable_writes_nothing() {
     let guard = EnvGuard::acquire();
     let world = stage(
@@ -658,6 +1043,139 @@ fn codex_forged_resource_root_and_symlink_target_rejected() {
     assert!(
         matches!(err, AdapterError::ClaimValidation(_)),
         "got {err:?}"
+    );
+}
+
+/// A forged state file that plants both a trust anchor at /etc and a
+/// receipt symlink target inside it must still be rejected: the anchor is
+/// only honoured when the on-disk contract grants external-root trust for
+/// this provenance (RPM provenance + declared RPM root). For a raw
+/// component the state file alone is not a trust source.
+#[test]
+fn codex_forged_anchor_does_not_authorize_forged_target() {
+    let guard = EnvGuard::acquire();
+    // Real RPM provenance and a contract-declared external root: the one
+    // branch where the enable-time anchor is honoured. A forged anchor
+    // must still authorize nothing beneath itself — it is an
+    // exact-equality allowance, never a root.
+    let world = stage_rpm_backend(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable");
+
+    // Tamper: replace the legitimate anchor with /etc AND point the
+    // symlink resource below it.
+    let state_path = world.layout.state_dir.join("installed.toml");
+    let mut state = world.load_state();
+    state.upsert_adapter_trust_root(COMPONENT, "codex", PathBuf::from("/etc"));
+    {
+        let claim = state
+            .adapter_claims
+            .iter_mut()
+            .find(|c| c.component == COMPONENT)
+            .expect("claim");
+        for res in &mut claim.resources {
+            if let ClaimResourceKind::Symlink { target, .. } = &mut res.kind {
+                *target = PathBuf::from("/etc/cron.d/evil");
+            }
+        }
+    }
+    state.save(&state_path).expect("save tampered state");
+
+    let err = manager
+        .status(Some(COMPONENT))
+        .expect_err("forged anchor must not authorize a target beneath it");
+    assert!(
+        matches!(err, AdapterError::ClaimValidation(_)),
+        "got {err:?}"
+    );
+    let err = manager
+        .disable(COMPONENT, Some("codex"), false)
+        .expect_err("disable must refuse the forged target too");
+    assert!(
+        matches!(err, AdapterError::ClaimValidation(_)),
+        "got {err:?}"
+    );
+}
+
+/// Reverse lifecycle hole: after the RPM component is gone — bundle root,
+/// contract snapshots and installation record all removed — the enable-time
+/// anchor must keep the stale external-root receipt reportable and
+/// disable must clean it up rather than wedge on `ClaimValidation`.
+#[test]
+fn codex_stale_external_receipt_cleans_up_after_component_removal() {
+    let guard = EnvGuard::acquire();
+    let world = stage_rpm_backend(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    let (_log, marketplace_root) = apply_codex_env(&guard, &world, &fake);
+
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable");
+
+    // Simulate `rpm -e` plus `anolisa uninstall`: bundle root, both
+    // contract copies and the installation record disappear; only the
+    // adapter receipt and its anchor remain.
+    std::fs::remove_dir_all(&world.resource_root).expect("remove rpm root");
+    for path in [
+        world
+            .layout
+            .state_dir
+            .join("component-manifests")
+            .join(COMPONENT)
+            .join("component.toml"),
+        world
+            .layout
+            .datadir
+            .join("components")
+            .join(COMPONENT)
+            .join("component.toml"),
+    ] {
+        std::fs::remove_file(&path).expect("remove contract");
+    }
+    let state_path = world.layout.state_dir.join("installed.toml");
+    let mut state = world.load_state();
+    state.installations.retain(|i| i.name != COMPONENT);
+    state.save(&state_path).expect("save uninstalled state");
+
+    // status: reportable, not a validation failure.
+    let status = manager
+        .status(Some(COMPONENT))
+        .expect("status must survive component removal");
+    assert_eq!(status.entries.len(), 1);
+
+    // disable: cleans up receipt, anchor and framework registration.
+    let outcome = manager
+        .disable(COMPONENT, Some("codex"), false)
+        .expect("disable must clean up the stale receipt");
+    assert!(outcome.claim_removed, "receipt must be removed");
+    let state = world.load_state();
+    assert!(
+        state.find_adapter_claim(COMPONENT, "codex").is_none(),
+        "receipt must be gone"
+    );
+    assert!(
+        state.find_adapter_trust_root(COMPONENT, "codex").is_none(),
+        "anchor must not outlive its receipt"
+    );
+    assert!(
+        !marketplace_root.join(COMPONENT).exists(),
+        "marketplace symlink must be cleaned up"
     );
 }
 
@@ -2993,5 +3511,157 @@ fn qoder_forged_settings_redirect_within_qoder_home_rejected() {
         std::fs::read_to_string(&decoy).expect("read decoy"),
         "{\"user\":\"data\"}",
         "the redirected file must be left untouched"
+    );
+}
+
+/// Anchors are for *external* roots only. An RPM-provenance contract whose
+/// `resource_root` lives inside the datadir is already covered by the
+/// static trust boundary — writing an anchor for it would needlessly bump
+/// the state schema to v6 and lock released 0.2.16 CLIs out of every state
+/// command on a path that never needed trust migration. The external-root
+/// counterpart must keep anchoring (and bumping to v6) as designed.
+#[test]
+fn codex_datadir_rpm_root_keeps_state_anchor_free_at_v5() {
+    let guard = EnvGuard::acquire();
+
+    // In-datadir declaration: RPM provenance, but the bundle sits under
+    // the always-trusted datadir.
+    let world = stage_rpm_backend(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_bundle,
+    );
+    let datadir_root = world
+        .layout
+        .datadir
+        .join("adapters")
+        .join(COMPONENT)
+        .join("codex");
+    std::fs::create_dir_all(&datadir_root).expect("datadir bundle dir");
+    stage_codex_bundle(&datadir_root);
+    let contract = format!(
+        r#"[component]
+name = "{COMPONENT}"
+version = "0.6.0"
+
+[component.layout]
+modes = ["system"]
+
+[[adapters]]
+framework = "codex"
+adapter_type = "plugin"
+plugin_id = "{COMPONENT}"
+dest = "{{datadir}}/adapters/{{component}}/codex/"
+
+[adapters.backends.rpm]
+resource_root = "{{datadir}}/adapters/{{component}}/codex/"
+"#
+    );
+    for path in [
+        world
+            .layout
+            .state_dir
+            .join("component-manifests")
+            .join(COMPONENT)
+            .join("component.toml"),
+        world
+            .layout
+            .datadir
+            .join("components")
+            .join(COMPONENT)
+            .join("component.toml"),
+    ] {
+        std::fs::write(&path, &contract).expect("rewrite contract");
+    }
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+    world
+        .manager()
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable with in-datadir rpm root");
+    let state = world.load_state();
+    assert!(
+        state.find_adapter_trust_root(COMPONENT, "codex").is_none(),
+        "an in-datadir root must not be anchored"
+    );
+    let state_text = std::fs::read_to_string(world.layout.state_dir.join("installed.toml"))
+        .expect("read state file");
+    assert!(
+        state_text.contains("schema_version = 5"),
+        "anchor-free state must stay at v5, got:\n{}",
+        state_text.lines().take(3).collect::<Vec<_>>().join("\n")
+    );
+}
+
+/// External-root counterpart of
+/// [`codex_datadir_rpm_root_keeps_state_anchor_free_at_v5`]: a package-owned
+/// root outside the datadir still records its anchor and bumps to v6.
+#[test]
+fn codex_external_rpm_root_still_anchors_state_at_v6() {
+    let guard = EnvGuard::acquire();
+    let world = stage_rpm_backend(
+        "codex",
+        "plugin",
+        "{datadir}/adapters/{component}/codex/",
+        stage_codex_bundle,
+    );
+    let fake = write_fake_codex(&world.prefix);
+    apply_codex_env(&guard, &world, &fake);
+    world
+        .manager()
+        .enable(COMPONENT, Some("codex"), false)
+        .expect("enable with external rpm root");
+    let state = world.load_state();
+    assert_eq!(
+        state
+            .find_adapter_trust_root(COMPONENT, "codex")
+            .map(|p| p.to_path_buf()),
+        Some(world.resource_root.clone()),
+        "an external root must be anchored"
+    );
+    let state_text = std::fs::read_to_string(world.layout.state_dir.join("installed.toml"))
+        .expect("read state file");
+    assert!(
+        state_text.contains("schema_version = 6"),
+        "anchored state must be written at v6, got:\n{}",
+        state_text.lines().take(3).collect::<Vec<_>>().join("\n")
+    );
+}
+
+/// The anchor is consumed only for symlink *targets*
+/// (`ClaimResourceKind::Symlink`), which today only Codex receipts
+/// contain. A claude-code receipt over the same kind of external RPM root
+/// records no symlink — an anchor for it would never be read back, only
+/// bump the state schema to v6 and lock released 0.2.16 CLIs out of every
+/// state command. It must stay anchor-free at v5.
+#[test]
+fn claude_code_external_rpm_root_needs_no_anchor_stays_v5() {
+    let guard = EnvGuard::acquire();
+    let world = stage_rpm_backend(
+        "claude-code",
+        "plugin",
+        "{datadir}/adapters/{component}/claude-code/",
+        stage_claude_bundle,
+    );
+    let fake = write_fake_claude(&world.prefix);
+    apply_claude_env(&guard, &world, &fake);
+    world
+        .manager()
+        .enable(COMPONENT, Some("claude-code"), false)
+        .expect("enable with external rpm root");
+    let state = world.load_state();
+    assert!(
+        state
+            .find_adapter_trust_root(COMPONENT, "claude-code")
+            .is_none(),
+        "a receipt without symlink resources must not be anchored"
+    );
+    let state_text = std::fs::read_to_string(world.layout.state_dir.join("installed.toml"))
+        .expect("read state file");
+    assert!(
+        state_text.contains("schema_version = 5"),
+        "anchor-free state must stay at v5, got:\n{}",
+        state_text.lines().take(3).collect::<Vec<_>>().join("\n")
     );
 }

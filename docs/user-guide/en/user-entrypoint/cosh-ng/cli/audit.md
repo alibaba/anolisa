@@ -1,23 +1,37 @@
-# Security Audit and Production Troubleshooting
+# Security Audit
 
-The `cosh-cli audit` subsystem evaluates security policy and provides a redacted, correlated
-timeline for production troubleshooting. `cosh-core`, `cosh-shell`, and policy checks append
-versioned JSONL events without changing the existing SLS/metrics export.
+[中文版](../../../../zh/user-entrypoint/cosh-ng/cli/audit.md)
 
-Install cosh with `anolisa install cosh`, then use these commands locally or from an incident
-runbook. Every command returns the standard `CoshResponse<T>` JSON envelope.
+`cosh-cli audit` checks whether an action is allowed and reads the redacted audit events used for troubleshooting. It supports policy checks, bounded queries, correlated traces, incident exports, and retention previews. Every command returns the standard `CoshResponse<T>` JSON envelope.
 
-## Operational Commands
+## Commands
 
 | Command | Purpose |
-| --- | --- |
-| `cosh-cli audit status` | Report effective settings, storage, reader diagnostics, and last-observer health |
-| `cosh-cli audit events` | Query a bounded event page with filters and an opaque cursor |
-| `cosh-cli audit trace <id>` | Correlate an event, session, run, turn, request, Tool-use, or command ID |
-| `cosh-cli audit export --output <dir>` | Create a fail-closed redacted incident bundle |
-| `cosh-cli audit prune --dry-run` | Preview the deterministic retention plan; version 1 never deletes manually |
+|---|---|
+| `cosh-cli audit check` | Evaluate an action under the active policy |
+| `cosh-cli audit log` | Read policy-decision events for a session |
+| `cosh-cli audit status` | Show audit storage and reader health |
+| `cosh-cli audit events` | Query a bounded page of events |
+| `cosh-cli audit trace <id>` | Follow events for an ID or correlation identity |
+| `cosh-cli audit export --output <dir>` | Write a redacted incident bundle |
+| `cosh-cli audit prune --dry-run` | Preview retention candidates |
+| `cosh-cli audit policy ...` | Inspect or validate policy files |
 
-Examples:
+Use `cosh-cli audit --help` or an action's `--help` output for the complete option list.
+
+## Check a policy decision
+
+Pass either a raw action string or structured fields:
+
+```bash
+cosh-cli audit check --action-string "pkg install nginx"
+cosh-cli audit check --subsystem pkg --operation install --target nginx
+cosh-cli audit log --session abc123 --since 2h --limit 50
+```
+
+`--action` remains an alias for `--action-string`. Structured checks require `--subsystem` and `--operation`; `--target` and paired `--arg-key`/`--arg-value` fields are optional.
+
+## Query and export events
 
 ```bash
 cosh-cli audit status
@@ -27,71 +41,19 @@ cosh-cli audit export --since 2h --identity session-123 --output ./audit-inciden
 cosh-cli audit prune --dry-run
 ```
 
-`events` accepts `--since`, `--until`, repeated or comma-separated `--event`, `--component`, and
-`--outcome` filters, plus `--identity`, `--schema v1|legacy_v0`, `--limit 1..1000`, and `--cursor`.
-Durations such as `30s`, `5m`, `2h`, and `1d` are accepted for `--since`; absolute bounds use RFC
-3339. Cursors are bound to the original filters and are rejected if reused with different filters.
+`--since` accepts a duration such as `30s`, `5m`, `2h`, or `1d`, or an RFC 3339 timestamp. `--until` accepts an RFC 3339 timestamp. `events` and `export` also accept repeated or comma-separated `--event`, `--component`, and `--outcome` filters, plus `--identity` and `--schema v1|legacy_v0`; `events` and `trace` support an opaque `--cursor` for the next page.
 
-The export directory contains `events.jsonl`, `summary.json`, `manifest.json`, and `SHA256SUMS`.
-Export aliases correlation identities, applies an allowlist, scans final bytes for secrets, and
-publishes atomically. `--force` replaces only a directory containing a valid cosh audit manifest.
+Inside `cosh-shell`, `/audit status`, `/audit trace current`, and `/audit export current <dir>` provide bounded wrappers for the same operations.
 
-Inside `cosh-shell`, `/audit status`, `/audit trace current`, and
-`/audit export current <dir>` provide bounded wrappers around the same CLI.
+An export contains `events.jsonl`, `summary.json`, `manifest.json`, and `SHA256SUMS`. The export is redacted and published atomically; `--force` replaces only a directory containing a valid cosh audit manifest. Version 1 supports retention preview only, so `audit prune` must include `--dry-run` and does not delete data.
 
-## Configuration and Storage
-
-No separate audit configuration file is added. The existing
-`/etc/copilot-shell/config.toml` system table is authoritative; when it has no `[audit]` table,
-`~/.copilot-shell/config.toml` is used. Project `[audit]` tables are ignored so a workspace cannot
-weaken production audit.
-
-```toml
-[audit]
-mode = "best_effort" # best_effort | required
-retention_days = 30
-max_disk_bytes = 1073741824
-```
-
-The storage root resolves in this order:
-
-1. `COSH_AUDIT_DIR` (deployment/test override)
-2. `$XDG_STATE_HOME/cosh/audit`
-3. `~/.local/state/cosh/audit`
-
-There is no temporary-directory fallback. Directories use mode `0700`; segment and state files use
-`0600`. Writers create independent locked files below `v1/segments/YYYY-MM-DD/`, rotate at 16 MiB
-or a UTC date boundary, and publish closed `.jsonl` segments by atomic rename. `v1/state.json` is
-diagnostic last-observer state, not an authorization source.
-
-Retention runs at most once per 24 hours, removes expired closed segments before applying the disk
-cap, and never removes a live locked segment. Defaults are 30 days and 1 GiB.
-
-## Failure Modes
-
-- `best_effort` records a bounded degraded warning and lets work continue.
-- `required` fails closed before Provider start, approval resolution, or Tool execution when the
-  security-boundary record cannot be durably written.
-- Native PTY commands remain usable during an audit outage but expose a persistent audit gap.
-- Query corruption is reported as bounded diagnostics; a trailing partial crash record is not
-  returned as an event.
-
-Never attach the private segment directory directly to a ticket. Use `audit export`, review the
-manifest and hashes, and transfer the redacted bundle through the approved incident channel.
-
-## Policy Evaluation Compatibility
-
-The existing policy commands remain available:
+## Policy commands
 
 ```bash
-cosh-cli audit check --action "rm -rf /var/log"
-cosh-cli audit log --session abc123
 cosh-cli audit policy show
 cosh-cli audit policy list
 cosh-cli audit policy validate ./audit.toml
 cosh-cli audit policy explain "cat /etc/os-release"
 ```
 
-Policy loading remains `COSH_AUDIT_POLICY`, `~/.copilot-shell/cosh/audit.toml`,
-`/etc/cosh/audit.toml`, then the built-in `balanced` preset. The legacy policy log is readable as
-`legacy_v0`; raw legacy content is not projected into version 1 queries or exports.
+The policy loader also accepts the legacy `cosh-cli audit check --action ...` form. For policy locations, audit settings, and storage overrides, see [Configuration](../configuration.md). System audit settings take precedence over user settings; project audit tables are ignored.

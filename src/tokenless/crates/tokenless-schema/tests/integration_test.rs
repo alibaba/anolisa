@@ -4,6 +4,8 @@
 //! including real-world fixture schemas.
 
 use serde_json::{Value, json};
+use std::sync::Arc;
+use tokenless_ccr::{InMemoryStore, StashStore};
 use tokenless_schema::{ResponseCompressor, SchemaCompressor};
 
 // ============================================================
@@ -18,6 +20,17 @@ fn load_schema(name: &str) -> Value {
     let path = format!("{}/{}", fixtures_dir(), name);
     let content = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("Failed to load schema {}: {}", path, e));
+    serde_json::from_str(&content).unwrap()
+}
+
+fn response_fixtures_dir() -> String {
+    format!("{}/tests/fixtures/responses", env!("CARGO_MANIFEST_DIR"))
+}
+
+fn load_response(name: &str) -> Value {
+    let path = format!("{}/{}", response_fixtures_dir(), name);
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("Failed to load response {}: {}", path, e));
     serde_json::from_str(&content).unwrap()
 }
 
@@ -434,6 +447,9 @@ fn test_all_fixtures_produce_valid_json() {
         "simple_calculator.json",
         "hubspot_contact.json",
         "stripe_payment.json",
+        "github_create_issue.json",
+        "slack_send_message.json",
+        "aws_describe_instances.json",
     ];
 
     for name in files {
@@ -458,6 +474,16 @@ fn test_all_fixtures_produce_valid_json() {
             comp_len,
             orig_len
         );
+
+        // The top-level "type": "function" discriminant must be preserved when present.
+        if schema.get("type").is_some() {
+            assert_eq!(
+                compressed.get("type"),
+                schema.get("type"),
+                "{}: top-level \"type\" field must survive compression",
+                name
+            );
+        }
     }
 }
 
@@ -468,6 +494,9 @@ fn test_fixture_compression_ratio_benchmark() {
         "simple_calculator.json",
         "hubspot_contact.json",
         "stripe_payment.json",
+        "github_create_issue.json",
+        "slack_send_message.json",
+        "aws_describe_instances.json",
     ];
 
     let mut total_orig = 0usize;
@@ -496,10 +525,363 @@ fn test_fixture_compression_ratio_benchmark() {
         total_orig, total_comp, avg_saved
     );
 
-    // At minimum some compression should occur on complex schemas
     assert!(
         avg_saved >= 5.0,
         "Average compression should be >= 5%, got {:.1}%",
         avg_saved
+    );
+}
+
+// ============================================================
+// Tokenless Benchmark: L1–L4 layered compression
+// ============================================================
+//
+// L1 — Individual compressors (each compressor alone)
+// L2 — Pairs (schema + response combined on tool call data)
+// L3 — Triple (schema + response + stash/CCR reversible)
+// L4 — Full pipeline (all optimizations combined)
+
+const ALL_SCHEMA_FIXTURES: &[&str] = &[
+    "simple_calculator.json",
+    "hubspot_contact.json",
+    "stripe_payment.json",
+    "github_create_issue.json",
+    "slack_send_message.json",
+    "aws_describe_instances.json",
+];
+
+const RESPONSE_FIXTURES: &[&str] = &["github_issues.json"];
+
+// github_issues_stashable.json has 35 items, which exceeds the default
+// truncate_arrays_at=32, so the array tail gets stashed reversibly.
+// Use this fixture wherever we need to assert store.len() > 0.
+const RESPONSE_STASH_FIXTURES: &[&str] = &["github_issues_stashable.json"];
+
+fn byte_len(v: &Value) -> usize {
+    serde_json::to_string(v).unwrap().len()
+}
+
+#[test]
+fn bench_l1_schema_compressor() {
+    println!("\n=== L1: SchemaCompressor (individual) ===");
+    let compressor = SchemaCompressor::new();
+
+    let mut total_orig = 0usize;
+    let mut total_comp = 0usize;
+
+    for name in ALL_SCHEMA_FIXTURES {
+        let schema = load_schema(name);
+        let compressed = compressor.compress(&schema);
+        let orig = byte_len(&schema);
+        let comp = byte_len(&compressed);
+        let saved = (1.0 - comp as f64 / orig as f64) * 100.0;
+        println!(
+            "  {:<35} {:>6} -> {:>6} ({:.1}% saved)",
+            name, orig, comp, saved
+        );
+        total_orig += orig;
+        total_comp += comp;
+    }
+
+    let overall = (1.0 - total_comp as f64 / total_orig as f64) * 100.0;
+    println!(
+        "  {:<35} {:>6} -> {:>6} ({:.1}% saved)",
+        "TOTAL", total_orig, total_comp, overall
+    );
+
+    assert!(
+        overall >= 5.0,
+        "L1 schema: expected >= 5% savings, got {:.1}%",
+        overall
+    );
+}
+
+#[test]
+fn bench_l1_response_compressor() {
+    println!("\n=== L1: ResponseCompressor (individual) ===");
+    let compressor = ResponseCompressor::new();
+
+    let mut total_orig = 0usize;
+    let mut total_comp = 0usize;
+
+    for name in RESPONSE_FIXTURES {
+        let response = load_response(name);
+        let compressed = compressor.compress(&response);
+        let orig = byte_len(&response);
+        let comp = byte_len(&compressed);
+        let saved = (1.0 - comp as f64 / orig as f64) * 100.0;
+        println!(
+            "  {:<35} {:>6} -> {:>6} ({:.1}% saved)",
+            name, orig, comp, saved
+        );
+        total_orig += orig;
+        total_comp += comp;
+    }
+
+    let overall = (1.0 - total_comp as f64 / total_orig as f64) * 100.0;
+    println!(
+        "  {:<35} {:>6} -> {:>6} ({:.1}% saved)",
+        "TOTAL", total_orig, total_comp, overall
+    );
+
+    assert!(
+        overall > 0.0,
+        "L1 response: expected some savings, got {:.1}%",
+        overall
+    );
+}
+
+#[test]
+fn bench_l1_stash_schema() {
+    println!("\n=== L1: SchemaCompressor + Stash (reversible) ===");
+    let store = Arc::new(InMemoryStore::new());
+    let compressor = SchemaCompressor::new().with_stash_store(store.clone());
+
+    let mut total_orig = 0usize;
+    let mut total_comp = 0usize;
+
+    for name in ALL_SCHEMA_FIXTURES {
+        let schema = load_schema(name);
+        let compressed = compressor.compress(&schema);
+        let orig = byte_len(&schema);
+        let comp = byte_len(&compressed);
+        let saved = (1.0 - comp as f64 / orig as f64) * 100.0;
+        println!(
+            "  {:<35} {:>6} -> {:>6} ({:.1}% saved, stash={})",
+            name,
+            orig,
+            comp,
+            saved,
+            store.len()
+        );
+        total_orig += orig;
+        total_comp += comp;
+    }
+
+    let overall = (1.0 - total_comp as f64 / total_orig as f64) * 100.0;
+    println!(
+        "  {:<35} {:>6} -> {:>6} ({:.1}% saved)",
+        "TOTAL", total_orig, total_comp, overall
+    );
+
+    assert!(store.len() > 0, "L1 stash schema: expected stashed entries");
+}
+
+#[test]
+fn bench_l1_stash_response() {
+    println!("\n=== L1: ResponseCompressor + Stash (reversible) ===");
+    let store = Arc::new(InMemoryStore::new());
+    let compressor = ResponseCompressor::new().with_stash_store(store.clone());
+
+    let mut total_orig = 0usize;
+    let mut total_comp = 0usize;
+
+    // Use a fixture with 35 items so the array tail (items 33-35) is stashed
+    // reversibly. github_issues.json has only 5 items, which never triggers
+    // array truncation, so stash=0 and the lossless label would be incorrect.
+    for name in RESPONSE_STASH_FIXTURES {
+        let response = load_response(name);
+        let compressed = compressor.compress(&response);
+        let orig = byte_len(&response);
+        let comp = byte_len(&compressed);
+        let saved = (1.0 - comp as f64 / orig as f64) * 100.0;
+        println!(
+            "  {:<35} {:>6} -> {:>6} ({:.1}% saved, stash={})",
+            name,
+            orig,
+            comp,
+            saved,
+            store.len()
+        );
+        total_orig += orig;
+        total_comp += comp;
+    }
+
+    let overall = (1.0 - total_comp as f64 / total_orig as f64) * 100.0;
+    println!(
+        "  {:<35} {:>6} -> {:>6} ({:.1}% saved)",
+        "TOTAL", total_orig, total_comp, overall
+    );
+
+    assert!(
+        store.len() > 0,
+        "L1 stash response: expected stash entries from array truncation (fixture has 35 items, limit=32)"
+    );
+    assert!(overall > 0.0, "L1 stash response: expected some savings");
+
+    // Verify round-trip: the compressed output must contain a <<tokenless:…>> marker
+    // and the store must return the exact original dropped payload for that key.
+    let response = load_response(RESPONSE_STASH_FIXTURES[0]);
+    let items = response["items"]
+        .as_array()
+        .expect("fixture must have items array");
+    let dropped_original = Value::Array(items[32..].to_vec());
+
+    let compressed = compressor.compress(&response);
+    let compressed_str = serde_json::to_string(&compressed).unwrap();
+    let hash = tokenless_ccr::extract_hash(&compressed_str).expect(
+        "compressed output must contain a <<tokenless:KEY>> marker for the truncated array tail",
+    );
+    let retrieved = store
+        .retrieve(hash)
+        .expect("store retrieve must not error")
+        .expect("stash key must be present and non-expired");
+    let tail: serde_json::Value =
+        serde_json::from_str(&retrieved).expect("stashed payload must be valid JSON");
+    assert!(
+        tail.is_array(),
+        "stashed payload must be an array of the dropped items, got: {:?}",
+        tail
+    );
+    assert!(
+        !tail.as_array().unwrap().is_empty(),
+        "stashed array must be non-empty"
+    );
+    assert_eq!(
+        tail, dropped_original,
+        "retrieved tail must match the original dropped items exactly"
+    );
+}
+
+#[test]
+fn bench_l2_schema_response_pipeline() {
+    println!("\n=== L2: Schema + Response pipeline ===");
+    let schema_compressor = SchemaCompressor::new();
+    let response_compressor = ResponseCompressor::new();
+
+    for schema_name in ALL_SCHEMA_FIXTURES {
+        let schema = load_schema(schema_name);
+        let compressed_schema = schema_compressor.compress(&schema);
+        let schema_saved =
+            (1.0 - byte_len(&compressed_schema) as f64 / byte_len(&schema) as f64) * 100.0;
+
+        for resp_name in RESPONSE_FIXTURES {
+            let response = load_response(resp_name);
+            let compressed_response = response_compressor.compress(&response);
+            let resp_saved =
+                (1.0 - byte_len(&compressed_response) as f64 / byte_len(&response) as f64) * 100.0;
+
+            let combined_orig = byte_len(&schema) + byte_len(&response);
+            let combined_comp = byte_len(&compressed_schema) + byte_len(&compressed_response);
+            let combined_saved = (1.0 - combined_comp as f64 / combined_orig as f64) * 100.0;
+
+            println!(
+                "  {} + {}: schema {:.1}% | response {:.1}% | combined {:.1}% ({} -> {})",
+                schema_name,
+                resp_name,
+                schema_saved,
+                resp_saved,
+                combined_saved,
+                combined_orig,
+                combined_comp
+            );
+        }
+    }
+}
+
+#[test]
+fn bench_l3_schema_response_stash_pipeline() {
+    println!("\n=== L3: Schema + Response + Stash pipeline ===");
+    let store = Arc::new(InMemoryStore::new());
+    let schema_compressor = SchemaCompressor::new().with_stash_store(store.clone());
+    let response_compressor = ResponseCompressor::new().with_stash_store(store.clone());
+
+    for schema_name in ALL_SCHEMA_FIXTURES {
+        let schema = load_schema(schema_name);
+        let compressed_schema = schema_compressor.compress(&schema);
+
+        // Use the 35-item stashable response fixture so the response compressor
+        // actually writes stash entries. The 5-item fixture never triggers
+        // array truncation and would make store.len()>0 come from schema only.
+        for resp_name in RESPONSE_STASH_FIXTURES {
+            let response = load_response(resp_name);
+            let compressed_response = response_compressor.compress(&response);
+
+            let combined_orig = byte_len(&schema) + byte_len(&response);
+            let combined_comp = byte_len(&compressed_schema) + byte_len(&compressed_response);
+            let combined_saved = (1.0 - combined_comp as f64 / combined_orig as f64) * 100.0;
+
+            println!(
+                "  {} + {}: combined {:.1}% ({} -> {}, stash={})",
+                schema_name,
+                resp_name,
+                combined_saved,
+                combined_orig,
+                combined_comp,
+                store.len()
+            );
+        }
+    }
+
+    assert!(
+        store.len() > 0,
+        "L3: expected stashed entries for reversibility"
+    );
+}
+
+#[test]
+fn bench_l4_full_pipeline_aggregate() {
+    println!("\n=== L4: Full pipeline aggregate benchmark ===");
+    println!("Schema fixtures + response fixtures with all optimizations enabled");
+
+    let store = Arc::new(InMemoryStore::new());
+    let schema_compressor = SchemaCompressor::new().with_stash_store(store.clone());
+    let response_compressor = ResponseCompressor::new().with_stash_store(store.clone());
+
+    let mut grand_orig = 0usize;
+    let mut grand_comp = 0usize;
+
+    println!("  --- Schema compression ---");
+    for name in ALL_SCHEMA_FIXTURES {
+        let schema = load_schema(name);
+        let compressed = schema_compressor.compress(&schema);
+        let orig = byte_len(&schema);
+        let comp = byte_len(&compressed);
+        println!(
+            "    {:<35} {:>6} -> {:>6} ({:.1}%)",
+            name,
+            orig,
+            comp,
+            (1.0 - comp as f64 / orig as f64) * 100.0
+        );
+        grand_orig += orig;
+        grand_comp += comp;
+    }
+
+    println!("  --- Response compression ---");
+    for name in RESPONSE_FIXTURES {
+        let response = load_response(name);
+        let compressed = response_compressor.compress(&response);
+        let orig = byte_len(&response);
+        let comp = byte_len(&compressed);
+        println!(
+            "    {:<35} {:>6} -> {:>6} ({:.1}%)",
+            name,
+            orig,
+            comp,
+            (1.0 - comp as f64 / orig as f64) * 100.0
+        );
+        grand_orig += orig;
+        grand_comp += comp;
+    }
+
+    let overall = (1.0 - grand_comp as f64 / grand_orig as f64) * 100.0;
+    println!(
+        "\n  GRAND TOTAL: {} -> {} bytes ({:.1}% saved)",
+        grand_orig, grand_comp, overall
+    );
+    println!(
+        "  Stash entries: {} (schema fields stashed reversibly; response savings include lossy field removal)",
+        store.len()
+    );
+    println!("  L4 layers: SchemaCompressor + ResponseCompressor + CCR Stash");
+    println!(
+        "  Note: TOON encoding (4th layer) requires external binary, not included in this Rust bench"
+    );
+
+    assert!(overall > 0.0, "L4: expected positive overall savings");
+    assert!(
+        store.len() > 0,
+        "L4: stash should contain reversible entries"
     );
 }

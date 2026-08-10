@@ -1,101 +1,48 @@
-# cosh-shell 总览
+# 交互式终端
 
-cosh-shell 是 cosh-ng 的 AI 增强交互式终端。它在原生 bash/zsh PTY 之上叠加
-AI 分析能力、工具审批控制和内联卡片渲染，为用户提供安全、可观测的 Agent
-交互体验。
+[English](../../../../en/user-entrypoint/cosh-ng/shell/overview.md)
 
-## 定位
+`cosh`是一个bash或zsh终端，也可以接收Agent的自然语言任务。熟悉的命令直接使用Shell语法；需要排查或执行较大任务时，再用自然语言描述目标。
 
-cosh-shell 是面向终端用户的前端层：
+## 典型工作流
 
-- 管理 PTY 主机（bash/zsh 子进程）
-- 通过 AI 适配器连接后端（默认 cosh-core）
-- 渲染审批卡片和 AI 分析结果
-- 实施工具审批控制协议
+1. 进入目标目录并运行`cosh`。
+2. 像平常一样执行熟悉的命令。
+3. 用自然语言描述排查或任务，并写明“仅检查”“修改前询问”等约束。
+4. 允许副作用前检查审批卡片。
+5. 离开长时间排查前运行`/session status`。
 
-## 运行模式
+常用启动方式：
 
 ```bash
-# 默认启动（使用配置中的适配器和 shell）
-cosh-shell
-
-# 显式指定适配器（位置参数）
-cosh-shell raw cosh-core
-cosh-shell raw claude
-cosh-shell raw qwen
-
-# 指定底层 shell
-cosh-shell --shell zsh
-cosh-shell raw co --shell bash
-
-# 直通模式：执行单条命令后退出
-cosh-shell -c 'ls -la'
-cosh-shell -- git status
-
-# 登录 shell 模式
-cosh-shell --login
-cosh-shell -l
-
-# 隔离模式（跳过用户 rcfile）
-cosh-shell --isolated
+cosh
+cosh --shell zsh
+cosh --resume
 ```
 
-## 支持的 AI 适配器
+## 输入如何分流
 
-| 适配器 | 后端 | 说明 |
-|--------|------|------|
-| `cosh-core` | cosh-core 进程 | 默认适配器，完整控制协议 |
-| `claude` | Claude Code CLI | Claude 适配器 |
-| `qwen` | Qwen Code CLI | 通义千问适配器 |
-| `fake` | 模拟 | 开发测试用，无需后端 |
+| 输入 | 结果 |
+|---|---|
+| `git status` | 在前台Shell中执行。 |
+| `why did the last command fail?` | 携带最近终端证据启动Agent请求。 |
+| `/session list` | 执行cosh控制命令。 |
+| Agent工具请求 | 按审批模式自动执行或显示审批卡片。 |
 
-## 适配器能力
+获批的Shell命令仍在前台Shell中执行，因此提示、输出、任务控制和`Ctrl+C`都可用。安全规则见[工具审批](approval.md)。
 
-| 能力 | 说明 |
-|------|------|
-| `text_stream` | 文本流式输出 |
-| `thinking_stream` | 思考过程流式输出 |
-| `session_resume` | 会话恢复 |
-| `tool_intent` | 工具调用意图感知 |
-| `user_question` | 向用户提问 |
-| `cancellable` | 支持取消运行中的请求 |
-| `control_protocol` | 完整控制协议支持 |
+## 会话与主动帮助
 
-## 核心功能
+- 会话由cosh-core保存，并按启动cosh时所在工作空间隔离。恢复会话只恢复模型可见的对话内容，不恢复终端进程或旧终端输出。详见[会话恢复](session-recovery.md)。
+- `smart`是默认分析模式。需要调整主动的失败帮助时，请看[AI分析](ai-analysis.md)。
+- `/help`是已安装版本命令集合的准确信息；简要参考见[交互命令](interactive-mode.md)。
 
-| 功能 | 说明 | 详细文档 |
-|------|------|----------|
-| PTY 交互 | bash/zsh 原生终端 | [interactive-mode.md](interactive-mode.md) |
-| AI 分析 | 流式命令分析 | [ai-analysis.md](ai-analysis.md) |
-| 工具审批 | 可视化审批卡片 | [approval.md](approval.md) |
+## 下一步
 
-## 架构概览
-
-```
-┌────────────────────────────────────────────┐
-│                 cosh-shell                 │
-│  ┌───────────┐  ┌──────────┐  ┌─────────┐  │
-│  │ PTY Host  │  │ Adapter  │  │   UI    │  │
-│  │ (bash/zsh)│  │(cosh-core│  │(ratatui)│  │
-│  └───────────┘  │/claude..)│  └─────────┘  │
-│  ┌───────────┐  └──────────┘  ┌─────────┐  │
-│  │  Hooks    │  ┌──────────┐  │Approval │  │
-│  │  Engine   │  │  Tools   │  │ Broker  │  │
-│  └───────────┘  └──────────┘  └─────────┘  │
-└────────────────────────────────────────────┘
-         │                │
-         ▼                ▼
-    bash/zsh PTY     cosh-core 进程
-```
-
-## 配置
-
-cosh-shell 特有配置位于 `~/.copilot-shell/config.toml` 的 `[ui]` 和 `[shell]`
-段。详见 [配置文档](../configuration.md)。
-
-## 项目信任
-
-cosh-shell 维护项目级信任存储。首次在新项目目录启动时，提示用户确认是否信任该项目。信任状态决定：
-
-- 是否加载项目目录下的 `.cosh/hooks`
-- 是否应用项目级配置覆盖
+- [工具审批](approval.md)
+- [AI分析](ai-analysis.md)
+- [会话恢复](session-recovery.md)
+- [会话压缩](session-compaction.md)
+- [Skills](../core/skills.md)
+- [MCP](../mcp.md)
+- [Extensions](../core/extensions.md)

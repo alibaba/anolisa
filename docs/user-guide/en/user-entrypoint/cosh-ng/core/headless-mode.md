@@ -1,211 +1,88 @@
-# Headless Mode
+# Headless mode
 
-cosh-core's headless mode provides a JSONL protocol interface via stdin/stdout. It is the standard communication method between cosh-shell and cosh-core, and can also be integrated by any client.
+[中文版](../../../../zh/user-entrypoint/cosh-ng/core/headless-mode.md)
 
-## Startup
+Headless mode is a line-delimited JSON protocol on stdin/stdout. Use the
+one-shot form for scripts and the long-running form for a frontend adapter.
+
+## One-shot prompt
 
 ```bash
-# Long-running mode (continuously receives JSONL)
+cosh-core --headless "Check disk usage; do not modify anything"
+```
+
+Core streams events, writes an `assistant` message, and finishes with a
+`result` object. Use `--model`, `--approval-mode`, `--tools`, or
+`--allowed-tools` when the script needs different settings.
+
+## Long-running client
+
+Start the process and send one JSON object per line:
+
+```bash
 cosh-core --headless
-
-# Single prompt (auto-exits after execution)
-cosh-core --headless "Check disk usage"
-
-# With parameters
-cosh-core --headless --model qwen-max --approval-mode trust
 ```
-
-## Input Messages (Shell → Core)
-
-All input is sent line by line via stdin, with each line being a JSON object distinguished by the `type` field.
-
-### user — User Message
 
 ```json
-{
-  "type": "user",
-  "message": { "role": "user", "content": "List files in current directory" },
-  "session_id": "optional-session-id",
-  "shell_context": { "cwd": "/home/user/project", "env": {}, "last_exit_code": 0 }
-}
+{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}
+{"type":"user","message":{"role":"user","content":"List files in current directory"}}
 ```
 
-### control_request — Control Request
+The first response is an initialization acknowledgement followed by a system
+summary:
 
 ```json
-{
-  "type": "control_request",
-  "request_id": "req-001",
-  "request": { "subtype": "initialize" }
-}
+{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{...}}}}
+{"type":"system","subtype":"init","session_id":"...","session_resumable":true,"model":"...","tools":[...]}
 ```
 
-Supported `subtype` values:
+Keep the `session_id` only when `session_resumable` is `true`. A client should
+read `stream_event` lines until the message stops, then consume the final
+`assistant` and `result` messages.
 
-| subtype | Description |
-|---------|-------------|
-| `initialize` | Initialize session (returns capability declaration + system init message) |
-| `interrupt` | Interrupt current generation |
-| `shutdown` | Shut down process |
-| `switch_model` | Switch model (requires `model` field) |
-| `reload_config` | Reload config.toml |
-| `config_override` | Runtime config override (`approval_mode`, `allowed_tools`) |
+## Control requests
 
-### control_response — Control Response (replying to Core's request)
+Core may pause for a tool decision or user input. Reply with the same request
+ID and a `control_response`:
 
 ```json
-{
-  "type": "control_response",
-  "response": {
-    "subtype": "tool_approval",
-    "request_id": "req-002",
-    "response": { "behavior": "allow" }
-  }
-}
+{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"df -h"},"tool_use_id":"toolu-1"}}
+{"type":"control_response","response":{"subtype":"success","request_id":"req-1","response":{"behavior":"allow","toolUseID":"toolu-1"}}}
 ```
 
-### registry_request — Registry Request
+Other Core requests include `ask_user`, `auth_required`, and the optional
+`shell_evidence` request. A frontend can interrupt or stop the process with:
 
 ```json
-{
-  "type": "registry_request",
-  "request_id": "reg-001",
-  "domain": "tools",
-  "action": "list",
-  "params": {}
-}
+{"type":"control_request","request_id":"stop-1","request":{"subtype":"shutdown"}}
 ```
 
-## Output Messages (Core → Shell)
+If credentials are missing, answer `auth_required` with the selected
+`provider_id`, its `values`, and `persist` according to the provider form. See
+[Providers](providers.md) for the available choices.
 
-All output is written to stdout, also line-by-line JSON.
+## Resume or compact a session
 
-### system — System Message
-
-```json
-{"type":"system","subtype":"init","session_id":"...","session_resumable":true,"model":"qwen3.7-plus","tools":["ask_user_question","edit","grep","read_file","shell","skill","todo","write_file"]}
+```bash
+cosh-core --headless --resume <session-id>
+cosh-core --headless --resume <session-id> --compact
 ```
 
-Common `subtype` values: `init`, `auth_required`, `auth_ok`, `model_switched`, `config_reloaded`.
-`session_resumable` is present on `init`; callers must not reuse the emitted
-session ID when it is `false`.
+The ID is workspace-scoped. The workspace is the current directory unless the
+frontend passes `--workspace <path>`. Set `session.auto_persist = false` to keep
+history only in memory; such a session is not resumable.
 
-### stream_event — Streaming Event
+## Results and errors
 
-Token-by-token output during LLM generation:
-
-```json
-{"type":"stream_event","event":{"subtype":"text_delta","content":"Hello"}}
-{"type":"stream_event","event":{"subtype":"thinking_delta","content":"Let me analyze..."}}
-{"type":"stream_event","event":{"subtype":"tool_use_begin","tool_name":"shell","tool_use_id":"tu-1"}}
-{"type":"stream_event","event":{"subtype":"tool_use_delta","content":"{\"command\":\"df -h\"}"}}
-{"type":"stream_event","event":{"subtype":"tool_use_end"}}
-```
-
-### control_request — Core-initiated Request
-
-When Core needs Shell cooperation (e.g., tool approval, user question):
-
-```json
-{
-  "type": "control_request",
-  "request_id": "cr-001",
-  "request": { "subtype": "can_use_tool", "tool_name": "shell", "tool_input": {"command": "rm -rf /tmp/old"} }
-}
-```
-
-### result — Turn End
+Successful turns end with a result like:
 
 ```json
 {"type":"result","subtype":"success","is_error":false,"result":"completed","session_id":"...","duration_ms":1234}
 ```
 
-## Initialization Handshake
+Failures use `is_error: true` and include `errors`; session load and persistence
+failures also include `session_error_code` and `session_error_phase`. Invalid
+JSONL input produces an error result and exits with a non-zero status. Keep
+stdout reserved for protocol messages; diagnostics are logged separately.
 
-Standard startup sequence:
-
-```
-Shell → Core:  {"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}
-Core → Shell:  {"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"subtype":"initialize","capabilities":{...}}}}
-Core → Shell:  {"type":"system","subtype":"init","session_id":"...","session_resumable":true,"model":"...","tools":[...]}
-```
-
-`capabilities` declares the protocol capabilities Core supports:
-
-| Capability | Description |
-|-----------|-------------|
-| `can_handle_can_use_tool` | Supports tool approval protocol |
-| `can_handle_host_executed_shell_tool_result` | Supports Shell-side execution result callback |
-| `can_handle_shell_evidence_tool` | Supports terminal evidence tool |
-
-## Authentication Flow
-
-If no API key is configured, Core sends an authentication request during initialization:
-
-```
-Core → Shell:  {"type":"control_request","request_id":"auth-init","request":{"subtype":"auth_required","reason":"not_configured","providers":[...]}}
-Shell → Core:  {"type":"control_response","response":{"subtype":"auth_response","request_id":"auth-init","response":{"provider_id":"dashscope","values":{"api_key":"sk-xxx"},"persist":true}}}
-Core → Shell:  {"type":"system","subtype":"auth_ok"}
-```
-
-## Session Resume
-
-```bash
-cosh-core --headless --resume <session-id>
-```
-
-Core resolves the workspace supplied through `--workspace` (or the process
-cwd when the flag is absent), loads that workspace's
-`.copilot-shell/config.toml`, validates the canonical UUID, and loads the same
-versioned session envelope used by cosh-shell's interactive recovery. The
-default root is `~/.copilot-shell/cosh-core/sessions/`; records are kept under
-deterministic workspace-scoped directories. A relative `session.persist_dir`
-is resolved from that workspace, not from an unrelated launcher cwd.
-
-Supplying the UUID of a pre-upgrade raw message-array file checks only an old
-flat directory that can be proven to belong to the requested workspace. For
-the former relative default, that is `<workspace>/sessions/<uuid>.json`;
-ambiguous shared roots and the launcher cwd are not searched. Core loads the
-legacy array in memory without changing it. Only a later successful persist
-atomically writes the schema-v1 envelope and then removes the old file. Legacy
-files are not shown in picker summaries because they contain no workspace
-identity. Proven workspace-owned legacy IDs are still included by clear-all,
-and an explicit clear removes either the legacy file or its upgraded copy.
-
-The provider session ID is immutable after startup. A missing ID or the legacy
-`"default"` value in a later user message does not replace it, while a
-different explicit ID is rejected as a recoverable protocol error. Core
-persists model-visible history after every mutated turn, including a turn that
-ends with a recoverable provider error.
-
-For a new session, the stored model is finalized after authentication and
-provider selection. A resumed session normally keeps its stored model; an
-explicit `--model <name>` takes precedence over that stored value.
-
-When `session.auto_persist = false`, Core keeps the current process history in
-memory but emits `session_resumable: false`. cosh-shell does not commit that
-UUID or pass it to a later `--resume` invocation.
-
-See [Session Recovery](../shell/session-recovery.md) for the interactive
-workflow and storage behavior.
-
-## Error Handling
-
-Protocol-level errors are delivered via `result` messages:
-
-```json
-{"type":"result","is_error":true,"errors":["provider returned HTTP 429: rate limit exceeded"],"session_id":"..."}
-```
-
-Session-load and persistence failures additionally carry a machine-readable
-code and phase that are separate from provider error text:
-
-```json
-{"type":"result","is_error":true,"errors":["session recovery failed [not_found]: session not found"],"session_error_code":"not_found","session_error_phase":"load","session_id":"..."}
-```
-
-Persistence failures use `"session_error_phase":"persist"`. When an automatic
-resume cannot persist, cosh-shell releases only the matching active session so
-it cannot silently retry stale history; unrelated selections remain intact.
-
-Input lines with JSON parse failures are silently ignored (debug log only) and do not terminate the process.
+For the complete schema, see the developer [IPC protocol reference](../../../../../developer-guide/en/cosh-ng/ipc-protocol.md).

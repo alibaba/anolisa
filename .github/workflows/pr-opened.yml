@@ -6,7 +6,7 @@
 # 2. Sends a DingTalk notification.
 #    Requires secrets: DINGTALK_WEBHOOK, DINGTALK_SECRET
 
-name: PR Opened
+name: Automation / PR Opened
 
 on:
   pull_request_target:

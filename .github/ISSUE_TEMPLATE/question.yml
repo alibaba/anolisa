@@ -12,6 +12,7 @@ body:
     id: component
     attributes:
       label: Component
+      description: Optional hint only. Leave this unanswered when the boundary is unclear.
       options:
         - anolisa
         - tokenless
@@ -27,7 +28,7 @@ body:
         - not sure
         - other
     validations:
-      required: true
+      required: false
 
   - type: textarea
     id: question

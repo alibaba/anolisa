@@ -88,6 +88,10 @@ pub struct AgentSight {
     response_mapper: ResponseSessionMapper,
     /// Pending GenAI events awaiting session_id resolution from ResponseSessionMapper
     pending_genai: Vec<PendingGenAI>,
+    /// Calls exported with a fallback session_id after the deferral window
+    /// timed out, keyed by pid, awaiting a late FileWrite mapping for
+    /// retroactive session fix-up (issue #2059).
+    retro_session_fixup: lru::LruCache<u32, Vec<RetroFixupEntry>>,
     /// Total estimated bytes of all pending_genai entries (for memory budget enforcement).
     pending_genai_bytes: usize,
     /// Runtime limits for bounded buffers and eviction policies.
@@ -134,6 +138,20 @@ impl PendingGenAI {
 
 /// Maximum time to wait for ResponseSessionMapper to resolve a session_id
 const PENDING_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long a timeout-escaped call stays eligible for retroactive session
+/// fix-up after export (see `apply_retro_session_fixup`). Generous compared
+/// to `PENDING_SESSION_TIMEOUT` because the write that reveals the session
+/// UUID may only happen at the end of a long agent turn.
+const RETRO_FIXUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Maximum number of pids tracked for retroactive session fix-up.
+const RETRO_FIXUP_CAPACITY: usize = 256;
+
+/// One timeout-escaped call awaiting retroactive session fix-up:
+/// (call_id, registration time, agent_name of the pid at registration time).
+/// The agent name guards against pid reuse (see `apply_retro_session_fixup`).
+type RetroFixupEntry = (String, std::time::Instant, Option<String>);
 
 impl AgentSight {
     /// Create a new AgentSight instance from configuration
@@ -562,6 +580,11 @@ impl AgentSight {
                 ResponseSessionMapper::disabled()
             },
             pending_genai: Vec::new(),
+            // RETRO_FIXUP_CAPACITY is a non-zero constant, so the unwrap is
+            // guaranteed unreachable.
+            retro_session_fixup: lru::LruCache::new(
+                std::num::NonZeroUsize::new(RETRO_FIXUP_CAPACITY).unwrap(),
+            ),
             pending_genai_bytes: 0,
             runtime_limits: config.runtime_limits,
             ffi_sender: None,
@@ -684,6 +707,19 @@ impl AgentSight {
         // Handle FileWrite events via callback (not through the pipeline)
         if let Event::FileWrite(ref fw_event) = event {
             self.handle_filewrite_event(fw_event);
+            // The refreshed pid → session mapping may allow repairing calls
+            // that already escaped the deferral window with a fallback id.
+            if let Some(ref store) = self.genai_sqlite_store {
+                apply_retro_session_fixup(
+                    &mut self.retro_session_fixup,
+                    &self.response_mapper,
+                    store,
+                    fw_event.pid,
+                    self.pid_agent_name_cache
+                        .peek(&fw_event.pid)
+                        .map(String::as_str),
+                );
+            }
             // After mapper is updated, try to resolve any pending GenAI events
             self.resolve_pending_genai();
             return None;
@@ -1348,6 +1384,7 @@ impl AgentSight {
             if let Some(pending) = self.genai_builder.build_pending_from_request(
                 request,
                 conn_id,
+                &self.response_mapper,
                 &self.pid_agent_name_cache,
             ) {
                 if let Some(ref store) = self.genai_sqlite_store {
@@ -1412,6 +1449,7 @@ impl AgentSight {
             if let Some(mut pending) = self.genai_builder.build_pending_from_request(
                 &request,
                 &conn_id,
+                &self.response_mapper,
                 &self.pid_agent_name_cache,
             ) {
                 pending.pending_origin = PendingOrigin::IdleDrain;
@@ -1478,6 +1516,7 @@ impl AgentSight {
                     compressed_buffer: Some(buf),
                     content_encoding,
                     response_headers,
+                    zstd_decoder,
                 } if sse_events.is_empty() && !buf.is_empty() => {
                     // fix(#973): decode the unfinalized compressed buffer
                     // so drain-path token extraction can proceed.
@@ -1490,6 +1529,7 @@ impl AgentSight {
                             &buf,
                             content_encoding.as_deref(),
                             is_chunked,
+                            zstd_decoder.as_deref(),
                             &response_headers.source_event,
                         );
                     ("SseActive", req, decoded)
@@ -1505,6 +1545,7 @@ impl AgentSight {
             if let Some(pending) = self.genai_builder.build_pending_from_request(
                 &request,
                 &conn_id,
+                &self.response_mapper,
                 &self.pid_agent_name_cache,
             ) {
                 if let Some(ref store) = self.genai_sqlite_store {
@@ -1767,6 +1808,40 @@ impl AgentSight {
         }
     }
 
+    /// Remember timeout-escaped LLM calls so a later FileWrite from the same
+    /// pid can retroactively repair their fallback session_id (issue #2059).
+    fn register_retro_session_fixup(&mut self, pid: u32, events: &[GenAISemanticEvent]) {
+        let call_ids = retro_fixup_call_ids(pid, events);
+        if call_ids.is_empty() {
+            return;
+        }
+        // All events of a deferred batch belong to one call from one process,
+        // so the first LLMCall's agent_name identifies the pid's owner. It is
+        // compared against the pid's owner at fix-up time to catch pid reuse.
+        let agent_name = events.iter().find_map(|e| match e {
+            GenAISemanticEvent::LLMCall(call) => Some(call.agent_name.clone()),
+            _ => None,
+        });
+        let agent_name = agent_name.flatten();
+        let now = std::time::Instant::now();
+        let mut entries = self.retro_session_fixup.pop(&pid).unwrap_or_default();
+        // Drop already-expired entries so a chatty pid cannot grow the list
+        // beyond what the fix-up window can ever consume.
+        entries.retain(|(_, ts, _)| ts.elapsed() <= RETRO_FIXUP_WINDOW);
+        entries.extend(call_ids.into_iter().map(|id| (id, now, agent_name.clone())));
+        // `push` (unlike `put`) reports the LRU victim; the pid's own entry
+        // was popped above, so any Some here is a capacity eviction — surface
+        // it because the evicted pid silently loses its fix-up chance.
+        if let Some((evicted_pid, evicted)) = self.retro_session_fixup.push(pid, entries) {
+            if evicted_pid != pid {
+                log::debug!(
+                    "retro fix-up registry full: evicted pid={evicted_pid} with {} pending fix-up(s)",
+                    evicted.len()
+                );
+            }
+        }
+    }
+
     /// Try to resolve pending GenAI events whose session_id can now be looked up.
     /// Called after FileWrite events update the ResponseSessionMapper.
     fn resolve_pending_genai(&mut self) {
@@ -1804,6 +1879,7 @@ impl AgentSight {
                     "Deferred session_id timed out for response_id={}, using fallback",
                     pending.response_id
                 );
+                self.register_retro_session_fixup(pending.pid, &pending.events);
                 to_export.push(pending.events);
             } else {
                 // Still waiting
@@ -1836,6 +1912,7 @@ impl AgentSight {
                     "Deferred session_id expired for response_id={}, using fallback",
                     pending.response_id
                 );
+                self.register_retro_session_fixup(pending.pid, &pending.events);
                 to_export.push(pending.events);
             } else {
                 still_pending.push(pending);
@@ -1851,6 +1928,12 @@ impl AgentSight {
     }
 
     /// Flush all remaining pending GenAI events (on shutdown).
+    ///
+    /// No retro fix-up registration here: the process is exiting, so no
+    /// further FileWrite can ever arrive to repair a fallback session_id.
+    /// The runtime already repaired what it could via
+    /// `apply_retro_session_fixup`; the remaining pendings are persisted with
+    /// whatever session_id they carry now (real UUID or fallback).
     fn flush_all_pending_genai(&mut self) {
         let pending_items: Vec<_> = self.pending_genai.drain(..).collect();
         for pending in &pending_items {
@@ -1885,6 +1968,8 @@ impl AgentSight {
         let (to_export, still_pending) = take_deferred_genai_for_pid(pending_items, pid);
         self.pending_genai = still_pending;
 
+        // No retro fix-up registration here: the pid is dead, so the FileWrite
+        // that would reveal its session mapping can never arrive anymore.
         for events in &to_export {
             self.complete_and_export_deferred_genai(events);
             self.detect_and_store_interruptions(events);
@@ -2121,6 +2206,92 @@ fn take_deferred_genai_for_pid(
     }
 
     (to_export, still_pending)
+}
+
+/// Collect the call_ids eligible for retroactive session fix-up from a
+/// timeout-escaped deferred batch.
+///
+/// pid 0 is the placeholder used when `pending_info` was missing at queue
+/// time; it can never match a real FileWrite pid, so it yields nothing.
+/// Extracted as a free function so the registration filter is unit-testable
+/// without constructing a full `AgentSight` instance.
+fn retro_fixup_call_ids(pid: u32, events: &[GenAISemanticEvent]) -> Vec<String> {
+    if pid == 0 {
+        return Vec::new();
+    }
+    events
+        .iter()
+        .filter_map(|e| match e {
+            GenAISemanticEvent::LLMCall(call) => Some(call.call_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Retroactively repair the session_id of calls that escaped the deferral
+/// window before `pid`'s FileWrite mapping arrived (issue #2059).
+///
+/// The pid entry is kept while the mapping is still unknown (a later write
+/// within `RETRO_FIXUP_WINDOW` may bring it) and consumed once the mapping is
+/// available; individual entries older than the window are dropped. Extracted
+/// as a free function so the fix-up path is unit-testable without a full
+/// `AgentSight` instance (mirrors `record_agent_crash_interruptions`).
+///
+/// `current_agent` (the pid's owner in `pid_agent_name_cache` at fix-up time)
+/// guards against pid reuse: when both the registered and the current agent
+/// are known and differ, the pid has been recycled by another process and the
+/// entry is dropped. Known residual limitation: a pid wrapped around within
+/// the window to a *same-named* traced agent that writes a session file can
+/// still be mis-repaired — vanishingly rare, and the double guard (32-hex
+/// shape in `update_fallback_session_id` + this agent check) limits the harm
+/// to a grouping deviation of orphan fallback rows.
+fn apply_retro_session_fixup(
+    fixups: &mut lru::LruCache<u32, Vec<RetroFixupEntry>>,
+    mapper: &ResponseSessionMapper,
+    store: &GenAISqliteStore,
+    pid: u32,
+    current_agent: Option<&str>,
+) {
+    // Cheap peek first: the vast majority of FileWrite events belong to pids
+    // with no timeout-escaped calls.
+    if fixups.peek(&pid).is_none() {
+        return;
+    }
+    let Some(session_id) = mapper.get_session_by_pid(pid).map(str::to_string) else {
+        return;
+    };
+    let Some(entries) = fixups.pop(&pid) else {
+        return;
+    };
+    // Entries whose UPDATE errored are re-registered below so a later write
+    // retries them; the window check above them bounds the retries.
+    let mut failed: Vec<RetroFixupEntry> = Vec::new();
+    for (call_id, registered_at, entry_agent) in entries {
+        if registered_at.elapsed() > RETRO_FIXUP_WINDOW {
+            continue;
+        }
+        if let (Some(registered), Some(current)) = (entry_agent.as_deref(), current_agent) {
+            if registered != current {
+                log::debug!(
+                    "retro session fix-up skipped for call_id={call_id}: pid {pid} was reused (agent {registered} -> {current})"
+                );
+                continue;
+            }
+        }
+        match store.update_fallback_session_id(&call_id, &session_id) {
+            Ok(n) if n > 0 => {
+                log::debug!("retro session fix-up: call_id={call_id} session_id={session_id}");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                log::warn!("retro session fix-up failed for call_id={call_id}: {e}");
+                failed.push((call_id, registered_at, entry_agent));
+            }
+        }
+    }
+    if !failed.is_empty() {
+        fixups.put(pid, failed);
+    }
 }
 
 /// Record `agent_crash` interruption events for the pending calls of an
@@ -2811,5 +2982,198 @@ mod tests {
             pid: 1,
         });
         assert!(!events_are_empty_llm(&[empty, tool]));
+    }
+
+    // ── Tests for retroactive session fix-up (issue #2059) ──
+
+    /// Build a mapper that learned `pid` → the cosh session UUID from a
+    /// FileWrite of the atomic-write temp file, exactly as at runtime.
+    fn make_mapper_with_pid(pid: u32) -> ResponseSessionMapper {
+        let mut mapper = ResponseSessionMapper::new();
+        mapper.process_filewrite(&FileWriteEvent {
+            pid,
+            tid: pid,
+            uid: 0,
+            timestamp_ns: 0,
+            write_size: 0,
+            comm: "cosh-core".to_string(),
+            filename:
+                ".550e8400-e29b-41d4-a716-446655440000.0198f00d-1a2b-4c3d-8e4f-556677889900.tmp"
+                    .to_string(),
+            cgroup_id: 0,
+            buf: Vec::new(),
+        });
+        mapper
+    }
+
+    fn make_fixup_cache() -> lru::LruCache<u32, Vec<RetroFixupEntry>> {
+        // Capacity constant is non-zero, unwrap cannot fire.
+        lru::LruCache::new(std::num::NonZeroUsize::new(RETRO_FIXUP_CAPACITY).unwrap())
+    }
+
+    #[test]
+    fn test_retro_fixup_call_ids_skips_pid_zero() {
+        let events = vec![GenAISemanticEvent::LLMCall(make_test_llm_call("call-a"))];
+        // pid 0 is the missing-pending_info placeholder — never registered.
+        assert!(retro_fixup_call_ids(0, &events).is_empty());
+        assert_eq!(retro_fixup_call_ids(4242, &events), vec!["call-a"]);
+    }
+
+    /// End-to-end narrow chain: a call escapes the deferral window with a
+    /// hash fallback session_id, gets registered, and a later FileWrite from
+    /// the same pid repairs the DB row. Reverting the fix-up makes the final
+    /// session_id assertion fail (the row would keep the 32-hex fallback).
+    #[test]
+    fn test_retro_session_fixup_repairs_timeout_escaped_call() {
+        let dir = unique_tmp_dir("retro-fixup");
+        let store =
+            GenAISqliteStore::new_with_path(&dir.join("genai_events.db")).expect("genai store");
+        let mut info = make_test_pending_info("retro-call-1");
+        info.pid = 4242;
+        // The 32-hex shape the id_resolver fallback produces.
+        info.session_id = Some("0123456789abcdef0123456789abcdef".to_string());
+        store.insert_pending(&info).expect("insert_pending");
+
+        let mut fixups = make_fixup_cache();
+        fixups.put(
+            4242,
+            vec![("retro-call-1".to_string(), std::time::Instant::now(), None)],
+        );
+
+        let mapper = make_mapper_with_pid(4242);
+        apply_retro_session_fixup(&mut fixups, &mapper, &store, 4242, None);
+
+        let rows = store.list_pending_for_pids(&[4242]).expect("list pending");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].1.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000"),
+            "fallback session_id must be repaired to the mapper UUID"
+        );
+        assert!(
+            fixups.peek(&4242).is_none(),
+            "pid entry must be consumed after the fix-up"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A FileWrite that does not yield a mapping for the pid must keep the
+    /// registration for later writes and leave the row untouched.
+    #[test]
+    fn test_retro_session_fixup_waits_for_mapping() {
+        let dir = unique_tmp_dir("retro-wait");
+        let store =
+            GenAISqliteStore::new_with_path(&dir.join("genai_events.db")).expect("genai store");
+        let mut info = make_test_pending_info("retro-call-2");
+        info.pid = 4242;
+        info.session_id = Some("0123456789abcdef0123456789abcdef".to_string());
+        store.insert_pending(&info).expect("insert_pending");
+
+        let mut fixups = make_fixup_cache();
+        fixups.put(
+            4242,
+            vec![("retro-call-2".to_string(), std::time::Instant::now(), None)],
+        );
+
+        // Mapper knows a different pid only.
+        let mapper = make_mapper_with_pid(9999);
+        apply_retro_session_fixup(&mut fixups, &mapper, &store, 4242, None);
+
+        let rows = store.list_pending_for_pids(&[4242]).expect("list pending");
+        assert_eq!(
+            rows[0].1.as_deref(),
+            Some("0123456789abcdef0123456789abcdef"),
+            "row must stay on the fallback while the mapping is unknown"
+        );
+        assert!(
+            fixups.peek(&4242).is_some(),
+            "entry must survive until the mapping arrives or expires"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Entries older than RETRO_FIXUP_WINDOW must be dropped without touching
+    /// the DB, even when the mapping is available.
+    #[test]
+    fn test_retro_session_fixup_drops_expired_entries() {
+        // Back-date the registration beyond the window. On hosts whose
+        // monotonic clock started less than the window ago this cannot be
+        // represented — skip silently (Instant cannot be mocked).
+        let Some(expired_at) = std::time::Instant::now()
+            .checked_sub(RETRO_FIXUP_WINDOW + std::time::Duration::from_secs(1))
+        else {
+            return;
+        };
+
+        let dir = unique_tmp_dir("retro-expired");
+        let store =
+            GenAISqliteStore::new_with_path(&dir.join("genai_events.db")).expect("genai store");
+        let mut info = make_test_pending_info("retro-call-3");
+        info.pid = 4242;
+        info.session_id = Some("0123456789abcdef0123456789abcdef".to_string());
+        store.insert_pending(&info).expect("insert_pending");
+
+        let mut fixups = make_fixup_cache();
+        fixups.put(4242, vec![("retro-call-3".to_string(), expired_at, None)]);
+
+        let mapper = make_mapper_with_pid(4242);
+        apply_retro_session_fixup(&mut fixups, &mapper, &store, 4242, None);
+
+        let rows = store.list_pending_for_pids(&[4242]).expect("list pending");
+        assert_eq!(
+            rows[0].1.as_deref(),
+            Some("0123456789abcdef0123456789abcdef"),
+            "expired entries must not touch the DB"
+        );
+        assert!(
+            fixups.peek(&4242).is_none(),
+            "expired entries are discarded together with the pid entry"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pid recycled by a different traced agent must not have its old
+    /// entries repaired: registered agent and current agent both known but
+    /// different → drop, no DB write. Reverting the agent guard in
+    /// `apply_retro_session_fixup` makes this test fail (the row would be
+    /// repaired with the new process's session).
+    #[test]
+    fn test_retro_session_fixup_skips_reused_pid() {
+        let dir = unique_tmp_dir("retro-pid-reuse");
+        let store =
+            GenAISqliteStore::new_with_path(&dir.join("genai_events.db")).expect("genai store");
+        let mut info = make_test_pending_info("retro-call-4");
+        info.pid = 4242;
+        info.session_id = Some("0123456789abcdef0123456789abcdef".to_string());
+        store.insert_pending(&info).expect("insert_pending");
+
+        let mut fixups = make_fixup_cache();
+        fixups.put(
+            4242,
+            vec![(
+                "retro-call-4".to_string(),
+                std::time::Instant::now(),
+                Some("cosh".to_string()),
+            )],
+        );
+
+        let mapper = make_mapper_with_pid(4242);
+        apply_retro_session_fixup(&mut fixups, &mapper, &store, 4242, Some("other-agent"));
+
+        let rows = store.list_pending_for_pids(&[4242]).expect("list pending");
+        assert_eq!(
+            rows[0].1.as_deref(),
+            Some("0123456789abcdef0123456789abcdef"),
+            "entries registered under another agent must not be repaired"
+        );
+        assert!(
+            fixups.peek(&4242).is_none(),
+            "reused-pid entries are dropped, not retried"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

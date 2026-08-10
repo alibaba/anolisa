@@ -184,16 +184,20 @@ mod tests {
         );
         assert_eq!(
             MessageId::ApprovalShellHandoffInputWaitTimeoutTitle as usize,
-            MessageId::ALL.len() - 11
+            MessageId::ALL.len() - 12
         );
         assert_eq!(
             MessageId::ShellInputWaitHintTimeoutForecastBody as usize,
-            MessageId::ALL.len() - 2
+            MessageId::ALL.len() - 3
         );
-        // The #2068 startup auth-hint segment is the current tail; tail
-        // ownership assertions move with each appended segment.
+        // The #2068 startup auth-hint segment remains ahead of the appended
+        // session-picker footer segment.
         assert_eq!(
             MessageId::StartupAuthHintLine as usize,
+            MessageId::ALL.len() - 2
+        );
+        assert_eq!(
+            MessageId::SessionPickerMarkedFooter as usize,
             MessageId::ALL.len() - 1
         );
     }

@@ -106,6 +106,7 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
+    use crate::raw_input::{update_input_mode, RawObserverAction};
 
     fn question() -> RawInputCapture {
         RawInputCapture::Question {
@@ -139,6 +140,92 @@ mod tests {
             &*input_mode.lock().expect("input mode"),
             RawInputMode::Capture { generation: 7, .. }
         ));
+    }
+
+    #[test]
+    fn marked_session_enter_requests_delete_without_releasing_capture() {
+        let capture = RawInputCapture::Session {
+            id: "session-panel".to_string(),
+            option_count: 2,
+            selected: 0,
+            marked_for_clear: vec![true, false],
+            confirming_clear: false,
+        };
+        let input_mode = Arc::new(Mutex::new(RawInputMode::Capture {
+            capture: capture.clone(),
+            generation: 7,
+            installed_at: std::time::Instant::now(),
+        }));
+        let (sender, receiver) = mpsc::channel();
+        let mut state = CardInputState::default();
+
+        let result = consume_captured_input(&mut state, &capture, 7, b"\n", &sender, &input_mode);
+
+        assert_eq!(result.generation, None);
+        assert!(result.remainder.is_empty());
+        assert_eq!(
+            receiver.recv().expect("session action"),
+            RawInputEvent::SessionDelete("session-panel".to_string())
+        );
+        assert!(receiver.try_recv().is_err());
+        assert!(matches!(
+            &*input_mode.lock().expect("input mode"),
+            RawInputMode::Capture { generation: 7, .. }
+        ));
+    }
+
+    #[test]
+    fn session_mark_refresh_preserves_generation_for_split_enter() {
+        let unmarked = RawInputCapture::Session {
+            id: "session-panel".to_string(),
+            option_count: 2,
+            selected: 0,
+            marked_for_clear: vec![false, false],
+            confirming_clear: false,
+        };
+        let marked = RawInputCapture::Session {
+            id: "session-panel".to_string(),
+            option_count: 2,
+            selected: 0,
+            marked_for_clear: vec![true, false],
+            confirming_clear: false,
+        };
+        let input_mode = Arc::new(Mutex::new(RawInputMode::Capture {
+            capture: unmarked.clone(),
+            generation: 7,
+            installed_at: std::time::Instant::now(),
+        }));
+        let (sender, receiver) = mpsc::channel();
+        let mut state = CardInputState::default();
+
+        let toggle = consume_captured_input(&mut state, &unmarked, 7, b" ", &sender, &input_mode);
+        assert!(!toggle.retry);
+        assert_eq!(toggle.generation, None);
+
+        update_input_mode(
+            &input_mode,
+            &RawObserverAction::CaptureInput(marked.clone()),
+            None,
+        );
+        assert!(matches!(
+            &*input_mode.lock().expect("input mode"),
+            RawInputMode::Capture {
+                capture,
+                generation: 7,
+                ..
+            } if capture == &marked
+        ));
+
+        let enter = consume_captured_input(&mut state, &marked, 7, b"\n", &sender, &input_mode);
+        assert!(!enter.retry);
+        assert_eq!(enter.generation, None);
+        assert_eq!(
+            receiver.try_iter().collect::<Vec<_>>(),
+            vec![
+                RawInputEvent::SessionToggle("session-panel".to_string(), 0),
+                RawInputEvent::SessionDelete("session-panel".to_string()),
+            ]
+        );
     }
 
     /// Stale-generation 竞态回归（评审 P1 追加）：旧 generation 的 Standard

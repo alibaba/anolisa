@@ -178,6 +178,22 @@ fn transcript_ends_with_complete_agent_run(messages: &[Message], run: RunSpan) -
         })
 }
 
+/// Reports whether the transcript's last Agent run is still in flight.
+///
+/// An exhausted emergency ladder means different things depending on this: with
+/// an active run the uncompactable remainder *is* that run, while without one
+/// every run is complete and already covered by the projection. A malformed
+/// transcript reports no active run; its real failure surfaces through the
+/// selection path as a [`BoundaryError`].
+pub(crate) fn has_active_run(messages: &[Message]) -> bool {
+    match group_agent_runs(messages) {
+        Ok(runs) => runs
+            .last()
+            .is_some_and(|run| !transcript_ends_with_complete_agent_run(messages, *run)),
+        Err(_) => false,
+    }
+}
+
 /// Reports whether automatic compaction can advance beyond the active
 /// projection while preserving the configured number of recent runs.
 ///
@@ -198,34 +214,62 @@ pub(crate) fn has_new_compactable_prefix(
         .is_some_and(|index| runs[index].start > compacted_through))
 }
 
-/// Selects the compaction cut for a transcript, or `None` when no safe cut
-/// frees at least one complete Agent run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How much trailing verbatim history a compaction attempt must keep.
 ///
-/// At least `preserve_recent_runs` trailing runs are kept verbatim. Within
-/// that constraint the cut preserving the most history whose retained suffix
-/// still fits `target_tokens` wins; when nothing fits, semantic integrity
-/// wins and exactly `preserve_recent_runs` runs are preserved.
+/// This is the only difference between the manual, automatic, and emergency
+/// paths: all three select their cut through
+/// [`select_compacted_through_after`], so the boundary arithmetic and the
+/// safety invariants cannot drift between triggers.
 ///
-/// # Errors
-///
-/// Propagates [`BoundaryError`] so malformed transcripts are never compacted.
-pub(crate) fn select_compacted_through(
-    messages: &[Message],
-    preserve_recent_runs: usize,
-    target_tokens: u64,
-) -> Result<Option<usize>, BoundaryError> {
-    select_compacted_through_after(messages, preserve_recent_runs, target_tokens, 0)
+/// Neither variant may cut the active (incomplete) Agent run, and neither may
+/// split a tool-call/tool-result exchange.
+pub(crate) enum PreservationPolicy {
+    /// Keep at least this many trailing complete Agent runs verbatim.
+    ///
+    /// Values below one are raised to one: normal automatic compaction never
+    /// summarizes away the run the model is still reasoning about.
+    RecentRuns(usize),
+    /// Keep no complete run unconditionally; the latest *completed* run may be
+    /// summarized.
+    ///
+    /// Used by explicit manual compaction and as the last emergency fallback
+    /// before failing closed.
+    ThroughLatestCompletedRun,
 }
 
-/// Selects a safe cut strictly after an already compacted transcript prefix.
+/// Selects a safe cut under `policy`, strictly after an already compacted
+/// transcript prefix, or `None` when no safe cut frees a complete Agent run.
 ///
-/// This prevents a later compaction from selecting the active projection's
-/// boundary merely because its retained suffix still fits the target.
+/// Requiring a cut past `compacted_through` prevents a later compaction from
+/// re-selecting the active projection's boundary merely because its retained
+/// suffix still fits the target.
 ///
 /// # Errors
 ///
 /// Propagates [`BoundaryError`] so malformed transcripts are never compacted.
 pub(crate) fn select_compacted_through_after(
+    messages: &[Message],
+    policy: PreservationPolicy,
+    target_tokens: u64,
+    compacted_through: usize,
+) -> Result<Option<usize>, BoundaryError> {
+    match policy {
+        PreservationPolicy::RecentRuns(runs) => {
+            select_preserving_recent_runs(messages, runs, target_tokens, compacted_through)
+        }
+        PreservationPolicy::ThroughLatestCompletedRun => {
+            select_through_latest_completed_run(messages, target_tokens, compacted_through)
+        }
+    }
+}
+
+/// Selects a cut that keeps at least `preserve_recent_runs` trailing runs.
+///
+/// Within that constraint the cut preserving the most history whose retained
+/// suffix still fits `target_tokens` wins; when nothing fits, semantic
+/// integrity wins and exactly `preserve_recent_runs` runs are preserved.
+fn select_preserving_recent_runs(
     messages: &[Message],
     preserve_recent_runs: usize,
     target_tokens: u64,
@@ -244,18 +288,14 @@ pub(crate) fn select_compacted_through_after(
     Ok(choose_target_cut(messages, candidates, target_tokens))
 }
 
-/// Selects a manual compaction cut, including the transcript end when the
-/// latest Agent run is complete.
+/// Selects a cut that may reach the end of the latest *completed* Agent run,
+/// including the transcript end when the transcript has no active run.
 ///
-/// Manual compaction is an explicit request, so it does not reserve recent
-/// runs unconditionally. It still preserves as much verbatim history as the
-/// target permits and only summarizes the latest run when no earlier cut can
-/// satisfy the request.
-///
-/// # Errors
-///
-/// Propagates [`BoundaryError`] so malformed transcripts are never compacted.
-pub(crate) fn select_manual_compacted_through_after(
+/// No recent run is reserved unconditionally. As much verbatim history as the
+/// target permits is still preserved, and the latest completed run is only
+/// summarized when no earlier cut satisfies the target. An incomplete trailing
+/// run stops candidate generation, so the active run is never cut.
+fn select_through_latest_completed_run(
     messages: &[Message],
     target_tokens: u64,
     compacted_through: usize,
@@ -307,6 +347,34 @@ mod tests {
         ]
     }
 
+    /// Selects from the transcript start while preserving recent runs.
+    fn select_preserving(
+        messages: &[Message],
+        preserve_recent_runs: usize,
+        target_tokens: u64,
+    ) -> Result<Option<usize>, BoundaryError> {
+        select_compacted_through_after(
+            messages,
+            PreservationPolicy::RecentRuns(preserve_recent_runs),
+            target_tokens,
+            0,
+        )
+    }
+
+    /// Selects from the transcript start with no unconditionally reserved run.
+    fn select_latest_completed(
+        messages: &[Message],
+        target_tokens: u64,
+        compacted_through: usize,
+    ) -> Result<Option<usize>, BoundaryError> {
+        select_compacted_through_after(
+            messages,
+            PreservationPolicy::ThroughLatestCompletedRun,
+            target_tokens,
+            compacted_through,
+        )
+    }
+
     #[test]
     fn groups_simple_runs() {
         let mut messages = run_with_tools("first", "call-1");
@@ -337,7 +405,13 @@ mod tests {
         let runs = group_agent_runs(&messages).unwrap();
 
         assert_eq!(
-            select_compacted_through_after(&messages, 1, u64::MAX, runs[1].start).unwrap(),
+            select_compacted_through_after(
+                &messages,
+                PreservationPolicy::RecentRuns(1),
+                u64::MAX,
+                runs[1].start,
+            )
+            .unwrap(),
             Some(runs[2].start)
         );
     }
@@ -347,7 +421,7 @@ mod tests {
         let messages = run_with_tools("first", "call-1");
 
         assert_eq!(
-            select_manual_compacted_through_after(&messages, u64::MAX, 0).unwrap(),
+            select_latest_completed(&messages, u64::MAX, 0).unwrap(),
             Some(messages.len())
         );
     }
@@ -356,7 +430,7 @@ mod tests {
     fn manual_selection_only_cuts_complete_run_prefixes() {
         let user_only = vec![Message::user("unfinished")];
         assert_eq!(
-            select_manual_compacted_through_after(&user_only, u64::MAX, 0).unwrap(),
+            select_latest_completed(&user_only, u64::MAX, 0).unwrap(),
             None
         );
 
@@ -366,7 +440,7 @@ mod tests {
             Message::tool_result("call-1", "output", false),
         ];
         assert_eq!(
-            select_manual_compacted_through_after(&tool_tail, u64::MAX, 0).unwrap(),
+            select_latest_completed(&tool_tail, u64::MAX, 0).unwrap(),
             None
         );
 
@@ -374,7 +448,7 @@ mod tests {
         let first_run_end = older_complete.len();
         older_complete.push(Message::user("unfinished second run"));
         assert_eq!(
-            select_manual_compacted_through_after(&older_complete, u64::MAX, 0).unwrap(),
+            select_latest_completed(&older_complete, u64::MAX, 0).unwrap(),
             Some(first_run_end)
         );
     }
@@ -422,7 +496,7 @@ mod tests {
             group_agent_runs(&messages),
             Err(BoundaryError::MissingToolResults { index: 2 })
         );
-        assert!(select_compacted_through(&messages, 1, 0).is_err());
+        assert!(select_preserving(&messages, 1, 0).is_err());
     }
 
     #[test]
@@ -462,7 +536,7 @@ mod tests {
         for run in 0..5 {
             messages.extend(run_with_tools(&format!("prompt {run}"), &format!("c{run}")));
         }
-        let cut = select_compacted_through(&messages, 2, 0)
+        let cut = select_preserving(&messages, 2, 0)
             .expect("valid transcript")
             .expect("cut selected");
         // Five runs of four messages: preserving 2 runs cuts at index 12.
@@ -475,7 +549,7 @@ mod tests {
         for run in 0..5 {
             messages.extend(run_with_tools(&format!("prompt {run}"), &format!("c{run}")));
         }
-        let cut = select_compacted_through(&messages, 2, u64::MAX)
+        let cut = select_preserving(&messages, 2, u64::MAX)
             .expect("valid transcript")
             .expect("cut selected");
         // A huge budget keeps everything except the first run.
@@ -486,7 +560,7 @@ mod tests {
     fn refuses_to_cut_when_too_few_runs() {
         let messages = run_with_tools("only", "call-1");
         assert_eq!(
-            select_compacted_through(&messages, 2, 0).expect("valid transcript"),
+            select_preserving(&messages, 2, 0).expect("valid transcript"),
             None
         );
     }
@@ -498,7 +572,7 @@ mod tests {
             Message::tool_result("orphan", "x", false),
             Message::user("again"),
         ];
-        assert!(select_compacted_through(&messages, 1, 0).is_err());
+        assert!(select_preserving(&messages, 1, 0).is_err());
     }
 
     #[test]

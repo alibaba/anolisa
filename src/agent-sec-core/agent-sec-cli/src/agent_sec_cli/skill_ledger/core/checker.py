@@ -3,11 +3,12 @@
 Implements ``agent-sec-cli skill-ledger check <skill_dir>``:
 
 1. Read ``latest.json``
-2. Missing → ``{"status": "none"}``
-3. Manifest present → compute current fileHashes, compare
-4. Mismatch → ``{"status": "drifted", "added": ..., "removed": ..., "modified": ...}``
-5. Match → verify signature → invalid → ``{"status": "tampered", "reason": ...}``
-6. Check scanStatus → ``deny`` / ``warn`` / ``none`` / ``pass``
+2. Missing with no version artifacts → ``{"status": "none"}``
+3. Missing with version artifacts → ``{"status": "tampered", "reason": ...}``
+4. Manifest present → verify its hash, signature, and signed identity
+5. Invalid → ``{"status": "tampered", "reason": ...}``
+6. Valid → compare current fileHashes; mismatch → ``{"status": "drifted", ...}``
+7. Match → dispatch ``scanStatus`` as ``deny`` / ``warn`` / ``none`` / ``pass``
 """
 
 import json
@@ -27,17 +28,15 @@ from agent_sec_cli.skill_ledger.core.live_root import (
 )
 from agent_sec_cli.skill_ledger.core.manifest_helpers import (
     snapshot_matches_manifest,
-)
-from agent_sec_cli.skill_ledger.core.manifest_integrity import (
-    MISSING_SIGNATURE_ERROR,
-    manifest_hash_error,
-    verify_manifest_signature,
+    verify_latest_manifest_artifact,
 )
 from agent_sec_cli.skill_ledger.core.version_chain import (
     latest_json_path,
+    list_version_artifact_ids,
     load_latest_manifest,
     snapshot_dir_path,
 )
+from agent_sec_cli.skill_ledger.errors import KeyNotFoundError
 from agent_sec_cli.skill_ledger.models.manifest import (
     SignedManifest,
 )
@@ -45,6 +44,20 @@ from agent_sec_cli.skill_ledger.path_identity import (
     normalize_canonical_skill_dir,
 )
 from agent_sec_cli.skill_ledger.signing.base import SigningBackend
+
+
+def _safe_metadata(root: ResolvedSkillRoot) -> dict[str, Any]:
+    """Return path-derived identity while withholding all manifest-derived fields."""
+    return {
+        "canonicalSkillDir": str(root.canonical_dir),
+        "skillName": root.skill_name,
+        "versionId": None,
+        "createdAt": None,
+        "updatedAt": None,
+        "fileCount": None,
+        "manifestHash": None,
+        "userDecision": None,
+    }
 
 
 def _manifest_metadata(
@@ -58,8 +71,7 @@ def _manifest_metadata(
     ``.skill-meta/latest.json`` directly.
     """
     return {
-        "canonicalSkillDir": str(root.canonical_dir),
-        "skillName": root.skill_name,
+        **_safe_metadata(root),
         "versionId": manifest.versionId,
         "createdAt": manifest.createdAt,
         "updatedAt": manifest.updatedAt,
@@ -71,6 +83,55 @@ def _manifest_metadata(
             else None
         ),
     }
+
+
+def _load_authenticated_manifest(
+    root: ResolvedSkillRoot,
+    backend: SigningBackend,
+) -> tuple[SignedManifest | None, dict[str, Any] | None]:
+    """Load latest.json and return a terminal result unless it is authenticated."""
+    io_skill_dir = str(root.io_dir)
+    try:
+        manifest = load_latest_manifest(io_skill_dir)
+    except (json.JSONDecodeError, ValueError):
+        if latest_json_path(io_skill_dir).is_file():
+            return None, {
+                **_safe_metadata(root),
+                "status": "tampered",
+                "reason": "manifest file is corrupted or schema-invalid",
+            }
+        manifest = None
+
+    if manifest is None:
+        if list_version_artifact_ids(io_skill_dir):
+            return None, {
+                **_safe_metadata(root),
+                "status": "tampered",
+                "reason": "latest.json is missing while version artifacts exist",
+            }
+        return None, {**_safe_metadata(root), "status": "none"}
+
+    try:
+        valid, error = verify_latest_manifest_artifact(
+            io_skill_dir,
+            manifest,
+            backend,
+            expected_skill_name=root.skill_name,
+            verify_snapshot=False,
+        )
+    except KeyNotFoundError:
+        return None, {
+            **_safe_metadata(root),
+            "status": "tampered",
+            "reason": "manifest signature could not be verified",
+        }
+    if not valid:
+        return None, {
+            **_safe_metadata(root),
+            "status": "tampered",
+            "reason": error,
+        }
+    return manifest, None
 
 
 @canonical_skill_operation
@@ -87,51 +148,16 @@ def check(skill_dir: SkillRootInput, backend: SigningBackend) -> dict[str, Any]:
     validate_resolved_skill_root(root)
     io_skill_dir = str(root.io_dir)
 
-    # Step 1: Load latest.json
-    # If the file exists but is malformed/corrupted, treat as tampered.
-    try:
-        manifest = load_latest_manifest(io_skill_dir)
-    except (json.JSONDecodeError, ValueError) as exc:
-        # File exists but cannot be parsed — corrupted or tampered metadata
-        if latest_json_path(io_skill_dir).is_file():
-            return {
-                "status": "tampered",
-                "canonicalSkillDir": str(root.canonical_dir),
-                "skillName": root.skill_name,
-                "versionId": None,
-                "createdAt": None,
-                "updatedAt": None,
-                "fileCount": None,
-                "manifestHash": None,
-                "reason": f"manifest file is corrupted: {exc}",
-            }
-        # File doesn't exist and some other error — treat as missing
-        manifest = None
+    # A manifest cannot influence status or metadata until its authenticity is proven.
+    manifest, terminal_result = _load_authenticated_manifest(root, backend)
+    if terminal_result is not None:
+        return terminal_result
+    assert manifest is not None
 
-    # Step 2: No manifest → read-only none.  scan/certify are the only
-    # commands that create signed versions and snapshots.
-    if manifest is None:
-        return {
-            "status": "none",
-            "canonicalSkillDir": str(root.canonical_dir),
-            "skillName": root.skill_name,
-            "versionId": None,
-            "createdAt": None,
-            "updatedAt": None,
-            "fileCount": None,
-            "manifestHash": None,
-        }
-
-    # Step 3: Compute current file hashes
-    current_hashes = compute_file_hashes(io_skill_dir)
-
-    # Manifest loaded — compute standard metadata for all subsequent returns
     meta = _manifest_metadata(manifest, root)
 
-    # Step 4: Compare fileHashes (takes priority over signature verification)
+    current_hashes = compute_file_hashes(io_skill_dir)
     diff = diff_file_hashes(manifest.fileHashes, current_hashes)
-
-    # Step 5: Mismatch → drifted
     if not diff["match"]:
         return {
             **meta,
@@ -141,29 +167,6 @@ def check(skill_dir: SkillRootInput, backend: SigningBackend) -> dict[str, Any]:
             "modified": diff["modified"],
         }
 
-    # Step 6: fileHashes match → verify signature
-    # 6a: Recompute manifestHash
-    hash_error = manifest_hash_error(manifest)
-    if hash_error is not None:
-        return {
-            **meta,
-            "status": "tampered",
-            "reason": hash_error,
-        }
-
-    # 6b: Verify digital signature
-    signature_valid, signature_error = verify_manifest_signature(manifest, backend)
-    if not signature_valid and signature_error == MISSING_SIGNATURE_ERROR:
-        # Legacy manifest without signature — treat as "none" (backward compat)
-        return {
-            **meta,
-            "status": "none",
-            "reason": "manifest has no signature (legacy)",
-        }
-    if not signature_valid:
-        return {**meta, "status": "tampered", "reason": signature_error}
-
-    # Step 7: Signature valid → dispatch on scanStatus
     scan_status = manifest.scanStatus
 
     if scan_status == "deny":
@@ -190,59 +193,22 @@ def manifest_only_status(
     root = resolve_skill_root(skill_dir)
     validate_resolved_skill_root(root)
     io_skill_dir = str(root.io_dir)
-    try:
-        manifest = load_latest_manifest(io_skill_dir)
-    except (json.JSONDecodeError, ValueError) as exc:
-        if latest_json_path(io_skill_dir).is_file():
-            return {
-                "status": "tampered",
-                "canonicalSkillDir": str(root.canonical_dir),
-                "skillName": root.skill_name,
-                "versionId": None,
-                "createdAt": None,
-                "updatedAt": None,
-                "fileCount": None,
-                "manifestHash": None,
-                "reason": f"manifest file is corrupted: {exc}",
-            }
-        manifest = None
-    if manifest is None:
-        return {
-            "status": "none",
-            "canonicalSkillDir": str(root.canonical_dir),
-            "skillName": root.skill_name,
-            "versionId": None,
-            "createdAt": None,
-            "updatedAt": None,
-            "fileCount": None,
-            "manifestHash": None,
-        }
-
-    meta = _manifest_metadata(manifest, root)
-    hash_error = manifest_hash_error(manifest)
-    if hash_error is not None:
-        return {**meta, "status": "tampered", "reason": hash_error}
-
-    signature_valid, signature_error = verify_manifest_signature(manifest, backend)
-    if not signature_valid and signature_error == MISSING_SIGNATURE_ERROR:
-        return {
-            **meta,
-            "status": "none",
-            "reason": "manifest has no signature (legacy)",
-        }
-    if not signature_valid:
-        return {**meta, "status": "tampered", "reason": signature_error}
+    manifest, terminal_result = _load_authenticated_manifest(root, backend)
+    if terminal_result is not None:
+        return terminal_result
+    assert manifest is not None
 
     if not snapshot_matches_manifest(
         snapshot_dir_path(io_skill_dir, manifest.versionId),
         manifest,
     ):
         return {
-            **meta,
+            **_safe_metadata(root),
             "status": "tampered",
             "reason": "snapshot does not match manifest",
         }
 
+    meta = _manifest_metadata(manifest, root)
     if manifest.scanStatus in {"deny", "warn"}:
         return {
             **meta,

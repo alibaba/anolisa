@@ -1,5 +1,7 @@
 # ws-ckpt and Session Management IPC Protocols
 
+[中文版](../../zh/cosh-ng/ipc-protocol.md)
+
 ## Overview
 
 cosh-ng communicates with the ws-ckpt daemon via Unix Domain Socket to manage workspace snapshots.

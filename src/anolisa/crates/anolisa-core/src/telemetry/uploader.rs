@@ -61,11 +61,15 @@ impl Endpoint {
     ///
     /// `use_internal` selects the Aliyun internal vs public host (per the
     /// region probe); `logstore` is the component name.
+    ///
+    /// `self.project` is a project prefix (e.g. `anolisa`); the actual
+    /// SLS project name is `{prefix}-{region}` (e.g. `anolisa-cn-hangzhou`).
     pub fn track_url(&self, region: &str, use_internal: bool, logstore: &str) -> String {
+        let project = format!("{}-{region}", self.project);
         let host = if use_internal {
-            format!("{}.{}-internal.log.aliyuncs.com", self.project, region)
+            format!("{project}.{region}-internal.log.aliyuncs.com")
         } else {
-            format!("{}.{}.log.aliyuncs.com", self.project, region)
+            format!("{project}.{region}.log.aliyuncs.com")
         };
         format!("https://{host}/logstores/{logstore}/track")
     }
@@ -130,7 +134,7 @@ impl Default for UploaderConfig {
             identity_cache_path: PathBuf::from("/var/lib/anolisa/telemetry/identity.json"),
             metadata_url: "http://100.100.100.200/latest/meta-data/region-id".to_string(),
             endpoint: Endpoint {
-                project: env_or("SLS_PROJECT", "anolisa"),
+                project: env_or("SLS_PROJECT_PREFIX", "anolisa"),
             },
             sleep_secs: DEFAULT_SLEEP_SECS,
             topic: "anolisa-telemetry".to_string(),
@@ -933,15 +937,15 @@ mod tests {
         let ep = Endpoint {
             project: "proj".into(),
         };
-        // Not detected → public host.
+        // Prefix + region → full project name in the host.
         assert_eq!(
             ep.track_url("cn-hangzhou", false, "agent-sec-core"),
-            "https://proj.cn-hangzhou.log.aliyuncs.com/logstores/agent-sec-core/track"
+            "https://proj-cn-hangzhou.cn-hangzhou.log.aliyuncs.com/logstores/agent-sec-core/track"
         );
         // Detected → internal host.
         assert_eq!(
             ep.track_url("cn-beijing", true, "cosh"),
-            "https://proj.cn-beijing-internal.log.aliyuncs.com/logstores/cosh/track"
+            "https://proj-cn-beijing.cn-beijing-internal.log.aliyuncs.com/logstores/cosh/track"
         );
     }
 

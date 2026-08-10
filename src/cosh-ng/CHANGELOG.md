@@ -4,7 +4,20 @@ All notable changes to the cosh-ng project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.15.0] — Unreleased
+## [0.16.0] — Unreleased
+
+## [0.15.0] — 2026-08-09
+
+### Fixed
+- Restore hint cursor after inline hints in shell (#2172)
+- Support ID_LIKE fallback for OS distribution detection (#2200)
+- List hook commands in `/help` output (#2208)
+- Skip audit logs for service lifecycle actions (#2213)
+- Support macOS-specific file reads in core (#2220)
+- Serialize handoff state to prevent race conditions (#2226)
+- Normalize apt search glob patterns (#2227)
+- Recover context budget after compaction in core (#2244)
+- Deduplicate hook notices in shell (#2259)
 
 ## [0.14.0] — 2026-08-04
 

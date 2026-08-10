@@ -398,20 +398,37 @@ async fn compact_in_memory_reduces_and_respects_disabled_policy() {
     let messages = bulky_messages(5);
     let provider = summary_provider();
     let config = CoreConfig::default();
-    let candidate = compact_in_memory(&messages, None, 0, &provider, "mock-model", &config, 0)
-        .await
-        .expect("in-memory candidate");
+    let candidate = compact_in_memory(
+        &messages,
+        None,
+        0,
+        &provider,
+        "mock-model",
+        &config,
+        0,
+        PreservationPolicy::RecentRuns(config.session.compaction.preserve_recent_runs),
+    )
+    .await
+    .expect("in-memory candidate");
     assert!(candidate.compacted_through > 0);
     assert_eq!(candidate.revision, 1);
 
     let mut disabled = CoreConfig::default();
     disabled.session.compaction.enabled = false;
     let provider = summary_provider();
-    assert!(
-        compact_in_memory(&messages, None, 0, &provider, "mock-model", &disabled, 0)
-            .await
-            .is_none()
-    );
+    let error = compact_in_memory(
+        &messages,
+        None,
+        0,
+        &provider,
+        "mock-model",
+        &disabled,
+        0,
+        PreservationPolicy::RecentRuns(2),
+    )
+    .await
+    .expect_err("disabled policy");
+    assert_eq!(error.code(), "disabled");
 }
 
 #[tokio::test]
@@ -804,24 +821,35 @@ async fn emergency_compaction_continues_from_the_saved_revision_floor() {
     // Sanitization dropped the projection, so `previous` is `None` while the
     // runtime clock still remembers revision 4.
     let provider = summary_provider();
-    let candidate = compact_in_memory(&messages, None, 4, &provider, "mock-model", &config, 0)
-        .await
-        .expect("in-memory candidate");
+    let candidate = compact_in_memory(
+        &messages,
+        None,
+        4,
+        &provider,
+        "mock-model",
+        &config,
+        0,
+        PreservationPolicy::RecentRuns(2),
+    )
+    .await
+    .expect("in-memory candidate");
     assert_eq!(candidate.revision, 5);
 
     // An exhausted clock takes the existing fail-closed emergency path.
     let provider = summary_provider();
-    assert!(compact_in_memory(
+    let error = compact_in_memory(
         &messages,
         None,
         u64::MAX,
         &provider,
         "mock-model",
         &config,
-        0
+        0,
+        PreservationPolicy::RecentRuns(2),
     )
     .await
-    .is_none());
+    .expect_err("exhausted revision clock");
+    assert_eq!(error.code(), "revision_exhausted");
 }
 
 #[test]
@@ -890,6 +918,50 @@ async fn legacy_envelope_without_projection_starts_at_zero() {
         .await
         .expect("first compaction");
     assert_eq!(report.revision, 1);
+}
+
+#[tokio::test]
+async fn normal_auto_trigger_still_protects_two_recent_runs() {
+    // The soft-threshold path stays quality-first: with the default policy two
+    // complete runs are both protected, so automatic compaction declines even
+    // though the same transcript is compactable on request. Only the emergency
+    // ladder degrades below this (see `compaction::preflight::tests`).
+    let temp = tempfile::tempdir().unwrap();
+    let store = store(&temp);
+    let session = persisted(&store, 2);
+    let config = CoreConfig::default();
+    assert_eq!(config.session.compaction.preserve_recent_runs, 2);
+    assert!(
+        !super::super::boundary::has_new_compactable_prefix(&session.messages, 2, 0).unwrap(),
+        "the idle-boundary preflight must see no eligible prefix"
+    );
+
+    let provider = summary_provider();
+    let error = compact_session(
+        &store,
+        &session.session_id,
+        &provider,
+        &config,
+        1_000,
+        None,
+        CompactionTrigger::Auto,
+        None,
+    )
+    .await
+    .expect_err("both runs are protected");
+    assert_eq!(error.code(), "nothing_to_compact");
+    assert!(store
+        .load(&session.session_id)
+        .unwrap()
+        .compaction
+        .is_none());
+
+    // Manual compaction over the very same transcript keeps working.
+    let provider = summary_provider();
+    let (report, _) = compact(&store, &session, &provider, &config)
+        .await
+        .expect("manual compaction committed");
+    assert!(report.compacted_through > 0);
 }
 
 #[tokio::test]

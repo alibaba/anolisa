@@ -1,4 +1,5 @@
 import type { SecurityCapability } from "../types.js";
+import { inboundPiiScanText } from "../helpers/pii-text.js";
 import { buildTraceContext, callAgentSecCli, envFlagEnabled } from "../utils.js";
 
 /**
@@ -30,7 +31,7 @@ export const promptScan: SecurityCapability = {
     const cfg = (api.pluginConfig as Record<string, any>) ?? {};
     api.on("before_dispatch", async (event: any, ctx: any) => {
       try {
-        const text = String(event.content ?? event.body ?? "");
+        const text = inboundPiiScanText(event);
         if (!text.trim()) {
           return undefined;
         }

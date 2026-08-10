@@ -10,7 +10,7 @@ use anolisa_platform::ipc::{SYSTEM_HELPER_SOCKET, recv_message, send_message};
 use anolisa_platform::privilege;
 
 use crate::context::CliContext;
-use crate::response::CliError;
+use crate::response::{CliError, render_json};
 
 #[derive(Parser)]
 pub struct OsbaseArgs {
@@ -314,7 +314,7 @@ fn handle_sandbox_list(json: bool) -> Result<(), CliError> {
         Ok(names) => {
             if json {
                 let data = serde_json::json!({ "scenarios": names });
-                println!("{}", serde_json::to_string_pretty(&data).unwrap());
+                render_json("osbase sandbox list", data)?;
             } else {
                 println!("Available sandbox scenarios (from sandbox.toml):");
                 println!();

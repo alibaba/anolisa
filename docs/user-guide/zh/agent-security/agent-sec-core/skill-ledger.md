@@ -11,7 +11,7 @@ Skill Ledger 是 agent-sec-core 的安全子系统，为 AI Agent Skill 提供�
 | 概念 | 说明 |
 |------|------|
 | **Manifest** | JSON 记录（`.skill-meta/latest.json`），包含文件哈希、扫描结果和数字签名；由 `scan`、`certify` 或 `init` baseline 创建和更新 |
-| **版本链** | 只追加的账本——每个版本通过 `previousManifestSignature` 链接上一版本，形成防篡改历史 |
+| **版本链** | 只追加的账本——每个非根版本通过 `previousVersionId` 和 `previousManifestSignature` 指向已验真的父版本；恢复时可以建立新的签名链段 |
 | **状态** | 每个 Skill 的安全状态：`pass` ✅ · `none` 🆕 · `drifted` 🔄 · `warn` ⚠️ · `deny` 🚨 · `tampered` 🔴 |
 
 ### 1. 初始化签名密钥
@@ -48,12 +48,14 @@ agent-sec-cli skill-ledger check /path/to/your-skill
 
 | 状态 | 含义 |
 |------|------|
-| `none` 🆕 | 从未扫描——没有可验证的签名 manifest |
-| `pass` ✅ | 文件未变 + 签名有效 + 扫描通过 |
-| `drifted` 🔄 | Skill 文件已变更（fileHashes 不匹配） |
-| `warn` ⚠️ | 签名有效，但上次扫描存在低风险发现 |
-| `deny` 🚨 | 签名有效，但上次扫描存在高危发现 |
-| `tampered` 🔴 | manifest 签名校验失败——元数据可能被伪造 |
+| `none` 🆕 | `latest.json` 与任何版本 JSON/snapshot artifact 均不存在，或已验真且与当前文件匹配的 manifest 为 `scanStatus=none` |
+| `pass` ✅ | manifest 验真成功 + 文件未变 + 扫描通过 |
+| `drifted` 🔄 | manifest 验真成功，但 live Skill 与已签名 fileHashes 不同；这是尚未扫描的内容分歧，不是 scanner 已确认的风险结论 |
+| `warn` ⚠️ | manifest 验真成功，但上次扫描存在低风险发现 |
+| `deny` 🚨 | manifest 验真成功，但上次扫描存在高危发现 |
+| `tampered` 🔴 | Ledger metadata 的 schema、哈希、签名、已签名身份或 latest/版本 artifact 一致性校验失败，包括历史 artifact 仍存在但 `latest.json` 缺失、缺少签名或回放旧的已签名 latest |
+
+Skill Ledger 会先验证已有 manifest 的真实性，并将 `latest.json` 绑定到最新已验真的版本 artifact，再将其中的文件哈希与当前 Skill 比较。仅当 `latest.json` 和版本 JSON/snapshot artifact 均不存在时，缺少 latest 才表示 `none`；若历史 artifact 仍存在，则 Ledger 不完整，返回 `tampered`。因此，即使当前文件同时发生变化，缺少签名、签名无效或回放旧的已签名 latest 仍返回 `tampered`；只有已验真的当前 manifest 才可能返回 `drifted`。
 
 ### 3. 快速扫描 + 签名认证
 
@@ -136,10 +138,12 @@ agent-sec-cli skill-ledger certify /path/to/your-skill \
 
 `scan` 会运行内置快速扫描器并签名入账；`certify` 则只导入外部 findings。`certify` 会依次：
 
-1. 验证文件一致性（文件变更时自动创建新版本）
+1. 先验证已有 manifest 的真实性，再验证文件一致性（文件变更或 manifest 无效时自动创建新版本）
 2. 规范化 findings 并合并到 manifest 的 `scans[]` 数组
 3. 聚合 `scanStatus`（`pass` / `warn` / `deny`）
 4. 重新签名并写入 `.skill-meta/latest.json`
+
+已有 manifest 无效或缺少签名时，CLI 不会原地签名，也不会继承其中的扫描结果或用户决策。恢复操作会创建新版本，并且只链接身份、哈希、签名和 snapshot 均通过校验的最新历史版本。若不存在这样的父版本，新签名版本会将两个 previous 字段都置为 `null`，成为新的链段根。
 
 输出示例：
 
@@ -176,7 +180,7 @@ agent-sec-cli skill-ledger status --verbose
 
 ### 5. 审计完整版本链
 
-深度验证全部历史版本——校验哈希完整性、签名有效性和版本链链接：
+深度验证全部历史版本——校验 schema、哈希、签名、已签名身份和显式父版本链接。父链接必须指向编号更早且通过验真的版本，并携带该父版本的准确签名；两个 previous 字段均为 `null` 的已签名版本是合法链段根。无效历史版本仍会使整体 audit 失败。
 
 ```bash
 agent-sec-cli skill-ledger audit /path/to/your-skill
@@ -251,7 +255,7 @@ Skill Ledger 推荐与 SkillFS 联合使用：SkillFS 捕获 Skill 变更，通�
 1. SkillFS 捕获 Skill 目录创建、更新、删除或内容变更。
 2. SkillFS 通知 Skill Ledger daemon 的 `skill_ledger.skillfs_notify_change` 接口。
 3. daemon 根据签名 manifest、当前文件状态、用户决策和 activation policy 刷新 `.skill-meta/activation.json`，并尽力同步写入 xattr。
-4. 若当前风险版本不可直接激活，activation metadata 会指向上一个可信 `pass` / `warn` snapshot；若没有可信 fallback，则指向安全 pending review stub；用户 `block` 决策或 fail-safe 场景才写 `target: null`。
+4. 若当前版本不可直接激活，activation metadata 会指向上一个可信 `pass` / `warn` snapshot；若没有可信 fallback，则指向安全 pending review stub；用户 `block` 决策或 fail-safe 场景才写 `target: null`。
 
 **版本要求：SkillFS 必须 ≥ 0.4.0。**
 
@@ -345,11 +349,11 @@ enable_block = false
 
 **copilot-shell 配置方式**：默认 Cosh manifest 已注册 `skill-ledger` hook。默认 policy 为 `ask`；如需 observe-only、warning-only 或强拒绝，可设置 `SKILL_LEDGER_MODE=observe` / `warn` / `block`。`debug` 仍作为 `observe` 的别名。该环境变量应由可信宿主或部署环境设置，不应由 Skill、项目脚本或不可信 shell 启动逻辑设置；如需防止本地 shell profile 被篡改后降级策略，后续应迁移到可信宿主配置源。
 
-**Qoder CLI 配置方式**：安装 `qoder-plugin` 后，plugin 自动注册 matcher 为 `Skill` 的 `PreToolUse` hook。默认 policy 为 `ask`；可由可信启动环境设置 `SKILL_LEDGER_MODE=observe` / `warn` / `block`，并通过 `SKILL_LEDGER_TIMEOUT` 调整 CLI 超时（默认 5 秒）。`debug` 仍作为 `observe` 的别名。hook 覆盖 `~/.qoder/skills/` 和 `<cwd>/.qoder/skills/` 下的本地 Skill，用户级同名 Skill 优先；仅在两个目录表都可信解析且没有匹配时，才把调用视为内置、plugin 或 remote Skill，放行并记录 debug。hook 不自动执行 `init` 或 `scan`，未签名 Skill 会以 `none` 状态进入 policy；完成审查后需显式执行 `agent-sec-cli skill-ledger scan <skill_dir>`。
+**Qoder CLI 配置方式**：安装 `qoder-plugin` 后，plugin 自动注册 matcher 为 `Skill` 的 `PreToolUse` hook。默认 policy 为 `ask`；可由可信启动环境设置 `SKILL_LEDGER_MODE=observe` / `warn` / `block`，并通过 `SKILL_LEDGER_TIMEOUT` 调整 CLI 超时（默认 5 秒）。`debug` 仍作为 `observe` 的别名。hook 覆盖 `~/.qoder/skills/` 和 `<cwd>/.qoder/skills/` 下的本地 Skill，用户级同名 Skill 优先；仅在两个目录表都可信解析且没有匹配时，才把调用视为内置、plugin 或 remote Skill，放行并记录 debug。hook 不自动执行 `init` 或 `scan`。`latest.json` 与任何版本 JSON/snapshot artifact 均不存在的 Skill 以 `none` 状态进入 policy；历史 artifact 仍存在但 `latest.json` 缺失，或已有 latest manifest 缺少签名、签名无效时，则以 `tampered` 进入。完成审查后需显式执行 `agent-sec-cli skill-ledger scan <skill_dir>`。
 
 Skill Ledger 全局 `activationPolicy` 属于 SkillFS/daemon activation；这里的 hook `policy` 只控制宿主 hook/capability 的用户可见行为和日志等级。
 
-### 风险 Skill 用户审查与决策
+### 非 pass Skill 用户审查与决策
 
 当 hook 或 `show` 提示当前 skill 需要用户审查时，先查看统一暴露摘要：
 
@@ -367,7 +371,7 @@ agent-sec-cli skill-ledger show /path/to/skill
 | `userDecision` | 当前命中的用户决策；为 `null` 表示尚未决策 |
 | `message` | 需要提示用户的信息；为 `null` 时 hook 静默 |
 
-若需要完整查看不可见的风险版本，导出 latest snapshot、manifest 和 findings：
+若需要完整查看未暴露的待审查版本，导出 latest snapshot、manifest 和 findings：
 
 ```bash
 agent-sec-cli skill-ledger export /path/to/skill --version latest --output /tmp/skill-review
@@ -490,7 +494,7 @@ agent-sec-cli skill-ledger check /path/to/my-skill
 # → {"status": "drifted", "added": [...], "modified": [...]}
 ```
 
-更新 Skill 后状态变为 `drifted`。触发重新扫描恢复到 `pass`：
+更新 Skill 后状态变为 `drifted`。这只表示 live root 与已签名版本不同，不是 scanner 已确认的风险结果。触发重新扫描认证新内容，并获得当前扫描状态：
 
 ```
 扫描 /path/to/my-skill
@@ -502,7 +506,7 @@ agent-sec-cli skill-ledger check /path/to/my-skill
 agent-sec-cli skill-ledger audit /path/to/my-skill --verify-snapshots
 ```
 
-逐版本验证：哈希完整性 → 签名有效性 → 版本链链接 → 快照一致性。
+逐版本验证：schema → 哈希完整性 → 签名有效性 → 已签名身份 → 显式父版本链接 → 快照一致性。
 
 ---
 

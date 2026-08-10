@@ -28,7 +28,7 @@
 | Codex | 支持 | 不支持 | 支持，输出既有 `decision=block` | `observe` |
 | Cosh | 不支持 | 支持，且是固定行为 | 不支持 | 固定 `ask` |
 | Hermes | 支持 | 不支持 | 支持，输出既有 `action=block` | 由 `enable_block` 推导 |
-| OpenClaw | 支持 | 支持，输出既有 `requireApproval` | 普通 findings 不支持 | 由 `codeScanRequireApproval` 推导 |
+| OpenClaw | 支持 | 支持，输出既有 `requireApproval` | 支持，输出既有 `{ block: true, blockReason }` | 由 `codeScanRequireApproval` 推导 |
 
 `block` 是环境变量中的规范名称。Qoder 和 Qwen Code 在宿主协议中仍返回 `permissionDecision=deny`；该返回结构是原有交互，不是新增模式。
 
@@ -39,7 +39,7 @@
 - `debug` → `observe`
 - `deny` → `block`
 
-归一化后必须再次检查宿主能力子集。例如，OpenClaw 收到 `deny` 后先归一化为 `block`，但普通 findings 不支持 direct block，因此该环境变量最终不生效，并回到原生配置。
+归一化后必须再次检查宿主能力子集。例如，Cosh 收到 `deny` 后先归一化为 `block`，但 Cosh 不支持 direct block，因此该环境变量最终不生效，并回到固定 `ask` 行为。
 
 `warn` 不属于 Code Scanner 可配置 MODE。`warn`、非法值和宿主不支持的值都等价于没有设置 `CODE_SCANNER_MODE`。配置错配诊断不得进入 stdout、systemMessage 或其他 HookOutput；独立脚本写 stderr，Hermes/OpenClaw capability 写宿主 logger。
 
@@ -52,7 +52,7 @@
 | Codex | 支持 | `observe/block` | 支持，默认 10 秒 |
 | Cosh | 支持 | 仅 `ask` 生效 | 不支持，固定 10 秒 |
 | Hermes | 支持 | `observe/block` | 不支持，使用 capability `timeout` |
-| OpenClaw | 支持 | `observe/ask` | 不支持，固定 10 秒 |
+| OpenClaw | 支持 | `observe/ask/block` | 不支持，固定 10 秒 |
 
 ### 4.1 `CODE_SCANNER_HOOK_ENABLED`
 
@@ -75,7 +75,7 @@ Qoder、Qwen Code、Codex 和 Cosh 未设置时默认启用。Hermes 和 OpenCla
 | Codex | 合法 `observe/block` env > 默认 `observe` |
 | Cosh | 仅 `ask` 有效；其他值回到固定 `ask` |
 | Hermes | 合法 `observe/block` env > `enable_block` > 默认 `observe` |
-| OpenClaw | 合法 `observe/ask` env > `codeScanRequireApproval` > 默认 `observe` |
+| OpenClaw | 合法 `observe/ask/block` env > `codeScanRequireApproval` > 默认 `observe` |
 
 ### 4.3 `CODE_SCANNER_TIMEOUT`
 
@@ -148,7 +148,7 @@ OpenClaw 保留以下配置：
 - `codeScanRequireApproval=false`：observe。
 - `codeScanRequireApproval=true`：ask，返回 `requireApproval`。
 
-合法 `CODE_SCANNER_HOOK_ENABLED` 可覆盖 `enabled`，合法 `CODE_SCANNER_MODE=observe|ask` 可覆盖 `codeScanRequireApproval`。`block`、其别名 `deny`、`warn` 和非法值等价于未设置，并回到 OpenClaw 配置。普通 findings 不得返回 `{block: true}`。
+合法 `CODE_SCANNER_HOOK_ENABLED` 可覆盖 `enabled`，合法 `CODE_SCANNER_MODE=observe|ask|block` 可覆盖 `codeScanRequireApproval`。`ask` 返回 `requireApproval`，`block` 及其别名 `deny` 返回 OpenClaw 既有 `{ block: true, blockReason }`。`warn` 和非法值等价于未设置，并回到 OpenClaw 配置。
 
 ## 6. Scanner Verdict 到 Hook 行为
 
@@ -170,7 +170,7 @@ Hermes 和 OpenClaw 已有专属 self-protect finding：
 - Hermes：`shell-self-protect-hermes`
 - OpenClaw：`shell-self-protect-openclaw`
 
-命中时无视 MODE，继续使用现有强制 block 返回。OpenClaw 的 self-protect block 不表示普通 findings 支持 `block` MODE。设置 `CODE_SCANNER_HOOK_ENABLED=false` 后整个 hook 不执行，因此也不会运行 self-protect 检查。
+命中时无视 MODE，继续使用现有强制 block 返回。设置 `CODE_SCANNER_HOOK_ENABLED=false` 后整个 hook 不执行，因此也不会运行 self-protect 检查。
 
 Qoder、Qwen Code 和 Cosh 没有 Code Scanner 专属 self-protect 分支。Codex 的 self-protect 分支当前保持禁用，因为 CLI 尚无 Codex 专属规则，不能误匹配其他 Agent 的规则。
 

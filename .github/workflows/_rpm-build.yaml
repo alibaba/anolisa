@@ -1,4 +1,4 @@
-name: RPM Build (Reusable)
+name: Build / RPM (Reusable)
 
 on:
   workflow_call:

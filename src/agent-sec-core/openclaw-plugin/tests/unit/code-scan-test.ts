@@ -351,22 +351,39 @@ describe("scan-code", () => {
       assert.equal(result, undefined);
     });
 
-    it("unsupported block and deny modes use the original config fallback", async () => {
-      for (const mode of ["block", "deny"]) {
-        process.env.CODE_SCANNER_MODE = mode;
-        const { handler, logs } = registerAndGetHandler({ codeScanRequireApproval: true });
-        mockCli({
-          exitCode: 0,
-          stdout: '{"verdict":"deny","findings":[{"desc_zh":"危险"}]}',
-          stderr: "",
-        });
+    it("CODE_SCANNER_MODE=block overrides approval config and blocks warn findings", async () => {
+      process.env.CODE_SCANNER_MODE = "block";
+      const { handler, logs } = registerAndGetHandler({ codeScanRequireApproval: true });
+      mockCli({
+        exitCode: 0,
+        stdout: '{"verdict":"warn","findings":[{"desc_zh":"注意"}]}',
+        stderr: "",
+      });
 
-        const result = await handler(execEvent("risky-cmd"), {});
+      const result = await handler(execEvent("risky-cmd"), {});
 
-        assert.ok(result.requireApproval);
-        assert.equal(result.block, undefined);
-        assert.ok(logs.some((log) => log.includes("CODE_SCANNER_MODE") && log.includes(mode)));
-      }
+      assert.equal(result.block, true);
+      assert.equal(result.requireApproval, undefined);
+      assert.ok(result.blockReason.includes("[code-scanner] Detected 1 issue(s):"));
+      assert.ok(result.blockReason.includes("- 注意"));
+      assert.equal(logs.some((log) => log.includes("CODE_SCANNER_MODE")), false);
+    });
+
+    it("CODE_SCANNER_MODE=deny aliases block and blocks deny findings", async () => {
+      process.env.CODE_SCANNER_MODE = "deny";
+      const { handler, logs } = registerAndGetHandler({ codeScanRequireApproval: false });
+      mockCli({
+        exitCode: 0,
+        stdout: '{"verdict":"deny","findings":[{"desc_zh":"危险"}]}',
+        stderr: "",
+      });
+
+      const result = await handler(execEvent("risky-cmd"), {});
+
+      assert.equal(result.block, true);
+      assert.equal(result.requireApproval, undefined);
+      assert.ok(result.blockReason.includes("- 危险"));
+      assert.equal(logs.some((log) => log.includes("CODE_SCANNER_MODE")), false);
     });
 
     it("debug alias selects the existing observe interaction", async () => {

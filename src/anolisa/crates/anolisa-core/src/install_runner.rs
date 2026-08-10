@@ -1,7 +1,11 @@
 //! Install runner: copy a cached artifact into the ANOLISA-owned layout.
 //!
-//! This runner supports `tar_gz` artifacts. It extracts a gzipped tar archive,
-//! then copies each entry whose basename matches a manifest dest.
+//! This runner supports `tar_gz` artifacts. It decodes a gzipped tar archive
+//! once, streaming every entry the component contract selects into a private
+//! staging directory under `cache_dir`, then places each staged payload at its
+//! destination. Payload bytes are never retained in memory for the whole
+//! archive: peak memory tracks the fixed streaming buffer plus per-entry
+//! metadata, not the uncompressed artifact size.
 //!
 //! All destinations must resolve under one of the ANOLISA-owned roots
 //! (`bin_dir`, `etc_dir`, `state_dir`, `lib_dir`, `libexec_dir`, `datadir`,
@@ -17,10 +21,28 @@ use std::path::{Component, Path, PathBuf};
 
 use anolisa_platform::fs_layout::FsLayout;
 use flate2::read::GzDecoder;
+use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use tar::Archive;
+use tempfile::TempDir;
 
 use crate::manifest::FileKind;
+
+/// Fixed copy-buffer size for archive-to-staging and staging-to-destination
+/// streaming. The only payload memory the runner holds at any instant.
+const STREAM_BUF_SIZE: usize = 64 * 1024;
+
+/// Prefix for private per-preparation directories under [`FsLayout::cache_dir`].
+/// Staging stays out of the system temp dir, which is frequently a memory-backed
+/// tmpfs in containers, without adding a fixed single-owner directory beneath a
+/// cache that may be shared by several users.
+const STAGING_DIR_PREFIX: &str = "install-prepare-";
+
+/// Advisory lock held for the lifetime of one staging directory.
+const STAGING_LOCK_FILE: &str = ".lock";
+
+/// Undiscoverable lock name used until the new directory is safely locked.
+const STAGING_LOCK_PENDING_FILE: &str = ".lock.pending";
 
 /// Wire-form `artifact_type` strings accepted by the raw install runner.
 ///
@@ -57,6 +79,11 @@ pub struct ResolvedInstallFile {
     /// File role; [`FileKind::Symlink`] entries are created after the
     /// regular files instead of being extracted from the artifact.
     pub kind: FileKind,
+    /// Content-rendering request from the manifest `render` key. `None`
+    /// places the archive bytes verbatim. Rendering runs before the
+    /// installed sha256 is computed, so state records the bytes that
+    /// actually land on disk.
+    pub render: Option<RenderSpec>,
 }
 
 impl ResolvedInstallFile {
@@ -68,7 +95,39 @@ impl ResolvedInstallFile {
             dest,
             mode: None,
             kind: FileKind::Data,
+            render: None,
         }
+    }
+}
+
+/// Content-rendering request carried on a [`ResolvedInstallFile`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderSpec {
+    /// Versioned rendering mode resolved from the manifest `render` value.
+    pub mode: RenderMode,
+    /// Component name substituted for the `{component}` placeholder,
+    /// mirroring destination-path expansion.
+    pub component: String,
+}
+
+/// Supported file content-rendering modes.
+///
+/// Each variant corresponds to one versioned manifest `render` value; the
+/// install resolver rejects values with no variant here so an unsupported
+/// contract fails closed instead of installing unrendered placeholders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderMode {
+    /// [`RENDER_ANOLISA_PATHS_V1`](crate::manifest::RENDER_ANOLISA_PATHS_V1):
+    /// substitute layout placeholders (`{bindir}`, `{datadir}`, … plus
+    /// `{component}`) inside UTF-8 file content against the final layout.
+    AnolisaPathsV1,
+}
+
+impl RenderMode {
+    /// Map a manifest `render` string to a supported mode. Returns `None`
+    /// for values this CLI does not implement — callers must reject those.
+    pub fn parse(value: &str) -> Option<Self> {
+        (value == crate::manifest::RENDER_ANOLISA_PATHS_V1).then_some(Self::AnolisaPathsV1)
     }
 }
 
@@ -171,6 +230,38 @@ pub enum InstallError {
     /// parsed as a component manifest.
     #[error("embedded component manifest could not be parsed: {0}")]
     EmbeddedManifestParse(String),
+
+    /// A staged payload no longer matched the digest recorded during
+    /// preparation when it was streamed to its destination.
+    ///
+    /// Preparation verifies content once; placement re-hashes what it writes
+    /// so tampering with the staging area between the two phases cannot get
+    /// unverified bytes installed.
+    #[error(
+        "staged payload for '{path}' does not match preparation: expected sha256 {expected_sha256} ({expected_size} bytes), got {actual_sha256} ({actual_size} bytes)"
+    )]
+    StagedContentMismatch {
+        /// Destination whose staged payload failed re-verification.
+        path: PathBuf,
+        /// Digest recorded while the entry was spooled to staging.
+        expected_sha256: String,
+        /// Byte length recorded while the entry was spooled to staging.
+        expected_size: u64,
+        /// Digest of what was actually read back from staging.
+        actual_sha256: String,
+        /// Byte length actually read back from staging.
+        actual_size: u64,
+    },
+
+    /// Content rendering (`render = "anolisa-paths-v1"`) failed for an entry.
+    #[error("cannot render '{path}': {reason}")]
+    Render {
+        /// Destination of the entry that could not be rendered.
+        path: PathBuf,
+        /// What was wrong (non-UTF-8 content, unknown placeholder, or a
+        /// render request on a non-regular entry).
+        reason: String,
+    },
 }
 
 /// Extract and parse the published install contract embedded in a tar.gz
@@ -303,16 +394,19 @@ impl<'a> InstallRunner<'a> {
 
     /// Install a file set previously returned by [`Self::prepare_files`].
     ///
-    /// The prepared regular-file bytes are the exact bytes that were
-    /// inspected and verified; the cache is not reopened. Destination
-    /// safety and vacancy are rechecked immediately before placement so a
-    /// caller may safely carry this value across a lifecycle lock boundary.
+    /// Each destination is streamed from the payload preparation spooled to
+    /// staging and re-hashed on the way out; the cache is not reopened. A
+    /// staged payload whose digest no longer matches the one recorded during
+    /// preparation is rejected before its destination is renamed into place.
+    /// Destination safety and vacancy are rechecked immediately before
+    /// placement so a caller may safely carry this value across a lifecycle
+    /// lock boundary.
     ///
     /// # Errors
     ///
-    /// Fails if a destination is no longer safe or vacant, or if placement
-    /// fails. A later placement failure best-effort removes paths created by
-    /// this call.
+    /// Fails if a destination is no longer safe or vacant, a staged payload no
+    /// longer matches its recorded digest, or placement fails. A later
+    /// placement failure best-effort removes paths created by this call.
     pub fn install_prepared(
         &self,
         prepared: PreparedFileSet,
@@ -320,7 +414,7 @@ impl<'a> InstallRunner<'a> {
         let regular_files = prepared
             .regular
             .iter()
-            .map(|(file, _)| file.clone())
+            .map(|staged| staged.file.clone())
             .collect::<Vec<_>>();
         let links = prepared
             .links
@@ -330,9 +424,18 @@ impl<'a> InstallRunner<'a> {
         self.validate_install_targets(&regular_files, DestinationPolicy::Vacant)?;
         self.validate_symlink_entries(&links, DestinationPolicy::Vacant)?;
         let mut installed = Vec::with_capacity(prepared.regular.len() + prepared.links.len());
-        for (file, bytes) in prepared.regular {
-            match write_dest_atomic(&file.dest, &bytes, file.mode.as_deref()) {
-                Ok(file) => installed.push(file),
+        for staged in &prepared.regular {
+            match place_staged_file(staged) {
+                Ok(file) => {
+                    // Release the spooled copy as soon as it lands so staging
+                    // does not hold a second full copy of the payload while
+                    // the remaining entries are placed. Every staged path is
+                    // claimed by exactly one destination, so nothing else can
+                    // still need this file. A failure here cannot leak the
+                    // payload: dropping `prepared` removes whatever is left.
+                    let _ = fs::remove_file(&staged.staged_path);
+                    installed.push(file);
+                }
                 Err(err) => {
                     rollback_installed_files(&installed);
                     return Err(err);
@@ -348,6 +451,11 @@ impl<'a> InstallRunner<'a> {
                 }
             }
         }
+        // Staging is released by dropping `prepared` on the way out — the same
+        // path every early return above takes. Deliberately not
+        // `TempDir::close()`: that consumes the guard and disables `Drop`, so a
+        // removal failure would leave the payload behind with nothing left to
+        // retry it.
         Ok(InstallOutcome { files: installed })
     }
 
@@ -368,8 +476,9 @@ impl<'a> InstallRunner<'a> {
         Ok(prepared.preview())
     }
 
-    /// Read and validate an artifact once, retaining the exact bytes that a
-    /// later [`Self::install_prepared`] call will place.
+    /// Read and validate an artifact once, spooling the exact payloads that a
+    /// later [`Self::install_prepared`] call will place into a private staging
+    /// directory owned by the returned [`PreparedFileSet`].
     ///
     /// # Errors
     ///
@@ -447,11 +556,15 @@ impl<'a> InstallRunner<'a> {
             // treat it as the same defect as declaring no files at all.
             return Err(InstallError::NoDestinations);
         }
-        let regular = match artifact_type {
+        let (staging, regular) = match artifact_type {
             "tar_gz" => self.prepare_tar_gz(cached_artifact, &regular, destination_policy),
             other => Err(InstallError::UnsupportedArtifactType(other.to_string())),
         }?;
-        Ok(PreparedFileSet { regular, links })
+        Ok(PreparedFileSet {
+            staging,
+            regular,
+            links,
+        })
     }
 
     /// Up-front checks for symlink entries, run before any byte lands so a
@@ -464,6 +577,17 @@ impl<'a> InstallRunner<'a> {
     ) -> Result<(), InstallError> {
         let mut seen = BTreeSet::new();
         for link in links {
+            // A symlink has no content to render; a render request on one
+            // is a contract defect, not something to silently drop. The CLI
+            // rejects this earlier with contract context (raw install's
+            // render resolution); this re-check is defense-in-depth for
+            // callers constructing `ResolvedInstallFile` directly.
+            if link.render.is_some() {
+                return Err(InstallError::Render {
+                    path: link.dest.clone(),
+                    reason: "render applies to regular files, not symlinks".to_string(),
+                });
+            }
             let referent =
                 link.source
                     .as_deref()
@@ -485,64 +609,146 @@ impl<'a> InstallRunner<'a> {
         }
         Ok(())
     }
+    /// Spool the contract-selected archive entries to staging, then expand
+    /// them into one prepared destination each.
+    ///
+    /// The archive is decoded exactly once (gzip is sequential, so an index
+    /// would have to buffer payloads), and only entries an [`EntrySelector`]
+    /// accepts are written to disk.
     fn prepare_tar_gz(
         &self,
         cached_artifact: &Path,
         files: &[ResolvedInstallFile],
         destination_policy: DestinationPolicy,
-    ) -> Result<Vec<(ResolvedInstallFile, Vec<u8>)>, InstallError> {
-        let entries = read_tar_gz_entries(cached_artifact)?;
+    ) -> Result<(StagingDir, Vec<PreparedRegularFile>), InstallError> {
+        let selector = EntrySelector::build(files)?;
+        let mut staged = StagedArchive::spool(cached_artifact, self.staging_parent()?, &selector)?;
 
-        let mut expanded: Vec<(ResolvedInstallFile, Vec<u8>)> = Vec::new();
+        let mut expanded: Vec<PreparedRegularFile> = Vec::new();
         for file in files {
             if let Some(source) = file.source.as_deref()
                 && archive_source_is_dir(source)
             {
                 let prefix = normalize_archive_key(source);
                 let prefix = prefix.trim_end_matches('/');
-                let mut matched = false;
-                for (key, bytes) in &entries.full_paths {
-                    let Some(relative) = archive_relative_under(key, prefix) else {
-                        continue;
-                    };
-                    if relative.is_empty() {
-                        continue;
-                    }
-                    matched = true;
-                    expanded.push((
-                        ResolvedInstallFile {
-                            source: Some(key.clone()),
+                // Collect before claiming: `claim` needs `&mut staged`, and
+                // the sorted map iteration is what makes the expanded order
+                // of a directory source stable across runs.
+                let matches = staged.entries_under(prefix);
+                if matches.is_empty() {
+                    return Err(InstallError::MissingArchiveEntry {
+                        basename: format!("{prefix}/"),
+                    });
+                }
+                for (key, relative, index) in matches {
+                    let claim = staged.claim(index)?;
+                    expanded.push(PreparedRegularFile {
+                        file: ResolvedInstallFile {
+                            source: Some(key),
                             dest: file.dest.join(relative),
                             mode: file.mode.clone(),
                             kind: file.kind,
+                            render: None,
                         },
-                        bytes.clone(),
-                    ));
-                }
-                if !matched {
-                    return Err(InstallError::MissingArchiveEntry {
-                        basename: format!("{prefix}/"),
+                        staged_path: claim.path,
+                        sha256: claim.sha256,
+                        size: claim.size,
                     });
                 }
                 continue;
             }
 
             let key = archive_source_key(file)?;
-            let bytes =
-                entries
-                    .lookup
-                    .get(&key)
+            let index =
+                staged
+                    .index_for(&key)
                     .ok_or_else(|| InstallError::MissingArchiveEntry {
                         basename: key.clone(),
                     })?;
-            expanded.push((file.clone(), bytes.clone()));
+            // Rendering is the one case that needs the payload in memory: it
+            // rewrites the whole content as text. Only single-file sources may
+            // render (see `EntrySelector::build`), so a large directory
+            // payload never takes this branch.
+            let claim = match file.render.as_ref() {
+                None => staged.claim(index)?,
+                Some(spec) => {
+                    let bytes = staged.read_staged(index)?;
+                    let rendered = self.render_bytes(file, spec, &bytes)?;
+                    staged.stage_bytes(&rendered)?
+                }
+            };
+            expanded.push(PreparedRegularFile {
+                file: file.clone(),
+                staged_path: claim.path,
+                sha256: claim.sha256,
+                size: claim.size,
+            });
         }
 
         let expanded_files: Vec<ResolvedInstallFile> =
-            expanded.iter().map(|(file, _)| file.clone()).collect();
+            expanded.iter().map(|staged| staged.file.clone()).collect();
         self.validate_install_targets(&expanded_files, destination_policy)?;
 
-        Ok(expanded)
+        // Duplicate archive keys are last-write-wins, so a superseded payload
+        // can never be claimed — drop it now instead of carrying it until the
+        // staging directory is dropped.
+        staged.prune_unclaimed();
+        Ok((staged.into_staging(), expanded))
+    }
+
+    /// Ensure the cache directory used as the staging parent exists.
+    ///
+    /// `cache_dir` is the trust anchor supplied by [`FsLayout`] and shared with
+    /// the artifact cache (`cache_dir/downloads`). Each preparation creates its
+    /// own random `0700` child directly beneath it, so a group-shared cache does
+    /// not acquire a fixed directory owned by whichever user installs first.
+    fn staging_parent(&self) -> Result<&Path, InstallError> {
+        let cache_dir = &self.layout.cache_dir;
+        fs::create_dir_all(cache_dir).map_err(|source| InstallError::Io {
+            path: cache_dir.clone(),
+            source,
+        })?;
+        Ok(cache_dir)
+    }
+
+    /// Apply the entry's content-rendering request to the staged bytes.
+    ///
+    /// For [`RenderMode::AnolisaPathsV1`] the bytes must be UTF-8 text; layout
+    /// placeholders are substituted via the same expansion vocabulary used
+    /// for destination paths, so path and content semantics cannot drift.
+    fn render_bytes(
+        &self,
+        file: &ResolvedInstallFile,
+        spec: &RenderSpec,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, InstallError> {
+        match spec.mode {
+            RenderMode::AnolisaPathsV1 => {
+                let text = std::str::from_utf8(bytes).map_err(|_| InstallError::Render {
+                    path: file.dest.clone(),
+                    reason: "content is not valid UTF-8 — anolisa-paths-v1 renders text files only"
+                        .to_string(),
+                })?;
+                let rendered = crate::adapter::expand_layout_placeholders_str(
+                    text,
+                    self.layout,
+                    &[("component", spec.component.as_str())],
+                )
+                .map_err(|err| {
+                    let reason = match err {
+                        crate::adapter::AdapterError::UnknownPlaceholder {
+                            placeholder, ..
+                        } => format!("content references unknown placeholder '{{{placeholder}}}'"),
+                        other => other.to_string(),
+                    };
+                    InstallError::Render {
+                        path: file.dest.clone(),
+                        reason,
+                    }
+                })?;
+                Ok(rendered.into_bytes())
+            }
+        }
     }
 
     fn validate_dest(&self, dest: &Path) -> Result<(), InstallError> {
@@ -594,25 +800,59 @@ enum DestinationPolicy {
     MayExist,
 }
 
-/// Validated install destinations together with their verified regular-file
-/// bytes.
+/// One validated destination whose payload waits in the staging directory.
+#[derive(Debug)]
+struct PreparedRegularFile {
+    /// Destination mapping, with directory sources already expanded.
+    file: ResolvedInstallFile,
+    /// Staged payload, inside the owning [`PreparedFileSet::staging`] dir.
+    /// Claimed by exactly this destination, so placement may delete it.
+    staged_path: PathBuf,
+    /// Digest computed while the payload was streamed to staging; re-checked
+    /// during placement and recorded in `InstalledState`.
+    sha256: String,
+    /// Byte length streamed to staging, re-checked during placement.
+    size: u64,
+}
+
+/// Validated install destinations whose regular-file payloads are spooled to a
+/// private staging directory.
 ///
 /// Fields are private so every instance preserves the path, archive, and
-/// symlink invariants established by [`InstallRunner::prepare_files`].
+/// symlink invariants established by [`InstallRunner::prepare_files`]. The
+/// value may be held across a lifecycle lock, dependency provisioning, and
+/// pre-install hooks: dropping it removes every remaining staged payload, on
+/// both the success and the error path.
+#[derive(Debug)]
 pub struct PreparedFileSet {
-    regular: Vec<(ResolvedInstallFile, Vec<u8>)>,
+    /// Owns the staged payloads. Never read: cleanup is the `TempDir` `Drop`
+    /// impl, which is exactly why it must not be replaced by an explicit
+    /// `close()` — `close()` consumes the guard and disables `Drop`, so a
+    /// removal that fails would leak the whole payload instead of being
+    /// retried on scope exit.
+    #[expect(
+        dead_code,
+        reason = "RAII guard: held so Drop removes staged payloads on every exit path"
+    )]
+    staging: StagingDir,
+    regular: Vec<PreparedRegularFile>,
     links: Vec<PreparedSymlink>,
 }
 
 impl PreparedFileSet {
     /// Describe the files this set will install without touching disk.
+    ///
+    /// Reports the digests recorded while the payloads were streamed to
+    /// staging; the staged files are not re-read, so this stays cheap for
+    /// multi-gigabyte payloads. [`InstallRunner::install_prepared`] verifies
+    /// the same digests as it writes, so its `InstalledFile` entries match.
     pub fn preview(&self) -> InstallOutcome {
         let mut files = self
             .regular
             .iter()
-            .map(|(file, bytes)| InstalledFile {
-                path: file.dest.clone(),
-                sha256: to_lower_hex(&Sha256::digest(bytes)),
+            .map(|staged| InstalledFile {
+                path: staged.file.dest.clone(),
+                sha256: staged.sha256.clone(),
                 referent: None,
             })
             .collect::<Vec<_>>();
@@ -625,6 +865,7 @@ impl PreparedFileSet {
     }
 }
 
+#[derive(Debug)]
 struct PreparedSymlink {
     dest: PathBuf,
     referent: PathBuf,
@@ -637,6 +878,7 @@ impl PreparedSymlink {
             dest: self.dest.clone(),
             mode: None,
             kind: FileKind::Symlink,
+            render: None,
         }
     }
 }
@@ -654,49 +896,381 @@ fn ensure_destination_vacant(dest: &Path) -> Result<(), InstallError> {
     }
 }
 
-/// Tar entries keyed by their full archive path plus the legacy lookup map.
-struct TarGzEntries {
-    full_paths: BTreeMap<String, Vec<u8>>,
-    lookup: BTreeMap<String, Vec<u8>>,
+/// What the component contract asks the archive for.
+///
+/// Built before the archive is decoded so an entry no destination maps to is
+/// skipped without ever being written to staging.
+struct EntrySelector {
+    /// Exact keys: normalized full archive paths and legacy destination
+    /// basenames. Matched against an entry's full path *and* its basename,
+    /// mirroring the dual-keyed lookup this replaces.
+    keys: BTreeSet<String>,
+    /// Directory sources, trailing slash trimmed. An empty prefix (source
+    /// `"/"`) selects the whole archive, as before.
+    prefixes: Vec<String>,
 }
 
-/// Last-write-wins on duplicate archive keys. Entries are addressable both by
-/// full archive path (for manifest `source`) and basename (legacy behavior).
-fn read_tar_gz_entries(path: &Path) -> Result<TarGzEntries, InstallError> {
-    let file = File::open(path).map_err(|source| InstallError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let mut archive = Archive::new(GzDecoder::new(file));
-    let mut full_paths: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    let mut lookup: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    let entries = archive
-        .entries()
-        .map_err(|e| InstallError::Archive(format!("entries: {e}")))?;
-    for entry_res in entries {
-        let mut entry = entry_res.map_err(|e| InstallError::Archive(format!("entry: {e}")))?;
-        if !entry.header().entry_type().is_file() {
+impl EntrySelector {
+    fn build(files: &[ResolvedInstallFile]) -> Result<Self, InstallError> {
+        let mut keys = BTreeSet::new();
+        let mut prefixes = Vec::new();
+        for file in files {
+            match file.source.as_deref() {
+                Some(source) if archive_source_is_dir(source) => {
+                    // Rendering targets one regular file; a directory source
+                    // fans out to arbitrarily many entries and would silently
+                    // rewrite payloads the contract author never meant to
+                    // template. Fail closed. Mirrors the CLI-side early check
+                    // in raw install's render resolution; keep both in sync.
+                    if file.render.is_some() {
+                        return Err(InstallError::Render {
+                            path: file.dest.clone(),
+                            reason: "render applies to single regular files, not directory sources"
+                                .to_string(),
+                        });
+                    }
+                    let prefix = normalize_archive_key(source);
+                    prefixes.push(prefix.trim_end_matches('/').to_string());
+                }
+                _ => {
+                    keys.insert(archive_source_key(file)?);
+                }
+            }
+        }
+        Ok(Self { keys, prefixes })
+    }
+
+    fn selects(&self, path_key: &str, basename: &str) -> bool {
+        self.keys.contains(path_key)
+            || self.keys.contains(basename)
+            || self.prefixes.iter().any(|prefix| {
+                archive_relative_under(path_key, prefix).is_some_and(|rel| !rel.is_empty())
+            })
+    }
+}
+
+/// A staged payload reserved for one destination.
+struct StagedClaim {
+    path: PathBuf,
+    sha256: String,
+    size: u64,
+}
+
+/// One archive entry spooled to disk.
+struct StagedEntry {
+    path: PathBuf,
+    sha256: String,
+    size: u64,
+}
+
+/// Contract-selected archive entries spooled into a private staging directory,
+/// addressable by full archive path and by basename.
+///
+/// Replaces the previous in-memory entry index: the maps hold indices into
+/// `entries`, and the payloads live on disk, so memory scales with the entry
+/// count rather than with the uncompressed payload size.
+struct StagedArchive {
+    staging: StagingDir,
+    entries: Vec<StagedEntry>,
+    /// Full archive path -> entry index. Drives directory-source expansion;
+    /// sorted iteration gives that expansion a stable order.
+    full_paths: BTreeMap<String, usize>,
+    /// Basename *and* full archive path -> entry index. Duplicate keys are
+    /// last-write-wins in archive order, matching the previous behavior.
+    lookup: BTreeMap<String, usize>,
+    /// Whether an entry has been reserved for a destination. A second claim
+    /// gets its own hard link so each destination owns its staged file.
+    claimed: Vec<bool>,
+    /// Monotonic counter for unique staged file names.
+    next_id: u64,
+}
+
+impl StagedArchive {
+    /// Decode `artifact` once, streaming each selected entry into a fresh
+    /// private directory under `staging_parent`.
+    fn spool(
+        artifact: &Path,
+        staging_parent: &Path,
+        selector: &EntrySelector,
+    ) -> Result<Self, InstallError> {
+        let file = File::open(artifact).map_err(|source| InstallError::Io {
+            path: artifact.to_path_buf(),
+            source,
+        })?;
+        let staging = StagingDir::create(staging_parent)?;
+        let mut staged = Self {
+            staging,
+            entries: Vec::new(),
+            full_paths: BTreeMap::new(),
+            lookup: BTreeMap::new(),
+            claimed: Vec::new(),
+            next_id: 0,
+        };
+        let mut archive = Archive::new(GzDecoder::new(file));
+        let entries = archive
+            .entries()
+            .map_err(|e| InstallError::Archive(format!("entries: {e}")))?;
+        for entry_res in entries {
+            let mut entry = entry_res.map_err(|e| InstallError::Archive(format!("entry: {e}")))?;
+            if !entry.header().entry_type().is_file() {
+                continue;
+            }
+            let entry_path = entry
+                .path()
+                .map_err(|e| InstallError::Archive(format!("path: {e}")))?
+                .into_owned();
+            // Unsafe paths are rejected whether or not the contract selects
+            // them: an archive that tries to escape is not one to install from.
+            let Some(path_key) = archive_key_from_path(&entry_path)? else {
+                continue;
+            };
+            let basename = path_key.rsplit('/').next().unwrap_or(&path_key).to_string();
+            if !selector.selects(&path_key, &basename) {
+                continue;
+            }
+            let index = staged.spool_entry(&mut entry, &path_key)?;
+            // Basename first, then the full path — the same insertion order as
+            // the map this replaces, so which entry wins a basename/full-path
+            // collision does not change.
+            staged.lookup.insert(basename, index);
+            staged.lookup.insert(path_key.clone(), index);
+            staged.full_paths.insert(path_key, index);
+        }
+        Ok(staged)
+    }
+
+    /// Stream one entry to a staging file, hashing as it goes.
+    fn spool_entry(
+        &mut self,
+        source: &mut impl Read,
+        path_key: &str,
+    ) -> Result<usize, InstallError> {
+        let path = self.next_staged_path();
+        let mut out = create_exclusive_no_follow(&path)?;
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; STREAM_BUF_SIZE];
+        let mut size = 0u64;
+        loop {
+            let read = source
+                .read(&mut buf)
+                .map_err(|e| InstallError::Archive(format!("read entry '{path_key}': {e}")))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buf[..read]);
+            out.write_all(&buf[..read])
+                .map_err(|source| InstallError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+            size += read as u64;
+        }
+        out.flush().map_err(|source| InstallError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        self.entries.push(StagedEntry {
+            path,
+            sha256: to_lower_hex(&hasher.finalize()),
+            size,
+        });
+        self.claimed.push(false);
+        Ok(self.entries.len() - 1)
+    }
+
+    /// Spool already-in-memory bytes (a rendered file) as a new staged entry.
+    ///
+    /// The result is claimed immediately: rendered content belongs to exactly
+    /// the destination that requested it and is not addressable by archive key.
+    fn stage_bytes(&mut self, bytes: &[u8]) -> Result<StagedClaim, InstallError> {
+        let index = self.spool_entry(&mut &bytes[..], "<rendered>")?;
+        self.claim(index)
+    }
+
+    /// Entry index for an explicit archive `source` or legacy dest basename.
+    fn index_for(&self, key: &str) -> Option<usize> {
+        self.lookup.get(key).copied()
+    }
+
+    /// Entries under a directory source, as `(archive key, relative path,
+    /// entry index)` in sorted-key order.
+    fn entries_under(&self, prefix: &str) -> Vec<(String, String, usize)> {
+        self.full_paths
+            .iter()
+            .filter_map(|(key, &index)| {
+                let relative = archive_relative_under(key, prefix)?;
+                (!relative.is_empty()).then(|| (key.clone(), relative.to_string(), index))
+            })
+            .collect()
+    }
+
+    /// Reserve entry `index` for one destination.
+    ///
+    /// A repeat claim — two contract entries mapping the same archive entry to
+    /// different destinations — gets its own hard link to the same payload, so
+    /// placement can delete each staged file as soon as it is consumed without
+    /// pulling the payload out from under the other destination.
+    fn claim(&mut self, index: usize) -> Result<StagedClaim, InstallError> {
+        let entry = self.entries.get(index).ok_or_else(|| {
+            InstallError::Archive(format!("internal: staged entry {index} is missing"))
+        })?;
+        let (source, sha256, size) = (entry.path.clone(), entry.sha256.clone(), entry.size);
+        let already_claimed = self.claimed.get(index).copied().unwrap_or(false);
+        if !already_claimed {
+            self.claimed[index] = true;
+            return Ok(StagedClaim {
+                path: source,
+                sha256,
+                size,
+            });
+        }
+        let path = self.next_staged_path();
+        // Same directory, hence same filesystem: the link is O(1) and adds no
+        // disk. `link(2)` neither follows nor replaces an existing new path.
+        if fs::hard_link(&source, &path).is_err() {
+            // Filesystems without hard-link support: copy through the same
+            // exclusive no-follow open the rest of staging uses, rather than
+            // `fs::copy`, which follows and truncates its destination.
+            let mut reader = File::open(&source).map_err(|err| InstallError::Io {
+                path: source.clone(),
+                source: err,
+            })?;
+            let mut writer = create_exclusive_no_follow(&path)?;
+            std::io::copy(&mut reader, &mut writer).map_err(|err| InstallError::Io {
+                path: path.clone(),
+                source: err,
+            })?;
+        }
+        Ok(StagedClaim { path, sha256, size })
+    }
+
+    /// Read a staged payload back into memory. Only used for rendering, which
+    /// is restricted to single-file sources.
+    fn read_staged(&self, index: usize) -> Result<Vec<u8>, InstallError> {
+        let entry = self.entries.get(index).ok_or_else(|| {
+            InstallError::Archive(format!("internal: staged entry {index} is missing"))
+        })?;
+        fs::read(&entry.path).map_err(|source| InstallError::Io {
+            path: entry.path.clone(),
+            source,
+        })
+    }
+
+    /// Delete staged payloads no destination claimed — entries superseded by a
+    /// later duplicate archive key.
+    fn prune_unclaimed(&self) {
+        for (index, entry) in self.entries.iter().enumerate() {
+            if !self.claimed.get(index).copied().unwrap_or(false) {
+                let _ = fs::remove_file(&entry.path);
+            }
+        }
+    }
+
+    /// Hand the staging directory to the [`PreparedFileSet`] that owns the
+    /// claims, which keeps the payloads alive until placement finishes.
+    fn into_staging(self) -> StagingDir {
+        self.staging
+    }
+
+    fn next_staged_path(&mut self) -> PathBuf {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.staging.path().join(format!("{id:08}"))
+    }
+}
+
+/// Private staging directory whose advisory lock distinguishes active work
+/// from debris left by an interrupted process.
+#[derive(Debug)]
+struct StagingDir {
+    // Keep the directory before the lock so field drop order removes payloads
+    // while the lock is still held.
+    dir: TempDir,
+    #[expect(
+        dead_code,
+        reason = "RAII guard: the open file keeps this staging directory active"
+    )]
+    lock: File,
+}
+
+impl StagingDir {
+    fn create(parent: &Path) -> Result<Self, InstallError> {
+        reclaim_stale_staging_dirs(parent);
+
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(STAGING_DIR_PREFIX);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(fs::Permissions::from_mode(0o700));
+        }
+        let dir = builder
+            .tempdir_in(parent)
+            .map_err(|source| InstallError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        let pending_lock_path = dir.path().join(STAGING_LOCK_PENDING_FILE);
+        let lock =
+            open_staging_lock(&pending_lock_path, true).map_err(|source| InstallError::Io {
+                path: pending_lock_path.clone(),
+                source,
+            })?;
+        lock.lock_exclusive().map_err(|source| InstallError::Io {
+            path: pending_lock_path.clone(),
+            source,
+        })?;
+        let lock_path = dir.path().join(STAGING_LOCK_FILE);
+        fs::rename(&pending_lock_path, &lock_path).map_err(|source| InstallError::Io {
+            path: pending_lock_path,
+            source,
+        })?;
+        Ok(Self { dir, lock })
+    }
+
+    fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+/// Best-effort removal of staging left behind after a process dies.
+///
+/// A live [`StagingDir`] holds its lock until `TempDir` cleanup finishes. A
+/// killed process releases the kernel lock automatically, so the next prepare
+/// can acquire it and remove the orphan without an age heuristic that could
+/// delete a long-running concurrent installation.
+fn reclaim_stale_staging_dirs(parent: &Path) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(STAGING_DIR_PREFIX)
+            || !entry.file_type().is_ok_and(|kind| kind.is_dir())
+        {
             continue;
         }
-        let entry_path = entry
-            .path()
-            .map_err(|e| InstallError::Archive(format!("path: {e}")))?
-            .into_owned();
-        let Some(path_key) = archive_key_from_path(&entry_path)? else {
+        let lock_path = entry.path().join(STAGING_LOCK_FILE);
+        let Ok(lock) = open_staging_lock(&lock_path, false) else {
             continue;
         };
-        let basename = path_key.rsplit('/').next().map(str::to_string);
-        let mut buf = Vec::new();
-        entry
-            .read_to_end(&mut buf)
-            .map_err(|e| InstallError::Archive(format!("read entry '{path_key}': {e}")))?;
-        if let Some(basename) = basename {
-            lookup.insert(basename, buf.clone());
+        if lock.try_lock_exclusive().is_ok() {
+            let _ = fs::remove_dir_all(entry.path());
         }
-        lookup.insert(path_key.clone(), buf.clone());
-        full_paths.insert(path_key, buf);
     }
-    Ok(TarGzEntries { full_paths, lookup })
+}
+
+fn open_staging_lock(path: &Path, create_new: bool) -> std::io::Result<File> {
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true).create_new(create_new);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    opts.open(path)
 }
 
 fn archive_source_key(file: &ResolvedInstallFile) -> Result<String, InstallError> {
@@ -799,10 +1373,42 @@ fn rollback_installed_files(files: &[InstalledFile]) {
     }
 }
 
+/// Stream one staged payload to its destination.
+///
+/// Opens the staged file and hands it to [`write_dest_atomic`], which
+/// re-verifies the recorded digest before the rename.
+fn place_staged_file(staged: &PreparedRegularFile) -> Result<InstalledFile, InstallError> {
+    let mut source = File::open(&staged.staged_path).map_err(|source| InstallError::Io {
+        path: staged.staged_path.clone(),
+        source,
+    })?;
+    write_dest_atomic(
+        &staged.file.dest,
+        &mut source,
+        staged.file.mode.as_deref(),
+        StagedContent {
+            sha256: &staged.sha256,
+            size: staged.size,
+        },
+    )
+}
+
+/// Digest and length a staged payload must still have at placement time.
+struct StagedContent<'a> {
+    sha256: &'a str,
+    size: u64,
+}
+
+/// Stream `source` into `dest.tmp`, verify it against `expected`, then rename.
+///
+/// The content is hashed on the way out and compared with the digest recorded
+/// during preparation; a mismatch removes the temporary sibling and fails
+/// before anything is renamed over the destination.
 fn write_dest_atomic(
     dest: &Path,
-    bytes: &[u8],
+    source: &mut impl Read,
     mode: Option<&str>,
+    expected: StagedContent<'_>,
 ) -> Result<InstalledFile, InstallError> {
     #[cfg(unix)]
     let parsed_mode = parse_unix_mode(mode, dest)?;
@@ -814,8 +1420,18 @@ fn write_dest_atomic(
         })?;
     }
     let tmp = tmp_sibling(dest);
-    let sha = match stream_write_and_hash(&tmp, bytes) {
-        Ok(h) => h,
+    let sha = match stream_write_and_hash(&tmp, source) {
+        Ok((sha, size)) if sha == expected.sha256 && size == expected.size => sha,
+        Ok((sha, size)) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(InstallError::StagedContentMismatch {
+                path: dest.to_path_buf(),
+                expected_sha256: expected.sha256.to_string(),
+                expected_size: expected.size,
+                actual_sha256: sha,
+                actual_size: size,
+            });
+        }
         Err(err) => {
             let _ = fs::remove_file(&tmp);
             return Err(err);
@@ -868,16 +1484,18 @@ fn parse_unix_mode(mode: Option<&str>, dest: &Path) -> Result<u32, InstallError>
     Ok(parsed)
 }
 
-fn stream_write_and_hash(tmp: &Path, bytes: &[u8]) -> Result<String, InstallError> {
-    // Security-critical: open the tmp sibling with O_CREAT|O_EXCL so a
-    // pre-placed symlink (or any other existing entry) fails the open
-    // with EEXIST/ELOOP instead of letting us write through it to a
-    // path outside the ANOLISA-owned roots. On Unix we additionally pass
-    // O_NOFOLLOW as belt-and-suspenders: even on a kernel that resolves
-    // O_CREAT|O_EXCL race-y vs a concurrently-planted symlink, the final
-    // component cannot be followed. `File::create` (the old code) did
-    // NOT do either — it opened with O_TRUNC and followed symlinks,
-    // which is exactly the hole this hardens against.
+/// Create a file for writing, refusing to reuse or follow anything already at
+/// `path`.
+///
+/// Security-critical, and used for both staged payloads and destination tmp
+/// siblings: `O_CREAT|O_EXCL` makes a pre-placed symlink (or any other existing
+/// entry) fail the open with `EEXIST`/`ELOOP` instead of letting the write
+/// through to a path outside the ANOLISA-owned roots. On Unix `O_NOFOLLOW` is
+/// belt-and-suspenders — even on a kernel that resolves `O_CREAT|O_EXCL`
+/// race-y against a concurrently planted symlink, the final component cannot be
+/// followed. `File::create` does neither: it opens with `O_TRUNC` and follows
+/// symlinks, which is exactly the hole this closes.
+fn create_exclusive_no_follow(path: &Path) -> Result<File, InstallError> {
     let mut opts = OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -885,23 +1503,42 @@ fn stream_write_and_hash(tmp: &Path, bytes: &[u8]) -> Result<String, InstallErro
         use std::os::unix::fs::OpenOptionsExt;
         opts.custom_flags(nix::libc::O_NOFOLLOW);
     }
-    let mut out = opts.open(tmp).map_err(|source| InstallError::Io {
-        path: tmp.to_path_buf(),
+    opts.open(path).map_err(|source| InstallError::Io {
+        path: path.to_path_buf(),
         source,
-    })?;
+    })
+}
+
+/// Copy `source` into a freshly created `tmp`, returning its sha256 and length.
+fn stream_write_and_hash(
+    tmp: &Path,
+    source: &mut impl Read,
+) -> Result<(String, u64), InstallError> {
+    let mut out = create_exclusive_no_follow(tmp)?;
     let mut hasher = Sha256::new();
-    for chunk in bytes.chunks(8 * 1024) {
-        hasher.update(chunk);
-        out.write_all(chunk).map_err(|source| InstallError::Io {
+    let mut buf = vec![0u8; STREAM_BUF_SIZE];
+    let mut size = 0u64;
+    loop {
+        let read = source.read(&mut buf).map_err(|source| InstallError::Io {
             path: tmp.to_path_buf(),
             source,
         })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+        out.write_all(&buf[..read])
+            .map_err(|source| InstallError::Io {
+                path: tmp.to_path_buf(),
+                source,
+            })?;
+        size += read as u64;
     }
     out.flush().map_err(|source| InstallError::Io {
         path: tmp.to_path_buf(),
         source,
     })?;
-    Ok(to_lower_hex(&hasher.finalize()))
+    Ok((to_lower_hex(&hasher.finalize()), size))
 }
 
 fn tmp_sibling(dest: &Path) -> PathBuf {
@@ -957,6 +1594,92 @@ mod tests {
         }
         let enc = tar.into_inner().unwrap();
         enc.finish().unwrap()
+    }
+
+    /// Append an entry whose recorded name escapes the archive root.
+    ///
+    /// `Builder::append_data` refuses to write `..`, so the name goes straight
+    /// into the header — the only way to produce the hostile archive the
+    /// runner must reject.
+    fn build_tar_gz_with_unsafe_entry(safe: &[(&str, &[u8])], unsafe_name: &[u8]) -> Vec<u8> {
+        let buf: Vec<u8> = Vec::new();
+        let enc = GzEncoder::new(buf, Compression::default());
+        let mut tar = Builder::new(enc);
+        for (path, data) in safe {
+            let mut hdr = Header::new_gnu();
+            hdr.set_size(data.len() as u64);
+            hdr.set_mode(0o644);
+            hdr.set_cksum();
+            tar.append_data(&mut hdr, path, *data).unwrap();
+        }
+        let mut hdr = Header::new_gnu();
+        hdr.set_size(1);
+        hdr.set_mode(0o644);
+        hdr.as_old_mut().name[..unsafe_name.len()].copy_from_slice(unsafe_name);
+        hdr.set_cksum();
+        tar.append(&hdr, &b"x"[..]).unwrap();
+        tar.into_inner().unwrap().finish().unwrap()
+    }
+
+    /// Per-preparation staging directories currently on disk. Empty means every
+    /// `PreparedFileSet` has been dropped and cleaned up.
+    fn staging_dirs(layout: &FsLayout) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(&layout.cache_dir) else {
+            return Vec::new();
+        };
+        let mut dirs: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(STAGING_DIR_PREFIX)
+                    && entry.file_type().is_ok_and(|kind| kind.is_dir())
+            })
+            .map(|entry| entry.path())
+            .collect();
+        dirs.sort();
+        dirs
+    }
+
+    /// Payload files spooled under every staging directory, sorted by path.
+    fn staged_files(layout: &FsLayout) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        for dir in staging_dirs(layout) {
+            if let Ok(entries) = fs::read_dir(&dir) {
+                files.extend(
+                    entries
+                        .flatten()
+                        .filter(|entry| entry.file_name() != STAGING_LOCK_FILE)
+                        .map(|entry| entry.path()),
+                );
+            }
+        }
+        files.sort();
+        files
+    }
+
+    fn staged_bytes(layout: &FsLayout) -> u64 {
+        staged_files(layout)
+            .iter()
+            .map(|p| fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+            .sum()
+    }
+
+    /// Bytes the prepared set keeps in memory: record metadata plus the heap
+    /// behind its paths and digests. Must not scale with payload size.
+    fn retained_metadata_bytes(prepared: &PreparedFileSet) -> usize {
+        prepared
+            .regular
+            .iter()
+            .map(|staged| {
+                std::mem::size_of::<PreparedRegularFile>()
+                    + staged.staged_path.as_os_str().len()
+                    + staged.sha256.len()
+                    + staged.file.dest.as_os_str().len()
+                    + staged.file.source.as_deref().map_or(0, str::len)
+            })
+            .sum()
     }
 
     #[test]
@@ -1147,6 +1870,7 @@ mod tests {
                     dest: dest.clone(),
                     mode: None,
                     kind: FileKind::Data,
+                    render: None,
                 }],
             )
             .expect("install ok");
@@ -1183,6 +1907,7 @@ mod tests {
                     dest: dest_root.clone(),
                     mode: Some("0644".to_string()),
                     kind: FileKind::Data,
+                    render: None,
                 }],
             )
             .expect("install ok");
@@ -1228,6 +1953,7 @@ mod tests {
                     dest: dest.clone(),
                     mode: Some("0644".to_string()),
                     kind: FileKind::Data,
+                    render: None,
                 }],
             )
             .expect("install ok");
@@ -1255,6 +1981,7 @@ mod tests {
                     dest: dest.clone(),
                     mode: Some("not-octal".to_string()),
                     kind: FileKind::Data,
+                    render: None,
                 }],
             )
             .expect_err("must reject invalid mode");
@@ -1374,6 +2101,7 @@ mod tests {
                     dest: dest.clone(),
                     mode: None,
                     kind: FileKind::Data,
+                    render: None,
                 }],
             )
             .expect_err("must reject");
@@ -1405,6 +2133,7 @@ mod tests {
                     dest: dest.clone(),
                     mode: None,
                     kind: FileKind::Data,
+                    render: None,
                 }],
             )
             .expect_err("must reject");
@@ -1557,6 +2286,7 @@ mod tests {
             dest,
             mode: None,
             kind: FileKind::Symlink,
+            render: None,
         }
     }
 
@@ -1580,6 +2310,7 @@ mod tests {
                 dest: referent.clone(),
                 mode: Some("0755".into()),
                 kind: FileKind::Data,
+                render: None,
             },
             symlink_entry(&referent, link_dest.clone()),
         ];
@@ -1620,6 +2351,7 @@ mod tests {
                 dest: link_dest.clone(),
                 mode: None,
                 kind: FileKind::Symlink,
+                render: None,
             },
         ];
 
@@ -1741,5 +2473,855 @@ mod tests {
             .install_files("tar_gz", &cached, &files)
             .expect_err("must error");
         assert!(matches!(err, InstallError::NoDestinations));
+    }
+
+    // -- content rendering (`render = "anolisa-paths-v1"`) ------------------
+
+    fn render_entry(source: &str, dest: PathBuf) -> ResolvedInstallFile {
+        ResolvedInstallFile {
+            source: Some(source.to_string()),
+            dest,
+            mode: Some("0644".to_string()),
+            kind: FileKind::Data,
+            render: Some(RenderSpec {
+                mode: RenderMode::AnolisaPathsV1,
+                component: "sec-core".to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn render_substitutes_placeholders_and_hashes_rendered_bytes() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let template = "[Service]\nExecStart=\"{bindir}/agent-sec-daemon\" serve\nReadWritePaths=\"{datadir}\"\n";
+        let gz = build_tar_gz(&[("share/agent-sec-core.service.in", template.as_bytes())]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
+
+        let dest = layout.datadir.join("agent-sec-core.service");
+        let outcome = runner
+            .install_files(
+                "tar_gz",
+                &cached,
+                &[render_entry(
+                    "share/agent-sec-core.service.in",
+                    dest.clone(),
+                )],
+            )
+            .expect("install ok");
+
+        let expected = template
+            .replace("{bindir}", &layout.bin_dir.to_string_lossy())
+            .replace("{datadir}", &layout.datadir.to_string_lossy());
+        let installed = fs::read_to_string(&dest).unwrap();
+        assert_eq!(installed, expected, "placeholders must be substituted");
+        assert!(
+            !installed.contains('{'),
+            "no literal placeholder may survive rendering"
+        );
+        // State records the sha256 of the *rendered* bytes, so integrity
+        // verification over the installed file passes.
+        assert_eq!(outcome.files[0].sha256, sha256_of(expected.as_bytes()));
+    }
+
+    #[test]
+    fn render_expands_component_variable() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let gz = build_tar_gz(&[("conf.in", b"root={datadir}/adapters/{component}\n")]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
+
+        let dest = layout.etc_dir.join("conf");
+        runner
+            .install_files("tar_gz", &cached, &[render_entry("conf.in", dest.clone())])
+            .expect("install ok");
+        assert_eq!(
+            fs::read_to_string(&dest).unwrap(),
+            format!("root={}/adapters/sec-core\n", layout.datadir.display())
+        );
+    }
+
+    #[test]
+    fn render_unknown_placeholder_rejected() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let gz = build_tar_gz(&[("unit.in", b"ExecStart={no_such_dir}/daemon\n")]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
+
+        let dest = layout.datadir.join("unit");
+        let err = runner
+            .install_files("tar_gz", &cached, &[render_entry("unit.in", dest.clone())])
+            .expect_err("must reject unknown placeholder");
+        match err {
+            InstallError::Render { path, reason } => {
+                assert_eq!(path, dest);
+                assert!(
+                    reason.contains("no_such_dir"),
+                    "reason must name the placeholder: {reason}"
+                );
+            }
+            other => panic!("expected Render, got {other:?}"),
+        }
+        assert!(!dest.exists(), "nothing may land on a failed render");
+    }
+
+    #[test]
+    fn render_non_utf8_content_rejected() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let gz = build_tar_gz(&[("blob.in", &[0xff, 0xfe, 0x00, 0x7b][..])]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
+
+        let dest = layout.datadir.join("blob");
+        let err = runner
+            .install_files("tar_gz", &cached, &[render_entry("blob.in", dest.clone())])
+            .expect_err("must reject non-UTF-8 content");
+        match err {
+            InstallError::Render { path, reason } => {
+                assert_eq!(path, dest);
+                assert!(reason.contains("UTF-8"), "reason must say UTF-8: {reason}");
+            }
+            other => panic!("expected Render, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_on_directory_source_rejected() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let gz = build_tar_gz(&[("tree/file", b"x")]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
+
+        let dest = layout.datadir.join("tree");
+        let err = runner
+            .install_files("tar_gz", &cached, &[render_entry("tree/", dest.clone())])
+            .expect_err("must reject render on a directory source");
+        match err {
+            InstallError::Render { path, .. } => assert_eq!(path, dest),
+            other => panic!("expected Render, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_on_symlink_rejected() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let gz = build_tar_gz(&[("bin/foo", b"x")]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
+
+        let referent = layout.bin_dir.join("foo");
+        let link_dest = layout.bin_dir.join("foo-link");
+        let mut link = symlink_entry(&referent, link_dest.clone());
+        link.render = Some(RenderSpec {
+            mode: RenderMode::AnolisaPathsV1,
+            component: "sec-core".to_string(),
+        });
+        let files = vec![
+            ResolvedInstallFile {
+                source: Some("bin/foo".to_string()),
+                dest: referent,
+                mode: None,
+                kind: FileKind::Data,
+                render: None,
+            },
+            link,
+        ];
+        let err = runner
+            .install_files("tar_gz", &cached, &files)
+            .expect_err("must reject render on a symlink");
+        match err {
+            InstallError::Render { path, .. } => assert_eq!(path, link_dest),
+            other => panic!("expected Render, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_mode_parse_accepts_only_v1() {
+        assert_eq!(
+            RenderMode::parse("anolisa-paths-v1"),
+            Some(RenderMode::AnolisaPathsV1)
+        );
+        assert_eq!(RenderMode::parse("anolisa-paths-v2"), None);
+        assert_eq!(RenderMode::parse(""), None);
+    }
+
+    // -- disk staging (no whole-archive payload in memory) -------------------
+
+    #[test]
+    fn prepared_set_spools_payload_to_staging_under_cache_dir() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let payload = vec![0xa5u8; 3 * 1024 * 1024];
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("bin/tool", &payload)]),
+        );
+        let dest = layout.bin_dir.join("tool");
+        let files = [ResolvedInstallFile::dest_only(dest.clone())];
+
+        let prepared = runner
+            .prepare_files("tar_gz", &cached, &files)
+            .expect("prepare files");
+
+        // The payload lives in a private per-preparation directory directly
+        // under cache_dir, not in the prepared record.
+        let staged = &prepared.regular[0];
+        assert!(
+            staged.staged_path.starts_with(&layout.cache_dir),
+            "staging must live under cache_dir, got {}",
+            staged.staged_path.display()
+        );
+        assert_eq!(staging_dirs(&layout).len(), 1);
+        assert_eq!(staged.size, payload.len() as u64);
+        assert_eq!(staged.sha256, sha256_of(&payload));
+        assert_eq!(
+            fs::metadata(&staged.staged_path).unwrap().len(),
+            payload.len() as u64,
+            "whole entry must be spooled to disk"
+        );
+        assert_eq!(staged_bytes(&layout), payload.len() as u64);
+        assert!(
+            retained_metadata_bytes(&prepared) < 1024,
+            "prepared record must hold metadata only, not {} bytes",
+            retained_metadata_bytes(&prepared)
+        );
+
+        runner.install_prepared(prepared).expect("install prepared");
+        assert_eq!(fs::read(&dest).unwrap(), payload);
+        assert!(
+            staging_dirs(&layout).is_empty(),
+            "staging must be cleaned up after a successful install"
+        );
+    }
+
+    #[test]
+    fn only_contract_selected_entries_are_staged() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let wanted: &[u8] = b"wanted-payload";
+        let gz = build_tar_gz(&[
+            ("bin/wanted", wanted),
+            ("bin/unwanted", &[7u8; 4096][..]),
+            ("share/also-unwanted", &[9u8; 4096][..]),
+        ]);
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
+        let files = [ResolvedInstallFile::dest_only(
+            layout.bin_dir.join("wanted"),
+        )];
+
+        let prepared = runner
+            .prepare_files("tar_gz", &cached, &files)
+            .expect("prepare files");
+
+        assert_eq!(
+            staged_files(&layout).len(),
+            1,
+            "entries no destination maps to must never be spooled"
+        );
+        assert_eq!(staged_bytes(&layout), wanted.len() as u64);
+        drop(prepared);
+    }
+
+    #[test]
+    fn prepared_directory_source_installs_original_after_cache_is_replaced() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let plugin: &[u8] = br#"{"name":"original"}"#;
+        let script: &[u8] = b"console.log('original');";
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("tree/plugin.json", plugin), ("tree/dist/index.js", script)]),
+        );
+        let dest_root = layout.datadir.join("adapters/openclaw");
+        let files = [ResolvedInstallFile {
+            source: Some("tree/".to_string()),
+            dest: dest_root.clone(),
+            mode: Some("0644".to_string()),
+            kind: FileKind::Data,
+            render: None,
+        }];
+
+        let prepared = runner
+            .prepare_files("tar_gz", &cached, &files)
+            .expect("prepare files");
+        let preview = prepared.preview();
+
+        // Swap the cache for a different archive, then delete it outright: the
+        // staged payloads are the only source placement may use.
+        fs::write(
+            &cached,
+            build_tar_gz(&[
+                ("tree/plugin.json", br#"{"name":"tampered"}"#),
+                ("tree/dist/index.js", b"console.log('tampered');"),
+            ]),
+        )
+        .unwrap();
+        fs::remove_file(&cached).unwrap();
+
+        let installed = runner.install_prepared(prepared).expect("install prepared");
+
+        assert_eq!(installed.files, preview.files, "preview must match install");
+        assert_eq!(fs::read(dest_root.join("plugin.json")).unwrap(), plugin);
+        assert_eq!(fs::read(dest_root.join("dist/index.js")).unwrap(), script);
+        assert!(staging_dirs(&layout).is_empty(), "staging must be cleaned");
+    }
+
+    #[test]
+    fn preview_digests_match_installed_digests_across_entry_kinds() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let template = "root={datadir}/adapters/{component}\n";
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[
+                ("tree/a.bin", b"tree-a"),
+                ("tree/nested/b.bin", b"tree-b"),
+                ("conf.in", template.as_bytes()),
+                ("libexec/anolisa/tokenless/rtk", b"rtk-bytes"),
+            ]),
+        );
+        let referent = layout.libexec_dir.join("tokenless").join("rtk");
+        let files = vec![
+            ResolvedInstallFile {
+                source: Some("tree/".to_string()),
+                dest: layout.datadir.join("tree"),
+                mode: Some("0644".to_string()),
+                kind: FileKind::Data,
+                render: None,
+            },
+            render_entry("conf.in", layout.etc_dir.join("conf")),
+            ResolvedInstallFile {
+                source: Some("libexec/anolisa/tokenless/rtk".to_string()),
+                dest: referent.clone(),
+                mode: Some("0755".to_string()),
+                kind: FileKind::Data,
+                render: None,
+            },
+            symlink_entry(&referent, layout.bin_dir.join("rtk")),
+        ];
+
+        let prepared = runner
+            .prepare_files("tar_gz", &cached, &files)
+            .expect("prepare files");
+        let preview = prepared.preview();
+        let installed = runner.install_prepared(prepared).expect("install prepared");
+
+        assert_eq!(installed.files, preview.files);
+        // Rendered content is hashed as it will land, not as it shipped.
+        let rendered = format!("root={}/adapters/sec-core\n", layout.datadir.display());
+        let conf = installed
+            .files
+            .iter()
+            .find(|f| f.path == layout.etc_dir.join("conf"))
+            .expect("rendered file recorded");
+        assert_eq!(conf.sha256, sha256_of(rendered.as_bytes()));
+        assert_eq!(fs::read_to_string(&conf.path).unwrap(), rendered);
+    }
+
+    #[test]
+    fn missing_entry_cleans_staging_and_leaves_destinations_untouched() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("bin/present", b"present-bytes")]),
+        );
+        let present = layout.bin_dir.join("present");
+        let absent = layout.bin_dir.join("absent");
+
+        let err = runner
+            .prepare_files(
+                "tar_gz",
+                &cached,
+                &[
+                    ResolvedInstallFile::dest_only(present.clone()),
+                    ResolvedInstallFile::dest_only(absent.clone()),
+                ],
+            )
+            .expect_err("must reject a missing archive entry");
+        match err {
+            InstallError::MissingArchiveEntry { basename } => assert_eq!(basename, "absent"),
+            other => panic!("expected MissingArchiveEntry, got {other:?}"),
+        }
+        assert!(
+            staging_dirs(&layout).is_empty(),
+            "a failed preparation must leave no staged payloads"
+        );
+        assert!(!present.exists(), "no destination may be created");
+        assert!(!absent.exists());
+    }
+
+    #[test]
+    fn unsafe_archive_path_cleans_staging_and_leaves_destinations_untouched() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        // The selected entry comes first, so a payload is already spooled when
+        // the hostile entry aborts the pass.
+        let gz = build_tar_gz_with_unsafe_entry(&[("bin/tool", b"tool-bytes")], b"../escape.txt");
+        let cached = write_cached(cache.path(), "payload.tar.gz", &gz);
+        let dest = layout.bin_dir.join("tool");
+
+        let err = runner
+            .prepare_files(
+                "tar_gz",
+                &cached,
+                &[ResolvedInstallFile::dest_only(dest.clone())],
+            )
+            .expect_err("must reject an escaping archive entry");
+        match err {
+            InstallError::Archive(msg) => assert!(
+                msg.contains("unsafe archive entry path"),
+                "unexpected message: {msg}"
+            ),
+            other => panic!("expected Archive, got {other:?}"),
+        }
+        assert!(
+            staging_dirs(&layout).is_empty(),
+            "staged payloads must be dropped when the archive is rejected"
+        );
+        assert!(!dest.exists(), "no destination may be created");
+        assert!(!home.path().join("escape.txt").exists());
+    }
+
+    #[test]
+    fn duplicate_destination_cleans_staging_and_leaves_destination_untouched() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("bin/tool", b"tool-bytes"), ("share/tool", b"other-bytes")]),
+        );
+        let dest = layout.bin_dir.join("tool");
+        let duplicate = [
+            ResolvedInstallFile {
+                source: Some("bin/tool".to_string()),
+                dest: dest.clone(),
+                mode: None,
+                kind: FileKind::Data,
+                render: None,
+            },
+            ResolvedInstallFile {
+                source: Some("share/tool".to_string()),
+                dest: dest.clone(),
+                mode: None,
+                kind: FileKind::Data,
+                render: None,
+            },
+        ];
+
+        let err = runner
+            .prepare_files("tar_gz", &cached, &duplicate)
+            .expect_err("must reject a duplicate destination");
+        match err {
+            InstallError::DuplicateDestination { path } => assert_eq!(path, dest),
+            other => panic!("expected DuplicateDestination, got {other:?}"),
+        }
+        assert!(!dest.exists(), "destination must not be touched");
+        assert!(staging_dirs(&layout).is_empty(), "staging must be cleaned");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn placement_failure_rolls_back_and_cleans_staging_and_tmp() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[
+                ("bin/first", b"first-bytes"),
+                ("bin/second", b"second-bytes"),
+            ]),
+        );
+        let first = layout.bin_dir.join("first");
+        let second = layout.bin_dir.join("second");
+        let files = [
+            ResolvedInstallFile::dest_only(first.clone()),
+            ResolvedInstallFile::dest_only(second.clone()),
+        ];
+
+        let prepared = runner
+            .prepare_files("tar_gz", &cached, &files)
+            .expect("prepare files");
+        assert_eq!(staged_files(&layout).len(), 2);
+
+        // Plant a symlinked tmp sibling so the *second* placement fails after
+        // the first already landed.
+        fs::create_dir_all(&layout.bin_dir).unwrap();
+        let victim = outside.path().join("victim");
+        fs::write(&victim, b"untouched").unwrap();
+        std::os::unix::fs::symlink(&victim, tmp_sibling(&second)).unwrap();
+
+        let err = runner
+            .install_prepared(prepared)
+            .expect_err("must refuse to write through a symlinked tmp sibling");
+        assert!(matches!(err, InstallError::Io { .. }), "got {err:?}");
+
+        assert_eq!(fs::read(&victim).unwrap(), b"untouched");
+        assert!(!first.exists(), "earlier placement must roll back");
+        assert!(!second.exists());
+        assert!(
+            !tmp_sibling(&first).exists(),
+            "tmp siblings must be removed"
+        );
+        assert!(!tmp_sibling(&second).exists());
+        assert!(
+            staging_dirs(&layout).is_empty(),
+            "staging must be cleaned on the failure path"
+        );
+    }
+
+    #[test]
+    fn duplicate_archive_basename_keeps_last_write_wins() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let last: &[u8] = b"second-wins";
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("a/dup", b"first-loses"), ("b/dup", last)]),
+        );
+        let dest = layout.bin_dir.join("dup");
+        let files = [ResolvedInstallFile::dest_only(dest.clone())];
+
+        let prepared = runner
+            .prepare_files("tar_gz", &cached, &files)
+            .expect("prepare files");
+        assert_eq!(prepared.regular[0].sha256, sha256_of(last));
+        assert_eq!(
+            staged_files(&layout).len(),
+            1,
+            "the superseded payload must not stay spooled"
+        );
+
+        runner.install_prepared(prepared).expect("install prepared");
+        assert_eq!(fs::read(&dest).unwrap(), last);
+    }
+
+    #[test]
+    fn one_archive_entry_may_feed_several_destinations() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let payload: &[u8] = b"shared-bytes";
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("bin/tool", payload)]),
+        );
+        let bin_dest = layout.bin_dir.join("tool");
+        let libexec_dest = layout.libexec_dir.join("tool");
+        let entry = |dest: PathBuf| ResolvedInstallFile {
+            source: Some("bin/tool".to_string()),
+            dest,
+            mode: None,
+            kind: FileKind::Data,
+            render: None,
+        };
+
+        let outcome = runner
+            .install_files(
+                "tar_gz",
+                &cached,
+                &[entry(bin_dest.clone()), entry(libexec_dest.clone())],
+            )
+            .expect("install both destinations");
+
+        assert_eq!(outcome.files.len(), 2);
+        assert_eq!(fs::read(&bin_dest).unwrap(), payload);
+        assert_eq!(fs::read(&libexec_dest).unwrap(), payload);
+        assert!(staging_dirs(&layout).is_empty(), "staging must be cleaned");
+    }
+
+    #[test]
+    fn large_payload_preparation_retains_metadata_only() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        // 8 x 2 MiB: large enough that a retained copy of any single entry —
+        // let alone the whole payload — would dwarf the metadata budget below.
+        const ENTRIES: usize = 8;
+        const ENTRY_LEN: usize = 2 * 1024 * 1024;
+        let payloads: Vec<Vec<u8>> = (0..ENTRIES).map(|i| vec![i as u8 + 1; ENTRY_LEN]).collect();
+        let names: Vec<String> = (0..ENTRIES).map(|i| format!("tree/part-{i}.bin")).collect();
+        let entries: Vec<(&str, &[u8])> = names
+            .iter()
+            .zip(&payloads)
+            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .collect();
+        let cached = write_cached(cache.path(), "payload.tar.gz", &build_tar_gz(&entries));
+
+        let dest_root = layout.datadir.join("tree");
+        let prepared = runner
+            .prepare_files(
+                "tar_gz",
+                &cached,
+                &[ResolvedInstallFile {
+                    source: Some("tree/".to_string()),
+                    dest: dest_root.clone(),
+                    mode: Some("0644".to_string()),
+                    kind: FileKind::Data,
+                    render: None,
+                }],
+            )
+            .expect("prepare files");
+
+        let total = (ENTRIES * ENTRY_LEN) as u64;
+        assert_eq!(prepared.regular.len(), ENTRIES);
+        assert_eq!(
+            staged_bytes(&layout),
+            total,
+            "the whole selected payload must be spooled to disk"
+        );
+        // The retained footprint is a function of entry count and path
+        // lengths, never of payload size.
+        let retained = retained_metadata_bytes(&prepared);
+        assert!(
+            retained < 4096,
+            "prepared set retained {retained} bytes for a {total}-byte payload"
+        );
+        // Directory expansion stays in sorted archive-key order.
+        let sources: Vec<&str> = prepared
+            .regular
+            .iter()
+            .filter_map(|staged| staged.file.source.as_deref())
+            .collect();
+        let mut sorted = sources.clone();
+        sorted.sort_unstable();
+        assert_eq!(sources, sorted);
+
+        // Placement reads staging, not the cache.
+        fs::remove_file(&cached).unwrap();
+        let installed = runner.install_prepared(prepared).expect("install prepared");
+        assert_eq!(installed.files.len(), ENTRIES);
+        for (name, payload) in names.iter().zip(&payloads) {
+            let relative = name.strip_prefix("tree/").unwrap();
+            assert_eq!(
+                fs::metadata(dest_root.join(relative)).unwrap().len(),
+                payload.len() as u64
+            );
+        }
+        assert!(
+            staging_dirs(&layout).is_empty(),
+            "staging must be cleaned after placement"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preparations_use_independent_private_dirs_in_shared_cache() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        fs::create_dir_all(&layout.cache_dir).unwrap();
+        fs::set_permissions(&layout.cache_dir, fs::Permissions::from_mode(0o777)).unwrap();
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("bin/tool", b"tool-bytes")]),
+        );
+        let entry = |dest: PathBuf| ResolvedInstallFile {
+            source: Some("bin/tool".to_string()),
+            dest,
+            mode: None,
+            kind: FileKind::Data,
+            render: None,
+        };
+
+        let first = runner
+            .prepare_files("tar_gz", &cached, &[entry(layout.bin_dir.join("first"))])
+            .expect("first preparation");
+        let second = runner
+            .prepare_files("tar_gz", &cached, &[entry(layout.bin_dir.join("second"))])
+            .expect("second preparation");
+
+        let dirs = staging_dirs(&layout);
+        assert_eq!(dirs.len(), 2, "each preparation needs its own directory");
+        assert_ne!(dirs[0], dirs[1]);
+        for dir in &dirs {
+            assert_eq!(
+                fs::metadata(dir).unwrap().mode() & 0o777,
+                0o700,
+                "per-preparation staging must stay private"
+            );
+            assert_eq!(dir.parent(), Some(layout.cache_dir.as_path()));
+        }
+
+        drop(first);
+        assert_eq!(staging_dirs(&layout).len(), 1);
+        drop(second);
+        assert!(staging_dirs(&layout).is_empty());
+    }
+
+    #[test]
+    fn next_preparation_reclaims_interrupted_staging() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        fs::create_dir_all(&layout.cache_dir).unwrap();
+        let orphan = layout
+            .cache_dir
+            .join(format!("{STAGING_DIR_PREFIX}interrupted"));
+        fs::create_dir(&orphan).unwrap();
+        fs::write(orphan.join("00000000"), b"orphaned payload").unwrap();
+        let orphan_lock = open_staging_lock(&orphan.join(STAGING_LOCK_FILE), true).unwrap();
+        orphan_lock.lock_exclusive().unwrap();
+        drop(orphan_lock); // Simulate the kernel releasing locks on process exit.
+
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("bin/tool", b"tool-bytes")]),
+        );
+        let prepared = runner
+            .prepare_files(
+                "tar_gz",
+                &cached,
+                &[ResolvedInstallFile {
+                    source: Some("bin/tool".to_string()),
+                    dest: layout.bin_dir.join("tool"),
+                    mode: None,
+                    kind: FileKind::Data,
+                    render: None,
+                }],
+            )
+            .expect("prepare after interrupted install");
+
+        assert!(!orphan.exists(), "unlocked staging must be reclaimed");
+        assert_eq!(staging_dirs(&layout).len(), 1);
+        drop(prepared);
+        assert!(staging_dirs(&layout).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_writes_refuse_to_follow_a_planted_symlink() {
+        // Staged payloads and destination tmp siblings share one hardened open
+        // path; a planted entry must fail it rather than be written through.
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        fs::write(&victim, b"untouched").unwrap();
+
+        let planted = dir.path().join("00000000");
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+
+        let err = create_exclusive_no_follow(&planted).expect_err("must refuse a planted symlink");
+        match err {
+            InstallError::Io { path, .. } => assert_eq!(path, planted),
+            other => panic!("expected Io, got {other:?}"),
+        }
+        assert_eq!(fs::read(&victim).unwrap(), b"untouched");
+
+        // The same helper still creates a fresh file normally.
+        let fresh = dir.path().join("00000001");
+        create_exclusive_no_follow(&fresh).expect("fresh staged file");
+        assert!(fresh.exists());
+    }
+
+    #[test]
+    fn staged_payload_tampering_is_rejected_before_the_rename() {
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let original: &[u8] = b"verified-bytes";
+        let cached = write_cached(
+            cache.path(),
+            "payload.tar.gz",
+            &build_tar_gz(&[("bin/tool", original)]),
+        );
+        let dest = layout.bin_dir.join("tool");
+        let prepared = runner
+            .prepare_files(
+                "tar_gz",
+                &cached,
+                &[ResolvedInstallFile::dest_only(dest.clone())],
+            )
+            .expect("prepare files");
+
+        // Rewrite the staged payload behind the runner's back: placement
+        // re-hashes what it writes, so the swap cannot reach the destination.
+        fs::write(&prepared.regular[0].staged_path, b"tampered").unwrap();
+        let err = runner
+            .install_prepared(prepared)
+            .expect_err("must reject a staged payload that no longer matches");
+        match err {
+            InstallError::StagedContentMismatch {
+                path,
+                expected_sha256,
+                actual_sha256,
+                ..
+            } => {
+                assert_eq!(path, dest);
+                assert_eq!(expected_sha256, sha256_of(original));
+                assert_eq!(actual_sha256, sha256_of(b"tampered"));
+            }
+            other => panic!("expected StagedContentMismatch, got {other:?}"),
+        }
+        assert!(!dest.exists(), "destination must not be created");
+        assert!(!tmp_sibling(&dest).exists(), "tmp sibling must be removed");
     }
 }

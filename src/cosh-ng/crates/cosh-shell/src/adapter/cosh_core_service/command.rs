@@ -21,6 +21,7 @@ use super::PreparedInvocation;
 pub(super) struct RunCommand {
     pub(super) run_id: String,
     pub(super) prepared: PreparedInvocation,
+    pub(super) raw_user_input: Option<String>,
     pub(super) mode: CoshApprovalMode,
     pub(super) session_state: Arc<Mutex<SessionRuntimeState>>,
     pub(super) session_scope: String,

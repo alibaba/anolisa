@@ -885,6 +885,14 @@ fn serialize_initialize_format() {
 }
 
 #[test]
+fn serialize_one_shot_initialize_disables_session_start() {
+    let s = super::serialize_initialize_without_session_start("init-7");
+    let v: Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(v["request"]["subtype"], "initialize");
+    assert_eq!(v["request"]["fire_session_start"], false);
+}
+
+#[test]
 fn serialize_user_message_format() {
     let s = serialize_user_message("hello world", Some("sess-1"));
     let v: Value = serde_json::from_str(&s).unwrap();
@@ -897,6 +905,19 @@ fn serialize_user_message_format() {
     let s2 = serialize_user_message("hi", None);
     let v2: Value = serde_json::from_str(&s2).unwrap();
     assert!(v2.get("session_id").is_none());
+}
+
+#[test]
+fn serialize_cosh_core_user_message_omits_missing_raw_input() {
+    let with_raw = serialize_cosh_core_user_message("envelope", Some("raw"), Some("sess-1"));
+    let value: Value = serde_json::from_str(&with_raw).unwrap();
+    assert_eq!(value["message"]["content"], "envelope");
+    assert_eq!(value["message"]["raw_user_input"], "raw");
+    assert_eq!(value["session_id"], "sess-1");
+
+    let without_raw = serialize_cosh_core_user_message("legacy", None, None);
+    let value: Value = serde_json::from_str(&without_raw).unwrap();
+    assert!(value["message"].get("raw_user_input").is_none());
 }
 
 #[test]
