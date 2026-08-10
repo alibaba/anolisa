@@ -1,7 +1,7 @@
 use anolisa_core::domain::LifecycleStatus;
 use anolisa_core::state::ObjectKind;
 
-use crate::commands::tier1::list::{ListArgs, ListPayload, build_rows};
+use crate::commands::tier1::list::{ListArgs, ListPayload, build_rows, build_rows_for_platform};
 use crate::resolution::{ComponentBackendEntry, ComponentIndex, ComponentIndexEntry};
 
 use super::support::{
@@ -21,11 +21,32 @@ fn index_builds_rows() {
     assert_eq!(sight.display_name, "AgentSight");
     assert_eq!(sight.summary, "eBPF-based AI agent observability tool");
     assert_eq!(sight.backends, vec!["raw", "rpm"]);
+    assert_eq!(sight.platforms, vec!["linux"]);
+    assert!(sight.platform_available);
     assert_eq!(sight.status, "not_installed");
 
     let token = &rows[1];
     assert_eq!(token.name, "tokenless");
     assert_eq!(token.backends, vec!["raw"]);
+    assert_eq!(token.platforms, vec!["linux", "macos"]);
+    assert!(token.platform_available);
+}
+
+#[test]
+fn macos_rows_remain_complete_and_report_platform_availability() {
+    let index = sample_index();
+    let args = ListArgs { installed: false };
+    let state = empty_state();
+
+    let rows = build_rows_for_platform(&index, &args, &state, None, "macos");
+
+    assert_eq!(rows.len(), 2);
+    let sight = rows.iter().find(|row| row.name == "agentsight").unwrap();
+    assert!(!sight.platform_available);
+    assert_eq!(sight.action, "unavailable");
+    let token = rows.iter().find(|row| row.name == "tokenless").unwrap();
+    assert!(token.platform_available);
+    assert_eq!(token.action, "install");
 }
 
 #[test]
@@ -208,6 +229,7 @@ fn missing_optional_fields_use_defaults() {
             name: "minimal".to_string(),
             display_name: None,
             summary: None,
+            platforms: vec!["linux".to_string()],
             backends: Vec::new(),
             aliases: Vec::new(),
         }],
@@ -221,7 +243,10 @@ fn missing_optional_fields_use_defaults() {
     assert_eq!(row.display_name, "minimal");
     assert!(row.summary.is_empty());
     assert!(row.backends.is_empty());
+    assert_eq!(row.platforms, ["linux"]);
+    assert!(row.platform_available);
     assert_eq!(row.status, "not_installed");
+    assert_eq!(row.action, "unavailable");
 }
 
 #[test]
@@ -234,6 +259,7 @@ fn unknown_backend_kind_preserved() {
             name: "test".to_string(),
             display_name: None,
             summary: None,
+            platforms: vec!["linux".to_string()],
             backends: vec![ComponentBackendEntry {
                 kind: "custom-repo".to_string(),
                 package: "test".to_string(),

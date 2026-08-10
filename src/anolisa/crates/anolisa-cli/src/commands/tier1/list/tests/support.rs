@@ -21,6 +21,7 @@ pub(super) fn sample_index() -> ComponentIndex {
                 name: "agentsight".to_string(),
                 display_name: Some("AgentSight".to_string()),
                 summary: Some("eBPF-based AI agent observability tool".to_string()),
+                platforms: vec!["linux".to_string()],
                 backends: vec![
                     ComponentBackendEntry {
                         kind: "raw".to_string(),
@@ -41,6 +42,7 @@ pub(super) fn sample_index() -> ComponentIndex {
                 name: "tokenless".to_string(),
                 display_name: Some("Tokenless".to_string()),
                 summary: Some("LLM token optimization toolkit".to_string()),
+                platforms: vec!["linux".to_string(), "macos".to_string()],
                 backends: vec![ComponentBackendEntry {
                     kind: "raw".to_string(),
                     package: "tokenless".to_string(),
@@ -291,6 +293,7 @@ pub(super) fn sample_index_with_aliases() -> ComponentIndex {
             name: "cosh".to_string(),
             display_name: Some("Copilot Shell".to_string()),
             summary: Some("shell".to_string()),
+            platforms: vec!["linux".to_string()],
             backends: vec![
                 ComponentBackendEntry {
                     kind: "raw".to_string(),

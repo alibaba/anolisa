@@ -44,6 +44,10 @@ pub struct Row {
     pub display_name: String,
     pub summary: String,
     pub backends: Vec<String>,
+    /// Platforms declared by the component index.
+    pub platforms: Vec<String>,
+    /// Whether the component declares support for the current platform.
+    pub platform_available: bool,
     pub status: String,
     pub local_state: String,
     pub ownership: String,
@@ -96,6 +100,7 @@ pub fn handle(args: ListArgs, ctx: &CliContext) -> Result<(), CliError> {
         &args,
         &view,
         rpm_query.as_ref().map(|query| query as &dyn PackageQuery),
+        &env.os,
     );
 
     if ctx.json {
@@ -110,7 +115,7 @@ pub fn handle(args: ListArgs, ctx: &CliContext) -> Result<(), CliError> {
 
     if !ctx.quiet {
         render_warnings(&view.warnings);
-        render_human(&rows, ctx.no_color);
+        render_human(&rows, ctx.no_color, &env.os);
     }
     Ok(())
 }
@@ -121,6 +126,17 @@ fn build_rows(
     args: &ListArgs,
     state: &StateStore,
     rpm_query: Option<&dyn PackageQuery>,
+) -> Vec<Row> {
+    build_rows_for_platform(index, args, state, rpm_query, "linux")
+}
+
+#[cfg(test)]
+fn build_rows_for_platform(
+    index: &ComponentIndex,
+    args: &ListArgs,
+    state: &StateStore,
+    rpm_query: Option<&dyn PackageQuery>,
+    platform: &str,
 ) -> Vec<Row> {
     index
         .components
@@ -133,6 +149,7 @@ fn build_rows(
             Some(entry_to_row(
                 entry,
                 projection,
+                platform,
                 RowScope {
                     scope: "none".to_string(),
                     active: false,
@@ -150,6 +167,7 @@ fn build_rows_from_view(
     args: &ListArgs,
     view: &StateView,
     rpm_query: Option<&dyn PackageQuery>,
+    platform: &str,
 ) -> Vec<Row> {
     let visible_components = view.visible_components();
     index
@@ -178,7 +196,7 @@ fn build_rows_from_view(
                                 .map(str::to_string),
                             state_path: Some(record.root.state_path.display().to_string()),
                         };
-                        Some(entry_to_row(entry, projection, row_scope))
+                        Some(entry_to_row(entry, projection, platform, row_scope))
                     })
                     .collect::<Vec<_>>();
             }
@@ -201,6 +219,7 @@ fn build_rows_from_view(
             vec![entry_to_row(
                 entry,
                 projection,
+                platform,
                 RowScope {
                     scope: scope.to_string(),
                     active: false,
@@ -224,12 +243,19 @@ struct RowScope {
 fn entry_to_row(
     entry: &ComponentIndexEntry,
     projection: LocalProjection,
+    platform: &str,
     row_scope: RowScope,
 ) -> Row {
     let backends: Vec<String> = entry.backends.iter().map(|b| b.kind.clone()).collect();
     let local_state = projection.local_state.label().to_string();
     let ownership = projection.ownership_label().to_string();
-    let action = projection.action_label().to_string();
+    let platform_available = entry.supports_platform(platform);
+    let install_available = platform_available && !backends.is_empty();
+    let action = if install_available || projection.action_label() != "install" {
+        projection.action_label().to_string()
+    } else {
+        "unavailable".to_string()
+    };
     Row {
         name: entry.name.clone(),
         display_name: entry
@@ -238,6 +264,8 @@ fn entry_to_row(
             .unwrap_or_else(|| entry.name.clone()),
         summary: entry.summary.clone().unwrap_or_default(),
         backends,
+        platforms: entry.platforms.clone(),
+        platform_available,
         status: projection.status,
         local_state,
         ownership,

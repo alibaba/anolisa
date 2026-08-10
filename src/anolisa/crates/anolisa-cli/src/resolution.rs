@@ -54,6 +54,13 @@ pub(crate) struct ComponentIndexEntry {
     /// Optional one-line summary; not used by resolution v1.
     #[serde(default)]
     pub(crate) summary: Option<String>,
+    /// Operating systems supported by this component.
+    ///
+    /// The field is optional on the wire so existing v1 indexes remain valid;
+    /// indexes that omit it inherit the original Linux-only behavior. A
+    /// published backend is still required before installation is actionable.
+    #[serde(default = "default_component_platforms")]
+    pub(crate) platforms: Vec<String>,
     /// Backend-native package names for this component.
     ///
     /// Components may initially ship on only one backend, so the list defaults
@@ -96,6 +103,21 @@ pub(crate) struct ComponentAliasEntry {
     pub(crate) kind: String,
     /// Alias value.
     pub(crate) name: String,
+}
+
+fn default_component_platforms() -> Vec<String> {
+    vec!["linux".to_string()]
+}
+
+fn is_canonical_platform(platform: &str) -> bool {
+    let bytes = platform.as_bytes();
+    bytes.first().is_some_and(u8::is_ascii_lowercase)
+        && bytes
+            .last()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 
 /// Parse or validation failures for `components.toml`.
@@ -462,6 +484,34 @@ impl ComponentIndex {
                     reason: format!("duplicate component '{name}'"),
                 });
             }
+            if entry.platforms.is_empty() {
+                return Err(ComponentIndexError::Invalid {
+                    reason: format!("component '{name}' must declare at least one platform"),
+                });
+            }
+            let mut platforms = BTreeSet::new();
+            for platform in &entry.platforms {
+                if platform.trim().is_empty() {
+                    return Err(ComponentIndexError::Invalid {
+                        reason: format!("component '{name}' has an empty platform"),
+                    });
+                }
+                if !is_canonical_platform(platform) {
+                    return Err(ComponentIndexError::Invalid {
+                        reason: format!(
+                            "component '{name}' platform '{platform}' must be a lowercase ASCII \
+                             identifier with optional internal digits or hyphens"
+                        ),
+                    });
+                }
+                if !platforms.insert(platform) {
+                    return Err(ComponentIndexError::Invalid {
+                        reason: format!(
+                            "component '{name}' declares duplicate platform '{platform}'"
+                        ),
+                    });
+                }
+            }
             for backend in &entry.backends {
                 if backend.kind.trim().is_empty() {
                     return Err(ComponentIndexError::Invalid {
@@ -541,6 +591,11 @@ impl ComponentIndex {
 }
 
 impl ComponentIndexEntry {
+    /// Whether the component index permits installation on `platform`.
+    pub(crate) fn supports_platform(&self, platform: &str) -> bool {
+        self.platforms.iter().any(|candidate| candidate == platform)
+    }
+
     fn backends_for(&self, backend: BackendKind) -> impl Iterator<Item = &ComponentBackendEntry> {
         self.backends
             .iter()
@@ -827,6 +882,63 @@ name = "copilot-shell"
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let index_path = manifest_dir.join("../../manifests/components.toml");
         ComponentIndex::load(&index_path).expect("component index template must parse");
+    }
+
+    #[test]
+    fn component_index_without_platforms_keeps_legacy_linux_default() {
+        let index = index();
+
+        assert_eq!(index.components[0].platforms, ["linux"]);
+        assert!(index.components[0].supports_platform("linux"));
+        assert!(!index.components[0].supports_platform("macos"));
+    }
+
+    #[test]
+    fn non_canonical_platform_identifiers_are_rejected() {
+        for platform in ["Linux", " linux "] {
+            let source = format!(
+                r#"
+schema_version = 1
+
+[[components]]
+name = "test"
+platforms = ["{platform}"]
+"#
+            );
+
+            let err = ComponentIndex::from_toml_str(&source, "components.toml")
+                .expect_err("non-canonical platform must be rejected");
+            assert!(
+                matches!(
+                    err,
+                    ComponentIndexError::Invalid { ref reason }
+                        if reason.contains("lowercase ASCII identifier")
+                ),
+                "unexpected error for {platform:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn repository_component_index_declares_current_platform_matrix() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let index_path = manifest_dir.join("../../manifests/components.toml");
+        let index = ComponentIndex::load(&index_path).expect("component index template must parse");
+
+        assert!(
+            index
+                .components
+                .iter()
+                .all(|component| component.supports_platform("linux")),
+            "every published component must remain visible as available on Linux"
+        );
+        let macos_components = index
+            .components
+            .iter()
+            .filter(|component| component.supports_platform("macos"))
+            .map(|component| component.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(macos_components, ["tokenless"]);
     }
 
     #[test]
