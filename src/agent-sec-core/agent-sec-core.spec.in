@@ -2,13 +2,15 @@
 %define anolis_release 1
 %global debug_package %{nil}
 
-# Disable stripping of ELF binaries.  Bundled third-party .so files (numpy
-# openblas, torch, NVIDIA) have precise ELF segment alignment that `strip`
-# breaks, causing "ELF load command address/offset not page-aligned" at runtime.
+# Disable stripping of ELF binaries.  Bundled .so files (the crate-backed
+# agent_sec_cli._native extension and prebuilt wheel extensions such as
+# cryptography and pydantic-core) have precise ELF segment alignment that
+# `strip` breaks, causing "ELF load command address/offset not page-aligned"
+# at runtime.
 %global __strip /bin/true
 
 # Use default zstd compression (level 3) instead of -19 to speed up packaging
-# agent-sec-cli bundles multi-GB NVIDIA/torch libraries; -19 takes 15-30 min
+# of bundled native extensions; -19 takes noticeably longer with no real gain.
 %define _binary_payload w.zstdio
 %define _source_payload w.zstdio
 %{!?_userunitdir:%global _userunitdir /usr/lib/systemd/user}
@@ -17,10 +19,9 @@
 %undefine __brp_mangle_shebangs
 
 # Exclude bundled site-packages from RPM auto-dependency scanning.
-# Python wheels (torch, numpy, NVIDIA, triton) ship prebuilt .so files that
-# reference host GPU drivers (libcuda, libibverbs, libnccl, etc.) or use
-# hash-named internal libraries (e.g. numpy.libs/libscipy_openblas64_-xxx.so).
-# These must NOT become hard RPM Requires/Provides.
+# Prebuilt wheel .so files reference host system libraries or use hash-named
+# internal libraries, neither of which must become hard RPM
+# Requires/Provides.
 # Using path-based exclusion instead of AutoReqProv:no so that other subpackages
 # (e.g. linux-sandbox in agent-sec-cosh-hook) retain proper auto-dependency detection.
 %global __requires_exclude_from /opt/agent-sec/lib/python3\.11/site-packages/.*
@@ -253,10 +254,6 @@ make download-deps
 make stage-cli
 
 %install
-# NVIDIA prebuilt .so files ship with non-standard RPATH (${ORIGIN} instead
-# of $ORIGIN) and empty RUNPATH entries.  These are harmless at runtime but
-# trip RPM's check-rpaths validator.  Allow 0x0002 (invalid) + 0x0010 (empty).
-export QA_RPATHS=$(( 0x0002 | 0x0010 ))
 rm -rf $RPM_BUILD_ROOT
 make install-all-for-rpmbuild DESTDIR=$RPM_BUILD_ROOT
 

@@ -213,7 +213,6 @@ download-deps: ## Download ALL Python deps for agent-sec-cli (requires network)
 		--timeout 60 \
 		--require-hashes \
 		--index-url https://pypi.org/simple/ \
-		--extra-index-url https://download.pytorch.org/whl/cpu \
 		-r agent-sec-cli/requirements.txt
 
 .PHONY: stage-cli

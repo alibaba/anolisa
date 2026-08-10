@@ -28,19 +28,13 @@ classifiers = [
 
 dependencies = [
     "cryptography>=42.0",
-    "modelscope>=1.10",
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "regex>=2026.4.4",
     "sqlalchemy>=2.0",
     "textual>=0.80",
-    "torch>=2.0",
-    "transformers>=4.40",
     "typer>=0.9.0",
 ]
-
-[tool.uv.sources]
-torch = { index = "pytorch-cpu" }
 
 [project.optional-dependencies]
 pgpy = ["pgpy>=0.5"]
@@ -162,11 +156,6 @@ profile = "black"
 line_length = 80
 known_first_party = ["agent_sec_cli"]
 extend_skip_glob = ["dev-tools/backend-skill/templates/*"]
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
 
 [[tool.uv.index]]
 url = "https://mirrors.aliyun.com/pypi/simple/"

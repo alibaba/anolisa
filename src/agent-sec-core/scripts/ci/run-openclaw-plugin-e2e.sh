@@ -132,11 +132,10 @@ tools_root="${OPENCLAW_E2E_TOOLS_ROOT:-$repo_root/target/openclaw-e2e/tools}"
 npm_cache="${NPM_CONFIG_CACHE:-$result_dir/npm-cache}"
 export NPM_CONFIG_CACHE="$npm_cache"
 export npm_config_cache="$npm_cache"
-agent_sec_cli_e2e_excluded_deps=(
-    "modelscope"
-    "torch"
-    "transformers"
-)
+# Wheels no longer declare torch/transformers/modelscope, so there is nothing
+# to exclude from the resolved runtime-dep set. Kept as an empty array so the
+# resolve_wheel_runtime_deps call site keeps working if exclusions are needed again.
+agent_sec_cli_e2e_excluded_deps=()
 
 sync_pilot_workdir() {
     if [[ "$OPENCLAW_E2E_DRY_RUN" == "1" || ! -d "$pilot_workdir" ]]; then
