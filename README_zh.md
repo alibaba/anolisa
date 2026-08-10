@@ -73,7 +73,7 @@ Skills，只把用得到的技能放进上下文，[AgentSight](src/agentsight/R
       <video
         controls
         muted
-        src="https://github.com/user-attachments/assets/1c416b99-2bbb-41c1-b754-fe9af634779c"
+        src="https://github.com/user-attachments/assets/b372ae72-44fa-492f-9feb-e6cd137b631a"
       ></video>
     </td>
   </tr>
