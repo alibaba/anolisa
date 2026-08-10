@@ -1,4 +1,4 @@
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::sync::mpsc::{self, Sender};
@@ -20,6 +20,10 @@ use super::io_loop::{read_until_streaming, wait_child_preserving_signal};
 use super::lifecycle::{build_shell_host_output, push_shell_exited_event};
 use super::model::{ShellHostConfig, ShellHostOutput};
 use super::raw_relay::{read_raw_until_exit, DriverCompletion, RawActionWatchdog};
+
+mod raw_mode_guard;
+
+use raw_mode_guard::{reopen_stdout_blocking, RawModeGuard};
 
 pub fn run_raw_relay_bash<R, W>(
     config: &ShellHostConfig,
@@ -421,164 +425,6 @@ where
     )
 }
 
-/// Re-open stdout on a fresh, blocking file description when needed.
-///
-/// On Linux terminals (and SSH sessions), stdin and stdout often share the
-/// same underlying open file description. `RawModeGuard` sets `O_NONBLOCK` on
-/// stdin (fd 0), which therefore also makes stdout (fd 1) non-blocking.
-/// Subsequent writes to stdout can then return `EAGAIN` / `EWOULDBLOCK`.
-///
-/// This function opens `/dev/tty` to obtain a new, independent file
-/// description that is not marked `O_NONBLOCK`, and uses `dup2` to replace
-/// fd 1 with it. The termios configuration is per-device, so the new fd
-/// inherits the raw-mode settings already applied by `RawModeGuard`.
-///
-/// If stdout is not a terminal, or if `/dev/tty` cannot be opened, the
-/// function logs a warning and returns success so that the shell can still
-/// start. In that case the caller retains the original (possibly
-/// non-blocking) stdout behavior.
-fn reopen_stdout_blocking() -> io::Result<()> {
-    if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 0 {
-        // stdout is not a terminal, so the stdin/stdout shared file
-        // description problem does not apply here.
-        return Ok(());
-    }
-    let tty = match OpenOptions::new().write(true).open("/dev/tty") {
-        Ok(tty) => tty,
-        Err(err) => {
-            eprintln!(
-                "cosh-shell: warning: cannot reopen stdout as blocking: {err}; \
-                 EAGAIN risk remains"
-            );
-            return Ok(());
-        }
-    };
-    let tty_fd = tty.as_raw_fd();
-    if unsafe { libc::dup2(tty_fd, libc::STDOUT_FILENO) } < 0 {
-        let err = io::Error::last_os_error();
-        eprintln!(
-            "cosh-shell: warning: cannot reopen stdout as blocking: {err}; \
-             EAGAIN risk remains"
-        );
-    }
-    // `tty` is dropped here, but the duplicated fd remains alive because fd 1
-    // now refers to the same open file description.
-    Ok(())
-}
-
-struct RawModeGuard {
-    fd: i32,
-    original_termios: Option<libc::termios>,
-    original_flags: i32,
-    active: bool,
-}
-
-impl RawModeGuard {
-    #[cfg(test)]
-    fn for_test(fd: i32, original_termios: Option<libc::termios>, original_flags: i32) -> Self {
-        Self {
-            fd,
-            original_termios,
-            original_flags,
-            active: true,
-        }
-    }
-
-    /// #1932 F4: modifyOtherKeys level 1 makes the terminal report
-    /// modifier-carrying editing keys (Shift+Enter -> `CSI 27;2;13~`)
-    /// that already sit on the soft-newline whitelist, with zero terminal
-    /// configuration. Level 1 leaves every conventionally-encoded key
-    /// (Esc, Alt+letter, Ctrl+letter) untouched, and terminals without
-    /// the feature ignore the sequence entirely. The enable is written on
-    /// the relay's ordered stdout path; this guard only owns the
-    /// withdrawal so the tty never keeps the mode after exit.
-    const MODIFY_OTHER_KEYS_DISABLE: &'static [u8] = b"\x1b[>4;0m";
-
-    fn activate_stdin() -> io::Result<Option<Self>> {
-        Self::activate_fd(0)
-    }
-
-    fn activate_fd(fd: i32) -> io::Result<Option<Self>> {
-        let original_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        if original_flags < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if unsafe { libc::fcntl(fd, libc::F_SETFL, original_flags | libc::O_NONBLOCK) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        let original_termios = if unsafe { libc::isatty(fd) } == 1 {
-            let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
-            if unsafe { libc::tcgetattr(fd, &mut original) } < 0 {
-                let error = io::Error::last_os_error();
-                unsafe {
-                    libc::fcntl(fd, libc::F_SETFL, original_flags);
-                }
-                return Err(error);
-            }
-
-            let mut raw = original;
-            unsafe {
-                libc::cfmakeraw(&mut raw);
-            }
-            if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } < 0 {
-                let error = io::Error::last_os_error();
-                unsafe {
-                    libc::fcntl(fd, libc::F_SETFL, original_flags);
-                }
-                return Err(error);
-            }
-            Some(original)
-        } else {
-            None
-        };
-
-        Ok(Some(Self {
-            fd,
-            original_termios,
-            original_flags,
-            active: true,
-        }))
-    }
-}
-
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        if self.active {
-            // Clear O_NONBLOCK temporarily so the cleanup write and termios
-            // restore cannot be lost to EAGAIN. This is necessary even if the
-            // descriptor inherited O_NONBLOCK from the parent process, because
-            // original_flags would then still contain that bit and a plain
-            // restore would leave the fd non-blocking during the write.
-            // The actual original flags are restored after the cleanup.
-            unsafe {
-                libc::fcntl(
-                    self.fd,
-                    libc::F_SETFL,
-                    self.original_flags & !libc::O_NONBLOCK,
-                );
-            }
-            if let Some(original) = &self.original_termios {
-                // Withdraw the keyboard negotiation before handing the tty
-                // back (#1932 F4); paired with the enable in activate_fd.
-                unsafe {
-                    libc::write(
-                        self.fd,
-                        Self::MODIFY_OTHER_KEYS_DISABLE.as_ptr().cast(),
-                        Self::MODIFY_OTHER_KEYS_DISABLE.len(),
-                    );
-                    libc::tcsetattr(self.fd, libc::TCSANOW, original);
-                }
-            }
-            // Restore the exact flags we inherited, even if they included
-            // O_NONBLOCK.
-            unsafe {
-                libc::fcntl(self.fd, libc::F_SETFL, self.original_flags);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,8 +498,12 @@ mod tests {
         );
 
         let fake_termios = unsafe { std::mem::zeroed::<libc::termios>() };
-        let guard =
-            RawModeGuard::for_test(write_fd, Some(fake_termios), original | libc::O_NONBLOCK);
+        let guard = RawModeGuard::for_test(
+            write_fd,
+            write_fd,
+            Some(fake_termios),
+            original | libc::O_NONBLOCK,
+        );
 
         let drain_handle = thread::spawn(move || {
             thread::sleep(Duration::from_millis(50));
@@ -677,6 +527,88 @@ mod tests {
             output.contains("\x1b[>4;0m"),
             "disable sequence not found in pipe output: {output:?}"
         );
+    }
+
+    #[test]
+    fn raw_mode_guard_disable_write_targets_output_fd() {
+        // The withdrawal must travel on the output path that carried the
+        // enable, not on the input fd: a read-only or separately opened
+        // stdin never delivers bytes to the terminal. Input and output are
+        // separate pipes standing in for stdin and stdout; the guard is
+        // built with a fake termios so the cleanup write path runs. The
+        // disable sequence must land on the output pipe and nothing may be
+        // written to the input pipe.
+        let (input_read_owned, input_write_owned) = nix::unistd::pipe().expect("open input pipe");
+        let (output_read_owned, output_write_owned) =
+            nix::unistd::pipe().expect("open output pipe");
+        let input_read = input_read_owned.as_raw_fd();
+        let input_write = input_write_owned.as_raw_fd();
+        let output_read = output_read_owned.as_raw_fd();
+        let output_write = output_write_owned.as_raw_fd();
+
+        let original = unsafe { libc::fcntl(input_write, libc::F_GETFL) };
+        let fake_termios = unsafe { std::mem::zeroed::<libc::termios>() };
+        let guard = RawModeGuard::for_test(input_write, output_write, Some(fake_termios), original);
+        drop(guard);
+
+        // The drop above already wrote synchronously, so a non-blocking read
+        // either sees the sequence or fails immediately instead of hanging
+        // when the write went to the wrong fd.
+        let output_flags = unsafe { libc::fcntl(output_read, libc::F_GETFL) };
+        unsafe { libc::fcntl(output_read, libc::F_SETFL, output_flags | libc::O_NONBLOCK) };
+        let mut buf = [0_u8; 64];
+        let n = unsafe { libc::read(output_read, buf.as_mut_ptr().cast(), buf.len()) };
+        assert!(n > 0, "expected disable sequence on the output fd");
+        assert_eq!(&buf[..n as usize], b"\x1b[>4;0m");
+
+        let input_flags = unsafe { libc::fcntl(input_read, libc::F_GETFL) };
+        unsafe { libc::fcntl(input_read, libc::F_SETFL, input_flags | libc::O_NONBLOCK) };
+        let n = unsafe { libc::read(input_read, buf.as_mut_ptr().cast(), buf.len()) };
+        assert!(
+            n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN),
+            "expected no bytes written to the input fd, got {:?}",
+            &buf[..n.max(0) as usize]
+        );
+    }
+
+    #[test]
+    fn raw_mode_guard_full_non_tty_output_does_not_block_exit() {
+        // With stdout on a pipe the enable never reached a terminal, so the
+        // withdrawal must not block shell exit when that pipe is full and
+        // its reader never drains: the write is best-effort non-blocking on
+        // non-tty outputs. The guard drops on a worker thread so a
+        // regression to a blocking write surfaces as a fast timeout here
+        // instead of a hang.
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let (_input_read_owned, input_write_owned) = nix::unistd::pipe().expect("open input pipe");
+        let (output_read_owned, output_write_owned) =
+            nix::unistd::pipe().expect("open output pipe");
+        let input_write = input_write_owned.as_raw_fd();
+        let output_write = output_write_owned.as_raw_fd();
+
+        let output_flags = unsafe { libc::fcntl(output_write, libc::F_GETFL) };
+        unsafe { libc::fcntl(output_write, libc::F_SETFL, output_flags | libc::O_NONBLOCK) };
+        let chunk = [0_u8; 8192];
+        while unsafe { libc::write(output_write, chunk.as_ptr().cast(), chunk.len()) } >= 0 {}
+        unsafe { libc::fcntl(output_write, libc::F_SETFL, output_flags) };
+
+        let original = unsafe { libc::fcntl(input_write, libc::F_GETFL) };
+        let fake_termios = unsafe { std::mem::zeroed::<libc::termios>() };
+        let guard = RawModeGuard::for_test(input_write, output_write, Some(fake_termios), original);
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let dropper = thread::spawn(move || {
+            drop(guard);
+            done_tx.send(()).expect("send drop completion");
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("guard drop must not block on a full non-tty output");
+        dropper.join().expect("join dropper thread");
+        drop(output_read_owned);
     }
 
     fn termios_for_fd(fd: i32) -> libc::termios {
