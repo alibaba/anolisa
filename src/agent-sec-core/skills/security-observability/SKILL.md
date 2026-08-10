@@ -12,7 +12,7 @@ description: 使用 agent-sec-cli 查询本地安全事件并生成会话级安�
 1. 先用 `events --summary` 或 `events --count-by` 获取概览。
 2. 根据 `event_type`、`category`、关联 ID 和时间范围缩小查询。
 3. 需要程序解析时使用 `--output json` 或 `--output jsonl`，不要解析 table 或 summary 文本。
-4. 已知 `session_id` 或需要查看最近会话时，使用 `observability report --format json` 汇总 LLM、工具和安全事件。
+4. 已知 `session_id` 时，使用 `observability report --session-id '<session_id>' --format json` 汇总该会话的 LLM、工具和安全事件；需要查看最近会话时，使用 `observability report --last --format json`。
 5. 向用户报告必要结论即可。`details` 可能包含命令、扫描证据或后端诊断信息，不要无必要地完整回显。
 
 ## 安全事件查询
@@ -168,7 +168,7 @@ agent-sec-cli observability report \
   --format json
 ```
 
-选择 `--last` 或 `--session-id` 之一。命令没有默认目标；两者都不提供时返回错误。`--format` 支持 `text` 和 `json`，供 Agent 解析时必须使用 `json`。
+选择 `--last` 或 `--session-id` 之一：`--last` 查询最近记录的会话，`--session-id '<session_id>'` 查询指定会话。命令没有默认目标；两者都不提供时返回错误。`--format` 支持 `text` 和 `json`，供 Agent 解析时必须使用 `json`。
 
 ### JSON 结构
 

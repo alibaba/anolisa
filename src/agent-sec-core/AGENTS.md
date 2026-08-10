@@ -466,7 +466,20 @@ uv run --project agent-sec-cli pytest tests/unit-test/hermes-plugin/ -v
 
 ## skills
 
-> TODO: 待补充
+### security-observability
+
+- `skills/security-observability/SKILL.md` intentionally keeps a self-contained
+  parameter and output contract for `agent-sec-cli events` and
+  `agent-sec-cli observability report`. Do not replace it with instructions that
+  require the Agent to run `--help` before each use; that adds avoidable tool
+  calls and context-reconstruction cost.
+- The duplicated parameter table is an implicit contract with the CLI help text.
+  When changing `events` or `observability report` options, defaults,
+  mutual-exclusion rules, output formats, or documented fields, update the
+  corresponding SKILL.md section and contract tests in the same change.
+- Verify the source CLI definitions before editing the skill. Treat `--summary`
+  and table/text output as human-display surfaces; structured Agent parsing must
+  keep using JSON or JSONL examples.
 
 ---
 

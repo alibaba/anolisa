@@ -3,8 +3,8 @@
 import json
 from pathlib import Path
 
-
 _AGENT_SEC_CORE_DIR = Path(__file__).resolve().parents[3]
+_AGENTS_PATH = _AGENT_SEC_CORE_DIR / "AGENTS.md"
 _MANIFEST_PATH = _AGENT_SEC_CORE_DIR / "cosh-extension" / "cosh-extension.json"
 _COMPONENT_MANIFEST_PATH = _AGENT_SEC_CORE_DIR / ".anolisa" / "component.toml"
 _SKILL_PATH = _AGENT_SEC_CORE_DIR / "skills" / "security-observability" / "SKILL.md"
@@ -28,7 +28,9 @@ def test_cosh_extension_does_not_bundle_security_observability_skill() -> None:
     assert "skills" not in manifest
 
 
-def test_component_manifest_installs_security_observability_with_skills_bundle() -> None:
+def test_component_manifest_installs_security_observability_with_skills_bundle() -> (
+    None
+):
     content = _COMPONENT_MANIFEST_PATH.read_text(encoding="utf-8")
 
     assert 'source = "share/anolisa/skills/"' in content
@@ -51,6 +53,10 @@ def test_security_observability_skill_documents_cli_and_output_contracts() -> No
 
     assert "agent-sec-cli events" in content
     assert "agent-sec-cli observability report" in content
+    assert "observability report --last --format json" in content
+    assert "observability report --session-id '<session_id>' --format json" in content
+    assert "`--last` 查询最近记录的会话" in content
+    assert "`--session-id '<session_id>'` 查询指定会话" in content
     assert "--last-hours" in content
     assert "--since" in content
     assert "--until" in content
@@ -90,3 +96,14 @@ def test_security_observability_skill_documents_cli_and_output_contracts() -> No
     assert "backend-specific" in content or "后端专属" in content
     assert "succeeded/failed" in content or "succeeded` / `failed" in content
     assert "pass` / `warn` / `deny" in content
+
+
+def test_security_observability_parameters_are_covered_by_agents_contract() -> None:
+    content = _AGENTS_PATH.read_text(encoding="utf-8")
+
+    assert "skills/security-observability/SKILL.md" in content
+    assert "self-contained" in content
+    assert "implicit contract with the CLI help text" in content
+    assert "Do not replace it with instructions" in content
+    assert "--help" in content
+    assert "contract tests" in content
