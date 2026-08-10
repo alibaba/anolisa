@@ -10,9 +10,6 @@
   },
   "os": ["darwin"],
   "cpu": ["arm64"],
-  "bin": {
-    "anolisa": "bin/anolisa"
-  },
   "files": [
     "bin/"
   ],
