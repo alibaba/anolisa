@@ -313,6 +313,37 @@ agent-sec-cli events --offset 50 --limit 20
 agent-sec-cli events --summary
 ```
 
+### Agent Capability View
+
+`agent-sec-cli capabilities` shows the hook capability view for Qoder, Qwen Code, Codex, Cosh, OpenClaw, and Hermes derived from environment variables visible to the current CLI process. It is not a runtime health check and does not prove that hooks are loaded, registered, or currently effective in the target Agent process.
+
+Run the command from the same shell/container/service environment that starts the target Agent when you want the closest approximation. The command does not read OpenClaw, Hermes, or other Agent configuration files, and it does not resolve Agent home directories; Agent config values such as enabled flags, policies, and timeouts can still make runtime behavior differ from this view.
+
+```bash
+# All agents and all capabilities
+agent-sec-cli capabilities
+
+# By agent
+agent-sec-cli capabilities --agent openclaw
+
+# By capability
+agent-sec-cli capabilities --capability prompt-scan
+
+# By agent and capability
+agent-sec-cli capabilities --agent hermes --capability code-scan
+
+# Machine-readable output
+agent-sec-cli capabilities --agent qwen --capability pii-check --output json
+```
+
+Supported capability names are exactly `code-scan`, `prompt-scan`, `pii-check`, `skill-ledger`, and `observability`; plugin-internal IDs such as `scan-code`, `prompt-scan-user-input`, or `pii-scan-user-input` are rejected. Table output is grouped by Agent and includes `CAPABILITY`, `ENABLED`, `MODE`, `SCAN_MODE`, `TIMEOUT(s)`, and `DIAGNOSTICS`; `MODE` is the hook interaction mode, while `SCAN_MODE` is the prompt scanner engine mode (`fast`, `standard`, or `strict`). JSON output uses the same user-facing fields and also includes the current CLI process environment values and diagnostics.
+
+View source and limits:
+
+- Source: static hook capability metadata plus environment variables visible to the current CLI process.
+- Not included: OpenClaw, Hermes, or other Agent configuration files; Agent home directories; live hook loading or registration state.
+- Known drift: running the command from a different shell/container/service or with different Agent config can produce output that differs from real Agent runtime behavior.
+
 ## Agent Framework Integration
 
 ### OpenClaw

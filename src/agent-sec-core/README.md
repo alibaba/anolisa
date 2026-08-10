@@ -333,6 +333,28 @@ check carries Qoder trace identifiers into the security audit log.
 
 Design doc: [`docs/design/SKILL_LEDGER_zh.md`](docs/design/SKILL_LEDGER_zh.md) · User guide: [Skill Ledger User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/skill-ledger.md)
 
+## Agent Capability View
+
+`agent-sec-cli capabilities` shows the hook capability view derived from environment variables visible to the current CLI process across Qoder, Qwen Code, Codex, Cosh, OpenClaw, and Hermes.
+
+The command does not read OpenClaw, Hermes, or other Agent configuration files, and it does not resolve Agent home directories. Run it from the same shell/container/service environment that starts the target Agent when you want the closest approximation, but treat the output as an environment-variable view only: it does not prove that hooks are loaded, registered, or currently effective in the target Agent process. Agent config values such as enabled flags, policies, and timeouts can still make runtime behavior differ from this view.
+
+```bash
+# All agents and all hook capabilities
+agent-sec-cli capabilities
+
+# Filter by agent
+agent-sec-cli capabilities --agent openclaw
+
+# Filter by capability
+agent-sec-cli capabilities --capability code-scan
+
+# Filter by agent and capability, with machine-readable output
+agent-sec-cli capabilities --agent hermes --capability pii-check --output json
+```
+
+Supported capability names are fixed: `code-scan`, `prompt-scan`, `pii-check`, `skill-ledger`, and `observability`. Plugin-specific IDs such as `scan-code` or `pii-scan-user-input` are not accepted as CLI filters.
+
 ## Audit Log
 
 All security events are logged as JSONL to `/var/log/agent-sec/security-events.jsonl` (falls back to `~/.agent-sec-core/security-events.jsonl`):

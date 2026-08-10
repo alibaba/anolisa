@@ -105,7 +105,19 @@ agent-sec-cli summary --hours 72 --format json
 # Observability record ingestion
 agent-sec-cli observability record --format json --stdin < record.json
 agent-sec-cli observability schema
+
+# Agent plugin capability configuration view
+agent-sec-cli capabilities
+agent-sec-cli capabilities --agent openclaw --capability code-scan --output json
 ```
+
+### Agent Plugin Capability View
+
+`agent-sec-cli capabilities` prints the hook capability view derived from environment variables visible to the current CLI process. It does not read OpenClaw, Hermes, or other Agent configuration files, and it does not resolve Agent home directories.
+
+Run it from the same shell/container/service environment that starts the target Agent when you want the closest approximation. Even then, the output is not proof that hooks are loaded, registered, or currently effective in the target Agent process; Agent config values such as enabled flags, policies, and timeouts can still make runtime behavior differ from this view.
+
+Supported capability filters are fixed to `code-scan`, `prompt-scan`, `pii-check`, `skill-ledger`, and `observability`; plugin-internal IDs are not accepted as aliases.
 
 ### Observability Records
 

@@ -331,6 +331,28 @@ Skill，随后执行只读的 `skill-ledger check`，并按
 
 设计文档：[`docs/design/SKILL_LEDGER_zh.md`](docs/design/SKILL_LEDGER_zh.md) · 用户指南：[Skill Ledger 用户手册](../../docs/user-guide/zh/agent-security/agent-sec-core/skill-ledger.md)
 
+## Agent Capability 视图
+
+`agent-sec-cli capabilities` 用于查看当前 CLI 进程可见环境变量推导出的 Qoder、Qwen Code、Codex、Cosh、OpenClaw 和 Hermes agent-sec hook capability 视图。
+
+该命令不读取 OpenClaw、Hermes 或其他 Agent 的配置文件，也不解析 Agent home 目录。若希望结果尽量接近目标 Agent，请在启动目标 Agent 的同一 shell/container/service 环境中运行；即便如此，输出也只代表当前 CLI 环境变量视图，不能证明 hook 已在目标 Agent 进程中加载、注册或实际生效。Agent 配置中的 enabled、policy、timeout 等值仍可能让真实运行行为与该视图不同。
+
+```bash
+# 展示所有 agent 的所有 hook capability
+agent-sec-cli capabilities
+
+# 按 agent 过滤
+agent-sec-cli capabilities --agent openclaw
+
+# 按 capability 过滤
+agent-sec-cli capabilities --capability code-scan
+
+# 同时按 agent 和 capability 过滤，并输出 JSON
+agent-sec-cli capabilities --agent hermes --capability pii-check --output json
+```
+
+支持的 capability 名称固定为：`code-scan`、`prompt-scan`、`pii-check`、`skill-ledger` 和 `observability`。CLI 过滤参数不接受 `scan-code` 或 `pii-scan-user-input` 等插件内部 ID。
+
 ## 审计日志
 
 所有安全事件以 JSONL 格式记录至 `/var/log/agent-sec/security-events.jsonl`（回退路径：`~/.agent-sec-core/security-events.jsonl`）：

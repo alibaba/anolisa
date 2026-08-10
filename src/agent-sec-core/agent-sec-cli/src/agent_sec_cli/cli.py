@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import typer
+from agent_sec_cli.capabilities.cli import app as capabilities_app
 from agent_sec_cli.cli_logging import setup_cli_logging
 from agent_sec_cli.correlation_context import (
     init_invocation_context,
@@ -132,6 +133,7 @@ def main_callback(
 # Mount skill-ledger as a subcommand group: agent-sec-cli skill-ledger <cmd>
 app.add_typer(skill_ledger_app, name="skill-ledger")
 app.add_typer(observability_app, name="observability")
+app.add_typer(capabilities_app, name="capabilities")
 
 # ---------------------------------------------------------------------------
 # Command: harden

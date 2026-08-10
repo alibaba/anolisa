@@ -307,6 +307,38 @@ agent-sec-cli events --offset 50 --limit 20
 agent-sec-cli events --summary
 ```
 
+### Agent Capability 视图
+
+`agent-sec-cli capabilities` 展示当前 CLI 进程可见环境变量推导出的 Qoder、Qwen Code、Codex、Cosh、OpenClaw 和 Hermes hook capability 视图。它不是运行时健康检查，不能证明 hook 已在目标 Agent 进程中加载、注册或实际生效。
+
+若希望结果尽量接近目标 Agent，请在启动目标 Agent 的同一 shell/container/service 环境中运行该命令。命令不读取 OpenClaw、Hermes 或其他 Agent 的配置文件，也不解析 Agent home 目录；Agent 配置中的 enabled、policy、timeout 等值仍可能让真实运行行为与该视图不同。
+
+```bash
+# 展示所有 agent 的所有 capability
+agent-sec-cli capabilities
+
+# 按 agent 查询
+agent-sec-cli capabilities --agent openclaw
+
+# 按 capability 查询
+agent-sec-cli capabilities --capability prompt-scan
+
+# 同时按 agent 和 capability 查询
+agent-sec-cli capabilities --agent hermes --capability code-scan
+
+# JSON 输出，便于脚本消费
+agent-sec-cli capabilities --agent qwen --capability pii-check --output json
+```
+
+支持的 capability 名称只能是 `code-scan`、`prompt-scan`、`pii-check`、`skill-ledger` 和 `observability`；`scan-code`、`prompt-scan-user-input`、`pii-scan-user-input` 等插件内部 ID 会被拒绝。表格输出按 Agent 分块展示，每个分块包含 `CAPABILITY`、`ENABLED`、`MODE`、`SCAN_MODE`、`TIMEOUT(s)` 和 `DIAGNOSTICS`；`MODE` 表示 hook 交互方式，`SCAN_MODE` 表示 prompt scanner 引擎档位（`fast`、`standard` 或 `strict`）。JSON 输出使用同样的用户可见字段，并额外包含当前 CLI 进程可见的环境变量值和诊断信息。
+
+视图来源和限制：
+
+- 来源：静态 hook capability metadata 加当前 CLI 进程可见的环境变量。
+- 不包含：OpenClaw、Hermes 或其他 Agent 配置文件；Agent home 目录；实时 hook 加载或注册状态。
+- 已知偏移：从不同 shell/container/service 运行命令，或真实 Agent 使用不同配置时，输出可能与真实运行行为不同。
+
+
 ## Agent 框架集成
 
 ### OpenClaw

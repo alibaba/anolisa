@@ -263,6 +263,29 @@ include = [
 > Lint 检查仅在 PR 触发时对增量代码检查，不检查历史代码。违规信息显示在 PR 的 Job Summary 区域。
 > 增量覆盖率门禁仅在 PR 触发，要求本次 PR 新增/修改的代码行中被测试覆盖的比例 ≥ 80%。
 
+### 12. Capability View Maintenance
+
+`agent-sec-cli capabilities` is the canonical read-only environment-variable view of agent-sec plugin hook capabilities. Treat it as part of the hook environment contract, but do not treat it as proof of the target Agent's live runtime state.
+
+The view and the hook runtime have an implicit dependency: they must interpret hook environment variables the same way while remaining deployment-decoupled. Hook code must not import `agent_sec_cli` to share parsing logic, because hooks and the CLI are installed and executed in different raw/RPM/plugin layouts.
+
+When changing any Agent plugin hook environment behavior, update the capability view in the same PR. This includes:
+
+- Adding, removing, or renaming a hook or capability in Qoder, Qwen Code, Codex, Cosh, OpenClaw, or Hermes integrations
+- Changing environment variables, defaults, accepted values, timeout behavior, mode/policy semantics, legacy fallback behavior, or enabled/disabled behavior
+- Changing hook matchers or hook names that appear in manifests such as `hooks.json`, `qwen-extension.json`, `cosh-extension.json`, `openclaw.plugin.json`, or `hermes-plugin/src/plugin.yaml`
+
+Required synchronized updates:
+
+1. Update `agent-sec-cli/src/agent_sec_cli/capabilities/` metadata and parsing logic.
+2. Update CLI/user documentation for `agent-sec-cli capabilities`.
+3. Update unit/e2e tests that lock each Agent's capability, hook, and environment-variable mapping.
+4. Add or update tests that verify CLI parsing semantics match existing hook semantics for shared environment variables.
+
+Important scope boundary: `agent-sec-cli capabilities` reads only the current CLI process environment variables. It must not read OpenClaw, Hermes, or other Agent configuration files; it must not resolve Agent home directories; and its output must not be described as actual hook load, registration, or runtime-effective state. Config-driven differences are allowed to exist and must be documented as known drift.
+
+Qwen Code PII currently has a specific compatibility fallback: `PII_CHECKER_HOOK_ENABLED` takes precedence, and legacy `PII_CHECKER_ENABLED` is consulted only when the new variable is absent. Do not generalize that fallback to other Agents unless their hook runtime implements it too.
+
 ---
 
 ## raw packaging

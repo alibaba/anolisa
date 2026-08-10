@@ -1,11 +1,15 @@
 """Unit tests for the top-level CLI entry points."""
 
+import json
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+from click import unstyle
+from typer.testing import CliRunner
+
 from agent_sec_cli.cli import (
     _extract_trace_context_arg,
     _is_read_only_skill_analyze,
@@ -19,8 +23,6 @@ from agent_sec_cli.correlation_context import (
     get_current_trace_context,
 )
 from agent_sec_cli.security_middleware.result import ActionResult
-from click import unstyle
-from typer.testing import CliRunner
 
 
 @patch("agent_sec_cli.cli.invoke")
@@ -508,6 +510,71 @@ def test_events_help_lists_session_and_run_filters():
     help_text = unstyle(result.output)
     assert "--session-id" in help_text
     assert "--run-id" in help_text
+
+
+def test_capabilities_json_filter_outputs_current_environment(monkeypatch):
+    monkeypatch.setenv("CODE_SCANNER_HOOK_ENABLED", "false")
+    result = CliRunner().invoke(
+        app,
+        [
+            "capabilities",
+            "--agent",
+            "qoder",
+            "--capability",
+            "code-scan",
+            "--output",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert len(payload) == 1
+    assert payload[0]["agent"] == "qoder"
+    assert payload[0]["capability"] == "code-scan"
+    assert payload[0]["enabled"] == "disabled"
+    assert payload[0]["mode"] == "observe"
+    assert payload[0]["scan_mode"] == "-"
+    assert payload[0]["timeout"] == "10"
+    assert "hooks" not in payload[0]
+    assert "source" not in payload[0]
+    assert payload[0]["env"]["CODE_SCANNER_HOOK_ENABLED"]["effective"] is False
+
+
+def test_capabilities_default_table_output(monkeypatch):
+    monkeypatch.delenv("OPENCLAW_CONFIG_PATH", raising=False)
+    result = CliRunner().invoke(app, ["capabilities", "--agent", "cosh"])
+
+    assert result.exit_code == 0
+    lines = result.output.strip().split("\n")
+    assert lines[0] == "[cosh]"
+    assert lines[1].startswith("CAPABILITY")
+    assert "AGENT" not in lines[1]
+    assert "CAPABILITY" in lines[1]
+    assert "ENABLED" in lines[1]
+    assert "MODE" in lines[1]
+    assert "SCAN_MODE" in lines[1]
+    assert "TIMEOUT(s)" in lines[1]
+    assert "HOOKS" not in lines[1]
+    assert "SOURCE" not in lines[1]
+    assert "code-scan" in result.output
+
+
+def test_capabilities_rejects_plugin_capability_alias():
+    result = CliRunner().invoke(
+        app,
+        ["capabilities", "--capability", "scan-code"],
+    )
+
+    assert result.exit_code == 1
+    assert "unknown capability" in result.stderr
+
+
+def test_capabilities_rejects_invalid_output_format():
+    result = CliRunner().invoke(app, ["capabilities", "--output", "yaml"])
+
+    assert result.exit_code == 1
+    assert "--output must be one of" in result.stderr
 
 
 class TestHardenCli(unittest.TestCase):
