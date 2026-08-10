@@ -39,8 +39,10 @@ agent-sec-cli scan-prompt --input prompts.txt --format json
 | `strict` | L1 + L2 ML 分类器（L3 预留） | `False` | 50–200 ms | 高安全场景 |
 | `multi_turn` | L4 多轮意图检测 | — | 取决于模型 | 从 stdin 传入 JSON history（Ollama） |
 
-L2 分类器首次使用时会从 ModelScope 下载 `LLM-Research/Llama-Prompt-Guard-2-86M`（约 1 GB）。
-安装后执行一次 `agent-sec-cli scan-prompt warmup` 可消除冷启动延迟。
+L2 分类器调用 `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`，由 Ollama 从项目自有的
+ModelScope 仓库拉取。执行一次
+`ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` 即可（无需重命名），
+再执行 `agent-sec-cli scan-prompt warmup` 验证模型可用，避免首次扫描时才发现模型缺失。
 
 ## Verdict
 

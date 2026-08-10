@@ -29,9 +29,6 @@ from agent_sec_cli.daemon.gateway import (
     PreparedDaemonRequest,
     _log_request_completion,
 )
-from agent_sec_cli.daemon.handlers.prompt_scan import (
-    register_prompt_scan_methods,
-)
 from agent_sec_cli.daemon.handlers.security_query import (
     register_security_query_methods,
 )
@@ -70,7 +67,6 @@ def create_default_registry() -> MethodRegistry:
     """Create the default daemon method registry."""
     registry = MethodRegistry()
     register_health_methods(registry)
-    register_prompt_scan_methods(registry)
     register_skill_ledger_methods(registry)
     register_security_query_methods(registry)
     return registry
@@ -133,7 +129,7 @@ class DaemonServer:
         self.max_connections = max_connections
         self.request_read_timeout_ms = request_read_timeout_ms
         self.runtime = DaemonRuntime(socket_path=resolved_socket_path)
-        register_default_jobs(self.runtime.jobs, self.runtime.prompt_scan_state)
+        register_default_jobs(self.runtime.jobs)
         self.gateway = DaemonGateway(self.registry, self.runtime)
         self._server: asyncio.Server | None = None
         self._lock: SingleInstanceLock | None = None

@@ -6,7 +6,6 @@ import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from agent_sec_cli.daemon.env import SOCKET_ENV
 from agent_sec_cli.daemon.errors import DaemonRuntimePathError
@@ -17,29 +16,6 @@ SOCKET_FILENAME = "daemon.sock"
 LOCK_FILENAME = "daemon.lock"
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class PromptScanRuntimeState:
-    """Prompt scanner runtime state exposed by health."""
-
-    status: str = "pending"
-    model: str | None = None
-    loaded: bool = False
-    last_error: str | None = None
-    last_started_at: str | None = None
-    last_finished_at: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serializable prompt scanner state."""
-        return {
-            "status": self.status,
-            "model": self.model,
-            "loaded": self.loaded,
-            "last_error": self.last_error,
-            "last_started_at": self.last_started_at,
-            "last_finished_at": self.last_finished_at,
-        }
 
 
 @dataclass
@@ -61,9 +37,6 @@ class DaemonRuntime:
     socket_path: Path
     started_monotonic: float = field(default_factory=time.monotonic)
     status: str = "ok"
-    prompt_scan_state: PromptScanRuntimeState = field(
-        default_factory=PromptScanRuntimeState
-    )
     queues: QueueState = field(default_factory=QueueState)
     jobs: JobManager = field(default_factory=JobManager)
 

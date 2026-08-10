@@ -40,9 +40,10 @@ Useful options:
 | `strict` | L1 + L2 ML classifier (L3 reserved) | `False` | 50–200 ms | High-security scenarios |
 | `multi_turn` | L4 multi-turn intent detection | — | Varies | JSON history input via stdin (Ollama) |
 
-The L2 classifier downloads `LLM-Research/Llama-Prompt-Guard-2-86M` from ModelScope on first use
-(about 1 GB). Run `agent-sec-cli scan-prompt warmup` once after installation to eliminate the
-cold-start delay.
+The L2 classifier calls `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`, served by Ollama
+from the project's ModelScope repository. Pull it once with
+`ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` — no renaming is needed — then
+run `agent-sec-cli scan-prompt warmup` to verify the model is available before the first scan.
 
 ## Verdicts
 

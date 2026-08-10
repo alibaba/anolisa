@@ -114,11 +114,11 @@ agent-sec-cli scan-prompt --input prompts.txt --format json
 # 人类可读输出
 agent-sec-cli scan-prompt --text "hello" --format text
 
-# 预下载 ML 模型（安装后执行一次）
+# 验证 Ollama 模型已就绪（安装后执行一次）
 agent-sec-cli scan-prompt warmup
 ```
 
-模型来源：ModelScope（Llama-Prompt-Guard-2-86M）。安装后执行 `scan-prompt warmup` 一次以消除冷启动延迟。
+模型来源：L2 使用 `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`，由 Ollama 从项目自有的 ModelScope 仓库拉取。执行一次 `ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` 即可，无需重命名；再执行 `scan-prompt warmup` 验证模型可用。
 
 #### 宿主 Hook Policy
 

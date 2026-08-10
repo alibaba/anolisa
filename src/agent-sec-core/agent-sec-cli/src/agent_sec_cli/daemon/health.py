@@ -19,7 +19,6 @@ def build_health_snapshot(runtime: DaemonRuntime) -> dict[str, Any]:
         "pid": os.getpid(),
         "uptime_seconds": runtime.uptime_seconds(),
         "socket": str(runtime.socket_path),
-        "prompt_scan": runtime.prompt_scan_state.to_dict(),
         "jobs": runtime.jobs.status(),
         "queues": runtime.queues.to_dict(),
     }

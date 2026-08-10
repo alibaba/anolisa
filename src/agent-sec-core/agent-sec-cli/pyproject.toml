@@ -74,7 +74,6 @@ include = [
     "src/agent_sec_cli/asset_verify/config.conf",
     "src/agent_sec_cli/asset_verify/trusted-keys/*.asc",
     "src/agent_sec_cli/code_scanner/rules/**/*.yaml",
-    "src/agent_sec_cli/prompt_scanner/rules/*.yaml",
     "src/agent_sec_cli/skill_ledger/scanner/builtins/cisco_static/NOTICE",
     "src/agent_sec_cli/skill_ledger/scanner/builtins/cisco_static/rules/*.yaml",
     "src/agent_sec_cli/skill_ledger/analyze.schema.json",

@@ -14,7 +14,7 @@
 - [输出 Schema](#输出-schema)
 - [自定义规则](#自定义规则)
 - [审计日志](#审计日志)
-- [安装 ML 依赖](#安装-ml-依赖)
+- [L2 模型与 Ollama 配置](#l2-模型与-ollama-配置)
 - [已知限制](#已知限制)
 
 ---
@@ -39,9 +39,9 @@
        │
        ▼ (STANDARD / STRICT 模式)
 ┌─────────────┐
-│  L2 ML      │  默认Meta Llama Prompt Guard 2 (86M)
-│  Classifier │  二分类：BENIGN / JAILBREAK
-└──────┬──────┘  ModelScope 离线下载，懒加载
+│  L2 ML      │  默认 Qwen3Guard (qwen3guard:0.6b) via Ollama
+│  Classifier │  分类：Safe / Unsafe (+ 类别)
+└──────┬──────┘  HTTP 调用 Ollama，懒加载
        │
        ▼ (L3 待实现)
 ┌─────────────┐
@@ -52,8 +52,8 @@
   Verdict（基于层语义推导）: PASS / WARN / DENY / ERROR
 ```
 
-> **注意**：L2（Llama-Prompt-Guard-2）为二分类模型，LABEL_0 = BENIGN，LABEL_1 = JAILBREAK
-> （涵盖所有注入 / 越狱尝试）。
+> **注意**：L2（Qwen3Guard）为 Ollama 上的分类模型，输出 `Safety: Safe` 或 `Safety: Unsafe`
+> 并附带类别标签（如 `Injection`、`Jailbreak` 等）。
 
 ### 检测模式
 
@@ -68,19 +68,20 @@
 ## 快速开始
 
 ```bash
-# 安装依赖（torch / transformers / modelscope 为必选依赖，随主包一同安装）
+# 安装依赖（Rust 原生扩展 + 轻量 Python 依赖，无 ML 库）
 cd agent-sec-core/agent-sec-cli
 uv sync
 
-# 预下载模型（推荐：首次安装后执行，避免第一次扫描时冷启动等待）
-# 下载过程有进度提示，约需 1-5 分钟（取决于网速）
+# 拉取 L2 模型，再预热（推荐：首次安装后执行，验证 Ollama 中模型已就绪）
+ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF
 uv run agent-sec-cli scan-prompt warmup
 ```
 
-> **冷启动说明**：`standard` / `strict` 模式首次使用时会通过 ModelScope 下载
-> `LLM-Research/Llama-Prompt-Guard-2-86M`（约 1 GB），下载完成后缓存于
-> `~/.cache/prompt_scanner/models/LLM-Research/Llama-Prompt-Guard-2-86M/`，后续启动直接从缓存加载（约 2–5 s）。
-> 生产部署建议在服务启动脚本中提前执行 `warmup`。
+> **L2 模型说明**：`standard` / `strict` 模式调用 Ollama 上的
+> `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`（项目自有 ModelScope 仓库）。
+> 首次使用前执行 `ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` 即可，
+> 无需重命名（由 Ollama 统一管理缓存）。
+> 生产部署建议在服务启动脚本中提前执行 `ollama pull` 与 `scan-prompt warmup`。
 
 ---
 
@@ -89,7 +90,7 @@ uv run agent-sec-cli scan-prompt warmup
 ### 基本命令
 
 ```bash
-# 预热模型（首次安装后建议执行）
+# 验证 L2 模型已就绪（首次安装后建议执行）
 agent-sec-cli scan-prompt warmup
 
 # 直接传入文本
@@ -112,7 +113,8 @@ agent-sec-cli scan-prompt --input prompts.txt
 | `--format FMT` | `json` | 输出格式：`json`（结构化）或 `text`（人类可读）|
 | `--source LABEL` | `""` | 输入来源标签，记录到结果 metadata（如 `user_input`、`rag`、`tool_output`）|
 
-> **warmup 子命令**无额外参数，始终以 `strict` 模式初始化 scanner（覆盖所有含 ML 的层）确保完整预热。
+> **warmup 子命令**默认以 `standard` 模式初始化 scanner，检查 L2 (Qwen3Guard) 模型在 Ollama 中是否可用；
+> 模型缺失时返回错误并提示对应的 `ollama pull` 命令。
 
 ### 输出格式示例
 
@@ -210,7 +212,7 @@ agent-sec-cli scan-prompt --text "ignore all system instructions"
 
 > **说明**：STANDARD 模式 L1、L2 全量运行（`fast_fail=False`）。L2 ML 确认了 L1 的判断，verdict 为 `deny`。
 > L2 的 finding 不含 `severity` 字段（ML 置信度不等同于规则严重程度）。
-> 首次运行需下载模型（约 1 GB），建议提前执行 `warmup`。
+> L2 首次调用需 Ollama 已拉取 `qwen3guard:0.6b`，建议提前执行 `ollama pull` 与 `warmup`。
 
 **text 格式（无威胁）：**
 
@@ -256,6 +258,8 @@ agent-sec-cli scan-prompt --text "ignore all system instructions" --mode fast --
 ---
 
 ## Python API
+
+> ⚠️ **本节描述的 Python API 已被 Rust 原生实现取代**，保留作为历史设计参考。当前调用入口为 `agent_sec_cli._native`（PyO3，提供 `scan_prompt_json` / `scan_multi_turn_json` / `warmup_scanner`），详见 user-guide 的 `prompt-scanner.md` 与 `agent-sec-cli/crates/prompt-scanner` 的 README。
 
 ### 基本用法
 
@@ -351,6 +355,8 @@ d = result.to_dict()
 ---
 
 ## 配置说明
+
+> ⚠️ **本节描述的 Python `ScanConfig` 已被 Rust 原生实现取代**，保留作为历史设计参考。当前配置通过环境变量（见下方「L2 模型与 Ollama 配置」章）与 CLI 参数完成。
 
 ### ScanConfig 全量参数
 
@@ -491,6 +497,8 @@ scanner = PromptScanner(
 
 ## 审计日志
 
+> ⚠️ **本节描述的 Python `AuditLogger` 已随 Python 引擎一并移除**，保留作为历史设计参考。Rust 原生 crate 不含审计模块；当前审计由 `security_middleware` 的生命周期钩子（`security_middleware/lifecycle.py`）以「单事件」模型统一记录：每次 `invoke("prompt_scan", ...)` 完成后写出一条 `prompt_scan` security event。daemon 侧的 `scan-prompt` 方法已下线，不再参与审计。
+
 `AuditLogger` 通过标准 `logging` 模块发送结构化日志事件，并可选地将 JSONL 记录追加到文件，支持 SIEM 集成。
 
 - 未配置 `log_path` 时：日志仅通过 `logging` 模块输出（logger 名称：`prompt_scanner.audit`）
@@ -558,58 +566,37 @@ if result.is_threat:
 
 ---
 
-## 安装 ML 依赖
+## L2 模型与 Ollama 配置
 
-`torch`、`transformers`、`modelscope` 已作为**必选依赖**随主包安装，执行 `uv sync` 即可，无需 `--extra ml`。
+L2（ML 分类器）与 L4（多轮意图检测）均通过 HTTP 调用 Ollama，不再依赖本机 ML 库（`torch` / `transformers` / `modelscope` 已移除）。
 
-### 模型下载时机
+### 前置条件
 
-| 方式 | 说明 |
-|------|------|
-| **自动懒加载**（默认） | 第一次调用 `scan()` 时触发下载，有冷启动延迟 |
-| **CLI 预热**（推荐） | 安装后手动执行 `warmup`，后续扫描无延迟 |
-| **Python API 预热** | 调用 `scanner.warmup()` 在服务启动时提前加载 |
+- 一个运行中的 Ollama 实例（默认 `http://localhost:11434`）
+- 已拉取所需模型
 
-```bash
-# CLI 预热（推荐在首次安装或部署后执行一次）
-uv run agent-sec-cli scan-prompt warmup
-```
+| 层 | 模型 | 拉取命令 |
+|----|------|----------|
+| L2 (Qwen3Guard) | `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` | `ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` |
+| L4 (Multi-turn intent) | `warden`（默认，可改） | `ollama pull warden` |
 
-```python
-# Python API 预热（在服务启动阶段调用）
-scanner = PromptScanner(mode=ScanMode.STANDARD)
-scanner.warmup()  # 下载并加载模型，幂等，多次调用安全
-# 此后的 scan() 调用无冷启动延迟
-result = scanner.scan(text)
-```
+### 环境变量
 
-模型缓存路径（ModelScope 默认）：
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `AGENT_SEC_MODEL_SERVICE_BACKEND` | `ollama` | 模型服务后端（当前仅支持 `ollama`） |
+| `AGENT_SEC_MODEL_SERVICE_BASE_URL` | `http://localhost:11434` | Ollama 服务地址 |
+| `AGENT_SEC_MODEL_SERVICE_TIMEOUT` | `30` | HTTP 调用超时（秒） |
+| `AGENT_SEC_OLLAMA_MODEL` | `warden` | L4 多轮意图检测使用的模型 |
+
+### 就绪检查
 
 ```bash
-# 查看已下载的模型
-ls ~/.cache/prompt_scanner/models/LLM-Research/
+# 验证 L2 模型在 Ollama 中可用（首次安装后建议执行）
+agent-sec-cli scan-prompt warmup
 ```
 
-也可以使用轻量 22M 模型（精度略低，速度更快）：
-
-```python
-from agent_sec_cli.prompt_scanner import PromptScanner
-from agent_sec_cli.prompt_scanner.config import ScanConfig
-
-scanner = PromptScanner(
-    config=ScanConfig(model_name="LLM-Research/Llama-Prompt-Guard-2-22M")
-)
-```
-
-也可以提前手动下载：
-
-```bash
-# Python SDK 下载
-uv run python -c "from modelscope import snapshot_download; snapshot_download('LLM-Research/Llama-Prompt-Guard-2-86M')"
-```
-
-**模型加载噪音抑制：**
-模型已缓存时，`model_manager` 会自动屏蔽 modelscope / safetensors / tqdm 的进度条和日志输出，仅首次下载时显示进度提示。
+模型缺失时返回 `verdict: error` 并提示对应的 `ollama pull` 命令。
 
 ---
 
@@ -617,9 +604,9 @@ uv run python -c "from modelscope import snapshot_download; snapshot_download('L
 
 | 限制 | 说明 |
 |------|------|
-| L3 Semantic 未实现 | `strict` 模式实际运行 L1 + L2（`fast_fail=False`）；`SemanticDetector.is_available()` 始终返回 `False`，L3 接口已预留 |
-| 自定义规则加载 | `ScanConfig.custom_rules_path` 字段已定义；内置规则自动加载，自定义规则加载集成待完成（可直接调用 `load_rules_from_yaml()` 后传给 `RuleEngine`）|
-| L2 模型冷启动 | 首次加载约 2–5 s；**建议安装后执行 `scan-prompt warmup` 预热** |
-| L2 为二分类器 | Llama-Prompt-Guard-2 只区分 BENIGN 和 JAILBREAK，injection 类型最终通过 L1 规则的 category 字段推断 |
-| 批量扫描并发策略 | `scan_batch` 在 STANDARD/STRICT 模式下强制串行执行（HuggingFace tokenizer Rust 后端非线程安全，`ModelManager.inference_context` 序列化推理，多线程只会增加开销）；仅 FAST 模式（纯 L1）使用 `ThreadPoolExecutor` |
+| L3 Semantic 未实现 | `strict` 模式实际运行 L1 + L2（`fast_fail=False`）；L3 语义检测层接口已预留，`is_available()` 始终返回 `false` |
+| 自定义规则加载 | 内置规则自动加载；自定义规则加载集成待完成 |
+| L2 模型就绪 | L2 调用 Ollama 的 `qwen3guard:0.6b`，首次需 `ollama pull` 拉取；**建议执行 `scan-prompt warmup` 验证可用** |
+| L2 输出语义 | Qwen3Guard 输出 Safe/Unsafe + 类别标签；具体 injection 类型由 L1 规则的 category 字段推断 |
+| 批量扫描并发策略 | STANDARD/STRICT 模式下 `scan_batch` 串行调用 Ollama（HTTP 请求串行，避免单连接竞争）；FAST 模式（纯 L1）可并行 |
 | 语言检测 | 当前为启发式规则（Unicode 脚本块比例 ≥ 15%），非 ML 模型；支持 `zh`/`ar`/`ru`/`hi`/`en`；日文汉字及韩文归为 `zh` |

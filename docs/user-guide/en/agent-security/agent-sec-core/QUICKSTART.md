@@ -116,11 +116,11 @@ agent-sec-cli scan-prompt --input prompts.txt --format json
 # Human-readable output
 agent-sec-cli scan-prompt --text "hello" --format text
 
-# Pre-download ML models (run once after install)
+# Verify Ollama model is ready (run once after install)
 agent-sec-cli scan-prompt warmup
 ```
 
-Model source: models are downloaded from ModelScope (Llama-Prompt-Guard-2-86M). Run `scan-prompt warmup` once after installation to eliminate cold-start latency.
+Model source: L2 uses `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`, served by Ollama from the project's ModelScope repository. Pull it once: `ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`. Run `scan-prompt warmup` to verify the model is available before scanning.
 
 #### Host hook policy
 
