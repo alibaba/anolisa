@@ -12,6 +12,17 @@ pub struct LedgerOutput {
 
 pub fn build_command_blocks(events: &[ShellEvent]) -> LedgerOutput {
     let mut starts = BTreeMap::new();
+    // Starts closed by a correlated intercept (#2106). Ledger contract for a
+    // started command: it yields a block (finish pairs a live or intercepted
+    // start), or an explicit command_started_without_finish error (start
+    // neither intercepted nor finished), or a by-design silent close (start
+    // intercepted and never finished — the NL interception path from #1742,
+    // which must stay free of block and error output). This map holds the
+    // third state: excluded from the started-without-finish sweep, yet still
+    // able to pair a later finish so an intercepted command that ran to
+    // completion keeps its block instead of degrading into
+    // command_finished_without_start.
+    let mut intercepted = BTreeMap::new();
     let mut blocks = Vec::new();
     let mut errors = Vec::new();
 
@@ -30,7 +41,10 @@ pub fn build_command_blocks(events: &[ShellEvent]) -> LedgerOutput {
                     continue;
                 };
 
-                let Some(start) = starts.remove(command_id) else {
+                let Some(start) = starts
+                    .remove(command_id)
+                    .or_else(|| intercepted.remove(command_id))
+                else {
                     errors.push(format!("command_finished_without_start:{command_id}"));
                     continue;
                 };
@@ -75,7 +89,9 @@ pub fn build_command_blocks(events: &[ShellEvent]) -> LedgerOutput {
             }
             ShellEventKind::UserInputIntercepted => {
                 if let Some(command_id) = &event.command_id {
-                    starts.remove(command_id);
+                    if let Some(start) = starts.remove(command_id) {
+                        intercepted.insert(command_id.clone(), start);
+                    }
                 }
             }
             _ => {}
@@ -125,5 +141,54 @@ mod tests {
 
         assert!(output.errors.is_empty());
         assert!(output.blocks.is_empty());
+    }
+
+    #[test]
+    fn user_input_intercepted_does_not_drop_subsequent_finish() {
+        let start = ShellEvent::command_started("session", "command", "echo ok", "/tmp", 1);
+        let mut intercept = ShellEvent::user_input_intercepted("session", "echo ok");
+        intercept.command_id = Some("command".to_string());
+        intercept.component = Some("natural_language".to_string());
+        let finish = ShellEvent::command_finished(
+            ShellEventKind::CommandCompleted,
+            "session",
+            "command",
+            0,
+            2,
+            "/tmp/output",
+        );
+
+        let output = build_command_blocks(&[start, intercept, finish]);
+
+        assert_eq!(output.blocks.len(), 1, "errors: {:?}", output.errors);
+        assert!(
+            !output
+                .errors
+                .iter()
+                .any(|error| error.starts_with("command_finished_without_start")),
+            "errors: {:?}",
+            output.errors
+        );
+    }
+
+    #[test]
+    fn user_input_intercepted_does_not_drop_subsequent_failed_finish() {
+        let start = ShellEvent::command_started("session", "command", "echo ok", "/tmp", 1);
+        let mut intercept = ShellEvent::user_input_intercepted("session", "echo ok");
+        intercept.command_id = Some("command".to_string());
+        intercept.component = Some("natural_language".to_string());
+        let finish = ShellEvent::command_finished(
+            ShellEventKind::CommandFailed,
+            "session",
+            "command",
+            1,
+            2,
+            "/tmp/output",
+        );
+
+        let output = build_command_blocks(&[start, intercept, finish]);
+
+        assert_eq!(output.blocks.len(), 1, "errors: {:?}", output.errors);
+        assert!(output.errors.is_empty(), "errors: {:?}", output.errors);
     }
 }
