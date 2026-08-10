@@ -1,8 +1,7 @@
-use std::fs::File;
-use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
+use super::temp_output::TempOutput;
 use super::{is_sensitive_target, strip_ansi};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -69,19 +68,19 @@ fn run_plan(
     plan: &GuardedDiagnosticPlan,
     config: &GuardedDiagnosticConfig,
 ) -> Result<GuardedDiagnosticOutput, GuardedDiagnosticError> {
-    let stdout_path = temp_path("stdout");
-    let stderr_path = temp_path("stderr");
-    let cleanup = [stdout_path.clone(), stderr_path.clone()];
-
-    let stdout = File::create(&stdout_path)
-        .map_err(|err| error("executor-io", format!("create stdout: {err}")))?;
-    let stderr = File::create(&stderr_path)
-        .map_err(|err| error("executor-io", format!("create stderr: {err}")))?;
+    let mut stdout =
+        TempOutput::new().map_err(|err| error("executor-io", format!("create stdout: {err}")))?;
+    let mut stderr =
+        TempOutput::new().map_err(|err| error("executor-io", format!("create stderr: {err}")))?;
     let mut child = Command::new(&plan.argv[0])
         .args(&plan.argv[1..])
         .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
+        .stdout(Stdio::from(stdout.try_clone().map_err(|err| {
+            error("executor-io", format!("create stdout: {err}"))
+        })?))
+        .stderr(Stdio::from(stderr.try_clone().map_err(|err| {
+            error("executor-io", format!("create stderr: {err}"))
+        })?))
         .spawn()
         .map_err(|err| error("executor-spawn", format!("{}: {err}", plan.argv[0])))?;
 
@@ -92,24 +91,20 @@ fn run_plan(
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                cleanup_paths(&cleanup);
                 return Err(error("diagnostic-timeout", plan.argv.join(" ")));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
             Err(err) => {
-                cleanup_paths(&cleanup);
                 return Err(error("executor-wait", err.to_string()));
             }
         }
     };
 
-    let output = GuardedDiagnosticOutput {
+    Ok(GuardedDiagnosticOutput {
         exit_code,
-        stdout: read_limited_clean(&stdout_path, config.output_limit_bytes)?,
-        stderr: read_limited_clean(&stderr_path, config.output_limit_bytes)?,
-    };
-    cleanup_paths(&cleanup);
-    Ok(output)
+        stdout: read_limited_clean(&mut stdout, config.output_limit_bytes)?,
+        stderr: read_limited_clean(&mut stderr, config.output_limit_bytes)?,
+    })
 }
 
 fn parse_simple(command: &str) -> Result<Vec<String>, GuardedDiagnosticError> {
@@ -155,30 +150,18 @@ fn push_token(tokens: &mut Vec<String>, token: &mut String) {
     }
 }
 
-fn temp_path(kind: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!(
-        "cosh-guarded-diagnostic-{}-{nanos}-{kind}",
-        std::process::id()
-    ))
-}
-
-fn read_limited_clean(path: &Path, limit: usize) -> Result<String, GuardedDiagnosticError> {
-    let bytes = std::fs::read(path).map_err(|err| error("executor-io", err.to_string()))?;
+fn read_limited_clean(
+    output: &mut TempOutput,
+    limit: usize,
+) -> Result<String, GuardedDiagnosticError> {
+    let bytes = output
+        .read_all()
+        .map_err(|err| error("executor-io", err.to_string()))?;
     let mut text = String::from_utf8_lossy(&bytes[..bytes.len().min(limit)]).to_string();
     if bytes.len() > limit {
         text.push_str("\n<truncated>");
     }
     Ok(strip_ansi(&text))
-}
-
-fn cleanup_paths(paths: &[PathBuf]) {
-    for path in paths {
-        let _ = std::fs::remove_file(path);
-    }
 }
 
 fn error(reason: &'static str, detail: impl Into<String>) -> GuardedDiagnosticError {
@@ -229,5 +212,68 @@ mod tests {
         .expect("diagnostic output");
         assert_eq!(output.exit_code, Some(0));
         assert!(!output.stdout.trim().is_empty());
+    }
+
+    // Diagnostic temp output must never appear at a predictable path in
+    // the shared temp dir, and attacker-controlled bytes must never be
+    // read back as diagnostic output. The attacker polls the temp dir for
+    // this process's historical `cosh-guarded-diagnostic-<pid>-*` files;
+    // on sighting one it swaps the file for a symlink to a sentinel
+    // victim, which a path-based read-back would follow.
+    #[test]
+    fn guarded_diagnostic_temp_output_is_not_observable_or_swappable() {
+        use super::super::temp_output::test_support::SwapAttacker;
+        use std::io::Write;
+        use std::sync::atomic::Ordering;
+
+        let temp_dir = std::env::temp_dir();
+        // Zero sightings only proves something when the temp dir is
+        // actually enumerable.
+        std::fs::read_dir(&temp_dir).expect("temp dir must be enumerable");
+        // NamedTempFile deletes the victim on drop, even when an assertion
+        // panics mid-test.
+        let mut victim_file = tempfile::NamedTempFile::new().expect("victim file");
+        victim_file
+            .write_all(b"GUARDED_DIAGNOSTIC_INJECTED")
+            .expect("write victim");
+        victim_file.flush().expect("flush victim");
+
+        let attacker = SwapAttacker::for_process(
+            "cosh-guarded-diagnostic",
+            &temp_dir,
+            victim_file.path().to_path_buf(),
+        );
+
+        let mut injected = false;
+        for _ in 0..10 {
+            let output = run_guarded_diagnostic(
+                "df -h",
+                &GuardedDiagnosticConfig {
+                    output_limit_bytes: 4096,
+                    ..GuardedDiagnosticConfig::default()
+                },
+            )
+            .expect("diagnostic run");
+            if output.stdout.contains("GUARDED_DIAGNOSTIC_INJECTED")
+                || output.stderr.contains("GUARDED_DIAGNOSTIC_INJECTED")
+            {
+                injected = true;
+            }
+        }
+        let enum_errors = attacker.enum_errors.load(Ordering::Relaxed);
+        let sightings = attacker.sightings.load(Ordering::Relaxed);
+        let swaps = attacker.swaps.load(Ordering::Relaxed);
+        attacker.finish();
+
+        assert_eq!(enum_errors, 0, "temp dir enumeration must not fail");
+        assert!(
+            !injected,
+            "attacker-controlled content was read back as diagnostic output"
+        );
+        assert_eq!(
+            sightings, 0,
+            "diagnostic temp files must never appear at predictable paths \
+             (symlink swaps succeeded: {swaps})"
+        );
     }
 }
