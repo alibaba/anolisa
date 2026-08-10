@@ -1,0 +1,165 @@
+name: sec-core-raw-install-nightly-test
+
+on:
+  # 临时触发器：仅为在真实 PR 上验证本 lane 而存在，paths 只匹配本 lane 自身的
+  # 文件，因此不会拦住其他 PR。验证通过后必须整块删除 —— 本作业包含一次完整源码
+  # 构建（约 45-60 分钟），不作为 PR 卡点。
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/sec-core-raw-install-nightly-test.yaml'
+      - 'src/agent-sec-core/scripts/ci/local_repo.sh'
+  schedule:
+    # UTC 16:00 = Beijing 00:00
+    - cron: "0 16 * * *"
+  workflow_dispatch:       # 手动触发，便于改动本 workflow 后立即验证
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+  RAW_REPO_DIR: ${{ github.workspace }}/sec-core-raw-repo
+
+jobs:
+  e2e-raw:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 22.04
+            container: ''
+          - name: Alinux4
+            container: alibaba-cloud-linux-4-registry.cn-hangzhou.cr.aliyuncs.com/alinux4/alinux4:latest
+    name: E2E sec-core raw install (${{ matrix.name }})
+    runs-on: anolisa-k8s-general-ci-x64
+    container: ${{ matrix.container || '' }}
+    timeout-minutes: 120
+    steps:
+      - name: Prepare Ubuntu 22.04
+        if: matrix.container == ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl git make tar jq python3-pip
+
+      - name: Configure mirrors and install base tools (Alinux4)
+        if: matrix.container != ''
+        run: |
+          sed -i -e "s/cloud.aliyuncs/aliyun/g" /etc/yum.repos.d/*.repo
+          dnf install -y tar git sudo make gzip jq python3-pip
+          command -v curl >/dev/null 2>&1 || dnf install -y --allowerasing curl
+          # sec-core's contract declares bwrap / systemctl / node / gpg / jq as
+          # runtime dependencies, and this image ships only gpg and python3.
+          # The published stable CLI (0.2.18) still refuses to auto-install them
+          # on rpm-family hosts ("unsupported package base: rpm"); the fix is in
+          # anolisa 0.2.19, which is not published yet — see alibaba/anolisa#2278.
+          # Drop this line once the published CLI provisions them itself, so the
+          # lane covers dependency provisioning here the way the Ubuntu leg does.
+          dnf install -y bubblewrap systemd nodejs gnupg2
+          # Fix sudo PAM in container: replace with permissive config
+          cat > /etc/pam.d/sudo <<'EOF'
+          #%PAM-1.0
+          auth       sufficient   pam_rootok.so
+          account    sufficient   pam_permit.so
+          session    sufficient   pam_permit.so
+          EOF
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.93.0'
+
+      # Raw packaging reads TOML with `tomllib` and builds the wheel against
+      # `python3.11`, and agent-sec-cli pins `requires-python = "==3.11.6"`.
+      # Alinux4 already ships 3.11 as `python3`; Ubuntu 22.04 ships 3.10, so
+      # there the interpreter has to come from the tool cache.
+      - uses: actions/setup-python@v5
+        if: matrix.container == ''
+        with:
+          python-version: '3.11.6'
+
+      - uses: astral-sh/setup-uv@v8.0.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Fail here rather than deep inside packaging if the image's default
+      # interpreter ever moves off 3.11.
+      - name: Verify packaging interpreter
+        run: |
+          python3 -c 'import sys, tomllib; assert sys.version_info[:2] == (3, 11), sys.version; print(sys.version)'
+          command -v python3.11
+
+      - name: Install build dependencies
+        run: ./scripts/build-all.sh --deps-only --component sec-core
+
+      # The published raw repository is built from release tags, so installing
+      # from it would test an older sec-core than the E2E suite in this
+      # checkout. Build the archive here and serve it from a local file://
+      # repository so the installed component and the tests share one commit.
+      - name: Build raw archive and publish it locally
+        run: make -C src/agent-sec-core raw-repo RAW_REPO_DIR="$RAW_REPO_DIR"
+
+      - name: Install anolisa CLI
+        run: |
+          curl -fsSL https://get.agentic-os.sh | bash
+          # The installer picks its prefix from the effective user: /usr/local
+          # for root (the Alinux4 container), ~/.local otherwise.
+          bin=""
+          for candidate in "$HOME/.local/bin/anolisa" /usr/local/bin/anolisa /usr/bin/anolisa; do
+            if [ -x "$candidate" ]; then
+              bin="$candidate"
+              break
+            fi
+          done
+          if [ -z "$bin" ]; then
+            echo "::error::anolisa CLI not found after install"
+            exit 1
+          fi
+          echo "ANOLISA_BIN=$bin" >> "$GITHUB_ENV"
+          dirname "$bin" >> "$GITHUB_PATH"
+          "$bin" --version
+
+      - name: Install sec-core from the local raw repository
+        run: |
+          sudo "$ANOLISA_BIN" --install-mode system \
+            install sec-core --backend raw --repo "file://${RAW_REPO_DIR}/v1"
+
+      - name: Verify sec-core installation
+        run: |
+          sudo "$ANOLISA_BIN" --install-mode system status sec-core
+          agent-sec-cli --version
+          agent-sec-daemon --help >/dev/null
+          linux-sandbox --help >/dev/null
+
+      - name: Verify the installed version matches this checkout
+        run: |
+          expected="$(python3 -c 'import tomllib; print(tomllib.load(open("src/agent-sec-core/.anolisa/component.toml", "rb"))["component"]["version"])')"
+          installed="$(sudo "$ANOLISA_BIN" --json --no-color --install-mode system status sec-core \
+            | jq -r '.data.components[] | select(.name == "sec-core" and .scope == "system") | .version')"
+          echo "contract version: ${expected}"
+          echo "installed version: ${installed}"
+          # Both sides must be non-empty: two empty strings would compare equal
+          # and turn the drift gate into a no-op.
+          if [ -z "$expected" ]; then
+            echo "::error::could not read the component version from .anolisa/component.toml"
+            exit 1
+          fi
+          if [ -z "$installed" ]; then
+            echo "::error::anolisa status reported no installed system-scope sec-core"
+            exit 1
+          fi
+          if [ "$installed" != "$expected" ]; then
+            echo "::error::installed sec-core ${installed} does not match this checkout (${expected}); the E2E suite would test a different build"
+            exit 1
+          fi
+
+      - name: Install E2E test dependency
+        run: python3 -m pip install --quiet pytest
+
+      - name: Run sec-core E2E tests
+        run: make -C src/agent-sec-core test-e2e-rpm

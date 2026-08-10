@@ -447,6 +447,21 @@ uv run --project agent-sec-cli pytest tests/unit-test/hermes-plugin/ -v
 
 ---
 
+## raw 打包与安装验证
+
+```bash
+make package-raw   # 构建确定性 raw 归档（OUTPUT_DIR，默认 target/raw/）
+make raw-repo      # 把刚构建的归档发布为本地 file:// 仓库，stdout 打印 --repo URL
+```
+
+- `raw-repo`（实现见 `scripts/ci/local_repo.sh`）生成 `RAW_REPO_DIR/v1/{归档, index-v2.toml}`。索引里的 component / version / install_modes 全部读自 `.anolisa/component.toml`，并写入该文件的 `manifest_digest`；`anolisa install` 会用归档内嵌 contract 重算该 digest，因此 OUTPUT_DIR 里残留的旧归档不会被冒充成当前版本发布。
+- **E2E 必须安装本地构建的包**：线上 raw 仓库按 tag 发布，直接从它安装会让 `tests/e2e/` 去验证一个更旧的 sec-core（RPM 后端同理，差异只在于制品格式）。CI 与本地复现都应先 `make raw-repo`，再 `anolisa install sec-core --backend raw --repo "file://$RAW_REPO_DIR/v1"`，并在安装后断言 `anolisa status` 报告的版本等于 contract 版本。对应的 CI 是 nightly 作业 `sec-core-raw-install-nightly-test`（Ubuntu 22.04 + Alinux4 矩阵）；它包含一次完整源码构建，所以不作为 PR 卡点。
+- 只发布 `index-v2.toml`：sec-core contract 使用 `render = "anolisa-paths-v1"`，属于 anolisa ≥ 0.2.17 才能表示的第二代索引语义，线上仓库同样只在 v2 索引中发布该组件。
+- 打包依赖 `python3` 3.11（`tomllib` + `maturin build -i python3.11`，且 agent-sec-cli 的 `requires-python = "==3.11.6"`）、uv、Node.js 与 Rust 工具链。Alinux4 镜像自带 `python3` = 3.11.6，直接可用；Ubuntu 22.04 自带 3.10，需额外准备 3.11.6 解释器。
+- Alinux4 上需先手动装好 contract 要求的 `bubblewrap` / `systemd` / `nodejs` 等运行时依赖：已发布的 stable anolisa CLI（0.2.18）在 rpm 系主机上仍以 `unsupported package base: rpm` 拒绝自动安装依赖（alibaba/anolisa#2278，修复在未发布的 0.2.19）；deb 系（Ubuntu）不受影响。
+
+---
+
 ## User-Facing Documentation Guidelines
 
 ### Authoring Protocol
