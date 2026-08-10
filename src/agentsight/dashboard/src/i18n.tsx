@@ -2,7 +2,7 @@ import React, {
   createContext,
   useCallback,
   useContext,
-  useEffect,
+  useLayoutEffect,
   useMemo,
   useState,
 } from 'react';
@@ -136,13 +136,12 @@ function syncDocumentMetadata(locale: Locale): void {
 export const I18nProvider: React.FC<React.PropsWithChildren> = ({ children }) => {
   const [locale, setLocaleState] = useState<Locale>(resolveInitialLocale);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     syncDocumentMetadata(locale);
   }, [locale]);
 
   const setLocale = useCallback((nextLocale: Locale) => {
     setLocaleState(nextLocale);
-    syncDocumentMetadata(nextLocale);
 
     try {
       window.localStorage.setItem(LOCALE_STORAGE_KEY, nextLocale);
