@@ -1,5 +1,7 @@
 # 安全启发规则
 
+[English](../../en/cosh-ng/security-heuristics.md)
+
 ## 概述
 
 cosh-ng 审计子系统实现了 PEP→PDP→Log 三阶段安全决策流水线。每条命令在执行前经过
@@ -33,9 +35,9 @@ cosh-ng 审计子系统实现了 PEP→PDP→Log 三阶段安全决策流水线�
 
 ## 命令解析（action parser）
 
-源文件：`audit/action.rs`
+源文件位于 `audit/action.rs`。
 
-解析器在 PDP 之前拒绝危险输入：
+解析器会在 PDP 处理前拒绝危险输入。
 
 | 检查 | 拒绝条件 | 理由 |
 |------|----------|------|
@@ -45,13 +47,14 @@ cosh-ng 审计子系统实现了 PEP→PDP→Log 三阶段安全决策流水线�
 
 解析失败时，调用方应映射为 `Outcome::Deny`（永不自动放行）。
 
-解析成功后，按首 token 决定结构：
+解析成功后，按首个 Token 决定结构。
+
 - `pkg` / `svc` / `checkpoint` / `cosh` → 结构化子系统（operation=tokens[1]，target=tokens[2]）
 - 其它 → Shell 子系统（operation=首 token，target=第二 token，args=tokens[1..]）
 
 ## 策略系统
 
-源文件：`audit/policy.rs`、`audit/builtin.rs`
+源文件位于 `audit/policy.rs` 和 `audit/builtin.rs`。
 
 ### 策略加载优先级
 
@@ -98,11 +101,11 @@ reason = "destructive command blocked by policy"
 | 枚举匹配 | `{ one_of = ["start", "restart", "stop"] }` | 任一匹配即可 |
 | Glob 匹配 | `{ glob = "-i*" }` | 支持 `*` 和 `?` |
 
-match 块支持字段：`subsystem`、`operation`、`target`、`arg[].key`、`arg[].value`
+match 块支持 `subsystem`、`operation`、`target`、`arg[].key` 和 `arg[].value` 字段。
 
 ## 决策引擎（evaluate）
 
-源文件：`audit/evaluate.rs`
+源文件位于 `audit/evaluate.rs`。
 
 - 遍历 `policy.rules[]`，第一条匹配的规则决定结果
 - 未匹配任何规则时使用 `policy.default`
@@ -145,11 +148,11 @@ match 块支持字段：`subsystem`、`operation`、`target`、`arg[].key`、`ar
 
 ## 日志与脱敏
 
-源文件：`audit/log.rs`、`audit/redact.rs`
+源文件位于 `audit/log.rs` 和 `audit/redact.rs`。
 
 ### 脱敏规则
 
-在写入日志前自动脱敏：
+写入日志前会自动脱敏。
 
 | 检测方式 | 触发条件 | 替换值 |
 |----------|----------|--------|

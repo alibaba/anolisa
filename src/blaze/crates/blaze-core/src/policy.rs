@@ -358,7 +358,9 @@ pub struct FirecrackerConfig {
     /// Guest kernel command line.
     #[serde(default = "default_fc_boot_args")]
     pub boot_args: String,
-    /// Enable virtio-vsock (Phase 2+; parsed today but not yet wired).
+    /// Enable guest operations over virtio-vsock.
+    ///
+    /// This is disabled by default and requires a compatible guest service.
     #[serde(default)]
     pub enable_vsock: bool,
     /// Create an isolated network namespace, veth uplink, tap, and NAT.

@@ -55,9 +55,10 @@ capability can be enabled independently.
 
 <h3 align="center">Let the Agent work directly in the terminal</h3>
 
-cosh-ng gives Agents a structured, predictable interface for Shell and system
-operations. Keep the Agent framework and sandbox already in use, and bring
-system work into the existing terminal workflow.
+cosh-ng is an AI-native Linux terminal: it keeps familiar Bash/Zsh behavior,
+then adds an Agent that can understand intent, use tools and Skills, and ask
+for approval before risky work. Shell commands and natural language share one
+terminal instead of forcing users into a separate chat application.
 
 [Get started with cosh-ng →](docs/user-guide/en/user-entrypoint/cosh-ng/QUICKSTART.md)
 
@@ -70,6 +71,26 @@ Token-less removes redundancy from tool schemas and responses.
 [SkillFS](src/skillfs/README.md) exposes Skills as views and mounts them on
 demand so only the relevant ones enter the context, and
 [AgentSight](src/agentsight/README.md) records where Tokens are actually spent.
+
+<table align="center" cellpadding="0" cellspacing="0">
+  <tr>
+    <td>
+      <video
+        controls
+        muted
+        src="https://github.com/user-attachments/assets/b372ae72-44fa-492f-9feb-e6cd137b631a"
+      ></video>
+    </td>
+  </tr>
+</table>
+
+<p align="center">
+  <sub>
+    In one observed coding task, Token-less saved 317K Tokens (40.5%), based
+    on AgentSight measurements.
+    Results vary by workload.
+  </sub>
+</p>
 
 <p align="center">
   <img
@@ -106,18 +127,18 @@ ANOLISA is building out the Agent execution environment:
 
 ## Install
 
-ANOLISA CLI is the common installation entry point. Enable cosh-ng, Token-less,
-or other capabilities as needed.
+ANOLISA CLI is the common installation entry point. cosh-ng is installed in
+system mode; Token-less and other capabilities can be added independently.
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash
 
-anolisa install cosh-ng
+sudo anolisa --install-mode system install cosh-ng
 anolisa install tokenless
 ```
 
-Run `cosh-ng` to enter the Agent-native shell, or point any existing Agent at
-it — Token-less applies to tool calls without further configuration.
+Run `cosh` to enter the AI-native terminal. Token-less can also optimize tool
+calls from an existing Agent without changing its framework.
 
 [Read the Quick Start →](docs/QUICKSTART.md)
 

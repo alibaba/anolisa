@@ -1,6 +1,6 @@
 {
   "name": "agent-sec-core-qwen-code-extension",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "ANOLISA security integration for Qwen Code",
   "hooks": {
     "UserPromptSubmit": [

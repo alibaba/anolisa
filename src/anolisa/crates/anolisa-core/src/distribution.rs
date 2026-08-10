@@ -158,6 +158,69 @@ impl<'de> Deserialize<'de> for ArtifactType {
     }
 }
 
+/// An index row that lenient loading could not represent, with the
+/// selector fields recovered best-effort from the raw TOML so callers can
+/// tell whether the row could have answered their query.
+///
+/// Fail-closed contract: a query that *may* match a skipped row must be
+/// refused rather than answered from the remaining rows — answering would
+/// silently substitute an older parsable version for the one this build
+/// cannot read (worst case: `update` downgrading an installed component).
+/// Unreadable selector fields are `None` and match conservatively.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedIndexEntry {
+    /// `component` field, when readable.
+    pub component: Option<String>,
+    /// `version` field, when readable.
+    pub version: Option<String>,
+    /// `channel` field, when readable.
+    pub channel: Option<String>,
+    /// `os` field, when readable.
+    pub os: Option<String>,
+    /// `arch` field, when readable.
+    pub arch: Option<String>,
+    /// `install_modes` field, when readable.
+    pub install_modes: Option<Vec<String>>,
+    /// Human-facing diagnostic (row position, component, parse error).
+    pub reason: String,
+}
+
+impl SkippedIndexEntry {
+    /// Whether this skipped row could have answered `q`, mirroring the
+    /// selector rules of [`DistributionIndex::resolve`] with `None`
+    /// (unreadable) fields treated as matching. A `version: None` query
+    /// ("latest") matches any skipped version of the component — the row
+    /// might be the newest — while a pinned query matches only its exact
+    /// version. `libc`/`pkg_base` are not recovered and never narrow the
+    /// answer, erring on refusal.
+    pub fn may_match(&self, q: &ResolveQuery<'_>) -> bool {
+        let component_matches = self.component.as_deref().is_none_or(|c| c == q.component);
+        let version_matches = match q.version {
+            Some(pinned) => self.version.as_deref().is_none_or(|v| v == pinned),
+            None => true,
+        };
+        let channel_matches = self
+            .channel
+            .as_deref()
+            .is_none_or(|c| c == q.channel.unwrap_or("stable"));
+        let os_matches = self.os.as_deref().is_none_or(|os| os == q.os);
+        let arch_matches = self
+            .arch
+            .as_deref()
+            .is_none_or(|arch| arch == q.arch || arch == "any");
+        let mode_matches = self
+            .install_modes
+            .as_ref()
+            .is_none_or(|modes| modes.iter().any(|m| m == q.install_mode));
+        component_matches
+            && version_matches
+            && channel_matches
+            && os_matches
+            && arch_matches
+            && mode_matches
+    }
+}
+
 /// Resolver query. Borrowed so callers can build it without allocating.
 #[derive(Debug, Clone)]
 pub struct ResolveQuery<'a> {
@@ -224,6 +287,116 @@ impl DistributionIndex {
     /// Parse from a TOML string. Returned error is the raw `toml` message.
     pub fn from_toml_str(s: &str) -> Result<Self, String> {
         toml::from_str(s).map_err(|e| e.to_string())
+    }
+
+    /// Load like [`Self::load`], but tolerate individually unparsable
+    /// entries instead of failing the whole index.
+    ///
+    /// Forward compatibility for consumers of a shared index: when a future
+    /// repository publishes an entry this build cannot represent (e.g. a new
+    /// `artifact_type`), that row is skipped while every other entry stays
+    /// installable; atomic parsing would instead reject the entire index and
+    /// break unrelated components. Callers MUST hold each returned
+    /// [`SkippedIndexEntry`] against their query via
+    /// [`SkippedIndexEntry::may_match`] and refuse to resolve when one may
+    /// match — otherwise a query for "latest" would silently fall back to
+    /// an older parsable version of the same component, which is a silent
+    /// downgrade, not fail-closed. File-level errors (I/O, TOML syntax,
+    /// malformed header) still fail the whole load: a damaged index is not
+    /// something to shop around in.
+    pub fn load_lenient(path: &Path) -> Result<(Self, Vec<SkippedIndexEntry>), DistributionError> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| DistributionError::Io(path.display().to_string(), e))?;
+        Self::from_toml_str_lenient(&content)
+            .map_err(|e| DistributionError::Parse(path.display().to_string(), e))
+    }
+
+    /// Entry-tolerant variant of [`Self::from_toml_str`]; see
+    /// [`Self::load_lenient`] for the compatibility rationale and the
+    /// obligation the skipped rows place on callers.
+    pub fn from_toml_str_lenient(s: &str) -> Result<(Self, Vec<SkippedIndexEntry>), String> {
+        /// Index shell with entries left as raw TOML values so one bad row
+        /// cannot poison the header or its siblings.
+        #[derive(Deserialize)]
+        struct LenientIndex {
+            schema_version: u32,
+            #[serde(default)]
+            channel: Option<String>,
+            #[serde(default)]
+            generated_at: Option<String>,
+            #[serde(default)]
+            expires_at: Option<String>,
+            #[serde(default)]
+            publisher: Option<String>,
+            #[serde(default)]
+            signature: Option<String>,
+            #[serde(default)]
+            entries: Vec<toml::Value>,
+        }
+
+        fn get_str(value: &toml::Value, key: &str) -> Option<String> {
+            value.get(key).and_then(|v| v.as_str()).map(str::to_owned)
+        }
+
+        let raw: LenientIndex = toml::from_str(s).map_err(|e| e.to_string())?;
+        let mut entries = Vec::with_capacity(raw.entries.len());
+        let mut skipped = Vec::new();
+        for (i, value) in raw.entries.into_iter().enumerate() {
+            // Selector fields are captured best-effort *before* the strict
+            // parse so a skipped row can still be matched against queries;
+            // a field too broken to read stays None and matches
+            // conservatively (see [`SkippedIndexEntry::may_match`]).
+            let component = get_str(&value, "component");
+            let version = get_str(&value, "version");
+            let channel = get_str(&value, "channel");
+            let os = get_str(&value, "os");
+            let arch = get_str(&value, "arch");
+            // All-or-nothing recovery: one non-string element makes the
+            // whole selector unreadable (`None`, matches conservatively).
+            // A partially recovered list would under-block — e.g. valid
+            // TOML `install_modes = [1]` recovered as an empty list
+            // matches no install mode, letting the skipped row bypass the
+            // downgrade gate.
+            let install_modes = value
+                .get("install_modes")
+                .and_then(|v| v.as_array())
+                .and_then(|modes| {
+                    modes
+                        .iter()
+                        .map(|m| m.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<_>>>()
+                });
+            match value.try_into::<DistributionEntry>() {
+                Ok(entry) => entries.push(entry),
+                Err(e) => {
+                    let who = component
+                        .as_deref()
+                        .map(|c| format!(" (component '{c}')"))
+                        .unwrap_or_default();
+                    skipped.push(SkippedIndexEntry {
+                        component,
+                        version,
+                        channel,
+                        os,
+                        arch,
+                        install_modes,
+                        reason: format!("skipped index entry #{i}{who}: {e}"),
+                    });
+                }
+            }
+        }
+        Ok((
+            Self {
+                schema_version: raw.schema_version,
+                channel: raw.channel,
+                generated_at: raw.generated_at,
+                expires_at: raw.expires_at,
+                publisher: raw.publisher,
+                signature: raw.signature,
+                entries,
+            },
+            skipped,
+        ))
     }
 
     /// Serialize to TOML. Useful for tests and tooling.
@@ -744,6 +917,152 @@ mod tests {
         "#;
         let index = DistributionIndex::from_toml_str(toml_str).expect("parse");
         assert_eq!(index.entries[0].artifact_type, ArtifactType::TarGz);
+    }
+
+    /// Lenient loading skips only the rows this build cannot represent
+    /// (fail closed for their component) and keeps siblings installable;
+    /// strict parsing of the same document still fails atomically.
+    #[test]
+    fn lenient_parse_skips_unknown_entry_and_keeps_siblings() {
+        let toml_str = r#"
+            schema_version = 1
+            [[entries]]
+            component = "cosh"
+            version = "1.2.3"
+            channel = "stable"
+            artifact_type = "tar_gz"
+            backend = "tar"
+            url = "https://example.invalid/cosh.tar.gz"
+            os = "linux"
+            arch = "x86_64"
+            install_modes = ["user"]
+            [[entries]]
+            component = "future-thing"
+            version = "0.1.0"
+            channel = "stable"
+            artifact_type = "hologram_v9"
+            backend = "tar"
+            url = "https://example.invalid/future.tar.gz"
+            os = "linux"
+            arch = "x86_64"
+            install_modes = ["user"]
+        "#;
+        assert!(
+            DistributionIndex::from_toml_str(toml_str).is_err(),
+            "strict parse must stay atomic"
+        );
+        let (index, skipped) =
+            DistributionIndex::from_toml_str_lenient(toml_str).expect("lenient parse");
+        assert_eq!(index.entries.len(), 1);
+        assert_eq!(index.entries[0].component, "cosh");
+        assert_eq!(skipped.len(), 1);
+        assert!(
+            skipped[0].reason.contains("future-thing"),
+            "diagnostic should name the skipped component, got: {}",
+            skipped[0].reason
+        );
+        assert_eq!(skipped[0].component.as_deref(), Some("future-thing"));
+        assert_eq!(skipped[0].version.as_deref(), Some("0.1.0"));
+    }
+
+    /// A selector that is valid TOML but not the shape this build expects
+    /// (e.g. non-string elements in `install_modes`) must be recovered as
+    /// unreadable (`None`) — never as a partial list. `Some([])` would
+    /// match no install mode and let the row bypass the downgrade gate.
+    #[test]
+    fn lenient_parse_treats_malformed_selector_as_unreadable() {
+        let toml_str = r#"
+            schema_version = 1
+            [[entries]]
+            component = "sec-core"
+            version = "2.0.0"
+            channel = "stable"
+            artifact_type = "hologram_v9"
+            backend = "tar"
+            url = "https://example.invalid/sec-core.tar.gz"
+            os = "linux"
+            arch = "x86_64"
+            install_modes = [1]
+        "#;
+        let (index, skipped) =
+            DistributionIndex::from_toml_str_lenient(toml_str).expect("lenient parse");
+        assert!(index.entries.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(
+            skipped[0].install_modes, None,
+            "a partially readable selector must collapse to unreadable"
+        );
+        // And the unreadable selector must block conservatively.
+        let query = ResolveQuery {
+            component: "sec-core",
+            version: None,
+            channel: None,
+            install_mode: "user",
+            os: "linux",
+            arch: "x86_64",
+            libc: None,
+            pkg_base: None,
+            preferred_types: &[],
+        };
+        assert!(skipped[0].may_match(&query));
+    }
+
+    /// The fail-closed matcher: a skipped row blocks exactly the queries it
+    /// could have answered — same component and target (any version when
+    /// the query wants "latest", the exact version when pinned) — and
+    /// unreadable fields block conservatively.
+    #[test]
+    fn skipped_entry_may_match_mirrors_resolver_selectors() {
+        let skipped = SkippedIndexEntry {
+            component: Some("sec-core".to_string()),
+            version: Some("2.0.0".to_string()),
+            channel: Some("stable".to_string()),
+            os: Some("linux".to_string()),
+            arch: Some("x86_64".to_string()),
+            install_modes: Some(vec!["user".to_string()]),
+            reason: "skipped index entry #1 (component 'sec-core')".to_string(),
+        };
+        let query = |component: &'static str, version: Option<&'static str>| ResolveQuery {
+            component,
+            version,
+            channel: None,
+            install_mode: "user",
+            os: "linux",
+            arch: "x86_64",
+            libc: None,
+            pkg_base: None,
+            preferred_types: &[],
+        };
+        // "latest" for the same component: the skipped row might be newest.
+        assert!(skipped.may_match(&query("sec-core", None)));
+        // The pinned version the row itself advertises.
+        assert!(skipped.may_match(&query("sec-core", Some("2.0.0"))));
+        // A different pinned version is answerable from parsable rows.
+        assert!(!skipped.may_match(&query("sec-core", Some("1.0.0"))));
+        // Unrelated components are unaffected.
+        assert!(!skipped.may_match(&query("cosh", None)));
+        // Non-matching target never blocks.
+        let mut other_os = query("sec-core", None);
+        other_os.os = "darwin";
+        assert!(!skipped.may_match(&other_os));
+        // Unreadable selectors must block conservatively.
+        let opaque = SkippedIndexEntry {
+            component: None,
+            version: None,
+            channel: None,
+            os: None,
+            arch: None,
+            install_modes: None,
+            reason: "skipped index entry #0".to_string(),
+        };
+        assert!(opaque.may_match(&query("cosh", Some("1.0.0"))));
+    }
+
+    /// A syntactically damaged file must fail even in lenient mode: entry
+    /// tolerance is for schema evolution, not for corrupted downloads.
+    #[test]
+    fn lenient_parse_still_rejects_file_level_damage() {
+        assert!(DistributionIndex::from_toml_str_lenient("schema_version = [broken").is_err());
     }
 
     #[test]

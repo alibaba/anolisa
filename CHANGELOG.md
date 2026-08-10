@@ -7,6 +7,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1] - 2026-08-08
+
+### Component Versions
+
+| Component | Version |
+|-----------|--------|
+| copilot-shell | 2.8.0 |
+| agent-sec-core | 0.9.0 |
+| agentsight | 0.9.1 |
+| tokenless | 0.7.3 |
+| agent-memory | 0.2.6 |
+| os-skills | 0.6.1 |
+| anolisa | 0.2.15 |
+| skillfs | 0.4.0 |
+| ws-ckpt | 0.4.2 |
+| cosh-ng | 0.14.0 |
+
+> **Note:** os-skills remains at v0.6.1; it did not change in this release and
+> is listed to show the complete stack composition.
+
+### Highlights
+
+- **cosh-ng**: Updated to v0.14.0, added resumable workspace sessions, MCP management, runtime introspection, and DashScope prompt caching, agents can recover long-running work and extend capabilities while reducing repeated prompt cost (#1546, #1592, #1778, #1949, #2046)
+- **agentsight**: Updated to v0.9.1, added optimization and trajectory analysis together with case containment, system audit, and ActPlane risk enforcement, users can diagnose agent quality and cost while investigating and containing risky behavior (#1728, #1789, #2051)
+- **agent-sec-core**: Updated to v0.9.0, expanded prompt, PII, code, and observability hooks across Qoder CLI, Qwen Code, and Codex, users can apply consistent security policies across supported agent runtimes (#1473, #1480, #1495, #1501, #1529, #1535)
+- **tokenless**: Updated to v0.7.3, added reversible compression with MCP retrieval plus Cosh-NG response and command compression, agents can reduce model context while recovering truncated payloads on demand (#1285, #1376, #1669)
+- **anolisa**: Updated to v0.2.15, added exact-version RPM and raw installs, file-metadata repair, and interactive progress, administrators can select published versions and recover installation drift with visible operation phases (#1700, #1740, #1987, #2036)
+
+### Updated
+
+- **copilot-shell**: Updated to v2.8.0, added the consent-gated `/ktuner` command, exported `COSH_SESSION_ID`, and reused compatible cosh-ng authentication during switching, users can tune hosts, correlate subprocess activity, and move between shells with less setup (#1279, #1491, #1951)
+- **agent-sec-core**: Updated to v0.9.0, added Qoder CLI and Qwen Code hook coverage, Codex PII and observability hooks, custom PII rules, and Chinese prompt-injection detection, users receive broader protection across prompts, tool calls, skills, and agent output (#1473, #1495, #1501, #1522, #1554)
+- **agentsight**: Updated to v0.9.1, added ATIF v1.7 trajectory analysis, accuracy/performance/cost workspaces, case containment, system audit, and risk dashboards, users can trace multi-agent behavior and act on optimization or security findings (#1728, #1789, #1828, #2051)
+- **tokenless**: Updated to v0.7.3, added stash-backed reversible compression, an MCP retrieval server, Cosh-NG compression, and macOS/Qwencode adapter support, agents can save tokens across more runtimes without permanently losing compressed content (#1285, #1376, #1669, #1894, #1964)
+- **agent-memory**: Updated to v0.2.6, added synchronous indexing plus focused-query and OR-ranked recall fallbacks, agents can retrieve newly captured memories from verbose or stopword-heavy prompts (#1520, #1574, #2047)
+- **anolisa**: Updated to v0.2.15, added exact-version RPM and raw installs, telemetry controls, macOS arm64 npm delivery, file-metadata repair, and phase-based progress, users can select published versions across Linux and macOS, control reporting, and repair Linux installation drift (#1619, #1700, #1740, #1962, #1987, #2036)
+- **skillfs**: Updated to v0.4.0, added Hermes nested-skill compatibility, configurable read-time transforms, authenticated live-source resolution, and hardened permission boundaries, agents can consume adapted skill views while source mutations remain safely controlled (#1146, #1484, #1517)
+- **ws-ckpt**: Updated to v0.4.2, added telemetry gating and automatic recovery of orphaned pre-init backups, users can recover workspaces after interrupted initialization without stale backup state (#1509, #1601)
+- **cosh-ng**: Updated to v0.14.0, added session recovery, MCP tools, slash-command introspection, and prompt-cache observability, agents can resume complex work, extend capabilities, and diagnose cache savings (#1530, #1546, #1592, #1778, #1949, #2046, #2075)
+
 ## [1.0] - 2026-07-06
 
 ### Component Versions

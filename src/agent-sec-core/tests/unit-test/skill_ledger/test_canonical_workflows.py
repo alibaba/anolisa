@@ -413,7 +413,9 @@ def test_audit_projects_io_paths_from_corrupted_manifests(
     assert result["errors"]
     assert str(canonical) in serialized
     if corruption == "latest-version-id":
-        assert str(canonical) in serialized_errors
+        # Authentication diagnostics deliberately omit manifest-controlled
+        # values instead of projecting and echoing a forged versionId.
+        assert "manifestHash" in serialized_errors
     assert str(live_alias) not in serialized
     assert str(physical.resolve()) not in serialized
     assert "resolved/weather" not in serialized

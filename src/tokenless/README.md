@@ -11,7 +11,7 @@ Token-Less combines complementary strategies to minimize LLM token consumption:
 - **Command Rewriting** — Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI command output, eliminating noise that would otherwise waste 60–90% of tokens.
 - **Tool Ready** — Pre-checks tool execution environments (binaries, configs, permissions, network), auto-fixes missing dependencies, and classifies execution failures as environment issues vs logic errors — reducing wasted retry tokens.
 
-Three integration paths are available:
+Framework integrations are available for:
 
 - **OpenClaw plugin** — covers command rewriting, response compression, and schema compression in one plugin.
 - **copilot-shell hook** — intercepts Shell commands via a PreToolUse hook and delegates to RTK for command rewriting + output filtering.
@@ -19,6 +19,7 @@ Three integration paths are available:
 - **Qoder CLI plugin** — Tool Ready, command rewriting, and response compression via Qoder's native hook system.
 - **Claude Code plugin** — RTK command rewriting, response/TOON compression, and Tool Ready via Claude Code's official plugin marketplace.
 - **Codex plugin** — response compression, TOON encoding, Tool Ready, and command rewriting via Codex's native hook system.
+- **OpenCode plugin** — schema/response/TOON compression, Tool Ready, and command rewriting via OpenCode's local plugin API.
 
 ## Features
 
@@ -36,6 +37,7 @@ Three integration paths are available:
 | Qoder CLI plugin | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅ |
 | Claude Code plugin | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅, TOON ✅ |
 | Codex plugin | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅, TOON ✅ |
+| OpenCode plugin | — | Tool Ready ✅, Command rewriting ✅, Schema compression ✅, Response compression ✅, TOON ✅ |
 | Zero runtime deps | — | Pure Rust, single static binary |
 
 ## Applicable Scenarios & Expected Effects
@@ -82,8 +84,8 @@ Token-Less/
 ├── crates/tokenless-schema/   # Core library: SchemaCompressor + ResponseCompressor
 ├── crates/tokenless-ccr/      # Reversible compression stash (Compress-Cache-Retrieve)
 ├── crates/tokenless-cli/      # CLI binary: `tokenless` command (env-check, compress, retrieve, stats)
-├── adapters/tokenless/        # FHS adapter bundle (manifest, common, openclaw, hermes, qoder, claude-code, codex)
-│   ├── manifest.json            # Adapter manifest (cosh + openclaw + hermes + qoder + claude-code + codex)
+├── adapters/tokenless/        # FHS adapter bundle (manifest + framework integrations)
+│   ├── manifest.json            # Adapter manifest for supported frameworks
 │   ├── common/                  # Shared: hooks, spec, env-fix, commands, cosh-extension
 │   │   ├── hooks/               # copilot-shell hooks (tool-ready + rewrite + compression)
 │   │   ├── cosh-extension.json  # copilot-shell extension manifest (references common/hooks/)
@@ -94,7 +96,8 @@ Token-Less/
 │   ├── hermes/                  # Hermes Agent plugin + scripts
 │   ├── qoder/                   # Qoder CLI plugin + scripts
 │   ├── claude-code/             # Claude Code plugin + marketplace + hooks
-│   └── codex/                   # Codex plugin + scripts
+│   ├── codex/                   # Codex plugin + scripts
+│   └── opencode/                # OpenCode local plugin + scripts
 ├── third_party/rtk/           # RTK vendored source (justfile clone+patch from GitHub)
 ├── third_party/patches/      # Patches for vendored third_party sources
 ├── Makefile                   # Unified build system
@@ -102,6 +105,52 @@ Token-Less/
 ```
 
 ## Quick Start
+
+Install the published component with the ANOLISA CLI:
+
+The install script places `anolisa` in `~/.local/bin`, and a user-mode
+Tokenless installation places `tokenless`, `rtk`, and `toon` in that same
+directory. Export it once if the current shell has not picked it up yet.
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash
+
+# Make the default install directory available in this shell
+export PATH="$HOME/.local/bin:$PATH"
+anolisa --version
+anolisa install tokenless
+tokenless --version
+```
+
+Alinux users with the YUM repository configured may install the RPM instead:
+
+```bash
+sudo yum install anolisa tokenless
+sudo anolisa --install-mode system adopt tokenless
+```
+
+Installing the CLI from the same YUM repository makes it available on sudo's
+system path. `adopt` then records the directly installed RPM in system state so
+adapter commands can use its component contract.
+
+Current public packages support Linux x86_64/aarch64 and macOS Apple Silicon.
+Intel macOS does not currently have a published package. The repository's npm
+packaging sources are for release construction and are not a public
+`anolisa-tokenless` installation route. The retained
+`@anolisa/tokenless-darwin-x64` optional-dependency entry describes a release
+build target; it does not indicate registry availability.
+
+ANOLISA-managed and adopted RPM installations place the available adapters
+without changing an Agent framework's user configuration. Run these commands
+as the user who owns that configuration, and enable only the adapter you need:
+
+```bash
+anolisa adapter scan
+anolisa adapter enable tokenless openclaw
+anolisa adapter status tokenless
+```
+
+Developers building from source can use:
 
 ```bash
 # Clone repo (no submodules needed)
@@ -112,7 +161,8 @@ cd Token-Less
 make setup
 ```
 
-Both methods install `tokenless` to `~/.local/bin`, helper binaries `rtk`/`toon` alongside it, and deploy the adapters (hooks + OpenClaw plugin + Hermes plugin).
+The source setup installs `tokenless` to `~/.local/bin`, places the `rtk` and
+`toon` helpers alongside it, and deploys all adapters for development.
 
 ## CLI Usage
 
@@ -398,15 +448,29 @@ The plugin registers hooks at four Codex events, covering four strategies:
 make codex-install
 ```
 
+## OpenCode Plugin
 
-## npm Install
+The local plugin uses OpenCode's mutable tool hooks, so compressed output
+replaces the original model-visible response instead of being appended to it.
+
+| Strategy | Event | Action | Status |
+|---|---|---|---|
+| Tool Ready | `tool.execute.before` | Checks dependencies and blocks calls that cannot run | ✅ Active |
+| Command rewriting | `tool.execute.before` (bash) | Rewrites shell commands via RTK | ✅ Active |
+| Response + TOON compression | `tool.execute.after` | Replaces structured tool output with a smaller representation | ✅ Active |
+| Schema compression | `tool.definition` | Compresses tool descriptions and JSON Schemas | ✅ Active |
+
+Install the plugin globally, then restart OpenCode:
 
 ```bash
-npm install -g anolisa-tokenless
+make opencode-install
 ```
 
-This automatically installs the correct prebuilt binaries (`tokenless`, `rtk`, `toon`) for your platform.
-Supports Linux and macOS on x86_64 and arm64.
+The installer creates a `tokenless.js` symbolic link in OpenCode's global
+`plugins/` directory and never overwrites an existing unmanaged file. It honors
+`OPENCODE_CONFIG_DIR`, `XDG_CONFIG_HOME`, and the explicit
+`TOKENLESS_OPENCODE_CONFIG_DIR` override.
+
 
 ## Build
 
@@ -421,7 +485,8 @@ Supports Linux and macOS on x86_64 and arm64.
 | `make lint` | Run clippy checks |
 | `make fmt` | Format code |
 | `make clean` | Clean build artifacts |
-| `make adapter-install` | Install all adapters (cosh + openclaw + hermes) |
+| `make package-raw` | Package prebuilt target binaries as an ANOLISA raw archive |
+| `make adapter-install` | Install all available framework adapters |
 | `make adapter-uninstall` | Remove all adapters |
 | `make cosh-extension-install` | Install Copilot Shell extension |
 | `make cosh-extension-uninstall` | Remove Copilot Shell extension |
@@ -435,6 +500,8 @@ Supports Linux and macOS on x86_64 and arm64.
 | `make claude-code-uninstall` | Remove Claude Code plugin |
 | `make codex-install` | Install Codex plugin |
 | `make codex-uninstall` | Remove Codex plugin |
+| `make opencode-install` | Install OpenCode local plugin |
+| `make opencode-uninstall` | Remove OpenCode local plugin |
 | `make setup` | Full setup: build + install + all adapters |
 
 Override install paths:
@@ -442,6 +509,39 @@ Override install paths:
 ```bash
 make install BIN_DIR=/usr/local/bin
 ```
+
+## Raw Packaging
+
+Raw packaging accepts already-built `tokenless`, `rtk`, and `toon`
+executables in one directory and applies the stable component payload layout:
+
+```bash
+make package-raw \
+  BIN_DIR="$PWD/target/release-bins" \
+  TARGET_OS=linux \
+  TARGET_ARCH=aarch64 \
+  OUTPUT_DIR="$PWD/dist"
+```
+
+Supported raw targets are `linux-x86_64`, `linux-aarch64`, and
+`macos-aarch64`. `darwin`/`arm64` and `amd64`/`x64` are accepted as input
+aliases, while artifact names always use the canonical ANOLISA labels. The
+packer verifies the ELF or Mach-O architecture without executing cross-target
+binaries, embeds the component-owned `.anolisa/component.toml`, materializes
+adapter hook symlinks, and emits a reproducible
+`tokenless-<version>-<os>-<arch>.tar.gz` archive. Set `SOURCE_DATE_EPOCH` when
+the caller needs an epoch other than the source commit time.
+
+npm packaging also accepts prebuilt `linux-x64`, `linux-arm64`, `darwin-x64`,
+and `darwin-arm64` binary directories under `target/npm-prebuilt`. The packer
+validates and assembles them:
+
+```bash
+node npm/scripts/package-npm.js --all
+```
+
+See [npm/README.md](npm/README.md#packaging-for-npm) for the fixed directory
+layout and single-target interface.
 
 ## Project Structure
 
@@ -454,8 +554,10 @@ make install BIN_DIR=/usr/local/bin
 | `adapters/tokenless/qoder/` | Qoder CLI adapter — plugin + detect/install/uninstall scripts |
 | `adapters/tokenless/claude-code/` | Claude Code adapter — marketplace + plugin + hooks dispatcher |
 | `adapters/tokenless/codex/` | Codex adapter — plugin + Python hook scripts |
+| `adapters/tokenless/opencode/` | OpenCode adapter — local JavaScript plugin + lifecycle scripts |
 | `third_party/rtk/` | RTK vendored source — command rewriting engine (justfile clone+patch) |
 | `third_party/patches/` | Patches for vendored third_party sources |
+| `packaging/raw/` | Component-owned ANOLISA raw packer and target validation |
 | `Makefile` | Unified build system for the entire workspace |
 
 ## Prerequisites

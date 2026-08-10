@@ -1,26 +1,28 @@
 import React from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
+import { LanguageSwitcher, useI18n } from '../i18n';
+import type { MessageKey } from '../i18n';
 import type { AppCapability } from '../utils/apiClient';
 
 type NavItem = {
   path: string;
-  label: string;
+  labelKey: MessageKey;
   icon: string;
   capability: AppCapability;
 };
 
 const navItems: NavItem[] = [
-  { path: '/health', label: 'Agent 看板', icon: '🩺', capability: 'agent_health' },
-  { path: '/', label: 'Agent 可观测', icon: '📊', capability: 'agent_observability' },
-  { path: '/sessions', label: '会话列表', icon: '🗂️', capability: 'sessions' },
-  { path: '/savings', label: 'Token 节省', icon: '⚡', capability: 'token_savings' },
-  { path: '/optimization', label: '优化分析', icon: '🔬', capability: 'optimization' },
-  { path: '/skills', label: 'Skill 指标', icon: '🧩', capability: 'skills' },
-  { path: '/security', label: '安全可观测', icon: '🛡️', capability: 'security' },
-  { path: '/audit', label: '系统审计', icon: '📋', capability: 'security' },
-  { path: '/enforcement', label: '风险拦截', icon: '⛔', capability: 'enforcement' },
-  { path: '/atif', label: '轨迹查看', icon: '🔍', capability: 'atif' },
-  { path: '/settings', label: '设置', icon: '⚙️', capability: 'settings' },
+  { path: '/health', labelKey: 'nav.agentHealth', icon: '🩺', capability: 'agent_health' },
+  { path: '/', labelKey: 'nav.agentObservability', icon: '📊', capability: 'agent_observability' },
+  { path: '/sessions', labelKey: 'nav.sessions', icon: '🗂️', capability: 'sessions' },
+  { path: '/savings', labelKey: 'nav.tokenSavings', icon: '⚡', capability: 'token_savings' },
+  { path: '/optimization', labelKey: 'nav.optimization', icon: '🔬', capability: 'optimization' },
+  { path: '/skills', labelKey: 'nav.skillMetrics', icon: '🧩', capability: 'skills' },
+  { path: '/security', labelKey: 'nav.securityObservability', icon: '🛡️', capability: 'security' },
+  { path: '/audit', labelKey: 'nav.systemAudit', icon: '📋', capability: 'security' },
+  { path: '/enforcement', labelKey: 'nav.riskEnforcement', icon: '⛔', capability: 'enforcement' },
+  { path: '/atif', labelKey: 'nav.trajectoryViewer', icon: '🔍', capability: 'atif' },
+  { path: '/settings', labelKey: 'nav.settings', icon: '⚙️', capability: 'settings' },
 ];
 
 interface NavBarProps {
@@ -29,13 +31,14 @@ interface NavBarProps {
 
 export const NavBar: React.FC<NavBarProps> = ({ capabilities }) => {
   const location = useLocation();
+  const { t } = useI18n();
   const visibleItems = Array.isArray(capabilities)
     ? navItems.filter((item) => capabilities.includes(item.capability))
     : navItems;
 
   return (
     <nav className="bg-white border-b border-gray-200 px-6 py-3">
-      <div className="max-w-screen-xl mx-auto flex items-center justify-between">
+      <div className="max-w-screen-2xl mx-auto flex flex-wrap items-center gap-3">
         {/* Logo / Brand */}
         <div className="flex items-center gap-2">
           <span className="text-xl font-bold text-gray-900">AgentSight</span>
@@ -43,7 +46,7 @@ export const NavBar: React.FC<NavBarProps> = ({ capabilities }) => {
         </div>
 
         {/* Navigation Links */}
-        <div className="flex items-center gap-1">
+        <div className="flex flex-1 flex-wrap items-center justify-end gap-1">
           {visibleItems.map((item) => {
             const isActive = item.path === '/' 
               ? location.pathname === '/' 
@@ -60,10 +63,11 @@ export const NavBar: React.FC<NavBarProps> = ({ capabilities }) => {
                 }`}
               >
                 <span className="mr-1.5">{item.icon}</span>
-                {item.label}
+                {t(item.labelKey)}
               </NavLink>
             );
           })}
+          <LanguageSwitcher id="navbar-language" className="ml-2 shrink-0" />
         </div>
       </div>
     </nav>

@@ -6,7 +6,7 @@
 //! Graceful degradation: if decompression fails, the original bytes are
 //! returned unchanged.
 
-use std::io::Read;
+use std::io::{Read, Write};
 
 /// Hard cap on a single decompressed body. Decompression operates on traffic
 /// from observed, untrusted processes, where a crafted "compression bomb" (a
@@ -109,6 +109,168 @@ pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
         }
         Some("br") => read_capped(brotli::Decompressor::new(body, 4096), body, "brotli"),
         _ => body.to_vec(),
+    }
+}
+
+/// Growable output sink for the incremental zstd decoder with the same hard
+/// cap as `read_capped` (bomb defense): a crafted stream expanding past
+/// `MAX_DECOMPRESSED_LEN` makes `write` fail, which poisons the decoder
+/// instead of exhausting memory.
+#[derive(Debug, Default)]
+struct CappedWriter {
+    buf: Vec<u8>,
+}
+
+impl Write for CappedWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.buf.len().saturating_add(data.len()) > MAX_DECOMPRESSED_LEN {
+            return Err(std::io::Error::other(format!(
+                "decompressed output exceeds {MAX_DECOMPRESSED_LEN} bytes (possible decompression bomb)"
+            )));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Incremental zstd decoder for *streaming* SSE bodies (issue #2267).
+///
+/// Gateways that zstd-compress an SSE stream flush per event but only close
+/// the frame when the response ends — or never, when the stream is finalized
+/// early (HTTP/2 framing without a chunked terminator, drain paths).
+/// Whole-buffer decompression needs the frame epilogue and fails with
+/// `UnexpectedEof` on such open frames; feeding fragments into a push-style
+/// decoder instead recovers every block the gateway flushed so far.
+///
+/// The first decode error poisons the decoder (subsequent fragments are
+/// ignored) but the bytes already decoded stay available via
+/// [`Self::decoded_output`], so a mid-stream corruption still salvages the
+/// events before it.
+///
+/// `pub(crate)`: aggregation-internal plumbing (review F5) — no external
+/// consumer, and keeping it crate-private leaves room to change the decoding
+/// strategy without a lib API break.
+pub(crate) struct ZstdStreamDecoder {
+    /// `None` when the zstd context could not be created; the decoder then
+    /// behaves as permanently failed and callers fall back to whole-buffer
+    /// decoding.
+    decoder: Option<zstd::stream::write::Decoder<'static, CappedWriter>>,
+    /// Total compressed bytes fed, kept for failure diagnostics.
+    bytes_fed: usize,
+    /// Set on the first decode error so follow-up fragments neither spam the
+    /// log nor corrupt the salvaged output.
+    failed: bool,
+}
+
+impl std::fmt::Debug for ZstdStreamDecoder {
+    // Manual impl because the inner zstd context is not `Debug`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ZstdStreamDecoder")
+            .field("bytes_fed", &self.bytes_fed)
+            .field("failed", &self.failed)
+            .finish()
+    }
+}
+
+impl Default for ZstdStreamDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ZstdStreamDecoder {
+    /// Create a decoder. Context-creation failure is not fatal: the decoder
+    /// starts in the failed state and `decoded_output` stays empty, letting
+    /// callers fall back to whole-buffer decompression.
+    pub fn new() -> Self {
+        match zstd::stream::write::Decoder::new(CappedWriter::default()) {
+            Ok(decoder) => ZstdStreamDecoder {
+                decoder: Some(decoder),
+                bytes_fed: 0,
+                failed: false,
+            },
+            Err(e) => {
+                log::warn!(
+                    "zstd streaming decoder init failed ({e:?}); incremental SSE decompression unavailable for this stream"
+                );
+                ZstdStreamDecoder {
+                    decoder: None,
+                    bytes_fed: 0,
+                    failed: true,
+                }
+            }
+        }
+    }
+
+    /// Feed one compressed fragment. On the first error the decoder is
+    /// poisoned and the failure is logged loudly (this replaces the silent
+    /// raw-bytes fallback that made zstd streams vanish into `events=0`);
+    /// output decoded before the error remains available.
+    pub fn feed(&mut self, data: &[u8]) {
+        // Count even after failure so diagnostics reflect the full stream.
+        self.bytes_fed = self.bytes_fed.saturating_add(data.len());
+        if self.failed {
+            return;
+        }
+        let Some(decoder) = self.decoder.as_mut() else {
+            return;
+        };
+        if let Err(e) = decoder.write_all(data) {
+            log::warn!(
+                "zstd streaming decompression failed (encoding=zstd, compressed_bytes_fed={}, decoded_bytes={}, err={e:?}); keeping partially decoded output",
+                self.bytes_fed,
+                decoder.get_ref().buf.len(),
+            );
+            self.failed = true;
+        }
+    }
+
+    /// Return everything decoded so far (all fully received blocks).
+    ///
+    /// Non-consuming: finalization can run on a cloned snapshot (idle/dead
+    /// drain) while the live connection keeps streaming into the same shared
+    /// decoder, so the internal state must survive this call. Needs `&mut`
+    /// because pending block bytes are flushed out of the zstd context first.
+    pub fn decoded_output(&mut self) -> Vec<u8> {
+        let Some(decoder) = self.decoder.as_mut() else {
+            return Vec::new();
+        };
+        // Flush pushes bytes of already-complete blocks into the sink without
+        // requiring the frame epilogue — exactly what an open streaming frame
+        // needs. Flush failure (e.g. output cap hit) poisons like `feed`.
+        if !self.failed {
+            if let Err(e) = decoder.flush() {
+                log::warn!(
+                    "zstd streaming flush failed (encoding=zstd, compressed_bytes_fed={}, decoded_bytes={}, err={e:?}); keeping partially decoded output",
+                    self.bytes_fed,
+                    decoder.get_ref().buf.len(),
+                );
+                self.failed = true;
+            }
+        }
+        decoder.get_ref().buf.clone()
+    }
+
+    /// Whether the decoder hit a decode error (or never initialized).
+    ///
+    /// Diagnostic accessor, currently exercised only by tests (production
+    /// callers rely on the empty-output fallback instead), hence the
+    /// dead_code allowance after the review F5 visibility narrowing.
+    #[allow(dead_code)]
+    pub fn is_failed(&self) -> bool {
+        self.failed
+    }
+
+    /// Total compressed bytes fed so far.
+    ///
+    /// Diagnostic accessor (see [`Self::is_failed`]).
+    #[allow(dead_code)]
+    pub fn bytes_fed(&self) -> usize {
+        self.bytes_fed
     }
 }
 
@@ -415,6 +577,81 @@ mod tests {
         let big = vec![b'x'; 2 * 1024 * 1024]; // 2 MiB, well under the cap
         let comp = zstd::encode_all(&big[..], 3).unwrap();
         assert_eq!(decompress_body(&comp, Some("zstd")), big);
+    }
+
+    /// Build a multi-block open zstd frame the way a streaming gateway does:
+    /// one frame, one flush per event, no epilogue. Returns (plain, compressed).
+    fn open_frame_multi_block() -> (Vec<u8>, Vec<u8>) {
+        let events: [&[u8]; 3] = [
+            b"event: message_start\ndata: {\"id\":\"msg_01ABC\",\"usage\":{\"input_tokens\":25}}\n\n",
+            b"event: content_block_delta\ndata: {\"delta\":{\"text\":\"Hello\"}}\n\n",
+            b"event: message_delta\ndata: {\"stop_reason\":\"end_turn\",\"usage\":{\"output_tokens\":42}}\n\n",
+        ];
+        let mut plain = Vec::new();
+        let mut enc = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+        for ev in events {
+            plain.extend_from_slice(ev);
+            enc.write_all(ev).unwrap();
+            enc.flush().unwrap();
+        }
+        (plain, enc.get_ref().clone())
+    }
+
+    #[test]
+    fn zstd_stream_decoder_one_byte_feed_recovers_all_blocks() {
+        // Boundary experiment for issue #2267 review finding F1: fragment
+        // boundaries never align with zstd block boundaries in the worst case
+        // (1-byte fragments). The write-decoder must buffer partial block
+        // bytes across feeds and emit every completed block on flush, so the
+        // decoded output is byte-identical to the original plaintext even
+        // though the frame epilogue never arrives.
+        let (plain, compressed) = open_frame_multi_block();
+        let mut dec = ZstdStreamDecoder::new();
+        for b in &compressed {
+            dec.feed(std::slice::from_ref(b));
+        }
+        assert!(!dec.is_failed());
+        assert_eq!(
+            dec.decoded_output(),
+            plain,
+            "1-byte-fragmented open frame must decode byte-exactly"
+        );
+    }
+
+    #[test]
+    fn zstd_stream_decoder_truncated_tail_keeps_complete_blocks() {
+        // Companion experiment: cut the compressed stream inside the LAST
+        // block. Only that incomplete block is undecodable; every earlier
+        // block must still be recovered in full (prefix of the plaintext).
+        let (plain, compressed) = open_frame_multi_block();
+        let mut dec = ZstdStreamDecoder::new();
+        // Drop the last 4 compressed bytes: mid-block cut, no epilogue.
+        dec.feed(&compressed[..compressed.len() - 4]);
+        let out = dec.decoded_output();
+        assert!(!out.is_empty(), "earlier complete blocks must survive");
+        assert!(
+            plain.starts_with(&out),
+            "truncated-tail output must be a plaintext prefix (no corruption)"
+        );
+        // The first two events were flushed as complete blocks well before
+        // the cut, so they must be fully present.
+        let second_event_end = plain
+            .windows(2)
+            .position(|w| w == b"\n\n")
+            .map(|p| p + 2)
+            .and_then(|first_end| {
+                plain[first_end..]
+                    .windows(2)
+                    .position(|w| w == b"\n\n")
+                    .map(|p| first_end + p + 2)
+            })
+            .unwrap();
+        assert!(
+            out.len() >= second_event_end,
+            "all blocks before the cut must decode: got {} of {} bytes",
+            out.len(),
+            second_event_end
+        );
     }
 
     #[test]

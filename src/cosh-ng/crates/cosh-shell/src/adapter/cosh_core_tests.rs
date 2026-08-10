@@ -229,6 +229,7 @@ fn prepare_invocation_headless_flag() {
     assert!(inv
         .args
         .contains(&"--enable-shell-evidence-tool".to_string()));
+    assert!(inv.args.contains(&"--cosh-shell-transport".to_string()));
 }
 
 #[test]
@@ -597,6 +598,7 @@ fn stream_parser_uses_neutral_status_messages() {
     std::fs::write(
         &script,
         r#"#!/bin/sh
+cat >/dev/null
 printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hidden reasoning"}}}'
 printf '%s\n' '{"type":"result","subtype":"success","session_id":"s","is_error":false,"result":"done"}'
 "#,
@@ -828,6 +830,7 @@ fn non_resumable_error_result_discards_active_session() {
     let script = write_mock_core(
         "non-resumable-error",
         r#"#!/bin/sh
+cat >/dev/null
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","session_resumable":false,"model":"mock","tools":[]}'
 printf '%s\n' '{"type":"result","subtype":"error","session_id":"00000000-0000-4000-8000-000000000000","is_error":true,"result":"failed"}'
 "#,
@@ -851,6 +854,7 @@ fn non_resumable_nonzero_exit_discards_active_session() {
     let script = write_mock_core(
         "non-resumable-nonzero",
         r#"#!/bin/sh
+cat >/dev/null
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000000","session_resumable":false,"model":"mock","tools":[]}'
 printf '%s\n' 'provider failed' >&2
 exit 7

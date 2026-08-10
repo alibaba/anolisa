@@ -18,6 +18,7 @@ pub(crate) mod readonly_compound;
 mod readonly_compound_tests;
 pub(crate) mod readonly_pipeline;
 pub(crate) mod readonly_rules;
+mod temp_output;
 
 pub(crate) fn strip_ansi(input: &str) -> String {
     let mut out = String::new();

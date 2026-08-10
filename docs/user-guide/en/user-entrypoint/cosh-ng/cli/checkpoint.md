@@ -1,102 +1,49 @@
 # Workspace Checkpoints
 
-The `cosh-cli checkpoint` subsystem manages workspace snapshots by communicating with the ws-ckpt daemon via Unix socket. Snapshots enable Agents to save state before executing high-risk operations and quickly rollback on failure.
+[中文版](../../../../zh/user-entrypoint/cosh-ng/cli/checkpoint.md)
 
-## Prerequisites
+`cosh-cli checkpoint` asks the ws-ckpt daemon to save, compare, restore, and clean workspace snapshots. Use a snapshot before a high-risk change so a failed operation can be rolled back.
 
-Checkpoint commands require a running ws-ckpt daemon. If not running, commands return `CheckpointDaemonUnavailable` error.
+## Requirements and safety
 
-## Command List
+- A running ws-ckpt daemon is required. If its socket is unavailable, the command returns `CheckpointDaemonUnavailable`.
+- The default socket is `/run/ws-ckpt/ws-ckpt.sock`; pass `--socket <path>` to use another socket.
+- Checkpoint commands do not support `--dry-run`. Check the workspace and snapshot IDs before restoring, deleting, or cleaning up.
 
-| Command | Description |
-|---------|-------------|
-| `cosh-cli checkpoint create` | Create snapshot |
-| `cosh-cli checkpoint restore <id>` | Restore to specified snapshot |
-| `cosh-cli checkpoint list` | List all snapshots |
-| `cosh-cli checkpoint status` | Check daemon status |
-| `cosh-cli checkpoint init` | Initialize workspace |
-| `cosh-cli checkpoint delete` | Delete snapshot |
-| `cosh-cli checkpoint diff` | Compare two snapshots |
+## Commands
 
-## create
+| Command | Required arguments | Purpose |
+|---|---|---|
+| `cosh-cli checkpoint init` | `--workspace <path>` | Initialize a workspace |
+| `cosh-cli checkpoint recover` | `--workspace <path>` | Recover workspace metadata |
+| `cosh-cli checkpoint create` | `--workspace <path> --id <id>` | Create a snapshot |
+| `cosh-cli checkpoint list` | none (`--workspace` is optional) | List snapshots |
+| `cosh-cli checkpoint restore <id>` | `--workspace <path>` | Restore a snapshot |
+| `cosh-cli checkpoint status` | none (`--workspace` is optional) | Show daemon status |
+| `cosh-cli checkpoint delete` | `--snapshot <id>` | Delete a snapshot |
+| `cosh-cli checkpoint diff` | `--workspace <path> --from <id> --to <id>` | Compare snapshots |
+| `cosh-cli checkpoint cleanup` | `--workspace <path>` | Keep a bounded number of snapshots |
 
-Create a snapshot with an identifier and description.
-
-```bash
-cosh-cli checkpoint create --workspace /home/agent/project --id step-042 -m "before refactor"
-```
-
-Output:
-
-```json
-{
-  "ok": true,
-  "data": {
-    "checkpoint_id": "step-042",
-    "step": 42
-  },
-  "meta": { "subsystem": "checkpoint", "duration_ms": 150, "distro": "alinux", "dry_run": false }
-}
-```
-
-## restore
-
-Restore workspace to a specified snapshot state.
-
-```bash
-cosh-cli checkpoint restore step-040 --workspace /home/agent/project
-```
-
-## list
-
-List all snapshots in the workspace.
-
-```bash
-cosh-cli checkpoint list --workspace /home/agent/project
-```
-
-## diff
-
-Compare differences between two snapshots.
-
-```bash
-cosh-cli checkpoint diff --workspace /home/agent/project --from step-040 --to step-042
-```
-
-## init
-
-Initialize checkpoint management for a workspace.
+All commands use the `cosh-cli checkpoint` prefix:
 
 ```bash
 cosh-cli checkpoint init --workspace /home/agent/project
+cosh-cli checkpoint create --workspace /home/agent/project --id before-change --message "safe point"
+cosh-cli checkpoint list --workspace /home/agent/project
+cosh-cli checkpoint diff --workspace /home/agent/project --from before-change --to after-change
+cosh-cli checkpoint restore before-change --workspace /home/agent/project
 ```
 
-## delete
+Optional controls include `--pin` and `--metadata <json>` on `create`, `--force` and `--workspace <path>` on `delete`, and `--keep <count>` on `cleanup`. `list` and `status` can omit `--workspace` to query all workspaces known to the daemon.
 
-Delete a specified snapshot.
+## Typical rollback flow
+
+Create a snapshot, perform and verify the high-risk operation, then restore it if the operation fails. After a successful operation, clean up old snapshots when they are no longer needed.
 
 ```bash
-cosh-cli checkpoint delete --snapshot step-042
+cosh-cli checkpoint create --workspace /path/to/workspace --id pre-action --message "safe point"
+cosh-cli checkpoint restore pre-action --workspace /path/to/workspace
+cosh-cli checkpoint cleanup --workspace /path/to/workspace
 ```
 
-## status
-
-Check ws-ckpt daemon connection status.
-
-```bash
-cosh-cli checkpoint status
-```
-
-## IPC Protocol
-
-Checkpoint commands communicate with the ws-ckpt daemon via Unix socket, using bincode serialization + 4-byte little-endian length prefix frame format. See developer documentation [IPC Protocol](../../../../../developer-guide/en/cosh-ng/ipc-protocol.md).
-
-## Typical Agent Workflow
-
-```
-1. cosh-cli checkpoint create --id pre-action -m "safe point"
-2. Execute high-risk operation (file modifications, service restarts, etc.)
-3. Verify operation results
-4. If failed → cosh-cli checkpoint restore pre-action
-5. If successful → proceed to next step
-```
+Responses use the standard [CoshResponse<T> envelope](../output-format.md).

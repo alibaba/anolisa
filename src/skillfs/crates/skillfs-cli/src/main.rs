@@ -188,6 +188,13 @@ enum Commands {
         #[arg(long, help_heading = help_text::HEADING_MOUNT)]
         allow_other: bool,
 
+        /// Root visible to readers for paths advertised by skill-discover.
+        ///
+        /// Set this to the mounted skills directory when readers cannot access
+        /// the physical source path, such as a separate workload container.
+        #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_MOUNT)]
+        skill_discover_root: Option<PathBuf>,
+
         /// Keep SkillFS in the foreground; useful for tests and systemd.
         #[arg(long, help_heading = help_text::HEADING_PROCESS)]
         foreground: bool,
@@ -536,6 +543,7 @@ async fn run(
             source,
             mountpoint,
             allow_other,
+            skill_discover_root,
             foreground,
             managed,
             pid_file,
@@ -559,6 +567,17 @@ async fn run(
             trusted_peer_gid,
             skill_layout,
         } => {
+            if let Some(root) = &skill_discover_root {
+                if !root.is_absolute() {
+                    let result = Err(format!(
+                        "--skill-discover-root must be absolute, got '{}'",
+                        root.display()
+                    )
+                    .into());
+                    finish_sls(guard, err_reason(&result));
+                    return result;
+                }
+            }
             if managed {
                 // Managed mode: spawn a detached supervisor and return once
                 // the mount is ready. The supervisor re-invokes this binary
@@ -576,6 +595,7 @@ async fn run(
                 source,
                 mountpoint,
                 allow_other,
+                skill_discover_root,
                 foreground,
                 pid_file,
                 audit_log,
@@ -804,6 +824,7 @@ async fn cmd_mount(
     source: PathBuf,
     mountpoint: PathBuf,
     allow_other: bool,
+    skill_discover_root: Option<PathBuf>,
     foreground: bool,
     pid_file: Option<PathBuf>,
     audit_log: Option<PathBuf>,
@@ -2465,6 +2486,7 @@ async fn cmd_mount(
                 skill_layout,
                 os_adapter: os_adapter_stage,
                 directive_enabled,
+                skill_discover_root,
             },
         )
     });

@@ -143,7 +143,24 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Mon Aug 03 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Mon Aug 10 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Raw dependency provisioning now recognizes RPM and DEB family hints without `which`.
+- Sandbox-list and registration-status JSON now use the standard response envelope.
+- OpenClaw adapters now honor configured state directories and migrate legacy installs safely.
+
+* Thu Aug 06 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.18-1
+- Raw installs now use bounded-memory, disk-backed payload staging.
+- Telemetry now derives region-specific SLS projects from a project prefix.
+- Large intact artifacts no longer cause false integrity failures.
+- Codex adapter enablement now trusts installed plugin hooks.
+
+* Wed Aug 05 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.17-1
+- Raw installs now render relocatable templates and reject incompatible contracts.
+- Generation-2 indexes prevent silent downgrade from unreadable entries.
+- RPM adapters now use package-owned roots and preserve external symlink trust.
+- Native Qoder plugins now use the framework lifecycle and protect existing registrations.
+
+* Mon Aug 03 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.16-1
 - Component updates now report adapter bundles that need follow-up.
 - Raw installs now work without rpm tooling on deb-family hosts that have no rpm database.
 

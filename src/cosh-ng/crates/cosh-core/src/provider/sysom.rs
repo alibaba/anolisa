@@ -151,6 +151,11 @@ impl SysomProvider {
             inner["instance_id"] = serde_json::json!(id);
         }
 
+        // Last word on the output cap: the `extra_params` merge above may have
+        // replaced the resolved `max_tokens`, which would let the wire request
+        // outspend the reserve the compaction budget priced it against (#2240).
+        super::clamp_output_cap_fields(&mut inner, config.max_tokens);
+
         // Wrap in llmParamString
         serde_json::json!({
             "llmParamString": inner.to_string()

@@ -181,7 +181,7 @@ Enable code-scan approval:
 openclaw config set plugins.entries.agent-sec.config.codeScanRequireApproval true
 ```
 
-For deployment-level overrides, `CODE_SCANNER_HOOK_ENABLED=true|false` takes precedence over `capabilities["scan-code"].enabled`, and `CODE_SCANNER_MODE=observe|ask` takes precedence over `codeScanRequireApproval`. Invalid or unsupported values, including `block`/`deny`, are treated as unset and fall back to plugin configuration. Ordinary findings do not support direct block; the existing self-protect rule remains a forced-block exception. OpenClaw does not consume `CODE_SCANNER_TIMEOUT` and keeps its fixed 10-second timeout.
+For deployment-level overrides, `CODE_SCANNER_HOOK_ENABLED=true|false` takes precedence over `capabilities["scan-code"].enabled`, and `CODE_SCANNER_MODE=observe|ask|block` takes precedence over `codeScanRequireApproval`. `debug` aliases `observe`, `deny` aliases `block`, and `warn` or invalid values are treated as unset and fall back to plugin configuration. In `ask` mode, ordinary findings return `requireApproval`; in `block` mode, ordinary findings return `{ block: true, blockReason }`. The existing self-protect rule remains a forced-block exception regardless of mode. OpenClaw does not consume `CODE_SCANNER_TIMEOUT` and keeps its fixed 10-second timeout.
 
 Enable PII deny blocking:
 

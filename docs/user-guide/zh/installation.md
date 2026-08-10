@@ -1,42 +1,59 @@
 # 安装指南
 
-本指南涵盖 ANOLISA 的渐进式安装——从 CLI 工具到各组件及适配器的配置。
+[English](../en/installation.md)
+
+本指南介绍如何安装 ANOLISA CLI、所需组件和适配器。
 
 ---
 
-## 第一步：安装 ANOLISA CLI
+## 第一步 安装 ANOLISA CLI
 
 `anolisa` CLI 是管理所有 ANOLISA 组件的统一入口。
 
-### 方式 A：安装脚本（推荐）
+### 方式 A 安装脚本（推荐）
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash
 ```
 
-### 方式 B：YUM（Alinux）
+### 方式 B YUM（Alinux）
 
 ```bash
 sudo yum install anolisa
 ```
 
-安装后验证：
+安装后验证版本。
 
 ```bash
 anolisa --version
 ```
 
+如果当前 CLI 较旧，先根据它的安装来源完成自更新，再安装使用新版 raw
+包契约的组件。
+
+```bash
+# 通过 get.agentic-os.sh 安装的 CLI
+anolisa update self
+
+# 由 RPM 管理的 CLI
+sudo anolisa update self
+```
+
+AgentSecCore 要求 `anolisa` 0.2.17 或更高版本。CLI 无法安全读取契约时，
+会先给出更新提示并停止安装，不会改动主机。
+
 ---
 
-## 第二步：环境检测
+## 第二步 环境检测
 
-运行环境检查以识别系统能力：
+运行环境检查，识别系统能力。
 
 ```bash
 anolisa env
 ```
 
-将显示：
+命令会显示以下信息。
+
 - 操作系统和架构
 - 可用文件系统（btrfs 用于 ws-ckpt）
 - FUSE 可用性（用于 skillfs）
@@ -45,9 +62,9 @@ anolisa env
 
 ---
 
-## 第三步：安装组件
+## 第三步 安装组件
 
-根据需要逐个安装组件：
+根据需要逐个安装组件。
 
 ```bash
 anolisa install <component>
@@ -57,19 +74,41 @@ anolisa install <component>
 
 | 组件 | 说明 | 支持的模式 |
 |------|------|------------|
-| `cosh` | Copilot Shell — AI 终端助手 | user、system |
+| `cosh` | Copilot Shell AI 终端助手 | user、system |
+| `cosh-ng` | AI 原生 Linux 终端与 Agent 运行时（实验阶段） | **system** |
 | `os-skills` | 系统管理与 DevOps 技能 | user、system |
 | `tokenless` | Token 优化（压缩） | user、system |
 | `ws-ckpt` | 工作区快照/回滚 | **system** |
 | `skillfs` | FUSE 虚拟技能文件系统 | **system** |
 | `agent-memory` | 基于 MCP 的持久化记忆 | user、system |
 | `agentsight` | eBPF 追踪与 Dashboard | **system** |
-| `agent-sec-core` | 安全加固 | **system** |
+| `sec-core` | 本地安全运行时、scanner 和 adapter | **system** |
 
-> **注意**：仅支持 system mode 的组件需要 `sudo` 并显式选择 system scope：
+> **注意** 仅支持 system 模式的组件需要 `sudo`，并且必须显式选择 system 范围。
 > ```bash
 > sudo anolisa --install-mode system install agentsight
 > ```
+
+以 system 模式安装 cosh-ng，随后运行 `cosh` 进入终端。
+
+```bash
+sudo anolisa --install-mode system install cosh-ng
+cosh
+```
+
+ANOLISA CLI 使用组件名 `sec-core`。Alinux 的 RPM 包名仍然是
+`agent-sec-core`。
+
+```bash
+sudo anolisa --install-mode system install sec-core
+
+# 如果直接安装 RPM，配置 adapter 前先让 ANOLISA 记录该组件
+sudo yum install anolisa agent-sec-core
+sudo anolisa --install-mode system adopt sec-core
+```
+
+随后进入[第四步](#第四步-配置适配器)，由拥有目标 Agent 配置的用户执行
+`anolisa adapter enable sec-core <framework>`。
 
 ### 安装全部组件
 
@@ -79,17 +118,20 @@ anolisa install --all
 
 ### YUM 替代方式（Alinux）
 
-每个组件也可通过 YUM 安装：
+每个组件也可通过 YUM 安装。请在同一条命令中安装 system CLI，避免 `sudo`
+依赖用户目录中的 `PATH`。直接安装 RPM 不会生成 ANOLISA 状态记录，继续使用
+组件生命周期或 adapter 命令前，需要先执行 `adopt`。
 
 ```bash
-sudo yum install <component>
+sudo yum install anolisa <rpm-package>
+sudo anolisa --install-mode system adopt <component>
 ```
 
 ---
 
-## 第四步：适配器配置
+## 第四步 配置适配器
 
-适配器将组件桥接到特定 Agent 框架。安装组件后再启用适配器：
+适配器把组件接入特定 Agent 框架。安装组件后再启用适配器。
 
 ```bash
 anolisa adapter scan
@@ -110,19 +152,52 @@ ws-ckpt plugin install --runtime openclaw
 
 # ws-ckpt Hermes 插件
 ws-ckpt plugin install --runtime hermes
+
+# AgentSecCore OpenClaw 插件
+anolisa adapter enable sec-core openclaw
+```
+
+system 安装负责管理组件文件。adapter 需要写入当前用户的 Agent 配置，
+普通的 user scope 框架安装不需要 `sudo`。
+
+---
+
+## 第五步 启动常驻服务
+
+安装组件和启动常驻服务是两个动作。AgentSight 会安装
+`agentsight.service` 及其 enforcer 依赖，两个单元默认都不启用。
+主机准备开始采集时，再启动主服务。
+
+```bash
+sudo systemctl enable --now agentsight.service
+sudo systemctl status agentsight.service
+```
+
+主服务以 root 身份运行 eBPF trace 和 Dashboard，数据保存在仅 root 可读的
+`/var/log/sysak/.agentsight`。查询服务数据时也要使用 `sudo`。如需前台排查，
+先停止服务，再在两个终端中分别以 root 身份启动 tracer 和 server。
+
+```bash
+sudo systemctl stop agentsight.service
+
+# 终端 1
+sudo agentsight trace
+
+# 终端 2
+sudo agentsight serve
 ```
 
 ---
 
-## 第五步：验证安装
+## 第六步 验证安装
 
-查看所有已安装组件的状态：
+查看所有已安装组件的状态。
 
 ```bash
 anolisa status
 ```
 
-运行内置诊断工具：
+运行内置诊断工具。
 
 ```bash
 anolisa doctor
@@ -132,14 +207,14 @@ anolisa doctor
 
 ## 卸载
 
-移除特定组件：
+移除指定组件。
 
 ```bash
 anolisa uninstall <component>
 ```
 
 当前没有批量卸载命令。先列出安装记录，再逐个卸载目标组件，以便分别确认其
-authority 和系统软件包移除策略：
+权限来源和系统软件包移除策略。
 
 ```bash
 anolisa list --installed
@@ -150,25 +225,26 @@ anolisa uninstall <component>
 
 ## 升级
 
-更新特定组件：
+更新指定组件。
 
 ```bash
 anolisa update <component>
 ```
 
-更新所有已安装组件：
+更新所有已安装组件。
 
 ```bash
 anolisa update all
 ```
 
-`update all` 只更新已记录的组件，不更新 CLI；更新 CLI 请使用
-`anolisa update self`。
+`update all` 只更新已记录的组件，不更新 CLI。脚本安装的 CLI 使用
+`anolisa update self`，RPM 管理的 CLI 使用 `sudo anolisa update self`。
 
 ---
 
 ## 下一步
 
 - [anolisa CLI 参考](user-entrypoint/anolisa-cli.md)
+- [cosh-ng 快速开始](user-entrypoint/cosh-ng/QUICKSTART.md)
 - [Copilot Shell](user-entrypoint/copilot-shell/QUICKSTART.md)
 - [故障排查](troubleshooting.md)

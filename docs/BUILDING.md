@@ -2,449 +2,198 @@
 
 [中文版](BUILDING_zh.md)
 
-This guide describes how to prepare the development environment, build each component from source, and run tests.
+This guide is for contributors working from an ANOLISA checkout. It describes
+the repository-wide build entry point, the boundary of the aggregate test
+runner, and the local build and test commands for all twelve components. A
+component README remains the source for component-specific dependencies and
+runtime setup.
 
-Two paths are provided:
-
-1. Quick Start: run one script to check/install dependencies and build selected components.
-2. Component-by-Component: build each module manually.
-
-## 1. Repository Layout
-
-```text
-anolisa/
-├── src/
-│   ├── copilot-shell/       # AI terminal assistant (Node.js / TypeScript)
-│   ├── os-skills/           # Ops skills (Markdown + optional scripts)
-│   ├── agent-sec-core/      # Agent security sandbox (Rust + Python)
-│   ├── agentsight/          # eBPF observability/audit agent (Rust, optional)
-│   └── agent-memory/        # MCP filesystem memory server (Rust, Linux only)
-├── scripts/
-│   ├── build-all.sh         # Unified build entry
-│   └── rpm-build.sh         # Unified RPM build script
-├── tests/
-│   └── run-all-tests.sh     # Unified test entry
-├── Makefile
-└── docs/
-```
-
-## 2. Environment Dependencies
-
-| Component | Required Tools |
-|-----------|----------------|
-| copilot-shell | Node.js >= 20, npm >= 10, make, g++ |
-| os-skills | Python >= 3.12 (only for optional scripts) |
-| agent-sec-core | Rust >= 1.91.0, Python >= 3.12, uv (Linux only) |
-| agentsight *(optional)* | Rust >= 1.80, clang >= 14, libbpf headers, kernel headers (Linux only) |
-| agent-memory | Rust >= 1.85, cargo, cmake, libsystemd headers (Linux only) |
-
-## 3. Quick Start
-
-The unified build script handles dependency installation, building, and system installation automatically.
+## 1. Prepare a checkout
 
 ```bash
 git clone https://github.com/alibaba/anolisa.git
 cd anolisa
 ```
 
-Then run the build script. By default it installs dependencies, builds, and installs to the system:
+The common prerequisites are Git, Bash, `make`, a C compiler for native Rust
+or Python extensions, and a working network connection for package downloads.
+Platform-specific requirements are listed in the component matrix below. The
+repository does not define one global Rust version. Use the `rust-toolchain.toml`
+or `rust-version` declared by the component you are changing.
 
-> **Tip:** Each option below is a standalone command — just pick the one that fits your use case. If you use the unified script, you can skip the [Component-by-Component Build](#4-component-by-component-build) section below entirely.
+## 2. Repository layout
+
+The `src/` tree currently contains these twelve components:
+
+| Component | Directory | Platform and role |
+|-----------|-----------|-------------------|
+| copilot-shell (`cosh`) | [`src/copilot-shell`](../src/copilot-shell/README.md) | TypeScript terminal assistant; Linux, macOS, and Windows |
+| cosh-ng | [`src/cosh-ng`](../src/cosh-ng/README.md) | Rust Agent OS CLI and shell; full Linux build, limited macOS source build |
+| agent-sec-core | [`src/agent-sec-core`](../src/agent-sec-core/README.md) | Rust sandbox plus Python security CLI; Linux |
+| agentsight | [`src/agentsight`](../src/agentsight/README.md) | Rust/eBPF observability; full tracing on Linux, `trace` and `serve` on macOS |
+| tokenless | [`src/tokenless`](../src/tokenless/README.md) | Rust token and command-output optimization; Linux source build, with cross-compiled npm artifacts for macOS |
+| agent-memory (`memory`) | [`src/agent-memory`](../src/agent-memory/README.md) | Rust MCP memory server; Linux |
+| os-skills (`skills`) | [`src/os-skills`](../src/os-skills/README.md) | Static skill definitions and scripts; all platforms supported by each skill |
+| anolisa | [`src/anolisa`](../src/anolisa/README.md) | Rust component lifecycle CLI; Linux and macOS arm64 |
+| SkillFS (`skillfs`) | [`src/skillfs`](../src/skillfs/README.md) | Rust FUSE skill filesystem; Linux |
+| ws-ckpt | [`src/ws-ckpt`](../src/ws-ckpt/README.md) | Rust workspace checkpoint daemon and TypeScript adapters; Linux system service |
+| ktuner | [`src/ktuner`](../src/ktuner/README.md) | Rust kernel-tuning engine; Linux |
+| blaze | [`src/blaze`](../src/blaze/README.md) | Rust per-host sandbox orchestrator; Linux |
+
+The repository-level instructions are in [`AGENTS.md`](../AGENTS.md). Read a
+component's `AGENTS.md` before changing that component and use its README for
+architecture and runtime details.
+
+## 3. Toolchains and native dependencies
+
+The build script can install common dependencies on supported Linux
+distributions, but it cannot make an unsupported platform build a Linux-only
+component.
+
+| Need | Source of truth |
+|------|-----------------|
+| Node.js | `src/copilot-shell/package.json` requires Node.js `>=20.0.0`; npm is also used by the agentsight, agent-sec-core, tokenless, and ws-ckpt plugin builds. |
+| Python and uv | `src/agent-sec-core/agent-sec-cli/pyproject.toml` requires Python `==3.11.6`; use `uv` for that project. Do not replace this with a repository-wide Python minimum. |
+| Rust | `src/agent-sec-core/linux-sandbox/rust-toolchain.toml` pins `1.93.0`; `src/anolisa/rust-toolchain.toml` and `src/blaze/rust-toolchain.toml` pin `1.88.0`; `src/cosh-ng/rust-toolchain.toml` follows `stable`. Other components use the `rust-version` in their `Cargo.toml` when one is declared. |
+| cosh-ng | Linux source builds need `pkg-config` and OpenSSL development files. |
+| agent-sec-core | Linux sandbox runtime and integration checks may need bubblewrap, GnuPG, and `jq`. |
+| agentsight | Linux eBPF builds need clang, LLVM, libbpf and ELF development headers, kernel headers, and a BTF-enabled kernel. `make build-mac` builds the macOS local viewer without eBPF. |
+| tokenless | `just` is used to fetch and patch RTK; npm is needed for the OpenClaw plugin. |
+| agent-memory | Linux builds need CMake and libsystemd development headers. |
+| SkillFS | FUSE 3 and `/dev/fuse` are needed for the smoke test; ordinary Cargo tests do not mount FUSE. |
+| ws-ckpt | Installing the daemon requires Linux systemd and root privileges. Its user-mode Makefile target intentionally does not install the service. |
+
+When a component has a pinned toolchain, run its commands from that component
+directory so rustup can select the pin automatically. For an unpinned
+component, check its `Cargo.toml` and the installed stable toolchain before
+building.
+
+## 4. Unified build script
+
+`scripts/build-all.sh` is a convenience entry point, not a complete monorepo
+builder. It currently knows eight components:
+
+- Default six: `cosh`, `skills`, `sec-core`, `tokenless`, `ws-ckpt`, and
+  `memory`.
+- Optional two: `cosh-ng` and `sight`. Add `--all` or select them with
+  `--component`.
+
+The four components outside this script are `anolisa`, `skillfs`, `ktuner`, and
+`blaze`; build those with their local commands in section 5.
+
+The default install profile is user mode. Component files install under
+`~/.local` and user-scoped Copilot Shell directories without `sudo`. Initial
+system dependency installation may still request `sudo`. Use `--system` (or
+`--install-mode system`) for system paths; the script stages files and may
+invoke `sudo`. `--no-install` builds and stages artifacts without installing
+them.
 
 ```bash
-# Default: install deps + build + install to system (recommended for most users)
+# Default six components, user install
 ./scripts/build-all.sh
 
-# Build only, skip system install
+# Build and stage without installing
 ./scripts/build-all.sh --no-install
 
-# Skip dependency installation (deps already present)
+# Use system paths instead of the default user profile
+./scripts/build-all.sh --system
+
+# Include cosh-ng and agentsight as well
+./scripts/build-all.sh --all
+
+# Select one or more of the eight supported names
+./scripts/build-all.sh --component cosh --component sec-core
+./scripts/build-all.sh --component cosh-ng --component sight
+
+# Reuse already-installed dependencies
 ./scripts/build-all.sh --ignore-deps
 
-# Install dependencies only (useful for CI or manual builds)
+# Install dependencies only, or print the plan without changing the system
 ./scripts/build-all.sh --deps-only
+./scripts/build-all.sh --dry-run
 
-# Build and install selected components only
-./scripts/build-all.sh --component cosh --component sec-core
-
-# Include optional agentsight
-./scripts/build-all.sh --component cosh --component skills --component sec-core --component sight
+# Explicit non-interactive mode and help
+./scripts/build-all.sh --non-interactive
+./scripts/build-all.sh --help
 ```
 
-### 3.1 Script Options
-
-| Flag | Description |
-|------|-------------|
-| --no-install | Skip installing built components to system paths |
-| --ignore-deps | Skip dependency installation |
-| --deps-only | Install dependencies only, do not build |
-| --component <name> | Build selected component(s), repeatable: cosh, skills, sec-core, sight. Default: cosh, skills, sec-core |
-| --help | Show help |
-
-### 3.2 Important Notes
-
-1. The build script tries system packages first and falls back to upstream installers (nvm / rustup) when system versions don't meet requirements.
-2. os-skills are mostly static assets and do not require compilation.
-3. AgentSight is an optional component that provides audit and observability capabilities but is not required for core functionality. It is excluded from default builds; use `--component sight` to include it explicitly.
-4. AgentSight system dependencies (clang/llvm/libbpf/kernel headers) should be installed through your distro package manager.
-5. **Sandbox policy hooks are not enabled automatically.** After installation, run `/hooks install` inside Copilot Shell once to activate the built-in sandbox-guard hooks. See [3.3 Post-Installation: Enable Sandbox Hooks](#33-post-installation-enable-sandbox-hooks) below.
-
-### 3.3 Post-Installation: Enable Sandbox Hooks
-
-The build script installs the components but does not automatically activate the sandbox policy hooks. To prevent unauthorized file system access or dangerous command execution, run the following inside Copilot Shell after installation:
-
-```bash
-cosh
-```
-
-Then inside the session:
-
-```
-/hooks install
-```
-
-This command:
-- Copies the bundled `sandbox-guard.py` and `sandbox-failure-handler.py` scripts to `~/.copilot-shell/hooks/`
-- Registers them as `PreToolUse` and `PostToolUseFailure` hooks in your user settings (`~/.copilot-shell/settings.json`)
-- Activates the hooks immediately in the current session
-
-You only need to run this once — the configuration persists across sessions.
-
-> **Note:** The sandbox hooks require `agent-sec-core` (linux-sandbox) to be installed at `/usr/local/bin/linux-sandbox`. When a dangerous command is detected, `sandbox-guard.py` wraps it inside the `linux-sandbox` binary for execution. If `agent-sec-core` is not built and installed, the hook will be registered but sandboxed execution of dangerous commands will fail. Make sure `agent-sec-core` is built (it is included in the default `build-all.sh` run) before relying on sandbox enforcement.
-
----
-
-## 4. Component-by-Component Build
-
-> **You can skip this section** if you already used the unified build script above. The script handles all dependency installation, building, and system installation automatically.
-
-If you prefer to set up each toolchain and build each component manually, follow the steps below.
-
-### 4.1 Install Dependencies
-
-#### 4.1.1 Node.js (for copilot-shell)
-
-Required: Node.js >= 20, npm >= 10.
-
-- **Alinux 4 (verified)**
-
-```bash
-sudo dnf install -y nodejs npm make gcc-c++
-```
-
-- **Other distros: nvm**
-
-```bash
-# Skip if Node.js >= 20 is already installed
-if command -v node &>/dev/null && node -v | grep -qE '^v(2[0-9]|[3-9][0-9])'; then
-  echo "Node.js $(node -v) already installed, skipping"
-else
-  # Install nvm from Gitee mirror
-  curl -fsSL --connect-timeout 15 --max-time 60 https://gitee.com/mirrors/nvm/raw/v0.40.3/install.sh | bash
-  source "$HOME/.$(basename "$SHELL")rc"
-
-  # Configure npmmirror for faster Node.js downloads
-  export NVM_NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node/
-  nvm install 20
-  nvm use 20
-fi
-
-# Verify
-node -v   # expected: v20.x.x or higher
-npm -v    # expected: 10.x.x or higher
-```
-
----
-
-#### 4.1.2 Rust (for agent-sec-core and agentsight)
-
-Required: agent-sec-core needs Rust >= 1.91.0; agentsight needs Rust >= 1.80.
-
-- **Alinux 4 (verified)** — the system `rust` package is below 1.91.0; use rustup instead (see below).
-Only install the build tools from dnf:
-
-```bash
-sudo dnf install -y gcc make
-```
-
-- **Ubuntu 24.04 (verified)**
-
-```bash
-sudo apt install -y rustc-1.91 cargo-1.91 gcc make
-sudo update-alternatives --install /usr/bin/cargo cargo /usr/bin/cargo-1.91 100
-```
-
-> The system `rust` package on some distros may be older than 1.91.0. If the build fails due to version mismatch, use rustup below.
-
-- **Other distros / Alinux 4: rustup (recommended)**
-
-```bash
-# Skip if Rust is already installed
-if command -v rustc &>/dev/null && command -v cargo &>/dev/null; then
-  echo "Rust $(rustc --version) already installed, skipping"
-else
-  # Install Rust via rsproxy.cn (China mirror)
-  curl --proto '=https' --tlsv1.2 -sSf --connect-timeout 15 --max-time 120 https://rsproxy.cn/rustup-init.sh | sh -s -- -y
-  source "$HOME/.cargo/env"
-fi
-
-# Verify
-rustc --version   # expected: rustc 1.91.0 or higher
-cargo --version   # expected: cargo 1.91.0 or higher
-```
-
-> The repository uses a pinned toolchain (`rust-toolchain.toml`) for agent-sec-core. If the system Rust version does not match, rustup will automatically download the correct version when building inside the repo.
-
-**Configure Rustup distribution mirror (recommended for China users)**
-
-If building triggers auto-download of a pinned Rust toolchain (via `rust-toolchain.toml`) and it times out, set the Rustup distribution mirror:
-
-```bash
-export RUSTUP_DIST_SERVER="https://rsproxy.cn"
-export RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"
-```
-
-Add these lines to your shell rc file (`~/.bashrc` or `~/.zshrc`) to persist them. The build script (`build-all.sh`) configures this automatically.
-
-**Configure crates.io mirror (recommended for China users)**
-
-If `cargo build` is slow fetching dependencies, configure an Aliyun crates.io mirror.
-The build script (`build-all.sh`) configures this automatically regardless of how Rust is installed.
-For manual setup, add to `~/.cargo/config.toml`:
-
-```toml
-[source.crates-io]
-replace-with = 'aliyun'
-[source.aliyun]
-registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
-```
-
----
-
-#### 4.1.3 Python and uv (for agent-sec-core and os-skills)
-
-Required: Python >= 3.12.
-
-- **Alinux 4 (verified)**
-
-```bash
-pip3 install uv
-uv python install 3.12
-```
-
-- **Ubuntu 24.04 (verified)**
-
-```bash
-sudo apt install -y pipx
-pipx ensurepath
-source "$HOME/.$(basename "$SHELL")rc"
-pipx install uv
-```
-
-- **Other distros: uv**
-
-```bash
-# Skip if uv is already installed
-if command -v uv &>/dev/null; then
-  echo "uv $(uv --version) already installed, skipping"
-else
-  # Install uv
-  curl -LsSf --connect-timeout 15 --max-time 60 https://astral.sh/uv/install.sh | sh
-  source "$HOME/.$(basename "$SHELL")rc"
-fi
-
-# Install Python 3.12 via uv (skips if already present)
-uv python install 3.12
-```
-
-```bash
-# Verify
-uv --version          # expected: uv 0.x.x or higher
-uv python find 3.12   # expected: path to python3.12 binary
-```
-
----
-
-#### 4.1.4 AgentSight System Dependencies (Optional, Package Manager Required)
-
-AgentSight is an optional component that provides eBPF-based audit and observability capabilities. It is not required for core ANOLISA functionality. If you choose to build it, the following system-level dependencies are needed:
-
-- **dnf (Alinux / Anolis OS / Fedora / RHEL / CentOS / etc.)**
-
-```bash
-sudo dnf install -y clang llvm libbpf-devel elfutils-libelf-devel zlib-devel openssl-devel perl perl-IPC-Cmd
-sudo dnf install -y kernel-devel-$(uname -r)
-```
-
-- **apt (Debian / Ubuntu)**
-
-```bash
-sudo apt-get update -y
-sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev libssl-dev perl linux-headers-$(uname -r)
-```
-
-> Some distributions do not provide a separate perl-core package. That is expected.
-
-- **Kernel Requirement**
-
-AgentSight requires Linux kernel >= 5.10 and BTF enabled (`CONFIG_DEBUG_INFO_BTF=y`).
-
----
-
-#### 4.1.5 Version Check
-
-```bash
-node -v            # v20.x.x
-npm -v             # 10.x.x
-rustc --version    # rustc 1.91.0+
-cargo --version    # cargo 1.91.0+
-python3 --version  # Python 3.12.x
-uv --version       # uv 0.x.x
-clang --version    # clang version 14+
-```
-
----
-
-### 4.2 Build Components
-
-#### 4.2.1 copilot-shell
-
-```bash
-cd src/copilot-shell
-make deps
-make build
-```
-
-> **Note:** `make deps` runs `npm install`, which automatically sets up husky pre-commit hooks. These hooks run Prettier and ESLint on staged files before each commit. In CI environments, use `make deps-ci` instead, which skips hook installation.
-
-Artifact: `dist/cli.js`
-
-```bash
-# Run directly
-node dist/cli.js
-
-# Or install to system PATH (creates cosh/co/copilot commands)
-sudo make install
-cosh
-```
-
-#### 4.2.2 os-skills
-
-**Install**
-
-Skill search paths (Copilot Shell discovers skills in the following priority order):
-
-| Scope | Path |
-|-------|------|
-| Project | `.copilot-shell/skills/` |
-| User | `~/.copilot-shell/skills/` |
-| System | `/usr/share/anolisa/skills/` |
-
-Install options:
-
-- **Using the build script (automatic)**
-
-```bash
-./scripts/build-all.sh --component skills
-```
-
-- **Manual deployment (user-level)**
-
-```bash
-mkdir -p ~/.copilot-shell/skills
-find src/os-skills -name 'SKILL.md' -exec sh -c \
-	'cp -rp "$(dirname "$1")" ~/.copilot-shell/skills/' _ {} \;
-```
-
-**Verify**
-
-```bash
-co /skills
-```
-
-#### 4.2.3 agent-sec-core (Linux only)
-
-```bash
-cd src/agent-sec-core
-make build-sandbox
-```
-
-Artifact: `linux-sandbox/target/release/linux-sandbox`
-
-**Install**
-
-```bash
-sudo make install-sandbox
-```
-
-#### 4.2.4 agentsight (Optional, Linux only)
-
-> Note: AgentSight is an optional component. It provides eBPF-based audit and observability capabilities but is not required for core ANOLISA functionality.
-
-```bash
-cd src/agentsight
-make build
-```
-
-Artifact: `target/release/agentsight`
-
-**Install**
-
-```bash
-sudo make install
-```
-
-### 4.3 Run Tests (Recommended)
-
-#### 4.3.1 Unified Entry
+Valid `--component` names are `cosh`, `skills`, `sec-core`, `tokenless`,
+`ws-ckpt`, `memory`, `cosh-ng`, and `sight`. The script may build a component
+in `target/` before installing it, and a component's own install policy still
+applies. For example, `ws-ckpt` requires `--system` to install its daemon;
+selecting it in the default user profile does not create a user service.
+
+## 5. Component build and test entry points
+
+Run the commands from the repository root unless a `cd` is shown. These are
+the smallest useful local gates; read the linked README and scoped developer
+guide before changing component internals.
+
+| Component | Build | Test and quality gate |
+|-----------|-------|-----------------------|
+| [copilot-shell](../src/copilot-shell/README.md) | `cd src/copilot-shell && make deps && make build` | `cd src/copilot-shell && make lint && make test` |
+| [os-skills](../src/os-skills/README.md) | `cd src/os-skills && make build` | No compilation target. Validate changed `SKILL.md` files and run changed scripts with their documented interpreter. |
+| [agent-sec-core](../src/agent-sec-core/README.md) | `cd src/agent-sec-core && make build-all` | `cd src/agent-sec-core && make test` runs Python, Rust sandbox, and OpenClaw plugin tests. Python uses uv with Python 3.11.6. |
+| [agentsight](../src/agentsight/README.md) | Linux: `cd src/agentsight && make build-all`; macOS local viewer: `cd src/agentsight && make build-mac` | Linux: `cd src/agentsight && make lint && make test`; macOS: run the tests relevant to the local viewer and trajectory collector. |
+| [tokenless](../src/tokenless/README.md) | `cd src/tokenless && make build` | `cd src/tokenless && make lint && make test` |
+| [agent-memory](../src/agent-memory/README.md) | `cd src/agent-memory && make build` | `cd src/agent-memory && make fmt-check && make lint && make test`; `cd src/agent-memory && make smoke` covers the MCP stdio path. Linux only. |
+| [ws-ckpt](../src/ws-ckpt/README.md) | `cd src/ws-ckpt && make build` | `cd src/ws-ckpt && make test`; install and service checks require Linux system mode. |
+| [cosh-ng](../src/cosh-ng/README.md) | `cd src/cosh-ng && cargo build --workspace` | `cd src/cosh-ng && cargo fmt --all -- --check`, then select the closest targeted test from its [contribution guide](../src/cosh-ng/CONTRIBUTING.md). Full local gates are reserved for explicitly requested large or cross-cutting validation. |
+| [anolisa](../src/anolisa/README.md) | `cd src/anolisa && cargo build --release --locked` | `cd src/anolisa && cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked` |
+| [SkillFS](../src/skillfs/README.md) | `cd src/skillfs && cargo build --workspace --release` | `cd src/skillfs && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`; on Linux, `cd src/skillfs && scripts/test.sh` adds the FUSE smoke test. |
+| [ktuner](../src/ktuner/README.md) | `cd src/ktuner && cargo build --release` | `cd src/ktuner && cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test` |
+| [blaze](../src/blaze/README.md) | `cd src/blaze && cargo build --workspace --release` | `cd src/blaze && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` |
+
+For a public API or rustdoc change, add `cargo doc --workspace --no-deps` to
+the affected Rust component's gate. `ktuner tune`, Blaze Firecracker paths,
+FUSE mounts, eBPF tracing, and system daemons need host privileges or kernel
+features beyond a normal unit-test run.
+
+The [CI workflow](https://github.com/alibaba/anolisa/blob/main/.github/workflows/ci.yaml) adds coverage, packaging,
+frontend, adapter, and integration checks for selected components. Those jobs
+are stricter than the smallest local commands in the matrix, so consult the
+workflow when a change touches a generated package or a framework adapter.
+
+## 6. Aggregate tests and pull-request gates
+
+`tests/run-all-tests.sh` is a partial convenience runner. With no filter it
+invokes exactly five components: copilot-shell, agent-sec-core, agentsight,
+tokenless, and agent-memory. It does not test cosh-ng, os-skills, ws-ckpt,
+anolisa, SkillFS, ktuner, or blaze.
 
 ```bash
 ./tests/run-all-tests.sh
 ./tests/run-all-tests.sh --filter shell
 ./tests/run-all-tests.sh --filter sec
 ./tests/run-all-tests.sh --filter sight
+./tests/run-all-tests.sh --filter tokenless
+./tests/run-all-tests.sh --filter memory
 ```
 
-#### 4.3.2 Per Component
+The script currently skips work when prerequisites are missing. It skips
+agent-sec-core Python tests without `uv`, skips its sandbox e2e test when
+`/usr/local/bin/linux-sandbox` is absent, skips AgentSight without `cargo`,
+and skips tokenless only when neither `make` nor `cargo` is available. It also
+skips agent-memory outside Linux or when `cargo` is unavailable. It still
+prints a success line after these skips,
+so a zero exit status does not prove that every test ran. The agent-sec-core
+e2e invocation also depends on its current working-directory layout. Use the
+component Makefiles for a reliable local gate.
 
-```bash
-# copilot-shell
-cd src/copilot-shell && make test
+For a pull request, select the rows in the component matrix that correspond to
+the changed files and run their build, lint, and test commands. Add platform,
+integration, smoke, frontend, or documentation checks when the changed files
+require them. Keep the aggregate runner as a quick signal rather than the
+pull-request acceptance criterion.
 
-# agent-sec-core
-cd src/agent-sec-core
-make test-python
+## 7. Further documentation
 
-# agentsight
-cd src/agentsight && cargo test
-```
+- [User installation guide](user-guide/en/installation.md)
+- [Developer guide index](developer-guide/en/README.md)
+- [Component onboarding specification](../specs/component-onboarding.md)
+- [Documentation standard](../specs/documentation-standard.md)
 
----
-
-## 5. Troubleshooting
-
-### 5.1 Node.js version mismatch
-
-Use nvm and re-activate the expected version:
-
-```bash
-source "$HOME/.$(basename "$SHELL")rc"
-```
-
-### 5.2 Rust toolchain mismatch
-
-```bash
-rustup show
-```
-
-### 5.3 AgentSight missing libbpf / headers
-
-Install distro packages from section 4.1.4 above.
-
-### 5.4 AgentSight runtime permission denied
-
-```bash
-sudo ./target/release/agentsight --help
-# or grant minimum capabilities
-sudo setcap cap_bpf,cap_perfmon=ep ./target/release/agentsight
-```
+Component-specific build details, generated artifacts, and runtime setup belong
+in the component README or its linked developer guide. Keep this page focused
+on repository-wide entry points and update it when the component list or script
+interfaces change.

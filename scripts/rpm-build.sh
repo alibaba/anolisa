@@ -395,14 +395,19 @@ build_agentsight() {
     (
         cd "$SIGHT_DIR"
         # Build frontend (embed into Rust binary via include_dir!)
-        if [ -d "dashboard" ] && command -v npm &>/dev/null; then
+        if [ -d "${SIGHT_DIR}/dashboard" ] && command -v npm &>/dev/null; then
             log "Building frontend..."
-            cd dashboard
+            cd "${SIGHT_DIR}/dashboard"
             npm install
             npm run build:embed
             cd "$SIGHT_DIR"
         else
-            warn "Skipping frontend build (dashboard/ not found or npm unavailable)"
+            local reason=""
+            [ -d "${SIGHT_DIR}/dashboard" ] || reason="${reason}dashboard/ not found at ${SIGHT_DIR}/dashboard; "
+            command -v npm &>/dev/null || reason="${reason}npm not available in PATH; "
+            err "Cannot build agentsight frontend: ${reason}"
+            err "Frontend embedding is required for WebUI/serve tests. Aborting build."
+            exit 1
         fi
         cargo build --release --bin agentsight
         ./scripts/build-enforcer.sh

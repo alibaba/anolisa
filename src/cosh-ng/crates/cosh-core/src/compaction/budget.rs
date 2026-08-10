@@ -17,8 +17,18 @@ use super::projection::{TokenMeasurement, TokenMeasurementSource};
 
 /// Conservative window applied when nothing better is known.
 const FALLBACK_CONTEXT_WINDOW: u64 = 32_768;
-/// Output reserve applied when neither user nor profile supplies one.
-const FALLBACK_MAX_OUTPUT_TOKENS: u64 = 8_192;
+/// Ceiling applied to a known model's hard output capability when deriving the
+/// default per-request output budget.
+///
+/// A documented maximum output is a *capability*, not a per-turn expectation.
+/// Charging the full capability to every request permanently donates that much
+/// window to output: a 131 072-token window with a 65 536-token capability
+/// keeps only ~40% of the window for history. Ordinary agent turns stay far
+/// below this ceiling, so the default budget caps the capability here and only
+/// an explicit user override may raise it.
+const DEFAULT_OUTPUT_BUDGET: u64 = 16_384;
+/// Per-request output budget for a model with no known output capability.
+const UNKNOWN_MODEL_OUTPUT_BUDGET: u64 = 4_096;
 /// Default agent session token limit; a differing value is user-explicit.
 const DEFAULT_SESSION_TOKEN_LIMIT: u64 = 128_000;
 /// Smallest burst reserve regardless of window size.
@@ -60,8 +70,18 @@ impl CapabilitySource {
 pub struct ModelCapability {
     /// Total model context window in tokens.
     pub context_window: u64,
-    /// Maximum output tokens reserved for one response.
-    pub max_output_tokens: u64,
+    /// Hard output ceiling the model family accepts, in tokens; `None` when the
+    /// model is unrecognized.
+    ///
+    /// This is the capability from the provider table, deliberately *not* the
+    /// amount budgeted per request — see [`Self::output_budget_tokens`].
+    pub output_capability_tokens: Option<u64>,
+    /// Output tokens budgeted for one ordinary request.
+    ///
+    /// Single source of truth for both [`ContextBudget::output_reserve`] and the
+    /// `max_tokens` actually sent in the provider request, so the budget can
+    /// never reserve less than a request is allowed to spend.
+    pub output_budget_tokens: u64,
     /// Provenance of the resolved values.
     pub source: CapabilitySource,
 }
@@ -71,38 +91,74 @@ impl ModelCapability {
     /// override, provider profile safety value, explicitly configured session
     /// token limit, then a conservative fallback marked as estimated.
     pub fn resolve(compaction: &CompactionConfig, session_token_limit: u64, model: &str) -> Self {
-        let max_output = compaction
-            .model_max_output_tokens
-            .filter(|value| *value > 0);
-        if let Some(window) = compaction.model_context_window.filter(|value| *value > 0) {
-            return Self {
-                context_window: window,
-                max_output_tokens: max_output
-                    .unwrap_or_else(|| profile_max_output(model))
-                    .min(window),
-                source: CapabilitySource::UserOverride,
-            };
-        }
-        if let Some(window) = profile_context_window(model) {
-            return Self {
-                context_window: window,
-                max_output_tokens: max_output.unwrap_or_else(|| profile_max_output(model)),
-                source: CapabilitySource::ProviderProfile,
-            };
-        }
-        if session_token_limit != DEFAULT_SESSION_TOKEN_LIMIT && session_token_limit > 0 {
-            return Self {
-                context_window: session_token_limit,
-                max_output_tokens: max_output.unwrap_or(FALLBACK_MAX_OUTPUT_TOKENS),
-                source: CapabilitySource::SessionTokenLimit,
-            };
-        }
+        let (context_window, source) =
+            resolve_context_window(compaction, session_token_limit, model);
         Self {
-            context_window: FALLBACK_CONTEXT_WINDOW,
-            max_output_tokens: max_output.unwrap_or(FALLBACK_MAX_OUTPUT_TOKENS),
-            source: CapabilitySource::ConservativeFallback,
+            context_window,
+            output_capability_tokens: profile_output_capability(model),
+            output_budget_tokens: resolve_output_budget(compaction, model, context_window),
+            source,
         }
     }
+
+    /// Output cap to send as `GenerateConfig::max_tokens` for one request.
+    ///
+    /// Reads the same resolved value the budget reserves, so lowering the
+    /// reserve can never leave the request authorized to spend more.
+    pub fn request_max_tokens(&self) -> u32 {
+        // `resolve_output_budget` already clamps into the u32 request range;
+        // the repeated bound keeps a hand-built capability safe too.
+        self.output_budget_tokens.min(u64::from(u32::MAX)) as u32
+    }
+}
+
+/// Resolves the context window `W` and records where the value came from.
+fn resolve_context_window(
+    compaction: &CompactionConfig,
+    session_token_limit: u64,
+    model: &str,
+) -> (u64, CapabilitySource) {
+    if let Some(window) = compaction.model_context_window.filter(|value| *value > 0) {
+        return (window, CapabilitySource::UserOverride);
+    }
+    if let Some(window) = profile_context_window(model) {
+        return (window, CapabilitySource::ProviderProfile);
+    }
+    if session_token_limit != DEFAULT_SESSION_TOKEN_LIMIT && session_token_limit > 0 {
+        return (session_token_limit, CapabilitySource::SessionTokenLimit);
+    }
+    (
+        FALLBACK_CONTEXT_WINDOW,
+        CapabilitySource::ConservativeFallback,
+    )
+}
+
+/// Shared resolution of the per-request output budget `O`.
+///
+/// Precedence:
+/// 1. an explicit `[session.compaction] model_max_output_tokens` override;
+/// 2. `min(model output capability, `[`DEFAULT_OUTPUT_BUDGET`]`)` for a known
+///    model family;
+/// 3. [`UNKNOWN_MODEL_OUTPUT_BUDGET`] for an unrecognized model.
+///
+/// The result is then bounded by `window / 2` — the window-safety limit the
+/// history budget relies on — and by the `u32` range of a provider request, so
+/// the same value can drive `ContextBudget::output_reserve` and
+/// `GenerateConfig::max_tokens` without either side rounding differently.
+///
+/// Adaptive sizing from observed output percentiles is deliberately out of
+/// scope; this only stops a capability ceiling from being charged every turn.
+fn resolve_output_budget(compaction: &CompactionConfig, model: &str, context_window: u64) -> u64 {
+    compaction
+        .model_max_output_tokens
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| {
+            profile_output_capability(model)
+                .map(|capability| capability.min(DEFAULT_OUTPUT_BUDGET))
+                .unwrap_or(UNKNOWN_MODEL_OUTPUT_BUDGET)
+        })
+        .min(context_window / 2)
+        .min(u64::from(u32::MAX))
 }
 
 /// Conservative window table for known model families.
@@ -131,14 +187,9 @@ fn profile_context_window(model: &str) -> Option<u64> {
         .map(|(_, window)| *window)
 }
 
-/// Output reserve for a model when the user has not supplied one explicitly.
-///
-/// Shares the same lookup table as `core.rs` so the budget's output reserve
-/// matches the `max_tokens` actually sent in the provider request.
-fn profile_max_output(model: &str) -> u64 {
-    model_max_output_tokens(model)
-        .map(|v| v as u64)
-        .unwrap_or(FALLBACK_MAX_OUTPUT_TOKENS)
+/// Hard output capability of a known model family, in tokens.
+fn profile_output_capability(model: &str) -> Option<u64> {
+    model_max_output_tokens(model).map(u64::from)
 }
 
 /// Conservative token estimate for text that never splits UTF-8 code points.
@@ -216,7 +267,10 @@ impl ContextBudget {
         config: &CompactionConfig,
     ) -> Self {
         let window = capability.context_window;
-        let output_reserve = capability.max_output_tokens.min(window / 2);
+        // The resolver already applied this bound; repeating it keeps the
+        // invariant for a hand-built capability and documents that the reserve
+        // may never claim more than half the window.
+        let output_reserve = capability.output_budget_tokens.min(window / 2);
         let burst_reserve = (window / 20).max(MIN_BURST_RESERVE);
         let usable_history = window
             .saturating_sub(prefix_tokens)
@@ -312,6 +366,21 @@ mod tests {
         CompactionConfig::default()
     }
 
+    /// Hand-builds a capability so threshold tests stay independent of the
+    /// model tables.
+    fn capability(
+        context_window: u64,
+        output_budget_tokens: u64,
+        source: CapabilitySource,
+    ) -> ModelCapability {
+        ModelCapability {
+            context_window,
+            output_capability_tokens: Some(output_budget_tokens),
+            output_budget_tokens,
+            source,
+        }
+    }
+
     #[test]
     fn capability_prefers_user_override() {
         let mut cfg = config();
@@ -346,12 +415,122 @@ mod tests {
     }
 
     #[test]
+    fn large_output_capability_is_not_charged_per_request() {
+        // #2240: the 65 536-token capability of qwen3.x-max used to be both the
+        // request cap and the reserve, leaving a 131 072-token window with only
+        // ~52K of usable history.
+        let capability =
+            ModelCapability::resolve(&config(), DEFAULT_SESSION_TOKEN_LIMIT, "qwen3.7-max");
+        assert_eq!(capability.context_window, 131_072);
+        assert_eq!(capability.output_capability_tokens, Some(65_536));
+        assert_eq!(capability.output_budget_tokens, DEFAULT_OUTPUT_BUDGET);
+        assert_eq!(capability.request_max_tokens(), 16_384);
+
+        // P mirrors the session reported in the issue.
+        let budget = ContextBudget::compute(capability, 6_251, &config());
+        assert_eq!(budget.output_reserve, 16_384);
+        assert_eq!(budget.usable_history, 101_884);
+        assert_eq!(budget.emergency_tokens, 91_695);
+        assert!(budget.usable_history > 100_000);
+    }
+
+    #[test]
+    fn output_reserve_and_request_cap_are_the_same_value() {
+        // Both sides must read the one resolver, for every provenance class:
+        // a request may never be authorized to spend more than was reserved.
+        let mut explicit_window = config();
+        explicit_window.model_context_window = Some(200_000);
+        let mut explicit_output = config();
+        explicit_output.model_max_output_tokens = Some(32_000);
+        let cases: [(&CompactionConfig, u64, &str); 5] = [
+            (&config(), DEFAULT_SESSION_TOKEN_LIMIT, "qwen3.7-max"),
+            (&config(), DEFAULT_SESSION_TOKEN_LIMIT, "gpt-4o"),
+            (&config(), DEFAULT_SESSION_TOKEN_LIMIT, "unknown-model"),
+            (&explicit_window, DEFAULT_SESSION_TOKEN_LIMIT, "gpt-4o"),
+            (&explicit_output, DEFAULT_SESSION_TOKEN_LIMIT, "qwen3.7-max"),
+        ];
+        for (cfg, session_limit, model) in cases {
+            let capability = ModelCapability::resolve(cfg, session_limit, model);
+            let budget = ContextBudget::compute(capability, 1_000, cfg);
+            assert_eq!(
+                u64::from(capability.request_max_tokens()),
+                budget.output_reserve,
+                "model {model} sends a different cap than it reserves"
+            );
+        }
+    }
+
+    #[test]
+    fn small_output_models_are_never_raised_to_the_default_ceiling() {
+        // The ceiling only lowers a large capability; it must not inflate a
+        // model that documents a smaller output limit.
+        for (model, expected) in [("gpt-4o", 8_192), ("deepseek-chat", 8_192)] {
+            let capability =
+                ModelCapability::resolve(&config(), DEFAULT_SESSION_TOKEN_LIMIT, model);
+            assert_eq!(
+                capability.output_budget_tokens, expected,
+                "model {model} output budget"
+            );
+            assert_eq!(capability.output_capability_tokens, Some(expected));
+        }
+    }
+
+    #[test]
+    fn unknown_models_share_one_safe_output_default() {
+        let capability =
+            ModelCapability::resolve(&config(), DEFAULT_SESSION_TOKEN_LIMIT, "brand-new-model");
+        assert_eq!(capability.output_capability_tokens, None);
+        assert_eq!(capability.output_budget_tokens, UNKNOWN_MODEL_OUTPUT_BUDGET);
+        assert_eq!(capability.request_max_tokens(), 4_096);
+        // The explicit-session-limit branch resolves the same default.
+        let sized = ModelCapability::resolve(&config(), 60_000, "brand-new-model");
+        assert_eq!(sized.output_budget_tokens, UNKNOWN_MODEL_OUTPUT_BUDGET);
+    }
+
+    #[test]
+    fn explicit_output_override_drives_both_reserve_and_request() {
+        let mut cfg = config();
+        cfg.model_max_output_tokens = Some(48_000);
+        let capability = ModelCapability::resolve(&cfg, DEFAULT_SESSION_TOKEN_LIMIT, "qwen3.7-max");
+        assert_eq!(capability.output_budget_tokens, 48_000);
+        assert_eq!(capability.request_max_tokens(), 48_000);
+        let budget = ContextBudget::compute(capability, 6_251, &cfg);
+        assert_eq!(budget.output_reserve, 48_000);
+        // The user override raises the reserve, so history shrinks accordingly.
+        assert_eq!(budget.usable_history, 131_072 - 6_251 - 48_000 - 6_553);
+    }
+
+    #[test]
+    fn extreme_output_configuration_never_overflows_or_exceeds_the_window() {
+        let mut cfg = config();
+        cfg.model_max_output_tokens = Some(u64::MAX);
+        cfg.model_context_window = Some(u64::MAX);
+        let capability = ModelCapability::resolve(&cfg, DEFAULT_SESSION_TOKEN_LIMIT, "qwen3.7-max");
+        assert_eq!(capability.output_budget_tokens, u64::from(u32::MAX));
+        assert_eq!(capability.request_max_tokens(), u32::MAX);
+
+        // A window smaller than the default budget still caps at W/2 on both
+        // sides, so no request can be larger than the window allows.
+        cfg.model_max_output_tokens = Some(u64::MAX);
+        cfg.model_context_window = Some(2_000);
+        let tiny = ModelCapability::resolve(&cfg, DEFAULT_SESSION_TOKEN_LIMIT, "qwen3.7-max");
+        assert_eq!(tiny.output_budget_tokens, 1_000);
+        assert_eq!(tiny.request_max_tokens(), 1_000);
+        let budget = ContextBudget::compute(tiny, 200, &cfg);
+        assert_eq!(budget.output_reserve, 1_000);
+        assert!(u64::from(tiny.request_max_tokens()) <= tiny.context_window);
+        assert_budget_is_sane(&budget);
+
+        // A zero or absent override falls back instead of reserving nothing.
+        cfg.model_max_output_tokens = Some(0);
+        cfg.model_context_window = None;
+        let zeroed = ModelCapability::resolve(&cfg, DEFAULT_SESSION_TOKEN_LIMIT, "qwen3.7-max");
+        assert_eq!(zeroed.output_budget_tokens, DEFAULT_OUTPUT_BUDGET);
+    }
+
+    #[test]
     fn budget_excludes_prefix_output_and_burst() {
-        let capability = ModelCapability {
-            context_window: 100_000,
-            max_output_tokens: 8_000,
-            source: CapabilitySource::UserOverride,
-        };
+        let capability = capability(100_000, 8_000, CapabilitySource::UserOverride);
         let budget = ContextBudget::compute(capability, 12_000, &config());
         assert_eq!(budget.output_reserve, 8_000);
         assert_eq!(budget.burst_reserve, 5_000);
@@ -363,11 +542,7 @@ mod tests {
 
     #[test]
     fn thresholds_bound_trigger_and_emergency_semantics() {
-        let capability = ModelCapability {
-            context_window: 100_000,
-            max_output_tokens: 8_000,
-            source: CapabilitySource::UserOverride,
-        };
+        let capability = capability(100_000, 8_000, CapabilitySource::UserOverride);
         let budget = ContextBudget::compute(capability, 12_000, &config());
         assert!(!budget.over_trigger(budget.trigger_tokens));
         assert!(budget.over_trigger(budget.trigger_tokens + 1));
@@ -379,11 +554,7 @@ mod tests {
     fn absolute_limit_is_clamped_into_model_budget() {
         let mut cfg = config();
         cfg.auto_compact_token_limit = Some(1_000_000);
-        let capability = ModelCapability {
-            context_window: 100_000,
-            max_output_tokens: 8_000,
-            source: CapabilitySource::UserOverride,
-        };
+        let capability = capability(100_000, 8_000, CapabilitySource::UserOverride);
         let budget = ContextBudget::compute(capability, 12_000, &cfg);
         assert!(budget.trigger_tokens <= budget.usable_history);
         cfg.auto_compact_token_limit = Some(10_000);
@@ -399,11 +570,7 @@ mod tests {
 
     #[test]
     fn oversized_prefix_yields_zero_history_budget() {
-        let capability = ModelCapability {
-            context_window: 16_000,
-            max_output_tokens: 8_000,
-            source: CapabilitySource::ConservativeFallback,
-        };
+        let capability = capability(16_000, 8_000, CapabilitySource::ConservativeFallback);
         let budget = ContextBudget::compute(capability, 20_000, &config());
         assert_eq!(budget.usable_history, 0);
         assert!(budget.over_emergency(0));
@@ -419,11 +586,7 @@ mod tests {
 
     #[test]
     fn non_finite_ratios_never_panic_and_keep_threshold_order() {
-        let capability = ModelCapability {
-            context_window: 100_000,
-            max_output_tokens: 8_000,
-            source: CapabilitySource::UserOverride,
-        };
+        let capability = capability(100_000, 8_000, CapabilitySource::UserOverride);
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             // Each field individually poisoned.
             for field in 0..3 {
@@ -451,11 +614,7 @@ mod tests {
 
     #[test]
     fn inverted_ratio_overrides_are_reordered_not_panicking() {
-        let capability = ModelCapability {
-            context_window: 100_000,
-            max_output_tokens: 8_000,
-            source: CapabilitySource::UserOverride,
-        };
+        let capability = capability(100_000, 8_000, CapabilitySource::UserOverride);
         let mut cfg = config();
         cfg.trigger_ratio = 0.90;
         cfg.emergency_ratio = 0.20;
@@ -466,11 +625,7 @@ mod tests {
 
     #[test]
     fn legal_ratio_overrides_still_apply() {
-        let capability = ModelCapability {
-            context_window: 100_000,
-            max_output_tokens: 8_000,
-            source: CapabilitySource::UserOverride,
-        };
+        let capability = capability(100_000, 8_000, CapabilitySource::UserOverride);
         let mut cfg = config();
         cfg.trigger_ratio = 0.50;
         cfg.emergency_ratio = 0.80;

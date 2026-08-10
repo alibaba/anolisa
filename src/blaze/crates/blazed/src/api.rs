@@ -7,16 +7,19 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use blaze_core::backend::{BackendKind, BackendStatus, select_backend};
 use blaze_core::kernel::HookKind;
 use blaze_core::lifecycle::{SandboxInstance, SandboxState, StartPath};
-use blaze_core::policy::{ImageMetadata, RuntimeDecision, WorkloadClass, parse_duration};
+use blaze_core::policy::{ImageMetadata, RuntimeDecision, WorkloadClass};
 use blaze_core::pool::{PoolConfig, PoolKey};
 use http_body_util::{BodyExt, Full};
-use hyper::body::{Bytes, Incoming};
+use hyper::body::{Body, Bytes, Incoming};
 use hyper::header::CONTENT_TYPE;
 use hyper::{Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -24,8 +27,12 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::error::{BlazeDaemonError, Result};
+use crate::guest::MAX_GUEST_FILE_BYTES;
 use crate::sandbox::CreateSandbox;
 use crate::state::ServerState;
+
+const MAX_EXEC_TIMEOUT_SECS: u32 = 20;
+const MAX_GUEST_HTTP_BODY_BYTES: usize = 22 * 1024 * 1024;
 
 /// Top-level request handler. Always returns `Ok(Response)`; internal
 /// errors are turned into JSON error bodies so hyper never sees a panic.
@@ -33,13 +40,25 @@ pub async fn handle(
     req: Request<Incoming>,
     state: Arc<ServerState>,
 ) -> std::result::Result<Response<Full<Bytes>>, Infallible> {
+    handle_request(req, state).await
+}
+
+async fn handle_request<B>(
+    req: Request<B>,
+    state: Arc<ServerState>,
+) -> std::result::Result<Response<Full<Bytes>>, Infallible>
+where
+    B: Body<Data = Bytes> + Unpin,
+    B::Error: std::fmt::Display,
+{
     state.metrics.inc(&state.metrics.requests_total);
 
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
+    let limit = guest_body_route(&method, &path).then_some(MAX_GUEST_HTTP_BODY_BYTES);
 
-    let response = match collect_body(req).await {
+    let response = match collect_body(req, limit).await {
         Ok(body) => dispatch(&method, &path, &query, body, &state).await,
         Err(e) => Err(e),
     };
@@ -51,9 +70,58 @@ pub async fn handle(
     Ok(resp)
 }
 
-async fn collect_body(req: Request<Incoming>) -> Result<Vec<u8>> {
-    let collected = req.into_body().collect().await?;
-    Ok(collected.to_bytes().to_vec())
+fn guest_body_route(method: &Method, path: &str) -> bool {
+    if method != Method::POST {
+        return false;
+    }
+    let parts = path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    matches!(
+        parts.as_slice(),
+        [
+            "v1",
+            "instances" | "sandboxes",
+            _,
+            "exec" | "read" | "write"
+        ]
+    )
+}
+
+async fn collect_body<B>(req: Request<B>, limit: Option<usize>) -> Result<Vec<u8>>
+where
+    B: Body<Data = Bytes> + Unpin,
+    B::Error: std::fmt::Display,
+{
+    let mut body = req.into_body();
+    let mut collected = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame
+            .map_err(|error| BlazeDaemonError::BadRequest(format!("request body: {error}")))?;
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        if let Some(limit) = limit
+            && collected.len().saturating_add(data.len()) > limit
+        {
+            return Err(crate::guest::GuestError::PayloadTooLarge {
+                actual: collected.len().saturating_add(data.len()),
+                limit,
+            }
+            .into());
+        }
+        collected.extend_from_slice(&data);
+    }
+    Ok(collected)
+}
+
+const fn max_base64_len(decoded_bytes: usize) -> usize {
+    decoded_bytes
+        .saturating_add(2)
+        .saturating_div(3)
+        .saturating_mul(4)
 }
 
 async fn dispatch(
@@ -79,6 +147,15 @@ async fn dispatch(
         ("GET", ["v1", "instances", id]) | ("GET", ["v1", "sandboxes", id]) => {
             get_instance(state, id)
         }
+        ("POST", ["v1", "sandboxes", id, "exec"]) | ("POST", ["v1", "instances", id, "exec"]) => {
+            exec_instance(state, id, &body).await
+        }
+        ("POST", ["v1", "sandboxes", id, "read"]) | ("POST", ["v1", "instances", id, "read"]) => {
+            read_instance_file(state, id, &body).await
+        }
+        ("POST", ["v1", "sandboxes", id, "write"]) | ("POST", ["v1", "instances", id, "write"]) => {
+            write_instance_file(state, id, &body).await
+        }
         ("POST", ["v1", "instances", id, "checkpoint"]) => checkpoint(state, id).await,
         ("POST", ["v1", "instances", id, "reset"]) => reset_instance(state, id).await,
         ("DELETE", ["v1", "instances", id])
@@ -90,9 +167,9 @@ async fn dispatch(
         ("PUT", ["v1", "pools", backend, class, "sizing"]) => {
             resize_pool(state, backend, class, &body)
         }
-        ("POST", ["v1", "templates", "gc"]) => gc_templates(state),
-        ("GET", ["v1", "templates"]) => list_templates(state),
-        ("GET", ["v1", "templates", id]) => inspect_template(state, id),
+        ("GET", ["v1", "templates"]) => list_templates(state).await,
+        ("GET", ["v1", "templates", name]) => get_template(state, name).await,
+        ("POST", ["v1", "templates", "import"]) => import_template(state, &body).await,
         ("GET", ["v1", "policies"]) => list_policies(state),
         ("GET", ["v1", "hooks"]) => list_hooks(state),
         ("GET", ["v1", "metrics"]) => metrics(state),
@@ -329,6 +406,113 @@ async fn destroy_instance(state: &Arc<ServerState>, id: &str) -> Result<Response
     }))
 }
 
+#[derive(Debug, Deserialize)]
+struct ExecRequest {
+    cmd: String,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    env: Option<HashMap<String, String>>,
+    #[serde(default)]
+    timeout: Option<u32>,
+}
+
+async fn exec_instance(
+    state: &Arc<ServerState>,
+    id: &str,
+    body: &[u8],
+) -> Result<Response<Full<Bytes>>> {
+    let request: ExecRequest = serde_json::from_slice(body)
+        .map_err(|error| BlazeDaemonError::BadRequest(format!("invalid exec body: {error}")))?;
+    if request.cmd.is_empty() {
+        return Err(BlazeDaemonError::BadRequest(
+            "exec command is required".to_string(),
+        ));
+    }
+    let timeout = request.timeout.unwrap_or(MAX_EXEC_TIMEOUT_SECS);
+    if timeout == 0 || timeout > MAX_EXEC_TIMEOUT_SECS {
+        return Err(BlazeDaemonError::BadRequest(format!(
+            "exec timeout must be between 1 and {MAX_EXEC_TIMEOUT_SECS} seconds"
+        )));
+    }
+    let result = state
+        .manager
+        .exec(
+            parse_uuid(id)?,
+            request.cmd,
+            request.cwd,
+            request.env,
+            timeout,
+        )
+        .await?;
+    json_ok(&json!({
+        "exit_code": result.exit_code,
+        "stdout_b64": BASE64.encode(result.stdout),
+        "stderr_b64": BASE64.encode(result.stderr),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct FileRequest {
+    path: String,
+    #[serde(default)]
+    data_b64: Option<String>,
+}
+
+async fn read_instance_file(
+    state: &Arc<ServerState>,
+    id: &str,
+    body: &[u8],
+) -> Result<Response<Full<Bytes>>> {
+    let request: FileRequest = serde_json::from_slice(body)
+        .map_err(|error| BlazeDaemonError::BadRequest(format!("invalid read body: {error}")))?;
+    let data = state
+        .manager
+        .read_file(parse_uuid(id)?, request.path)
+        .await?;
+    json_ok(&json!({"data_b64": BASE64.encode(data)}))
+}
+
+async fn write_instance_file(
+    state: &Arc<ServerState>,
+    id: &str,
+    body: &[u8],
+) -> Result<Response<Full<Bytes>>> {
+    let request: FileRequest = serde_json::from_slice(body)
+        .map_err(|error| BlazeDaemonError::BadRequest(format!("invalid write body: {error}")))?;
+    let encoded = request
+        .data_b64
+        .ok_or_else(|| BlazeDaemonError::BadRequest("data_b64 is required".to_string()))?;
+    let data = decode_guest_file(&encoded, MAX_GUEST_FILE_BYTES)?;
+    state
+        .manager
+        .write_file(parse_uuid(id)?, request.path, &data)
+        .await?;
+    json_ok(&json!({"written": true, "bytes": data.len()}))
+}
+
+fn decode_guest_file(encoded: &str, limit: usize) -> Result<Vec<u8>> {
+    let encoded_limit = max_base64_len(limit);
+    if encoded.len() > encoded_limit {
+        return Err(crate::guest::GuestError::PayloadTooLarge {
+            actual: encoded.len(),
+            limit: encoded_limit,
+        }
+        .into());
+    }
+    let data = BASE64
+        .decode(encoded)
+        .map_err(|error| BlazeDaemonError::BadRequest(format!("invalid base64: {error}")))?;
+    if data.len() > limit {
+        return Err(crate::guest::GuestError::PayloadTooLarge {
+            actual: data.len(),
+            limit,
+        }
+        .into());
+    }
+    Ok(data)
+}
+
 // ---------------------------------------------------------------------------
 // Pools
 // ---------------------------------------------------------------------------
@@ -468,45 +652,31 @@ fn resize_pool(
 // Templates
 // ---------------------------------------------------------------------------
 
-fn list_templates(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
-    let reg = state
-        .template
-        .lock()
-        .map_err(|_| BlazeDaemonError::Internal("template lock poisoned".into()))?;
-    json_ok(&reg.list())
+async fn list_templates(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
+    json_bytes_ok(state.manager.list_templates().await?)
 }
 
-fn inspect_template(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>>> {
-    let uuid = parse_uuid(id)?;
-    let reg = state
-        .template
-        .lock()
-        .map_err(|_| BlazeDaemonError::Internal("template lock poisoned".into()))?;
-    let view = reg
-        .inspect(uuid)
-        .ok_or_else(|| BlazeDaemonError::NotFound(format!("template {uuid}")))?;
-    json_ok(&view)
+async fn get_template(state: &Arc<ServerState>, name: &str) -> Result<Response<Full<Bytes>>> {
+    json_bytes_ok(state.manager.get_template(name.to_string()).await?)
 }
 
-fn gc_templates(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
-    let idle_ttl = {
-        let cfg = state
-            .config
-            .lock()
-            .map_err(|_| BlazeDaemonError::Internal("config lock poisoned".into()))?;
-        parse_duration(&cfg.template.idle_ttl).unwrap_or(std::time::Duration::from_secs(3600))
-    };
-    let collected = {
-        let mut reg = state
-            .template
-            .lock()
-            .map_err(|_| BlazeDaemonError::Internal("template lock poisoned".into()))?;
-        reg.gc_unused(idle_ttl)
-    };
-    json_ok(&json!({
-        "collected": collected,
-        "count": collected.len(),
-    }))
+#[derive(Debug, Deserialize)]
+struct ImportTemplateRequest {
+    name: String,
+    source: PathBuf,
+    #[serde(default)]
+    description: String,
+}
+
+async fn import_template(state: &Arc<ServerState>, body: &[u8]) -> Result<Response<Full<Bytes>>> {
+    let request: ImportTemplateRequest = serde_json::from_slice(body).map_err(|error| {
+        BlazeDaemonError::BadRequest(format!("invalid runtime template import body: {error}"))
+    })?;
+    let imported = state
+        .manager
+        .import_template(request.name, request.source, request.description)
+        .await?;
+    json_response(StatusCode::CREATED, &imported)
 }
 
 // ---------------------------------------------------------------------------
@@ -552,6 +722,13 @@ fn json_ok<T: Serialize>(value: &T) -> Result<Response<Full<Bytes>>> {
     json_response(StatusCode::OK, value)
 }
 
+fn json_bytes_ok(body: Bytes) -> Result<Response<Full<Bytes>>> {
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Full::new(body))?)
+}
+
 fn json_created<T: Serialize>(value: &T) -> Result<Response<Full<Bytes>>> {
     json_response(StatusCode::CREATED, value)
 }
@@ -567,10 +744,13 @@ fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Result<Response
 fn error_response(err: &BlazeDaemonError) -> Response<Full<Bytes>> {
     let status =
         StatusCode::from_u16(err.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let body = json!({
+    let mut body = json!({
         "error": err.to_string(),
         "status": status.as_u16(),
     });
+    if let Some(code) = err.api_code() {
+        body["code"] = json!(code);
+    }
     let bytes = serde_json::to_vec_pretty(&body)
         .unwrap_or_else(|_| br#"{"error":"serialize_failed"}"#.to_vec());
     Response::builder()
@@ -610,14 +790,17 @@ mod tests {
     use blaze_core::storage::{
         AcquireOpts, PoolStatus, StorageAcquireError, StorageProvider, StorageSlot,
     };
-    use blaze_core::template::TemplateRegistry;
 
     use crate::file_provider::FileStorageProvider;
+    #[cfg(target_os = "linux")]
+    use crate::spawner::BubblewrapSpawner;
     use crate::spawner::{
-        BackendInstance, BackendSpawner, DynBackendInstance, DynSpawner, MockSpawner, SpawnFailure,
-        SpawnResult, SpawnerRegistry,
+        BackendInstance, BackendSpawner, DynBackendInstance, DynSpawner, GuestMockSpawner,
+        MockSpawner, SpawnFailure, SpawnResult, SpawnerRegistry,
     };
     use crate::state::ServerState;
+    #[cfg(target_os = "linux")]
+    use tokio::sync::Notify;
 
     use super::*;
 
@@ -632,6 +815,7 @@ mod tests {
         config.daemon.state_dir = temp.path().join("state");
         config.storage.images_dir = temp.path().join("images");
         config.storage.instances_dir = temp.path().join("instances");
+        config.template.dir = temp.path().join("templates");
         std::fs::create_dir_all(&config.daemon.state_dir).expect("state");
         std::fs::create_dir_all(&config.storage.images_dir).expect("images");
         std::fs::create_dir_all(&config.storage.instances_dir).expect("instances");
@@ -684,16 +868,18 @@ mod tests {
         active_backend: BackendKind,
         storage: Arc<dyn StorageProvider>,
     ) -> Arc<ServerState> {
-        Arc::new(ServerState::build(
-            config,
-            PolicyEngine::with_policies(vec![policy]),
-            PoolManager::new(),
-            TemplateRegistry::new(),
-            HookRegistry::new(),
-            registry,
-            active_backend,
-            storage,
-        ))
+        Arc::new(
+            ServerState::build(
+                config,
+                PolicyEngine::with_policies(vec![policy]),
+                PoolManager::new(),
+                HookRegistry::new(),
+                registry,
+                active_backend,
+                storage,
+            )
+            .expect("state"),
+        )
     }
 
     #[cfg(feature = "test-failpoints")]
@@ -707,6 +893,22 @@ mod tests {
             config,
             test_policy(BackendKind::Mock, pooled),
             spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+        )
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    fn guest_mock_state(temp: &tempfile::TempDir, pooled: bool) -> Arc<ServerState> {
+        let config = test_config(temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        build_test_state(
+            config,
+            test_policy(BackendKind::Mock, pooled),
+            spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
             BackendKind::Mock,
             storage,
         )
@@ -734,6 +936,32 @@ mod tests {
         let response = dispatch(&method, path, "", body, state)
             .await
             .expect("dispatch");
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        let value = serde_json::from_slice(&body).expect("response json");
+        (status, value)
+    }
+
+    async fn handled_json(
+        state: &Arc<ServerState>,
+        method: Method,
+        path: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, serde_json::Value) {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(hyper::header::CONTENT_LENGTH, body.len())
+            .body(Full::new(Bytes::from(body)))
+            .expect("request");
+        let response = handle_request(request, state.clone())
+            .await
+            .expect("infallible response");
         let status = response.status();
         let body = response
             .into_body()
@@ -789,8 +1017,8 @@ mod tests {
             self.inner.reconstruct(instance_id).await
         }
 
-        async fn flush_dirty(&self, slot: &StorageSlot) -> blaze_core::Result<()> {
-            self.inner.flush_dirty(slot).await
+        async fn sync_artifacts(&self, slot: &StorageSlot) -> blaze_core::Result<()> {
+            self.inner.sync_artifacts(slot).await
         }
 
         fn pool_status(&self) -> PoolStatus {
@@ -842,8 +1070,8 @@ mod tests {
             self.inner.reconstruct(instance_id).await
         }
 
-        async fn flush_dirty(&self, slot: &StorageSlot) -> blaze_core::Result<()> {
-            self.inner.flush_dirty(slot).await
+        async fn sync_artifacts(&self, slot: &StorageSlot) -> blaze_core::Result<()> {
+            self.inner.sync_artifacts(slot).await
         }
 
         fn pool_status(&self) -> PoolStatus {
@@ -912,6 +1140,39 @@ mod tests {
             Err(BlazeError::BackendError {
                 msg: "partial owner must remain registered".into(),
             })
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    struct PreSpawnBoundarySpawner {
+        reached: Arc<Notify>,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[async_trait]
+    impl BackendSpawner for PreSpawnBoundarySpawner {
+        async fn prepare_spawn(&self, run_dir: &Path) -> blaze_core::Result<()> {
+            BubblewrapSpawner.prepare_spawn(run_dir).await
+        }
+
+        async fn spawn(
+            &self,
+            _request: SpawnRequest,
+        ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
+            self.reached.notify_one();
+            std::future::pending().await
+        }
+
+        async fn probe(&self, _binary_path: &Path) -> blaze_core::Result<bool> {
+            Ok(true)
+        }
+
+        async fn cleanup_orphan(
+            &self,
+            instance_id: Uuid,
+            run_dir: &Path,
+        ) -> blaze_core::Result<()> {
+            BubblewrapSpawner.cleanup_orphan(instance_id, run_dir).await
         }
     }
 
@@ -1037,6 +1298,39 @@ mod tests {
         }
     }
 
+    struct StalledGuestOwner {
+        instance_id: Uuid,
+        socket: PathBuf,
+        kill_count: Arc<AtomicUsize>,
+        killed: AtomicBool,
+    }
+
+    #[async_trait]
+    impl BackendInstance for StalledGuestOwner {
+        fn backend(&self) -> BackendKind {
+            BackendKind::Mock
+        }
+
+        fn guest_socket_path(&self) -> &Path {
+            &self.socket
+        }
+
+        async fn try_wait(&self) -> blaze_core::Result<Option<SpawnResult>> {
+            Ok(self.killed.load(Ordering::Acquire).then_some(SpawnResult {
+                instance_id: self.instance_id,
+                exit_code: Some(0),
+                signal: None,
+            }))
+        }
+
+        async fn kill(&self) -> blaze_core::Result<()> {
+            if !self.killed.swap(true, Ordering::AcqRel) {
+                self.kill_count.fetch_add(1, Ordering::AcqRel);
+            }
+            Ok(())
+        }
+    }
+
     struct CountingStorage {
         inner: FileStorageProvider,
         release_count: Arc<AtomicUsize>,
@@ -1069,8 +1363,8 @@ mod tests {
             self.inner.reconstruct(instance_id).await
         }
 
-        async fn flush_dirty(&self, slot: &StorageSlot) -> blaze_core::Result<()> {
-            self.inner.flush_dirty(slot).await
+        async fn sync_artifacts(&self, slot: &StorageSlot) -> blaze_core::Result<()> {
+            self.inner.sync_artifacts(slot).await
         }
 
         fn pool_status(&self) -> PoolStatus {
@@ -1225,6 +1519,7 @@ mod tests {
         // Minimal config with both backends present.
         let mut config = DaemonConfig::default();
         config.daemon.state_dir = tmp.join("state");
+        config.template.dir = tmp.join("templates");
         let _ = std::fs::create_dir_all(&config.daemon.state_dir);
         config.backends.insert("firecracker".into(), fc_bin.clone());
         config
@@ -1262,16 +1557,18 @@ mod tests {
         let _ = std::fs::create_dir_all(&storage_dir);
         let storage: Arc<dyn blaze_core::storage::StorageProvider> =
             Arc::new(FileStorageProvider::new(storage_dir));
-        let state = Arc::new(ServerState::build(
-            config,
-            engine,
-            PoolManager::new(),
-            TemplateRegistry::new(),
-            HookRegistry::new(),
-            spawners(BackendKind::Firecracker, spawner),
-            BackendKind::Firecracker,
-            storage,
-        ));
+        let state = Arc::new(
+            ServerState::build(
+                config,
+                engine,
+                PoolManager::new(),
+                HookRegistry::new(),
+                spawners(BackendKind::Firecracker, spawner),
+                BackendKind::Firecracker,
+                storage,
+            )
+            .expect("state"),
+        );
 
         // Create instance request for AgentRl workload.
         let req_body = serde_json::to_vec(&serde_json::json!({
@@ -1305,6 +1602,7 @@ mod tests {
         config.daemon.state_dir = temp.path().join("state");
         config.storage.images_dir = temp.path().join("images");
         config.storage.instances_dir = temp.path().join("instances");
+        config.template.dir = temp.path().join("templates");
         std::fs::create_dir_all(&config.daemon.state_dir).expect("state");
         std::fs::create_dir_all(&config.storage.images_dir).expect("images");
         std::fs::create_dir_all(&config.storage.instances_dir).expect("instances");
@@ -1342,16 +1640,18 @@ mod tests {
                 config.storage.images_dir.clone(),
                 config.storage.instances_dir.clone(),
             ));
-        let state = Arc::new(ServerState::build(
-            config,
-            PolicyEngine::with_policies(vec![policy]),
-            PoolManager::new(),
-            TemplateRegistry::new(),
-            HookRegistry::new(),
-            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
-            BackendKind::Mock,
-            storage,
-        ));
+        let state = Arc::new(
+            ServerState::build(
+                config,
+                PolicyEngine::with_policies(vec![policy]),
+                PoolManager::new(),
+                HookRegistry::new(),
+                spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+                BackendKind::Mock,
+                storage,
+            )
+            .expect("state"),
+        );
         let request = serde_json::to_vec(&json!({
             "workload_class": "agent-tool",
             "image_digest": "sha256:warm-validation"
@@ -1416,6 +1716,327 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sandbox_guest_routes_use_owned_runtime() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config,
+            test_policy(BackendKind::Mock, false),
+            spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("instance id");
+
+        let (status, exec) = dispatched_json(
+            &state,
+            Method::POST,
+            &format!("/v1/sandboxes/{id}/exec"),
+            serde_json::to_vec(&json!({
+                "cmd": "printf routed",
+                "timeout": 5,
+            }))
+            .expect("exec request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(exec["exit_code"], 0);
+        assert_eq!(exec["stdout_b64"], BASE64.encode(b"printf routed"));
+
+        let encoded = "AAEC/2d1ZXN0";
+        let (status, written) = dispatched_json(
+            &state,
+            Method::POST,
+            &format!("/v1/instances/{id}/write"),
+            serde_json::to_vec(&json!({
+                "path": "/tmp/value",
+                "data_b64": encoded,
+            }))
+            .expect("write request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(written["bytes"], 9);
+
+        let (status, read) = dispatched_json(
+            &state,
+            Method::POST,
+            &format!("/v1/sandboxes/{id}/read"),
+            serde_json::to_vec(&json!({"path": "/tmp/value"})).expect("read request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(read["data_b64"], encoded);
+
+        let invalid_timeout = dispatch(
+            &Method::POST,
+            &format!("/v1/sandboxes/{id}/exec"),
+            "",
+            serde_json::to_vec(&json!({
+                "cmd": "true",
+                "timeout": MAX_EXEC_TIMEOUT_SECS + 1,
+            }))
+            .expect("invalid request"),
+            &state,
+        )
+        .await
+        .expect_err("timeout above the API limit must fail");
+        assert!(matches!(invalid_timeout, BlazeDaemonError::BadRequest(_)));
+
+        assert_eq!(
+            decode_guest_file(&BASE64.encode(b"1234"), 4).expect("boundary"),
+            b"1234"
+        );
+        assert!(matches!(
+            decode_guest_file(&BASE64.encode(b"12345"), 4),
+            Err(BlazeDaemonError::Guest(
+                crate::guest::GuestError::PayloadTooLarge { .. }
+            ))
+        ));
+        assert!(matches!(
+            decode_guest_file("not/base64!", 16),
+            Err(BlazeDaemonError::BadRequest(_))
+        ));
+
+        let (status, destroyed) = dispatched_json(
+            &state,
+            Method::DELETE,
+            &format!("/v1/sandboxes/{id}"),
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(destroyed["destroyed"], true);
+    }
+
+    #[tokio::test]
+    async fn production_mock_rejects_guest_operations() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config,
+            test_policy(BackendKind::Mock, false),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("instance id");
+
+        let (status, error) = handled_json(
+            &state,
+            Method::POST,
+            &format!("/v1/sandboxes/{id}/exec"),
+            serde_json::to_vec(&json!({"cmd": "true"})).expect("exec request"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            error["error"]
+                .as_str()
+                .expect("error message")
+                .contains("no guest transport")
+        );
+    }
+
+    #[tokio::test]
+    async fn guest_write_respects_http_and_decoded_limits() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config,
+            test_policy(BackendKind::Mock, false),
+            spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("instance id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        let path = format!("/v1/sandboxes/{id}/write");
+
+        let envelope_payload = vec![b'y'; 17 * 1024 * 1024];
+        let envelope_body = serde_json::to_vec(&json!({
+            "path": "/tmp/http-envelope",
+            "data_b64": BASE64.encode(&envelope_payload),
+        }))
+        .expect("write request above the guest HTTP limit");
+        assert!(envelope_body.len() > MAX_GUEST_HTTP_BODY_BYTES);
+        let (status, error) = handled_json(&state, Method::POST, &path, envelope_body).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(error["status"], 413);
+
+        let mut payload = vec![b'z'; MAX_GUEST_FILE_BYTES];
+        let body = serde_json::to_vec(&json!({
+            "path": "/tmp/max-size",
+            "data_b64": BASE64.encode(&payload),
+        }))
+        .expect("write request");
+        assert!(body.len() <= MAX_GUEST_HTTP_BODY_BYTES);
+
+        let (status, written) = handled_json(&state, Method::POST, &path, body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(written["bytes"], MAX_GUEST_FILE_BYTES);
+        let readback = state
+            .manager
+            .read_file(uuid, "/tmp/max-size".into())
+            .await
+            .expect("read maximum file");
+        assert_eq!(readback, payload);
+        drop(readback);
+
+        payload.push(b'z');
+        let oversized = serde_json::to_vec(&json!({
+            "path": "/tmp/too-large",
+            "data_b64": BASE64.encode(&payload),
+        }))
+        .expect("oversized write request");
+        assert!(oversized.len() <= MAX_GUEST_HTTP_BODY_BYTES);
+        let (status, error) = handled_json(&state, Method::POST, &path, oversized).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(error["status"], 413);
+    }
+
+    #[tokio::test]
+    async fn write_route_reports_unknown_after_delivery_failure() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config,
+            test_policy(BackendKind::Mock, false),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("instance id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        state
+            .manager
+            .backend_owner(uuid)
+            .expect("mock owner")
+            .kill()
+            .await
+            .expect("stop mock guest");
+
+        let socket = temp.path().join("uncertain.uds");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind guest endpoint");
+        state
+            .manager
+            .insert_backend_owner(
+                uuid,
+                Arc::new(StalledGuestOwner {
+                    instance_id: uuid,
+                    socket,
+                    kill_count: Arc::new(AtomicUsize::new(0)),
+                    killed: AtomicBool::new(false),
+                }),
+            )
+            .expect("replace backend owner");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept guest request");
+            let mut reader = tokio::io::BufReader::new(stream);
+            let mut connect = String::new();
+            reader.read_line(&mut connect).await.expect("read connect");
+            assert_eq!(connect, "CONNECT 5000\n");
+            reader
+                .get_mut()
+                .write_all(b"OK 5000\n")
+                .await
+                .expect("write handshake");
+            let mut request = String::new();
+            reader
+                .read_line(&mut request)
+                .await
+                .expect("read guest request");
+            let request: serde_json::Value =
+                serde_json::from_str(&request).expect("parse guest request");
+            assert_eq!(request["op"], "write");
+        });
+
+        let body = serde_json::to_vec(&json!({
+            "path": "/tmp/value",
+            "data_b64": BASE64.encode(b"value"),
+        }))
+        .expect("write request");
+        let (status, error) = handled_json(
+            &state,
+            Method::POST,
+            &format!("/v1/sandboxes/{id}/write"),
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(error["code"], "guest_outcome_unknown");
+        server.await.expect("guest server");
+    }
+
+    #[tokio::test]
+    async fn unknown_guest_outcome_has_stable_api_code() {
+        let response = error_response(&BlazeDaemonError::Guest(
+            crate::guest::GuestError::OutcomeUnknown("response lost".into()),
+        ));
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("error json");
+        assert_eq!(value["code"], "guest_outcome_unknown");
+        assert_eq!(value["status"], 504);
+
+        let response = error_response(&BlazeDaemonError::Guest(
+            crate::guest::GuestError::ResponseTooLarge {
+                actual: 5,
+                limit: 4,
+            },
+        ));
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("error json");
+        assert_eq!(value["code"], "guest_response_too_large");
+
+        let response = error_response(&BlazeDaemonError::Guest(crate::guest::GuestError::Timeout(
+            "connect stalled".into(),
+        )));
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("error json");
+        assert_eq!(value["code"], "guest_timeout");
+    }
+
+    #[tokio::test]
     async fn create_publishes_ownership_before_provider_acquire() {
         let temp = tempfile::tempdir().expect("temp");
         let config = test_config(&temp);
@@ -1438,6 +2059,226 @@ mod tests {
 
         created_json(&state, &test_request()).await;
         assert!(observed.load(Ordering::Acquire));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn restart_reconciles_durable_starting_before_spawn() {
+        let temp = tempfile::tempdir().expect("temp");
+        let mut config = test_config(&temp);
+        config.storage.rootfs_size = 64;
+        config.storage.mem_size = 32;
+        config
+            .backends
+            .insert(BackendKind::Bubblewrap.as_str().into(), "/bin/true".into());
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let reached = Arc::new(Notify::new());
+        let state = build_test_state(
+            config.clone(),
+            test_policy(BackendKind::Bubblewrap, false),
+            spawners(
+                BackendKind::Bubblewrap,
+                Arc::new(PreSpawnBoundarySpawner {
+                    reached: reached.clone(),
+                }),
+            ),
+            BackendKind::Bubblewrap,
+            storage,
+        );
+        let create_state = state.clone();
+        let create =
+            tokio::spawn(async move { create_instance(&create_state, &test_request()).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), reached.notified())
+            .await
+            .expect("create reached the pre-spawn boundary");
+
+        let instance = state
+            .manager
+            .list()
+            .expect("instances")
+            .into_iter()
+            .next()
+            .expect("durable create state");
+        let persisted = SandboxInstance::load(&config.daemon.state_dir, instance.id)
+            .expect("load durable Starting state");
+        assert_eq!(persisted.state, SandboxState::Creating);
+        assert_eq!(persisted.backend_ownership, BackendOwnership::Starting);
+        let pid_file = config
+            .daemon
+            .state_dir
+            .join(instance.id.to_string())
+            .join("backend.pid");
+        assert_eq!(std::fs::read(&pid_file).expect("prepared PID handoff"), b"");
+        assert!(
+            config
+                .storage
+                .instances_dir
+                .join(instance.id.to_string())
+                .is_dir()
+        );
+
+        create.abort();
+        assert!(
+            create
+                .await
+                .expect_err("simulated daemon exit cancels create")
+                .is_cancelled()
+        );
+        drop(state);
+
+        let recovered_storage: Arc<dyn StorageProvider> =
+            Arc::new(FileStorageProvider::with_images(
+                config.storage.images_dir.clone(),
+                config.storage.instances_dir.clone(),
+            ));
+        let recovered = build_test_state(
+            config.clone(),
+            test_policy(BackendKind::Bubblewrap, false),
+            spawners(BackendKind::Bubblewrap, Arc::new(BubblewrapSpawner)),
+            BackendKind::Bubblewrap,
+            recovered_storage,
+        );
+
+        let report = recovered.manager.reconcile_startup().await;
+
+        assert_eq!(report.attempted, 1);
+        assert_eq!(report.completed, 1);
+        assert!(report.failures.is_empty());
+        assert_eq!(
+            recovered
+                .manager
+                .get(instance.id)
+                .expect("reconciled state")
+                .state,
+            SandboxState::Destroyed
+        );
+        assert!(
+            !config
+                .storage
+                .instances_dir
+                .join(instance.id.to_string())
+                .exists()
+        );
+        assert!(
+            config
+                .daemon
+                .state_dir
+                .join(instance.id.to_string())
+                .join("backend.stopped")
+                .is_file()
+        );
+        assert!(!pid_file.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn restart_retains_locked_handoff_until_retry() {
+        use std::os::fd::AsRawFd;
+
+        let temp = tempfile::tempdir().expect("temp");
+        let mut config = test_config(&temp);
+        config.storage.rootfs_size = 64;
+        config.storage.mem_size = 32;
+        let storage = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let mut instance = SandboxInstance::new(
+            BackendKind::Bubblewrap,
+            WorkloadClass::AgentTool,
+            "sha256:locked-handoff".into(),
+            StartPath::Cold,
+            "pid-handoff-test".into(),
+        );
+        instance
+            .transition(SandboxState::Creating)
+            .expect("creating");
+        instance.begin_operation(OperationKind::Create);
+        let run_dir = config.daemon.state_dir.join(instance.id.to_string());
+        BubblewrapSpawner
+            .prepare_spawn(&run_dir)
+            .await
+            .expect("prepare PID handoff");
+        instance.backend_ownership = BackendOwnership::Starting;
+        instance
+            .persist(&config.daemon.state_dir)
+            .expect("persist Starting state");
+        storage
+            .acquire(&AcquireOpts {
+                instance_id: instance.id.to_string(),
+                rootfs_size: config.storage.rootfs_size,
+                mem_size: config.storage.mem_size,
+            })
+            .await
+            .expect("storage");
+        let pid_file = run_dir.join("backend.pid");
+        let handoff = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&pid_file)
+            .expect("open PID handoff");
+        assert_eq!(
+            unsafe { libc::flock(handoff.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0,
+            "lock PID handoff"
+        );
+        let state = build_test_state(
+            config.clone(),
+            test_policy(BackendKind::Bubblewrap, false),
+            spawners(BackendKind::Bubblewrap, Arc::new(BubblewrapSpawner)),
+            BackendKind::Bubblewrap,
+            storage,
+        );
+
+        let first = state.manager.reconcile_startup().await;
+
+        assert_eq!(first.attempted, 1);
+        assert_eq!(first.completed, 0);
+        assert_eq!(first.failures.len(), 1);
+        assert!(first.failures[0].error.contains("still in progress"));
+        assert_eq!(
+            state
+                .manager
+                .get(instance.id)
+                .expect("retained state")
+                .state,
+            SandboxState::RecoveryRequired
+        );
+        assert!(
+            config
+                .storage
+                .instances_dir
+                .join(instance.id.to_string())
+                .is_dir()
+        );
+        assert!(!run_dir.join("backend.stopped").exists());
+
+        drop(handoff);
+        let retry = state.manager.reconcile_startup().await;
+
+        assert_eq!(retry.attempted, 1);
+        assert_eq!(retry.completed, 1);
+        assert!(retry.failures.is_empty());
+        assert_eq!(
+            state
+                .manager
+                .get(instance.id)
+                .expect("destroyed state")
+                .state,
+            SandboxState::Destroyed
+        );
+        assert!(
+            !config
+                .storage
+                .instances_dir
+                .join(instance.id.to_string())
+                .exists()
+        );
+        assert!(run_dir.join("backend.stopped").is_file());
+        assert!(!pid_file.exists());
     }
 
     #[tokio::test]
@@ -1818,6 +2659,37 @@ mod tests {
     #[tokio::test]
     async fn warm_final_commit_failure_restores_the_claim() {
         assert_warm_state_commit_failure_restores_claim("warm-final-state-commit").await;
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn guest_readiness_failure_compensates_owned_resources() {
+        let request = test_request();
+        let temp = tempfile::tempdir().expect("temp");
+        let state = guest_mock_state(&temp, false);
+        let hook = crate::failpoint::TestFailpoint::new(&["create-guest-ready"]);
+
+        hook.run(create_instance(&state, &request))
+            .await
+            .expect_err("guest readiness failure");
+
+        let instance = state
+            .instances
+            .lock()
+            .expect("instances")
+            .values()
+            .next()
+            .cloned()
+            .expect("destroyed create");
+        assert_eq!(instance.state, SandboxState::Destroyed);
+        assert!(state.manager.backend_owner(instance.id).is_none());
+        assert!(
+            !temp
+                .path()
+                .join("instances")
+                .join(instance.id.to_string())
+                .exists()
+        );
     }
 
     #[cfg(feature = "test-failpoints")]
@@ -2405,5 +3277,159 @@ mod tests {
             state.instances.lock().expect("instances")[&stopped_id].state,
             SandboxState::Destroyed
         );
+    }
+
+    #[tokio::test]
+    async fn template_routes_import_list_and_get_published_artifacts() {
+        let temp = tempfile::tempdir().expect("temp");
+        let import_root = temp.path().join("imports");
+        let source = import_root.join("source");
+        std::fs::create_dir(&import_root).expect("import root");
+        std::fs::create_dir(&source).expect("source");
+        std::fs::write(source.join("vmstate.snap"), b"snapshot").expect("snapshot");
+        std::fs::write(source.join("mem.bin"), b"memory").expect("memory");
+        std::fs::write(source.join("rootfs.ext4"), b"rootfs").expect("rootfs");
+
+        let mut config = DaemonConfig::default();
+        config.daemon.state_dir = temp.path().join("state");
+        config.storage.images_dir = temp.path().join("images");
+        config.storage.instances_dir = temp.path().join("instances");
+        config.template.dir = temp.path().join("templates");
+        config.template.import_root = Some(import_root);
+        for directory in [
+            &config.daemon.state_dir,
+            &config.storage.images_dir,
+            &config.storage.instances_dir,
+            &config.template.dir,
+        ] {
+            std::fs::create_dir_all(directory).expect("directory");
+        }
+        let storage: Arc<dyn blaze_core::storage::StorageProvider> =
+            Arc::new(FileStorageProvider::with_images(
+                config.storage.images_dir.clone(),
+                config.storage.instances_dir.clone(),
+            ));
+        let state = Arc::new(
+            ServerState::build(
+                config,
+                PolicyEngine::with_policies(Vec::new()),
+                PoolManager::new(),
+                HookRegistry::new(),
+                spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+                BackendKind::Mock,
+                storage,
+            )
+            .expect("state"),
+        );
+
+        for (method, path) in [
+            (Method::GET, "/v1/runtime-templates"),
+            (Method::POST, "/v1/templates/gc"),
+        ] {
+            let error = dispatch(&method, path, "", Vec::new(), &state)
+                .await
+                .expect_err("retired template route");
+            assert!(matches!(error, BlazeDaemonError::NotFound(_)));
+        }
+
+        let request = serde_json::to_vec(&json!({
+            "name": "runtime-base",
+            "source": "source",
+            "description": "reusable runtime",
+        }))
+        .expect("request");
+        let imported = dispatch(
+            &Method::POST,
+            "/v1/templates/import",
+            "",
+            request.clone(),
+            &state,
+        )
+        .await
+        .expect("import");
+        assert_eq!(imported.status(), StatusCode::CREATED);
+        let imported = serde_json::from_slice::<serde_json::Value>(
+            &imported
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("json");
+        assert_eq!(imported["name"], "runtime-base");
+        assert_eq!(imported["description"], "reusable runtime");
+
+        let listed = dispatch(&Method::GET, "/v1/templates", "", Vec::new(), &state)
+            .await
+            .expect("list");
+        let concurrent_list = dispatch(&Method::GET, "/v1/templates", "", Vec::new(), &state)
+            .await
+            .expect_err("list response must retain the single-flight permit");
+        assert!(matches!(
+            concurrent_list,
+            BlazeDaemonError::ServiceUnavailable(_)
+        ));
+        let listed = serde_json::from_slice::<serde_json::Value>(
+            &listed.into_body().collect().await.expect("body").to_bytes(),
+        )
+        .expect("json");
+        assert_eq!(listed, json!([{ "name": "runtime-base" }]));
+
+        dispatch(&Method::GET, "/v1/templates", "", Vec::new(), &state)
+            .await
+            .expect("list after response body release");
+
+        let fetched = dispatch(
+            &Method::GET,
+            "/v1/templates/runtime-base",
+            "",
+            Vec::new(),
+            &state,
+        )
+        .await
+        .expect("get");
+        assert_eq!(
+            fetched.headers().get(CONTENT_TYPE).expect("content type"),
+            "application/json"
+        );
+        let concurrent_get = dispatch(
+            &Method::GET,
+            "/v1/templates/runtime-base",
+            "",
+            Vec::new(),
+            &state,
+        )
+        .await
+        .expect_err("item response must retain the single-flight permit");
+        assert!(matches!(
+            concurrent_get,
+            BlazeDaemonError::ServiceUnavailable(_)
+        ));
+        let fetched = serde_json::from_slice::<serde_json::Value>(
+            &fetched
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("json");
+        assert_eq!(fetched, imported);
+
+        dispatch(
+            &Method::GET,
+            "/v1/templates/runtime-base",
+            "",
+            Vec::new(),
+            &state,
+        )
+        .await
+        .expect("get after response body release");
+
+        let duplicate = dispatch(&Method::POST, "/v1/templates/import", "", request, &state)
+            .await
+            .expect_err("duplicate");
+        assert!(matches!(duplicate, BlazeDaemonError::Conflict(_)));
     }
 }
