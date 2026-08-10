@@ -23,6 +23,37 @@ python-lint-ci: ## Run incremental ruff lint check (only changed lines vs main, 
 	@cd "$(shell git rev-parse --show-toplevel)" && diff-quality --violations=flake8 --compare-branch=$(COMPARE_BRANCH) src/agent-sec-core/ruff_report.txt || true
 	@rm -f ruff_report.txt
 
+# -----------------------------------------------------------------------------
+# Rust code quality. agent-sec-cli (prompt-scanner) is cross-platform; linux-sandbox is Linux-only.
+#
+# pyo3 0.20 rejects Python > 3.12, so point it at the uv project env instead of
+# whatever PATH offers.  Never export an empty value -- that is fatal to pyo3.
+# Recipes group `{ $(PYO3_PIN); cargo ...; }` behind `cd ... &&` so a failed cd
+# aborts the whole line instead of running cargo from the wrong directory.
+PYO3_PIN = PY="$$(uv python find 2>/dev/null)"; if [ -n "$$PY" ]; then export PYO3_PYTHON="$$PY"; fi
+
+.PHONY: rust-code-pretty
+rust-code-pretty: ## Format Rust code with cargo fmt (agent-sec-cli + linux-sandbox)
+	@echo "🎨 Formatting Rust code with cargo fmt..."
+	cd agent-sec-cli && cargo fmt --all
+	cd linux-sandbox && cargo fmt
+
+.PHONY: rust-fmt-check
+rust-fmt-check: ## Check Rust formatting without modifying files
+	@echo "🔍 Checking Rust formatting..."
+	cd agent-sec-cli && cargo fmt --all -- --check
+	cd linux-sandbox && cargo fmt -- --check
+
+.PHONY: rust-lint
+rust-lint: ## Run cargo clippy on Rust crates (linux-sandbox on Linux only)
+	@echo "🔍 Running cargo clippy..."
+	cd agent-sec-cli && { $(PYO3_PIN); cargo clippy --workspace --all-targets -- -D warnings; }
+	@if [ "$$(uname -s)" = "Linux" ]; then \
+		cd linux-sandbox && cargo clippy --all-targets -- -D warnings; \
+	else \
+		echo "  (linux-sandbox clippy skipped: requires Linux)"; \
+	fi
+
 # =============================================================================
 # TEST
 # =============================================================================
@@ -82,14 +113,30 @@ test-python-coverage: ## Run Python tests with coverage report
 		-v --cov --cov-config=agent-sec-cli/pyproject.toml --cov-report=xml --cov-report=term-missing
 
 .PHONY: test-rust
-test-rust: ## Run Rust sandbox tests
-	@echo "🧪 Running Rust tests..."
-	cd linux-sandbox && cargo test -- --skip bwrap_seccomp
+test-rust: ## Run Rust tests (agent-sec-cli workspace always; linux-sandbox on Linux only)
+	@echo "🧪 Running agent-sec-cli workspace Rust tests..."
+	cd agent-sec-cli && { $(PYO3_PIN); cargo test --workspace; }
+	@echo "🧪 Running linux-sandbox Rust tests (Linux only)..."
+	@if [ "$$(uname -s)" = "Linux" ]; then \
+		cd linux-sandbox && cargo test -- --skip bwrap_seccomp; \
+	else \
+		echo "  (linux-sandbox tests skipped: requires Linux)"; \
+	fi
 
+# One report per workspace: cargo-llvm-cov cannot merge across workspaces, and
+# CI unions them via diff-cover.  `-p` skips the untested PyO3 cdylib root.
 .PHONY: test-rust-coverage
-test-rust-coverage: ## Run Rust sandbox tests with coverage report
-	@echo "🧪 Running Rust tests with coverage..."
-	cd linux-sandbox && cargo llvm-cov --cobertura --output-path ../rust-coverage.xml -- --skip bwrap_seccomp
+test-rust-coverage: ## Run Rust tests with coverage (agent-sec-cli crates; linux-sandbox on Linux only)
+	@echo "🧪 Running agent-sec-cli Rust tests with coverage..."
+	cd agent-sec-cli && cargo llvm-cov --cobertura \
+		--output-path ../rust-cli-coverage.xml \
+		-p prompt-scanner -p model-service
+	@echo "🧪 Running linux-sandbox Rust tests with coverage (Linux only)..."
+	@if [ "$$(uname -s)" = "Linux" ]; then \
+		cd linux-sandbox && cargo llvm-cov --cobertura --output-path ../rust-coverage.xml -- --skip bwrap_seccomp; \
+	else \
+		echo "  (linux-sandbox coverage skipped: requires Linux)"; \
+	fi
 
 .PHONY: test-openclaw-plugin
 test-openclaw-plugin: ## Run openclaw-plugin tests

@@ -356,7 +356,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.93.0'
-          components: llvm-tools-preview
+          components: llvm-tools-preview, rustfmt, clippy
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
@@ -464,6 +464,15 @@ jobs:
           fi
           echo "requirements.txt is in sync with uv.lock."
 
+      - name: Rust format & lint check
+        run: |
+          cd src/agent-sec-core
+          make rust-fmt-check
+          make rust-lint
+          # cargo-llvm-cov cannot instrument doctests on stable, so the coverage
+          # step below skips them; run the crate's public examples here instead.
+          cd agent-sec-cli && cargo test --doc -p prompt-scanner
+
       - name: Run Rust tests with coverage
         run: |
           cd src/agent-sec-core
@@ -473,24 +482,33 @@ jobs:
         if: always()
         shell: bash
         run: |
-          COV_FILE="src/agent-sec-core/rust-coverage.xml"
-          if [ -f "$COV_FILE" ]; then
-            LINE_RATE=$(grep -oP 'line-rate="\K[^"]+' "$COV_FILE" | head -1)
-            LINES_VALID=$(grep -oP 'lines-valid="\K[^"]+' "$COV_FILE" | head -1)
-            LINES_COVERED=$(grep -oP 'lines-covered="\K[^"]+' "$COV_FILE" | head -1)
-            LINE_PCT=$(echo "$LINE_RATE * 100" | bc -l | xargs printf '%.1f')
+          cd src/agent-sec-core
+          # One row per Rust workspace: linux-sandbox and the agent-sec-cli
+          # library crates are separate cargo workspaces with separate reports.
+          emit_rust_cov_row() {
+            local cov_file="$1" label="agent-sec-core/$2"
+            if [ ! -f "$cov_file" ]; then
+              echo "### ⚠️ ${label} Rust coverage report not found" >> "$GITHUB_STEP_SUMMARY"
+              return 0
+            fi
+            local line_rate lines_valid lines_covered line_pct
+            line_rate=$(grep -oP 'line-rate="\K[^"]+' "$cov_file" | head -1)
+            lines_valid=$(grep -oP 'lines-valid="\K[^"]+' "$cov_file" | head -1)
+            lines_covered=$(grep -oP 'lines-covered="\K[^"]+' "$cov_file" | head -1)
+            line_pct=$(echo "$line_rate * 100" | bc -l | xargs printf '%.1f')
             {
-              echo "### 🧪 agent-sec-core/linux-sandbox (Rust) Test Coverage"
+              echo "### 🧪 ${label} (Rust) Test Coverage"
               echo ""
               echo "| Metric | Coverage | Detail |"
               echo "|--------|----------|--------|"
-              echo "| 🟢 Line Coverage | **${LINE_PCT}%** | ${LINES_COVERED}/${LINES_VALID} lines |"
+              echo "| 🟢 Line Coverage | **${line_pct}%** | ${lines_covered}/${lines_valid} lines |"
               echo ""
               echo "> ℹ️ cargo-llvm-cov 不支持分支覆盖统计，仅展示行覆盖率。"
             } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "### ⚠️ linux-sandbox Rust coverage report not found" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          }
+
+          emit_rust_cov_row rust-cli-coverage.xml agent-sec-cli
+          emit_rust_cov_row rust-coverage.xml linux-sandbox
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -571,9 +589,15 @@ jobs:
           fi
 
           # --- Rust ---
-          if [ -f rust-coverage.xml ]; then
-            echo "--- Rust incremental coverage ---"
-            RUST_OUTPUT=$(diff-cover rust-coverage.xml --compare-branch="$COMPARE_BRANCH" --fail-under=$THRESHOLD 2>&1) || GATE_FAILED=true
+          # One Cobertura report per Rust workspace (cargo-llvm-cov cannot merge
+          # profiles across workspaces).  diff-cover accepts several reports and
+          # unions them, so every workspace report lands in a single Rust row.
+          shopt -s nullglob
+          RUST_REPORTS=(rust*-coverage.xml)
+          shopt -u nullglob
+          if [ "${#RUST_REPORTS[@]}" -gt 0 ]; then
+            echo "--- Rust incremental coverage (${RUST_REPORTS[*]}) ---"
+            RUST_OUTPUT=$(diff-cover "${RUST_REPORTS[@]}" --compare-branch="$COMPARE_BRANCH" --fail-under=$THRESHOLD 2>&1) || GATE_FAILED=true
             echo "$RUST_OUTPUT"
             RUST_STATS=$(extract_diff_cov_stats "$RUST_OUTPUT")
             RUST_PCT=$(echo "$RUST_STATS" | cut -d'|' -f1)

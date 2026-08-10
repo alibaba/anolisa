@@ -233,7 +233,7 @@ fn bwrap_supports_argv0() -> bool {
 fn parse_bwrap_version_supports_argv0(version_output: &str) -> bool {
     fn parse(s: &str) -> Option<bool> {
         // e.g. "bubblewrap 0.9.0"
-        let version_str = s.trim().split_whitespace().nth(1)?;
+        let version_str = s.split_whitespace().nth(1)?;
         let mut parts = version_str.split('.');
         let major: u32 = parts.next()?.parse().ok()?;
         let minor: u32 = parts.next()?.parse().ok()?;
@@ -284,8 +284,12 @@ fn preflight_proc_mount_support(
     network_mode: BwrapNetworkMode,
     supports_argv0: bool,
 ) -> bool {
-    let preflight_argv =
-        build_preflight_bwrap_argv(sandbox_policy_cwd, file_system_sandbox_policy, network_mode, supports_argv0);
+    let preflight_argv = build_preflight_bwrap_argv(
+        sandbox_policy_cwd,
+        file_system_sandbox_policy,
+        network_mode,
+        supports_argv0,
+    );
     let stderr = run_bwrap_in_child_capture_stderr(preflight_argv);
     !is_proc_mount_failure(stderr.as_str())
 }

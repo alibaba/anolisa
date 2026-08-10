@@ -146,6 +146,11 @@ jobs:
           EXPECT_UNSAFE_INSTALL_FLAG: ${{ matrix.openclaw.expect-unsafe-install }}
           AGENT_SEC_CLI_WHEEL: target/wheels/*.whl
           OPENCLAW_E2E_RESULT_ROOT: target/openclaw-e2e/results
+          # The native prompt scanner's standard mode requires an Ollama L2
+          # model service that is not available in this CI environment. Use
+          # fast (L1-only) mode so the E2E exercises the hook integration
+          # without depending on an external inference backend.
+          PROMPT_SCANNER_SCAN_MODE: fast
         run: scripts/ci/run-openclaw-plugin-e2e.sh
 
       - name: Upload E2E evidence
