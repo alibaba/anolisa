@@ -21,6 +21,7 @@ use uuid::Uuid;
 use crate::error::{BlazeDaemonError, Result};
 use crate::guest::{GuestClient, GuestExecResult, MAX_GUEST_FILE_BYTES};
 use crate::metrics::Metrics;
+use crate::sandbox::template::TemplateCatalog;
 use crate::spawner::{DynBackendInstance, SpawnerRegistry};
 
 const GUEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -86,6 +87,7 @@ pub struct SandboxManager {
     rootfs_size: u64,
     mem_size: u64,
     metrics: Arc<Metrics>,
+    pub(super) template_catalog: TemplateCatalog,
 }
 
 /// Construction inputs grouped to keep daemon wiring explicit.
@@ -98,6 +100,7 @@ pub struct SandboxManagerInit {
     pub state_dir: PathBuf,
     pub rootfs_size: u64,
     pub mem_size: u64,
+    pub template_catalog: TemplateCatalog,
 }
 
 /// Shared resources exposed to API paths that do not change runtime
@@ -120,6 +123,7 @@ impl SandboxManager {
             state_dir,
             rootfs_size,
             mem_size,
+            template_catalog,
         } = init;
         let operation_locks = instances
             .keys()
@@ -152,6 +156,7 @@ impl SandboxManager {
                 rootfs_size,
                 mem_size,
                 metrics,
+                template_catalog,
             },
             resources,
         )

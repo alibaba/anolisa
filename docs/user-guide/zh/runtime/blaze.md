@@ -153,3 +153,103 @@ running 的 backend ownership，该记录属于不一致状态，会记为失败
 service loop 停止时，Blaze 会取消并等待周期 scheduler 退出。无法取消的
 provider 工作会继续由对应 sandbox lock 持有直至完成；daemon 级连接排空和
 runtime 清理仍属于独立职责。
+
+## Template Catalog
+
+Blaze 可以原子发布运维人员准备的 runtime artifact，并通过 daemon API 提供
+其 metadata。`/v1/templates` 是唯一面向运维人员的 template 资源；发布条目
+目前不会让 sandbox create 自动选择或启动它。
+
+后续 sandbox create 支持会从同一个 catalog 解析可选的 template name；运维
+人员不需要配置或监控另一套进程内 registry。
+
+### 配置方法
+
+catalog 目录有默认值，但只有配置 import root 后才会启用导入：
+
+```toml
+[template]
+dir = "/var/lib/blaze/templates"
+import_root = "/var/lib/blaze/template-imports"
+max_files = 32
+max_bytes = 274877906944
+max_metadata_bytes = 1048576
+max_total_bytes = 1099511627776
+max_entries = 128
+```
+
+两个根目录必须使用绝对路径，彼此不能重叠，也不能与 Blaze 的 image、instance、
+policy 根目录、`[backends]` 中配置的任一 executable 路径、本次启动
+打开 daemon 配置文件时捕获的解析位置、该文件的配置路径或配置的
+`daemon.socket` 路径以及宿主机网络协调路径
+`/run/lock/blaze-network.lock` 重叠，也不能与宿主机上两种常见的命名网络空间
+目录 `/var/run/netns` 和 `/run/netns` 重叠。
+`[backends]` 中的相对路径会在启动时根据 daemon 的工作目录解析一次；目录边界
+检查、backend probe 和 sandbox launch 随后复用该绝对路径。如果配置的 backend 路径
+是符号链接，则该链接的配置位置及其解析目标都不能进入 template catalog ownership。
+daemon 配置路径为符号链接时遵循相同规则：配置的链接位置与已打开文件的解析位置
+都不能进入 template catalog ownership。
+template catalog 根目录不能包含符号链接组件。在 Linux 上，Blaze 启动时会解析
+路径中已经存在的部分，并根据 mount table 比较其底层文件系统位置，避免符号
+链接或 bind mount 别名绕过目录边界。Blaze 会保留已打开的配置文件，并在捕获
+的解析位置重复核对其身份，因此重定向配置路径不能换入另一个配置文件。发现
+重叠时，启动会在修改 catalog
+权限或扫描 catalog 条目之前拒绝继续。
+template catalog 根目录可以像默认配置一样使用 `daemon.state_dir` 下的非 UUID
+子目录，但不能接管 state root，也不能进入 sandbox UUID 子树。
+如果 catalog 根目录尚不存在，Blaze 会保留路径中最深的现有父目录，并从该目录
+创建缺失的路径段。如果计划创建的路径段在检查期间出现，启动会在修改该对象权限
+之前停止。policy 条目边界检查遵循 `policy.on_load_error`：`warn` 模式下的条目
+发现失败与 policy 加载一样使用空 policy engine；成功发现的 policy 目标仍受边界
+保护。Blaze 通过 `PATH` 找到的宿主机辅助程序也受保护，检查同时覆盖程序的配置
+位置和解析目标。
+Blaze 会保留启动时打开并验证过的 import root 目录。之后替换配置路径不会改变
+源目录查找的起点。
+
+### 导入与查询
+
+以下请求会发布 `import_root` 下的一个源目录：
+
+```http
+POST /v1/templates/import
+Content-Type: application/json
+
+{"name":"runtime-base","source":"runtime-base","description":"base runtime"}
+```
+
+`source` 必须是相对路径，不能跳转父目录或经过链接。源目录必须包含顶层普通文件
+`vmstate.snap`、`mem.bin` 和 `rootfs.ext4`；可选的 `template.json` 必须是
+JSON object。源目录和文件必须属于 daemon 用户，且不能允许 group 或其他用户
+写入。嵌套目录、链接和特殊文件都会被拒绝。
+已发布文件只能有一个硬链接，catalog 条目和 staging 目录也必须留在 catalog
+根目录所在的挂载点。发现不满足这些边界的数据时，Blaze 会停止处理，不会修改或
+继续遍历这些数据。
+启动扫描或 list/get 读取 artifact 前，Blaze 会先在不取得可读句柄的情况下判型，
+并在读取前重新核对对象身份。Linux 上的可读句柄来自已经固定的判型对象，因此替换
+目录项不能把读取重定向到另一个对象。
+
+`GET /v1/templates` 用于列出按名称排序的轻量摘要，
+`GET /v1/templates/{name}` 用于读取一个条目的完整 metadata。列表读取会
+逐条校验并释放完整 metadata，且任一时刻最多保留一个列表响应；在其 body 释放
+前，并发列表请求返回 `503 Service Unavailable`。单项查询使用独立上限，任一时刻
+最多保留一个完整单项响应；在该 body 释放前，其他单项查询返回
+`503 Service Unavailable`。目标名称已存在或同名导入正在进行时返回
+`409 Conflict`。
+
+### 发布、上限与恢复
+
+Blaze 在检查输入时执行单条目的文件数和字节数上限，并在复制到私有 staging
+目录前预留 catalog 字节和一个 `max_entries` slot。复制后会再次检查源文件
+身份，同步完整条目，再通过不覆盖现有目标的 rename 发布。因此读取方只会
+看到“没有条目”或完整条目，名称摘要 list 响应也不会物化超过配置数量的条目。
+
+导入失败时会删除 staging 数据；这也包括 staging 目录已创建、但后续打开或
+校验失败的情况。如果无法确认清理完成或发布结果已持久化，后续导入会被拒绝，
+直到修复 catalog 并重启 daemon。启动时会验证已发布条目，并删除中断导入遗留
+且归 daemon 所有的 staging 目录。在执行扫描或清理前，daemon 会在已打开的
+catalog 根目录上取得并持续持有独占锁；使用同一 catalog 的第二个 daemon 会在
+检查或清理仍在使用的 staging 目录前直接失败。正常关闭时会拒绝新导入、取消
+正在复制的任务，并等待相关文件句柄关闭。
+
+API 只校验 artifact 结构，不证明 snapshot 能在特定 backend 上启动。当前的
+sandbox create 不接受 template name，catalog 也尚未提供删除或引用跟踪。

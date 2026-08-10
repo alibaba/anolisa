@@ -448,6 +448,7 @@ mod tests {
 
     use async_trait::async_trait;
     use blaze_core::backend::{BackendKind, SpawnRequest};
+    use blaze_core::config::TemplateSection;
     use blaze_core::error::{BlazeError, Result as CoreResult};
     use blaze_core::lifecycle::{
         BackendOwnership, OperationKind, SandboxInstance, SandboxState, StartPath,
@@ -461,6 +462,7 @@ mod tests {
 
     use crate::file_provider::{ArtifactSyncOpenHook, FileStorageProvider};
     use crate::sandbox::manager::{SandboxManagerInit, SandboxManagerResources};
+    use crate::sandbox::template::TemplateCatalog;
     use crate::spawner::{
         BackendInstance, BackendSpawner, MockSpawner, SpawnResult, SpawnerRegistry,
     };
@@ -646,9 +648,17 @@ mod tests {
         let state_dir = temp.join("state");
         let images = temp.join("images");
         let instances = temp.join("instances");
-        for directory in [&state_dir, &images, &instances] {
+        let templates_dir = temp.join("templates");
+        let runtime_template_imports = temp.join("runtime-template-imports");
+        for directory in [&state_dir, &images, &instances, &runtime_template_imports] {
             std::fs::create_dir_all(directory).expect("test directory");
         }
+        let template_catalog = TemplateCatalog::open(&TemplateSection {
+            dir: templates_dir,
+            import_root: Some(runtime_template_imports),
+            ..TemplateSection::default()
+        })
+        .expect("test runtime template catalog");
         let mut spawners = SpawnerRegistry::new();
         spawners.insert(BackendKind::Mock, Arc::new(MockSpawner));
         let (manager, resources) = SandboxManager::new(SandboxManagerInit {
@@ -660,6 +670,7 @@ mod tests {
             state_dir,
             rootfs_size: 64,
             mem_size: 32,
+            template_catalog,
         });
         (Arc::new(manager), resources)
     }

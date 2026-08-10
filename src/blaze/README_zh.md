@@ -16,7 +16,7 @@ Prometheus 指标导出，设计为 E2B 类编排平台的单机执行代理。
   Checkpointed、RecoveryRequired、Reset、Warm 和 Destroyed
 - **Guest 操作** — 对提供 guest endpoint 的运行中后端执行有界命令和文件传输
 - **Warm pool 管理** — 预热实例 + 基于 TTL 的 GC
-- **模板注册表** — 内存中模板追踪，支持空闲驱逐
+- **Template catalog** — 有界导入并原子发布可复用 artifact
 - **内核 hook 注册** — 前/后置 hook 状态追踪
 - **Prometheus 指标** — 请求计数、实例 gauge、池大小
 - **Spawner 后端** — FirecrackerSpawner、BubblewrapSpawner、MockSpawner
@@ -144,13 +144,18 @@ lock 和唯一的同步许可直至完成；后续同步会被推迟而不会不
 | GET | `/v1/pools/{backend}/{class}` | 获取 pool 状态 |
 | POST | `/v1/pools/{backend}/{class}/drain` | 排空 pool |
 | PUT | `/v1/pools/{backend}/{class}/sizing` | 调整 pool 大小 |
-| GET | `/v1/templates` | 列出模板 |
-| GET | `/v1/templates/{id}` | 查看模板详情 |
-| POST | `/v1/templates/gc` | 触发模板 GC |
+| GET | `/v1/templates` | 列出已发布 template 的名称 |
+| GET | `/v1/templates/{name}` | 查看已发布 template 的 metadata |
+| POST | `/v1/templates/import` | 从配置的导入根目录发布 template |
 | GET | `/v1/policies` | 列出已加载策略 |
 | GET | `/v1/hooks` | 列出内核 hook |
 | GET | `/v1/metrics` | Prometheus 指标 |
 | POST | `/v1/admin/reload` | 热加载策略 |
+
+`/v1/templates` 是唯一面向运维人员的 template catalog。导入条目目前不会让
+sandbox create 自动选择它；后续 create 支持会从同一个 catalog 解析可选名称。
+配置方法、接受的 artifact、上限和发布规则参见
+[Template catalog 用户指南](../../docs/user-guide/zh/runtime/blaze.md#template-catalog)。
 
 ### 生命周期管理与恢复
 

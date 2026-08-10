@@ -39,6 +39,21 @@ Claude Code requires version 2.1.121 or later for `updatedToolOutput`. On older 
 
 ## Manage adapters with anolisa (recommended)
 
+These commands require an ANOLISA component record. If Tokenless was installed
+directly with YUM, record the RPM once before continuing:
+
+```bash
+sudo yum install anolisa
+sudo anolisa --install-mode system adopt tokenless
+```
+
+The YUM-installed CLI is available on sudo's system path; the user-local CLI
+installed by `get.agentic-os.sh` may be hidden by sudo's `secure_path`.
+
+Run the adapter commands below as the user who owns the target Agent
+configuration. A user-scoped adapter operation can discover the adopted system
+package while keeping the framework mutation in that user's configuration.
+
 ### 1. Scan frameworks
 
 ```bash
@@ -78,11 +93,9 @@ anolisa adapter enable tokenless openclaw \
 
 On OpenClaw releases where the underlying bypass is unsupported or a deprecated no-op, anolisa refuses this option; follow the error's `security.installPolicy` guidance instead.
 
-If Tokenless was installed in system mode, use the same scope:
-
-```bash
-sudo anolisa adapter enable tokenless <framework>
-```
+The component package may be system-scoped while the adapter receipt remains
+user-scoped. Use `sudo` only when the target framework configuration and its
+adapter receipt are intentionally owned by root.
 
 ### 3. Check status
 
@@ -99,11 +112,8 @@ Restart the target agent CLI or IDE afterwards. A running session normally does 
 anolisa adapter disable tokenless <framework>
 ```
 
-For system mode:
-
-```bash
-sudo anolisa adapter disable tokenless <framework>
-```
+Disable the adapter with the same user that enabled it. A root-owned receipt is
+the exception and requires `sudo` for both operations.
 
 Restart the target agent after disabling. All enabled adapters must be released before Tokenless can be uninstalled.
 

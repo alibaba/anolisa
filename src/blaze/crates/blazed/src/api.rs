@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -15,7 +16,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use blaze_core::backend::{BackendKind, BackendStatus, select_backend};
 use blaze_core::kernel::HookKind;
 use blaze_core::lifecycle::{SandboxInstance, SandboxState, StartPath};
-use blaze_core::policy::{ImageMetadata, RuntimeDecision, WorkloadClass, parse_duration};
+use blaze_core::policy::{ImageMetadata, RuntimeDecision, WorkloadClass};
 use blaze_core::pool::{PoolConfig, PoolKey};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Body, Bytes, Incoming};
@@ -166,9 +167,9 @@ async fn dispatch(
         ("PUT", ["v1", "pools", backend, class, "sizing"]) => {
             resize_pool(state, backend, class, &body)
         }
-        ("POST", ["v1", "templates", "gc"]) => gc_templates(state),
-        ("GET", ["v1", "templates"]) => list_templates(state),
-        ("GET", ["v1", "templates", id]) => inspect_template(state, id),
+        ("GET", ["v1", "templates"]) => list_templates(state).await,
+        ("GET", ["v1", "templates", name]) => get_template(state, name).await,
+        ("POST", ["v1", "templates", "import"]) => import_template(state, &body).await,
         ("GET", ["v1", "policies"]) => list_policies(state),
         ("GET", ["v1", "hooks"]) => list_hooks(state),
         ("GET", ["v1", "metrics"]) => metrics(state),
@@ -651,45 +652,31 @@ fn resize_pool(
 // Templates
 // ---------------------------------------------------------------------------
 
-fn list_templates(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
-    let reg = state
-        .template
-        .lock()
-        .map_err(|_| BlazeDaemonError::Internal("template lock poisoned".into()))?;
-    json_ok(&reg.list())
+async fn list_templates(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
+    json_bytes_ok(state.manager.list_templates().await?)
 }
 
-fn inspect_template(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>>> {
-    let uuid = parse_uuid(id)?;
-    let reg = state
-        .template
-        .lock()
-        .map_err(|_| BlazeDaemonError::Internal("template lock poisoned".into()))?;
-    let view = reg
-        .inspect(uuid)
-        .ok_or_else(|| BlazeDaemonError::NotFound(format!("template {uuid}")))?;
-    json_ok(&view)
+async fn get_template(state: &Arc<ServerState>, name: &str) -> Result<Response<Full<Bytes>>> {
+    json_bytes_ok(state.manager.get_template(name.to_string()).await?)
 }
 
-fn gc_templates(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
-    let idle_ttl = {
-        let cfg = state
-            .config
-            .lock()
-            .map_err(|_| BlazeDaemonError::Internal("config lock poisoned".into()))?;
-        parse_duration(&cfg.template.idle_ttl).unwrap_or(std::time::Duration::from_secs(3600))
-    };
-    let collected = {
-        let mut reg = state
-            .template
-            .lock()
-            .map_err(|_| BlazeDaemonError::Internal("template lock poisoned".into()))?;
-        reg.gc_unused(idle_ttl)
-    };
-    json_ok(&json!({
-        "collected": collected,
-        "count": collected.len(),
-    }))
+#[derive(Debug, Deserialize)]
+struct ImportTemplateRequest {
+    name: String,
+    source: PathBuf,
+    #[serde(default)]
+    description: String,
+}
+
+async fn import_template(state: &Arc<ServerState>, body: &[u8]) -> Result<Response<Full<Bytes>>> {
+    let request: ImportTemplateRequest = serde_json::from_slice(body).map_err(|error| {
+        BlazeDaemonError::BadRequest(format!("invalid runtime template import body: {error}"))
+    })?;
+    let imported = state
+        .manager
+        .import_template(request.name, request.source, request.description)
+        .await?;
+    json_response(StatusCode::CREATED, &imported)
 }
 
 // ---------------------------------------------------------------------------
@@ -733,6 +720,13 @@ fn parse_uuid(s: &str) -> Result<Uuid> {
 
 fn json_ok<T: Serialize>(value: &T) -> Result<Response<Full<Bytes>>> {
     json_response(StatusCode::OK, value)
+}
+
+fn json_bytes_ok(body: Bytes) -> Result<Response<Full<Bytes>>> {
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Full::new(body))?)
 }
 
 fn json_created<T: Serialize>(value: &T) -> Result<Response<Full<Bytes>>> {
@@ -796,7 +790,6 @@ mod tests {
     use blaze_core::storage::{
         AcquireOpts, PoolStatus, StorageAcquireError, StorageProvider, StorageSlot,
     };
-    use blaze_core::template::TemplateRegistry;
 
     use crate::file_provider::FileStorageProvider;
     #[cfg(target_os = "linux")]
@@ -822,6 +815,7 @@ mod tests {
         config.daemon.state_dir = temp.path().join("state");
         config.storage.images_dir = temp.path().join("images");
         config.storage.instances_dir = temp.path().join("instances");
+        config.template.dir = temp.path().join("templates");
         std::fs::create_dir_all(&config.daemon.state_dir).expect("state");
         std::fs::create_dir_all(&config.storage.images_dir).expect("images");
         std::fs::create_dir_all(&config.storage.instances_dir).expect("instances");
@@ -874,16 +868,18 @@ mod tests {
         active_backend: BackendKind,
         storage: Arc<dyn StorageProvider>,
     ) -> Arc<ServerState> {
-        Arc::new(ServerState::build(
-            config,
-            PolicyEngine::with_policies(vec![policy]),
-            PoolManager::new(),
-            TemplateRegistry::new(),
-            HookRegistry::new(),
-            registry,
-            active_backend,
-            storage,
-        ))
+        Arc::new(
+            ServerState::build(
+                config,
+                PolicyEngine::with_policies(vec![policy]),
+                PoolManager::new(),
+                HookRegistry::new(),
+                registry,
+                active_backend,
+                storage,
+            )
+            .expect("state"),
+        )
     }
 
     #[cfg(feature = "test-failpoints")]
@@ -1523,6 +1519,7 @@ mod tests {
         // Minimal config with both backends present.
         let mut config = DaemonConfig::default();
         config.daemon.state_dir = tmp.join("state");
+        config.template.dir = tmp.join("templates");
         let _ = std::fs::create_dir_all(&config.daemon.state_dir);
         config.backends.insert("firecracker".into(), fc_bin.clone());
         config
@@ -1560,16 +1557,18 @@ mod tests {
         let _ = std::fs::create_dir_all(&storage_dir);
         let storage: Arc<dyn blaze_core::storage::StorageProvider> =
             Arc::new(FileStorageProvider::new(storage_dir));
-        let state = Arc::new(ServerState::build(
-            config,
-            engine,
-            PoolManager::new(),
-            TemplateRegistry::new(),
-            HookRegistry::new(),
-            spawners(BackendKind::Firecracker, spawner),
-            BackendKind::Firecracker,
-            storage,
-        ));
+        let state = Arc::new(
+            ServerState::build(
+                config,
+                engine,
+                PoolManager::new(),
+                HookRegistry::new(),
+                spawners(BackendKind::Firecracker, spawner),
+                BackendKind::Firecracker,
+                storage,
+            )
+            .expect("state"),
+        );
 
         // Create instance request for AgentRl workload.
         let req_body = serde_json::to_vec(&serde_json::json!({
@@ -1603,6 +1602,7 @@ mod tests {
         config.daemon.state_dir = temp.path().join("state");
         config.storage.images_dir = temp.path().join("images");
         config.storage.instances_dir = temp.path().join("instances");
+        config.template.dir = temp.path().join("templates");
         std::fs::create_dir_all(&config.daemon.state_dir).expect("state");
         std::fs::create_dir_all(&config.storage.images_dir).expect("images");
         std::fs::create_dir_all(&config.storage.instances_dir).expect("instances");
@@ -1640,16 +1640,18 @@ mod tests {
                 config.storage.images_dir.clone(),
                 config.storage.instances_dir.clone(),
             ));
-        let state = Arc::new(ServerState::build(
-            config,
-            PolicyEngine::with_policies(vec![policy]),
-            PoolManager::new(),
-            TemplateRegistry::new(),
-            HookRegistry::new(),
-            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
-            BackendKind::Mock,
-            storage,
-        ));
+        let state = Arc::new(
+            ServerState::build(
+                config,
+                PolicyEngine::with_policies(vec![policy]),
+                PoolManager::new(),
+                HookRegistry::new(),
+                spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+                BackendKind::Mock,
+                storage,
+            )
+            .expect("state"),
+        );
         let request = serde_json::to_vec(&json!({
             "workload_class": "agent-tool",
             "image_digest": "sha256:warm-validation"
@@ -3275,5 +3277,159 @@ mod tests {
             state.instances.lock().expect("instances")[&stopped_id].state,
             SandboxState::Destroyed
         );
+    }
+
+    #[tokio::test]
+    async fn template_routes_import_list_and_get_published_artifacts() {
+        let temp = tempfile::tempdir().expect("temp");
+        let import_root = temp.path().join("imports");
+        let source = import_root.join("source");
+        std::fs::create_dir(&import_root).expect("import root");
+        std::fs::create_dir(&source).expect("source");
+        std::fs::write(source.join("vmstate.snap"), b"snapshot").expect("snapshot");
+        std::fs::write(source.join("mem.bin"), b"memory").expect("memory");
+        std::fs::write(source.join("rootfs.ext4"), b"rootfs").expect("rootfs");
+
+        let mut config = DaemonConfig::default();
+        config.daemon.state_dir = temp.path().join("state");
+        config.storage.images_dir = temp.path().join("images");
+        config.storage.instances_dir = temp.path().join("instances");
+        config.template.dir = temp.path().join("templates");
+        config.template.import_root = Some(import_root);
+        for directory in [
+            &config.daemon.state_dir,
+            &config.storage.images_dir,
+            &config.storage.instances_dir,
+            &config.template.dir,
+        ] {
+            std::fs::create_dir_all(directory).expect("directory");
+        }
+        let storage: Arc<dyn blaze_core::storage::StorageProvider> =
+            Arc::new(FileStorageProvider::with_images(
+                config.storage.images_dir.clone(),
+                config.storage.instances_dir.clone(),
+            ));
+        let state = Arc::new(
+            ServerState::build(
+                config,
+                PolicyEngine::with_policies(Vec::new()),
+                PoolManager::new(),
+                HookRegistry::new(),
+                spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+                BackendKind::Mock,
+                storage,
+            )
+            .expect("state"),
+        );
+
+        for (method, path) in [
+            (Method::GET, "/v1/runtime-templates"),
+            (Method::POST, "/v1/templates/gc"),
+        ] {
+            let error = dispatch(&method, path, "", Vec::new(), &state)
+                .await
+                .expect_err("retired template route");
+            assert!(matches!(error, BlazeDaemonError::NotFound(_)));
+        }
+
+        let request = serde_json::to_vec(&json!({
+            "name": "runtime-base",
+            "source": "source",
+            "description": "reusable runtime",
+        }))
+        .expect("request");
+        let imported = dispatch(
+            &Method::POST,
+            "/v1/templates/import",
+            "",
+            request.clone(),
+            &state,
+        )
+        .await
+        .expect("import");
+        assert_eq!(imported.status(), StatusCode::CREATED);
+        let imported = serde_json::from_slice::<serde_json::Value>(
+            &imported
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("json");
+        assert_eq!(imported["name"], "runtime-base");
+        assert_eq!(imported["description"], "reusable runtime");
+
+        let listed = dispatch(&Method::GET, "/v1/templates", "", Vec::new(), &state)
+            .await
+            .expect("list");
+        let concurrent_list = dispatch(&Method::GET, "/v1/templates", "", Vec::new(), &state)
+            .await
+            .expect_err("list response must retain the single-flight permit");
+        assert!(matches!(
+            concurrent_list,
+            BlazeDaemonError::ServiceUnavailable(_)
+        ));
+        let listed = serde_json::from_slice::<serde_json::Value>(
+            &listed.into_body().collect().await.expect("body").to_bytes(),
+        )
+        .expect("json");
+        assert_eq!(listed, json!([{ "name": "runtime-base" }]));
+
+        dispatch(&Method::GET, "/v1/templates", "", Vec::new(), &state)
+            .await
+            .expect("list after response body release");
+
+        let fetched = dispatch(
+            &Method::GET,
+            "/v1/templates/runtime-base",
+            "",
+            Vec::new(),
+            &state,
+        )
+        .await
+        .expect("get");
+        assert_eq!(
+            fetched.headers().get(CONTENT_TYPE).expect("content type"),
+            "application/json"
+        );
+        let concurrent_get = dispatch(
+            &Method::GET,
+            "/v1/templates/runtime-base",
+            "",
+            Vec::new(),
+            &state,
+        )
+        .await
+        .expect_err("item response must retain the single-flight permit");
+        assert!(matches!(
+            concurrent_get,
+            BlazeDaemonError::ServiceUnavailable(_)
+        ));
+        let fetched = serde_json::from_slice::<serde_json::Value>(
+            &fetched
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+        )
+        .expect("json");
+        assert_eq!(fetched, imported);
+
+        dispatch(
+            &Method::GET,
+            "/v1/templates/runtime-base",
+            "",
+            Vec::new(),
+            &state,
+        )
+        .await
+        .expect("get after response body release");
+
+        let duplicate = dispatch(&Method::POST, "/v1/templates/import", "", request, &state)
+            .await
+            .expect_err("duplicate");
+        assert!(matches!(duplicate, BlazeDaemonError::Conflict(_)));
     }
 }

@@ -215,6 +215,20 @@ pub enum AdapterError {
         reason: String,
     },
 
+    /// Re-enable could not release resources owned by the prior receipt, so
+    /// replacing it would discard the only durable cleanup record.
+    #[error(
+        "cannot re-enable {component}/{framework} because prior cleanup was incomplete: {reason}"
+    )]
+    ReenableCleanupIncomplete {
+        /// Component whose prior adapter installation remains active.
+        component: String,
+        /// Framework whose prior adapter installation remains active.
+        framework: String,
+        /// Driver-provided cleanup failure details.
+        reason: String,
+    },
+
     /// A receipt's claim resources failed re-validation.
     #[error("adapter claim validation failed: {0}")]
     ClaimValidation(#[from] claim::ClaimValidationError),

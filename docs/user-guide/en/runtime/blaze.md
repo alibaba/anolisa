@@ -177,3 +177,123 @@ operations.
 When the service loop stops, Blaze cancels and joins the periodic scheduler.
 Provider work that cannot be cancelled remains under its sandbox lock until it
 completes. Daemon-wide connection draining and runtime cleanup remain separate.
+
+## Template Catalog
+
+Blaze can atomically publish operator-prepared runtime artifacts and expose
+their metadata through the daemon API. `/v1/templates` is the single
+operator-facing template resource. Publishing an entry does not yet make
+sandbox creation select or boot it.
+
+Future sandbox-create support will resolve an optional template name from this
+same catalog; there is no separate process-local registry for operators to
+configure or monitor.
+
+### Configuration
+
+The catalog directory has a default, but imports remain disabled until an
+operator configures an import root:
+
+```toml
+[template]
+dir = "/var/lib/blaze/templates"
+import_root = "/var/lib/blaze/template-imports"
+max_files = 32
+max_bytes = 274877906944
+max_metadata_bytes = 1048576
+max_total_bytes = 1099511627776
+max_entries = 128
+```
+
+Both roots must be absolute and disjoint from each other, from Blaze image,
+instance, and policy roots, from every executable path configured in
+`[backends]`, from the resolved location captured when the daemon configuration
+file is opened for this startup, from that file's configured pathname, and from
+the configured `daemon.socket` path and the host network coordination path
+`/run/lock/blaze-network.lock`. They must also remain disjoint from the
+conventional named network namespace trees `/var/run/netns` and `/run/netns`.
+Relative `[backends]` paths are resolved once against the daemon's startup
+working directory; boundary checks, backend probing, and sandbox launch then
+reuse that absolute path. When a configured backend path is a symbolic link,
+both the configured link location and its resolved target remain outside
+template catalog ownership.
+The same rule applies when the daemon configuration path is a symbolic link:
+both the configured link location and the opened file's resolved location stay
+outside template catalog ownership.
+Template catalog roots must not contain symbolic link components. On Linux,
+Blaze compares resolved path prefixes and their underlying filesystem locations
+from the mount table, so symbolic-link and bind-mounted aliases cannot bypass
+these directory boundaries. Blaze retains the opened configuration file and
+rechecks its identity at the captured location, so retargeting the pathname
+cannot substitute another configuration file. An overlap is rejected before catalog permissions are
+changed or catalog entries are scanned. A template catalog root may use a
+non-UUID child of `daemon.state_dir`, as the default does, but it cannot own the
+state root or enter a sandbox UUID subtree.
+If the catalog root does not exist yet, Blaze retains the deepest existing
+parent directory and creates the missing suffix relative to that directory.
+Startup stops if any planned component appears during validation, before Blaze
+changes that object's permissions. Policy-entry boundary discovery follows
+`policy.on_load_error`: a discovery failure in `warn` mode uses the same empty
+policy engine as policy loading, while successfully discovered policy targets
+remain protected. Executable files found through `PATH` for Blaze's host helper
+commands are protected as well, including both their configured and resolved
+locations.
+Blaze retains the validated import-root directory opened at startup. Replacing
+the configured pathname later does not redirect source lookup.
+
+### Import and lookup
+
+Publish a source directory below `import_root`:
+
+```http
+POST /v1/templates/import
+Content-Type: application/json
+
+{"name":"runtime-base","source":"runtime-base","description":"base runtime"}
+```
+
+`source` must be relative and must not traverse parent directories or links.
+The source contains top-level regular files `vmstate.snap`, `mem.bin`, and
+`rootfs.ext4`; `template.json` is optional and must be a JSON object. Source
+directories and files must be owned by the daemon user and not writable by
+group or other users. Nested directories, links, and special files are
+rejected.
+Published files must have exactly one hard link, and catalog entries and staging
+directories must remain on the catalog root's mount. Blaze stops rather than
+changing or traversing data that violates these boundaries.
+Before startup scans or list/get reads open an artifact for reading, Blaze
+classifies it without a read-capable handle and rechecks the opened object's
+identity. On Linux, the readable handle is derived from the pinned classified
+object, so replacing the directory entry cannot redirect the read.
+
+Use `GET /v1/templates` to list sorted name-only summaries and
+`GET /v1/templates/{name}` to read one entry's complete metadata. The
+daemon validates entries one at a time while listing and retains at most one
+list response until its body is released; a concurrent list request receives
+`503 Service Unavailable`. It separately retains at most one complete item
+response; another item request receives `503 Service Unavailable` until the
+first response body is released. A duplicate name or a concurrent import of
+the same name returns `409 Conflict`.
+
+### Publication, limits, and recovery
+
+Blaze enforces the configured per-entry file and byte limits while inspecting
+input. It also reserves catalog bytes and one of the `max_entries` slots before
+copying into a private staging directory. It rechecks source identity after
+copying, synchronizes the complete entry, and publishes it with a no-replace
+rename. Readers therefore see either no entry or a complete entry. Name-only
+list responses cannot materialize more than the configured number of entries.
+
+Failed imports remove their staging data, including a staging directory whose
+post-creation open or validation fails. If cleanup or publication durability
+cannot be confirmed, later imports are rejected until the catalog is repaired
+and the daemon restarts. Startup validates published entries and removes owned
+staging directories left by an interrupted import. Before either action, the
+daemon obtains and retains an exclusive lock on the opened catalog root; a
+second daemon using the same catalog fails before it can inspect or clean a live
+import. Graceful shutdown rejects new imports, cancels active copies, and waits
+for their file handles to close.
+
+The API validates artifact structure, not whether a snapshot can boot with a
+particular backend. Sandbox create does not yet accept a template name, and the
+catalog does not yet expose deletion or reference tracking.

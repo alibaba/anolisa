@@ -2,448 +2,176 @@
 
 [English](BUILDING.md)
 
-本指南介绍如何准备开发环境、从源码构建各组件并运行测试。
+本指南面向从源码参与 ANOLISA 开发的贡献者，说明仓库级构建入口、聚合测试脚本
+的覆盖范围，以及 12 个组件各自的构建和测试命令。组件特有的依赖和运行方式仍以
+组件 README 为准。
 
-提供两种构建路径：
-
-1. 快速开始：运行一个脚本自动检查/安装依赖并构建选定组件。
-
-2. 分组件构建：手动逐一构建各模块。
-
-## 1. 仓库结构
-
-```text
-anolisa/
-├── src/
-│   ├── copilot-shell/       # AI 终端助手（Node.js / TypeScript）
-│   ├── os-skills/           # 运维技能库（Markdown + 可选脚本）
-│   ├── agent-sec-core/      # Agent 安全沙箱（Rust + Python）
-│   └── agentsight/          # eBPF 可观测/审计引擎（Rust，可选）
-├── scripts/
-│   ├── build-all.sh         # 统一构建入口
-│   └── rpm-build.sh         # 统一 RPM 构建脚本
-├── tests/
-│   └── run-all-tests.sh     # 统一测试入口
-├── Makefile
-└── docs/
-```
-
-## 2. 环境依赖
-
-| 组件 | 所需工具 |
-|------|----------|
-| copilot-shell | Node.js >= 20、npm >= 10、make、g++ |
-| os-skills | Python >= 3.12（仅可选脚本需要） |
-| agent-sec-core | Rust >= 1.91.0、Python >= 3.12、uv（仅 Linux） |
-| agentsight *（可选）* | Rust >= 1.80、clang >= 14、libbpf 头文件、内核头文件（仅 Linux） |
-
-## 3. 快速开始
-
-统一构建脚本可自动完成依赖安装、构建和系统安装。
+## 1. 准备源码目录
 
 ```bash
 git clone https://github.com/alibaba/anolisa.git
 cd anolisa
 ```
 
-克隆完成后，运行构建脚本。默认会安装依赖、构建并安装到系统：
+通用前置条件包括 Git、Bash、`make`、用于编译 Rust 或 Python 原生扩展的 C 编译器，
+以及可下载依赖的网络环境。组件矩阵会列出平台特有的要求。仓库没有统一的 Rust
+版本，构建某个组件时请遵循该组件声明的 `rust-toolchain.toml` 或 `rust-version`。
 
-> **提示：** 以下每个方式都是独立的命令，根据自己的需求选择一个执行即可。如果使用了统一构建脚本，可以跳过下方的[分组件构建](#4-分组件构建)部分。
+## 2. 仓库结构
+
+当前 `src/` 下包含 12 个组件。
+
+| 组件 | 目录 | 平台和职责 |
+|------|------|------------|
+| copilot-shell（`cosh`） | [`src/copilot-shell`](../src/copilot-shell/README_zh.md) | TypeScript 终端助手，支持 Linux、macOS 和 Windows |
+| cosh-ng | [`src/cosh-ng`](../src/cosh-ng/README_zh.md) | Rust Agent OS CLI 和 Shell，Linux 提供完整构建，macOS 提供受限源码构建 |
+| agent-sec-core | [`src/agent-sec-core`](../src/agent-sec-core/README_zh.md) | Rust sandbox 与 Python 安全 CLI，Linux |
+| agentsight | [`src/agentsight`](../src/agentsight/README_zh.md) | Rust/eBPF 可观测组件，Linux 提供完整 tracing，macOS 提供 `trace` 和 `serve` |
+| tokenless | [`src/tokenless`](../src/tokenless/README_zh.md) | Rust Token 与命令输出优化，源码构建面向 Linux，macOS 使用从 Linux 交叉编译的 npm 制品 |
+| agent-memory（`memory`） | [`src/agent-memory`](../src/agent-memory/README_zh.md) | Rust MCP memory server，Linux |
+| os-skills（`skills`） | [`src/os-skills`](../src/os-skills/README_zh.md) | 静态 Skill 定义和脚本，具体平台取决于各 Skill 的声明 |
+| anolisa | [`src/anolisa`](../src/anolisa/README_zh.md) | Rust 组件生命周期 CLI，支持 Linux 和 macOS arm64 |
+| SkillFS（`skillfs`） | [`src/skillfs`](../src/skillfs/README_zh.md) | Rust FUSE Skill 文件系统，Linux |
+| ws-ckpt | [`src/ws-ckpt`](../src/ws-ckpt/README_zh.md) | Rust workspace checkpoint daemon 和 TypeScript adapter，作为 Linux system service 运行 |
+| ktuner | [`src/ktuner`](../src/ktuner/README.md) | Rust kernel tuning engine，Linux |
+| blaze | [`src/blaze`](../src/blaze/README_zh.md) | Rust 单机 sandbox 编排 daemon，Linux |
+
+仓库级规则位于 [`AGENTS.md`](../AGENTS.md)。修改组件前先阅读对应的 `AGENTS.md`，
+架构和运行细节请查看组件 README。
+
+## 3. 工具链和系统依赖
+
+构建脚本可以在受支持的 Linux 发行版上安装常用依赖，但无法让不支持的系统构建
+Linux-only 组件。
+
+| 需求 | 依据 |
+|------|------|
+| Node.js | `src/copilot-shell/package.json` 要求 Node.js `>=20.0.0`。agentsight、agent-sec-core、tokenless 和 ws-ckpt 的插件构建也会使用 npm。 |
+| Python 和 uv | `src/agent-sec-core/agent-sec-cli/pyproject.toml` 要求 Python `==3.11.6`，该项目使用 `uv`。不要把它扩展成仓库级 Python 最低版本。 |
+| Rust | `src/agent-sec-core/linux-sandbox/rust-toolchain.toml` 固定 `1.93.0`；`src/anolisa/rust-toolchain.toml` 和 `src/blaze/rust-toolchain.toml` 固定 `1.88.0`；`src/cosh-ng/rust-toolchain.toml` 跟随 `stable`。其他组件有 `rust-version` 时以各自 `Cargo.toml` 为准。 |
+| cosh-ng | Linux 源码构建需要 `pkg-config` 和 OpenSSL 开发文件。 |
+| agent-sec-core | Linux sandbox 运行和集成检查可能需要 bubblewrap、GnuPG 以及 `jq`。 |
+| agentsight | Linux eBPF 构建需要 clang、LLVM、libbpf 和 ELF 开发头文件、内核头文件，以及启用 BTF 的内核。`make build-mac` 构建不含 eBPF 的 macOS local viewer。 |
+| tokenless | `just` 用于获取并修补 RTK，OpenClaw plugin 构建需要 npm。 |
+| agent-memory | Linux 构建需要 CMake 和 libsystemd 开发头文件。 |
+| SkillFS | FUSE smoke test 需要 FUSE 3 和 `/dev/fuse`，普通 Cargo 测试不会挂载 FUSE。 |
+| ws-ckpt | 安装 daemon 需要 Linux systemd 和 root 权限。组件的 user-mode Makefile 目标会有意跳过 service 安装。 |
+
+组件有固定工具链时，从该组件目录执行命令，rustup 会自动选择对应版本。没有固定
+版本的组件应先查看自己的 `Cargo.toml` 和当前 stable 工具链，再开始构建。
+
+## 4. 统一构建脚本
+
+`scripts/build-all.sh` 是便捷入口，并不负责构建整个 monorepo。当前脚本支持 8 个
+组件。
+
+- 默认 6 个组件包括 `cosh`、`skills`、`sec-core`、`tokenless`、`ws-ckpt` 和
+  `memory`。
+- 可选 2 个组件包括 `cosh-ng` 和 `sight`。可以用 `--all` 或 `--component` 显式加入。
+
+脚本之外的 4 个组件是 `anolisa`、`skillfs`、`ktuner` 和 `blaze`，请按第 5 节的
+组件命令单独构建。
+
+默认安装模式是 user mode，组件文件安装到 `~/.local` 和 Copilot Shell 的用户目录
+时无需 `sudo`，首次安装系统依赖仍可能请求 `sudo`。使用 `--system`（或
+`--install-mode system`）切换到系统路径，脚本会暂存文件并可能调用 `sudo`。
+`--no-install` 只构建并暂存制品，不执行安装。
 
 ```bash
-# 默认：安装依赖 + 构建 + 安装到系统（推荐大多数用户使用）
+# Default six components, user install
 ./scripts/build-all.sh
 
-# 仅构建，不安装到系统
+# Build and stage without installing
 ./scripts/build-all.sh --no-install
 
-# 跳过依赖安装（依赖已就绪时使用）
+# Use system paths instead of the default user profile
+./scripts/build-all.sh --system
+
+# Include cosh-ng and agentsight as well
+./scripts/build-all.sh --all
+
+# Select one or more of the eight supported names
+./scripts/build-all.sh --component cosh --component sec-core
+./scripts/build-all.sh --component cosh-ng --component sight
+
+# Reuse already-installed dependencies
 ./scripts/build-all.sh --ignore-deps
 
-# 仅安装依赖（适用于 CI 或手动构建场景）
+# Install dependencies only, or print the plan without changing the system
 ./scripts/build-all.sh --deps-only
+./scripts/build-all.sh --dry-run
 
-# 仅构建并安装指定组件
-./scripts/build-all.sh --component cosh --component sec-core
-
-# 包含可选的 agentsight
-./scripts/build-all.sh --component cosh --component skills --component sec-core --component sight
+# Explicit non-interactive mode and help
+./scripts/build-all.sh --non-interactive
+./scripts/build-all.sh --help
 ```
 
-### 3.1 脚本选项
-
-| 参数 | 说明 |
-|------|------|
-| --no-install | 跳过将组件安装到系统路径 |
-| --ignore-deps | 跳过依赖安装 |
-| --deps-only | 仅安装依赖，不构建 |
-| --component <名称> | 构建指定组件（可重复使用）：cosh、skills、sec-core、sight。默认：cosh、skills、sec-core |
-| --help | 显示帮助信息 |
-
-### 3.2 注意事项
-
-1. 构建脚本会优先使用系统软件包，当系统版本不满足要求时自动回退到上游安装器（nvm / rustup）。
-2. os-skills 大部分是静态资源，无需编译。
-3. AgentSight 是可选组件，提供审计和可观测性能力，但不是核心功能所必需的。默认构建不包含它，使用 `--component sight` 显式包含。
-4. AgentSight 的系统依赖（clang/llvm/libbpf/内核头文件）需通过发行版包管理器安装。
-5. **沙箱策略 Hooks 不会自动启用。** 安装完成后，需在 Copilot Shell 内执行一次 `/hooks install` 来激活内置的 sandbox-guard hooks。详见 [3.3 安装后：启用沙箱 Hooks](#33-安装后启用沙箱-hooks)。
-
-### 3.3 安装后：启用沙箱 Hooks
-
-构建脚本完成安装后，沙箱策略 hooks 不会自动激活。为防止未经授权的文件系统访问或危险命令执行，请在安装完成后执行以下操作：
-
-```bash
-cosh
-```
-
-进入 Copilot Shell 会话后，执行：
-
-```
-/hooks install
-```
-
-该命令会：
-- 将内置的 `sandbox-guard.py` 和 `sandbox-failure-handler.py` 脚本复制到 `~/.copilot-shell/hooks/`
-- 将其注册为 `PreToolUse` 和 `PostToolUseFailure` hooks，写入用户配置（`~/.copilot-shell/settings.json`）
-- 立即在当前会话中激活这些 hooks
-
-只需执行一次，配置会持久保存，后续会话自动生效。
-
-> **说明：** 沙箱 hooks 依赖 `agent-sec-core`（linux-sandbox）正确构建并安装到 `/usr/local/bin/linux-sandbox`。当 `sandbox-guard.py` 检测到危险命令时，会将其包裹为 `linux-sandbox ... bash -c '...'` 的形式执行。若 `agent-sec-core` 未构建安装，hooks 可以注册成功，但危险命令的沙箱隔离执行将会失败。请确保在依赖沙箱防护前已完成 `agent-sec-core` 的构建（默认 `build-all.sh` 已包含该步骤）。
-
----
-
-## 4. 分组件构建
-
-> **如果已使用上方的统一构建脚本，可以跳过本节。** 脚本会自动完成依赖安装、构建和系统安装的所有步骤。
-
-如果你希望手动设置各工具链并逐个构建组件，请按以下步骤操作。
-
-### 4.1 安装依赖
-
-#### 4.1.1 Node.js（用于 copilot-shell）
-
-要求：Node.js >= 20、npm >= 10。
-
-- **Alinux 4（已验证）**
-
-```bash
-sudo dnf install -y nodejs npm make gcc-c++
-```
-
-- **其他发行版：nvm**
-
-```bash
-# 如果 Node.js >= 20 已安装则跳过
-if command -v node &>/dev/null && node -v | grep -qE '^v(2[0-9]|[3-9][0-9])'; then
-  echo "Node.js $(node -v) 已安装，跳过"
-else
-  # 从 Gitee 镜像安装 nvm
-  curl -fsSL --connect-timeout 15 --max-time 60 https://gitee.com/mirrors/nvm/raw/v0.40.3/install.sh | bash
-  source "$HOME/.$(basename "$SHELL")rc"
-
-  # 配置 npmmirror 加速 Node.js 下载
-  export NVM_NODEJS_ORG_MIRROR=https://npmmirror.com/mirrors/node/
-  nvm install 20
-  nvm use 20
-fi
-
-# 验证
-node -v   # 期望：v20.x.x 或更高
-npm -v    # 期望：10.x.x 或更高
-```
-
----
-
-#### 4.1.2 Rust（用于 agent-sec-core 和 agentsight）
-
-要求：agent-sec-core 需要 Rust >= 1.91.0；agentsight 需要 Rust >= 1.80。
-
-- **Alinux 4（已验证）** — 系统 `rust` 包版本低于 1.91.0，无法直接使用，请用下方 rustup 安装。
-仅需通过 dnf 安装构建工具：
-
-```bash
-sudo dnf install -y gcc make
-```
-
-- **Ubuntu 24.04（已验证）**
-
-```bash
-sudo apt install -y rustc-1.91 cargo-1.91 gcc make
-sudo update-alternatives --install /usr/bin/cargo cargo /usr/bin/cargo-1.91 100
-```
-
-> 部分发行版的系统 `rust` 包版本可能低于 1.91.0。如果构建因版本不匹配而失败，请改用下方的 rustup。
-
-- **其他发行版 / Alinux 4：rustup（推荐）**
-
-```bash
-# 如果 Rust 已安装则跳过
-if command -v rustc &>/dev/null && command -v cargo &>/dev/null; then
-  echo "Rust $(rustc --version) 已安装，跳过"
-else
-  # 通过 rsproxy.cn 镜像安装 Rust
-  curl --proto '=https' --tlsv1.2 -sSf --connect-timeout 15 --max-time 120 https://rsproxy.cn/rustup-init.sh | sh -s -- -y
-  source "$HOME/.cargo/env"
-fi
-
-# 验证
-rustc --version   # 期望：rustc 1.91.0 或更高
-cargo --version   # 期望：cargo 1.91.0 或更高
-```
-
-> 仓库为 agent-sec-core 固定了工具链版本（`rust-toolchain.toml`）。如果系统 Rust 版本不匹配，rustup 会在仓库内构建时自动下载正确版本。
-
-**配置 Rustup 分发镜像（国内用户推荐）**
-
-如果构建时触发了固定工具链的自动下载（通过 `rust-toolchain.toml`）并且超时，请设置 Rustup 分发镜像：
-
-```bash
-export RUSTUP_DIST_SERVER="https://rsproxy.cn"
-export RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"
-```
-
-将以上内容添加到 shell 配置文件（`~/.bashrc` 或 `~/.zshrc`）中以使其永久生效。构建脚本（`build-all.sh`）会自动配置此项。
-
-**配置 crates.io 镜像（国内用户推荐）**
-
-如果 `cargo build` 拉取依赖较慢，可配置阿里云 crates.io 镜像。
-构建脚本（`build-all.sh`）会自动配置，不限于 rustup 安装路径。
-手动设置方法：在 `~/.cargo/config.toml` 中添加：
-
-```toml
-[source.crates-io]
-replace-with = 'aliyun'
-[source.aliyun]
-registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
-```
-
----
-
-#### 4.1.3 Python 和 uv（用于 agent-sec-core 和 os-skills）
-
-要求：Python >= 3.12。
-
-- **Alinux 4（已验证）**
-
-```bash
-pip3 install uv
-uv python install 3.12
-```
-
-- **Ubuntu 24.04（已验证）**
-
-```bash
-sudo apt install -y pipx
-pipx ensurepath
-source "$HOME/.$(basename "$SHELL")rc"
-pipx install uv
-```
-
-- **其他发行版：uv**
-
-```bash
-# 如果 uv 已安装则跳过
-if command -v uv &>/dev/null; then
-  echo "uv $(uv --version) 已安装，跳过"
-else
-  # 安装 uv
-  curl -LsSf --connect-timeout 15 --max-time 60 https://astral.sh/uv/install.sh | sh
-  source "$HOME/.$(basename "$SHELL")rc"
-fi
-
-# 通过 uv 安装 Python 3.12（已存在则跳过）
-uv python install 3.12
-```
-
-```bash
-# 验证
-uv --version          # 期望：uv 0.x.x 或更高
-uv python find 3.12   # 期望：输出 python3.12 可执行文件路径
-```
-
----
-
-#### 4.1.4 AgentSight 系统依赖（可选，需包管理器）
-
-AgentSight 是可选组件，提供基于 eBPF 的审计和可观测性能力，不是 ANOLISA 核心功能所必需的。如果你选择构建它，需要以下系统级依赖：
-
-- **dnf（Alinux / Anolis OS / Fedora / RHEL / CentOS 等）**
-
-```bash
-sudo dnf install -y clang llvm libbpf-devel elfutils-libelf-devel zlib-devel openssl-devel perl perl-IPC-Cmd
-sudo dnf install -y kernel-devel-$(uname -r)
-```
-
-- **apt（Debian / Ubuntu）**
-
-```bash
-sudo apt-get update -y
-sudo apt-get install -y clang llvm libbpf-dev libelf-dev zlib1g-dev libssl-dev perl linux-headers-$(uname -r)
-```
-
-> 部分发行版没有单独的 perl-core 包，这是正常的。
-
-- **内核要求**
-
-AgentSight 要求 Linux 内核 >= 5.10 且启用 BTF（`CONFIG_DEBUG_INFO_BTF=y`）。
-
----
-
-#### 4.1.5 版本检查
-
-```bash
-node -v            # v20.x.x
-npm -v             # 10.x.x
-rustc --version    # rustc 1.91.0+
-cargo --version    # cargo 1.91.0+
-python3 --version  # Python 3.12.x
-uv --version       # uv 0.x.x
-clang --version    # clang version 14+
-```
-
----
-
-### 4.2 构建组件
-
-#### 4.2.1 copilot-shell
-
-```bash
-cd src/copilot-shell
-make deps
-make build
-```
-
-> **注意：** `make deps` 执行 `npm install`，会自动初始化 husky pre-commit 钩子。每次提交时，钩子会对暂存文件执行 Prettier 格式化和 ESLint 检查。CI 环境请使用 `make deps-ci`，该命令会跳过钩子安装。
-
-产物：`dist/cli.js`
-
-```bash
-# 直接运行
-node dist/cli.js
-
-# 或安装到系统 PATH（创建 cosh/co/copilot 命令）
-sudo make install
-cosh
-```
-
-#### 4.2.2 os-skills
-
-**安装**
-
-技能搜索路径（Copilot Shell 按以下优先级发现技能）：
-
-| 范围 | 路径 |
-|------|------|
-| 项目级 | `.copilot-shell/skills/` |
-| 用户级 | `~/.copilot-shell/skills/` |
-| 系统级 | `/usr/share/anolisa/skills/` |
-
-安装方式：
-
-- **使用构建脚本自动部署**
-
-```bash
-./scripts/build-all.sh --component skills
-```
-
-- **手动部署（用户级）**
-
-```bash
-mkdir -p ~/.copilot-shell/skills
-find src/os-skills -name 'SKILL.md' -exec sh -c \
-	'cp -rp "$(dirname "$1")" ~/.copilot-shell/skills/' _ {} \;
-```
-
-**验证**
-
-```bash
-co /skills
-```
-
-#### 4.2.3 agent-sec-core（仅 Linux）
-
-```bash
-cd src/agent-sec-core
-make build-sandbox
-```
-
-产物：`linux-sandbox/target/release/linux-sandbox`
-
-**安装**
-
-```bash
-sudo make install-sandbox
-```
-
-#### 4.2.4 agentsight（可选，仅 Linux）
-
-> 注意：AgentSight 是可选组件，提供基于 eBPF 的审计和可观测性能力，不是 ANOLISA 核心功能所必需的。
-
-```bash
-cd src/agentsight
-make build
-```
-
-产物：`target/release/agentsight`
-
-**安装**
-
-```bash
-sudo make install
-```
-
-### 4.3 运行测试（推荐）
-
-#### 4.3.1 统一入口
+`--component` 的合法名称为 `cosh`、`skills`、`sec-core`、`tokenless`、`ws-ckpt`、
+`memory`、`cosh-ng` 和 `sight`。脚本可能先在 `target/` 中生成构建结果，再执行安装，
+最终行为仍由组件自己的安装规则决定。例如 `ws-ckpt` 只有在 `--system` 下才会安装
+daemon，默认 user profile 不会创建 user service。
+
+## 5. 组件构建和测试入口
+
+除非命令中带有 `cd`，否则都从仓库根目录执行。以下命令是最小的本地门禁；修改
+组件内部实现前，请阅读对应 README 和开发指南。
+
+| 组件 | 构建 | 测试和质量门禁 |
+|------|------|----------------|
+| [copilot-shell](../src/copilot-shell/README_zh.md) | `cd src/copilot-shell && make deps && make build` | `cd src/copilot-shell && make lint && make test` |
+| [os-skills](../src/os-skills/README_zh.md) | `cd src/os-skills && make build` | 没有编译目标。检查变更过的 `SKILL.md`，并按文件说明的解释器运行变更脚本。 |
+| [agent-sec-core](../src/agent-sec-core/README_zh.md) | `cd src/agent-sec-core && make build-all` | `cd src/agent-sec-core && make test` 会运行 Python、Rust sandbox 和 OpenClaw plugin 测试。Python 使用 uv 与 Python 3.11.6。 |
+| [agentsight](../src/agentsight/README_zh.md) | Linux 使用 `cd src/agentsight && make build-all`；macOS local viewer 使用 `cd src/agentsight && make build-mac` | Linux 使用 `cd src/agentsight && make lint && make test`；macOS 运行 local viewer 和 trajectory collector 相关测试。 |
+| [tokenless](../src/tokenless/README_zh.md) | `cd src/tokenless && make build` | `cd src/tokenless && make lint && make test` |
+| [agent-memory](../src/agent-memory/README_zh.md) | `cd src/agent-memory && make build` | `cd src/agent-memory && make fmt-check && make lint && make test`；`cd src/agent-memory && make smoke` 覆盖 MCP stdio 路径。仅 Linux。 |
+| [ws-ckpt](../src/ws-ckpt/README_zh.md) | `cd src/ws-ckpt && make build` | `cd src/ws-ckpt && make test`；安装和 service 检查需要 Linux system mode。 |
+| [cosh-ng](../src/cosh-ng/README_zh.md) | `cd src/cosh-ng && cargo build --workspace` | `cd src/cosh-ng && cargo fmt --all -- --check`，随后按[贡献指南](../src/cosh-ng/CONTRIBUTING_zh.md)选择最接近改动的测试。只有明确要求对大型或跨模块改动执行完整验证时，才运行全量本地门禁。 |
+| [anolisa](../src/anolisa/README_zh.md) | `cd src/anolisa && cargo build --release --locked` | `cd src/anolisa && cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked` |
+| [SkillFS](../src/skillfs/README_zh.md) | `cd src/skillfs && cargo build --workspace --release` | `cd src/skillfs && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`；Linux 上再运行 `cd src/skillfs && scripts/test.sh` 执行 FUSE smoke test。 |
+| [ktuner](../src/ktuner/README.md) | `cd src/ktuner && cargo build --release` | `cd src/ktuner && cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test` |
+| [blaze](../src/blaze/README_zh.md) | `cd src/blaze && cargo build --workspace --release` | `cd src/blaze && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` |
+
+修改公共 API 或 rustdoc 时，在受影响的 Rust 组件门禁中追加
+`cargo doc --workspace --no-deps`。`ktuner tune`、Blaze Firecracker 路径、FUSE 挂载、
+eBPF tracing 和系统 daemon 需要普通单元测试之外的主机权限或内核能力。
+
+[CI workflow](https://github.com/alibaba/anolisa/blob/main/.github/workflows/ci.yaml) 还会为部分组件执行 coverage、打包、前端、
+adapter 和集成检查。这些任务比矩阵中的最小本地命令更严格，涉及生成制品或框架
+adapter 时应再查看 workflow。
+
+## 6. 聚合测试与 PR 门禁
+
+`tests/run-all-tests.sh` 只是部分组件的便捷测试脚本。不带过滤条件时，它只会调用
+copilot-shell、agent-sec-core、agentsight、tokenless 和 agent-memory 这 5 个组件，
+不会测试 cosh-ng、os-skills、ws-ckpt、anolisa、SkillFS、ktuner 或 blaze。
 
 ```bash
 ./tests/run-all-tests.sh
 ./tests/run-all-tests.sh --filter shell
 ./tests/run-all-tests.sh --filter sec
 ./tests/run-all-tests.sh --filter sight
+./tests/run-all-tests.sh --filter tokenless
+./tests/run-all-tests.sh --filter memory
 ```
 
-#### 4.3.2 分组件测试
+当前脚本在前置条件缺失时会跳过测试。没有 `uv` 时会跳过 agent-sec-core 的 Python
+测试，没有 `/usr/local/bin/linux-sandbox` 时会跳过其 sandbox e2e，没有 `cargo` 时
+会跳过 AgentSight。只有 `make` 和 `cargo` 都不存在时才会跳过 tokenless。在非 Linux
+系统或没有 `cargo` 时会跳过 agent-memory。即使出现这些跳过，脚本仍会打印成功
+信息，因此退出码为 0 不能证明
+所有测试都已运行。agent-sec-core 的 e2e 调用还依赖当前工作目录布局，可靠的本地
+门禁应使用组件 Makefile。
 
-```bash
-# copilot-shell
-cd src/copilot-shell && make test
+PR 应根据变更文件选择组件矩阵中的对应行，运行相应的构建、lint 和测试命令。变更
+涉及的平台、集成、smoke、前端或文档时，还要补充相应检查。聚合脚本适合作为快速
+信号，不应作为 PR 的唯一验收依据。
 
-# agent-sec-core
-cd src/agent-sec-core
-make test-python
+## 7. 延伸阅读
 
-# agentsight
-cd src/agentsight && cargo test
-```
+- [用户安装指南](user-guide/zh/installation.md)
+- [开发指南索引](developer-guide/zh/README.md)
+- [组件接入规范](../specs/component-onboarding.md)
+- [文档规范](../specs/documentation-standard.md)
 
----
-
-## 5. 常见问题排查
-
-### 5.1 Node.js 版本不匹配
-
-使用 nvm 重新激活期望版本：
-
-```bash
-source "$HOME/.$(basename "$SHELL")rc"
-```
-
-### 5.2 Rust 工具链不匹配
-
-```bash
-rustup show
-```
-
-### 5.3 AgentSight 缺少 libbpf / 头文件
-
-按 4.1.4 节安装对应发行版的系统软件包。
-
-### 5.4 AgentSight 运行时权限被拒绝
-
-```bash
-sudo ./target/release/agentsight --help
-# 或授予最小权限
-sudo setcap cap_bpf,cap_perfmon=ep ./target/release/agentsight
-```
+组件特有的构建细节、生成制品和运行配置应放在组件 README 或对应开发指南中。本页
+只维护仓库级入口，组件清单或脚本接口发生变化时同步更新这里。

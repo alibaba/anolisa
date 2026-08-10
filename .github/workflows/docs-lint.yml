@@ -6,7 +6,7 @@
 #               + relative link integrity for docs/ and README files
 ###############################################################################
 
-name: 📚 Docs Lint
+name: CI / Docs
 
 on:
   pull_request:

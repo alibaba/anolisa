@@ -286,6 +286,26 @@ impl CoshCore {
         W: Write,
         R: AsyncBufReadExt + Unpin,
     {
+        self.handle_user_message_with_raw_input(content, None, reader, writer)
+            .await
+    }
+
+    /// Handles a provider-facing envelope while giving UserPromptSubmit the
+    /// structured raw input when the transport supplied one.
+    ///
+    /// The envelope remains authoritative for provider messages, transcripts,
+    /// and compaction; the optional raw value affects only hook input.
+    pub(crate) async fn handle_user_message_with_raw_input<W, R>(
+        &mut self,
+        content: &str,
+        raw_user_input: Option<&str>,
+        reader: &mut tokio::io::Lines<R>,
+        writer: &mut W,
+    ) -> Result<AgentTurnOutcome, String>
+    where
+        W: Write,
+        R: AsyncBufReadExt + Unpin,
+    {
         self.bind_current_extension_snapshot();
         let _generation_pin = self.extension_generation.pin();
         // Generate a unique run_id for this agent run.
@@ -294,9 +314,10 @@ impl CoshCore {
 
         // ─── Hook: UserPromptSubmit ───
         let cwd_str = self.cwd().to_string_lossy().to_string();
+        let hook_prompt = raw_user_input.unwrap_or(content);
         let prompt_result = self
             .hook_system
-            .fire_user_prompt_submit(&self.session_id, &cwd_str, content)
+            .fire_user_prompt_submit(&self.session_id, &cwd_str, hook_prompt)
             .await;
         self.audit.record_hook_decision(
             CoreAuditScope::run(&run_id),

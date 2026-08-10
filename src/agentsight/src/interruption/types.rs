@@ -18,7 +18,9 @@ pub enum InterruptionType {
     ServiceUnavailable,
     /// finish_reason == "content_filter" from LLM safety policy
     SafetyFilter,
-    /// SSE stream ended without finish_reason=stop/tool_calls ([DONE])
+    /// SSE stream ended without a normal finish_reason
+    /// (stop/tool_calls/end_turn/tool_use/stop_sequence/pause_turn)
+    /// and not due to a token-limit finish (length/max_tokens)
     SseTruncated,
     /// context_length_exceeded or similar context-bound errors
     ContextOverflow,

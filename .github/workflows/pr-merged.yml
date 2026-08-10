@@ -3,7 +3,7 @@
 # Sends a DingTalk notification when a pull request is merged into main or release branches.
 # Requires secrets: DINGTALK_WEBHOOK, DINGTALK_SECRET
 
-name: PR Merged Notification
+name: Automation / PR Merged
 
 on:
   pull_request_target:

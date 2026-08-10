@@ -18,7 +18,7 @@ Designed as the per-host agent for E2B-style orchestrator platforms.
 - **Guest operations** — bounded command execution and file transfer for
   running backends that expose a guest endpoint
 - **Warm pool management** — pre-warmed instances with TTL-based GC
-- **Template registry** — in-memory template tracking with idle eviction
+- **Template catalog** — bounded import and atomic publication of reusable artifacts
 - **Kernel hook registry** — state tracking for pre/post hooks
 - **Prometheus metrics** — request counts, instance gauges, pool sizes
 - **Spawners** — FirecrackerSpawner, BubblewrapSpawner, MockSpawner
@@ -151,13 +151,19 @@ for configuration, selection, retry, and worker shutdown behavior.
 | GET | `/v1/pools/{backend}/{class}` | Get pool status |
 | POST | `/v1/pools/{backend}/{class}/drain` | Drain a pool |
 | PUT | `/v1/pools/{backend}/{class}/sizing` | Resize a pool |
-| GET | `/v1/templates` | List templates |
-| GET | `/v1/templates/{id}` | Inspect a template |
-| POST | `/v1/templates/gc` | Trigger template GC |
+| GET | `/v1/templates` | List published template names |
+| GET | `/v1/templates/{name}` | Inspect published template metadata |
+| POST | `/v1/templates/import` | Publish a template from the configured import root |
 | GET | `/v1/policies` | List loaded policies |
 | GET | `/v1/hooks` | List kernel hooks |
 | GET | `/v1/metrics` | Prometheus metrics |
 | POST | `/v1/admin/reload` | Hot-reload policies |
+
+The `/v1/templates` routes are the single operator-facing template catalog.
+Importing an entry does not yet make sandbox creation select it; future create
+support will resolve optional names from this same catalog. See the
+[template catalog user guide](../../docs/user-guide/en/runtime/blaze.md#template-catalog)
+for configuration, accepted artifacts, limits, and publication rules.
 
 ### Managed lifecycle and recovery
 

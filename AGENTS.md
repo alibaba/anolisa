@@ -9,9 +9,9 @@ This file provides context for AI coding assistants (Qoder, Claude, etc.) workin
 | Component | Path | Tech | Platform |
 |-----------|------|------|----------|
 | **copilot-shell** (`cosh`) | `src/copilot-shell/` | TypeScript / Node.js | All |
-| **cosh-ng** | `src/cosh-ng/` | Rust | Linux only |
+| **cosh-ng** | `src/cosh-ng/` | Rust | Linux (full); macOS (limited functionality) |
 | **agent-sec-core** | `src/agent-sec-core/` | Rust + Python | Linux only |
-| **agentsight** | `src/agentsight/` | Rust (eBPF) | Linux only |
+| **agentsight** | `src/agentsight/` | Rust (eBPF) | Linux (full); macOS (trajectory/serve only) |
 | **tokenless** | `src/tokenless/` | Rust | Linux (full); macOS x64/arm64 (CLI binaries + adapters, via npm) |
 | **agent-memory** (`memory`) | `src/agent-memory/` | Rust | Linux only |
 | **os-skills** | `src/os-skills/` | Python / Shell | All |
@@ -21,18 +21,18 @@ This file provides context for AI coding assistants (Qoder, Claude, etc.) workin
 | **ktuner** | `src/ktuner/` | Rust | Linux only |
 | **blaze** | `src/blaze/` | Rust | Linux only |
 
-> `agent-sec-core`, `agentsight`, `tokenless`, `agent-memory`, `skillfs`, `ktuner`, and `blaze` require Linux. Do **not** attempt to build them on macOS or Windows. (tokenless ships macOS CLI binaries and framework adapters via npm, but the binaries are cross-compiled **from Linux** — building tokenless on macOS is still unsupported.)
+> `agent-sec-core`, `agent-memory`, `skillfs`, `ktuner`, and `blaze` require Linux. `agentsight` provides full eBPF tracing on Linux and limited trajectory collection plus the local viewer on macOS. `cosh-ng` is Linux-first and supports limited functionality on macOS. Do **not** attempt to build the Linux-only components on macOS or Windows. (tokenless ships macOS CLI binaries and framework adapters via npm, but the binaries are cross-compiled **from Linux** — building tokenless on macOS is still unsupported.)
 
 ## 2. Development Commands
 
 ```bash
-# Unified build (recommended — handles deps, build, and system install)
-./scripts/build-all.sh                                        # all default components
+# Unified build (recommended — handles deps, build, and user install)
+./scripts/build-all.sh                                        # integrated default components
 ./scripts/build-all.sh --no-install                           # build only, skip install
 ./scripts/build-all.sh --ignore-deps                          # skip dep installation
 ./scripts/build-all.sh --component cosh --component sec-core  # selected components
 
-# Unified test runner
+# Partial convenience test runner (five components; may skip unavailable suites)
 ./tests/run-all-tests.sh
 ./tests/run-all-tests.sh --filter shell   # copilot-shell only
 ./tests/run-all-tests.sh --filter sec     # agent-sec-core only
@@ -45,27 +45,43 @@ make build
 make lint
 make test
 
-# agent-sec-core (Linux only, per-component)
-cd src/agent-sec-core
-make build-sandbox
-pytest tests/integration-test/ tests/unit-test/ -v
+# cosh-ng (Linux full; macOS limited functionality, per-component)
+cd src/cosh-ng
+cargo build --workspace
+cargo fmt --all -- --check
+# Select the closest targeted test from src/cosh-ng/CONTRIBUTING.md.
+# Full gates require a large/cross-cutting change and an explicit request.
 
-# agentsight (Linux only, optional, per-component)
+# agent-sec-core (Linux only; Python 3.11.6 + uv, per-component)
+cd src/agent-sec-core
+make build-all
+uv run --project agent-sec-cli python --version  # must report 3.11.6
+make test         # Python + Rust sandbox + OpenClaw plugin tests
+
+# agentsight (Linux full eBPF; macOS trajectory/serve only, per-component)
 cd src/agentsight
-make build
-cargo test
+# Linux
+make build-all
+make lint
+make test
+
+# macOS
+make build-mac
 
 # os-skills
 cd src/os-skills   # Skill definitions are static assets, no compilation needed
 
 # tokenless (per-component)
 cd src/tokenless
-cargo build --release
-cargo test
+make build       # tokenless + RTK + TOON + OpenClaw plugin
+make lint
+make test        # Rust + hooks + integration + adapters
 
 # agent-memory (Linux only, per-component)
 cd src/agent-memory
 make build       # cargo build --release --locked
+make fmt-check
+make lint
 make test        # cargo test --locked
 make smoke       # end-to-end MCP stdio smoke test
 
@@ -102,7 +118,7 @@ cargo test --workspace
 
 ## 3. Rust Common Conventions
 
-> Applies to all Rust components: `anolisa`, `agentsight`, `tokenless`, `agent-memory`, `skillfs`, `ktuner`, `blaze`.
+> Applies to these Rust components: `anolisa`, `agentsight`, `tokenless`, `agent-memory`, `skillfs`, `ktuner`, `blaze`.
 
 ### 3.1 Comment Guidelines
 
@@ -211,7 +227,7 @@ Summary:
 ### Subject line
 
 Format: `type(scope): imperative description`
-- **50 characters max** (type + scope + colon + space + description)
+- **Repository maximum: 50 characters** (commitlint currently hard-fails above 120)
 - Language: **English only**
 - Imperative mood ("add", "fix", "remove" — not "added", "fixes", "removing")
 - Lowercase first letter, no trailing period
@@ -266,6 +282,7 @@ When generating commits, detect the active tool and fill in the actual version. 
 | Changed path | Scope |
 |---|---|
 | `src/copilot-shell/` | `cosh` |
+| `src/cosh-ng/` | `cosh-ng` |
 | `src/agent-sec-core/` | `sec-core` |
 | `src/os-skills/` | `skill` |
 | `src/agentsight/` | `sight` |
@@ -312,8 +329,9 @@ Use [`.github/pull_request_template.md`](.github/pull_request_template.md) as th
 
 - **Description**: 2–5 sentences — what changed, why, key implementation decision
 - **Related Issue**: `closes #<n>` or `no-issue: <reason>`
-- **Type / Scope**: check all that apply based on the diff
-- **Testing**: command used, scope (unit/integration/manual), edge cases verified
+- **Risk and compatibility**: explain checked public, privileged, contract, or migration risks
+- **Validation**: commands, environment, scope (unit/integration/manual), and edge cases
+- **Documentation and rollback**: record documentation updates and rollback guidance
 - PR title follows commit message format: `type(scope): description`
 
 ## 9. Documentation Rules

@@ -6,7 +6,7 @@ Code Scanner hooks inspect shell or code tool calls before execution and reuse e
 
 ```bash
 # Recommended (system mode required)
-sudo anolisa install agent-sec-core
+sudo anolisa --install-mode system install sec-core
 
 # Alternative for Alinux systems with the YUM repository configured
 sudo yum install agent-sec-core

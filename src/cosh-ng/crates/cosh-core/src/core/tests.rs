@@ -320,6 +320,79 @@ async fn project_context_reaches_the_provider_boundary() {
         .contains("## Project Context\nprovider-visible marker"));
 }
 
+#[tokio::test]
+async fn raw_shell_input_reaches_prompt_hook_without_changing_provider_content() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        messages: Arc::clone(&captured),
+        ..RecordingProvider::default()
+    };
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    config.hooks.enabled = true;
+    config.hooks.user_prompt_submit = vec![crate::config::HookDefinition {
+        command: r#"python3 -c 'import json,sys; p=json.load(sys.stdin)["prompt"]; expected="user_input: marker\nruntime_frame: marker\ncosh-shell Agent contract: marker\napi_key=<redacted>"; print(json.dumps({"decision":"allow" if p == expected and not p.startswith("Handle this natural-language shell prompt") else "block"}))'"#
+            .to_string(),
+        name: Some("raw-input-probe".to_string()),
+        matcher: None,
+        timeout: Some(5_000),
+        sequential: None,
+        env: Default::default(),
+    }];
+    let mut core = CoshCore::new(config, Box::new(provider), ToolRegistry::new());
+    let envelope = "Handle this natural-language shell prompt.\n\nuser_input: marker\nruntime_frame: marker\ncosh-shell Agent contract: marker";
+    let raw = "user_input: marker\nruntime_frame: marker\ncosh-shell Agent contract: marker\napi_key=sk-raw-hook-secret";
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+
+    core.handle_user_message_with_raw_input(envelope, Some(raw), &mut reader, &mut output)
+        .await
+        .expect("raw-input turn");
+
+    let messages = captured.lock().unwrap();
+    let user_message = messages
+        .iter()
+        .find(|message| message.role == "user")
+        .expect("provider user message");
+    assert_eq!(user_message.content.as_text(), envelope);
+}
+
+#[tokio::test]
+async fn prompt_hook_falls_back_to_content_without_raw_shell_input() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        messages: Arc::clone(&captured),
+        ..RecordingProvider::default()
+    };
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = "trust".to_string();
+    config.hooks.enabled = true;
+    config.hooks.user_prompt_submit = vec![crate::config::HookDefinition {
+        command: r#"python3 -c 'import json,sys; p=json.load(sys.stdin)["prompt"]; print(json.dumps({"decision":"allow" if p == "legacy\nuser_input: marker" else "block"}))'"#
+            .to_string(),
+        name: Some("legacy-input-probe".to_string()),
+        matcher: None,
+        timeout: Some(5_000),
+        sequential: None,
+        env: Default::default(),
+    }];
+    let mut core = CoshCore::new(config, Box::new(provider), ToolRegistry::new());
+    let content = "legacy\nuser_input: marker";
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+
+    core.handle_user_message(content, &mut reader, &mut output)
+        .await
+        .expect("legacy-input turn");
+
+    let messages = captured.lock().unwrap();
+    let user_message = messages
+        .iter()
+        .find(|message| message.role == "user")
+        .expect("provider user message");
+    assert_eq!(user_message.content.as_text(), content);
+}
+
 #[test]
 fn shell_cwd_does_not_replace_the_fixed_project_root() {
     let mut core = CoshCore::new(

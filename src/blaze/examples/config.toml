@@ -115,20 +115,23 @@ default_warm_ttl = "30m"
 gc_interval = "5m"
 
 # ---------------------------------------------------------------------------
-# Template engine settings (memory-template sharing).
+# Published template catalog.
 # ---------------------------------------------------------------------------
 [template]
-# Directory where the daemon stores template snapshots.
+# Destination for atomically published template artifact sets.
 # Default: "/var/lib/blaze/templates".
 dir = "/var/lib/blaze/templates"
 
-# How often the template GC runs to evict unused templates.
-# Format: duration string.  Default: "10m".
-gc_interval = "10m"
+# Optional operator-controlled source root. Imports are disabled when omitted.
+# API requests name a relative directory below this root.
+# import_root = "/srv/blaze/template-imports"
 
-# Time a template must be idle (no active references) before eviction.
-# Format: duration string.  Default: "1h".
-idle_ttl = "1h"
+# Per-import resource bounds and aggregate catalog capacity.
+max_files = 32
+max_bytes = 274877906944
+max_metadata_bytes = 1048576
+max_total_bytes = 1099511627776
+max_entries = 128
 
 # ---------------------------------------------------------------------------
 # Metrics / observability.

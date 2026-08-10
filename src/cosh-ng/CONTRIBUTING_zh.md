@@ -9,6 +9,7 @@
 | Rust toolchain | stable（`rust-toolchain.toml` 管理） |
 | Rust 最低版本 | 1.74 |
 | 组件 | rustfmt + clippy |
+| 支持平台 | Linux（完整功能）；macOS（功能受限） |
 
 ```bash
 cd src/cosh-ng
@@ -51,6 +52,7 @@ cargo doc --workspace --no-deps
 
 ```bash
 scripts/run-test-gates.sh all    # 完整确定性门禁
+cargo build --workspace --release --locked
 crates/cosh-shell/scripts/check-layout.sh
 ```
 
@@ -132,7 +134,7 @@ git commit -s -m 'feat(cosh-ng): [core] add hook registry list'
 ## PR 流程
 
 1. 从最新 main 分支切出特性分支
-2. 遵循 `feature/cosh/<short-desc>` 分支命名
-3. 确保所有检查通过后推送
+2. 遵循 `feature/cosh-ng/<short-desc>` 分支命名
+3. 确保所有适用检查通过后推送
 4. PR 标题遵循 commit message 格式
-5. 填写 PR 模板（Description / Testing / Related Issue）
+5. 填写 PR 模板中的适用章节，包括风险、验证、文档和回滚说明

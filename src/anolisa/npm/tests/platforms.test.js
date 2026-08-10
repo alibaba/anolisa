@@ -5,9 +5,11 @@
  */
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   buildStrategyForTarget,
   platformPackageName,
+  TARGETS,
   targetForSelector,
   targetsForHost,
 } from '../scripts/platforms.js';
@@ -15,6 +17,23 @@ import {
 const linuxX64 = targetForSelector('linux-x64');
 const linuxArm64 = targetForSelector('linux-arm64');
 const darwinArm64 = targetForSelector('darwin-arm64');
+
+const rootManifest = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+);
+assert.deepEqual(rootManifest.bin, { anolisa: 'bin/anolisa' });
+for (const target of TARGETS) {
+  const platformManifest = JSON.parse(
+    readFileSync(
+      new URL(
+        `../platforms/${target.pkg_suffix}/package.json`,
+        import.meta.url,
+      ),
+      'utf8',
+    ),
+  );
+  assert.equal('bin' in platformManifest, false);
+}
 
 assert.equal(targetForSelector('linux-arm64').pkg_suffix, 'linux-arm64');
 assert.equal(

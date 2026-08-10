@@ -20,6 +20,17 @@ curl -fsSL https://get.agentic-os.sh | bash
 anolisa --version
 ```
 
+AgentSecCore 的 raw 包需要 `anolisa` 0.2.17 或更高版本。先更新 CLI，
+它才能读取当前的组件契约，并正确选中已发布的 raw 包。
+
+```bash
+# 通过 get.agentic-os.sh 安装的 CLI
+anolisa update self
+
+# 由 RPM 管理的 CLI
+sudo anolisa update self
+```
+
 ---
 
 ## 环境探测与组件安装
@@ -32,23 +43,21 @@ anolisa env
 anolisa list
 ```
 
-按需安装组件。当前 `cosh-ng`、`agentsight`、`agent-sec-core`、`ws-ckpt` 和
+按需安装组件。当前 `cosh-ng`、`agentsight`、`sec-core`、`ws-ckpt` 和
 `skillfs` 需要以 system 模式安装，其余示例支持 user 模式。
 
 ```bash
 # Token 优化
 anolisa install tokenless
-# 或通过 npm：
-# npm install -g anolisa-tokenless
 
 # 工作区快照（基于 btrfs COW）
 sudo anolisa --install-mode system install ws-ckpt
 
-# 可观测性（仅 Linux system mode；包含 agentsight-enforcer 服务）
+# 可观测性（Linux system mode）
 sudo anolisa --install-mode system install agentsight
 
-# 安全内核（需要 sudo）
-sudo anolisa --install-mode system install agent-sec-core
+# 安全运行时和 adapter 资源（Linux x86_64 system mode）
+sudo anolisa --install-mode system install sec-core
 
 # 持久记忆（MCP 文件形态）
 anolisa install agent-memory
@@ -72,6 +81,17 @@ sudo anolisa --install-mode system install cosh-ng
 anolisa status
 ```
 
+安装会放置 systemd 服务文件，不会自动启动或设置开机自启。准备开始
+采集时，再把 AgentSight 交给 systemd 管理。
+
+```bash
+sudo systemctl enable --now agentsight.service
+sudo systemctl status agentsight.service
+```
+
+主服务会一起启动 trace 和 Dashboard，并带起它依赖的
+`agentsight-enforcer.service`。
+
 ---
 
 ## 使用各组件
@@ -90,10 +110,9 @@ tokenless env-check --all
 ws-ckpt checkpoint -w ~/project -s v1 -m "initial"
 ws-ckpt rollback -w ~/project -s v1
 
-# 可观测性，追踪 Agent Token 消耗
-sudo agentsight trace
-agentsight token --period week
-agentsight serve   # Web Dashboard: http://localhost:7396
+# 可观测性，system 服务以 root 身份保存采集数据
+sudo agentsight token --period week
+# Web Dashboard：http://localhost:7396
 
 # 安全，系统加固与技能验证
 agent-sec-cli harden --scan --config agentos_baseline
@@ -110,6 +129,7 @@ agent-sec-cli skill-ledger status
 anolisa adapter scan                        # 发现已安装框架
 anolisa adapter enable tokenless openclaw   # tokenless → OpenClaw
 anolisa adapter enable ws-ckpt hermes       # ws-ckpt → Hermes
+anolisa adapter enable sec-core openclaw    # AgentSecCore → OpenClaw
 ```
 
 ---

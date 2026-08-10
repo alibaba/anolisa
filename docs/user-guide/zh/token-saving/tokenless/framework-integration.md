@@ -39,6 +39,20 @@ Claude Code 需要 2.1.121 或更高版本才能使用 `updatedToolOutput`。版
 
 ## 通过 anolisa 管理（推荐）
 
+这些命令需要 ANOLISA 组件记录。如果 Tokenless 是通过 YUM 直接安装的，
+继续操作前先记录该 RPM。
+
+```bash
+sudo yum install anolisa
+sudo anolisa --install-mode system adopt tokenless
+```
+
+YUM 安装的 CLI 位于 `sudo` 可见的系统路径。`get.agentic-os.sh` 安装在用户
+目录中的 CLI 可能会被 `sudo` 的 `secure_path` 隐藏。
+
+后续 adapter 命令请用拥有目标 Agent 配置的用户执行。user scope 的 adapter
+操作可以读取已采纳的 system 软件包，同时把框架改动留在当前用户的配置中。
+
 ### 1. 扫描框架
 
 ```bash
@@ -78,11 +92,8 @@ anolisa adapter enable tokenless openclaw \
 
 如果当前 OpenClaw 不支持底层覆盖参数，或已把它标记为无效的废弃选项，anolisa 会拒绝上述参数；此时应按照错误中的 `security.installPolicy` 指引处理。
 
-如果 Tokenless 通过 system mode 安装，请使用相同 scope：
-
-```bash
-sudo anolisa adapter enable tokenless <framework>
-```
+组件软件包可以安装在 system scope，adapter receipt 仍由当前用户管理。只有
+目标框架配置和 receipt 都明确归 root 所有时，才需要使用 `sudo`。
 
 ### 3. 检查状态
 
@@ -99,11 +110,8 @@ anolisa doctor tokenless
 anolisa adapter disable tokenless <framework>
 ```
 
-system mode 同样需要：
-
-```bash
-sudo anolisa adapter disable tokenless <framework>
-```
+请用启用 adapter 的同一用户执行禁用操作。只有 root 管理的 receipt 需要在
+两个操作中都使用 `sudo`。
 
 禁用后重启目标 Agent。卸载 Tokenless 前必须先释放所有已启用的 Adapter。
 
