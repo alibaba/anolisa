@@ -382,8 +382,8 @@ def test_daemon_write_response_closes_writer_when_drain_is_cancelled(
 def test_daemon_server_uses_default_job_registration(monkeypatch, tmp_path: Path):
     registered_managers = []
 
-    def fake_register_default_jobs(job_manager, prompt_scan_state):
-        registered_managers.append((job_manager, prompt_scan_state))
+    def fake_register_default_jobs(job_manager):
+        registered_managers.append(job_manager)
 
     monkeypatch.setattr(
         "agent_sec_cli.daemon.server.register_default_jobs",
@@ -392,9 +392,7 @@ def test_daemon_server_uses_default_job_registration(monkeypatch, tmp_path: Path
 
     server = DaemonServer(socket_path=tmp_path / "runtime" / "daemon.sock")
 
-    assert registered_managers == [
-        (server.runtime.jobs, server.runtime.prompt_scan_state)
-    ]
+    assert registered_managers == [server.runtime.jobs]
 
 
 def test_daemon_client_calls_health_over_temp_socket(tmp_path: Path):
@@ -422,7 +420,6 @@ def test_daemon_client_calls_health_over_temp_socket(tmp_path: Path):
     assert response.ok is True
     assert response.exit_code == 0
     assert response.data["status"] == "ok"
-    assert response.data["prompt_scan"]["status"] == "pending"
     assert response.data["socket"].endswith("daemon.sock")
     assert runtime_dir_mode == 0o700
     assert socket_mode == 0o600
@@ -963,13 +960,11 @@ def test_health_does_not_import_heavy_modules(tmp_path: Path):
     registry = create_default_registry()
 
     assert snapshot["status"] == "ok"
-    assert snapshot["prompt_scan"]["status"] == "pending"
     assert registry.methods() == (
         "daemon.health",
         "obs.runs.list",
         "obs.sessions.list",
         "obs.timeline.get",
-        "scan-prompt",
         "sec.events.count_by",
         "sec.events.get",
         "sec.events.list",
