@@ -69,16 +69,16 @@ RSYNC_EXCLUDES=(
 # fresh box without the workspace root would fail on the very first transfer.
 # Create the destination root up front (idempotent).
 echo "[sync] ensuring $L2_REMOTE_WORK exists on $L2_SSH_HOST"
-sshpass -p "$L2_SSH_PASS" ssh "${SSH_OPTS[@]}" "$L2_SSH_USER@$L2_SSH_HOST" \
+SSHPASS="$L2_SSH_PASS" sshpass -e ssh "${SSH_OPTS[@]}" "$L2_SSH_USER@$L2_SSH_HOST" \
     "mkdir -p $L2_REMOTE_WORK"
 
 echo "[sync] anolisa -> $L2_SSH_USER@$L2_SSH_HOST:$L2_REMOTE_WORK/anolisa"
-sshpass -p "$L2_SSH_PASS" rsync -az --delete "${RSYNC_EXCLUDES[@]}" \
+SSHPASS="$L2_SSH_PASS" sshpass -e rsync -az --delete "${RSYNC_EXCLUDES[@]}" \
     -e "ssh ${SSH_OPTS[*]}" \
     "$ANOLISA_SRC/" "$L2_SSH_USER@$L2_SSH_HOST:$L2_REMOTE_WORK/anolisa/"
 
 echo "[sync] headroom -> $L2_SSH_USER@$L2_SSH_HOST:$L2_REMOTE_WORK/headroom"
-sshpass -p "$L2_SSH_PASS" rsync -az --delete "${RSYNC_EXCLUDES[@]}" \
+SSHPASS="$L2_SSH_PASS" sshpass -e rsync -az --delete "${RSYNC_EXCLUDES[@]}" \
     -e "ssh ${SSH_OPTS[*]}" \
     "$HEADROOM_SRC/" "$L2_SSH_USER@$L2_SSH_HOST:$L2_REMOTE_WORK/headroom/"
 
