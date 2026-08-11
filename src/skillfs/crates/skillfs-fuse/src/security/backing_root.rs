@@ -250,7 +250,7 @@ impl LedgerBackingRoot {
         source_canon: &Path,
         backing_root_path: &Path,
         mount_canon: &Path,
-        _in_place: bool,
+        in_place: bool,
     ) -> Result<Self, BackingRootError> {
         if backing_root_path.as_os_str().is_empty() {
             return Err(BackingRootError::EmptyPath);
@@ -349,6 +349,44 @@ impl LedgerBackingRoot {
             }
         })?;
 
+        // Repeat the shape checks after following the leaf. An external
+        // symlink can otherwise resolve back into the mount or source tree.
+        if path_is_inside(&backing_canon, mount_canon) {
+            if let Some(ref dir) = created_temp_dir {
+                let _ = std::fs::remove_dir(dir);
+            }
+            return Err(BackingRootError::InsideMountPath {
+                path: backing_canon,
+                mount: mount_canon.to_path_buf(),
+            });
+        }
+
+        // A source alias is safe only when no in-place over-mount can hide
+        // it. Return it directly instead of attempting a self-bind.
+        if backing_canon == source_canon {
+            if in_place {
+                return Err(BackingRootError::InsideMountPath {
+                    path: backing_canon,
+                    mount: mount_canon.to_path_buf(),
+                });
+            }
+            return Ok(Self {
+                path: source_canon.to_path_buf(),
+                created_bind_mount: false,
+                created_temp_dir: None,
+            });
+        }
+
+        if path_is_inside(&backing_canon, source_canon) {
+            if let Some(ref dir) = created_temp_dir {
+                let _ = std::fs::remove_dir(dir);
+            }
+            return Err(BackingRootError::InsideSourceTree {
+                path: backing_canon,
+                source: source_canon.to_path_buf(),
+            });
+        }
+
         // Validate permissions on the backing root's parent directory.
         // After bind mount, the backing root itself shows the source's
         // permissions. The real security boundary is the parent directory
@@ -400,6 +438,19 @@ impl LedgerBackingRoot {
                 })
             }
             Err(e) => {
+                // In-place mounts require a bind created and made private by
+                // this setup. Identity alone cannot prove propagation mode.
+                if in_place {
+                    if let Some(ref dir) = created_temp_dir {
+                        let _ = std::fs::remove_dir(dir);
+                    }
+                    return Err(BackingRootError::BindMountFailed {
+                        source: source_canon.to_path_buf(),
+                        target: backing_canon,
+                        error: e,
+                    });
+                }
+
                 // P1-1: Bind mount failed. Check if the backing root is a
                 // pre-existing alias (e.g. operator-created bind mount or
                 // symlink to source). Verify via stat dev/ino identity.
@@ -810,6 +861,118 @@ mod tests {
         let mount_canon = mount.path().canonicalize().unwrap();
 
         let result = LedgerBackingRoot::setup(&source_canon, &mount_canon, &mount_canon, false);
+        assert!(matches!(
+            result,
+            Err(BackingRootError::InsideMountPath { .. })
+        ));
+    }
+
+    #[test]
+    fn in_place_backing_root_same_as_source_rejected() {
+        let source = tempfile::tempdir().unwrap();
+        let source_canon = source.path().canonicalize().unwrap();
+
+        let result = LedgerBackingRoot::setup(&source_canon, &source_canon, &source_canon, true);
+
+        assert!(matches!(
+            result,
+            Err(BackingRootError::InsideMountPath { .. })
+        ));
+    }
+
+    #[test]
+    fn non_in_place_symlink_to_source_uses_source_without_bind() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let source = tempfile::tempdir().unwrap();
+        let source_canon = source.path().canonicalize().unwrap();
+        let private_parent = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(
+            private_parent.path(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let backing_link = private_parent.path().join("backing");
+        std::os::unix::fs::symlink(&source_canon, &backing_link).unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let mount_canon = mount.path().canonicalize().unwrap();
+
+        let backing = LedgerBackingRoot::setup(&source_canon, &backing_link, &mount_canon, false)
+            .expect("non-in-place source alias should remain compatible");
+
+        assert_eq!(backing.path(), source_canon);
+        assert!(!backing.created_bind_mount());
+    }
+
+    #[test]
+    fn symlink_into_mount_rejected_after_canonicalization() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let source = tempfile::tempdir().unwrap();
+        let source_canon = source.path().canonicalize().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let mount_canon = mount.path().canonicalize().unwrap();
+        let private_parent = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(
+            private_parent.path(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let backing_link = private_parent.path().join("backing");
+        std::os::unix::fs::symlink(&mount_canon, &backing_link).unwrap();
+
+        let result = LedgerBackingRoot::setup(&source_canon, &backing_link, &mount_canon, false);
+
+        assert!(matches!(
+            result,
+            Err(BackingRootError::InsideMountPath { .. })
+        ));
+    }
+
+    #[test]
+    fn symlink_into_source_subtree_rejected_after_canonicalization() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let source = tempfile::tempdir().unwrap();
+        let source_canon = source.path().canonicalize().unwrap();
+        let source_child = source_canon.join("child");
+        std::fs::create_dir(&source_child).unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let mount_canon = mount.path().canonicalize().unwrap();
+        let private_parent = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(
+            private_parent.path(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let backing_link = private_parent.path().join("backing");
+        std::os::unix::fs::symlink(&source_child, &backing_link).unwrap();
+
+        let result = LedgerBackingRoot::setup(&source_canon, &backing_link, &mount_canon, false);
+
+        assert!(matches!(
+            result,
+            Err(BackingRootError::InsideSourceTree { .. })
+        ));
+    }
+
+    #[test]
+    fn in_place_symlink_to_source_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let source = tempfile::tempdir().unwrap();
+        let source_canon = source.path().canonicalize().unwrap();
+        let private_parent = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(
+            private_parent.path(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let backing_link = private_parent.path().join("backing");
+        std::os::unix::fs::symlink(&source_canon, &backing_link).unwrap();
+
+        let result = LedgerBackingRoot::setup(&source_canon, &backing_link, &source_canon, true);
+
         assert!(matches!(
             result,
             Err(BackingRootError::InsideMountPath { .. })
