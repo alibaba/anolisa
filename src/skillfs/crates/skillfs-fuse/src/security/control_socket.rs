@@ -720,7 +720,7 @@ fn atomic_write_activation_fd(
 
     // 3. Ensure .skill-meta exists via mkdirat. EEXIST is fine.
     let c_meta = CString::new(".skill-meta").unwrap();
-    let rc = unsafe { libc::mkdirat(skill_fd, c_meta.as_ptr(), 0o755) };
+    let rc = unsafe { libc::mkdirat(skill_fd, c_meta.as_ptr(), 0o700) };
     if rc != 0 {
         let e = std::io::Error::last_os_error();
         if e.raw_os_error() != Some(libc::EEXIST) {
@@ -747,6 +747,14 @@ fn atomic_write_activation_fd(
         ));
     }
     let meta_dir_file = unsafe { std::fs::File::from_raw_fd(meta_fd) };
+    let rc = unsafe { libc::fchmod(meta_fd, 0o700) };
+    if rc != 0 {
+        let e = std::io::Error::last_os_error();
+        return Err(ControlResponse::err(
+            "write_failed",
+            format!("failed to secure .skill-meta permissions: {e}"),
+        ));
+    }
 
     // 5. Create temp file via openat on meta_fd.
     let tmp_name = format!(
@@ -766,7 +774,7 @@ fn atomic_write_activation_fd(
             meta_fd,
             c_tmp.as_ptr(),
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
-            0o644,
+            0o600,
         )
     };
     if tmp_fd < 0 {
@@ -2701,10 +2709,17 @@ mod tests {
 
     #[test]
     fn meta_write_activation_success_writes_file() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = tempfile::tempdir().unwrap();
         let skill_dir = dir.path().join("alpha");
-        std::fs::create_dir(&skill_dir).unwrap();
+        let meta_dir = skill_dir.join(".skill-meta");
+        let activation_path = meta_dir.join("activation.json");
+        std::fs::create_dir_all(&meta_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), "# Skill\n").unwrap();
+        std::fs::write(&activation_path, "old").unwrap();
+        std::fs::set_permissions(&meta_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&activation_path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
         let raw = serde_json::json!({
             "schemaVersion": "1",
@@ -2720,11 +2735,18 @@ mod tests {
         let resp = dispatch_request(&req, &raw, Some(&ctx));
         assert!(resp.ok, "expected ok, got: {resp:?}");
 
-        let written =
-            std::fs::read_to_string(skill_dir.join(".skill-meta/activation.json")).unwrap();
+        let written = std::fs::read_to_string(&activation_path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert_eq!(parsed["schemaVersion"], 1);
         assert!(parsed["target"].is_null());
+        let meta_mode = std::fs::metadata(&meta_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(meta_mode, 0o700, ".skill-meta must be owner-only");
+        let mode = std::fs::metadata(&activation_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "activation.json must be owner-only");
     }
 
     #[test]
