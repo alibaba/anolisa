@@ -131,6 +131,7 @@ pub(crate) fn resolve_raw(
         arch: &env.arch,
         libc: env.libc.as_deref(),
         pkg_base: env.pkg_base.as_deref(),
+        os_version: env.os_version.as_deref(),
         preferred_types: &[],
     };
     // A skipped row that may answer this query forces a refusal *before*

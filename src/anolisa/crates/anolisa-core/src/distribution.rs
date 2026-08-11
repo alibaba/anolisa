@@ -11,7 +11,7 @@
 //!
 //! It only loads TOML and resolves a query to a single matching entry.
 
-use semver::Version;
+use semver::{Version, VersionReq};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::path::Path;
 
@@ -181,6 +181,8 @@ pub struct SkippedIndexEntry {
     pub arch: Option<String>,
     /// `install_modes` field, when readable.
     pub install_modes: Option<Vec<String>>,
+    /// `os_version` field, when readable.
+    pub os_version: Option<String>,
     /// Human-facing diagnostic (row position, component, parse error).
     pub reason: String,
 }
@@ -212,12 +214,19 @@ impl SkippedIndexEntry {
             .install_modes
             .as_ref()
             .is_none_or(|modes| modes.iter().any(|m| m == q.install_mode));
+        // Unreadable `os_version` (`None`) matches conservatively — same as
+        // other recovered selectors — so a skipped gated row still blocks.
+        let os_version_matches = self
+            .os_version
+            .as_deref()
+            .is_none_or(|constraint| matches_os_version(Some(constraint), q.os_version));
         component_matches
             && version_matches
             && channel_matches
             && os_matches
             && arch_matches
             && mode_matches
+            && os_version_matches
     }
 }
 
@@ -240,6 +249,9 @@ pub struct ResolveQuery<'a> {
     pub libc: Option<&'a str>,
     /// Target OS package base, when known.
     pub pkg_base: Option<&'a str>,
+    /// Host OS version (`VERSION_ID`), when known. Used to evaluate entry
+    /// `os_version` constraints such as `">=4"` or `"22.04"`.
+    pub os_version: Option<&'a str>,
     /// Ordered tiebreaker. When more than one entry survives version
     /// selection, the first listed type that matches *any* candidate is
     /// preferred. An empty slice preserves legacy ambiguity behavior.
@@ -351,6 +363,7 @@ impl DistributionIndex {
             let channel = get_str(&value, "channel");
             let os = get_str(&value, "os");
             let arch = get_str(&value, "arch");
+            let os_version = get_str(&value, "os_version");
             // All-or-nothing recovery: one non-string element makes the
             // whole selector unreadable (`None`, matches conservatively).
             // A partially recovered list would under-block — e.g. valid
@@ -380,6 +393,7 @@ impl DistributionIndex {
                         os,
                         arch,
                         install_modes,
+                        os_version,
                         reason: format!("skipped index entry #{i}{who}: {e}"),
                     });
                 }
@@ -409,21 +423,24 @@ impl DistributionIndex {
     /// Filter rules (in order):
     ///   1. `component` exact match.
     ///   2. `channel` exact match (query default "stable").
-    ///   3. `install_mode` must appear in the entry's `install_modes`.
-    ///   4. `os` exact match.
-    ///   5. `arch` exact match OR entry arch == "any".
-    ///   6. `libc` and `pkg_base`: if entry has Some, query must match.
+    ///   3. `os` exact match.
+    ///   4. `arch` exact match OR entry arch == "any".
+    ///   5. `libc` and `pkg_base`: if entry has Some, query must match.
     ///      If entry has None, accepted for any query value.
-    ///   7. `version`: if Some, exact match. If None, keep only entries with
+    ///   6. `os_version`: if entry has Some, host must satisfy the
+    ///      constraint (`">=4"`, `"<4"`, exact `"22.04"`, …). Entry None
+    ///      accepts any host; a gated entry with unknown host is refused.
+    ///   7. `install_mode` must appear in the entry's `install_modes`.
+    ///   8. `version`: if Some, exact match. If None, keep only entries with
     ///      the highest semver version (lexicographic fallback).
-    ///   8. Tiebreaker: if `preferred_types` is non-empty and more than one
+    ///   9. Tiebreaker: if `preferred_types` is non-empty and more than one
     ///      candidate remains, the first type in `preferred_types` that
     ///      matches any candidate wins; non-matching entries are dropped.
-    ///   9. Exactly one candidate -> Ok; zero -> NotFound; more -> Ambiguous.
+    ///  10. Exactly one candidate -> Ok; zero -> NotFound; more -> Ambiguous.
     pub fn resolve(&self, q: &ResolveQuery<'_>) -> Result<DistributionEntry, ResolveError> {
         let want_channel = q.channel.unwrap_or("stable");
 
-        // 1-6: filter without considering version.
+        // 1-7: filter without considering artifact version.
         let mut candidates: Vec<&DistributionEntry> = self
             .entries
             .iter()
@@ -433,13 +450,14 @@ impl DistributionIndex {
             .filter(|e| e.arch == q.arch || e.arch == "any")
             .filter(|e| matches_optional(e.libc.as_deref(), q.libc))
             .filter(|e| matches_optional(e.pkg_base.as_deref(), q.pkg_base))
+            .filter(|e| matches_os_version(e.os_version.as_deref(), q.os_version))
             .collect();
 
         if candidates.is_empty() {
             return Err(ResolveError::NotFound);
         }
 
-        // 7a: install_mode filter — track separately so we can distinguish
+        // 7: install_mode filter — track separately so we can distinguish
         // "would have matched but the install mode is wrong" from a generic
         // NotFound.
         let before_mode = candidates.len();
@@ -452,7 +470,7 @@ impl DistributionIndex {
             };
         }
 
-        // 7b: version selection — narrow `candidates` rather than picking
+        // 8: version selection — narrow `candidates` rather than picking
         // eagerly, so the preferred-type tiebreaker can run afterwards.
         match q.version {
             Some(v) => {
@@ -466,7 +484,7 @@ impl DistributionIndex {
             }
         }
 
-        // 8: preferred-type tiebreaker. Empty preferences keep legacy
+        // 9: preferred-type tiebreaker. Empty preferences keep legacy
         // behavior — multiple candidates surface as Ambiguous below.
         if candidates.len() > 1 && !q.preferred_types.is_empty() {
             for preferred in q.preferred_types {
@@ -477,7 +495,7 @@ impl DistributionIndex {
             }
         }
 
-        // 9: final cardinality check.
+        // 10: final cardinality check.
         match candidates.len() {
             0 => Err(ResolveError::NotFound),
             1 => Ok(candidates[0].clone()),
@@ -488,10 +506,11 @@ impl DistributionIndex {
     }
 
     /// All distinct versions that pass the same component / channel / os / arch
-    /// / libc / pkg_base / install_mode filters as [`resolve`](Self::resolve),
-    /// highest-first by semver (lexicographic fallback). Ignores `q.version`
-    /// and the preferred-type tiebreaker — it answers "what could this query
-    /// resolve to", for dry-run previews that must agree with `resolve`.
+    /// / libc / pkg_base / os_version / install_mode filters as
+    /// [`resolve`](Self::resolve), highest-first by semver (lexicographic
+    /// fallback). Ignores `q.version` and the preferred-type tiebreaker — it
+    /// answers "what could this query resolve to", for dry-run previews that
+    /// must agree with `resolve`.
     pub fn matching_versions(&self, q: &ResolveQuery<'_>) -> Vec<String> {
         let want_channel = q.channel.unwrap_or("stable");
         let mut versions: Vec<String> = self
@@ -503,6 +522,7 @@ impl DistributionIndex {
             .filter(|e| e.arch == q.arch || e.arch == "any")
             .filter(|e| matches_optional(e.libc.as_deref(), q.libc))
             .filter(|e| matches_optional(e.pkg_base.as_deref(), q.pkg_base))
+            .filter(|e| matches_os_version(e.os_version.as_deref(), q.os_version))
             .filter(|e| e.install_modes.iter().any(|m| m.as_str() == q.install_mode))
             .map(|e| e.version.clone())
             .collect();
@@ -523,6 +543,59 @@ fn matches_optional(entry_val: Option<&str>, query_val: Option<&str>) -> bool {
         None => true,
         Some(ev) => query_val.is_some_and(|qv| qv == ev),
     }
+}
+
+/// Entry `os_version` constraint match against the host `VERSION_ID`.
+///
+/// - Entry `None` => wildcard (any host, including unknown).
+/// - Entry `Some` + unknown host => refuse (fail closed; cannot verify the gate).
+/// - Exact string equality covers literal values such as `"22.04"`.
+/// - Otherwise treat the constraint as a [`VersionReq`] against a coerced
+///   host version (`"4"` → `4.0.0`, `"22.04"` → `22.4.0`).
+fn matches_os_version(entry_constraint: Option<&str>, host: Option<&str>) -> bool {
+    let Some(constraint) = entry_constraint else {
+        return true;
+    };
+    let Some(host) = host else {
+        return false;
+    };
+    if constraint == host {
+        return true;
+    }
+    let Ok(req) = VersionReq::parse(constraint) else {
+        return false;
+    };
+    coerce_os_version(host).is_some_and(|version| req.matches(&version))
+}
+
+/// Coerce an OS `VERSION_ID` into a semver [`Version`] for constraint checks.
+///
+/// Pads missing minor/patch with zeros and strips a leading `v`. Numeric
+/// segments tolerate a leading zero (`"22.04"` → `22.4.0`) so Ubuntu-style
+/// IDs compare under the same `VersionReq` rules as Alinux majors (`"4"`).
+fn coerce_os_version(raw: &str) -> Option<Version> {
+    let trimmed = raw.strip_prefix('v').unwrap_or(raw).trim();
+    if let Ok(version) = Version::parse(trimmed) {
+        return Some(version);
+    }
+    let mut nums = Vec::new();
+    for part in trimmed.split('.') {
+        let digits: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            return None;
+        }
+        nums.push(digits.parse::<u64>().ok()?);
+        if nums.len() == 3 {
+            break;
+        }
+    }
+    if nums.is_empty() {
+        return None;
+    }
+    while nums.len() < 3 {
+        nums.push(0);
+    }
+    Some(Version::new(nums[0], nums[1], nums[2]))
 }
 
 /// Narrow `candidates` to the entries that share the highest version. Uses
@@ -598,6 +671,7 @@ mod tests {
             arch: "x86_64",
             libc: Some("glibc"),
             pkg_base: Some("anolis23"),
+            os_version: None,
             preferred_types: &[],
         }
     }
@@ -1002,6 +1076,7 @@ mod tests {
             arch: "x86_64",
             libc: None,
             pkg_base: None,
+            os_version: None,
             preferred_types: &[],
         };
         assert!(skipped[0].may_match(&query));
@@ -1020,6 +1095,7 @@ mod tests {
             os: Some("linux".to_string()),
             arch: Some("x86_64".to_string()),
             install_modes: Some(vec!["user".to_string()]),
+            os_version: None,
             reason: "skipped index entry #1 (component 'sec-core')".to_string(),
         };
         let query = |component: &'static str, version: Option<&'static str>| ResolveQuery {
@@ -1031,6 +1107,7 @@ mod tests {
             arch: "x86_64",
             libc: None,
             pkg_base: None,
+            os_version: None,
             preferred_types: &[],
         };
         // "latest" for the same component: the skipped row might be newest.
@@ -1053,9 +1130,85 @@ mod tests {
             os: None,
             arch: None,
             install_modes: None,
+            os_version: None,
             reason: "skipped index entry #0".to_string(),
         };
         assert!(opaque.may_match(&query("cosh", Some("1.0.0"))));
+    }
+
+    #[test]
+    fn os_version_gated_rows_filter_for_host() {
+        let mut newer = sample_entry();
+        newer.os = "alinux".into();
+        newer.version = "2.0.0".into();
+        newer.os_version = Some(">=4".into());
+        newer.pkg_base = Some("rpm".into());
+
+        let mut legacy = sample_entry();
+        legacy.os = "alinux".into();
+        legacy.version = "1.0.0".into();
+        legacy.os_version = Some("<4".into());
+        legacy.pkg_base = Some("rpm".into());
+
+        let index = DistributionIndex {
+            schema_version: 1,
+            channel: None,
+            generated_at: None,
+            expires_at: None,
+            publisher: None,
+            signature: None,
+            entries: vec![newer, legacy],
+        };
+        let mut q = linux_x86_query("agentsight", "system");
+        q.os = "alinux";
+        q.pkg_base = Some("rpm");
+        q.os_version = Some("3");
+        let entry = index
+            .resolve(&q)
+            .expect("Alinux 3 must resolve the <4 artifact");
+        assert_eq!(
+            entry.version, "1.0.0",
+            "host on OS major 3 must receive the <4 artifact, not the >=4 build"
+        );
+        assert_eq!(index.matching_versions(&q), vec!["1.0.0".to_string()]);
+
+        q.os_version = Some("4");
+        let entry = index
+            .resolve(&q)
+            .expect("Alinux 4 must resolve the >=4 artifact");
+        assert_eq!(entry.version, "2.0.0");
+    }
+
+    #[test]
+    fn os_version_exact_literal_and_unknown_host() {
+        let mut entry = sample_entry();
+        entry.os = "ubuntu".into();
+        entry.os_version = Some("22.04".into());
+        entry.pkg_base = Some("deb".into());
+        let index = DistributionIndex {
+            schema_version: 1,
+            channel: None,
+            generated_at: None,
+            expires_at: None,
+            publisher: None,
+            signature: None,
+            entries: vec![entry],
+        };
+        let mut q = linux_x86_query("agentsight", "system");
+        q.os = "ubuntu";
+        q.pkg_base = Some("deb");
+        q.os_version = Some("22.04");
+        assert_eq!(index.resolve(&q).expect("exact").version, "0.1.0");
+
+        q.os_version = Some("24.04");
+        assert_eq!(index.resolve(&q), Err(ResolveError::NotFound));
+
+        q.os_version = None;
+        assert_eq!(
+            index.resolve(&q),
+            Err(ResolveError::NotFound),
+            "gated rows must not match when the host OS version is unknown"
+        );
     }
 
     /// A syntactically damaged file must fail even in lenient mode: entry
