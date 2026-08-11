@@ -143,7 +143,11 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Mon Aug 10 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Tue Aug 11 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Component listing now reports host-aware availability in human and JSON output.
+- npm installs now keep the public command link under the root package.
+
+* Mon Aug 10 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.2.19-1
 - Raw dependency provisioning now recognizes RPM and DEB family hints without `which`.
 - Sandbox-list and registration-status JSON now use the standard response envelope.
 - OpenClaw adapters now honor configured state directories and migrate legacy installs safely.

@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.20] - 2026-08-11
+
+### Changed
+
+- `anolisa list` now announces the detected host platform and reports component
+  availability instead of backend and ownership columns in human-readable
+  output. Components unsupported on the host remain visible with their
+  supported platform and no install action, while JSON adds `platforms` and
+  `platform_available` without removing backend or ownership metadata
+  ([#2367](https://github.com/alibaba/anolisa/pull/2367)).
+
+### Fixed
+
+- npm installs now keep `@anolisa/cli` as the sole owner of the public
+  `anolisa` executable. With npm 10, local installs reliably create
+  `node_modules/.bin/anolisa` instead of losing the command when platform
+  packages are linked
+  ([#2345](https://github.com/alibaba/anolisa/pull/2345)).
+
 ## [0.2.19] - 2026-08-10
 
 ### Fixed
