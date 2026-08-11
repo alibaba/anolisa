@@ -820,7 +820,15 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             };
             match store.retrieve(&key) {
                 Ok(Some(payload)) => {
-                    println!("{}", payload);
+                    // Verbatim write — no trailing newline, to stay byte-identical to the stashed original.
+                    use std::io::Write;
+                    let mut stdout = io::stdout().lock();
+                    stdout
+                        .write_all(payload.as_bytes())
+                        .map_err(|e| (format!("failed to write payload to stdout: {}", e), 1))?;
+                    stdout
+                        .flush()
+                        .map_err(|e| (format!("failed to flush stdout: {}", e), 1))?;
                 }
                 Ok(None) => {
                     return Err((format!("no stashed payload for hash: {}", key), 1));

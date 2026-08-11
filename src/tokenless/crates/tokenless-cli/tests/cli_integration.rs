@@ -326,6 +326,67 @@ fn retrieve_invalid_hash() {
 }
 
 #[test]
+fn retrieve_stdout_is_byte_identical_to_stashed_payload() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let stash_db = fixture.root.join("retrieve-exact.db");
+    // Payload deliberately does NOT end with '\n' so a trailing newline is detectable.
+    let long_value = "HELLO_UNIQUE_".to_string() + &"X".repeat(200);
+    let input = serde_json::json!({"s": long_value.clone()}).to_string();
+
+    let compress = fixture
+        .command()
+        .args([
+            "compress-response",
+            "--truncate-strings-at",
+            "80",
+            "--stash-db",
+            stash_db.to_str().unwrap(),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(input.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert!(
+        compress.status.success(),
+        "compress-response failed: {}",
+        String::from_utf8_lossy(&compress.stderr)
+    );
+
+    let compressed = String::from_utf8_lossy(&compress.stdout);
+    let start = compressed
+        .find("<<tokenless:")
+        .expect("compressed output should contain a stash marker");
+    let end = compressed[start..].find(">>").expect("marker end") + start + 2;
+    let marker = &compressed[start..end];
+
+    let retrieve = fixture
+        .command()
+        .args(["retrieve", marker, "--stash-db", stash_db.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        retrieve.status.success(),
+        "retrieve failed: {}",
+        String::from_utf8_lossy(&retrieve.stderr)
+    );
+    // stdout must equal the stashed payload byte-for-byte — no appended newline.
+    assert_eq!(
+        retrieve.stdout,
+        long_value.as_bytes(),
+        "retrieve stdout should be byte-identical to the stashed payload"
+    );
+}
+
+#[test]
 fn no_args_shows_error() {
     let output = tokenless_bin().output().unwrap();
     assert!(!output.status.success());
