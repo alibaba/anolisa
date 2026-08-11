@@ -69,7 +69,14 @@ pub(super) fn render_slash_command<W: Write>(
         }
         SlashCommand::Hooks(sub, arg, extra) => {
             render_hooks_command(sub, arg, extra, blocks, adapter, state, output)?;
-            Ok(true)
+            // When a hook id collides between shell and agent layers, the
+            // disambiguation panel is now active; withhold the PTY prompt
+            // until the user picks a layer.
+            if crate::slash::hooks::has_pending_hook_action(state) {
+                Ok(false)
+            } else {
+                Ok(true)
+            }
         }
         SlashCommand::Mode(arg, sub, confirm) => {
             render_mode_command(arg, sub, confirm, state, output)

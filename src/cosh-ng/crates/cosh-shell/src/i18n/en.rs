@@ -8,6 +8,7 @@ mod config;
 mod debug;
 mod health;
 mod help;
+mod hook_action;
 mod hook_details;
 mod hooks;
 mod insight;
@@ -22,6 +23,7 @@ pub(super) fn message(id: MessageId) -> &'static str {
         .or_else(|| help::message(id))
         .or_else(|| config::message(id))
         .or_else(|| hooks::message(id))
+        .or_else(|| hook_action::message(id))
         .or_else(|| debug::message(id))
         .or_else(|| modes::message(id))
         .or_else(|| agent::message(id))

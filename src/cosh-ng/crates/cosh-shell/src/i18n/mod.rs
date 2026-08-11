@@ -56,6 +56,7 @@ mod tests {
         "debug",
         "health",
         "help",
+        "hook_action",
         "hook_details",
         "hooks",
         "insight",
@@ -184,21 +185,22 @@ mod tests {
         );
         assert_eq!(
             MessageId::ApprovalShellHandoffInputWaitTimeoutTitle as usize,
-            MessageId::ALL.len() - 23
+            MessageId::ALL.len() - 34
         );
         assert_eq!(
             MessageId::ShellInputWaitHintTimeoutForecastBody as usize,
-            MessageId::ALL.len() - 14
+            MessageId::ALL.len() - 25
         );
         // The #2068 startup auth-hint segment remains ahead of the appended
-        // session-picker footer, Agent Composer, and Trust-catalog segments.
+        // session-picker footer, Agent Composer, Trust-catalog, and hook-action
+        // segments.
         assert_eq!(
             MessageId::StartupAuthHintLine as usize,
-            MessageId::ALL.len() - 13
+            MessageId::ALL.len() - 24
         );
         assert_eq!(
             MessageId::SessionPickerMarkedFooter as usize,
-            MessageId::ALL.len() - 12
+            MessageId::ALL.len() - 23
         );
         assert_eq!(
             MessageId::AgentComposerTitle as usize,
@@ -206,7 +208,7 @@ mod tests {
         );
         assert_eq!(
             MessageId::AgentComposerFooterEditing as usize,
-            MessageId::ALL.len() - 9
+            MessageId::ALL.len() - 20
         );
         assert_eq!(
             MessageId::AgentComposerRejectedTitle as usize,
@@ -218,6 +220,52 @@ mod tests {
         );
         assert_eq!(
             MessageId::ApprovalTrustUnknownToolReason as usize,
+            MessageId::ALL.len() - 12
+        );
+        // The hook-action segment follows the Trust-catalog segment and is the
+        // current tail; tail ownership assertions move with each appended segment.
+        assert_eq!(
+            MessageId::SlashHooksActionCancelledTitle as usize,
+            MessageId::ALL.len() - 11
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionCancelledBody as usize,
+            MessageId::ALL.len() - 10
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionVerbEnable as usize,
+            MessageId::ALL.len() - 9
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionVerbDisable as usize,
+            MessageId::ALL.len() - 8
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionQuestion as usize,
+            MessageId::ALL.len() - 7
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionOptionShell as usize,
+            MessageId::ALL.len() - 6
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionOptionAgent as usize,
+            MessageId::ALL.len() - 5
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionOptionBoth as usize,
+            MessageId::ALL.len() - 4
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionAgentEnabledBody as usize,
+            MessageId::ALL.len() - 3
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionAgentDisabledBody as usize,
+            MessageId::ALL.len() - 2
+        );
+        assert_eq!(
+            MessageId::SlashHooksActionAgentErrorBody as usize,
             MessageId::ALL.len() - 1
         );
     }

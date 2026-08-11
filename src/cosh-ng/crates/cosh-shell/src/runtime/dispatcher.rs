@@ -180,6 +180,15 @@ fn render_inline_guidance_from_batch<W: Write>(
         output,
         event_index_base,
     )?;
+    // Hook-action disambiguation panel (#1629): route focus/answer/cancel
+    // events for the pending hook-action question panel.
+    crate::slash::hooks::render_hook_action_card_actions(
+        action_events,
+        adapter,
+        state,
+        output,
+        event_index_base,
+    )?;
     let evidence_actions = EvidenceRequestConsumer::consume(
         action_events,
         &ledger.blocks,

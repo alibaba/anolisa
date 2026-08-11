@@ -256,6 +256,12 @@ pub(crate) fn pending_card_capture(state: &InlineState) -> Option<RawInputCaptur
         }
     }
 
+    // Hook-action disambiguation panel (#1629): when a hook id collides
+    // between shell and agent layers, capture input for the question panel.
+    if let Some(capture) = crate::slash::hooks::pending_hook_action_capture(state) {
+        return Some(capture);
+    }
+
     if let Some(capture) = pending_question_capture(state) {
         return Some(capture);
     }

@@ -1,8 +1,16 @@
 use serde_json::Value;
 
-use crate::hooks::state::{HookFeedback, RuntimeHookDisplayEvent, RuntimeHookFinding};
+use crate::hooks::state::{
+    HookActionKind, HookFeedback, RuntimeHookDisplayEvent, RuntimeHookFinding,
+};
 use crate::runtime::prelude::*;
 use crate::slash::panel::render_notice_panel;
+
+pub(super) mod action;
+
+pub(crate) use action::{
+    has_pending_hook_action, pending_hook_action_capture, render_hook_action_card_actions,
+};
 
 pub(crate) fn render_hooks_command<W: Write>(
     sub: Option<&str>,
@@ -116,9 +124,16 @@ pub(crate) fn render_hooks_command<W: Write>(
         (Some("untrust-project"), None, None) => render_project_hook_trust(false, state, output),
         (Some("clear-project-trust"), None, None) => render_clear_project_hook_trust(state, output),
         (Some("enable"), Some(id), None) => {
-            // Waterfall routing: shell hooks first, then cosh-core registry
             let shell_hooks = state.hooks.engine.registered_hooks();
-            if shell_hooks.contains(&id) {
+            let shell_hit = shell_hooks.contains(&id);
+            // When the id collides between shell and agent layers, enter
+            // interactive disambiguation instead of silently picking one.
+            if shell_hit && action::agent_list_contains_id(adapter, id) {
+                action::begin_hook_action_confirmation(state, id, HookActionKind::Enable);
+                return action::render_hook_action_confirmation(state, output);
+            }
+            // Non-collision: waterfall routing (shell first, then cosh-core)
+            if shell_hit {
                 // Shell hook: session-level enable
                 state.hooks.disabled.remove(id);
                 let i18n = state.i18n();
@@ -136,13 +151,18 @@ pub(crate) fn render_hooks_command<W: Write>(
                     Ok(_) => render_notice_panel(
                         output,
                         i18n.t(MessageId::SlashHooksEnabledTitle),
-                        vec![format!("  Agent hook \"{id}\" enabled (persisted).")],
+                        vec![
+                            i18n.format(MessageId::SlashHooksActionAgentEnabledBody, &[("id", id)])
+                        ],
                         None,
                     ),
                     Err(e) => render_notice_panel(
                         output,
                         i18n.t(MessageId::SlashHooksEnabledTitle),
-                        vec![format!("Error: {e}")],
+                        vec![i18n.format(
+                            MessageId::SlashHooksActionAgentErrorBody,
+                            &[("id", id), ("error", &e)],
+                        )],
                         None,
                     ),
                 }
@@ -159,9 +179,16 @@ pub(crate) fn render_hooks_command<W: Write>(
             }
         }
         (Some("disable"), Some(id), None) => {
-            // Waterfall routing: shell hooks first, then cosh-core registry
             let shell_hooks = state.hooks.engine.registered_hooks();
-            if shell_hooks.contains(&id) {
+            let shell_hit = shell_hooks.contains(&id);
+            // When the id collides between shell and agent layers, enter
+            // interactive disambiguation instead of silently picking one.
+            if shell_hit && action::agent_list_contains_id(adapter, id) {
+                action::begin_hook_action_confirmation(state, id, HookActionKind::Disable);
+                return action::render_hook_action_confirmation(state, output);
+            }
+            // Non-collision: waterfall routing (shell first, then cosh-core)
+            if shell_hit {
                 // Shell hook: session-level disable
                 state.hooks.disabled.insert(id.to_string());
                 let i18n = state.i18n();
@@ -179,13 +206,17 @@ pub(crate) fn render_hooks_command<W: Write>(
                     Ok(_) => render_notice_panel(
                         output,
                         i18n.t(MessageId::SlashHooksDisabledTitle),
-                        vec![format!("  Agent hook \"{id}\" disabled (persisted).")],
+                        vec![i18n
+                            .format(MessageId::SlashHooksActionAgentDisabledBody, &[("id", id)])],
                         None,
                     ),
                     Err(e) => render_notice_panel(
                         output,
                         i18n.t(MessageId::SlashHooksDisabledTitle),
-                        vec![format!("Error: {e}")],
+                        vec![i18n.format(
+                            MessageId::SlashHooksActionAgentErrorBody,
+                            &[("id", id), ("error", &e)],
+                        )],
                         None,
                     ),
                 }
