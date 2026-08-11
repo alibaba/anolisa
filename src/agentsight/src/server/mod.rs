@@ -300,6 +300,39 @@ async fn api_not_found() -> impl Responder {
         .json(serde_json::json!({"error": "not_found", "message": "No matching API endpoint"}))
 }
 
+/// Builds the JSON body extractor config registered on the server `App`.
+///
+/// Actix's default rejection is a `text/plain` raw serde message; API
+/// consumers expect the structured `{"error":{...}}` envelope, so every
+/// `web::Json` failure is rewritten here. Kept as a shared constructor so
+/// tests exercise the exact handler used in production.
+fn json_extractor_config() -> web::JsonConfig {
+    // Generic prefix keeps Rust type names out of the leading text while
+    // preserving the serde detail (field/variant names are public API states).
+    web::JsonConfig::default()
+        .error_handler(|error, _req| extractor_error(format!("invalid request body: {error}")))
+}
+
+/// Builds the typed path extractor config registered on the server `App`.
+///
+/// Also turns typed-path failures (e.g. a non-UUID `{binding_id}`) into 400
+/// instead of actix's default 404, matching handlers that parse ids manually.
+fn path_extractor_config() -> web::PathConfig {
+    web::PathConfig::default()
+        .error_handler(|error, _req| extractor_error(format!("invalid path parameter: {error}")))
+}
+
+/// Wraps an extractor failure into a 400 response with the shared envelope.
+fn extractor_error(message: String) -> actix_web::Error {
+    let response = system_audit::error_response(
+        actix_web::http::StatusCode::BAD_REQUEST,
+        "bad_request",
+        &message,
+        false,
+    );
+    actix_web::error::InternalError::from_response(message, response).into()
+}
+
 // ─── Server entry point ───────────────────────────────────────────────────────
 
 fn private_state_dir(storage_path: &Path) -> PathBuf {
@@ -492,6 +525,8 @@ pub async fn run_server(
             .wrap(cors)
             .wrap(AuthMiddleware::new(dashboard_auth.clone()))
             .app_data(data.clone())
+            .app_data(json_extractor_config())
+            .app_data(path_extractor_config())
             .configure(configure_routes)
     })
     .bind((host, port))
@@ -591,7 +626,8 @@ mod tests {
     use super::auth::DashboardAuth;
     use super::{
         AppState, SecurityObservabilityConfig, TrajectoryStore, configure_routes,
-        private_state_dir, serve_frontend, serve_frontend_root,
+        json_extractor_config, path_extractor_config, private_state_dir, serve_frontend,
+        serve_frontend_root,
     };
     use crate::config::ServerAuthConfig;
 
@@ -672,6 +708,103 @@ mod tests {
         let response = awtest::call_service(&app, request).await;
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Asserts the response is a 400 carrying the structured error envelope
+    /// produced by the extractor error handlers (issues #2372/#2392).
+    async fn assert_bad_request_envelope<B>(
+        response: actix_web::dev::ServiceResponse<B>,
+        message_fragment: &str,
+    ) where
+        B: actix_web::body::MessageBody,
+    {
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response
+                .headers()
+                .get(actix_web::http::header::CONTENT_TYPE)
+                .expect("content-type header"),
+            "application/json"
+        );
+        let body: serde_json::Value = awtest::read_body_json(response).await;
+        assert_eq!(body["error"]["code"], "bad_request");
+        assert_eq!(body["error"]["retryable"], false);
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(message_fragment),
+            "message {message:?} does not contain {message_fragment:?}"
+        );
+    }
+
+    #[actix_web::test]
+    async fn review_json_extractor_errors_return_error_envelope() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .app_data(json_extractor_config())
+                .app_data(path_extractor_config())
+                .configure(configure_routes),
+        )
+        .await;
+        let uri = "/api/audit/cases/00000000-0000-0000-0000-000000000000/review";
+
+        let missing_field = awtest::TestRequest::post()
+            .uri(uri)
+            .insert_header(("content-type", "application/json"))
+            .set_payload("{}")
+            .to_request();
+        let response = awtest::call_service(&app, missing_field).await;
+        assert_bad_request_envelope(response, "missing field").await;
+
+        let invalid_variant = awtest::TestRequest::post()
+            .uri(uri)
+            .insert_header(("content-type", "application/json"))
+            .set_payload(r#"{"status":"bogus"}"#)
+            .to_request();
+        let response = awtest::call_service(&app, invalid_variant).await;
+        assert_bad_request_envelope(response, "unknown variant").await;
+    }
+
+    #[actix_web::test]
+    async fn enforcement_json_extractor_error_returns_error_envelope() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .app_data(json_extractor_config())
+                .app_data(path_extractor_config())
+                .configure(configure_routes),
+        )
+        .await;
+        let request = awtest::TestRequest::post()
+            .uri("/api/enforcement/bindings")
+            .insert_header(("content-type", "application/json"))
+            .set_payload("{}")
+            .to_request();
+
+        let response = awtest::call_service(&app, request).await;
+
+        assert_bad_request_envelope(response, "invalid request body").await;
+    }
+
+    #[actix_web::test]
+    async fn enforcement_path_extractor_error_returns_error_envelope() {
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state(0))
+                .app_data(json_extractor_config())
+                .app_data(path_extractor_config())
+                .configure(configure_routes),
+        )
+        .await;
+        // Without the PathConfig handler actix answers 404 here; 400 matches
+        // handlers that parse path ids manually (e.g. audit case_detail).
+        let request = awtest::TestRequest::delete()
+            .uri("/api/enforcement/bindings/not-a-uuid")
+            .to_request();
+
+        let response = awtest::call_service(&app, request).await;
+
+        assert_bad_request_envelope(response, "invalid path parameter").await;
     }
 
     #[actix_web::test]
