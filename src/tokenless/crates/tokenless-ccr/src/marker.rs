@@ -26,16 +26,26 @@ pub fn parse_marker(s: &str) -> Option<&str> {
     Some(inner)
 }
 
-/// Extract the first marker's hash from arbitrary text. Useful when the LLM
-/// quotes a whole truncation line such as
+/// Extract the first valid marker's hash from arbitrary text. Useful when the
+/// LLM quotes a whole truncation line such as
 /// `<... 12 items truncated, retrieve with <<tokenless:abcd…>>`.
+/// Skips malformed markers (e.g. wrong hash length) and keeps scanning until
+/// a valid one is found.
 pub fn extract_hash(text: &str) -> Option<&str> {
-    let start = text.find(MARKER_PREFIX)?;
-    let rest = &text[start + MARKER_PREFIX.len()..];
-    let end = rest.find(MARKER_SUFFIX)?;
-    let hash = &rest[..end];
-    validate_hash(hash)?;
-    Some(hash)
+    let mut remaining = text;
+    while let Some(start) = remaining.find(MARKER_PREFIX) {
+        let after_prefix = &remaining[start + MARKER_PREFIX.len()..];
+        let Some(end) = after_prefix.find(MARKER_SUFFIX) else {
+            return None;
+        };
+        let hash = &after_prefix[..end];
+        if is_valid_hash(hash) {
+            return Some(hash);
+        }
+        // Skip past this malformed marker and continue scanning.
+        remaining = &after_prefix[end + MARKER_SUFFIX.len()..];
+    }
+    None
 }
 
 /// Whether `hash` is a valid stash key: exactly 24 ASCII hex characters
@@ -120,5 +130,26 @@ mod tests {
         let text =
             "<<tokenless:000000000000000000000000>> then <<tokenless:111111111111111111111111>>";
         assert_eq!(extract_hash(text), Some("000000000000000000000000"));
+    }
+
+    #[test]
+    fn extract_hash_skips_malformed_before_valid() {
+        // Malformed marker (too short) followed by a valid one.
+        assert_eq!(
+            extract_hash("see <<tokenless:abc>> then <<tokenless:0123456789abcdef01234567>>"),
+            Some("0123456789abcdef01234567"),
+        );
+        // Malformed (non-hex) followed by a valid one.
+        assert_eq!(
+            extract_hash("<<tokenless:ZZZZZZZZZZZZZZZZZZZZZZZZ>> <<tokenless:aabbccdd11223344aabbccdd>>"),
+            Some("aabbccdd11223344aabbccdd"),
+        );
+        // Multiple malformed before a valid one.
+        assert_eq!(
+            extract_hash("<<tokenless:x>> <<tokenless:yy>> <<tokenless:0123456789abcdef01234567>>"),
+            Some("0123456789abcdef01234567"),
+        );
+        // Only malformed markers — still None.
+        assert_eq!(extract_hash("<<tokenless:abc>> <<tokenless:def>>"), None);
     }
 }
