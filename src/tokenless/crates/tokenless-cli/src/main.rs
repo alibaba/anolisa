@@ -820,7 +820,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             };
             match store.retrieve(&key) {
                 Ok(Some(payload)) => {
-                    println!("{}", payload);
+                    print!("{}", payload);
                 }
                 Ok(None) => {
                     return Err((format!("no stashed payload for hash: {}", key), 1));
