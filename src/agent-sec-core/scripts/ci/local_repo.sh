@@ -24,6 +24,8 @@ TARGET_OS="${TARGET_OS:-linux}"
 TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
 CHANNEL="${RAW_REPO_CHANNEL:-stable}"
 PUBLISHER="${RAW_REPO_PUBLISHER:-sec-core-local-build}"
+MARKER_NAME=".anolisa-local-raw-repo"
+MARKER_CONTENT="anolisa-local-raw-repo-v1"
 
 command -v python3 >/dev/null 2>&1 || die "python3 is required to read the raw contract"
 [ -f "$CONTRACT" ] || die "raw contract not found: $CONTRACT"
@@ -48,24 +50,37 @@ PY
 [ -n "$COMPONENT" ] && [ -n "$VERSION" ] && [ -n "$INSTALL_MODES" ] || \
     die "could not read component identity from $CONTRACT"
 
-ARTIFACT="${ARTIFACT:-$OUTPUT_DIR/${COMPONENT}-${VERSION}-${TARGET_OS}-${TARGET_ARCH}.tar.gz}"
+ARTIFACT="$OUTPUT_DIR/${COMPONENT}-${VERSION}-${TARGET_OS}-${TARGET_ARCH}.tar.gz"
 [ -f "$ARTIFACT" ] || \
     die "raw archive not found: $ARTIFACT (run 'make package-raw' first)"
 
-# The repository directory is recreated from scratch below, so refuse the two
-# targets where that would destroy something: the filesystem root, and any
-# directory holding the archive this run is supposed to publish.
+# Never replace an unrelated directory. A directory becomes managed only when
+# this script creates its marker; an existing empty directory is safe to adopt.
 [ -n "$REPO_DIR" ] && [ "$REPO_DIR" != "/" ] || \
     die "REPO_DIR must be a non-empty, non-root path"
 case "$ARTIFACT" in
     "$REPO_DIR"/*) die "REPO_DIR must not contain the built archive: $ARTIFACT" ;;
 esac
+MARKER="$REPO_DIR/$MARKER_NAME"
+if [ -e "$REPO_DIR" ] || [ -L "$REPO_DIR" ]; then
+    [ -d "$REPO_DIR" ] && [ ! -L "$REPO_DIR" ] || \
+        die "REPO_DIR must be a directory, not a file or symlink: $REPO_DIR"
+    if [ -e "$MARKER" ] || [ -L "$MARKER" ]; then
+        [ -f "$MARKER" ] && [ ! -L "$MARKER" ] && \
+            [ "$(cat "$MARKER")" = "$MARKER_CONTENT" ] || \
+            die "REPO_DIR has an invalid ownership marker: $MARKER"
+    elif [ -n "$(find "$REPO_DIR" -mindepth 1 -print -quit)" ]; then
+        die "refusing to replace non-empty unmanaged REPO_DIR: $REPO_DIR"
+    fi
+fi
 
 # A stale v1/ would let install resolve an archive this run did not build,
 # which is the very drift this repository exists to remove.
 rm -rf "$REPO_DIR"
 V1="$REPO_DIR/v1"
 install -d -m 0755 "$V1"
+printf '%s\n' "$MARKER_CONTENT" > "$MARKER"
+chmod 0644 "$MARKER"
 ARTIFACT_NAME="$(basename "$ARTIFACT")"
 # The archive is a few hundred MB, so prefer a hard link and only fall back to
 # a copy when the output and repository directories are on different volumes.

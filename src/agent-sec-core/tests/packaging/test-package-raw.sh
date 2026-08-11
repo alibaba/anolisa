@@ -129,11 +129,85 @@ run_package() {
 
 OUT_ONE="$TMP/out-one"
 OUT_TWO="$TMP/out-two"
-run_package "$OUT_ONE"
-run_package "$OUT_TWO"
+PACKAGE_STDOUT="$(run_package "$OUT_ONE")"
+test -z "$PACKAGE_STDOUT"
+PACKAGE_STDOUT="$(run_package "$OUT_TWO")"
+test -z "$PACKAGE_STDOUT"
 
 ARTIFACT="sec-core-${VERSION}-linux-x86_64.tar.gz"
 cmp "$OUT_ONE/$ARTIFACT" "$OUT_TWO/$ARTIFACT"
+
+LOCAL_REPO="$TMP/local-repo"
+STALE_ARTIFACT="$TMP/stale.tar.gz"
+printf 'stale artifact that must not be published\n' > "$STALE_ARTIFACT"
+LOCAL_REPO_STDOUT="$(
+    ARTIFACT="$STALE_ARTIFACT" \
+    OUTPUT_DIR="$OUT_ONE" \
+    REPO_DIR="$LOCAL_REPO" \
+    TARGET_OS=linux \
+    TARGET_ARCH=x86_64 \
+        "$ROOT/scripts/ci/local_repo.sh"
+)"
+test "$LOCAL_REPO_STDOUT" = "file://$LOCAL_REPO/v1"
+test "$(cat "$LOCAL_REPO/.anolisa-local-raw-repo")" = \
+    "anolisa-local-raw-repo-v1"
+cmp "$OUT_ONE/$ARTIFACT" "$LOCAL_REPO/v1/$ARTIFACT"
+if cmp -s "$STALE_ARTIFACT" "$LOCAL_REPO/v1/$ARTIFACT"; then
+    echo "ERROR: ARTIFACT environment override selected a stale archive" >&2
+    exit 1
+fi
+
+printf 'stale repository entry\n' > "$LOCAL_REPO/v1/stale"
+OUTPUT_DIR="$OUT_ONE" \
+REPO_DIR="$LOCAL_REPO" \
+TARGET_OS=linux \
+TARGET_ARCH=x86_64 \
+    "$ROOT/scripts/ci/local_repo.sh" > "$TMP/local-repo.out"
+test ! -e "$LOCAL_REPO/v1/stale"
+test "$(cat "$TMP/local-repo.out")" = "file://$LOCAL_REPO/v1"
+
+UNMANAGED_REPO="$TMP/unmanaged-repo"
+install -d -m 0755 "$UNMANAGED_REPO"
+printf 'preserve me\n' > "$UNMANAGED_REPO/sentinel"
+if OUTPUT_DIR="$OUT_ONE" \
+    REPO_DIR="$UNMANAGED_REPO" \
+    TARGET_OS=linux \
+    TARGET_ARCH=x86_64 \
+        "$ROOT/scripts/ci/local_repo.sh" \
+        > "$TMP/unmanaged.out" 2> "$TMP/unmanaged.err"; then
+    echo "ERROR: non-empty unmanaged repository unexpectedly succeeded" >&2
+    exit 1
+fi
+grep -Fq "refusing to replace non-empty unmanaged REPO_DIR" "$TMP/unmanaged.err"
+test "$(cat "$UNMANAGED_REPO/sentinel")" = "preserve me"
+
+INVALID_MARKER_REPO="$TMP/invalid-marker-repo"
+install -d -m 0755 "$INVALID_MARKER_REPO"
+printf 'not-owned-by-local-repo\n' > \
+    "$INVALID_MARKER_REPO/.anolisa-local-raw-repo"
+printf 'preserve me too\n' > "$INVALID_MARKER_REPO/sentinel"
+if OUTPUT_DIR="$OUT_ONE" \
+    REPO_DIR="$INVALID_MARKER_REPO" \
+    TARGET_OS=linux \
+    TARGET_ARCH=x86_64 \
+        "$ROOT/scripts/ci/local_repo.sh" \
+        > "$TMP/invalid-marker.out" 2> "$TMP/invalid-marker.err"; then
+    echo "ERROR: invalid repository marker unexpectedly authorized replacement" >&2
+    exit 1
+fi
+grep -Fq "REPO_DIR has an invalid ownership marker" "$TMP/invalid-marker.err"
+test "$(cat "$INVALID_MARKER_REPO/sentinel")" = "preserve me too"
+
+EMPTY_REPO="$TMP/empty-repo"
+install -d -m 0755 "$EMPTY_REPO"
+OUTPUT_DIR="$OUT_ONE" \
+REPO_DIR="$EMPTY_REPO" \
+TARGET_OS=linux \
+TARGET_ARCH=x86_64 \
+    "$ROOT/scripts/ci/local_repo.sh" > "$TMP/empty-repo.out"
+test "$(cat "$EMPTY_REPO/.anolisa-local-raw-repo")" = \
+    "anolisa-local-raw-repo-v1"
+test "$(cat "$TMP/empty-repo.out")" = "file://$EMPTY_REPO/v1"
 
 STAGE="$TMP/stage"
 make -C "$ROOT" stage-raw \

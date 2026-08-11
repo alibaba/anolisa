@@ -198,4 +198,4 @@ LC_ALL=C tar \
     -cf - . | gzip -n -9 > "$TEMP_ARTIFACT"
 mv -f "$TEMP_ARTIFACT" "$OUTPUT_DIR/$ARTIFACT"
 TEMP_ARTIFACT=""
-printf '%s\n' "$OUTPUT_DIR/$ARTIFACT"
+printf '%s\n' "$OUTPUT_DIR/$ARTIFACT" >&2
