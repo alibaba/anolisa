@@ -396,9 +396,28 @@ pub(super) fn candidate_inline_hint(line: &str) -> Option<String> {
             Some("approval [recommend|auto|trust] | analysis [smart|auto|manual]".to_string())
         }
         "/details" if parts.next().is_none() => Some("<id>".to_string()),
-        _ => crate::slash::registry::visible_slash_commands()
-            .find(|spec| spec.name.starts_with(token) && spec.name != token)
-            .map(|spec| spec.usage.to_string()),
+        _ => {
+            // List every matching command: returning only the first prefix
+            // match hides same-prefix siblings (`/sta` hid `/stats`). Names
+            // are deduplicated so multi-spec commands (`/mode`) still count
+            // as a single candidate and keep their usage hint.
+            let mut names: Vec<&'static str> = Vec::new();
+            let mut sole_usage = None;
+            for spec in crate::slash::registry::visible_slash_commands() {
+                if spec.name.starts_with(token) && spec.name != token && !names.contains(&spec.name)
+                {
+                    names.push(spec.name);
+                    if names.len() == 1 {
+                        sole_usage = Some(spec.usage);
+                    }
+                }
+            }
+            match names.len() {
+                0 => None,
+                1 => sole_usage.map(str::to_string),
+                _ => Some(names.join(" · ")),
+            }
+        }
     }
 }
 

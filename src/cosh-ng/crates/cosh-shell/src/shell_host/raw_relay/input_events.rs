@@ -55,6 +55,19 @@ fn erase_native_columns<W: Write>(output: &mut W, columns: usize) -> io::Result<
     Ok(())
 }
 
+// The inline hint must never trigger terminal auto-wrap: a wrapped tail
+// lands on the next screen line where the erase-to-EOL of the following
+// redraw/commit cannot reach it, leaving residue behind. The native
+// prompt width is unknown here, so clipping by remaining columns is not
+// possible; instead auto-wrap (DECAWM) is disabled around the write and
+// the terminal clips the hint at the right edge itself.
+fn write_inline_hint<W: Write>(output: &mut W, hint: &str) -> io::Result<()> {
+    write!(
+        output,
+        "{SAVE_CURSOR}\x1b[?7l\x1b[2m {hint}\x1b[0m\x1b[?7h{RESTORE_CURSOR}"
+    )
+}
+
 pub(super) fn drain_raw_input_events<W: Write>(
     input_events: &Receiver<RawInputEvent>,
     parser: &mut OscParser,
@@ -139,14 +152,14 @@ pub(super) fn drain_raw_input_events<W: Write>(
                     write!(output, "\x1b[K")?;
                     output.write_all(&input)?;
                     if let Some(hint) = hint {
-                        write!(output, "{SAVE_CURSOR}\x1b[2m {hint}\x1b[0m{RESTORE_CURSOR}")?;
+                        write_inline_hint(output, &hint)?;
                     }
                     *native_candidate_echoed_len = candidate_display_columns(&input);
                 } else {
                     write!(output, "\r\x1b[2K{prompt}")?;
                     output.write_all(&input)?;
                     if let Some(hint) = hint {
-                        write!(output, "{SAVE_CURSOR}\x1b[2m {hint}\x1b[0m{RESTORE_CURSOR}")?;
+                        write_inline_hint(output, &hint)?;
                     }
                 }
                 output.flush()?;

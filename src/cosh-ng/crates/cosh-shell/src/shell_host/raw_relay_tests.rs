@@ -225,11 +225,50 @@ fn candidate_hint_uses_terminfo_cursor_save_restore() {
 
     assert_eq!(
         output,
-        b"\x1b[K/m\x1b7\x1b[2m /mode approval [recommend|auto|trust]\x1b[0m\x1b8"
+        b"\x1b[K/m\x1b7\x1b[?7l\x1b[2m /mode approval [recommend|auto|trust]\x1b[0m\x1b[?7h\x1b8"
     );
     assert_eq!(echoed, 2);
     assert!(!output.windows(3).any(|window| window == b"\x1b[s"));
     assert!(!output.windows(3).any(|window| window == b"\x1b[u"));
+}
+
+// A wrapped hint tail would land below the erase-to-EOL reach of the next
+// redraw/commit, so the hint write must keep auto-wrap disabled in both
+// the native and the prompt-owned branches.
+#[test]
+fn candidate_hint_disables_autowrap_in_both_branches() {
+    for prompt in ["", "prompt> "] {
+        let mut parser = parser_for_test("candidate-hint-autowrap");
+        let (_generation, mut prompt_replay) = tracker_for_test();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut output = Vec::new();
+        let mut echoed = 0usize;
+
+        sender
+            .send(crate::raw_input::RawInputEvent::CandidateRedraw {
+                input: b"/s".to_vec(),
+                hint: Some("/status · /stats · /session · /skills".to_string()),
+            })
+            .expect("queue candidate redraw");
+        drain_raw_input_events(
+            &receiver,
+            &mut parser,
+            &mut output,
+            prompt,
+            &mut echoed,
+            &mut prompt_replay,
+        )
+        .expect("draw candidate hint");
+
+        let rendered = String::from_utf8(output).expect("utf8 output");
+        let disable = rendered.find("\x1b[?7l").expect("auto-wrap disabled");
+        let hint = rendered.find("/status · /stats").expect("hint rendered");
+        let enable = rendered.find("\x1b[?7h").expect("auto-wrap restored");
+        assert!(
+            disable < hint && hint < enable,
+            "hint must render inside the no-wrap window: {rendered:?}"
+        );
+    }
 }
 
 #[test]

@@ -540,6 +540,39 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_prefix_hint_lists_all_matching_candidates() {
+        assert_eq!(
+            candidate_inline_hint("/sta"),
+            Some("/status · /stats".to_string())
+        );
+        assert_eq!(
+            candidate_inline_hint("/st"),
+            Some("/status · /stats".to_string())
+        );
+        assert_eq!(
+            candidate_inline_hint("/s"),
+            Some("/status · /stats · /session · /skills".to_string())
+        );
+        assert_eq!(
+            candidate_inline_hint("/h"),
+            Some("/health · /hooks".to_string())
+        );
+        // `/mode` has two specs but deduplicates to one candidate name.
+        assert_eq!(
+            candidate_inline_hint("/m"),
+            Some("/mode · /mcp".to_string())
+        );
+    }
+
+    #[test]
+    fn exact_command_token_excludes_itself_from_hint() {
+        // `/stats` is complete: no other visible command shares the prefix.
+        assert_eq!(candidate_inline_hint("/stats"), None);
+        // `/status` is complete and no sibling extends it either.
+        assert_eq!(candidate_inline_hint("/status"), None);
+    }
+
+    #[test]
     fn extension_setting_values_are_redacted_from_candidate_echo() {
         let command = b"/extensions settings set fixture token secret-value --scope user";
         let redacted = redact_extension_setting_value(command);
