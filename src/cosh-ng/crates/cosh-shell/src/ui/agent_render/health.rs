@@ -275,9 +275,12 @@ fn health_panel_sections(
         };
     }
 
-    // Emit metric band first, then checks coverage — matching the healthy
-    // branch order (summary → checks → metrics) so the checks line always
-    // sits in the same relative position regardless of severity.
+    // Emit metric band first, then checks coverage. The checks line always
+    // sits between the panel's overview and its detail sections, and what
+    // counts as the overview differs by branch: the healthy branch leads with
+    // the summary line (summary → checks → metrics), while this branch leads
+    // with the metric band (metrics → checks → findings). The relative order
+    // of checks and metrics therefore intentionally differs between branches.
     let mut main = metric_band_lines(report, i18n, content_width, allow_meter);
     if include_checks {
         main.extend(health_checks::checks_lines(report, i18n, content_width));
