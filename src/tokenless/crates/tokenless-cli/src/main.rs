@@ -4,7 +4,7 @@ mod mcp;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::fs;
-use std::io::{self, IsTerminal as _, Read};
+use std::io::{self, IsTerminal as _, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
@@ -698,7 +698,6 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     // payloads that do not already end with `\n` (and would
                     // diverge from MCP `tokenless_retrieve`, which returns the
                     // stored string unchanged).
-                    use std::io::Write;
                     let mut out = io::stdout().lock();
                     out.write_all(payload.as_bytes())
                         .map_err(|e| (format!("failed to write retrieved payload: {e}"), 1))?;
@@ -831,7 +830,6 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     let recorder = open_recorder()?;
                     if !yes {
                         print!("Are you sure you want to clear all statistics? [y/N] ");
-                        use std::io::Write;
                         let _ = io::stdout().flush();
                         let mut input = String::new();
                         if io::stdin().read_line(&mut input).unwrap_or(0) == 0 {

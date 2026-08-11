@@ -419,6 +419,10 @@ fn retrieve_stdout_is_byte_exact_without_extra_trailing_newline() {
 
     let compressed = fixture
         .command()
+        // Force compression on so a caller/home config with
+        // TOKENLESS_COMPRESSION_ENABLED=0 (or compression_enabled:false)
+        // cannot dry-run this subprocess and skip the stash marker.
+        .env("TOKENLESS_COMPRESSION_ENABLED", "1")
         .env("TOKENLESS_STATS_ENABLED", "0")
         .args([
             "compress-response",
