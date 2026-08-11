@@ -1556,6 +1556,44 @@ fn socket_identity(path: &Path) -> Option<FileId> {
     })
 }
 
+fn remove_socket_if_identity_matches(path: &Path, identity: Option<FileId>) {
+    if identity.is_some() && identity == socket_identity(path) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Removes a newly bound socket if startup exits before ownership transfers
+/// to [`ControlSocketHandle`]. Identity matching protects replacements.
+struct BoundSocketGuard {
+    socket_path: PathBuf,
+    bound_identity: Option<FileId>,
+    armed: bool,
+}
+
+impl BoundSocketGuard {
+    fn new(socket_path: PathBuf) -> Self {
+        let bound_identity = socket_identity(&socket_path);
+        Self {
+            socket_path,
+            bound_identity,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) -> Option<FileId> {
+        self.armed = false;
+        self.bound_identity
+    }
+}
+
+impl Drop for BoundSocketGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            remove_socket_if_identity_matches(&self.socket_path, self.bound_identity);
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Server
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1602,12 +1640,7 @@ impl ControlSocketHandle {
 
         // Only remove the socket if it is still the exact object we bound.
         // If the path was replaced by another socket or object, leave it.
-        match (self.bound_identity, socket_identity(&self.socket_path)) {
-            (Some(bound), Some(current)) if bound == current => {
-                let _ = std::fs::remove_file(&self.socket_path);
-            }
-            _ => {}
-        }
+        remove_socket_if_identity_matches(&self.socket_path, self.bound_identity);
     }
 }
 
@@ -1638,6 +1671,16 @@ impl ControlSocketServer {
     /// Start the server on a dedicated thread. Returns a handle for
     /// shutdown coordination.
     pub fn start(self) -> Result<ControlSocketHandle, Box<dyn std::error::Error>> {
+        self.start_with_listener_setup(|listener| listener.set_nonblocking(true))
+    }
+
+    fn start_with_listener_setup<F>(
+        self,
+        setup_listener: F,
+    ) -> Result<ControlSocketHandle, Box<dyn std::error::Error>>
+    where
+        F: FnOnce(&UnixListener) -> std::io::Result<()>,
+    {
         // Secure socket parent directory to 0o700 before bind to
         // eliminate the bind-to-chmod permission window. Runs before
         // the lifecycle lock so that create_dir_all provides the parent
@@ -1655,6 +1698,8 @@ impl ControlSocketServer {
         preflight_socket_path(&self.config.socket_path)?;
 
         let listener = UnixListener::bind(&self.config.socket_path)?;
+        let bound_socket_guard = BoundSocketGuard::new(self.config.socket_path.clone());
+        setup_listener(&listener)?;
 
         // Set socket file permissions to 0o600.
         #[cfg(target_os = "linux")]
@@ -1663,10 +1708,6 @@ impl ControlSocketServer {
             let perms = std::fs::Permissions::from_mode(0o600);
             std::fs::set_permissions(&self.config.socket_path, perms)?;
         }
-
-        // Record the bound socket identity so shutdown only removes the
-        // exact object we created, never a replacement at the same path.
-        let bound_identity = socket_identity(&self.config.socket_path);
 
         let shutdown = self.shutdown.clone();
         let config = self.config.clone();
@@ -1686,6 +1727,10 @@ impl ControlSocketServer {
             .spawn(move || {
                 run_server_loop(&listener, &config, context.as_deref(), &shutdown_for_thread);
             })?;
+
+        // Ownership transfers to the handle only after every fallible
+        // startup step has completed.
+        let bound_identity = bound_socket_guard.disarm();
 
         Ok(ControlSocketHandle {
             socket_path,
@@ -1712,10 +1757,6 @@ fn run_server_loop(
     // another object (connecting to the path to unblock a blocking
     // accept would not work in that case). Connections are still handled
     // one at a time on this single thread — no thread-per-request.
-    listener
-        .set_nonblocking(true)
-        .unwrap_or_else(|e| warn!("failed to set listener non-blocking: {e}"));
-
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _addr)) => {
@@ -4747,6 +4788,33 @@ mod tests {
                 connect_and_send(&socket_path, r#"{"schemaVersion":"1","method":"ping"}"#);
             assert!(resp_str.contains("\"ok\":true"));
 
+            handle.shutdown();
+        }
+
+        #[test]
+        fn listener_setup_failure_cleans_socket_and_releases_lock() {
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("test.sock");
+            let result = ControlSocketServer::new(ControlSocketConfig {
+                socket_path: socket_path.clone(),
+                trusted_peer: self_exe_config(),
+            })
+            .start_with_listener_setup(|_| {
+                Err(std::io::Error::other("injected listener setup failure"))
+            });
+
+            assert!(result.is_err());
+            assert!(
+                !socket_path.exists(),
+                "failed startup must remove its socket"
+            );
+
+            let handle = ControlSocketServer::new(ControlSocketConfig {
+                socket_path: socket_path.clone(),
+                trusted_peer: self_exe_config(),
+            })
+            .start()
+            .expect("failed startup must release the lifecycle lock");
             handle.shutdown();
         }
 
