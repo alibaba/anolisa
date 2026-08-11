@@ -114,6 +114,7 @@ pub mod resolver;
 pub mod runtime_metrics;
 pub mod session_stats;
 pub mod session_stats_writer;
+mod skill_dir;
 pub mod telemetry_gate;
 pub mod trusted_writer;
 

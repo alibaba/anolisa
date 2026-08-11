@@ -12,13 +12,11 @@
 //! Skill boundaries as the FUSE layer, so it never reports a phantom Skill
 //! at the wrong directory depth.
 
-use std::ffi::{CStr, CString};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
 
 use crate::path::SkillLayout;
 
-use super::trusted_writer::FileId;
+use super::skill_dir::{SkillDirError, open_verified_skill_dir};
 
 /// Reserved top-level skill name for the synthesized discovery view; it has
 /// no physical backing directory.
@@ -38,17 +36,6 @@ impl ResolveError {
         Self {
             code,
             message: message.into(),
-        }
-    }
-}
-
-/// RAII guard that closes a raw fd on drop.
-struct FdGuard(libc::c_int);
-
-impl Drop for FdGuard {
-    fn drop(&mut self) {
-        if self.0 >= 0 {
-            unsafe { libc::close(self.0) };
         }
     }
 }
@@ -146,7 +133,11 @@ pub fn resolve_live_source(
     }
 
     // 5. Enforce the layout boundary and safely resolve the live directory.
-    let (_leaf, identity) = resolve_leaf(live_root, layout, &components)?;
+    let leaf = open_verified_skill_dir(live_root, layout, &components)
+        .map_err(|error| map_skill_dir_error(error, layout))?;
+    let identity = leaf
+        .identity()
+        .map_err(|error| map_skill_dir_error(error, layout))?;
 
     let relative_skill_dir = components.join("/");
     let live_skill_dir = live_root.join(&relative_skill_dir);
@@ -203,226 +194,65 @@ fn validate_canonical_syntax(raw: &str) -> Result<(), ResolveError> {
     Ok(())
 }
 
-/// Enforce the layout Skill boundary and resolve the leaf directory,
-/// descending one component at a time with `O_NOFOLLOW`.
-///
-/// Boundaries mirror the FUSE layer and the Hermes id enumeration:
-///
-/// * Flat — a Skill is exactly one directory level (`<root>/<skill>`); a
-///   deeper path is a subdirectory, not a Skill.
-/// * Hermes — a Skill is a top-level directory (`<root>/<skill>`) or a
-///   `<root>/<category>/<skill>` leaf whose category is not itself a
-///   top-level skill (has no own `SKILL.md`); anything deeper, or a
-///   subdirectory of a top-level skill, is not a Skill.
-fn resolve_leaf(
-    live_root: &Path,
-    layout: SkillLayout,
-    components: &[&str],
-) -> Result<(FdGuard, FileId), ResolveError> {
-    match layout {
-        SkillLayout::Flat => {
-            if components.len() != 1 {
-                return Err(ResolveError::new(
-                    "invalid_skill_layout",
-                    "flat layout Skills occupy a single directory level",
-                ));
-            }
-        }
-        SkillLayout::Hermes => {
-            if components.len() > 2 {
-                return Err(ResolveError::new(
-                    "invalid_skill_layout",
-                    "hermes layout Skills occupy at most two directory levels",
-                ));
-            }
-        }
-    }
-
-    // The live root is trusted; open it without O_NOFOLLOW.
-    let mut current = open_live_root(live_root)?;
-
-    for (idx, name) in components.iter().enumerate() {
-        let dir = openat_dir_nofollow(&current, name)?;
-
-        // Hermes two-level path: the first component must be a category,
-        // i.e. must NOT be a top-level skill. If it carries its own
-        // SKILL.md the deeper path is a subdirectory of a top-level skill,
-        // not a nested Skill. `?` fails closed on an inconclusive stat so a
-        // permission error never masquerades as "no SKILL.md → category".
-        if layout == SkillLayout::Hermes
-            && components.len() == 2
-            && idx == 0
-            && dir_has_skill_md(&dir)?
-        {
-            return Err(ResolveError::new(
+fn map_skill_dir_error(error: SkillDirError, layout: SkillLayout) -> ResolveError {
+    match error {
+        SkillDirError::InvalidDepth => match layout {
+            SkillLayout::Flat => ResolveError::new(
                 "invalid_skill_layout",
-                format!(
-                    "'{name}' is a top-level skill, not a category; '{}' is a \
-                     subdirectory, not a nested Skill",
-                    components[1]
-                ),
-            ));
+                "flat layout Skills occupy a single directory level",
+            ),
+            SkillLayout::Hermes => ResolveError::new(
+                "invalid_skill_layout",
+                "hermes layout Skills occupy at most two directory levels",
+            ),
+        },
+        SkillDirError::RootPathContainsNul => {
+            ResolveError::new("live_source_unavailable", "live root path contains NUL")
         }
-
-        current = dir;
-    }
-
-    verify_skill_md(&current)?;
-    let identity = fstat_identity(&current)?;
-    Ok((current, identity))
-}
-
-/// Open the (trusted) live root directory.
-fn open_live_root(live_root: &Path) -> Result<FdGuard, ResolveError> {
-    let c_root = CString::new(live_root.as_os_str().as_bytes())
-        .map_err(|_| ResolveError::new("live_source_unavailable", "live root path contains NUL"))?;
-    let fd = unsafe {
-        libc::open(
-            c_root.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        let e = std::io::Error::last_os_error();
-        return Err(ResolveError::new(
+        SkillDirError::RootOpen(error) => ResolveError::new(
             "live_source_unavailable",
-            format!("failed to open live root: {e}"),
-        ));
-    }
-    Ok(FdGuard(fd))
-}
-
-/// Open a child directory under `parent` with `O_NOFOLLOW | O_DIRECTORY`,
-/// classifying failures into structured errors.
-fn openat_dir_nofollow(parent: &FdGuard, name: &str) -> Result<FdGuard, ResolveError> {
-    let c_name = CString::new(name.as_bytes()).map_err(|_| {
-        ResolveError::new(
+            format!("failed to open live root: {error}"),
+        ),
+        SkillDirError::ComponentContainsNul => ResolveError::new(
             "invalid_canonical_path",
             "skill path component contains NUL",
-        )
-    })?;
-    let fd = unsafe {
-        libc::openat(
-            parent.0,
-            c_name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        let e = std::io::Error::last_os_error();
-        let errno = e.raw_os_error().unwrap_or(0);
-        if errno == libc::ELOOP {
-            return Err(ResolveError::new(
-                "invalid_canonical_path",
-                format!("skill path component '{name}' is a symlink; refusing to follow"),
-            ));
-        }
-        if errno == libc::ENOENT {
-            return Err(ResolveError::new(
-                "skill_not_found",
-                format!("skill path component '{name}' does not exist under the managed root"),
-            ));
-        }
-        if errno == libc::ENOTDIR {
-            if entry_is_symlink(parent, &c_name) {
-                return Err(ResolveError::new(
-                    "invalid_canonical_path",
-                    format!("skill path component '{name}' is a symlink; refusing to follow"),
-                ));
-            }
-            return Err(ResolveError::new(
-                "invalid_skill_layout",
-                format!("skill path component '{name}' is not a directory"),
-            ));
-        }
-        return Err(ResolveError::new(
+        ),
+        SkillDirError::ComponentSymlink { component } => ResolveError::new(
+            "invalid_canonical_path",
+            format!("skill path component '{component}' is a symlink; refusing to follow"),
+        ),
+        SkillDirError::ComponentMissing { component } => ResolveError::new(
+            "skill_not_found",
+            format!("skill path component '{component}' does not exist under the managed root"),
+        ),
+        SkillDirError::ComponentNotDirectory { component } => ResolveError::new(
+            "invalid_skill_layout",
+            format!("skill path component '{component}' is not a directory"),
+        ),
+        SkillDirError::ComponentOpen { component, source } => ResolveError::new(
             "live_source_unavailable",
-            format!("failed to open skill path component '{name}': {e}"),
-        ));
-    }
-    Ok(FdGuard(fd))
-}
-
-/// Return `true` when the entry named `c_name` under `dir` is a symlink,
-/// probed with `AT_SYMLINK_NOFOLLOW`.
-fn entry_is_symlink(dir: &FdGuard, c_name: &CStr) -> bool {
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::fstatat(dir.0, c_name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
-    rc == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFLNK
-}
-
-/// Classify the `SKILL.md` marker in `dir` using the same "no-follow
-/// regular file" rule as [`skillfs_core::store::has_regular_skill_md`], so
-/// the resolver never disagrees with store discovery, the FUSE layer, or
-/// Hermes activation enumeration about what a Skill is:
-///
-/// * `Ok(true)` — a regular-file `SKILL.md` is present (a valid marker),
-///   even when it is unreadable (mode `000`).
-/// * `Ok(false)` — no valid marker: the entry is absent (`ENOENT`/`ENOTDIR`)
-///   **or** exists but is not a regular file (a symlink — never followed —,
-///   directory, FIFO, …). A non-regular `SKILL.md` is treated as absent, so
-///   a symlinked top-level marker makes the directory a category (its real
-///   nested Skills still resolve) exactly as store discovery treats it.
-/// * `Err(live_source_unavailable)` — the entry cannot be classified (e.g.
-///   an I/O or permission error while stat-ing). Only a genuinely
-///   inconclusive result fails closed.
-///
-/// Existence and type are decided with `fstatat(AT_SYMLINK_NOFOLLOW)` on the
-/// already-opened directory fd rather than a path-based `symlink_metadata`,
-/// which keeps the resolver's symlink-escape-safe fd descent while yielding
-/// the identical marker classification.
-fn dir_has_skill_md(dir: &FdGuard) -> Result<bool, ResolveError> {
-    let c_name = CString::new("SKILL.md")
-        .map_err(|_| ResolveError::new("live_source_unavailable", "SKILL.md name contains NUL"))?;
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::fstatat(dir.0, c_name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
-    if rc == 0 {
-        // Present: a valid marker only when it is a regular file. A symlink
-        // (never followed), directory, or other object is not a marker and
-        // is treated as absent — matching store/FUSE discovery.
-        return Ok((st.st_mode & libc::S_IFMT) == libc::S_IFREG);
-    }
-    let e = std::io::Error::last_os_error();
-    match e.raw_os_error() {
-        // Definitively absent.
-        Some(libc::ENOENT) | Some(libc::ENOTDIR) => Ok(false),
-        // Anything else (EACCES, EIO, …) is inconclusive — fail closed
-        // rather than assume the marker is absent.
-        _ => Err(ResolveError::new(
+            format!("failed to open skill path component '{component}': {source}"),
+        ),
+        SkillDirError::NestedBelowTopLevelSkill { parent, child } => ResolveError::new(
+            "invalid_skill_layout",
+            format!(
+                "'{parent}' is a top-level skill, not a category; '{child}' is a \
+                 subdirectory, not a nested Skill"
+            ),
+        ),
+        SkillDirError::MarkerInspect(error) => ResolveError::new(
             "live_source_unavailable",
-            format!("cannot determine SKILL.md presence: {e}"),
-        )),
-    }
-}
-
-/// Verify that `dir` contains a regular-file `SKILL.md`, failing closed on
-/// an inconclusive stat.
-fn verify_skill_md(dir: &FdGuard) -> Result<(), ResolveError> {
-    if dir_has_skill_md(dir)? {
-        Ok(())
-    } else {
-        Err(ResolveError::new(
+            format!("cannot determine SKILL.md presence: {error}"),
+        ),
+        SkillDirError::MissingMarker => ResolveError::new(
             "invalid_skill_layout",
             "skill directory is missing a regular SKILL.md",
-        ))
-    }
-}
-
-/// Read the `(dev, ino)` identity of an open directory fd via `fstat`.
-fn fstat_identity(dir: &FdGuard) -> Result<FileId, ResolveError> {
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::fstat(dir.0, &mut st) };
-    if rc != 0 {
-        let e = std::io::Error::last_os_error();
-        return Err(ResolveError::new(
+        ),
+        SkillDirError::Identity(error) => ResolveError::new(
             "live_source_unavailable",
-            format!("failed to stat live skill directory: {e}"),
-        ));
+            format!("failed to stat live skill directory: {error}"),
+        ),
     }
-    Ok(FileId {
-        dev: st.st_dev,
-        ino: st.st_ino,
-    })
 }
 
 #[cfg(test)]

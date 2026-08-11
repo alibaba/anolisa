@@ -1977,10 +1977,8 @@ async fn cmd_mount(
 
     // Build ControlSocketConfig when the control plane is enabled.
     //
-    // Hermes layout is compatible: the read-only resolver derives full
-    // nested skill ids from the canonical path. Nested activation *writes*
-    // still return an invalid-skill-name error inside the write methods —
-    // enabling the resolver does not widen the write protocol.
+    // Hermes layout is compatible: the resolver and activation write methods
+    // use full layout-relative skill ids such as `category/skill`.
     let control_socket_config: Option<ControlSocketConfig> =
         match (&effective_socket_path, &trusted_peer_exe) {
             (Some(socket_path), Some(exe_path)) => {

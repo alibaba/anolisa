@@ -28,9 +28,8 @@ pub enum SkillLayout {
     /// hidden), `--notify-socket` mutation events, and installer
     /// transactions (staging rename, pending install, quiet timeout,
     /// post-publish grace). Incompatible with `--decision-command`
-    /// (rejected at startup). The read-only `skill.resolveLiveSource`
-    /// control socket query is supported: it derives full nested skill
-    /// ids from the canonical path.
+    /// (rejected at startup). Control socket resolver and activation write
+    /// methods support full nested Skill ids.
     ///
     /// **Parser model:** purely lexical. Every non-management
     /// top-level entry is classified as `CategoryDir`; every second-

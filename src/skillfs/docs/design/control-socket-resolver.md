@@ -208,10 +208,11 @@ Resolution is O(path depth) and never scans the whole Skill root:
    `invalid_skill_layout`, and a symlinked *top-level* marker means the
    directory is a category whose real nested Skills still resolve. Only a
    genuinely inconclusive `stat` (e.g. an I/O error) fails closed as
-   `live_source_unavailable`. This is the same predicate — a shared
-   `has_regular_skill_md` — that store discovery, the FUSE readdir/read
-   gating, and Hermes activation enumeration apply, so no layer disagrees
-   about what a Skill is (see [Skill layout](#skill-layout-and-skill-id)).
+   `live_source_unavailable`. The fd-based resolver and mutation paths share
+   one classifier. Store discovery and FUSE layout code apply the same
+   no-follow regular-file rule through their path-based helper, so no layer
+   disagrees about what a Skill is (see
+   [Skill layout](#skill-layout-and-skill-id)).
 
 The backing path is never produced by naively joining unvalidated user
 input; each component is validated and opened without following symlinks.
@@ -234,25 +235,82 @@ phantom Skill, keeping the resolver's identities consistent with the FUSE
 layer and the notify id enumeration.
 
 Whether a directory "has a `SKILL.md`" — used for the top-level-vs-category
-decision and the leaf check — is the single shared `has_regular_skill_md`
-predicate: a **no-follow regular file**. A `SKILL.md` that is a symlink or
-other non-regular object is not a marker, so such a top-level directory is a
-category (its real nested Skills resolve) and such a leaf is
-`invalid_skill_layout`. Store discovery, FUSE readdir/read gating, and Hermes
-activation enumeration all use the same predicate, so a directory is a Skill
-in every layer or in none — the resolver cannot report a Skill the store
-never loaded, or reject one it did.
+decision and the leaf check — follows one semantic predicate: a **no-follow
+regular file**. A `SKILL.md` that is a symlink or other non-regular object is
+not a marker, so such a top-level directory is a category (its real nested
+Skills resolve) and such a leaf is `invalid_skill_layout`. The fd-based
+control-plane paths share one implementation; store discovery and FUSE layout
+code retain their crate-local path helper but apply the same rule. A directory
+is therefore a Skill in every layer or in none — the resolver cannot report a
+Skill the store never loaded, or reject one it did.
 
 ### Relationship to activation writes
 
-The read-only resolver is layout-agnostic and supports nested ids. The
-existing activation *write* methods (`meta.writeActivation`,
-`meta.setActivationXattr`) still validate a single skill-name component and
-reject nested ids with a clear invalid-skill-name error — they are not
-widened, and a nested write is never truncated to a basename and applied
-to the wrong target. Enabling the resolver under Hermes layout only lifts
-the blanket startup gate that previously refused to start the control
-socket in Hermes mode; it does not extend the write protocol.
+The read-only resolver and activation write methods (`meta.writeActivation`,
+`meta.setActivationXattr`) use layout-relative Skill ids. Flat layout accepts
+one component, while Hermes accepts either a top-level Skill or
+`category/skill`. Each component is validated independently and opened with
+`O_NOFOLLOW|O_DIRECTORY`; nested ids are never truncated to a basename, and
+managed or reserved paths remain invalid write targets. Writes in both layouts
+require a no-follow regular `SKILL.md` at the leaf. Hermes nested writes also
+require the first component to be a category rather than a top-level Skill.
+
+## Shared fd boundary and container follow-up
+
+### Decision for S1
+
+Read-side resolution and activation writes use one internal fd-anchored Skill
+directory capability. That shared layer owns:
+
+- opening the trusted live root and descending each component with
+  `O_NOFOLLOW | O_DIRECTORY`;
+- classifying symlink, missing, and non-directory components;
+- enforcing Flat and Hermes depth and category boundaries;
+- requiring a no-follow regular `SKILL.md` at the leaf; and
+- retaining the verified leaf fd for identity reads or metadata mutations.
+
+Request syntax, reserved-name checks, response construction, and protocol
+error mapping stay with each caller. This is intentional: for example, the
+resolver reports a non-directory component as `invalid_skill_layout`, while
+the existing activation-write protocol reports it as `skill_not_found`.
+Sharing the syscall and boundary layer must not silently change either public
+contract.
+
+The capability is rooted at a directory fd internally rather than at a joined
+user-controlled path. S1 still opens that root from the configured shared path
+and still returns `transport = shared_path`; it does not add an unused wire
+protocol or expose a new public API.
+
+### Container and security-integration plan
+
+The shared fd boundary is a prerequisite, not the complete container design.
+Follow-up container work is split into these independently testable steps:
+
+1. **SkillFS sidecar only** — keep the current shared-volume FUSE topology.
+   OpenClaw flat/staging paths and Hermes nested paths continue using their
+   existing layout semantics; replacing the example workload with either real
+   runtime does not itself require a new resolver protocol.
+2. **Ledger colocated with SkillFS** — when security integration is required
+   before a cross-container trust design is approved, run the trusted Ledger
+   worker in the SkillFS container. Existing `SO_PEERCRED`, `/proc/<pid>/exe`,
+   socket, and ledger-backing-root assumptions remain locally verifiable.
+3. **Ledger in a separate container** — define a shared runtime volume for
+   sockets and an explicit source capability transport. Evaluate a shared PID
+   namespace against a container-aware authenticated identity; any identity or
+   executable lookup ambiguity must fail closed.
+4. **General multi-container/Kubernetes support** — add `dir-fd` /
+   `SCM_RIGHTS` only with a versioned transport contract, namespace-aware
+   identity tests, and lifecycle tests for sidecar restart and fd revocation.
+   The same verified-directory primitive then consumes the received root fd,
+   so Flat/Hermes Skill boundaries do not fork again.
+
+The complex part of containerizing Skill Ledger is therefore not OpenClaw or
+Hermes parsing. It is preserving four cross-container security invariants:
+authenticated peer identity, visibility of the runtime socket, access to the
+physical live/backing source rather than the FUSE view, and consistent fd/path
+identity across PID and mount namespaces. Until those invariants have an
+accepted threat model and black-box Kubernetes tests, the separate-Ledger
+profile is not advertised as supported.
 
 ## Socket lifecycle hardening
 
