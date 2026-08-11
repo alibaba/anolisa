@@ -190,7 +190,17 @@ Plugin 在新的 Codex 会话中加载。关闭旧会话并重新启动后验证
 
 ### OpenCode
 
-OpenCode 会在启动时发现全局 Local Plugin。使用上文说明的 Tokenless 生命周期脚本安装或移除后应重启 OpenCode，再执行一次工具调用并检查 `tokenless stats list`。脚本依次从 `TOKENLESS_OPENCODE_CONFIG_DIR`、`OPENCODE_CONFIG_DIR`、`XDG_CONFIG_HOME/opencode`、`~/.config/opencode` 解析配置目录。安装只会创建托管的 `plugins/tokenless.js` 符号链接，若该路径已有无关文件则拒绝覆盖。
+OpenCode 启动时会自动加载配置目录下的 Plugin。使用上述 Tokenless 生命周期脚本
+完成安装或卸载后，请重启 OpenCode。重启后执行一次工具调用，再运行
+`tokenless stats list`，确认已生成统计记录。
+
+脚本会优先使用 `TOKENLESS_OPENCODE_CONFIG_DIR`，其次使用
+`OPENCODE_CONFIG_DIR`。如果两者均未设置，则使用
+`${XDG_CONFIG_HOME}/opencode`；如果 `XDG_CONFIG_HOME` 也未设置，则回退到
+`~/.config/opencode`。
+
+安装过程中，脚本只会创建由 Tokenless 管理的 `plugins/tokenless.js` 符号链接。
+如果目标路径已经存在但不由 Tokenless 管理，安装会停止，原有内容不会被覆盖。
 
 ### Qwen Code
 

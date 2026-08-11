@@ -19,6 +19,8 @@ const content = {
     agentLabel: 'Bring your Agent in',
     agentPrompt:
       'Read https://agentic-os.sh/agents/ to learn how to use ANOLISA, then help me install it for this environment.',
+    startTokenless: 'Start saving with Tokenless',
+    exploreAnolisa: 'Explore ANOLISA',
     copy: 'Copy',
     copied: 'Copied',
     surfaceLabel: 'ANOLISA system surface',
@@ -42,6 +44,8 @@ const content = {
     agentLabel: '让你的 Agent 接入',
     agentPrompt:
       '阅读 https://agentic-os.sh/agents/，了解如何使用 ANOLISA，并根据当前环境帮我完成安装。',
+    startTokenless: '开始使用 Tokenless',
+    exploreAnolisa: '了解 ANOLISA',
     copy: '复制',
     copied: '已复制',
     surfaceLabel: 'ANOLISA 系统能力视图',
@@ -332,6 +336,18 @@ export default function Home() {
                 <p>{t.systemScope}</p>
               </div>
               <p className="heroStatement">{t.statement}</p>
+
+              <div className="buttonRow">
+                <SiteLink
+                  locale={locale}
+                  to="/docs/user-guide/token-saving/tokenless/quickstart"
+                  className="primaryButton">
+                  {t.startTokenless} →
+                </SiteLink>
+                <SiteLink locale={locale} to="/docs/quickstart" className="secondaryButton">
+                  {t.exploreAnolisa}
+                </SiteLink>
+              </div>
 
               <div className="heroCommand">
                 <p>{t.installLabel}</p>

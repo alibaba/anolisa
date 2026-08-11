@@ -2,117 +2,151 @@
 
 [中文版](../../../zh/token-saving/tokenless/QUICKSTART.md)
 
-## 1. What Tokenless does
+Install Tokenless, connect it to Claude Code, run one real task, and verify a
+before/after Token record in about three minutes. Tokenless works in the
+background, so your prompts and normal Agent workflow do not change.
 
-Tokenless helps an AI agent complete the same work with fewer tokens.
+Savings vary by workload. Tool-heavy tasks usually show the clearest result;
+short or conversation-only tasks may show little change.
 
-After you turn it on, you do not need to change your prompts or the way you use the agent. Tokenless works automatically in the background.
+## 1. Install Tokenless and connect Claude Code
 
-What you may notice:
-
-- Less token usage on lengthy intermediate results.
-- More room for useful information during long tasks.
-- Cleaner information for the agent to use when deciding what to do next.
-
-Savings vary by task. Short tasks or tasks that are mostly conversation may show little change, so check the result with your own workload in [View the result](#4-view-the-result).
-
-## 2. Install Tokenless
-
-Install the anolisa CLI first, then use it to install Tokenless:
+This quick path uses Claude Code as the example Agent:
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
-anolisa --version
 anolisa install tokenless
-tokenless --version
+anolisa adapter enable tokenless claude-code
 ```
 
-If `anolisa --version` succeeds, start with `anolisa install tokenless`. The
-PATH update above makes a fresh default installation available in the current
-shell; new login shells may already include `~/.local/bin`.
+If the anolisa CLI is already installed, start with `anolisa install
+tokenless`. The PATH line is needed only when a fresh installation reports
+that `~/.local/bin` is not available in the current Shell.
 
-## 3. Start using Tokenless
+Using another Agent? Follow the matching setup path in
+[Use another Agent](#use-another-agent); the remaining steps stay the same.
+Most Agents use an `anolisa adapter enable` command, while OpenCode uses its
+linked lifecycle script.
 
-### 3.1 Use Tokenless in your agent
+## 2. Run one real task
 
-Tokenless can work with:
-
-| Agent | Value used in commands |
-|-------|------------------------|
-| cosh / Copilot Shell | `cosh` |
-| OpenClaw | `openclaw` |
-| Hermes | `hermes` |
-| Qoder | `qoder` |
-| Claude Code | `claude-code` |
-| Codex | `codex` |
-| Qwen Code | `qwencode` |
-
-Find your agent and turn on Tokenless:
-
-```bash
-anolisa adapter scan
-anolisa adapter enable tokenless <agent>
-anolisa adapter status tokenless
-```
-
-Restart the agent CLI, IDE, or gateway after Tokenless is enabled.
-
-#### 3.1.1 Example: OpenClaw
-
-Turn on Tokenless and restart the OpenClaw gateway:
-
-```bash
-anolisa adapter enable tokenless openclaw
-anolisa adapter status tokenless
-```
-
-Then ask OpenClaw to perform a normal task:
+Restart Claude Code so it loads the adapter, then start a new session and run a
+tool-heavy task. For example:
 
 > Run the full test suite for this repository and summarize only the failures.
 
 You do not need to mention Tokenless in the prompt.
 
-If OpenClaw rejects the installation during its security check, follow [the OpenClaw instructions](framework-integration.md#openclaw) before retrying.
+## 3. Verify the saving
 
-### 3.2 Use the standalone CLI
-
-You can try response compression directly:
-
-```bash
-printf '%s\n' \
-  '{"status":"ok","data":{"name":"demo","items":[1,2,3]},"debug":{"trace":"verbose"},"metadata":null}' \
-  | tokenless compress-response
-```
-
-The command returns valid JSON with removable fields such as `debug` and `metadata` omitted.
-If the output is unchanged, the input has no compressible content; retry with JSON that contains `debug`, `null`, or a long string.
-
-## 4. View the result
-
-After using a Shell, API, or other supported tool in your agent, run:
+After Claude Code uses a Shell, API, or another supported tool, run:
 
 ```bash
 tokenless stats list --limit 5
 tokenless stats summary
 ```
 
-- `stats list` shows recent results that Tokenless made shorter. Copy a record ID from this list when you want to inspect one result.
-- `stats summary` shows the estimated tokens before and after Tokenless processing and the total saved.
+Example output (values vary by workload):
 
-For the OpenClaw example above, look for a record containing `openclaw` and confirm that its token count decreases from left to right.
+```text
+Showing 1 record(s):
+================================================================================
+[ID:42] 2026-08-12 10:20:30 | claude-code | Session:- | Tool:- | Chars:5120→2880(-2240) | Tokens:1280→720(-44%)
 
-To see what changed in one record:
+Tokenless Statistics Summary
+============================================================
+Total Records: 1
+
+Character Savings:
+  Before: 5120 chars
+  After:  2880 chars
+  Saved:  2240 chars (43.8%)
+
+Token Savings:
+  Before: 1280 tokens
+  After:  720 tokens
+  Saved:  560 tokens (43.8%)
+
+Breakdown by Operation:
+----------------------------------------
+  compress-response: 1 records
+    Chars: 5120 -> 2880 (-43.8%)
+    Tokens: 1280 -> 720 (-43.8%)
+```
+
+You are done when `stats list` contains a record whose estimated Token count
+decreases from before to after. To inspect exactly what changed, copy its ID:
 
 ```bash
 tokenless stats diff <record-id>
 ```
 
-If no record appears, the content may not have passed through Tokenless or may not have become shorter. See [No statistics appear after setup](troubleshooting.md#no-statistics-appear-after-enabling-the-adapter).
+For a visual view of savings over time, follow the
+[AgentSight guide](../../agent-observability/agentsight.md#token-savings-tokenless-integration).
+When Tokenless and AgentSight run as the same user, the Dashboard reads local
+Tokenless statistics without requiring SLS.
 
-Token counts are estimates for content processed by Tokenless, not a direct measurement of the model bill. Statistics and diffs may contain original tool content; avoid sharing their output when it contains sensitive data. See [Measuring savings](measuring-savings.md) and [Configuration and data privacy](configuration-and-privacy.md) for details.
+If no record appears, the content may not have passed through Tokenless or may
+not have become shorter. Check the adapter and component health:
 
-## 5. Platform support
+```bash
+anolisa adapter status tokenless
+anolisa doctor tokenless
+```
+
+Then see
+[No statistics appear after setup](troubleshooting.md#no-statistics-appear-after-enabling-the-adapter).
+
+Token counts are estimates for content processed by Tokenless, not a direct
+measurement of the model bill. Statistics and diffs may contain original tool
+content; avoid sharing their output when it contains sensitive data. See
+[Measuring savings](measuring-savings.md) and
+[Configuration and data privacy](configuration-and-privacy.md) for details.
+
+## Use another Agent
+
+Scan the machine, then enable only the Agent you use:
+
+```bash
+anolisa adapter scan
+```
+
+| Agent | Setup |
+|-------|-------|
+| cosh / Copilot Shell | `anolisa adapter enable tokenless cosh` |
+| OpenClaw | `anolisa adapter enable tokenless openclaw` |
+| Hermes | `anolisa adapter enable tokenless hermes` |
+| Qoder | `anolisa adapter enable tokenless qoder` |
+| Claude Code | `anolisa adapter enable tokenless claude-code` |
+| Codex | `anolisa adapter enable tokenless codex` |
+| OpenCode | Lifecycle script (see below) |
+| Qwen Code | `anolisa adapter enable tokenless qwencode` |
+
+Restart the Agent CLI or IDE after setting it up. OpenClaw also requires
+`openclaw gateway restart`; if its security check rejects the plugin, follow
+the [OpenClaw integration instructions](framework-integration.md#2-enable-one-adapter).
+OpenCode is not registered with `anolisa adapter enable` in this release; use
+the bundled lifecycle script described in the
+[OpenCode integration instructions](framework-integration.md#opencode).
+
+## Optional: test compression without an Agent
+
+Use this deterministic check when you want to confirm the standalone CLI
+before enabling an adapter:
+
+```bash
+printf '%s\n' \
+  '{"status":"ok","data":{"name":"demo","items":[1,2,3]},"debug":{"trace":"verbose"},"metadata":null}' \
+  | tokenless compress-response
+
+tokenless stats list --limit 1
+```
+
+The command returns valid JSON with `debug` and `metadata` omitted. Content
+without removable fields is returned unchanged and is not recorded.
+
+## Platform support
 
 | Platform | anolisa CLI installation |
 |----------|--------------------------|
@@ -121,12 +155,14 @@ Token counts are estimates for content processed by Tokenless, not a direct meas
 | macOS x86_64 | Not currently supported |
 | Windows or Linux with musl, such as Alpine | Not currently supported |
 
-This page covers installation with the anolisa CLI only. To build the standalone CLI from source, see [User manual · Build the standalone CLI from source](user-manual.md#build-the-standalone-cli-from-source).
+This page covers installation with the anolisa CLI only. To build the
+standalone CLI from source, see
+[User manual · Build the standalone CLI from source](user-manual.md#build-the-standalone-cli-from-source).
 
-## 6. Next steps
+## Next steps
 
+- [Framework integration](framework-integration.md): framework-specific activation and behavior
 - [User manual](user-manual.md): behavior boundaries and documentation map
-- [Framework integration](framework-integration.md): enable, verify, and disable each agent
 - [CLI reference](cli-reference.md): all subcommands and options
 - [Measuring savings](measuring-savings.md): statistics, dual runs, and AgentSight/SLS
 - [Configuration and data privacy](configuration-and-privacy.md): toggles, storage, and sensitive data

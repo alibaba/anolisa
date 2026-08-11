@@ -12,6 +12,15 @@ const copy = {
     intro:
       'Tokenless compresses tool schemas and responses before they enter model context. Its reversible stash lets an agent retrieve dropped payloads by marker when full fidelity is needed.',
     copy: 'Copy', copied: 'Copied', docs: 'Read the Tokenless guide',
+    start: 'Start the 3-minute Quick Start',
+    quickTitle: 'Get your first verified saving',
+    quickIntro:
+      'Install Tokenless, connect one Agent adapter, then confirm a before/after record.',
+    quickSteps: [
+      ['01 · INSTALL', 'Install the published Tokenless component with the ANOLISA CLI.'],
+      ['02 · CONNECT', 'Scan your machine and enable Tokenless for the Agent you use.'],
+      ['03 · VERIFY', 'Run one tool-heavy task, then check tokenless stats list and tokenless stats summary.'],
+    ],
   },
   zh: {
     eyebrow: '产品 / 上下文效率',
@@ -19,6 +28,14 @@ const copy = {
     intro:
       'Tokenless 在工具 Schema 和响应进入模型上下文前完成压缩；需要完整信息时，Agent 可通过标记从可逆 Stash 中取回原始 Payload。',
     copy: '复制', copied: '已复制', docs: '阅读 Tokenless 指南',
+    start: '开始三分钟快速体验',
+    quickTitle: '完成第一次可验证的节省',
+    quickIntro: '安装 Tokenless，接入一个 Agent Adapter，然后确认一条压缩前后的记录。',
+    quickSteps: [
+      ['01 · 安装', '通过 ANOLISA CLI 安装已发布的 Tokenless 组件。'],
+      ['02 · 接入', '扫描当前机器，并为正在使用的 Agent 启用 Tokenless。'],
+      ['03 · 验证', '运行一次工具密集型任务，再查看 tokenless stats list 和 tokenless stats summary。'],
+    ],
   },
 } as const;
 
@@ -49,9 +66,11 @@ export default function TokenlessProduct() {
   const t = copy[locale];
   const component = repoIndex.components.find((item) => item.id === 'tokenless');
   const version = component?.version;
-  const platforms = component?.platform_support.macos
-    ? `Linux · macOS (${component.platform_support.architectures.join(' / ')})`
-    : 'Linux';
+  const installVariants = component?.install_variants ?? [];
+  const preferredInstall = installVariants.find((variant) => variant.preferred);
+  const platforms = preferredInstall
+    ? formatInstallTargets(preferredInstall.platforms as InstallTarget[])
+    : 'Unavailable';
   const features = locale === 'zh'
     ? [
         ['Schema 压缩', '减少 Function Calling 工具定义中的结构与描述开销。'],
@@ -79,7 +98,7 @@ export default function TokenlessProduct() {
             <h1>{t.title}</h1>
             <p className="productIntro">{t.intro}</p>
             <div className="installVariants">
-              {component?.install_variants.map((variant) => (
+              {installVariants.map((variant) => (
                 <div className="installVariant" key={`${variant.method}:${variant.command}`}>
                   <div className="installVariantHeader">
                     <strong>{variant.method === 'cli' ? 'ANOLISA CLI' : variant.method}</strong>
@@ -93,9 +112,31 @@ export default function TokenlessProduct() {
                 </div>
               ))}
             </div>
+            <div className="buttonRow">
+              <SiteLink
+                locale={locale}
+                to="/docs/user-guide/token-saving/tokenless/quickstart"
+                className="primaryButton">
+                {t.start} →
+              </SiteLink>
+            </div>
           </div>
         </header>
         <section className="section siteContainer narrowContainer">
+          <div className="productQuickPath">
+            <div>
+              <h2>{t.quickTitle}</h2>
+              <p>{t.quickIntro}</p>
+            </div>
+            <div className="productQuickSteps">
+              {t.quickSteps.map(([title, body]) => (
+                <article key={title}>
+                  <strong>{title}</strong>
+                  <p>{body}</p>
+                </article>
+              ))}
+            </div>
+          </div>
           <div className="factStrip">
             <div><span>PLATFORM</span><strong>{platforms}</strong></div>
             <div><span>CLI VERSION</span><strong>{version ? `v${version}` : 'unversioned'}</strong></div>
@@ -121,7 +162,10 @@ cat response.json | tokenless compress-response
 # 按标记取回被截断的内容
 tokenless retrieve <HASH>
 
-# 查看节省统计
+# 查看压缩前后记录
+tokenless stats list --limit 5
+
+# 查看汇总节省效果
 tokenless stats summary
 
 # 检查工具运行环境
@@ -135,13 +179,16 @@ cat response.json | tokenless compress-response
 # Recover stashed content by marker
 tokenless retrieve <HASH>
 
-# Review savings
+# Inspect before/after records
+tokenless stats list --limit 5
+
+# Review aggregate savings
 tokenless stats summary
 
 # Check tool environments
 tokenless env-check --all`}</code></pre>
           </div>
-          <SiteLink locale={locale} to="/docs/user-guide/token-saving/tokenless/quickstart" className="primaryButton">
+          <SiteLink locale={locale} to="/docs/user-guide/token-saving/tokenless/user-manual" className="primaryButton">
             {t.docs}
           </SiteLink>
         </section>

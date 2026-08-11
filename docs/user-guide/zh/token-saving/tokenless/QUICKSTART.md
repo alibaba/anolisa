@@ -2,117 +2,145 @@
 
 [English](../../../en/token-saving/tokenless/QUICKSTART.md)
 
-## 1. Tokenless 能做什么
+大约三分钟内完成 Tokenless 安装、接入 Claude Code、运行一次真实任务，并确认一条
+压缩前后的 Token 记录。Tokenless 在后台工作，不需要改变 Prompt 或日常使用
+Agent 的方式。
 
-Tokenless 帮助 AI Agent 用更少的 Token 完成原来的工作。
+实际节省效果取决于工作负载。工具调用密集型任务通常最明显；较短或以对话为主的
+任务可能变化不大。
 
-开启后，你不需要改变 Prompt，也不需要改变使用 Agent 的方式，Tokenless 会在后台自动工作。
+## 1. 安装 Tokenless 并接入 Claude Code
 
-你可能会感受到：
-
-- 冗长的中间结果占用更少 Token。
-- 长任务可以为真正有用的信息留出更多空间。
-- Agent 在决定下一步时，面对的信息更加简洁。
-
-不同任务的节省效果不同。较短或以对话为主的任务可能变化不明显，请使用自己的工作负载按[查看效果](#4-查看效果)进行确认。
-
-## 2. 安装 Tokenless
-
-先安装 anolisa CLI，再用它安装 Tokenless：
+下面以 Claude Code 作为示例 Agent：
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
-anolisa --version
 anolisa install tokenless
-tokenless --version
+anolisa adapter enable tokenless claude-code
 ```
 
-如果 `anolisa --version` 能正常返回，可以直接从 `anolisa install tokenless`
-开始。上面的 PATH 设置会让默认安装目录在当前 Shell 中立即生效，新的登录 Shell
-可能已经包含 `~/.local/bin`。
+如果已经安装 anolisa CLI，可以直接从 `anolisa install tokenless` 开始。只有首次
+安装提示当前 Shell 找不到 `~/.local/bin` 时，才需要执行 PATH 设置。
 
-## 3. 开始使用 Tokenless
+使用其他 Agent？按照[使用其他 Agent](#使用其他-agent)中的对应接入方式操作，后续
+步骤保持不变。大多数 Agent 使用 `anolisa adapter enable` 命令，OpenCode 则使用
+链接指向的生命周期脚本。
 
-### 3.1 在 Agent 中使用
+## 2. 运行一次真实任务
 
-Tokenless 可以用于：
-
-| Agent | 命令中使用的值 |
-|-------|----------------|
-| cosh / Copilot Shell | `cosh` |
-| OpenClaw | `openclaw` |
-| Hermes | `hermes` |
-| Qoder | `qoder` |
-| Claude Code | `claude-code` |
-| Codex | `codex` |
-| Qwen Code | `qwencode` |
-
-先查找 Agent，再为它开启 Tokenless：
-
-```bash
-anolisa adapter scan
-anolisa adapter enable tokenless <agent>
-anolisa adapter status tokenless
-```
-
-开启 Tokenless 后，重启对应的 Agent CLI、IDE 或 Gateway。
-
-#### 3.1.1 示例：OpenClaw
-
-为 OpenClaw 开启 Tokenless，然后重启 OpenClaw Gateway：
-
-```bash
-anolisa adapter enable tokenless openclaw
-anolisa adapter status tokenless
-```
-
-接着让 OpenClaw 完成一个正常任务：
+重启 Claude Code，使其加载 Adapter，然后启动新的 Session，并运行一次工具密集型
+任务。例如：
 
 > 运行当前仓库的完整测试，只总结失败项。
 
 Prompt 中不需要提到 Tokenless。
 
-如果 OpenClaw 在安全检查时拒绝安装，请按照 [OpenClaw 说明](framework-integration.md#openclaw)确认后再重试。
+## 3. 查看节省效果
 
-### 3.2 单独使用 CLI
-
-可以直接体验一次响应压缩：
-
-```bash
-printf '%s\n' \
-  '{"status":"ok","data":{"name":"demo","items":[1,2,3]},"debug":{"trace":"verbose"},"metadata":null}' \
-  | tokenless compress-response
-```
-
-命令返回的仍是合法 JSON，其中 `debug`、`metadata` 等可移除字段会被省略。
-如果输出与输入完全相同，说明当前输入没有可压缩内容；请改用包含 `debug`、`null` 或长字符串的 JSON 重试。
-
-## 4. 查看效果
-
-在 Agent 中使用一次 Shell、API 或其他受支持的工具后，运行：
+Claude Code 使用一次 Shell、API 或其他受支持的工具后，运行：
 
 ```bash
 tokenless stats list --limit 5
 tokenless stats summary
 ```
 
-- `stats list` 显示最近被 Tokenless 变短的结果。需要查看某次结果时，从这里复制 record ID。
-- `stats summary` 显示 Tokenless 处理前后的 Token 估算值和总节省量。
+输出示例（实际数值因任务而异）：
 
-对于上面的 OpenClaw 示例，可以找到包含 `openclaw` 的记录，并确认其中的 Token 数从左到右变小。
+```text
+Showing 1 record(s):
+================================================================================
+[ID:42] 2026-08-12 10:20:30 | claude-code | Session:- | Tool:- | Chars:5120→2880(-2240) | Tokens:1280→720(-44%)
 
-查看某条记录具体改变了什么：
+Tokenless Statistics Summary
+============================================================
+Total Records: 1
+
+Character Savings:
+  Before: 5120 chars
+  After:  2880 chars
+  Saved:  2240 chars (43.8%)
+
+Token Savings:
+  Before: 1280 tokens
+  After:  720 tokens
+  Saved:  560 tokens (43.8%)
+
+Breakdown by Operation:
+----------------------------------------
+  compress-response: 1 records
+    Chars: 5120 -> 2880 (-43.8%)
+    Tokens: 1280 -> 720 (-43.8%)
+```
+
+当 `stats list` 中出现 Token 估算值从压缩前到压缩后下降的记录时，首次体验即完成。
+如需检查某条记录具体改变了什么，复制其 ID 后运行：
 
 ```bash
 tokenless stats diff <record-id>
 ```
 
-如果没有记录，可能是内容没有经过 Tokenless，或处理后没有变短。请参阅[开启后没有产生统计记录](troubleshooting.md#启用后没有产生统计记录)。
+需要查看一段时间内的可视化节省趋势时，前往
+[AgentSight 用户指南](../../agent-observability/agentsight.md#token-节省tokenless-集成)。
+Tokenless 与 AgentSight 由同一用户运行时，Dashboard 可以直接读取本地统计，不需要
+配置 SLS。
 
-Token 数只是在 Tokenless 已处理内容范围内的估算值，不等于模型账单的直接变化。统计和 diff 可能包含原始工具内容；涉及敏感数据时不要分享输出。完整说明见[效果度量](measuring-savings.md)和[配置与数据隐私](configuration-and-privacy.md)。
+如果没有记录，可能是内容没有经过 Tokenless，或处理后没有变短。先检查 Adapter
+和组件健康状态：
 
-## 5. 平台适配性
+```bash
+anolisa adapter status tokenless
+anolisa doctor tokenless
+```
+
+再参阅[开启后没有产生统计记录](troubleshooting.md#启用后没有产生统计记录)。
+
+Token 数只是在 Tokenless 已处理内容范围内的估算值，不等于模型账单的直接变化。
+统计和 diff 可能包含原始工具内容；涉及敏感数据时不要分享输出。完整说明见
+[效果度量](measuring-savings.md)和
+[配置与数据隐私](configuration-and-privacy.md)。
+
+## 使用其他 Agent
+
+扫描当前机器，然后只启用正在使用的 Agent：
+
+```bash
+anolisa adapter scan
+```
+
+| Agent | 接入方式 |
+|-------|----------|
+| cosh / Copilot Shell | `anolisa adapter enable tokenless cosh` |
+| OpenClaw | `anolisa adapter enable tokenless openclaw` |
+| Hermes | `anolisa adapter enable tokenless hermes` |
+| Qoder | `anolisa adapter enable tokenless qoder` |
+| Claude Code | `anolisa adapter enable tokenless claude-code` |
+| Codex | `anolisa adapter enable tokenless codex` |
+| OpenCode | 生命周期脚本（见下文） |
+| Qwen Code | `anolisa adapter enable tokenless qwencode` |
+
+接入后重启对应的 Agent CLI 或 IDE。OpenClaw 还需要运行
+`openclaw gateway restart`；如果安全检查拒绝 Plugin，请按照
+[OpenClaw 接入说明](framework-integration.md#2-启用一个-adapter)处理。本版本尚未将
+OpenCode 注册到 `anolisa adapter enable`；请使用
+[OpenCode 接入说明](framework-integration.md#opencode)中的随附生命周期脚本。
+
+## 可选：不接入 Agent 测试压缩
+
+需要在启用 Adapter 前单独确认 CLI 时，运行下面这组结果确定的检查：
+
+```bash
+printf '%s\n' \
+  '{"status":"ok","data":{"name":"demo","items":[1,2,3]},"debug":{"trace":"verbose"},"metadata":null}' \
+  | tokenless compress-response
+
+tokenless stats list --limit 1
+```
+
+命令返回的仍是合法 JSON，其中 `debug` 和 `metadata` 会被省略。不包含可移除字段的
+内容会原样返回且不记录。
+
+## 平台适配性
 
 | 平台 | anolisa CLI 安装 |
 |------|------------------|
@@ -121,12 +149,13 @@ Token 数只是在 Tokenless 已处理内容范围内的估算值，不等于模
 | macOS x86_64 | 暂不支持 |
 | Windows 或使用 musl 的 Linux（例如 Alpine） | 暂不支持 |
 
-本页只提供 anolisa CLI 的安装路径。需要从源码构建独立 CLI 时，请参阅[用户手册 · 从源码构建独立 CLI](user-manual.md#从源码构建独立-cli)。
+本页只提供 anolisa CLI 安装路径。需要从源码构建独立 CLI 时，请参阅
+[用户手册 · 从源码构建独立 CLI](user-manual.md#从源码构建独立-cli)。
 
-## 6. 下一步
+## 下一步
 
+- [框架接入](framework-integration.md)：各框架的激活方法和实际行为
 - [用户手册](user-manual.md)：能力边界和文档导航
-- [框架集成](framework-integration.md)：各 Agent 的启用、验证与禁用
 - [CLI 参考](cli-reference.md)：全部子命令和参数
 - [效果度量](measuring-savings.md)：统计、双跑对比和 AgentSight/SLS
 - [配置与数据隐私](configuration-and-privacy.md)：开关、存储和敏感数据

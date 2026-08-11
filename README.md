@@ -72,6 +72,27 @@ Token-less removes redundancy from tool schemas and responses.
 demand so only the relevant ones enter the context, and
 [AgentSight](src/agentsight/README.md) records where Tokens are actually spent.
 
+### Try Token-less with Claude Code in 3 minutes
+
+Install Token-less and connect it to Claude Code:
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+anolisa install tokenless
+anolisa adapter enable tokenless claude-code
+```
+
+Restart Claude Code, run one tool-heavy task, then inspect the result:
+
+```bash
+tokenless stats summary
+tokenless stats list --limit 5
+```
+
+[Open the full Token-less Quick Start →](https://agentic-os.sh/docs/user-guide/token-saving/tokenless/quickstart/)
+· [Read the user manual](https://agentic-os.sh/docs/user-guide/token-saving/tokenless/user-manual/)
+
 <table align="center" cellpadding="0" cellspacing="0">
   <tr>
     <td>
@@ -112,8 +133,6 @@ through a `<<tokenless:KEY>>` marker, which keeps the compression reversible.
 Savings apply to the tool responses entering the context, not to the whole
 session bill — the [Token-less README](src/tokenless/README.md) explains how to
 estimate the effect for a given workload.
-
-[Read the Token-less user manual →](docs/user-guide/en/token-saving/tokenless/user-manual.md)
 
 <p align="center"><strong>03 · EXECUTION RUNTIME</strong></p>
 

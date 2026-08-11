@@ -67,6 +67,27 @@ Token-less 去掉工具 Schema 和响应中的冗余，[Agent Memory](src/agent-
 Skills，只把用得到的技能放进上下文，[AgentSight](src/agentsight/README_zh.md)
 记录 Token 实际花在哪。
 
+### 使用 Claude Code，3 分钟体验 Token-less
+
+安装 Token-less，并将它接入 Claude Code：
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+anolisa install tokenless
+anolisa adapter enable tokenless claude-code
+```
+
+重启 Claude Code，运行一次工具密集型任务，再查看结果：
+
+```bash
+tokenless stats summary
+tokenless stats list --limit 5
+```
+
+[打开完整 Token-less 快速体验 →](https://agentic-os.sh/zh/docs/user-guide/token-saving/tokenless/quickstart/)
+· [阅读完整用户手册](https://agentic-os.sh/zh/docs/user-guide/token-saving/tokenless/user-manual/)
+
 <table align="center" cellpadding="0" cellspacing="0">
   <tr>
     <td>
@@ -105,8 +126,6 @@ Skills，只把用得到的技能放进上下文，[AgentSight](src/agentsight/R
 
 节省比例针对进入上下文的工具响应，不代表整个会话的账单。具体工作负载的估算方法
 见 [Token-less README](src/tokenless/README_zh.md)。
-
-[查看 Token-less 用户手册 →](docs/user-guide/zh/token-saving/tokenless/user-manual.md)
 
 <p align="center"><strong>03 · EXECUTION RUNTIME</strong></p>
 
