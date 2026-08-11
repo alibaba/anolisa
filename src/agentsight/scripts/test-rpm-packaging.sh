@@ -92,6 +92,21 @@ for file in \
     require_file "$fixture_payload/$file"
 done
 
+existing_payload="$tmp_dir/existing-payload"
+mkdir -p "$existing_payload"
+printf 'preserve me\n' > "$existing_payload/sentinel"
+if AGENTSIGHT_PROJECT_ROOT="$fixture_root" \
+    bash "$repo_root/src/agentsight/scripts/stage-rpm-payload.sh" \
+    "$existing_payload" >"$tmp_dir/existing.out" 2>"$tmp_dir/existing.err"; then
+    printf 'existing RPM payload destination unexpectedly replaced\n' >&2
+    failures=$((failures + 1))
+fi
+if [[ ! -f "$existing_payload/sentinel" ]] \
+    || [[ "$(cat "$existing_payload/sentinel")" != "preserve me" ]]; then
+    printf 'existing RPM payload destination was modified\n' >&2
+    failures=$((failures + 1))
+fi
+
 complete_list="$tmp_dir/complete-rpm-files.txt"
 cat > "$complete_list" <<'EOF'
 /usr/local/bin/agentsight

@@ -47,7 +47,11 @@ if (( missing != 0 )); then
     exit 1
 fi
 
-rm -rf -- "$destination"
+if [[ -e "$destination" ]]; then
+    echo "AgentSight RPM payload destination already exists: $destination" >&2
+    exit 1
+fi
+
 install -d -m 0755 "$destination"
 for index in "${!sources[@]}"; do
     mode=0644
