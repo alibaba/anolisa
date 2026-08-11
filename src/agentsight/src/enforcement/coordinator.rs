@@ -41,22 +41,24 @@ struct IngestionState {
 
 #[derive(Default)]
 struct AvailabilityLogTransitions {
-    unavailable_detail: Option<String>,
+    unavailable: bool,
 }
 
 impl AvailabilityLogTransitions {
     fn unavailable(&mut self, detail: &str) -> Option<String> {
-        if self.unavailable_detail.as_deref() == Some(detail) {
+        if self.unavailable {
             return None;
         }
-        self.unavailable_detail = Some(detail.into());
+        self.unavailable = true;
         Some(format!("AgentSight enforcement unavailable: {detail}"))
     }
 
     fn recovered(&mut self) -> Option<String> {
-        self.unavailable_detail
-            .take()
-            .map(|_| "AgentSight enforcement recovered".into())
+        if std::mem::take(&mut self.unavailable) {
+            Some("AgentSight enforcement recovered".into())
+        } else {
+            None
+        }
     }
 }
 
@@ -1034,15 +1036,16 @@ mod tests {
             Some("AgentSight enforcement unavailable: socket missing".into())
         );
         assert_eq!(transitions.unavailable("socket missing"), None);
-        assert_eq!(
-            transitions.unavailable("connection refused"),
-            Some("AgentSight enforcement unavailable: connection refused".into())
-        );
+        assert_eq!(transitions.unavailable("connection refused"), None);
         assert_eq!(
             transitions.recovered(),
             Some("AgentSight enforcement recovered".into())
         );
         assert_eq!(transitions.recovered(), None);
+        assert_eq!(
+            transitions.unavailable("socket missing"),
+            Some("AgentSight enforcement unavailable: socket missing".into())
+        );
     }
 
     fn make_ready(readiness: &IngestionReadiness, worker: &Arc<WorkerToken>) -> Uuid {
