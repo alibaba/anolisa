@@ -693,7 +693,17 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             };
             match store.retrieve(&key) {
                 Ok(Some(payload)) => {
-                    println!("{}", payload);
+                    // Byte-exact restore: do not append a trailing newline.
+                    // `println!` would break end-to-end lossless retrieve for
+                    // payloads that do not already end with `\n` (and would
+                    // diverge from MCP `tokenless_retrieve`, which returns the
+                    // stored string unchanged).
+                    use std::io::Write;
+                    let mut out = io::stdout().lock();
+                    out.write_all(payload.as_bytes())
+                        .map_err(|e| (format!("failed to write retrieved payload: {e}"), 1))?;
+                    out.flush()
+                        .map_err(|e| (format!("failed to flush retrieved payload: {e}"), 1))?;
                 }
                 Ok(None) => {
                     return Err((format!("no stashed payload for hash: {}", key), 1));

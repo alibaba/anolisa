@@ -406,6 +406,72 @@ fn retrieve_invalid_hash() {
 }
 
 #[test]
+fn retrieve_stdout_is_byte_exact_without_extra_trailing_newline() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let stash_db = fixture.data_dir.join("stash.db");
+    // Long string forces reversible truncation + stash. The stored payload is
+    // this string value (not the whole JSON document) and has no trailing `\n`.
+    let stashed_string = format!("HELLO_RETRIEVE_EXACT_{}", "X".repeat(200));
+    let original = format!("{{\"s\":\"{stashed_string}\"}}");
+
+    let compressed = fixture
+        .command()
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .args([
+            "compress-response",
+            "--truncate-strings-at",
+            "80",
+            "--stash-db",
+        ])
+        .arg(&stash_db)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(original.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert!(
+        compressed.status.success(),
+        "compress-response failed: {}",
+        String::from_utf8_lossy(&compressed.stderr)
+    );
+    let compressed_text = String::from_utf8_lossy(&compressed.stdout);
+    let marker_start = compressed_text
+        .find("<<tokenless:")
+        .expect("compressed output should contain a stash marker");
+    let marker_end = compressed_text[marker_start..]
+        .find(">>")
+        .map(|i| marker_start + i + 2)
+        .expect("stash marker should be closed");
+    let marker = &compressed_text[marker_start..marker_end];
+
+    let retrieved = fixture
+        .command()
+        .args(["retrieve", marker, "--stash-db"])
+        .arg(&stash_db)
+        .output()
+        .unwrap();
+    assert!(
+        retrieved.status.success(),
+        "retrieve failed: {}",
+        String::from_utf8_lossy(&retrieved.stderr)
+    );
+    assert_eq!(
+        retrieved.stdout.as_slice(),
+        stashed_string.as_bytes(),
+        "retrieve must restore the stashed payload byte-for-byte; \
+         an extra trailing newline breaks end-to-end lossless recovery"
+    );
+}
+
+#[test]
 fn no_args_shows_error() {
     let output = tokenless_bin().output().unwrap();
     assert!(!output.status.success());
