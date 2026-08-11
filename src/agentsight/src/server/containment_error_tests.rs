@@ -70,6 +70,11 @@ async fn typed_errors_have_stable_sanitized_mappings() {
                 "database /private/db".into(),
             )),
             S::INTERNAL_SERVER_ERROR,
+            "invalid_stored_data",
+        ),
+        (
+            E::Store(SecurityStoreError::Poisoned),
+            S::INTERNAL_SERVER_ERROR,
             "security_store_unavailable",
         ),
         (E::AlreadyRunning, S::CONFLICT, "reconciler_already_running"),
