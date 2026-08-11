@@ -63,6 +63,7 @@ fn command_projection_contains_no_raw_command_cwd_or_path() {
         degraded: false,
         warning_emitted: false,
         owned_approvals: std::collections::HashSet::new(),
+        resolved_approvals: std::collections::HashSet::new(),
         command_refs: std::collections::HashMap::new(),
     };
     let secret = "super-secret-command-value";
@@ -95,6 +96,7 @@ fn required_owned_approval_resolution_fails_before_execution_boundary() {
         degraded: true,
         warning_emitted: false,
         owned_approvals: std::collections::HashSet::new(),
+        resolved_approvals: std::collections::HashSet::new(),
         command_refs: std::collections::HashMap::new(),
     };
     let requested = recorder.record_approval_requested(ShellApprovalAuditInput {
@@ -164,6 +166,7 @@ fn required_core_host_execution_fails_before_handoff_boundary() {
         degraded: true,
         warning_emitted: false,
         owned_approvals: std::collections::HashSet::new(),
+        resolved_approvals: std::collections::HashSet::new(),
         command_refs: std::collections::HashMap::new(),
     };
 
@@ -202,6 +205,7 @@ fn core_host_execution_does_not_duplicate_the_approval_resolution() {
         degraded: false,
         warning_emitted: false,
         owned_approvals: std::collections::HashSet::new(),
+        resolved_approvals: std::collections::HashSet::new(),
         command_refs: std::collections::HashMap::new(),
     };
 
@@ -243,6 +247,7 @@ fn shell_owned_approval_does_not_require_a_provider_tool_identity() {
         degraded: false,
         warning_emitted: false,
         owned_approvals: std::collections::HashSet::from(["approval-1".to_string()]),
+        resolved_approvals: std::collections::HashSet::new(),
         command_refs: std::collections::HashMap::new(),
     };
 
@@ -279,6 +284,7 @@ fn successful_write_closes_shell_degraded_episode() {
         degraded: true,
         warning_emitted: true,
         owned_approvals: std::collections::HashSet::new(),
+        resolved_approvals: std::collections::HashSet::new(),
         command_refs: std::collections::HashMap::new(),
     };
     assert!(recorder
@@ -303,6 +309,7 @@ fn recording_recorder(root: &Path) -> ShellAuditRecorder {
         degraded: false,
         warning_emitted: false,
         owned_approvals: std::collections::HashSet::new(),
+        resolved_approvals: std::collections::HashSet::new(),
         command_refs: std::collections::HashMap::new(),
     }
 }
@@ -438,6 +445,98 @@ fn approval_events_claim_only_the_hashed_preview() {
         redaction_claim(&root, "approval.resolved"),
         clean_claim(),
         "the resolution payload carries only a decision label"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn preset_audit_ref_still_records_approval_resolved() {
+    let root = private_root();
+    let mut recorder = recording_recorder(&root);
+    let request = |status, audit_ref| ShellApprovalAuditInput {
+        id: "approval-1",
+        audit_ref,
+        session_id: "session-1",
+        run_id: "run-1",
+        request_id: Some("request-1"),
+        tool_use_id: None,
+        subject: "shell command",
+        risk: "medium",
+        assessment: None,
+        preview: "$ echo ok",
+        status,
+    };
+    assert_eq!(
+        recorder.record_approval_requested(request("pending", Some("external-audit-ref"))),
+        Some("external-audit-ref".to_string()),
+        "the external audit_ref should be returned unchanged"
+    );
+    assert!(
+        recorder
+            .record_approval_resolved(request("approved", Some("external-audit-ref")))
+            .unwrap()
+            .is_some(),
+        "a preset audit_ref must not prevent the resolved event from being written"
+    );
+    drop(recorder);
+
+    let text = walk_segment_text(&root);
+    assert!(
+        text.contains("approval.resolved"),
+        "approval.resolved should be present when audit_ref was preset; got: {text}"
+    );
+    assert!(
+        !text.contains("approval.requested"),
+        "approval.requested should not be duplicated when an external owner already wrote it"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn preset_audit_ref_allows_host_execution_boundary() {
+    let root = private_root();
+    let mut recorder = recording_recorder(&root);
+    let request = |status, audit_ref| ShellApprovalAuditInput {
+        id: "approval-1",
+        audit_ref,
+        session_id: "session-1",
+        run_id: "run-1",
+        request_id: Some("request-1"),
+        tool_use_id: Some("tool-1"),
+        subject: "run_shell_command",
+        risk: "medium",
+        assessment: None,
+        preview: "$ echo ok",
+        status,
+    };
+    assert_eq!(
+        recorder.record_approval_requested(request("pending", Some("external-audit-ref"))),
+        Some("external-audit-ref".to_string())
+    );
+    assert!(recorder
+        .record_approval_resolved(request("approved", Some("external-audit-ref")))
+        .unwrap()
+        .is_some());
+    recorder
+        .authorize_host_execution(
+            request("approved", Some("external-audit-ref")),
+            "shell_foreground_handoff",
+        )
+        .unwrap();
+    drop(recorder);
+
+    let text = walk_segment_text(&root);
+    assert!(
+        text.contains("tool.execution.started"),
+        "an externally owned provider tool must still get the host-execution boundary; got: {text}"
+    );
+    assert!(
+        text.contains("approval.resolved"),
+        "approval.resolved should be present; got: {text}"
+    );
+    assert!(
+        !text.contains("approval.requested"),
+        "approval.requested should not be duplicated; got: {text}"
     );
     let _ = std::fs::remove_dir_all(root);
 }
