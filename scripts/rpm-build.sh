@@ -421,23 +421,7 @@ build_agentsight() {
     local tmp_dir
     tmp_dir=$(mktemp -d)
     local pkg_dir="${tmp_dir}/${pkg_name}-${version}"
-    mkdir -p "$pkg_dir"
-
-    # Copy relevant files
-    cp -p "${SIGHT_DIR}/target/release/agentsight" "$pkg_dir/"
-    cp -p "${SIGHT_DIR}/target/release/agentsight-enforcer" "$pkg_dir/"
-    cp -p "${SIGHT_DIR}/scripts/agentsight.service" "$pkg_dir/"
-    cp -p "${SIGHT_DIR}/scripts/agentsight-enforcer.service" "$pkg_dir/"
-    cp -p "${SIGHT_DIR}/scripts/agentsight-start.sh" "$pkg_dir/agentsight-start"
-    [ -f "${SIGHT_DIR}/README.md" ] && cp "${SIGHT_DIR}/README.md" "$pkg_dir/"
-    [ -f "${SIGHT_DIR}/README_zh.md" ] && cp "${SIGHT_DIR}/README_zh.md" "$pkg_dir/"
-    [ -f "${SIGHT_DIR}/LICENSE" ] && cp "${SIGHT_DIR}/LICENSE" "$pkg_dir/"
-
-    # component.toml — spec %install installs it to %{_datadir}/anolisa/components/agentsight/
-    [ -f "${SIGHT_DIR}/component.toml" ] && cp "${SIGHT_DIR}/component.toml" "$pkg_dir/"
-
-    # agentsight.json — spec %install installs it to %{_sysconfdir}/agentsight/config.json
-    [ -f "${SIGHT_DIR}/agentsight.json" ] && cp "${SIGHT_DIR}/agentsight.json" "$pkg_dir/"
+    "${SIGHT_DIR}/scripts/stage-rpm-payload.sh" "$pkg_dir"
 
     tar -czf "${BUILD_DIR}/SOURCES/${tarball_name}" -C "$tmp_dir" "${pkg_name}-${version}"
     rm -rf "$tmp_dir"

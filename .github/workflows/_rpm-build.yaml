@@ -202,17 +202,9 @@ jobs:
             )
 
             PACKAGE_DIR=$(mktemp -d)
-            mkdir -p "$PACKAGE_DIR/${COMPONENT}-${VERSION}"
-            cp -p "$SOURCE_ROOT/target/release/agentsight" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
-            cp -p "$SOURCE_ROOT/target/release/agentsight-enforcer" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
-            cp -p "$SOURCE_ROOT/scripts/agentsight-start.sh" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/agentsight-start"
-            cp -p "$SOURCE_ROOT/scripts/agentsight.service" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
-            cp -p "$SOURCE_ROOT/scripts/agentsight-enforcer.service" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
-            cp -p "$SOURCE_ROOT/component.toml" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
-            cp -p "$SOURCE_ROOT/README.md" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
-            cp -p "$SOURCE_ROOT/README_zh.md" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
-            cp -p "$SOURCE_ROOT/LICENSE" "$PACKAGE_DIR/${COMPONENT}-${VERSION}/"
+            "$SOURCE_ROOT/scripts/stage-rpm-payload.sh" "$PACKAGE_DIR/${COMPONENT}-${VERSION}"
             tar -czf ~/rpmbuild/SOURCES/"${EXPECTED_TAR}" -C "$PACKAGE_DIR" "${COMPONENT}-${VERSION}"
+            echo "AGENTSIGHT_VERIFY_RPM=$SOURCE_ROOT/scripts/verify-rpm-package.sh" >> "$GITHUB_ENV"
           fi
 
           # The anolisa spec intentionally unpacks Source0 into `anolisa/`
@@ -271,6 +263,12 @@ jobs:
 
           echo "Built RPMs:"
           ls -la /tmp/rpm-output/
+
+          if [ "${{ inputs.component }}" = "agentsight" ]; then
+            while IFS= read -r rpm_path; do
+              "$AGENTSIGHT_VERIFY_RPM" "$rpm_path"
+            done < <(find /tmp/rpm-output/ -maxdepth 1 -type f -name "*.rpm" -print)
+          fi
 
       - name: Upload RPM artifact
         uses: actions/upload-artifact@v4
