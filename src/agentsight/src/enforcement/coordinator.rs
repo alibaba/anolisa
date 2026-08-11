@@ -39,6 +39,27 @@ struct IngestionState {
     generation: u64,
 }
 
+#[derive(Default)]
+struct AvailabilityLogTransitions {
+    unavailable_detail: Option<String>,
+}
+
+impl AvailabilityLogTransitions {
+    fn unavailable(&mut self, detail: &str) -> Option<String> {
+        if self.unavailable_detail.as_deref() == Some(detail) {
+            return None;
+        }
+        self.unavailable_detail = Some(detail.into());
+        Some(format!("AgentSight enforcement unavailable: {detail}"))
+    }
+
+    fn recovered(&mut self) -> Option<String> {
+        self.unavailable_detail
+            .take()
+            .map(|_| "AgentSight enforcement recovered".into())
+    }
+}
+
 #[derive(Clone)]
 struct IngestionReadiness {
     state: Arc<Mutex<IngestionState>>,
@@ -839,6 +860,7 @@ fn ingest_loop(
     worker: Arc<WorkerToken>,
 ) {
     let mut backoff = Duration::from_millis(100);
+    let mut availability_log = AvailabilityLogTransitions::default();
     while ingestion_readiness.is_current(&worker) {
         ingestion_readiness.mark_not_ready(&worker);
         match client.subscribe_required() {
@@ -879,7 +901,10 @@ fn ingest_loop(
                 };
                 if let Err(error) = reconciliation {
                     if ingestion_readiness.is_current(&worker) {
-                        eprintln!("AgentSight enforcement reconciliation failed: {error}");
+                        let detail = format!("reconciliation failed: {error}");
+                        if let Some(message) = availability_log.unavailable(&detail) {
+                            eprintln!("{message}");
+                        }
                         if let Err(store_error) =
                             store.mark_active_degraded(DEGRADED_BINDING_MESSAGE)
                         {
@@ -891,6 +916,9 @@ fn ingest_loop(
                     sleep_until_superseded(&ingestion_readiness, &worker, backoff);
                     backoff = backoff.saturating_mul(2).min(Duration::from_secs(5));
                     continue;
+                }
+                if let Some(message) = availability_log.recovered() {
+                    eprintln!("{message}");
                 }
                 backoff = Duration::from_millis(100);
                 while ingestion_readiness.is_subscription_current(&worker, subscription_id) {
@@ -917,7 +945,10 @@ fn ingest_loop(
                             if !ingestion_readiness.is_current(&worker) {
                                 break;
                             }
-                            eprintln!("AgentSight enforcement subscription lost: {error}");
+                            let detail = format!("subscription lost: {error}");
+                            if let Some(message) = availability_log.unavailable(&detail) {
+                                eprintln!("{message}");
+                            }
                             if let Err(store_error) =
                                 store.mark_active_degraded(DEGRADED_BINDING_MESSAGE)
                             {
@@ -933,7 +964,9 @@ fn ingest_loop(
             Err(error) => {
                 ingestion_readiness.mark_not_ready(&worker);
                 if ingestion_readiness.is_current(&worker) {
-                    eprintln!("AgentSight enforcement unavailable: {error}");
+                    if let Some(message) = availability_log.unavailable(&error.to_string()) {
+                        eprintln!("{message}");
+                    }
                     if let Err(store_error) = store.mark_active_degraded(DEGRADED_BINDING_MESSAGE) {
                         eprintln!(
                             "AgentSight could not persist enforcement unavailability: {store_error}"
@@ -991,6 +1024,26 @@ fn sleep_until_superseded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn availability_log_reports_only_state_transitions() {
+        let mut transitions = AvailabilityLogTransitions::default();
+
+        assert_eq!(
+            transitions.unavailable("socket missing"),
+            Some("AgentSight enforcement unavailable: socket missing".into())
+        );
+        assert_eq!(transitions.unavailable("socket missing"), None);
+        assert_eq!(
+            transitions.unavailable("connection refused"),
+            Some("AgentSight enforcement unavailable: connection refused".into())
+        );
+        assert_eq!(
+            transitions.recovered(),
+            Some("AgentSight enforcement recovered".into())
+        );
+        assert_eq!(transitions.recovered(), None);
+    }
 
     fn make_ready(readiness: &IngestionReadiness, worker: &Arc<WorkerToken>) -> Uuid {
         let subscription_id = Uuid::new_v4();
