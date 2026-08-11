@@ -1,15 +1,6 @@
 name: sec-core-raw-install-nightly-test
 
 on:
-  # 临时触发器：仅为在真实 PR 上验证本 lane 而存在，paths 只匹配本 lane 自身的
-  # 文件，因此不会拦住其他 PR。验证通过后必须整块删除 —— 本作业包含一次完整源码
-  # 构建（约 45-60 分钟），不作为 PR 卡点。
-  pull_request:
-    branches:
-      - main
-    paths:
-      - '.github/workflows/sec-core-raw-install-nightly-test.yaml'
-      - 'src/agent-sec-core/scripts/ci/local_repo.sh'
   schedule:
     # UTC 16:00 = Beijing 00:00
     - cron: "0 16 * * *"
