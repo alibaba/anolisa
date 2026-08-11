@@ -30,7 +30,8 @@ use super::driver::{
     ClaimResourceRef, ConditionStatus, DetectResult, DisableReport, DriverCtx, DriverPlan,
     FrameworkDriver, HostEnv, PreparedEnable, find_binary_in_path,
 };
-use super::util::{bool_status, digest_tree, now_iso8601};
+use super::managed_files::{MaterializedMapping, copy_materialized_resource};
+use super::util::{bool_status, now_iso8601};
 
 /// Candidate binary names that indicate cosh is installed. `co` and
 /// `copilot` are the short/legacy aliases of the `cosh` CLI.
@@ -140,7 +141,6 @@ impl FrameworkDriver for CoshDriver {
         );
         Ok(AdapterBundle {
             resource_root: root.clone(),
-            digest: digest_tree(root),
             plugin_id,
         })
     }
@@ -184,7 +184,9 @@ impl FrameworkDriver for CoshDriver {
                 adapter_type: ctx.adapter_type.clone(),
                 enabled_at: now_iso8601(),
                 resource_root: bundle.resource_root.clone(),
-                bundle_digest: bundle.digest.clone(),
+                bundle_digest: None,
+                source_revision: None,
+                materialized_files: Vec::new(),
                 driver_schema: DRIVER_SCHEMA_VERSION,
                 status: ClaimStatus::Enabled,
                 notices: Vec::new(),
@@ -195,6 +197,23 @@ impl FrameworkDriver for CoshDriver {
             },
             PreparedEnable::None,
         ))
+    }
+
+    fn materialized_mappings(
+        &self,
+        resource_root: &Path,
+        _adapter_type: Option<&str>,
+        _declared_skills: &[super::driver::DeclaredSkill],
+    ) -> Vec<MaterializedMapping> {
+        vec![MaterializedMapping {
+            resource_id: RES_EXTENSION_DIR.to_string(),
+            source_root: resource_root.to_path_buf(),
+            excluded_prefixes: Vec::new(),
+        }]
+    }
+
+    fn materialized_verification_applicable(&self, _claim: &AdapterClaim) -> bool {
+        true
     }
 
     fn apply_enable(
@@ -236,7 +255,7 @@ impl FrameworkDriver for CoshDriver {
             &dst.join(COSH_OWNERSHIP_MARKER),
             b"ANOLISA-managed cosh extension\n",
         )?;
-        ctx.ops.copy_tree(&claim.resource_root, &dst)?;
+        copy_materialized_resource(claim, RES_EXTENSION_DIR, &claim.resource_root, ctx.ops)?;
         Ok(())
     }
 
@@ -258,10 +277,7 @@ impl FrameworkDriver for CoshDriver {
             resource: None,
         });
 
-        // 2. Resource bundle still matches the enable-time digest?
-        conditions.push(bundle_match_condition(claim));
-
-        // 3. Extension tree still present, carrying its manifest AND our
+        // 2. Extension tree still present, carrying its manifest AND our
         //    ownership marker? A dir/manifest without the marker is not
         //    ANOLISA-managed (user replaced it, or a marker write failed),
         //    which is a degraded state — not a healthy one. This is a
@@ -428,32 +444,6 @@ fn claim_extension_dir(claim: &AdapterClaim) -> Option<PathBuf> {
     })
 }
 
-/// Build the `ResourceBundleMatches` condition by re-digesting the resource
-/// root and comparing to the enable-time digest.
-fn bundle_match_condition(claim: &AdapterClaim) -> AdapterCondition {
-    let kind = AdapterConditionKind::ResourceBundleMatches;
-    match (&claim.bundle_digest, digest_tree(&claim.resource_root)) {
-        (Some(recorded), Some(current)) if recorded == &current => AdapterCondition {
-            kind,
-            status: ConditionStatus::True,
-            reason: None,
-            resource: None,
-        },
-        (Some(_), Some(_)) => AdapterCondition {
-            kind,
-            status: ConditionStatus::False,
-            reason: Some("resource bundle changed since enable".to_string()),
-            resource: None,
-        },
-        _ => AdapterCondition {
-            kind,
-            status: ConditionStatus::Unknown,
-            reason: Some("no digest recorded or resource root unavailable".to_string()),
-            resource: None,
-        },
-    }
-}
-
 /// Roll the detect and tree-present signals into a summary, honoring a
 /// `cleanup_failed` receipt.
 fn summarize(
@@ -477,6 +467,10 @@ fn summarize(
 mod tests {
     use super::*;
     use crate::adapter::driver::{AdapterOps, CliOutput, FrameworkCommand};
+    use crate::adapter::managed_files::{
+        ManagedFile, ManagedInventory, ManagedInventoryKind, materialized_files, source_revision,
+    };
+    use sha2::{Digest, Sha256};
     use std::sync::{Mutex, MutexGuard};
 
     /// Serializes cosh env mutation across tests in this module.
@@ -545,8 +539,19 @@ mod tests {
                 source,
             })
         }
-        fn copy_file(&self, _: &Path, _: &Path) -> Result<(), AdapterError> {
-            unimplemented!()
+        fn copy_file(&self, src: &Path, dst: &Path) -> Result<(), AdapterError> {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).map_err(|source| AdapterError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            std::fs::copy(src, dst)
+                .map(|_| ())
+                .map_err(|source| AdapterError::Io {
+                    path: dst.to_path_buf(),
+                    source,
+                })
         }
         fn remove_tree(&self, path: &Path) -> Result<bool, AdapterError> {
             if !path.exists() {
@@ -601,6 +606,31 @@ mod tests {
         root
     }
 
+    fn attach_materialized_inventory(claim: &mut AdapterClaim, root: &Path) {
+        let managed = [root.join(COSH_MANIFEST), root.join("hooks/run-hook.sh")]
+            .into_iter()
+            .map(|path| ManagedFile {
+                sha256: Some(format!(
+                    "{:x}",
+                    Sha256::digest(std::fs::read(&path).expect("managed fixture bytes"))
+                )),
+                path,
+                kind: ManagedInventoryKind::File,
+                symlink_target: None,
+            })
+            .collect();
+        let inventory = ManagedInventory { files: managed };
+        let mappings = vec![MaterializedMapping {
+            resource_id: RES_EXTENSION_DIR.to_string(),
+            source_root: root.to_path_buf(),
+            excluded_prefixes: Vec::new(),
+        }];
+        claim.source_revision =
+            Some(source_revision(&inventory, root, &mappings).expect("revision"));
+        claim.materialized_files =
+            materialized_files(&inventory, &mappings).expect("materialized inventory");
+    }
+
     fn ctx<'a>(
         resource_root: &Path,
         user_home: &Path,
@@ -648,6 +678,7 @@ mod tests {
         assert_eq!(bundle.plugin_id.as_deref(), Some("tokenless"));
 
         let (mut claim, prepared) = driver.prepare_enable(&bundle, &ctx).expect("claim");
+        attach_materialized_inventory(&mut claim, &resource_root);
         driver
             .apply_enable(&mut claim, &prepared, &ctx, &mut ())
             .expect("apply");

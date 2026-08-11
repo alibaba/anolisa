@@ -1279,6 +1279,8 @@ mod tests {
                 enabled_at: NOW.to_string(),
                 resource_root: PathBuf::new(),
                 bundle_digest: None,
+                source_revision: None,
+                materialized_files: Vec::new(),
                 driver_schema: 1,
                 status: ClaimStatus::Enabled,
                 notices: Vec::new(),

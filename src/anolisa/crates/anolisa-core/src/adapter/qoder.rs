@@ -36,7 +36,7 @@ use super::driver::{
     ClaimResourceRef, ConditionStatus, DetectResult, DisableReport, DriverCtx, DriverPlan,
     FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable, find_binary_in_path,
 };
-use super::util::{bool_status, cli_failure_reason, digest_tree, display_command, now_iso8601};
+use super::util::{bool_status, cli_failure_reason, display_command, now_iso8601};
 
 mod settings;
 
@@ -180,7 +180,6 @@ impl FrameworkDriver for QoderDriver {
         validate_plugin_id(&plugin_id)?;
         Ok(AdapterBundle {
             resource_root: root.clone(),
-            digest: digest_tree(root),
             plugin_id: Some(plugin_id),
         })
     }
@@ -314,7 +313,9 @@ impl FrameworkDriver for QoderDriver {
                 adapter_type: ctx.adapter_type.clone(),
                 enabled_at: now_iso8601(),
                 resource_root: bundle.resource_root.clone(),
-                bundle_digest: bundle.digest.clone(),
+                bundle_digest: None,
+                source_revision: None,
+                materialized_files: Vec::new(),
                 driver_schema: DRIVER_SCHEMA_VERSION,
                 status: ClaimStatus::Enabled,
                 notices: Vec::new(),
@@ -373,7 +374,9 @@ impl FrameworkDriver for QoderDriver {
                 adapter_type: ctx.adapter_type.clone(),
                 enabled_at: now_iso8601(),
                 resource_root: bundle.resource_root.clone(),
-                bundle_digest: bundle.digest.clone(),
+                bundle_digest: None,
+                source_revision: None,
+                materialized_files: Vec::new(),
                 driver_schema: DRIVER_SCHEMA_VERSION,
                 status: ClaimStatus::Enabled,
                 notices: Vec::new(),
@@ -604,8 +607,6 @@ impl FrameworkDriver for QoderDriver {
             reason: Some(detect.reason.clone()),
             resource: None,
         });
-        conditions.push(bundle_match_condition(claim));
-
         // Resolve strictly from the receipt payload; a receipt missing its
         // plugin or settings resource is malformed and must not be treated as
         // healthy or verifiable.
@@ -1197,15 +1198,12 @@ fn native_status(
     let detect = QoderDriver.detect(&HostEnv {
         user_home: ctx.user_home.clone(),
     });
-    let mut conditions = vec![
-        AdapterCondition {
-            kind: AdapterConditionKind::FrameworkDetected,
-            status: bool_status(detect.detected),
-            reason: Some(detect.reason),
-            resource: None,
-        },
-        bundle_match_condition(claim),
-    ];
+    let mut conditions = vec![AdapterCondition {
+        kind: AdapterConditionKind::FrameworkDetected,
+        status: bool_status(detect.detected),
+        reason: Some(detect.reason),
+        resource: None,
+    }];
     let Some(plugin) = resolve_plugin(claim) else {
         push_native_conditions(
             &mut conditions,
@@ -1677,31 +1675,6 @@ fn build_native_uninstall_cmd(program: &str, plugin: &str) -> FrameworkCommand {
 // ---------------------------------------------------------------------------
 // Status assembly
 // ---------------------------------------------------------------------------
-
-/// Build the `ResourceBundleMatches` condition.
-fn bundle_match_condition(claim: &AdapterClaim) -> AdapterCondition {
-    let kind = AdapterConditionKind::ResourceBundleMatches;
-    match (&claim.bundle_digest, digest_tree(&claim.resource_root)) {
-        (Some(recorded), Some(current)) if recorded == &current => AdapterCondition {
-            kind,
-            status: ConditionStatus::True,
-            reason: None,
-            resource: None,
-        },
-        (Some(_), Some(_)) => AdapterCondition {
-            kind,
-            status: ConditionStatus::False,
-            reason: Some("resource bundle changed since enable".to_string()),
-            resource: None,
-        },
-        _ => AdapterCondition {
-            kind,
-            status: ConditionStatus::Unknown,
-            reason: Some("no digest recorded or resource root unavailable".to_string()),
-            resource: None,
-        },
-    }
-}
 
 /// Roll signals into a summary. Healthy requires the framework detected and
 /// our managed settings entries verified present. Plugin registration is

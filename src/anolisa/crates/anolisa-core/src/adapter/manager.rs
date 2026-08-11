@@ -32,13 +32,19 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anolisa_platform::fs_layout::{FsLayout, InstallMode};
+use anolisa_platform::pkg_files::PackageFileQuery;
+use anolisa_platform::rpm_query::RpmPackageQuery;
 
 use super::AdapterError;
-use super::claim::{AdapterClaim, ClaimStatus};
+use super::claim::{AdapterClaim, AdapterSourceRevision, ClaimStatus};
 use super::driver::{
     AdapterCondition, AdapterConditionKind, AdapterOps, AdapterStatusReport, AdapterSummary,
     CliOutput, ConditionStatus, DisableReport, DriverCtx, DriverPlan, EnableProgress,
     FrameworkCommand, FrameworkRpcSession, HostEnv,
+};
+use super::managed_files::{
+    ManagedMatch, inventory_for_installation, materialized_files, source_revision,
+    verify_managed_bundle, verify_materialized_bundle,
 };
 use super::registry::DriverRegistry;
 use crate::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
@@ -176,6 +182,7 @@ struct SourceProbe {
     status: AdapterSourceStatus,
     resource_root: Option<PathBuf>,
     reason: Option<String>,
+    revision: Result<super::claim::AdapterSourceRevision, String>,
 }
 
 /// Full result of [`AdapterManager::scan`].
@@ -455,6 +462,9 @@ pub struct AdapterManager {
     user_home: Option<PathBuf>,
     /// Identity recorded as the central-log actor.
     actor: String,
+    /// Read-only native package file inventory. Kept separate from lifecycle
+    /// version queries so adapter status can be tested without rpmdb.
+    package_files: Box<dyn PackageFileQuery>,
 }
 
 impl AdapterManager {
@@ -478,7 +488,13 @@ impl AdapterManager {
             visibility_warnings: Vec::new(),
             user_home,
             actor,
+            package_files: Box::new(RpmPackageQuery::system()),
         }
+    }
+
+    /// Replace the read-only native package file query (primarily for tests).
+    pub fn set_package_file_query(&mut self, query: Box<dyn PackageFileQuery>) {
+        self.package_files = query;
     }
 
     /// Replace the visible root set. Receipts still read/write only the
@@ -688,7 +704,7 @@ impl AdapterManager {
         }
 
         for claim in &state.adapter_claims {
-            let source = self.source_probe_for_claim(claim, &state);
+            let source = self.source_probe(&claim.component, &claim.framework, &state);
             let (driver_available, framework_detected) = self.driver_scan_facts(&claim.framework);
             let key = (claim.component.clone(), claim.framework.clone());
             let entry = entries.entry(key).or_insert_with(|| ScanEntry {
@@ -953,9 +969,8 @@ impl AdapterManager {
             ops: &ops,
         };
 
-        let bundle = driver.read_bundle(&ctx)?;
-
         if dry_run {
+            let bundle = driver.read_bundle(&ctx)?;
             let mut plan = driver.plan_enable(&bundle, &ctx)?;
             if let Some(prior) = state.find_adapter_claim(component, &framework) {
                 let claim_allowed_roots = driver.allowed_external_roots(&ctx);
@@ -987,7 +1002,13 @@ impl AdapterManager {
             });
         }
 
+        // Preserve the driver's existing read-only input validation and error
+        // ordering. The authoritative integrity gate runs below after all
+        // pure preparation, immediately before replacement cleanup or apply
+        // can mutate framework state.
+        let bundle = driver.read_bundle(&ctx)?;
         let (mut claim, prepared) = driver.prepare_enable(&bundle, &ctx)?;
+        claim.bundle_digest = None;
         // Persist the manifest's static notices in the receipt so a later
         // disable can show `post_disable` notices from the receipt alone.
         // Inert text — never expanded or executed.
@@ -1005,6 +1026,44 @@ impl AdapterManager {
             )?;
             driver.preserve_reenable_facts(prior, &mut claim)?;
         }
+        let mappings = driver.materialized_mappings(
+            &resource_root,
+            ctx.adapter_type.as_deref(),
+            &ctx.declared_skills,
+        );
+        let managed_inventory = self
+            .find_component_installation(component, &state)?
+            .ok_or_else(|| AdapterError::ComponentNotInstalled {
+                component: component.to_string(),
+            })
+            .and_then(|installation| {
+                inventory_for_installation(&installation, self.package_files.as_ref()).map_err(
+                    |reason| AdapterError::InvalidAdapterInput {
+                        component: component.to_string(),
+                        framework: framework.clone(),
+                        reason,
+                    },
+                )
+            })?;
+        let revision =
+            source_revision(&managed_inventory, &resource_root, &mappings).map_err(|reason| {
+                AdapterError::InvalidAdapterInput {
+                    component: component.to_string(),
+                    framework: framework.clone(),
+                    reason,
+                }
+            })?;
+        claim.source_revision = Some(revision.clone());
+        if !mappings.is_empty() {
+            claim.materialized_files =
+                materialized_files(&managed_inventory, &mappings).map_err(|reason| {
+                    AdapterError::InvalidAdapterInput {
+                        component: component.to_string(),
+                        framework: framework.clone(),
+                        reason,
+                    }
+                })?;
+        }
         // Defense in depth: the driver must not emit a claim that points
         // outside its own declared roots. Reject before persisting.
         claim.validate_with_trust(
@@ -1014,6 +1073,16 @@ impl AdapterManager {
             trust.exact_targets(),
         )?;
         driver.validate_prepared_enable(&claim)?;
+        match verify_managed_bundle(&revision) {
+            ManagedMatch::Matched => {}
+            ManagedMatch::Changed(reason) | ManagedMatch::Unknown(reason) => {
+                return Err(AdapterError::InvalidAdapterInput {
+                    component: component.to_string(),
+                    framework: framework.clone(),
+                    reason,
+                });
+            }
+        }
 
         if let Some(prior) = &prior {
             // Do not overwrite the only durable ownership record until the
@@ -1076,6 +1145,14 @@ impl AdapterManager {
             }
             return Err(err);
         }
+        claim.validate_with_trust(
+            &self.layout,
+            &claim_allowed_roots,
+            &trust.target_roots,
+            trust.exact_targets(),
+        )?;
+        state.upsert_adapter_claim(claim.clone());
+        state.save(&self.state_path)?;
         self.log_operation(&label, component, LogStatus::Ok, "adapter enabled", None);
 
         Ok(EnableOutcome::Enabled(Box::new(claim)))
@@ -1316,7 +1393,7 @@ impl AdapterManager {
                 continue;
             }
             let framework = claim.framework.clone();
-            let source = self.source_probe_for_claim(claim, &state);
+            let source = self.source_probe(&claim.component, &claim.framework, &state);
             let driver = match self.registry.get(&framework) {
                 Some(d) => d,
                 None => {
@@ -1325,9 +1402,11 @@ impl AdapterManager {
                     entries.push(StatusEntry {
                         component: claim.component.clone(),
                         framework,
-                        report: with_source_condition(
+                        report: with_managed_conditions(
                             unverified_report("no built-in driver for framework"),
+                            claim,
                             &source,
+                            false,
                         ),
                     });
                     continue;
@@ -1409,7 +1488,12 @@ impl AdapterManager {
                 &trust.target_roots,
                 trust.exact_targets(),
             )?;
-            let report = with_source_condition(driver.status(claim, &ctx)?, &source);
+            let report = with_managed_conditions(
+                driver.status(claim, &ctx)?,
+                claim,
+                &source,
+                driver.materialized_verification_applicable(claim),
+            );
             entries.push(StatusEntry {
                 component: claim.component.clone(),
                 framework,
@@ -1418,6 +1502,48 @@ impl AdapterManager {
         }
 
         Ok(StatusReport { entries })
+    }
+
+    /// Compare one receipt with the same authoritative source revision used by
+    /// [`Self::status`]. Component update uses this to avoid a second drift
+    /// definition.
+    pub fn source_revision_match(
+        &self,
+        claim: &AdapterClaim,
+        current_state: &StateStore,
+    ) -> ManagedMatch {
+        let source = self.source_probe(&claim.component, &claim.framework, current_state);
+        match source.revision {
+            Ok(current) => super::managed_files::compare_source_revision(claim, &current),
+            Err(reason) => ManagedMatch::Unknown(reason),
+        }
+    }
+
+    /// Capture every declared adapter's authoritative source revision.
+    ///
+    /// Missing package metadata is represented as `None` for that framework
+    /// so update reporting cannot mistake an unverifiable source for an
+    /// unchanged one.
+    pub fn source_revision_snapshot(
+        &self,
+        component: &str,
+        current_state: &StateStore,
+    ) -> BTreeMap<String, Option<AdapterSourceRevision>> {
+        let Ok((manifest, _, _, _)) =
+            self.load_visible_component_manifest(component, current_state)
+        else {
+            return BTreeMap::new();
+        };
+        declared_frameworks(&manifest)
+            .into_iter()
+            .map(|framework| {
+                let revision = self
+                    .source_probe(component, &framework, current_state)
+                    .revision
+                    .ok();
+                (framework, revision)
+            })
+            .collect()
     }
 
     // -- discovery helpers --------------------------------------------------
@@ -1434,14 +1560,6 @@ impl AdapterManager {
             })
             .unwrap_or(false);
         (driver_available, framework_detected)
-    }
-
-    fn source_probe_for_claim(
-        &self,
-        claim: &AdapterClaim,
-        current_state: &StateStore,
-    ) -> SourceProbe {
-        self.source_probe(&claim.component, &claim.framework, current_state)
     }
 
     fn source_probe(
@@ -1510,17 +1628,44 @@ impl AdapterManager {
             // leftover (e.g. the empty skeleton an uninstalled scope left
             // behind). Report Missing rather than letting a hollow
             // directory masquerade as a live source.
-            Ok((resource_root, _))
+            Ok((resource_root, effective_datadir))
                 if self.bundle_root_valid(
                     framework,
                     declared_bundle_entry(&manifest, framework).as_deref(),
                     &resource_root,
                 ) =>
             {
+                let revision = (|| {
+                    let mappings = if let Some(driver) = self.registry.get(framework) {
+                        let skills = resolve_skill_sources(
+                            declared_skills(&manifest, framework),
+                            &self.layout,
+                            &effective_datadir,
+                            component,
+                            framework,
+                            &resource_root,
+                        )
+                        .map_err(|err| format!("adapter skill sources are invalid: {err}"))?;
+                        driver.materialized_mappings(
+                            &resource_root,
+                            declared_adapter_type(&manifest, framework).as_deref(),
+                            &skills,
+                        )
+                    } else {
+                        Vec::new()
+                    };
+                    self.current_source_revision(
+                        component,
+                        current_state,
+                        &resource_root,
+                        &mappings,
+                    )
+                })();
                 SourceProbe {
                     status: AdapterSourceStatus::Available,
-                    resource_root: Some(resource_root),
+                    resource_root: Some(resource_root.clone()),
                     reason: None,
+                    revision,
                 }
             }
             Ok((resource_root, _)) => source_missing(format!(
@@ -1646,6 +1791,46 @@ impl AdapterManager {
             }
         }
         Ok(None)
+    }
+
+    fn find_component_installation(
+        &self,
+        component: &str,
+        current_state: &StateStore,
+    ) -> Result<Option<Installation>, AdapterError> {
+        for vr in &self.visible_roots {
+            let found = if vr.state_dir == self.layout.state_dir {
+                current_state
+                    .find(ObjectKind::Component, component)
+                    .filter(|installation| is_adapter_visible(installation))
+                    .cloned()
+            } else {
+                let state_path = vr.state_dir.join("installed.toml");
+                Self::load_state_at(&state_path)?
+                    .find(ObjectKind::Component, component)
+                    .filter(|installation| is_adapter_visible(installation))
+                    .cloned()
+            };
+            if found.is_some() {
+                return Ok(found);
+            }
+        }
+        Ok(None)
+    }
+
+    fn current_source_revision(
+        &self,
+        component: &str,
+        current_state: &StateStore,
+        resource_root: &Path,
+        mappings: &[super::managed_files::MaterializedMapping],
+    ) -> Result<super::claim::AdapterSourceRevision, String> {
+        let installation = self
+            .find_component_installation(component, current_state)
+            .map_err(|err| format!("installed component state unavailable: {err}"))?
+            .ok_or_else(|| format!("component '{component}' is not installed"))?;
+        let inventory = inventory_for_installation(&installation, self.package_files.as_ref())?;
+        source_revision(&inventory, resource_root, mappings)
     }
 
     /// Adapter declarations from component contracts visible to the
@@ -3814,7 +3999,8 @@ fn source_missing(reason: String) -> SourceProbe {
     SourceProbe {
         status: AdapterSourceStatus::Missing,
         resource_root: None,
-        reason: Some(reason),
+        reason: Some(reason.clone()),
+        revision: Err(reason),
     }
 }
 
@@ -3830,17 +4016,78 @@ fn source_condition(source: &SourceProbe) -> AdapterCondition {
     }
 }
 
-fn with_source_condition(
+fn with_managed_conditions(
     mut report: AdapterStatusReport,
+    claim: &AdapterClaim,
     source: &SourceProbe,
+    materialized_applicable: bool,
 ) -> AdapterStatusReport {
-    if source.status == AdapterSourceStatus::Missing
-        && report.summary != AdapterSummary::CleanupFailed
-    {
-        report.summary = AdapterSummary::Degraded;
+    let (managed, revision) = match &source.revision {
+        Ok(current) => (
+            verify_managed_bundle(current),
+            super::managed_files::compare_source_revision(claim, current),
+        ),
+        Err(reason) => (
+            ManagedMatch::Unknown(reason.clone()),
+            ManagedMatch::Unknown(reason.clone()),
+        ),
+    };
+    let mut integrity = vec![
+        managed_condition(AdapterConditionKind::ManagedBundleMatches, managed),
+        managed_condition(AdapterConditionKind::SourceRevisionMatches, revision),
+    ];
+    if materialized_applicable {
+        let materialized = if claim.materialized_files.is_empty() {
+            ManagedMatch::Unknown(
+                "receipt has no materialized file inventory; re-enable the adapter".into(),
+            )
+        } else {
+            verify_materialized_bundle(claim)
+        };
+        integrity.push(managed_condition(
+            AdapterConditionKind::MaterializedBundleMatches,
+            materialized,
+        ));
     }
+
+    let has_false = integrity
+        .iter()
+        .any(|condition| condition.status == ConditionStatus::False);
+    let has_unknown = integrity
+        .iter()
+        .any(|condition| condition.status == ConditionStatus::Unknown);
+    if report.summary != AdapterSummary::CleanupFailed {
+        if source.status == AdapterSourceStatus::Missing || has_false {
+            report.summary = AdapterSummary::Degraded;
+        } else if has_unknown && report.summary == AdapterSummary::Healthy {
+            report.summary = AdapterSummary::Unknown;
+        }
+    }
+    report.conditions.retain(|condition| {
+        !matches!(
+            condition.kind,
+            AdapterConditionKind::ManagedBundleMatches
+                | AdapterConditionKind::SourceRevisionMatches
+                | AdapterConditionKind::MaterializedBundleMatches
+        )
+    });
     report.conditions.insert(0, source_condition(source));
+    report.conditions.splice(1..1, integrity);
     report
+}
+
+fn managed_condition(kind: AdapterConditionKind, verdict: ManagedMatch) -> AdapterCondition {
+    let (status, reason) = match verdict {
+        ManagedMatch::Matched => (ConditionStatus::True, None),
+        ManagedMatch::Changed(reason) => (ConditionStatus::False, Some(reason)),
+        ManagedMatch::Unknown(reason) => (ConditionStatus::Unknown, Some(reason)),
+    };
+    AdapterCondition {
+        kind,
+        status,
+        reason,
+        resource: None,
+    }
 }
 
 /// Reorder datadir roots so `preferred` is tried first, then the remaining
@@ -4831,6 +5078,8 @@ source = "adapters/openclaw"
             enabled_at: "2026-07-09T00:00:00Z".to_string(),
             resource_root,
             bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -4842,6 +5091,121 @@ source = "adapters/openclaw"
                 config_resources: Vec::new(),
             }),
         }
+    }
+
+    #[test]
+    fn unavailable_authoritative_inventory_never_reports_healthy() {
+        let claim = openclaw_claim("tokenless", PathBuf::from("/missing/source"));
+        let reason = "native package file query failed; re-enable the adapter".to_string();
+        let source = SourceProbe {
+            status: AdapterSourceStatus::Available,
+            resource_root: Some(claim.resource_root.clone()),
+            reason: None,
+            revision: Err(reason),
+        };
+        let report = with_managed_conditions(
+            AdapterStatusReport {
+                summary: AdapterSummary::Healthy,
+                conditions: Vec::new(),
+            },
+            &claim,
+            &source,
+            false,
+        );
+
+        assert_eq!(report.summary, AdapterSummary::Unknown);
+        assert!(report.conditions.iter().any(|condition| {
+            condition.kind == AdapterConditionKind::ManagedBundleMatches
+                && condition.status == ConditionStatus::Unknown
+        }));
+        assert!(report.conditions.iter().any(|condition| {
+            condition.kind == AdapterConditionKind::SourceRevisionMatches
+                && condition.status == ConditionStatus::Unknown
+        }));
+    }
+
+    #[test]
+    fn changed_managed_file_degrades_an_otherwise_healthy_report() {
+        use crate::adapter::claim::{AdapterSourceRevision, ManagedFileKind, ManagedSourceFile};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("plugin.json"), b"changed").expect("managed file");
+        let revision = AdapterSourceRevision {
+            source_root: tmp.path().to_path_buf(),
+            files: vec![ManagedSourceFile {
+                relative_path: PathBuf::from("plugin.json"),
+                kind: ManagedFileKind::File,
+                sha256: Some("0".repeat(64)),
+                symlink_target: None,
+            }],
+            materialized_sources: Vec::new(),
+        };
+        let mut claim = openclaw_claim("tokenless", tmp.path().to_path_buf());
+        claim.source_revision = Some(revision.clone());
+        let source = SourceProbe {
+            status: AdapterSourceStatus::Available,
+            resource_root: Some(tmp.path().to_path_buf()),
+            reason: None,
+            revision: Ok(revision),
+        };
+        let report = with_managed_conditions(
+            AdapterStatusReport {
+                summary: AdapterSummary::Healthy,
+                conditions: Vec::new(),
+            },
+            &claim,
+            &source,
+            false,
+        );
+
+        assert_eq!(report.summary, AdapterSummary::Degraded);
+        assert!(report.conditions.iter().any(|condition| {
+            condition.kind == AdapterConditionKind::ManagedBundleMatches
+                && condition.status == ConditionStatus::False
+        }));
+    }
+
+    #[test]
+    fn missing_materialized_inventory_is_unknown() {
+        use crate::adapter::claim::{AdapterSourceRevision, ManagedFileKind, ManagedSourceFile};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("plugin.json"), b"").expect("managed file");
+        let revision = AdapterSourceRevision {
+            source_root: tmp.path().to_path_buf(),
+            files: vec![ManagedSourceFile {
+                relative_path: PathBuf::from("plugin.json"),
+                kind: ManagedFileKind::File,
+                sha256: Some(
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
+                ),
+                symlink_target: None,
+            }],
+            materialized_sources: Vec::new(),
+        };
+        let mut claim = openclaw_claim("tokenless", tmp.path().to_path_buf());
+        claim.source_revision = Some(revision.clone());
+        let source = SourceProbe {
+            status: AdapterSourceStatus::Available,
+            resource_root: Some(tmp.path().to_path_buf()),
+            reason: None,
+            revision: Ok(revision),
+        };
+        let report = with_managed_conditions(
+            AdapterStatusReport {
+                summary: AdapterSummary::Healthy,
+                conditions: Vec::new(),
+            },
+            &claim,
+            &source,
+            true,
+        );
+
+        assert_eq!(report.summary, AdapterSummary::Unknown);
+        assert!(report.conditions.iter().any(|condition| {
+            condition.kind == AdapterConditionKind::MaterializedBundleMatches
+                && condition.status == ConditionStatus::Unknown
+        }));
     }
 
     fn seed_adapter_claim(
@@ -5028,6 +5392,8 @@ entry = "cosh-extension.json"
             enabled_at: "2026-07-09T00:00:00Z".to_string(),
             resource_root,
             bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -7915,6 +8281,8 @@ dest = "{datadir}/skills"
             enabled_at: "2026-06-30T00:00:00Z".to_string(),
             resource_root: PathBuf::from("/fake/adapters/test-comp/openclaw"),
             bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
             driver_schema: 1,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -8100,6 +8468,8 @@ dest = "{datadir}/skills"
             enabled_at: "2026-06-30T00:00:00Z".to_string(),
             resource_root: PathBuf::from("/fake/adapters/test-comp/hermes"),
             bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
             driver_schema: 1,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -8172,6 +8542,8 @@ dest = "{datadir}/skills"
             enabled_at: "2026-06-30T00:00:00Z".to_string(),
             resource_root: PathBuf::from("/fake/adapters/test-comp/hermes"),
             bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
             driver_schema: 1,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),

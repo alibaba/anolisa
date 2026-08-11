@@ -41,8 +41,8 @@ use crate::context::CliContext;
 use crate::response::{CliError, render_json, render_json_with_status};
 
 use super::{
-    AdapterAction, AdapterBundleSnapshot, COMMAND, ComponentUpdateResult, PlannedComponentUpdate,
-    PlannedUpdateRoute, UpdateOutcome, adapter_actions_after_update, adapter_bundle_snapshot,
+    AdapterAction, AdapterRevisionSnapshot, COMMAND, ComponentUpdateResult, PlannedComponentUpdate,
+    PlannedUpdateRoute, UpdateOutcome, adapter_actions_after_update, adapter_revision_snapshot,
     append_update_log, complete_delegated_update, native_update_authorized, now_iso8601,
     plan_component_update, render_adapter_action_notices, step_label, update_backends,
     update_component_with_deps,
@@ -487,13 +487,13 @@ fn execute_merged_updates_with_deps(
     if active.is_empty() {
         return items;
     }
-    let prior_adapter_bundles: HashMap<String, AdapterBundleSnapshot> = active
+    let prior_adapter_revisions: HashMap<String, AdapterRevisionSnapshot> = active
         .iter()
         .map(|(item, _)| {
             let target = item.planned.target.clone();
             (
                 target.clone(),
-                adapter_bundle_snapshot(ctx, &layout, &target),
+                adapter_revision_snapshot(ctx, &layout, &target),
             )
         })
         .collect();
@@ -668,7 +668,7 @@ fn execute_merged_updates_with_deps(
                         // A member whose EVR did not move changed nothing,
                         // so it cannot require adapter follow-up (issue #1885).
                         let adapter_actions = if moved {
-                            let before = prior_adapter_bundles
+                            let before = prior_adapter_revisions
                                 .get(&target)
                                 .cloned()
                                 .unwrap_or_default();
@@ -1602,10 +1602,10 @@ mod tests {
         );
     }
 
-    /// A merged batch reports each changed source bundle under its own
-    /// component (issue #1885): only cosh changes during the transaction.
+    /// A merged batch does not infer drift from directory bytes when its fake
+    /// native backend supplies no authoritative file inventory.
     #[test]
-    fn merged_updates_associate_adapter_actions_with_the_right_component() {
+    fn merged_updates_require_authoritative_inventory_for_adapter_actions() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         managed_pair(&c);
@@ -1662,19 +1662,10 @@ mod tests {
 
         assert_eq!(find(&items, "cosh").status, "updated");
         assert_eq!(find(&items, "sec-core").status, "updated");
-        assert_eq!(
-            find(&items, "cosh").adapter_actions,
-            vec![AdapterAction {
-                component: "cosh".to_string(),
-                framework: "openclaw".to_string(),
-                reason: "adapter bundle changed during system update".to_string(),
-                command: "anolisa adapter status cosh".to_string(),
-            }],
-            "the changed source bundle must surface on cosh's own item"
-        );
         assert!(
-            find(&items, "sec-core").adapter_actions.is_empty(),
-            "an unchanged source bundle must not produce an action"
+            find(&items, "cosh").adapter_actions.is_empty()
+                && find(&items, "sec-core").adapter_actions.is_empty(),
+            "unmanaged directory bytes must not be treated as package revisions"
         );
     }
 
@@ -1709,7 +1700,7 @@ mod tests {
             adapter_actions: vec![AdapterAction {
                 component: "cosh".to_string(),
                 framework: "openclaw".to_string(),
-                reason: anolisa_core::adapter::claim::BUNDLE_CHANGED_REASON.to_string(),
+                reason: anolisa_core::adapter::claim::SOURCE_REVISION_CHANGED_REASON.to_string(),
                 command: "anolisa adapter enable cosh openclaw".to_string(),
             }],
         };
@@ -1721,7 +1712,7 @@ mod tests {
             serde_json::json!([{
                 "component": "cosh",
                 "framework": "openclaw",
-                "reason": "resource bundle changed since enable",
+                "reason": "adapter source revision changed since enable",
                 "command": "anolisa adapter enable cosh openclaw",
             }]),
             "each batch item carries its own adapter actions (issue #1885): {json}"

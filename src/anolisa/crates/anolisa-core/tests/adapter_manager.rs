@@ -24,10 +24,14 @@ use anolisa_core::adapter::claim::{
 };
 use anolisa_core::adapter::driver::{AdapterSummary, ConditionStatus};
 use anolisa_core::adapter::manager::{AdapterManager, EnableOptions, EnableOutcome};
+use anolisa_core::domain::ProviderBinding;
 use anolisa_core::manifest::{NoticeLevel, NoticeWhen};
-use anolisa_core::state::InstallMode as StateInstallMode;
+use anolisa_core::state::{
+    FileOwner, InstallMode as StateInstallMode, ObjectKind, OwnedFile, OwnedFileKind,
+};
 use anolisa_core::state_store::StateStore;
 use anolisa_platform::fs_layout::FsLayout;
+use sha2::{Digest, Sha256};
 
 /// Serializes the process-global env mutation across tests.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -48,6 +52,7 @@ struct World {
 
 impl World {
     fn manager(&self) -> AdapterManager {
+        record_owned_adapter_files(&self.layout, &self.resource_root);
         AdapterManager::new(
             self.layout.clone(),
             Some(self.user_home.clone()),
@@ -86,6 +91,59 @@ impl World {
             .find_adapter_claim(COMPONENT, FRAMEWORK)
             .is_some()
     }
+}
+
+fn record_owned_adapter_files(layout: &FsLayout, root: &Path) {
+    fn collect(root: &Path, files: &mut Vec<OwnedFile>) {
+        for entry in std::fs::read_dir(root).expect("read adapter fixture") {
+            let entry = entry.expect("adapter fixture entry");
+            let path = entry.path();
+            let file_type = entry.file_type().expect("adapter fixture file type");
+            if file_type.is_dir() {
+                collect(&path, files);
+            } else if file_type.is_symlink() {
+                files.push(OwnedFile {
+                    path: path.clone(),
+                    owner: FileOwner::Anolisa,
+                    sha256: None,
+                    kind: OwnedFileKind::Symlink,
+                    referent: Some(std::fs::read_link(path).expect("adapter fixture symlink")),
+                    mode: None,
+                    capabilities: Vec::new(),
+                });
+            } else if file_type.is_file() {
+                files.push(OwnedFile {
+                    path: path.clone(),
+                    owner: FileOwner::Anolisa,
+                    sha256: Some(format!(
+                        "{:x}",
+                        Sha256::digest(std::fs::read(path).expect("adapter fixture bytes"))
+                    )),
+                    kind: OwnedFileKind::File,
+                    referent: None,
+                    mode: None,
+                    capabilities: Vec::new(),
+                });
+            }
+        }
+    }
+
+    if !root.is_dir() {
+        return;
+    }
+    let state_path = layout.state_dir.join("installed.toml");
+    let mut state = load_state_at(&state_path);
+    let installation = state
+        .find_mut(ObjectKind::Component, COMPONENT)
+        .expect("fixture component");
+    let ProviderBinding::Owned { artifact } = &mut installation.binding else {
+        panic!("fixture component must be raw-owned");
+    };
+    let mut files = Vec::new();
+    collect(root, &mut files);
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    artifact.files = files;
+    state.save(&state_path).expect("save fixture state");
 }
 
 fn recorded_openclaw_state_dir(claim: &AdapterClaim) -> &Path {
@@ -485,6 +543,14 @@ installed_at = "2026-06-15T00:00:00Z"
     );
     std::fs::write(&state_path, toml).expect("seed state");
     write_installed_manifest(layout, FRAMEWORK);
+    record_owned_adapter_files(
+        layout,
+        &layout
+            .datadir
+            .join("adapters")
+            .join(COMPONENT)
+            .join(FRAMEWORK),
+    );
 }
 
 fn write_installed_manifest(layout: &FsLayout, framework: &str) {
@@ -574,6 +640,29 @@ fn enable_status_disable_happy_path() {
             .is_none(),
         "receipt must be gone after successful disable"
     );
+}
+
+#[test]
+fn enable_rejects_modified_package_owned_source() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    std::fs::write(
+        world.resource_root.join("openclaw.plugin.json"),
+        br#"{"id":"modified","name":"Modified"}"#,
+    )
+    .expect("modify package-owned manifest after recording its digest");
+
+    let err = manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect_err("modified package-owned bytes must block enable");
+    assert!(matches!(
+        err,
+        AdapterError::InvalidAdapterInput { reason, .. } if reason.contains("content changed")
+    ));
+    assert!(!world.registry_marker_exists());
+    assert!(!world.has_claim());
 }
 
 #[test]
@@ -669,6 +758,25 @@ skills = ["sec-audit"]
         &resource.kind,
         ClaimResourceKind::ExternalPath { path } if path == &expected
     )));
+
+    std::fs::write(expected.join("skills/sec-audit/runtime.log"), b"runtime")
+        .expect("runtime file");
+    let status = manager
+        .status(Some(COMPONENT))
+        .expect("status with runtime file");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+
+    std::fs::write(expected.join("skills/sec-audit/marker.txt"), b"changed")
+        .expect("mutate materialized skill");
+    let status = manager
+        .status(Some(COMPONENT))
+        .expect("status with changed skill");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Degraded);
+    assert!(status.entries[0].report.conditions.iter().any(|condition| {
+        condition.kind
+            == anolisa_core::adapter::driver::AdapterConditionKind::MaterializedBundleMatches
+            && condition.status == ConditionStatus::False
+    }));
 }
 
 #[test]

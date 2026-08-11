@@ -17,6 +17,7 @@ use anolisa_platform::fs_layout::FsLayout;
 
 use super::AdapterError;
 use super::claim::AdapterClaim;
+use super::managed_files::MaterializedMapping;
 
 /// Read-only host facts a driver may inspect during [`FrameworkDriver::detect`].
 #[derive(Debug, Clone, Default)]
@@ -110,9 +111,6 @@ impl DriverCtx<'_> {
 pub struct AdapterBundle {
     /// Resource root the bundle was read from.
     pub resource_root: PathBuf,
-    /// Digest of the resource tree, for drift/upgrade detection. `None`
-    /// when the driver declined to compute one.
-    pub digest: Option<String>,
     /// Framework-native plugin id resolved from the bundle (or the
     /// manifest-declared fallback).
     pub plugin_id: Option<String>,
@@ -265,8 +263,13 @@ pub enum AdapterConditionKind {
     SourceAvailable,
     /// The framework itself is detectable on the host.
     FrameworkDetected,
-    /// The installed resource bundle still matches the enable-time digest.
-    ResourceBundleMatches,
+    /// Package-manager-owned source files still match current package metadata.
+    ManagedBundleMatches,
+    /// The package-manager-owned adapter inputs still equal the enable-time
+    /// revision, including the resolved source root.
+    SourceRevisionMatches,
+    /// Files ANOLISA explicitly copied still match their receipt entries.
+    MaterializedBundleMatches,
     /// The plugin is still present in the framework registry.
     PluginRegistered,
     /// The framework reports the plugin's declared resources as loaded.
@@ -666,6 +669,27 @@ pub trait FrameworkDriver: Send + Sync {
     /// Returns a driver-specific ownership or receipt consistency error.
     fn validate_prepared_enable(&self, _claim: &AdapterClaim) -> Result<(), AdapterError> {
         Ok(())
+    }
+
+    /// Source-to-resource copies this driver will explicitly materialize.
+    ///
+    /// The Manager maps only package-owned source entries through these
+    /// declarations before apply. Framework-native staging or copies remain
+    /// outside this contract.
+    fn materialized_mappings(
+        &self,
+        _resource_root: &Path,
+        _adapter_type: Option<&str>,
+        _declared_skills: &[DeclaredSkill],
+    ) -> Vec<MaterializedMapping> {
+        Vec::new()
+    }
+
+    /// Whether this claim is expected to carry a materialized-file list.
+    /// Receipts with an empty list report `Unknown`; drivers whose framework
+    /// performs its own copy omit the condition entirely.
+    fn materialized_verification_applicable(&self, _claim: &AdapterClaim) -> bool {
+        false
     }
 
     /// Idempotently apply an already-persisted enable receipt to framework

@@ -8,6 +8,10 @@
 //! [`SystemCommandRunner`]'s `LC_ALL=C`.
 
 use crate::command::{CommandOutput, CommandRunner, SystemCommandRunner};
+use crate::pkg_files::{
+    PackageFile, PackageFileDigestAlgorithm, PackageFileInventory, PackageFileKind,
+    PackageFileQuery,
+};
 use crate::pkg_query::{PackageInfo, PackageQuery, PackageQueryError, PackageVersion};
 use crate::rpm_repo::DnfRepoSource;
 
@@ -36,6 +40,15 @@ const REPONAME_QF: &str = "%{reponame}\n";
 /// is directly usable as a package name (the default `name-version-release.arch`
 /// is not).
 const PROVIDES_NAME_QF: &str = "%{NAME}\n";
+
+/// File inventory query format.
+///
+/// RPM stores file metadata in parallel arrays. `:shescape` makes path,
+/// digest, and link-target boundaries unambiguous even when values contain
+/// tabs, newlines, quotes, or backslashes; [`parse_file_inventory`] decodes
+/// that quoting without invoking a shell. The scalar digest algorithm is the
+/// first record and the four per-file columns follow in lockstep.
+const FILE_INVENTORY_QF: &str = "%{FILEDIGESTALGO}\n[%{FILENAMES:shescape}\t%{FILEMODES}\t%{FILEDIGESTS:shescape}\t%{FILELINKTOS:shescape}\n]";
 
 const RPM: &str = "rpm";
 const DNF: &str = "dnf";
@@ -141,6 +154,133 @@ impl<R: CommandRunner> RpmPackageQuery<R> {
         }
         args.extend(command_args.iter().map(|arg| (*arg).to_string()));
         args
+    }
+}
+
+impl<R: CommandRunner + Send + Sync> PackageFileQuery for RpmPackageQuery<R> {
+    fn query_file_inventory(
+        &self,
+        package: &str,
+    ) -> Result<PackageFileInventory, PackageQueryError> {
+        let out = self
+            .runner
+            .run(RPM, &["-q", "--qf", FILE_INVENTORY_QF, package])
+            .map_err(|e| map_spawn_error(e, RPM))?;
+        if out.code != Some(0) {
+            let detail = if out.stderr.trim().is_empty() {
+                out.stdout
+            } else {
+                out.stderr
+            };
+            return Err(PackageQueryError::QueryFailed {
+                command: RPM.to_string(),
+                code: out.code,
+                stderr: detail,
+            });
+        }
+        parse_file_inventory(&out.stdout)
+    }
+}
+
+fn parse_file_inventory(stdout: &str) -> Result<PackageFileInventory, PackageQueryError> {
+    let (algorithm, rows) = stdout
+        .split_once('\n')
+        .ok_or_else(|| unexpected_file_inventory("missing digest-algorithm header"))?;
+    let algorithm = algorithm
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| unexpected_file_inventory("digest algorithm is not an integer"))?;
+    let digest_algorithm = match algorithm {
+        8 => PackageFileDigestAlgorithm::Sha256,
+        other => PackageFileDigestAlgorithm::Unsupported(other),
+    };
+
+    let decoded = parse_shell_escaped_table(rows)?;
+    let mut files = Vec::with_capacity(decoded.len());
+    for fields in decoded {
+        if fields.len() != 4 {
+            return Err(unexpected_file_inventory(&format!(
+                "file row has {} columns, expected 4",
+                fields.len()
+            )));
+        }
+        let mode = fields[1]
+            .parse::<u32>()
+            .map_err(|_| unexpected_file_inventory("file mode is not an integer"))?;
+        let kind = match mode & 0o170000 {
+            0o100000 => PackageFileKind::Regular,
+            0o120000 => PackageFileKind::Symlink,
+            0o040000 => PackageFileKind::Directory,
+            _ => PackageFileKind::Other,
+        };
+        files.push(PackageFile {
+            path: fields[0].clone(),
+            kind,
+            digest: (!fields[2].is_empty()).then(|| fields[2].clone()),
+            link_target: (!fields[3].is_empty()).then(|| fields[3].clone()),
+        });
+    }
+    Ok(PackageFileInventory {
+        digest_algorithm,
+        files,
+    })
+}
+
+/// Decode RPM's `:shescape` table while treating separators inside quoted
+/// values as data. RPM emits adjacent single-quoted chunks plus backslash
+/// escapes for embedded quotes; no shell expansion is performed here.
+fn parse_shell_escaped_table(rows: &str) -> Result<Vec<Vec<String>>, PackageQueryError> {
+    let mut records = Vec::new();
+    let mut record = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+
+    for ch in rows.chars() {
+        if escaped {
+            field.push(ch);
+            escaped = false;
+            continue;
+        }
+        if quoted {
+            if ch == '\'' {
+                quoted = false;
+            } else {
+                field.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' => quoted = true,
+            '\\' => escaped = true,
+            '\t' => record.push(std::mem::take(&mut field)),
+            '\n' => {
+                record.push(std::mem::take(&mut field));
+                if record.iter().any(|value| !value.is_empty()) {
+                    records.push(std::mem::take(&mut record));
+                } else {
+                    record.clear();
+                }
+            }
+            _ => field.push(ch),
+        }
+    }
+    if quoted || escaped {
+        return Err(unexpected_file_inventory(
+            "unterminated shell-escaped file metadata",
+        ));
+    }
+    if !field.is_empty() || !record.is_empty() {
+        record.push(field);
+        records.push(record);
+    }
+    Ok(records)
+}
+
+fn unexpected_file_inventory(detail: &str) -> PackageQueryError {
+    PackageQueryError::UnexpectedOutput {
+        command: RPM.to_string(),
+        detail: detail.to_string(),
     }
 }
 
@@ -779,6 +919,77 @@ mod tests {
             }
             other => panic!("expected QueryFailed, got {other:?}"),
         }
+    }
+
+    fn file_query(
+        stdout: &str,
+        code: Option<i32>,
+        stderr: &str,
+    ) -> RpmPackageQuery<FakeCommandRunner> {
+        RpmPackageQuery::with_runner(FakeCommandRunner {
+            rpm: Some(ok_out(code, stdout, stderr)),
+            dnf: None,
+            expected_package: "adapter-pkg".to_string(),
+            expected_args: Some(
+                ["-q", "--qf", FILE_INVENTORY_QF, "adapter-pkg"]
+                    .iter()
+                    .map(|value| (*value).to_string())
+                    .collect(),
+            ),
+        })
+    }
+
+    #[test]
+    fn file_inventory_parses_escaped_paths_and_symlinks() {
+        let digest = "a".repeat(64);
+        let output = format!(
+            "8\n'/opt/adapter/a'\\''b\tline\nname.py'\t33188\t'{digest}'\t''\n\
+             '/opt/adapter/current'\t41471\t''\t'../adapter/a'\\''b'\n"
+        );
+        let inventory = file_query(&output, Some(0), "")
+            .query_file_inventory("adapter-pkg")
+            .expect("file inventory");
+        assert_eq!(
+            inventory.digest_algorithm,
+            PackageFileDigestAlgorithm::Sha256
+        );
+        assert_eq!(inventory.files.len(), 2);
+        assert_eq!(inventory.files[0].path, "/opt/adapter/a'b\tline\nname.py");
+        assert_eq!(inventory.files[0].kind, PackageFileKind::Regular);
+        assert_eq!(inventory.files[0].digest.as_deref(), Some(digest.as_str()));
+        assert_eq!(inventory.files[1].kind, PackageFileKind::Symlink);
+        assert_eq!(
+            inventory.files[1].link_target.as_deref(),
+            Some("../adapter/a'b")
+        );
+    }
+
+    #[test]
+    fn file_inventory_preserves_unsupported_algorithm_for_fail_closed_callers() {
+        let inventory = file_query(
+            "1\n'/opt/adapter/hook.py'\t33188\t'deadbeef'\t''\n",
+            Some(0),
+            "",
+        )
+        .query_file_inventory("adapter-pkg")
+        .expect("query itself succeeds");
+        assert_eq!(
+            inventory.digest_algorithm,
+            PackageFileDigestAlgorithm::Unsupported(1)
+        );
+    }
+
+    #[test]
+    fn file_inventory_surfaces_empty_digest_and_nonzero_exit() {
+        let inventory = file_query("8\n'/opt/adapter/hook.py'\t33188\t''\t''\n", Some(0), "")
+            .query_file_inventory("adapter-pkg")
+            .expect("empty digest stays explicit for the integrity layer");
+        assert_eq!(inventory.files[0].digest, None);
+
+        let error = file_query("", Some(1), "rpmdb open failed")
+            .query_file_inventory("adapter-pkg")
+            .expect_err("nonzero rpm exit");
+        assert!(matches!(error, PackageQueryError::QueryFailed { .. }));
     }
 
     #[test]

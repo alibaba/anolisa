@@ -291,6 +291,8 @@ fn adapter_claim(component: &str) -> AdapterClaim {
         enabled_at: "2026-01-01T00:00:00Z".to_string(),
         resource_root: PathBuf::from("/tmp/adapter-resource"),
         bundle_digest: None,
+        source_revision: None,
+        materialized_files: Vec::new(),
         driver_schema: 1,
         status: ClaimStatus::Enabled,
         notices: Vec::new(),

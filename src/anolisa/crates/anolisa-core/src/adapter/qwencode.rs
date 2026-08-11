@@ -39,7 +39,7 @@ use super::driver::{
     ClaimResourceRef, ConditionStatus, DetectResult, DisableReport, DriverCtx, DriverPlan,
     FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable, find_binary_in_path,
 };
-use super::util::{bool_status, cli_failure_reason, digest_tree, display_command, now_iso8601};
+use super::util::{bool_status, cli_failure_reason, display_command, now_iso8601};
 
 const CLI_TIMEOUT: Duration = Duration::from_secs(60);
 // tokenless declares the same floor; earlier Qwen releases expose the
@@ -150,7 +150,6 @@ impl FrameworkDriver for QwenCodeDriver {
 
         Ok(AdapterBundle {
             resource_root: root.clone(),
-            digest: digest_tree(root),
             plugin_id: Some(plugin),
         })
     }
@@ -221,7 +220,9 @@ impl FrameworkDriver for QwenCodeDriver {
             adapter_type: ctx.adapter_type.clone(),
             enabled_at: now_iso8601(),
             resource_root: bundle.resource_root.clone(),
-            bundle_digest: bundle.digest.clone(),
+            bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
             driver_schema: DRIVER_SCHEMA_VERSION,
             status: ClaimStatus::Enabled,
             notices: Vec::new(),
@@ -329,7 +330,6 @@ impl FrameworkDriver for QwenCodeDriver {
         let detect = self.detect(&HostEnv {
             user_home: ctx.user_home.clone(),
         });
-        let (bundle_condition, bundle_status) = bundle_match_condition(claim);
         let registration = probe_registration(&layout, claim, ctx)?;
         let registration_status = registration.status();
         let activation = probe_activation(&layout, ctx)?;
@@ -372,7 +372,6 @@ impl FrameworkDriver for QwenCodeDriver {
                 reason: Some(detect.reason),
                 resource: None,
             },
-            bundle_condition,
             AdapterCondition {
                 kind: AdapterConditionKind::PluginRegistered,
                 status: registration_status,
@@ -399,7 +398,6 @@ impl FrameworkDriver for QwenCodeDriver {
         let summary = summarize(
             claim.status,
             detect.detected,
-            bundle_status,
             registration_status,
             activation_status,
             verification_status,
@@ -1157,34 +1155,9 @@ fn parse_qwen_version(output: &str) -> Option<Version> {
     })
 }
 
-fn bundle_match_condition(claim: &AdapterClaim) -> (AdapterCondition, ConditionStatus) {
-    let kind = AdapterConditionKind::ResourceBundleMatches;
-    let (status, reason) = match (&claim.bundle_digest, digest_tree(&claim.resource_root)) {
-        (Some(recorded), Some(current)) if recorded == &current => (ConditionStatus::True, None),
-        (Some(_), Some(_)) => (
-            ConditionStatus::False,
-            Some("resource bundle changed since enable".to_string()),
-        ),
-        _ => (
-            ConditionStatus::Unknown,
-            Some("no digest recorded or resource root unavailable".to_string()),
-        ),
-    };
-    (
-        AdapterCondition {
-            kind,
-            status,
-            reason,
-            resource: None,
-        },
-        status,
-    )
-}
-
 fn summarize(
     claim_status: ClaimStatus,
     framework_detected: bool,
-    bundle: ConditionStatus,
     registration: ConditionStatus,
     activation: ConditionStatus,
     verification: ConditionStatus,
@@ -1193,15 +1166,13 @@ fn summarize(
         return AdapterSummary::CleanupFailed;
     }
     if !framework_detected
-        || bundle == ConditionStatus::False
         || registration == ConditionStatus::False
         || activation == ConditionStatus::False
         || verification == ConditionStatus::False
     {
         return AdapterSummary::Degraded;
     }
-    if bundle == ConditionStatus::Unknown
-        || registration == ConditionStatus::Unknown
+    if registration == ConditionStatus::Unknown
         || activation == ConditionStatus::Unknown
         || verification == ConditionStatus::Unknown
     {

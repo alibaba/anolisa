@@ -37,7 +37,7 @@ use super::driver::{
     ClaimResourceRef, ConditionStatus, DetectResult, DisableReport, DriverCtx, DriverPlan,
     FrameworkCommand, FrameworkDriver, HostEnv, PreparedEnable, find_binary_in_path,
 };
-use super::util::{bool_status, cli_failure_reason, digest_tree, display_command, now_iso8601};
+use super::util::{bool_status, cli_failure_reason, display_command, now_iso8601};
 
 /// Default timeout for a Codex CLI invocation.
 const CLI_TIMEOUT: Duration = Duration::from_secs(60);
@@ -138,7 +138,6 @@ impl FrameworkDriver for CodexDriver {
         );
         Ok(AdapterBundle {
             resource_root: root.clone(),
-            digest: digest_tree(root),
             plugin_id,
         })
     }
@@ -234,7 +233,9 @@ impl FrameworkDriver for CodexDriver {
                 adapter_type: ctx.adapter_type.clone(),
                 enabled_at: now_iso8601(),
                 resource_root: bundle.resource_root.clone(),
-                bundle_digest: bundle.digest.clone(),
+                bundle_digest: None,
+                source_revision: None,
+                materialized_files: Vec::new(),
                 driver_schema: DRIVER_SCHEMA_VERSION,
                 status: ClaimStatus::Enabled,
                 notices: Vec::new(),
@@ -316,10 +317,6 @@ impl FrameworkDriver for CodexDriver {
             reason: Some(detect.reason.clone()),
             resource: None,
         });
-        let bundle_condition = bundle_match_condition(claim);
-        let bundle_status = bundle_condition.status;
-        conditions.push(bundle_condition);
-
         // Symlink presence is a reliable filesystem check independent of
         // the CLI.
         let symlink_ok = claim_symlink(claim)
@@ -400,7 +397,6 @@ impl FrameworkDriver for CodexDriver {
             claim.status,
             detect.detected,
             bool_status(symlink_ok),
-            bundle_status,
             mkt_status,
             plugin_status,
         );
@@ -799,41 +795,13 @@ fn claim_symlink(claim: &AdapterClaim) -> Option<(PathBuf, PathBuf)> {
     })
 }
 
-/// Build the `ResourceBundleMatches` condition.
-fn bundle_match_condition(claim: &AdapterClaim) -> AdapterCondition {
-    let kind = AdapterConditionKind::ResourceBundleMatches;
-    match (&claim.bundle_digest, digest_tree(&claim.resource_root)) {
-        (Some(recorded), Some(current)) if recorded == &current => AdapterCondition {
-            kind,
-            status: ConditionStatus::True,
-            reason: None,
-            resource: None,
-        },
-        (Some(_), Some(_)) => AdapterCondition {
-            kind,
-            status: ConditionStatus::False,
-            reason: Some("resource bundle changed since enable".to_string()),
-            resource: None,
-        },
-        _ => AdapterCondition {
-            kind,
-            status: ConditionStatus::Unknown,
-            reason: Some("no digest recorded or resource root unavailable".to_string()),
-            resource: None,
-        },
-    }
-}
-
 /// Roll signals into a summary. Healthy requires the framework detected,
-/// the plugin symlink functional, the resource bundle verified unchanged,
-/// and both marketplace and plugin verified present — a broken symlink or
-/// a drifted/vanished bundle means codex is not actually serving this
-/// plugin, so registration alone must not report Healthy.
+/// the plugin symlink functional, and both marketplace and plugin verified
+/// present. Package-owned source integrity is added by the Manager.
 fn summarize(
     claim_status: ClaimStatus,
     detected: bool,
     symlink: ConditionStatus,
-    bundle: ConditionStatus,
     marketplace: ConditionStatus,
     plugin: ConditionStatus,
 ) -> AdapterSummary {
@@ -843,7 +811,7 @@ fn summarize(
     if !detected {
         return AdapterSummary::Degraded;
     }
-    let signals = [symlink, bundle, marketplace, plugin];
+    let signals = [symlink, marketplace, plugin];
     if signals.contains(&ConditionStatus::False) {
         return AdapterSummary::Degraded;
     }
@@ -932,25 +900,21 @@ mod tests {
     }
 
     #[test]
-    fn summarize_folds_symlink_and_bundle_signals() {
+    fn summarize_folds_framework_signals() {
         use ConditionStatus::{False, True, Unknown};
-        let s = |symlink, bundle, mkt, plugin| {
-            summarize(ClaimStatus::Enabled, true, symlink, bundle, mkt, plugin)
+        let s = |symlink, marketplace, plugin| {
+            summarize(ClaimStatus::Enabled, true, symlink, marketplace, plugin)
         };
-        // Registration alone must not report Healthy: a broken symlink or
-        // a drifted bundle degrades even with both registrations intact.
-        assert_eq!(s(False, Unknown, True, True), AdapterSummary::Degraded);
-        assert_eq!(s(True, False, True, True), AdapterSummary::Degraded);
-        // Undecidable drift is Unknown, not Healthy.
-        assert_eq!(s(True, Unknown, True, True), AdapterSummary::Unknown);
-        assert_eq!(s(True, True, True, True), AdapterSummary::Healthy);
+        assert_eq!(s(False, True, True), AdapterSummary::Degraded);
+        assert_eq!(s(True, Unknown, True), AdapterSummary::Unknown);
+        assert_eq!(s(True, True, True), AdapterSummary::Healthy);
         // CleanupFailed and framework-missing keep their priority.
         assert_eq!(
-            summarize(ClaimStatus::CleanupFailed, true, True, True, True, True),
+            summarize(ClaimStatus::CleanupFailed, true, True, True, True),
             AdapterSummary::CleanupFailed
         );
         assert_eq!(
-            summarize(ClaimStatus::Enabled, false, True, True, True, True),
+            summarize(ClaimStatus::Enabled, false, True, True, True),
             AdapterSummary::Degraded
         );
     }

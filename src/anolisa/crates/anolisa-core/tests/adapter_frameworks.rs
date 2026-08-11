@@ -22,7 +22,15 @@ use anolisa_core::adapter::AdapterError;
 use anolisa_core::adapter::claim::{ClaimResourceKind, ClaimStatus, DriverPayload};
 use anolisa_core::adapter::driver::{AdapterConditionKind, AdapterSummary, ConditionStatus};
 use anolisa_core::adapter::manager::{AdapterManager, EnableOutcome};
+use anolisa_core::domain::{PackageIdentity, ProviderBinding};
+use anolisa_core::state::{FileOwner, OwnedFile, OwnedFileKind};
 use anolisa_platform::fs_layout::FsLayout;
+use anolisa_platform::pkg_files::{
+    PackageFile, PackageFileDigestAlgorithm, PackageFileInventory, PackageFileKind,
+    PackageFileQuery,
+};
+use anolisa_platform::pkg_query::PackageQueryError;
+use sha2::{Digest, Sha256};
 
 const COMPONENT: &str = "tokenless";
 
@@ -104,11 +112,15 @@ struct World {
 
 impl World {
     fn manager(&self) -> AdapterManager {
-        AdapterManager::new(
+        let mut manager = AdapterManager::new(
             self.layout.clone(),
             Some(self.user_home.clone()),
             "tester".to_string(),
-        )
+        );
+        manager.set_package_file_query(Box::new(FixturePackageFiles {
+            root: self.prefix.clone(),
+        }));
+        manager
     }
 
     fn load_state(&self) -> anolisa_core::state_store::StateStore {
@@ -118,6 +130,112 @@ impl World {
         )
         .expect("load state")
     }
+}
+
+struct FixturePackageFiles {
+    root: PathBuf,
+}
+
+impl PackageFileQuery for FixturePackageFiles {
+    fn query_file_inventory(
+        &self,
+        _package: &str,
+    ) -> Result<PackageFileInventory, PackageQueryError> {
+        Ok(PackageFileInventory {
+            digest_algorithm: PackageFileDigestAlgorithm::Sha256,
+            files: fixture_package_files(&self.root),
+        })
+    }
+}
+
+fn fixture_package_files(root: &Path) -> Vec<PackageFile> {
+    fn collect(root: &Path, files: &mut Vec<PackageFile>) {
+        for entry in std::fs::read_dir(root).expect("read fixture package root") {
+            let entry = entry.expect("fixture package entry");
+            let path = entry.path();
+            let file_type = entry.file_type().expect("fixture file type");
+            if file_type.is_dir() {
+                collect(&path, files);
+            } else if file_type.is_symlink() {
+                files.push(PackageFile {
+                    path: path.display().to_string(),
+                    kind: PackageFileKind::Symlink,
+                    digest: None,
+                    link_target: Some(
+                        std::fs::read_link(&path)
+                            .expect("fixture symlink target")
+                            .display()
+                            .to_string(),
+                    ),
+                });
+            } else if file_type.is_file() {
+                files.push(PackageFile {
+                    path: path.display().to_string(),
+                    kind: PackageFileKind::Regular,
+                    digest: Some(format!(
+                        "{:x}",
+                        Sha256::digest(std::fs::read(&path).expect("fixture file bytes"))
+                    )),
+                    link_target: None,
+                });
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    collect(root, &mut files);
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    files
+}
+
+fn record_owned_adapter_files(layout: &FsLayout, root: &Path) {
+    let state_path = layout.state_dir.join("installed.toml");
+    let mut state = anolisa_core::state_store::StateStore::load(
+        &state_path,
+        anolisa_platform::privilege::effective_uid(),
+    )
+    .expect("load fixture state");
+    let installation = state
+        .find_mut(anolisa_core::state::ObjectKind::Component, COMPONENT)
+        .expect("fixture component");
+    let ProviderBinding::Owned { artifact } = &mut installation.binding else {
+        panic!("fixture component must be raw-owned");
+    };
+    artifact.files = fixture_package_files(root)
+        .into_iter()
+        .map(|file| OwnedFile {
+            path: PathBuf::from(file.path),
+            owner: FileOwner::Anolisa,
+            sha256: file.digest,
+            kind: match file.kind {
+                PackageFileKind::Symlink => OwnedFileKind::Symlink,
+                _ => OwnedFileKind::File,
+            },
+            referent: file.link_target.map(PathBuf::from),
+            mode: None,
+            capabilities: Vec::new(),
+        })
+        .collect();
+    state.save(&state_path).expect("save fixture state");
+}
+
+fn resolve_fixture_rpm_identity(layout: &FsLayout) {
+    let state_path = layout.state_dir.join("installed.toml");
+    let mut state = anolisa_core::state_store::StateStore::load(
+        &state_path,
+        anolisa_platform::privilege::effective_uid(),
+    )
+    .expect("load fixture state");
+    let installation = state
+        .find_mut(anolisa_core::state::ObjectKind::Component, COMPONENT)
+        .expect("fixture component");
+    let ProviderBinding::Delegated { package, .. } = &mut installation.binding else {
+        panic!("fixture component must be delegated");
+    };
+    *package = PackageIdentity::Resolved {
+        name: COMPONENT.to_string(),
+    };
+    state.save(&state_path).expect("save fixture state");
 }
 
 /// Stage a component contract declaring `framework`/`adapter_type` with the
@@ -205,6 +323,10 @@ dest = "{dest}"
         ),
     )
     .expect("seed contract");
+    let resource_root = expand_dest(dest, &layout.datadir);
+    if resource_root.is_dir() {
+        record_owned_adapter_files(layout, &resource_root);
+    }
 }
 
 /// Minimal `{datadir}`/`{component}` expansion for staging (the manager's
@@ -300,6 +422,7 @@ resource_root = "{rpm_root}/"
         std::fs::create_dir_all(path.parent().unwrap()).expect("contract dir");
         std::fs::write(&path, &contract).expect("seed contract");
     }
+    resolve_fixture_rpm_identity(&layout);
 
     World {
         _root: root,
@@ -345,6 +468,15 @@ fn cosh_enable_status_disable_touches_only_extension_dir() {
     std::fs::write(sibling.join("keep.txt"), b"keep").expect("keep");
 
     let manager = world.manager();
+    let source_runtime_cache = world.resource_root.join("__pycache__/runtime.pyc");
+    std::fs::create_dir_all(
+        source_runtime_cache
+            .parent()
+            .expect("source runtime cache parent"),
+    )
+    .expect("source runtime cache dir");
+    std::fs::write(&source_runtime_cache, b"source-runtime-only")
+        .expect("source runtime cache file");
     let claim = match manager
         .enable(COMPONENT, Some("cosh"), false)
         .expect("enable")
@@ -360,6 +492,10 @@ fn cosh_enable_status_disable_touches_only_extension_dir() {
         "extension copied"
     );
     assert!(ext_dir.join("hooks/run-hook.sh").is_file(), "tree copied");
+    assert!(
+        !ext_dir.join("__pycache__/runtime.pyc").exists(),
+        "unowned source files must not be materialized"
+    );
 
     let status = manager.status(Some(COMPONENT)).expect("status");
     assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
@@ -371,6 +507,26 @@ fn cosh_enable_status_disable_touches_only_extension_dir() {
             .any(|c| c.kind == AdapterConditionKind::TreePresent
                 && c.status == ConditionStatus::True)
     );
+
+    let runtime_cache = ext_dir.join("__pycache__/runtime.pyc");
+    std::fs::create_dir_all(runtime_cache.parent().expect("runtime cache parent"))
+        .expect("runtime cache dir");
+    std::fs::write(&runtime_cache, b"runtime-only").expect("runtime cache file");
+    let status = manager
+        .status(Some(COMPONENT))
+        .expect("status with runtime file");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+
+    std::fs::write(ext_dir.join("hooks/run-hook.sh"), b"changed").expect("mutate copied hook");
+    let status = manager
+        .status(Some(COMPONENT))
+        .expect("status with changed copy");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Degraded);
+    assert!(status.entries[0].report.conditions.iter().any(|condition| {
+        condition.kind == AdapterConditionKind::MaterializedBundleMatches
+            && condition.status == ConditionStatus::False
+    }));
+    std::fs::write(ext_dir.join("hooks/run-hook.sh"), b"#!/bin/sh\n").expect("restore copied hook");
 
     let disabled = manager
         .disable(COMPONENT, Some("cosh"), false)
@@ -883,8 +1039,8 @@ resource_root = "{root_b}/"
         .report
         .conditions
         .iter()
-        .find(|c| c.kind == AdapterConditionKind::ResourceBundleMatches)
-        .expect("bundle condition present");
+        .find(|c| c.kind == AdapterConditionKind::SourceRevisionMatches)
+        .expect("source revision condition present");
     assert_ne!(
         bundle.status,
         ConditionStatus::True,
@@ -1248,6 +1404,7 @@ fn codex_enable_succeeds_with_bundle_under_packaged_datadir() {
         "plugin",
         "{datadir}/adapters/{component}/codex/",
     );
+    record_owned_adapter_files(&layout, &resource_root);
 
     let fake = write_fake_codex(&prefix);
     let xdg = prefix.join("xdg-data");
@@ -2380,6 +2537,7 @@ fn qoder_native_reenable_rejects_preexisting_different_plugin_id() {
     std::fs::write(replacement.join("owner.txt"), b"user-owned\n")
         .expect("replacement ownership marker");
     set_native_qoder_plugin_id(&world, "replacement");
+    record_owned_adapter_files(&world.layout, &world.resource_root);
     guard.set("FAKE_QODER_PLUGIN_ID", Path::new("replacement"));
 
     let error = manager
@@ -2440,6 +2598,7 @@ fn qoder_native_reenable_rejects_absent_different_plugin_id() {
         .expect("initial native enable");
 
     set_native_qoder_plugin_id(&world, "replacement");
+    record_owned_adapter_files(&world.layout, &world.resource_root);
     guard.set("FAKE_QODER_PLUGIN_ID", Path::new("replacement"));
     let error = manager
         .enable(COMPONENT, Some("qoder"), false)
@@ -2583,6 +2742,7 @@ fn qoder_cross_layout_reenable_preserves_legacy_receipt_for_cleanup() {
 
     std::fs::remove_file(world.resource_root.join("hooks.json")).expect("remove legacy hooks");
     stage_native_qoder_bundle(&world.resource_root);
+    record_owned_adapter_files(&world.layout, &world.resource_root);
     let error = manager
         .enable(COMPONENT, Some("qoder"), false)
         .expect_err("cross-layout re-enable must be explicit");
