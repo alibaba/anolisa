@@ -11,6 +11,7 @@ pub enum ErrorCode {
     NotFound = 4,
     Timeout = 5,
     UnsupportedDistro = 6,
+    OutputTooLarge = 7,
     // Pkg (1xx)
     PkgNotFound = 100,
     PkgAlreadyInstalled = 101,
