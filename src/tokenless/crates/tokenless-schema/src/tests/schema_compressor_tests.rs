@@ -472,6 +472,49 @@ fn test_description_truncation_with_stash() {
 }
 
 #[test]
+fn direct_schema_stash_single_retrieve() {
+    // Regression test: direct schema with description > func_desc_max_len must
+    // stash exactly once. The retrieved value must be the verbatim original —
+    // no nested <<tokenless:K1>> markers.
+    use std::sync::Arc;
+    use tokenless_ccr::{InMemoryStore, StashStore, extract_hash};
+
+    let store = Arc::new(InMemoryStore::new());
+    let compressor = SchemaCompressor::new()
+        .with_func_desc_max_len(100)
+        .with_stash_store(store.clone());
+
+    let original_desc = format!("DIRECTORIG_{}", "a".repeat(280));
+    let schema = json!({
+        "type": "object",
+        "description": original_desc,
+        "properties": {
+            "p": {"description": "b".repeat(180)}
+        }
+    });
+
+    let result = compressor.compress(&schema);
+    let desc = result["description"].as_str().unwrap();
+
+    // Output marker must be present and fit within the limit.
+    assert!(desc.contains("tokenless:"), "expected a stash marker in output");
+    assert!(desc.chars().count() <= 100);
+
+    // Retrieve the single stash key — must yield the verbatim original with
+    // no nested markers.
+    let key = extract_hash(desc).expect("marker must carry a valid hash");
+    let retrieved = store.retrieve(key).unwrap().expect("stash entry must exist");
+    assert_eq!(
+        retrieved, original_desc,
+        "retrieved value must equal the original description verbatim"
+    );
+    assert!(
+        !retrieved.contains("tokenless:"),
+        "retrieved value must not contain nested stash markers"
+    );
+}
+
+#[test]
 fn test_compress_parameters_with_nested_schema() {
     let compressor = SchemaCompressor::new();
     let schema = json!({

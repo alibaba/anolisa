@@ -133,28 +133,17 @@ impl SchemaCompressor {
                 self.compress_json_schema(params, 1);
             }
         } else {
-            // Direct schema (no function wrapper)
-            // Compress top-level description
-            if let Some(desc) = result.get("description").and_then(|d| d.as_str()) {
-                let compressed = self.truncate_description(desc, self.func_desc_max_len);
-                result["description"] = Value::String(compressed);
-            }
-
-            // Optionally remove title
-            #[allow(clippy::collapsible_if)]
-            if self.drop_titles {
-                if let Some(obj) = result.as_object_mut() {
-                    obj.remove("title");
+            // Direct schema (no function wrapper). Let compress_json_schema
+            // handle description, title removal, and nested properties at
+            // depth 0 — doing it here first would stash description as K1,
+            // then compress_json_schema would stash the marker string as K2,
+            // requiring two retrieves to recover the original.
+            if result.is_object() {
+                // Compress parameters if present (not a JSON Schema keyword;
+                // compress_json_schema does not recurse into it).
+                if let Some(params) = result.get_mut("parameters") {
+                    self.compress_json_schema(params, 1);
                 }
-            }
-
-            // Compress parameters if present
-            if let Some(params) = result.get_mut("parameters") {
-                self.compress_json_schema(params, 1);
-            }
-
-            // If this looks like a JSON Schema itself, compress it recursively
-            if result.get("type").is_some() || result.get("properties").is_some() {
                 self.compress_json_schema(&mut result, 0);
             }
         }
