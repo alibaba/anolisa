@@ -23,6 +23,8 @@ TOML_CONTRACTS = (
     ("src/agentsight/Cargo.toml", "src/agentsight/component.toml"),
     ("src/copilot-shell/package.json", "src/copilot-shell/component.toml"),
     ("src/cosh-ng/Cargo.toml", "src/cosh-ng/component.toml"),
+    ("src/cosh-ng/Cargo.toml", "src/cosh-ng/.anolisa/component.toml"),
+    ("src/cosh-ng/Cargo.toml", "src/cosh-ng/.anolisa/component.macos.toml"),
     ("src/skillfs/Cargo.toml", "src/skillfs/component.toml"),
     ("src/tokenless/Cargo.toml", "src/anolisa/manifests/components/tokenless/component.toml"),
     ("src/ws-ckpt/src/Cargo.toml", "src/ws-ckpt/component.toml"),
