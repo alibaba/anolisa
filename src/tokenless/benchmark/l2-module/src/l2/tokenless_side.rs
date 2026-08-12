@@ -29,8 +29,16 @@ pub const LATENCY_BASIS: &str = "in-process";
 /// Output of one in-process compression call.
 #[derive(Debug, Clone)]
 pub struct TokenlessOutput {
-    /// Compact-JSON wire form of the compressed value.
+    /// Compact-JSON wire form of the compressed value; what token counts and
+    /// the compression rate are measured on.
     pub compressed: String,
+    /// Text that retention checks run against. For JSON samples this is the
+    /// wire form; for wrapped text (source code) it is the inner `content`
+    /// string, un-escaped, so a ground-truth literal containing a quote or a
+    /// newline matches the way it was written rather than its JSON-escaped
+    /// serialization — escaping a `"` into `\"` was scoring content that was
+    /// fully present as a spurious retention miss.
+    pub retention_text: String,
     /// Pure compression time in seconds (serialization excluded).
     pub latency_s: f64,
 }
@@ -62,8 +70,23 @@ pub fn compress(category: Category, content: &str) -> Result<TokenlessOutput, L2
     let compressed_value = compressor.compress(&value);
     let latency_s = start.elapsed().as_secs_f64();
 
+    let compressed = serde_json::to_string(&compressed_value)?;
+    // Retention matches literal source substrings, so for the wrapped-text
+    // envelope it must see the inner string, not its JSON-escaped form. JSON
+    // samples keep the wire form: their ground truth is written to match it.
+    let retention_text = if category == Category::Json {
+        compressed.clone()
+    } else {
+        compressed_value
+            .get("content")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| compressed.clone())
+    };
+
     Ok(TokenlessOutput {
-        compressed: serde_json::to_string(&compressed_value)?,
+        compressed,
+        retention_text,
         latency_s,
     })
 }

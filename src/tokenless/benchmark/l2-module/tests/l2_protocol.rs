@@ -114,7 +114,7 @@ fn rtk_paired_run_captures_both_sides() {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let run = run_paired(Path::new("/bin/echo"), &argv, &cwd).expect("paired run");
+    let run = run_paired(Path::new("/bin/echo"), &argv, &argv, &cwd).expect("paired run");
     assert!(
         run.raw_text.contains("hello world"),
         "raw: {:?}",
@@ -132,7 +132,7 @@ fn rtk_paired_run_captures_both_sides() {
 
 #[test]
 fn rtk_paired_run_rejects_empty_argv() {
-    let err = run_paired(Path::new("/bin/echo"), &[], &std::env::temp_dir())
+    let err = run_paired(Path::new("/bin/echo"), &[], &[], &std::env::temp_dir())
         .expect_err("empty argv must fail");
     assert!(matches!(err, L2Error::Command(_)), "got {err:?}");
 }
@@ -162,7 +162,7 @@ fn rtk_paired_run_fails_on_raw_command_failure() {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let err = run_paired(Path::new("/bin/echo"), &argv, &std::env::temp_dir())
+    let err = run_paired(Path::new("/bin/echo"), &argv, &argv, &std::env::temp_dir())
         .expect_err("raw failure must surface");
     assert!(matches!(err, L2Error::Command(_)), "got {err:?}");
 }
