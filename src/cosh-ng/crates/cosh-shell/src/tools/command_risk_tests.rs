@@ -600,6 +600,205 @@ fn null_redirection_preserves_partial_path_match() {
 }
 
 #[test]
+fn dup_fd_consumption_keeps_safe_sink_spans_aligned() {
+    // KaiLongZhou review P1 (PR #1903): the dup-fd success path consumes
+    // `&` + digit/`-` characters from the iterator; `byte_pos` must
+    // advance with them, otherwise every later safe-sink span is
+    // misaligned and `strip_null_redirections` cuts the wrong bytes.
+    let command = "ls 2>&1 2>/dev/null";
+    let parsed = super::command_risk_parser::parse_command(command);
+    assert_eq!(parsed.shape, CommandShape::Simple);
+    assert_eq!(parsed.stages, vec![vec!["ls".to_string()]]);
+    assert_eq!(parsed.null_redirections, 1);
+    assert_eq!(parsed.null_redirection_spans, vec![(3, 7), (8, 19)]);
+    // Span slices must reproduce the exact exempted syntax in order.
+    let slices: Vec<&str> = parsed
+        .null_redirection_spans
+        .iter()
+        .map(|&(start, end)| &command[start..end])
+        .collect();
+    assert_eq!(slices, vec!["2>&1", "2>/dev/null"]);
+
+    // Close form counts as a null redirection but records no span: the
+    // `>&-` word must stay visible in the stripped text (never
+    // auto-allowed, V-F5), while the following safe-sink span stays
+    // byte-exact despite the consumed dup characters.
+    let close_command = "ls 2>&- >/dev/null";
+    let close = super::command_risk_parser::parse_command(close_command);
+    assert_eq!(close.shape, CommandShape::Simple);
+    assert_eq!(close.stages, vec![vec!["ls".to_string()]]);
+    assert_eq!(close.null_redirections, 2);
+    assert_eq!(close.null_redirection_spans, vec![(8, 18)]);
+    assert_eq!(&close_command[8..18], ">/dev/null");
+
+    // Pipeline stages: the dup span must not shift the sink span.
+    let pipeline_command = "ls 2>&1 | tail -5 2>/dev/null";
+    let pipeline = super::command_risk_parser::parse_command(pipeline_command);
+    assert_eq!(pipeline.shape, CommandShape::Pipeline);
+    assert_eq!(pipeline.null_redirections, 1);
+    assert_eq!(pipeline.null_redirection_spans, vec![(3, 7), (18, 29)]);
+
+    // Dup form followed by a multi-digit fd safe sink.
+    let multi_command = "ls 2>&1 10>/dev/null";
+    let multi = super::command_risk_parser::parse_command(multi_command);
+    assert_eq!(multi.null_redirections, 1);
+    assert_eq!(multi.null_redirection_spans, vec![(3, 7), (8, 20)]);
+}
+
+#[test]
+fn dup_fd_followed_by_safe_sink_keeps_auto_allow() {
+    // KaiLongZhou review P1 (PR #1903): fd duplication before a safe-sink
+    // redirection must not degrade the auto-allow this PR preserves; the
+    // stripped effective text must be free of `>&` metacharacters.
+    let dup_then_sink = auto("ls 2>&1 2>/dev/null");
+    assert_eq!(
+        dup_then_sink.execution,
+        ExecutionDecision::AutoAllow,
+        "{:?}",
+        dup_then_sink.reasons
+    );
+    assert!(
+        dup_then_sink.reasons.contains(&"output-suppressed"),
+        "{:?}",
+        dup_then_sink.reasons
+    );
+
+    // Close forms stay fail-closed (V-F5, issue #2054): they join the
+    // null-sink channel with the `output-suppressed` reason but are never
+    // auto-allowed, whether alone or followed by a safe sink; the safe
+    // sink after a close form must still keep its byte-exact span.
+    for command in ["ls 2>&-", "ls 2>&- >/dev/null"] {
+        let assessment = auto(command);
+        assert_eq!(
+            assessment.execution,
+            ExecutionDecision::AskUser,
+            "{command}: {:?}",
+            assessment.reasons
+        );
+        assert!(assessment.auto_allow.is_none(), "{command}");
+        assert!(
+            assessment.reasons.contains(&"output-suppressed"),
+            "{command}: {:?}",
+            assessment.reasons
+        );
+    }
+
+    // Boundary: duplication without suppression stays fail-closed AskUser
+    // (`2>&1` is descriptor routing, not output suppression).
+    let dup_only = auto("ls 2>&1");
+    assert_eq!(
+        dup_only.execution,
+        ExecutionDecision::AskUser,
+        "{:?}",
+        dup_only.reasons
+    );
+    assert!(dup_only.auto_allow.is_none());
+
+    // ask() side: no false high-risk write classification.
+    for command in ["ls 2>&1 2>/dev/null", "ls 2>&- >/dev/null"] {
+        let assessment = ask(command);
+        assert_ne!(
+            assessment.impact,
+            RiskImpact::High,
+            "{command}: {:?}",
+            assessment.reasons
+        );
+        assert!(
+            !assessment.reasons.contains(&"redirection-write"),
+            "{command}: {:?}",
+            assessment.reasons
+        );
+        assert!(
+            assessment.reasons.contains(&"output-suppressed"),
+            "{command}: {:?}",
+            assessment.reasons
+        );
+    }
+}
+
+#[test]
+fn multi_digit_fd_prefix_spans_cover_full_prefix() {
+    // KaiLongZhou review P2 (PR #1903): a multi-digit fd prefix span must
+    // start at the first prefix digit so stripping removes the whole
+    // `[N]>` syntax instead of leaving a residual digit behind.
+    let ps_command = "ps 10>/dev/null";
+    let ps = super::command_risk_parser::parse_command(ps_command);
+    assert_eq!(ps.shape, CommandShape::Simple);
+    assert_eq!(ps.stages, vec![vec!["ps".to_string()]]);
+    assert_eq!(ps.null_redirections, 1);
+    assert_eq!(ps.null_redirection_spans, vec![(3, 15)]);
+    assert_eq!(&ps_command[3..15], "10>/dev/null");
+
+    let echo_command = "echo hi 10>/dev/null";
+    let echo = super::command_risk_parser::parse_command(echo_command);
+    assert_eq!(
+        echo.stages,
+        vec![vec!["echo".to_string(), "hi".to_string()]]
+    );
+    assert_eq!(echo.null_redirections, 1);
+    assert_eq!(echo.null_redirection_spans, vec![(8, 20)]);
+    assert_eq!(&echo_command[8..20], "10>/dev/null");
+
+    for command in ["ps 10>/dev/null", "echo hi 10>/dev/null"] {
+        let assessment = ask(command);
+        assert_ne!(
+            assessment.impact,
+            RiskImpact::High,
+            "{command}: {:?}",
+            assessment.reasons
+        );
+        assert!(
+            !assessment.reasons.contains(&"redirection-write"),
+            "{command}: {:?}",
+            assessment.reasons
+        );
+        assert!(
+            assessment.reasons.contains(&"output-suppressed"),
+            "{command}: {:?}",
+            assessment.reasons
+        );
+    }
+}
+
+#[test]
+fn escaped_arguments_keep_null_redirection_spans_aligned() {
+    // SunnyQjm follow-up (PR #1903): every iterator consumption site must
+    // keep `byte_pos` in sync; the `\\` arm consumes the escaped
+    // character, which shifts later safe-sink spans otherwise.
+    let command = r"ls foo\ bar 2>/dev/null";
+    let parsed = super::command_risk_parser::parse_command(command);
+    assert_eq!(parsed.shape, CommandShape::Simple);
+    assert_eq!(parsed.null_redirections, 1);
+    assert_eq!(parsed.null_redirection_spans, vec![(12, 23)]);
+    assert_eq!(&command[12..23], "2>/dev/null");
+}
+
+#[test]
+fn real_write_redirection_stays_fail_closed_before_safe_sink() {
+    // SunnyQjm follow-up (PR #1903): the else branch (a real write target
+    // such as `>out.txt`) escalates to RedirectionWrite and consumes the
+    // second `>` of `>>`; a later safe sink must not mask the write and
+    // span tracking must stay aligned on the fail-closed path.
+    let single = ask("cat >out.txt 2>/dev/null");
+    assert_eq!(single.shape, CommandShape::RedirectionWrite);
+    assert!(single.reasons.contains(&"redirection-write"));
+    assert!(!single.reasons.contains(&"output-suppressed"));
+
+    let append = ask("cat >>out.txt 2>/dev/null");
+    assert_eq!(append.shape, CommandShape::RedirectionWrite);
+    assert!(append.reasons.contains(&"redirection-write"));
+    assert!(!append.reasons.contains(&"output-suppressed"));
+
+    // Parser-level invariant: even after the fail-closed `>>out.txt`
+    // branch consumes the second `>`, the following safe-sink span stays
+    // byte-exact.
+    let command = "cat >>out.txt 2>/dev/null";
+    let parsed = super::command_risk_parser::parse_command(command);
+    assert_eq!(parsed.null_redirection_spans, vec![(14, 25)]);
+    assert_eq!(&command[14..25], "2>/dev/null");
+}
+
+#[test]
 fn compound_high_risk_tails_survive_null_redirection_stripping() {
     // Design v3 §3: stripped compounds are assessed per segment with the
     // existing simple/pipeline rules and aggregated, so tails keep their

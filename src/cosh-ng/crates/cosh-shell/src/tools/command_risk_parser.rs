@@ -32,11 +32,15 @@ pub(super) struct ParsedCommand {
     pub(super) shape: CommandShape,
     pub(super) stages: Vec<Vec<String>>,
     pub(super) null_redirections: usize,
-    /// Byte ranges `(start, end)` of null redirections in the original
-    /// command text, covering the fd prefix (if any), the `>` / `>>`
-    /// operator, any whitespace, and the target path. Used by
-    /// `strip_null_redirections()` in `command_risk.rs` to produce a
-    /// lossless command text for downstream validators.
+    /// Byte ranges `(start, end)` of elidable output-redirection syntax
+    /// in the original command text: null-sink redirections (fd prefix,
+    /// `>` / `>>` operator, any whitespace, and the target path) plus the
+    /// exempted duplication words `[N]>&1` / `[N]>&2`. Close forms
+    /// (`[N]>&-`) are counted in `null_redirections` but carry no span:
+    /// they are never auto-allowed, so they must stay visible in the
+    /// stripped text. Spans are recorded in source order and never
+    /// overlap. Used by `strip_null_redirections()` in `command_risk.rs`
+    /// to produce a lossless command text for downstream validators.
     pub(super) null_redirection_spans: Vec<(usize, usize)>,
     /// Command segments split at `&&`, `||`, `;`, and newlines; each
     /// segment holds its own pipeline stages. Only populated when the
@@ -88,6 +92,11 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
     // content; such tokens are ordinary arguments and never fd prefixes.
     let mut token_quoted = false;
     let mut chars = command.chars().peekable();
+    // Byte offset of the next character `chars` will yield. The loop head
+    // advances it for every character pulled by the `while let` itself;
+    // any extra `chars.next()` inside the loop body must advance it by
+    // the same amount, otherwise the recorded null-redirection spans
+    // drift (KaiLongZhou / SunnyQjm reviews, PR #1903).
     let mut byte_pos: usize = 0;
     let mut null_redirection_spans: Vec<(usize, usize)> = Vec::new();
 
@@ -116,6 +125,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                 push_token(&mut tokens, &mut token, &mut token_quoted);
                 if chars.peek().is_some_and(|next| *next == '|') {
                     chars.next();
+                    byte_pos += 1;
                     segment_marks.push((stages.len(), tokens.len(), SegmentConnector::Or));
                     shape = max_shape(shape, CommandShape::AndOrList);
                 } else {
@@ -127,6 +137,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                 push_token(&mut tokens, &mut token, &mut token_quoted);
                 if chars.peek().is_some_and(|next| *next == '&') {
                     chars.next();
+                    byte_pos += 1;
                     segment_marks.push((stages.len(), tokens.len(), SegmentConnector::And));
                     shape = max_shape(shape, CommandShape::AndOrList);
                 } else {
@@ -228,8 +239,37 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                         )
                     });
                     if (has_digit || has_dash) && boundary_ok {
+                        // Duplication forms (`[N]>&1` / `[N]>&2`) are pure
+                        // descriptor routing with no persistent effect;
+                        // record their byte span so stripping removes them
+                        // together with safe-sink spans and the effective
+                        // text retains no `>&` metacharacters
+                        // (KaiLongZhou review P1, PR #1903). Close forms
+                        // (`[N]>&-`) intentionally stay unstripped: they
+                        // are never auto-allowed (V-F5, issue #2054), so
+                        // the residual fd word keeps the downstream broker
+                        // fail-closed.
+                        let dup_span_start = if has_digit {
+                            Some(if fd_candidate {
+                                let fd_bytes: usize = token.chars().map(|c| c.len_utf8()).sum();
+                                byte_pos.saturating_sub(1 + fd_bytes)
+                            } else {
+                                byte_pos - 1
+                            })
+                        } else {
+                            None
+                        };
                         for _ in 0..dup_consumed {
                             chars.next();
+                        }
+                        // The consumed dup characters (`&` plus a digit or
+                        // `-`) are ASCII, so the byte advance equals the
+                        // character count; keep byte_pos in sync with the
+                        // iterator so later spans stay aligned
+                        // (KaiLongZhou review P1, PR #1903).
+                        byte_pos += dup_consumed;
+                        if let Some(start) = dup_span_start {
+                            null_redirection_spans.push((start, byte_pos));
                         }
                         // Close forms (`[N]>&-`) suppress the stream from
                         // the user's point of view only when they close an
@@ -297,8 +337,11 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                     } else {
                         byte_pos - 1
                     };
+                    // Sum the bytes on the main iterator, which still
+                    // points at the start of the consumed region; the
+                    // lookahead clone has already advanced past it.
                     let consumed_bytes: usize =
-                        lookahead.clone().take(consumed).map(|c| c.len_utf8()).sum();
+                        chars.clone().take(consumed).map(|c| c.len_utf8()).sum();
                     if fd_candidate {
                         token.clear();
                         token_quoted = false;
@@ -315,6 +358,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
                     }
                     if chars.peek().is_some_and(|next| *next == '>') {
                         chars.next();
+                        byte_pos += 1;
                     }
                     shape = max_shape(shape, CommandShape::RedirectionWrite);
                 }
@@ -330,6 +374,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
             '$' if chars.peek().is_some_and(|next| *next == '(') => {
                 push_token(&mut tokens, &mut token, &mut token_quoted);
                 chars.next();
+                byte_pos += 1;
                 shape = max_shape(shape, CommandShape::CommandSubstitution);
             }
             '(' | ')' | '{' | '}' => {
@@ -338,6 +383,7 @@ pub(super) fn parse_command(command: &str) -> ParsedCommand {
             }
             '\\' => {
                 if let Some(next) = chars.next() {
+                    byte_pos += next.len_utf8();
                     token.push(next);
                     token_quoted = true;
                 }
