@@ -191,9 +191,11 @@ Tokenless 默认将统计数据和可逆压缩数据分别存储在
 export TOKENLESS_DATA_DIR="$HOME/path/to/tokenless-data"
 ```
 
-该目录必须是位于真实用户 home 下的绝对路径。若只需自定义一个数据库，
-现有的 `TOKENLESS_STATS_DB`、`TOKENLESS_STASH_DB` 和 `--stash-db` 覆盖项
-优先级更高。配置文件仍位于 `~/.tokenless/config.json`。
+该目录可以是当前用户有权访问的任意绝对路径，包括 `/var/lib` 下由服务管理
+的目录；文件系统根目录、相对路径和父目录遍历会被拒绝。若只需自定义一个
+数据库，现有的 `TOKENLESS_STATS_DB`、`TOKENLESS_STASH_DB` 和 `--stash-db`
+覆盖项优先级更高，但必须位于真实用户 home 或选定的数据目录下。配置文件
+仍位于 `~/.tokenless/config.json`。
 
 ## 架构
 

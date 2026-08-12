@@ -101,8 +101,9 @@ Configuration is managed through the `tokenless` CLI's environment and config fi
 | `TOKENLESS_STASH_DB` | `~/.tokenless/stash.db` | Reversible stash database path |
 
 `TOKENLESS_STATS_DB` and `TOKENLESS_STASH_DB` take precedence over
-`TOKENLESS_DATA_DIR`. Custom database paths must remain under the real user
-home.
+`TOKENLESS_DATA_DIR`, which may be any accessible absolute non-root directory.
+Custom database files must remain under the real user home or selected data
+directory.
 
 ### View Statistics
 

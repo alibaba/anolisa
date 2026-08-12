@@ -73,19 +73,25 @@ struct TempDataDir {
 impl TempDataDir {
     fn new() -> Option<Self> {
         let home = get_home_dir();
-        if home.is_empty() {
-            return None;
-        }
         let unique = format!(
-            ".tokenless-data-dir-integration-{}-{}",
+            "tokenless-external-data-dir-integration-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .ok()?
                 .as_nanos()
         );
-        let root = std::path::PathBuf::from(home).join(unique);
+        let root = std::env::temp_dir().join(unique);
         std::fs::create_dir_all(&root).ok()?;
+        if !home.is_empty()
+            && root
+                .canonicalize()
+                .ok()?
+                .starts_with(std::path::Path::new(&home).canonicalize().ok()?)
+        {
+            std::fs::remove_dir_all(&root).ok();
+            return None;
+        }
         let data_dir = root.join("databases");
         Some(Self { root, data_dir })
     }
@@ -123,7 +129,16 @@ fn data_dir_env_routes_stats_and_stash_databases() {
         "stats command failed: {}",
         String::from_utf8_lossy(&stats_output.stderr)
     );
+    assert!(!String::from_utf8_lossy(&stats_output.stderr).contains("ignoring TOKENLESS_DATA_DIR"));
     assert!(fixture.data_dir.join("stats.db").is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fixture.data_dir.metadata().unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
 
     let stash_output = fixture
         .command()
@@ -140,7 +155,7 @@ fn stats_db_env_takes_precedence_over_data_dir() {
         Some(fixture) => fixture,
         None => return,
     };
-    let explicit_dir = fixture.root.join("explicit");
+    let explicit_dir = fixture.data_dir.join("explicit");
     std::fs::create_dir_all(&explicit_dir).unwrap();
     let explicit_db = explicit_dir.join("stats.db");
 
@@ -165,7 +180,7 @@ fn stash_db_env_takes_precedence_over_data_dir() {
         Some(fixture) => fixture,
         None => return,
     };
-    let explicit_dir = fixture.root.join("explicit");
+    let explicit_dir = fixture.data_dir.join("explicit");
     std::fs::create_dir_all(&explicit_dir).unwrap();
     let explicit_db = explicit_dir.join("stash.db");
 
@@ -178,6 +193,71 @@ fn stash_db_env_takes_precedence_over_data_dir() {
     assert!(!output.status.success());
     assert!(explicit_db.is_file());
     assert!(!fixture.data_dir.join("stash.db").exists());
+}
+
+#[test]
+fn invalid_explicit_data_dir_does_not_fall_back_to_home() {
+    let output = tokenless_bin()
+        .env("TOKENLESS_DATA_DIR", "relative/data")
+        .env_remove("TOKENLESS_STATS_DB")
+        .args(["stats", "summary"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("path 'relative/data' is not absolute"));
+}
+
+#[test]
+fn invalid_explicit_data_dir_does_not_block_stats_status() {
+    let output = tokenless_bin()
+        .env("TOKENLESS_DATA_DIR", "relative/data")
+        .env_remove("TOKENLESS_STATS_DB")
+        .args(["stats", "status"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Stats recording:"));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn valid_stats_db_override_wins_over_invalid_data_dir() {
+    let fixture = match TempStatsDb::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let output = fixture
+        .command()
+        .env("TOKENLESS_DATA_DIR", "relative/data")
+        .args(["stats", "summary"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(fixture.path.is_file());
+}
+
+#[test]
+fn stats_db_override_cannot_escape_selected_data_dir() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let outside_db = fixture.root.join("outside-stats.db");
+    let output = fixture
+        .command()
+        .env("TOKENLESS_STATS_DB", &outside_db)
+        .args(["stats", "summary"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(!outside_db.exists());
+    assert!(fixture.data_dir.join("stats.db").is_file());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ignoring TOKENLESS_STATS_DB"));
 }
 
 #[test]

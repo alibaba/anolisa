@@ -7,6 +7,7 @@
 pub mod config;
 pub mod diff;
 pub mod home;
+pub mod path_policy;
 pub mod query;
 pub mod record;
 pub mod recorder;
@@ -32,6 +33,10 @@ pub use diff::{
 };
 
 pub use home::get_home_dir;
+
+pub use path_policy::{
+    PathPolicyError, ensure_state_dir, resolve_data_dir, validate_data_dir, validate_database_path,
+};
 
 pub use sls::{SlsRecord, SlsWriter};
 

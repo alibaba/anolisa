@@ -71,9 +71,9 @@ An environment override still wins after these commands. For example, `TOKENLESS
 | `TOKENLESS_STATS_ENABLED` | Override local statistics | Does not affect SLS or Stash |
 | `TOKENLESS_SLS_ENABLED` | Override SLS metrics | Does not affect local statistics |
 | `TOKENLESS_COMPRESSION_ENABLED` | Override active compression | False is dry-run, not a full stop |
-| `TOKENLESS_DATA_DIR` | Directory containing `stats.db` and `stash.db` | Absolute path under the real user home |
-| `TOKENLESS_STATS_DB` | Override the statistics database | The CLI and bundled RTK writer validate the real-user-home boundary and ignore an invalid value |
-| `TOKENLESS_STASH_DB` | Override the Stash database | Must be under the real user home |
+| `TOKENLESS_DATA_DIR` | Directory containing `stats.db` and `stash.db` | Any accessible absolute directory except filesystem root; no parent traversal |
+| `TOKENLESS_STATS_DB` | Override the statistics database | Must be under the real user home or selected data directory |
+| `TOKENLESS_STASH_DB` | Override the Stash database | Must be under the real user home or selected data directory |
 | `TOKENLESS_SLS_PATH` | Override the SLS JSONL path | Must be under `/var/log/` or `/tmp/` |
 
 ### Adapter and diagnostic variables
@@ -94,9 +94,9 @@ Database path priority is:
 - Stats: `TOKENLESS_STATS_DB` > `TOKENLESS_DATA_DIR/stats.db` > `~/.tokenless/stats.db`
 - Stash: `--stash-db` > `TOKENLESS_STASH_DB` > `TOKENLESS_DATA_DIR/stash.db` > `~/.tokenless/stash.db`
 
-Both the CLI and bundled RTK writer validate Stats paths against the real user home. An invalid `TOKENLESS_STATS_DB` is skipped; `TOKENLESS_DATA_DIR` is used only when it passes the same boundary check, otherwise the default path is used.
+`TOKENLESS_DATA_DIR` is an explicit directory-level relocation and may point outside the real user home, including to a managed service directory under `/var/lib`. Both the CLI and bundled RTK writer reject filesystem root, relative paths, parent traversal, and existing non-directory targets. Without a valid higher-priority file override, an invalid explicit data directory disables that operation's SQLite state instead of silently falling back to home.
 
-An empty value is treated as unset. `TOKENLESS_DATA_DIR` may name a directory that does not exist yet; Tokenless creates it after validating its nearest existing ancestor. It does not relocate `~/.tokenless/config.json` or the SLS JSONL output.
+An empty value is treated as unset. `TOKENLESS_DATA_DIR` may name a directory that does not exist yet; Tokenless canonicalizes its nearest existing ancestor before creating it. File-level overrides are accepted only beneath the canonical real home or selected data directory, and existing database symlinks are rejected. `TOKENLESS_DATA_DIR` does not relocate `~/.tokenless/config.json` or the SLS JSONL output.
 
 ## Local and external data
 
@@ -124,7 +124,7 @@ ls -l ~/.tokenless/stats.db*
 
 ### Sensitivity of Stash
 
-Stash saves the original content removed by truncation, not a summary. It does not save fields removed solely because they are blacklisted, `null`, or empty. Its path is restricted to the real user home by the `tokenless` CLI, but also verify that the database and SQLite sidecar files are not readable by other local users:
+Stash saves the original content removed by truncation, not a summary. It does not save fields removed solely because they are blacklisted, `null`, or empty. The `tokenless` CLI restricts its path to the real user home or selected data directory, but also verify that the database and SQLite sidecar files are not readable by other local users:
 
 ```bash
 ls -l ~/.tokenless/stash.db*

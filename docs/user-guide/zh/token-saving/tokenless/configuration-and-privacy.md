@@ -71,9 +71,9 @@ tokenless stats disable
 | `TOKENLESS_STATS_ENABLED` | 覆盖本地统计开关 | 不影响 SLS 或 Stash |
 | `TOKENLESS_SLS_ENABLED` | 覆盖 SLS 度量开关 | 不影响本地统计 |
 | `TOKENLESS_COMPRESSION_ENABLED` | 覆盖真实压缩开关 | false 是 dry-run，不是完全停用 |
-| `TOKENLESS_DATA_DIR` | 存放 `stats.db` 和 `stash.db` 的目录 | 须为真实用户 home 下的绝对路径 |
-| `TOKENLESS_STATS_DB` | 覆盖统计数据库路径 | CLI 和随包 RTK 写入器都会校验真实用户 home 边界，并忽略无效值 |
-| `TOKENLESS_STASH_DB` | 覆盖 Stash 数据库路径 | 必须位于真实用户 home 下 |
+| `TOKENLESS_DATA_DIR` | 存放 `stats.db` 和 `stash.db` 的目录 | 可访问的任意绝对目录，但不能是文件系统根目录或包含父目录遍历 |
+| `TOKENLESS_STATS_DB` | 覆盖统计数据库路径 | 必须位于真实用户 home 或选定的数据目录下 |
+| `TOKENLESS_STASH_DB` | 覆盖 Stash 数据库路径 | 必须位于真实用户 home 或选定的数据目录下 |
 | `TOKENLESS_SLS_PATH` | 覆盖 SLS JSONL 路径 | 必须位于 `/var/log/` 或 `/tmp/` 下 |
 
 ### Adapter 和诊断变量
@@ -94,9 +94,9 @@ tokenless stats disable
 - 统计库：`TOKENLESS_STATS_DB` > `TOKENLESS_DATA_DIR/stats.db` > `~/.tokenless/stats.db`
 - stash 库：`--stash-db` > `TOKENLESS_STASH_DB` > `TOKENLESS_DATA_DIR/stash.db` > `~/.tokenless/stash.db`
 
-CLI 和随包 RTK 写入器都会按真实用户 home 校验 Stats 路径。无效的 `TOKENLESS_STATS_DB` 会被跳过；`TOKENLESS_DATA_DIR` 也必须通过相同的边界校验，否则使用默认路径。
+`TOKENLESS_DATA_DIR` 是显式的目录级迁移配置，可以指向真实用户 home 之外，包括 `/var/lib` 下由服务管理的目录。CLI 和随包 RTK 写入器都会拒绝文件系统根目录、相对路径、父目录遍历以及已存在的非目录目标。若没有有效的更高优先级文件覆盖项，显式数据目录无效时会停用本次操作的 SQLite 状态，不会静默回退到 home。
 
-空值视为未设置。`TOKENLESS_DATA_DIR` 可以指向尚不存在的目录；Tokenless 会先校验其最近的已存在父目录，再创建目标目录。该变量不会迁移 `~/.tokenless/config.json` 或 SLS JSONL 输出。
+空值视为未设置。`TOKENLESS_DATA_DIR` 可以指向尚不存在的目录；Tokenless 会先规范化其最近的已存在父目录，再创建目标目录。文件级覆盖项只能位于规范化后的真实用户 home 或选定的数据目录下，且已存在的数据库软链接会被拒绝。该变量不会迁移 `~/.tokenless/config.json` 或 SLS JSONL 输出。
 
 ## 本地与外部数据
 
@@ -124,7 +124,7 @@ ls -l ~/.tokenless/stats.db*
 
 ### Stash 的敏感性
 
-Stash 保存压缩时被截断的原始内容，而不是摘要。仅因字段在黑名单中、值为 `null` 或为空而被移除的内容不会写入 Stash。`tokenless` CLI 会把路径限制在真实用户 home 下，但仍应确认数据库及 SQLite sidecar 文件不会被其他本机用户读取：
+Stash 保存压缩时被截断的原始内容，而不是摘要。仅因字段在黑名单中、值为 `null` 或为空而被移除的内容不会写入 Stash。`tokenless` CLI 会把路径限制在真实用户 home 或选定的数据目录下，但仍应确认数据库及 SQLite sidecar 文件不会被其他本机用户读取：
 
 ```bash
 ls -l ~/.tokenless/stash.db*

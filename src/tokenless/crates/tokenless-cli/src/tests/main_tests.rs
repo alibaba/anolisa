@@ -5,7 +5,7 @@ static ENV_MUTEX: Mutex<()> = Mutex::new(());
 fn default_path_resolver(home: &str) -> DatabasePathResolver {
     DatabasePathResolver {
         home: std::sync::OnceLock::from(home.to_string()),
-        data_dir: std::sync::OnceLock::from(Ok(format!("{home}/.tokenless"))),
+        data_dir: std::sync::OnceLock::from(Ok(PathBuf::from(home).join(".tokenless"))),
     }
 }
 
@@ -101,11 +101,9 @@ fn temp_subdir(label: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn validate_db_path_rejects_empty_home() {
-    // No trusted home anchor means starts_with("") would match
-    // any path, so the function must short-circuit to rejection.
-    let err = validate_db_path("/tmp/whatever.db", "").unwrap_err();
-    assert!(err.contains("no trusted home"));
+fn validate_db_path_rejects_without_trusted_root() {
+    let err = validate_db_path(Path::new("/tmp/whatever.db"), "", None).unwrap_err();
+    assert!(err.contains("no trusted root"));
 }
 
 #[test]
@@ -113,14 +111,18 @@ fn validate_db_path_accepts_path_inside_home() {
     let home = temp_subdir("inside");
     let canon_home = std::fs::canonicalize(&home).unwrap();
     let inner = canon_home.join("stats.db");
-    let result =
-        validate_db_path(inner.to_str().unwrap(), canon_home.to_str().unwrap()).unwrap();
-    assert_eq!(result, inner.to_str().unwrap());
+    let result = validate_db_path(
+        &inner,
+        canon_home.to_str().unwrap(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(result, inner);
     std::fs::remove_dir_all(&home).ok();
 }
 
 #[test]
-fn validate_db_path_rejects_path_outside_home() {
+fn validate_db_path_rejects_path_outside_trusted_roots() {
     let home = temp_subdir("outside-home");
     let canon_home = std::fs::canonicalize(&home).unwrap();
     // Pick a known-existing directory that is NOT under home.
@@ -129,8 +131,13 @@ fn validate_db_path_rejects_path_outside_home() {
         std::fs::remove_dir_all(&home).ok();
         return;
     }
-    let err = validate_db_path("/etc/hosts", canon_home.to_str().unwrap()).unwrap_err();
-    assert!(err.contains("outside home"));
+    let err = validate_db_path(
+        Path::new("/etc/hosts"),
+        canon_home.to_str().unwrap(),
+        None,
+    )
+    .unwrap_err();
+    assert!(err.contains("outside the trusted home and data directory"));
     std::fs::remove_dir_all(&home).ok();
 }
 
@@ -141,12 +148,16 @@ fn validate_db_path_rejects_parent_dir_bypass_with_existing_parent() {
     let home = temp_subdir("pd-existing");
     let canon_home = std::fs::canonicalize(&home).unwrap();
     let escape = canon_home.join("foo/../../etc/evil.db");
-    let err =
-        validate_db_path(escape.to_str().unwrap(), canon_home.to_str().unwrap()).unwrap_err();
+    let err = validate_db_path(
+        &escape,
+        canon_home.to_str().unwrap(),
+        None,
+    )
+    .unwrap_err();
     // Either "outside home" (parent canonicalized away from home) or
     // "cannot be resolved" (parent itself unreachable). Both are valid
     // rejections — what matters is no Ok return.
-    assert!(err.contains("outside home") || err.contains("cannot be resolved"));
+    assert!(err.contains("parent traversal"));
     std::fs::remove_dir_all(&home).ok();
 }
 
@@ -160,7 +171,7 @@ fn validate_db_path_canonicalizes_home_with_symlink_prefix() {
     // informational there but real coverage on macOS.
     let home = temp_subdir("sym-prefix");
     let inner = home.join("stats.db");
-    let result = validate_db_path(inner.to_str().unwrap(), home.to_str().unwrap());
+    let result = validate_db_path(&inner, home.to_str().unwrap(), None);
     assert!(
         result.is_ok(),
         "raw (non-canonical) home should be accepted after internal canonicalization: {:?}",
@@ -177,7 +188,11 @@ fn validate_db_path_rejects_parent_dir_bypass_with_nonexistent_parent() {
     let home = temp_subdir("pd-nonexistent");
     let canon_home = std::fs::canonicalize(&home).unwrap();
     let escape = canon_home.join("does-not-exist-xyz/../../etc/evil.db");
-    let result = validate_db_path(escape.to_str().unwrap(), canon_home.to_str().unwrap());
+    let result = validate_db_path(
+        &escape,
+        canon_home.to_str().unwrap(),
+        None,
+    );
     assert!(
         result.is_err(),
         "ParentDir bypass via nonexistent intermediate must be rejected; got {:?}",
@@ -190,40 +205,34 @@ fn validate_db_path_rejects_parent_dir_bypass_with_nonexistent_parent() {
 fn validate_data_dir_path_accepts_nonexistent_descendant() {
     let home = temp_subdir("data-dir-home");
     let candidate = home.join("nested/data");
-    let result =
-        validate_data_dir_path(candidate.to_str().unwrap(), home.to_str().unwrap()).unwrap();
-    assert_eq!(result, candidate.to_str().unwrap());
+    let result = tokenless_stats::validate_data_dir(&candidate).unwrap();
+    assert_eq!(result, candidate);
     std::fs::remove_dir_all(&home).ok();
 }
 
 #[test]
-fn get_data_dir_rejects_empty_home() {
-    let err = get_data_dir("").unwrap_err();
-    assert!(err.contains("no trusted home"));
-}
-
-#[test]
-fn validate_data_dir_path_rejects_outside_home() {
+fn validate_data_dir_path_accepts_outside_home() {
     let home = temp_subdir("data-dir-outside-home");
     let outside = temp_subdir("data-dir-outside-candidate");
-    let err =
-        validate_data_dir_path(outside.to_str().unwrap(), home.to_str().unwrap()).unwrap_err();
-    assert!(err.contains("outside home"));
+    let resolved = tokenless_stats::resolve_data_dir(
+        Some(home.as_path()),
+        outside.to_str(),
+    )
+    .unwrap();
+    assert_eq!(resolved, outside.canonicalize().unwrap());
     std::fs::remove_dir_all(&home).ok();
     std::fs::remove_dir_all(&outside).ok();
 }
 
 #[test]
 fn validate_data_dir_path_rejects_relative_path() {
-    let home = temp_subdir("data-dir-relative");
-    let err = validate_data_dir_path("relative/data", home.to_str().unwrap()).unwrap_err();
-    assert!(err.contains("not absolute"));
-    std::fs::remove_dir_all(&home).ok();
+    let error = tokenless_stats::validate_data_dir(Path::new("relative/data")).unwrap_err();
+    assert!(error.to_string().contains("not absolute"));
 }
 
 #[cfg(unix)]
 #[test]
-fn validate_data_dir_path_rejects_symlink_escape() {
+fn validate_data_dir_path_canonicalizes_symlink() {
     use std::os::unix::fs::symlink;
 
     let home = temp_subdir("data-dir-symlink-home");
@@ -231,9 +240,8 @@ fn validate_data_dir_path_rejects_symlink_escape() {
     let link = home.join("redirect");
     symlink(&outside, &link).unwrap();
     let candidate = link.join("data");
-    let err =
-        validate_data_dir_path(candidate.to_str().unwrap(), home.to_str().unwrap()).unwrap_err();
-    assert!(err.contains("outside home"));
+    let resolved = tokenless_stats::validate_data_dir(&candidate).unwrap();
+    assert_eq!(resolved, outside.canonicalize().unwrap().join("data"));
     std::fs::remove_dir_all(&home).ok();
     std::fs::remove_dir_all(&outside).ok();
 }
@@ -242,9 +250,8 @@ fn validate_data_dir_path_rejects_symlink_escape() {
 fn validate_data_dir_path_rejects_parent_traversal() {
     let home = temp_subdir("data-dir-traversal");
     let candidate = home.join("nested/../data");
-    let err =
-        validate_data_dir_path(candidate.to_str().unwrap(), home.to_str().unwrap()).unwrap_err();
-    assert!(err.contains("parent traversal"));
+    let error = tokenless_stats::validate_data_dir(&candidate).unwrap_err();
+    assert!(error.to_string().contains("parent traversal"));
     std::fs::remove_dir_all(&home).ok();
 }
 
@@ -253,9 +260,8 @@ fn validate_data_dir_path_rejects_existing_file() {
     let home = temp_subdir("data-dir-file");
     let candidate = home.join("not-a-directory");
     std::fs::write(&candidate, "").unwrap();
-    let err =
-        validate_data_dir_path(candidate.to_str().unwrap(), home.to_str().unwrap()).unwrap_err();
-    assert!(err.contains("not a directory"));
+    let error = tokenless_stats::validate_data_dir(&candidate).unwrap_err();
+    assert!(error.to_string().contains("not a directory"));
     std::fs::remove_dir_all(&home).ok();
 }
 
@@ -333,8 +339,8 @@ fn get_stash_db_path_default() {
         return;
     }
     let path = get_stash_db_path_with(&default_path_resolver(&home), None);
-    assert!(path.is_some());
-    assert!(path.unwrap().contains(".tokenless/stash.db"));
+    assert!(path.is_ok());
+    assert!(path.unwrap().ends_with(".tokenless/stash.db"));
 }
 
 #[test]
@@ -346,7 +352,7 @@ fn get_stash_db_path_with_valid_override() {
         &DatabasePathResolver::default(),
         Some(guard.stash_db_path()),
     );
-    assert_eq!(result, Some(guard.stash_db_path().to_string()));
+    assert_eq!(result.unwrap(), PathBuf::from(guard.stash_db_path()));
 }
 
 #[test]
@@ -371,9 +377,24 @@ fn ensure_db_dir_creates_parent() {
 
     // ensure_db_dir is idempotent — calling it when the dir already exists
     // (which it does for most test envs) succeeds.
-    let result = ensure_db_dir(&get_db_path_with(&DatabasePathResolver::default()));
+    let db_path = get_db_path_with(&DatabasePathResolver::default()).unwrap();
+    let result = ensure_db_dir(&db_path);
     // With TempDbGuard the stats DB path points to a temp dir, so this succeeds.
     assert!(result.is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_db_dir_preserves_existing_parent_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = temp_subdir("existing-mode");
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o750)).unwrap();
+
+    ensure_db_dir(&parent.join("stats.db")).unwrap();
+
+    assert_eq!(parent.metadata().unwrap().permissions().mode() & 0o777, 0o750);
+    std::fs::remove_dir_all(parent).ok();
 }
 
 #[test]
@@ -468,7 +489,7 @@ fn record_compression_stats_records_dryrun_mode() {
 fn get_db_path_returns_valid_path() {
     let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let db_path = get_db_path_with(&DatabasePathResolver::default());
-    assert!(db_path.contains("stats.db"));
+    assert!(db_path.unwrap().ends_with("stats.db"));
 }
 
 #[test]
@@ -1097,8 +1118,8 @@ fn get_stash_db_path_returns_valid() {
         return;
     }
     let path = get_stash_db_path_with(&default_path_resolver(&home), None);
-    assert!(path.is_some());
-    assert!(path.unwrap().contains(".tokenless/stash.db"));
+    assert!(path.is_ok());
+    assert!(path.unwrap().ends_with(".tokenless/stash.db"));
 }
 
 #[test]
@@ -1113,8 +1134,8 @@ fn get_stash_db_path_with_bad_override() {
         Some("/nonexistent/deep/dir/stash.db"),
     );
     // Bad override is rejected, falls back to default
-    assert!(path.is_some());
-    assert!(path.unwrap().contains(".tokenless/stash.db"));
+    assert!(path.is_ok());
+    assert!(path.unwrap().ends_with(".tokenless/stash.db"));
 }
 
 

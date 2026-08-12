@@ -1,21 +1,245 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index e38c6cf..f0d2742 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -108,7 +108,7 @@ checksum = "e8b5778837666541195063243828c5b6139221b47dc4ec3ba81738e532469ab1"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -208,7 +208,7 @@ dependencies = [
+  "heck",
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -331,7 +331,7 @@ checksum = "97369cbbc041bc366949bc74d34658d6cda5621039731c6310521892a3a20ae0"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -800,7 +800,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
+ dependencies = [
+  "proc-macro2",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -844,7 +844,7 @@ checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
+ dependencies = [
+  "getrandom 0.2.17",
+  "libredox",
+- "thiserror",
++ "thiserror 1.0.69",
+ ]
+
+ [[package]]
+@@ -912,6 +912,7 @@ dependencies = [
+  "serde_json",
+  "sha2",
+  "tempfile",
++ "thiserror 2.0.20",
+  "toml",
+  "ureq",
+  "walkdir",
+@@ -1028,7 +1029,7 @@ checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -1112,6 +1113,17 @@ dependencies = [
+  "unicode-ident",
+ ]
+
++[[package]]
++name = "syn"
++version = "3.0.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "unicode-ident",
++]
++
+ [[package]]
+ name = "synstructure"
+ version = "0.13.2"
+@@ -1120,7 +1132,7 @@ checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -1142,7 +1154,16 @@ version = "1.0.69"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+ dependencies = [
+- "thiserror-impl",
++ "thiserror-impl 1.0.69",
++]
++
++[[package]]
++name = "thiserror"
++version = "2.0.20"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
++dependencies = [
++ "thiserror-impl 2.0.20",
+ ]
+
+ [[package]]
+@@ -1153,7 +1174,18 @@ checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
++]
++
++[[package]]
++name = "thiserror-impl"
++version = "2.0.20"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 3.0.3",
+ ]
+
+ [[package]]
+@@ -1349,7 +1381,7 @@ dependencies = [
+  "bumpalo",
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+  "wasm-bindgen-shared",
+ ]
+
+@@ -1455,7 +1487,7 @@ checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -1466,7 +1498,7 @@ checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -1695,7 +1727,7 @@ dependencies = [
+  "heck",
+  "indexmap",
+  "prettyplease",
+- "syn",
++ "syn 2.0.117",
+  "wasm-metadata",
+  "wit-bindgen-core",
+  "wit-component",
+@@ -1711,7 +1743,7 @@ dependencies = [
+  "prettyplease",
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+  "wit-bindgen-core",
+  "wit-bindgen-rust",
+ ]
+@@ -1778,7 +1810,7 @@ checksum = "b659052874eb698efe5b9e8cf382204678a0086ebf46982b79d6ca3182927e5d"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+  "synstructure",
+ ]
+
+@@ -1799,7 +1831,7 @@ checksum = "f65c489a7071a749c849713807783f70672b28094011623e200cb86dcb835953"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+@@ -1819,7 +1851,7 @@ checksum = "d71e5d6e06ab090c67b5e44993ec16b72dcbaabc526db883a360057678b48502"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+  "synstructure",
+ ]
+
+@@ -1859,7 +1891,7 @@ checksum = "eadce39539ca5cb3985590102671f2567e659fca9666581ad3411d59207951f3"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+
+ [[package]]
+diff --git a/Cargo.toml b/Cargo.toml
+index a881be9..7e8cfb7 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -24,6 +24,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
+ colored = "2"
+ dirs = "5"
+ rusqlite = { version = "0.31", features = ["bundled"] }
++thiserror = "2"
+ toml = "0.8"
+ chrono = "0.4"
+ tempfile = "3"
 diff --git a/src/core/tracking.rs b/src/core/tracking.rs
-index 359e4f6..0a7507b 100644
+index 359e4f6..934d48c 100644
 --- a/src/core/tracking.rs
 +++ b/src/core/tracking.rs
 @@ -1358,6 +1358,9 @@ impl TimedExecution {
          let input_tokens = estimate_tokens(input);
          let output_tokens = estimate_tokens(output);
- 
+
 +        // Also record to tokenless stats database (fail-silent)
 +        record_to_tokenless_stats(original_cmd, rtk_cmd, input, output);
 +
          if let Ok(tracker) = Tracker::new() {
              let _ = tracker.record(
                  original_cmd,
-@@ -1419,5 +1422,247 @@ pub fn args_display(args: &[OsString]) -> String {
+@@ -1419,10 +1422,269 @@ pub fn args_display(args: &[OsString]) -> String {
          .join(" ")
  }
- 
+
 +/// Estimate token count from character count using ~4 chars/token heuristic.
 +fn estimate_tokens_from_chars(chars: usize) -> usize {
 +    if chars == 0 {
@@ -40,7 +264,7 @@ index 359e4f6..0a7507b 100644
 +    }
 +
 +    // Fallback: .rewrite-context file (legacy compat)
-+    let context_file = dirs::home_dir()
++    let context_file = tokenless_trusted_home_dir()
 +        .map(|d| d.join(".tokenless/.rewrite-context"))
 +        .filter(|p| p.exists())
 +        .and_then(|p| std::fs::read_to_string(p).ok());
@@ -75,7 +299,7 @@ index 359e4f6..0a7507b 100644
 +    if let Ok(val) = std::env::var("TOKENLESS_STATS_ENABLED") {
 +        return val == "1" || val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("yes");
 +    }
-+    dirs::home_dir()
++    tokenless_trusted_home_dir()
 +        .map(|d| d.join(".tokenless/config.json"))
 +        .and_then(|p| std::fs::read_to_string(p).ok())
 +        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -83,96 +307,54 @@ index 359e4f6..0a7507b 100644
 +        .unwrap_or(true)
 +}
 +
-+#[cfg(unix)]
-+#[allow(unsafe_code)] // libc is required to avoid trusting the mutable HOME environment variable.
++#[allow(unsafe_code)] // Shared passwd lookup requires libc and contains documented safety proofs.
++#[path = "../../../../crates/tokenless-stats/src/home.rs"]
++mod tokenless_home;
++#[path = "../../../../crates/tokenless-stats/src/path_policy.rs"]
++mod tokenless_path_policy;
++
 +fn tokenless_trusted_home_dir() -> Option<std::path::PathBuf> {
-+    use std::ffi::CStr;
-+
-+    // SAFETY: getuid is infallible. getpwuid_r receives valid pointers to a
-+    // live passwd value and buffer, and cannot write beyond the given length.
-+    let uid = unsafe { libc::getuid() };
-+    let mut passwd: libc::passwd = unsafe { std::mem::zeroed() };
-+    let mut buffer = vec![0u8; 4096];
-+    let mut result: *mut libc::passwd = std::ptr::null_mut();
-+    let status = unsafe {
-+        libc::getpwuid_r(
-+            uid,
-+            &mut passwd,
-+            buffer.as_mut_ptr().cast(),
-+            buffer.len(),
-+            &mut result,
-+        )
-+    };
-+    if status != 0 || result.is_null() || passwd.pw_dir.is_null() {
-+        return None;
-+    }
-+
-+    // SAFETY: a successful getpwuid_r call provides a NUL-terminated pw_dir
-+    // pointer backed by buffer, which remains alive for this conversion.
-+    let home = unsafe { CStr::from_ptr(passwd.pw_dir) }.to_str().ok()?;
-+    let path = std::path::PathBuf::from(home);
-+    if home == "/" || !path.is_absolute() {
-+        return None;
-+    }
-+    Some(path)
-+}
-+
-+#[cfg(not(unix))]
-+fn tokenless_trusted_home_dir() -> Option<std::path::PathBuf> {
-+    None
-+}
-+
-+fn tokenless_path_is_under_home(path: &std::path::Path, home: &std::path::Path) -> bool {
-+    let Ok(canonical_home) = home.canonicalize() else {
-+        return false;
-+    };
-+    let resolved = path.canonicalize().or_else(|_| {
-+        path.parent()
-+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
-+            .and_then(std::path::Path::canonicalize)
-+    });
-+    resolved.is_ok_and(|resolved| resolved.starts_with(canonical_home))
-+}
-+
-+fn validate_tokenless_data_dir(
-+    data_dir: &str,
-+    home: &std::path::Path,
-+) -> Option<std::path::PathBuf> {
-+    let candidate = std::path::PathBuf::from(data_dir);
-+    if !candidate.is_absolute()
-+        || candidate
-+            .components()
-+            .any(|component| matches!(component, std::path::Component::ParentDir))
-+        || (candidate.exists() && !candidate.is_dir())
-+    {
-+        return None;
-+    }
-+
-+    let mut existing_ancestor = candidate.as_path();
-+    while !existing_ancestor.exists() {
-+        existing_ancestor = existing_ancestor.parent()?;
-+    }
-+    tokenless_path_is_under_home(existing_ancestor, home).then_some(candidate)
++    let home = tokenless_home::get_home_dir();
++    (!home.is_empty()).then(|| std::path::PathBuf::from(home))
 +}
 +
 +fn resolve_tokenless_stats_db() -> Option<std::path::PathBuf> {
-+    let home = tokenless_trusted_home_dir()?;
++    let home = tokenless_trusted_home_dir();
++    let data_dir_override = std::env::var("TOKENLESS_DATA_DIR").ok();
++    let stats_db_override = std::env::var("TOKENLESS_STATS_DB").ok();
++    resolve_tokenless_stats_db_with(
++        home.as_deref(),
++        data_dir_override.as_deref(),
++        stats_db_override.as_deref(),
++    )
++}
 +
-+    if let Some(path) = std::env::var("TOKENLESS_STATS_DB")
-+        .ok()
++fn resolve_tokenless_stats_db_with(
++    home: Option<&std::path::Path>,
++    data_dir_override: Option<&str>,
++    stats_db_override: Option<&str>,
++) -> Option<std::path::PathBuf> {
++    let data_dir = tokenless_path_policy::resolve_data_dir(home, data_dir_override);
++
++    let mut trusted_roots = Vec::with_capacity(2);
++    if let Some(home) = home {
++        trusted_roots.push(home);
++    }
++    if let Ok(data_dir) = data_dir.as_deref() {
++        trusted_roots.push(data_dir);
++    }
++
++    if let Some(path) = stats_db_override
 +        .filter(|path| !path.is_empty())
 +        .map(std::path::PathBuf::from)
-+        .filter(|path| tokenless_path_is_under_home(path, &home))
++        .and_then(|path| tokenless_path_policy::validate_database_path(&path, &trusted_roots).ok())
 +    {
 +        return Some(path);
 +    }
 +
-+    let data_dir = std::env::var("TOKENLESS_DATA_DIR")
++    let data_dir = data_dir.ok()?;
++    tokenless_path_policy::validate_database_path(&data_dir.join("stats.db"), &[data_dir.as_path()])
 +        .ok()
-+        .filter(|path| !path.is_empty())
-+        .and_then(|path| validate_tokenless_data_dir(&path, &home))
-+        .unwrap_or_else(|| home.join(".tokenless"));
-+    Some(data_dir.join("stats.db"))
 +}
 +
 +/// Record RTK command output compression stats to the tokenless stats database.
@@ -209,7 +391,7 @@ index 359e4f6..0a7507b 100644
 +
 +    let _ = (|| -> anyhow::Result<()> {
 +        if let Some(parent) = db_path.parent() {
-+            std::fs::create_dir_all(parent)?;
++            tokenless_path_policy::ensure_state_dir(parent)?;
 +        }
 +        let conn = rusqlite::Connection::open(&db_path)?;
 +        conn.execute_batch(
@@ -260,30 +442,30 @@ index 359e4f6..0a7507b 100644
 +
  #[cfg(test)]
  mod tests {
-@@ -1424 +1669,32 @@ mod tests {
      use super::*;
-+
+
 +    #[test]
 +    fn tokenless_data_dir_accepts_nonexistent_descendant() {
 +        let home = tempfile::tempdir().unwrap();
 +        let candidate = home.path().join("nested/data");
 +        let resolved =
-+            validate_tokenless_data_dir(candidate.to_str().unwrap(), home.path()).unwrap();
++            tokenless_path_policy::resolve_data_dir(Some(home.path()), candidate.to_str()).unwrap();
 +        assert_eq!(resolved, candidate);
 +    }
 +
 +    #[test]
-+    fn tokenless_data_dir_rejects_outside_home() {
++    fn tokenless_data_dir_accepts_outside_home() {
 +        let home = tempfile::tempdir().unwrap();
 +        let outside = tempfile::tempdir().unwrap();
-+        assert!(
-+            validate_tokenless_data_dir(outside.path().to_str().unwrap(), home.path()).is_none()
-+        );
++        let resolved =
++            tokenless_path_policy::resolve_data_dir(Some(home.path()), outside.path().to_str())
++                .unwrap();
++        assert_eq!(resolved, outside.path().canonicalize().unwrap());
 +    }
 +
 +    #[cfg(unix)]
 +    #[test]
-+    fn tokenless_data_dir_rejects_symlink_escape() {
++    fn tokenless_data_dir_canonicalizes_symlink() {
 +        use std::os::unix::fs::symlink;
 +
 +        let home = tempfile::tempdir().unwrap();
@@ -291,17 +473,47 @@ index 359e4f6..0a7507b 100644
 +        let link = home.path().join("redirect");
 +        symlink(outside.path(), &link).unwrap();
 +        let candidate = link.join("data");
-+        assert!(validate_tokenless_data_dir(candidate.to_str().unwrap(), home.path()).is_none());
++        let resolved = tokenless_path_policy::validate_data_dir(&candidate).unwrap();
++        assert_eq!(
++            resolved,
++            outside.path().canonicalize().unwrap().join("data")
++        );
 +    }
 +
++    #[test]
++    fn tokenless_stats_db_uses_external_data_dir() {
++        let home = tempfile::tempdir().unwrap();
++        let external = tempfile::tempdir().unwrap();
++        let data_dir = external.path().join("tokenless-data");
++        let resolved =
++            resolve_tokenless_stats_db_with(Some(home.path()), data_dir.to_str(), None).unwrap();
++        assert_eq!(resolved, data_dir.join("stats.db"));
++    }
++
++    #[test]
++    fn tokenless_stats_db_override_wins_over_invalid_data_dir() {
++        let home = tempfile::tempdir().unwrap();
++        let stats_db = home.path().join("stats.db");
++        let resolved = resolve_tokenless_stats_db_with(
++            Some(home.path()),
++            Some("relative/data"),
++            stats_db.to_str(),
++        )
++        .unwrap();
++        assert_eq!(resolved, stats_db);
++    }
++
+     // 1. estimate_tokens — verify ~4 chars/token ratio
+     #[test]
+     fn test_estimate_tokens() {
 diff --git a/src/hooks/hook_check.rs b/src/hooks/hook_check.rs
-index 4dd26d8..3638321 100644
+index ca6faf5..7f12ced 100644
 --- a/src/hooks/hook_check.rs
 +++ b/src/hooks/hook_check.rs
 @@ -1,5 +1,6 @@
  //! Detects whether RTK hooks are installed and warns if they are outdated.
- 
+
 +#[allow(unused_imports)]
  use super::constants::{
-     CLAUDE_DIR, CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
-     SETTINGS_JSON,
+     CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+ };

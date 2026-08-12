@@ -258,10 +258,12 @@ Tokenless stores statistics and reversible-compression data in
 export TOKENLESS_DATA_DIR="$HOME/path/to/tokenless-data"
 ```
 
-The directory must be an absolute path under the real user home. The existing
-`TOKENLESS_STATS_DB`, `TOKENLESS_STASH_DB`, and `--stash-db` overrides take
-precedence when only one database needs a custom path. Configuration remains
-at `~/.tokenless/config.json`.
+The directory may be any absolute path the current user can access, including
+a managed service directory under `/var/lib`; filesystem root, relative paths,
+and parent traversal are rejected. The existing `TOKENLESS_STATS_DB`,
+`TOKENLESS_STASH_DB`, and `--stash-db` overrides take precedence but must stay
+under the real user home or selected data directory. Configuration remains at
+`~/.tokenless/config.json`.
 
 ## copilot-shell Hooks
 

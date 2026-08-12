@@ -114,7 +114,7 @@ anolisa adapter status tokenless
 env | grep '^TOKENLESS_'
 ```
 
-确认没有意外设置 `TOKENLESS_STATS_ENABLED=0`，并检查自定义数据库路径是否仍位于真实用户 home 下。
+确认没有意外设置 `TOKENLESS_STATS_ENABLED=0`，并检查自定义数据库路径是否仍位于真实用户 home 或选定的数据目录下。
 
 ## Adapter 启用失败
 
@@ -199,7 +199,7 @@ ls -l ~/.tokenless/stats.db*
 env | grep -E 'TOKENLESS_(DATA_DIR|STATS_DB|STASH_DB)='
 ```
 
-确认当前用户对选定的数据目录和数据库可写。`tokenless` CLI 只接受真实用户 home 下的 `TOKENLESS_DATA_DIR`、`TOKENLESS_STATS_DB` 和 `TOKENLESS_STASH_DB`，覆盖值被拒绝时会回退。随包提供的 RTK 统计写入器会直接使用 `TOKENLESS_STATS_DB`，因此也要移除或修正 Agent 环境中的异常覆盖值。
+确认当前用户对选定的数据目录和数据库可写。`TOKENLESS_DATA_DIR` 可以位于真实用户 home 之外，但必须是不包含父目录遍历的绝对非根目录；显式数据目录无效时不会回退到 home。`TOKENLESS_STATS_DB` 和 `TOKENLESS_STASH_DB` 必须位于真实用户 home 或选定的数据目录下，随包 RTK 写入器也执行相同规则。
 
 不要让多个用户共享同一个 `stats.db`。AgentSight 和 Tokenless 应以能访问同一用户数据库的方式运行。
 

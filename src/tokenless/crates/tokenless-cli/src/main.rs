@@ -5,6 +5,7 @@ mod mcp;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::fs;
 use std::io::{self, IsTerminal as _, Read};
+use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
 use tokenless_ccr::{SqliteStore, StashStore, extract_hash, is_valid_hash};
@@ -12,11 +13,12 @@ use tokenless_schema::{ResponseCompressor, SchemaCompressor};
 use tokenless_stats::{
     CompressionMode, DiffSort, OperationType, StatsRecord, StatsRecorder, TokenlessConfig,
 };
-use tokenless_stats::{estimate_tokens, estimate_tokens_from_bytes};
 use tokenless_stats::{
-    format_compare, format_compare_json, format_diff_report, format_list, format_show,
-    format_summary, record_report, session_report, tool_use_report,
+    ensure_state_dir, format_compare, format_compare_json, format_diff_report, format_list,
+    format_show, format_summary, record_report, resolve_data_dir, session_report, tool_use_report,
+    validate_database_path,
 };
+use tokenless_stats::{estimate_tokens, estimate_tokens_from_bytes};
 
 #[derive(Parser)]
 #[command(
@@ -54,7 +56,7 @@ enum Commands {
         no_stash: bool,
         /// Override the stash database path. Defaults to
         /// $TOKENLESS_DATA_DIR/stash.db or ~/.tokenless/stash.db.
-        /// Resolved under the trusted home directory; rejected if outside.
+        /// Must remain under the real home or selected data directory.
         #[arg(long)]
         stash_db: Option<String>,
     },
@@ -87,7 +89,7 @@ enum Commands {
         no_stash: bool,
         /// Override the stash database path. Defaults to
         /// $TOKENLESS_DATA_DIR/stash.db or ~/.tokenless/stash.db.
-        /// Resolved under the trusted home directory; rejected if outside.
+        /// Must remain under the real home or selected data directory.
         #[arg(long)]
         stash_db: Option<String>,
     },
@@ -314,75 +316,15 @@ pub fn get_home_dir() -> String {
     tokenless_stats::get_home_dir()
 }
 
-/// Validate a custom tokenless data directory against the user's home.
-///
-/// Unlike database file overrides, the directory may not exist yet. The
-/// nearest existing ancestor is canonicalized so a symlink cannot redirect
-/// the eventual directory outside the trusted home. Validation and later
-/// directory creation are separate filesystem operations, so callers must
-/// not treat this check as protection from concurrent path replacement.
-fn validate_data_dir_path(env_path: &str, home: &str) -> Result<String, String> {
-    if home.is_empty() {
-        return Err("no trusted home directory available".to_string());
-    }
-
-    let canonical_home = std::path::Path::new(home)
-        .canonicalize()
-        .map_err(|e| format!("home directory '{}' cannot be resolved: {}", home, e))?;
-    let candidate = std::path::Path::new(env_path);
-    if !candidate.is_absolute() {
-        return Err(format!("path '{}' is not absolute", env_path));
-    }
-    if candidate
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return Err(format!("path '{}' contains parent traversal", env_path));
-    }
-    if candidate.exists() && !candidate.is_dir() {
-        return Err(format!("path '{}' is not a directory", env_path));
-    }
-
-    let mut existing_ancestor = candidate;
-    while !existing_ancestor.exists() {
-        existing_ancestor = existing_ancestor
-            .parent()
-            .ok_or_else(|| format!("path '{}' has no existing ancestor to validate", env_path))?;
-    }
-    let resolved_ancestor = existing_ancestor
-        .canonicalize()
-        .map_err(|e| format!("path '{}' cannot be resolved: {}", env_path, e))?;
-    if !resolved_ancestor.starts_with(&canonical_home) {
-        return Err(format!(
-            "path '{}' is outside home directory '{}'",
-            env_path, home
-        ));
-    }
-
-    Ok(env_path.to_string())
-}
-
 /// Resolve the directory containing tokenless SQLite databases.
 ///
-/// `TOKENLESS_DATA_DIR` affects `stats.db` and `stash.db` only. Invalid
-/// overrides are ignored in favor of the existing `~/.tokenless` default.
-/// Returns an error when no trusted home anchor exists.
-fn get_data_dir(home: &str) -> Result<String, String> {
-    if home.is_empty() {
-        return Err("no trusted home directory available".to_string());
-    }
-
-    let data_dir = match std::env::var("TOKENLESS_DATA_DIR") {
-        Ok(env_path) if !env_path.is_empty() => match validate_data_dir_path(&env_path, home) {
-            Ok(path) => path,
-            Err(reason) => {
-                eprintln!("[tokenless] ignoring TOKENLESS_DATA_DIR: {}", reason);
-                format!("{}/.tokenless", home)
-            }
-        },
-        _ => format!("{}/.tokenless", home),
-    };
-    Ok(data_dir)
+/// `TOKENLESS_DATA_DIR` affects `stats.db` and `stash.db` only and may be an
+/// absolute directory outside the real home. An invalid explicit override is
+/// returned as an error so state never silently moves back to the default.
+fn get_data_dir(home: &str) -> Result<PathBuf, String> {
+    let override_path = std::env::var("TOKENLESS_DATA_DIR").ok();
+    let home = (!home.is_empty()).then(|| Path::new(home));
+    resolve_data_dir(home, override_path.as_deref()).map_err(|error| error.to_string())
 }
 
 // Lazily snapshot path inputs for one command so stats and stash share the
@@ -390,7 +332,7 @@ fn get_data_dir(home: &str) -> Result<String, String> {
 #[derive(Default)]
 struct DatabasePathResolver {
     home: std::sync::OnceLock<String>,
-    data_dir: std::sync::OnceLock<Result<String, String>>,
+    data_dir: std::sync::OnceLock<Result<PathBuf, String>>,
 }
 
 impl DatabasePathResolver {
@@ -398,101 +340,51 @@ impl DatabasePathResolver {
         self.home.get_or_init(get_home_dir)
     }
 
-    fn data_dir(&self) -> Result<&str, &str> {
+    fn data_dir(&self) -> Result<&Path, &str> {
         self.data_dir
             .get_or_init(|| get_data_dir(self.home()))
             .as_ref()
-            .map(String::as_str)
+            .map(PathBuf::as_path)
             .map_err(String::as_str)
     }
 }
 
 /// Resolve the database path. When `TOKENLESS_STATS_DB` is set, the path
-/// is validated to ensure it resides under the user's home directory;
+/// is validated against the user's home and selected data directory;
 /// otherwise `TOKENLESS_DATA_DIR` and then the default data directory are
-/// used. This prevents an attacker from redirecting the database to a
-/// system-critical location (e.g. `/etc/evil.db`).
-fn get_db_path_with(paths: &DatabasePathResolver) -> String {
+/// used.
+fn get_db_path_with(paths: &DatabasePathResolver) -> Result<PathBuf, String> {
     let home = paths.home();
-    // When no trusted home is available (empty string from passwd lookup
-    // failure), return a path that will safely fail on open/create rather
-    // than silently writing to / or CWD.
-    if home.is_empty() {
-        eprintln!("[tokenless] no home directory available — stats DB writes disabled");
-        return "/dev/null/.tokenless/stats.db".to_string();
-    }
+    let data_dir = paths.data_dir();
     match std::env::var("TOKENLESS_STATS_DB") {
-        Ok(env_path) if !env_path.is_empty() => match validate_db_path(&env_path, home) {
-            Ok(path) => return path,
-            Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STATS_DB: {}", reason),
-        },
+        Ok(env_path) if !env_path.is_empty() => {
+            match validate_db_path(Path::new(&env_path), home, data_dir.ok()) {
+                Ok(path) => return Ok(path),
+                Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STATS_DB: {}", reason),
+            }
+        }
         _ => {}
     }
-    let data_dir = match paths.data_dir() {
-        Ok(path) => path,
-        Err(reason) => {
-            eprintln!("[tokenless] {} — stats DB writes disabled", reason);
-            return "/dev/null/.tokenless/stats.db".to_string();
-        }
-    };
-    std::path::Path::new(&data_dir)
-        .join("stats.db")
-        .to_string_lossy()
-        .into_owned()
+    let data_dir = data_dir.map_err(str::to_string)?;
+    let path = data_dir.join("stats.db");
+    validate_db_path(&path, home, Some(data_dir))
 }
 
-/// Validate a TOKENLESS_STATS_DB candidate against the user's home directory.
-/// Returns the original path on success, or a human-readable rejection reason.
-///
-/// Extracted from `get_db_path` so unit tests can exercise the bypass paths
-/// (ParentDir traversal, nonexistent parents, missing home anchor) without
-/// mutating process-wide env vars.
-fn validate_db_path(env_path: &str, home: &str) -> Result<String, String> {
-    // Reject when we have no trusted home anchor:
-    // Path::starts_with("") returns true for every path, which would
-    // let an attacker point the database at any system location.
-    if home.is_empty() {
-        return Err("no trusted home directory available".to_string());
+/// Validate a file-level override against the real home and selected data dir.
+fn validate_db_path(path: &Path, home: &str, data_dir: Option<&Path>) -> Result<PathBuf, String> {
+    let mut roots = Vec::with_capacity(2);
+    if !home.is_empty() {
+        roots.push(Path::new(home));
     }
-    // Canonicalize the home anchor as well as the candidate path. Passwd
-    // entries can name a directory that traverses a symlink (e.g. macOS
-    // /Users/u where /Users is a symlink to /home, or distros that put
-    // /home/u behind /export/home/u). If we compare a canonicalized
-    // env_path against a raw home, the prefix check rejects legitimate
-    // paths AND, conversely, a `home == "/"` slip-through (rejected at
-    // the passwd layer in tokenless-stats::home but defended in depth
-    // here) would match every absolute path under `starts_with`.
-    let canonical_home = std::path::Path::new(home)
-        .canonicalize()
-        .map_err(|e| format!("home directory '{}' cannot be resolved: {}", home, e))?;
-    let p = std::path::Path::new(env_path);
-    // Accept only paths under the user's real home directory.
-    // For not-yet-created DB files, the parent directory MUST itself
-    // canonicalize — falling back to an unresolved parent would let
-    // `~/x/../../etc/evil.db` slip past the starts_with(&home) check,
-    // since Path::starts_with matches components literally and an
-    // unresolved path still begins with the home prefix.
-    let resolved = p
-        .canonicalize()
-        .or_else(|_| {
-            p.parent()
-                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
-                .and_then(|parent| parent.canonicalize())
-        })
-        .map_err(|e| format!("path '{}' cannot be resolved: {}", env_path, e))?;
-    if resolved.starts_with(&canonical_home) {
-        Ok(env_path.to_string())
-    } else {
-        Err(format!(
-            "path '{}' is outside home directory '{}'",
-            env_path, home
-        ))
+    if let Some(data_dir) = data_dir {
+        roots.push(data_dir);
     }
+    validate_database_path(path, &roots).map_err(|error| error.to_string())
 }
 
-fn ensure_db_dir(db_path: &str) -> Result<(), (String, i32)> {
-    if let Some(parent) = std::path::Path::new(&db_path).parent() {
-        fs::create_dir_all(parent)
+fn ensure_db_dir(db_path: &Path) -> Result<(), (String, i32)> {
+    if let Some(parent) = db_path.parent() {
+        ensure_state_dir(parent)
             .map_err(|e| (format!("Failed to create database directory: {}", e), 1))?;
     }
     Ok(())
@@ -503,64 +395,49 @@ fn open_recorder() -> Result<StatsRecorder, (String, i32)> {
 }
 
 fn open_recorder_with(paths: &DatabasePathResolver) -> Result<StatsRecorder, (String, i32)> {
-    let db_path = get_db_path_with(paths);
+    let db_path = get_db_path_with(paths)
+        .map_err(|error| (format!("Stats database unavailable: {}", error), 1))?;
     ensure_db_dir(&db_path)?;
     StatsRecorder::new(db_path).map_err(|e| (format!("Failed to open database: {}", e), 1))
 }
 
-/// Resolve the stash database path under the trusted home directory.
+/// Resolve the stash database path under a trusted state root.
 ///
-/// Mirrors `get_db_path`'s trust model (passwd-rooted home, validated env
-/// override) so an attacker cannot redirect the stash to a system-critical
-/// location by setting `TOKENLESS_STASH_DB` or passing `--stash-db`. Returns
-/// `None` when no trusted home anchor exists or an override is rejected —
-/// callers fail open (no stash, lossy truncation) rather than writing state
-/// to an untrusted location.
+/// File-level overrides may reside beneath the passwd-backed home or the
+/// selected data directory. Callers fail open when no valid data directory is
+/// available rather than writing state to an unintended fallback location.
 fn get_stash_db_path_with(
     paths: &DatabasePathResolver,
     override_path: Option<&str>,
-) -> Option<String> {
+) -> Result<PathBuf, String> {
     let home = paths.home();
-    if home.is_empty() {
-        eprintln!("[tokenless] no home directory available — stash disabled");
-        return None;
-    }
+    let data_dir = paths.data_dir();
     // An explicit --stash-db override is validated the same way as the
     // TOKENLESS_STASH_DB env var: on rejection we warn AND fall back to the
-    // default under the trusted home (rather than silently disabling the
-    // stash), so a typo doesn't quietly drop reversibility.
+    // selected data directory, so a bad file override does not silently drop
+    // reversibility. An invalid data-directory override still fails closed.
     if let Some(p) = override_path.filter(|s| !s.is_empty()) {
-        match validate_db_path(p, home) {
-            Ok(valid) => return Some(valid),
+        match validate_db_path(Path::new(p), home, data_dir.ok()) {
+            Ok(valid) => return Ok(valid),
             Err(reason) => eprintln!("[tokenless] rejecting --stash-db {}: {}", p, reason),
         }
     }
     if let Ok(env_path) = std::env::var("TOKENLESS_STASH_DB")
         && !env_path.is_empty()
     {
-        match validate_db_path(&env_path, home) {
-            Ok(path) => return Some(path),
+        match validate_db_path(Path::new(&env_path), home, data_dir.ok()) {
+            Ok(path) => return Ok(path),
             Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STASH_DB: {}", reason),
         }
     }
-    let data_dir = match paths.data_dir() {
-        Ok(path) => path,
-        Err(reason) => {
-            eprintln!("[tokenless] {} — stash disabled", reason);
-            return None;
-        }
-    };
-    Some(
-        std::path::Path::new(&data_dir)
-            .join("stash.db")
-            .to_string_lossy()
-            .into_owned(),
-    )
+    let data_dir = data_dir.map_err(str::to_string)?;
+    let path = data_dir.join("stash.db");
+    validate_db_path(&path, home, Some(data_dir))
 }
 
 /// Open a stash store, returning the specific failure cause. Used by
 /// user-initiated paths (`retrieve`) where a generic "unavailable" message
-/// would hide the real reason (no home, path rejected, corrupt DB, …).
+/// would hide the real reason (invalid data dir, path rejected, corrupt DB, …).
 fn open_stash_store_or_err(override_path: Option<&str>) -> Result<Arc<dyn StashStore>, String> {
     open_stash_store_or_err_with(&DatabasePathResolver::default(), override_path)
 }
@@ -569,20 +446,16 @@ fn open_stash_store_or_err_with(
     paths: &DatabasePathResolver,
     override_path: Option<&str>,
 ) -> Result<Arc<dyn StashStore>, String> {
-    let path = get_stash_db_path_with(paths, override_path)
-        .ok_or_else(|| "no trusted home directory available for stash db".to_string())?;
-    if let Some(parent) = std::path::Path::new(&path).parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("cannot create stash directory {}: {}", parent.display(), e))?;
-    }
+    let path = get_stash_db_path_with(paths, override_path)?;
+    ensure_db_dir(&path).map_err(|(message, _)| message)?;
     SqliteStore::new(&path)
-        .map_err(|e| format!("cannot open stash db at {}: {}", path, e))
+        .map_err(|e| format!("cannot open stash db at {}: {}", path.display(), e))
         .map(|s| Arc::new(s) as Arc<dyn StashStore>)
 }
 
 /// Open a stash store, failing open to `None` on any error. Compression
-/// proceeds without stash (lossy truncation) when the home anchor is missing,
-/// the parent directory cannot be created, or the database cannot be opened.
+/// proceeds without stash (lossy truncation) when no valid data directory is
+/// available, the parent cannot be created, or the database cannot be opened.
 fn open_stash_store(override_path: Option<&str>) -> Option<Arc<dyn StashStore>> {
     open_stash_store_with(&DatabasePathResolver::default(), override_path)
 }
@@ -831,14 +704,13 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             }
         }
         Commands::Stats(stats_cmd) => {
-            let recorder = open_recorder()?;
-
             match stats_cmd {
                 StatsCommands::Summary {
                     limit,
                     json,
                     compare,
                 } => {
+                    let recorder = open_recorder()?;
                     if let Some(sessions) = compare {
                         let baseline_sid = sessions[0].as_str();
                         let tokenless_sid = sessions[1].as_str();
@@ -872,12 +744,14 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     }
                 }
                 StatsCommands::List { limit } => {
+                    let recorder = open_recorder()?;
                     let records = recorder
                         .all_records(Some(limit))
                         .map_err(|e| (format!("Failed to query records: {}", e), 1))?;
                     println!("{}", format_list(&records, limit));
                 }
                 StatsCommands::Show { id } => {
+                    let recorder = open_recorder()?;
                     let record = recorder
                         .record_by_id(id)
                         .map_err(|e| (format!("Failed to query record: {}", e), 1))?
@@ -894,6 +768,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     no_color,
                     json,
                 } => {
+                    let recorder = open_recorder()?;
                     let report = match (id, session) {
                         (Some(id), None) => {
                             let record = recorder
@@ -943,6 +818,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     }
                 }
                 StatsCommands::Clear { yes } => {
+                    let recorder = open_recorder()?;
                     if !yes {
                         print!("Are you sure you want to clear all statistics? [y/N] ");
                         use std::io::Write;

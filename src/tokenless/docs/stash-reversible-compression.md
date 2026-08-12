@@ -87,7 +87,7 @@ tokenless retrieve "<... 195 items truncated, retrieve with <<tokenless:c30c…>
 # Opt out of stash (lossy truncation, the pre-stash behavior).
 echo '[...]' | tokenless compress-response --no-stash
 
-# Override the stash db path (must be under the trusted home directory).
+# Override the stash db path under the home or selected data directory.
 tokenless retrieve <hash> --stash-db ~/.tokenless/alt-stash.db
 ```
 
@@ -98,24 +98,27 @@ single-file override.
 
 ## Security model
 
-The stash db path is resolved under the **trusted home directory** — derived
-from `getpwuid_r(getuid())`, never from `$HOME` (which a parent process can
-spoof to redirect state into attacker-writable paths). An override
-(`--stash-db`, `TOKENLESS_STASH_DB`, or `TOKENLESS_DATA_DIR`) is validated
-against the canonical home anchor and must remain under that home. For a data
-directory that does not exist yet, tokenless canonicalizes the nearest existing
-ancestor before checking that boundary; a path outside home is rejected. This
-mirrors the stats DB trust model exactly, so an attacker cannot redirect the
-stash to a system-critical location.
+`TOKENLESS_DATA_DIR` is an explicit directory-level trust decision and may
+point outside the real home, including to a managed service directory. It must
+be absolute, cannot be filesystem root or contain parent traversal, and its
+nearest existing ancestor is canonicalized before use. An invalid explicit
+directory disables SQLite state for that operation instead of silently moving
+it back under home.
+
+File-level overrides (`--stash-db`, `TOKENLESS_STASH_DB`, and
+`TOKENLESS_STATS_DB`) remain confined to the canonical real home — derived
+from `getpwuid_r(getuid())`, never `$HOME` — or the selected data directory.
+Existing database files must be regular files rather than symlinks. The CLI
+and bundled RTK writer use the same path policy.
 
 `retrieve` queries are parameterized SQL; a malformed hash simply yields "no
 payload" rather than an injection.
 
 ## Fail-open policy
 
-- **Compress path**: if the stash cannot be opened (no trusted home, directory
-  cannot be created, db open fails) or `stash()` errors, compression proceeds
-  without stash and the marker degrades to the plain
+- **Compress path**: if the stash cannot be opened (invalid data directory,
+  directory cannot be created, db open fails) or `stash()` errors, compression
+  proceeds without stash and the marker degrades to the plain
   `<... N more items truncated>` form. Compression never fails because of the
   stash.
 - **Retrieve path**: retrieve is user-initiated, so failures surface as

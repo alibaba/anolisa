@@ -116,7 +116,9 @@ Run a task that actually passes through a hook, such as a shell command with vis
 env | grep '^TOKENLESS_'
 ```
 
-Confirm that `TOKENLESS_STATS_ENABLED=0` is not set unexpectedly and that any custom database path remains under the real user home.
+Confirm that `TOKENLESS_STATS_ENABLED=0` is not set unexpectedly and that any
+custom database path remains under the real user home or selected data
+directory.
 
 ## Adapter enable fails
 
@@ -202,7 +204,7 @@ ls -l ~/.tokenless/stats.db*
 env | grep -E 'TOKENLESS_(DATA_DIR|STATS_DB|STASH_DB)='
 ```
 
-Confirm that the current user can write the selected data directory and database. The `tokenless` CLI accepts `TOKENLESS_DATA_DIR`, `TOKENLESS_STATS_DB`, and `TOKENLESS_STASH_DB` only under the real user home and falls back when an override is rejected. The bundled RTK statistics writer uses `TOKENLESS_STATS_DB` directly, so remove or correct an unexpected override in the agent environment as well.
+Confirm that the current user can write the selected data directory and database. `TOKENLESS_DATA_DIR` may be outside the real home, but it must be an absolute non-root directory without parent traversal. An invalid explicit data directory does not fall back to home. `TOKENLESS_STATS_DB` and `TOKENLESS_STASH_DB` must remain under the real home or selected data directory; the bundled RTK writer applies the same rule.
 
 Do not share one `stats.db` between users. AgentSight and Tokenless should run so that they can access the same user's database.
 
