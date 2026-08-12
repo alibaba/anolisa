@@ -257,6 +257,62 @@ describe('runNonInteractive', () => {
     expect(mockShutdownTelemetry).toHaveBeenCalled();
   });
 
+  it('should reject hook confirmation in non-interactive mode', async () => {
+    setupMetricsMock();
+    let resolveDecision!: (confirmed: boolean) => void;
+    const resolveConfirmation = vi.fn((confirmed: boolean) => {
+      resolveDecision(confirmed);
+    });
+
+    async function* createConfirmationStream(
+      signal: AbortSignal,
+    ): AsyncGenerator<ServerGeminiStreamEvent> {
+      const confirmationPromise = new Promise<boolean>((resolve) => {
+        resolveDecision = resolve;
+      });
+      const abortPromise = new Promise<boolean>((resolve) => {
+        signal.addEventListener('abort', () => resolve(false), { once: true });
+      });
+
+      yield {
+        type: GeminiEventType.UserPromptConfirmation,
+        value: {
+          reason: 'The prompt requires approval',
+          resolve: resolveConfirmation,
+        },
+      };
+
+      if (!(await Promise.race([confirmationPromise, abortPromise]))) {
+        yield { type: GeminiEventType.UserCancelled };
+      }
+    }
+
+    mockGeminiClient.sendMessageStream.mockImplementation(
+      (_request, signal: AbortSignal) => createConfirmationStream(signal),
+    );
+    const abortController = new AbortController();
+    const watchdog = setTimeout(() => abortController.abort(), 250);
+
+    try {
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Test input',
+          'prompt-id-confirmation',
+          { abortController },
+        ),
+      ).rejects.toThrow(
+        'UserPromptSubmit hook requires confirmation, which is not available in non-interactive mode: The prompt requires approval',
+      );
+    } finally {
+      clearTimeout(watchdog);
+    }
+
+    expect(resolveConfirmation).toHaveBeenCalledOnce();
+    expect(resolveConfirmation).toHaveBeenCalledWith(false);
+  });
+
   it('should handle a single tool call and respond', async () => {
     setupMetricsMock();
     const toolCallEvent: ServerGeminiStreamEvent = {
