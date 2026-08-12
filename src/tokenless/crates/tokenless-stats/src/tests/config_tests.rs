@@ -167,6 +167,122 @@ fn test_compression_empty_env_treated_as_unset() {
 }
 
 #[test]
+fn test_compression_config_honored_with_stats_sls_envs() {
+    // Regression: when both stats and sls envs are set, compression_enabled
+    // must fall back to config.json (not default true) when its own env is
+    // unset — otherwise a dry-run config is silently bypassed.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let _ = std::fs::write(
+        &path,
+        "{\"compression_enabled\":false,\"stats_enabled\":true,\"sls_enabled\":false}",
+    );
+    let config = TokenlessConfig::load_with_envs_and_path(
+        Some("true"),
+        Some("true"),
+        None,
+        Some(&path),
+    );
+    assert!(config.is_stats_enabled());
+    assert!(config.is_sls_enabled());
+    assert!(!config.is_compression_enabled());
+}
+
+#[test]
+fn test_compression_config_honored_with_stats_sls_envs_unreadable_file() {
+    // Regression guard: when stats/sls envs are set but compression_env is absent
+    // and the config file is unreadable (e.g. nonexistent path), the loader must
+    // still honor env > default — not silently bypass with a stale cached value.
+    let path = std::path::PathBuf::from("/nonexistent/path/config.json");
+    let config = TokenlessConfig::load_with_envs_and_path(
+        Some("true"),
+        Some("true"),
+        None,
+        Some(&path),
+    );
+    assert!(config.is_stats_enabled());
+    assert!(config.is_sls_enabled());
+    // compression_env unset + file unreadable → falls back to default (true)
+    assert!(config.is_compression_enabled());
+}
+
+#[test]
+fn test_all_envs_set_skips_file_read() {
+    // Fast path: when all three envs are present, the config file must not be
+    // read at all. Observe the read itself via an injected reader that records
+    // invocations and returns values opposite to the envs — asserting only the
+    // returned config is blind here, because env overrides every toggle even
+    // when the slow path falls back to defaults after a failed read.
+    let path = std::path::PathBuf::from("/nonexistent/path/config.json");
+    let read_attempted = std::cell::Cell::new(false);
+    let config = TokenlessConfig::load_with_envs_and_file_reader(
+        Some("true"),
+        Some("false"),
+        Some("false"),
+        Some(&path),
+        |_p| {
+            read_attempted.set(true);
+            Ok(
+                "{\"stats_enabled\":false,\"sls_enabled\":true,\"compression_enabled\":true}"
+                    .to_string(),
+            )
+        },
+    );
+    assert!(
+        !read_attempted.get(),
+        "all-envs-set fast path must not read the config file"
+    );
+    assert!(config.is_stats_enabled());
+    assert!(!config.is_sls_enabled());
+    assert!(!config.is_compression_enabled());
+}
+
+#[test]
+fn test_partial_envs_attempt_file_read() {
+    // Companion guard for test_all_envs_set_skips_file_read: with one toggle's
+    // env unset, the loader must attempt the file read to fill the gap. This
+    // proves the injected reader actually observes reads, so the fast-path
+    // test's !read_attempted assertion cannot pass vacuously.
+    let path = std::path::PathBuf::from("/nonexistent/path/config.json");
+    let read_attempted = std::cell::Cell::new(false);
+    let config = TokenlessConfig::load_with_envs_and_file_reader(
+        Some("true"),
+        Some("true"),
+        None,
+        Some(&path),
+        |_p| {
+            read_attempted.set(true);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "config missing",
+            ))
+        },
+    );
+    assert!(
+        read_attempted.get(),
+        "partial-env load must attempt to read the config file"
+    );
+    // Read failed → built-in default fills the gap: env > default preserved.
+    assert!(config.is_stats_enabled());
+    assert!(config.is_sls_enabled());
+    assert!(config.is_compression_enabled());
+}
+
+#[test]
+fn test_compression_env_overrides_file_with_stats_sls_envs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let _ = std::fs::write(&path, "{\"compression_enabled\":false}");
+    let config = TokenlessConfig::load_with_envs_and_path(
+        Some("true"),
+        Some("true"),
+        Some("true"),
+        Some(&path),
+    );
+    assert!(config.is_compression_enabled());
+}
+
+#[test]
 fn test_parse_env_bool_yes_variant() {
     let config = TokenlessConfig::load_with_env(Some("yes"));
     assert!(config.is_stats_enabled());

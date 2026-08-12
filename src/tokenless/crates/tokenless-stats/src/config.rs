@@ -68,35 +68,62 @@ impl TokenlessConfig {
     }
 
     /// Load config with explicit env overrides for all toggles and optional custom path.
-    /// Priority (per toggle): env > config.json file > default
+    ///
+    /// Priority (per toggle): env > config.json file > default.
     /// Empty env var values are normalized to None (treated as unset).
-    /// When stats and sls envs are both set, skips the config file read entirely
-    /// (compression still defaults to true unless its own env is set).
+    ///
+    /// All env combinations that leave at least one toggle unset will attempt to
+    /// read the config file so the file value can fill the gap. IO failures
+    /// (missing file, unreadable path, corrupt NFS mount, etc.) are silently
+    /// ignored and the built-in defaults take over — `env > default` priority is
+    /// preserved even when the file cannot be read.
+    ///
+    /// Fast path: when all three env vars are present (none is None after
+    /// normalization), the file read is skipped entirely — every toggle is already
+    /// determined by the env values, so opening the config file would have no
+    /// effect. This avoids latency on slow or broken mounts in env-only
+    /// deployments.
     pub fn load_with_envs_and_path(
         stats_env: Option<&str>,
         sls_env: Option<&str>,
         compression_env: Option<&str>,
         path: Option<&PathBuf>,
     ) -> Self {
+        Self::load_with_envs_and_file_reader(stats_env, sls_env, compression_env, path, |p| {
+            std::fs::read_to_string(p)
+        })
+    }
+
+    /// Core logic of [`TokenlessConfig::load_with_envs_and_path`] with an
+    /// injectable file reader. Production always reads via
+    /// [`std::fs::read_to_string`]; tests inject a recording reader so they can
+    /// assert whether the config file read was attempted at all — the returned
+    /// config alone cannot distinguish the fast path from a failed read when
+    /// every toggle is already determined by env.
+    fn load_with_envs_and_file_reader(
+        stats_env: Option<&str>,
+        sls_env: Option<&str>,
+        compression_env: Option<&str>,
+        path: Option<&PathBuf>,
+        read_file: impl FnOnce(&std::path::Path) -> std::io::Result<String>,
+    ) -> Self {
         // Normalize empty strings to None — an empty env var means "unset".
         let stats_env = stats_env.filter(|v| !v.is_empty());
         let sls_env = sls_env.filter(|v| !v.is_empty());
         let compression_env = compression_env.filter(|v| !v.is_empty());
 
-        // When both stats and sls env vars are set, skip the file read entirely.
-        // This avoids unnecessary I/O when the config file is on a slow
-        // or unavailable filesystem (e.g. broken NFS mount).
-        if let (Some(stats_val), Some(sls_val)) = (stats_env, sls_env) {
+        // Fast path: all three toggles are determined by env — no file read needed.
+        if let (Some(s), Some(sl), Some(c)) = (stats_env, sls_env, compression_env) {
             return Self {
-                stats_enabled: parse_env_bool(stats_val),
-                sls_enabled: parse_env_bool(sls_val),
-                compression_enabled: compression_env.map(parse_env_bool).unwrap_or(true),
+                stats_enabled: parse_env_bool(s),
+                sls_enabled: parse_env_bool(sl),
+                compression_enabled: parse_env_bool(c),
             };
         }
 
         let default_path = Self::config_path();
         let config_path = path.unwrap_or(&default_path);
-        let base = std::fs::read_to_string(config_path)
+        let base = read_file(config_path)
             .ok()
             .and_then(|s| serde_json::from_str::<TokenlessConfig>(&s).ok())
             .unwrap_or_default();
