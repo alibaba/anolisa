@@ -360,6 +360,7 @@ where
         &config.input_wait_status,
         &crate::i18n::I18n::new(config.hint_language),
         config.input_wait_timeout_secs,
+        config.hint_card_renderer.as_ref(),
     )?;
     let display_start = session.parser.display.len();
     session.parser.flush_pending();

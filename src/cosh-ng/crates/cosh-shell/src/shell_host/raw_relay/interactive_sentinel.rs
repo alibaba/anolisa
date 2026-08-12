@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::i18n::{I18n, MessageId};
+use crate::shell_host::HintCardRenderer;
 use crate::types::CommandOrigin;
 
 use super::super::osc::OscParser;
@@ -145,7 +146,9 @@ pub(crate) fn sample_interactive_state(master_fd: i32, shell_pgid: i32) -> Inter
 }
 
 /// One-shot inline hint card (spec Q6, user-decided 2026-08-04): a
-/// yellow-bordered notice card appended to the terminal stream once per
+/// NoticePanel-family card (#2179: same framing, width contract, and
+/// plain fallback as every other panel, produced by the injected
+/// [`HintCardRenderer`]) appended to the terminal stream once per
 /// episode/kind, followed by a redraw of the program's own prompt tail so
 /// the user's typing target visually returns to the bottom (continuity).
 /// Fullscreen (alt-screen) episodes render nothing: any in-screen insert
@@ -155,7 +158,7 @@ pub(crate) fn hint_card(
     prompt_tail: &str,
     i18n: &I18n,
     input_wait_timeout_secs: u64,
-    cols: u16,
+    renderer: &HintCardRenderer,
 ) -> Option<String> {
     if matches!(kind, InteractiveHintKind::Fullscreen { .. }) {
         return None;
@@ -175,44 +178,27 @@ pub(crate) fn hint_card(
     let (safe_tail, _) = crate::evidence::redact_sensitive_text(prompt_tail.trim_end());
     let safe_tail = safe_tail.trim().to_string();
 
-    let width = usize::from(cols).clamp(40, 100);
-    let inner = width - 2;
-    let mut lines: Vec<String> = Vec::new();
-    let title = i18n.t(MessageId::ShellInputWaitHintTitle);
-    let title_width = approx_display_width(title);
-    let dashes = inner.saturating_sub(title_width + 3);
-    lines.push(format!(
-        "\x1b[33m╭─ {title} {}\x1b[0m",
-        "─".repeat(dashes.max(1))
-    ));
-    let body_line = |text: &str, dim: bool| {
-        let clipped = clip_to_width(text, inner.saturating_sub(2));
-        if dim {
-            format!("\x1b[33m│\x1b[0m \x1b[2m{clipped}\x1b[0m")
-        } else {
-            format!("\x1b[33m│\x1b[0m {clipped}")
-        }
-    };
+    let mut body: Vec<String> = Vec::new();
     if safe_tail.is_empty() {
-        lines.push(body_line(kind_body, false));
+        body.push(kind_body.to_string());
     } else {
-        lines.push(body_line(&safe_tail, false));
-        lines.push(body_line(kind_body, true));
+        body.push(safe_tail.clone());
+        body.push(kind_body.to_string());
     }
-    lines.push(body_line(
-        i18n.t(MessageId::ShellInputWaitHintGuidanceBody),
-        true,
-    ));
+    body.push(
+        i18n.t(MessageId::ShellInputWaitHintGuidanceBody)
+            .to_string(),
+    );
     if input_wait_timeout_secs > 0 && timeout_eligible(kind) {
-        lines.push(body_line(
-            &i18n.format(
-                MessageId::ShellInputWaitHintTimeoutForecastBody,
-                &[("seconds", &input_wait_timeout_secs.to_string())],
-            ),
-            true,
+        body.push(i18n.format(
+            MessageId::ShellInputWaitHintTimeoutForecastBody,
+            &[("seconds", &input_wait_timeout_secs.to_string())],
         ));
     }
-    lines.push(format!("\x1b[33m╰{}\x1b[0m", "─".repeat(inner)));
+    let lines = renderer.render(i18n.t(MessageId::ShellInputWaitHintTitle), body);
+    if lines.is_empty() {
+        return None;
+    }
 
     let mut rendered = format!("\r\n{}\r\n", lines.join("\r\n"));
     if !safe_tail.is_empty() {
@@ -222,95 +208,6 @@ pub(crate) fn hint_card(
         rendered.push(' ');
     }
     Some(rendered)
-}
-
-/// Extracts the current unfinished display line (after the last newline),
-/// stripped of CSI/OSC escape sequences and control bytes — the "prompt
-/// tail" the foreground program is waiting on.
-pub(crate) fn prompt_tail_from_display(display: &[u8]) -> String {
-    let start = display
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    let tail = String::from_utf8_lossy(&display[start..]);
-    strip_escape_sequences(&tail)
-}
-
-fn strip_escape_sequences(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            match chars.peek() {
-                Some('[') => {
-                    chars.next();
-                    for follow in chars.by_ref() {
-                        if follow.is_ascii_alphabetic() || follow == '~' {
-                            break;
-                        }
-                    }
-                }
-                // String-family introducers (OSC / DCS / SOS / PM / APC):
-                // consume until BEL or the ST pair `ESC \` (#2168 review:
-                // treating only OSC here left DCS/APC payloads visible).
-                Some(']' | 'P' | 'X' | '^' | '_') => {
-                    chars.next();
-                    while let Some(follow) = chars.next() {
-                        if follow == '\u{7}' {
-                            break;
-                        }
-                        if follow == '\u{1b}' && chars.peek() == Some(&'\\') {
-                            chars.next();
-                            break;
-                        }
-                    }
-                }
-                // nF sequences such as charset selection `ESC ( B`: consume
-                // intermediates (0x20..=0x2F) plus the final byte, instead
-                // of dropping a single char and leaking the final.
-                Some('\u{20}'..='\u{2f}') => {
-                    while let Some(&follow) = chars.peek() {
-                        chars.next();
-                        if !('\u{20}'..='\u{2f}').contains(&follow) {
-                            break;
-                        }
-                    }
-                }
-                _ => {
-                    chars.next();
-                }
-            }
-            continue;
-        }
-        if c == '\r' || c.is_control() {
-            continue;
-        }
-        out.push(c);
-    }
-    out
-}
-
-/// Coarse display width (ASCII = 1 column, everything else = 2): enough
-/// to keep the card border aligned for the zh/en copy and typical prompt
-/// tails without pulling a unicode-width dependency into the relay.
-fn approx_display_width(text: &str) -> usize {
-    text.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
-}
-
-fn clip_to_width(text: &str, max_width: usize) -> String {
-    let mut width = 0;
-    let mut out = String::new();
-    for c in text.chars() {
-        let w = if c.is_ascii() { 1 } else { 2 };
-        if width + w > max_width.saturating_sub(1) {
-            out.push('…');
-            break;
-        }
-        width += w;
-        out.push(c);
-    }
-    out
 }
 
 /// Timeout eligibility for the #2161 input-wait interrupt: only kinds
@@ -449,7 +346,7 @@ pub(super) fn emit_interactive_hint_if_waiting<W: std::io::Write>(
     input_wait_status: &InputWaitStatus,
     hint_i18n: &I18n,
     input_wait_timeout_secs: u64,
-    cols: u16,
+    hint_card_renderer: Option<&HintCardRenderer>,
 ) -> std::io::Result<()> {
     let is_agent_handoff = matches!(
         parser.active_command_origin(),
@@ -484,16 +381,26 @@ pub(super) fn emit_interactive_hint_if_waiting<W: std::io::Write>(
         .map(std::mem::discriminant)
         .is_none_or(|seen| seen != std::mem::discriminant(&kind));
     if changed {
-        let prompt_tail = prompt_tail_from_display(&parser.display);
-        if let Some(card) = hint_card(
-            &kind,
-            &prompt_tail,
-            hint_i18n,
-            input_wait_timeout_secs,
-            cols,
-        ) {
-            output.write_all(card.as_bytes())?;
-            output.flush()?;
+        // #2179 fail-quiet: no injected panel renderer means no card, but
+        // the episode kind is still recorded so re-entry stays deduped.
+        if let Some(renderer) = hint_card_renderer {
+            // Prompt tail: the parser's incrementally maintained, bounded
+            // visible tail (#2196 reviews R1/R4/R5/R7 — window anchored at
+            // preexec, one escape-stripping authority with state carried
+            // across chunks, retained lines capped, O(1) per sample; the
+            // last non-blank visible line keeps the #2179 echo+read
+            // semantics).
+            let prompt_tail = parser.active_command_visible_tail();
+            if let Some(card) = hint_card(
+                &kind,
+                &prompt_tail,
+                hint_i18n,
+                input_wait_timeout_secs,
+                renderer,
+            ) {
+                output.write_all(card.as_bytes())?;
+                output.flush()?;
+            }
         }
         *shown = Some(kind);
     }

@@ -156,6 +156,47 @@ fn streaming_agent_prefers_word_boundaries_across_deltas() {
 }
 
 #[test]
+fn notice_panel_lines_matches_write_form_and_closes_borders() {
+    // #2179: the offscreen form feeds the relay-injected hint card; it
+    // must be byte-identical to the written panel so the hint card shares
+    // the family framing, and every framed line must close both borders
+    // at the panel standard width.
+    let renderer = RatatuiInlineRenderer::with_width(80);
+    let model = || NoticePanelModel {
+        title: "Command is waiting for input",
+        body: vec![
+            "Type y or n:".to_string(),
+            "Reply directly, or press Ctrl+C to interrupt.".to_string(),
+        ],
+        footer: None,
+    };
+    let lines = renderer.notice_panel_lines(model());
+    let mut written = Vec::new();
+    renderer.write_notice_panel(&mut written, model()).unwrap();
+    assert_eq!(
+        lines.join("\n") + "\n",
+        String::from_utf8(written).unwrap(),
+        "offscreen lines must match the written panel"
+    );
+    let joined = lines.join("\n");
+    let width = usize::from(renderer.panel_standard_width());
+    assert_box_lines_aligned(joined.trim_end(), width);
+    assert!(lines.first().is_some_and(|l| l.trim_end().ends_with('╮')));
+    assert!(lines.last().is_some_and(|l| l.trim_end().ends_with('╯')));
+    for line in &lines[1..lines.len() - 1] {
+        assert!(
+            line.trim_end().ends_with('│'),
+            "body rows must close the right border: {line:?}"
+        );
+    }
+
+    // Plain form: same content contract, no box drawing.
+    let plain = RatatuiInlineRenderer::plain_with_width(44).notice_panel_lines(model());
+    assert!(plain[0].starts_with("Command is waiting for input:"));
+    assert!(plain.iter().all(|l| !l.contains('│')));
+}
+
+#[test]
 fn plain_renderer_uses_text_blocks_without_box_drawing() {
     let renderer = RatatuiInlineRenderer::plain_with_width(44);
     let mut output = Vec::new();

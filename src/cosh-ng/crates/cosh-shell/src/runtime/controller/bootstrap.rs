@@ -206,6 +206,20 @@ pub(crate) fn run_raw(
         .unwrap_or_default();
     // #2025: the relay renders the input-wait hint card itself.
     config.hint_language = inline_state.language;
+    // #2179: inject the panel-family framing so the relay-side hint card
+    // shares the NoticePanel width contract, closed borders, and plain
+    // fallback with every other panel. `for_terminal()` re-reads the
+    // terminal width per emission, so resizes are picked up for free.
+    let hint_card_language = inline_state.language;
+    config.set_hint_card_renderer(move |title, body| {
+        crate::ui::agent_render::RatatuiInlineRenderer::for_terminal()
+            .with_language(hint_card_language)
+            .notice_panel_lines(crate::ui::agent_render::NoticePanelModel {
+                title,
+                body,
+                footer: None,
+            })
+    });
     match cosh_config.analysis_mode.as_str() {
         "auto" => inline_state.analysis_mode = AnalysisMode::Auto,
         "manual" => inline_state.analysis_mode = AnalysisMode::Manual,

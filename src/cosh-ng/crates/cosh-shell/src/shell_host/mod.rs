@@ -18,6 +18,7 @@ mod routing;
 mod scripted;
 
 pub use line_interactive::{run_line_interactive_bash, LineInteractiveOutput};
+pub(crate) use model::HintCardRenderer;
 pub use model::{ScriptedInput, ShellHostConfig, ShellHostOutput};
 pub(crate) use raw_relay::interactive_sentinel::InputWaitStatus;
 pub use raw_runner::{

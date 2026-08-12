@@ -717,7 +717,9 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("dir");
         let output = dir.join("output.txt");
-        std::fs::write(&output, "\x1b[31mred\x1b[0m\r\nplain\x07\n").expect("write output");
+        // `ESC ( B` charset selection: the nF final byte must not leak
+        // into the excerpt (#2196 review: single stripping authority).
+        std::fs::write(&output, "\x1b(B\x1b[31mred\x1b[0m\r\nplain\x07\n").expect("write output");
         let output_ref = output.to_str().expect("utf8 output path");
 
         let excerpt =

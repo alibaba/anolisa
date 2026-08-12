@@ -30,6 +30,35 @@ impl std::fmt::Debug for ShellHistoryFileObserver {
     }
 }
 
+/// #2179: renders the input-wait hint card body into panel-family framed
+/// lines. Injected by the runtime bootstrap (which owns the UI renderer)
+/// so the relay-side sentinel emits the exact NoticePanel framing — width
+/// contract, closed borders, plain fallback — without the shell host
+/// depending on the UI layer.
+type HintCardRenderFn = dyn Fn(&str, Vec<String>) -> Vec<String> + Send + Sync + 'static;
+
+#[derive(Clone)]
+pub(crate) struct HintCardRenderer(Arc<HintCardRenderFn>);
+
+impl std::fmt::Debug for HintCardRenderer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("HintCardRenderer")
+    }
+}
+
+impl HintCardRenderer {
+    pub(crate) fn new<F>(render: F) -> Self
+    where
+        F: Fn(&str, Vec<String>) -> Vec<String> + Send + Sync + 'static,
+    {
+        Self(Arc::new(render))
+    }
+
+    pub(crate) fn render(&self, title: &str, body: Vec<String>) -> Vec<String> {
+        (self.0)(title, body)
+    }
+}
+
 impl ShellHistoryFileObserver {
     pub(super) fn new<F>(observer: F) -> Self
     where
@@ -82,6 +111,9 @@ pub struct ShellHostConfig {
     pub(crate) input_wait_status: InputWaitStatus,
     /// #2025/#2161: language for the relay-rendered input-wait hint card.
     pub(crate) hint_language: crate::config::Language,
+    /// #2179: panel-family renderer for the hint card; when absent the
+    /// sentinel stays fail-quiet and emits no card.
+    pub(crate) hint_card_renderer: Option<HintCardRenderer>,
     /// #2161: mirrors `shell.input_wait_timeout_secs` so the hint card can
     /// forecast the auto-interrupt (0 = disabled, no forecast line).
     pub(crate) input_wait_timeout_secs: u64,
@@ -107,6 +139,7 @@ impl ShellHostConfig {
             raw_action_watchdog: Duration::from_secs(120),
             input_wait_status: InputWaitStatus::default(),
             hint_language: crate::config::Language::default(),
+            hint_card_renderer: None,
             input_wait_timeout_secs: 120,
             shell_environment_observer: None,
             shell_history_file_observer: None,
@@ -121,6 +154,19 @@ impl ShellHostConfig {
     pub fn with_ai_enabled(mut self, enabled: bool) -> Self {
         self.input_classifier = self.input_classifier.with_ai_enabled(enabled);
         self
+    }
+
+    /// Installs the input-wait hint card frame renderer (#2196 review):
+    /// `new()` leaves it unset and the sentinel then stays fail-quiet, so
+    /// crate-external callers of the public raw relay entry points need
+    /// this to opt back into the card. The closure receives the card
+    /// title and body lines and returns the framed lines to emit; the
+    /// in-process runtime injects the NoticePanel framing here.
+    pub fn set_hint_card_renderer<F>(&mut self, render: F)
+    where
+        F: Fn(&str, Vec<String>) -> Vec<String> + Send + Sync + 'static,
+    {
+        self.hint_card_renderer = Some(HintCardRenderer::new(render));
     }
 
     pub(crate) fn set_shell_environment_observer<F>(&mut self, observer: F)

@@ -9,6 +9,7 @@ mod routing;
 
 use alt_screen::AltScreenTracker;
 use command::CurrentCommand;
+pub(crate) use command::{VisibleTailTracker, VISIBLE_TAIL_MAX_CHARS};
 use handoff_claim::{
     claim_pending_command_origin, pending_origin_for_request, PendingCommandOrigin,
 };
@@ -91,6 +92,9 @@ pub(super) struct OscParser {
     /// invalidation barrier; a fresh command-less prompt report
     /// (`ShellReady`) re-arms it.
     pty_input_barrier_pushed: bool,
+    /// #2196 R7: bounded last-visible-line tracker for the active command,
+    /// fed incrementally per PTY chunk; owned by osc/command.rs.
+    visible_tail: VisibleTailTracker,
     /// #2025: alternate-screen tracking, owned by osc/alt_screen.rs.
     alt_screen: AltScreenTracker,
 }
@@ -137,6 +141,7 @@ impl OscParser {
             history_file_observer: None,
             main_prompt_gate: crate::raw_input::MainPromptGate::default(),
             pty_input_barrier_pushed: false,
+            visible_tail: VisibleTailTracker::default(),
             alt_screen: AltScreenTracker::default(),
         }
     }
@@ -269,6 +274,10 @@ impl OscParser {
             }
             "preexec" => {
                 self.main_prompt_gate.set_at_prompt(false);
+                // #2196 R7: the visible-tail window starts at the command
+                // boundary, so earlier output can never resurface as the
+                // prompt tail.
+                self.visible_tail.reset();
                 let command = marker.command.unwrap_or_default();
                 self.command_seq += 1;
                 let command_id = format!("cmd-{}", self.command_seq);
@@ -474,6 +483,7 @@ impl OscParser {
             return;
         }
         self.alt_screen.observe(&data);
+        self.visible_tail.feed(&data);
         self.display.extend_from_slice(&data);
         self.append_clean(&data);
     }

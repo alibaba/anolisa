@@ -1471,3 +1471,73 @@ fn raw_relay_zsh_secret_handoff_survives_a_bypass_prefixed_race() {
         "{terminal}"
     );
 }
+
+/// #2196 review regression: `ShellHostConfig::new()` leaves the hint card
+/// renderer unset (fail-quiet), so the public raw relay surface must offer
+/// a working opt-in path. Wires a marker frame through the public
+/// `set_hint_card_renderer` and drives an agent handoff into a blocked tty
+/// read via the public bash entry point; the marker proves the sentinel
+/// reached the injected renderer. The card is relay-injected into the
+/// output sink (never echoed back by the PTY), so the assertion reads the
+/// sink instead of `terminal_output`. Linux-only: the blocked-read
+/// classification needs /proc evidence.
+#[cfg(target_os = "linux")]
+#[test]
+fn raw_relay_bash_public_config_renders_hint_card_for_waiting_handoff() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    struct SharedSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl Write for SharedSink {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("sink lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-public-hint-card-work-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut config = ShellHostConfig::new("public-hint-card-test", &work_dir);
+    config.native_mode = false;
+    config.set_hint_card_renderer(|title, body| {
+        let mut lines = vec![format!("[public-frame] {title}")];
+        lines.extend(body);
+        lines
+    });
+
+    // A forked child (`bash -c`) keeps the read outside the relay shell's
+    // own process group: the sentinel requires a foreign foreground pgid
+    // before it consults the /proc blocked-read evidence, and a bare
+    // `read` builtin would run inside the shell itself and never qualify.
+    let command = r#"bash -c 'read -p "Type y or n: " answer; echo "answer=$answer"'"#;
+    let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            // The sentinel needs a 2s output-quiet window plus a 1s sample
+            // interval before it may emit; the margin covers loaded runners.
+            RawRelayAction::wait(Duration::from_millis(6_000)),
+            RawRelayAction::line("y"),
+            RawRelayAction::wait(Duration::from_millis(500)),
+            RawRelayAction::line("exit"),
+        ],
+        SharedSink(sink.clone()),
+        emit_pager_policy_handoff(command, ImplicitPagerPolicy::Inherit),
+    )
+    .expect("raw relay bash public hint card handoff");
+
+    let relayed = String::from_utf8_lossy(&sink.lock().expect("sink lock")).into_owned();
+    assert!(
+        relayed.contains("[public-frame]"),
+        "hint card must reach the renderer injected through the public config path: {relayed}"
+    );
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("answer=y"), "{terminal}");
+}

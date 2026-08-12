@@ -84,6 +84,7 @@ pub(super) fn read_raw_until_exit<W: Write, F>(
     input_wait_status: &InputWaitStatus,
     hint_i18n: &crate::i18n::I18n,
     input_wait_timeout_secs: u64,
+    hint_card_renderer: Option<&crate::shell_host::HintCardRenderer>,
 ) -> io::Result<bool>
 where
     F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
@@ -362,7 +363,7 @@ where
             input_wait_status,
             hint_i18n,
             input_wait_timeout_secs,
-            last_winsize.ws_col,
+            hint_card_renderer,
         )?;
         if let Some(watchdog) = watchdog {
             if watchdog.expired(driver_completed_at) {

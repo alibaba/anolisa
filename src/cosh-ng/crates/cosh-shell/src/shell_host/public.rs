@@ -10,3 +10,4 @@ pub use implementation::{
 };
 
 pub(crate) use implementation::run_streaming_line_bash;
+pub(crate) use implementation::HintCardRenderer;
