@@ -809,7 +809,7 @@ fn check_tool(tool_name: &str, spec: &ToolDepSpec) -> ToolReadyResult {
     let has_perm_missing = permission_results.iter().any(|(_, ok)| !ok);
     let has_recommended_missing = recommended_results
         .iter()
-        .any(|(_, s)| s == &DepStatus::Missing);
+        .any(|(_, s)| s == &DepStatus::Missing || matches!(s, DepStatus::VersionLow { .. }));
     let has_config_missing = config_results.iter().any(|(_, ok)| !ok);
     let has_net_missing = network_results.iter().any(|(_, ok)| !ok);
 
@@ -898,10 +898,15 @@ fn generate_checklist(results: &[ToolReadyResult]) -> String {
             let label = if *ok { "GRANTED" } else { "DENIED" };
             output.push_str(&format!("  permission: {:12} {}\n", perm, label));
         }
+        for (net, ok) in &result.network_results {
+            let label = if *ok { "OK" } else { "FAIL" };
+            output.push_str(&format!("  network:    {:12} {}\n", net, label));
+        }
         if !result.required_results.is_empty()
             || !result.recommended_results.is_empty()
             || !result.config_results.is_empty()
             || !result.permission_results.is_empty()
+            || !result.network_results.is_empty()
         {
             output.push('\n');
         }
@@ -935,6 +940,124 @@ fn generate_checklist(results: &[ToolReadyResult]) -> String {
     output.push_str(&summary);
 
     output
+}
+
+/// Serialize checklist results as a JSON object for machine consumption.
+///
+/// **Sync rule**: when `ToolReadyResult` gains a new check category, add a
+/// matching array here so JSON consumers see every field the text path shows.
+///
+/// **Ordering contract**: the `tools` array preserves the caller's order.
+/// `run()` sorts tool names before building results, so output is stable
+/// across processes and safe for diff/hash/cache/snapshot consumers.
+///
+/// Schema:
+/// ```json
+/// {
+///   "tools": [
+///     {
+///       "tool": "<name>",
+///       "status": "READY|PARTIAL|NOT_READY|UNKNOWN",
+///       "required":    [{"binary":"…","status":"…"}, …],
+///       "recommended": [{"binary":"…","status":"…"}, …],
+///       "config":      [{"name":"…","ok":true}, …],
+///       "permissions": [{"name":"…","ok":true}, …],
+///       "network":     [{"name":"…","ok":true}, …]
+///     },
+///     …
+///   ],
+///   "summary": {
+///     "ready": N, "partial": N, "not_ready": N, "unknown": N, "total": N
+///   }
+/// }
+/// ```
+fn generate_checklist_json(results: &[ToolReadyResult]) -> Value {
+    let tools: Vec<Value> = results
+        .iter()
+        .map(|r| {
+            let mut obj = serde_json::Map::new();
+            obj.insert("tool".to_string(), Value::String(r.tool_name.clone()));
+            obj.insert(
+                "status".to_string(),
+                Value::String(format_status(&r.status).to_string()),
+            );
+
+            let required: Vec<Value> = r
+                .required_results
+                .iter()
+                .map(|(dep, status)| {
+                    serde_json::json!({
+                        "binary": dep.binary,
+                        "status": format_dep_status_label(status)
+                    })
+                })
+                .collect();
+            obj.insert("required".to_string(), Value::Array(required));
+
+            let recommended: Vec<Value> = r
+                .recommended_results
+                .iter()
+                .map(|(dep, status)| {
+                    serde_json::json!({
+                        "binary": dep.binary,
+                        "status": format_dep_status_label(status)
+                    })
+                })
+                .collect();
+            obj.insert("recommended".to_string(), Value::Array(recommended));
+
+            let config: Vec<Value> = r
+                .config_results
+                .iter()
+                .map(|(name, ok)| serde_json::json!({"name": name, "ok": ok}))
+                .collect();
+            obj.insert("config".to_string(), Value::Array(config));
+
+            let permissions: Vec<Value> = r
+                .permission_results
+                .iter()
+                .map(|(name, ok)| serde_json::json!({"name": name, "ok": ok}))
+                .collect();
+            obj.insert("permissions".to_string(), Value::Array(permissions));
+
+            let network: Vec<Value> = r
+                .network_results
+                .iter()
+                .map(|(name, ok)| serde_json::json!({"name": name, "ok": ok}))
+                .collect();
+            obj.insert("network".to_string(), Value::Array(network));
+
+            Value::Object(obj)
+        })
+        .collect();
+
+    let ready = results
+        .iter()
+        .filter(|r| r.status == ReadyStatus::Ready)
+        .count();
+    let partial = results
+        .iter()
+        .filter(|r| r.status == ReadyStatus::Partial)
+        .count();
+    let not_ready = results
+        .iter()
+        .filter(|r| r.status == ReadyStatus::NotReady)
+        .count();
+    let unknown = results
+        .iter()
+        .filter(|r| r.status == ReadyStatus::Unknown)
+        .count();
+
+    serde_json::json!({
+        "tools": tools,
+        "summary": {
+            "ready": ready,
+            "partial": partial,
+            "not_ready": not_ready,
+            "unknown": unknown,
+            "total": results.len()
+        }
+    })
 }
 
 /// Build the ordered candidate list for `auto_fix`.
@@ -1198,11 +1321,22 @@ pub fn run(
     let specs = load_spec(&spec_path).map_err(|e| (e, 1))?;
 
     if checklist {
-        let results: Vec<ToolReadyResult> = specs
-            .keys()
-            .map(|name| check_tool(name, specs.get(name).unwrap()))
+        // Sort tool names before building results so both the text and JSON
+        // checklist output keep a stable order across processes; `specs` is a
+        // HashMap, whose iteration order is randomized per process.
+        let mut tool_names: Vec<&str> = specs.keys().map(String::as_str).collect();
+        tool_names.sort_unstable();
+        let results: Vec<ToolReadyResult> = tool_names
+            .iter()
+            .map(|name| check_tool(name, specs.get(*name).unwrap()))
             .collect();
-        println!("{}", generate_checklist(&results));
+        if json {
+            let json_value = serde_json::to_string(&generate_checklist_json(&results))
+                .map_err(|e| (format!("Failed to serialize checklist JSON: {}", e), 1))?;
+            println!("{}", json_value);
+        } else {
+            println!("{}", generate_checklist(&results));
+        }
         return Ok(());
     }
 

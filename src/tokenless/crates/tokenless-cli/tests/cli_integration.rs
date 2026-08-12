@@ -613,3 +613,144 @@ fn stats_diff_invalid_scope_and_missing_record_use_expected_exit_codes() {
         .unwrap();
     assert_eq!(missing.status.code(), Some(1));
 }
+
+fn write_checklist_spec(dir: &std::path::Path) -> std::path::PathBuf {
+    // Config file that reliably exists for the config-file check.
+    let config_path = dir.join("present.conf");
+    std::fs::write(&config_path, "").unwrap();
+    let spec = serde_json::json!({
+        "_comment": "comment keys must be skipped",
+        "Write": {
+            "required": ["nonexistent_binary_xyz_98"],
+            "recommended": [],
+            "config_files": [],
+            "permissions": [],
+            "network": []
+        },
+        "Shell": {
+            "required": ["bash"],
+            "recommended": [],
+            "config_files": [],
+            "permissions": [],
+            "network": []
+        },
+        "WebFetch": {
+            "required": [],
+            "recommended": ["nonexistent_binary_xyz_99"],
+            "config_files": [],
+            "permissions": [],
+            "network": ["lan_probe"]
+        },
+        "Read": {
+            "required": ["bash"],
+            "recommended": [],
+            "config_files": [config_path],
+            "permissions": ["exec_shell"],
+            "network": []
+        }
+    });
+    let spec_path = dir.join("checklist-spec.json");
+    std::fs::write(&spec_path, spec.to_string()).unwrap();
+    spec_path
+}
+
+#[test]
+fn env_check_checklist_json_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_checklist_spec(dir.path());
+
+    let output = tokenless_bin()
+        .args(["env-check", "--checklist", "--json"])
+        .env("TOKENLESS_TOOL_READY_SPEC", &spec_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "env-check --checklist --json should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect(
+        "--checklist --json must print one JSON object on stdout (text output would not parse)",
+    );
+
+    // Tools are ordered by tool name so the array is stable across runs.
+    let tools = value["tools"].as_array().expect("tools must be an array");
+    let names: Vec<&str> = tools
+        .iter()
+        .map(|tool| tool["tool"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["Read", "Shell", "WebFetch", "Write"]);
+
+    // Every tool entry carries the status label plus all five categories.
+    for tool in tools {
+        assert!(tool["status"].is_string());
+        for category in [
+            "required",
+            "recommended",
+            "config",
+            "permissions",
+            "network",
+        ] {
+            assert!(
+                tool[category].is_array(),
+                "tool {} must serialize category {}",
+                tool["tool"],
+                category
+            );
+        }
+    }
+
+    // READY tool: required dep installed, config present, permission granted.
+    let read = &tools[0];
+    assert_eq!(read["status"], "READY");
+    assert_eq!(read["required"][0]["binary"], "bash");
+    assert_eq!(read["required"][0]["status"], "INSTALLED");
+    assert_eq!(read["config"][0]["ok"], true);
+    assert_eq!(read["permissions"][0]["name"], "exec_shell");
+    assert_eq!(read["permissions"][0]["ok"], true);
+
+    // PARTIAL tool: only a recommended dep missing.
+    let web_fetch = &tools[2];
+    assert_eq!(web_fetch["status"], "PARTIAL");
+    assert_eq!(web_fetch["recommended"][0]["status"], "MISSING");
+    assert_eq!(web_fetch["network"][0]["ok"], true);
+
+    // NOT_READY tool: required dep missing.
+    let write = &tools[3];
+    assert_eq!(write["status"], "NOT_READY");
+    assert_eq!(write["required"][0]["status"], "MISSING");
+
+    // Summary counts must agree with the tools array.
+    assert_eq!(value["summary"]["ready"], 2);
+    assert_eq!(value["summary"]["partial"], 1);
+    assert_eq!(value["summary"]["not_ready"], 1);
+    assert_eq!(value["summary"]["unknown"], 0);
+    assert_eq!(value["summary"]["total"], 4);
+}
+
+#[test]
+fn env_check_checklist_json_stable_across_processes() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec_path = write_checklist_spec(dir.path());
+
+    let mut outputs = Vec::new();
+    for _ in 0..8 {
+        let output = tokenless_bin()
+            .args(["env-check", "--checklist", "--json"])
+            .env("TOKENLESS_TOOL_READY_SPEC", &spec_path)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        outputs.push(output.stdout);
+    }
+
+    for (index, stdout) in outputs.iter().enumerate().skip(1) {
+        assert_eq!(
+            stdout,
+            &outputs[0],
+            "checklist JSON must be byte-identical across processes (run {})",
+            index + 1
+        );
+    }
+}

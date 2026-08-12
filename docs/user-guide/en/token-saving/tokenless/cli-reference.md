@@ -207,6 +207,36 @@ tokenless env-check --all --json
 tokenless env-check --all --checklist
 ```
 
+Full checklist as one JSON object for hooks, plugins, and CI gates:
+
+```bash
+tokenless env-check --checklist --json
+```
+
+```json
+{
+  "tools": [
+    {
+      "tool": "Shell",
+      "status": "PARTIAL",
+      "required": [{ "binary": "jq", "status": "INSTALLED" }],
+      "recommended": [{ "binary": "rtk", "status": "MISSING" }],
+      "config": [{ "name": "~/.tokenless/config.json", "ok": true }],
+      "permissions": [{ "name": "exec_shell", "ok": true }],
+      "network": [{ "name": "https_outbound", "ok": true }]
+    }
+  ],
+  "summary": { "ready": 0, "partial": 1, "not_ready": 0, "unknown": 0, "total": 1 }
+}
+```
+
+Checklist JSON contract:
+
+- `tools` is sorted by tool name, so repeated runs produce identical output that is safe to diff, hash, cache, or snapshot.
+- `status` uses the fixed labels `READY` / `PARTIAL` / `NOT_READY` / `UNKNOWN`.
+- Dependency entries report `INSTALLED`, `MISSING`, or `OUTDATED (<installed>/<required>)`; config, permission, and network entries report `ok: true|false`.
+- `summary` aggregates the same results: `ready`, `partial`, `not_ready`, `unknown`, and `total`.
+
 Status meanings:
 
 | Status | Meaning |

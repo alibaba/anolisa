@@ -698,6 +698,38 @@ fn check_tool_partial_missing_recommended() {
 }
 
 #[test]
+fn check_tool_partial_recommended_version_low() {
+    // bash>=999.0.0 is always VersionLow; the overall status must be PARTIAL, not READY.
+    let spec = ToolDepSpec {
+        aliases: vec![],
+        required: vec![make_dep("sh")],
+        recommended: vec![DepEntry {
+            binary: "bash".to_string(),
+            version: Some(">=999.0.0".to_string()),
+            package: "bash".to_string(),
+            apt_package: None,
+            apk_package: None,
+            manager: "rpm".to_string(),
+            pip_name: None,
+            uv_name: None,
+            npm_name: None,
+            use_npx: false,
+            fallback: vec![],
+        }],
+        config_files: vec![],
+        permissions: vec![],
+        network: vec![],
+    };
+    let result = check_tool("PartialVersionedTool", &spec);
+    assert_eq!(result.status, ReadyStatus::Partial);
+    // Confirm the dep itself is VersionLow, not Missing
+    assert!(
+        matches!(result.recommended_results[0].1, DepStatus::VersionLow { .. }),
+        "expected VersionLow for bash>=999.0.0"
+    );
+}
+
+#[test]
 fn check_tool_partial_missing_config() {
     let spec = ToolDepSpec {
         aliases: vec![],
@@ -1132,8 +1164,13 @@ fn check_tool_versioned_available() {
     let spec_path = write_versioned_spec(dir.path());
     let specs = load_spec(&spec_path).unwrap();
     let result = check_tool("VersionedTool", specs.get("VersionedTool").unwrap());
-    // bash >= 1.0 should be available on any Linux
-    assert_eq!(result.status, ReadyStatus::Ready);
+    // bash >= 1.0 satisfies the required dep; cat>=0.1 may be VersionLow (no --version)
+    // and ~/.bashrc is likely absent — both conditions produce Partial, not Ready.
+    assert!(
+        result.status == ReadyStatus::Partial || result.status == ReadyStatus::Ready,
+        "expected Partial or Ready, got {:?}",
+        result.status
+    );
     assert!(!result.config_results.is_empty());
 }
 
@@ -1578,4 +1615,94 @@ fn normalize_dep_with_fallback() {
     assert_eq!(dep.manager, "pip");
     assert_eq!(dep.fallback.len(), 1);
     assert_eq!(dep.fallback[0].binary.as_deref(), Some("rtk-fallback"));
+}
+
+fn synthetic_checklist_results() -> Vec<ToolReadyResult> {
+    vec![
+        ToolReadyResult {
+            tool_name: "Read".to_string(),
+            status: ReadyStatus::Ready,
+            required_results: vec![(normalize_dep(&json!("bash")), DepStatus::Available)],
+            recommended_results: vec![],
+            config_results: vec![("/etc/hostname".to_string(), true)],
+            permission_results: vec![("exec_shell".to_string(), true)],
+            network_results: vec![],
+        },
+        ToolReadyResult {
+            tool_name: "WebFetch".to_string(),
+            status: ReadyStatus::Partial,
+            required_results: vec![],
+            recommended_results: vec![(
+                normalize_dep(&json!("nonexistent_binary_xyz_99")),
+                DepStatus::Missing,
+            )],
+            config_results: vec![],
+            permission_results: vec![],
+            network_results: vec![("lan_probe".to_string(), true)],
+        },
+        ToolReadyResult {
+            tool_name: "Write".to_string(),
+            status: ReadyStatus::NotReady,
+            required_results: vec![(
+                normalize_dep(&json!("nonexistent_binary_xyz_99")),
+                DepStatus::Missing,
+            )],
+            recommended_results: vec![],
+            config_results: vec![("~/.nonexistent_config_xyz".to_string(), false)],
+            permission_results: vec![("file_write".to_string(), false)],
+            network_results: vec![],
+        },
+    ]
+}
+
+#[test]
+fn checklist_json_schema_covers_all_categories() {
+    let value = generate_checklist_json(&synthetic_checklist_results());
+
+    let tools = value["tools"].as_array().expect("tools must be an array");
+    assert_eq!(tools.len(), 3);
+
+    // Every tool entry carries the status label plus all five categories.
+    for tool in tools {
+        assert!(tool["status"].is_string());
+        for category in ["required", "recommended", "config", "permissions", "network"] {
+            assert!(
+                tool[category].is_array(),
+                "tool {} must serialize category {}",
+                tool["tool"],
+                category
+            );
+        }
+    }
+
+    let read = &tools[0];
+    assert_eq!(read["tool"], "Read");
+    assert_eq!(read["status"], "READY");
+    assert_eq!(read["required"][0]["binary"], "bash");
+    assert_eq!(read["required"][0]["status"], "INSTALLED");
+    assert_eq!(read["config"][0]["name"], "/etc/hostname");
+    assert_eq!(read["config"][0]["ok"], true);
+    assert_eq!(read["permissions"][0]["name"], "exec_shell");
+    assert_eq!(read["permissions"][0]["ok"], true);
+    assert_eq!(read["recommended"].as_array().unwrap().len(), 0);
+    assert_eq!(read["network"].as_array().unwrap().len(), 0);
+
+    let web_fetch = &tools[1];
+    assert_eq!(web_fetch["status"], "PARTIAL");
+    assert_eq!(web_fetch["recommended"][0]["status"], "MISSING");
+    assert_eq!(web_fetch["network"][0]["name"], "lan_probe");
+    assert_eq!(web_fetch["network"][0]["ok"], true);
+
+    let write = &tools[2];
+    assert_eq!(write["status"], "NOT_READY");
+    assert_eq!(write["required"][0]["status"], "MISSING");
+    assert_eq!(write["config"][0]["ok"], false);
+    assert_eq!(write["permissions"][0]["ok"], false);
+
+    // Summary counts are derived from the same results.
+    assert_eq!(value["summary"]["ready"], 1);
+    assert_eq!(value["summary"]["partial"], 1);
+    assert_eq!(value["summary"]["not_ready"], 1);
+    assert_eq!(value["summary"]["unknown"], 0);
+    assert_eq!(value["summary"]["total"], 3);
 }

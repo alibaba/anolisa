@@ -302,9 +302,17 @@ tokenless env-check --all
 # Generate checklist
 tokenless env-check --checklist
 
+# Machine-readable checklist (single JSON object, tools sorted by name)
+tokenless env-check --checklist --json
+
 # Check and auto-fix missing deps
 tokenless env-check --tool Shell --fix
 ```
+
+`--checklist --json` emits one `{tools, summary}` object with stable ordering
+for hooks, plugins, and CI gates; see the
+[CLI reference](../../docs/user-guide/en/token-saving/tokenless/cli-reference.md#env-check)
+for the full schema.
 
 ### Configuration
 

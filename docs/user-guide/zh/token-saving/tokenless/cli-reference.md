@@ -207,6 +207,36 @@ tokenless env-check --all --json
 tokenless env-check --all --checklist
 ```
 
+以单个 JSON 对象输出完整清单，供 Hook、插件和 CI 门禁消费：
+
+```bash
+tokenless env-check --checklist --json
+```
+
+```json
+{
+  "tools": [
+    {
+      "tool": "Shell",
+      "status": "PARTIAL",
+      "required": [{ "binary": "jq", "status": "INSTALLED" }],
+      "recommended": [{ "binary": "rtk", "status": "MISSING" }],
+      "config": [{ "name": "~/.tokenless/config.json", "ok": true }],
+      "permissions": [{ "name": "exec_shell", "ok": true }],
+      "network": [{ "name": "https_outbound", "ok": true }]
+    }
+  ],
+  "summary": { "ready": 0, "partial": 1, "not_ready": 0, "unknown": 0, "total": 1 }
+}
+```
+
+清单 JSON 约定：
+
+- `tools` 按工具名排序，重复运行输出完全一致，可安全用于 diff、hash、缓存或快照。
+- `status` 使用固定标签 `READY` / `PARTIAL` / `NOT_READY` / `UNKNOWN`。
+- 依赖项报告 `INSTALLED`、`MISSING` 或 `OUTDATED (<installed>/<required>)`；配置、权限和网络项报告 `ok: true|false`。
+- `summary` 对同一结果汇总：`ready`、`partial`、`not_ready`、`unknown` 与 `total`。
+
 状态含义：
 
 | 状态 | 含义 |

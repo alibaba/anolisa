@@ -197,6 +197,33 @@ export TOKENLESS_DATA_DIR="$HOME/path/to/tokenless-data"
 覆盖项优先级更高，但必须位于真实用户 home 或选定的数据目录下。配置文件
 仍位于 `~/.tokenless/config.json`。
 
+## Tool Ready
+
+Tool Ready 在工具调用前预检环境依赖（来自 `tool-ready-spec.json`），缺失时
+报告 `NOT_READY` 并提示跳过重试，避免浪费 Token 重试必然失败的命令；调用失败
+后再做错误归因。
+
+```bash
+# 检查单个工具
+tokenless env-check --tool Shell
+
+# 检查全部工具
+tokenless env-check --all
+
+# 生成清单
+tokenless env-check --checklist
+
+# 机器可读清单（单个 JSON 对象，tools 按名称排序）
+tokenless env-check --checklist --json
+
+# 检查并自动修复缺失依赖
+tokenless env-check --tool Shell --fix
+```
+
+`--checklist --json` 输出单个 `{tools, summary}` 对象，顺序稳定，供 Hook、
+插件和 CI 门禁消费；完整 schema 见
+[CLI 参考](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#env-check)。
+
 ## 架构
 
 - `crates/tokenless-schema/` — 核心库：SchemaCompressor + ResponseCompressor
