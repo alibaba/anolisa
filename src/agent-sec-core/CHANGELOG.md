@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.1
+
+**OpenClaw & cosh Hook Integrations**
+
+- Piped prompt text through stdin instead of command-line arguments in the OpenClaw and cosh prompt scanner hooks. (#2445)
+
+**Security Events & CLI**
+
+- Validated events query parameters in the CLI and the daemon security query handlers. (#2451)
+
 ## 0.10.0
 
 **Agent Hook Policy Controls**
