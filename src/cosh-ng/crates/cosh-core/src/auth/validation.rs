@@ -10,6 +10,7 @@ use super::AuthResponse;
 pub(crate) enum AuthConfigValidationError {
     MissingRequiredField(String),
     InvalidBaseUrl,
+    InvalidProviderId,
 }
 
 impl fmt::Display for AuthConfigValidationError {
@@ -20,6 +21,8 @@ impl fmt::Display for AuthConfigValidationError {
             }
             Self::InvalidBaseUrl => formatter
                 .write_str("invalid base_url: expected an http:// or https:// URL with a host"),
+            Self::InvalidProviderId => formatter
+                .write_str("invalid provider_id: expected letters, digits, '-' and '_' only"),
         }
     }
 }
@@ -58,6 +61,13 @@ pub(super) fn validate_auth_response(
         validate_base_url(base_url)?;
     }
     Ok(())
+}
+
+pub(crate) fn is_valid_provider_id(provider_id: &str) -> bool {
+    !provider_id.is_empty()
+        && provider_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
 }
 
 pub(super) fn validate_base_url(base_url: &str) -> Result<(), AuthConfigValidationError> {

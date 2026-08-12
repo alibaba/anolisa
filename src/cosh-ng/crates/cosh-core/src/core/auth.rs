@@ -17,7 +17,7 @@ impl CoshCore {
     {
         let request_id = self.next_request_id();
         let mut discarded_lines = Vec::new();
-        let response = request_validated_auth(
+        let validated = request_validated_auth(
             &mut self.config,
             reader,
             writer,
@@ -27,15 +27,11 @@ impl CoshCore {
             &mut discarded_lines,
         )
         .await;
-        let Some(response) = response else {
+        let Some(validated) = validated else {
             return false;
         };
 
-        if response.persist {
-            if let Err(error) = config::persist_config(&self.config) {
-                tracing::warn!("failed to persist config: {error}");
-            }
-        }
+        self.config = validated.candidate;
 
         let resolved = self.config.resolve_provider();
         if resolved.provider_type == "aliyun" {

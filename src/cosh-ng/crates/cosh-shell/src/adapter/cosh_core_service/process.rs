@@ -369,13 +369,18 @@ pub(super) fn execute_registry(
         {
             return Ok(response.get("data").cloned().unwrap_or(Value::Null));
         }
-        return Err(RegistryQueryError::Response(
-            response
+        return Err(RegistryQueryError::Response {
+            message: response
                 .get("error")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown live registry error")
                 .to_string(),
-        ));
+            code: response
+                .get("data")
+                .and_then(|data| data.get("error_code"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        });
     }
 }
 

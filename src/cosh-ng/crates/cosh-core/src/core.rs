@@ -13,7 +13,9 @@ use cosh_types::audit::{AuditOutcomeStatus, AuditProviderData, AuditToolData, Ou
 use crate::audit::{CoreAuditRecorder, CoreAuditScope};
 use crate::auth::is_auth_error;
 use crate::compaction::{CompactionRuntime, ModelCapability};
-use crate::config::{self, ApprovalMode, CoreConfig};
+#[cfg(test)]
+use crate::config;
+use crate::config::{ApprovalMode, CoreConfig};
 use crate::context::ContextBuilder;
 use crate::extension::{GenerationController, RuntimeGeneration, RuntimeSnapshot};
 use crate::hook::{HookDecision, HookNotification, HookSystem, PreToolUseResult};

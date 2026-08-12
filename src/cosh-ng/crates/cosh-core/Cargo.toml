@@ -51,3 +51,4 @@ wait-timeout.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }

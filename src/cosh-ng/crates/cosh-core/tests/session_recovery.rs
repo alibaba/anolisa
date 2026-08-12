@@ -1,7 +1,9 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::thread::JoinHandle;
 
 use rustix::fs::{flock, FlockOperation};
 use serde_json::{json, Value};
@@ -61,6 +63,30 @@ model = "mock-history"
 "#,
     )
     .expect("write mock provider config");
+}
+
+fn authentication_model_server(model: &'static str) -> (String, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind auth model server");
+    let address = listener.local_addr().expect("auth model server address");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept auth model request");
+        let mut request = [0_u8; 2048];
+        let count = stream.read(&mut request).expect("read auth model request");
+        let request = String::from_utf8_lossy(&request[..count]);
+        assert!(
+            request.starts_with(&format!("GET /v1/models/{model} HTTP/1.1")),
+            "unexpected auth model request: {request}"
+        );
+        let body = format!(r#"{{"id":"{model}","object":"model"}}"#);
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .expect("write auth model response");
+    });
+    (format!("http://{address}/v1"), server)
 }
 
 #[test]
@@ -578,6 +604,7 @@ fn authentication_selected_model_initializes_new_session() {
     let home = temp.path().join("home");
     let workspace = temp.path().join("workspace");
     let store = temp.path().join("sessions");
+    let (auth_base_url, auth_server) = authentication_model_server("gpt-selected");
     fs::create_dir_all(&home).expect("create home");
     fs::create_dir_all(&workspace).expect("create workspace");
     let config_dir = home.join(".copilot-shell");
@@ -619,7 +646,7 @@ persist_dir = "{}"
                         "provider_type": "openai_compat",
                         "values": {
                             "api_key": "test-key",
-                            "base_url": "http://127.0.0.1:9/v1",
+                            "base_url": auth_base_url,
                             "model": "gpt-selected"
                         },
                         "persist": false
@@ -638,6 +665,7 @@ persist_dir = "{}"
             }),
         ],
     ));
+    auth_server.join().expect("auth model server");
     let init = messages
         .iter()
         .find(|message| message["type"] == "system" && message["subtype"] == "init")

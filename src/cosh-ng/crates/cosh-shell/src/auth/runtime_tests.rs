@@ -1,4 +1,4 @@
-use super::retry::restore_after_failed_submission;
+use super::retry::{restore_after_failed_submission, restore_after_failed_submission_at};
 use super::runtime::*;
 use super::validation::{record_field_edit, record_field_submission, FieldSubmission};
 use crate::runtime::prelude::{
@@ -290,7 +290,7 @@ fn editing_the_field_again_clears_the_previous_error() {
 }
 
 #[test]
-fn failed_submission_restarts_with_clean_values() {
+fn failed_submission_returns_to_preserved_non_secret_field() {
     let mut provider = provider("openai_compat", "OpenAI Compatible");
     provider.fields.push(AuthFieldInfo {
         name: "provider_id".to_string(),
@@ -313,8 +313,11 @@ fn failed_submission_restarts_with_clean_values() {
 
     assert_eq!(auth.phase, AuthPhase::FillingField);
     assert_eq!(auth.current_field, 0);
-    assert!(auth.collected_values.is_empty());
-    assert!(auth.field_input.is_empty());
+    assert_eq!(
+        auth.collected_values.get("provider_id").map(String::as_str),
+        Some("bad.provider")
+    );
+    assert_eq!(auth.field_input, "bad.provider");
 }
 
 #[test]
@@ -454,10 +457,9 @@ fn failed_edit_submission_drops_secrets_the_user_actually_typed() {
     );
 }
 
-/// Selective preservation is scoped to edits. A new provider must still retry from empty,
-/// which is what #1769 hardened the retry path for.
+/// A new provider keeps non-secret identity fields while dropping submitted plaintext secrets.
 #[test]
-fn failed_new_provider_submission_still_clears_every_value() {
+fn failed_new_provider_submission_preserves_only_non_secret_values() {
     let mut state = failed_edit_state();
     let auth = state.auth.state.as_mut().unwrap();
     auth.editing_provider_name = None;
@@ -465,7 +467,36 @@ fn failed_new_provider_submission_still_clears_every_value() {
     restore_after_failed_submission(auth);
 
     assert_eq!(auth.current_field, 0);
-    assert!(auth.collected_values.is_empty());
+    assert_eq!(
+        auth.collected_values.get("provider_id").map(String::as_str),
+        Some("qwen-prod")
+    );
+    assert_eq!(
+        auth.collected_values.get("model").map(String::as_str),
+        Some("qwen3.7-plus")
+    );
+    assert!(!auth.collected_values.contains_key("api_key"));
+    assert!(!auth.collected_values.contains_key("access_key_secret"));
+    assert_eq!(auth.field_input, "qwen-prod");
+}
+
+#[test]
+fn classified_retry_focuses_api_key_without_losing_provider_identity() {
+    let mut state = failed_edit_state();
+    let auth = state.auth.state.as_mut().unwrap();
+    auth.editing_provider_name = None;
+
+    restore_after_failed_submission_at(auth, Some("api_key"));
+
+    assert_eq!(
+        auth.current_field_info().map(|field| field.name.as_str()),
+        Some("api_key")
+    );
+    assert_eq!(
+        auth.collected_values.get("provider_id").map(String::as_str),
+        Some("qwen-prod")
+    );
+    assert!(!auth.collected_values.contains_key("api_key"));
     assert!(auth.field_input.is_empty());
 }
 

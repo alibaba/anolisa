@@ -5,7 +5,7 @@ use std::io::Write;
 use tokio::io::AsyncBufReadExt;
 
 use crate::auth::request_validated_auth;
-use crate::config::{self, CoreConfig};
+use crate::config::CoreConfig;
 use crate::protocol::{AuthReason, OutputMessage};
 
 /// Requests credentials until they validate or the shell cancels the exchange.
@@ -19,7 +19,7 @@ where
     W: Write,
     R: AsyncBufReadExt + Unpin,
 {
-    let response = request_validated_auth(
+    let validated = request_validated_auth(
         config,
         lines,
         writer,
@@ -30,11 +30,7 @@ where
     )
     .await?;
 
-    if response.persist {
-        if let Err(error) = config::persist_config(config) {
-            tracing::warn!("failed to persist config: {error}");
-        }
-    }
+    *config = validated.candidate;
 
     if let Ok(json) = serde_json::to_string(&OutputMessage::system_status("auth_ok")) {
         let _ = writeln!(writer, "{json}");

@@ -5,9 +5,12 @@ use crate::config::{CoreConfig, ProviderConfig};
 use crate::protocol::{AuthField, AuthProvider};
 
 mod exchange;
+mod preflight;
 mod validation;
 
 pub(crate) use exchange::request_validated_auth;
+pub(crate) use preflight::AuthPreflightError;
+pub(crate) use validation::is_valid_provider_id;
 pub(crate) use validation::AuthConfigValidationError;
 use validation::{validate_auth_response, validate_base_url};
 
@@ -251,6 +254,9 @@ pub(crate) fn apply_auth_credentials(
     config: &mut CoreConfig,
     response: &AuthResponse,
 ) -> Result<(), AuthConfigValidationError> {
+    if !is_valid_provider_id(&response.provider_id) {
+        return Err(AuthConfigValidationError::InvalidProviderId);
+    }
     let template_id = response
         .provider_type
         .as_deref()
@@ -328,12 +334,13 @@ pub(crate) fn apply_auth_credentials(
         .and_then(|p| p.explicit_cache);
 
     config.ai.active_provider = Some(response.provider_id.clone());
+    config.ai.active_model = final_model.clone();
     let provider = ProviderConfig {
         provider_type: Some(provider_type),
         auth_source,
         base_url: Some(base_url),
         api_key: Some(api_key),
-        model: final_model,
+        model: final_model.clone(),
         extra_params: None,
         access_key_id,
         access_key_secret,
@@ -346,12 +353,99 @@ pub(crate) fn apply_auth_credentials(
         .insert(response.provider_id.clone(), provider.clone());
     if response.persist {
         config.user_ai.active_provider = Some(response.provider_id.clone());
+        config.user_ai.active_model = final_model;
         config
             .user_ai
             .providers
             .insert(response.provider_id.clone(), provider);
     }
     Ok(())
+}
+
+/// Authentication configuration failures remain classified across the core/shell boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AuthConfigureError {
+    Validation(AuthConfigValidationError),
+    Preflight(AuthPreflightError),
+    Persistence,
+}
+
+impl AuthConfigureError {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::Validation(AuthConfigValidationError::MissingRequiredField(field)) => {
+                match field.as_str() {
+                    "api_key" => "missing_credentials",
+                    "access_key_id" => "missing_access_key_id",
+                    "access_key_secret" => "missing_access_key_secret",
+                    "model" => "missing_model",
+                    "base_url" => "missing_base_url",
+                    _ => "invalid_configuration",
+                }
+            }
+            Self::Validation(AuthConfigValidationError::InvalidBaseUrl) => "invalid_base_url",
+            Self::Validation(AuthConfigValidationError::InvalidProviderId) => "invalid_provider_id",
+            Self::Preflight(error) => error.code(),
+            Self::Persistence => "persistence_failed",
+        }
+    }
+}
+
+impl fmt::Display for AuthConfigureError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Validation(error) => error.fmt(formatter),
+            Self::Preflight(error) => error.fmt(formatter),
+            Self::Persistence => formatter.write_str(
+                "Configuration was validated but could not be saved. Check config permissions and try again.",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AuthConfigureError {}
+
+impl From<AuthConfigValidationError> for AuthConfigureError {
+    fn from(error: AuthConfigValidationError) -> Self {
+        Self::Validation(error)
+    }
+}
+
+impl From<AuthPreflightError> for AuthConfigureError {
+    fn from(error: AuthPreflightError) -> Self {
+        Self::Preflight(error)
+    }
+}
+
+/// Builds and validates an auth candidate without mutating the active configuration.
+pub(crate) async fn prepare_auth_candidate(
+    current: &CoreConfig,
+    response: &AuthResponse,
+) -> Result<CoreConfig, AuthConfigureError> {
+    let mut candidate = current.clone();
+    apply_auth_credentials(&mut candidate, response)?;
+    let mut resolved = candidate.resolve_provider();
+    if response.provider_type.as_deref() == Some("openai_compat") {
+        resolved.provider_type = "openai_compat".to_string();
+    }
+    preflight::preflight_auth(&resolved).await?;
+    Ok(candidate)
+}
+
+/// Completes the auth transaction and returns a candidate safe to publish in memory.
+pub(crate) async fn prepare_and_persist_auth_candidate<F>(
+    current: &CoreConfig,
+    response: &AuthResponse,
+    persist: F,
+) -> Result<CoreConfig, AuthConfigureError>
+where
+    F: FnOnce(&CoreConfig) -> Result<(), String>,
+{
+    let candidate = prepare_auth_candidate(current, response).await?;
+    if response.persist {
+        persist(&candidate).map_err(|_| AuthConfigureError::Persistence)?;
+    }
+    Ok(candidate)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -390,6 +484,7 @@ pub(crate) fn remove_auth_provider(
     config.user_ai.providers.remove(provider_id);
     if config.user_ai.active_provider.as_deref() == Some(provider_id) {
         config.user_ai.active_provider = None;
+        config.user_ai.active_model = None;
     }
 
     if let Some(system_provider) = config.system_ai.providers.get(provider_id).cloned() {
@@ -429,7 +524,124 @@ pub fn is_auth_error(error: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
     use super::*;
+
+    fn model_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request);
+            let body = r#"{"id":"test-model","object":"model"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        format!("http://{address}/v1")
+    }
+
+    fn transaction_response(base_url: String) -> AuthResponse {
+        AuthResponse {
+            provider_id: "transaction-provider".to_string(),
+            provider_type: Some("openai_compat".to_string()),
+            values: HashMap::from([
+                ("base_url".to_string(), base_url),
+                ("api_key".to_string(), "sk-test".to_string()),
+                ("model".to_string(), "test-model".to_string()),
+            ]),
+            persist: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_transaction_persists_candidate_before_publication() {
+        let current = CoreConfig::default();
+        let persisted = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&persisted);
+        let candidate = prepare_and_persist_auth_candidate(
+            &current,
+            &transaction_response(model_server()),
+            move |candidate| {
+                assert_eq!(
+                    candidate.ai.active_provider.as_deref(),
+                    Some("transaction-provider")
+                );
+                observed.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .expect("transaction succeeds");
+
+        assert!(persisted.load(Ordering::SeqCst));
+        assert!(current.ai.providers.is_empty());
+        assert!(candidate.ai.providers.contains_key("transaction-provider"));
+    }
+
+    #[tokio::test]
+    async fn persistence_failure_leaves_runtime_config_unchanged() {
+        let current = CoreConfig::default();
+        let result = prepare_and_persist_auth_candidate(
+            &current,
+            &transaction_response(model_server()),
+            |_| Err("read-only config".to_string()),
+        )
+        .await;
+
+        assert!(matches!(result, Err(AuthConfigureError::Persistence)));
+        assert!(current.ai.providers.is_empty());
+        assert!(current.user_ai.providers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_validation_failure_never_invokes_persistence() {
+        let current = CoreConfig::default();
+        let invoked = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&invoked);
+        let temporary = tempfile::tempdir().unwrap();
+        let config_path = temporary.path().join("config.toml");
+        let attempted_path = config_path.clone();
+        let response = transaction_response("not-a-url".to_string());
+        let result = prepare_and_persist_auth_candidate(&current, &response, move |_| {
+            observed.store(true, Ordering::SeqCst);
+            std::fs::write(&attempted_path, "should not exist").unwrap();
+            Ok(())
+        })
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(AuthConfigureError::Validation(
+                AuthConfigValidationError::InvalidBaseUrl
+            ))
+        ));
+        assert!(!invoked.load(Ordering::SeqCst));
+        assert!(!config_path.exists());
+        assert!(current.ai.providers.is_empty());
+    }
+
+    #[test]
+    fn aliyun_missing_credentials_preserve_field_codes() {
+        for (field, expected) in [
+            ("access_key_id", "missing_access_key_id"),
+            ("access_key_secret", "missing_access_key_secret"),
+        ] {
+            let error = AuthConfigureError::Validation(
+                AuthConfigValidationError::MissingRequiredField(field.to_string()),
+            );
+            assert_eq!(error.code(), expected);
+        }
+    }
 
     #[test]
     fn builtin_providers_have_correct_ids() {
@@ -791,6 +1003,7 @@ mod tests {
             .providers
             .insert("user-provider".to_string(), provider.clone());
         config.user_ai.active_provider = Some("user-provider".to_string());
+        config.user_ai.active_model = Some("user-model".to_string());
         config
             .user_ai
             .providers
@@ -801,6 +1014,7 @@ mod tests {
         assert_eq!(removed.active_provider, None);
         assert_eq!(config.ai.active_provider, None);
         assert_eq!(config.ai.active_model, None);
+        assert_eq!(config.user_ai.active_model, None);
         assert!(!config.ai.providers.contains_key("user-provider"));
         assert!(!config.user_ai.providers.contains_key("user-provider"));
     }

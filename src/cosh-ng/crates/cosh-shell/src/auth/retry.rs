@@ -5,15 +5,30 @@ use std::collections::HashSet;
 use super::menu::ECS_RAM_ROLE_AUTH_SOURCE;
 use super::runtime::{AuthPhase, RuntimeAuthState};
 
+#[cfg(test)]
 pub(super) fn restore_after_failed_submission(auth: &mut RuntimeAuthState) {
+    restore_after_failed_submission_at(auth, None);
+}
+
+pub(super) fn restore_after_failed_submission_at(
+    auth: &mut RuntimeAuthState,
+    field_name: Option<&str>,
+) {
     auth.phase = AuthPhase::FillingField;
     auth.field_error = None;
     let Some(provider_id) = auth.editing_provider_name.clone() else {
-        // A brand-new provider retries from scratch: nothing the rejected attempt collected
-        // may leak into the next one (#1769).
-        auth.current_field = 0;
-        auth.collected_values.clear();
-        auth.field_input.clear();
+        let fields = &auth.providers[auth.selected_provider].fields;
+        let secret_fields: HashSet<_> = fields
+            .iter()
+            .filter(|field| field.secret)
+            .map(|field| field.name.as_str())
+            .collect();
+        auth.collected_values
+            .retain(|name, _| !secret_fields.contains(name.as_str()));
+        auth.current_field = field_name
+            .and_then(|name| fields.iter().position(|field| field.name == name))
+            .unwrap_or(0);
+        auth.load_current_field_input();
         return;
     };
 
@@ -39,6 +54,11 @@ pub(super) fn restore_after_failed_submission(auth: &mut RuntimeAuthState) {
         .insert("provider_id".to_string(), provider_id);
     clear_ecs_auth_source(&mut auth.collected_values);
     auth.current_field = 1.min(fields.len());
+    if let Some(field_name) = field_name {
+        if let Some(index) = fields.iter().position(|field| field.name == field_name) {
+            auth.current_field = index;
+        }
+    }
     auth.load_current_field_input();
 }
 
