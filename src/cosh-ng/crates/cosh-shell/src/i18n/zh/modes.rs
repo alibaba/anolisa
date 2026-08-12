@@ -8,8 +8,9 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ModesTitle => "模式",
         MessageId::ModeApprovalLine => "审批: {mode}",
         MessageId::ModeAnalysisLine => "分析: {mode}",
+        MessageId::ModePlanLine => "plan: {mode}",
         MessageId::ModeSummaryFooter => {
-            "使用 /mode approval [recommend|auto|trust] 或 /mode analysis [smart|auto|manual]。"
+            "使用 /mode approval [recommend|auto|trust]、/mode analysis [smart|auto|manual] 或 /mode plan [on|off|status]。"
         }
         MessageId::ModeRemovedTitle => "模式命令已移除",
         MessageId::ModeRemovedBody => "/mode {mode} 不再支持。",
@@ -18,7 +19,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ModeLanguageFooter => "使用 /config language [auto|en-US|zh-CN]。",
         MessageId::ModeUnknownBody => "未知模式: {mode}",
         MessageId::ModeUnknownFooter => {
-            "使用 /mode approval recommend|auto|trust 或 /mode analysis smart|auto|manual。"
+            "使用 /mode approval recommend|auto|trust、/mode analysis smart|auto|manual 或 /mode plan on|off|status。"
         }
         MessageId::ApprovalModeTitle => "审批模式",
         MessageId::ApprovalModeSetBody => "模式已设置为 {mode}。",
@@ -75,6 +76,19 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::AnalysisModeRemainsBody => "模式仍为 {mode}。",
         MessageId::AnalysisModeCancelBody => "模式未改变: {mode}。",
         MessageId::AnalysisModeCancelFooter => "没有执行 shell 命令。",
+        MessageId::PlanModeTitle => "Plan 模式",
+        MessageId::PlanModeEnabledBody => "plan mode: ON",
+        MessageId::PlanModeDisabledBody => "plan mode: OFF",
+        MessageId::PlanModeStatusOnBody => "plan 模式已开启（审批模式 {mode} 暂停生效）。",
+        MessageId::PlanModeStatusOffBody => "plan 模式已关闭（审批模式: {mode}）。",
+        MessageId::PlanModeEnabledFooter => {
+            "Agent 只调研和制定计划；不会执行有副作用的 tool call。使用 /plan 或 /mode plan off 退出。"
+        }
+        MessageId::PlanModeDisabledFooter => "Agent 恢复按当前审批模式正常执行。",
+        MessageId::PlanModeAlreadyOnBody => "plan 模式已经是开启状态。",
+        MessageId::PlanModeAlreadyOffBody => "plan 模式已经是关闭状态。",
+        MessageId::PlanModeUnknownBody => "未知 plan 模式选项: {mode}",
+        MessageId::PlanModeUsageFooter => "使用 /plan 或 /mode plan [on|off|status]。",
         _ => return None,
     })
 }

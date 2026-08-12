@@ -104,5 +104,6 @@ collect_message_ids!([
     approval_system_control_ids,
     input_wait_hint_ids,
     startup_auth_hint_ids,
+    plan_mode_ids,
     session_picker_footer_ids,
 ],);

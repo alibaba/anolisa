@@ -64,3 +64,28 @@ macro_rules! mode_ids {
         );
     };
 }
+
+// The #1961 plan-mode workflow segment is appended after every earlier
+// segment so pre-existing discriminants never shift.
+macro_rules! plan_mode_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            HelpSummaryModePlan,
+            HelpSummaryPlan,
+            ModePlanLine,
+            PlanModeTitle,
+            PlanModeEnabledBody,
+            PlanModeDisabledBody,
+            PlanModeStatusOnBody,
+            PlanModeStatusOffBody,
+            PlanModeEnabledFooter,
+            PlanModeDisabledFooter,
+            PlanModeAlreadyOnBody,
+            PlanModeAlreadyOffBody,
+            PlanModeUnknownBody,
+            PlanModeUsageFooter,
+        );
+    };
+}

@@ -268,7 +268,7 @@ fn runtime_request_from_parsed(
 }
 
 fn history_request_needs_confirmation(state: &InlineState) -> bool {
-    if state.approval_mode == CoshApprovalMode::Recommend {
+    if state.effective_approval_mode() == CoshApprovalMode::Recommend {
         return true;
     }
     state
