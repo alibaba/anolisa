@@ -8,6 +8,7 @@ mod list_directory;
 pub mod mcp;
 pub mod read_file;
 mod read_many_files;
+mod runtime_context;
 mod save_memory;
 pub mod shell;
 pub mod shell_evidence;
@@ -77,11 +78,23 @@ pub enum ToolKind {
 
 pub struct ToolContext {
     pub cwd: PathBuf,
-    #[allow(dead_code)]
     pub session_id: String,
-    #[allow(dead_code)]
     pub project_root: PathBuf,
     workspace: SessionWorkspace,
+    runtime: ToolRuntimeContext,
+}
+
+/// Runtime-owned metadata exposed to tools without placing dynamic values in
+/// the provider's cached system prompt.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ToolRuntimeContext {
+    pub(crate) model: String,
+    pub(crate) approval_mode: String,
+    pub(crate) session_resumed: bool,
+    pub(crate) compaction_revision: u64,
+    pub(crate) compacted_through: Option<usize>,
+    pub(crate) tools: Vec<String>,
+    pub(crate) active_extensions: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -154,20 +167,23 @@ impl ToolContext {
             session_id,
             project_root,
             workspace,
+            runtime: ToolRuntimeContext::default(),
         }
     }
 
-    pub(crate) fn with_workspace(
+    pub(crate) fn with_runtime(
         cwd: PathBuf,
         session_id: String,
         project_root: PathBuf,
         workspace: SessionWorkspace,
+        runtime: ToolRuntimeContext,
     ) -> Self {
         Self {
             cwd,
             session_id,
             project_root,
             workspace,
+            runtime,
         }
     }
 
@@ -286,6 +302,7 @@ impl ToolRegistry {
         registry.register(Box::new(glob::GlobTool));
         registry.register(Box::new(list_directory::ListDirectoryTool));
         registry.register(Box::new(read_many_files::ReadManyFilesTool));
+        registry.register(Box::new(runtime_context::RuntimeContextTool));
         registry.register(Box::new(save_memory::SaveMemoryTool));
         registry.register(Box::new(todo::TodoTool::new()));
         registry.register(Box::new(web_fetch::WebFetchTool::new()));
@@ -473,6 +490,7 @@ mod tests {
             "glob",
             "list_directory",
             "read_many_files",
+            "runtime_context",
             "save_memory",
             "web_fetch",
         ] {

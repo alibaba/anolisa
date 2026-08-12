@@ -73,6 +73,7 @@ impl CoshCore {
             messages: Vec::new(),
             compaction: CompactionRuntime::default(),
             model,
+            session_resumed: false,
             shell_context: None,
             project_root,
             workspace,

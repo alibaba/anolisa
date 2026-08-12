@@ -601,6 +601,86 @@ async fn project_context_reaches_the_provider_boundary() {
 }
 
 #[tokio::test]
+async fn provider_session_identity_stays_out_of_the_system_prompt() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        messages: Arc::clone(&captured),
+        ..RecordingProvider::default()
+    };
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = ApprovalMode::Trust;
+    let mut core = CoshCore::new(config, Box::new(provider), ToolRegistry::new());
+    let provider_session_id = core.session_id.clone();
+    let mut reader = empty_reader().await;
+    let mut output = Vec::new();
+
+    core.handle_user_message("hello", &mut reader, &mut output)
+        .await
+        .unwrap();
+
+    let messages = captured.lock().unwrap();
+    let prompt = messages
+        .first()
+        .expect("provider system message")
+        .content
+        .as_text();
+    assert!(!prompt.contains(&provider_session_id));
+    assert!(!prompt.contains("provider_session_id"));
+}
+
+#[tokio::test]
+async fn runtime_context_tool_reads_live_core_state_on_demand() {
+    let mut config = CoreConfig::default();
+    config.agent.approval_mode = ApprovalMode::Recommend;
+    config.hooks.enabled = true;
+    config.ai.active_provider = Some("coding".to_string());
+    config.ai.providers.insert(
+        "coding".to_string(),
+        crate::config::ProviderConfig {
+            provider_type: Some("dashscope".to_string()),
+            model: Some("qwen-test".to_string()),
+            ..Default::default()
+        },
+    );
+    let tools = ToolRegistry::with_defaults_for_test();
+    let mut core = CoshCore::new(config, Box::new(MockProvider::new(Vec::new())), tools);
+    core.set_session_resumed(true);
+    core.compaction.load_state(None, 7);
+    // Config reload does not rebuild the bound provider or hook system. The
+    // runtime contract therefore omits those config-only identities.
+    core.config.ai.active_provider = Some("reloaded-provider".to_string());
+    core.config.hooks.enabled = false;
+    let context = ToolContext::with_runtime(
+        core.cwd(),
+        core.session_id.clone(),
+        core.project_root.clone(),
+        core.workspace.clone(),
+        core.tool_runtime_context(),
+    );
+
+    let result = core
+        .tools
+        .get("runtime_context")
+        .expect("default runtime_context tool")
+        .invoke(serde_json::json!({}), &context)
+        .await
+        .expect("runtime context output");
+    let output: serde_json::Value =
+        serde_json::from_str(&result.output).expect("runtime context JSON");
+
+    assert_eq!(output["provider_session_id"], core.session_id);
+    assert_eq!(output["model"], "qwen-test");
+    assert!(output.get("provider").is_none());
+    assert_eq!(output["approval_mode"], "recommend");
+    assert_eq!(output["session"]["resumed"], true);
+    assert_eq!(output["compaction"]["revision"], 7);
+    assert!(output["capabilities"]["tools"]
+        .as_array()
+        .is_some_and(|tools| tools.iter().any(|name| name == "runtime_context")));
+    assert!(output["capabilities"].get("hooks_enabled").is_none());
+}
+
+#[tokio::test]
 async fn raw_shell_input_reaches_prompt_hook_without_changing_provider_content() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let provider = RecordingProvider {

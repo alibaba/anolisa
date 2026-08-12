@@ -24,7 +24,9 @@ use crate::provider::{
     ContentGenerator, GenerateConfig, GenerateEvent, Message, MAX_TOOL_CALL_INDEX,
 };
 use crate::tool::ask_user_question;
-use crate::tool::{SessionWorkspace, ToolContext, ToolKind, ToolRegistry, ToolResult};
+use crate::tool::{
+    SessionWorkspace, ToolContext, ToolKind, ToolRegistry, ToolResult, ToolRuntimeContext,
+};
 use crate::truncator::OutputTruncator;
 
 use self::tool_execution::{
@@ -65,6 +67,7 @@ pub struct CoshCore {
     /// sees the projected effective context.
     pub compaction: CompactionRuntime,
     pub model: String,
+    session_resumed: bool,
     pub shell_context: Option<ShellContext>,
     project_root: PathBuf,
     workspace: SessionWorkspace,
@@ -90,6 +93,23 @@ pub struct CoshCore {
 impl CoshCore {
     pub fn tool_names(&self) -> Vec<String> {
         self.tools.names()
+    }
+
+    pub(crate) fn set_session_resumed(&mut self, resumed: bool) {
+        self.session_resumed = resumed;
+    }
+
+    fn tool_runtime_context(&self) -> ToolRuntimeContext {
+        let snapshot = self.extension_generation.current();
+        ToolRuntimeContext {
+            model: self.model.clone(),
+            approval_mode: self.config.agent.approval_mode.to_string(),
+            session_resumed: self.session_resumed,
+            compaction_revision: self.compaction.revision(),
+            compacted_through: self.compaction.state().map(|state| state.compacted_through),
+            tools: self.tool_names(),
+            active_extensions: snapshot.active_extensions.iter().cloned().collect(),
+        }
     }
 
     pub fn emit<W: Write>(&self, writer: &mut W, msg: &OutputMessage) {
@@ -975,11 +995,12 @@ impl CoshCore {
             self.messages
                 .push(Message::assistant_with_tool_calls(&text_buf, tc_infos));
 
-            let ctx = ToolContext::with_workspace(
+            let ctx = ToolContext::with_runtime(
                 self.cwd(),
                 self.session_id.clone(),
                 self.project_root.clone(),
                 self.workspace.clone(),
+                self.tool_runtime_context(),
             );
 
             let mut interrupted = false;

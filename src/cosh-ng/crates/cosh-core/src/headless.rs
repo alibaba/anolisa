@@ -133,6 +133,7 @@ pub async fn run(
         project_root,
         workspace,
     );
+    engine.set_session_resumed(session.resumed);
     let live_extension_runtime = crate::registry::LiveExtensionRuntime::new(
         engine.extension_generation.clone(),
         args.enable_shell_evidence_tool,

@@ -65,7 +65,7 @@ impl AuditTestDir {
 /// Call-site identity captured for a policy audit event.
 #[derive(Debug, Clone)]
 pub struct CallerInfo {
-    /// Provider/session correlation identifier.
+    /// Shell/terminal correlation identifier, with a process-scoped fallback.
     pub session_id: String,
     /// Local user label used only by legacy call sites, never persisted in v1.
     pub user: String,
@@ -91,9 +91,7 @@ impl CallerInfo {
                     .filter(|value| !value.is_empty())
             })
             .unwrap_or_else(|| "unknown".to_string());
-        let session_id = std::env::var("COSH_SESSION_ID")
-            .ok()
-            .filter(|value| !value.is_empty())
+        let session_id = detected_shell_session_id()
             .unwrap_or_else(|| format!("p{}-t{}", std::process::id(), Utc::now().timestamp()));
         let sudo_user = std::env::var("SUDO_USER")
             .ok()
@@ -107,6 +105,12 @@ impl CallerInfo {
             pid: std::process::id(),
         }
     }
+}
+
+fn detected_shell_session_id() -> Option<String> {
+    std::env::var("COSH_SESSION_ID")
+        .ok()
+        .filter(|value| !value.is_empty())
 }
 
 /// Runs a full policy evaluation and durably records its decision.
@@ -155,6 +159,7 @@ fn record_to_log(
     source: LogSource,
 ) -> Result<(), CoshError> {
     let redacted = redact::redact_action(&mut action);
+    let shell_session_id = detected_shell_session_id();
     let caller = CallerInfo::detect();
     let root = config::resolve_audit_root()?;
     let component = match source {
@@ -194,7 +199,7 @@ fn record_to_log(
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
         AuditIdentity {
-            provider_session_id: Some(caller.session_id),
+            shell_session_id,
             ..AuditIdentity::default()
         },
         AuditActor {
@@ -250,22 +255,37 @@ mod tests {
 
     struct AuditEnvGuard {
         directory: AuditTestDir,
+        original_audit_dir: Option<std::ffi::OsString>,
+        original_shell_session_id: Option<std::ffi::OsString>,
         _lock: MutexGuard<'static, ()>,
     }
 
     fn temp_audit_env() -> AuditEnvGuard {
         let lock = env_lock();
         let directory = AuditTestDir::create();
+        let original_audit_dir = std::env::var_os("COSH_AUDIT_DIR");
+        let original_shell_session_id = std::env::var_os("COSH_SESSION_ID");
         std::env::set_var("COSH_AUDIT_DIR", directory.path());
         AuditEnvGuard {
             directory,
+            original_audit_dir,
+            original_shell_session_id,
             _lock: lock,
         }
     }
 
     impl Drop for AuditEnvGuard {
         fn drop(&mut self) {
-            std::env::remove_var("COSH_AUDIT_DIR");
+            if let Some(value) = &self.original_audit_dir {
+                std::env::set_var("COSH_AUDIT_DIR", value);
+            } else {
+                std::env::remove_var("COSH_AUDIT_DIR");
+            }
+            if let Some(value) = &self.original_shell_session_id {
+                std::env::set_var("COSH_SESSION_ID", value);
+            } else {
+                std::env::remove_var("COSH_SESSION_ID");
+            }
         }
     }
 
@@ -291,10 +311,43 @@ mod tests {
     }
 
     #[test]
+    fn policy_event_records_cosh_session_as_shell_identity() {
+        let guard = temp_audit_env();
+        std::env::set_var("COSH_SESSION_ID", "raw-session-identity-test");
+
+        check(package_install(), LogSource::Cli, &builtin::balanced()).unwrap();
+
+        let read = reader::read_all(guard.directory.path(), false).unwrap();
+        let identity = &read.events[0].event.identity;
+        assert_eq!(
+            identity.shell_session_id.as_deref(),
+            Some("raw-session-identity-test")
+        );
+        assert_eq!(identity.provider_session_id, None);
+    }
+
+    #[test]
     fn caller_info_detection_is_infallible() {
+        let _guard = temp_audit_env();
+        std::env::remove_var("COSH_SESSION_ID");
+
         let info = CallerInfo::detect();
+
         assert!(!info.session_id.is_empty());
         assert!(!info.user.is_empty());
+    }
+
+    #[test]
+    fn policy_event_omits_missing_session_identities() {
+        let guard = temp_audit_env();
+        std::env::remove_var("COSH_SESSION_ID");
+
+        check(package_install(), LogSource::Cli, &builtin::balanced()).unwrap();
+
+        let read = reader::read_all(guard.directory.path(), false).unwrap();
+        let identity = &read.events[0].event.identity;
+        assert_eq!(identity.shell_session_id, None);
+        assert_eq!(identity.provider_session_id, None);
     }
 
     #[test]
