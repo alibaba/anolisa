@@ -186,6 +186,49 @@ def test_resolve_time_range_last_hours_returns_utc_iso(
     assert until == "2027-01-15T08:00:00+00:00"
 
 
+@pytest.mark.parametrize(
+    ("args", "error"),
+    [
+        (["--last-hours", "-1", "--count"], "--last-hours must be non-negative"),
+        (["--limit", "0", "--count"], "--limit must be positive"),
+        (["--offset", "-5", "--count"], "--offset must be non-negative"),
+    ],
+)
+def test_events_rejects_out_of_range_query_values_before_opening_reader(
+    args: list[str], error: str
+) -> None:
+    with patch("agent_sec_cli.cli.get_reader") as get_reader:
+        result = CliRunner().invoke(app, ["events", *args])
+
+    assert result.exit_code == 1
+    assert error in result.output
+    get_reader.assert_not_called()
+
+
+def test_events_accepts_query_value_boundaries() -> None:
+    reader = Mock()
+    reader.count.return_value = 0
+
+    with patch("agent_sec_cli.cli.get_reader", return_value=reader):
+        result = CliRunner().invoke(
+            app,
+            [
+                "events",
+                "--last-hours",
+                "0",
+                "--limit",
+                "1",
+                "--offset",
+                "0",
+                "--count",
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert result.output == "0\n"
+    reader.count.assert_called_once()
+
+
 def test_extract_trace_context_arg_stops_at_posix_double_dash():
     assert (
         _extract_trace_context_arg(

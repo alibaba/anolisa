@@ -489,6 +489,100 @@ def test_security_query_validation_errors_are_bad_request(tmp_path: Path) -> Non
     assert count_by_offset.error["code"] == "bad_request"
 
 
+@pytest.mark.parametrize(
+    ("method", "params", "message"),
+    [
+        (
+            "sec.events.list",
+            {"result": "success"},
+            "result must be one of: failed, succeeded",
+        ),
+        (
+            "sec.events.list",
+            {"result": ""},
+            "result must be one of: failed, succeeded",
+        ),
+        (
+            "sec.events.list",
+            {
+                "since": "2026-01-02T00:00:00Z",
+                "until": "2026-01-01T00:00:00Z",
+            },
+            "time range start must not be after end",
+        ),
+        (
+            "obs.sessions.list",
+            {"start_ns": 2_000_000_000, "end_ns": 1_000_000_000},
+            "time range start must not be after end",
+        ),
+        (
+            "obs.runs.list",
+            {
+                "session_id": "session-1",
+                "since": "1970-01-01T00:00:02Z",
+                "end_ns": 1_000_000_000,
+            },
+            "time range start must not be after end",
+        ),
+        (
+            "sec.events.list",
+            {"start_ns": 10**100},
+            "start_ns is outside the supported timestamp range",
+        ),
+        (
+            "obs.timeline.get",
+            {"session_id": "session-1", "run_id": "run-1", "end_ns": 10**100},
+            "end_ns is outside the supported timestamp range",
+        ),
+        (
+            "sec.events.list",
+            {"offset": security_query._MAX_OFFSET + 1},
+            f"offset must not exceed {security_query._MAX_OFFSET}",
+        ),
+    ],
+)
+def test_security_query_rejects_invalid_existing_parameter_values_before_reading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    params: dict[str, Any],
+    message: str,
+) -> None:
+    def fail_reader() -> None:
+        raise AssertionError(
+            "invalid parameters must be rejected before opening readers"
+        )
+
+    monkeypatch.setattr(security_query, "SqliteEventReader", fail_reader)
+    monkeypatch.setattr(security_query, "ObservabilityReader", fail_reader)
+
+    response = _call_daemon(tmp_path, method, params)
+
+    assert response.ok is False
+    assert response.error == {"code": "bad_request", "message": message}
+
+
+def test_security_query_accepts_parameter_boundaries(tmp_path: Path) -> None:
+    equal_time = "2026-01-01T00:00:00Z"
+    _write_observability_event(tmp_path)
+
+    result_response = _call_daemon(
+        tmp_path,
+        "sec.events.list",
+        {"result": "failed", "since": equal_time, "until": equal_time},
+    )
+    offset_response = _call_daemon(
+        tmp_path,
+        "obs.sessions.list",
+        {"offset": security_query._MAX_OFFSET},
+    )
+
+    assert result_response.ok is True
+    assert result_response.data["items"] == []
+    assert offset_response.ok is True
+    assert offset_response.data["offset"] == security_query._MAX_OFFSET
+
+
 def test_security_events_list_filters_by_verdict(tmp_path: Path) -> None:
     """Events list filtered by verdict returns only matching events."""
     _write_security_event(

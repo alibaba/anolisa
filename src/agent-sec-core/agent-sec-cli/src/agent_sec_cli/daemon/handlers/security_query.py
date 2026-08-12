@@ -1,6 +1,7 @@
 """Read-only daemon handlers for security and observability SQLite data."""
 
 import json
+from datetime import datetime
 from pathlib import PurePath
 from typing import Any
 
@@ -28,7 +29,9 @@ from agent_sec_cli.utils.timestamp import (
 
 _DEFAULT_LIMIT = 100
 _MAX_LIMIT = 1000
+_MAX_OFFSET = (1 << 63) - 1
 _SUMMARY_LATEST_LIMIT = 5
+_EVENT_RESULTS = frozenset({"failed", "succeeded"})
 _EVENT_GROUP_FIELDS = {
     "category",
     "event_type",
@@ -337,7 +340,7 @@ def _security_filters(params: dict[str, Any]) -> dict[str, str | None]:
     return {
         "event_type": _optional_string_param(params, "event_type"),
         "category": _optional_string_param(params, "category"),
-        "result": _optional_string_param(params, "result"),
+        "result": _optional_choice_param(params, "result", _EVENT_RESULTS),
         "trace_id": _optional_string_param(params, "trace_id"),
         "session_id": _optional_string_param(params, "session_id"),
         "run_id": _optional_string_param(params, "run_id"),
@@ -486,15 +489,33 @@ def _iso_range(params: dict[str, Any]) -> tuple[str | None, str | None]:
         raise BadRequestError("until and end_ns are mutually exclusive")
     if start_ns is not None:
         # Nanosecond filters are absolute epoch time, so convert directly to UTC.
-        since = ns_to_utc_iso(_integer_param(params, "start_ns"))
+        since = _nanoseconds_to_utc_iso(params, "start_ns")
     elif since is not None:
         # String filters may be naive local time; normalize before reader/repository calls.
         since = _normalize_iso_timestamp(since, "since")
     if end_ns is not None:
-        until = ns_to_utc_iso(_integer_param(params, "end_ns"))
+        until = _nanoseconds_to_utc_iso(params, "end_ns")
     elif until is not None:
         until = _normalize_iso_timestamp(until, "until")
+    _validate_time_range(since, until)
     return since, until
+
+
+def _nanoseconds_to_utc_iso(params: dict[str, Any], name: str) -> str:
+    value = _integer_param(params, name)
+    try:
+        return ns_to_utc_iso(value)
+    except (OSError, OverflowError, ValueError) as exc:
+        raise BadRequestError(
+            f"{name} is outside the supported timestamp range"
+        ) from exc
+
+
+def _validate_time_range(since: str | None, until: str | None) -> None:
+    if since is None or until is None:
+        return
+    if datetime.fromisoformat(since) > datetime.fromisoformat(until):
+        raise BadRequestError("time range start must not be after end")
 
 
 def _epoch_range(params: dict[str, Any]) -> tuple[float | None, float | None]:
@@ -532,6 +553,23 @@ def _optional_string_param(params: dict[str, Any], name: str) -> str | None:
     return value or None
 
 
+def _optional_choice_param(
+    params: dict[str, Any],
+    name: str,
+    choices: frozenset[str],
+) -> str | None:
+    if name not in params or params[name] is None:
+        return None
+    value = params[name]
+    if not isinstance(value, str):
+        raise BadRequestError(f"{name} must be a string")
+    value = value.strip()
+    if value not in choices:
+        allowed = ", ".join(sorted(choices))
+        raise BadRequestError(f"{name} must be one of: {allowed}")
+    return value
+
+
 def _limit_param(
     params: dict[str, Any],
     name: str,
@@ -555,6 +593,8 @@ def _offset_param(params: dict[str, Any]) -> int:
         raise BadRequestError("offset must be an integer")
     if value < 0:
         raise BadRequestError("offset must not be negative")
+    if value > _MAX_OFFSET:
+        raise BadRequestError(f"offset must not exceed {_MAX_OFFSET}")
     return value
 
 
