@@ -82,6 +82,17 @@
         "hooks": [
           {
             "type": "command",
+            "name": "session-context",
+            "command": "python3 ${extensionPath}/hooks/session_context_hook.py",
+            "description": "Tells the agent which session ID filters its security events.",
+            "timeout": 2000
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
             "name": "observability-hook",
             "command": "python3 ${extensionPath}/hooks/observability_hook.py",
             "description": "Records cosh hook observability metrics.",
