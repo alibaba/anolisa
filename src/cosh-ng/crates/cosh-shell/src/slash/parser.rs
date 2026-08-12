@@ -15,7 +15,6 @@ pub(super) fn slash_input(event: &ShellEvent) -> Option<&str> {
 pub(super) enum SlashCommand<'a> {
     Noop,
     Help,
-    Draft,
     Agent,
     Auth,
     Audit(&'a str),
@@ -61,7 +60,6 @@ impl<'a> SlashCommand<'a> {
         }
         Ok(match token {
             "/help" => Some(Self::Help),
-            "/draft" => Some(Self::Draft),
             "/agent" => Some(Self::Agent),
             "/auth" => Some(Self::Auth),
             "/hooks" => {
@@ -201,14 +199,10 @@ mod tests {
     use super::{RemovedCommand, SlashCommand, SlashCommandSpec, SlashParseError};
 
     #[test]
-    fn routing_c4_draft_grammar_no_drift() {
+    fn removed_draft_alias_is_unknown() {
         assert!(matches!(
-            SlashCommand::parse("/draft extra"),
-            Ok(Some(SlashCommand::Draft))
-        ));
-        assert!(matches!(
-            SlashCommand::parse("/draft 'extra'"),
-            Ok(Some(SlashCommand::Draft))
+            SlashCommand::parse("/draft"),
+            Ok(Some(SlashCommand::Unknown("/draft")))
         ));
         assert!(matches!(
             SlashCommand::parse("/agent"),

@@ -49,16 +49,6 @@ pub fn slash_command_registry() -> &'static [SlashCommandSpec] {
             state: SlashCommandState::Public,
         },
         SlashCommandSpec {
-            // Compatibility alias: keep exact routing while `/agent` is the
-            // only discoverable Composer entry during the migration window.
-            name: "/draft",
-            usage: "/draft",
-            summary_id: MessageId::HelpSummaryDraft,
-            group: Some("Prompt"),
-            scope: "session",
-            state: SlashCommandState::Hidden,
-        },
-        SlashCommandSpec {
             name: "/health",
             usage: "/health",
             summary_id: MessageId::HelpSummaryHealth,
@@ -401,12 +391,10 @@ mod tests {
         assert!(visible.contains(&"/recommendations [on|off|status|privacy|clear]"));
         assert!(visible.contains(&"/agent"));
         assert!(!visible.contains(&"/draft"));
-        let draft = slash_command_registry()
+        assert!(!slash_command_registry()
             .iter()
-            .find(|spec| spec.name == "/draft")
-            .expect("draft compatibility alias");
-        assert_eq!(draft.state, SlashCommandState::Hidden);
-        assert!(exact_slash_control_commands().any(|name| name == "/draft"));
+            .any(|spec| spec.name == "/draft"));
+        assert!(!exact_slash_control_commands().any(|name| name == "/draft"));
         assert!(!active_slash_commands().any(|name| name == "/draft"));
         assert!(!active_slash_hint_commands().any(|name| name == "/draft"));
         assert!(!visible.iter().any(|usage| usage.starts_with("/explain")));

@@ -78,9 +78,9 @@ enum CardPhase {
     Cancelled,
 }
 
-/// Opens a fresh prompt-draft card immediately (#1932): shared by the
-/// relay-driven `open` lifecycle event and the `/draft` slash entry. The
-/// pending card capture picks the draft up on the next controller pass.
+/// Opens a fresh prompt-draft card immediately (#1932) for relay-driven
+/// multiline input. The pending card capture picks the draft up on the next
+/// controller pass.
 /// `line_break_before` distinguishes the relay path (cursor still sits on
 /// the bash prompt line, the card must open on a fresh line) from the
 /// slash path (the dispatcher already left the cursor at a fresh column).

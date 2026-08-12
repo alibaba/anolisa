@@ -42,7 +42,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::HelpGroupPrompt => "Prompt",
         MessageId::HelpSummaryDraft => "打开多行 Prompt 草稿卡（?? 回车等效）",
         MessageId::PromptMultilineEntryHint => {
-            "多行提问可输入 ?? 后回车，或使用 /draft 打开草稿卡"
+            "多行提问可输入 ?? 后回车；一次性 cosh-core 请求可使用 /agent"
         }
         MessageId::HelpGroupConfig => "配置",
         MessageId::HelpGroupHealth => "健康",

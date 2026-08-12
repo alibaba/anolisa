@@ -72,9 +72,4 @@
 不指定 Skill 或引用的纯文本请求同样有效。其他 provider runtime 不提供`/agent`；
 此时可直接输入自然语言请求或使用多行输入。
 
-`/draft`仍作为隐藏兼容别名被接受，但不会出现在帮助和命令联想中。使用 cosh-core
-时，它与`/agent`打开同一个 Agent Composer，Fake 测试 adapter 也使用相同路由；使用
-其他 provider runtime 时，它继续打开旧版多行 Draft Editor。兼容阶段内，已有脚本
-可以逐步迁移到`/agent`。
-
 审批行为见[工具审批](approval.md)，主动的失败帮助见[AI分析](ai-analysis.md)。

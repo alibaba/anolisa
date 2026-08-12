@@ -1,8 +1,8 @@
 use super::*;
 
 #[test]
-fn raw_cli_draft_alias_opens_agent_composer() {
-    let home = temp_shell_home("agent-composer-draft-alias");
+fn raw_cli_removed_draft_alias_falls_through_to_shell() {
+    let home = temp_shell_home("agent-composer-removed-draft-alias");
     fs::write(home.join(".bashrc"), "PS1='alias-test$ '\n").unwrap();
     let home_str = home.to_string_lossy().to_string();
     let output = run_raw_cli_with_args_env_current_dir_and_marker_input(
@@ -17,14 +17,13 @@ fn raw_cli_draft_alias_opens_agent_composer() {
         Path::new(env!("CARGO_MANIFEST_DIR")),
         &[
             ("alias-test$", b"/draft\n"),
-            ("Agent Composer", b"cancel alias\x1b"),
-            ("Draft cancelled", b"exit\n"),
+            ("No such file or directory", b"exit 0\n"),
         ],
     );
     let _ = fs::remove_dir_all(&home);
 
-    assert!(output.contains("Runtime: fake"), "{output}");
-    assert!(!output.contains("bash: /draft"), "{output}");
+    assert!(output.contains("bash: /draft"), "{output}");
+    assert!(!output.contains("Agent Composer"), "{output}");
 }
 
 #[test]

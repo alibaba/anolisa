@@ -1246,7 +1246,7 @@ fn routing_c4_zsh_stubs_intercept_bypass_only_commands() {
         unique_suffix()
     ));
     let config = ShellHostConfig::new("routing-c4-zsh-stubs", &work_dir);
-    let inputs = ["/draft", "/resume", "/session"];
+    let inputs = ["/resume", "/session"];
     let steps = inputs
         .iter()
         .map(|input| ScriptedInput::user_line(*input))

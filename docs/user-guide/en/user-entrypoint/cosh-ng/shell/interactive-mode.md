@@ -78,10 +78,4 @@ Plain text without a Skill or references is also valid. Other provider runtimes
 leave `/agent` unavailable; use an ordinary natural-language request or
 multiline input instead.
 
-`/draft` remains accepted as a hidden compatibility alias and is omitted from
-help and command completion. With cosh-core it opens the same Agent Composer as
-`/agent`; the Fake testing adapter follows the same route. With other provider
-runtimes it retains the legacy multiline draft editor. Existing scripts may
-migrate to `/agent` while this compatibility phase remains in place.
-
 For approval behavior, see [Tool approval](approval.md). For proactive failure help, see [AI analysis](ai-analysis.md).

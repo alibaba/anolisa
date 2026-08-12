@@ -102,11 +102,10 @@ directory remains inside the workspace. The Composer passes reference metadata
 to cosh-core without reading or embedding referenced contents. Invalid or
 out-of-workspace references are reported in the structured Composer envelope.
 
-`/agent` is the only public Composer entry point. `/draft` remains accepted as
-a hidden compatibility alias: it reuses the Composer with cosh-core and the
-Fake adapter, while other providers retain the legacy multiline draft editor.
-Ordinary command input continues through shell-first routing, and cancellation
-restores the native Bash or Zsh prompt without submitting a turn.
+`/agent` is the only Composer command. The former `/draft` compatibility alias
+is not intercepted and follows native shell routing. Ordinary command input
+continues through shell-first routing, and cancellation restores the native
+Bash or Zsh prompt without submitting a turn.
 
 ## Compatibility and rollback
 

@@ -62,8 +62,7 @@ commands, and `/mode approval recommend` when every Agent tool call should wait
 for confirmation. Approval settings use `recommend`, `auto`, or `trust` across
 the shell and Core. With the cosh-core runtime, `/agent` opens a one-shot
 Composer that accepts a leading `/skill:<name>` and validated workspace-local
-`@path` references. The legacy `/draft` spelling remains a hidden compatibility
-alias and is not advertised by help or command completion.
+`@path` references.
 
 ## Documentation
 

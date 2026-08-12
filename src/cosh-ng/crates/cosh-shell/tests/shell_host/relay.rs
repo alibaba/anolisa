@@ -101,7 +101,7 @@ fn routing_c4_zsh_rust_route_uses_shared_event_contract() {
 }
 
 #[test]
-fn routing_c4_draft_grammar_no_drift_preserves_raw_arguments() {
+fn removed_draft_alias_preserves_native_shell_routing() {
     let work_dir = std::env::temp_dir().join(format!(
         "cosh-shell-c4-draft-grammar-{}-{}",
         std::process::id(),
@@ -116,13 +116,16 @@ fn routing_c4_draft_grammar_no_drift_preserves_raw_arguments() {
         ],
         Vec::new(),
     )
-    .expect("draft grammar routing");
+    .expect("removed draft routing");
 
     for input in ["/draft extra", "/draft 'extra'"] {
-        assert!(output.events.iter().any(|event| {
+        assert!(!output.events.iter().any(|event| {
             event.kind == ShellEventKind::UserInputIntercepted
                 && event.input.as_deref() == Some(input)
                 && event.component.as_deref() == Some("slash")
+        }));
+        assert!(output.events.iter().any(|event| {
+            event.kind == ShellEventKind::CommandStarted && event.command.as_deref() == Some(input)
         }));
     }
 }

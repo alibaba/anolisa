@@ -40,33 +40,6 @@ pub(super) fn render_slash_command<W: Write>(
             render_help(state, output)?;
             Ok(true)
         }
-        SlashCommand::Draft => {
-            if let Some((workspace_cwd, skill_names)) =
-                agent_composer_context(adapter, state, shell_cwd)
-            {
-                crate::runtime::prompt_draft::open_agent_composer(
-                    state,
-                    output,
-                    adapter.name(),
-                    workspace_cwd.as_deref(),
-                    skill_names,
-                )?;
-                // `/draft` remains accepted as a compatibility alias, but it
-                // must share the Composer terminal lifecycle with `/agent`.
-                Ok(false)
-            } else {
-                // Preserve the legacy multi-provider draft for adapters that
-                // do not expose cosh-core Composer metadata.
-                crate::runtime::prompt_draft::open_prompt_draft(
-                    state,
-                    output,
-                    String::new(),
-                    false,
-                    adapter.name(),
-                )?;
-                Ok(true)
-            }
-        }
         SlashCommand::Agent => {
             let Some((workspace_cwd, skill_names)) =
                 agent_composer_context(adapter, state, shell_cwd)
