@@ -203,6 +203,7 @@ install -m 0755 adapters/tokenless/codex/scripts/tool-ready %{buildroot}%{_datad
 install -m 0755 adapters/tokenless/codex/scripts/detect.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
 install -m 0755 adapters/tokenless/codex/scripts/install.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
 install -m 0755 adapters/tokenless/codex/scripts/uninstall.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
+install -m 0644 adapters/tokenless/codex/scripts/_common.sh %{buildroot}%{_datadir}/anolisa/adapters/tokenless/codex/scripts/
 
 # Install OpenCode plugin (local JavaScript plugin + lifecycle scripts).
 install -m 0644 adapters/tokenless/opencode/plugin.js %{buildroot}%{_datadir}/anolisa/adapters/tokenless/opencode/
@@ -317,6 +318,7 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/detect.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/install.sh
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/uninstall.sh
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/codex/scripts/_common.sh
 # OpenCode plugin — local JavaScript plugin + lifecycle scripts.
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/opencode/plugin.js
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/opencode/scripts/detect.sh
