@@ -739,6 +739,23 @@ fn multi_digit_fd_prefix_spans_cover_full_prefix() {
     assert_eq!(echo.null_redirection_spans, vec![(8, 20)]);
     assert_eq!(&echo_command[8..20], "10>/dev/null");
 
+    // Auto policy: readonly commands with a multi-digit fd safe sink keep
+    // auto-allow because the stripped text is a clean readonly command.
+    for command in ["ls 10>/dev/null", "ps aux 10>/dev/null"] {
+        let assessment = auto(command);
+        assert_eq!(
+            assessment.execution,
+            ExecutionDecision::AutoAllow,
+            "{command}: {:?}",
+            assessment.reasons
+        );
+        assert!(
+            assessment.reasons.contains(&"output-suppressed"),
+            "{command}: {:?}",
+            assessment.reasons
+        );
+    }
+
     for command in ["ps 10>/dev/null", "echo hi 10>/dev/null"] {
         let assessment = ask(command);
         assert_ne!(
