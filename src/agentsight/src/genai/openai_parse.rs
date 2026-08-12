@@ -398,7 +398,12 @@ impl GenAIBuilder {
                         }
                         if let Some(func) = tc.get("function") {
                             if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
-                                entry.1 = name.to_string();
+                                if !name.is_empty() {
+                                    entry.1 = name.to_string();
+                                }
+                                // Empty string must not overwrite an existing name: some
+                                // backends (e.g. deepseek models on DashScope) repeat
+                                // name:"" on every continuation delta.
                             }
                             if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
                                 entry.2.push_str(args);
@@ -648,6 +653,47 @@ mod tests {
                 assert_eq!(id.as_deref(), Some("tc_1"));
                 assert_eq!(name, "search");
                 assert_eq!(arguments.as_ref().unwrap()["q"], "rust");
+            }
+            _ => panic!("expected ToolCall"),
+        }
+        assert_eq!(finish, Some("tool_calls".to_string()));
+    }
+
+    /// Regression: deepseek models on DashScope repeat `id:""` + `name:""` on every
+    /// continuation delta. The empty name used to overwrite the real one, so reported
+    /// tool calls ended up with an empty name.
+    #[test]
+    fn test_extract_parts_from_sse_body_tool_calls_empty_name_in_continuation() {
+        let body = r#"[
+            {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]}}]},
+            {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","type":"function","function":{"name":"","arguments":"{\"file_path\""}}]}}]},
+            {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","type":"function","function":{"name":"","arguments":": \"/tmp/a.md\"}"}}]}}]},
+            {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_2","type":"function","function":{"name":"list_dir","arguments":""}}]}}]},
+            {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"","type":"function","function":{"name":"","arguments":"{\"path\": \"/tmp\"}"}}]},"finish_reason":"tool_calls"}]}
+        ]"#;
+        let (parts, finish) = GenAIBuilder::extract_parts_from_sse_body(body).unwrap();
+        assert_eq!(parts.len(), 2);
+        match &parts[0] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_1"));
+                assert_eq!(name, "read_file");
+                assert_eq!(arguments.as_ref().unwrap()["file_path"], "/tmp/a.md");
+            }
+            _ => panic!("expected ToolCall"),
+        }
+        match &parts[1] {
+            MessagePart::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("call_2"));
+                assert_eq!(name, "list_dir");
+                assert_eq!(arguments.as_ref().unwrap()["path"], "/tmp");
             }
             _ => panic!("expected ToolCall"),
         }

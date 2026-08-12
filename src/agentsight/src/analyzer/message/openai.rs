@@ -445,7 +445,12 @@ impl OpenAIParser {
                             }
                             if let Some(func) = tc.get("function") {
                                 if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
-                                    entry.1 = name.to_string();
+                                    if !name.is_empty() {
+                                        entry.1 = name.to_string();
+                                    }
+                                    // Empty string must not overwrite an existing name: some
+                                    // backends (e.g. deepseek models on DashScope) repeat
+                                    // name:"" on every continuation delta.
                                 }
                                 if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
                                     entry.2.push_str(args);
@@ -1077,6 +1082,52 @@ mod tests {
         assert_eq!(
             func.get("arguments").unwrap().as_str().unwrap(),
             "{\"city\":\"Beijing\"}"
+        );
+    }
+
+    /// Regression: deepseek models on DashScope repeat `id:""` + `name:""` on every
+    /// continuation delta. The empty name used to overwrite the real one, so the
+    /// aggregated tool call ended up with an empty name.
+    #[test]
+    fn test_aggregate_sse_chunks_empty_name_in_continuation() {
+        let chunk = |tc: serde_json::Value, finish: Option<&str>| {
+            serde_json::json!({
+                "id": "chatcmpl-1",
+                "object": "chat.completion.chunk",
+                "created": 1_786_504_982u64,
+                "model": "deepseek-v4-flash",
+                "choices": [{"index": 0, "delta": {"tool_calls": [tc]}, "finish_reason": finish}]
+            })
+        };
+        let chunks = vec![
+            chunk(
+                serde_json::json!({"index": 0, "id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": ""}}),
+                None,
+            ),
+            chunk(
+                serde_json::json!({"index": 0, "id": "", "type": "function", "function": {"name": "", "arguments": "{\"file_path\""}}),
+                None,
+            ),
+            chunk(
+                serde_json::json!({"index": 0, "id": "", "type": "function", "function": {"name": "", "arguments": ": \"/tmp/a.md\"}"}}),
+                Some("tool_calls"),
+            ),
+        ];
+
+        let body = serde_json::Value::Array(chunks);
+        let resp = OpenAIParser::parse_response(&body).expect("chat SSE chunks should aggregate");
+        assert_eq!(
+            resp.choices[0].finish_reason,
+            Some("tool_calls".to_string())
+        );
+        let tc = resp.choices[0].message.tool_calls.as_ref().unwrap();
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0].get("id").unwrap().as_str().unwrap(), "call_1");
+        let func = tc[0].get("function").unwrap();
+        assert_eq!(func.get("name").unwrap().as_str().unwrap(), "read_file");
+        assert_eq!(
+            func.get("arguments").unwrap().as_str().unwrap(),
+            "{\"file_path\": \"/tmp/a.md\"}"
         );
     }
 }
