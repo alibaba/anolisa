@@ -13,10 +13,11 @@ use super::guarded_diagnostic::validate_guarded_diagnostic;
 use super::is_sensitive_target;
 use super::readonly_pipeline::validate_readonly_pipeline;
 
-/// Strip null redirections from command text using precise byte spans
-/// recorded by the parser. Unlike regex-based reconstruction, this
-/// preserves the original command structure including quoted arguments,
-/// escaping, and internal whitespace (issue #1752, SunnyQjm review).
+/// Strip null redirections and exempted fd words from command text using
+/// precise byte spans recorded by the parser. Unlike regex-based
+/// reconstruction, this preserves the original command structure
+/// including quoted arguments, escaping, and internal whitespace
+/// (issue #1752, SunnyQjm review).
 fn strip_null_redirections(command: &str, spans: &[(usize, usize)]) -> String {
     if spans.is_empty() {
         return command.to_string();
