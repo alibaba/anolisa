@@ -41,6 +41,9 @@ pub mod types;
 #[allow(dead_code, unused_imports)]
 #[path = "ui/public.rs"]
 mod ui;
+#[cfg(test)]
+#[path = "ui/wrap_tests.rs"]
+mod wrap_tests;
 
 pub use adapter::{AuthFieldInfo, AuthProviderInfo, AuthResponse};
 pub use config::{

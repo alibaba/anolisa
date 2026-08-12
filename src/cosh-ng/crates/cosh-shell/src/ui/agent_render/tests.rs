@@ -1957,6 +1957,100 @@ fn streaming_card_keeps_ambiguous_and_combining_widths_aligned() {
             "streaming card line should keep a stable right border: {line:?}\n{text}"
         );
     }
+
+    let renderer = RatatuiInlineRenderer::with_width(40);
+    let mut stream = renderer.stream_agent();
+    let mut output = Vec::new();
+
+    stream.write_delta(&mut output, &"中".repeat(18)).unwrap();
+    stream.write_delta(&mut output, "alpha").unwrap();
+    stream.finish(&mut output, None).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    let expected_line = "中".repeat(18);
+    let first_content = text
+        .lines()
+        .find_map(|line| line.strip_prefix("│ "))
+        .and_then(|line| line.strip_suffix(" │"));
+
+    assert_eq!(
+        first_content,
+        Some(expected_line.as_str()),
+        "streaming words should preserve an exactly filled line: {text}"
+    );
+
+    for punctuation in [
+        '。', '，', '、', '；', '：', '！', '？', ')', ']', '}', '）', '】', '》', '〉', '」',
+        '』', '”', '’',
+    ] {
+        let renderer = RatatuiInlineRenderer::with_width(40);
+        let mut stream = renderer.stream_agent();
+        let mut output = Vec::new();
+
+        stream.write_delta(&mut output, &"中".repeat(18)).unwrap();
+        stream
+            .write_delta(&mut output, &punctuation.to_string())
+            .unwrap();
+        stream.finish(&mut output, None).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        let bound_prefix = format!("中{punctuation}");
+
+        assert!(text.contains(punctuation), "{text}");
+        assert!(
+            text.lines().any(|line| line
+                .strip_prefix("│ ")
+                .is_some_and(|content| content.starts_with(&bound_prefix))),
+            "streaming continuation should bind its punctuation: {text}"
+        );
+        for line in text.lines().filter(|line| !line.is_empty()) {
+            assert_eq!(
+                snapshot_width(line),
+                40,
+                "streaming punctuation should keep the right border aligned: {line:?}\n{text}"
+            );
+        }
+    }
+
+    let renderer = RatatuiInlineRenderer::with_width(40);
+    let mut stream = renderer.stream_agent();
+    let mut output = Vec::new();
+
+    stream.write_delta(&mut output, &"中".repeat(17)).unwrap();
+    stream.write_delta(&mut output, "。").unwrap();
+    stream.write_delta(&mut output, "”").unwrap();
+    stream.finish(&mut output, None).unwrap();
+    let text = String::from_utf8(output).unwrap();
+
+    assert!(
+        text.lines().any(|line| line
+            .strip_prefix("│ ")
+            .is_some_and(|content| content.starts_with("中。”"))),
+        "streaming continuation should keep consecutive punctuation bound: {text}"
+    );
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        assert_eq!(
+            snapshot_width(line),
+            40,
+            "consecutive punctuation should keep the right border aligned: {line:?}\n{text}"
+        );
+    }
+
+    let renderer = RatatuiInlineRenderer::with_width(40);
+    let mut stream = renderer.stream_agent();
+    let mut output = Vec::new();
+
+    stream.write_delta(&mut output, "中").unwrap();
+    stream.write_delta(&mut output, &"。".repeat(40)).unwrap();
+    stream.finish(&mut output, None).unwrap();
+    let text = String::from_utf8(output).unwrap();
+
+    assert_eq!(text.matches('。').count(), 40, "{text}");
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        assert_eq!(
+            snapshot_width(line),
+            40,
+            "long punctuation runs should keep the right border aligned: {line:?}\n{text}"
+        );
+    }
 }
 
 #[test]

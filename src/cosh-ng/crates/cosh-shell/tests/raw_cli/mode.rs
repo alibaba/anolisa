@@ -233,7 +233,11 @@ fn raw_cli_mode_approval_and_analysis_use_zh_language_env() {
         "{output}"
     );
     assert!(
-        manual_footer.contains("个性化提示词推荐同时暂停，可用 /recommendations 管理。"),
+        manual_footer.contains("个性化提示词推荐同时暂停，"),
+        "{output}"
+    );
+    assert!(
+        manual_footer.contains("可用 /recommendations 管理。"),
         "{output}"
     );
     assert!(!output.contains("bash: /mode"), "{output}");
