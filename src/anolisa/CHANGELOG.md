@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-12
+
+### Fixed
+
+- Adapter enable, status, and update now derive adapter revisions from
+  ANOLISA-owned Raw files or native package metadata instead of hashing whole
+  resource trees. Runtime caches and other unowned files no longer cause false
+  drift or get copied into frameworks, while changed package-owned inputs block
+  enable before framework mutation and unavailable metadata is reported with
+  an `unknown` status
+  ([#2419](https://github.com/alibaba/anolisa/pull/2419)).
+- Re-enabling adapters now removes only stale materialized files recorded by the
+  previous receipt, preserves runtime-created files, previews the cleanup with
+  `--dry-run`, and retains the old receipt when a directory-to-file replacement
+  would discard runtime data
+  ([#2438](https://github.com/alibaba/anolisa/pull/2438)).
+
 ## [0.2.20] - 2026-08-11
 
 ### Changed

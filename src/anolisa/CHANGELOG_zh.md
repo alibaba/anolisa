@@ -9,6 +9,21 @@
 
 ## [未发布]
 
+## [0.3.0] - 2026-08-12
+
+### 修复
+
+- Adapter enable、status 和 update 现基于 ANOLISA-owned Raw file 或 native
+  package metadata 派生 adapter revision，不再对整个 resource tree 计算 hash。
+  Runtime cache 与其他 unowned file 不再造成错误 drift，也不会被复制到 framework；
+  已变化的 package-owned input 会在 framework mutation 前阻止 enable，metadata
+  不可用时则报告为 `unknown` 状态
+  ([#2419](https://github.com/alibaba/anolisa/pull/2419))。
+- Re-enable adapter 现仅删除旧 receipt 记录的 stale materialized file，保留
+  runtime-created file，通过 `--dry-run` 预览 cleanup，并在 directory-to-file
+  replacement 会丢弃 runtime data 时保留旧 receipt
+  ([#2438](https://github.com/alibaba/anolisa/pull/2438))。
+
 ## [0.2.20] - 2026-08-11
 
 ### 变更
