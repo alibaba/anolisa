@@ -124,6 +124,17 @@ The sec-core consumer switches directly to v2 and must:
 5. return `schemaVersion=2` with `accepted=true` only after accepting the
    event.
 
+The inner v2 business frame stays unchanged in both authentication profiles.
+SkillFS now supports the client half of the explicit container profile,
+verifies the server proof before sending the v2 frame, and follows the raw
+frame with a session-bound `auth.frame` tag. It likewise verifies the daemon's
+response tag before interpreting the acknowledgement. The peer-side behavior
+remains a proposed sec-core contract: it must complete the bounded mutual HMAC
+preface and protected-frame exchange from
+[SkillFS Container Peer Authentication](container-peer-authentication.md), and
+reject plain or incorrectly tagged notify requests when that profile is
+configured.
+
 An in-place notify v2 mount, or any notify mount with an explicit backing root,
 starts only when the authenticated S1 resolver control plane is enabled. The
 canonical path becomes the FUSE over-mount in-place, while an out-of-place

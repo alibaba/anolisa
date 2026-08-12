@@ -20,6 +20,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read as IoRead, Write as IoWrite};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -34,6 +35,11 @@ use tracing::{debug, info, warn};
 
 use super::activation_reload::ActivationReloadController;
 use super::activation_watcher::WatcherRegistrar;
+#[cfg(test)]
+use super::auth::authenticate_server;
+use super::auth::{
+    FrameSender, NOTIFY_CLIENT_DOMAIN, NOTIFY_SERVER_DOMAIN, SharedSecret, authenticate_client,
+};
 use super::lifecycle::is_reserved_lifecycle_name;
 use super::path::is_skill_meta_path;
 use super::protocol_events::{NoopProtocolEventWriter, ProtocolEvent, ProtocolEventWriter};
@@ -171,6 +177,7 @@ pub enum NotifyError {
     Timeout,
     InvalidResponse { body: String },
     Rejected { body: String },
+    Authentication(String),
 }
 
 impl std::fmt::Display for NotifyError {
@@ -186,6 +193,7 @@ impl std::fmt::Display for NotifyError {
             Self::Rejected { body } => {
                 write!(f, "notify: rejected: {body}")
             }
+            Self::Authentication(message) => write!(f, "notify: authentication failed: {message}"),
         }
     }
 }
@@ -206,6 +214,7 @@ pub trait NotifyClient: Send + Sync {
 pub struct UnixSocketNotifyClient {
     socket_path: PathBuf,
     timeout: Duration,
+    auth_secret: Option<SharedSecret>,
 }
 
 impl UnixSocketNotifyClient {
@@ -213,13 +222,31 @@ impl UnixSocketNotifyClient {
         Self {
             socket_path: socket_path.into(),
             timeout,
+            auth_secret: None,
         }
+    }
+
+    /// Creates a notify client that mutually authenticates before sending
+    /// the unchanged notify v2 business frame.
+    pub fn new_authenticated(
+        socket_path: impl Into<PathBuf>,
+        timeout: Duration,
+        key_file: &Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self {
+            socket_path: socket_path.into(),
+            timeout,
+            auth_secret: Some(SharedSecret::load(key_file)?),
+        })
     }
 }
 
 impl NotifyClient for UnixSocketNotifyClient {
     fn send(&self, event: &NotifyChangeEvent) -> Result<(), NotifyError> {
-        let stream = UnixStream::connect(&self.socket_path).map_err(NotifyError::Connect)?;
+        if self.auth_secret.is_some() {
+            validate_authenticated_notify_endpoint(&self.socket_path)?;
+        }
+        let mut stream = UnixStream::connect(&self.socket_path).map_err(NotifyError::Connect)?;
         stream
             .set_write_timeout(Some(self.timeout))
             .map_err(NotifyError::Write)?;
@@ -227,38 +254,138 @@ impl NotifyClient for UnixSocketNotifyClient {
             .set_read_timeout(Some(self.timeout))
             .map_err(NotifyError::Read)?;
 
-        let mut writer = std::io::BufWriter::new(&stream);
-        serde_json::to_writer(&mut writer, event)
-            .map_err(|e| NotifyError::Write(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-        writer.write_all(b"\n").map_err(NotifyError::Write)?;
-        writer.flush().map_err(NotifyError::Write)?;
+        let authenticated_session = if let Some(secret) = &self.auth_secret {
+            Some(
+                authenticate_client(
+                    &mut stream,
+                    secret,
+                    NOTIFY_CLIENT_DOMAIN,
+                    NOTIFY_SERVER_DOMAIN,
+                )
+                .map_err(|error| NotifyError::Authentication(error.to_string()))?,
+            )
+        } else {
+            None
+        };
 
-        let reader = BufReader::new(&stream);
-        let mut limited = reader.take(MAX_RESPONSE_BYTES + 1);
-        let mut line = String::new();
-        match limited.read_line(&mut line) {
-            Ok(0) => {
-                return Err(NotifyError::InvalidResponse {
-                    body: "empty response".to_string(),
-                });
-            }
-            Ok(n) if n as u64 > MAX_RESPONSE_BYTES => {
-                return Err(NotifyError::InvalidResponse {
-                    body: format!("response exceeds {MAX_RESPONSE_BYTES} byte limit"),
-                });
-            }
-            Ok(_) => {}
-            Err(e)
-                if e.kind() == std::io::ErrorKind::TimedOut
-                    || e.kind() == std::io::ErrorKind::WouldBlock =>
-            {
-                return Err(NotifyError::Timeout);
-            }
-            Err(e) => return Err(NotifyError::Read(e)),
+        let request = serde_json::to_vec(event)
+            .map_err(|e| NotifyError::Write(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        if let Some(session) = &authenticated_session {
+            session
+                .write_frame(&mut stream, FrameSender::Client, &request)
+                .map_err(|error| NotifyError::Authentication(error.to_string()))?;
+        } else {
+            let mut writer = std::io::BufWriter::new(&stream);
+            writer.write_all(&request).map_err(NotifyError::Write)?;
+            writer.write_all(b"\n").map_err(NotifyError::Write)?;
+            writer.flush().map_err(NotifyError::Write)?;
         }
+
+        let line = if let Some(session) = &authenticated_session {
+            let response = session
+                .read_frame(
+                    &mut stream,
+                    FrameSender::Server,
+                    MAX_RESPONSE_BYTES as usize,
+                )
+                .map_err(|error| NotifyError::Authentication(error.to_string()))?;
+            String::from_utf8(response).map_err(|error| NotifyError::InvalidResponse {
+                body: format!("response is not UTF-8: {error}"),
+            })?
+        } else {
+            let reader = BufReader::new(&stream);
+            let mut limited = reader.take(MAX_RESPONSE_BYTES + 1);
+            let mut line = String::new();
+            match limited.read_line(&mut line) {
+                Ok(0) => {
+                    return Err(NotifyError::InvalidResponse {
+                        body: "empty response".to_string(),
+                    });
+                }
+                Ok(n) if n as u64 > MAX_RESPONSE_BYTES => {
+                    return Err(NotifyError::InvalidResponse {
+                        body: format!("response exceeds {MAX_RESPONSE_BYTES} byte limit"),
+                    });
+                }
+                Ok(_) => {}
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::TimedOut
+                        || e.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    return Err(NotifyError::Timeout);
+                }
+                Err(e) => return Err(NotifyError::Read(e)),
+            }
+            line
+        };
 
         validate_response(&line)
     }
+}
+
+fn validate_authenticated_notify_endpoint(socket_path: &Path) -> Result<(), NotifyError> {
+    let expected_uid = unsafe { libc::geteuid() };
+    let parent = socket_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| endpoint_authentication_error("socket path has no parent directory"))?;
+    let parent_metadata = std::fs::symlink_metadata(parent).map_err(|error| {
+        endpoint_authentication_error(format!(
+            "cannot inspect parent '{}': {error}",
+            parent.display()
+        ))
+    })?;
+    if !parent_metadata.file_type().is_dir() {
+        return Err(endpoint_authentication_error(format!(
+            "parent '{}' is not a directory",
+            parent.display()
+        )));
+    }
+    if parent_metadata.uid() != expected_uid {
+        return Err(endpoint_authentication_error(format!(
+            "parent '{}' is not owned by the effective uid",
+            parent.display()
+        )));
+    }
+    if parent_metadata.mode() & 0o077 != 0 {
+        return Err(endpoint_authentication_error(format!(
+            "parent '{}' must not grant group or other permissions",
+            parent.display()
+        )));
+    }
+
+    let socket_metadata = std::fs::symlink_metadata(socket_path).map_err(|error| {
+        endpoint_authentication_error(format!(
+            "cannot inspect socket '{}': {error}",
+            socket_path.display()
+        ))
+    })?;
+    if !socket_metadata.file_type().is_socket() {
+        return Err(endpoint_authentication_error(format!(
+            "endpoint '{}' is not a Unix socket",
+            socket_path.display()
+        )));
+    }
+    if socket_metadata.uid() != expected_uid {
+        return Err(endpoint_authentication_error(format!(
+            "socket '{}' is not owned by the effective uid",
+            socket_path.display()
+        )));
+    }
+    if socket_metadata.mode() & 0o077 != 0 {
+        return Err(endpoint_authentication_error(format!(
+            "socket '{}' must not grant group or other permissions",
+            socket_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn endpoint_authentication_error(message: impl Into<String>) -> NotifyError {
+    NotifyError::Authentication(format!(
+        "notify socket endpoint is not trusted: {}",
+        message.into()
+    ))
 }
 
 fn validate_response(body: &str) -> Result<(), NotifyError> {
@@ -1900,6 +2027,190 @@ mod tests {
             result.is_ok(),
             "normal response must be accepted: {result:?}"
         );
+    }
+
+    #[test]
+    fn authenticated_unix_socket_client_handshakes_before_notify() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let sock_path = dir.path().join("test.sock");
+        let key_path = dir.path().join("key");
+        std::fs::write(&key_path, [5_u8; 32]).unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let client = UnixSocketNotifyClient::new_authenticated(
+            &sock_path,
+            Duration::from_secs(5),
+            &key_path,
+        )
+        .unwrap();
+        let server_secret = SharedSecret::load(&key_path).unwrap();
+        let event = NotifyChangeEvent::new(
+            "/srv/skills/alpha",
+            "alpha",
+            NotifyEventKind::Write,
+            vec![],
+            5000,
+        );
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let session = authenticate_server(
+                &mut stream,
+                &server_secret,
+                NOTIFY_CLIENT_DOMAIN,
+                NOTIFY_SERVER_DOMAIN,
+            )
+            .unwrap();
+            let request = session
+                .read_frame(
+                    &mut stream,
+                    FrameSender::Client,
+                    MAX_RESPONSE_BYTES as usize,
+                )
+                .unwrap();
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.contains(NOTIFY_METHOD));
+            session
+                .write_frame(
+                    &mut stream,
+                    FrameSender::Server,
+                    br#"{"ok":true,"data":{"schemaVersion":2,"accepted":true}}"#,
+                )
+                .unwrap();
+        });
+
+        let result = client.send(&event);
+        handle.join().unwrap();
+        assert!(result.is_ok(), "authenticated notify failed: {result:?}");
+    }
+
+    #[test]
+    fn authenticated_notify_rejects_permissive_socket() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let sock_path = dir.path().join("test.sock");
+        let key_path = dir.path().join("key");
+        std::fs::write(&key_path, [5_u8; 32]).unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let _listener = UnixListener::bind(&sock_path).unwrap();
+        std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        let client = UnixSocketNotifyClient::new_authenticated(
+            &sock_path,
+            Duration::from_secs(5),
+            &key_path,
+        )
+        .unwrap();
+        let event = NotifyChangeEvent::new(
+            "/srv/skills/alpha",
+            "alpha",
+            NotifyEventKind::Write,
+            vec![],
+            5000,
+        );
+
+        let result = client.send(&event);
+        assert!(matches!(
+            result,
+            Err(NotifyError::Authentication(message))
+                if message.contains("group or other permissions")
+        ));
+    }
+
+    #[test]
+    fn authenticated_notify_rejects_permissive_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("test.sock");
+        let key_path = dir.path().join("key");
+        std::fs::write(&key_path, [5_u8; 32]).unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let _listener = UnixListener::bind(&sock_path).unwrap();
+        std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
+        let client = UnixSocketNotifyClient::new_authenticated(
+            &sock_path,
+            Duration::from_secs(5),
+            &key_path,
+        )
+        .unwrap();
+        let event = NotifyChangeEvent::new(
+            "/srv/skills/alpha",
+            "alpha",
+            NotifyEventKind::Write,
+            vec![],
+            5000,
+        );
+
+        let result = client.send(&event);
+        assert!(matches!(
+            result,
+            Err(NotifyError::Authentication(message))
+                if message.contains("group or other permissions")
+        ));
+    }
+
+    #[test]
+    fn authenticated_notify_accepts_restrictive_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let sock_path = dir.path().join("test.sock");
+        let _listener = UnixListener::bind(&sock_path).unwrap();
+        std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o300)).unwrap();
+
+        let result = validate_authenticated_notify_endpoint(&sock_path);
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            result.is_ok(),
+            "owner-only parent permissions must be accepted: {result:?}"
+        );
+    }
+
+    #[test]
+    fn authenticated_notify_rejects_non_socket_endpoint() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let sock_path = dir.path().join("not-a-socket");
+        let key_path = dir.path().join("key");
+        std::fs::write(&sock_path, b"not a socket").unwrap();
+        std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&key_path, [5_u8; 32]).unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let client = UnixSocketNotifyClient::new_authenticated(
+            &sock_path,
+            Duration::from_secs(5),
+            &key_path,
+        )
+        .unwrap();
+        let event = NotifyChangeEvent::new(
+            "/srv/skills/alpha",
+            "alpha",
+            NotifyEventKind::Write,
+            vec![],
+            5000,
+        );
+
+        let result = client.send(&event);
+        assert!(matches!(
+            result,
+            Err(NotifyError::Authentication(message)) if message.contains("not a Unix socket")
+        ));
     }
 
     #[test]

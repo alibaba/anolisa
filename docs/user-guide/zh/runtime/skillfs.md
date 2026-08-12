@@ -435,8 +435,8 @@ socket。与 Skill Ledger 联合部署时，它就是 agent-sec-core daemon 的 
 
 对于 in-place activation 和 notify mount，需要设置 `--ledger-backing-root`，给
 daemon 一个可见的 backing source path，并启用 authenticated resolver。Notify v2
-只携带 canonical identity，因此缺少 `--trusted-peer-exe` 的 in-place notify 配置会
-在启动阶段被拒绝。out-of-place notify mount 如果显式配置
+只携带 canonical identity，因此缺少 authenticated control-peer 配置的 in-place
+notify 配置会在启动阶段被拒绝。out-of-place notify mount 如果显式配置
 `--ledger-backing-root`，同样必须启用 resolver：
 
 ```bash
@@ -466,8 +466,8 @@ skillfs mount /path/to/skills /mnt/skillfs \
 ```
 
 该 socket 要求 `--security --activation-mode file`，与 `--decision-command` 互斥，
-并且必须指定可信 peer executable。Peer 校验使用 Linux peer credential 和
-executable identity。
+并且必须恰好配置一种 peer authentication mode。宿主机模式使用 Linux peer
+credential 和 executable identity。
 
 packaged AgentSecCore daemon 使用 `sys.executable` 启动 Skill Ledger worker，该路径
 解析为 `/usr/bin/python3.11`；worker 并不是 `/usr/bin/skill-ledger` executable。
@@ -490,20 +490,52 @@ control plane 是 opt-in 且需认证的。endpoint 按优先级解析：
 2. 配置文件 `[control_socket].path`
 3. 默认的每用户 endpoint `/run/user/<uid>/skillfs/control.sock`
 
-仅配置可信 peer 而未给显式 path 时使用默认 endpoint；仅给显式 path 而未配置可信
-peer 为配置错误；两者都没有则 control plane 保持关闭。默认 endpoint 绝不 fallback
-到 `/tmp` 或 `/var/tmp`——若 `/run/user/<uid>` 不可用，启动会返回明确且可操作的
+executable peer 未给显式 path 时使用默认 endpoint；HMAC mode 要求显式 path。仅给
+显式 path 而未配置 peer mode 为配置错误；两者都没有则 control plane 保持关闭。默认
+endpoint 绝不 fallback 到 `/tmp` 或 `/var/tmp`——若 `/run/user/<uid>` 不可用，启动会返回明确且可操作的
 错误，此时必须显式传入 `--control-socket`。第二个实例绝不会 unlink 处于活跃状态
 的 endpoint；只有确认属于 SkillFS 且为 stale 的 socket 才会被回收。
 
 无需 `register`、`mountId` 或 `generation` 握手——endpoint 按 UID 稳定，resolver
 可直接查询。
 
-> **与 Skill Ledger 联合部署时不要使用自定义 endpoint。** Skill Ledger 的 resolver
-> 客户端只探测默认的 `/run/user/<uid>/skillfs/control.sock`，没有任何配置项或命令行
-> 参数可以让它跟随自定义路径。如果用 `--control-socket` 或 `[control_socket].path`
-> 指定了其他路径，Ledger 找不到默认 socket 会静默按 host 模式处理，canonical path
-> 解析随之失效，且两侧都不会报错。这是当前 M1 的限制。
+#### 容器 HMAC profile
+
+可信 peer 运行在独立 PID 或 mount namespace 时，SkillFS 侧可以使用 HMAC
+profile。两个进程必须从只挂载给可信容器的私有文件读取同一个 secret：
+
+```bash
+skillfs mount /var/lib/skillfs/source /var/lib/skillfs/shared/mount \
+  --foreground --allow-other \
+  --security --activation-mode file \
+  --notify-socket /run/anolisa/peer/notify.sock \
+  --notify-auth-key-file /run/anolisa/auth/skillfs.key \
+  --control-socket /run/anolisa/skillfs/control.sock \
+  --trusted-peer-key-file /run/anolisa/auth/skillfs.key
+```
+
+Secret file 必须是绝对路径、nonblocking、no-follow 的普通文件，由 effective user
+所有，不给 group 或 other 任何权限，并包含 32–4096 个 raw bytes。FIFO 等非普通
+文件会立即导致启动失败，不会阻塞。HMAC mode 不会 fallback 到 executable 或
+plain authentication。双向认证后，session-bound tag 会在双方解释 raw business
+request/response 前验证其完整性。Authenticated notify 要求 daemon socket 由
+SkillFS 的 effective UID 所有，不给 group 或 other 任何权限，并直接位于 owner
+匹配且不给 group 或 other 任何权限的目录下，目录推荐使用 `0700`。兼容的
+agent-sec-core listener 会以 `0600` 创建该 endpoint；SkillFS 每次连接前都会检查
+这些属性。因此首版 profile 要求 SkillFS 与 agent-sec-core 使用相同的 effective
+UID。Runtime socket volume 只能以 read-write 方式挂载到可信容器；负向测试中的
+workload 可以只读挂载，但不能替换 socket entry。
+resolver 仍返回 `transport: shared_path`，因此
+SkillFS 和 resolver peer 必须在同一个绝对路径看到物理 source。不要把 source 或
+Secret 挂载到 workload 容器。
+
+本仓库改动只实现 SkillFS server/client surface，不配置或实现 agent-sec-core。
+Peer-side 行为是
+[容器 Peer 认证](../../../../src/skillfs/docs/design/container-peer-authentication_zh.md)
+中的拟议合同，仍需 sec-core maintainer 确认。在其后续实现合入前，应使用独立
+probe 和
+[单方面验证计划](../../../../src/skillfs/docs/testing/container-peer-authentication-unilateral-validation_zh.md)，
+不能把 sec-core 联动描述为已经可用。
 
 支持的 JSONL 请求示例：
 
@@ -623,12 +655,14 @@ mount-session summary 仍共享同一个文件。
 | `--activation-mode file` | 消费 activation JSON/xattr 状态 |
 | `--activation-reload-mode poll` | notify trigger 后 poll activation |
 | `--notify-socket <PATH>` | 向外部 daemon 发送 mutation event |
+| `--notify-auth-key-file <PATH>` | 使用 owner-only 共享 key file 双向认证 notify 连接 |
 | `--activation-events-log <PATH>` | 写 activation protocol events JSONL |
 | `--audit-log <PATH>` | 写 filesystem audit events JSONL |
 | `--audit-queue-capacity <N>` | audit writer 线程队列长度；`0` 用内置默认值，仅配合 `--audit-log` 生效 |
 | `--events-log <PATH>` | 写旧 decision 流程的 security decision events JSONL，仅配合 `--security --decision-command` 生效 |
-| `--control-socket <PATH>` | 覆盖 control socket endpoint（默认 `/run/user/<uid>/skillfs/control.sock`）；与 Skill Ledger 联合部署时不要使用 |
+| `--control-socket <PATH>` | 覆盖 control socket endpoint（executable mode 默认 `/run/user/<uid>/skillfs/control.sock`） |
 | `--trusted-peer-exe <PATH>` | 固定可信 control socket peer（未给 path 时在默认 endpoint 启用 control plane） |
+| `--trusted-peer-key-file <PATH>` | 启用双向认证的容器 peer mode；要求显式 control socket，并与 `--trusted-peer-exe` 互斥 |
 | `--trusted-peer-uid <UID>` | 额外约束 control socket peer 的 UID（取自 `SO_PEERCRED`） |
 | `--trusted-peer-gid <GID>` | 额外约束 control socket peer 的 GID（取自 `SO_PEERCRED`） |
 | `--trusted-writer-exe <PATH>` | 固定可信 mount-path writer |

@@ -144,6 +144,7 @@ pub struct NotifySection {
     pub mode: Option<String>,
     pub socket_path: Option<String>,
     pub timeout_ms: Option<u64>,
+    pub auth_key_file: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,6 +181,7 @@ pub struct InstallSection {
 pub struct ControlSocketSection {
     pub path: Option<String>,
     pub trusted_peer_exe: Option<String>,
+    pub trusted_peer_key_file: Option<String>,
     pub trusted_peer_uid: Option<u32>,
     pub trusted_peer_gid: Option<u32>,
 }
@@ -514,6 +516,14 @@ impl SecurityConfig {
         self.notify.as_ref().and_then(|n| n.timeout_ms)
     }
 
+    /// Returns the notify authentication key file when configured.
+    pub fn notify_auth_key_file(&self) -> Option<&str> {
+        self.notify
+            .as_ref()
+            .and_then(|n| n.auth_key_file.as_deref())
+            .filter(|s| !s.trim().is_empty())
+    }
+
     pub fn activation_events_log_path(&self) -> Option<&str> {
         self.activation_events
             .as_ref()
@@ -573,6 +583,14 @@ impl SecurityConfig {
         self.control_socket
             .as_ref()
             .and_then(|c| c.trusted_peer_exe.as_deref())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Returns the shared-key file for container peer authentication.
+    pub fn control_socket_trusted_peer_key_file(&self) -> Option<&str> {
+        self.control_socket
+            .as_ref()
+            .and_then(|c| c.trusted_peer_key_file.as_deref())
             .filter(|s| !s.trim().is_empty())
     }
 
@@ -1523,6 +1541,33 @@ trusted_peer_gid = 1000
         );
         assert_eq!(cfg.control_socket_trusted_peer_uid(), Some(1000));
         assert_eq!(cfg.control_socket_trusted_peer_gid(), Some(1000));
+        assert!(cfg.control_socket_trusted_peer_key_file().is_none());
+    }
+
+    #[test]
+    fn shared_key_paths_parse_for_control_and_notify() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("security.toml");
+        std::fs::write(
+            &path,
+            r#"
+[notify]
+mode = "unix-socket"
+socket_path = "/run/agent-sec/daemon.sock"
+auth_key_file = "/run/keys/peer.key"
+
+[control_socket]
+path = "/run/skillfs/control.sock"
+trusted_peer_key_file = "/run/keys/peer.key"
+"#,
+        )
+        .unwrap();
+        let cfg = SecurityConfig::load(&path).unwrap();
+        assert_eq!(cfg.notify_auth_key_file(), Some("/run/keys/peer.key"));
+        assert_eq!(
+            cfg.control_socket_trusted_peer_key_file(),
+            Some("/run/keys/peer.key")
+        );
     }
 
     #[test]

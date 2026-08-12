@@ -1,11 +1,8 @@
 //! Trusted peer control socket.
 //!
-//! Provides a Unix domain socket control plane authenticated via
-//! `SO_PEERCRED` + executable identity + starttime. External daemons
-//! connect to this socket; SkillFS verifies the peer's pid/uid/gid,
-//! resolves the peer's `/proc/<pid>/exe` to match a pinned `(dev, ino)`,
-//! and reads `/proc/<pid>/stat` field 22 (starttime) for PID reuse
-//! defense.
+//! Provides a Unix domain socket control plane authenticated either by
+//! the legacy executable identity contract or an explicitly configured
+//! shared-key challenge-response contract for isolated containers.
 //!
 //! ## Protocol
 //!
@@ -64,6 +61,12 @@ use tracing::{debug, info, warn};
 use super::activation::{ACTIVATION_XATTR, ActivationRecord};
 use super::activation_reload::ReloadOutcome;
 use super::active::{ActiveSkillResolver, ActiveTarget};
+#[cfg(test)]
+use super::auth::authenticate_client;
+use super::auth::{
+    AuthenticatedSession, CONTROL_CLIENT_DOMAIN, CONTROL_SERVER_DOMAIN, FrameSender, SharedSecret,
+    authenticate_server,
+};
 use super::ledger::validate_skill_name_component;
 use super::protocol_events::{ProtocolEvent, ProtocolEventWriter};
 use super::skill_dir::{SkillDirError, VerifiedSkillDir, open_verified_skill_dir};
@@ -1599,9 +1602,20 @@ impl Drop for BoundSocketGuard {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct ControlSocketServer {
-    config: ControlSocketConfig,
+    socket_path: PathBuf,
+    authentication: ControlSocketAuthentication,
     context: Option<Arc<ControlSocketContext>>,
     shutdown: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+enum ControlSocketAuthentication {
+    Executable(TrustedPeerConfig),
+    Hmac {
+        secret: SharedSecret,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    },
 }
 
 /// Handle returned to the caller for shutdown coordination.
@@ -1657,10 +1671,28 @@ impl Drop for ControlSocketHandle {
 impl ControlSocketServer {
     pub fn new(config: ControlSocketConfig) -> Self {
         Self {
-            config,
+            socket_path: config.socket_path,
+            authentication: ControlSocketAuthentication::Executable(config.trusted_peer),
             context: None,
             shutdown: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Builds a server using shared-key authentication without consulting
+    /// the peer executable across process or mount namespaces.
+    pub fn new_hmac(
+        socket_path: PathBuf,
+        key_file: &Path,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let secret = SharedSecret::load(key_file)?;
+        Ok(Self {
+            socket_path,
+            authentication: ControlSocketAuthentication::Hmac { secret, uid, gid },
+            context: None,
+            shutdown: Arc::new(AtomicBool::new(false)),
+        })
     }
 
     pub fn with_context(mut self, context: ControlSocketContext) -> Self {
@@ -1685,20 +1717,20 @@ impl ControlSocketServer {
         // eliminate the bind-to-chmod permission window. Runs before
         // the lifecycle lock so that create_dir_all provides the parent
         // the lock file lives in.
-        secure_socket_parent(&self.config.socket_path)?;
+        secure_socket_parent(&self.socket_path)?;
 
         // Acquire the non-blocking lifecycle lock before touching the
         // socket path. A second instance targeting the same endpoint
         // fails here instead of unlinking a live socket.
-        let lifecycle_lock = acquire_lifecycle_lock(&self.config.socket_path)?;
+        let lifecycle_lock = acquire_lifecycle_lock(&self.socket_path)?;
 
         // Reclaim only a confirmed-stale, owned socket (checked while the
         // lock is held). Fails closed on non-sockets, wrong owner, or a
         // live listener.
-        preflight_socket_path(&self.config.socket_path)?;
+        preflight_socket_path(&self.socket_path)?;
 
-        let listener = UnixListener::bind(&self.config.socket_path)?;
-        let bound_socket_guard = BoundSocketGuard::new(self.config.socket_path.clone());
+        let listener = UnixListener::bind(&self.socket_path)?;
+        let bound_socket_guard = BoundSocketGuard::new(self.socket_path.clone());
         setup_listener(&listener)?;
 
         // Set socket file permissions to 0o600.
@@ -1706,26 +1738,39 @@ impl ControlSocketServer {
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(&self.config.socket_path, perms)?;
+            std::fs::set_permissions(&self.socket_path, perms)?;
         }
 
         let shutdown = self.shutdown.clone();
-        let config = self.config.clone();
+        let authentication = self.authentication.clone();
         let context = self.context.clone();
-        let socket_path = self.config.socket_path.clone();
+        let socket_path = self.socket_path.clone();
 
-        info!(
-            socket = %socket_path.display(),
-            trusted_peer_exe = %config.trusted_peer.exe_path.display(),
-            trusted_peer_file_id = %config.trusted_peer.exe_file_id,
-            "control socket server starting"
-        );
+        match &authentication {
+            ControlSocketAuthentication::Executable(peer) => info!(
+                socket = %socket_path.display(),
+                trusted_peer_exe = %peer.exe_path.display(),
+                trusted_peer_file_id = %peer.exe_file_id,
+                auth_mode = "executable",
+                "control socket server starting"
+            ),
+            ControlSocketAuthentication::Hmac { .. } => info!(
+                socket = %socket_path.display(),
+                auth_mode = "hmac-sha256",
+                "control socket server starting"
+            ),
+        }
 
         let shutdown_for_thread = shutdown.clone();
         let thread = std::thread::Builder::new()
             .name("skillfs-control-socket".to_string())
             .spawn(move || {
-                run_server_loop(&listener, &config, context.as_deref(), &shutdown_for_thread);
+                run_server_loop(
+                    &listener,
+                    &authentication,
+                    context.as_deref(),
+                    &shutdown_for_thread,
+                );
             })?;
 
         // Ownership transfers to the handle only after every fallible
@@ -1748,7 +1793,7 @@ const ACCEPT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 
 fn run_server_loop(
     listener: &UnixListener,
-    config: &ControlSocketConfig,
+    authentication: &ControlSocketAuthentication,
     ctx: Option<&ControlSocketContext>,
     shutdown: &AtomicBool,
 ) {
@@ -1763,7 +1808,7 @@ fn run_server_loop(
                 if shutdown.load(Ordering::SeqCst) {
                     break;
                 }
-                handle_connection(stream, config, ctx);
+                handle_connection(stream, authentication, ctx);
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(ACCEPT_POLL_INTERVAL);
@@ -1789,76 +1834,118 @@ const CONNECTION_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 const MAX_CONTROL_REQUEST_BYTES: u64 = 64 * 1024;
 
 fn handle_connection(
-    stream: UnixStream,
-    config: &ControlSocketConfig,
+    mut stream: UnixStream,
+    authentication: &ControlSocketAuthentication,
     ctx: Option<&ControlSocketContext>,
 ) {
     // The listener is non-blocking; ensure the accepted stream is blocking
     // so the read timeout governs the per-connection hold time.
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(CONNECTION_READ_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(CONNECTION_READ_TIMEOUT));
 
-    let peer_identity = match identify_peer(&stream) {
-        Ok(id) => id,
-        Err(e) => {
-            warn!("failed to identify peer: {e}");
-            let resp = ControlResponse::err("peer_identification_failed", e.to_string());
-            let _ = send_response(&stream, &resp);
-            return;
+    let (credentials, authenticated_session) = match authentication {
+        ControlSocketAuthentication::Executable(config) => {
+            let peer_identity = match identify_peer(&stream) {
+                Ok(id) => id,
+                Err(e) => {
+                    warn!("failed to identify peer executable: {e}");
+                    let resp = ControlResponse::err("peer_identification_failed", e.to_string());
+                    let _ = send_response(&mut stream, &resp, None);
+                    return;
+                }
+            };
+            let verify = verify_peer(config, &peer_identity);
+            if !verify.is_accepted() {
+                let msg = verify
+                    .denial_message()
+                    .unwrap_or_else(|| "peer verification failed".to_string());
+                warn!(pid = peer_identity.credentials.pid, reason = %msg, "control socket peer rejected");
+                let resp = ControlResponse::err("permission_denied", msg);
+                let _ = send_response(&mut stream, &resp, None);
+                return;
+            }
+            (peer_identity.credentials, None)
+        }
+        ControlSocketAuthentication::Hmac { secret, uid, gid } => {
+            let credentials = match get_peer_credentials(&stream) {
+                Ok(credentials) => credentials,
+                Err(e) => {
+                    warn!("failed to identify HMAC peer credentials: {e}");
+                    return;
+                }
+            };
+            if uid.is_some_and(|expected| credentials.uid != expected)
+                || gid.is_some_and(|expected| credentials.gid != expected)
+            {
+                warn!(
+                    pid = credentials.pid,
+                    "control socket peer credentials rejected"
+                );
+                return;
+            }
+            let session = match authenticate_server(
+                &mut stream,
+                secret,
+                CONTROL_CLIENT_DOMAIN,
+                CONTROL_SERVER_DOMAIN,
+            ) {
+                Ok(session) => session,
+                Err(error) => {
+                    warn!(pid = credentials.pid, reason = %error, "control socket HMAC peer rejected");
+                    return;
+                }
+            };
+            (credentials, Some(session))
         }
     };
 
-    debug!(
-        pid = peer_identity.credentials.pid,
-        uid = peer_identity.credentials.uid,
-        gid = peer_identity.credentials.gid,
-        exe = ?peer_identity.exe_path,
-        "control socket peer connected"
-    );
+    debug!(pid = credentials.pid, "control socket peer accepted");
 
-    let verify = verify_peer(&config.trusted_peer, &peer_identity);
-    if !verify.is_accepted() {
-        let msg = verify
-            .denial_message()
-            .unwrap_or_else(|| "peer verification failed".to_string());
-        warn!(
-            pid = peer_identity.credentials.pid,
-            reason = %msg,
-            "control socket peer rejected"
-        );
-        let resp = ControlResponse::err("permission_denied", msg);
-        let _ = send_response(&stream, &resp);
-        return;
-    }
-
-    debug!(
-        pid = peer_identity.credentials.pid,
-        "control socket peer accepted"
-    );
-
-    let reader = BufReader::new(&stream);
-    let mut limited = reader.take(MAX_CONTROL_REQUEST_BYTES + 1);
-    let mut line = String::new();
-    match limited.read_line(&mut line) {
-        Ok(0) => return,
-        Ok(n) if n as u64 > MAX_CONTROL_REQUEST_BYTES => {
-            warn!(
-                pid = peer_identity.credentials.pid,
-                "control socket request exceeds {MAX_CONTROL_REQUEST_BYTES} byte limit"
-            );
-            let resp = ControlResponse::err(
-                "invalid_request",
-                format!("request exceeds {MAX_CONTROL_REQUEST_BYTES} byte limit"),
-            );
-            let _ = send_response(&stream, &resp);
-            return;
+    let line = if let Some(session) = &authenticated_session {
+        match session.read_frame(
+            &mut stream,
+            FrameSender::Client,
+            MAX_CONTROL_REQUEST_BYTES as usize,
+        ) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(line) => line,
+                Err(error) => {
+                    debug!("control socket request is not UTF-8: {error}");
+                    return;
+                }
+            },
+            Err(error) => {
+                warn!(pid = credentials.pid, reason = %error, "control socket business frame rejected");
+                return;
+            }
         }
-        Ok(_) => {}
-        Err(e) => {
-            debug!("control socket read error: {e}");
-            return;
+    } else {
+        let reader = BufReader::new(&stream);
+        let mut limited = reader.take(MAX_CONTROL_REQUEST_BYTES + 1);
+        let mut line = String::new();
+        match limited.read_line(&mut line) {
+            Ok(0) => return,
+            Ok(n) if n as u64 > MAX_CONTROL_REQUEST_BYTES => {
+                warn!(
+                    pid = credentials.pid,
+                    "control socket request exceeds {MAX_CONTROL_REQUEST_BYTES} byte limit"
+                );
+                let resp = ControlResponse::err(
+                    "invalid_request",
+                    format!("request exceeds {MAX_CONTROL_REQUEST_BYTES} byte limit"),
+                );
+                let _ = send_response(&mut stream, &resp, None);
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                debug!("control socket read error: {e}");
+                return;
+            }
         }
-    }
+        line
+    };
 
     if line.trim().is_empty() {
         return;
@@ -1869,16 +1956,23 @@ fn handle_connection(
         Err(err_resp) => err_resp,
     };
 
-    let _ = send_response(&stream, &resp);
+    let _ = send_response(&mut stream, &resp, authenticated_session.as_ref());
 }
 
-fn send_response(stream: &UnixStream, resp: &ControlResponse) -> std::io::Result<()> {
-    let mut writer = stream;
-    let json = serde_json::to_string(resp)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    writer.write_all(json.as_bytes())?;
-    writer.write_all(b"\n")?;
-    writer.flush()
+fn send_response(
+    stream: &mut UnixStream,
+    resp: &ControlResponse,
+    session: Option<&AuthenticatedSession>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let json = serde_json::to_vec(resp)?;
+    if let Some(session) = session {
+        session.write_frame(stream, FrameSender::Server, &json)?;
+    } else {
+        stream.write_all(&json)?;
+        stream.write_all(b"\n")?;
+        stream.flush()?;
+    }
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3586,6 +3680,107 @@ mod tests {
             let mut response = String::new();
             reader.read_line(&mut response).unwrap();
             response
+        }
+
+        fn write_key(path: &Path, byte: u8) {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(path, [byte; 32]).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        fn hmac_connect_and_send(socket_path: &Path, key_path: &Path, request: &str) -> String {
+            let secret = SharedSecret::load(key_path).unwrap();
+            let mut stream = UnixStream::connect(socket_path).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let session = authenticate_client(
+                &mut stream,
+                &secret,
+                CONTROL_CLIENT_DOMAIN,
+                CONTROL_SERVER_DOMAIN,
+            )
+            .unwrap();
+            session
+                .write_frame(&mut stream, FrameSender::Client, request.as_bytes())
+                .unwrap();
+            let response = session
+                .read_frame(
+                    &mut stream,
+                    FrameSender::Server,
+                    MAX_CONTROL_REQUEST_BYTES as usize,
+                )
+                .unwrap();
+            String::from_utf8(response).unwrap()
+        }
+
+        #[test]
+        fn hmac_server_authenticates_before_dispatch() {
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("test.sock");
+            let key_path = dir.path().join("key");
+            write_key(&key_path, 7);
+            let handle = ControlSocketServer::new_hmac(
+                socket_path.clone(),
+                &key_path,
+                Some(unsafe { libc::geteuid() }),
+                None,
+            )
+            .unwrap()
+            .start()
+            .unwrap();
+
+            let response = hmac_connect_and_send(
+                &socket_path,
+                &key_path,
+                r#"{"schemaVersion":"1","method":"ping"}"#,
+            );
+            let response: ControlResponse = serde_json::from_str(&response).unwrap();
+            assert!(response.ok);
+            assert_eq!(response.result.unwrap()["pong"], true);
+            handle.shutdown();
+        }
+
+        #[test]
+        fn hmac_server_rejects_plain_or_wrong_key_without_dispatch() {
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("test.sock");
+            let key_path = dir.path().join("key");
+            let wrong_path = dir.path().join("wrong-key");
+            write_key(&key_path, 7);
+            write_key(&wrong_path, 8);
+            let handle = ControlSocketServer::new_hmac(socket_path.clone(), &key_path, None, None)
+                .unwrap()
+                .start()
+                .unwrap();
+
+            let mut plain = UnixStream::connect(&socket_path).unwrap();
+            plain
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            plain
+                .write_all(b"{\"schemaVersion\":\"1\",\"method\":\"ping\"}\n")
+                .unwrap();
+            let mut response = String::new();
+            let read = BufReader::new(&plain).read_line(&mut response).unwrap();
+            assert_eq!(read, 0);
+            assert!(response.is_empty());
+
+            let wrong = SharedSecret::load(&wrong_path).unwrap();
+            let mut stream = UnixStream::connect(&socket_path).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            assert!(
+                authenticate_client(
+                    &mut stream,
+                    &wrong,
+                    CONTROL_CLIENT_DOMAIN,
+                    CONTROL_SERVER_DOMAIN,
+                )
+                .is_err()
+            );
+            handle.shutdown();
         }
 
         #[test]

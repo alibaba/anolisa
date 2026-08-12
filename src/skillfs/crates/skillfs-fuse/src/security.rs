@@ -93,6 +93,7 @@ pub mod activation_reload;
 pub mod activation_watcher;
 pub mod active;
 pub mod audit;
+pub(crate) mod auth;
 pub mod backing_root;
 pub mod config;
 pub mod control_socket;
