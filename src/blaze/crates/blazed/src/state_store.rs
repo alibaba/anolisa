@@ -11,10 +11,10 @@ use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use blaze_core::lifecycle::SandboxInstance;
+use blaze_core::lifecycle::{BackendOwnership, SandboxInstance, SandboxState};
 use rustix::fs::{
-    AtFlags, Dir, FlockOperation, Mode, OFlags, RenameFlags, flock, fstat, fsync, mkdirat, open,
-    openat, renameat, renameat_with, unlinkat,
+    AtFlags, Dir, DirEntry, FileType, FlockOperation, Mode, OFlags, RenameFlags, Stat, flock,
+    fstat, fsync, mkdirat, open, openat, renameat, renameat_with, statat, unlinkat,
 };
 use rustix::io::Errno;
 use uuid::Uuid;
@@ -226,13 +226,61 @@ impl StateStore {
         Self::load_from(&run_dir)
     }
 
-    /// Best-effort startup scan of persisted lifecycle records.
+    /// Validate and load every owned lifecycle record before request handling.
     ///
     /// The scan owns the run-directory map for its complete duration and must
-    /// run before request handling starts. This prevents a stale scan result
-    /// from restoring ownership after a concurrent terminal commit.
+    /// run before request handling starts. Supported lifecycle writers use the
+    /// same store, so this lock prevents a stale scan result from restoring
+    /// ownership after a concurrent terminal commit. The production store's
+    /// state-root lock excludes other cooperating Blaze daemons.
     pub fn scan(&self) -> Result<HashMap<Uuid, SandboxInstance>> {
+        self.scan_with_hooks(|_| Ok(()), || Ok(()), |_| Ok(()))
+    }
+
+    #[cfg(test)]
+    fn scan_with_owner_hook<F>(&self, mut after_owner: F) -> Result<HashMap<Uuid, SandboxInstance>>
+    where
+        F: FnMut(Uuid) -> Result<()>,
+    {
+        self.scan_with_hooks(&mut after_owner, || Ok(()), |_| Ok(()))
+    }
+
+    #[cfg(test)]
+    fn scan_with_prevalidation_hook<F>(
+        &self,
+        mut before_validation: F,
+    ) -> Result<HashMap<Uuid, SandboxInstance>>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        self.scan_with_hooks(|_| Ok(()), &mut before_validation, |_| Ok(()))
+    }
+
+    #[cfg(test)]
+    fn scan_with_post_final_enumeration_hook<F>(
+        &self,
+        mut after_final_enumeration: F,
+    ) -> Result<HashMap<Uuid, SandboxInstance>>
+    where
+        F: FnMut(&[Uuid]) -> Result<()>,
+    {
+        self.scan_with_hooks(|_| Ok(()), || Ok(()), &mut after_final_enumeration)
+    }
+
+    fn scan_with_hooks<F, G, H>(
+        &self,
+        mut after_owner: F,
+        mut before_validation: G,
+        mut after_final_enumeration: H,
+    ) -> Result<HashMap<Uuid, SandboxInstance>>
+    where
+        F: FnMut(Uuid) -> Result<()>,
+        G: FnMut() -> Result<()>,
+        H: FnMut(&[Uuid]) -> Result<()>,
+    {
         let mut instances = HashMap::new();
+        let mut scanned_run_dirs = HashMap::new();
+        let mut scanned_owners = Vec::new();
         let mut run_dirs =
             self.inner.run_dirs.lock().map_err(|_| {
                 BlazeDaemonError::Internal("state run-directory lock poisoned".into())
@@ -257,13 +305,17 @@ impl StateStore {
             let Ok(id) = Uuid::parse_str(name) else {
                 continue;
             };
-            let run_dir = match self.open_run_dir_object(id) {
-                Ok(run_dir) => run_dir,
-                Err(error) => {
-                    tracing::warn!(instance = %id, %error, "skipping invalid instance directory");
-                    continue;
-                }
-            };
+            let canonical_name = id.to_string();
+            if name != canonical_name {
+                return Err(BlazeDaemonError::RecoveryRequired(format!(
+                    "owned state directory {name} is a non-canonical UUID alias for {canonical_name}"
+                )));
+            }
+            let run_dir = self.open_scanned_run_dir(&entry, id).map_err(|error| {
+                BlazeDaemonError::RecoveryRequired(format!(
+                    "cannot open persisted instance directory {id}: {error}"
+                ))
+            })?;
             if let Err(error) = remove_file_if_exists(&run_dir.inner.directory, TEMP_STATE_FILE) {
                 tracing::warn!(
                     instance = %id,
@@ -271,27 +323,71 @@ impl StateStore {
                     "failed to remove stale state record temporary file"
                 );
             }
-            match Self::load_from(&run_dir) {
-                Ok(instance) => {
-                    let ownership =
-                        if instance.state == blaze_core::lifecycle::SandboxState::Destroyed {
-                            RunDirEntry::Released
-                        } else {
-                            RunDirEntry::Owned(run_dir)
-                        };
-                    run_dirs.insert(id, ownership);
-                    instances.insert(id, instance);
-                }
-                Err(error) => {
-                    tracing::warn!(instance = %id, %error, "skipping corrupt instance state");
-                }
+            let (instance, record_identity) =
+                Self::load_from_with_identity(&run_dir).map_err(|error| {
+                    BlazeDaemonError::RecoveryRequired(format!(
+                        "cannot load persisted instance {id}: {error}"
+                    ))
+                })?;
+            if instance.id != id {
+                return Err(BlazeDaemonError::RecoveryRequired(format!(
+                    "persisted instance id {} does not match owned directory {id}",
+                    instance.id
+                )));
             }
+            validate_terminal_record(&instance)?;
+            let ownership = if instance.state == SandboxState::Destroyed {
+                RunDirEntry::Released
+            } else {
+                RunDirEntry::Owned(run_dir.clone())
+            };
+            scanned_owners.push((id, run_dir, record_identity));
+            scanned_run_dirs.insert(id, ownership);
+            instances.insert(id, instance);
+            after_owner(id)?;
         }
+        before_validation()?;
+        self.revalidate_scanned_inventory(&scanned_owners, &mut after_final_enumeration)?;
+        *run_dirs = scanned_run_dirs;
         tracing::info!(
             instances = instances.len(),
             "rehydrated instances from state_dir"
         );
         Ok(instances)
+    }
+
+    fn open_scanned_run_dir(&self, entry: &DirEntry, id: Uuid) -> Result<OwnedRunDir> {
+        let name = entry.file_name().to_str().map_err(|_| {
+            BlazeDaemonError::RecoveryRequired(format!(
+                "owned state path for instance {id} has a non-UTF-8 name"
+            ))
+        })?;
+        let inspected = statat(&self.inner.root, name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(std::io::Error::from)?;
+        if !is_directory(&inspected) {
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "owned state path {id} is not a directory"
+            )));
+        }
+        if inspected.st_ino != entry.ino() {
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "owned state path {id} is not the directory observed during the state scan"
+            )));
+        }
+        let changed = format!("owned state path {id} changed while it was opened");
+        let directory = open_inspected_object(
+            &self.inner.root,
+            name,
+            &inspected,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            is_directory,
+            &changed,
+        )?;
+        Ok(OwnedRunDir::new(
+            id,
+            self.inner.configured_root.join(id.to_string()),
+            directory,
+        ))
     }
 
     fn cached_run_dir(&self, id: Uuid) -> Result<Option<OwnedRunDir>> {
@@ -308,6 +404,7 @@ impl StateStore {
         }
     }
 
+    #[cfg(test)]
     fn open_run_dir_object(&self, id: Uuid) -> Result<OwnedRunDir> {
         let name = id.to_string();
         let directory = openat(
@@ -534,6 +631,110 @@ impl StateStore {
         Ok(Some(same_opened_object(&linked, &run_dir.inner.directory)?))
     }
 
+    fn revalidate_scanned_owner(
+        &self,
+        id: Uuid,
+        run_dir: &OwnedRunDir,
+        record_identity: &Stat,
+    ) -> Result<()> {
+        match self.linked_directory_matches(&id.to_string(), run_dir) {
+            Ok(Some(true)) => {}
+            Ok(Some(false)) => {
+                return Err(BlazeDaemonError::RecoveryRequired(format!(
+                    "owned state path {id} changed before inventory publication"
+                )));
+            }
+            Ok(None) => {
+                return Err(BlazeDaemonError::RecoveryRequired(format!(
+                    "owned state path {id} disappeared before inventory publication"
+                )));
+            }
+            Err(error) => {
+                return Err(BlazeDaemonError::RecoveryRequired(format!(
+                    "owned state path {id} could not be revalidated before inventory publication: {error}"
+                )));
+            }
+        }
+        let current_record = statat(
+            &run_dir.inner.directory,
+            STATE_FILE,
+            AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .map_err(|error| {
+            BlazeDaemonError::RecoveryRequired(format!(
+                "owned state record for {id} could not be revalidated before inventory publication: {}",
+                std::io::Error::from(error)
+            ))
+        })?;
+        if !is_direct_state_record(&current_record)
+            || !same_stat_object(record_identity, &current_record)
+        {
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "owned state record for {id} changed before inventory publication"
+            )));
+        }
+        Ok(())
+    }
+
+    fn revalidate_scanned_inventory<F>(
+        &self,
+        scanned_owners: &[(Uuid, OwnedRunDir, Stat)],
+        after_final_enumeration: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(&[Uuid]) -> Result<()>,
+    {
+        let scanned_owners = scanned_owners
+            .iter()
+            .map(|(id, run_dir, record_identity)| (*id, (run_dir, record_identity)))
+            .collect::<HashMap<_, _>>();
+        let mut current_ids = Vec::with_capacity(scanned_owners.len());
+        let entries = Dir::read_from(&self.inner.root).map_err(std::io::Error::from)?;
+        for entry in entries {
+            let entry = entry.map_err(std::io::Error::from)?;
+            let Ok(name) = entry.file_name().to_str() else {
+                continue;
+            };
+            if is_state_staging_name(name) {
+                continue;
+            }
+            let Ok(id) = Uuid::parse_str(name) else {
+                continue;
+            };
+            if name != id.to_string() {
+                return Err(BlazeDaemonError::RecoveryRequired(format!(
+                    "owned state directory {name} changed the inventory before publication"
+                )));
+            }
+            if !scanned_owners.contains_key(&id) {
+                return Err(BlazeDaemonError::RecoveryRequired(format!(
+                    "owned state directory {id} was added before inventory publication"
+                )));
+            }
+            current_ids.push(id);
+        }
+        // Complete the name-set walk before checking any retained object's
+        // identity so an early entry is not accepted while later names are
+        // still being enumerated.
+        let enumerated_ids = current_ids;
+        let mut current_ids = enumerated_ids.clone();
+        current_ids.sort_unstable();
+        let mut scanned_ids = scanned_owners.keys().copied().collect::<Vec<_>>();
+        scanned_ids.sort_unstable();
+        if current_ids != scanned_ids {
+            return Err(BlazeDaemonError::RecoveryRequired(
+                "owned state directory set changed before inventory publication".into(),
+            ));
+        }
+        after_final_enumeration(&enumerated_ids)?;
+        // Set completeness is now established; validate every retained object
+        // against the handles and record identity captured by the initial scan.
+        for (id, (run_dir, record_identity)) in scanned_owners {
+            self.revalidate_scanned_owner(id, run_dir, record_identity)?;
+        }
+        Ok(())
+    }
+
     fn revalidate_uncertain(&self, id: Uuid, run_dir: &OwnedRunDir) -> Result<()> {
         let name = id.to_string();
         let linkage = crate::failpoint::state("state-post-publication-identity")
@@ -568,29 +769,88 @@ impl StateStore {
         self.discard_staging(&run_dir, staging_name)
     }
 
+    #[cfg(test)]
     fn load_from(run_dir: &OwnedRunDir) -> Result<SandboxInstance> {
-        let state = openat(
+        Self::load_from_with_identity(run_dir).map(|(instance, _)| instance)
+    }
+
+    fn load_from_with_identity(run_dir: &OwnedRunDir) -> Result<(SandboxInstance, Stat)> {
+        let inspected = statat(
             &run_dir.inner.directory,
             STATE_FILE,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-            Mode::empty(),
+            AtFlags::SYMLINK_NOFOLLOW,
         )
         .map_err(std::io::Error::from)?;
-        let mut state = File::from(state);
-        if !state.metadata()?.is_file() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "{} must be a regular file",
-                    run_dir.inner.configured_path.join(STATE_FILE).display()
-                ),
-            )
-            .into());
+        if !is_direct_state_record(&inspected) {
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "owned state record for {} is not a direct regular file",
+                run_dir.instance_id()
+            )));
         }
+        let changed = format!(
+            "owned state record for {} changed while it was opened",
+            run_dir.instance_id()
+        );
+        let state = open_inspected_object(
+            &run_dir.inner.directory,
+            STATE_FILE,
+            &inspected,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            is_direct_state_record,
+            &changed,
+        )?;
+        let mut state = File::from(state);
         let mut raw = Vec::new();
         state.read_to_end(&mut raw)?;
-        Ok(serde_json::from_slice(&raw)?)
+        Ok((serde_json::from_slice(&raw)?, inspected))
     }
+}
+
+fn is_directory(metadata: &Stat) -> bool {
+    FileType::from_raw_mode(metadata.st_mode) == FileType::Directory
+}
+
+fn is_direct_state_record(metadata: &Stat) -> bool {
+    FileType::from_raw_mode(metadata.st_mode) == FileType::RegularFile && metadata.st_nlink == 1
+}
+
+fn open_inspected_object(
+    directory: &OwnedFd,
+    name: &str,
+    inspected: &Stat,
+    flags: OFlags,
+    expected_type: fn(&Stat) -> bool,
+    changed: &str,
+) -> Result<OwnedFd> {
+    let object = openat(directory, name, flags, Mode::empty()).map_err(std::io::Error::from)?;
+    let opened = fstat(&object).map_err(std::io::Error::from)?;
+    if !expected_type(&opened) || !same_stat_object(inspected, &opened) {
+        return Err(BlazeDaemonError::RecoveryRequired(changed.into()));
+    }
+    Ok(object)
+}
+
+fn same_stat_object(left: &Stat, right: &Stat) -> bool {
+    left.st_dev == right.st_dev && left.st_ino == right.st_ino
+}
+
+fn validate_terminal_record(instance: &SandboxInstance) -> Result<()> {
+    if instance.state != SandboxState::Destroyed {
+        return Ok(());
+    }
+    if matches!(
+        instance.backend_ownership,
+        BackendOwnership::NotStarted | BackendOwnership::Stopped
+    ) && instance.operation.is_none()
+    {
+        return Ok(());
+    }
+    Err(BlazeDaemonError::RecoveryRequired(format!(
+        "destroyed instance {} does not prove completed cleanup: backend ownership {:?}, active operation {:?}",
+        instance.id,
+        instance.backend_ownership,
+        instance.operation.as_ref().map(|operation| operation.kind)
+    )))
 }
 
 fn remove_file_if_exists(directory: &OwnedFd, name: &str) -> Result<()> {
@@ -752,6 +1012,672 @@ mod tests {
             StartPath::Cold,
             "default".into(),
         )
+    }
+
+    fn scan_root(root: &Path) -> Result<HashMap<Uuid, SandboxInstance>> {
+        StateStore::new(root.to_path_buf()).scan()
+    }
+
+    fn find_scanned_entry(store: &StateStore, id: Uuid) -> DirEntry {
+        let expected = id.to_string();
+        Dir::read_from(&store.inner.root)
+            .expect("read state root")
+            .map(|entry| entry.expect("state entry"))
+            .find(|entry| entry.file_name().to_bytes() == expected.as_bytes())
+            .expect("owned state entry")
+    }
+
+    #[test]
+    fn scan_rejects_corrupt_owned_state() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let id = Uuid::new_v4();
+        let owner = temporary.path().join(id.to_string());
+        std::fs::create_dir(&owner).expect("owner directory");
+        std::fs::write(owner.join(STATE_FILE), b"{not-json").expect("corrupt state");
+
+        let error = scan_root(temporary.path()).expect_err("corrupt state must stop startup");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&id.to_string())
+                    && message.contains("cannot load persisted instance")
+        ));
+    }
+
+    #[test]
+    fn failed_scan_does_not_publish_a_partial_owner_inventory() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let first = instance();
+        first.persist(temporary.path()).expect("first state");
+        let second = instance();
+        second.persist(temporary.path()).expect("second state");
+        let store = StateStore::new(temporary.path().to_path_buf());
+        let mut processed = Vec::new();
+        let mut corrupted = None;
+
+        let error = store
+            .scan_with_owner_hook(|processed_id| {
+                processed.push(processed_id);
+                if processed.len() == 1 {
+                    let pending_id = if processed_id == first.id {
+                        second.id
+                    } else {
+                        assert_eq!(processed_id, second.id);
+                        first.id
+                    };
+                    std::fs::write(
+                        temporary
+                            .path()
+                            .join(pending_id.to_string())
+                            .join(STATE_FILE),
+                        b"{not-json",
+                    )?;
+                    corrupted = Some(pending_id);
+                }
+                Ok(())
+            })
+            .expect_err("corrupt pending state must stop the scan");
+
+        assert_eq!(processed.len(), 1);
+        let corrupted = corrupted.expect("one pending owner was corrupted");
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&corrupted.to_string())
+                    && message.contains("cannot load persisted instance")
+        ));
+        assert_eq!(store.retained_run_dir_count(), 0);
+    }
+
+    #[test]
+    fn scan_rejects_a_processed_owner_replaced_before_publication() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let instance = instance();
+        instance.persist(temporary.path()).expect("persisted state");
+        let owner = temporary.path().join(instance.id.to_string());
+        let displaced = temporary.path().join("displaced-owner");
+        let store = StateStore::new(temporary.path().to_path_buf());
+
+        let error = store
+            .scan_with_owner_hook(|processed_id| {
+                assert_eq!(processed_id, instance.id);
+                std::fs::rename(&owner, &displaced)?;
+                std::fs::create_dir(&owner)?;
+                std::fs::copy(displaced.join(STATE_FILE), owner.join(STATE_FILE))?;
+                Ok(())
+            })
+            .expect_err("a replaced processed owner must stop the scan");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&instance.id.to_string())
+                    && message.contains("changed before inventory publication")
+        ));
+        assert_eq!(store.retained_run_dir_count(), 0);
+        assert!(owner.join(STATE_FILE).is_file());
+        assert!(displaced.join(STATE_FILE).is_file());
+    }
+
+    #[test]
+    fn scan_rejects_a_processed_record_replaced_before_publication() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let instance = instance();
+        instance.persist(temporary.path()).expect("persisted state");
+        let owner = temporary.path().join(instance.id.to_string());
+        let record = owner.join(STATE_FILE);
+        let displaced = owner.join("state.read-by-scan.json");
+        let replacement = instance.clone();
+        let store = StateStore::new(temporary.path().to_path_buf());
+
+        let error = store
+            .scan_with_owner_hook(|processed_id| {
+                assert_eq!(processed_id, instance.id);
+                std::fs::rename(&record, &displaced)?;
+                std::fs::write(&record, serde_json::to_vec_pretty(&replacement)?)?;
+                Ok(())
+            })
+            .expect_err("a replaced processed record must stop the scan");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&instance.id.to_string())
+                    && message.contains("record")
+                    && message.contains("changed before inventory publication")
+        ));
+        assert_eq!(store.retained_run_dir_count(), 0);
+        assert!(record.is_file());
+        assert!(displaced.is_file());
+    }
+
+    #[test]
+    fn scan_rejects_an_owner_added_before_publication() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let first = instance();
+        first
+            .persist(temporary.path())
+            .expect("first persisted state");
+        let added = instance();
+        let store = StateStore::new(temporary.path().to_path_buf());
+
+        let error = store
+            .scan_with_prevalidation_hook(|| {
+                added.persist(temporary.path())?;
+                Ok(())
+            })
+            .expect_err("an owner added after enumeration must stop the scan");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&added.id.to_string())
+                    && message.contains("was added before inventory publication")
+        ));
+        assert_eq!(store.retained_run_dir_count(), 0);
+        assert!(temporary.path().join(first.id.to_string()).is_dir());
+        assert!(temporary.path().join(added.id.to_string()).is_dir());
+    }
+
+    #[test]
+    fn scan_rejects_an_early_owner_replaced_after_final_enumeration() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let first = instance();
+        first.persist(temporary.path()).expect("first state");
+        let second = instance();
+        second.persist(temporary.path()).expect("second state");
+        let store = StateStore::new(temporary.path().to_path_buf());
+        let mut replaced = None;
+
+        let error = store
+            .scan_with_post_final_enumeration_hook(|enumerated_ids| {
+                assert_eq!(enumerated_ids.len(), 2);
+                let earlier_id = enumerated_ids[0];
+                let owner = temporary.path().join(earlier_id.to_string());
+                let displaced = temporary.path().join(format!("displaced-{earlier_id}"));
+                std::fs::rename(&owner, &displaced)?;
+                std::fs::create_dir(&owner)?;
+                std::fs::copy(displaced.join(STATE_FILE), owner.join(STATE_FILE))?;
+                replaced = Some((earlier_id, displaced));
+                Ok(())
+            })
+            .expect_err("an owner replaced after the final enumeration must stop the scan");
+
+        let (replaced_id, displaced) = replaced.expect("one enumerated owner was replaced");
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&replaced_id.to_string())
+                    && message.contains("changed before inventory publication")
+        ));
+        assert_eq!(store.retained_run_dir_count(), 0);
+        assert!(
+            temporary
+                .path()
+                .join(replaced_id.to_string())
+                .join(STATE_FILE)
+                .is_file()
+        );
+        assert!(displaced.join(STATE_FILE).is_file());
+    }
+
+    #[test]
+    fn scan_rejects_an_early_record_replaced_after_final_enumeration() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let first = instance();
+        first.persist(temporary.path()).expect("first state");
+        let second = instance();
+        second.persist(temporary.path()).expect("second state");
+        let store = StateStore::new(temporary.path().to_path_buf());
+        let mut replaced = None;
+
+        let error = store
+            .scan_with_post_final_enumeration_hook(|enumerated_ids| {
+                assert_eq!(enumerated_ids.len(), 2);
+                let earlier_id = enumerated_ids[0];
+                let owner = temporary.path().join(earlier_id.to_string());
+                let record = owner.join(STATE_FILE);
+                let displaced = owner.join("state.read-by-scan.json");
+                std::fs::rename(&record, &displaced)?;
+                std::fs::copy(&displaced, &record)?;
+                replaced = Some((earlier_id, record, displaced));
+                Ok(())
+            })
+            .expect_err("a record replaced after the final enumeration must stop the scan");
+
+        let (replaced_id, record, displaced) =
+            replaced.expect("one enumerated record was replaced");
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&replaced_id.to_string())
+                    && message.contains("record")
+                    && message.contains("changed before inventory publication")
+        ));
+        assert_eq!(store.retained_run_dir_count(), 0);
+        assert!(record.is_file());
+        assert!(displaced.is_file());
+    }
+
+    #[test]
+    fn scan_rejects_a_non_canonical_uuid_alias() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let valid = instance();
+        valid.persist(temporary.path()).expect("valid state");
+        let alias = valid.id.simple().to_string();
+        let alias_owner = temporary.path().join(&alias);
+        std::fs::create_dir(&alias_owner).expect("alias owner directory");
+        std::fs::write(alias_owner.join(STATE_FILE), b"{not-json").expect("alias state");
+
+        let error = scan_root(temporary.path()).expect_err("UUID alias must stop startup");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&alias)
+                    && message.contains(&valid.id.to_string())
+                    && message.contains("non-canonical UUID alias")
+        ));
+    }
+
+    #[test]
+    fn scan_rejects_a_uuid_named_regular_file() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let id = Uuid::new_v4();
+        std::fs::write(temporary.path().join(id.to_string()), b"not a directory")
+            .expect("UUID-shaped file");
+
+        let error = scan_root(temporary.path()).expect_err("UUID file must stop startup");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&id.to_string()) && message.contains("is not a directory")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_rejects_a_uuid_named_symbolic_link() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let target = temporary.path().join("unowned-target");
+        std::fs::create_dir(&target).expect("target directory");
+        let id = Uuid::new_v4();
+        symlink(&target, temporary.path().join(id.to_string())).expect("UUID-shaped link");
+
+        let error = scan_root(temporary.path()).expect_err("UUID link must stop startup");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&id.to_string()) && message.contains("is not a directory")
+        ));
+    }
+
+    #[test]
+    fn scan_rejects_state_owned_by_a_different_directory() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let stored = instance();
+        stored.persist(temporary.path()).expect("persist state");
+        let directory_id = Uuid::new_v4();
+        std::fs::rename(
+            temporary.path().join(stored.id.to_string()),
+            temporary.path().join(directory_id.to_string()),
+        )
+        .expect("rename owner directory");
+
+        let error = scan_root(temporary.path()).expect_err("mismatched ID must stop startup");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&stored.id.to_string())
+                    && message.contains(&directory_id.to_string())
+        ));
+    }
+
+    #[test]
+    fn scan_rejects_a_non_regular_state_record() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let id = Uuid::new_v4();
+        let owner = temporary.path().join(id.to_string());
+        std::fs::create_dir_all(owner.join(STATE_FILE)).expect("record directory");
+
+        let error = scan_root(temporary.path()).expect_err("record directory must stop startup");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&id.to_string())
+                    && message.contains("cannot load persisted instance")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_rejects_a_symbolic_link_state_record() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let external = tempfile::tempdir().expect("external directory");
+        let stored = instance();
+        stored.persist(external.path()).expect("external state");
+        let owner = temporary.path().join(stored.id.to_string());
+        std::fs::create_dir(&owner).expect("owner directory");
+        symlink(
+            external.path().join(stored.id.to_string()).join(STATE_FILE),
+            owner.join(STATE_FILE),
+        )
+        .expect("record link");
+
+        let error = scan_root(temporary.path()).expect_err("record link must stop startup");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&stored.id.to_string())
+                    && message.contains("cannot load persisted instance")
+        ));
+    }
+
+    #[test]
+    fn scan_rejects_a_hard_link_state_record() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let external = tempfile::tempdir().expect("external directory");
+        let stored = instance();
+        stored.persist(external.path()).expect("external state");
+        let owner = temporary.path().join(stored.id.to_string());
+        std::fs::create_dir(&owner).expect("owner directory");
+        std::fs::hard_link(
+            external.path().join(stored.id.to_string()).join(STATE_FILE),
+            owner.join(STATE_FILE),
+        )
+        .expect("record hard link");
+
+        let error = scan_root(temporary.path()).expect_err("hard link must stop startup");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&stored.id.to_string())
+                    && message.contains("cannot load persisted instance")
+        ));
+    }
+
+    #[test]
+    fn scan_rejects_destroyed_state_with_uncleared_ownership() {
+        for ownership in [
+            BackendOwnership::Unknown,
+            BackendOwnership::Starting,
+            BackendOwnership::Running,
+        ] {
+            let temporary = tempfile::tempdir().expect("temporary directory");
+            let mut stored = instance();
+            stored
+                .transition(SandboxState::Destroyed)
+                .expect("terminal transition");
+            stored.backend_ownership = ownership;
+            stored.persist(temporary.path()).expect("persist state");
+
+            let error = scan_root(temporary.path())
+                .expect_err("uncleared terminal ownership must stop startup");
+
+            assert!(matches!(
+                error,
+                BlazeDaemonError::RecoveryRequired(message)
+                    if message.contains(&stored.id.to_string())
+                        && message.contains("does not prove completed cleanup")
+            ));
+        }
+    }
+
+    #[test]
+    fn scan_rejects_destroyed_state_with_an_active_operation() {
+        for operation in [
+            blaze_core::lifecycle::OperationKind::Create,
+            blaze_core::lifecycle::OperationKind::Destroy,
+        ] {
+            let temporary = tempfile::tempdir().expect("temporary directory");
+            let mut stored = instance();
+            stored.backend_ownership = BackendOwnership::Stopped;
+            stored
+                .transition(SandboxState::Destroyed)
+                .expect("terminal transition");
+            stored.begin_operation(operation);
+            stored.persist(temporary.path()).expect("persist state");
+
+            let error =
+                scan_root(temporary.path()).expect_err("terminal operation must stop startup");
+
+            assert!(matches!(
+                error,
+                BlazeDaemonError::RecoveryRequired(message)
+                    if message.contains(&stored.id.to_string())
+                        && message.contains(&format!("active operation Some({operation:?})"))
+            ));
+        }
+    }
+
+    #[test]
+    fn scan_rejects_legacy_destroyed_state_without_ownership_evidence() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut stored = instance();
+        stored
+            .transition(SandboxState::Destroyed)
+            .expect("terminal transition");
+        let mut record = serde_json::to_value(&stored).expect("serialize state");
+        let fields = record.as_object_mut().expect("state object");
+        fields.remove("backend_ownership");
+        fields.remove("operation");
+        let owner = temporary.path().join(stored.id.to_string());
+        std::fs::create_dir(&owner).expect("owner directory");
+        std::fs::write(
+            owner.join(STATE_FILE),
+            serde_json::to_vec_pretty(&record).expect("serialize legacy state"),
+        )
+        .expect("write legacy state");
+
+        let error = scan_root(temporary.path())
+            .expect_err("legacy terminal state must prove ownership was released");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&stored.id.to_string())
+                    && message.contains("backend ownership Unknown")
+                    && message.contains("does not prove completed cleanup")
+        ));
+    }
+
+    #[test]
+    fn scan_accepts_destroyed_state_that_proves_cleanup() {
+        for ownership in [BackendOwnership::NotStarted, BackendOwnership::Stopped] {
+            let temporary = tempfile::tempdir().expect("temporary directory");
+            let mut stored = instance();
+            stored.backend_ownership = ownership;
+            stored
+                .transition(SandboxState::Destroyed)
+                .expect("terminal transition");
+            stored.persist(temporary.path()).expect("persist state");
+
+            let records = scan_root(temporary.path()).expect("clean terminal state");
+
+            assert_eq!(records[&stored.id].state, SandboxState::Destroyed);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_rejects_an_owner_replaced_by_a_link_after_enumeration() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let external = tempfile::tempdir().expect("external directory");
+        let stored = instance();
+        stored.persist(temporary.path()).expect("local state");
+        stored.persist(external.path()).expect("external state");
+        let store = StateStore::new(temporary.path().to_path_buf());
+        let entry = find_scanned_entry(&store, stored.id);
+        let configured = temporary.path().join(stored.id.to_string());
+        std::fs::rename(&configured, temporary.path().join("moved-owner"))
+            .expect("move scanned owner");
+        symlink(external.path().join(stored.id.to_string()), &configured)
+            .expect("replace owner with link");
+
+        let error = store
+            .open_scanned_run_dir(&entry, stored.id)
+            .expect_err("replacement link must not be followed");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&stored.id.to_string())
+                    && message.contains("is not a directory")
+        ));
+    }
+
+    #[test]
+    fn scan_rejects_an_owner_replaced_after_enumeration() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let replacement = tempfile::tempdir().expect("replacement directory");
+        let stored = instance();
+        stored.persist(temporary.path()).expect("local state");
+        stored
+            .persist(replacement.path())
+            .expect("replacement state");
+        let store = StateStore::new(temporary.path().to_path_buf());
+        let entry = find_scanned_entry(&store, stored.id);
+        let configured = temporary.path().join(stored.id.to_string());
+        std::fs::rename(&configured, temporary.path().join("moved-owner"))
+            .expect("move scanned owner");
+        std::fs::rename(replacement.path().join(stored.id.to_string()), &configured)
+            .expect("replace owner directory");
+
+        let error = store
+            .open_scanned_run_dir(&entry, stored.id)
+            .expect_err("replacement directory must be rejected");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message)
+                if message.contains(&stored.id.to_string())
+                    && message.contains("observed during the state scan")
+        ));
+    }
+
+    #[test]
+    fn owner_identity_check_rejects_replacement_between_inspect_and_open() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let replacement = tempfile::tempdir().expect("replacement directory");
+        let stored = instance();
+        stored.persist(temporary.path()).expect("local state");
+        stored
+            .persist(replacement.path())
+            .expect("replacement state");
+        let store = StateStore::new(temporary.path().to_path_buf());
+        let name = stored.id.to_string();
+        let inspected = statat(&store.inner.root, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
+            .expect("inspect owner directory");
+        let configured = temporary.path().join(&name);
+        std::fs::rename(&configured, temporary.path().join("moved-owner"))
+            .expect("move inspected owner");
+        std::fs::rename(replacement.path().join(&name), &configured)
+            .expect("replace inspected owner");
+        let changed = format!("owned state path {} changed while it was opened", stored.id);
+
+        let error = open_inspected_object(
+            &store.inner.root,
+            &name,
+            &inspected,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            is_directory,
+            &changed,
+        )
+        .expect_err("replacement directory must fail identity validation");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message) if message == changed
+        ));
+    }
+
+    #[test]
+    fn state_record_identity_check_rejects_replacement_between_inspect_and_open() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let stored = instance();
+        stored.persist(temporary.path()).expect("stored state");
+        let store = StateStore::new(temporary.path().to_path_buf());
+        let owner = store
+            .open_run_dir_object(stored.id)
+            .expect("open owner directory");
+        let inspected = statat(
+            &owner.inner.directory,
+            STATE_FILE,
+            AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .expect("inspect state record");
+        let configured = temporary.path().join(stored.id.to_string());
+        std::fs::rename(
+            configured.join(STATE_FILE),
+            configured.join("state.original.json"),
+        )
+        .expect("move inspected state record");
+        let mut replacement = stored.clone();
+        replacement.policy_name = "replacement".into();
+        std::fs::write(
+            configured.join(STATE_FILE),
+            serde_json::to_vec_pretty(&replacement).expect("serialize replacement state"),
+        )
+        .expect("replace inspected state record");
+        let changed = format!(
+            "owned state record for {} changed while it was opened",
+            stored.id
+        );
+
+        let error = open_inspected_object(
+            &owner.inner.directory,
+            STATE_FILE,
+            &inspected,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            is_direct_state_record,
+            &changed,
+        )
+        .expect_err("replacement record must fail identity validation");
+
+        assert!(matches!(
+            error,
+            BlazeDaemonError::RecoveryRequired(message) if message == changed
+        ));
+    }
+
+    #[test]
+    fn record_lookup_stays_bound_to_the_opened_owner_directory() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let replacement = tempfile::tempdir().expect("replacement directory");
+        let stored = instance();
+        stored.persist(temporary.path()).expect("original state");
+        let mut replacement_record = stored.clone();
+        replacement_record.policy_name = "replacement".into();
+        replacement_record
+            .persist(replacement.path())
+            .expect("replacement state");
+        let store = StateStore::new(temporary.path().to_path_buf());
+        let entry = find_scanned_entry(&store, stored.id);
+        let owner = store
+            .open_scanned_run_dir(&entry, stored.id)
+            .expect("open scanned owner");
+        let configured = temporary.path().join(stored.id.to_string());
+        std::fs::rename(&configured, temporary.path().join("moved-owner"))
+            .expect("move opened owner");
+        std::fs::rename(replacement.path().join(stored.id.to_string()), &configured)
+            .expect("replace owner path");
+
+        let loaded = StateStore::load_from(&owner).expect("load opened owner record");
+
+        assert_eq!(loaded.policy_name, stored.policy_name);
     }
 
     #[test]
@@ -1026,6 +1952,7 @@ mod tests {
         std::fs::create_dir(&root).expect("state directory");
         let writer = StateStore::new(root.clone());
         let mut instance = instance();
+        instance.backend_ownership = BackendOwnership::Stopped;
         instance
             .transition(blaze_core::lifecycle::SandboxState::Destroyed)
             .expect("destroy transition");

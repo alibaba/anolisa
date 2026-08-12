@@ -172,9 +172,32 @@ resources. A successful create finishes in `Running`; a successful destroy
 finishes in `Destroyed`. If compensation cannot release every owned resource,
 the sandbox remains visible as `RecoveryRequired` so destroy can be retried.
 
-At startup, the daemon reconciles each non-terminal sandbox independently.
-Failure to clean up one sandbox does not prevent the remaining records from
-being processed or the API from starting.
+At startup, Blaze first validates the complete lifecycle inventory. Only after
+that inventory is complete and consistent does the daemon reconcile each
+non-terminal sandbox independently. A cleanup failure during this later
+reconciliation leaves that sandbox `RecoveryRequired`, but does not prevent the
+remaining accepted records from being processed or the API from starting.
+
+Inventory validation is fail-closed. Startup stops before the API listeners
+open if a UUID-owned entry is not a canonically named directory; if its
+`state.json` is missing, unreadable, a
+symbolic link or directory, or has another hard link; if the stored sandbox ID
+differs from the directory name; or if a `Destroyed` record still reports an
+active operation or backend ownership that may still be live. Blaze does not
+repair or delete these records automatically. Before accepting the inventory,
+Blaze completes a second enumeration of the canonical UUID names and compares
+the complete set with the initial scan. It then checks that every retained UUID
+directory and `state.json` still refer to the objects it read. Startup stops if
+the second enumeration finds an added or removed entry, or if the following
+object checks find that either retained object disappeared or was replaced.
+This consistency contract applies to Blaze state writers: the production store
+holds the state-root advisory lock, and the scan holds the in-process ownership
+map lock until publication. Direct file changes by a process that bypasses the
+state-root lock are unsupported.
+
+See the
+[lifecycle state consistency design](docs/design/lifecycle-state-consistency.md)
+for the writer-coordination, inventory-publication, and failure boundaries.
 
 The operation journal records the operation and start time, not completion of
 each resource step. An interrupted create is cleaned up rather than resumed,

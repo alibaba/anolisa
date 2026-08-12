@@ -163,8 +163,25 @@ sandbox create 自动选择它；后续 create 支持会从同一个 catalog 解
 `Running`，销毁成功后状态为 `Destroyed`。如果失败补偿不能释放全部已有
 资源，sandbox 会保留为可查询的 `RecoveryRequired`，后续可以再次执行销毁。
 
-daemon 启动时会逐个处理未结束的 sandbox。单个 sandbox 清理失败不会阻止
-其他记录继续处理，也不会阻止 API 启动。
+daemon 启动时，Blaze 会先校验完整的生命周期清单。只有清单完整且一致时，
+daemon 才会逐个处理未结束的 sandbox。后续逐项恢复期间，如果单个 sandbox
+清理失败，该 sandbox 会保留为 `RecoveryRequired`，但不会阻止其他已通过校验的
+记录继续处理，也不会阻止 API 启动。
+
+清单校验采用 fail-closed 策略。如果 UUID 所属条目不是规范命名的目录，
+`state.json` 缺失、不可读、是符号链接或目录、存在其他
+硬链接，记录内的 sandbox ID 与目录名不同，或者 `Destroyed` 记录仍保留活动操作
+或可能仍存活的后端所有权，daemon 都会在打开 API 监听器前停止。Blaze 不会自动
+修复或删除这些记录。接受这份清单前，Blaze 还会确认每个 UUID 名称和其中的
+`state.json` 仍然指向刚才读取的对象；具体流程是先完成第二次规范 UUID 名称
+枚举并比较完整集合，再逐一复验保留的目录和记录。如果第二次枚举发现条目新增
+或删除，或者后续对象检查发现保留对象消失或被替换，daemon 会停止启动。这一
+一致性合同面向 Blaze 状态写入者：生产 store 持有 state root advisory lock，扫描
+也会持有进程内 ownership map 锁直至发布。绕过 state root 锁直接修改文件的外部
+进程不在支持范围内。
+
+写入协调、清单发布和失败边界参见
+[生命周期状态一致性设计](docs/design/lifecycle-state-consistency_zh.md)。
 
 操作记录只保存操作类型和开始时间，不记录每个资源步骤是否已经完成。中断的
 创建会被清理而不是从原位置继续，重启后也不会接管先前的后端进程。恢复失败

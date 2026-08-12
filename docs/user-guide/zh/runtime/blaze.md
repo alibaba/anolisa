@@ -50,6 +50,30 @@ Blaze 会保留 ownership，不会将 slot 重新交给分配器，以便后续 
 daemon 重启后，后续 destroy 请求可以根据已有记录重新识别 network slot。
 Blaze 不会在后台扫描或自动重试孤立的网络资源。
 
+开始任何启动恢复之前，Blaze 会完整读取已持久化的 sandbox 生命周期清单。每个
+UUID 所属目录及其中的 `state.json` 都必须使用规范形式并且可以直接读取。接受
+清单前，Blaze 会先完成第二次规范 UUID 名称枚举，并将完整集合与首次扫描结果
+比较；随后再逐一确认保留的 owner 目录和 `state.json` 仍是先前读取的对象。如果
+第二次枚举发现 UUID 缺失或新增、后续对象检查发现替换，或者 `Destroyed` 记录
+未能证明清理完成，daemon 会在打开 API 监听器前停止，并保留原条目供运维人员
+修复。
+
+Blaze 只支持通过 `StateStore` 写入状态。生产 daemon 会一直持有 state root 的
+排他 advisory lock，启动扫描也会持有进程内 ownership map 锁直至发布，因此遵守
+这些锁的 Blaze 写入操作会被串行化。未参与 state root 锁、直接修改状态文件的
+外部进程不属于这一致性合同的支持范围。
+
+### 识别清单校验失败
+
+Blaze 会在绑定 Unix listener 或可选 TCP listener 之前完成清单校验。如果校验
+失败，daemon 会以非零状态退出，所有 API endpoint 都不可用；因此请求
+`/v1/health` 时会连接失败，而不是收到表示降级状态的健康检查响应。
+
+使用随软件包提供的 systemd service 时，可通过 `systemctl status blazed` 和
+`journalctl -u blazed` 查看校验错误；与记录有关的错误会包含受影响的 sandbox
+ID。Blaze 会保留被拒绝的记录。修复或恢复该记录后，重新启动 service，并确认
+`/v1/health` 可以响应。
+
 ## 主机集成边界
 
 Blaze 负责配置 sandbox 本地的网络路径。主机以外的路由和 DNS 仍由主机运维方

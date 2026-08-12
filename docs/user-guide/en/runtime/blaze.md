@@ -56,6 +56,38 @@ After a daemon restart, a later destroy request can reconstruct a recorded
 network slot. Blaze does not run a background scan or retry controller for
 orphaned network resources.
 
+Before any startup reconciliation begins, Blaze loads the complete persisted
+sandbox lifecycle inventory. Every UUID owner directory and its `state.json`
+must be canonical and directly readable. Before accepting the inventory, Blaze
+completes a second enumeration of the canonical UUID names and compares the
+complete set with the initial scan. It then revalidates every retained owner
+directory and `state.json` against the objects read earlier. Startup stops
+before the API listeners open if the second enumeration finds a missing or new
+UUID, if the following object checks find a replacement, or if a `Destroyed`
+record does not prove cleanup completed. Blaze does not repair or delete the
+invalid owner directory or its `state.json`; it remains available for operator
+repair.
+
+Blaze state writes are supported only through `StateStore`. A production daemon
+keeps an exclusive advisory lock on the state root, and the startup scan holds
+the in-process ownership-map lock until publication. These locks serialize
+cooperating Blaze writers. A process that modifies the state files directly
+without participating in the state-root lock is outside this consistency
+contract.
+
+### Detecting an inventory validation failure
+
+Inventory validation happens before Blaze binds either its Unix or optional TCP
+listener. If validation fails, the daemon exits with a non-zero status and no
+API endpoint is available; `/v1/health` therefore fails to connect instead of
+returning a degraded health response.
+
+For the packaged systemd service, inspect `systemctl status blazed` and
+`journalctl -u blazed` for the validation error; record-specific errors include
+the affected sandbox ID. Blaze leaves the rejected record in place. Repair or
+restore that record, then restart the service and confirm that `/v1/health`
+responds.
+
 ## Host Integration Boundary
 
 Blaze configures the sandbox-local network path. Routing beyond the host and DNS
