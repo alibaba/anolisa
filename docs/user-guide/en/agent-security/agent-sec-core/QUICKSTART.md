@@ -1,5 +1,7 @@
 # AgentSecCore
 
+[中文版](../../../zh/agent-security/agent-sec-core/QUICKSTART.md)
+
 AgentSecCore is an all-local security kernel for AI Agents. It runs entirely on the local machine with zero Token consumption, providing defense-in-depth: prompt injection detection, code scanning, skill integrity verification, PII detection, system hardening, and sandbox isolation.
 
 ## Overview
@@ -124,15 +126,21 @@ Model source: L2 uses `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`, served b
 
 #### Host hook policy
 
-Set `PROMPT_SCANNER_HOOK_ENABLED=false` to skip prompt scanner hooks entirely. When enabled, the
-following variables override capability configuration:
+Set `PROMPT_SCANNER_HOOK_ENABLED=false` to skip prompt scanner hooks entirely.
 
-| Environment variable | Default | Behavior |
-|----------------------|---------|----------|
-| `PROMPT_SCANNER_HOOK_ENABLED` | `true` | Set to `false` to short-circuit the hook before input is read |
-| `PROMPT_SCANNER_MODE` | `observe` | `observe` audits silently; `warn` warns; `ask`/`block` enforce or fall back to `warn`; `deny` maps to `block` |
-| `PROMPT_SCANNER_SCAN_MODE` | `standard` | Scan strength: `fast` / `standard` / `strict` |
-| `PROMPT_SCANNER_TIMEOUT` | `10` | Scanner timeout in seconds |
+| Environment variable | Default | Hosts that read it | Behavior |
+|----------------------|---------|--------------------|----------|
+| `PROMPT_SCANNER_HOOK_ENABLED` | `true` | All six | Set to `false` to short-circuit the hook before input is read |
+| `PROMPT_SCANNER_MODE` | `observe` | Qoder, Codex, Qwen Code | `observe` audits silently; `warn` warns; `ask`/`block` enforce or fall back to `warn`; `deny` maps to `block` |
+| `PROMPT_SCANNER_SCAN_MODE` | `standard` | All six | Scan strength: `fast` / `standard` / `strict` |
+| `PROMPT_SCANNER_TIMEOUT` | `10` | Qoder, Codex, Qwen Code | Scanner timeout in seconds |
+
+cosh, Hermes, and OpenClaw do not read `PROMPT_SCANNER_MODE` or
+`PROMPT_SCANNER_TIMEOUT`. On those hosts the prompt policy comes from native
+configuration instead — for OpenClaw that is `promptScanBlock`, while the Hermes
+prompt-scan capability is non-blocking by design and exposes no block switch. See
+[Agent Hook Environment Variables](#agent-hook-environment-variables) for the
+full cross-host matrix.
 
 See the [Prompt Scanner User Guide](prompt-scanner.md) for full CLI options, verdict semantics, and
 Security Event details.
@@ -173,6 +181,9 @@ OS-level skill integrity tracking with Ed25519 signatures and append-only versio
 # Initialize keys and baseline scan
 agent-sec-cli skill-ledger init
 
+# Read-only content analysis, without creating or updating ledger state
+agent-sec-cli skill-ledger analyze /path/to/skill --format json
+
 # Check integrity (no modification)
 agent-sec-cli skill-ledger check /path/to/skill
 agent-sec-cli skill-ledger check --all
@@ -205,6 +216,8 @@ agent-sec-cli skill-ledger show /path/to/skill
 agent-sec-cli skill-ledger export /path/to/skill --output /tmp/export/
 ```
 
+Signing keys live under `~/.local/share/agent-sec/skill-ledger/`.
+
 ### PII Checker
 
 Detects personal information and credentials in text input.
@@ -226,26 +239,30 @@ agent-sec-cli scan-pii --text "card 4111111111111111" --redact-output
 agent-sec-cli scan-pii --text "some text" --include-low-confidence
 ```
 
-#### Qwen Code integration
+#### Host hook policy
+
+All six hosts scan with the PII checker. It runs in observe-only, fail-open mode by
+default; raw scan content is passed to `scan-pii` only through stdin, and notices
+use only redacted evidence.
+
+| Environment variable | Default | Hosts that read it | Behavior |
+|----------------------|---------|--------------------|----------|
+| `PII_CHECKER_HOOK_ENABLED` | `true` | All six | Set to `false` to skip the PII hook before input is read |
+| `PII_CHECKER_MODE` | `observe` | All six | `observe` audits silently; `warn` warns; `ask`/`block` use host-specific enforcement or fallback; `debug` aliases `observe`, and `deny` aliases `block` |
+| `PII_CHECKER_TIMEOUT` | `5` | Qoder, Codex, Qwen Code | Scanner timeout in seconds; Qwen Code caps it at 8 seconds |
+| `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | Qoder, Qwen Code | Passes `--include-low-confidence` when enabled |
+| `PII_CHECKER_ENABLED` | - | Qwen Code only | Legacy enabled variable, used when `PII_CHECKER_HOOK_ENABLED` is absent |
+
+#### Qwen Code enforcement boundary
 
 The Qwen Code extension scans user prompts, tool inputs, successful and failed tool
-outputs, and final model output. It is enabled in observe-only, fail-open mode by
-default; raw scan content is passed to `scan-pii` only through stdin, and notices use
-only redacted evidence.
+outputs, and final model output.
 
 ```bash
 # Enable the extension, then start Qwen Code with blocking enabled
 anolisa adapter enable sec-core qwencode
 PII_CHECKER_MODE=block qwen
 ```
-
-| Environment variable | Default | Behavior |
-|----------------------|---------|----------|
-| `PII_CHECKER_HOOK_ENABLED` | `true` | Set to `false` to skip the PII hook before input is read |
-| `PII_CHECKER_MODE` | `observe` | `observe` audits silently; `warn` warns; `ask`/`block` use host-specific enforcement or fallback; `debug` aliases `observe`, and `deny` aliases `block` |
-| `PII_CHECKER_ENABLED` | - | Legacy Qwen-only enabled variable, used when the new switch is absent |
-| `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | Passes `--include-low-confidence` when enabled |
-| `PII_CHECKER_TIMEOUT` | `5` | Scanner timeout in seconds, capped at 8 seconds |
 
 User prompts and tool inputs can be stopped before execution. For a successful tool call,
 `PostToolUse` runs after side effects have occurred, but Qwen Code 0.19.9 consumes
@@ -281,11 +298,11 @@ agent-sec-cli harden --downstream-help
 
 Interactive event review tool for auditing Agent behavior.
 
-The OpenClaw, Hermes, cosh, Qwen Code, Qoder, and Codex integrations enable
-their observability hooks by default. To disable hook recording, set
-`OBSERVABILITY_HOOK_ENABLED=false` before starting the host and restart the host
-after changing it. The variable accepts only `true` / `false` (ignoring case and
-surrounding whitespace); an unset or invalid value keeps recording enabled.
+All six integrations enable their observability hooks by default. To disable hook
+recording, set `OBSERVABILITY_HOOK_ENABLED=false` before starting the host and
+restart the host after changing it. The variable accepts only `true` / `false`
+(ignoring case and surrounding whitespace); an unset or invalid value keeps
+recording enabled.
 
 `OBSERVABILITY_TIMEOUT` sets the timeout in seconds for each local PII
 redaction and observability record CLI call. It defaults to `5`; an unset,
@@ -378,6 +395,53 @@ View source and limits:
 - Not included: OpenClaw, Hermes, or other Agent configuration files; Agent home directories; live hook loading or registration state.
 - Known drift: running the command from a different shell/container/service or with different Agent config can produce output that differs from real Agent runtime behavior.
 
+## Agent Hook Environment Variables
+
+Every host reads `<CAPABILITY>_HOOK_ENABLED` (`true` / `false`, case-insensitive,
+surrounding whitespace ignored). An unset or invalid value keeps the hook
+enabled. For capabilities that use the shared hook policy parser,
+`<CAPABILITY>_MODE` selects how findings are surfaced; `debug` is an alias for
+`observe` and `deny` is an alias for `block`. Prompt Scanner is narrower:
+`PROMPT_SCANNER_MODE` accepts only `observe` and `deny`. Hosts read these
+variables when they load the plugin, so restart the host after changing them.
+
+**Not every variable is honored by every host.** This table reflects what the
+adapter code actually reads (✓ = read by that host, ✗ = not read):
+
+| Variable | Default | cosh | Qoder | Codex | Qwen Code | Hermes | OpenClaw |
+|----------|---------|------|-------|-------|-----------|--------|----------|
+| `CODE_SCANNER_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `CODE_SCANNER_MODE` | `observe` (cosh: `ask`) | ✓ (only `ask`) | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `CODE_SCANNER_TIMEOUT` | `10` | ✗ | ✓ | ✓ | ✓ | ✗ | ✗ |
+| `PROMPT_SCANNER_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `PROMPT_SCANNER_MODE` | `observe` | ✗ | ✓ | ✓ | ✓ | ✗ | ✗ |
+| `PROMPT_SCANNER_SCAN_MODE` | `standard` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `PROMPT_SCANNER_TIMEOUT` | `10` | ✗ | ✓ | ✓ | ✓ | ✗ | ✗ |
+| `PII_CHECKER_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `PII_CHECKER_MODE` | `observe` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `PII_CHECKER_TIMEOUT` | `5` | ✗ | ✓ | ✓ | ✓ | ✗ | ✗ |
+| `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | ✗ | ✓ | ✗ | ✓ | ✗ | ✗ |
+| `PII_CHECKER_ENABLED` (legacy) | — | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
+| `SKILL_LEDGER_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `SKILL_LEDGER_MODE` | `ask` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `SKILL_LEDGER_TIMEOUT` | `5` | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `OBSERVABILITY_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+Where a variable is not read by a host, that host's native configuration governs
+the behavior. For example OpenClaw takes its prompt policy from
+`promptScanBlock` and its code-scan policy from `codeScanRequireApproval`, while
+Hermes uses `enable_block` for `code-scan` and `policy` for `pii-scan-user-input`.
+The Hermes `prompt-scan-user-input` capability has no block switch at all.
+
+For Hermes and OpenClaw, the capability `enabled` setting remains an independent
+gate. Either switch can disable a hook; setting `<CAPABILITY>_HOOK_ENABLED=true`
+does not re-enable a capability that plugin configuration has disabled.
+`PII_CHECKER_ENABLED` is a Qwen Code legacy fallback only: Qwen Code reads it
+only when `PII_CHECKER_HOOK_ENABLED` is absent, and all other hosts ignore it.
+
+Per-host Code Scanner mode semantics and fallback behavior:
+[Code Scanner Hook Configuration](code-scanner.md).
+
 ## Agent Framework Integration
 
 For an ANOLISA-managed raw package or an adopted RPM, installation places the
@@ -455,17 +519,28 @@ enable_block = false    # false=observe, true=block
 [capabilities.pii-scan-user-input]
 enabled = true
 timeout = 10
+policy = "observe"      # observe (default) | warn | ask | block
+include_low_confidence = false
+warning_ttl_seconds = 300
 
 [capabilities.prompt-scan-user-input]
 enabled = true
-timeout = 10
-enable_block = false    # false=observe, true=block
+timeout = 15
+warning_ttl_seconds = 300
+
+[capabilities.observability]
+enabled = true
+timeout = 5
 
 [capabilities.skill-ledger]
 enabled = true
 timeout = 5
 policy = "ask"          # observe | warn | ask (default) | block
 ```
+
+`timeout` is a required key for every Hermes capability. `prompt-scan-user-input`
+is non-blocking by design: it warns through `transform_llm_output` and has no
+`enable_block` or `policy` field.
 
 ### Qwen Code
 
@@ -522,6 +597,62 @@ symlinks whose targets leave the corresponding `.qwen/skills` root. Missing CLI
 or keys, initialization failure, inaccessible or ambiguous paths or settings,
 timeouts, and invalid output are diagnosed and fail open. There is no startup
 preflight, background scan, cache, or automatic configuration repair.
+
+### Codex
+
+Enable the adapter with ANOLISA:
+
+```bash
+anolisa adapter enable sec-core codex
+```
+
+The adapter registers `agent-sec-core` as a Codex plugin through the bundled
+`agent-sec` marketplace, so `codex` and `agent-sec-cli` must both be on `PATH`
+before enabling it. The registered hooks are:
+
+| Codex hook | Checks |
+|------------|--------|
+| `UserPromptSubmit` | prompt scanner, PII checker, Skill Ledger, observability |
+| `PreToolUse` | code scanner (`Bash` matcher), PII checker, observability |
+| `PostToolUse` | PII checker, observability |
+| `Stop` | observability |
+
+Codex supports `observe` and `block` for `CODE_SCANNER_MODE`; `ask` is treated as
+unset. Set the policy in the environment that starts Codex:
+
+```bash
+CODE_SCANNER_MODE=block PROMPT_SCANNER_MODE=block PII_CHECKER_MODE=block codex
+```
+
+### Qoder
+
+Enable the adapter with ANOLISA:
+
+```bash
+anolisa adapter enable sec-core qoder
+```
+
+The adapter installs a Qoder CLI plugin via `qodercli plugins install`. Restart
+Qoder CLI or run `/plugins reload` afterwards. The registered hooks are:
+
+| Qoder hook | Checks |
+|------------|--------|
+| `UserPromptSubmit` | observability, PII checker, prompt scanner |
+| `PreToolUse` | observability, Skill Ledger (`Skill` matcher), code scanner (`Bash` matcher), PII checker |
+| `PostToolUse` | observability, PII checker |
+| `PostToolUseFailure` | observability |
+| `Stop` / `StopFailure` | observability |
+
+The Skill Ledger hook resolves user Skills from `~/.qoder/skills/` before project
+Skills from `<cwd>/.qoder/skills/`, runs a read-only `skill-ledger check`, and
+applies `SKILL_LEDGER_MODE` (default `ask`). Each check carries Qoder trace
+identifiers into the security audit log.
+
+Qoder supports `observe`, `ask`, and `block` for `CODE_SCANNER_MODE`:
+
+```bash
+CODE_SCANNER_MODE=ask SKILL_LEDGER_MODE=block qoder
+```
 
 ### Copilot Shell (cosh)
 

@@ -1,5 +1,7 @@
 # AgentSecCore
 
+[English](../../../en/agent-security/agent-sec-core/QUICKSTART.md)
+
 AgentSecCore 是面向 AI Agent 的全本地安全内核，零 Token 消耗。提供纵深防御体系：提示词注入检测、代码扫描、技能完整性验证、敏感信息检测、系统加固和沙箱隔离。
 
 ## 概述
@@ -122,15 +124,19 @@ agent-sec-cli scan-prompt warmup
 
 #### 宿主 Hook Policy
 
-设置 `PROMPT_SCANNER_HOOK_ENABLED=false` 可完全跳过 prompt scanner hook。启用时，以下环境变量覆盖
-capability 配置：
+设置 `PROMPT_SCANNER_HOOK_ENABLED=false` 可完全跳过 prompt scanner hook。
 
-| 环境变量 | 默认值 | 行为 |
-|----------|--------|------|
-| `PROMPT_SCANNER_HOOK_ENABLED` | `true` | 设为 `false` 时在读取输入前跳过 hook |
-| `PROMPT_SCANNER_MODE` | `observe` | `observe` 静默审计；`warn` 告警；`ask`/`block` 执行或 fallback 为 `warn`；`deny` 等价于 `block` |
-| `PROMPT_SCANNER_SCAN_MODE` | `standard` | 扫描强度：`fast` / `standard` / `strict` |
-| `PROMPT_SCANNER_TIMEOUT` | `10` | Scanner 超时秒数 |
+| 环境变量 | 默认值 | 读取该变量的宿主 | 行为 |
+|----------|--------|------------------|------|
+| `PROMPT_SCANNER_HOOK_ENABLED` | `true` | 全部六个 | 设为 `false` 时在读取输入前跳过 hook |
+| `PROMPT_SCANNER_MODE` | `observe` | Qoder、Codex、Qwen Code | `observe` 静默审计；`warn` 告警；`ask`/`block` 执行或 fallback 为 `warn`；`deny` 等价于 `block` |
+| `PROMPT_SCANNER_SCAN_MODE` | `standard` | 全部六个 | 扫描强度：`fast` / `standard` / `strict` |
+| `PROMPT_SCANNER_TIMEOUT` | `10` | Qoder、Codex、Qwen Code | Scanner 超时秒数 |
+
+cosh、Hermes 和 OpenClaw 不读取 `PROMPT_SCANNER_MODE` 与 `PROMPT_SCANNER_TIMEOUT`。
+在这些宿主上，prompt 策略来自原生配置 —— OpenClaw 使用 `promptScanBlock`；Hermes 的
+prompt-scan capability 本身就是非阻断设计，没有阻断开关。完整跨宿主矩阵见
+[Agent Hook 环境变量](#agent-hook-环境变量)。
 
 完整 CLI 选项、verdict 语义和 Security Event 说明参见 [Prompt Scanner 用户使用指南](prompt-scanner.md)。
 
@@ -170,6 +176,9 @@ OS 级技能完整性追踪，Ed25519 签名 + 只追加版本链。
 # 初始化密钥并基线扫描
 agent-sec-cli skill-ledger init
 
+# 只读分析当前内容，不创建或更新账本状态
+agent-sec-cli skill-ledger analyze /path/to/skill --format json
+
 # 检查完整性（不修改）
 agent-sec-cli skill-ledger check /path/to/skill
 agent-sec-cli skill-ledger check --all
@@ -202,6 +211,8 @@ agent-sec-cli skill-ledger show /path/to/skill
 agent-sec-cli skill-ledger export /path/to/skill --output /tmp/export/
 ```
 
+签名密钥位于 `~/.local/share/agent-sec/skill-ledger/`。
+
 ### PII Checker（敏感信息检测）
 
 检测文本输入中的个人信息和凭据。
@@ -223,25 +234,28 @@ agent-sec-cli scan-pii --text "card 4111111111111111" --redact-output
 agent-sec-cli scan-pii --text "some text" --include-low-confidence
 ```
 
-#### Qwen Code 集成
+#### 宿主 Hook Policy
+
+六个宿主都会执行 PII 检测。默认启用 observe-only 和 fail-open；原始扫描内容只通过
+stdin 传给 `scan-pii`，告警只使用脱敏 evidence。
+
+| 环境变量 | 默认值 | 读取该变量的宿主 | 行为 |
+|----------|--------|------------------|------|
+| `PII_CHECKER_HOOK_ENABLED` | `true` | 全部六个 | 设为 `false` 时在读取输入前跳过 PII hook |
+| `PII_CHECKER_MODE` | `observe` | 全部六个 | `observe` 静默审计；`warn` 告警；`ask`/`block` 按宿主能力执行或 fallback；`debug` 等价于 `observe`，`deny` 等价于 `block` |
+| `PII_CHECKER_TIMEOUT` | `5` | Qoder、Codex、Qwen Code | scanner 超时秒数；Qwen Code 上限为 8 秒 |
+| `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | Qoder、Qwen Code | 开启后传递 `--include-low-confidence` |
+| `PII_CHECKER_ENABLED` | - | 仅 Qwen Code | 旧 enabled 变量；`PII_CHECKER_HOOK_ENABLED` 缺失时生效 |
+
+#### Qwen Code 阻断边界
 
 Qwen Code extension 会扫描用户输入、工具输入、成功及失败的工具输出和最终模型输出。
-默认启用 observe-only 和 fail-open；原始扫描内容只通过 stdin 传给 `scan-pii`，告警只使用
-脱敏 evidence。
 
 ```bash
 # 启用扩展，再以阻断模式启动 Qwen Code
 anolisa adapter enable sec-core qwencode
 PII_CHECKER_MODE=block qwen
 ```
-
-| 环境变量 | 默认值 | 行为 |
-|----------|--------|------|
-| `PII_CHECKER_HOOK_ENABLED` | `true` | 设为 `false` 时在读取输入前跳过 PII hook |
-| `PII_CHECKER_MODE` | `observe` | `observe` 静默审计；`warn` 告警；`ask`/`block` 按宿主能力执行或 fallback；`debug` 等价于 `observe`，`deny` 等价于 `block` |
-| `PII_CHECKER_ENABLED` | - | 仅兼容 Qwen 旧 enabled 变量；新开关缺失时生效 |
-| `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | 开启后传递 `--include-low-confidence` |
-| `PII_CHECKER_TIMEOUT` | `5` | scanner 超时秒数，最大 8 秒 |
 
 用户输入和工具输入可在执行前阻断。工具成功执行后才触发 `PostToolUse`，此时副作用已经
 发生；Qwen Code 0.19.9 会消费 `continue:false`，在下游正常处理前把成功结果转为
@@ -275,10 +289,9 @@ agent-sec-cli harden --downstream-help
 
 交互式事件审阅工具，用于审计 Agent 行为。
 
-OpenClaw、Hermes、cosh、Qwen Code、Qoder 和 Codex 集成默认启用 Observability hook。
-若需停止 hook 记录，请在启动宿主前设置 `OBSERVABILITY_HOOK_ENABLED=false`；修改后需重启
-宿主进程。该变量仅接受 `true` / `false`（忽略大小写和首尾空白）；未设置或值无效时保持
-默认开启。
+六个集成默认启用 Observability hook。若需停止 hook 记录，请在启动宿主前设置
+`OBSERVABILITY_HOOK_ENABLED=false`；修改后需重启宿主进程。该变量仅接受
+`true` / `false`（忽略大小写和首尾空白）；未设置或值无效时保持默认开启。
 
 `OBSERVABILITY_TIMEOUT` 控制每次本地 PII 脱敏和 Observability 数据写入 CLI 调用的超时秒数。
 默认值为 `5`；未设置、空值、非法值或非正数同样使用 `5`。所有集成都会将大于 `5` 的值
@@ -369,6 +382,48 @@ agent-sec-cli capabilities --agent qwen --capability pii-check --output json
 - 不包含：OpenClaw、Hermes 或其他 Agent 配置文件；Agent home 目录；实时 hook 加载或注册状态。
 - 已知偏移：从不同 shell/container/service 运行命令，或真实 Agent 使用不同配置时，输出可能与真实运行行为不同。
 
+## Agent Hook 环境变量
+
+每个宿主都会读取 `<CAPABILITY>_HOOK_ENABLED`（`true` / `false`，忽略大小写和首尾
+空白）。未设置或值无效时保持 hook 开启。对于使用 shared hook policy parser 的
+capability，`<CAPABILITY>_MODE` 决定 finding 的处置方式；`debug` 是 `observe`
+的别名，`deny` 是 `block` 的别名。Prompt Scanner 更窄：`PROMPT_SCANNER_MODE`
+只接受 `observe` 和 `deny`。宿主在加载插件时读取这些变量，修改后需重启宿主进程。
+
+**并非每个变量都被所有宿主消费。** 下表反映 adapter 代码实际读取的情况
+（✓ = 该宿主会读取，✗ = 不读取）：
+
+| 变量 | 默认值 | cosh | Qoder | Codex | Qwen Code | Hermes | OpenClaw |
+|------|--------|------|-------|-------|-----------|--------|----------|
+| `CODE_SCANNER_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `CODE_SCANNER_MODE` | `observe`（cosh 为 `ask`） | ✓（仅 `ask`） | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `CODE_SCANNER_TIMEOUT` | `10` | ✗ | ✓ | ✓ | ✓ | ✗ | ✗ |
+| `PROMPT_SCANNER_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `PROMPT_SCANNER_MODE` | `observe` | ✗ | ✓ | ✓ | ✓ | ✗ | ✗ |
+| `PROMPT_SCANNER_SCAN_MODE` | `standard` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `PROMPT_SCANNER_TIMEOUT` | `10` | ✗ | ✓ | ✓ | ✓ | ✗ | ✗ |
+| `PII_CHECKER_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `PII_CHECKER_MODE` | `observe` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `PII_CHECKER_TIMEOUT` | `5` | ✗ | ✓ | ✓ | ✓ | ✗ | ✗ |
+| `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | ✗ | ✓ | ✗ | ✓ | ✗ | ✗ |
+| `PII_CHECKER_ENABLED`（旧开关） | — | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
+| `SKILL_LEDGER_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `SKILL_LEDGER_MODE` | `ask` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `SKILL_LEDGER_TIMEOUT` | `5` | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ |
+| `OBSERVABILITY_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+若某宿主不读取某个变量，则由该宿主的原生配置决定行为。例如 OpenClaw 的 prompt
+策略来自 `promptScanBlock`、code-scan 策略来自 `codeScanRequireApproval`；Hermes 则
+对 `code-scan` 使用 `enable_block`、对 `pii-scan-user-input` 使用 `policy`。Hermes 的
+`prompt-scan-user-input` capability 根本没有阻断开关。
+
+对于 Hermes 和 OpenClaw，capability 的 `enabled` 配置仍是独立开关。任一开关关闭都会
+停用该 hook；把 `<CAPABILITY>_HOOK_ENABLED` 设为 `true`，不会重新启用已在插件配置中
+关闭的 capability。`PII_CHECKER_ENABLED` 只是 Qwen Code 旧开关 fallback：仅当
+`PII_CHECKER_HOOK_ENABLED` 缺失时读取，其它宿主完全忽略。
+
+各宿主 Code Scanner 的 mode 语义与 fallback 行为见
+[Code Scanner Hook 配置](code-scanner.md)。
 
 ## Agent 框架集成
 
@@ -447,17 +502,27 @@ enable_block = false    # false=观察模式, true=阻断
 [capabilities.pii-scan-user-input]
 enabled = true
 timeout = 10
+policy = "observe"      # observe（默认）| warn | ask | block
+include_low_confidence = false
+warning_ttl_seconds = 300
 
 [capabilities.prompt-scan-user-input]
 enabled = true
-timeout = 10
-enable_block = false    # false=观察模式, true=阻断
+timeout = 15
+warning_ttl_seconds = 300
+
+[capabilities.observability]
+enabled = true
+timeout = 5
 
 [capabilities.skill-ledger]
 enabled = true
 timeout = 5
 policy = "ask"          # observe | warn | ask（默认）| block
 ```
+
+`timeout` 是 Hermes 每个 capability 的必填项。`prompt-scan-user-input` 本身是非阻断
+设计：它通过 `transform_llm_output` 告警，没有 `enable_block` 或 `policy` 字段。
 
 ### Qwen Code
 
@@ -507,6 +572,61 @@ hook 遵循现有 Skill Ledger exposure message，包括已有的 `decide` 决�
 `.agents/skills`、bundled Skill，以及目标离开对应 `.qwen/skills` 根目录的符号链接。
 CLI 或密钥缺失、初始化失败、路径或 settings 不可访问或歧义、超时及输出异常都会
 记录诊断并 fail-open。本集成不提供启动预检、后台扫描、缓存或配置自动修复。
+
+### Codex
+
+通过 ANOLISA 启用 adapter。
+
+```bash
+anolisa adapter enable sec-core codex
+```
+
+adapter 会通过内置的 `agent-sec` marketplace 把 `agent-sec-core` 注册为 Codex 插件，
+因此启用前 `codex` 和 `agent-sec-cli` 都需在 `PATH` 中。已注册的 hook：
+
+| Codex hook | 检查项 |
+|------------|--------|
+| `UserPromptSubmit` | prompt scanner、PII checker、Skill Ledger、observability |
+| `PreToolUse` | code scanner（`Bash` matcher）、PII checker、observability |
+| `PostToolUse` | PII checker、observability |
+| `Stop` | observability |
+
+Codex 的 `CODE_SCANNER_MODE` 支持 `observe` 和 `block`，`ask` 被视为未设置。在启动
+Codex 的环境中设置策略：
+
+```bash
+CODE_SCANNER_MODE=block PROMPT_SCANNER_MODE=block PII_CHECKER_MODE=block codex
+```
+
+### Qoder
+
+通过 ANOLISA 启用 adapter。
+
+```bash
+anolisa adapter enable sec-core qoder
+```
+
+adapter 会通过 `qodercli plugins install` 安装 Qoder CLI 插件。完成后请重启 Qoder CLI
+或执行 `/plugins reload`。已注册的 hook：
+
+| Qoder hook | 检查项 |
+|------------|--------|
+| `UserPromptSubmit` | observability、PII checker、prompt scanner |
+| `PreToolUse` | observability、Skill Ledger（`Skill` matcher）、code scanner（`Bash` matcher）、PII checker |
+| `PostToolUse` | observability、PII checker |
+| `PostToolUseFailure` | observability |
+| `Stop` / `StopFailure` | observability |
+
+Skill Ledger hook 先从 `~/.qoder/skills/` 解析用户级 Skill，再从
+`<cwd>/.qoder/skills/` 解析项目级 Skill，随后执行只读的 `skill-ledger check`，并
+按 `SKILL_LEDGER_MODE`（默认 `ask`）处理结果。每次检查都会把 Qoder trace 标识写入
+安全审计日志。
+
+Qoder 的 `CODE_SCANNER_MODE` 支持 `observe`、`ask` 和 `block`：
+
+```bash
+CODE_SCANNER_MODE=ask SKILL_LEDGER_MODE=block qoder
+```
 
 ### Copilot Shell（cosh）
 

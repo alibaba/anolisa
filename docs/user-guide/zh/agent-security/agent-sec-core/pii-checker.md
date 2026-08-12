@@ -76,6 +76,18 @@ verdict 和 finding schema；宿主只观察 finding 还是阻断操作，由该
 配置。`debug` 映射为 `observe`，`deny` 映射为 `block`。仅 Qwen Code 在未设置
 `PII_CHECKER_HOOK_ENABLED` 时额外兼容旧开关 `PII_CHECKER_ENABLED`。
 
+`PII_CHECKER_HOOK_ENABLED` 和 `PII_CHECKER_MODE` 被全部六个宿主读取。另有两个变量只被部分
+宿主读取：
+
+| 环境变量 | 默认值 | 读取该变量的宿主 |
+|----------|--------|------------------|
+| `PII_CHECKER_TIMEOUT` | `5` | Qoder、Codex、Qwen Code（Qwen Code 上限为 8 秒） |
+| `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | Qoder、Qwen Code |
+
+cosh、Hermes 和 OpenClaw 不读取这两个环境变量。但 Hermes 和 OpenClaw 仍可通过 capability
+配置支持这两项 —— Hermes 使用 `timeout` 和 `include_low_confidence`，OpenClaw 使用
+`piiIncludeLowConfidence`；cosh 使用固定超时，且从不请求低置信度 finding。
+
 宿主 Agent 在加载插件时读取这些变量。修改后需重启承载该 hook 的 Agent 进程；
 hook 和 agent-sec-core 并不是需要单独重启的 policy 服务。
 

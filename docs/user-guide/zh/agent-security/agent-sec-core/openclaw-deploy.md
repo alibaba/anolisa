@@ -163,15 +163,16 @@ openclaw config get plugins.entries.agent-sec.hooks.allowConversationAccess
 openclaw config set plugins.entries.agent-sec.config.promptScanBlock true
 ```
 
-你也可以通过环境变量在部署层覆盖 prompt scanner 行为，这些变量优先于 OpenClaw capability
-配置：
+你也可以通过以下环境变量在部署层影响 prompt scanner 行为。
+`PROMPT_SCANNER_HOOK_ENABLED=false` 无论插件配置如何都会跳过 hook 注册：
 
 | 环境变量 | 默认值 | 行为 |
 |----------|--------|------|
 | `PROMPT_SCANNER_HOOK_ENABLED` | `true` | 设为 `false` 时完全跳过 prompt-scan hook 注册 |
-| `PROMPT_SCANNER_MODE` | `observe` | 策略模式：`observe` / `warn` / `ask` / `block`；`deny` 等价于 `block` |
 | `PROMPT_SCANNER_SCAN_MODE` | `standard` | 传给 `scan-prompt` 的扫描强度：`fast` / `standard` / `strict` |
-| `PROMPT_SCANNER_TIMEOUT` | `10` | Scanner 超时秒数 |
+
+OpenClaw 插件不读取 `PROMPT_SCANNER_MODE` 和 `PROMPT_SCANNER_TIMEOUT`。OpenClaw 上的
+prompt 策略由上方的 `promptScanBlock` 决定，scanner 超时固定为 10 秒。
 
 修改这些变量后需重启 OpenClaw gateway。
 

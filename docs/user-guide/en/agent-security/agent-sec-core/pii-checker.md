@@ -83,6 +83,19 @@ policy overrides Hermes/OpenClaw capability configuration. `debug` maps to `obse
 `deny` maps to `block`. Qwen Code additionally accepts the legacy `PII_CHECKER_ENABLED` switch when
 `PII_CHECKER_HOOK_ENABLED` is absent.
 
+`PII_CHECKER_HOOK_ENABLED` and `PII_CHECKER_MODE` are read by all six hosts. Two further
+variables are only read by some of them:
+
+| Environment variable | Default | Hosts that read it |
+|----------------------|---------|--------------------|
+| `PII_CHECKER_TIMEOUT` | `5` | Qoder, Codex, Qwen Code (Qwen Code caps it at 8 seconds) |
+| `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | Qoder, Qwen Code |
+
+cosh, Hermes, and OpenClaw do not read those two environment variables. Hermes and OpenClaw
+still support both settings through capability configuration instead — `timeout` and
+`include_low_confidence` for Hermes, `piiIncludeLowConfidence` for OpenClaw — while cosh uses a
+fixed timeout and never requests low-confidence findings.
+
 The host Agent reads these variables when it loads the plugin. Restart the Agent process that
 hosts the hook after changing them; the hook and agent-sec-core are not separate policy services.
 
