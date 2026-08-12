@@ -136,13 +136,13 @@ def main() -> None:
         return
 
     # 3. Call CLI. Model download/loading is owned by the daemon.
+    # Pipe prompt via stdin (not --text argv) to avoid /proc/<pid>/cmdline
+    # exposure and ARG_MAX limits — mirrors codex/hermes/qoder/qwen.
     try:
         cmd = with_trace_context(
             [
                 "agent-sec-cli",
                 "scan-prompt",
-                "--text",
-                prompt_text,
                 "--mode",
                 _DEFAULT_MODE,
                 "--format",
@@ -158,6 +158,7 @@ def main() -> None:
             check=False,
             text=True,
             timeout=10,
+            input=prompt_text,
         )
     except subprocess.TimeoutExpired as exc:
         print(

@@ -241,13 +241,13 @@ class TestCoshHookSubprocess:
             separators=(",", ":"),
         )
         assert output == {"decision": "allow"}
+        # Prompt is piped via stdin (not --text argv) — avoids /proc/cmdline
+        # exposure and ARG_MAX limits, matching codex/hermes/qoder/qwen.
         assert captured["args"] == [
             "agent-sec-cli",
             "--trace-context",
             expected_context,
             "scan-prompt",
-            "--text",
-            "hello",
             "--mode",
             "standard",
             "--format",
@@ -255,4 +255,40 @@ class TestCoshHookSubprocess:
             "--source",
             "user_input",
         ]
+        assert "--text" not in captured["args"]
+        assert "hello" not in captured["args"]
+        assert captured["kwargs"]["input"] == "hello"
         assert captured["kwargs"]["check"] is False
+
+    def test_prompt_passed_via_stdin_not_argv(self, monkeypatch, capsys):
+        """Prompt text must be passed via stdin (input kwarg), not --text argv.
+
+        Mirrors codex/hermes/qoder/qwen — avoids /proc/<pid>/cmdline
+        exposure and ARG_MAX limits.
+        """
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            captured["input"] = kwargs.get("input")
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps({"verdict": "pass"}),
+                stderr="",
+            )
+
+        monkeypatch.setattr(prompt_scanner_hook.subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            prompt_scanner_hook.sys,
+            "stdin",
+            io.StringIO(json.dumps({"prompt": "sensitive data here"})),
+        )
+
+        prompt_scanner_hook.main()
+
+        # Must NOT appear in argv (avoids /proc/cmdline leak & ARG_MAX)
+        assert "--text" not in captured["args"]
+        assert "sensitive data here" not in captured["args"]
+        # Must be piped via stdin
+        assert captured["input"] == "sensitive data here"
