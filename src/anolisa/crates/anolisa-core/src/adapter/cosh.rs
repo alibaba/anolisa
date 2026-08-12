@@ -18,6 +18,7 @@
 //! `COSH_HOME` overrides the cosh home directory (default
 //! `<user_home>/.copilot-shell`).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::AdapterError;
@@ -210,6 +211,17 @@ impl FrameworkDriver for CoshDriver {
             source_root: resource_root.to_path_buf(),
             excluded_prefixes: Vec::new(),
         }]
+    }
+
+    fn materialized_destination_roots(
+        &self,
+        bundle: &AdapterBundle,
+        ctx: &DriverCtx,
+    ) -> Result<BTreeMap<String, PathBuf>, AdapterError> {
+        Ok(BTreeMap::from([(
+            RES_EXTENSION_DIR.to_string(),
+            extension_dir(bundle, ctx)?,
+        )]))
     }
 
     fn materialized_verification_applicable(&self, _claim: &AdapterClaim) -> bool {

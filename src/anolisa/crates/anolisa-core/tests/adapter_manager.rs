@@ -258,6 +258,8 @@ const OWNED_ENV: &[&str] = &[
     "FAKE_OC_VERSION_PREAMBLE",
     "FAKE_OC_CONFIG_FAIL_KEY",
     "FAKE_OC_CONFIG_FAIL_AFTER_KEY",
+    "HERMES_BIN",
+    "HERMES_HOME",
 ];
 
 struct OpenClawEnvGuard {
@@ -780,6 +782,177 @@ skills = ["sec-audit"]
 }
 
 #[test]
+fn reenable_prunes_removed_managed_skill_files_but_keeps_runtime_extras() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    configure_plugin_with_skill(&world, "sec-audit");
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable initial skill revision");
+    let destination = world.openclaw_home.join("skills/sec-audit");
+    let removed = destination.join("marker.txt");
+    let runtime_extra = destination.join("runtime.log");
+    assert!(removed.is_file());
+    std::fs::write(&runtime_extra, b"runtime").expect("runtime-created extra");
+
+    let source = world.resource_root.join("skills/sec-audit");
+    std::fs::remove_file(source.join("marker.txt")).expect("remove old managed source");
+    std::fs::write(source.join("renamed.txt"), b"skill-v2").expect("write renamed source");
+    record_owned_adapter_files(&world.layout, &world.resource_root);
+
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("re-enable updated skill revision");
+
+    assert!(destination.join("renamed.txt").is_file());
+    assert!(
+        !removed.exists(),
+        "a file owned only by the prior receipt must be removed"
+    );
+    assert_eq!(
+        std::fs::read(&runtime_extra).expect("runtime extra must survive"),
+        b"runtime"
+    );
+    let status = manager
+        .status(Some(COMPONENT))
+        .expect("status after re-enable");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+}
+
+#[test]
+fn reenable_prunes_empty_ancestors_before_directory_to_file_change() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    configure_plugin_with_skill(&world, "sec-audit");
+    let source = world.resource_root.join("skills/sec-audit");
+    std::fs::create_dir_all(source.join("hook.py/sub")).expect("old nested source directory");
+    std::fs::write(source.join("hook.py/sub/managed.txt"), b"v1").expect("old nested managed file");
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable initial directory-shaped output");
+
+    std::fs::remove_dir_all(source.join("hook.py")).expect("remove old source directory");
+    std::fs::write(source.join("hook.py"), b"v2").expect("new file-shaped source");
+    record_owned_adapter_files(&world.layout, &world.resource_root);
+
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("empty ancestors are pruned before replacing the directory");
+
+    let destination = world.openclaw_home.join("skills/sec-audit/hook.py");
+    assert_eq!(
+        std::fs::read(destination).expect("new file-shaped output"),
+        b"v2"
+    );
+}
+
+#[test]
+fn hermes_reenable_prunes_removed_managed_skill_files() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    let hermes_root = world
+        .layout
+        .datadir
+        .join("adapters")
+        .join(COMPONENT)
+        .join("hermes");
+    let source = hermes_root.join("skills/sec-audit");
+    std::fs::create_dir_all(&source).expect("Hermes skill source");
+    std::fs::write(source.join("marker.txt"), b"skill-v1").expect("Hermes skill marker");
+    write_openclaw_manifest(
+        &world.layout,
+        &format!(
+            r#"[[adapters]]
+framework = "hermes"
+adapter_type = "skill_bundle"
+source = "adapters/{COMPONENT}/hermes"
+dest = "{{datadir}}/adapters/{{component}}/hermes/"
+
+[adapters.hermes]
+skills = ["sec-audit"]
+"#
+        ),
+    );
+    record_owned_adapter_files(&world.layout, &hermes_root);
+    let hermes_home = world._root.path().join("hermes-home");
+    guard.set("HERMES_BIN", &world.fake_bin);
+    guard.set("HERMES_HOME", &hermes_home);
+    let manager = AdapterManager::new(
+        world.layout.clone(),
+        Some(world.user_home.clone()),
+        "tester".to_string(),
+    );
+
+    manager
+        .enable(COMPONENT, Some("hermes"), false)
+        .expect("enable initial Hermes skill revision");
+    let destination = hermes_home.join("skills/sec-audit");
+    assert!(destination.join("marker.txt").is_file());
+
+    std::fs::remove_file(source.join("marker.txt")).expect("remove old Hermes source");
+    std::fs::write(source.join("renamed.txt"), b"skill-v2").expect("rename Hermes source");
+    record_owned_adapter_files(&world.layout, &hermes_root);
+    manager
+        .enable(COMPONENT, Some("hermes"), false)
+        .expect("re-enable updated Hermes skill revision");
+
+    assert!(destination.join("renamed.txt").is_file());
+    assert!(!destination.join("marker.txt").exists());
+    let status = manager.status(Some(COMPONENT)).expect("Hermes status");
+    assert_eq!(status.entries[0].report.summary, AdapterSummary::Healthy);
+}
+
+#[test]
+fn reenable_refuses_directory_to_file_change_when_runtime_content_would_be_lost() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    configure_plugin_with_skill(&world, "sec-audit");
+    let source = world.resource_root.join("skills/sec-audit");
+    std::fs::create_dir_all(source.join("hook.py")).expect("old source directory");
+    std::fs::write(source.join("hook.py/managed.txt"), b"v1").expect("old managed file");
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable initial directory-shaped output");
+
+    let destination = world.openclaw_home.join("skills/sec-audit");
+    std::fs::write(destination.join("hook.py/runtime.log"), b"runtime")
+        .expect("runtime content under old directory");
+    std::fs::remove_dir_all(source.join("hook.py")).expect("remove old source directory");
+    std::fs::write(source.join("hook.py"), b"v2").expect("new file-shaped source");
+    record_owned_adapter_files(&world.layout, &world.resource_root);
+
+    let err = manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect_err("runtime content must not be recursively removed");
+    assert!(matches!(
+        err,
+        AdapterError::ReenableCleanupIncomplete { .. }
+    ));
+    assert_eq!(
+        std::fs::read(destination.join("hook.py/runtime.log")).expect("runtime content survives"),
+        b"runtime"
+    );
+    let claim = world
+        .load_state()
+        .find_adapter_claim(COMPONENT, FRAMEWORK)
+        .cloned()
+        .expect("prior receipt remains durable");
+    assert!(
+        claim
+            .materialized_files
+            .iter()
+            .any(|file| file.relative_path == Path::new("hook.py/managed.txt"))
+    );
+}
+
+#[test]
 fn pre_fix_receipt_remains_visible_and_disable_cleans_recorded_state() {
     let guard = OpenClawEnvGuard::acquire();
     let world = stage();
@@ -976,6 +1149,44 @@ fn migration_dry_run_previews_cleanup_without_mutation() {
         argv_lines(&world.argv_log())
             .iter()
             .all(|line| !line.starts_with("plugins uninstall "))
+    );
+}
+
+#[test]
+fn reenable_dry_run_previews_stale_materialized_file_cleanup() {
+    let guard = OpenClawEnvGuard::acquire();
+    let world = stage();
+    configure_plugin_with_skill(&world, "sec-audit");
+    world.apply_env(&guard, None);
+    let manager = world.manager();
+    manager
+        .enable(COMPONENT, Some(FRAMEWORK), false)
+        .expect("enable initial skill revision");
+
+    let source = world.resource_root.join("skills/sec-audit");
+    std::fs::remove_file(source.join("marker.txt")).expect("remove old managed source");
+    std::fs::write(source.join("renamed.txt"), b"skill-v2").expect("write renamed source");
+    record_owned_adapter_files(&world.layout, &world.resource_root);
+
+    let destination = world.openclaw_home.join("skills/sec-audit");
+    let stale = destination.join("marker.txt");
+    let outcome = manager
+        .enable(COMPONENT, Some(FRAMEWORK), true)
+        .expect("plan stale materialized-file cleanup");
+    let plan = match outcome {
+        EnableOutcome::Planned { plan, .. } => plan,
+        EnableOutcome::Enabled(_) => panic!("dry-run must return a plan"),
+    };
+    let cleanup = format!("remove stale materialized file {}", stale.display());
+    assert!(
+        plan.actions.iter().any(|action| action == &cleanup),
+        "missing '{cleanup}' in plan: {:?}",
+        plan.actions
+    );
+    assert!(stale.is_file(), "dry-run must not remove the stale output");
+    assert!(
+        !destination.join("renamed.txt").exists(),
+        "dry-run must not deliver the replacement output"
     );
 }
 

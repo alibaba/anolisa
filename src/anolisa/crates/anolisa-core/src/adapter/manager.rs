@@ -43,8 +43,9 @@ use super::driver::{
     FrameworkCommand, FrameworkRpcSession, HostEnv,
 };
 use super::managed_files::{
-    ManagedMatch, inventory_for_installation, materialized_files, source_revision,
-    verify_managed_bundle, verify_materialized_bundle,
+    ManagedInventory, ManagedMatch, cleanup_replaced_materialized_files,
+    inventory_for_installation, materialized_files, plan_replaced_materialized_files,
+    source_revision, verify_managed_bundle, verify_materialized_bundle,
 };
 use super::registry::DriverRegistry;
 use crate::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
@@ -980,7 +981,30 @@ impl AdapterManager {
                     &trust.target_roots,
                     trust.exact_targets(),
                 )?;
-                let cleanup_actions = driver.plan_reenable_cleanup(prior, &ctx)?;
+                let mappings = driver.materialized_mappings(
+                    &resource_root,
+                    ctx.adapter_type.as_deref(),
+                    &ctx.declared_skills,
+                );
+                let next_files = if mappings.is_empty() {
+                    Vec::new()
+                } else {
+                    let inventory = self.managed_inventory(component, &state, &framework)?;
+                    materialized_files(&inventory, &mappings).map_err(|reason| {
+                        AdapterError::InvalidAdapterInput {
+                            component: component.to_string(),
+                            framework: framework.clone(),
+                            reason,
+                        }
+                    })?
+                };
+                let next_roots = driver.materialized_destination_roots(&bundle, &ctx)?;
+                let mut cleanup_actions = driver.plan_reenable_cleanup(prior, &ctx)?;
+                cleanup_actions.extend(plan_replaced_materialized_files(
+                    prior,
+                    &next_files,
+                    &next_roots,
+                )?);
                 plan.actions.splice(0..0, cleanup_actions);
             }
             let notices = declared_notices(
@@ -1031,20 +1055,7 @@ impl AdapterManager {
             ctx.adapter_type.as_deref(),
             &ctx.declared_skills,
         );
-        let managed_inventory = self
-            .find_component_installation(component, &state)?
-            .ok_or_else(|| AdapterError::ComponentNotInstalled {
-                component: component.to_string(),
-            })
-            .and_then(|installation| {
-                inventory_for_installation(&installation, self.package_files.as_ref()).map_err(
-                    |reason| AdapterError::InvalidAdapterInput {
-                        component: component.to_string(),
-                        framework: framework.clone(),
-                        reason,
-                    },
-                )
-            })?;
+        let managed_inventory = self.managed_inventory(component, &state, &framework)?;
         let revision =
             source_revision(&managed_inventory, &resource_root, &mappings).map_err(|reason| {
                 AdapterError::InvalidAdapterInput {
@@ -1102,6 +1113,13 @@ impl AdapterManager {
                     reason,
                 });
             }
+            cleanup_replaced_materialized_files(prior, &claim, &ops).map_err(|err| {
+                AdapterError::ReenableCleanupIncomplete {
+                    component: component.to_string(),
+                    framework: framework.clone(),
+                    reason: format!("failed to prune stale materialized output: {err}"),
+                }
+            })?;
         }
 
         state.upsert_adapter_claim(claim.clone());
@@ -1816,6 +1834,26 @@ impl AdapterManager {
             }
         }
         Ok(None)
+    }
+
+    fn managed_inventory(
+        &self,
+        component: &str,
+        current_state: &StateStore,
+        framework: &str,
+    ) -> Result<ManagedInventory, AdapterError> {
+        let installation = self
+            .find_component_installation(component, current_state)?
+            .ok_or_else(|| AdapterError::ComponentNotInstalled {
+                component: component.to_string(),
+            })?;
+        inventory_for_installation(&installation, self.package_files.as_ref()).map_err(|reason| {
+            AdapterError::InvalidAdapterInput {
+                component: component.to_string(),
+                framework: framework.to_string(),
+                reason,
+            }
+        })
     }
 
     fn current_source_revision(
@@ -2624,6 +2662,31 @@ impl AdapterOps for ManagerOps {
             source,
         })?;
         Ok(())
+    }
+
+    fn remove_path(&self, path: &Path) -> Result<bool, AdapterError> {
+        validate_ops_path(path, &self.allowed_roots)?;
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_dir() => {
+                std::fs::remove_dir(path).map_err(|source| AdapterError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+                Ok(true)
+            }
+            Ok(_) => {
+                std::fs::remove_file(path).map_err(|source| AdapterError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+                Ok(true)
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(AdapterError::Io {
+                path: path.to_path_buf(),
+                source,
+            }),
+        }
     }
 
     fn remove_tree(&self, path: &Path) -> Result<bool, AdapterError> {

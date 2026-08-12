@@ -29,7 +29,7 @@
 //! written into the receipt — the receipt stays pure typed data.
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -357,6 +357,24 @@ impl FrameworkDriver for OpenClawDriver {
                 excluded_prefixes: Vec::new(),
             })
             .collect()
+    }
+
+    fn materialized_destination_roots(
+        &self,
+        _bundle: &AdapterBundle,
+        ctx: &DriverCtx,
+    ) -> Result<BTreeMap<String, PathBuf>, AdapterError> {
+        let home = require_home(ctx)?;
+        Ok(ctx
+            .declared_skills
+            .iter()
+            .map(|skill| {
+                (
+                    format!("openclaw_skill_{}", skill.name),
+                    home.join("skills").join(&skill.name),
+                )
+            })
+            .collect())
     }
 
     fn materialized_verification_applicable(&self, claim: &AdapterClaim) -> bool {

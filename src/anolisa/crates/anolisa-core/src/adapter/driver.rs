@@ -8,6 +8,7 @@
 //! stay centralized. The split is deliberate — **driver owns framework
 //! semantics, Manager owns dangerous-resource boundaries**.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -461,6 +462,30 @@ pub trait AdapterOps {
     /// [`AdapterError::ClaimValidation`] if either path fails boundary check.
     fn copy_file(&self, src: &Path, dst: &Path) -> Result<(), AdapterError>;
 
+    /// Remove exactly one filesystem entry without recursively deleting a
+    /// directory. Files and symlinks are unlinked; empty directories are
+    /// removed so a materialized path can change from a directory prefix to
+    /// a file. Returns `Ok(false)` when the path does not exist.
+    ///
+    /// The Manager validates that `path` is under an allowed root. Refusing
+    /// non-empty directories preserves runtime-created files that were never
+    /// owned by an adapter receipt.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::Io`] on filesystem failure, including a non-empty
+    /// directory; [`AdapterError::ClaimValidation`] if `path` fails boundary
+    /// validation.
+    fn remove_path(&self, path: &Path) -> Result<bool, AdapterError> {
+        Err(AdapterError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "operation provider does not support exact path removal",
+            ),
+        })
+    }
+
     /// Remove a directory tree rooted at `path`. The Manager validates
     /// that `path` is under an allowed external root before executing.
     /// Returns `Ok(false)` when the path does not exist (idempotent).
@@ -683,6 +708,24 @@ pub trait FrameworkDriver: Send + Sync {
         _declared_skills: &[DeclaredSkill],
     ) -> Vec<MaterializedMapping> {
         Vec::new()
+    }
+
+    /// Concrete destination roots for [`Self::materialized_mappings`].
+    ///
+    /// Dry-run cleanup compares these paths with the prior receipt so its
+    /// stale-output plan matches live re-enable even when a stable resource
+    /// id moves to a different framework path.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same destination or identifier validation error as
+    /// [`Self::prepare_enable`].
+    fn materialized_destination_roots(
+        &self,
+        _bundle: &AdapterBundle,
+        _ctx: &DriverCtx,
+    ) -> Result<BTreeMap<String, PathBuf>, AdapterError> {
+        Ok(BTreeMap::new())
     }
 
     /// Whether this claim is expected to carry a materialized-file list.

@@ -15,6 +15,7 @@
 //! tests to point at a fake CLI); `HERMES_HOME` overrides the home
 //! directory.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -263,6 +264,27 @@ impl FrameworkDriver for HermesDriver {
             });
         }
         mappings
+    }
+
+    fn materialized_destination_roots(
+        &self,
+        bundle: &AdapterBundle,
+        ctx: &DriverCtx,
+    ) -> Result<BTreeMap<String, PathBuf>, AdapterError> {
+        let home = require_home(ctx)?;
+        let mut roots = BTreeMap::new();
+        if !ctx.is_skill_bundle() {
+            let plugin_id = require_plugin_id(bundle)?;
+            validate_plugin_id(&plugin_id)?;
+            roots.insert(RES_PLUGIN.to_string(), home.join("plugins").join(plugin_id));
+        }
+        for skill in &ctx.declared_skills {
+            roots.insert(
+                format!("hermes_skill_{}", skill.name),
+                home.join("skills").join(&skill.name),
+            );
+        }
+        Ok(roots)
     }
 
     fn materialized_verification_applicable(&self, _claim: &AdapterClaim) -> bool {

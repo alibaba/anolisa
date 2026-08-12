@@ -1,5 +1,6 @@
 //! Package-owned adapter input revisions and materialized-file verification.
 
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use anolisa_platform::pkg_files::{PackageFileDigestAlgorithm, PackageFileKind, PackageFileQuery};
@@ -420,6 +421,175 @@ pub(crate) fn copy_materialized_resource(
     Ok(())
 }
 
+/// Remove outputs owned only by a prior receipt before replacing it.
+///
+/// Exact-entry removal deliberately leaves unrelated files in materialized
+/// destination directories intact. When a former directory prefix must
+/// become a file, only an empty prefix directory is removed; runtime content
+/// makes cleanup fail while the prior receipt is still durable.
+pub(crate) fn cleanup_replaced_materialized_files(
+    prior: &AdapterClaim,
+    next: &AdapterClaim,
+    ops: &dyn AdapterOps,
+) -> Result<Vec<String>, AdapterError> {
+    let prior_paths = materialized_paths(prior)?;
+    let next_paths = materialized_paths(next)?;
+    let next_set = next_paths
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut stale = prior_paths
+        .iter()
+        .filter(|path| !next_set.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    stale.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    stale.dedup();
+
+    let mut messages = Vec::new();
+    for path in &stale {
+        if ops.remove_path(path)? {
+            messages.push(format!(
+                "removed stale materialized file {}",
+                path.display()
+            ));
+        }
+    }
+
+    // Remove every empty ancestor below a file-shaped replacement. Stopping
+    // at the first non-empty directory preserves runtime-created content.
+    for path in replacement_prefixes(&stale, &next_paths) {
+        if ops.remove_path(&path)? {
+            messages.push(format!(
+                "removed empty stale materialized directory {}",
+                path.display()
+            ));
+        }
+    }
+
+    Ok(messages)
+}
+
+/// Describe generic materialized-file cleanup for a re-enable dry-run.
+pub(crate) fn plan_replaced_materialized_files(
+    prior: &AdapterClaim,
+    next_files: &[MaterializedFile],
+    next_roots: &BTreeMap<String, PathBuf>,
+) -> Result<Vec<String>, AdapterError> {
+    let next_paths = next_files
+        .iter()
+        .map(|file| {
+            validate_relative(&file.relative_path)
+                .map_err(|reason| invalid_materialized(prior, reason))?;
+            let root = next_roots.get(&file.resource_id).ok_or_else(|| {
+                invalid_materialized(
+                    prior,
+                    format!(
+                        "next materialized resource '{}' has no destination root",
+                        file.resource_id
+                    ),
+                )
+            })?;
+            Ok(root.join(&file.relative_path))
+        })
+        .collect::<Result<Vec<_>, AdapterError>>()?;
+    let next_set = next_paths.iter().collect::<std::collections::BTreeSet<_>>();
+
+    let mut stale = prior
+        .materialized_files
+        .iter()
+        .map(|file| materialized_path(prior, file))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|path| !next_set.contains(path))
+        .collect::<Vec<_>>();
+    stale.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    stale.dedup();
+
+    let mut actions = stale
+        .iter()
+        .map(|path| format!("remove stale materialized file {}", path.display()))
+        .collect::<Vec<_>>();
+    actions.extend(
+        replacement_prefixes(&stale, &next_paths)
+            .into_iter()
+            .map(|path| {
+                format!(
+                    "remove empty stale materialized directory {}",
+                    path.display()
+                )
+            }),
+    );
+    Ok(actions)
+}
+
+fn materialized_paths(claim: &AdapterClaim) -> Result<Vec<PathBuf>, AdapterError> {
+    claim
+        .materialized_files
+        .iter()
+        .map(|file| materialized_path(claim, file))
+        .collect()
+}
+
+fn materialized_path(
+    claim: &AdapterClaim,
+    file: &MaterializedFile,
+) -> Result<PathBuf, AdapterError> {
+    validate_relative(&file.relative_path).map_err(|reason| invalid_materialized(claim, reason))?;
+    let resource = claim.resource(&file.resource_id).ok_or_else(|| {
+        invalid_materialized(
+            claim,
+            format!(
+                "materialized resource '{}' is missing from the receipt",
+                file.resource_id
+            ),
+        )
+    })?;
+    let root = match &resource.kind {
+        ClaimResourceKind::OwnedPath { path } | ClaimResourceKind::ExternalPath { path } => path,
+        _ => {
+            return Err(invalid_materialized(
+                claim,
+                format!(
+                    "materialized resource '{}' is not a filesystem root",
+                    file.resource_id
+                ),
+            ));
+        }
+    };
+    Ok(root.join(&file.relative_path))
+}
+
+fn invalid_materialized(claim: &AdapterClaim, reason: String) -> AdapterError {
+    AdapterError::InvalidAdapterInput {
+        component: claim.component.clone(),
+        framework: claim.framework.clone(),
+        reason,
+    }
+}
+
+fn replacement_prefixes(stale: &[PathBuf], next: &[PathBuf]) -> Vec<PathBuf> {
+    let mut prefixes = Vec::new();
+    for stale_path in stale {
+        for next_path in next {
+            if !stale_path.starts_with(next_path) {
+                continue;
+            }
+            let mut ancestor = stale_path.parent();
+            while let Some(path) = ancestor.filter(|path| path.starts_with(next_path)) {
+                prefixes.push(path.to_path_buf());
+                if path == next_path {
+                    break;
+                }
+                ancestor = path.parent();
+            }
+        }
+    }
+    prefixes.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    prefixes.dedup();
+    prefixes
+}
+
 /// Verify recorded materialized files without scanning for extra entries.
 pub fn verify_materialized_bundle(claim: &AdapterClaim) -> ManagedMatch {
     for file in &claim.materialized_files {
@@ -837,6 +1007,35 @@ mod tests {
                 extension_dir_resource: "copy".into(),
             }),
         }
+    }
+
+    #[test]
+    fn dry_run_cleanup_compares_concrete_destination_roots() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let old_root = tmp.path().join("plugins/old-id");
+        let new_root = tmp.path().join("plugins/new-id");
+        let file = MaterializedFile {
+            resource_id: "copy".into(),
+            relative_path: PathBuf::from("hook.py"),
+            kind: RevisionFileKind::File,
+            sha256: Some(sha256(b"managed")),
+            symlink_target: None,
+        };
+        let mut prior = claim(&old_root);
+        prior.materialized_files = vec![file.clone()];
+        let next_files = vec![file];
+        let next_roots = BTreeMap::from([("copy".to_string(), new_root)]);
+
+        let actions = plan_replaced_materialized_files(&prior, &next_files, &next_roots)
+            .expect("plan replacement cleanup");
+
+        assert_eq!(
+            actions,
+            vec![format!(
+                "remove stale materialized file {}",
+                old_root.join("hook.py").display()
+            )]
+        );
     }
 
     #[test]
