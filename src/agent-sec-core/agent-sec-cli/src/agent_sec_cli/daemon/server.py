@@ -6,6 +6,7 @@ import contextlib
 import fcntl
 import logging
 import os
+import secrets
 import signal
 import stat
 import time
@@ -13,7 +14,9 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from agent_sec_cli.daemon.client import daemon_health_reachable
+from agent_sec_cli.daemon.env import SKILLFS_NOTIFY_AUTH_SECRET_FILE_ENV
 from agent_sec_cli.daemon.errors import (
+    AuthenticationError,
     BadRequestError,
     BusyError,
     DaemonAlreadyRunningError,
@@ -58,11 +61,29 @@ from agent_sec_cli.daemon.runtime import (
     lock_path_for_socket,
     resolve_socket_path,
 )
+from agent_sec_cli.skillfs_auth import (
+    AUTH_INIT,
+    AUTH_NONCE_BYTES,
+    MAX_AUTH_FRAME_BYTES,
+    NOTIFY_CLIENT_DOMAIN,
+    NOTIFY_SERVER_DOMAIN,
+    SkillFsAuthError,
+    auth_challenge_frame,
+    auth_frame_type,
+    auth_ok_frame,
+    calculate_proof,
+    load_auth_secret,
+    parse_auth_init,
+    parse_auth_proof,
+    proof_matches,
+)
 
 LOGGER = logging.getLogger("agent-sec-core.daemon")
 DEFAULT_MAX_CONNECTIONS = 64
 DEFAULT_DRAIN_TIMEOUT_SECONDS = 2.0
 DEFAULT_REQUEST_READ_TIMEOUT_MS = 5000
+DEFAULT_AUTH_READ_TIMEOUT_MS = 5000
+SKILLFS_NOTIFY_METHOD = "skill_ledger.skillfs_notify_change"
 SocketIdentity = tuple[int, int]
 
 
@@ -121,6 +142,7 @@ class DaemonServer:
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         request_read_timeout_ms: int = DEFAULT_REQUEST_READ_TIMEOUT_MS,
+        skillfs_notify_auth_secret_file: str | Path | None = None,
     ) -> None:
         if request_read_timeout_ms <= 0:
             raise ValueError("request_read_timeout_ms must be positive")
@@ -132,6 +154,14 @@ class DaemonServer:
         self.max_response_bytes = max_response_bytes
         self.max_connections = max_connections
         self.request_read_timeout_ms = request_read_timeout_ms
+        configured_secret = skillfs_notify_auth_secret_file or os.environ.get(
+            SKILLFS_NOTIFY_AUTH_SECRET_FILE_ENV
+        )
+        self._skillfs_notify_auth_secret = (
+            load_auth_secret(configured_secret)
+            if configured_secret is not None
+            else None
+        )
         self.runtime = DaemonRuntime(socket_path=resolved_socket_path)
         register_default_jobs(self.runtime.jobs, self.runtime.prompt_scan_state)
         self.gateway = DaemonGateway(self.registry, self.runtime)
@@ -247,6 +277,7 @@ class DaemonServer:
         started = time.monotonic()
         response: DaemonResponse | None = None
         prepared_request: PreparedDaemonRequest | None = None
+        authenticated_skillfs_notify = False
 
         try:
             line = await asyncio.wait_for(
@@ -254,7 +285,29 @@ class DaemonServer:
                 timeout=self.request_read_timeout_ms / 1000,
             )
             bytes_in = len(line)
+            if (
+                self._skillfs_notify_auth_secret is not None
+                and auth_frame_type(line) == AUTH_INIT
+            ):
+                await self._authenticate_skillfs_notify(reader, writer, line)
+                authenticated_skillfs_notify = True
+                line = await asyncio.wait_for(
+                    read_request_frame(reader, self.max_request_bytes),
+                    timeout=self.request_read_timeout_ms / 1000,
+                )
+                bytes_in += len(line)
             request = parse_request_line(line, max_request_bytes=self.max_request_bytes)
+            if self._skillfs_notify_auth_secret is not None:
+                if (
+                    authenticated_skillfs_notify
+                    and request.method != SKILLFS_NOTIFY_METHOD
+                ):
+                    raise AuthenticationError()
+                if (
+                    not authenticated_skillfs_notify
+                    and request.method == SKILLFS_NOTIFY_METHOD
+                ):
+                    raise AuthenticationError()
             prepared_request = self.gateway.prepare(request)
             response = await self.gateway.execute(prepared_request)
         except asyncio.TimeoutError:
@@ -315,6 +368,47 @@ class DaemonServer:
                     bytes_in=bytes_in,
                     bytes_out=bytes_out,
                 )
+
+    async def _authenticate_skillfs_notify(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        init_frame: bytes,
+    ) -> None:
+        """Authenticate one SkillFS notification connection before dispatch."""
+        secret = self._skillfs_notify_auth_secret
+        if secret is None:
+            raise AuthenticationError()
+        try:
+            parse_auth_init(init_frame)
+            nonce = secrets.token_bytes(AUTH_NONCE_BYTES)
+            await self._write_auth_frame(writer, auth_challenge_frame(nonce))
+            proof_frame = await asyncio.wait_for(
+                read_request_frame(reader, MAX_AUTH_FRAME_BYTES),
+                timeout=DEFAULT_AUTH_READ_TIMEOUT_MS / 1000,
+            )
+            actual_proof = parse_auth_proof(proof_frame)
+            expected_proof = calculate_proof(secret, NOTIFY_CLIENT_DOMAIN, nonce)
+            if not proof_matches(actual_proof, expected_proof):
+                raise SkillFsAuthError("client authentication failed")
+            server_proof = calculate_proof(secret, NOTIFY_SERVER_DOMAIN, nonce)
+            await self._write_auth_frame(writer, auth_ok_frame(server_proof))
+        except (SkillFsAuthError, asyncio.TimeoutError) as exc:
+            raise AuthenticationError() from exc
+
+    @staticmethod
+    async def _write_auth_frame(
+        writer: asyncio.StreamWriter,
+        frame: bytes,
+    ) -> None:
+        writer.write(frame)
+        try:
+            await asyncio.wait_for(
+                writer.drain(),
+                timeout=DEFAULT_AUTH_READ_TIMEOUT_MS / 1000,
+            )
+        except asyncio.TimeoutError as exc:
+            raise AuthenticationError() from exc
 
     async def _write_response(
         self,
@@ -474,6 +568,7 @@ async def run_daemon(
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     max_connections: int = DEFAULT_MAX_CONNECTIONS,
     request_read_timeout_ms: int = DEFAULT_REQUEST_READ_TIMEOUT_MS,
+    skillfs_notify_auth_secret_file: str | Path | None = None,
 ) -> None:
     """Run the daemon until SIGTERM/SIGINT or task cancellation."""
     configure_logging()
@@ -483,6 +578,7 @@ async def run_daemon(
         max_response_bytes=max_response_bytes,
         max_connections=max_connections,
         request_read_timeout_ms=request_read_timeout_ms,
+        skillfs_notify_auth_secret_file=skillfs_notify_auth_secret_file,
     )
     stop_event = asyncio.Event()
     _install_signal_handlers(stop_event)
@@ -518,6 +614,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             max_response_bytes=args.max_response_bytes,
             max_connections=args.max_connections,
             request_read_timeout_ms=args.request_read_timeout_ms,
+            skillfs_notify_auth_secret_file=args.skillfs_notify_auth_secret_file,
         )
     )
 
@@ -528,6 +625,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     serve_parser = subparsers.add_parser("serve")
     serve_parser.add_argument(
         "--socket", dest="socket_path", default=None, help=argparse.SUPPRESS
+    )
+    serve_parser.add_argument(
+        "--skillfs-notify-auth-secret-file",
+        default=None,
+        help=argparse.SUPPRESS,
     )
     serve_parser.add_argument(
         "--max-request-bytes", type=int, default=DEFAULT_MAX_REQUEST_BYTES
@@ -552,6 +654,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.set_defaults(max_response_bytes=DEFAULT_MAX_RESPONSE_BYTES)
     parser.set_defaults(max_connections=DEFAULT_MAX_CONNECTIONS)
     parser.set_defaults(request_read_timeout_ms=DEFAULT_REQUEST_READ_TIMEOUT_MS)
+    parser.set_defaults(skillfs_notify_auth_secret_file=None)
     return parser
 
 

@@ -8,6 +8,7 @@ BUSY = "busy"
 UNAVAILABLE = "unavailable"
 INTERNAL_ERROR = "internal_error"
 SHUTDOWN = "shutdown"
+AUTHENTICATION_FAILED = "authentication_failed"
 
 
 class DaemonError(Exception):
@@ -88,6 +89,13 @@ class ShutdownError(DaemonError):
 
     def __init__(self) -> None:
         super().__init__(SHUTDOWN, "daemon is shutting down")
+
+
+class AuthenticationError(DaemonError):
+    """A protected local protocol peer did not authenticate."""
+
+    def __init__(self) -> None:
+        super().__init__(AUTHENTICATION_FAILED, "SkillFS authentication failed")
 
 
 class DaemonRuntimePathError(DaemonError):

@@ -1914,6 +1914,132 @@ fn control_socket_without_trusted_peer_exe_fails_startup() {
 }
 
 #[test]
+fn trusted_peer_auth_modes_are_mutually_exclusive() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--control-socket",
+            "/run/skillfs-test.sock",
+            "--trusted-peer-exe",
+            "/usr/bin/env",
+            "--trusted-peer-key-file",
+            "/run/skillfs-test.key",
+        ])
+        .output()
+        .expect("invoke skillfs");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(!out.status.success());
+    assert!(combined.contains("mutually exclusive"), "got: {combined}");
+}
+
+#[test]
+fn trusted_peer_key_requires_explicit_socket() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--trusted-peer-key-file",
+            "/run/skillfs-test.key",
+        ])
+        .output()
+        .expect("invoke skillfs");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(!out.status.success());
+    assert!(
+        combined.contains("requires an explicit --control-socket"),
+        "got: {combined}"
+    );
+}
+
+#[test]
+fn trusted_peer_key_with_insecure_permissions_fails_startup() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let source = non_tmp_dir();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let socket_dir = non_tmp_dir();
+    let socket_path = socket_dir.path().join("control.sock");
+    let key_dir = non_tmp_dir();
+    let key_path = key_dir.path().join("peer.key");
+    std::fs::write(&key_path, [3_u8; 32]).expect("write key");
+    std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644)).expect("chmod key");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--control-socket",
+            socket_path.to_str().unwrap(),
+            "--trusted-peer-key-file",
+            key_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("invoke skillfs");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(!out.status.success());
+    assert!(
+        combined.contains("must not grant group or other permissions"),
+        "got: {combined}"
+    );
+    assert!(!socket_path.exists(), "socket must not bind with bad key");
+}
+
+#[test]
+fn container_hmac_control_rejects_plain_notify_channel() {
+    let source = empty_source();
+    let mount = tempfile::tempdir().expect("mount tempdir");
+    let out = Command::new(bin_path())
+        .args([
+            "mount",
+            source.path().to_str().unwrap(),
+            mount.path().to_str().unwrap(),
+            "--security",
+            "--activation-mode",
+            "file",
+            "--control-socket",
+            "/run/skillfs-test-control.sock",
+            "--trusted-peer-key-file",
+            "/run/skillfs-test.key",
+            "--notify-socket",
+            "/run/skillfs-test-notify.sock",
+        ])
+        .output()
+        .expect("invoke skillfs");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(!out.status.success());
+    assert!(
+        combined.contains("requires --notify-auth-key-file"),
+        "got: {combined}"
+    );
+}
+
+#[test]
 fn trusted_peer_exe_without_security_fails_startup() {
     // A trusted peer with no explicit --control-socket enables the control
     // plane on the default per-user endpoint, so it is no longer rejected

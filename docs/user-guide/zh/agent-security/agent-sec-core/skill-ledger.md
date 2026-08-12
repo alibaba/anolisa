@@ -275,11 +275,22 @@ payload 只有 `canonicalSkillDir`、`skillId`、`eventKind` 和 `paths` 四个�
 | Socket | 谁监听 | 默认路径 | 用途 |
 |---|---|---|---|
 | daemon socket | agent-sec-core daemon | `$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock`（`AGENT_SEC_DAEMON_SOCKET` 可覆盖） | SkillFS 用 `--notify-socket` 指向这里，发送变更通知 |
-| control socket | SkillFS | `/run/user/<uid>/skillfs/control.sock` | daemon 反向查询 `skill.resolveLiveSource`，并写 activation 元数据 |
+| control socket | SkillFS | `/run/user/<uid>/skillfs/control.sock`（`AGENT_SEC_SKILLFS_CONTROL_SOCKET` 可覆盖） | daemon 反向查询 `skill.resolveLiveSource`，并写 activation 元数据 |
 
-control socket 的路径**不要自定义**。Ledger 的 resolver 客户端只探测上表中的默认路径，
-没有配置项可以让它跟随 `--control-socket` 指定的其他路径；改了之后 Ledger 会静默按
-host 模式处理。SkillFS 与 daemon 还必须运行在相同 effective UID 下。
+宿主机部署通常继续使用默认 control path 和 executable peer 认证。Security-integrated
+container profile 使用显式共享 runtime path 和双向 HMAC 认证：
+
+```bash
+export AGENT_SEC_SKILLFS_CONTROL_SOCKET=/run/anolisa/skillfs/control.sock
+export AGENT_SEC_SKILLFS_CONTROL_AUTH_SECRET_FILE=/run/anolisa/auth/skillfs.key
+export AGENT_SEC_SKILLFS_NOTIFY_AUTH_SECRET_FILE=/run/anolisa/auth/skillfs.key
+```
+
+对应的 SkillFS 进程使用 `--trusted-peer-key-file` 和
+`--notify-auth-key-file`。绝对路径的 secret file 必须仅 owner 可访问，只挂载到
+SkillFS 和 agent-sec-core，不能挂载到 workload。未配置 HMAC 变量时，现有 plain
+notify 和 executable-authenticated control protocol 保持不变。已配置认证的 control
+socket 如果不存在或拒绝认证，会 fail closed，不会 fallback 到 host path resolution。
 
 Hermes 布局下 activation 流程携带的是嵌套身份（`category/skill`），而非扁平 skill 名；
 `skillId` 会保留两个分量。

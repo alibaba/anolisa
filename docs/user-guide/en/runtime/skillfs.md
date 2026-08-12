@@ -480,7 +480,7 @@ skills staying hidden rather than as an obvious error.
 For in-place activation and notify mounts, set `--ledger-backing-root` to a
 daemon-visible backing source path and enable the authenticated resolver.
 Notify v2 carries canonical identity only, so startup rejects an in-place
-notify configuration that omits `--trusted-peer-exe`. The same resolver
+notify configuration that omits authenticated control-peer configuration. The same resolver
 requirement applies to an out-of-place notify mount whenever it explicitly
 configures `--ledger-backing-root`:
 
@@ -512,8 +512,8 @@ skillfs mount /path/to/skills /mnt/skillfs \
 ```
 
 The socket requires `--security --activation-mode file`, is mutually exclusive
-with `--decision-command`, and requires a pinned trusted peer executable. Peer
-validation uses Linux peer credentials and executable identity checks.
+with `--decision-command`, and requires exactly one peer authentication mode.
+The host mode uses Linux peer credentials and executable identity checks.
 
 The packaged AgentSecCore daemon starts the Skill Ledger worker with
 `sys.executable`, which resolves to `/usr/bin/python3.11`; the worker is not a
@@ -539,9 +539,10 @@ priority:
 2. `[control_socket].path` in the config file
 3. the default per-user endpoint `/run/user/<uid>/skillfs/control.sock`
 
-A trusted peer with no explicit path uses the default endpoint; an explicit
-path with no trusted peer is a configuration error; neither leaves the control
-plane off. The default endpoint never falls back to `/tmp` or `/var/tmp` — if
+An executable peer with no explicit path uses the default endpoint; HMAC mode
+requires an explicit path. An explicit path with no peer mode is a
+configuration error; neither leaves the control plane off. The default endpoint
+never falls back to `/tmp` or `/var/tmp` — if
 `/run/user/<uid>` is unavailable, startup fails with an actionable error and
 you must pass `--control-socket` explicitly. A second instance never unlinks an
 active endpoint; only a confirmed-stale socket that SkillFS owns is reclaimed.
@@ -549,13 +550,40 @@ active endpoint; only a confirmed-stale socket that SkillFS owns is reclaimed.
 No `register`, `mountId`, or `generation` handshake is required — the endpoint
 is stable per UID and the resolver is queried directly.
 
-> **Do not use a custom endpoint in a joint deployment with Skill Ledger.** The
-> Skill Ledger resolver client only probes the default
-> `/run/user/<uid>/skillfs/control.sock`; no configuration key or command-line
-> option makes it follow a custom path. If you point `--control-socket` or
-> `[control_socket].path` elsewhere, Ledger fails to find the default socket and
-> silently falls back to host mode, canonical path resolution stops working, and
-> neither side reports an error. This is a current M1 limitation.
+The agent-sec-core resolver follows `AGENT_SEC_SKILLFS_CONTROL_SOCKET` when it
+is set. Without that variable it keeps probing the default per-user endpoint.
+
+#### Container HMAC profile
+
+Use the HMAC profile when SkillFS and agent-sec-core run in separate PID or
+mount namespaces. Both processes read the same absolute secret-file path from
+a Secret volume mounted only into those two trusted containers:
+
+```bash
+skillfs mount /var/lib/skillfs/source /var/lib/skillfs/shared/mount \
+  --foreground --allow-other \
+  --security --activation-mode file \
+  --notify-socket /run/anolisa/sec-core/daemon.sock \
+  --notify-auth-key-file /run/anolisa/auth/skillfs.key \
+  --control-socket /run/anolisa/skillfs/control.sock \
+  --trusted-peer-key-file /run/anolisa/auth/skillfs.key
+```
+
+Configure agent-sec-core with the matching paths:
+
+```bash
+export AGENT_SEC_DAEMON_SOCKET=/run/anolisa/sec-core/daemon.sock
+export AGENT_SEC_SKILLFS_NOTIFY_AUTH_SECRET_FILE=/run/anolisa/auth/skillfs.key
+export AGENT_SEC_SKILLFS_CONTROL_SOCKET=/run/anolisa/skillfs/control.sock
+export AGENT_SEC_SKILLFS_CONTROL_AUTH_SECRET_FILE=/run/anolisa/auth/skillfs.key
+```
+
+The secret file must be an absolute, no-follow regular file owned by the
+effective user, grant no group or other permissions, and contain 32–4096 raw
+bytes. HMAC mode does not fall back to executable or plain authentication.
+SkillFS and agent-sec-core must see the physical source at the same absolute
+path because the resolver continues to return `transport: shared_path`.
+Do not mount the source or Secret into the workload container.
 
 Supported JSONL request examples:
 
@@ -694,12 +722,14 @@ shares the same file for compatibility.
 | `--activation-mode file` | Consume activation JSON/xattr state |
 | `--activation-reload-mode poll` | Poll activation after notify triggers |
 | `--notify-socket <PATH>` | Send mutation events to an external daemon |
+| `--notify-auth-key-file <PATH>` | Mutually authenticate notify connections with an owner-only shared key file |
 | `--activation-events-log <PATH>` | Write activation protocol events as JSONL |
 | `--audit-log <PATH>` | Write filesystem audit events as JSONL |
 | `--audit-queue-capacity <N>` | Queue size for the audit writer thread; `0` uses the built-in default, and it only applies with `--audit-log` |
 | `--events-log <PATH>` | Write legacy security decision events as JSONL; only applies with `--security --decision-command` |
-| `--control-socket <PATH>` | Override the control socket endpoint (default: `/run/user/<uid>/skillfs/control.sock`); do not use in a joint deployment with Skill Ledger |
+| `--control-socket <PATH>` | Override the control socket endpoint (default for executable mode: `/run/user/<uid>/skillfs/control.sock`) |
 | `--trusted-peer-exe <PATH>` | Pin the trusted control socket peer (enables the control plane on the default endpoint if no path is given) |
+| `--trusted-peer-key-file <PATH>` | Enable mutually authenticated container peer mode; requires an explicit control socket and is mutually exclusive with `--trusted-peer-exe` |
 | `--trusted-peer-uid <UID>` | Additionally constrain the control socket peer's UID (from `SO_PEERCRED`) |
 | `--trusted-peer-gid <GID>` | Additionally constrain the control socket peer's GID (from `SO_PEERCRED`) |
 | `--trusted-writer-exe <PATH>` | Pin a trusted mount-path writer |

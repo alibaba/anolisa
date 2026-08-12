@@ -40,6 +40,14 @@
 
 安全检查工作流（Phase 1-3 + 安全决策）由 `agent-sec-cli` 提供，各阶段通过独立 CLI 子命令调用。
 
+Skill Ledger 与容器化 SkillFS 联合部署时，agent-sec-core 可以使用 owner-only 的共享
+secret file，对 resolver 和 notify 流量进行双向认证。通过
+`AGENT_SEC_SKILLFS_CONTROL_SOCKET`、
+`AGENT_SEC_SKILLFS_CONTROL_AUTH_SECRET_FILE` 和
+`AGENT_SEC_SKILLFS_NOTIFY_AUTH_SECRET_FILE` 配置显式 SkillFS control socket 和
+secret path。现有宿主机部署继续保持 plain notify 和 executable-authenticated control
+行为。详见 [Skill Ledger 指南](../../docs/user-guide/zh/agent-security/agent-sec-core/skill-ledger.md)。
+
 ## 安全检查工作流
 
 每次 Agent 执行前，按顺序完成以下安全检查（Phase 1-3），**全部通过后才允许进入安全决策流程**。

@@ -70,15 +70,17 @@ symlink-resolved alias 下的路径投影回 canonical 空间。相对路径和�
 
 ## 3. SkillFS Resolver 合同
 
-Resolver 复用 SkillFS trusted control socket 的 JSONL 协议。M1 固定使用：
+Resolver 复用 SkillFS trusted control socket 的 JSONL 业务协议。默认 endpoint 为：
 
 ```text
 /run/user/<effective-uid>/skillfs/control.sock
 ```
 
-Ledger 通过 `os.geteuid()` 计算 endpoint，不增加 Ledger 配置项，也不通过 notify 传递
-endpoint、mount id 或 generation。SkillFS 与 Ledger daemon/CLI 必须位于同一 effective UID 和
-安全域，并且 SkillFS 必须信任实际发起请求的进程。
+未设置 `AGENT_SEC_SKILLFS_CONTROL_SOCKET` 时，Ledger 通过 `os.geteuid()` 计算默认
+endpoint。容器 profile 使用该变量指定共享 runtime volume 中的 socket，并通过
+`AGENT_SEC_SKILLFS_CONTROL_AUTH_SECRET_FILE` 显式启用 mutual HMAC preface。认证完成后
+仍发送下述 schema v1 request；认证失败不得降级到 host path。Host profile 不设置这两个
+变量，继续使用默认 endpoint 和原有 trusted executable 认证。
 
 请求：
 
@@ -142,7 +144,9 @@ SkillFS 发现受管 source 变化后，调用现有 daemon method：
 skill_ledger.skillfs_notify_change
 ```
 
-通知使用 daemon Unix socket 的单连接 NDJSON request frame。SkillFS 当前会发送本地生成的
+通知使用 daemon Unix socket 的单连接 NDJSON request frame。设置
+`AGENT_SEC_SKILLFS_NOTIFY_AUTH_SECRET_FILE` 后，daemon 先完成 mutual HMAC preface，
+plain notify 必须被拒绝；其他 daemon method 保持原有 plain 协议兼容性。SkillFS 当前会发送本地生成的
 `id`，但 daemon 不消费该字段，而是为请求生成自己的 `request_id`。daemon socket 由
 `AGENT_SEC_DAEMON_SOCKET` 指定，未指定时使用
 `$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock`。
@@ -256,8 +260,8 @@ canonical 身份来源。Ledger v2 不读取该日志。
 
 - SkillFS 与 Skill Ledger 必须协调升级：Ledger 明确拒绝 notify v1。
 - 既有 `managedSkillDirs` 中的 live/backing path 必须迁移为 canonical path；Ledger 不自动猜测。
-- M1 只使用默认 resolver endpoint。SkillFS 配置自定义 control socket 时，Ledger 无法跟随该
-  endpoint；若默认 socket 不存在，将按 host 模式处理。
+- Host profile 默认使用 per-UID resolver endpoint；容器 profile 必须同时显式配置 control
+  socket 和 auth secret file。只有未显式配置 endpoint 且默认 socket 不存在时才进入 host 模式。
 - M1 不引入 mount registry、mountId、generation、endpoint 传递或 canonical/live 缓存。
 - SkillFS 与 Ledger 必须使用相同 effective UID，且 resolver control socket 必须授权实际调用的
   daemon 和 CLI 进程。

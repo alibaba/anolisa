@@ -512,8 +512,10 @@ Related security surfaces:
 - `--notify-socket <PATH>` sends debounced skill mutation notifications to an
   external daemon. Notify v2 identifies the Skill with its canonical path and
   complete flat or Hermes `skillId`; live/backing paths are resolved separately.
+  `--notify-auth-key-file <PATH>` enables mutual HMAC authentication for a
+  containerized sec-core peer without changing the notify v2 business payload.
   In-place notify mounts, and any notify mount with `--ledger-backing-root`,
-  require `--trusted-peer-exe` so the authenticated resolver is available
+  require an authenticated control-peer mode so the resolver is available
   before the daemon accesses the source.
 - `--activation-events-log <PATH>` writes activation protocol events as JSONL.
 - `--activation-reload-mode poll` re-reads activation state after notify events
@@ -532,19 +534,19 @@ Related security surfaces:
 - `--trusted-writer <NAME>` is a deprecated compatibility gate based on Linux
   TGID `comm`; process names can be spoofed and this should not be used for
   production trust.
-- `--control-socket <PATH>` with `--trusted-peer-exe <PATH>` starts a trusted
-  Unix socket control plane. Trusted peers can write activation JSON or xattr
-  through methods such as `meta.writeActivation` and
-  `meta.setActivationXattr`. The packaged Skill Ledger worker's executable is
-  `/usr/bin/python3.11` because it starts through `sys.executable`, not a
-  `skill-ledger` launcher.
+- `--control-socket <PATH>` starts a trusted Unix socket control plane when
+  exactly one peer mode is configured. `--trusted-peer-exe <PATH>` preserves
+  host executable authentication; `--trusted-peer-key-file <PATH>` enables an
+  explicit container HMAC profile and requires an explicit socket path.
+  Trusted peers can write activation JSON or xattr through methods such as
+  `meta.writeActivation` and `meta.setActivationXattr`.
 - The control plane is opt-in and authenticated. The endpoint is resolved by
   priority: CLI `--control-socket` > `[control_socket].path` in the config >
   the default per-user endpoint `/run/user/<uid>/skillfs/control.sock`. A
-  trusted peer without an explicit path uses the default endpoint; an explicit
-  path without a trusted peer is a configuration error; neither leaves the
-  control plane off. The default never falls back to `/tmp` or `/var/tmp`, and
-  a second instance never unlinks an active endpoint.
+  executable peer without an explicit path uses the default endpoint; HMAC
+  mode always requires an explicit path; an explicit path without a peer mode
+  is a configuration error. The default never falls back to `/tmp` or
+  `/var/tmp`, and a second instance never unlinks an active endpoint.
 - `skill.resolveLiveSource` is a read-only query that maps a caller-supplied
   canonical Skill directory to its physical live/backing source. It returns
   `managed=true` (with the derived `skillId`, `relativeSkillDir`,

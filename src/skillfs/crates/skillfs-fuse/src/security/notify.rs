@@ -34,6 +34,9 @@ use tracing::{debug, info, warn};
 
 use super::activation_reload::ActivationReloadController;
 use super::activation_watcher::WatcherRegistrar;
+#[cfg(test)]
+use super::auth::authenticate_server;
+use super::auth::{NOTIFY_CLIENT_DOMAIN, NOTIFY_SERVER_DOMAIN, SharedSecret, authenticate_client};
 use super::lifecycle::is_reserved_lifecycle_name;
 use super::path::is_skill_meta_path;
 use super::protocol_events::{NoopProtocolEventWriter, ProtocolEvent, ProtocolEventWriter};
@@ -171,6 +174,7 @@ pub enum NotifyError {
     Timeout,
     InvalidResponse { body: String },
     Rejected { body: String },
+    Authentication(String),
 }
 
 impl std::fmt::Display for NotifyError {
@@ -186,6 +190,7 @@ impl std::fmt::Display for NotifyError {
             Self::Rejected { body } => {
                 write!(f, "notify: rejected: {body}")
             }
+            Self::Authentication(message) => write!(f, "notify: authentication failed: {message}"),
         }
     }
 }
@@ -206,6 +211,7 @@ pub trait NotifyClient: Send + Sync {
 pub struct UnixSocketNotifyClient {
     socket_path: PathBuf,
     timeout: Duration,
+    auth_secret: Option<SharedSecret>,
 }
 
 impl UnixSocketNotifyClient {
@@ -213,19 +219,44 @@ impl UnixSocketNotifyClient {
         Self {
             socket_path: socket_path.into(),
             timeout,
+            auth_secret: None,
         }
+    }
+
+    /// Creates a notify client that mutually authenticates before sending
+    /// the unchanged notify v2 business frame.
+    pub fn new_authenticated(
+        socket_path: impl Into<PathBuf>,
+        timeout: Duration,
+        key_file: &Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self {
+            socket_path: socket_path.into(),
+            timeout,
+            auth_secret: Some(SharedSecret::load(key_file)?),
+        })
     }
 }
 
 impl NotifyClient for UnixSocketNotifyClient {
     fn send(&self, event: &NotifyChangeEvent) -> Result<(), NotifyError> {
-        let stream = UnixStream::connect(&self.socket_path).map_err(NotifyError::Connect)?;
+        let mut stream = UnixStream::connect(&self.socket_path).map_err(NotifyError::Connect)?;
         stream
             .set_write_timeout(Some(self.timeout))
             .map_err(NotifyError::Write)?;
         stream
             .set_read_timeout(Some(self.timeout))
             .map_err(NotifyError::Read)?;
+
+        if let Some(secret) = &self.auth_secret {
+            authenticate_client(
+                &mut stream,
+                secret,
+                NOTIFY_CLIENT_DOMAIN,
+                NOTIFY_SERVER_DOMAIN,
+            )
+            .map_err(|error| NotifyError::Authentication(error.to_string()))?;
+        }
 
         let mut writer = std::io::BufWriter::new(&stream);
         serde_json::to_writer(&mut writer, event)
@@ -1900,6 +1931,57 @@ mod tests {
             result.is_ok(),
             "normal response must be accepted: {result:?}"
         );
+    }
+
+    #[test]
+    fn authenticated_unix_socket_client_handshakes_before_notify() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("test.sock");
+        let key_path = dir.path().join("key");
+        std::fs::write(&key_path, [5_u8; 32]).unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let client = UnixSocketNotifyClient::new_authenticated(
+            &sock_path,
+            Duration::from_secs(5),
+            &key_path,
+        )
+        .unwrap();
+        let server_secret = SharedSecret::load(&key_path).unwrap();
+        let event = NotifyChangeEvent::new(
+            "/srv/skills/alpha",
+            "alpha",
+            NotifyEventKind::Write,
+            vec![],
+            5000,
+        );
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            authenticate_server(
+                &mut stream,
+                &server_secret,
+                NOTIFY_CLIENT_DOMAIN,
+                NOTIFY_SERVER_DOMAIN,
+            )
+            .unwrap();
+            let mut request = String::new();
+            BufReader::new(&stream).read_line(&mut request).unwrap();
+            assert!(request.contains(NOTIFY_METHOD));
+            let mut writer = std::io::BufWriter::new(&stream);
+            writer
+                .write_all(br#"{"ok":true,"data":{"schemaVersion":2,"accepted":true}}"#)
+                .unwrap();
+            writer.write_all(b"\n").unwrap();
+            writer.flush().unwrap();
+        });
+
+        let result = client.send(&event);
+        handle.join().unwrap();
+        assert!(result.is_ok(), "authenticated notify failed: {result:?}");
     }
 
     #[test]

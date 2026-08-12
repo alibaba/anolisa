@@ -1,7 +1,10 @@
 """Tests for daemon client/server integration."""
 
 import asyncio
+import base64
 import contextlib
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -300,6 +303,161 @@ def test_daemon_client_can_disable_ambient_trace_context_inheritance(
 
     request = captured["request"]
     assert request.trace_context == {"trace_id": "invocation-1"}
+
+
+def test_notify_auth_gate_accepts_proof_and_preserves_plain_health(
+    tmp_path: Path,
+) -> None:
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        secret_path = tmp_path / "notify.secret"
+        secret = bytes(range(32))
+        secret_path.write_bytes(secret)
+        secret_path.chmod(0o600)
+        server = DaemonServer(
+            socket_path=socket_path,
+            skillfs_notify_auth_secret_file=secret_path,
+        )
+        await server.start()
+        try:
+            health = await _send_daemon_request(
+                socket_path,
+                DaemonRequest(method="daemon.health"),
+            )
+            notify = await _send_authenticated_notify(socket_path, secret)
+            return health, notify
+        finally:
+            await server.stop()
+
+    health, notify = asyncio.run(scenario())
+
+    assert health.ok is True
+    assert notify.ok is True
+    assert notify.data["accepted"] is True
+
+
+def test_notify_auth_gate_rejects_plain_notify(tmp_path: Path) -> None:
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        secret_path = tmp_path / "notify.secret"
+        secret_path.write_bytes(b"x" * 32)
+        secret_path.chmod(0o600)
+        server = DaemonServer(
+            socket_path=socket_path,
+            skillfs_notify_auth_secret_file=secret_path,
+        )
+        await server.start()
+        try:
+            return await _send_daemon_request(socket_path, _notify_request())
+        finally:
+            await server.stop()
+
+    response = asyncio.run(scenario())
+
+    assert response.ok is False
+    assert response.error == {
+        "code": "authentication_failed",
+        "message": "SkillFS authentication failed",
+    }
+
+
+def test_notify_auth_session_cannot_call_other_daemon_methods(tmp_path: Path) -> None:
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        secret_path = tmp_path / "notify.secret"
+        secret = b"x" * 32
+        secret_path.write_bytes(secret)
+        secret_path.chmod(0o600)
+        server = DaemonServer(
+            socket_path=socket_path,
+            skillfs_notify_auth_secret_file=secret_path,
+        )
+        await server.start()
+        try:
+            return await _send_authenticated_notify(
+                socket_path,
+                secret,
+                request=DaemonRequest(method="daemon.health"),
+            )
+        finally:
+            await server.stop()
+
+    response = asyncio.run(scenario())
+
+    assert response.ok is False
+    assert response.error == {
+        "code": "authentication_failed",
+        "message": "SkillFS authentication failed",
+    }
+
+
+def test_notify_auth_gate_rejects_wrong_proof(tmp_path: Path) -> None:
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        secret_path = tmp_path / "notify.secret"
+        secret_path.write_bytes(b"x" * 32)
+        secret_path.chmod(0o600)
+        server = DaemonServer(
+            socket_path=socket_path,
+            skillfs_notify_auth_secret_file=secret_path,
+        )
+        await server.start()
+        try:
+            return await _send_authenticated_notify(socket_path, b"z" * 32)
+        finally:
+            await server.stop()
+
+    response = asyncio.run(scenario())
+
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error["code"] == "authentication_failed"
+
+
+def test_notify_auth_failure_logs_do_not_disclose_credentials(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    secret = b"correct-secret-material-32-bytes!"
+    wrong_secret = b"wrong-secret-material-is-32-bytes!"
+
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        secret_path = tmp_path / "notify.secret"
+        secret_path.write_bytes(secret)
+        secret_path.chmod(0o600)
+        server = DaemonServer(
+            socket_path=socket_path,
+            skillfs_notify_auth_secret_file=secret_path,
+        )
+        await server.start()
+        try:
+            return await _send_authenticated_notify(socket_path, wrong_secret)
+        finally:
+            await server.stop()
+
+    caplog.set_level(logging.DEBUG)
+    response = asyncio.run(scenario())
+    rendered_logs = "\n".join(record.getMessage() for record in caplog.records)
+
+    assert response.ok is False
+    assert secret.decode("ascii") not in rendered_logs
+    assert wrong_secret.decode("ascii") not in rendered_logs
+
+
+def test_notify_remains_plain_when_auth_is_not_configured(tmp_path: Path) -> None:
+    async def scenario():
+        socket_path = tmp_path / "runtime" / "daemon.sock"
+        server = DaemonServer(socket_path=socket_path)
+        await server.start()
+        try:
+            return await _send_daemon_request(socket_path, _notify_request())
+        finally:
+            await server.stop()
+
+    response = asyncio.run(scenario())
+
+    assert response.ok is True
 
 
 def test_daemon_health_reachable_disables_ambient_trace_context(monkeypatch) -> None:
@@ -1466,3 +1624,66 @@ async def _send_daemon_request(
     writer.close()
     await writer.wait_closed()
     return parse_response_line(line)
+
+
+def _notify_request() -> DaemonRequest:
+    return DaemonRequest(
+        method="skill_ledger.skillfs_notify_change",
+        params={
+            "schemaVersion": 2,
+            "canonicalSkillDir": "/skills/weather",
+            "skillId": "weather",
+            "eventKind": "write",
+            "paths": ["SKILL.md"],
+        },
+    )
+
+
+async def _send_authenticated_notify(
+    socket_path: Path,
+    secret: bytes,
+    *,
+    request: DaemonRequest | None = None,
+) -> DaemonResponse:
+    reader, writer = await asyncio.open_unix_connection(str(socket_path))
+    writer.write(b'{"authVersion":"1","type":"auth.init"}\n')
+    await writer.drain()
+    challenge = json.loads((await reader.readline()).decode("utf-8"))
+    nonce = base64.b64decode(challenge["nonce"], validate=True)
+    client_proof = hmac.new(
+        secret,
+        b"anolisa.skillfs.notify.client.v1\0" + nonce,
+        hashlib.sha256,
+    ).digest()
+    writer.write(
+        json.dumps(
+            {
+                "authVersion": "1",
+                "type": "auth.proof",
+                "proof": base64.b64encode(client_proof).decode("ascii"),
+            }
+        ).encode("utf-8")
+        + b"\n"
+    )
+    await writer.drain()
+    response_line = await reader.readline()
+    response_payload = json.loads(response_line.decode("utf-8"))
+    if response_payload.get("type") != "auth.ok":
+        writer.close()
+        await writer.wait_closed()
+        return parse_response_line(response_line)
+    expected_server_proof = hmac.new(
+        secret,
+        b"anolisa.skillfs.notify.server.v1\0" + nonce,
+        hashlib.sha256,
+    ).digest()
+    assert hmac.compare_digest(
+        base64.b64decode(response_payload["proof"], validate=True),
+        expected_server_proof,
+    )
+    writer.write(serialize_request(request or _notify_request()))
+    await writer.drain()
+    response = parse_response_line(await reader.readline())
+    writer.close()
+    await writer.wait_closed()
+    return response

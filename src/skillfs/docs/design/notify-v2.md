@@ -124,6 +124,13 @@ The sec-core consumer switches directly to v2 and must:
 5. return `schemaVersion=2` with `accepted=true` only after accepting the
    event.
 
+The v2 business frame stays unchanged in both authentication profiles. In the
+explicit container profile, SkillFS and sec-core first complete the bounded
+mutual HMAC preface from
+[SkillFS Container Peer Authentication](container-peer-authentication.md).
+When that profile is configured, sec-core rejects a plain notify request and
+SkillFS verifies the server proof before sending the v2 frame.
+
 An in-place notify v2 mount, or any notify mount with an explicit backing root,
 starts only when the authenticated S1 resolver control plane is enabled. The
 canonical path becomes the FUSE over-mount in-place, while an out-of-place

@@ -17,10 +17,12 @@ live/backing source, and is it yours to manage?" S1 provides:
 2. A read-only `skill.resolveLiveSource` query answering the mapping above
    with a strict three-state contract.
 
-Everything reuses the existing control socket, its `schemaVersion "1"`
-envelope, and its `SO_PEERCRED` + trusted-executable-identity +
-process-starttime authentication. No second authentication mechanism and
-no new protocol version are introduced.
+Everything reuses the existing control socket and its `schemaVersion "1"`
+business envelope. The host profile retains its `SO_PEERCRED` +
+trusted-executable-identity + process-starttime authentication unchanged. An
+explicit container profile may instead complete the HMAC preface defined in
+[SkillFS Container Peer Authentication](container-peer-authentication.md).
+Neither profile changes the resolver business protocol version.
 
 ## Endpoint
 
@@ -50,10 +52,13 @@ The control plane stays **opt-in and authenticated**:
 | no | no | control plane stays off |
 | yes | yes | use the explicit path |
 
-Authentication is unchanged: `SO_PEERCRED` credentials, the peer's
-`/proc/<pid>/exe` `(dev, ino)` pinned against the configured trusted
-executable, and `/proc/<pid>/stat` starttime bracketing for PID-reuse
-defense.
+Authentication is selected as one mutually exclusive profile. The host
+profile uses `SO_PEERCRED`, pins the peer's `/proc/<pid>/exe` `(dev, ino)` to
+the configured executable, and brackets the lookup with
+`/proc/<pid>/stat` starttime for PID-reuse defense. The container profile
+requires an explicit endpoint and shared-key mutual authentication before the
+same resolver request is read. It never falls back to host authentication or
+plain NDJSON after an authentication failure.
 
 A single SkillFS instance may in the future manage multiple canonical
 roots behind this same endpoint, selecting the live source by

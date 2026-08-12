@@ -305,6 +305,10 @@ enum Commands {
         #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_LEDGER)]
         notify_socket: Option<PathBuf>,
 
+        /// Shared-key file used to authenticate the SkillFS notify client.
+        #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_LEDGER)]
+        notify_auth_key_file: Option<PathBuf>,
+
         /// Write daemon protocol events as JSONL.
         ///
         /// Records debounced FUSE mutations that should be reconciled by an
@@ -341,8 +345,8 @@ enum Commands {
         /// channel. Overrides the default per-user endpoint
         /// `/run/user/<uid>/skillfs/control.sock`. SkillFS creates a
         /// control socket at this path and accepts connections from
-        /// trusted peers; peer identity is verified via `SO_PEERCRED` +
-        /// executable identity. Requires `--trusted-peer-exe`. Linux only.
+        /// trusted peers. Requires exactly one of `--trusted-peer-exe` or
+        /// `--trusted-peer-key-file`. Linux only.
         #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_TRUSTED_PEER)]
         control_socket: Option<PathBuf>,
 
@@ -354,6 +358,11 @@ enum Commands {
         /// endpoint `/run/user/<uid>/skillfs/control.sock`.
         #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_TRUSTED_PEER)]
         trusted_peer_exe: Option<PathBuf>,
+
+        /// Shared-key file for container-safe control socket authentication.
+        /// Mutually exclusive with `--trusted-peer-exe`.
+        #[arg(long, value_name = "PATH", help_heading = help_text::HEADING_TRUSTED_PEER)]
+        trusted_peer_key_file: Option<PathBuf>,
 
         /// Optional trusted peer UID constraint for control
         /// socket authentication. When set, the peer's UID (from
@@ -558,11 +567,13 @@ async fn run(
             config,
             activation_mode,
             notify_socket,
+            notify_auth_key_file,
             activation_events_log,
             activation_reload_mode,
             ledger_backing_root,
             control_socket,
             trusted_peer_exe,
+            trusted_peer_key_file,
             trusted_peer_uid,
             trusted_peer_gid,
             skill_layout,
@@ -609,11 +620,13 @@ async fn run(
                 config,
                 activation_mode,
                 notify_socket,
+                notify_auth_key_file,
                 activation_events_log,
                 activation_reload_mode,
                 ledger_backing_root,
                 control_socket,
                 trusted_peer_exe,
+                trusted_peer_key_file,
                 trusted_peer_uid,
                 trusted_peer_gid,
                 skill_layout,
@@ -838,11 +851,13 @@ async fn cmd_mount(
     config_path: Option<PathBuf>,
     activation_mode_raw: Option<String>,
     notify_socket: Option<PathBuf>,
+    notify_auth_key_file: Option<PathBuf>,
     activation_events_log: Option<PathBuf>,
     activation_reload_mode_raw: Option<String>,
     ledger_backing_root: Option<PathBuf>,
     control_socket: Option<PathBuf>,
     trusted_peer_exe: Option<PathBuf>,
+    trusted_peer_key_file: Option<PathBuf>,
     trusted_peer_uid: Option<u32>,
     trusted_peer_gid: Option<u32>,
     skill_layout_raw: Option<String>,
@@ -1008,11 +1023,26 @@ async fn cmd_mount(
             .as_ref()
             .and_then(|c| c.control_socket_path().map(PathBuf::from))
     });
-    let trusted_peer_exe = trusted_peer_exe.or_else(|| {
+    let config_peer_exe = || {
         file_config
             .as_ref()
             .and_then(|c| c.control_socket_trusted_peer_exe().map(PathBuf::from))
-    });
+    };
+    let config_peer_key = || {
+        file_config
+            .as_ref()
+            .and_then(|c| c.control_socket_trusted_peer_key_file().map(PathBuf::from))
+    };
+    // An authentication selector supplied on the CLI overrides the selector
+    // in the config as one unit; otherwise a CLI key plus config exe would
+    // accidentally enable two modes instead of applying normal precedence.
+    let (trusted_peer_exe, trusted_peer_key_file) = match (trusted_peer_exe, trusted_peer_key_file)
+    {
+        (Some(exe), None) => (Some(exe), None),
+        (None, Some(key)) => (None, Some(key)),
+        (Some(exe), Some(key)) => (Some(exe), Some(key)),
+        (None, None) => (config_peer_exe(), config_peer_key()),
+    };
     let trusted_peer_uid = trusted_peer_uid.or_else(|| {
         file_config
             .as_ref()
@@ -1033,17 +1063,25 @@ async fn cmd_mount(
     // control plane binds the default per-user endpoint (resolved below).
     // Only an explicit socket path without a trusted peer is an error —
     // the control plane is always authenticated.
-    if let (Some(p), None) = (&control_socket, &trusted_peer_exe) {
+    if trusted_peer_exe.is_some() && trusted_peer_key_file.is_some() {
+        return Err("--trusted-peer-exe and --trusted-peer-key-file are mutually exclusive".into());
+    }
+    if trusted_peer_key_file.is_some() && control_socket.is_none() {
+        return Err("--trusted-peer-key-file requires an explicit --control-socket path".into());
+    }
+    let has_trusted_peer = trusted_peer_exe.is_some() || trusted_peer_key_file.is_some();
+    if control_socket.is_some() && !has_trusted_peer {
+        let p = control_socket.as_ref().expect("presence checked above");
         return Err(format!(
-            "--control-socket {} requires a trusted peer (--trusted-peer-exe \
-             or [control_socket].trusted_peer_exe)",
+            "--control-socket {} requires a trusted peer authentication mode; \
+             configure exactly one of --trusted-peer-exe or --trusted-peer-key-file",
             p.display()
         )
         .into());
     }
     // The control plane is enabled by either an explicit socket path or a
     // trusted peer (which selects the default endpoint).
-    let control_plane_enabled = control_socket.is_some() || trusted_peer_exe.is_some();
+    let control_plane_enabled = control_socket.is_some() || has_trusted_peer;
     if control_plane_enabled {
         if !security {
             return Err("--control-socket requires --security (the control socket \
@@ -1086,6 +1124,11 @@ async fn cmd_mount(
             .as_ref()
             .and_then(|c| c.notify_socket_path().map(PathBuf::from))
     });
+    let notify_auth_key_file = notify_auth_key_file.or_else(|| {
+        file_config
+            .as_ref()
+            .and_then(|c| c.notify_auth_key_file().map(PathBuf::from))
+    });
     let notify_timeout_ms = file_config
         .as_ref()
         .and_then(|c| c.notify_timeout_ms())
@@ -1114,6 +1157,16 @@ async fn cmd_mount(
                     .into(),
             );
         }
+    }
+    if notify_auth_key_file.is_some() && notify_socket.is_none() {
+        return Err("--notify-auth-key-file requires --notify-socket".into());
+    }
+    if trusted_peer_key_file.is_some() && notify_socket.is_some() && notify_auth_key_file.is_none()
+    {
+        return Err(
+            "container HMAC control mode requires --notify-auth-key-file when --notify-socket is enabled"
+                .into(),
+        );
     }
 
     // Merge activation-events-log: CLI flag overrides config file.
@@ -1317,7 +1370,7 @@ async fn cmd_mount(
         return Err(
             "--notify-socket with an in-place mount or --ledger-backing-root requires the \
              authenticated live-source resolver; \
-             configure --trusted-peer-exe (and optionally --control-socket) so the daemon \
+             configure --trusted-peer-exe or the container HMAC peer mode so the daemon \
              can resolve canonicalSkillDir before accessing the source"
                 .into(),
         );
@@ -1824,40 +1877,45 @@ async fn cmd_mount(
             None
         };
 
-    let notify_controller: Option<Arc<NotifyController>> =
-        if let Some(ref socket_path) = notify_socket {
-            let client = Arc::new(UnixSocketNotifyClient::new(
-                socket_path.clone(),
-                std::time::Duration::from_millis(notify_timeout_ms),
-            ));
-            let ctrl = build_notify_controller(
-                client,
-                &runtime_roots,
-                notify_timeout_ms,
-                protocol_event_writer.clone(),
-                reload_controller.clone(),
-            );
-            info!(
-                socket = %socket_path.display(),
-                timeout_ms = notify_timeout_ms,
-                reload = reload_mode != ReloadMode::Off,
-                "notify: change client enabled (Unix socket)"
-            );
-            Some(ctrl)
-        } else if activation_events_log.is_some() {
-            let client = Arc::new(skillfs_fuse::security::NoopNotifyClient);
-            let ctrl = build_notify_controller(
-                client,
-                &runtime_roots,
-                DEFAULT_NOTIFY_TIMEOUT_MS,
-                protocol_event_writer.clone(),
-                reload_controller.clone(),
-            );
-            info!("notify: protocol event log only (no socket)");
-            Some(ctrl)
-        } else {
-            None
+    let notify_controller: Option<Arc<NotifyController>> = if let Some(ref socket_path) =
+        notify_socket
+    {
+        let timeout = std::time::Duration::from_millis(notify_timeout_ms);
+        let client = match notify_auth_key_file.as_deref() {
+            Some(key_file) => Arc::new(
+                UnixSocketNotifyClient::new_authenticated(socket_path.clone(), timeout, key_file)
+                    .map_err(|e| format!("--notify-auth-key-file '{}': {e}", key_file.display()))?,
+            ),
+            None => Arc::new(UnixSocketNotifyClient::new(socket_path.clone(), timeout)),
         };
+        let ctrl = build_notify_controller(
+            client,
+            &runtime_roots,
+            notify_timeout_ms,
+            protocol_event_writer.clone(),
+            reload_controller.clone(),
+        );
+        info!(
+            socket = %socket_path.display(),
+            timeout_ms = notify_timeout_ms,
+            reload = reload_mode != ReloadMode::Off,
+            "notify: change client enabled (Unix socket)"
+        );
+        Some(ctrl)
+    } else if activation_events_log.is_some() {
+        let client = Arc::new(skillfs_fuse::security::NoopNotifyClient);
+        let ctrl = build_notify_controller(
+            client,
+            &runtime_roots,
+            DEFAULT_NOTIFY_TIMEOUT_MS,
+            protocol_event_writer.clone(),
+            reload_controller.clone(),
+        );
+        info!("notify: protocol event log only (no socket)");
+        Some(ctrl)
+    } else {
+        None
+    };
 
     // Merge trusted-writer-exe: CLI flag overrides config file.
     let trusted_writer_exe = trusted_writer_exe.or_else(|| {
@@ -1952,10 +2010,7 @@ async fn cmd_mount(
             EndpointResolution, classify_control_socket_endpoint,
             resolve_default_control_socket_endpoint,
         };
-        match classify_control_socket_endpoint(
-            control_socket.as_deref(),
-            trusted_peer_exe.is_some(),
-        ) {
+        match classify_control_socket_endpoint(control_socket.as_deref(), has_trusted_peer) {
             EndpointResolution::Explicit(path) => Some(path),
             EndpointResolution::UseDefault => {
                 // Trusted peer, no explicit path: bind the default per-user
@@ -1966,7 +2021,7 @@ async fn cmd_mount(
             // path without a trusted peer.
             EndpointResolution::MissingTrustedPeer(p) => {
                 return Err(format!(
-                    "--control-socket {} requires --trusted-peer-exe",
+                    "--control-socket {} requires a trusted peer authentication mode",
                     p.display()
                 )
                 .into());
@@ -1979,56 +2034,71 @@ async fn cmd_mount(
     //
     // Hermes layout is compatible: the resolver and activation write methods
     // use full layout-relative skill ids such as `category/skill`.
-    let control_socket_config: Option<ControlSocketConfig> =
-        match (&effective_socket_path, &trusted_peer_exe) {
-            (Some(socket_path), Some(exe_path)) => {
-                #[cfg(not(target_os = "linux"))]
-                return Err(
-                    "--control-socket requires Linux (SO_PEERCRED, /proc/<pid>/exe)".into(),
+    let control_socket_server: Option<ControlSocketServer> = match (
+        &effective_socket_path,
+        &trusted_peer_exe,
+        &trusted_peer_key_file,
+    ) {
+        (Some(socket_path), Some(exe_path), None) => {
+            #[cfg(not(target_os = "linux"))]
+            return Err("--control-socket requires Linux (SO_PEERCRED, /proc/<pid>/exe)".into());
+
+            #[cfg(target_os = "linux")]
+            {
+                use skillfs_fuse::security::FileId;
+                use std::os::unix::fs::MetadataExt;
+
+                let canonical = std::fs::canonicalize(exe_path)
+                    .map_err(|e| format!("--trusted-peer-exe '{}': {e}", exe_path.display()))?;
+                let meta = std::fs::metadata(&canonical)
+                    .map_err(|e| format!("--trusted-peer-exe '{}': {e}", canonical.display()))?;
+                if !meta.is_file() {
+                    return Err(format!(
+                        "--trusted-peer-exe '{}': not a regular file",
+                        canonical.display()
+                    )
+                    .into());
+                }
+                let file_id = FileId {
+                    dev: meta.dev(),
+                    ino: meta.ino(),
+                };
+
+                info!(
+                    control_socket = %socket_path.display(),
+                    trusted_peer_exe = %canonical.display(),
+                    trusted_peer_file_id = %file_id,
+                    "control socket enabled"
                 );
 
-                #[cfg(target_os = "linux")]
-                {
-                    use skillfs_fuse::security::FileId;
-                    use std::os::unix::fs::MetadataExt;
-
-                    let canonical = std::fs::canonicalize(exe_path)
-                        .map_err(|e| format!("--trusted-peer-exe '{}': {e}", exe_path.display()))?;
-                    let meta = std::fs::metadata(&canonical).map_err(|e| {
-                        format!("--trusted-peer-exe '{}': {e}", canonical.display())
-                    })?;
-                    if !meta.is_file() {
-                        return Err(format!(
-                            "--trusted-peer-exe '{}': not a regular file",
-                            canonical.display()
-                        )
-                        .into());
-                    }
-                    let file_id = FileId {
-                        dev: meta.dev(),
-                        ino: meta.ino(),
-                    };
-
-                    info!(
-                        control_socket = %socket_path.display(),
-                        trusted_peer_exe = %canonical.display(),
-                        trusted_peer_file_id = %file_id,
-                        "control socket enabled"
-                    );
-
-                    Some(ControlSocketConfig {
-                        socket_path: socket_path.clone(),
-                        trusted_peer: TrustedPeerConfig {
-                            exe_path: canonical,
-                            exe_file_id: file_id,
-                            uid: trusted_peer_uid,
-                            gid: trusted_peer_gid,
-                        },
-                    })
-                }
+                Some(ControlSocketServer::new(ControlSocketConfig {
+                    socket_path: socket_path.clone(),
+                    trusted_peer: TrustedPeerConfig {
+                        exe_path: canonical,
+                        exe_file_id: file_id,
+                        uid: trusted_peer_uid,
+                        gid: trusted_peer_gid,
+                    },
+                }))
             }
-            _ => None,
-        };
+        }
+        (Some(socket_path), None, Some(key_file)) => {
+            let server = ControlSocketServer::new_hmac(
+                socket_path.clone(),
+                key_file,
+                trusted_peer_uid,
+                trusted_peer_gid,
+            )
+            .map_err(|e| format!("--trusted-peer-key-file '{}': {e}", key_file.display()))?;
+            info!(
+                control_socket = %socket_path.display(),
+                auth_mode = "hmac-sha256",
+                "control socket enabled"
+            );
+            Some(server)
+        }
+        _ => None,
+    };
 
     // Mount options
     let options = MountOptions {
@@ -2305,7 +2375,7 @@ async fn cmd_mount(
     };
 
     // Start control socket server before the FUSE mount.
-    let control_socket_handle = if let Some(cs_config) = control_socket_config {
+    let control_socket_handle = if let Some(server) = control_socket_server {
         let ctx = ControlSocketContext {
             // Canonical root: the user-visible Skill root the ledger
             // addresses. Live root (source_root): the physical backing
@@ -2317,8 +2387,8 @@ async fn cmd_mount(
             resolver: active_resolver.clone(),
             protocol_event_writer: Some(protocol_event_writer.clone()),
         };
-        let server = ControlSocketServer::new(cs_config).with_context(ctx);
         let handle = server
+            .with_context(ctx)
             .start()
             .map_err(|e| format!("failed to start control socket server: {e}"))?;
         info!(

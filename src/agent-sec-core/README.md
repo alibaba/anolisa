@@ -40,6 +40,15 @@ As AI Agents gradually gain OS-level execution capabilities (file I/O, network a
 
 The security check workflow (Phase 1-3 + Security Decision) is provided by `agent-sec-cli`; each phase is invoked through dedicated CLI subcommands.
 
+When Skill Ledger is paired with containerized SkillFS, agent-sec-core can
+mutually authenticate resolver and notify traffic with an owner-only shared
+secret file. Configure the explicit SkillFS control socket and secret paths
+with `AGENT_SEC_SKILLFS_CONTROL_SOCKET`,
+`AGENT_SEC_SKILLFS_CONTROL_AUTH_SECRET_FILE`, and
+`AGENT_SEC_SKILLFS_NOTIFY_AUTH_SECRET_FILE`. Existing host deployments retain
+their current plain-notify and executable-authenticated control behavior. See
+the [Skill Ledger guide](../../docs/user-guide/en/agent-security/agent-sec-core/skill-ledger.md).
+
 ## Security Check Workflow
 
 Before each Agent execution, complete the following security checks **in strict order** (Phase 1-3). Only after all phases pass can the security decision process proceed.

@@ -286,12 +286,25 @@ from conflating them:
 | Socket | Listener | Default path | Purpose |
 |---|---|---|---|
 | daemon socket | agent-sec-core daemon | `$XDG_RUNTIME_DIR/agent-sec-core/daemon.sock` (override with `AGENT_SEC_DAEMON_SOCKET`) | SkillFS points `--notify-socket` here to send change notifications |
-| control socket | SkillFS | `/run/user/<uid>/skillfs/control.sock` | The daemon queries `skill.resolveLiveSource` back through it and writes activation metadata |
+| control socket | SkillFS | `/run/user/<uid>/skillfs/control.sock` (override with `AGENT_SEC_SKILLFS_CONTROL_SOCKET`) | The daemon queries `skill.resolveLiveSource` back through it and writes activation metadata |
 
-Do **not** customize the control socket path. The Ledger resolver client only
-probes the default path above; no configuration key makes it follow a path given
-to `--control-socket`, and changing it makes Ledger silently fall back to host
-mode. SkillFS and the daemon must also run under the same effective UID.
+Host deployments normally keep the default control path and executable peer
+authentication. A security-integrated container profile uses an explicit
+shared runtime path plus mutual HMAC authentication:
+
+```bash
+export AGENT_SEC_SKILLFS_CONTROL_SOCKET=/run/anolisa/skillfs/control.sock
+export AGENT_SEC_SKILLFS_CONTROL_AUTH_SECRET_FILE=/run/anolisa/auth/skillfs.key
+export AGENT_SEC_SKILLFS_NOTIFY_AUTH_SECRET_FILE=/run/anolisa/auth/skillfs.key
+```
+
+The matching SkillFS process uses `--trusted-peer-key-file` and
+`--notify-auth-key-file`. The absolute secret file must be owner-only and is
+mounted into SkillFS and agent-sec-core, never the workload. Without the HMAC
+variables, the existing plain notify and executable-authenticated control
+protocols remain unchanged. A configured authenticated control socket that is
+missing or rejects authentication fails closed instead of falling back to host
+path resolution.
 
 Under the Hermes layout the activation flow carries nested identities
 (`category/skill`) rather than flat skill names, and `skillId` keeps both
