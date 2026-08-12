@@ -13,6 +13,24 @@ use super::guarded_diagnostic::validate_guarded_diagnostic;
 use super::is_sensitive_target;
 use super::readonly_pipeline::validate_readonly_pipeline;
 
+/// Strip null redirections from command text using precise byte spans
+/// recorded by the parser. Unlike regex-based reconstruction, this
+/// preserves the original command structure including quoted arguments,
+/// escaping, and internal whitespace (issue #1752, SunnyQjm review).
+fn strip_null_redirections(command: &str, spans: &[(usize, usize)]) -> String {
+    if spans.is_empty() {
+        return command.to_string();
+    }
+    let mut result = String::with_capacity(command.len());
+    let mut last_end = 0usize;
+    for &(start, end) in spans {
+        result.push_str(&command[last_end..start]);
+        last_end = end;
+    }
+    result.push_str(&command[last_end..]);
+    result.trim().to_string()
+}
+
 pub use super::command_risk_model::{
     is_high_risk_explanation, AssessmentConfidence, AssessmentPolicy, AssessmentSource,
     AssessmentSummary, AutoAllowEvidence, AutoExecutionPolicy, AutoExecutionRoute,
@@ -99,9 +117,21 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
     } else {
         match parsed.shape {
             CommandShape::Simple | CommandShape::EnvSimple => {
-                assess_simple_command(command, parsed, policy)
+                let effective = if parsed.null_redirections > 0 {
+                    strip_null_redirections(command, &parsed.null_redirection_spans)
+                } else {
+                    command.to_string()
+                };
+                assess_simple_command(&effective, parsed, policy)
             }
-            CommandShape::Pipeline => assess_pipeline(command, parsed, policy),
+            CommandShape::Pipeline => {
+                let effective = if parsed.null_redirections > 0 {
+                    strip_null_redirections(command, &parsed.null_redirection_spans)
+                } else {
+                    command.to_string()
+                };
+                assess_pipeline(&effective, parsed, policy)
+            }
             CommandShape::AndOrList | CommandShape::Sequence | CommandShape::RedirectionRead => {
                 let mut simple = assess_first_stage(command, &parsed, policy);
                 simple.shape = parsed.shape;
@@ -132,6 +162,7 @@ pub fn assess_shell_command(command: &str, policy: AssessmentPolicy) -> CommandA
     };
     if null_redirections > 0 {
         apply_null_redirection_policy(&mut result);
+        result.command = command.to_string();
     }
     result
 }
@@ -283,6 +314,7 @@ fn assess_first_stage(
         },
         stages: parsed.stages.first().cloned().into_iter().collect(),
         null_redirections: 0,
+        null_redirection_spans: Vec::new(),
         segments: Vec::new(),
         segment_connectors: Vec::new(),
     };

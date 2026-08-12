@@ -504,16 +504,24 @@ pub(super) fn basename(program: &str) -> &str {
 }
 
 /// Post-processing for assessments whose command carried stripped
-/// null-suppression redirections (issue #1667): append the informational
-/// reason and keep the execution boundary unchanged. Risk itself is fully
-/// decided by the shape/segment assessment paths.
+/// null-suppression redirections to safe output sinks (issue #1667, #1752):
+/// append the informational reason without changing the execution boundary.
+/// Redirections to `/dev/null` are output-suppression, not filesystem writes,
+/// so the auto-allow decision is preserved. Risk itself is fully decided by
+/// the shape/segment assessment paths.
+///
+/// # Safety boundary
+///
+/// This function is only called when `parsed.null_redirections > 0`, which
+/// the parser sets exclusively for targets in the `SAFE_OUTPUT_SINKS`
+/// allowlist (`command_risk_parser.rs`). Any future extension of that
+/// allowlist (e.g. adding `/dev/random` or custom device nodes) must
+/// revisit the issue #1667 boundaries and the decision-matrix tests in
+/// `command_risk_tests.rs` — the auto-allow preservation here is safe
+/// only because the parser enforces the whitelist upstream.
 pub(super) fn apply_null_redirection_policy(result: &mut CommandAssessment) {
     result.reasons.push("output-suppressed");
     result.reasons = dedupe_reasons(std::mem::take(&mut result.reasons));
-    if result.execution == ExecutionDecision::AutoAllow {
-        result.execution = ExecutionDecision::AskUser;
-    }
-    result.auto_allow = None;
 }
 
 pub(super) fn high_risk_program(

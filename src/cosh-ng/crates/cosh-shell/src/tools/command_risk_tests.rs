@@ -511,10 +511,92 @@ fn null_redirection_keeps_remaining_command_risk_and_boundaries() {
     assert!(delete.reasons.contains(&"filesystem-delete"));
     assert!(delete.reasons.contains(&"output-suppressed"));
 
-    // V-M10: the execution boundary is never widened.
+    // V-M10: null redirections to safe sinks preserve auto-allow (#1752).
+    // Verify that the informational `output-suppressed` reason survives
+    // alongside the auto-allow evidence so audit visibility is maintained.
     let auto_policy = auto("ps aux 2>/dev/null");
-    assert_eq!(auto_policy.execution, ExecutionDecision::AskUser);
-    assert!(auto_policy.auto_allow.is_none());
+    assert_eq!(auto_policy.execution, ExecutionDecision::AutoAllow);
+    assert!(auto_policy.auto_allow.is_some());
+    assert!(
+        auto_policy.reasons.contains(&"output-suppressed"),
+        "auto-allowed null-redirected command must retain output-suppressed reason: {:?}",
+        auto_policy.reasons
+    );
+}
+
+#[test]
+fn null_redirection_preserves_quoted_arguments() {
+    // Regression test (SunnyQjm review): the lossy `stage.join(" ")` reconstruction
+    // would lose quotes from arguments like `find . -name "foo bar" 2>/dev/null`.
+    // The `strip_null_redirections` regex approach preserves the original command
+    // structure including quotes and escaping.
+    let find_quoted = ask(r#"find . -name "foo bar" 2>/dev/null"#);
+    // Should not be flagged as high risk (it's a readonly find command)
+    assert_ne!(
+        find_quoted.impact,
+        RiskImpact::High,
+        "{:?}",
+        find_quoted.reasons
+    );
+    assert!(
+        !find_quoted.reasons.contains(&"redirection-write"),
+        "{:?}",
+        find_quoted.reasons
+    );
+    assert!(
+        find_quoted.reasons.contains(&"output-suppressed"),
+        "{:?}",
+        find_quoted.reasons
+    );
+
+    // Pipeline with quoted pipe character should preserve the quote
+    let grep_quoted = ask(r#"grep "a | b" file 2>/dev/null"#);
+    assert_ne!(
+        grep_quoted.impact,
+        RiskImpact::High,
+        "{:?}",
+        grep_quoted.reasons
+    );
+    assert!(
+        grep_quoted.reasons.contains(&"output-suppressed"),
+        "{:?}",
+        grep_quoted.reasons
+    );
+}
+
+#[test]
+fn null_redirection_does_not_strip_quoted_literal_dev_null() {
+    // SunnyQjm review P2: regex-based stripping is not quote-aware, so
+    // `grep "2>/dev/null" f 2>/dev/null` would incorrectly strip the
+    // quoted literal as well. Parser-span-based stripping only removes
+    // the actual redirection at the end.
+    let grep_quoted = ask(r#"grep "2>/dev/null" file 2>/dev/null"#);
+    // The command has a null redirection and should be output-suppressed
+    assert!(
+        grep_quoted.reasons.contains(&"output-suppressed"),
+        "{:?}",
+        grep_quoted.reasons
+    );
+    // The quoted argument should NOT cause the command to be misclassified
+    // as a file write or pipe
+    assert!(
+        !grep_quoted.reasons.contains(&"redirection-write"),
+        "{:?}",
+        grep_quoted.reasons
+    );
+}
+
+#[test]
+fn null_redirection_preserves_partial_path_match() {
+    // SunnyQjm review P2: regex without token boundary would mis-strip
+    // `2>/dev/nullify` as `2>/dev/null` + leftover `ify`. The parser
+    // reads the full target token and only matches against the
+    // SAFE_OUTPUT_SINKS allowlist, so `/dev/nullify` is not recognised
+    // as a null redirection and stays as a write redirect.
+    let cmd = ask("echo hi 2>/dev/nullify");
+    assert_eq!(cmd.impact, RiskImpact::High, "{:?}", cmd.reasons);
+    assert!(cmd.reasons.contains(&"redirection-write"));
+    assert!(!cmd.reasons.contains(&"output-suppressed"));
 }
 
 #[test]
