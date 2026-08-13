@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-13
+
+### Fixed
+
+- Adapter discovery now excludes undeclared shared resource directories unless
+  a contract, receipt, or built-in framework driver identifies them as real
+  adapters. Shared assets such as Tokenless common hooks no longer appear as
+  unsupported frameworks in adapter scan and status output
+  ([#2502](https://github.com/alibaba/anolisa/pull/2502)).
+
 ## [0.3.0] - 2026-08-12
 
 ### Fixed

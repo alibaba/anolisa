@@ -9,6 +9,15 @@
 
 ## [未发布]
 
+## [0.3.1] - 2026-08-13
+
+### 修复
+
+- Adapter discovery 现会忽略未声明的共享 resource directory，除非 contract、
+  receipt 或内置 framework driver 将其识别为实际 adapter。Tokenless common hook
+  等共享 asset 不再于 adapter scan 和 status output 中显示为不支持的 framework
+  ([#2502](https://github.com/alibaba/anolisa/pull/2502))。
+
 ## [0.3.0] - 2026-08-12
 
 ### 修复
