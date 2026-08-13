@@ -629,12 +629,13 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             let stash_errors = stash.as_ref().map(|_| compressor.stash_errors());
             let stash_size = stash.as_ref().map(|s| s.len());
             // Surface persistent stash backend failures (disk full, locked DB,
-            // I/O) so they aren't invisible — compression degrades to the
-            // lossy marker per entry, but a non-zero count means the stash
-            // path is broken and retrievals will miss.
+            // I/O, rollback delete) so they aren't invisible. `stash_errors`
+            // counts both compress-time stash writes and no-savings rollback
+            // deletes; a non-zero count means the stash path is broken and
+            // retrievals will miss.
             if matches!(stash_errors, Some(e) if e > 0) {
                 eprintln!(
-                    "[tokenless] stash: {} write(s) failed during compression; truncated entries are not retrievable (check stash db health)",
+                    "[tokenless] stash: {} stash operation(s) failed; truncated entries are not retrievable (check stash db health)",
                     stash_errors.expect("checked Some above")
                 );
             }
