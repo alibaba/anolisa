@@ -22,6 +22,16 @@ const COMMON_ENVIRONMENT: &[&str] = &[
     "XDG_RUNTIME_DIR",
     "XDG_STATE_HOME",
 ];
+const PROXY_ENVIRONMENT: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+];
 const CODEX_ENVIRONMENT: &[&str] = &[
     "CODEX_API_KEY",
     "CODEX_HOME",
@@ -119,6 +129,7 @@ impl AcpRuntimeProfile {
     pub fn allowed_environment_names(self) -> impl Iterator<Item = &'static str> {
         COMMON_ENVIRONMENT
             .iter()
+            .chain(PROXY_ENVIRONMENT.iter())
             .chain(self.provider_environment.iter())
             .copied()
     }

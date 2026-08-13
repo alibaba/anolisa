@@ -7,7 +7,7 @@ use tempfile::TempDir;
 
 use super::{
     built_in_acp_runtime_profiles, AcpRuntimeProfileId, AcpRuntimeProfileRequest,
-    AcpRuntimeProfileResolveError, AcpRuntimeProfileResolver,
+    AcpRuntimeProfileResolveError, AcpRuntimeProfileResolver, PROXY_ENVIRONMENT,
 };
 
 fn executable(directory: &Path, name: &str) -> PathBuf {
@@ -159,7 +159,8 @@ fn environment_is_filtered_per_profile_and_debug_is_redacted() {
     let root = TempDir::new().unwrap();
     let adapter = executable(root.path(), "claude-agent-acp");
     let secret = "highly-sensitive-secret";
-    let environment = BTreeMap::from([
+    let proxy_secret = "proxy-sensitive-secret";
+    let mut environment = BTreeMap::from([
         (OsString::from("HOME"), OsString::from("/safe/home")),
         (OsString::from("PATH"), OsString::from("/safe/bin")),
         (
@@ -172,7 +173,17 @@ fn environment_is_filtered_per_profile_and_debug_is_redacted() {
             OsString::from("wrong-provider"),
         ),
         (OsString::from("LD_PRELOAD"), OsString::from("/unsafe.so")),
+        (
+            OsString::from("NODE_OPTIONS"),
+            OsString::from("--require=/unsafe.js"),
+        ),
     ]);
+    for name in PROXY_ENVIRONMENT {
+        environment.insert(
+            OsString::from(name),
+            OsString::from(format!("http://user:{proxy_secret}@127.0.0.1:7890")),
+        );
+    }
     let request = request(
         AcpRuntimeProfileId::ClaudeCode,
         Some(adapter),
@@ -180,6 +191,7 @@ fn environment_is_filtered_per_profile_and_debug_is_redacted() {
         environment,
     );
     assert!(!format!("{request:?}").contains(secret));
+    assert!(!format!("{request:?}").contains(proxy_secret));
 
     let resolved = AcpRuntimeProfileResolver::resolve(request).unwrap();
     let names: Vec<_> = resolved.environment_names().collect();
@@ -187,9 +199,14 @@ fn environment_is_filtered_per_profile_and_debug_is_redacted() {
     assert!(names.contains(&OsStr::new("PATH")));
     assert!(names.contains(&OsStr::new("XDG_CONFIG_HOME")));
     assert!(names.contains(&OsStr::new("ANTHROPIC_API_KEY")));
+    for name in PROXY_ENVIRONMENT {
+        assert!(names.contains(&OsStr::new(name)));
+    }
     assert!(!names.contains(&OsStr::new("OPENAI_API_KEY")));
     assert!(!names.contains(&OsStr::new("LD_PRELOAD")));
+    assert!(!names.contains(&OsStr::new("NODE_OPTIONS")));
     assert!(!format!("{resolved:?}").contains(secret));
+    assert!(!format!("{resolved:?}").contains(proxy_secret));
 }
 
 #[test]
