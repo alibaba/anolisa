@@ -60,6 +60,7 @@ jobs:
               ;;
             cosh-ng)
               dnf install -y rust cargo openssl-devel pkgconfig
+              rustc --version | awk '{ split($2, v, "."); if (v[1] != 1 || v[2] < 88) exit 1 }'
               ;;
             agent-sec-core)
               dnf_install clang llvm openssl-devel libseccomp-devel bubblewrap python3-pip systemd-rpm-macros

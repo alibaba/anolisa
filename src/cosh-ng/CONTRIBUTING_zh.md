@@ -7,7 +7,7 @@
 | 要求 | 版本 |
 |------|------|
 | Rust toolchain | stable（`rust-toolchain.toml` 管理） |
-| Rust 最低版本 | 1.74 |
+| Rust 最低版本 | 1.88 |
 | 组件 | rustfmt + clippy |
 | 支持平台 | Linux（完整功能）；macOS（功能受限） |
 
@@ -19,7 +19,7 @@ rustup show   # 确认工具链已就绪
 ## 构建
 
 ```bash
-# 完整构建（所有 5 个 crate）
+# 完整构建（所有 workspace crate）
 cargo build --workspace
 
 # 发布构建
@@ -69,7 +69,9 @@ cosh-ng/
     ├── cosh-platform/      # 平台抽象（发行版检测、后端路由）
     ├── cosh-cli/           # CLI 入口
     ├── cosh-core/          # Agent 核心
-    └── cosh-shell/         # 交互终端
+    ├── cosh-shell/         # 交互终端
+    ├── cosh-gateway-contracts/ # 无副作用的 Gateway contract
+    └── cosh-gateway/       # Gateway control plane library 基础
 ```
 
 ## 依赖管理

@@ -7,7 +7,7 @@
 | Requirement | Version |
 |-------------|---------|
 | Rust toolchain | stable (managed by `rust-toolchain.toml`) |
-| Minimum Rust version | 1.74 |
+| Minimum Rust version | 1.88 |
 | Components | rustfmt + clippy |
 | Supported platforms | Linux (full); macOS (limited functionality) |
 
@@ -19,7 +19,7 @@ rustup show   # Confirm toolchain is ready
 ## Build
 
 ```bash
-# Full build (all 5 crates)
+# Full build (all workspace crates)
 cargo build --workspace
 
 # Release build
@@ -72,7 +72,9 @@ cosh-ng/
     ├── cosh-platform/      # Platform abstraction (distro detection, backend routing)
     ├── cosh-cli/           # CLI entry
     ├── cosh-core/          # Agent core
-    └── cosh-shell/         # Interactive terminal
+    ├── cosh-shell/         # Interactive terminal
+    ├── cosh-gateway-contracts/ # Side-effect-free Gateway contracts
+    └── cosh-gateway/       # Gateway control-plane library foundations
 ```
 
 ## Dependency Management
