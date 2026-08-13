@@ -6,10 +6,50 @@ use super::*;
 
 const FRAME_LIMIT: usize = 16 * 1024;
 
+#[test]
+fn default_command_deadline_outlives_adapter_startup() {
+    let config = AcpSessionDriverConfig::new(
+        RuntimeLaunchSpec::new("/bin/false", "/"),
+        AcpV1ClientConfig::new("cosh-ng", "0.15.0", FRAME_LIMIT),
+        "/",
+    );
+
+    assert_eq!(config.initialize_timeout, Duration::from_secs(60));
+    assert_eq!(config.command_timeout, Duration::from_secs(70));
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn invalid_deadline_order_is_rejected_before_launch() {
+    let mut config = AcpSessionDriverConfig::new(
+        RuntimeLaunchSpec::new("/bin/false", "/"),
+        AcpV1ClientConfig::new("cosh-ng", "0.15.0", FRAME_LIMIT),
+        "/",
+    );
+    config.command_timeout = config.initialize_timeout;
+
+    assert!(matches!(
+        AcpSessionDriver::launch(config),
+        Err(AcpSessionDriverError::InvalidDeadlineConfiguration)
+    ));
+
+    let mut config = AcpSessionDriverConfig::new(
+        RuntimeLaunchSpec::new("/bin/false", "/"),
+        AcpV1ClientConfig::new("cosh-ng", "0.15.0", FRAME_LIMIT),
+        "/",
+    );
+    config.shutdown_grace = config.command_timeout - Duration::from_millis(500);
+    assert!(matches!(
+        AcpSessionDriver::launch(config),
+        Err(AcpSessionDriverError::InvalidDeadlineConfiguration)
+    ));
+}
+
 #[cfg(unix)]
 fn driver(script: &str, workspace: &tempfile::TempDir) -> AcpSessionDriver {
     let mut launch = RuntimeLaunchSpec::new("/bin/sh", workspace.path());
     launch.arguments = vec!["-c".into(), script.into()];
+    launch.stdin_write_timeout = Duration::from_millis(100);
     let mut config = AcpSessionDriverConfig::new(
         launch,
         AcpV1ClientConfig::new("cosh-ng", "0.15.0", FRAME_LIMIT),
@@ -20,6 +60,44 @@ fn driver(script: &str, workspace: &tempfile::TempDir) -> AcpSessionDriver {
     config.shutdown_grace = Duration::from_millis(50);
     config.command_timeout = Duration::from_secs(3);
     AcpSessionDriver::launch(config).unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn default_startup_deadline_accepts_session_after_ten_seconds() {
+    let workspace = tempfile::tempdir().unwrap();
+    let script = r#"
+step=0
+while IFS= read -r line; do
+    step=$((step + 1))
+    case "$step" in
+        1) printf '%s\n' '{"jsonrpc":"2.0","id":"cosh-acp-1","result":{"protocolVersion":1,"agentCapabilities":{}}}' ;;
+        2)
+           sleep 11
+           printf '%s\n' '{"jsonrpc":"2.0","id":"cosh-acp-2","result":{"sessionId":"session-1"}}'
+           ;;
+    esac
+done
+"#;
+    let mut launch = RuntimeLaunchSpec::new("/bin/sh", workspace.path());
+    launch.arguments = vec!["-c".into(), script.into()];
+    let config = AcpSessionDriverConfig::new(
+        launch,
+        AcpV1ClientConfig::new("cosh-ng", "0.15.0", FRAME_LIMIT),
+        workspace.path(),
+    );
+    let driver = AcpSessionDriver::launch(config).unwrap();
+
+    driver.initialize().unwrap();
+    observation(&driver);
+    let started = Instant::now();
+    driver.open_session().unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(10));
+    assert!(matches!(
+        observation(&driver),
+        AcpV1Observation::SessionOpened { .. }
+    ));
+    driver.shutdown().unwrap();
 }
 
 fn observation(driver: &AcpSessionDriver) -> AcpV1Observation {

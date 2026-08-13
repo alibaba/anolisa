@@ -846,6 +846,7 @@ fn map_driver_error(error: AcpSessionDriverError) -> AgentRuntimePortError {
         | AcpSessionDriverError::CancellationPending
         | AcpSessionDriverError::ObservationBackpressure
         | AcpSessionDriverError::Cancelled => AgentRuntimePortError::Transport,
+        AcpSessionDriverError::InvalidDeadlineConfiguration => AgentRuntimePortError::Protocol,
     }
 }
 fn safe_error(

@@ -18,6 +18,9 @@ const COMMAND_CAPACITY: usize = 8;
 const CONTROL_CAPACITY: usize = 1;
 const EVENT_CAPACITY: usize = 32;
 const MAX_TERMINAL_DETAIL_BYTES: usize = 4 * 1024;
+const DEFAULT_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(70);
+const SHUTDOWN_SETTLEMENT_MARGIN: Duration = Duration::from_secs(1);
 
 /// Deadlines and immutable launch inputs for one local ACP session.
 #[derive(Debug, Clone)]
@@ -53,11 +56,36 @@ impl AcpSessionDriverConfig {
             client,
             workspace: workspace.into(),
             additional_directories: Vec::new(),
-            initialize_timeout: Duration::from_secs(10),
+            initialize_timeout: DEFAULT_INITIALIZE_TIMEOUT,
             prompt_timeout: Duration::from_secs(30 * 60),
             shutdown_grace: Duration::from_secs(2),
-            command_timeout: Duration::from_secs(10),
+            // Keep the caller alive after the actor's protocol deadline so it
+            // receives the operation-specific result instead of a racing ack timeout.
+            command_timeout: DEFAULT_COMMAND_TIMEOUT,
         }
+    }
+
+    fn validate(&self) -> Result<(), AcpSessionDriverError> {
+        let initialize_minimum = self
+            .initialize_timeout
+            .checked_add(self.launch.stdin_write_timeout)
+            .and_then(|timeout| timeout.checked_add(CONTROL_POLL_INTERVAL))
+            .ok_or(AcpSessionDriverError::InvalidDeadlineConfiguration)?;
+        let shutdown_minimum = self
+            .shutdown_grace
+            // Supervisor settlement also reaps the child and drains the
+            // bounded stderr collector after the TERM grace expires.
+            .checked_add(SHUTDOWN_SETTLEMENT_MARGIN)
+            .ok_or(AcpSessionDriverError::InvalidDeadlineConfiguration)?;
+        if self.initialize_timeout.is_zero()
+            || self.command_timeout <= initialize_minimum
+            || self.command_timeout <= shutdown_minimum
+            || self.prompt_timeout.is_zero()
+            || self.shutdown_grace.is_zero()
+        {
+            return Err(AcpSessionDriverError::InvalidDeadlineConfiguration);
+        }
+        Ok(())
     }
 }
 
@@ -124,6 +152,9 @@ pub enum AcpSessionDriverError {
     /// Independent control cancelled a deadline-bound operation.
     #[error("ACP operation was cancelled")]
     Cancelled,
+    /// Configured deadlines cannot preserve actor-before-caller settlement.
+    #[error("ACP session deadline configuration is invalid")]
+    InvalidDeadlineConfiguration,
 }
 
 type Reply = SyncSender<Result<(), AcpSessionDriverError>>;
@@ -183,6 +214,7 @@ impl AcpSessionDriver {
     ///
     /// Returns bridge launch or actor thread creation failures.
     pub fn launch(config: AcpSessionDriverConfig) -> Result<Self, AcpSessionDriverError> {
+        config.validate()?;
         let bridge = AcpV1RuntimeBridge::launch(&config.launch, config.client.clone())?;
         let (command_sender, command_receiver) = mpsc::sync_channel(COMMAND_CAPACITY);
         let (cancel_sender, cancel_receiver) = mpsc::sync_channel(CONTROL_CAPACITY);

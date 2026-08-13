@@ -100,6 +100,11 @@ gateway_stub="$temp_root/cosh-gateway"
 cat >"$gateway_stub" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${FAKE_GATEWAY_ERROR:-0}" == 1 ]]; then
+  printf '%s\n' \
+    '{"event":"error","code":"bad\u001b[31m","message":"failed\u001b]8;;https://example.invalid\u0007link"}'
+  exit 12
+fi
 case "$1" in
   doctor)
     printf '%s\n' \
@@ -122,6 +127,16 @@ case "$1" in
 esac
 SH
 chmod 0700 "$gateway_stub"
+set +e
+diagnostic=$(FAKE_GATEWAY_ERROR=1 "$conformance" fake \
+  --gateway "$gateway_stub" --workspace "$workspace" 2>&1 >/dev/null)
+diagnostic_exit=$?
+set -e
+[[ "$diagnostic_exit" != 0 ]] || fail "control-bearing diagnostic unexpectedly passed"
+[[ "$diagnostic" == *'\u001b'* && "$diagnostic" == *'\u0007'* ]] || \
+  fail "control-bearing diagnostic was not escaped"
+[[ "$diagnostic" != *$'\033'* && "$diagnostic" != *$'\007'* ]] || \
+  fail "control-bearing diagnostic reached the terminal"
 expect_exit 2 "$conformance" real \
   --gateway "$gateway_stub" \
   --workspace "$workspace" \

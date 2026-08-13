@@ -84,13 +84,29 @@ import sys
 
 scenario = sys.argv[1]
 events = []
+
+def terminal_safe(value):
+    normalized = " ".join(value.split())[:240]
+    return "".join(
+        character if character.isprintable() else f"\\u{ord(character):04x}"
+        for character in normalized
+    )
+
 for line in sys.stdin:
     record = json.loads(line)
     event = record.get("event")
     if not isinstance(event, str):
         raise SystemExit("COSH emitted a JSONL record without an event")
     if event == "error":
-        raise SystemExit("COSH emitted an error event")
+        code = record.get("code", "unknown_error")
+        message = record.get("message", "no diagnostic available")
+        if not isinstance(code, str):
+            code = "unknown_error"
+        if not isinstance(message, str):
+            message = "no diagnostic available"
+        raise SystemExit(
+            f"COSH error [{terminal_safe(code)}]: {terminal_safe(message)}"
+        )
     events.append(event)
 
 required = {
