@@ -1,4 +1,8 @@
 #![forbid(unsafe_code)]
+#![allow(
+    clippy::result_large_err,
+    reason = "crate APIs share public CoshError; per-function allows obscure one API trade-off"
+)]
 //! cosh-platform: Distribution Abstraction Layer for the cosh deterministic interaction layer.
 //!
 //! Detects the current distro and routes pkg/svc operations to the

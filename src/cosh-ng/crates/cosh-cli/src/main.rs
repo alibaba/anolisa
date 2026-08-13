@@ -1,4 +1,8 @@
 #![forbid(unsafe_code)]
+#![allow(
+    clippy::result_large_err,
+    reason = "crate APIs share public CoshError; per-function allows obscure one API trade-off"
+)]
 //! cosh CLI — Computable Operating System Harness.
 //!
 //! Deterministic OS capability interface for Agents.

@@ -1209,10 +1209,13 @@ jobs:
     if: needs.detect-changes.outputs.cosh_ng == 'true'
     runs-on: anolisa-k8s-general-ci-x64
     timeout-minutes: 15
+    env:
+      # This override takes precedence over the workspace's `stable` channel.
+      RUSTUP_TOOLCHAIN: '1.88.0'
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.88.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -1285,10 +1288,12 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.cosh_ng == 'true'
     runs-on: anolisa-k8s-general-ci-x64
+    env:
+      RUSTUP_TOOLCHAIN: '1.88.0'
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.88.0
 
       - uses: Swatinem/rust-cache@v2
         with:

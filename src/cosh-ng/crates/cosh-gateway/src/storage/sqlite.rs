@@ -1,0 +1,360 @@
+//! SQLite connection policy and private-path validation.
+
+use std::fs::{self, OpenOptions};
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+
+use rusqlite::Connection;
+
+use super::{schema, StoreError};
+
+/// Single-writer SQLite Task store configured for local durable operation.
+pub struct SqliteTaskStore {
+    connection: Connection,
+    path: Option<PathBuf>,
+}
+
+impl SqliteTaskStore {
+    /// Opens or creates a private local database and applies checked migrations.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fail-closed error for unsafe paths, unsupported migrations,
+    /// corrupt storage, or SQLite configuration failures.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        prepare_private_path(path)?;
+        validate_companion_files(path)?;
+        let mut connection = Connection::open(path)?;
+        configure(&connection)?;
+        schema::migrate(&mut connection)?;
+        validate_companion_files(path)?;
+        Ok(Self {
+            connection,
+            path: Some(path.to_path_buf()),
+        })
+    }
+
+    /// Opens an isolated in-memory store for deterministic unit tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns migration or SQLite configuration failures.
+    #[cfg(test)]
+    pub(crate) fn open_in_memory() -> Result<Self, StoreError> {
+        let mut connection = Connection::open_in_memory()?;
+        configure_in_memory(&connection)?;
+        schema::migrate(&mut connection)?;
+        Ok(Self {
+            connection,
+            path: None,
+        })
+    }
+
+    pub(super) fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    pub(super) fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.connection
+    }
+
+    /// Returns the durable path, or `None` for an in-memory test store.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+}
+
+fn configure(connection: &Connection) -> Result<(), StoreError> {
+    connection.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = FULL;
+         PRAGMA busy_timeout = 5000;
+         PRAGMA trusted_schema = OFF;",
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn configure_in_memory(connection: &Connection) -> Result<(), StoreError> {
+    connection.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         PRAGMA synchronous = FULL;
+         PRAGMA busy_timeout = 5000;
+         PRAGMA trusted_schema = OFF;",
+    )?;
+    Ok(())
+}
+
+fn prepare_private_path(path: &Path) -> Result<(), StoreError> {
+    if !path.is_absolute() {
+        return Err(StoreError::UnsafePath {
+            path: path.to_path_buf(),
+            message: "database path must be absolute".to_string(),
+        });
+    }
+    let parent = path.parent().ok_or_else(|| StoreError::UnsafePath {
+        path: path.to_path_buf(),
+        message: "database path has no parent directory".to_string(),
+    })?;
+    create_private_path_components(parent)?;
+    validate_private_permissions(parent, true)?;
+
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            reject_symlink_or_wrong_type(path, false)?;
+            validate_private_permissions(path, false)?;
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => create_private_file(path)?,
+        Err(error) => {
+            return Err(StoreError::UnsafePath {
+                path: path.to_path_buf(),
+                message: format!("inspect database file: {error}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn create_private_path_components(parent: &Path) -> Result<(), StoreError> {
+    let mut current = PathBuf::new();
+    for component in parent.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(_) => reject_symlink_or_wrong_type(&current, true)?,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                create_private_directory(&current)?;
+                reject_symlink_or_wrong_type(&current, true)?;
+            }
+            Err(error) => {
+                return Err(StoreError::UnsafePath {
+                    path: current,
+                    message: format!("inspect state path component: {error}"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn create_private_directory(path: &Path) -> Result<(), StoreError> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(path)
+        .map_err(|error| StoreError::UnsafePath {
+            path: path.to_path_buf(),
+            message: format!("create private state directory: {error}"),
+        })
+}
+
+fn create_private_file(path: &Path) -> Result<(), StoreError> {
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .map(|_| ())
+        .map_err(|error| StoreError::UnsafePath {
+            path: path.to_path_buf(),
+            message: format!("create private database file: {error}"),
+        })
+}
+
+fn validate_companion_files(path: &Path) -> Result<(), StoreError> {
+    for suffix in ["-wal", "-shm"] {
+        let mut companion = path.as_os_str().to_os_string();
+        companion.push(suffix);
+        let companion = PathBuf::from(companion);
+        match fs::symlink_metadata(&companion) {
+            Ok(_) => {
+                reject_symlink_or_wrong_type(&companion, false)?;
+                validate_private_permissions(&companion, false)?;
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(StoreError::UnsafePath {
+                    path: companion,
+                    message: format!("inspect SQLite companion file: {error}"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject_symlink_or_wrong_type(path: &Path, directory: bool) -> Result<(), StoreError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| StoreError::UnsafePath {
+        path: path.to_path_buf(),
+        message: format!("inspect path: {error}"),
+    })?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink()
+        || (directory && !file_type.is_dir())
+        || (!directory && !file_type.is_file())
+    {
+        return Err(StoreError::UnsafePath {
+            path: path.to_path_buf(),
+            message: if directory {
+                "expected a real directory, not a symlink or special file"
+            } else {
+                "expected a regular file, not a symlink or special file"
+            }
+            .to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_private_permissions(path: &Path, directory: bool) -> Result<(), StoreError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = fs::symlink_metadata(path)
+        .map_err(|error| StoreError::UnsafePath {
+            path: path.to_path_buf(),
+            message: format!("inspect private permissions: {error}"),
+        })?
+        .permissions()
+        .mode();
+    if mode & 0o077 != 0 {
+        return Err(StoreError::UnsafePath {
+            path: path.to_path_buf(),
+            message: if directory {
+                "state directory grants group or other permissions"
+            } else {
+                "database file grants group or other permissions"
+            }
+            .to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_private_permissions(_path: &Path, _directory: bool) -> Result<(), StoreError> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_database_path_is_rejected() {
+        assert!(matches!(
+            SqliteTaskStore::open("relative/state.db"),
+            Err(StoreError::UnsafePath { .. })
+        ));
+    }
+
+    #[test]
+    fn durable_store_uses_wal_full_and_foreign_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqliteTaskStore::open(directory.path().join("gateway/state.db")).unwrap();
+        let journal: String = store
+            .connection()
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        let synchronous: u32 = store
+            .connection()
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        let foreign_keys: u32 = store
+            .connection()
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal, "wal");
+        assert_eq!(synchronous, 2);
+        assert_eq!(foreign_keys, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_database_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let actual = directory.path().join("actual.db");
+        fs::write(&actual, []).unwrap();
+        let link = directory.path().join("state.db");
+        symlink(&actual, &link).unwrap();
+        assert!(matches!(
+            SqliteTaskStore::open(&link),
+            Err(StoreError::UnsafePath { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_utf8_database_path_rejects_companion_symlinks() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut path = directory.path().to_path_buf();
+        path.push(OsString::from_vec(b"state-\xff.db".to_vec()));
+        fs::write(&path, []).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        for suffix in ["-wal", "-shm"] {
+            let mut companion = path.as_os_str().to_os_string();
+            companion.push(suffix);
+            symlink(&path, PathBuf::from(companion)).unwrap();
+        }
+
+        assert!(matches!(
+            SqliteTaskStore::open(&path),
+            Err(StoreError::UnsafePath { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn insecure_existing_parent_is_rejected_without_chmod() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("gateway");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(matches!(
+            SqliteTaskStore::open(parent.join("state.db")),
+            Err(StoreError::UnsafePath { .. })
+        ));
+        assert_eq!(
+            fs::symlink_metadata(&parent).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(!parent.join("state.db").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn intermediate_symlink_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let actual = directory.path().join("actual");
+        fs::create_dir(&actual).unwrap();
+        let link = directory.path().join("linked");
+        symlink(&actual, &link).unwrap();
+
+        assert!(matches!(
+            SqliteTaskStore::open(link.join("gateway/state.db")),
+            Err(StoreError::UnsafePath { .. })
+        ));
+        assert!(!actual.join("gateway/state.db").exists());
+    }
+}

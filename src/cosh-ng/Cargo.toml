@@ -5,17 +5,20 @@ members = [
     "crates/cosh-cli",
     "crates/cosh-core",
     "crates/cosh-shell",
+    "crates/cosh-gateway-contracts",
+    "crates/cosh-gateway",
 ]
 resolver = "2"
 
 [workspace.package]
 version = "0.17.2"
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/alibaba/anolisa"
 
 [workspace.dependencies]
+agent-client-protocol = "=2.0.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false }
@@ -39,6 +42,9 @@ tracing-appender = "0.2"
 signal-hook = "0.3"
 uuid = { version = "1", features = ["v4"] }
 wait-timeout = "0.2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+thiserror = "2"
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

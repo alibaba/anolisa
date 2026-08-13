@@ -108,7 +108,7 @@ struct AuditCursorV1 {
 ///
 /// Returns `AuditCursorInvalid` for malformed, unsupported, or filter-mismatched
 /// cursors and `InvalidInput` for page sizes outside `1..=1000`.
-// Keep the workspace Rust 1.74 MSRV; `Option::is_none_or` is newer.
+// Keep the explicit predicates readable across the inclusive filter bounds.
 #[allow(clippy::unnecessary_map_or)]
 pub fn query_events(
     root: &Path,
