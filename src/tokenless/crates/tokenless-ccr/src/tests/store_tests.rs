@@ -4,7 +4,7 @@ use crate::InMemoryStore;
 fn is_empty_default_trait_method() {
     let store = InMemoryStore::new();
     assert!(store.is_empty());
-    store.stash("payload").unwrap();
+    let _ = store.stash("payload").unwrap();
     assert!(!store.is_empty());
 }
 
@@ -18,7 +18,7 @@ fn stash_error_display() {
 fn default_trait_creates_working_store() {
     let store = InMemoryStore::default();
     assert!(store.is_empty());
-    let key = store.stash("payload").unwrap();
+    let key = store.stash("payload").unwrap().key;
     assert!(!store.is_empty());
     let retrieved = store.retrieve(&key).unwrap();
     assert_eq!(retrieved, Some("payload".to_string()));

@@ -14,7 +14,10 @@ called **stash** to avoid the proprietary abbreviation.
 
 1. **Compress**: `ResponseCompressor` truncates oversized arrays (default:
    keep the first 32 items). The dropped tail is serialized to JSON and
-   `stash.stash(payload)` stores it, returning a 24-hex BLAKE3 key.
+   `stash.stash(payload)` stores it, returning a 24-hex BLAKE3 key plus a
+   store-wide, monotonically increasing ownership token used if the write must
+   later be rolled back. Tokens are never reused after expiry, deletion, or
+   eviction.
 2. **Mark**: the truncation marker becomes
    `<... N items truncated, retrieve with <<tokenless:KEY>>`.
 3. **Retrieve**: the LLM emits the marker (or the bare key); the agent calls
@@ -25,6 +28,39 @@ When no stash store is attached (`Option<Arc<dyn StashStore>>` = `None`),
 truncation is lossy and non-retrievable — the original pre-stash behavior.
 This keeps the stash off the core compression path unless a caller explicitly
 enables it.
+
+## No-savings rollback
+
+If compressed output is discarded (CLI no-savings fallback), call
+`rollback_stash_writes()` so markers that never reached the LLM do not leave
+orphan stash rows. Pending rollback is a `HashMap<key, generation>`: a key
+created in this session is recorded, and a later in-session refresh of that
+same payload updates the generation **only when the store reports an unbroken
+ownership chain** (`previous_generation` equals the token this session last
+recorded). A refresh of a key this session never created stays off the list.
+
+That chain check is required because content-addressed keys are shared across
+processes. If compressor A creates P, compressor B refreshes P and emits a
+marker, then A stashes P again, re-adopting B's generation would make A's
+no-savings rollback delete the row B's marker still needs. A mismatch drops
+the key from the pending list instead; rollback of the stale create-time
+token is a CAS no-op.
+
+`stash_writes` counts unique keys created this session, plus refreshes of
+keys this session did not create. An in-session refresh does not increment
+again, so after a successful rollback the counter matches remaining live
+rows from that session.
+
+Session scope differs by compressor:
+
+- `ResponseCompressor` resets pending keys at the start of each `compress()`.
+- `SchemaCompressor` accumulates across `compress()` calls until rollback or
+  `clear_stash_session()`. That matches `compress-schema --batch` (compress
+  every item, then one all-or-nothing rollback). Call rollback only after
+  every emit/discard decision for the session. Programmatic callers that
+  emit some results and later discard others on the same instance must call
+  `clear_stash_session()` after keeping output; otherwise a later rollback
+  deletes those emitted markers.
 
 ## Marker format
 
@@ -69,6 +105,15 @@ Both backends enforce:
 - **Capacity** (FIFO): once the live entry count exceeds the limit (InMemory
   1000; SQLite 10 000), the oldest entries are evicted. This prevents
   unbounded growth from runaway compression.
+
+SQLite allocates ownership tokens and performs the live-row check, `created`
+decision, upsert, and capacity enforcement in one `BEGIN IMMEDIATE`
+transaction. A singleton `stash_metadata` row persists the generation
+high-water mark across row deletion, expiry, lazy purge, and eviction; opening
+older databases migrates the generation column and repairs that high-water
+mark from the existing rows. InMemory keeps the equivalent high-water counter
+under its store lock. Both backends fail without changing stash state when the
+signed SQLite generation limit is exhausted.
 
 ## CLI
 
@@ -130,10 +175,13 @@ payload" rather than an injection.
   marker but the tail is not stashed. The stash marker (~65 chars) against
   small per-field limits would be proportionally large overhead; the
   high-value case is array truncation, which is covered.
-- **Schema description truncation**: `SchemaCompressor::truncate_description`
-  remains lossy for the same marker-overhead reason.
 - **MCP `tokenless_retrieve`**: not yet implemented; retrieval is via the CLI
   today. MCP integration is tracked separately.
+
+Schema description truncation **is** stashed when a store is attached (CLI
+default): `SchemaCompressor::truncate_description` writes the verbatim
+original and appends a `<<tokenless:KEY>>` marker. It stays lossy only when
+stash is off or the stash write fails.
 
 ## Mapping to Headroom CCR
 
@@ -142,7 +190,7 @@ payload" rather than an injection.
 | CCR Store | stash store (`StashStore` trait) | InMemory / SQLite(WAL) / Redis* |
 | `<<ccr:HASH>>` | `<<tokenless:HASH>>` | 24-hex BLAKE3, same key length |
 | `headroom_retrieve` (MCP) | `tokenless retrieve` (CLI) | MCP tool pending |
-| DashMap `remove_if` TOCTOU fix | single-writer `Mutex<Connection>` | SQLite path |
+| DashMap `remove_if` TOCTOU fix | `BEGIN IMMEDIATE` ownership transaction | SQLite path |
 | default TTL 5 min / cap 1000 | InMemory 5 min / 1000; SQLite 1 h / 10 000 | tuned for hook process model |
 
 \* Redis backend is not yet implemented; it is tracked for the

@@ -423,10 +423,7 @@ pub fn compress_response_with_store(
         serde_json::to_string(&compressed_value).map_err(RuntimeError::Serialize)?;
     let before_tokens = estimate_tokens(input);
     let after_tokens = estimate_tokens(&compressed_output);
-    let stash_writes = attached_store.map(|_| compressor.stash_writes());
-    let stash_errors = attached_store.map(|_| compressor.stash_errors());
     let unrecoverable_truncations = attached_store.map(|_| compressor.unrecoverable_truncations());
-    let stash_size = attached_store.map(|store| store.len());
 
     let disposition = if after_tokens >= before_tokens {
         CompressionDisposition::NoSavings
@@ -440,6 +437,15 @@ pub fn compress_response_with_store(
     } else {
         CompressionDisposition::Applied
     };
+    // Discarded compressed output never reaches the LLM, so roll back stash
+    // keys created during this compress — otherwise markers live only in
+    // `compressed_output` and orphan stash rows.
+    if disposition != CompressionDisposition::Applied {
+        compressor.rollback_stash_writes();
+    }
+    let stash_writes = attached_store.map(|_| compressor.stash_writes());
+    let stash_errors = attached_store.map(|_| compressor.stash_errors());
+    let stash_size = attached_store.map(|store| store.len());
     let output = if disposition == CompressionDisposition::Applied {
         compressed_output.clone()
     } else {
@@ -503,7 +509,7 @@ mod tests {
     struct AlwaysFail;
 
     impl StashStore for AlwaysFail {
-        fn stash(&self, _payload: &str) -> Result<String, StashError> {
+        fn stash(&self, _payload: &str) -> Result<tokenless_ccr::StashWrite, StashError> {
             Err(StashError::Backend("simulated".to_string()))
         }
 
@@ -517,6 +523,10 @@ mod tests {
 
         fn evict_expired(&self) -> Result<usize, StashError> {
             Ok(0)
+        }
+
+        fn delete(&self, _hash: &str, _generation: u64) -> Result<bool, StashError> {
+            Ok(false)
         }
     }
 
@@ -703,6 +713,26 @@ mod tests {
     }
 
     #[test]
+    fn no_savings_rolls_back_orphan_stash() {
+        let input = r#"["a","b"]"#;
+        let store = Arc::new(InMemoryStore::new()) as Arc<dyn StashStore>;
+        let result = compress_response_with_store(
+            input,
+            &CompressOptions {
+                truncate_arrays_at: Some(1),
+                ..CompressOptions::default()
+            },
+            true,
+            Some(&store),
+        )
+        .unwrap();
+        assert_eq!(result.disposition, CompressionDisposition::NoSavings);
+        assert_eq!(result.output, input);
+        assert_eq!(store.len(), 0);
+        assert_eq!(result.stash_writes, Some(0));
+    }
+
+    #[test]
     fn invalid_json_is_structured_error() {
         let error =
             compress_response_with_store("not json", &CompressOptions::default(), true, None)
@@ -800,6 +830,13 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        // Directory mode bits do not constrain euid 0; skip rather than
+        // asserting a permission failure that cannot happen as root.
+        if std::fs::File::create(directory.path().join(".probe")).is_ok() {
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            return;
+        }
         let runtime = TokenlessRuntime::new(RuntimeConfig {
             data_dir: Some(directory.path().to_path_buf()),
             stats_enabled: false,

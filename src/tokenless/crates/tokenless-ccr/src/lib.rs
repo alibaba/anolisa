@@ -31,4 +31,4 @@ pub use key::compute_key;
 pub use marker::{
     MARKER_PREFIX, MARKER_SUFFIX, extract_hash, is_valid_hash, marker_for, parse_marker,
 };
-pub use store::{StashError, StashStore};
+pub use store::{StashError, StashStore, StashWrite};

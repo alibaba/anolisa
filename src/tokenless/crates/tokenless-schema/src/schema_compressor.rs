@@ -1,7 +1,9 @@
 use regex::Regex;
 use serde_json::Value;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
-use tokenless_ccr::StashStore;
+use tokenless_ccr::{StashStore, StashWrite};
 
 use crate::response_compressor::{stash_suffix, stash_suffix_char_len};
 
@@ -31,6 +33,20 @@ pub struct SchemaCompressor {
     /// full original. When `None`, truncation is lossy — the pre-stash
     /// behavior. Mirrors `ResponseCompressor::stash_store`.
     stash_store: Option<Arc<dyn StashStore>>,
+    /// Unique stash rows created this session, plus refreshes of keys this
+    /// session did not create. CLI `compress-schema --batch` calls
+    /// `compress()` once per item, so the counter accumulates until rollback
+    /// or [`Self::clear_stash_session`]. An in-session refresh of a pending
+    /// key does not increment again.
+    stash_writes: Cell<usize>,
+    /// Number of stash writes / rollback deletes that failed. Same session
+    /// accumulator as `stash_writes`.
+    stash_errors: Cell<usize>,
+    /// Keys created during this compressor session, mapped to the latest
+    /// generation this session still owns. Not reset at each `compress()` so
+    /// CLI `--batch` can roll back every discarded item. In-session refreshes
+    /// update the generation only when the store reports an unbroken chain.
+    stash_keys_created: RefCell<HashMap<String, u64>>,
 }
 
 impl Default for SchemaCompressor {
@@ -51,6 +67,9 @@ impl Default for SchemaCompressor {
             // ~1024-frame default stack while leaving real schemas intact.
             max_depth: 32,
             stash_store: None,
+            stash_writes: Cell::new(0),
+            stash_errors: Cell::new(0),
+            stash_keys_created: RefCell::new(HashMap::new()),
         }
     }
 }
@@ -106,7 +125,105 @@ impl SchemaCompressor {
         self
     }
 
-    /// Compress an OpenAI Function Calling schema
+    /// Unique stash rows created this session, plus refreshes of keys this
+    /// session did not create. Duplicate payloads first created this session
+    /// (including `--batch` items that stash the same description) count once;
+    /// repeated refreshes of a pre-existing key count once per refresh.
+    pub fn stash_writes(&self) -> usize {
+        self.stash_writes.get()
+    }
+
+    /// Number of stash writes / rollback deletes that failed this session.
+    pub fn stash_errors(&self) -> usize {
+        self.stash_errors.get()
+    }
+
+    /// Delete stash entries created during this compressor session.
+    ///
+    /// Call this when the compressed output (and its embedded markers) will
+    /// never be emitted — e.g. the CLI no-savings path that falls back to the
+    /// original input, including `compress-schema --batch`. Returns how many
+    /// keys were successfully removed.
+    ///
+    /// Session semantics: [`compress`](Self::compress) does **not** reset the
+    /// pending-key list. Keys accumulate from construction until this method
+    /// or [`clear_stash_session`](Self::clear_stash_session). That matches
+    /// CLI `--batch` (compress every item, then one all-or-nothing rollback).
+    /// Call rollback only after every emit/discard decision for the session.
+    /// If a programmatic caller emits some results and later discards others
+    /// on the same instance, call [`clear_stash_session`](Self::clear_stash_session)
+    /// after keeping output so a later rollback cannot delete those markers.
+    pub fn rollback_stash_writes(&self) -> usize {
+        let Some(store) = self.stash_store.as_ref() else {
+            return 0;
+        };
+        let writes = std::mem::take(&mut *self.stash_keys_created.borrow_mut());
+        let mut removed = 0usize;
+        for (key, generation) in &writes {
+            match store.delete(key, *generation) {
+                Ok(true) => removed += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    self.record_stash_error();
+                    eprintln!(
+                        "[tokenless] stash: rollback delete failed for key {}: {e}",
+                        key
+                    );
+                }
+            }
+        }
+        self.stash_writes
+            .set(self.stash_writes.get().saturating_sub(removed));
+        removed
+    }
+
+    /// Forget pending rollback keys without deleting stash rows.
+    ///
+    /// Use after deciding to **keep** compressed output from this session
+    /// (markers were emitted) and starting a new independent
+    /// compress/rollback cycle on the same `SchemaCompressor`. Does not
+    /// touch the store. [`ResponseCompressor`](crate::ResponseCompressor)
+    /// does not need this: it resets pending keys at the start of each
+    /// `compress()`.
+    pub fn clear_stash_session(&self) {
+        self.stash_keys_created.borrow_mut().clear();
+        self.stash_writes.set(0);
+        self.stash_errors.set(0);
+    }
+
+    fn record_stash_success(&self, write: &StashWrite) {
+        let mut pending = self.stash_keys_created.borrow_mut();
+        if write.created {
+            self.stash_writes.set(self.stash_writes.get() + 1);
+            pending.insert(write.key.clone(), write.generation);
+        } else if let Some(&expected) = pending.get(&write.key) {
+            if write.previous_generation == Some(expected) {
+                // Unbroken in-session refresh (duplicate payloads, including
+                // `--batch`): update generation so rollback CAS matches.
+                pending.insert(write.key.clone(), write.generation);
+            } else {
+                // A foreign writer refreshed (and likely emitted a marker)
+                // between our create and this write. Drop ownership so
+                // rollback cannot delete the live row those markers need.
+                pending.remove(&write.key);
+            }
+        } else {
+            // Refresh of a key this session never created. Another emitted
+            // marker may still need it, so it stays off the rollback list.
+            self.stash_writes.set(self.stash_writes.get() + 1);
+        }
+    }
+
+    fn record_stash_error(&self) {
+        self.stash_errors.set(self.stash_errors.get() + 1);
+    }
+
+    /// Compress an OpenAI Function Calling schema.
+    ///
+    /// Unlike [`ResponseCompressor`](crate::ResponseCompressor), this does
+    /// not reset stash session state. Pending rollback keys accumulate until
+    /// [`rollback_stash_writes`](Self::rollback_stash_writes) or
+    /// [`clear_stash_session`](Self::clear_stash_session).
     pub fn compress(&self, tool: &Value) -> Value {
         let original_text = serde_json::to_string(tool).unwrap_or_default();
 
@@ -286,9 +403,19 @@ impl SchemaCompressor {
         // ResponseCompressor's "retrieval yields the original content
         // verbatim" contract.
         let stash_key = if stash_active {
-            self.stash_store
-                .as_ref()
-                .and_then(|store| store.stash(desc).ok())
+            match self.stash_store.as_ref() {
+                Some(store) => match store.stash(desc) {
+                    Ok(write) => {
+                        self.record_stash_success(&write);
+                        Some(write.key)
+                    }
+                    Err(_) => {
+                        self.record_stash_error();
+                        None
+                    }
+                },
+                None => None,
+            }
         } else {
             None
         };

@@ -531,15 +531,24 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     "tokenless: schema compression did not reduce size ({} -> {} est. tokens), outputting original",
                     before_tokens, after_tokens
                 );
-                // No-savings discard edge: if a stash was attached and a
-                // description was truncated, those writes orphan (markers
-                // live in `after_compact`, which is discarded). Truncation
-                // almost always yields savings, so this is rare; orphaned
-                // entries are TTL-cleaned.
+                // Discarded compressed output never reaches the LLM, so roll
+                // back stash keys created during this compress — otherwise
+                // markers live only in `after_compact` and orphan stash rows.
+                compressor.rollback_stash_writes();
                 input.clone()
             } else {
                 after_compact.clone()
             };
+
+            let stash_writes = stash.as_ref().map(|_| compressor.stash_writes());
+            let stash_errors = stash.as_ref().map(|_| compressor.stash_errors());
+            let stash_size = stash.as_ref().map(|s| s.len());
+            if matches!(stash_errors, Some(e) if e > 0) {
+                eprintln!(
+                    "[tokenless] stash: {} stash operation(s) failed; truncated entries are not retrievable (check stash db health)",
+                    stash_errors.expect("checked Some above")
+                );
+            }
 
             let mode = resolve_mode(compression_on, before_tokens, after_tokens);
             let emit_text = if compression_on {
@@ -559,9 +568,9 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                 input,
                 output_text,
                 mode,
-                None,
-                None,
-                None,
+                stash_writes,
+                stash_errors,
+                stash_size,
             );
         }
         Commands::CompressResponse {
@@ -617,12 +626,13 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                 (error.to_string(), code)
             })?;
             // Surface persistent stash backend failures (disk full, locked DB,
-            // I/O) so they aren't invisible — compression degrades to the
-            // lossy marker per entry, but a non-zero count means the stash
-            // path is broken and retrievals will miss.
+            // I/O, rollback delete) so they aren't invisible. `stash_errors`
+            // counts both compress-time stash writes and no-savings rollback
+            // deletes; a non-zero count means the stash path is broken and
+            // retrievals will miss.
             if matches!(result.stash_errors, Some(errors) if errors > 0) {
                 eprintln!(
-                    "[tokenless] stash: {} write(s) failed during compression; truncated entries are not retrievable (check stash db health)",
+                    "[tokenless] stash: {} stash operation(s) failed; truncated entries are not retrievable (check stash db health)",
                     result.stash_errors.expect("checked Some above")
                 );
             }

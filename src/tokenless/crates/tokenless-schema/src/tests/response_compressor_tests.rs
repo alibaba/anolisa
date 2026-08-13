@@ -5,7 +5,7 @@ use tokenless_ccr::{StashError, StashStore};
 struct AlwaysFail;
 
 impl StashStore for AlwaysFail {
-    fn stash(&self, _payload: &str) -> Result<String, StashError> {
+    fn stash(&self, _payload: &str) -> Result<tokenless_ccr::StashWrite, StashError> {
         Err(StashError::Backend("simulated".to_string()))
     }
 
@@ -19,6 +19,10 @@ impl StashStore for AlwaysFail {
 
     fn evict_expired(&self) -> Result<usize, StashError> {
         Ok(0)
+    }
+
+    fn delete(&self, _hash: &str, _generation: u64) -> Result<bool, StashError> {
+        Ok(false)
     }
 }
 
@@ -348,6 +352,180 @@ fn test_stash_writes_counter_resets_per_compress() {
 }
 
 #[test]
+fn test_rollback_stash_writes_removes_created_entries() {
+    use std::sync::Arc;
+    use tokenless_ccr::InMemoryStore;
+
+    let store = Arc::new(InMemoryStore::new());
+    let compressor = ResponseCompressor::new()
+        .with_truncate_arrays_at(2)
+        .with_stash_store(store.clone());
+    let arr: Vec<i32> = (1..=5).collect();
+    let _ = compressor.compress(&json!(arr));
+    assert_eq!(compressor.stash_writes(), 1);
+    assert_eq!(store.len(), 1);
+
+    let removed = compressor.rollback_stash_writes();
+    assert_eq!(removed, 1);
+    assert_eq!(store.len(), 0);
+    assert_eq!(compressor.stash_writes(), 0);
+    // Second rollback is a no-op.
+    assert_eq!(compressor.rollback_stash_writes(), 0);
+}
+
+#[test]
+fn test_rollback_preserves_preexisting_same_payload_entry() {
+    // Refreshing a payload that already has an emitted marker must not put
+    // that key on the rollback list. Discarding a later no-savings compress
+    // must leave the earlier marker retrievable.
+    use std::sync::Arc;
+    use tokenless_ccr::{InMemoryStore, StashStore, extract_hash};
+
+    let store = Arc::new(InMemoryStore::new());
+    let compressor = ResponseCompressor::new()
+        .with_truncate_arrays_at(2)
+        .with_stash_store(store.clone());
+    let arr = json!([1, 2, 3, 4, 5]);
+    let first = compressor.compress(&arr);
+    let marker = first.as_array().unwrap().last().unwrap().as_str().unwrap();
+    let hash = extract_hash(marker).expect("marker");
+    assert!(store.retrieve(hash).unwrap().is_some());
+
+    // Second compress refreshes the same content-addressed key.
+    let _ = compressor.compress(&arr);
+    assert_eq!(store.len(), 1);
+    let removed = compressor.rollback_stash_writes();
+    assert_eq!(removed, 0, "refresh must not be treated as created");
+    assert_eq!(
+        store.retrieve(hash).unwrap().as_deref(),
+        Some(r#"[3,4,5]"#),
+        "pre-existing emitted marker must remain retrievable after rollback"
+    );
+}
+
+#[test]
+fn test_rollback_does_not_delete_key_adopted_by_another_compressor() {
+    // Compressor A creates the row; compressor B refreshes it and emits a
+    // marker. A's no-savings rollback must not delete B's live generation.
+    use std::sync::Arc;
+    use tokenless_ccr::{InMemoryStore, StashStore, extract_hash};
+
+    let store = Arc::new(InMemoryStore::new());
+    let a = ResponseCompressor::new()
+        .with_truncate_arrays_at(2)
+        .with_stash_store(store.clone());
+    let b = ResponseCompressor::new()
+        .with_truncate_arrays_at(2)
+        .with_stash_store(store.clone());
+    let arr = json!([1, 2, 3, 4, 5]);
+    let _ = a.compress(&arr);
+    let emitted = b.compress(&arr);
+    let marker = emitted.as_array().unwrap().last().unwrap().as_str().unwrap();
+    let hash = extract_hash(marker).expect("marker");
+    assert_eq!(a.rollback_stash_writes(), 0);
+    assert_eq!(
+        store.retrieve(hash).unwrap().as_deref(),
+        Some(r#"[3,4,5]"#),
+        "B's emitted marker must remain retrievable after A's rollback"
+    );
+}
+
+#[test]
+fn test_rollback_updates_generation_after_in_compress_refresh() {
+    // Two identical truncated arrays stash the same payload twice in one
+    // compress(). The second write refreshes generation; rollback must delete
+    // with that latest generation, not the create-time one.
+    use std::sync::Arc;
+    use tokenless_ccr::InMemoryStore;
+
+    let store = Arc::new(InMemoryStore::new());
+    let compressor = ResponseCompressor::new()
+        .with_truncate_arrays_at(2)
+        .with_stash_store(store.clone());
+    let value = json!({"a": [1, 2, 3, 4, 5], "b": [1, 2, 3, 4, 5]});
+    let _ = compressor.compress(&value);
+    assert_eq!(store.len(), 1);
+    assert_eq!(
+        compressor.stash_writes(),
+        1,
+        "in-compress refresh of the same key must not double-count stash_writes"
+    );
+    assert_eq!(compressor.rollback_stash_writes(), 1);
+    assert_eq!(store.len(), 0);
+    assert_eq!(compressor.stash_writes(), 0);
+}
+
+#[test]
+fn test_rollback_does_not_re_adopt_after_intervening_foreign_refresh() {
+    // Duplicate payloads in one compress(), with another writer refreshing
+    // the key between the two stashes. The wrapper performs that refresh
+    // before the second stash so the interleaving is deterministic
+    // (`ResponseCompressor` resets pending state at each `compress()`).
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokenless_ccr::{InMemoryStore, StashError, StashStore, StashWrite, extract_hash};
+
+    struct ForeignRefreshOnSecondStash {
+        inner: Arc<InMemoryStore>,
+        n: AtomicUsize,
+    }
+
+    impl StashStore for ForeignRefreshOnSecondStash {
+        fn stash(&self, payload: &str) -> Result<StashWrite, StashError> {
+            let n = self.n.fetch_add(1, Ordering::SeqCst) + 1;
+            if n == 2 {
+                let _ = self.inner.stash(payload)?;
+            }
+            self.inner.stash(payload)
+        }
+        fn retrieve(&self, hash: &str) -> Result<Option<String>, StashError> {
+            self.inner.retrieve(hash)
+        }
+        fn len(&self) -> usize {
+            self.inner.len()
+        }
+        fn evict_expired(&self) -> Result<usize, StashError> {
+            self.inner.evict_expired()
+        }
+        fn delete(&self, hash: &str, generation: u64) -> Result<bool, StashError> {
+            self.inner.delete(hash, generation)
+        }
+    }
+
+    let inner = Arc::new(InMemoryStore::new());
+    let wrapped = Arc::new(ForeignRefreshOnSecondStash {
+        inner: inner.clone(),
+        n: AtomicUsize::new(0),
+    });
+    let a = ResponseCompressor::new()
+        .with_truncate_arrays_at(2)
+        .with_stash_store(wrapped);
+    let value = json!({"a": [1, 2, 3, 4, 5], "b": [1, 2, 3, 4, 5]});
+    let compressed = a.compress(&value);
+    let marker = compressed["a"]
+        .as_array()
+        .and_then(|arr| arr.last())
+        .and_then(|v| v.as_str())
+        .expect("truncation marker");
+    let hash = extract_hash(marker).expect("marker");
+    assert_eq!(
+        inner.retrieve(hash).unwrap().as_deref(),
+        Some(r#"[3,4,5]"#),
+        "B's marker must be retrievable before A's rollback"
+    );
+    let removed = a.rollback_stash_writes();
+    assert_eq!(
+        removed, 0,
+        "A must not re-adopt a key after an intervening foreign refresh"
+    );
+    assert_eq!(
+        inner.retrieve(hash).unwrap().as_deref(),
+        Some(r#"[3,4,5]"#),
+        "B's emitted marker must remain retrievable after A's rollback"
+    );
+}
+
+#[test]
 fn test_array_truncation_with_failing_stash_falls_back_to_lossy() {
     // A stash that always errors must not break compression: the marker
     // degrades to the plain lossy form.
@@ -416,7 +594,7 @@ fn test_string_truncation_counts_unrecoverable_marker_budget() {
 #[test]
 fn test_stash_round_trip_with_cjk_items() {
     // CJK payloads are multi-byte; the stashed JSON must round-trip
-    // byte-for-byte (review §12: char vs byte semantics).
+    // byte-for-byte, not by Unicode scalar count.
     use std::sync::Arc;
     use tokenless_ccr::{InMemoryStore, StashStore, extract_hash};
 

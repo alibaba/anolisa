@@ -1,8 +1,8 @@
 use serde_json::{Map, Value};
-use std::cell::Cell;
-use std::collections::HashSet;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokenless_ccr::{StashStore, marker_for};
+use tokenless_ccr::{StashStore, StashWrite, marker_for};
 
 /// Build the stash-augmented truncation suffix for `key`:
 /// `… (truncated, retrieve with <<tokenless:KEY>>)`.
@@ -36,19 +36,25 @@ pub struct ResponseCompressor {
     /// pre-stash behavior. Keeping this optional means the stash stays off
     /// the core compression path unless a caller explicitly enables it.
     stash_store: Option<Arc<dyn StashStore>>,
-    /// Number of stash writes performed during the last `compress()` call.
-    /// Exposed for stats recording so callers can observe stash usage without
-    /// the schema crate depending on the stats crate.
+    /// Unique stash rows this `compress()` created, plus refreshes of keys
+    /// it did not create. An in-compress refresh of a key already pending
+    /// rollback does not increment again, so after `rollback_stash_writes`
+    /// the counter matches remaining live rows from this call.
     stash_writes: Cell<usize>,
-    /// Number of stash writes that **failed** during the last `compress()`
-    /// call (backend error — disk full, locked DB, I/O). Exposed so the CLI
-    /// can surface persistent backend failures instead of silently degrading
-    /// to the lossy marker.
+    /// Number of stash writes or rollback deletes that failed for the most
+    /// recent `compress()` call. Non-zero signals a persistent backend problem
+    /// (disk full, locked DB, I/O) — the caller should log it so the failure
+    /// isn't invisible.
     stash_errors: Cell<usize>,
     /// Number of truncations that could not embed a retrievable marker during
     /// the last `compress()` call. Includes backend failures and marker-budget
     /// limits without conflating the two causes.
     unrecoverable_truncations: Cell<usize>,
+    /// Keys created during the last `compress()` call, mapped to the latest
+    /// generation this call still owns. An in-compress refresh updates the
+    /// generation only when `StashWrite::previous_generation` matches, so a
+    /// foreign refresh in between cannot be re-adopted and later deleted.
+    stash_keys_created: RefCell<HashMap<String, u64>>,
 }
 
 impl Default for ResponseCompressor {
@@ -81,6 +87,7 @@ impl Default for ResponseCompressor {
             stash_writes: Cell::new(0),
             stash_errors: Cell::new(0),
             unrecoverable_truncations: Cell::new(0),
+            stash_keys_created: RefCell::new(HashMap::new()),
         }
     }
 }
@@ -150,6 +157,7 @@ impl ResponseCompressor {
         self.stash_writes.set(0);
         self.stash_errors.set(0);
         self.unrecoverable_truncations.set(0);
+        self.stash_keys_created.borrow_mut().clear();
         let original_text = serde_json::to_string(response).unwrap_or_default();
         let result = self.compress_value(response, 0);
 
@@ -162,15 +170,19 @@ impl ResponseCompressor {
         result
     }
 
-    /// Number of stash writes performed during the last `compress()` call.
-    /// Zero when no stash store is attached or no value was stashed.
+    /// Unique stash rows created during the last `compress()` call, plus
+    /// refresh operations for keys this call did not create. Duplicate
+    /// payloads first created by this call count once; repeated refreshes of
+    /// a pre-existing key count once per refresh. Zero when no stash store is
+    /// attached or no value was stashed.
     pub fn stash_writes(&self) -> usize {
         self.stash_writes.get()
     }
 
-    /// Number of stash writes that failed during the last `compress()` call.
-    /// Non-zero signals a persistent backend problem (disk full, locked DB,
-    /// I/O) — the caller should log it so the failure isn't invisible.
+    /// Number of stash writes or rollback deletes that failed for the most
+    /// recent `compress()` call. Non-zero signals a persistent backend problem
+    /// (disk full, locked DB, I/O) — the caller should log it so the failure
+    /// isn't invisible.
     pub fn stash_errors(&self) -> usize {
         self.stash_errors.get()
     }
@@ -179,6 +191,67 @@ impl ResponseCompressor {
     /// attached stash. A non-zero value means the candidate is partly lossy.
     pub fn unrecoverable_truncations(&self) -> usize {
         self.unrecoverable_truncations.get()
+    }
+
+    /// Delete stash entries created during the last `compress()` call.
+    ///
+    /// Call this when the compressed output (and its embedded markers) will
+    /// never be emitted — e.g. the CLI no-savings path that falls back to the
+    /// original input. Returns how many keys were successfully removed.
+    pub fn rollback_stash_writes(&self) -> usize {
+        let Some(store) = self.stash_store.as_ref() else {
+            return 0;
+        };
+        let writes = std::mem::take(&mut *self.stash_keys_created.borrow_mut());
+        let mut removed = 0usize;
+        for (key, generation) in &writes {
+            match store.delete(key, *generation) {
+                Ok(true) => removed += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    // Keep the key list drained so we don't retry forever, but
+                    // surface the failure — a silent orphan is worse than a
+                    // loud warning (AGENTS.md: do not swallow operational errors).
+                    self.record_stash_error();
+                    eprintln!(
+                        "[tokenless] stash: rollback delete failed for key {}: {e}",
+                        key
+                    );
+                }
+            }
+        }
+        // Keep counters consistent with the rolled-back store.
+        self.stash_writes
+            .set(self.stash_writes.get().saturating_sub(removed));
+        removed
+    }
+
+    fn record_stash_success(&self, write: &StashWrite) {
+        let mut pending = self.stash_keys_created.borrow_mut();
+        if write.created {
+            self.stash_writes.set(self.stash_writes.get() + 1);
+            pending.insert(write.key.clone(), write.generation);
+        } else if let Some(&expected) = pending.get(&write.key) {
+            if write.previous_generation == Some(expected) {
+                // Unbroken in-session refresh: update generation so rollback
+                // CAS matches the live row. Do not double-count stash_writes.
+                pending.insert(write.key.clone(), write.generation);
+            } else {
+                // A foreign writer refreshed (and likely emitted a marker)
+                // between our create and this write. Drop ownership so
+                // rollback cannot delete the live row those markers need.
+                pending.remove(&write.key);
+            }
+        } else {
+            // Refresh of a key this compress never created. Another emitted
+            // marker may still need it, so it stays off the rollback list,
+            // but the write still counts.
+            self.stash_writes.set(self.stash_writes.get() + 1);
+        }
+    }
+
+    fn record_stash_error(&self) {
+        self.stash_errors.set(self.stash_errors.get() + 1);
     }
 
     /// Recursively compress a JSON value
@@ -370,12 +443,12 @@ impl ResponseCompressor {
     fn stash_payload(&self, payload: &str) -> Option<String> {
         let stash = self.stash_store.as_ref()?;
         match stash.stash(payload) {
-            Ok(k) => {
-                self.stash_writes.set(self.stash_writes.get() + 1);
-                Some(k)
+            Ok(write) => {
+                self.record_stash_success(&write);
+                Some(write.key)
             }
             Err(_) => {
-                self.stash_errors.set(self.stash_errors.get() + 1);
+                self.record_stash_error();
                 self.mark_unrecoverable_truncation();
                 None
             }

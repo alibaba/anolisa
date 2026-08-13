@@ -48,7 +48,7 @@ fn retrieve_invalid_hash_format_is_error() {
 #[test]
 fn retrieve_round_trips_via_store() {
     let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
-    let key = store.stash("payload-body").unwrap();
+    let key = store.stash("payload-body").unwrap().key;
     let r = retrieve_from_store(&store, &key);
     assert_eq!(r["isError"], json!(false));
     assert_eq!(r["content"][0]["text"], json!("payload-body"));
@@ -57,7 +57,7 @@ fn retrieve_round_trips_via_store() {
 #[test]
 fn retrieve_accepts_marker_line() {
     let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
-    let key = store.stash("dropped items").unwrap();
+    let key = store.stash("dropped items").unwrap().key;
     let marker_line = format!("<... 5 items truncated, retrieve with <<tokenless:{key}>>");
     // Exercise the public entry point so marker extraction in `retrieve`
     // is covered, not just the bare-key path of `retrieve_from_store`.
@@ -113,7 +113,7 @@ fn retrieve_stash_unavailable_when_store_is_none() {
 #[test]
 fn handle_tool_call_dispatches_retrieve_with_store() {
     let store: Arc<dyn StashStore> = Arc::new(InMemoryStore::new());
-    let key = store.stash("mcp-payload").unwrap();
+    let key = store.stash("mcp-payload").unwrap().key;
     let params = json!({
         "name": "tokenless_retrieve",
         "arguments": {"hash": key}
