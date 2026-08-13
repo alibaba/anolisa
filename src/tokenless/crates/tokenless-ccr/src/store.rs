@@ -11,9 +11,14 @@
 /// for key derivation (rather than accepting a caller-supplied hash) removes a
 /// injection footgun: callers cannot mismatch a marker from its payload.
 pub trait StashStore: Send + Sync {
-    /// Stash `payload`, returning its key. Re-stashing the same payload is
-    /// idempotent (same key) and refreshes the entry's expiry.
-    fn stash(&self, payload: &str) -> Result<String, StashError>;
+    /// Stash `payload`, returning `(key, created)`.
+    ///
+    /// Re-stashing the same payload is idempotent (same key) and refreshes the
+    /// entry's expiry. `created` is `true` only when no live entry existed for
+    /// that key before this call — callers that roll back discarded compress
+    /// output must delete only `created` keys so pre-existing markers stay
+    /// retrievable.
+    fn stash(&self, payload: &str) -> Result<(String, bool), StashError>;
 
     /// Retrieve a stashed payload by key. Returns `Ok(None)` if the key is
     /// absent or the entry has expired.

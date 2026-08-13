@@ -111,17 +111,26 @@ impl SqliteStore {
 }
 
 impl StashStore for SqliteStore {
-    fn stash(&self, payload: &str) -> Result<String, StashError> {
+    fn stash(&self, payload: &str) -> Result<(String, bool), StashError> {
         let key = compute_key(payload.as_bytes());
         let now = now_unix();
         let expires_at = now + self.ttl_seconds;
         let conn = self.lock_conn();
+        let had_live: bool = match conn.query_row(
+            "SELECT 1 FROM stash WHERE hash = ? AND expires_at >= ?",
+            rusqlite::params![key, now as i64],
+            |_| Ok(true),
+        ) {
+            Ok(v) => v,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(e) => return Err(StashError::from(e)),
+        };
         conn.execute(
             "INSERT OR REPLACE INTO stash (hash, payload, expires_at) VALUES (?, ?, ?)",
             rusqlite::params![key, payload, expires_at as i64],
         )?;
         self.enforce_capacity(&conn)?;
-        Ok(key)
+        Ok((key, !had_live))
     }
 
     fn retrieve(&self, hash: &str) -> Result<Option<String>, StashError> {
@@ -198,7 +207,7 @@ mod tests {
     #[test]
     fn retrieve_is_case_insensitive() {
         let (store, _dir) = tmp_store(60, 100);
-        let key = store.stash("payload").unwrap();
+        let (key, _) = store.stash("payload").unwrap();
         assert_eq!(key, key.to_ascii_lowercase());
         let upper = key.to_uppercase();
         assert_ne!(upper, key);
@@ -208,7 +217,7 @@ mod tests {
     #[test]
     fn round_trip_persists_across_connections() {
         let (store, dir) = tmp_store(60, 100);
-        let key = store.stash("payload-A").unwrap();
+        let (key, _) = store.stash("payload-A").unwrap();
         assert_eq!(store.retrieve(&key).unwrap(), Some("payload-A".to_string()));
 
         // A second connection to the same file sees the entry: proves the
@@ -229,7 +238,7 @@ mod tests {
     #[test]
     fn expired_entry_not_retrievable() {
         let (store, _dir) = tmp_store(1, 100);
-        let key = store.stash("ephemeral").unwrap();
+        let (key, _) = store.stash("ephemeral").unwrap();
         thread::sleep(std::time::Duration::from_secs(2));
         assert_eq!(store.retrieve(&key).unwrap(), None);
     }
@@ -237,8 +246,8 @@ mod tests {
     #[test]
     fn evict_expired_reports_count() {
         let (store, _dir) = tmp_store(1, 100);
-        store.stash("a").unwrap();
-        store.stash("b").unwrap();
+        let _ = store.stash("a").unwrap();
+        let _ = store.stash("b").unwrap();
         thread::sleep(std::time::Duration::from_secs(2));
         assert_eq!(store.evict_expired().unwrap(), 2);
         assert_eq!(store.len(), 0);
@@ -247,10 +256,10 @@ mod tests {
     #[test]
     fn fifo_eviction_when_over_capacity() {
         let (store, _dir) = tmp_store(60, 3);
-        let k0 = store.stash("0").unwrap();
-        store.stash("1").unwrap();
-        store.stash("2").unwrap();
-        store.stash("3").unwrap(); // surplus=1, evicts oldest live (k0)
+        let (k0, _) = store.stash("0").unwrap();
+        let _ = store.stash("1").unwrap();
+        let _ = store.stash("2").unwrap();
+        let _ = store.stash("3").unwrap(); // surplus=1, evicts oldest live (k0)
         assert_eq!(store.retrieve(&k0).unwrap(), None);
         assert!(store.len() <= 3);
     }
@@ -264,7 +273,7 @@ mod tests {
                 let s = store.clone();
                 thread::spawn(move || {
                     for j in 0..50 {
-                        s.stash(&format!("p-{i}-{j}")).unwrap();
+                        let _ = s.stash(&format!("p-{i}-{j}")).unwrap();
                     }
                 })
             })
@@ -281,8 +290,8 @@ mod tests {
         // merely filter them via the WHERE clause. Mirrors headroom's
         // `SqliteCcrStore::get` lazy-purge sweep.
         let (store, _dir) = tmp_store(1, 100);
-        store.stash("a").unwrap();
-        store.stash("b").unwrap();
+        let _ = store.stash("a").unwrap();
+        let _ = store.stash("b").unwrap();
         assert_eq!(store.len(), 2);
         thread::sleep(std::time::Duration::from_secs(2));
         // Both rows are now expired. A retrieve for any (absent) key triggers

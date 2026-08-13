@@ -64,12 +64,18 @@ impl Default for InMemoryStore {
 }
 
 impl StashStore for InMemoryStore {
-    fn stash(&self, payload: &str) -> Result<String, StashError> {
+    fn stash(&self, payload: &str) -> Result<(String, bool), StashError> {
         let key = compute_key(payload.as_bytes());
         let mut inner = self
             .inner
             .lock()
             .map_err(|e| StashError::Backend(format!("in_memory mutex poisoned: {e}")))?;
+        let now = Instant::now();
+        let had_live = inner
+            .map
+            .get(&key)
+            .map(|e| now.duration_since(e.inserted_at) < inner.ttl)
+            .unwrap_or(false);
         // Re-stash refreshes: move the key to the back of the FIFO order so a
         // refreshed entry is evicted last, matching SqliteStore's
         // expires_at-ordered eviction.
@@ -96,7 +102,7 @@ impl StashStore for InMemoryStore {
                 inserted_at: Instant::now(),
             },
         );
-        Ok(key)
+        Ok((key, !had_live))
     }
 
     fn retrieve(&self, hash: &str) -> Result<Option<String>, StashError> {
@@ -184,7 +190,7 @@ mod tests {
         // An LLM may quote a marker back with uppercased hex; keys are stored
         // lowercase, so retrieve must normalize the lookup.
         let store = InMemoryStore::new();
-        let key = store.stash("payload").unwrap();
+        let (key, _) = store.stash("payload").unwrap();
         assert_eq!(key, key.to_ascii_lowercase());
         let upper = key.to_uppercase();
         assert_ne!(upper, key);
@@ -196,20 +202,20 @@ mod tests {
         // A re-stashed (refreshed) entry should survive FIFO eviction, matching
         // SqliteStore's expires_at-ordered eviction.
         let store = InMemoryStore::with_limits(Duration::from_secs(60), 3);
-        let k0 = store.stash("0").unwrap();
-        store.stash("1").unwrap();
-        store.stash("2").unwrap();
+        let (k0, _) = store.stash("0").unwrap();
+        let _ = store.stash("1").unwrap();
+        let _ = store.stash("2").unwrap();
         // Re-stash k0 to refresh it (moves to back); then stash a new key to
         // trigger eviction. k0 must survive (refreshed), k1 (oldest) evicted.
-        store.stash("0").unwrap();
-        store.stash("3").unwrap();
+        let _ = store.stash("0").unwrap();
+        let _ = store.stash("3").unwrap();
         assert!(store.retrieve(&k0).unwrap().is_some());
     }
 
     #[test]
     fn stash_and_retrieve_round_trip() {
         let store = InMemoryStore::new();
-        let key = store.stash("some payload").unwrap();
+        let (key, _) = store.stash("some payload").unwrap();
         assert_eq!(
             store.retrieve(&key).unwrap(),
             Some("some payload".to_string())
@@ -225,13 +231,13 @@ mod tests {
     #[test]
     fn re_stash_is_idempotent_and_refreshes() {
         let store = InMemoryStore::with_limits(Duration::from_millis(50), 100);
-        let k1 = store.stash("payload").unwrap();
-        let k2 = store.stash("payload").unwrap();
+        let (k1, _) = store.stash("payload").unwrap();
+        let (k2, _) = store.stash("payload").unwrap();
         assert_eq!(k1, k2);
         // After the original TTL would have expired, the refreshed entry is
         // still live.
         std::thread::sleep(Duration::from_millis(30));
-        store.stash("payload").unwrap();
+        let _ = store.stash("payload").unwrap();
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(store.retrieve(&k1).unwrap(), Some("payload".to_string()));
     }
@@ -239,7 +245,7 @@ mod tests {
     #[test]
     fn expired_entry_not_retrievable() {
         let store = InMemoryStore::with_limits(Duration::from_millis(20), 100);
-        let key = store.stash("ephemeral").unwrap();
+        let (key, _) = store.stash("ephemeral").unwrap();
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(store.retrieve(&key).unwrap(), None);
     }
@@ -247,8 +253,8 @@ mod tests {
     #[test]
     fn evict_expired_reports_count() {
         let store = InMemoryStore::with_limits(Duration::from_millis(20), 100);
-        store.stash("a").unwrap();
-        store.stash("b").unwrap();
+        let _ = store.stash("a").unwrap();
+        let _ = store.stash("b").unwrap();
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(store.evict_expired().unwrap(), 2);
         assert_eq!(store.len(), 0);
@@ -257,14 +263,14 @@ mod tests {
     #[test]
     fn fifo_eviction_when_over_capacity() {
         let store = InMemoryStore::with_limits(Duration::from_secs(60), 3);
-        let k0 = store.stash("0").unwrap();
-        store.stash("1").unwrap();
-        store.stash("2").unwrap();
-        store.stash("3").unwrap(); // evicts "0"
+        let (k0, _) = store.stash("0").unwrap();
+        let _ = store.stash("1").unwrap();
+        let _ = store.stash("2").unwrap();
+        let _ = store.stash("3").unwrap(); // evicts "0"
         assert_eq!(store.retrieve(&k0).unwrap(), None);
         assert!(
             store
-                .retrieve(&store.stash("1").unwrap())
+                .retrieve(&store.stash("1").unwrap().0)
                 .unwrap()
                 .is_some()
         );
@@ -279,7 +285,7 @@ mod tests {
                 let s = store.clone();
                 thread::spawn(move || {
                     for j in 0..100 {
-                        s.stash(&format!("p-{i}-{j}")).unwrap();
+                        let _ = s.stash(&format!("p-{i}-{j}")).unwrap();
                     }
                 })
             })

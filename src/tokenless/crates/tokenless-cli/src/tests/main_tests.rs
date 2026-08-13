@@ -717,7 +717,7 @@ fn run_command_retrieve_with_marker() {
         return;
     }
     let store = store.unwrap();
-    let key = store.stash("hello world").unwrap();
+    let (key, _) = store.stash("hello world").unwrap();
     let marker = format!("<<tokenless:{}>>", key);
     let result = run_command(Commands::Retrieve {
         hash: marker,
@@ -734,7 +734,7 @@ fn run_command_retrieve_bare_hash() {
         return;
     }
     let store = store.unwrap();
-    let key = store.stash("retrieve bare hash test").unwrap();
+    let (key, _) = store.stash("retrieve bare hash test").unwrap();
     let result = run_command(Commands::Retrieve {
         hash: key,
         stash_db: None,

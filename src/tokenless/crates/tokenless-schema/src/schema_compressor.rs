@@ -288,7 +288,7 @@ impl SchemaCompressor {
         let stash_key = if stash_active {
             self.stash_store
                 .as_ref()
-                .and_then(|store| store.stash(desc).ok())
+                .and_then(|store| store.stash(desc).ok().map(|(k, _)| k))
         } else {
             None
         };

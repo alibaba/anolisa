@@ -188,8 +188,19 @@ impl ResponseCompressor {
         let keys = std::mem::take(&mut *self.stash_keys_created.borrow_mut());
         let mut removed = 0usize;
         for key in &keys {
-            if store.delete(key).unwrap_or(false) {
-                removed += 1;
+            match store.delete(key) {
+                Ok(true) => removed += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    // Keep the key list drained so we don't retry forever, but
+                    // surface the failure — a silent orphan is worse than a
+                    // loud warning (AGENTS.md: do not swallow operational errors).
+                    self.record_stash_error();
+                    eprintln!(
+                        "[tokenless] stash: rollback delete failed for key {}: {e}",
+                        key
+                    );
+                }
             }
         }
         // Keep counters consistent with the rolled-back store.
@@ -198,9 +209,14 @@ impl ResponseCompressor {
         removed
     }
 
-    fn record_stash_success(&self, key: String) {
+    fn record_stash_success(&self, key: String, created: bool) {
         self.stash_writes.set(self.stash_writes.get() + 1);
-        self.stash_keys_created.borrow_mut().push(key);
+        // Only newly inserted keys are safe to delete on discard. Refreshing an
+        // existing content-addressed entry must not put that key on the
+        // rollback list — another emitted marker may still need it.
+        if created {
+            self.stash_keys_created.borrow_mut().push(key);
+        }
     }
 
     fn record_stash_error(&self) {
@@ -227,8 +243,8 @@ impl ResponseCompressor {
                 && let Ok(serialized) = serde_json::to_string(value)
             {
                 match store.stash(&serialized) {
-                    Ok(key) => {
-                        self.record_stash_success(key.clone());
+                    Ok((key, created)) => {
+                        self.record_stash_success(key.clone(), created);
                         return Value::String(format!(
                             "<{type_name} truncated at depth {depth}, retrieve with {}>",
                             marker_for(&key)
@@ -286,8 +302,8 @@ impl ResponseCompressor {
             && let Some(store) = self.stash_store.as_ref()
         {
             match store.stash(s) {
-                Ok(key) => {
-                    self.record_stash_success(key.clone());
+                Ok((key, created)) => {
+                    self.record_stash_success(key.clone(), created);
                     let target = self.truncate_strings_at - stash_suffix_char_len();
                     let truncate_pos = s
                         .char_indices()
@@ -393,8 +409,8 @@ impl ResponseCompressor {
             return None;
         }
         let key = match stash.stash(&payload) {
-            Ok(k) => {
-                self.record_stash_success(k.clone());
+            Ok((k, created)) => {
+                self.record_stash_success(k.clone(), created);
                 k
             }
             Err(_) => {

@@ -348,6 +348,36 @@ fn test_rollback_stash_writes_removes_created_entries() {
 }
 
 #[test]
+fn test_rollback_preserves_preexisting_same_payload_entry() {
+    // Codex P1: idempotent re-stash of an already-emitted payload must not
+    // put that key on the rollback list — discarding a later no-savings
+    // compress must not make earlier markers unretrievable.
+    use std::sync::Arc;
+    use tokenless_ccr::{InMemoryStore, StashStore, extract_hash};
+
+    let store = Arc::new(InMemoryStore::new());
+    let compressor = ResponseCompressor::new()
+        .with_truncate_arrays_at(2)
+        .with_stash_store(store.clone());
+    let arr = json!([1, 2, 3, 4, 5]);
+    let first = compressor.compress(&arr);
+    let marker = first.as_array().unwrap().last().unwrap().as_str().unwrap();
+    let hash = extract_hash(marker).expect("marker");
+    assert!(store.retrieve(hash).unwrap().is_some());
+
+    // Second compress refreshes the same content-addressed key.
+    let _ = compressor.compress(&arr);
+    assert_eq!(store.len(), 1);
+    let removed = compressor.rollback_stash_writes();
+    assert_eq!(removed, 0, "refresh must not be treated as created");
+    assert_eq!(
+        store.retrieve(hash).unwrap().as_deref(),
+        Some(r#"[3,4,5]"#),
+        "pre-existing emitted marker must remain retrievable after rollback"
+    );
+}
+
+#[test]
 fn test_array_truncation_with_failing_stash_falls_back_to_lossy() {
     // A stash that always errors must not break compression: the marker
     // degrades to the plain lossy form.
@@ -356,7 +386,7 @@ fn test_array_truncation_with_failing_stash_falls_back_to_lossy() {
 
     struct AlwaysFail;
     impl StashStore for AlwaysFail {
-        fn stash(&self, _payload: &str) -> Result<String, StashError> {
+        fn stash(&self, _payload: &str) -> Result<(String, bool), StashError> {
             Err(StashError::Backend("simulated".to_string()))
         }
         fn retrieve(&self, _hash: &str) -> Result<Option<String>, StashError> {
