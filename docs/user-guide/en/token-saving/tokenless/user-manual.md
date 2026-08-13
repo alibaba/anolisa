@@ -19,6 +19,54 @@ cargo build --release --locked -p tokenless-cli
 
 This path produces only the standalone `tokenless` CLI. It does not install `rtk`, `toon`, or the agent integration resources. To use the complete feature set in an agent, install through the anolisa CLI as described in the [Quick Start](QUICKSTART.md).
 
+## Build the Python runtime from source
+
+Framework integrations running in CPython can use Tokenless in-process instead of starting the
+CLI for every response:
+
+```bash
+make python-wheel
+python3 -m venv /tmp/tokenless-python
+/tmp/tokenless-python/bin/pip install target/wheels/anolisa_tokenless-*.whl
+```
+
+The build requires a discoverable CPython 3.11+ development environment.
+`make python-wheel` uses `uvx` to provision Maturin, so install
+[`uv`](https://docs.astral.sh/uv/) first; alternatively, install Maturin and run
+`make python-wheel MATURIN=maturin`. Full `cargo test --workspace` commands also
+compile the Python member and require the same environment, while default
+workspace Cargo commands exclude it.
+
+The wheel uses the CPython 3.11 stable ABI, so it supports CPython 3.11 and later on the operating
+system and CPU architecture where it was built. The package is not yet published to PyPI.
+
+The first API accepts JSON text and exposes response compression and Stash retrieval:
+
+```python
+import json
+from pathlib import Path
+
+from anolisa_tokenless import TokenlessRuntime
+
+runtime = TokenlessRuntime(Path.home() / ".local/state/my-agent/tokenless")
+result = runtime.compress_response(
+    json.dumps({"items": list(range(200))}),
+    truncate_arrays_at=32,
+    agent_id="my-agent",
+    session_id="session-42",
+    tool_use_id="tool-7",
+)
+model_visible_output = result.output
+```
+
+The Python API defaults to reversible fail-open behavior: when Stash was requested but is
+unavailable, a write fails, or a configured limit cannot fit a retrieval marker,
+`result.output` remains the original JSON and
+`result.disposition` is `reversibility-unavailable`. Use a separate absolute data directory for
+each user or tenant. Schema compression, TOON, RTK, MCP, and framework middleware are not included
+in this first API. See the [runtime design](../../../../../src/tokenless/docs/design/runtime-library.md)
+for the state and concurrency contract.
+
 ## Capabilities and boundaries
 
 | Capability | Behavior implemented in the current code | Important boundary |
@@ -109,6 +157,7 @@ Command rewriting also changes the shell command submitted by the host. Most ada
 |-----------|----------|
 | Install and verify for the first time | [Quick Start](QUICKSTART.md) |
 | Build the standalone CLI from source | [This page · Build the standalone CLI from source](#build-the-standalone-cli-from-source) |
+| Build the in-process Python runtime | [This page · Build the Python runtime from source](#build-the-python-runtime-from-source) |
 | Connect or switch an agent framework | [Framework integration](framework-integration.md) |
 | Compress, retrieve, or run MCP manually | [CLI reference](cli-reference.md) |
 | Inspect savings or content changes, or run a dual comparison | [Measuring savings](measuring-savings.md) |

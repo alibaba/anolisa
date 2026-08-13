@@ -3,6 +3,15 @@ resolver = "2"
 members = [
     "crates/tokenless-ccr",
     "crates/tokenless-schema",
+    "crates/tokenless-runtime",
+    "crates/tokenless-cli",
+    "crates/tokenless-stats",
+    "python/tokenless",
+]
+default-members = [
+    "crates/tokenless-ccr",
+    "crates/tokenless-schema",
+    "crates/tokenless-runtime",
     "crates/tokenless-cli",
     "crates/tokenless-stats",
 ]
@@ -13,7 +22,7 @@ exclude = [
 [workspace.package]
 version = "0.7.6"
 edition = "2024"
-license = "MIT"
+license = "Apache-2.0"
 
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -28,6 +37,8 @@ blake3 = "1.5"
 dirs = "5.0"
 libc = "0.2"
 similar = "2"
+pyo3 = "0.24.2"
+tempfile = "3"
 
 [profile.release]
 opt-level = 3
@@ -35,3 +46,9 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Python extensions must unwind at the FFI boundary instead of aborting the
+# embedding interpreter. CLI releases continue to use the profile above.
+[profile.python-release]
+inherits = "release"
+panic = "unwind"

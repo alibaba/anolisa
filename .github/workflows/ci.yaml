@@ -848,6 +848,15 @@ jobs:
           python3 tests/test_compress_response_hook.py
           python3 tests/test_hermes_plugin_import.py
 
+      - uses: astral-sh/setup-uv@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build and test Tokenless Python wheel
+        run: make -C src/tokenless test-python-runtime
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'

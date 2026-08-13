@@ -19,6 +19,52 @@ cargo build --release --locked -p tokenless-cli
 
 这条路径只生成独立的 `tokenless` CLI，不会安装 `rtk`、`toon` 或 Agent 接入资源。需要在 Agent 中使用完整能力时，请按照[快速开始](QUICKSTART.md)通过 anolisa CLI 安装。
 
+## 从源码构建 Python Runtime
+
+运行在 CPython 中的框架集成可以在进程内使用 Tokenless，无需为每个响应启动
+CLI：
+
+```bash
+make python-wheel
+python3 -m venv /tmp/tokenless-python
+/tmp/tokenless-python/bin/pip install target/wheels/anolisa_tokenless-*.whl
+```
+
+构建时要求系统可发现 CPython 3.11+ 开发环境。`make python-wheel` 默认通过
+`uvx` 提供 Maturin，因此需要先安装 [`uv`](https://docs.astral.sh/uv/)；也可以
+先安装 Maturin，再执行 `make python-wheel MATURIN=maturin`。完整的
+`cargo test --workspace` 也会编译 Python member，需要相同环境；默认的 Cargo
+workspace 命令则不包含它。
+
+Wheel 使用 CPython 3.11 stable ABI，因此支持构建平台上的 CPython 3.11 及更高
+版本，但仍受操作系统和 CPU 架构限制。该包目前尚未发布到 PyPI。
+
+首版 API 接收 JSON 文本，开放响应压缩和 Stash 取回：
+
+```python
+import json
+from pathlib import Path
+
+from anolisa_tokenless import TokenlessRuntime
+
+runtime = TokenlessRuntime(Path.home() / ".local/state/my-agent/tokenless")
+result = runtime.compress_response(
+    json.dumps({"items": list(range(200))}),
+    truncate_arrays_at=32,
+    agent_id="my-agent",
+    session_id="session-42",
+    tool_use_id="tool-7",
+)
+model_visible_output = result.output
+```
+
+Python API 默认采用可逆 fail-open 策略：请求使用 Stash，但数据库不可用、
+写入失败或配置阈值无法容纳取回 marker 时，`result.output` 保留原始 JSON，
+`result.disposition` 为 `reversibility-unavailable`。每个用户或租户应使用独立的
+绝对数据目录。
+首版 API 不包含 Schema 压缩、TOON、RTK、MCP 或框架 Middleware。状态和并发
+契约见 [Runtime 设计](../../../../../src/tokenless/docs/design/runtime-library_zh.md)。
+
 ## 能力与边界
 
 | 能力 | 当前代码实际执行的行为 | 重要边界 |
@@ -109,6 +155,7 @@ Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、
 |------------|------|
 | 第一次安装并验证 | [快速开始](QUICKSTART.md) |
 | 从源码构建独立 CLI | [本页 · 从源码构建独立 CLI](#从源码构建独立-cli) |
+| 从源码构建进程内 Python Runtime | [本页 · 从源码构建 Python Runtime](#从源码构建-python-runtime) |
 | 接入或切换 Agent 框架 | [框架集成](framework-integration.md) |
 | 手动压缩、取回或运行 MCP | [CLI 参考](cli-reference.md) |
 | 查看节省或内容变化、做双跑对比 | [效果度量](measuring-savings.md) |

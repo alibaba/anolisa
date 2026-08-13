@@ -13,6 +13,7 @@ path = "src/main.rs"
 tokenless-schema = { path = "../tokenless-schema" }
 tokenless-stats = { path = "../tokenless-stats" }
 tokenless-ccr = { path = "../tokenless-ccr" }
+tokenless-runtime = { path = "../tokenless-runtime" }
 dirs.workspace = true
 clap.workspace = true
 serde_json.workspace = true
@@ -23,5 +24,4 @@ libc.workspace = true
 regex.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
-
+tempfile.workspace = true

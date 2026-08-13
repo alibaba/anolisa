@@ -140,4 +140,4 @@ npx vitest run test/assembler.test.ts # 运行单个测试套件
 
 ## 许可证
 
-MIT
+Apache License 2.0

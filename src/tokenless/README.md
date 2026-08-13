@@ -83,7 +83,9 @@ Example: dashboard shows 60% compression rate, but if tool responses account for
 Token-Less/
 ├── crates/tokenless-schema/   # Core library: SchemaCompressor + ResponseCompressor
 ├── crates/tokenless-ccr/      # Reversible compression stash (Compress-Cache-Retrieve)
+├── crates/tokenless-runtime/  # Stateful in-process compression and retrieval API
 ├── crates/tokenless-cli/      # CLI binary: `tokenless` command (env-check, compress, retrieve, stats)
+├── python/tokenless/          # PyO3 package: `anolisa_tokenless`
 ├── adapters/tokenless/        # FHS adapter bundle (manifest + framework integrations)
 │   ├── manifest.json            # Adapter manifest for supported frameworks
 │   ├── common/                  # Shared: hooks, spec, env-fix, commands, cosh-extension
@@ -163,6 +165,30 @@ make setup
 
 The source setup installs `tokenless` to `~/.local/bin`, places the `rtk` and
 `toon` helpers alongside it, and deploys all adapters for development.
+
+### Build the Python runtime
+
+Framework authors can build the in-process Python API from source:
+
+```bash
+make python-wheel
+python3 -m venv /tmp/tokenless-python
+/tmp/tokenless-python/bin/pip install target/wheels/anolisa_tokenless-*.whl
+```
+
+This target requires a discoverable CPython 3.11+ development environment and
+uses `uvx` to provision Maturin by default. Install
+[`uv`](https://docs.astral.sh/uv/) first, or run
+`make python-wheel MATURIN=maturin` with a compatible Maturin already on
+`PATH`. The same Python environment is required by `cargo test --workspace`;
+plain workspace-default Cargo commands exclude the Python extension.
+
+The `anolisa_tokenless` module supports CPython 3.11 and later on the platform
+where its native wheel was built. It currently exposes JSON response
+compression and Stash retrieval; it does not bundle the CLI, RTK, TOON, or a
+framework adapter. The package is built and tested in this repository but is
+not yet published to PyPI. See the [runtime design](docs/design/runtime-library.md)
+and the [user manual](../../docs/user-guide/en/token-saving/tokenless/user-manual.md#build-the-python-runtime-from-source).
 
 ## CLI Usage
 
@@ -502,6 +528,8 @@ The installer creates a `tokenless.js` symbolic link in OpenCode's global
 | `make build` | Build `tokenless` + `rtk` + `toon` (release mode) |
 | `make build-tokenless` | Build `tokenless` + `rtk` (via justfile) |
 | `make build-toon` | Install TOON binary via `cargo install toon-format` |
+| `make python-wheel` | Build the native `anolisa-tokenless` wheel |
+| `make test-python-runtime` | Install and test the wheel in an isolated environment |
 | `make install` | Build and install binaries to `BIN_DIR` (default: ~/.local/bin) |
 | `make test` | Run all tests (Rust + hooks) |
 | `make test-hooks` | Run hook integration tests |
@@ -572,6 +600,8 @@ layout and single-target interface.
 |---|---|
 | `crates/tokenless-cli/` | CLI binary — `tokenless` command (compress, stats, env-check) |
 | `crates/tokenless-schema/` | Core Rust library — `SchemaCompressor` and `ResponseCompressor` |
+| `crates/tokenless-runtime/` | Stateful Rust API shared by the CLI and language bindings |
+| `python/tokenless/` | PyO3 package exposing `anolisa_tokenless` for CPython 3.11+ |
 | `adapters/tokenless/` | FHS adapter bundle — manifest, env-check spec/fix, hooks, OpenClaw plugin |
 | `adapters/tokenless/hermes/` | Hermes Agent adapter — plugin + detect/install/uninstall scripts |
 | `adapters/tokenless/qoder/` | Qoder CLI adapter — plugin + detect/install/uninstall scripts |
@@ -588,6 +618,8 @@ layout and single-target interface.
 - **Rust** toolchain >= 1.89 — required by rtk (edition 2024) and toon-format (is_multiple_of). Install via [rustup](https://rustup.rs)
 - **just** — build runner for rtk setup (clone + patch orchestration)
 - **Git** — for rtk source download via justfile
+- **CPython 3.11+ development environment and uv** — only for the Python wheel
+  and commands that explicitly include all workspace members
 
 ## License
 

@@ -45,6 +45,10 @@ pub struct ResponseCompressor {
     /// can surface persistent backend failures instead of silently degrading
     /// to the lossy marker.
     stash_errors: Cell<usize>,
+    /// Number of truncations that could not embed a retrievable marker during
+    /// the last `compress()` call. Includes backend failures and marker-budget
+    /// limits without conflating the two causes.
+    unrecoverable_truncations: Cell<usize>,
 }
 
 impl Default for ResponseCompressor {
@@ -76,6 +80,7 @@ impl Default for ResponseCompressor {
             stash_store: None,
             stash_writes: Cell::new(0),
             stash_errors: Cell::new(0),
+            unrecoverable_truncations: Cell::new(0),
         }
     }
 }
@@ -144,6 +149,7 @@ impl ResponseCompressor {
         // impression that a reset-then-increment AtomicUsize pattern would give.
         self.stash_writes.set(0);
         self.stash_errors.set(0);
+        self.unrecoverable_truncations.set(0);
         let original_text = serde_json::to_string(response).unwrap_or_default();
         let result = self.compress_value(response, 0);
 
@@ -157,7 +163,7 @@ impl ResponseCompressor {
     }
 
     /// Number of stash writes performed during the last `compress()` call.
-    /// Zero when no stash store is attached or no arrays were truncated.
+    /// Zero when no stash store is attached or no value was stashed.
     pub fn stash_writes(&self) -> usize {
         self.stash_writes.get()
     }
@@ -167,6 +173,12 @@ impl ResponseCompressor {
     /// I/O) — the caller should log it so the failure isn't invisible.
     pub fn stash_errors(&self) -> usize {
         self.stash_errors.get()
+    }
+
+    /// Number of truncations that lacked a retrievable marker despite an
+    /// attached stash. A non-zero value means the candidate is partly lossy.
+    pub fn unrecoverable_truncations(&self) -> usize {
+        self.unrecoverable_truncations.get()
     }
 
     /// Recursively compress a JSON value
@@ -185,14 +197,17 @@ impl ResponseCompressor {
             // verbatim original via the embedded marker. On any failure (no
             // store, serialization error, stash backend error) fall back to
             // the plain lossy depth marker.
-            if let Some(store) = self.stash_store.as_ref()
-                && let Ok(serialized) = serde_json::to_string(value)
-                && let Ok(key) = store.stash(&serialized)
-            {
-                return Value::String(format!(
-                    "<{type_name} truncated at depth {depth}, retrieve with {}>",
-                    marker_for(&key)
-                ));
+            if self.stash_store.is_some() {
+                if let Ok(serialized) = serde_json::to_string(value) {
+                    if let Some(key) = self.stash_payload(&serialized) {
+                        return Value::String(format!(
+                            "<{type_name} truncated at depth {depth}, retrieve with {}>",
+                            marker_for(&key)
+                        ));
+                    }
+                } else {
+                    self.mark_unrecoverable_truncation();
+                }
             }
             return Value::String(format!("<{type_name} truncated at depth {depth}>"));
         }
@@ -238,18 +253,20 @@ impl ResponseCompressor {
         // BEFORE stashing so a too-small limit (or disabled markers) does not
         // orphan a stash entry with no embedded marker — a stash without a
         // reachable marker is unretrievable.
-        if self.add_truncation_marker
-            && self.truncate_strings_at > stash_suffix_char_len()
-            && let Some(store) = self.stash_store.as_ref()
-            && let Ok(key) = store.stash(s)
-        {
-            let target = self.truncate_strings_at - stash_suffix_char_len();
-            let truncate_pos = s
-                .char_indices()
-                .nth(target)
-                .map(|(i, _)| i)
-                .unwrap_or(s.len());
-            return Value::String(format!("{}{}", &s[..truncate_pos], stash_suffix(&key)));
+        let reversible_marker_fits =
+            self.add_truncation_marker && self.truncate_strings_at > stash_suffix_char_len();
+        if reversible_marker_fits {
+            if let Some(key) = self.stash_payload(s) {
+                let target = self.truncate_strings_at - stash_suffix_char_len();
+                let truncate_pos = s
+                    .char_indices()
+                    .nth(target)
+                    .map(|(i, _)| i)
+                    .unwrap_or(s.len());
+                return Value::String(format!("{}{}", &s[..truncate_pos], stash_suffix(&key)));
+            }
+        } else if self.stash_store.is_some() {
+            self.mark_unrecoverable_truncation();
         }
 
         // Lossy path: existing behavior. Only attach the marker when the
@@ -324,6 +341,8 @@ impl ResponseCompressor {
                 None => format!("<... {} more items truncated>", remaining),
             };
             result.push(Value::String(marker));
+        } else if truncate && self.stash_store.is_some() {
+            self.mark_unrecoverable_truncation();
         }
 
         Value::Array(result)
@@ -336,7 +355,6 @@ impl ResponseCompressor {
     /// items (not their compressed forms) means retrieval yields the original
     /// content verbatim.
     fn stash_dropped(&self, dropped: &[Value]) -> Option<String> {
-        let stash = self.stash_store.as_ref()?;
         if dropped.is_empty() {
             return None;
         }
@@ -344,19 +362,29 @@ impl ResponseCompressor {
         if payload.is_empty() {
             return None;
         }
-        let key = match stash.stash(&payload) {
+        self.stash_payload(&payload)
+    }
+
+    /// Write one payload and keep per-compression observability consistent
+    /// across string, array, and depth truncation paths.
+    fn stash_payload(&self, payload: &str) -> Option<String> {
+        let stash = self.stash_store.as_ref()?;
+        match stash.stash(payload) {
             Ok(k) => {
                 self.stash_writes.set(self.stash_writes.get() + 1);
-                k
+                Some(k)
             }
             Err(_) => {
-                // Surface the backend failure via the counter so the CLI can
-                // log it; degrade to the lossy marker for this entry.
                 self.stash_errors.set(self.stash_errors.get() + 1);
-                return None;
+                self.mark_unrecoverable_truncation();
+                None
             }
-        };
-        Some(key)
+        }
+    }
+
+    fn mark_unrecoverable_truncation(&self) {
+        self.unrecoverable_truncations
+            .set(self.unrecoverable_truncations.get() + 1);
     }
 
     /// Compress an object, removing drop_fields and recursing

@@ -8,8 +8,12 @@ use std::io::{self, IsTerminal as _, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
-use tokenless_ccr::{SqliteStore, StashStore, extract_hash, is_valid_hash};
-use tokenless_schema::{ResponseCompressor, SchemaCompressor};
+use tokenless_ccr::{SqliteStore, StashStore};
+use tokenless_runtime::{
+    CompressOptions, CompressionDisposition, MAX_INPUT_BYTES, compress_response_with_store,
+    retrieve_from_store,
+};
+use tokenless_schema::SchemaCompressor;
 use tokenless_stats::{
     CompressionMode, DiffSort, OperationType, StatsRecord, StatsRecorder, TokenlessConfig,
 };
@@ -246,9 +250,6 @@ enum StatsCommands {
     /// Disable stats recording
     Disable,
 }
-
-/// Maximum input size (64 MiB) to prevent OOM on accidental large-file stdin.
-const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
 
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
     let parsed = value
@@ -575,19 +576,6 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             stash_db,
         } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
-            let value: serde_json::Value = serde_json::from_str(&input)
-                .map_err(|e| (format!("JSON parse error: {}", e), 2))?;
-
-            let mut compressor = ResponseCompressor::new();
-            if let Some(v) = truncate_strings_at {
-                compressor = compressor.with_truncate_strings_at(v);
-            }
-            if let Some(v) = truncate_arrays_at {
-                compressor = compressor.with_truncate_arrays_at(v);
-            }
-            if let Some(v) = max_depth {
-                compressor = compressor.with_max_depth(v);
-            }
             // Load config before deciding on the stash so we can skip it
             // entirely when compression is disabled (dry-run). Attaching the
             // stash in dry-run would write entries whose `<<tokenless:KEY>>`
@@ -601,55 +589,57 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             } else {
                 open_stash_store_with(&database_paths, stash_db.as_deref())
             };
-            if let Some(ref store) = stash {
-                compressor = compressor.with_stash_store(store.clone());
-            }
-            let result = compressor.compress(&value);
-            // Stash observability: capture write/error counts + live entry
-            // count for stats. All three are None when no stash store is
-            // attached (vs Some(0) when a stash is attached but nothing was
-            // truncated) so stats queries can distinguish "no stash" runs
-            // from "stash, zero writes" runs. Counts are read AFTER compress
-            // so they reflect this call; stash_size reflects entries added.
-            let stash_writes = stash.as_ref().map(|_| compressor.stash_writes());
-            let stash_errors = stash.as_ref().map(|_| compressor.stash_errors());
-            let stash_size = stash.as_ref().map(|s| s.len());
+            let result = compress_response_with_store(
+                &input,
+                &CompressOptions {
+                    truncate_strings_at,
+                    truncate_arrays_at,
+                    max_depth,
+                    stash_enabled: !no_stash,
+                    // Preserve the existing CLI contract: stash failure is
+                    // visible but does not block lossy compression. Embedded
+                    // frontends can require reversible output instead.
+                    require_reversible: false,
+                },
+                compression_on,
+                stash.as_ref(),
+            )
+            .map_err(|error| {
+                let code = if matches!(
+                    error,
+                    tokenless_runtime::RuntimeError::InvalidJson(_)
+                        | tokenless_runtime::RuntimeError::InputTooLarge { .. }
+                ) {
+                    2
+                } else {
+                    1
+                };
+                (error.to_string(), code)
+            })?;
             // Surface persistent stash backend failures (disk full, locked DB,
             // I/O) so they aren't invisible — compression degrades to the
             // lossy marker per entry, but a non-zero count means the stash
             // path is broken and retrievals will miss.
-            if matches!(stash_errors, Some(e) if e > 0) {
+            if matches!(result.stash_errors, Some(errors) if errors > 0) {
                 eprintln!(
                     "[tokenless] stash: {} write(s) failed during compression; truncated entries are not retrievable (check stash db health)",
-                    stash_errors.expect("checked Some above")
+                    result.stash_errors.expect("checked Some above")
                 );
             }
-            let after_compact = serde_json::to_string(&result).unwrap_or_else(|_| String::new());
-
-            let before_tokens = estimate_tokens(&input);
-            let after_tokens = estimate_tokens(&after_compact);
-            let output_text = if after_tokens >= before_tokens {
+            if result.disposition == CompressionDisposition::NoSavings {
                 eprintln!(
                     "tokenless: response compression did not reduce size ({} -> {} est. tokens), outputting original",
-                    before_tokens, after_tokens
+                    result.before_tokens, result.after_tokens
                 );
-                // No-savings discard edge: if a stash was attached and an
-                // array was truncated, those writes orphan (markers live in
-                // `after_compact`, which is discarded). Truncation almost
-                // always yields savings, so this is rare; orphaned entries
-                // are TTL-cleaned.
-                input.clone()
-            } else {
-                after_compact.clone()
-            };
+            }
 
-            let mode = resolve_mode(compression_on, before_tokens, after_tokens);
-            let emit_text = if compression_on {
-                output_text.clone()
-            } else {
+            let mode = resolve_mode(compression_on, result.before_tokens, result.after_tokens);
+            let output_text = if result.disposition == CompressionDisposition::NoSavings {
                 input.clone()
+            } else {
+                result.compressed_output.clone()
             };
-            println!("{}", emit_text);
+            println!("{}", result.output);
 
             record_compression_stats(
                 &config,
@@ -661,9 +651,9 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                 input,
                 output_text,
                 mode,
-                stash_writes,
-                stash_errors,
-                stash_size,
+                result.stash_writes,
+                result.stash_errors,
+                result.stash_size,
             );
         }
         Commands::Retrieve { hash, stash_db } => {
@@ -673,44 +663,14 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     return Err((format!("stash unavailable: {}", e), 1));
                 }
             };
-            // Accept either a bare 24-hex hash or text containing a marker;
-            // extract_hash validates the embedded hash. When no marker is
-            // found, validate the bare hash format before the DB round-trip
-            // so a mistaken non-hash argument (e.g. a file path) gets a clear
-            // format error instead of a misleading "no stashed payload".
-            let key = match extract_hash(&hash) {
-                Some(h) => h.to_string(),
-                None if is_valid_hash(&hash) => hash.to_string(),
-                None => {
-                    return Err((
-                        format!(
-                            "invalid stash hash: {:?} (expected 24 hex chars or a <<tokenless:HASH>> marker)",
-                            hash
-                        ),
-                        1,
-                    ));
-                }
-            };
-            match store.retrieve(&key) {
-                Ok(Some(payload)) => {
-                    // Byte-exact restore: do not append a trailing newline.
-                    // `println!` would break end-to-end lossless retrieve for
-                    // payloads that do not already end with `\n` (and would
-                    // diverge from MCP `tokenless_retrieve`, which returns the
-                    // stored string unchanged).
-                    let mut out = io::stdout().lock();
-                    out.write_all(payload.as_bytes())
-                        .map_err(|e| (format!("failed to write retrieved payload: {e}"), 1))?;
-                    out.flush()
-                        .map_err(|e| (format!("failed to flush retrieved payload: {e}"), 1))?;
-                }
-                Ok(None) => {
-                    return Err((format!("no stashed payload for hash: {}", key), 1));
-                }
-                Err(e) => {
-                    return Err((format!("stash retrieve failed: {}", e), 1));
-                }
-            }
+            let payload = retrieve_from_store(store.as_ref(), &hash)
+                .map_err(|error| (error.to_string(), 1))?;
+            // Byte-exact restore: do not append a trailing newline.
+            let mut out = io::stdout().lock();
+            out.write_all(payload.as_bytes())
+                .map_err(|e| (format!("failed to write retrieved payload: {e}"), 1))?;
+            out.flush()
+                .map_err(|e| (format!("failed to flush retrieved payload: {e}"), 1))?;
         }
         Commands::Stats(stats_cmd) => {
             match stats_cmd {
@@ -1055,8 +1015,8 @@ fn record_compression_stats(
     let after_bytes = after_text.len();
 
     // Skip recording if there was no actual token savings
-    let before_tokens = estimate_tokens_from_bytes(before_bytes);
-    let after_tokens = estimate_tokens_from_bytes(after_bytes);
+    let before_tokens = estimate_tokens(&before_text);
+    let after_tokens = estimate_tokens(&after_text);
     if after_tokens >= before_tokens {
         return;
     }

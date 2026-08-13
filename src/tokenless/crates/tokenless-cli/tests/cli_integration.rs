@@ -1,6 +1,8 @@
 use std::process::Command;
 
-use tokenless_stats::{OperationType, StatsRecord, StatsRecorder, get_home_dir};
+use tokenless_stats::{OperationType, StatsRecord, StatsRecorder, estimate_tokens, get_home_dir};
+
+use tokenless_runtime::{CompressOptions, compress_response_with_store};
 
 fn tokenless_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_tokenless"))
@@ -339,6 +341,141 @@ fn compress_response_from_stdin() {
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(result.get("data").is_some());
     assert!(result.get("debug").is_none());
+}
+
+#[test]
+fn compress_response_cli_matches_runtime_library() {
+    let response = serde_json::to_string(&serde_json::json!({
+        "items": (0..100).collect::<Vec<_>>(),
+        "debug": "remove",
+        "empty": null,
+    }))
+    .unwrap();
+    let expected = compress_response_with_store(
+        &response,
+        &CompressOptions {
+            truncate_arrays_at: Some(4),
+            stash_enabled: false,
+            ..CompressOptions::default()
+        },
+        true,
+        None,
+    )
+    .unwrap();
+
+    let output = tokenless_bin()
+        .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args([
+            "compress-response",
+            "--truncate-arrays-at",
+            "4",
+            "--no-stash",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(response.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim_end(),
+        expected.output,
+    );
+}
+
+#[test]
+fn compress_response_stats_use_unicode_aware_estimates() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let response = serde_json::to_string(&serde_json::json!({
+        "tail": "世界".repeat(300)
+    }))
+    .unwrap();
+    let output = fixture
+        .command()
+        .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+        .env("TOKENLESS_STATS_ENABLED", "1")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args([
+            "compress-response",
+            "--truncate-strings-at",
+            "80",
+            "--no-stash",
+            "--agent-id",
+            "integration-agent",
+            "--session-id",
+            "unicode-session",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(response.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "compress-response failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let compressed = String::from_utf8(output.stdout).unwrap();
+    let recorder = StatsRecorder::new(fixture.data_dir.join("stats.db")).unwrap();
+    let records = recorder
+        .records_by_session("unicode-session", None)
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].before_tokens, estimate_tokens(&response));
+    assert_eq!(
+        records[0].after_tokens,
+        estimate_tokens(compressed.trim_end())
+    );
+}
+
+#[test]
+fn dry_run_no_savings_keeps_the_no_savings_warning() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let response = r#"{"value":1}"#;
+    let output = fixture
+        .command()
+        .env("TOKENLESS_COMPRESSION_ENABLED", "0")
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args(["compress-response", "--no-stash"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(response.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim_end(),
+        response
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("response compression did not reduce size"));
+    assert!(stderr.contains("dry-run mode"));
 }
 
 #[test]

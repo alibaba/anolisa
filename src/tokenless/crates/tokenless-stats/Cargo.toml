@@ -16,4 +16,4 @@ libc.workspace = true
 similar.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

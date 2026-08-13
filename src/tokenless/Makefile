@@ -38,6 +38,9 @@ TOON_VER := 0.5.0
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 NATIVE_NPM_TARGET := $(shell node -p 'process.platform + "-" + process.arch')
 NATIVE_NPM_INPUT_DIR := $(CURDIR)/target/npm-prebuilt/$(NATIVE_NPM_TARGET)
+PYTHON_RUNTIME_DIR := python/tokenless
+PYTHON_WHEEL_DIR := $(CURDIR)/target/wheels
+MATURIN ?= uvx --from 'maturin>=1.9,<2.0' maturin
 
 .PHONY: build build-tokenless build-toon build-openclaw-plugin \
         stamp-adapter-templates generate-component-contract \
@@ -55,7 +58,7 @@ NATIVE_NPM_INPUT_DIR := $(CURDIR)/target/npm-prebuilt/$(NATIVE_NPM_TARGET)
         qwencode-install qwencode-uninstall \
         setup help \
         npm-package npm-package-all npm-publish prepare-npm-native-binaries \
-        test-hooks
+        python-wheel test-python-runtime test-hooks
 
 # Default target
 all: build
@@ -204,6 +207,21 @@ test-adapters: build-openclaw-plugin
 	@echo "==> Testing OpenCode adapter..."
 	bash tests/test-opencode-adapter-install.sh
 	node tests/test-opencode-plugin.mjs
+
+# Build the abi3 extension with unwind semantics so a Rust panic cannot abort
+# the embedding Python interpreter. The wheel remains platform-specific, but
+# one build supports CPython 3.11 and later on that platform.
+python-wheel:
+	@echo "==> Building Tokenless Python wheel..."
+	install -d -m 0755 $(PYTHON_WHEEL_DIR)
+	rm -f $(PYTHON_WHEEL_DIR)/anolisa_tokenless-*.whl
+	cd $(PYTHON_RUNTIME_DIR) && \
+		$(MATURIN) build --profile python-release --interpreter python3 \
+			--compatibility pypi --auditwheel check \
+			--out $(PYTHON_WHEEL_DIR)
+
+test-python-runtime: python-wheel
+	@bash tests/test-python-runtime.sh
 
 # These targets only assemble the prebuilt BIN_DIR/{tokenless,rtk,toon} files
 # into the portable raw-package contract maintained by this component.

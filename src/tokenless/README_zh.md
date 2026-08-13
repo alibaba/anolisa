@@ -122,6 +122,28 @@ make setup
 源码安装会把 `tokenless` 放在 `~/.local/bin`，`rtk` 和 `toon` 辅助
 二进制也位于同一个目录，并部署开发所需的全部 adapter。
 
+### 构建 Python Runtime
+
+框架开发者可以从源码构建进程内 Python API：
+
+```bash
+make python-wheel
+python3 -m venv /tmp/tokenless-python
+/tmp/tokenless-python/bin/pip install target/wheels/anolisa_tokenless-*.whl
+```
+
+该目标要求系统可发现 CPython 3.11+ 开发环境，并默认通过 `uvx` 提供
+Maturin。请先安装 [`uv`](https://docs.astral.sh/uv/)，或者在 `PATH` 中已有
+兼容 Maturin 时执行 `make python-wheel MATURIN=maturin`。执行
+`cargo test --workspace` 同样需要该 Python 环境；普通 Cargo workspace 默认
+命令不包含 Python Extension。
+
+`anolisa_tokenless` 模块支持 CPython 3.11 及更高版本，但只能在构建该原生
+Wheel 的对应平台使用。当前只开放 JSON 响应压缩和 Stash 取回，不捆绑
+CLI、RTK、TOON 或框架 Adapter。仓库会构建并测试该包，但目前尚未发布到
+PyPI。具体见 [Runtime 设计](docs/design/runtime-library_zh.md) 和
+[用户手册](../../docs/user-guide/zh/token-saving/tokenless/user-manual.md#从源码构建-python-runtime)。
+
 ### OpenCode 安装
 
 OpenCode 适配器通过 `tool.execute.before/after` 原生插件事件注册已硬关闭的 Tool Ready、
@@ -238,10 +260,20 @@ tokenless env-check --tool Shell --fix
 
 - `crates/tokenless-schema/` — 核心库：SchemaCompressor + ResponseCompressor
 - `crates/tokenless-ccr/` — 可逆压缩缓存（Compress-Cache-Retrieve）
+- `crates/tokenless-runtime/` — CLI 与语言绑定共用的有状态 Rust API
 - `crates/tokenless-cli/` — CLI 二进制
+- `python/tokenless/` — 面向 CPython 3.11+ 的 PyO3 `anolisa_tokenless` 包
 - `adapters/tokenless/` — 适配器包（OpenClaw / Hermes / Qoder / Claude Code / Codex / OpenCode）
 - `third_party/rtk/` — RTK 命令重写引擎（vendored）
 - `packaging/raw/` — Tokenless 自维护的 ANOLISA Raw 打包与目标校验
+
+## 前置依赖
+
+- **Rust** toolchain >= 1.89 — RTK（edition 2024）及 toon-format 所需
+- **just** — 用于下载并应用 RTK Patch
+- **Git** — 用于通过 justfile 下载 RTK 源码
+- **CPython 3.11+ 开发环境与 uv** — 仅构建 Python Wheel 或显式包含全部
+  workspace member 的命令需要
 
 ## 许可证
 

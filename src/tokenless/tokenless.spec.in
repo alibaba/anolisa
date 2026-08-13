@@ -6,7 +6,8 @@ Version:        @VERSION@
 Release:        %{anolis_release}%{?dist}
 Summary:        LLM Token Optimization Toolkit - Schema/Response Compression + Command Rewriting + Tool Ready
 
-License:        MIT and Apache-2.0
+# Tokenless and RTK are Apache-2.0; the bundled toon-format binary is MIT.
+License:        Apache-2.0 AND MIT
 URL:            https://github.com/alibaba/anolisa
 Source0:        %{name}-%{version}.tar.gz
 

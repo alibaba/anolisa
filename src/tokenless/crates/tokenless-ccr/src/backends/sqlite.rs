@@ -41,6 +41,35 @@ impl SqliteStore {
         ttl_seconds: u64,
         capacity: usize,
     ) -> Result<Self, StashError> {
+        let path = path.as_ref();
+        // Pre-create with owner-only access to avoid a permissive window before
+        // SQLite opens the file. Reapply the mode for existing databases.
+        #[cfg(unix)]
+        {
+            use std::fs::OpenOptions;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .open(path)
+                .map_err(|error| {
+                    StashError::Backend(format!(
+                        "cannot create stash database '{}': {error}",
+                        path.display(),
+                    ))
+                })?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| {
+                    StashError::Backend(format!(
+                        "cannot restrict stash database '{}': {error}",
+                        path.display(),
+                    ))
+                })?;
+        }
         let conn = Connection::open(path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -210,6 +239,23 @@ mod tests {
         assert_eq!(
             store2.retrieve(&key).unwrap(),
             Some("payload-A".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("stash.db");
+        std::fs::write(&path, []).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let _store = SqliteStore::new(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600,
         );
     }
 

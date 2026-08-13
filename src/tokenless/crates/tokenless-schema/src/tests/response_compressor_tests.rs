@@ -1,4 +1,26 @@
 use serde_json::json;
+use std::sync::Arc;
+use tokenless_ccr::{StashError, StashStore};
+
+struct AlwaysFail;
+
+impl StashStore for AlwaysFail {
+    fn stash(&self, _payload: &str) -> Result<String, StashError> {
+        Err(StashError::Backend("simulated".to_string()))
+    }
+
+    fn retrieve(&self, _hash: &str) -> Result<Option<String>, StashError> {
+        Ok(None)
+    }
+
+    fn len(&self) -> usize {
+        0
+    }
+
+    fn evict_expired(&self) -> Result<usize, StashError> {
+        Ok(0)
+    }
+}
 
 #[test]
 fn test_string_truncation() {
@@ -329,25 +351,6 @@ fn test_stash_writes_counter_resets_per_compress() {
 fn test_array_truncation_with_failing_stash_falls_back_to_lossy() {
     // A stash that always errors must not break compression: the marker
     // degrades to the plain lossy form.
-    use std::sync::Arc;
-    use tokenless_ccr::{StashError, StashStore};
-
-    struct AlwaysFail;
-    impl StashStore for AlwaysFail {
-        fn stash(&self, _payload: &str) -> Result<String, StashError> {
-            Err(StashError::Backend("simulated".to_string()))
-        }
-        fn retrieve(&self, _hash: &str) -> Result<Option<String>, StashError> {
-            Ok(None)
-        }
-        fn len(&self) -> usize {
-            0
-        }
-        fn evict_expired(&self) -> Result<usize, StashError> {
-            Ok(0)
-        }
-    }
-
     let compressor = ResponseCompressor::new()
         .with_truncate_arrays_at(3)
         .with_stash_store(Arc::new(AlwaysFail));
@@ -361,6 +364,53 @@ fn test_array_truncation_with_failing_stash_falls_back_to_lossy() {
     // backend failure isn't invisible.
     assert_eq!(compressor.stash_errors(), 1);
     assert_eq!(compressor.stash_writes(), 0);
+    assert_eq!(compressor.unrecoverable_truncations(), 1);
+}
+
+#[test]
+fn test_string_truncation_with_failing_stash_counts_error() {
+    let compressor = ResponseCompressor::new()
+        .with_truncate_strings_at(80)
+        .with_stash_store(Arc::new(AlwaysFail));
+    let result = compressor.compress(&json!("x".repeat(200)));
+
+    assert!(result.as_str().unwrap().contains("truncated"));
+    assert!(!result.as_str().unwrap().contains("tokenless:"));
+    assert_eq!(compressor.stash_errors(), 1);
+    assert_eq!(compressor.stash_writes(), 0);
+    assert_eq!(compressor.unrecoverable_truncations(), 1);
+}
+
+#[test]
+fn test_depth_truncation_with_failing_stash_counts_error() {
+    let compressor = ResponseCompressor::new()
+        .with_max_depth(0)
+        .with_stash_store(Arc::new(AlwaysFail));
+    let result = compressor.compress(&json!({
+        "nested": {"payload": "x".repeat(200)}
+    }));
+
+    let marker = result["nested"].as_str().unwrap();
+    assert!(marker.contains("truncated at depth"));
+    assert!(!marker.contains("tokenless:"));
+    assert_eq!(compressor.stash_errors(), 1);
+    assert_eq!(compressor.stash_writes(), 0);
+    assert_eq!(compressor.unrecoverable_truncations(), 1);
+}
+
+#[test]
+fn test_string_truncation_counts_unrecoverable_marker_budget() {
+    use tokenless_ccr::InMemoryStore;
+
+    let compressor = ResponseCompressor::new()
+        .with_truncate_strings_at(10)
+        .with_stash_store(Arc::new(InMemoryStore::new()));
+    let result = compressor.compress(&json!("x".repeat(200)));
+
+    assert_eq!(result.as_str().unwrap(), "xxxxxxxxxx");
+    assert_eq!(compressor.stash_errors(), 0);
+    assert_eq!(compressor.stash_writes(), 0);
+    assert_eq!(compressor.unrecoverable_truncations(), 1);
 }
 
 #[test]

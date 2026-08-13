@@ -20,5 +20,5 @@
     "typescript": "^5.8.0"
   },
   "files": ["dist/", "openclaw.plugin.json", "scripts/"],
-  "license": "MIT"
+  "license": "Apache-2.0"
 }

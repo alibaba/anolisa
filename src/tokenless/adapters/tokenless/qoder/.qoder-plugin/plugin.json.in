@@ -7,5 +7,5 @@
     "email": "shile.zhang@linux.alibaba.com"
   },
   "homepage": "https://github.com/alibaba/anolisa",
-  "license": "MIT"
+  "license": "Apache-2.0"
 }
