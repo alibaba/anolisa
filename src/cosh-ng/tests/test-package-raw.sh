@@ -43,7 +43,7 @@ if os_name == "linux":
 else:
     cpu = {"aarch64": 0x0100000C}[arch]
     content = struct.pack("<IiiIIIII", 0xFEEDFACF, cpu, 0, 2, 0, 0, 0, 0)
-for name in ("cosh-cli", "cosh-core", "cosh-shell"):
+for name in ("cosh-cli", "cosh-core", "cosh-gateway", "cosh-shell"):
     (pathlib.Path(destination) / name).write_bytes(content)
 digest = hashlib.sha256(content).hexdigest()
 metadata = [
@@ -54,7 +54,8 @@ metadata = [
     "[binaries]",
 ]
 metadata.extend(
-    f'{name} = "{digest}"' for name in ("cosh-cli", "cosh-core", "cosh-shell")
+    f'{name} = "{digest}"'
+    for name in ("cosh-cli", "cosh-core", "cosh-gateway", "cosh-shell")
 )
 (pathlib.Path(destination) / "cosh-ng-build.toml").write_text(
     "\n".join(metadata) + "\n",
@@ -64,6 +65,7 @@ PY
     chmod 0755 \
         "$destination/cosh-cli" \
         "$destination/cosh-core" \
+        "$destination/cosh-gateway" \
         "$destination/cosh-shell"
 }
 
@@ -131,6 +133,7 @@ if python3 "$ROOT/packaging/raw/verify-binaries.py" \
     --component-version "$VERSION" \
     "$LINUX_ARM64/cosh-cli" \
     "$LINUX_ARM64/cosh-core" \
+    "$LINUX_ARM64/cosh-gateway" \
     "$LINUX_ARM64/cosh-shell" >/dev/null 2>&1; then
     echo "ERROR: unexpected build metadata entry was accepted" >&2
     exit 1
@@ -158,7 +161,7 @@ test_native_without_metadata() {
         "$ROOT/.anolisa/component.toml" > "$native_source/.anolisa/component.toml"
     install -p -m 0644 "$ROOT/LICENSE" "$native_source/LICENSE"
     install -p -m 0644 "$ROOT/README.md" "$native_source/README.md"
-    for binary in cosh-cli cosh-core cosh-shell; do
+    for binary in cosh-cli cosh-core cosh-gateway cosh-shell; do
         install -p -m 0755 "$python_bin" "$native_bins/$binary"
     done
 
@@ -223,10 +226,11 @@ fi
 
 EXTRACTED="$TMP/extracted"
 install -d -m 0755 "$EXTRACTED"
-tar -xzf "$OUT_ONE/$X64_ARTIFACT" -C "$EXTRACTED"
+tar --same-permissions -xzf "$OUT_ONE/$X64_ARTIFACT" -C "$EXTRACTED"
 cmp "$LINUX_CONTRACT" "$EXTRACTED/.anolisa/component.toml"
 cmp "$LINUX_X64/cosh-cli" "$EXTRACTED/bin/cosh-cli"
 cmp "$LINUX_X64/cosh-core" "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-core"
+cmp "$LINUX_X64/cosh-gateway" "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-gateway"
 cmp "$LINUX_X64/cosh-shell" "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-shell"
 cmp "$ROOT/LICENSE" "$EXTRACTED/share/doc/cosh-ng/LICENSE"
 cmp "$ROOT/README.md" "$EXTRACTED/share/doc/cosh-ng/README.md"
@@ -235,6 +239,7 @@ file_mode() {
     stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 test "$(file_mode "$EXTRACTED/bin/cosh")" = 755
+test "$(file_mode "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-gateway")" = 755
 test "$(file_mode "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-shell")" = 755
 test "$(file_mode "$EXTRACTED/share/doc/cosh-ng/README.md")" = 644
 test ! -e "$EXTRACTED/share/anolisa/hooks"
@@ -245,7 +250,14 @@ cat > "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-shell" <<'EOF'
 printf '%s\n' "$#" "$@"
 EOF
 chmod 0755 "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-shell"
+cat > "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-gateway" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$#" "$@"
+EOF
+chmod 0755 "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-gateway"
 test "$("$EXTRACTED/bin/cosh" --version)" = $'1\n--version'
+test "$("$EXTRACTED/bin/cosh" agent doctor --profile codex)" = \
+    $'4\nagent\ndoctor\n--profile\ncodex'
 READLINK_STUB="$TMP/readlink-without-f"
 install -d -m 0755 "$READLINK_STUB"
 install -p -m 0755 /bin/false "$READLINK_STUB/readlink"

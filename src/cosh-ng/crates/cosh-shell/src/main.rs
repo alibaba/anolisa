@@ -43,7 +43,9 @@ mod types;
 mod ui;
 
 use runtime::cli_args::configured_raw_invocation;
-use runtime::invocation::{classify_invocation, exec_shell, is_cosh_entry, Invocation};
+use runtime::invocation::{
+    classify_invocation, exec_gateway, exec_shell, gateway_plan, is_cosh_entry, Invocation,
+};
 use runtime::startup::{
     passthrough_non_interactive, passthrough_raw_non_interactive, print_usage_help,
 };
@@ -89,6 +91,9 @@ fn main() {
     if let Some(args_os) = cosh_entry_args() {
         use std::io::IsTerminal;
 
+        if let Some(plan) = gateway_plan(&args_os[1..]) {
+            std::process::exit(exec_gateway(plan));
+        }
         let stdin_tty = std::io::stdin().is_terminal();
         let stdout_tty = std::io::stdout().is_terminal();
         let stderr_tty = std::io::stderr().is_terminal();

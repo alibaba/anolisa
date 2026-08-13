@@ -42,6 +42,10 @@ cosh-ng 是一个 AI 原生 Linux 终端，让日常 Shell 操作和 Agent 任�
 
 ## 集成与自动化
 
+- 运行 `cosh agent doctor --profile codex --workspace "$PWD"` 检查单独安装的
+  `codex-acp`，也可以选择 `claude-code` profile 检查 `claude-agent-acp`。把有界 UTF-8
+  prompt 通过管道传给 `cosh agent run` 即可执行一轮任务；增加 `--output jsonl` 可以获得
+  稳定的流式事件。COSH 不运行 `npx`、不下载 package，也不接受任意 Adapter command。
 - [结构化 OS CLI](cli/overview.md)：命令域和安全的自动化方式。
 - [输出格式](output-format.md)：`CoshResponse<T>` 成功和失败响应封装。
 - [无界面模式](core/headless-mode.md)：供其他前端使用的 JSONL 集成。

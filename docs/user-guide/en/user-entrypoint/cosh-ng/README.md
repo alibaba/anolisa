@@ -42,6 +42,11 @@ Use read-only commands first. Add `--dry-run` to a supported package or service 
 
 ## Integrate and automate
 
+- Run `cosh agent doctor --profile codex --workspace "$PWD"` to verify a
+  separately installed `codex-acp`, or select `claude-code` for
+  `claude-agent-acp`. Run one turn by piping a bounded UTF-8 prompt into
+  `cosh agent run`; add `--output jsonl` for stable streamed events. COSH does
+  not run `npx`, download packages, or accept arbitrary adapter commands.
 - [Structured OS CLI](cli/overview.md) — command domains and safe automation patterns.
 - [Output format](output-format.md) — the `CoshResponse<T>` success and error envelope.
 - [Headless mode](core/headless-mode.md) — JSONL integration for other frontends.

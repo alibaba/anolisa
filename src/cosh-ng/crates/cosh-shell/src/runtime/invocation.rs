@@ -1,10 +1,8 @@
 //! Invocation-transparency dispatch for the `/usr/bin/cosh` entry.
 //!
-//! Single source of truth for the TUI-vs-passthrough decision: the TUI is an
-//! allowlist (bare/login invocation on a terminal, cosh-owned flags only) and
-//! every other argv shape is handed verbatim to the inner shell via `execve`,
-//! so unknown or future bash flags degrade to native bash instead of being
-//! hijacked into the TUI.
+//! Single source of truth for the installed entry: the reserved `agent`
+//! namespace enters the Gateway, the TUI is an allowlist, and every other argv
+//! shape is handed verbatim to the inner shell via `execve`.
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
@@ -15,6 +13,12 @@ pub(crate) enum Invocation {
     Tui(TuiEntry),
     /// Everything else: replace this process with the inner shell.
     ExecShell(ExecPlan),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GatewayPlan {
+    /// Arguments after the reserved `agent` namespace token.
+    pub(crate) args: Vec<OsString>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +43,13 @@ pub(crate) struct ExecPlan {
 /// login `-` prefix set by login(1)/su).
 pub(crate) fn is_cosh_entry(argv0: &OsStr) -> bool {
     entry_basename(argv0) == b"cosh"
+}
+
+/// Remove the reserved `agent` namespace before entering the Gateway.
+pub(crate) fn gateway_plan(args: &[OsString]) -> Option<GatewayPlan> {
+    (args.first().and_then(|arg| arg.to_str()) == Some("agent")).then(|| GatewayPlan {
+        args: args[1..].to_vec(),
+    })
 }
 
 fn entry_basename(argv0: &OsStr) -> &[u8] {
@@ -265,6 +276,40 @@ pub(crate) fn exec_shell(plan: ExecPlan) -> i32 {
     }
 }
 
+/// Replace the installed `cosh` entry with its sibling Gateway binary.
+pub(crate) fn exec_gateway(plan: GatewayPlan) -> i32 {
+    use std::os::unix::process::CommandExt;
+
+    let gateway = match std::env::current_exe().ok().and_then(|executable| {
+        executable
+            .parent()
+            .map(|parent| parent.join("cosh-gateway"))
+    }) {
+        Some(gateway) => gateway,
+        None => {
+            eprintln!("cosh: cosh-gateway: cannot resolve sibling executable");
+            return 126;
+        }
+    };
+    let mut command = std::process::Command::new(&gateway);
+    command.args(&plan.args);
+    unsafe {
+        command.pre_exec(crate::shell_host::sigpipe::restore_in_child);
+    }
+    let error = command.exec();
+    let reason = match error.kind() {
+        std::io::ErrorKind::NotFound => "No such file or directory".to_string(),
+        std::io::ErrorKind::PermissionDenied => "Permission denied".to_string(),
+        _ => error.to_string(),
+    };
+    eprintln!("cosh: {}: {reason}", gateway.display());
+    if error.kind() == std::io::ErrorKind::NotFound {
+        127
+    } else {
+        126
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +330,18 @@ mod tests {
             Invocation::ExecShell(plan) => plan.args,
             Invocation::Tui(entry) => panic!("expected ExecShell, got Tui({entry:?})"),
         }
+    }
+
+    #[test]
+    fn agent_namespace_builds_gateway_plan_without_the_namespace_token() {
+        assert_eq!(
+            gateway_plan(&os(&["agent", "task", "get", "task-1"])),
+            Some(GatewayPlan {
+                args: os(&["task", "get", "task-1"]),
+            })
+        );
+        assert_eq!(gateway_plan(&os(&["agentic"])), None);
+        assert_eq!(gateway_plan(&[]), None);
     }
 
     #[test]

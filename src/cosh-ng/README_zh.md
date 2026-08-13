@@ -86,6 +86,19 @@ $ /session status
 会打开一次性 Composer，可在开头指定 `/skill:<name>`，并添加经过验证的工作空间内
 `@路径`引用。
 
+如果要在不进入交互式 Shell 的情况下运行本机已安装的 ACP Adapter，可以先检查
+Adapter，再通过 stdin 发送 prompt。
+
+```bash
+cosh agent doctor --profile codex --workspace "$PWD"
+printf '%s\n' 'summarize the current changes' | \
+  cosh agent run --profile codex --workspace "$PWD"
+```
+
+首个版本只接受内置 `codex` 与 `claude-code` profile。对应的 `codex-acp` 或
+`claude-agent-acp` executable 需要单独安装。COSH 在 runtime 中不会调用 `npx`，也不会
+下载 Adapter。这个 entrypoint 默认拒绝 permission callback。
+
 ## 文档
 
 - [用户手册](../../docs/user-guide/zh/user-entrypoint/cosh-ng/README.md)

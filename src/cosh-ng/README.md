@@ -89,6 +89,20 @@ the shell and Core. With the cosh-core runtime, `/agent` opens a one-shot
 Composer that accepts a leading `/skill:<name>` and validated workspace-local
 `@path` references.
 
+To run one locally installed ACP adapter without entering the interactive
+Shell, verify it first and then pipe the prompt through stdin:
+
+```bash
+cosh agent doctor --profile codex --workspace "$PWD"
+printf '%s\n' 'summarize the current changes' | \
+  cosh agent run --profile codex --workspace "$PWD"
+```
+
+The first release accepts only the built-in `codex` and `claude-code`
+profiles. Install the corresponding `codex-acp` or `claude-agent-acp`
+executable separately; COSH never invokes `npx` or downloads an adapter at
+runtime. Permission callbacks are rejected by default in this entrypoint.
+
 ## Documentation
 
 - [User guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/README.md)

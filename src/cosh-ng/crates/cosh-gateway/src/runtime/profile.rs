@@ -200,6 +200,16 @@ impl ResolvedAcpRuntimeProfile {
         self.environment.keys().map(OsString::as_os_str)
     }
 
+    /// Builds a fresh supervised launch specification for this pinned profile.
+    #[must_use]
+    pub fn launch_spec(&self) -> RuntimeLaunchSpec {
+        let profile = self.profile.profile();
+        let mut spec = RuntimeLaunchSpec::new(&self.executable, &self.workspace);
+        spec.arguments = profile.arguments.iter().map(OsString::from).collect();
+        spec.environment.clone_from(&self.environment);
+        spec
+    }
+
     /// Launches the pinned adapter with the ACP v1 runtime bridge.
     ///
     /// # Errors
@@ -209,11 +219,7 @@ impl ResolvedAcpRuntimeProfile {
         &self,
         client: AcpV1ClientConfig,
     ) -> Result<AcpV1RuntimeBridge, AcpRuntimeProfileLaunchError> {
-        let profile = self.profile.profile();
-        let mut spec = RuntimeLaunchSpec::new(&self.executable, &self.workspace);
-        spec.arguments = profile.arguments.iter().map(OsString::from).collect();
-        spec.environment.clone_from(&self.environment);
-        AcpV1RuntimeBridge::launch(&spec, client).map_err(Into::into)
+        AcpV1RuntimeBridge::launch(&self.launch_spec(), client).map_err(Into::into)
     }
 }
 

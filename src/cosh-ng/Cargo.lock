@@ -722,14 +722,16 @@ dependencies = [
 
 [[package]]
 name = "cosh-gateway"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "agent-client-protocol",
+ "clap",
  "cosh-gateway-contracts",
  "nix 0.29.0",
  "rusqlite",
  "serde",
  "serde_json",
+ "signal-hook",
  "tempfile",
  "thiserror 2.0.18",
  "wait-timeout",
@@ -737,7 +739,7 @@ dependencies = [
 
 [[package]]
 name = "cosh-gateway-contracts"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "serde",
  "serde_json",

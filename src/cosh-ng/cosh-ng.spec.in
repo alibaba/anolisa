@@ -19,7 +19,7 @@ Requires(post):   lua
 Requires(postun): lua
 Requires(preun):  /usr/bin/getent /usr/bin/awk
 Requires:       openssl-libs
-Provides:       %{_bindir}/cosh-cli %{_bindir}/cosh
+Provides:       %{_bindir}/cosh-cli %{_bindir}/cosh %{_libexecdir_cosh}/cosh-gateway
 Provides:       anolisa-component(cosh-ng)
 Conflicts:      copilot-shell
 
@@ -39,6 +39,7 @@ rm -rf %{buildroot}
 # Install internal binaries to libexec
 install -d %{buildroot}%{_libexecdir_cosh}
 install -m 0755 target/release/cosh-core %{buildroot}%{_libexecdir_cosh}/cosh-core
+install -m 0755 target/release/cosh-gateway %{buildroot}%{_libexecdir_cosh}/cosh-gateway
 install -m 0755 target/release/cosh-shell %{buildroot}%{_libexecdir_cosh}/cosh-shell
 
 # Install CLI binary
@@ -86,6 +87,7 @@ install -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/cosh-n
 %{_bindir}/cosh-switch
 %dir %{_libexecdir_cosh}
 %{_libexecdir_cosh}/cosh-core
+%{_libexecdir_cosh}/cosh-gateway
 %{_libexecdir_cosh}/cosh-shell
 %{_datadir}/anolisa/components/cosh-ng/component.toml
 
