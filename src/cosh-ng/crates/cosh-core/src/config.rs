@@ -174,6 +174,13 @@ fn default_max_tool_calls() -> u32 {
 pub struct HooksConfig {
     #[serde(default)]
     pub enabled: bool,
+    /// Last explicit value applied by a trusted configuration layer.
+    ///
+    /// This distinguishes the default `false` from a system/user-requested
+    /// disable so installed extensions can auto-enable hooks without allowing
+    /// untrusted project configuration to override the kill switch.
+    #[serde(skip)]
+    pub(crate) enabled_override: Option<bool>,
     #[serde(default, rename = "PreToolUse")]
     pub pre_tool_use: Vec<HookDefinition>,
     #[serde(default, rename = "PostToolUse")]
@@ -628,7 +635,7 @@ fn apply_user_layer(config: &mut CoreConfig, layer: &PartialCoreConfig) {
     if let Some(ref mcp) = layer.mcp {
         config.mcp.servers.extend(mcp.servers.clone());
     }
-    apply_common_layers(config, layer);
+    apply_common_layers(config, layer, true);
 }
 
 fn apply_project_layer(config: &mut CoreConfig, layer: &PartialCoreConfig, path: &std::path::Path) {
@@ -653,7 +660,7 @@ fn apply_project_layer(config: &mut CoreConfig, layer: &PartialCoreConfig, path:
             path.display()
         );
     }
-    apply_common_layers(config, layer);
+    apply_common_layers(config, layer, false);
 }
 
 fn apply_ai_preferences(ai: &mut AiConfig, layer: &PartialAiConfig) {
@@ -668,12 +675,16 @@ fn apply_ai_preferences(ai: &mut AiConfig, layer: &PartialAiConfig) {
     }
 }
 
-fn apply_common_layers(config: &mut CoreConfig, layer: &PartialCoreConfig) {
+fn apply_common_layers(
+    config: &mut CoreConfig,
+    layer: &PartialCoreConfig,
+    hooks_can_control_extensions: bool,
+) {
     if let Some(ref agent) = layer.agent {
         apply_agent_layer(&mut config.agent, agent);
     }
     if let Some(ref hooks) = layer.hooks {
-        apply_hooks_layer(&mut config.hooks, hooks);
+        apply_hooks_layer(&mut config.hooks, hooks, hooks_can_control_extensions);
     }
     if let Some(ref skills) = layer.skills {
         apply_skills_layer(&mut config.skills, skills);
@@ -704,9 +715,16 @@ fn apply_agent_layer(config: &mut AgentConfig, layer: &PartialAgentConfig) {
     }
 }
 
-fn apply_hooks_layer(config: &mut HooksConfig, layer: &PartialHooksConfig) {
+fn apply_hooks_layer(
+    config: &mut HooksConfig,
+    layer: &PartialHooksConfig,
+    can_control_extensions: bool,
+) {
     if let Some(value) = layer.enabled {
         config.enabled = value;
+        if can_control_extensions {
+            config.enabled_override = Some(value);
+        }
     }
     if let Some(ref value) = layer.pre_tool_use {
         config.pre_tool_use = value.clone();
@@ -825,7 +843,10 @@ impl CoreConfig {
     }
 
     fn apply_bare_isolation(&mut self) {
-        self.hooks = HooksConfig::default();
+        self.hooks = HooksConfig {
+            enabled_override: Some(false),
+            ..Default::default()
+        };
         self.skills = SkillsConfig::default();
         self.session.auto_persist = false;
     }
@@ -1132,6 +1153,45 @@ mod tests {
         assert_eq!(config.agent.session_token_limit, 128_000);
         assert_eq!(config.agent.max_tool_calls_per_turn, 10);
         assert!(config.session.auto_persist);
+        assert_eq!(config.hooks.enabled_override, None);
+    }
+
+    #[test]
+    fn layered_hooks_enabled_tracks_explicit_disable() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        std::fs::write(&user, "[hooks]\nenabled = false\n").unwrap();
+
+        let config = CoreConfig::load_from_paths(None, Some(&user), None);
+
+        assert!(!config.hooks.enabled);
+        assert_eq!(config.hooks.enabled_override, Some(false));
+    }
+
+    #[test]
+    fn project_hooks_disable_cannot_control_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project.toml");
+        std::fs::write(&project, "[hooks]\nenabled = false\n").unwrap();
+
+        let config = CoreConfig::load_from_paths(None, None, Some(&project));
+
+        assert!(!config.hooks.enabled);
+        assert_eq!(config.hooks.enabled_override, None);
+    }
+
+    #[test]
+    fn project_hooks_enable_cannot_override_trusted_disable() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join("project.toml");
+        std::fs::write(&user, "[hooks]\nenabled = false\n").unwrap();
+        std::fs::write(&project, "[hooks]\nenabled = true\n").unwrap();
+
+        let config = CoreConfig::load_from_paths(None, Some(&user), Some(&project));
+
+        assert!(config.hooks.enabled);
+        assert_eq!(config.hooks.enabled_override, Some(false));
     }
 
     #[test]
@@ -1634,6 +1694,7 @@ active_model = "project-model"
         assert_eq!(config.ai.active_model.as_deref(), Some("user-model"));
         assert_eq!(config.resolve_provider().api_key, "sk-user");
         assert!(!config.hooks.enabled);
+        assert_eq!(config.hooks.enabled_override, Some(false));
         assert!(!config.skills.enabled);
         assert!(config.skills.custom_paths.is_empty());
         assert!(!config.session.auto_persist);

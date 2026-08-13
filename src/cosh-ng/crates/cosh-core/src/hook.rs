@@ -243,10 +243,24 @@ pub struct AfterModelResult {
 
 pub struct HookSystem {
     enabled: bool,
+    allow_extension_auto_enable: bool,
     disabled: HashSet<String>,
-    hooks: HashMap<HookEventName, Vec<HookDefinition>>,
+    hooks: HashMap<HookEventName, Vec<RegisteredHook>>,
     /// Current run_id, set at the start of each agent run.
     run_id: Option<String>,
+}
+
+struct RegisteredHook {
+    definition: HookDefinition,
+    accepts_empty_output: bool,
+}
+
+impl std::ops::Deref for RegisteredHook {
+    type Target = HookDefinition;
+
+    fn deref(&self) -> &Self::Target {
+        &self.definition
+    }
 }
 
 struct HookExecution {
@@ -262,7 +276,7 @@ impl HookSystem {
         let disabled = crate::state::load_disabled(crate::state::HOOKS_STATE);
 
         // Filter out hooks without name (enforced for all sources).
-        let filter_named = |defs: &[HookDefinition]| -> Vec<HookDefinition> {
+        let filter_named = |defs: &[HookDefinition]| -> Vec<RegisteredHook> {
             defs.iter()
                 .filter(|d| {
                     if d.name.is_none() {
@@ -274,10 +288,14 @@ impl HookSystem {
                     }
                 })
                 .cloned()
+                .map(|definition| RegisteredHook {
+                    definition,
+                    accepts_empty_output: false,
+                })
                 .collect()
         };
 
-        let mut hooks: HashMap<HookEventName, Vec<HookDefinition>> = HashMap::new();
+        let mut hooks: HashMap<HookEventName, Vec<RegisteredHook>> = HashMap::new();
         hooks.insert(
             HookEventName::PreToolUse,
             filter_named(&config.pre_tool_use),
@@ -307,6 +325,7 @@ impl HookSystem {
 
         Self {
             enabled,
+            allow_extension_auto_enable: config.enabled_override != Some(false),
             disabled,
             hooks,
             run_id: None,
@@ -316,6 +335,7 @@ impl HookSystem {
     pub fn new_disabled() -> Self {
         Self {
             enabled: false,
+            allow_extension_auto_enable: true,
             disabled: HashSet::new(),
             hooks: HashMap::new(),
             run_id: None,
@@ -340,7 +360,7 @@ impl HookSystem {
     pub fn register_extension_hooks(&mut self, hooks: &crate::extension::ExtensionHooks) {
         use crate::extension::config::flatten_hook_groups;
 
-        if hooks.is_empty() {
+        if hooks.is_empty() || !self.allow_extension_auto_enable {
             return;
         }
 
@@ -363,41 +383,37 @@ impl HookSystem {
                 .collect()
         };
 
-        self.hooks
-            .entry(HookEventName::PreToolUse)
-            .or_default()
-            .extend(filter_named(&hooks.pre_tool_use));
-        self.hooks
-            .entry(HookEventName::PostToolUse)
-            .or_default()
-            .extend(filter_named(&hooks.post_tool_use));
-        self.hooks
-            .entry(HookEventName::UserPromptSubmit)
-            .or_default()
-            .extend(filter_named(&hooks.user_prompt_submit));
-        self.hooks
-            .entry(HookEventName::SessionStart)
-            .or_default()
-            .extend(filter_named(&hooks.session_start));
-        self.hooks
-            .entry(HookEventName::Stop)
-            .or_default()
-            .extend(filter_named(&hooks.stop));
-        self.hooks
-            .entry(HookEventName::PostToolUseFailure)
-            .or_default()
-            .extend(filter_named(&hooks.post_tool_use_failure));
-        self.hooks
-            .entry(HookEventName::BeforeModel)
-            .or_default()
-            .extend(filter_named(&hooks.before_model));
-        self.hooks
-            .entry(HookEventName::AfterModel)
-            .or_default()
-            .extend(filter_named(&hooks.after_model));
+        for (event, groups) in [
+            (HookEventName::PreToolUse, hooks.pre_tool_use.as_slice()),
+            (HookEventName::PostToolUse, hooks.post_tool_use.as_slice()),
+            (
+                HookEventName::UserPromptSubmit,
+                hooks.user_prompt_submit.as_slice(),
+            ),
+            (HookEventName::SessionStart, hooks.session_start.as_slice()),
+            (HookEventName::Stop, hooks.stop.as_slice()),
+            (
+                HookEventName::PostToolUseFailure,
+                hooks.post_tool_use_failure.as_slice(),
+            ),
+            (HookEventName::BeforeModel, hooks.before_model.as_slice()),
+            (HookEventName::AfterModel, hooks.after_model.as_slice()),
+        ] {
+            self.hooks
+                .entry(event)
+                .or_default()
+                .extend(
+                    filter_named(groups)
+                        .into_iter()
+                        .map(|definition| RegisteredHook {
+                            definition,
+                            accepts_empty_output: true,
+                        }),
+                );
+        }
     }
 
-    fn active_hooks(&self, event: HookEventName) -> Vec<&HookDefinition> {
+    fn active_hooks(&self, event: HookEventName) -> Vec<&RegisteredHook> {
         self.hooks
             .get(&event)
             .map(|defs| {
@@ -477,7 +493,7 @@ impl HookSystem {
         }
     }
 
-    fn is_sequential(defs: &[&HookDefinition]) -> bool {
+    fn is_sequential(defs: &[&RegisteredHook]) -> bool {
         defs.iter().any(|d| d.sequential.unwrap_or(false))
     }
 
@@ -509,7 +525,7 @@ impl HookSystem {
             };
         }
 
-        let defs: Vec<&HookDefinition> = self
+        let defs: Vec<&RegisteredHook> = self
             .active_hooks(HookEventName::PreToolUse)
             .into_iter()
             .filter(|d| Self::matches_tool(d, tool_name))
@@ -557,7 +573,7 @@ impl HookSystem {
             };
         }
 
-        let defs: Vec<&HookDefinition> = self
+        let defs: Vec<&RegisteredHook> = self
             .active_hooks(HookEventName::PostToolUse)
             .into_iter()
             .filter(|d| Self::matches_tool(d, tool_name))
@@ -680,7 +696,7 @@ impl HookSystem {
             };
         }
 
-        let defs: Vec<&HookDefinition> = self
+        let defs: Vec<&RegisteredHook> = self
             .active_hooks(HookEventName::PostToolUseFailure)
             .into_iter()
             .filter(|d| Self::matches_tool(d, tool_name))
@@ -912,7 +928,7 @@ impl HookSystem {
 
     async fn run_hooks(
         &self,
-        defs: &[&HookDefinition],
+        defs: &[&RegisteredHook],
         input: &HookInput,
     ) -> Vec<(usize, HookExecution)> {
         let input_json = crate::redaction::to_redacted_json_with_schemas(
@@ -936,8 +952,11 @@ impl HookSystem {
                     let cmd = def.command.clone();
                     let env = def.env.clone();
                     let timeout = Self::timeout_for(def);
+                    let accepts_empty_output = def.accepts_empty_output;
                     async move {
-                        let output = Self::run_hook_cmd(&cmd, &env, &json, timeout).await;
+                        let output =
+                            Self::run_hook_cmd(&cmd, &env, &json, timeout, accepts_empty_output)
+                                .await;
                         (i, output)
                     }
                 })
@@ -946,8 +965,15 @@ impl HookSystem {
         }
     }
 
-    async fn run_single_hook(def: &HookDefinition, input_json: &str) -> HookExecution {
-        Self::run_hook_cmd(&def.command, &def.env, input_json, Self::timeout_for(def)).await
+    async fn run_single_hook(def: &RegisteredHook, input_json: &str) -> HookExecution {
+        Self::run_hook_cmd(
+            &def.command,
+            &def.env,
+            input_json,
+            Self::timeout_for(def),
+            def.accepts_empty_output,
+        )
+        .await
     }
 
     async fn run_hook_cmd(
@@ -955,6 +981,7 @@ impl HookSystem {
         env: &BTreeMap<String, String>,
         input_json: &str,
         timeout: Duration,
+        accepts_empty_output: bool,
     ) -> HookExecution {
         use tokio::process::Command;
 
@@ -1030,6 +1057,12 @@ impl HookSystem {
         match exit_code {
             0 => {
                 if output.stdout.iter().all(u8::is_ascii_whitespace) {
+                    if accepts_empty_output {
+                        return HookExecution {
+                            output: HookOutput::default(),
+                            failure: None,
+                        };
+                    }
                     tracing::warn!(target: "cosh_hook", "Hook '{safe_command}' returned empty output");
                     return HookExecution {
                         output: HookOutput::default(),
@@ -1114,7 +1147,7 @@ impl HookSystem {
     fn aggregate_pre_tool_use(
         &self,
         outputs: Vec<(usize, HookExecution)>,
-        defs: &[&HookDefinition],
+        defs: &[&RegisteredHook],
     ) -> PreToolUseResult {
         let mut decision = HookDecision::Passthrough;
         let mut tool_input_patch: Option<Value> = None;
@@ -1164,7 +1197,7 @@ impl HookSystem {
     fn aggregate_post_tool_use(
         &self,
         outputs: Vec<(usize, HookExecution)>,
-        defs: &[&HookDefinition],
+        defs: &[&RegisteredHook],
     ) -> PostToolUseResult {
         let mut decision = HookDecision::Passthrough;
         let mut additional_context: Option<String> = None;
@@ -1198,7 +1231,7 @@ impl HookSystem {
     fn aggregate_user_prompt(
         &self,
         outputs: Vec<(usize, HookExecution)>,
-        defs: &[&HookDefinition],
+        defs: &[&RegisteredHook],
     ) -> UserPromptResult {
         let mut decision = HookDecision::Passthrough;
         let mut additional_context: Option<String> = None;
@@ -1223,7 +1256,7 @@ impl HookSystem {
     fn aggregate_session_start(
         &self,
         outputs: Vec<(usize, HookExecution)>,
-        defs: &[&HookDefinition],
+        defs: &[&RegisteredHook],
     ) -> SessionStartResult {
         let mut additional_context: Option<String> = None;
         let mut notifications = Vec::new();
@@ -1245,7 +1278,7 @@ impl HookSystem {
     fn aggregate_stop(
         &self,
         outputs: Vec<(usize, HookExecution)>,
-        defs: &[&HookDefinition],
+        defs: &[&RegisteredHook],
     ) -> StopResult {
         let mut decision = HookDecision::Passthrough;
         let mut notifications = Vec::new();
@@ -1589,6 +1622,126 @@ mod tests {
         assert_eq!(result.decision, HookDecision::Passthrough);
     }
 
+    fn extension_pre_tool_hook(command: &str) -> crate::extension::ExtensionHooks {
+        serde_json::from_value(serde_json::json!({
+            "PreToolUse": [{
+                "hooks": [{
+                    "type": "command",
+                    "name": "extension-probe",
+                    "command": command
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn extension_post_tool_hook(command: &str) -> crate::extension::ExtensionHooks {
+        serde_json::from_value(serde_json::json!({
+            "PostToolUse": [{
+                "hooks": [{
+                    "type": "command",
+                    "name": "extension-post-probe",
+                    "command": command
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn extension_empty_output_is_passthrough() {
+        let mut system = HookSystem::from_config(&HooksConfig::default());
+        system.register_extension_hooks(&extension_pre_tool_hook("true"));
+        assert!(system.enabled, "extension registration must enable hooks");
+
+        let result = system
+            .fire_pre_tool_use("s1", "/tmp", "tool-1", "shell", &Value::Null, None)
+            .await;
+
+        assert_eq!(result.decision, HookDecision::Passthrough);
+        assert!(result.hook_failures.is_empty());
+        assert!(result.notifications.is_empty());
+    }
+
+    #[tokio::test]
+    async fn extension_errors_remain_fail_closed() {
+        for (command, expected) in [
+            ("printf 'not-json'", HookFailureKind::InvalidJson),
+            ("exit 7", HookFailureKind::NonZero),
+        ] {
+            let mut system = HookSystem::from_config(&HooksConfig::default());
+            system.register_extension_hooks(&extension_pre_tool_hook(command));
+            assert!(system.enabled, "extension registration must enable hooks");
+
+            let result = system
+                .fire_pre_tool_use("s1", "/tmp", "tool-1", "shell", &Value::Null, None)
+                .await;
+
+            assert!(matches!(result.decision, HookDecision::HookFailure(_)));
+            assert_eq!(result.hook_failures.len(), 1);
+            assert_eq!(result.hook_failures[0].kind, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_hooks_disable_prevents_extension_auto_enable() {
+        let config = HooksConfig {
+            enabled: false,
+            enabled_override: Some(false),
+            ..Default::default()
+        };
+        let mut system = HookSystem::from_config(&config);
+        system.register_extension_hooks(&extension_pre_tool_hook(
+            "printf '{\"decision\":\"block\",\"reason\":\"must not run\"}'",
+        ));
+        assert!(!system.enabled, "explicit disable must prevent auto-enable");
+
+        let result = system
+            .fire_pre_tool_use("s1", "/tmp", "tool-1", "shell", &Value::Null, None)
+            .await;
+
+        assert_eq!(result.decision, HookDecision::Passthrough);
+        assert!(result.hook_failures.is_empty());
+        assert!(result.notifications.is_empty());
+    }
+
+    #[tokio::test]
+    async fn config_hook_collision_remains_fail_closed() {
+        let config = HooksConfig {
+            enabled: true,
+            pre_tool_use: vec![HookDefinition {
+                command: "true".to_string(),
+                name: Some("extension-probe".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut system = HookSystem::from_config(&config);
+        system.register_extension_hooks(&extension_pre_tool_hook("true"));
+
+        let result = system
+            .fire_pre_tool_use("s1", "/tmp", "tool-1", "shell", &Value::Null, None)
+            .await;
+
+        assert!(matches!(result.decision, HookDecision::HookFailure(_)));
+        assert_eq!(result.hook_failures.len(), 1);
+        assert_eq!(result.hook_failures[0].kind, HookFailureKind::EmptyOutput);
+    }
+
+    #[tokio::test]
+    async fn extension_post_tool_empty_output_has_no_failure() {
+        let mut system = HookSystem::from_config(&HooksConfig::default());
+        system.register_extension_hooks(&extension_post_tool_hook("true"));
+        assert!(system.enabled, "extension registration must enable hooks");
+
+        let definitions = system.active_hooks(HookEventName::PostToolUse);
+        let input = system.build_input("s1", "/tmp", HookEventName::PostToolUse, Value::Null);
+        let outputs = system.run_hooks(&definitions, &input).await;
+
+        assert_eq!(outputs.len(), 1);
+        assert!(outputs[0].1.failure.is_none());
+    }
+
     #[test]
     fn matcher_regex_works() {
         let def = HookDefinition {
@@ -1622,6 +1775,7 @@ mod tests {
     async fn fire_pre_tool_use_with_blocking_hook() {
         let config = HooksConfig {
             enabled: true,
+            enabled_override: None,
 
             pre_tool_use: vec![HookDefinition {
                 command: "echo '{\"decision\":\"block\",\"reason\":\"no rm allowed\"}'".to_string(),
@@ -1662,6 +1816,7 @@ mod tests {
     async fn fire_pre_tool_use_no_match() {
         let config = HooksConfig {
             enabled: true,
+            enabled_override: None,
 
             pre_tool_use: vec![HookDefinition {
                 command: "echo '{\"decision\":\"block\",\"reason\":\"no\"}'".to_string(),
@@ -1699,6 +1854,7 @@ mod tests {
         let secret = "sk-user-prompt-hook-secret";
         let config = HooksConfig {
             enabled: true,
+            enabled_override: None,
             pre_tool_use: vec![],
             post_tool_use: vec![],
             post_tool_use_failure: vec![],
@@ -1735,6 +1891,7 @@ mod tests {
     async fn exit_code_2_means_block() {
         let config = HooksConfig {
             enabled: true,
+            enabled_override: None,
 
             pre_tool_use: vec![HookDefinition {
                 command: "sh -c 'echo blocked: api_key=sk-exit2-secret >&2; exit 2'".to_string(),
@@ -1851,14 +2008,17 @@ mod tests {
 
     #[test]
     fn all_hook_failure_kinds_fail_closed_without_detail_leakage() {
-        let definition = HookDefinition {
-            command: "probe".to_string(),
-            name: Some("failure-probe".to_string()),
-            matcher: None,
-            timeout: None,
-            sequential: None,
-            fail_open: false,
-            env: Default::default(),
+        let definition = RegisteredHook {
+            definition: HookDefinition {
+                command: "probe".to_string(),
+                name: Some("failure-probe".to_string()),
+                matcher: None,
+                timeout: None,
+                sequential: None,
+                fail_open: false,
+                env: Default::default(),
+            },
+            accepts_empty_output: false,
         };
         let definitions = [&definition];
         let system = HookSystem::new_disabled();
@@ -2260,6 +2420,7 @@ mod tests {
         // hook 脚本输出使用输入中的 tool_name 与 tool_use_id 作为上下文验证。
         let config = HooksConfig {
             enabled: true,
+            enabled_override: None,
 
             pre_tool_use: vec![],
             post_tool_use: vec![HookDefinition {
@@ -2303,6 +2464,7 @@ mod tests {
         // PostToolUse 路径验证（不同处理器但同样读 skill_context）。
         let config = HooksConfig {
             enabled: true,
+            enabled_override: None,
 
             pre_tool_use: vec![],
             post_tool_use: vec![HookDefinition {
@@ -2354,9 +2516,14 @@ mod tests {
         let pid_file = dir.path().join("pids");
         let script = leak_script(&marker, &pid_file);
 
-        let out =
-            HookSystem::run_hook_cmd(&script, &BTreeMap::new(), "{}", Duration::from_millis(300))
-                .await;
+        let out = HookSystem::run_hook_cmd(
+            &script,
+            &BTreeMap::new(),
+            "{}",
+            Duration::from_millis(300),
+            false,
+        )
+        .await;
         assert!(
             out.output.decision.is_none(),
             "timed-out hook must fall back to the default output"
@@ -2383,6 +2550,7 @@ mod tests {
             &BTreeMap::new(),
             &payload,
             Duration::from_millis(300),
+            false,
         )
         .await;
         assert!(out.output.decision.is_none());
@@ -2555,6 +2723,7 @@ mod tests {
     async fn post_tool_use_hook_emits_updated_tool_response() {
         let config = HooksConfig {
             enabled: true,
+            enabled_override: None,
             pre_tool_use: vec![],
             post_tool_use: vec![HookDefinition {
                 command: r#"python3 -c 'import sys,json; print(json.dumps({"hook_specific_output": {"updatedToolResponse": "compressed!", "additionalContext": "env-hint"}}))'"#.to_string(),
@@ -2601,6 +2770,7 @@ mod tests {
         // Two hooks both emit updatedToolResponse; last one in config order wins.
         let config = HooksConfig {
             enabled: true,
+            enabled_override: None,
             pre_tool_use: vec![],
             post_tool_use: vec![
                 HookDefinition {
@@ -2652,6 +2822,7 @@ mod tests {
     async fn post_tool_use_no_replacement_when_absent() {
         let config = HooksConfig {
             enabled: true,
+            enabled_override: None,
             pre_tool_use: vec![],
             post_tool_use: vec![HookDefinition {
                 command: r#"python3 -c 'import sys,json; print(json.dumps({"hook_specific_output": {"additionalContext": "just context"}}))'"#.to_string(),

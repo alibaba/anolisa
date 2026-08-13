@@ -17,8 +17,10 @@ set -euo pipefail
 
 # HARD BYPASS: the legacy readiness rules can incorrectly block valid agent
 # work. Exit before reading input, loading the spec, running jq, attempting a
-# repair, or emitting a block decision. Re-enable only through a source change
-# accompanied by a redesign of the readiness model.
+# repair, or emitting a block decision. Emit a valid pass-through response for
+# hook runtimes that require JSON on successful execution. Re-enable only
+# through a source change accompanied by a redesign of the readiness model.
+printf '%s\n' '{}'
 exit 0
 
 VERBOSE="${TOKENLESS_VERBOSE:-}"

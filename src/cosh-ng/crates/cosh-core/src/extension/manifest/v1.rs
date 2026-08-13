@@ -335,6 +335,12 @@ pub(super) fn legacy_hook_records(config: &ExtensionConfig) -> Vec<CapabilityRec
                 if !hook.env.is_empty() {
                     projection["env"] = json!(hook.env);
                 }
+                // Fail-open changes whether hook execution failures authorize
+                // the guarded action, so enabling it requires fresh consent.
+                // Omit false to preserve existing legacy fingerprints.
+                if hook.fail_open {
+                    projection["fail_open"] = Value::Bool(true);
+                }
                 records.push(CapabilityRecord {
                     id: id.canonical(),
                     projection,

@@ -14,6 +14,7 @@
             "description": "Registered hard-disabled Tool Ready pass-through; performs no check, repair, or block",
             "command": "bash ${extensionPath}/hooks/tool_ready_hook.sh",
             "timeout": 10000,
+            "fail_open": true,
             "env": { "TOKENLESS_AGENT_ID": "copilot-shell" }
           }
         ]

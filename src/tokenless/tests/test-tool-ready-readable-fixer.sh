@@ -35,6 +35,6 @@ OUTPUT=$(
 )
 
 [ ! -e "$MARKER" ]
-[ -z "$OUTPUT" ]
+[ "$OUTPUT" = "{}" ]
 
 echo "tool-ready hard bypass test passed"

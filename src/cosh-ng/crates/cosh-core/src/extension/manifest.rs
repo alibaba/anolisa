@@ -381,6 +381,32 @@ mod tests {
     }
 
     #[test]
+    fn legacy_manifest_fail_open_requires_fresh_consent() {
+        let root = package_root();
+        let manifest = |fail_open: &str| {
+            format!(
+                r#"{{"name":"legacy-ext","version":"1.0.0","hooks":{{"PreToolUse":[{{"hooks":[{{
+                    "type":"command","name":"guard","command":"echo guard"{fail_open}
+                }}]}}]}}}}"#
+            )
+        };
+
+        let omitted = parse_manifest(&manifest(""), root.path()).unwrap();
+        let explicit_false =
+            parse_manifest(&manifest(r#", "fail_open":false"#), root.path()).unwrap();
+        let enabled = parse_manifest(&manifest(r#", "fail_open":true"#), root.path()).unwrap();
+
+        assert_eq!(
+            omitted.capability_fingerprint,
+            explicit_false.capability_fingerprint
+        );
+        assert_ne!(
+            enabled.capability_fingerprint,
+            omitted.capability_fingerprint
+        );
+    }
+
+    #[test]
     fn v1_rejects_path_escape() {
         let root = package_root();
         let error = parse_manifest(

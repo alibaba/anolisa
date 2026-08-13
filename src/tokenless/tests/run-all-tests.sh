@@ -463,12 +463,12 @@ EOF
           TOKENLESS_ENV_FIX_SCRIPT="$bypass_fixer" \
           TOKENLESS_FIX_MARKER="$bypass_marker" \
           bash "$READY_SCRIPT" 2>&1)
-    if [ -n "$ready_out" ]; then
-        log_fail "tool-ready hard bypass unexpected output: $ready_out"
+    if [ "$ready_out" != "{}" ]; then
+        log_fail "tool-ready hard bypass returned invalid pass-through output: $ready_out"
     elif [ -e "$bypass_marker" ]; then
         log_fail "tool-ready hard bypass invoked the legacy fixer"
     else
-        log_pass "tool-ready hard bypass emits nothing and skips the fixer"
+        log_pass "tool-ready hard bypass emits JSON pass-through and skips the fixer"
     fi
     rm -rf "$bypass_dir"
 
