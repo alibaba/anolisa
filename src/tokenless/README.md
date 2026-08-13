@@ -20,6 +20,7 @@ Framework integrations are available for:
 - **Claude Code plugin** — RTK command rewriting, response/TOON compression, and registered but hard-disabled Tool Ready via Claude Code's official plugin marketplace.
 - **Codex plugin** — response compression, TOON encoding, registered but hard-disabled Tool Ready, and command rewriting via Codex's native hook system.
 - **OpenCode plugin** — schema/response/TOON compression, registered but hard-disabled Tool Ready, and command rewriting via OpenCode's local plugin API.
+- **AgentScope middleware** — replaces successful final tool responses and provides a marker-scoped native retrieval Tool.
 
 ## Features
 
@@ -38,6 +39,7 @@ Framework integrations are available for:
 | Claude Code plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅ |
 | Codex plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅ |
 | OpenCode plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Schema compression ✅, Response compression ✅, TOON ✅ |
+| AgentScope middleware | — | Response compression ✅, Native retrieval Tool ✅ |
 | Zero runtime deps | — | Pure Rust, single static binary |
 
 ## Applicable Scenarios & Expected Effects
@@ -99,7 +101,8 @@ Token-Less/
 │   ├── qoder/                   # Qoder CLI plugin + scripts
 │   ├── claude-code/             # Claude Code plugin + marketplace + hooks
 │   ├── codex/                   # Codex plugin + scripts
-│   └── opencode/                # OpenCode local plugin + scripts
+│   ├── opencode/                # OpenCode local plugin + scripts
+│   └── agentscope/              # Installable AgentScope Python middleware
 ├── third_party/rtk/           # RTK vendored source (justfile clone+patch from GitHub)
 ├── third_party/patches/      # Patches for vendored third_party sources
 ├── Makefile                   # Unified build system
@@ -519,6 +522,64 @@ The installer creates a `tokenless.js` symbolic link in OpenCode's global
 `plugins/` directory and never overwrites an existing unmanaged file. It honors
 `OPENCODE_CONFIG_DIR`, `XDG_CONFIG_HOME`, and the explicit
 `TOKENLESS_OPENCODE_CONFIG_DIR` override.
+
+## AgentScope Middleware
+
+AgentScope 2.0 applications install two same-version Python wheels explicitly.
+The adapter uses the `anolisa-tokenless` runtime directly and does not start a
+CLI subprocess. The runtime wheel is not currently published to a Python
+package index, so installing only the adapter source staged by anolisa cannot
+resolve its exact dependency in a fresh environment. Build and install both
+wheels from a source checkout:
+
+```bash
+make python-wheel agentscope-wheel
+python -m pip install \
+  target/wheels/anolisa_tokenless-*.whl \
+  target/agentscope-wheels/anolisa_tokenless_agentscope-*.whl
+```
+
+Register the same middleware instance with both the high-code Toolkit and the
+Agent. AgentScope App collects its `tokenless_retrieve` Tool through
+`list_tools()`, so App code only supplies the middleware. If an App already
+has a Tool with that name, pass a unique `retrieve_tool_name`; AgentScope uses
+the last Tool when names collide, and middleware cannot inspect the other App
+tools during `list_tools()`.
+
+```python
+from agentscope.agent import Agent
+from agentscope.tool import Toolkit
+from tokenless_agentscope import TokenlessMiddleware
+
+toolkit = Toolkit()
+middleware = TokenlessMiddleware(
+    mode="balanced",
+    data_dir="/absolute/path/to/tenant-tokenless-data",
+    # retrieve_tool_name="tenant_tokenless_retrieve",
+)
+await middleware.register_tools(toolkit)
+
+agent = Agent(
+    ...,
+    toolkit=toolkit,
+    middlewares=[middleware],
+)
+```
+
+| Mode | Policy |
+|---|---|
+| `conservative` | Compress every non-excluded tool with 1 MiB / 65,536 / depth 32 limits |
+| `balanced` | Skip Read/Glob/Grep; use 65,536 / 128 / depth 8 for Shell and conservative limits elsewhere |
+| `aggressive` | Skip Read/Glob/Grep; use CLI defaults of 4,096 / 32 / depth 8 elsewhere |
+
+`balanced` is the default. The read-only retrieval Tool is auto-allowed only
+for a 24-character hash whose marker is present in the current AgentScope
+context or summary. Pass a different absolute `data_dir` to each user or tenant;
+`TOKENLESS_DATA_DIR` is only a process-wide fallback when `data_dir` is omitted.
+Retain the default one-hour stash TTL unless the application has a deliberate
+lifecycle policy, and do not expect retrieval across nodes. This first adapter
+does not enable Shell, MCP, TOON, RTK, or schema compression, and is not managed
+by `anolisa adapter enable`.
 
 
 ## Build

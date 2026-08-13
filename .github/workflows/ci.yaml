@@ -878,8 +878,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Build and test Tokenless Python wheel
-        run: make -C src/tokenless test-python-runtime
+      - name: Build and test Tokenless Python packages
+        run: |
+          make -C src/tokenless \
+            test-python-runtime test-agentscope-adapter
 
       - uses: actions/setup-node@v4
         with:

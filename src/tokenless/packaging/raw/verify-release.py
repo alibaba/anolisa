@@ -13,6 +13,7 @@ WORKSPACE_VERSION = re.compile(
     r"(?ms)^\[workspace\.package\]\s*$.*?^version\s*=\s*\"([^\"]+)\""
 )
 COMPONENT = re.compile(r"(?ms)^\[component\]\s*$.*?(?=^\[|\Z)")
+PROJECT = re.compile(r"(?ms)^\[project\]\s*$.*?(?=^\[|\Z)")
 FIELD = r"(?m)^{}\s*=\s*\"([^\"]+)\""
 
 
@@ -46,6 +47,18 @@ def read_hermes_version(path: Path) -> str:
     if match is None:
         raise SystemExit(f"ERROR: {path} has no version")
     return match.group(1)
+
+
+def read_pyproject_version(path: Path) -> str:
+    """Read the generated AgentScope package version."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise SystemExit(f"ERROR: cannot read {path}: {error}") from error
+    project_match = PROJECT.search(text)
+    if project_match is None:
+        raise SystemExit(f"ERROR: {path} has no [project] table")
+    return match_field(project_match.group(0), "version", path)
 
 
 def verify_versions(root: Path, contract: Path) -> str:
@@ -88,6 +101,8 @@ def verify_versions(root: Path, contract: Path) -> str:
     versions = {str(path.relative_to(root)): read_json_version(path) for path in json_manifests}
     hermes = adapters / "hermes" / "plugin.yaml"
     versions[str(hermes.relative_to(root))] = read_hermes_version(hermes)
+    agentscope = adapters / "agentscope" / "pyproject.toml"
+    versions[str(agentscope.relative_to(root))] = read_pyproject_version(agentscope)
     drift = [f"{path}={version}" for path, version in versions.items() if version != expected]
     if drift:
         raise SystemExit(

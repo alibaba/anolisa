@@ -28,7 +28,8 @@ ADAPTER_TEMPLATES := \
     $(ADAPTER_SRC_DIR)/qoder/.qoder-plugin/plugin.json \
     $(ADAPTER_SRC_DIR)/claude-code/.claude-plugin/plugin.json \
     $(ADAPTER_SRC_DIR)/codex/.codex-plugin/plugin.json \
-    $(ADAPTER_SRC_DIR)/qwencode/qwen-extension.json
+    $(ADAPTER_SRC_DIR)/qwencode/qwen-extension.json \
+    $(ADAPTER_SRC_DIR)/agentscope/pyproject.toml
 # Canonical RPM/raw component contract — kept separate from the adapter
 # payload tree and stamped from the workspace version before packaging.
 # Shipped to %{_datadir}/anolisa/components/tokenless/component.toml and
@@ -40,7 +41,10 @@ NATIVE_NPM_TARGET := $(shell node -p 'process.platform + "-" + process.arch')
 NATIVE_NPM_INPUT_DIR := $(CURDIR)/target/npm-prebuilt/$(NATIVE_NPM_TARGET)
 PYTHON_RUNTIME_DIR := python/tokenless
 PYTHON_WHEEL_DIR := $(CURDIR)/target/wheels
+AGENTSCOPE_ADAPTER_DIR := $(ADAPTER_SRC_DIR)/agentscope
+AGENTSCOPE_WHEEL_DIR := $(CURDIR)/target/agentscope-wheels
 MATURIN ?= uvx --from 'maturin>=1.9,<2.0' maturin
+PYPROJECT_BUILD ?= uvx --from 'build>=1,<2' pyproject-build
 
 .PHONY: build build-tokenless build-toon build-openclaw-plugin \
         stamp-adapter-templates generate-component-contract \
@@ -58,7 +62,8 @@ MATURIN ?= uvx --from 'maturin>=1.9,<2.0' maturin
         qwencode-install qwencode-uninstall \
         setup help \
         npm-package npm-package-all npm-publish prepare-npm-native-binaries \
-        python-wheel test-python-runtime test-hooks
+        python-wheel test-python-runtime agentscope-wheel \
+        test-agentscope-adapter test-hooks
 
 # Default target
 all: build
@@ -120,6 +125,11 @@ $(ADAPTER_SRC_DIR)/qwencode/qwen-extension.json: \
 	@echo "==> Generating qwencode/qwen-extension.json (version=$(VERSION))..."
 	sed 's/@VERSION@/$(VERSION)/g' $< > $@
 
+$(ADAPTER_SRC_DIR)/agentscope/pyproject.toml: \
+    $(ADAPTER_SRC_DIR)/agentscope/pyproject.toml.in Cargo.toml
+	@echo "==> Generating agentscope/pyproject.toml (version=$(VERSION))..."
+	sed 's/@VERSION@/$(VERSION)/g' $< > $@
+
 # Build the tokenless OpenClaw plugin (TypeScript -> dist/index.js).
 # Produces $(OPENCLAW_PLUGIN_SRC_DIR)/dist/index.js, which install-adapter-resources
 # then copies into $(SHARE_DIR)/openclaw/dist/index.js. This file is referenced by
@@ -156,6 +166,11 @@ install-adapter-resources: build-openclaw-plugin
 	# Strip build-only artifacts from the installed plugin tree.
 	rm -rf $(DESTDIR)$(SHARE_DIR)/openclaw/node_modules
 	rm -f  $(DESTDIR)$(SHARE_DIR)/openclaw/package-lock.json
+	rm -rf $(DESTDIR)$(SHARE_DIR)/agentscope/build
+	find $(DESTDIR)$(SHARE_DIR)/agentscope -type d \
+	    \( -name '__pycache__' -o -name '*.egg-info' \) -prune -exec rm -rf {} +
+	find $(DESTDIR)$(SHARE_DIR)/agentscope -type f \
+	    \( -name '*.pyc' -o -name '*.pyo' \) -delete
 	find $(DESTDIR)$(SHARE_DIR) -name '*.in' -delete
 	find $(DESTDIR)$(SHARE_DIR) -type f \( -name '*.py' -o -name '*.sh' \) -exec chmod 0755 {} +
 	@test -f $(DESTDIR)$(SHARE_DIR)/openclaw/dist/index.js \
@@ -196,6 +211,7 @@ test-integration:
 	python3 tests/test_compress_response_hook.py
 	python3 tests/test_compress_schema_hook.py
 	python3 tests/test_hermes_plugin_import.py
+	python3 tests/test_agentscope_middleware.py
 	python3 tests/test_rewrite_hook.py
 	python3 tests/test_resolve_agent_id.py
 
@@ -222,6 +238,16 @@ python-wheel:
 
 test-python-runtime: python-wheel
 	@bash tests/test-python-runtime.sh
+
+agentscope-wheel: stamp-adapter-templates
+	@echo "==> Building Tokenless AgentScope adapter wheel..."
+	install -d -m 0755 $(AGENTSCOPE_WHEEL_DIR)
+	rm -f $(AGENTSCOPE_WHEEL_DIR)/anolisa_tokenless_agentscope-*.whl
+	$(PYPROJECT_BUILD) --wheel --outdir $(AGENTSCOPE_WHEEL_DIR) \
+		$(AGENTSCOPE_ADAPTER_DIR)
+
+test-agentscope-adapter: python-wheel agentscope-wheel
+	@bash tests/test-agentscope-adapter.sh
 
 # These targets only assemble the prebuilt BIN_DIR/{tokenless,rtk,toon} files
 # into the portable raw-package contract maintained by this component.

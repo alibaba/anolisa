@@ -2,7 +2,7 @@
 
 [English](../../../en/token-saving/tokenless/framework-integration.md)
 
-Tokenless 通过 Adapter 把压缩、命令重写和环境检查接入 Agent。安装 Tokenless 只提供二进制和 Adapter 资源；启用 Adapter 后，目标 Agent 才会自动调用这些能力。
+Tokenless 通过 Adapter 把压缩、命令重写和环境检查接入 Agent。安装 Tokenless 会提供二进制和 Adapter 资源。Plugin/Hook 型框架在启用 Adapter 后调用这些能力；AgentScope 应用需要显式安装并注册 Python 中间件。
 
 ## 支持矩阵
 
@@ -16,6 +16,7 @@ Tokenless 通过 Adapter 把压缩、命令重写和环境检查接入 Agent。�
 | Codex | `codex` | 已硬关闭 | 替换受支持的 Shell 输入 | 保留原文，追加分析或压缩备选内容 | 用于生成该备选内容 | — |
 | OpenCode | `opencode` | 已硬关闭 | 替换 Bash 输入 | 替换工具输出 | 在响应压缩后尝试 | ✅ |
 | Qwen Code | `qwencode` | 已硬关闭 | 输出改写后的 Shell 输入 | 输出 `additionalContext` | 在响应压缩后尝试 | ✅ |
+| AgentScope | Python API | — | — | 替换成功的最终工具响应 | — | — |
 
 “—”表示当前 Adapter 没有注册此能力；对应的 Tokenless CLI 命令仍可能可用。
 
@@ -23,7 +24,7 @@ Tokenless 通过 Adapter 把压缩、命令重写和环境检查接入 Agent。�
 
 `additionalContext` 是追加型 Hook 字段。在这些路径上，Tokenless 源码本身不会删除原始结果，最终处理方式还取决于宿主实现。统计记录只能证明压缩候选内容变小了，不能证明宿主已经从模型请求中移除原文。
 
-OpenCode 当前使用下文说明的随附生命周期脚本；本版本尚未把它注册到 `anolisa adapter enable` 的驱动集合。
+OpenCode 当前使用下文说明的随附生命周期脚本，AgentScope 则使用可安装的 Python 包和显式应用代码；本版本尚未把两者注册到 `anolisa adapter enable` 的驱动集合。
 
 ## Adapter 处理规则
 
@@ -83,7 +84,7 @@ anolisa adapter enable tokenless qwencode
 
 只需启用实际使用的框架。为多个框架启用时，应逐个执行并分别验证。
 
-OpenCode 不适用本节，应使用 [npm 安装后的手动接入](#npm-安装后的手动接入)中的随附安装脚本。
+OpenCode 和 AgentScope 不适用本节。OpenCode 应使用 [npm 安装后的手动接入](#npm-安装后的手动接入)中的随附安装脚本；AgentScope 请参阅下文的 [AgentScope](#agentscope)。
 
 对于 OpenClaw，anolisa 会先尝试普通安装，默认不会加入 unsafe-install 覆盖参数。如果 OpenClaw 的安全扫描拒绝此 Plugin，应先阅读其报告；确认接受风险后，才显式重试：
 
@@ -207,6 +208,105 @@ OpenCode 启动时会自动加载配置目录下的 Plugin。使用上述 Tokenl
 ### Qwen Code
 
 Extension 在新的 Qwen Code 会话中加载。重启后执行一次工具调用验证。
+
+### AgentScope
+
+Python 包支持 `agentscope>=2.0.5,<2.1`。原生 `anolisa-tokenless` runtime Wheel
+当前尚未发布到 Python 包索引。虽然 anolisa 会把 Adapter 源码部署到
+`~/.local/share/anolisa/adapters/tokenless/agentscope` 或
+`/usr/share/anolisa/adapters/tokenless/agentscope`，但在全新环境中只安装该源码
+无法解析其精确版本的 runtime 依赖。当前唯一受支持的安装方式是从源码 checkout
+构建并同时安装两个相同版本的 Wheel：
+
+```bash
+make python-wheel agentscope-wheel
+python -m pip install \
+  target/wheels/anolisa_tokenless-*.whl \
+  target/agentscope-wheels/anolisa_tokenless_agentscope-*.whl
+```
+
+普通高代码 Agent 需要把同一个中间件实例同时注册到 Toolkit 和 Agent：
+
+```python
+from agentscope.agent import Agent
+from agentscope.tool import Toolkit
+from tokenless_agentscope import TokenlessMiddleware
+
+toolkit = Toolkit()
+middleware = TokenlessMiddleware(
+    mode="balanced",
+    data_dir="/absolute/path/to/tenant-tokenless-data",
+    min_chars=200,
+)
+await middleware.register_tools(toolkit)
+
+agent = Agent(
+    ...,
+    toolkit=toolkit,
+    middlewares=[middleware],
+)
+```
+
+AgentScope App 接受按请求创建中间件的 factory。其 Toolkit 组装过程会自动调用
+`list_tools()`，因此不要再单独注册恢复 Tool：
+
+```python
+from hashlib import sha256
+from pathlib import Path
+
+from agentscope.app import create_app
+from tokenless_agentscope import TokenlessMiddleware
+
+tenant_root = Path("/srv/tokenless-tenants")
+
+async def tokenless_middlewares(user_id, agent_id, session_id):
+    del agent_id, session_id
+    tenant_key = sha256(user_id.encode("utf-8")).hexdigest()
+    return [TokenlessMiddleware(data_dir=tenant_root / tenant_key)]
+
+app = create_app(
+    ...,
+    extra_agent_middlewares=tokenless_middlewares,
+)
+```
+
+AgentScope 遇到同名 Tool 时会保留最后一个，而 `list_tools()` 无法取得 App 的其他
+Tool。如果 App 已有 `tokenless_retrieve` Tool，或安装了多个 Tokenless 中间件实例，
+应为每个 Tokenless Tool 指定唯一名称：
+
+```python
+TokenlessMiddleware(
+    data_dir=tenant_root / tenant_key,
+    retrieve_tool_name="tenant_tokenless_retrieve",
+)
+```
+
+中间件会把配置的名称用于 `list_tools()`、高代码注册和永久压缩排除。高代码路径的
+`register_tools()` 遇到已有同名 Tool 时仍会报错。
+
+请根据应用可接受的 inline 截断程度选择模式：
+
+| 模式 | Read/Glob/Grep | 其他工具 |
+|------|----------------|----------|
+| `conservative` | 压缩 | 字符串 1 MiB、数组 65,536 项、深度 32 |
+| `balanced`（默认） | 跳过 | Shell：65,536 / 128 / 深度 8；其他采用 conservative 限制 |
+| `aggressive` | 跳过 | CLI 默认值：4,096 / 32 / 深度 8 |
+
+中间件会原样转发流式 chunk，只替换成功的最终 `ToolResponse`；响应和 block 的
+标识、元数据都会保留。Tokenless 失败或 UTF-8 结果没有严格变小时保留原文。
+JSON object/array 仍为 JSON，普通文本仍为文本，`DataBlock` 永不修改。
+
+中间件还提供只读、并发安全的恢复 Tool，默认名称为 `tokenless_retrieve`。只有
+参数是严格的 24 位十六进制哈希，且当前 AgentScope 上下文或摘要中存在对应
+`<<tokenless:HASH>>` marker 时才会自动允许；该 Tool 永远不参与压缩。这一窄权限
+仍依赖存储隔离：每个用户或租户必须显式传入独立的绝对 `data_dir`。省略
+`data_dir` 时，`TOKENLESS_DATA_DIR` 只作为进程级回退，不得由多个租户共用；
+也不要依赖跨节点恢复。stash 当前使用固定的一小时 TTL，Agent 应在这一边界前
+恢复所需内容。
+
+压缩和恢复会从 async worker thread 调用进程内 `anolisa-tokenless` runtime；Adapter
+不会启动 CLI 进程或授予 Shell 权限，也不接入 MCP、TOON、RTK 命令重写或
+Schema 压缩。
 
 ## 验证是否真正接入
 

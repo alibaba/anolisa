@@ -2,7 +2,7 @@
 
 [中文版](../../../zh/token-saving/tokenless/framework-integration.md)
 
-Tokenless uses adapters to connect compression, command rewriting, and environment checks to an agent. Installing Tokenless provides the binaries and adapter resources; the target agent calls them automatically only after its adapter is enabled.
+Tokenless uses adapters to connect compression, command rewriting, and environment checks to an agent. Installing Tokenless provides the binaries and adapter resources. Plugin- and hook-based frameworks call them after their adapter is enabled; AgentScope applications install and register the Python middleware explicitly.
 
 ## Support matrix
 
@@ -16,6 +16,7 @@ Tokenless uses adapters to connect compression, command rewriting, and environme
 | Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original and adds analysis or a compressed alternative | Used to build that alternative | — |
 | OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Attempted after response compression | ✅ |
 | Qwen Code | `qwencode` | Hard-disabled | Emits rewritten shell input | Emits `additionalContext` | Attempted after response compression | ✅ |
+| AgentScope | Python API | — | — | Replaces successful final tool responses | — | — |
 
 “—” means that the current adapter does not register that capability. The corresponding Tokenless CLI command may still be available.
 
@@ -23,7 +24,7 @@ Tool Ready remains registered by these adapters but is unconditionally hard-disa
 
 `additionalContext` is an additive hook field. The Tokenless source does not remove the original result on those paths; the final treatment also depends on the host implementation. A statistics record proves that a candidate became smaller, not that the host removed the original from its model request.
 
-OpenCode currently uses the bundled lifecycle scripts documented below. It is not registered with the `anolisa adapter enable` driver set in this release.
+OpenCode currently uses the bundled lifecycle scripts documented below. AgentScope uses an installable Python package and explicit application code. Neither is registered with the `anolisa adapter enable` driver set in this release.
 
 ## Adapter processing rules
 
@@ -84,7 +85,7 @@ anolisa adapter enable tokenless qwencode
 
 Enable only frameworks that you use. When enabling more than one, run and verify each command separately.
 
-OpenCode is the exception to this section; use its bundled install script under [Manual integration after npm installation](#manual-integration-after-npm-installation).
+OpenCode and AgentScope are exceptions to this section. Use OpenCode's bundled install script under [Manual integration after npm installation](#manual-integration-after-npm-installation), and use the [AgentScope](#agentscope) instructions below.
 
 For OpenClaw, anolisa first attempts a normal install and does not add an unsafe-install bypass by default. If OpenClaw rejects the plugin on its safety scan, read the reported findings. Only after accepting them, retry explicitly:
 
@@ -199,6 +200,116 @@ OpenCode discovers global local plugins at startup. Use the bundled Tokenless li
 ### Qwen Code
 
 The extension loads in a new Qwen Code session. Restart and run one tool call to verify it.
+
+### AgentScope
+
+The Python package supports `agentscope>=2.0.5,<2.1`. The native
+`anolisa-tokenless` runtime wheel is not currently published to a Python
+package index. Although anolisa stages the adapter source under
+`~/.local/share/anolisa/adapters/tokenless/agentscope` or
+`/usr/share/anolisa/adapters/tokenless/agentscope`, installing that source
+alone cannot resolve its exact runtime dependency in a fresh environment.
+The currently supported installation path is to build and install both
+same-version wheels from a source checkout:
+
+```bash
+make python-wheel agentscope-wheel
+python -m pip install \
+  target/wheels/anolisa_tokenless-*.whl \
+  target/agentscope-wheels/anolisa_tokenless_agentscope-*.whl
+```
+
+For a high-code Agent, register the same middleware instance with its Toolkit
+and Agent:
+
+```python
+from agentscope.agent import Agent
+from agentscope.tool import Toolkit
+from tokenless_agentscope import TokenlessMiddleware
+
+toolkit = Toolkit()
+middleware = TokenlessMiddleware(
+    mode="balanced",
+    data_dir="/absolute/path/to/tenant-tokenless-data",
+    min_chars=200,
+)
+await middleware.register_tools(toolkit)
+
+agent = Agent(
+    ...,
+    toolkit=toolkit,
+    middlewares=[middleware],
+)
+```
+
+AgentScope App accepts a per-request middleware factory. Its toolkit assembly
+calls `list_tools()` automatically, so do not also register the retrieval Tool:
+
+```python
+from hashlib import sha256
+from pathlib import Path
+
+from agentscope.app import create_app
+from tokenless_agentscope import TokenlessMiddleware
+
+tenant_root = Path("/srv/tokenless-tenants")
+
+async def tokenless_middlewares(user_id, agent_id, session_id):
+    del agent_id, session_id
+    tenant_key = sha256(user_id.encode("utf-8")).hexdigest()
+    return [TokenlessMiddleware(data_dir=tenant_root / tenant_key)]
+
+app = create_app(
+    ...,
+    extra_agent_middlewares=tokenless_middlewares,
+)
+```
+
+AgentScope resolves duplicate Tool names by keeping the last Tool, while
+`list_tools()` does not receive the other App tools. If the App already has a
+`tokenless_retrieve` Tool, or installs multiple Tokenless middleware instances,
+assign each Tokenless Tool a unique name:
+
+```python
+TokenlessMiddleware(
+    data_dir=tenant_root / tenant_key,
+    retrieve_tool_name="tenant_tokenless_retrieve",
+)
+```
+
+The middleware uses the configured name for `list_tools()`, high-code
+registration, and permanent compression exclusion. High-code
+`register_tools()` still rejects an existing Tool with that configured name.
+
+Choose a mode according to how much inline truncation the application accepts:
+
+| Mode | Read/Glob/Grep | Other tools |
+|------|----------------|-------------|
+| `conservative` | Compress | 1 MiB strings, 65,536 array items, depth 32 |
+| `balanced` (default) | Skip | Shell: 65,536 / 128 / depth 8; others: conservative limits |
+| `aggressive` | Skip | CLI defaults: 4,096 / 32 / depth 8 |
+
+The middleware passes streaming chunks through unchanged. It only replaces a
+successful final `ToolResponse`, preserves response and block identifiers and
+metadata, and keeps the original whenever Tokenless fails or does not make the
+UTF-8 result strictly smaller. JSON objects and arrays remain JSON; ordinary
+text remains text. `DataBlock` values are never changed.
+
+The middleware also exposes a read-only, concurrency-safe retrieval Tool named
+`tokenless_retrieve` by default. It is auto-allowed only for an exact
+24-character hexadecimal hash whose `<<tokenless:HASH>>` marker is present in
+the current AgentScope context or summary. The Tool is permanently excluded
+from compression. This narrow permission still depends on storage isolation:
+pass a separate absolute `data_dir` for every user or tenant. If `data_dir` is
+omitted, `TOKENLESS_DATA_DIR` is only a process-wide fallback and must not be
+shared by multiple tenants. Retrieval does not work across nodes. Stash entries
+expire after the current fixed one-hour TTL, so the Agent should retrieve
+necessary content before that boundary.
+
+Compression and retrieval call the in-process `anolisa-tokenless` runtime from
+an async worker thread; the adapter does not start a CLI process or grant Shell
+access. It also does not add MCP, TOON, RTK command rewriting, or schema
+compression.
 
 ## Verify the actual integration
 

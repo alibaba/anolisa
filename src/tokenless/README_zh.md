@@ -64,6 +64,7 @@ tokenless 只优化**工具调用响应**进入 LLM 上下文前的冗余，不�
 - **Claude Code 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
 - **Codex 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
 - **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + Schema/响应压缩 + TOON
+- **AgentScope 中间件** — 替换成功的最终工具响应，并提供受 marker 约束的原生恢复 Tool
 
 ## 快速开始
 
@@ -158,6 +159,59 @@ make opencode-install
 不会覆盖同名的非托管文件。配置目录支持 `OPENCODE_CONFIG_DIR`、
 `XDG_CONFIG_HOME` 和显式的 `TOKENLESS_OPENCODE_CONFIG_DIR` 覆盖。
 安装后重启 OpenCode 即可加载插件。
+
+### AgentScope 中间件
+
+AgentScope 2.0 应用需要显式安装两个相同版本的 Python Wheel。Adapter 直接调用
+`anolisa-tokenless` runtime，不会启动 CLI 子进程。runtime Wheel 当前尚未发布到
+Python 包索引，因此在全新环境中只安装 anolisa 随附的 Adapter 源码无法解析其
+精确版本依赖。当前应从源码 checkout 构建并同时安装两个 Wheel：
+
+```bash
+make python-wheel agentscope-wheel
+python -m pip install \
+  target/wheels/anolisa_tokenless-*.whl \
+  target/agentscope-wheels/anolisa_tokenless_agentscope-*.whl
+```
+
+普通高代码 Agent 需要把同一个中间件实例同时注册到 Toolkit 和 Agent。
+AgentScope App 会通过 `list_tools()` 自动收集 `tokenless_retrieve`，因此 App
+代码只需提供中间件。如果 App 已有同名 Tool，应传入唯一的
+`retrieve_tool_name`；AgentScope 遇到重名时采用最后一个 Tool，而中间件在
+`list_tools()` 阶段无法检查 App 的其他 Tool。
+
+```python
+from agentscope.agent import Agent
+from agentscope.tool import Toolkit
+from tokenless_agentscope import TokenlessMiddleware
+
+toolkit = Toolkit()
+middleware = TokenlessMiddleware(
+    mode="balanced",
+    data_dir="/absolute/path/to/tenant-tokenless-data",
+    # retrieve_tool_name="tenant_tokenless_retrieve",
+)
+await middleware.register_tools(toolkit)
+
+agent = Agent(
+    ...,
+    toolkit=toolkit,
+    middlewares=[middleware],
+)
+```
+
+| 模式 | 策略 |
+|---|---|
+| `conservative` | 所有未排除工具使用 1 MiB / 65,536 / 深度 32 限制 |
+| `balanced` | 跳过 Read/Glob/Grep；Shell 使用 65,536 / 128 / 深度 8，其他采用 conservative 限制 |
+| `aggressive` | 跳过 Read/Glob/Grep；其他采用 CLI 默认的 4,096 / 32 / 深度 8 |
+
+默认模式为 `balanced`。只读恢复 Tool 仅在 24 位哈希对应的 marker 出现在当前
+AgentScope 上下文或摘要中时自动允许。每个用户或租户必须显式传入不同的绝对
+`data_dir`；省略 `data_dir` 时，`TOKENLESS_DATA_DIR` 只作为进程级回退。除非应用
+有明确生命周期策略，否则保留默认一小时 stash TTL，且不要依赖跨节点恢复。
+首版不启用 Shell、MCP、TOON、RTK 或 Schema 压缩，也不由
+`anolisa adapter enable` 管理。
 
 ## Raw 打包
 
@@ -263,7 +317,7 @@ tokenless env-check --tool Shell --fix
 - `crates/tokenless-runtime/` — CLI 与语言绑定共用的有状态 Rust API
 - `crates/tokenless-cli/` — CLI 二进制
 - `python/tokenless/` — 面向 CPython 3.11+ 的 PyO3 `anolisa_tokenless` 包
-- `adapters/tokenless/` — 适配器包（OpenClaw / Hermes / Qoder / Claude Code / Codex / OpenCode）
+- `adapters/tokenless/` — 适配器包（含 AgentScope 中间件及各框架 Plugin/Hook）
 - `third_party/rtk/` — RTK 命令重写引擎（vendored）
 - `packaging/raw/` — Tokenless 自维护的 ANOLISA Raw 打包与目标校验
 
