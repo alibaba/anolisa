@@ -4,7 +4,7 @@
 
 ## 状态
 
-- 规划基线：`up/main` 的 `6c115aefe04ace0d169a24fa7cd55ad7c1befa52`
+- 规划基线：`up/main` 的 `e3763b001c91f3c13dc6afbd57aac924162e9f59`
 - 候选工作树：基于该基线的未提交实现切片
 - 文档日期：2026-08-13
 - Phase 0-2 总体就绪度：**NOT ACCEPTED**
@@ -37,10 +37,11 @@ Gateway，而且尚无独立的候选 commit SHA。
   仅解析已安装的 `codex-acp` 与 `claude-agent-acp`，校验 canonical workspace/executable，
   使用 environment allowlist，且没有 shell、package runner 或 network bootstrap 路径。
 
-Capability contract 与 package-exposed in-memory Broker/permit slice 已存在并通过 targeted
-validation。工作树仍没有 Gateway daemon 或 network API、已安装的 local ACP entrypoint、支持独立
-取消的 ACP Session Driver、production Permission Proxy、`CoshCoreBridge` public event mapping、完整
-ACP-to-domain mapping、Shell Attachment、Web UI/API、钉钉/飞书 Adapter、restart/lease orchestration，也没有完成所有
+Capability contract、durable ledger slice、installed ACP entrypoint、once-only permission evidence、
+neutral Core/ACP Runtime port 与 local Unix Gateway daemon/client slice 已存在。本地控制切片支持
+peer-authenticated Task submit/get/events/cancel，但不调度 Runtime，也不消费 Outbox。工作树仍没有
+remote/network API、完整 ACP-to-domain governance、Shell Attachment、Web UI/API、钉钉/飞书
+Adapter、restart/lease orchestration，也没有完成所有
 production bypass closure。现有 `cosh-shell` 继续拥有 PTY 与兼容 cosh-core process path。
 
 Contract 基础尚未对全部 collection 与 envelope 应用 aggregate admission limit，包括 vector、batch

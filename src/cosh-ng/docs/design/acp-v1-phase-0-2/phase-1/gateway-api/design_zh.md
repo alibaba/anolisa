@@ -4,10 +4,15 @@
 
 ## 状态与范围
 
-本文是 Phase 1 规划契约，不代表功能已经实现。源码基线为上游提交
-`6c115aefe04ace0d169a24fa7cd55ad7c1befa52`。Gateway API 是 Shell、Web、CLI 和未来企业
+本文的 Phase 1 契约已配套一份基于上游提交
+`e3763b001c91f3c13dc6afbd57aac924162e9f59` 的局部本地实现。Gateway API 是 Shell、Web、CLI 和未来企业
 渠道适配器的本地控制面入口。Handler 只负责认证、规范化用户意图、向 Task Execution Plane
 提交命令并返回 Task projection，不执行 OS 操作，不启动 Agent 进程，也不自行作出审批决定。
+
+候选切片仅实现 authenticated local Unix socket 与 installed CLI client。Daemon 从 peer credential
+解析 actor，不信任 request JSON 中的身份，并通过有版本的本地 protocol 提供有界 Task
+submit/get/events/cancel。Task 状态写入现有 SQLite store。该切片不调度 Agent Runtime、不消费
+Outbox、不恢复 Run、不开放 remote listener，也没有 real-provider evidence。
 
 ## 目标
 
@@ -36,7 +41,8 @@
 | [`cosh-core/session_control.rs`](../../../../../crates/cosh-core/src/session_control.rs) | 已有带边界、无 provider 的单请求 JSON 管理路径。 | 只管理 provider session，不管理持久 Task 或审批。 |
 | [`cosh-shell`](../../../../../crates/cosh-shell/src) | Shell 已拥有富交互和审批渲染。 | Shell 仍是 standalone，没有多渠道共享的 ingress port。 |
 
-基线不存在 `GatewayApi`、`IngressPort`、channel adapter、Task endpoint 或持久请求去重存储。
+上游基线不存在 `GatewayApi`、`IngressPort`、channel adapter、Task endpoint 或持久请求去重存储。
+候选实现增加 narrow local daemon/client adapter；下述 target port 与 remote/channel surface 仍是设计契约。
 
 ## 边界与 ownership
 
@@ -235,6 +241,28 @@ Transport error 不代表 mutating command 一定未提交。
 
 Rollback 时禁用 daemon 和 adapter；现有 `cosh-cli`、`cosh-core` 与 `cosh-shell` 入口保持当前行为。
 Database migration rollback 由 Task Execution Plane 定义，不由 Gateway handler 定义。
+
+## 已实现的本地控制切片
+
+安装后的命令入口为：
+
+```text
+cosh agent serve
+cosh agent task submit|get|events|cancel
+```
+
+`serve` 首次启动时生成并持久化 durable installation ID，或者验证显式预置的 ID，同时要求 private
+absolute socket/database path。Client mutation 要求显式传入 caller-stable idempotency key；Task
+与 Run ID 按各自 strong type 解析。Event read 使用 optional revision cursor 与 64-event hard page
+limit。Daemon 只接受 local Unix peer，并拒绝 UID 与 daemon owner 不一致的 peer；client 连接后也会
+独立校验 server UID。
+
+当前 transport 使用 local Unix socket 上带四字节无符号大端长度前缀的 bounded JSON frame。这个
+private Gateway wire 不能与 ACP JSON-RPC 或 private cosh-core JSONL 混淆。
+
+该切片只提供 durable control。Submit 创建 durable queued Task/Run projection，但不表示 Runtime
+worker 已接管；Cancel 只会在 Runtime 启动前终结 queued Run，started Run 在 settlement callback
+完成前会被拒绝。当前没有启用 HTTP、WebSocket、钉钉、飞书、bearer token 或 cross-device listener。
 
 ## 依赖
 

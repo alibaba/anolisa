@@ -4,7 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use super::StoreError;
 
-pub(super) const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub(super) const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 struct Migration {
     version: u32,
@@ -210,6 +210,16 @@ BEGIN
 END;
 "#,
     },
+    Migration {
+        version: 3,
+        checksum: "cosh-gateway-identity-schema-v3-20260813",
+        sql: r#"
+CREATE TABLE gateway_identity (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+    installation_id TEXT NOT NULL UNIQUE
+) STRICT;
+"#,
+    },
 ];
 
 pub(super) fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
@@ -315,6 +325,7 @@ mod tests {
                 "command_receipts",
                 "execution_receipts",
                 "executions",
+                "gateway_identity",
                 "ledger_receipts",
                 "outbox",
                 "permits",
@@ -328,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_v1_database_migrates_to_v2_without_rewriting_v1() {
+    fn existing_v1_database_migrates_without_rewriting_v1() {
         let mut connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
@@ -351,7 +362,7 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(versions, [1, 2]);
+        assert_eq!(versions, [1, 2, 3]);
         let v1_checksum: String = connection
             .query_row(
                 "SELECT checksum FROM schema_migrations WHERE version=1",

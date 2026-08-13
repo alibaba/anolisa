@@ -113,6 +113,52 @@ fn commits_projection_event_receipt_and_outbox_atomically() {
 }
 
 #[test]
+fn event_page_is_owner_scoped_and_sql_bounded() {
+    let mut store = SqliteTaskStore::open_in_memory().unwrap();
+    let task_id = TaskId::new();
+    let actor_id = ActorId::new();
+    let run_id = RunId::new();
+    let submitted = submitted(&task_id, &actor_id);
+    let queued = envelope(
+        &task_id,
+        &actor_id,
+        2,
+        TaskEvent::TaskQueued {
+            run_id,
+            runtime: RuntimeSelector {
+                runtime: BoundedName::new("acp").unwrap(),
+                profile: None,
+            },
+        },
+    );
+    store
+        .commit_task(&task_commit(
+            &task_id,
+            &actor_id,
+            "page",
+            'd',
+            vec![submitted, queued],
+            Vec::new(),
+        ))
+        .unwrap();
+
+    let (first, revision) = store
+        .load_task_events_for_owner(&task_id, &actor_id, None, 1)
+        .unwrap();
+    assert_eq!(revision, 2);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].revision, 1);
+    assert!(matches!(
+        store.load_task_events_for_owner(&task_id, &ActorId::new(), None, 1),
+        Err(StoreError::TaskNotFound)
+    ));
+    assert!(matches!(
+        store.load_task_events_for_owner(&task_id, &actor_id, None, 65),
+        Err(StoreError::InvalidCommit { .. })
+    ));
+}
+
+#[test]
 fn idempotency_replays_same_digest_and_rejects_conflict() {
     let mut store = SqliteTaskStore::open_in_memory().unwrap();
     let task_id = TaskId::new();

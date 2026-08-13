@@ -49,15 +49,15 @@ flowchart LR
     RS["RuntimeSupervisor\nprocess group + bounded I/O + reap"]
     CJ["private COSH JSONL v1 codec"]
     CAP["Capability Broker slice\nin-memory + targeted tests"]
-    API["Gateway daemon / API\nnot implemented"]
-    CCB["CoshCoreBridge\nnot implemented"]
-    ACP["ACP codec + bridge + profiles\npartial library slice"]
+    API["Local Gateway daemon + CLI\npartial control slice"]
+    CCB["CoshCoreBridge + Runtime Port\npartial library slice"]
+    ACP["ACP v1 port + profiles + entrypoint\npartial local slice"]
 
     CT --> RED
     RED --> DB
     CT --> CAP
-    CT -.->|future public mapping| CCB
-    API -.-> RED
+    CT --> CCB
+    API --> RED
     CCB -.-> RS
     CCB -.-> CJ
     ACP --> RS
@@ -69,18 +69,19 @@ Capability/Permit shapes. It does not yet bound every collection or aggregate
 envelope. The reducer
 enforces identity, consecutive revisions, active Run, approval/execution, and
 terminal transition rules. The single-writer store uses checked SQLite schema
-v1, WAL/FULL policy, private path checks, and one transaction for Task events,
+v3, WAL/FULL policy, durable installation binding, private path checks, and one transaction for Task events,
 projection, command receipt, and Outbox intents. The supervisor validates a
 direct launch, clears inherited environment, bounds JSONL/stderr, owns the
 process group, escalates shutdown, reaps, and emits one process terminal.
 
-This is not yet a runnable Gateway. There is no daemon entry point, ingress or
-network API, coordinator/runner lease loop, public Runtime-event mapping,
-restart recovery worker, Shell attachment, or Web/channel presentation. The
-ACP codec/bridge and fixed installed-executable profiles exist as a library
-slice with a bounded independently cancellable session driver, but there is no
-installed entrypoint, production permission UI/evidence, or real-adapter
-conformance evidence.
+This is now a runnable local control-plane slice, but not a complete Gateway.
+The Unix daemon authenticates peer UID and supports durable Task
+submit/get/events/cancel through the installed CLI. There is no Runtime
+scheduler, coordinator/runner lease loop, restart recovery worker, Outbox
+consumer, Shell attachment, remote identity, or Web/channel presentation. Core
+and ACP bridges implement partial neutral Runtime mapping; the installed ACP
+path has local once-only permission evidence. Real-adapter conformance and
+end-to-end Task-to-Runtime execution evidence remain absent.
 Capability code is package-exposed and passes targeted tests,
 but remains partial because the store is in-memory and no target executes from
 its claim. Existing Shell PTY/core ownership is
@@ -337,10 +338,10 @@ shutdown timeouts, and reaps the child. The corresponding bridge owns protocol
 negotiation and connection/session state. A PID or dropped connection alone is
 never a durable Task result.
 
-In the candidate worktree, `RuntimeSupervisor` exists only as a library owner
-for a directly launched child. No Gateway daemon invokes it, no
-`CoshCoreBridge` maps its observations, and `cosh-shell` still owns the current
-interactive cosh-core compatibility process.
+The candidate Core and ACP Runtime ports now use `RuntimeSupervisor` for direct
+child ownership and map a bounded subset of neutral events. The local Gateway
+daemon does not yet schedule either port, and `cosh-shell` still owns the
+current interactive cosh-core compatibility process.
 
 ## Dependency order
 

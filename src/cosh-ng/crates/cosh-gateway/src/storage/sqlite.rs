@@ -4,7 +4,9 @@ use std::fs::{self, OpenOptions};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use cosh_gateway_contracts::ids::InstallationId;
+use cosh_gateway_contracts::task::TaskEventEnvelope;
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::{schema, StoreError};
 
@@ -63,6 +65,91 @@ impl SqliteTaskStore {
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
+
+    /// Returns the persisted installation identity, creating it exactly once
+    /// when a new database has no binding yet.
+    ///
+    /// A supplied identity is accepted only for the first bind or when it
+    /// matches the existing value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a conflict for identity substitution or corrupt stored data.
+    pub fn bind_installation_id(
+        &mut self,
+        requested: Option<&InstallationId>,
+    ) -> Result<InstallationId, StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let existing = transaction
+            .query_row(
+                "SELECT installation_id FROM gateway_identity WHERE singleton = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let installation_id = match existing {
+            Some(value) => {
+                let existing =
+                    InstallationId::parse(value).map_err(|error| StoreError::Corrupt {
+                        message: format!("stored installation identity is invalid: {error}"),
+                    })?;
+                if requested.is_some_and(|requested| requested != &existing) {
+                    return Err(StoreError::LedgerConflict {
+                        message: "database is bound to another installation identity".to_owned(),
+                    });
+                }
+                existing
+            }
+            None => {
+                let recovered = recover_installation_id(&transaction)?;
+                if let (Some(requested), Some(recovered)) = (requested, recovered.as_ref()) {
+                    if requested != recovered {
+                        return Err(StoreError::LedgerConflict {
+                            message: "existing Task history belongs to another installation"
+                                .to_owned(),
+                        });
+                    }
+                }
+                let installation_id = recovered.or_else(|| requested.cloned()).unwrap_or_default();
+                transaction.execute(
+                    "INSERT INTO gateway_identity(singleton, installation_id) VALUES (1, ?1)",
+                    params![installation_id.as_str()],
+                )?;
+                installation_id
+            }
+        };
+        transaction.commit()?;
+        Ok(installation_id)
+    }
+}
+
+fn recover_installation_id(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<Option<InstallationId>, StoreError> {
+    let mut statement =
+        transaction.prepare("SELECT payload_json FROM task_events ORDER BY task_id, revision")?;
+    let payloads = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let mut recovered: Option<InstallationId> = None;
+    for payload in payloads {
+        let event = serde_json::from_str::<TaskEventEnvelope>(&payload?).map_err(|error| {
+            StoreError::Corrupt {
+                message: format!("Task event cannot recover installation identity: {error}"),
+            }
+        })?;
+        let candidate = event.header.correlation.installation_id;
+        if recovered
+            .as_ref()
+            .is_some_and(|recovered| recovered != &candidate)
+        {
+            return Err(StoreError::Corrupt {
+                message: "Task history contains multiple installation identities".to_owned(),
+            });
+        }
+        recovered = Some(candidate);
+    }
+    Ok(recovered)
 }
 
 fn configure(connection: &Connection) -> Result<(), StoreError> {

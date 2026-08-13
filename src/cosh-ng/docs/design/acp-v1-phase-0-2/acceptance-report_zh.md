@@ -6,10 +6,10 @@
 
 | 字段 | 值 |
 | --- | --- |
-| 基线 | `6c115aefe04ace0d169a24fa7cd55ad7c1befa52`（2026-08-12 获取的 `up/main`） |
+| 基线 | `e3763b001c91f3c13dc6afbd57aac924162e9f59`（`up/main`） |
 | 候选 | 基于该基线的未提交共享工作树；尚无独立候选 SHA |
 | 范围 | Phase 0、Phase 1 与 Phase 2 架构就绪度 |
-| 被评估的代码变更 | Contracts、Task reducer/SQLite store、Runtime/private JSONL、ACP v1 Bridge/profile 切片与局部 Capability slice |
+| 被评估的代码变更 | Contracts、Task/SQLite/ledger、Runtime port、installed ACP path、permission、adapter 与局部 local Gateway daemon/client |
 | 总体实现状态 | **NOT ACCEPTED** |
 | 文档集成状态 | **PASS**（通过下述检查；不等于阶段 Gate） |
 
@@ -51,15 +51,16 @@ Attachment API 或 Channel Adapter。因此所有 Phase 1 与 Phase 2 产品 Gat
 | 切片 | 已实现证据 | 通过验收仍缺少 |
 | --- | --- | --- |
 | 中立 contract 与 identity | 无副作用的 `cosh-gateway-contracts`，包含 versioned header、有界 leaf string/digest/error、不同 ID newtype、Task/Runtime event、Capability/Approval/Permit shape 与 serde validation | Aggregate collection/envelope admission limit、canonical schema/golden corpus、完整 compatibility manifest、ownership ADR 验收、authenticated identity resolver 与 durable parent/fence enforcement |
-| Task reducer | `TaskAggregate` 校验 schema/correlation、连续 revision、active Run、approval/execution lifecycle、cancel、retry 与 terminal transition，失败时不产生 partial mutation | `TaskCoordinator`、command routing、runner lease、durable input、event-admission fencing、完整 transition/property/race suite 与 restart orchestration |
-| SQLite Task store | Local single-writer SQLite schema v1，包含 WAL/FULL policy、checked migration、Task projection/event/receipt/Outbox transaction、revision/idempotency check 与 path/symlink/permission validation | Backup/restore、migration artifact、disk-full/corruption/kill-point suite、Outbox worker/lease recovery、daemon restart reconciliation 与完整 companion-file race hardening |
-| Runtime 与 private core transport | `RuntimeSupervisor` 校验 direct launch、清除 inherited environment、限制 stdout/stderr、独占 process-group shutdown/reap 并产生一次 process terminal；private COSH JSONL codec 协商 exact v1 并生成 typed local observation | 集成 `CoshCoreBridge`、public contract event mapping/fencing/backpressure、restart/deadline policy、provider-session binding、完整 descendant/race fixture 与 Shell ownership migration |
-| ACP v1 第一轮切片 | 准确固定官方 SDK 2.0.0 与 Rust 1.88；codec/Bridge 协商 wire v1；有界 Driver 提供独立 cancel；内置 profile 以 canonical path 与 environment allowlist 解析已安装 Adapter | 已安装 COSH entrypoint、local permission UI/evidence、durable governance/mapping、restart/resume、更广 conformance 与 real-adapter 证据 |
-| Capability | 中立 contract、package-exposed Broker 与 mutex-atomic in-memory single-use permit store 已存在；targeted test 覆盖 parent、expiry、target、operation、policy、execution binding 与 concurrent claim | Durable/audited permit ledger、immutable target resolver、execution target/verifier、reconciliation 与关闭 legacy CLI/core/Shell bypass |
+| Task reducer | `TaskAggregate` 与 local `TaskCoordinator` 串行处理 submit、read、event page 和 queued cancel，并校验 owner 与 durable replay | Runtime scheduling、durable input、execution settlement callback、完整 property/race suite 与 restart orchestration |
+| SQLite Task store | Checksummed schema v3 使用 WAL/FULL、installation binding、Task projection/event/receipt/Outbox transaction、durable governance ledger、revision/idempotency check 与 private-path validation | Backup/restore、disk-full/kill-point suite、Outbox worker、daemon reconciliation 与完整 filesystem race hardening |
+| Runtime 与 private core transport | `RuntimeSupervisor`、private COSH JSONL 与 provider-neutral `CoshCoreBridge` 提供有界映射、identity fence、cancel 与 process settlement | Coordinator/Broker wiring、restart/deadline policy、完整 descendant/race fixture 与 Shell ownership migration |
+| ACP v1 第一轮切片 | Rust 1.88 与 SDK 2.0.0 已固定；installed `cosh agent doctor/run` 支持固定 Codex/Claude profile、supervised ACP v1 与 local once-only permission evidence | Runtime scheduling、restart/resume、更广 conformance 与 real-adapter 证据 |
+| Capability | 中立 Broker contract、in-memory admission 与 durable approval/permit/execution/runtime-binding/lease ledger 强制 identity 和 fencing invariant | Broker 到 daemon/runtime wiring、immutable target resolver、execution target/verifier、reconciliation 与关闭 legacy bypass |
 
-候选代码没有实现 Gateway daemon、authenticated Unix/network API、已安装 ACP entrypoint、
-Shell Attachment、Web/API Presentation 或 Channel Adapter。Private COSH JSONL v1
-codec 与新增 ACP v1 Bridge 继续保持独立。
+候选实现已包含局部 local Gateway daemon/client 与 installed ACP entrypoint。Daemon 仅支持 Unix，
+从 peer UID 解析 identity，并提供 durable Task submit/get/events/cancel。它不调度 Runtime work、
+不消费 Outbox、不恢复 Run，也不开放 remote/channel API。Shell Attachment、Web/API Presentation、
+钉钉/飞书 Adapter 与 real-provider validation 仍缺。Private COSH JSONL 与 ACP 保持独立。
 
 ## 模块就绪度摘要
 
@@ -70,11 +71,11 @@ codec 与新增 ACP v1 Bridge 继续保持独立。
 | 0 | Protocol Contracts | `PARTIAL`；typed leaf contract 通过 targeted check，frozen schema/fixture 与完整 port 仍缺 | [报告](phase-0/protocol-contracts/acceptance_zh.md) |
 | 0 | Identity and Correlation | `PARTIAL`；已有独立 ID/binding，authenticated/durable mapping 与 fence 仍缺 | [报告](phase-0/identity-correlation/acceptance_zh.md) |
 | 0 | Storage and Supervision | `PARTIAL`；SQLite/store 与 supervisor 基础存在，recovery、fencing、process-tree 与 ownership migration 仍缺 | [报告](phase-0/storage-supervision/acceptance_zh.md) |
-| 1 | Gateway API | `NOT IMPLEMENTED` | [报告](phase-1/gateway-api/acceptance_zh.md) |
+| 1 | Gateway API | `PARTIAL`；已有 authenticated local Unix submit/get/events/cancel，Runtime scheduling、Outbox delivery、recovery 与 remote identity 仍缺 | [报告](phase-1/gateway-api/acceptance_zh.md) |
 | 1 | Task Execution Plane | `PARTIAL`；已有 reducer 与 atomic local store，coordinator/lease/restart path 仍缺 | [报告](phase-1/task-execution-plane/acceptance_zh.md) |
 | 1 | Capability Broker | `PARTIAL`；package-exposed in-memory slice 通过 targeted test，但还不是通用 production gate | [报告](phase-1/capability-broker/acceptance_zh.md) |
-| 1 | CoshCore Bridge | `PARTIAL`；已有 supervisor/private codec，但 Bridge/public mapping 不存在 | [报告](phase-1/cosh-core-bridge/acceptance_zh.md) |
-| 1 | Local ACP Runtime MVP | `PARTIAL`；codec、Bridge、有界 Driver、独立 cancel、fake-Agent test 与固定 profile 已存在，但 installed entrypoint、permission UI/evidence 与 real-adapter proof 不存在 | [报告](phase-1/acp-mvp/acceptance_zh.md) |
+| 1 | CoshCore Bridge | `PARTIAL`；已有 neutral port、identity fencing、有界 public mapping 与 cleanup，Broker/recovery integration 仍缺 | [报告](phase-1/cosh-core-bridge/acceptance_zh.md) |
+| 1 | Local ACP Runtime MVP | `PARTIAL`；已有 installed entrypoint、有界 Driver、fake-Agent path、固定 profile 与 once-only permission evidence，real-adapter proof 仍缺 | [报告](phase-1/acp-mvp/acceptance_zh.md) |
 | 2 | ACP Client Bridge | `PARTIAL`；官方 v1 codec 与 supervised stdio 切片通过 focused test，domain/governance/recovery integration 仍缺 | [报告](phase-2/acp-client-bridge/acceptance_zh.md) |
 | 2 | Shell Attachment | `NOT IMPLEMENTED`；当前存在 direct Shell mode | [报告](phase-2/shell-attachment/acceptance_zh.md) |
 | 2 | Web and Presentation | `NOT IMPLEMENTED` | [报告](phase-2/web-presentation/acceptance_zh.md) |
@@ -118,8 +119,9 @@ G0 前，任何 Phase 1 生产 API 都不能冻结自己重复的 contract。
 - cancellation、approval race、crash recovery 与 audit correlation 测试；
 - handler、presenter 或 Agent bridge 都不能直接执行 OS action。
 
-Reducer/store/supervisor slice 不提供 daemon、API、TaskCoordinator、runner lease/recovery loop、集成
-Runtime Port 或通用 production Capability gate，因此不能满足 G1。
+Local daemon/API 与 partial Runtime port 降低了 G1 风险，但仍无 Runtime scheduler、runner
+lease/recovery loop、Outbox worker、通用 production Capability gate 或 end-to-end Task execution，
+因此 G1 仍未通过。
 
 ### GM：Local ACP Runtime MVP
 
@@ -202,7 +204,7 @@ Terminal gate。
 | 切片 | 已记录 command/result |
 | --- | --- |
 | Contracts | `cargo test --locked --package cosh-gateway-contracts`：6 个 integration test 通过；unit/doc-test target 通过。Package fmt、all-target Clippy、rustdoc 与 dependency-tree check 也通过。 |
-| Gateway library integration | `cargo +1.88.0 test --locked --package cosh-gateway --no-fail-fast`：84 passed、0 failed。这是单 package suite，不是 workspace/full-system gate。 |
+| Gateway library integration | `cargo +1.88 test --package cosh-gateway --no-fail-fast`：126 个 library、4 个 binary 与 7 个 installed-CLI 测试通过，0 失败；all-target Clippy 与 package rustdoc 通过。这是单 package suite，不是 workspace/full-system gate。 |
 | Task reducer | Aggregate suite 包含 15 个 focused transition test，包括 unresolved/uncertain execution guard。 |
 | SQLite storage | Storage suite 包含 15 个 focused test，包括 normal load/commit 的 snapshot replay verification。 |
 | Runtime 与 ACP | Package suite 覆盖 private JSONL、ACP v1 codec/Bridge、固定 profile、有界 I/O/supervision 与可独立 cancel 的 Session Driver。Gateway all-target Clippy 与 package rustdoc 通过。 |
@@ -217,7 +219,7 @@ Terminal gate。
 | 仓库 link 检查 | PASS：`python3 scripts/docs-link-check.py` |
 | 完整 owned-document link 检查 | PASS：8 份总体/开发者指南文档中的全部 relative link 可解析 |
 | Markdown 卫生 | PASS：`git diff --check` 与 owned-file 行尾空白检查 |
-| 实现声明复核 | PASS：区分基线与候选声明；ACP codec/Bridge/profile/Driver foundation 与缺失的已安装 entrypoint、production governance、real-adapter 证据明确区分 |
+| 实现声明复核 | PASS：区分基线与候选声明；installed ACP 与 local durable-control slice 同缺失的 scheduling、recovery、remote channel、audit evidence 和 real-adapter proof 明确区分 |
 
 已记录的代码结果属于 scope-proportional package gate，不是 full workspace 或 live-system
 validation。ECS validation、provider call 与手工 Terminal UX 未运行。

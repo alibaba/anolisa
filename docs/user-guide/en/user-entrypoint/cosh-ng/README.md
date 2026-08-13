@@ -57,6 +57,15 @@ Use read-only commands first. Add `--dry-run` to a supported package or service 
   decision class, never raw prompts, tool arguments, option labels, session
   identifiers, or workspace paths. Evidence persistence failure cancels the
   callback and fails the run.
+- Run `cosh agent serve` to start the first
+  Unix-only durable control slice. From another terminal, use `cosh agent task
+  submit --idempotency-key '<stable-key>'`, then `task get`, `task events`, or
+  `task cancel --run-id '<run_UUID>' --idempotency-key '<stable-key>'`. The
+  daemon generates and persists its installation identity on first start,
+  authenticates the local Unix peer, and persists Task state, but it does
+  not yet schedule an ACP/Core Runtime, consume Outbox work, recover a Run, or
+  expose a remote listener. A submitted Task is therefore durable control
+  state, not evidence that an Agent executed it.
 - [Structured OS CLI](cli/overview.md) — command domains and safe automation patterns.
 - [Output format](output-format.md) — the `CoshResponse<T>` success and error envelope.
 - [Headless mode](core/headless-mode.md) — JSONL integration for other frontends.

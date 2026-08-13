@@ -55,6 +55,12 @@ cosh-ng 是一个 AI 原生 Linux 终端，让日常 Shell 操作和 Agent 任�
   `--permission-evidence PATH` 覆盖。COSH 只存储 digest 与 decision class，不保存 raw
   prompt、tool argument、option label、session identifier 或 workspace path。Evidence
   持久化失败时，callback 会被取消且本轮运行失败。
+- 运行 `cosh agent serve` 启动第一轮 Unix-only durable
+  control slice。在另一个 Terminal 使用 `cosh agent task submit --idempotency-key
+  '<stable-key>'`，随后可运行 `task get`、`task events` 或 `task cancel --run-id
+  '<run_UUID>' --idempotency-key '<stable-key>'`。Daemon 认证 local Unix peer 并持久化 Task
+  状态，但尚不调度 ACP/Core Runtime、不消费 Outbox、不恢复 Run，也不开放 remote listener。
+  Submitted Task 因此只是 durable control state，不构成 Agent 已执行的证据。
 - [结构化 OS CLI](cli/overview.md)：命令域和安全的自动化方式。
 - [输出格式](output-format.md)：`CoshResponse<T>` 成功和失败响应封装。
 - [无界面模式](core/headless-mode.md)：供其他前端使用的 JSONL 集成。

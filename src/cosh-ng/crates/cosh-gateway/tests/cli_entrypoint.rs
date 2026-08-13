@@ -244,3 +244,38 @@ fn relative_permission_evidence_path_fails_before_adapter_launch() {
     assert!(!workspace.path().join("launched").exists());
     assert!(!workspace.path().join("relative.jsonl").exists());
 }
+
+#[test]
+fn task_cli_rejects_invalid_identity_before_socket_io() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("absent.sock");
+    let output = Command::new(env!("CARGO_BIN_EXE_cosh-gateway"))
+        .args([
+            "task",
+            "--socket",
+            socket.to_str().unwrap(),
+            "--output",
+            "jsonl",
+            "get",
+            "run_00000000-0000-0000-0000-000000000000",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(10));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("\"code\":\"invalid_request\""));
+    assert!(stdout.contains("identifier prefix must be `tsk`"));
+}
+
+#[test]
+fn serve_rejects_an_invalid_provisioned_installation_identity() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cosh-gateway"))
+        .args(["serve", "--installation-id", "invalid"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(12));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("identifier prefix must be `ins`"));
+}

@@ -105,6 +105,27 @@ runtime. A permission callback prompts only on the local controlling terminal;
 without one, or with `--permission deny`, COSH cancels it. Once-only decisions
 are recorded as redacted evidence under the private local state directory.
 
+The first durable local-control slice can run a Unix-only Gateway daemon and
+manage Task state from another terminal:
+
+```bash
+cosh agent serve
+printf '%s\n' 'inspect the failed service' | \
+  cosh agent task submit --idempotency-key '<stable-retry-key>'
+cosh agent task get '<tsk_UUID>'
+cosh agent task events '<tsk_UUID>' --after 0 --limit 64
+cosh agent task cancel '<tsk_UUID>' --run-id '<run_UUID>' \
+  --idempotency-key '<stable-cancel-key>'
+```
+
+The daemon generates and persists its installation ID on first start; an
+operator may provision one explicitly with `--installation-id`. Replace the
+other typed identifiers with returned COSH IDs. This
+local API authenticates the Unix peer and persists Task control state. It does
+not yet schedule the ACP/Core Runtime, deliver Outbox work, recover a Run, or
+open a remote listener; `task submit` is a control-plane operation, not proof
+that an Agent executed the intent.
+
 ## Documentation
 
 - [User guide](../../docs/user-guide/en/user-entrypoint/cosh-ng/README.md)

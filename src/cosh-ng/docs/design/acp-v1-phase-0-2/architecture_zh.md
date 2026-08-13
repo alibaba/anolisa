@@ -45,15 +45,15 @@ flowchart LR
     RS["RuntimeSupervisor\nprocess group + bounded I/O + reap"]
     CJ["private COSH JSONL v1 codec"]
     CAP["Capability Broker slice\nin-memory + targeted test"]
-    API["Gateway daemon / API\n未实现"]
-    CCB["CoshCoreBridge\n未实现"]
-    ACP["ACP codec + Bridge + profile\n局部 library slice"]
+    API["Local Gateway daemon + CLI\n局部 control slice"]
+    CCB["CoshCoreBridge + Runtime Port\n局部 library slice"]
+    ACP["ACP v1 Port + profile + entrypoint\n局部 local slice"]
 
     CT --> RED
     RED --> DB
     CT --> CAP
-    CT -.->|未来 public mapping| CCB
-    API -.-> RED
+    CT --> CCB
+    API --> RED
     CCB -.-> RS
     CCB -.-> CJ
     ACP --> RS
@@ -62,18 +62,17 @@ flowchart LR
 Contracts leaf 校验有界 leaf string/digest、schema/envelope kind、不同 ID、Runtime binding、Task
 event 与 Capability/Permit shape，但尚未限制每一个 collection 或 aggregate envelope。Reducer 执行
 identity、连续 revision、active Run、approval/execution 与
-terminal transition 规则。Single-writer store 使用经过检查的 SQLite schema v1、WAL/FULL policy、
-private path check，并在一个 transaction 中提交 Task event、projection、command receipt 与 Outbox
+terminal transition 规则。Single-writer store 使用经过检查的 SQLite schema v3、WAL/FULL policy、
+durable installation binding 与 private path check，并在一个 transaction 中提交 Task event、projection、command receipt 与 Outbox
 intent。Supervisor 校验 direct launch、清除 inherited environment、限制 JSONL/stderr、独占 process
 group、升级 shutdown、reap，并只生成一次 process terminal。
 
-这还不是可运行的 Gateway。当前没有 daemon entry point、ingress 或 network API、coordinator/runner
-lease loop、public Runtime-event mapping、restart recovery worker、Shell Attachment 或 Web/channel
-presentation。ACP codec/Bridge、固定的 installed-executable profile 与支持独立 cancel 的有界
-Session Driver 已形成 library slice，但仍没有已安装 entrypoint、production Permission UI/evidence
-或 real-adapter conformance 证据。Capability code 已由 package 暴露并通过 targeted test，但 permit
-store 仍在内存中，也没有 target 根据 claim 执行，因此仍是 partial。现有 Shell PTY/core ownership
-没有改变。
+当前已形成可运行的 local control-plane slice，但仍不是完整 Gateway。Unix daemon 认证 peer UID，
+并通过 installed CLI 提供 durable Task submit/get/events/cancel。当前没有 Runtime scheduler、
+coordinator/runner lease loop、restart recovery worker、Outbox consumer、Shell Attachment、remote
+identity 或 Web/channel presentation。Core 与 ACP Bridge 已实现局部 neutral Runtime mapping；installed
+ACP path 具备 local once-only permission evidence。Real-adapter conformance 与 end-to-end
+Task-to-Runtime execution evidence 仍缺。现有 Shell PTY/core ownership 没有改变。
 
 ## 目标逻辑系统视图
 
@@ -304,9 +303,9 @@ Approval 是持久 Task 状态，不是 card widget。Shell 或 Web card 只是 
 收集有界 stderr、传播 cancel、执行 shutdown timeout 并回收子进程；对应 Bridge 拥有
 protocol negotiation 与 connection/session state。PID 或连接断开本身不能成为持久 Task result。
 
-候选工作树中的 `RuntimeSupervisor` 只作为直接启动 child 的 library owner 存在。没有 Gateway daemon
-调用它，没有 `CoshCoreBridge` 映射其 observation，`cosh-shell` 仍然拥有当前 interactive cosh-core
-compatibility process。
+候选 Core 与 ACP Runtime port 已使用 `RuntimeSupervisor` 独占直接启动的 child，并映射有界 neutral
+event 子集。Local Gateway daemon 尚未调度这两个 port，`cosh-shell` 仍然拥有当前 interactive
+cosh-core compatibility process。
 
 ## 依赖顺序
 

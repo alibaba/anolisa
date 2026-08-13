@@ -4,9 +4,11 @@
 
 ## Baseline result
 
-**Overall: NOT IMPLEMENTED at `6c115aefe04ace0d169a24fa7cd55ad7c1befa52`.** Existing JSON
-envelopes and correlated control messages are useful inputs, but no Gateway API, Task command
-port, ingress identity, durable idempotency, or projection delivery path exists.
+**Overall: PARTIAL candidate implementation based on upstream
+`e3763b001c91f3c13dc6afbd57aac924162e9f59`; Phase 1 remains NOT ACCEPTED.** The candidate adds a
+bounded local Unix daemon/client slice with peer-UID authentication and durable Task
+submit/get/events/cancel. Runtime scheduling, approval resolution, Outbox delivery, restart
+reconciliation, remote identity, channel adapters, and real-provider evidence remain absent.
 
 This report records readiness before implementation. It must not be interpreted as a Phase 1
 acceptance pass.
@@ -22,8 +24,7 @@ acceptance pass.
 
 ## Evidence inspected
 
-- Baseline: `git rev-parse HEAD` returned
-  `6c115aefe04ace0d169a24fa7cd55ad7c1befa52`.
+- Upstream baseline: `e3763b001c91f3c13dc6afbd57aac924162e9f59`.
 - [`cosh-types/output.rs`](../../../../../crates/cosh-types/src/output.rs) defines the current CLI
   response envelope.
 - [`cosh-cli/main.rs`](../../../../../crates/cosh-cli/src/main.rs) dispatches directly to current
@@ -32,25 +33,26 @@ acceptance pass.
   shell/core JSONL protocol.
 - [`cosh-core/session_control.rs`](../../../../../crates/cosh-core/src/session_control.rs) manages
   provider sessions, not Tasks.
-- Repository search found no `GatewayApi`, `IngressPort`, or `TaskCommandPort` implementation.
+- Candidate source adds a private versioned local API, daemon, typed client, installed CLI route,
+  and SQLite-backed Task projections without a remote listener.
 
 ## Acceptance matrix
 
 | ID | Criterion | Baseline | Evidence or missing artifact |
 | --- | --- | --- | --- |
-| GWA-001 | A versioned bounded local API accepts typed Task commands. | NOT IMPLEMENTED | No daemon/API module. |
-| GWA-002 | Transport identity overrides any untrusted actor body. | NOT IMPLEMENTED | No identity resolver or ingress envelope. |
-| GWA-003 | Handler code has no OS, PTY, process-spawn, Agent, or store capability. | NOT IMPLEMENTED | No handler boundary to inspect. |
-| GWA-004 | Every mutation is sent through `TaskCommandPort`. | NOT IMPLEMENTED | Port absent. |
-| GWA-005 | `TaskCoordinator` is the only Task aggregate writer. | NOT IMPLEMENTED | Task aggregate absent. |
-| GWA-006 | Same request and digest replay the original receipt. | NOT IMPLEMENTED | No durable idempotency table. |
-| GWA-007 | Same request with a different digest fails deterministically. | NOT IMPLEMENTED | No request ledger. |
-| GWA-008 | Task reads and bounded event pages are tenant-authorized. | NOT IMPLEMENTED | No projection/event API. |
+| GWA-001 | A versioned bounded local API accepts typed Task commands. | PARTIAL | Local submit/get/events/cancel and bounded framing exist; approval/append/retry and frozen golden corpus remain. |
+| GWA-002 | Transport identity overrides any untrusted actor body. | PARTIAL | Requests carry no actor and Unix peer UID is authoritative; tenant/remote identity resolution remains. |
+| GWA-003 | Handler code has no OS, PTY, process-spawn, Agent, or store capability. | PARTIAL | Handler has no Runtime/PTY/OS execution; current daemon owns the local store directly, so the target port split is incomplete. |
+| GWA-004 | Every mutation is sent through `TaskCommandPort`. | PARTIAL | Mutations use one daemon service path, but a separately enforced `TaskCommandPort` boundary remains. |
+| GWA-005 | `TaskCoordinator` is the only Task aggregate writer. | PARTIAL | Local service serializes Task writes; scheduling/recovery coordinator is absent. |
+| GWA-006 | Same request and digest replay the original receipt. | PARTIAL | Durable command receipts back submit/cancel; crash-after-commit retry evidence remains. |
+| GWA-007 | Same request with a different digest fails deterministically. | PARTIAL | Store conflict behavior exists; end-to-end local API fixture remains. |
+| GWA-008 | Task reads and bounded event pages are tenant-authorized. | PARTIAL | Peer UID gates Task reads and pages are limited; tenant authorization is not implemented. |
 | GWA-009 | Approval resolution cannot create or widen a permit. | NOT IMPLEMENTED | Approval endpoint and Broker absent. |
 | GWA-010 | Outbox delivery tolerates duplicate send and restart. | NOT IMPLEMENTED | No outbox consumer. |
 | GWA-011 | Existing shell/core JSONL is not exposed as Gateway API. | PASS | It remains scoped to runtime code. |
-| GWA-012 | Existing CLI behavior remains available when daemon is disabled. | PASS | No daemon integration exists yet. |
-| GWA-013 | Remote listeners are disabled in Phase 1. | PASS | No listener exists; retain this property. |
+| GWA-012 | Existing CLI behavior remains available when daemon is disabled. | PASS for source slice | Existing `doctor` and `run` routes remain independent of `serve`/`task`. |
+| GWA-013 | Remote listeners are disabled in Phase 1. | PASS for source slice | Only a local Unix listener exists. |
 | GWA-014 | Cross-channel identity authority is selected. | BLOCKED | Product/security owner decision remains open. |
 
 ## Required fixtures and commands for implementation acceptance
@@ -73,9 +75,20 @@ cargo test --package cosh-gateway gateway_contract
 cargo test --package cosh-gateway-contracts gateway_schema
 ```
 
-These commands were **not run** because the candidate package has no Gateway API implementation
-or matching test targets. The existing package-level suite validates other candidate slices only;
-documentation checks validate this still-unimplemented module's links and bilingual parity.
+The Stage 6 commit containing this report passed on Rust 1.88:
+
+- `cargo +1.88 test -p cosh-gateway --no-fail-fast`: 126 library, 4 binary,
+  and 7 installed-CLI tests passed; 0 failed.
+- `cargo +1.88 clippy -p cosh-gateway --all-targets -- -D warnings` passed.
+- `cargo +1.88 doc -p cosh-gateway --no-deps` passed.
+- Focused fixtures cover peer/server UID authentication, installation binding,
+  bounded framing and SQL event pages, strict fields, replay, queued cancel,
+  safe stale sockets, and installed CLI parsing.
+- A local built-binary smoke completed `serve`, `task submit`, one-page
+  `events`, queued `cancel`, and SIGINT socket cleanup through the Unix API.
+
+No real provider, ECS, remote transport, manual Terminal, crash-after-commit,
+audit-evidence sink, or screenshot evidence is claimed here.
 
 ## Exit criteria
 

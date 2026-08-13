@@ -101,6 +101,23 @@ printf '%s\n' 'summarize the current changes' | \
 `--permission deny` 时，COSH 会取消请求。Once-only decision 会以脱敏 evidence 形式记录到
 private local state directory。
 
+第一轮 durable local-control slice 可以启动 Unix-only Gateway daemon，并从另一个 Terminal 管理
+Task 状态。
+
+```bash
+cosh agent serve
+printf '%s\n' 'inspect the failed service' | \
+  cosh agent task submit --idempotency-key '<stable-retry-key>'
+cosh agent task get '<tsk_UUID>'
+cosh agent task events '<tsk_UUID>' --after 0 --limit 64
+cosh agent task cancel '<tsk_UUID>' --run-id '<run_UUID>' \
+  --idempotency-key '<stable-cancel-key>'
+```
+
+请把示例中的 typed identifier 替换成 provisioned 或返回的 COSH ID。本地 API 会认证 Unix peer，
+并持久化 Task control state。它尚不调度 ACP/Core Runtime、不投递 Outbox、不恢复 Run，也不开放
+remote listener；因此 `task submit` 只是 control-plane operation，不能证明 Agent 已执行 intent。
+
 ## 文档
 
 - [用户手册](../../docs/user-guide/zh/user-entrypoint/cosh-ng/README.md)

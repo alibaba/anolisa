@@ -4,7 +4,7 @@
 
 ## Status
 
-- Planning baseline: `up/main` at `6c115aefe04ace0d169a24fa7cd55ad7c1befa52`
+- Planning baseline: `up/main` at `e3763b001c91f3c13dc6afbd57aac924162e9f59`
 - Candidate worktree: uncommitted implementation slices based on that baseline
 - Document date: 2026-08-13
 - Overall Phase 0-2 readiness: **NOT ACCEPTED**
@@ -43,11 +43,12 @@ The current worktree contains these partial foundations:
   workspace/executable validation, an environment allowlist, and no
   shell/package-runner/network bootstrap path.
 
-Capability contracts and a package-exposed, in-memory Broker/permit slice now
-exist and pass targeted validation. The worktree still has
-no Gateway daemon or network API, installed local ACP entrypoint, ACP session
-driver with independent cancellation, production permission proxy,
-`CoshCoreBridge` public event mapping, complete ACP-to-domain mapping, Shell
+Capability contracts, a durable ledger slice, installed ACP entrypoint,
+once-only permission evidence, neutral Core/ACP Runtime ports, and a local
+Unix Gateway daemon/client slice now exist. The local control slice supports
+peer-authenticated Task submit/get/events/cancel, but does not schedule a
+Runtime or consume Outbox work. The worktree still has no remote/network API,
+complete ACP-to-domain governance, Shell
 attachment, Web UI/API, DingTalk/Feishu adapter, restart/lease
 orchestration, or complete production bypass closure. Existing `cosh-shell`
 continues to own its PTY and compatibility cosh-core process path.

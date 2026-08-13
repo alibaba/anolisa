@@ -4,11 +4,17 @@
 
 ## Status and scope
 
-This is a Phase 1 planning contract, not an implementation claim. It is based on upstream commit
-`6c115aefe04ace0d169a24fa7cd55ad7c1befa52`. The Gateway API is the local control-plane ingress
+This Phase 1 contract is paired with a partial local implementation based on upstream commit
+`e3763b001c91f3c13dc6afbd57aac924162e9f59`. The Gateway API is the local control-plane ingress
 for Shell, Web, CLI, and future enterprise channel adapters. A handler authenticates and
 normalizes intent, submits a command to the Task Execution Plane, and returns a task projection.
 It never invokes an OS operation, starts an Agent process, or decides an approval itself.
+
+The candidate slice implements only an authenticated local Unix socket and installed CLI client.
+The daemon derives the actor from peer credentials rather than request JSON and supports bounded
+Task submit/get/events/cancel calls over a versioned local protocol. It persists Task state through
+the existing SQLite store. It does not schedule an Agent Runtime, consume Outbox work, resume a
+Run, expose a remote listener, or prove a real-provider path.
 
 ## Goals
 
@@ -38,8 +44,9 @@ It never invokes an OS operation, starts an Agent process, or decides an approva
 | [`cosh-core/session_control.rs`](../../../../../crates/cosh-core/src/session_control.rs) | A bounded, provider-free one-request JSON management path exists. | It manages provider sessions only, not durable Tasks or approvals. |
 | [`cosh-shell`](../../../../../crates/cosh-shell/src) | Shell owns rich interaction and approval rendering. | Shell is standalone and no reusable multi-channel ingress port exists. |
 
-The baseline contains no `GatewayApi`, `IngressPort`, channel adapter, Task endpoint, or durable
-request-deduplication store.
+The upstream baseline contains no `GatewayApi`, `IngressPort`, channel adapter, Task endpoint, or
+durable request-deduplication store. The candidate adds a narrow local daemon/client adapter; the
+target ports and remote/channel surfaces below remain design contracts.
 
 ## Boundary and ownership
 
@@ -248,6 +255,31 @@ Transport errors do not imply that a mutating command failed to commit.
 Rollback disables the daemon and adapters; existing `cosh-cli`, `cosh-core`, and `cosh-shell`
 entry points keep their current behavior. Database migration rollback is defined by the Task
 Execution Plane, not a Gateway handler.
+
+## Implemented local control slice
+
+The installed route is:
+
+```text
+cosh agent serve
+cosh agent task submit|get|events|cancel
+```
+
+`serve` generates and persists a durable installation ID on first start, or verifies an explicitly
+provisioned ID, and requires private absolute socket/database paths. Client mutations require an
+explicit caller-stable idempotency key; Task and Run IDs are parsed as their own strong types.
+Event reads use an optional revision cursor and a 64-event hard page limit. The daemon accepts
+only local Unix peers and rejects a peer UID that does not match the daemon owner; the client
+independently verifies the server UID after connecting.
+
+The implemented transport uses bounded JSON frames prefixed by a four-byte unsigned big-endian
+length over a local Unix socket. Its private Gateway wire must not be confused with either ACP
+JSON-RPC or private cosh-core JSONL.
+
+This slice deliberately stops at durable control. Submit creates a durable queued Task/Run
+projection; it does not claim that a Runtime worker picked it up. Cancel terminalizes only a
+queued Run before runtime start; started Runs are rejected until a settlement callback exists.
+No HTTP, WebSocket, DingTalk, Feishu, bearer-token, or cross-device listener is enabled.
 
 ## Dependencies
 

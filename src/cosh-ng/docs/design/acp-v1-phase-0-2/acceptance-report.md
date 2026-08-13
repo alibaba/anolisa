@@ -6,10 +6,10 @@
 
 | Field | Value |
 | --- | --- |
-| Baseline | `6c115aefe04ace0d169a24fa7cd55ad7c1befa52` (`up/main`, 2026-08-12 fetch) |
+| Baseline | `e3763b001c91f3c13dc6afbd57aac924162e9f59` (`up/main`) |
 | Candidate | Uncommitted shared worktree based on the baseline; no distinct candidate SHA yet |
 | Scope | Phase 0, Phase 1, and Phase 2 architecture readiness |
-| Code changes assessed | Contracts, Task reducer/SQLite store, Runtime/private JSONL, ACP v1 bridge/profile slices, and partial Capability slices |
+| Code changes assessed | Contracts, Task/SQLite/ledger, Runtime ports, installed ACP path, permissions, adapters, and partial local Gateway daemon/client |
 | Overall implementation status | **NOT ACCEPTED** |
 | Document integration status | **PASS** after the checks recorded below; not a phase gate |
 
@@ -53,16 +53,18 @@ pinned baseline:
 | Slice | Implemented evidence | Still missing for acceptance |
 | --- | --- | --- |
 | Neutral contracts and identities | Side-effect-free `cosh-gateway-contracts` with versioned headers, bounded leaf strings/digests/errors, distinct ID newtypes, Task/Runtime events, Capability/Approval/Permit shapes, and serde validation | Aggregate collection/envelope admission limits, canonical schema/golden corpus, complete compatibility manifest, ownership ADR acceptance, authenticated identity resolver, and durable parent/fence enforcement |
-| Task reducer | `TaskAggregate` validates schema/correlation, consecutive revisions, active Run, approval/execution lifecycle, cancellation, retry, and terminal transitions without partial mutation | `TaskCoordinator`, command routing, runner leases, durable input, event-admission fencing, complete transition/property/race suite, and restart orchestration |
-| SQLite Task store | Local single-writer SQLite schema v1 with WAL/FULL policy, checked migrations, Task projection/event/receipt/Outbox transaction, revision/idempotency checks, and path/symlink/permission validation | Backup/restore, migration artifacts, disk-full/corruption/kill-point suites, Outbox worker/lease recovery, daemon restart reconciliation, and full companion-file race hardening |
-| Runtime and private core transport | `RuntimeSupervisor` validates direct launches, clears inherited environment, bounds stdout/stderr, owns process-group shutdown/reap, and emits one process terminal; private COSH JSONL codec negotiates exact v1 and produces typed local observations | Integrated `CoshCoreBridge`, public contract event mapping/fencing/backpressure, restart/deadline policy, provider-session binding, complete descendant/race fixtures, and migration from Shell ownership |
-| ACP v1 first slice | Official SDK 2.0.0 is pinned with Rust 1.88; codec/bridge negotiate wire v1; a bounded driver provides independent cancellation; built-in profiles resolve installed adapters with canonical paths and allowlisted environments | Installed COSH entrypoint, local permission UI/evidence, durable governance/mapping, restart/resume, broader conformance, and real-adapter evidence |
-| Capability | Neutral contracts plus a package-exposed Broker and mutex-atomic in-memory single-use permit store; targeted tests cover parent, expiry, target, operation, policy, execution binding, and concurrent claims | Durable/audited permit ledger, immutable target resolver, execution target/verifier, reconciliation, and closure of legacy CLI/core/Shell bypasses |
+| Task reducer | `TaskAggregate` plus the local `TaskCoordinator` serialize submit, read, event-page, and queued-cancel paths with owner checks and durable replay | Runtime scheduling, durable input, execution settlement callbacks, complete property/race suite, and restart orchestration |
+| SQLite Task store | Checksummed schema v3 uses WAL/FULL, installation binding, Task projection/event/receipt/Outbox transactions, durable governance ledgers, revision/idempotency checks, and private-path validation | Backup/restore, disk-full/kill-point suites, Outbox worker, daemon reconciliation, and complete filesystem race hardening |
+| Runtime and private core transport | `RuntimeSupervisor`, private COSH JSONL, and a provider-neutral `CoshCoreBridge` provide bounded mapping, identity fences, cancellation, and process settlement | Coordinator/Broker wiring, restart/deadline policy, full descendant/race fixtures, and migration from Shell ownership |
+| ACP v1 first slice | Rust 1.88 and SDK 2.0.0 are pinned; installed `cosh agent doctor/run` supports fixed Codex/Claude profiles, supervised ACP v1, and local once-only permission evidence | Runtime scheduling, restart/resume, broader conformance, and real-adapter evidence |
+| Capability | Neutral Broker contracts, in-memory admission, and durable approval/permit/execution/runtime-binding/lease ledgers enforce identity and fencing invariants | Broker-to-daemon/runtime wiring, immutable target resolver, execution target/verifier, reconciliation, and closure of legacy bypasses |
 
-No candidate code implements a Gateway daemon, authenticated Unix/network
-API, installed ACP entrypoint, Shell attachment, Web/API presentation,
-or channel adapter. The private COSH JSONL v1 codec remains separate from the
-new ACP v1 bridge.
+The candidate now implements a partial local Gateway daemon/client and installed
+ACP entrypoint. The daemon is Unix-only, derives identity from peer UID, and
+supports durable Task submit/get/events/cancel. It does not schedule Runtime
+work, consume Outbox rows, recover a Run, or expose any remote/channel API.
+Shell attachment, Web/API presentation, DingTalk/Feishu adapters, and real
+provider validation remain absent. Private COSH JSONL remains separate from ACP.
 
 ## Module readiness summary
 
@@ -73,11 +75,11 @@ Each detailed report is authoritative for its module.
 | 0 | Protocol contracts | `PARTIAL`; typed leaf contracts pass targeted checks, while frozen schemas/fixtures and full ports remain | [Report](phase-0/protocol-contracts/acceptance.md) |
 | 0 | Identity and correlation | `PARTIAL`; distinct IDs/bindings exist, while authenticated/durable mapping and fences remain | [Report](phase-0/identity-correlation/acceptance.md) |
 | 0 | Storage and supervision | `PARTIAL`; SQLite/store and supervisor foundations exist, while recovery, fencing, process-tree, and ownership migration remain | [Report](phase-0/storage-supervision/acceptance.md) |
-| 1 | Gateway API | `NOT IMPLEMENTED` | [Report](phase-1/gateway-api/acceptance.md) |
+| 1 | Gateway API | `PARTIAL`; authenticated local Unix submit/get/events/cancel exists, while Runtime scheduling, Outbox delivery, recovery, and remote identity remain | [Report](phase-1/gateway-api/acceptance.md) |
 | 1 | Task Execution Plane | `PARTIAL`; reducer and atomic local store exist, but coordinator/leases/restart path do not | [Report](phase-1/task-execution-plane/acceptance.md) |
 | 1 | Capability Broker | `PARTIAL`; package-exposed in-memory slice passes targeted tests, but is not a universal production gate | [Report](phase-1/capability-broker/acceptance.md) |
-| 1 | CoshCore Bridge | `PARTIAL`; supervisor/private codec exist, but the bridge/public mapping does not | [Report](phase-1/cosh-core-bridge/acceptance.md) |
-| 1 | Local ACP Runtime MVP | `PARTIAL`; codec, bridge, bounded driver, independent cancel, fake-Agent tests, and fixed profiles exist, but the installed entrypoint, permission UI/evidence, and real-adapter proof do not | [Report](phase-1/acp-mvp/acceptance.md) |
+| 1 | CoshCore Bridge | `PARTIAL`; neutral port, identity fencing, bounded public mapping, and cleanup exist, while Broker/recovery integration remains | [Report](phase-1/cosh-core-bridge/acceptance.md) |
+| 1 | Local ACP Runtime MVP | `PARTIAL`; installed entrypoint, bounded driver, fake-Agent path, fixed profiles, and once-only permission evidence exist, but real-adapter proof remains | [Report](phase-1/acp-mvp/acceptance.md) |
 | 2 | ACP Client Bridge | `PARTIAL`; official v1 codec and supervised stdio slice pass focused tests, while domain/governance/recovery integration remains | [Report](phase-2/acp-client-bridge/acceptance.md) |
 | 2 | Shell Attachment | `NOT IMPLEMENTED`; direct Shell mode exists | [Report](phase-2/shell-attachment/acceptance.md) |
 | 2 | Web and Presentation | `NOT IMPLEMENTED` | [Report](phase-2/web-presentation/acceptance.md) |
@@ -125,9 +127,9 @@ Exit requires:
 - cancellation, approval race, crash recovery, and audit-correlation tests;
 - no direct OS execution from handlers, presenters, or Agent bridges.
 
-The reducer/store/supervisor slices do not provide a daemon, API,
-TaskCoordinator, runner lease/recovery loop, integrated Runtime Port, or a
-universal production Capability gate. They therefore do not satisfy G1.
+The local daemon/API and partial Runtime ports reduce G1 risk, but no Runtime
+scheduler, runner lease/recovery loop, Outbox worker, universal production
+Capability gate, or end-to-end Task execution exists. G1 remains rejected.
 
 ### GM: local ACP Runtime MVP
 
@@ -219,7 +221,7 @@ or manual Terminal gate is claimed.
 | Slice | Recorded command/result |
 | --- | --- |
 | Contracts | `cargo test --locked --package cosh-gateway-contracts`: 6 integration tests passed; unit/doc-test targets passed. Package fmt, all-target Clippy, rustdoc, and dependency-tree checks also passed. |
-| Gateway library integration | `cargo +1.88.0 test --locked --package cosh-gateway --no-fail-fast`: 84 passed, 0 failed. This is one package suite, not a workspace/full-system gate. |
+| Gateway library integration | `cargo +1.88 test --package cosh-gateway --no-fail-fast`: 126 library, 4 binary, and 7 installed-CLI tests passed; 0 failed. All-target Clippy and package rustdoc passed. This is one package suite, not a workspace/full-system gate. |
 | Task reducer | The aggregate suite includes 15 focused transition tests, including unresolved and uncertain execution guards. |
 | SQLite storage | The storage suite includes 15 focused tests, including normal load/commit snapshot replay verification. |
 | Runtime and ACP | The package suite covers private JSONL, ACP v1 codec/bridge, fixed profiles, bounded I/O/supervision, and the independently cancellable session driver. Gateway all-target Clippy and package rustdoc passed. |
@@ -234,7 +236,7 @@ or manual Terminal gate is claimed.
 | Repository link check | PASS: `python3 scripts/docs-link-check.py` |
 | Complete owned-document link check | PASS: every relative link in the eight aggregate/developer-guide files resolves |
 | Markdown hygiene | PASS: `git diff --check` and owned-file trailing-whitespace checks |
-| Implementation-claim review | PASS: baseline and candidate claims are separated; the ACP codec/bridge/profile/driver foundation is distinguished from the missing installed entrypoint, production governance, and real-adapter evidence |
+| Implementation-claim review | PASS: baseline and candidate claims are separated; installed ACP and local durable-control slices are distinguished from missing scheduling, recovery, remote channels, audit evidence, and real-adapter proof |
 
 The recorded code results are scope-proportional package gates, not full
 workspace or live-system validation. ECS validation, provider calls, and
