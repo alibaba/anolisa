@@ -159,6 +159,19 @@ impl StashStore for InMemoryStore {
         }
         Ok(count)
     }
+
+    fn delete(&self, hash: &str) -> Result<bool, StashError> {
+        let key = hash.to_ascii_lowercase();
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|e| StashError::Backend(format!("in_memory mutex poisoned: {e}")))?;
+        let removed = inner.map.remove(&key).is_some();
+        if removed {
+            inner.order.retain(|k| k != &key);
+        }
+        Ok(removed)
+    }
 }
 
 #[cfg(test)]

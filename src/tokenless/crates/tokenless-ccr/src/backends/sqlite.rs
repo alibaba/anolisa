@@ -166,6 +166,13 @@ impl StashStore for SqliteStore {
         let evicted = conn.execute("DELETE FROM stash WHERE expires_at < ?", [now as i64])?;
         Ok(evicted)
     }
+
+    fn delete(&self, hash: &str) -> Result<bool, StashError> {
+        let key = hash.to_ascii_lowercase();
+        let conn = self.lock_conn();
+        let removed = conn.execute("DELETE FROM stash WHERE hash = ?", [key])?;
+        Ok(removed > 0)
+    }
 }
 
 /// Current wall-clock seconds since the Unix epoch. Used for expiry math so

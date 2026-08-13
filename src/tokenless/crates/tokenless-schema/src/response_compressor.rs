@@ -1,5 +1,5 @@
 use serde_json::{Map, Value};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokenless_ccr::{StashStore, marker_for};
@@ -45,6 +45,11 @@ pub struct ResponseCompressor {
     /// can surface persistent backend failures instead of silently degrading
     /// to the lossy marker.
     stash_errors: Cell<usize>,
+    /// Keys created during the last `compress()` call. Cleared at the start of
+    /// each compress; used by [`Self::rollback_stash_writes`] when a caller
+    /// discards the compressed output (no-savings path) so markers never reach
+    /// the LLM.
+    stash_keys_created: RefCell<Vec<String>>,
 }
 
 impl Default for ResponseCompressor {
@@ -76,6 +81,7 @@ impl Default for ResponseCompressor {
             stash_store: None,
             stash_writes: Cell::new(0),
             stash_errors: Cell::new(0),
+            stash_keys_created: RefCell::new(Vec::new()),
         }
     }
 }
@@ -144,6 +150,7 @@ impl ResponseCompressor {
         // impression that a reset-then-increment AtomicUsize pattern would give.
         self.stash_writes.set(0);
         self.stash_errors.set(0);
+        self.stash_keys_created.borrow_mut().clear();
         let original_text = serde_json::to_string(response).unwrap_or_default();
         let result = self.compress_value(response, 0);
 
@@ -169,6 +176,37 @@ impl ResponseCompressor {
         self.stash_errors.get()
     }
 
+    /// Delete stash entries created during the last `compress()` call.
+    ///
+    /// Call this when the compressed output (and its embedded markers) will
+    /// never be emitted — e.g. the CLI no-savings path that falls back to the
+    /// original input. Returns how many keys were successfully removed.
+    pub fn rollback_stash_writes(&self) -> usize {
+        let Some(store) = self.stash_store.as_ref() else {
+            return 0;
+        };
+        let keys = std::mem::take(&mut *self.stash_keys_created.borrow_mut());
+        let mut removed = 0usize;
+        for key in &keys {
+            if store.delete(key).unwrap_or(false) {
+                removed += 1;
+            }
+        }
+        // Keep counters consistent with the rolled-back store.
+        self.stash_writes
+            .set(self.stash_writes.get().saturating_sub(removed));
+        removed
+    }
+
+    fn record_stash_success(&self, key: String) {
+        self.stash_writes.set(self.stash_writes.get() + 1);
+        self.stash_keys_created.borrow_mut().push(key);
+    }
+
+    fn record_stash_error(&self) {
+        self.stash_errors.set(self.stash_errors.get() + 1);
+    }
+
     /// Recursively compress a JSON value
     fn compress_value(&self, value: &Value, depth: usize) -> Value {
         // Check depth limit
@@ -187,12 +225,17 @@ impl ResponseCompressor {
             // the plain lossy depth marker.
             if let Some(store) = self.stash_store.as_ref()
                 && let Ok(serialized) = serde_json::to_string(value)
-                && let Ok(key) = store.stash(&serialized)
             {
-                return Value::String(format!(
-                    "<{type_name} truncated at depth {depth}, retrieve with {}>",
-                    marker_for(&key)
-                ));
+                match store.stash(&serialized) {
+                    Ok(key) => {
+                        self.record_stash_success(key.clone());
+                        return Value::String(format!(
+                            "<{type_name} truncated at depth {depth}, retrieve with {}>",
+                            marker_for(&key)
+                        ));
+                    }
+                    Err(_) => self.record_stash_error(),
+                }
             }
             return Value::String(format!("<{type_name} truncated at depth {depth}>"));
         }
@@ -241,15 +284,20 @@ impl ResponseCompressor {
         if self.add_truncation_marker
             && self.truncate_strings_at > stash_suffix_char_len()
             && let Some(store) = self.stash_store.as_ref()
-            && let Ok(key) = store.stash(s)
         {
-            let target = self.truncate_strings_at - stash_suffix_char_len();
-            let truncate_pos = s
-                .char_indices()
-                .nth(target)
-                .map(|(i, _)| i)
-                .unwrap_or(s.len());
-            return Value::String(format!("{}{}", &s[..truncate_pos], stash_suffix(&key)));
+            match store.stash(s) {
+                Ok(key) => {
+                    self.record_stash_success(key.clone());
+                    let target = self.truncate_strings_at - stash_suffix_char_len();
+                    let truncate_pos = s
+                        .char_indices()
+                        .nth(target)
+                        .map(|(i, _)| i)
+                        .unwrap_or(s.len());
+                    return Value::String(format!("{}{}", &s[..truncate_pos], stash_suffix(&key)));
+                }
+                Err(_) => self.record_stash_error(),
+            }
         }
 
         // Lossy path: existing behavior. Only attach the marker when the
@@ -346,13 +394,13 @@ impl ResponseCompressor {
         }
         let key = match stash.stash(&payload) {
             Ok(k) => {
-                self.stash_writes.set(self.stash_writes.get() + 1);
+                self.record_stash_success(k.clone());
                 k
             }
             Err(_) => {
                 // Surface the backend failure via the counter so the CLI can
                 // log it; degrade to the lossy marker for this entry.
-                self.stash_errors.set(self.stash_errors.get() + 1);
+                self.record_stash_error();
                 return None;
             }
         };

@@ -29,6 +29,12 @@ pub trait StashStore: Send + Sync {
 
     /// Drop all expired entries and return how many were removed.
     fn evict_expired(&self) -> Result<usize, StashError>;
+
+    /// Delete a live entry by hash. Returns `Ok(true)` when a row was removed,
+    /// `Ok(false)` when the key was absent (or already expired). Used to roll
+    /// back stash writes whose markers never reach the LLM (e.g. CLI discards
+    /// a no-savings compression result).
+    fn delete(&self, hash: &str) -> Result<bool, StashError>;
 }
 
 /// Errors a stash backend can surface. Kept minimal: backends map their

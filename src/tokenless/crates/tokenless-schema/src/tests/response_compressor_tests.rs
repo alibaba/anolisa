@@ -326,6 +326,28 @@ fn test_stash_writes_counter_resets_per_compress() {
 }
 
 #[test]
+fn test_rollback_stash_writes_removes_created_entries() {
+    use std::sync::Arc;
+    use tokenless_ccr::InMemoryStore;
+
+    let store = Arc::new(InMemoryStore::new());
+    let compressor = ResponseCompressor::new()
+        .with_truncate_arrays_at(2)
+        .with_stash_store(store.clone());
+    let arr: Vec<i32> = (1..=5).collect();
+    let _ = compressor.compress(&json!(arr));
+    assert_eq!(compressor.stash_writes(), 1);
+    assert_eq!(store.len(), 1);
+
+    let removed = compressor.rollback_stash_writes();
+    assert_eq!(removed, 1);
+    assert_eq!(store.len(), 0);
+    assert_eq!(compressor.stash_writes(), 0);
+    // Second rollback is a no-op.
+    assert_eq!(compressor.rollback_stash_writes(), 0);
+}
+
+#[test]
 fn test_array_truncation_with_failing_stash_falls_back_to_lossy() {
     // A stash that always errors must not break compression: the marker
     // degrades to the plain lossy form.
@@ -345,6 +367,9 @@ fn test_array_truncation_with_failing_stash_falls_back_to_lossy() {
         }
         fn evict_expired(&self) -> Result<usize, StashError> {
             Ok(0)
+        }
+        fn delete(&self, _hash: &str) -> Result<bool, StashError> {
+            Ok(false)
         }
     }
 

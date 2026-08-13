@@ -605,12 +605,26 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                 compressor = compressor.with_stash_store(store.clone());
             }
             let result = compressor.compress(&value);
+            let after_compact = serde_json::to_string(&result).unwrap_or_else(|_| String::new());
+
+            let before_tokens = estimate_tokens(&input);
+            let after_tokens = estimate_tokens(&after_compact);
+            let output_text = if after_tokens >= before_tokens {
+                eprintln!(
+                    "tokenless: response compression did not reduce size ({} -> {} est. tokens), outputting original",
+                    before_tokens, after_tokens
+                );
+                // Discarded compressed output never reaches the LLM, so roll
+                // back stash keys created during this compress — otherwise
+                // markers live only in `after_compact` and orphan stash rows.
+                compressor.rollback_stash_writes();
+                input.clone()
+            } else {
+                after_compact.clone()
+            };
             // Stash observability: capture write/error counts + live entry
-            // count for stats. All three are None when no stash store is
-            // attached (vs Some(0) when a stash is attached but nothing was
-            // truncated) so stats queries can distinguish "no stash" runs
-            // from "stash, zero writes" runs. Counts are read AFTER compress
-            // so they reflect this call; stash_size reflects entries added.
+            // count for stats AFTER the no-savings rollback so discarded
+            // orphans are not counted as successful writes.
             let stash_writes = stash.as_ref().map(|_| compressor.stash_writes());
             let stash_errors = stash.as_ref().map(|_| compressor.stash_errors());
             let stash_size = stash.as_ref().map(|s| s.len());
@@ -624,24 +638,6 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     stash_errors.expect("checked Some above")
                 );
             }
-            let after_compact = serde_json::to_string(&result).unwrap_or_else(|_| String::new());
-
-            let before_tokens = estimate_tokens(&input);
-            let after_tokens = estimate_tokens(&after_compact);
-            let output_text = if after_tokens >= before_tokens {
-                eprintln!(
-                    "tokenless: response compression did not reduce size ({} -> {} est. tokens), outputting original",
-                    before_tokens, after_tokens
-                );
-                // No-savings discard edge: if a stash was attached and an
-                // array was truncated, those writes orphan (markers live in
-                // `after_compact`, which is discarded). Truncation almost
-                // always yields savings, so this is rare; orphaned entries
-                // are TTL-cleaned.
-                input.clone()
-            } else {
-                after_compact.clone()
-            };
 
             let mode = resolve_mode(compression_on, before_tokens, after_tokens);
             let emit_text = if compression_on {

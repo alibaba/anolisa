@@ -1,5 +1,6 @@
 use std::process::Command;
 
+use tokenless_ccr::StashStore;
 use tokenless_stats::{OperationType, StatsRecord, StatsRecorder, get_home_dir};
 
 fn tokenless_bin() -> Command {
@@ -472,6 +473,69 @@ fn retrieve_stdout_is_byte_exact_without_extra_trailing_newline() {
         stashed_string.as_bytes(),
         "retrieve must restore the stashed payload byte-for-byte; \
          an extra trailing newline breaks end-to-end lossless recovery"
+    );
+}
+
+#[test]
+fn compress_response_no_savings_rolls_back_orphan_stash() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let stash_db = fixture.data_dir.join("stash.db");
+    // Small array + aggressive truncate: marker overhead makes after_tokens
+    // >= before_tokens, so CLI falls back to the original input.
+    let original = r#"["a","b"]"#;
+
+    let output = fixture
+        .command()
+        .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .args([
+            "compress-response",
+            "--truncate-arrays-at",
+            "1",
+            "--stash-db",
+        ])
+        .arg(&stash_db)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(original.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "compress-response failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("did not reduce size"),
+        "expected no-savings path, stderr={stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("tokenless:"),
+        "no-savings stdout must not expose markers: {stdout}"
+    );
+    // Discarded markers must not leave orphan rows in stash.db.
+    let live = if stash_db.exists() {
+        tokenless_ccr::SqliteStore::new(&stash_db)
+            .map(|s| s.len())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    assert_eq!(
+        live,
+        0,
+        "no-savings discard must roll back stash writes; orphan rows remain in {}",
+        stash_db.display()
     );
 }
 
