@@ -733,6 +733,11 @@ impl AdapterManager {
             entry.source_reason = source.reason;
         }
 
+        // A directory name alone cannot establish an unknown framework. Keep
+        // unknown rows only when a contract or receipt identifies them, so
+        // shared trees such as `adapters/tokenless/common` are not adapters.
+        entries.retain(|_, entry| entry.declared || entry.enabled || entry.driver_available);
+
         let mut warnings = self.visibility_warnings.clone();
         warnings.extend(declaration_warnings);
         Ok(ScanReport {
@@ -5957,6 +5962,53 @@ entry = "custom-entry.json"
         assert!(
             entry.resource_root.is_some(),
             "convention resource must be found by directory discovery"
+        );
+    }
+
+    #[test]
+    fn convention_discovery_ignores_shared_resource_directories() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let datadir = tmp.path().join("data");
+
+        std::fs::create_dir_all(&state_dir).expect("mkdir state");
+        InstalledState::default()
+            .save(&state_dir.join("installed.toml"))
+            .expect("save empty state");
+
+        let adapters = datadir.join("adapters/tokenless");
+        let openclaw = adapters.join("openclaw");
+        std::fs::create_dir_all(&openclaw).expect("mkdir openclaw adapter");
+        std::fs::write(openclaw.join("openclaw.plugin.json"), b"{}").expect("adapter manifest");
+
+        let common = adapters.join("common/hooks");
+        std::fs::create_dir_all(&common).expect("mkdir shared hooks");
+        std::fs::write(common.join("rewrite.sh"), b"#!/bin/sh\n").expect("shared hook");
+
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let mut manager =
+            AdapterManager::new(layout, Some(tmp.path().to_path_buf()), "test".into());
+        manager.state_path = state_dir.join("installed.toml");
+        manager.visible_roots = vec![VisibleRoot {
+            state_dir,
+            contract_datadir_roots: vec![datadir.clone()],
+        }];
+        manager.all_datadir_roots = vec![datadir];
+
+        let report = manager.scan().expect("scan");
+        assert!(
+            report
+                .entries
+                .iter()
+                .any(|entry| entry.component == "tokenless" && entry.framework == "openclaw"),
+            "real framework adapter must remain discoverable"
+        );
+        assert!(
+            report
+                .entries
+                .iter()
+                .all(|entry| entry.component != "tokenless" || entry.framework != "common"),
+            "shared common resources must not be reported as an adapter"
         );
     }
 
