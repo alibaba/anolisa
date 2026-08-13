@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [0.17.0] — Unreleased
 
+## [0.16.1] — 2026-08-14
+
+### Fixed
+- Improve CJK text wrapping so East Asian characters fill the full terminal line width and punctuation stays attached to adjacent text (#2446)
+- Validate credentials, endpoints, and models before persisting `/auth` changes, keeping the auth panel open on failure (#2458)
+- Treat empty successful output from extension hooks as valid instead of fail-closed (#2506)
+
 ## [0.16.0] — 2026-08-13
 
 ### Added
