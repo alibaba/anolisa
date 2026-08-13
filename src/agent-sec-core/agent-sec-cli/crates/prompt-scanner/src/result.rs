@@ -171,6 +171,25 @@ impl ScanResult {
         out.insert("layer_results".into(), Value::Array(layer_summary));
         out.insert("engine_version".into(), json!(crate::ENGINE_VERSION));
         out.insert("elapsed_ms".into(), json!(round_py(self.latency_ms, 2)));
+        // Input-size accounting: always present so consumers can detect
+        // partial scans without checking for key presence.  Defaults reflect
+        // a non-truncated scan (e.g. results built by hand in tests).
+        out.insert(
+            "input_truncated".into(),
+            json!(self
+                .metadata
+                .get("input_truncated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)),
+        );
+        out.insert(
+            "input_bytes_scanned".into(),
+            json!(self
+                .metadata
+                .get("input_bytes_scanned")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)),
+        );
         Value::Object(out)
     }
 
@@ -565,5 +584,41 @@ mod tests {
         // layer_results: L1 score=0.8, L2 score=null.
         assert_eq!(v["layer_results"][0]["score"], 0.8);
         assert!(v["layer_results"][1]["score"].is_null());
+    }
+
+    #[test]
+    fn json_reports_input_truncation_from_metadata() {
+        let mut metadata = Map::new();
+        metadata.insert("input_truncated".into(), json!(true));
+        metadata.insert("input_bytes_scanned".into(), json!(1_048_576u64));
+        let result = ScanResult {
+            is_threat: false,
+            threat_type: ThreatType::Benign,
+            layer_results: vec![],
+            latency_ms: 0.1,
+            metadata,
+            verdict: Verdict::Pass,
+        };
+        let value = result.to_json_value();
+        assert_eq!(value["input_truncated"], true);
+        assert_eq!(value["input_bytes_scanned"], 1_048_576);
+    }
+
+    #[test]
+    fn json_defaults_input_fields_when_metadata_absent() {
+        // Results built without going through the scanner (e.g. tests) still
+        // emit the fields with safe defaults so consumers can rely on key
+        // presence.
+        let result = ScanResult {
+            is_threat: false,
+            threat_type: ThreatType::Benign,
+            layer_results: vec![],
+            latency_ms: 0.1,
+            metadata: Map::new(),
+            verdict: Verdict::Pass,
+        };
+        let value = result.to_json_value();
+        assert_eq!(value["input_truncated"], false);
+        assert_eq!(value["input_bytes_scanned"], 0);
     }
 }

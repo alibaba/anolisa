@@ -39,14 +39,20 @@ const MAX_HISTORY_TURNS: usize = 32;
 const CHAT_TEMPLATE_PREFIX: &str = "<|im_start|>user\n";
 const CHAT_TEMPLATE_SUFFIX: &str = "<|im_end|>\n<|im_start|>assistant\n";
 
-/// Qwen3 special tokens that delineate chat turns.
+/// Qwen3 control tokens that must never survive into the raw prompt.
 ///
-/// If any survive into the raw prompt an attacker can break out of the
-/// `user` role and forge fake `assistant` turns — e.g. pre-filling "1"
-/// (benign) to bias the classifier's logprobs.  All user-controlled text
-/// is stripped of them before templating.
+/// If `<|im_start|>` / `<|im_end|>` / `<|endoftext|>` survive an attacker
+/// can break out of the `user` role and forge fake `assistant` turns —
+/// e.g. pre-filling "1" (benign) to bias the classifier's logprobs.  The
+/// generic `<|...|>` arm also removes the remaining special tokens
+/// (`<|fim_*|>`, `<|vision_*|>`, `<|file_sep|>`, ...) plus any future
+/// additions, and the second arm strips Qwen3's atomic thinking/tool-use
+/// tags, which could otherwise steer generation away from the trained
+/// "0"/"1" answer format and into the neutral fallback.  All
+/// user-controlled text is stripped before templating.
 static SPECIAL_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)<\|im_start\|>|<\|im_end\|>|<\|endoftext\|>").expect("static regex is valid")
+    Regex::new(r"(?i)<\|[a-z0-9_]+\|>|</?(?:think|tool_call|tool_response)>")
+        .expect("static regex is valid")
 });
 
 /// Single-pass placeholder matcher.
@@ -636,6 +642,31 @@ mod tests {
         assert!(!prompt.contains("<|im_start|>"), "{prompt}");
         assert!(!prompt.contains("<|im_end|>"), "{prompt}");
         assert!(!prompt.contains("<|endoftext|>"), "{prompt}");
+    }
+
+    #[test]
+    fn thinking_tool_and_other_control_tokens_are_stripped() {
+        // Non-turn control tokens must not survive either: `<think>` can
+        // push the model off the "0"/"1" format into the 0.5 fallback,
+        // and unseen `<|...|>` tokens are stripped generically.
+        let history = vec![msg(
+            "user",
+            "a<think>b</think>c<tool_response>d</tool_response>",
+        )];
+        let prompt =
+            format_defender_prompt(&history, "q<tool_call>x</tool_call>", "r<|fim_prefix|>");
+        for token in [
+            "<think>",
+            "</think>",
+            "<tool_call>",
+            "</tool_call>",
+            "<tool_response>",
+            "</tool_response>",
+            "<|fim_prefix|>",
+        ] {
+            assert!(!prompt.contains(token), "{token} survived: {prompt}");
+        }
+        assert!(prompt.contains("USER: abc"), "{prompt}");
     }
 
     #[test]

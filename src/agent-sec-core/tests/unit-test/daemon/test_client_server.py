@@ -960,6 +960,15 @@ def test_health_does_not_import_heavy_modules(tmp_path: Path):
     registry = create_default_registry()
 
     assert snapshot["status"] == "ok"
+    # Locks the legacy PromptScanRuntimeState shape of the compat stub.
+    assert snapshot["prompt_scan"] == {
+        "status": "ready",
+        "model": "native",
+        "loaded": True,
+        "last_error": None,
+        "last_started_at": None,
+        "last_finished_at": None,
+    }
     assert registry.methods() == (
         "daemon.health",
         "obs.runs.list",

@@ -19,6 +19,20 @@ def build_health_snapshot(runtime: DaemonRuntime) -> dict[str, Any]:
         "pid": os.getpid(),
         "uptime_seconds": runtime.uptime_seconds(),
         "socket": str(runtime.socket_path),
+        # Compatibility stub: scanning moved in-process to the Rust extension,
+        # so the daemon no longer tracks scanner state. Keep the key with the
+        # legacy PromptScanRuntimeState shape frozen at its success terminal
+        # state (ready/loaded) so monitors reading `.prompt_scan.*` neither
+        # fail silently nor raise false not-ready alerts; "native" in the
+        # model field marks the in-process engine.
+        "prompt_scan": {
+            "status": "ready",
+            "model": "native",
+            "loaded": True,
+            "last_error": None,
+            "last_started_at": None,
+            "last_finished_at": None,
+        },
         "jobs": runtime.jobs.status(),
         "queues": runtime.queues.to_dict(),
     }

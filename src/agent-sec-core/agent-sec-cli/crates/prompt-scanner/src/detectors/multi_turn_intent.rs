@@ -1,10 +1,11 @@
 //! L4 multi-turn intent detector — judges an assistant reply in context.
 //!
-//! L4 is an **optional** layer: it needs a running Ollama instance with
-//! the target model loaded.  When unavailable the scanner skips it and
-//! MULTI_TURN mode returns a pass-through verdict.  It only runs when the
-//! caller explicitly selects multi-turn scanning, so no separate disable
-//! flag exists.
+//! L4 is a **mandatory** layer when the caller selects multi-turn scanning:
+//! if the Ollama service or target model is unavailable, scanner
+//! construction fails, and a classifier failure during the scan itself
+//! surfaces as an error instead of silently degrading to a pass-through
+//! verdict.  It only runs when the caller explicitly requests multi-turn
+//! scanning, so no separate disable flag exists.
 
 use std::time::Instant;
 
@@ -59,13 +60,26 @@ impl DetectionLayer for MultiTurnIntentDetector {
 
     /// Whether Ollama is reachable and the target model is loaded.
     ///
-    /// Reported as `false` (so the scanner skips the layer) on any error.
+    /// Reported as `false` on any error; because L4 is mandatory in
+    /// multi-turn mode, this causes [`crate::scanner::PromptScanner::new`]
+    /// to return [`ScannerError::LayerNotAvailable`] rather than skip the
+    /// layer.
     fn is_available(&self) -> bool {
         self.classifier.check_ready()
     }
 
-    /// Never fails: the layer fails open, so callers see a pass-through
-    /// result instead of an error when classification is impossible.
+    /// Classifies a conversation triple.
+    ///
+    /// Missing conversation context degrades to a pass-through result
+    /// because L4 cannot judge a plain prompt.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScannerError::ModelInference`] when the classifier call
+    /// fails.  The layer was confirmed available at construction time, so a
+    /// failure here leaves the verdict *unknown* rather than benign: it
+    /// fails closed so the caller sees an error instead of a PASS it would
+    /// otherwise trust.
     fn detect(&self, input: &DetectInput<'_>) -> Result<LayerResult, ScannerError> {
         let Some(conversation) = input.conversation.as_ref() else {
             return Ok(Self::passthrough("missing_conversation_context", 0.0));
@@ -79,11 +93,9 @@ impl DetectionLayer for MultiTurnIntentDetector {
         ) {
             Ok(response) => response,
             Err(err) => {
-                log::warn!("Intent classifier call failed: {err}");
-                return Ok(Self::passthrough(
-                    "classifier_error",
-                    t0.elapsed().as_secs_f64() * 1000.0,
-                ));
+                return Err(ScannerError::ModelInference(format!(
+                    "multi-turn intent classification failed: {err}"
+                )));
             }
         };
         let latency_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -211,7 +223,7 @@ mod tests {
             history,
             assistant_response,
         });
-        detector.detect(&input).expect("L4 never returns Err")
+        detector.detect(&input).expect("classification succeeded")
     }
 
     #[test]
@@ -257,11 +269,21 @@ mod tests {
     }
 
     #[test]
-    fn classifier_failure_fails_open() {
+    fn classifier_failure_fails_closed() {
         let detector = detector_with(Box::new(DownClient));
-        let lr = detect_with_conversation(&detector, &[], "whatever");
-        assert!(!lr.detected, "an unreachable service must not block");
-        assert_eq!(lr.score, Some(0.0));
+        let variants: Vec<String> = Vec::new();
+        let mut input = DetectInput::new("how do I do it", &variants);
+        input.conversation = Some(Conversation {
+            history: &[],
+            assistant_response: "whatever",
+        });
+        assert!(
+            matches!(
+                detector.detect(&input),
+                Err(ScannerError::ModelInference(_))
+            ),
+            "a failed classification must not be reported as a clean pass"
+        );
     }
 
     #[test]

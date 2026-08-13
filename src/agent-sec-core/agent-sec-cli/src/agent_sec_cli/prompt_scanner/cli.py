@@ -12,6 +12,7 @@ from typing import Any
 
 import typer
 from agent_sec_cli.security_middleware import invoke
+from agent_sec_cli.security_middleware.backends.prompt_scan import error_payload
 from agent_sec_cli.security_middleware.result import ActionResult
 
 scanner_app = typer.Typer(
@@ -23,10 +24,33 @@ _SUPPORTED_MODES = frozenset({"fast", "standard", "strict", "multi_turn"})
 _MULTITURN_MODE = "multi_turn"
 
 
+def _print_error_json(message: str) -> None:
+    """Print a scanner-compatible ERROR verdict payload."""
+    typer.echo(json.dumps(error_payload(message), indent=2, ensure_ascii=False))
+
+
+def _invoke_prompt_scan(**kwargs: Any) -> ActionResult:
+    """Call the middleware, containing unexpected exceptions.
+
+    The backend already converts scanner failures into ERROR verdicts; this
+    guard covers anything escaping ``invoke`` itself (e.g. routing bugs) so
+    automated consumers always receive the spec error JSON instead of a
+    traceback.  Exits 1, matching the backend's ERROR exit code, so a caller
+    cannot tell a contained failure from an escaped one by exit status.
+    """
+    try:
+        return invoke("prompt_scan", **kwargs)
+    except Exception as exc:  # noqa: BLE001 - CLI error surface
+        _print_error_json(f"Scanner error: {exc}")
+        raise typer.Exit(code=1)
+
+
 def _print_result(result: ActionResult, output_format: str) -> None:
     """Print a middleware scan result in the requested format."""
     if output_format == "text":
-        _print_text(result.data)
+        # ``data`` is a dict by contract, but guard against a malformed
+        # result so display never crashes on ``None``.
+        _print_text(result.data or {})
     else:
         typer.echo(result.stdout)
 
@@ -219,8 +243,7 @@ def scan_prompt(
             typer.echo("Error: current_query is empty.", err=True)
             raise typer.Exit(code=1)
 
-        result = invoke(
-            "prompt_scan",
+        result = _invoke_prompt_scan(
             text=current_query,
             assistant_response=assistant_response,
             history=history,
@@ -229,12 +252,15 @@ def scan_prompt(
             model=None,
         )
 
-        # Warn when L4 is unavailable — the scan passes through with no
-        # detectors having run (MULTI_TURN mode only configures L4).
-        if not result.data.get("layer_results"):
+        # L4 is mandatory in multi_turn mode, so an empty ``layer_results``
+        # can only mean the scan itself failed (ERROR verdict) rather than a
+        # pass-through.  ``data`` is a dict by contract; ``or {}`` guards a
+        # malformed result, which means no detectors ran either.
+        if not (result.data or {}).get("layer_results"):
             typer.echo(
-                "Warning: L4 multi-turn intent detection is not available "
-                "(Ollama unreachable). Scan returned a pass-through verdict.",
+                "Warning: no detection layer ran — the multi-turn scan did not "
+                "complete (check that Ollama is reachable). Treat the verdict "
+                "as unknown.",
                 err=True,
             )
 
@@ -268,8 +294,7 @@ def scan_prompt(
     # --- Scan each text through the middleware ---
     exit_code = 0
     for t in texts:
-        result = invoke(
-            "prompt_scan",
+        result = _invoke_prompt_scan(
             text=t,
             mode=mode,
             source=source or None,

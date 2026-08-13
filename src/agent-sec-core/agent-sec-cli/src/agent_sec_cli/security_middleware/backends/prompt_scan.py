@@ -133,12 +133,13 @@ def _engine_version() -> str:
         return "unknown"
 
 
-def _scanner_error_result(
-    message: str,
-    *,
-    error_type: str = "PromptScanError",
-) -> ActionResult:
-    data = {
+def error_payload(message: str) -> dict[str, Any]:
+    """Build the spec ERROR verdict payload (``schema_version: "1.0"``).
+
+    Shared with the scan-prompt CLI so error output keeps a single shape
+    regardless of where the failure is caught.
+    """
+    return {
         "schema_version": "1.0",
         "ok": False,
         "verdict": "error",
@@ -151,6 +152,14 @@ def _scanner_error_result(
         "engine_version": _engine_version(),
         "elapsed_ms": 0,
     }
+
+
+def _scanner_error_result(
+    message: str,
+    *,
+    error_type: str = "PromptScanError",
+) -> ActionResult:
+    data = error_payload(message)
     return ActionResult(
         success=False,
         data=data,

@@ -91,7 +91,8 @@ impl ScanConfig {
             },
             // L4 runs alone: it consumes a conversation triple and
             // delegates to an external service.  When that service is
-            // unreachable the layer is skipped and the scan returns PASS.
+            // unreachable, construction fails so the caller knows the
+            // multi-turn check could not be performed.
             ScanMode::MultiTurn => ScanConfig {
                 layers: vec!["multi_turn_intent".to_string()],
                 fast_fail: false,

@@ -5,7 +5,7 @@
 //!
 //! - `AGENT_SEC_MODEL_SERVICE_BACKEND` (default `ollama`)
 //! - `AGENT_SEC_MODEL_SERVICE_BASE_URL` (default `http://localhost:11434`)
-//! - `AGENT_SEC_MODEL_SERVICE_TIMEOUT` seconds (default `30`)
+//! - `AGENT_SEC_MODEL_SERVICE_TIMEOUT` seconds (default `30`, max `300`)
 //!
 //! Consumers (prompt-scanner, future code/pii scanners) inject a
 //! [`ModelClient`] so their transport stays decoupled from this crate.
@@ -22,6 +22,15 @@ const ENV_TIMEOUT: &str = "AGENT_SEC_MODEL_SERVICE_TIMEOUT";
 const DEFAULT_BACKEND: &str = "ollama";
 const DEFAULT_BASE_URL: &str = "http://localhost:11434";
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// Pause before the single retry of a transient failure; long enough for
+/// an Ollama restart to finish binding, short enough to stay invisible
+/// inside the middleware's per-scan budget.
+const RETRY_BACKOFF: Duration = Duration::from_millis(200);
+
+/// Upper bound for the configurable timeout; values beyond this would let a
+/// single scan hang far longer than any caller expects.
+const MAX_TIMEOUT_SECS: u64 = 300;
 
 /// Errors raised by the model service client.
 #[derive(Debug, Error)]
@@ -210,19 +219,50 @@ impl ModelClient for OllamaClient {
 
 impl OllamaClient {
     /// POST `payload` to `path` and parse the JSON response body.
+    ///
+    /// Transient failures (see [`is_transient`]) are retried once after
+    /// [`RETRY_BACKOFF`], since middleware callers issue a request per scan
+    /// and a lone hiccup would otherwise fail the whole hook.
     fn post(&self, path: &str, payload: Value) -> Result<Value, ModelServiceError> {
         let url = format!("{}{path}", self.base_url);
-        let response = self
-            .agent
-            .post(&url)
-            .set("Content-Type", "application/json")
-            .send_json(payload)
-            .map_err(|err| {
-                ModelServiceError::Inference(format!("Ollama request failed (url={url}): {err}"))
-            })?;
+        let response = match self.send(&url, &payload) {
+            Err(err) if is_transient(&err) => {
+                log::warn!("Ollama request failed (url={url}): {err}; retrying once");
+                std::thread::sleep(RETRY_BACKOFF);
+                self.send(&url, &payload)
+            }
+            attempt => attempt,
+        }
+        .map_err(|err| {
+            ModelServiceError::Inference(format!("Ollama request failed (url={url}): {err}"))
+        })?;
         response.into_json().map_err(|err| {
             ModelServiceError::Inference(format!("Ollama returned invalid JSON: {err}"))
         })
+    }
+
+    /// Single POST attempt, kept separate so `post` can retry it.
+    // The large Err (ureq::Error embeds a Response) is consumed immediately
+    // by `post`; boxing it would only obscure the transient-error check.
+    #[allow(clippy::result_large_err)]
+    fn send(&self, url: &str, payload: &Value) -> Result<ureq::Response, ureq::Error> {
+        self.agent
+            .post(url)
+            .set("Content-Type", "application/json")
+            .send_json(payload)
+    }
+}
+
+/// Whether `err` is transient enough that one short-backoff retry can
+/// realistically succeed: an HTTP 5xx or a failed connect (refused or
+/// connect timeout, e.g. Ollama mid-restart).  Read timeouts map to
+/// `ErrorKind::Io` and are deliberately excluded — retrying them would
+/// double the caller's latency budget on slow inference instead of
+/// masking a transient fault.
+fn is_transient(err: &ureq::Error) -> bool {
+    match err {
+        ureq::Error::Status(code, _) => *code >= 500,
+        ureq::Error::Transport(transport) => transport.kind() == ureq::ErrorKind::ConnectionFailed,
     }
 }
 
@@ -234,8 +274,9 @@ impl OllamaClient {
 ///
 /// # Errors
 ///
-/// Returns [`ModelServiceError::Config`] for an unsupported backend name.  An
-/// unparseable timeout silently falls back to the default, matching the
+/// Returns [`ModelServiceError::Config`] for an unsupported backend name or
+/// a base URL without an `http://`/`https://` scheme.  An unparseable or
+/// out-of-range timeout silently falls back to the default, matching the
 /// tolerant behaviour of the surrounding tooling.
 pub fn create_client() -> Result<Box<dyn ModelClient>, ModelServiceError> {
     Ok(Box::new(ollama_from_env()?))
@@ -250,15 +291,58 @@ fn ollama_from_env() -> Result<OllamaClient, ModelServiceError> {
         )));
     }
     let base_url = env_or(ENV_BASE_URL, DEFAULT_BASE_URL);
-    let timeout_secs = std::env::var(ENV_TIMEOUT)
-        .ok()
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .filter(|secs| *secs > 0)
-        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    validate_base_url(&base_url)?;
+    let timeout_secs = timeout_secs_or_default(std::env::var(ENV_TIMEOUT).ok());
     Ok(OllamaClient::new(
         base_url,
         Duration::from_secs(timeout_secs),
     ))
+}
+
+/// Reject a base URL whose scheme is not `http://` or `https://`, and warn
+/// when it targets a non-loopback host.  The URL comes from an environment
+/// variable, so a hijacked value (compromised orchestration config, injected
+/// `.env`) would silently exfiltrate every scanned prompt to that host.
+fn validate_base_url(base_url: &str) -> Result<(), ModelServiceError> {
+    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+        return Err(ModelServiceError::Config(format!(
+            "base_url must use http:// or https:// scheme: {base_url:?}"
+        )));
+    }
+    if !is_loopback_url(base_url) {
+        log::warn!(
+            "Model service base_url points to a non-local host: {base_url}; \
+             scanned prompts will be sent to it"
+        );
+    }
+    Ok(())
+}
+
+/// Whether the URL's host is `localhost` or a loopback IP (any `127.x.x.x`
+/// or `::1`).  Assumes a valid `http(s)://` prefix has already been checked.
+fn is_loopback_url(base_url: &str) -> bool {
+    let after_scheme = base_url
+        .split_once("://")
+        .map_or(base_url, |(_, rest)| rest);
+    let authority = after_scheme.split('/').next().unwrap_or("");
+    // Bracketed IPv6 keeps its colons inside `[...]`; otherwise the first
+    // colon separates host from port.
+    let host = match authority.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    };
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Parse a timeout in seconds, falling back to [`DEFAULT_TIMEOUT_SECS`] when
+/// the value is missing, unparseable, zero, or above [`MAX_TIMEOUT_SECS`].
+fn timeout_secs_or_default(raw: Option<String>) -> u64 {
+    raw.and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|secs| (1..=MAX_TIMEOUT_SECS).contains(secs))
+        .unwrap_or(DEFAULT_TIMEOUT_SECS)
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -272,7 +356,7 @@ fn env_or(key: &str, default: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -325,6 +409,145 @@ mod tests {
         (port, accepted, handle)
     }
 
+    /// Spawn a minimal HTTP/1.1 server that answers each request with the
+    /// next status in `statuses` (body `{}`), returning its port and a
+    /// served-request counter.  Exits once every status has been sent.
+    fn spawn_scripted_server(
+        statuses: &'static [u16],
+    ) -> (u16, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local addr").port();
+        let served = Arc::new(AtomicUsize::new(0));
+        let served_in_server = Arc::clone(&served);
+
+        let handle = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.expect("accept");
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                loop {
+                    let mut request_line = String::new();
+                    if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+                        break; // client closed the connection
+                    }
+                    let mut content_length = 0usize;
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) == 0 {
+                            break;
+                        }
+                        if header == "\r\n" || header == "\n" {
+                            break;
+                        }
+                        let lower = header.to_ascii_lowercase();
+                        if let Some(value) = lower.strip_prefix("content-length:") {
+                            content_length = value.trim().parse().unwrap_or(0);
+                        }
+                    }
+                    // Consume the request body so the client never sees a
+                    // reset while still writing.
+                    let mut body = vec![0u8; content_length];
+                    reader.read_exact(&mut body).ok();
+
+                    let index = served_in_server.fetch_add(1, Ordering::SeqCst);
+                    let status = statuses.get(index).copied().unwrap_or(200);
+                    let reason = if status < 400 { "OK" } else { "Error" };
+                    let response = format!(
+                        "HTTP/1.1 {status} {reason}\r\n\
+                         Content-Type: application/json\r\n\
+                         Content-Length: 2\r\n\r\n{{}}"
+                    );
+                    stream
+                        .write_all(response.as_bytes())
+                        .expect("write response");
+                    stream.flush().ok();
+                    if index + 1 >= statuses.len() {
+                        return;
+                    }
+                }
+            }
+        });
+        (port, served, handle)
+    }
+
+    /// Minimal generate request for retry tests.
+    fn generate_request(prompt: &str) -> GenerateRequest<'_> {
+        GenerateRequest {
+            model: "warden",
+            prompt,
+            raw: true,
+            logprobs: false,
+            top_logprobs: 0,
+            options: Map::new(),
+        }
+    }
+
+    #[test]
+    fn timeout_in_range_is_used() {
+        assert_eq!(timeout_secs_or_default(Some("45".into())), 45);
+        assert_eq!(timeout_secs_or_default(Some("1".into())), 1);
+        assert_eq!(
+            timeout_secs_or_default(Some(MAX_TIMEOUT_SECS.to_string())),
+            MAX_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn timeout_out_of_range_falls_back_to_default() {
+        assert_eq!(
+            timeout_secs_or_default(Some("0".into())),
+            DEFAULT_TIMEOUT_SECS
+        );
+        assert_eq!(
+            timeout_secs_or_default(Some((MAX_TIMEOUT_SECS + 1).to_string())),
+            DEFAULT_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn timeout_missing_or_unparseable_falls_back_to_default() {
+        assert_eq!(timeout_secs_or_default(None), DEFAULT_TIMEOUT_SECS);
+        assert_eq!(
+            timeout_secs_or_default(Some("not-a-number".into())),
+            DEFAULT_TIMEOUT_SECS
+        );
+        assert_eq!(
+            timeout_secs_or_default(Some("-5".into())),
+            DEFAULT_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn base_url_without_http_scheme_is_rejected() {
+        for bad in [
+            "ftp://localhost:11434",
+            "file:///etc/passwd",
+            "localhost:11434",
+            "//attacker.example",
+        ] {
+            assert!(
+                matches!(validate_base_url(bad), Err(ModelServiceError::Config(_))),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn base_url_with_http_scheme_is_accepted() {
+        assert!(validate_base_url("http://localhost:11434").is_ok());
+        assert!(validate_base_url("https://model.internal:8443").is_ok());
+    }
+
+    #[test]
+    fn loopback_detection_matches_local_hosts_only() {
+        assert!(is_loopback_url("http://localhost:11434"));
+        assert!(is_loopback_url("http://127.0.0.1:11434"));
+        assert!(is_loopback_url("http://127.1.2.3:11434/api"));
+        assert!(is_loopback_url("http://[::1]:11434"));
+        assert!(!is_loopback_url("http://attacker.example:11434"));
+        assert!(!is_loopback_url("http://10.0.0.5:11434"));
+        assert!(!is_loopback_url("http://[2001:db8::1]:11434"));
+    }
+
     #[test]
     fn base_url_trailing_slash_is_stripped() {
         let client = OllamaClient::new("http://localhost:11434/", Duration::from_secs(1));
@@ -368,5 +591,38 @@ mod tests {
             client.generate(&request),
             Err(ModelServiceError::Inference(_))
         ));
+    }
+
+    #[test]
+    fn transient_5xx_is_retried_once_and_succeeds() {
+        let (port, served, server) = spawn_scripted_server(&[500, 200]);
+        let client = OllamaClient::new(format!("http://127.0.0.1:{port}"), Duration::from_secs(5));
+        let result = client.generate(&generate_request("hi"));
+        server.join().expect("server thread");
+
+        assert!(result.is_ok(), "retry after a 500 must succeed: {result:?}");
+        assert_eq!(served.load(Ordering::SeqCst), 2, "exactly one retry");
+    }
+
+    #[test]
+    fn persistent_5xx_fails_after_single_retry() {
+        let (port, served, server) = spawn_scripted_server(&[500, 500]);
+        let client = OllamaClient::new(format!("http://127.0.0.1:{port}"), Duration::from_secs(5));
+        let result = client.generate(&generate_request("hi"));
+        server.join().expect("server thread");
+
+        assert!(matches!(result, Err(ModelServiceError::Inference(_))));
+        assert_eq!(served.load(Ordering::SeqCst), 2, "one retry, then give up");
+    }
+
+    #[test]
+    fn client_error_is_not_retried() {
+        let (port, served, server) = spawn_scripted_server(&[400]);
+        let client = OllamaClient::new(format!("http://127.0.0.1:{port}"), Duration::from_secs(5));
+        let result = client.generate(&generate_request("hi"));
+        server.join().expect("server thread");
+
+        assert!(matches!(result, Err(ModelServiceError::Inference(_))));
+        assert_eq!(served.load(Ordering::SeqCst), 1, "4xx must not be retried");
     }
 }

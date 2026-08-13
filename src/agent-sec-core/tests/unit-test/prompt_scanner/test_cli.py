@@ -6,6 +6,7 @@ from io import StringIO
 from unittest.mock import MagicMock, patch
 
 from agent_sec_cli.prompt_scanner.cli import (
+    _print_result,
     _print_text,
     scanner_app,
 )
@@ -112,6 +113,15 @@ def test_print_text_renders_verdict_and_summary():
     assert "INJ-011" in rendered
 
 
+def test_print_result_text_survives_none_data():
+    """A malformed result with ``data=None`` must not crash text rendering."""
+    malformed = ActionResult(success=False, data=None, exit_code=1)
+    buf = StringIO()
+    with patch("agent_sec_cli.prompt_scanner.cli.typer.echo", new=buf.write):
+        _print_result(malformed, "text")
+    assert "UNKNOWN" in buf.getvalue()
+
+
 def test_scan_prompt_fast_text_json():
     result = _make_native_result(
         verdict="deny",
@@ -214,6 +224,35 @@ def test_scan_prompt_reports_empty_stdin():
     rv = runner.invoke(scanner_app, ["--mode", "fast"], input="   \n")
     assert rv.exit_code == 1
     assert "No input received from stdin" in rv.output
+
+
+def test_scan_prompt_invoke_exception_prints_error_json():
+    """An exception escaping ``invoke`` yields the spec error JSON, exit 1."""
+    with patch(
+        "agent_sec_cli.prompt_scanner.cli.invoke", side_effect=RuntimeError("boom")
+    ):
+        rv = runner.invoke(scanner_app, ["--mode", "fast", "--text", "hello"])
+    assert rv.exit_code == 1
+    parsed = json.loads(rv.output)
+    assert parsed["schema_version"] == "1.0"
+    assert parsed["verdict"] == "error"
+    assert "boom" in parsed["summary"]
+
+
+def test_scan_prompt_multi_turn_invoke_exception_prints_error_json():
+    """The multi_turn path shares the same exception containment."""
+    payload = {"history": [], "current_query": "hello", "assistant_response": ""}
+    with patch(
+        "agent_sec_cli.prompt_scanner.cli.invoke", side_effect=RuntimeError("boom")
+    ):
+        rv = runner.invoke(
+            scanner_app, ["--mode", "multi_turn"], input=json.dumps(payload)
+        )
+    assert rv.exit_code == 1
+    parsed = json.loads(rv.output)
+    assert parsed["schema_version"] == "1.0"
+    assert parsed["verdict"] == "error"
+    assert "boom" in parsed["summary"]
 
 
 def test_scan_prompt_multi_turn_json_stdin():

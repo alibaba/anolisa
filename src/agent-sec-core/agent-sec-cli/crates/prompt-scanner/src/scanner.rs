@@ -1,5 +1,6 @@
 //! Core scanner — orchestrates the multi-layer detection pipeline.
 
+use std::borrow::Cow;
 use std::time::Instant;
 
 use serde_json::{json, Value};
@@ -17,18 +18,45 @@ use crate::verdict::determine_verdict;
 
 /// Detectors that may be skipped silently when unavailable.
 ///
-/// L1 and L2 are mandatory — their failure is a real error.  L4 depends on
-/// an external service, so MULTI_TURN mode degrades to a pass-through
-/// verdict instead of failing the caller's request.
-const OPTIONAL_DETECTORS: [&str; 2] = ["semantic", "multi_turn_intent"];
+/// L1, L2, and L4 are mandatory when configured: their failure must surface
+/// as a construction error so the caller knows the scan could not be
+/// performed.  Only the future L3 semantic layer is optional.
+const OPTIONAL_DETECTORS: [&str; 1] = ["semantic"];
 
 /// Human-readable skip reason for an unavailable optional detector.
 fn skip_reason(name: &str) -> String {
     match name {
-        "multi_turn_intent" => "L4 multi-turn intent detection is not available".to_string(),
         "semantic" => "L3 semantic detection is not available".to_string(),
         other => format!("{other} is not available"),
     }
+}
+
+/// Hard cap (1 MiB, mirroring PII's `DEFAULT_MAX_BYTES`) bounding regex/NFKC/decode
+/// work across every scan entry point.  Oversized inputs are cut to the first
+/// `MAX_INPUT_BYTES` bytes and the tail is discarded without scanning (same semantics
+/// as PII's `_limit_text`); `input_truncated` flags partial scans.  Risk: a payload
+/// past the boundary evades detection — future options: reject-on-oversize or chunked.
+const MAX_INPUT_BYTES: usize = 1_048_576; // 1 MiB
+
+/// Truncate `text` to at most `max_bytes` UTF-8 bytes on a character
+/// boundary.
+///
+/// Returns the (possibly truncated) text as a [`Cow`] — borrowed when the
+/// input fits within `max_bytes` (the common path, zero allocation) and
+/// owned only when truncation actually occurs.  Also returns whether
+/// truncation occurred and the resulting byte length.  Oversized inputs are
+/// cut at the largest character boundary not exceeding `max_bytes` so the
+/// result is always valid UTF-8.
+fn truncate_to_bytes(text: &str, max_bytes: usize) -> (Cow<'_, str>, bool, usize) {
+    let total = text.len();
+    if total <= max_bytes {
+        return (Cow::Borrowed(text), false, total);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (Cow::Owned(text[..end].to_string()), true, end)
 }
 
 /// Main entry point for prompt scanning.
@@ -52,9 +80,10 @@ pub struct PromptScanner {
 impl PromptScanner {
     /// Build a scanner from an explicit config.
     ///
-    /// Mandatory detectors (`rule_engine`, `ml_classifier`) fail the
-    /// construction when unavailable; optional ones are skipped and
-    /// reported through the result metadata.
+    /// Mandatory detectors (`rule_engine`, `ml_classifier`,
+    /// `multi_turn_intent`) fail construction when unavailable; only the
+    /// future L3 `semantic` layer is optional and will be skipped with a
+    /// warning in the result metadata.
     ///
     /// # Errors
     ///
@@ -125,6 +154,11 @@ impl PromptScanner {
     /// `source` is an optional label for the input origin
     /// (e.g. "user_input") recorded in the result metadata.
     ///
+    /// Inputs exceeding [`MAX_INPUT_BYTES`] are truncated to that limit on a
+    /// UTF-8 character boundary before scanning; the result records the
+    /// truncation via `input_truncated` / `input_bytes_scanned` metadata so
+    /// callers can decide whether to trust a partial scan.
+    ///
     /// # Errors
     ///
     /// - [`ScannerError::Input`] if `text` is empty after stripping.
@@ -137,13 +171,19 @@ impl PromptScanner {
                 "Input text must not be empty.".to_string(),
             ));
         }
-        self.run_pipeline(text, source, None)
+        let (text, truncated, bytes_scanned) = truncate_to_bytes(text, MAX_INPUT_BYTES);
+        self.run_pipeline(&text, source, None, truncated, bytes_scanned)
     }
 
     /// Scan a conversation triple through the multi-turn pipeline.
     ///
     /// Only the L4 layer consumes `history` / `assistant_response`; other
     /// configured layers see the query text as usual.
+    ///
+    /// `current_query` is truncated to [`MAX_INPUT_BYTES`] just like
+    /// [`scan`](Self::scan); `history` and `assistant_response` are forwarded
+    /// verbatim because L4 consumes them as structured context rather than
+    /// running regex/NFKC over them.
     ///
     /// # Errors
     ///
@@ -163,13 +203,17 @@ impl PromptScanner {
                 "current_query must not be empty.".to_string(),
             ));
         }
+        let (current_query, truncated, bytes_scanned) =
+            truncate_to_bytes(current_query, MAX_INPUT_BYTES);
         self.run_pipeline(
-            current_query,
+            &current_query,
             source,
             Some(Conversation {
                 history,
                 assistant_response,
             }),
+            truncated,
+            bytes_scanned,
         )
     }
 
@@ -191,10 +235,16 @@ impl PromptScanner {
         text: &str,
         source: Option<&str>,
         conversation: Option<Conversation<'_>>,
+        input_truncated: bool,
+        input_bytes_scanned: usize,
     ) -> Result<ScanResult, ScannerError> {
         // 1. Preprocess.
         let prep = self.preprocessor.preprocess(text);
         let mut metadata = prep.metadata;
+        // Record input-size accounting before any other metadata so callers
+        // can always find it regardless of which layers ran.
+        metadata.insert("input_truncated".into(), json!(input_truncated));
+        metadata.insert("input_bytes_scanned".into(), json!(input_bytes_scanned));
         if let Some(source) = source {
             metadata.insert("source".into(), json!(source));
         }
@@ -643,51 +693,10 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_l4_is_skipped_with_skip_reason() {
-        struct DownClient;
-        impl ModelClient for DownClient {
-            fn check_model(&self, _model: &str) -> bool {
-                false
-            }
-            fn generate(
-                &self,
-                _r: &GenerateRequest<'_>,
-            ) -> Result<Value, model_service::ModelServiceError> {
-                Err(model_service::ModelServiceError::Inference("down".into()))
-            }
-            fn chat(
-                &self,
-                _m: &str,
-                _msgs: &[(&str, &str)],
-                _o: &ModelOptions,
-                _logprobs: bool,
-                _top_logprobs: u32,
-            ) -> Result<Value, model_service::ModelServiceError> {
-                unreachable!()
-            }
-        }
-        let l4 = MultiTurnIntentDetector::with_classifier(MultiTurnIntentClassifier::with_client(
-            0.55,
-            "warden",
-            Box::new(DownClient),
-        ));
-        // Mirrors PromptScanner::new skipping an unavailable optional layer.
-        assert!(!l4.is_available());
-        let scanner = PromptScanner {
-            config: ScanConfig::preset(ScanMode::MultiTurn),
-            preprocessor: Preprocessor::new(true),
-            detectors: vec![],
-            skipped_detectors: vec!["multi_turn_intent".to_string()],
-        };
-        let result = scanner
-            .scan_multi_turn(&[], "query", "response", None)
-            .unwrap();
-        assert_eq!(result.verdict, Verdict::Pass);
-        assert_eq!(result.threat_type, ThreatType::NotScanned);
-        assert_eq!(
-            result.metadata["skip_reason"],
-            json!("L4 multi-turn intent detection is not available")
-        );
+    fn multi_turn_intent_is_mandatory() {
+        // L4 is required when the caller explicitly selects multi_turn mode;
+        // it must not be silently skipped like the future L3 semantic layer.
+        assert!(!OPTIONAL_DETECTORS.contains(&"multi_turn_intent"));
     }
 
     // --- batch & warmup ---------------------------------------------------
@@ -725,5 +734,71 @@ mod tests {
     fn warmup_checks_l2_model_presence() {
         let scanner = scanner_l1_l2("Safety: Safe");
         assert!(scanner.warmup().is_ok());
+    }
+
+    // --- input truncation -----------------------------------------------
+
+    #[test]
+    fn truncate_passes_small_input_unchanged() {
+        let (out, truncated, len) = truncate_to_bytes("hello", 100);
+        assert_eq!(out, "hello");
+        assert!(!truncated);
+        assert_eq!(len, 5);
+    }
+
+    #[test]
+    fn truncate_at_exact_boundary_is_not_truncated() {
+        let (out, truncated, len) = truncate_to_bytes("abc", 3);
+        assert_eq!(out, "abc");
+        assert!(!truncated);
+        assert_eq!(len, 3);
+    }
+
+    #[test]
+    fn truncate_cuts_on_char_boundary_for_multibyte() {
+        // "备注" is 6 UTF-8 bytes (3 per CJK char).  Cutting at 4 bytes
+        // would split the second character; the function must back up to 3.
+        let (out, truncated, len) = truncate_to_bytes("备注", 4);
+        assert_eq!(out, "备");
+        assert!(truncated);
+        assert_eq!(len, 3);
+    }
+
+    #[test]
+    fn oversized_input_is_truncated_and_flagged() {
+        let scanner = PromptScanner::with_mode(ScanMode::Fast).unwrap();
+        // 2 MiB of benign ASCII filler — well over the 1 MiB cap.
+        let oversized = "a ".repeat(1_048_576);
+        let result = scanner.scan(&oversized, None).unwrap();
+        assert_eq!(result.metadata["input_truncated"].as_bool(), Some(true));
+        let scanned = result.metadata["input_bytes_scanned"].as_u64().unwrap_or(0) as usize;
+        assert!(scanned <= MAX_INPUT_BYTES);
+        assert!(scanned > 0);
+        // The scan still runs to completion on the truncated text.
+        assert!(!result.is_threat);
+    }
+
+    #[test]
+    fn normal_input_is_not_truncated() {
+        let scanner = PromptScanner::with_mode(ScanMode::Fast).unwrap();
+        let result = scanner.scan("hello there", None).unwrap();
+        assert_eq!(result.metadata["input_truncated"].as_bool(), Some(false));
+        assert_eq!(
+            result.metadata["input_bytes_scanned"].as_u64(),
+            Some("hello there".len() as u64)
+        );
+    }
+
+    #[test]
+    fn multi_turn_oversized_query_is_truncated_and_flagged() {
+        let scanner = scanner_l4(json!({"response": "1"}));
+        let oversized = "a ".repeat(1_048_576);
+        let result = scanner
+            .scan_multi_turn(&[], &oversized, "reply", None)
+            .unwrap();
+        assert_eq!(result.metadata["input_truncated"].as_bool(), Some(true));
+        assert!(
+            result.metadata["input_bytes_scanned"].as_u64().unwrap_or(0) <= MAX_INPUT_BYTES as u64
+        );
     }
 }
