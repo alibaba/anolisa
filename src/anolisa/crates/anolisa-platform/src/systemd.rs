@@ -162,10 +162,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unimplemented_unit_operations_return_errors_instead_of_panicking() {
-        assert!(unit_status("agentsight.service").is_err());
-        assert!(enable_unit("agentsight.service").is_err());
-        assert!(disable_unit("agentsight.service").is_err());
-        assert!(disable_unit_deferred("agentsight.service").is_err());
+    fn empty_unit_operations_return_not_found() {
+        assert!(matches!(
+            unit_status(" "),
+            Err(SystemdError::NotFound(unit)) if unit == "<empty>"
+        ));
+        assert!(matches!(
+            enable_unit(" "),
+            Err(SystemdError::NotFound(unit)) if unit == "<empty>"
+        ));
+        assert!(matches!(
+            disable_unit(" "),
+            Err(SystemdError::NotFound(unit)) if unit == "<empty>"
+        ));
+        assert!(matches!(
+            disable_unit_deferred(" "),
+            Err(SystemdError::NotFound(unit)) if unit == "<empty>"
+        ));
     }
 }
