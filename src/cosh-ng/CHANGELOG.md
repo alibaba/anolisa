@@ -4,7 +4,32 @@ All notable changes to the cosh-ng project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.16.0] — Unreleased
+## [0.17.0] — Unreleased
+
+## [0.16.0] — 2026-08-13
+
+### Added
+- Raw packaging interface for deterministic cosh-ng archives with cross-target build validation and portable macOS launchers (#2411)
+
+### Changed
+- Converge cosh-core and cosh-shell runtime paths, unify Claude and Qwen provider drivers, and add explicit shell/core protocol v1 negotiation with legacy fallback (#2403)
+- Remove deprecated `/draft` slash command alias in favor of `/agent` (#2441)
+
+### Fixed
+- Use monotonic clock for input-wait timing to avoid clock-skew stalls (#2176)
+- Fix panel-family hint card rendering (#2196)
+- Decode SSE events per spec and fail loud on malformed input (#2209)
+- Confine and guard sensitive file writes across core (#2211, #2378)
+- Pass raw prompt text through core and shell without normalization (#2256)
+- Fix review marker activation on Enter key (#2274)
+- Narrow interactive-cancel detection and pair ledger finish after correlated intercept (#2352, #2353)
+- Send raw-mode disable to stdout on drop to prevent terminal state leaks (#2357)
+- Harden hooks across core and shell (#2359)
+- Avoid predictable temporary file paths (#2361)
+- Enforce byte cap in line truncation branch (#2370)
+- List all slash hint matches instead of first-only (#2410)
+- Map missing failed exit code to -1 sentinel for consistent error reporting (#2412)
+- Expose runtime context in core for consistent state access (#2428)
 
 ## [0.15.0] — 2026-08-09
 
