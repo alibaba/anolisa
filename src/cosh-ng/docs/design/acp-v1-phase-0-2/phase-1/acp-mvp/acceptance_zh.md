@@ -8,7 +8,8 @@
 **PARTIAL IMPLEMENTATION / NOT ACCEPTED。** 候选树已有严格 ACP v1 codec、
 supervised stdio Bridge、带独立 cancellation 的有界 Session Driver、已安装 COSH
 entrypoint，以及面向 `codex-acp` 和 `claude-agent-acp` 的内置 profile resolver。
-Local once-only Permission Proxy 会在回复前写入脱敏 evidence，但尚未记录真实 Adapter
+Source-tree installer 固定官方 Adapter package，确定性 harness 会验证 entrypoint，
+local once-only Permission Proxy 会在回复前写入脱敏 evidence，但尚未记录真实 Adapter
 provider run。
 
 本 Gate 独立于完整 G1 与 G2 验收。即使通过，也只证明设计中定义的窄范围本地互操作结果。
@@ -35,7 +36,8 @@ provider run。
 | Permission correlation | `PASS for local slice` | Local TTY presentation 只保留有关联的 `allow_once`/`reject_once`；non-TTY、EOF、unsupported-only option 与 explicit deny 都会取消 |
 | Permission evidence | `PASS for local slice` | Private append-only JSONL 在回复前记录 bounded hash、actor UID 与 decision class；不含 raw prompt/tool/session/workspace value |
 | Unsupported callback | `PARTIAL` | Fake fs request 收到有关联 method-not-found；完整 fs/terminal non-advertisement matrix 待补 |
-| 真实 Adapter conformance | `NOT RUN` | 未记录 exact-version `codex-acp` 或 `claude-agent-acp` provider run |
+| Adapter distribution | `PARTIAL` | Source installer 使用 exact npm lockfile、private managed prefix、安装时禁用 script，并校验 package/version/bin provenance；仓库尚未分发 signed offline Adapter artifact |
+| 真实 Adapter conformance | `NOT RUN` | 已有 opt-in、non-persisting harness，但未记录 exact-version `codex-acp` 或 `claude-agent-acp` provider run |
 | Rollback | `PARTIAL` | 现有 direct `cosh-shell raw cosh-core` path 保留，raw-package routing 已测试；installed-package smoke 仍缺 |
 
 Source 存在不等于用户侧验收。使用临时 executable file 的 profile resolver test 不能证明
@@ -46,7 +48,7 @@ Source 存在不等于用户侧验收。使用临时 executable file 的 profile
 | ID | Criterion | 当前结果 | 必需证明 |
 | --- | --- | --- | --- |
 | MVP-01 | 一个已安装 COSH entrypoint 接受内置 profile、canonical workspace 与 bounded text prompt | `PARTIAL` | Binary integration 与 raw-package routing 通过；installed-package smoke 仍缺 |
-| MVP-02 | 只启动本地已安装 `codex-acp` 或 `claude-agent-acp`；不可能启动原生 Codex/Claude、`npx`、shell、package runner 或 network bootstrap | `PARTIAL` | Runtime resolver 从不 bootstrap package；distribution 与 installed-package proof 仍缺 |
+| MVP-02 | 只启动本地已安装 `codex-acp` 或 `claude-agent-acp`；不可能启动原生 Codex/Claude、`npx`、shell、package runner 或 network bootstrap | `PARTIAL` | Runtime resolver 从不 bootstrap package；显式 installer 固定并校验两个 Adapter package，但 signed/offline distribution 仍缺 |
 | MVP-03 | Profile resolve 固定 exact basename、canonical executable/workspace、fixed args 与 allowlisted environment，且不记录 value | `PARTIAL` | Entrypoint path 的 positive 与 spoof/path/environment test |
 | MVP-04 | Driver 按序执行 ACP v1 initialize、单 session/new 与单 active text prompt | `PARTIAL` | End-to-end Driver fixture 以及 wrong-order/duplicate-prompt negative |
 | MVP-05 | Text update 按接收顺序交付，带有界 local sequence、queue depth 与 byte | `NOT IMPLEMENTED` | Multi-chunk 与 saturation fixture |
@@ -126,6 +128,30 @@ cargo +1.88.0 test --locked --package cosh-gateway \
 # 7 passed
 ```
 
+## Stage 3 Adapter 证据
+
+Source installer 通过 committed lockfile 固定
+`@agentclientprotocol/codex-acp` `1.2.0` 与
+`@agentclientprotocol/claude-agent-acp` `0.66.0`。Installer 只接受显式 absolute
+private prefix，并拒绝 symlink、非当前用户所有、向 group/world 开放或含无关内容的
+non-empty prefix。完成 `npm ci --ignore-scripts` 后，它会校验 package name、version
+与 canonical `bin` target。COSH runtime resolver 永远不能调用 npm。
+
+Fake conformance 验证 initialization、session creation、两个有序 text chunk、prompt
+completion 与唯一 terminal event。Real mode 为 opt-in，要求 piped prompt 与
+`--acknowledge-provider-run`，校验 exact package provenance，并在内存中把 JSONL
+归约为 event count。它不创建 evidence file，也不回显 prompt 或 Agent text。
+
+```bash
+bash src/cosh-ng/tests/test-acp-adapters.sh
+src/cosh-ng/scripts/run-acp-conformance.sh fake \
+  --gateway "$PWD/src/cosh-ng/target/debug/cosh-gateway" \
+  --workspace "$PWD"
+```
+
+这些 check 使用 fake npm 与确定性 fake Agent，不通过网络安装、不调用 provider，
+也不把 MVP-13 从 `NOT RUN` 改为通过。
+
 ## Exit Criteria
 
 ACP MVP 只在以下条件全部成立时接受：
@@ -141,5 +167,5 @@ ACP MVP 只在以下条件全部成立时接受：
 ## 文档验证
 
 双语文档必须通过仓库 docs lint、relative-link check、pairing/parity review 与
-`git diff --check`。Stage 2 不运行 provider、ECS 或真实 Adapter，因此不能把 MVP-13
+`git diff --check`。Stage 3 不运行 provider、ECS 或真实 Adapter，因此不能把 MVP-13
 从 `NOT RUN` 改为通过。

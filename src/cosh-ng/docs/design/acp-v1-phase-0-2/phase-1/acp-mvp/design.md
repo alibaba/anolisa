@@ -19,14 +19,14 @@ The candidate worktree already provides:
   `session/update`, permission correlation, cancellation frames, and
   fail-closed decoding;
 - built-in `Codex` and `ClaudeCode` profile resolution for the locally
-  installed `codex-acp` and `claude-agent-acp` adapters.
+  installed `codex-acp` and `claude-agent-acp` adapters;
+- an installed local entrypoint, bounded session driver, and deterministic
+  fake-Adapter conformance path.
 
-These are library-level foundations. No installed COSH entrypoint selects a
-profile and drives a complete turn. The current synchronous bridge does not
-provide an independent cancellation control path while its owner is blocked
-reading Agent stdout. Permission responses are correlated ACP wire responses,
-not yet a COSH approval or Capability Broker decision. No real adapter evidence
-has been recorded.
+The remaining acceptance gap is not entrypoint or permission source presence.
+It is installed-package proof, the full failure/race matrix, and a sanitized
+real-Adapter run. Permission responses remain narrower than durable Task
+approval or a complete Capability Broker decision.
 
 ## MVP outcome
 
@@ -61,8 +61,8 @@ The complete MVP profile is deliberately fixed:
 The MVP does not include:
 
 - native ACP support in the Codex or Claude Code binaries;
-- downloading or executing adapters through `npx`, a shell, a package runner,
-  or any network bootstrap;
+- runtime downloading or executing adapters through `npx`, a shell, a package
+  runner, or any network bootstrap;
 - filesystem callbacks, terminal callbacks, rich prompt content, additional
   directories, session load, session resume, or multi-session operation;
 - `allow_always`, `reject_always`, durable trust rules, or policy mutation;
@@ -93,6 +93,30 @@ executable, or change the workspace.
 
 The adapter executables are separate installed adapters. Documentation and UI
 must not claim that the native `codex` or `claude` command implements ACP.
+
+## Adapter distribution and conformance boundary
+
+Adapter installation is an explicit operator/developer step outside the COSH
+runtime. The source helper installs one lockfile-defined bundle into an
+explicit private prefix with package scripts disabled. It verifies the exact
+package name, version, and `bin` target before that path can be selected for
+validation. The runtime still accepts only an exact installed executable path
+or allowlisted `PATH` lookup and has no npm or network code path.
+
+The Stage 3 bundle is fixed:
+
+| Profile | npm package | Version |
+| --- | --- | --- |
+| `codex` | `@agentclientprotocol/codex-acp` | `1.2.0` |
+| `claude-code` | `@agentclientprotocol/claude-agent-acp` | `0.66.0` |
+
+Conformance has two deliberately separate modes. Fake mode constructs a local
+deterministic Adapter and verifies ordered protocol/presentation events without
+credentials or network access. Real mode requires explicit acknowledgement,
+an exact pinned package path, and a prompt supplied through stdin. It reduces
+the JSONL stream to counts in memory and never writes or echoes prompt/Agent
+text. A real mode result is evidence only for the selected profile and exact
+candidate revision; it cannot be inferred from fake mode.
 
 ## Local entrypoint
 

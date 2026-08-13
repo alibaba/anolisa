@@ -18,12 +18,12 @@
   `session/update`、permission correlation、cancellation frame 与 fail-closed
   decode；
 - 面向本地已安装 `codex-acp` 与 `claude-agent-acp` Adapter 的内置 `Codex`
-  和 `ClaudeCode` profile resolver。
+  和 `ClaudeCode` profile resolver；
+- 已安装 local entrypoint、有界 Session Driver 与确定性 fake-Adapter conformance path。
 
-这些仍是 library-level foundation。当前没有已安装的 COSH entrypoint 选择 profile
-并驱动完整 turn。同步 Bridge 的 owner 阻塞等待 Agent stdout 时，尚无独立 cancellation
-control path。Permission response 是有关联的 ACP wire response，尚不是 COSH approval
-或 Capability Broker decision。也没有记录真实 Adapter 证据。
+剩余验收缺口不再是 entrypoint 或 permission source 是否存在，而是
+installed-package proof、完整 failure/race matrix 与脱敏真实 Adapter run。Permission
+response 的范围仍小于持久 Task approval 或完整 Capability Broker decision。
 
 ## MVP 结果
 
@@ -56,7 +56,7 @@ MVP profile 固定如下：
 MVP 不包括：
 
 - Codex 或 Claude Code binary 原生实现 ACP；
-- 通过 `npx`、shell、package runner 或任何 network bootstrap 下载或执行 Adapter；
+- Runtime 通过 `npx`、shell、package runner 或任何 network bootstrap 下载或执行 Adapter；
 - filesystem callback、terminal callback、rich prompt content、additional directory、
   session load、session resume 或 multi-session；
 - `allow_always`、`reject_always`、持久 trust rule 或 policy mutation；
@@ -82,6 +82,27 @@ output 均不能增加 process argument、替换 executable 或改变 workspace�
 
 这些 executable 是单独安装的 Adapter。文档与 UI 不得声称原生 `codex` 或 `claude`
 command 已实现 ACP。
+
+## Adapter Distribution 与 Conformance 边界
+
+Adapter 安装是 COSH runtime 之外的显式 operator/developer 操作。Source helper 把一个由
+lockfile 定义的 bundle 安装到显式 private prefix，并禁用 package script。该 helper
+会校验准确 package name、version 与 `bin` target，之后该路径才可用于 validation。
+Runtime 仍只接受 exact installed executable path 或 allowlisted `PATH` lookup，不存在
+npm 或 network code path。
+
+Stage 3 bundle 固定如下：
+
+| Profile | npm package | Version |
+| --- | --- | --- |
+| `codex` | `@agentclientprotocol/codex-acp` | `1.2.0` |
+| `claude-code` | `@agentclientprotocol/claude-agent-acp` | `0.66.0` |
+
+Conformance 明确分为两种模式。Fake mode 构造本地确定性 Adapter，在没有 credential 或
+network access 的情况下验证有序 protocol/presentation event。Real mode 要求显式确认、
+exact pinned package path，以及通过 stdin 提供的 prompt。它在内存中把 JSONL stream
+归约为 count，不写入或回显 prompt/Agent text。Real mode 结果只证明所选 profile 与
+精确 candidate revision，不能从 fake mode 推断。
 
 ## Local Entrypoint
 

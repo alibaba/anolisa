@@ -8,9 +8,10 @@
 **PARTIAL IMPLEMENTATION / NOT ACCEPTED.** The candidate has a strict ACP v1
 codec, supervised stdio bridge, bounded session driver with independent
 cancellation, an installed COSH entrypoint, and built-in profile resolution
-for `codex-acp` and `claude-agent-acp`. A local once-only permission proxy
-writes redacted evidence before reply. No real-Adapter provider run is
-recorded.
+for `codex-acp` and `claude-agent-acp`. A source-tree installer pins the
+official Adapter packages, a deterministic harness exercises the entrypoint,
+and a local once-only permission proxy writes redacted evidence before reply.
+No real-Adapter provider run is recorded.
 
 This gate is independent from complete G1 and G2 acceptance. Passing it will
 prove only the narrow local interoperability outcome defined in the design.
@@ -37,7 +38,8 @@ prove only the narrow local interoperability outcome defined in the design.
 | Permission correlation | `PASS for local slice` | Local TTY presentation retains only correlated `allow_once`/`reject_once`; non-TTY, EOF, unsupported-only options, and explicit deny cancel |
 | Permission evidence | `PASS for local slice` | Private append-only JSONL records bounded hashes, actor UID, and decision class before reply; raw prompt/tool/session/workspace values are excluded |
 | Unsupported callbacks | `PARTIAL` | Fake fs request receives correlated method-not-found; complete fs/terminal non-advertisement matrix remains |
-| Real adapter conformance | `NOT RUN` | No exact-version `codex-acp` or `claude-agent-acp` provider run is recorded |
+| Adapter distribution | `PARTIAL` | Source installer uses an exact npm lockfile, a private managed prefix, scripts disabled during install, and package/version/bin provenance checks; the repository does not yet distribute a signed offline Adapter artifact |
+| Real adapter conformance | `NOT RUN` | An opt-in, non-persisting harness exists, but no exact-version `codex-acp` or `claude-agent-acp` provider run is recorded |
 | Rollback | `PARTIAL` | Existing direct `cosh-shell raw cosh-core` path remains and raw-package routing is tested; an installed-package smoke remains |
 
 Source presence is not user-facing acceptance. Profile resolver tests that use
@@ -48,7 +50,7 @@ temporary executable files do not prove an installed official adapter works.
 | ID | Criterion | Current result | Required proof |
 | --- | --- | --- | --- |
 | MVP-01 | One installed COSH entrypoint accepts a built-in profile, canonical workspace, and bounded text prompt | `PARTIAL` | Binary integration and raw-package routing pass; installed-package smoke remains |
-| MVP-02 | Only locally installed `codex-acp` or `claude-agent-acp` is launched; native Codex/Claude, `npx`, shell, package runner, and network bootstrap are impossible | `PARTIAL` | Runtime resolver never bootstraps packages; distribution and installed-package proof remain |
+| MVP-02 | Only locally installed `codex-acp` or `claude-agent-acp` is launched; native Codex/Claude, `npx`, shell, package runner, and network bootstrap are impossible | `PARTIAL` | Runtime resolver never bootstraps packages; the explicit installer pins and verifies both Adapter packages, but signed/offline distribution remains |
 | MVP-03 | Profile resolution pins exact basename, canonical executable/workspace, fixed args, and allowlisted environment without logging values | `PARTIAL` | Positive and spoof/path/environment tests on the entrypoint path |
 | MVP-04 | Driver performs ACP v1 initialize, one session/new, and one active text prompt in order | `PARTIAL` | End-to-end driver fixture with wrong-order and duplicate-prompt negatives |
 | MVP-05 | Text updates are delivered in receive order with bounded local sequence, queue depth, and bytes | `NOT IMPLEMENTED` | Multi-chunk and saturation fixtures |
@@ -133,6 +135,32 @@ cargo +1.88.0 test --locked --package cosh-gateway \
 # 7 passed
 ```
 
+## Stage 3 Adapter evidence
+
+The source installer pins `@agentclientprotocol/codex-acp` at `1.2.0` and
+`@agentclientprotocol/claude-agent-acp` at `0.66.0` through the committed
+lockfile. It accepts only an explicit absolute private prefix and rejects a
+symlinked, non-owned, group/world-accessible, or unrelated non-empty prefix.
+After `npm ci --ignore-scripts`, it verifies each package name, version, and
+canonical `bin` target. npm is never available to the COSH runtime resolver.
+
+Fake conformance validates initialization, session creation, two ordered text
+chunks, prompt completion, and exactly one terminal event. Real mode is
+opt-in, requires a piped prompt plus `--acknowledge-provider-run`, verifies
+exact package provenance, and reduces JSONL to event counts in memory. It does
+not create an evidence file or echo prompt or Agent text.
+
+```bash
+bash src/cosh-ng/tests/test-acp-adapters.sh
+src/cosh-ng/scripts/run-acp-conformance.sh fake \
+  --gateway "$PWD/src/cosh-ng/target/debug/cosh-gateway" \
+  --workspace "$PWD"
+```
+
+These checks use a fake npm implementation and deterministic fake Agent. They
+do not install from the network, invoke a provider, or change MVP-13 from
+`NOT RUN`.
+
 ## Exit criteria
 
 The ACP MVP is accepted only when:
@@ -150,5 +178,5 @@ The ACP MVP is accepted only when:
 ## Documentation validation
 
 The bilingual documents must pass repository docs lint, relative-link checking,
-pairing/parity review, and `git diff --check`. Stage 2 does not run a provider,
+pairing/parity review, and `git diff --check`. Stage 3 does not run a provider,
 ECS, or a real Adapter and cannot change MVP-13 from `NOT RUN`.
