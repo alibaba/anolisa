@@ -178,8 +178,12 @@ impl StashStore for SqliteStore {
 
     fn delete(&self, hash: &str) -> Result<bool, StashError> {
         let key = hash.to_ascii_lowercase();
+        let now = now_unix();
         let conn = self.lock_conn();
-        let removed = conn.execute("DELETE FROM stash WHERE hash = ?", [key])?;
+        let removed = conn.execute(
+            "DELETE FROM stash WHERE hash = ? AND expires_at >= ?",
+            rusqlite::params![key, now as i64],
+        )?;
         Ok(removed > 0)
     }
 }
@@ -262,6 +266,32 @@ mod tests {
         let _ = store.stash("3").unwrap(); // surplus=1, evicts oldest live (k0)
         assert_eq!(store.retrieve(&k0).unwrap(), None);
         assert!(store.len() <= 3);
+    }
+
+    #[test]
+    fn delete_live_entry_returns_true() {
+        let (store, _dir) = tmp_store(60, 100);
+        let (key, _) = store.stash("payload").unwrap();
+        assert!(store.delete(&key).unwrap());
+        assert_eq!(store.retrieve(&key).unwrap(), None);
+        assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn delete_missing_returns_false() {
+        let (store, _dir) = tmp_store(60, 100);
+        assert!(!store.delete("000000000000000000000000").unwrap());
+    }
+
+    #[test]
+    fn delete_expired_returns_false() {
+        // Trait: Ok(false) when already expired. DELETE must include
+        // `expires_at >= now` so an expired row is not reported as a live delete.
+        let (store, _dir) = tmp_store(1, 100);
+        let (key, _) = store.stash("ephemeral").unwrap();
+        thread::sleep(std::time::Duration::from_secs(2));
+        assert!(!store.delete(&key).unwrap());
+        assert_eq!(store.retrieve(&key).unwrap(), None);
     }
 
     #[test]

@@ -540,6 +540,79 @@ fn compress_response_no_savings_rolls_back_orphan_stash() {
 }
 
 #[test]
+fn compress_schema_no_savings_rolls_back_orphan_stash() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let stash_db = fixture.data_dir.join("stash.db");
+    // Description just over the default 256-char cap: truncation + stash
+    // marker often yields after_tokens >= before_tokens (1-char savings
+    // does not always change the estimate). Pad the function name so the
+    // compact JSON length hits that equality.
+    let mut hit_no_savings = false;
+    for name in ["x", "xx", "xxx", "xxxx"] {
+        let schema = serde_json::json!({
+            "function": {
+                "name": name,
+                "description": "A".repeat(257),
+                "parameters": {"type": "object", "properties": {}}
+            }
+        });
+        let original = serde_json::to_string(&schema).unwrap();
+        let output = fixture
+            .command()
+            .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+            .env("TOKENLESS_STATS_ENABLED", "0")
+            .args(["compress-schema", "--stash-db"])
+            .arg(&stash_db)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child.stdin.take().unwrap().write_all(original.as_bytes())?;
+                child.wait_with_output()
+            })
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "compress-schema failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.contains("did not reduce size") {
+            continue;
+        }
+        hit_no_savings = true;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.contains("tokenless:"),
+            "no-savings stdout must not expose markers: {stdout}"
+        );
+        let live = if stash_db.exists() {
+            tokenless_ccr::SqliteStore::new(&stash_db)
+                .map(|s| s.len())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        assert_eq!(
+            live,
+            0,
+            "no-savings discard must roll back stash writes; orphan rows remain in {}",
+            stash_db.display()
+        );
+        break;
+    }
+    assert!(
+        hit_no_savings,
+        "failed to hit compress-schema no-savings path with a just-over-limit description"
+    );
+}
+
+#[test]
 fn no_args_shows_error() {
     let output = tokenless_bin().output().unwrap();
     assert!(!output.status.success());

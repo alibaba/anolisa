@@ -172,11 +172,21 @@ impl StashStore for InMemoryStore {
             .inner
             .lock()
             .map_err(|e| StashError::Backend(format!("in_memory mutex poisoned: {e}")))?;
-        let removed = inner.map.remove(&key).is_some();
-        if removed {
-            inner.order.retain(|k| k != &key);
+        let now = Instant::now();
+        let ttl = inner.ttl;
+        let live = inner
+            .map
+            .get(&key)
+            .map(|e| now.duration_since(e.inserted_at) < ttl)
+            .unwrap_or(false);
+        if !live {
+            // Absent or already expired: match retrieve/`Ok(false)` contract.
+            // Do not physically drop an expired row here — `retrieve` / `evict_expired` own that.
+            return Ok(false);
         }
-        Ok(removed)
+        inner.map.remove(&key);
+        inner.order.retain(|k| k != &key);
+        Ok(true)
     }
 }
 
@@ -275,6 +285,32 @@ mod tests {
                 .is_some()
         );
         assert!(store.len() <= 3);
+    }
+
+    #[test]
+    fn delete_live_entry_returns_true() {
+        let store = InMemoryStore::new();
+        let (key, _) = store.stash("payload").unwrap();
+        assert!(store.delete(&key).unwrap());
+        assert_eq!(store.retrieve(&key).unwrap(), None);
+        assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn delete_missing_returns_false() {
+        let store = InMemoryStore::new();
+        assert!(!store.delete("000000000000000000000000").unwrap());
+    }
+
+    #[test]
+    fn delete_expired_returns_false_without_removing_live_contract() {
+        // Trait: Ok(false) when absent or already expired. Must not report a
+        // successful live delete for a row retrieve() would already hide.
+        let store = InMemoryStore::with_limits(Duration::from_millis(20), 100);
+        let (key, _) = store.stash("ephemeral").unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(!store.delete(&key).unwrap());
+        assert_eq!(store.retrieve(&key).unwrap(), None);
     }
 
     #[test]

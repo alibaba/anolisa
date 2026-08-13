@@ -1,5 +1,6 @@
 use regex::Regex;
 use serde_json::Value;
+use std::cell::{Cell, RefCell};
 use std::sync::{Arc, LazyLock};
 use tokenless_ccr::StashStore;
 
@@ -31,6 +32,16 @@ pub struct SchemaCompressor {
     /// full original. When `None`, truncation is lossy — the pre-stash
     /// behavior. Mirrors `ResponseCompressor::stash_store`.
     stash_store: Option<Arc<dyn StashStore>>,
+    /// Number of stash writes performed since construction (or last rollback
+    /// that cleared them). CLI `compress-schema --batch` calls `compress()`
+    /// once per item, so these counters accumulate across the invocation.
+    stash_writes: Cell<usize>,
+    /// Number of stash writes / rollback deletes that failed. Same session
+    /// accumulator as `stash_writes`.
+    stash_errors: Cell<usize>,
+    /// Keys created during this compressor session. Not reset at each
+    /// `compress()` so CLI `--batch` can roll back every discarded item.
+    stash_keys_created: RefCell<Vec<String>>,
 }
 
 impl Default for SchemaCompressor {
@@ -51,6 +62,9 @@ impl Default for SchemaCompressor {
             // ~1024-frame default stack while leaving real schemas intact.
             max_depth: 32,
             stash_store: None,
+            stash_writes: Cell::new(0),
+            stash_errors: Cell::new(0),
+            stash_keys_created: RefCell::new(Vec::new()),
         }
     }
 }
@@ -104,6 +118,57 @@ impl SchemaCompressor {
     pub fn with_max_depth(mut self, depth: usize) -> Self {
         self.max_depth = depth;
         self
+    }
+
+    /// Number of stash writes performed during this compressor session.
+    pub fn stash_writes(&self) -> usize {
+        self.stash_writes.get()
+    }
+
+    /// Number of stash writes / rollback deletes that failed this session.
+    pub fn stash_errors(&self) -> usize {
+        self.stash_errors.get()
+    }
+
+    /// Delete stash entries created during this compressor session.
+    ///
+    /// Call this when the compressed output (and its embedded markers) will
+    /// never be emitted — e.g. the CLI no-savings path that falls back to the
+    /// original input, including `compress-schema --batch`. Returns how many
+    /// keys were successfully removed.
+    pub fn rollback_stash_writes(&self) -> usize {
+        let Some(store) = self.stash_store.as_ref() else {
+            return 0;
+        };
+        let keys = std::mem::take(&mut *self.stash_keys_created.borrow_mut());
+        let mut removed = 0usize;
+        for key in &keys {
+            match store.delete(key) {
+                Ok(true) => removed += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    self.record_stash_error();
+                    eprintln!(
+                        "[tokenless] stash: rollback delete failed for key {}: {e}",
+                        key
+                    );
+                }
+            }
+        }
+        self.stash_writes
+            .set(self.stash_writes.get().saturating_sub(removed));
+        removed
+    }
+
+    fn record_stash_success(&self, key: String, created: bool) {
+        self.stash_writes.set(self.stash_writes.get() + 1);
+        if created {
+            self.stash_keys_created.borrow_mut().push(key);
+        }
+    }
+
+    fn record_stash_error(&self) {
+        self.stash_errors.set(self.stash_errors.get() + 1);
     }
 
     /// Compress an OpenAI Function Calling schema
@@ -286,9 +351,19 @@ impl SchemaCompressor {
         // ResponseCompressor's "retrieval yields the original content
         // verbatim" contract.
         let stash_key = if stash_active {
-            self.stash_store
-                .as_ref()
-                .and_then(|store| store.stash(desc).ok().map(|(k, _)| k))
+            match self.stash_store.as_ref() {
+                Some(store) => match store.stash(desc) {
+                    Ok((k, created)) => {
+                        self.record_stash_success(k.clone(), created);
+                        Some(k)
+                    }
+                    Err(_) => {
+                        self.record_stash_error();
+                        None
+                    }
+                },
+                None => None,
+            }
         } else {
             None
         };

@@ -549,3 +549,90 @@ fn test_compress_parameters_with_nested_schema() {
         .unwrap();
     assert!(nested_desc.chars().count() <= 160);
 }
+
+#[test]
+fn test_rollback_stash_writes_removes_created_entries() {
+    use std::sync::Arc;
+    use tokenless_ccr::InMemoryStore;
+
+    let store = Arc::new(InMemoryStore::new());
+    let compressor = SchemaCompressor::new()
+        .with_func_desc_max_len(100)
+        .with_stash_store(store.clone());
+    let schema = json!({
+        "function": {
+            "name": "test",
+            "description": "A".repeat(300),
+            "parameters": {"type": "object", "properties": {}}
+        }
+    });
+    let _ = compressor.compress(&schema);
+    assert_eq!(compressor.stash_writes(), 1);
+    assert_eq!(store.len(), 1);
+
+    let removed = compressor.rollback_stash_writes();
+    assert_eq!(removed, 1);
+    assert_eq!(store.len(), 0);
+    assert_eq!(compressor.stash_writes(), 0);
+    assert_eq!(compressor.rollback_stash_writes(), 0);
+}
+
+#[test]
+fn test_rollback_preserves_preexisting_same_payload_entry() {
+    // Refreshing an already-emitted description must not put that key on the
+    // rollback list — discarding a later no-savings compress must not make
+    // earlier markers unretrievable.
+    use std::sync::Arc;
+    use tokenless_ccr::{InMemoryStore, StashStore};
+
+    let store = Arc::new(InMemoryStore::new());
+    let long_desc = "A".repeat(300);
+    let (hash, created) = store.stash(&long_desc).unwrap();
+    assert!(created);
+
+    let compressor = SchemaCompressor::new()
+        .with_func_desc_max_len(100)
+        .with_stash_store(store.clone());
+    let schema = json!({
+        "function": {
+            "name": "test",
+            "description": long_desc,
+            "parameters": {"type": "object", "properties": {}}
+        }
+    });
+    let _ = compressor.compress(&schema);
+    assert_eq!(store.len(), 1);
+    let removed = compressor.rollback_stash_writes();
+    assert_eq!(removed, 0, "refresh must not be treated as created");
+    assert_eq!(
+        store.retrieve(&hash).unwrap().as_deref(),
+        Some(long_desc.as_str()),
+        "pre-existing emitted marker must remain retrievable after rollback"
+    );
+}
+
+#[test]
+fn test_batch_rollback_removes_keys_from_every_item() {
+    // CLI --batch calls compress() once per item then discards the whole
+    // batch on no-savings. Keys must accumulate across compress() calls.
+    use std::sync::Arc;
+    use tokenless_ccr::InMemoryStore;
+
+    let store = Arc::new(InMemoryStore::new());
+    let compressor = SchemaCompressor::new()
+        .with_func_desc_max_len(100)
+        .with_stash_store(store.clone());
+    for i in 0..3 {
+        let schema = json!({
+            "function": {
+                "name": format!("f{i}"),
+                "description": format!("DESC{i}_{}", "A".repeat(300)),
+                "parameters": {"type": "object", "properties": {}}
+            }
+        });
+        let _ = compressor.compress(&schema);
+    }
+    assert_eq!(store.len(), 3);
+    assert_eq!(compressor.rollback_stash_writes(), 3);
+    assert_eq!(store.len(), 0);
+}
