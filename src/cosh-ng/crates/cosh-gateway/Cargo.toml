@@ -14,6 +14,7 @@ nix = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 signal-hook = { workspace = true }
 thiserror = { workspace = true }
 wait-timeout = { workspace = true }

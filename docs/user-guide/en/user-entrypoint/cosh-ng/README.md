@@ -47,6 +47,16 @@ Use read-only commands first. Add `--dry-run` to a supported package or service 
   `claude-agent-acp`. Run one turn by piping a bounded UTF-8 prompt into
   `cosh agent run`; add `--output jsonl` for stable streamed events. COSH does
   not run `npx`, download packages, or accept arbitrary adapter commands.
+  Permission requests use `/dev/tty`, leaving stdin dedicated to the prompt.
+  The default `--permission prompt` offers only `allow_once` and `reject_once`;
+  no TTY, unsupported choices, EOF, and `--permission deny` all cancel without
+  authorization. Redacted append-only evidence defaults to
+  `$XDG_STATE_HOME/cosh/gateway/permission-evidence.jsonl`, falling back to
+  `$HOME/.local/state/cosh/gateway/permission-evidence.jsonl`. Use an absolute
+  `--permission-evidence PATH` to override it. COSH stores hashes and the
+  decision class, never raw prompts, tool arguments, option labels, session
+  identifiers, or workspace paths. Evidence persistence failure cancels the
+  callback and fails the run.
 - [Structured OS CLI](cli/overview.md) — command domains and safe automation patterns.
 - [Output format](output-format.md) — the `CoshResponse<T>` success and error envelope.
 - [Headless mode](core/headless-mode.md) — JSONL integration for other frontends.

@@ -101,7 +101,9 @@ printf '%s\n' 'summarize the current changes' | \
 The first release accepts only the built-in `codex` and `claude-code`
 profiles. Install the corresponding `codex-acp` or `claude-agent-acp`
 executable separately; COSH never invokes `npx` or downloads an adapter at
-runtime. Permission callbacks are rejected by default in this entrypoint.
+runtime. A permission callback prompts only on the local controlling terminal;
+without one, or with `--permission deny`, COSH cancels it. Once-only decisions
+are recorded as redacted evidence under the private local state directory.
 
 ## Documentation
 

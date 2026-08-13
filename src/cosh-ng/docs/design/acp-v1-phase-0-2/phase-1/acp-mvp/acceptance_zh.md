@@ -6,9 +6,10 @@
 ## 结果
 
 **PARTIAL IMPLEMENTATION / NOT ACCEPTED。** 候选树已有严格 ACP v1 codec、
-supervised stdio Bridge、带独立 cancellation 的有界 Session Driver、确定性 fake-Agent
-fixture，以及面向 `codex-acp` 和 `claude-agent-acp` 的内置 profile resolver。它仍没有
-已安装 COSH entrypoint、local permission UI/evidence record 或真实 Adapter 证据。
+supervised stdio Bridge、带独立 cancellation 的有界 Session Driver、已安装 COSH
+entrypoint，以及面向 `codex-acp` 和 `claude-agent-acp` 的内置 profile resolver。
+Local once-only Permission Proxy 会在回复前写入脱敏 evidence，但尚未记录真实 Adapter
+provider run。
 
 本 Gate 独立于完整 G1 与 G2 验收。即使通过，也只证明设计中定义的窄范围本地互操作结果。
 
@@ -28,13 +29,14 @@ fixture，以及面向 `codex-acp` 和 `claude-agent-acp` 的内置 profile reso
 | --- | --- | --- |
 | ACP v1 codec | `PARTIAL` | Exact wire v1 initialization、单 session、text prompt/update/stop、bound 与 malformed-input handling 有 focused fixture；未运行真实 Adapter |
 | Supervised stdio | `PARTIAL` | Bridge 组合一个 Supervisor 与带 deadline/backpressure 的有界 Driver；更广的 race 与 process-tree fixture 仍缺 |
-| Runtime profile | `PARTIAL` | 内置 resolver 固定 `codex-acp` 与 `claude-agent-acp`、canonical executable/workspace、fixed args 与 environment allowlist；无已安装用户 entrypoint |
+| Runtime profile | `PARTIAL` | 已安装 entrypoint 使用内置 resolver，固定 `codex-acp` 与 `claude-agent-acp`、canonical executable/workspace、fixed args 与 environment allowlist；installed-package smoke 证据仍缺 |
 | Streaming | `PARTIAL` | 有界 Driver 按接收顺序交付 decoded observation，saturation 时 fail closed；local sequence 与 presentation 未完成 |
 | Cancellation | `PARTIAL` | Independent control 能触达 silent Agent、结算 pending permission callback 并 reap process；更广 race coverage 仍缺 |
-| Permission correlation | `PARTIAL` | Offered request/option ID 已校验，durable option 被拒绝且 response single-use；无 local user decision surface 或 evidence record |
+| Permission correlation | `PASS for local slice` | Local TTY presentation 只保留有关联的 `allow_once`/`reject_once`；non-TTY、EOF、unsupported-only option 与 explicit deny 都会取消 |
+| Permission evidence | `PASS for local slice` | Private append-only JSONL 在回复前记录 bounded hash、actor UID 与 decision class；不含 raw prompt/tool/session/workspace value |
 | Unsupported callback | `PARTIAL` | Fake fs request 收到有关联 method-not-found；完整 fs/terminal non-advertisement matrix 待补 |
-| 真实 Adapter conformance | `NOT RUN` | 未记录 exact-version `codex-acp` 或 `claude-agent-acp` transcript |
-| Rollback | `PARTIAL` | 现有 direct `cosh-shell raw cosh-core` path 保留；无已安装 ACP entrypoint smoke test |
+| 真实 Adapter conformance | `NOT RUN` | 未记录 exact-version `codex-acp` 或 `claude-agent-acp` provider run |
+| Rollback | `PARTIAL` | 现有 direct `cosh-shell raw cosh-core` path 保留，raw-package routing 已测试；installed-package smoke 仍缺 |
 
 Source 存在不等于用户侧验收。使用临时 executable file 的 profile resolver test 不能证明
 已安装官方 Adapter 可工作。
@@ -43,16 +45,16 @@ Source 存在不等于用户侧验收。使用临时 executable file 的 profile
 
 | ID | Criterion | 当前结果 | 必需证明 |
 | --- | --- | --- | --- |
-| MVP-01 | 一个已安装 COSH entrypoint 接受内置 profile、canonical workspace 与 bounded text prompt | `NOT IMPLEMENTED` | Installed-binary integration test 与 `--help`/contract fixture |
-| MVP-02 | 只启动本地已安装 `codex-acp` 或 `claude-agent-acp`；不可能启动原生 Codex/Claude、`npx`、shell、package runner 或 network bootstrap | `PARTIAL` | Resolver source/test 加 entrypoint dependency 与 process-spawn review |
+| MVP-01 | 一个已安装 COSH entrypoint 接受内置 profile、canonical workspace 与 bounded text prompt | `PARTIAL` | Binary integration 与 raw-package routing 通过；installed-package smoke 仍缺 |
+| MVP-02 | 只启动本地已安装 `codex-acp` 或 `claude-agent-acp`；不可能启动原生 Codex/Claude、`npx`、shell、package runner 或 network bootstrap | `PARTIAL` | Runtime resolver 从不 bootstrap package；distribution 与 installed-package proof 仍缺 |
 | MVP-03 | Profile resolve 固定 exact basename、canonical executable/workspace、fixed args 与 allowlisted environment，且不记录 value | `PARTIAL` | Entrypoint path 的 positive 与 spoof/path/environment test |
 | MVP-04 | Driver 按序执行 ACP v1 initialize、单 session/new 与单 active text prompt | `PARTIAL` | End-to-end Driver fixture 以及 wrong-order/duplicate-prompt negative |
 | MVP-05 | Text update 按接收顺序交付，带有界 local sequence、queue depth 与 byte | `NOT IMPLEMENTED` | Multi-chunk 与 saturation fixture |
 | MVP-06 | 每轮只报告一个 terminal result，并拒绝 late update | `PARTIAL` | Completion/cancel/error/exit/timeout race matrix |
 | MVP-07 | Agent stdout 静默时 cancel 仍到达 Driver，并在配置 bound 内 settle protocol/process state | `PARTIAL` | Independent-control fake-Agent test 通过；completion/cancel race matrix 仍缺 |
 | MVP-08 | Cancel 结算所有 pending permission，late decision/update 不能授权工作 | `PARTIAL` | Permission-during-cancel 与 late-response race fixture |
-| MVP-09 | Permission Proxy 只提供有关联的 `allow_once` 与 `reject_once`；`allow_always`/`reject_always` 不能生成 decision 或 rule | `NOT IMPLEMENTED` | Local decision surface 与 unsupported-option test |
-| MVP-10 | Permission evidence 有界、脱敏，并记录 request correlation 与 decision class | `NOT IMPLEMENTED` | Evidence schema、secret/log injection 与 bounds test |
+| MVP-09 | Permission Proxy 只提供有关联的 `allow_once` 与 `reject_once`；`allow_always`/`reject_always` 不能生成 decision 或 rule | `PASS for local slice` | 七个 focused Proxy/evidence test 与 non-interactive entrypoint cancellation |
+| MVP-10 | Permission evidence 有界、脱敏，并记录 request correlation 与 decision class | `PASS for local slice` | Private-file、symlink、mode、secret exclusion、control-injection 与 entrypoint evidence test |
 | MVP-11 | fs、terminal、load、resume、rich content、additional directory 与 multiple session 保持不声明并 fail closed | `PARTIAL` | 完整 capability/request negative matrix 与 zero host I/O |
 | MVP-12 | Malformed/oversized/invalid UTF-8/contaminated stdout、stderr flood、child exit 与 timeout 安全终止并只 reap 一个 child | `PARTIAL` | Adversarial process fixture 与 leak assertion |
 | MVP-13 | 至少一个已安装真实 Adapter 完成 initialize、prompt、多个 streamed text update、terminal、active cancel、allow once 与 reject once | `NOT RUN` | Candidate SHA 上的脱敏 exact-version transcript 与 command result |
@@ -105,6 +107,25 @@ Fake-Agent corpus 必须包含：
 Evidence 必须移除 provider output、prompt、credential、environment value、host identifier
 与 private workspace content。
 
+## Stage 2 Permission 证据
+
+`cosh agent run` 默认在本地 `/dev/tty` 上呈现，只提供 Agent 实际给出的
+`allow_once` 与 `reject_once` choice。`--permission deny`、没有 TTY、EOF、无效输入与
+unsupported-only option 都会取消且不授权。只有 private append-only JSONL record 完成
+同步后才回复 callback。Record 只包含 correlation hash、actor UID、profile、time 与
+decision class，不含 raw prompt、tool argument、option label、provider session identifier
+或 workspace path。
+
+Stage 2 targeted check：
+
+```bash
+cargo +1.88.0 test --locked --package cosh-gateway permission:: --lib
+# 7 passed
+cargo +1.88.0 test --locked --package cosh-gateway \
+  --test cli_entrypoint --bin cosh-gateway
+# 7 passed
+```
+
 ## Exit Criteria
 
 ACP MVP 只在以下条件全部成立时接受：
@@ -117,8 +138,8 @@ ACP MVP 只在以下条件全部成立时接受：
 5. 报告明确说明该结果不是 G1/G2、durable governance、filesystem/terminal、Web、
    Shell Attachment 或 daemon acceptance。
 
-## 本切片文档验证
+## 文档验证
 
-本次 documentation-only change 必须通过仓库 docs lint、relative-link check、双语 pairing/parity
-review 与 `git diff --check`。它不运行 Cargo、provider、ECS 或真实 Adapter，因此不能把
-MVP-13 从 `NOT RUN` 改为通过。
+双语文档必须通过仓库 docs lint、relative-link check、pairing/parity review 与
+`git diff --check`。Stage 2 不运行 provider、ECS 或真实 Adapter，因此不能把 MVP-13
+从 `NOT RUN` 改为通过。

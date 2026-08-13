@@ -46,6 +46,15 @@ cosh-ng 是一个 AI 原生 Linux 终端，让日常 Shell 操作和 Agent 任�
   `codex-acp`，也可以选择 `claude-code` profile 检查 `claude-agent-acp`。把有界 UTF-8
   prompt 通过管道传给 `cosh agent run` 即可执行一轮任务；增加 `--output jsonl` 可以获得
   稳定的流式事件。COSH 不运行 `npx`、不下载 package，也不接受任意 Adapter command。
+  Permission request 使用 `/dev/tty`，stdin 只传递 prompt。默认的
+  `--permission prompt` 只提供 `allow_once` 与 `reject_once`；没有 TTY、只有不支持的
+  choice、遇到 EOF 或使用 `--permission deny` 时都取消且不授权。脱敏 append-only
+  evidence 默认写入 `$XDG_STATE_HOME/cosh/gateway/permission-evidence.jsonl`，没有设置
+  `XDG_STATE_HOME` 时使用
+  `$HOME/.local/state/cosh/gateway/permission-evidence.jsonl`。可以用绝对路径
+  `--permission-evidence PATH` 覆盖。COSH 只存储 digest 与 decision class，不保存 raw
+  prompt、tool argument、option label、session identifier 或 workspace path。Evidence
+  持久化失败时，callback 会被取消且本轮运行失败。
 - [结构化 OS CLI](cli/overview.md)：命令域和安全的自动化方式。
 - [输出格式](output-format.md)：`CoshResponse<T>` 成功和失败响应封装。
 - [无界面模式](core/headless-mode.md)：供其他前端使用的 JSONL 集成。

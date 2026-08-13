@@ -2,6 +2,7 @@
 //! fail-closed capability admission foundations.
 
 pub mod capability;
+pub mod permission;
 pub mod runtime;
 pub mod storage;
 pub mod task;

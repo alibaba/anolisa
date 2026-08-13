@@ -97,7 +97,9 @@ printf '%s\n' 'summarize the current changes' | \
 
 首个版本只接受内置 `codex` 与 `claude-code` profile。对应的 `codex-acp` 或
 `claude-agent-acp` executable 需要单独安装。COSH 在 runtime 中不会调用 `npx`，也不会
-下载 Adapter。这个 entrypoint 默认拒绝 permission callback。
+下载 Adapter。Permission callback 只在本地 controlling terminal 上提示；没有 TTY 或使用
+`--permission deny` 时，COSH 会取消请求。Once-only decision 会以脱敏 evidence 形式记录到
+private local state directory。
 
 ## 文档
 

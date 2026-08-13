@@ -2,14 +2,18 @@
 //! Installed local entrypoint for the narrow ACP v1 runtime profile.
 
 use std::fs::File;
-use std::io::{self, IsTerminal, Read, Write};
-use std::path::PathBuf;
+use std::io::{self, BufReader, IsTerminal, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use cosh_gateway::permission::{
+    CancelPermissionPresenter, FilePermissionEvidenceSink, OncePermissionProxy,
+    PermissionEvidenceContext, PermissionPresenter, TextPermissionPresenter,
+};
 use cosh_gateway::runtime::{
     AcpRuntimeProfileId, AcpRuntimeProfileRequest, AcpRuntimeProfileResolver, AcpSessionDriver,
     AcpSessionDriverConfig, AcpSessionEvent, AcpSessionTerminalKind, AcpV1ClientConfig,
@@ -72,6 +76,12 @@ struct RunArgs {
     /// Read the prompt from this regular file; default is stdin.
     #[arg(long, value_name = "PATH")]
     prompt_file: Option<PathBuf>,
+    /// Prompt on the local controlling terminal or deny every tool request.
+    #[arg(long, value_enum, default_value_t = PermissionMode::Prompt)]
+    permission: PermissionMode,
+    /// Absolute private JSONL evidence path; defaults below the user state directory.
+    #[arg(long, value_name = "PATH")]
+    permission_evidence: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -97,6 +107,15 @@ enum Output {
     Jsonl,
 }
 
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum PermissionMode {
+    /// Ask on `/dev/tty`; cancel when no controlling terminal is available.
+    #[default]
+    Prompt,
+    /// Cancel every permission callback without presenting it.
+    Deny,
+}
+
 #[derive(Debug, Error)]
 enum CliError {
     #[error("failed to resolve installed ACP profile: {0}")]
@@ -111,6 +130,8 @@ enum CliError {
     PromptTooLarge,
     #[error("failed to register interrupt handling: {0}")]
     Signal(#[source] io::Error),
+    #[error("local permission handling failed: {0}")]
+    Permission(String),
     #[error("ACP runtime failed: {0}")]
     Runtime(String),
     #[error("ACP Agent rejected or did not complete the prompt")]
@@ -127,7 +148,7 @@ impl CliError {
             | Self::EmptyPrompt
             | Self::PromptTooLarge => EXIT_INPUT,
             Self::Profile(_) => EXIT_PROFILE,
-            Self::Runtime(_) | Self::Signal(_) => EXIT_RUNTIME,
+            Self::Runtime(_) | Self::Signal(_) | Self::Permission(_) => EXIT_RUNTIME,
             Self::Agent => EXIT_AGENT,
             Self::Cancelled => EXIT_CANCELLED,
         }
@@ -141,6 +162,7 @@ impl CliError {
             Self::PromptTooLarge => "prompt_too_large",
             Self::Profile(_) => "profile_invalid",
             Self::Signal(_) => "signal_handler_failed",
+            Self::Permission(_) => "permission_failed",
             Self::Runtime(_) => "runtime_failed",
             Self::Agent => "agent_incomplete",
             Self::Cancelled => "cancelled",
@@ -178,7 +200,11 @@ impl Reporter {
                     print!("{}", terminal_safe(text));
                 }
             }
-            "permission_rejected" => eprintln!("ACP permission request rejected by default"),
+            "permission_decided" => match fields.get("decision").and_then(Value::as_str) {
+                Some("allow_once") => eprintln!("ACP permission allowed once"),
+                Some("reject_once") => eprintln!("ACP permission rejected once"),
+                _ => eprintln!("ACP permission request cancelled"),
+            },
             "prompt_finished" => eprintln!("\nACP prompt finished"),
             "doctor_ok" => println!("ACP adapter is ready"),
             "terminal" => {}
@@ -219,7 +245,7 @@ fn main() -> ExitCode {
 
 fn doctor(args: ProfileArgs, reporter: &Reporter) -> Result<u8, CliError> {
     let interrupted = install_interrupt_handler()?;
-    let driver = launch_driver(&args)?;
+    let (driver, _) = launch_driver(&args)?;
     initialize_session(&driver, reporter, &interrupted)?;
     driver
         .shutdown()
@@ -230,9 +256,11 @@ fn doctor(args: ProfileArgs, reporter: &Reporter) -> Result<u8, CliError> {
 }
 
 fn run(args: RunArgs, reporter: &Reporter) -> Result<u8, CliError> {
+    let evidence_path = permission_evidence_path(&args)?;
     let prompt = read_prompt(args.prompt_file.as_ref())?;
     let interrupted = install_interrupt_handler()?;
-    let driver = launch_driver(&args.profile)?;
+    let (driver, workspace) = launch_driver(&args.profile)?;
+    let mut permissions = LocalPermissionHandler::new(&args, &workspace, evidence_path);
     initialize_session(&driver, reporter, &interrupted)?;
     driver
         .prompt(prompt)
@@ -249,7 +277,9 @@ fn run(args: RunArgs, reporter: &Reporter) -> Result<u8, CliError> {
         }
         match driver.receive_timeout(EVENT_POLL_INTERVAL) {
             Ok(AcpSessionEvent::Observation(observation)) => {
-                if let Some(exit) = handle_observation(&driver, reporter, observation)? {
+                if let Some(exit) =
+                    handle_observation(&driver, reporter, observation, Some(&mut permissions))?
+                {
                     driver
                         .shutdown()
                         .map_err(|error| CliError::Runtime(error.to_string()))?;
@@ -269,7 +299,7 @@ fn run(args: RunArgs, reporter: &Reporter) -> Result<u8, CliError> {
     }
 }
 
-fn launch_driver(args: &ProfileArgs) -> Result<AcpSessionDriver, CliError> {
+fn launch_driver(args: &ProfileArgs) -> Result<(AcpSessionDriver, PathBuf), CliError> {
     let request = AcpRuntimeProfileRequest::from_current_environment(
         args.profile.into(),
         args.adapter.clone(),
@@ -277,6 +307,7 @@ fn launch_driver(args: &ProfileArgs) -> Result<AcpSessionDriver, CliError> {
     );
     let resolved = AcpRuntimeProfileResolver::resolve(request)
         .map_err(|error| CliError::Profile(error.to_string()))?;
+    let workspace = resolved.workspace().to_path_buf();
     let config = AcpSessionDriverConfig::new(
         resolved.launch_spec(),
         AcpV1ClientConfig::new(
@@ -286,7 +317,9 @@ fn launch_driver(args: &ProfileArgs) -> Result<AcpSessionDriver, CliError> {
         ),
         resolved.workspace(),
     );
-    AcpSessionDriver::launch(config).map_err(|error| CliError::Runtime(error.to_string()))
+    let driver =
+        AcpSessionDriver::launch(config).map_err(|error| CliError::Runtime(error.to_string()))?;
+    Ok((driver, workspace))
 }
 
 fn initialize_session(
@@ -328,7 +361,7 @@ fn wait_for_observation(
         match driver.receive_timeout(remaining.min(EVENT_POLL_INTERVAL)) {
             Ok(AcpSessionEvent::Observation(observation)) => {
                 let matched = expected(&observation);
-                handle_observation(driver, reporter, observation)?;
+                handle_observation(driver, reporter, observation, None)?;
                 if matched {
                     return Ok(());
                 }
@@ -349,6 +382,7 @@ fn handle_observation(
     driver: &AcpSessionDriver,
     reporter: &Reporter,
     observation: AcpV1Observation,
+    permissions: Option<&mut LocalPermissionHandler>,
 ) -> Result<Option<u8>, CliError> {
     match observation {
         AcpV1Observation::Initialized { agent_info, .. } => {
@@ -380,22 +414,22 @@ fn handle_observation(
             }
         }
         AcpV1Observation::PermissionRequested(request) => {
-            let options = request
-                .options
-                .iter()
-                .filter_map(|option| match option.kind {
-                    AcpV1PermissionOptionKind::AllowOnce => Some("allow_once"),
-                    AcpV1PermissionOptionKind::RejectOnce => Some("reject_once"),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            reporter.event(
-                "permission_rejected",
-                json!({"request_id":request.request_id.to_string(), "options":options}),
-            )?;
+            let request_id = request.request_id.clone();
+            let resolved = permissions
+                .ok_or_else(|| CliError::Permission("permission UI is unavailable".into()))
+                .and_then(|handler| handler.resolve(&request));
+            let (decision, decision_name) = match resolved {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ =
+                        driver.answer_permission(request_id, AcpV1PermissionDecision::Cancelled);
+                    return Err(error);
+                }
+            };
             driver
-                .answer_permission(request.request_id, AcpV1PermissionDecision::Cancelled)
+                .answer_permission(request_id, decision)
                 .map_err(|error| CliError::Runtime(error.to_string()))?;
+            reporter.event("permission_decided", json!({"decision":decision_name}))?;
         }
         AcpV1Observation::PromptFinished {
             session_id,
@@ -438,6 +472,137 @@ fn handle_observation(
     Ok(None)
 }
 
+struct LocalPermissionHandler {
+    mode: PermissionMode,
+    profile: &'static str,
+    workspace: Vec<u8>,
+    evidence_path: PathBuf,
+    evidence: Option<FilePermissionEvidenceSink>,
+}
+
+impl LocalPermissionHandler {
+    fn new(args: &RunArgs, workspace: &Path, evidence_path: PathBuf) -> Self {
+        #[cfg(unix)]
+        use std::os::unix::ffi::OsStrExt;
+
+        #[cfg(unix)]
+        let workspace = workspace.as_os_str().as_bytes().to_vec();
+        #[cfg(not(unix))]
+        let workspace = workspace.to_string_lossy().as_bytes().to_vec();
+        Self {
+            mode: args.permission,
+            profile: profile_name(args.profile.profile),
+            workspace,
+            evidence_path,
+            evidence: None,
+        }
+    }
+
+    fn resolve(
+        &mut self,
+        request: &cosh_gateway::runtime::AcpV1PermissionRequest,
+    ) -> Result<(AcpV1PermissionDecision, &'static str), CliError> {
+        let occurred_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| CliError::Permission("system clock precedes the Unix epoch".into()))?
+            .as_millis()
+            .try_into()
+            .map_err(|_| CliError::Permission("system clock is out of range".into()))?;
+        let context = PermissionEvidenceContext {
+            profile: self.profile,
+            canonical_workspace: &self.workspace,
+            actor_uid: nix::unistd::Uid::effective().as_raw(),
+            occurred_at_ms,
+        };
+        if self.evidence.is_none() {
+            self.evidence = Some(
+                FilePermissionEvidenceSink::open_in_private_state(&self.evidence_path)
+                    .map_err(|error| CliError::Permission(error.to_string()))?,
+            );
+        }
+        let evidence = self
+            .evidence
+            .as_mut()
+            .ok_or_else(|| CliError::Permission("permission evidence is unavailable".into()))?;
+        let decision = match self.mode {
+            PermissionMode::Deny => {
+                resolve_permission(CancelPermissionPresenter, evidence, context, request)?
+            }
+            PermissionMode::Prompt => match local_terminal_presenter() {
+                Some(presenter) => resolve_permission(presenter, evidence, context, request)?,
+                None => resolve_permission(CancelPermissionPresenter, evidence, context, request)?,
+            },
+        };
+        let name = match &decision {
+            AcpV1PermissionDecision::Cancelled => "cancelled",
+            AcpV1PermissionDecision::Selected { option_id } => request
+                .options
+                .iter()
+                .find(|option| &option.option_id == option_id)
+                .map_or("cancelled", |option| match option.kind {
+                    AcpV1PermissionOptionKind::AllowOnce => "allow_once",
+                    AcpV1PermissionOptionKind::RejectOnce => "reject_once",
+                    _ => "cancelled",
+                }),
+        };
+        Ok((decision, name))
+    }
+}
+
+fn resolve_permission<P: PermissionPresenter>(
+    presenter: P,
+    evidence: &mut FilePermissionEvidenceSink,
+    context: PermissionEvidenceContext<'_>,
+    request: &cosh_gateway::runtime::AcpV1PermissionRequest,
+) -> Result<AcpV1PermissionDecision, CliError> {
+    let mut proxy = OncePermissionProxy::new(presenter, evidence);
+    proxy
+        .resolve(context, request)
+        .map_err(|error| CliError::Permission(error.to_string()))
+}
+
+fn local_terminal_presenter() -> Option<TextPermissionPresenter<BufReader<File>, File>> {
+    let terminal = File::options()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()?;
+    if !terminal.is_terminal() {
+        return None;
+    }
+    let input = terminal.try_clone().ok()?;
+    Some(TextPermissionPresenter::new(
+        BufReader::new(input),
+        terminal,
+    ))
+}
+
+fn permission_evidence_path(args: &RunArgs) -> Result<PathBuf, CliError> {
+    if let Some(path) = &args.permission_evidence {
+        return if path.is_absolute() {
+            Ok(path.clone())
+        } else {
+            Err(CliError::Permission(
+                "permission evidence path must be absolute".into(),
+            ))
+        };
+    }
+    if let Some(state) = std::env::var_os("XDG_STATE_HOME") {
+        let state = PathBuf::from(state);
+        if !state.is_absolute() {
+            return Err(CliError::Permission(
+                "XDG_STATE_HOME must be absolute".into(),
+            ));
+        }
+        return Ok(state.join("cosh/gateway/permission-evidence.jsonl"));
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| CliError::Permission("absolute HOME is required".into()))?;
+    Ok(home.join(".local/state/cosh/gateway/permission-evidence.jsonl"))
+}
+
 fn wait_for_terminal(
     driver: &AcpSessionDriver,
     reporter: &Reporter,
@@ -453,7 +618,7 @@ fn wait_for_terminal(
         }
         match driver.receive_timeout(remaining.min(EVENT_POLL_INTERVAL)) {
             Ok(AcpSessionEvent::Observation(observation)) => {
-                handle_observation(driver, reporter, observation)?;
+                handle_observation(driver, reporter, observation, None)?;
             }
             Ok(AcpSessionEvent::Terminal(terminal)) => {
                 report_terminal(reporter, &terminal)?;
