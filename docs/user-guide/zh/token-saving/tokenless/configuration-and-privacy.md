@@ -87,7 +87,7 @@ tokenless stats disable
 | `TOKENLESS_ENV_FIX_SCRIPT` | 覆盖环境修复脚本路径 |
 | `TOKENLESS_PACKAGE_MANAGER` | 覆盖包管理器探测，主要用于测试 |
 
-后面三项会经过信任路径或运行环境校验，不建议普通用户修改。
+当前构建已硬关闭 Tool Ready。依赖规范和修复脚本覆盖仅为休眠的旧版实现保留，运行时不会生效；这些路径会经过信任校验，也不建议普通用户修改。
 
 数据库路径优先级如下：
 
@@ -163,7 +163,7 @@ export TOKENLESS_STATS_ENABLED=0
 export TOKENLESS_SLS_ENABLED=0
 ```
 
-Dry-run 不会创建 Stash 条目，但也不会关闭 RTK 重写或 Tool Ready。需要停止这些行为时应禁用 Adapter。
+Dry-run 不会创建 Stash 条目，但也不会关闭 RTK 重写。Tool Ready 已独立硬关闭。需要停止全部 Hook 行为时应禁用 Adapter。
 
 ### 完全停止 Agent 中的 Tokenless
 
@@ -221,7 +221,7 @@ OpenClaw Plugin 还提供框架级选项：
 | 选项 | 作用 |
 |------|------|
 | `rtk_enabled` | 命令重写 |
-| `tool_ready_enabled` | Tool Ready 检查 |
+| `tool_ready_enabled` | OpenClaw 侧的 Tool Ready 注册门槛 |
 | `response_compression_enabled` | 响应压缩 |
 | `toon_compression_enabled` | TOON 编码 |
 | `skip_tools` | 完全跳过压缩的工具名列表 |
@@ -230,7 +230,7 @@ OpenClaw Plugin 还提供框架级选项：
 
 OpenClaw Adapter 当前未实现 Schema 压缩；需要时可以直接调用 `tokenless compress-schema` CLI 命令。
 
-运行时代码默认开启 RTK、Tool Ready 和响应压缩，默认关闭 TOON。当前运行时代码把未提供的 `verbose` 当作开启，但 Plugin Schema 声明的默认值是关闭；在二者统一前应显式设置 `verbose`。
+运行时代码默认开启 RTK、OpenClaw 侧的 Tool Ready 门槛和响应压缩，默认关闭 TOON。但由于 Tokenless 已硬关闭底层检查，Tool Ready 选项当前不会生效。当前运行时代码把未提供的 `verbose` 当作开启，但 Plugin Schema 声明的默认值是关闭；在二者统一前应显式设置 `verbose`。
 
 这些值由 OpenClaw Plugin 配置管理，不属于 `~/.tokenless/config.json`。修改后按 OpenClaw 提示重启 gateway。
 

@@ -87,7 +87,7 @@ An environment override still wins after these commands. For example, `TOKENLESS
 | `TOKENLESS_ENV_FIX_SCRIPT` | Override the environment repair script |
 | `TOKENLESS_PACKAGE_MANAGER` | Override package-manager detection, mainly for tests |
 
-The last three are subject to trusted-path or runtime validation and are not recommended for normal users.
+Tool Ready is hard-disabled in this build. Its specification and repair-script overrides are retained for the dormant legacy implementation but have no runtime effect. They are subject to trusted-path validation and are not recommended for normal users.
 
 Database path priority is:
 
@@ -163,7 +163,7 @@ export TOKENLESS_STATS_ENABLED=0
 export TOKENLESS_SLS_ENABLED=0
 ```
 
-Dry-run does not create Stash entries, but it also does not disable RTK rewriting or Tool Ready. Disable the adapter when those behaviors must stop.
+Dry-run does not create Stash entries, but it also does not disable RTK rewriting. Tool Ready is independently hard-disabled. Disable the adapter when all hook behavior must stop.
 
 ### Stop Tokenless completely in an agent
 
@@ -221,7 +221,7 @@ The OpenClaw plugin also provides framework-level options:
 | Option | Purpose |
 |--------|---------|
 | `rtk_enabled` | Command rewriting |
-| `tool_ready_enabled` | Tool Ready checks |
+| `tool_ready_enabled` | OpenClaw-side Tool Ready registration gate |
 | `response_compression_enabled` | Response compression |
 | `toon_compression_enabled` | TOON encoding |
 | `skip_tools` | Tool names that bypass all compression |
@@ -230,7 +230,7 @@ The OpenClaw plugin also provides framework-level options:
 
 The OpenClaw adapter does not currently implement Schema compression; invoke the `tokenless compress-schema` CLI command directly when needed.
 
-The runtime defaults RTK, Tool Ready, and response compression to on, and TOON to off. The current runtime code treats an omitted `verbose` as on, while the plugin schema declares its default as off; set `verbose` explicitly until those definitions are aligned.
+The runtime defaults RTK, its OpenClaw-side Tool Ready gate, and response compression to on, and TOON to off. The Tool Ready option currently has no effect because Tokenless hard-disables the underlying check. The current runtime code treats an omitted `verbose` as on, while the plugin schema declares its default as off; set `verbose` explicitly until those definitions are aligned.
 
 These values are managed by OpenClaw plugin configuration, not `~/.tokenless/config.json`. Restart the gateway as instructed after changing them.
 

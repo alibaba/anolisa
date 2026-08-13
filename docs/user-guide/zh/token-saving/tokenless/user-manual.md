@@ -27,7 +27,7 @@ cargo build --release --locked -p tokenless-cli
 | 响应压缩 | 移除名称完全匹配且区分大小写的调试字段、`null`、空字符串/数组/对象，并按配置阈值截断 | 输入必须是 JSON；Adapter 会主动跳过内容读取类工具 |
 | TOON 编码 | 编码 JSON；估算 Token 没有下降时保留 JSON 输入 | TOON 是替换原文还是与原文并存，取决于 Adapter |
 | 命令重写 | 有匹配规则时调用 `rtk rewrite`，再向框架提交改写后的 Shell 输入 | 真正提交给 Shell 的命令会变化；无规则或被拒绝时透传 |
-| Tool Ready | 检查声明的二进制、版本、配置、权限和可选依赖 | `--fix` 只安装缺失的必需依赖，并可能改变环境 |
+| Tool Ready | 旧版调用前能力，用于检查声明的二进制、版本、配置、权限和可选依赖 | 已硬关闭；不会检查、修复或阻断工具调用 |
 | Stash | 保存因字符串、数组、深度或 Schema 描述截断而移除的内容 | 默认 TTL 一小时、最多 10,000 个有效条目；其他被移除字段不会进入 Stash |
 
 代码没有提供固定节省率保证。结果取决于 Payload、Adapter 交付语义，以及工具数据在模型上下文中的占比。请按[效果度量](measuring-savings.md)使用自己的工作负载测量。
@@ -37,7 +37,7 @@ cargo build --release --locked -p tokenless-cli
 启用对应 Adapter 后，一次工具调用可能经过以下阶段：
 
 ```text
-工具调用前：Tool Ready 检查 → 命令重写
+工具调用前：已硬关闭的 Tool Ready Hook → 命令重写
 工具调用后：响应压缩 → 可选 Stash → TOON 编码 → 写入统计
 模型调用前：Schema 压缩
 ```
@@ -60,7 +60,7 @@ CLI-only 用法不需要 Adapter。
 
 设置 `compression_enabled=false` 或 `TOKENLESS_COMPRESSION_ENABLED=0` 后，无论是直接调用还是通过 Adapter 调用，`compress-schema`、`compress-response` 和 `compress-toon` 都仍会计算预测节省并可能写入统计，但会返回原始输入。该模式不会写入 Stash 条目。
 
-这个设置不会关闭 RTK 命令重写、Tool Ready 检查、Adapter 执行或内容取回。如需停止 Agent 中的所有 Tokenless 行为，应禁用 Adapter：
+这个设置不会关闭 RTK 命令重写、Adapter 执行或内容取回。Tool Ready 已独立硬关闭。如需停止 Agent 中的所有 Tokenless 行为，应禁用 Adapter：
 
 ```bash
 anolisa adapter disable tokenless <framework>
@@ -87,7 +87,7 @@ Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、
 
 ### 普通处理错误通常 fail-open
 
-缺少 `tokenless` 或 `rtk`、压缩无收益或发生普通处理错误时，压缩和重写 Hook 通常不返回修改。Tool Ready 不同：部分 Adapter 会在自动修复后仍为 `NOT_READY` 时主动阻止工具执行。Stash 写入失败时，仍可能继续执行有损压缩。
+缺少 `tokenless` 或 `rtk`、压缩无收益或发生普通处理错误时，压缩和重写 Hook 通常不返回修改。Tool Ready 会在旧版检查、修复和阻断逻辑之前硬退出。工具执行后的失败归因是独立能力，保持不变。Stash 写入失败时，仍可能继续执行有损压缩。
 
 命令重写也会改变宿主提交的 Shell 命令。大多数 Adapter 会直接替换命令输入；Hermes 会先阻止第一次调用，再提示 Agent 使用改写命令重试。因此，除了压缩结果，还应验证重要命令工作流。
 
@@ -95,13 +95,13 @@ Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、
 
 | 框架 | 集成方式 | 当前代码路径 |
 |------|----------|--------------|
-| cosh | Extension | Tool Ready、命令重写、响应压缩 + TOON、Schema；Cosh-NG 有替换路径，旧版 Copilot Shell 则追加额外上下文 |
-| OpenClaw | Plugin | Tool Ready、`exec` 命令重写、替换持久化结果、可选 TOON；无 Schema |
-| Hermes | Plugin | Tool Ready、阻止后重试的命令重写、用响应压缩 + TOON 替换结果；无 Schema |
-| Qoder | Plugin | Tool Ready、命令重写、通过 `additionalContext` 交付响应压缩 + TOON；无 Schema |
-| Claude Code | Marketplace Plugin | Tool Ready、Bash 命令重写；Claude Code 2.1.121 及以上可替换响应；条件式 TOON；无 Schema |
-| Codex | Plugin | Tool Ready、命令重写；把响应/TOON 分析追加为上下文，保留原始结果；无 Schema |
-| Qwen Code | Extension | Tool Ready、命令重写、通过 `additionalContext` 交付响应压缩 + TOON、Schema |
+| cosh | Extension | Tool Ready（已硬关闭）、命令重写、响应压缩 + TOON、Schema；Cosh-NG 有替换路径，旧版 Copilot Shell 则追加额外上下文 |
+| OpenClaw | Plugin | Tool Ready（已硬关闭）、`exec` 命令重写、替换持久化结果、可选 TOON；无 Schema |
+| Hermes | Plugin | Tool Ready（已硬关闭）、阻止后重试的命令重写、用响应压缩 + TOON 替换结果；无 Schema |
+| Qoder | Plugin | Tool Ready（已硬关闭）、命令重写、通过 `additionalContext` 交付响应压缩 + TOON；无 Schema |
+| Claude Code | Marketplace Plugin | Tool Ready（已硬关闭）、Bash 命令重写；Claude Code 2.1.121 及以上可替换响应；条件式 TOON；无 Schema |
+| Codex | Plugin | Tool Ready（已硬关闭）、命令重写；把响应/TOON 分析追加为上下文，保留原始结果；无 Schema |
+| Qwen Code | Extension | Tool Ready（已硬关闭）、命令重写、通过 `additionalContext` 交付响应压缩 + TOON、Schema |
 
 ## 按任务查找文档
 

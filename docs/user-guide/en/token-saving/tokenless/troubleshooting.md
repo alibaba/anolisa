@@ -14,7 +14,7 @@ anolisa status tokenless
 anolisa doctor tokenless
 anolisa adapter status tokenless
 tokenless stats status
-tokenless env-check --all --checklist
+tokenless env-check --all --json
 ```
 
 When one command fails, resolve that layer before continuing. Preview the install plan without modifying the system:
@@ -170,29 +170,22 @@ If `rtk` is missing:
 
 ```bash
 command -v rtk
-tokenless env-check --tool Shell
 ```
 
 If RTK works directly but not in the agent, inspect the framework support matrix, adapter status, and whether the session was restarted.
 
 `TOKENLESS_COMPRESSION_ENABLED=0` does not disable rewriting. Disable the adapter, or set OpenClaw's `rtk_enabled=false` when using that plugin, if the original shell input must be preserved.
 
-## Tool Ready reports `NOT_READY`
+## Tool Ready still reports `NOT_READY`
 
-View the complete checklist:
-
-```bash
-tokenless env-check --tool <name>
-tokenless env-check --all --checklist
-```
-
-`NOT_READY` means that a required dependency is absent. Resolve the specific binary, configuration, permission, or network issue in the report. Review the change before automatic repair:
+The current build hard-disables Tool Ready and cannot emit `NOT_READY` or block a tool. Confirm the active binary:
 
 ```bash
-tokenless env-check --tool <name> --fix
+tokenless --version
+tokenless env-check --tool <name> --json
 ```
 
-`--fix` may invoke a package manager or create links. Do not add `sudo` without understanding the output.
+The JSON result should contain `"status":"UNKNOWN"` and `"enabled":false`. A `NOT_READY` result indicates a mixed or stale deployment. Update both the Tokenless binary and shared adapter resources, then restart the agent. Setting the former `TOKENLESS_TOOL_READY_ENABLED` variable has no effect.
 
 ## Database errors
 

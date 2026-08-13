@@ -27,7 +27,7 @@ This path produces only the standalone `tokenless` CLI. It does not install `rtk
 | Response compression | Removes exact, case-sensitive debug-field names, `null`, empty strings/arrays/objects, and truncates values past configured limits | Accepts JSON; content-retrieval tools are intentionally skipped by adapters |
 | TOON encoding | Encodes JSON and keeps the JSON input when the estimated token count does not decrease | Whether TOON replaces or accompanies the original depends on the adapter |
 | Command rewriting | Calls `rtk rewrite` and submits the rewritten shell input when a rule is available | The command actually sent to the shell changes; unsupported or denied rewrites pass through |
-| Tool Ready | Checks declared binaries, versions, configuration, permissions, and optional dependencies | `--fix` installs only missing required dependencies and may change the environment |
+| Tool Ready | Legacy pre-call checks for declared binaries, versions, configuration, permissions, and optional dependencies | Hard-disabled; it cannot inspect, repair, or block tool execution |
 | Stash | Stores content removed by string, array, depth, or schema-description truncation | One-hour TTL and 10,000 live entries by default; other removed fields are not stashed |
 
 The implementation contains no fixed saving-rate guarantee. Results depend on the payload, adapter delivery semantics, and the share of the model context that came from tool data. Measure your own workload as described in [Measuring savings](measuring-savings.md).
@@ -37,7 +37,7 @@ The implementation contains no fixed saving-rate guarantee. Results depend on th
 After an adapter is enabled, a tool call may pass through these stages:
 
 ```text
-Before the tool: Tool Ready check → command rewrite
+Before the tool: hard-disabled Tool Ready hook → command rewrite
 After the tool: response compression → optional Stash → TOON encoding → statistics
 Before the model: schema compression
 ```
@@ -60,7 +60,7 @@ CLI-only use does not require an adapter.
 
 With `compression_enabled=false` or `TOKENLESS_COMPRESSION_ENABLED=0`, `compress-schema`, `compress-response`, and `compress-toon`—whether called directly or through an adapter—still calculate predicted savings and may write statistics, but return the original input. They do not write Stash entries in this mode.
 
-This setting does not disable RTK command rewriting, Tool Ready checks, adapter execution, or retrieval. To stop all Tokenless behavior in an agent, disable the adapter:
+This setting does not disable RTK command rewriting, adapter execution, or retrieval. Tool Ready is independently hard-disabled. To stop all Tokenless behavior in an agent, disable the adapter:
 
 ```bash
 anolisa adapter disable tokenless <framework>
@@ -87,7 +87,7 @@ Stash does not make all compression reversible. Removed `debug`/`trace` fields, 
 
 ### Processing errors usually fail open
 
-Compression and rewrite hooks normally return no modification when `tokenless` or `rtk` is missing, compression provides no savings, or an ordinary processing error occurs. Tool Ready is different: some adapters intentionally block a tool that is still `NOT_READY` after an auto-fix attempt. A Stash write failure may still allow lossy compression to continue.
+Compression and rewrite hooks normally return no modification when `tokenless` or `rtk` is missing, compression provides no savings, or an ordinary processing error occurs. Tool Ready is hard-disabled before its legacy check, repair, and blocking logic. Post-tool failure attribution is independent and remains unchanged. A Stash write failure may still allow lossy compression to continue.
 
 Command rewriting also changes the shell command submitted by the host. Most adapters replace the command input directly; Hermes blocks the first call and tells the agent to retry with the rewritten command. Validate important command workflows as well as compressed output.
 
@@ -95,13 +95,13 @@ Command rewriting also changes the shell command submitted by the host. Most ada
 
 | Framework | Integration | Current code path |
 |-----------|-------------|-------------------|
-| cosh | Extension | Tool Ready, rewrite, response + TOON, Schema; Cosh-NG has a replacement path, while legacy Copilot Shell appends additional context |
-| OpenClaw | Plugin | Tool Ready, `exec` rewrite, persisted-result replacement, optional TOON; no Schema |
-| Hermes | Plugin | Tool Ready, block-and-retry rewrite, result replacement with response + TOON; no Schema |
-| Qoder | Plugin | Tool Ready, rewrite, response + TOON through `additionalContext`; no Schema |
-| Claude Code | Marketplace plugin | Tool Ready, Bash rewrite, response replacement on Claude Code 2.1.121 or later; conditional TOON; no Schema |
-| Codex | Plugin | Tool Ready, rewrite, response/TOON analysis added as context; the original result is retained; no Schema |
-| Qwen Code | Extension | Tool Ready, rewrite, response + TOON through `additionalContext`, Schema |
+| cosh | Extension | Hard-disabled Tool Ready, rewrite, response + TOON, Schema; Cosh-NG has a replacement path, while legacy Copilot Shell appends additional context |
+| OpenClaw | Plugin | Hard-disabled Tool Ready, `exec` rewrite, persisted-result replacement, optional TOON; no Schema |
+| Hermes | Plugin | Hard-disabled Tool Ready, block-and-retry rewrite, result replacement with response + TOON; no Schema |
+| Qoder | Plugin | Hard-disabled Tool Ready, rewrite, response + TOON through `additionalContext`; no Schema |
+| Claude Code | Marketplace plugin | Hard-disabled Tool Ready, Bash rewrite, response replacement on Claude Code 2.1.121 or later; conditional TOON; no Schema |
+| Codex | Plugin | Hard-disabled Tool Ready, rewrite, response/TOON analysis added as context; the original result is retained; no Schema |
+| Qwen Code | Extension | Hard-disabled Tool Ready, rewrite, response + TOON through `additionalContext`, Schema |
 
 ## Find documentation by task
 

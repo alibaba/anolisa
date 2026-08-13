@@ -19,10 +19,11 @@ actionable fix hints.
 The plugin registers four hooks with Codex:
 
 1. **`SessionStart`** — verifies the `tokenless` CLI is installed and functional (non-blocking)
-2. **`PreToolUse` (tool-ready)** — runs before every tool execution:
-   - Checks if required dependencies are available via `tokenless env-check`
-   - Auto-installs missing dependencies via `tokenless env-check --fix`
-   - Blocks the tool if critical dependencies are still missing after auto-fix
+2. **`PreToolUse` (tool-ready, hard-disabled)** — remains registered but is a
+   silent pass-through. `tokenless env-check` returns `UNKNOWN` with
+   `enabled:false`, so the hook emits no context, performs no repair, and never
+   blocks a tool. Re-enabling the retained legacy pipeline requires a source
+   change and a new release.
 3. **`PreToolUse` (rewrite)** — runs before shell command execution:
    - Rewrites commands via `rtk rewrite` for token optimization
    - Only applies to Bash/Shell/terminal/programmatic tools
@@ -140,7 +141,7 @@ codex-plugin-tokenless/
 ├── scripts/
 │   ├── compress-response    # PostToolUse: response compression + env error detection
 │   ├── rewrite-hook         # PreToolUse: RTK command rewriting
-│   ├── tool-ready           # PreToolUse: environment check + auto-fix
+│   ├── tool-ready           # PreToolUse: registered hard-disabled pass-through
 │   ├── check-tokenless      # SessionStart: version/availability check
 │   ├── install.sh           # Build and install tokenless CLI + register plugin
 │   ├── detect.sh            # Detect tokenless availability

@@ -2,7 +2,7 @@
   "id": "tokenless",
   "name": "Tokenless",
   "version": "@VERSION@",
-  "description": "Unified RTK command rewriting + response/TOON compression + Tool Ready environment pre-check. Wraps tokenless and rtk system binaries via child_process — this is expected and not malicious.",
+  "description": "Unified RTK command rewriting + response/TOON compression + registered but hard-disabled Tool Ready. Wraps tokenless and rtk system binaries via child_process — this is expected and not malicious.",
   "activation": {
     "onCapabilities": ["hook"]
   },
@@ -30,7 +30,7 @@
   },
   "uiHints": {
     "rtk_enabled": { "label": "Enable RTK command rewriting" },
-    "tool_ready_enabled": { "label": "Enable Tool Ready environment pre-check" },
+    "tool_ready_enabled": { "label": "Register Tool Ready hook (hard-disabled)" },
     "response_compression_enabled": { "label": "Enable response compression" },
     "skip_tools": { "label": "Tool names whose responses should not be compressed" },
     "shell_tools": { "label": "Tool names treated as shell/exec (moderate truncation)" },

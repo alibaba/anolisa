@@ -1,10 +1,8 @@
-//! Environment readiness checker for Tool Ready feature.
+//! Dormant environment-readiness implementation for Tool Ready.
 //!
-//! Loads per-tool dependency declarations from tool-ready-spec.json.
-//! Supports both string format ("jq") and object format ({binary, version, package, manager, ...}).
-//! Checks binary availability (with version constraints), config files,
-//! permissions, and network connectivity. Generates a structured
-//! ready checklist and supports auto-fix via config-driven install engine.
+//! Release builds hard-bypass the legacy checks before loading a specification,
+//! repairing the environment, or producing a blocking result. The retained
+//! implementation remains covered by unit tests for a future redesign.
 
 use serde_json::Value;
 use std::fs;
@@ -20,6 +18,22 @@ use std::sync::LazyLock;
 // anchored on digit groups avoids these false matches.
 static VERSION_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"(\d+\.\d+\.\d+)").unwrap());
+
+fn tool_ready_hard_bypassed() -> bool {
+    // Release builds always bypass Tool Ready. Unit tests retain a test-only
+    // escape hatch so the dormant legacy implementation remains covered.
+    #[cfg(test)]
+    {
+        !matches!(
+            std::env::var("TOKENLESS_TOOL_READY_TEST_LEGACY").as_deref(),
+            Ok("1")
+        )
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -1317,6 +1331,29 @@ pub fn run(
     checklist: bool,
     json: bool,
 ) -> Result<(), (String, i32)> {
+    if tool.is_none() && !all && !checklist {
+        return Err(("Specify --tool <name> or --all".to_string(), 1));
+    }
+
+    // HARD BYPASS: the legacy readiness model can incorrectly block valid
+    // agent work. JSON callers receive only {tool,status,enabled}; in
+    // particular, checklist mode never exposes its dormant tools/summary
+    // schema. Re-enabling checks or expanding this contract requires an
+    // intentional source change.
+    if tool_ready_hard_bypassed() {
+        if json {
+            let result = serde_json::json!({
+                "tool": tool.unwrap_or(if all { "all" } else { "checklist" }),
+                "status": "UNKNOWN",
+                "enabled": false,
+            });
+            println!("{}", serde_json::to_string(&result).unwrap());
+        } else {
+            println!("Tool Ready is hard-disabled in this build");
+        }
+        return Ok(());
+    }
+
     let spec_path = find_spec_path().map_err(|e| (e, 1))?;
     let specs = load_spec(&spec_path).map_err(|e| (e, 1))?;
 
@@ -1372,7 +1409,7 @@ pub fn run(
         }
         vec![resolved]
     } else {
-        return Err(("Specify --tool <name> or --all".to_string(), 1));
+        unreachable!("tool arguments were validated before the readiness gate")
     };
 
     for tool_name in &tool_names {

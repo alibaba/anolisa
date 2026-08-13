@@ -14,7 +14,7 @@ anolisa status tokenless
 anolisa doctor tokenless
 anolisa adapter status tokenless
 tokenless stats status
-tokenless env-check --all --checklist
+tokenless env-check --all --json
 ```
 
 如果某条命令失败，先处理该层问题，再继续后面的检查。查看安装计划但不修改系统：
@@ -165,29 +165,22 @@ rtk rewrite "ls -la"
 
 ```bash
 command -v rtk
-tokenless env-check --tool Shell
 ```
 
 如果 RTK 正常但 Agent 中不生效，检查框架支持矩阵、Adapter 状态和是否已经重启会话。
 
 `TOKENLESS_COMPRESSION_ENABLED=0` 不会关闭命令重写。如果必须保留原始 Shell 输入，应禁用 Adapter；使用 OpenClaw Plugin 时也可以设置 `rtk_enabled=false`。
 
-## Tool Ready 报 `NOT_READY`
+## Tool Ready 仍然报告 `NOT_READY`
 
-查看完整清单：
-
-```bash
-tokenless env-check --tool <name>
-tokenless env-check --all --checklist
-```
-
-`NOT_READY` 表示缺少必需依赖；先处理报告的具体二进制、配置、权限或网络问题。自动修复前先确认变更：
+当前构建已硬关闭 Tool Ready，不会输出 `NOT_READY` 或阻断工具。先确认实际生效的二进制：
 
 ```bash
-tokenless env-check --tool <name> --fix
+tokenless --version
+tokenless env-check --tool <name> --json
 ```
 
-`--fix` 可能调用包管理器或创建链接，不应在不了解输出时直接加 `sudo`。
+JSON 应包含 `"status":"UNKNOWN"` 和 `"enabled":false`。如果仍得到 `NOT_READY`，说明线上混用了新旧版本。请同时更新 Tokenless 二进制和共享 Adapter 资源，然后重启 Agent。旧的 `TOKENLESS_TOOL_READY_ENABLED` 环境变量不会生效。
 
 ## 数据库错误
 

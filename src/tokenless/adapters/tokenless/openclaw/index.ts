@@ -477,7 +477,7 @@ export default {
   id: "tokenless",
   name: "Tokenless",
   version: "1.0.0",
-  description: "Unified RTK command rewriting + response/TOON compression + Tool Ready",
+  description: "Unified RTK command rewriting + response/TOON compression + hard-disabled Tool Ready",
   register(api: any) {
   const pluginConfig = api.config ?? {};
   const rtkEnabled = pluginConfig.rtk_enabled !== false;
@@ -532,7 +532,7 @@ export default {
     },
   );
 
-  // ---- 1. Tool Ready environment pre-check (before_tool_call) -----------------
+  // ---- 1. Registered hard-disabled Tool Ready hook (before_tool_call) ---------
 
   if (toolReadyEnabled && checkTokenless()) {
     api.on(
@@ -711,7 +711,6 @@ export default {
   if (verbose) {
     const features = [
       rtkEnabled && rtkAvailable ? "rtk-rewrite" : null,
-      toolReadyEnabled && tokenlessAvailable ? "tool-ready" : null,
       responseCompressionEnabled && tokenlessAvailable ? "response-compression" : null,
       toonCompressionEnabled && tokenlessAvailable ? "toon-compression" : null,
     ].filter(Boolean);

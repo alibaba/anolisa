@@ -13,7 +13,7 @@
 | `tokenless compress-toon` | 将 JSON 编码为 TOON |
 | `tokenless decompress-toon` | 将 TOON 解码为 JSON |
 | `tokenless retrieve` | 取回被截断并写入 Stash 的 Payload |
-| `tokenless env-check` | 检查工具依赖与环境 |
+| `tokenless env-check` | 报告旧版环境检查已硬关闭 |
 | `tokenless stats` | 查询和控制本地统计 |
 | `tokenless mcp serve` | 启动提供取回工具的 MCP stdio 服务 |
 
@@ -193,58 +193,32 @@ tokenless mcp serve
 
 ## `env-check`
 
-检查单个工具：
+Tool Ready 已硬关闭。文本输出只报告这一状态，不会读取规范或改变环境。
+任何环境变量都无法重新启用它。
+
+所有 JSON 调用都只返回三个字段：
+
+```json
+{"tool":"Shell","status":"UNKNOWN","enabled":false}
+```
+
+`tool` 是指定的工具名、`all` 或 `checklist`。硬关闭契约绝不会包含休眠旧版
+清单的 `tools` 或 `summary` 字段。
+
+报告单个工具对应的硬关闭状态：
 
 ```bash
 tokenless env-check --tool Shell
 ```
 
-检查全部已声明工具：
+报告全部工具或清单模式的硬关闭状态：
 
 ```bash
 tokenless env-check --all
 tokenless env-check --all --json
-tokenless env-check --all --checklist
-```
-
-以单个 JSON 对象输出完整清单，供 Hook、插件和 CI 门禁消费：
-
-```bash
+tokenless env-check --checklist
 tokenless env-check --checklist --json
 ```
-
-```json
-{
-  "tools": [
-    {
-      "tool": "Shell",
-      "status": "PARTIAL",
-      "required": [{ "binary": "jq", "status": "INSTALLED" }],
-      "recommended": [{ "binary": "rtk", "status": "MISSING" }],
-      "config": [{ "name": "~/.tokenless/config.json", "ok": true }],
-      "permissions": [{ "name": "exec_shell", "ok": true }],
-      "network": [{ "name": "https_outbound", "ok": true }]
-    }
-  ],
-  "summary": { "ready": 0, "partial": 1, "not_ready": 0, "unknown": 0, "total": 1 }
-}
-```
-
-清单 JSON 约定：
-
-- `tools` 按工具名排序，重复运行输出完全一致，可安全用于 diff、hash、缓存或快照。
-- `status` 使用固定标签 `READY` / `PARTIAL` / `NOT_READY` / `UNKNOWN`。
-- 依赖项报告 `INSTALLED`、`MISSING` 或 `OUTDATED (<installed>/<required>)`；配置、权限和网络项报告 `ok: true|false`。
-- `summary` 对同一结果汇总：`ready`、`partial`、`not_ready`、`unknown` 与 `total`。
-
-状态含义：
-
-| 状态 | 含义 |
-|------|------|
-| `READY` | 必需依赖、推荐依赖、配置和权限均满足 |
-| `PARTIAL` | 必需依赖和权限已满足，但缺少推荐依赖、配置项或网络检查 |
-| `NOT_READY` | 缺少必需依赖或权限，不应重复调用该工具 |
-| `UNKNOWN` | 依赖规范中没有该工具 |
 
 自动修复：
 
@@ -252,7 +226,7 @@ tokenless env-check --checklist --json
 tokenless env-check --tool Shell --fix
 ```
 
-> `--fix` 只尝试修复缺失的必需依赖，不会安装推荐依赖。它可能调用系统包管理器、安装依赖或创建链接。应先阅读普通检查输出，并在明确接受环境变更后使用；需要管理员权限时，按输出提示操作。
+> 硬旁路生效期间，`--fix` 不会调用包管理器或修改环境。如果未来重新设计并启用，保留的旧版实现只会尝试修复缺失的必需依赖。
 
 ## `stats`
 

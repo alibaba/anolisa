@@ -6,8 +6,7 @@ static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
 struct EnvGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
-    key: &'static str,
-    prev: Option<std::ffi::OsString>,
+    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
 }
 
 impl EnvGuard {
@@ -15,23 +14,53 @@ impl EnvGuard {
         let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var_os(key);
         unsafe { std::env::set_var(key, value) };
-        EnvGuard { _lock: lock, key, prev }
+        EnvGuard {
+            _lock: lock,
+            previous: vec![(key, prev)],
+        }
     }
 
     fn set_spec(path: &str) -> Self {
-        Self::set("TOKENLESS_TOOL_READY_SPEC", path)
+        let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let spec_prev = std::env::var_os("TOKENLESS_TOOL_READY_SPEC");
+        let legacy_prev = std::env::var_os("TOKENLESS_TOOL_READY_TEST_LEGACY");
+        unsafe {
+            std::env::set_var("TOKENLESS_TOOL_READY_SPEC", path);
+            std::env::set_var("TOKENLESS_TOOL_READY_TEST_LEGACY", "1");
+        }
+        EnvGuard {
+            _lock: lock,
+            previous: vec![
+                ("TOKENLESS_TOOL_READY_SPEC", spec_prev),
+                ("TOKENLESS_TOOL_READY_TEST_LEGACY", legacy_prev),
+            ],
+        }
     }
 }
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         unsafe {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
+            for (key, prev) in self.previous.iter().rev() {
+                match prev {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
             }
         }
     }
+}
+
+#[test]
+fn tool_ready_is_hard_bypassed_by_default() {
+    let _guard = EnvGuard::set("TOKENLESS_TOOL_READY_ENABLED", "1");
+    assert!(tool_ready_hard_bypassed());
+}
+
+#[test]
+fn tool_ready_legacy_path_has_a_test_only_override() {
+    let _guard = EnvGuard::set("TOKENLESS_TOOL_READY_TEST_LEGACY", "1");
+    assert!(!tool_ready_hard_bypassed());
 }
 
 #[test]
@@ -1297,6 +1326,7 @@ fn run_fix_skips_recommended_only_missing_deps() {
     let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let prev_spec = std::env::var_os("TOKENLESS_TOOL_READY_SPEC");
     let prev_fix = std::env::var_os("TOKENLESS_ENV_FIX_SCRIPT");
+    let prev_legacy = std::env::var_os("TOKENLESS_TOOL_READY_TEST_LEGACY");
 
     let dir = tempfile::tempdir().unwrap();
     let spec_path = dir.path().join("recommended-only-spec.json");
@@ -1323,6 +1353,7 @@ fn run_fix_skips_recommended_only_missing_deps() {
     unsafe {
         std::env::set_var("TOKENLESS_TOOL_READY_SPEC", &spec_path);
         std::env::set_var("TOKENLESS_ENV_FIX_SCRIPT", &fix_script_path);
+        std::env::set_var("TOKENLESS_TOOL_READY_TEST_LEGACY", "1");
     }
 
     let result = run(Some("Shell"), false, true, false, true);
@@ -1335,6 +1366,10 @@ fn run_fix_skips_recommended_only_missing_deps() {
         match prev_fix {
             Some(v) => std::env::set_var("TOKENLESS_ENV_FIX_SCRIPT", v),
             None => std::env::remove_var("TOKENLESS_ENV_FIX_SCRIPT"),
+        }
+        match prev_legacy {
+            Some(v) => std::env::set_var("TOKENLESS_TOOL_READY_TEST_LEGACY", v),
+            None => std::env::remove_var("TOKENLESS_TOOL_READY_TEST_LEGACY"),
         }
     }
 

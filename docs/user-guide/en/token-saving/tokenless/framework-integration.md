@@ -8,16 +8,18 @@ Tokenless uses adapters to connect compression, command rewriting, and environme
 
 | Framework | Value | Tool Ready | Rewrite behavior | Response delivery | TOON | Schema |
 |-----------|-------|------------|------------------|-------------------|------|--------|
-| cosh | `cosh` | ✅ | Replaces supported shell input | Cosh-NG replaces the response; legacy Copilot Shell appends context | Attempted after response compression | ✅ |
-| OpenClaw | `openclaw` | ✅ | Replaces the `exec` command input | Replaces the persisted tool-result message | Off by default; opt in | — |
-| Hermes | `hermes` | ✅ | Blocks the first call and asks the agent to retry | Replaces the result string | Attempted after response compression | — |
-| Qoder | `qoder` | ✅ | Emits rewritten shell input | Emits `additionalContext` | Attempted after response compression | — |
-| Claude Code | `claude-code` | ✅ | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Used only when the replacement can remain text | — |
-| Codex | `codex` | ✅ | Replaces supported shell input | Keeps the original and adds analysis or a compressed alternative | Used to build that alternative | — |
-| OpenCode | `opencode` | ✅ | Replaces Bash input | Replaces tool output | Attempted after response compression | ✅ |
-| Qwen Code | `qwencode` | ✅ | Emits rewritten shell input | Emits `additionalContext` | Attempted after response compression | ✅ |
+| cosh | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces the response; legacy Copilot Shell appends context | Attempted after response compression | ✅ |
+| OpenClaw | `openclaw` | Hard-disabled | Replaces the `exec` command input | Replaces the persisted tool-result message | Off by default; opt in | — |
+| Hermes | `hermes` | Hard-disabled | Blocks the first call and asks the agent to retry | Replaces the result string | Attempted after response compression | — |
+| Qoder | `qoder` | Hard-disabled | Emits rewritten shell input | Emits `additionalContext` | Attempted after response compression | — |
+| Claude Code | `claude-code` | Hard-disabled | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Used only when the replacement can remain text | — |
+| Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original and adds analysis or a compressed alternative | Used to build that alternative | — |
+| OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Attempted after response compression | ✅ |
+| Qwen Code | `qwencode` | Hard-disabled | Emits rewritten shell input | Emits `additionalContext` | Attempted after response compression | ✅ |
 
 “—” means that the current adapter does not register that capability. The corresponding Tokenless CLI command may still be available.
+
+Tool Ready remains registered by these adapters but is unconditionally hard-disabled before checking, repair, or blocking. No runtime setting can re-enable it. Post-tool failure attribution is independent.
 
 `additionalContext` is an additive hook field. The Tokenless source does not remove the original result on those paths; the final treatment also depends on the host implementation. A statistics record proves that a candidate became smaller, not that the host removed the original from its model request.
 
@@ -172,7 +174,7 @@ Extensions are discovered at startup. Restart cosh, run a shell-tool task, and i
 
 ### OpenClaw
 
-The install script uses OpenClaw's unsafe-install override as described above. Restart the gateway after accepting and installing the plugin. Response compression, Tool Ready, and RTK rewriting default to enabled in the plugin code; TOON defaults to disabled.
+The install script uses OpenClaw's unsafe-install override as described above. Restart the gateway after accepting and installing the plugin. Response compression and RTK rewriting default to enabled in the plugin code; TOON defaults to disabled. The plugin's Tool Ready option currently has no effect because the underlying check is hard-disabled.
 
 ### Hermes
 

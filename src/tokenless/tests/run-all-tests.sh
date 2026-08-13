@@ -361,116 +361,19 @@ test_tool_ready() {
         || log_fail "tool_ready_hook.sh missing/unreadable or bash parse failed"
 
     # ==========================================
-    # 6.2 All 4 spec categories produce valid status
+    # 6.2 Rust env-check: unconditional hard bypass
     # ==========================================
-    log_info "Test 6.2: All 4 categories return valid status"
-    for tool in Shell WebFetch Read Write; do
-        local out=$(tokenless env-check --tool "$tool" 2>&1)
-        if echo "$out" | grep -qE 'READY|PARTIAL|NOT_READY'; then
-            log_pass "env-check --tool $tool returns valid status"
-        else log_fail "env-check --tool $tool invalid: $out"; fi
-    done
+    log_info "Test 6.2: env-check hard bypass ignores legacy opt-in"
+    local json_out
+    json_out=$(TOKENLESS_TOOL_READY_ENABLED=1 \
+        TOKENLESS_TOOL_READY_SPEC=/path/that/must/not/be-read \
+        tokenless env-check --tool Shell --json 2>&1)
+    assert_contains "$json_out" '"status":"UNKNOWN"' "env-check hard bypass returns UNKNOWN"
+    assert_contains "$json_out" '"enabled":false' "env-check hard bypass reports disabled"
 
-    # ==========================================
-    # 6.3 Alias reverse lookup (exec→Shell, Bash→Shell)
-    # ==========================================
-    log_info "Test 6.3: Alias reverse lookup"
-    local exec_out=$(tokenless env-check --tool exec 2>&1)
-    echo "$exec_out" | grep -qE 'READY|PARTIAL|NOT_READY' && log_pass "Alias 'exec' resolves to Shell" || log_fail "Alias 'exec' not resolved"
-    local bash_out=$(tokenless env-check --tool Bash 2>&1)
-    echo "$bash_out" | grep -qE 'READY|PARTIAL|NOT_READY' && log_pass "Alias 'Bash' resolves to Shell" || log_fail "Alias 'Bash' not resolved"
-    # Docker/Git/Uv/Cargo are NOT aliases → UNKNOWN
-    local docker_unknown=$(tokenless env-check --tool Docker 2>&1)
-    assert_contains "$docker_unknown" "UNKNOWN" "Docker is not a spec key → UNKNOWN"
-
-    # ==========================================
-    # 6.4 Case-insensitive spec key lookup
-    # ==========================================
-    log_info "Test 6.4: Case-insensitive spec key"
-    local lower=$(tokenless env-check --tool shell 2>&1)
-    echo "$lower" | grep -qE 'READY|PARTIAL|NOT_READY' && log_pass "Lowercase 'shell' resolves to Shell" || log_fail "Lowercase 'shell' not resolved"
-    local webfetch=$(tokenless env-check --tool webfetch 2>&1)
-    echo "$webfetch" | grep -qE 'READY|PARTIAL|NOT_READY' && log_pass "Lowercase 'webfetch' resolves to WebFetch" || log_fail "Lowercase 'webfetch' not resolved"
-
-    # ==========================================
-    # 6.5 Unknown tool → UNKNOWN status
-    # ==========================================
-    log_info "Test 6.5: Unknown tool → UNKNOWN"
-    local unknown=$(tokenless env-check --tool NonExistentTool99 2>&1)
-    assert_contains "$unknown" "UNKNOWN" "Unknown tool returns UNKNOWN status"
-    local unknown_json=$(tokenless env-check --tool NonExistentTool99 --json 2>&1)
-    assert_contains "$unknown_json" '"UNKNOWN"' "Unknown tool --json returns UNKNOWN"
-    assert_contains "$unknown_json" '"NonExistentTool99"' "Unknown tool --json includes tool name"
-
-    # ==========================================
-    # 6.6 --checklist --all: only 4 categories present
-    # ==========================================
-    log_info "Test 6.6: --checklist --all lists only 4 categories"
-    local checklist=$(tokenless env-check --checklist --all 2>&1)
-    assert_contains "$checklist" "Shell" "--checklist includes Shell"
-    assert_contains "$checklist" "WebFetch" "--checklist includes WebFetch"
-    assert_contains "$checklist" "Read" "--checklist includes Read"
-    assert_contains "$checklist" "Write" "--checklist includes Write"
-    assert_contains "$checklist" "Summary:" "--checklist includes summary"
-    # Verify removed categories absent
-    ! echo "$checklist" | grep -q "^Docker" && log_pass "No Docker category (merged into Shell)" || log_fail "Docker still present"
-    ! echo "$checklist" | grep -q "^Bash" && log_pass "No Bash category (merged into Shell)" || log_fail "Bash still present"
-
-    # ==========================================
-    # 6.7 --all detailed output: correct manager labels
-    # ==========================================
-    log_info "Test 6.7: Manager labels show detected system manager (dnf)"
-    local all_out=$(tokenless env-check --all 2>&1)
-    echo "$all_out" | grep -q '\[dnf\]' && log_pass "Manager labels show [dnf] for rpm deps" || log_fail "Manager labels missing [dnf]"
-    echo "$all_out" | grep -q '\[pip\]' && log_pass "Manager labels show [pip] for pip deps" || log_fail "Manager labels missing [pip]"
-
-    # ==========================================
-    # 6.8 --json output schema validation
-    # ==========================================
-    log_info "Test 6.8: --json output schema"
-    local json_out=$(tokenless env-check --tool Shell --json 2>&1)
-    assert_contains "$json_out" '"tool"' "--json contains tool field"
-    assert_contains "$json_out" '"status"' "--json contains status field"
-    assert_contains "$json_out" '"Shell"' "--json uses exact spec key name"
-
-    # ==========================================
-    # 6.9 Shell: required (bash, jq) + recommended (git, docker, uv, cargo, rustc) + permissions
-    # ==========================================
-    log_info "Test 6.9: Shell required + recommended + permissions"
-    local shell_out=$(tokenless env-check --tool Shell 2>&1)
-    assert_contains "$shell_out" "bash" "Shell lists bash"
-    assert_contains "$shell_out" "jq" "Shell lists jq"
-    assert_contains "$shell_out" "git" "Shell lists git in recommended"
-    assert_contains "$shell_out" "docker" "Shell lists docker in recommended"
-    assert_contains "$shell_out" "uv" "Shell lists uv in recommended"
-    assert_contains "$shell_out" "cargo" "Shell lists cargo in recommended"
-    echo "$shell_out" | grep -q "exec_shell" && log_pass "Shell includes exec_shell permission" || log_fail "Shell missing exec_shell"
-
-    # ==========================================
-    # 6.10 Shell recommended: no rustup (removed from spec)
-    # ==========================================
-    log_info "Test 6.10: Shell recommended has no rustup"
-    ! echo "$shell_out" | grep -q "rustup" && log_pass "Shell does not list rustup (removed)" || log_fail "Shell still lists rustup"
-
-    # ==========================================
-    # 6.11 Shell recommended: no docker-compose (removed from spec)
-    # ==========================================
-    log_info "Test 6.11: Shell recommended has no docker-compose"
-    ! echo "$shell_out" | grep -q "docker-compose" && log_pass "Shell does not list docker-compose (removed)" || log_fail "Shell still lists docker-compose"
-
-    # ==========================================
-    # 6.12 --fix: Shell (rpm + pip deps)
-    # ==========================================
-    log_info "Test 6.12: --fix Shell (deps already available)"
-    local fix_shell=$(tokenless env-check --fix --tool Shell 2>&1)
-    echo "$fix_shell" | grep -qE "READY|already" && log_pass "--fix --tool Shell: available deps handled" || log_fail "--fix --tool Shell unexpected: $fix_shell"
-
-    # ==========================================
-    # 6.13 Alias lookup with --fix (exec → Shell)
-    # ==========================================
-    log_info "Test 6.13: Alias lookup with --fix (exec→Shell)"
-    local fix_exec=$(tokenless env-check --fix --tool exec 2>&1)
-    echo "$fix_exec" | grep -qE "READY|already" && log_pass "--fix --tool exec resolves to Shell" || log_fail "--fix --tool exec unexpected: $fix_exec"
+    local text_out
+    text_out=$(TOKENLESS_TOOL_READY_ENABLED=1 tokenless env-check --tool Shell 2>&1)
+    assert_contains "$text_out" "hard-disabled" "legacy opt-in cannot re-enable env-check"
 
     # ==========================================
     # 6.14 env-fix script: check command
@@ -533,48 +436,41 @@ test_tool_ready() {
     fi
 
     # ==========================================
-    # 6.21 tool-ready hook: READY (silent exit)
+    # 6.21 tool-ready hook: unconditional hard bypass
     # ==========================================
-    log_info "Test 6.21: tool-ready hook — READY silent exit"
-    local ready_out=$(echo '{"tool_name":"Shell","tool_input":{"command":"ls"}}' | bash "$READY_SCRIPT" 2>&1)
-    [ -z "$ready_out" ] && log_pass "tool-ready READY produces no output" || log_fail "tool-ready READY unexpected output: $ready_out"
-
-    # ==========================================
-    # 6.22 tool-ready hook: NOT_READY + Skip retry
-    # ==========================================
-    log_info "Test 6.22: tool-ready hook — NOT_READY"
-    local tmp_dir
-    local tmp_spec
-    local tmp_fixer
-    local fix_marker
-    if ! tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/tokenless-tool-ready.XXXXXX"); then
-        log_fail "unable to create private temporary directory"
-        return
-    fi
-    chmod 0700 "$tmp_dir"
-    tmp_spec="$tmp_dir/tool-ready-spec.json"
-    tmp_fixer="$tmp_dir/tokenless-env-fix.sh"
-    fix_marker="$tmp_dir/fixer-called"
-    cat > "$tmp_spec" << 'EOF'
-{"TestMissing":{"required":[{"binary":"fakebin99","package":"fakebin99","manager":"rpm"}],"recommended":[],"permissions":[],"network":[]}}
+    log_info "Test 6.21: tool-ready hook — hard bypass"
+    local bypass_dir
+    bypass_dir=$(mktemp -d)
+    local bypass_spec="$bypass_dir/tool-ready-spec.json"
+    local bypass_fixer="$bypass_dir/tokenless-env-fix.sh"
+    local bypass_marker="$bypass_dir/fixer-called"
+    cat > "$bypass_spec" <<'EOF'
+{"TestMissing":{"required":[{"binary":"tokenless-missing-for-test","package":"tokenless-missing-for-test","manager":"rpm"}],"recommended":[],"permissions":[]}}
 EOF
-    cat > "$tmp_fixer" << 'EOF'
+    cat > "$bypass_fixer" <<'EOF'
 #!/usr/bin/env bash
+set -euo pipefail
+[ "${1:-}" = "fix-all" ]
+cat >/dev/null
 touch "$TOKENLESS_FIX_MARKER"
 EOF
-    chmod 0644 "$tmp_fixer"
-    local not_ready_out
-    not_ready_out=$(echo '{"tool_name":"TestMissing","tool_input":{"command":"test"}}' \
-        | TOKENLESS_TOOL_READY_SPEC="$tmp_spec" \
-          TOKENLESS_ENV_FIX_SCRIPT="$tmp_fixer" \
-          TOKENLESS_FIX_MARKER="$fix_marker" \
+    chmod 0644 "$bypass_fixer"
+
+    local ready_out
+    ready_out=$(echo '{"tool_name":"TestMissing","tool_input":{"command":"test"}}' \
+        | TOKENLESS_TOOL_READY_ENABLED=1 \
+          TOKENLESS_TOOL_READY_SPEC="$bypass_spec" \
+          TOKENLESS_ENV_FIX_SCRIPT="$bypass_fixer" \
+          TOKENLESS_FIX_MARKER="$bypass_marker" \
           bash "$READY_SCRIPT" 2>&1)
-    [ -f "$fix_marker" ] \
-        && log_pass "tool-ready invokes a non-executable fixer through bash" \
-        || log_fail "tool-ready skipped the readable 0644 fixer"
-    assert_contains "$not_ready_out" "NOT_READY" "hook outputs NOT_READY"
-    assert_contains "$not_ready_out" "Skip retry" "hook includes Skip retry guidance"
-    rm -rf "$tmp_dir"
+    if [ -n "$ready_out" ]; then
+        log_fail "tool-ready hard bypass unexpected output: $ready_out"
+    elif [ -e "$bypass_marker" ]; then
+        log_fail "tool-ready hard bypass invoked the legacy fixer"
+    else
+        log_pass "tool-ready hard bypass emits nothing and skips the fixer"
+    fi
+    rm -rf "$bypass_dir"
 
     # ==========================================
     # 6.23 Attribution: ENV_DEPENDENCY_MISSING

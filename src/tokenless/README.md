@@ -9,17 +9,17 @@ Token-Less combines complementary strategies to minimize LLM token consumption:
 - **Schema & Response Compression** — Compresses OpenAI Function Calling tool definitions and API responses via the `tokenless-schema` library, cutting structural overhead before tokens ever reach the context window.
 - **TOON Context Compression** — Encodes JSON responses to TOON (Token-Oriented Object Notation) format via the `toon` binary, reducing token usage by 15-40% for structured data.
 - **Command Rewriting** — Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI command output, eliminating noise that would otherwise waste 60–90% of tokens.
-- **Tool Ready** — Pre-checks tool execution environments (binaries, configs, permissions, network), auto-fixes missing dependencies, and classifies execution failures as environment issues vs logic errors — reducing wasted retry tokens.
+- **Tool Ready (legacy, hard-disabled)** — Its pre-call dependency checks are retained in source but unconditionally bypassed while the readiness model is redesigned.
 
 Framework integrations are available for:
 
 - **OpenClaw plugin** — covers command rewriting, response compression, and schema compression in one plugin.
 - **copilot-shell hook** — intercepts Shell commands via a PreToolUse hook and delegates to RTK for command rewriting + output filtering.
-- **Hermes Agent plugin** — response compression, TOON encoding, command rewriting (block + suggest), and Tool Ready environment pre-check via Hermes's native plugin system.
-- **Qoder CLI plugin** — Tool Ready, command rewriting, and response compression via Qoder's native hook system.
-- **Claude Code plugin** — RTK command rewriting, response/TOON compression, and Tool Ready via Claude Code's official plugin marketplace.
-- **Codex plugin** — response compression, TOON encoding, Tool Ready, and command rewriting via Codex's native hook system.
-- **OpenCode plugin** — schema/response/TOON compression, Tool Ready, and command rewriting via OpenCode's local plugin API.
+- **Hermes Agent plugin** — response compression, TOON encoding, command rewriting (block + suggest), and registered but hard-disabled Tool Ready via Hermes's native plugin system.
+- **Qoder CLI plugin** — registered but hard-disabled Tool Ready, command rewriting, and response compression via Qoder's native hook system.
+- **Claude Code plugin** — RTK command rewriting, response/TOON compression, and registered but hard-disabled Tool Ready via Claude Code's official plugin marketplace.
+- **Codex plugin** — response compression, TOON encoding, registered but hard-disabled Tool Ready, and command rewriting via Codex's native hook system.
+- **OpenCode plugin** — schema/response/TOON compression, registered but hard-disabled Tool Ready, and command rewriting via OpenCode's local plugin API.
 
 ## Features
 
@@ -30,14 +30,14 @@ Framework integrations are available for:
 | Reversible compression (stash) | — | Dropped array items are stashed and retrievable via `<<tokenless:KEY>>` markers |
 | TOON context compression | 15–40% | Encodes JSON to TOON format for LLMs |
 | Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported) |
-| Tool Ready | reduces retry waste | Pre-check env, auto-fix deps, failure attribution |
+| Tool Ready | reduces retry waste | Legacy pre-call check, auto-fix, and blocking; hard-disabled |
 | OpenClaw plugin | — | Command rewriting ✅, Response compression ✅, Schema compression ✅ |
-| copilot-shell hooks | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅, TOON ✅, Schema compression ✅ |
-| Hermes Agent plugin | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅, TOON ✅, Schema compression ⏳ |
-| Qoder CLI plugin | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅ |
-| Claude Code plugin | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅, TOON ✅ |
-| Codex plugin | — | Tool Ready ✅, Command rewriting ✅, Response compression ✅, TOON ✅ |
-| OpenCode plugin | — | Tool Ready ✅, Command rewriting ✅, Schema compression ✅, Response compression ✅, TOON ✅ |
+| copilot-shell hooks | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅, Schema compression ✅ |
+| Hermes Agent plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅, Schema compression ⏳ |
+| Qoder CLI plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅ |
+| Claude Code plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅ |
+| Codex plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅ |
+| OpenCode plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Schema compression ✅, Response compression ✅, TOON ✅ |
 | Zero runtime deps | — | Pure Rust, single static binary |
 
 ## Applicable Scenarios & Expected Effects
@@ -89,7 +89,7 @@ Token-Less/
 │   ├── common/                  # Shared: hooks, spec, env-fix, commands, cosh-extension
 │   │   ├── hooks/               # copilot-shell hooks (tool-ready + rewrite + compression)
 │   │   ├── cosh-extension.json  # copilot-shell extension manifest (references common/hooks/)
-│   │   ├── tool-ready-spec.json # Tool dependency spec (4 categories)
+│   │   ├── tool-ready-spec.json # Dormant legacy dependency specification
 │   │   ├── tokenless-env-fix.sh # Auto-fix script for missing deps
 │   │   └── commands/            # Hook command configs
 │   ├── openclaw/                # OpenClaw plugin + agent scripts
@@ -271,7 +271,7 @@ The adapter provides hooks that are auto-discovered by copilot-shell via the cos
 
 | Hook | Event | File | Description |
 |------|-------|------|-------------|
-| Tool environment check | PreToolUse (all tools) | `tool_ready_hook.sh` | Pre-check env, auto-fix, skip-retry guidance |
+| Tool Ready (hard-disabled) | PreToolUse (all tools) | `tool_ready_hook.sh` | Silent pass-through; no check, repair, context, or block |
 | Command rewriting | PreToolUse (Shell) | `rewrite_hook.py` | Rewrite commands via RTK |
 | Response compression + attribution + TOON | PostToolUse | `compress_response_hook.py` | Compress + env error attribution + TOON |
 | Schema compression | BeforeModel | `compress_schema_hook.py` | Compress tool schemas |
@@ -286,37 +286,49 @@ Hooks are registered via the cosh extension manifest (`cosh-extension.json`) and
 
 ## Tool Ready
 
-Tool Ready prevents wasted LLM tokens from retrying commands that fail due to missing environment dependencies.
+Tool Ready was designed to prevent wasted LLM tokens from retrying commands that fail due to missing environment dependencies.
 
-**How it works**: Before each tool call, the `tool_ready_hook.sh` hook checks the tool's dependency list (from `tool-ready-spec.json`). If dependencies are missing, it reports `NOT_READY` with "Skip retry" guidance so the LLM doesn't waste tokens retrying a command that can't succeed. After a tool call fails, the compression hook classifies the error (missing binary, permissions, network, etc.) and injects attribution context.
+**Legacy behavior**: Before each tool call, the `tool_ready_hook.sh` hook checked the tool's dependency list (from `tool-ready-spec.json`). Missing dependencies could produce `NOT_READY` with "Skip retry" guidance.
+
+Tool Ready is currently hard-disabled across all adapters. Its registered hooks return before reading the dependency specification, checking the environment, attempting repair, or emitting a block decision. No environment variable can re-enable the legacy behavior; doing so requires an intentional source change and a new release.
+
+Post-tool failure attribution, response compression, command rewriting, TOON encoding, Stash, and statistics are independent and remain active.
 
 ### env-check CLI
 
 ```bash
-# Check a specific tool
+# Report the disabled state for a specific tool
 tokenless env-check --tool Shell
 
-# Check all tools
+# Report the disabled state for all tools
 tokenless env-check --all
 
-# Generate checklist
+# Report the disabled state for checklist mode
 tokenless env-check --checklist
 
-# Machine-readable checklist (single JSON object, tools sorted by name)
+# Machine-readable disabled state; no tools/summary checklist is emitted
 tokenless env-check --checklist --json
 
-# Check and auto-fix missing deps
+# Accepted for compatibility; does not inspect or repair the environment
 tokenless env-check --tool Shell --fix
 ```
 
-`--checklist --json` emits one `{tools, summary}` object with stable ordering
-for hooks, plugins, and CI gates; see the
-[CLI reference](../../docs/user-guide/en/token-saving/tokenless/cli-reference.md#env-check)
-for the full schema.
+These commands currently report that Tool Ready is hard-disabled and do not inspect or modify the environment.
+Every JSON mode returns exactly the same three-field schema:
+
+```json
+{"tool":"checklist","status":"UNKNOWN","enabled":false}
+```
+
+`tool` identifies the requested tool or the `all`/`checklist` scope. The dormant
+legacy `tools` and `summary` checklist fields are never emitted while the hard
+bypass is active.
 
 ### Configuration
 
-Per-tool dependencies are declared in `tool-ready-spec.json` (shipped within the adapter bundle at `common/tool-ready-spec.json`):
+The dormant legacy per-tool dependencies remain in `tool-ready-spec.json`
+(shipped within the adapter bundle at `common/tool-ready-spec.json`). The hard
+bypass does not read this file:
 
 ```json
 {
@@ -343,6 +355,7 @@ The plugin hooks into the OpenClaw agent loop at two stages:
 
 | Hook | Event | Action | Status |
 |---|---|---|---|
+| Tool Ready | `before_tool_call` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
 | Command rewriting | `before_tool_call` | Rewrites `exec` commands to RTK equivalents for filtered output | ✅ Active |
 | Response compression | `tool_result_persist` | Compresses tool results before they enter the context window | ✅ Active |
 | Schema compression | — | Not supported by OpenClaw's hook system | ⏳ → ✅ |
@@ -371,7 +384,7 @@ The plugin registers hooks at three Hermes events, covering five strategies:
 
 | Strategy | Event | Action | Status |
 |---|---|---|---|
-| Tool Ready | `pre_tool_call` | Environment readiness pre-check with auto-fix and skip-retry feedback | ✅ Active |
+| Tool Ready | `pre_tool_call` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
 | Command rewriting | `pre_tool_call` | Blocks original command, suggests `rtk`-rewritten version (one extra round-trip) | ✅ Active |
 | Response compression | `transform_tool_result` | Compresses tool results via `tokenless compress-response` | ✅ Active |
 | TOON encoding | `transform_tool_result` | Pipeline step after response compression — encodes JSON to TOON format | ✅ Active |
@@ -408,7 +421,7 @@ The plugin registers hooks at three Qoder events, covering three strategies:
 
 | Strategy | Event | Action | Status |
 |---|---|---|---|
-| Tool Ready | `PreToolUse` | Environment readiness pre-check with auto-fix and skip-retry feedback | ✅ Active |
+| Tool Ready | `PreToolUse` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
 | Command rewriting | `PreToolUse` | Rewrites shell commands via RTK for token savings | ✅ Active |
 | Response compression | `PostToolUse` | Compresses tool responses and encodes to TOON format | ✅ Active |
 
@@ -426,7 +439,7 @@ The plugin registers hooks at two Claude Code events, covering four strategies:
 
 | Strategy | Event | Action | Status |
 |---|---|---|---|
-| Tool Ready | `PreToolUse` | Environment readiness pre-check with auto-fix and skip-retry feedback | ✅ Active |
+| Tool Ready | `PreToolUse` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
 | Command rewriting | `PreToolUse` (Bash) | Rewrites shell commands via RTK for token savings | ✅ Active |
 | Response compression | `PostToolUse` | Compresses tool responses and encodes to TOON format | ✅ Active |
 | TOON encoding | `PostToolUse` | Pipeline step after response compression — encodes JSON to TOON format | ✅ Active |
@@ -446,7 +459,7 @@ The plugin registers hooks at four Codex events, covering four strategies:
 | Strategy | Event | Action | Status |
 |---|---|---|---|
 | Session check | `SessionStart` | Verifies tokenless CLI is installed and functional (non-blocking) | ✅ Active |
-| Tool Ready | `PreToolUse` | Environment readiness pre-check with auto-fix and skip-retry feedback | ✅ Active |
+| Tool Ready | `PreToolUse` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
 | Command rewriting | `PreToolUse` | Rewrites shell commands via RTK for token savings | ✅ Active |
 | Response compression | `PostToolUse` | Compresses tool responses and encodes to TOON format, injects compressed summary as `additionalContext` | ✅ Active |
 
@@ -465,7 +478,7 @@ replaces the original model-visible response instead of being appended to it.
 
 | Strategy | Event | Action | Status |
 |---|---|---|---|
-| Tool Ready | `tool.execute.before` | Checks dependencies and blocks calls that cannot run | ✅ Active |
+| Tool Ready | `tool.execute.before` | Registered silent pass-through; no check, repair, context, or block | ⛔ Hard-disabled |
 | Command rewriting | `tool.execute.before` (bash) | Rewrites shell commands via RTK | ✅ Active |
 | Response + TOON compression | `tool.execute.after` | Replaces structured tool output with a smaller representation | ✅ Active |
 | Schema compression | `tool.definition` | Compresses tool descriptions and JSON Schemas | ✅ Active |

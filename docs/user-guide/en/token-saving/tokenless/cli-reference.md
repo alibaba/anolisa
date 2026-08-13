@@ -13,7 +13,7 @@ The `tokenless` CLI can compress schemas and responses, encode and decode TOON, 
 | `tokenless compress-toon` | Encode JSON as TOON |
 | `tokenless decompress-toon` | Decode TOON to JSON |
 | `tokenless retrieve` | Recover a payload truncated into Stash |
-| `tokenless env-check` | Check tool dependencies and environment |
+| `tokenless env-check` | Report the hard-disabled state of the legacy environment check |
 | `tokenless stats` | Query and control local statistics |
 | `tokenless mcp serve` | Start an MCP stdio server for retrieval |
 
@@ -193,58 +193,34 @@ It exposes `tokenless_retrieve`, allowing an MCP-capable agent to recover Stash 
 
 ## `env-check`
 
-Check one tool:
+Tool Ready is hard-disabled. Text output reports that state without reading the
+specification or changing the environment. No environment variable can
+re-enable it.
+
+Every JSON invocation returns exactly three fields:
+
+```json
+{"tool":"Shell","status":"UNKNOWN","enabled":false}
+```
+
+`tool` is the requested tool name, `all`, or `checklist`. The hard-disabled
+contract never includes the dormant legacy checklist's `tools` or `summary`
+fields.
+
+Report the disabled state for one tool:
 
 ```bash
 tokenless env-check --tool Shell
 ```
 
-Check all declared tools:
+Report the disabled state for all-tools or checklist mode:
 
 ```bash
 tokenless env-check --all
 tokenless env-check --all --json
-tokenless env-check --all --checklist
-```
-
-Full checklist as one JSON object for hooks, plugins, and CI gates:
-
-```bash
+tokenless env-check --checklist
 tokenless env-check --checklist --json
 ```
-
-```json
-{
-  "tools": [
-    {
-      "tool": "Shell",
-      "status": "PARTIAL",
-      "required": [{ "binary": "jq", "status": "INSTALLED" }],
-      "recommended": [{ "binary": "rtk", "status": "MISSING" }],
-      "config": [{ "name": "~/.tokenless/config.json", "ok": true }],
-      "permissions": [{ "name": "exec_shell", "ok": true }],
-      "network": [{ "name": "https_outbound", "ok": true }]
-    }
-  ],
-  "summary": { "ready": 0, "partial": 1, "not_ready": 0, "unknown": 0, "total": 1 }
-}
-```
-
-Checklist JSON contract:
-
-- `tools` is sorted by tool name, so repeated runs produce identical output that is safe to diff, hash, cache, or snapshot.
-- `status` uses the fixed labels `READY` / `PARTIAL` / `NOT_READY` / `UNKNOWN`.
-- Dependency entries report `INSTALLED`, `MISSING`, or `OUTDATED (<installed>/<required>)`; config, permission, and network entries report `ok: true|false`.
-- `summary` aggregates the same results: `ready`, `partial`, `not_ready`, `unknown`, and `total`.
-
-Status meanings:
-
-| Status | Meaning |
-|--------|---------|
-| `READY` | Required and recommended dependencies, configuration, and permissions are satisfied |
-| `PARTIAL` | Required dependencies and permissions are satisfied, but a recommended dependency, configuration item, or network check is missing |
-| `NOT_READY` | A required dependency or permission is missing; the tool should not be retried |
-| `UNKNOWN` | The dependency specification does not contain the tool |
 
 Automatic repair:
 
@@ -252,7 +228,7 @@ Automatic repair:
 tokenless env-check --tool Shell --fix
 ```
 
-> `--fix` attempts only missing required dependencies, not recommended ones. It may invoke a system package manager, install dependencies, or create links. Read the normal check output first and use it only after accepting those environment changes. Follow the output when administrator access is required.
+> While the hard bypass is active, `--fix` does not invoke a package manager or modify the environment. The retained legacy implementation would attempt only missing required dependencies if it were redesigned and re-enabled in a future release.
 
 ## `stats`
 

@@ -568,8 +568,28 @@ fn compress_toon_from_stdin() {
 #[test]
 fn env_check_without_spec() {
     let output = tokenless_bin().args(["env-check"]).output().unwrap();
-    // May fail if no spec file exists, that's OK
-    let _ = output.status;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Specify --tool <name> or --all"));
+}
+
+#[test]
+fn env_check_is_hard_bypassed_even_with_legacy_opt_in() {
+    let output = tokenless_bin()
+        .args(["env-check", "--tool", "Shell", "--json"])
+        .env("TOKENLESS_TOOL_READY_ENABLED", "1")
+        .env(
+            "TOKENLESS_TOOL_READY_SPEC",
+            "/path/that/must/not/be-read-while-disabled",
+        )
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result.as_object().unwrap().len(), 3);
+    assert_eq!(result["tool"], "Shell");
+    assert_eq!(result["status"], "UNKNOWN");
+    assert_eq!(result["enabled"], false);
 }
 
 #[test]
@@ -725,12 +745,13 @@ fn write_checklist_spec(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 #[test]
-fn env_check_checklist_json_output() {
+fn env_check_checklist_json_is_hard_bypassed() {
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_checklist_spec(dir.path());
 
     let output = tokenless_bin()
         .args(["env-check", "--checklist", "--json"])
+        .env("TOKENLESS_TOOL_READY_ENABLED", "1")
         .env("TOKENLESS_TOOL_READY_SPEC", &spec_path)
         .output()
         .unwrap();
@@ -740,67 +761,18 @@ fn env_check_checklist_json_output() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect(
-        "--checklist --json must print one JSON object on stdout (text output would not parse)",
-    );
-
-    // Tools are ordered by tool name so the array is stable across runs.
-    let tools = value["tools"].as_array().expect("tools must be an array");
-    let names: Vec<&str> = tools
-        .iter()
-        .map(|tool| tool["tool"].as_str().unwrap())
-        .collect();
-    assert_eq!(names, vec!["Read", "Shell", "WebFetch", "Write"]);
-
-    // Every tool entry carries the status label plus all five categories.
-    for tool in tools {
-        assert!(tool["status"].is_string());
-        for category in [
-            "required",
-            "recommended",
-            "config",
-            "permissions",
-            "network",
-        ] {
-            assert!(
-                tool[category].is_array(),
-                "tool {} must serialize category {}",
-                tool["tool"],
-                category
-            );
-        }
-    }
-
-    // READY tool: required dep installed, config present, permission granted.
-    let read = &tools[0];
-    assert_eq!(read["status"], "READY");
-    assert_eq!(read["required"][0]["binary"], "bash");
-    assert_eq!(read["required"][0]["status"], "INSTALLED");
-    assert_eq!(read["config"][0]["ok"], true);
-    assert_eq!(read["permissions"][0]["name"], "exec_shell");
-    assert_eq!(read["permissions"][0]["ok"], true);
-
-    // PARTIAL tool: only a recommended dep missing.
-    let web_fetch = &tools[2];
-    assert_eq!(web_fetch["status"], "PARTIAL");
-    assert_eq!(web_fetch["recommended"][0]["status"], "MISSING");
-    assert_eq!(web_fetch["network"][0]["ok"], true);
-
-    // NOT_READY tool: required dep missing.
-    let write = &tools[3];
-    assert_eq!(write["status"], "NOT_READY");
-    assert_eq!(write["required"][0]["status"], "MISSING");
-
-    // Summary counts must agree with the tools array.
-    assert_eq!(value["summary"]["ready"], 2);
-    assert_eq!(value["summary"]["partial"], 1);
-    assert_eq!(value["summary"]["not_ready"], 1);
-    assert_eq!(value["summary"]["unknown"], 0);
-    assert_eq!(value["summary"]["total"], 4);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("--checklist --json must print one JSON object on stdout");
+    assert_eq!(value.as_object().unwrap().len(), 3);
+    assert_eq!(value["tool"], "checklist");
+    assert_eq!(value["status"], "UNKNOWN");
+    assert_eq!(value["enabled"], false);
+    assert!(value.get("tools").is_none());
+    assert!(value.get("summary").is_none());
 }
 
 #[test]
-fn env_check_checklist_json_stable_across_processes() {
+fn env_check_hard_bypass_json_is_stable_across_processes() {
     let dir = tempfile::tempdir().unwrap();
     let spec_path = write_checklist_spec(dir.path());
 
@@ -808,6 +780,7 @@ fn env_check_checklist_json_stable_across_processes() {
     for _ in 0..8 {
         let output = tokenless_bin()
             .args(["env-check", "--checklist", "--json"])
+            .env("TOKENLESS_TOOL_READY_ENABLED", "1")
             .env("TOKENLESS_TOOL_READY_SPEC", &spec_path)
             .output()
             .unwrap();
@@ -819,7 +792,7 @@ fn env_check_checklist_json_stable_across_processes() {
         assert_eq!(
             stdout,
             &outputs[0],
-            "checklist JSON must be byte-identical across processes (run {})",
+            "hard-bypass JSON must be byte-identical across processes (run {})",
             index + 1
         );
     }

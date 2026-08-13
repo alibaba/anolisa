@@ -12,7 +12,11 @@ LLM Token 优化工具包——Schema/响应压缩 + 命令重写 + 工具环境
 | 响应压缩 | ~26–78% | 压缩 API/工具响应（因内容类型而异） |
 | TOON 上下文压缩 | 15–40% | 将 JSON 编码为 TOON 格式 |
 | 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令） |
-| Tool Ready | 减少重试浪费 | 预检环境、自动修复依赖、故障归因 |
+| Tool Ready | 减少重试浪费 | 旧版调用前预检、自动修复与阻断；当前硬关闭 |
+
+Tool Ready 当前在所有 Adapter 中无条件硬旁路，不会读取依赖规范、执行调用前检查、自动修复环境或阻止工具调用。任何环境变量都无法恢复旧行为；重新启用必须修改源码并重新发布。
+
+工具执行后的失败归因、响应压缩、RTK 命令重写、TOON、Stash 和统计是独立能力，仍保持原有行为。
 
 ## 适用场景与预期效果
 
@@ -54,12 +58,12 @@ tokenless 只优化**工具调用响应**进入 LLM 上下文前的冗余，不�
 ## 集成路径
 
 - **OpenClaw 插件** — 命令重写 + 响应压缩 + Schema 压缩
-- **copilot-shell 钩子** — Tool Ready + 命令重写 + 响应压缩 + TOON
-- **Hermes Agent 插件** — Tool Ready + 命令重写 + 响应压缩 + TOON
-- **Qoder CLI 插件** — Tool Ready + 命令重写 + 响应压缩
-- **Claude Code 插件** — Tool Ready + 命令重写 + 响应压缩 + TOON
-- **Codex 插件** — Tool Ready + 命令重写 + 响应压缩 + TOON
-- **OpenCode 插件** — Tool Ready + 命令重写 + Schema/响应压缩 + TOON
+- **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
+- **Hermes Agent 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
+- **Qoder CLI 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩
+- **Claude Code 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
+- **Codex 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
+- **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + Schema/响应压缩 + TOON
 
 ## 快速开始
 
@@ -120,7 +124,7 @@ make setup
 
 ### OpenCode 安装
 
-OpenCode 适配器通过 `tool.execute.before/after` 原生插件事件执行 Tool Ready、
+OpenCode 适配器通过 `tool.execute.before/after` 原生插件事件注册已硬关闭的 Tool Ready、
 RTK 命令重写和响应/TOON 压缩，并通过 `tool.definition` 压缩工具 Schema。
 压缩后的响应会替换原始模型可见输出，避免重复占用上下文。
 
@@ -199,30 +203,36 @@ export TOKENLESS_DATA_DIR="$HOME/path/to/tokenless-data"
 
 ## Tool Ready
 
-Tool Ready 在工具调用前预检环境依赖（来自 `tool-ready-spec.json`），缺失时
-报告 `NOT_READY` 并提示跳过重试，避免浪费 Token 重试必然失败的命令；调用失败
-后再做错误归因。
+旧版 Tool Ready 会在工具调用前预检 `tool-ready-spec.json` 中声明的环境依赖，
+缺失时报告 `NOT_READY` 并提示跳过重试。当前已无条件硬关闭，Hook 会在读取规范、
+检查、修复或阻断之前返回；工具执行后的失败归因保持独立。
 
 ```bash
-# 检查单个工具
+# 报告单个工具对应的硬关闭状态
 tokenless env-check --tool Shell
 
-# 检查全部工具
+# 报告全部工具模式的硬关闭状态
 tokenless env-check --all
 
-# 生成清单
+# 报告清单模式的硬关闭状态
 tokenless env-check --checklist
 
-# 机器可读清单（单个 JSON 对象，tools 按名称排序）
+# 机器可读的硬关闭状态；不会输出 tools/summary 清单
 tokenless env-check --checklist --json
 
-# 检查并自动修复缺失依赖
+# 为兼容性保留；不会检查或修复环境
 tokenless env-check --tool Shell --fix
 ```
 
-`--checklist --json` 输出单个 `{tools, summary}` 对象，顺序稳定，供 Hook、
-插件和 CI 门禁消费；完整 schema 见
-[CLI 参考](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md#env-check)。
+这些命令当前只报告 Tool Ready 已硬关闭，不会检查或修改环境。
+所有 JSON 模式都只返回相同的三个字段：
+
+```json
+{"tool":"checklist","status":"UNKNOWN","enabled":false}
+```
+
+`tool` 表示指定的工具或 `all`/`checklist` 范围。硬旁路生效期间绝不会输出
+休眠旧版实现的 `tools` 与 `summary` 清单字段。
 
 ## 架构
 

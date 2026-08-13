@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": "2.0",
-    "description": "Tool Ready dependency spec — defines per-tool system dependencies, detection methods, and install strategies. Edit this JSON to add new tool support without code changes.",
+    "description": "Dormant legacy Tool Ready dependency spec. Release builds do not read it while the hard bypass is active.",
     "related_files": {
       "tool_categories.json": "Unified tool categorization for compression strategies. Tool names in 'aliases' must match those in tool_categories.json to ensure consistent behavior across tool-ready and compression."
     },
