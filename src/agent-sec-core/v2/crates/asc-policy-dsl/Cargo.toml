@@ -1,0 +1,16 @@
+[package]
+name = "asc-policy-dsl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "P1 trace DSL: handwritten recursive-descent parser, typecheck and IR lowering"
+
+[dependencies]
+asc-policy-types = { workspace = true }
+asc-policy-ir = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

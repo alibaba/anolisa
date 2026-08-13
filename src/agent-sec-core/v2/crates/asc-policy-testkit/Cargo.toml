@@ -1,0 +1,19 @@
+[package]
+name = "asc-policy-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Policy test framework: conformance runner, shadow replay, fault injection (dev-only, never shipped)"
+
+[dependencies]
+asc-policy-types = { workspace = true }
+asc-policy-ir = { workspace = true }
+asc-pdp = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

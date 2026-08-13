@@ -1,0 +1,20 @@
+[package]
+name = "asc-pap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Policy administration point: signed bundle verification, activation transaction, rollout control"
+
+[dependencies]
+asc-policy-types = { workspace = true }
+asc-policy-ir = { workspace = true }
+asc-policy-frontend = { workspace = true }
+blake3 = { workspace = true }
+ed25519-dalek = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

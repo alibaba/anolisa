@@ -1,0 +1,16 @@
+[package]
+name = "asc-pip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Policy information point: context providers, concurrent attribute fetch, failure semantics"
+
+[dependencies]
+asc-policy-types = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

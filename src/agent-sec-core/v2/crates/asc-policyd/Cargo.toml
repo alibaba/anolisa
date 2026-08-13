@@ -1,0 +1,27 @@
+[package]
+name = "asc-policyd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Sidecar daemon hosting the policy engine: UDS server, event bus, lifecycle"
+
+[[bin]]
+name = "asc-policyd"
+path = "src/main.rs"
+
+[dependencies]
+asc-policy-types = { workspace = true }
+asc-policy-ir = { workspace = true }
+asc-pdp = { workspace = true }
+asc-pip = { workspace = true }
+asc-pep = { workspace = true }
+asc-pap = { workspace = true }
+asc-audit = { workspace = true }
+asc-intent = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "asc-policy-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Domain model and stable schema contracts for the asc-policy framework"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+json-patch = { workspace = true }
+ulid = { workspace = true }
+
+[lints]
+workspace = true

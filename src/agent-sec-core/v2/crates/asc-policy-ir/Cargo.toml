@@ -1,0 +1,19 @@
+[package]
+name = "asc-policy-ir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Typed policy IR, merge law and tier decomposition (pure functions, no IO)"
+
+[dependencies]
+asc-policy-types = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

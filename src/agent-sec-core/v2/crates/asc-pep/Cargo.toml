@@ -1,0 +1,19 @@
+[package]
+name = "asc-pep"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Enforcement adapters, obligation dispatcher and TokenAuthority HMAC implementation"
+
+[dependencies]
+asc-policy-types = { workspace = true }
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: Apache-2.0
+# AgentSecCore V2 Policy Engine Framework (asc-policy) workspace.
+# Crate layout follows design doc ASC-DD-2026-08-01 §11.1 (Table 12).
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/asc-policy-types",
+    "crates/asc-policy-ir",
+    "crates/asc-policy-frontend",
+    "crates/asc-policy-dsl",
+    "crates/asc-pdp",
+    "crates/asc-pip",
+    "crates/asc-pep",
+    "crates/asc-pap",
+    "crates/asc-audit",
+    "crates/asc-intent",
+    "crates/asc-policy-testkit",
+    "crates/asc-policy-ffi",
+    "crates/asc-policyd",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.88"
+repository = "https://github.com/alibaba/anolisa"
+publish = false
+
+# Dependency whitelist per design doc §11.2. TCB crates (types/ir/pdp/pap)
+# keep their dependency count minimal; additions require review.
+[workspace.dependencies]
+# Internal crates
+asc-policy-types = { path = "crates/asc-policy-types" }
+asc-policy-ir = { path = "crates/asc-policy-ir" }
+asc-policy-frontend = { path = "crates/asc-policy-frontend" }
+asc-policy-dsl = { path = "crates/asc-policy-dsl" }
+asc-pdp = { path = "crates/asc-pdp" }
+asc-pip = { path = "crates/asc-pip" }
+asc-pep = { path = "crates/asc-pep" }
+asc-pap = { path = "crates/asc-pap" }
+asc-audit = { path = "crates/asc-audit" }
+asc-intent = { path = "crates/asc-intent" }
+asc-policy-testkit = { path = "crates/asc-policy-testkit" }
+
+# Third-party
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+ulid = { version = "1", features = ["serde"] }
+json-patch = "4"
+jsonschema = "0.33"
+blake3 = "1"
+ed25519-dalek = "2"
+arc-swap = "1"
+regex = "1"
+async-trait = "0.1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "io-util", "time"] }
+# Binary-only (asc-policyd, AGENTS.md §3.4); documented exception to the
+# §11.2 whitelist — library crates use thiserror enums instead.
+anyhow = "1"
+
+# Test-only
+proptest = "1"
+criterion = "0.7"
+
+[workspace.lints.clippy]
+uninlined_format_args = "deny"
+redundant_closure_for_method_calls = "deny"
+
+# Release profile aligned with anolisa/blaze. `panic = "abort"` on the
+# decision path is a release-gate requirement (design doc §10.3); dev/test
+# profiles keep unwinding so panic→Deny conversion tests can run.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
