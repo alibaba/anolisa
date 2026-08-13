@@ -9,6 +9,21 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.7.6] - 2026-08-13
+
+### 变更
+
+- `TOKENLESS_DATA_DIR` 现在接受真实用户 home 之外的绝对非根目录；显式目录无效时会停用 SQLite 状态，不再静默回退到 home（[#2434](https://github.com/alibaba/anolisa/pull/2434)）。
+- 所有 Adapter 的 Tool Ready 调用前检查、修复和阻断现已硬关闭，避免错误的就绪结果阻止有效工作；工具执行后的失败归因和其他 Tokenless 功能保持启用（[#2487](https://github.com/alibaba/anolisa/pull/2487)）。
+
+### 修复
+
+- 直接 JSON Schema 的 Description 现在只会 Stash 一次，因此一次 Retrieve 即可返回不含嵌套 Marker 的原始内容（[#2399](https://github.com/alibaba/anolisa/pull/2399)）。
+- 通过环境变量设置 Stats 与 SLS 开关时，`config.json` 中的 Dry-run 压缩配置现在仍会生效（[#2380](https://github.com/alibaba/anolisa/pull/2380)）。
+- `tokenless retrieve` 现在会逐字节写出已存储的 Payload，不再追加换行符（[#2396](https://github.com/alibaba/anolisa/pull/2396)）。
+- Stash Retrieve 现在会跳过格式错误的 Marker 以查找后续有效 Key，并在对抗性输入下保持线性扫描（[#2386](https://github.com/alibaba/anolisa/pull/2386)）。
+- RPM 安装现在包含 Codex Adapter 安装脚本所需的共享生命周期 Helper（[#2425](https://github.com/alibaba/anolisa/pull/2425)）。
+
 ## [0.7.5] - 2026-08-10
 
 ### 新增
@@ -233,7 +248,7 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 - 将 Tokenless 引入 ANOLISA（#199）
 
-[未发布]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.5...HEAD
+[0.7.6]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.5...tokenless/v0.7.6
 [0.7.5]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.4...tokenless/v0.7.5
 [0.7.4]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.3...tokenless/v0.7.4
 [0.7.3]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.2...tokenless/v0.7.3

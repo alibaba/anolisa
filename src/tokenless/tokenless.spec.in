@@ -473,6 +473,15 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Thu Aug 13 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.6-1
+- feat(tokenless): add reproducible raw and prebuilt npm packaging
+- fix(tokenless): allow trusted external data directories without unsafe fallback
+- fix(tokenless): keep schema stash and CLI retrieval lossless in one round trip
+- fix(tokenless): honor dry-run config with stats and SLS environment overrides
+- fix(tokenless): scan past malformed stash markers in linear time
+- fix(tokenless): hard-disable Tool Ready pre-call gates
+- fix(tokenless): ship the Codex lifecycle helper in RPM payloads
+
 * Mon Aug 10 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.5-1
 - feat(tokenless): add an OpenCode adapter with shared compression hooks
 - fix(tokenless): support native Qoder plugins and in-place compressed output

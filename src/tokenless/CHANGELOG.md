@@ -9,6 +9,21 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-08-13
+
+### Changed
+
+- `TOKENLESS_DATA_DIR` now accepts absolute non-root directories outside the real user home, while invalid explicit directories disable SQLite state instead of silently falling back to home ([#2434](https://github.com/alibaba/anolisa/pull/2434)).
+- Tool Ready pre-call checks, repairs, and blocking are now hard-disabled across adapters so incorrect readiness results cannot block valid work; post-tool failure attribution and other Tokenless features remain active ([#2487](https://github.com/alibaba/anolisa/pull/2487)).
+
+### Fixed
+
+- Direct JSON Schema descriptions are now stashed once, so one retrieval returns the original content without a nested marker ([#2399](https://github.com/alibaba/anolisa/pull/2399)).
+- Dry-run compression settings from `config.json` now remain effective when statistics and SLS toggles are set through environment variables ([#2380](https://github.com/alibaba/anolisa/pull/2380)).
+- `tokenless retrieve` now writes stored payloads byte-for-byte without appending a trailing newline ([#2396](https://github.com/alibaba/anolisa/pull/2396)).
+- Stash retrieval now scans past malformed markers to find a later valid key and stays linear on adversarial input ([#2386](https://github.com/alibaba/anolisa/pull/2386)).
+- RPM installations now include the shared Codex lifecycle helper required by the adapter install script ([#2425](https://github.com/alibaba/anolisa/pull/2425)).
+
 ## [0.7.5] - 2026-08-10
 
 ### Added
@@ -234,7 +249,7 @@ Releases from 0.7.2 onward follow
 
 - introduce tokenless into ANOLISA (#199)
 
-[Unreleased]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.5...HEAD
+[0.7.6]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.5...tokenless/v0.7.6
 [0.7.5]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.4...tokenless/v0.7.5
 [0.7.4]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.3...tokenless/v0.7.4
 [0.7.3]: https://github.com/alibaba/anolisa/compare/tokenless/v0.7.2...tokenless/v0.7.3
