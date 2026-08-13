@@ -6,7 +6,7 @@ Related design: [ACP Client Bridge design](design.md).
 
 ## 1. Report scope
 
-- Baseline reviewed: `6c115aefe04ace0d169a24fa7cd55ad7c1befa52`
+- Upstream baseline reviewed: `e3763b001c91f3c13dc6afbd57aac924162e9f59`
 - Review date: 2026-08-13
 - Change type: first library implementation slice plus design evidence
 - Implementation acceptance: **NOT ACCEPTED**
@@ -33,20 +33,24 @@ the sole `RuntimeSupervisor` lifecycle implementation
 and has focused fixtures for v1 negotiation, a supervised stdio exchange,
 session/prompt/update, permission correlation, cancellation settlement,
 identity mismatch, unsupported callbacks, and malformed/oversized frames.
+It also defines the shared object-safe `AgentRuntimePort` and an ACP adapter
+that maps bounded text/tool events, delegates permission normalization to a
+trusted port, correlates one-shot decisions, fences public identity, and
+settles the supervised child before publishing a terminal event.
 
 ## 3. Current readiness
 
 | Area | Baseline status | Acceptance status | Evidence needed to pass |
 | --- | --- | --- | --- |
-| Neutral `AgentRuntimePort` | Not present in production | **PARTIAL** | Neutral contracts exist; coordinator/port implementation and fixtures remain |
+| Neutral `AgentRuntimePort` | Not present in production | **PARTIAL** | Shared object-safe port plus Core and ACP implementations exist; coordinator integration and complete fixtures remain |
 | ACP SDK/toolchain ADR and dependency | Not present | **PASS for first slice** | SDK 2.0.0 and Rust 1.88 are pinned; release/license review remains a PR gate |
-| Built-in runtime profiles | Not present | **PARTIAL** | Installed `codex-acp` and `claude-agent-acp` resolution, canonical paths, and environment allowlists have focused tests; no installed COSH entrypoint or distribution/version policy exists |
+| Built-in runtime profiles | Not present | **PARTIAL** | Installed entrypoint, pinned Adapter bundle, canonical paths, and environment allowlists have focused tests; signed/offline distribution policy remains |
 | ACP v1 initialization | Not present | **PARTIAL** | Exact v1 request, response, and wrong-version rejection pass focused tests; real-Agent conformance remains |
 | Capability snapshot | Not present | **PARTIAL** | Stable capability copying and additional-root gating exist; complete method matrix remains |
 | stdio transport | Internal JSONL only | **PARTIAL** | Fake Agent exchange uses the sole hardened supervisor; crash/backpressure suite remains |
-| ACP session binding | Provider session state only | **PARTIAL** | One opaque ACP session is fenced inside the codec; durable `AgentSessionId` binding remains |
-| Prompt and update mapping | Shell-specific events only | **PARTIAL** | Official v1 types validate text prompt/update/stop; neutral Runtime/Task mapping remains |
-| Permission callback governance | Shell approval bridge only | **PARTIAL** | Request/option correlation and cancel settlement exist; Approval/Broker integration remains |
+| ACP session binding | Provider session state only | **PARTIAL** | ACP session is exposed only as a scoped digest under COSH-owned binding IDs; coordinator durability remains |
+| Prompt and update mapping | Shell-specific events only | **PARTIAL** | Bounded text, tool observations, and stop reasons map to neutral ordered Runtime events; complete update goldens remain |
+| Permission callback governance | Shell approval bridge only | **PARTIAL** | Trusted normalizer produces a Capability request and Broker results select only correlated one-shot choices; production Broker wiring remains |
 | Filesystem callbacks | No ACP callback path | **NOT IMPLEMENTED** | Broker-only read/write tests and escape PoCs |
 | Terminal callbacks | No ACP callback path | **NOT IMPLEMENTED** | Governed execution handle lifecycle tests |
 | Cancellation settlement | Provider-specific cancellation exists | **PARTIAL** | Pending permission callbacks receive ACP cancelled outcomes; prompt/process race suite remains |
@@ -102,8 +106,12 @@ Current focused command:
 cargo +1.88.0 test --package cosh-gateway runtime::acp
 ```
 
-Result on the uncommitted candidate worktree: 13 passed, 0 failed. This is
-first-slice evidence only and is not the full Phase 2 conformance suite.
+Result on the uncommitted candidate worktree: the existing ACP codec/driver
+suite and five ACP-port tests pass. The latter cover mapping, identity
+substitution, one-shot correlation, missing once-only choices, cancellation,
+and settlement ordering. This remains first-slice evidence rather than the
+full Phase 2 conformance suite. The separate Core-port lifecycle suite is not
+ACP conformance evidence.
 
 ## 6. Manual and live validation
 
@@ -117,8 +125,8 @@ passed until it runs the exact candidate commit and records sanitized evidence.
   be accepted first.
 - Phase 1 Task Plane, Capability Broker, Approval Service, and Execution Target
   must be available.
-- Fixed executable names and local resolution are implemented; signed/versioned
-  adapter distribution policy and installed-entrypoint integration remain.
+- Fixed executable names, local resolution, pinned source installer, and the
+  installed entrypoint exist; signed/offline distribution policy remains.
 - Output, terminal lifetime, and optional replay policy limits need approved
   values.
 

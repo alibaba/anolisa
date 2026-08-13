@@ -6,7 +6,7 @@
 
 ## 1. 报告范围
 
-- 审计基线：`6c115aefe04ace0d169a24fa7cd55ad7c1befa52`
+- 审计的上游基线：`e3763b001c91f3c13dc6afbd57aac924162e9f59`
 - 审计日期：2026-08-13
 - 变更类型：第一轮 library implementation slice 与设计证据
 - 实现验收：**NOT ACCEPTED**
@@ -30,20 +30,23 @@ cosh-core 中的 `CONTROL_PROTOCOL_VERSION = 1` 是内部 shell-to-core 契约�
 Bridge 内嵌唯一的 `RuntimeSupervisor` lifecycle implementation；focused fixture 覆盖 v1 negotiation、supervised stdio
 exchange、session/prompt/update、permission correlation、cancellation settlement、identity
 mismatch、unsupported callback 与 malformed/oversized frame。
+候选工作树还定义 shared object-safe `AgentRuntimePort` 与 ACP adapter。后者映射有界
+text/tool event，通过可信 port 完成 permission normalization，关联 one-shot decision，
+隔离公共 identity，并在发布 terminal event 前结算 supervised child。
 
 ## 3. 当前就绪度
 
 | 领域 | 基线状态 | 验收状态 | 通过所需证据 |
 | --- | --- | --- | --- |
-| 中立 `AgentRuntimePort` | Production 中不存在 | **PARTIAL** | 中立 contract 已存在；coordinator/port implementation 与 fixture 仍缺 |
+| 中立 `AgentRuntimePort` | Production 中不存在 | **PARTIAL** | Shared object-safe port、Core 与 ACP implementation 已存在；coordinator integration 与完整 fixture 仍缺 |
 | ACP SDK/toolchain ADR 与 dependency | 不存在 | **第一轮 PASS** | SDK 2.0.0 与 Rust 1.88 已固定；release/license review 仍是 PR gate |
-| 内置 Runtime profile | 不存在 | **PARTIAL** | 已安装 `codex-acp` 与 `claude-agent-acp` 的解析、canonical path 与 environment allowlist 有 focused test；仍无已安装 COSH entrypoint 或 distribution/version policy |
+| 内置 Runtime profile | 不存在 | **PARTIAL** | Installed entrypoint、pinned Adapter bundle、canonical path 与 environment allowlist 有 focused test；signed/offline distribution policy 仍缺 |
 | ACP v1 初始化 | 不存在 | **PARTIAL** | Exact v1 request、response 与错误版本拒绝通过 focused test；真实 Agent conformance 仍缺 |
 | Capability snapshot | 不存在 | **PARTIAL** | Stable capability copy 与 additional-root gate 已有；完整 method matrix 仍缺 |
 | stdio transport | 只有内部 JSONL | **PARTIAL** | Fake Agent exchange 使用唯一 hardened supervisor；crash/backpressure suite 仍缺 |
-| ACP session binding | 只有 provider session state | **PARTIAL** | Codec 内已约束单一 opaque ACP session；持久 `AgentSessionId` binding 仍缺 |
-| Prompt 与 update 映射 | 只有 Shell-specific event | **PARTIAL** | 官方 v1 类型校验 text prompt/update/stop；中立 Runtime/Task mapping 仍缺 |
-| Permission callback 治理 | 只有 Shell approval bridge | **PARTIAL** | Request/option correlation 与 cancel settlement 已有；Approval/Broker integration 仍缺 |
+| ACP session binding | 只有 provider session state | **PARTIAL** | ACP session 只以 scoped digest 暴露在 COSH-owned binding ID 下；coordinator durability 仍缺 |
+| Prompt 与 update 映射 | 只有 Shell-specific event | **PARTIAL** | Bounded text、tool observation 与 stop reason 映射为中立有序 Runtime event；完整 update golden 仍缺 |
+| Permission callback 治理 | 只有 Shell approval bridge | **PARTIAL** | Trusted normalizer 生成 Capability request，Broker result 只选择有关联 one-shot choice；production Broker wiring 仍缺 |
 | Filesystem callback | 没有 ACP callback 路径 | **NOT IMPLEMENTED** | Broker-only read/write test 和逃逸 PoC |
 | Terminal callback | 没有 ACP callback 路径 | **NOT IMPLEMENTED** | Governed execution handle 生命周期测试 |
 | Cancellation 结算 | 已有 provider-specific cancellation | **PARTIAL** | 待决 permission callback 会收到 ACP cancelled outcome；prompt/process race suite 仍缺 |
@@ -98,8 +101,11 @@ Attachment exit criteria。
 cargo +1.88.0 test --package cosh-gateway runtime::acp
 ```
 
-未提交候选工作树结果为 13 passed、0 failed。这只是第一轮切片证据，不是完整
-Phase 2 conformance suite。
+未提交候选工作树中，现有 ACP codec/driver suite 与 5 个 ACP-port test 均通过。
+后者覆盖 mapping、identity substitution、one-shot correlation、缺少 once-only choice、
+cancellation 与 settlement ordering。这仍是第一轮切片证据，不是完整 Phase 2
+conformance suite。
+独立的 Core-port lifecycle suite 不能作为 ACP conformance evidence。
 
 ## 6. 手工与在线验证
 
@@ -112,8 +118,8 @@ Phase 2 conformance suite。
   contract。
 - 必须具备 Phase 1 Task Plane、Capability Broker、Approval Service 与
   Execution Target。
-- 固定 executable name 与 local resolution 已实现；signed/versioned adapter distribution policy
-  和 installed-entrypoint integration 仍缺。
+- 固定 executable name、local resolution、pinned source installer 与 installed entrypoint
+  已实现；signed/offline distribution policy 仍缺。
 - Output、terminal lifetime 与 optional replay policy limit 需要批准具体值。
 
 ## 8. 验收决定

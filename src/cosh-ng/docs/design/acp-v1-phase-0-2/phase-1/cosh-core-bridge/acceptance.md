@@ -4,11 +4,12 @@
 
 ## Baseline result
 
-**Overall: PARTIAL foundation on a working tree based on
-`6c115aefe04ace0d169a24fa7cd55ad7c1befa52`.** The pinned upstream baseline remains NOT
-IMPLEMENTED. The planning branch adds a Gateway-owned local process supervisor and strict private
-cosh-core JSONL v1 codec, but no integrated `CoshCoreBridge`, durable runtime binding, public event
-mapping, brokered execution profile, or Shell ownership migration exists.
+**Overall: PARTIAL implementation on a candidate based on upstream
+`e3763b001c91f3c13dc6afbd57aac924162e9f59`; Phase 1 remains NOT ACCEPTED.** The candidate adds a
+neutral `AgentRuntimePort` and a supervised `CoshCoreBridge` over the strict private cosh-core
+JSONL v1 codec. The bridge now fences public identity and event order, bounds retained state, and
+settles cancellation through process cleanup. Durable coordination, brokered tool execution,
+resume/recovery, Shell ownership migration, and real-provider evidence remain absent.
 
 ## Result vocabulary
 
@@ -22,7 +23,7 @@ mapping, brokered execution profile, or Shell ownership migration exists.
 
 ## Evidence inspected
 
-- Pinned source: `6c115aefe04ace0d169a24fa7cd55ad7c1befa52`.
+- Upstream source baseline: `e3763b001c91f3c13dc6afbd57aac924162e9f59`.
 - [`protocol.rs`](../../../../../crates/cosh-core/src/protocol.rs) defines exact private protocol v1
   and all current message shapes.
 - [`headless.rs`](../../../../../crates/cosh-core/src/headless.rs) negotiates and runs provider turns.
@@ -39,24 +40,29 @@ mapping, brokered execution profile, or Shell ownership migration exists.
   bounded stdout framing and stderr-tail retention.
 - [`runtime/cosh_core_jsonl.rs`](../../../../../crates/cosh-gateway/src/runtime/cosh_core_jsonl.rs)
   implements strict private v1 initialization and typed wire observations without ACP naming.
+- [`runtime/port.rs`](../../../../../crates/cosh-gateway/src/runtime/port.rs) defines the
+  provider-neutral, object-safe command/event boundary and redacted errors.
+- [`runtime/cosh_core_bridge.rs`](../../../../../crates/cosh-gateway/src/runtime/cosh_core_bridge.rs)
+  binds COSH identities, maps bounded public events, rejects unsupported control requests, and
+  owns one supervisor generation without importing Task storage, core, or Shell crates.
 
 ## Acceptance matrix
 
 | ID | Criterion | Baseline | Evidence or missing artifact |
 | --- | --- | --- | --- |
-| CCB-001 | Bridge implements neutral `AgentRuntimePort`. | NOT IMPLEMENTED | No Gateway/port. |
+| CCB-001 | Bridge implements neutral `AgentRuntimePort`. | PASS for library slice | Object-safe port and Core implementation compile and pass focused lifecycle tests. |
 | CCB-002 | Private JSONL v1 is explicitly distinct from ACP v1. | PASS | Current runtime contract states the separation. |
-| CCB-003 | Exact initialization succeeds before Task input admission. | PARTIAL | Codec requires exact v1/correlation/capabilities before user frames; Task admission is not integrated. |
-| CCB-004 | Gateway production rejects legacy unversioned peers. | PARTIAL | Codec rejects missing/mismatched versions; no launch profile invokes it yet. |
+| CCB-003 | Exact initialization succeeds before Task input admission. | PARTIAL | Bridge negotiates before Prompt and requires `SessionOpened` delivery first; durable Task admission is not integrated. |
+| CCB-004 | Gateway production rejects legacy unversioned peers. | PARTIAL | Bridge uses the strict codec, which rejects missing/mismatched versions; installed Core profile evidence remains. |
 | CCB-005 | `RuntimeSupervisor` solely owns child process lifecycle. | PARTIAL | New supervisor owns one child/group/pipes/reap; existing Shell core owner and restart policy are not migrated. |
-| CCB-006 | Every JSONL message maps to a bounded ordered Runtime event/command. | PARTIAL | Current outputs decode to typed local observations; public contract mapping/order/backpressure are absent. |
-| CCB-007 | Task/Run/runtime/Agent/provider IDs remain distinct. | PARTIAL | Contracts own neutral IDs and codec names provider session separately; no binding mapper exists. |
-| CCB-008 | Bridge never writes Task storage. | NOT IMPLEMENTED | Boundary absent. |
+| CCB-006 | Every JSONL message maps to a bounded ordered Runtime event/command. | PARTIAL | Session, text, tool observation, result, cancel, and transport failure map with monotonic sequence; question/auth/tool permission, usage, environment, durable backpressure, and full goldens remain. |
+| CCB-007 | Task/Run/runtime/Agent/provider IDs remain distinct. | PARTIAL | Bridge creates a fenced in-memory binding with scoped provider `ExternalRef`; durable binding persistence and stale-generation reconciliation remain. |
+| CCB-008 | Bridge never writes Task storage. | PASS for library slice | Dependency and source review show no storage owner or storage calls in the port/bridge. |
 | CCB-009 | Brokered profile prevents core-local side effects. | FAIL | Current allowed/approved tools can execute in core. |
 | CCB-010 | `can_use_tool` reaches Broker and a permit-bound target result. | NOT IMPLEMENTED | Broker/Bridge absent. |
 | CCB-011 | Approval receipt follows durable Task ownership. | NOT IMPLEMENTED | Current receipt proves Shell main-thread receipt only. |
-| CCB-012 | Question/auth/evidence use durable or secret-safe ports. | NOT IMPLEMENTED | Current paths are Shell-owned. |
-| CCB-013 | Process cancel escalates, kills the group, and reaps children. | PARTIAL | Supervisor TERM/KILL/reap test passes; descendant, cancel/result/EOF race, and protocol interrupt fixtures remain. |
+| CCB-012 | Question/auth/evidence use durable or secret-safe ports. | PARTIAL | Core auth and all unmodeled control requests fail closed with redacted errors; durable ports remain absent. |
+| CCB-013 | Process cancel escalates, kills the group, and reaps children. | PARTIAL | Focused tests cover interrupt, cancelled terminal, TERM/KILL/reap, and synchronous fallback cleanup; descendant and cancel/result/EOF race fixtures remain. |
 | CCB-014 | Provider session persists separately from Task storage. | PASS | Current `SessionStore` is workspace-scoped provider state. |
 | CCB-015 | Crash/restart never silently resends an uncertain prompt. | NOT IMPLEMENTED | Task/Broker reconciliation absent. |
 | CCB-016 | Gateway has no Rust dependency on core implementation or Shell. | PASS | `cosh-gateway` speaks mirrored private wire types and has no core/Shell crate dependency. |
@@ -86,20 +92,19 @@ cargo test --package cosh-gateway cosh_jsonl_contract
 cargo test --package cosh-gateway-contracts runtime_schema
 ```
 
-First-increment targeted evidence:
+Current bridge-targeted evidence on the uncommitted candidate:
 
 ```bash
-cargo test -p cosh-gateway --lib runtime --no-fail-fast
-# 19 passed; 0 failed; 17 filtered out
+cargo +1.88.0 test --locked --package cosh-gateway cosh_core_bridge
+# 7 passed; 0 failed; 104 filtered out in the library target
 ```
 
-This covers codec negotiation/terminal behavior, bounds, launch validation, stderr retention,
-single terminal delivery, and TERM-to-KILL reap. It does not replace the required canonical,
-process-tree/race, public mapping, broker, recovery, backpressure, Shell protocol, or PTY gates.
-The process suite also injects process-group TERM failure and proves that the direct child is
-killed, reaped, settled, and exposed through one still-readable terminal before any repeat read.
-Eighteen passing tests are Runtime-owned; the `runtime` name filter also selects one Task aggregate
-test whose name mentions runtime events.
+This covers identity fencing, stream and terminal mapping, single terminal delivery, open timeout,
+cross-Run rejection, SessionOpened-before-Prompt ordering, idle-cancel rejection, aggregate Prompt
+bounds, retained tool-ID bounds, and process cleanup on cancellation. It does not replace the
+required canonical corpus, full process-tree/race, Broker, recovery, backpressure, Shell protocol,
+real-provider, or PTY gates. Rustdoc and Clippy evidence are recorded only after their final scoped
+commands complete.
 
 ## Exit criteria
 
@@ -121,3 +126,5 @@ test whose name mentions runtime events.
 - Sending generic allow for a side-effect tool bypasses target-bound permits.
 - Persisting a provider session binding from a stale Run can attach future work to the wrong Task.
 - Reading faster than durable Task event commit can lose control events on daemon crash.
+- `ExternalRef.value` contains private provider data and must not be logged or copied to general
+  audit output; durable storage still needs an encrypted reference row or keyed digest policy.

@@ -5,8 +5,11 @@
 //! `cosh-gateway-contracts` and are mapped by a higher-level bridge.
 
 mod acp;
+mod acp_port;
 mod bounded_io;
+mod cosh_core_bridge;
 mod cosh_core_jsonl;
+mod port;
 mod process_group;
 mod profile;
 mod session_driver;
@@ -18,7 +21,12 @@ pub use acp::{
     AcpV1PermissionOptionKind, AcpV1PermissionRequest, AcpV1ProtocolPhase, AcpV1RequestId,
     AcpV1RequestKind, AcpV1RuntimeBridge, AcpV1StopReason, ACP_WIRE_PROTOCOL_VERSION,
 };
+pub use acp_port::{
+    AcpAgentRuntime, AcpAgentRuntimeConfig, AcpAgentRuntimeIdentity, AcpPermissionContext,
+    AcpPermissionNormalizer,
+};
 pub use bounded_io::{BoundedLineError, BoundedLineReader, StderrSnapshot};
+pub use cosh_core_bridge::{CoshCoreBridge, CoshCoreBridgeConfig, CoshCoreBridgeIdentity};
 pub use cosh_core_jsonl::{
     CoshCoreAssistantBody, CoshCoreAssistantMessage, CoshCoreCapabilities, CoshCoreCodecError,
     CoshCoreContentBlock, CoshCoreContentBlockInfo, CoshCoreContentDelta, CoshCoreControlRequest,
@@ -27,6 +35,7 @@ pub use cosh_core_jsonl::{
     CoshCoreStreamEvent, CoshCoreSystemMessage, CoshCoreToolResult, CoshCoreUserTurn,
     PRIVATE_COSH_CONTROL_PROTOCOL_VERSION,
 };
+pub use port::{AgentRuntimePort, AgentRuntimePortError};
 pub use process_group::{PlatformProcessGroup, ProcessGroupLifecycle};
 pub use profile::{
     built_in_acp_runtime_profiles, AcpRuntimeProfile, AcpRuntimeProfileId,

@@ -4,10 +4,11 @@
 
 ## 基线结果
 
-**整体结果：基于 `6c115aefe04ace0d169a24fa7cd55ad7c1befa52` 的工作树已有 PARTIAL
-foundation。** 固定的上游基线仍是 NOT IMPLEMENTED。当前规划分支加入 Gateway-owned local process
-supervisor 与严格的 private cosh-core JSONL v1 codec，但仍不存在已集成的 `CoshCoreBridge`、durable
-runtime binding、public event mapping、brokered execution profile 或 Shell ownership migration。
+**整体结果：基于上游 `e3763b001c91f3c13dc6afbd57aac924162e9f59` 的候选实现为 PARTIAL，
+Phase 1 仍是 NOT ACCEPTED。** 候选实现加入 neutral `AgentRuntimePort`，并在严格的 private
+cosh-core JSONL v1 codec 上实现 supervised `CoshCoreBridge`。Bridge 已约束 public identity 与 event
+顺序、限制 retained state，并通过 process cleanup 结算 cancel。Durable coordination、brokered tool
+execution、resume/recovery、Shell ownership migration 与 real-provider evidence 仍缺失。
 
 ## 结果口径
 
@@ -21,7 +22,7 @@ runtime binding、public event mapping、brokered execution profile 或 Shell ow
 
 ## 已检查证据
 
-- 固定源码：`6c115aefe04ace0d169a24fa7cd55ad7c1befa52`。
+- 上游源码基线：`e3763b001c91f3c13dc6afbd57aac924162e9f59`。
 - [`protocol.rs`](../../../../../crates/cosh-core/src/protocol.rs) 定义 exact private protocol v1 和全部当前
   message shape。
 - [`headless.rs`](../../../../../crates/cosh-core/src/headless.rs) negotiation 并运行 provider turn。
@@ -37,24 +38,29 @@ runtime binding、public event mapping、brokered execution profile 或 Shell ow
   stdout framing 与 stderr-tail retention。
 - [`runtime/cosh_core_jsonl.rs`](../../../../../crates/cosh-gateway/src/runtime/cosh_core_jsonl.rs) 实现严格的
   private v1 initialization 与 typed wire observation，不使用 ACP 命名。
+- [`runtime/port.rs`](../../../../../crates/cosh-gateway/src/runtime/port.rs) 定义 provider-neutral、
+  object-safe command/event boundary 与脱敏 error。
+- [`runtime/cosh_core_bridge.rs`](../../../../../crates/cosh-gateway/src/runtime/cosh_core_bridge.rs) 绑定
+  COSH identity、映射有界 public event、拒绝不支持的 control request，并在不导入 Task storage、core
+  或 Shell crate 的前提下独占一个 supervisor generation。
 
 ## 验收矩阵
 
 | ID | 验收项 | 基线 | 证据或缺失产物 |
 | --- | --- | --- | --- |
-| CCB-001 | Bridge 实现 neutral `AgentRuntimePort`。 | NOT IMPLEMENTED | 无 Gateway/port。 |
+| CCB-001 | Bridge 实现 neutral `AgentRuntimePort`。 | Library 切片 PASS | Object-safe port 与 Core implementation 可编译，并通过 focused lifecycle test。 |
 | CCB-002 | Private JSONL v1 与 ACP v1 显式分离。 | PASS | 当前 runtime contract 明确该区分。 |
-| CCB-003 | Task input admission 前 exact initialization 成功。 | PARTIAL | Codec 在 user frame 前要求 exact v1/correlation/capabilities；尚未集成 Task admission。 |
-| CCB-004 | Gateway production 拒绝 legacy unversioned peer。 | PARTIAL | Codec 拒绝 missing/mismatched version；尚无 launch profile 调用。 |
+| CCB-003 | Task input admission 前 exact initialization 成功。 | PARTIAL | Bridge 在 Prompt 前完成 negotiation，并要求先交付 `SessionOpened`；尚未集成 durable Task admission。 |
+| CCB-004 | Gateway production 拒绝 legacy unversioned peer。 | PARTIAL | Bridge 使用 strict codec，拒绝 missing/mismatched version；仍缺已安装 Core profile evidence。 |
 | CCB-005 | `RuntimeSupervisor` 是 child process lifecycle 唯一 owner。 | PARTIAL | 新 supervisor 独占一个 child/group/pipe/reap；现有 Shell core owner 与 restart policy 尚未迁移。 |
-| CCB-006 | 每种 JSONL message 映射成有界有序 Runtime event/command。 | PARTIAL | 当前 output 解码为 typed local observation；缺少 public contract mapping/order/backpressure。 |
-| CCB-007 | Task/Run/runtime/Agent/provider ID 保持独立。 | PARTIAL | Contracts 拥有 neutral ID，codec 单独命名 provider session；尚无 binding mapper。 |
-| CCB-008 | Bridge 不能写 Task storage。 | NOT IMPLEMENTED | Boundary 不存在。 |
+| CCB-006 | 每种 JSONL message 映射成有界有序 Runtime event/command。 | PARTIAL | Session、text、tool observation、result、cancel 与 transport failure 已用 monotonic sequence 映射；question/auth/tool permission、usage、environment、durable backpressure 与完整 golden 仍缺。 |
+| CCB-007 | Task/Run/runtime/Agent/provider ID 保持独立。 | PARTIAL | Bridge 创建带 scoped provider `ExternalRef` 的 fenced in-memory binding；仍缺 durable binding persistence 与 stale-generation reconciliation。 |
+| CCB-008 | Bridge 不能写 Task storage。 | Library 切片 PASS | Dependency 与 source review 表明 port/bridge 没有 storage owner 或 storage call。 |
 | CCB-009 | Brokered profile 阻止 core-local side effect。 | FAIL | 当前 allowed/approved tool 可在 core 执行。 |
 | CCB-010 | `can_use_tool` 进入 Broker 和 permit-bound target result。 | NOT IMPLEMENTED | Broker/Bridge 不存在。 |
 | CCB-011 | Approval receipt 在 durable Task ownership 后发送。 | NOT IMPLEMENTED | 当前 receipt 只证明 Shell main-thread receipt。 |
-| CCB-012 | Question/auth/evidence 使用 durable 或 secret-safe port。 | NOT IMPLEMENTED | 当前 path 属于 Shell。 |
-| CCB-013 | Process cancel escalation、kill group 并 reap child。 | PARTIAL | Supervisor TERM/KILL/reap test 通过；仍缺 descendant、cancel/result/EOF race 与 protocol interrupt fixture。 |
+| CCB-012 | Question/auth/evidence 使用 durable 或 secret-safe port。 | PARTIAL | Core auth 与所有未建模 control request 使用脱敏 error fail closed；durable port 仍缺。 |
+| CCB-013 | Process cancel escalation、kill group 并 reap child。 | PARTIAL | Focused test 覆盖 interrupt、cancelled terminal、TERM/KILL/reap 与同步 fallback cleanup；仍缺 descendant 与 cancel/result/EOF race fixture。 |
 | CCB-014 | Provider session persistence 与 Task storage 分离。 | PASS | 当前 `SessionStore` 是 workspace-scoped provider state。 |
 | CCB-015 | Crash/restart 不会静默重发 uncertain prompt。 | NOT IMPLEMENTED | Task/Broker reconciliation 不存在。 |
 | CCB-016 | Gateway 不通过 Rust dependency 依赖 core implementation 或 Shell。 | PASS | `cosh-gateway` mirror private wire type，不依赖 core/Shell crate。 |
@@ -83,20 +89,18 @@ cargo test --package cosh-gateway cosh_jsonl_contract
 cargo test --package cosh-gateway-contracts runtime_schema
 ```
 
-第一轮增量的 targeted evidence：
+当前未提交候选实现的 bridge-targeted evidence：
 
 ```bash
-cargo test -p cosh-gateway --lib runtime --no-fail-fast
-# 19 passed; 0 failed; 17 filtered out
+cargo +1.88.0 test --locked --package cosh-gateway cosh_core_bridge
+# Library target 7 passed；0 failed；104 filtered out
 ```
 
-这覆盖 codec negotiation/terminal behavior、bound、launch validation、stderr retention、single terminal
-delivery 与 TERM-to-KILL reap。它不能替代必需的 canonical、process-tree/race、public mapping、Broker、
-recovery、backpressure、Shell protocol 或 PTY gate。
-Process suite 还注入 process-group TERM failure，并证明 direct child 会在返回前被 kill、reap、settle，
-同时保留一个仍可读取且不可重复交付的 terminal。
-其中 18 个通过测试由 Runtime 拥有；`runtime` 名称过滤还会选中一个名称包含 runtime event 的 Task
-aggregate test。
+这覆盖 identity fencing、stream 与 terminal mapping、single terminal delivery、open timeout、cross-Run
+rejection、SessionOpened-before-Prompt ordering、idle-cancel rejection、aggregate Prompt bound、retained
+tool-ID bound，以及 cancel 时的 process cleanup。它不能替代必需的 canonical corpus、完整
+process-tree/race、Broker、recovery、backpressure、Shell protocol、real-provider 或 PTY gate。Rustdoc 与
+Clippy evidence 只会在最终 scoped command 完成后记录。
 
 ## Exit criteria
 
@@ -117,3 +121,5 @@ aggregate test。
 - 对 side-effect tool 发送 generic allow 会绕过 target-bound permit。
 - 从 stale Run 持久化 provider session binding，可能使后续工作关联到错误 Task。
 - 读取速度超过 durable Task event commit，可能在 daemon crash 时丢失 control event。
+- `ExternalRef.value` 包含私有 provider data，不得写入 log 或通用 audit output；durable storage 仍需采用
+  encrypted reference row 或 keyed digest policy。
