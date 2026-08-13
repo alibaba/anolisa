@@ -26,6 +26,28 @@ Outbox delivery worker 或 execution reconciliation。
   replay/conflict、stale revision、Outbox atomic rollback、schema/checksum rejection、private-path attack、
   causation persistence，以及 durable reopen 后 event replay。
 
+## Durable ledger 切片
+
+**整体结果为 VERIFIED STORAGE SLICE；Phase 1 exit 尚未验收。** 当前 candidate 增加 checksummed
+v2 migration，持久化 approval、single-use permit、execution、runtime binding 与 Run lease。
+每次 ledger mutation 在使用 Task/Run binding 前都会 replay authoritative Task event stream。
+Permit consume 与 Runtime event acceptance 必须携带准确、当前且未过期的 lease generation 和
+revision。Execution start 与 permit consume 原子提交；restart recovery 将没有 receipt 的 started
+execution 标记为 `uncertain`，且不自动 retry。
+
+2026-08-13 记录的证据：
+
+- `cargo +1.88.0 test --locked --package cosh-gateway storage --no-fail-fast` 通过 28/28 个
+  targeted storage test。
+- Adversarial fixture 覆盖其他 Task 的有效 Run、stale lease revision、跳号 Runtime generation、
+  超过 approval 的 permit expiry、跨 plane idempotency key 复用、SQLite integer overflow、terminal
+  receipt divergence，以及 rejected permit/execution mutation 的完整 rollback。
+- Task command 与 ledger command receipt table 强制共享 actor-scoped idempotency namespace。
+  v1 migration checksum 保持不变，existing v1 store 可升级至 v2。
+
+该切片尚未增加 `TaskCoordinator`、Outbox delivery worker、executor、reconciliation 或 daemon API。
+Runtime sequence callback 对重复 sequence 采取 reject，而非 replay 已存 callback result。
+
 ## 结果口径
 
 | 结果 | 含义 |
@@ -59,10 +81,10 @@ Outbox delivery worker 或 execution reconciliation。
 | TEP-003 | State reducer 拒绝所有非法 transition。 | PARTIAL | Reducer 与关键 transition test 已通过；完整 state/event matrix 待补。 |
 | TEP-004 | Event、snapshot、idempotency receipt 与 outbox 原子 commit。 | PASS | `commit_task` 使用 `BEGIN IMMEDIATE`；重复 Delivery ID 证明完整 rollback。 |
 | TEP-005 | Expected revision 阻止 stale writer。 | PASS | Revision-conflict test 后所有 Task table 仍为空。 |
-| TEP-006 | Run lease 使用 monotonic fencing 与有界 renewal。 | NOT IMPLEMENTED | Run lease 不存在。 |
-| TEP-007 | Lease expiry 不会自动重放 unknown OS effect。 | NOT IMPLEMENTED | Reconciliation path 不存在。 |
-| TEP-008 | Approval resolution 使用 first-valid-terminal-wins。 | PARTIAL | Reducer 拒绝已 resolve/非 pending ID；authorization 与 concurrent-decision fixture 待补。 |
-| TEP-009 | Runtime 与 execution callback 幂等且带 fence。 | NOT IMPLEMENTED | Port 不存在。 |
+| TEP-006 | Run lease 使用 monotonic fencing 与有界 renewal。 | PASS | Lease acquire/renew/release 校验准确 owner、revision、generation、active Task/Run 与 deadline；takeover 增加 generation。 |
+| TEP-007 | Lease expiry 不会自动重放 unknown OS effect。 | PARTIAL | Started execution 在 recovery 时进入 `uncertain` 且不 retry；executor reconciliation 尚缺。 |
+| TEP-008 | Approval resolution 使用 first-valid-terminal-wins。 | PARTIAL | Durable pending-state CAS 绑定 actor、revision、deadline、Task 与 Run；concurrent-decision fixture 和 Task event integration 待补。 |
+| TEP-009 | Runtime 与 execution callback 幂等且带 fence。 | PARTIAL | Ledger command 按 actor/key/digest replay；permit start 与 Runtime sequence 要求 current lease。Runtime sequence replay 和 Runtime port integration 待补。 |
 | TEP-010 | Event replay 重建等价 projection。 | PASS | Durable reopen recovery replay ordered envelope，并比较完整 snapshot。 |
 | TEP-011 | Outbox restart 使用 at-least-once 与稳定 Delivery ID。 | PARTIAL | 稳定 row 已持久化，但 dispatch lease/reclaim/ack 不存在。 |
 | TEP-012 | Task record 排除 raw stream、secret 与 terminal buffer。 | PARTIAL | Snapshot/event leaf 已 typed/bounded；Outbox payload、collection aggregate bound 与 secret classification 待补。 |

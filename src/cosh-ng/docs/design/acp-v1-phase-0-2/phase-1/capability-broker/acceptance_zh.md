@@ -17,6 +17,22 @@ consume single-use permit。八个 targeted test 通过。
 OS executor、revocation、crash recovery、reconciliation、network API 与 ACP integration 均未实现。
 现有 CLI/Core/Shell mutation path 仍会绕过该切片。
 
+## Durable ledger storage 结果
+
+**整体结果为 VERIFIED DURABLE STORAGE SLICE；Broker integration 仍为 PARTIAL。** Checksummed
+SQLite v2 migration 现在会持久化 approval resolution、single-use permit、execution state 与 receipt、
+Runtime binding 和 fenced Run lease。Durable consume path replay authoritative Task event stream，
+要求准确的 current lease claim，并将 issued permit 和 planned execution 原子更新为 consumed/started。
+Recovery 将没有 receipt 的 started execution 标记为 `uncertain`，且不会 retry effect。基于 approval
+签发的 permit 不能超过 approval deadline，也不能扩大任何 approval binding。
+
+2026-08-13，`cargo +1.88.0 test --locked --package cosh-gateway storage --no-fail-fast`
+通过 28/28 个 targeted storage test。测试覆盖 stale lease、cross-Task Run、generation skip、扩大
+approval deadline、integer overflow、idempotency namespace、receipt corruption 与 atomic rollback。
+
+Process-local `CapabilityBroker` 尚未连接该 store，因此 existing bypass finding、immutable target
+resolution、required audit persistence、OS executor 与 reconciliation 仍待完成。
+
 ## 结果口径
 
 | 结果 | 含义 |
@@ -48,12 +64,12 @@ ACP 或 network API。
 | CBR-002 | Target 解析成 immutable authenticated identity。 | NOT IMPLEMENTED | 第一版只绑定 exact `TargetRef`；没有 resolver、boot/workspace/UID identity 或 attestation。 |
 | CBR-003 | Policy result、approval 与 permit 是不同类型。 | PARTIAL | `PolicyDecision`、`ApprovalRequest`、`CapabilityDecision` 与 `ExecutionPermit` 已分离；durable approval resolution/re-authorization 不存在。 |
 | CBR-004 | 每个 permitted effect 有一个 `ExecutionId`。 | PARTIAL | 每个 Broker-issued permit 都有一个 `ExecutionId`；bypass path 与 execution lifecycle 未集成。 |
-| CBR-005 | Permit 绑定 actor、Task、Run、target、operation digest、policy、fence、expiry 与一次使用。 | PARTIAL | Actor/Task/Run/Execution/exact target/完整 operation digest/policy/expiry/single-use binding 通过；immutable target 与 runtime/lease fence 尚缺。Canonicalization 与 hashing 仍依赖 trusted ingress。 |
-| CBR-006 | Target 在执行前立即校验并 consume permit。 | PARTIAL | `claim` atomically 校验并 consume，但没有 target adapter 或 durable store 在 effect 前调用。 |
-| CBR-007 | Approval 是 durable Task state 且不能扩大 authority。 | PARTIAL | Approval request 保留 request/Task/Run/expiry；没有 durable approval ledger、resolution 或 approval-bound issuance。Direct permit 的 `approval_id = None`。 |
+| CBR-005 | Permit 绑定 actor、Task、Run、target、operation digest、policy、fence、expiry 与一次使用。 | PARTIAL | Durable consume 校验准确 actor/Task/authoritative Run/Execution/target/digest/policy/expiry，以及 current lease generation 与 revision。Immutable target identity 和 production Broker wiring 尚缺。 |
+| CBR-006 | Target 在执行前立即校验并 consume permit。 | PARTIAL | Durable consume 与 execution start 在同一 transaction 中，但没有 OS target adapter 在 effect 前立即调用 ledger。 |
+| CBR-007 | Approval 是 durable Task state 且不能扩大 authority。 | PARTIAL | Durable approval resolution 与准确的 approval-bound issuance 已存在；approval ledger 尚未与 Task approval event 原子集成。仍支持 direct policy permit。 |
 | CBR-008 | Broker 不写 Task aggregate。 | PASS | Broker 不依赖 Task aggregate 或 storage，只返回 decision。 |
-| CBR-009 | 重复 execute 不能产生第二个 effect。 | PARTIAL | 八个 concurrent claim 只有一个成功，单进程 replay 失败；没有跨 restart 的 durable execution/effect ledger。 |
-| CBR-010 | Crash uncertainty 进入 typed reconciliation，不自动 retry。 | NOT IMPLEMENTED | 没有 execution lifecycle 或 reconciliation port。 |
+| CBR-009 | 重复 execute 不能产生第二个 effect。 | PARTIAL | Durable single-use consume 与 idempotent command receipt 可跨 restart；executor integration 仍需证明 `Replayed` outcome 不会重复 effect。 |
+| CBR-010 | Crash uncertainty 进入 typed reconciliation，不自动 retry。 | PARTIAL | Recovery 将所有没有 receipt 的 started execution 更新为 `uncertain` 且不 retry；typed reconciliation port 尚缺。 |
 | CBR-011 | Shell parsing 对 adversarial separator 与 metacharacter fail closed。 | PASS | 当前 parser/heuristic baseline 仍可复用；新 Broker 没有增加 Shell fallback。 |
 | CBR-012 | Typed policy 有 allow/deny/require-approval outcome。 | PASS | Neutral `PolicyPort` 与 deterministic test 覆盖三个 outcome，以及 unavailable/invalid authority。 |
 | CBR-013 | Permit issuance 与 execution start 要求 durable security audit。 | NOT IMPLEMENTED | Memory store 没有 audit port 或 durable issuance gate。 |

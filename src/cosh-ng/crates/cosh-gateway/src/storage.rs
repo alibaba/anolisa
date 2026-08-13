@@ -3,10 +3,17 @@
 //! The store owns one write connection and commits task events, projections,
 //! command receipts, and Outbox intents in one immediate transaction.
 
+mod ledger;
 mod schema;
 mod sqlite;
 mod task_store;
 
+pub use ledger::{
+    ApprovalRecord, ApprovalResolution, ApprovalState, ExecutionClaim, ExecutionCompletion,
+    ExecutionRecord, ExecutionState, LeaseClaim, LeaseCommand, LedgerCommand, LedgerOutcome,
+    PermitRecord, PermitState, RecoveryReport, RunLeaseRecord, RuntimeBindingRecord,
+    RuntimeBindingState,
+};
 pub use sqlite::SqliteTaskStore;
 pub use task_store::{CommitOutcome, CommitReceipt, OutboxIntent, TaskCommit};
 
@@ -50,6 +57,26 @@ pub enum StoreError {
         /// Revision supplied by the command.
         expected: u64,
         /// Current durable revision.
+        actual: u64,
+    },
+    /// A durable ledger entity does not exist.
+    #[error("Gateway ledger entity not found: {entity}")]
+    LedgerNotFound {
+        /// Stable entity category and identifier safe for diagnostics.
+        entity: String,
+    },
+    /// A durable ledger transition violates a binding or lifecycle invariant.
+    #[error("Gateway ledger conflict: {message}")]
+    LedgerConflict {
+        /// Bounded developer-oriented reason.
+        message: String,
+    },
+    /// Runtime output belongs to a stale process generation.
+    #[error("runtime generation fenced: expected {expected}, found {actual}")]
+    GenerationFenced {
+        /// Active durable runtime generation.
+        expected: u64,
+        /// Generation carried by the stale operation.
         actual: u64,
     },
     /// A requested Task does not exist.

@@ -19,6 +19,25 @@ fence, durable permit/execution ledger, audit gate, OS executor, revocation, cra
 reconciliation, network API, or ACP integration. Existing CLI/Core/Shell mutation paths still
 bypass this slice.
 
+## Durable ledger storage result
+
+**Overall: VERIFIED DURABLE STORAGE SLICE; BROKER INTEGRATION REMAINS PARTIAL.** A checksummed
+SQLite v2 migration now stores approval resolution, single-use permits, execution state and
+receipts, Runtime bindings, and fenced Run leases. The durable consume path replays the
+authoritative Task event stream, requires the exact current lease claim, atomically changes an
+issued permit and planned execution to consumed/started, and marks an unreceipted started execution
+`uncertain` during recovery without retrying the effect. Approved permits cannot outlive or widen
+their approval bindings.
+
+`cargo +1.88.0 test --locked --package cosh-gateway storage --no-fail-fast` passed 28/28 targeted
+storage tests on 2026-08-13. These tests include stale-lease, cross-Task Run, generation-skip,
+approval-deadline widening, integer-overflow, idempotency-namespace, receipt-corruption, and atomic
+rollback fixtures.
+
+The process-local `CapabilityBroker` is not yet wired to this store, so existing bypass findings,
+immutable target resolution, required audit persistence, the OS executor, and reconciliation remain
+open.
+
 ## Result vocabulary
 
 | Result | Meaning |
@@ -50,12 +69,12 @@ Runtime bridges, OS operators, ACP, or network APIs.
 | CBR-002 | Target resolves to an immutable authenticated identity. | NOT IMPLEMENTED | The first slice binds exact `TargetRef`; there is no resolver, boot/workspace/UID identity, or attestation. |
 | CBR-003 | Policy result, approval, and permit are distinct types. | PARTIAL | `PolicyDecision`, `ApprovalRequest`, `CapabilityDecision`, and `ExecutionPermit` are distinct; durable approval resolution/re-authorization is absent. |
 | CBR-004 | Every permitted effect has one `ExecutionId`. | PARTIAL | Every Broker-issued permit gets one `ExecutionId`; bypass paths and execution lifecycle are not integrated. |
-| CBR-005 | Permit binds actor, Task, Run, target, operation digest, policy, fence, expiry, and one use. | PARTIAL | Actor/Task/Run/Execution/exact target/complete operation digest/policy/expiry/single-use bindings pass; immutable target and runtime/lease fence remain. Canonicalization and hashing still rely on trusted ingress. |
-| CBR-006 | Target verifies and consumes permit immediately before execution. | PARTIAL | `claim` atomically verifies and consumes, but no target adapter or durable store invokes it before an effect. |
-| CBR-007 | Approval is durable Task state and cannot widen authority. | PARTIAL | Approval requests preserve request/Task/Run/expiry; there is no durable approval ledger, resolution, or approval-bound issuance. Direct permits have `approval_id = None`. |
+| CBR-005 | Permit binds actor, Task, Run, target, operation digest, policy, fence, expiry, and one use. | PARTIAL | Durable consume verifies exact actor/Task/authoritative Run/Execution/target/digests/policy/expiry plus current lease generation and revision. Immutable target identity and production Broker wiring remain. |
+| CBR-006 | Target verifies and consumes permit immediately before execution. | PARTIAL | Durable consume and execution start are one transaction, but no OS target adapter invokes the ledger immediately before an effect. |
+| CBR-007 | Approval is durable Task state and cannot widen authority. | PARTIAL | Durable approval resolution and exact approval-bound issuance exist; the approval ledger is not yet atomically integrated with Task approval events. Direct policy permits remain supported. |
 | CBR-008 | Broker never writes the Task aggregate. | PASS | Broker has no Task aggregate or storage dependency and returns decisions only. |
-| CBR-009 | Repeated execute cannot produce a second effect. | PARTIAL | One of eight concurrent claims wins and replay fails in one process; there is no durable execution/effect ledger across restart. |
-| CBR-010 | Crash uncertainty triggers typed reconciliation, never automatic retry. | NOT IMPLEMENTED | No execution lifecycle or reconciliation port exists. |
+| CBR-009 | Repeated execute cannot produce a second effect. | PARTIAL | Durable single-use consume and idempotent command receipts survive restart; executor integration must still prove that `Replayed` outcomes never repeat an effect. |
+| CBR-010 | Crash uncertainty triggers typed reconciliation, never automatic retry. | PARTIAL | Recovery changes every unreceipted started execution to `uncertain` without retry; a typed reconciliation port is absent. |
 | CBR-011 | Shell parsing fails closed on adversarial separators and metacharacters. | PASS | Existing parser/heuristic baseline remains reusable; the new Broker does not add a Shell fallback. |
 | CBR-012 | Typed policy has allow/deny/require-approval outcomes. | PASS | Neutral `PolicyPort` and deterministic tests cover all three outcomes plus unavailable/invalid authority. |
 | CBR-013 | Permit issuance and execution start require durable security audit. | NOT IMPLEMENTED | The memory store has no audit port or durable issuance gate. |

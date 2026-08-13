@@ -27,6 +27,29 @@ Evidence recorded on 2026-08-13:
   idempotency replay/conflict, stale revisions, atomic Outbox rollback, schema/checksum rejection,
   private-path attacks, causation persistence, and event replay after a durable reopen.
 
+## Durable ledger slice
+
+**Overall: VERIFIED STORAGE SLICE; PHASE 1 EXIT NOT ACCEPTED.** The candidate now adds a
+checksummed v2 migration for durable approval, single-use permit, execution, runtime-binding, and
+Run-lease records. Every ledger mutation replays the authoritative Task event stream before using
+a Task/Run binding. Permit consumption and Runtime event acceptance require the exact current,
+unexpired lease generation and revision. Execution start consumes its permit atomically, while
+restart recovery marks an unreceipted started execution `uncertain` without retrying it.
+
+Evidence recorded on 2026-08-13:
+
+- `cargo +1.88.0 test --locked --package cosh-gateway storage --no-fail-fast` passed 28/28
+  targeted storage tests.
+- Adversarial fixtures cover a valid Run from another Task, stale lease revision, skipped Runtime
+  generation, permit expiry wider than approval, cross-plane idempotency-key reuse, SQLite integer
+  overflow, terminal receipt divergence, and rollback of rejected permit/execution mutations.
+- The task-command and ledger-command receipt tables enforce one actor-scoped idempotency
+  namespace. The v1 migration checksum remains unchanged and an existing v1 store upgrades to v2.
+
+This slice does not add `TaskCoordinator`, Outbox delivery workers, an executor, reconciliation,
+or a daemon API. Runtime sequence callbacks reject duplicate sequence numbers rather than replaying
+a stored callback result.
+
 ## Result vocabulary
 
 | Result | Meaning |
@@ -60,10 +83,10 @@ Evidence recorded on 2026-08-13:
 | TEP-003 | State reducer rejects every illegal transition. | PARTIAL | Reducer exists and critical transition tests pass; exhaustive state/event matrix is pending. |
 | TEP-004 | Event, snapshot, idempotency receipt, and outbox commit atomically. | PASS | `commit_task` uses `BEGIN IMMEDIATE`; a duplicate Delivery ID proves complete rollback. |
 | TEP-005 | Expected revision prevents stale writers. | PASS | Revision-conflict test leaves all Task tables empty. |
-| TEP-006 | Run lease has monotonic fencing and bounded renewal. | NOT IMPLEMENTED | Run lease absent. |
-| TEP-007 | Lease expiry never replays an unknown OS effect automatically. | NOT IMPLEMENTED | Reconciliation path absent. |
-| TEP-008 | Approval resolution is first-valid-terminal-wins. | PARTIAL | Reducer rejects resolved/non-pending approval IDs, but authorization and concurrent-decision fixture are pending. |
-| TEP-009 | Runtime and execution callbacks are idempotent and fenced. | NOT IMPLEMENTED | Ports absent. |
+| TEP-006 | Run lease has monotonic fencing and bounded renewal. | PASS | Lease acquire/renew/release requires exact owner, revision, generation, active Task/Run, and deadline; takeover increments generation. |
+| TEP-007 | Lease expiry never replays an unknown OS effect automatically. | PARTIAL | Started executions recover as `uncertain` and are not retried; executor reconciliation is absent. |
+| TEP-008 | Approval resolution is first-valid-terminal-wins. | PARTIAL | Durable pending-state CAS binds actor, revision, deadline, Task, and Run; a concurrent-decision fixture and Task-event integration remain. |
+| TEP-009 | Runtime and execution callbacks are idempotent and fenced. | PARTIAL | Ledger commands replay by actor/key/digest; permit start and Runtime sequence require the current lease. Runtime sequence replay and Runtime-port integration remain. |
 | TEP-010 | Event replay rebuilds an equivalent projection. | PASS | Durable-reopen recovery replays ordered envelopes and compares the exact snapshot. |
 | TEP-011 | Outbox restart is at-least-once with stable Delivery IDs. | PARTIAL | Stable rows persist, but dispatch leasing/reclaim/ack does not exist. |
 | TEP-012 | Task records exclude raw streams, secrets, and terminal buffers. | PARTIAL | Snapshot/event leaves are typed and bounded; Outbox payload, collection aggregate bounds, and secret classification remain. |
