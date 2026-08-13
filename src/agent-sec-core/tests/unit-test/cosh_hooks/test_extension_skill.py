@@ -98,6 +98,59 @@ def test_security_observability_skill_documents_cli_and_output_contracts() -> No
     assert "pass` / `warn` / `deny" in content
 
 
+def test_security_observability_skill_includes_few_shot_queries() -> None:
+    content = _SKILL_PATH.read_text(encoding="utf-8")
+
+    assert "## Few-shot 场景" in content
+    assert "帮我查询最近一个小时出现的安全事件" in content
+    assert "events --last-hours 1 --output json" in content
+    assert "帮我查询本次会话出现的安全事件" in content
+    assert "events --session-id '<current_session_id>' --output json" in content
+    assert "帮我复盘最近一次 Agent 会话的安全情况" in content
+    assert "observability report --last --format json" in content
+
+
+def test_security_observability_skill_documents_cosh_ng_session_id_lookup() -> None:
+    """The cosh-ng-specific session lookup must stay explicit and fenced off.
+
+    ``runtime_context`` only exists in cosh-ng, and ``COSH_SESSION_ID`` is a
+    different identity namespace there, so both facts have to survive edits.
+    """
+    content = _SKILL_PATH.read_text(encoding="utf-8")
+
+    assert "## 获取当前 session_id" in content
+    assert "### cosh-ng 特别用法：`runtime_context` 工具" in content
+    assert "`provider_session_id`" in content
+    assert "events --session-id '<provider_session_id>' --output json" in content
+    assert (
+        "observability report --session-id '<provider_session_id>' --format json"
+        in content
+    )
+    # The skill must scope the tool to cosh-ng rather than presenting it as generic.
+    assert "仅适用于 **cosh-ng** Agent" in content
+    # Anti-pattern: the shell/terminal identity is not the agent session id.
+    assert "不要用环境变量 `$COSH_SESSION_ID` 代替" in content
+    assert "shell_session_id" in content
+    # runtime_context carries no run_id, so run scoping still needs another source.
+    assert "不返回 `run_id`" in content
+
+
+def test_security_observability_skill_scopes_session_queries_to_cosh_ng() -> None:
+    """Only cosh-ng can resolve its own session id.
+
+    Every other runtime must fall back to a time range or ``--last`` and state
+    the real query scope, instead of stalling on an id it cannot obtain.
+    """
+    content = _SKILL_PATH.read_text(encoding="utf-8")
+
+    assert "### 其他 Agent 运行时：不使用 `--session-id`" in content
+    assert "只有 cosh-ng 能让 Agent 取得自己的 `session_id`" in content
+    assert "默认改用**时间范围查询**" in content
+    assert "**必须在报告中说明实际查询范围**" in content
+    # The old "ask the user for the id" fallback must not come back.
+    assert "不要因为拿不到 `session_id` 而停下来反复询问用户" in content
+
+
 def test_security_observability_parameters_are_covered_by_agents_contract() -> None:
     content = _AGENTS_PATH.read_text(encoding="utf-8")
 

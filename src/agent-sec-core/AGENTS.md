@@ -480,6 +480,22 @@ uv run --project agent-sec-cli pytest tests/unit-test/hermes-plugin/ -v
 - Verify the source CLI definitions before editing the skill. Treat `--summary`
   and table/text output as human-display surfaces; structured Agent parsing must
   keep using JSON or JSONL examples.
+- The "获取当前 session_id" section documents a cosh-ng-only path: the cosh-ng
+  `runtime_context` tool returns `provider_session_id`, which is the same value
+  cosh-ng passes to hooks as `session_id` and therefore the same value stored on
+  security events and observability records. Keep that section explicitly scoped
+  to cosh-ng and keep the generic fallback next to it; no other agent runtime
+  exposes that tool as of this release. If one starts to, update both the skill
+  section and its contract test.
+- Only cosh-ng lets an Agent resolve its own `session_id`. Every other runtime
+  must fall back to a time range or `--last` and state the real query scope in
+  its answer, so keep the skill from telling those Agents to ask the user for an
+  id they cannot obtain. `run_id` and `trace_id` are never self-resolvable.
+- Keep the warning that `COSH_SESSION_ID` is not the agent session id. In
+  cosh-ng it is the shell/terminal identity recorded as `shell_session_id`, so
+  querying with it silently returns zero events and reads as "no security
+  events". If cosh-ng changes how the session id is exposed, update the skill
+  section and its contract test in the same change.
 
 ---
 
