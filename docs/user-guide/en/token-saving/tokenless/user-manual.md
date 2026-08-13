@@ -19,6 +19,33 @@ cargo build --release --locked -p tokenless-cli
 
 This path produces only the standalone `tokenless` CLI. It does not install `rtk`, `toon`, or the agent integration resources. To use the complete feature set in an agent, install through the anolisa CLI as described in the [Quick Start](QUICKSTART.md).
 
+### Binary tarball (no build toolchain required)
+
+Pre-built release tarballs include an embedded `install.sh` that deploys to any `PREFIX` without requiring Rust, Cargo, or Node.js on the target machine. Linux only (x86_64 / aarch64).
+
+```bash
+# Build the tarball (on a Linux build machine)
+cd anolisa/src/tokenless
+make release
+# => dist/tokenless-<VERSION>-<ARCH>.tar.gz
+
+# Deploy on the target machine
+tar xzf tokenless-<VERSION>-<ARCH>.tar.gz
+cd tokenless-<VERSION>
+sudo ./install.sh              # installs to /usr/local (default)
+sudo PREFIX=/usr ./install.sh  # installs to /usr
+```
+
+The installer deploys:
+- `bin/tokenless` and `libexec/anolisa/tokenless/{rtk,toon}` with symlinks in `bin/`
+- Adapter resources under `share/anolisa/adapters/tokenless/`
+- Component contract at `share/anolisa/components/tokenless/component.toml`
+- Cosh extension at `share/anolisa/extensions/tokenless/` (hooks, commands, cosh-extension.json)
+
+**Note:** `PREFIX` must be an absolute path. The installer is an overwrite-style deployment — it replaces the entire adapter resources directory and cosh extension on each run. For non-destructive or staged installs, use `make install` from a source build.
+
+If cosh does not scan `$PREFIX/share/anolisa/extensions` by default (the system scan path is `/usr/share/anolisa/extensions`), you may need to configure cosh to include the extension path for non-standard prefixes.
+
 ## Capabilities and boundaries
 
 | Capability | Behavior implemented in the current code | Important boundary |

@@ -36,6 +36,11 @@ ADAPTER_TEMPLATES := \
 COMPONENT_CONTRACT := .anolisa/component.toml
 TOON_VER := 0.5.0
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+# Architecture suffix for release tarball naming (derived from the Rust host
+# triple — more accurate than uname -m under Rosetta). Cross-architecture
+# builds are NOT supported: set up a native build environment for the target
+# arch instead, or pass CARGO_TARGET_TRIPLE and a matching --target to cargo.
+ARCH ?= $(shell rustc -vV 2>/dev/null | sed -n 's/^host: *\([^ -]*\).*/\1/p' || uname -m)
 NATIVE_NPM_TARGET := $(shell node -p 'process.platform + "-" + process.arch')
 NATIVE_NPM_INPUT_DIR := $(CURDIR)/target/npm-prebuilt/$(NATIVE_NPM_TARGET)
 
@@ -54,8 +59,9 @@ NATIVE_NPM_INPUT_DIR := $(CURDIR)/target/npm-prebuilt/$(NATIVE_NPM_TARGET)
         opencode-install opencode-uninstall \
         qwencode-install qwencode-uninstall \
         setup help \
-        npm-package npm-package-all npm-publish prepare-npm-native-binaries \
-        test-hooks
+        test-hooks \
+        release release-install-script release-check-cargo-config \
+        npm-package npm-package-all npm-publish prepare-npm-native-binaries
 
 # Default target
 all: build
@@ -255,6 +261,9 @@ dist: clean
 	tar czf ../tokenless-$(VERSION).tar.gz \
 	    --exclude='target' \
 	    --exclude='.git' \
+	    --exclude='tokenless/dist' \
+	    --exclude='node_modules' \
+	    --exclude='__pycache__' \
 	    -C .. tokenless
 	@tar_list=$$(tar -tzf ../tokenless-$(VERSION).tar.gz); \
 	for required in \
@@ -266,6 +275,341 @@ dist: clean
 		}; \
 	done
 	@echo "==> Tarball: ../tokenless-$(VERSION).tar.gz"
+
+# Path variables used by the embedded install.sh.
+# IMPORTANT — keep these in sync with the Makefile definitions above:
+#   BINDIR            ?= $(PREFIX)/bin
+#   LIBEXECDIR        ?= $(PREFIX)/libexec/anolisa/tokenless
+#   SHARE_DIR         ?= $(PREFIX)/share/anolisa/adapters/tokenless
+#   components        :  $(PREFIX)/share/anolisa/components/tokenless
+#   COSH_EXTENSION_DIR?= $(PREFIX)/share/anolisa/extensions/tokenless
+# The install.sh defines these same paths relative to its own PREFIX default,
+# so any future layout change (e.g. libexec restructuring, new adapter
+# subdirectories) must be updated in BOTH the Makefile variables and the
+# install.sh variable definitions below to prevent path drift between
+# `make install` and the release tarball installer.
+#
+# Overwrite behavior: the install.sh performs destructive operations —
+#   - replaces rtk/toon symlinks (or binaries) in $BINDIR
+#   - rm -rf + reinstall of the entire $SHARE_DIR directory
+#   - replaces the cosh extension directory
+# All destructive actions emit warnings before execution. This is by design
+# for a self-contained release installer. For environments requiring
+# non-destructive or staged installs, use `make install` directly.
+#
+# Pre-flight guards: the release target refuses to build on non-Linux
+# platforms and rejects Cargo configuration overrides of [build] target or
+# target-dir — in $CARGO_HOME/config{,.toml}, in any .cargo/config{,.toml}
+# from the working directory up to the filesystem root (all locations Cargo
+# merges), and via CARGO_BUILD_TARGET / CARGO_TARGET_DIR /
+# CARGO_BUILD_TARGET_DIR environment variables — since those would change
+# the artifact paths the packaging step relies on.
+#
+# Build all binaries and package into a release tarball.
+# Produces dist/tokenless-$(VERSION)-$(ARCH).tar.gz containing:
+#   bin/tokenless        - main CLI binary
+#   libexec/rtk          - command rewriting proxy
+#   libexec/toon         - TOON encoder/decoder (built fresh via cargo install)
+#   share/adapters/      - adapter plugins (openclaw, hermes, qoder, etc.)
+#   share/component.toml - component contract
+#   docs/                - user manuals
+#   LICENSE
+#   install.sh           - standalone deployment script
+release:
+	@# --- Pre-flight guards ---
+	@# [Guard] Linux-only: tokenless release artifacts are Linux-only.
+	@if [ "$$(uname -s)" != "Linux" ]; then \
+	    echo "ERROR: make release is only supported on Linux."; \
+	    echo "       Current platform: $$(uname -s)."; \
+	    echo "       Use a Linux build environment."; \
+	    exit 1; \
+	fi
+	@# [Guard] Cargo config files can override target/target-dir via config
+	@# rather than environment variables. Cargo merges config from
+	@# $CARGO_HOME plus every .cargo/config{,.toml} from the CWD up to the
+	@# filesystem root, so all those locations are scanned (target_dir, the
+	@# underscore spelling cargo also accepts, is rejected as well).
+	@CFG_FILES=""; \
+	CARGO_HOME_DIR="$${CARGO_HOME:-$$HOME/.cargo}"; \
+	for f in "$$CARGO_HOME_DIR/config.toml" "$$CARGO_HOME_DIR/config"; do \
+	    [ -f "$$f" ] && CFG_FILES="$$CFG_FILES$$f "; \
+	done; \
+	d=$$(pwd); \
+	while :; do \
+	    for f in "$$d/.cargo/config.toml" "$$d/.cargo/config"; do \
+	        [ -f "$$f" ] && CFG_FILES="$$CFG_FILES$$f "; \
+	    done; \
+	    case "$$d" in /) break ;; esac; \
+	    d=$${d%/*}; [ -n "$$d" ] || d=/; \
+	done; \
+	for cfg in $$CFG_FILES; do \
+	    if grep -qE '^[[:space:]]*target[[:space:]]*=' "$$cfg" 2>/dev/null; then \
+	        echo "ERROR: Cargo config $$cfg sets [build] target."; \
+	        echo "       release builds require the default target. Remove or rename $$cfg."; \
+	        exit 1; \
+	    fi; \
+	    if grep -qE '^[[:space:]]*target[-_]dir[[:space:]]*=' "$$cfg" 2>/dev/null; then \
+	        echo "ERROR: Cargo config $$cfg sets [build] target-dir."; \
+	        echo "       release builds require the default target-dir. Remove or rename $$cfg."; \
+	        exit 1; \
+	    fi; \
+	done
+	@# [Guard] Environment variable checks
+	@HOST_ARCH="$$(rustc -vV 2>/dev/null | sed -n 's/^host: *\([^ -]*\).*/\1/p' || uname -m)"; \
+	if [ -n "$$CARGO_BUILD_TARGET" ]; then \
+	    echo "ERROR: CARGO_BUILD_TARGET is set to $$CARGO_BUILD_TARGET."; \
+	    echo "       release builds always use target/release/ — cross-compilation is not supported."; \
+	    echo "       Unset CARGO_BUILD_TARGET and build on a native $(ARCH) machine."; \
+	    exit 1; \
+	fi; \
+	if [ -n "$$CARGO_TARGET_DIR" ]; then \
+	    echo "ERROR: CARGO_TARGET_DIR is set to $$CARGO_TARGET_DIR."; \
+	    echo "       release builds always read from target/release/ — custom target dirs are not supported."; \
+	    echo "       Unset CARGO_TARGET_DIR before running make release."; \
+	    exit 1; \
+	fi; \
+	if [ -n "$$CARGO_BUILD_TARGET_DIR" ]; then \
+	    echo "ERROR: CARGO_BUILD_TARGET_DIR is set to $$CARGO_BUILD_TARGET_DIR."; \
+	    echo "       release builds always read from target/release/ — custom target dirs are not supported."; \
+	    echo "       Unset CARGO_BUILD_TARGET_DIR before running make release."; \
+	    exit 1; \
+	fi; \
+	if [ "$(ARCH)" != "$$HOST_ARCH" ]; then \
+	    echo "ERROR: ARCH=$(ARCH) does not match build host architecture ($$HOST_ARCH)."; \
+	    echo "       Cross-architecture release builds are not supported."; \
+	    echo "       Build on a native $(ARCH) machine instead."; \
+	    exit 1; \
+	fi
+	@# --- Build ---
+	$(MAKE) --no-print-directory build
+	@# --- Package ---
+	@echo "==> Packaging release tarball for tokenless v$(VERSION)..."
+	@rm -rf dist/tokenless-$(VERSION)
+	@mkdir -p dist/tokenless-$(VERSION)/bin \
+	    dist/tokenless-$(VERSION)/libexec \
+	    dist/tokenless-$(VERSION)/share/adapters/tokenless \
+	    dist/tokenless-$(VERSION)/docs
+	install -m 0755 target/release/tokenless dist/tokenless-$(VERSION)/bin/
+	install -m 0755 third_party/rtk/target/release/rtk dist/tokenless-$(VERSION)/libexec/
+	@# [Toon] Build toon into a private staging dir to guarantee we package
+	@# the binary from THIS build, not an arbitrary toon from the environment.
+	@STAGING=$$(mktemp -d); \
+	trap 'rm -rf "$$STAGING"' EXIT; \
+	if ! cargo install toon-format --version $(TOON_VER) --locked --root "$$STAGING" 2>"$$STAGING/install.err"; then \
+	    echo "ERROR: toon install failed — a release tarball must bundle the toon from this build."; \
+	    cat "$$STAGING/install.err" >&2; \
+	    exit 1; \
+	elif [ ! -x "$$STAGING/bin/toon" ]; then \
+	    echo "ERROR: toon binary not found at staging path $$STAGING/bin/toon — refusing to package."; \
+	    exit 1; \
+	else \
+	    install -m 0755 "$$STAGING/bin/toon" dist/tokenless-$(VERSION)/libexec/toon; \
+	    echo "==> Bundled toon $$("$$STAGING/bin/toon" --version 2>/dev/null || echo $(TOON_VER))"; \
+	fi
+	tar -cf - -C $(ADAPTER_SRC_DIR) \
+	    --exclude='node_modules' \
+	    --exclude='.tsbuildinfo' \
+	    --exclude='*.in' \
+	    --exclude='tests' \
+	    . | tar -xf - -C dist/tokenless-$(VERSION)/share/adapters/tokenless/
+	find dist/tokenless-$(VERSION)/share/adapters/tokenless \
+	    -type f \( -name '*.py' -o -name '*.sh' \) -exec chmod 0755 {} +
+	install -m 0644 $(COMPONENT_CONTRACT) dist/tokenless-$(VERSION)/share/component.toml
+	install -m 0644 ../../docs/user-guide/en/token-saving/tokenless/user-manual.md dist/tokenless-$(VERSION)/docs/tokenless-user-manual-en.md
+	install -m 0644 ../../docs/user-guide/zh/token-saving/tokenless/user-manual.md dist/tokenless-$(VERSION)/docs/tokenless-user-manual-zh.md
+	install -m 0644 docs/response-compression.md dist/tokenless-$(VERSION)/docs/
+	install -m 0644 LICENSE dist/tokenless-$(VERSION)/
+	$(MAKE) --no-print-directory release-install-script
+	@rm -f dist/tokenless-$(VERSION)-$(ARCH).tar.gz
+	tar czf dist/tokenless-$(VERSION)-$(ARCH).tar.gz -C dist tokenless-$(VERSION)
+	@rm -rf dist/tokenless-$(VERSION)
+	@echo ""
+	@echo "==> Release tarball: dist/tokenless-$(VERSION)-$(ARCH).tar.gz $$(du -sh dist/tokenless-$(VERSION)-$(ARCH).tar.gz | cut -f1)"
+	@echo "==> Extract and run ./install.sh to deploy."
+
+# Helper target: verify no Cargo config overrides are active.
+# Can be called independently in CI.
+release-check-cargo-config:
+	@# Scan every location Cargo merges: $CARGO_HOME plus all ancestor
+	@# .cargo/config{,.toml} from the CWD up to the filesystem root.
+	@CFG_FILES=""; \
+	CARGO_HOME_DIR="$${CARGO_HOME:-$$HOME/.cargo}"; \
+	for f in "$$CARGO_HOME_DIR/config.toml" "$$CARGO_HOME_DIR/config"; do \
+	    [ -f "$$f" ] && CFG_FILES="$$CFG_FILES$$f "; \
+	done; \
+	d=$$(pwd); \
+	while :; do \
+	    for f in "$$d/.cargo/config.toml" "$$d/.cargo/config"; do \
+	        [ -f "$$f" ] && CFG_FILES="$$CFG_FILES$$f "; \
+	    done; \
+	    case "$$d" in /) break ;; esac; \
+	    d=$${d%/*}; [ -n "$$d" ] || d=/; \
+	done; \
+	FAIL=0; \
+	for cfg in $$CFG_FILES; do \
+	    if grep -qE '^[[:space:]]*target[[:space:]]*=' "$$cfg" 2>/dev/null; then \
+	        echo "FAIL: $$cfg sets [build] target"; FAIL=1; \
+	    fi; \
+	    if grep -qE '^[[:space:]]*target[-_]dir[[:space:]]*=' "$$cfg" 2>/dev/null; then \
+	        echo "FAIL: $$cfg sets [build] target-dir"; FAIL=1; \
+	    fi; \
+	done; \
+	if [ "$$FAIL" -ne 0 ]; then exit 1; fi; \
+	echo "OK: no Cargo config overrides detected"
+
+# Write the embedded install script into the release staging directory.
+# Invoked as a dependency of `release` (not called directly).
+#
+# The path variables below mirror the Makefile defaults. If the Makefile layout
+# changes, update these definitions to prevent path drift.
+#
+# Generated install.sh features:
+#   - PREFIX must be an absolute path (rejects relative paths)
+#   - Preflight checks for path conflicts before any file writes
+#   - Uses `cp -r` (not `cp -pr`) to avoid preserving source file ownership
+#   - Deploys cosh extension (hooks/commands/cosh-extension.json)
+#   - Safe toon symlink cleanup that preserves external symlinks
+release-install-script:
+	@mkdir -p dist/tokenless-$(VERSION)
+	@echo '#!/usr/bin/env bash' > dist/tokenless-$(VERSION)/install.sh
+	@echo 'set -euo pipefail' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'SCRIPT_DIR="$$(cd "$$(dirname "$$0")" && pwd)"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'VERSION="$(VERSION)"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'PREFIX="$${PREFIX:-/usr/local}"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '# --- Preflight: PREFIX must be an absolute path ---' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'case "$$PREFIX" in' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    /*) ;;' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    *)  echo "ERROR: PREFIX must be an absolute path (got: $$PREFIX)"; exit 1 ;;' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'esac' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '# --- Preflight: ensure BINDIR parent is a directory ---' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'if [ -e "$$PREFIX/bin" ] && [ ! -d "$$PREFIX/bin" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    echo "ERROR: $$PREFIX/bin exists but is not a directory"; exit 1' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'fi' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '# --- Preflight: rtk/toon entries must be replaceable by symlinks ---' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '# ln -sf cannot overwrite a directory; reject before writing anything.' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'for entry in "$$PREFIX/bin/rtk" "$$PREFIX/bin/toon"; do' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    if [ -d "$$entry" ] && [ ! -L "$$entry" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '        echo "ERROR: $$entry is a directory — remove it before installing."; exit 1' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    fi' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'done' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '# --- Preflight: an existing PREFIX must be writable ---' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'if [ -d "$$PREFIX" ] && [ ! -w "$$PREFIX" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    echo "ERROR: $$PREFIX is not writable — re-run with sudo or choose a writable PREFIX"; exit 1' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'fi' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '# Path layout — keep in sync with Makefile' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'BINDIR="$$PREFIX/bin"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'LIBEXECDIR="$$PREFIX/libexec/anolisa/tokenless"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'SHARE_DIR="$$PREFIX/share/anolisa/adapters/tokenless"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'COMPONENTS_DIR="$$PREFIX/share/anolisa/components/tokenless"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'COSH_EXT_DIR="$$PREFIX/share/anolisa/extensions/tokenless"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'echo "==> tokenless $$VERSION installer"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'echo "    Install prefix : $$PREFIX"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'echo "    Binaries       : $$BINDIR"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'echo "    Libexec        : $$LIBEXECDIR"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'echo "    Adapters       : $$SHARE_DIR"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'echo "    Cosh extension : $$COSH_EXT_DIR"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'echo "    Note: this script will OVERWRITE rtk/toon symlinks in $$BINDIR,"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'echo "          replace all files under $$SHARE_DIR,"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'echo "          and replace the cosh extension at $$COSH_EXT_DIR"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'echo "==> Installing tokenless $$VERSION from $$SCRIPT_DIR ..."' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'echo ""' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '# --- Install binaries ---' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'install -d -m 0755 "$$BINDIR" "$$LIBEXECDIR"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'install -m 0755 "$$SCRIPT_DIR/bin/tokenless" "$$BINDIR/"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'install -m 0755 "$$SCRIPT_DIR/libexec/rtk" "$$LIBEXECDIR/"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '# rtk symlink' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'TARGET="$$LIBEXECDIR/rtk"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'if [ -L "$$BINDIR/rtk" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    RTK_LINK=$$(readlink "$$BINDIR/rtk" || true)' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    case "$$RTK_LINK" in' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '        *"$$PREFIX"*) ;;' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '        *) echo "WARNING: $$BINDIR/rtk is an existing symlink pointing to $$RTK_LINK — will be overwritten" ;;' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    esac' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'elif [ -e "$$BINDIR/rtk" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    echo "WARNING: $$BINDIR/rtk already exists — will be overwritten"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'fi' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'ln -sf "$$TARGET" "$$BINDIR/"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '# toon (conditional)' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'if [ -f "$$SCRIPT_DIR/libexec/toon" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    install -m 0755 "$$SCRIPT_DIR/libexec/toon" "$$LIBEXECDIR/"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    TARGET="$$LIBEXECDIR/toon"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    if [ -L "$$BINDIR/toon" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '        TOON_LINK=$$(readlink "$$BINDIR/toon" || true)' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '        case "$$TOON_LINK" in' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '            *"$$PREFIX"*) ;;' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '            *) echo "WARNING: $$BINDIR/toon is an existing symlink pointing to $$TOON_LINK — will be overwritten" ;;' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '        esac' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    elif [ -e "$$BINDIR/toon" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '        echo "WARNING: $$BINDIR/toon already exists — will be overwritten"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    fi' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    ln -sf "$$TARGET" "$$BINDIR/"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'else' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    # Clean up toon from a previous install when this release does not bundle it.' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    if [ -e "$$LIBEXECDIR/toon" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '        rm -f "$$LIBEXECDIR/toon"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    fi' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    if [ -L "$$BINDIR/toon" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '        TOON_LINK=$$(readlink "$$BINDIR/toon" 2>/dev/null || true)' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '        TOON_REAL=$$(cd "$$BINDIR" && realpath -m "$$TOON_LINK" 2>/dev/null || echo "$$TOON_LINK")' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '        TOON_EXPECT="$$(realpath -m "$$LIBEXECDIR/toon" 2>/dev/null || echo "$$LIBEXECDIR/toon")"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '        if [ "$$TOON_REAL" = "$$TOON_EXPECT" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '            rm -f "$$BINDIR/toon"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '            echo "NOTE: removed $$BINDIR/toon symlink (no longer bundled)"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '        else' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '            echo "NOTE: $$BINDIR/toon is an external symlink ($$TOON_LINK) — left untouched"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '        fi' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    fi' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'fi' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '# --- Adapter resources ---' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '# Use cp -r (NOT cp -pr) to avoid preserving source file ownership.' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'if [ -d "$$SHARE_DIR" ] && [ "$$(ls -A "$$SHARE_DIR" 2>/dev/null)" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    echo "WARNING: $$SHARE_DIR is not empty — all contents will be replaced"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'fi' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'rm -rf "$$SHARE_DIR"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'install -d -m 0755 "$$SHARE_DIR"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'cp -r "$$SCRIPT_DIR/share/adapters/tokenless/." "$$SHARE_DIR/"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'find "$$SHARE_DIR" -type f \( -name '\''*.py'\'' -o -name '\''*.sh'\'' \) -exec chmod 0755 {} +' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '# --- Component contract ---' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'if [ -f "$$SCRIPT_DIR/share/component.toml" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    install -d -m 0755 "$$COMPONENTS_DIR"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    install -m 0644 "$$SCRIPT_DIR/share/component.toml" "$$COMPONENTS_DIR/"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'fi' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '# --- Cosh extension ---' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'if [ -d "$$COSH_EXT_DIR" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    echo "NOTE: replacing existing cosh extension at $$COSH_EXT_DIR"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'fi' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'rm -rf "$$COSH_EXT_DIR"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'install -d -m 0755 "$$COSH_EXT_DIR/hooks" "$$COSH_EXT_DIR/commands"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'if [ -d "$$SHARE_DIR/common/hooks" ] && [ "$$(ls -A "$$SHARE_DIR/common/hooks" 2>/dev/null)" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    cp -r "$$SHARE_DIR/common/hooks/." "$$COSH_EXT_DIR/hooks/"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'fi' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'if [ -d "$$SHARE_DIR/common/commands" ] && [ "$$(ls -A "$$SHARE_DIR/common/commands" 2>/dev/null)" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    cp -r "$$SHARE_DIR/common/commands/." "$$COSH_EXT_DIR/commands/"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'fi' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'if [ -f "$$SHARE_DIR/common/cosh-extension.json" ]; then' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '    install -m 0644 "$$SHARE_DIR/common/cosh-extension.json" "$$COSH_EXT_DIR/"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'fi' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'find "$$COSH_EXT_DIR" -type f \( -name '\''*.py'\'' -o -name '\''*.sh'\'' \) -exec chmod 0755 {} +' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'echo "==> cosh extension installed to $$COSH_EXT_DIR"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo '' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'echo ""' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'echo "==> Done. Run '\''tokenless --version'\'' to verify."' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'echo "==> Cosh extension deployed to $$COSH_EXT_DIR."' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'echo "==> If cosh does not scan $$PREFIX/share/anolisa/extensions by default,"' >> dist/tokenless-$(VERSION)/install.sh
+	@echo 'echo "    you may need to configure cosh to include this extension path."' >> dist/tokenless-$(VERSION)/install.sh
+	@chmod +x dist/tokenless-$(VERSION)/install.sh
 
 # Adapter management — invokes detect/install/uninstall action scripts per the
 # ANOLISA FHS adapter spec.  Environment variables point to installed FHS paths.
@@ -496,6 +840,7 @@ help:
 	@echo "  qwencode-install  Register Qwen Code plugin via qwen CLI"
 	@echo "  qwencode-uninstall Unregister Qwen Code plugin"
 	@echo "  setup             Full setup: build + install + register adapters"
+	@echo "  release           Build all + package release tarball"
 	@echo "  npm-package       Build and package the current host"
 	@echo "  npm-package-all   Package target/npm-prebuilt target directories"
 	@echo "  npm-publish       Build and publish all npm packages"
