@@ -61,7 +61,7 @@ PYPROJECT_BUILD ?= uvx --from 'build>=1,<2' pyproject-build
         setup help \
         npm-package npm-package-all npm-publish prepare-npm-native-binaries \
         python-wheel test-python-runtime agentscope-wheel \
-        test-agentscope-integration test-hooks
+        test-agentscope-integration test-hooks test-claude-code-detect
 
 # Default target
 all: build
@@ -190,7 +190,7 @@ uninstall:
 
 # Run tests
 test: test-tokenless test-hooks test-integration test-adapters \
-      test-raw-package test-npm-package
+      test-claude-code-detect test-raw-package test-npm-package
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
@@ -201,6 +201,10 @@ test-hooks:
 	bash tests/test-run-hook-install-scope.sh
 	bash tests/test-tool-ready-readable-fixer.sh
 	bash tests/run-all-tests.sh
+
+test-claude-code-detect:
+	@echo "==> Testing claude-code detect.sh first-run retry..."
+	bash tests/test-claude-code-detect-retry.sh
 
 test-integration:
 	@echo "==> Testing hook integration (Python)..."
@@ -388,7 +392,9 @@ claude-code-install:
 	@echo "==> Installing Claude Code plugin..."
 	@# detect.sh exits 1 (installable) or 2 (missing prereq); we tolerate both
 	@# and let install.sh make the final call (it gracefully no-ops without claude CLI).
-	@$(ADAPTER_ENV) ANOLISA_TARGET=claude-code bash $(CLAUDE_CODE_ADAPTER_DIR)/scripts/detect.sh || true
+	@# This pre-install probe runs on a steady-state machine and its output is
+	@# informational only, so skip detect.sh's first-run settling retries.
+	@$(ADAPTER_ENV) ANOLISA_TARGET=claude-code TOKENLESS_DETECT_RETRIES=0 bash $(CLAUDE_CODE_ADAPTER_DIR)/scripts/detect.sh || true
 	@$(ADAPTER_ENV) ANOLISA_TARGET=claude-code bash $(CLAUDE_CODE_ADAPTER_DIR)/scripts/install.sh
 
 claude-code-uninstall:
