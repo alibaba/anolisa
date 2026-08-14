@@ -125,10 +125,14 @@ test-rust: ## Run Rust tests (agent-sec-cli workspace always; linux-sandbox on L
 
 # One report per workspace: cargo-llvm-cov cannot merge across workspaces, and
 # CI unions them via diff-cover.  `-p` skips the untested PyO3 cdylib root.
+#
+# Exclude `src/bin/`: build-time tools (sync_atr) that ship in no artifact, so
+# their main()/git/IO glue would skew the gate. Their logic is unit-tested.
 .PHONY: test-rust-coverage
 test-rust-coverage: ## Run Rust tests with coverage (agent-sec-cli crates; linux-sandbox on Linux only)
 	@echo "🧪 Running agent-sec-cli Rust tests with coverage..."
 	cd agent-sec-cli && cargo llvm-cov --cobertura \
+		--ignore-filename-regex '/src/bin/' \
 		--output-path ../rust-cli-coverage.xml \
 		-p prompt-scanner -p model-service
 	@echo "🧪 Running linux-sandbox Rust tests with coverage (Linux only)..."
