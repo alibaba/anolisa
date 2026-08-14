@@ -2882,10 +2882,11 @@ mod tests {
     fn status_lookup_name_uses_component_index_alias_before_state_selection() {
         let idx = ComponentIndex::from_toml_str(
             r#"
-schema_version = 1
+schema_version = 2
 
 [[components]]
 name = "cosh"
+targets = [{ os = "linux", arch = "x86_64" }]
 
 [[components.backends]]
 kind = "rpm"

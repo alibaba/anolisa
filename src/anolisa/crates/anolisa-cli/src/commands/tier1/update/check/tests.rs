@@ -583,7 +583,7 @@ fn update_check_default_present_via_index_package_without_provide() {
         info("copilot-shell", "2.6.1", Some("1")),
     );
     let index = crate::resolution::ComponentIndex::from_toml_str(
-        "schema_version = 1\n\n[[components]]\nname = \"cosh\"\n\n[[components.backends]]\nkind = \"rpm\"\npackage = \"copilot-shell\"\n",
+        "schema_version = 2\n\n[[components]]\nname = \"cosh\"\ntargets = [{ os = \"linux\", arch = \"x86_64\" }]\n\n[[components.backends]]\nkind = \"rpm\"\npackage = \"copilot-shell\"\n",
         "test-components.toml",
     )
     .expect("index parses");
@@ -833,7 +833,7 @@ fn update_check_default_resolved_package_absent_is_item_error() {
 #[test]
 fn update_check_index_rpm_packages_are_deduplicated() {
     let index = crate::resolution::ComponentIndex::from_toml_str(
-        "schema_version = 1\n\n[[components]]\nname = \"cosh\"\n\n[[components.backends]]\nkind = \"rpm\"\npackage = \"copilot-shell\"\n\n[[components.aliases]]\nkind = \"rpm-package\"\nname = \"copilot-shell\"\n",
+        "schema_version = 2\n\n[[components]]\nname = \"cosh\"\ntargets = [{ os = \"linux\", arch = \"x86_64\" }]\n\n[[components.backends]]\nkind = \"rpm\"\npackage = \"copilot-shell\"\n\n[[components.aliases]]\nkind = \"rpm-package\"\nname = \"copilot-shell\"\n",
         "test-components.toml",
     )
     .expect("index parses");

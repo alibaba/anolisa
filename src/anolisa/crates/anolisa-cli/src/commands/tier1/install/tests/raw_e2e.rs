@@ -1378,11 +1378,13 @@ manifest_digest = "sha256:{manifest_sha}"
     }
     std::fs::write(v1.join("index.toml"), index).expect("write distribution index");
     std::fs::write(
-        v1.join("components.toml"),
-        r#"schema_version = 1
+        v1.join("components-v2.toml"),
+        format!(
+            r#"schema_version = 2
 
 [[components]]
 name = "cosh"
+targets = [{{ os = "{os}", arch = "{arch}" }}]
 
 [[components.backends]]
 kind = "raw"
@@ -1390,11 +1392,15 @@ package = "cosh"
 
 [[components]]
 name = "cosh-ng"
+targets = [{{ os = "{os}", arch = "{arch}" }}]
 
 [[components.backends]]
 kind = "raw"
 package = "cosh-ng"
 "#,
+            os = env.os,
+            arch = env.arch,
+        ),
     )
     .expect("write component index");
     format!("file://{}", v1.display())

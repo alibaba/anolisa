@@ -11,13 +11,13 @@ use std::path::Path;
 use anolisa_core::download::DownloadCache;
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::repo_config::{BackendConfig, HostVars, RepoConfig, component_index_url};
+use crate::repo_config::{BackendConfig, HostVars, RepoConfig, component_index_v2_url};
 
-/// On-disk schema version for repo-side `components.toml`.
-pub(crate) const COMPONENT_INDEX_SCHEMA_VERSION: u32 = 1;
+/// On-disk schema version for repo-side `components-v2.toml`.
+pub(crate) const COMPONENT_INDEX_SCHEMA_VERSION: u32 = 2;
 
 /// Repository-side component identity and backend mapping index.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -26,8 +26,7 @@ pub(crate) struct ComponentIndex {
     pub(crate) schema_version: u32,
     /// Optional publish timestamp for diagnostics.
     ///
-    /// This is not required in v1 indexes, so absent fields deserialize as
-    /// `None` to keep hand-authored indexes small.
+    /// Absent fields deserialize as `None` to keep hand-authored indexes small.
     #[serde(default)]
     pub(crate) generated_at: Option<String>,
     /// Optional publishing party for diagnostics.
@@ -48,19 +47,14 @@ pub(crate) struct ComponentIndex {
 pub(crate) struct ComponentIndexEntry {
     /// Stable ANOLISA component name.
     pub(crate) name: String,
-    /// Optional human label; not used by resolution v1.
+    /// Optional human label; not used by identity resolution.
     #[serde(default)]
     pub(crate) display_name: Option<String>,
-    /// Optional one-line summary; not used by resolution v1.
+    /// Optional one-line summary; not used by identity resolution.
     #[serde(default)]
     pub(crate) summary: Option<String>,
-    /// Operating systems supported by this component.
-    ///
-    /// The field is optional on the wire so existing v1 indexes remain valid;
-    /// indexes that omit it inherit the original Linux-only behavior. A
-    /// published backend is still required before installation is actionable.
-    #[serde(default = "default_component_platforms")]
-    pub(crate) platforms: Vec<String>,
+    /// Supported host OS/architecture combinations.
+    pub(crate) targets: Vec<ComponentTarget>,
     /// Backend-native package names for this component.
     ///
     /// Components may initially ship on only one backend, so the list defaults
@@ -72,6 +66,15 @@ pub(crate) struct ComponentIndexEntry {
     /// Alias rows are optional and mainly cover historical RPM package names.
     #[serde(default)]
     pub(crate) aliases: Vec<ComponentAliasEntry>,
+}
+
+/// One host target supported by a component.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct ComponentTarget {
+    /// Operating system identifier used by distribution indexes.
+    pub(crate) os: String,
+    /// CPU architecture identifier used by distribution indexes.
+    pub(crate) arch: String,
 }
 
 /// Backend-native identity for a component.
@@ -105,12 +108,8 @@ pub(crate) struct ComponentAliasEntry {
     pub(crate) name: String,
 }
 
-fn default_component_platforms() -> Vec<String> {
-    vec!["linux".to_string()]
-}
-
-fn is_canonical_platform(platform: &str) -> bool {
-    let bytes = platform.as_bytes();
+fn is_canonical_os(os: &str) -> bool {
+    let bytes = os.as_bytes();
     bytes.first().is_some_and(u8::is_ascii_lowercase)
         && bytes
             .last()
@@ -120,7 +119,16 @@ fn is_canonical_platform(platform: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 
-/// Parse or validation failures for `components.toml`.
+fn is_canonical_architecture(architecture: &str) -> bool {
+    let bytes = architecture.as_bytes();
+    bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-' || *byte == b'_'
+        })
+}
+
+/// Parse or validation failures for `components-v2.toml`.
 #[derive(Debug, Error)]
 pub(crate) enum ComponentIndexError {
     /// TOML parse or read error.
@@ -174,7 +182,7 @@ pub(crate) enum ResolutionUse {
 /// Source that produced a resolved component/package pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResolutionSource {
-    /// Repository `components.toml`.
+    /// Repository component index.
     ComponentIndex,
     /// Site-local `[backends.rpm.package_map]`.
     RepoPackageMap,
@@ -439,7 +447,7 @@ pub(crate) fn lookup_component_alias(
 }
 
 impl ComponentIndex {
-    /// Parse and validate `components.toml`.
+    /// Parse and validate a component index.
     pub(crate) fn from_toml_str(
         s: &str,
         path: impl AsRef<Path>,
@@ -484,30 +492,26 @@ impl ComponentIndex {
                     reason: format!("duplicate component '{name}'"),
                 });
             }
-            if entry.platforms.is_empty() {
+            if entry.targets.is_empty() {
                 return Err(ComponentIndexError::Invalid {
-                    reason: format!("component '{name}' must declare at least one platform"),
+                    reason: format!("component '{name}' must declare at least one target"),
                 });
             }
-            let mut platforms = BTreeSet::new();
-            for platform in &entry.platforms {
-                if platform.trim().is_empty() {
-                    return Err(ComponentIndexError::Invalid {
-                        reason: format!("component '{name}' has an empty platform"),
-                    });
-                }
-                if !is_canonical_platform(platform) {
+            let mut targets = BTreeSet::new();
+            for target in &entry.targets {
+                if !is_canonical_os(&target.os) || !is_canonical_architecture(&target.arch) {
                     return Err(ComponentIndexError::Invalid {
                         reason: format!(
-                            "component '{name}' platform '{platform}' must be a lowercase ASCII \
-                             identifier with optional internal digits or hyphens"
+                            "component '{name}' target '{}/{}' must use canonical lowercase OS and architecture identifiers",
+                            target.os, target.arch
                         ),
                     });
                 }
-                if !platforms.insert(platform) {
+                if !targets.insert((target.os.as_str(), target.arch.as_str())) {
                     return Err(ComponentIndexError::Invalid {
                         reason: format!(
-                            "component '{name}' declares duplicate platform '{platform}'"
+                            "component '{name}' declares duplicate target '{}/{}'",
+                            target.os, target.arch
                         ),
                     });
                 }
@@ -591,9 +595,11 @@ impl ComponentIndex {
 }
 
 impl ComponentIndexEntry {
-    /// Whether the component index permits installation on `platform`.
-    pub(crate) fn supports_platform(&self, platform: &str) -> bool {
-        self.platforms.iter().any(|candidate| candidate == platform)
+    /// Whether the component index permits installation on `os`/`arch`.
+    pub(crate) fn supports_target(&self, os: &str, arch: &str) -> bool {
+        self.targets
+            .iter()
+            .any(|candidate| candidate.os == os && candidate.arch == arch)
     }
 
     fn backends_for(&self, backend: BackendKind) -> impl Iterator<Item = &ComponentBackendEntry> {
@@ -707,7 +713,7 @@ pub(crate) fn rpm_components_from_capabilities(capabilities: &[String]) -> Vec<S
     components
 }
 
-/// Load repo-side `components.toml`, returning a structured error on failure.
+/// Load repo-side `components-v2.toml`, returning a structured error on failure.
 ///
 /// Used by commands (`ls`, `install --all`) that require the component index
 /// to function. For best-effort usage where a missing index is acceptable,
@@ -732,7 +738,7 @@ pub(crate) fn load_component_index(
         .map_err(|err| ComponentIndexError::Fetch {
             reason: format!("cannot resolve base_url for raw backend: {err}"),
         })?;
-    let url = component_index_url(&base_url);
+    let url = component_index_v2_url(&base_url);
 
     let cache = DownloadCache::new(layout.cache_dir.clone());
     #[cfg(test)]
@@ -749,7 +755,7 @@ pub(crate) fn load_component_index(
     ComponentIndex::load(&downloaded.cached_path)
 }
 
-/// Best-effort load of repo-side `components.toml`.
+/// Best-effort load of repo-side `components-v2.toml`.
 pub(crate) fn load_optional_component_index(
     layout: &FsLayout,
     env: &anolisa_env::EnvFacts,
@@ -850,13 +856,14 @@ mod tests {
     fn index() -> ComponentIndex {
         ComponentIndex::from_toml_str(
             r#"
-schema_version = 1
+schema_version = 2
 publisher = "anolisa"
 
 [[components]]
 name = "cosh"
 display_name = "Copilot Shell"
 summary = "shell"
+targets = [{ os = "linux", arch = "x86_64" }]
 
 [[components.backends]]
 kind = "raw"
@@ -880,71 +887,116 @@ name = "copilot-shell"
     #[test]
     fn repository_component_index_template_is_valid() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let index_path = manifest_dir.join("../../manifests/components.toml");
+        let index_path = manifest_dir.join("../../manifests/components-v2.toml");
         ComponentIndex::load(&index_path).expect("component index template must parse");
     }
 
     #[test]
-    fn component_index_without_platforms_keeps_legacy_linux_default() {
-        let index = index();
-
-        assert_eq!(index.components[0].platforms, ["linux"]);
-        assert!(index.components[0].supports_platform("linux"));
-        assert!(!index.components[0].supports_platform("macos"));
-    }
-
-    #[test]
-    fn non_canonical_platform_identifiers_are_rejected() {
-        for platform in ["Linux", " linux "] {
-            let source = format!(
-                r#"
-schema_version = 1
+    fn component_index_requires_at_least_one_target() {
+        let source = r#"
+schema_version = 2
 
 [[components]]
 name = "test"
-platforms = ["{platform}"]
+targets = []
+"#;
+
+        let err = ComponentIndex::from_toml_str(source, "components.toml")
+            .expect_err("empty targets must be rejected");
+        assert!(
+            matches!(
+                err,
+                ComponentIndexError::Invalid { ref reason }
+                    if reason.contains("at least one target")
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn invalid_or_duplicate_targets_are_rejected() {
+        for (targets, expected) in [
+            (
+                r#"[{ os = "Linux", arch = "x86_64" }]"#,
+                "canonical lowercase",
+            ),
+            (
+                r#"[{ os = "linux", arch = "X86_64" }]"#,
+                "canonical lowercase",
+            ),
+            (
+                r#"[{ os = "linux", arch = "x86_64" }, { os = "linux", arch = "x86_64" }]"#,
+                "duplicate target",
+            ),
+        ] {
+            let source = format!(
+                r#"
+schema_version = 2
+
+[[components]]
+name = "test"
+targets = {targets}
 "#
             );
 
             let err = ComponentIndex::from_toml_str(&source, "components.toml")
-                .expect_err("non-canonical platform must be rejected");
+                .expect_err("invalid target must be rejected");
             assert!(
                 matches!(
                     err,
                     ComponentIndexError::Invalid { ref reason }
-                        if reason.contains("lowercase ASCII identifier")
+                        if reason.contains(expected)
                 ),
-                "unexpected error for {platform:?}: {err}"
+                "unexpected error for {targets}: {err}"
             );
         }
     }
 
     #[test]
-    fn repository_component_index_declares_current_platform_matrix() {
+    fn repository_component_index_declares_current_target_matrix() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let index_path = manifest_dir.join("../../manifests/components.toml");
+        let index_path = manifest_dir.join("../../manifests/components-v2.toml");
         let index = ComponentIndex::load(&index_path).expect("component index template must parse");
 
         assert!(
             index
                 .components
                 .iter()
-                .all(|component| component.supports_platform("linux")),
-            "every published component must remain visible as available on Linux"
+                .all(|component| component.supports_target("linux", "x86_64"))
         );
         let macos_components = index
             .components
             .iter()
-            .filter(|component| component.supports_platform("macos"))
+            .filter(|component| component.targets.iter().any(|target| target.os == "macos"))
             .map(|component| component.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(macos_components, ["tokenless"]);
+        assert_eq!(macos_components, ["cosh-ng", "agentsight", "tokenless"]);
+
+        let agentsight = index
+            .components
+            .iter()
+            .find(|component| component.name == "agentsight")
+            .expect("agentsight entry");
+        assert!(agentsight.supports_target("macos", "aarch64"));
+        assert!(!agentsight.supports_target("macos", "x86_64"));
+        assert!(!agentsight.supports_target("linux", "aarch64"));
+
+        for name in ["cosh-ng", "tokenless"] {
+            let component = index
+                .components
+                .iter()
+                .find(|component| component.name == name)
+                .expect("component entry");
+            assert!(component.supports_target("linux", "aarch64"));
+            assert!(component.supports_target("macos", "aarch64"));
+            assert!(!component.supports_target("macos", "x86_64"));
+        }
     }
 
     #[test]
     fn repository_component_index_uses_sec_core_as_canonical_name() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let index_path = manifest_dir.join("../../manifests/components.toml");
+        let index_path = manifest_dir.join("../../manifests/components-v2.toml");
         let idx = ComponentIndex::load(&index_path).expect("component index template must parse");
         let query = FakeQuery::default();
         let resolver = ComponentResolver::new(Some(&idx), None, Some(&query));
@@ -987,7 +1039,7 @@ platforms = ["{platform}"]
     #[test]
     fn repository_component_index_maps_cosh_ng_rpm_to_cosh_ng() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let index_path = manifest_dir.join("../../manifests/components.toml");
+        let index_path = manifest_dir.join("../../manifests/components-v2.toml");
         let idx = ComponentIndex::load(&index_path).expect("component index template must parse");
         let query = FakeQuery::default();
         let resolver = ComponentResolver::new(Some(&idx), None, Some(&query));
@@ -1012,7 +1064,7 @@ platforms = ["{platform}"]
     }
 
     #[test]
-    fn load_optional_component_index_uses_raw_index_for_rpm_resolution() {
+    fn load_optional_component_index_uses_generation_2_raw_index_for_rpm_resolution() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let layout =
             anolisa_platform::fs_layout::FsLayout::system(Some(tmp.path().join("install-root")));
@@ -1027,20 +1079,33 @@ platforms = ["{platform}"]
 schema_version = 1
 
 [[components]]
-name = "raw-index"
+name = "legacy-index"
+platforms = ["linux"]
 "#,
         )
-        .expect("write raw components.toml");
+        .expect("write generation-1 component index");
         std::fs::write(
-            rpm_root.join("components.toml"),
+            raw_v1.join("components-v2.toml"),
             r#"
-schema_version = 1
+schema_version = 2
+
+[[components]]
+name = "raw-index"
+targets = [{ os = "linux", arch = "x86_64" }]
+"#,
+        )
+        .expect("write generation-2 component index");
+        std::fs::write(
+            rpm_root.join("components-v2.toml"),
+            r#"
+schema_version = 2
 
 [[components]]
 name = "rpm-ignored"
+targets = [{ os = "linux", arch = "x86_64" }]
 "#,
         )
-        .expect("write rpm components.toml");
+        .expect("write rpm component index");
         let repo_config = RepoConfig::from_toml_str(&format!(
             r#"
 schema_version = 1
@@ -1260,11 +1325,17 @@ cosh = "site-copilot"
 
     #[test]
     fn unsupported_schema_is_rejected() {
-        let err = ComponentIndex::from_toml_str("schema_version = 99", "components.toml")
-            .expect_err("unsupported schema");
-        assert!(matches!(
-            err,
-            ComponentIndexError::UnsupportedSchema { actual: 99, .. }
-        ));
+        for actual in [1, 99] {
+            let source = format!("schema_version = {actual}");
+            let err = ComponentIndex::from_toml_str(&source, "components.toml")
+                .expect_err("unsupported schema");
+            assert!(matches!(
+                err,
+                ComponentIndexError::UnsupportedSchema {
+                    actual: rejected,
+                    ..
+                } if rejected == actual
+            ));
+        }
     }
 }

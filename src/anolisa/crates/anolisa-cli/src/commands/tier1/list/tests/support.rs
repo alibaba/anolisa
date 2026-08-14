@@ -9,11 +9,19 @@ use anolisa_platform::pkg_query::{PackageInfo, PackageQuery, PackageQueryError, 
 use crate::commands::tier1::list::state_view::{self, LocalProjection};
 use crate::resolution::{
     ComponentAliasEntry, ComponentBackendEntry, ComponentIndex, ComponentIndexEntry,
+    ComponentTarget,
 };
+
+pub(super) fn target(os: &str, arch: &str) -> ComponentTarget {
+    ComponentTarget {
+        os: os.to_string(),
+        arch: arch.to_string(),
+    }
+}
 
 pub(super) fn sample_index() -> ComponentIndex {
     ComponentIndex {
-        schema_version: 1,
+        schema_version: 2,
         generated_at: None,
         publisher: Some("anolisa".to_string()),
         components: vec![
@@ -21,7 +29,7 @@ pub(super) fn sample_index() -> ComponentIndex {
                 name: "agentsight".to_string(),
                 display_name: Some("AgentSight".to_string()),
                 summary: Some("eBPF-based AI agent observability tool".to_string()),
-                platforms: vec!["linux".to_string()],
+                targets: vec![target("linux", "x86_64"), target("macos", "aarch64")],
                 backends: vec![
                     ComponentBackendEntry {
                         kind: "raw".to_string(),
@@ -42,7 +50,11 @@ pub(super) fn sample_index() -> ComponentIndex {
                 name: "tokenless".to_string(),
                 display_name: Some("Tokenless".to_string()),
                 summary: Some("LLM token optimization toolkit".to_string()),
-                platforms: vec!["linux".to_string(), "macos".to_string()],
+                targets: vec![
+                    target("linux", "x86_64"),
+                    target("linux", "aarch64"),
+                    target("macos", "aarch64"),
+                ],
                 backends: vec![ComponentBackendEntry {
                     kind: "raw".to_string(),
                     package: "tokenless".to_string(),
@@ -286,14 +298,14 @@ pub(super) fn projection_for_index(
 /// with an rpm-package alias — mirrors the real `cosh` / `copilot-shell` mapping.
 pub(super) fn sample_index_with_aliases() -> ComponentIndex {
     ComponentIndex {
-        schema_version: 1,
+        schema_version: 2,
         generated_at: None,
         publisher: Some("anolisa".to_string()),
         components: vec![ComponentIndexEntry {
             name: "cosh".to_string(),
             display_name: Some("Copilot Shell".to_string()),
             summary: Some("shell".to_string()),
-            platforms: vec!["linux".to_string()],
+            targets: vec![target("linux", "x86_64")],
             backends: vec![
                 ComponentBackendEntry {
                     kind: "raw".to_string(),

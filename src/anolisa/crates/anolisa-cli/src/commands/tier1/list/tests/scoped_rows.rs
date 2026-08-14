@@ -20,7 +20,7 @@ fn user_view_installed_filter_keeps_system_provided_component() {
         state_with_component_object(owned_component("agentsight", LifecycleStatus::Installed)),
     );
 
-    let rows = build_rows_from_view(&index, &args, &view, None, "linux");
+    let rows = build_rows_from_view(&index, &args, &view, None, "linux", "x86_64");
 
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].name, "agentsight");
@@ -47,7 +47,7 @@ fn user_record_shadows_system_record_in_list_rows() {
         )),
     );
 
-    let rows = build_rows_from_view(&index, &args, &view, None, "linux");
+    let rows = build_rows_from_view(&index, &args, &view, None, "linux", "x86_64");
 
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].name, "agentsight");

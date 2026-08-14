@@ -1,11 +1,11 @@
 use anolisa_core::domain::LifecycleStatus;
 use anolisa_core::state::ObjectKind;
 
-use crate::commands::tier1::list::{ListArgs, ListPayload, build_rows, build_rows_for_platform};
+use crate::commands::tier1::list::{ListArgs, ListPayload, build_rows, build_rows_for_target};
 use crate::resolution::{ComponentBackendEntry, ComponentIndex, ComponentIndexEntry};
 
 use super::support::{
-    empty_state, sample_index, state_with_adopted_object, state_with_owned_object,
+    empty_state, sample_index, state_with_adopted_object, state_with_owned_object, target,
 };
 
 #[test]
@@ -21,31 +21,53 @@ fn index_builds_rows() {
     assert_eq!(sight.display_name, "AgentSight");
     assert_eq!(sight.summary, "eBPF-based AI agent observability tool");
     assert_eq!(sight.backends, vec!["raw", "rpm"]);
-    assert_eq!(sight.platforms, vec!["linux"]);
-    assert!(sight.platform_available);
+    assert_eq!(
+        sight.targets,
+        vec![target("linux", "x86_64"), target("macos", "aarch64")]
+    );
+    assert!(sight.target_available);
     assert_eq!(sight.status, "not_installed");
 
     let token = &rows[1];
     assert_eq!(token.name, "tokenless");
     assert_eq!(token.backends, vec!["raw"]);
-    assert_eq!(token.platforms, vec!["linux", "macos"]);
-    assert!(token.platform_available);
+    assert_eq!(
+        token.targets,
+        vec![
+            target("linux", "x86_64"),
+            target("linux", "aarch64"),
+            target("macos", "aarch64"),
+        ]
+    );
+    assert!(token.target_available);
 }
 
 #[test]
-fn macos_rows_remain_complete_and_report_platform_availability() {
+fn target_matrix_distinguishes_os_and_architecture() {
     let index = sample_index();
     let args = ListArgs { installed: false };
     let state = empty_state();
 
-    let rows = build_rows_for_platform(&index, &args, &state, None, "macos");
+    let rows = build_rows_for_target(&index, &args, &state, None, "macos", "aarch64");
 
     assert_eq!(rows.len(), 2);
     let sight = rows.iter().find(|row| row.name == "agentsight").unwrap();
-    assert!(!sight.platform_available);
+    assert!(sight.target_available);
+    assert_eq!(sight.action, "install");
+    let token = rows.iter().find(|row| row.name == "tokenless").unwrap();
+    assert!(token.target_available);
+    assert_eq!(token.action, "install");
+
+    let rows = build_rows_for_target(&index, &args, &state, None, "macos", "x86_64");
+    assert!(rows.iter().all(|row| !row.target_available));
+    assert!(rows.iter().all(|row| row.action == "unavailable"));
+
+    let rows = build_rows_for_target(&index, &args, &state, None, "linux", "aarch64");
+    let sight = rows.iter().find(|row| row.name == "agentsight").unwrap();
+    assert!(!sight.target_available);
     assert_eq!(sight.action, "unavailable");
     let token = rows.iter().find(|row| row.name == "tokenless").unwrap();
-    assert!(token.platform_available);
+    assert!(token.target_available);
     assert_eq!(token.action, "install");
 }
 
@@ -222,14 +244,14 @@ fn json_payload_status_reflects_install_state() {
 #[test]
 fn missing_optional_fields_use_defaults() {
     let index = ComponentIndex {
-        schema_version: 1,
+        schema_version: 2,
         generated_at: None,
         publisher: None,
         components: vec![ComponentIndexEntry {
             name: "minimal".to_string(),
             display_name: None,
             summary: None,
-            platforms: vec!["linux".to_string()],
+            targets: vec![target("linux", "x86_64")],
             backends: Vec::new(),
             aliases: Vec::new(),
         }],
@@ -243,8 +265,8 @@ fn missing_optional_fields_use_defaults() {
     assert_eq!(row.display_name, "minimal");
     assert!(row.summary.is_empty());
     assert!(row.backends.is_empty());
-    assert_eq!(row.platforms, ["linux"]);
-    assert!(row.platform_available);
+    assert_eq!(row.targets, [target("linux", "x86_64")]);
+    assert!(row.target_available);
     assert_eq!(row.status, "not_installed");
     assert_eq!(row.action, "unavailable");
 }
@@ -252,14 +274,14 @@ fn missing_optional_fields_use_defaults() {
 #[test]
 fn unknown_backend_kind_preserved() {
     let index = ComponentIndex {
-        schema_version: 1,
+        schema_version: 2,
         generated_at: None,
         publisher: None,
         components: vec![ComponentIndexEntry {
             name: "test".to_string(),
             display_name: None,
             summary: None,
-            platforms: vec!["linux".to_string()],
+            targets: vec![target("linux", "x86_64")],
             backends: vec![ComponentBackendEntry {
                 kind: "custom-repo".to_string(),
                 package: "test".to_string(),

@@ -40,6 +40,7 @@ use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install;
 use crate::context::CliContext;
 use crate::progress::{self, Activity};
+use crate::resolution::ComponentIndex;
 use crate::response::{CliError, render_json, render_json_with_status};
 
 use super::types::InstallOutcome;
@@ -832,9 +833,26 @@ pub(crate) fn batch_status(outcome: InstallOutcome, dry_run: bool) -> &'static s
     }
 }
 
-/// Load the component index and return names of components that support
-/// the given backend. When `backend` is `None`, the repo's default
-/// backend is used.
+fn component_names_for_target(
+    index: &ComponentIndex,
+    backend: &str,
+    os: &str,
+    arch: &str,
+) -> Vec<String> {
+    index
+        .components
+        .iter()
+        .filter(|entry| {
+            entry.backends.iter().any(|item| item.kind == backend)
+                && entry.supports_target(os, arch)
+        })
+        .map(|entry| entry.name.clone())
+        .collect()
+}
+
+/// Load the component index and return names of components that support the
+/// current target and selected backend. When `backend` is `None`, the repo's
+/// default backend is used.
 pub(crate) fn resolve_all_components(
     ctx: &CliContext,
     backend: Option<&str>,
@@ -857,14 +875,12 @@ pub(crate) fn resolve_all_components(
                 command: "install --all".to_string(),
                 reason: format!("{err}"),
             })?;
-    let selected_backend = selected_backend.to_string();
-    let names: Vec<String> = index
-        .components
-        .iter()
-        .filter(|entry| entry.backends.iter().any(|b| b.kind == selected_backend))
-        .map(|entry| entry.name.clone())
-        .collect();
-    Ok(names)
+    Ok(component_names_for_target(
+        &index,
+        selected_backend,
+        &env.os,
+        &env.arch,
+    ))
 }
 
 #[cfg(test)]
@@ -896,6 +912,22 @@ mod tests {
         assert_eq!(
             batch_status(InstallOutcome::AlreadyInstalled, true),
             "already-installed"
+        );
+    }
+
+    #[test]
+    fn batch_component_selection_uses_host_target() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let index_path = manifest_dir.join("../../manifests/components-v2.toml");
+        let index = ComponentIndex::load(index_path).expect("component index template must parse");
+
+        assert_eq!(
+            component_names_for_target(&index, "raw", "linux", "aarch64"),
+            ["cosh-ng", "tokenless"]
+        );
+        assert_eq!(
+            component_names_for_target(&index, "raw", "macos", "aarch64"),
+            ["cosh-ng", "agentsight", "tokenless"]
         );
     }
 

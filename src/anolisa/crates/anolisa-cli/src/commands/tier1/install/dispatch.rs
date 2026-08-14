@@ -2382,12 +2382,13 @@ mod tests {
         let repo_v1 = repo_root.join("v1");
         std::fs::create_dir_all(&repo_v1).expect("repo dir");
         std::fs::write(
-            repo_v1.join("components.toml"),
+            repo_v1.join("components-v2.toml"),
             r#"
-schema_version = 1
+schema_version = 2
 
 [[components]]
 name = "cosh"
+targets = [{ os = "linux", arch = "x86_64" }]
 
 [[components.backends]]
 kind = "raw"
@@ -2399,6 +2400,7 @@ name = "legacy-name"
 
 [[components]]
 name = "sec-core"
+targets = [{ os = "linux", arch = "x86_64" }]
 
 [[components.backends]]
 kind = "raw"

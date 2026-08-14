@@ -47,11 +47,11 @@ impl HumanWidths {
     }
 }
 
-pub(super) fn render_human(rows: &[Row], no_color: bool, platform: &str) {
+pub(super) fn render_human(rows: &[Row], no_color: bool, os: &str, arch: &str) {
     let color = Palette::new(no_color);
     println!(
         "{}",
-        color.header(format!("Components for {}", display_platform(platform)))
+        color.header(format!("Components for {}/{arch}", display_os(os)))
     );
     println!();
     if rows.is_empty() {
@@ -64,7 +64,7 @@ pub(super) fn render_human(rows: &[Row], no_color: bool, platform: &str) {
     println!("{}", color.header(human_header(rows)));
     for row in rows {
         let availability = availability_label(row);
-        let availability = if row.platform_available {
+        let availability = if row.target_available {
             color.ok(availability)
         } else {
             color.err(availability)
@@ -88,20 +88,20 @@ pub(super) fn render_human(rows: &[Row], no_color: bool, platform: &str) {
 }
 
 pub(super) fn availability_label(row: &Row) -> String {
-    if row.platform_available {
+    if row.target_available {
         return "available".to_string();
     }
     let supported = row
-        .platforms
+        .targets
         .iter()
-        .map(|platform| display_platform(platform))
+        .map(|target| format!("{}/{}", display_os(&target.os), target.arch))
         .collect::<Vec<_>>()
-        .join("/");
+        .join(", ");
     format!("{supported} only")
 }
 
-fn display_platform(platform: &str) -> String {
-    match platform {
+fn display_os(os: &str) -> String {
+    match os {
         "linux" => "Linux".to_string(),
         "macos" => "macOS".to_string(),
         other => other.to_string(),

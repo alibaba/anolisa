@@ -346,12 +346,13 @@ sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
     )
     .expect("distribution index");
     std::fs::write(
-        repo_v1.join("components.toml"),
+        repo_v1.join("components-v2.toml"),
         r#"
-schema_version = 1
+schema_version = 2
 
 [[components]]
 name = "cosh"
+targets = [{ os = "linux", arch = "x86_64" }]
 
 [[components.backends]]
 kind = "raw"

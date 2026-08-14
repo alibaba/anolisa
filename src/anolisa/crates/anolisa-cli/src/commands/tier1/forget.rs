@@ -828,7 +828,7 @@ mod tests {
         let layout = common::resolve_layout(ctx);
         let repo_v1 = layout.prefix.join("repo").join("v1");
         fs::create_dir_all(&repo_v1).expect("mkdir repo");
-        fs::write(repo_v1.join("components.toml"), index).expect("write components.toml");
+        fs::write(repo_v1.join("components-v2.toml"), index).expect("write components-v2.toml");
         fs::create_dir_all(&layout.etc_dir).expect("mkdir etc");
         fs::write(
             layout.etc_dir.join("repo.toml"),
@@ -862,10 +862,11 @@ mod tests {
         seed_component_index(
             &c,
             r#"
-schema_version = 1
+schema_version = 2
 
 [[components]]
 name = "cosh"
+targets = [{ os = "linux", arch = "x86_64" }]
 
 [[components.backends]]
 kind = "rpm"
@@ -907,10 +908,11 @@ name = "copilot-shell"
         seed_component_index(
             &c,
             r#"
-schema_version = 1
+schema_version = 2
 
 [[components]]
 name = "cosh"
+targets = [{ os = "linux", arch = "x86_64" }]
 
 [[components.aliases]]
 kind = "rpm-package"

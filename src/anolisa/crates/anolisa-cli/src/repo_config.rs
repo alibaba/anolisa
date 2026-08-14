@@ -690,13 +690,21 @@ pub fn raw_index_v2_url(base_url: &str) -> String {
     format!("{}/index-v2.toml", raw_root(base_url))
 }
 
-/// Component identity index location under the raw repository root.
+/// Generation-1 component identity index location under the raw repository root.
 ///
-/// `components.toml` is separate from raw `index.toml`: the former resolves a
-/// stable ANOLISA component identity to backend-native package names, while the
-/// latter selects raw artifact versions and hashes.
+/// Released clients continue reading this path, so publishers must preserve its
+/// schema v1 contents when publishing later component-index generations.
+#[cfg(test)]
 pub fn component_index_url(base_url: &str) -> String {
     format!("{}/components.toml", raw_root(base_url))
+}
+
+/// Generation-2 component identity index location under the raw repository root.
+///
+/// Keeping v2 at a distinct path prevents its incompatible target rows from
+/// breaking released clients that parse `components.toml` atomically.
+pub fn component_index_v2_url(base_url: &str) -> String {
+    format!("{}/components-v2.toml", raw_root(base_url))
 }
 
 /// Root that repo-relative index-row `url`s join onto. Same prefix the
@@ -1262,10 +1270,14 @@ base_url = "https://example.com/$typo_var/repo"
     }
 
     #[test]
-    fn component_index_url_uses_raw_repository_root() {
+    fn component_index_urls_are_generation_specific() {
         assert_eq!(
             component_index_url("file:///srv/repo"),
             "file:///srv/repo/v1/components.toml"
+        );
+        assert_eq!(
+            component_index_v2_url("file:///srv/repo"),
+            "file:///srv/repo/v1/components-v2.toml"
         );
     }
 

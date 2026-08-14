@@ -1,7 +1,7 @@
 use crate::commands::tier1::list::render::{availability_label, human_header};
 use crate::commands::tier1::list::{ListArgs, ListPayload, Row, build_rows};
 
-use super::support::{FakeRpmQuery, empty_state, pkg_info, sample_index};
+use super::support::{FakeRpmQuery, empty_state, pkg_info, sample_index, target};
 
 #[test]
 fn row_json_retains_status_and_adds_local_fields() {
@@ -39,8 +39,16 @@ fn row_json_retains_status_and_adds_local_fields() {
     assert_eq!(sight["active"], false);
     assert_eq!(sight["mutable_by_current_invocation"], false);
     assert_eq!(sight["action"], "install");
-    assert_eq!(sight["platforms"], serde_json::json!(["linux"]));
-    assert_eq!(sight["platform_available"], true);
+    assert_eq!(
+        sight["targets"],
+        serde_json::json!([
+            {"os": "linux", "arch": "x86_64"},
+            {"os": "macos", "arch": "aarch64"}
+        ])
+    );
+    assert_eq!(sight["target_available"], true);
+    assert!(sight.get("platforms").is_none());
+    assert!(sight.get("platform_available").is_none());
 }
 
 #[test]
@@ -50,8 +58,8 @@ fn human_header_contains_local_state() {
         display_name: "AgentSight".to_string(),
         summary: "observability".to_string(),
         backends: vec!["rpm".to_string()],
-        platforms: vec!["linux".to_string()],
-        platform_available: true,
+        targets: vec![target("linux", "x86_64")],
+        target_available: true,
         status: "not_installed".to_string(),
         local_state: "observed".to_string(),
         ownership: "none".to_string(),
@@ -76,7 +84,7 @@ fn human_header_contains_local_state() {
 }
 
 #[test]
-fn human_availability_explains_the_supported_platform() {
+fn human_availability_explains_the_supported_targets() {
     let mut rows = build_rows(
         &sample_index(),
         &ListArgs { installed: false },
@@ -87,9 +95,12 @@ fn human_availability_explains_the_supported_platform() {
         .iter_mut()
         .find(|row| row.name == "agentsight")
         .unwrap();
-    sight.platform_available = false;
+    sight.target_available = false;
 
-    assert_eq!(availability_label(sight), "Linux only");
+    assert_eq!(
+        availability_label(sight),
+        "Linux/x86_64, macOS/aarch64 only"
+    );
 }
 
 #[test]
