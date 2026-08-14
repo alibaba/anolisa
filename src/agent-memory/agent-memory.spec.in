@@ -37,6 +37,9 @@ BuildRequires:  jq
 BuildRequires:  systemd-devel
 BuildRequires:  systemd-rpm-macros
 
+# Required for ANOLISA RPM component identity resolution.
+Provides:       anolisa-component(agent-memory)
+
 %description
 Agent memory is a persistent filesystem memory for AI agents, served over
 the MCP (Model Context Protocol) standard. Linux only.
