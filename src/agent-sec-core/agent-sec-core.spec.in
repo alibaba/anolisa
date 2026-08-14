@@ -61,6 +61,12 @@ Requires:       agent-sec-hermes-hook = %{version}-%{release}
 Requires:       agent-sec-qwen-code-hook = %{version}-%{release}
 Requires:       agent-sec-skills = %{version}-%{release}
 
+# Declare ANOLISA component identity so that `anolisa install sec-core --backend rpm`
+# can resolve this package via RPM Provides when the repo-side components-v2.toml
+# is unavailable (404) and no package_map entry exists — the resolver falls through to
+# RPM Provides but finds no anolisa-component(sec-core) capability.
+Provides:       anolisa-component(sec-core)
+
 %description
 Agent-Sec-Core is an OS-level security baseline and hardening framework for AI Agents.
 This metapackage installs all agent-sec-core components including CLI, hooks, and skills.
