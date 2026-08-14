@@ -16,6 +16,17 @@ PLUGIN_SRC="$ADAPTER_DIR/claude-code"
 CLAUDE_BIN="${CLAUDE_BIN:-}"
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 
+# First-run timing races (GH issue #2512): right after a fresh install the
+# claude binary may not be visible on PATH yet, and `claude plugin list` may
+# lag a moment behind `claude plugin install` while ~/.claude is still being
+# initialized. Retry such checks briefly before declaring them missing.
+# Tunable via ANOLISA_DETECT_RETRIES / ANOLISA_DETECT_RETRY_DELAY; set
+# retries to 1 to disable.
+DETECT_RETRIES="${ANOLISA_DETECT_RETRIES:-3}"
+DETECT_RETRY_DELAY="${ANOLISA_DETECT_RETRY_DELAY:-1}"
+case "$DETECT_RETRIES" in ''|*[!0-9]*) DETECT_RETRIES=3 ;; esac
+case "$DETECT_RETRY_DELAY" in ''|*[!0-9.]*) DETECT_RETRY_DELAY=1 ;; esac
+
 line()  { printf '[%s] %s\n' "$COMPONENT" "$*"; }
 field() { printf '[%s]   %-26s %s\n' "$COMPONENT" "$1" "$2"; }
 
@@ -26,6 +37,14 @@ note_install_missing() { INSTALL_MISSING+=("$1"); }
 
 if [ -z "$CLAUDE_BIN" ]; then
     CLAUDE_BIN="$(command -v claude 2>/dev/null || true)"
+    # Fresh-install race: the binary may appear on PATH moments after the
+    # installer exits; probe briefly before reporting it missing.
+    attempt=1
+    while [ -z "$CLAUDE_BIN" ] && [ "$attempt" -lt "$DETECT_RETRIES" ]; do
+        sleep "$DETECT_RETRY_DELAY"
+        attempt=$((attempt + 1))
+        CLAUDE_BIN="$(command -v claude 2>/dev/null || true)"
+    done
 fi
 
 line "${AGENT} detect"
@@ -59,7 +78,22 @@ else
 fi
 
 if [ -n "$CLAUDE_BIN" ] && [ -x "$CLAUDE_BIN" ]; then
-    if "$CLAUDE_BIN" plugin list 2>&1 | grep -qF "$PLUGIN_ID"; then
+    plugin_state="missing"
+    attempt=1
+    while true; do
+        if "$CLAUDE_BIN" plugin list 2>&1 | grep -qF "$PLUGIN_ID"; then
+            plugin_state="installed"
+            break
+        fi
+        # First-run race: `plugin list` may not reflect a fresh
+        # `plugin install` until the ~/.claude state settles; retry briefly.
+        if [ "$attempt" -ge "$DETECT_RETRIES" ]; then
+            break
+        fi
+        sleep "$DETECT_RETRY_DELAY"
+        attempt=$((attempt + 1))
+    done
+    if [ "$plugin_state" = "installed" ]; then
         field "plugin install"    "installed ($PLUGIN_ID)"
     else
         field "plugin install"    "not installed"
