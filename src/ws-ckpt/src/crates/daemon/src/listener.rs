@@ -62,6 +62,14 @@ pub async fn run_listener(
                 break;
             }
         }
+
+        // Reap finished connections. JoinSet holds each task's handle and output
+        // slot until it is joined, so without this the set grows by one entry per
+        // CLI invocation and is only released at shutdown. try_join_next never
+        // awaits, so reaping cannot delay the next accept; a join_next branch in
+        // the select! above would instead need a second mutable borrow of
+        // join_set while the accept arm still spawns into it.
+        while join_set.try_join_next().is_some() {}
     }
 
     // 7. Wait for in-flight tasks to complete (with timeout)
