@@ -8,10 +8,11 @@ fn dispatcher_advances_cursor_to_snapshot_end() {
     let adapter = AdapterInstance::Fake(FakeAgentAdapter);
     let mut state = InlineState::default();
     let mut output = Vec::new();
-    let snapshot = ShellEventSnapshot::new(&[
+    let events = [
         ShellEvent::user_input_intercepted("s", "/help"),
         ShellEvent::user_input_intercepted("s", "/help"),
-    ]);
+    ];
+    let snapshot = ShellEventSnapshot::new(&events);
 
     let actions = RuntimeDispatcher::dispatch_inline_batch(
         &snapshot,
@@ -137,6 +138,65 @@ fn dispatcher_records_the_latest_shell_prompt_cwd_report() {
 }
 
 #[test]
+fn idle_dispatch_reuses_ledger_until_new_events_arrive() {
+    let adapter = AdapterInstance::Fake(FakeAgentAdapter);
+    let mut state = InlineState::default();
+    let mut output = Vec::new();
+    let mut events = vec![
+        ShellEvent::command_started("s", "cmd-1", "echo one", "/tmp", 1),
+        ShellEvent::command_finished(
+            ShellEventKind::CommandCompleted,
+            "s",
+            "cmd-1",
+            0,
+            2,
+            "/tmp/cmd-1",
+        ),
+    ];
+
+    dispatch_and_apply(&events, &adapter, &mut state, &mut output);
+    assert_eq!(state.session_blocks.len(), 1);
+    assert_eq!(state.control.ledger_rebuild_count(), 1);
+
+    dispatch_and_apply(&events, &adapter, &mut state, &mut output);
+    assert_eq!(state.session_blocks.len(), 1);
+    assert_eq!(
+        state.control.ledger_rebuild_count(),
+        1,
+        "an end cursor must bypass the cumulative ledger"
+    );
+
+    events.extend([
+        ShellEvent::command_started("s", "cmd-2", "echo two", "/tmp", 3),
+        ShellEvent::command_finished(
+            ShellEventKind::CommandCompleted,
+            "s",
+            "cmd-2",
+            0,
+            4,
+            "/tmp/cmd-2",
+        ),
+    ]);
+    dispatch_and_apply(&events, &adapter, &mut state, &mut output);
+
+    assert_eq!(state.session_blocks.len(), 2);
+    assert_eq!(state.control.ledger_rebuild_count(), 2);
+}
+
+fn dispatch_and_apply(
+    events: &[ShellEvent],
+    adapter: &AdapterInstance,
+    state: &mut InlineState,
+    output: &mut Vec<u8>,
+) {
+    let snapshot = ShellEventSnapshot::new(events);
+    let actions =
+        RuntimeDispatcher::dispatch_inline_batch(&snapshot, adapter, "bash", state, output)
+            .expect("dispatch should render");
+    RuntimeDispatcher::apply_actions(actions, state);
+}
+
+#[test]
 fn pty_input_invalidates_the_prompt_cwd_report() {
     // Any PTY input may submit a `cd` through a binding the
     // byte-stream heuristic cannot see, and its markers may be lost
@@ -237,9 +297,10 @@ fn busy_shell_updates_the_analyzer_foreground_gate() {
         ..InlineState::default()
     };
     let mut output = Vec::new();
-    let snapshot = ShellEventSnapshot::new(&[ShellEvent::command_started(
+    let events = [ShellEvent::command_started(
         "session", "command", "sleep 1", "/tmp", 1,
-    )]);
+    )];
+    let snapshot = ShellEventSnapshot::new(&events);
 
     RuntimeDispatcher::dispatch_inline_batch(&snapshot, &adapter, "bash", &mut state, &mut output)
         .expect("dispatch should render");

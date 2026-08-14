@@ -42,7 +42,7 @@ use crate::runtime::state::InlineState;
 use crate::slash::runtime::render_slash_actions;
 use crate::slash::session::poll_background_compaction;
 
-use super::controller::{pending_card_capture, shell_has_active_foreground_command};
+use super::controller::pending_card_capture;
 use super::events::{ShellEventBatch, ShellEventCursor, ShellEventSnapshot};
 use super::startup::{
     render_pending_recommendation_notice, render_startup_banner, render_startup_health_banner,
@@ -108,11 +108,18 @@ fn render_inline_guidance_from_batch<W: Write>(
 ) -> std::io::Result<()> {
     state.personalization.poll_ready();
     let events = snapshot.events();
-    let action_events = batch.events.as_slice();
+    let action_events = batch.events;
     let event_index_base = batch.global_index(0);
-    state.shell_exited = events
+    if action_events.is_empty() {
+        return poll_inline_runtime_without_shell_events(adapter, state, output);
+    }
+
+    state.control.observe_shell_command_activity(action_events);
+    state.shell_exited |= action_events
         .iter()
         .any(|event| event.kind == ShellEventKind::ShellExited);
+    #[cfg(test)]
+    state.control.record_ledger_rebuild();
     let ledger = build_command_blocks(events);
     record_completed_command_blocks(state, &ledger.blocks);
     state.session_blocks = ledger.blocks.clone();
@@ -122,9 +129,9 @@ fn render_inline_guidance_from_batch<W: Write>(
     // (and cd'd inside) a command. `events` is the session's cumulative
     // stream (the raw relay always passes the parser's full event vec,
     // which is append-only), so once a command marker is present it is
-    // present in every later dispatch and this assignment never
-    // regresses to `false`.
-    state.shell_command_activity_observed = events.iter().any(|event| {
+    // present in an incremental batch at most once, so this flag is
+    // monotonic without rescanning the cumulative stream.
+    state.shell_command_activity_observed |= action_events.iter().any(|event| {
         matches!(
             event.kind,
             ShellEventKind::CommandStarted
@@ -144,7 +151,7 @@ fn render_inline_guidance_from_batch<W: Write>(
     // follows it. Scanned newest first: the most recent decisive
     // event wins, and an event-free dispatch never erases the last
     // known state.
-    for event in events.iter().rev() {
+    for event in action_events.iter().rev() {
         if event.kind == ShellEventKind::UserInputIntercepted
             && event.component.as_deref() == Some("shell_pty_input")
             && event.message.as_deref() == Some("write")
@@ -198,7 +205,7 @@ fn render_inline_guidance_from_batch<W: Write>(
         event_index_base,
     )?;
     RuntimeDispatcher::apply_actions(approval_actions, state);
-    let shell_busy = shell_has_active_foreground_command(events);
+    let shell_busy = state.control.shell_busy();
     if shell_busy {
         if let Some(cancellation) = state.personalization.analyzer_cancellation.as_ref() {
             cancellation.set_foreground_idle(false);
@@ -385,6 +392,47 @@ fn render_inline_guidance_from_batch<W: Write>(
     render_owned_shell_prompt(state, output)?;
 
     Ok(())
+}
+
+fn poll_inline_runtime_without_shell_events<W: Write>(
+    adapter: &AdapterInstance,
+    state: &mut InlineState,
+    output: &mut W,
+) -> std::io::Result<()> {
+    if state.shell_exited {
+        stop_active_agent_run_without_rendering(state, output)?;
+        return Ok(());
+    }
+
+    if state.control.shell_busy() {
+        if let Some(cancellation) = state.personalization.analyzer_cancellation.as_ref() {
+            cancellation.set_foreground_idle(false);
+        }
+        state.personalization.idle_since = None;
+        poll_active_agent_run_deferred(state, output, adapter)?;
+        poll_background_compaction(state, output, adapter, true)?;
+        return Ok(());
+    }
+
+    render_startup_health_banner(state, output)?;
+    render_pending_recommendation_notice(state, output)?;
+    let personal_idle =
+        state.agent_run.active.is_none() && !state.personalization.shell_input_active;
+    crate::recommendation::personal_session::poll_personal_session(state, adapter, personal_idle);
+    render_queued_hook_consultation(state, output)?;
+    if pending_card_capture(state).is_none() {
+        render_pending_command_insight(state, output)?;
+    } else {
+        state.pending_command_insight = None;
+    }
+    flush_held_agent_events(state, output)?;
+    if !state.control.shell_handoff().has_active_handoff() {
+        poll_active_agent_run(state, output, adapter)?;
+    }
+    flush_held_agent_events(state, output)?;
+    start_pending_shell_handoff_continuations(adapter, state, output)?;
+    poll_background_compaction(state, output, adapter, false)?;
+    render_owned_shell_prompt(state, output)
 }
 
 /// Starts the shell-evidence continuation whose delivery to the owning provider
