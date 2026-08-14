@@ -213,9 +213,17 @@ Extension 在新的 Qwen Code 会话中加载。重启后执行一次工具调�
 
 ## AgentScope 框架集成
 
-Python 包支持 `agentscope>=2.0.5,<2.1`。原生 `anolisa-tokenless` Runtime Wheel 和
-AgentScope 集成 Wheel 当前都尚未发布到 Python 包索引。当前唯一受支持的安装方式是
-从源码 checkout 构建并同时安装两个相同版本的 Wheel：
+Python 包支持 AgentScope 1.0.11 至 1.0.x 和 AgentScope 2.0.x。应根据已安装版本选择
+挂载入口：
+
+| AgentScope 版本 | 支持的入口 |
+|---|---|
+| 1.0.11 至 1.0.x | 通过 `integration.install(agent)` 接入直接构造的 Agent |
+| 2.0.0 | 通过 `integration.tools` 和 `integration.middlewares` 直接构造 Agent |
+| 2.0.1 至 2.0.x | 直接构造 Agent，或通过 `integration.app_options()` 接入 App |
+
+原生 `anolisa-tokenless` Runtime Wheel 和 AgentScope 集成 Wheel 当前都尚未发布到
+Python 包索引。请从源码 checkout 构建并同时安装两个相同版本的 Wheel：
 
 ```bash
 make python-wheel agentscope-wheel
@@ -224,64 +232,65 @@ python -m pip install \
   target/wheels/anolisa_tokenless_agentscope-*.whl
 ```
 
-普通高代码 Agent 需要把同一个中间件实例同时注册到 Toolkit 和 Agent：
+两个大版本都使用 `TokenlessAgentScope` 和 `TokenlessConfig`，只有最后的挂载方式不同。
+AgentScope 1.x 必须先创建 Agent 和所有工具函数，再安装集成；之后注册的工具不会被包装：
+
+```python
+from agentscope.agent import ReActAgent
+from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
+
+integration = TokenlessAgentScope(
+    TokenlessConfig(
+        mode="balanced",
+        data_dir="/absolute/path/to/tenant-tokenless-data",
+    ),
+)
+agent = ReActAgent(..., toolkit=toolkit)
+integration.install(agent)
+```
+
+AgentScope 2.x 应在构造 Toolkit 和 Agent 时传入恢复 Tool 和中间件。该方式从 2.0.0
+即可使用，不依赖后续补丁版本才引入的 Toolkit 动态修改 API：
 
 ```python
 from agentscope.agent import Agent
 from agentscope.tool import Toolkit
-from tokenless_agentscope import TokenlessMiddleware
+from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
 
-toolkit = Toolkit()
-middleware = TokenlessMiddleware(
-    mode="balanced",
-    data_dir="/absolute/path/to/tenant-tokenless-data",
-    min_chars=200,
+integration = TokenlessAgentScope(
+    TokenlessConfig(
+        mode="balanced",
+        data_dir="/absolute/path/to/tenant-tokenless-data",
+        # retrieve_tool_name="tenant_tokenless_retrieve",
+    ),
 )
-await middleware.register_tools(toolkit)
+toolkit = Toolkit(tools=[*application_tools, *integration.tools])
 
 agent = Agent(
     ...,
     toolkit=toolkit,
-    middlewares=[middleware],
+    middlewares=integration.middlewares,
 )
 ```
 
-AgentScope App 接受按请求创建中间件的 factory。其 Toolkit 组装过程会自动调用
-`list_tools()`，因此不要再单独注册恢复 Tool：
+AgentScope App 从 2.0.1 开始支持。`app_options()` 会在配置的绝对基础目录下，为每个
+user/agent/session 派生独立的 Tokenless 数据目录：
 
 ```python
-from hashlib import sha256
-from pathlib import Path
-
 from agentscope.app import create_app
-from tokenless_agentscope import TokenlessMiddleware
+from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
 
-tenant_root = Path("/srv/tokenless-tenants")
-
-async def tokenless_middlewares(user_id, agent_id, session_id):
-    del agent_id, session_id
-    tenant_key = sha256(user_id.encode("utf-8")).hexdigest()
-    return [TokenlessMiddleware(data_dir=tenant_root / tenant_key)]
-
-app = create_app(
-    ...,
-    extra_agent_middlewares=tokenless_middlewares,
+integration = TokenlessAgentScope(
+    TokenlessConfig(data_dir="/srv/tokenless-tenants"),
 )
+app = create_app(..., **integration.app_options())
 ```
 
-AgentScope 遇到同名 Tool 时会保留最后一个，而 `list_tools()` 无法取得 App 的其他
-Tool。如果 App 已有 `tokenless_retrieve` Tool，或安装了多个 Tokenless 中间件实例，
-应为每个 Tokenless Tool 指定唯一名称：
-
-```python
-TokenlessMiddleware(
-    data_dir=tenant_root / tenant_key,
-    retrieve_tool_name="tenant_tokenless_retrieve",
-)
-```
-
-中间件会把配置的名称用于 `list_tools()`、高代码注册和永久压缩排除。高代码路径的
-`register_tools()` 遇到已有同名 Tool 时仍会报错。
+如果应用已经定义 `tokenless_retrieve`，应在 `TokenlessConfig` 中设置唯一的
+`retrieve_tool_name`；App 组装阶段不会把其他工具暴露给该 factory，无法预先检查重名。
+AgentScope 2.0.0 尚未提供 App 级 Agent middleware 和 Tool 注入，因此只支持直接构造
+Agent。原有 `TokenlessMiddleware` 2.x API 继续保留兼容；新代码应使用
+`TokenlessAgentScope`，避免依赖特定补丁版本的 Toolkit 动态修改或 Tool 自动收集行为。
 
 请根据应用可接受的 inline 截断程度选择模式：
 
@@ -291,17 +300,16 @@ TokenlessMiddleware(
 | `balanced`（默认） | 跳过 | Shell：65,536 / 128 / 深度 8；其他采用 conservative 限制 |
 | `aggressive` | 跳过 | CLI 默认值：4,096 / 32 / 深度 8 |
 
-中间件会原样转发流式 chunk，只替换成功的最终 `ToolResponse`；响应和 block 的
+集成会原样转发中间流式 chunk，只替换成功的最终 `ToolResponse`；响应和 block 的
 标识、元数据都会保留。Tokenless 失败或 UTF-8 结果没有严格变小时保留原文。
 JSON object/array 仍为 JSON，普通文本仍为文本，`DataBlock` 永不修改。
 
-中间件还提供只读、并发安全的恢复 Tool，默认名称为 `tokenless_retrieve`。只有
-参数是严格的 24 位十六进制哈希，且当前 AgentScope 上下文或摘要中存在对应
-`<<tokenless:HASH>>` marker 时才会自动允许；该 Tool 永远不参与压缩。这一窄权限
-仍依赖存储隔离：每个用户或租户必须显式传入独立的绝对 `data_dir`。省略
-`data_dir` 时，`TOKENLESS_DATA_DIR` 只作为进程级回退，不得由多个租户共用；
-也不要依赖跨节点恢复。stash 当前使用固定的一小时 TTL，Agent 应在这一边界前
-恢复所需内容。
+集成还提供默认名为 `tokenless_retrieve` 的恢复 Tool。只有参数是严格的 24 位十六进制
+哈希，且对应的 `<<tokenless:HASH>>` marker 在 AgentScope 1.x memory 或 AgentScope
+2.x context/summary 中可见时，才会返回内容；该 Tool 永远不参与压缩。这一窄权限仍依赖
+存储隔离：每个用户或租户必须显式传入独立的绝对 `data_dir`。省略 `data_dir` 时，
+`TOKENLESS_DATA_DIR` 只作为进程级回退，不得由多个租户共用；也不要依赖跨节点恢复。
+stash 当前使用固定的一小时 TTL，Agent 应在这一边界前恢复所需内容。
 
 压缩和恢复会从 async worker thread 调用进程内 `anolisa-tokenless` Runtime；该集成
 不会启动 CLI 进程或授予 Shell 权限，也不接入 MCP、TOON、RTK 命令重写或

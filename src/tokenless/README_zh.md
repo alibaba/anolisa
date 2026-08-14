@@ -168,9 +168,9 @@ make opencode-install
 
 ### AgentScope 框架集成
 
-AgentScope 2.0 应用需要显式安装两个相同版本的 Python Wheel。框架集成直接调用
-`anolisa-tokenless` Runtime，不会启动 CLI 子进程。两个 Python 包当前都尚未发布到
-包索引。当前应从源码 checkout 构建并同时安装两个 Wheel：
+AgentScope 1.0.11 至 1.0.x 及 AgentScope 2.0.x 应用需要显式安装两个相同版本的 Python
+Wheel。框架集成直接调用 `anolisa-tokenless` Runtime，不会启动 CLI 子进程。两个 Python
+包当前都尚未发布到包索引。当前应从源码 checkout 构建并同时安装两个 Wheel：
 
 ```bash
 make python-wheel agentscope-wheel
@@ -179,31 +179,65 @@ python -m pip install \
   target/wheels/anolisa_tokenless_agentscope-*.whl
 ```
 
-普通高代码 Agent 需要把同一个中间件实例同时注册到 Toolkit 和 Agent。
-AgentScope App 会通过 `list_tools()` 自动收集 `tokenless_retrieve`，因此 App
-代码只需提供中间件。如果 App 已有同名 Tool，应传入唯一的
-`retrieve_tool_name`；AgentScope 遇到重名时采用最后一个 Tool，而中间件在
-`list_tools()` 阶段无法检查 App 的其他 Tool。
+两个大版本使用相同的公开入口和配置对象；由于 AgentScope 1.x 与 2.x 提供的生命周期
+扩展点不同，仅最后的挂载方式不同。
+
+AgentScope 1.x 必须在 Agent 和所有工具函数创建后安装集成。安装时会把恢复工具绑定到
+该 Agent 的 memory，只有 memory 中可见的 marker 才能授权恢复对应 stash。
+
+```python
+from agentscope.agent import ReActAgent
+from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
+
+integration = TokenlessAgentScope(
+    TokenlessConfig(
+        mode="balanced",
+        data_dir="/absolute/path/to/tenant-tokenless-data",
+    ),
+)
+agent = ReActAgent(..., toolkit=toolkit)
+integration.install(agent)
+```
+
+AgentScope 2.x 在构造阶段接收恢复 Tool 和中间件；该方式从 2.0.0 即可使用，不依赖后续
+补丁版本才新增的 Toolkit 动态修改接口。
 
 ```python
 from agentscope.agent import Agent
 from agentscope.tool import Toolkit
-from tokenless_agentscope import TokenlessMiddleware
+from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
 
-toolkit = Toolkit()
-middleware = TokenlessMiddleware(
-    mode="balanced",
-    data_dir="/absolute/path/to/tenant-tokenless-data",
-    # retrieve_tool_name="tenant_tokenless_retrieve",
+integration = TokenlessAgentScope(
+    TokenlessConfig(
+        mode="balanced",
+        data_dir="/absolute/path/to/tenant-tokenless-data",
+        # retrieve_tool_name="tenant_tokenless_retrieve",
+    ),
 )
-await middleware.register_tools(toolkit)
+toolkit = Toolkit(tools=[*application_tools, *integration.tools])
 
 agent = Agent(
     ...,
     toolkit=toolkit,
-    middlewares=[middleware],
+    middlewares=integration.middlewares,
 )
 ```
+
+AgentScope App 从 2.0.1 开始支持。它会在配置的绝对基础目录下，为每个
+user/agent/session 派生独立的 Tokenless 数据目录：
+
+```python
+from agentscope.app import create_app
+
+app = create_app(..., **integration.app_options())
+```
+
+如果应用已经定义 `tokenless_retrieve`，应在 `TokenlessConfig` 中设置唯一的
+`retrieve_tool_name`；App 组装阶段不会把其他工具暴露给该 factory，无法预先检查重名。
+
+AgentScope 2.0.0 尚未提供 App 级 Agent middleware 和 Tool 注入，因此该补丁版本只支持
+直接构造 Agent。原有 `TokenlessMiddleware` 2.x API 继续保留兼容；新代码应使用
+`TokenlessAgentScope`，避免依赖特定补丁版本的 Toolkit 动态修改或 Tool 自动收集行为。
 
 | 模式 | 策略 |
 |---|---|
@@ -211,12 +245,13 @@ agent = Agent(
 | `balanced` | 跳过 Read/Glob/Grep；Shell 使用 65,536 / 128 / 深度 8，其他采用 conservative 限制 |
 | `aggressive` | 跳过 Read/Glob/Grep；其他采用 CLI 默认的 4,096 / 32 / 深度 8 |
 
-默认模式为 `balanced`。只读恢复 Tool 仅在 24 位哈希对应的 marker 出现在当前
-AgentScope 上下文或摘要中时自动允许。每个用户或租户必须显式传入不同的绝对
-`data_dir`；省略 `data_dir` 时，`TOKENLESS_DATA_DIR` 只作为进程级回退。除非应用
-有明确生命周期策略，否则保留默认一小时 stash TTL，且不要依赖跨节点恢复。
-该集成不启用 Shell、MCP、TOON、RTK 或 Schema 压缩。源码位于
-`python/agentscope/`，可后续独立发布 Wheel。
+默认模式为 `balanced`。只读恢复 Tool 仅在 24 位哈希对应的 marker 出现在
+AgentScope 1.x memory 或 AgentScope 2.x context/summary 中时自动允许。1.x 的
+`install()` 必须在待压缩工具注册完成后调用；之后动态注册的工具不会被包装。直接构造
+Agent 时，每个用户或租户必须显式传入不同的绝对 `data_dir`；省略 `data_dir` 时，
+`TOKENLESS_DATA_DIR` 只作为进程级回退。除非应用有明确生命周期策略，否则保留默认
+一小时 stash TTL，且不要依赖跨节点恢复。该集成不启用 Shell、MCP、TOON、RTK 或
+Schema 压缩。源码位于 `python/agentscope/`，可后续独立发布 Wheel。
 
 ## Raw 打包
 

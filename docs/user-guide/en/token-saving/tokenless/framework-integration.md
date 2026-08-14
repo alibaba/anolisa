@@ -206,11 +206,18 @@ The extension loads in a new Qwen Code session. Restart and run one tool call to
 
 ## AgentScope framework integration
 
-The Python package supports `agentscope>=2.0.5,<2.1`. The native
-`anolisa-tokenless` runtime wheel and AgentScope integration wheel are not
-currently published to a Python package index. The currently supported
-installation path is to build and install both same-version wheels from a
-source checkout:
+The Python package supports AgentScope 1.0.11 through 1.0.x and AgentScope
+2.0.x. Choose the attachment point for the installed framework version:
+
+| AgentScope version | Supported entry point |
+|---|---|
+| 1.0.11 through 1.0.x | Direct Agent through `integration.install(agent)` |
+| 2.0.0 | Direct Agent construction with `integration.tools` and `integration.middlewares` |
+| 2.0.1 through 2.0.x | Direct Agent construction or App through `integration.app_options()` |
+
+The native `anolisa-tokenless` runtime wheel and AgentScope integration wheel
+are not currently published to a Python package index. Build and install both
+same-version wheels from a source checkout:
 
 ```bash
 make python-wheel agentscope-wheel
@@ -219,67 +226,71 @@ python -m pip install \
   target/wheels/anolisa_tokenless_agentscope-*.whl
 ```
 
-For a high-code Agent, register the same middleware instance with its Toolkit
-and Agent:
+Both major versions use `TokenlessAgentScope` and `TokenlessConfig`; only the
+final attachment step differs. In AgentScope 1.x, create the Agent and all tool
+functions before installing the integration. Tools registered afterward are
+not wrapped:
+
+```python
+from agentscope.agent import ReActAgent
+from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
+
+integration = TokenlessAgentScope(
+    TokenlessConfig(
+        mode="balanced",
+        data_dir="/absolute/path/to/tenant-tokenless-data",
+    ),
+)
+agent = ReActAgent(..., toolkit=toolkit)
+integration.install(agent)
+```
+
+In AgentScope 2.x, pass the retrieval Tool and middleware when constructing the
+Toolkit and Agent. This works from 2.0.0 and does not depend on mutable Toolkit
+APIs introduced in later patch releases:
 
 ```python
 from agentscope.agent import Agent
 from agentscope.tool import Toolkit
-from tokenless_agentscope import TokenlessMiddleware
+from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
 
-toolkit = Toolkit()
-middleware = TokenlessMiddleware(
-    mode="balanced",
-    data_dir="/absolute/path/to/tenant-tokenless-data",
-    min_chars=200,
+integration = TokenlessAgentScope(
+    TokenlessConfig(
+        mode="balanced",
+        data_dir="/absolute/path/to/tenant-tokenless-data",
+        # retrieve_tool_name="tenant_tokenless_retrieve",
+    ),
 )
-await middleware.register_tools(toolkit)
+toolkit = Toolkit(tools=[*application_tools, *integration.tools])
 
 agent = Agent(
     ...,
     toolkit=toolkit,
-    middlewares=[middleware],
+    middlewares=integration.middlewares,
 )
 ```
 
-AgentScope App accepts a per-request middleware factory. Its toolkit assembly
-calls `list_tools()` automatically, so do not also register the retrieval Tool:
+AgentScope App is supported from 2.0.1. `app_options()` derives an isolated
+Tokenless data directory for every user/agent/session below the configured
+absolute base directory:
 
 ```python
-from hashlib import sha256
-from pathlib import Path
-
 from agentscope.app import create_app
-from tokenless_agentscope import TokenlessMiddleware
+from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
 
-tenant_root = Path("/srv/tokenless-tenants")
-
-async def tokenless_middlewares(user_id, agent_id, session_id):
-    del agent_id, session_id
-    tenant_key = sha256(user_id.encode("utf-8")).hexdigest()
-    return [TokenlessMiddleware(data_dir=tenant_root / tenant_key)]
-
-app = create_app(
-    ...,
-    extra_agent_middlewares=tokenless_middlewares,
+integration = TokenlessAgentScope(
+    TokenlessConfig(data_dir="/srv/tokenless-tenants"),
 )
+app = create_app(..., **integration.app_options())
 ```
 
-AgentScope resolves duplicate Tool names by keeping the last Tool, while
-`list_tools()` does not receive the other App tools. If the App already has a
-`tokenless_retrieve` Tool, or installs multiple Tokenless middleware instances,
-assign each Tokenless Tool a unique name:
-
-```python
-TokenlessMiddleware(
-    data_dir=tenant_root / tenant_key,
-    retrieve_tool_name="tenant_tokenless_retrieve",
-)
-```
-
-The middleware uses the configured name for `list_tools()`, high-code
-registration, and permanent compression exclusion. High-code
-`register_tools()` still rejects an existing Tool with that configured name.
+Set a unique `retrieve_tool_name` in `TokenlessConfig` if the application
+already defines `tokenless_retrieve`; App assembly does not expose other tools
+to its factory for a preflight collision check. AgentScope 2.0.0 does not
+provide App-level Agent middleware or Tool injection, so it supports direct
+Agent construction only. The existing `TokenlessMiddleware` 2.x API remains
+available for compatibility; new code should use `TokenlessAgentScope` to
+avoid patch-specific Toolkit mutation and automatic Tool collection behavior.
 
 Choose a mode according to how much inline truncation the application accepts:
 
@@ -289,22 +300,22 @@ Choose a mode according to how much inline truncation the application accepts:
 | `balanced` (default) | Skip | Shell: 65,536 / 128 / depth 8; others: conservative limits |
 | `aggressive` | Skip | CLI defaults: 4,096 / 32 / depth 8 |
 
-The middleware passes streaming chunks through unchanged. It only replaces a
+The integration passes intermediate streaming chunks through unchanged and only replaces a
 successful final `ToolResponse`, preserves response and block identifiers and
 metadata, and keeps the original whenever Tokenless fails or does not make the
 UTF-8 result strictly smaller. JSON objects and arrays remain JSON; ordinary
 text remains text. `DataBlock` values are never changed.
 
-The middleware also exposes a read-only, concurrency-safe retrieval Tool named
-`tokenless_retrieve` by default. It is auto-allowed only for an exact
-24-character hexadecimal hash whose `<<tokenless:HASH>>` marker is present in
-the current AgentScope context or summary. The Tool is permanently excluded
-from compression. This narrow permission still depends on storage isolation:
-pass a separate absolute `data_dir` for every user or tenant. If `data_dir` is
-omitted, `TOKENLESS_DATA_DIR` is only a process-wide fallback and must not be
-shared by multiple tenants. Retrieval does not work across nodes. Stash entries
-expire after the current fixed one-hour TTL, so the Agent should retrieve
-necessary content before that boundary.
+The integration also exposes a retrieval Tool named `tokenless_retrieve` by
+default. It returns content only for an exact 24-character hexadecimal hash
+whose `<<tokenless:HASH>>` marker is visible in AgentScope 1.x memory or the
+AgentScope 2.x context/summary. The Tool is permanently excluded from
+compression. This narrow permission still depends on storage isolation: pass a
+separate absolute `data_dir` for every user or tenant. If `data_dir` is omitted,
+`TOKENLESS_DATA_DIR` is only a process-wide fallback and must not be shared by
+multiple tenants. Retrieval does not work across nodes. Stash entries expire
+after the current fixed one-hour TTL, so the Agent should retrieve necessary
+content before that boundary.
 
 Compression and retrieval call the in-process `anolisa-tokenless` runtime from
 an async worker thread; the integration does not start a CLI process or grant Shell

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import sqlite3
@@ -11,14 +12,23 @@ from concurrent.futures import ThreadPoolExecutor
 from importlib.metadata import distribution
 from pathlib import Path
 
-from anolisa_tokenless import TokenlessError, TokenlessRuntime, __version__
+from anolisa_tokenless import (
+    RetrievalError,
+    TokenlessConfig,
+    TokenlessError,
+    TokenlessRuntime,
+    ToolResponseCompressor,
+    __version__,
+)
 
 
 class TokenlessRuntimeTests(unittest.TestCase):
     """Exercise public Python API behavior against real SQLite state."""
 
     def setUp(self) -> None:
-        self.temporary_directory = tempfile.TemporaryDirectory(prefix="tokenless-python-test-")
+        self.temporary_directory = tempfile.TemporaryDirectory(
+            prefix="tokenless-python-test-"
+        )
         self.runtime = TokenlessRuntime(
             self.temporary_directory.name,
             stats_enabled=True,
@@ -81,6 +91,82 @@ class TokenlessRuntimeTests(unittest.TestCase):
         recovered = self.runtime.retrieve(marker.group(1).upper())
         self.assertEqual(recovered, payload)
 
+    def test_framework_core_compresses_and_authorizes_visible_marker(self) -> None:
+        payload = "RECOVERY_SENTINEL=FRAMEWORK\n" + ("世界" * 3_000)
+        original = json.dumps({"payload": payload}, ensure_ascii=False)
+        compressor = ToolResponseCompressor(
+            TokenlessConfig(
+                mode="aggressive",
+                data_dir=Path(self.temporary_directory.name, "framework"),
+                min_chars=0,
+            ),
+        )
+        compressed = asyncio.run(
+            compressor.compress_text(
+                original,
+                tool_name="api_call",
+                agent_id="framework-test",
+                session_id="session",
+                tool_use_id="tool",
+            ),
+        )
+        self.assertIsNotNone(compressed)
+        assert compressed is not None
+        marker = re.search(r"<<tokenless:([0-9a-f]{24})>>", compressed)
+        self.assertIsNotNone(marker)
+        assert marker is not None
+
+        with self.assertRaisesRegex(RetrievalError, "not present"):
+            asyncio.run(compressor.retrieve(marker.group(1), "no visible marker"))
+        recovered = asyncio.run(
+            compressor.retrieve(marker.group(1).upper(), compressed)
+        )
+        self.assertEqual(recovered, payload)
+
+    def test_framework_core_treats_oversized_integer_as_text(self) -> None:
+        compressor = ToolResponseCompressor(
+            TokenlessConfig(
+                data_dir=Path(self.temporary_directory.name, "oversized-integer"),
+                min_chars=0,
+            ),
+        )
+        compressed = asyncio.run(
+            compressor.compress_text(
+                "9" * 4_301,
+                tool_name="api_call",
+                agent_id="framework-test",
+                session_id="session",
+                tool_use_id="tool",
+            ),
+        )
+        self.assertIsNone(compressed)
+
+    def test_framework_core_treats_deep_json_as_text(self) -> None:
+        compressor = ToolResponseCompressor(
+            TokenlessConfig(
+                data_dir=Path(self.temporary_directory.name, "deep-json"),
+                min_chars=0,
+            ),
+        )
+        compressed = asyncio.run(
+            compressor.compress_text(
+                "[" * 10_000 + "]" * 10_000,
+                tool_name="api_call",
+                agent_id="framework-test",
+                session_id="session",
+                tool_use_id="tool",
+            ),
+        )
+        self.assertIsNone(compressed)
+
+    def test_framework_config_enforces_common_policy(self) -> None:
+        compressor = ToolResponseCompressor(TokenlessConfig(mode="balanced"))
+        self.assertTrue(compressor.is_excluded("Read"))
+        self.assertFalse(compressor.is_excluded("api_call"))
+        self.assertEqual(compressor.thresholds_for("Bash"), (65_536, 128, 8))
+        with self.assertRaisesRegex(ValueError, "absolute path"):
+            TokenlessConfig(data_dir="relative")
+
     def test_invalid_json_raises_package_error(self) -> None:
         with self.assertRaisesRegex(TokenlessError, "JSON parse error"):
             self.runtime.compress_response("not-json")
@@ -94,7 +180,9 @@ class TokenlessRuntimeTests(unittest.TestCase):
             self.runtime.retrieve("not-a-hash")
 
     def test_stash_initialization_failure_is_reversible_fail_open(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="tokenless-python-broken-stash-") as directory:
+        with tempfile.TemporaryDirectory(
+            prefix="tokenless-python-broken-stash-"
+        ) as directory:
             Path(directory, "stash.db").write_bytes(b"not a sqlite database")
             runtime = TokenlessRuntime(directory, stats_enabled=False)
             self.assertFalse(runtime.stash_available)
@@ -119,7 +207,9 @@ class TokenlessRuntimeTests(unittest.TestCase):
         self.assertEqual(result.unrecoverable_truncations, 1)
 
     def test_string_stash_write_failure_is_reversible_fail_open(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="tokenless-python-string-failure-") as directory:
+        with tempfile.TemporaryDirectory(
+            prefix="tokenless-python-string-failure-"
+        ) as directory:
             runtime = TokenlessRuntime(directory, stats_enabled=False)
             with sqlite3.connect(Path(directory, "stash.db")) as connection:
                 connection.execute("DROP TABLE stash")
@@ -132,7 +222,9 @@ class TokenlessRuntimeTests(unittest.TestCase):
             self.assertEqual(result.unrecoverable_truncations, 1)
 
     def test_depth_stash_write_failure_is_reversible_fail_open(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="tokenless-python-depth-failure-") as directory:
+        with tempfile.TemporaryDirectory(
+            prefix="tokenless-python-depth-failure-"
+        ) as directory:
             runtime = TokenlessRuntime(directory, stats_enabled=False)
             with sqlite3.connect(Path(directory, "stash.db")) as connection:
                 connection.execute("DROP TABLE stash")

@@ -17,6 +17,7 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _PACKAGE_SRC = _REPO_ROOT / "python" / "agentscope" / "src"
+_RUNTIME_SRC = _REPO_ROOT / "python" / "tokenless" / "python"
 
 
 class _TokenlessError(Exception):
@@ -37,7 +38,9 @@ class _TokenlessRuntime:
         self.compress_impl = None
         self.retrieve_impl = None
 
-    def compress_response(self, input_text: str, **kwargs: object) -> _CompressionResult:
+    def compress_response(
+        self, input_text: str, **kwargs: object
+    ) -> _CompressionResult:
         if self.compress_impl is None:
             return _CompressionResult(input_text, False)
         return self.compress_impl(input_text, **kwargs)
@@ -50,12 +53,15 @@ class _TokenlessRuntime:
 
 def _install_dependency_stubs() -> None:
     """Install the AgentScope and native-runtime API surfaces used here."""
-    runtime = types.ModuleType("anolisa_tokenless")
-    runtime.TokenlessError = _TokenlessError
-    runtime.TokenlessRuntime = _TokenlessRuntime
+    native = types.ModuleType("anolisa_tokenless._native")
+    native.CompressionResult = _CompressionResult
+    native.TokenlessError = _TokenlessError
+    native.TokenlessRuntime = _TokenlessRuntime
+    native.__version__ = "0.0.0-test"
 
     agentscope = types.ModuleType("agentscope")
     agentscope.__path__ = []
+    agentscope.__version__ = "2.0.5"
 
     message = types.ModuleType("agentscope.message")
 
@@ -88,7 +94,8 @@ def _install_dependency_stubs() -> None:
     middleware = types.ModuleType("agentscope.middleware")
 
     class MiddlewareBase:
-        pass
+        async def list_tools(self) -> list[object]:
+            return []
 
     middleware.MiddlewareBase = MiddlewareBase
 
@@ -110,6 +117,9 @@ def _install_dependency_stubs() -> None:
     class ToolBase:
         def __init__(self) -> None:
             pass
+
+        async def call(self, **_kwargs: object):
+            raise NotImplementedError
 
     @dataclass
     class ToolChunk:
@@ -153,7 +163,7 @@ def _install_dependency_stubs() -> None:
 
     sys.modules.update(
         {
-            "anolisa_tokenless": runtime,
+            "anolisa_tokenless._native": native,
             "agentscope": agentscope,
             "agentscope.message": message,
             "agentscope.middleware": middleware,
@@ -164,11 +174,15 @@ def _install_dependency_stubs() -> None:
 
 
 _install_dependency_stubs()
+sys.path.insert(0, str(_RUNTIME_SRC))
 sys.path.insert(0, str(_PACKAGE_SRC))
 
 integration = importlib.import_module("tokenless_agentscope.middleware")
+public_api = importlib.import_module("tokenless_agentscope")
 CompressionMode = integration.CompressionMode
 TokenlessMiddleware = integration.TokenlessMiddleware
+TokenlessAgentScope = public_api.TokenlessAgentScope
+TokenlessConfig = public_api.TokenlessConfig
 TextBlock = sys.modules["agentscope.message"].TextBlock
 ToolResultState = sys.modules["agentscope.message"].ToolResultState
 ToolChunk = sys.modules["agentscope.tool"].ToolChunk
@@ -370,6 +384,8 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
             _TokenlessError("stash unavailable"),
             _CompressionResult(original, False),
             _CompressionResult("not-json", True),
+            _CompressionResult("9" * 4_301, True),
+            _CompressionResult("[" * 10_000 + "]" * 10_000, True),
             _CompressionResult("[]", True),
             _CompressionResult(original, True),
             _CompressionResult('{"value":"' + "x" * 120 + '"}', True),
@@ -391,7 +407,9 @@ class MiddlewareTest(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
-        middleware._runtime.compress_impl = lambda *_args, **_kwargs: _CompressionResult("{}", True)
+        middleware._runtime.compress_impl = (
+            lambda *_args, **_kwargs: _CompressionResult("{}", True)
+        )
         self.assertIsNone(
             await middleware._compress_text(
                 "plain text that should remain text",
@@ -546,13 +564,48 @@ class RetrieveToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("no stashed payload", chunk.content[0].text)
 
 
+class PublicIntegrationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_direct_agent_surfaces_share_one_middleware(self) -> None:
+        integration = TokenlessAgentScope(
+            TokenlessConfig(data_dir="/tmp/tokenless-direct")
+        )
+        self.assertEqual(integration.middlewares, [integration.middleware])
+        self.assertEqual(integration.tools, [integration.middleware.retrieve_tool])
+
+    async def test_app_options_isolate_sessions_without_duplicate_tools(self) -> None:
+        integration = TokenlessAgentScope(
+            TokenlessConfig(data_dir="/tmp/tokenless-app")
+        )
+        options = integration.app_options()
+        middleware_factory = options["extra_agent_middlewares"]
+        tool_factory = options["extra_agent_tools"]
+
+        middlewares = await middleware_factory("user", "agent", "session")
+        tools = await tool_factory("user", "agent", "session")
+        other = await middleware_factory("user", "agent", "other")
+
+        self.assertEqual(await middlewares[0].list_tools(), [])
+        self.assertEqual(middlewares[0].data_dir, tools[0]._compressor.config.data_dir)
+        self.assertNotEqual(middlewares[0].data_dir, other[0].data_dir)
+
+    async def test_app_options_requires_explicit_base_directory(self) -> None:
+        with self.assertRaisesRegex(ValueError, "data_dir"):
+            TokenlessAgentScope().app_options()
+
+
 class PolicyTest(unittest.TestCase):
     def test_categories_match_canonical_policy(self) -> None:
         policy = json.loads(
-            (_REPO_ROOT / "adapters/tokenless/common/hooks/tool_categories.json").read_text(),
+            (
+                _REPO_ROOT / "adapters/tokenless/common/hooks/tool_categories.json"
+            ).read_text(),
         )
-        self.assertEqual(integration._SKIP_TOOLS, frozenset(policy["layer_1_skip"]["tools"]))
-        self.assertEqual(integration._SHELL_TOOLS, frozenset(policy["layer_2_shell"]["tools"]))
+        self.assertEqual(
+            integration._SKIP_TOOLS, frozenset(policy["layer_1_skip"]["tools"])
+        )
+        self.assertEqual(
+            integration._SHELL_TOOLS, frozenset(policy["layer_2_shell"]["tools"])
+        )
         thresholds = policy["layer_2_shell"]["thresholds"]
         self.assertEqual(
             integration._SHELL_THRESHOLDS,

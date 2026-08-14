@@ -527,7 +527,8 @@ The installer creates a `tokenless.js` symbolic link in OpenCode's global
 
 ## AgentScope Framework Integration
 
-AgentScope 2.0 applications install two same-version Python wheels explicitly.
+AgentScope 1.0.11 through 1.0.x and AgentScope 2.0.x applications install two same-version Python
+wheels explicitly.
 The framework integration uses the `anolisa-tokenless` runtime directly and
 does not start a CLI subprocess. Neither Python package is currently published
 to a package index. Build and install both wheels from a source checkout:
@@ -539,32 +540,72 @@ python -m pip install \
   target/wheels/anolisa_tokenless_agentscope-*.whl
 ```
 
-Register the same middleware instance with both the high-code Toolkit and the
-Agent. AgentScope App collects its `tokenless_retrieve` Tool through
-`list_tools()`, so App code only supplies the middleware. If an App already
-has a Tool with that name, pass a unique `retrieve_tool_name`; AgentScope uses
-the last Tool when names collide, and middleware cannot inspect the other App
-tools during `list_tools()`.
+The public entry point and configuration are the same across both major
+versions. AgentScope 1.x and 2.x expose different lifecycle hooks, so only the
+final attachment step differs.
+
+AgentScope 1.x must install the integration after the Agent and all of its tool
+functions have been created. Installation binds retrieval to that Agent's
+memory so a stash hash cannot be retrieved unless its marker is visible there.
+
+```python
+from agentscope.agent import ReActAgent
+from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
+
+integration = TokenlessAgentScope(
+    TokenlessConfig(
+        mode="balanced",
+        data_dir="/absolute/path/to/tenant-tokenless-data",
+    ),
+)
+agent = ReActAgent(..., toolkit=toolkit)
+integration.install(agent)
+```
+
+AgentScope 2.x receives the retrieval Tool and middleware during construction;
+this works from 2.0.0 and does not depend on mutable Toolkit APIs added in later
+patch versions.
 
 ```python
 from agentscope.agent import Agent
 from agentscope.tool import Toolkit
-from tokenless_agentscope import TokenlessMiddleware
+from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
 
-toolkit = Toolkit()
-middleware = TokenlessMiddleware(
-    mode="balanced",
-    data_dir="/absolute/path/to/tenant-tokenless-data",
-    # retrieve_tool_name="tenant_tokenless_retrieve",
+integration = TokenlessAgentScope(
+    TokenlessConfig(
+        mode="balanced",
+        data_dir="/absolute/path/to/tenant-tokenless-data",
+        # retrieve_tool_name="tenant_tokenless_retrieve",
+    ),
 )
-await middleware.register_tools(toolkit)
+toolkit = Toolkit(tools=[*application_tools, *integration.tools])
 
 agent = Agent(
     ...,
     toolkit=toolkit,
-    middlewares=[middleware],
+    middlewares=integration.middlewares,
 )
 ```
+
+AgentScope App is supported from 2.0.1. It derives an isolated Tokenless data
+directory for every user/agent/session below the configured absolute base
+directory:
+
+```python
+from agentscope.app import create_app
+
+app = create_app(..., **integration.app_options())
+```
+
+Set a unique `retrieve_tool_name` in `TokenlessConfig` if the application
+already defines `tokenless_retrieve`; App assembly does not expose the other
+tools to this factory for a preflight collision check.
+
+AgentScope 2.0.0 does not expose App-level Agent middleware or Tool injection,
+so that patch release supports direct Agent construction only. The existing
+`TokenlessMiddleware` 2.x API remains available for compatibility; new code
+should use `TokenlessAgentScope` so it does not depend on patch-specific
+Toolkit mutation or automatic Tool collection.
 
 | Mode | Policy |
 |---|---|
@@ -573,8 +614,10 @@ agent = Agent(
 | `aggressive` | Skip Read/Glob/Grep; use CLI defaults of 4,096 / 32 / depth 8 elsewhere |
 
 `balanced` is the default. The read-only retrieval Tool is auto-allowed only
-for a 24-character hash whose marker is present in the current AgentScope
-context or summary. Pass a different absolute `data_dir` to each user or tenant;
+for a 24-character hash whose marker is present in AgentScope 1.x memory or the
+AgentScope 2.x context/summary. In 1.x, call `install()` only after registering
+the tools that should be compressed; tools registered later are not wrapped.
+Pass a different absolute `data_dir` to each user or tenant for direct Agents;
 `TOKENLESS_DATA_DIR` is only a process-wide fallback when `data_dir` is omitted.
 Retain the default one-hour stash TTL unless the application has a deliberate
 lifecycle policy, and do not expect retrieval across nodes. This integration

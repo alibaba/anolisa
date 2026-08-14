@@ -10,8 +10,10 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = [
-    "agentscope>=2.0.5,<2.1",
+    "agentscope>=1.0.11,<2.1",
     "anolisa-tokenless==@VERSION@",
+    # AgentScope 2.0.0 does not cap MCP and is incompatible with MCP 2.x.
+    "mcp>=1.13,<2",
 ]
 
 [tool.setuptools]
