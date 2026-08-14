@@ -58,6 +58,12 @@ Developers building from source should use the repository-level entry point:
 ./scripts/build-all.sh --component sec-core
 ```
 
+Before installing files, the source-build entry point checks Node.js 20 or
+newer, bubblewrap, GnuPG, and `jq`. User mode reports all missing system
+runtime packages with one install command and exits; install them and rerun the
+same command. `--ignore-deps` bypasses this verification for pre-provisioned
+hosts.
+
 The source build installs the runtime and integration resources in user paths,
 but it does not register `sec-core` in ANOLISA state. Do not follow it with
 `anolisa adapter enable`; use the source integration scripts documented below.

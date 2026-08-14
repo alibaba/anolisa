@@ -13,9 +13,10 @@ git clone https://github.com/alibaba/anolisa.git
 cd anolisa
 ```
 
-通用前置条件包括 Git、Bash、`make`、用于编译 Rust 或 Python 原生扩展的 C 编译器，
-以及可下载依赖的网络环境。组件矩阵会列出平台特有的要求。仓库没有统一的 Rust
-版本，构建某个组件时请遵循该组件声明的 `rust-toolchain.toml` 或 `rust-version`。
+通用前置条件包括 Git、Bash 4.3 或更高版本、`make`、用于编译 Rust 或 Python
+原生扩展的 C 编译器，以及可下载依赖的网络环境。组件矩阵会列出平台特有的要求。
+仓库没有统一的 Rust 版本，构建某个组件时请遵循该组件声明的
+`rust-toolchain.toml` 或 `rust-version`。
 
 ## 2. 仓库结构
 
@@ -60,6 +61,14 @@ Linux-only 组件。
 组件有固定工具链时，从该组件目录执行命令，rustup 会自动选择对应版本。没有固定
 版本的组件应先查看自己的 `Cargo.toml` 和当前 stable 工具链，再开始构建。
 
+由 uv 管理的 Python runtime 默认从 GitHub 官方
+`astral-sh/python-build-standalone` 下载。若当前网络无法访问该地址，请在构建前将
+`UV_PYTHON_INSTALL_MIRROR` 设置为兼容镜像的 base URL。
+
+```bash
+export UV_PYTHON_INSTALL_MIRROR="https://your-mirror.example/python-build-standalone"
+```
+
 ## 4. 统一构建脚本
 
 `scripts/build-all.sh` 是便捷入口，并不负责构建整个 monorepo。当前脚本支持 8 个
@@ -76,6 +85,12 @@ Linux-only 组件。
 时无需 `sudo`，首次安装系统依赖仍可能请求 `sudo`。使用 `--system`（或
 `--install-mode system`）切换到系统路径，脚本会暂存文件并可能调用 `sudo`。
 `--no-install` 只构建并暂存制品，不执行安装。
+
+安装组件文件前，脚本会集中收集并检查所有已选组件的 runtime contract。user mode
+若缺少系统 runtime package，会一次性列出缺失项和 package manager 安装命令，然后
+在安装任何组件文件前退出。system mode 会用一次事务安装可自动处理的原生 runtime
+package；若缺少 language runtime 或 platform capability，则在修改 package 前退出。
+需要 Node.js 的 system install 必须能从标准 system PATH 找到 Node.js 20 或更高版本。
 
 ```bash
 # Default six components, user install
@@ -105,6 +120,9 @@ Linux-only 组件。
 ./scripts/build-all.sh --non-interactive
 ./scripts/build-all.sh --help
 ```
+
+`--ignore-deps` 会同时跳过 dependency setup 和 runtime dependency verification。
+它只适用于已经准备好全部依赖的主机，调用者需要自行保证安装后的组件具备所需 runtime。
 
 `--component` 的合法名称为 `cosh`、`skills`、`sec-core`、`tokenless`、`ws-ckpt`、
 `memory`、`cosh-ng` 和 `sight`。脚本可能先在 `target/` 中生成构建结果，再执行安装，

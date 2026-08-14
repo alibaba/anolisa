@@ -196,6 +196,11 @@ sudo anolisa --install-mode system adopt sec-core
 ./scripts/build-all.sh --component sec-core
 ```
 
+安装文件前，源码构建入口会检查 Node.js 20 或更高版本、bubblewrap、GnuPG 和
+`jq`。user mode 会一次性列出缺少的系统 runtime package 和安装命令，然后退出；
+安装这些依赖后重新执行同一命令即可。已提前准备好依赖的主机可以用
+`--ignore-deps` 跳过检查。
+
 源码构建会把运行时和集成资源安装到用户目录，但不会在 ANOLISA 状态中注册
 组件。请使用已安装的集成脚本，不要继续执行 `anolisa adapter enable`。具体入口见
 [源码集成入口](../../docs/user-guide/zh/agent-security/agent-sec-core/QUICKSTART.md#源码集成入口)。

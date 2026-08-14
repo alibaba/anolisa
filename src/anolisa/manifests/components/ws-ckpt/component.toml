@@ -24,7 +24,7 @@ min_kernel = "5.4"
 [[component.dependencies]]
 name = "btrfs-progs"
 kind = "system-package"
-probe = "btrfs version"
+probe = "mkfs.btrfs --version"
 packages = { rpm = "btrfs-progs", deb = "btrfs-progs" }
 
 [[component.dependencies]]
