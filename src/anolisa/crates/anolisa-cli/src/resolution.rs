@@ -759,9 +759,7 @@ pub(crate) fn load_component_index(
             // still load (components simply appear as "no target info").
             let v1_url = component_index_url(&base_url);
             fetch_index_url(&cache, &v1_url).map_err(|err| ComponentIndexError::Fetch {
-                reason: format!(
-                    "failed to fetch component index (tried v2 then v1): {err}"
-                ),
+                reason: format!("failed to fetch component index (tried v2 then v1): {err}"),
             })?
         }
         Err(err) => return Err(err),
