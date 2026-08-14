@@ -387,9 +387,26 @@ impl Http2Stream {
             Some(serde_json::Value::Array(json_array))
         }
     }
+    /// Count complete SSE events in the response body.
+    ///
+    /// The count follows the HTTP/1 aggregator's event count semantics and
+    /// includes non-JSON events such as the [DONE] marker.
+    pub fn response_sse_event_count(&self) -> usize {
+        self.response_body_str()
+            .map(|body| SSEParser::parse_stream(&body).events.len())
+            .unwrap_or(0)
+    }
 
     /// Check if response content-type indicates SSE stream
     pub fn is_response_sse(&self) -> bool {
+        if let Some(headers) = self.decoded_response_headers.as_ref() {
+            if let Some((_, value)) = headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            {
+                return value.contains("text/event-stream");
+            }
+        }
         self.response_headers
             .as_ref()
             .map(|h| {
