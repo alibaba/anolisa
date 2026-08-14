@@ -498,10 +498,7 @@ impl StorageBackend for BtrfsLoopBackend {
             true
         };
         if needs_mount {
-            let loop_device = run_command("losetup", &["--find", "--show", &img_path_str])
-                .await
-                .context("Failed to setup loop device")?;
-            let loop_device = loop_device.trim().to_string();
+            let loop_device = attach_loop(&img_path_str).await?;
             if let Err(e) = run_command_checked("mount", &[&loop_device, &mount_path_str]).await {
                 // Mount failed after the loop device was attached; detach it so
                 // repeated failures don't leak/exhaust loop devices.
@@ -839,9 +836,8 @@ async fn try_relocate_active_legacy_mount(
     // Past rename: legacy is gone — we return Ok(()) regardless so the caller
     // uses `target`. If remount fails, bootstrap will handle it on this same run.
     let target_str = target.to_string_lossy().to_string();
-    match run_command("losetup", &["--find", "--show", &target_str]).await {
+    match attach_loop(&target_str).await {
         Ok(new_loop) => {
-            let new_loop = new_loop.trim().to_string();
             if let Err(e) = run_command_checked("mount", &[&new_loop, mount_path]).await {
                 let _ = run_command_checked("losetup", &["-d", &new_loop]).await;
                 warn!(
@@ -869,10 +865,9 @@ async fn try_relocate_active_legacy_mount(
 /// Called after `losetup -d` succeeded, so the original loop device is gone and we
 /// must allocate a fresh one via `losetup --find`.
 async fn remount_legacy(img: &str, mount_path: &str) -> anyhow::Result<()> {
-    let loop_dev = run_command("losetup", &["--find", "--show", img])
+    let loop_dev = attach_loop(img)
         .await
         .context("reattach legacy via losetup --find")?;
-    let loop_dev = loop_dev.trim().to_string();
     run_command_checked("mount", &[&loop_dev, mount_path])
         .await
         .context("remount legacy after relocation rollback")
@@ -1103,10 +1098,9 @@ async fn reconcile_img_size(
             run_command_checked("truncate", &["-s", &target.to_string(), img_path])
                 .await
                 .context("Failed to truncate image file")?;
-            let new_loop = run_command("losetup", &["--find", "--show", img_path])
+            let new_loop = attach_loop(img_path)
                 .await
                 .context("Failed to reattach loop device")?;
-            let new_loop = new_loop.trim().to_string();
             run_command_checked("mount", &[&new_loop, mount_path_str])
                 .await
                 .context("Failed to remount after image shrink")?;
@@ -1142,6 +1136,31 @@ async fn check_mount_busy(mount_path: &str) -> Option<String> {
     } else {
         Some(pids)
     }
+}
+
+/// Attach `img` to a free loop device, then enable direct-IO best-effort.
+///
+/// The two steps are deliberately separate: a combined
+/// `losetup --find --show --direct-io=on` reports a DIO failure through its
+/// exit code *after* the device is attached, which would fail bootstrap (and
+/// discard the freshly attached device name) on hosts where the kernel
+/// rejects DIO — tmpfs backing has no `direct_IO`, and backing devices with
+/// logical blocks larger than the loop's 512 (4Kn NVMe, 4096-sector LUKS2)
+/// fail the block-size check. DIO is a performance optimization, not a
+/// correctness requirement, so those hosts fall back to buffered mode.
+async fn attach_loop(img: &str) -> anyhow::Result<String> {
+    let dev = run_command("losetup", &["--find", "--show", img])
+        .await
+        .context("Failed to setup loop device")?;
+    let dev = dev.trim().to_string();
+    if let Err(e) = run_command_checked("losetup", &["--direct-io=on", &dev]).await {
+        warn!(
+            "Could not enable direct-io on {} for {}: {:#}. Continuing in buffered mode; \
+             checkpoint latency will be higher.",
+            dev, img, e
+        );
+    }
+    Ok(dev)
 }
 
 /// Parse `losetup -j <img>` and return the backing loop device.
