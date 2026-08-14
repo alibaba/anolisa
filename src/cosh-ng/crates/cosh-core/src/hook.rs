@@ -63,12 +63,20 @@ pub struct HookOutput {
     pub stop_reason: Option<String>,
     #[serde(alias = "suppressOutput")]
     pub suppress_output: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
     pub decision: Option<String>,
     pub reason: Option<String>,
     #[serde(alias = "systemMessage")]
     pub system_message: Option<String>,
     #[serde(alias = "hookSpecificOutput")]
     pub hook_specific_output: Option<Value>,
+}
+
+fn deserialize_present_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
 }
 
 struct ObjectOnlyHookOutput(HookOutput);
@@ -1537,10 +1545,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_hook_output_accepts_null_decision() {
+    fn parse_hook_output_rejects_null_decision() {
         let json = r#"{"decision":null}"#;
-        let out = decode_hook_output(json.as_bytes()).unwrap();
-        assert_eq!(out.decision, None);
+        assert!(decode_hook_output(json.as_bytes()).is_none());
     }
 
     #[test]
@@ -1667,6 +1674,7 @@ mod tests {
     async fn extension_errors_remain_fail_closed() {
         for (command, expected) in [
             ("printf 'not-json'", HookFailureKind::InvalidJson),
+            ("printf '{\"decision\":null}'", HookFailureKind::InvalidJson),
             ("exit 7", HookFailureKind::NonZero),
         ] {
             let mut system = HookSystem::from_config(&HooksConfig::default());
@@ -1961,6 +1969,7 @@ mod tests {
         let cases = [
             ("exit 7", HookFailureKind::NonZero),
             ("printf 'not-json'", HookFailureKind::InvalidJson),
+            ("printf '{\"decision\":null}'", HookFailureKind::InvalidJson),
             ("true", HookFailureKind::EmptyOutput),
             (
                 "printf 'secret-output' >&2; exit 7",
