@@ -1358,17 +1358,16 @@ cosh = "site-copilot"
         // Schema v1 and v2 are accepted; anything else is rejected.
         // v1 is accepted because `targets` defaults to an empty vec and
         // the non-empty-target check is skipped for schema v1.
-        for actual in [99] {
-            let source = format!("schema_version = {actual}");
-            let err = ComponentIndex::from_toml_str(&source, "components.toml")
-                .expect_err("unsupported schema");
-            assert!(matches!(
-                err,
-                ComponentIndexError::UnsupportedSchema {
-                    actual: rejected,
-                    ..
-                } if rejected == actual
-            ));
-        }
+        let actual = 99;
+        let source = format!("schema_version = {actual}");
+        let err = ComponentIndex::from_toml_str(&source, "components.toml")
+            .expect_err("unsupported schema");
+        assert!(matches!(
+            err,
+            ComponentIndexError::UnsupportedSchema {
+                actual: rejected,
+                ..
+            } if rejected == actual
+        ));
     }
 }
