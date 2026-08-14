@@ -173,10 +173,20 @@ mod tests {
     #[test]
     fn single_line_flag_is_parsed() {
         let rules = builtin_rules().unwrap();
-        // INJ-015 is the only rule using single_line: true (multi-line
-        // false-positive fix); make sure the flag survives parsing.
+        // `single_line: true` is the common case in the vendored ATR packs,
+        // not a one-off: those rules pair it with the `[\s\S]` idiom to span
+        // newlines while keeping `.` line-bounded.  Assert both origins keep
+        // the flag through parsing, since dropping it silently changes what
+        // every such rule matches.
         let single_line: Vec<_> = rules.iter().filter(|r| r.single_line).collect();
-        assert!(!single_line.is_empty());
+        assert!(
+            single_line.iter().any(|r| r.id == "INJ-015"),
+            "builtin single_line rule lost its flag"
+        );
+        assert!(
+            single_line.iter().any(|r| r.id.starts_with("ATR-")),
+            "ATR single_line rules lost their flag"
+        );
     }
 
     #[test]

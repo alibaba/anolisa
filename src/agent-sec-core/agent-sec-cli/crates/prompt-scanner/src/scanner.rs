@@ -1,6 +1,7 @@
 //! Core scanner — orchestrates the multi-layer detection pipeline.
 
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use serde_json::{json, Value};
@@ -75,6 +76,13 @@ pub struct PromptScanner {
     preprocessor: Preprocessor,
     detectors: Vec<Box<dyn DetectionLayer>>,
     skipped_detectors: Vec<String>,
+    /// Wall time spent in [`PromptScanner::new`], dominated by compiling the
+    /// rule set's regexes.  Reported so callers can see the cold-start cost
+    /// instead of it hiding outside every measured scan.
+    init_ms: f64,
+    /// Whether [`Self::init_ms`] has already been charged to a scan result.
+    /// Interior mutability keeps `scan` on `&self`.
+    init_charged: AtomicBool,
 }
 
 impl PromptScanner {
@@ -92,6 +100,7 @@ impl PromptScanner {
     /// - [`ScannerError::LayerNotAvailable`] when a mandatory layer's
     ///   dependencies are missing.
     pub fn new(config: ScanConfig) -> Result<Self, ScannerError> {
+        let t_init = Instant::now();
         let preprocessor = Preprocessor::new(config.detect_encoding);
         let mut detectors: Vec<Box<dyn DetectionLayer>> = Vec::new();
         let mut skipped_detectors: Vec<String> = Vec::new();
@@ -122,6 +131,8 @@ impl PromptScanner {
             preprocessor,
             detectors,
             skipped_detectors,
+            init_ms: t_init.elapsed().as_secs_f64() * 1000.0,
+            init_charged: AtomicBool::new(false),
         })
     }
 
@@ -294,6 +305,13 @@ impl PromptScanner {
             threat_type,
             layer_results,
             latency_ms: t0.elapsed().as_secs_f64() * 1000.0,
+            // Charge the one-time construction cost to whichever scan gets
+            // here first; every later scan on this instance reports 0.0.
+            engine_init_ms: if self.init_charged.swap(true, Ordering::Relaxed) {
+                0.0
+            } else {
+                self.init_ms
+            },
             metadata,
             verdict,
         })
@@ -348,6 +366,35 @@ mod tests {
     use crate::models::qwen3_guard::{Qwen3GuardClassifier, MODEL_QWEN3_GUARD};
     use model_service::{GenerateRequest, ModelClient, ModelOptions};
     use serde_json::json;
+
+    #[test]
+    fn engine_init_cost_is_charged_to_the_first_scan_only() {
+        // Construction compiles the whole rule set, so that cost is real
+        // user-visible latency and must land in `elapsed_ms`.  It is a
+        // one-time per-instance cost though: charging it to every scan would
+        // inflate long-lived callers (daemon) rather than inform them, so
+        // charge it exactly once, to the scan that first observes it.
+        let scanner = PromptScanner::with_mode(ScanMode::Fast).expect("fast mode builds");
+
+        let first = scanner.scan("hello there", None).unwrap().to_json_value();
+        let init = first["engine_init_ms"].as_f64().expect("engine_init_ms");
+        let scan = first["scan_ms"].as_f64().expect("scan_ms");
+        assert_eq!(
+            first["elapsed_ms"].as_f64().unwrap(),
+            crate::result::round_py(init + scan, 2)
+        );
+
+        let second = scanner.scan("hello again", None).unwrap().to_json_value();
+        assert_eq!(
+            second["engine_init_ms"].as_f64().unwrap(),
+            0.0,
+            "the one-time init cost must not be charged twice"
+        );
+        assert_eq!(
+            second["elapsed_ms"].as_f64().unwrap(),
+            second["scan_ms"].as_f64().unwrap()
+        );
+    }
 
     /// Client serving canned chat (L2) and generate (L4) replies.
     struct FakeClient {
@@ -405,6 +452,8 @@ mod tests {
             preprocessor: Preprocessor::new(true),
             detectors: vec![Box::new(RuleEngine::new().unwrap()), Box::new(ml)],
             skipped_detectors: vec![],
+            init_ms: 0.0,
+            init_charged: AtomicBool::new(false),
         }
     }
 
@@ -422,6 +471,8 @@ mod tests {
             preprocessor: Preprocessor::new(true),
             detectors: vec![Box::new(l4)],
             skipped_detectors: vec![],
+            init_ms: 0.0,
+            init_charged: AtomicBool::new(false),
         }
     }
 
@@ -651,6 +702,8 @@ mod tests {
             preprocessor: Preprocessor::new(true),
             detectors: vec![Box::new(RuleEngine::new().unwrap()), Box::new(ml)],
             skipped_detectors: vec![],
+            init_ms: 0.0,
+            init_charged: AtomicBool::new(false),
         };
         assert!(matches!(
             scanner.scan("hello", None),

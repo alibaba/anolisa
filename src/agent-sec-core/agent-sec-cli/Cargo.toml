@@ -1,6 +1,14 @@
 [workspace]
 members = ["crates/model-service", "crates/prompt-scanner"]
 
+[profile.dev.package]
+# Rule-set startup is dominated by runtime regex compilation; unoptimised,
+# these make a dev-profile scan ~7x slower.
+aho-corasick.opt-level = 3
+regex.opt-level = 3
+regex-automata.opt-level = 3
+regex-syntax.opt-level = 3
+
 [workspace.dependencies]
 base64 = "0.22"
 log = "0.4"

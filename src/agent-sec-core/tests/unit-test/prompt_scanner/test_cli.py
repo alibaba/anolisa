@@ -113,6 +113,44 @@ def test_print_text_renders_verdict_and_summary():
     assert "INJ-011" in rendered
 
 
+def test_print_text_breaks_out_engine_init_cost():
+    """Engine construction dominates a cold scan, so the text view must
+    attribute it instead of showing only the total."""
+    buf = StringIO()
+    with patch("agent_sec_cli.prompt_scanner.cli.typer.echo", new=buf.write):
+        _print_text(
+            {
+                "verdict": "pass",
+                "summary": "No threats detected",
+                "elapsed_ms": 402.88,
+                "engine_init_ms": 402.84,
+                "scan_ms": 0.04,
+            }
+        )
+    rendered = buf.getvalue()
+    assert "402.88" in rendered
+    assert "engine init 402.84" in rendered
+    assert "scan 0.04" in rendered
+
+
+def test_print_text_omits_engine_init_when_already_charged():
+    """A warm scanner reports no init cost; the breakdown then adds noise."""
+    buf = StringIO()
+    with patch("agent_sec_cli.prompt_scanner.cli.typer.echo", new=buf.write):
+        _print_text(
+            {
+                "verdict": "pass",
+                "summary": "No threats detected",
+                "elapsed_ms": 0.04,
+                "engine_init_ms": 0.0,
+                "scan_ms": 0.04,
+            }
+        )
+    rendered = buf.getvalue()
+    assert "0.04 ms" in rendered
+    assert "engine init" not in rendered
+
+
 def test_print_result_text_survives_none_data():
     """A malformed result with ``data=None`` must not crash text rendering."""
     malformed = ActionResult(success=False, data=None, exit_code=1)

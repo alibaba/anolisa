@@ -74,7 +74,18 @@ def _format_text(d: dict[str, Any]) -> str:
             evidence = f.get("evidence")
             if evidence:
                 lines.append(f"        evidence: {evidence[:80]!r}")
-    lines.append(f"    Elapsed : {d.get('elapsed_ms', 0)} ms")
+    # `elapsed_ms` is the total; break it out when engine construction paid a
+    # cold-start cost, so a slow invocation points at the rule-set compile
+    # rather than looking like a slow scan.
+    elapsed = d.get("elapsed_ms", 0)
+    engine_init = d.get("engine_init_ms") or 0
+    if engine_init:
+        lines.append(
+            f"    Elapsed : {elapsed} ms "
+            f"(engine init {engine_init}, scan {d.get('scan_ms', 0)})"
+        )
+    else:
+        lines.append(f"    Elapsed : {elapsed} ms")
     return "\n".join(lines)
 
 

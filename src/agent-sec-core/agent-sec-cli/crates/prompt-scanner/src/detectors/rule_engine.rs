@@ -5,6 +5,7 @@
 //! input (for characters normalisation strips) and any decoded variants,
 //! collecting one hit per rule at most.
 
+use std::borrow::Cow;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -17,6 +18,35 @@ use crate::rules::{builtin_rules, Rule};
 
 /// Max characters of a match kept as evidence.
 const MAX_EVIDENCE_CHARS: usize = 200;
+
+/// The "any character including newline" idiom upstream rule packs use.
+const ANY_CHAR_CLASS: &str = r"[\s\S]";
+
+/// Equivalent spelling that is cheap to compile: a dot with DOTALL opted in
+/// for just that dot.
+const ANY_CHAR_INLINE_DOT: &str = r"(?s:.)";
+
+/// Rewrite the `[\s\S]` idiom to the equivalent `(?s:.)`.
+///
+/// Both mean "any character, newline included", but `[\s\S]` is a *bracketed*
+/// class whose union spans the whole Unicode range, which forces
+/// regex-syntax to case-fold that entire range under `case_insensitive` —
+/// roughly 6 ms per occurrence against ~1 ms for `(?s:.)`.  With a few
+/// hundred patterns that difference dominates process start-up.
+///
+/// The rewrite is deliberately *not* conditional on the rule's `single_line`
+/// flag: `(?s:.)` sets DOTALL locally, so it means the same thing whichever
+/// way the surrounding `dot_matches_new_line` is configured.  Rewriting to a
+/// bare `.` instead would be wrong — most rules using this idiom are
+/// `single_line: true`, where `.` stops at newlines and the detection is
+/// silently lost.
+fn normalize_any_char_class(pattern: &str) -> Cow<'_, str> {
+    if pattern.contains(ANY_CHAR_CLASS) {
+        Cow::Owned(pattern.replace(ANY_CHAR_CLASS, ANY_CHAR_INLINE_DOT))
+    } else {
+        Cow::Borrowed(pattern)
+    }
+}
 
 /// Severity → L1 risk score mapping.
 fn severity_score(severity: Severity) -> f64 {
@@ -63,7 +93,7 @@ fn compile_rule(rule: Rule) -> Result<CompiledRule, ScannerError> {
         .map(|p| {
             // Case-insensitive always; '.' matches newlines (DOTALL)
             // unless the rule opts into single-line matching.
-            RegexBuilder::new(p)
+            RegexBuilder::new(&normalize_any_char_class(p))
                 .case_insensitive(true)
                 .dot_matches_new_line(!rule.single_line)
                 .build()
@@ -203,6 +233,63 @@ mod tests {
         let a = engine();
         let b = engine();
         assert!(std::ptr::eq(a.rules, b.rules));
+    }
+
+    #[test]
+    fn any_char_class_is_normalized_to_an_inline_dotall_dot() {
+        assert_eq!(normalize_any_char_class(r"a[\s\S]{0,5}b"), r"a(?s:.){0,5}b");
+        // Every occurrence, and nothing else.
+        assert_eq!(normalize_any_char_class(r"[\s\S]x[\s\S]"), r"(?s:.)x(?s:.)");
+        // Patterns without it are returned untouched (and unallocated).
+        assert_eq!(normalize_any_char_class(r"\s+plain\S"), r"\s+plain\S");
+    }
+
+    #[test]
+    fn normalized_any_char_still_crosses_newlines_when_dotall_is_off() {
+        // Most ATR rules set `single_line: true` (DOTALL off) yet use
+        // `[\s\S]` precisely because they must still span newlines.
+        // `(?s:.)` re-enables DOTALL for that one dot, so the rewrite is
+        // independent of the surrounding flag.  A bare `.` is NOT — this
+        // test keeps that trap documented and enforced.
+        let text = "SECURITY BREACH\nplease wire $500";
+        let raw = r"(?i)SECURITY\s+BREACH[\s\S]{0,80}wire";
+
+        let normalized = RegexBuilder::new(&normalize_any_char_class(raw))
+            .case_insensitive(true)
+            .dot_matches_new_line(false)
+            .build()
+            .unwrap();
+        assert!(
+            normalized.is_match(text),
+            "(?s:.) must still span the newline"
+        );
+
+        let naive = RegexBuilder::new(&raw.replace(r"[\s\S]", "."))
+            .case_insensitive(true)
+            .dot_matches_new_line(false)
+            .build()
+            .unwrap();
+        assert!(
+            !naive.is_match(text),
+            "a bare '.' cannot span newlines here - rewriting to it loses detections"
+        );
+    }
+
+    #[test]
+    fn no_compiled_pattern_keeps_a_full_range_bracket_class() {
+        // Case-folding a bracketed class that spans all of Unicode costs
+        // ~6 ms per occurrence versus ~1 ms for the equivalent `(?s:.)`.
+        // Across the whole rule set that dominates process start-up, so
+        // gate it: no compiled pattern may carry the expensive spelling.
+        for rule in shared_rules().expect("built-in rules must compile") {
+            for pattern in &rule.patterns {
+                assert!(
+                    !pattern.as_str().contains(ANY_CHAR_CLASS),
+                    "rule {} still compiles the expensive {ANY_CHAR_CLASS} spelling",
+                    rule.id
+                );
+            }
+        }
     }
 
     #[test]

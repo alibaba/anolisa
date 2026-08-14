@@ -111,7 +111,15 @@ pub struct ScanResult {
     pub is_threat: bool,
     pub threat_type: ThreatType,
     pub layer_results: Vec<LayerResult>,
+    /// Detection-pipeline duration, published as `scan_ms`.
     pub latency_ms: f64,
+    /// One-time engine construction cost (dominated by rule-set regex
+    /// compilation) charged to this scan, published as `engine_init_ms`.
+    ///
+    /// `0.0` when an earlier scan on the same scanner instance already
+    /// absorbed it, so summing `engine_init_ms` across a scanner's results
+    /// never double-counts the cost.
+    pub engine_init_ms: f64,
     /// Free-form metadata (original_length, source, decoded_variants, ...).
     pub metadata: Map<String, Value>,
     pub verdict: Verdict,
@@ -170,7 +178,18 @@ impl ScanResult {
         out.insert("findings".into(), Value::Array(findings));
         out.insert("layer_results".into(), Value::Array(layer_summary));
         out.insert("engine_version".into(), json!(crate::ENGINE_VERSION));
-        out.insert("elapsed_ms".into(), json!(round_py(self.latency_ms, 2)));
+        // Timing: `elapsed_ms` is the total, and the two parts that make it
+        // up follow it.  The published parts are rounded first and the total
+        // derived from them, so the wire values always satisfy
+        // `elapsed_ms == engine_init_ms + scan_ms` exactly.
+        let engine_init_ms = round_py(self.engine_init_ms, 2);
+        let scan_ms = round_py(self.latency_ms, 2);
+        out.insert(
+            "elapsed_ms".into(),
+            json!(round_py(engine_init_ms + scan_ms, 2)),
+        );
+        out.insert("engine_init_ms".into(), json!(engine_init_ms));
+        out.insert("scan_ms".into(), json!(scan_ms));
         // Input-size accounting: always present so consumers can detect
         // partial scans without checking for key presence.  Defaults reflect
         // a non-truncated scan (e.g. results built by hand in tests).
@@ -370,6 +389,7 @@ mod tests {
                 latency_ms: 1.234,
             }],
             latency_ms: 2.345,
+            engine_init_ms: 0.0,
             metadata: Map::new(),
             verdict: Verdict::Deny,
         }
@@ -404,6 +424,21 @@ mod tests {
     }
 
     #[test]
+    fn elapsed_ms_is_the_sum_of_engine_init_and_scan() {
+        // `elapsed_ms` is documented as the *total* cost. Engine construction
+        // (rule-set regex compilation) dominates it on a cold process, so the
+        // total must be decomposable into its two reported parts rather than
+        // silently reporting the pipeline only.
+        let value = threat_result().to_json_value();
+        let init = value["engine_init_ms"]
+            .as_f64()
+            .expect("engine_init_ms must be present");
+        let scan = value["scan_ms"].as_f64().expect("scan_ms must be present");
+        let elapsed = value["elapsed_ms"].as_f64().expect("elapsed_ms");
+        assert_eq!(elapsed, round_py(init + scan, 2));
+    }
+
+    #[test]
     fn json_snapshot_pass() {
         let result = ScanResult {
             is_threat: false,
@@ -416,6 +451,7 @@ mod tests {
                 latency_ms: 0.5,
             }],
             latency_ms: 0.8,
+            engine_init_ms: 0.0,
             metadata: Map::new(),
             verdict: Verdict::Pass,
         };
@@ -439,6 +475,7 @@ mod tests {
             threat_type: ThreatType::NotScanned,
             layer_results: vec![],
             latency_ms: 0.1,
+            engine_init_ms: 0.0,
             metadata,
             verdict: Verdict::Pass,
         };
@@ -484,7 +521,8 @@ mod tests {
         };
         // Top-level keys in logical order: schema_version, ok, verdict,
         // risk_level, threat_type, confidence, summary, findings,
-        // layer_results, engine_version, elapsed_ms.
+        // layer_results, engine_version, elapsed_ms, engine_init_ms,
+        // scan_ms.
         assert!(pos("schema_version") < pos("ok"));
         assert!(pos("ok") < pos("verdict"));
         assert!(pos("verdict") < pos("risk_level"));
@@ -495,6 +533,9 @@ mod tests {
         assert!(pos("findings") < pos("layer_results"));
         assert!(pos("layer_results") < pos("engine_version"));
         assert!(pos("engine_version") < pos("elapsed_ms"));
+        // The breakdown follows the total it decomposes.
+        assert!(pos("elapsed_ms") < pos("engine_init_ms"));
+        assert!(pos("engine_init_ms") < pos("scan_ms"));
         // Keys within a finding, in logical order: rule_id, title, message,
         // evidence, category.
         assert!(pos("rule_id") < pos("title"));
@@ -543,6 +584,7 @@ mod tests {
                 },
             ],
             latency_ms: 1453.89,
+            engine_init_ms: 0.0,
             metadata: Map::new(),
             verdict: Verdict::Deny,
         };
@@ -596,6 +638,7 @@ mod tests {
             threat_type: ThreatType::Benign,
             layer_results: vec![],
             latency_ms: 0.1,
+            engine_init_ms: 0.0,
             metadata,
             verdict: Verdict::Pass,
         };
@@ -614,6 +657,7 @@ mod tests {
             threat_type: ThreatType::Benign,
             layer_results: vec![],
             latency_ms: 0.1,
+            engine_init_ms: 0.0,
             metadata: Map::new(),
             verdict: Verdict::Pass,
         };
