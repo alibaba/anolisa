@@ -44,7 +44,10 @@ pub struct LogsArgs {
     #[arg(long, value_name = "COMP")]
     pub component: Option<String>,
     /// Minimum severity: `debug` | `info` | `warn` | `error`.
-    #[arg(long, value_name = "LEVEL")]
+    // Aliased rather than duplicated: log CLIs commonly name this filter
+    // "level", and one field keeps both spellings on the same validation and
+    // filtering path. Visible so clap advertises `[aliases: --level]` itself.
+    #[arg(long, visible_alias = "level", value_name = "LEVEL")]
     pub severity: Option<String>,
     /// Lexicographic ISO8601 lower bound on `started_at`.
     #[arg(long, value_name = "ISO")]
@@ -155,7 +158,9 @@ fn parse_severity(raw: &str) -> Result<Severity, CliError> {
         "error" => Ok(Severity::Error),
         other => Err(CliError::InvalidArgument {
             command: COMMAND.to_string(),
-            reason: format!("--severity expects one of debug|info|warn|error, got '{other}'"),
+            reason: format!(
+                "--severity/--level expects one of debug|info|warn|error, got '{other}'"
+            ),
         }),
     }
 }
@@ -246,6 +251,7 @@ fn truncate(value: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use anolisa_core::{CentralLog, LogFilter};
+    use clap::CommandFactory;
 
     fn default_args() -> LogsArgs {
         LogsArgs {
@@ -308,6 +314,40 @@ mod tests {
         assert_eq!(parse_severity("warning").unwrap(), Severity::Warn);
         assert_eq!(parse_severity("error").unwrap(), Severity::Error);
         assert!(parse_severity("loud").is_err());
+    }
+
+    #[test]
+    fn level_alias_parses_like_severity() {
+        let severity = LogsArgs::try_parse_from(["logs", "--severity", "warn"]).expect("parse");
+        let level = LogsArgs::try_parse_from(["logs", "--level", "warn"]).expect("parse");
+
+        assert_eq!(severity.severity.as_deref(), Some("warn"));
+        assert_eq!(level.severity.as_deref(), Some("warn"));
+        assert_eq!(
+            build_filter(&severity).expect("filter").severity_at_least,
+            build_filter(&level).expect("filter").severity_at_least
+        );
+    }
+
+    #[test]
+    fn level_alias_rejects_unknown_severity() {
+        let args = LogsArgs::try_parse_from(["logs", "--level", "loud"]).expect("parse");
+
+        let err = build_filter(&args).expect_err("unknown severity should fail");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        // Names both spellings so the message stays actionable for whichever
+        // one the user typed.
+        assert!(err.reason().contains("--severity/--level"));
+    }
+
+    #[test]
+    fn help_advertises_level_alias() {
+        let mut cmd = LogsArgs::command();
+        let help = cmd.render_help().to_string();
+        assert!(
+            help.contains("--severity <LEVEL>") && help.contains("--level"),
+            "help must relate --level to --severity, got:\n{help}"
+        );
     }
 
     #[test]

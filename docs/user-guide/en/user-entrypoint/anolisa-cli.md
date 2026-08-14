@@ -181,6 +181,8 @@ anolisa logs <component> --severity warn
 anolisa bug
 ```
 
+`--level` is an alias for `--severity`.
+
 ---
 
 ## Recovery Behavior

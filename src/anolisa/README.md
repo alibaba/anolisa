@@ -33,7 +33,7 @@ anolisa update all
 | `upgrade` | Apply an RPM/system-image upgrade plan (system scope) |
 | `status` | Show component health |
 | `doctor` | Diagnose issues and suggest fixes |
-| `logs` | Query component logs |
+| `logs` | Query component logs (`--severity`, alias `--level`) |
 | `restart` | Restart a component service |
 | `repair` | Reconcile state after manual RPM changes |
 | `adopt` | Record an existing system RPM as adopted without default removal authority |

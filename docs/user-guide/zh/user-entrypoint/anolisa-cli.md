@@ -172,6 +172,8 @@ anolisa logs <component> --severity warn
 anolisa bug
 ```
 
+`--level` 是 `--severity` 的别名。
+
 ---
 
 ## 恢复行为
