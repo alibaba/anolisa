@@ -694,7 +694,6 @@ pub fn raw_index_v2_url(base_url: &str) -> String {
 ///
 /// Released clients continue reading this path, so publishers must preserve its
 /// schema v1 contents when publishing later component-index generations.
-#[cfg(test)]
 pub fn component_index_url(base_url: &str) -> String {
     format!("{}/components.toml", raw_root(base_url))
 }

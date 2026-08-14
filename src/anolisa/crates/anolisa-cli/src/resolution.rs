@@ -14,7 +14,7 @@ use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::repo_config::{BackendConfig, HostVars, RepoConfig, component_index_v2_url};
+use crate::repo_config::{BackendConfig, HostVars, RepoConfig, component_index_url, component_index_v2_url};
 
 /// On-disk schema version for repo-side `components-v2.toml`.
 pub(crate) const COMPONENT_INDEX_SCHEMA_VERSION: u32 = 2;
@@ -54,6 +54,7 @@ pub(crate) struct ComponentIndexEntry {
     #[serde(default)]
     pub(crate) summary: Option<String>,
     /// Supported host OS/architecture combinations.
+    #[serde(default)]
     pub(crate) targets: Vec<ComponentTarget>,
     /// Backend-native package names for this component.
     ///
@@ -473,7 +474,11 @@ impl ComponentIndex {
     }
 
     fn validate(&self) -> Result<(), ComponentIndexError> {
-        if self.schema_version != COMPONENT_INDEX_SCHEMA_VERSION {
+        // Accept schema v1 and v2: v1 rows simply lack `targets`, which
+        // defaults to an empty vec via `#[serde(default)]`. This lets the
+        // v2 parser gracefully load v1 `components.toml` when the v2 file
+        // has not been published to the mirror yet.
+        if !matches!(self.schema_version, 1 | 2) {
             return Err(ComponentIndexError::UnsupportedSchema {
                 actual: self.schema_version,
                 expected: COMPONENT_INDEX_SCHEMA_VERSION,
@@ -492,7 +497,9 @@ impl ComponentIndex {
                     reason: format!("duplicate component '{name}'"),
                 });
             }
-            if entry.targets.is_empty() {
+            // v1 indexes predate the `targets` field; skip the non-empty
+            // check for schema v1 (targets defaults to empty via serde).
+            if self.schema_version >= 2 && entry.targets.is_empty() {
                 return Err(ComponentIndexError::Invalid {
                     reason: format!("component '{name}' must declare at least one target"),
                 });
@@ -741,18 +748,43 @@ pub(crate) fn load_component_index(
     let url = component_index_v2_url(&base_url);
 
     let cache = DownloadCache::new(layout.cache_dir.clone());
+    let downloaded = match fetch_index_url(&cache, &url) {
+        Ok(art) => art,
+        Err(ComponentIndexError::Fetch { ref reason })
+            if reason.contains("http status 404") =>
+        {
+            // v2 not published yet — fall back to v1 components.toml.
+            // The v2 parser accepts v1 rows because `targets` has
+            // `#[serde(default)]`, so legacy indexes without targets
+            // still load (components simply appear as "no target info").
+            let v1_url = component_index_url(&base_url);
+            fetch_index_url(&cache, &v1_url).map_err(|err| ComponentIndexError::Fetch {
+                reason: format!(
+                    "failed to fetch component index (tried v2 then v1): {err}"
+                ),
+            })?
+        }
+        Err(err) => return Err(err),
+    };
+    ComponentIndex::load(&downloaded.cached_path)
+}
+
+/// Fetch a component index TOML from `url` into `cache`.
+fn fetch_index_url(
+    cache: &DownloadCache,
+    url: &str,
+) -> Result<anolisa_core::download::DownloadedArtifact, ComponentIndexError> {
     #[cfg(test)]
     if !url.starts_with("file://") {
         return Err(ComponentIndexError::Fetch {
             reason: format!("test mode: refusing non-file URL {url}"),
         });
     }
-    let downloaded = cache
-        .fetch(&url, None)
+    cache
+        .fetch(url, None)
         .map_err(|err| ComponentIndexError::Fetch {
             reason: format!("failed to fetch {url}: {err}"),
-        })?;
-    ComponentIndex::load(&downloaded.cached_path)
+        })
 }
 
 /// Best-effort load of repo-side `components-v2.toml`.
@@ -1325,7 +1357,10 @@ cosh = "site-copilot"
 
     #[test]
     fn unsupported_schema_is_rejected() {
-        for actual in [1, 99] {
+        // Schema v1 and v2 are accepted; anything else is rejected.
+        // v1 is accepted because `targets` defaults to an empty vec and
+        // the non-empty-target check is skipped for schema v1.
+        for actual in [99] {
             let source = format!("schema_version = {actual}");
             let err = ComponentIndex::from_toml_str(&source, "components.toml")
                 .expect_err("unsupported schema");
