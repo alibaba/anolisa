@@ -428,6 +428,15 @@ mod tests {
     use std::fs;
     use std::io::{Seek, SeekFrom};
 
+    #[cfg(target_os = "linux")]
+    use std::os::unix::process::ExitStatusExt;
+    #[cfg(target_os = "linux")]
+    use std::process::{Command, Stdio};
+    #[cfg(target_os = "linux")]
+    use std::thread;
+    #[cfg(target_os = "linux")]
+    use std::time::{Duration, Instant};
+
     #[cfg(unix)]
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -455,6 +464,72 @@ mod tests {
             .unwrap()
             .prepare_write(parent, name, false)
             .unwrap()
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn sigkill_before_commit_keeps_existing_target_complete() {
+        const CHILD_TARGET_ENV: &str = "COSH_ATOMIC_SIGKILL_CHILD_TARGET";
+        const CHILD_READY_ENV: &str = "COSH_ATOMIC_SIGKILL_CHILD_READY";
+        const TEST_NAME: &str =
+            "tool::atomic_file::tests::sigkill_before_commit_keeps_existing_target_complete";
+
+        if let Some(target) = std::env::var_os(CHILD_TARGET_ENV) {
+            let target = PathBuf::from(target);
+            let ready = PathBuf::from(
+                std::env::var_os(CHILD_READY_ENV).expect("child ready path is configured"),
+            );
+            let write_target = prepare_test_target(&target);
+
+            let _ = replace_with_hooks(
+                &write_target,
+                b"complete replacement",
+                None,
+                |_, _| Ok(()),
+                |_, _| {
+                    fs::write(&ready, b"ready")?;
+                    loop {
+                        thread::park();
+                    }
+                },
+                |_| Ok(()),
+            );
+            unreachable!("the parent must kill the child at the pre-commit barrier");
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("config.toml");
+        let ready = directory.path().join("pre-commit-ready");
+        fs::write(&target, b"complete original").unwrap();
+
+        let mut child = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([TEST_NAME, "--exact", "--nocapture"])
+            .env(CHILD_TARGET_ENV, &target)
+            .env(CHILD_READY_ENV, &ready)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn atomic replacement child");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            if let Some(status) = child.try_wait().expect("poll atomic replacement child") {
+                panic!("atomic replacement child exited before the barrier: {status}");
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("atomic replacement child did not reach the pre-commit barrier");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        child.kill().expect("send SIGKILL to replacement child");
+        let status = child.wait().expect("wait for replacement child");
+
+        assert_eq!(status.signal(), Some(9), "child status: {status}");
+        assert_eq!(fs::read(&target).unwrap(), b"complete original");
     }
 
     #[test]
