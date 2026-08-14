@@ -29,7 +29,10 @@ use crate::config::BatchConfig;
 pub use events::TraceEventDetail;
 pub use pending::{PendingCallInfo, PendingOrigin, SseEnrichment};
 pub use session::{SavingsSessionSummary, SessionSummary, ToolCallTurnInfo, TraceSummary};
-pub use stats::{AgentTokenSummary, ModelTimeseriesBucket, TimeseriesBucket};
+pub use stats::{
+    AgentTokenSummary, LatencyMetricsSummary, MetricPercentiles, ModelTimeseriesBucket,
+    TimeseriesBucket,
+};
 
 /// SQLite-backed GenAI event storage
 pub struct GenAISqliteStore {

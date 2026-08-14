@@ -499,6 +499,15 @@ impl GenAISqliteStore {
                         call.metadata.get("call_kind").map(|s| s.as_str()).unwrap_or("main"),
                     ],
                 )?;
+                conn.execute(
+                    "UPDATE genai_events SET first_output_timestamp_ns = ?1 WHERE call_id = ?2",
+                    params![
+                        call.metadata
+                            .get("first_output_timestamp_ns")
+                            .and_then(|value| value.parse::<i64>().ok()),
+                        call.call_id
+                    ],
+                )?;
             }
             GenAISemanticEvent::ToolUse(tool) => {
                 conn.execute(

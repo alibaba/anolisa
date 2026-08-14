@@ -213,6 +213,7 @@ fn row_to_record(row: &rusqlite::Row) -> Result<HttpRecord> {
         response_headers,
         response_body,
         duration_ns: duration_ns as u64,
+        first_output_timestamp_ns: None,
         is_sse: is_sse_int != 0,
         sse_event_count: sse_event_count as usize,
     })
@@ -247,6 +248,7 @@ mod tests {
             response_headers: r#"{"content-type":"application/json"}"#.to_string(),
             response_body: Some(r#"{"choices":[]}"#.to_string()),
             duration_ns: 500000000,
+            first_output_timestamp_ns: None,
             is_sse: false,
             sse_event_count: 0,
         };
@@ -286,6 +288,7 @@ mod tests {
             response_headers: "{}".to_string(),
             response_body: None,
             duration_ns: 0,
+            first_output_timestamp_ns: None,
             is_sse: true,
             sse_event_count: 10,
         };
@@ -323,6 +326,7 @@ mod tests {
                 response_headers: "{}".to_string(),
                 response_body: None,
                 duration_ns: 0,
+                first_output_timestamp_ns: None,
                 is_sse: false,
                 sse_event_count: 0,
             };

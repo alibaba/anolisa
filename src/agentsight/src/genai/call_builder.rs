@@ -272,6 +272,12 @@ impl GenAIBuilder {
                 meta.insert("path".to_string(), http.path.clone());
                 meta.insert("status_code".to_string(), http.status_code.to_string());
                 meta.insert("is_sse".to_string(), http.is_sse.to_string());
+                if let Some(timestamp_ns) = http.first_output_timestamp_ns {
+                    meta.insert(
+                        "first_output_timestamp_ns".to_string(),
+                        timestamp_ns.to_string(),
+                    );
+                }
                 meta.insert(
                     "sse_event_count".to_string(),
                     http.sse_event_count.to_string(),
@@ -804,6 +810,7 @@ mod tests {
             response_headers: "{}".to_string(),
             response_body,
             duration_ns: 1_000_000,
+            first_output_timestamp_ns: None,
             is_sse: false,
             sse_event_count: 0,
         }
@@ -1691,6 +1698,53 @@ mod tests {
         let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
         assert!(call.request.messages.is_empty());
         assert!(!call.request.stream);
+    }
+
+    #[test]
+    fn first_output_timestamp_reaches_latency_query() {
+        let mut http = make_http(
+            "/v1/chat/completions",
+            Some(
+                r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}"#
+                    .to_string(),
+            ),
+            Some(
+                r#"{"id":"chatcmpl-test","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"world"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#
+                    .to_string(),
+            ),
+        );
+        http.duration_ns = 500_000_000;
+        http.first_output_timestamp_ns = Some(1_100_000_000);
+        http.is_sse = true;
+        http.sse_event_count = 4;
+
+        let builder = GenAIBuilder::new();
+        let call = build_call(&builder, &[AnalysisResult::Http(http)]).unwrap();
+        assert_eq!(
+            call.metadata.get("first_output_timestamp_ns"),
+            Some(&"1100000000".to_string())
+        );
+        assert_eq!(call.metadata.get("is_sse"), Some(&"true".to_string()));
+
+        let path = std::env::temp_dir().join(format!(
+            "agentsight_timing_pipeline_{}_{}.db",
+            std::process::id(),
+            1_100_000_000u64
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = crate::storage::sqlite::genai::GenAISqliteStore::new_with_path(&path).unwrap();
+        let event = crate::genai::semantic::GenAISemanticEvent::LLMCall(call);
+        store.complete_pending(&event).unwrap();
+
+        let metrics = store.get_latency_metrics(0, 2_000_000_000, None).unwrap();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].streaming_call_count, 1);
+        assert_eq!(
+            metrics[0].ttft_ms.as_ref().map(|metric| metric.p50),
+            Some(100.0)
+        );
+        drop(store);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

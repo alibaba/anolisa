@@ -4,7 +4,6 @@
 //! AgentSight storage data, and optionally serves the embedded frontend.
 
 pub mod auth;
-mod causal;
 mod containment;
 mod enforcement;
 mod handlers;
@@ -221,6 +220,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::latest_grader)
                 .service(handlers::list_agent_names)
                 .service(handlers::get_timeseries)
+                .service(handlers::get_latency_metrics)
                 .service(handlers::export_atif_trace)
                 .service(handlers::export_atif_session)
                 .service(handlers::export_atif_conversation)
@@ -283,8 +283,6 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(optimize::list_optimization_history)
                 .service(optimize::get_optimize_config)
                 .service(optimize::update_optimize_config)
-                // Causal attribution API routes
-                .service(causal::run_causal_attribution)
                 // Trajectory collection API routes (filters before the dynamic segment)
                 .service(handlers::list_trajectories)
                 .service(handlers::trajectory_filters)

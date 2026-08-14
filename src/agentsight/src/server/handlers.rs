@@ -417,6 +417,47 @@ pub struct TimeseriesQuery {
     pub buckets: Option<u32>,
 }
 
+/// Query parameters for LLM latency percentile metrics.
+#[derive(Debug, Deserialize)]
+pub struct LatencyMetricsQuery {
+    pub start_ns: Option<i64>,
+    pub end_ns: Option<i64>,
+    pub agent_name: Option<String>,
+}
+
+/// GET /api/metrics/latency
+#[get("/metrics/latency")]
+pub async fn get_latency_metrics(
+    data: web::Data<AppState>,
+    query: web::Query<LatencyMetricsQuery>,
+) -> impl Responder {
+    let end_ns = query.end_ns.unwrap_or_else(|| now_ns() as i64);
+    let start_ns = match query.start_ns {
+        Some(start_ns) => start_ns,
+        None => match end_ns.checked_sub(86_400_000_000_000i64) {
+            Some(start_ns) => start_ns,
+            None => {
+                return HttpResponse::BadRequest()
+                    .json(serde_json::json!({"error": "default time range is out of bounds"}));
+            }
+        },
+    };
+    if start_ns > end_ns {
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({"error": "start_ns must not exceed end_ns"}));
+    }
+    match GenAISqliteStore::new_with_path(&data.storage_path) {
+        Ok(store) => match store.get_latency_metrics(start_ns, end_ns, query.agent_name.as_deref())
+        {
+            Ok(summary) => HttpResponse::Ok().json(summary),
+            Err(error) => HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": error.to_string()})),
+        },
+        Err(error) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": error.to_string()})),
+    }
+}
+
 /// GET /api/agent-names?start_ns=<i64>&end_ns=<i64>
 ///
 /// Returns a sorted list of distinct agent_name values.
@@ -1985,7 +2026,8 @@ mod tests {
                 .service(get_trace_detail)
                 .service(get_conversation_events)
                 .service(list_agent_names)
-                .service(get_timeseries),
+                .service(get_timeseries)
+                .service(get_latency_metrics),
         )
         .await;
 
@@ -2070,6 +2112,41 @@ mod tests {
         assert!(timeseries_body["token_series"].as_array().is_some());
         assert!(timeseries_body["model_series"].as_array().is_some());
 
+        let latency = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/metrics/latency?start_ns=0&end_ns=9223372036854775807&agent_name=claude")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(latency.status(), StatusCode::OK);
+        let latency_body = service_response_json(latency).await;
+        assert_eq!(latency_body.as_array().map(Vec::len), Some(1));
+        assert_eq!(latency_body[0]["agent_name"], "claude");
+        assert!(latency_body[0]["e2e_latency_ms"]["p50"].is_number());
+        assert!(latency_body[0]["ttft_ms"].is_null());
+
+        cleanup_db(&db_path);
+    }
+
+    #[actix_web::test]
+    async fn latency_rejects_unrepresentable_default_start() {
+        let db_path = unique_handler_db("latency_overflow");
+        let app = awtest::init_service(
+            App::new()
+                .app_data(test_app_state_with_storage(db_path.clone()))
+                .service(get_latency_metrics),
+        )
+        .await;
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get()
+                .uri("/metrics/latency?end_ns=-9223372036854775808")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         cleanup_db(&db_path);
     }
 

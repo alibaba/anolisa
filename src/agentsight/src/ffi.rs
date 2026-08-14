@@ -1660,6 +1660,7 @@ mod tests {
             response_headers: "{\"content-type\":\"application/octet-stream\"}".to_string(),
             response_body,
             duration_ns: 1,
+            first_output_timestamp_ns: None,
             is_sse: false,
             sse_event_count: 0,
         }

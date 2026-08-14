@@ -51,6 +51,7 @@ impl GenAISqliteStore {
                 start_timestamp_ns INTEGER NOT NULL,
                 end_timestamp_ns INTEGER,
                 duration_ns INTEGER,
+                first_output_timestamp_ns INTEGER,
                 pid INTEGER,
                 process_name TEXT,
                 agent_name TEXT,
@@ -197,6 +198,9 @@ impl GenAISqliteStore {
 
         // v8: stable key used to reconcile idle stream snapshots on completion
         ensure_col!("pending_match_key", "TEXT", "idx_genai_pending_match_key");
+
+        // v9: first provider event that carries model output
+        ensure_col!("first_output_timestamp_ns", "INTEGER");
 
         Ok(())
     }

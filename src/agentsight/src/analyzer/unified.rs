@@ -995,6 +995,7 @@ impl Analyzer {
                     duration_ns: resp
                         .end_timestamp_ns()
                         .saturating_sub(req.source_event.timestamp_ns),
+                    first_output_timestamp_ns: None,
                     is_sse: false,
                     sse_event_count: 0,
                 })
@@ -1038,6 +1039,7 @@ impl Analyzer {
                     duration_ns: resp
                         .end_timestamp_ns()
                         .saturating_sub(req.source_event.timestamp_ns),
+                    first_output_timestamp_ns: resp.first_output_timestamp_ns(),
                     is_sse: true,
                     sse_event_count: resp.sse_event_count(),
                 })
@@ -1067,6 +1069,7 @@ impl Analyzer {
                     response_headers: String::new(),
                     response_body: None,
                     duration_ns: 0,
+                    first_output_timestamp_ns: None,
                     is_sse: false,
                     sse_event_count: 0,
                 })
@@ -1107,6 +1110,11 @@ impl Analyzer {
                     duration_ns: stream
                         .end_timestamp_ns
                         .saturating_sub(stream.start_timestamp_ns),
+                    first_output_timestamp_ns: if sse_event_count > 0 {
+                        stream.first_output_timestamp_ns()
+                    } else {
+                        None
+                    },
                     is_sse: sse_event_count > 0,
                     sse_event_count,
                 })

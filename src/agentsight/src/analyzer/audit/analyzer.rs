@@ -231,6 +231,7 @@ mod tests {
             response_headers: "{}".into(),
             response_body: response_body.map(|s| s.to_string()),
             duration_ns: 1000,
+            first_output_timestamp_ns: None,
             is_sse,
             sse_event_count: 0,
         }

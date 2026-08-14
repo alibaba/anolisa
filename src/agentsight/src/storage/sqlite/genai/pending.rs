@@ -310,6 +310,18 @@ impl GenAISqliteStore {
                 )?;
 
                 if updated > 0 {
+                    conn.execute(
+                        "UPDATE genai_events SET first_output_timestamp_ns = ?1 WHERE call_id = ?2",
+                        params![
+                            call.metadata
+                                .get("first_output_timestamp_ns")
+                                .and_then(|value| value.parse::<i64>().ok()),
+                            call.call_id
+                        ],
+                    )?;
+                }
+
+                if updated > 0 {
                     log::debug!(
                         "[GenAI] Promoted pending/interrupted→complete for call_id={}",
                         call.call_id
@@ -418,6 +430,18 @@ impl GenAISqliteStore {
                             match_key.as_str(),
                         ],
                     )?;
+
+                    if updated > 0 {
+                        conn.execute(
+                            "UPDATE genai_events SET first_output_timestamp_ns = ?1 WHERE call_id = ?2",
+                            params![
+                                call.metadata
+                                    .get("first_output_timestamp_ns")
+                                    .and_then(|value| value.parse::<i64>().ok()),
+                                call.call_id
+                            ],
+                        )?;
+                    }
 
                     if updated > 0 {
                         log::debug!(
