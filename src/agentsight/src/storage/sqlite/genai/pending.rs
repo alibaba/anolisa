@@ -266,8 +266,9 @@ impl GenAISqliteStore {
                         sse_event_count     = ?26,
                         event_json          = ?27,
                         tool_call_ids       = ?28,
-                        call_kind           = ?29
-                    WHERE call_id = ?30 AND status IN ('pending', 'interrupted')",
+                        call_kind           = ?29,
+                        first_output_timestamp_ns = ?30
+                    WHERE call_id = ?31 AND status IN ('pending', 'interrupted')",
                     params![
                         call.metadata.get("response_id"),
                         call.metadata.get("conversation_id"),
@@ -305,21 +306,12 @@ impl GenAISqliteStore {
                             .get("call_kind")
                             .map(|s| s.as_str())
                             .unwrap_or("main"),
+                        call.metadata
+                            .get("first_output_timestamp_ns")
+                            .and_then(|value| value.parse::<i64>().ok()),
                         call.call_id.as_str(),
                     ],
                 )?;
-
-                if updated > 0 {
-                    conn.execute(
-                        "UPDATE genai_events SET first_output_timestamp_ns = ?1 WHERE call_id = ?2",
-                        params![
-                            call.metadata
-                                .get("first_output_timestamp_ns")
-                                .and_then(|value| value.parse::<i64>().ok()),
-                            call.call_id
-                        ],
-                    )?;
-                }
 
                 if updated > 0 {
                     log::debug!(
@@ -379,13 +371,14 @@ impl GenAISqliteStore {
                             event_json          = ?27,
                             tool_call_ids       = ?28,
                             call_kind           = ?29,
-                            call_id             = ?30
+                            first_output_timestamp_ns = ?30,
+                            call_id             = ?31
                          WHERE id = (
                             SELECT id FROM genai_events
                             WHERE event_type = 'llm_call'
                               AND status IN ('pending', 'interrupted')
                               AND pending_origin = 'idle_drain'
-                              AND pending_match_key = ?31
+                              AND pending_match_key = ?32
                             ORDER BY start_timestamp_ns DESC
                             LIMIT 1
                          )",
@@ -426,22 +419,13 @@ impl GenAISqliteStore {
                                 .get("call_kind")
                                 .map(|s| s.as_str())
                                 .unwrap_or("main"),
+                            call.metadata
+                                .get("first_output_timestamp_ns")
+                                .and_then(|value| value.parse::<i64>().ok()),
                             call.call_id.as_str(),
                             match_key.as_str(),
                         ],
                     )?;
-
-                    if updated > 0 {
-                        conn.execute(
-                            "UPDATE genai_events SET first_output_timestamp_ns = ?1 WHERE call_id = ?2",
-                            params![
-                                call.metadata
-                                    .get("first_output_timestamp_ns")
-                                    .and_then(|value| value.parse::<i64>().ok()),
-                                call.call_id
-                            ],
-                        )?;
-                    }
 
                     if updated > 0 {
                         log::debug!(

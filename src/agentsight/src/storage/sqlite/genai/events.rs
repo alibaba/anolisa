@@ -448,12 +448,13 @@ impl GenAISqliteStore {
                         cache_creation_tokens, cache_read_tokens,
                         system_instructions, input_messages, output_messages,
                         user_query, http_method, http_path, status_code,
-                        is_sse, sse_event_count, event_json, tool_call_ids, call_kind
+                        is_sse, sse_event_count, event_json, tool_call_ids, call_kind,
+                        first_output_timestamp_ns
                     ) VALUES (
                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
                         ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
                         ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32,
-                        ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41
+                        ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42
                     )",
                     params![
                         "llm_call",
@@ -497,15 +498,9 @@ impl GenAISqliteStore {
                         event_json,
                         tool_call_ids,
                         call.metadata.get("call_kind").map(|s| s.as_str()).unwrap_or("main"),
-                    ],
-                )?;
-                conn.execute(
-                    "UPDATE genai_events SET first_output_timestamp_ns = ?1 WHERE call_id = ?2",
-                    params![
                         call.metadata
                             .get("first_output_timestamp_ns")
                             .and_then(|value| value.parse::<i64>().ok()),
-                        call.call_id
                     ],
                 )?;
             }

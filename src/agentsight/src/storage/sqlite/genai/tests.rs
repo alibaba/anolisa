@@ -807,6 +807,10 @@ fn test_complete_pending_promotes_idle_snapshot_by_match_key() {
         .insert("sse_event_count".to_string(), "2".to_string());
     call.metadata
         .insert("call_kind".to_string(), "main".to_string());
+    call.metadata.insert(
+        "first_output_timestamp_ns".to_string(),
+        (BASE_NS + STEP_NS / 2).to_string(),
+    );
 
     store
         .complete_pending(&GenAISemanticEvent::LLMCall(call))
@@ -818,17 +822,25 @@ fn test_complete_pending_promotes_idle_snapshot_by_match_key() {
         .unwrap();
     assert_eq!(total, 1, "complete must update the idle snapshot row");
 
-    let (status, call_id, trace_id, origin): (String, String, String, String) = conn
+    let (status, call_id, trace_id, origin, first_output): (
+        String,
+        String,
+        String,
+        String,
+        Option<i64>,
+    ) = conn
         .query_row(
-            "SELECT status, call_id, trace_id, pending_origin FROM genai_events",
+            "SELECT status, call_id, trace_id, pending_origin, first_output_timestamp_ns
+             FROM genai_events",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .unwrap();
     assert_eq!(status, "complete");
     assert_eq!(call_id, "real-response-id");
     assert_eq!(trace_id, "real-response-id");
     assert_eq!(origin, "idle_drain");
+    assert_eq!(first_output, Some(BASE_NS + STEP_NS / 2));
     drop(conn);
     cleanup_db(&path);
 }

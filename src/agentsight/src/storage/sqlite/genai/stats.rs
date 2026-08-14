@@ -67,6 +67,24 @@ mod latency_tests {
                 [],
             )
             .unwrap();
+            conn.execute(
+                "INSERT INTO genai_events
+                 (event_type, status, call_id, start_timestamp_ns, end_timestamp_ns,
+                  first_output_timestamp_ns, output_tokens, is_sse, process_name, event_json)
+                 VALUES ('llm_call', 'complete', 'fallback-agent-call', 500, 550, 520, 10, 1,
+                         'fallback-agent', '{}')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO genai_events
+                 (event_type, status, call_id, start_timestamp_ns, end_timestamp_ns,
+                  first_output_timestamp_ns, output_tokens, is_sse, agent_name, event_json)
+                 VALUES ('llm_call', 'complete', 'invalid-ttft', 700, 710, 720, 10, 1,
+                         'agent-invalid', '{}')",
+                [],
+            )
+            .unwrap();
         }
         let result = store.get_latency_metrics(50, 250, Some("agent-a")).unwrap();
         assert_eq!(result.len(), 1);
@@ -82,6 +100,23 @@ mod latency_tests {
         assert_eq!(zero[0].streaming_call_count, 1);
         assert!(zero[0].tps_tokens_per_second.is_none());
         assert!(zero[0].tpot_ms_per_token.is_none());
+
+        let fallback = store
+            .get_latency_metrics(450, 600, Some("fallback-agent"))
+            .unwrap();
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].agent_name.as_deref(), Some("fallback-agent"));
+        assert_eq!(
+            fallback[0].ttft_ms.as_ref().map(|value| value.p50),
+            Some(0.00002)
+        );
+
+        let invalid = store
+            .get_latency_metrics(650, 750, Some("agent-invalid"))
+            .unwrap();
+        assert_eq!(invalid.len(), 1);
+        assert!(invalid[0].ttft_ms.is_none());
+
         drop(store);
         let _ = std::fs::remove_file(path);
     }
@@ -109,7 +144,7 @@ mod latency_tests {
                 "INSERT INTO genai_events
                  (event_type, status, call_id, start_timestamp_ns, end_timestamp_ns,
                   first_output_timestamp_ns, output_tokens, is_sse, agent_name, event_json)
-                 VALUES ('llm_call', 'complete', 'non-sse', 100, 200, 150, NULL, 0,
+                 VALUES ('llm_call', 'complete', 'non-sse', 100, 200, NULL, NULL, 0,
                          'agent-count', '{}')",
                 [],
             )
@@ -121,10 +156,6 @@ mod latency_tests {
             .unwrap();
         assert_eq!(summary[0].call_count, 2);
         assert_eq!(summary[0].streaming_call_count, 1);
-        assert_eq!(
-            summary[0].ttft_ms.as_ref().map(|metric| metric.p50),
-            Some(0.00005)
-        );
         drop(store);
         let _ = std::fs::remove_file(path);
     }
@@ -208,13 +239,16 @@ impl GenAISqliteStore {
     ) -> Result<Vec<LatencyMetricsSummary>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let sql = if agent_name.is_some() {
-            "SELECT agent_name, start_timestamp_ns, end_timestamp_ns,
+            "SELECT COALESCE(agent_name, process_name) AS agent_name,
+                    start_timestamp_ns, end_timestamp_ns,
                     first_output_timestamp_ns, output_tokens, is_sse
              FROM genai_events
              WHERE event_type = 'llm_call' AND status = 'complete'
-               AND start_timestamp_ns BETWEEN ?1 AND ?2 AND agent_name = ?3"
+               AND start_timestamp_ns BETWEEN ?1 AND ?2
+               AND COALESCE(agent_name, process_name) = ?3"
         } else {
-            "SELECT agent_name, start_timestamp_ns, end_timestamp_ns,
+            "SELECT COALESCE(agent_name, process_name) AS agent_name,
+                    start_timestamp_ns, end_timestamp_ns,
                     first_output_timestamp_ns, output_tokens, is_sse
              FROM genai_events
              WHERE event_type = 'llm_call' AND status = 'complete'
@@ -236,7 +270,7 @@ impl GenAISqliteStore {
             Ok(CallMetrics {
                 agent_name: row.get(0)?,
                 ttft_ms: first
-                    .filter(|first| *first >= start)
+                    .filter(|first| *first >= start && end.map_or(true, |end| *first <= end))
                     .map(|first| (first - start) as f64 / 1_000_000.0),
                 is_sse: is_sse == Some(1),
                 tps_tokens_per_second: stream_ns

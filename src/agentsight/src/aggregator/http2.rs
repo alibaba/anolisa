@@ -1276,6 +1276,43 @@ mod tests {
     }
 
     #[test]
+    fn first_output_timestamp_handles_meaningful_event_split_across_data_frames() {
+        let mut stream =
+            Http2Stream::new(StreamId::new(ConnectionId { pid: 1, ssl_ptr: 1 }, 1), 100);
+        let first_payload = b"data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hel".to_vec();
+        let second_payload = b"lo\"}\n\n".to_vec();
+
+        // The first DATA frame has a complete metadata event, but the
+        // meaningful event is still incomplete and must not be counted.
+        let first_body = std::str::from_utf8(&first_payload).unwrap();
+        let first_parse = SSEParser::parse_stream(first_body);
+        assert_eq!(first_parse.events.len(), 1);
+        assert!(first_parse.events.iter().all(|event| {
+            let value = serde_json::from_str::<serde_json::Value>(&event.data).ok();
+            !event_has_meaningful_output(value.as_ref())
+        }));
+
+        stream.response_data_frames.push(create_test_frame(
+            1,
+            0,
+            0,
+            first_payload,
+            create_test_event(1234, 0x1000, 0, 200),
+        ));
+        stream.response_data_frames.push(create_test_frame(
+            1,
+            0,
+            0,
+            second_payload,
+            create_test_event(1234, 0x1000, 0, 400),
+        ));
+
+        // Re-parsing the accumulated body after frame 2 must attribute the
+        // first complete meaningful event to frame 2, not the metadata frame.
+        assert_eq!(stream.first_output_timestamp_ns(), Some(400));
+    }
+
+    #[test]
     fn first_output_timestamp_is_none_without_meaningful_data_frame() {
         let mut stream =
             Http2Stream::new(StreamId::new(ConnectionId { pid: 1, ssl_ptr: 1 }, 1), 100);

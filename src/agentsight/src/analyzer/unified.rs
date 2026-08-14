@@ -1593,6 +1593,74 @@ mod tests {
     }
 
     #[test]
+    fn first_output_timestamp_propagates_from_http2_to_latency_metrics() {
+        use crate::genai::{GenAIBuilder, GenAISemanticEvent};
+        use crate::response_map::ResponseSessionMapper;
+        use std::collections::HashMap;
+
+        let analyzer = Analyzer::new();
+        let request_body =
+            br#"{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+        let chunk = serde_json::json!({
+            "id": "chatcmpl-h2-propagation",
+            "model": "gpt-4o",
+            "choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]
+        });
+        let stream = build_sse_http2_stream("/v1/chat/completions", request_body, &chunk);
+        let results = analyzer.analyze_aggregated(&AggregatedResult::Http2StreamComplete(stream));
+
+        let http = results
+            .iter()
+            .find_map(|result| match result {
+                AnalysisResult::Http(record) => Some(record),
+                _ => None,
+            })
+            .expect("Analyzer must emit HttpRecord");
+        assert_eq!(http.first_output_timestamp_ns, Some(1_000_000_000));
+        assert!(http.is_sse);
+
+        let builder = GenAIBuilder::new();
+        let mapper = ResponseSessionMapper::new();
+        let cache = HashMap::<u32, String>::new();
+        let (built, pending) = builder.build_with_pending(&results, &mapper, &cache);
+        let call = built
+            .events
+            .into_iter()
+            .find_map(|event| match event {
+                GenAISemanticEvent::LLMCall(call) => Some(call),
+                _ => None,
+            })
+            .expect("GenAIBuilder must emit LLMCall");
+        assert_eq!(
+            call.metadata.get("first_output_timestamp_ns"),
+            Some(&"1000000000".to_string())
+        );
+
+        let event = GenAISemanticEvent::LLMCall(call);
+        let path = std::env::temp_dir().join(format!(
+            "agentsight_analyzer_latency_{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = crate::storage::sqlite::genai::GenAISqliteStore::new_with_path(&path).unwrap();
+        if let Some(info) = pending.as_ref() {
+            store.insert_pending(info).unwrap();
+        }
+        store.complete_pending(&event).unwrap();
+
+        let metrics = store.get_latency_metrics(0, 2_000_000_000, None).unwrap();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].streaming_call_count, 1);
+        assert_eq!(
+            metrics[0].ttft_ms.as_ref().map(|metric| metric.p50),
+            Some(100.0)
+        );
+
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn test_extract_message_from_http_parses_openai_sse_request() {
         // SSE-shaped OpenAI response: branch A now delegates to parse_by_path
         // (restored), so the request body is parsed even though the OpenAI
