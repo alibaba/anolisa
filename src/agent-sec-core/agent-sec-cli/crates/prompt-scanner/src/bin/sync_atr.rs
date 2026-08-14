@@ -1,10 +1,11 @@
 //! ATR → internal rule-pack converter (build-time adapter).
 //!
 //! Reads a local checkout of Agent-Threat-Rule/agent-threat-rules, keeps
-//! stable LLM-input rules, validates every regex against the same regex
-//! crate the engine uses, and writes deterministic pack YAML plus an
-//! UPSTREAM.toml sync report. Never runs at scan time.
+//! stable LLM-input rules, validates every regex the way the engine
+//! compiles it, and writes deterministic pack YAML plus an UPSTREAM.toml
+//! sync report. Never runs at scan time.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
@@ -35,6 +36,12 @@ const SCAN_TARGETS: &[&str] = &["", "mcp", "both", "llm_io", "llm"];
 const CONTENT_FIELDS: &[&str] = &["user_input", "content"];
 
 const UPSTREAM_URL: &str = "https://github.com/Agent-Threat-Rule/agent-threat-rules";
+
+/// The "any character including newline" idiom upstream rule packs use.
+const ANY_CHAR_CLASS: &str = r"[\s\S]";
+
+/// The cheap-to-compile spelling the engine rewrites it to.
+const ANY_CHAR_INLINE_DOT: &str = r"(?s:.)";
 
 // ---- upstream (ATR) shapes: subset we consume --------------------------
 
@@ -183,10 +190,22 @@ fn map_severity(atr: &str) -> Option<&'static str> {
     }
 }
 
-/// True when the pattern compiles with the exact flags the engine uses
-/// for `single_line: true` rules.
+/// Mirror of the engine's `[\s\S]` → `(?s:.)` rewrite.
+///
+/// Verbatim copy of the private `rule_engine::normalize_any_char_class`
+/// (a bin is a separate crate target); keep both sides identical.
+fn normalize_any_char_class(pattern: &str) -> Cow<'_, str> {
+    if pattern.contains(ANY_CHAR_CLASS) {
+        Cow::Owned(pattern.replace(ANY_CHAR_CLASS, ANY_CHAR_INLINE_DOT))
+    } else {
+        Cow::Borrowed(pattern)
+    }
+}
+
+/// True when the pattern compiles the way the engine compiles it: same
+/// rewrite first, then the exact flags a `single_line: true` rule gets.
 fn compiles(pattern: &str) -> bool {
-    RegexBuilder::new(pattern)
+    RegexBuilder::new(&normalize_any_char_class(pattern))
         .case_insensitive(true)
         .dot_matches_new_line(false)
         .build()
@@ -582,6 +601,44 @@ mod tests {
         let (out, skips) = convert(rule);
         let out = out.expect("kept with remaining pattern");
         assert_eq!(out.patterns.len(), 1);
+        assert!(skips
+            .iter()
+            .any(|s| s.reason.contains("not regex-crate compatible")));
+    }
+
+    #[test]
+    fn normalization_mirrors_the_engine_rewrite() {
+        // Same cases the engine asserts on its own copy. If these two sets
+        // ever disagree, the validator stops speaking for the engine.
+        assert_eq!(normalize_any_char_class(r"a[\s\S]{0,5}b"), r"a(?s:.){0,5}b");
+        assert_eq!(normalize_any_char_class(r"[\s\S]x[\s\S]"), r"(?s:.)x(?s:.)");
+        assert_eq!(normalize_any_char_class(r"\s+plain\S"), r"\s+plain\S");
+    }
+
+    #[test]
+    fn pattern_breaking_only_after_normalization_is_dropped() {
+        // `\[\s\S]` compiles as written, but the engine's rewrite turns it
+        // into `\(?s:.)` whose trailing paren is unopened. Validating the raw
+        // string would ship a pattern that fails at engine load time and
+        // takes the whole pack down with it.
+        let raw = r"\[\s\S]";
+        assert!(
+            RegexBuilder::new(raw)
+                .case_insensitive(true)
+                .dot_matches_new_line(false)
+                .build()
+                .is_ok(),
+            "precondition: the raw pattern must compile, or this test proves nothing"
+        );
+
+        let mut rule = sample_rule("stable", "stable", "mcp");
+        rule.detection.conditions.push(AtrCondition {
+            field: "content".to_string(),
+            operator: "regex".to_string(),
+            value: raw.to_string(),
+        });
+        let (out, skips) = convert(rule);
+        assert_eq!(out.expect("kept with remaining pattern").patterns.len(), 1);
         assert!(skips
             .iter()
             .any(|s| s.reason.contains("not regex-crate compatible")));
