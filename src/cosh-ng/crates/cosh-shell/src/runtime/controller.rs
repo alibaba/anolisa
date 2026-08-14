@@ -69,7 +69,7 @@ fn render_raw_inline_events<W: Write>(
             ghost_route: std::mem::take(&mut inline_state.pending_input_ghost_route),
         });
     }
-    let shell_busy = shell_has_active_foreground_command(snapshot.events());
+    let shell_busy = inline_state.control.shell_busy();
     if let Some(action) =
         shell_handoff_timeout_recovery_action(inline_state, shell_busy, &mut terminal_output)?
     {

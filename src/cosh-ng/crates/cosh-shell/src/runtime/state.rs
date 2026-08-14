@@ -30,7 +30,7 @@ use crate::runtime::state_prelude::{
 };
 use crate::runtime::trust_state::ApprovalTrustState;
 use crate::slash::session::SessionControlState;
-use crate::types::AgentContextBinding;
+use crate::types::{AgentContextBinding, ShellEvent, ShellEventKind};
 
 pub(crate) struct AnalysisThrottle {
     recent: HashMap<String, (Instant, usize)>,
@@ -507,6 +507,9 @@ pub(crate) struct ControlState {
     selectable_after_event_index: Option<usize>,
     pub(crate) trust: ApprovalTrustState,
     event_cursor: ShellEventCursor,
+    active_shell_command_ids: HashSet<String>,
+    #[cfg(test)]
+    ledger_rebuild_count: usize,
 }
 
 impl ControlState {
@@ -820,6 +823,35 @@ impl ControlState {
     }
     pub(crate) fn set_event_cursor(&mut self, cursor: ShellEventCursor) {
         self.event_cursor = cursor;
+    }
+    pub(crate) fn observe_shell_command_activity(&mut self, events: &[ShellEvent]) {
+        for event in events {
+            let Some(command_id) = event.command_id.as_ref() else {
+                continue;
+            };
+            match event.kind {
+                ShellEventKind::CommandStarted => {
+                    self.active_shell_command_ids.insert(command_id.clone());
+                }
+                ShellEventKind::CommandCompleted
+                | ShellEventKind::CommandFailed
+                | ShellEventKind::UserInputIntercepted => {
+                    self.active_shell_command_ids.remove(command_id);
+                }
+                _ => {}
+            }
+        }
+    }
+    pub(crate) fn shell_busy(&self) -> bool {
+        !self.active_shell_command_ids.is_empty()
+    }
+    #[cfg(test)]
+    pub(crate) fn record_ledger_rebuild(&mut self) {
+        self.ledger_rebuild_count += 1;
+    }
+    #[cfg(test)]
+    pub(crate) fn ledger_rebuild_count(&self) -> usize {
+        self.ledger_rebuild_count
     }
 }
 
