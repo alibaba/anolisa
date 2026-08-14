@@ -30,6 +30,7 @@ BuildRequires:  npm
 Requires:       python3
 Requires:       jq
 Requires:       bash
+Provides:       anolisa-component(tokenless)
 
 %description
 Token-Less is an LLM token optimization toolkit that significantly reduces token
