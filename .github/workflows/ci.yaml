@@ -703,6 +703,10 @@ jobs:
           cd src/agentsight
           cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Test raw packaging
+        working-directory: src/agentsight
+        run: uv run --python 3.11.6 --no-project make test-raw-package
+
       - name: Run tests with coverage
         run: |
           cd src/agentsight

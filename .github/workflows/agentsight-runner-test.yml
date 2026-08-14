@@ -66,6 +66,10 @@ jobs:
         working-directory: src/agentsight
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Test raw packaging
+        working-directory: src/agentsight
+        run: uv run --python 3.11.6 --no-project make test-raw-package
+
       - name: Run tests with coverage
         working-directory: src/agentsight
         run: |
@@ -163,4 +167,3 @@ jobs:
               exec "$CARGO_BIN" test --test bpf_load -- \
                 --ignored --nocapture --test-threads=1
             '
-

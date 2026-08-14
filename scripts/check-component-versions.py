@@ -21,6 +21,8 @@ VERSION_RE = re.compile(
 TOML_CONTRACTS = (
     ("src/agent-sec-core/openclaw-plugin/package.json", "src/agent-sec-core/.anolisa/component.toml"),
     ("src/agentsight/Cargo.toml", "src/agentsight/component.toml"),
+    ("src/agentsight/Cargo.toml", "src/agentsight/.anolisa/component.toml"),
+    ("src/agentsight/Cargo.toml", "src/agentsight/.anolisa/component.macos.toml"),
     ("src/copilot-shell/package.json", "src/copilot-shell/component.toml"),
     ("src/cosh-ng/Cargo.toml", "src/cosh-ng/component.toml"),
     ("src/cosh-ng/Cargo.toml", "src/cosh-ng/.anolisa/component.toml"),

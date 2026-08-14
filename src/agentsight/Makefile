@@ -93,8 +93,18 @@ uninstall:
 # TEST & QUALITY
 # =============================================================================
 
+.PHONY: package-raw stage-raw test-raw-package
+package-raw: ## Package prebuilt AgentSight binaries for one raw target
+	@./packaging/raw/package.sh package
+
+stage-raw: ## Stage one raw payload into DESTDIR
+	@./packaging/raw/package.sh stage
+
+test-raw-package: ## Validate Linux and macOS raw package assembly
+	@bash scripts/test-package-raw.sh
+
 .PHONY: test
-test: test-rpm-packaging ## Run unit tests (fast, no coverage)
+test: test-rpm-packaging test-raw-package ## Run unit tests (fast, no coverage)
 	cd $(CURDIR) && cargo test
 
 .PHONY: test-rpm-packaging
