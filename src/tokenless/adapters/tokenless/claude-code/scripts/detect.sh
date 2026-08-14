@@ -20,12 +20,15 @@ export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 # claude binary may not be visible on PATH yet, and `claude plugin list` may
 # lag a moment behind `claude plugin install` while ~/.claude is still being
 # initialized. Retry such checks briefly before declaring them missing.
-# Tunable via ANOLISA_DETECT_RETRIES / ANOLISA_DETECT_RETRY_DELAY; set
-# retries to 1 to disable.
+# Tunable via ANOLISA_DETECT_RETRIES / ANOLISA_DETECT_RETRY_DELAY.
+# DETECT_RETRIES is the maximum number of probe attempts: 1 means a
+# single probe with no retries, and 0 is accepted as an alias for 1
+# ("no retries"), never as "skip the check entirely".
 DETECT_RETRIES="${ANOLISA_DETECT_RETRIES:-3}"
 DETECT_RETRY_DELAY="${ANOLISA_DETECT_RETRY_DELAY:-1}"
 case "$DETECT_RETRIES" in ''|*[!0-9]*) DETECT_RETRIES=3 ;; esac
 case "$DETECT_RETRY_DELAY" in ''|*[!0-9.]*) DETECT_RETRY_DELAY=1 ;; esac
+if [ "$DETECT_RETRIES" -eq 0 ]; then DETECT_RETRIES=1; fi
 
 line()  { printf '[%s] %s\n' "$COMPONENT" "$*"; }
 field() { printf '[%s]   %-26s %s\n' "$COMPONENT" "$1" "$2"; }
@@ -88,6 +91,11 @@ if [ -n "$CLAUDE_BIN" ] && [ -x "$CLAUDE_BIN" ]; then
         # First-run race: `plugin list` may not reflect a fresh
         # `plugin install` until the ~/.claude state settles; retry briefly.
         if [ "$attempt" -ge "$DETECT_RETRIES" ]; then
+            # Explicit status note so operators can tell the check retried
+            # up to the limit instead of failing on a single probe.
+            if [ "$DETECT_RETRIES" -gt 1 ]; then
+                line "plugin check: '$PLUGIN_ID' still not listed after ${attempt} attempts"
+            fi
             break
         fi
         sleep "$DETECT_RETRY_DELAY"
