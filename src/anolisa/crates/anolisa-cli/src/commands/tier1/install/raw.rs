@@ -53,11 +53,11 @@ pub(super) fn index_fetch_error(index_url: &str, err: DownloadError) -> CliError
     }
 }
 
-/// Whether a fetch failure means "this index file is not published", as
-/// opposed to a transport or repository fault. Only the former may fall
-/// back from `index-v2.toml` to `index.toml`: falling back on transient
-/// errors could silently downgrade a gen-2 repository to its gen-1 view.
-fn index_not_published(err: &DownloadError) -> bool {
+/// Whether a fetch failure means "this file is not published", as opposed to
+/// a transport or repository fault. Every optional-file fallback in this
+/// module is gated on it: falling back on a transient error would silently
+/// serve a *different* file than the one the repository actually publishes.
+fn remote_file_absent(err: &DownloadError) -> bool {
     match err {
         DownloadError::HttpStatus { status, .. } => *status == 404 || *status == 410,
         // file:// repositories surface a missing index as I/O NotFound.
@@ -77,7 +77,9 @@ fn fetch_raw_index(
     let v2_url = raw_index_v2_url(base_url);
     match cache.fetch(&v2_url, None) {
         Ok(downloaded) => Ok((v2_url, downloaded.cached_path)),
-        Err(err) if index_not_published(&err) => {
+        // Absence only: a transport fault here must not downgrade a gen-2
+        // repository to its gen-1 view.
+        Err(err) if remote_file_absent(&err) => {
             let v1_url = raw_index_url(base_url);
             let downloaded = cache
                 .fetch(&v1_url, None)
@@ -332,70 +334,95 @@ impl InstallContractSource {
 /// Load the published lightweight install contract without fetching the full
 /// artifact, so dry-run can enforce manifest-backed refusals such as component
 /// conflicts.
+///
+/// The contract must describe the artifact that was *resolved*, not merely the
+/// component and version: a repository may publish a different contract per
+/// target (a Linux system-only payload beside a macOS build that also supports
+/// user mode). [`meta_url_candidates`] therefore prefers the metadata beside
+/// the resolved artifact, and the version-level file is consulted only when
+/// that sibling is absent.
 pub(crate) fn load_dry_run_install_contract(
     ctx: &CliContext,
     layout: &FsLayout,
     resolution: &RawResolution,
 ) -> Result<Option<LoadedInstallContract>, CliError> {
-    let Some(meta_url) = sidecar_meta_url(
+    let expected_sha = manifest_digest_sha256(resolution.entry.manifest_digest.as_deref())?;
+    let cache = DownloadCache::new(layout.cache_dir.clone());
+    // Candidates are keyed by full URL in the download cache, so a sibling and
+    // a version-level `meta.toml` never share a cache entry.
+    for meta_url in meta_url_candidates(
         &resolution.artifact_url,
         &resolution.entry.component,
         &resolution.entry.version,
-    ) else {
-        return Ok(None);
-    };
-    let expected_sha = manifest_digest_sha256(resolution.entry.manifest_digest.as_deref())?;
-    let cache = DownloadCache::new(layout.cache_dir.clone());
-    let downloaded = match cache.fetch(&meta_url, expected_sha) {
-        Ok(downloaded) => downloaded,
-        Err(DownloadError::HttpStatus { status: 404, .. }) => return Ok(None),
-        Err(DownloadError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(None);
-        }
-        Err(err) => {
-            return Err(CliError::Runtime {
+    ) {
+        let downloaded = match cache.fetch(&meta_url, expected_sha) {
+            Ok(downloaded) => downloaded,
+            // Absence only. A network, digest, or parse failure on metadata
+            // the repository *does* publish must fail the dry-run: falling
+            // through would validate another target's contract and report a
+            // preview the execution path would never honour.
+            Err(err) if remote_file_absent(&err) => continue,
+            Err(err) => {
+                return Err(CliError::Runtime {
+                    command: COMMAND.to_string(),
+                    reason: format!("failed to fetch sidecar metadata {meta_url}: {err}"),
+                });
+            }
+        };
+        let toml =
+            std::fs::read_to_string(&downloaded.cached_path).map_err(|err| CliError::Runtime {
                 command: COMMAND.to_string(),
-                reason: format!("failed to fetch sidecar metadata {meta_url}: {err}"),
-            });
-        }
-    };
-    let toml =
-        std::fs::read_to_string(&downloaded.cached_path).map_err(|err| CliError::Runtime {
-            command: COMMAND.to_string(),
-            reason: format!(
-                "failed to read sidecar metadata {} from cache: {err}",
-                downloaded.cached_path.display()
-            ),
-        })?;
-    let manifest = ComponentManifest::from_toml_str(&toml).map_err(|err| CliError::Runtime {
-        command: COMMAND.to_string(),
-        reason: format!("failed to parse sidecar metadata {meta_url}: {err}"),
-    })?;
-    validate_manifest_contract_header(
-        &manifest,
-        resolution,
-        ctx.install_mode.as_str(),
-        InstallContractSource::SidecarMeta,
-    )?;
-    Ok(Some(LoadedInstallContract {
-        manifest,
-        source: InstallContractSource::SidecarMeta,
-        toml,
-    }))
+                reason: format!(
+                    "failed to read sidecar metadata {} from cache: {err}",
+                    downloaded.cached_path.display()
+                ),
+            })?;
+        let manifest =
+            ComponentManifest::from_toml_str(&toml).map_err(|err| CliError::Runtime {
+                command: COMMAND.to_string(),
+                reason: format!("failed to parse sidecar metadata {meta_url}: {err}"),
+            })?;
+        validate_manifest_contract_header(
+            &manifest,
+            resolution,
+            ctx.install_mode.as_str(),
+            InstallContractSource::SidecarMeta,
+        )?;
+        return Ok(Some(LoadedInstallContract {
+            manifest,
+            source: InstallContractSource::SidecarMeta,
+            toml,
+        }));
+    }
+    Ok(None)
 }
 
-fn sidecar_meta_url(artifact_url: &str, component: &str, version: &str) -> Option<String> {
+/// `meta.toml` URLs to try for a resolved artifact, in preference order.
+///
+/// The metadata published beside the artifact wins. Replacing the final
+/// artifact URL segment is the same-directory convention already frozen by
+/// [`anolisa_core::registry`], and it is the only form that can describe a
+/// single target: `…/0.10.1/macos/aarch64/meta.toml` documents the macOS
+/// payload, while `…/0.10.1/meta.toml` documents whatever target the
+/// publisher happened to make version-wide.
+///
+/// The version root stays as a fallback so legacy repositories — which
+/// publish one contract for every target — keep working unchanged. It is
+/// omitted when the artifact already sits in the version root, where both
+/// forms derive the same URL and a second fetch would be pure waste.
+fn meta_url_candidates(artifact_url: &str, component: &str, version: &str) -> Vec<String> {
+    let mut candidates = Vec::with_capacity(2);
+    if let Some(index) = artifact_url.rfind('/') {
+        candidates.push(format!("{}/meta.toml", &artifact_url[..index]));
+    }
     let version_marker = format!("/{component}/{version}/");
     if let Some(index) = artifact_url.rfind(&version_marker) {
-        return Some(format!(
-            "{}meta.toml",
-            &artifact_url[..index + version_marker.len()]
-        ));
+        let version_root = format!("{}meta.toml", &artifact_url[..index + version_marker.len()]);
+        if !candidates.contains(&version_root) {
+            candidates.push(version_root);
+        }
     }
-
-    artifact_url
-        .rfind('/')
-        .map(|index| format!("{}/meta.toml", &artifact_url[..index]))
+    candidates
 }
 
 fn manifest_digest_sha256(digest: Option<&str>) -> Result<Option<&str>, CliError> {
@@ -1097,26 +1124,77 @@ mod tests {
         assert!(!reason.contains("index-v2.toml"), "got: {reason}");
     }
 
-    /// Fallback is reserved for "not published"; transport faults on the v2
-    /// fetch must not silently downgrade a gen-2 repository to its v1 view.
+    /// Fallback is reserved for "not published"; transport faults must not
+    /// silently downgrade a gen-2 repository to its v1 view, nor let a
+    /// resolved artifact's sidecar be replaced by version-level metadata
+    /// describing a different target.
     #[test]
-    fn index_not_published_distinguishes_absence_from_faults() {
+    fn remote_file_absent_distinguishes_absence_from_faults() {
         let http = |status| DownloadError::HttpStatus {
             url: "https://example.invalid/index-v2.toml".to_string(),
             status,
         };
-        assert!(index_not_published(&http(404)));
-        assert!(index_not_published(&http(410)));
-        assert!(!index_not_published(&http(500)));
-        assert!(!index_not_published(&http(403)));
-        assert!(index_not_published(&DownloadError::Io {
+        assert!(remote_file_absent(&http(404)));
+        assert!(remote_file_absent(&http(410)));
+        assert!(!remote_file_absent(&http(500)));
+        assert!(!remote_file_absent(&http(403)));
+        assert!(remote_file_absent(&DownloadError::Io {
             path: std::path::PathBuf::from("/repo/v1/index-v2.toml"),
             source: std::io::Error::from(std::io::ErrorKind::NotFound),
         }));
-        assert!(!index_not_published(&DownloadError::Network {
+        assert!(!remote_file_absent(&DownloadError::Network {
             url: "https://example.invalid/index-v2.toml".to_string(),
             reason: "timed out".to_string(),
         }));
+    }
+
+    /// Target-specific metadata is the point of the sibling-first order: the
+    /// macOS contract sits beside the macOS artifact, while the version root
+    /// holds whichever target the publisher made version-wide.
+    #[test]
+    fn meta_url_candidates_prefer_the_artifact_sibling() {
+        let candidates = meta_url_candidates(
+            "file:///repo/v1/agentsight/0.10.1/macos/aarch64/agentsight-0.10.1-macos-aarch64.tar.gz",
+            "agentsight",
+            "0.10.1",
+        );
+        assert_eq!(
+            candidates,
+            vec![
+                "file:///repo/v1/agentsight/0.10.1/macos/aarch64/meta.toml".to_string(),
+                "file:///repo/v1/agentsight/0.10.1/meta.toml".to_string(),
+            ]
+        );
+    }
+
+    /// An artifact published directly in the version root derives the same
+    /// URL both ways; the duplicate must not cost a second fetch.
+    #[test]
+    fn meta_url_candidates_dedupe_the_version_root() {
+        let candidates = meta_url_candidates(
+            "file:///repo/v1/agentsight/0.10.1/agentsight-0.10.1.tar.gz",
+            "agentsight",
+            "0.10.1",
+        );
+        assert_eq!(
+            candidates,
+            vec!["file:///repo/v1/agentsight/0.10.1/meta.toml".to_string()]
+        );
+    }
+
+    /// A flat repository (no `<component>/<version>/` path segment, e.g. an
+    /// off-repo `url = "https://…"` escape hatch) still resolves its sibling.
+    #[test]
+    fn meta_url_candidates_handle_a_flat_layout() {
+        let candidates = meta_url_candidates(
+            "https://mirror.invalid/downloads/agentsight.tar.gz",
+            "agentsight",
+            "0.10.1",
+        );
+        assert_eq!(
+            candidates,
+            vec!["https://mirror.invalid/downloads/meta.toml".to_string()]
+        );
     }
 
     #[test]

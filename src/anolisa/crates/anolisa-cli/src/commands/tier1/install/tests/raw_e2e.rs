@@ -1634,6 +1634,252 @@ fn install_dry_run_rejects_mismatched_sidecar_digest() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Target-specific sidecar metadata
+// ---------------------------------------------------------------------------
+
+/// Local `file://` repo publishing one component for two targets, each with
+/// its own install contract — the shape a raw repository takes once a
+/// component's payload and lifecycle differ per platform.
+///
+/// The Linux build is system-only and its `meta.toml` sits at the version
+/// root (`<component>/<version>/meta.toml`); the macOS build also supports
+/// user mode and publishes `meta.toml` beside its own artifact. Each index
+/// entry carries the `manifest_digest` of *its own* contract.
+///
+/// `macos_sidecar = false` drops the macOS sidecar, leaving the legacy shape:
+/// one version-level contract covering every target. `digests = false` drops
+/// `manifest_digest` from every entry, the shape of a repository published
+/// before the field existed.
+fn write_local_repo_target_specific_meta(
+    root: &Path,
+    macos_sidecar: bool,
+    digests: bool,
+) -> String {
+    const COMPONENT: &str = "agentsight";
+    const VERSION: &str = "0.10.1";
+
+    let v1 = root.join("v1");
+    let version_dir = v1.join(COMPONENT).join(VERSION);
+    std::fs::create_dir_all(&version_dir).expect("create version dir");
+
+    let linux_meta = component_manifest_toml(COMPONENT, VERSION, &["system"]);
+    std::fs::write(version_dir.join("meta.toml"), &linux_meta).expect("write version-level meta");
+    let macos_meta = component_manifest_toml(COMPONENT, VERSION, &["user"]);
+
+    let mut index =
+        String::from("schema_version = 1\nchannel = \"stable\"\npublisher = \"test\"\n");
+    for (os, arch, modes, meta) in [
+        ("linux", "x86_64", &["system"][..], &linux_meta),
+        ("macos", "aarch64", &["user"][..], &macos_meta),
+    ] {
+        let artifact_dir = version_dir.join(os).join(arch);
+        std::fs::create_dir_all(&artifact_dir).expect("create artifact dir");
+        if os == "macos" && macos_sidecar {
+            std::fs::write(artifact_dir.join("meta.toml"), meta).expect("write macos sidecar");
+        }
+
+        // `build_component_artifact` embeds the same manifest text, so the
+        // executed contract digests to the value published for this entry.
+        let artifact = build_component_artifact(COMPONENT, VERSION, modes);
+        let artifact_name = format!("{COMPONENT}-{VERSION}-{os}-{arch}.tar.gz");
+        std::fs::write(artifact_dir.join(&artifact_name), &artifact).expect("write artifact");
+
+        let digest_line = if digests {
+            format!(
+                "manifest_digest = \"sha256:{:x}\"\n",
+                Sha256::digest(meta.as_bytes())
+            )
+        } else {
+            String::new()
+        };
+        index.push_str(&format!(
+            r#"
+[[entries]]
+component = "{COMPONENT}"
+version = "{VERSION}"
+channel = "stable"
+artifact_type = "tar_gz"
+backend = "raw"
+url = "{COMPONENT}/{VERSION}/{os}/{arch}/{artifact_name}"
+os = "{os}"
+arch = "{arch}"
+install_modes = {modes_arr}
+sha256 = "{artifact_sha:x}"
+{digest_line}"#,
+            modes_arr = toml_string_array(modes),
+            artifact_sha = Sha256::digest(&artifact),
+        ));
+    }
+    std::fs::write(v1.join("index.toml"), index).expect("write distribution index");
+    format!("file://{}", v1.display())
+}
+
+fn agentsight_resolve_inputs(repo_url: String) -> ResolveInputs<'static> {
+    ResolveInputs {
+        component: "agentsight".to_string(),
+        package: "agentsight".to_string(),
+        backend: "raw".to_string(),
+        base_url: repo_url,
+        version: None,
+        warnings: Vec::new(),
+    }
+}
+
+/// File names cached under `<cache>/downloads`, for asserting what a dry-run
+/// did and did not fetch.
+fn cached_download_names(layout: &FsLayout) -> Vec<String> {
+    std::fs::read_dir(layout.cache_dir.join("downloads"))
+        .expect("downloads cache exists")
+        .map(|entry| {
+            entry
+                .expect("cache entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
+}
+
+/// The regression, in the shape that fails silently: with no
+/// `manifest_digest` to cross-check, deriving the metadata URL from the
+/// version root loads the *Linux* contract for a resolved macOS artifact.
+/// That contract declares system mode only, so a `--install-mode user`
+/// dry-run refuses an install the execution path — which reads the artifact's
+/// own embedded contract — would have accepted.
+#[test]
+fn dry_run_contract_reads_the_target_sidecar_without_a_digest() {
+    let sandbox = TestSandbox::new();
+    let repo_url = write_local_repo_target_specific_meta(sandbox.repo_root(), true, false);
+    let ctx = sandbox.context(InstallMode::User);
+    let layout = common::resolve_layout(&ctx);
+
+    let resolution = resolve_raw(
+        &ctx,
+        &layout,
+        &macos_arm_env(),
+        agentsight_resolve_inputs(repo_url),
+    )
+    .expect("macos/aarch64 entry must resolve");
+
+    let contract = load_dry_run_install_contract(&ctx, &layout, &resolution)
+        .expect("the macOS sidecar must satisfy the user-mode dry-run")
+        .expect("a published sidecar must yield a contract");
+
+    assert_eq!(
+        contract.manifest.install.modes,
+        vec!["user".to_string()],
+        "dry-run must validate the macOS contract, not the version-level Linux one"
+    );
+}
+
+/// The same resolution with `manifest_digest` published per entry: the
+/// sidecar is both selected by target and verified against the digest the
+/// execution path checks the embedded contract against.
+#[test]
+fn dry_run_contract_reads_the_resolved_target_sidecar() {
+    let sandbox = TestSandbox::new();
+    let repo_url = write_local_repo_target_specific_meta(sandbox.repo_root(), true, true);
+    let ctx = sandbox.context(InstallMode::User);
+    let layout = common::resolve_layout(&ctx);
+
+    let resolution = resolve_raw(
+        &ctx,
+        &layout,
+        &macos_arm_env(),
+        agentsight_resolve_inputs(repo_url),
+    )
+    .expect("macos/aarch64 entry must resolve");
+    assert!(
+        resolution
+            .artifact_url
+            .ends_with("/macos/aarch64/agentsight-0.10.1-macos-aarch64.tar.gz"),
+        "fixture must resolve the macOS artifact, got: {}",
+        resolution.artifact_url
+    );
+
+    let contract = load_dry_run_install_contract(&ctx, &layout, &resolution)
+        .expect("the macOS sidecar must satisfy the user-mode dry-run")
+        .expect("a published sidecar must yield a contract");
+
+    assert_eq!(
+        contract.manifest.install.modes,
+        vec!["user".to_string()],
+        "dry-run must validate the macOS contract, not the version-level Linux one"
+    );
+    let cached = cached_download_names(&layout);
+    assert!(
+        cached.iter().all(|name| !name.ends_with(".tar.gz")),
+        "dry-run must stay lightweight and skip the artifact; cache entries: {cached:?}"
+    );
+}
+
+/// A repository publishing only version-level metadata — every raw repo
+/// before target-specific contracts existed — must keep resolving its
+/// contract through the version-root fallback.
+#[test]
+fn dry_run_contract_falls_back_to_version_level_meta() {
+    let sandbox = TestSandbox::new();
+    let repo_url = write_local_repo_target_specific_meta(sandbox.repo_root(), false, true);
+    let ctx = sandbox.context(InstallMode::System);
+    let layout = common::resolve_layout(&ctx);
+
+    let sibling = sandbox
+        .repo_root()
+        .join("v1/agentsight/0.10.1/linux/x86_64/meta.toml");
+    assert!(
+        !sibling.exists(),
+        "the legacy fixture must publish no sibling metadata"
+    );
+
+    let resolution = resolve_raw(
+        &ctx,
+        &layout,
+        &linux_env(),
+        agentsight_resolve_inputs(repo_url),
+    )
+    .expect("linux/x86_64 entry must resolve");
+
+    let contract = load_dry_run_install_contract(&ctx, &layout, &resolution)
+        .expect("an absent sibling must fall back, not fail")
+        .expect("version-level metadata must still yield a contract");
+
+    assert_eq!(contract.manifest.install.modes, vec!["system".to_string()]);
+    assert_eq!(contract.source, InstallContractSource::SidecarMeta);
+}
+
+/// Fallback is reserved for absence. A published sibling that does not match
+/// the index `manifest_digest` must fail the dry-run — falling through to the
+/// version root would validate a contract the resolved artifact never had.
+#[test]
+fn dry_run_contract_rejects_a_tampered_sidecar_without_falling_back() {
+    let sandbox = TestSandbox::new();
+    let repo_url = write_local_repo_target_specific_meta(sandbox.repo_root(), true, true);
+    std::fs::write(
+        sandbox
+            .repo_root()
+            .join("v1/agentsight/0.10.1/macos/aarch64/meta.toml"),
+        component_manifest_toml("agentsight", "0.10.1", &["user", "system"]),
+    )
+    .expect("replace the macOS sidecar");
+
+    let ctx = sandbox.context(InstallMode::User);
+    let layout = common::resolve_layout(&ctx);
+    let resolution = resolve_raw(
+        &ctx,
+        &layout,
+        &macos_arm_env(),
+        agentsight_resolve_inputs(repo_url),
+    )
+    .expect("macos/aarch64 entry must resolve");
+
+    let Err(err) = load_dry_run_install_contract(&ctx, &layout, &resolution) else {
+        panic!("a sidecar digest mismatch must fail the dry-run, not fall back");
+    };
+    assert_eq!(err.code(), "EXECUTION_FAILED");
+    assert!(err.reason().contains("sha256 mismatch"), "got: {err}");
+}
+
 #[test]
 fn install_no_conflict_when_conflicting_component_not_installed() {
     let tmp = tempdir().expect("tmpdir");

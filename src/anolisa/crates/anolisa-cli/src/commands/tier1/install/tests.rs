@@ -1248,6 +1248,24 @@ pub fn rpm_host_env() -> anolisa_env::EnvFacts {
     }
 }
 
+/// Host facts for a macOS/aarch64 target, so raw resolution can select a
+/// macOS index entry deterministically on a Linux CI runner. macOS carries
+/// no libc or pkg_base selector, and no BPF facts.
+pub fn macos_arm_env() -> anolisa_env::EnvFacts {
+    anolisa_env::EnvFacts {
+        os: "macos".to_string(),
+        arch: "aarch64".to_string(),
+        libc: None,
+        pkg_base: None,
+        os_id: Some("macos".to_string()),
+        os_id_like: None,
+        os_version: Some("15.0".to_string()),
+        btf: None,
+        cap_bpf: None,
+        ..anolisa_env::EnvService::detect()
+    }
+}
+
 /// Host facts for a distro outside the known rpm/deb families; missing rpm
 /// tooling must fail closed here.
 pub fn unknown_host_env() -> anolisa_env::EnvFacts {
