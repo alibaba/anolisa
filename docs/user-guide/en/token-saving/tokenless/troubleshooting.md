@@ -124,7 +124,7 @@ directory.
 
 Common causes:
 
-- The target agent framework is not installed or detected.
+- The target Agent product is not installed or detected.
 - The framework version does not meet the adapter requirement.
 - The adapter command ran as a different user from the one that owns the target
   framework configuration or adapter receipt.
@@ -236,7 +236,7 @@ Expired or never-successfully-written content cannot be recovered.
 
 ## Statistics exist but the prompt is not smaller
 
-First check the framework's response-delivery path in the [support matrix](framework-integration.md#support-matrix). Qoder and Qwen Code emit `additionalContext`; legacy Copilot Shell appends it; Codex intentionally retains the original result and adds only analysis or a compressed alternative. These paths can record a smaller candidate without reducing the final prompt.
+First check the framework's response-delivery path in the [support matrix](framework-integration.md#agent-adapter-support-matrix). Qoder and Qwen Code emit `additionalContext`; legacy Copilot Shell appends it; Codex intentionally retains the original result and adds only analysis or a compressed alternative. These paths can record a smaller candidate without reducing the final prompt.
 
 For Claude Code, response replacement requires version 2.1.121 or later. Older or unrecognized versions pass the original through. OpenClaw replaces persisted results, but TOON remains off unless `toon_compression_enabled=true`.
 

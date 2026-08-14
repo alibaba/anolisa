@@ -99,10 +99,6 @@ stage_payload() {
         codex/.codex-plugin/plugin.json \
         qwencode/qwen-extension.json \
         qwencode/hooks/run-hook.sh \
-        agentscope/LICENSE \
-        agentscope/pyproject.toml \
-        agentscope/src/tokenless_agentscope/__init__.py \
-        agentscope/src/tokenless_agentscope/middleware.py \
         common/cosh-extension.json \
         common/tool-ready-spec.json \
         common/tokenless-env-fix.sh; do
@@ -121,6 +117,10 @@ stage_payload() {
     install -p -m 0755 "$BIN_DIR/rtk" "$BIN_DIR/toon" \
         "$stage/libexec/anolisa/tokenless/"
     cp -a "$adapters"/. "$stage/adapters"/
+
+    # A checkout upgraded from the former adapter layout can retain formerly
+    # ignored AgentScope build artifacts. They are not part of this payload.
+    rm -rf "$stage/adapters/agentscope"
 
     # ANOLISA intentionally ignores archive symlinks. The source tree shares
     # these dispatchers by symlink, so raw packages must carry regular files.
@@ -142,11 +142,6 @@ stage_payload() {
         "$stage/adapters/openclaw/package-lock.json" \
         "$stage/adapters/openclaw/index.ts" \
         "$stage/adapters/openclaw/tsconfig.json"
-    rm -rf "$stage/adapters/agentscope/build"
-    find "$stage/adapters/agentscope" -type d \
-        \( -name '__pycache__' -o -name '*.egg-info' \) -prune -exec rm -rf {} +
-    find "$stage/adapters/agentscope" -type f \
-        \( -name '*.pyc' -o -name '*.pyo' \) -delete
     find "$stage/adapters" "$stage/extensions/tokenless" \
         \( -name '*.in' -o -name '.gitignore' \) -delete
     normalize_modes "$stage"

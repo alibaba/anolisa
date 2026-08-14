@@ -139,9 +139,9 @@ Compression and rewrite hooks normally return no modification when `tokenless` o
 
 Command rewriting also changes the shell command submitted by the host. Most adapters replace the command input directly; Hermes blocks the first call and tells the agent to retry with the rewritten command. Validate important command workflows as well as compressed output.
 
-## Supported agent frameworks
+## Supported Agent adapters
 
-| Framework | Integration | Current code path |
+| Agent product | Integration | Current code path |
 |-----------|-------------|-------------------|
 | cosh | Extension | Hard-disabled Tool Ready, rewrite, response + TOON, Schema; Cosh-NG has a replacement path, while legacy Copilot Shell appends additional context |
 | OpenClaw | Plugin | Hard-disabled Tool Ready, `exec` rewrite, persisted-result replacement, optional TOON; no Schema |
@@ -149,7 +149,14 @@ Command rewriting also changes the shell command submitted by the host. Most ada
 | Qoder | Plugin | Hard-disabled Tool Ready, rewrite, response + TOON through `additionalContext`; no Schema |
 | Claude Code | Marketplace plugin | Hard-disabled Tool Ready, Bash rewrite, response replacement on Claude Code 2.1.121 or later; conditional TOON; no Schema |
 | Codex | Plugin | Hard-disabled Tool Ready, rewrite, response/TOON analysis added as context; the original result is retained; no Schema |
+| OpenCode | Plugin | Hard-disabled Tool Ready, Bash rewrite, tool-output replacement with response + TOON, Schema |
 | Qwen Code | Extension | Hard-disabled Tool Ready, rewrite, response + TOON through `additionalContext`, Schema |
+
+## Supported Agent development frameworks
+
+| Framework | Integration | Current code path |
+|-----------|-------------|-------------------|
+| AgentScope | In-process Python middleware | Replaces successful final tool responses and exposes a marker-scoped retrieval Tool through a separate Python package |
 
 ## Find documentation by task
 
@@ -158,7 +165,7 @@ Command rewriting also changes the shell command submitted by the host. Most ada
 | Install and verify for the first time | [Quick Start](QUICKSTART.md) |
 | Build the standalone CLI from source | [This page · Build the standalone CLI from source](#build-the-standalone-cli-from-source) |
 | Build the in-process Python runtime | [This page · Build the Python runtime from source](#build-the-python-runtime-from-source) |
-| Connect or switch an agent framework | [Framework integration](framework-integration.md) |
+| Connect an Agent product or integrate AgentScope | [Agent and framework integration](framework-integration.md) |
 | Compress, retrieve, or run MCP manually | [CLI reference](cli-reference.md) |
 | Inspect savings or content changes, or run a dual comparison | [Measuring savings](measuring-savings.md) |
 | Change settings or understand local data | [Configuration and data privacy](configuration-and-privacy.md) |

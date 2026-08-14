@@ -39,12 +39,12 @@ The correct platform-specific binaries are automatically installed via `optional
 > declare `"libc": ["glibc"]`. musl-based distributions (e.g. Alpine) are not
 > supported — build from source there instead.
 
-## Framework Adapters
+## Agent Adapters
 
-The root package bundles the Tokenless framework adapters (cosh, OpenClaw,
-Hermes, qoder, claude-code, codex, qwencode). The adapter hooks are plain
-bash/python scripts — OS and architecture independent — so they work on both
-Linux and macOS.
+The root package bundles the Tokenless adapters for Agent products (cosh,
+OpenClaw, Hermes, Qoder, Claude Code, Codex, OpenCode, and Qwen Code). The
+adapter hooks are plain bash/python scripts — OS and architecture independent —
+so they work on both Linux and macOS.
 
 On install, they are copied to the user-level data directory searched by the
 hook dispatcher:
@@ -53,7 +53,7 @@ hook dispatcher:
 ~/.local/share/anolisa/adapters/tokenless/
 ```
 
-To register an adapter with your agent framework, run its install script,
+To register an adapter with an Agent product, run its install script,
 e.g. for Claude Code:
 
 ```bash

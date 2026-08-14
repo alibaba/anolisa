@@ -161,7 +161,7 @@ standalone CLI from source, see
 
 ## Next steps
 
-- [Framework integration](framework-integration.md): framework-specific activation and behavior
+- [Agent and framework integration](framework-integration.md): Agent adapter activation and AgentScope application integration
 - [User manual](user-manual.md): behavior boundaries and documentation map
 - [CLI reference](cli-reference.md): all subcommands and options
 - [Measuring savings](measuring-savings.md): statistics, dual runs, and AgentSight/SLS

@@ -13,8 +13,8 @@
 - `anolisa-tokenless`：通过 PyO3 暴露 Runtime 的原生 Python 包。
 
 首版 Python 接口只覆盖 JSON 响应压缩与 Stash 取回。Schema 压缩、TOON 编码、RTK
-命令改写、MCP 和框架专用 Middleware 不属于该库。AgentScope 集成将在独立变更中使用
-这个 API。
+命令改写、MCP 和框架专用 Middleware 不属于该库。独立的 `tokenless_agentscope`
+包使用这个 API，并负责 AgentScope 生命周期契约。
 
 ## 架构
 
@@ -22,6 +22,7 @@
 tokenless-schema ─┐
 tokenless-ccr ────┼──> tokenless-runtime ──> tokenless CLI
 tokenless-stats ──┘              └─────────> PyO3 ──> anolisa_tokenless
+                                                       └──> tokenless_agentscope
 ```
 
 `tokenless-runtime` 是高层应用 API。它只打开一次 Stash 和统计数据库，每次调用执行
@@ -62,14 +63,19 @@ Cargo `python-release` profile 使用 unwind panic 语义，因为 Rust panic �
 它的解释器。`make test-python-runtime` 会在全新虚拟环境中安装 Wheel，并验证压缩、
 Unicode 原样取回、错误映射、并发调用和逐调用统计归因。
 
-本仓库负责构建和测试 Wheel，但不会把它发布到 PyPI。正式发布还需要发布流水线为
-每个受支持平台构建 Wheel，按发布策略签名或生成证明，再使用发布凭据上传。
+`python/agentscope/` 是独立的纯 Python Distribution。
+`make agentscope-wheel` 会把它构建到同一个 `target/wheels/` 输出目录；
+`make test-agentscope-integration` 会配合同版本的原生 Runtime Wheel，验证声明支持的
+AgentScope 版本范围。
+
+本仓库负责构建和测试两个 Python Distribution，但不会把它们发布到 PyPI。正式发布
+还需要发布流水线为每个受支持平台构建 Wheel，按发布策略签名或生成证明，再使用发布
+凭据上传。
 
 ## 兼容性与演进
 
-Rust API 和 Python 包从 alpha 接口开始。运行在兼容 Python 进程内的新框架 Adapter
+Rust API 和 Python 包从 alpha 接口开始。运行在兼容 Python 进程内的新框架集成
 应依赖 Python API，而不是调用 CLI。现有 CLI 和 Hook 集成仍受支持，无需迁移。
 
-后续 AgentScope Adapter 将负责流式 Block 保真、工具注册、marker 授权、压缩模式和
-Middleware fail-open 等框架细节。这样可以避免把框架生命周期逻辑放入通用压缩
-Runtime。
+AgentScope 包负责流式 Block 保真、工具注册、marker 授权、压缩模式和 Middleware
+fail-open 等框架细节。这样可以避免把框架生命周期逻辑放入通用压缩 Runtime。

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for the AgentScope Tokenless middleware adapter."""
+"""Unit tests for the Tokenless AgentScope integration."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from enum import StrEnum
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_PACKAGE_SRC = _REPO_ROOT / "adapters" / "tokenless" / "agentscope" / "src"
+_PACKAGE_SRC = _REPO_ROOT / "python" / "agentscope" / "src"
 
 
 class _TokenlessError(Exception):
@@ -166,9 +166,9 @@ def _install_dependency_stubs() -> None:
 _install_dependency_stubs()
 sys.path.insert(0, str(_PACKAGE_SRC))
 
-adapter = importlib.import_module("tokenless_agentscope.middleware")
-CompressionMode = adapter.CompressionMode
-TokenlessMiddleware = adapter.TokenlessMiddleware
+integration = importlib.import_module("tokenless_agentscope.middleware")
+CompressionMode = integration.CompressionMode
+TokenlessMiddleware = integration.TokenlessMiddleware
 TextBlock = sys.modules["agentscope.message"].TextBlock
 ToolResultState = sys.modules["agentscope.message"].ToolResultState
 ToolChunk = sys.modules["agentscope.tool"].ToolChunk
@@ -551,11 +551,11 @@ class PolicyTest(unittest.TestCase):
         policy = json.loads(
             (_REPO_ROOT / "adapters/tokenless/common/hooks/tool_categories.json").read_text(),
         )
-        self.assertEqual(adapter._SKIP_TOOLS, frozenset(policy["layer_1_skip"]["tools"]))
-        self.assertEqual(adapter._SHELL_TOOLS, frozenset(policy["layer_2_shell"]["tools"]))
+        self.assertEqual(integration._SKIP_TOOLS, frozenset(policy["layer_1_skip"]["tools"]))
+        self.assertEqual(integration._SHELL_TOOLS, frozenset(policy["layer_2_shell"]["tools"]))
         thresholds = policy["layer_2_shell"]["thresholds"]
         self.assertEqual(
-            adapter._SHELL_THRESHOLDS,
+            integration._SHELL_THRESHOLDS,
             (
                 thresholds["truncate_strings_at"],
                 thresholds["truncate_arrays_at"],

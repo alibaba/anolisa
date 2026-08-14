@@ -57,6 +57,8 @@ tokenless 只优化**工具调用响应**进入 LLM 上下文前的冗余，不�
 
 ## 集成路径
 
+### Agent Adapter
+
 - **OpenClaw 插件** — 命令重写 + 响应压缩 + Schema 压缩
 - **copilot-shell 钩子** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
 - **Hermes Agent 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
@@ -64,7 +66,11 @@ tokenless 只优化**工具调用响应**进入 LLM 上下文前的冗余，不�
 - **Claude Code 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
 - **Codex 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
 - **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + Schema/响应压缩 + TOON
-- **AgentScope 中间件** — 替换成功的最终工具响应，并提供受 marker 约束的原生恢复 Tool
+
+### Agent 开发框架集成
+
+- **AgentScope Python 集成** — 替换成功的最终工具响应，并提供受 marker 约束的原生
+  恢复 Tool。
 
 ## 快速开始
 
@@ -101,7 +107,7 @@ Mac 暂无已发布的软件包。仓库中的 npm packaging 目录用于构建�
 不代表 registry 中已有可安装的软件包。
 
 通过 ANOLISA 管理的安装或已执行 `adopt` 的 RPM 会放置可用 adapter，但不会
-直接改动 Agent 框架的用户配置。请用拥有该配置的用户执行以下命令，并且只启用
+直接改动 Agent 产品的用户配置。请用拥有该配置的用户执行以下命令，并且只启用
 准备使用的 adapter。
 
 ```bash
@@ -141,7 +147,7 @@ Maturin。请先安装 [`uv`](https://docs.astral.sh/uv/)，或者在 `PATH` 中
 
 `anolisa_tokenless` 模块支持 CPython 3.11 及更高版本，但只能在构建该原生
 Wheel 的对应平台使用。当前只开放 JSON 响应压缩和 Stash 取回，不捆绑
-CLI、RTK、TOON 或框架 Adapter。仓库会构建并测试该包，但目前尚未发布到
+CLI、RTK、TOON 或框架集成。仓库会构建并测试该包，但目前尚未发布到
 PyPI。具体见 [Runtime 设计](docs/design/runtime-library_zh.md) 和
 [用户手册](../../docs/user-guide/zh/token-saving/tokenless/user-manual.md#从源码构建-python-runtime)。
 
@@ -160,18 +166,17 @@ make opencode-install
 `XDG_CONFIG_HOME` 和显式的 `TOKENLESS_OPENCODE_CONFIG_DIR` 覆盖。
 安装后重启 OpenCode 即可加载插件。
 
-### AgentScope 中间件
+### AgentScope 框架集成
 
-AgentScope 2.0 应用需要显式安装两个相同版本的 Python Wheel。Adapter 直接调用
-`anolisa-tokenless` runtime，不会启动 CLI 子进程。runtime Wheel 当前尚未发布到
-Python 包索引，因此在全新环境中只安装 anolisa 随附的 Adapter 源码无法解析其
-精确版本依赖。当前应从源码 checkout 构建并同时安装两个 Wheel：
+AgentScope 2.0 应用需要显式安装两个相同版本的 Python Wheel。框架集成直接调用
+`anolisa-tokenless` Runtime，不会启动 CLI 子进程。两个 Python 包当前都尚未发布到
+包索引。当前应从源码 checkout 构建并同时安装两个 Wheel：
 
 ```bash
 make python-wheel agentscope-wheel
 python -m pip install \
   target/wheels/anolisa_tokenless-*.whl \
-  target/agentscope-wheels/anolisa_tokenless_agentscope-*.whl
+  target/wheels/anolisa_tokenless_agentscope-*.whl
 ```
 
 普通高代码 Agent 需要把同一个中间件实例同时注册到 Toolkit 和 Agent。
@@ -210,8 +215,8 @@ agent = Agent(
 AgentScope 上下文或摘要中时自动允许。每个用户或租户必须显式传入不同的绝对
 `data_dir`；省略 `data_dir` 时，`TOKENLESS_DATA_DIR` 只作为进程级回退。除非应用
 有明确生命周期策略，否则保留默认一小时 stash TTL，且不要依赖跨节点恢复。
-首版不启用 Shell、MCP、TOON、RTK 或 Schema 压缩，也不由
-`anolisa adapter enable` 管理。
+该集成不启用 Shell、MCP、TOON、RTK 或 Schema 压缩。源码位于
+`python/agentscope/`，可后续独立发布 Wheel。
 
 ## Raw 打包
 
@@ -317,7 +322,8 @@ tokenless env-check --tool Shell --fix
 - `crates/tokenless-runtime/` — CLI 与语言绑定共用的有状态 Rust API
 - `crates/tokenless-cli/` — CLI 二进制
 - `python/tokenless/` — 面向 CPython 3.11+ 的 PyO3 `anolisa_tokenless` 包
-- `adapters/tokenless/` — 适配器包（含 AgentScope 中间件及各框架 Plugin/Hook）
+- `python/agentscope/` — 独立的 AgentScope 框架集成与 Wheel 元数据
+- `adapters/tokenless/` — 面向具体 Agent/CLI 的 Plugin、Hook 与 Extension 适配器包
 - `third_party/rtk/` — RTK 命令重写引擎（vendored）
 - `packaging/raw/` — Tokenless 自维护的 ANOLISA Raw 打包与目标校验
 

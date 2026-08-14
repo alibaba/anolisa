@@ -11,7 +11,7 @@ Token-Less combines complementary strategies to minimize LLM token consumption:
 - **Command Rewriting** — Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI command output, eliminating noise that would otherwise waste 60–90% of tokens.
 - **Tool Ready (legacy, hard-disabled)** — Its pre-call dependency checks are retained in source but unconditionally bypassed while the readiness model is redesigned.
 
-Framework integrations are available for:
+Agent adapters are available for:
 
 - **OpenClaw plugin** — covers command rewriting, response compression, and schema compression in one plugin.
 - **copilot-shell hook** — intercepts Shell commands via a PreToolUse hook and delegates to RTK for command rewriting + output filtering.
@@ -20,7 +20,9 @@ Framework integrations are available for:
 - **Claude Code plugin** — RTK command rewriting, response/TOON compression, and registered but hard-disabled Tool Ready via Claude Code's official plugin marketplace.
 - **Codex plugin** — response compression, TOON encoding, registered but hard-disabled Tool Ready, and command rewriting via Codex's native hook system.
 - **OpenCode plugin** — schema/response/TOON compression, registered but hard-disabled Tool Ready, and command rewriting via OpenCode's local plugin API.
-- **AgentScope middleware** — replaces successful final tool responses and provides a marker-scoped native retrieval Tool.
+
+For framework developers, the separate **AgentScope Python integration** replaces successful
+final tool responses and provides a marker-scoped native retrieval Tool.
 
 ## Features
 
@@ -39,7 +41,7 @@ Framework integrations are available for:
 | Claude Code plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅ |
 | Codex plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅ |
 | OpenCode plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Schema compression ✅, Response compression ✅, TOON ✅ |
-| AgentScope middleware | — | Response compression ✅, Native retrieval Tool ✅ |
+| AgentScope framework integration | — | Response compression ✅, Native retrieval Tool ✅ |
 | Zero runtime deps | — | Pure Rust, single static binary |
 
 ## Applicable Scenarios & Expected Effects
@@ -88,8 +90,9 @@ Token-Less/
 ├── crates/tokenless-runtime/  # Stateful in-process compression and retrieval API
 ├── crates/tokenless-cli/      # CLI binary: `tokenless` command (env-check, compress, retrieve, stats)
 ├── python/tokenless/          # PyO3 package: `anolisa_tokenless`
-├── adapters/tokenless/        # FHS adapter bundle (manifest + framework integrations)
-│   ├── manifest.json            # Adapter manifest for supported frameworks
+├── python/agentscope/         # Pure-Python AgentScope integration package
+├── adapters/tokenless/        # FHS bundle for Agent plugins, hooks, and extensions
+│   ├── manifest.json            # Adapter manifest for supported Agent products
 │   ├── common/                  # Shared: hooks, spec, env-fix, commands, cosh-extension
 │   │   ├── hooks/               # copilot-shell hooks (tool-ready + rewrite + compression)
 │   │   ├── cosh-extension.json  # copilot-shell extension manifest (references common/hooks/)
@@ -101,8 +104,7 @@ Token-Less/
 │   ├── qoder/                   # Qoder CLI plugin + scripts
 │   ├── claude-code/             # Claude Code plugin + marketplace + hooks
 │   ├── codex/                   # Codex plugin + scripts
-│   ├── opencode/                # OpenCode local plugin + scripts
-│   └── agentscope/              # Installable AgentScope Python middleware
+│   └── opencode/                # OpenCode local plugin + scripts
 ├── third_party/rtk/           # RTK vendored source (justfile clone+patch from GitHub)
 ├── third_party/patches/      # Patches for vendored third_party sources
 ├── Makefile                   # Unified build system
@@ -146,7 +148,7 @@ packaging sources are for release construction and are not a public
 build target; it does not indicate registry availability.
 
 ANOLISA-managed and adopted RPM installations place the available adapters
-without changing an Agent framework's user configuration. Run these commands
+without changing an Agent product's user configuration. Run these commands
 as the user who owns that configuration, and enable only the adapter you need:
 
 ```bash
@@ -189,7 +191,7 @@ plain workspace-default Cargo commands exclude the Python extension.
 The `anolisa_tokenless` module supports CPython 3.11 and later on the platform
 where its native wheel was built. It currently exposes JSON response
 compression and Stash retrieval; it does not bundle the CLI, RTK, TOON, or a
-framework adapter. The package is built and tested in this repository but is
+framework integration. The package is built and tested in this repository but is
 not yet published to PyPI. See the [runtime design](docs/design/runtime-library.md)
 and the [user manual](../../docs/user-guide/en/token-saving/tokenless/user-manual.md#build-the-python-runtime-from-source).
 
@@ -523,20 +525,18 @@ The installer creates a `tokenless.js` symbolic link in OpenCode's global
 `OPENCODE_CONFIG_DIR`, `XDG_CONFIG_HOME`, and the explicit
 `TOKENLESS_OPENCODE_CONFIG_DIR` override.
 
-## AgentScope Middleware
+## AgentScope Framework Integration
 
 AgentScope 2.0 applications install two same-version Python wheels explicitly.
-The adapter uses the `anolisa-tokenless` runtime directly and does not start a
-CLI subprocess. The runtime wheel is not currently published to a Python
-package index, so installing only the adapter source staged by anolisa cannot
-resolve its exact dependency in a fresh environment. Build and install both
-wheels from a source checkout:
+The framework integration uses the `anolisa-tokenless` runtime directly and
+does not start a CLI subprocess. Neither Python package is currently published
+to a package index. Build and install both wheels from a source checkout:
 
 ```bash
 make python-wheel agentscope-wheel
 python -m pip install \
   target/wheels/anolisa_tokenless-*.whl \
-  target/agentscope-wheels/anolisa_tokenless_agentscope-*.whl
+  target/wheels/anolisa_tokenless_agentscope-*.whl
 ```
 
 Register the same middleware instance with both the high-code Toolkit and the
@@ -577,9 +577,9 @@ for a 24-character hash whose marker is present in the current AgentScope
 context or summary. Pass a different absolute `data_dir` to each user or tenant;
 `TOKENLESS_DATA_DIR` is only a process-wide fallback when `data_dir` is omitted.
 Retain the default one-hour stash TTL unless the application has a deliberate
-lifecycle policy, and do not expect retrieval across nodes. This first adapter
-does not enable Shell, MCP, TOON, RTK, or schema compression, and is not managed
-by `anolisa adapter enable`.
+lifecycle policy, and do not expect retrieval across nodes. This integration
+does not enable Shell, MCP, TOON, RTK, or schema compression. Its source lives
+under `python/agentscope/` for independent wheel distribution.
 
 
 ## Build
@@ -590,7 +590,9 @@ by `anolisa adapter enable`.
 | `make build-tokenless` | Build `tokenless` + `rtk` (via justfile) |
 | `make build-toon` | Install TOON binary via `cargo install toon-format` |
 | `make python-wheel` | Build the native `anolisa-tokenless` wheel |
+| `make agentscope-wheel` | Build the pure-Python AgentScope integration wheel |
 | `make test-python-runtime` | Install and test the wheel in an isolated environment |
+| `make test-agentscope-integration` | Test both wheels with supported AgentScope versions |
 | `make install` | Build and install binaries to `BIN_DIR` (default: ~/.local/bin) |
 | `make test` | Run all tests (Rust + hooks) |
 | `make test-hooks` | Run hook integration tests |
@@ -663,6 +665,7 @@ layout and single-target interface.
 | `crates/tokenless-schema/` | Core Rust library — `SchemaCompressor` and `ResponseCompressor` |
 | `crates/tokenless-runtime/` | Stateful Rust API shared by the CLI and language bindings |
 | `python/tokenless/` | PyO3 package exposing `anolisa_tokenless` for CPython 3.11+ |
+| `python/agentscope/` | Independent AgentScope framework integration and wheel metadata |
 | `adapters/tokenless/` | FHS adapter bundle — manifest, env-check spec/fix, hooks, OpenClaw plugin |
 | `adapters/tokenless/hermes/` | Hermes Agent adapter — plugin + detect/install/uninstall scripts |
 | `adapters/tokenless/qoder/` | Qoder CLI adapter — plugin + detect/install/uninstall scripts |

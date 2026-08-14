@@ -1,12 +1,14 @@
-# Tokenless Framework Integration
+# Tokenless Agent and Framework Integration
 
 [中文版](../../../zh/token-saving/tokenless/framework-integration.md)
 
-Tokenless uses adapters to connect compression, command rewriting, and environment checks to an agent. Installing Tokenless provides the binaries and adapter resources. Plugin- and hook-based frameworks call them after their adapter is enabled; AgentScope applications install and register the Python middleware explicitly.
+Tokenless has two integration layers. Agent adapters connect the installed binaries to concrete
+Agent products through plugins, hooks, and extensions. AgentScope support is instead an in-process
+Python framework package that application developers install and register explicitly.
 
-## Support matrix
+## Agent adapter support matrix
 
-| Framework | Value | Tool Ready | Rewrite behavior | Response delivery | TOON | Schema |
+| Agent product | Value | Tool Ready | Rewrite behavior | Response delivery | TOON | Schema |
 |-----------|-------|------------|------------------|-------------------|------|--------|
 | cosh | `cosh` | Hard-disabled | Replaces supported shell input | Cosh-NG replaces the response; legacy Copilot Shell appends context | Attempted after response compression | ✅ |
 | OpenClaw | `openclaw` | Hard-disabled | Replaces the `exec` command input | Replaces the persisted tool-result message | Off by default; opt in | — |
@@ -16,7 +18,6 @@ Tokenless uses adapters to connect compression, command rewriting, and environme
 | Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original and adds analysis or a compressed alternative | Used to build that alternative | — |
 | OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Attempted after response compression | ✅ |
 | Qwen Code | `qwencode` | Hard-disabled | Emits rewritten shell input | Emits `additionalContext` | Attempted after response compression | ✅ |
-| AgentScope | Python API | — | — | Replaces successful final tool responses | — | — |
 
 “—” means that the current adapter does not register that capability. The corresponding Tokenless CLI command may still be available.
 
@@ -24,7 +25,8 @@ Tool Ready remains registered by these adapters but is unconditionally hard-disa
 
 `additionalContext` is an additive hook field. The Tokenless source does not remove the original result on those paths; the final treatment also depends on the host implementation. A statistics record proves that a candidate became smaller, not that the host removed the original from its model request.
 
-OpenCode currently uses the bundled lifecycle scripts documented below. AgentScope uses an installable Python package and explicit application code. Neither is registered with the `anolisa adapter enable` driver set in this release.
+OpenCode currently uses the bundled lifecycle scripts documented below and is not registered with
+the `anolisa adapter enable` driver set in this release.
 
 ## Adapter processing rules
 
@@ -57,7 +59,7 @@ Run the adapter commands below as the user who owns the target Agent
 configuration. A user-scoped adapter operation can discover the adopted system
 package while keeping the framework mutation in that user's configuration.
 
-### 1. Scan frameworks
+### 1. Scan Agent products
 
 ```bash
 anolisa adapter scan
@@ -83,9 +85,10 @@ anolisa adapter enable tokenless codex
 anolisa adapter enable tokenless qwencode
 ```
 
-Enable only frameworks that you use. When enabling more than one, run and verify each command separately.
+Enable only Agent products that you use. When enabling more than one, run and verify each command separately.
 
-OpenCode and AgentScope are exceptions to this section. Use OpenCode's bundled install script under [Manual integration after npm installation](#manual-integration-after-npm-installation), and use the [AgentScope](#agentscope) instructions below.
+OpenCode uses its bundled install script under
+[Manual integration after npm installation](#manual-integration-after-npm-installation).
 
 For OpenClaw, anolisa first attempts a normal install and does not add an unsafe-install bypass by default. If OpenClaw rejects the plugin on its safety scan, read the reported findings. Only after accepting them, retry explicitly:
 
@@ -167,7 +170,7 @@ cp -R ~/.local/share/anolisa/adapters/tokenless/common/hooks \
 
 Restart cosh afterwards. Before removing it, exit cosh and confirm that the target directory is the Tokenless Extension created by this npm installation.
 
-## Framework activation notes
+## Agent adapter activation notes
 
 ### cosh
 
@@ -201,22 +204,19 @@ OpenCode discovers global local plugins at startup. Use the bundled Tokenless li
 
 The extension loads in a new Qwen Code session. Restart and run one tool call to verify it.
 
-### AgentScope
+## AgentScope framework integration
 
 The Python package supports `agentscope>=2.0.5,<2.1`. The native
-`anolisa-tokenless` runtime wheel is not currently published to a Python
-package index. Although anolisa stages the adapter source under
-`~/.local/share/anolisa/adapters/tokenless/agentscope` or
-`/usr/share/anolisa/adapters/tokenless/agentscope`, installing that source
-alone cannot resolve its exact runtime dependency in a fresh environment.
-The currently supported installation path is to build and install both
-same-version wheels from a source checkout:
+`anolisa-tokenless` runtime wheel and AgentScope integration wheel are not
+currently published to a Python package index. The currently supported
+installation path is to build and install both same-version wheels from a
+source checkout:
 
 ```bash
 make python-wheel agentscope-wheel
 python -m pip install \
   target/wheels/anolisa_tokenless-*.whl \
-  target/agentscope-wheels/anolisa_tokenless_agentscope-*.whl
+  target/wheels/anolisa_tokenless_agentscope-*.whl
 ```
 
 For a high-code Agent, register the same middleware instance with its Toolkit
@@ -307,13 +307,14 @@ expire after the current fixed one-hour TTL, so the Agent should retrieve
 necessary content before that boundary.
 
 Compression and retrieval call the in-process `anolisa-tokenless` runtime from
-an async worker thread; the adapter does not start a CLI process or grant Shell
+an async worker thread; the integration does not start a CLI process or grant Shell
 access. It also does not add MCP, TOON, RTK command rewriting, or schema
 compression.
 
 ## Verify the actual integration
 
-Do not treat a zero install exit code as the only success criterion. At minimum, run:
+For an Agent adapter, do not treat a zero install exit code as the only success criterion. At
+minimum, run:
 
 ```bash
 tokenless --version
@@ -322,6 +323,17 @@ tokenless stats list --limit 5
 ```
 
 Then execute a tool task with visible output in the target agent. If `stats list` remains empty, follow [No statistics appear after enabling the adapter](troubleshooting.md#no-statistics-appear-after-enabling-the-adapter).
+
+For the AgentScope framework package, validate the two wheels and the declared AgentScope version
+range from a source checkout with:
+
+```bash
+make test-agentscope-integration
+```
+
+Then exercise one successful, compressible tool response in the application and confirm that the
+middleware returns the smaller result and that `tokenless_retrieve` can recover marker-scoped
+content from the same `data_dir`.
 
 ## Related documents
 

@@ -393,11 +393,14 @@ function buildAdapters() {
 function copyAdapters(rootPkgDir) {
   const adaptersSrc = join(tokenlessRoot, 'adapters', 'tokenless');
   const adaptersDest = join(rootPkgDir, 'adapters', 'tokenless');
+  const legacyAgentscopeSrc = join(adaptersSrc, 'agentscope');
 
-  console.log('  Bundling framework adapters...');
+  console.log('  Bundling Agent adapters...');
   cpSync(adaptersSrc, adaptersDest, {
     recursive: true,
     filter: (src) =>
+      src !== legacyAgentscopeSrc &&
+      !src.startsWith(`${legacyAgentscopeSrc}${sep}`) &&
       !src.split(sep).includes('node_modules') &&
       !src.endsWith(`${sep}package-lock.json`) &&
       !src.endsWith(`${sep}.gitignore`),
@@ -445,7 +448,7 @@ process.exit(1);
     join(rootPkgDir, 'scripts', 'postinstall.js'),
   );
 
-  // Build and bundle framework adapters (hook scripts are plain bash/python
+  // Build and bundle Agent adapters (hook scripts are plain bash/python
   // — OS and architecture independent), so npm installs get adapter
   // integration on macOS and Linux alike. postinstall copies them to the
   // user-level data dir that run-hook.sh already searches

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Build, install, and exercise the AgentScope adapter with its real dependencies.
+# Build, install, and exercise the AgentScope integration with its real dependencies.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TEST_ROOT="$(mktemp -d /tmp/tokenless-agentscope-adapter-test.XXXXXX)"
+TEST_ROOT="$(mktemp -d /tmp/tokenless-agentscope-integration-test.XXXXXX)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 mapfile -t RUNTIME_WHEELS < <(find "$ROOT/target/wheels" -maxdepth 1 -type f \
     -name 'anolisa_tokenless-*.whl' -print)
-mapfile -t ADAPTER_WHEELS < <(find "$ROOT/target/agentscope-wheels" -maxdepth 1 -type f \
+mapfile -t INTEGRATION_WHEELS < <(find "$ROOT/target/wheels" -maxdepth 1 -type f \
     -name 'anolisa_tokenless_agentscope-*.whl' -print)
-if [ "${#RUNTIME_WHEELS[@]}" -ne 1 ] || [ "${#ADAPTER_WHEELS[@]}" -ne 1 ]; then
+if [ "${#RUNTIME_WHEELS[@]}" -ne 1 ] || [ "${#INTEGRATION_WHEELS[@]}" -ne 1 ]; then
     echo "ERROR: expected exactly one runtime wheel and one AgentScope wheel" >&2
     exit 1
 fi
@@ -23,8 +23,8 @@ run_smoke() {
     uv venv --python python3 "$venv" >/dev/null
     uv pip install --python "$venv/bin/python" \
         "$agentscope_requirement" \
-        "${RUNTIME_WHEELS[0]}" "${ADAPTER_WHEELS[0]}" >/dev/null
-    "$venv/bin/python" "$ROOT/tests/agentscope_adapter_smoke.py"
+        "${RUNTIME_WHEELS[0]}" "${INTEGRATION_WHEELS[0]}" >/dev/null
+    "$venv/bin/python" "$ROOT/tests/agentscope_integration_smoke.py"
     "$venv/bin/python" - <<'PY'
 import agentscope
 
@@ -37,7 +37,7 @@ run_smoke latest 'agentscope>=2.0.5,<2.1'
 
 EXPECTED_VERSION="$(sed -n \
     's/^version = "\([^"]*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
-"$TEST_ROOT/minimum/bin/python" - "$EXPECTED_VERSION" "${ADAPTER_WHEELS[0]}" <<'PY'
+"$TEST_ROOT/minimum/bin/python" - "$EXPECTED_VERSION" "${INTEGRATION_WHEELS[0]}" <<'PY'
 from importlib.metadata import distribution
 from pathlib import Path
 import sys
@@ -55,4 +55,4 @@ assert "Apache License" in Path(license_paths[0].locate()).read_text()
 assert Path(sys.argv[2]).is_file()
 PY
 
-printf 'Tokenless AgentScope adapter smoke test passed\n'
+printf 'Tokenless AgentScope integration smoke test passed\n'

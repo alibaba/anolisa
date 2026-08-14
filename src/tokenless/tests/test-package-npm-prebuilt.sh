@@ -7,11 +7,17 @@ TMP="$(mktemp -d /tmp/tokenless-npm-package-test.XXXXXX)"
 PREBUILT="$ROOT/target/npm-prebuilt"
 BACKUP="$TMP/npm-prebuilt.backup"
 TEST_TOOLS="$TMP/tools"
+LEGACY_AGENTSCOPE="$ROOT/adapters/tokenless/agentscope"
+LEGACY_AGENTSCOPE_BACKUP="$TMP/legacy-agentscope.backup"
 
 cleanup() {
     rm -rf "$PREBUILT"
+    rm -rf "$LEGACY_AGENTSCOPE"
     if [[ -e "$BACKUP" ]]; then
         mv "$BACKUP" "$PREBUILT"
+    fi
+    if [[ -e "$LEGACY_AGENTSCOPE_BACKUP" ]]; then
+        mv "$LEGACY_AGENTSCOPE_BACKUP" "$LEGACY_AGENTSCOPE"
     fi
     rm -rf "$TMP"
 }
@@ -20,6 +26,19 @@ trap cleanup EXIT
 if [[ -e "$PREBUILT" ]]; then
     mv "$PREBUILT" "$BACKUP"
 fi
+if [[ -e "$LEGACY_AGENTSCOPE" ]]; then
+    mv "$LEGACY_AGENTSCOPE" "$LEGACY_AGENTSCOPE_BACKUP"
+fi
+
+mkdir -p \
+    "$LEGACY_AGENTSCOPE/build/lib/tokenless_agentscope" \
+    "$LEGACY_AGENTSCOPE/src/anolisa_tokenless_agentscope.egg-info"
+printf '[build-system]\nrequires = ["setuptools"]\n' \
+    > "$LEGACY_AGENTSCOPE/pyproject.toml"
+printf 'legacy build output\n' \
+    > "$LEGACY_AGENTSCOPE/build/lib/tokenless_agentscope/middleware.py"
+printf 'Name: anolisa-tokenless-agentscope\n' \
+    > "$LEGACY_AGENTSCOPE/src/anolisa_tokenless_agentscope.egg-info/PKG-INFO"
 
 mkdir -p "$TEST_TOOLS"
 cat >"$TEST_TOOLS/readelf" <<'SH'
@@ -101,6 +120,7 @@ check_selector linux 'linux-x64, linux-arm64'
 check_selector aarch64-apple-darwin 'darwin-arm64'
 
 node "$ROOT/npm/scripts/package-npm.js" --all
+test ! -e "$ROOT/npm/dist/tokenless/adapters/tokenless/agentscope"
 
 for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
     package="$ROOT/npm/dist/tokenless-$target"

@@ -21,9 +21,8 @@ mkdir -p \
     "$ADAPTERS/claude-code/.claude-plugin" \
     "$ADAPTERS/claude-code/hooks" \
     "$ADAPTERS/codex/.codex-plugin" \
-    "$ADAPTERS/agentscope/build" \
+    "$ADAPTERS/agentscope/build/lib/tokenless_agentscope" \
     "$ADAPTERS/agentscope/src/anolisa_tokenless_agentscope.egg-info" \
-    "$ADAPTERS/agentscope/src/tokenless_agentscope/__pycache__" \
     "$ADAPTERS/qwencode/hooks"
 
 cat > "$SOURCE/Cargo.toml" <<EOF
@@ -52,21 +51,6 @@ write_json_version "$ADAPTERS/qwencode/qwen-extension.json"
 printf '{"name":"anolisa-tokenless"}\n' \
     > "$ADAPTERS/claude-code/.claude-plugin/marketplace.json"
 printf 'version: "%s"\n' "$VERSION" > "$ADAPTERS/hermes/plugin.yaml"
-printf 'Apache License fixture\n' > "$ADAPTERS/agentscope/LICENSE"
-cat > "$ADAPTERS/agentscope/pyproject.toml" <<EOF
-[project]
-name = "anolisa-tokenless-agentscope"
-version = "$VERSION"
-EOF
-printf 'from .middleware import TokenlessMiddleware\n' \
-    > "$ADAPTERS/agentscope/src/tokenless_agentscope/__init__.py"
-printf 'class TokenlessMiddleware: pass\n' \
-    > "$ADAPTERS/agentscope/src/tokenless_agentscope/middleware.py"
-printf 'build artifact\n' > "$ADAPTERS/agentscope/build/junk.txt"
-printf 'metadata\n' \
-    > "$ADAPTERS/agentscope/src/anolisa_tokenless_agentscope.egg-info/PKG-INFO"
-printf 'bytecode\n' \
-    > "$ADAPTERS/agentscope/src/tokenless_agentscope/__pycache__/middleware.pyc"
 printf 'export default {};\n' > "$ADAPTERS/openclaw/dist/index.js"
 printf '{"name":"tokenless","version":"%s"}\n' "$VERSION" \
     > "$ADAPTERS/common/cosh-extension.json"
@@ -76,6 +60,12 @@ printf '#!/usr/bin/env bash\nprintf "shared hook\\n"\n' \
     > "$ADAPTERS/common/hooks/run-hook.sh"
 printf 'description = "fixture"\n' \
     > "$ADAPTERS/common/commands/tokenless-stats.toml"
+printf '[build-system]\nrequires = ["setuptools"]\n' \
+    > "$ADAPTERS/agentscope/pyproject.toml"
+printf 'legacy build output\n' \
+    > "$ADAPTERS/agentscope/build/lib/tokenless_agentscope/middleware.py"
+printf 'Name: anolisa-tokenless-agentscope\n' \
+    > "$ADAPTERS/agentscope/src/anolisa_tokenless_agentscope.egg-info/PKG-INFO"
 chmod 0755 \
     "$ADAPTERS/common/tokenless-env-fix.sh" \
     "$ADAPTERS/common/hooks/run-hook.sh"
@@ -173,9 +163,7 @@ for relative in \
 done
 test -f "$EXTRACTED/extensions/tokenless/cosh-extension.json"
 test -f "$EXTRACTED/extensions/tokenless/hooks/run-hook.sh"
-test -f "$EXTRACTED/adapters/agentscope/LICENSE"
-test -f "$EXTRACTED/adapters/agentscope/pyproject.toml"
-test -f "$EXTRACTED/adapters/agentscope/src/tokenless_agentscope/middleware.py"
+test ! -e "$EXTRACTED/adapters/agentscope"
 test -z "$(find "$EXTRACTED" -type l -print -quit)"
 test -z "$(find "$EXTRACTED" \( \
     -name '*.in' -o \

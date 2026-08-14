@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the installed adapter with a supported AgentScope and native Tokenless."""
+"""Exercise the installed integration with AgentScope and native Tokenless."""
 
 from __future__ import annotations
 

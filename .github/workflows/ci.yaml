@@ -866,22 +866,20 @@ jobs:
           cd src/tokenless/benchmark/l2-module
           cargo test --release --locked
 
-      - name: Run hook integration tests (Python)
-        run: |
-          cd src/tokenless
-          python3 tests/test_compress_response_hook.py
-          python3 tests/test_hermes_plugin_import.py
-
-      - uses: astral-sh/setup-uv@v6
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
+      - name: Run Python integration tests
+        run: |
+          make -C src/tokenless test-integration
+
+      - uses: astral-sh/setup-uv@v6
+
       - name: Build and test Tokenless Python packages
         run: |
           make -C src/tokenless \
-            test-python-runtime test-agentscope-adapter
+            test-python-runtime test-agentscope-integration
 
       - uses: actions/setup-node@v4
         with:

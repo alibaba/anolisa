@@ -120,7 +120,7 @@ env | grep '^TOKENLESS_'
 
 常见原因：
 
-- 目标 Agent 框架未安装或未被扫描到。
+- 目标 Agent 产品未安装或未被扫描到。
 - 框架版本不满足 Adapter 要求。
 - adapter 命令的执行用户与目标框架配置或 receipt 的所属用户不同。
 - 直接安装的 Tokenless RPM 尚未写入 ANOLISA 状态。
@@ -231,7 +231,7 @@ tokenless retrieve <hash> --stash-db ~/.tokenless/stash.db
 
 ## 有统计记录但 Prompt 没有变小
 
-先查看[支持矩阵](framework-integration.md#支持矩阵)中的响应交付路径。Qoder 和 Qwen Code 输出 `additionalContext`，旧版 Copilot Shell 会追加该字段，Codex 则有意保留原始结果，只追加分析或压缩备选。这些路径可以记录变小的候选内容，但不一定减少最终 Prompt。
+先查看[支持矩阵](framework-integration.md#agent-adapter-支持矩阵)中的响应交付路径。Qoder 和 Qwen Code 输出 `additionalContext`，旧版 Copilot Shell 会追加该字段，Codex 则有意保留原始结果，只追加分析或压缩备选。这些路径可以记录变小的候选内容，但不一定减少最终 Prompt。
 
 Claude Code 需要 2.1.121 或更高版本才能替换响应；旧版本或无法识别版本时会透传原文。OpenClaw 会替换持久化结果，但只有设置 `toon_compression_enabled=true` 才会启用 TOON。
 

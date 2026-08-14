@@ -1,12 +1,14 @@
-# Tokenless 框架集成
+# Tokenless Agent 与框架集成
 
 [English](../../../en/token-saving/tokenless/framework-integration.md)
 
-Tokenless 通过 Adapter 把压缩、命令重写和环境检查接入 Agent。安装 Tokenless 会提供二进制和 Adapter 资源。Plugin/Hook 型框架在启用 Adapter 后调用这些能力；AgentScope 应用需要显式安装并注册 Python 中间件。
+Tokenless 提供两类集成。Agent Adapter 通过 Plugin、Hook 和 Extension，把已安装的
+二进制接入具体 Agent 产品；AgentScope 支持则是供应用开发者显式安装和注册的进程内
+Python 框架包。
 
-## 支持矩阵
+## Agent Adapter 支持矩阵
 
-| 框架 | 值 | Tool Ready | 命令重写行为 | 响应交付方式 | TOON | Schema |
+| Agent 产品 | 值 | Tool Ready | 命令重写行为 | 响应交付方式 | TOON | Schema |
 |------|----|------------|--------------|--------------|------|--------|
 | cosh | `cosh` | 已硬关闭 | 替换受支持的 Shell 输入 | Cosh-NG 替换响应；旧版 Copilot Shell 追加上下文 | 在响应压缩后尝试 | ✅ |
 | OpenClaw | `openclaw` | 已硬关闭 | 替换 `exec` 命令输入 | 替换持久化工具结果消息 | 默认关闭，需主动启用 | — |
@@ -16,7 +18,6 @@ Tokenless 通过 Adapter 把压缩、命令重写和环境检查接入 Agent。�
 | Codex | `codex` | 已硬关闭 | 替换受支持的 Shell 输入 | 保留原文，追加分析或压缩备选内容 | 用于生成该备选内容 | — |
 | OpenCode | `opencode` | 已硬关闭 | 替换 Bash 输入 | 替换工具输出 | 在响应压缩后尝试 | ✅ |
 | Qwen Code | `qwencode` | 已硬关闭 | 输出改写后的 Shell 输入 | 输出 `additionalContext` | 在响应压缩后尝试 | ✅ |
-| AgentScope | Python API | — | — | 替换成功的最终工具响应 | — | — |
 
 “—”表示当前 Adapter 没有注册此能力；对应的 Tokenless CLI 命令仍可能可用。
 
@@ -24,7 +25,8 @@ Tokenless 通过 Adapter 把压缩、命令重写和环境检查接入 Agent。�
 
 `additionalContext` 是追加型 Hook 字段。在这些路径上，Tokenless 源码本身不会删除原始结果，最终处理方式还取决于宿主实现。统计记录只能证明压缩候选内容变小了，不能证明宿主已经从模型请求中移除原文。
 
-OpenCode 当前使用下文说明的随附生命周期脚本，AgentScope 则使用可安装的 Python 包和显式应用代码；本版本尚未把两者注册到 `anolisa adapter enable` 的驱动集合。
+OpenCode 当前使用下文说明的随附生命周期脚本，本版本尚未把它注册到
+`anolisa adapter enable` 的驱动集合。
 
 ## Adapter 处理规则
 
@@ -56,7 +58,7 @@ YUM 安装的 CLI 位于 `sudo` 可见的系统路径。`get.agentic-os.sh` 安�
 后续 adapter 命令请用拥有目标 Agent 配置的用户执行。user scope 的 adapter
 操作可以读取已采纳的 system 软件包，同时把框架改动留在当前用户的配置中。
 
-### 1. 扫描框架
+### 1. 扫描 Agent 产品
 
 ```bash
 anolisa adapter scan
@@ -82,9 +84,9 @@ anolisa adapter enable tokenless codex
 anolisa adapter enable tokenless qwencode
 ```
 
-只需启用实际使用的框架。为多个框架启用时，应逐个执行并分别验证。
+只需启用实际使用的 Agent 产品。启用多个产品时，应逐个执行并分别验证。
 
-OpenCode 和 AgentScope 不适用本节。OpenCode 应使用 [npm 安装后的手动接入](#npm-安装后的手动接入)中的随附安装脚本；AgentScope 请参阅下文的 [AgentScope](#agentscope)。
+OpenCode 应使用 [npm 安装后的手动接入](#npm-安装后的手动接入)中的随附安装脚本。
 
 对于 OpenClaw，anolisa 会先尝试普通安装，默认不会加入 unsafe-install 覆盖参数。如果 OpenClaw 的安全扫描拒绝此 Plugin，应先阅读其报告；确认接受风险后，才显式重试：
 
@@ -165,7 +167,7 @@ cp -R ~/.local/share/anolisa/adapters/tokenless/common/hooks \
 
 完成后重启 cosh。移除前先退出 cosh，并确认目标目录确实是本次 npm 安装创建的 Tokenless Extension。
 
-## 各框架的生效提示
+## Agent Adapter 生效提示
 
 ### cosh
 
@@ -209,20 +211,17 @@ OpenCode 启动时会自动加载配置目录下的 Plugin。使用上述 Tokenl
 
 Extension 在新的 Qwen Code 会话中加载。重启后执行一次工具调用验证。
 
-### AgentScope
+## AgentScope 框架集成
 
-Python 包支持 `agentscope>=2.0.5,<2.1`。原生 `anolisa-tokenless` runtime Wheel
-当前尚未发布到 Python 包索引。虽然 anolisa 会把 Adapter 源码部署到
-`~/.local/share/anolisa/adapters/tokenless/agentscope` 或
-`/usr/share/anolisa/adapters/tokenless/agentscope`，但在全新环境中只安装该源码
-无法解析其精确版本的 runtime 依赖。当前唯一受支持的安装方式是从源码 checkout
-构建并同时安装两个相同版本的 Wheel：
+Python 包支持 `agentscope>=2.0.5,<2.1`。原生 `anolisa-tokenless` Runtime Wheel 和
+AgentScope 集成 Wheel 当前都尚未发布到 Python 包索引。当前唯一受支持的安装方式是
+从源码 checkout 构建并同时安装两个相同版本的 Wheel：
 
 ```bash
 make python-wheel agentscope-wheel
 python -m pip install \
   target/wheels/anolisa_tokenless-*.whl \
-  target/agentscope-wheels/anolisa_tokenless_agentscope-*.whl
+  target/wheels/anolisa_tokenless_agentscope-*.whl
 ```
 
 普通高代码 Agent 需要把同一个中间件实例同时注册到 Toolkit 和 Agent：
@@ -304,13 +303,13 @@ JSON object/array 仍为 JSON，普通文本仍为文本，`DataBlock` 永不修
 也不要依赖跨节点恢复。stash 当前使用固定的一小时 TTL，Agent 应在这一边界前
 恢复所需内容。
 
-压缩和恢复会从 async worker thread 调用进程内 `anolisa-tokenless` runtime；Adapter
+压缩和恢复会从 async worker thread 调用进程内 `anolisa-tokenless` Runtime；该集成
 不会启动 CLI 进程或授予 Shell 权限，也不接入 MCP、TOON、RTK 命令重写或
 Schema 压缩。
 
 ## 验证是否真正接入
 
-不要只以“安装命令退出码为 0”作为成功标准。至少完成：
+对于 Agent Adapter，不要只以“安装命令退出码为 0”作为成功标准。至少完成：
 
 ```bash
 tokenless --version
@@ -319,6 +318,16 @@ tokenless stats list --limit 5
 ```
 
 然后在目标 Agent 中执行一次有明显输出的工具任务。如果 `stats list` 仍为空，请按照[启用后没有产生统计记录](troubleshooting.md#启用后没有产生统计记录)排查。
+
+对于 AgentScope 框架包，在源码 checkout 中运行下面的命令，验证两个 Wheel 和声明
+支持的 AgentScope 版本范围：
+
+```bash
+make test-agentscope-integration
+```
+
+随后在应用中执行一次成功且可压缩的工具响应，确认中间件返回更小的结果，并确认
+`tokenless_retrieve` 可以从同一个 `data_dir` 恢复 marker 对应的内容。
 
 ## 相关文档
 

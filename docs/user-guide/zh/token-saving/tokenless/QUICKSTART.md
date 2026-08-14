@@ -154,7 +154,7 @@ tokenless stats list --limit 1
 
 ## 下一步
 
-- [框架接入](framework-integration.md)：各框架的激活方法和实际行为
+- [Agent 与框架集成](framework-integration.md)：Agent Adapter 激活和 AgentScope 应用集成
 - [用户手册](user-manual.md)：能力边界和文档导航
 - [CLI 参考](cli-reference.md)：全部子命令和参数
 - [效果度量](measuring-savings.md)：统计、双跑对比和 AgentSight/SLS

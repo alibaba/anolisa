@@ -11,9 +11,9 @@ adapters/tokenless/qoder/.qoder-plugin/plugin.json
 adapters/tokenless/claude-code/.claude-plugin/plugin.json
 adapters/tokenless/codex/.codex-plugin/plugin.json
 adapters/tokenless/qwencode/qwen-extension.json
-adapters/tokenless/agentscope/pyproject.toml
-adapters/tokenless/agentscope/build/
-adapters/tokenless/agentscope/src/*.egg-info/
+python/agentscope/pyproject.toml
+python/agentscope/build/
+python/agentscope/src/*.egg-info/
 
 # Python bytecode cache
 __pycache__/

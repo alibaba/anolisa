@@ -137,9 +137,9 @@ Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、
 
 命令重写也会改变宿主提交的 Shell 命令。大多数 Adapter 会直接替换命令输入；Hermes 会先阻止第一次调用，再提示 Agent 使用改写命令重试。因此，除了压缩结果，还应验证重要命令工作流。
 
-## 支持的 Agent 框架
+## 支持的 Agent Adapter
 
-| 框架 | 集成方式 | 当前代码路径 |
+| Agent 产品 | 集成方式 | 当前代码路径 |
 |------|----------|--------------|
 | cosh | Extension | Tool Ready（已硬关闭）、命令重写、响应压缩 + TOON、Schema；Cosh-NG 有替换路径，旧版 Copilot Shell 则追加额外上下文 |
 | OpenClaw | Plugin | Tool Ready（已硬关闭）、`exec` 命令重写、替换持久化结果、可选 TOON；无 Schema |
@@ -147,7 +147,14 @@ Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、
 | Qoder | Plugin | Tool Ready（已硬关闭）、命令重写、通过 `additionalContext` 交付响应压缩 + TOON；无 Schema |
 | Claude Code | Marketplace Plugin | Tool Ready（已硬关闭）、Bash 命令重写；Claude Code 2.1.121 及以上可替换响应；条件式 TOON；无 Schema |
 | Codex | Plugin | Tool Ready（已硬关闭）、命令重写；把响应/TOON 分析追加为上下文，保留原始结果；无 Schema |
+| OpenCode | Plugin | Tool Ready（已硬关闭）、Bash 命令重写、用响应压缩 + TOON 替换工具输出、Schema |
 | Qwen Code | Extension | Tool Ready（已硬关闭）、命令重写、通过 `additionalContext` 交付响应压缩 + TOON、Schema |
+
+## 支持的 Agent 开发框架
+
+| 框架 | 集成方式 | 当前代码路径 |
+|------|----------|--------------|
+| AgentScope | 进程内 Python Middleware | 通过独立 Python 包替换成功的最终工具响应，并提供受 marker 约束的恢复 Tool |
 
 ## 按任务查找文档
 
@@ -156,7 +163,7 @@ Stash 并不能让所有压缩都可逆。被移除的 `debug`/`trace` 字段、
 | 第一次安装并验证 | [快速开始](QUICKSTART.md) |
 | 从源码构建独立 CLI | [本页 · 从源码构建独立 CLI](#从源码构建独立-cli) |
 | 从源码构建进程内 Python Runtime | [本页 · 从源码构建 Python Runtime](#从源码构建-python-runtime) |
-| 接入或切换 Agent 框架 | [框架集成](framework-integration.md) |
+| 接入 Agent 产品或集成 AgentScope | [Agent 与框架集成](framework-integration.md) |
 | 手动压缩、取回或运行 MCP | [CLI 参考](cli-reference.md) |
 | 查看节省或内容变化、做双跑对比 | [效果度量](measuring-savings.md) |
 | 修改配置或了解本地数据 | [配置与数据隐私](configuration-and-privacy.md) |

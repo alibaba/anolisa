@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 _RETRIEVE_TOOL_NAME = "tokenless_retrieve"
 _HASH_PATTERN = re.compile(r"^[0-9a-fA-F]{24}$")
 
-# Keep these names aligned with common/hooks/tool_categories.json. The adapter
+# Keep these names aligned with common/hooks/tool_categories.json. The integration
 # package is installable on its own, so it cannot load that sibling resource at
 # runtime; a repository test guards the copied policy against drift.
 _SKIP_TOOLS = frozenset(
