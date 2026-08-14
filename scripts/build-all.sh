@@ -1799,17 +1799,26 @@ install_skills() {
     fi
 }
 
+# Package providing `gpg` on the detected distro family.
+gpg_pkg_name() {
+    if [[ "$PKG_BASE" == "deb" ]]; then echo "gnupg"; else echo "gnupg2"; fi
+}
+
+# Runtime dependencies are installed in both user and system mode: they are
+# system packages either way, and `bwrap` is a hard requirement of
+# linux-sandbox (the RPM declares `Requires: bubblewrap` for the same reason).
+# Skipping them in user mode makes the install look successful and defers the
+# failure to the first sandbox launch.
 install_sec_core_runtime_deps() {
-    if cmd_exists bwrap && { cmd_exists gpg || cmd_exists gpg2; } && cmd_exists jq; then
-        return 0
+    step "Runtime dependencies (for agent-sec-core)"
+
+    local need_gpg=false
+    if ! cmd_exists gpg && ! cmd_exists gpg2; then
+        need_gpg=true
     fi
 
-    if [[ "$INSTALL_MODE" != "system" ]]; then
-        cmd_exists bwrap || warn "bubblewrap not found; linux-sandbox may not run until it is installed."
-        if ! cmd_exists gpg && ! cmd_exists gpg2; then
-            warn "gpg/gpg2 not found; skill signature setup will need GnuPG."
-        fi
-        cmd_exists jq || warn "jq not found; sec-core helper scripts may need jq."
+    if cmd_exists bwrap && ! $need_gpg && cmd_exists jq; then
+        ok "agent-sec-core runtime dependencies already installed"
         return 0
     fi
 
@@ -1817,20 +1826,47 @@ install_sec_core_runtime_deps() {
         detect_distro
     fi
 
+    local missing=()
+    cmd_exists bwrap || missing+=("bubblewrap")
+    if $need_gpg; then
+        missing+=("$(gpg_pkg_name)")
+    fi
+    cmd_exists jq || missing+=("jq")
+
+    info "Installing: ${missing[*]}"
+    # shellcheck disable=SC2086
+    as_root $PKG_INSTALL "${missing[@]}" || \
+        warn "Failed to install: ${missing[*]}"
+
+    # Re-check instead of trusting the package manager exit code: a partially
+    # satisfied install must still surface the specific missing capability.
+    local unresolved=()
+    local unresolved_pkgs=()
     if ! cmd_exists bwrap; then
-        info "Installing runtime dependency: bubblewrap ..."
-        as_root $PKG_INSTALL bubblewrap || warn "bubblewrap not installed (linux-sandbox runtime dep)"
+        unresolved+=("bubblewrap (linux-sandbox cannot launch without bwrap)")
+        unresolved_pkgs+=("bubblewrap")
     fi
     if ! cmd_exists gpg && ! cmd_exists gpg2; then
-        local gpg_pkg="gnupg2"
-        [[ "$PKG_BASE" == "deb" ]] && gpg_pkg="gnupg"
-        info "Installing runtime dependency: ${gpg_pkg} ..."
-        as_root $PKG_INSTALL "$gpg_pkg" || warn "${gpg_pkg} not installed (skill signature verification)"
+        unresolved+=("gnupg (skill signature verification)")
+        unresolved_pkgs+=("$(gpg_pkg_name)")
     fi
     if ! cmd_exists jq; then
-        info "Installing runtime dependency: jq ..."
-        as_root $PKG_INSTALL jq || warn "jq not installed (sec-core helper/signing dependency)"
+        unresolved+=("jq (sec-core helper/signing scripts)")
+        unresolved_pkgs+=("jq")
     fi
+
+    if [[ ${#unresolved[@]} -eq 0 ]]; then
+        ok "agent-sec-core runtime dependencies installed"
+        return 0
+    fi
+
+    local item
+    for item in "${unresolved[@]}"; do
+        warn "Unresolved runtime dependency: ${item}"
+    done
+    local sudo_prefix="sudo "
+    [[ "$(id -u)" -eq 0 ]] && sudo_prefix=""
+    info "Install manually with: ${BOLD}${sudo_prefix}${PKG_INSTALL} ${unresolved_pkgs[*]}${NC}"
 }
 
 install_sec_core() {

@@ -60,6 +60,12 @@ jobs:
         run: agent-sec-daemon --help
       - name: Verify sandbox
         run: linux-sandbox --help
+      - name: Verify runtime dependencies
+        run: |
+          command -v bwrap
+          bwrap --version
+          jq --version
+          command -v gpg || command -v gpg2
       - name: Verify deployment
         run: |
           echo "=== Skills ==="
@@ -113,6 +119,12 @@ jobs:
           agent-sec-cli scan-pii --help >/dev/null
           agent-sec-daemon --help
           linux-sandbox --help
+      - name: Verify runtime dependencies
+        run: |
+          command -v bwrap
+          bwrap --version
+          jq --version
+          command -v gpg || command -v gpg2
       - name: Verify system deployment
         run: |
           echo "=== System binaries ==="
