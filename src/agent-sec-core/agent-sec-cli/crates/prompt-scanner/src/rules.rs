@@ -206,6 +206,61 @@ mod tests {
         assert!(packs.iter().any(|p| p.pack.name == "builtin-jailbreak"));
     }
 
+    /// Mirrors the `disabled.yaml` schema owned by `sync_atr`. Kept local to
+    /// the test so the runtime crate does not depend on the converter's
+    /// input format.
+    #[derive(Deserialize)]
+    struct DisabledFile {
+        disabled: Vec<DisabledEntry>,
+    }
+
+    #[derive(Deserialize)]
+    struct DisabledEntry {
+        id: String,
+        reason: String,
+    }
+
+    #[test]
+    fn atr_disabled_list_matches_generated_packs() {
+        // `sync_atr` is the sole writer of the ATR packs and derives every
+        // rule's `enabled` flag solely from disabled.yaml, so the two must
+        // agree exactly.  A mismatch means one of: a pack was hand-edited
+        // despite its DO-NOT-EDIT header, disabled.yaml gained an entry
+        // without a re-sync, or an entry outlived the upstream rule it names.
+        // CI cannot re-run the sync (that needs the upstream clone), so this
+        // is the standing gate for all three.
+        const DISABLED_YAML: &str = include_str!("../rules/atr/disabled.yaml");
+        let listed: DisabledFile =
+            serde_yaml::from_str(DISABLED_YAML).expect("rules/atr/disabled.yaml must parse");
+        let expected: std::collections::BTreeSet<&str> =
+            listed.disabled.iter().map(|e| e.id.as_str()).collect();
+
+        let packs = builtin_packs().expect("built-in packs must parse");
+        let actual: std::collections::BTreeSet<&str> = packs
+            .iter()
+            .filter(|pack| pack.pack.source == "atr")
+            .flat_map(|pack| &pack.rules)
+            .filter(|rule| !rule.enabled)
+            .map(|rule| rule.id.as_str())
+            .collect();
+
+        assert_eq!(
+            actual, expected,
+            "generated ATR packs disagree with rules/atr/disabled.yaml — \
+             re-run `cargo run -p prompt-scanner --bin sync_atr` instead of \
+             editing the packs"
+        );
+        // Every disable needs a rationale: the reason is the only record of
+        // why upstream coverage was dropped.
+        for entry in &listed.disabled {
+            assert!(
+                !entry.reason.trim().is_empty(),
+                "disabled entry {} has no reason",
+                entry.id
+            );
+        }
+    }
+
     #[test]
     fn optional_v2_rule_fields_parse() {
         let yaml = r#"

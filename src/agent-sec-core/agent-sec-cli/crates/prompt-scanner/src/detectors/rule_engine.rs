@@ -270,4 +270,71 @@ mod tests {
         let short = clamp_evidence("abc");
         assert_eq!(short, "abc");
     }
+
+    #[test]
+    fn embedded_test_cases_hold_for_every_pack() {
+        // TPs must fire their owning rule; TNs must not fire it (other
+        // rules are free to match — packs stay decoupled).
+        let eng = engine();
+        let variants: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        for pack in crate::rules::builtin_packs().unwrap() {
+            for rule in &pack.rules {
+                if !rule.enabled {
+                    continue;
+                }
+                for tp in &rule.test_cases.true_positives {
+                    let lr = eng.detect(&DetectInput::new(tp, &variants)).unwrap();
+                    assert!(
+                        lr.details.iter().any(|d| d.rule_id == rule.id),
+                        "TP for {} did not fire: {tp:?}",
+                        rule.id
+                    );
+                    checked += 1;
+                }
+                for tn in &rule.test_cases.true_negatives {
+                    let lr = eng.detect(&DetectInput::new(tn, &variants)).unwrap();
+                    assert!(
+                        !lr.details.iter().any(|d| d.rule_id == rule.id),
+                        "TN for {} fired: {tn:?}",
+                        rule.id
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        // Guards against the corpus silently becoming empty.
+        assert!(checked >= 4, "expected seed test cases, got {checked}");
+    }
+
+    #[test]
+    fn benign_corpus_never_fires_any_rule() {
+        // FP gate: every line is a real-world benign prompt (one prompt
+        // per line, blank lines ignored). A hit here is a merge blocker —
+        // add the offending rule to rules/atr/disabled.yaml (with a
+        // reason) and re-run sync_atr, or fix the builtin rule. Never
+        // weaken this test.
+        let eng = engine();
+        let variants: Vec<String> = Vec::new();
+        let corpus = include_str!("../../tests/data/benign_corpus.txt");
+        let mut hits: Vec<String> = Vec::new();
+        let mut scanned = 0usize;
+        for line in corpus.lines().filter(|l| !l.trim().is_empty()) {
+            let lr = eng.detect(&DetectInput::new(line, &variants)).unwrap();
+            for d in &lr.details {
+                hits.push(format!(
+                    "{} matched {:?} on {line:?}",
+                    d.rule_id, d.matched_text
+                ));
+            }
+            scanned += 1;
+        }
+        // Guards against the corpus silently becoming empty.
+        assert!(scanned >= 25, "expected benign corpus lines, got {scanned}");
+        assert!(
+            hits.is_empty(),
+            "benign corpus false positives:\n{}",
+            hits.join("\n")
+        );
+    }
 }
