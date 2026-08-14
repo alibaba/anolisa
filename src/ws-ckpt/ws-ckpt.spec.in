@@ -25,6 +25,7 @@ BuildRequires:  npm
 
 Requires:       rsync
 Requires:       btrfs-progs
+Provides:       anolisa-component(ws-ckpt)
 
 %description
 ws-ckpt is an AI-oriented filesystem snapshot tool. It supports workspace
