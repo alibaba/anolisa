@@ -11,6 +11,13 @@ Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch
 
+# Virtual provide for ANOLISA component identity resolution.
+# Without this, `anolisa install os-skills --backend rpm` fails with
+# INVALID_ARGUMENT when the repo-side components-v2.toml is unavailable
+# (404) and no package_map entry exists - the resolver falls through to
+# RPM Provides but finds no anolisa-component(os-skills) capability.
+Provides:       anolisa-component(os-skills)
+
 %description
 A collection of agentic OS skills for Copilot Shell, providing capabilities
 including AI tool installation, Alibaba Cloud ECS management, DevOps
