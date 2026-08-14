@@ -14,7 +14,9 @@ use anolisa_platform::pkg_query::{PackageQuery, PackageQueryError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::repo_config::{BackendConfig, HostVars, RepoConfig, component_index_url, component_index_v2_url};
+use crate::repo_config::{
+    BackendConfig, HostVars, RepoConfig, component_index_url, component_index_v2_url,
+};
 
 /// On-disk schema version for repo-side `components-v2.toml`.
 pub(crate) const COMPONENT_INDEX_SCHEMA_VERSION: u32 = 2;
@@ -750,9 +752,7 @@ pub(crate) fn load_component_index(
     let cache = DownloadCache::new(layout.cache_dir.clone());
     let downloaded = match fetch_index_url(&cache, &url) {
         Ok(art) => art,
-        Err(ComponentIndexError::Fetch { ref reason })
-            if reason.contains("http status 404") =>
-        {
+        Err(ComponentIndexError::Fetch { ref reason }) if reason.contains("http status 404") => {
             // v2 not published yet — fall back to v1 components.toml.
             // The v2 parser accepts v1 rows because `targets` has
             // `#[serde(default)]`, so legacy indexes without targets
