@@ -270,7 +270,9 @@ impl GenAISqliteStore {
             Ok(CallMetrics {
                 agent_name: row.get(0)?,
                 ttft_ms: first
-                    .filter(|first| *first >= start && end.is_none_or(|end| *first <= end))
+                    .filter(|first| {
+                        *first >= start && (end.is_none() || end.is_some_and(|end| *first <= end))
+                    })
                     .map(|first| (first - start) as f64 / 1_000_000.0),
                 is_sse: is_sse == Some(1),
                 // By #2339 convention, TPS/TPOT use total output_tokens N; do not use N - 1.
