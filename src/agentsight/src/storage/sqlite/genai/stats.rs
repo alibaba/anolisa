@@ -270,9 +270,10 @@ impl GenAISqliteStore {
             Ok(CallMetrics {
                 agent_name: row.get(0)?,
                 ttft_ms: first
-                    .filter(|first| *first >= start && end.map_or(true, |end| *first <= end))
+                    .filter(|first| *first >= start && end.is_none_or(|end| *first <= end))
                     .map(|first| (first - start) as f64 / 1_000_000.0),
                 is_sse: is_sse == Some(1),
+                // By #2339 convention, TPS/TPOT use total output_tokens N; do not use N - 1.
                 tps_tokens_per_second: stream_ns
                     .zip(tokens)
                     .map(|(duration, tokens)| tokens as f64 * 1_000_000_000.0 / duration as f64),
@@ -325,6 +326,7 @@ impl GenAISqliteStore {
             })
             .collect())
     }
+
     /// One bucket in a token time-series query.
     pub fn get_token_timeseries(
         &self,

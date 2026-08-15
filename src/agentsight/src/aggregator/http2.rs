@@ -322,6 +322,8 @@ impl Http2Stream {
 
         let mut body = Vec::new();
         let mut parsed_event_count = 0usize;
+        // Re-parsing the accumulated body is O(frames^2) worst-case, but meaningful output
+        // normally arrives early and returns; an algorithm redesign is out of scope here.
         for frame in &self.response_data_frames {
             body.extend_from_slice(frame.payload());
             let Ok(body_str) = std::str::from_utf8(&body) else {

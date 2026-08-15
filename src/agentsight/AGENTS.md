@@ -210,6 +210,7 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/conversations/{id}` | GET | conversation 事件详情 |
 | `/api/agent-names` | GET | Agent 名称列表 |
 | `/api/timeseries` | GET | 时序 Token 统计 |
+| `/api/metrics/latency` | GET | LLM 延迟与吞吐 percentile 指标 |
 | `/api/agent-health` | GET | Agent 健康状态 |
 | `/api/agent-health/{pid}` | DELETE | 删除健康条目 |
 | `/api/agent-health/{pid}/restart` | POST | 重启 Agent |

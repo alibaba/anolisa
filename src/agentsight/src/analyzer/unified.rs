@@ -1086,11 +1086,10 @@ impl Analyzer {
                     Some(serde_json::to_string(sse_json).unwrap_or_default())
                 } else {
                     // Not SSE, try regular JSON or raw text
-                    let body = stream
+                    stream
                         .response_json_body()
                         .map(|v| serde_json::to_string(&v).unwrap_or_default())
-                        .or_else(|| stream.response_body_str());
-                    body
+                        .or_else(|| stream.response_body_str())
                 };
                 let is_sse = stream.is_response_sse() || sse_event_count > 0;
 
