@@ -8,6 +8,7 @@ const {
   enforcementSupportsMode,
   enforcementViolationTotal,
   fetchContainmentPlan,
+  fetchLatencyMetrics,
   fetchSecurityCase,
   fetchSecurityStatus,
   reviewSecurityCase,
@@ -97,6 +98,49 @@ test('fetchSecurityStatus preserves a non-2xx availability state envelope', asyn
 
   assert.equal(response.state, 'daemon_unreachable');
   assert.deepEqual(response.data, { error: 'socket unavailable' });
+});
+
+test('fetchLatencyMetrics forwards ranges and preserves nullable percentile data', async () => {
+  let requestedUrl = null;
+  global.fetch = async (url) => {
+    requestedUrl = String(url);
+    return new Response(JSON.stringify([{
+      agent_name: 'claude',
+      call_count: 3,
+      streaming_call_count: 2,
+      ttft_ms: { p50: 10, p95: 20, p99: 30 },
+      tps_tokens_per_second: { p50: 40, p95: 50, p99: 60 },
+      tpot_ms_per_token: null,
+      e2e_latency_ms: { p50: 100, p95: 200, p99: 300 },
+    }]), { status: 200 });
+  };
+
+  const response = await fetchLatencyMetrics(1_000_000_000, 2_000_000_000, 'claude');
+  const url = new URL(requestedUrl);
+
+  assert.equal(url.pathname, '/api/metrics/latency');
+  assert.equal(url.searchParams.get('start_ns'), '1000000000');
+  assert.equal(url.searchParams.get('end_ns'), '2000000000');
+  assert.equal(url.searchParams.get('agent_name'), 'claude');
+  assert.deepEqual(response[0].ttft_ms, { p50: 10, p95: 20, p99: 30 });
+  assert.deepEqual(response[0].tps_tokens_per_second, { p50: 40, p95: 50, p99: 60 });
+  assert.deepEqual(response[0].e2e_latency_ms, { p50: 100, p95: 200, p99: 300 });
+  assert.equal(response[0].tpot_ms_per_token, null);
+});
+
+test('fetchLatencyMetrics omits agent_name when no filter is provided', async () => {
+  let requestedUrl = null;
+  global.fetch = async (url) => {
+    requestedUrl = String(url);
+    return new Response('[]', { status: 200 });
+  };
+
+  await fetchLatencyMetrics(3_000_000_000, 4_000_000_000);
+  const url = new URL(requestedUrl);
+
+  assert.equal(url.searchParams.get('start_ns'), '3000000000');
+  assert.equal(url.searchParams.get('end_ns'), '4000000000');
+  assert.equal(url.searchParams.has('agent_name'), false);
 });
 
 test('fetchSecurityCase accepts a valid system-audit detail response', async () => {

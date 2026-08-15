@@ -557,6 +557,38 @@ export interface TimeseriesResponse {
   model_series: ModelTimeseriesBucket[];
 }
 
+export interface MetricPercentiles {
+  p50: number;
+  p95: number;
+  p99: number;
+}
+
+export interface LatencyMetricsSummary {
+  agent_name: string | null;
+  call_count: number;
+  streaming_call_count: number;
+  ttft_ms: MetricPercentiles | null;
+  tps_tokens_per_second: MetricPercentiles | null;
+  tpot_ms_per_token: MetricPercentiles | null;
+  e2e_latency_ms: MetricPercentiles | null;
+}
+
+/**
+ * Fetch percentile latency metrics grouped by Agent.
+ */
+export async function fetchLatencyMetrics(
+  startNs: number,
+  endNs: number,
+  agentName?: string
+): Promise<LatencyMetricsSummary[]> {
+  const params = new URLSearchParams({
+    start_ns: String(startNs),
+    end_ns: String(endNs),
+  });
+  if (agentName) params.set('agent_name', agentName);
+  return apiFetch<LatencyMetricsSummary[]>(`${API_BASE}/api/metrics/latency?${params.toString()}`);
+}
+
 /**
  * Fetch time-bucketed token stats and per-model breakdowns.
  */
