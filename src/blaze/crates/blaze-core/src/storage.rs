@@ -119,6 +119,30 @@ pub trait StorageProvider: Send + Sync {
         self.release(slot).await
     }
 
+    /// Report whether provider-owned slots can be inventoried and released by ID.
+    ///
+    /// Returning true promises both a complete [`Self::list_owned_ids`]
+    /// inventory for the provider's currently configured root and an
+    /// idempotent [`Self::release_by_id`] that can retry complete, missing,
+    /// and partially created slots. It does not identify a provider or root
+    /// recorded by another subsystem.
+    fn supports_owned_slot_inventory(&self) -> bool {
+        false
+    }
+
+    /// List every stable slot identifier currently owned by the provider.
+    ///
+    /// This is a point-in-time inventory. Callers that need a stable boundary
+    /// must serialize it with concurrent acquire and release operations.
+    /// Implementations must reject entries that cannot be classified as a
+    /// provider-owned slot. Callers use this inventory only when
+    /// [`Self::supports_owned_slot_inventory`] returns true.
+    async fn list_owned_ids(&self) -> Result<Vec<String>> {
+        Err(BlazeError::StorageError {
+            msg: "storage provider does not expose stable slot inventory".to_string(),
+        })
+    }
+
     /// Reconstruct a previously allocated slot from a stable instance id.
     ///
     /// Implementations must derive every returned path from their configured

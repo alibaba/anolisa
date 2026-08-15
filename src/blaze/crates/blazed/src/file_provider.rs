@@ -244,12 +244,29 @@ impl StorageProvider for FileStorageProvider {
         // Re-derive the canonical path from instances_dir + slot.id. Do not
         // trust path strings carried in a persisted or externally built slot.
         let canonical_dir = self.slot_for_id(&slot.id)?.instance_dir;
-        if canonical_dir.exists() {
-            tokio::fs::remove_dir_all(&canonical_dir)
-                .await
-                .map_err(|e| BlazeError::StorageError {
-                    msg: format!("release '{}': {}", slot.id, e),
-                })?;
+        match tokio::fs::symlink_metadata(&canonical_dir).await {
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                tokio::fs::remove_dir_all(&canonical_dir)
+                    .await
+                    .map_err(|error| BlazeError::StorageError {
+                        msg: format!("release '{}': {error}", slot.id),
+                    })?;
+            }
+            Ok(_) => {
+                return Err(BlazeError::StorageError {
+                    msg: format!(
+                        "release '{}': refusing non-directory slot {}",
+                        slot.id,
+                        canonical_dir.display()
+                    ),
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(BlazeError::StorageError {
+                    msg: format!("release '{}': inspect: {error}", slot.id),
+                });
+            }
         }
         Ok(())
     }
@@ -257,6 +274,53 @@ impl StorageProvider for FileStorageProvider {
     async fn release_by_id(&self, instance_id: &str) -> Result<()> {
         let slot = self.slot_for_id(instance_id)?;
         self.release(slot).await
+    }
+
+    fn supports_owned_slot_inventory(&self) -> bool {
+        true
+    }
+
+    async fn list_owned_ids(&self) -> Result<Vec<String>> {
+        let mut entries = tokio::fs::read_dir(&self.instances_dir)
+            .await
+            .map_err(|error| BlazeError::StorageError {
+                msg: format!("inventory {}: {error}", self.instances_dir.display()),
+            })?;
+        let mut ids = Vec::new();
+        while let Some(entry) =
+            entries
+                .next_entry()
+                .await
+                .map_err(|error| BlazeError::StorageError {
+                    msg: format!("inventory {}: {error}", self.instances_dir.display()),
+                })?
+        {
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .await
+                .map_err(|error| BlazeError::StorageError {
+                    msg: format!("inventory {}: inspect: {error}", path.display()),
+                })?;
+            if !file_type.is_dir() {
+                return Err(BlazeError::StorageError {
+                    msg: format!(
+                        "inventory {}: unexpected non-directory entry",
+                        path.display()
+                    ),
+                });
+            }
+            let id = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| BlazeError::StorageError {
+                    msg: format!("inventory {}: slot name is not UTF-8", path.display()),
+                })?;
+            validate_instance_id(&id)?;
+            ids.push(id);
+        }
+        ids.sort();
+        Ok(ids)
     }
 
     async fn reconstruct(&self, instance_id: &str) -> Result<StorageSlot> {
@@ -447,6 +511,7 @@ fn validate_instance_id(instance_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn probe_existing_dir_returns_true() {
@@ -501,6 +566,136 @@ mod tests {
         assert!(dir.exists());
         provider.release(slot).await.unwrap();
         assert!(!dir.exists());
+    }
+
+    #[tokio::test]
+    async fn release_by_id_recovers_missing_and_partial_slots() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let provider = FileStorageProvider::new(tmp.path().to_path_buf());
+        let id = Uuid::new_v4().to_string();
+        let missing_id = Uuid::new_v4().to_string();
+        provider.release_by_id(&missing_id).await.unwrap();
+        provider.release_by_id(&missing_id).await.unwrap();
+        let partial = tmp.path().join(&id);
+        tokio::fs::create_dir(&partial).await.unwrap();
+        tokio::fs::write(partial.join("rootfs.ext4"), b"partial")
+            .await
+            .unwrap();
+
+        provider.release_by_id(&id).await.unwrap();
+        provider.release_by_id(&id).await.unwrap();
+
+        assert!(!partial.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn release_by_id_rejects_non_directory_and_symlink_slots() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let provider = FileStorageProvider::new(tmp.path().to_path_buf());
+        let id = Uuid::new_v4().to_string();
+        let slot_path = tmp.path().join(&id);
+        tokio::fs::write(&slot_path, b"not a directory")
+            .await
+            .unwrap();
+
+        let file_error = provider.release_by_id(&id).await.unwrap_err();
+        assert!(file_error.to_string().contains("refusing non-directory"));
+        assert!(slot_path.is_file());
+
+        tokio::fs::remove_file(&slot_path).await.unwrap();
+        let target = tempfile::TempDir::new().unwrap();
+        symlink(target.path(), &slot_path).unwrap();
+
+        let symlink_error = provider.release_by_id(&id).await.unwrap_err();
+        assert!(symlink_error.to_string().contains("refusing non-directory"));
+        assert!(std::fs::symlink_metadata(&slot_path).unwrap().is_symlink());
+        assert!(target.path().is_dir());
+    }
+
+    #[tokio::test]
+    async fn owned_slot_inventory_includes_partial_slots_in_stable_order() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let provider = FileStorageProvider::new(tmp.path().to_path_buf());
+        let first = Uuid::new_v4().to_string();
+        let second = Uuid::new_v4().to_string();
+        tokio::fs::create_dir(tmp.path().join(&second))
+            .await
+            .unwrap();
+        tokio::fs::create_dir(tmp.path().join(&first))
+            .await
+            .unwrap();
+        tokio::fs::write(tmp.path().join(&second).join("rootfs.ext4"), b"partial")
+            .await
+            .unwrap();
+        let mut expected = vec![first, second];
+        expected.sort();
+
+        assert!(provider.supports_owned_slot_inventory());
+        assert_eq!(provider.list_owned_ids().await.unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn owned_slot_inventory_rejects_non_directory_entries() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let provider = FileStorageProvider::new(tmp.path().to_path_buf());
+        let id = Uuid::new_v4().to_string();
+        tokio::fs::write(tmp.path().join(id), b"not a slot directory")
+            .await
+            .unwrap();
+
+        let error = provider.list_owned_ids().await.unwrap_err();
+
+        assert!(error.to_string().contains("unexpected non-directory"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn owned_slot_inventory_rejects_invalid_directory_names() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let provider = FileStorageProvider::new(tmp.path().to_path_buf());
+        tokio::fs::create_dir(tmp.path().join("invalid\\slot"))
+            .await
+            .unwrap();
+
+        let error = provider.list_owned_ids().await.unwrap_err();
+
+        assert!(error.to_string().contains("invalid instance_id"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn owned_slot_inventory_rejects_non_utf8_directory_names() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let provider = FileStorageProvider::new(tmp.path().to_path_buf());
+        tokio::fs::create_dir(tmp.path().join(OsString::from_vec(vec![0xff])))
+            .await
+            .unwrap();
+
+        let error = provider.list_owned_ids().await.unwrap_err();
+
+        assert!(error.to_string().contains("slot name is not UTF-8"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn owned_slot_inventory_rejects_linked_entries() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let provider = FileStorageProvider::new(tmp.path().to_path_buf());
+        let target = tempfile::TempDir::new().unwrap();
+        let id = Uuid::new_v4().to_string();
+        symlink(target.path(), tmp.path().join(id)).unwrap();
+
+        let error = provider.list_owned_ids().await.unwrap_err();
+
+        assert!(error.to_string().contains("unexpected non-directory"));
     }
 
     #[tokio::test]
