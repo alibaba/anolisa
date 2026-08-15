@@ -272,6 +272,10 @@ export const AgentSessionsPage: React.FC = () => {
       }
     }
   }, [agentFilter, rangeMs, t]);
+  const refreshAll = () => {
+    void loadData();
+    void loadLatency();
+  };
   useEffect(() => {
     loadData();
   }, [loadData]);
@@ -378,7 +382,7 @@ export const AgentSessionsPage: React.FC = () => {
             自动刷新
           </label>
           <button
-            onClick={loadData}
+            onClick={refreshAll}
             disabled={loading}
             className="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
           >
