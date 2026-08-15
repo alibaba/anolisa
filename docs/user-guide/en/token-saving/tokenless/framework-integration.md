@@ -16,6 +16,7 @@ Python framework package that application developers install and register explic
 | Qoder | `qoder` | Hard-disabled | Emits rewritten shell input | Emits `additionalContext` | Attempted after response compression | — |
 | Claude Code | `claude-code` | Hard-disabled | Replaces Bash input | Replaces output on 2.1.121 or later; otherwise passes through | Used only when the replacement can remain text | — |
 | Codex | `codex` | Hard-disabled | Replaces supported shell input | Keeps the original and adds analysis or a compressed alternative | Used to build that alternative | — |
+| DeepSeek Harness | `dsh` | — | — | Replaces an accepted single-text JSON result when the replacement is smaller | — | — |
 | OpenCode | `opencode` | Hard-disabled | Replaces Bash input | Replaces tool output | Attempted after response compression | ✅ |
 | Qwen Code | `qwencode` | Hard-disabled | Emits rewritten shell input | Emits `additionalContext` | Attempted after response compression | ✅ |
 
@@ -41,6 +42,83 @@ The standalone `compress-response` defaults are not the defaults used by most ad
 The shared response hook, OpenClaw, and Hermes skip inputs shorter than 200 characters. Codex skips inputs shorter than 500 characters; it includes compressed content only for inputs of at least 4,000 characters and otherwise adds diagnostics or a summary. Skill-like text with YAML frontmatter is also skipped by the shared paths.
 
 Claude Code requires version 2.1.121 or later for `updatedToolOutput`. On older or unknown versions, response compression is disabled to avoid duplicating the original. Structured tool outputs preserve their host schema and do not switch to textual TOON; JSON carried as a string can use TOON when it is smaller.
+
+### DeepSeek Harness native processing
+
+The DSH bundle requires Node.js 22 or later and a compatible DSH profile. Pass
+all desired profile names in the same enable command, then start DSH with one
+of those names:
+
+```bash
+anolisa adapter enable tokenless dsh \
+  --profile web \
+  --profile headless
+dsh --profile web
+```
+
+`--profile` is required and repeatable. Each enable or re-enable treats its
+arguments as the complete desired profile set. It removes the bundle from any
+profile recorded by the prior receipt but omitted from the new command, so
+always include every profile that should retain Tokenless. ANOLISA records the
+selected profiles and their resolved DSH home in the adapter receipt, so later
+status, disable, and re-enable operations continue to address the same profile
+tree.
+
+The plugin runs on DSH's `tools/post-execute` waterfall. It attempts
+`tokenless compress-response` only for a successful result containing one text
+block whose text is a JSON object or array. It replaces the content only when
+the CLI returns valid JSON that is strictly shorter. Multiple blocks, images,
+plain text, invalid JSON, errored results, Code Mode child executions, and the
+default content-retrieval tools are not compressed. A missing, failing, or
+timed-out CLI also preserves the original content. This native path does not
+run the TOON second stage and has no pre-spawn minimum-size gate.
+
+Add an override for the installed row to
+`$DSH_HOME/profiles/<profile>/cordis.patch.yml`, then restart that DSH profile:
+
+```yaml
+- id: anolisa-tokenless
+  config:
+    responseCompressionEnabled: true
+    timeoutMs: 5000
+    maxBuffer: 4194304
+    noStash: false
+```
+
+Later DSH patch layers replace the row's complete `config` value. The plugin
+supplies defaults for omitted keys, so the override may contain only the keys
+that need to differ.
+
+| Option | Default | Behavior |
+|--------|---------|----------|
+| `responseCompressionEnabled` | `true` | Enables response compression. Setting it to `false` does not disable environment-error attribution. |
+| `tokenlessBin` | `$TOKENLESS_BIN`, then `tokenless` | Selects the Tokenless CLI executable. A non-empty plugin value takes precedence over the environment variable. |
+| `skipTools` | Content-retrieval set below | Skips compression for matching tool names. A configured array replaces the default set; an empty array skips none. Attribution remains active. |
+| `shellTools` | Shell/process set below | Selects shell thresholds and the tools whose structured `value` may be interpreted for failure attribution. A configured array replaces the default set. |
+| `truncateStringsAt` | Shell `65536`; other `1048576` | Overrides the maximum retained string length for every tool class. Only a positive integer is accepted. |
+| `truncateArraysAt` | Shell `128`; other `65536` | Overrides the maximum retained array length for every tool class. Only a positive integer is accepted. |
+| `maxDepth` | Shell `8`; other `32` | Overrides maximum JSON depth for every tool class. Only a positive integer is accepted. |
+| `timeoutMs` | `3000` | Bounds one Tokenless child process in milliseconds. Only a positive integer is accepted. |
+| `maxBuffer` | `2097152` | Bounds captured child-process output in bytes. Only a positive integer is accepted. |
+| `agentId` | `dsh` | Sets the `--agent-id` recorded by Tokenless statistics. |
+| `noStash` | `false` | Passes `--no-stash` when `true`; dropped array items are otherwise eligible for Stash storage. |
+
+The default `skipTools` set is `Read`, `read`, `read_file`, `read_many_files`,
+`Glob`, `glob`, `search_file`, `list_directory`, `list_dir`, `Grep`, `grep`,
+`grep_code`, `grep_search`, `search_files`, `Lsp`, `lsp`, `NotebookRead`,
+`notebook_read`, and `notebookread`.
+
+The default `shellTools` set is `Bash`, `bash`, `Shell`, `shell`, `exec`,
+`terminal`, `run_shell_command`, `run_in_terminal`, `get_terminal_output`,
+`execute_command`, and `process`.
+
+Raw DSH failures marked with `isError` may receive dependency, permission,
+path, network, or package attribution for any tool. Structured output is
+classified only for `shellTools`. Attribution is independent of compression,
+so it remains active when compression is disabled, skipped, or produces no
+smaller result. When a later waterfall listener replaces the canonical
+`value`, Tokenless classifies that replacement and does not carry attribution
+from the superseded result.
 
 ## Manage adapters with anolisa (recommended)
 
@@ -83,9 +161,19 @@ anolisa adapter enable tokenless qoder
 anolisa adapter enable tokenless claude-code
 anolisa adapter enable tokenless codex
 anolisa adapter enable tokenless qwencode
+anolisa adapter enable tokenless dsh \
+  --profile web \
+  --profile headless
 ```
 
-Enable only Agent products that you use. When enabling more than one, run and verify each command separately.
+Enable only Agent products that you use. Run and verify each product's command
+separately. For DSH, include every desired profile in its single enable
+command.
+
+DeepSeek Harness is profile-scoped and therefore requires at least one
+`--profile`. Each name must match one passed to `dsh --profile <profile>`; the
+generic command without a profile is rejected. A later enable or re-enable
+must repeat every profile that should remain registered.
 
 OpenCode uses its bundled install script under
 [Manual integration after npm installation](#manual-integration-after-npm-installation).
@@ -195,6 +283,14 @@ The marketplace plugin takes effect after restarting Claude Code. The install sc
 ### Codex
 
 The plugin loads in a new Codex session. Close the old session and start a new one before verifying statistics. Its PostToolUse hook is additive: use statistics as candidate-compression telemetry, not as proof that the original Codex tool output left the prompt.
+
+### DeepSeek Harness
+
+The native bundle loads when the selected DSH profile starts. After enabling
+or changing its profile patch, restart `dsh --profile <profile>`, run a tool
+that returns compressible JSON, and inspect `tokenless stats list`. Disable the
+adapter with `anolisa adapter disable tokenless dsh`; the receipt already
+records the profile names, so disable does not accept another `--profile`.
 
 ### OpenCode
 

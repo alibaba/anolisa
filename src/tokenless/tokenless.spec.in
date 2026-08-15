@@ -21,7 +21,8 @@ Source0:        %{name}-%{version}.tar.gz
 BuildRequires:  cargo
 BuildRequires:  rust >= 1.89
 # nodejs/npm are required to compile the OpenClaw TS plugin -> dist/index.js
-# via `make build-openclaw-plugin`. Provided by CI; declared here for chroot
+# via `make build-openclaw-plugin`. The native dsh bundle is plain ESM and is
+# validated by `make build-dsh-plugin`. Provided by CI; declared here for chroot
 # builds where they are not pre-installed.
 BuildRequires:  nodejs
 BuildRequires:  npm
@@ -50,6 +51,9 @@ The package includes:
 - toon: JSON to TOON format encoder/decoder (crates.io toon-format v0.5.0)
 
 Note: OpenClaw plugin is available under /usr/share/anolisa/adapters/tokenless/openclaw/.
+Native DeepSeek Harness (dsh) plugin bundle is available under
+/usr/share/anolisa/adapters/tokenless/dsh/. Register it with
+`anolisa adapter enable tokenless dsh --profile <profile>`.
 Copilot-shell extension is auto-discovered from /usr/share/anolisa/extensions/tokenless/.
 Hermes Agent plugin (response compression, TOON encoding, command rewriting via RTK,
 and Tool Ready) is available under /usr/share/anolisa/adapters/tokenless/hermes/.
@@ -93,7 +97,7 @@ fi
 # Produces adapters/tokenless/openclaw/dist/index.js, which package.json
 # declares as both "main" and openclaw.extensions. Mirroring sec-core's
 # build-openclaw-plugin pattern — never hand-roll tsc/esbuild here.
-make build-openclaw-plugin
+make build-openclaw-plugin build-dsh-plugin
 
 %install
 rm -rf %{buildroot}
@@ -103,6 +107,7 @@ mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/hooks
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/common/commands
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/dist
+mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/dsh/dist
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/scripts
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/.qoder-plugin
 mkdir -p %{buildroot}%{_datadir}/anolisa/adapters/tokenless/qoder/scripts
@@ -165,6 +170,12 @@ install -m 0755 adapters/tokenless/openclaw/scripts/uninstall.sh %{buildroot}%{_
 install -m 0644 adapters/tokenless/openclaw/dist/index.js %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/dist/
 install -m 0644 adapters/tokenless/openclaw/openclaw.plugin.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/
 install -m 0644 adapters/tokenless/openclaw/package.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/openclaw/
+
+# Install the native dsh bundle. dsh owns profile mutation; this package only
+# ships the immutable package manifest, Cordis patch, and plugin entry.
+install -m 0644 adapters/tokenless/dsh/package.json %{buildroot}%{_datadir}/anolisa/adapters/tokenless/dsh/
+install -m 0644 adapters/tokenless/dsh/cordis.patch.yml %{buildroot}%{_datadir}/anolisa/adapters/tokenless/dsh/
+install -m 0644 adapters/tokenless/dsh/dist/index.js %{buildroot}%{_datadir}/anolisa/adapters/tokenless/dsh/dist/
 
 # Install Hermes Agent plugin (Python hooks + install scripts)
 install -m 0755 adapters/tokenless/hermes/__init__.py %{buildroot}%{_datadir}/anolisa/adapters/tokenless/hermes/
@@ -253,6 +264,8 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %dir %{_datadir}/anolisa/adapters/tokenless/openclaw
 %dir %{_datadir}/anolisa/adapters/tokenless/openclaw/scripts
 %dir %{_datadir}/anolisa/adapters/tokenless/openclaw/dist
+%dir %{_datadir}/anolisa/adapters/tokenless/dsh
+%dir %{_datadir}/anolisa/adapters/tokenless/dsh/dist
 %dir %{_datadir}/anolisa/adapters/tokenless/hermes
 %dir %{_datadir}/anolisa/adapters/tokenless/hermes/scripts
 %dir %{_datadir}/anolisa/adapters/tokenless/qoder
@@ -288,6 +301,9 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/openclaw/dist/index.js
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/openclaw/openclaw.plugin.json
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/openclaw/package.json
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/dsh/package.json
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/dsh/cordis.patch.yml
+%attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/dsh/dist/index.js
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/__init__.py
 %attr(0644,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/plugin.yaml
 %attr(0755,root,root) %{_datadir}/anolisa/adapters/tokenless/hermes/scripts/detect.sh

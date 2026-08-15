@@ -29,6 +29,20 @@
         "uninstall": "openclaw/scripts/uninstall.sh"
       }
     },
+    "dsh": {
+      "compatibleVersions": ">=0.1.0-rc.2 <0.2.0",
+      "method": "plugin",
+      "pluginId": "@anolisa/dsh-tokenless",
+      "capabilities": {
+        "seams": ["tools/post-execute"],
+        "features": ["compress-response", "error-attribution", "stats"]
+      },
+      "bundle": {
+        "entry": "package.json",
+        "patch": "cordis.patch.yml",
+        "pluginEntry": "dist/index.js"
+      }
+    },
     "hermes": {
       "compatibleVersions": ">=1.0.0",
       "capabilities": {

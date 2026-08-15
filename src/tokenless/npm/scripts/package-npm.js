@@ -357,7 +357,8 @@ function walkFiles(dir, cb) {
  * Build adapter payloads that are not plain source files. The OpenClaw plugin
  * is TypeScript and must be compiled to dist/index.js before it can be
  * installed by openclaw plugins install; a clean Git checkout only contains
- * index.ts. This mirrors the Makefile's build-openclaw-plugin target.
+ * index.ts. The dsh entry is plain ESM, but its package manifest is generated
+ * from the component version and is validated by the same Makefile seam.
  */
 function buildAdapters() {
   const openclawDir = join(tokenlessRoot, 'adapters', 'tokenless', 'openclaw');
@@ -367,14 +368,14 @@ function buildAdapters() {
   // never leak into a published tarball.
   console.log('  Building OpenClaw plugin (TypeScript -> dist/index.js)...');
   try {
-    execSync('make build-openclaw-plugin', {
+    execSync('make build-openclaw-plugin build-dsh-plugin', {
       stdio: 'inherit',
       cwd: tokenlessRoot,
     });
   } catch (err) {
     throw new Error(
-      `OpenClaw plugin build failed. Ensure npm and TypeScript are available. ` +
-      `Build manually with: make -C src/tokenless build-openclaw-plugin`,
+      `Adapter bundle preparation failed. Ensure npm and TypeScript are available. ` +
+      `Build manually with: make -C src/tokenless build-openclaw-plugin build-dsh-plugin`,
     );
   }
 
@@ -382,6 +383,13 @@ function buildAdapters() {
     throw new Error(
       `OpenClaw plugin build did not produce adapters/tokenless/openclaw/dist/index.js`,
     );
+  }
+
+  const dshDir = join(tokenlessRoot, 'adapters', 'tokenless', 'dsh');
+  for (const relative of ['package.json', 'cordis.patch.yml', 'dist/index.js']) {
+    if (!existsSync(join(dshDir, relative))) {
+      throw new Error(`Native dsh adapter bundle is missing adapters/tokenless/dsh/${relative}`);
+    }
   }
 }
 

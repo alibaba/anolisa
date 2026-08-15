@@ -116,12 +116,27 @@ anolisa adapter scan
 | Qoder | `anolisa adapter enable tokenless qoder` |
 | Claude Code | `anolisa adapter enable tokenless claude-code` |
 | Codex | `anolisa adapter enable tokenless codex` |
+| DeepSeek Harness（dsh） | `anolisa adapter enable tokenless dsh --profile <profile>` |
 | OpenCode | 生命周期脚本（见下文） |
 | Qwen Code | `anolisa adapter enable tokenless qwencode` |
 
 接入后重启对应的 Agent CLI 或 IDE。OpenClaw 还需要运行
 `openclaw gateway restart`；如果安全检查拒绝 Plugin，请按照
-[OpenClaw 接入说明](framework-integration.md#2-启用一个-adapter)处理。本版本尚未将
+[OpenClaw 接入说明](framework-integration.md#2-启用一个-adapter)处理。
+DeepSeek Harness 必须提供 `<profile>`，并与 `dsh --profile <profile>` 使用的名称
+保持一致。启用 Bundle 后应重启这个 profile。需要启用多个 profile 时，应在同一条
+命令中重复传入 `--profile`。
+
+```bash
+anolisa adapter enable tokenless dsh \
+  --profile web \
+  --profile headless
+```
+
+后续每次 enable 或 re-enable 都会替换 receipt 记录的完整 profile 集合。每次都要
+列出需要继续使用 Tokenless 的全部 profile。
+
+本版本尚未将
 OpenCode 注册到 `anolisa adapter enable`；请使用
 [OpenCode 接入说明](framework-integration.md#opencode)中的随附生命周期脚本。
 

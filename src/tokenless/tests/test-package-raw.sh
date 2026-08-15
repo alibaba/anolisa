@@ -16,6 +16,7 @@ mkdir -p \
     "$ADAPTERS/common/hooks" \
     "$ADAPTERS/common/commands" \
     "$ADAPTERS/openclaw/dist" \
+    "$ADAPTERS/dsh/dist" \
     "$ADAPTERS/hermes" \
     "$ADAPTERS/qoder/.qoder-plugin" \
     "$ADAPTERS/claude-code/.claude-plugin" \
@@ -44,6 +45,7 @@ write_json_version() {
 write_json_version "$ADAPTERS/manifest.json"
 write_json_version "$ADAPTERS/openclaw/package.json"
 write_json_version "$ADAPTERS/openclaw/openclaw.plugin.json"
+write_json_version "$ADAPTERS/dsh/package.json"
 write_json_version "$ADAPTERS/qoder/.qoder-plugin/plugin.json"
 write_json_version "$ADAPTERS/claude-code/.claude-plugin/plugin.json"
 write_json_version "$ADAPTERS/codex/.codex-plugin/plugin.json"
@@ -52,6 +54,9 @@ printf '{"name":"anolisa-tokenless"}\n' \
     > "$ADAPTERS/claude-code/.claude-plugin/marketplace.json"
 printf 'version: "%s"\n' "$VERSION" > "$ADAPTERS/hermes/plugin.yaml"
 printf 'export default {};\n' > "$ADAPTERS/openclaw/dist/index.js"
+printf '%s\n' '- insert:' '    - id: anolisa-tokenless' "      name: '@anolisa/dsh-tokenless'" \
+    > "$ADAPTERS/dsh/cordis.patch.yml"
+printf 'export function apply() {}\n' > "$ADAPTERS/dsh/dist/index.js"
 printf '{"name":"tokenless","version":"%s"}\n' "$VERSION" \
     > "$ADAPTERS/common/cosh-extension.json"
 printf '{}\n' > "$ADAPTERS/common/tool-ready-spec.json"
@@ -161,6 +166,9 @@ for relative in \
     test ! -L "$EXTRACTED/$relative"
     cmp "$ADAPTERS/common/hooks/run-hook.sh" "$EXTRACTED/$relative"
 done
+test -f "$EXTRACTED/adapters/dsh/package.json"
+test -f "$EXTRACTED/adapters/dsh/cordis.patch.yml"
+test -f "$EXTRACTED/adapters/dsh/dist/index.js"
 test -f "$EXTRACTED/extensions/tokenless/cosh-extension.json"
 test -f "$EXTRACTED/extensions/tokenless/hooks/run-hook.sh"
 test ! -e "$EXTRACTED/adapters/agentscope"

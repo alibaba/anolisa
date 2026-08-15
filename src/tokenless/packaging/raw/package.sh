@@ -91,6 +91,9 @@ stage_payload() {
         openclaw/package.json \
         openclaw/openclaw.plugin.json \
         openclaw/dist/index.js \
+        dsh/package.json \
+        dsh/cordis.patch.yml \
+        dsh/dist/index.js \
         hermes/plugin.yaml \
         qoder/.qoder-plugin/plugin.json \
         claude-code/.claude-plugin/marketplace.json \

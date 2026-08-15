@@ -89,6 +89,20 @@ detect = { binary = "openclaw" }
 entry = "openclaw.plugin.json"
 
 [[adapters]]
+framework = "dsh"
+adapter_type = "plugin"
+plugin_id = "anolisa-tokenless"
+source = "adapters/dsh"
+dest = "{datadir}/adapters/{component}/dsh/"
+detect = { binary = "dsh" }
+
+[adapters.bundle]
+entry = "package.json"
+
+[adapters.compat]
+framework_version = ">=0.1.0-rc.2 <0.2.0"
+
+[[adapters]]
 framework = "hermes"
 adapter_type = "plugin"
 plugin_id = "tokenless"

@@ -20,6 +20,7 @@ Agent adapters are available for:
 - **Claude Code plugin** — RTK command rewriting, response/TOON compression, and registered but hard-disabled Tool Ready via Claude Code's official plugin marketplace.
 - **Codex plugin** — response compression, TOON encoding, registered but hard-disabled Tool Ready, and command rewriting via Codex's native hook system.
 - **OpenCode plugin** — schema/response/TOON compression, registered but hard-disabled Tool Ready, and command rewriting via OpenCode's local plugin API.
+- **DeepSeek Harness plugin** — native response compression and environment-error attribution through DSH's `tools/post-execute` seam.
 
 For framework developers, the separate **AgentScope Python integration** replaces successful
 final tool responses and provides a marker-scoped native retrieval Tool.
@@ -41,6 +42,7 @@ final tool responses and provides a marker-scoped native retrieval Tool.
 | Claude Code plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅ |
 | Codex plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅ |
 | OpenCode plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Schema compression ✅, Response compression ✅, TOON ✅ |
+| DeepSeek Harness plugin | — | Response compression ✅, Environment-error attribution ✅ |
 | AgentScope framework integration | — | Response compression ✅, Native retrieval Tool ✅ |
 | Zero runtime deps | — | Pure Rust, single static binary |
 
@@ -104,7 +106,8 @@ Token-Less/
 │   ├── qoder/                   # Qoder CLI plugin + scripts
 │   ├── claude-code/             # Claude Code plugin + marketplace + hooks
 │   ├── codex/                   # Codex plugin + scripts
-│   └── opencode/                # OpenCode local plugin + scripts
+│   ├── opencode/                # OpenCode local plugin + scripts
+│   └── dsh/                     # Native DeepSeek Harness bundle
 ├── third_party/rtk/           # RTK vendored source (justfile clone+patch from GitHub)
 ├── third_party/patches/      # Patches for vendored third_party sources
 ├── Makefile                   # Unified build system
@@ -155,6 +158,15 @@ as the user who owns that configuration, and enable only the adapter you need:
 anolisa adapter scan
 anolisa adapter enable tokenless openclaw
 anolisa adapter status tokenless
+```
+
+DeepSeek Harness requires at least one explicit profile name. When enabling
+multiple profiles, pass every name in the same command; see the plugin section
+below for the complete-set behavior. Use an enabled name when starting DSH:
+
+```bash
+anolisa adapter enable tokenless dsh --profile <profile>
+dsh --profile <profile>
 ```
 
 Developers building from source can use:
@@ -524,6 +536,31 @@ The installer creates a `tokenless.js` symbolic link in OpenCode's global
 `plugins/` directory and never overwrites an existing unmanaged file. It honors
 `OPENCODE_CONFIG_DIR`, `XDG_CONFIG_HOME`, and the explicit
 `TOKENLESS_OPENCODE_CONFIG_DIR` override.
+
+## DeepSeek Harness Plugin
+
+The native DSH bundle compresses successful single-block JSON tool results
+through `tools/post-execute` and keeps the original result unless the Tokenless
+CLI returns strictly smaller valid JSON. Content-retrieval tools remain
+lossless by default. Environment-error attribution stays active when response
+compression is disabled, skipped, or unable to reduce the result.
+
+Enable the bundle for every desired DSH profile in one command by repeating
+`--profile`:
+
+```bash
+anolisa adapter enable tokenless dsh \
+  --profile web \
+  --profile headless
+```
+
+Each enable or re-enable treats the supplied profiles as the complete desired
+set. It removes the bundle from profiles recorded by the prior receipt but
+omitted from the new command, so always include every profile that should keep
+Tokenless. Each name must match a profile passed to `dsh --profile <profile>`.
+Configuration belongs in that profile's `cordis.patch.yml`; see the
+[DeepSeek Harness integration reference](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#deepseek-harness-native-processing)
+for every option and default.
 
 ## AgentScope Framework Integration
 

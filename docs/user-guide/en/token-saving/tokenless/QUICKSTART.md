@@ -120,12 +120,26 @@ anolisa adapter scan
 | Qoder | `anolisa adapter enable tokenless qoder` |
 | Claude Code | `anolisa adapter enable tokenless claude-code` |
 | Codex | `anolisa adapter enable tokenless codex` |
+| DeepSeek Harness (dsh) | `anolisa adapter enable tokenless dsh --profile <profile>` |
 | OpenCode | Lifecycle script (see below) |
 | Qwen Code | `anolisa adapter enable tokenless qwencode` |
 
 Restart the Agent CLI or IDE after setting it up. OpenClaw also requires
 `openclaw gateway restart`; if its security check rejects the plugin, follow
 the [OpenClaw integration instructions](framework-integration.md#2-enable-one-adapter).
+For DeepSeek Harness, `<profile>` is required and must match the name used by
+`dsh --profile <profile>`; restart that profile after enabling the bundle.
+To enable more than one profile, repeat `--profile` in the same command:
+
+```bash
+anolisa adapter enable tokenless dsh \
+  --profile web \
+  --profile headless
+```
+
+Every later enable or re-enable replaces the entire recorded profile set.
+Include every profile that should retain Tokenless each time.
+
 OpenCode is not registered with `anolisa adapter enable` in this release; use
 the bundled lifecycle script described in the
 [OpenCode integration instructions](framework-integration.md#opencode).

@@ -66,6 +66,7 @@ tokenless 只优化**工具调用响应**进入 LLM 上下文前的冗余，不�
 - **Claude Code 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
 - **Codex 插件** — Tool Ready（已硬关闭）+ 命令重写 + 响应压缩 + TOON
 - **OpenCode 插件** — Tool Ready（已硬关闭）+ 命令重写 + Schema/响应压缩 + TOON
+- **DeepSeek Harness 插件**。通过 DSH 原生 `tools/post-execute` 接入响应压缩和环境错误归因
 
 ### Agent 开发框架集成
 
@@ -114,6 +115,14 @@ Mac 暂无已发布的软件包。仓库中的 npm packaging 目录用于构建�
 anolisa adapter scan
 anolisa adapter enable tokenless openclaw
 anolisa adapter status tokenless
+```
+
+DeepSeek Harness 必须指定至少一个 profile。需要启用多个 profile 时，应在同一条
+命令中列出全部名称，完整集合语义见下文。启动 DSH 时请使用已经启用的名称。
+
+```bash
+anolisa adapter enable tokenless dsh --profile <profile>
+dsh --profile <profile>
 ```
 
 从源码构建适合开发者。
@@ -165,6 +174,26 @@ make opencode-install
 不会覆盖同名的非托管文件。配置目录支持 `OPENCODE_CONFIG_DIR`、
 `XDG_CONFIG_HOME` 和显式的 `TOKENLESS_OPENCODE_CONFIG_DIR` 覆盖。
 安装后重启 OpenCode 即可加载插件。
+
+### DeepSeek Harness 插件
+
+DSH 原生 Bundle 通过 `tools/post-execute` 压缩成功的单文本块 JSON 工具结果。
+Tokenless CLI 只有返回更短的合法 JSON 时才会替换结果，内容读取类工具默认保持
+原样。关闭响应压缩、跳过压缩或压缩无收益时，环境错误归因仍会工作。
+
+需要启用多个 DSH profile 时，应在同一条命令中重复传入 `--profile`。
+
+```bash
+anolisa adapter enable tokenless dsh \
+  --profile web \
+  --profile headless
+```
+
+每次 enable 或 re-enable 都会把本次传入的 profile 视为完整目标集合。旧 receipt
+中已有但本次没有列出的 profile 会卸载 Bundle，因此每次都要列出需要继续使用
+Tokenless 的全部 profile。每个名称必须与 `dsh --profile <profile>` 使用的名称
+一致。配置写在对应 profile 的 `cordis.patch.yml` 中。全部配置项和默认值见
+[DeepSeek Harness 集成参考](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#deepseek-harness-原生处理路径)。
 
 ### AgentScope 框架集成
 
@@ -324,6 +353,7 @@ tokenless env-check --tool Shell --fix
 - `python/tokenless/` — 面向 CPython 3.11+ 的 PyO3 `anolisa_tokenless` 包
 - `python/agentscope/` — 独立的 AgentScope 框架集成与 Wheel 元数据
 - `adapters/tokenless/` — 面向具体 Agent/CLI 的 Plugin、Hook 与 Extension 适配器包
+- `adapters/tokenless/dsh/`。DeepSeek Harness 原生 Bundle
 - `third_party/rtk/` — RTK 命令重写引擎（vendored）
 - `packaging/raw/` — Tokenless 自维护的 ANOLISA Raw 打包与目标校验
 

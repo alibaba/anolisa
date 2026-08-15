@@ -148,6 +148,18 @@ for (const name of expected) {
 }
 JS
 
+test -f "$ROOT/npm/dist/tokenless/adapters/tokenless/dsh/package.json"
+test -f "$ROOT/npm/dist/tokenless/adapters/tokenless/dsh/cordis.patch.yml"
+test -f "$ROOT/npm/dist/tokenless/adapters/tokenless/dsh/dist/index.js"
+node - "$ROOT/npm/dist/tokenless/adapters/tokenless/dsh/package.json" <<'JS'
+const fs = require('node:fs');
+const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+if (manifest.name !== '@anolisa/dsh-tokenless') throw new Error('wrong dsh package name');
+if (manifest.dsh?.bundle?.patch !== './cordis.patch.yml') {
+  throw new Error('dsh bundle patch contract missing');
+}
+JS
+
 if grep -Eq \
     'cargo-zigbuild|cargo zigbuild|cross build|rustup target|SDKROOT|detectBuilder' \
     "$ROOT/npm/scripts/package-npm.js"; then
