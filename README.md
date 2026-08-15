@@ -191,6 +191,27 @@ isolates risky operations, and
 [ws-ckpt](https://agentic-os.sh/docs/user-guide/runtime/ws-ckpt/) keeps recovery
 points for workspace changes.
 
+### Catch a changed Skill before it runs
+
+When a signed Skill changes, the Agent reports `drifted` before using it again.
+A rescan records blocking findings as `deny`.
+
+[Try the Agent demo →](https://agentic-os.sh/docs/user-guide/agent-security/agent-sec-core/qoder-skill-ledger-demo/)
+· [Skill Ledger guide](https://agentic-os.sh/docs/user-guide/agent-security/agent-sec-core/skill-ledger/)
+
+<table align="center" cellpadding="0" cellspacing="0">
+  <tr>
+    <td>
+      <video
+        controls
+        muted
+        preload="metadata"
+        src="https://github.com/user-attachments/assets/aad6e296-7c5a-4a81-be2e-ea4f49e43637"
+      ></video>
+    </td>
+  </tr>
+</table>
+
 [Choose a runtime or security starting point →](https://agentic-os.sh/docs/quickstart/)
 · [Start with ANOLISA CLI](https://agentic-os.sh/docs/user-guide/user-entrypoint/anolisa-cli/)
 

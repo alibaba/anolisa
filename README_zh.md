@@ -183,6 +183,27 @@ ANOLISA 正在完善面向 Agent 的执行环境。
 隔离高风险操作，[ws-ckpt](https://agentic-os.sh/zh/docs/user-guide/runtime/ws-ckpt/)
 为工作区变更保留恢复点。
 
+### 在 Skill 运行前发现它已被改动
+
+已签名的 Skill 发生变化后，Agent 会在再次调用前报告 `drifted`。
+重新扫描发现阻断级风险时，新版本记录为 `deny`。
+
+[查看 Agent 演示 →](https://agentic-os.sh/zh/docs/user-guide/agent-security/agent-sec-core/qoder-skill-ledger-demo/)
+· [Skill Ledger 手册](https://agentic-os.sh/zh/docs/user-guide/agent-security/agent-sec-core/skill-ledger/)
+
+<table align="center" cellpadding="0" cellspacing="0">
+  <tr>
+    <td>
+      <video
+        controls
+        muted
+        preload="metadata"
+        src="https://github.com/user-attachments/assets/aad6e296-7c5a-4a81-be2e-ea4f49e43637"
+      ></video>
+    </td>
+  </tr>
+</table>
+
 [选择运行与安全能力的开始位置 →](https://agentic-os.sh/zh/docs/quickstart/)
 · [通过 ANOLISA CLI 开始](https://agentic-os.sh/zh/docs/user-guide/user-entrypoint/anolisa-cli/)
 

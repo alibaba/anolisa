@@ -215,6 +215,13 @@ agent-sec-cli skill-ledger export /path/to/skill --output /tmp/export/
 
 签名密钥位于 `~/.local/share/agent-sec/skill-ledger/`。
 
+#### 在 Qoder 中体验调用前检查
+
+Qoder adapter 会在本地 `Skill` Tool 调用前检查签名状态。你可以用一个固定输出的
+测试 Skill 依次看到 `pass`、`drifted` 和 `deny`，并在修改后的内容执行前取消调用。
+
+[打开完整的 Qoder Skill Ledger 演示](./qoder-skill-ledger-demo.md)
+
 ### PII Checker（敏感信息检测）
 
 检测文本输入中的个人信息和凭据。

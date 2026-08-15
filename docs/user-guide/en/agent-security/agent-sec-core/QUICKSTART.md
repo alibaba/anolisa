@@ -220,6 +220,14 @@ agent-sec-cli skill-ledger export /path/to/skill --output /tmp/export/
 
 Signing keys live under `~/.local/share/agent-sec/skill-ledger/`.
 
+#### Try the pre-use check in Qoder
+
+The Qoder adapter checks signed status before a local `Skill` Tool invocation.
+Use a deterministic test Skill to see `pass`, `drifted`, and `deny`, then cancel
+the invocation before the changed instructions run.
+
+[Open the complete Qoder Skill Ledger demo](./qoder-skill-ledger-demo.md)
+
 ### PII Checker
 
 Detects personal information and credentials in text input.
