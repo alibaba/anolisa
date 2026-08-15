@@ -3662,6 +3662,7 @@ mod tests {
             resource_root: dir.path().to_path_buf(),
             user_home: Some(PathBuf::from("/tmp/test-home")),
             declared_plugin_id: None,
+            requested_profiles: Vec::new(),
             adapter_type: Some("skill_bundle".to_string()),
             declared_skills: vec![DeclaredSkill {
                 name: "install-openclaw".to_string(),
@@ -3756,6 +3757,7 @@ mod tests {
             resource_root: PathBuf::from("/tmp/test-home/resource"),
             user_home: Some(PathBuf::from("/tmp/test-home")),
             declared_plugin_id: None,
+            requested_profiles: Vec::new(),
             adapter_type: adapter_type.map(str::to_string),
             declared_skills: Vec::new(),
             declared_config: Vec::new(),

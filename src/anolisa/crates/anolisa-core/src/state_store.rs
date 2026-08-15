@@ -67,21 +67,18 @@ struct StateFileV5 {
     adapter_trust_roots: Vec<AdapterTrustRoot>,
 }
 
-/// Manager-written record of the external adapter resource root that was
-/// contract-validated at the receipt's last successful enable.
+/// Manager-written record of an external adapter root validated at enable.
 ///
-/// Receipt symlink targets are never trusted from the receipt itself (a
-/// forged receipt must not self-authorize). But a legitimate RPM update
-/// may move the resource root and refresh the contract snapshot while an
-/// enabled receipt still points at the old root — without this anchor,
-/// that receipt could no longer be validated for status/disable/re-enable
-/// and became permanently stuck. Only the Manager writes this record
-/// (enable upserts, disable removes); drivers never see it.
+/// This anchors either a contract-validated symlink target or a framework
+/// home resolved and validated from the enable-time process environment.
+/// Without it, an RPM update or later environment drift could make the
+/// authoritative receipt impossible to verify or clean up. Only the Manager
+/// writes this record (enable upserts, disable removes); drivers never see it.
 ///
-/// Despite the type name, validation consumes the anchor as an
-/// **exact-equality** symlink-target allowance, never as a root: a
-/// state-resident path (forgeable in user mode) authorizes only itself,
-/// nothing beneath it, and no write outside anolisa's own layout.
+/// Symlink validation consumes the anchor as an **exact-equality** target
+/// allowance. Drivers whose native CLI owns a persisted framework home may
+/// consume that home as an external IO root; the initial value must first
+/// validate against the driver's environment-derived boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AdapterTrustRoot {
     /// Component the anchored receipt belongs to.

@@ -32,7 +32,7 @@
 //! conditions behind it. Verification that cannot run reports `unknown`
 //! rather than a faked healthy/absent verdict.
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use serde::Serialize;
 
 use anolisa_core::adapter::AdapterError;
@@ -81,6 +81,10 @@ pub enum AdapterCommands {
         /// default; a normal install never bypasses OpenClaw's checks.
         #[arg(long)]
         allow_unsafe_plugin_install: bool,
+        /// dsh profile to enable. Repeat for multiple profiles; required
+        /// when the selected framework is profile-scoped.
+        #[arg(long = "profile", action = ArgAction::Append)]
+        profiles: Vec<String>,
     },
     /// Disable a previously enabled adapter.
     Disable {
@@ -217,11 +221,13 @@ pub fn handle(args: AdapterArgs, ctx: &CliContext) -> Result<(), CliError> {
             component,
             framework,
             allow_unsafe_plugin_install,
+            profiles,
         } => handle_enable(
             ctx,
             &component,
             framework.as_deref(),
             allow_unsafe_plugin_install,
+            profiles,
         ),
         AdapterCommands::Disable {
             component,
@@ -337,6 +343,7 @@ fn handle_enable(
     component: &str,
     framework: Option<&str>,
     allow_unsafe_plugin_install: bool,
+    profiles: Vec<String>,
 ) -> Result<(), CliError> {
     const COMMAND: &str = "adapter enable";
     let (component, view) = common::resolve_adapter_target(component, ctx, COMMAND)?;
@@ -348,6 +355,7 @@ fn handle_enable(
             ctx.dry_run,
             EnableOptions {
                 allow_unsafe_plugin_install,
+                profiles,
             },
         )
         .map_err(|e| map_err(COMMAND, e))?;
@@ -678,6 +686,7 @@ mod tests {
                 component,
                 framework,
                 allow_unsafe_plugin_install,
+                profiles,
             } => {
                 assert_eq!(component, "tokenless");
                 assert!(framework.is_none());
@@ -685,6 +694,7 @@ mod tests {
                     !allow_unsafe_plugin_install,
                     "unsafe install must default to false"
                 );
+                assert!(profiles.is_empty());
             }
             _ => panic!("expected enable"),
         }
@@ -713,6 +723,7 @@ mod tests {
                 component,
                 framework,
                 allow_unsafe_plugin_install,
+                profiles,
             } => {
                 assert_eq!(component, "tokenless");
                 assert_eq!(framework.as_deref(), Some("openclaw"));
@@ -720,6 +731,28 @@ mod tests {
                     allow_unsafe_plugin_install,
                     "flag must be captured when passed"
                 );
+                assert!(profiles.is_empty());
+            }
+            _ => panic!("expected enable"),
+        }
+    }
+
+    #[test]
+    fn enable_parses_repeatable_profiles() {
+        let cli = TestCli::try_parse_from([
+            "x",
+            "enable",
+            "tokenless",
+            "dsh",
+            "--profile",
+            "web",
+            "--profile",
+            "headless",
+        ])
+        .expect("parse");
+        match cli.command {
+            AdapterCommands::Enable { profiles, .. } => {
+                assert_eq!(profiles, vec!["web", "headless"]);
             }
             _ => panic!("expected enable"),
         }

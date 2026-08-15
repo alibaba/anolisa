@@ -2149,6 +2149,7 @@ fn authorized_unsafe_supported_includes_flag_once() {
             false,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                profiles: Vec::new(),
             },
         )
         .expect("authorized unsafe enable");
@@ -2188,6 +2189,7 @@ fn authorized_unsafe_unsupported_blocks() {
             false,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                profiles: Vec::new(),
             },
         )
         .expect_err("authorized-but-unsupported unsafe must block");
@@ -2219,6 +2221,7 @@ fn authorized_unsafe_deprecated_noop_blocks() {
             false,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                profiles: Vec::new(),
             },
         )
         .expect_err("a deprecated no-op cannot satisfy unsafe authorization");
@@ -2879,6 +2882,7 @@ dest = "{{datadir}}/adapters/{{component}}/openclaw/"
             false,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                profiles: Vec::new(),
             },
         )
         .expect_err("unsafe authorization must be rejected for skill_bundle");
@@ -3477,6 +3481,7 @@ fn authorized_unsafe_dry_run_shows_flag_without_mutation() {
             true,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                profiles: Vec::new(),
             },
         )
         .expect("dry-run enable");
@@ -3518,6 +3523,7 @@ fn central_log_records_authorized_unsafe_install_argv() {
             false,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                profiles: Vec::new(),
             },
         )
         .expect("authorized unsafe enable");
@@ -3553,6 +3559,7 @@ dest = "{{datadir}}/adapters/{{component}}/hermes/"
             false,
             EnableOptions {
                 allow_unsafe_plugin_install: true,
+                profiles: Vec::new(),
             },
         )
         .expect_err("unsafe authorization must be rejected for a non-OpenClaw framework");

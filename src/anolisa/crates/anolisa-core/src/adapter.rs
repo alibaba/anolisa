@@ -26,6 +26,7 @@ pub mod codex;
 pub mod contract;
 pub mod cosh;
 pub mod driver;
+pub mod dsh;
 pub mod hermes;
 pub mod managed_files;
 pub mod manager;

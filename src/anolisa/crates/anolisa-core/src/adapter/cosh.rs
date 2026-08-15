@@ -656,6 +656,7 @@ mod tests {
             resource_root: resource_root.to_path_buf(),
             user_home: Some(user_home.to_path_buf()),
             declared_plugin_id: Some("tokenless".to_string()),
+            requested_profiles: Vec::new(),
             adapter_type: Some("extension".to_string()),
             declared_skills: Vec::new(),
             declared_config: Vec::new(),

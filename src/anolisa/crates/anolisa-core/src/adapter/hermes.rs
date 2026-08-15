@@ -991,6 +991,7 @@ mod tests {
             resource_root: dir.path().to_path_buf(),
             user_home: Some(PathBuf::from("/tmp/test-home-a")),
             declared_plugin_id: Some("agent-sec".to_string()),
+            requested_profiles: Vec::new(),
             adapter_type: None,
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
@@ -1019,6 +1020,7 @@ mod tests {
             resource_root: dir.path().join("bundle"),
             user_home: Some(dir.path().join("home")),
             declared_plugin_id: Some("agent-sec".into()),
+            requested_profiles: Vec::new(),
             adapter_type: Some("plugin".into()),
             declared_skills: vec![super::super::driver::DeclaredSkill {
                 name: "sec-audit".into(),
@@ -1082,6 +1084,7 @@ mod tests {
             resource_root: root.to_path_buf(),
             user_home: Some(PathBuf::from("/tmp/test-home-c")),
             declared_plugin_id: Some("test-plugin".to_string()),
+            requested_profiles: Vec::new(),
             adapter_type: None,
             declared_skills: vec![DeclaredSkill {
                 name: "sec-audit".to_string(),
@@ -1149,6 +1152,7 @@ mod tests {
             resource_root: dir.path().to_path_buf(),
             user_home: Some(PathBuf::from("/tmp/test-home-d")),
             declared_plugin_id: None,
+            requested_profiles: Vec::new(),
             adapter_type: Some("skill_bundle".to_string()),
             declared_skills: vec![DeclaredSkill {
                 name: "install-hermes".to_string(),

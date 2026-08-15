@@ -8,6 +8,7 @@ use super::claude_code::ClaudeCodeDriver;
 use super::codex::CodexDriver;
 use super::cosh::CoshDriver;
 use super::driver::FrameworkDriver;
+use super::dsh::DshDriver;
 use super::hermes::HermesDriver;
 use super::openclaw::OpenClawDriver;
 use super::qoder::QoderDriver;
@@ -26,6 +27,7 @@ impl DriverRegistry {
                 Box::new(OpenClawDriver::new()),
                 Box::new(HermesDriver::new()),
                 Box::new(CoshDriver::new()),
+                Box::new(DshDriver::new()),
                 Box::new(CodexDriver::new()),
                 Box::new(ClaudeCodeDriver::new()),
                 Box::new(QoderDriver::new()),
@@ -69,6 +71,7 @@ mod tests {
         assert!(reg.contains("openclaw"));
         assert!(reg.contains("hermes"));
         assert!(reg.contains("cosh"));
+        assert!(reg.contains("dsh"));
         assert!(reg.contains("codex"));
         assert!(reg.contains("claude-code"));
         assert!(reg.contains("qoder"));
@@ -79,6 +82,7 @@ mod tests {
                 "openclaw",
                 "hermes",
                 "cosh",
+                "dsh",
                 "codex",
                 "claude-code",
                 "qoder",

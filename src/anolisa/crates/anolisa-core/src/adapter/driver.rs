@@ -64,6 +64,9 @@ pub struct DriverCtx<'a> {
     /// Plugin id declared in the component's adapter manifest, if any.
     /// A driver may fall back to it when the bundle does not name one.
     pub declared_plugin_id: Option<String>,
+    /// Explicit framework profiles selected by the caller for profile-scoped
+    /// adapters. Drivers that are not profile-scoped ignore this list.
+    pub requested_profiles: Vec<String>,
     /// Adapter type declared in the component manifest. Absent means the
     /// legacy plugin adapter model.
     pub adapter_type: Option<String>,

@@ -208,7 +208,11 @@ impl AdapterClaim {
         exact_symlink_targets: &[PathBuf],
     ) -> Result<(), ClaimValidationError> {
         if let Some(pid) = &self.plugin_id {
-            validate_plugin_id(pid)?;
+            if self.framework == "dsh" {
+                validate_dsh_package_name(pid)?;
+            } else {
+                validate_plugin_id(pid)?;
+            }
         }
         for resource in &self.resources {
             resource.validate_with_owned_roots(
@@ -441,6 +445,10 @@ impl ClaimResource {
                     }
                 })
             }
+            ClaimResourceKind::FrameworkPlugin {
+                framework,
+                plugin_id,
+            } if framework == "dsh" => validate_dsh_package_name(plugin_id),
             ClaimResourceKind::FrameworkPlugin { plugin_id, .. } => validate_plugin_id(plugin_id),
             ClaimResourceKind::FrameworkMarketplace { marketplace, .. } => {
                 validate_marketplace_name(marketplace).map_err(|_| {
@@ -581,6 +589,9 @@ pub enum DriverPayload {
     /// Qwen Code driver payload.
     #[serde(rename = "qwencode")]
     QwenCode(QwenCodeClaim),
+    /// DeepSeek Harness (`dsh`) native plugin payload.
+    #[serde(rename = "dsh")]
+    Dsh(DshClaim),
 }
 
 /// OpenClaw driver payload. Holds only [`ClaimResource::id`] references —
@@ -721,6 +732,32 @@ pub struct QwenCodeClaim {
     pub extension_dir_resource: String,
     /// Resource id of the installed extension
     /// ([`ClaimResourceKind::FrameworkPlugin`]).
+    pub plugin_resource: String,
+}
+
+/// DeepSeek Harness native-plugin receipt. A single ANOLISA receipt owns the
+/// same package across every explicitly selected dsh profile; each profile
+/// keeps its own validated framework-plugin resource reference so disable can
+/// release exactly the registrations that enable created.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DshClaim {
+    /// Package name read from the bundle's `package.json`.
+    pub package_name: String,
+    /// Resource id of the enable-time dsh home
+    /// ([`ClaimResourceKind::ExternalPath`]). Persisting the resolved root
+    /// keeps later lifecycle operations independent of process environment
+    /// and working-directory drift.
+    pub home_resource: String,
+    /// Profiles in which ANOLISA registered the package.
+    pub profiles: Vec<DshProfileClaim>,
+}
+
+/// One profile entry in a [`DshClaim`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DshProfileClaim {
+    /// dsh profile identifier passed to the native plugin CLI.
+    pub name: String,
+    /// Resource id of the profile's registered package.
     pub plugin_resource: String,
 }
 
@@ -1156,6 +1193,55 @@ pub fn validate_plugin_id(plugin_id: &str) -> Result<(), ClaimValidationError> {
     Ok(())
 }
 
+/// Validate an npm-compatible dsh package name before it enters a CLI argv.
+/// Scoped names (`@scope/name`) are accepted because native dsh bundles use
+/// package-manager names, while traversal, flags, empty segments, and shell
+/// metacharacters remain rejected.
+pub fn validate_dsh_package_name(package_name: &str) -> Result<(), ClaimValidationError> {
+    let reject = |reason: &str| {
+        Err(ClaimValidationError::PluginId {
+            plugin_id: package_name.to_string(),
+            reason: reason.to_string(),
+        })
+    };
+    if package_name.is_empty() {
+        return reject("must not be empty");
+    }
+    if package_name.starts_with('-') || package_name == "." || package_name == ".." {
+        return reject("must not be '.'/'..' or start with '-'");
+    }
+    let mut segments = package_name.split('/');
+    let first = segments.next().unwrap_or_default();
+    let scoped = first.starts_with('@');
+    if scoped {
+        if first.len() <= 1 || segments.clone().count() != 1 {
+            return reject("scoped names must have exactly one non-empty package segment");
+        }
+        if first[1..].starts_with('.') || first[1..].starts_with('-') {
+            return reject("scope must not start with '.' or '-'");
+        }
+        if !first[1..]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
+            return reject("scope contains disallowed characters");
+        }
+    } else if segments.clone().next().is_some() {
+        return reject("unscoped names must not contain '/'");
+    }
+    let name = segments.next().unwrap_or(first);
+    if name.is_empty() || name == "." || name == ".." || name.starts_with('-') {
+        return reject("package segment is empty, traversal, or starts with '-'");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return reject("contains disallowed character");
+    }
+    Ok(())
+}
+
 /// Reject a marketplace name unless it is a non-empty string of argv-safe
 /// characters (`[A-Za-z0-9._-]`) that is neither `.`/`..` nor leading with
 /// `-`. Codex/Claude Code marketplace names are passed to the framework
@@ -1393,6 +1479,26 @@ mod tests {
         validate_plugin_id("tokenless").expect("plain");
         validate_plugin_id("ws-ckpt").expect("dash");
         validate_plugin_id("a.b_c-1").expect("mixed");
+    }
+
+    #[test]
+    fn validate_dsh_package_name_accepts_scoped_name() {
+        validate_dsh_package_name("@anolisa/dsh-tokenless").expect("scoped package");
+        validate_dsh_package_name("dsh-tokenless").expect("unscoped package");
+    }
+
+    #[test]
+    fn validate_dsh_package_name_rejects_traversal_and_shell_text() {
+        for value in [
+            "",
+            "@anolisa",
+            "@anolisa/",
+            "@anolisa/a/b",
+            "../escape",
+            "a b",
+        ] {
+            assert!(validate_dsh_package_name(value).is_err(), "{value}");
+        }
     }
 
     #[test]

@@ -1916,6 +1916,7 @@ mod tests {
             resource_root: root.to_path_buf(),
             user_home: Some(PathBuf::from("/tmp/qoder-home")),
             declared_plugin_id: Some("tokenless".to_string()),
+            requested_profiles: Vec::new(),
             adapter_type: Some("plugin".to_string()),
             declared_skills: Vec::new(),
             declared_config: Vec::new(),

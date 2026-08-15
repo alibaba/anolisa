@@ -36,7 +36,9 @@ use anolisa_platform::pkg_files::PackageFileQuery;
 use anolisa_platform::rpm_query::RpmPackageQuery;
 
 use super::AdapterError;
-use super::claim::{AdapterClaim, AdapterSourceRevision, ClaimStatus};
+use super::claim::{
+    AdapterClaim, AdapterSourceRevision, ClaimResourceKind, ClaimStatus, DriverPayload,
+};
 use super::driver::{
     AdapterCondition, AdapterConditionKind, AdapterOps, AdapterStatusReport, AdapterSummary,
     CliOutput, ConditionStatus, DisableReport, DriverCtx, DriverPlan, EnableProgress,
@@ -100,6 +102,10 @@ pub struct EnableOptions {
     /// adapter. Even when set, the driver adds the framework's unsafe flag
     /// only if the host's install help exposes it.
     pub allow_unsafe_plugin_install: bool,
+    /// Explicit profiles for profile-scoped framework adapters such as dsh.
+    /// An empty list means no profiles were selected; profile-scoped drivers
+    /// reject that input rather than silently mutating an implicit profile.
+    pub profiles: Vec<String>,
 }
 
 /// Outcome of [`AdapterManager::disable`].
@@ -355,8 +361,8 @@ impl AdapterDecl {
     }
 }
 
-/// Trust decision for the receipt symlink *targets* of one
-/// `(component, framework)`: the roots targets may resolve under, plus
+/// Trust decision for the external resources of one `(component, framework)`:
+/// the roots symlink targets may resolve under, plus
 /// whether the two-source condition — RPM provenance recorded in state
 /// **and** a contract-declared `[adapters.backends.rpm].resource_root`
 /// — currently grants external-root trust. This is the single decision
@@ -391,6 +397,19 @@ impl ExternalRootTrust {
         self.anchor.as_slice()
     }
 
+    /// Restore a Manager-written dsh home anchor as an allowed external
+    /// root. Unlike ordinary receipt data, this value was captured only
+    /// after the enable-time `DSH_HOME` boundary validated, so environment
+    /// drift cannot redirect later reads or cleanup commands.
+    fn extend_allowed_roots(&self, framework: &str, roots: &mut Vec<PathBuf>) {
+        if framework == "dsh"
+            && let Some(anchor) = &self.anchor
+            && !roots.contains(anchor)
+        {
+            roots.push(anchor.clone());
+        }
+    }
+
     /// Persist or clear the enable-time anchor under the same
     /// eligibility that governs anchor consumption — by construction the
     /// write condition and the read condition can never diverge. The
@@ -414,6 +433,18 @@ impl ExternalRootTrust {
         claim: &AdapterClaim,
         trusted_owned_roots: &[PathBuf],
     ) {
+        if claim.framework == "dsh" {
+            if let Some(root) = dsh_home_anchor(claim) {
+                state.upsert_adapter_trust_root(
+                    &claim.component,
+                    &claim.framework,
+                    root.to_path_buf(),
+                );
+            } else {
+                state.remove_adapter_trust_root(&claim.component, &claim.framework);
+            }
+            return;
+        }
         if self.anchor_eligible
             && claim.requires_external_symlink_trust(layout, trusted_owned_roots)
         {
@@ -425,6 +456,19 @@ impl ExternalRootTrust {
         } else {
             state.remove_adapter_trust_root(&claim.component, &claim.framework);
         }
+    }
+}
+
+/// Return the already-validated dsh home resource for anchor persistence.
+/// The driver's claim validation establishes the exact payload/resource
+/// relationship before [`ExternalRootTrust::sync_anchor`] is called.
+fn dsh_home_anchor(claim: &AdapterClaim) -> Option<&Path> {
+    let DriverPayload::Dsh(payload) = &claim.driver_payload else {
+        return None;
+    };
+    match &claim.resource(&payload.home_resource)?.kind {
+        ClaimResourceKind::ExternalPath { path } => Some(path),
+        _ => None,
     }
 }
 
@@ -826,6 +870,13 @@ impl AdapterManager {
                 adapter_type: adapter_type.clone(),
             });
         }
+        if !options.profiles.is_empty() && framework != "dsh" {
+            return Err(AdapterError::InvalidAdapterInput {
+                component: component.to_string(),
+                framework: framework.clone(),
+                reason: "--profile is only valid for the dsh framework".to_string(),
+            });
+        }
 
         let declared_plugin_id = declared_plugin_id(&manifest, &framework);
         let skill_specs = declared_skills(&manifest, &framework);
@@ -926,6 +977,7 @@ impl AdapterManager {
             resource_root: resource_root.clone(),
             user_home: self.user_home.clone(),
             declared_plugin_id: declared_plugin_id.clone(),
+            requested_profiles: options.profiles.clone(),
             adapter_type: adapter_type.clone(),
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
@@ -936,6 +988,7 @@ impl AdapterManager {
             ops: &probe_ops,
         };
         let mut allowed_roots = driver.allowed_external_roots(&probe_ctx);
+        trust.extend_allowed_roots(&framework, &mut allowed_roots);
         allowed_roots.push(resource_root.clone());
         // Skill sources that live outside the resource root (e.g.
         // `{datadir}/skills/<name>/`) must also be readable by the
@@ -965,6 +1018,7 @@ impl AdapterManager {
             resource_root: resource_root.clone(),
             user_home: self.user_home.clone(),
             declared_plugin_id,
+            requested_profiles: options.profiles.clone(),
             adapter_type,
             declared_skills: skills,
             declared_config: config,
@@ -979,7 +1033,8 @@ impl AdapterManager {
             let bundle = driver.read_bundle(&ctx)?;
             let mut plan = driver.plan_enable(&bundle, &ctx)?;
             if let Some(prior) = state.find_adapter_claim(component, &framework) {
-                let claim_allowed_roots = driver.allowed_external_roots(&ctx);
+                let mut claim_allowed_roots = driver.allowed_external_roots(&ctx);
+                trust.extend_allowed_roots(&framework, &mut claim_allowed_roots);
                 prior.validate_with_trust(
                     &self.layout,
                     &claim_allowed_roots,
@@ -1042,7 +1097,8 @@ impl AdapterManager {
         // disable can show `post_disable` notices from the receipt alone.
         // Inert text — never expanded or executed.
         claim.notices = all_notices;
-        let claim_allowed_roots = driver.allowed_external_roots(&ctx);
+        let mut claim_allowed_roots = driver.allowed_external_roots(&ctx);
+        trust.extend_allowed_roots(&framework, &mut claim_allowed_roots);
         let prior = state.find_adapter_claim(component, &framework).cloned();
         if let Some(prior) = &prior {
             // A forged prior receipt must not gain authority merely because a
@@ -1277,6 +1333,7 @@ impl AdapterManager {
             .discover_resource_root(component, &framework)
             .map(|(path, _)| path)
             .unwrap_or_else(|| claim.resource_root.clone());
+        let trust = self.external_root_trust_from_state(component, &framework, &state);
 
         let label = format!("adapter disable {component} {framework}");
         let probe_ops = ManagerOps::new(
@@ -1294,6 +1351,7 @@ impl AdapterManager {
             resource_root: resource_root.clone(),
             user_home: self.user_home.clone(),
             declared_plugin_id: None,
+            requested_profiles: Vec::new(),
             adapter_type: claim.adapter_type.clone(),
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
@@ -1304,6 +1362,7 @@ impl AdapterManager {
             ops: &probe_ops,
         };
         let mut allowed_roots = driver.allowed_external_roots(&probe_ctx);
+        trust.extend_allowed_roots(&framework, &mut allowed_roots);
         allowed_roots.push(resource_root.clone());
         drop(probe_ctx);
         drop(probe_ops);
@@ -1323,6 +1382,7 @@ impl AdapterManager {
             resource_root,
             user_home: self.user_home.clone(),
             declared_plugin_id: None,
+            requested_profiles: Vec::new(),
             adapter_type: claim.adapter_type.clone(),
             declared_skills: Vec::new(),
             declared_config: Vec::new(),
@@ -1334,10 +1394,11 @@ impl AdapterManager {
         };
 
         // Re-validate the receipt before acting on it (forged-state guard).
-        let trust = self.external_root_trust_from_state(component, &framework, &state);
+        let mut claim_allowed_roots = driver.allowed_external_roots(&ctx);
+        trust.extend_allowed_roots(&framework, &mut claim_allowed_roots);
         claim.validate_with_trust(
             &self.layout,
-            &driver.allowed_external_roots(&ctx),
+            &claim_allowed_roots,
             &trust.target_roots,
             trust.exact_targets(),
         )?;
@@ -1444,6 +1505,7 @@ impl AdapterManager {
                         .map(|(path, _)| path)
                 })
                 .unwrap_or_else(|| claim.resource_root.clone());
+            let trust = self.external_root_trust_from_state(&claim.component, &framework, &state);
             let label = format!("adapter status {} {framework}", claim.component);
             // Two-phase ops mirroring enable/disable: probe to learn the
             // driver's external roots, then rebuild so a driver that verifies
@@ -1465,6 +1527,7 @@ impl AdapterManager {
                 resource_root: resource_root.clone(),
                 user_home: self.user_home.clone(),
                 declared_plugin_id: None,
+                requested_profiles: Vec::new(),
                 adapter_type: claim.adapter_type.clone(),
                 declared_skills: Vec::new(),
                 declared_config: Vec::new(),
@@ -1475,6 +1538,7 @@ impl AdapterManager {
                 ops: &probe_ops,
             };
             let mut allowed_roots = driver.allowed_external_roots(&probe_ctx);
+            trust.extend_allowed_roots(&framework, &mut allowed_roots);
             allowed_roots.push(resource_root.clone());
             drop(probe_ctx);
             drop(probe_ops);
@@ -1494,6 +1558,7 @@ impl AdapterManager {
                 resource_root,
                 user_home: self.user_home.clone(),
                 declared_plugin_id: None,
+                requested_profiles: Vec::new(),
                 adapter_type: claim.adapter_type.clone(),
                 declared_skills: Vec::new(),
                 declared_config: Vec::new(),
@@ -1504,10 +1569,11 @@ impl AdapterManager {
                 ops: &ops,
             };
 
-            let trust = self.external_root_trust_from_state(&claim.component, &framework, &state);
+            let mut claim_allowed_roots = driver.allowed_external_roots(&ctx);
+            trust.extend_allowed_roots(&framework, &mut claim_allowed_roots);
             claim.validate_with_trust(
                 &self.layout,
-                &driver.allowed_external_roots(&ctx),
+                &claim_allowed_roots,
                 &trust.target_roots,
                 trust.exact_targets(),
             )?;
@@ -3574,6 +3640,8 @@ fn allowed_adapter_types(framework: &str) -> Option<&'static [&'static str]> {
         // Qoder installs a directory-named plugin and activates it via
         // settings.json entries: plugin only (no extension / skill_bundle).
         "qoder" => Some(&["plugin"]),
+        // dsh bundles are native plugins registered per explicit profile.
+        "dsh" => Some(&["plugin"]),
         // Extension frameworks require an explicit type. Qwen Code delegates
         // artifact and activation mutations to its native CLI.
         "cosh" | "qwencode" => Some(&["extension"]),
@@ -3986,17 +4054,22 @@ fn plan_disable_report(claim: &AdapterClaim) -> DisableReport {
                 .push("would remove the Qwen Code activation policy via the qwen CLI".to_string());
             None
         }
+        DriverPayload::Dsh(dsh) => {
+            for profile in &dsh.profiles {
+                cleanup_ids.push(&profile.plugin_resource);
+            }
+            None
+        }
     };
 
     // Whether disable uninstalls (Claude Code / Qoder semantics) rather than
     // unregisters (registry-only). Purely cosmetic for the plan text.
-    let plugin_verb = if matches!(
-        claim.driver_payload,
-        DriverPayload::ClaudeCode(_) | DriverPayload::Qoder(_) | DriverPayload::QwenCode(_)
-    ) {
-        "uninstall"
-    } else {
-        "unregister"
+    let plugin_verb = match claim.driver_payload {
+        DriverPayload::ClaudeCode(_) | DriverPayload::Qoder(_) | DriverPayload::QwenCode(_) => {
+            "uninstall"
+        }
+        DriverPayload::Dsh(_) => "remove",
+        _ => "unregister",
     };
 
     for resource in &claim.resources {
@@ -4199,6 +4272,79 @@ mod tests {
             None,
         );
         (layout, home)
+    }
+
+    #[test]
+    fn dsh_home_anchor_survives_environment_root_drift() {
+        use crate::adapter::claim::{
+            CLAIM_SCHEMA_VERSION, ClaimResource, DRIVER_SCHEMA_VERSION, DshClaim, DshProfileClaim,
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (layout, _) = test_user_layout(tmp.path());
+        let enabled_home = tmp.path().join("first-dsh-home");
+        let claim = AdapterClaim {
+            claim_schema: CLAIM_SCHEMA_VERSION,
+            component: "tokenless".to_string(),
+            framework: "dsh".to_string(),
+            plugin_id: Some("@anolisa/dsh-tokenless".to_string()),
+            adapter_type: Some("plugin".to_string()),
+            enabled_at: "2026-08-16T00:00:00Z".to_string(),
+            resource_root: tmp.path().join("bundle"),
+            bundle_digest: None,
+            source_revision: None,
+            materialized_files: Vec::new(),
+            driver_schema: DRIVER_SCHEMA_VERSION,
+            status: ClaimStatus::Enabled,
+            notices: Vec::new(),
+            resources: vec![
+                ClaimResource {
+                    id: "dsh_home".to_string(),
+                    purpose: "dsh_home".to_string(),
+                    kind: ClaimResourceKind::ExternalPath {
+                        path: enabled_home.clone(),
+                    },
+                },
+                ClaimResource {
+                    id: "dsh_plugin_0".to_string(),
+                    purpose: "dsh_plugin_profile_web".to_string(),
+                    kind: ClaimResourceKind::FrameworkPlugin {
+                        framework: "dsh".to_string(),
+                        plugin_id: "@anolisa/dsh-tokenless".to_string(),
+                    },
+                },
+            ],
+            driver_payload: DriverPayload::Dsh(DshClaim {
+                package_name: "@anolisa/dsh-tokenless".to_string(),
+                home_resource: "dsh_home".to_string(),
+                profiles: vec![DshProfileClaim {
+                    name: "web".to_string(),
+                    plugin_resource: "dsh_plugin_0".to_string(),
+                }],
+            }),
+        };
+        let mut state = StateStore::empty();
+        let initial = ExternalRootTrust {
+            target_roots: Vec::new(),
+            anchor: None,
+            anchor_eligible: false,
+        };
+
+        initial.sync_anchor(&mut state, &layout, &claim, &[]);
+
+        let anchored = ExternalRootTrust {
+            target_roots: Vec::new(),
+            anchor: state
+                .find_adapter_trust_root("tokenless", "dsh")
+                .map(Path::to_path_buf),
+            anchor_eligible: false,
+        };
+        let mut later_roots = vec![tmp.path().join("second-dsh-home")];
+        anchored.extend_allowed_roots("dsh", &mut later_roots);
+        assert_eq!(
+            later_roots,
+            [tmp.path().join("second-dsh-home"), enabled_home]
+        );
     }
 
     /// The framework-agnostic Manager resolves the requirement by precedence
@@ -4782,6 +4928,8 @@ mod tests {
         assert!(ok("cosh", Some("extension")));
         assert!(ok("qoder", Some("plugin")));
         assert!(ok("qoder", None), "qoder defaults to plugin");
+        assert!(ok("dsh", Some("plugin")));
+        assert!(ok("dsh", None), "dsh defaults to plugin");
         assert!(ok("qwencode", Some("extension")));
     }
 
