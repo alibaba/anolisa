@@ -18,7 +18,7 @@ use blaze_core::kernel::HookKind;
 use blaze_core::lifecycle::{SandboxInstance, SandboxState, StartPath};
 use blaze_core::policy::{ImageMetadata, RuntimeDecision, WorkloadClass};
 use blaze_core::pool::{PoolConfig, PoolKey};
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::body::{Body, Bytes, Incoming};
 use hyper::header::CONTENT_TYPE;
 use hyper::{Method, Request, Response, StatusCode};
@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 use crate::error::{BlazeDaemonError, Result};
 use crate::guest::MAX_GUEST_FILE_BYTES;
+use crate::request_body::{self, CollectError};
 use crate::sandbox::CreateSandbox;
 use crate::state::ServerState;
 
@@ -56,11 +57,22 @@ where
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
-    let limit = guest_body_route(&method, &path).then_some(MAX_GUEST_HTTP_BODY_BYTES);
+    let guest_route = guest_body_route(&method, &path);
+    let default_limit = state
+        .config
+        .lock()
+        .map(|config| config.api.max_body_bytes)
+        .map_err(|_| BlazeDaemonError::Internal("config lock poisoned".into()));
 
-    let response = match collect_body(req, limit).await {
-        Ok(body) => dispatch(&method, &path, &query, body, &state).await,
-        Err(e) => Err(e),
+    let response = match default_limit {
+        Ok(default_limit) => {
+            let limit = request_body_limit(guest_route, default_limit);
+            match request_body::collect(req, limit).await {
+                Ok(body) => dispatch(&method, &path, &query, body, &state).await,
+                Err(error) => Err(classify_body_error(error, guest_route)),
+            }
+        }
+        Err(error) => Err(error),
     };
 
     let resp = match response {
@@ -90,31 +102,28 @@ fn guest_body_route(method: &Method, path: &str) -> bool {
     )
 }
 
-async fn collect_body<B>(req: Request<B>, limit: Option<usize>) -> Result<Vec<u8>>
-where
-    B: Body<Data = Bytes> + Unpin,
-    B::Error: std::fmt::Display,
-{
-    let mut body = req.into_body();
-    let mut collected = Vec::new();
-    while let Some(frame) = body.frame().await {
-        let frame = frame
-            .map_err(|error| BlazeDaemonError::BadRequest(format!("request body: {error}")))?;
-        let Ok(data) = frame.into_data() else {
-            continue;
-        };
-        if let Some(limit) = limit
-            && collected.len().saturating_add(data.len()) > limit
-        {
-            return Err(crate::guest::GuestError::PayloadTooLarge {
-                actual: collected.len().saturating_add(data.len()),
+const fn request_body_limit(guest_route: bool, default_limit: usize) -> usize {
+    if guest_route {
+        MAX_GUEST_HTTP_BODY_BYTES
+    } else {
+        default_limit
+    }
+}
+
+fn classify_body_error(error: CollectError, guest_route: bool) -> BlazeDaemonError {
+    match error {
+        CollectError::BadRequest(message) => BlazeDaemonError::BadRequest(message),
+        CollectError::TooLarge { actual, limit } if guest_route => {
+            crate::guest::GuestError::PayloadTooLarge {
+                actual: usize::try_from(actual).unwrap_or(usize::MAX),
                 limit,
             }
-            .into());
+            .into()
         }
-        collected.extend_from_slice(&data);
+        CollectError::TooLarge { actual, limit } => {
+            BlazeDaemonError::RequestBodyTooLarge { actual, limit }
+        }
     }
-    Ok(collected)
 }
 
 const fn max_base64_len(decoded_bytes: usize) -> usize {
@@ -790,6 +799,7 @@ mod tests {
     use blaze_core::storage::{
         AcquireOpts, PoolStatus, StorageAcquireError, StorageProvider, StorageSlot,
     };
+    use http_body_util::BodyExt;
 
     use crate::file_provider::FileStorageProvider;
     #[cfg(target_os = "linux")]
@@ -972,6 +982,60 @@ mod tests {
             .to_bytes();
         let value = serde_json::from_slice(&body).expect("response json");
         (status, value)
+    }
+
+    #[test]
+    fn guest_routes_keep_their_larger_envelope_limit() {
+        assert_eq!(request_body_limit(false, 1024 * 1024), 1024 * 1024);
+        assert_eq!(
+            request_body_limit(true, 1024 * 1024),
+            MAX_GUEST_HTTP_BODY_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_routes_including_template_import_use_configured_body_limit() {
+        let temp = tempfile::tempdir().expect("temp");
+        let mut config = test_config(&temp);
+        config.api.max_body_bytes = 4;
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config,
+            test_policy(BackendKind::Mock, false),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+
+        for path in ["/v1/sandboxes", "/v1/templates/import"] {
+            let (status, error) = handled_json(&state, Method::POST, path, b"12345".to_vec()).await;
+
+            assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "path {path}");
+            assert_eq!(error["status"], 413, "path {path}");
+            assert_eq!(error["code"], "request_too_large", "path {path}");
+            assert!(
+                error["error"]
+                    .as_str()
+                    .expect("error message")
+                    .contains("5 bytes exceeds 4"),
+                "path {path}"
+            );
+        }
+
+        let malformed = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/sandboxes")
+            .header(hyper::header::CONTENT_LENGTH, "invalid")
+            .body(Full::new(Bytes::new()))
+            .expect("request");
+        let response = handle_request(malformed, state)
+            .await
+            .expect("infallible response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     struct TransientReconstructStorage {
@@ -1884,6 +1948,7 @@ mod tests {
         let (status, error) = handled_json(&state, Method::POST, &path, envelope_body).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(error["status"], 413);
+        assert_eq!(error["code"], "guest_request_too_large");
 
         let mut payload = vec![b'z'; MAX_GUEST_FILE_BYTES];
         let body = serde_json::to_vec(&json!({
@@ -2039,6 +2104,37 @@ mod tests {
             .to_bytes();
         let value: serde_json::Value = serde_json::from_slice(&body).expect("error json");
         assert_eq!(value["code"], "guest_timeout");
+    }
+
+    #[tokio::test]
+    async fn request_body_code_is_reserved_for_collector_limits() {
+        let response = error_response(&BlazeDaemonError::RequestBodyTooLarge {
+            actual: 5,
+            limit: 4,
+        });
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("error json");
+        assert_eq!(value["code"], "request_too_large");
+
+        let response = error_response(&BlazeDaemonError::PayloadTooLarge {
+            actual: 5,
+            limit: 4,
+        });
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("error json");
+        assert!(value.get("code").is_none());
     }
 
     #[tokio::test]

@@ -83,6 +83,26 @@ Blaze 负责配置 sandbox 本地的网络路径。主机以外的路由和 DNS 
 如需关闭该能力，将 `enable_network` 设置为 `false` 或删除该配置项，再通过
 正常的 instance API 销毁已经启用网络的 sandbox。
 
+## HTTP 请求体上限
+
+Blaze 会在读取过程中限制每个 HTTP request body。没有专用 envelope 的路由
+默认使用 1 MiB 上限，可以通过正整数字节数配置：
+
+```toml
+[api]
+max_body_bytes = 1048576
+```
+
+daemon 会在读取 body 前检查声明的 `Content-Length`，并继续检查流式数据的
+累计字节数，因此缺少或低报长度不能绕过上限。长度格式错误、空值或冲突值
+返回 HTTP 400。声明大小或实际累计大小超过路由上限时，
+返回 HTTP 413 和 `"code": "request_too_large"`。
+
+Guest exec、read 和 write 路由继续使用原有的 22 MiB HTTP envelope 上限，
+不使用 `api.max_body_bytes`；对应的超限错误码仍是
+`"guest_request_too_large"`。较大的 envelope 用于容纳最多 16 MiB 的解码文件
+数据以及 base64 和 JSON 开销。
+
 ## Guest 操作
 
 只有 sandbox 处于 `Running` 且 backend 报告兼容的 guest endpoint 时，

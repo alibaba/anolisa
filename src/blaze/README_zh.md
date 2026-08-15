@@ -64,6 +64,20 @@ daemon 读取 TOML 配置文件（默认：`/etc/anolisa/blaze/config.toml`）
 
 参见 `src/blaze/examples/` 获取带注释的示例配置。
 
+### API 请求上限
+
+没有专用 request envelope 的路由默认最多接收 1 MiB。可以在 daemon 配置中
+设置正整数字节数：
+
+```toml
+[api]
+max_body_bytes = 1048576
+```
+
+`Content-Length` 格式错误或多个值冲突时，daemon 返回 HTTP 400；声明大小或
+流式读取的累计大小超过对应路由上限时，返回 HTTP 413。Guest 命令与文件路由
+继续使用 22 MiB envelope 上限，以便通过 base64 JSON 传输 16 MiB 文件。
+
 ### VM 资源配置
 
 Blaze 使用三层回退链解析 vCPU 和内存设置：

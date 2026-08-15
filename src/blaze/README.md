@@ -66,6 +66,21 @@ and a policies directory containing per-workload-class policy files.
 
 See `src/blaze/examples/` for annotated sample configurations.
 
+### API Request Limits
+
+Routes without a specialized request envelope accept up to 1 MiB by default.
+Set a positive byte limit in the daemon configuration:
+
+```toml
+[api]
+max_body_bytes = 1048576
+```
+
+The daemon rejects malformed or conflicting `Content-Length` values with HTTP
+400. It rejects a declared or streamed body above the applicable route limit
+with HTTP 413. Guest command and file routes retain their 22 MiB envelope limit
+so a 16 MiB file can be carried as base64 JSON.
+
 ### VM Resource Configuration
 
 Blaze resolves vCPU and memory settings using a three-layer fallback chain:

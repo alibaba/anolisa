@@ -98,6 +98,28 @@ and verify guest connectivity for the host environment.
 To disable the capability, set `enable_network = false` or remove the key, then
 destroy existing network-enabled sandboxes through the normal instance API.
 
+## HTTP Request Body Limits
+
+Blaze bounds every HTTP request body while reading it. Routes without a
+specialized envelope use a 1 MiB default, configurable as a positive byte
+count:
+
+```toml
+[api]
+max_body_bytes = 1048576
+```
+
+The daemon checks a declared `Content-Length` before reading the body and also
+checks the accumulated bytes from the stream. A missing or understated length
+therefore cannot bypass the limit. Malformed, empty, or conflicting length
+values return HTTP 400. A declared or observed body above the route limit
+returns HTTP 413 with `"code": "request_too_large"`.
+
+Guest exec, read, and write routes use their existing 22 MiB HTTP envelope
+limit instead of `api.max_body_bytes`. Their oversized-request code remains
+`"guest_request_too_large"`. The larger envelope accommodates up to 16 MiB of
+decoded file data plus base64 and JSON overhead.
+
 ## Guest Operations
 
 Guest operations are available only while a sandbox is `Running` and its

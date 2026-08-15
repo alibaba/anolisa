@@ -19,6 +19,11 @@ pub struct DaemonConfig {
     pub daemon: DaemonSection,
     #[serde(default)]
     pub listen: ListenSection,
+    /// Request-body limits for routes without a dedicated protocol envelope.
+    ///
+    /// Guest-operation routes retain their protocol-specific envelope limit.
+    #[serde(default)]
+    pub api: ApiSection,
     /// Backend name → binary path mapping (e.g. `firecracker = "/usr/bin/firecracker"`).
     #[serde(default)]
     pub backends: HashMap<String, PathBuf>,
@@ -61,6 +66,22 @@ pub struct ListenSection {
     /// Empty string or absent means remote API is disabled.
     #[serde(default)]
     pub http_addr: String,
+}
+
+/// HTTP API request limits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiSection {
+    /// Maximum body size for routes without a more specific envelope limit.
+    #[serde(default = "default_max_body_bytes")]
+    pub max_body_bytes: usize,
+}
+
+impl Default for ApiSection {
+    fn default() -> Self {
+        Self {
+            max_body_bytes: default_max_body_bytes(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +284,13 @@ impl DaemonConfig {
 
     /// Validate cross-field invariants that serde cannot express.
     pub fn validate(&self) -> Result<()> {
+        if self.api.max_body_bytes == 0 {
+            return Err(BlazeError::ConfigError {
+                source: ConfigErrorSource::InvalidValue(
+                    "api.max_body_bytes must be greater than zero".to_string(),
+                ),
+            });
+        }
         validate_storage_paths(&self.storage.images_dir, &self.storage.instances_dir)?;
         self.storage.sync_schedule()?;
         self.storage.sync_timeout_duration()?;
@@ -499,6 +527,9 @@ fn default_policy_dir() -> PathBuf {
 fn default_on_load_error() -> PolicyLoadErrorMode {
     PolicyLoadErrorMode::Fail
 }
+fn default_max_body_bytes() -> usize {
+    1024 * 1024
+}
 fn default_pool_warm_ttl() -> String {
     "30m".to_string()
 }
@@ -557,6 +588,7 @@ mod tests {
         let cfg: DaemonConfig = toml::from_str("").expect("empty parses to defaults");
         assert_eq!(cfg.daemon.log_level, "info");
         assert_eq!(cfg.policy.on_load_error, PolicyLoadErrorMode::Fail);
+        assert_eq!(cfg.api.max_body_bytes, 1024 * 1024);
         assert!(cfg.backends.is_empty());
         assert_ne!(cfg.storage.images_dir, cfg.storage.instances_dir);
         assert_eq!(
@@ -587,6 +619,38 @@ mod tests {
         assert_eq!(cfg.daemon.log_level, "debug");
         assert_eq!(cfg.policy.on_load_error, PolicyLoadErrorMode::Warn);
         assert_eq!(cfg.backends.len(), 2);
+    }
+
+    #[test]
+    fn parses_api_body_limit() {
+        let cfg: DaemonConfig = toml::from_str(
+            r#"
+                [api]
+                max_body_bytes = 4096
+            "#,
+        )
+        .expect("api config");
+
+        assert_eq!(cfg.api.max_body_bytes, 4096);
+        cfg.validate().expect("positive body limit");
+    }
+
+    #[test]
+    fn rejects_zero_api_body_limit() {
+        let cfg: DaemonConfig = toml::from_str(
+            r#"
+                [api]
+                max_body_bytes = 0
+            "#,
+        )
+        .expect("api config");
+
+        let error = cfg.validate().expect_err("zero body limit");
+        assert!(
+            error
+                .to_string()
+                .contains("api.max_body_bytes must be greater than zero")
+        );
     }
 
     #[test]

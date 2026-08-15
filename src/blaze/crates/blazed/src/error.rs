@@ -63,6 +63,15 @@ pub enum BlazeDaemonError {
     #[error("request body too large: {actual} bytes exceeds {limit}")]
     PayloadTooLarge { actual: u64, limit: usize },
 
+    /// An HTTP request body exceeded the limit assigned to its API route.
+    #[error("request body too large: {actual} bytes exceeds {limit}")]
+    RequestBodyTooLarge {
+        /// Declared or observed request-body bytes.
+        actual: u64,
+        /// Maximum request-body bytes accepted by the route.
+        limit: usize,
+    },
+
     #[error("operation requires recovery: {0}")]
     RecoveryRequired(String),
 
@@ -94,6 +103,7 @@ impl BlazeDaemonError {
             BlazeDaemonError::Guest(crate::guest::GuestError::PayloadTooLarge { .. }) => {
                 Some("guest_request_too_large")
             }
+            BlazeDaemonError::RequestBodyTooLarge { .. } => Some("request_too_large"),
             BlazeDaemonError::Guest(crate::guest::GuestError::ResponseTooLarge { .. }) => {
                 Some("guest_response_too_large")
             }
@@ -109,7 +119,8 @@ impl BlazeDaemonError {
             BlazeDaemonError::NotFound(_) => 404,
             BlazeDaemonError::Conflict(_) => 409,
             BlazeDaemonError::ServiceUnavailable(_) => 503,
-            BlazeDaemonError::PayloadTooLarge { .. } => 413,
+            BlazeDaemonError::PayloadTooLarge { .. }
+            | BlazeDaemonError::RequestBodyTooLarge { .. } => 413,
             BlazeDaemonError::RecoveryRequired(_) => 500,
             BlazeDaemonError::HttpStatus { status, .. } => *status,
             BlazeDaemonError::Core(blaze_core::BlazeError::PolicyEvalError { .. })

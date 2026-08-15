@@ -16,6 +16,7 @@ mod failpoint;
 mod file_provider;
 mod guest;
 mod metrics;
+mod request_body;
 mod sandbox;
 mod spawner;
 mod state;
