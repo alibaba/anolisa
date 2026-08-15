@@ -80,6 +80,7 @@ pub struct SandboxManager {
     instances: Arc<Mutex<HashMap<Uuid, SandboxInstance>>>,
     backend_instances: Arc<Mutex<HashMap<Uuid, DynBackendInstance>>>,
     operation_locks: Mutex<HashMap<Uuid, Arc<AsyncMutex<()>>>>,
+    storage_cleanup_blocked: Arc<Mutex<HashSet<Uuid>>>,
     pub(super) storage_sync_inflight: Arc<Mutex<HashSet<Uuid>>>,
     pub(super) storage_sync_permits: Arc<Semaphore>,
     pool: Arc<Mutex<PoolManager>>,
@@ -147,6 +148,7 @@ impl SandboxManager {
                 instances,
                 backend_instances,
                 operation_locks: Mutex::new(operation_locks),
+                storage_cleanup_blocked: Arc::new(Mutex::new(HashSet::new())),
                 storage_sync_inflight: Arc::new(Mutex::new(HashSet::new())),
                 // The periodic worker is sequential. Retain that bound when a
                 // timed-out provider operation has to finish in the background.
@@ -285,7 +287,7 @@ impl SandboxManager {
             request.decision.policy_name.clone(),
         );
         let operation_lock = self.operation_lock(instance.id);
-        let _operation = operation_lock.lock().await;
+        let operation = operation_lock.lock_owned().await;
         instance.transition(SandboxState::Creating)?;
         instance.begin_operation(OperationKind::Create);
 
@@ -319,19 +321,52 @@ impl SandboxManager {
             )));
         }
 
-        let storage = match self
-            .storage
-            .acquire(&AcquireOpts {
+        let acquire = crate::failpoint::spawn(supervise_storage_acquire(
+            Arc::clone(&self.storage),
+            Arc::clone(&self.storage_cleanup_blocked),
+            operation,
+            instance.id,
+            AcquireOpts {
                 instance_id: instance.id.to_string(),
                 rootfs_size: self.rootfs_size,
                 mem_size: self.mem_size,
-            })
-            .await
-        {
+            },
+        ));
+        let (operation, acquire_result) = match acquire.await {
+            Ok(result) => result,
+            Err(error) => {
+                let recovery = self.mark_instance_recovery(instance.clone()).err();
+                return Err(BlazeDaemonError::RecoveryRequired(format!(
+                    "create {}: storage acquisition supervisor failed: {error}; automatic storage cleanup is disabled{}",
+                    instance.id,
+                    recovery
+                        .map(|error| format!("; recovery state persistence failed: {error}"))
+                        .unwrap_or_default()
+                )));
+            }
+        };
+        let _operation = operation;
+        let storage = match acquire_result {
             Ok(storage) => storage,
             Err(error) => {
-                let (source, residual) = error.into_parts();
-                return Err(self.retain_failed_acquire(&mut instance, residual, source.into()));
+                let (source, disposition) = error.into_parts();
+                match disposition {
+                    blaze_core::storage::StorageAcquireDisposition::Clean => {
+                        return Err(self.retain_failed_acquire(&mut instance, None, source.into()));
+                    }
+                    blaze_core::storage::StorageAcquireDisposition::Residual(residual) => {
+                        return Err(self.retain_failed_acquire(
+                            &mut instance,
+                            Some(residual),
+                            source.into(),
+                        ));
+                    }
+                    blaze_core::storage::StorageAcquireDisposition::ManualCleanupRequired => {
+                        return Err(
+                            self.retain_manual_storage_failure(&mut instance, source.into())
+                        );
+                    }
+                }
             }
         };
         crate::failpoint::pause("create-after-storage-acquire").await;
@@ -732,6 +767,11 @@ impl SandboxManager {
             let _ = self.mark_recovery(id);
             return;
         }
+        if let Err(error) = self.ensure_automatic_storage_cleanup_allowed(id) {
+            tracing::error!(instance = %id, %error, "quarantined storage cleanup suppressed");
+            let _ = self.mark_recovery(id);
+            return;
+        }
         if let Err(error) = self.storage.release_by_id(&id.to_string()).await {
             tracing::error!(instance = %id, %error, "quarantined storage cleanup failed");
             let _ = self.mark_recovery(id);
@@ -862,6 +902,15 @@ impl SandboxManager {
             )));
         }
 
+        if let Err(error) = self.ensure_automatic_storage_cleanup_allowed(id) {
+            let recovery = self.mark_recovery(id).err();
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "destroy {id}: {error}; storage retained for manual inspection{}",
+                recovery
+                    .map(|error| format!("; recovery state persistence failed: {error}"))
+                    .unwrap_or_default()
+            )));
+        }
         if let Err(error) = self.storage.release_by_id(&id.to_string()).await {
             let recovery = self.mark_recovery(id).err();
             return Err(BlazeDaemonError::RecoveryRequired(format!(
@@ -1130,6 +1179,49 @@ impl SandboxManager {
         }
     }
 
+    fn retain_manual_storage_failure(
+        &self,
+        instance: &mut SandboxInstance,
+        original: BlazeDaemonError,
+    ) -> BlazeDaemonError {
+        let mut errors = Vec::new();
+        if instance.state != SandboxState::RecoveryRequired
+            && let Err(error) = instance.transition(SandboxState::RecoveryRequired)
+        {
+            errors.push(format!("recovery state update failed: {error}"));
+        }
+        if let Err(error) = self.state_store.persist(instance) {
+            errors.push(format!("recovery state persistence failed: {error}"));
+        }
+        if let Some(error) = self.retain_instance(instance.clone()) {
+            errors.push(error);
+        }
+        let suffix = if errors.is_empty() {
+            "automatic cleanup by sandbox ID is disabled; inspect storage manually".to_string()
+        } else {
+            format!(
+                "automatic cleanup by sandbox ID is disabled; recovery recording also failed: {}",
+                errors.join("; ")
+            )
+        };
+        BlazeDaemonError::RecoveryRequired(format!(
+            "{original}; instance {}: {suffix}",
+            instance.id
+        ))
+    }
+
+    fn ensure_automatic_storage_cleanup_allowed(&self, id: Uuid) -> Result<()> {
+        match self.storage_cleanup_blocked.lock() {
+            Ok(blocked) if !blocked.contains(&id) => Ok(()),
+            Ok(_) => Err(BlazeDaemonError::RecoveryRequired(format!(
+                "automatic storage cleanup for {id} is disabled because the provider could not prove that the stable slot name still identifies its object"
+            ))),
+            Err(_) => Err(BlazeDaemonError::RecoveryRequired(format!(
+                "automatic storage cleanup for {id} is disabled because the cleanup-safety registry is poisoned"
+            ))),
+        }
+    }
+
     /// Commit a fully compensated create as terminal without losing the
     /// operation record when that terminal commit itself fails.
     fn commit_create_rollback(&self, instance: &mut SandboxInstance) -> Vec<String> {
@@ -1216,6 +1308,88 @@ impl SandboxManager {
             }
         }
     }
+}
+
+struct StorageAcquireSupervision {
+    operation: Option<OwnedMutexGuard<()>>,
+    cleanup_blocked: Arc<Mutex<HashSet<Uuid>>>,
+    instance_id: Uuid,
+    armed: bool,
+}
+
+impl StorageAcquireSupervision {
+    fn new(
+        operation: OwnedMutexGuard<()>,
+        cleanup_blocked: Arc<Mutex<HashSet<Uuid>>>,
+        instance_id: Uuid,
+    ) -> Self {
+        Self {
+            operation: Some(operation),
+            cleanup_blocked,
+            instance_id,
+            armed: true,
+        }
+    }
+
+    fn finish(mut self, manual_cleanup: bool) -> OwnedMutexGuard<()> {
+        if manual_cleanup {
+            self.block_cleanup();
+        }
+        let operation = self.operation.take().expect("operation guard");
+        self.armed = false;
+        operation
+    }
+
+    fn block_cleanup(&self) {
+        match self.cleanup_blocked.lock() {
+            Ok(mut blocked) => {
+                blocked.insert(self.instance_id);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().insert(self.instance_id);
+            }
+        }
+    }
+}
+
+impl Drop for StorageAcquireSupervision {
+    fn drop(&mut self) {
+        if self.armed {
+            self.block_cleanup();
+        }
+    }
+}
+
+async fn supervise_storage_acquire(
+    storage: Arc<dyn StorageProvider>,
+    cleanup_blocked: Arc<Mutex<HashSet<Uuid>>>,
+    operation: OwnedMutexGuard<()>,
+    instance_id: Uuid,
+    opts: AcquireOpts,
+) -> (
+    OwnedMutexGuard<()>,
+    std::result::Result<StorageSlot, blaze_core::storage::StorageAcquireError>,
+) {
+    let supervision = StorageAcquireSupervision::new(operation, cleanup_blocked, instance_id);
+    let worker = crate::failpoint::spawn(async move { storage.acquire(&opts).await });
+    let result = match worker.await {
+        Ok(result) => result,
+        Err(error) => Err(
+            blaze_core::storage::StorageAcquireError::with_manual_cleanup_required(
+                BlazeError::StorageError {
+                    msg: format!(
+                        "acquire '{instance_id}': supervised provider task failed: {error}; outcome is unknown"
+                    ),
+                },
+            ),
+        ),
+    };
+    let manual_cleanup = result
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.requires_manual_cleanup());
+    let operation = supervision.finish(manual_cleanup);
+    (operation, result)
 }
 
 fn poisoned(name: &str) -> BlazeDaemonError {

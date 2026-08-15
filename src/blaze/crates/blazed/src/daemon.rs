@@ -21,9 +21,10 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::api;
 use crate::error::{BlazeDaemonError, Result};
+use crate::file_provider::{FileStorageProvider, PlannedFileStorageProvider};
 use crate::sandbox::StorageSyncLoop;
 use crate::sandbox::template::{
-    PinnedConfigSource, PolicyLoadDisposition, TemplateCatalog,
+    PinnedConfigSource, PolicyLoadDisposition, TemplateCatalog, preflight_storage_root_boundaries,
     validate_template_roots_with_policy_mode,
 };
 use crate::spawner::{
@@ -65,7 +66,10 @@ fn absolutize_backend_paths(config: &mut DaemonConfig) -> Result<()> {
 }
 
 async fn run_loaded_config(loaded: LoadedDaemonConfig) -> Result<()> {
-    let LoadedDaemonConfig { config, source } = loaded;
+    let LoadedDaemonConfig { mut config, source } = loaded;
+    // Resolve and inspect the instances root before any daemon-owned path is
+    // materialized. The provider later consumes this exact retained plan.
+    let planned_storage = plan_storage_instances(&mut config)?;
     let sync_schedule = config.storage.sync_schedule()?;
     let sync_timeout = config.storage.sync_timeout_duration()?;
 
@@ -81,6 +85,7 @@ async fn run_loaded_config(loaded: LoadedDaemonConfig) -> Result<()> {
         config.policy.on_load_error,
     )?;
     let policy_load = template_roots.policy_load_disposition();
+    let prepared_storage = FileStorageProvider::prepare(planned_storage)?;
     let template_catalog = TemplateCatalog::open_validated(&config.template, template_roots)?;
     ensure_dirs(&config)?;
     // Retain the accepted state-root object before policy, backend, and
@@ -113,11 +118,8 @@ async fn run_loaded_config(loaded: LoadedDaemonConfig) -> Result<()> {
         use crate::file_provider::FileStorageProvider;
         // Keep immutable images and provider-owned runtime slots separate.
         tokio::fs::create_dir_all(&config.storage.images_dir).await?;
-        tokio::fs::create_dir_all(&config.storage.instances_dir).await?;
-        let fp = FileStorageProvider::with_images(
-            config.storage.images_dir.clone(),
-            config.storage.instances_dir.clone(),
-        );
+        let fp =
+            FileStorageProvider::from_prepared(config.storage.images_dir.clone(), prepared_storage);
         match fp.probe().await {
             Ok(true) => {
                 tracing::info!(dir = %config.storage.images_dir.display(), "storage provider ready");
@@ -186,14 +188,22 @@ fn ensure_dirs(cfg: &DaemonConfig) -> Result<()> {
     // TemplateCatalog::open_validated creates and retains the accepted catalog
     // object. Reopening its configured path here would discard that binding.
     std::fs::create_dir_all(&cfg.storage.images_dir)?;
-    std::fs::create_dir_all(&cfg.storage.instances_dir)?;
-    let images_dir = std::fs::canonicalize(&cfg.storage.images_dir)?;
-    let instances_dir = std::fs::canonicalize(&cfg.storage.instances_dir)?;
-    blaze_core::config::validate_storage_paths(&images_dir, &instances_dir)?;
     if let Some(parent) = cfg.daemon.socket.parent() {
         std::fs::create_dir_all(parent)?;
     }
     Ok(())
+}
+
+fn plan_storage_instances(config: &mut DaemonConfig) -> Result<PlannedFileStorageProvider> {
+    let planned = FileStorageProvider::plan(config.storage.instances_dir.clone())?;
+    config.storage.instances_dir = FileStorageProvider::planned_instances_dir(&planned).into();
+    config.validate()?;
+    preflight_storage_root_boundaries(
+        &config.storage.images_dir,
+        &config.storage.instances_dir,
+        &config.daemon.state_dir,
+    )?;
+    Ok(planned)
 }
 
 /// Build the [`crate::spawner::BackendSpawner`] implementations used by API
@@ -466,6 +476,164 @@ mod tests {
     use super::*;
 
     #[test]
+    fn instances_plan_does_not_materialize() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let configured = temp.path().join("missing/instances");
+        let mut config = DaemonConfig::default();
+        config.storage.instances_dir = configured.clone();
+
+        let _planned = plan_storage_instances(&mut config).expect("instances plan");
+
+        assert_eq!(config.storage.instances_dir, configured);
+        assert!(!configured.exists());
+    }
+
+    #[test]
+    fn instances_plan_rejects_lifecycle_subtree_without_materializing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state = temp.path().join("state");
+        std::fs::create_dir(&state).expect("state root");
+        let instances = state
+            .join("86b59faf-3b91-46e4-9db0-2468b8336eb6")
+            .join("instances");
+        let mut config = DaemonConfig::default();
+        config.daemon.state_dir = state;
+        config.storage.instances_dir = instances.clone();
+
+        let error = match plan_storage_instances(&mut config) {
+            Ok(_) => panic!("instances root must not enter lifecycle state"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("storage.instances_dir"));
+        assert!(!instances.exists());
+    }
+
+    #[test]
+    fn instances_plan_rejects_an_images_alias_without_mutating_the_instances_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let instances = temp.path().join("instances");
+        let images_alias = temp.path().join("images-alias");
+        let state = temp.path().join("state");
+        std::fs::create_dir(&instances).expect("instances root");
+        std::fs::create_dir(&state).expect("state root");
+        std::fs::write(instances.join("sentinel"), b"retained").expect("instances sentinel");
+        symlink(&instances, &images_alias).expect("images alias");
+        let mut config = DaemonConfig::default();
+        config.storage.images_dir = images_alias.clone();
+        config.storage.instances_dir = instances.clone();
+        config.daemon.state_dir = state;
+
+        let error = match plan_storage_instances(&mut config) {
+            Ok(_) => panic!("resolved storage roots must be disjoint"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("storage.images_dir"));
+        assert!(error.to_string().contains("storage.instances_dir"));
+        assert_eq!(
+            std::fs::read(instances.join("sentinel")).expect("instances sentinel"),
+            b"retained"
+        );
+        assert!(images_alias.is_symlink());
+    }
+
+    #[test]
+    fn instances_plan_rejects_a_dangling_images_alias_to_the_planned_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let instances = temp.path().join("missing/instances");
+        let images_alias = temp.path().join("images-alias");
+        let state = temp.path().join("state");
+        std::fs::create_dir(&state).expect("state root");
+        symlink(&instances, &images_alias).expect("dangling images alias");
+        let mut config = DaemonConfig::default();
+        config.storage.images_dir = images_alias.clone();
+        config.storage.instances_dir = instances.clone();
+        config.daemon.state_dir = state;
+
+        let error = match plan_storage_instances(&mut config) {
+            Ok(_) => panic!("future storage aliases must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("storage.images_dir"));
+        assert!(error.to_string().contains("storage.instances_dir"));
+        assert!(!instances.exists());
+        assert!(!instances.parent().expect("instances parent").exists());
+        assert!(images_alias.is_symlink());
+        assert_eq!(
+            std::fs::read_link(&images_alias).expect("images alias target"),
+            instances
+        );
+    }
+
+    #[test]
+    fn instances_plan_resolves_relative_dangling_aliases_below_symlinked_parents() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let retained_parent = temp.path().join("retained/dir");
+        let configured_parent = temp.path().join("configured-parent");
+        let instances = temp.path().join("retained/instances");
+        let images_alias = retained_parent.join("images-alias");
+        let configured_images = configured_parent.join("images-alias/base/v1");
+        let state = temp.path().join("state");
+        std::fs::create_dir_all(&retained_parent).expect("retained parent");
+        std::fs::create_dir(&state).expect("state root");
+        symlink(&retained_parent, &configured_parent).expect("configured parent alias");
+        symlink("../instances", &images_alias).expect("relative dangling images alias");
+        let mut config = DaemonConfig::default();
+        config.storage.images_dir = configured_images;
+        config.storage.instances_dir = instances.join("base");
+        config.daemon.state_dir = state;
+
+        let error = match plan_storage_instances(&mut config) {
+            Ok(_) => panic!("relative future storage aliases must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("storage.images_dir"));
+        assert!(error.to_string().contains("storage.instances_dir"));
+        assert!(!instances.exists());
+        assert_eq!(
+            std::fs::read_link(&images_alias).expect("relative images alias target"),
+            Path::new("../instances")
+        );
+    }
+
+    #[test]
+    fn instances_plan_resolves_parent_components_after_symlink_targets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let resolved_subtree = temp.path().join("resolved/x/y");
+        let lexical_parent = temp.path().join("configured");
+        let subalias = lexical_parent.join("subalias");
+        let images_alias = lexical_parent.join("images-alias");
+        let instances = temp.path().join("resolved/x/instances");
+        let state = temp.path().join("state");
+        std::fs::create_dir_all(&resolved_subtree).expect("resolved subtree");
+        std::fs::create_dir(&lexical_parent).expect("configured parent");
+        std::fs::create_dir(&state).expect("state root");
+        symlink(&resolved_subtree, &subalias).expect("target component alias");
+        symlink("subalias/../instances", &images_alias)
+            .expect("images alias with parent component");
+        let mut config = DaemonConfig::default();
+        config.storage.images_dir = images_alias.clone();
+        config.storage.instances_dir = instances.clone();
+        config.daemon.state_dir = state;
+
+        let error = match plan_storage_instances(&mut config) {
+            Ok(_) => panic!("parent components after symbolic links must follow kernel semantics"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("storage.images_dir"));
+        assert!(error.to_string().contains("storage.instances_dir"));
+        assert!(!instances.exists());
+        assert_eq!(
+            std::fs::read_link(&images_alias).expect("images alias target"),
+            Path::new("subalias/../instances")
+        );
+    }
+
+    #[test]
     fn policy_boundary_fallback_prevents_a_later_directory_rescan() {
         let temp = tempfile::tempdir().expect("tempdir");
         let mut config = DaemonConfig::default();
@@ -587,7 +755,7 @@ backend_priority = ["bubblewrap"]
         assert!(!config.template.dir.exists());
         assert!(detached_parent.join("catalog").is_dir());
         assert!(config.storage.images_dir.is_dir());
-        assert!(config.storage.instances_dir.is_dir());
+        assert!(!config.storage.instances_dir.exists());
         assert!(config.daemon.state_dir.is_dir());
     }
 
@@ -863,8 +1031,7 @@ backend_priority = ["bubblewrap"]
 
     #[tokio::test]
     async fn every_configured_backend_path_is_checked_before_catalog_creation() {
-        let current_dir = std::env::current_dir().expect("current directory");
-        let temp = tempfile::tempdir_in(&current_dir).expect("tempdir below current directory");
+        let temp = tempfile::tempdir().expect("tempdir");
         let catalog = temp.path().join("catalog");
         let import_root = temp.path().join("imports");
         std::fs::create_dir(&import_root).expect("import root");
@@ -878,13 +1045,9 @@ backend_priority = ["bubblewrap"]
         config.daemon.state_dir = temp.path().join("state");
         config.daemon.socket = temp.path().join("run/api.sock");
         let missing_binary = catalog.join("future-backend");
-        config.backends.insert(
-            "future-backend".to_string(),
-            missing_binary
-                .strip_prefix(&current_dir)
-                .expect("backend path below current directory")
-                .to_path_buf(),
-        );
+        config
+            .backends
+            .insert("future-backend".to_string(), missing_binary.clone());
         let config_path = temp.path().join("config.toml");
         std::fs::write(
             &config_path,

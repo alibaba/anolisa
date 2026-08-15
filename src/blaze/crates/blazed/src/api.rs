@@ -1337,6 +1337,58 @@ mod tests {
         release_count: Arc<AtomicUsize>,
     }
 
+    struct PanickingAcquireStorage {
+        entered: tokio::sync::Notify,
+        resume: tokio::sync::Notify,
+        release_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl StorageProvider for PanickingAcquireStorage {
+        async fn probe(&self) -> blaze_core::Result<bool> {
+            Ok(true)
+        }
+
+        async fn acquire(
+            &self,
+            _opts: &AcquireOpts,
+        ) -> std::result::Result<StorageSlot, StorageAcquireError> {
+            self.entered.notify_one();
+            self.resume.notified().await;
+            panic!("controlled storage acquire panic");
+        }
+
+        async fn release(&self, _slot: StorageSlot) -> blaze_core::Result<()> {
+            self.release_count.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+
+        async fn release_by_id(&self, _instance_id: &str) -> blaze_core::Result<()> {
+            self.release_count.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+
+        async fn reconstruct(&self, instance_id: &str) -> blaze_core::Result<StorageSlot> {
+            Err(BlazeError::StorageIncomplete {
+                instance_id: instance_id.to_string(),
+                path: PathBuf::from(instance_id),
+                expected: "provider-owned slot",
+            })
+        }
+
+        async fn sync_artifacts(&self, _slot: &StorageSlot) -> blaze_core::Result<()> {
+            Ok(())
+        }
+
+        fn pool_status(&self) -> PoolStatus {
+            PoolStatus::default()
+        }
+
+        async fn drain_pool(&self) -> blaze_core::Result<usize> {
+            Ok(0)
+        }
+    }
+
     #[async_trait]
     impl StorageProvider for CountingStorage {
         async fn probe(&self) -> blaze_core::Result<bool> {
@@ -2479,11 +2531,15 @@ mod tests {
                 cleanup_count: policy_cleanups.clone(),
             }),
         );
-        let restarted_storage: Arc<dyn StorageProvider> =
-            Arc::new(FileStorageProvider::with_images(
+        let restarted_storage: Arc<dyn StorageProvider> = Arc::new(
+            FileStorageProvider::reopen_after_simulated_restart(
                 config.storage.images_dir.clone(),
                 instances_dir.clone(),
-            ));
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .expect("restart storage instances root"),
+        );
         let restarted = build_test_state(
             config,
             test_policy(BackendKind::Firecracker, false),
@@ -3369,6 +3425,248 @@ mod tests {
     }
 
     #[cfg(feature = "test-failpoints")]
+    struct AcquireFailpointReleaseGuard<'a>(&'a crate::failpoint::TestFailpoint);
+
+    #[cfg(feature = "test-failpoints")]
+    impl Drop for AcquireFailpointReleaseGuard<'_> {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    async fn assert_cancelled_acquire_keeps_destroy_waiting(
+        failpoint: &'static str,
+        slot_is_published: bool,
+    ) {
+        let temp = tempfile::tempdir().expect("temp");
+        let state = mock_state(&temp, false);
+        let hook = crate::failpoint::TestFailpoint::new(&[failpoint]);
+        let release_guard = AcquireFailpointReleaseGuard(&hook);
+        let create_state = Arc::clone(&state);
+        let create_hook = hook.clone();
+        let create = tokio::spawn(async move {
+            create_hook
+                .run(create_instance(&create_state, &test_request()))
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), hook.wait_until_paused())
+            .await
+            .expect("storage acquire reached deterministic boundary");
+
+        let instance = state
+            .instances
+            .lock()
+            .expect("instances")
+            .values()
+            .next()
+            .cloned()
+            .expect("write-ahead instance");
+        let id = instance.id;
+        let slot = temp.path().join("instances").join(id.to_string());
+        assert_eq!(slot.exists(), slot_is_published);
+
+        create.abort();
+        assert!(
+            create
+                .await
+                .expect_err("create task aborted")
+                .is_cancelled()
+        );
+        assert!(state.manager.operation_lock(id).try_lock().is_err());
+
+        let destroy_state = Arc::clone(&state);
+        let (destroy_started_tx, destroy_started_rx) = tokio::sync::oneshot::channel();
+        let destroy = tokio::spawn(async move {
+            destroy_started_tx.send(()).expect("mark destroy started");
+            destroy_instance(&destroy_state, &id.to_string()).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), destroy_started_rx)
+            .await
+            .expect("destroy task was scheduled")
+            .expect("destroy start signal");
+        tokio::task::yield_now().await;
+        assert!(
+            !destroy.is_finished(),
+            "destroy must wait for supervised storage acquisition"
+        );
+        assert_eq!(slot.exists(), slot_is_published);
+
+        hook.release();
+        drop(release_guard);
+        tokio::time::timeout(std::time::Duration::from_secs(2), destroy)
+            .await
+            .expect("destroy completed after storage supervision")
+            .expect("destroy task")
+            .expect("destroy response");
+        assert!(!slot.exists());
+        assert_eq!(
+            state.instances.lock().expect("instances")[&id].state,
+            SandboxState::Destroyed
+        );
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn cancelled_acquire_before_publication_keeps_destroy_waiting() {
+        assert_cancelled_acquire_keeps_destroy_waiting(
+            "storage-acquire-before-slot-publish",
+            false,
+        )
+        .await;
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn cancelled_acquire_after_publication_keeps_destroy_waiting() {
+        assert_cancelled_acquire_keeps_destroy_waiting("storage-acquire-after-slot-publish", true)
+            .await;
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn cancelled_replaced_slot_disables_automatic_cleanup_before_unlocking() {
+        let temp = tempfile::tempdir().expect("temp");
+        let state = mock_state(&temp, false);
+        let hook = crate::failpoint::TestFailpoint::new(&["storage-acquire-after-slot-publish"]);
+        let release_guard = AcquireFailpointReleaseGuard(&hook);
+        let create_state = Arc::clone(&state);
+        let create_hook = hook.clone();
+        let create = tokio::spawn(async move {
+            create_hook
+                .run(create_instance(&create_state, &test_request()))
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), hook.wait_until_paused())
+            .await
+            .expect("storage acquire reached post-publication boundary");
+
+        let instance = state
+            .instances
+            .lock()
+            .expect("instances")
+            .values()
+            .next()
+            .cloned()
+            .expect("write-ahead instance");
+        let id = instance.id;
+        let instances = temp.path().join("instances");
+        let slot = instances.join(id.to_string());
+        let retained = instances.join(format!("{id}.retained"));
+        std::fs::rename(&slot, &retained).expect("detach provider-owned slot");
+        std::fs::create_dir(&slot).expect("replacement slot");
+        std::fs::write(slot.join("sentinel"), b"replacement").expect("replacement sentinel");
+
+        create.abort();
+        assert!(
+            create
+                .await
+                .expect_err("create task aborted")
+                .is_cancelled()
+        );
+        assert!(state.manager.operation_lock(id).try_lock().is_err());
+        let destroy_state = Arc::clone(&state);
+        let (destroy_started_tx, destroy_started_rx) = tokio::sync::oneshot::channel();
+        let destroy = tokio::spawn(async move {
+            destroy_started_tx.send(()).expect("mark destroy started");
+            destroy_instance(&destroy_state, &id.to_string()).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), destroy_started_rx)
+            .await
+            .expect("destroy task was scheduled")
+            .expect("destroy start signal");
+        tokio::task::yield_now().await;
+        assert!(
+            !destroy.is_finished(),
+            "destroy must wait while the provider classifies the replacement"
+        );
+        assert_eq!(
+            std::fs::read(slot.join("sentinel")).expect("replacement remains while paused"),
+            b"replacement"
+        );
+
+        hook.release();
+        drop(release_guard);
+        let error = tokio::time::timeout(std::time::Duration::from_secs(2), destroy)
+            .await
+            .expect("destroy completed after storage supervision")
+            .expect("destroy task")
+            .expect_err("replacement requires manual inspection");
+        assert!(matches!(error, BlazeDaemonError::RecoveryRequired(_)));
+        assert_eq!(
+            std::fs::read(slot.join("sentinel")).expect("replacement remains"),
+            b"replacement"
+        );
+        assert!(retained.is_dir());
+        assert_eq!(
+            state.instances.lock().expect("instances")[&id].state,
+            SandboxState::RecoveryRequired
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_create_blocks_cleanup_when_storage_acquire_panics() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let release_count = Arc::new(AtomicUsize::new(0));
+        let storage = Arc::new(PanickingAcquireStorage {
+            entered: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+            release_count: Arc::clone(&release_count),
+        });
+        let state = build_test_state(
+            config,
+            test_policy(BackendKind::Mock, false),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage.clone(),
+        );
+        let create_state = Arc::clone(&state);
+        let create =
+            tokio::spawn(async move { create_instance(&create_state, &test_request()).await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            storage.entered.notified(),
+        )
+        .await
+        .expect("storage provider entered acquire");
+
+        let instance = state
+            .instances
+            .lock()
+            .expect("instances")
+            .values()
+            .next()
+            .cloned()
+            .expect("write-ahead instance");
+        let id = instance.id;
+        create.abort();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), create)
+                .await
+                .expect("create cancellation completed")
+                .expect_err("create task aborted")
+                .is_cancelled()
+        );
+        assert!(state.manager.operation_lock(id).try_lock().is_err());
+
+        storage.resume.notify_one();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            destroy_instance(&state, &id.to_string()),
+        )
+        .await
+        .expect("destroy completed after acquire panic")
+        .expect_err("unknown acquire outcome requires manual inspection");
+        assert!(matches!(error, BlazeDaemonError::RecoveryRequired(_)));
+        assert_eq!(release_count.load(Ordering::Acquire), 0);
+        assert_eq!(
+            state.instances.lock().expect("instances")[&id].state,
+            SandboxState::RecoveryRequired
+        );
+    }
+
+    #[cfg(feature = "test-failpoints")]
     #[tokio::test]
     async fn acquired_slot_is_destroyable_after_restart_before_start_commit() {
         let temp = tempfile::tempdir().expect("temp");
@@ -3430,11 +3728,15 @@ mod tests {
         drop(initial_state);
 
         let cleanup_count = Arc::new(AtomicUsize::new(0));
-        let restarted_storage: Arc<dyn StorageProvider> =
-            Arc::new(FileStorageProvider::with_images(
+        let restarted_storage: Arc<dyn StorageProvider> = Arc::new(
+            FileStorageProvider::reopen_after_simulated_restart(
                 config.storage.images_dir.clone(),
                 instances_dir.clone(),
-            ));
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .expect("restart storage instances root"),
+        );
         let restarted = build_test_state(
             config,
             test_policy(BackendKind::Mock, false),

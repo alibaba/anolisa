@@ -62,10 +62,18 @@ struct FilesystemLocation {
     path: PathBuf,
 }
 
+// Non-Linux builds retain the shared boundary types, but load no mount table.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+enum MountRoot {
+    Hierarchical(PathBuf),
+    Opaque(OsString),
+}
+
 #[derive(Clone, Debug)]
 struct MountEntry {
     device: (u64, u64),
-    root: PathBuf,
+    root: MountRoot,
     mount_point: PathBuf,
 }
 
@@ -1829,6 +1837,15 @@ fn opened_mount_id(file: &File) -> io::Result<u64> {
     Ok(file.metadata()?.dev())
 }
 
+/// Return the mount identity for an already-opened filesystem object.
+///
+/// Provider cleanup uses the catalog's mount-ID seam so recursive deletion
+/// can reject nested mounts without reopening the configured instances path.
+pub(crate) fn opened_mount_id_for_owned_fd(object: &std::os::fd::OwnedFd) -> io::Result<u64> {
+    let duplicate = rustix::io::dup(object).map_err(io::Error::from)?;
+    opened_mount_id(&File::from(duplicate))
+}
+
 fn validate_catalog_mount_id(mount_id: u64, boundary: CatalogBoundary, label: &Path) -> Result<()> {
     if mount_id != boundary.mount_id {
         return Err(BlazeDaemonError::RecoveryRequired(format!(
@@ -2184,6 +2201,55 @@ pub(crate) fn validate_template_roots_with_policy_mode(
         policy_error_mode,
         || {},
     )
+}
+
+/// Validate the resolved storage roots before creating either root.
+pub(crate) fn preflight_storage_root_boundaries(
+    images_dir: &Path,
+    instances_dir: &Path,
+    state_dir: &Path,
+) -> Result<()> {
+    let mounts = MountTable::load()?;
+    validate_storage_root_disjointness(images_dir, instances_dir, &mounts)?;
+    let instances = resolve_existing_prefix(instances_dir)?;
+    let configured_state = normalize_startup_path(state_dir)?;
+    let state = resolve_existing_prefix(state_dir)?;
+    validate_lifecycle_boundary(
+        "storage.instances_dir",
+        instances_dir,
+        &instances,
+        &configured_state,
+        &mounts,
+    )?;
+    if state != configured_state {
+        validate_lifecycle_boundary(
+            "storage.instances_dir",
+            instances_dir,
+            &instances,
+            &state,
+            &mounts,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_storage_root_disjointness(
+    images_dir: &Path,
+    instances_dir: &Path,
+    mounts: &MountTable,
+) -> Result<()> {
+    let images = resolve_existing_prefix(images_dir)?;
+    let instances = resolve_existing_prefix(instances_dir)?;
+    if paths_overlap_across_mounts(&images, &instances, mounts)? {
+        return Err(BlazeDaemonError::Core(BlazeError::ConfigError {
+            source: ConfigErrorSource::InvalidValue(format!(
+                "storage.images_dir ({}) and storage.instances_dir ({}) resolve to overlapping filesystem locations",
+                images_dir.display(),
+                instances_dir.display()
+            )),
+        }));
+    }
+    Ok(())
 }
 
 // Keep the test-only transition hook adjacent to the complete boundary set so
@@ -2670,7 +2736,20 @@ fn resolve_existing_prefix(path: &Path) -> Result<PathBuf> {
     // Anchor them before walking missing suffixes so a fresh single-component
     // path still has the working directory as an existing ancestor.
     let absolute = normalize_startup_path(path)?;
-    let mut existing = absolute.as_path();
+    resolve_existing_prefix_absolute(&absolute, 0)
+}
+
+fn resolve_existing_prefix_absolute(path: &Path, symlink_depth: usize) -> Result<PathBuf> {
+    const MAX_SYMLINK_DEPTH: usize = 40;
+    if symlink_depth > MAX_SYMLINK_DEPTH {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "startup path exceeds the symbolic-link resolution limit",
+        )
+        .into());
+    }
+
+    let mut existing = path;
     let mut missing = Vec::new();
     loop {
         match std::fs::canonicalize(existing) {
@@ -2681,6 +2760,38 @@ fn resolve_existing_prefix(path: &Path) -> Result<PathBuf> {
                 return Ok(resolved);
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(existing) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        let target = std::fs::read_link(existing)?;
+                        let target = if target.is_absolute() {
+                            target
+                        } else {
+                            let parent = existing.parent().ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "symbolic link has no parent directory",
+                                )
+                            })?;
+                            std::fs::canonicalize(parent)?.join(target)
+                        };
+                        if !target.is_absolute() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "resolved symbolic-link target must be absolute",
+                            )
+                            .into());
+                        }
+                        let mut resolved =
+                            resolve_existing_prefix_absolute(&target, symlink_depth + 1)?;
+                        for component in missing.iter().rev() {
+                            resolved.push(component);
+                        }
+                        return Ok(resolved);
+                    }
+                    Ok(_) => return Err(error.into()),
+                    Err(metadata_error) if metadata_error.kind() == io::ErrorKind::NotFound => {}
+                    Err(metadata_error) => return Err(metadata_error.into()),
+                }
                 let name = existing.file_name().ok_or(error)?;
                 missing.push(name.to_os_string());
                 existing = existing.parent().ok_or_else(|| {
@@ -2733,15 +2844,20 @@ impl MountTable {
             let device = parse_mount_device(fields[2])?;
             let root = decode_mount_path(fields[3])?;
             let mount_point = decode_mount_path(fields[4])?;
-            if !root.is_absolute() || !mount_point.is_absolute() {
+            if !mount_point.is_absolute() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "mountinfo root and mount point must be absolute",
+                    "mountinfo mount point must be absolute",
                 ));
             }
+            let root = if root.is_absolute() {
+                MountRoot::Hierarchical(normalize_absolute_path(&root)?)
+            } else {
+                MountRoot::Opaque(root.into_os_string())
+            };
             entries.push(MountEntry {
                 device,
-                root: normalize_absolute_path(&root)?,
+                root,
                 mount_point: normalize_absolute_path(&mount_point)?,
             });
         }
@@ -2764,9 +2880,22 @@ impl MountTable {
                 "mount point stopped containing the resolved path",
             )
         })?;
+        let root = match &entry.root {
+            MountRoot::Hierarchical(root) => root,
+            MountRoot::Opaque(root) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "mount point {} has non-hierarchical root {}; filesystem location cannot be translated",
+                        entry.mount_point.display(),
+                        Path::new(root).display()
+                    ),
+                ));
+            }
+        };
         Ok(Some(FilesystemLocation {
             device: entry.device,
-            path: normalize_absolute_path(&entry.root.join(relative))?,
+            path: normalize_absolute_path(&root.join(relative))?,
         }))
     }
 }
@@ -4060,6 +4189,91 @@ mod tests {
     }
 
     #[test]
+    fn storage_roots_reject_a_bind_alias_before_materialization() {
+        let mounts = MountTable::parse(
+            b"24 1 8:1 / / rw - ext4 /dev/root rw\n\
+              25 24 8:1 /srv/instances/slot-1 /mnt/images rw - ext4 /dev/root rw\n",
+        )
+        .expect("mount table");
+
+        let error = validate_storage_root_disjointness(
+            Path::new("/mnt/images"),
+            Path::new("/srv/instances"),
+            &mounts,
+        )
+        .expect_err("bind aliases must be rejected");
+
+        assert!(error.to_string().contains("storage.images_dir"));
+        assert!(error.to_string().contains("storage.instances_dir"));
+        validate_storage_root_disjointness(
+            Path::new("/mnt/other-images"),
+            Path::new("/srv/instances"),
+            &mounts,
+        )
+        .expect("disjoint storage roots");
+    }
+
+    #[test]
+    fn mount_table_treats_an_opaque_nsfs_root_as_a_mapping_boundary() {
+        let mounts = MountTable::parse(
+            b"24 1 8:1 / / rw - ext4 /dev/root rw\n\
+              25 24 8:1 /srv/storage /mnt/catalog rw - ext4 /dev/root rw\n\
+              90 43 0:4 net:[4026537325] /run/netns/ns-2 rw,nosuid,nodev,noexec,relatime shared:51 - nsfs nsfs rw\n",
+        )
+        .expect("mount table with an nsfs entry");
+
+        assert_eq!(
+            mounts.entries[2].root,
+            MountRoot::Opaque(OsString::from("net:[4026537325]"))
+        );
+        let error = mounts
+            .location(Path::new("/run/netns/ns-2"))
+            .expect_err("opaque mount point lookup must fail closed");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("non-hierarchical root"));
+        assert!(
+            mounts
+                .location(Path::new("/run/netns/ns-2/child"))
+                .expect_err("opaque mount subtree lookup must fail closed")
+                .to_string()
+                .contains("non-hierarchical root")
+        );
+        assert_eq!(
+            mounts
+                .location(Path::new("/run/netns/other"))
+                .expect("parent mount lookup")
+                .expect("parent mount location")
+                .path,
+            Path::new("/run/netns/other")
+        );
+        assert!(
+            paths_overlap_across_mounts(
+                Path::new("/srv/storage"),
+                Path::new("/mnt/catalog/templates/base"),
+                &mounts,
+            )
+            .expect("bind alias remains detectable")
+        );
+        let error = paths_overlap_across_mounts(
+            Path::new("/srv/storage"),
+            Path::new("/run/netns/ns-2"),
+            &mounts,
+        )
+        .expect_err("boundary preflight must reject an opaque mount root");
+        assert!(error.to_string().contains("non-hierarchical root"));
+    }
+
+    #[test]
+    fn mount_table_rejects_a_relative_mount_point() {
+        let error =
+            MountTable::parse(b"90 43 0:4 net:[4026537325] run/netns/ns-2 rw - nsfs nsfs rw\n")
+                .expect_err("relative mount point");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "mountinfo mount point must be absolute");
+    }
+
+    #[test]
     fn root_validation_rejects_bind_alias_to_storage() {
         let temp = tempfile::tempdir().expect("tempdir");
         let catalog = temp.path().join("catalog");
@@ -4082,12 +4296,12 @@ mod tests {
             entries: vec![
                 MountEntry {
                     device: (8, 1),
-                    root: PathBuf::from("/"),
+                    root: MountRoot::Hierarchical(PathBuf::from("/")),
                     mount_point: PathBuf::from("/"),
                 },
                 MountEntry {
                     device: (8, 1),
-                    root: images.clone(),
+                    root: MountRoot::Hierarchical(images.clone()),
                     mount_point: catalog.clone(),
                 },
             ],
@@ -4139,12 +4353,12 @@ mod tests {
             entries: vec![
                 MountEntry {
                     device: (8, 1),
-                    root: PathBuf::from("/"),
+                    root: MountRoot::Hierarchical(PathBuf::from("/")),
                     mount_point: PathBuf::from("/"),
                 },
                 MountEntry {
                     device: (8, 1),
-                    root: backend_root,
+                    root: MountRoot::Hierarchical(backend_root),
                     mount_point: catalog.clone(),
                 },
             ],
@@ -4416,12 +4630,12 @@ mod tests {
             entries: vec![
                 MountEntry {
                     device: (8, 1),
-                    root: PathBuf::from("/"),
+                    root: MountRoot::Hierarchical(PathBuf::from("/")),
                     mount_point: PathBuf::from("/"),
                 },
                 MountEntry {
                     device: (8, 1),
-                    root: network_root,
+                    root: MountRoot::Hierarchical(network_root),
                     mount_point: catalog.clone(),
                 },
             ],
@@ -4637,12 +4851,12 @@ mod tests {
                 entries: vec![
                     MountEntry {
                         device: (8, 1),
-                        root: PathBuf::from("/"),
+                        root: MountRoot::Hierarchical(PathBuf::from("/")),
                         mount_point: PathBuf::from("/"),
                     },
                     MountEntry {
                         device: (8, 1),
-                        root: network_root,
+                        root: MountRoot::Hierarchical(network_root),
                         mount_point: owner.clone(),
                     },
                 ],

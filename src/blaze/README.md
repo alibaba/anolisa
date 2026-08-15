@@ -115,6 +115,28 @@ sync_timeout = "30s"       # Maximum scheduler wait for reconstruction plus arti
 ```
 
 The `file` provider uses standard filesystem operations for sandbox storage. The `auto` provider probes available backends in priority order (currently equivalent to `file`). Unrecognized values will log a warning and fall back to `file`.
+Existing storage configuration fields, HTTP APIs, and successful lifecycle
+behavior are unchanged. The file provider now rejects an instances-root path
+that contains `..` or a symbolic-link component; storage roots that resolve to
+overlapping locations; an instances root that would own the daemon state
+directory or enter a sandbox UUID subtree, directly or through an alias; or a
+root already owned by another daemon. First-start creation remains supported,
+but every publication parent and the resulting instances root must be owned by
+root or the daemon's effective user and must not be writable by group or other
+users. A shared writable ancestor in an existing path is accepted only when it
+is sticky and the next component is owned by root or the daemon's effective
+user. If the target name is occupied at atomic publication, or if a published
+slot is replaced before allocation completes, the operation fails without
+adopting or removing the replacement during that daemon process. This cleanup
+suppression does not survive a daemon restart; inspect or restore the path
+before restarting. Root and processes running as the daemon's effective user
+remain within the host administration trust boundary; stop Blaze before
+changing its storage paths.
+If the configured pathname is replaced while Blaze is running, new allocation
+and reconstruction fail closed. Release, and any synchronization attempt that
+already completed reconstruction, continue against the original storage root.
+See [File storage compatibility and safety checks](../../docs/user-guide/en/runtime/blaze.md#file-storage-compatibility-and-safety-checks)
+for the complete behavior.
 When periodic synchronization is enabled, a completed provider failure is
 isolated from later sandboxes. If a provider cannot stop its filesystem work at
 the deadline, that work keeps the sandbox operation lock and the single

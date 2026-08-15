@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! No-op hooks used when daemon verification support is disabled.
 
-#![allow(dead_code)] // Call sites land with their owning lifecycle commits.
-
 /// Keep daemon startup independent from verification-only configuration.
 pub(crate) fn announce() {}
 
@@ -14,6 +12,25 @@ pub(crate) fn backend(_name: &str) -> blaze_core::Result<()> {
 /// Leave storage operations unchanged in production builds.
 pub(crate) fn storage(_name: &str) -> blaze_core::Result<()> {
     Ok(())
+}
+
+/// Empty test context used by the production no-op implementation.
+#[cfg(test)]
+pub(crate) struct TestFailpointContext;
+
+/// Capture an empty failpoint context in default-feature tests.
+#[cfg(test)]
+pub(crate) fn capture_test_context() -> TestFailpointContext {
+    TestFailpointContext
+}
+
+/// Run a blocking operation unchanged in default-feature tests.
+#[cfg(test)]
+pub(crate) fn with_test_context<T>(
+    _context: TestFailpointContext,
+    operation: impl FnOnce() -> T,
+) -> T {
+    operation()
 }
 
 /// Leave guest operations unchanged in production builds.
@@ -28,6 +45,18 @@ pub(crate) fn state(_name: &str) -> crate::error::Result<()> {
 
 /// Never pause production requests.
 pub(crate) async fn pause(_name: &str) {}
+
+// Spawn detached supervision in production builds.
+pub(crate) fn spawn<F, R>(future: F) -> tokio::task::JoinHandle<R>
+where
+    F: std::future::Future<Output = R> + Send + 'static,
+    R: Send + 'static,
+{
+    tokio::spawn(future)
+}
+
+/// Never pause production blocking operations.
+pub(crate) fn pause_blocking(_name: &str) {}
 
 #[cfg(test)]
 mod tests {

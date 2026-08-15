@@ -264,6 +264,11 @@ impl DaemonConfig {
     /// Validate cross-field invariants that serde cannot express.
     pub fn validate(&self) -> Result<()> {
         validate_storage_paths(&self.storage.images_dir, &self.storage.instances_dir)?;
+        validate_state_boundary(
+            &self.storage.instances_dir,
+            "storage.instances_dir",
+            &self.daemon.state_dir,
+        )?;
         self.storage.sync_schedule()?;
         self.storage.sync_timeout_duration()?;
         let template_boundaries = [
@@ -804,5 +809,31 @@ mod tests {
         let mut total = DaemonConfig::default();
         total.template.max_total_bytes = 0;
         assert!(total.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_instances_root_inside_daemon_lifecycle_state() {
+        let state = PathBuf::from("/srv/blaze-state");
+        for instances in [
+            state.clone(),
+            state
+                .join("86b59faf-3b91-46e4-9db0-2468b8336eb6")
+                .join("slot"),
+        ] {
+            let mut config = DaemonConfig::default();
+            config.daemon.state_dir = state.clone();
+            config.storage.images_dir = PathBuf::from("/srv/blaze-images");
+            config.storage.instances_dir = instances;
+            config.template.dir = PathBuf::from("/srv/blaze-templates");
+            config.template.import_root = Some(PathBuf::from("/srv/blaze-imports"));
+            config.policy.dir = PathBuf::from("/srv/blaze-policies");
+            config.daemon.socket = PathBuf::from("/srv/blaze-run/api.sock");
+
+            let error = config
+                .validate()
+                .expect_err("instances root must not enter lifecycle state");
+
+            assert!(error.to_string().contains("storage.instances_dir"));
+        }
     }
 }
