@@ -122,6 +122,47 @@ mod latency_tests {
     }
 
     #[test]
+    fn filters_latency_metrics_case_insensitively_and_combines_variants() {
+        let path = std::env::temp_dir().join(format!(
+            "agentsight_latency_case_insensitive_{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = GenAISqliteStore::new_with_path(&path).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            for (call_id, agent, start, first, is_sse) in [
+                ("upper", "Qoder", 100_i64, 110_i64, 1_i64),
+                ("lower", "qoder", 200_i64, 220_i64, 0_i64),
+            ] {
+                conn.execute(
+                    "INSERT INTO genai_events
+                     (event_type, status, call_id, start_timestamp_ns, end_timestamp_ns,
+                      first_output_timestamp_ns, output_tokens, is_sse, agent_name, event_json)
+                     VALUES ('llm_call', 'complete', ?1, ?2, ?3, ?4, 10, ?5, ?6, '{}')",
+                    params![call_id, start, start + 30, first, is_sse, agent],
+                )
+                .unwrap();
+            }
+        }
+
+        for query_name in ["Qoder", "qoder"] {
+            let summary = store
+                .get_latency_metrics(50, 250, Some(query_name))
+                .unwrap();
+            assert_eq!(summary.len(), 1);
+            assert_eq!(summary[0].agent_name.as_deref(), Some(query_name));
+            assert_eq!(summary[0].call_count, 2);
+            assert_eq!(summary[0].streaming_call_count, 1);
+            let ttft_p50 = summary[0].ttft_ms.as_ref().unwrap().p50;
+            assert!((ttft_p50 - 0.000015).abs() < 1e-12);
+        }
+
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn streaming_call_count_uses_is_sse_when_ttft_is_missing() {
         let path = std::env::temp_dir().join(format!(
             "agentsight_streaming_count_{}.db",
@@ -239,13 +280,13 @@ impl GenAISqliteStore {
     ) -> Result<Vec<LatencyMetricsSummary>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let sql = if agent_name.is_some() {
-            "SELECT COALESCE(agent_name, process_name) AS agent_name,
+            "SELECT ?3 AS agent_name,
                     start_timestamp_ns, end_timestamp_ns,
                     first_output_timestamp_ns, output_tokens, is_sse
              FROM genai_events
              WHERE event_type = 'llm_call' AND status = 'complete'
                AND start_timestamp_ns BETWEEN ?1 AND ?2
-               AND COALESCE(agent_name, process_name) = ?3"
+               AND COALESCE(agent_name, process_name) COLLATE NOCASE = ?3 COLLATE NOCASE"
         } else {
             "SELECT COALESCE(agent_name, process_name) AS agent_name,
                     start_timestamp_ns, end_timestamp_ns,
