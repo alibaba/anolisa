@@ -88,6 +88,13 @@ the affected sandbox ID. Blaze leaves the rejected record in place. Repair or
 restore that record, then restart the service and confirm that `/v1/health`
 responds.
 
+## Sandbox API
+
+Blaze exposes sandbox lifecycle and guest operations under `/v1/sandboxes`.
+Clients use this namespace to list, create, inspect, and delete sandboxes and
+to execute commands, read files, and write files inside them. Sandbox
+destruction uses `DELETE /v1/sandboxes/{id}`.
+
 ## Host Integration Boundary
 
 Blaze configures the sandbox-local network path. Routing beyond the host and DNS
@@ -96,7 +103,7 @@ option in production, configure the required upstream routing or translation
 and verify guest connectivity for the host environment.
 
 To disable the capability, set `enable_network = false` or remove the key, then
-destroy existing network-enabled sandboxes through the normal instance API.
+destroy existing network-enabled sandboxes through the sandbox API.
 
 ## Guest Operations
 
@@ -116,7 +123,6 @@ The sandbox routes are:
 - `POST /v1/sandboxes/{id}/read` — read one file; and
 - `POST /v1/sandboxes/{id}/write` — replace one file.
 
-The corresponding `/v1/instances/{id}/...` routes provide the same behavior.
 Exec requests use the following shape:
 
 ```json
@@ -153,13 +159,7 @@ Leave `listen.http_addr` disabled in production until
 Daemon shutdown also does not yet wait for every active HTTP handler or release
 all runtime owners, so an in-flight request may observe a closed connection.
 
-## Reset and Reusable-Instance Management
-
-`POST /v1/instances/{id}/reset` does not report success until Blaze can reset
-both runtime and storage. A malformed identifier returns HTTP 400, an unknown
-instance returns HTTP 404, an instance that is not running returns HTTP 422,
-and a running instance returns HTTP 501 without changing its state or owned
-resources.
+## Reusable-Instance Management
 
 The four `/v1/pools` management routes also return HTTP 501. Blaze rejects
 `storage.pool_size`, `storage.prefork`, and every `[pool]` section except the

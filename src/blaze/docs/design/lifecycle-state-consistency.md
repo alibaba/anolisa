@@ -4,15 +4,16 @@
 
 Blaze has two related lifecycle boundaries. Before serving requests, it must
 reconstruct a complete persisted sandbox inventory without exposing a partial
-result. While serving requests, it must reject reset and reusable-instance
-operations that cannot preserve runtime and storage ownership. Retired `Reset`,
-`Warm`, and `start_path = "warm"` values remain decodable so startup can clean
-non-terminal records that contain them.
+result. While serving requests, it exposes lifecycle and guest operations only
+through the sandbox namespace and rejects reserved reusable-capacity operations
+before they can change ownership. Retired `Reset`, `Warm`, and
+`start_path = "warm"` values remain decodable so startup can clean non-terminal
+records that contain them.
 
 This document defines both boundaries. The inventory-publication protocol does
-not change the HTTP API, configuration keys, or persisted JSON format. The reset
-and reusable-instance section defines the public compatibility protocol that
-follows from the reachable lifecycle states.
+not change the HTTP API, configuration keys, or persisted JSON format. The
+management API section defines the sandbox namespace and the reserved
+reusable-capacity boundary.
 
 ## Terms and owned objects
 
@@ -97,15 +98,12 @@ validated inventory into a partial one. Blaze attempts to persist the recovery
 state; if that write also fails, reconciliation reports the additional error
 and the durable record may still contain its previous state.
 
-## Reset and reusable-instance compatibility boundary
+## Management API and reusable-state boundary
 
-`POST /v1/instances/{id}/reset` has no successful path until Blaze can reset
-runtime and storage as one operation. A malformed identifier returns `400 Bad
-Request`, an unknown sandbox returns `404 Not Found`, and an existing sandbox
-that is not `Running` returns `422 Unprocessable Entity`. A running sandbox
-returns `501 Not Implemented`. Every rejection occurs before any in-memory or
-persisted lifecycle change and before any change to runtime or storage
-ownership.
+Lifecycle and guest operations are registered under `/v1/sandboxes`.
+Action-style reset, checkpoint, and destroy paths are unregistered and return
+`404 Not Found`. Canonical destruction remains
+`DELETE /v1/sandboxes/{id}`. Checkpoint capture is defined separately.
 
 The following reserved management routes also return `501 Not Implemented` and
 do not manage reusable capacity:
@@ -117,8 +115,9 @@ do not manage reusable capacity:
 
 `GET /v1/health` retains its `storage_pool` object for response compatibility;
 the file provider reports zero ready, capacity, pending, and quarantined slots.
-The metrics endpoint no longer publishes reset, pool-hit, or pool-miss counters
-because those operations have no supported success path.
+The metrics endpoint does not publish a reset counter because no reset route is
+registered. Pool-hit and pool-miss counters also remain absent because reusable
+capacity has no supported success path.
 
 New sandbox creation always records `start_path = "cold"`. Lifecycle
 transitions cannot enter `Reset` or `Warm`, so no supported path can produce or
@@ -157,7 +156,9 @@ Future lifecycle-state changes must preserve these rules:
   revalidated;
 - no request handler can observe either startup map before all inventory
   checks have passed;
-- reset and pool-management rejections occur before lifecycle, runtime, or
-  storage ownership changes; and
+- unregistered sandbox action routes return `404` before reading or changing
+  sandbox state;
+- pool-management rejections occur before lifecycle, runtime, or storage
+  ownership changes; and
 - lifecycle operations cannot enter or reactivate `Reset` or `Warm`; legacy
   values are cleanup inputs only.

@@ -13,8 +13,7 @@ use std::sync::Arc;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use blaze_core::backend::{BackendKind, BackendStatus, select_backend};
-use blaze_core::kernel::HookKind;
-use blaze_core::lifecycle::{SandboxInstance, SandboxState, StartPath};
+use blaze_core::lifecycle::{SandboxInstance, StartPath};
 use blaze_core::policy::{ImageMetadata, RuntimeDecision, WorkloadClass};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Body, Bytes, Incoming};
@@ -54,6 +53,7 @@ where
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
+
     let limit = guest_body_route(&method, &path).then_some(MAX_GUEST_HTTP_BODY_BYTES);
 
     let response = match collect_body(req, limit).await {
@@ -79,12 +79,7 @@ fn guest_body_route(method: &Method, path: &str) -> bool {
         .collect::<Vec<_>>();
     matches!(
         parts.as_slice(),
-        [
-            "v1",
-            "instances" | "sandboxes",
-            _,
-            "exec" | "read" | "write"
-        ]
+        ["v1", "sandboxes", _, "exec" | "read" | "write"]
     )
 }
 
@@ -138,27 +133,13 @@ async fn dispatch(
 
     match (m, parts.as_slice()) {
         ("GET", ["v1", "health"]) => health(state),
-        ("GET", ["v1", "instances"]) | ("GET", ["v1", "sandboxes"]) => list_instances(state),
-        ("POST", ["v1", "instances"]) | ("POST", ["v1", "sandboxes"]) => {
-            create_instance(state, &body).await
-        }
-        ("GET", ["v1", "instances", id]) | ("GET", ["v1", "sandboxes", id]) => {
-            get_instance(state, id)
-        }
-        ("POST", ["v1", "sandboxes", id, "exec"]) | ("POST", ["v1", "instances", id, "exec"]) => {
-            exec_instance(state, id, &body).await
-        }
-        ("POST", ["v1", "sandboxes", id, "read"]) | ("POST", ["v1", "instances", id, "read"]) => {
-            read_instance_file(state, id, &body).await
-        }
-        ("POST", ["v1", "sandboxes", id, "write"]) | ("POST", ["v1", "instances", id, "write"]) => {
-            write_instance_file(state, id, &body).await
-        }
-        ("POST", ["v1", "instances", id, "checkpoint"]) => checkpoint(state, id).await,
-        ("POST", ["v1", "instances", id, "reset"]) => reset_instance(state, id).await,
-        ("DELETE", ["v1", "instances", id])
-        | ("DELETE", ["v1", "sandboxes", id])
-        | ("POST", ["v1", "instances", id, "destroy"]) => destroy_instance(state, id).await,
+        ("GET", ["v1", "sandboxes"]) => list_sandboxes(state),
+        ("POST", ["v1", "sandboxes"]) => create_sandbox(state, &body).await,
+        ("GET", ["v1", "sandboxes", id]) => get_sandbox(state, id),
+        ("POST", ["v1", "sandboxes", id, "exec"]) => exec_sandbox(state, id, &body).await,
+        ("POST", ["v1", "sandboxes", id, "read"]) => read_sandbox_file(state, id, &body).await,
+        ("POST", ["v1", "sandboxes", id, "write"]) => write_sandbox_file(state, id, &body).await,
+        ("DELETE", ["v1", "sandboxes", id]) => destroy_sandbox(state, id).await,
         ("GET", ["v1", "pools"])
         | ("GET", ["v1", "pools", _, _])
         | ("POST", ["v1", "pools", _, _, "drain"])
@@ -217,7 +198,7 @@ fn admin_reload(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
 }
 
 // ---------------------------------------------------------------------------
-// Instances
+// Sandboxes
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -238,15 +219,15 @@ struct CreateInstanceResp {
     selected_backend: BackendKind,
 }
 
-fn list_instances(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
+fn list_sandboxes(state: &Arc<ServerState>) -> Result<Response<Full<Bytes>>> {
     json_ok(&state.manager.list()?)
 }
 
-fn get_instance(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>>> {
+fn get_sandbox(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>>> {
     json_ok(&state.manager.get(parse_uuid(id)?)?)
 }
 
-async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Response<Full<Bytes>>> {
+async fn create_sandbox(state: &Arc<ServerState>, body: &[u8]) -> Result<Response<Full<Bytes>>> {
     let req: CreateInstanceReq = serde_json::from_slice(body)
         .map_err(|e| BlazeDaemonError::BadRequest(format!("invalid create body: {e}")))?;
 
@@ -334,56 +315,7 @@ async fn create_instance(state: &Arc<ServerState>, body: &[u8]) -> Result<Respon
     })
 }
 
-async fn checkpoint(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>>> {
-    let uuid = parse_uuid(id)?;
-    let operation_lock = state.operation_lock(uuid);
-    let _operation = operation_lock.lock().await;
-    let mut map = state
-        .instances
-        .lock()
-        .map_err(|_| BlazeDaemonError::Internal("instances lock poisoned".into()))?;
-    let inst = map
-        .get_mut(&uuid)
-        .ok_or_else(|| BlazeDaemonError::NotFound(format!("instance {uuid}")))?;
-
-    if inst.state == SandboxState::Running {
-        inst.transition(SandboxState::Paused)?;
-    }
-    inst.transition(SandboxState::Checkpointed)?;
-    state.state_store.persist(inst)?;
-
-    let checkpoint_id = format!("ckpt-{}-{}", inst.id, chrono::Utc::now().timestamp());
-    json_ok(&json!({
-        "checkpoint_id": checkpoint_id,
-        "instance_id": inst.id,
-    }))
-}
-
-async fn reset_instance(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>>> {
-    let uuid = parse_uuid(id)?;
-    let operation_lock = state.operation_lock(uuid);
-    let _operation = operation_lock.lock().await;
-    let map = state
-        .instances
-        .lock()
-        .map_err(|_| BlazeDaemonError::Internal("instances lock poisoned".into()))?;
-    let inst = map
-        .get(&uuid)
-        .ok_or_else(|| BlazeDaemonError::NotFound(format!("instance {uuid}")))?;
-    if inst.state != SandboxState::Running {
-        return Err(blaze_core::BlazeError::InvalidStateTransition {
-            from: inst.state.to_string(),
-            to: SandboxState::Reset.to_string(),
-        }
-        .into());
-    }
-
-    Err(BlazeDaemonError::UnsupportedOperation(format!(
-        "instance {uuid} cannot be reset until its runtime and storage can be reset together"
-    )))
-}
-
-async fn destroy_instance(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>>> {
+async fn destroy_sandbox(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>>> {
     let uuid = parse_uuid(id)?;
     state.manager.destroy(uuid).await?;
     json_ok(&json!({
@@ -403,7 +335,7 @@ struct ExecRequest {
     timeout: Option<u32>,
 }
 
-async fn exec_instance(
+async fn exec_sandbox(
     state: &Arc<ServerState>,
     id: &str,
     body: &[u8],
@@ -445,7 +377,7 @@ struct FileRequest {
     data_b64: Option<String>,
 }
 
-async fn read_instance_file(
+async fn read_sandbox_file(
     state: &Arc<ServerState>,
     id: &str,
     body: &[u8],
@@ -459,7 +391,7 @@ async fn read_instance_file(
     json_ok(&json!({"data_b64": BASE64.encode(data)}))
 }
 
-async fn write_instance_file(
+async fn write_sandbox_file(
     state: &Arc<ServerState>,
     id: &str,
     body: &[u8],
@@ -621,11 +553,6 @@ fn error_response(err: &BlazeDaemonError) -> Response<Full<Bytes>> {
         })
 }
 
-// Keep the unused-import lint quiet when `HookKind` is gated behind
-// future-only hook registration paths.
-#[allow(dead_code)]
-fn _hookkind_marker(_k: HookKind) {}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -638,7 +565,7 @@ mod tests {
     use blaze_core::backend::BackendKind;
     use blaze_core::config::DaemonConfig;
     use blaze_core::kernel::HookRegistry;
-    use blaze_core::lifecycle::{BackendOwnership, OperationKind};
+    use blaze_core::lifecycle::{BackendOwnership, OperationKind, SandboxState};
     use blaze_core::policy::{
         BackendConfigs, FallbackOnMissingHook, PolicyEngine, PolicyFile, PolicyHooks, PolicyMatch,
         PolicySelect, WorkloadClass,
@@ -764,7 +691,7 @@ mod tests {
     }
 
     async fn created_json(state: &Arc<ServerState>, request: &[u8]) -> serde_json::Value {
-        let response = create_instance(state, request).await.expect("create");
+        let response = create_sandbox(state, request).await.expect("create");
         serde_json::from_slice(
             &response
                 .into_body()
@@ -1197,7 +1124,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sandbox_collection_and_item_routes_match_instance_routes() {
+    async fn sandbox_routes_cover_lifecycle_and_guest_operations() {
         let temp = tempfile::tempdir().expect("temp");
         let config = test_config(&temp);
         let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
@@ -1207,7 +1134,7 @@ mod tests {
         let state = build_test_state(
             config,
             test_policy(BackendKind::Mock),
-            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
             BackendKind::Mock,
             storage,
         );
@@ -1216,29 +1143,67 @@ mod tests {
             dispatched_json(&state, Method::POST, "/v1/sandboxes", test_request()).await;
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(created["instance"]["state"], "running");
-        let id = created["instance"]["id"].as_str().expect("instance id");
+        assert!(created["decision"].is_object());
+        assert_eq!(created["start_path"], "cold");
+        assert_eq!(created["selected_backend"], "mock");
+        let id = created["instance"]["id"]
+            .as_str()
+            .expect("sandbox id")
+            .to_string();
+        let item = format!("/v1/sandboxes/{id}");
 
-        let (_, sandboxes) =
+        let (status, sandboxes) =
             dispatched_json(&state, Method::GET, "/v1/sandboxes", Vec::new()).await;
-        let (_, instances) =
-            dispatched_json(&state, Method::GET, "/v1/instances", Vec::new()).await;
-        assert_eq!(sandboxes, instances);
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            sandboxes
+                .as_array()
+                .expect("sandbox list")
+                .iter()
+                .any(|candidate| candidate["id"] == id)
+        );
 
-        let (_, sandbox) = dispatched_json(
+        let (status, fetched) = dispatched_json(&state, Method::GET, &item, Vec::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fetched["id"], id);
+
+        let (status, executed) = dispatched_json(
             &state,
-            Method::GET,
-            &format!("/v1/sandboxes/{id}"),
-            Vec::new(),
+            Method::POST,
+            &format!("{item}/exec"),
+            serde_json::to_vec(&json!({"cmd": "printf sandbox", "timeout": 5}))
+                .expect("exec request"),
         )
         .await;
-        let (_, instance) = dispatched_json(
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(executed["exit_code"], 0);
+
+        let encoded = BASE64.encode(b"sandbox");
+        let (status, written) = dispatched_json(
             &state,
-            Method::GET,
-            &format!("/v1/instances/{id}"),
-            Vec::new(),
+            Method::POST,
+            &format!("{item}/write"),
+            serde_json::to_vec(&json!({"path": "/tmp/sandbox", "data_b64": encoded}))
+                .expect("write request"),
         )
         .await;
-        assert_eq!(sandbox, instance);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(written["bytes"], 7);
+
+        let (status, read) = dispatched_json(
+            &state,
+            Method::POST,
+            &format!("{item}/read"),
+            serde_json::to_vec(&json!({"path": "/tmp/sandbox"})).expect("read request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(read["data_b64"], encoded);
+
+        let (status, destroyed) = dispatched_json(&state, Method::DELETE, &item, Vec::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(destroyed["destroyed"], true);
+        assert_eq!(destroyed["instance_id"], id);
     }
 
     #[tokio::test]
@@ -1307,7 +1272,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn destroy_route_forms_share_managed_cleanup() {
+    async fn unregistered_sandbox_actions_return_not_found() {
         let temp = tempfile::tempdir().expect("temp");
         let config = test_config(&temp);
         let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
@@ -1322,38 +1287,54 @@ mod tests {
             storage,
         );
 
-        let mut ids = Vec::new();
-        for _ in 0..3 {
-            let created = created_json(&state, &test_request()).await;
-            ids.push(
-                Uuid::parse_str(created["instance"]["id"].as_str().expect("instance id"))
-                    .expect("uuid"),
-            );
-        }
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"]
+            .as_str()
+            .expect("sandbox id")
+            .to_string();
+        let uuid = Uuid::parse_str(&id).expect("uuid");
+
         let routes = [
-            (Method::DELETE, format!("/v1/sandboxes/{}", ids[0]), ids[0]),
-            (Method::DELETE, format!("/v1/instances/{}", ids[1]), ids[1]),
-            (
-                Method::POST,
-                format!("/v1/instances/{}/destroy", ids[2]),
-                ids[2],
-            ),
+            (Method::POST, format!("/v1/sandboxes/{id}/reset")),
+            (Method::POST, format!("/v1/sandboxes/{id}/checkpoint")),
+            (Method::POST, format!("/v1/sandboxes/{id}/destroy")),
         ];
 
-        for (method, path, id) in routes {
-            let (status, response) = dispatched_json(&state, method, &path, Vec::new()).await;
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(response["destroyed"], true);
-            assert_eq!(response["instance_id"], id.to_string());
-            assert_eq!(
-                state.manager.get(id).expect("destroyed state").state,
-                SandboxState::Destroyed
+        for (method, path) in routes {
+            let (status, body) = handled_json(&state, method, &path, Vec::new()).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+            assert_eq!(body["status"], 404, "{path}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .expect("error message")
+                    .contains(&path),
+                "{path}"
             );
-            assert!(matches!(
-                state.state_store.run_dir(id),
-                Err(BlazeDaemonError::NotFound(_))
-            ));
+            assert_eq!(
+                state.manager.get(uuid).expect("unchanged state").state,
+                SandboxState::Running,
+                "{path}"
+            );
         }
+
+        let (status, destroyed) = dispatched_json(
+            &state,
+            Method::DELETE,
+            &format!("/v1/sandboxes/{id}"),
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(destroyed["instance_id"], id);
+        assert_eq!(
+            state.manager.get(uuid).expect("destroyed state").state,
+            SandboxState::Destroyed
+        );
+        assert!(matches!(
+            state.state_store.run_dir(uuid),
+            Err(BlazeDaemonError::NotFound(_))
+        ));
     }
 
     /// When multiple backend binaries exist on disk but the daemon probed
@@ -1429,7 +1410,7 @@ mod tests {
         }))
         .unwrap();
 
-        let resp = create_instance(&state, &req_body).await.unwrap();
+        let resp = create_sandbox(&state, &req_body).await.unwrap();
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let resp_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
@@ -1445,128 +1426,6 @@ mod tests {
 
         // Cleanup.
         let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[tokio::test]
-    async fn reset_never_reports_success_without_runtime_and_storage_reset() {
-        let temp = tempfile::tempdir().expect("temp");
-        let config = test_config(&temp);
-        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
-            config.storage.images_dir.clone(),
-            config.storage.instances_dir.clone(),
-        ));
-        let state = build_test_state(
-            config,
-            test_policy(BackendKind::Mock),
-            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
-            BackendKind::Mock,
-            storage,
-        );
-
-        let (status, body) = handled_json(
-            &state,
-            Method::POST,
-            "/v1/instances/not-a-uuid/reset",
-            Vec::new(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["status"], 400);
-
-        let missing_id = Uuid::nil();
-        let (status, body) = handled_json(
-            &state,
-            Method::POST,
-            &format!("/v1/instances/{missing_id}/reset"),
-            Vec::new(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(body["status"], 404);
-
-        let created = created_json(&state, &test_request()).await;
-        let id = created["instance"]["id"].as_str().expect("id");
-        let uuid = Uuid::parse_str(id).expect("uuid");
-
-        let (status, body) = handled_json(
-            &state,
-            Method::POST,
-            &format!("/v1/instances/{id}/reset"),
-            Vec::new(),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-        assert_eq!(body["status"], 501);
-        assert!(
-            body["error"]
-                .as_str()
-                .expect("error")
-                .contains("runtime and storage")
-        );
-        assert_eq!(
-            state.instances.lock().expect("instances")[&uuid].state,
-            SandboxState::Running
-        );
-        let persisted = state
-            .state_store
-            .load(uuid)
-            .expect("persisted running state");
-        assert_eq!(persisted.state, SandboxState::Running);
-        assert!(state.manager.backend_owner(uuid).is_some());
-    }
-
-    #[tokio::test]
-    async fn reset_preserves_invalid_state_error_and_persisted_state() {
-        let temp = tempfile::tempdir().expect("temp");
-        let config = test_config(&temp);
-        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
-            config.storage.images_dir.clone(),
-            config.storage.instances_dir.clone(),
-        ));
-        let state = build_test_state(
-            config,
-            test_policy(BackendKind::Mock),
-            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
-            BackendKind::Mock,
-            storage,
-        );
-        let created = created_json(&state, &test_request()).await;
-        let id = created["instance"]["id"].as_str().expect("id");
-        let uuid = Uuid::parse_str(id).expect("uuid");
-        {
-            let mut instances = state.instances.lock().expect("instances");
-            let instance = instances.get_mut(&uuid).expect("instance");
-            instance.transition(SandboxState::Paused).expect("pause");
-            state.state_store.persist(instance).expect("persist pause");
-        }
-
-        let (status, body) = handled_json(
-            &state,
-            Method::POST,
-            &format!("/v1/instances/{id}/reset"),
-            Vec::new(),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(body["status"], 422);
-        assert!(
-            body["error"]
-                .as_str()
-                .expect("error")
-                .contains("paused -> reset")
-        );
-        assert_eq!(
-            state.instances.lock().expect("instances")[&uuid].state,
-            SandboxState::Paused
-        );
-        let persisted = state
-            .state_store
-            .load(uuid)
-            .expect("persisted paused state");
-        assert_eq!(persisted.state, SandboxState::Paused);
-        assert!(state.manager.backend_owner(uuid).is_some());
     }
 
     #[tokio::test]
@@ -1606,7 +1465,7 @@ mod tests {
         let (status, written) = dispatched_json(
             &state,
             Method::POST,
-            &format!("/v1/instances/{id}/write"),
+            &format!("/v1/sandboxes/{id}/write"),
             serde_json::to_vec(&json!({
                 "path": "/tmp/value",
                 "data_b64": encoded,
@@ -1944,7 +1803,7 @@ mod tests {
         );
         let create_state = state.clone();
         let create =
-            tokio::spawn(async move { create_instance(&create_state, &test_request()).await });
+            tokio::spawn(async move { create_sandbox(&create_state, &test_request()).await });
         tokio::time::timeout(std::time::Duration::from_secs(2), reached.notified())
             .await
             .expect("create reached the pre-spawn boundary");
@@ -2162,7 +2021,7 @@ mod tests {
             storage,
         );
 
-        let error = create_instance(&state, &test_request())
+        let error = create_sandbox(&state, &test_request())
             .await
             .expect_err("partial spawn must require recovery");
         assert!(matches!(error, BlazeDaemonError::RecoveryRequired(_)));
@@ -2184,7 +2043,7 @@ mod tests {
         assert!(state.manager.backend_owner(instance.id).is_some());
         assert!(state.state_store.run_dir(instance.id).is_ok());
 
-        destroy_instance(&state, &instance.id.to_string())
+        destroy_sandbox(&state, &instance.id.to_string())
             .await
             .expect("retry destroy");
         assert!(!instances_dir.join(instance.id.to_string()).exists());
@@ -2251,7 +2110,7 @@ mod tests {
             storage,
         );
 
-        destroy_instance(&state, &instance.id.to_string())
+        destroy_sandbox(&state, &instance.id.to_string())
             .await
             .expect("destroy recovered instance");
         assert_eq!(persisted_cleanups.load(Ordering::Acquire), 1);
@@ -2307,7 +2166,7 @@ mod tests {
             restarted_storage,
         );
 
-        destroy_instance(&restarted, &id)
+        destroy_sandbox(&restarted, &id)
             .await
             .expect("destroy recovered mock instance");
         assert_eq!(mock_cleanups.load(Ordering::Acquire), 1);
@@ -2353,7 +2212,7 @@ mod tests {
             storage,
         );
 
-        destroy_instance(&restarted, &id.to_string())
+        destroy_sandbox(&restarted, &id.to_string())
             .await
             .expect("destroy state without slot");
         assert_eq!(cleanup_count.load(Ordering::Acquire), 0);
@@ -2372,7 +2231,7 @@ mod tests {
         let state = guest_mock_state(&temp);
         let hook = crate::failpoint::TestFailpoint::new(&["create-guest-ready"]);
 
-        hook.run(create_instance(&state, &request))
+        hook.run(create_sandbox(&state, &request))
             .await
             .expect_err("guest readiness failure");
 
@@ -2404,7 +2263,7 @@ mod tests {
         let spawn_state = mock_state(&spawn_temp);
         let spawn_hook = crate::failpoint::TestFailpoint::new(&["create-spawn"]);
         spawn_hook
-            .run(create_instance(&spawn_state, &request))
+            .run(create_sandbox(&spawn_state, &request))
             .await
             .expect_err("spawn failure");
         let spawn_instance = spawn_state
@@ -2421,7 +2280,7 @@ mod tests {
         let commit_state = mock_state(&commit_temp);
         let commit_hook = crate::failpoint::TestFailpoint::new(&["create-state-commit"]);
         commit_hook
-            .run(create_instance(&commit_state, &request))
+            .run(create_sandbox(&commit_state, &request))
             .await
             .expect_err("state commit failure");
         let commit_instance = commit_state
@@ -2446,7 +2305,7 @@ mod tests {
         let id = created["instance"]["id"].as_str().expect("id").to_string();
         let kill_hook = crate::failpoint::TestFailpoint::new(&["destroy-kill"]);
         kill_hook
-            .run(destroy_instance(&destroy_state, &id))
+            .run(destroy_sandbox(&destroy_state, &id))
             .await
             .expect_err("kill boundary");
         let uuid = Uuid::parse_str(&id).expect("uuid");
@@ -2460,7 +2319,7 @@ mod tests {
             Some(OperationKind::Destroy)
         );
         assert!(destroy_state.manager.backend_owner(uuid).is_some());
-        destroy_instance(&destroy_state, &id)
+        destroy_sandbox(&destroy_state, &id)
             .await
             .expect("destroy retry");
 
@@ -2470,7 +2329,7 @@ mod tests {
         let id = created["instance"]["id"].as_str().expect("id").to_string();
         let release_hook = crate::failpoint::TestFailpoint::new(&["storage-release"]);
         release_hook
-            .run(destroy_instance(&release_state, &id))
+            .run(destroy_sandbox(&release_state, &id))
             .await
             .expect_err("release boundary");
         let uuid = Uuid::parse_str(&id).expect("uuid");
@@ -2485,7 +2344,7 @@ mod tests {
                 .map(|operation| operation.kind),
             Some(OperationKind::Destroy)
         );
-        destroy_instance(&release_state, &id)
+        destroy_sandbox(&release_state, &id)
             .await
             .expect("release retry");
     }
@@ -2499,7 +2358,7 @@ mod tests {
         let hook = crate::failpoint::TestFailpoint::new(failpoints);
 
         let error = hook
-            .run(create_instance(&state, &test_request()))
+            .run(create_sandbox(&state, &test_request()))
             .await
             .expect_err("rollback terminal commit failure");
 
@@ -2535,7 +2394,7 @@ mod tests {
                 .exists()
         );
 
-        destroy_instance(&state, &instance.id.to_string())
+        destroy_sandbox(&state, &instance.id.to_string())
             .await
             .expect("destroy retry");
 
@@ -2556,7 +2415,7 @@ mod tests {
         let state = mock_state(&temp);
         let hook = crate::failpoint::TestFailpoint::new(&["state-before-first-publication"]);
 
-        hook.run(create_instance(&state, &test_request()))
+        hook.run(create_sandbox(&state, &test_request()))
             .await
             .expect_err("pre-publication failure");
 
@@ -2586,7 +2445,7 @@ mod tests {
         let state = mock_state(&temp);
         let hook = crate::failpoint::TestFailpoint::new(&["state-first-publication-root-sync"]);
 
-        hook.run(create_instance(&state, &test_request()))
+        hook.run(create_sandbox(&state, &test_request()))
             .await
             .expect_err("initial state publication sync failure");
 
@@ -2630,7 +2489,7 @@ mod tests {
         let hook = crate::failpoint::TestFailpoint::new(&["state-post-publication-identity"]);
 
         let error = hook
-            .run(create_instance(&state, &test_request()))
+            .run(create_sandbox(&state, &test_request()))
             .await
             .expect_err("unconfirmed publication");
 
@@ -2667,7 +2526,7 @@ mod tests {
                 .exists()
         );
 
-        destroy_instance(&state, &instance.id.to_string())
+        destroy_sandbox(&state, &instance.id.to_string())
             .await
             .expect("destroy revalidates the publication");
         assert_eq!(
@@ -2701,7 +2560,7 @@ mod tests {
         let state = mock_state(&temp);
         let hook = crate::failpoint::TestFailpoint::new(&["state-post-publication-identity"]);
 
-        hook.run(create_instance(&state, &test_request()))
+        hook.run(create_sandbox(&state, &test_request()))
             .await
             .expect_err("unconfirmed publication");
         let instance = state
@@ -2717,7 +2576,7 @@ mod tests {
         std::fs::rename(&configured, &retained).expect("move retained state directory");
         std::fs::create_dir(&configured).expect("replacement state directory");
 
-        let error = destroy_instance(&state, &instance.id.to_string())
+        let error = destroy_sandbox(&state, &instance.id.to_string())
             .await
             .expect_err("replacement must keep recovery fail-closed");
 
@@ -2783,7 +2642,7 @@ mod tests {
         let hook = crate::failpoint::TestFailpoint::new(&["destroy-intent-state-commit"]);
 
         let error = hook
-            .run(destroy_instance(&state, &id))
+            .run(destroy_sandbox(&state, &id))
             .await
             .expect_err("intent failure");
 
@@ -2804,7 +2663,7 @@ mod tests {
         assert!(temp.path().join("instances").join(&id).is_dir());
         assert!(state.state_store.run_dir(uuid).is_ok());
 
-        destroy_instance(&state, &id).await.expect("destroy retry");
+        destroy_sandbox(&state, &id).await.expect("destroy retry");
         assert_eq!(kill_count.load(Ordering::Acquire), 1);
         assert_eq!(release_count.load(Ordering::Acquire), 1);
         assert_eq!(
@@ -2834,7 +2693,7 @@ mod tests {
         let hook = crate::failpoint::TestFailpoint::new(&["destroy-stop-state-commit"]);
 
         let error = hook
-            .run(destroy_instance(&state, &id))
+            .run(destroy_sandbox(&state, &id))
             .await
             .expect_err("stop commit failure");
 
@@ -2862,7 +2721,7 @@ mod tests {
         assert!(temp.path().join("instances").join(&id).is_dir());
         assert!(state.state_store.run_dir(uuid).is_ok());
 
-        destroy_instance(&state, &id).await.expect("destroy retry");
+        destroy_sandbox(&state, &id).await.expect("destroy retry");
         assert_eq!(kill_count.load(Ordering::Acquire), 1);
         assert_eq!(release_count.load(Ordering::Acquire), 1);
         let persisted = state
@@ -2888,7 +2747,7 @@ mod tests {
         let hook = crate::failpoint::TestFailpoint::new(&["destroy-final-state-commit"]);
 
         let error = hook
-            .run(destroy_instance(&state, &id))
+            .run(destroy_sandbox(&state, &id))
             .await
             .expect_err("final commit failure");
 
@@ -2916,7 +2775,7 @@ mod tests {
         );
         assert!(state.state_store.run_dir(uuid).is_ok());
 
-        destroy_instance(&state, &id).await.expect("destroy retry");
+        destroy_sandbox(&state, &id).await.expect("destroy retry");
         assert_eq!(kill_count.load(Ordering::Acquire), 1);
         assert_eq!(release_count.load(Ordering::Acquire), 2);
         let destroyed = state.instances.lock().expect("instances")[&uuid].clone();
@@ -2944,7 +2803,7 @@ mod tests {
             "storage-acquire-rollback",
         ]);
         let error = acquire_hook
-            .run(create_instance(&state, &test_request()))
+            .run(create_sandbox(&state, &test_request()))
             .await
             .expect_err("residual slot must require recovery");
         assert!(matches!(error, BlazeDaemonError::RecoveryRequired(_)));
@@ -2969,7 +2828,7 @@ mod tests {
                 .join(instance.id.to_string())
                 .is_dir()
         );
-        destroy_instance(&state, &instance.id.to_string())
+        destroy_sandbox(&state, &instance.id.to_string())
             .await
             .expect("destroy residual slot");
     }
@@ -2996,7 +2855,7 @@ mod tests {
         let create_hook = pause_hook.clone();
         let create = tokio::spawn(async move {
             create_hook
-                .run(create_instance(&create_state, &test_request()))
+                .run(create_sandbox(&create_state, &test_request()))
                 .await
         });
         pause_hook.wait_until_paused().await;
@@ -3061,7 +2920,7 @@ mod tests {
                 .contains_key(&id)
         );
 
-        destroy_instance(&restarted, &id.to_string())
+        destroy_sandbox(&restarted, &id.to_string())
             .await
             .expect("destroy acquired slot after restart");
         assert_eq!(cleanup_count.load(Ordering::Acquire), 0);

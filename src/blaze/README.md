@@ -136,6 +136,8 @@ for configuration, selection, retry, and worker shutdown behavior.
 
 ## API Endpoints
 
+Blaze exposes sandbox lifecycle and guest operations through `/v1/sandboxes`.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/v1/health` | Health check |
@@ -146,16 +148,6 @@ for configuration, selection, retry, and worker shutdown behavior.
 | POST | `/v1/sandboxes/{id}/exec` | Execute a guest command |
 | POST | `/v1/sandboxes/{id}/read` | Read a guest file |
 | POST | `/v1/sandboxes/{id}/write` | Replace a guest file |
-| GET | `/v1/instances` | Alias for listing sandboxes |
-| POST | `/v1/instances` | Alias for creating a sandbox |
-| GET | `/v1/instances/{id}` | Alias for sandbox details |
-| DELETE | `/v1/instances/{id}` | Alias for destroying a sandbox |
-| POST | `/v1/instances/{id}/destroy` | Compatible destroy action |
-| POST | `/v1/instances/{id}/exec` | Compatible guest command action |
-| POST | `/v1/instances/{id}/read` | Compatible guest file read action |
-| POST | `/v1/instances/{id}/write` | Compatible guest file write action |
-| POST | `/v1/instances/{id}/checkpoint` | Record checkpoint state |
-| POST | `/v1/instances/{id}/reset` | Reserved for running instances; returns `501` until runtime and storage reset are implemented |
 | GET | `/v1/pools` | Reserved; returns `501` |
 | GET | `/v1/pools/{backend}/{class}` | Reserved; returns `501` |
 | POST | `/v1/pools/{backend}/{class}/drain` | Reserved; returns `501` |
@@ -167,13 +159,6 @@ for configuration, selection, retry, and worker shutdown behavior.
 | GET | `/v1/hooks` | List kernel hooks |
 | GET | `/v1/metrics` | Prometheus metrics |
 | POST | `/v1/admin/reload` | Hot-reload policies |
-
-For reset requests, a malformed instance identifier returns `400`, an unknown
-instance returns `404`, and an instance that is not running returns `422`. A
-running instance returns `501` without changing its lifecycle state or its
-runtime and storage resources. Clients that require a fresh sandbox must
-successfully destroy the old sandbox and create a new one; `501` does not mean
-that reset completed.
 
 Upgrade compatibility accepts and ignores only this exact daemon section:
 
@@ -251,10 +236,10 @@ cleanup, and failure boundaries.
 The operation journal records the operation and start time, not completion of
 each resource step. An interrupted create is cleaned up rather than resumed,
 and an existing backend process is not adopted after restart. Failed recovery
-does not run in a background retry loop. The checkpoint endpoint retains its
-existing metadata transition. Reset remains unavailable until runtime and
-storage can be reset together; this recovery flow does not add backend snapshot
-or restore operations.
+does not run in a background retry loop. Checkpoint capture and restore are not
+available in this change. Reset remains unavailable until runtime and storage
+can be reset together; this recovery flow does not add backend snapshot,
+capture, or restore operations.
 
 ### Guest operations
 

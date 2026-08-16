@@ -127,6 +127,8 @@ lock 和唯一的同步许可直至完成；后续同步会被推迟而不会不
 
 ## API 端点
 
+Blaze 通过 `/v1/sandboxes` 提供沙箱生命周期和客户机操作。
+
 | 方法 | 路径 | 说明 |
 |--------|------|-------------|
 | GET | `/v1/health` | 健康检查 |
@@ -137,16 +139,6 @@ lock 和唯一的同步许可直至完成；后续同步会被推迟而不会不
 | POST | `/v1/sandboxes/{id}/exec` | 执行 guest 命令 |
 | POST | `/v1/sandboxes/{id}/read` | 读取 guest 文件 |
 | POST | `/v1/sandboxes/{id}/write` | 替换 guest 文件 |
-| GET | `/v1/instances` | 列出 sandbox 的兼容入口 |
-| POST | `/v1/instances` | 创建 sandbox 的兼容入口 |
-| GET | `/v1/instances/{id}` | 获取 sandbox 详情的兼容入口 |
-| DELETE | `/v1/instances/{id}` | 销毁 sandbox 的兼容入口 |
-| POST | `/v1/instances/{id}/destroy` | 保留的销毁 action |
-| POST | `/v1/instances/{id}/exec` | Guest 命令兼容入口 |
-| POST | `/v1/instances/{id}/read` | Guest 文件读取兼容入口 |
-| POST | `/v1/instances/{id}/write` | Guest 文件写入兼容入口 |
-| POST | `/v1/instances/{id}/checkpoint` | 记录 checkpoint 状态 |
-| POST | `/v1/instances/{id}/reset` | 运行中实例的预留接口；运行时和存储重置实现前返回 `501` |
 | GET | `/v1/pools` | 预留接口；返回 `501` |
 | GET | `/v1/pools/{backend}/{class}` | 预留接口；返回 `501` |
 | POST | `/v1/pools/{backend}/{class}/drain` | 预留接口；返回 `501` |
@@ -158,11 +150,6 @@ lock 和唯一的同步许可直至完成；后续同步会被推迟而不会不
 | GET | `/v1/hooks` | 列出内核 hook |
 | GET | `/v1/metrics` | Prometheus 指标 |
 | POST | `/v1/admin/reload` | 热加载策略 |
-
-重置请求中的实例编号格式错误时返回 `400`，实例不存在时返回 `404`，实例
-不处于运行状态时返回 `422`。运行中的实例返回 `501`，且不会改变其生命周期
-状态，也不会改变其运行环境和存储资源。需要全新沙箱的客户端必须先成功销毁
-旧沙箱，再创建新沙箱；`501` 不表示重置已经完成。
 
 升级兼容仅接受并忽略以下内容完全一致的 daemon `[pool]` 配置段：
 
@@ -224,9 +211,9 @@ daemon 才会逐个处理未结束的 sandbox。后续逐项恢复期间，如�
 
 操作记录只保存操作类型和开始时间，不记录每个资源步骤是否已经完成。中断的
 创建会被清理而不是从原位置继续，重启后也不会接管先前的后端进程。恢复失败
-后目前没有后台循环自动重试。检查点接口保持原有的元数据状态变化。重置接口
-在运行环境和存储能够一起重置前不可用；这里的恢复流程没有增加后端快照或
-恢复操作。
+后目前没有后台循环自动重试。本次变更不提供检查点捕获或恢复。重置接口在
+运行环境和存储能够一起重置前不可用；这里的恢复流程没有增加后端快照、捕获
+或恢复操作。
 
 ### Guest 操作
 

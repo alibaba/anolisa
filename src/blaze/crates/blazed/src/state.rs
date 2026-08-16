@@ -5,15 +5,19 @@
 //! lock just long enough to read or mutate the piece they need — locks
 //! are never held across `.await` boundaries.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+#[cfg(test)]
+use std::collections::HashMap;
 
 use blaze_core::backend::BackendKind;
 use blaze_core::config::DaemonConfig;
 use blaze_core::kernel::HookRegistry;
+#[cfg(test)]
 use blaze_core::lifecycle::SandboxInstance;
 use blaze_core::policy::PolicyEngine;
 use blaze_core::storage::StorageProvider;
+#[cfg(test)]
 use uuid::Uuid;
 
 use crate::error::Result;
@@ -31,6 +35,7 @@ pub struct ServerState {
     pub config: Mutex<DaemonConfig>,
     pub policy: Mutex<PolicyEngine>,
     pub hook: Mutex<HookRegistry>,
+    #[cfg(test)]
     pub instances: Arc<Mutex<HashMap<Uuid, SandboxInstance>>>,
     pub manager: Arc<SandboxManager>,
     /// The backend kind that `build_spawner` actually probed and selected.
@@ -38,6 +43,7 @@ pub struct ServerState {
     /// backend rather than reporting all configured binaries.
     pub active_backend: BackendKind,
     pub storage: Arc<dyn StorageProvider>,
+    #[cfg(test)]
     pub state_store: StateStore,
     pub metrics: Arc<Metrics>,
 }
@@ -128,18 +134,15 @@ impl ServerState {
             config: Mutex::new(config),
             policy: Mutex::new(policy),
             hook: Mutex::new(hook),
+            #[cfg(test)]
             instances: resources.instances,
             manager: Arc::new(manager),
             active_backend,
             storage,
+            #[cfg(test)]
             state_store,
             metrics: resources.metrics,
         })
-    }
-
-    /// Return the async operation lock that serializes one sandbox mutation.
-    pub fn operation_lock(&self, id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
-        self.manager.operation_lock(id)
     }
 }
 

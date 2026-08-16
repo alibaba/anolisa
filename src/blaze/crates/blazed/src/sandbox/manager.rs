@@ -101,9 +101,9 @@ pub struct SandboxManagerInit {
     pub template_catalog: TemplateCatalog,
 }
 
-/// Shared resources exposed to API paths that do not change runtime
-/// ownership, such as checkpoint and reset.
+/// Shared resources returned to the daemon wiring and test harness.
 pub struct SandboxManagerResources {
+    #[cfg(test)]
     pub instances: Arc<Mutex<HashMap<Uuid, SandboxInstance>>>,
     pub metrics: Arc<Metrics>,
 }
@@ -130,6 +130,7 @@ impl SandboxManager {
         let backend_instances = Arc::new(Mutex::new(HashMap::new()));
         let metrics = Arc::new(Metrics::new());
         let resources = SandboxManagerResources {
+            #[cfg(test)]
             instances: instances.clone(),
             metrics: metrics.clone(),
         };

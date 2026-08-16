@@ -74,6 +74,12 @@ Blaze 会在绑定 Unix listener 或可选 TCP listener 之前完成清单校验
 ID。Blaze 会保留被拒绝的记录。修复或恢复该记录后，重新启动 service，并确认
 `/v1/health` 可以响应。
 
+## 沙箱 API
+
+Blaze 通过 `/v1/sandboxes` 提供沙箱生命周期和客户机操作。客户端使用该
+命名空间列出、创建、查看和删除沙箱，以及在沙箱内执行命令、读取文件和写入
+文件。销毁沙箱使用 `DELETE /v1/sandboxes/{id}`。
+
 ## 主机集成边界
 
 Blaze 负责配置 sandbox 本地的网络路径。主机以外的路由和 DNS 仍由主机运维方
@@ -81,7 +87,7 @@ Blaze 负责配置 sandbox 本地的网络路径。主机以外的路由和 DNS 
 环境中验证 guest 连通性。
 
 如需关闭该能力，将 `enable_network` 设置为 `false` 或删除该配置项，再通过
-正常的 instance API 销毁已经启用网络的 sandbox。
+沙箱 API 销毁已经启用网络的 sandbox。
 
 ## Guest 操作
 
@@ -99,7 +105,7 @@ Sandbox 路由包括：
 - `POST /v1/sandboxes/{id}/read` — 读取一个文件；
 - `POST /v1/sandboxes/{id}/write` — 替换一个文件。
 
-对应的 `/v1/instances/{id}/...` 路由提供相同行为。Exec 请求格式如下：
+Exec 请求格式如下：
 
 ```json
 {"cmd":"uname -a","cwd":"/","env":{"LANG":"C"},"timeout":10}
@@ -130,12 +136,7 @@ read 响应过大时返回 HTTP 502 和
 保持 `listen.http_addr` 关闭。Daemon 停止时也不会等待全部 HTTP handler 或
 释放所有 runtime owner，因此正在执行的请求可能看到连接关闭。
 
-## 重置与可复用实例管理
-
-在 Blaze 能够同时重置运行环境和存储之前，
-`POST /v1/instances/{id}/reset` 不会返回成功。实例编号格式错误时返回
-HTTP 400，实例不存在时返回 HTTP 404，实例不处于运行状态时返回 HTTP 422，
-运行中的实例返回 HTTP 501，且不会改变其状态或已占用资源。
+## 可复用实例管理
 
 四个 `/v1/pools` 管理接口同样返回 HTTP 501。`storage.pool_size` 和
 `storage.prefork` 始终会被拒绝；除历史软件包的精确默认值外，任何 `[pool]`
