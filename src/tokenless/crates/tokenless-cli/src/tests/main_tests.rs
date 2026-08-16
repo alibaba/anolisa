@@ -1073,6 +1073,35 @@ fn run_command_stats_status() {
 }
 
 #[test]
+fn stats_persist_snapshot_enable_keeps_file_compression_and_sls() {
+    // A/B dry-run sets TOKENLESS_COMPRESSION_ENABLED=0 in the process, but
+    // `stats enable` must write the on-disk compression/SLS values, not the
+    // session overrides.
+    let file = TokenlessConfig {
+        stats_enabled: false,
+        sls_enabled: true,
+        compression_enabled: true,
+    };
+    let persisted = stats_persist_snapshot(file, true);
+    assert!(persisted.stats_enabled);
+    assert!(persisted.sls_enabled);
+    assert!(persisted.compression_enabled);
+}
+
+#[test]
+fn stats_persist_snapshot_disable_keeps_file_compression_and_sls() {
+    let file = TokenlessConfig {
+        stats_enabled: true,
+        sls_enabled: false,
+        compression_enabled: false,
+    };
+    let persisted = stats_persist_snapshot(file, false);
+    assert!(!persisted.stats_enabled);
+    assert!(!persisted.sls_enabled);
+    assert!(!persisted.compression_enabled);
+}
+
+#[test]
 fn run_command_stats_compare() {
     let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
     let result = run_command(Commands::Stats(StatsCommands::Summary {

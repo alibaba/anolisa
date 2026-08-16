@@ -1,8 +1,10 @@
 //! Configuration for tokenless.
 //!
 //! Stored at `~/.tokenless/config.json`. Controls global feature flags.
-//! Environment variables `TOKENLESS_STATS_ENABLED` and
-//! `TOKENLESS_SLS_ENABLED` override file config independently.
+//! Environment variables `TOKENLESS_STATS_ENABLED`, `TOKENLESS_SLS_ENABLED`,
+//! and `TOKENLESS_COMPRESSION_ENABLED` override file config at runtime.
+//! `tokenless stats enable` / `disable` persist from the file snapshot so
+//! those session overrides are not written back.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -189,6 +191,16 @@ impl TokenlessConfig {
             compression_env.as_deref(),
             None,
         )
+    }
+
+    /// Load on-disk config without applying process environment overrides.
+    ///
+    /// `tokenless stats enable` / `disable` persist only the stats toggle.
+    /// Loading via [`Self::load`] would copy session env overrides such as
+    /// `TOKENLESS_COMPRESSION_ENABLED` into `config.json`, turning a
+    /// temporary A/B dry-run into a durable setting.
+    pub fn load_from_file() -> Self {
+        Self::load_with_envs_and_path(None, None, None, None)
     }
 
     /// Save config to disk.

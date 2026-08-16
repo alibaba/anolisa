@@ -336,3 +336,63 @@ fn test_serde_round_trip() {
     assert!(!deserialized.sls_enabled);
     assert!(deserialized.compression_enabled);
 }
+
+#[test]
+fn load_from_file_ignores_would_be_env_overrides() {
+    // `stats enable`/`disable` persist from this snapshot. A session
+    // TOKENLESS_COMPRESSION_ENABLED=0 A/B run must not rewrite the file's
+    // compression toggle when the user only asked to flip stats recording.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let _ = std::fs::write(
+        &path,
+        "{\"stats_enabled\":false,\"sls_enabled\":true,\"compression_enabled\":true}",
+    );
+
+    let runtime = TokenlessConfig::load_with_envs_and_path(
+        Some("1"),
+        Some("0"),
+        Some("0"),
+        Some(&path),
+    );
+    assert!(runtime.is_stats_enabled());
+    assert!(!runtime.is_sls_enabled());
+    assert!(!runtime.is_compression_enabled());
+
+    let mut persist = TokenlessConfig::load_with_envs_and_path(None, None, None, Some(&path));
+    persist.stats_enabled = true;
+    assert!(persist.is_stats_enabled());
+    assert!(persist.is_sls_enabled());
+    assert!(persist.is_compression_enabled());
+
+    let json = serde_json::to_value(&persist).unwrap();
+    assert_eq!(json["stats_enabled"], true);
+    assert_eq!(json["sls_enabled"], true);
+    assert_eq!(json["compression_enabled"], true);
+}
+
+#[test]
+fn stats_disable_persist_keeps_file_compression_and_sls() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let _ = std::fs::write(
+        &path,
+        "{\"stats_enabled\":true,\"sls_enabled\":false,\"compression_enabled\":false}",
+    );
+
+    let runtime = TokenlessConfig::load_with_envs_and_path(
+        Some("0"),
+        Some("1"),
+        Some("1"),
+        Some(&path),
+    );
+    assert!(!runtime.is_stats_enabled());
+    assert!(runtime.is_sls_enabled());
+    assert!(runtime.is_compression_enabled());
+
+    let mut persist = TokenlessConfig::load_with_envs_and_path(None, None, None, Some(&path));
+    persist.stats_enabled = false;
+    assert!(!persist.is_stats_enabled());
+    assert!(!persist.is_sls_enabled());
+    assert!(!persist.is_compression_enabled());
+}

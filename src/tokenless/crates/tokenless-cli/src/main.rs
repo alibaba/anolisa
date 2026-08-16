@@ -845,19 +845,11 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     println!("SLS recording:   {} (via {})", sls_state, sls_source);
                 }
                 StatsCommands::Enable => {
-                    let mut config = TokenlessConfig::load();
-                    config.stats_enabled = true;
-                    config
-                        .save()
-                        .map_err(|e| (format!("Failed to save config: {}", e), 1))?;
+                    persist_stats_enabled(true)?;
                     println!("Stats recording enabled.");
                 }
                 StatsCommands::Disable => {
-                    let mut config = TokenlessConfig::load();
-                    config.stats_enabled = false;
-                    config
-                        .save()
-                        .map_err(|e| (format!("Failed to save config: {}", e), 1))?;
+                    persist_stats_enabled(false)?;
                     println!("Stats recording disabled.");
                 }
             }
@@ -984,6 +976,30 @@ fn warn_mode_mismatch(label: &str, records: &[StatsRecord], expected: Compressio
             expected.as_str()
         );
     }
+}
+
+/// Persist only the stats recording toggle to `config.json`.
+///
+/// Starts from the on-disk file rather than [`TokenlessConfig::load`], so a
+/// session `TOKENLESS_COMPRESSION_ENABLED` / `TOKENLESS_SLS_ENABLED` override
+/// is not copied into durable config. Runtime `stats status` still uses
+/// [`TokenlessConfig::load`] and therefore still honors those env vars.
+fn persist_stats_enabled(enabled: bool) -> Result<(), (String, i32)> {
+    let config = stats_persist_snapshot(TokenlessConfig::load_from_file(), enabled);
+    config
+        .save()
+        .map_err(|e| (format!("Failed to save config: {}", e), 1))?;
+    Ok(())
+}
+
+/// Snapshot written by `stats enable` / `stats disable`.
+///
+/// `file_config` is the on-disk document with no process-env merge. Only
+/// `stats_enabled` changes; compression and SLS stay as stored.
+fn stats_persist_snapshot(file_config: TokenlessConfig, enabled: bool) -> TokenlessConfig {
+    let mut config = file_config;
+    config.stats_enabled = enabled;
+    config
 }
 
 /// Record compression stats — fail-silent so compression output
