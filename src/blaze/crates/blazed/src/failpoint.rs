@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Feature-gated fault hooks for daemon-level integration verification.
 
-#![allow(dead_code)] // Call sites land with their owning lifecycle commits.
-
 #[cfg(test)]
 use std::cell::RefCell;
 #[cfg(test)]
@@ -18,8 +16,13 @@ const FAILPOINTS_ENV: &str = "BLAZE_TEST_FAILPOINTS";
 const FAILPOINT_FILE_ENV: &str = "BLAZE_TEST_FAILPOINT_FILE";
 
 #[cfg(test)]
+tokio::task_local! {
+    static TEST_FAILPOINTS: Option<Arc<TestFailpointState>>;
+}
+
+#[cfg(test)]
 thread_local! {
-    static TEST_FAILPOINTS: RefCell<Option<Arc<TestFailpointState>>> =
+    static BLOCKING_TEST_FAILPOINTS: RefCell<Option<Arc<TestFailpointState>>> =
         const { RefCell::new(None) };
 }
 
@@ -40,14 +43,14 @@ pub(crate) struct TestFailpoint {
 }
 
 #[cfg(test)]
-struct TestFailpointScope {
+struct BlockingTestFailpointScope {
     previous: Option<Arc<TestFailpointState>>,
 }
 
 #[cfg(test)]
-impl Drop for TestFailpointScope {
+impl Drop for BlockingTestFailpointScope {
     fn drop(&mut self) {
-        TEST_FAILPOINTS.with(|current| {
+        BLOCKING_TEST_FAILPOINTS.with(|current| {
             current.replace(self.previous.take());
         });
     }
@@ -70,9 +73,9 @@ impl TestFailpoint {
 
     /// Run one future with this failpoint set in its test-thread context.
     pub(crate) async fn run<F: Future>(&self, future: F) -> F::Output {
-        let previous = TEST_FAILPOINTS.with(|current| current.replace(Some(self.state.clone())));
-        let _scope = TestFailpointScope { previous };
-        future.await
+        TEST_FAILPOINTS
+            .scope(Some(self.state.clone()), future)
+            .await
     }
 
     /// Wait until the scoped future reaches a pause failpoint.
@@ -91,6 +94,52 @@ impl TestFailpoint {
         self.state.released.store(true, Ordering::Release);
         self.state.release_notify.notify_waiters();
     }
+}
+
+/// Run blocking work while preserving the active unit-test failpoint context.
+///
+/// Tokio's blocking pool uses different threads, so thread-local test hooks
+/// would otherwise become invisible at filesystem durability boundaries.
+pub(crate) fn spawn_blocking<F, R>(operation: F) -> tokio::task::JoinHandle<R>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    #[cfg(test)]
+    {
+        let context = task_test_context()
+            .or_else(|| BLOCKING_TEST_FAILPOINTS.with(|current| current.borrow().clone()));
+        tokio::task::spawn_blocking(move || {
+            let previous = BLOCKING_TEST_FAILPOINTS.with(|current| current.replace(context));
+            let _scope = BlockingTestFailpointScope { previous };
+            operation()
+        })
+    }
+
+    #[cfg(not(test))]
+    {
+        tokio::task::spawn_blocking(operation)
+    }
+}
+
+// Preserve the active unit-test failpoint context in detached supervision.
+#[cfg(test)]
+pub(crate) fn spawn<F, R>(future: F) -> tokio::task::JoinHandle<R>
+where
+    F: Future<Output = R> + Send + 'static,
+    R: Send + 'static,
+{
+    let context = task_test_context();
+    tokio::spawn(TEST_FAILPOINTS.scope(context, future))
+}
+
+#[cfg(not(test))]
+pub(crate) fn spawn<F, R>(future: F) -> tokio::task::JoinHandle<R>
+where
+    F: std::future::Future<Output = R> + Send + 'static,
+    R: Send + 'static,
+{
+    tokio::spawn(future)
 }
 
 /// Log that a test-only binary is accepting failpoint configuration.
@@ -169,6 +218,29 @@ pub(crate) async fn pause(name: &str) {
     }
 }
 
+/// Hold a blocking durability operation at a test-only boundary.
+pub(crate) fn pause_blocking(name: &str) {
+    #[cfg(test)]
+    if let Some(state) = test_state(name) {
+        state.paused.store(true, Ordering::Release);
+        state.paused_notify.notify_waiters();
+        tracing::warn!(failpoint = name, "test failpoint paused");
+        while !state.released.load(Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        tracing::warn!(failpoint = name, "test failpoint released");
+        return;
+    }
+
+    if armed(name) {
+        tracing::warn!(failpoint = name, "test failpoint paused");
+        while armed(name) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        tracing::warn!(failpoint = name, "test failpoint released");
+    }
+}
+
 fn hit(name: &str) -> bool {
     if armed(name) {
         tracing::warn!(failpoint = name, "test failpoint triggered");
@@ -192,9 +264,17 @@ fn armed(name: &str) -> bool {
 
 #[cfg(test)]
 fn test_state(name: &str) -> Option<Arc<TestFailpointState>> {
-    TEST_FAILPOINTS
-        .with(|current| current.borrow().clone())
+    task_test_context()
+        .or_else(|| BLOCKING_TEST_FAILPOINTS.with(|current| current.borrow().clone()))
         .filter(|state| !state.released.load(Ordering::Acquire) && state.names.contains(&name))
+}
+
+#[cfg(test)]
+fn task_test_context() -> Option<Arc<TestFailpointState>> {
+    TEST_FAILPOINTS
+        .try_with(|current| current.clone())
+        .ok()
+        .flatten()
 }
 
 fn configured(name: &str, inline: &str, file: &str) -> bool {
@@ -207,12 +287,82 @@ fn configured(name: &str, inline: &str, file: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::configured;
+    use std::time::Duration;
+
+    use super::{TestFailpoint, configured, pause, pause_blocking, spawn, spawn_blocking};
 
     #[test]
     fn configuration_matches_complete_tokens_from_both_sources() {
         assert!(configured("before-publish", "start, before-publish", ""));
         assert!(configured("after-publish", "", "start\nafter-publish"));
         assert!(!configured("publish", "before-publish", "after-publish"));
+    }
+
+    #[tokio::test]
+    async fn blocking_failpoint_keeps_a_single_worker_runtime_responsive() {
+        let hook = TestFailpoint::new(&["blocking-runtime-heartbeat"]);
+        let task_hook = hook.clone();
+        let task = tokio::spawn(async move {
+            task_hook
+                .run(async {
+                    spawn_blocking(|| pause_blocking("blocking-runtime-heartbeat"))
+                        .await
+                        .expect("blocking failpoint task");
+                })
+                .await;
+        });
+        hook.wait_until_paused().await;
+
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            tokio::time::sleep(Duration::from_millis(1)),
+        )
+        .await
+        .expect("blocking work must not occupy the async runtime worker");
+
+        hook.release();
+        task.await.expect("scoped blocking task");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn detached_spawn_keeps_failpoint_context_after_parent_abort() {
+        let hook = TestFailpoint::new(&["detached-child-context"]);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (continue_tx, continue_rx) = tokio::sync::oneshot::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let parent_hook = hook.clone();
+        let parent = tokio::spawn(async move {
+            parent_hook
+                .run(async move {
+                    let child = spawn(async move {
+                        let _ = ready_tx.send(());
+                        continue_rx.await.expect("continue detached child");
+                        pause("detached-child-context").await;
+                        let _ = finished_tx.send(());
+                    });
+                    drop(child);
+                    std::future::pending::<()>().await;
+                })
+                .await;
+        });
+
+        ready_rx.await.expect("detached child started");
+        parent.abort();
+        assert!(
+            parent
+                .await
+                .expect_err("parent task must be cancelled")
+                .is_cancelled()
+        );
+        continue_tx.send(()).expect("continue detached child");
+        tokio::time::timeout(Duration::from_millis(250), hook.wait_until_paused())
+            .await
+            .expect("detached child must retain its failpoint context");
+
+        hook.release();
+        tokio::time::timeout(Duration::from_millis(250), finished_rx)
+            .await
+            .expect("detached child must finish after release")
+            .expect("detached child completion signal");
     }
 }

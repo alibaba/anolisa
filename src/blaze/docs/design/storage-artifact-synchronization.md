@@ -59,6 +59,33 @@ The file provider calls `sync_all` for the canonical `rootfs.ext4`, `mem.bin`,
 Other providers can use a different mechanism while preserving the same
 ownership-until-completion contract.
 
+## Checkpoint artifact capture and publication
+
+Checkpoint capture is a separate, explicit provider capability. The default
+`StorageProvider` implementation reports no support and returns an error, so a
+provider cannot silently opt into partial capture. The file provider
+reconstructs the canonical slot from the sandbox ID, retains the opened source
+file, and copies the writable root into a private target owned by the
+checkpoint transaction. It preserves sparse extents when possible and never
+replaces an existing target.
+
+The checkpoint catalog is derived from the retained state-root directory. Each
+sandbox has private staging entries, committed checkpoint directories, and one
+HEAD reference. Publication verifies the required backend-state, memory, and
+writable-root artifacts, records their sizes and SHA-256 digests, synchronizes
+the files and directories, and publishes the checkpoint with a no-replace
+rename. HEAD is updated atomically only after that publication is durable.
+Listing reopens and validates committed manifests and artifacts before
+reporting history and HEAD reachability.
+
+Blocking file copies, manifest publication, and HEAD updates remain supervised
+after request cancellation and retain the sandbox operation lock until their
+outcome is known. A known pre-publication failure removes only the private
+stage. An uncertain publication never removes a path whose identity cannot be
+proven. Sandbox destruction removes transaction artifacts and committed
+checkpoint history under the same state-root ownership boundary. Restore,
+checkpoint deletion, and pruning are not part of this protocol.
+
 ## Capability boundary
 
 Each provider synchronization call persists the already-written artifact bytes

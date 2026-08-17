@@ -23,6 +23,8 @@ use crate::error::{BlazeDaemonError, Result};
 
 const STATE_FILE: &str = "state.json";
 const TEMP_STATE_FILE: &str = "state.json.tmp";
+const CHECKPOINT_DIRECTORY: &str = "checkpoints";
+const CHECKPOINT_DIRECTORY_MODE: Mode = Mode::RWXU;
 
 /// Central access point for the daemon state directory.
 ///
@@ -56,6 +58,21 @@ pub(crate) struct OwnedRunDir {
     inner: Arc<OwnedRunDirInner>,
 }
 
+/// Cloneable owner of a directory derived from the retained state root.
+///
+/// Checkpoint catalog code uses this handle instead of reopening configured
+/// pathnames after startup validation.
+#[derive(Clone)]
+pub(crate) struct OwnedStateDirectory {
+    inner: Arc<OwnedStateDirectoryInner>,
+}
+
+struct OwnedStateDirectoryInner {
+    configured_path: PathBuf,
+    stable_path: PathBuf,
+    directory: OwnedFd,
+}
+
 struct OwnedRunDirInner {
     instance_id: Uuid,
     configured_path: PathBuf,
@@ -78,6 +95,15 @@ impl fmt::Debug for OwnedRunDir {
         formatter
             .debug_struct("OwnedRunDir")
             .field("instance_id", &self.inner.instance_id)
+            .field("configured_path", &self.inner.configured_path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for OwnedStateDirectory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OwnedStateDirectory")
             .field("configured_path", &self.inner.configured_path)
             .finish_non_exhaustive()
     }
@@ -118,6 +144,32 @@ impl StateStore {
                 run_dirs: Mutex::new(HashMap::new()),
             }),
         })
+    }
+
+    /// Create or open the daemon-owned checkpoint namespace relative to the
+    /// retained state-root object.
+    pub(crate) fn checkpoint_directory(&self) -> Result<OwnedStateDirectory> {
+        match mkdirat(
+            &self.inner.root,
+            CHECKPOINT_DIRECTORY,
+            CHECKPOINT_DIRECTORY_MODE,
+        ) {
+            Ok(()) | Err(Errno::EXIST) => {}
+            Err(error) => return Err(std::io::Error::from(error).into()),
+        }
+        let directory = openat(
+            &self.inner.root,
+            CHECKPOINT_DIRECTORY,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?;
+        crate::failpoint::state("checkpoint-state-root-sync")?;
+        fsync(&self.inner.root).map_err(std::io::Error::from)?;
+        Ok(OwnedStateDirectory::new(
+            self.inner.configured_root.join(CHECKPOINT_DIRECTORY),
+            directory,
+        ))
     }
 
     /// Return the retained owner for one known sandbox directory.
@@ -993,6 +1045,34 @@ impl OwnedRunDir {
         )
         .expect("open test runtime directory");
         Self::new(instance_id, path, directory)
+    }
+}
+
+impl OwnedStateDirectory {
+    pub(crate) fn new(configured_path: PathBuf, directory: OwnedFd) -> Self {
+        #[cfg(target_os = "linux")]
+        let stable_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+        #[cfg(not(target_os = "linux"))]
+        let stable_path = configured_path.clone();
+        Self {
+            inner: Arc::new(OwnedStateDirectoryInner {
+                configured_path,
+                stable_path,
+                directory,
+            }),
+        }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.inner.stable_path
+    }
+
+    pub(crate) fn configured_path(&self) -> &Path {
+        &self.inner.configured_path
+    }
+
+    pub(crate) fn descriptor(&self) -> &OwnedFd {
+        &self.inner.directory
     }
 }
 
@@ -2150,5 +2230,43 @@ mod tests {
 
         assert!(matches!(error, BlazeDaemonError::Conflict(_)));
         drop(owner);
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn checkpoint_catalog_retries_state_root_sync_when_existing() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path().join("state");
+        std::fs::create_dir(&root).expect("state directory");
+        let store = StateStore::new(root.clone());
+        let hook = crate::failpoint::TestFailpoint::new(&["checkpoint-state-root-sync"]);
+
+        let first_error = hook
+            .run(async { store.checkpoint_directory() })
+            .await
+            .expect_err("initial state-root sync must fail");
+        assert!(
+            first_error
+                .to_string()
+                .contains("checkpoint-state-root-sync")
+        );
+        assert!(
+            root.join(CHECKPOINT_DIRECTORY).is_dir(),
+            "the failed parent sync leaves the newly created catalog"
+        );
+
+        let retry_error = hook
+            .run(async { store.checkpoint_directory() })
+            .await
+            .expect_err("retry must synchronize the state root again");
+        assert!(
+            retry_error
+                .to_string()
+                .contains("checkpoint-state-root-sync")
+        );
+
+        store
+            .checkpoint_directory()
+            .expect("unarmed retry synchronizes the state root");
     }
 }

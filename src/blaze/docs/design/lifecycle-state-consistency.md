@@ -2,18 +2,20 @@
 
 [中文版](lifecycle-state-consistency_zh.md)
 
-Blaze has two related lifecycle boundaries. Before serving requests, it must
+Blaze has three related lifecycle boundaries. Before serving requests, it must
 reconstruct a complete persisted sandbox inventory without exposing a partial
 result. While serving requests, it exposes lifecycle and guest operations only
 through the sandbox namespace and rejects reserved reusable-capacity operations
-before they can change ownership. Retired `Reset`, `Warm`, and
-`start_path = "warm"` values remain decodable so startup can clean non-terminal
-records that contain them.
+before they can change ownership. Checkpoint capture must publish artifacts,
+checkpoint history, and lifecycle state in a recoverable order. Retired
+`Reset`, `Warm`, and `start_path = "warm"` values remain decodable so startup
+can clean non-terminal records that contain them.
 
-This document defines both boundaries. The inventory-publication protocol does
-not change the HTTP API, configuration keys, or persisted JSON format. The
+This document defines all three boundaries. The inventory-publication protocol
+does not change the HTTP API, configuration keys, or persisted JSON format. The
 management API section defines the sandbox namespace and the reserved
-reusable-capacity boundary.
+reusable-capacity boundary. The checkpoint section defines two sandbox routes
+and the durable operation fields used to recover interrupted capture.
 
 ## Terms and owned objects
 
@@ -98,12 +100,47 @@ validated inventory into a partial one. Blaze attempts to persist the recovery
 state; if that write also fails, reconciliation reports the additional error
 and the durable record may still contain its previous state.
 
+## Checkpoint lifecycle and recovery
+
+`POST /v1/sandboxes/{id}/checkpoint` captures a running sandbox, and
+`GET /v1/sandboxes/{id}/checkpoints` lists its committed history. Both
+operations hold the same per-sandbox operation lock used by lifecycle and
+guest requests. Capture requires a `Running` record with no unfinished
+operation, a live matching backend owner, and explicit capture support from
+both the backend and storage provider. An unsupported combination returns
+`501 Not Implemented` before the backend is paused or lifecycle state changes.
+
+Capture uses this durable order:
+
+1. Validate the current checkpoint parent and create a private staging
+   directory.
+2. Persist checkpoint intent, including the generated checkpoint ID, before
+   pausing the backend.
+3. Pause the backend, record that durable phase, capture backend state and the
+   provider-owned writable root, then publish an integrity-checked manifest by
+   a no-replace rename.
+4. Persist publication, atomically move the sandbox checkpoint HEAD, and
+   persist the HEAD-update phase.
+5. Resume and revalidate the backend, pass through `Checkpointed` back to
+   `Running`, record `last_checkpoint`, clear the operation, and persist the
+   final lifecycle record.
+
+A failure known to precede publication removes the private stage, resumes the
+backend, and clears the operation. If publication, HEAD movement, lifecycle
+persistence, or backend resume has an unknown or unsafe outcome, Blaze retains
+the durable operation and marks the sandbox `RecoveryRequired`. Startup does
+not restore a checkpoint or adopt an interrupted backend; normal reconciliation
+cleans the owned runtime and checkpoint transaction artifacts. Committed
+checkpoint history is retained until sandbox destruction. Restore, deletion,
+and pruning are outside this interface.
+
 ## Management API and reusable-state boundary
 
 Lifecycle and guest operations are registered under `/v1/sandboxes`.
-Action-style reset, checkpoint, and destroy paths are unregistered and return
+Action-style reset and destroy paths are unregistered and return
 `404 Not Found`. Canonical destruction remains
-`DELETE /v1/sandboxes/{id}`. Checkpoint capture is defined separately.
+`DELETE /v1/sandboxes/{id}`. Checkpoint capture uses the two routes defined in
+the preceding section.
 
 The following reserved management routes also return `501 Not Implemented` and
 do not manage reusable capacity:
@@ -158,6 +195,10 @@ Future lifecycle-state changes must preserve these rules:
   checks have passed;
 - unregistered sandbox action routes return `404` before reading or changing
   sandbox state;
+- checkpoint capture keeps the per-sandbox operation lock until every
+  supervised backend, storage, publication, and state task has converged;
+- a checkpoint is never exposed as committed history before its artifacts and
+  manifest are durably published, and HEAD never names an unpublished entry;
 - pool-management rejections occur before lifecycle, runtime, or storage
   ownership changes; and
 - lifecycle operations cannot enter or reactivate `Reset` or `Warm`; legacy

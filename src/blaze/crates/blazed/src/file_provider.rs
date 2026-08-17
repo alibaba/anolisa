@@ -3,11 +3,16 @@
 //! rootfs and memory files on a local filesystem. Base images and mutable
 //! instance slots use separate roots.
 
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::os::fd::OwnedFd;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rustix::fs::{Mode, OFlags, open, openat};
+use rustix::fs::{
+    AtFlags, Mode, OFlags, RenameFlags, fstat, fsync, open, openat, renameat_with, statat, unlinkat,
+};
+use uuid::Uuid;
 
 use blaze_core::error::{BlazeError, Result};
 use blaze_core::storage::{
@@ -27,6 +32,7 @@ pub struct FileStorageProvider {
 pub(crate) struct ArtifactSyncOpenHook {
     opened: tokio::sync::Notify,
     resume: tokio::sync::Notify,
+    capture_finished: tokio::sync::Notify,
 }
 
 #[cfg(test)]
@@ -35,6 +41,7 @@ impl ArtifactSyncOpenHook {
         Self {
             opened: tokio::sync::Notify::new(),
             resume: tokio::sync::Notify::new(),
+            capture_finished: tokio::sync::Notify::new(),
         }
     }
 
@@ -44,6 +51,25 @@ impl ArtifactSyncOpenHook {
 
     pub(crate) fn resume(&self) {
         self.resume.notify_one();
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    pub(crate) async fn wait_until_capture_finished(&self) {
+        self.capture_finished.notified().await;
+    }
+}
+
+struct CaptureCompletion {
+    #[cfg(test)]
+    hook: Option<std::sync::Arc<ArtifactSyncOpenHook>>,
+}
+
+impl CaptureCompletion {
+    fn finish(self) {
+        #[cfg(test)]
+        if let Some(hook) = self.hook {
+            hook.capture_finished.notify_one();
+        }
     }
 }
 
@@ -121,6 +147,126 @@ impl RequiredPathType {
         match self {
             Self::Directory => metadata.is_dir(),
             Self::File => metadata.is_file(),
+        }
+    }
+}
+
+struct UnpublishedCheckpoint {
+    parent: OwnedFd,
+    temporary_file: std::fs::File,
+    identity: Option<rustix::fs::Stat>,
+    temporary: OsString,
+    target: OsString,
+    committed: bool,
+}
+
+impl UnpublishedCheckpoint {
+    fn new(
+        parent: OwnedFd,
+        temporary_file: std::fs::File,
+        temporary: OsString,
+        target: OsString,
+    ) -> Self {
+        Self {
+            parent,
+            temporary_file,
+            identity: None,
+            temporary,
+            target,
+            committed: false,
+        }
+    }
+
+    fn parent(&self) -> &OwnedFd {
+        &self.parent
+    }
+
+    fn temporary_file(&self) -> &std::fs::File {
+        &self.temporary_file
+    }
+
+    fn retain_identity(&mut self) -> std::io::Result<()> {
+        let stat = fstat(&self.temporary_file).map_err(std::io::Error::from)?;
+        self.identity = Some(stat);
+        Ok(())
+    }
+
+    fn candidate_matches(&self, name: &std::ffi::OsStr) -> std::io::Result<bool> {
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("checkpoint temporary identity is unavailable"))?;
+        match statat(&self.parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => Ok(stat.st_dev == identity.st_dev && stat.st_ino == identity.st_ino),
+            Err(rustix::io::Errno::NOENT) => Ok(false),
+            Err(error) => Err(std::io::Error::from(error)),
+        }
+    }
+
+    fn require_temporary_identity(&self) -> std::io::Result<()> {
+        if self.candidate_matches(&self.temporary)? {
+            return Ok(());
+        }
+        Err(std::io::Error::other(
+            "checkpoint temporary file changed identity before publication",
+        ))
+    }
+
+    fn publish_noreplace(&self) -> std::io::Result<()> {
+        self.require_temporary_identity()?;
+        let rename_error = renameat_with(
+            &self.parent,
+            &self.temporary,
+            &self.parent,
+            &self.target,
+            RenameFlags::NOREPLACE,
+        )
+        .err()
+        .map(std::io::Error::from);
+
+        let temporary_matches = self.candidate_matches(&self.temporary)?;
+        let target_matches = self.candidate_matches(&self.target)?;
+        match (temporary_matches, target_matches, rename_error) {
+            (false, true, _) => Ok(()),
+            (true, false, Some(error)) => Err(error),
+            (true, false, None) => Err(std::io::Error::other(
+                "checkpoint rename reported success but retained the temporary name",
+            )),
+            (false, false, Some(error)) => Err(std::io::Error::other(format!(
+                "checkpoint rename failed and the retained file lost both candidate names: {error}"
+            ))),
+            (false, false, None) => Err(std::io::Error::other(
+                "checkpoint rename reported success but the retained file lost both candidate names",
+            )),
+            (true, true, Some(error)) => Err(std::io::Error::other(format!(
+                "checkpoint rename failed with both candidate names linked to the retained file: {error}"
+            ))),
+            (true, true, None) => Err(std::io::Error::other(
+                "checkpoint rename reported success with both candidate names linked to the retained file",
+            )),
+        }
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for UnpublishedCheckpoint {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let mut removed = false;
+        for name in [&self.temporary, &self.target] {
+            if self.candidate_matches(name).unwrap_or(false)
+                && unlinkat(&self.parent, name, AtFlags::empty()).is_ok()
+            {
+                removed = true;
+            }
+        }
+        if removed {
+            let _ = fsync(&self.parent);
         }
     }
 }
@@ -346,6 +492,47 @@ impl StorageProvider for FileStorageProvider {
         Ok(())
     }
 
+    fn supports_checkpoint_capture(&self) -> bool {
+        true
+    }
+
+    async fn capture_checkpoint(&self, slot: &StorageSlot, target: &Path) -> Result<()> {
+        let (source, source_path) = self.checkpoint_source(slot).await?;
+        let (target_parent, target) = checkpoint_target(target).await?;
+        let target_parent_owner = open_checkpoint_target_parent(&target_parent, &target).await?;
+        #[cfg(test)]
+        if let Some(hook) = &self.artifact_sync_open_hook {
+            hook.opened.notify_one();
+            hook.resume.notified().await;
+        }
+
+        let target_name = target
+            .file_name()
+            .expect("validated checkpoint target")
+            .to_os_string();
+        let temporary_name = checkpoint_temporary_name(&target);
+        let completion = CaptureCompletion {
+            #[cfg(test)]
+            hook: self.artifact_sync_open_hook.clone(),
+        };
+        let result = capture_rootfs(
+            source,
+            target_parent_owner,
+            temporary_name,
+            target_name,
+            completion,
+        )
+        .await;
+        result.map_err(|error| BlazeError::StorageError {
+            msg: format!(
+                "capture checkpoint for '{}': copy {} to {}: {error}",
+                slot.id,
+                source_path.display(),
+                target.display()
+            ),
+        })
+    }
+
     fn pool_status(&self) -> PoolStatus {
         PoolStatus::default()
     }
@@ -409,6 +596,46 @@ where
     })?
 }
 
+impl FileStorageProvider {
+    async fn checkpoint_source(&self, slot: &StorageSlot) -> Result<(tokio::fs::File, PathBuf)> {
+        let canonical = self.slot_for_id(&slot.id)?;
+        let instance_path = canonical.instance_dir.clone();
+        let directory = open_required_slot_path(
+            &slot.id,
+            &canonical.instance_dir,
+            RequiredPathType::Directory,
+            move || {
+                open(
+                    &instance_path,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+            },
+        )
+        .await?;
+        let directory = Arc::new(directory);
+        let open_directory = Arc::clone(&directory);
+        let source = open_required_slot_path(
+            &slot.id,
+            &canonical.rootfs_path,
+            RequiredPathType::File,
+            move || {
+                openat(
+                    &*open_directory,
+                    "rootfs.ext4",
+                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                    Mode::empty(),
+                )
+            },
+        )
+        .await?;
+        Ok((
+            tokio::fs::File::from_std(std::fs::File::from(source)),
+            canonical.rootfs_path,
+        ))
+    }
+}
+
 async fn create_or_copy(
     source: &std::path::Path,
     target: &std::path::Path,
@@ -421,6 +648,311 @@ async fn create_or_copy(
     let file = tokio::fs::File::create(target).await?;
     if size > 0 {
         file.set_len(size).await?;
+    }
+    Ok(())
+}
+
+async fn canonical_plain_path(path: &Path, required_type: RequiredPathType) -> Result<PathBuf> {
+    let metadata =
+        tokio::fs::symlink_metadata(path)
+            .await
+            .map_err(|error| BlazeError::StorageError {
+                msg: format!("inspect checkpoint path {}: {error}", path.display()),
+            })?;
+    if !required_type.matches(&metadata) || metadata.file_type().is_symlink() {
+        return Err(BlazeError::StorageError {
+            msg: format!(
+                "checkpoint path {} is not a plain {}",
+                path.display(),
+                required_type.description()
+            ),
+        });
+    }
+    tokio::fs::canonicalize(path)
+        .await
+        .map_err(|error| BlazeError::StorageError {
+            msg: format!("canonicalize checkpoint path {}: {error}", path.display()),
+        })
+}
+
+async fn checkpoint_target(target: &Path) -> Result<(PathBuf, PathBuf)> {
+    if !matches!(target.components().next_back(), Some(Component::Normal(_))) {
+        return Err(BlazeError::StorageError {
+            msg: format!(
+                "checkpoint target {} must end in a file name",
+                target.display()
+            ),
+        });
+    }
+    let parent = target.parent().ok_or_else(|| BlazeError::StorageError {
+        msg: format!(
+            "checkpoint target {} has no parent directory",
+            target.display()
+        ),
+    })?;
+    let parent = if is_retained_directory_adapter(parent) {
+        let metadata =
+            tokio::fs::metadata(parent)
+                .await
+                .map_err(|error| BlazeError::StorageError {
+                    msg: format!(
+                        "inspect retained checkpoint directory {}: {error}",
+                        parent.display()
+                    ),
+                })?;
+        if !metadata.is_dir() {
+            return Err(BlazeError::StorageError {
+                msg: format!(
+                    "retained checkpoint path {} is not a directory",
+                    parent.display()
+                ),
+            });
+        }
+        parent.to_path_buf()
+    } else {
+        canonical_plain_path(parent, RequiredPathType::Directory).await?
+    };
+    let file_name = target.file_name().ok_or_else(|| BlazeError::StorageError {
+        msg: format!("checkpoint target {} has no file name", target.display()),
+    })?;
+    let target = parent.join(file_name);
+    Ok((parent, target))
+}
+
+#[cfg(target_os = "linux")]
+fn is_retained_directory_adapter(path: &Path) -> bool {
+    path.parent() == Some(Path::new("/proc/self/fd"))
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()))
+            .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_retained_directory_adapter(_path: &Path) -> bool {
+    false
+}
+
+async fn open_checkpoint_target_parent(parent: &Path, target: &Path) -> Result<OwnedFd> {
+    let parent_path = parent.to_path_buf();
+    let target_path = target.to_path_buf();
+    let target_name = target
+        .file_name()
+        .expect("validated checkpoint target")
+        .to_os_string();
+    let follow_retained_adapter = is_retained_directory_adapter(parent);
+    crate::failpoint::spawn_blocking(move || {
+        let base_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+        let flags = if follow_retained_adapter {
+            base_flags
+        } else {
+            base_flags | OFlags::NOFOLLOW
+        };
+        let parent_owner =
+            open(&parent_path, flags, Mode::empty()).map_err(|error| BlazeError::StorageError {
+                msg: format!(
+                    "open checkpoint target directory {}: {error}",
+                    parent_path.display()
+                ),
+            })?;
+        match statat(&parent_owner, &target_name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(_) => Err(BlazeError::StorageError {
+                msg: format!("checkpoint target {} already exists", target_path.display()),
+            }),
+            Err(rustix::io::Errno::NOENT) => Ok(parent_owner),
+            Err(error) => Err(BlazeError::StorageError {
+                msg: format!(
+                    "inspect checkpoint target {}: {error}",
+                    target_path.display()
+                ),
+            }),
+        }
+    })
+    .await
+    .map_err(|error| BlazeError::StorageError {
+        msg: format!(
+            "open checkpoint target directory {}: blocking task failed: {error}",
+            parent.display()
+        ),
+    })?
+}
+
+fn checkpoint_temporary_name(target: &Path) -> OsString {
+    let mut name = OsString::from(".");
+    name.push(target.file_name().expect("validated checkpoint target"));
+    name.push(format!(".capture-{}.tmp", Uuid::new_v4()));
+    name
+}
+
+async fn capture_rootfs(
+    source_file: tokio::fs::File,
+    target_parent: OwnedFd,
+    temporary_name: OsString,
+    target_name: OsString,
+    completion: CaptureCompletion,
+) -> std::io::Result<()> {
+    let source_file = source_file.into_std().await;
+    crate::failpoint::spawn_blocking(move || {
+        let result = (|| {
+            if !source_file.metadata()?.is_file() {
+                return Err(std::io::Error::other(
+                    "checkpoint source owner is not a regular file",
+                ));
+            }
+            let temporary_file = openat(
+                &target_parent,
+                &temporary_name,
+                OFlags::WRONLY
+                    | OFlags::CREATE
+                    | OFlags::EXCL
+                    | OFlags::NOFOLLOW
+                    | OFlags::CLOEXEC
+                    | OFlags::NONBLOCK,
+                Mode::RUSR.union(Mode::WUSR),
+            )
+            .map(std::fs::File::from)
+            .map_err(std::io::Error::from)?;
+            let mut cleanup = UnpublishedCheckpoint::new(
+                target_parent,
+                temporary_file,
+                temporary_name,
+                target_name,
+            );
+            cleanup.retain_identity()?;
+            copy_sparse_file(&source_file, cleanup.temporary_file())?;
+            cleanup.temporary_file().sync_all()?;
+            crate::failpoint::pause_blocking("storage-capture-before-publish");
+            cleanup.publish_noreplace()?;
+            crate::failpoint::storage("storage-capture-after-publish")
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            fsync(cleanup.parent()).map_err(std::io::Error::from)?;
+            cleanup.commit();
+            Ok(())
+        })();
+        completion.finish();
+        result
+    })
+    .await
+    .map_err(|error| std::io::Error::other(format!("checkpoint capture task failed: {error}")))?
+}
+
+fn copy_sparse_file(source: &std::fs::File, target: &std::fs::File) -> std::io::Result<()> {
+    copy_sparse_file_with_seek(source, target, |file, position| {
+        rustix::fs::seek(file, position)
+    })
+}
+
+fn copy_sparse_file_with_seek<F>(
+    source: &std::fs::File,
+    target: &std::fs::File,
+    mut seek: F,
+) -> std::io::Result<()>
+where
+    F: FnMut(&std::fs::File, rustix::fs::SeekFrom) -> std::result::Result<u64, rustix::io::Errno>,
+{
+    const COPY_BUFFER_SIZE: usize = 64 * 1024;
+
+    let logical_len = source.metadata()?.len();
+    let mut position = 0_u64;
+    let mut buffer = [0_u8; COPY_BUFFER_SIZE];
+
+    while position < logical_len {
+        let data = match seek(source, rustix::fs::SeekFrom::Data(position)) {
+            Ok(data) => data,
+            Err(rustix::io::Errno::NXIO) => break,
+            Err(error) if sparse_seek_is_unsupported(error) => {
+                return copy_sparse_file_by_scanning(source, target, logical_len);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if data >= logical_len {
+            break;
+        }
+        let hole = match seek(source, rustix::fs::SeekFrom::Hole(data)) {
+            Ok(hole) => hole.min(logical_len),
+            Err(error) if sparse_seek_is_unsupported(error) => {
+                return copy_sparse_file_by_scanning(source, target, logical_len);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if hole <= data {
+            return Err(std::io::Error::other(format!(
+                "invalid sparse extent {data}..{hole} for file length {logical_len}"
+            )));
+        }
+
+        let mut offset = data;
+        while offset < hole {
+            let remaining = hole - offset;
+            let requested = usize::try_from(remaining.min(COPY_BUFFER_SIZE as u64))
+                .map_err(|_| std::io::Error::other("sparse extent exceeds platform limits"))?;
+            let read = rustix::io::pread(source, &mut buffer[..requested], offset)
+                .map_err(std::io::Error::from)?;
+            if read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!("sparse extent ended before offset {hole}"),
+                ));
+            }
+            write_all_at(target, &buffer[..read], offset)?;
+            offset += read as u64;
+        }
+        position = hole;
+    }
+
+    rustix::fs::ftruncate(target, logical_len).map_err(std::io::Error::from)
+}
+
+fn sparse_seek_is_unsupported(error: rustix::io::Errno) -> bool {
+    error == rustix::io::Errno::INVAL || error == rustix::io::Errno::NOTSUP
+}
+
+fn copy_sparse_file_by_scanning(
+    source: &std::fs::File,
+    target: &std::fs::File,
+    logical_len: u64,
+) -> std::io::Result<()> {
+    const COPY_BUFFER_SIZE: usize = 64 * 1024;
+
+    // A seek implementation may report unsupported after earlier extents were
+    // copied. Reset the private temporary file before rebuilding it so skipped
+    // zero blocks cannot retain stale bytes from that partial attempt.
+    rustix::fs::ftruncate(target, 0).map_err(std::io::Error::from)?;
+    let mut buffer = [0_u8; COPY_BUFFER_SIZE];
+    let mut offset = 0_u64;
+    while offset < logical_len {
+        let remaining = logical_len - offset;
+        let requested = usize::try_from(remaining.min(COPY_BUFFER_SIZE as u64))
+            .map_err(|_| std::io::Error::other("checkpoint file exceeds platform limits"))?;
+        let read = rustix::io::pread(source, &mut buffer[..requested], offset)
+            .map_err(std::io::Error::from)?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("checkpoint source ended before offset {logical_len}"),
+            ));
+        }
+        if buffer[..read].iter().any(|byte| *byte != 0) {
+            write_all_at(target, &buffer[..read], offset)?;
+        }
+        offset += read as u64;
+    }
+    rustix::fs::ftruncate(target, logical_len).map_err(std::io::Error::from)
+}
+
+fn write_all_at(target: &std::fs::File, buffer: &[u8], offset: u64) -> std::io::Result<()> {
+    let mut written = 0;
+    while written < buffer.len() {
+        let count = rustix::io::pwrite(target, &buffer[written..], offset + written as u64)
+            .map_err(std::io::Error::from)?;
+        if count == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "failed to write sparse checkpoint extent",
+            ));
+        }
+        written += count;
     }
     Ok(())
 }
@@ -443,6 +975,26 @@ fn validate_instance_id(instance_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn checkpoint_fixture(
+        instance_id: &str,
+    ) -> (tempfile::TempDir, FileStorageProvider, StorageSlot, PathBuf) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let instances = temp.path().join("instances");
+        let checkpoints = temp.path().join("checkpoints");
+        tokio::fs::create_dir(&instances).await.unwrap();
+        tokio::fs::create_dir(&checkpoints).await.unwrap();
+        let provider = FileStorageProvider::new(instances);
+        let slot = provider
+            .acquire(&AcquireOpts {
+                instance_id: instance_id.to_string(),
+                rootfs_size: 64,
+                mem_size: 32,
+            })
+            .await
+            .unwrap();
+        (temp, provider, slot, checkpoints)
+    }
 
     #[tokio::test]
     async fn probe_existing_dir_returns_true() {
@@ -846,5 +1398,696 @@ mod tests {
             .await
             .expect_err("missing artifact must fail the sweep item");
         assert!(error.to_string().contains("mem.diff"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_capture_is_explicit_and_independent() {
+        let (_temp, provider, slot, checkpoints) = checkpoint_fixture("capture-independent").await;
+        tokio::fs::write(&slot.rootfs_path, b"captured-rootfs")
+            .await
+            .unwrap();
+        let target = checkpoints.join("rootfs.snap");
+
+        assert!(provider.supports_checkpoint_capture());
+        provider.capture_checkpoint(&slot, &target).await.unwrap();
+        tokio::fs::write(&slot.rootfs_path, b"changed-live-rootfs")
+            .await
+            .unwrap();
+
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"captured-rootfs");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_capture_does_not_replace_the_live_rootfs() {
+        let (_temp, provider, slot, checkpoints) = checkpoint_fixture("capture-read-only").await;
+        tokio::fs::write(&slot.rootfs_path, b"live-rootfs")
+            .await
+            .unwrap();
+
+        provider
+            .capture_checkpoint(&slot, &checkpoints.join("rootfs.snap"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tokio::fs::read(&slot.rootfs_path).await.unwrap(),
+            b"live-rootfs"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_capture_ignores_forged_slot_paths() {
+        let (temp, provider, slot, checkpoints) = checkpoint_fixture("capture-canonical").await;
+        tokio::fs::write(&slot.rootfs_path, b"canonical-rootfs")
+            .await
+            .unwrap();
+        let forged_source = temp.path().join("forged-rootfs");
+        tokio::fs::write(&forged_source, b"forged-rootfs")
+            .await
+            .unwrap();
+        let mut forged = slot.clone();
+        forged.rootfs_path = forged_source;
+        forged.mem_path = temp.path().join("forged-memory");
+        forged.mem_diff_path = temp.path().join("forged-memory-diff");
+        forged.rootfs_diff_path = temp.path().join("forged-rootfs-diff");
+        forged.instance_dir = temp.path().to_path_buf();
+        let target = checkpoints.join("rootfs.snap");
+
+        provider.capture_checkpoint(&forged, &target).await.unwrap();
+
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"canonical-rootfs");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_capture_retains_the_opened_source_artifact() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let instances = temp.path().join("instances");
+        let checkpoints = temp.path().join("checkpoints");
+        tokio::fs::create_dir(&instances).await.unwrap();
+        tokio::fs::create_dir(&checkpoints).await.unwrap();
+        let hook = Arc::new(ArtifactSyncOpenHook::new());
+        let provider = Arc::new(FileStorageProvider::with_artifact_sync_open_hook(
+            instances.clone(),
+            instances,
+            Arc::clone(&hook),
+        ));
+        let slot = provider
+            .acquire(&AcquireOpts {
+                instance_id: "capture-source-owner".into(),
+                rootfs_size: 64,
+                mem_size: 32,
+            })
+            .await
+            .unwrap();
+        tokio::fs::write(&slot.rootfs_path, b"opened-source")
+            .await
+            .unwrap();
+        let target = checkpoints.join("rootfs.snap");
+
+        let capture_provider = Arc::clone(&provider);
+        let capture_slot = slot.clone();
+        let capture_target = target.clone();
+        let capture = tokio::spawn(async move {
+            capture_provider
+                .capture_checkpoint(&capture_slot, &capture_target)
+                .await
+        });
+        hook.wait_until_open().await;
+        let retained = slot.instance_dir.join("retained-rootfs.ext4");
+        tokio::fs::rename(&slot.rootfs_path, &retained)
+            .await
+            .unwrap();
+        tokio::fs::write(&slot.rootfs_path, b"replacement-source")
+            .await
+            .unwrap();
+        hook.resume();
+
+        capture.await.unwrap().unwrap();
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"opened-source");
+        assert_eq!(
+            tokio::fs::read(&slot.rootfs_path).await.unwrap(),
+            b"replacement-source"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn checkpoint_sparse_copy_falls_back_when_extent_seeks_are_unsupported() {
+        use std::io::{Read, Seek, Write};
+        use std::os::unix::fs::MetadataExt;
+
+        const LOGICAL_LEN: u64 = 64 * 1024 * 1024;
+        const FIRST_OFFSET: u64 = 8 * 1024;
+        const LAST_OFFSET: u64 = 48 * 1024 * 1024 + 91;
+        const FIRST_DATA: &[u8] = b"portable-first-extent";
+        const LAST_DATA: &[u8] = b"portable-last-extent";
+
+        let temp = tempfile::tempdir().expect("temp");
+        let source_path = temp.path().join("source.img");
+        let mut source = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&source_path)
+            .expect("source");
+        source.set_len(LOGICAL_LEN).expect("logical source length");
+        source
+            .seek(std::io::SeekFrom::Start(FIRST_OFFSET))
+            .expect("first offset");
+        source.write_all(FIRST_DATA).expect("first data");
+        source
+            .seek(std::io::SeekFrom::Start(LAST_OFFSET))
+            .expect("last offset");
+        source.write_all(LAST_DATA).expect("last data");
+        source.sync_all().expect("source sync");
+
+        for (name, unsupported) in [
+            ("invalid", rustix::io::Errno::INVAL),
+            ("not-supported", rustix::io::Errno::NOTSUP),
+        ] {
+            let target_path = temp.path().join(format!("target-{name}.img"));
+            let target = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&target_path)
+                .expect("target");
+            copy_sparse_file_with_seek(&source, &target, |_, _| Err(unsupported))
+                .expect("portable sparse copy");
+            target.sync_all().expect("target sync");
+
+            let metadata = target.metadata().expect("target metadata");
+            assert_eq!(metadata.len(), LOGICAL_LEN);
+            assert!(
+                metadata.blocks().saturating_mul(512) < LOGICAL_LEN / 4,
+                "fallback allocated {} bytes for a {LOGICAL_LEN}-byte sparse source",
+                metadata.blocks().saturating_mul(512)
+            );
+
+            let mut captured = std::fs::File::open(&target_path).expect("captured target");
+            let mut first = vec![0; FIRST_DATA.len()];
+            captured
+                .seek(std::io::SeekFrom::Start(FIRST_OFFSET))
+                .expect("captured first offset");
+            captured
+                .read_exact(&mut first)
+                .expect("captured first data");
+            assert_eq!(first, FIRST_DATA);
+            let mut last = vec![0; LAST_DATA.len()];
+            captured
+                .seek(std::io::SeekFrom::Start(LAST_OFFSET))
+                .expect("captured last offset");
+            captured.read_exact(&mut last).expect("captured last data");
+            assert_eq!(last, LAST_DATA);
+            let mut hole = [1_u8; 4096];
+            captured
+                .seek(std::io::SeekFrom::Start(24 * 1024 * 1024))
+                .expect("captured hole offset");
+            captured.read_exact(&mut hole).expect("captured hole");
+            assert!(hole.iter().all(|byte| *byte == 0));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn checkpoint_capture_preserves_sparse_extents() {
+        use std::io::{Read, Seek, Write};
+        use std::os::unix::fs::MetadataExt;
+
+        const LOGICAL_LEN: u64 = 64 * 1024 * 1024;
+        const FIRST_OFFSET: u64 = 4 * 1024;
+        const LAST_OFFSET: u64 = 48 * 1024 * 1024 + 137;
+        const FIRST_DATA: &[u8] = b"first-checkpoint-extent";
+        const LAST_DATA: &[u8] = b"last-checkpoint-extent";
+
+        let (_temp, provider, slot, checkpoints) = checkpoint_fixture("capture-sparse").await;
+        let mut source = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&slot.rootfs_path)
+            .unwrap();
+        source.set_len(LOGICAL_LEN).unwrap();
+        source.seek(std::io::SeekFrom::Start(FIRST_OFFSET)).unwrap();
+        source.write_all(FIRST_DATA).unwrap();
+        source.seek(std::io::SeekFrom::Start(LAST_OFFSET)).unwrap();
+        source.write_all(LAST_DATA).unwrap();
+        source.sync_all().unwrap();
+        let source_blocks = source.metadata().unwrap().blocks();
+        drop(source);
+
+        let target = checkpoints.join("rootfs.snap");
+        provider.capture_checkpoint(&slot, &target).await.unwrap();
+
+        let metadata = std::fs::metadata(&target).unwrap();
+        assert_eq!(metadata.len(), LOGICAL_LEN);
+        assert!(
+            metadata.blocks().saturating_mul(512) < LOGICAL_LEN / 4,
+            "checkpoint allocated {} bytes for a {LOGICAL_LEN}-byte sparse source",
+            metadata.blocks().saturating_mul(512)
+        );
+        assert!(
+            metadata.blocks() <= source_blocks.saturating_add(32),
+            "checkpoint used {} blocks for a source using {source_blocks} blocks",
+            metadata.blocks()
+        );
+
+        let mut live = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&slot.rootfs_path)
+            .unwrap();
+        live.seek(std::io::SeekFrom::Start(FIRST_OFFSET)).unwrap();
+        live.write_all(&[b'x'; FIRST_DATA.len()]).unwrap();
+        live.sync_all().unwrap();
+
+        let mut captured = std::fs::File::open(&target).unwrap();
+        let mut first = vec![0; FIRST_DATA.len()];
+        captured
+            .seek(std::io::SeekFrom::Start(FIRST_OFFSET))
+            .unwrap();
+        captured.read_exact(&mut first).unwrap();
+        assert_eq!(first, FIRST_DATA);
+        let mut last = vec![0; LAST_DATA.len()];
+        captured
+            .seek(std::io::SeekFrom::Start(LAST_OFFSET))
+            .unwrap();
+        captured.read_exact(&mut last).unwrap();
+        assert_eq!(last, LAST_DATA);
+        let mut hole = [1_u8; 4096];
+        captured
+            .seek(std::io::SeekFrom::Start(16 * 1024 * 1024))
+            .unwrap();
+        captured.read_exact(&mut hole).unwrap();
+        assert!(hole.iter().all(|byte| *byte == 0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn checkpoint_capture_preserves_an_all_hole_rootfs() {
+        use std::io::{Read, Seek};
+        use std::os::unix::fs::MetadataExt;
+
+        const LOGICAL_LEN: u64 = 64 * 1024 * 1024;
+
+        let (_temp, provider, slot, checkpoints) = checkpoint_fixture("capture-all-hole").await;
+        let source = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&slot.rootfs_path)
+            .unwrap();
+        source.set_len(LOGICAL_LEN).unwrap();
+        source.sync_all().unwrap();
+        let source_blocks = source.metadata().unwrap().blocks();
+        drop(source);
+
+        let target = checkpoints.join("rootfs.snap");
+        provider.capture_checkpoint(&slot, &target).await.unwrap();
+
+        let metadata = std::fs::metadata(&target).unwrap();
+        assert_eq!(metadata.len(), LOGICAL_LEN);
+        assert!(
+            metadata.blocks().saturating_mul(512) < LOGICAL_LEN / 16,
+            "all-hole checkpoint allocated {} bytes",
+            metadata.blocks().saturating_mul(512)
+        );
+        assert!(
+            metadata.blocks() <= source_blocks.saturating_add(8),
+            "all-hole checkpoint used {} blocks for a source using {source_blocks} blocks",
+            metadata.blocks()
+        );
+
+        let mut captured = std::fs::File::open(&target).unwrap();
+        let mut zeros = [1_u8; 4096];
+        captured
+            .seek(std::io::SeekFrom::Start(LOGICAL_LEN / 2))
+            .unwrap();
+        captured.read_exact(&mut zeros).unwrap();
+        assert!(zeros.iter().all(|byte| *byte == 0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn checkpoint_capture_retains_the_opened_target_directory() {
+        use std::os::fd::AsRawFd;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let instances = temp.path().join("instances");
+        let checkpoints = temp.path().join("checkpoints");
+        tokio::fs::create_dir(&instances).await.unwrap();
+        tokio::fs::create_dir(&checkpoints).await.unwrap();
+        let checkpoint_owner = open(
+            &checkpoints,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let stable_parent =
+            PathBuf::from(format!("/proc/self/fd/{}", checkpoint_owner.as_raw_fd()));
+        let hook = Arc::new(ArtifactSyncOpenHook::new());
+        let provider = Arc::new(FileStorageProvider::with_artifact_sync_open_hook(
+            instances.clone(),
+            instances,
+            Arc::clone(&hook),
+        ));
+        let slot = provider
+            .acquire(&AcquireOpts {
+                instance_id: "capture-target-owner".into(),
+                rootfs_size: 64,
+                mem_size: 32,
+            })
+            .await
+            .unwrap();
+        tokio::fs::write(&slot.rootfs_path, b"retained-target")
+            .await
+            .unwrap();
+        let target = stable_parent.join("rootfs.snap");
+
+        let capture_provider = Arc::clone(&provider);
+        let capture_slot = slot.clone();
+        let capture = tokio::spawn(async move {
+            capture_provider
+                .capture_checkpoint(&capture_slot, &target)
+                .await
+        });
+        hook.wait_until_open().await;
+        let retained = temp.path().join("retained-checkpoints");
+        tokio::fs::rename(&checkpoints, &retained).await.unwrap();
+        tokio::fs::create_dir(&checkpoints).await.unwrap();
+        hook.resume();
+
+        capture.await.unwrap().unwrap();
+        assert_eq!(
+            tokio::fs::read(retained.join("rootfs.snap")).await.unwrap(),
+            b"retained-target"
+        );
+        assert!(!checkpoints.join("rootfs.snap").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkpoint_capture_rejects_a_linked_rootfs() {
+        use std::os::unix::fs::symlink;
+
+        let (temp, provider, slot, checkpoints) = checkpoint_fixture("capture-linked-source").await;
+        tokio::fs::remove_file(&slot.rootfs_path).await.unwrap();
+        let external = temp.path().join("external-rootfs");
+        tokio::fs::write(&external, b"external").await.unwrap();
+        symlink(&external, &slot.rootfs_path).unwrap();
+        let target = checkpoints.join("rootfs.snap");
+
+        provider
+            .capture_checkpoint(&slot, &target)
+            .await
+            .expect_err("linked rootfs must not be captured");
+
+        assert!(!target.exists());
+        assert_eq!(tokio::fs::read(external).await.unwrap(), b"external");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkpoint_capture_rejects_a_linked_slot_directory() {
+        use std::os::unix::fs::symlink;
+
+        let (temp, provider, slot, checkpoints) = checkpoint_fixture("capture-linked-slot").await;
+        tokio::fs::remove_dir_all(&slot.instance_dir).await.unwrap();
+        let external = temp.path().join("external-slot");
+        tokio::fs::create_dir(&external).await.unwrap();
+        tokio::fs::write(external.join("rootfs.ext4"), b"external")
+            .await
+            .unwrap();
+        symlink(&external, &slot.instance_dir).unwrap();
+        let target = checkpoints.join("rootfs.snap");
+
+        provider
+            .capture_checkpoint(&slot, &target)
+            .await
+            .expect_err("linked slot directory must be rejected");
+
+        assert!(!target.exists());
+        assert_eq!(
+            tokio::fs::read(external.join("rootfs.ext4")).await.unwrap(),
+            b"external"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkpoint_capture_rejects_a_linked_target_parent() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let instances = temp.path().join("instances");
+        let external = temp.path().join("external-checkpoints");
+        tokio::fs::create_dir(&instances).await.unwrap();
+        tokio::fs::create_dir(&external).await.unwrap();
+        let linked_parent = temp.path().join("linked-checkpoints");
+        symlink(&external, &linked_parent).unwrap();
+        let provider = FileStorageProvider::new(instances);
+        let slot = provider
+            .acquire(&AcquireOpts {
+                instance_id: "capture-linked-parent".into(),
+                rootfs_size: 64,
+                mem_size: 32,
+            })
+            .await
+            .unwrap();
+        let target = linked_parent.join("rootfs.snap");
+
+        provider
+            .capture_checkpoint(&slot, &target)
+            .await
+            .expect_err("linked target parent must be rejected");
+
+        assert!(!external.join("rootfs.snap").exists());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_capture_preserves_an_existing_target() {
+        let (_temp, provider, slot, checkpoints) =
+            checkpoint_fixture("capture-existing-target").await;
+        tokio::fs::write(&slot.rootfs_path, b"new-checkpoint")
+            .await
+            .unwrap();
+        let target = checkpoints.join("rootfs.snap");
+        tokio::fs::write(&target, b"existing-checkpoint")
+            .await
+            .unwrap();
+
+        provider
+            .capture_checkpoint(&slot, &target)
+            .await
+            .expect_err("capture must never replace an existing target");
+
+        assert_eq!(
+            tokio::fs::read(&target).await.unwrap(),
+            b"existing-checkpoint"
+        );
+    }
+
+    #[test]
+    fn unpublished_checkpoint_cleans_target_after_an_unreported_rename() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let temporary_name = OsString::from("temporary");
+        let target_name = OsString::from("target");
+        let parent = open(
+            temp.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let temporary_file = openat(
+            &parent,
+            &temporary_name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR.union(Mode::WUSR),
+        )
+        .map(std::fs::File::from)
+        .unwrap();
+        let mut cleanup = UnpublishedCheckpoint::new(
+            parent,
+            temporary_file,
+            temporary_name.clone(),
+            target_name.clone(),
+        );
+        cleanup.retain_identity().unwrap();
+        std::fs::rename(
+            temp.path().join(&temporary_name),
+            temp.path().join(&target_name),
+        )
+        .unwrap();
+
+        drop(cleanup);
+
+        assert!(!temp.path().join(&temporary_name).exists());
+        assert!(!temp.path().join(&target_name).exists());
+    }
+
+    #[test]
+    fn unpublished_checkpoint_does_not_remove_a_replacement_target() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let temporary_name = OsString::from("temporary");
+        let target_name = OsString::from("target");
+        let retained_name = OsString::from("retained");
+        let parent = open(
+            temp.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let temporary_file = openat(
+            &parent,
+            &temporary_name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR.union(Mode::WUSR),
+        )
+        .map(std::fs::File::from)
+        .unwrap();
+        let mut cleanup = UnpublishedCheckpoint::new(
+            parent,
+            temporary_file,
+            temporary_name.clone(),
+            target_name.clone(),
+        );
+        cleanup.retain_identity().unwrap();
+        std::fs::rename(
+            temp.path().join(&temporary_name),
+            temp.path().join(&target_name),
+        )
+        .unwrap();
+        std::fs::rename(
+            temp.path().join(&target_name),
+            temp.path().join(&retained_name),
+        )
+        .unwrap();
+        std::fs::write(temp.path().join(&target_name), b"replacement").unwrap();
+
+        drop(cleanup);
+
+        assert_eq!(
+            std::fs::read(temp.path().join(&target_name)).unwrap(),
+            b"replacement"
+        );
+        assert!(temp.path().join(&retained_name).exists());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_capture_does_not_replace_a_racing_target() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let instances = temp.path().join("instances");
+        let checkpoints = temp.path().join("checkpoints");
+        tokio::fs::create_dir(&instances).await.unwrap();
+        tokio::fs::create_dir(&checkpoints).await.unwrap();
+        let hook = Arc::new(ArtifactSyncOpenHook::new());
+        let provider = Arc::new(FileStorageProvider::with_artifact_sync_open_hook(
+            instances.clone(),
+            instances,
+            Arc::clone(&hook),
+        ));
+        let slot = provider
+            .acquire(&AcquireOpts {
+                instance_id: "capture-racing-target".into(),
+                rootfs_size: 64,
+                mem_size: 32,
+            })
+            .await
+            .unwrap();
+        tokio::fs::write(&slot.rootfs_path, b"new-checkpoint")
+            .await
+            .unwrap();
+        let target = checkpoints.join("rootfs.snap");
+
+        let capture_provider = Arc::clone(&provider);
+        let capture_slot = slot.clone();
+        let capture_target = target.clone();
+        let capture = tokio::spawn(async move {
+            capture_provider
+                .capture_checkpoint(&capture_slot, &capture_target)
+                .await
+        });
+        hook.wait_until_open().await;
+        tokio::fs::write(&target, b"racing-checkpoint")
+            .await
+            .unwrap();
+        hook.resume();
+
+        capture
+            .await
+            .unwrap()
+            .expect_err("capture must not replace a target created after validation");
+        assert_eq!(
+            tokio::fs::read(&target).await.unwrap(),
+            b"racing-checkpoint"
+        );
+        let mut entries = tokio::fs::read_dir(&checkpoints).await.unwrap();
+        assert_eq!(
+            entries.next_entry().await.unwrap().unwrap().file_name(),
+            "rootfs.snap"
+        );
+        assert!(entries.next_entry().await.unwrap().is_none());
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn cancelled_checkpoint_capture_finishes_its_blocking_publication() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let instances = temp.path().join("instances");
+        let checkpoints = temp.path().join("checkpoints");
+        tokio::fs::create_dir(&instances).await.unwrap();
+        tokio::fs::create_dir(&checkpoints).await.unwrap();
+        let completion = Arc::new(ArtifactSyncOpenHook::new());
+        let provider = Arc::new(FileStorageProvider::with_artifact_sync_open_hook(
+            instances.clone(),
+            instances,
+            Arc::clone(&completion),
+        ));
+        let slot = provider
+            .acquire(&AcquireOpts {
+                instance_id: "capture-cancelled-publication".into(),
+                rootfs_size: 64,
+                mem_size: 32,
+            })
+            .await
+            .unwrap();
+        tokio::fs::write(&slot.rootfs_path, b"complete-checkpoint")
+            .await
+            .unwrap();
+        let target = checkpoints.join("rootfs.snap");
+        let hook = crate::failpoint::TestFailpoint::new(&["storage-capture-before-publish"]);
+
+        let capture = tokio::spawn({
+            let hook = hook.clone();
+            let provider = Arc::clone(&provider);
+            let slot = slot.clone();
+            let target = target.clone();
+            async move { hook.run(provider.capture_checkpoint(&slot, &target)).await }
+        });
+        completion.wait_until_open().await;
+        completion.resume();
+        hook.wait_until_paused().await;
+        capture.abort();
+        assert!(capture.await.unwrap_err().is_cancelled());
+        hook.release();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            completion.wait_until_capture_finished(),
+        )
+        .await
+        .expect("blocking publication transaction must finish after caller cancellation");
+        assert_eq!(
+            tokio::fs::read(&target).await.unwrap(),
+            b"complete-checkpoint"
+        );
+        let mut entries = tokio::fs::read_dir(&checkpoints).await.unwrap();
+        assert_eq!(
+            entries.next_entry().await.unwrap().unwrap().file_name(),
+            "rootfs.snap"
+        );
+        assert!(entries.next_entry().await.unwrap().is_none());
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn checkpoint_capture_cleans_temporary_data_after_failure() {
+        let (_temp, provider, slot, checkpoints) = checkpoint_fixture("capture-cleanup").await;
+        tokio::fs::write(&slot.rootfs_path, b"complete-temporary-copy")
+            .await
+            .unwrap();
+        let target = checkpoints.join("rootfs.snap");
+        let hook = crate::failpoint::TestFailpoint::new(&["storage-capture-after-publish"]);
+
+        hook.run(provider.capture_checkpoint(&slot, &target))
+            .await
+            .expect_err("armed capture must roll back its unpublished target");
+
+        assert!(!target.exists());
+        assert!(
+            tokio::fs::read_dir(&checkpoints)
+                .await
+                .unwrap()
+                .next_entry()
+                .await
+                .unwrap()
+                .is_none(),
+            "capture failure must remove its temporary file"
+        );
     }
 }

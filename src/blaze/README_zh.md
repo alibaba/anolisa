@@ -13,6 +13,8 @@ Blaze 通过 HTTP API 管理 sandbox 实例的完整生命周期，支持策略�
 - **HTTP API** — Unix domain socket (`/run/blaze/api.sock`) + TCP (`:14159`)
 - **策略驱动后端选择** — workload class → 后端优先级列表
 - **生命周期状态机** — 持久化状态，并支持重启恢复
+- **检查点捕获** — 对支持该能力的后端和存储提供程序捕获完整 VM 状态、客体
+  内存和可写根文件系统，并提供历史查询
 - **Guest 操作** — 对提供 guest endpoint 的运行中后端执行有界命令和文件传输
 - **Template catalog** — 有界导入并原子发布可复用 artifact
 - **内核 hook 注册** — 前/后置 hook 状态追踪
@@ -139,6 +141,8 @@ Blaze 通过 `/v1/sandboxes` 提供沙箱生命周期和客户机操作。
 | POST | `/v1/sandboxes/{id}/exec` | 执行 guest 命令 |
 | POST | `/v1/sandboxes/{id}/read` | 读取 guest 文件 |
 | POST | `/v1/sandboxes/{id}/write` | 替换 guest 文件 |
+| POST | `/v1/sandboxes/{id}/checkpoint` | 捕获完整检查点 |
+| GET | `/v1/sandboxes/{id}/checkpoints` | 列出已提交的检查点历史 |
 | GET | `/v1/pools` | 预留接口；返回 `501` |
 | GET | `/v1/pools/{backend}/{class}` | 预留接口；返回 `501` |
 | POST | `/v1/pools/{backend}/{class}/drain` | 预留接口；返回 `501` |
@@ -209,11 +213,24 @@ daemon 才会逐个处理未结束的 sandbox。后续逐项恢复期间，如�
 写入协调、清单发布、重置拒绝、旧状态清理和失败边界参见
 [生命周期状态一致性与兼容性设计](docs/design/lifecycle-state-consistency_zh.md)。
 
-操作记录只保存操作类型和开始时间，不记录每个资源步骤是否已经完成。中断的
-创建会被清理而不是从原位置继续，重启后也不会接管先前的后端进程。恢复失败
-后目前没有后台循环自动重试。本次变更不提供检查点捕获或恢复。重置接口在
-运行环境和存储能够一起重置前不可用；这里的恢复流程没有增加后端快照、捕获
-或恢复操作。
+操作记录会保存创建和销毁操作，以及检查点捕获已经完成的持久化阶段。中断的
+创建会被清理而不是从原位置继续，重启后也不会接管先前的后端进程。启动恢复会
+销毁捕获中断的 sandbox，而不是从其检查点恢复。恢复失败后目前没有后台循环自动
+重试。重置接口仍不可用，也不会恢复检查点。
+
+### 检查点捕获与历史
+
+当运行中的 sandbox 所使用的后端和存储提供程序都声明支持完整捕获时，
+`POST /v1/sandboxes/{id}/checkpoint` 会创建检查点。请求成功时，Blaze 会暂停后端，
+捕获 VM 状态、客体内存和可写根文件系统，发布包含完整性信息的自包含清单，更新
+该 sandbox 的检查点 HEAD，然后恢复后端。响应包含完整清单，以及
+`checkpoint_id` 和 `instance_id` 字段。后端或存储组合不支持该能力时，接口会在
+改变 sandbox 状态前返回 HTTP 501。
+
+`GET /v1/sandboxes/{id}/checkpoints` 返回已提交检查点的历史摘要，包括父检查点、
+逻辑大小、是否为当前 HEAD，以及能否从 HEAD 到达。当前版本不提供检查点恢复或
+删除接口。响应字段、当前后端支持情况和失败处理方式参见
+[检查点捕获用户指南](../../docs/user-guide/zh/runtime/blaze.md#检查点捕获与历史)。
 
 ### Guest 操作
 

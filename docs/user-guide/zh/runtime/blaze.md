@@ -78,7 +78,9 @@ ID。Blaze 会保留被拒绝的记录。修复或恢复该记录后，重新启
 
 Blaze 通过 `/v1/sandboxes` 提供沙箱生命周期和客户机操作。客户端使用该
 命名空间列出、创建、查看和删除沙箱，以及在沙箱内执行命令、读取文件和写入
-文件。销毁沙箱使用 `DELETE /v1/sandboxes/{id}`。
+文件。销毁沙箱使用 `DELETE /v1/sandboxes/{id}`。检查点捕获与历史查询分别使用
+`POST /v1/sandboxes/{id}/checkpoint` 和
+`GET /v1/sandboxes/{id}/checkpoints`。
 
 ## 主机集成边界
 
@@ -178,6 +180,68 @@ Blaze 仍可读取旧版本写入的 `Reset`、`Warm` 和 `start_path = "warm"` 
 这些兼容响应背后的生命周期约束记录在
 [生命周期状态一致性与兼容性设计](../../../../src/blaze/docs/design/lifecycle-state-consistency_zh.md)
 中。
+
+## 检查点捕获与历史
+
+Blaze 通过 `POST /v1/sandboxes/{id}/checkpoint` 捕获运行中的 sandbox。
+
+所选后端和存储提供程序必须同时声明支持完整检查点捕获。内置文件存储提供程序
+负责捕获可写根文件系统，内置 `mock` 后端提供完整的开发环境实现。当前版本的
+Firecracker、Bubblewrap 和其他进程后端尚未声明支持捕获。不支持的组合会在暂停
+sandbox 或修改其生命周期记录前返回 HTTP 501。
+
+对于受支持且正在运行的 sandbox，Blaze 会持有该 sandbox 的操作锁，验证当前
+检查点的父项，暂停后端，并捕获三个自包含文件：`vmstate.snap`、`memory.snap`
+和 `rootfs.snap`。随后会同步文件、计算摘要、发布清单、原子更新该 sandbox 的
+检查点 HEAD，再恢复后端。捕获期间，对虚拟机内部执行的命令和文件操作，以及
+其他生命周期变更都会等待同一把操作锁。
+
+成功响应包含已发布的完整清单。现有 `checkpoint_id` 和 `instance_id` 字段与
+`id` 和 `sandbox_id` 分别指向同一个检查点和 sandbox：
+
+```json
+{
+  "checkpoint_id": "ckpt-11111111-1111-4111-8111-111111111111",
+  "instance_id": "22222222-2222-4222-8222-222222222222",
+  "format_version": 1,
+  "id": "ckpt-11111111-1111-4111-8111-111111111111",
+  "parent": null,
+  "sandbox_id": "22222222-2222-4222-8222-222222222222",
+  "policy_name": "agent-tool",
+  "image_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "backend": "mock",
+  "backend_version": "mock-v1",
+  "created_at": "2026-08-14T00:00:00Z",
+  "snapshot_kind": "full",
+  "artifacts": [
+    {
+      "name": "vmstate.snap",
+      "size_bytes": 4096,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "memory.snap",
+      "size_bytes": 8192,
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "name": "rootfs.snap",
+      "size_bytes": 8589934592,
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  ]
+}
+```
+
+可以通过 `GET /v1/sandboxes/{id}/checkpoints` 查询已提交的历史。每个列表项
+包含 `id`、`parent`、`created_at`、总逻辑大小 `size_bytes`、`is_head` 和
+`on_head_chain`。该列表只提供摘要，不会重复捕获响应中的完整制品清单。
+
+能够确认发生在发布前的失败会删除临时数据、恢复后端，并让 sandbox 保持运行。
+如果 Blaze 无法确认发布、HEAD 更新、持久化或后端恢复的结果，则会保留持久记录并
+报告 `RecoveryRequired`；在 sandbox 完成恢复处理或销毁前，不应重试捕获。已经提交但
+未成为 HEAD 的检查点仍可能出现在历史列表中，其 `is_head` 为 `false`。当前版本
+不提供检查点恢复、删除或清理接口。
 
 ## 存储制品同步
 

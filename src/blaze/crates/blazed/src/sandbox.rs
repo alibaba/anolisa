@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Managed sandbox lifecycle and runtime ownership.
 
+mod checkpoint;
 mod manager;
 mod storage_sync;
 pub(crate) mod template;

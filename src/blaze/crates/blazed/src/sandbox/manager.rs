@@ -15,6 +15,7 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::checkpoint_store::CheckpointStore;
 use crate::error::{BlazeDaemonError, Result};
 use crate::guest::{GuestClient, GuestExecResult, MAX_GUEST_FILE_BYTES};
 use crate::metrics::Metrics;
@@ -81,8 +82,9 @@ pub struct SandboxManager {
     pub(super) storage_sync_permits: Arc<Semaphore>,
     spawners: Arc<SpawnerRegistry>,
     active_backend: BackendKind,
-    storage: Arc<dyn StorageProvider>,
+    pub(super) storage: Arc<dyn StorageProvider>,
     state_store: StateStore,
+    pub(super) checkpoints: CheckpointStore,
     rootfs_size: u64,
     mem_size: u64,
     metrics: Arc<Metrics>,
@@ -129,6 +131,7 @@ impl SandboxManager {
         let instances = Arc::new(Mutex::new(instances));
         let backend_instances = Arc::new(Mutex::new(HashMap::new()));
         let metrics = Arc::new(Metrics::new());
+        let checkpoints = CheckpointStore::new(state_store.clone());
         let resources = SandboxManagerResources {
             #[cfg(test)]
             instances: instances.clone(),
@@ -147,6 +150,7 @@ impl SandboxManager {
                 active_backend,
                 storage,
                 state_store,
+                checkpoints,
                 rootfs_size,
                 mem_size,
                 metrics,
@@ -477,10 +481,21 @@ impl SandboxManager {
     }
 
     /// Idempotently destroy one sandbox and its owned runtime resources.
-    pub async fn destroy(&self, id: Uuid) -> Result<bool> {
-        let operation_lock = self.operation_lock(id);
-        let _operation = operation_lock.lock().await;
-        self.destroy_locked(id).await
+    ///
+    /// The supervised task retains per-sandbox serialization after a caller
+    /// disconnects, so blocking filesystem cleanup cannot race a retry.
+    pub async fn destroy(self: &Arc<Self>, id: Uuid) -> Result<bool> {
+        let manager = Arc::clone(self);
+        crate::failpoint::spawn(async move {
+            let operation = manager.operation_lock(id).lock_owned().await;
+            let result = manager.destroy_locked(id).await;
+            drop(operation);
+            result
+        })
+        .await
+        .map_err(|error| {
+            BlazeDaemonError::Internal(format!("destroy supervisor failed: {error}"))
+        })?
     }
 
     async fn destroy_locked(&self, id: Uuid) -> Result<bool> {
@@ -573,6 +588,28 @@ impl SandboxManager {
             return Err(BlazeDaemonError::RecoveryRequired(format!(
                 "destroy {id}: backend stopped but lifecycle retention failed: {error}; \
                  storage retained"
+            )));
+        }
+
+        let checkpoints = self.checkpoints.clone();
+        let checkpoint_cleanup = crate::failpoint::spawn_blocking(move || {
+            crate::failpoint::pause_blocking("checkpoint-before-store-remove");
+            checkpoints.remove_sandbox(id)
+        })
+        .await;
+        let checkpoint_cleanup_error = match checkpoint_cleanup {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error.to_string()),
+            Err(error) => Some(format!("blocking task failed: {error}")),
+        };
+        if let Some(error) = checkpoint_cleanup_error {
+            let recovery = self.mark_recovery(id).err();
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "destroy {id}: backend stopped but checkpoint cleanup failed: {error}; \
+                 storage retained{}",
+                recovery
+                    .map(|error| format!("; recovery state persistence failed: {error}"))
+                    .unwrap_or_default()
             )));
         }
 
@@ -696,7 +733,7 @@ impl SandboxManager {
         ))
     }
 
-    async fn wait_for_guest_ready(
+    pub(super) async fn wait_for_guest_ready(
         &self,
         backend: &DynBackendInstance,
         failpoint: &str,
@@ -885,11 +922,19 @@ impl SandboxManager {
         }
     }
 
-    fn mark_recovery(&self, id: Uuid) -> Result<()> {
+    pub(super) fn mark_recovery(&self, id: Uuid) -> Result<()> {
         self.mark_instance_recovery(self.get(id)?)
     }
 
-    fn mark_instance_recovery(&self, mut instance: SandboxInstance) -> Result<()> {
+    pub(super) fn persist_and_retain(&self, instance: SandboxInstance) -> Result<()> {
+        self.state_store.persist(&instance)?;
+        if let Some(error) = self.retain_instance(instance) {
+            return Err(BlazeDaemonError::RecoveryRequired(error));
+        }
+        Ok(())
+    }
+
+    pub(super) fn mark_instance_recovery(&self, mut instance: SandboxInstance) -> Result<()> {
         if instance.state != SandboxState::RecoveryRequired {
             instance.transition(SandboxState::RecoveryRequired)?;
         }
@@ -918,7 +963,7 @@ impl SandboxManager {
         }
     }
 
-    fn retain_instance(&self, instance: SandboxInstance) -> Option<String> {
+    pub(super) fn retain_instance(&self, instance: SandboxInstance) -> Option<String> {
         match self.instances.lock() {
             Ok(mut instances) => {
                 instances.insert(instance.id, instance);

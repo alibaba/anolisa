@@ -99,6 +99,28 @@ pub struct SpawnRequest {
     pub vm: Option<VmConfig>,
 }
 
+/// Snapshot flavor requested from a backend.
+///
+/// The file provider currently requires self-contained artifacts, so only
+/// full snapshots are exposed until a restore-independent delta format exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SnapshotKind {
+    /// Self-contained VM and memory snapshot.
+    Full,
+}
+
+/// Paths and semantics for one snapshot operation.
+#[derive(Debug, Clone)]
+pub struct SnapshotRequest {
+    /// Destination for VM state.
+    pub snapshot_path: PathBuf,
+    /// Destination for guest memory.
+    pub mem_path: PathBuf,
+    /// Snapshot flavor.
+    pub kind: SnapshotKind,
+}
+
 /// Probed availability of a single backend on this host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendStatus {
@@ -202,5 +224,13 @@ mod tests {
         }];
         let err = select_backend(&priority, &available).expect_err("must fail");
         assert!(matches!(err, BlazeError::BackendUnavailable { .. }));
+    }
+
+    #[test]
+    fn snapshot_kind_serializes_as_a_stable_lowercase_value() {
+        assert_eq!(
+            serde_json::to_value(SnapshotKind::Full).expect("snapshot kind"),
+            serde_json::json!("full")
+        );
     }
 }

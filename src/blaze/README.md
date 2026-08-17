@@ -14,6 +14,9 @@ Designed as the per-host agent for E2B-style orchestrator platforms.
 - **HTTP API** — Unix domain socket (`/run/blaze/api.sock`) + TCP (`:14159`)
 - **Policy-driven backend selection** — workload class → backend priority list
 - **Lifecycle state machine** — durable state with restart recovery
+- **Checkpoint capture** — full VM state, guest memory, and writable root
+  filesystem capture with queryable history for supported backends and storage
+  providers
 - **Guest operations** — bounded command execution and file transfer for
   running backends that expose a guest endpoint
 - **Template catalog** — bounded import and atomic publication of reusable artifacts
@@ -148,6 +151,8 @@ Blaze exposes sandbox lifecycle and guest operations through `/v1/sandboxes`.
 | POST | `/v1/sandboxes/{id}/exec` | Execute a guest command |
 | POST | `/v1/sandboxes/{id}/read` | Read a guest file |
 | POST | `/v1/sandboxes/{id}/write` | Replace a guest file |
+| POST | `/v1/sandboxes/{id}/checkpoint` | Capture a full checkpoint |
+| GET | `/v1/sandboxes/{id}/checkpoints` | List committed checkpoint history |
 | GET | `/v1/pools` | Reserved; returns `501` |
 | GET | `/v1/pools/{backend}/{class}` | Reserved; returns `501` |
 | POST | `/v1/pools/{backend}/{class}/drain` | Reserved; returns `501` |
@@ -233,13 +238,29 @@ See the
 for writer coordination, inventory publication, reset rejection, legacy-state
 cleanup, and failure boundaries.
 
-The operation journal records the operation and start time, not completion of
-each resource step. An interrupted create is cleaned up rather than resumed,
-and an existing backend process is not adopted after restart. Failed recovery
-does not run in a background retry loop. Checkpoint capture and restore are not
-available in this change. Reset remains unavailable until runtime and storage
-can be reset together; this recovery flow does not add backend snapshot,
-capture, or restore operations.
+The operation journal records create and destroy operations and the durable
+phase reached by checkpoint capture. An interrupted create is cleaned up rather
+than resumed, and an existing backend process is not adopted after restart.
+Startup recovery destroys an interrupted sandbox instead of restoring its
+checkpoint. Failed recovery does not run in a background retry loop. Reset
+remains unavailable and does not restore a checkpoint.
+
+### Checkpoint capture and history
+
+`POST /v1/sandboxes/{id}/checkpoint` captures a running sandbox when both its
+backend and storage provider advertise full-capture support. A successful
+request pauses the backend, captures VM state, guest memory, and the writable
+root filesystem, publishes a self-contained integrity manifest, moves the
+sandbox checkpoint HEAD, and resumes the backend. The response includes the
+complete manifest plus the `checkpoint_id` and `instance_id` fields.
+Unsupported backend or storage combinations return HTTP 501 before changing
+sandbox state.
+
+`GET /v1/sandboxes/{id}/checkpoints` returns committed history summaries,
+including parentage, logical size, current-HEAD status, and HEAD reachability.
+This release does not provide checkpoint restore or deletion.
+See the [checkpoint capture user guide](../../docs/user-guide/en/runtime/blaze.md#checkpoint-capture-and-history)
+for response fields, current backend support, and failure handling.
 
 ### Guest operations
 
