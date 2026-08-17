@@ -194,9 +194,12 @@ fn canonicalize_value(value: &mut Value) {
             }
         }
         Value::Object(map) => {
-            for value in map.values_mut() {
+            let mut entries = std::mem::take(map).into_iter().collect::<Vec<_>>();
+            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            for (_, value) in &mut entries {
                 canonicalize_value(value);
             }
+            map.extend(entries);
         }
         _ => {}
     }
@@ -261,6 +264,19 @@ mod tests {
         assert_eq!(
             fingerprint_projection(projection).unwrap(),
             "f678fe77434f8ed6a87de660a42db17c06aa29411280150fd92f2c29f8012b13"
+        );
+    }
+
+    #[test]
+    fn fingerprint_ignores_nested_object_insertion_order() {
+        let first: Value =
+            serde_json::from_str(r#"{"z":{"b":2,"a":1},"a":[{"d":4,"c":3}]}"#).unwrap();
+        let second: Value =
+            serde_json::from_str(r#"{"a":[{"c":3,"d":4}],"z":{"a":1,"b":2}}"#).unwrap();
+
+        assert_eq!(
+            fingerprint_projection(first).unwrap(),
+            fingerprint_projection(second).unwrap()
         );
     }
 }
