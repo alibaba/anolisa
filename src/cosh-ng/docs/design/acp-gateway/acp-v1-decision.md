@@ -54,6 +54,16 @@ ACP provides runtime interoperability. It does not own:
 ACP is therefore a Runtime replaceability boundary, not the COSH control
 protocol.
 
+ACP Runtime selection is also independent from Gateway capability profile
+selection. An admitted ACP adapter does not imply that any `ExecutionTarget`
+is present. A `task-only-v1` deployment exposes no governed side-effect tool;
+`ws-ckpt-v1` exposes checkpoint only through a typed hosted-operation contract
+that the Runtime explicitly acknowledges.
+
+Provider-native ACP permission is not a fallback execution target. An adapter
+without a typed hosted-result contract cannot turn `allow_once` into a COSH
+Permit or satisfy a checkpoint request on behalf of `ws-ckpt`.
+
 ## Stable capability scope
 
 | Capability | COSH handling |
@@ -117,6 +127,10 @@ A supported adapter must:
 ACP Runtime is enabled by profile. A protocol or adapter regression disables
 that profile while preserving Task and audit history. Rollback does not rewrite
 historic events and does not silently move a failed Run to another agent.
+
+Runtime and capability profiles roll back independently. Their admitted pair
+must have an explicit conformance entry; Gateway never invents a new pair for
+an existing Run.
 
 ## Adding an agent
 

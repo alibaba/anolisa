@@ -38,6 +38,25 @@ Runtime request
 Provider-native permission 只有在 COSH 通过上述流程接管 operation 后才是治理权限，否则
 只是 observation evidence。ACP `allow_once` 不能证明 COSH Permit 在 effect boundary 被消费。
 
+## ExecutionTarget registry 与 profile boundary
+
+Gateway 负责公共 approval、Permit、lease、dispatch 与 recovery 状态机。`ExecutionTarget`
+provider 只负责自身 typed operation mapping、readiness proof、target identity、effect、result
+与 reconciliation logic。
+
+Provider 由可信 daemon construction 在 admission 前注册。Capability profile 从 registry 中
+选择封闭的 operation-version 与 target-kind 集合。Task input、Runtime label 与 approval
+presentation 都不能加载 provider 或改变该集合。
+
+`task-only-v1` 选择空 governed-operation 集合，因此不依赖 checkpoint provider。
+`ws-ckpt-v1` 选择 typed workspace checkpoint operation，并要求 `ws-ckpt` provider 在
+Gateway 接收 Task 前通过 readiness 与 identity admission。后续 Git、OverlayFS、cloud 或
+remote snapshot provider 必须拥有独立 typed target 与 conformance evidence，不能作为
+`ws-ckpt` 的 alias 或 silent fallback。
+
+Provider 缺失在 profile admission 阶段处理。已经 admitted 的 Runtime 若请求 profile 外的
+operation，Gateway 必须在创建 Approval 或 Permit state 前返回稳定 unsupported error。
+
 ## Canonical operation
 
 每个 governed operation 都有有版本的 typed representation。Canonical digest 覆盖：
@@ -124,3 +143,6 @@ Cancellation 阻止尚未开始的 authority 继续推进，并收敛 pending ap
 - Started execution 不得自动 retry。
 - 伪造 Runtime result 不能与 durable Execution state 不一致。
 - Delivery replay 最多写 Runtime 一次。
+- Profile 不得暴露没有 exact admitted target provider 的 operation。
+- Profile 移除 `ws-ckpt` 时必须同时移除 checkpoint tool 与 authority，不能把 checkpoint
+  request 转发到其他 execution path。

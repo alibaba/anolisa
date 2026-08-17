@@ -43,6 +43,12 @@ A profile records:
 Profile resolution occurs before production admission. A Task cannot override
 the executable, arguments, environment, or workspace.
 
+An installed Agent Runtime profile is distinct from a Gateway capability
+profile. The first admits an agent process and wire contract; the second admits
+a closed set of governed `ExecutionTarget` operations. Passing ACP adapter
+conformance does not make `ws-ckpt`, shell, filesystem, or terminal execution
+available. Release evidence records the tested combination of both profiles.
+
 ## Atomic installation
 
 Installation uses a private managed prefix and stages a complete candidate
@@ -116,6 +122,11 @@ verified profile and does not rewrite Task or audit history.
 Unsupported or regressed profiles are disabled. Gateway does not silently fall
 back to another provider or ungoverned Runtime for an existing Task.
 
+The same rule applies to capability providers. A missing `ws-ckpt` service can
+make `ws-ckpt-v1` unavailable while leaving an explicitly selected
+`task-only-v1` daemon valid. It cannot leave the checkpoint tool advertised or
+redirect the operation to provider-native execution.
+
 ## Evidence package
 
 Every accepted release records:
@@ -123,6 +134,7 @@ Every accepted release records:
 - candidate commit and artifact digest;
 - adapter package, adapter version, and upstream agent version;
 - operating environment and required Runtime capabilities;
+- Gateway capability profile and exact ExecutionTarget provider versions;
 - exact automated commands and result summary;
 - manual steps and expected observations, when applicable;
 - untested cases and rollback result.

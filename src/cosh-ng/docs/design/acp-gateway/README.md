@@ -121,6 +121,50 @@ flowchart TB
 | Capability Broker | Actor, Target, Operation, Scope, and Permit binding | User interface and agent sessions |
 | Execution Target | Execute an authorized typed operation and return evidence | Expand authority or rewrite Task decisions |
 
+## Capability profiles and portability
+
+A Gateway capability profile is an admission-time manifest of the governed
+operations and trusted `ExecutionTarget` providers available to a daemon. It is
+separate from an Agent Runtime profile: selecting Codex, Claude, or cosh-core
+does not implicitly install checkpoint, shell, or filesystem authority.
+
+The target architecture defines at least these profiles:
+
+| Profile | Governed operation inventory | Platform dependency | Status |
+| --- | --- | --- | --- |
+| `task-only-v1` | None; Task, approval, cancellation, input, retry, and observation remain available | No checkpoint provider | Target design; not implemented yet |
+| `ws-ckpt-v1` | Typed workspace checkpoint creation through the Capability Broker | Linux and an admitted `ws-ckpt` service, socket, and workspace identity | Initial Phase 1 implementation slice |
+
+Profile selection follows these rules:
+
+- the operator selects one profile before the daemon binds its command socket;
+- a Task or Runtime cannot select a provider or widen the admitted inventory;
+- the Runtime handshake advertises exactly the tools enabled by the profile;
+- a missing optional provider removes its capability, not its security checks;
+- requesting an unavailable operation fails before Approval or Permit issuance;
+- Gateway never falls back to provider-native execution, a local copy, or an
+  ungoverned shell operation.
+
+This makes `ws-ckpt` a pluggable execution provider rather than a permanent
+Gateway dependency. The current implementation still admits only the
+checkpoint-enabled production slice; making `task-only-v1` selectable is a
+separate implementation and acceptance task.
+
+Issue-sized implementation slices are:
+
+| Slice | Deliverable | Acceptance |
+| --- | --- | --- |
+| Capability profile contract | Versioned profile ID, closed operation manifest, and stable digest | Unknown profiles and inventory mismatch fail before Task admission |
+| Portable admission | Explicit `task-only-v1` daemon mode with no checkpoint arguments or connection | Task submit/get/events/cancel/input/retry work; checkpoint is absent and rejected |
+| Target provider registry | Trusted startup registration keyed by operation version and target kind | Task and Runtime input cannot select or replace a provider |
+| `ws-ckpt` provider extraction | Move the existing checkpoint path behind the common target registry | Existing Permit, audit, typed-result, uncertainty, and replay tests stay green |
+| Durable profile binding | Persist the admitted profile identity for scheduling, retry, and recovery | Restart never substitutes a provider or changes a Run inventory |
+| Platform matrix | Linux `ws-ckpt-v1` evidence plus portable-profile evidence on each supported host family | Unsupported hosts reject only `ws-ckpt-v1`; no silent downgrade or false tool advertisement |
+
+Each slice can be reviewed independently. `task-only-v1` is complete only when
+the no-`ws-ckpt` startup and negative checkpoint tests exercise the production
+binary, not only an injected unit-test driver.
+
 ## Core objects
 
 | Object | Meaning |

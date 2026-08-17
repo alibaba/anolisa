@@ -108,6 +108,45 @@ flowchart TB
 | Capability Broker | 绑定 Actor、Target、Operation、Scope 和 Permit | 用户界面和 Agent 会话 |
 | Execution Target | 在本机或 ECS 执行已授权操作并返回证据 | 自行扩大权限或修改 Task 决策 |
 
+## Capability Profile 与可移植性
+
+Gateway capability profile 是 daemon admission 时确定的 manifest，列出可用的 governed
+operation 与可信 `ExecutionTarget` provider。它与 Agent Runtime profile 相互独立：选择
+Codex、Claude 或 cosh-core，不会隐式安装 checkpoint、shell 或 filesystem authority。
+
+目标架构至少定义以下 profile：
+
+| Profile | Governed operation inventory | 平台依赖 | 状态 |
+| --- | --- | --- | --- |
+| `task-only-v1` | 无副作用 operation；Task、approval、cancel、input、retry 与 observation 仍可用 | 不依赖 checkpoint provider | 目标设计，尚未实现 |
+| `ws-ckpt-v1` | 通过 Capability Broker 执行 typed workspace checkpoint create | Linux，以及通过 admission 的 `ws-ckpt` service、socket 与 workspace identity | Phase 1 首个实现切片 |
+
+Profile selection 遵循以下规则：
+
+- operator 在 daemon 绑定 command socket 前选择 profile；
+- Task 或 Runtime 不能选择 provider，也不能扩大 admitted inventory；
+- Runtime handshake 只发布该 profile 启用的 tool；
+- optional provider 缺失时移除相应 capability，不移除安全检查；
+- unavailable operation 在 Approval 或 Permit 签发前失败；
+- Gateway 不得 fallback 到 provider-native execution、local copy 或 ungoverned shell。
+
+因此，`ws-ckpt` 是可插拔 execution provider，不是 Gateway 永久依赖。当前实现仍只接纳
+checkpoint-enabled production slice；让 `task-only-v1` 可选择属于独立的实现与验收任务。
+
+可以按以下粒度拆分 Issue：
+
+| 切片 | 交付内容 | 验收标准 |
+| --- | --- | --- |
+| Capability profile contract | 有版本的 profile ID、封闭 operation manifest 与稳定 digest | Unknown profile 与 inventory mismatch 在 Task admission 前失败 |
+| Portable admission | 显式 `task-only-v1` daemon mode，不需要 checkpoint 参数或连接 | Task submit/get/events/cancel/input/retry 可用；checkpoint 不暴露且明确拒绝 |
+| Target provider registry | 按 operation version 与 target kind 注册可信 startup provider | Task 与 Runtime input 不能选择或替换 provider |
+| `ws-ckpt` provider extraction | 把现有 checkpoint path 迁入公共 target registry | 既有 Permit、audit、typed-result、uncertainty 与 replay test 保持通过 |
+| Durable profile binding | 为 scheduling、retry 与 recovery 持久化 admitted profile identity | Restart 不替换 provider，也不改变 Run inventory |
+| Platform matrix | Linux `ws-ckpt-v1` evidence，以及各 supported host family 的 portable-profile evidence | Unsupported host 只拒绝 `ws-ckpt-v1`，不 silent downgrade 或错误发布 tool |
+
+每个切片可以独立 review。只有 production binary 完成无 `ws-ckpt` 启动与 checkpoint negative
+test，`task-only-v1` 才算完成，不能只依赖 injected unit-test driver。
+
 ## 核心对象
 
 | 对象 | 语义 |

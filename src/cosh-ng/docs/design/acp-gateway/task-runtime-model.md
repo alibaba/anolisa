@@ -79,6 +79,17 @@ Events cover:
 Provider-specific payloads are normalized at the bridge. Channel-specific
 presentation is derived later from durable events.
 
+Runtime initialization also declares a bounded hosted-operation inventory.
+Gateway compares it with the selected capability profile before accepting Task
+work. `task-only-v1` requires an empty inventory; `ws-ckpt-v1` requires the
+exact versioned checkpoint request and typed-result capability. Missing,
+additional, or downgraded operations fail admission rather than being hidden
+by presentation logic.
+
+The Runtime can request only an operation. It cannot select the concrete
+`ExecutionTarget`, socket, service, credential, or fallback path. Those remain
+trusted daemon configuration bound to the admitted profile.
+
 ## Runtime binding fence
 
 A callback is accepted only when all of the following match durable state:
@@ -120,3 +131,5 @@ Runtime a second time.
 - A late permission or input response is rejected without partial mutation.
 - Exactly one terminal outcome is observable through the port.
 - Core and ACP adapters pass the same neutral-port contract suite.
+- Runtime hosted-operation inventory exactly matches the admitted capability
+  profile before a Run starts.

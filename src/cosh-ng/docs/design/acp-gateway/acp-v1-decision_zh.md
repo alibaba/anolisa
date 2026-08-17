@@ -49,6 +49,15 @@ ACP 负责 Agent Client 与 Agent 之间的运行时互操作，不负责：
 
 因此 ACP 是 **Runtime 可替换性边界**，不是 COSH 整体控制协议。
 
+ACP Runtime selection 与 Gateway capability profile selection 也相互独立。接纳 ACP
+adapter 不表示任何 `ExecutionTarget` 已存在。`task-only-v1` deployment 不暴露 governed
+side-effect tool；`ws-ckpt-v1` 只通过 Runtime 明确确认的 typed hosted-operation contract
+暴露 checkpoint。
+
+Provider-native ACP permission 不是 fallback execution target。没有 typed hosted-result
+contract 的 adapter 不能把 `allow_once` 变成 COSH Permit，也不能替代 `ws-ckpt` 完成
+checkpoint request。
+
 ## 稳定能力范围
 
 | 能力 | COSH 处理方式 |
@@ -100,6 +109,9 @@ MCP-over-ACP 和 v2 实验能力不属于稳定基线。引入这些能力时，
 ACP Runtime 通过 Profile 启用。发生协议或 Adapter 回归时，禁用对应 Profile 并保留
 Task 和审计数据，其他 Runtime 实现继续工作。回滚不修改已持久化的历史事件，也不把
 失败 Run 自动迁移到另一个 Agent。
+
+Runtime profile 与 capability profile 独立 rollback。两者的 admitted pair 必须有显式
+conformance entry；Gateway 不为已有 Run 临时构造新的组合。
 
 ## 扩展新的 Agent
 

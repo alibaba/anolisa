@@ -42,6 +42,11 @@ Profile 记录：
 Profile resolution 在 production admission 前完成。Task 不能覆盖 executable、argument、
 environment 或 workspace。
 
+Installed Agent Runtime profile 与 Gateway capability profile 是两个不同概念。前者接纳
+agent process 与 wire contract，后者接纳封闭的 governed `ExecutionTarget` operation 集合。
+通过 ACP adapter conformance 不会自动启用 `ws-ckpt`、shell、filesystem 或 terminal
+execution。Release evidence 必须记录两类 profile 的实际测试组合。
+
 ## 原子安装
 
 Installer 使用 private managed prefix，并在发布前 stage 完整 candidate。Verification 覆盖
@@ -108,6 +113,10 @@ conformance。Rollback 恢复此前 verified profile，不改写 Task 或 audit 
 Unsupported/regressed profile 必须禁用。Gateway 不为已有 Task 静默 fallback 到其他 Provider
 或 ungoverned Runtime。
 
+Capability provider 遵守同一规则。`ws-ckpt` service 缺失可以让 `ws-ckpt-v1` 不可用，
+同时保留 operator 显式选择的 `task-only-v1` daemon；但不能继续发布 checkpoint tool，也
+不能把 operation 转发到 provider-native execution。
+
 ## Evidence package
 
 每个 accepted release 记录：
@@ -115,6 +124,7 @@ Unsupported/regressed profile 必须禁用。Gateway 不为已有 Task 静默 fa
 - candidate commit 与 artifact digest；
 - adapter package、adapter version 与 upstream agent version；
 - operating environment 与 required Runtime capability；
+- Gateway capability profile 与准确 ExecutionTarget provider version；
 - 精确自动化 command 与结果摘要；
 - 适用时的 manual step 与 expected observation；
 - untested case 与 rollback result。

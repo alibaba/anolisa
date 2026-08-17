@@ -74,6 +74,14 @@ Event 包括：
 
 Provider 私有 payload 在 Bridge 内归一化。渠道 presentation 再由持久 event 派生。
 
+Runtime initialization 还需要声明有界 hosted-operation inventory。Gateway 在接收 Task work
+前，将其与 selected capability profile 精确比较。`task-only-v1` 要求 inventory 为空；
+`ws-ckpt-v1` 要求准确版本的 checkpoint request 与 typed-result capability。缺失、额外或
+downgrade operation 必须拒绝 admission，不能由 presentation logic 隐藏。
+
+Runtime 只能请求 operation，不能选择具体 `ExecutionTarget`、socket、service、credential
+或 fallback path。这些内容属于绑定 admitted profile 的可信 daemon configuration。
+
 ## Runtime binding fence
 
 Callback 只有在以下字段全部匹配持久状态时才被接受：
@@ -112,3 +120,4 @@ Prompt completion、process exit、transport close、cancellation 与 execution 
 - Late permission/input response 被拒绝且没有 partial mutation。
 - Port 只能观察到一个 terminal outcome。
 - Core 与 ACP Adapter 通过同一 neutral-port contract suite。
+- Run 启动前，Runtime hosted-operation inventory 必须与 admitted capability profile 精确匹配。

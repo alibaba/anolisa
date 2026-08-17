@@ -82,6 +82,24 @@ containment proof, and service identity before binding a public command socket.
 Test or interoperability flags cannot silently enable the durable production
 scheduler.
 
+## Profile admission and platform portability
+
+Capability dependencies are mandatory only for the selected profile. A
+`task-only-v1` daemon does not open or validate a checkpoint socket and must not
+advertise a checkpoint tool. A `ws-ckpt-v1` daemon requires Linux plus the
+reviewed service lifecycle, peer identity, socket, workspace binding, and
+filesystem support of its `ws-ckpt` provider.
+
+If a host cannot satisfy those requirements, `ws-ckpt-v1` fails admission
+before the command socket is published. The operator may explicitly select a
+smaller supported profile, but Gateway never downgrades an already selected
+profile. The admitted profile identity and operation inventory remain fixed
+for the Run and are checked against the Runtime handshake.
+
+Adding another checkpoint implementation does not inherit `ws-ckpt` trust.
+Its executable or service identity, data durability, audit barrier,
+reconciliation, and crash-containment evidence are reviewed independently.
+
 ## Filesystem authority
 
 Security-sensitive files are opened relative to a trusted directory descriptor
@@ -108,3 +126,5 @@ be appended to a corrupt tail and treated as durable evidence.
 - Environment injection and service-manager escape attempts fail closed.
 - Security evidence comes from effective runtime properties and adversarial
   fixtures, not configuration intent alone.
+- Unsupported platform dependencies reject only the profile that requires
+  them; they never leave an advertised operation without an admitted target.

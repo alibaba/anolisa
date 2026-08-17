@@ -40,6 +40,28 @@ Provider-native permission remains observational evidence unless COSH takes
 over the operation through this flow. An ACP `allow_once` response does not
 prove a COSH Permit was consumed at the effect boundary.
 
+## ExecutionTarget registry and profile boundary
+
+Gateway owns the common approval, Permit, lease, dispatch, and recovery state
+machines. An `ExecutionTarget` provider owns only its typed operation mapping,
+readiness proof, target identity, effect, result, and reconciliation logic.
+
+Providers are registered by trusted daemon construction before admission. A
+capability profile selects a closed set of operation-version and target-kind
+pairs from that registry. Task input, Runtime labels, and approval presentation
+cannot load a provider or change that set.
+
+`task-only-v1` selects an empty governed-operation set and therefore requires
+no checkpoint provider. `ws-ckpt-v1` selects the typed workspace checkpoint
+operation and requires the `ws-ckpt` provider to pass readiness and identity
+admission before Gateway serves Tasks. Future Git, OverlayFS, cloud, or remote
+snapshot providers require distinct typed targets and conformance evidence;
+they are not aliases or silent fallbacks for `ws-ckpt`.
+
+Provider absence is handled at profile admission. If an admitted Runtime later
+requests an operation outside the profile, Gateway returns a stable unsupported
+error before creating Approval or Permit state.
+
 ## Canonical operation
 
 Every governed operation has a versioned typed representation. Its canonical
@@ -135,3 +157,6 @@ reconciliation or explicit operator settlement.
 - Started execution is never automatically retried.
 - A fabricated Runtime result cannot disagree with durable Execution state.
 - Delivery replay writes to Runtime at most once.
+- A profile exposes no operation without an admitted exact target provider.
+- Removing `ws-ckpt` from a profile removes the checkpoint tool and authority;
+  it does not redirect checkpoint requests to another execution path.

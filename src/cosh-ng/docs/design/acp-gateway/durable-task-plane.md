@@ -25,6 +25,11 @@ The persistence model separates:
 Each record carries exact internal identities. Raw provider output and secrets
 are not Task history.
 
+The admitted Runtime profile and Gateway capability profile are immutable Run
+inputs. Scheduling and retry reconstruct their exact identities from durable
+state; they do not re-resolve a profile from current host availability. A
+profile change creates a new explicitly admitted Run or fails closed.
+
 ## Atomic command boundary
 
 A Task command commits, in one transaction:
@@ -76,6 +81,11 @@ process did:
 - typed target reconciliation may turn an uncertain result into a conclusive
   result when the target proves the exact operation outcome.
 
+Recovery does not substitute one capability provider for another. If a Run
+references a target that is no longer admitted, its unstarted work settles
+fail closed and a Started effect remains uncertain until the same typed target
+or an explicit operator procedure can reconcile it.
+
 Explicit release is distinguished from lease expiry so a partially completed
 takeover can resume without repeatedly reclaiming a settled suspended Run.
 
@@ -122,3 +132,5 @@ alone do not protect against rename or symlink races.
 - Poison data cannot starve unrelated work.
 - Every uncertain effect remains visible until exact reconciliation or operator
   settlement.
+- Restart and retry preserve the admitted capability profile; provider
+  unavailability cannot silently change a Run's operation inventory.

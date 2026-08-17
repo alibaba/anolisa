@@ -23,6 +23,10 @@ Task Plane 是 Task 状态、调度意图、Runtime ownership 与 delivery 的�
 
 每条记录携带准确内部 identity。Raw provider output 和 secret 不进入 Task history。
 
+Admitted Runtime profile 与 Gateway capability profile 都是 immutable Run input。调度与
+retry 从 durable state 重建其准确 identity，不根据当前 host availability 重新解析 profile。
+Profile change 必须创建新的显式 admitted Run，否则 fail closed。
+
 ## 原子 command 边界
 
 一个 Task command 在同一 transaction 内提交：
@@ -66,6 +70,10 @@ Gateway 重启后依据持久状态分类，不猜测旧 process 已经做了什
 - typed target 能证明准确 operation outcome 时，reconciliation 可以把 uncertain 结果
   转为 conclusive result。
 
+Recovery 不替换 capability provider。Run 引用的 target 不再 admitted 时，尚未开始的 work
+fail closed；已经 Started 的 effect 保持 uncertain，直到相同 typed target 或显式 operator
+procedure 可以 reconcile。
+
 显式 release 与 lease expiry 必须区分，使中断的 takeover 可以继续，同时避免反复领取已
 收敛的 suspended Run。
 
@@ -107,3 +115,5 @@ symlink race。
 - Response-loss replay 不重复 effect 或 Runtime delivery。
 - Poison data 不得饿死无关 work。
 - 每个 uncertain effect 在准确 reconcile 或 operator settlement 前保持可见。
+- Restart 与 retry 保留 admitted capability profile；provider unavailable 不能静默改变 Run
+  的 operation inventory。

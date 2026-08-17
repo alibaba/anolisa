@@ -72,6 +72,21 @@ Production admission 在绑定公共 command socket 前验证 configured Runtime
 workspace、containment proof 与 service identity。Test/interoperability flag 不能静默启用 durable
 production scheduler。
 
+## Profile admission 与平台可移植性
+
+Capability dependency 只对 selected profile 强制。`task-only-v1` daemon 不打开或校验
+checkpoint socket，也不得发布 checkpoint tool。`ws-ckpt-v1` daemon 要求 Linux，并要求其
+`ws-ckpt` provider 的 service lifecycle、peer identity、socket、workspace binding 与
+filesystem support 全部通过评审和 admission。
+
+Host 无法满足这些要求时，`ws-ckpt-v1` 必须在发布 command socket 前拒绝 admission。
+Operator 可以显式选择更小且受支持的 profile，但 Gateway 不得自动 downgrade 已选择的
+profile。Admitted profile identity 与 operation inventory 在 Run 内保持不变，并与 Runtime
+handshake 精确核对。
+
+新增 checkpoint implementation 不继承 `ws-ckpt` 的信任。其 executable/service identity、
+data durability、audit barrier、reconciliation 与 crash-containment evidence 需要独立评审。
+
 ## Filesystem authority
 
 Security-sensitive file 必须相对可信 directory descriptor 打开，并跨 open 保持 owner、mode、type
@@ -94,3 +109,5 @@ durable evidence。
 - Gateway 被 SIGKILL 后不能留下 lifecycle owner 之外、可产生 effect 的 descendant。
 - Environment injection 与 service-manager escape 尝试 fail closed。
 - Security evidence 来自 effective runtime property 与 adversarial fixture，而非配置意图。
+- 不支持的平台依赖只拒绝需要它的 profile，不能留下没有 admitted target 却仍被发布的
+  operation。
