@@ -22,7 +22,7 @@ use anolisa_core::system_helper::{HelperRequest, HelperResponse};
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::ipc::{self, SYSTEM_HELPER_SOCKET};
 use anolisa_platform::privilege;
-use anolisa_platform::systemd::{self, SystemdError};
+use anolisa_platform::systemd::{Systemd, SystemdError};
 
 use crate::context::CliContext;
 use crate::response::{self, CliError};
@@ -648,18 +648,17 @@ impl StatusServiceState {
 }
 
 fn check_service_state() -> StatusServiceState {
-    match systemd::unit_status(STATUS_SERVICE_UNIT) {
+    match Systemd::system().unit_status(STATUS_SERVICE_UNIT) {
         Ok(status) => {
-            if status.active {
+            if status.failed {
+                StatusServiceState::Failed
+            } else if status.active {
                 StatusServiceState::Active
             } else {
                 StatusServiceState::Inactive
             }
         }
         Err(SystemdError::NotFound(_)) => StatusServiceState::NotInstalled,
-        Err(SystemdError::CommandFailed(ref msg)) if msg.to_lowercase().contains("failed") => {
-            StatusServiceState::Failed
-        }
         Err(_) => StatusServiceState::Unknown,
     }
 }

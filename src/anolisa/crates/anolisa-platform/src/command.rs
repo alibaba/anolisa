@@ -1,10 +1,10 @@
-//! Backend-neutral command execution seam for host package queries.
+//! Backend-neutral command execution seam for host process boundaries.
 //!
 //! [`CommandRunner`] abstracts spawning a process and capturing its output so
-//! that query backends can be tested with a fake runner instead of shelling
-//! out to real `rpm`/`dnf`. The runner stays pure: spawn failures surface as
+//! that process-backed boundaries can be tested with a fake runner instead of
+//! changing the host. The runner stays pure: spawn failures surface as
 //! [`std::io::Error`] and business-level exit-code interpretation lives in the
-//! query layer that consumes the runner.
+//! boundary that consumes the runner.
 
 use std::process::Command;
 
