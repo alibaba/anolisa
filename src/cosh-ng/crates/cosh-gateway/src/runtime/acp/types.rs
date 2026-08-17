@@ -273,6 +273,15 @@ pub enum AcpV1CodecError {
     /// Frame was not valid UTF-8.
     #[error("ACP frame is not valid UTF-8")]
     InvalidUtf8,
+    /// A low-level single-message decoder cannot consume a multi-message frame.
+    #[error("ACP multi-message frame requires the batch-aware runtime bridge")]
+    MultiMessageFrameRequiresBridge,
+    /// One frame exceeded the bounded number of independently dispatched entries.
+    #[error("ACP batch exceeds {limit} entries")]
+    BatchTooLarge {
+        /// Maximum entries accepted in one JSON-RPC batch.
+        limit: usize,
+    },
     /// Official SDK JSON parsing or serialization failed.
     #[error("invalid ACP JSON-RPC frame: {0}")]
     Json(#[from] serde_json::Error),
@@ -363,6 +372,28 @@ pub enum AcpV1CodecError {
     /// Outbound request sequence exceeded the supported JSON-RPC range.
     #[error("ACP request id sequence exhausted")]
     RequestIdExhausted,
+    /// Inbound batch sequence exceeded the supported correlation range.
+    #[error("ACP inbound batch id sequence exhausted")]
+    BatchIdExhausted,
+    /// A deferred response referenced a batch that is no longer pending.
+    #[error("ACP inbound batch {0} is not pending")]
+    UnknownInboundBatch(u64),
+    /// A deferred response referenced a slot outside its pending batch.
+    #[error("ACP inbound batch {batch_id} has no response slot {slot}")]
+    UnknownInboundBatchSlot {
+        /// Connection-local batch identity.
+        batch_id: u64,
+        /// Response position within the batch response array.
+        slot: usize,
+    },
+    /// A batch callback attempted to settle the same response slot twice.
+    #[error("ACP inbound batch {batch_id} response slot {slot} is already settled")]
+    InboundBatchSlotAlreadySettled {
+        /// Connection-local batch identity.
+        batch_id: u64,
+        /// Response position within the batch response array.
+        slot: usize,
+    },
     /// Prompt settled while callbacks still required a response.
     #[error("ACP prompt finished with {count} pending permission requests")]
     PromptFinishedWithPendingPermissions {

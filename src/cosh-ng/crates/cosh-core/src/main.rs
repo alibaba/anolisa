@@ -134,10 +134,25 @@ async fn run_until_sigint() {
 
 async fn run() {
     let args = cli::CliArgs::parse();
+    let agent_headless = is_agent_headless_mode(&args);
+    if args.execution_profile.is_brokered()
+        && (!agent_headless
+            || args.is_session_control()
+            || args.prompt.is_some()
+            || args.cosh_shell_transport
+            || args.enable_shell_evidence_tool
+            || args.approval_mode.is_some()
+            || args.allowed_tools.is_some()
+            || args.tools.is_some())
+    {
+        eprintln!(
+            "[cosh-core] gateway-brokered-v1 requires persistent headless mode and rejects legacy tool or approval overrides"
+        );
+        std::process::exit(2);
+    }
     if args.is_session_control() {
         std::process::exit(session_control::run());
     }
-    let agent_headless = is_agent_headless_mode(&args);
     let (project_root, session_workspace) = if agent_headless {
         let requested_root = args.workspace_path();
         match tool::SessionWorkspace::try_new(&requested_root) {
@@ -153,7 +168,11 @@ async fn run() {
     } else {
         (args.workspace_root(), None)
     };
-    let config = if args.bare {
+    // The execution boundary is a launch property. Resolve it before reading
+    // any workspace project config or constructing hooks/extensions/MCP.
+    let config = if args.execution_profile.is_brokered() {
+        CoreConfig::load_gateway_brokered()
+    } else if args.bare {
         CoreConfig::load_bare()
     } else {
         CoreConfig::load_for_workspace(&project_root)

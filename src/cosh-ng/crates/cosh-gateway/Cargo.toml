@@ -20,4 +20,6 @@ thiserror = { workspace = true }
 wait-timeout = { workspace = true }
 
 [dev-dependencies]
+bincode = { workspace = true }
+chrono = { workspace = true, features = ["clock"] }
 tempfile = { workspace = true }

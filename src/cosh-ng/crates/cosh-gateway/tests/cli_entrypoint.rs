@@ -88,8 +88,10 @@ fn doctor_initializes_installed_adapter_without_prompting() {
 
     assert!(
         output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        "status={:?} stdout={} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout
@@ -131,8 +133,10 @@ fn run_reads_prompt_from_stdin_and_escapes_terminal_controls() {
 
     assert!(
         output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        "status={:?} stdout={} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("safe\\u{1b}[2Jtext"));
@@ -166,6 +170,7 @@ fn missing_adapter_has_stable_profile_exit_and_jsonl_error() {
 #[test]
 fn noninteractive_permission_cancels_and_persists_only_digests() {
     let workspace = tempfile::tempdir().unwrap();
+    fs::set_permissions(workspace.path(), fs::Permissions::from_mode(0o700)).unwrap();
     let (adapter, response) = permission_adapter(&workspace);
     let evidence = workspace.path().join("permission-evidence.jsonl");
     let mut child = Command::new(env!("CARGO_BIN_EXE_cosh-gateway"))
@@ -197,8 +202,10 @@ fn noninteractive_permission_cancels_and_persists_only_digests() {
 
     assert!(
         output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        "status={:?} stdout={} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("\"event\":\"permission_decided\""));
@@ -269,6 +276,33 @@ fn task_cli_rejects_invalid_identity_before_socket_io() {
 }
 
 #[test]
+fn task_retry_cli_rejects_a_non_run_previous_identity_before_socket_io() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("absent.sock");
+    let output = Command::new(env!("CARGO_BIN_EXE_cosh-gateway"))
+        .args([
+            "task",
+            "--socket",
+            socket.to_str().unwrap(),
+            "--output",
+            "jsonl",
+            "retry",
+            "tsk_00000000-0000-0000-0000-000000000000",
+            "--previous-run-id",
+            "tsk_00000000-0000-0000-0000-000000000001",
+            "--idempotency-key",
+            "stable-retry-key",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(10));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("\"code\":\"invalid_request\""));
+    assert!(stdout.contains("identifier prefix must be `run`"));
+}
+
+#[test]
 fn serve_rejects_an_invalid_provisioned_installation_identity() {
     let output = Command::new(env!("CARGO_BIN_EXE_cosh-gateway"))
         .args(["serve", "--installation-id", "invalid"])
@@ -278,4 +312,206 @@ fn serve_rejects_an_invalid_provisioned_installation_identity() {
     assert_eq!(output.status.code(), Some(12));
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("identifier prefix must be `ins`"));
+}
+
+#[test]
+fn serve_rejects_removed_runtime_and_acp_arguments_before_binding() {
+    for removed in [
+        vec!["--runtime-backend", "acp"],
+        vec!["--runtime-backend", "core-brokered"],
+        vec!["--profile", "codex"],
+        vec!["--adapter", "/not/reached/codex-acp"],
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("gateway.sock");
+        let database = directory.path().join("gateway.db");
+        let output = Command::new(env!("CARGO_BIN_EXE_cosh-gateway"))
+            .arg("serve")
+            .args(&removed)
+            .args(["--socket", socket.to_str().unwrap()])
+            .args(["--database", database.to_str().unwrap()])
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(2), "removed args: {removed:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("unexpected argument"), "{stderr}");
+        assert!(!socket.exists());
+        assert!(!database.exists());
+    }
+}
+
+#[test]
+fn serve_help_exposes_only_task_only_runtime_inputs() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cosh-gateway"))
+        .args(["serve", "--help"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("--core-executable"), "{stdout}");
+    for removed in ["--checkpoint-socket", "--security-audit"] {
+        assert!(!stdout.contains(removed), "{stdout}");
+    }
+    for removed in ["--runtime-backend", "--profile", "--adapter"] {
+        assert!(!stdout.contains(removed), "{stdout}");
+    }
+}
+
+#[test]
+fn serve_rejects_removed_ws_ckpt_arguments_before_binding() {
+    for removed in [
+        vec!["--checkpoint-socket", "/run/ws-ckpt/ws-ckpt.sock"],
+        vec![
+            "--security-audit",
+            "/var/lib/cosh-gateway/security-audit.jsonl",
+        ],
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("gateway.sock");
+        let database = directory.path().join("gateway.db");
+        let output = Command::new(env!("CARGO_BIN_EXE_cosh-gateway"))
+            .arg("serve")
+            .args(&removed)
+            .args(["--socket", socket.to_str().unwrap()])
+            .args(["--database", database.to_str().unwrap()])
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(2), "removed args: {removed:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("unexpected argument"), "{stderr}");
+        assert!(!socket.exists());
+        assert!(!database.exists());
+    }
+}
+
+#[test]
+fn task_only_serve_requires_containment_for_the_brokered_core_runtime() {
+    let workspace = tempfile::tempdir().unwrap();
+    let core = workspace.path().join("cosh-core");
+    fs::write(&core, "#!/bin/sh\nexit 0\n").unwrap();
+    let mut permissions = fs::metadata(&core).unwrap().permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&core, permissions).unwrap();
+    let socket = workspace.path().join("gateway.sock");
+    let database = workspace.path().join("gateway.db");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cosh-gateway"))
+        .args([
+            "serve",
+            "--socket",
+            socket.to_str().unwrap(),
+            "--database",
+            database.to_str().unwrap(),
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--core-executable",
+            core.to_str().unwrap(),
+            "--output",
+            "jsonl",
+        ])
+        .env("PATH", "")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(12));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("\"code\":\"runtime_containment_unverified\""));
+    assert!(!stdout.contains("profile_invalid"));
+    assert!(!socket.exists());
+    assert!(!database.exists());
+}
+
+#[test]
+fn packaged_base_service_is_task_only_and_free_of_ws_ckpt_dependency() {
+    let unit = include_str!("../../../packaging/systemd/cosh-gateway@.service.in");
+
+    assert!(unit.contains("--core-executable=\"{libexecdir}/cosh-ng/cosh-core\""));
+    assert!(unit.contains("--workspace=${COSH_GATEWAY_WORKSPACE}"));
+    assert!(!unit.contains("ws-ckpt.service"));
+    assert!(!unit.contains("--checkpoint-socket="));
+    assert!(!unit.contains("--security-audit="));
+    for property in [
+        "Type=exec",
+        "KillMode=control-group",
+        "SendSIGKILL=yes",
+        "FinalKillSignal=SIGKILL",
+        "Delegate=no",
+        "TimeoutStopSec=15",
+        "Restart=on-failure",
+        "ProtectControlGroups=true",
+        "InaccessiblePaths=/run/user",
+    ] {
+        assert!(unit.lines().any(|line| line == property), "{property}");
+    }
+    assert!(!unit.contains("--adapter="));
+    assert!(!unit.contains("--profile="));
+    assert!(!unit.contains("--runtime-backend="));
+}
+
+#[test]
+fn serve_rejects_a_spoofed_core_profile_before_binding_state() {
+    let workspace = tempfile::tempdir().unwrap();
+    let spoofed = workspace.path().join("not-cosh-core");
+    fs::write(&spoofed, "#!/bin/sh\nexit 0\n").unwrap();
+    let mut permissions = fs::metadata(&spoofed).unwrap().permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&spoofed, permissions).unwrap();
+    let socket = workspace.path().join("gateway.sock");
+    let database = workspace.path().join("gateway.db");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cosh-gateway"))
+        .args([
+            "serve",
+            "--systemd-unit",
+            "cosh-gateway@test.service",
+            "--core-executable",
+            spoofed.to_str().unwrap(),
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--socket",
+            socket.to_str().unwrap(),
+            "--database",
+            database.to_str().unwrap(),
+            "--output",
+            "jsonl",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(11));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("\"code\":\"profile_invalid\""));
+    assert!(!socket.exists());
+    assert!(!database.exists());
+}
+
+#[test]
+fn serve_rejects_an_invalid_systemd_unit_before_binding() {
+    let workspace = tempfile::tempdir().unwrap();
+    let socket = workspace.path().join("gateway.sock");
+    let database = workspace.path().join("gateway.db");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cosh-gateway"))
+        .args([
+            "serve",
+            "--systemd-unit",
+            "../cosh-gateway.service",
+            "--socket",
+            socket.to_str().unwrap(),
+            "--database",
+            database.to_str().unwrap(),
+            "--output",
+            "jsonl",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(12));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("\"code\":\"runtime_containment_unverified\""));
+    assert!(!socket.exists());
+    assert!(!database.exists());
 }

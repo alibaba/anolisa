@@ -107,6 +107,12 @@ stage_payload() {
         "$SCRIPT_DIR/assets/bin/cosh" \
         "$SCRIPT_DIR/assets/bin/cosh-switch" \
         "$stage/bin/"
+    if [ "$TARGET_OS" = "linux" ]; then
+        install -d -m 0755 "$stage/share/anolisa/cosh-ng"
+        install -p -m 0644 \
+            "$SOURCE_ROOT/packaging/systemd/cosh-gateway@.service.in" \
+            "$stage/share/anolisa/cosh-ng/cosh-gateway@.service.in"
+    fi
     install -p -m 0644 "$SOURCE_ROOT/LICENSE" "$stage/share/doc/cosh-ng/LICENSE"
     install -p -m 0644 "$SOURCE_ROOT/README.md" "$stage/share/doc/cosh-ng/README.md"
     normalize_modes "$stage"
@@ -144,6 +150,7 @@ for input in \
     "$SOURCE_ROOT/Cargo.toml" \
     "$SOURCE_ROOT/LICENSE" \
     "$SOURCE_ROOT/README.md" \
+    "$SOURCE_ROOT/packaging/systemd/cosh-gateway@.service.in" \
     "$SCRIPT_DIR/assets/bin/cosh" \
     "$SCRIPT_DIR/assets/bin/cosh-switch"; do
     require_file "$input"

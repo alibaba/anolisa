@@ -842,6 +842,24 @@ impl CoreConfig {
         config
     }
 
+    /// Loads provider credentials for Gateway brokered mode without migration.
+    ///
+    /// The launch profile is already fixed before this method is called. It
+    /// deliberately excludes the project layer and clears every local runtime
+    /// contribution so startup cannot run hooks, skills, MCP, or registry
+    /// migration before the private v2 handshake.
+    pub(crate) fn load_gateway_brokered() -> Self {
+        let user_path = config_dir().join("config.toml");
+        let system_path = PathBuf::from("/etc/copilot-shell/config.toml");
+        let mut config = Self::load_from_paths(Some(&system_path), Some(&user_path), None);
+        config.apply_env_overrides();
+        config.apply_bare_isolation();
+        config.mcp = McpConfig::default();
+        config.agent.allowed_tools.clear();
+        config.agent.approval_mode = ApprovalMode::Recommend;
+        config
+    }
+
     fn apply_bare_isolation(&mut self) {
         self.hooks = HooksConfig {
             enabled_override: Some(false),

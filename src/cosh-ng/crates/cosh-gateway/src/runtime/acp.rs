@@ -5,6 +5,7 @@
 
 mod bridge;
 mod codec;
+mod tool_accumulator;
 mod types;
 
 #[cfg(test)]
@@ -12,6 +13,10 @@ mod tests;
 
 pub use bridge::{AcpV1BridgeError, AcpV1BridgeRead, AcpV1RuntimeBridge};
 pub use codec::AcpV1Codec;
+pub use tool_accumulator::{
+    AcpToolAccumulation, AcpToolAccumulatorError, AcpToolAccumulatorLimits,
+    AcpToolInvocationSnapshot, ToolInvocationAccumulator,
+};
 pub use types::{
     AcpV1AgentCapabilities, AcpV1AgentInfo, AcpV1ClientConfig, AcpV1CodecError, AcpV1Observation,
     AcpV1PermissionDecision, AcpV1PermissionOption, AcpV1PermissionOptionKind,

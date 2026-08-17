@@ -59,6 +59,12 @@ mode = "0755"
 type = "executable"
 
 [[component.layout.files]]
+source = "libexec/anolisa/cosh-ng/cosh-gateway"
+target = "{libexecdir}/cosh-ng/cosh-gateway"
+mode = "0755"
+type = "executable"
+
+[[component.layout.files]]
 source = "libexec/anolisa/cosh-ng/cosh-shell"
 target = "{libexecdir}/cosh-ng/cosh-shell"
 mode = "0755"

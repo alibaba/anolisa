@@ -3,7 +3,7 @@
 use cosh_gateway_contracts::{
     capability::{
         ApprovalRequest, CapabilityDecision, CapabilityRequest, CapabilityScope, DenialCode,
-        ExecutionPermit, OperationDescriptor,
+        ExecutionPermit, OperationDescriptor, RuntimeExecutionFence,
     },
     common::{ActorRef, BoundedText, Digest, TargetRef},
     ids::{ActorId, ExecutionId, PermitId, RunId, TaskId},
@@ -26,6 +26,10 @@ pub struct ParentBinding {
 pub struct AuthoritativeRequestBinding {
     /// Exact target selected by trusted admission.
     pub target: TargetRef,
+    /// Immutable identity resolved for the selected target.
+    pub target_identity_digest: Digest,
+    /// Exact Runtime and renewable Run-lease fence requesting authority.
+    pub runtime_fence: RuntimeExecutionFence,
     /// Complete normalized operation descriptor shown to policy.
     pub operation: OperationDescriptor,
     /// Digest of the complete canonical operation.
@@ -104,6 +108,10 @@ pub struct PermitExpectation {
     pub execution_id: ExecutionId,
     /// Exact target selected immediately before execution.
     pub target: TargetRef,
+    /// Immutable target identity selected immediately before execution.
+    pub target_identity_digest: Digest,
+    /// Exact Runtime and Run-lease fence selected immediately before execution.
+    pub runtime_fence: RuntimeExecutionFence,
     /// Digest of the normalized operation about to execute.
     pub operation_digest: Digest,
     /// Digest of the complete Runtime input about to execute.
@@ -161,6 +169,12 @@ pub enum PermitStoreError {
     /// The presented target differs from the permit binding.
     #[error("permit target mismatch")]
     TargetMismatch,
+    /// The presented immutable target identity differs from the permit binding.
+    #[error("permit target identity mismatch")]
+    TargetIdentityMismatch,
+    /// The presented Runtime or Run-lease fence differs from the permit binding.
+    #[error("permit Runtime fence mismatch")]
+    RuntimeFenceMismatch,
     /// The presented operation digest differs from the permit binding.
     #[error("permit operation digest mismatch")]
     OperationMismatch,
@@ -305,6 +319,8 @@ where
                     run_id: request.run_id.clone(),
                     execution_id: ExecutionId::new(),
                     target: request.target.clone(),
+                    target_identity_digest: context.binding.target_identity_digest.clone(),
+                    runtime_fence: context.binding.runtime_fence.clone(),
                     operation_digest: request.operation_digest.clone(),
                     input_digest: request.input_digest.clone(),
                     policy_revision,
@@ -351,6 +367,8 @@ fn validate_request(
     }
     let content = AuthoritativeRequestBinding {
         target: request.target.clone(),
+        target_identity_digest: context.binding.target_identity_digest.clone(),
+        runtime_fence: context.binding.runtime_fence.clone(),
         operation: request.operation.clone(),
         operation_digest: request.operation_digest.clone(),
         requested_scope: request.requested_scope.clone(),

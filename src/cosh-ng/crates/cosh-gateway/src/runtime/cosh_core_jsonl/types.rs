@@ -8,6 +8,36 @@ use thiserror::Error;
 
 /// Exact private Shell/Core control protocol version implemented by cosh-core.
 pub const PRIVATE_COSH_CONTROL_PROTOCOL_VERSION: u32 = 1;
+/// Exact private protocol version for the Gateway-brokered Core profile.
+pub const BROKERED_COSH_CONTROL_PROTOCOL_VERSION: u32 = 2;
+/// Exact launch and acknowledgement name for the brokered Core profile.
+pub const GATEWAY_BROKERED_EXECUTION_PROFILE: &str = "gateway_brokered_v1";
+
+/// Private Core execution boundary selected before process launch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CoshCoreExecutionProfile {
+    /// Existing Core behavior using private protocol v1.
+    #[default]
+    Legacy,
+    /// Gateway owns the task-only brokered profile using private protocol v2.
+    GatewayBrokeredV1,
+}
+
+impl CoshCoreExecutionProfile {
+    pub(super) const fn protocol_version(self) -> u32 {
+        match self {
+            Self::Legacy => PRIVATE_COSH_CONTROL_PROTOCOL_VERSION,
+            Self::GatewayBrokeredV1 => BROKERED_COSH_CONTROL_PROTOCOL_VERSION,
+        }
+    }
+
+    pub(super) const fn wire_name(self) -> Option<&'static str> {
+        match self {
+            Self::Legacy => None,
+            Self::GatewayBrokeredV1 => Some(GATEWAY_BROKERED_EXECUTION_PROFILE),
+        }
+    }
+}
 
 /// Protocol negotiation and terminal state owned by one codec instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +67,14 @@ pub struct CoshCoreCapabilities {
     /// Core accepts durable approval-ownership receipts.
     #[serde(default)]
     pub can_handle_approval_receipt: bool,
+    /// Compatibility marker for a hosted checkpoint capability.
+    ///
+    /// The task-only Gateway profile requires this value to remain false.
+    #[serde(default)]
+    pub can_handle_hosted_checkpoint_create: bool,
+    /// Core accepts a Gateway-resolved, side-effect-free user question.
+    #[serde(default)]
+    pub can_handle_brokered_ask_user: bool,
 }
 
 /// One typed user turn encoded for the private cosh-core transport.
@@ -302,10 +340,13 @@ pub enum CoshCoreControlRequest {
     /// Requests durable user input.
     #[serde(rename = "ask_user")]
     AskUser {
+        /// Provider tool-use identifier required by the brokered profile.
+        #[serde(default)]
+        tool_use_id: Option<String>,
         /// Question text.
         question: String,
-        /// Option payload retained for higher-level normalization.
-        options: Vec<Value>,
+        /// Strict user-presentable choices.
+        options: Vec<CoshCoreAskUserOption>,
         /// Whether free text is accepted.
         allow_free_text: bool,
         /// Whether multiple options can be selected.
@@ -348,6 +389,17 @@ pub enum CoshCoreControlRequest {
         #[serde(default)]
         bypass_recent_filter: Option<bool>,
     },
+}
+
+/// Strict private-wire choice carried by `ask_user`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoshCoreAskUserOption {
+    /// User-visible choice label.
+    pub label: String,
+    /// Optional user-visible explanation.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// Non-initialization private control response.
@@ -453,6 +505,18 @@ pub enum CoshCoreCodecError {
     /// Production bridge requires an explicit capability snapshot.
     #[error("private cosh-core initialize response omitted capabilities")]
     InitializeCapabilitiesMissing,
+    /// Peer did not acknowledge the exact launch profile.
+    #[error("private cosh-core initialize response did not acknowledge the execution profile")]
+    InitializeProfileMismatch,
+    /// Peer capability snapshot is unsafe for the selected execution profile.
+    #[error("private cosh-core initialize capabilities are invalid for the execution profile")]
+    InitializeCapabilitiesInvalid,
+    /// A profile-specific frame was requested from a legacy codec.
+    #[error("private cosh-core operation {operation} requires the brokered profile")]
+    ProfileMismatch {
+        /// Rejected codec operation.
+        operation: &'static str,
+    },
     /// Output following a terminal result violates deterministic settlement.
     #[error("private cosh-core emitted output after terminal result")]
     OutputAfterTerminal,

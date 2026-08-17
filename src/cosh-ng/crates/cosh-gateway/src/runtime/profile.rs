@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use super::{AcpV1BridgeError, AcpV1ClientConfig, AcpV1RuntimeBridge, RuntimeLaunchSpec};
+use super::{
+    AcpV1BridgeError, AcpV1ClientConfig, AcpV1RuntimeBridge, PinnedDirectory, PinnedExecutable,
+    RuntimeLaunchSpec,
+};
 
 const COMMON_ENVIRONMENT: &[&str] = &[
     "HOME",
@@ -182,8 +185,8 @@ impl fmt::Debug for AcpRuntimeProfileRequest {
 /// Fully pinned adapter launch resolved from one built-in profile.
 pub struct ResolvedAcpRuntimeProfile {
     profile: AcpRuntimeProfileId,
-    executable: PathBuf,
-    workspace: PathBuf,
+    executable: PinnedExecutable,
+    workspace: PinnedDirectory,
     environment: BTreeMap<OsString, OsString>,
 }
 
@@ -197,12 +200,16 @@ impl ResolvedAcpRuntimeProfile {
     /// Returns the canonical absolute adapter executable.
     #[must_use]
     pub fn executable(&self) -> &Path {
-        &self.executable
+        self.executable.canonical_path()
     }
 
     /// Returns the canonical absolute workspace.
     #[must_use]
     pub fn workspace(&self) -> &Path {
+        self.workspace.canonical_path()
+    }
+
+    pub(crate) fn pinned_workspace(&self) -> &PinnedDirectory {
         &self.workspace
     }
 
@@ -215,7 +222,8 @@ impl ResolvedAcpRuntimeProfile {
     #[must_use]
     pub fn launch_spec(&self) -> RuntimeLaunchSpec {
         let profile = self.profile.profile();
-        let mut spec = RuntimeLaunchSpec::new(&self.executable, &self.workspace);
+        let mut spec =
+            RuntimeLaunchSpec::from_pinned_script(self.executable.clone(), self.workspace.clone());
         spec.arguments = profile.arguments.iter().map(OsString::from).collect();
         spec.environment.clone_from(&self.environment);
         spec
@@ -239,8 +247,8 @@ impl fmt::Debug for ResolvedAcpRuntimeProfile {
         formatter
             .debug_struct("ResolvedAcpRuntimeProfile")
             .field("profile", &self.profile)
-            .field("executable", &self.executable)
-            .field("workspace", &self.workspace)
+            .field("executable", &self.executable.canonical_path())
+            .field("workspace", &self.workspace.canonical_path())
             .field("environment_names", &self.environment.keys())
             .finish()
     }
@@ -359,7 +367,7 @@ pub enum AcpRuntimeProfileLaunchError {
 fn resolve_explicit_executable(
     profile: &AcpRuntimeProfile,
     path: &Path,
-) -> Result<PathBuf, AcpRuntimeProfileResolveError> {
+) -> Result<PinnedExecutable, AcpRuntimeProfileResolveError> {
     if !path.is_absolute() {
         return Err(AcpRuntimeProfileResolveError::ExecutableNotAbsolute(
             path.to_path_buf(),
@@ -377,7 +385,7 @@ fn resolve_explicit_executable(
 fn resolve_from_path(
     profile: &AcpRuntimeProfile,
     path: Option<&OsString>,
-) -> Result<PathBuf, AcpRuntimeProfileResolveError> {
+) -> Result<PinnedExecutable, AcpRuntimeProfileResolveError> {
     let Some(path) = path else {
         return Err(AcpRuntimeProfileResolveError::ExecutableNotFound {
             name: profile.executable_name,
@@ -404,32 +412,31 @@ fn resolve_from_path(
     })
 }
 
-fn canonical_executable(path: &Path) -> Result<PathBuf, AcpRuntimeProfileResolveError> {
-    // npm installs command shims as symlinks. Canonicalize the trusted local
-    // profile path before launch so the child cannot later depend on the shim.
-    let canonical = fs::canonicalize(path).map_err(|source| {
-        AcpRuntimeProfileResolveError::ExecutableUnavailable {
-            path: path.to_path_buf(),
-            source,
+fn canonical_executable(path: &Path) -> Result<PinnedExecutable, AcpRuntimeProfileResolveError> {
+    // Opening the configured path is the successful admission linearization
+    // point. npm-style final symlinks are followed by that single open, while
+    // later launches remain bound to the resulting descriptor.
+    match PinnedExecutable::pin(path) {
+        Ok(executable) => Ok(executable),
+        Err(source) => {
+            // Classification after a failed pin is diagnostic only. A racing
+            // replacement can at worst produce the generic unavailable error;
+            // it can never turn this failed admission into a launch handle.
+            let diagnostic_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            match fs::metadata(path) {
+                Ok(metadata) if !metadata.is_file() => Err(
+                    AcpRuntimeProfileResolveError::ExecutableNotRegular(diagnostic_path),
+                ),
+                Ok(metadata) if !is_executable(&metadata) => Err(
+                    AcpRuntimeProfileResolveError::ExecutableNotExecutable(diagnostic_path),
+                ),
+                _ => Err(AcpRuntimeProfileResolveError::ExecutableUnavailable {
+                    path: diagnostic_path,
+                    source,
+                }),
+            }
         }
-    })?;
-    let metadata = fs::metadata(&canonical).map_err(|source| {
-        AcpRuntimeProfileResolveError::ExecutableUnavailable {
-            path: canonical.clone(),
-            source,
-        }
-    })?;
-    if !metadata.is_file() {
-        return Err(AcpRuntimeProfileResolveError::ExecutableNotRegular(
-            canonical,
-        ));
     }
-    if !is_executable(&metadata) {
-        return Err(AcpRuntimeProfileResolveError::ExecutableNotExecutable(
-            canonical,
-        ));
-    }
-    Ok(canonical)
 }
 
 #[cfg(unix)]
@@ -443,25 +450,17 @@ fn is_executable(_metadata: &fs::Metadata) -> bool {
     true
 }
 
-fn canonical_directory(path: &Path) -> Result<PathBuf, AcpRuntimeProfileResolveError> {
-    let canonical = fs::canonicalize(path).map_err(|source| {
-        AcpRuntimeProfileResolveError::WorkspaceUnavailable {
-            path: path.to_path_buf(),
-            source,
+fn canonical_directory(path: &Path) -> Result<PinnedDirectory, AcpRuntimeProfileResolveError> {
+    PinnedDirectory::pin(path).map_err(|source| {
+        if source.kind() == io::ErrorKind::InvalidInput && path.is_absolute() {
+            AcpRuntimeProfileResolveError::WorkspaceNotDirectory(path.to_path_buf())
+        } else {
+            AcpRuntimeProfileResolveError::WorkspaceUnavailable {
+                path: path.to_path_buf(),
+                source,
+            }
         }
-    })?;
-    let metadata = fs::metadata(&canonical).map_err(|source| {
-        AcpRuntimeProfileResolveError::WorkspaceUnavailable {
-            path: canonical.clone(),
-            source,
-        }
-    })?;
-    if !metadata.is_dir() {
-        return Err(AcpRuntimeProfileResolveError::WorkspaceNotDirectory(
-            canonical,
-        ));
-    }
-    Ok(canonical)
+    })
 }
 
 #[cfg(test)]

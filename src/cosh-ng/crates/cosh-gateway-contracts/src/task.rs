@@ -9,7 +9,8 @@ use crate::{
         IdempotencyKey, RuntimeBindingRef, RuntimeSelector, TargetRef,
     },
     error::ContractError,
-    ids::{ApprovalId, ExecutionId, PermitId, RunId, TaskId},
+    ids::{ApprovalId, ExecutionId, InputRequestId, PermitId, RunId, TaskId},
+    runtime::RuntimeInputRequest,
 };
 
 /// Opaque cursor used to resume a Task event attachment.
@@ -151,6 +152,13 @@ pub enum TaskCommand {
         /// Last revision already observed.
         cursor: Option<EventCursor>,
     },
+    /// Queue a new attempt from one exact nonterminal suspended Run.
+    RetryRun {
+        /// Task owning the suspended Run.
+        task_id: TaskId,
+        /// Exact previous attempt that may be retried.
+        previous_run_id: RunId,
+    },
 }
 
 /// Authenticated and idempotent Gateway command envelope.
@@ -240,6 +248,10 @@ pub enum TaskEventKind {
     RuntimeBound,
     /// Runtime progress was recorded.
     RuntimeEventRecorded,
+    /// Runtime requested durable user input.
+    InputRequested,
+    /// Authorized user input was accepted for dispatch.
+    InputSubmitted,
     /// Capability policy requested approval.
     ApprovalRequested,
     /// Approval was resolved.
@@ -306,6 +318,20 @@ pub enum TaskEvent {
         run_id: RunId,
         /// Recorded progress update.
         update: RuntimeUpdate,
+    },
+    /// A Runtime request became the one pending input for the active Run.
+    InputRequested {
+        /// Complete bounded request presentation and identity.
+        request: RuntimeInputRequest,
+    },
+    /// A response was accepted without storing its raw value in Task history.
+    InputSubmitted {
+        /// Exact pending request resolved by this response.
+        request_id: InputRequestId,
+        /// Active Run owning the pending request.
+        run_id: RunId,
+        /// Digest of the typed response stored in the private dispatch ledger.
+        response_digest: Digest,
     },
     /// Capability policy requires an actor decision.
     ApprovalRequested {
@@ -401,6 +427,8 @@ impl TaskEvent {
             Self::RunStarted { .. } => TaskEventKind::RunStarted,
             Self::RuntimeBound { .. } => TaskEventKind::RuntimeBound,
             Self::RuntimeEventRecorded { .. } => TaskEventKind::RuntimeEventRecorded,
+            Self::InputRequested { .. } => TaskEventKind::InputRequested,
+            Self::InputSubmitted { .. } => TaskEventKind::InputSubmitted,
             Self::ApprovalRequested { .. } => TaskEventKind::ApprovalRequested,
             Self::ApprovalResolved { .. } => TaskEventKind::ApprovalResolved,
             Self::ExecutionPlanned { .. } => TaskEventKind::ExecutionPlanned,

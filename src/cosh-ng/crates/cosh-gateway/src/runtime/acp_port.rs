@@ -17,19 +17,19 @@ use cosh_gateway_contracts::{
     external::{ExternalRef, ExternalRefKind},
     ids::{
         AgentSessionId, InstallationId, MessageId, RequestId, RunId, RuntimeBindingId,
-        RuntimeInstanceId, RuntimeMessageId, TaskId, ToolUseId,
+        RuntimeInstanceId, RuntimeMessageId, TaskId, TurnId,
     },
     runtime::{
-        AgentRuntimeCommand, AgentRuntimeEvent, RunOutcome, RuntimeEventEnvelope,
-        RuntimePermissionDecision, ToolSummary,
+        AgentRuntimeCommand, AgentRuntimeEvent, RuntimeEventEnvelope, RuntimePermissionDecision,
+        TurnLimit, TurnOutcome,
     },
 };
 
 use super::{
     AcpSessionDriver, AcpSessionDriverConfig, AcpSessionDriverError, AcpSessionEvent,
-    AcpSessionTerminalKind, AcpV1Observation, AcpV1PermissionDecision, AcpV1PermissionOptionKind,
-    AcpV1PermissionRequest, AcpV1RequestId, AcpV1StopReason, AgentRuntimePort,
-    AgentRuntimePortError,
+    AcpSessionTerminalKind, AcpToolAccumulation, AcpV1Observation, AcpV1PermissionDecision,
+    AcpV1PermissionOptionKind, AcpV1PermissionRequest, AcpV1RequestId, AcpV1StopReason,
+    AgentRuntimePort, AgentRuntimePortError, ToolInvocationAccumulator,
 };
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -188,7 +188,8 @@ pub struct AcpAgentRuntime {
     events: VecDeque<RuntimeEventEnvelope>,
     sequence: u64,
     messages: BTreeMap<String, RuntimeMessageId>,
-    tools: BTreeMap<String, ToolUseId>,
+    active_turn: Option<TurnId>,
+    tools: ToolInvocationAccumulator,
     permissions: BTreeMap<RequestId, PendingPermission>,
     terminal_delivered: bool,
 }
@@ -218,7 +219,8 @@ impl AcpAgentRuntime {
             events: VecDeque::new(),
             sequence: 0,
             messages: BTreeMap::new(),
-            tools: BTreeMap::new(),
+            active_turn: None,
+            tools: ToolInvocationAccumulator::provider_native(),
             permissions: BTreeMap::new(),
             terminal_delivered: false,
         }
@@ -260,14 +262,18 @@ impl AcpAgentRuntime {
                     .saturating_duration_since(Instant::now())
                     .min(EVENT_POLL_INTERVAL),
             ) {
-                Ok(AcpSessionEvent::Observation(AcpV1Observation::Initialized { .. })) => {}
-                Ok(AcpSessionEvent::Observation(AcpV1Observation::SessionOpened {
-                    session_id,
-                })) => {
-                    self.bind_session(session_id)?;
-                    self.state = PortState::SessionOpenedPending;
-                    return Ok(());
-                }
+                Ok(AcpSessionEvent::Observation(observation)) => match observation.observation {
+                    AcpV1Observation::Initialized { .. } => {}
+                    AcpV1Observation::SessionOpened { session_id } => {
+                        self.bind_session(session_id)?;
+                        self.state = PortState::SessionOpenedPending;
+                        return Ok(());
+                    }
+                    _ => {
+                        self.fail_and_shutdown("acp_session_open_failed")?;
+                        return Err(AgentRuntimePortError::Protocol);
+                    }
+                },
                 Ok(AcpSessionEvent::Terminal(_))
                 | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     self.settle(AgentRuntimeEvent::TransportFailed {
@@ -281,10 +287,6 @@ impl AcpAgentRuntime {
                     return Err(AgentRuntimePortError::Transport);
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Ok(AcpSessionEvent::Observation(_)) => {
-                    self.fail_and_shutdown("acp_session_open_failed")?;
-                    return Err(AgentRuntimePortError::Protocol);
-                }
             }
         }
     }
@@ -292,6 +294,7 @@ impl AcpAgentRuntime {
     fn prompt(
         &mut self,
         run_id: RunId,
+        turn_id: TurnId,
         input: Vec<ContentPart>,
         deadline: Instant,
     ) -> Result<(), AgentRuntimePortError> {
@@ -316,7 +319,11 @@ impl AcpAgentRuntime {
                 operation: "prompt",
             });
         }
+        self.active_turn = Some(turn_id.clone());
+        self.messages.clear();
         self.state = PortState::PromptActive;
+        let started = self.event(AgentRuntimeEvent::TurnStarted { turn_id });
+        self.events.push_back(started);
         Ok(())
     }
 
@@ -334,7 +341,7 @@ impl AcpAgentRuntime {
             .cloned()
             .ok_or(AgentRuntimePortError::IdentityMismatch)?;
         let selected = match decision {
-            RuntimePermissionDecision::Permit { .. } => pending.allow_once,
+            RuntimePermissionDecision::ProviderNativeAllowOnce => pending.allow_once,
             RuntimePermissionDecision::Deny { .. } => pending.reject_once,
         };
         let missing_one_shot = selected.is_none();
@@ -358,14 +365,24 @@ impl AcpAgentRuntime {
         self.require_time(deadline, "resolve_permission")
     }
 
-    fn cancel(&mut self, run_id: RunId, deadline: Instant) -> Result<(), AgentRuntimePortError> {
+    fn cancel(
+        &mut self,
+        run_id: RunId,
+        turn_id: TurnId,
+        deadline: Instant,
+    ) -> Result<(), AgentRuntimePortError> {
         self.require_run(&self.config.identity.task_id.clone(), &run_id)?;
         self.require_time(deadline, "cancel")?;
         self.require_state(PortState::PromptActive, "cancel")?;
+        if self.active_turn.as_ref() != Some(&turn_id) {
+            return Err(AgentRuntimePortError::IdentityMismatch);
+        }
         self.backend.cancel().map_err(map_driver_error)?;
         self.await_terminal(deadline, "cancel")?;
+        self.active_turn = None;
         self.settle(AgentRuntimeEvent::Completed {
-            outcome: RunOutcome::Cancelled,
+            turn_id,
+            outcome: TurnOutcome::Cancelled,
         });
         Ok(())
     }
@@ -391,7 +408,7 @@ impl AcpAgentRuntime {
                     .min(EVENT_POLL_INTERVAL),
             ) {
                 Ok(AcpSessionEvent::Observation(observation)) => {
-                    match self.map_observation(observation) {
+                    match self.map_observation(observation.observation) {
                         Ok(Some(event)) => return self.deliver(event),
                         Ok(None) => {}
                         Err(error) => {
@@ -407,9 +424,14 @@ impl AcpAgentRuntime {
                 Ok(AcpSessionEvent::Terminal(terminal)) => {
                     match terminal.kind {
                         AcpSessionTerminalKind::Cancelled => {
+                            let turn_id = self
+                                .active_turn
+                                .take()
+                                .ok_or(AgentRuntimePortError::Protocol)?;
                             self.settle(AgentRuntimeEvent::Completed {
-                                outcome: RunOutcome::Cancelled,
-                            })
+                                turn_id,
+                                outcome: TurnOutcome::Cancelled,
+                            });
                         }
                         AcpSessionTerminalKind::Failed | AcpSessionTerminalKind::Shutdown => self
                             .settle(AgentRuntimeEvent::TransportFailed {
@@ -446,12 +468,38 @@ impl AcpAgentRuntime {
             }
             AcpV1Observation::PermissionRequested(request) => {
                 self.require_session(&request.session_id)?;
+                let turn_id = self
+                    .active_turn
+                    .clone()
+                    .ok_or(AgentRuntimePortError::Protocol)?;
+                let tool_call_id = request
+                    .tool_call
+                    .get("toolCallId")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(AgentRuntimePortError::Protocol)?;
+                let mut tool_update = request.tool_call.clone();
+                tool_update
+                    .as_object_mut()
+                    .ok_or(AgentRuntimePortError::Protocol)?
+                    .insert(
+                        "sessionUpdate".to_owned(),
+                        serde_json::Value::String("tool_call_update".to_owned()),
+                    );
+                self.tools
+                    .observe(&request.session_id, &turn_id, &tool_update)
+                    .map_err(|_| AgentRuntimePortError::Protocol)?;
+                let tool_snapshot = self
+                    .tools
+                    .snapshot(&request.session_id, &turn_id, tool_call_id)
+                    .ok_or(AgentRuntimePortError::Protocol)?;
+                let mut canonical_request = request.clone();
+                canonical_request.tool_call = tool_snapshot.tool_call;
                 let context = AcpPermissionContext {
                     actor: self.config.identity.actor.clone(),
                     task_id: self.config.identity.task_id.clone(),
                     run_id: self.config.identity.run_id.clone(),
                 };
-                let normalized = self.normalizer.normalize(&request, &context)?;
+                let normalized = self.normalizer.normalize(&canonical_request, &context)?;
                 if normalized.task_id != context.task_id
                     || normalized.run_id != context.run_id
                     || normalized.actor != context.actor
@@ -477,37 +525,60 @@ impl AcpAgentRuntime {
                         reject_once,
                     },
                 );
-                Ok(Some(self.event(AgentRuntimeEvent::PermissionRequested {
-                    request: normalized,
-                })))
+                Ok(Some(self.event(
+                    AgentRuntimeEvent::ExecutionPermissionRequested {
+                        turn_id,
+                        tool_use_id: Some(tool_snapshot.projection.tool_use_id),
+                        summary: tool_snapshot.projection.summary,
+                        request: normalized,
+                    },
+                )))
             }
             AcpV1Observation::PromptFinished {
                 session_id,
                 stop_reason,
             } => {
                 self.require_session(&session_id)?;
+                let turn_id = self
+                    .active_turn
+                    .take()
+                    .ok_or(AgentRuntimePortError::Protocol)?;
                 let outcome = match stop_reason {
-                    AcpV1StopReason::EndTurn
-                    | AcpV1StopReason::MaxTokens
-                    | AcpV1StopReason::MaxTurnRequests => RunOutcome::Succeeded,
-                    AcpV1StopReason::Cancelled => RunOutcome::Cancelled,
-                    AcpV1StopReason::Refusal | AcpV1StopReason::Unsupported => RunOutcome::Failed {
+                    AcpV1StopReason::EndTurn => TurnOutcome::Completed,
+                    AcpV1StopReason::MaxTokens => TurnOutcome::LimitReached {
+                        limit: TurnLimit::Tokens,
+                    },
+                    AcpV1StopReason::MaxTurnRequests => TurnOutcome::LimitReached {
+                        limit: TurnLimit::Requests,
+                    },
+                    AcpV1StopReason::Cancelled => TurnOutcome::Cancelled,
+                    AcpV1StopReason::Refusal => TurnOutcome::Refused,
+                    AcpV1StopReason::Unsupported => TurnOutcome::Failed {
                         error: safe_error(
-                            "acp_turn_failed",
+                            "acp_turn_stop_unsupported",
                             ErrorCategory::RuntimeUnavailable,
                             false,
-                            "The ACP Agent did not complete the turn",
+                            "The ACP Agent returned an unsupported stop reason",
                         ),
                     },
                 };
-                self.backend.shutdown().map_err(map_driver_error)?;
-                self.settle(AgentRuntimeEvent::Completed { outcome });
-                Ok(self.events.pop_front())
+                self.permissions.clear();
+                self.tools.release_turn(&session_id, &turn_id);
+                self.state = PortState::SessionOpen;
+                Ok(Some(
+                    self.event(AgentRuntimeEvent::Completed { turn_id, outcome }),
+                ))
             }
             AcpV1Observation::RequestFailed { .. } => {
-                self.backend.shutdown().map_err(map_driver_error)?;
-                self.settle(AgentRuntimeEvent::Completed {
-                    outcome: RunOutcome::Failed {
+                let turn_id = self
+                    .active_turn
+                    .take()
+                    .ok_or(AgentRuntimePortError::Protocol)?;
+                self.permissions.clear();
+                self.state = PortState::SessionOpen;
+                Ok(Some(self.event(AgentRuntimeEvent::Completed {
+                    turn_id,
+                    outcome: TurnOutcome::Failed {
                         error: safe_error(
                             "acp_request_failed",
                             ErrorCategory::RuntimeUnavailable,
@@ -515,8 +586,7 @@ impl AcpAgentRuntime {
                             "The ACP Agent request failed",
                         ),
                     },
-                });
-                Ok(self.events.pop_front())
+                })))
             }
             AcpV1Observation::TransportClosed => Err(AgentRuntimePortError::Transport),
             AcpV1Observation::Initialized { .. }
@@ -555,34 +625,29 @@ impl AcpAgentRuntime {
                     content: ContentPart::Text { text },
                 })))
             }
-            Some("tool_call") => {
-                let external = update
-                    .get("toolCallId")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or(AgentRuntimePortError::Protocol)?
-                    .to_owned();
-                if self.tools.contains_key(&external) {
-                    return Err(AgentRuntimePortError::Protocol);
+            Some("tool_call" | "tool_call_update") => {
+                let session_id = self
+                    .provider_session
+                    .clone()
+                    .ok_or(AgentRuntimePortError::Protocol)?;
+                let turn_id = self
+                    .active_turn
+                    .clone()
+                    .ok_or(AgentRuntimePortError::Protocol)?;
+                match self
+                    .tools
+                    .observe(&session_id, &turn_id, update)
+                    .map_err(|_| AgentRuntimePortError::Protocol)?
+                {
+                    AcpToolAccumulation::Updated(snapshot) => {
+                        Ok(Some(self.event(AgentRuntimeEvent::ToolInvocationUpdated {
+                            snapshot: snapshot.projection,
+                        })))
+                    }
+                    AcpToolAccumulation::Buffered { .. }
+                    | AcpToolAccumulation::Unchanged { .. }
+                    | AcpToolAccumulation::NotToolCall => Ok(None),
                 }
-                let title = update
-                    .get("title")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("Agent tool call");
-                let name = update
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("agent_tool");
-                let tool_use_id = ToolUseId::new();
-                self.tools.insert(external, tool_use_id.clone());
-                Ok(Some(self.event(AgentRuntimeEvent::ToolCallObserved {
-                    tool_use_id,
-                    summary: ToolSummary {
-                        name:
-                            BoundedName::new(name).map_err(|_| AgentRuntimePortError::Protocol)?,
-                        summary:
-                            BoundedText::new(title).map_err(|_| AgentRuntimePortError::Protocol)?,
-                    },
-                })))
             }
             Some(_) => Ok(None),
             None => Err(AgentRuntimePortError::Protocol),
@@ -642,6 +707,7 @@ impl AcpAgentRuntime {
             let event = self.event(event);
             self.events.push_back(event);
             self.state = PortState::Terminal;
+            self.active_turn = None;
             self.permissions.clear();
         }
     }
@@ -704,10 +770,7 @@ impl AcpAgentRuntime {
         {
             self.state = PortState::SessionOpen;
         }
-        if matches!(
-            event.event,
-            AgentRuntimeEvent::Completed { .. } | AgentRuntimeEvent::TransportFailed { .. }
-        ) {
+        if matches!(event.event, AgentRuntimeEvent::TransportFailed { .. }) {
             if self.terminal_delivered {
                 return Err(AgentRuntimePortError::Terminal);
             }
@@ -771,12 +834,27 @@ impl AgentRuntimePort for AcpAgentRuntime {
                 run_id,
                 workspace,
             } => self.open(task_id, run_id, workspace, deadline),
-            AgentRuntimeCommand::Prompt { run_id, input } => self.prompt(run_id, input, deadline),
+            AgentRuntimeCommand::Prompt {
+                run_id,
+                turn_id,
+                input,
+            } => self.prompt(run_id, turn_id, input, deadline),
             AgentRuntimeCommand::ResolvePermission {
                 request_id,
                 decision,
             } => self.resolve(request_id, decision, deadline),
-            AgentRuntimeCommand::Cancel { run_id, .. } => self.cancel(run_id, deadline),
+            AgentRuntimeCommand::AcknowledgeBrokeredRequest { .. }
+            | AgentRuntimeCommand::DeliverBrokeredResult { .. } => {
+                Err(AgentRuntimePortError::Unsupported {
+                    operation: "COSH-brokered execution over ACP",
+                })
+            }
+            AgentRuntimeCommand::ResolveInput { .. } => Err(AgentRuntimePortError::Unsupported {
+                operation: "resolve_input",
+            }),
+            AgentRuntimeCommand::Cancel {
+                run_id, turn_id, ..
+            } => self.cancel(run_id, turn_id, deadline),
             AgentRuntimeCommand::Close { binding } => {
                 self.require_time(deadline, "close")?;
                 if self.binding.as_ref() != Some(&binding) {

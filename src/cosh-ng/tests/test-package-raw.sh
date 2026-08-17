@@ -11,12 +11,56 @@ LINUX_CONTRACT="$SOURCE/.anolisa/component.toml"
 MACOS_CONTRACT="$SOURCE/.anolisa/component.macos.toml"
 VERSION="$(awk -F'"' '/^version = / { print $2; exit }' "$ROOT/Cargo.toml")"
 
-install -d -m 0755 "$SOURCE/.anolisa"
+install -d -m 0755 "$SOURCE/.anolisa" "$SOURCE/packaging/systemd"
 install -p -m 0644 "$ROOT/.anolisa/component.toml" "$LINUX_CONTRACT"
 install -p -m 0644 "$ROOT/.anolisa/component.macos.toml" "$MACOS_CONTRACT"
 install -p -m 0644 "$ROOT/Cargo.toml" "$SOURCE/Cargo.toml"
 install -p -m 0644 "$ROOT/LICENSE" "$SOURCE/LICENSE"
 install -p -m 0644 "$ROOT/README.md" "$SOURCE/README.md"
+install -p -m 0644 "$ROOT/packaging/systemd/cosh-gateway@.service.in" \
+    "$SOURCE/packaging/systemd/cosh-gateway@.service.in"
+
+test_rpm_systemd_unit_render() {
+    local rpm_libexec rpm_libexec_cosh rpm_libexec_cosh_macro rendered_unit
+
+    rpm_libexec=/usr/libexec
+    rpm_libexec_cosh_macro="$(
+        awk '
+            $1 == "%global" && $2 == "_libexecdir_cosh" {
+                sub(/^%global[[:space:]]+_libexecdir_cosh[[:space:]]+/, "")
+                print
+                exit
+            }
+        ' "$ROOT/cosh-ng.spec.in"
+    )"
+    rpm_libexec_cosh="$(
+        printf '%s\n' "$rpm_libexec_cosh_macro" |
+            sed "s|%{_libexecdir}|$rpm_libexec|g"
+    )"
+    rendered_unit="$TMP/cosh-gateway@.service.rpm-rendered"
+
+    if [ -z "$rpm_libexec_cosh_macro" ] ||
+        [[ "$rpm_libexec_cosh" == *'%{'* ]]; then
+        echo "ERROR: cannot resolve the RPM cosh libexec macro" >&2
+        exit 1
+    fi
+    grep -Fq "s|{libexecdir}/cosh-ng|%{_libexecdir_cosh}|g" \
+        "$ROOT/cosh-ng.spec.in" || {
+        echo "ERROR: RPM unit render does not use the cosh libexec macro" >&2
+        exit 1
+    }
+    sed "s|{libexecdir}/cosh-ng|$rpm_libexec_cosh|g" \
+        "$ROOT/packaging/systemd/cosh-gateway@.service.in" \
+        > "$rendered_unit"
+    grep -Fqx \
+        "ExecStart=\"$rpm_libexec_cosh/cosh-gateway\" serve --systemd-unit=cosh-gateway@%i.service --socket=/run/cosh-gateway-%i/gateway.sock --database=/var/lib/cosh-gateway-%i/gateway.sqlite --core-executable=\"$rpm_libexec_cosh/cosh-core\" --workspace=\${COSH_GATEWAY_WORKSPACE}" \
+        "$rendered_unit" || {
+        echo "ERROR: rendered RPM Gateway unit paths do not match libexec installation" >&2
+        exit 1
+    }
+}
+
+test_rpm_systemd_unit_render
 
 make_binaries() {
     local os="$1"
@@ -154,13 +198,18 @@ test_native_without_metadata() {
     native_source="$TMP/native-source"
     native_bins="$TMP/native-bins"
     native_stage="$TMP/native-stage"
-    install -d -m 0755 "$native_source/.anolisa" "$native_bins"
+    install -d -m 0755 \
+        "$native_source/.anolisa" \
+        "$native_source/packaging/systemd" \
+        "$native_bins"
     sed "0,/version = \"$VERSION\"/s//version = \"$native_version\"/" \
         "$ROOT/Cargo.toml" > "$native_source/Cargo.toml"
     sed "0,/version = \"$VERSION\"/s//version = \"$native_version\"/" \
         "$ROOT/.anolisa/component.toml" > "$native_source/.anolisa/component.toml"
     install -p -m 0644 "$ROOT/LICENSE" "$native_source/LICENSE"
     install -p -m 0644 "$ROOT/README.md" "$native_source/README.md"
+    install -p -m 0644 "$ROOT/packaging/systemd/cosh-gateway@.service.in" \
+        "$native_source/packaging/systemd/cosh-gateway@.service.in"
     for binary in cosh-cli cosh-core cosh-gateway cosh-shell; do
         install -p -m 0755 "$python_bin" "$native_bins/$binary"
     done
@@ -174,6 +223,15 @@ test_native_without_metadata() {
 }
 
 test_native_without_metadata
+
+BUILD_ALL_UNINSTALL_OUTPUT="$TMP/build-all-uninstall.out"
+"$ROOT/../../scripts/build-all.sh" \
+    --uninstall --component cosh-ng --system --dry-run \
+    > "$BUILD_ALL_UNINSTALL_OUTPUT"
+grep -Fxq 'DRY-RUN: systemctl stop cosh-gateway@*.service' \
+    "$BUILD_ALL_UNINSTALL_OUTPUT"
+grep -Fxq 'DRY-RUN: systemctl disable cosh-gateway@*.service' \
+    "$BUILD_ALL_UNINSTALL_OUTPUT"
 
 STAGED="$TMP/staged"
 COSH_NG_SOURCE_DIR="$SOURCE" \
@@ -232,6 +290,23 @@ cmp "$LINUX_X64/cosh-cli" "$EXTRACTED/bin/cosh-cli"
 cmp "$LINUX_X64/cosh-core" "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-core"
 cmp "$LINUX_X64/cosh-gateway" "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-gateway"
 cmp "$LINUX_X64/cosh-shell" "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-shell"
+cmp "$ROOT/packaging/systemd/cosh-gateway@.service.in" \
+    "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"
+if grep -Fq 'ws-ckpt.service' \
+    "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"; then
+    echo "ERROR: packaged Gateway unit depends on ws-ckpt" >&2
+    exit 1
+fi
+if grep -Fq -- '--checkpoint-socket=' \
+    "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"; then
+    echo "ERROR: packaged Gateway unit configures a checkpoint socket" >&2
+    exit 1
+fi
+if grep -Fq -- '--security-audit=' \
+    "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"; then
+    echo "ERROR: packaged Gateway unit configures checkpoint audit" >&2
+    exit 1
+fi
 cmp "$ROOT/LICENSE" "$EXTRACTED/share/doc/cosh-ng/LICENSE"
 cmp "$ROOT/README.md" "$EXTRACTED/share/doc/cosh-ng/README.md"
 test -z "$(find "$EXTRACTED" -type l -print -quit)"
@@ -241,6 +316,7 @@ file_mode() {
 test "$(file_mode "$EXTRACTED/bin/cosh")" = 755
 test "$(file_mode "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-gateway")" = 755
 test "$(file_mode "$EXTRACTED/libexec/anolisa/cosh-ng/cosh-shell")" = 755
+test "$(file_mode "$EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in")" = 644
 test "$(file_mode "$EXTRACTED/share/doc/cosh-ng/README.md")" = 644
 test ! -e "$EXTRACTED/share/anolisa/hooks"
 cmp "$STAGED/bin/cosh" "$EXTRACTED/bin/cosh"
@@ -317,6 +393,29 @@ macos_common = dict(macos["component"])
 for component in (linux_common, macos_common):
     component.pop("platform")
     component.pop("dependencies")
+gateway_service_file = {
+    "source": "share/anolisa/cosh-ng/cosh-gateway@.service.in",
+    "target": "{unitdir}/cosh-gateway@.service",
+    "mode": "0644",
+    "render": "anolisa-paths-v1",
+}
+assert gateway_service_file in linux_common["layout"]["files"]
+assert gateway_service_file not in macos_common["layout"]["files"]
+assert linux_common.pop("services") == [
+    {
+        "unit": "cosh-gateway@.service",
+        "scope": "system",
+        "enable": False,
+        "start": False,
+    }
+]
+assert "services" not in macos_common
+linux_common["layout"] = dict(linux_common["layout"])
+linux_common["layout"]["files"] = [
+    entry
+    for entry in linux_common["layout"]["files"]
+    if entry != gateway_service_file
+]
 assert linux_common == macos_common
 assert linux.get("backends") == macos.get("backends")
 PY
@@ -334,6 +433,7 @@ MACOS_EXTRACTED="$TMP/extracted-macos"
 install -d -m 0755 "$MACOS_EXTRACTED"
 tar -xzf "$TMP/out-macos-arm64/$MACOS_ARTIFACT" -C "$MACOS_EXTRACTED"
 cmp "$MACOS_CONTRACT" "$MACOS_EXTRACTED/.anolisa/component.toml"
+test ! -e "$MACOS_EXTRACTED/share/anolisa/cosh-ng/cosh-gateway@.service.in"
 grep -Fq 'name = "openssl1.1"' "$ROOT/.anolisa/component.toml"
 test -z "$(grep -F 'name = "openssl1.1"' \
     "$ROOT/.anolisa/component.macos.toml" || true)"

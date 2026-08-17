@@ -1,7 +1,9 @@
 //! Responsive single-owner ACP session orchestration over supervised stdio.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -17,6 +19,7 @@ const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const COMMAND_CAPACITY: usize = 8;
 const CONTROL_CAPACITY: usize = 1;
 const EVENT_CAPACITY: usize = 32;
+const DEFAULT_EVENT_BYTE_BUDGET: usize = 4 * 1024 * 1024;
 const MAX_TERMINAL_DETAIL_BYTES: usize = 4 * 1024;
 const DEFAULT_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(70);
@@ -41,6 +44,8 @@ pub struct AcpSessionDriverConfig {
     pub shutdown_grace: Duration,
     /// Maximum caller wait for actor acknowledgements.
     pub command_timeout: Duration,
+    /// Maximum serialized bytes retained by outstanding observation envelopes.
+    pub event_byte_budget: usize,
 }
 
 impl AcpSessionDriverConfig {
@@ -62,6 +67,7 @@ impl AcpSessionDriverConfig {
             // Keep the caller alive after the actor's protocol deadline so it
             // receives the operation-specific result instead of a racing ack timeout.
             command_timeout: DEFAULT_COMMAND_TIMEOUT,
+            event_byte_budget: DEFAULT_EVENT_BYTE_BUDGET,
         }
     }
 
@@ -82,6 +88,7 @@ impl AcpSessionDriverConfig {
             || self.command_timeout <= shutdown_minimum
             || self.prompt_timeout.is_zero()
             || self.shutdown_grace.is_zero()
+            || self.event_byte_budget == 0
         {
             return Err(AcpSessionDriverError::InvalidDeadlineConfiguration);
         }
@@ -89,11 +96,33 @@ impl AcpSessionDriverConfig {
     }
 }
 
+/// One locally ordered ACP observation retained against the driver byte budget.
+#[derive(Debug)]
+pub struct AcpSessionObservation {
+    /// Strictly increasing driver-generation sequence, starting at one.
+    pub sequence: u64,
+    /// Validated ACP v1 observation; sequence is never part of the ACP wire value.
+    pub observation: AcpV1Observation,
+    _budget_lease: Option<ObservationBudgetLease>,
+}
+
+impl AcpSessionObservation {
+    /// Builds an unbudgeted envelope for neutral-port adapters and test doubles.
+    #[must_use]
+    pub fn new(sequence: u64, observation: AcpV1Observation) -> Self {
+        Self {
+            sequence,
+            observation,
+            _budget_lease: None,
+        }
+    }
+}
+
 /// One bounded event delivered by the ACP session actor.
 #[derive(Debug)]
 pub enum AcpSessionEvent {
     /// Validated protocol observation in wire order.
-    Observation(AcpV1Observation),
+    Observation(AcpSessionObservation),
     /// The sole terminal event for this driver generation.
     Terminal(AcpSessionTerminal),
 }
@@ -155,6 +184,94 @@ pub enum AcpSessionDriverError {
     /// Configured deadlines cannot preserve actor-before-caller settlement.
     #[error("ACP session deadline configuration is invalid")]
     InvalidDeadlineConfiguration,
+}
+
+#[derive(Debug)]
+struct ObservationBudget {
+    limit: usize,
+    outstanding: AtomicUsize,
+}
+
+impl ObservationBudget {
+    fn reserve(self: &Arc<Self>, bytes: usize) -> Result<ObservationBudgetLease, ()> {
+        let mut current = self.outstanding.load(Ordering::Acquire);
+        loop {
+            let next = current.checked_add(bytes).ok_or(())?;
+            if next > self.limit {
+                return Err(());
+            }
+            match self.outstanding.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(ObservationBudgetLease {
+                        budget: Arc::clone(self),
+                        bytes,
+                    });
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ObservationBudgetLease {
+    budget: Arc<ObservationBudget>,
+    bytes: usize,
+}
+
+impl Drop for ObservationBudgetLease {
+    fn drop(&mut self) {
+        self.budget
+            .outstanding
+            .fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
+#[derive(Debug)]
+struct ObservationEmitter {
+    events: SyncSender<AcpSessionEvent>,
+    budget: Arc<ObservationBudget>,
+    next_sequence: u64,
+}
+
+impl ObservationEmitter {
+    fn new(events: SyncSender<AcpSessionEvent>, byte_budget: usize) -> Self {
+        Self {
+            events,
+            budget: Arc::new(ObservationBudget {
+                limit: byte_budget,
+                outstanding: AtomicUsize::new(0),
+            }),
+            next_sequence: 1,
+        }
+    }
+
+    fn emit(&mut self, observation: AcpV1Observation) -> Result<(), AcpSessionDriverError> {
+        let sequence = self.next_sequence;
+        let next_sequence = sequence
+            .checked_add(1)
+            .ok_or(AcpSessionDriverError::ObservationBackpressure)?;
+        let bytes = serialized_observation_bytes(sequence, &observation);
+        let budget_lease = self
+            .budget
+            .reserve(bytes)
+            .map_err(|()| AcpSessionDriverError::ObservationBackpressure)?;
+        let event = AcpSessionEvent::Observation(AcpSessionObservation {
+            sequence,
+            observation,
+            _budget_lease: Some(budget_lease),
+        });
+        self.events
+            .try_send(event)
+            .map_err(|_| AcpSessionDriverError::ObservationBackpressure)?;
+        self.next_sequence = next_sequence;
+        Ok(())
+    }
 }
 
 type Reply = SyncSender<Result<(), AcpSessionDriverError>>;
@@ -224,12 +341,14 @@ impl AcpSessionDriver {
         let actor = thread::Builder::new()
             .name("cosh-acp-session".to_owned())
             .spawn(move || {
+                let observation_emitter =
+                    ObservationEmitter::new(event_sender, config.event_byte_budget);
                 run_actor(
                     bridge,
                     config,
                     command_receiver,
                     cancel_receiver,
-                    event_sender,
+                    observation_emitter,
                     terminal_sender,
                 )
             })
@@ -383,7 +502,7 @@ fn run_actor(
     config: AcpSessionDriverConfig,
     commands: Receiver<DriverCommand>,
     cancel: Receiver<()>,
-    events: SyncSender<AcpSessionEvent>,
+    mut events: ObservationEmitter,
     terminal: SyncSender<AcpSessionTerminal>,
 ) {
     let mut state = ActorState::Created;
@@ -403,7 +522,7 @@ fn run_actor(
                     command,
                     &mut bridge,
                     &config,
-                    &events,
+                    &mut events,
                     &terminal,
                     &cancel,
                     &mut state,
@@ -447,7 +566,7 @@ fn run_actor(
                     AcpV1Observation::PromptFinished { .. }
                         | AcpV1Observation::RequestFailed { .. }
                 );
-                if emit_observation(&events, observation).is_err() {
+                if events.emit(observation).is_err() {
                     fail_terminal(
                         &mut bridge,
                         &config,
@@ -473,7 +592,7 @@ fn handle_command(
     command: DriverCommand,
     bridge: &mut AcpV1RuntimeBridge,
     config: &AcpSessionDriverConfig,
-    events: &SyncSender<AcpSessionEvent>,
+    events: &mut ObservationEmitter,
     terminal_events: &SyncSender<AcpSessionTerminal>,
     cancel: &Receiver<()>,
     state: &mut ActorState,
@@ -585,7 +704,7 @@ fn require_state(
 
 fn wait_for(
     bridge: &mut AcpV1RuntimeBridge,
-    events: &SyncSender<AcpSessionEvent>,
+    events: &mut ObservationEmitter,
     cancel: &Receiver<()>,
     timeout: Duration,
     operation: &'static str,
@@ -606,7 +725,7 @@ fn wait_for(
             AcpV1BridgeRead::Observation(observation) => {
                 settle_unsupported(bridge, &observation)?;
                 let matched = expected(&observation);
-                emit_observation(events, observation)?;
+                events.emit(observation)?;
                 if matched {
                     return Ok(());
                 }
@@ -625,13 +744,12 @@ fn settle_unsupported(
     Ok(())
 }
 
-fn emit_observation(
-    events: &SyncSender<AcpSessionEvent>,
-    observation: AcpV1Observation,
-) -> Result<(), AcpSessionDriverError> {
-    events
-        .try_send(AcpSessionEvent::Observation(observation))
-        .map_err(|_| AcpSessionDriverError::ObservationBackpressure)
+fn serialized_observation_bytes(sequence: u64, observation: &AcpV1Observation) -> usize {
+    // This local accounting projection intentionally is not an ACP wire schema.
+    // Debug includes every validated payload while JSON escaping accounts for
+    // expansion in downstream structured reporters.
+    serde_json::to_vec(&(sequence, format!("{observation:?}")))
+        .map_or(usize::MAX, |encoded| encoded.len())
 }
 
 fn settle_cancel(

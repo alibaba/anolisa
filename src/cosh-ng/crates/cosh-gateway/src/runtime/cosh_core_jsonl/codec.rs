@@ -11,6 +11,7 @@ pub struct CoshCoreJsonlCodec {
     initialize_request_id: String,
     max_frame_bytes: usize,
     phase: CoshCoreProtocolPhase,
+    profile: CoshCoreExecutionProfile,
 }
 
 impl CoshCoreJsonlCodec {
@@ -30,7 +31,22 @@ impl CoshCoreJsonlCodec {
             initialize_request_id: initialize_request_id.into(),
             max_frame_bytes,
             phase: CoshCoreProtocolPhase::Created,
+            profile: CoshCoreExecutionProfile::Legacy,
         })
+    }
+
+    /// Creates a codec that requires the exact brokered v2 acknowledgement.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidLimit` when `max_frame_bytes` is zero.
+    pub fn new_gateway_brokered(
+        initialize_request_id: impl Into<String>,
+        max_frame_bytes: usize,
+    ) -> Result<Self, CoshCoreCodecError> {
+        let mut codec = Self::new(initialize_request_id, max_frame_bytes)?;
+        codec.profile = CoshCoreExecutionProfile::GatewayBrokeredV1;
+        Ok(codec)
     }
 
     /// Returns the current private protocol phase.
@@ -57,7 +73,8 @@ impl CoshCoreJsonlCodec {
                 request: InitializeRequest {
                     subtype: "initialize",
                     fire_session_start,
-                    protocol_version: PRIVATE_COSH_CONTROL_PROTOCOL_VERSION,
+                    protocol_version: self.profile.protocol_version(),
+                    execution_profile: self.profile.wire_name(),
                 },
             },
             self.max_frame_bytes,
@@ -106,6 +123,96 @@ impl CoshCoreJsonlCodec {
     /// Returns an invalid-phase, serialization, or frame-bound error.
     pub fn shutdown_frame(&self, request_id: &str) -> Result<String, CoshCoreCodecError> {
         self.control_frame(request_id, "shutdown", "shutdown_frame")
+    }
+
+    /// Encodes durable takeover of a pending brokered callback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-phase, profile, serialization, or frame-bound error.
+    pub fn brokered_acknowledgement_frame(
+        &self,
+        request_id: &str,
+    ) -> Result<String, CoshCoreCodecError> {
+        self.require_brokered("brokered_acknowledgement_frame")?;
+        if self.phase != CoshCoreProtocolPhase::Ready {
+            return Err(self.invalid_phase("brokered_acknowledgement_frame"));
+        }
+        encode_frame(
+            &ApprovalReceiptInput {
+                message_type: "approval_receipt",
+                request_id,
+            },
+            self.max_frame_bytes,
+        )
+    }
+
+    /// Encodes a bounded terminal rejection for a brokered operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-phase, profile, serialization, or frame-bound error.
+    pub fn brokered_denial_frame(
+        &self,
+        request_id: &str,
+        safe_message: &str,
+    ) -> Result<String, CoshCoreCodecError> {
+        self.require_brokered("brokered_denial_frame")?;
+        if self.phase != CoshCoreProtocolPhase::Ready {
+            return Err(self.invalid_phase("brokered_denial_frame"));
+        }
+        encode_frame(
+            &BrokeredControlResponseInput {
+                message_type: "control_response",
+                response: BrokeredControlResponse {
+                    subtype: "success",
+                    request_id,
+                    response: BrokeredControlResponseBody::Deny {
+                        behavior: "deny",
+                        message: safe_message,
+                    },
+                },
+            },
+            self.max_frame_bytes,
+        )
+    }
+
+    /// Encodes one bounded answer for an exact brokered `ask_user` request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-phase, profile, serialization, or frame-bound error.
+    pub fn brokered_input_response_frame(
+        &self,
+        request_id: &str,
+        answer: &str,
+    ) -> Result<String, CoshCoreCodecError> {
+        self.require_brokered("brokered_input_response_frame")?;
+        if self.phase != CoshCoreProtocolPhase::Ready {
+            return Err(self.invalid_phase("brokered_input_response_frame"));
+        }
+        encode_frame(
+            &BrokeredControlResponseInput {
+                message_type: "control_response",
+                response: BrokeredControlResponse {
+                    subtype: "success",
+                    request_id,
+                    response: BrokeredControlResponseBody::Answer {
+                        behavior: "answer",
+                        answer,
+                    },
+                },
+            },
+            self.max_frame_bytes,
+        )
+    }
+
+    fn require_brokered(&self, operation: &'static str) -> Result<(), CoshCoreCodecError> {
+        if self.profile == CoshCoreExecutionProfile::GatewayBrokeredV1 {
+            Ok(())
+        } else {
+            Err(CoshCoreCodecError::ProfileMismatch { operation })
+        }
     }
 
     fn control_frame(
@@ -226,17 +333,32 @@ impl CoshCoreJsonlCodec {
             .response
             .protocol_version
             .ok_or(CoshCoreCodecError::InitializeVersionMissing)?;
-        if version != PRIVATE_COSH_CONTROL_PROTOCOL_VERSION {
+        let required_version = self.profile.protocol_version();
+        if version != required_version {
             return Err(CoshCoreCodecError::InitializeVersionMismatch {
-                required: PRIVATE_COSH_CONTROL_PROTOCOL_VERSION,
+                required: required_version,
                 actual: version,
             });
+        }
+        let acknowledged_profile = envelope.response.response.execution_profile.as_deref();
+        if acknowledged_profile != self.profile.wire_name() {
+            return Err(CoshCoreCodecError::InitializeProfileMismatch);
         }
         let capabilities = envelope
             .response
             .response
             .capabilities
             .ok_or(CoshCoreCodecError::InitializeCapabilitiesMissing)?;
+        if self.profile == CoshCoreExecutionProfile::GatewayBrokeredV1
+            && (!capabilities.can_handle_can_use_tool
+                || capabilities.can_handle_host_executed_shell_tool_result
+                || capabilities.can_handle_shell_evidence_tool
+                || !capabilities.can_handle_approval_receipt
+                || capabilities.can_handle_hosted_checkpoint_create
+                || !capabilities.can_handle_brokered_ask_user)
+        {
+            return Err(CoshCoreCodecError::InitializeCapabilitiesInvalid);
+        }
         self.phase = CoshCoreProtocolPhase::Ready;
         Ok(CoshCoreObservation::Initialized(capabilities))
     }
@@ -357,6 +479,42 @@ struct InitializeRequest {
     subtype: &'static str,
     fire_session_start: bool,
     protocol_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_profile: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct ApprovalReceiptInput<'a> {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    request_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct BrokeredControlResponseInput<'a> {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    response: BrokeredControlResponse<'a>,
+}
+
+#[derive(Serialize)]
+struct BrokeredControlResponse<'a> {
+    subtype: &'static str,
+    request_id: &'a str,
+    response: BrokeredControlResponseBody<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum BrokeredControlResponseBody<'a> {
+    Deny {
+        behavior: &'static str,
+        message: &'a str,
+    },
+    Answer {
+        behavior: &'static str,
+        answer: &'a str,
+    },
 }
 
 #[derive(Serialize)]
@@ -408,6 +566,8 @@ struct WireInitializeBody {
     subtype: String,
     #[serde(default)]
     protocol_version: Option<u32>,
+    #[serde(default)]
+    execution_profile: Option<String>,
     #[serde(default)]
     capabilities: Option<CoshCoreCapabilities>,
     #[serde(default)]

@@ -3,6 +3,15 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
+fn private_wire_corpus() -> Value {
+    serde_json::from_str(include_str!("fixtures/cosh-private-wire-dual-version.json"))
+        .expect("valid private wire corpus")
+}
+
+fn json_line(value: &Value) -> String {
+    serde_json::to_string(value).expect("serializable private wire fixture")
+}
+
 fn binary_path() -> std::path::PathBuf {
     let mut path = std::env::current_exe()
         .unwrap()
@@ -205,8 +214,10 @@ fn initialize_returns_system_init() {
 
 #[test]
 fn versioned_initialize_returns_negotiated_version() {
+    let corpus = private_wire_corpus();
+    let initialize = json_line(&corpus["legacy_v1"]["initialize_request"]);
     let msgs = run_with_input(&[
-        r#"{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize","protocol_version":1}}"#,
+        &initialize,
         r#"{"type":"control_request","request_id":"shut-1","request":{"subtype":"shutdown"}}"#,
     ]);
 
@@ -214,11 +225,166 @@ fn versioned_initialize_returns_negotiated_version() {
         .iter()
         .find(|message| message["type"] == "control_response")
         .expect("initialize response");
-    assert_eq!(response["response"]["subtype"], "success");
-    assert_eq!(response["response"]["response"]["protocol_version"], 1);
+    assert_eq!(response, &corpus["legacy_v1"]["initialize_ack"]);
     assert!(msgs
         .iter()
         .any(|message| message["type"] == "system" && message["subtype"] == "init"));
+}
+
+#[test]
+fn gateway_brokered_profile_acks_v2_without_initializing_local_runtime() {
+    let corpus = private_wire_corpus();
+    let initialize = json_line(&corpus["gateway_brokered_v2"]["initialize_request"]);
+    let home = tempfile::tempdir().expect("temp home");
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let hook_marker = home.path().join("hook-ran");
+    let mcp_marker = home.path().join("mcp-ran");
+    let config_dir = home.path().join(".copilot-shell");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            r#"[ai]
+active_provider = "mock"
+
+[ai.providers.mock]
+type = "mock"
+
+[agent]
+approval_mode = "trust"
+allowed_tools = ["shell", "write_file"]
+
+[hooks]
+enabled = true
+
+[[hooks.SessionStart]]
+command = "touch {}"
+name = "must-not-run"
+
+[mcp.servers.must_not_start]
+command = "sh"
+args = ["-c", "touch {}; exit 1"]
+startup_timeout_ms = 1000
+"#,
+            hook_marker.display(),
+            mcp_marker.display()
+        ),
+    )
+    .unwrap();
+
+    let output = run_process_at_home_args(
+        home.path(),
+        &[
+            "--headless",
+            "--execution-profile",
+            "gateway-brokered-v1",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+        ],
+        &[
+            &initialize,
+            r#"{"type":"control_request","request_id":"shutdown","request":{"subtype":"shutdown"}}"#,
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let messages = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let response = messages
+        .iter()
+        .find(|message| message["type"] == "control_response")
+        .expect("profile acknowledgement");
+    assert_eq!(response, &corpus["gateway_brokered_v2"]["initialize_ack"]);
+    let init = messages
+        .iter()
+        .find(|message| message["type"] == "system" && message["subtype"] == "init")
+        .expect("system init");
+    assert_eq!(init["tools"], serde_json::json!(["ask_user_question"]));
+    assert!(response["response"]["response"]["capabilities"]
+        .get("can_handle_hosted_checkpoint_create")
+        .is_none());
+    assert!(!messages
+        .iter()
+        .any(|message| message["hook_name"] == "must-not-run"));
+    assert!(!hook_marker.exists());
+    assert!(!mcp_marker.exists());
+}
+
+#[test]
+fn gateway_brokered_profile_rejects_legacy_or_missing_ack_without_fallback() {
+    let corpus = private_wire_corpus();
+    let invalid = corpus["gateway_brokered_v2"]["invalid_initialize_requests"]
+        .as_object()
+        .expect("invalid initialize request map");
+    for (case, initialize) in invalid {
+        let home = tempfile::tempdir().expect("temp home");
+        let initialize = json_line(initialize);
+        let output = run_process_at_home_args(
+            home.path(),
+            &["--headless", "--execution-profile", "gateway-brokered-v1"],
+            &[&initialize],
+        );
+        assert_eq!(output.status.code(), Some(65), "case {case}");
+        let messages = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let response = messages
+            .iter()
+            .find(|message| message["type"] == "control_response")
+            .unwrap_or_else(|| panic!("profile error for {case}"));
+        assert_eq!(response["response"]["subtype"], "error");
+        assert_eq!(response["response"]["response"]["protocol_version"], 2);
+        assert_eq!(
+            response["response"]["response"]["execution_profile"],
+            "gateway_brokered_v1"
+        );
+        assert!(!messages
+            .iter()
+            .any(|message| message["type"] == "system" && message["subtype"] == "init"));
+    }
+}
+
+#[test]
+fn gateway_brokered_profile_rejects_runtime_and_registry_mutation() {
+    let home = tempfile::tempdir().expect("temp home");
+    let output = run_process_at_home_args(
+        home.path(),
+        &["--headless", "--execution-profile", "gateway-brokered-v1"],
+        &[
+            r#"{"type":"control_request","request_id":"init","request":{"subtype":"initialize","protocol_version":2,"execution_profile":"gateway_brokered_v1"}}"#,
+            r#"{"type":"control_request","request_id":"config","request":{"subtype":"config_override","approval_mode":"trust","allowed_tools":["shell"]}}"#,
+            r#"{"type":"control_request","request_id":"reload","request":{"subtype":"reload_config"}}"#,
+            r#"{"type":"registry_request","request_id":"registry","domain":"extensions","action":"install","params":{}}"#,
+            r#"{"type":"control_request","request_id":"shutdown","request":{"subtype":"shutdown"}}"#,
+        ],
+    );
+    assert!(output.status.success());
+    let messages = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["error_code"] == "BrokeredProfileViolation")
+            .count(),
+        2
+    );
+    let registry = messages
+        .iter()
+        .find(|message| message["type"] == "registry_response")
+        .expect("registry rejection");
+    assert_eq!(registry["success"], false);
+    assert!(registry["error"]
+        .as_str()
+        .unwrap()
+        .contains("disabled by the gateway brokered profile"));
 }
 
 #[test]

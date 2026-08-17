@@ -140,6 +140,12 @@ fn validate_expectation(
     if permit.target != expectation.target {
         return Err(PermitStoreError::TargetMismatch);
     }
+    if permit.target_identity_digest != expectation.target_identity_digest {
+        return Err(PermitStoreError::TargetIdentityMismatch);
+    }
+    if permit.runtime_fence != expectation.runtime_fence {
+        return Err(PermitStoreError::RuntimeFenceMismatch);
+    }
     if permit.operation_digest != expectation.operation_digest {
         return Err(PermitStoreError::OperationMismatch);
     }

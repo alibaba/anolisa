@@ -2,9 +2,10 @@
 
 use std::collections::BTreeSet;
 
-use cosh_gateway_contracts::capability::ApprovalDecision;
-use cosh_gateway_contracts::common::{ContractSchema, TargetRef, CONTRACT_SCHEMA_VERSION};
-use cosh_gateway_contracts::ids::{ActorId, ApprovalId, ExecutionId, RunId, TaskId};
+use cosh_gateway_contracts::common::{ContractSchema, TargetRef, TASK_EVENT_SCHEMA_VERSION};
+use cosh_gateway_contracts::ids::{
+    ActorId, ApprovalId, ExecutionId, InputRequestId, RunId, TaskId,
+};
 use cosh_gateway_contracts::task::{TaskEvent, TaskEventEnvelope, TaskState};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -21,7 +22,15 @@ pub struct TaskAggregate {
     run_outcome: RunOutcome,
     cancellation_requested: bool,
     pending_approvals: BTreeSet<ApprovalId>,
+    #[serde(default)]
+    pending_input: Option<PendingInputIdentity>,
     planned_executions: BTreeSet<ExecutionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PendingInputIdentity {
+    request_id: InputRequestId,
+    run_id: RunId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +73,9 @@ pub enum AggregateError {
         /// Revision carried by the rejected event.
         actual: u64,
     },
+    /// The aggregate has exhausted the revision number space.
+    #[error("Task revision cannot advance beyond u64::MAX")]
+    RevisionOverflow,
     /// The first event is not a valid Task creation event.
     #[error("the first Task event must be task_submitted with an actor correlation")]
     InvalidFirstEvent,
@@ -81,6 +93,9 @@ pub enum AggregateError {
     /// An approval event references an unknown or already-resolved approval.
     #[error("approval is not pending for this Task")]
     ApprovalNotPending,
+    /// An input submission does not match the one pending Runtime request.
+    #[error("runtime input request is not pending for this Task")]
+    InputNotPending,
     /// An execution result references an execution that was not planned.
     #[error("execution is not planned for this Task")]
     ExecutionNotPlanned,
@@ -122,6 +137,7 @@ impl TaskAggregate {
             run_outcome: RunOutcome::None,
             cancellation_requested: false,
             pending_approvals: BTreeSet::new(),
+            pending_input: None,
             planned_executions: BTreeSet::new(),
         };
         for envelope in rest {
@@ -143,7 +159,10 @@ impl TaskAggregate {
         if envelope.header.correlation.actor_id.as_ref() != Some(&self.owner_actor_id) {
             return Err(AggregateError::CorrelationMismatch);
         }
-        let expected = self.revision.saturating_add(1);
+        let expected = self
+            .revision
+            .checked_add(1)
+            .ok_or(AggregateError::RevisionOverflow)?;
         if envelope.revision != expected {
             return Err(AggregateError::RevisionGap {
                 expected,
@@ -188,10 +207,39 @@ impl TaskAggregate {
         self.state
     }
 
+    /// Returns whether durable cancellation won admission for the active Run.
+    #[must_use]
+    pub fn cancellation_requested(&self) -> bool {
+        self.cancellation_requested
+    }
+
     /// Returns the current Run identity, when one has been allocated.
     #[must_use]
     pub fn active_run_id(&self) -> Option<&RunId> {
         self.active_run_id.as_ref()
+    }
+
+    pub(crate) fn active_run_is_running(&self, run_id: &RunId) -> bool {
+        self.active_run_id.as_ref() == Some(run_id)
+            && self.state == TaskState::Running
+            && self.run_outcome == RunOutcome::Active
+    }
+
+    pub(crate) fn active_run_can_be_cancelled(&self, run_id: &RunId) -> bool {
+        self.active_run_id.as_ref() == Some(run_id)
+            && self.planned_executions.is_empty()
+            && matches!(
+                self.run_outcome,
+                RunOutcome::None | RunOutcome::Active | RunOutcome::Suspended | RunOutcome::Failed
+            )
+    }
+
+    /// Returns the one input request currently blocking the active Run.
+    #[must_use]
+    pub fn pending_input_request_id(&self) -> Option<&InputRequestId> {
+        self.pending_input
+            .as_ref()
+            .map(|pending| &pending.request_id)
     }
 
     fn reduce(&mut self, event: &TaskEvent) -> Result<(), AggregateError> {
@@ -218,6 +266,40 @@ impl TaskAggregate {
             TaskEvent::RuntimeEventRecorded { run_id, .. } => {
                 self.require_running_event(event, run_id)?;
             }
+            TaskEvent::InputRequested { request } => {
+                self.require_running_event(event, request.run_id())?;
+                if self.cancellation_requested
+                    || !self.planned_executions.is_empty()
+                    || self.pending_input.is_some()
+                {
+                    return self.invalid(event);
+                }
+                self.pending_input = Some(PendingInputIdentity {
+                    request_id: request.request_id().clone(),
+                    run_id: request.run_id().clone(),
+                });
+                self.state = TaskState::WaitingInput;
+                self.run_outcome = RunOutcome::Suspended;
+            }
+            TaskEvent::InputSubmitted {
+                request_id, run_id, ..
+            } => {
+                self.require_state(event, &[TaskState::WaitingInput])?;
+                self.require_run(run_id)?;
+                let Some(pending) = &self.pending_input else {
+                    return Err(AggregateError::InputNotPending);
+                };
+                if &pending.request_id != request_id
+                    || &pending.run_id != run_id
+                    || self.cancellation_requested
+                    || !self.planned_executions.is_empty()
+                {
+                    return Err(AggregateError::InputNotPending);
+                }
+                self.pending_input = None;
+                self.state = TaskState::Running;
+                self.run_outcome = RunOutcome::Active;
+            }
             TaskEvent::ApprovalRequested { approval } => {
                 self.require_running_event(event, &approval.run_id)?;
                 if approval.task_id != self.task_id
@@ -237,13 +319,12 @@ impl TaskAggregate {
                     return Err(AggregateError::ApprovalNotPending);
                 }
                 if self.pending_approvals.is_empty() {
-                    if matches!(decision, ApprovalDecision::Approve) {
-                        self.state = TaskState::Running;
-                        self.run_outcome = RunOutcome::Active;
-                    } else {
-                        self.state = TaskState::Suspended;
-                        self.run_outcome = RunOutcome::Suspended;
-                    }
+                    // Denying one provider tool does not terminate its prompt
+                    // turn. The Runtime remains active and may continue with a
+                    // safer plan; suspension requires an explicit Run event.
+                    let _ = decision;
+                    self.state = TaskState::Running;
+                    self.run_outcome = RunOutcome::Active;
                 }
             }
             TaskEvent::ExecutionPlanned { execution_id, .. } => {
@@ -298,7 +379,7 @@ impl TaskAggregate {
                     ],
                 )?;
                 self.require_run(run_id)?;
-                if matches!(self.run_outcome, RunOutcome::Succeeded | RunOutcome::Failed) {
+                if self.run_outcome == RunOutcome::Succeeded {
                     return self.invalid(event);
                 }
                 if !self.cancellation_requested
@@ -310,14 +391,21 @@ impl TaskAggregate {
                 self.state = TaskState::Suspended;
                 self.run_outcome = RunOutcome::Cancelled;
                 self.pending_approvals.clear();
+                self.pending_input = None;
             }
             TaskEvent::RunSuspended { run_id, .. } => {
-                self.require_running_event(event, run_id)?;
-                if !self.planned_executions.is_empty() {
+                self.require_state(event, &[TaskState::Running, TaskState::WaitingInput])?;
+                self.require_run(run_id)?;
+                if (self.state == TaskState::Running && self.run_outcome != RunOutcome::Active)
+                    || (self.state == TaskState::WaitingInput
+                        && self.run_outcome != RunOutcome::Suspended)
+                    || !self.planned_executions.is_empty()
+                {
                     return self.invalid(event);
                 }
                 self.state = TaskState::Suspended;
                 self.run_outcome = RunOutcome::Suspended;
+                self.pending_input = None;
             }
             TaskEvent::RunSucceeded { run_id } => {
                 self.require_running_event(event, run_id)?;
@@ -327,11 +415,21 @@ impl TaskAggregate {
                 self.run_outcome = RunOutcome::Succeeded;
             }
             TaskEvent::RunFailed { run_id, .. } => {
-                self.require_state(event, &[TaskState::Running, TaskState::Suspended])?;
+                self.require_state(
+                    event,
+                    &[
+                        TaskState::Running,
+                        TaskState::WaitingApproval,
+                        TaskState::WaitingInput,
+                        TaskState::Suspended,
+                    ],
+                )?;
                 self.require_run(run_id)?;
                 if (self.state == TaskState::Running && self.run_outcome != RunOutcome::Active)
-                    || (self.state == TaskState::Suspended
-                        && self.run_outcome != RunOutcome::Suspended)
+                    || (matches!(
+                        self.state,
+                        TaskState::WaitingApproval | TaskState::WaitingInput | TaskState::Suspended
+                    ) && self.run_outcome != RunOutcome::Suspended)
                     || !self.planned_executions.is_empty()
                 {
                     return self.invalid(event);
@@ -339,6 +437,7 @@ impl TaskAggregate {
                 self.state = TaskState::Suspended;
                 self.run_outcome = RunOutcome::Failed;
                 self.pending_approvals.clear();
+                self.pending_input = None;
             }
             TaskEvent::RunRetryQueued {
                 previous_run_id,
@@ -356,6 +455,7 @@ impl TaskAggregate {
                 self.active_run_id = Some(next_run_id.clone());
                 self.run_outcome = RunOutcome::None;
                 self.pending_approvals.clear();
+                self.pending_input = None;
             }
             TaskEvent::TaskSucceeded => {
                 self.require_state(event, &[TaskState::Running])?;
@@ -394,6 +494,7 @@ impl TaskAggregate {
                     return self.invalid(event);
                 }
                 self.state = TaskState::Cancelled;
+                self.pending_input = None;
             }
         }
         Ok(())
@@ -449,9 +550,9 @@ fn validate_task_header(envelope: &TaskEventEnvelope) -> Result<(), AggregateErr
     if envelope.header.schema != ContractSchema::TaskEvent {
         return Err(AggregateError::WrongSchema);
     }
-    if envelope.header.schema_version != CONTRACT_SCHEMA_VERSION {
+    if envelope.header.schema_version != TASK_EVENT_SCHEMA_VERSION {
         return Err(AggregateError::WrongSchemaVersion {
-            expected: CONTRACT_SCHEMA_VERSION,
+            expected: TASK_EVENT_SCHEMA_VERSION,
             actual: envelope.header.schema_version,
         });
     }
@@ -470,3 +571,6 @@ fn task_event_kind_name(event: &TaskEvent) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod transition_matrix_tests;

@@ -1,6 +1,8 @@
 //! Focused supervisor lifecycle and cleanup tests.
 
+use std::fs;
 use std::io;
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -9,6 +11,24 @@ use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 use super::*;
+
+#[cfg(target_os = "linux")]
+fn linked_shell(directory: &Path, name: &str) -> std::path::PathBuf {
+    let path = directory.join(name);
+    std::os::unix::fs::symlink("/bin/sh", &path).unwrap();
+    path
+}
+
+fn wait_for_terminal(supervisor: &mut RuntimeSupervisor) -> ProcessTerminal {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(terminal) = supervisor.poll_terminal().unwrap() {
+            return terminal;
+        }
+        assert!(Instant::now() < deadline, "child did not exit");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
 
 #[derive(Debug, Default)]
 struct TermFailingProcessGroup {
@@ -61,9 +81,9 @@ fn reaps_once_and_retains_bounded_stderr_tail() {
     let mut spec = RuntimeLaunchSpec::new("/bin/sh", workspace.path());
     spec.arguments = vec![
         "-c".into(),
-        "printf 'ready\\n'; printf '0123456789' >&2; exit 7".into(),
+        "printf 'ready\\n'; head -c 4096 /dev/zero | tr '\\000' x >&2; exit 7".into(),
     ];
-    spec.stderr_capacity = 5;
+    spec.stderr_capacity = 64;
     let mut supervisor = RuntimeSupervisor::new();
 
     supervisor.launch(&spec).unwrap();
@@ -80,8 +100,8 @@ fn reaps_once_and_retains_bounded_stderr_tail() {
         thread::sleep(Duration::from_millis(5));
     };
     assert_eq!(terminal.exit, ProcessExit::Code(7));
-    assert_eq!(terminal.stderr.tail, "56789");
-    assert_eq!(terminal.stderr.discarded_bytes, 5);
+    assert_eq!(terminal.stderr.tail, "x".repeat(64));
+    assert_eq!(terminal.stderr.discarded_bytes, 4032);
     assert_eq!(supervisor.poll_terminal().unwrap(), None);
 }
 
@@ -153,4 +173,96 @@ fn term_group_failure_still_kills_reaps_and_settles_once() {
     let terminal = supervisor.poll_terminal().unwrap().unwrap();
     assert_eq!(terminal.exit, ProcessExit::Signal(9));
     assert_eq!(supervisor.poll_terminal().unwrap(), None);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn executable_and_workspace_replacements_do_not_redirect_launch() {
+    let root = tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let executable = linked_shell(root.path(), "runtime");
+    let mut spec = RuntimeLaunchSpec::new(&executable, &workspace);
+    spec.arguments = vec!["-c".into(), "printf original > launch.marker".into()];
+
+    let admitted_workspace = root.path().join("admitted-workspace");
+    fs::rename(&workspace, &admitted_workspace).unwrap();
+    fs::create_dir(&workspace).unwrap();
+    let admitted_executable = root.path().join("admitted-runtime");
+    fs::rename(&executable, &admitted_executable).unwrap();
+    fs::copy("/bin/false", &executable).unwrap();
+
+    let mut supervisor = RuntimeSupervisor::new();
+    supervisor.launch(&spec).unwrap();
+    assert_eq!(
+        wait_for_terminal(&mut supervisor).exit,
+        ProcessExit::Code(0)
+    );
+    assert_eq!(
+        fs::read_to_string(admitted_workspace.join("launch.marker")).unwrap(),
+        "original"
+    );
+    assert!(!workspace.join("launch.marker").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn pinned_launch_is_stable_across_multiple_runs() {
+    let root = tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let executable = linked_shell(root.path(), "runtime");
+    let mut spec = RuntimeLaunchSpec::new(&executable, &workspace);
+    spec.arguments = vec![
+        "-c".into(),
+        "printf x >> multi-run.marker; printf 'ready\\n'".into(),
+    ];
+
+    let mut first = RuntimeSupervisor::new();
+    first.launch(&spec).unwrap();
+    assert_eq!(first.read_frame().unwrap().as_deref(), Some("ready"));
+    assert_eq!(wait_for_terminal(&mut first).exit, ProcessExit::Code(0));
+
+    let admitted_workspace = root.path().join("admitted-workspace");
+    fs::rename(&workspace, &admitted_workspace).unwrap();
+    fs::create_dir(&workspace).unwrap();
+    fs::rename(&executable, root.path().join("admitted-runtime")).unwrap();
+    fs::copy("/bin/false", &executable).unwrap();
+
+    let mut second = RuntimeSupervisor::new();
+    second.launch(&spec).unwrap();
+    assert_eq!(second.read_frame().unwrap().as_deref(), Some("ready"));
+    assert_eq!(wait_for_terminal(&mut second).exit, ProcessExit::Code(0));
+    assert_eq!(
+        fs::read_to_string(admitted_workspace.join("multi-run.marker")).unwrap(),
+        "xx"
+    );
+    assert!(!workspace.join("multi-run.marker").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn pinned_descriptors_close_after_specs_are_dropped() {
+    for _ in 0..16 {
+        let root = tempdir().unwrap();
+        let executable = linked_shell(root.path(), "runtime");
+        let mut spec = RuntimeLaunchSpec::new(executable, root.path());
+        let (program, directory) = match (&spec.program, &spec.working_directory) {
+            (LaunchProgram::Pinned { executable, .. }, LaunchDirectory::Pinned(directory)) => {
+                (executable.descriptor_weak(), directory.descriptor_weak())
+            }
+            _ => panic!("expected pinned launch handles"),
+        };
+        spec.arguments = vec!["-c".into(), "exit 0".into()];
+        let mut supervisor = RuntimeSupervisor::new();
+        supervisor.launch(&spec).unwrap();
+        assert_eq!(
+            wait_for_terminal(&mut supervisor).exit,
+            ProcessExit::Code(0)
+        );
+        drop(supervisor);
+        drop(spec);
+        assert!(program.upgrade().is_none());
+        assert!(directory.upgrade().is_none());
+    }
 }

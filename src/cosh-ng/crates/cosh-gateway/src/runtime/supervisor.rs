@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -12,10 +11,14 @@ use std::time::Duration;
 use thiserror::Error;
 use wait_timeout::ChildExt;
 
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
+
 use super::bounded_io::{
     BoundedLineChannel, BoundedLineError, BoundedLineRead, BoundedWriteChannel, StderrCollector,
     StderrSnapshot,
 };
+use super::pinned_local::{PinnedDirectory, PinnedExecutable};
 use super::process_group::{PlatformProcessGroup, ProcessGroupLifecycle};
 
 const MAX_STDERR_CAPACITY: usize = 1024 * 1024;
@@ -27,12 +30,10 @@ const MAX_STDIN_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Configuration used to start a supervised runtime without invoking a shell.
 #[derive(Debug, Clone)]
 pub struct RuntimeLaunchSpec {
-    /// Approved absolute executable path.
-    pub program: PathBuf,
+    program: LaunchProgram,
     /// Arguments passed directly to the executable.
     pub arguments: Vec<OsString>,
-    /// Pinned absolute workspace used as the child working directory.
-    pub working_directory: PathBuf,
+    working_directory: LaunchDirectory,
     /// Explicit child environment after the inherited environment is cleared.
     pub environment: BTreeMap<OsString, OsString>,
     /// Maximum retained stderr tail in bytes.
@@ -43,13 +44,101 @@ pub struct RuntimeLaunchSpec {
     pub stdin_write_timeout: Duration,
 }
 
+#[derive(Debug, Clone)]
+enum LaunchProgram {
+    Pinned {
+        executable: PinnedExecutable,
+        inherit_for_script: bool,
+    },
+    Invalid {
+        path: PathBuf,
+        relative: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum LaunchDirectory {
+    Pinned(PinnedDirectory),
+    Invalid { path: PathBuf, relative: bool },
+}
+
 impl RuntimeLaunchSpec {
     /// Builds a launch specification with conservative I/O bounds.
     pub fn new(program: impl Into<PathBuf>, working_directory: impl Into<PathBuf>) -> Self {
+        let program = program.into();
+        let working_directory = working_directory.into();
+        let program = if program.is_absolute() {
+            PinnedExecutable::pin(&program)
+                .map(|executable| LaunchProgram::Pinned {
+                    executable,
+                    inherit_for_script: false,
+                })
+                .unwrap_or_else(|_| LaunchProgram::Invalid {
+                    path: program,
+                    relative: false,
+                })
+        } else {
+            LaunchProgram::Invalid {
+                path: program,
+                relative: true,
+            }
+        };
+        let working_directory = if working_directory.is_absolute() {
+            PinnedDirectory::pin(&working_directory)
+                .map(LaunchDirectory::Pinned)
+                .unwrap_or_else(|_| LaunchDirectory::Invalid {
+                    path: working_directory,
+                    relative: false,
+                })
+        } else {
+            LaunchDirectory::Invalid {
+                path: working_directory,
+                relative: true,
+            }
+        };
         Self {
-            program: program.into(),
+            program,
             arguments: Vec::new(),
-            working_directory: working_directory.into(),
+            working_directory,
+            environment: BTreeMap::new(),
+            stderr_capacity: 64 * 1024,
+            stdout_line_limit: 256 * 1024,
+            stdin_write_timeout: Duration::from_secs(5),
+        }
+    }
+
+    /// Builds a launch specification from handles pinned by trusted admission.
+    #[must_use]
+    pub fn from_pinned(program: PinnedExecutable, working_directory: PinnedDirectory) -> Self {
+        Self {
+            program: LaunchProgram::Pinned {
+                executable: program,
+                inherit_for_script: false,
+            },
+            arguments: Vec::new(),
+            working_directory: LaunchDirectory::Pinned(working_directory),
+            environment: BTreeMap::new(),
+            stderr_capacity: 64 * 1024,
+            stdout_line_limit: 256 * 1024,
+            stdin_write_timeout: Duration::from_secs(5),
+        }
+    }
+
+    /// Builds a descriptor-pinned launch for an installed shebang adapter.
+    ///
+    /// The executable descriptor is inherited only by the forked child so the
+    /// interpreter can reopen `/proc/self/fd/N`; the parent keeps `FD_CLOEXEC`.
+    pub(crate) fn from_pinned_script(
+        program: PinnedExecutable,
+        working_directory: PinnedDirectory,
+    ) -> Self {
+        Self {
+            program: LaunchProgram::Pinned {
+                executable: program,
+                inherit_for_script: true,
+            },
+            arguments: Vec::new(),
+            working_directory: LaunchDirectory::Pinned(working_directory),
             environment: BTreeMap::new(),
             stderr_capacity: 64 * 1024,
             stdout_line_limit: 256 * 1024,
@@ -64,25 +153,31 @@ impl RuntimeLaunchSpec {
     /// Rejects non-absolute executables/workspaces, unsafe workspaces, invalid
     /// environment entries, and unbounded I/O settings.
     pub fn validate(&self) -> Result<(), RuntimeLaunchError> {
-        if !self.program.is_absolute() {
-            return Err(RuntimeLaunchError::ProgramNotAbsolute(self.program.clone()));
-        }
-        if !self.working_directory.is_absolute() {
-            return Err(RuntimeLaunchError::WorkspaceNotAbsolute(
-                self.working_directory.clone(),
-            ));
-        }
-
-        let metadata = fs::metadata(&self.working_directory).map_err(|source| {
-            RuntimeLaunchError::WorkspaceUnavailable {
-                path: self.working_directory.clone(),
-                source,
+        match &self.program {
+            LaunchProgram::Pinned { .. } => {}
+            LaunchProgram::Invalid {
+                path,
+                relative: true,
+            } => return Err(RuntimeLaunchError::ProgramNotAbsolute(path.clone())),
+            LaunchProgram::Invalid { path, .. } => {
+                return Err(RuntimeLaunchError::ProgramUnavailable(path.clone()));
             }
-        })?;
-        if !metadata.is_dir() {
-            return Err(RuntimeLaunchError::WorkspaceNotDirectory(
-                self.working_directory.clone(),
-            ));
+        }
+        match &self.working_directory {
+            LaunchDirectory::Pinned(_) => {}
+            LaunchDirectory::Invalid {
+                path,
+                relative: true,
+            } => return Err(RuntimeLaunchError::WorkspaceNotAbsolute(path.clone())),
+            LaunchDirectory::Invalid { path, .. } => {
+                return Err(RuntimeLaunchError::WorkspaceUnavailable {
+                    path: path.clone(),
+                    source: io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "Runtime workspace could not be pinned",
+                    ),
+                });
+            }
         }
 
         validate_bound("stderr_capacity", self.stderr_capacity, MAX_STDERR_CAPACITY)?;
@@ -116,6 +211,29 @@ impl RuntimeLaunchSpec {
         Ok(())
     }
 }
+
+#[cfg(target_os = "linux")]
+fn configure_script_descriptor_inheritance(command: &mut Command, descriptor: i32) {
+    // SAFETY: The closure runs after fork and invokes only `fcntl`, which is
+    // async-signal-safe. The descriptor belongs to the borrowed launch spec
+    // and remains open through `spawn`; changing its child copy cannot alter
+    // the parent's `FD_CLOEXEC` flag.
+    unsafe {
+        command.pre_exec(move || {
+            // `open_pinned` creates this descriptor with the only defined file
+            // descriptor flag, `FD_CLOEXEC`, so zero clears exactly that flag.
+            let result = nix::libc::fcntl(descriptor, nix::libc::F_SETFD, 0);
+            if result == -1 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_script_descriptor_inheritance(_command: &mut Command, _descriptor: i32) {}
 
 fn validate_bound(
     field: &'static str,
@@ -159,6 +277,9 @@ pub enum RuntimeLaunchError {
     /// Executables are resolved by policy before they reach the supervisor.
     #[error("runtime program must be an absolute path: {0}")]
     ProgramNotAbsolute(PathBuf),
+    /// The executable could not be pinned during launch admission.
+    #[error("runtime program is unavailable or unsafe: {0}")]
+    ProgramUnavailable(PathBuf),
     /// Runtime workspaces must be pinned, not dependent on daemon cwd.
     #[error("runtime workspace must be an absolute path: {0}")]
     WorkspaceNotAbsolute(PathBuf),
@@ -364,16 +485,45 @@ impl RuntimeSupervisor {
     }
 
     fn launch_validated(&mut self, spec: &RuntimeLaunchSpec) -> Result<(), RuntimeSupervisorError> {
-        let mut command = Command::new(&spec.program);
+        let (program, inherited_script_descriptor) = match &spec.program {
+            LaunchProgram::Pinned {
+                executable,
+                inherit_for_script,
+            } => (
+                executable.descriptor_path(),
+                inherit_for_script.then(|| executable.descriptor_fd()),
+            ),
+            LaunchProgram::Invalid { .. } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid Runtime launch program reached spawn",
+                )
+                .into());
+            }
+        };
+        let working_directory = match &spec.working_directory {
+            LaunchDirectory::Pinned(directory) => directory.descriptor_path(),
+            LaunchDirectory::Invalid { .. } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid Runtime working directory reached spawn",
+                )
+                .into());
+            }
+        };
+        let mut command = Command::new(program);
         command
             .args(&spec.arguments)
-            .current_dir(&spec.working_directory)
+            .current_dir(working_directory)
             .env_clear()
             .envs(&spec.environment)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         self.process_group.configure(&mut command);
+        if let Some(descriptor) = inherited_script_descriptor {
+            configure_script_descriptor_inheritance(&mut command, descriptor);
+        }
 
         let mut child = command.spawn()?;
         let process_group_id = child.id();

@@ -61,7 +61,7 @@ pub(super) fn expand_tilde(path_str: &str) -> PathBuf {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolKind {
     ReadOnly,
     /// A network request that can reach services outside the local process.
@@ -71,6 +71,8 @@ pub enum ToolKind {
     ShellEvidence,
     /// An external tool discovered from a configured MCP server.
     Mcp,
+    /// A side effect that only the negotiated Gateway host may execute.
+    HostedSideEffect,
     /// A tool contributed by an extension-owned external runtime.
     External,
     Other,
@@ -311,6 +313,16 @@ impl ToolRegistry {
         registry
     }
 
+    /// Returns the task-only audited tool inventory for Gateway brokered v1.
+    ///
+    /// The inventory is constructed directly instead of filtering the legacy
+    /// registry so new legacy tools cannot become exposed by accident.
+    pub(crate) fn gateway_brokered_v1() -> Self {
+        let mut registry = Self::new();
+        registry.ask_user_question_enabled = true;
+        registry
+    }
+
     pub fn with_shell_evidence(mut self) -> Self {
         self.register(Box::new(
             read_file::ReadFileTool::with_shell_evidence_tool_guidance(),
@@ -495,6 +507,18 @@ mod tests {
             "web_fetch",
         ] {
             assert!(registry.contains(name), "missing default tool: {name}");
+        }
+    }
+
+    #[test]
+    fn brokered_inventory_is_explicit_and_task_only() {
+        let registry = ToolRegistry::gateway_brokered_v1();
+
+        assert_eq!(registry.names(), vec!["ask_user_question"]);
+        assert!(registry.supports_ask_user_question());
+        assert!(!registry.contains("workspace_checkpoint_create"));
+        for legacy_side_effect in ["shell", "write_file", "edit", "save_memory"] {
+            assert!(!registry.contains(legacy_side_effect));
         }
     }
 

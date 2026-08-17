@@ -15,9 +15,10 @@ BuildRequires:  rust >= 1.88
 BuildRequires:  cargo
 BuildRequires:  gcc
 BuildRequires:  openssl-devel
+BuildRequires:  systemd-rpm-macros
 Requires(post):   lua
 Requires(postun): lua
-Requires(preun):  /usr/bin/getent /usr/bin/awk
+Requires(preun):  (%{_bindir}/systemctl if systemd) /usr/bin/getent /usr/bin/awk
 Requires:       openssl-libs
 Provides:       %{_bindir}/cosh-cli %{_bindir}/cosh %{_libexecdir_cosh}/cosh-gateway
 Provides:       anolisa-component(cosh-ng)
@@ -41,6 +42,13 @@ install -d %{buildroot}%{_libexecdir_cosh}
 install -m 0755 target/release/cosh-core %{buildroot}%{_libexecdir_cosh}/cosh-core
 install -m 0755 target/release/cosh-gateway %{buildroot}%{_libexecdir_cosh}/cosh-gateway
 install -m 0755 target/release/cosh-shell %{buildroot}%{_libexecdir_cosh}/cosh-shell
+
+# Install the rendered system-level Gateway template.
+install -d %{buildroot}%{_unitdir}
+sed 's|{libexecdir}/cosh-ng|%{_libexecdir_cosh}|g' \
+    packaging/systemd/cosh-gateway@.service.in \
+    > %{buildroot}%{_unitdir}/cosh-gateway@.service
+chmod 0644 %{buildroot}%{_unitdir}/cosh-gateway@.service
 
 # Install CLI binary
 install -d %{buildroot}%{_bindir}
@@ -89,6 +97,7 @@ install -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/cosh-n
 %{_libexecdir_cosh}/cosh-core
 %{_libexecdir_cosh}/cosh-gateway
 %{_libexecdir_cosh}/cosh-shell
+%{_unitdir}/cosh-gateway@.service
 %{_datadir}/anolisa/components/cosh-ng/component.toml
 
 %preun
@@ -110,7 +119,12 @@ if [ "$1" -eq 0 ]; then
     printf '%s\n' "$users" >&2
     exit 1
   fi
+  if [ -d /run/systemd/system ] && ! systemctl stop 'cosh-gateway@*.service'; then
+    echo "error: cannot uninstall cosh-ng: failed to stop running Gateway instances." >&2
+    exit 1
+  fi
 fi
+%systemd_preun cosh-gateway@.service
 
 %post -p <lua>
 local nl = '\n'

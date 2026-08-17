@@ -2,8 +2,12 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
+
+use crate::runtime::{ProcessExit, RuntimeSupervisor};
 
 use super::{
     built_in_acp_runtime_profiles, AcpRuntimeProfileId, AcpRuntimeProfileRequest,
@@ -19,6 +23,33 @@ fn executable(directory: &Path, name: &str) -> PathBuf {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
     }
     path
+}
+
+#[cfg(target_os = "linux")]
+fn marker_executable(directory: &Path, name: &str, marker: &Path, value: &str) -> PathBuf {
+    let path = directory.join(name);
+    fs::write(
+        &path,
+        format!(
+            "#!/usr/bin/env sh\nprintf '{value}' >> '{}'\nexit 0\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    path
+}
+
+fn wait_for_terminal(supervisor: &mut RuntimeSupervisor) -> ProcessExit {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(terminal) = supervisor.poll_terminal().unwrap() {
+            return terminal.exit;
+        }
+        assert!(Instant::now() < deadline, "adapter child did not exit");
+        thread::sleep(Duration::from_millis(5));
+    }
 }
 
 fn request(
@@ -122,11 +153,60 @@ fn accepts_and_pins_an_npm_style_adapter_symlink() {
         AcpRuntimeProfileId::Codex,
         Some(adapter),
         root.path(),
-        BTreeMap::new(),
+        BTreeMap::from([(
+            OsString::from("PATH"),
+            env_path(&[PathBuf::from("/usr/bin"), PathBuf::from("/bin")]),
+        )]),
     ))
     .unwrap();
 
     assert_eq!(resolved.executable(), fs::canonicalize(target).unwrap());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn canonical_adapter_replacement_cannot_redirect_repeated_launches() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempDir::new().unwrap();
+    let original_marker = root.path().join("original.marker");
+    let replacement_marker = root.path().join("replacement.marker");
+    let canonical_target = marker_executable(
+        root.path(),
+        "adapter-target.js",
+        &original_marker,
+        "original\n",
+    );
+    let adapter = root.path().join("codex-acp");
+    symlink(&canonical_target, &adapter).unwrap();
+    let resolved = AcpRuntimeProfileResolver::resolve(request(
+        AcpRuntimeProfileId::Codex,
+        Some(adapter),
+        root.path(),
+        BTreeMap::new(),
+    ))
+    .unwrap();
+
+    let admitted_target = root.path().join("admitted-adapter-target.js");
+    fs::rename(&canonical_target, &admitted_target).unwrap();
+    marker_executable(
+        root.path(),
+        "adapter-target.js",
+        &replacement_marker,
+        "replacement\n",
+    );
+
+    for _ in 0..2 {
+        let mut supervisor = RuntimeSupervisor::new();
+        supervisor.launch(&resolved.launch_spec()).unwrap();
+        assert_eq!(wait_for_terminal(&mut supervisor), ProcessExit::Code(0));
+    }
+
+    assert_eq!(
+        fs::read_to_string(original_marker).unwrap(),
+        "original\noriginal\n"
+    );
+    assert!(!replacement_marker.exists());
 }
 
 #[test]

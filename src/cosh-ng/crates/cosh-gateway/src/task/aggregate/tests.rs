@@ -1,8 +1,12 @@
+use cosh_gateway_contracts::capability::ApprovalDecision;
 use cosh_gateway_contracts::common::{
     BoundedName, BoundedOpaque, BoundedText, ContractHeader, Correlation, Digest, RuntimeSelector,
 };
 use cosh_gateway_contracts::error::{ContractError, ErrorCategory};
-use cosh_gateway_contracts::ids::{InstallationId, MessageId, PermitId, RequestId};
+use cosh_gateway_contracts::ids::{
+    InputRequestId, InstallationId, MessageId, PermitId, RequestId, TurnId,
+};
+use cosh_gateway_contracts::runtime::RuntimeInputRequest;
 use cosh_gateway_contracts::task::{
     CancelReason, CancellationStage, RuntimeUpdate, SuspensionCode, UncertaintyCode,
 };
@@ -99,6 +103,123 @@ fn plan_execution(
     execution_id
 }
 
+fn input_request(run_id: &RunId) -> RuntimeInputRequest {
+    RuntimeInputRequest::new(
+        InputRequestId::new(),
+        run_id.clone(),
+        TurnId::new(),
+        None,
+        BoundedText::new("Need bounded input").unwrap(),
+        Vec::new(),
+        true,
+        false,
+    )
+    .unwrap()
+}
+
+#[test]
+fn input_request_and_digest_only_submission_are_exact_and_single_use() {
+    let task_id = TaskId::new();
+    let actor_id = ActorId::new();
+    let run_id = RunId::new();
+    let mut aggregate = running(&task_id, &actor_id, &run_id);
+    let request = input_request(&run_id);
+    aggregate
+        .apply(&envelope(
+            &task_id,
+            &actor_id,
+            4,
+            TaskEvent::InputRequested {
+                request: request.clone(),
+            },
+        ))
+        .unwrap();
+    assert_eq!(aggregate.state(), TaskState::WaitingInput);
+    assert_eq!(
+        aggregate.pending_input_request_id(),
+        Some(request.request_id())
+    );
+
+    let wrong = envelope(
+        &task_id,
+        &actor_id,
+        5,
+        TaskEvent::InputSubmitted {
+            request_id: InputRequestId::new(),
+            run_id: run_id.clone(),
+            response_digest: Digest::parse("b".repeat(64)).unwrap(),
+        },
+    );
+    let before = aggregate.clone();
+    assert_eq!(
+        aggregate.apply(&wrong),
+        Err(AggregateError::InputNotPending)
+    );
+    assert_eq!(aggregate, before);
+
+    aggregate
+        .apply(&envelope(
+            &task_id,
+            &actor_id,
+            5,
+            TaskEvent::InputSubmitted {
+                request_id: request.request_id().clone(),
+                run_id: run_id.clone(),
+                response_digest: Digest::parse("c".repeat(64)).unwrap(),
+            },
+        ))
+        .unwrap();
+    assert_eq!(aggregate.state(), TaskState::Running);
+    assert!(aggregate.pending_input_request_id().is_none());
+
+    let duplicate = envelope(
+        &task_id,
+        &actor_id,
+        6,
+        TaskEvent::InputSubmitted {
+            request_id: request.request_id().clone(),
+            run_id,
+            response_digest: Digest::parse("c".repeat(64)).unwrap(),
+        },
+    );
+    let before = aggregate.clone();
+    assert!(matches!(
+        aggregate.apply(&duplicate),
+        Err(AggregateError::InvalidTransition { .. })
+    ));
+    assert_eq!(aggregate, before);
+}
+
+#[test]
+fn input_request_rejects_cancellation_and_planned_execution_conflicts() {
+    let task_id = TaskId::new();
+    let actor_id = ActorId::new();
+    let run_id = RunId::new();
+    for planned in [false, true] {
+        let mut aggregate = running(&task_id, &actor_id, &run_id);
+        if planned {
+            plan_execution(&mut aggregate, &task_id, &actor_id, 4);
+        } else {
+            aggregate.cancellation_requested = true;
+        }
+        let revision = aggregate.revision() + 1;
+        let request = envelope(
+            &task_id,
+            &actor_id,
+            revision,
+            TaskEvent::InputRequested {
+                request: input_request(&run_id),
+            },
+        );
+        let before = aggregate.clone();
+        assert!(matches!(
+            aggregate.apply(&request),
+            Err(AggregateError::InvalidTransition { .. })
+        ));
+        assert_eq!(aggregate, before);
+    }
+}
+
 #[test]
 fn reducer_accepts_success_lifecycle() {
     let task_id = TaskId::new();
@@ -172,7 +293,7 @@ fn reducer_rejects_in_memory_unsupported_schema_version() {
     let task_id = TaskId::new();
     let actor_id = ActorId::new();
     let mut event = submitted(&task_id, &actor_id);
-    event.header.schema_version = CONTRACT_SCHEMA_VERSION + 1;
+    event.header.schema_version = TASK_EVENT_SCHEMA_VERSION + 1;
 
     assert!(matches!(
         TaskAggregate::replay(&[event]),
@@ -181,7 +302,7 @@ fn reducer_rejects_in_memory_unsupported_schema_version() {
 }
 
 #[test]
-fn approval_uses_explicit_waiting_state_and_denial_suspends() {
+fn approval_denial_returns_the_active_runtime_to_running() {
     let task_id = TaskId::new();
     let actor_id = ActorId::new();
     let run_id = RunId::new();
@@ -241,7 +362,82 @@ fn approval_uses_explicit_waiting_state_and_denial_suspends() {
             },
         ))
         .unwrap();
-    assert_eq!(aggregate.state(), TaskState::Suspended);
+    assert_eq!(aggregate.state(), TaskState::Running);
+}
+
+#[test]
+fn runtime_loss_settles_a_task_waiting_for_approval() {
+    let task_id = TaskId::new();
+    let actor_id = ActorId::new();
+    let run_id = RunId::new();
+    let approval_id = ApprovalId::new();
+    let mut aggregate = TaskAggregate::replay(&[
+        submitted(&task_id, &actor_id),
+        envelope(
+            &task_id,
+            &actor_id,
+            2,
+            TaskEvent::TaskQueued {
+                run_id: run_id.clone(),
+                runtime: RuntimeSelector {
+                    runtime: BoundedName::new("acp").unwrap(),
+                    profile: None,
+                },
+            },
+        ),
+        envelope(
+            &task_id,
+            &actor_id,
+            3,
+            TaskEvent::RunStarted {
+                run_id: run_id.clone(),
+            },
+        ),
+        envelope(
+            &task_id,
+            &actor_id,
+            4,
+            TaskEvent::ApprovalRequested {
+                approval: cosh_gateway_contracts::capability::ApprovalRequest {
+                    approval_id,
+                    request_id: RequestId::new(),
+                    task_id: task_id.clone(),
+                    run_id: run_id.clone(),
+                    summary: BoundedText::new("approve provider tool").unwrap(),
+                    expires_at_ms: 100,
+                },
+            },
+        ),
+    ])
+    .unwrap();
+
+    let error = ContractError::new(
+        "runtime_lost",
+        ErrorCategory::RuntimeUnavailable,
+        false,
+        "Runtime cannot be reattached",
+    )
+    .unwrap();
+    aggregate
+        .apply(&envelope(
+            &task_id,
+            &actor_id,
+            5,
+            TaskEvent::RunFailed {
+                run_id,
+                error: error.clone(),
+            },
+        ))
+        .unwrap();
+    aggregate
+        .apply(&envelope(
+            &task_id,
+            &actor_id,
+            6,
+            TaskEvent::TaskFailed { error },
+        ))
+        .unwrap();
+    assert_eq!(aggregate.state(), TaskState::Failed);
 }
 
 #[test]
@@ -535,6 +731,7 @@ fn retry_rejects_planned_or_uncertain_execution() {
 
     let mut cancelled_uncertain = before_uncertain_retry.clone();
     let uncertain_run_id = cancelled_uncertain.active_run_id().unwrap().clone();
+    assert!(!cancelled_uncertain.active_run_can_be_cancelled(&uncertain_run_id));
     cancelled_uncertain
         .apply(&envelope(
             &task_id,
@@ -560,4 +757,56 @@ fn retry_rejects_planned_or_uncertain_execution() {
         Err(AggregateError::InvalidTransition { .. })
     ));
     assert_eq!(cancelled_uncertain, before_uncertain_cancel);
+}
+
+#[test]
+fn retryable_failed_run_can_be_explicitly_abandoned() {
+    let task_id = TaskId::new();
+    let actor_id = ActorId::new();
+    let run_id = RunId::new();
+    let mut aggregate = running(&task_id, &actor_id, &run_id);
+    aggregate
+        .apply(&envelope(
+            &task_id,
+            &actor_id,
+            4,
+            TaskEvent::RunFailed {
+                run_id: run_id.clone(),
+                error: ContractError::new(
+                    "retryable_runtime_failure",
+                    ErrorCategory::RuntimeUnavailable,
+                    true,
+                    "Runtime is temporarily unavailable",
+                )
+                .unwrap(),
+            },
+        ))
+        .unwrap();
+    assert!(aggregate.active_run_can_be_cancelled(&run_id));
+    aggregate
+        .apply(&envelope(
+            &task_id,
+            &actor_id,
+            5,
+            TaskEvent::CancellationRequested {
+                run_id: run_id.clone(),
+                cause: CancelReason::UserRequested,
+            },
+        ))
+        .unwrap();
+    aggregate
+        .apply(&envelope(
+            &task_id,
+            &actor_id,
+            6,
+            TaskEvent::RunCancelled {
+                run_id,
+                stage: CancellationStage::Runtime,
+            },
+        ))
+        .unwrap();
+    aggregate
+        .apply(&envelope(&task_id, &actor_id, 7, TaskEvent::TaskCancelled))
+        .unwrap();
+    assert_eq!(aggregate.state(), TaskState::Cancelled);
 }

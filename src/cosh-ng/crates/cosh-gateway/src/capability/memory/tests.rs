@@ -6,12 +6,13 @@ use std::{
 use cosh_gateway_contracts::{
     capability::{
         CapabilityDecision, CapabilityRequest, CapabilityScope, DenialCode, OperationDescriptor,
+        RuntimeExecutionFence,
     },
     common::{
         ActorKind, ActorRef, AuthAssurance, BoundedName, BoundedOpaque, BoundedText, Digest,
         TargetRef,
     },
-    ids::{ActorId, ExecutionId, RequestId, RunId, TaskId},
+    ids::{ActorId, ExecutionId, RequestId, RunId, RuntimeBindingId, TaskId},
 };
 
 use super::super::{
@@ -46,6 +47,15 @@ fn target(value: &str) -> TargetRef {
         kind: BoundedName::new("ecs").expect("test target kind is bounded"),
         authority: BoundedName::new("local").expect("test authority is bounded"),
         identifier: BoundedOpaque::new(value).expect("test target ID is bounded"),
+    }
+}
+
+fn runtime_fence() -> RuntimeExecutionFence {
+    RuntimeExecutionFence {
+        binding_id: RuntimeBindingId::new(),
+        runtime_generation: 3,
+        lease_generation: 4,
+        lease_revision: 5,
     }
 }
 
@@ -86,6 +96,8 @@ fn context(request: &CapabilityRequest, now_ms: u64) -> RequestContext {
         },
         binding: AuthoritativeRequestBinding {
             target: request.target.clone(),
+            target_identity_digest: digest('d'),
+            runtime_fence: runtime_fence(),
             operation: request.operation.clone(),
             operation_digest: request.operation_digest.clone(),
             requested_scope: request.requested_scope.clone(),
@@ -128,6 +140,8 @@ fn expectation(
         run_id: permit.run_id.clone(),
         execution_id: permit.execution_id.clone(),
         target: permit.target.clone(),
+        target_identity_digest: permit.target_identity_digest.clone(),
+        runtime_fence: permit.runtime_fence.clone(),
         operation_digest: permit.operation_digest.clone(),
         input_digest: permit.input_digest.clone(),
         policy_revision: permit.policy_revision,

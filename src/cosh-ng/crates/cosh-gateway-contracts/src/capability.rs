@@ -4,8 +4,47 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     common::{ActorRef, BoundedName, BoundedText, Digest, TargetRef},
-    ids::{ActorId, ApprovalId, ExecutionId, PermitId, RequestId, RunId, TaskId},
+    ids::{
+        ActorId, ApprovalId, CheckpointId, ExecutionId, PermitId, RequestId, RunId,
+        RuntimeBindingId, TaskId,
+    },
 };
+
+/// Versioned typed operation whose side effect must cross a COSH execution target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", content = "input", rename_all = "snake_case")]
+pub enum BrokeredOperation {
+    /// Creates one checkpoint for the workspace already bound to the Runtime.
+    WorkspaceCheckpointCreateV1(WorkspaceCheckpointCreateV1),
+}
+
+/// Runtime-visible input for a brokered workspace checkpoint creation.
+///
+/// Workspace path, daemon socket, presentation metadata, pinning, and timeout
+/// remain Gateway-owned execution policy and never cross this input boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceCheckpointCreateV1 {
+    /// Broker-allocated identity used to correlate the requested checkpoint.
+    pub checkpoint_id: CheckpointId,
+}
+
+/// Fences a permit to the exact Runtime and Run-lease generation that requested it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeExecutionFence {
+    /// Fenced Runtime binding that originated the execution request.
+    pub binding_id: RuntimeBindingId,
+    /// Runtime generation copied from the durable binding.
+    pub runtime_generation: u64,
+    /// Lease generation that owned the Run when the permit was issued.
+    pub lease_generation: u64,
+    /// Lease revision observed at request admission for audit correlation.
+    ///
+    /// Renewal may advance this revision within the same generation. Execution
+    /// separately proves the current exact lease claim before consuming authority.
+    pub lease_revision: u64,
+}
 
 /// Normalized operation proposed by an Agent Runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +153,10 @@ pub struct ExecutionPermit {
     pub execution_id: ExecutionId,
     /// Target bound to the permit.
     pub target: TargetRef,
+    /// Immutable resolved target identity bound to the permit.
+    pub target_identity_digest: Digest,
+    /// Exact Runtime binding and Run lease that may consume the permit.
+    pub runtime_fence: RuntimeExecutionFence,
     /// Digest of the normalized operation bound to the permit.
     pub operation_digest: Digest,
     /// Digest of the complete Runtime input admitted by policy.
@@ -127,6 +170,9 @@ pub struct ExecutionPermit {
 }
 
 /// Result of evaluating a capability request.
+// Keep the established value-owned API: decisions are boundary messages, not
+// retained collections where the larger stack representation would compound.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum CapabilityDecision {

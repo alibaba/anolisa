@@ -19,8 +19,16 @@ pub const MAX_NAME_BYTES: usize = 128;
 pub const MAX_OPAQUE_BYTES: usize = 1024;
 /// Maximum UTF-8 byte length of an idempotency key.
 pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
-/// Current COSH Gateway domain schema version.
+/// Current Gateway command schema version.
 pub const CONTRACT_SCHEMA_VERSION: u16 = 1;
+/// Durable Task event payload schema version.
+///
+/// Keep this independent from ingress and Runtime wire versions. A bump
+/// requires a SQLite schema migration that rewrites every persisted Task event
+/// and projection before current readers can open the database.
+pub const TASK_EVENT_SCHEMA_VERSION: u16 = 1;
+/// Current Runtime command and event schema version.
+pub const RUNTIME_CONTRACT_SCHEMA_VERSION: u16 = 4;
 
 /// Failure returned when a bounded string violates its construction contract.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -227,7 +235,7 @@ impl ContractHeader {
     ) -> Self {
         Self {
             schema,
-            schema_version: CONTRACT_SCHEMA_VERSION,
+            schema_version: expected_schema_version(schema),
             message_id,
             occurred_at_ms,
             correlation,
@@ -236,11 +244,12 @@ impl ContractHeader {
 
     /// Rejects versions that this crate cannot interpret safely.
     pub fn validate_version(&self) -> Result<(), SchemaVersionError> {
-        if self.schema_version == CONTRACT_SCHEMA_VERSION {
+        let expected = expected_schema_version(self.schema);
+        if self.schema_version == expected {
             Ok(())
         } else {
             Err(SchemaVersionError {
-                expected: CONTRACT_SCHEMA_VERSION,
+                expected,
                 actual: self.schema_version,
             })
         }
@@ -256,6 +265,16 @@ impl ContractHeader {
                 actual: self.schema,
             })
         }
+    }
+}
+
+const fn expected_schema_version(schema: ContractSchema) -> u16 {
+    match schema {
+        ContractSchema::RuntimeCommand | ContractSchema::RuntimeEvent => {
+            RUNTIME_CONTRACT_SCHEMA_VERSION
+        }
+        ContractSchema::GatewayCommand => CONTRACT_SCHEMA_VERSION,
+        ContractSchema::TaskEvent => TASK_EVENT_SCHEMA_VERSION,
     }
 }
 

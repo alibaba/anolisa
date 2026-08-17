@@ -121,7 +121,7 @@ mod tests {
         let config = crate::config::CoreConfig::default();
         let provider = Box::new(crate::provider::mock::MockProvider::text_only("test"));
         let tools = crate::tool::ToolRegistry::new();
-        CoshCore::new(config, provider, tools)
+        CoshCore::new_legacy(config, provider, tools)
     }
 
     /// All 28 SLS fields must be present with correct types.
@@ -300,7 +300,7 @@ mod tests {
         let mut config = crate::config::CoreConfig::default();
         config.agent.approval_mode = ApprovalMode::Trust;
         let tools = crate::tool::ToolRegistry::with_defaults_for_test();
-        let mut engine = CoshCore::new(config, Box::new(provider), tools);
+        let mut engine = CoshCore::new_legacy(config, Box::new(provider), tools);
 
         let mut reader = BufReader::new(&b""[..]).lines();
         let mut output = Vec::new();

@@ -2576,6 +2576,8 @@ uninstall_cosh_ng() {
     step "Uninstalling cosh-ng"
     local bin
 
+    stop_systemd_service 'cosh-gateway@*.service'
+
     for bin in cosh-cli cosh-core cosh-gateway cosh-shell; do
         if $DRY_RUN; then
             echo "DRY-RUN: rm -f $INSTALL_BIN_DIR/$bin"

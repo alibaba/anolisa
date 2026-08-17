@@ -13,6 +13,11 @@ trap 'rm -rf "$TMP"' EXIT
 grep -q '^%preun$' "$SPEC"
 grep -q '^%define cosh_replacement_ready ' "$SPEC"
 grep -q '^Requires(preun): ' "$SPEC"
+grep -Fxq \
+    'Requires(preun):  (%{_bindir}/systemctl if systemd) /usr/bin/getent /usr/bin/awk' \
+    "$SPEC"
+grep -Fq "systemctl stop 'cosh-gateway@*.service'" "$SPEC"
+grep -Fxq '%systemd_preun cosh-gateway@.service' "$SPEC"
 grep -q '^%post -p <lua>$' "$SPEC"
 # the extraction below slices on section boundaries, so the sections must
 # keep their order: %preun, then %post, then %postun
@@ -134,15 +139,20 @@ fi
 STUB="$TMP/stub-bin"
 install -d -m 0755 "$STUB"
 GUARD_COSH="$STUB/cosh"
+SYSTEMD_RUNTIME="$TMP/run/systemd/system"
+SYSTEMCTL_LOG="$TMP/systemctl.log"
+install -d -m 0755 "$SYSTEMD_RUNTIME"
 
 PREDICATE="$(sed -n 's/^%define cosh_replacement_ready //p' "$SPEC")"
-PREUN_RAW="$(awk '/^%preun$/{f=1;next} /^%post/{f=0} f' "$SPEC")"
+PREUN_RAW="$(awk '/^%preun$/{f=1;next} /^%post/{f=0} f' "$SPEC" |
+    sed '/^%systemd_preun cosh-gateway@\.service$/d')"
 # Bash 5.2 enables patsub_replacement by default, which would expand every
 # unquoted '&' in the substituted predicate to the matched pattern text;
 # keep the replacement strings verbatim.
 shopt -u patsub_replacement 2>/dev/null || :
 PREUN="${PREUN_RAW//'%{cosh_replacement_ready}'/$PREDICATE}"
 PREUN="${PREUN//'%{_bindir}'/$STUB}"
+PREUN="${PREUN//\/run\/systemd\/system/$SYSTEMD_RUNTIME}"
 PREUN="${PREUN//%%/%}"
 case "$PREUN" in
     *'%{cosh_replacement_ready}'*)
@@ -187,15 +197,29 @@ expect_preun() {
 write_stub getent "printf '%s\n' 'coshuser:x:1000:1000::/home/coshuser:$GUARD_COSH'"
 write_stub rpm "printf '%s\n' cosh-ng"
 write_stub cosh ":"
+write_stub systemctl "printf '%s\n' \"\$*\" >> '$SYSTEMCTL_LOG'"
 
+: > "$SYSTEMCTL_LOG"
 expect_preun "erase with cosh login-shell user" 0 1
 grep -Fq coshuser "$TMP/preun.err"
 grep -Fq "$GUARD_COSH" "$TMP/preun.err"
+test ! -s "$SYSTEMCTL_LOG"
 
 expect_preun "upgrade never blocks" 1 0
+test ! -s "$SYSTEMCTL_LOG"
 
 write_stub getent "printf '%s\n' 'root:x:0:0:root:/root:/usr/bin/bash'"
 expect_preun "erase without cosh users" 0 0
+grep -Fxq 'stop cosh-gateway@*.service' "$SYSTEMCTL_LOG"
+
+write_stub systemctl "printf '%s\n' \"\$*\" >> '$SYSTEMCTL_LOG'; exit 4"
+expect_preun "failed Gateway instance stop" 0 1
+grep -Fq 'failed to stop running Gateway instances' "$TMP/preun.err"
+
+rmdir "$SYSTEMD_RUNTIME"
+expect_preun "erase without a systemd manager" 0 0
+install -d -m 0755 "$SYSTEMD_RUNTIME"
+write_stub systemctl "printf '%s\n' \"\$*\" >> '$SYSTEMCTL_LOG'"
 
 write_stub getent "exit 2"
 expect_preun "failed passwd enumeration" 0 1

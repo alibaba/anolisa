@@ -109,6 +109,11 @@ define_id!(ActorId, "act", "Identifies an authenticated COSH actor.");
 define_id!(TaskId, "tsk", "Identifies one durable user intent.");
 define_id!(RunId, "run", "Identifies one attempt to execute a task.");
 define_id!(
+    TurnId,
+    "trn",
+    "Identifies one prompt turn within an Agent session."
+);
+define_id!(
     AgentSessionId,
     "ags",
     "Identifies one COSH-owned logical Agent session."
@@ -139,6 +144,11 @@ define_id!(
     "exe",
     "Identifies one attempted governed side effect."
 );
+define_id!(
+    CheckpointId,
+    "ckp",
+    "Identifies one workspace checkpoint allocated by the capability broker."
+);
 define_id!(DeliveryId, "dlv", "Identifies one presentation delivery.");
 define_id!(
     MessageId,
@@ -146,9 +156,44 @@ define_id!(
     "Identifies one COSH command or event envelope."
 );
 define_id!(RequestId, "req", "Identifies one COSH capability request.");
+define_id!(
+    InputRequestId,
+    "inp",
+    "Identifies one durable-eligible Runtime input request."
+);
 define_id!(ToolUseId, "tol", "Identifies one observed Agent tool call.");
 define_id!(
     RuntimeMessageId,
     "rms",
     "Identifies one logical message emitted by an Agent runtime."
 );
+
+#[cfg(test)]
+mod tests {
+    use super::{CheckpointId, ExecutionId, RunId, TurnId};
+
+    #[test]
+    fn turn_ids_are_canonical_and_distinct_from_runs() {
+        let turn_id = TurnId::new();
+
+        assert!(turn_id.as_str().starts_with("trn_"));
+        assert_eq!(
+            TurnId::parse(turn_id.as_str()).expect("a generated turn ID is canonical"),
+            turn_id
+        );
+        assert!(RunId::parse(turn_id.as_str()).is_err());
+    }
+
+    #[test]
+    fn checkpoint_ids_are_canonical_and_distinct_from_executions() {
+        let checkpoint_id = CheckpointId::new();
+
+        assert!(checkpoint_id.as_str().starts_with("ckp_"));
+        assert_eq!(
+            CheckpointId::parse(checkpoint_id.as_str())
+                .expect("a generated checkpoint ID is canonical"),
+            checkpoint_id
+        );
+        assert!(ExecutionId::parse(checkpoint_id.as_str()).is_err());
+    }
+}

@@ -1,7 +1,8 @@
 //! Minimal synchronous ACP client bridge over [`RuntimeSupervisor`].
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
@@ -59,6 +60,7 @@ pub struct AcpV1RuntimeBridge {
     codec: AcpV1Codec,
     supervisor: RuntimeSupervisor,
     terminal: Option<ProcessTerminal>,
+    pending_observations: VecDeque<AcpV1Observation>,
 }
 
 impl AcpV1RuntimeBridge {
@@ -82,6 +84,7 @@ impl AcpV1RuntimeBridge {
             codec,
             supervisor,
             terminal: None,
+            pending_observations: VecDeque::new(),
         })
     }
 
@@ -166,7 +169,7 @@ impl AcpV1RuntimeBridge {
         decision: AcpV1PermissionDecision,
     ) -> Result<(), AcpV1BridgeError> {
         let request_id = request_id.clone();
-        self.commit_frame(move |codec| codec.permission_response_frame(&request_id, decision))
+        self.commit_frames(move |codec| codec.permission_response_frames(&request_id, decision))
     }
 
     /// Sends method-not-found for an unadvertised Agent callback.
@@ -179,7 +182,7 @@ impl AcpV1RuntimeBridge {
         request_id: &AcpV1RequestId,
     ) -> Result<(), AcpV1BridgeError> {
         let request_id = request_id.clone();
-        self.commit_frame(move |codec| codec.reject_unsupported_request_frame(&request_id))
+        self.commit_frames(move |codec| codec.reject_unsupported_request_frames(&request_id))
     }
 
     /// Reads and validates the next bounded Agent frame.
@@ -209,28 +212,47 @@ impl AcpV1RuntimeBridge {
         &mut self,
         timeout: Duration,
     ) -> Result<AcpV1BridgeRead, AcpV1BridgeError> {
-        let frame = match self.supervisor.read_frame_timeout(timeout) {
-            Ok(RuntimeFrameRead::Frame(frame)) => frame,
-            Ok(RuntimeFrameRead::Eof) => {
-                let observation = self.codec.finish_stdout();
-                self.terminal = self.supervisor.shutdown(PROTOCOL_FAILURE_SHUTDOWN_GRACE)?;
-                return Ok(AcpV1BridgeRead::Observation(
-                    observation.unwrap_or(AcpV1Observation::TransportClosed),
-                ));
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(observation) = self.pending_observations.pop_front() {
+                return Ok(AcpV1BridgeRead::Observation(observation));
             }
-            Ok(RuntimeFrameRead::TimedOut) => return Ok(AcpV1BridgeRead::TimedOut),
-            Err(transport) => return Err(self.fail_transport(transport)),
-        };
-        let observation = match self.codec.decode_frame(frame.as_bytes()) {
-            Ok(observation) => observation,
-            Err(protocol) => return Err(self.fail_protocol(protocol)),
-        };
-        if matches!(observation, AcpV1Observation::Initialized { .. }) {
-            if let Err(transport) = self.supervisor.mark_ready() {
-                return Err(self.fail_transport(transport));
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(AcpV1BridgeRead::TimedOut);
             }
+            let frame = match self.supervisor.read_frame_timeout(remaining) {
+                Ok(RuntimeFrameRead::Frame(frame)) => frame,
+                Ok(RuntimeFrameRead::Eof) => {
+                    let observation = self.codec.finish_stdout();
+                    self.terminal = self.supervisor.shutdown(PROTOCOL_FAILURE_SHUTDOWN_GRACE)?;
+                    return Ok(AcpV1BridgeRead::Observation(
+                        observation.unwrap_or(AcpV1Observation::TransportClosed),
+                    ));
+                }
+                Ok(RuntimeFrameRead::TimedOut) => return Ok(AcpV1BridgeRead::TimedOut),
+                Err(transport) => return Err(self.fail_transport(transport)),
+            };
+            let decoded = match self.codec.decode_transport_frame(frame.as_bytes()) {
+                Ok(decoded) => decoded,
+                Err(protocol) => return Err(self.fail_protocol(protocol)),
+            };
+            for frame in decoded.outbound_frames {
+                if let Err(transport) = self.supervisor.write_frame(&frame) {
+                    return Err(self.fail_transport(transport));
+                }
+            }
+            if decoded
+                .observations
+                .iter()
+                .any(|observation| matches!(observation, AcpV1Observation::Initialized { .. }))
+            {
+                if let Err(transport) = self.supervisor.mark_ready() {
+                    return Err(self.fail_transport(transport));
+                }
+            }
+            self.pending_observations.extend(decoded.observations);
         }
-        Ok(AcpV1BridgeRead::Observation(observation))
     }
 
     /// Polls the underlying process terminal without blocking.
@@ -289,6 +311,21 @@ impl AcpV1RuntimeBridge {
         let frame = encode(&mut candidate)?;
         if let Err(transport) = self.supervisor.write_frame(&frame) {
             return Err(self.fail_transport(transport));
+        }
+        self.codec = candidate;
+        Ok(())
+    }
+
+    fn commit_frames(
+        &mut self,
+        encode: impl FnOnce(&mut AcpV1Codec) -> Result<Vec<String>, AcpV1CodecError>,
+    ) -> Result<(), AcpV1BridgeError> {
+        let mut candidate = self.codec.clone();
+        let frames = encode(&mut candidate)?;
+        for frame in frames {
+            if let Err(transport) = self.supervisor.write_frame(&frame) {
+                return Err(self.fail_transport(transport));
+            }
         }
         self.codec = candidate;
         Ok(())

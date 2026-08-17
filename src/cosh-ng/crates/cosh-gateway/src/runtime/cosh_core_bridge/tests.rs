@@ -3,13 +3,19 @@
 use std::time::{Duration, Instant};
 
 use cosh_gateway_contracts::{
-    common::{BoundedName, BoundedText, ContentPart, Digest, WorkspaceRef},
+    common::{
+        ActorKind, ActorRef, AuthAssurance, BoundedName, BoundedOpaque, BoundedText, ContentPart,
+        Digest, TargetRef, WorkspaceRef,
+    },
     external::ExternalRefKind,
     ids::{
-        AgentSessionId, InstallationId, RunId, RuntimeBindingId, RuntimeInstanceId,
-        RuntimeMessageId, TaskId, ToolUseId,
+        ActorId, AgentSessionId, InstallationId, RequestId, RunId, RuntimeBindingId,
+        RuntimeInstanceId, RuntimeMessageId, TaskId, ToolUseId, TurnId,
     },
-    runtime::{AgentRuntimeCommand, AgentRuntimeEvent, RunOutcome},
+    runtime::{
+        AgentRuntimeCommand, AgentRuntimeEvent, RuntimeInputResponse, RuntimeInputSelections,
+        RuntimePermissionDecision, TurnOutcome,
+    },
     task::CancelReason,
 };
 
@@ -41,6 +47,47 @@ fn bridge(script: &str, workspace: &tempfile::TempDir) -> (CoshCoreBridge, CoshC
     let mut launch = RuntimeLaunchSpec::new("/bin/sh", workspace.path());
     launch.arguments = vec!["-c".into(), script.into()];
     let mut config = CoshCoreBridgeConfig::new(launch, workspace_ref(), identity.clone());
+    config.prompt_timeout = Duration::from_secs(2);
+    config.shutdown_grace = Duration::from_millis(50);
+    (CoshCoreBridge::launch(config).unwrap(), identity)
+}
+
+#[cfg(unix)]
+fn brokered_bridge(
+    script: &str,
+    workspace: &tempfile::TempDir,
+) -> (CoshCoreBridge, CoshCoreBridgeIdentity) {
+    let actor = ActorRef {
+        actor_id: ActorId::new(),
+        actor_kind: ActorKind::Human,
+        issuer: BoundedName::new("local-os").unwrap(),
+        assurance: AuthAssurance::LocalOs,
+    };
+    let identity = CoshCoreBridgeIdentity {
+        installation_id: InstallationId::new(),
+        actor_id: Some(actor.actor_id.clone()),
+        task_id: TaskId::new(),
+        run_id: RunId::new(),
+        agent_session_id: AgentSessionId::new(),
+        binding_id: RuntimeBindingId::new(),
+        runtime_instance_id: RuntimeInstanceId::new(),
+        runtime_generation: 11,
+        provider_authority: BoundedName::new("cosh-core").unwrap(),
+        provider_scope_digest: Digest::parse("1".repeat(64)).unwrap(),
+    };
+    let initialize_request_id = format!("init-{}", identity.runtime_instance_id);
+    let script = script.replace("__INIT_REQUEST_ID__", &initialize_request_id);
+    let mut launch = RuntimeLaunchSpec::new("/bin/sh", workspace.path());
+    launch.arguments = vec!["-c".into(), script.into()];
+    let mut config = CoshCoreBridgeConfig::new(launch, workspace_ref(), identity.clone())
+        .gateway_brokered(CoshCoreBrokeredContext {
+            actor,
+            target: TargetRef {
+                kind: BoundedName::new("local").unwrap(),
+                authority: BoundedName::new("cosh").unwrap(),
+                identifier: BoundedOpaque::new("primary").unwrap(),
+            },
+        });
     config.prompt_timeout = Duration::from_secs(2);
     config.shutdown_grace = Duration::from_millis(50);
     (CoshCoreBridge::launch(config).unwrap(), identity)
@@ -109,10 +156,12 @@ done
     );
     assert_eq!(binding.external_session.value.as_str(), "provider-session");
 
+    let turn_id = TurnId::new();
     bridge
         .dispatch(
             AgentRuntimeCommand::Prompt {
                 run_id: identity.run_id.clone(),
+                turn_id: turn_id.clone(),
                 input: vec![ContentPart::Text {
                     text: BoundedText::new("diagnose").unwrap(),
                 }],
@@ -120,10 +169,18 @@ done
             Instant::now() + Duration::from_secs(2),
         )
         .unwrap();
+    let started = bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(started.sequence, 2);
+    assert!(matches!(
+        started.event,
+        AgentRuntimeEvent::TurnStarted { turn_id: observed } if observed == turn_id
+    ));
     let chunk = bridge
         .next_event(Instant::now() + Duration::from_secs(1))
         .unwrap();
-    assert_eq!(chunk.sequence, 2);
+    assert_eq!(chunk.sequence, 3);
     assert!(matches!(
         chunk.event,
         AgentRuntimeEvent::MessageChunk {
@@ -134,12 +191,13 @@ done
     let terminal = bridge
         .next_event(Instant::now() + Duration::from_secs(1))
         .unwrap();
-    assert_eq!(terminal.sequence, 3);
+    assert_eq!(terminal.sequence, 4);
     assert!(matches!(
         terminal.event,
         AgentRuntimeEvent::Completed {
-            outcome: RunOutcome::Succeeded
-        }
+            turn_id: ref observed,
+            outcome: TurnOutcome::Completed
+        } if observed == &turn_id
     ));
     assert_eq!(
         bridge.next_event(Instant::now() + Duration::from_millis(20)),
@@ -164,10 +222,12 @@ while :; do sleep 1; done
     bridge
         .next_event(Instant::now() + Duration::from_secs(1))
         .unwrap();
+    let turn_id = TurnId::new();
     bridge
         .dispatch(
             AgentRuntimeCommand::Prompt {
                 run_id: identity.run_id.clone(),
+                turn_id: turn_id.clone(),
                 input: vec![ContentPart::Text {
                     text: BoundedText::new("wait").unwrap(),
                 }],
@@ -175,12 +235,16 @@ while :; do sleep 1; done
             Instant::now() + Duration::from_secs(2),
         )
         .unwrap();
+    bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
 
     let started = Instant::now();
     bridge
         .dispatch(
             AgentRuntimeCommand::Cancel {
                 run_id: identity.run_id,
+                turn_id: turn_id.clone(),
                 cause: CancelReason::UserRequested,
             },
             Instant::now() + Duration::from_secs(1),
@@ -193,8 +257,9 @@ while :; do sleep 1; done
     assert!(matches!(
         terminal.event,
         AgentRuntimeEvent::Completed {
-            outcome: RunOutcome::Cancelled
-        }
+            turn_id: observed,
+            outcome: TurnOutcome::Cancelled
+        } if observed == turn_id
     ));
     assert_eq!(
         bridge.next_event(Instant::now() + Duration::from_millis(20)),
@@ -266,6 +331,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
 
     let prompt = || AgentRuntimeCommand::Prompt {
         run_id: identity.run_id.clone(),
+        turn_id: TurnId::new(),
         input: vec![ContentPart::Text {
             text: BoundedText::new("continue").unwrap(),
         }],
@@ -285,6 +351,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
         bridge.dispatch(
             AgentRuntimeCommand::Cancel {
                 run_id: identity.run_id.clone(),
+                turn_id: TurnId::new(),
                 cause: CancelReason::UserRequested,
             },
             Instant::now() + Duration::from_secs(1),
@@ -298,13 +365,17 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
     bridge
         .dispatch(prompt(), Instant::now() + Duration::from_secs(1))
         .unwrap();
+    bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
     let terminal = bridge
         .next_event(Instant::now() + Duration::from_secs(1))
         .unwrap();
     assert!(matches!(
         terminal.event,
         AgentRuntimeEvent::Completed {
-            outcome: RunOutcome::Succeeded
+            outcome: TurnOutcome::Completed,
+            ..
         }
     ));
 }
@@ -343,4 +414,317 @@ fn tool_identity_retention_is_bounded() {
         },
     });
     assert_eq!(result, Err(AgentRuntimePortError::Protocol));
+}
+
+#[cfg(unix)]
+#[test]
+fn brokered_profile_rejects_checkpoint_request_before_capability() {
+    let workspace = tempfile::tempdir().unwrap();
+    let script = r#"
+IFS= read -r line
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"__INIT_REQUEST_ID__","response":{"subtype":"initialize","protocol_version":2,"execution_profile":"gateway_brokered_v1","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":false,"can_handle_approval_receipt":true,"can_handle_hosted_checkpoint_create":false,"can_handle_brokered_ask_user":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"provider-session"}'
+IFS= read -r line
+printf '%s\n' '{"type":"stream_event","event":{"type":"message_start"}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"provider-tool-1","name":"workspace_checkpoint_create"}}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_stop","index":0}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"message_stop"}}'
+printf '%s\n' '{"type":"control_request","request_id":"private-req-1","request":{"subtype":"can_use_tool","tool_name":"workspace_checkpoint_create","input":{},"tool_use_id":"provider-tool-1","hook_requires_approval":true}}'
+"#;
+    let (mut bridge, identity) = brokered_bridge(script, &workspace);
+    open(&mut bridge, &identity);
+    bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let turn_id = TurnId::new();
+    bridge
+        .dispatch(
+            AgentRuntimeCommand::Prompt {
+                run_id: identity.run_id.clone(),
+                turn_id,
+                input: vec![ContentPart::Text {
+                    text: BoundedText::new("checkpoint now").unwrap(),
+                }],
+            },
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+    bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let tool = bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    assert!(matches!(
+        tool.event,
+        AgentRuntimeEvent::ToolInvocationUpdated { ref snapshot }
+            if snapshot.authority == ExecutionAuthority::ProviderNativeObserved
+    ));
+    let failed = bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    assert!(matches!(
+        failed.event,
+        AgentRuntimeEvent::TransportFailed { .. }
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn brokered_ask_user_is_exact_single_use_and_side_effect_free() {
+    let workspace = tempfile::tempdir().unwrap();
+    let script = r#"
+IFS= read -r line
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"__INIT_REQUEST_ID__","response":{"subtype":"initialize","protocol_version":2,"execution_profile":"gateway_brokered_v1","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":false,"can_handle_approval_receipt":true,"can_handle_hosted_checkpoint_create":false,"can_handle_brokered_ask_user":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"provider-session"}'
+IFS= read -r line
+printf '%s\n' '{"type":"stream_event","event":{"type":"message_start"}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"question-call","name":"ask_user_question"}}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_stop","index":0}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"message_stop"}}'
+printf '%s\n' '{"type":"control_request","request_id":"private-question-1","request":{"subtype":"ask_user","tool_use_id":"question-call","question":"Choose a branch","options":[{"label":"main","description":"Use the default branch"},{"label":"release"}],"allow_free_text":false,"multi_select":false}}'
+IFS= read -r line
+case "$line" in *'"request_id":"private-question-1"'*'"behavior":"answer"'*'"answer":"main"'*) ;; *) exit 31 ;; esac
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"provider-session"}'
+"#;
+    let (mut bridge, identity) = brokered_bridge(script, &workspace);
+    open(&mut bridge, &identity);
+    bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let turn_id = TurnId::new();
+    bridge
+        .dispatch(
+            AgentRuntimeCommand::Prompt {
+                run_id: identity.run_id.clone(),
+                turn_id: turn_id.clone(),
+                input: vec![ContentPart::Text {
+                    text: BoundedText::new("ask safely").unwrap(),
+                }],
+            },
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+    bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let tool = bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    assert!(matches!(
+        tool.event,
+        AgentRuntimeEvent::ToolInvocationUpdated { snapshot }
+            if snapshot.authority == ExecutionAuthority::ProviderNativeObserved
+    ));
+    let requested = bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let AgentRuntimeEvent::InputRequested { request } = requested.event else {
+        panic!("expected bounded input request")
+    };
+    assert_eq!(request.run_id(), &identity.run_id);
+    assert_eq!(request.turn_id(), &turn_id);
+    assert_eq!(request.question().as_str(), "Choose a branch");
+    assert_eq!(request.options().len(), 2);
+    assert!(!request.allows_free_text());
+
+    let resolve = |request_id, run_id, turn_id, selection| AgentRuntimeCommand::ResolveInput {
+        request_id,
+        run_id,
+        turn_id,
+        response: RuntimeInputResponse::Options {
+            selections: RuntimeInputSelections::new(vec![selection]).unwrap(),
+        },
+    };
+    assert_eq!(
+        bridge.dispatch(
+            resolve(
+                request.request_id().clone(),
+                RunId::new(),
+                turn_id.clone(),
+                0,
+            ),
+            Instant::now() + Duration::from_secs(1),
+        ),
+        Err(AgentRuntimePortError::IdentityMismatch)
+    );
+    assert_eq!(
+        bridge.dispatch(
+            resolve(
+                request.request_id().clone(),
+                identity.run_id.clone(),
+                TurnId::new(),
+                0,
+            ),
+            Instant::now() + Duration::from_secs(1),
+        ),
+        Err(AgentRuntimePortError::IdentityMismatch)
+    );
+    assert_eq!(
+        bridge.dispatch(
+            resolve(
+                request.request_id().clone(),
+                identity.run_id.clone(),
+                turn_id.clone(),
+                9,
+            ),
+            Instant::now() + Duration::from_secs(1),
+        ),
+        Err(AgentRuntimePortError::IdentityMismatch)
+    );
+    let exact = resolve(
+        request.request_id().clone(),
+        identity.run_id,
+        turn_id.clone(),
+        0,
+    );
+    bridge
+        .dispatch(exact.clone(), Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(
+        bridge.dispatch(exact, Instant::now() + Duration::from_secs(1)),
+        Err(AgentRuntimePortError::IdentityMismatch)
+    );
+    let terminal = bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    assert!(matches!(
+        terminal.event,
+        AgentRuntimeEvent::Completed {
+            turn_id: observed,
+            outcome: TurnOutcome::Completed,
+        } if observed == turn_id
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn brokered_ask_user_resolution_after_cancel_fails_closed() {
+    let workspace = tempfile::tempdir().unwrap();
+    let script = r#"
+IFS= read -r line
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"__INIT_REQUEST_ID__","response":{"subtype":"initialize","protocol_version":2,"execution_profile":"gateway_brokered_v1","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":false,"can_handle_approval_receipt":true,"can_handle_hosted_checkpoint_create":false,"can_handle_brokered_ask_user":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"provider-session"}'
+IFS= read -r line
+printf '%s\n' '{"type":"stream_event","event":{"type":"message_start"}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"question-call","name":"ask_user_question"}}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_stop","index":0}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"message_stop"}}'
+printf '%s\n' '{"type":"control_request","request_id":"private-question-1","request":{"subtype":"ask_user","tool_use_id":"question-call","question":"Continue?","options":[],"allow_free_text":true,"multi_select":false}}'
+sleep 60
+"#;
+    let (mut bridge, identity) = brokered_bridge(script, &workspace);
+    open(&mut bridge, &identity);
+    bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let turn_id = TurnId::new();
+    bridge
+        .dispatch(
+            AgentRuntimeCommand::Prompt {
+                run_id: identity.run_id.clone(),
+                turn_id: turn_id.clone(),
+                input: vec![ContentPart::Text {
+                    text: BoundedText::new("ask then cancel").unwrap(),
+                }],
+            },
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+    bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let requested = bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let AgentRuntimeEvent::InputRequested { request } = requested.event else {
+        panic!("expected input request")
+    };
+    bridge
+        .dispatch(
+            AgentRuntimeCommand::Cancel {
+                run_id: identity.run_id.clone(),
+                turn_id: turn_id.clone(),
+                cause: CancelReason::UserRequested,
+            },
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+    assert!(matches!(
+        bridge.dispatch(
+            AgentRuntimeCommand::ResolveInput {
+                request_id: request.request_id().clone(),
+                run_id: identity.run_id,
+                turn_id,
+                response: RuntimeInputResponse::Text {
+                    text: BoundedText::new("late secret").unwrap(),
+                },
+            },
+            Instant::now() + Duration::from_secs(1),
+        ),
+        Err(AgentRuntimePortError::InvalidState { .. })
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn brokered_profile_rejects_generic_permission_and_unknown_intent() {
+    let workspace = tempfile::tempdir().unwrap();
+    let script = r#"
+IFS= read -r line
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"__INIT_REQUEST_ID__","response":{"subtype":"initialize","protocol_version":2,"execution_profile":"gateway_brokered_v1","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":false,"can_handle_approval_receipt":true,"can_handle_hosted_checkpoint_create":false,"can_handle_brokered_ask_user":true}}}}'
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"provider-session"}'
+IFS= read -r line
+printf '%s\n' '{"type":"stream_event","event":{"type":"message_start"}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"provider-tool-1","name":"shell"}}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_stop","index":0}}'
+printf '%s\n' '{"type":"stream_event","event":{"type":"message_stop"}}'
+printf '%s\n' '{"type":"control_request","request_id":"private-req-1","request":{"subtype":"can_use_tool","tool_name":"shell","input":{"command":"touch /tmp/forbidden"},"tool_use_id":"provider-tool-1"}}'
+"#;
+    let (mut bridge, identity) = brokered_bridge(script, &workspace);
+    open(&mut bridge, &identity);
+    bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let turn_id = TurnId::new();
+    bridge
+        .dispatch(
+            AgentRuntimeCommand::Prompt {
+                run_id: identity.run_id,
+                turn_id,
+                input: vec![ContentPart::Text {
+                    text: BoundedText::new("do not execute shell").unwrap(),
+                }],
+            },
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+    bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let failed = bridge
+        .next_event(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    assert!(matches!(
+        failed.event,
+        AgentRuntimeEvent::TransportFailed { .. }
+    ));
+    assert_eq!(
+        bridge.dispatch(
+            AgentRuntimeCommand::ResolvePermission {
+                request_id: RequestId::new(),
+                decision: RuntimePermissionDecision::ProviderNativeAllowOnce,
+            },
+            Instant::now() + Duration::from_secs(1),
+        ),
+        Err(AgentRuntimePortError::Unsupported {
+            operation: "resolve_permission"
+        })
+    );
 }

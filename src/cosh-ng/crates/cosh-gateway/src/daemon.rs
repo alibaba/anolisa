@@ -3,9 +3,18 @@
 //! The Unix transport derives authority from kernel peer credentials and
 //! delegates every mutation to the single-writer [`TaskCoordinator`].
 //!
-//! Owner note: Stage 6 keeps protocol, coordinator, and Unix transport in one
-//! review unit while the private API freezes. Split them into sibling modules
-//! before adding scheduling, approvals, or another transport.
+//! Runtime scheduling is isolated in the sibling `scheduler` module so the
+//! private transport remains independent from provider-specific adapters.
+
+mod handler;
+mod scheduler;
+mod scheduler_attachment;
+
+pub use scheduler::{
+    BrokeredApprovalContext, BrokeredApprovalPlan, BrokeredExecutionDriver, BrokeredResolution,
+    BrokeredResolutionContext, BrokeredResolutionSource, RuntimeFactory, RuntimeHandle,
+    RuntimePoll, ScheduledRun, SchedulerTick, StartedRuntime, TaskScheduler, TaskSchedulerConfig,
+};
 
 use std::fs::{self, FileType, Metadata};
 use std::io::{self, ErrorKind, Read, Write};
@@ -15,10 +24,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use cosh_gateway_contracts::capability::ApprovalDecision;
 use cosh_gateway_contracts::common::{
-    ContractHeader, ContractSchema, Correlation, Digest, IdempotencyKey, RuntimeSelector, TargetRef,
+    ActorKind, ActorRef, AuthAssurance, BoundedName, BoundedOpaque, ContractHeader, ContractSchema,
+    Correlation, Digest, IdempotencyKey, RuntimeSelector, TargetRef, WorkspaceRef,
 };
-use cosh_gateway_contracts::ids::{ActorId, InstallationId, MessageId, RequestId, RunId, TaskId};
+use cosh_gateway_contracts::ids::{
+    ActorId, ApprovalId, DeliveryId, InputRequestId, InstallationId, MessageId, RequestId, RunId,
+    TaskId,
+};
+use cosh_gateway_contracts::runtime::RuntimeInputResponse;
 use cosh_gateway_contracts::task::{
     CancelReason, CancellationStage, TaskEvent, TaskEventEnvelope, TaskState,
 };
@@ -28,14 +43,20 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
-use crate::storage::{CommitOutcome, SqliteTaskStore, StoreError, TaskCommit};
+use crate::runtime::VerifiedRuntimeContainment;
+use crate::storage::{CommitOutcome, OutboxIntent, SqliteTaskStore, StoreError, TaskCommit};
 use crate::task::TaskAggregate;
+
+use handler::{TaskAdmission, TaskCommandPort, TaskProjectionPort};
 
 /// Local Gateway API version, independent from ACP wire versions.
 pub const GATEWAY_API_VERSION: &str = "cosh.gateway.v1";
 /// Maximum bytes in one length-prefixed request or response.
 pub const MAX_GATEWAY_FRAME_BYTES: usize = 1024 * 1024;
-const CONNECTION_DEADLINE: Duration = Duration::from_secs(5);
+// A same-UID client may occupy the serial handler for at most one scheduler
+// admission quantum. This remains far below the shortest supported Run lease.
+const CONNECTION_ADMISSION_QUANTUM: Duration = Duration::from_millis(250);
+const CLIENT_REQUEST_DEADLINE: Duration = Duration::from_secs(5);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Configuration for one per-user local Gateway daemon.
@@ -47,6 +68,12 @@ pub struct GatewayDaemonConfig {
     pub database_path: PathBuf,
     /// Durable identity shared by events in this database.
     pub installation_id: Option<InstallationId>,
+    /// Exact target admitted by this per-user daemon instance.
+    pub target: TargetRef,
+    /// Canonical workspace projection resolved from trusted daemon config.
+    pub workspace: WorkspaceRef,
+    /// Exact installed Runtime kind and profile admitted by this daemon instance.
+    pub runtime: RuntimeSelector,
 }
 
 /// Validated fields used to create and queue one Task.
@@ -57,7 +84,8 @@ pub struct SubmitTask {
     pub request_id: RequestId,
     /// Caller-stable replay key within the authenticated actor namespace.
     pub idempotency_key: IdempotencyKey,
-    /// Bounded user intent; storage retains only its digest.
+    /// Bounded user intent; Task history retains its digest while the private
+    /// runtime-start Outbox retains the delivery payload.
     pub intent: cosh_gateway_contracts::common::BoundedText,
     /// Governed environment selected for the Task.
     pub target: TargetRef,
@@ -79,6 +107,54 @@ pub struct CancelTask {
     pub run_id: RunId,
     /// Optional optimistic Task revision.
     pub expected_revision: Option<u64>,
+}
+
+/// Validated fields used to queue a replacement for one suspended Run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetryTask {
+    /// Correlates one transport request and response.
+    pub request_id: RequestId,
+    /// Caller-stable replay key within the authenticated actor namespace.
+    pub idempotency_key: IdempotencyKey,
+    /// Task owning the suspended Run.
+    pub task_id: TaskId,
+    /// Exact active attempt from which immutable start intent is recovered.
+    pub previous_run_id: RunId,
+    /// Optional optimistic Task revision.
+    pub expected_revision: Option<u64>,
+}
+
+/// Validated fields used to append one exact pending Runtime input response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppendTaskInput {
+    /// Correlates one transport request and response.
+    pub request_id: RequestId,
+    /// Caller-stable replay key within the authenticated actor namespace.
+    pub idempotency_key: IdempotencyKey,
+    /// Task owning the pending Runtime question.
+    pub task_id: TaskId,
+    /// Exact durable Runtime input request being resolved.
+    pub input_request_id: InputRequestId,
+    /// Typed bounded response stored only in the private dispatch ledger.
+    pub response: RuntimeInputResponse,
+    /// Optional optimistic Task revision.
+    pub expected_revision: Option<u64>,
+}
+
+/// Validated fields used to resolve a provider-native approval.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveApproval {
+    /// Correlates one transport request and response.
+    pub request_id: RequestId,
+    /// Caller-stable replay key within the authenticated actor namespace.
+    pub idempotency_key: IdempotencyKey,
+    /// Durable approval awaiting this decision.
+    pub approval_id: ApprovalId,
+    /// Human decision dispatched once to the bound provider callback.
+    pub decision: ApprovalDecision,
 }
 
 /// Safe Task projection returned to an authorized local client.
@@ -133,6 +209,12 @@ pub enum GatewayResult {
     Events(TaskEventPage),
     /// Projection after a cancellation commit or replay.
     Cancelled(TaskView),
+    /// Projection after a provider-native approval resolution.
+    ApprovalResolved(TaskView),
+    /// Projection after a retry was queued or replayed.
+    Retried(TaskView),
+    /// Projection after an input response was durably appended and dispatched.
+    InputAppended(TaskView),
 }
 
 /// Local daemon or client failure.
@@ -205,6 +287,21 @@ enum GatewayRequest {
         #[serde(flatten)]
         request: CancelTask,
     },
+    ResolveApproval {
+        api_version: String,
+        #[serde(flatten)]
+        request: ResolveApproval,
+    },
+    Retry {
+        api_version: String,
+        #[serde(flatten)]
+        request: RetryTask,
+    },
+    AppendInput {
+        api_version: String,
+        #[serde(flatten)]
+        request: AppendTaskInput,
+    },
 }
 
 impl GatewayRequest {
@@ -215,6 +312,9 @@ impl GatewayRequest {
             | Self::Events { request_id, .. } => request_id,
             Self::Submit { request, .. } => &request.request_id,
             Self::Cancel { request, .. } => &request.request_id,
+            Self::Retry { request, .. } => &request.request_id,
+            Self::ResolveApproval { request, .. } => &request.request_id,
+            Self::AppendInput { request, .. } => &request.request_id,
         }
     }
 
@@ -224,7 +324,10 @@ impl GatewayRequest {
             | Self::Submit { api_version, .. }
             | Self::Get { api_version, .. }
             | Self::Events { api_version, .. }
-            | Self::Cancel { api_version, .. } => api_version,
+            | Self::Cancel { api_version, .. }
+            | Self::Retry { api_version, .. }
+            | Self::AppendInput { api_version, .. }
+            | Self::ResolveApproval { api_version, .. } => api_version,
         }
     }
 }
@@ -275,11 +378,13 @@ impl TaskCoordinator {
         })
     }
 
-    fn submit(
+    fn submit_admitted(
         &mut self,
-        actor_id: &ActorId,
+        actor: &ActorRef,
+        workspace: &WorkspaceRef,
         request: SubmitTask,
     ) -> Result<TaskView, GatewayDaemonError> {
+        let actor_id = &actor.actor_id;
         let task_id = TaskId::new();
         let run_id = RunId::new();
         let committed_at_ms = now_ms()?;
@@ -305,22 +410,59 @@ impl TaskCoordinator {
             committed_at_ms,
             TaskEvent::TaskQueued {
                 run_id: run_id.clone(),
-                runtime: request.runtime,
+                runtime: request.runtime.clone(),
             },
         );
+        let start_intent = scheduler::RuntimeStartIntent {
+            schema_version: scheduler::RUNTIME_START_SCHEMA_VERSION,
+            actor: actor.clone(),
+            task_id: task_id.clone(),
+            run_id,
+            runtime: request.runtime,
+            intent: request.intent,
+            target: submitted_target(&submitted)?,
+            workspace: workspace.clone(),
+        };
+        let outbox = OutboxIntent {
+            delivery_id: DeliveryId::new(),
+            event_id: queued.header.message_id.clone(),
+            delivery_kind: scheduler::runtime_start_delivery_kind(),
+            payload: serde_json::to_value(start_intent)?,
+            next_attempt_at_ms: committed_at_ms,
+        };
         let outcome = self.store.commit_task(&TaskCommit {
             actor_id: actor_id.clone(),
             idempotency_key: request.idempotency_key,
             command_digest,
             expected_revision: Some(0),
             events: vec![submitted, queued],
-            outbox: Vec::new(),
+            outbox: vec![outbox],
             committed_at_ms,
         })?;
         let task_id = receipt_task_id(&outcome);
         let task = self.store.load_task(task_id)?;
         authorize(&task, actor_id)?;
         Ok(TaskView::from(&task))
+    }
+
+    #[cfg(test)]
+    fn submit(
+        &mut self,
+        actor_id: &ActorId,
+        request: SubmitTask,
+    ) -> Result<TaskView, GatewayDaemonError> {
+        let actor = ActorRef {
+            actor_id: actor_id.clone(),
+            actor_kind: ActorKind::Human,
+            issuer: BoundedName::new("local-os")
+                .map_err(|error| GatewayDaemonError::Protocol(error.to_string()))?,
+            assurance: AuthAssurance::LocalOs,
+        };
+        let workspace = WorkspaceRef {
+            scope_digest: sha256_digest(b"cosh.gateway.test.workspace.v1"),
+            display_name: None,
+        };
+        self.submit_admitted(&actor, &workspace, request)
     }
 
     fn get(&self, actor_id: &ActorId, task_id: &TaskId) -> Result<TaskView, GatewayDaemonError> {
@@ -377,12 +519,25 @@ impl TaskCoordinator {
                 "cancel Run does not match the active Task Run".to_owned(),
             ));
         }
-        if current.state() != TaskState::Queued {
+        if !matches!(
+            current.state(),
+            TaskState::Queued
+                | TaskState::Running
+                | TaskState::WaitingApproval
+                | TaskState::WaitingInput
+                | TaskState::Suspended
+        ) {
             return Err(GatewayDaemonError::Protocol(
-                "this daemon slice cancels only queued, not yet started Runs".to_owned(),
+                "Task Run is not cancellable in its current state".to_owned(),
             ));
         }
-        let stage = CancellationStage::BeforeRuntime;
+        if current.state() == TaskState::Suspended
+            && !current.active_run_can_be_cancelled(&request.run_id)
+        {
+            return Err(GatewayDaemonError::Protocol(
+                "suspended Task Run has unresolved or uncertain execution state".to_owned(),
+            ));
+        }
         let committed_at_ms = now_ms()?;
         let first_revision = current.revision().saturating_add(1);
         let requested = self.event(
@@ -396,34 +551,142 @@ impl TaskCoordinator {
                 cause: CancelReason::UserRequested,
             },
         );
-        let run_cancelled = self.event(
-            actor_id,
-            &request.task_id,
-            Some(&request.run_id),
-            first_revision.saturating_add(1),
-            committed_at_ms,
-            TaskEvent::RunCancelled {
-                run_id: request.run_id.clone(),
-                stage,
-            },
-        );
-        let task_cancelled = self.event(
-            actor_id,
-            &request.task_id,
-            Some(&request.run_id),
-            first_revision.saturating_add(2),
-            committed_at_ms,
-            TaskEvent::TaskCancelled,
-        );
-        let outcome = self.store.commit_task(&TaskCommit {
+        let settle_without_runtime =
+            matches!(current.state(), TaskState::Queued | TaskState::Suspended);
+        let events = if settle_without_runtime {
+            let run_cancelled = self.event(
+                actor_id,
+                &request.task_id,
+                Some(&request.run_id),
+                first_revision.saturating_add(1),
+                committed_at_ms,
+                TaskEvent::RunCancelled {
+                    run_id: request.run_id.clone(),
+                    stage: if current.state() == TaskState::Queued {
+                        CancellationStage::BeforeRuntime
+                    } else {
+                        CancellationStage::Runtime
+                    },
+                },
+            );
+            let task_cancelled = self.event(
+                actor_id,
+                &request.task_id,
+                Some(&request.run_id),
+                first_revision.saturating_add(2),
+                committed_at_ms,
+                TaskEvent::TaskCancelled,
+            );
+            vec![requested, run_cancelled, task_cancelled]
+        } else {
+            vec![requested]
+        };
+        let commit = TaskCommit {
             actor_id: actor_id.clone(),
             idempotency_key: request.idempotency_key,
             command_digest,
             expected_revision: request.expected_revision.or(Some(current.revision())),
-            events: vec![requested, run_cancelled, task_cancelled],
+            events,
             outbox: Vec::new(),
             committed_at_ms,
-        })?;
+        };
+        let outcome = if current.state() == TaskState::Suspended {
+            self.store
+                .commit_suspended_cancel(&commit, &request.run_id)?
+        } else {
+            self.store.commit_task(&commit)?
+        };
+        let task = self.store.load_task(receipt_task_id(&outcome))?;
+        Ok(TaskView::from(&task))
+    }
+
+    fn retry_admitted(
+        &mut self,
+        actor: &ActorRef,
+        target: &TargetRef,
+        workspace: &WorkspaceRef,
+        runtime: &RuntimeSelector,
+        request: RetryTask,
+    ) -> Result<TaskView, GatewayDaemonError> {
+        let command_digest = digest_json(&("retry", &request.task_id, &request.previous_run_id))?;
+        if let Some(receipt) = self.store.load_command_receipt(
+            &actor.actor_id,
+            &request.idempotency_key,
+            &command_digest,
+        )? {
+            let task = self.store.load_task(&receipt.task_id)?;
+            authorize(&task, &actor.actor_id)?;
+            return Ok(TaskView::from(&task));
+        }
+
+        let current = self.store.load_task(&request.task_id)?;
+        authorize(&current, &actor.actor_id)?;
+        if current.state() != TaskState::Suspended
+            || current.active_run_id() != Some(&request.previous_run_id)
+            || current.cancellation_requested()
+        {
+            return Err(GatewayDaemonError::Protocol(
+                "only the exact active non-cancelled suspended Run may be retried".to_owned(),
+            ));
+        }
+
+        let payload = self.store.load_runtime_start_intent_for_retry(
+            &actor.actor_id,
+            &request.task_id,
+            &request.previous_run_id,
+        )?;
+        let mut start_intent = serde_json::from_value::<scheduler::RuntimeStartIntent>(payload)?;
+        if start_intent.schema_version != scheduler::RUNTIME_START_SCHEMA_VERSION
+            || start_intent.actor != *actor
+            || start_intent.task_id != request.task_id
+            || start_intent.run_id != request.previous_run_id
+            || current.target() != target
+            || start_intent.target != *target
+            || start_intent.runtime != *runtime
+            || start_intent.workspace != *workspace
+        {
+            return Err(GatewayDaemonError::Protocol(
+                "durable Runtime start intent does not match retry admission".to_owned(),
+            ));
+        }
+
+        let next_run_id = RunId::new();
+        let committed_at_ms = now_ms()?;
+        let revision = current
+            .revision()
+            .checked_add(1)
+            .ok_or_else(|| GatewayDaemonError::Protocol("Task revision overflow".to_owned()))?;
+        let queued = self.event(
+            &actor.actor_id,
+            &request.task_id,
+            Some(&next_run_id),
+            revision,
+            committed_at_ms,
+            TaskEvent::RunRetryQueued {
+                previous_run_id: request.previous_run_id.clone(),
+                next_run_id: next_run_id.clone(),
+            },
+        );
+        start_intent.run_id = next_run_id;
+        let outbox = OutboxIntent {
+            delivery_id: DeliveryId::new(),
+            event_id: queued.header.message_id.clone(),
+            delivery_kind: scheduler::runtime_start_delivery_kind(),
+            payload: serde_json::to_value(start_intent)?,
+            next_attempt_at_ms: committed_at_ms,
+        };
+        let outcome = self.store.commit_retry_task(
+            &TaskCommit {
+                actor_id: actor.actor_id.clone(),
+                idempotency_key: request.idempotency_key,
+                command_digest,
+                expected_revision: request.expected_revision.or(Some(current.revision())),
+                events: vec![queued],
+                outbox: vec![outbox],
+                committed_at_ms,
+            },
+            &request.previous_run_id,
+        )?;
         let task = self.store.load_task(receipt_task_id(&outcome))?;
         Ok(TaskView::from(&task))
     }
@@ -455,6 +718,118 @@ impl TaskCoordinator {
     }
 }
 
+fn submitted_target(event: &TaskEventEnvelope) -> Result<TargetRef, GatewayDaemonError> {
+    match &event.event {
+        TaskEvent::TaskSubmitted { target, .. } => Ok(target.clone()),
+        _ => Err(GatewayDaemonError::Protocol(
+            "runtime start intent is not bound to Task submission".to_owned(),
+        )),
+    }
+}
+
+struct DaemonTaskPorts<'a> {
+    coordinator: &'a mut TaskCoordinator,
+    scheduler: &'a mut Option<TaskScheduler<Box<dyn RuntimeFactory>>>,
+}
+
+impl TaskCommandPort for DaemonTaskPorts<'_> {
+    fn submit(
+        &mut self,
+        actor: &ActorRef,
+        workspace: &WorkspaceRef,
+        request: SubmitTask,
+    ) -> Result<TaskView, GatewayDaemonError> {
+        self.coordinator.submit_admitted(actor, workspace, request)
+    }
+
+    fn cancel(
+        &mut self,
+        actor_id: &ActorId,
+        request: CancelTask,
+    ) -> Result<TaskView, GatewayDaemonError> {
+        self.coordinator.cancel(actor_id, request)
+    }
+
+    fn retry(
+        &mut self,
+        actor: &ActorRef,
+        target: &TargetRef,
+        workspace: &WorkspaceRef,
+        runtime: &RuntimeSelector,
+        request: RetryTask,
+    ) -> Result<TaskView, GatewayDaemonError> {
+        self.coordinator
+            .retry_admitted(actor, target, workspace, runtime, request)
+    }
+
+    fn resolve_approval(
+        &mut self,
+        actor_id: &ActorId,
+        request: ResolveApproval,
+    ) -> Result<TaskView, GatewayDaemonError> {
+        let scheduler = self.scheduler.as_mut().ok_or_else(|| {
+            GatewayDaemonError::Protocol("Gateway scheduler is not attached".to_owned())
+        })?;
+        match scheduler.resolve_approval(
+            actor_id,
+            request.idempotency_key,
+            &request.approval_id,
+            request.decision,
+            now_ms()?,
+        )? {
+            SchedulerTick::Started(view)
+            | SchedulerTick::Progressed(view)
+            | SchedulerTick::Settled(view) => Ok(view),
+            SchedulerTick::Idle => Err(GatewayDaemonError::Protocol(
+                "approval resolution made no durable progress".to_owned(),
+            )),
+        }
+    }
+
+    fn append_input(
+        &mut self,
+        actor_id: &ActorId,
+        request: AppendTaskInput,
+    ) -> Result<TaskView, GatewayDaemonError> {
+        let scheduler = self.scheduler.as_mut().ok_or_else(|| {
+            GatewayDaemonError::Protocol("Gateway scheduler is not attached".to_owned())
+        })?;
+        match scheduler.resolve_input(
+            actor_id,
+            request.idempotency_key,
+            &request.task_id,
+            &request.input_request_id,
+            request.response,
+            request.expected_revision,
+            now_ms()?,
+        )? {
+            SchedulerTick::Started(view)
+            | SchedulerTick::Progressed(view)
+            | SchedulerTick::Settled(view) => Ok(view),
+            SchedulerTick::Idle => Err(GatewayDaemonError::Protocol(
+                "input append made no durable progress".to_owned(),
+            )),
+        }
+    }
+}
+
+impl TaskProjectionPort for DaemonTaskPorts<'_> {
+    fn get(&self, actor_id: &ActorId, task_id: &TaskId) -> Result<TaskView, GatewayDaemonError> {
+        self.coordinator.get(actor_id, task_id)
+    }
+
+    fn events(
+        &self,
+        actor_id: &ActorId,
+        task_id: &TaskId,
+        after_revision: Option<u64>,
+        limit: u16,
+    ) -> Result<TaskEventPage, GatewayDaemonError> {
+        self.coordinator
+            .events(actor_id, task_id, after_revision, limit)
+    }
+}
+
 /// Bound per-user local Gateway server.
 pub struct GatewayDaemon {
     listener: UnixListener,
@@ -462,6 +837,12 @@ pub struct GatewayDaemon {
     socket_path: PathBuf,
     socket_identity: (u64, u64),
     owner_uid: u32,
+    admitted_target: TargetRef,
+    admitted_workspace: WorkspaceRef,
+    admitted_runtime: RuntimeSelector,
+    database_path: PathBuf,
+    scheduler: Option<TaskScheduler<Box<dyn RuntimeFactory>>>,
+    runtime_containment: Option<VerifiedRuntimeContainment>,
 }
 
 impl GatewayDaemon {
@@ -471,9 +852,15 @@ impl GatewayDaemon {
     ///
     /// Returns a fail-closed path, storage, socket, or already-running error.
     pub fn bind(config: GatewayDaemonConfig) -> Result<Self, GatewayDaemonError> {
+        if !supported_daemon_runtime(&config.runtime) {
+            return Err(GatewayDaemonError::Protocol(
+                "daemon Runtime selector is not supported".to_owned(),
+            ));
+        }
         let owner_uid = Uid::effective().as_raw();
         prepare_socket_path(&config.socket_path, owner_uid)?;
-        let coordinator = TaskCoordinator::open(&config.database_path, config.installation_id)?;
+        let database_path = config.database_path.clone();
+        let coordinator = TaskCoordinator::open(&database_path, config.installation_id)?;
         let listener = UnixListener::bind(&config.socket_path)?;
         fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
@@ -484,7 +871,19 @@ impl GatewayDaemon {
             socket_path: config.socket_path,
             socket_identity: (metadata.dev(), metadata.ino()),
             owner_uid,
+            admitted_target: config.target,
+            admitted_workspace: config.workspace,
+            admitted_runtime: config.runtime,
+            database_path,
+            scheduler: None,
+            runtime_containment: None,
         })
+    }
+
+    /// Returns the durable installation identity bound to this daemon.
+    #[must_use]
+    pub fn installation_id(&self) -> &InstallationId {
+        &self.coordinator.installation_id
     }
 
     /// Serves one request per connection until the shutdown flag is set.
@@ -495,6 +894,12 @@ impl GatewayDaemon {
     /// errors are returned to that client without stopping admission.
     pub fn serve_until(&mut self, shutdown: &AtomicBool) -> Result<(), GatewayDaemonError> {
         while !shutdown.load(Ordering::Relaxed) {
+            if let Some(scheduler) = self.scheduler.as_mut() {
+                if let Err(error) = scheduler.tick(now_ms()?) {
+                    let _ = scheduler.shutdown(now_ms()?);
+                    return Err(error);
+                }
+            }
             match self.listener.accept() {
                 Ok((stream, _)) => {
                     let _ = self.handle_connection(stream);
@@ -506,17 +911,20 @@ impl GatewayDaemon {
                 Err(error) => return Err(error.into()),
             }
         }
+        if let Some(scheduler) = self.scheduler.as_mut() {
+            scheduler.shutdown(now_ms()?)?;
+        }
         Ok(())
     }
 
     fn handle_connection(&mut self, mut stream: UnixStream) -> Result<(), GatewayDaemonError> {
-        stream.set_read_timeout(Some(CONNECTION_DEADLINE))?;
-        stream.set_write_timeout(Some(CONNECTION_DEADLINE))?;
+        stream.set_read_timeout(Some(CONNECTION_ADMISSION_QUANTUM))?;
+        stream.set_write_timeout(Some(CONNECTION_ADMISSION_QUANTUM))?;
         let peer_uid = peer_uid(&stream)?;
         if peer_uid != self.owner_uid {
             return Err(GatewayDaemonError::Unauthorized);
         }
-        let actor_id = actor_id_for_uid(&self.coordinator.installation_id, peer_uid)?;
+        let actor = actor_ref_for_uid(&self.coordinator.installation_id, peer_uid)?;
         let request = match read_frame::<GatewayRequest>(&mut stream) {
             Ok(request) => request,
             Err(error) => {
@@ -526,7 +934,7 @@ impl GatewayDaemon {
             }
         };
         let request_id = request.request_id().clone();
-        let result = self.dispatch(&actor_id, request);
+        let result = self.dispatch(&actor, request);
         let response = match result {
             Ok(result) => GatewayResponse {
                 api_version: GATEWAY_API_VERSION.to_owned(),
@@ -540,39 +948,30 @@ impl GatewayDaemon {
 
     fn dispatch(
         &mut self,
-        actor_id: &ActorId,
+        actor: &ActorRef,
         request: GatewayRequest,
     ) -> Result<GatewayResult, GatewayDaemonError> {
-        if request.api_version() != GATEWAY_API_VERSION {
-            return Err(GatewayDaemonError::Protocol(
-                "unsupported Gateway API version".to_owned(),
-            ));
-        }
-        match request {
-            GatewayRequest::Ping { .. } => Ok(GatewayResult::Pong),
-            GatewayRequest::Submit { request, .. } => self
-                .coordinator
-                .submit(actor_id, request)
-                .map(GatewayResult::Task),
-            GatewayRequest::Get { task_id, .. } => self
-                .coordinator
-                .get(actor_id, &task_id)
-                .map(GatewayResult::Task),
-            GatewayRequest::Events {
-                task_id,
-                after_revision,
-                limit,
-                ..
-            } => self
-                .coordinator
-                .events(actor_id, &task_id, after_revision, limit)
-                .map(GatewayResult::Events),
-            GatewayRequest::Cancel { request, .. } => self
-                .coordinator
-                .cancel(actor_id, request)
-                .map(GatewayResult::Cancelled),
-        }
+        let admission = TaskAdmission {
+            target: &self.admitted_target,
+            workspace: &self.admitted_workspace,
+            runtime: &self.admitted_runtime,
+        };
+        let mut ports = DaemonTaskPorts {
+            coordinator: &mut self.coordinator,
+            scheduler: &mut self.scheduler,
+        };
+        handler::dispatch(actor, request, admission, &mut ports)
     }
+}
+
+fn supported_daemon_runtime(runtime: &RuntimeSelector) -> bool {
+    matches!(
+        (
+            runtime.runtime.as_str(),
+            runtime.profile.as_ref().map(BoundedName::as_str)
+        ),
+        ("core", Some("gateway-brokered-v1"))
+    )
 }
 
 impl Drop for GatewayDaemon {
@@ -654,6 +1053,36 @@ impl LocalGatewayClient {
         })
     }
 
+    /// Queues one replacement Run from an exact suspended attempt.
+    pub fn retry(&self, request: RetryTask) -> Result<GatewayResult, GatewayDaemonError> {
+        self.request(GatewayRequest::Retry {
+            api_version: GATEWAY_API_VERSION.to_owned(),
+            request,
+        })
+    }
+
+    /// Persists and dispatches one exact pending Runtime input response.
+    pub fn append_input(
+        &self,
+        request: AppendTaskInput,
+    ) -> Result<GatewayResult, GatewayDaemonError> {
+        self.request(GatewayRequest::AppendInput {
+            api_version: GATEWAY_API_VERSION.to_owned(),
+            request,
+        })
+    }
+
+    /// Persists and dispatches one provider-native approval decision.
+    pub fn resolve_approval(
+        &self,
+        request: ResolveApproval,
+    ) -> Result<GatewayResult, GatewayDaemonError> {
+        self.request(GatewayRequest::ResolveApproval {
+            api_version: GATEWAY_API_VERSION.to_owned(),
+            request,
+        })
+    }
+
     fn request(&self, request: GatewayRequest) -> Result<GatewayResult, GatewayDaemonError> {
         if !self.socket_path.is_absolute() {
             return Err(unsafe_path(
@@ -666,8 +1095,8 @@ impl LocalGatewayClient {
         if peer_uid(&stream)? != Uid::effective().as_raw() {
             return Err(GatewayDaemonError::Unauthorized);
         }
-        stream.set_read_timeout(Some(CONNECTION_DEADLINE))?;
-        stream.set_write_timeout(Some(CONNECTION_DEADLINE))?;
+        stream.set_read_timeout(Some(CLIENT_REQUEST_DEADLINE))?;
+        stream.set_write_timeout(Some(CLIENT_REQUEST_DEADLINE))?;
         write_frame(&mut stream, &request)?;
         let response = read_frame::<GatewayResponse>(&mut stream)?;
         if response.api_version != GATEWAY_API_VERSION
@@ -743,6 +1172,19 @@ fn actor_id_for_uid(
     );
     ActorId::parse(format!("act_{uuid}"))
         .map_err(|error| GatewayDaemonError::Protocol(error.to_string()))
+}
+
+fn actor_ref_for_uid(
+    installation_id: &InstallationId,
+    uid: u32,
+) -> Result<ActorRef, GatewayDaemonError> {
+    Ok(ActorRef {
+        actor_id: actor_id_for_uid(installation_id, uid)?,
+        actor_kind: ActorKind::Human,
+        issuer: BoundedName::new("local-os")
+            .map_err(|error| GatewayDaemonError::Protocol(error.to_string()))?,
+        assurance: AuthAssurance::LocalOs,
+    })
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]

@@ -2,6 +2,29 @@ use clap::{Parser, Subcommand};
 
 use crate::config::ApprovalMode;
 
+/// Runtime execution boundary selected before loading workspace-owned state.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ExecutionProfile {
+    /// Existing direct Core/Shell behavior and private control protocol v1.
+    #[default]
+    Legacy,
+    /// Gateway owns every hosted side effect through private protocol v2.
+    GatewayBrokeredV1,
+}
+
+impl ExecutionProfile {
+    pub(crate) const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::GatewayBrokeredV1 => "gateway_brokered_v1",
+        }
+    }
+
+    pub(crate) const fn is_brokered(self) -> bool {
+        matches!(self, Self::GatewayBrokeredV1)
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Manage configured MCP servers.
@@ -65,6 +88,13 @@ pub struct CliArgs {
     /// Force headless JSONL mode (otherwise auto-detected via TTY)
     #[arg(long)]
     pub headless: bool,
+
+    /// Select the trusted runtime execution boundary.
+    ///
+    /// Gateway is the only supported caller of the brokered profile. Keeping
+    /// this hidden prevents it from being mistaken for a user approval mode.
+    #[arg(long, value_enum, default_value_t, hide = true)]
+    pub execution_profile: ExecutionProfile,
 
     /// Override the active model from config.toml
     #[arg(long)]

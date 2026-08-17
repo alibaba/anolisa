@@ -6,8 +6,10 @@ use serde_json::Value;
 
 use crate::config::ApprovalMode;
 
-/// Exact shell-to-core control protocol version supported by this binary.
+/// Exact legacy shell-to-core control protocol version supported by this binary.
 pub const CONTROL_PROTOCOL_VERSION: u32 = 1;
+/// Exact private protocol version for the Gateway-owned execution profile.
+pub const BROKERED_CONTROL_PROTOCOL_VERSION: u32 = 2;
 
 // =====================================================================
 // Auth types (used by CoreControlRequest::AuthRequired)
@@ -78,7 +80,9 @@ pub enum InputMessage {
     },
 
     #[serde(rename = "control_response")]
-    ControlResponse { response: ControlResponsePayload },
+    ControlResponse {
+        response: Box<ControlResponsePayload>,
+    },
 
     /// #1940 receipt protocol: the shell emits this as soon as a control
     /// approval request reaches its main thread, proving the request has an
@@ -148,6 +152,9 @@ pub enum ShellControlRequest {
         protocol_version: Option<u32>,
         #[serde(default)]
         capabilities: ClientControlCapabilities,
+        /// Exact launch profile requested by a v2 Gateway peer.
+        #[serde(default)]
+        execution_profile: Option<String>,
     },
 
     #[serde(rename = "interrupt")]
@@ -299,6 +306,8 @@ pub struct CoreControlResponseBody {
     pub subtype: String,
     pub protocol_version: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<CoreControlCapabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -314,6 +323,9 @@ pub struct CoreControlCapabilities {
     /// sends receipts to a core that understands them; older or mock
     /// providers without this capability never see receipt lines.
     pub can_handle_approval_receipt: bool,
+    /// v2 can suspend one side-effect-free question for Gateway resolution.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub can_handle_brokered_ask_user: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -397,6 +409,8 @@ pub enum CoreControlRequest {
 
     #[serde(rename = "ask_user")]
     AskUser {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
         question: String,
         options: Vec<AskUserOption>,
         allow_free_text: bool,
@@ -514,18 +528,35 @@ impl OutputMessage {
     }
 
     pub fn initialize_success(request_id: &str, can_handle_shell_evidence_tool: bool) -> Self {
+        Self::initialize_success_for_profile(
+            request_id,
+            CONTROL_PROTOCOL_VERSION,
+            None,
+            can_handle_shell_evidence_tool,
+        )
+    }
+
+    /// Builds an initialize acknowledgement bound to the selected launch profile.
+    pub fn initialize_success_for_profile(
+        request_id: &str,
+        protocol_version: u32,
+        execution_profile: Option<&str>,
+        can_handle_shell_evidence_tool: bool,
+    ) -> Self {
         Self::ControlResponse {
             response: CoreControlResponsePayload {
                 subtype: "success".to_string(),
                 request_id: request_id.to_string(),
                 response: CoreControlResponseBody {
                     subtype: "initialize".to_string(),
-                    protocol_version: CONTROL_PROTOCOL_VERSION,
+                    protocol_version,
+                    execution_profile: execution_profile.map(str::to_string),
                     capabilities: Some(CoreControlCapabilities {
                         can_handle_can_use_tool: true,
-                        can_handle_host_executed_shell_tool_result: true,
+                        can_handle_host_executed_shell_tool_result: execution_profile.is_none(),
                         can_handle_shell_evidence_tool,
                         can_handle_approval_receipt: true,
+                        can_handle_brokered_ask_user: execution_profile.is_some(),
                     }),
                     error: None,
                 },
@@ -535,17 +566,33 @@ impl OutputMessage {
 
     /// Builds a fail-loud initialize response for an unsupported exact version.
     pub fn initialize_version_error(request_id: &str, received_version: u32) -> Self {
+        Self::initialize_negotiation_error(
+            request_id,
+            CONTROL_PROTOCOL_VERSION,
+            None,
+            format!(
+                "unsupported control protocol version {received_version}; expected exact version {CONTROL_PROTOCOL_VERSION}"
+            ),
+        )
+    }
+
+    /// Builds a fail-loud response for a version or launch-profile mismatch.
+    pub fn initialize_negotiation_error(
+        request_id: &str,
+        protocol_version: u32,
+        execution_profile: Option<&str>,
+        error: String,
+    ) -> Self {
         Self::ControlResponse {
             response: CoreControlResponsePayload {
                 subtype: "error".to_string(),
                 request_id: request_id.to_string(),
                 response: CoreControlResponseBody {
                     subtype: "initialize".to_string(),
-                    protocol_version: CONTROL_PROTOCOL_VERSION,
+                    protocol_version,
+                    execution_profile: execution_profile.map(str::to_string),
                     capabilities: None,
-                    error: Some(format!(
-                        "unsupported control protocol version {received_version}; expected exact version {CONTROL_PROTOCOL_VERSION}"
-                    )),
+                    error: Some(error),
                 },
             },
         }
@@ -950,11 +997,13 @@ mod tests {
                         fire_session_start,
                         protocol_version,
                         capabilities,
+                        execution_profile,
                     } => {
                         assert!(fire_session_start);
                         assert!(protocol_version.is_none());
                         assert!(!capabilities.can_handle_can_use_tool);
                         assert!(!capabilities.can_handle_host_executed_shell);
+                        assert!(execution_profile.is_none());
                     }
                     _ => panic!("expected Initialize variant"),
                 }
@@ -964,8 +1013,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_initialize_request_with_client_capabilities() {
-        let json = r#"{"request_id":"init-2","type":"control_request","request":{"subtype":"initialize","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell":true}}}"#;
+    fn parse_initialize_request_preserves_profile_and_capabilities() {
+        let json = r#"{"request_id":"init-2","type":"control_request","request":{"subtype":"initialize","protocol_version":2,"capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell":true},"execution_profile":"gateway_brokered_v1"}}"#;
         let msg: InputMessage = serde_json::from_str(json).expect("should parse initialize");
         match msg {
             InputMessage::ControlRequest {
@@ -974,9 +1023,14 @@ mod tests {
             } => {
                 assert_eq!(request_id, "init-2");
                 match request {
-                    ShellControlRequest::Initialize { capabilities, .. } => {
+                    ShellControlRequest::Initialize {
+                        capabilities,
+                        execution_profile,
+                        ..
+                    } => {
                         assert!(capabilities.can_handle_can_use_tool);
                         assert!(capabilities.can_handle_host_executed_shell);
+                        assert_eq!(execution_profile.as_deref(), Some("gateway_brokered_v1"));
                     }
                     _ => panic!("expected Initialize variant"),
                 }
@@ -1155,6 +1209,91 @@ mod tests {
         assert!(v["response"]["response"]["capabilities"]
             .get("can_handle_shell_output_evidence_tool")
             .is_none());
+    }
+
+    #[test]
+    fn serialize_brokered_initialize_ack_is_v2_and_profile_bound() {
+        let msg = OutputMessage::initialize_success_for_profile(
+            "init-brokered",
+            BROKERED_CONTROL_PROTOCOL_VERSION,
+            Some("gateway_brokered_v1"),
+            false,
+        );
+        let value = serde_json::to_value(msg).unwrap();
+        let response = &value["response"]["response"];
+        assert_eq!(
+            response["protocol_version"],
+            BROKERED_CONTROL_PROTOCOL_VERSION
+        );
+        assert_eq!(response["execution_profile"], "gateway_brokered_v1");
+        assert!(response["capabilities"]
+            .get("can_handle_hosted_checkpoint_create")
+            .is_none());
+        assert_eq!(
+            response["capabilities"]["can_handle_brokered_ask_user"],
+            true
+        );
+        assert!(response["capabilities"]
+            .get("can_handle_shell_evidence_tool")
+            .is_some());
+    }
+
+    #[test]
+    fn private_wire_dual_version_corpus_matches_core_types() {
+        let corpus: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/cosh-private-wire-dual-version.json"
+        ))
+        .unwrap();
+
+        let legacy_ack = OutputMessage::initialize_success_for_profile(
+            "gateway-init-1",
+            CONTROL_PROTOCOL_VERSION,
+            None,
+            false,
+        );
+        assert_eq!(
+            serde_json::to_value(legacy_ack).unwrap(),
+            corpus["legacy_v1"]["initialize_ack"]
+        );
+
+        let brokered_ack = OutputMessage::initialize_success_for_profile(
+            "gateway-init-v2",
+            BROKERED_CONTROL_PROTOCOL_VERSION,
+            Some("gateway_brokered_v1"),
+            false,
+        );
+        assert_eq!(
+            serde_json::to_value(brokered_ack).unwrap(),
+            corpus["gateway_brokered_v2"]["initialize_ack"]
+        );
+
+        let ask_user_request = OutputMessage::ControlRequest {
+            request_id: "question-1".to_string(),
+            request: CoreControlRequest::AskUser {
+                tool_use_id: Some("question-call".to_string()),
+                question: "Choose a branch".to_string(),
+                options: vec![AskUserOption {
+                    label: "main".to_string(),
+                    description: Some("Use the default branch".to_string()),
+                }],
+                allow_free_text: true,
+                multi_select: false,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(ask_user_request).unwrap(),
+            corpus["gateway_brokered_v2"]["ask_user_request"]
+        );
+
+        let ask_user_answer: InputMessage =
+            serde_json::from_value(corpus["gateway_brokered_v2"]["ask_user_answer"].clone())
+                .unwrap();
+        assert!(matches!(
+            ask_user_answer,
+            InputMessage::ControlResponse { response }
+                if response.request_id == "question-1"
+                    && response.response.answer.as_deref() == Some("main")
+        ));
     }
 
     #[test]

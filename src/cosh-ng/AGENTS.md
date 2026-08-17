@@ -70,7 +70,7 @@ Prerequisites: Linux (or macOS for limited functionality), Rust 1.88+. pkg/svc c
 - **cosh-core**: Unified agent core (binary: `cosh-core`). Headless JSONL backend + LLM provider integration (OpenAI-compat, SysOM/Aliyun). Includes hooks, tools, skills, extensions, and config management. Interactive TUI mode is declared but not yet implemented.
 - **cosh-shell**: AI-augmented interactive shell (binary: `cosh-shell`). PTY wrapper over bash/zsh with OSC marker-based command boundary detection, streaming AI analysis (Claude/Qwen adapters), inline card rendering (ratatui), tool approval control protocol.
 - **cosh-gateway-contracts**: Side-effect-free Gateway Task, Runtime, Capability, identity, and error contracts. It must not own storage, processes, transports, providers, or OS execution.
-- **cosh-gateway**: Gateway control plane: authenticated local Unix daemon/client, durable Task and governance storage, Runtime supervision, private core transport, ACP v1 codec/bridge, installed adapter profiles/entrypoint, and local once-only permission evidence. Runtime scheduling, remote channels, restart reconciliation, and real-adapter conformance evidence are not yet implemented.
+- **cosh-gateway**: Gateway control plane: authenticated local Unix daemon/client, durable Task and governance storage, Runtime scheduling and supervision, restart reconciliation, private core transport, ACP v1 codec/bridge, installed adapter profiles/entrypoint, and local once-only permission evidence. Remote channels and accepted real-adapter conformance evidence are not yet implemented.
 
 ### cosh-shell Code Organization
 

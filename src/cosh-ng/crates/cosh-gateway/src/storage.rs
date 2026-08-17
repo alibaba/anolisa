@@ -2,21 +2,49 @@
 //!
 //! The store owns one write connection and commits task events, projections,
 //! command receipts, and Outbox intents in one immediate transaction.
+//!
+//! The raw Task writer is intentionally not part of the production API:
+//! ```compile_fail
+//! let mut store = cosh_gateway::storage::SqliteTaskStore::open_in_memory().unwrap();
+//! store.commit_task(todo!());
+//! ```
 
+mod backup;
+#[cfg(debug_assertions)]
+mod fault_harness;
+mod inspect;
 mod ledger;
 mod schema;
 mod sqlite;
 mod task_store;
 
+pub use inspect::{
+    inspect_task_store, LegacyMarkerInspection, StoreCheckStatus, StoreInspection,
+    StoreInspectionOutcome,
+};
 pub use ledger::{
-    ApprovalRecord, ApprovalResolution, ApprovalState, ExecutionClaim, ExecutionCompletion,
-    ExecutionRecord, ExecutionState, LeaseClaim, LeaseCommand, LedgerCommand, LedgerOutcome,
-    PermitRecord, PermitState, RecoveryReport, RunLeaseRecord, RuntimeBindingRecord,
-    RuntimeBindingState,
+    ApprovalRecord, ApprovalResolution, ApprovalState, BrokerExecutionState,
+    BrokeredExecutionRecoveryReport, BrokeredExecutionResultRecord, BrokeredRequestRecord,
+    BrokeredRuntimeDispatchKind, BrokeredRuntimeDispatchRecord, BrokeredRuntimeDispatchSource,
+    BrokeredRuntimeDispatchState, ExecutionClaim, ExecutionCompletion, ExecutionRecord,
+    ExecutionState, LeaseClaim, LeaseCommand, LedgerCommand, LedgerOutcome, PermitRecord,
+    PermitState, ProviderPermissionDispatchDecision, ProviderPermissionDispatchRecord,
+    ProviderPermissionDispatchState, RecoveryReport, RunLeaseRecord, RuntimeBindingRecord,
+    RuntimeBindingState, SecurityAuditProof, TypedExecutionResultState,
+};
+pub(crate) use ledger::{
+    RuntimeInputDispatchRecord, RuntimeInputDispatchState, RuntimeInputRequestRecord,
+    RuntimeInputRequestState,
 };
 pub use sqlite::SqliteTaskStore;
-pub use task_store::{CommitOutcome, CommitReceipt, OutboxIntent, TaskCommit};
+pub use task_store::{CommitOutcome, CommitReceipt, OutboxClaim};
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub use task_store::{OutboxIntent, TaskCommit};
+#[cfg(not(debug_assertions))]
+pub(crate) use task_store::{OutboxIntent, TaskCommit};
 
+use std::io;
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -33,6 +61,17 @@ pub enum StoreError {
         path: PathBuf,
         /// Bounded developer-oriented reason.
         message: String,
+    },
+    /// A filesystem operation required for durable storage failed.
+    #[error("Gateway storage I/O failed while {operation} at {path}: {source}")]
+    Io {
+        /// Stable operation name safe for diagnostics.
+        operation: &'static str,
+        /// Path involved in the failed operation.
+        path: PathBuf,
+        /// Underlying operating-system error.
+        #[source]
+        source: io::Error,
     },
     /// The database uses a schema newer than this binary understands.
     #[error("Gateway database schema {found} is newer than supported schema {supported}")]
@@ -64,6 +103,12 @@ pub enum StoreError {
     LedgerNotFound {
         /// Stable entity category and identifier safe for diagnostics.
         entity: String,
+    },
+    /// A successful pre-v8 execution has no reconstructible typed result payload.
+    #[error("legacy brokered execution {execution_id} has no durable typed result")]
+    LegacyBrokeredResultUnavailable {
+        /// Successful execution migrated without inventing a result.
+        execution_id: String,
     },
     /// A durable ledger transition violates a binding or lifecycle invariant.
     #[error("Gateway ledger conflict: {message}")]

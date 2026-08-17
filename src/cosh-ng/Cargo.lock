@@ -725,6 +725,8 @@ name = "cosh-gateway"
 version = "0.17.2"
 dependencies = [
  "agent-client-protocol",
+ "bincode",
+ "chrono",
  "clap",
  "cosh-gateway-contracts",
  "nix 0.29.0",
