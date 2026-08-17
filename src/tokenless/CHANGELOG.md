@@ -9,6 +9,24 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-08-17
+
+### Added
+
+- A source-built `anolisa-tokenless` ABI3 wheel now provides stateful in-process JSON response compression and marker-based Stash retrieval for CPython 3.11+ without spawning the CLI ([#2501](https://github.com/alibaba/anolisa/pull/2501)).
+- AgentScope 1.0.11 through 1.x and AgentScope 2.0.x applications can install a separate same-version integration wheel to compress successful final Tool Responses and expose retrieval only for markers visible to the current Agent ([#2507](https://github.com/alibaba/anolisa/pull/2507), [#2528](https://github.com/alibaba/anolisa/pull/2528), [#2553](https://github.com/alibaba/anolisa/pull/2553)).
+- DeepSeek Harness profiles can enable a bundled native Plugin that compresses successful single-block JSON Tool Results while preserving environment-error attribution and fail-open behavior ([#2581](https://github.com/alibaba/anolisa/pull/2581)).
+
+### Changed
+
+- Claude Code Adapter detection now retries transient first-run binary and Plugin-registry initialization failures, reducing false not-ready results immediately after provisioning ([#2519](https://github.com/alibaba/anolisa/pull/2519)).
+- The Tokenless RPM now provides the virtual `anolisa-component(tokenless)` capability, allowing ANOLISA to resolve the Package when the repository component index is unavailable ([#2576](https://github.com/alibaba/anolisa/pull/2576)).
+
+### Fixed
+
+- Cosh-NG extension execution now treats the hard-disabled Tool Ready Hook's empty result as a successful no-op instead of failing closed ([#2506](https://github.com/alibaba/anolisa/pull/2506)).
+- No-savings response compression now removes only Stash rows created by the discarded candidate, avoiding orphaned rows without deleting entries refreshed by another process ([#2480](https://github.com/alibaba/anolisa/pull/2480)).
+
 ## [0.7.6] - 2026-08-13
 
 ### Changed

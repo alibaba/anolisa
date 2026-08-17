@@ -9,6 +9,24 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.7.7] - 2026-08-17
+
+### 新增
+
+- 现在可从源码构建 `anolisa-tokenless` ABI3 Wheel，为 CPython 3.11+ 提供有状态的进程内 JSON Response 压缩和基于 Marker 的 Stash Retrieve，且无需启动 CLI 子进程（[#2501](https://github.com/alibaba/anolisa/pull/2501)）。
+- AgentScope 1.0.11 至 1.x 以及 AgentScope 2.0.x 应用现在可以安装独立的同版本集成 Wheel，压缩成功的最终 Tool Response，并且只允许 Retrieve 当前 Agent 可见 Marker 对应的内容（[#2507](https://github.com/alibaba/anolisa/pull/2507)、[#2528](https://github.com/alibaba/anolisa/pull/2528)、[#2553](https://github.com/alibaba/anolisa/pull/2553)）。
+- DeepSeek Harness Profile 现在可以启用随包提供的原生 Plugin，在保持环境错误归因与 fail-open 行为的同时，压缩成功的单 Block JSON Tool Result（[#2581](https://github.com/alibaba/anolisa/pull/2581)）。
+
+### 变更
+
+- Claude Code Adapter 探测现在会重试首次运行时暂时性的二进制文件与 Plugin Registry 初始化失败，减少预置完成后立即出现的错误未就绪结果（[#2519](https://github.com/alibaba/anolisa/pull/2519)）。
+- Tokenless RPM 现在提供虚拟能力 `anolisa-component(tokenless)`，使 ANOLISA 在仓库组件索引不可用时仍可解析该 Package（[#2576](https://github.com/alibaba/anolisa/pull/2576)）。
+
+### 修复
+
+- Cosh-NG Extension 执行现在会把硬关闭的 Tool Ready Hook 所返回的空结果视为成功 no-op，而不再 fail closed（[#2506](https://github.com/alibaba/anolisa/pull/2506)）。
+- 无节省的 Response 压缩现在只删除已丢弃候选结果所创建的 Stash Row，既避免孤立数据，也不会删除被其他进程刷新过的条目（[#2480](https://github.com/alibaba/anolisa/pull/2480)）。
+
 ## [0.7.6] - 2026-08-13
 
 ### 变更

@@ -491,6 +491,15 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Mon Aug 17 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.7-1
+- feat(tokenless): expose a source-built Python runtime wheel
+- feat(tokenless): add AgentScope 1.x and 2.x response compression
+- feat(tokenless): add a native DeepSeek Harness plugin
+- fix(tokenless): retry transient Claude Code detection failures
+- fix(tokenless): accept the disabled Tool Ready no-op in Cosh-NG
+- fix(tokenless): roll back discarded no-savings stash rows
+- fix(tokenless): declare the RPM component virtual provide
+
 * Thu Aug 13 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.6-1
 - feat(tokenless): add reproducible raw and prebuilt npm packaging
 - fix(tokenless): allow trusted external data directories without unsafe fallback
