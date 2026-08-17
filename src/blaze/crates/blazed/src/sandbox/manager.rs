@@ -21,9 +21,10 @@ use crate::guest::{GuestClient, GuestExecResult, MAX_GUEST_FILE_BYTES};
 use crate::metrics::Metrics;
 use crate::sandbox::template::TemplateCatalog;
 use crate::spawner::{
-    BackendSpawnRequest, DynBackendInstance, SpawnerRegistry, spawn_with_runtime_directory,
+    BackendSpawnRequest, DynBackendInstance, DynSpawner, SpawnerRegistry,
+    spawn_with_runtime_directory,
 };
-use crate::state_store::StateStore;
+use crate::state_store::{OwnedRunDir, StateStore};
 
 const GUEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -111,6 +112,11 @@ pub struct SandboxManagerResources {
 }
 
 impl SandboxManager {
+    /// Return the retained runtime-directory owner for one sandbox.
+    pub(super) fn run_directory(&self, id: Uuid) -> Result<OwnedRunDir> {
+        self.state_store.run_dir(id)
+    }
+
     /// Build a manager around state loaded from the durable state directory.
     pub fn new(init: SandboxManagerInit) -> (Self, SandboxManagerResources) {
         let SandboxManagerInit {
@@ -179,6 +185,17 @@ impl SandboxManager {
         match self.backend_instances.lock() {
             Ok(instances) => instances.get(&id).cloned(),
             Err(poisoned) => poisoned.into_inner().get(&id).cloned(),
+        }
+    }
+
+    pub(super) fn spawner(&self, backend: BackendKind) -> Option<DynSpawner> {
+        self.spawners.get(backend)
+    }
+
+    pub(super) fn remove_backend_owner(&self, id: Uuid) -> Option<DynBackendInstance> {
+        match self.backend_instances.lock() {
+            Ok(mut instances) => instances.remove(&id),
+            Err(poisoned) => poisoned.into_inner().remove(&id),
         }
     }
 
@@ -950,7 +967,7 @@ impl SandboxManager {
         }
     }
 
-    fn retain_backend(&self, id: Uuid, backend: DynBackendInstance) -> Option<String> {
+    pub(super) fn retain_backend(&self, id: Uuid, backend: DynBackendInstance) -> Option<String> {
         match self.backend_instances.lock() {
             Ok(mut instances) => {
                 instances.insert(id, backend);

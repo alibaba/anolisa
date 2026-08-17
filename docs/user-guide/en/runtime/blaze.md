@@ -96,7 +96,8 @@ to execute commands, read files, and write files inside them. Sandbox
 destruction uses `DELETE /v1/sandboxes/{id}`. Checkpoint capture and history
 use
 `POST /v1/sandboxes/{id}/checkpoint` and
-`GET /v1/sandboxes/{id}/checkpoints`.
+`GET /v1/sandboxes/{id}/checkpoints`. Restore uses
+`POST /v1/sandboxes/{id}/rollback/{checkpoint_id}`.
 
 ## Host Integration Boundary
 
@@ -214,7 +215,7 @@ The lifecycle invariants behind these compatibility responses are recorded in
 the
 [lifecycle state consistency and compatibility design](../../../../src/blaze/docs/design/lifecycle-state-consistency.md).
 
-## Checkpoint Capture and History
+## Checkpoint Capture, History, and Restore
 
 Blaze captures a running sandbox through
 `POST /v1/sandboxes/{id}/checkpoint`.
@@ -283,8 +284,38 @@ resumes the backend, and leaves the sandbox running. If Blaze cannot prove the
 publication, HEAD update, persistence, or backend-resume outcome, it retains
 the durable record and reports `RecoveryRequired`; do not retry capture until
 the sandbox has been reconciled or destroyed. A committed checkpoint that did
-not become HEAD can still appear in history with `is_head: false`. This release
-does not provide checkpoint restore, deletion, or pruning APIs.
+not become HEAD can still appear in history with `is_head: false`.
+
+Restore a running sandbox with:
+
+```http
+POST /v1/sandboxes/{id}/rollback/{checkpoint_id}
+```
+
+Restore requires a verified full checkpoint, an exact match for the sandbox's
+policy, image, backend, and backend version, plus explicit restore support from
+both the backend adapter and storage provider. The built-in mock adapter and
+file provider implement this contract. Other backend adapters return HTTP 501
+before stopping the current runtime until they implement restore.
+
+A `checkpoint_id` that is not in canonical form is rejected with HTTP 400, and a
+canonical identifier that names no committed checkpoint is reported as HTTP 404.
+Both answers are final: neither changes the running sandbox, so retrying the
+same selection cannot succeed.
+
+The file provider stages the selected root filesystem while the current
+backend remains running. Blaze then stops the old backend, activates the staged
+root, starts and checks the replacement owner, moves checkpoint HEAD, and
+commits storage. The dividing line is whether Blaze has begun stopping the old
+backend: a failure before that point, while still validating and staging the
+replacement root, preserves the running sandbox untouched. Once Blaze starts
+stopping the old backend, any later failure — including the stop itself failing
+or Blaze being unable to confirm the old backend actually stopped — retains the
+resources that actually exist and marks the sandbox `RecoveryRequired` so
+destruction can finish cleanup. Restore moves checkpoint HEAD but does not
+rewrite `last_checkpoint` or capture history.
+
+Checkpoint deletion and pruning are not provided by this API.
 
 ## Storage Artifact Synchronization
 

@@ -16,7 +16,9 @@ use std::time::Duration;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use blaze_core::backend::{BackendKind, SnapshotRequest, SpawnRequest};
+use blaze_core::backend::{
+    BackendKind, RestoreCapability, RestoreRequest, SnapshotRequest, SpawnRequest,
+};
 #[cfg(test)]
 use blaze_core::guest_protocol::DEFAULT_MAX_RESPONSE_BYTES;
 use blaze_core::{BlazeError, Result};
@@ -230,6 +232,61 @@ pub(crate) async fn spawn_with_runtime_directory(
     }
 }
 
+/// Backend restore inputs paired with the opened runtime-directory owner.
+#[derive(Debug, Clone)]
+pub struct BackendRestoreRequest {
+    request: RestoreRequest,
+    /// Opened directory used for all replacement runtime artifacts.
+    pub run_dir: OwnedRunDir,
+}
+
+impl BackendRestoreRequest {
+    pub(crate) fn new(request: RestoreRequest, run_dir: OwnedRunDir) -> Result<Self> {
+        if request.instance_id != run_dir.instance_id() {
+            return Err(BlazeError::BackendError {
+                msg: format!(
+                    "restore request for {} does not match runtime-directory owner for {}",
+                    request.instance_id,
+                    run_dir.instance_id()
+                ),
+            });
+        }
+        Ok(Self { request, run_dir })
+    }
+}
+
+impl Deref for BackendRestoreRequest {
+    type Target = RestoreRequest;
+
+    fn deref(&self) -> &Self::Target {
+        &self.request
+    }
+}
+
+/// Restore outcome that preserves ownership when cleanup cannot be confirmed.
+pub type RestoreResult = std::result::Result<DynBackendInstance, SpawnFailure>;
+
+/// Restore one backend while attaching the runtime-directory owner to every
+/// returned process owner, including a partial owner carried by a failure.
+pub(crate) async fn restore_with_runtime_directory(
+    spawner: &dyn BackendSpawner,
+    request: BackendRestoreRequest,
+) -> RestoreResult {
+    let run_dir = request.run_dir.clone();
+    match spawner.restore(request).await {
+        Ok(owner) => Ok(bind_runtime_directory(owner, run_dir)),
+        Err(error) => {
+            let (source, owner) = error.into_parts();
+            Err(match owner {
+                Some(owner) => {
+                    SpawnFailure::with_owner(source, bind_runtime_directory(owner, run_dir))
+                }
+                None => SpawnFailure::clean(source),
+            })
+        }
+    }
+}
+
 /// Backend start failure that may retain ownership of a started process.
 pub struct SpawnFailure {
     source: BlazeError,
@@ -319,6 +376,26 @@ pub trait BackendSpawner: Send + Sync {
         &self,
         request: BackendSpawnRequest,
     ) -> std::result::Result<DynBackendInstance, SpawnFailure>;
+
+    /// Report the restore identity of the requested backend executable.
+    ///
+    /// `None` means restore is unsupported. Implementations that return a
+    /// version must inspect `binary_path` for every call rather than reusing
+    /// mutable process-wide state.
+    async fn restore_capability(&self, _binary_path: &Path) -> Result<Option<RestoreCapability>> {
+        Ok(None)
+    }
+
+    /// Start an owned backend from committed checkpoint artifacts.
+    ///
+    /// Callers prepare the PID handoff through [`Self::prepare_spawn`] first.
+    /// Failures transfer any owner whose cleanup could not be confirmed.
+    async fn restore(&self, request: BackendRestoreRequest) -> RestoreResult {
+        let _ = request;
+        Err(SpawnFailure::clean(BlazeError::BackendError {
+            msg: "checkpoint restore is not supported by this backend".to_string(),
+        }))
+    }
 
     /// Probe whether the configured backend executable is usable.
     async fn probe(&self, binary_path: &Path) -> Result<bool>;
@@ -497,6 +574,66 @@ impl BackendSpawner for MockSpawner {
         spawn_mock_instance(request.instance_id)
             .await
             .map_err(SpawnFailure::from)
+    }
+
+    async fn restore_capability(&self, _binary_path: &Path) -> Result<Option<RestoreCapability>> {
+        Ok(Some(RestoreCapability {
+            backend: BackendKind::Mock,
+            version: Some("mock-v1".to_string()),
+            snapshot_kind: blaze_core::backend::SnapshotKind::Full,
+        }))
+    }
+
+    async fn restore(&self, request: BackendRestoreRequest) -> RestoreResult {
+        let RestoreRequest {
+            instance_id,
+            snapshot_path,
+            mem_path,
+            checkpoint_backend,
+            expected_version,
+            snapshot_kind,
+            ..
+        } = request.request;
+        if checkpoint_backend != BackendKind::Mock
+            || expected_version.as_deref() != Some("mock-v1")
+            || snapshot_kind != blaze_core::backend::SnapshotKind::Full
+        {
+            return Err(SpawnFailure::clean(BlazeError::BackendError {
+                msg: "mock checkpoint identity is incompatible with the restore adapter"
+                    .to_string(),
+            }));
+        }
+        let vmstate: serde_json::Value = match tokio::fs::read(&snapshot_path)
+            .await
+            .map_err(BlazeError::from)
+            .and_then(|bytes| {
+                serde_json::from_slice(&bytes).map_err(|error| BlazeError::BackendError {
+                    msg: format!("decode mock VM state: {error}"),
+                })
+            }) {
+            Ok(vmstate) => vmstate,
+            Err(error) => return Err(SpawnFailure::clean(error)),
+        };
+        if vmstate.get("format").and_then(serde_json::Value::as_str) != Some("blaze-mock-v1")
+            || vmstate
+                .get("instance_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(instance_id.to_string().as_str())
+            || vmstate.get("kind").and_then(serde_json::Value::as_str) != Some("full")
+        {
+            return Err(SpawnFailure::clean(BlazeError::BackendError {
+                msg: "mock VM state does not match the requested sandbox".to_string(),
+            }));
+        }
+        match tokio::fs::read(&mem_path).await {
+            Ok(bytes) if bytes == b"blaze-mock-memory-v1" => spawn_mock_instance(instance_id)
+                .await
+                .map_err(SpawnFailure::from),
+            Ok(_) => Err(SpawnFailure::clean(BlazeError::BackendError {
+                msg: "mock checkpoint memory does not match the requested sandbox".to_string(),
+            })),
+            Err(error) => Err(SpawnFailure::clean(error.into())),
+        }
     }
 
     async fn probe(&self, _binary_path: &Path) -> Result<bool> {
@@ -1281,7 +1418,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     use std::time::Duration;
 
-    use blaze_core::backend::{SnapshotKind, SnapshotRequest, SpawnRequest};
+    use blaze_core::backend::{RestoreRequest, SnapshotKind, SnapshotRequest, SpawnRequest};
     use blaze_core::policy::BackendConfigs;
     use blaze_core::storage::StorageSlot;
 
@@ -1504,6 +1641,40 @@ mod tests {
         assert!(instance.pause().await.is_err());
         assert!(instance.resume().await.is_err());
         assert!(instance.snapshot(request).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_restore_defaults_fail_closed_without_an_owner() {
+        let temp = tempfile::tempdir().expect("temp");
+        let spawn = request(temp.path());
+        let run_dir = spawn.run_dir.clone();
+        let restore = RestoreRequest {
+            instance_id: spawn.instance_id,
+            binary_path: spawn.binary_path.clone(),
+            storage: spawn.storage.clone(),
+            snapshot_path: temp.path().join("vmstate.snap"),
+            mem_path: temp.path().join("memory.snap"),
+            checkpoint_backend: BackendKind::Bubblewrap,
+            expected_version: None,
+            snapshot_kind: SnapshotKind::Full,
+            expose_guest_socket: true,
+        };
+        let restore = BackendRestoreRequest::new(restore, run_dir).expect("restore request");
+
+        assert!(
+            BubblewrapSpawner
+                .restore_capability(Path::new(""))
+                .await
+                .expect("capability")
+                .is_none()
+        );
+        let failure = match BubblewrapSpawner.restore(restore).await {
+            Ok(_) => panic!("restore must remain unsupported"),
+            Err(failure) => failure,
+        };
+        let (source, owner) = failure.into_parts();
+        assert!(source.to_string().contains("restore is not supported"));
+        assert!(owner.is_none());
     }
 
     #[tokio::test]

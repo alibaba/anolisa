@@ -32,6 +32,19 @@ pub struct StorageSlot {
     pub instance_dir: PathBuf,
 }
 
+/// Stable handle for one provider-owned rootfs restore transaction.
+///
+/// Callers must keep this handle from staging through activation and
+/// finalization. Providers must validate both fields against durable state
+/// before changing storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageRestoreTransaction {
+    /// Stable sandbox identifier whose rootfs is being replaced.
+    pub instance_id: String,
+    /// Unique transaction identifier used to reject stale handles.
+    pub transaction_id: uuid::Uuid,
+}
+
 /// Storage provider capacity reported by the health endpoint.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct PoolStatus {
@@ -152,6 +165,73 @@ pub trait StorageProvider: Send + Sync {
         })
     }
 
+    /// Report whether this provider can restore a self-contained checkpoint.
+    ///
+    /// The default is conservative so existing providers cannot enter a
+    /// partially implemented replacement flow.
+    fn supports_checkpoint_restore(&self) -> bool {
+        false
+    }
+
+    /// Copy a checkpoint rootfs into provider-owned staging storage.
+    ///
+    /// Staging must leave the live rootfs unchanged so callers may prepare the
+    /// replacement before stopping the current runtime.
+    async fn stage_checkpoint_restore(
+        &self,
+        slot: &StorageSlot,
+        source: &Path,
+    ) -> Result<StorageRestoreTransaction> {
+        let _ = (slot, source);
+        Err(checkpoint_restore_unsupported())
+    }
+
+    /// Select the staged rootfs while retaining the previous rootfs.
+    ///
+    /// A successful activation must remain abortable until
+    /// [`Self::commit_checkpoint_restore`] starts.
+    async fn activate_checkpoint_restore(
+        &self,
+        transaction: &StorageRestoreTransaction,
+    ) -> Result<()> {
+        let _ = transaction;
+        Err(checkpoint_restore_unsupported())
+    }
+
+    /// Finalize an activated rootfs and release its retained predecessor.
+    async fn commit_checkpoint_restore(
+        &self,
+        transaction: &StorageRestoreTransaction,
+    ) -> Result<()> {
+        let _ = transaction;
+        Err(checkpoint_restore_unsupported())
+    }
+
+    /// Restore the predecessor retained by a staged or activated transaction.
+    async fn abort_checkpoint_restore(
+        &self,
+        transaction: &StorageRestoreTransaction,
+    ) -> Result<()> {
+        let _ = transaction;
+        Err(checkpoint_restore_unsupported())
+    }
+
+    /// Resolve an interrupted restore transaction after process restart.
+    ///
+    /// Implementations choose the outcome from durable transaction state:
+    /// work not yet committed should roll back, while a durable commit intent
+    /// should finish committing.
+    async fn reconcile_checkpoint_restore(&self, instance_id: &str) -> Result<()> {
+        let _ = instance_id;
+        Err(checkpoint_restore_unsupported())
+    }
+
     /// Return the provider's current storage capacity.
     fn pool_status(&self) -> PoolStatus;
+}
+
+fn checkpoint_restore_unsupported() -> BlazeError {
+    BlazeError::StorageError {
+        msg: "storage provider does not support checkpoint restore".to_string(),
+    }
 }

@@ -16,8 +16,11 @@ use uuid::Uuid;
 
 use blaze_core::error::{BlazeError, Result};
 use blaze_core::storage::{
-    AcquireOpts, PoolStatus, StorageAcquireError, StorageProvider, StorageSlot,
+    AcquireOpts, PoolStatus, StorageAcquireError, StorageProvider, StorageRestoreTransaction,
+    StorageSlot,
 };
+
+mod restore;
 
 /// A filesystem-based provider that copies base artifacts when available and
 /// otherwise creates sparse rootfs and memory files at configured sizes.
@@ -531,6 +534,43 @@ impl StorageProvider for FileStorageProvider {
                 target.display()
             ),
         })
+    }
+
+    fn supports_checkpoint_restore(&self) -> bool {
+        true
+    }
+
+    async fn stage_checkpoint_restore(
+        &self,
+        slot: &StorageSlot,
+        source: &Path,
+    ) -> Result<StorageRestoreTransaction> {
+        restore::stage(self, slot, source).await
+    }
+
+    async fn activate_checkpoint_restore(
+        &self,
+        transaction: &StorageRestoreTransaction,
+    ) -> Result<()> {
+        restore::activate(self, transaction).await
+    }
+
+    async fn commit_checkpoint_restore(
+        &self,
+        transaction: &StorageRestoreTransaction,
+    ) -> Result<()> {
+        restore::commit(self, transaction).await
+    }
+
+    async fn abort_checkpoint_restore(
+        &self,
+        transaction: &StorageRestoreTransaction,
+    ) -> Result<()> {
+        restore::abort(self, transaction).await
+    }
+
+    async fn reconcile_checkpoint_restore(&self, instance_id: &str) -> Result<()> {
+        restore::reconcile(self, instance_id).await
     }
 
     fn pool_status(&self) -> PoolStatus {

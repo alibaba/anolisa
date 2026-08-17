@@ -99,6 +99,40 @@ pub struct SpawnRequest {
     pub vm: Option<VmConfig>,
 }
 
+/// Backend identity and snapshot semantics accepted by a restore adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreCapability {
+    /// Concrete backend implementation that can consume the checkpoint.
+    pub backend: BackendKind,
+    /// Exact backend version required by versioned snapshot formats.
+    pub version: Option<String>,
+    /// Snapshot flavor accepted by the adapter.
+    pub snapshot_kind: SnapshotKind,
+}
+
+/// Complete input for restoring an owned backend instance.
+#[derive(Debug, Clone)]
+pub struct RestoreRequest {
+    /// Stable sandbox identifier.
+    pub instance_id: Uuid,
+    /// Backend executable selected from the current daemon configuration.
+    pub binary_path: PathBuf,
+    /// Storage resources reconstructed for this sandbox.
+    pub storage: StorageSlot,
+    /// VM-state artifact from a committed checkpoint.
+    pub snapshot_path: PathBuf,
+    /// Guest-memory artifact from the same checkpoint.
+    pub mem_path: PathBuf,
+    /// Backend identity frozen into the checkpoint metadata.
+    pub checkpoint_backend: BackendKind,
+    /// Backend version frozen into the checkpoint metadata.
+    pub expected_version: Option<String>,
+    /// Snapshot flavor frozen into the checkpoint metadata.
+    pub snapshot_kind: SnapshotKind,
+    /// Whether the captured runtime exposed the stable run-directory guest transport.
+    pub expose_guest_socket: bool,
+}
+
 /// Snapshot flavor requested from a backend.
 ///
 /// The file provider currently requires self-contained artifacts, so only

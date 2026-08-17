@@ -153,6 +153,7 @@ Blaze exposes sandbox lifecycle and guest operations through `/v1/sandboxes`.
 | POST | `/v1/sandboxes/{id}/write` | Replace a guest file |
 | POST | `/v1/sandboxes/{id}/checkpoint` | Capture a full checkpoint |
 | GET | `/v1/sandboxes/{id}/checkpoints` | List committed checkpoint history |
+| POST | `/v1/sandboxes/{id}/rollback/{checkpoint_id}` | Replace a running sandbox from a verified checkpoint |
 | GET | `/v1/pools` | Reserved; returns `501` |
 | GET | `/v1/pools/{backend}/{class}` | Reserved; returns `501` |
 | POST | `/v1/pools/{backend}/{class}/drain` | Reserved; returns `501` |
@@ -258,9 +259,30 @@ sandbox state.
 
 `GET /v1/sandboxes/{id}/checkpoints` returns committed history summaries,
 including parentage, logical size, current-HEAD status, and HEAD reachability.
-This release does not provide checkpoint restore or deletion.
-See the [checkpoint capture user guide](../../docs/user-guide/en/runtime/blaze.md#checkpoint-capture-and-history)
-for response fields, current backend support, and failure handling.
+
+`POST /v1/sandboxes/{id}/rollback/{checkpoint_id}` is available only when the
+current storage provider and checkpoint backend advertise compatible restore
+capabilities. The daemon verifies the selected checkpoint, its parent chain,
+runtime identity, and all artifact hashes before changing runtime state.
+
+The file provider stages a separate rootfs copy while the current backend is
+still running. After the old backend stops, the daemon selects that copy,
+starts and owns the replacement backend, moves HEAD to the selected checkpoint,
+and only then releases the previous rootfs. The dividing line is whether the
+daemon has begun stopping the old backend: a failure before that point, while
+still validating and staging the replacement rootfs, leaves the original
+runtime running untouched, as if the restore never happened. Once the daemon
+starts stopping the old backend, any later failure — including the stop itself
+failing or the daemon being unable to confirm the old backend actually
+stopped — retains the resources that actually exist and marks the sandbox
+`RecoveryRequired`, so a later destroy can finish cleanup without losing
+process ownership.
+
+`last_checkpoint` continues to mean the most recent completed capture. Restore
+moves catalog HEAD but does not rewrite capture history.
+
+See the [checkpoint capture and restore user guide](../../docs/user-guide/en/runtime/blaze.md#checkpoint-capture-history-and-restore)
+for response fields, supported capability combinations, and failure handling.
 
 ### Guest operations
 

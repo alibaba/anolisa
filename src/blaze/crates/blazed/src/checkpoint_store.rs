@@ -8,6 +8,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -235,11 +237,35 @@ struct OwnedArtifact {
 }
 
 struct VerifiedCheckpoint {
-    #[cfg(test)]
     metadata: CheckpointMetadata,
     directory: OwnedStateDirectory,
     metadata_file: OwnedArtifact,
     artifacts: Vec<OwnedArtifact>,
+}
+
+/// Restore target retained through the complete replacement operation.
+///
+/// The catalog, sandbox, checkpoint directory, and artifact descriptors stay
+/// open so path replacement cannot redirect either restore input or HEAD.
+pub(crate) struct RestoreCheckpoint {
+    catalog: OwnedStateDirectory,
+    sandbox: OwnedStateDirectory,
+    verified: VerifiedCheckpoint,
+}
+
+impl RestoreCheckpoint {
+    pub(crate) fn metadata(&self) -> &CheckpointMetadata {
+        &self.verified.metadata
+    }
+
+    pub(crate) fn artifact_path(&self, name: &str) -> Result<PathBuf> {
+        validate_artifact_name(name)?;
+        let index = REQUIRED_ARTIFACTS
+            .iter()
+            .position(|candidate| *candidate == name)
+            .ok_or_else(|| invariant(format!("checkpoint has no required artifact {name}")))?;
+        Ok(self.verified.artifacts[index].stable_path())
+    }
 }
 
 struct LoadedCheckpointMetadata {
@@ -307,6 +333,23 @@ impl VerifiedCheckpoint {
             require_linked_file(&self.directory, name, artifact)?;
         }
         require_linked_directory(sandbox, checkpoint_id, &self.directory)
+    }
+}
+
+impl OwnedArtifact {
+    fn stable_path(&self) -> PathBuf {
+        #[cfg(target_os = "linux")]
+        {
+            PathBuf::from(format!(
+                "/proc/{}/fd/{}",
+                std::process::id(),
+                self.file.as_raw_fd()
+            ))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.path.clone()
+        }
     }
 }
 
@@ -585,6 +628,44 @@ impl CheckpointStore {
             .metadata)
     }
 
+    /// Verify and retain a restore target and its complete ancestry.
+    pub(crate) fn verify_restore_target(
+        &self,
+        sandbox_id: Uuid,
+        checkpoint_id: &str,
+    ) -> Result<RestoreCheckpoint> {
+        let catalog = self.root()?;
+        let sandbox_name = sandbox_id.to_string();
+        let sandbox =
+            required_child_directory(&catalog, &sandbox_name, "open checkpoint sandbox directory")?;
+        self.validated_chain_from(&sandbox, sandbox_id, checkpoint_id)?;
+        let verified = self.verified_checkpoint(&sandbox, sandbox_id, checkpoint_id)?;
+        require_linked_directory(&catalog, &sandbox_name, &sandbox)?;
+        Ok(RestoreCheckpoint {
+            catalog,
+            sandbox,
+            verified,
+        })
+    }
+
+    /// Atomically move HEAD to a restore target retained by this process.
+    pub(crate) fn set_head_verified(&self, target: &RestoreCheckpoint) -> SetHeadResult<()> {
+        let checkpoint_id = target.verified.metadata.id.clone();
+        let sandbox_name = target.verified.metadata.sandbox_id.to_string();
+        self.set_head_with_revalidation(&target.sandbox, &checkpoint_id, || {
+            let root = self.root()?;
+            if !same_directory(&root, &target.catalog)? {
+                return Err(invariant(
+                    "restore target belongs to a different checkpoint catalog root",
+                ));
+            }
+            require_linked_directory(&target.catalog, &sandbox_name, &target.sandbox)?;
+            target
+                .verified
+                .require_linked(&target.sandbox, &checkpoint_id)
+        })
+    }
+
     /// List committed checkpoints and mark the lineage reachable from HEAD.
     pub fn list(&self, sandbox_id: Uuid) -> Result<Vec<CheckpointInfo>> {
         let catalog_root = self.root()?;
@@ -743,6 +824,22 @@ impl CheckpointStore {
             return Ok(None);
         };
         self.read_head_from(&sandbox, sandbox_id)
+    }
+
+    /// Return the recorded HEAD identifier without verifying its artifacts.
+    ///
+    /// Callers that only need to report which checkpoint HEAD names must use
+    /// this instead of [`Self::read_head`]. Hashing a complete checkpoint would
+    /// make the observation cost proportional to the guest image size, and an
+    /// unreadable artifact would replace the recorded identifier with an
+    /// integrity error exactly when a caller needs the identifier to describe
+    /// an interrupted operation.
+    pub fn read_head_id(&self, sandbox_id: Uuid) -> Result<Option<String>> {
+        let catalog = self.root()?;
+        let Some(sandbox) = optional_child_directory(&catalog, &sandbox_id.to_string())? else {
+            return Ok(None);
+        };
+        self.read_head_id_from(&sandbox)
     }
 
     /// Remove every checkpoint artifact owned by one sandbox.
@@ -959,7 +1056,6 @@ impl CheckpointStore {
             }
         }
         let verified = VerifiedCheckpoint {
-            #[cfg(test)]
             metadata,
             directory,
             metadata_file,
@@ -1887,6 +1983,13 @@ mod tests {
         assert!(
             store.read_head(sandbox_id).is_err(),
             "reading HEAD must retain full artifact verification"
+        );
+        assert_eq!(
+            store
+                .read_head_id(sandbox_id)
+                .expect("observing the recorded HEAD must not hash artifacts"),
+            Some(head),
+            "an unreadable artifact must not hide which checkpoint HEAD names"
         );
     }
 

@@ -83,8 +83,17 @@ after request cancellation and retain the sandbox operation lock until their
 outcome is known. A known pre-publication failure removes only the private
 stage. An uncertain publication never removes a path whose identity cannot be
 proven. Sandbox destruction removes transaction artifacts and committed
-checkpoint history under the same state-root ownership boundary. Restore,
-checkpoint deletion, and pruning are not part of this protocol.
+checkpoint history under the same state-root ownership boundary. Checkpoint
+deletion and pruning are not part of this protocol.
+
+Checkpoint restore is a separate opt-in provider capability. The file provider
+copies the verified checkpoint root into a private stage while the live root
+remains selected. Activation atomically selects the stage and retains the
+predecessor. Abort restores the predecessor; commit durably records its intent,
+then removes the predecessor and transaction journal. Every transition is
+idempotently reconciled from the journal after restart. Unexpected links,
+replacement paths, ambiguous layouts, or an unverified transaction identity
+fail closed without deleting an object whose ownership cannot be proven.
 
 ## Capability boundary
 

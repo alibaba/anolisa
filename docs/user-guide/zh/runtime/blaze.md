@@ -80,7 +80,8 @@ Blaze 通过 `/v1/sandboxes` 提供沙箱生命周期和客户机操作。客户
 命名空间列出、创建、查看和删除沙箱，以及在沙箱内执行命令、读取文件和写入
 文件。销毁沙箱使用 `DELETE /v1/sandboxes/{id}`。检查点捕获与历史查询分别使用
 `POST /v1/sandboxes/{id}/checkpoint` 和
-`GET /v1/sandboxes/{id}/checkpoints`。
+`GET /v1/sandboxes/{id}/checkpoints`；恢复使用
+`POST /v1/sandboxes/{id}/rollback/{checkpoint_id}`。
 
 ## 主机集成边界
 
@@ -181,7 +182,7 @@ Blaze 仍可读取旧版本写入的 `Reset`、`Warm` 和 `start_path = "warm"` 
 [生命周期状态一致性与兼容性设计](../../../../src/blaze/docs/design/lifecycle-state-consistency_zh.md)
 中。
 
-## 检查点捕获与历史
+## 检查点捕获、历史与恢复
 
 Blaze 通过 `POST /v1/sandboxes/{id}/checkpoint` 捕获运行中的 sandbox。
 
@@ -240,8 +241,32 @@ sandbox 或修改其生命周期记录前返回 HTTP 501。
 能够确认发生在发布前的失败会删除临时数据、恢复后端，并让 sandbox 保持运行。
 如果 Blaze 无法确认发布、HEAD 更新、持久化或后端恢复的结果，则会保留持久记录并
 报告 `RecoveryRequired`；在 sandbox 完成恢复处理或销毁前，不应重试捕获。已经提交但
-未成为 HEAD 的检查点仍可能出现在历史列表中，其 `is_head` 为 `false`。当前版本
-不提供检查点恢复、删除或清理接口。
+未成为 HEAD 的检查点仍可能出现在历史列表中，其 `is_head` 为 `false`。
+
+可以使用以下接口恢复正在运行的 sandbox：
+
+```http
+POST /v1/sandboxes/{id}/rollback/{checkpoint_id}
+```
+
+恢复要求目标是经过校验的完整检查点，且策略、镜像、后端和后端版本都与当前
+sandbox 完全一致；后端适配器和存储提供程序还必须明确声明支持恢复。内置 mock
+适配器与文件存储提供程序实现了这项合同。其他后端适配器在实现恢复前会返回
+HTTP 501，并且不会停止当前运行环境。
+
+`checkpoint_id` 不符合规范形式时返回 HTTP 400；符合规范但没有对应已提交检查点
+时返回 HTTP 404。这两种结果都是终态：都不会改动正在运行的 sandbox，用同一个
+标识符重试也不可能成功。
+
+文件存储提供程序会在当前后端仍运行时准备目标根文件系统。随后 Blaze 停止旧后端、
+启用暂存根文件系统、启动并检查替代后端、移动检查点 HEAD，最后提交存储变更。
+判断边界是 Blaze 是否已经开始停止旧后端：在此之前失败（仍处于校验和准备根文件
+系统的阶段）时，旧后端照常运行，sandbox 不受影响；一旦开始停止旧后端，此后
+任何失败——包括停止操作本身失败或无法确认旧后端是否真正停止——都会让 Blaze
+保留实际存在的资源并把 sandbox 标记为 `RecoveryRequired`，以便销毁操作完成
+清理。恢复会移动检查点 HEAD，但不会改写 `last_checkpoint` 或捕获历史。
+
+该接口不提供检查点删除或清理能力。
 
 ## 存储制品同步
 

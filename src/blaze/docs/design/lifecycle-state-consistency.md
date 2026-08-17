@@ -14,8 +14,10 @@ can clean non-terminal records that contain them.
 This document defines all three boundaries. The inventory-publication protocol
 does not change the HTTP API, configuration keys, or persisted JSON format. The
 management API section defines the sandbox namespace and the reserved
-reusable-capacity boundary. The checkpoint section defines two sandbox routes
-and the durable operation fields used to recover interrupted capture.
+reusable-capacity boundary. The checkpoint section defines three sandbox routes —
+capture, history, and restore — the durable operation fields used to recover
+interrupted capture, and the restore journal and lifecycle contract that keep an
+interrupted restore recoverable.
 
 ## Terms and owned objects
 
@@ -131,16 +133,42 @@ persistence, or backend resume has an unknown or unsafe outcome, Blaze retains
 the durable operation and marks the sandbox `RecoveryRequired`. Startup does
 not restore a checkpoint or adopt an interrupted backend; normal reconciliation
 cleans the owned runtime and checkpoint transaction artifacts. Committed
-checkpoint history is retained until sandbox destruction. Restore, deletion,
-and pruning are outside this interface.
+checkpoint history is retained until sandbox destruction. Deletion and pruning
+are outside this interface.
+
+`POST /v1/sandboxes/{id}/rollback/{checkpoint_id}` replaces a running sandbox
+from one verified full checkpoint. Before mutation, Blaze verifies the complete
+checkpoint ancestry and artifacts, matches the policy, image, backend, version,
+and snapshot kind, and requires explicit backend and storage restore
+capabilities. Unsupported combinations return `501 Not Implemented` while the
+current backend and lifecycle record remain unchanged.
+
+Restore uses this durable order:
+
+1. Persist restore intent and stage an independent root filesystem while the
+   current backend remains owned and running.
+2. Stop the current backend, record `RestoreBackendStopped`, and enter
+   `Restoring` only after that boundary is durable.
+3. Activate the staged root while retaining its predecessor, prepare backend
+   ownership, and start and validate the replacement owner.
+4. Move checkpoint HEAD, commit replacement storage, return the lifecycle to
+   `Running`, and clear the restore journal.
+
+A failure before Blaze begins stopping the backend aborts staged storage and
+preserves the running backend. Once Blaze starts stopping it, any later failure —
+including the stop itself failing or shutdown not being confirmed — retains the
+backend and storage ownership that can still be proven and commits
+`RecoveryRequired`; destruction uses that journal to complete cleanup. Restore
+changes catalog HEAD but does not rewrite the most recently completed capture
+recorded by `last_checkpoint`.
 
 ## Management API and reusable-state boundary
 
 Lifecycle and guest operations are registered under `/v1/sandboxes`.
 Action-style reset and destroy paths are unregistered and return
 `404 Not Found`. Canonical destruction remains
-`DELETE /v1/sandboxes/{id}`. Checkpoint capture uses the two routes defined in
-the preceding section.
+`DELETE /v1/sandboxes/{id}`. Checkpoint capture, listing, and restore use the
+three routes defined in the preceding section.
 
 The following reserved management routes also return `501 Not Implemented` and
 do not manage reusable capacity:
