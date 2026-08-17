@@ -642,11 +642,15 @@ impl<'a> InstallRunner<'a> {
                 }
                 for (key, relative, index) in matches {
                     let claim = staged.claim(index)?;
+                    let mode = file
+                        .mode
+                        .clone()
+                        .or_else(|| claim.mode.map(|mode| format!("{mode:04o}")));
                     expanded.push(PreparedRegularFile {
                         file: ResolvedInstallFile {
                             source: Some(key),
                             dest: file.dest.join(relative),
-                            mode: file.mode.clone(),
+                            mode,
                             kind: file.kind,
                             render: None,
                         },
@@ -954,6 +958,7 @@ struct StagedClaim {
     path: PathBuf,
     sha256: String,
     size: u64,
+    mode: Option<u32>,
 }
 
 /// One archive entry spooled to disk.
@@ -961,6 +966,7 @@ struct StagedEntry {
     path: PathBuf,
     sha256: String,
     size: u64,
+    mode: Option<u32>,
 }
 
 /// Contract-selected archive entries spooled into a private staging directory,
@@ -1015,6 +1021,7 @@ impl StagedArchive {
             if !entry.header().entry_type().is_file() {
                 continue;
             }
+            let mode = entry.header().mode().ok().map(|mode| mode & 0o7777);
             let entry_path = entry
                 .path()
                 .map_err(|e| InstallError::Archive(format!("path: {e}")))?
@@ -1028,7 +1035,7 @@ impl StagedArchive {
             if !selector.selects(&path_key, &basename) {
                 continue;
             }
-            let index = staged.spool_entry(&mut entry, &path_key)?;
+            let index = staged.spool_entry(&mut entry, &path_key, mode)?;
             // Basename first, then the full path — the same insertion order as
             // the map this replaces, so which entry wins a basename/full-path
             // collision does not change.
@@ -1044,6 +1051,7 @@ impl StagedArchive {
         &mut self,
         source: &mut impl Read,
         path_key: &str,
+        mode: Option<u32>,
     ) -> Result<usize, InstallError> {
         let path = self.next_staged_path();
         let mut out = create_exclusive_no_follow(&path)?;
@@ -1073,6 +1081,7 @@ impl StagedArchive {
             path,
             sha256: to_lower_hex(&hasher.finalize()),
             size,
+            mode,
         });
         self.claimed.push(false);
         Ok(self.entries.len() - 1)
@@ -1083,7 +1092,7 @@ impl StagedArchive {
     /// The result is claimed immediately: rendered content belongs to exactly
     /// the destination that requested it and is not addressable by archive key.
     fn stage_bytes(&mut self, bytes: &[u8]) -> Result<StagedClaim, InstallError> {
-        let index = self.spool_entry(&mut &bytes[..], "<rendered>")?;
+        let index = self.spool_entry(&mut &bytes[..], "<rendered>", None)?;
         self.claim(index)
     }
 
@@ -1114,7 +1123,12 @@ impl StagedArchive {
         let entry = self.entries.get(index).ok_or_else(|| {
             InstallError::Archive(format!("internal: staged entry {index} is missing"))
         })?;
-        let (source, sha256, size) = (entry.path.clone(), entry.sha256.clone(), entry.size);
+        let (source, sha256, size, mode) = (
+            entry.path.clone(),
+            entry.sha256.clone(),
+            entry.size,
+            entry.mode,
+        );
         let already_claimed = self.claimed.get(index).copied().unwrap_or(false);
         if !already_claimed {
             self.claimed[index] = true;
@@ -1122,6 +1136,7 @@ impl StagedArchive {
                 path: source,
                 sha256,
                 size,
+                mode,
             });
         }
         let path = self.next_staged_path();
@@ -1141,7 +1156,12 @@ impl StagedArchive {
                 source: err,
             })?;
         }
-        Ok(StagedClaim { path, sha256, size })
+        Ok(StagedClaim {
+            path,
+            sha256,
+            size,
+            mode,
+        })
     }
 
     /// Read a staged payload back into memory. Only used for rendering, which
@@ -1582,13 +1602,22 @@ mod tests {
     }
 
     fn build_tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        build_tar_gz_with_modes(
+            &entries
+                .iter()
+                .map(|(path, data)| (*path, *data, 0o644))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn build_tar_gz_with_modes(entries: &[(&str, &[u8], u32)]) -> Vec<u8> {
         let buf: Vec<u8> = Vec::new();
         let enc = GzEncoder::new(buf, Compression::default());
         let mut tar = Builder::new(enc);
-        for (path, data) in entries {
+        for (path, data, mode) in entries {
             let mut hdr = Header::new_gnu();
             hdr.set_size(data.len() as u64);
-            hdr.set_mode(0o644);
+            hdr.set_mode(*mode);
             hdr.set_cksum();
             tar.append_data(&mut hdr, path, *data).unwrap();
         }
@@ -1960,6 +1989,60 @@ mod tests {
 
         let mode = fs::metadata(dest).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o644);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn directory_source_without_manifest_mode_preserves_archive_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let layout = layout_for(home.path());
+        let runner = InstallRunner::new(&layout);
+
+        let gz = build_tar_gz_with_modes(&[
+            (
+                "adapters/tokenless/codex/scripts/tool-ready",
+                b"#!/usr/bin/env python3\n",
+                0o755,
+            ),
+            (
+                "adapters/tokenless/codex/hooks/hooks.json",
+                br#"{"hooks":{}}"#,
+                0o644,
+            ),
+        ]);
+        let cached = cache.path().join("payload.tar.gz");
+        fs::write(&cached, &gz).unwrap();
+
+        let dest_root = layout.datadir.join("adapters/tokenless/codex");
+        runner
+            .install_files(
+                "tar_gz",
+                &cached,
+                &[ResolvedInstallFile {
+                    source: Some("adapters/tokenless/codex/".to_string()),
+                    dest: dest_root.clone(),
+                    mode: None,
+                    kind: FileKind::Data,
+                    render: None,
+                }],
+            )
+            .expect("install ok");
+
+        let script_mode = fs::metadata(dest_root.join("scripts/tool-ready"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let json_mode = fs::metadata(dest_root.join("hooks/hooks.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(script_mode, 0o755);
+        assert_eq!(json_mode, 0o644);
     }
 
     #[test]

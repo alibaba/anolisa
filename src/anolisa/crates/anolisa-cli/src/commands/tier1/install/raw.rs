@@ -962,10 +962,9 @@ pub(crate) fn resolve_adapter_files(
         files.push(ResolvedInstallFile {
             source: Some(source),
             dest,
-            // Bundle contents are framework-loaded data, not directly
-            // executed by ANOLISA; lay them 0644. Per-file modes inside a
-            // bundle are not expressible in `[[adapters]]` in the MVP.
-            mode: Some("0644".to_string()),
+            // Preserve per-entry archive modes so framework-executed adapter
+            // hooks and scripts keep their executable bit after raw installs.
+            mode: None,
             kind: FileKind::Data,
             render: None,
         });
@@ -1216,7 +1215,7 @@ mod tests {
         assert_eq!(f.source.as_deref(), Some("adapters/tokenless/openclaw/"));
         assert_eq!(f.dest, layout.datadir.join("adapters/tokenless/openclaw"));
         assert_eq!(f.kind, FileKind::Data);
-        assert_eq!(f.mode.as_deref(), Some("0644"));
+        assert_eq!(f.mode, None);
     }
 
     #[test]
