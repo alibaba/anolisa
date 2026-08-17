@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useI18n } from '../i18n';
 import {
   fetchAgentHealth,
   deleteAgentHealth,
@@ -6,8 +7,14 @@ import {
   fetchInterruptions,
   resolveInterruption,
   INTERRUPTION_TYPE_CN,
+  fetchLatencyMetrics,
 } from '../utils/apiClient';
-import type { InterruptionRecord, InterruptionSeverity } from '../utils/apiClient';
+import type {
+  InterruptionRecord,
+  InterruptionSeverity,
+  LatencyMetricsSummary,
+  MetricPercentiles,
+} from '../utils/apiClient';
 import type { AgentHealthStatus } from '../types';
 
 // ─── Agent status section ─────────────────────────────────────────────────────
@@ -387,6 +394,159 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
           )}
         </div>
       )}
+    </section>
+  );
+};
+
+// ─── Latency metrics section ─────────────────────────────────────────────────
+
+function formatMetricValue(value: number): string {
+  return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+interface PercentileLabels {
+  p50: string;
+  p95: string;
+  p99: string;
+}
+
+const MetricPercentileCell: React.FC<{
+  metric: MetricPercentiles | null;
+  unit: string;
+  labels: PercentileLabels;
+}> = ({ metric, unit, labels }) => {
+  if (!metric) return <span className="text-gray-400">&mdash;</span>;
+
+  return (
+    <div className="space-y-0.5 whitespace-nowrap text-xs">
+      <div><span className="text-gray-400">{labels.p50}</span> {formatMetricValue(metric.p50)} {unit}</div>
+      <div><span className="text-gray-400">{labels.p95}</span> {formatMetricValue(metric.p95)} {unit}</div>
+      <div><span className="text-gray-400">{labels.p99}</span> {formatMetricValue(metric.p99)} {unit}</div>
+    </div>
+  );
+};
+
+const LATENCY_TIME_PRESETS = [
+  { key: 'latency.range24h', ms: 24 * 3600 * 1000 },
+  { key: 'latency.range7d', ms: 7 * 24 * 3600 * 1000 },
+  { key: 'latency.range30d', ms: 30 * 24 * 3600 * 1000 },
+] as const;
+
+const LatencyMetricsSection: React.FC = () => {
+  const { t } = useI18n();
+  const [rangeMs, setRangeMs] = useState(7 * 24 * 3600 * 1000);
+  const [latencyMetrics, setLatencyMetrics] = useState<LatencyMetricsSummary[]>([]);
+  const [latencyLoading, setLatencyLoading] = useState(true);
+  const [latencyError, setLatencyError] = useState<string | null>(null);
+  const latencyRequestIdRef = useRef(0);
+
+  const loadLatency = useCallback(async () => {
+    const requestId = ++latencyRequestIdRef.current;
+    setLatencyLoading(true);
+    setLatencyError(null);
+    try {
+      const endNs = Date.now() * 1_000_000;
+      const startNs = endNs - rangeMs * 1_000_000;
+      const data = await fetchLatencyMetrics(startNs, endNs);
+      if (requestId === latencyRequestIdRef.current) {
+        setLatencyMetrics(data);
+        setLatencyError(null);
+      }
+    } catch (e: any) {
+      if (requestId === latencyRequestIdRef.current) {
+        setLatencyError(e.message || '');
+      }
+    } finally {
+      if (requestId === latencyRequestIdRef.current) {
+        setLatencyLoading(false);
+      }
+    }
+  }, [rangeMs]);
+
+  useEffect(() => {
+    void loadLatency();
+  }, [loadLatency]);
+
+  const percentileLabels: PercentileLabels = {
+    p50: t('latency.p50'),
+    p95: t('latency.p95'),
+    p99: t('latency.p99'),
+  };
+
+  return (
+    <section className="mt-8">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <h2 className="text-lg font-semibold text-gray-800">{t('latency.title')}</h2>
+        <div className="flex gap-2">
+          {LATENCY_TIME_PRESETS.map(({ key, ms }) => (
+            <button
+              key={key}
+              onClick={() => setRangeMs(ms)}
+              className={rangeMs === ms
+                ? 'px-3 py-1.5 text-xs rounded-lg transition-colors bg-blue-100 text-blue-700 font-medium'
+                : 'px-3 py-1.5 text-xs rounded-lg transition-colors bg-gray-100 hover:bg-gray-200 text-gray-600'}
+            >
+              {t(key)}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div
+        className="bg-white rounded-lg border border-gray-200 overflow-x-auto"
+        aria-busy={latencyLoading}
+      >
+        {latencyLoading && latencyMetrics.length > 0 && (
+          <div className="px-4 py-2 text-xs text-gray-400">{t('latency.loading')}</div>
+        )}
+        {latencyError !== null && latencyMetrics.length > 0 && (
+          <div className="px-4 py-2 text-xs text-red-400">{latencyError || t('latency.error')}</div>
+        )}
+        {latencyError !== null && latencyMetrics.length === 0 ? (
+          <div className="py-8 text-center text-sm text-red-400">{latencyError || t('latency.error')}</div>
+        ) : latencyMetrics.length === 0 ? (
+          <div className="py-8 text-center text-sm text-gray-400">
+            {latencyLoading ? t('latency.loading') : t('latency.empty')}
+          </div>
+        ) : (
+          <table className="w-full min-w-[820px] text-sm">
+            <thead>
+              <tr className="bg-gray-50 text-left text-xs text-gray-500 uppercase">
+                <th className="px-4 py-3">{t('latency.agent')}</th>
+                <th className="px-4 py-3">{t('latency.calls')}</th>
+                <th className="px-4 py-3">{t('latency.streaming')}</th>
+                <th className="px-4 py-3">{t('latency.ttft')} <span className="font-normal">(ms)</span></th>
+                <th className="px-4 py-3">{t('latency.tps')} <span className="font-normal">(tokens/s)</span></th>
+                <th className="px-4 py-3">{t('latency.tpot')} <span className="font-normal">(ms/token)</span></th>
+                <th className="px-4 py-3">{t('latency.e2e')} <span className="font-normal">(ms)</span></th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {latencyMetrics.map((metric, index) => (
+                <tr key={(metric.agent_name ?? 'unknown') + '-' + index} className="align-top">
+                  <td className="px-4 py-3 text-gray-800 font-medium">
+                    {metric.agent_name ?? <span>&mdash;</span>}
+                  </td>
+                  <td className="px-4 py-3 text-gray-700">{metric.call_count.toLocaleString()}</td>
+                  <td className="px-4 py-3 text-gray-700">{metric.streaming_call_count.toLocaleString()}</td>
+                  <td className="px-4 py-3">
+                    <MetricPercentileCell metric={metric.ttft_ms} unit="ms" labels={percentileLabels} />
+                  </td>
+                  <td className="px-4 py-3">
+                    <MetricPercentileCell metric={metric.tps_tokens_per_second} unit="tokens/s" labels={percentileLabels} />
+                  </td>
+                  <td className="px-4 py-3">
+                    <MetricPercentileCell metric={metric.tpot_ms_per_token} unit="ms/token" labels={percentileLabels} />
+                  </td>
+                  <td className="px-4 py-3">
+                    <MetricPercentileCell metric={metric.e2e_latency_ms} unit="ms" labels={percentileLabels} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </section>
   );
 };
@@ -830,6 +990,7 @@ export const AgentHealthPage: React.FC = () => {
       </div>
 
       <AgentStatusSection addToast={addToast} />
+      <LatencyMetricsSection />
       <InterruptionSection addToast={addToast} />
     </div>
   );

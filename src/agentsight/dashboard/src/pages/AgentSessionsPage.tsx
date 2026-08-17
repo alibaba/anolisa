@@ -1,8 +1,7 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useI18n } from '../i18n';
-import { fetchLatencyMetrics, fetchSessions, fetchTrajectories } from '../utils/apiClient';
-import type { LatencyMetricsSummary, MetricPercentiles, SessionSummary, TrajectorySummary } from '../utils/apiClient';
+import { fetchSessions, fetchTrajectories } from '../utils/apiClient';
+import type { SessionSummary, TrajectorySummary } from '../utils/apiClient';
 import { CopyButton } from '../components/CopyButton';
 
 // ─── Merged session model ─────────────────────────────────────────────────────
@@ -185,37 +184,10 @@ const SourceBadge: React.FC<{ sources?: SessionSource[] }> = ({ sources }) => {
   );
 };
 
-function formatMetricValue(value: number): string {
-  return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
-}
-
-interface PercentileLabels {
-  p50: string;
-  p95: string;
-  p99: string;
-}
-
-const MetricPercentileCell: React.FC<{
-  metric: MetricPercentiles | null;
-  unit: string;
-  labels: PercentileLabels;
-}> = ({ metric, unit, labels }) => {
-  if (!metric) return <span className="text-gray-400">&mdash;</span>;
-
-  return (
-    <div className="space-y-0.5 whitespace-nowrap text-xs">
-      <div><span className="text-gray-400">{labels.p50}</span> {formatMetricValue(metric.p50)}{unit}</div>
-      <div><span className="text-gray-400">{labels.p95}</span> {formatMetricValue(metric.p95)}{unit}</div>
-      <div><span className="text-gray-400">{labels.p99}</span> {formatMetricValue(metric.p99)}{unit}</div>
-    </div>
-  );
-};
-
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export const AgentSessionsPage: React.FC = () => {
   const navigate = useNavigate();
-  const { t } = useI18n();
   const [merged, setMerged] = useState<MergedSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -225,10 +197,6 @@ export const AgentSessionsPage: React.FC = () => {
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [autoRefresh, setAutoRefresh] = useState(false);
-  const [latencyMetrics, setLatencyMetrics] = useState<LatencyMetricsSummary[]>([]);
-  const [latencyLoading, setLatencyLoading] = useState(true);
-  const [latencyError, setLatencyError] = useState<string | null>(null);
-  const latencyRequestIdRef = useRef(0);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -249,49 +217,18 @@ export const AgentSessionsPage: React.FC = () => {
     }
   }, [rangeMs]);
 
-  const loadLatency = useCallback(async () => {
-    const requestId = ++latencyRequestIdRef.current;
-    setLatencyLoading(true);
-    setLatencyError(null);
-    try {
-      const endNs = Date.now() * 1_000_000;
-      const startNs = endNs - rangeMs * 1_000_000;
-      const agentName = agentFilter === 'all' ? undefined : agentFilter;
-      const data = await fetchLatencyMetrics(startNs, endNs, agentName);
-      if (requestId === latencyRequestIdRef.current) {
-        setLatencyMetrics(data);
-        setLatencyError(null);
-      }
-    } catch (e: any) {
-      if (requestId === latencyRequestIdRef.current) {
-        setLatencyError(e.message || t('latency.error'));
-      }
-    } finally {
-      if (requestId === latencyRequestIdRef.current) {
-        setLatencyLoading(false);
-      }
-    }
-  }, [agentFilter, rangeMs, t]);
-  const refreshAll = () => {
-    void loadData();
-    void loadLatency();
-  };
   useEffect(() => {
     loadData();
   }, [loadData]);
 
-  useEffect(() => {
-    void loadLatency();
-  }, [loadLatency]);
   // Auto-refresh every 10s when enabled
   useEffect(() => {
     if (!autoRefresh) return;
     const interval = setInterval(() => {
       void loadData();
-      void loadLatency();
     }, 10_000);
     return () => clearInterval(interval);
-  }, [autoRefresh, loadData, loadLatency]);
+  }, [autoRefresh, loadData]);
 
   // Reset to page 1 when filters change
   useEffect(() => {
@@ -345,11 +282,6 @@ export const AgentSessionsPage: React.FC = () => {
   const safePage = Math.min(page, totalPages);
   const paged = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
-  const percentileLabels: PercentileLabels = {
-    p50: t('latency.p50'),
-    p95: t('latency.p95'),
-    p99: t('latency.p99'),
-  };
   return (
     <div className="p-6 max-w-screen-xl mx-auto space-y-4">
       {/* ── Toolbar: total + time range + refresh ── */}
@@ -382,7 +314,7 @@ export const AgentSessionsPage: React.FC = () => {
             自动刷新
           </label>
           <button
-            onClick={refreshAll}
+            onClick={loadData}
             disabled={loading}
             className="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
           >
@@ -436,59 +368,6 @@ export const AgentSessionsPage: React.FC = () => {
           {error}
         </div>
       )}
-
-      {/* ── Session table ── */}
-      <section className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-        <div className="px-4 py-3 border-b border-gray-200">
-          <h2 className="text-sm font-semibold text-gray-700">{t('latency.title')}</h2>
-        </div>
-        <div className="overflow-x-auto">
-          {latencyLoading ? (
-            <div className="p-6 text-center text-gray-500 text-sm">{t('latency.loading')}</div>
-          ) : latencyError ? (
-            <div className="p-6 text-center text-red-500 text-sm">{latencyError}</div>
-          ) : latencyMetrics.length === 0 ? (
-            <div className="p-6 text-center text-gray-500 text-sm">{t('latency.empty')}</div>
-          ) : (
-            <table className="w-full min-w-[820px] text-sm">
-              <thead>
-                <tr className="bg-gray-50 text-left text-xs text-gray-500 uppercase">
-                  <th className="px-4 py-3">{t('latency.agent')}</th>
-                  <th className="px-4 py-3">{t('latency.calls')}</th>
-                  <th className="px-4 py-3">{t('latency.streaming')}</th>
-                  <th className="px-4 py-3">{t('latency.ttft')} <span className="font-normal">(ms)</span></th>
-                  <th className="px-4 py-3">{t('latency.tps')} <span className="font-normal">(tokens/s)</span></th>
-                  <th className="px-4 py-3">{t('latency.tpot')} <span className="font-normal">(ms/token)</span></th>
-                  <th className="px-4 py-3">{t('latency.e2e')} <span className="font-normal">(ms)</span></th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {latencyMetrics.map((metric, index) => (
-                  <tr key={`${metric.agent_name ?? 'unknown'}-${index}`} className="align-top">
-                    <td className="px-4 py-3 text-gray-800 font-medium">
-                      {metric.agent_name ?? <span>&mdash;</span>}
-                    </td>
-                    <td className="px-4 py-3 text-gray-700">{metric.call_count.toLocaleString()}</td>
-                    <td className="px-4 py-3 text-gray-700">{metric.streaming_call_count.toLocaleString()}</td>
-                    <td className="px-4 py-3">
-                      <MetricPercentileCell metric={metric.ttft_ms} unit="ms" labels={percentileLabels} />
-                    </td>
-                    <td className="px-4 py-3">
-                      <MetricPercentileCell metric={metric.tps_tokens_per_second} unit=" tokens/s" labels={percentileLabels} />
-                    </td>
-                    <td className="px-4 py-3">
-                      <MetricPercentileCell metric={metric.tpot_ms_per_token} unit="ms/token" labels={percentileLabels} />
-                    </td>
-                    <td className="px-4 py-3">
-                      <MetricPercentileCell metric={metric.e2e_latency_ms} unit="ms" labels={percentileLabels} />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      </section>
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
         {loading && merged.length === 0 ? (
