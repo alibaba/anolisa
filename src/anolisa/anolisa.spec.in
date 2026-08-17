@@ -143,7 +143,14 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Thu Aug 13 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Mon Aug 17 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Native DSH adapters now support explicit multi-profile lifecycle.
+- Component availability and batch installs now match exact OS and architecture targets.
+- Raw dry-runs now validate metadata for the resolved artifact target.
+- Logs now accept --level as an alias for --severity.
+- System-helper status now distinguishes unit failures from systemctl launch failures.
+
+* Thu Aug 13 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.1-1
 - Adapter discovery now ignores undeclared shared resource directories.
 
 * Wed Aug 12 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.0-1

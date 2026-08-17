@@ -9,6 +9,42 @@
 
 ## [未发布]
 
+## [0.3.2] - 2026-08-17
+
+### 新增
+
+- ANOLISA 现为 plugin bundle 提供原生 DSH adapter driver。
+  `anolisa adapter enable <component> dsh --profile <name>` 支持重复指定
+  profile、验证 bundle identity、将 profile 变更委托给 DSH，并记录 enable
+  时的 DSH home，使 status、disable 和 re-enable 在 `DSH_HOME` 或 working
+  directory 变化后仍针对相同 profile。降级到更早的 ANOLISA release 前需先
+  disable DSH adapter
+  ([#2580](https://github.com/alibaba/anolisa/pull/2580))。
+- `anolisa logs --level <LEVEL>` 现为已有 `--severity` option 的可见别名，
+  使用相同的 validation 和 filtering behavior，同时 `severity` 仍为 canonical
+  JSON field
+  ([#2558](https://github.com/alibaba/anolisa/pull/2558))。
+
+### 变更
+
+- `anolisa list` 和 `anolisa install --all` 现依据 schema v2
+  `components-v2.toml` 中精确的 OS 与 architecture target 判断 component
+  availability。JSON output 以 `targets` 和 `target_available` 取代
+  `platforms` 和 `platform_available`；repository publisher 必须在保持 v1
+  index 不变的同时部署 v2 index
+  ([#2533](https://github.com/alibaba/anolisa/pull/2533))。
+
+### 修复
+
+- `anolisa --dry-run install` 现优先读取 resolved Raw artifact 旁的
+  `meta.toml`，仅在该 sibling file 不存在时回退到 version-level metadata。
+  Preview 现会验证所选 target 的 contract，并拒绝损坏的已发布 metadata，
+  不再掩盖错误，同时仍不会下载 artifact
+  ([#2551](https://github.com/alibaba/anolisa/pull/2551))。
+- System-helper status 现会在 `systemctl` 无法启动时报告 `unknown`，仅在 unit
+  的实际状态为 failed 时报告 `failed`
+  ([#2604](https://github.com/alibaba/anolisa/pull/2604))。
+
 ## [0.3.1] - 2026-08-13
 
 ### 修复

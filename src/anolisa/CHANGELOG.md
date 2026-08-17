@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-17
+
+### Added
+
+- ANOLISA now provides a native DSH adapter driver for plugin bundles.
+  `anolisa adapter enable <component> dsh --profile <name>` accepts repeatable
+  profiles, validates the bundle identity, delegates profile changes to DSH,
+  and remembers the enable-time DSH home so status, disable, and re-enable keep
+  targeting the same profiles even if `DSH_HOME` or the working directory
+  changes. Disable DSH adapters before downgrading to an earlier ANOLISA release
+  ([#2580](https://github.com/alibaba/anolisa/pull/2580)).
+- `anolisa logs --level <LEVEL>` is now a visible alias for the existing
+  `--severity` option, with the same validation and filtering behavior while
+  `severity` remains the canonical JSON field
+  ([#2558](https://github.com/alibaba/anolisa/pull/2558)).
+
+### Changed
+
+- `anolisa list` and `anolisa install --all` now evaluate component
+  availability against an exact OS and architecture target from schema v2
+  `components-v2.toml`. JSON output replaces `platforms` and
+  `platform_available` with `targets` and `target_available`; repository
+  publishers must deploy the v2 index beside the unchanged v1 index
+  ([#2533](https://github.com/alibaba/anolisa/pull/2533)).
+
+### Fixed
+
+- `anolisa --dry-run install` now reads `meta.toml` beside the resolved Raw
+  artifact before falling back to version-level metadata only when the sibling
+  file is absent. Previews now validate the selected target's contract, reject
+  corrupt published metadata instead of masking it, and still avoid downloading
+  the artifact
+  ([#2551](https://github.com/alibaba/anolisa/pull/2551)).
+- System-helper status now reports `unknown` when `systemctl` cannot be started
+  and reports `failed` only for a unit whose actual state is failed
+  ([#2604](https://github.com/alibaba/anolisa/pull/2604)).
+
 ## [0.3.1] - 2026-08-13
 
 ### Fixed
