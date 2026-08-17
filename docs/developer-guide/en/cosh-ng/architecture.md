@@ -3,9 +3,10 @@
 [中文版](../../zh/cosh-ng/architecture.md)
 
 cosh-ng separates the interactive terminal, Agent runtime, deterministic OS
-API, and an emerging Gateway control plane so each boundary can be tested and
-integrated independently. The Gateway material described below is a partial
-candidate-worktree foundation, not an upstream production service.
+API, and Gateway Task Plane so each boundary can be tested and integrated
+independently. The packaged Gateway path is intentionally narrow: it provides
+durable local Task coordination around a contained Core Runtime, not a general
+remote capability service.
 
 ## Upstream system view
 
@@ -21,6 +22,13 @@ bash/zsh <--- cosh-shell
                   +--> cosh-platform ---> cosh-types
 
 caller ---> cosh-cli ---> cosh-platform ---> cosh-types
+
+caller ---> cosh agent task ---> cosh-gateway (local Unix/systemd)
+                                      |
+                                      +--> Task/Event/Outbox SQLite
+                                      +--> contained cosh-core
+
+cosh-cli checkpoint -----------> existing ws-ckpt path (separate)
 ```
 
 The launcher installed as `cosh` normally executes `cosh-shell raw cosh-core`.
@@ -29,57 +37,62 @@ owns a long-lived cosh-core child at runtime. The stdin/stdout protocol between
 them must remain backward-aware because either side can fail or restart
 independently.
 
-The pinned upstream baseline for the Gateway plan is
-`fa0c8369d300d90a6470965dc564e20b09487eb7`. It contains the five crates and
-runtime path above, but no `cosh-gateway` or `cosh-gateway-contracts` crate.
+The Gateway addition keeps the existing Shell/Core/CLI paths intact. The
+`cosh agent task` entrypoint is a local Unix control surface; it is not a Shell
+slash-command surface and it does not open a network listener. The existing
+`cosh-cli checkpoint` path remains separate from the Gateway profile and may
+continue to use the ws-ckpt protocol documented for that CLI domain.
 
-## Candidate Gateway foundation
+## Gateway Task Plane
 
-The shared candidate worktree based on that baseline adds two library crates:
+The Gateway addition adds two library crates and an installed local entrypoint:
 
 ```text
 cosh-gateway-contracts --> TaskAggregate --> SQLite Task/event/receipt/Outbox transaction
         |
-        +---------------> Capability Broker slice (in-memory, targeted tests)
+        +---------------> generic Capability/Permit/Execution contracts
 
-cosh-gateway ----------> RuntimeSupervisor --> private COSH JSONL v1 codec
-                                   `-------> official ACP wire-v1 codec/bridge
-                                              + bounded session driver
-                                              + fixed installed-adapter profiles
+cosh-gateway ----------> contained RuntimeSupervisor --> private COSH JSONL bridge
+        |                          |
+        +--> local Unix Task API   +--> fixed `core`/`gateway-brokered-v1` profile
+        |
+        +--> direct ACP `doctor`/`run` path (ungoverned by Task Plane)
 
-future CoshCoreBridge --> contracts public mapping + supervisor + codec
-
-Gateway daemon/API, CoshCoreBridge, installed ACP entrypoint,
-complete ACP domain/governance mapping, Shell attachment, and Web presentation
-are not implemented.
+task-only inventory: `ask_user_question`
 ```
 
-The Task reducer and SQLite store are local control-plane foundations. The
-Runtime supervisor owns a directly launched child process group, bounded
-stdout/stderr, escalation/reap, and one process terminal observation. Its
-cosh-core codec speaks the existing **private COSH control protocol v1**; it is
-not ACP and is not yet mapped to public Runtime events.
+The Task reducer, SQLite store, Runtime supervisor, and Outbox scheduler form
+the local control plane. The packaged `serve` entrypoint requires live systemd
+containment before it binds a socket, canonicalizes the configured workspace,
+and admits the fixed target `workspace/cosh/task-only-v1` with the
+`core`/`gateway-brokered-v1` selector. The system manager owns the complete
+Runtime cgroup after a Gateway crash.
 
-No executable Gateway entry point or authenticated Unix/network API exists.
-The current Shell path is unchanged: `cosh-shell` still owns its native PTY and
-compatibility cosh-core process. The candidate pins official ACP Rust SDK 2.0.0,
-raises the component baseline to Rust 1.88, and adds a supervised stable-v1
-stdio slice plus built-in profiles for installed `codex-acp` and
-`claude-agent-acp`. There is no package-runner or network bootstrap path. The
-library still lacks an installed entrypoint, a session driver with independent
-cancel, a production permission proxy, and real-adapter conformance evidence.
+The task-only profile deliberately keeps the execution boundary side-effect
+free. Its only Runtime inventory item is `ask_user_question`; it does not
+provide checkpoint, write, Shell, slash-command, Web, channel, or remote
+capabilities, and it has no approvable side effect. The Task API still exposes
+`submit`, `get`, `events`, `append`, `cancel`, `retry`, and `resolve-approval` so
+the durable contract can support future profiles. `append` answers a pending
+question; this profile does not create an approval flow.
+
+The direct ACP `doctor` and `run` commands remain useful for local adapter
+interoperability, but they launch an adapter outside the durable Task Plane and
+are not governed by the task-only inventory. The current Shell path is also
+unchanged: `cosh-shell` owns its native PTY and its compatibility cosh-core
+process. Shell slash commands remain a Shell concern, not Gateway commands.
 
 ## Crate responsibilities
 
 | Crate | Binary | Owns | Must not own |
 |---|---|---|---|
-| `cosh-types` | — | Side-effect-free response, error, config, audit, and checkpoint wire types | OS access or runtime policy |
-| `cosh-platform` | — | Distro detection, package/service adapters, audit policy/store, ws-ckpt client | CLI rendering or Agent UX |
+| `cosh-types` | — | Side-effect-free response, error, config, audit, and existing checkpoint wire types | OS access or runtime policy |
+| `cosh-platform` | — | Distro detection, package/service adapters, audit policy/store, and the existing ws-ckpt client used by `cosh-cli checkpoint` | CLI rendering, Gateway Task policy, or Agent UX |
 | `cosh-cli` | `cosh-cli` | Clap commands, JSON envelope, exit status | Distro-specific branching outside platform adapters |
 | `cosh-core` | `cosh-core` | Providers, tool loop, hooks, Skills, MCP, extensions, registry, sessions, and compaction | Terminal ownership or foreground PTY interaction |
 | `cosh-shell` | `cosh-shell` | PTY host, input routing, cards, approvals, evidence, UI, core process lifecycle | Provider implementation or direct OS API abstraction |
-| `cosh-gateway-contracts` (candidate) | — | Side-effect-free Task, Runtime, Capability, identity, header, and error contracts with bounded leaf strings/digests | Storage, process ownership, transport, provider, OS execution, or aggregate admission limits not yet implemented |
-| `cosh-gateway` (candidate) | — | Partial Task reducer/SQLite store, Runtime supervision/private core codec, ACP v1 codec/bridge and fixed installed-adapter profiles, and Capability integration slice | Shell PTY, installed Gateway/ACP entrypoints, provider/ACP wire types as domain contracts, OS effects outside the Broker, or ungoverned ACP callbacks |
+| `cosh-gateway-contracts` | — | Side-effect-free Task, Runtime, Capability, identity, header, and error contracts with bounded leaf strings/digests | Storage, process ownership, transport, provider, or OS execution |
+| `cosh-gateway` | `cosh-gateway` | Durable Task reducer/store, Outbox scheduler, contained Core Runtime bridge, local Unix Task API, and direct ACP entrypoint | Shell PTY, checkpoint/write targets, remote listeners, Shell slash commands, or ungoverned side effects |
 
 ## Interactive data flow
 
@@ -108,8 +121,10 @@ Clap command
   → exit 0 on success, exit 1 on operation failure
 ```
 
-Package and service writes support `--dry-run`. Checkpoint calls cross a Unix
-socket using bincode with a four-byte little-endian length prefix.
+Package and service writes support `--dry-run`. The existing `cosh-cli
+checkpoint` domain crosses a Unix socket using bincode with a four-byte
+little-endian length prefix; this ws-ckpt path is separate from the task-only
+Gateway profile.
 
 ## cosh-shell ownership map
 
@@ -134,7 +149,8 @@ after structural changes.
 ## Compatibility and safety contracts
 
 - `CoshResponse<T>` is the stable automation envelope.
-- ws-ckpt enum order is part of the binary wire format.
+- The existing `cosh-cli checkpoint` ws-ckpt enum order is part of its binary
+  wire format; the task-only Gateway does not depend on that daemon.
 - cosh-core messages are newline-delimited JSON; stdout must not contain logs or
   UI prose in headless mode.
 - A running Agent turn is pinned to its registry generation. A healthy candidate
@@ -151,19 +167,30 @@ after structural changes.
   preserving the distribution's real `ID` in typed and JSON output.
 - Tool auto-approval fails closed. Raw command substring matching is not a
   security boundary.
+- Gateway Task submissions are fixed to `workspace/cosh/task-only-v1` and the
+  admitted `core`/`gateway-brokered-v1` selector. The durable API uses
+  idempotency keys so uncertain client I/O can be retried without replaying an
+  unknown side effect.
 
 ## Gateway and ACP delivery boundary
 
-The candidate libraries do not form a durable production Gateway. They still
-lack the Gateway API/daemon, Task coordinator and lease/recovery loop, complete
-Capability enforcement, integrated CoshCore Bridge, installed ACP Runtime
-entrypoint, production permission UI/evidence, real-adapter evidence,
-Shell attachment, and Web/channel presentation. The
-[ACP v1 Phase 0-2 planning set](../../../../src/cosh-ng/docs/design/acp-v1-phase-0-2/README.md)
-separates the pinned upstream baseline from candidate implementation evidence
-and defines the remaining module boundaries, Warp comparison, delivery
-sequence, and acceptance gates. Overall Phase 0-2 status remains **NOT
-ACCEPTED**.
+The packaged slice is a durable local Task Plane, not a general-purpose
+production Gateway. Its supported boundary is the contained
+`core`/`gateway-brokered-v1` Runtime, the fixed
+`workspace/cosh/task-only-v1` target, the local Unix Task API, and the single
+`ask_user_question` inventory item. Checkpoint, write, Shell, slash-command,
+Web/channel, and remote capabilities remain outside this profile. Generic
+approval and permit contracts stay available for later profiles, but this
+profile has no approvable side effect.
+
+The direct ACP `doctor`/`run` path is an interoperability entrypoint rather
+than a governed Gateway Runtime. It intentionally does not claim Task
+durability, capability admission, or remote execution. Shell attachment,
+broader capability profiles, Web/channel presentation, and real-adapter
+installation evidence remain separate work. The
+[ACP Task Platform planning set](../../../../src/cosh-ng/docs/design/acp-task-platform/README.md)
+records those boundaries and acceptance gates; overall Phase 0-2 status remains
+**NOT ACCEPTED**.
 
 Continue with [Developing cosh-ng](getting-started.md), [IPC protocols](ipc-protocol.md),
 and [Testing](testing.md).

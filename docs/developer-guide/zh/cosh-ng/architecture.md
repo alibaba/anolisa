@@ -2,9 +2,9 @@
 
 [English](../../en/cosh-ng/architecture.md)
 
-cosh-ng 将交互式终端、Agent 运行时、确定性的操作系统 API 和逐步形成的 Gateway control plane
-分开。每个边界都能独立测试，也可以由其他程序单独集成。下文 Gateway 内容是候选工作树中的局部基础，
-不是上游 production service。
+cosh-ng 将交互式终端、Agent 运行时、确定性的操作系统 API 和 Gateway Task Plane 分开。
+每个边界都能独立测试，也可以由其他程序单独集成。Package Gateway path 有意保持窄范围：
+它围绕 contained Core Runtime 提供 durable local Task coordination，不是通用的 remote capability service。
 
 ## 上游系统视图
 
@@ -20,55 +20,65 @@ bash/zsh <--- cosh-shell
                   +--> cosh-platform ---> cosh-types
 
 caller ---> cosh-cli ---> cosh-platform ---> cosh-types
+
+caller ---> cosh agent task ---> cosh-gateway（local Unix/systemd）
+                                      |
+                                      +--> Task/Event/Outbox SQLite
+                                      +--> contained cosh-core
+
+cosh-cli checkpoint -----------> existing ws-ckpt path（separate）
 ```
 
 安装后的 `cosh` 启动器通常执行 `cosh-shell raw cosh-core`。`cosh-shell` 编译时不依赖工作空间中的其他 crate，运行时则维护一个长时间存活的 cosh-core 子进程。两端都可能独立失败或重启，因此 stdin/stdout 协议需要保持向后兼容。
 
-Gateway 规划固定的上游基线是 `fa0c8369d300d90a6470965dc564e20b09487eb7`。该基线包含上图五个
-crate 与 runtime path，但没有 `cosh-gateway` 或 `cosh-gateway-contracts` crate。
+Gateway addition 保持现有 Shell/Core/CLI path 不变。`cosh agent task` entrypoint 是 local Unix
+control surface，不是 Shell slash-command surface，也不开放 network listener。现有的
+`cosh-cli checkpoint` path 与 Gateway profile 独立，可以继续使用该 CLI domain 文档中的 ws-ckpt protocol。
 
-## 候选 Gateway 基础
+## Gateway Task Plane
 
-基于该基线的共享候选工作树增加两个 library crate：
+Gateway addition 增加两个 library crate 和一个安装后的 local entrypoint：
 
 ```text
 cosh-gateway-contracts --> TaskAggregate --> SQLite Task/event/receipt/Outbox transaction
         |
-        +---------------> Capability Broker slice（in-memory，targeted test）
+        +---------------> generic Capability/Permit/Execution contract
 
-cosh-gateway ----------> RuntimeSupervisor --> private COSH JSONL v1 codec
-                                   `-------> official ACP wire-v1 codec/Bridge
-                                              + 固定 installed-adapter profile
+cosh-gateway ----------> contained RuntimeSupervisor --> private COSH JSONL bridge
+        |                          |
+        +--> local Unix Task API   +--> fixed `core`/`gateway-brokered-v1` profile
+        |
+        +--> direct ACP `doctor`/`run` path（不受 Task Plane 治理）
 
-未来 CoshCoreBridge --> contract public mapping + supervisor + codec
-
-Gateway daemon/API、CoshCoreBridge、已安装 ACP entrypoint、完整 ACP
-domain/governance mapping、Shell Attachment 与 Web presentation 均未实现。
+task-only inventory：`ask_user_question`
 ```
 
-Task reducer 与 SQLite store 是 local control-plane 基础。Runtime supervisor 独占一个 direct child
-process group、bounded stdout/stderr、escalation/reap 与一次 process terminal observation。它的
-cosh-core codec 使用现有 **private COSH control protocol v1**，不是 ACP，也尚未映射为 public
-Runtime event。
+Task reducer、SQLite store、Runtime supervisor 与 Outbox scheduler 组成 local control plane。
+Package `serve` entrypoint 在 bind socket 前必须通过 live systemd containment 校验，会规范化配置的
+workspace，并接纳固定的 `workspace/cosh/task-only-v1` target 与 `core`/`gateway-brokered-v1`
+selector。Gateway crash 后，system manager 仍然拥有完整 Runtime cgroup。
 
-当前不存在 executable Gateway entry point 或 authenticated Unix/network API。Shell path 没有改变，
-`cosh-shell` 仍拥有 native PTY 与 compatibility cosh-core process。候选树准确固定官方 ACP Rust SDK
-2.0.0，把组件 baseline 提升到 Rust 1.88，并增加 supervised stable-v1 stdio slice 以及已安装
-`codex-acp`/`claude-agent-acp` 的内置 profile。这里没有 package runner 或 network bootstrap
-路径。Library 已有支持独立 cancel 的有界 Session Driver，仍缺已安装 entrypoint、production
-Permission UI/evidence 与 real-adapter conformance 证据。
+Task-only profile 有意保持 execution boundary 无副作用。它的 Runtime inventory 只有
+`ask_user_question`，不提供 checkpoint、write、Shell、slash command、Web、channel 或 remote
+capability，也没有需要 approval 的 side effect。Task API 仍暴露 `submit`、`get`、`events`、
+`append`、`cancel`、`retry` 和 `resolve-approval`，以便 durable contract 支持后续 profile。
+`append` 回答 pending question；这个 profile 不会产生 approval flow。
+
+Direct ACP `doctor` 与 `run` 仍可用于本地 Adapter interoperability，但它们在 durable Task Plane
+之外启动 Adapter，不受 task-only inventory 治理。当前 Shell path 同样不变：`cosh-shell` 拥有
+native PTY 与 compatibility cosh-core process。Shell slash command 仍属于 Shell，不是 Gateway command。
 
 ## Crate 职责
 
 | Crate | 二进制 | 拥有 | 不应拥有 |
 |---|---|---|---|
-| `cosh-types` | 无 | 无副作用的响应、错误、配置、审计、快照协议类型 | 操作系统访问或运行策略 |
-| `cosh-platform` | 无 | 发行版检测、软件包和服务适配器、审计策略与存储、ws-ckpt 客户端 | CLI 展示或 Agent 交互 |
+| `cosh-types` | 无 | 无副作用的响应、错误、配置、审计和现有 checkpoint wire type | 操作系统访问或运行策略 |
+| `cosh-platform` | 无 | 发行版检测、软件包和服务适配器、审计策略与存储，以及供 `cosh-cli checkpoint` 使用的现有 ws-ckpt 客户端 | CLI 展示、Gateway Task policy 或 Agent 交互 |
 | `cosh-cli` | `cosh-cli` | Clap 命令、JSON 响应、退出状态 | 平台适配器之外的发行版分支 |
 | `cosh-core` | `cosh-core` | 模型服务、工具循环、Hooks、Skills、MCP、Extensions、注册表、会话和压缩 | 终端控制或前台 PTY 交互 |
 | `cosh-shell` | `cosh-shell` | PTY 宿主、输入路由、卡片、审批、终端证据、界面、core 进程生命周期 | 模型服务实现或直接抽象操作系统 API |
-| `cosh-gateway-contracts`（候选） | 无 | 无副作用的 Task、Runtime、Capability、identity、header 与 error contract，leaf string/digest 有界 | Storage、process ownership、transport、provider、OS execution 或尚未实现的 aggregate admission limit |
-| `cosh-gateway`（候选） | 无 | 局部 Task reducer/SQLite store、Runtime supervision/private core codec、ACP v1 codec/Bridge 与固定 installed-adapter profile、Capability integration slice | Shell PTY、已安装 Gateway/ACP entrypoint、把 provider/ACP wire type 当作 domain contract、绕过 Broker 的 OS effect 或未治理的 ACP callback |
+| `cosh-gateway-contracts` | 无 | 无副作用的 Task、Runtime、Capability、identity、header 与 error contract，leaf string/digest 有界 | Storage、process ownership、transport、provider 或 OS execution |
+| `cosh-gateway` | `cosh-gateway` | Durable Task reducer/store、Outbox scheduler、contained Core Runtime bridge、local Unix Task API 和 direct ACP entrypoint | Shell PTY、checkpoint/write target、remote listener、Shell slash command 或未治理的 side effect |
 
 ## 交互数据流
 
@@ -91,7 +101,8 @@ Clap command
   → 成功退出 0，操作失败退出 1
 ```
 
-软件包和服务写操作支持 `--dry-run`。快照调用通过 Unix socket，以 bincode 和四字节小端长度前缀进行通信。
+软件包和服务写操作支持 `--dry-run`。现有的 `cosh-cli checkpoint` domain 通过 Unix socket，
+以 bincode 和四字节小端长度前缀进行通信；这条 ws-ckpt path 与 task-only Gateway profile 独立。
 
 ## cosh-shell 模块职责
 
@@ -114,7 +125,8 @@ Clap command
 ## 兼容性和安全契约
 
 - `CoshResponse<T>` 是稳定的自动化信封。
-- ws-ckpt 枚举顺序属于二进制协议格式。
+- 现有 `cosh-cli checkpoint` 的 ws-ckpt enum 顺序属于它的二进制 wire format；task-only Gateway
+  不依赖这个 daemon。
 - cosh-core 消息使用逐行 JSON，headless 模式的 stdout 不能混入日志或界面文本。
 - 正在运行的 Agent 任务固定使用启动时的注册表版本。新版本检查通过后，在空闲时立即启用，否则等待安全时机。
 - 会话状态按工作区隔离。恢复只还原模型可见对话，不还原历史终端证据。
@@ -122,14 +134,22 @@ Clap command
 - 前台 Shell 交接串行执行。只有内核证据表明前台进程正在等待输入时，才应用输入等待超时。管道和全屏程序不受此限制。
 - Linux 包路由可使用 `ID_LIKE` 中第一个可识别家族，但 typed 和 JSON 输出仍保留发行版的真实 `ID`。
 - 工具自动审批在无法判断时拒绝执行。直接匹配原始命令子串不能充当安全边界。
+- Gateway Task submission 固定使用 `workspace/cosh/task-only-v1` 与接纳的
+  `core`/`gateway-brokered-v1` selector。Durable API 使用 idempotency key，因此客户端 I/O
+  不确定时可以重试而不会重放未知 side effect。
 
 ## Gateway 与 ACP 交付边界
 
-候选 library 尚未组成持久 production Gateway，仍缺 Gateway API/daemon、Task coordinator 与
-lease/recovery loop、完整 Capability enforcement、集成 CoshCore Bridge、已安装 ACP Runtime
-entrypoint/Session Driver、production Permission Proxy、real-adapter 证据、Shell Attachment 与
-Web/channel presentation。[ACP v1 Phase 0-2 规划集](../../../../src/cosh-ng/docs/design/acp-v1-phase-0-2/README_zh.md)
-区分固定的上游基线与候选实现证据，并定义剩余模块边界、Warp 对比、交付顺序与验收 Gate。
-Phase 0-2 总体状态仍为 **NOT ACCEPTED**。
+Package slice 是 durable local Task Plane，不是通用的 production Gateway。它支持的边界是
+contained `core`/`gateway-brokered-v1` Runtime、固定的 `workspace/cosh/task-only-v1` target、
+local Unix Task API，以及唯一的 `ask_user_question` inventory item。Checkpoint、write、Shell、
+slash command、Web/channel 和 remote capability 都不在这个 profile 中。Generic approval 与
+permit contract 仍可供后续 profile 使用，但这个 profile 没有需要 approval 的 side effect。
+
+Direct ACP `doctor`/`run` 是 interoperability entrypoint，不是受治理的 Gateway Runtime。它们
+有意不声明 Task durability、capability admission 或 remote execution。Shell attachment、更广的
+capability profile、Web/channel presentation 和真实 Adapter 的安装证据仍属于独立工作。
+[ACP Task Platform 规划集](../../../../src/cosh-ng/docs/design/acp-task-platform/README_zh.md)记录这些边界与
+验收 Gate；Phase 0-2 总体状态仍为 **NOT ACCEPTED**。
 
 继续阅读[开发 cosh-ng](getting-started.md)、[IPC 协议](ipc-protocol.md)和[测试](testing.md)。

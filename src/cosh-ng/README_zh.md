@@ -89,6 +89,10 @@ $ /session status
 如果要在不进入交互式 Shell 的情况下运行本机已安装的 ACP Adapter，可以先检查
 Adapter，再通过 stdin 发送 prompt。
 
+下面的命令使用 ANOLISA 或 RPM 安装的 `cosh agent` launcher。源码构建或 unified build
+只安装 Gateway binary，此时请使用 `cosh-gateway doctor`、`cosh-gateway run` 或
+`cosh-gateway task`，其余参数保持不变。
+
 ```bash
 cosh agent doctor --profile codex --workspace "$PWD"
 printf '%s\n' 'summarize the current changes' | \
@@ -101,22 +105,55 @@ printf '%s\n' 'summarize the current changes' | \
 `--permission deny` 时，COSH 会取消请求。Once-only decision 会以脱敏 evidence 形式记录到
 private local state directory。
 
-第一轮 durable local-control slice 可以启动 Unix-only Gateway daemon，并从另一个 Terminal 管理
-Task 状态。
+Package Gateway 提供一个受 containment 保护的本地 Task Plane。它只在 package 安装的
+systemd service 中调度 Task；即使 Gateway hard crash，该 service 仍负责完整 Runtime
+cgroup。`gateway-brokered-v1` Core profile 有意保持为 task-only：Runtime inventory
+只有无副作用的 `ask_user_question` capability。该 profile 不提供 checkpoint、write、Shell、
+slash command、Web 或 remote capability，也没有需要 approval 的 side effect。
+
+配置 workspace 并启动按 account 命名的 Gateway instance。
 
 ```bash
-cosh agent serve
+sudo install -d -m 0755 /etc/cosh
+sudo install -m 0600 /dev/null "/etc/cosh/gateway-$USER.env"
+printf '%s\n' \
+  "COSH_GATEWAY_WORKSPACE=$PWD" | \
+  sudo tee "/etc/cosh/gateway-$USER.env" >/dev/null
+sudo systemctl start "cosh-gateway@$USER.service"
+gateway_socket="/run/cosh-gateway-$USER/gateway.sock"
 printf '%s\n' 'inspect the failed service' | \
-  cosh agent task submit --idempotency-key '<stable-retry-key>'
-cosh agent task get '<tsk_UUID>'
-cosh agent task events '<tsk_UUID>' --after 0 --limit 64
-cosh agent task cancel '<tsk_UUID>' --run-id '<run_UUID>' \
+  cosh agent task --socket "$gateway_socket" submit \
+    --runtime core --runtime-profile gateway-brokered-v1 \
+    --idempotency-key '<stable-submit-key>'
+cosh agent task --socket "$gateway_socket" get '<tsk_UUID>'
+cosh agent task --socket "$gateway_socket" events '<tsk_UUID>' --after 0 --limit 64
+printf '%s\n' 'answer to the question' | \
+  cosh agent task --socket "$gateway_socket" append '<tsk_UUID>' \
+    --input-request-id '<inp_UUID>' --idempotency-key '<stable-input-key>'
+cosh agent task --socket "$gateway_socket" cancel '<tsk_UUID>' --run-id '<run_UUID>' \
   --idempotency-key '<stable-cancel-key>'
+cosh agent task --socket "$gateway_socket" retry '<tsk_UUID>' \
+  --previous-run-id '<run_UUID>' --idempotency-key '<stable-retry-key>'
 ```
 
-请把示例中的 typed identifier 替换成 provisioned 或返回的 COSH ID。本地 API 会认证 Unix peer，
-并持久化 Task control state。它尚不调度 ACP/Core Runtime、不投递 Outbox、不恢复 Run，也不开放
-remote listener；因此 `task submit` 只是 control-plane operation，不能证明 Agent 已执行 intent。
+Daemon 首次启动时会生成并持久化 installation ID，也可以通过 `--installation-id` 显式 provision。
+请把示例中的 typed identifier 替换成 Task API 返回的值。Task API 支持 `submit`、`get`、
+`events`、`append`、`cancel`、`retry` 和 `resolve-approval`；`append` 用来回答 profile
+产生的 durable user question，而这个 profile 不会产生 approval request。
+Direct `serve` 没有 package unit 的 live `--systemd-unit` proof 时会 fail closed；Gateway 会在
+创建 socket 或 database 前完成校验。Daemon 会把 Unix peer 认证为 local OS actor，将 target
+固定为 `workspace/cosh/task-only-v1`，只接受 `core`/`gateway-brokered-v1` selector 与配置的
+canonical workspace，持久化 Runtime binding，并由 scheduler 投递 durable Outbox work。
+本地非托管 ACP interoperability 应使用 `doctor` 与 `run`，不能使用 `serve`；这两个 direct
+ACP command 不受 durable Task Plane 治理。
+Task Plane 不依赖 checkpoint 或 ws-ckpt。现有的 `cosh-cli checkpoint` 命令仍是独立的
+system-operations 路径，不会为这个 Gateway profile 增加 checkpoint capability。
+
+`SIGINT` 与 `SIGTERM` 会在 Daemon 退出前触发有界的 scheduler 与 Runtime shutdown。Daemon
+仍然只监听 Unix socket，不开放 remote listener。
+
+仓库为 direct ACP path 提供 Fake Adapter conformance coverage。具体安装在投入生产前，仍需
+另行执行真实 Codex/Claude Adapter 检查与人工 Terminal 验收。
 
 ## 文档
 

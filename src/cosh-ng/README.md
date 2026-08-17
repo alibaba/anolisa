@@ -92,6 +92,11 @@ Composer that accepts a leading `/skill:<name>` and validated workspace-local
 To run one locally installed ACP adapter without entering the interactive
 Shell, verify it first and then pipe the prompt through stdin:
 
+The commands below use the `cosh agent` launcher installed by ANOLISA or the
+RPM. A source or unified build installs the bare Gateway binary instead; use
+`cosh-gateway doctor`, `cosh-gateway run`, or `cosh-gateway task` with the same
+remaining arguments.
+
 ```bash
 cosh agent doctor --profile codex --workspace "$PWD"
 printf '%s\n' 'summarize the current changes' | \
@@ -105,26 +110,63 @@ runtime. A permission callback prompts only on the local controlling terminal;
 without one, or with `--permission deny`, COSH cancels it. Once-only decisions
 are recorded as redacted evidence under the private local state directory.
 
-The first durable local-control slice can run a Unix-only Gateway daemon and
-manage Task state from another terminal:
+The packaged Gateway provides a contained local Task Plane. It schedules Tasks
+only inside the packaged systemd service, which owns the complete Runtime
+cgroup after a Gateway hard crash. The `gateway-brokered-v1` Core profile is
+intentionally task-only: its runtime inventory contains only the side-effect-free
+`ask_user_question` capability. It does not expose checkpoint, write, Shell,
+slash-command, Web, or remote capabilities, and this profile has no approvable
+side effect.
+
+Configure the workspace and start the account-named Gateway instance:
 
 ```bash
-cosh agent serve
+sudo install -d -m 0755 /etc/cosh
+sudo install -m 0600 /dev/null "/etc/cosh/gateway-$USER.env"
+printf '%s\n' \
+  "COSH_GATEWAY_WORKSPACE=$PWD" | \
+  sudo tee "/etc/cosh/gateway-$USER.env" >/dev/null
+sudo systemctl start "cosh-gateway@$USER.service"
+gateway_socket="/run/cosh-gateway-$USER/gateway.sock"
 printf '%s\n' 'inspect the failed service' | \
-  cosh agent task submit --idempotency-key '<stable-retry-key>'
-cosh agent task get '<tsk_UUID>'
-cosh agent task events '<tsk_UUID>' --after 0 --limit 64
-cosh agent task cancel '<tsk_UUID>' --run-id '<run_UUID>' \
+  cosh agent task --socket "$gateway_socket" submit \
+    --runtime core --runtime-profile gateway-brokered-v1 \
+    --idempotency-key '<stable-submit-key>'
+cosh agent task --socket "$gateway_socket" get '<tsk_UUID>'
+cosh agent task --socket "$gateway_socket" events '<tsk_UUID>' --after 0 --limit 64
+printf '%s\n' 'answer to the question' | \
+  cosh agent task --socket "$gateway_socket" append '<tsk_UUID>' \
+    --input-request-id '<inp_UUID>' --idempotency-key '<stable-input-key>'
+cosh agent task --socket "$gateway_socket" cancel '<tsk_UUID>' --run-id '<run_UUID>' \
   --idempotency-key '<stable-cancel-key>'
+cosh agent task --socket "$gateway_socket" retry '<tsk_UUID>' \
+  --previous-run-id '<run_UUID>' --idempotency-key '<stable-retry-key>'
 ```
 
 The daemon generates and persists its installation ID on first start; an
 operator may provision one explicitly with `--installation-id`. Replace the
-other typed identifiers with returned COSH IDs. This
-local API authenticates the Unix peer and persists Task control state. It does
-not yet schedule the ACP/Core Runtime, deliver Outbox work, recover a Run, or
-open a remote listener; `task submit` is a control-plane operation, not proof
-that an Agent executed the intent.
+typed identifiers with values returned by the Task API. The Task API supports
+`submit`, `get`, `events`, `append`, `cancel`, `retry`, and
+`resolve-approval`; `append` answers the profile's durable user questions, while
+this profile does not generate approval requests.
+Direct `serve` fails closed without the packaged unit's live `--systemd-unit`
+proof, which is verified before the socket or database is created. The daemon
+authenticates the Unix peer as a local OS actor, fixes the target to
+`workspace/cosh/task-only-v1`, admits only the `core`/
+`gateway-brokered-v1` selector and configured canonical workspace, persists
+Runtime bindings, and dispatches durable Outbox work through the scheduler.
+Use `doctor` and `run`, not `serve`, for uncontained local ACP interoperability;
+those direct ACP commands are not governed by the durable Task Plane.
+The Task Plane has no checkpoint or ws-ckpt dependency. The existing
+`cosh-cli checkpoint` commands remain a separate system-operations path and do
+not add checkpoint capability to this Gateway profile.
+
+`SIGINT` and `SIGTERM` trigger bounded scheduler and Runtime shutdown before the
+daemon exits. The daemon remains Unix-only and does not open a remote listener.
+
+The repository includes fake-adapter conformance coverage for the direct ACP
+path. Run the separate real Codex/Claude adapter checks and manual Terminal
+acceptance before treating a particular ACP installation as production-validated.
 
 ## Documentation
 
