@@ -704,7 +704,7 @@ fn raw_relay_zsh_handoff_keeps_an_export_attribute_change_the_command_made() {
     let input = DelayedInput::new(vec![
         (
             b"printf 'pager-after=%s\\n' \"${PAGER-unset}\"\n".to_vec(),
-            Duration::from_millis(2_000),
+            Duration::from_millis(4_000),
         ),
         (
             b"sh -c 'printf \"child-pager=%s\\n\" \"${PAGER-unset}\"'\n".to_vec(),

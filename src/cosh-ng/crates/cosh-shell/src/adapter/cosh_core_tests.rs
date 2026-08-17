@@ -815,6 +815,7 @@ fn synchronous_stream_read_error_releases_restoring_selection() {
     let script = write_mock_core(
         "invalid-utf8-stream",
         r#"#!/bin/sh
+cat >/dev/null
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-4111-8111-111111111111","model":"mock","tools":[]}'
 printf '\377\n'
 "#,

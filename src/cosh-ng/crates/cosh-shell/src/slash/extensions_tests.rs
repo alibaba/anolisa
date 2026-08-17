@@ -15,7 +15,19 @@ fn en_state() -> InlineState {
     }
 }
 
-fn mock_core(body: &str) -> (AdapterInstance, std::path::PathBuf) {
+fn mock_core(
+    body: &str,
+) -> (
+    std::sync::MutexGuard<'static, ()>,
+    AdapterInstance,
+    std::path::PathBuf,
+) {
+    use std::sync::{Mutex, MutexGuard};
+    static EXECUTABLE_LOCK: Mutex<()> = Mutex::new(());
+    let executable_guard: MutexGuard<'static, ()> = EXECUTABLE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -31,7 +43,7 @@ fn mock_core(body: &str) -> (AdapterInstance, std::path::PathBuf) {
     std::fs::set_permissions(&script, permissions).unwrap();
     let adapter =
         crate::adapter::CoshCoreAdapter::new(script.to_string_lossy().into_owned(), false);
-    (AdapterInstance::CoshCore(adapter), script)
+    (executable_guard, AdapterInstance::CoshCore(adapter), script)
 }
 
 #[test]
@@ -62,7 +74,7 @@ fn extensions_non_cosh_core_shows_unavailable_en() {
 
 #[test]
 fn extensions_install_displays_explicit_consent_without_committing() {
-    let (adapter, script) = mock_core(
+    let (_executable_guard, adapter, script) = mock_core(
         r#"read REQUEST
 case "$REQUEST" in
   *'"action":"install-preflight"'*)
@@ -85,7 +97,7 @@ esac"#,
 
 #[test]
 fn extensions_consent_reloads_operation_before_committing() {
-    let (adapter, script) = mock_core(
+    let (_executable_guard, adapter, script) = mock_core(
         r#"read REQUEST
 case "$REQUEST" in
   *'"action":"operation"'*)
@@ -108,7 +120,7 @@ esac"#,
 
 #[test]
 fn extensions_consent_queries_receipt_after_commit_transport_failure() {
-    let (adapter, script) = mock_core(
+    let (_executable_guard, adapter, script) = mock_core(
         r#"read REQUEST
 case "$REQUEST" in
   *'"action":"operation"'*)
@@ -134,7 +146,7 @@ esac"#,
 
 #[test]
 fn extensions_consent_preserves_application_error_without_querying_receipt() {
-    let (adapter, script) = mock_core(
+    let (_executable_guard, adapter, script) = mock_core(
         r#"read REQUEST
 case "$REQUEST" in
   *'"action":"operation"'*)
@@ -165,7 +177,7 @@ esac"#,
 
 #[test]
 fn extensions_operation_queries_durable_result_after_commit() {
-    let (adapter, script) = mock_core(
+    let (_executable_guard, adapter, script) = mock_core(
         r#"read REQUEST
 case "$REQUEST" in
   *'"action":"operation"'*)
@@ -191,7 +203,7 @@ esac"#,
 
 #[test]
 fn extensions_operation_renders_durable_update_all_checkpoint() {
-    let (adapter, script) = mock_core(
+    let (_executable_guard, adapter, script) = mock_core(
         r#"read REQUEST
 case "$REQUEST" in
   *'"action":"operation"'*)
@@ -220,7 +232,7 @@ esac"#,
 
 #[test]
 fn extensions_update_all_queries_batch_after_transport_failure() {
-    let (adapter, script) = mock_core(
+    let (_executable_guard, adapter, script) = mock_core(
         r#"read REQUEST
 case "$REQUEST" in
   *'"action":"update-all-preflight"'*)
@@ -250,7 +262,7 @@ esac"#,
 
 #[test]
 fn extensions_settings_redacts_sensitive_registry_values() {
-    let (adapter, script) = mock_core(
+    let (_executable_guard, adapter, script) = mock_core(
         r#"read REQUEST
 case "$REQUEST" in
   *'"action":"settings-get"'*)

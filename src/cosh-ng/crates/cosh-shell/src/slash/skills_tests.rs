@@ -146,7 +146,7 @@ fn skills_list_rendering_does_not_leak_description_text() {
     let (adapter, script) = mock_core(
         r#"read REQUEST
 case "$REQUEST" in
-  *'"action":"list"'*'"domain":"skills"'*)
+  *'"action":"list"'*'"domain":"skills"'*|*'"domain":"skills"'*'"action":"list"'*)
     printf '%s\n' '{"success":true,"data":[{"name":"agentsight","description":"DESCRIPTION_MUST_NOT_LEAK into the compact list row","level":"system"}]}'
     ;;
   *) printf '%s\n' '{"success":false,"error":"unexpected action"}' ;;
