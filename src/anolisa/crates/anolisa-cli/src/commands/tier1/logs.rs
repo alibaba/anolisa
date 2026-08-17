@@ -52,7 +52,7 @@ pub struct LogsArgs {
     /// Lexicographic ISO8601 lower bound on `started_at`.
     #[arg(long, value_name = "ISO")]
     pub since: Option<String>,
-    /// Cap returned records (default 50, max 1000; 0 returns none).
+    /// Cap returned records to the most recent N (default 50, max 1000; 0 returns none).
     #[arg(long, value_name = "N")]
     pub limit: Option<usize>,
 }
@@ -409,7 +409,10 @@ mod tests {
             .expect("query");
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].kind, LogKind::Component);
-        assert_eq!(one[0].severity, Severity::Warn);
+        // Two component rows are at-or-above warn (warn then error); limit 1
+        // must keep the later error, not the earlier warn.
+        assert_eq!(one[0].severity, Severity::Error);
+        assert_eq!(one[0].started_at, "2026-06-01T10:00:03Z");
 
         args.limit = Some(0);
         let zero = log
