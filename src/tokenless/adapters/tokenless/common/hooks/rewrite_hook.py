@@ -5,7 +5,10 @@ Reads a PreToolUse JSON from stdin, extracts the shell command,
 invokes ``rtk rewrite`` via subprocess, and writes a HookOutput
 JSON to stdout.
 
-Hook point: **PreToolUse** — matcher: ``Shell``
+Hook point: **PreToolUse** — matcher: shell-family tool names
+(``Bash``, ``run_shell_command``, ``terminal``, ``Shell``, ``shell``,
+``exec``, ``process``).  The lowercase ``shell`` alternative covers
+cosh-ng, whose built-in shell tool is named ``shell`` on the wire.
 
 The agent ID is read from the TOKENLESS_AGENT_ID environment variable
 (set by the install action script).  Fallback paths follow the ANOLISA

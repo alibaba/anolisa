@@ -20,7 +20,7 @@
         ]
       },
       {
-        "matcher": "^(Bash|run_shell_command|terminal|Shell|exec|process)$",
+        "matcher": "^(Bash|run_shell_command|terminal|Shell|shell|exec|process)$",
         "hooks": [
           {
             "type": "command",

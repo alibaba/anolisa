@@ -239,6 +239,7 @@ test-integration:
 	python3 tests/test_agentscope_middleware.py
 	python3 tests/test_agentscope_v1.py
 	python3 tests/test_rewrite_hook.py
+	python3 tests/test_cosh_extension_matcher.py
 	python3 tests/test_resolve_agent_id.py
 
 test-adapters: build-openclaw-plugin build-dsh-plugin
