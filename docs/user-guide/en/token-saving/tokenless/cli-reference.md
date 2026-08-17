@@ -54,6 +54,12 @@ Compress a JSON array:
 cat tools.json | tokenless compress-schema --batch
 ```
 
+Accepted item shapes (detected per item):
+
+- OpenAI function wrapper: `{"function": {"name", "description", "parameters"}}`
+- Direct schema: `{"name", "description", "parameters"}`
+- Gemini / copilot-shell wrapper: `{"functionDeclarations": [{"name", "description", "parameters"}, ...]}`; copilot-shell BeforeModel hooks deliver tool declarations in this shape (`llm_request.config.tools`). Declarations inside the wrapper are compressed individually; the wrapper itself and any sibling fields are preserved.
+
 An array input enables batch handling automatically. Common options:
 
 | Option | Description |

@@ -54,6 +54,12 @@ tokenless compress-schema -f tool.json
 cat tools.json | tokenless compress-schema --batch
 ```
 
+接受的输入条目形态（按条目自动识别）：
+
+- OpenAI function 包装：`{"function": {"name", "description", "parameters"}}`
+- 直接 Schema：`{"name", "description", "parameters"}`
+- Gemini / copilot-shell 包装：`{"functionDeclarations": [{"name", "description", "parameters"}, ...]}`；copilot-shell 的 BeforeModel hook 以该形态下发工具声明（`llm_request.config.tools`）。包装内的声明逐个压缩，包装本身及其同级字段原样保留。
+
 输入本身是数组时会自动使用 batch 处理。常用参数：
 
 | 参数 | 说明 |

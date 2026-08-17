@@ -820,3 +820,151 @@ fn test_clear_stash_session_keeps_emitted_markers() {
         "emitted keep-marker payload must survive rollback after clear_stash_session"
     );
 }
+
+#[test]
+fn gemini_wrapper_declarations_compressed() {
+    // copilot-shell BeforeModel events carry Gemini SDK tool entries:
+    // {"functionDeclarations": [{name, description, parameters}, ...]}.
+    // Each declaration must be compressed in place while the wrapper,
+    // declaration names, and order stay intact.
+    let compressor = SchemaCompressor::new();
+    let long_desc = "Run a shell command in the workspace. ".repeat(20);
+    let long_param_desc = "The command line to execute. ".repeat(12);
+    let tool = json!({
+        "functionDeclarations": [
+            {
+                "name": "shell",
+                "description": long_desc,
+                "title": "Shell",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": long_param_desc}
+                    },
+                    "required": ["command"]
+                }
+            },
+            {
+                "name": "read_file",
+                "description": "Read a file. ".repeat(25),
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}}
+                }
+            }
+        ]
+    });
+
+    let result = compressor.compress(&tool);
+
+    let decls = result["functionDeclarations"].as_array().unwrap();
+    assert_eq!(decls.len(), 2);
+    assert_eq!(decls[0]["name"], "shell");
+    assert_eq!(decls[1]["name"], "read_file");
+
+    // Declaration descriptions truncated to the function limit (char count).
+    assert!(decls[0]["description"].as_str().unwrap().chars().count() <= 256);
+    assert!(decls[1]["description"].as_str().unwrap().chars().count() <= 256);
+    // Titles dropped.
+    assert!(decls[0].get("title").is_none());
+    // Parameter descriptions truncated to the parameter limit (char count).
+    let param_desc = decls[0]["parameters"]["properties"]["command"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(param_desc.chars().count() <= 160);
+    // Protected schema fields preserved.
+    assert_eq!(decls[0]["parameters"]["required"][0], "command");
+
+    // The rewrite actually shrank the declaration set.
+    assert!(
+        serde_json::to_string(&result).unwrap().len()
+            < serde_json::to_string(&tool).unwrap().len()
+    );
+}
+
+#[test]
+fn gemini_wrapper_preserves_sibling_keys() {
+    let compressor = SchemaCompressor::new();
+    let tool = json!({
+        "functionDeclarations": [
+            {
+                "name": "shell",
+                "description": "Run a shell command. ".repeat(20),
+                "parameters": {"type": "object", "properties": {}}
+            }
+        ],
+        "codeExecution": {}
+    });
+
+    let result = compressor.compress(&tool);
+
+    assert!(result.get("codeExecution").is_some());
+    assert!(result["functionDeclarations"].is_array());
+}
+
+#[test]
+fn gemini_wrapper_empty_or_malformed_declarations_untouched() {
+    let compressor = SchemaCompressor::new();
+
+    let empty = json!({"functionDeclarations": []});
+    assert_eq!(compressor.compress(&empty), empty);
+
+    let malformed = json!({"functionDeclarations": {"name": "not-an-array"}});
+    assert_eq!(compressor.compress(&malformed), malformed);
+}
+
+#[test]
+fn gemini_wrapper_no_savings_returns_original() {
+    let compressor = SchemaCompressor::new();
+    let tool = json!({
+        "functionDeclarations": [
+            {
+                "name": "shell",
+                "description": "Run a shell command.",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        ]
+    });
+
+    // Nothing to compress: the original value is returned unchanged.
+    assert_eq!(compressor.compress(&tool), tool);
+}
+
+#[test]
+fn gemini_wrapper_stash_single_retrieve_per_declaration() {
+    // A truncated declaration description must stash exactly once and the
+    // retrieved payload must be the verbatim original, mirroring the direct
+    // schema contract.
+    use std::sync::Arc;
+    use tokenless_ccr::{InMemoryStore, StashStore, extract_hash};
+
+    let store = Arc::new(InMemoryStore::new());
+    let compressor = SchemaCompressor::new()
+        .with_func_desc_max_len(100)
+        .with_stash_store(store.clone());
+
+    let original_desc = format!("GEMINIORIG_{}", "a".repeat(280));
+    let tool = json!({
+        "functionDeclarations": [
+            {
+                "name": "shell",
+                "description": original_desc,
+                "parameters": {"type": "object", "properties": {}}
+            }
+        ]
+    });
+
+    let result = compressor.compress(&tool);
+    let desc = result["functionDeclarations"][0]["description"]
+        .as_str()
+        .unwrap();
+
+    assert!(desc.contains("tokenless:"), "expected a stash marker in output");
+    assert!(desc.chars().count() <= 100);
+
+    let key = extract_hash(desc).expect("marker must carry a valid hash");
+    let retrieved = store.retrieve(key).unwrap().expect("stash entry must exist");
+    assert_eq!(retrieved, original_desc);
+    assert!(!retrieved.contains("tokenless:"));
+    assert_eq!(store.len(), 1);
+}

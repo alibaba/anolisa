@@ -218,7 +218,17 @@ impl SchemaCompressor {
         self.stash_errors.set(self.stash_errors.get() + 1);
     }
 
-    /// Compress an OpenAI Function Calling schema.
+    /// Compress a tool schema declaration.
+    ///
+    /// Accepted item shapes:
+    /// - OpenAI function wrapper: `{"function": {name, description, parameters}}`
+    /// - Gemini / copilot-shell wrapper:
+    ///   `{"functionDeclarations": [{name, description, parameters}, ...]}`
+    ///   (the shape copilot-shell puts in `llm_request.config.tools` for
+    ///   BeforeModel hooks); each declaration is compressed in place and the
+    ///   wrapper plus any sibling keys are preserved so the host can apply
+    ///   the rewritten array unchanged.
+    /// - Direct schema: `{name, description, parameters}`
     ///
     /// Unlike [`ResponseCompressor`](crate::ResponseCompressor), this does
     /// not reset stash session state. Pending rollback keys accumulate until
@@ -229,7 +239,8 @@ impl SchemaCompressor {
 
         let mut result = tool.clone();
 
-        // Check if this is a function wrapper or direct schema
+        // Check if this is a function wrapper, a Gemini-style declarations
+        // wrapper, or a direct schema
         if let Some(function) = result.get_mut("function") {
             // Compress function-level description
             if let Some(desc) = function.get("description").and_then(|d| d.as_str()) {
@@ -249,20 +260,14 @@ impl SchemaCompressor {
             if let Some(params) = function.get_mut("parameters") {
                 self.compress_json_schema(params, 1);
             }
-        } else {
-            // Direct schema (no function wrapper). Let compress_json_schema
-            // handle description, title removal, and nested properties at
-            // depth 0 — doing it here first would stash description as K1,
-            // then compress_json_schema would stash the marker string as K2,
-            // requiring two retrieves to recover the original.
-            if result.is_object() {
-                // Compress parameters if present (not a JSON Schema keyword;
-                // compress_json_schema does not recurse into it).
-                if let Some(params) = result.get_mut("parameters") {
-                    self.compress_json_schema(params, 1);
+        } else if let Some(declarations) = result.get_mut("functionDeclarations") {
+            if let Some(entries) = declarations.as_array_mut() {
+                for entry in entries {
+                    self.compress_direct_declaration(entry);
                 }
-                self.compress_json_schema(&mut result, 0);
             }
+        } else {
+            self.compress_direct_declaration(&mut result);
         }
 
         // Compare with original to see if anything actually changed
@@ -272,6 +277,24 @@ impl SchemaCompressor {
         }
 
         result
+    }
+
+    /// Compress a direct tool declaration in place: an object carrying a
+    /// top-level `description` and an optional `parameters` JSON Schema.
+    ///
+    /// Let compress_json_schema handle description, title removal, and nested
+    /// properties at depth 0 — compressing the description here first would
+    /// stash it as K1, then compress_json_schema would stash the marker
+    /// string as K2, requiring two retrieves to recover the original.
+    fn compress_direct_declaration(&self, result: &mut Value) {
+        if result.is_object() {
+            // Compress parameters if present (not a JSON Schema keyword;
+            // compress_json_schema does not recurse into it).
+            if let Some(params) = result.get_mut("parameters") {
+                self.compress_json_schema(params, 1);
+            }
+            self.compress_json_schema(result, 0);
+        }
     }
 
     /// Recursively compress a JSON Schema

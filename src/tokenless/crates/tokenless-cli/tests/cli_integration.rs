@@ -322,6 +322,59 @@ fn compress_schema_batch_mode() {
 }
 
 #[test]
+fn compress_schema_batch_gemini_function_declarations() {
+    // copilot-shell BeforeModel hooks pass Gemini SDK tool entries
+    // ({"functionDeclarations": [...]}). The batch path must compress the
+    // nested declarations and keep the wrapper shape so the host can apply
+    // the rewritten array unchanged.
+    let long_desc = "Run a shell command in the workspace. ".repeat(20);
+    let schemas = serde_json::json!([
+        {
+            "functionDeclarations": [
+                {
+                    "name": "shell",
+                    "description": long_desc,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string", "description": long_desc}
+                        }
+                    }
+                }
+            ]
+        }
+    ]);
+    let input = serde_json::to_string(&schemas).unwrap();
+    let output = tokenless_bin()
+        .args(["compress-schema", "--batch"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(input.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert!(output.status.success(), "compress-schema should succeed");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let decls = &result[0]["functionDeclarations"];
+    assert_eq!(decls[0]["name"], "shell");
+    // Limits are char counts, not byte lengths (the stash marker carries a
+    // multibyte ellipsis).
+    assert!(decls[0]["description"].as_str().unwrap().chars().count() <= 256);
+    let param_desc = decls[0]["parameters"]["properties"]["command"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(param_desc.chars().count() <= 160);
+    assert!(
+        output.stdout.len() < input.len(),
+        "compressed output must be smaller than the input"
+    );
+}
+
+#[test]
 fn compress_response_from_stdin() {
     let response =
         r#"{"data":"value","debug":"remove","trace":"remove","empty_field":"","null_field":null}"#;
