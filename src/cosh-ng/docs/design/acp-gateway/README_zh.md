@@ -1,5 +1,7 @@
 # COSH Gateway 与 ACP 架构
 
+[English](README.md)
+
 COSH Gateway 将 cosh-ng 扩展为本地优先的 Agent 运维网关。它把 Shell、CLI、Web 和
 消息渠道接入同一个持久 Task Plane，通过可替换的 Agent Runtime 处理任务，并由统一的
 OS 治理层约束真实环境中的副作用。
@@ -7,10 +9,18 @@ OS 治理层约束真实环境中的副作用。
 本文是 Gateway 演进的长期架构基线。实现可以分阶段推进，但不得破坏这里定义的身份、
 持久性、Runtime 和权限边界。
 
+本文描述目标架构和长期不变量，不表示所有模块已经可用。实际能力以当前源码、组件
+README 和用户文档为准。
+
 配套决策：
 
 - [ACP v1 接入决策](acp-v1-decision_zh.md)
 - [Rust 1.88 工具链决策](rust-1.88-decision_zh.md)
+- [Task 与 Runtime 模型](task-runtime-model_zh.md)
+- [持久 Task Plane](durable-task-plane_zh.md)
+- [Capability 与执行](capability-execution_zh.md)
+- [Runtime 安全边界](runtime-security_zh.md)
+- [Adapter 验收](adapter-conformance_zh.md)
 
 ## 定位
 

@@ -1,5 +1,7 @@
 # ACP v1 接入决策
 
+[English](acp-v1-decision.md)
+
 关联架构：[COSH Gateway 与 ACP 架构](README_zh.md)
 
 ## 决策

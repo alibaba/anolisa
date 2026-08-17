@@ -1,5 +1,7 @@
 # Rust 1.88 工具链决策
 
+[English](rust-1.88-decision.md)
+
 关联架构：[COSH Gateway 与 ACP 架构](README_zh.md)
 
 ## 背景
