@@ -6,7 +6,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Callable, final
 
-from ..registry import safe_hook_wrapper
+from ..registry import _collect_transform_hook, safe_hook_wrapper
 
 logger = logging.getLogger("agent-sec-core")
 
@@ -45,7 +45,13 @@ class AgentSecCoreCapability(ABC):
         self._on_register(config)
         for hook_name, callback_func in self.get_hooks_define().items():
             wrapper_func = safe_hook_wrapper(callback_func, self.id)
-            ctx.register_hook(hook_name, wrapper_func)
+            if hook_name == "transform_llm_output":
+                # Collect for single composed registration (Hermes applies
+                # transform_llm_output with "first non-empty wins", which would
+                # let one capability's warning silently drop another's).
+                _collect_transform_hook(self.id, wrapper_func)
+            else:
+                ctx.register_hook(hook_name, wrapper_func)
 
     @abstractmethod
     def _on_register(self, config: dict) -> None:
