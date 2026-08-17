@@ -4,7 +4,19 @@ All notable changes to the cosh-ng project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.17.0] — Unreleased
+## [Unreleased]
+
+## [0.17.0] — 2026-08-17
+
+### Added
+- Interactive disambiguation panel for `/hooks enable|disable <id>` when the hook id exists in both shell and agent layers, letting users choose to toggle the shell hook, the agent hook, or both (#2400)
+
+### Changed
+- Skip redundant history processing during idle polling so long-running interactive sessions no longer repeat history-sized work while idle (#2546)
+
+### Fixed
+- Reject hook output with an explicit `"decision": null` as invalid hook output: the tool call is blocked by default, or passes through with a recorded `hook_failure` notice when the hook sets `fail_open = true`; emitting `{}` remains valid pass-through (#2529)
+- Report `cosh pkg install/remove --dry-run` success on dnf-based systems instead of returning a backend error for installable or removable packages (#2605)
 
 ## [0.16.1] — 2026-08-14
 

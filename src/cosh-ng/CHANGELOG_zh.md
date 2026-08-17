@@ -4,7 +4,19 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，并遵循 [Semantic Versioning](https://semver.org/spec/v2.0.0.html)。
 
-## [0.17.0] — 未发布
+## [未发布]
+
+## [0.17.0] — 2026-08-17
+
+### 新功能
+- 当 hook id 同时存在于 shell 层与 agent 层时，`/hooks enable|disable <id>` 弹出交互式消歧面板，可选择切换 Shell hook、Agent hook 或两者 (#2400)
+
+### 变更
+- 空闲轮询时跳过冗余的历史事件处理，长时间运行的交互会话不再在空闲时重复执行与历史事件规模相当的工作 (#2546)
+
+### 修复
+- 修复 hook 输出显式 `"decision": null` 被当作透传的问题：现视为无效 hook 输出并默认拦截对应工具调用；若 hook 配置 `fail_open = true` 则放行但记录 `hook_failure` 通知；输出 `{}` 仍为合法透传 (#2529)
+- 修复 dnf 系统上 `cosh pkg install/remove --dry-run` 将可安装/可移除软件包的成功模拟误报为后端错误的问题 (#2605)
 
 ## [0.16.1] — 2026-08-14
 
