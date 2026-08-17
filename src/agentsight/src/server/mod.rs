@@ -271,6 +271,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(enforcement::apply_binding)
                 .service(enforcement::apply_file_binding)
                 .service(enforcement::apply_credential_binding)
+                .service(enforcement::preview_agent_protection)
                 .service(enforcement::list_bindings)
                 .service(enforcement::detach_binding)
                 .service(enforcement::list_violations)

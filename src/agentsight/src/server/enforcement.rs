@@ -1,8 +1,7 @@
 //! HTTP boundary for local enforcement control and evidence queries.
 
-#[cfg(test)]
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use actix_web::{HttpResponse, delete, get, post, web};
@@ -10,7 +9,7 @@ use agentsight_enforcement_protocol::{
     ApplyCredentialPolicy, ApplyPolicy, Binding, BindingState, CredentialExfiltrationPolicy,
     DestinationScope, HealthStatus, PolicyMode,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -43,12 +42,128 @@ pub(super) struct CredentialBindingRequest {
     agent_id: String,
     session_id: Option<String>,
     root_pid: i32,
-    source_path: PathBuf,
+    source_path: Option<PathBuf>,
+    #[serde(default)]
+    source_paths: Vec<PathBuf>,
     trusted_endpoint: Option<String>,
+    #[serde(default)]
+    trusted_endpoints: Vec<String>,
     revision: u64,
     mode: PolicyMode,
     taint_ttl_secs: Option<u64>,
     destination_scope: DestinationScope,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ProtectionPreviewQuery {
+    directory: Option<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProtectionPreview {
+    agent_id: String,
+    root_pid: u32,
+    workspace_path: String,
+    source_paths: Vec<String>,
+    trusted_endpoints: Vec<String>,
+    mode: PolicyMode,
+    max_trusted_endpoints: usize,
+}
+
+/// Returns safe, content-free defaults for the Agent-card protection action.
+#[get("/enforcement/agent-protection/{pid}")]
+pub(super) async fn preview_agent_protection(
+    data: web::Data<AppState>,
+    pid: web::Path<u32>,
+    query: web::Query<ProtectionPreviewQuery>,
+) -> HttpResponse {
+    let pid = pid.into_inner();
+    let agent = data.health_store.read().ok().and_then(|store| {
+        store
+            .all_agents()
+            .into_iter()
+            .find(|agent| agent.pid == pid)
+    });
+    let Some(agent) = agent else {
+        return error_response(
+            actix_web::http::StatusCode::NOT_FOUND,
+            "agent_not_found",
+            "agent process was not found",
+            false,
+        );
+    };
+    let Some(workspace) = agent.workspace_path.as_deref().map(PathBuf::from) else {
+        return error_response(
+            actix_web::http::StatusCode::CONFLICT,
+            "workspace_unavailable",
+            "agent workspace is unavailable",
+            true,
+        );
+    };
+    let root = query.directory.as_deref().unwrap_or(&workspace);
+    let root = match root.canonicalize() {
+        Ok(root) if root.is_dir() => root,
+        _ => {
+            return error_response(
+                actix_web::http::StatusCode::BAD_REQUEST,
+                "invalid_protection_directory",
+                "protection directory must be an existing directory",
+                false,
+            );
+        }
+    };
+    let source_paths = discover_sensitive_files(&root, 3, 64);
+    HttpResponse::Ok().json(ProtectionPreview {
+        agent_id: agent.agent_name,
+        root_pid: pid,
+        workspace_path: root.to_string_lossy().into_owned(),
+        source_paths,
+        trusted_endpoints: Vec::new(),
+        mode: PolicyMode::Audit,
+        max_trusted_endpoints: 1,
+    })
+}
+
+fn discover_sensitive_files(root: &Path, max_depth: usize, limit: usize) -> Vec<String> {
+    fn visit(root: &Path, depth: usize, max_depth: usize, limit: usize, out: &mut Vec<String>) {
+        if depth > max_depth || out.len() >= limit {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if out.len() >= limit {
+                break;
+            }
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if path.is_dir() {
+                if !matches!(
+                    name.as_ref(),
+                    ".git" | "node_modules" | "target" | "dist" | "build" | ".cache"
+                ) {
+                    visit(&path, depth + 1, max_depth, limit, out);
+                }
+            } else if path.is_file()
+                && (name == ".env"
+                    || name.starts_with(".env.")
+                    || name.contains("credential")
+                    || name == ".npmrc"
+                    || name == ".pypirc"
+                    || name.starts_with("id_rsa")
+                    || name.starts_with("id_ed25519"))
+            {
+                out.push(path.to_string_lossy().into_owned());
+            }
+        }
+    }
+    let mut files = Vec::new();
+    visit(root, 0, max_depth, limit, &mut files);
+    files.sort();
+    files.dedup();
+    files
 }
 
 /// Returns privileged backend readiness.
@@ -332,24 +447,46 @@ fn build_credential_binding(
     if agent_id.is_empty() || agent_id.len() > 128 {
         return Err("agent_id must contain 1 to 128 characters".into());
     }
-    let source_path =
-        canonical_policy_file(&request.source_path).map_err(|error| error.to_string())?;
-    let source_path = source_path
-        .to_str()
-        .ok_or_else(|| "source_path must be valid UTF-8".to_string())?
-        .to_string();
+    let mut requested_sources = request.source_paths;
+    if let Some(source_path) = request.source_path {
+        requested_sources.push(source_path);
+    }
+    if requested_sources.is_empty() {
+        return Err("at least one source path is required".into());
+    }
+    let mut source_patterns = requested_sources
+        .iter()
+        .map(|path| canonical_policy_file(path).map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|path| {
+            path.to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "source paths must be valid UTF-8".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    source_patterns.sort();
+    source_patterns.dedup();
     let process_start_time =
         read_process_start_time(request.root_pid).map_err(|error| error.to_string())?;
-    let trusted_endpoints = request
-        .trusted_endpoint
+    let mut trusted_endpoints = request.trusted_endpoints;
+    if let Some(endpoint) = request.trusted_endpoint {
+        trusted_endpoints.push(endpoint);
+    }
+    trusted_endpoints = trusted_endpoints
+        .into_iter()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .into_iter()
         .collect();
+    trusted_endpoints.sort();
+    trusted_endpoints.dedup();
+    if trusted_endpoints.len() > 1 {
+        return Err("the current runtime supports at most one trusted network target".into());
+    }
     let policy = CredentialExfiltrationPolicy {
         policy_id: "agentsight-credential-exfiltration".into(),
         revision: request.revision,
-        source_patterns: vec![source_path],
+        source_patterns,
         trusted_endpoints,
         taint_label: "CREDENTIAL".into(),
         taint_ttl_secs: request.taint_ttl_secs.unwrap_or(900),
@@ -556,8 +693,10 @@ mod tests {
             agent_id: " qoder ".into(),
             session_id: Some(" session-1 ".into()),
             root_pid: child.id() as i32,
-            source_path: path.clone(),
+            source_path: Some(path.clone()),
+            source_paths: Vec::new(),
             trusted_endpoint: Some(" 10.0.0.8 ".into()),
+            trusted_endpoints: Vec::new(),
             revision: 3,
             mode: PolicyMode::Audit,
             taint_ttl_secs: None,
@@ -581,6 +720,64 @@ mod tests {
             [path.canonicalize().unwrap().to_str().unwrap()]
         );
 
+        child.kill().expect("fixture process should stop");
+        child.wait().expect("fixture process should exit");
+        fs::remove_file(path).expect("fixture file should be removed");
+    }
+
+    #[test]
+    fn discovers_workspace_sensitive_files_without_dependency_noise() {
+        let directory =
+            std::env::temp_dir().join(format!("agentsight-protection-{}", Uuid::new_v4()));
+        let nested = directory.join("config");
+        let dependency = directory.join("node_modules/package");
+        fs::create_dir_all(&nested).expect("fixture directory should exist");
+        fs::create_dir_all(&dependency).expect("dependency directory should exist");
+        fs::write(directory.join(".env"), b"fixture").expect("env fixture should exist");
+        fs::write(nested.join("service-credential.json"), b"fixture")
+            .expect("credential fixture should exist");
+        fs::write(dependency.join("credential.json"), b"fixture")
+            .expect("dependency fixture should exist");
+        fs::write(directory.join("README.md"), b"fixture").expect("ordinary fixture should exist");
+
+        let discovered = discover_sensitive_files(&directory, 3, 64);
+
+        assert_eq!(discovered.len(), 2);
+        assert!(discovered.iter().any(|path| path.ends_with("/.env")));
+        assert!(
+            discovered
+                .iter()
+                .any(|path| path.ends_with("/config/service-credential.json"))
+        );
+        assert!(discovered.iter().all(|path| !path.contains("node_modules")));
+        fs::remove_dir_all(directory).expect("fixture directory should be removed");
+    }
+
+    #[test]
+    fn rejects_more_trusted_targets_than_the_runtime_supports() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("fixture process should start");
+        let path = std::env::temp_dir().join(format!("agentsight-credential-{}", Uuid::new_v4()));
+        fs::write(&path, b"fixture").expect("fixture file should exist");
+
+        let error = build_credential_binding(CredentialBindingRequest {
+            agent_id: "qoder".into(),
+            session_id: None,
+            root_pid: child.id() as i32,
+            source_path: None,
+            source_paths: vec![path.clone()],
+            trusted_endpoint: None,
+            trusted_endpoints: vec!["10.0.0.8:443".into(), "10.0.0.9:443".into()],
+            revision: 1,
+            mode: PolicyMode::Audit,
+            taint_ttl_secs: None,
+            destination_scope: DestinationScope::PublicIpv4,
+        })
+        .expect_err("multiple trusted targets must be rejected explicitly");
+
+        assert!(error.contains("at most one trusted network target"));
         child.kill().expect("fixture process should stop");
         child.wait().expect("fixture process should exit");
         fs::remove_file(path).expect("fixture file should be removed");

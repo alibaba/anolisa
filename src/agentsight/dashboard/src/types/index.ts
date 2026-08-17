@@ -186,6 +186,8 @@ export interface AgentHealthStatus {
   agent_name: string;
   category: string;
   exe_path: string;
+  /** Agent 进程当前工作目录，用作安全保护默认范围 */
+  workspace_path?: string;
   ports: number[];
   status: 'healthy' | 'unhealthy' | 'hung' | 'unknown' | 'no_port' | 'offline';
   last_check_time: number;
