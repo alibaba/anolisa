@@ -274,19 +274,36 @@ const CONF_CLS: Record<string, string> = {
   低: 'bg-gray-100 text-gray-500',
 };
 
-/** 经验条目的可复制文本 —— 直接贴进 Skill / 规范文件。 */
+/**
+ * 经验条目的可复制文本 —— 直接贴进 Skill / 规范文件。
+ *
+ * 两路分组呈现：失败教训（要绕开什么）与成功经验（可照搬什么）。playbook 常为空，
+ * 缺了不占篇幅。旧 payload 两路都是 undefined，返回空串，展开区不渲染经验块。
+ */
 function experienceText(it: WasteItem): string {
   const e = it.experience;
   if (!e) return '';
-  const lines: string[] = [];
-  if (e.applicability) lines.push(`适用场景：${e.applicability}`);
-  if (e.pitfall) lines.push(`错误做法：${e.pitfall}`);
-  if (e.effective_path) lines.push(`正确做法：${e.effective_path}`);
-  if (e.rule) lines.push(`约定：${e.rule}`);
-  if (e.bad_example) lines.push(`反例：${e.bad_example}`);
-  if (e.good_example) lines.push(`正例：${e.good_example}`);
-  if (e.scope) lines.push(`适用范围：${e.scope}`);
-  return lines.join('\n');
+  const blocks: string[] = [];
+
+  const lesson = e.failure_lesson;
+  if (lesson?.instead) {
+    const lines = ['【失败教训】'];
+    if (lesson.title) lines.push(lesson.title);
+    if (lesson.when) lines.push(`触发场景：${lesson.when}`);
+    lines.push(`规避：${lesson.instead}`);
+    blocks.push(lines.join('\n'));
+  }
+
+  const playbook = e.success_playbook;
+  if (playbook?.how) {
+    const lines = ['【成功经验】'];
+    if (playbook.title) lines.push(playbook.title);
+    if (playbook.when) lines.push(`适用场景：${playbook.when}`);
+    lines.push(`做法：${playbook.how}`);
+    blocks.push(lines.join('\n'));
+  }
+
+  return blocks.join('\n\n');
 }
 
 /** 优化提示词 —— 有经验用经验全文；token 浪费类无 experience 字段，由现象/手段/证据合成。 */

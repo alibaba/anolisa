@@ -186,15 +186,27 @@ export interface CostStats {
   headroom?: CostHeadroom;
 }
 
-/** 可复用经验：试错型填 applicability/pitfall/effective_path，返工型填 rule/example/scope。 */
+/** 失败教训：要绕开的坑 + 明确的规避动作。 */
+export interface ExperienceLesson {
+  title?: string;
+  when?: string;
+  instead?: string;
+}
+
+/** 成功经验：取自走通的回合、可照搬的做法。 */
+export interface ExperiencePlaybook {
+  title?: string;
+  when?: string;
+  how?: string;
+}
+
+/**
+ * 可复用经验两路。failure_lesson 必有（后端丢弃缺它的 finding），success_playbook 可缺。
+ * 旧 cost_waste payload 用的是扁平形状，两路会是 undefined —— 重跑分析即恢复。
+ */
 export interface WasteExperience {
-  applicability?: string;
-  pitfall?: string;
-  effective_path?: string;
-  rule?: string;
-  good_example?: string;
-  bad_example?: string;
-  scope?: string;
+  failure_lesson?: ExperienceLesson | null;
+  success_playbook?: ExperiencePlaybook | null;
   defect_type?: string;
   root_cause?: string;
   fix_locus?: string;

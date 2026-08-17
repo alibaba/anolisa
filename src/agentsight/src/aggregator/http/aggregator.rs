@@ -448,9 +448,14 @@ impl HttpConnectionAggregator {
         // the first block), so fall back to whole-buffer decoding, which
         // still handles the closed-frame case.
         let decoder_output = zstd_decoder.map(|d| d.borrow_mut().decoded_output());
+        // Lossy: an SSE stream is decoded whenever the connection is finalized,
+        // which is routinely *before* the server closed it (idle timeout, LRU
+        // eviction, process exit). Strict decoding discards the whole body on the
+        // resulting mid-frame EOF, losing every event; the decoded prefix holds
+        // all events up to the cut.
         let decompressed = match decoder_output {
             Some(out) if !out.is_empty() => out,
-            _ => crate::utils::decompress::decompress_body(&body, content_encoding),
+            _ => crate::utils::decompress::decompress_body_lossy(&body, content_encoding),
         };
         let synthetic = std::rc::Rc::new(SslEvent {
             source: src.source,
@@ -467,6 +472,21 @@ impl HttpConnectionAggregator {
             ssl_ptr: src.ssl_ptr,
         });
         SseParser::new().parse(synthetic)
+    }
+
+    /// Whether a buffered compressed SSE body has reached its end marker.
+    ///
+    /// Only chunked responses carry an in-band terminator. Applying the chunk
+    /// walker to a body framed any other way (HTTP/2 DATA frames, or
+    /// connection-close framing) reads compressed bytes as hex chunk-size
+    /// lines: it then never reports completion, so the stream is only ever
+    /// finalized by a passive path — and it can even report completion by
+    /// chance, cutting the body short. Non-chunked streams therefore finalize
+    /// on connection close / idle timeout, which `decode_compressed_sse` now
+    /// decodes lossily so a mid-stream cut still yields its events.
+    fn compressed_sse_complete(response_headers: &ParsedResponse, buf: &[u8]) -> bool {
+        Self::is_chunked_response(response_headers)
+            && crate::utils::decompress::chunked_stream_complete(buf)
     }
 
     /// Whether a response declares chunked transfer-encoding.
@@ -605,7 +625,7 @@ impl HttpConnectionAggregator {
                         Self::sse_entry_state(&response_headers);
                     response_headers.body_len = 0;
                     if let Some(buf) = &compressed_buffer {
-                        if crate::utils::decompress::chunked_stream_complete(buf) {
+                        if Self::compressed_sse_complete(&response_headers, buf) {
                             return Some(Self::finish_compressed_sse(
                                 connection_id,
                                 Some(completed_request),
@@ -646,7 +666,7 @@ impl HttpConnectionAggregator {
                     response_headers.body_len = 0;
                     // Transition to SSE active state, wait for SSE events
                     if let Some(buf) = &compressed_buffer {
-                        if crate::utils::decompress::chunked_stream_complete(buf) {
+                        if Self::compressed_sse_complete(&response_headers, buf) {
                             return Some(Self::finish_compressed_sse(
                                 connection_id,
                                 Some(request),
@@ -694,7 +714,7 @@ impl HttpConnectionAggregator {
                         Self::sse_entry_state(&response_headers);
                     response_headers.body_len = 0;
                     if let Some(buf) = &compressed_buffer {
-                        if crate::utils::decompress::chunked_stream_complete(buf) {
+                        if Self::compressed_sse_complete(&response_headers, buf) {
                             return Some(Self::finish_compressed_sse(
                                 connection_id,
                                 None,
@@ -833,7 +853,7 @@ impl HttpConnectionAggregator {
                         zstd_decoder,
                     ));
                 }
-                if crate::utils::decompress::chunked_stream_complete(&buf) {
+                if Self::compressed_sse_complete(&response_headers, &buf) {
                     Some(Self::finish_compressed_sse(
                         connection_id,
                         request,
@@ -1050,6 +1070,23 @@ impl HttpConnectionAggregator {
         matches!(
             self.connections.peek(connection_id),
             Some(ConnectionState::SseActive { .. })
+        )
+    }
+
+    /// Whether this connection is an SSE stream whose body is compressed, i.e.
+    /// one whose bytes are buffered for decoding at completion rather than
+    /// parsed live.
+    ///
+    /// The parser cannot know this — it is stateless and sees a single read at a
+    /// time — so callers use this to decide that a read belongs in the
+    /// compressed buffer regardless of how the parser classified it.
+    pub fn is_compressed_sse(&self, connection_id: &ConnectionId) -> bool {
+        matches!(
+            self.connections.peek(connection_id),
+            Some(ConnectionState::SseActive {
+                compressed_buffer: Some(_),
+                ..
+            })
         )
     }
 

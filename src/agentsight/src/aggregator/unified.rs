@@ -10,6 +10,8 @@ use super::result::AggregatedResult;
 use crate::chrome_trace::export_trace_events;
 use crate::config::{DEFAULT_CONNECTION_CAPACITY, RuntimeLimits};
 use crate::parser::{ParseResult, ParsedMessage};
+use crate::probes::sslsniff::SslEvent;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 /// Unified aggregator for all event types
@@ -94,6 +96,52 @@ impl Aggregator {
         }
     }
 
+    /// Send compressed-SSE reads to the raw-data path.
+    ///
+    /// A compressed SSE body is binary, but the SSE parser is lenient enough to
+    /// occasionally "parse" an event out of those bytes. Such an event carries no
+    /// usable data and, worse, its source bytes then never reach the connection's
+    /// compressed buffer — leaving a buffer holding only the first chunk, which
+    /// decodes to nothing. Route the read to the raw-data path instead, which is
+    /// where compressed bytes are accumulated.
+    ///
+    /// Rewriting here rather than per message is what makes this safe: one read
+    /// can yield several SSE events, and the buffer must grow by that read's
+    /// bytes exactly once. Every event in a `ParseResult` shares one source
+    /// `Rc`, so pointer identity separates reads without the address-reuse
+    /// hazard a cache keyed across reads would have.
+    fn reroute_compressed_sse(&self, messages: Vec<ParsedMessage>) -> Vec<ParsedMessage> {
+        if !messages
+            .iter()
+            .any(|m| matches!(m, ParsedMessage::SseEvent(_)))
+        {
+            return messages;
+        }
+
+        let mut out = Vec::with_capacity(messages.len());
+        let mut rerouted_src: Option<*const SslEvent> = None;
+        for msg in messages {
+            match msg {
+                ParsedMessage::SseEvent(event) => {
+                    let conn_id = ConnectionId::from_ssl_event(event.source_event());
+                    if !self.http.is_compressed_sse(&conn_id) {
+                        out.push(ParsedMessage::SseEvent(event));
+                        continue;
+                    }
+                    let src = event.source_event_rc();
+                    let ptr = Rc::as_ptr(&src);
+                    if rerouted_src == Some(ptr) {
+                        continue; // same read, already forwarded
+                    }
+                    rerouted_src = Some(ptr);
+                    out.push(ParsedMessage::RawData(src));
+                }
+                other => out.push(other),
+            }
+        }
+        out
+    }
+
     /// Process parse result
     pub fn process_result(&mut self, result: ParseResult) -> Vec<AggregatedResult> {
         log::trace!(
@@ -116,8 +164,8 @@ impl Aggregator {
             self.last_eviction = now;
         }
 
-        let results: Vec<AggregatedResult> = result
-            .messages
+        let results: Vec<AggregatedResult> = self
+            .reroute_compressed_sse(result.messages)
             .into_iter()
             .flat_map(|msg| self.process_message(msg))
             .collect();

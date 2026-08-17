@@ -64,12 +64,12 @@ fn read_capped<R: Read>(mut reader: R, raw: &[u8], codec: &str) -> Vec<u8> {
 ///
 /// (Brotli has no reliable magic prefix, so it is only used when the header
 /// explicitly says `br`.)
-pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
+/// Resolve the codec to use: trust the header for known codecs, otherwise fall
+/// back to magic-byte sniffing (HTTP/2 responses can't always resolve
+/// `Content-Encoding` from the HPACK dynamic table).
+fn effective_encoding(body: &[u8], content_encoding: Option<&str>) -> Option<String> {
     let encoding = content_encoding.map(|e| e.trim().to_lowercase());
-
-    // Resolve the effective encoding: trust the header for known codecs,
-    // otherwise fall back to magic-byte sniffing.
-    let effective_encoding = match encoding.as_deref() {
+    match encoding.as_deref() {
         Some("gzip") | Some("x-gzip") | Some("deflate") | Some("zstd") | Some("br") => encoding,
         _ => {
             if body.len() >= 2 && body[0] == 0x1f && body[1] == 0x8b {
@@ -86,7 +86,11 @@ pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
                 encoding
             }
         }
-    };
+    }
+}
+
+pub fn decompress_body(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
+    let effective_encoding = effective_encoding(body, content_encoding);
 
     match effective_encoding.as_deref() {
         Some("gzip") | Some("x-gzip") => {
@@ -274,8 +278,102 @@ impl ZstdStreamDecoder {
     }
 }
 
-/// Strip HTTP chunked transfer-encoding framing, returning the concatenated
-/// chunk data (binary-safe). Stops at the terminating zero-size chunk. On
+/// A capped `Write` sink. Refusing further writes past the cap is what stops a
+/// decompression bomb: the decoder sees an error and gives up, and we keep the
+/// bounded prefix it already produced.
+struct CappedSink<'a> {
+    out: &'a mut Vec<u8>,
+    cap: usize,
+}
+
+impl std::io::Write for CappedSink<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let remaining = self.cap.saturating_sub(self.out.len());
+        if remaining == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "decompressed output cap reached",
+            ));
+        }
+        let take = buf.len().min(remaining);
+        self.out.extend_from_slice(&buf[..take]);
+        Ok(take)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Decompress, keeping whatever decoded before the input ran out.
+///
+/// `decompress_body` throws away the entire result when the decoder errors, so
+/// a body captured mid-stream (the normal case for a still-open SSE response,
+/// or one finalized by an idle timeout) yields nothing at all and the call is
+/// recorded with an empty response. Streaming decoders emit plaintext as they
+/// consume input, so the prefix before the truncation point is perfectly good —
+/// for an SSE stream that is nearly every event, missing only the tail.
+///
+/// Falls back to `body` only when nothing at all could be decoded, matching
+/// `decompress_body`'s graceful-degradation contract.
+pub fn decompress_body_lossy(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
+    use std::io::Write;
+
+    let encoding = effective_encoding(body, content_encoding);
+    let codec = match encoding.as_deref() {
+        Some(c @ ("gzip" | "x-gzip" | "deflate" | "zstd" | "br")) => c,
+        _ => return body.to_vec(),
+    };
+
+    let mut out = Vec::new();
+    {
+        let sink = CappedSink {
+            out: &mut out,
+            cap: MAX_DECOMPRESSED_LEN,
+        };
+        // Errors are expected here (that is the point) — a truncated frame ends
+        // in one. Whatever reached the sink first is kept.
+        match codec {
+            "gzip" | "x-gzip" => {
+                let mut d = flate2::write::GzDecoder::new(sink);
+                let _ = d.write_all(body);
+                let _ = d.try_finish();
+            }
+            "deflate" => {
+                let mut d = flate2::write::DeflateDecoder::new(sink);
+                let _ = d.write_all(body);
+                let _ = d.try_finish();
+            }
+            "zstd" => match zstd::stream::write::Decoder::new(sink) {
+                Ok(mut d) => {
+                    let _ = d.write_all(body);
+                    let _ = d.flush();
+                }
+                Err(e) => log::debug!("zstd streaming decoder init failed ({e:?})"),
+            },
+            "br" => {
+                let mut d = brotli::DecompressorWriter::new(sink, 4096);
+                let _ = d.write_all(body);
+                let _ = d.flush();
+            }
+            _ => unreachable!("codec matched above"),
+        }
+    }
+
+    if out.is_empty() {
+        return body.to_vec();
+    }
+    if out.len() < body.len() {
+        log::debug!(
+            "{codec} stream truncated: recovered {} bytes of plaintext from {} compressed bytes",
+            out.len(),
+            body.len(),
+        );
+    }
+    out
+}
+
+/// Strip HTTP chunked transfer-encoding framing, returning the concatenated/// chunk data (binary-safe). Stops at the terminating zero-size chunk. On
 /// malformed or incomplete input, returns whatever was decoded so far.
 ///
 /// Needed for compressed SSE streams: the raw bytes look like
@@ -382,6 +480,81 @@ pub fn decompress_body_to_string(body: &[u8], content_encoding: Option<&str>) ->
 mod tests {
     use super::*;
     use std::io::Write;
+
+    // ─── Truncated streams (the 0.5% response-capture bug) ────────────────────
+    // A compressed SSE body captured while the stream is still open — or
+    // finalized by an idle timeout — ends mid-frame. `decompress_body` discards
+    // everything in that case; `decompress_body_lossy` keeps the prefix.
+
+    /// Build a zstd SSE stream the way a server flushes it: one frame per event.
+    fn zstd_sse_stream(events: &[&str]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for e in events {
+            out.extend_from_slice(&zstd::encode_all(e.as_bytes(), 3).unwrap());
+        }
+        out
+    }
+
+    #[test]
+    fn lossy_recovers_events_from_a_truncated_zstd_stream() {
+        let events = [
+            "event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
+            "event: content_block_delta\ndata: {\"delta\":{\"text\":\"hello\"}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ];
+        let full = zstd_sse_stream(&events);
+        // Cut inside the last frame: exactly what a mid-stream capture looks like.
+        let truncated = &full[..full.len() - 12];
+
+        let strict = decompress_body(truncated, Some("zstd"));
+        assert_eq!(
+            strict, truncated,
+            "precondition: the strict decoder gives up and returns raw compressed bytes",
+        );
+
+        let lossy = decompress_body_lossy(truncated, Some("zstd"));
+        let text = String::from_utf8_lossy(&lossy);
+        assert!(text.contains("message_start"), "got: {text:?}");
+        assert!(
+            text.contains("hello"),
+            "the delta before the cut must survive"
+        );
+    }
+
+    #[test]
+    fn lossy_matches_strict_on_a_complete_stream() {
+        let full = zstd_sse_stream(&["data: one\n\n", "data: two\n\n"]);
+        assert_eq!(
+            decompress_body_lossy(&full, Some("zstd")),
+            decompress_body(&full, Some("zstd")),
+            "no behaviour change when nothing is truncated",
+        );
+    }
+
+    #[test]
+    fn lossy_recovers_prefix_from_a_truncated_gzip_body() {
+        let plain = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi there\"}}]}\n\n";
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(plain).unwrap();
+        let full = enc.finish().unwrap();
+        let truncated = &full[..full.len() - 8]; // drop the gzip trailer
+
+        assert_eq!(decompress_body(truncated, Some("gzip")), truncated);
+        let lossy = decompress_body_lossy(truncated, Some("gzip"));
+        assert!(
+            String::from_utf8_lossy(&lossy).contains("hi there"),
+            "gzip prefix must survive a missing trailer",
+        );
+    }
+
+    #[test]
+    fn lossy_falls_back_to_raw_when_nothing_decodes() {
+        let garbage = b"\x28\xb5\x2f\xfdnot really zstd";
+        assert_eq!(decompress_body_lossy(garbage, Some("zstd")), garbage);
+        let plain = b"data: hello\n\n";
+        assert_eq!(decompress_body_lossy(plain, None), plain);
+        assert_eq!(decompress_body_lossy(plain, Some("identity")), plain);
+    }
 
     #[test]
     fn zstd_decompresses_by_header() {

@@ -862,30 +862,47 @@ pub struct TurnLedgerRow {
     pub say_head: String,
 }
 
+/// 失败教训 —— 要绕开的坑，配一句明确的规避动作。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExperienceLesson {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    /// 触发场景。填不出场景的条目是一次性细节，不该沉淀。
+    #[serde(default, rename = "when", skip_serializing_if = "String::is_empty")]
+    pub when_: String,
+    /// 规避动作，必须同时给出"别这么做"与"改这么做" —— 说不清怎么避免的失败是死记录。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instead: String,
+}
+
+/// 成功经验 —— 取自走通的回合、可照搬的有效做法。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExperiencePlaybook {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    /// 适用场景。同 [`ExperienceLesson::when_`]。
+    #[serde(default, rename = "when", skip_serializing_if = "String::is_empty")]
+    pub when_: String,
+    /// 可执行的「这么做」。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub how: String,
+}
+
 /// A reusable lesson distilled from a prevention-class waste finding.
 ///
-/// Two shapes share one struct: 试错型 fills applicability/pitfall/effective_path,
-/// 返工型 fills rule/good_example/bad_example/scope. Empty fields are omitted so
-/// the frontend renders whichever shape came back.
+/// 两路独立存在：`failure_lesson`（失败教训）是必要条件 —— 报一段弯路就得说清那个坑，
+/// 缺了整条 finding 不报；`success_playbook`（成功经验）可缺 —— 坑是环境抖动时，走通的
+/// 回合沉淀不出可复用做法，宁缺毋滥。
+///
+/// 历史 `cost_waste` payload 用的是旧的扁平形状（applicability/pitfall/…）。两路
+/// 字段均为 `default`，旧 JSON 反序列化后两路为 `None` 而非报错；重跑一次分析即恢复。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WasteExperience {
-    // ── 试错型 ──
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub applicability: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub pitfall: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub effective_path: String,
-    // ── 返工型 ──
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub rule: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub good_example: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub bad_example: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub scope: String,
-    // ── 共用：五字段归因（本期只进 JSON，不渲染）──
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_lesson: Option<ExperienceLesson>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success_playbook: Option<ExperiencePlaybook>,
+    // ── 五字段归因（本期只进 JSON，不渲染）──
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub defect_type: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -895,7 +912,7 @@ pub struct WasteExperience {
 }
 
 /// One remediation attached to a detour finding — where to land the lesson
-/// and the paste-ready experience fields backing it.
+/// and the two experience tracks backing it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DetourFix {
     /// 一句话可执行修复动作 (→ WasteItem.optimization).
@@ -904,12 +921,12 @@ pub struct DetourFix {
     /// 落点: Skill / 项目规范 / 系统提示词 / 环境配置 / 框架配置.
     #[serde(default)]
     pub locus: String,
+    /// 失败教训。缺失时整条 finding 不报。
     #[serde(default)]
-    pub applicability: String,
+    pub failure_lesson: Option<ExperienceLesson>,
+    /// 成功经验。允许缺失。
     #[serde(default)]
-    pub pitfall: String,
-    #[serde(default)]
-    pub effective_path: String,
+    pub success_playbook: Option<ExperiencePlaybook>,
 }
 
 /// One detour segment reported by the detour prompt.

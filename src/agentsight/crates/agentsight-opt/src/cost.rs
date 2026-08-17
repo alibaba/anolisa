@@ -939,8 +939,7 @@ fn trunc_head_tail(raw: &str, head_chars: usize, tail_chars: usize) -> String {
 
 /// Build the 轮次账本: one structured row per agent turn, **unfiltered**.
 ///
-/// Deciding which turns were wasted is a semantic call
-/// (`prompts/waste_detour.md`);
+/// Deciding which turns were wasted is a semantic call (`prompts/detour.md`);
 /// filtering here would cap recall at whatever keywords Rust knows about. Rust
 /// only supplies the structure and, later, the token math behind the verdict.
 pub(crate) fn build_turn_ledger(

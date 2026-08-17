@@ -152,6 +152,13 @@ impl ParsedSseEvent {
     pub fn source_event(&self) -> &SslEvent {
         &self.source_event
     }
+
+    /// Share the source read. Lets a consumer hand the original bytes to
+    /// another path (e.g. re-routing a compressed chunk that only *looked*
+    /// like an SSE event) without copying them.
+    pub fn source_event_rc(&self) -> Rc<SslEvent> {
+        Rc::clone(&self.source_event)
+    }
 }
 
 impl fmt::Debug for ParsedSseEvent {

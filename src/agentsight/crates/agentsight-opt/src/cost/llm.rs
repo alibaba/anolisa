@@ -265,7 +265,10 @@ async fn judge_detour(
 ///    deterministic backstop.
 /// 3. **归因-产出一致性**: 偶发故障 must not carry a fix（随机故障没有可提炼
 ///    的因果）——a fabricated one is stripped rather than trusted.
-/// 4. **Confidence is pinned to 低** for single-trajectory evidence. Raising it
+/// 4. **失败教训必填**: a finding whose fix carries no `lesson` is dropped
+///    entirely — 说不清怎么避免的失败是死记录。偶发故障 is exempt because rule 3
+///    already stripped its experience, and the detour itself is still real.
+/// 5. **Confidence is pinned to 低** for single-trajectory evidence. Raising it
 ///    needs cross-trajectory recurrence, which has no store yet (see the
 ///    experience-library TODO).
 fn expand_detour_items(
@@ -291,8 +294,11 @@ fn expand_detour_items(
             continue;
         }
         // 偶发故障 carries no distillable causality — enforce fix = None even
-        // when the model fabricated one.
-        let fix = if f.why == "偶发故障" {
+        // when the model fabricated one. This runs *before* the lesson gate
+        // below: the detour itself is real and still gets reported, it just
+        // carries no experience.
+        let transient = f.why == "偶发故障";
+        let fix = if transient {
             if f.fix.is_some() {
                 tracing::warn!("Cost: 偶发故障 finding 带了 fix，已剥除：{}", f.what);
             }
@@ -300,10 +306,24 @@ fn expand_detour_items(
         } else {
             &f.fix
         };
+
+        // 失败教训是报一段弯路的必要条件：说不清那个坑，这条经验就是死记录。
+        // 偶发故障豁免 —— 它按上面的规则本就不带经验。
+        // 空对象（serde 解析为 Default）同样不通过：必须有实质规避动作。
+        if !transient
+            && fix.as_ref().is_none_or(|fx| {
+                fx.failure_lesson
+                    .as_ref()
+                    .is_none_or(|l| l.instead.is_empty())
+            })
+        {
+            tracing::info!("Cost: 弯路 finding 缺失败教训，不报：{}", f.what);
+            continue;
+        }
+
         let experience = fix.as_ref().map(|fx| WasteExperience {
-            applicability: fx.applicability.clone(),
-            pitfall: fx.pitfall.clone(),
-            effective_path: fx.effective_path.clone(),
+            failure_lesson: fx.failure_lesson.clone(),
+            success_playbook: fx.success_playbook.clone(),
             root_cause: f.why.clone(),
             fix_locus: fx.locus.clone(),
             ..Default::default()
@@ -350,7 +370,7 @@ fn expand_detour_items(
 mod tests {
     use super::*;
     use crate::cost::prompts::cost_identification::strategy_for;
-    use crate::types::{DetourFinding, DetourFix};
+    use crate::types::{DetourFinding, DetourFix, ExperienceLesson, ExperiencePlaybook};
 
     fn ledger() -> Vec<TurnLedgerRow> {
         (0..8)
@@ -378,6 +398,22 @@ mod tests {
         }
     }
 
+    fn lesson() -> ExperienceLesson {
+        ExperienceLesson {
+            title: "凭代码阅读推断根因就动手".into(),
+            when_: "形成根因假设准备动手时".into(),
+            instead: "别凭阅读推断即投入实现，改为先用 nm/perf 廉价实测验证".into(),
+        }
+    }
+
+    fn playbook() -> ExperiencePlaybook {
+        ExperiencePlaybook {
+            title: "廉价手段先验证再实施".into(),
+            when_: "任何需要定位二进制符号/性能根因的任务".into(),
+            how: "先用 nm/perf 等廉价手段实测验证".into(),
+        }
+    }
+
     fn finding(turns: Vec<usize>) -> DetourFinding {
         DetourFinding {
             turns,
@@ -387,9 +423,8 @@ mod tests {
             fix: Some(DetourFix {
                 action: "假设验证前置".into(),
                 locus: "Skill".into(),
-                applicability: "形成根因假设准备动手时".into(),
-                pitfall: "凭代码阅读推断即投入实现".into(),
-                effective_path: "先用 nm/perf 等廉价手段实测验证".into(),
+                failure_lesson: Some(lesson()),
+                success_playbook: Some(playbook()),
             }),
         }
     }
@@ -424,7 +459,69 @@ mod tests {
         let exp = rows[0].experience.as_ref().expect("fix maps to experience");
         assert_eq!(exp.fix_locus, "Skill");
         assert_eq!(exp.root_cause, "方向选错");
-        assert_eq!(exp.effective_path, "先用 nm/perf 等廉价手段实测验证");
+        // 两路各自落到自己的结构，不再挤进一个扁平形状。
+        let les = exp.failure_lesson.as_ref().expect("失败教训必有");
+        assert_eq!(les.when_, "形成根因假设准备动手时");
+        assert!(les.instead.contains("别凭阅读推断"));
+        let pb = exp.success_playbook.as_ref().expect("本例有成功经验");
+        assert_eq!(pb.how, "先用 nm/perf 等廉价手段实测验证");
+    }
+
+    /// 成功经验可缺：坑没有可复用的走通路径时，失败教训单独成立。
+    #[test]
+    fn playbook_is_optional_lesson_is_not() {
+        let mut no_pb = finding(vec![0, 1, 2, 3, 4]);
+        no_pb.fix.as_mut().expect("fix present").success_playbook = None;
+        let rows = expand(DetourVerdict {
+            detected: true,
+            findings: vec![no_pb],
+        });
+        assert_eq!(rows.len(), 1, "缺成功经验不影响 finding 成立");
+        let exp = rows[0].experience.as_ref().expect("experience present");
+        assert!(exp.failure_lesson.is_some());
+        assert!(exp.success_playbook.is_none());
+    }
+
+    /// 失败教训是报一段弯路的必要条件：说不清那个坑就整条不报。
+    #[test]
+    fn finding_without_lesson_is_dropped() {
+        let mut no_lesson = finding(vec![0, 1, 2, 3, 4]);
+        no_lesson.fix.as_mut().expect("fix present").failure_lesson = None;
+        let rows = expand(DetourVerdict {
+            detected: true,
+            findings: vec![no_lesson],
+        });
+        assert!(rows.is_empty(), "缺失败教训的 finding 必须不报");
+    }
+
+    /// 历史 cost_waste payload 用的是旧的扁平形状。反序列化必须降级为空而不是报错
+    /// —— 旧结论重跑一次分析即恢复，但读取绝不能 panic。
+    #[test]
+    fn legacy_flat_experience_json_degrades_to_empty() {
+        let legacy = r#"{
+            "applicability": "形成根因假设准备动手时",
+            "pitfall": "凭代码阅读推断即投入实现",
+            "effective_path": "先用 nm/perf 实测验证",
+            "rule": "", "good_example": "", "bad_example": "", "scope": "",
+            "root_cause": "方向选错",
+            "fix_locus": "Skill"
+        }"#;
+        let exp: crate::types::WasteExperience =
+            serde_json::from_str(legacy).expect("旧 payload 必须仍可反序列化");
+        assert!(exp.failure_lesson.is_none());
+        assert!(exp.success_playbook.is_none());
+        // 归因字段未变形状，继续可读。
+        assert_eq!(exp.root_cause, "方向选错");
+        assert_eq!(exp.fix_locus, "Skill");
+    }
+
+    /// `when` 是 Rust 关键字，字段名为 `when_`；序列化后必须仍是 `when`，
+    /// 否则前端读不到。
+    #[test]
+    fn when_field_serializes_unsuffixed() {
+        let json = serde_json::to_string(&lesson()).expect("serializes");
+        assert!(json.contains(r#""when":"#), "got {json}");
+        assert!(!json.contains("when_"), "got {json}");
     }
 
     /// The materiality gate: segments shorter than MIN_DETOUR_TURNS valid
@@ -449,18 +546,24 @@ mod tests {
 
     /// 偶发故障 has no distillable causality: a fabricated fix is stripped and
     /// the row falls back to the candidate's generic optimization label.
+    ///
+    /// 两路一并剥除 —— 随机故障既没有可绕开的坑，也没有可复用的路。这条 finding
+    /// 仍然要报（弯路是真的），只是不带经验；因此它必须先于「缺 lesson 即不报」
+    /// 的门生效，否则偶发故障的弯路会被整条吞掉。
     #[test]
-    fn transient_fault_fix_is_stripped() {
+    fn transient_fault_strips_both_tracks_but_keeps_the_row() {
         let mut transient = finding(vec![0, 1, 2, 3, 4]);
         transient.why = "偶发故障".into();
         let rows = expand(DetourVerdict {
             detected: true,
             findings: vec![transient],
         });
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 1, "偶发故障的弯路本身仍要报");
         assert_eq!(rows[0].subtype, "偶发故障");
-        assert!(rows[0].experience.is_none(), "fix must be stripped");
+        assert!(rows[0].experience.is_none(), "两路必须一并剥除");
         assert_eq!(rows[0].optimization, "归因并沉淀修复方案");
+        // 节省量不受剥除影响，仍从账本求和。
+        assert_eq!(rows[0].save_tokens, 100 + 200 + 300 + 400 + 500);
     }
 
     /// One call may report several distinct detours; each becomes its own row,

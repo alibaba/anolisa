@@ -61,7 +61,7 @@ pub const STRATEGIES: &[CostStrategyDef] = &[
         needs_confirm: true,
     },
     // ── 减轮次浪费（prevention 类）──
-    // 判定走 `prompts/waste_detour.md`（全量轮次账本 + 反事实删除测试 + 归因），
+    // 判定走 `prompts/detour.md`（全量轮次账本 + 反事实删除测试 + 归因），
     // 不走本文件的 system prompt：这条不裁 payload，省的是下次会话少跑的整轮。
     CostStrategyDef {
         id: "detour",

@@ -8,6 +8,8 @@ import {
   fetchAtifBySession, fetchAtifByConversation, fetchTrajectoryAtif, fetchSessionSavings,
 } from '../utils/apiClient';
 import type { SessionSavingsDetail, OptimizationItem } from '../utils/apiClient';
+import { loadSessionAtifSources, docForSource, atifAgentCoverage, SOURCE_LABEL, SOURCE_BADGE_CLASS } from '../utils/atifSource';
+import type { AtifSource, SessionAtifDocs } from '../utils/atifSource';
 import { SubagentGraph } from '../components/SubagentGraph';
 import { CausalAttributionPanel } from '../components/CausalAttributionPanel';
 import type { TrajNode } from '../utils/trajectoryTree';
@@ -64,7 +66,7 @@ function subagentRefsOf(result: { subagent_trajectory_ref?: SubagentTrajectoryRe
   return Array.isArray(result.subagent_trajectory_ref) ? result.subagent_trajectory_ref : [];
 }
 
-function highlightedSections(doc: AtifDocument, callId: string | null): Set<string> {
+function highlightedSections(doc: AtifDocument | null, callId: string | null): Set<string> {
   const sections = new Set<string>();
   if (!callId) return sections;
 
@@ -589,38 +591,70 @@ const MetricCard: React.FC<{ label: string; value: string; color: string; sub?: 
 );
 
 // ─── Session loading (two stores) ─────────────────────────────────────────────
-// A session lives in either store: eBPF-captured genai events (genai_events.db)
-// or a collector-ingested log trajectory (trajectories.db). Both now serve the
-// same ATIF schema, so only the lookup differs — try the export first, since it
-// carries token metrics, then fall back for sessions never seen on the wire.
+// A session lives in either store — eBPF-captured genai events (genai_events.db)
+// or a collector-ingested log trajectory (trajectories.db) — and sometimes in
+// both. Both are loaded up front: see utils/atifSource for why the default is
+// picked on content, and why the losing side stays available rather than hidden.
 
-function isAtifDocument(value: unknown): value is AtifDocument {
-  return !!value
-    && typeof value === 'object'
-    && !Array.isArray(value)
-    && typeof (value as { schema_version?: unknown }).schema_version === 'string'
-    && String((value as { schema_version: string }).schema_version).startsWith('ATIF');
+function loadSessionDocs(sessionId: string): Promise<SessionAtifDocs> {
+  return loadSessionAtifSources(sessionId, {
+    fetchExported: fetchAtifBySession,
+    fetchCollected: fetchTrajectoryAtif,
+  });
 }
 
-async function loadSessionDoc(sessionId: string): Promise<AtifDocument> {
-  try {
-    const exported = await fetchAtifBySession(sessionId);
-    if (isAtifDocument(exported)) return exported;
-  } catch (e: any) {
-    if (e?.status !== 404) throw e;
-  }
-
-  try {
-    const collected = await fetchTrajectoryAtif(sessionId);
-    if (isAtifDocument(collected)) return collected;
-    throw new Error(`采集轨迹格式异常：${sessionId}`);
-  } catch (fallbackErr: any) {
-    if (fallbackErr?.status === 404) {
-      throw new Error(`未找到该 Session：${sessionId}（既无 eBPF 捕获记录，也无采集轨迹）`);
-    }
-    throw fallbackErr;
-  }
+/** Wrap a single document as the only available source (conversation lookups). */
+function singleSourceDocs(doc: AtifDocument): SessionAtifDocs {
+  return { ebpf: doc, log: null, defaultSource: 'ebpf' };
 }
+
+// ─── SourceSwitcher ───────────────────────────────────────────────────────────
+
+const SOURCE_HINT: Record<AtifSource, string> = {
+  ebpf: '来自 eBPF 捕获的网络流量：含 system prompt、工具定义与中断信号',
+  log: '来自 Agent 自身的会话日志：含完整消息、工具调用与观察结果',
+};
+
+interface SourceSwitcherProps {
+  docs: SessionAtifDocs;
+  active: AtifSource;
+  onSelect: (source: AtifSource) => void;
+}
+
+const SourceSwitcher: React.FC<SourceSwitcherProps> = ({ docs, active, onSelect }) => (
+  <span className="inline-flex items-center gap-1">
+    <span className="text-xs text-gray-400">数据源</span>
+    {(['ebpf', 'log'] as const).map(source => {
+      const doc = source === 'ebpf' ? docs.ebpf : docs.log;
+      // Partial capture is worth calling out, not just total absence: for an
+      // eBPF tool, 1 recovered response out of 235 is still the finding.
+      const { withPayload, total } = atifAgentCoverage(doc);
+      const gap = !!doc && total > 0 && withPayload < total;
+      const note = !gap ? '' : withPayload === 0 ? '无响应侧数据' : `响应侧 ${withPayload}/${total}`;
+      const title = !doc
+        ? '该会话无此来源数据'
+        : `${SOURCE_HINT[source]}${gap ? `（${total} 个 Agent 步中仅 ${withPayload} 步捕获到内容）` : ''}`;
+      return (
+        <button
+          key={source}
+          onClick={() => doc && onSelect(source)}
+          disabled={!doc}
+          title={title}
+          className={`px-2 py-0.5 rounded text-xs font-medium transition-colors ${
+            !doc
+              ? 'bg-gray-100 text-gray-300 cursor-not-allowed line-through'
+              : source === active
+                ? `${SOURCE_BADGE_CLASS[source]} ring-1 ring-offset-1 ring-gray-300`
+                : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+          }`}
+        >
+          {SOURCE_LABEL[source]}
+          {note && <span className="ml-1 opacity-70">· {note}</span>}
+        </button>
+      );
+    })}
+  </span>
+);
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
@@ -638,11 +672,18 @@ export const AtifViewerPage: React.FC = () => {
   );
   const [queryId, setQueryId] = useState(searchParams.get('id') || '');
 
-  // Data state
-  const [doc, setDoc] = useState<AtifDocument | null>(null);
+  // Data state — both stores are held so switching source costs no request.
+  const [docs, setDocs] = useState<SessionAtifDocs | null>(null);
+  // null = follow the content-based default; set once the user picks explicitly.
+  const [source, setSource] = useState<AtifSource | null>(
+    (searchParams.get('source') as AtifSource | null) ?? null
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savingsDetail, setSavingsDetail] = useState<SessionSavingsDetail | null>(null);
+
+  const activeSource: AtifSource | null = docs ? (source ?? docs.defaultSource) : null;
+  const doc = docs ? docForSource(docs, source) : null;
 
   // Build tool_call_id → OptimizationItem map for StepCard badges
   const savingsMap = React.useMemo(() => {
@@ -680,6 +721,24 @@ export const AtifViewerPage: React.FC = () => {
     setSearchParams(next);
   }, [setSearchParams]);
 
+  /**
+   * Switch store. The two documents have unrelated step ids and subagent trees,
+   * so every selection derived from the old one is dropped.
+   */
+  const selectSource = useCallback((next: AtifSource) => {
+    setSource(next);
+    setNodePath([]);
+    setExpandedSections(new Set());
+    setSelectedRound(initialRound(
+      groupIntoRounds(stepsOf(next === 'ebpf' ? docs?.ebpf : docs?.log)),
+      new Set(),
+    ));
+    const params = new URLSearchParams(searchParamsRef.current);
+    params.set('source', next);
+    params.delete('node');
+    setSearchParams(params);
+  }, [docs, setSearchParams]);
+
   /** Step-level "🤖 子代理轨迹" button: select the node in the graph above. */
   const navigateToSubagent = useCallback((ref: SubagentTrajectoryRef) => {
     const target = tree ? findNodeByRef(tree, ref) : null;
@@ -714,15 +773,21 @@ export const AtifViewerPage: React.FC = () => {
 
     const nextParams: Record<string, string> = { type: t, id: i.trim() };
     const currentSearchParams = searchParamsRef.current;
-    // Node selection and highlights only carry over when the target is unchanged
-    // (an explicit reload of a different id starts at the root trajectory).
+    // Node selection, highlights and the chosen source only carry over when the
+    // target is unchanged (an explicit reload of a different id starts fresh).
     let initialPath: string[] = [];
+    let initialSource: AtifSource | null = null;
     if (currentSearchParams.get('id') === i.trim()) {
       const highlightCallId = currentSearchParams.get('highlight_call_id');
       const interruptionId = currentSearchParams.get('interruption_id');
       const node = currentSearchParams.get('node');
+      const urlSource = currentSearchParams.get('source') as AtifSource | null;
       if (highlightCallId) nextParams.highlight_call_id = highlightCallId;
       if (interruptionId) nextParams.interruption_id = interruptionId;
+      if (urlSource === 'ebpf' || urlSource === 'log') {
+        nextParams.source = urlSource;
+        initialSource = urlSource;
+      }
       if (node) {
         nextParams.node = node;
         initialPath = decodeNodePath(node);
@@ -731,19 +796,18 @@ export const AtifViewerPage: React.FC = () => {
     setSearchParams(nextParams, { replace: true });
     setLoading(true);
     setError(null);
-    setDoc(null);
+    setDocs(null);
+    setSource(initialSource);
     setNodePath(initialPath);
     setExpandedSections(new Set());
     setSelectedRound(null);
 
     try {
-      let data: AtifDocument;
-      if (t === 'conversation') {
-        data = await fetchAtifByConversation(i.trim());
-      } else {
-        data = await loadSessionDoc(i.trim());
-      }
-      setDoc(data);
+      const loaded = t === 'conversation'
+        ? singleSourceDocs(await fetchAtifByConversation(i.trim()))
+        : await loadSessionDocs(i.trim());
+      setDocs(loaded);
+      const data = docForSource(loaded, initialSource);
       const sections = highlightedSections(data, nextParams.highlight_call_id ?? null);
       setExpandedSections(sections);
       // Round selection follows the node the URL restored, not always the root.
@@ -753,7 +817,7 @@ export const AtifViewerPage: React.FC = () => {
         : data;
       setSelectedRound(initialRound(groupIntoRounds(stepsOf(restoredDoc)), sections));
       // Fetch savings data for the session
-      if (data.session_id) {
+      if (data?.session_id) {
         fetchSessionSavings(data.session_id)
           .then(setSavingsDetail)
           .catch(() => setSavingsDetail(null));
@@ -764,6 +828,21 @@ export const AtifViewerPage: React.FC = () => {
       setLoading(false);
     }
   }, [queryType, queryId, setSearchParams]);
+
+  // Back/forward navigation changes the URL without going through selectNode or
+  // selectSource, so mirror the `source` and `node` params back into state when
+  // they diverge. Source is checked first: it decides which document `tree` is
+  // built from, so a stale node path must not be applied to the new source.
+  useEffect(() => {
+    if (!docs) return;
+    const urlSource = searchParams.get('source') as AtifSource | null;
+    const normalised = urlSource === 'ebpf' || urlSource === 'log' ? urlSource : null;
+    if (normalised === source) return;
+    setSource(normalised);
+    setNodePath([]);
+    setExpandedSections(new Set());
+    setSelectedRound(initialRound(groupIntoRounds(stepsOf(docForSource(docs, normalised))), new Set()));
+  }, [searchParams, docs, source]);
 
   // Back/forward navigation changes the URL without going through selectNode,
   // so mirror the `node` param back into state when they diverge.
@@ -800,7 +879,9 @@ export const AtifViewerPage: React.FC = () => {
           setError('JSON 解析失败：缺少 schema_version 字段或非 ATIF 格式');
           return;
         }
-        setDoc(parsed as AtifDocument);
+        // An imported file is its own single source — no store to switch to.
+        setDocs(singleSourceDocs(parsed as AtifDocument));
+        setSource(null);
         setNodePath([]);
         setError(null);
         setQueryId(parsed.session_id ?? '');
@@ -856,11 +937,15 @@ export const AtifViewerPage: React.FC = () => {
           <div className="flex-1 min-w-0">
             <h1 className="text-lg font-bold text-gray-900">轨迹查看</h1>
             {doc && (
-              <div className="flex items-center gap-2 mt-0.5">
+              <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                 <span className="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-xs">
                   {doc.schema_version}
                 </span>
                 <span className="text-xs text-gray-400 font-mono truncate">{doc.session_id}</span>
+                {/* Conversation lookups have a single store — nothing to switch. */}
+                {queryType === 'session' && docs && activeSource && (
+                  <SourceSwitcher docs={docs} active={activeSource} onSelect={selectSource} />
+                )}
               </div>
             )}
           </div>
