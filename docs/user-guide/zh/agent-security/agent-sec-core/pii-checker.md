@@ -84,9 +84,10 @@ verdict 和 finding schema；宿主只观察 finding 还是阻断操作，由该
 | `PII_CHECKER_TIMEOUT` | `5` | Qoder、Codex、Qwen Code（Qwen Code 上限为 8 秒） |
 | `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | Qoder、Qwen Code |
 
-cosh、Hermes 和 OpenClaw 不读取这两个环境变量。但 Hermes 和 OpenClaw 仍可通过 capability
-配置支持这两项 —— Hermes 使用 `timeout` 和 `include_low_confidence`，OpenClaw 使用
-`piiIncludeLowConfidence`；cosh 使用固定超时，且从不请求低置信度 finding。
+cosh、Hermes 和 OpenClaw 不读取这两个环境变量。Hermes 可通过 capability 配置同时支持
+这两项（`timeout` 和 `include_low_confidence`）。OpenClaw 只支持
+`piiIncludeLowConfidence`；PII scanner CLI 超时固定为 10 秒。cosh 使用固定超时，且从不
+请求低置信度 finding。
 
 宿主 Agent 在加载插件时读取这些变量。修改后需重启承载该 hook 的 Agent 进程；
 hook 和 agent-sec-core 并不是需要单独重启的 policy 服务。

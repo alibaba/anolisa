@@ -64,19 +64,21 @@ Scanner 将各层结果聚合为一个 verdict：
 | 环境变量 | 默认值 | 读取该变量的宿主 | 行为 |
 |----------|--------|------------------|------|
 | `PROMPT_SCANNER_HOOK_ENABLED` | `true` | 全部六个 | 设为 `false` 时在读取输入前跳过 hook |
-| `PROMPT_SCANNER_MODE` | `observe` | Qoder、Codex、Qwen Code | `observe` 静默审计；`warn` 告警；`ask`/`block` 按宿主能力执行或 fallback 为 `warn`；`deny` 等价于 `block` |
+| `PROMPT_SCANNER_MODE` | `observe` | Qoder、Codex、Qwen Code | `observe` 静默审计；`deny` 会在 prompt scanner 返回 `warn` 或 `deny` finding 时阻断。`ask` 和 `block` 不是 prompt scanner 的有效模式。 |
 | `PROMPT_SCANNER_SCAN_MODE` | `standard` | 全部六个 | 传给 `scan-prompt` 的扫描强度：`fast` / `standard` / `strict` |
 | `PROMPT_SCANNER_TIMEOUT` | `10` | Qoder、Codex、Qwen Code | Scanner 超时秒数 |
 
 cosh、Hermes 和 OpenClaw 只读取 `PROMPT_SCANNER_HOOK_ENABLED` 和 `PROMPT_SCANNER_SCAN_MODE`，
 在这些宿主上设置 `PROMPT_SCANNER_MODE` 或 `PROMPT_SCANNER_TIMEOUT` 不会生效。OpenClaw 的阻断
 行为由 `promptScanBlock` 决定，scanner 超时固定为 10 秒；Hermes 的 `prompt-scan-user-input`
-capability 本身是非阻断设计，没有阻断开关；cosh 也没有 prompt 策略开关。
+capability 本身是非阻断设计，没有阻断开关；cosh 也没有 prompt 策略开关。Qoder、Codex 和
+Qwen Code 需要使用 `PROMPT_SCANNER_MODE=deny` 阻断 prompt scanner finding。
 
-对于确实会读取的环境变量，其优先于对应的 Hermes/OpenClaw capability 配置。宿主 Agent 在
-加载插件时读取这些变量，修改后需重启承载该 hook 的 Agent 进程。
+对于确实会读取的环境变量，其优先于对应宿主配置。宿主 Agent 在加载插件时读取这些变量，
+修改后需重启承载该 hook 的 Agent 进程。
 
-Scanner verdict `deny` 描述扫描风险；hook policy `block` 决定当前 adapter 是否执行阻断。
+Scanner verdict `deny` 描述扫描风险。对于 Qoder、Codex 和 Qwen Code prompt hook，
+`PROMPT_SCANNER_MODE=deny` 是将 prompt scanner finding 转成阻断 hook 结果的部署策略。
 
 ## Security Event 与 Observability
 

@@ -66,7 +66,7 @@ the following environment variables control deployment-level behavior:
 | Environment variable | Default | Hosts that read it | Behavior |
 |----------------------|---------|--------------------|----------|
 | `PROMPT_SCANNER_HOOK_ENABLED` | `true` | All six | Set to `false` to short-circuit the hook before input is read |
-| `PROMPT_SCANNER_MODE` | `observe` | Qoder, Codex, Qwen Code | `observe` audits silently; `warn` warns; `ask`/`block` use host-specific enforcement or fall back to `warn`; `deny` maps to `block` |
+| `PROMPT_SCANNER_MODE` | `observe` | Qoder, Codex, Qwen Code | `observe` audits silently; `deny` blocks prompt-scanner `warn` or `deny` findings. `ask` and `block` are not valid prompt-scanner modes. |
 | `PROMPT_SCANNER_SCAN_MODE` | `standard` | All six | Scan strength passed to `scan-prompt`: `fast` / `standard` / `strict` |
 | `PROMPT_SCANNER_TIMEOUT` | `10` | Qoder, Codex, Qwen Code | Scanner timeout in seconds |
 
@@ -74,14 +74,16 @@ cosh, Hermes, and OpenClaw read only `PROMPT_SCANNER_HOOK_ENABLED` and
 `PROMPT_SCANNER_SCAN_MODE`. Setting `PROMPT_SCANNER_MODE` or `PROMPT_SCANNER_TIMEOUT` has no
 effect there. OpenClaw derives its enforcement from `promptScanBlock` and uses a fixed
 10-second scanner timeout, while the Hermes `prompt-scan-user-input` capability is non-blocking
-by design and has no block switch; cosh has no prompt policy switch either.
+by design and has no block switch; cosh has no prompt policy switch either. For Qoder, Codex,
+and Qwen Code, use `PROMPT_SCANNER_MODE=deny` to block prompt scanner findings.
 
-Where an environment variable is read, it overrides the matching Hermes/OpenClaw capability
-configuration. The host Agent reads these variables when it loads the plugin, so restart the
-Agent process after changing them.
+Where an environment variable is read, it overrides the matching host configuration.
+The host Agent reads these variables when it loads the plugin, so restart the Agent process
+after changing them.
 
-Scanner verdict `deny` describes the risk severity; hook policy `block` controls whether the current
-adapter attempts enforcement.
+Scanner verdict `deny` describes risk severity. For Qoder, Codex, and Qwen Code prompt hooks,
+`PROMPT_SCANNER_MODE=deny` is the deployment policy that turns prompt-scanner findings into a
+blocking hook result.
 
 ## Security Events and Observability
 

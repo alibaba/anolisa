@@ -129,13 +129,15 @@ agent-sec-cli scan-prompt warmup
 | 环境变量 | 默认值 | 读取该变量的宿主 | 行为 |
 |----------|--------|------------------|------|
 | `PROMPT_SCANNER_HOOK_ENABLED` | `true` | 全部六个 | 设为 `false` 时在读取输入前跳过 hook |
-| `PROMPT_SCANNER_MODE` | `observe` | Qoder、Codex、Qwen Code | `observe` 静默审计；`warn` 告警；`ask`/`block` 执行或 fallback 为 `warn`；`deny` 等价于 `block` |
+| `PROMPT_SCANNER_MODE` | `observe` | Qoder、Codex、Qwen Code | `observe` 静默审计；`deny` 会在 prompt scanner 返回 `warn` 或 `deny` finding 时阻断。`ask` 和 `block` 不是 prompt scanner 的有效模式。 |
 | `PROMPT_SCANNER_SCAN_MODE` | `standard` | 全部六个 | 扫描强度：`fast` / `standard` / `strict` |
 | `PROMPT_SCANNER_TIMEOUT` | `10` | Qoder、Codex、Qwen Code | Scanner 超时秒数 |
 
 cosh、Hermes 和 OpenClaw 不读取 `PROMPT_SCANNER_MODE` 与 `PROMPT_SCANNER_TIMEOUT`。
 在这些宿主上，prompt 策略来自原生配置 —— OpenClaw 使用 `promptScanBlock`；Hermes 的
-prompt-scan capability 本身就是非阻断设计，没有阻断开关。完整跨宿主矩阵见
+prompt-scan capability 本身就是非阻断设计，没有阻断开关。Qoder、Codex 和 Qwen Code
+需要使用 `PROMPT_SCANNER_MODE=deny` 阻断 prompt scanner finding；这些 prompt hook
+会拒绝或忽略未知的 `block` 模式。完整跨宿主矩阵见
 [Agent Hook 环境变量](#agent-hook-环境变量)。
 
 完整 CLI 选项、verdict 语义和 Security Event 说明参见 [Prompt Scanner 用户使用指南](prompt-scanner.md)。
@@ -245,7 +247,7 @@ stdin 传给 `scan-pii`，告警只使用脱敏 evidence。
 | `PII_CHECKER_MODE` | `observe` | 全部六个 | `observe` 静默审计；`warn` 告警；`ask`/`block` 按宿主能力执行或 fallback；`debug` 等价于 `observe`，`deny` 等价于 `block` |
 | `PII_CHECKER_TIMEOUT` | `5` | Qoder、Codex、Qwen Code | scanner 超时秒数；Qwen Code 上限为 8 秒 |
 | `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | Qoder、Qwen Code | 开启后传递 `--include-low-confidence` |
-| `PII_CHECKER_ENABLED` | - | 仅 Qwen Code | 旧 enabled 变量；`PII_CHECKER_HOOK_ENABLED` 缺失时生效 |
+| `PII_CHECKER_ENABLED` | - | 仅 Qwen Code | 旧 enabled 变量；仅在 `PII_CHECKER_HOOK_ENABLED` 缺失时生效 |
 
 #### Qwen Code 阻断边界
 
@@ -523,6 +525,8 @@ policy = "ask"          # observe | warn | ask（默认）| block
 
 `timeout` 是 Hermes 每个 capability 的必填项。`prompt-scan-user-input` 本身是非阻断
 设计：它通过 `transform_llm_output` 告警，没有 `enable_block` 或 `policy` 字段。
+这里的 `timeout = 15` 是 Hermes capability 配置，不是 `PROMPT_SCANNER_TIMEOUT`；
+Hermes 不读取 prompt scanner timeout 环境变量。
 
 ### Qwen Code
 
@@ -591,11 +595,12 @@ adapter 会通过内置的 `agent-sec` marketplace 把 `agent-sec-core` 注册�
 | `PostToolUse` | PII checker、observability |
 | `Stop` | observability |
 
-Codex 的 `CODE_SCANNER_MODE` 支持 `observe` 和 `block`，`ask` 被视为未设置。在启动
-Codex 的环境中设置策略：
+Codex 的 `CODE_SCANNER_MODE` 支持 `observe` 和 `block`，`ask` 被视为未设置。
+prompt scanner 是独立模式，只接受 `observe` 或 `deny`；如需阻断 prompt，请使用
+`PROMPT_SCANNER_MODE=deny`。在启动 Codex 的环境中设置策略：
 
 ```bash
-CODE_SCANNER_MODE=block PROMPT_SCANNER_MODE=block PII_CHECKER_MODE=block codex
+CODE_SCANNER_MODE=block PROMPT_SCANNER_MODE=deny PII_CHECKER_MODE=block codex
 ```
 
 ### Qoder
@@ -622,10 +627,11 @@ Skill Ledger hook 先从 `~/.qoder/skills/` 解析用户级 Skill，再从
 按 `SKILL_LEDGER_MODE`（默认 `ask`）处理结果。每次检查都会把 Qoder trace 标识写入
 安全审计日志。
 
-Qoder 的 `CODE_SCANNER_MODE` 支持 `observe`、`ask` 和 `block`：
+Qoder 的 `CODE_SCANNER_MODE` 支持 `observe`、`ask` 和 `block`。prompt scanner 是独立
+模式，只接受 `observe` 或 `deny`；如需阻断 prompt，请使用 `PROMPT_SCANNER_MODE=deny`：
 
 ```bash
-CODE_SCANNER_MODE=ask SKILL_LEDGER_MODE=block qoder
+CODE_SCANNER_MODE=ask PROMPT_SCANNER_MODE=deny SKILL_LEDGER_MODE=block qoder
 ```
 
 ### Copilot Shell（cosh）

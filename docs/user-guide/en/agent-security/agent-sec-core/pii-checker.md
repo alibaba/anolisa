@@ -91,10 +91,10 @@ variables are only read by some of them:
 | `PII_CHECKER_TIMEOUT` | `5` | Qoder, Codex, Qwen Code (Qwen Code caps it at 8 seconds) |
 | `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | Qoder, Qwen Code |
 
-cosh, Hermes, and OpenClaw do not read those two environment variables. Hermes and OpenClaw
-still support both settings through capability configuration instead — `timeout` and
-`include_low_confidence` for Hermes, `piiIncludeLowConfidence` for OpenClaw — while cosh uses a
-fixed timeout and never requests low-confidence findings.
+cosh, Hermes, and OpenClaw do not read those two environment variables. Hermes supports both
+settings through capability configuration (`timeout` and `include_low_confidence`). OpenClaw
+supports only `piiIncludeLowConfidence`; its PII scanner CLI timeout is fixed at 10 seconds.
+cosh uses a fixed timeout and never requests low-confidence findings.
 
 The host Agent reads these variables when it loads the plugin. Restart the Agent process that
 hosts the hook after changing them; the hook and agent-sec-core are not separate policy services.

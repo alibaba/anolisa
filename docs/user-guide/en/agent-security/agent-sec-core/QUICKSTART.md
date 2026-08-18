@@ -131,16 +131,18 @@ Set `PROMPT_SCANNER_HOOK_ENABLED=false` to skip prompt scanner hooks entirely.
 | Environment variable | Default | Hosts that read it | Behavior |
 |----------------------|---------|--------------------|----------|
 | `PROMPT_SCANNER_HOOK_ENABLED` | `true` | All six | Set to `false` to short-circuit the hook before input is read |
-| `PROMPT_SCANNER_MODE` | `observe` | Qoder, Codex, Qwen Code | `observe` audits silently; `warn` warns; `ask`/`block` enforce or fall back to `warn`; `deny` maps to `block` |
+| `PROMPT_SCANNER_MODE` | `observe` | Qoder, Codex, Qwen Code | `observe` audits silently; `deny` blocks prompt-scanner `warn` or `deny` findings. `ask` and `block` are not valid prompt-scanner modes. |
 | `PROMPT_SCANNER_SCAN_MODE` | `standard` | All six | Scan strength: `fast` / `standard` / `strict` |
 | `PROMPT_SCANNER_TIMEOUT` | `10` | Qoder, Codex, Qwen Code | Scanner timeout in seconds |
 
 cosh, Hermes, and OpenClaw do not read `PROMPT_SCANNER_MODE` or
 `PROMPT_SCANNER_TIMEOUT`. On those hosts the prompt policy comes from native
 configuration instead — for OpenClaw that is `promptScanBlock`, while the Hermes
-prompt-scan capability is non-blocking by design and exposes no block switch. See
-[Agent Hook Environment Variables](#agent-hook-environment-variables) for the
-full cross-host matrix.
+prompt-scan capability is non-blocking by design and exposes no block switch. For
+Qoder, Codex, and Qwen Code, use `PROMPT_SCANNER_MODE=deny` to block prompt
+scanner findings; `block` is rejected or treated as an unknown mode by those
+prompt hooks. See [Agent Hook Environment Variables](#agent-hook-environment-variables)
+for the full cross-host matrix.
 
 See the [Prompt Scanner User Guide](prompt-scanner.md) for full CLI options, verdict semantics, and
 Security Event details.
@@ -251,7 +253,7 @@ use only redacted evidence.
 | `PII_CHECKER_MODE` | `observe` | All six | `observe` audits silently; `warn` warns; `ask`/`block` use host-specific enforcement or fallback; `debug` aliases `observe`, and `deny` aliases `block` |
 | `PII_CHECKER_TIMEOUT` | `5` | Qoder, Codex, Qwen Code | Scanner timeout in seconds; Qwen Code caps it at 8 seconds |
 | `PII_CHECKER_INCLUDE_LOW_CONFIDENCE` | `false` | Qoder, Qwen Code | Passes `--include-low-confidence` when enabled |
-| `PII_CHECKER_ENABLED` | - | Qwen Code only | Legacy enabled variable, used when `PII_CHECKER_HOOK_ENABLED` is absent |
+| `PII_CHECKER_ENABLED` | - | Qwen Code only | Legacy enabled variable, used only when `PII_CHECKER_HOOK_ENABLED` is absent |
 
 #### Qwen Code enforcement boundary
 
@@ -540,7 +542,9 @@ policy = "ask"          # observe | warn | ask (default) | block
 
 `timeout` is a required key for every Hermes capability. `prompt-scan-user-input`
 is non-blocking by design: it warns through `transform_llm_output` and has no
-`enable_block` or `policy` field.
+`enable_block` or `policy` field. Its `timeout = 15` value is Hermes capability
+configuration, not `PROMPT_SCANNER_TIMEOUT`; Hermes does not read the prompt
+scanner timeout environment variable.
 
 ### Qwen Code
 
@@ -618,10 +622,12 @@ before enabling it. The registered hooks are:
 | `Stop` | observability |
 
 Codex supports `observe` and `block` for `CODE_SCANNER_MODE`; `ask` is treated as
-unset. Set the policy in the environment that starts Codex:
+unset. Its prompt scanner is separate and accepts only `observe` or `deny`; use
+`PROMPT_SCANNER_MODE=deny` for prompt blocking. Set the policy in the environment
+that starts Codex:
 
 ```bash
-CODE_SCANNER_MODE=block PROMPT_SCANNER_MODE=block PII_CHECKER_MODE=block codex
+CODE_SCANNER_MODE=block PROMPT_SCANNER_MODE=deny PII_CHECKER_MODE=block codex
 ```
 
 ### Qoder
@@ -648,10 +654,12 @@ Skills from `<cwd>/.qoder/skills/`, runs a read-only `skill-ledger check`, and
 applies `SKILL_LEDGER_MODE` (default `ask`). Each check carries Qoder trace
 identifiers into the security audit log.
 
-Qoder supports `observe`, `ask`, and `block` for `CODE_SCANNER_MODE`:
+Qoder supports `observe`, `ask`, and `block` for `CODE_SCANNER_MODE`. Its prompt
+scanner is separate and accepts only `observe` or `deny`; use
+`PROMPT_SCANNER_MODE=deny` for prompt blocking:
 
 ```bash
-CODE_SCANNER_MODE=ask SKILL_LEDGER_MODE=block qoder
+CODE_SCANNER_MODE=ask PROMPT_SCANNER_MODE=deny SKILL_LEDGER_MODE=block qoder
 ```
 
 ### Copilot Shell (cosh)
