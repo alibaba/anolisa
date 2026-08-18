@@ -480,6 +480,52 @@ uv run --project agent-sec-cli pytest tests/unit-test/hermes-plugin/ -v
 - Verify the source CLI definitions before editing the skill. Treat `--summary`
   and table/text output as human-display surfaces; structured Agent parsing must
   keep using JSON or JSONL examples.
+- The "风险审查" section is a gate, not reference material. Security conclusions
+  must come from its aggregation commands over the per-event verdict field
+  (`details.result.verdict`). Never let the skill summarize by top-level
+  `result` or by `observability report`'s `security_verdicts`: both aggregate
+  whether the scanner *ran*, and top-level `result` is `succeeded` for
+  practically every event, so summarizing by it answers "no risk"
+  unconditionally. A regression once reported "no security events" for a
+  session holding a `prompt_scan` deny and a `code_scan` warn.
+- The aggregation scope is the four *scan* event types only: `code_scan`,
+  `prompt_scan`, `pii_scan`, `skill_ledger`. Non-scan events (`sandbox_prehook`,
+  `harden`, `verify`, `summary`) are filtered at the pipe entry via an
+  allowlist `select`, not scored. This allowlist is fail-open: a newly added
+  *scan* `event_type` is silently dropped until it is added to both `$spec`
+  (jq) and `SPEC` (python3), so update the verdict-path table, both aggregation
+  commands, and the contract tests in the same change. Verify the event_type
+  set against `security_middleware/lifecycle.py`'s `_ACTION_CATEGORY` before
+  editing.
+- Within an allowlisted type only an explicit `pass` counts as risk-free;
+  new/other verdict values (including `error`), missing fields, and non-string
+  verdicts must surface as pending (`MISSING`) items rather than silently pass.
+- The aggregation output is counts + RISK lines only; `pass`/`allow` events
+  never get a per-event line and their `details` are not fetched. This is a
+  context-cost invariant, not cosmetics: a security report must not flood the
+  Agent conversation. Keep the "上下文开销控制" guidance (count first, expand
+  only pending items, drill by `event_id` on demand, aggregate through the
+  pipe) intact when editing.
+- The "参数取值约束" section is a security control, not style. Every documented
+  command interpolates `<session_id>`/`<event_id>` into a single-quoted shell
+  string, and the skill explicitly accepts a user-supplied `session_id`, so an
+  unvalidated value closes the quote and yields command injection (verified
+  reproducible). Keep the strict UUID full-match requirement whenever adding or
+  editing a command that carries an ID placeholder.
+- The "获取单条事件细节" section exists because `events` has **no `--event-id`
+  filter**; single-event drill-down must go through client-side `jq` selection.
+  Keep it that way unless the CLI gains such a filter. Detail lives under the
+  uniform `details` = `{request, result}` shape, with `details.result.findings[]`
+  as the per-hit evidence; document it at that level instead of enumerating
+  each scanner's inner finding keys, which differ per scanner and would rot.
+- Keep the "报告不得重新引入敏感值" rule: reports may only cite the redacted
+  fields the event already carries (`evidence_redacted` et al., produced by
+  `pii_checker/audit.py`'s `_sanitize_result`, which drops `raw_evidence` and
+  keeps only `text_length`/`text_sha256` on the request side). Recovering the
+  original value from conversation history to "explain better" turns a
+  read-only query into a fresh leak, because model output is itself PII-scanned
+  (`source=model_output`). Describe redaction formats by pattern rather than
+  pasting observed values.
 - The "获取当前 session_id" section documents a cosh-ng-only path: the cosh-ng
   `runtime_context` tool returns `provider_session_id`, which is the same value
   cosh-ng passes to hooks as `session_id` and therefore the same value stored on

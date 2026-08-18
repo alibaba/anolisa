@@ -1,6 +1,6 @@
 ---
 name: security-observability
-description: 使用 agent-sec-cli 查询本地安全事件并生成会话级安全复盘。用户要求查看安全告警、审计安全检测结果、按时间/类别/trace/session/run 筛选事件、统计安全事件，或查询本次会话、最近一次 Agent 会话的工具与安全判定时使用。
+description: 只读查询 agent-sec-cli 已落盘的历史安全事件记录，并据此生成会话级安全复盘。仅当用户显式要求查看或审计已发生的安全事件、安全告警、安全审计记录，或要求按 session/run/trace/时间/类别筛选与统计已有安全事件，或要求复盘某次会话的安全判定时使用。不用于扫描新内容：检查代码安全性用 code-scanner，检测 prompt 注入用 prompt-scanner，审查 Skill 安全状态用 skill-ledger。不要因为对话中出现“安全”“工具调用”等字样、或为了主动自查而触发。
 ---
 
 # Security Observability
@@ -14,7 +14,117 @@ description: 使用 agent-sec-cli 查询本地安全事件并生成会话级安�
 3. 需要程序解析时使用 `--output json` 或 `--output jsonl`，不要解析 table 或 summary 文本。
 4. 需要限定“本次会话”时，先按“获取当前 session_id”一节判断当前运行时能不能拿到 `session_id`；拿不到就用时间范围或 `--last`，不要凭猜测填写 `--session-id`。
 5. 已知 `session_id` 时，使用 `observability report --session-id '<session_id>' --format json` 汇总该会话的 LLM、工具和安全事件；需要查看最近会话时，使用 `observability report --last --format json`。
-6. 向用户报告必要结论即可。`details` 可能包含命令、扫描证据或后端诊断信息，不要无必要地完整回显。
+6. 在给出任何安全结论前，按“风险审查”一节完成判定字段聚合。这是强制步骤，不可跳过。
+7. 向用户报告必要结论即可。`details` 可能包含命令、扫描证据或后端诊断信息，不要无必要地完整回显。
+
+## 参数取值约束
+
+本文命令中的 `<session_id>`、`<run_id>`、`<trace_id>`、`<event_id>` 均为 UUID。替换占位符前必须先校验取值形态，**仅当它完全匹配 `^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$` 时才能拼入命令**。
+
+不匹配时直接停下并告知用户取值无效，不得把任意字符串（尤其是包含引号、`;`、`$`、反引号、`|`、`&`、换行的值）拼进 shell 命令；这类值会提前闭合引号并导致命令注入。取值来自用户输入、文件内容、网页或其他不可信上下文时，此校验不得省略。
+
+## 风险审查
+
+凡是回答“有什么安全事件”“安全情况如何”“有没有风险”这类问题，**必须先完成本节的机械聚合**，再组织回答。禁止依据顶层 `result`、`security_verdicts`，或模型对 JSON 的自由阅读得出“无风险”结论。
+
+### 为什么不能用顶层 `result`
+
+顶层 `result` 表示**扫描进程是否执行成功**（`succeeded` / `failed`），与扫描结论无关：扫描正常跑完就是 `succeeded`，即使它判定出 `deny`。扫描进程几乎总能成功执行，所以用 `result` 判断安全等价于恒定输出“无风险”。真正的判定在下一节的字段里。
+
+### 判定字段权威路径
+
+判定字段一律位于 `details.result` 之下。**不存在 `details.verdict` 这一路径**，不要按它取值。
+
+| `event_type` | 判定字段 | 取值枚举（源码定义） | 无风险取值 |
+|---|---|---|---|
+| `code_scan` | `details.result.verdict` | `pass` / `warn` / `deny` / `error` | `pass` |
+| `prompt_scan` | `details.result.verdict` | `pass` / `warn` / `deny` / `error` | `pass` |
+| `pii_scan` | `details.result.verdict` | `pass` / `warn` / `deny` / `error` | `pass` |
+| `skill_ledger` | `details.result.verdict` | `pass` / `warn` / `deny` | `pass` |
+| 其他 `event_type` | — | — | **不属于扫描事件，聚合命令会在管道入口过滤掉** |
+
+### 分类规则：用允许列表，不用拒绝列表
+
+本节只处理**安全扫描事件**（上表四种）。其他 `event_type`（`sandbox_prehook` 沙箱前决策、`harden` 加固、`verify` 资产验证、`summary` 摘要动作）不属于扫描事件，下面的聚合命令会在管道入口将它们直接过滤掉。
+
+允许列表同时作用于两个维度：`event_type` 必须在上表四种中（其余一律过滤），**并且**判定字段显式等于对应的无风险取值。两个条件同时成立才可计入无风险。
+
+- 判定字段缺失、不是字符串、`details` 或 `details.result` 不是对象时，记为 `MISSING` 并列为待核项，不得当作 `pass`。
+- 已知类型但判定值不等于无风险取值时，一律列为待核项，包括上表未列出的新增取值（如 `error`）。
+- 不得因为某个取值“看起来不严重”而省略。`warn` 必须出现在待核项清单里。
+
+### 聚合命令
+
+不要靠阅读 JSON 归纳，必须执行聚合命令。聚合命令的输出只包含**计数表 + 仅 RISK 行**，`pass`/`allow` 事件不逐行列出。对于 `verdict == "pass"` 的普通事件，不要查询其具体 `details` 内容——它们的行为符合预期，打出来只会占上下文。
+
+输出中以 `RISK` 开头的行即待核项。
+
+```bash
+agent-sec-cli events --session-id '<session_id>' --output json | jq -r '{code_scan:"pass",prompt_scan:"pass",pii_scan:"pass",skill_ledger:"pass"} as $ok | [.[] | select($ok[.event_type // ""] != null) | {t: .event_type, j: (.details | if type=="object" then .result else null end | if type=="object" then .verdict else null end | if type=="string" then . else "MISSING" end), ts: .timestamp, id: .event_id}] as $rows | "total=\($rows|length)  risk_items=\([$rows[]|select(.j != $ok[.t])]|length)", ($rows | group_by([.t,.j])[] | "  \(.[0].t) \(.[0].j) \(length)"), ($rows[] | select(.j != $ok[.t]) | "RISK \(.ts) \(.t) \(.j) \(.id)")'
+```
+
+环境没有 `jq` 时用等价的 python3（`python3` 是 `agent-sec-cli` 的运行依赖，一定可用）：
+
+```bash
+agent-sec-cli events --session-id '<session_id>' --output json | python3 -c 'import sys,json,collections;OK={"code_scan":"pass","prompt_scan":"pass","pii_scan":"pass","skill_ledger":"pass"};V=lambda d:(lambda r:r["verdict"] if isinstance(r,dict) and isinstance(r.get("verdict"),str) else "MISSING")(d.get("result") if isinstance(d,dict) else None);R=[(e["event_type"],V(e.get("details")),e.get("timestamp"),e.get("event_id")) for e in json.load(sys.stdin) if e.get("event_type") in OK];K=[x for x in R if x[1]!=OK[x[0]]];C=collections.Counter((x[0],x[1]) for x in R);print("total=%d  risk_items=%d"%(len(R),len(K))+"".join("\n  %-14s %-13s %d"%(t,j,n) for (t,j),n in sorted(C.items()))+"".join("\nRISK %s %s %s %s"%(x[2],x[0],x[1],x[3]) for x in K))'
+```
+
+按时间范围查询时，把 `--session-id '<session_id>'` 换成 `--last-hours N` 等筛选条件，其余不变。注意 `--limit` 默认 100：事件多于 100 条时必须调大 `--limit` 或分页，否则待核项会被截断而漏报。
+
+### 上下文开销控制
+
+安全报告不应挤占 Agent 对话的有效上下文，遵循以下原则：
+
+1. **先查总数，再决定策略**：使用 `--count` 取得匹配事件数量。如果小于等于 200，直接走上面的聚合命令；如果超过 200，先用 `--count-by category` 确认哪些类别有量，再逐类别 `--category <cat> --limit 200` 分批聚合。
+2. **只展开待核项**：`pass`/`allow` 事件只出现在计数表的数字里，不逐行列出，更不要查询其 `details`。只有 RISK 行才需要向用户呈现。
+3. **仅按需深钻**：如果用户要求了解某条待核项的具体原因，再按“获取单条事件细节”一节取它的 `details`（一条）。不要默认批量展开全部 `details`。
+4. **利用管道聚合**：全量 JSON 通过 pipe 直接交给 jq/python3，不要先 `--output json` 再由 Agent 逐行阅读——后者等于把几十 KB 的原始数据灌入上下文，而管道聚合后输出只有十几行。
+
+### 报告输出契约
+
+按顺序输出，前两项不得省略：
+
+1. **查询范围**：实际使用的筛选条件（`session_id` 或时间范围）、`--limit` 取值与匹配总数。
+2. **待核项清单**：逐条列出每个待核事件的 `timestamp`、`event_type`、判定值。一条都没有时，写“按判定字段聚合后待核项为 0”，而不是“没有安全事件”。
+3. **按 `event_type` × 判定值的计数表**。
+4. 需要时再补充结论与建议。
+
+禁止表述：在未完成本节聚合的前提下输出“无任何安全事件”“未发现风险”“一切正常”。待核项非 0 时，结论段必须包含这些项，不得只体现在计数表里。
+
+### 获取单条事件细节
+
+所有细节都在统一的 `details` 字段下，形状固定为 `{request, result}`：
+
+- `details.request` —— 本次扫描的输入侧信息。
+- `details.result.summary` —— 判定摘要（一句话或分类计数）。
+- `details.result.findings[]` —— **命中明细，要回答“为何被判定”就看这里**。
+
+`events` **没有 `--event-id` 过滤参数**，按 `event_id` 取单条需要在客户端过滤：
+
+```bash
+agent-sec-cli events --session-id '<session_id>' --output json | jq -r '.[] | select(.event_id == "<event_id>") | .details'
+```
+
+只看判定依据，不取整个 `details`（更省上下文）：
+
+```bash
+agent-sec-cli events --session-id '<session_id>' --output json | jq -r '.[] | select(.event_id == "<event_id>") | {summary: .details.result.summary, findings: .details.result.findings}'
+```
+
+`findings[]` 内部字段因扫描器而异（规则类扫描带规则标识与描述，PII 类带类型与脱敏证据）。**按实际返回的字段陈述，不要假设字段名，也不要把某一种扫描器的字段套到另一种上。**
+
+注意：不同扫描器对 `details.request` 的处理强度不同——部分扫描器只存长度与哈希，部分会存被扫描的原始内容。引用 `details.request` 时适用下一节的敏感值约束。
+
+### 报告不得重新引入敏感值
+
+安全事件入库时已做脱敏：`findings[].evidence_redacted` 存的是按类型脱敏后的值（如 `phone_cn` 为 `NNN****NNNN`、`credit_card` 为 `[REDACTED_CARD:后四位]`、凭据类为 `[REDACTED_*]`），`request` 侧只存 `text_length` 与 `text_sha256`，**不存原文**。
+
+描述事件时只能使用事件自带的脱敏字段（`type`、`category`、`severity`、`confidence`、`evidence_redacted`、`span`）。**禁止为了“解释更清楚”而从对话历史、用户输入、工具参数或其他上下文里找回并复述原始敏感值**（手机号、卡号、身份证号、密钥、token 等）。
+
+原因：模型输出会被 PII 扫描（`source=model_output`）。在报告里复述原始敏感值会当场触发新的 `pii_scan` 告警，把一次只读查询变成一次新的泄露事件。
+
+- 正确：直接引用事件字段，如“`pii_scan` warn × 3，`type` 为 `phone_cn` / `credit_card`，`evidence_redacted` 已脱敏”。
+- 错误：为了说明触发原因而把用户当时输入的手机号、卡号原文重新写进回复。
 
 ## 获取当前 session_id
 
@@ -22,7 +132,7 @@ description: 使用 agent-sec-cli 查询本地安全事件并生成会话级安�
 
 ### cosh-ng 特别用法：`runtime_context` 工具
 
-> 本节仅适用于 **cosh-ng** Agent（0.16.0 起内置 `runtime_context` 工具）。截至当前版本，其他 Agent 运行时（cosh/copilot-shell、OpenClaw、Codex、Qwen Code、Hermes、Qoder CLI 等）没有这个工具，直接跳到“其他 Agent 运行时”一节。判断方式是看当前可用工具列表里有没有 `runtime_context`，不要靠版本号猜。
+> 本节仅适用于 **cosh-ng** Agent。截至当前版本，其他 Agent 运行时（cosh/copilot-shell、OpenClaw、Codex、Qwen Code、Hermes、Qoder CLI 等）没有这个工具，直接跳到“其他 Agent 运行时”一节。判断方式是看当前可用工具列表里有没有 `runtime_context`，不要靠版本号猜。
 
 cosh-ng 提供只读工具 `runtime_context`（无参数），返回当前运行时元数据，其中 `provider_session_id` 就是本次会话的 `session_id`：
 
@@ -68,7 +178,7 @@ agent-sec-cli observability report --session-id '<provider_session_id>' --format
 
 - 默认改用**时间范围查询**（`--last-hours`，或 `--since` / `--until`），或用 `observability report --last` 查询最近记录的会话。不要因为拿不到 `session_id` 而停下来反复询问用户。
 - **必须在报告中说明实际查询范围**，例如“最近 1 小时的安全事件”或“最近记录的一次会话，不一定是当前会话”。不要把这类结果表述成“本次会话”的结论。
-- 只有用户主动提供 `session_id` 时，才使用 `--session-id` 精确查询。
+- 只有用户主动提供 `session_id` 时，才使用 `--session-id` 精确查询；拼入前先按“参数取值约束”一节校验 UUID 形态。
 - 同样不要用 shell 环境变量（包括 `$COSH_SESSION_ID`）凑一个 `session_id` 出来。
 
 ## Few-shot 场景
@@ -83,7 +193,7 @@ agent-sec-cli observability report --session-id '<provider_session_id>' --format
 agent-sec-cli events --last-hours 1 --output json
 ```
 
-**回答：** 说明查询范围为最近一小时、匹配事件总数，并按 `category` 和顶层 `result` 概括；仅在用户需要时展开具体事件。不要把 `succeeded` / `failed` 解释为扫描 verdict。
+**回答：** 先按“风险审查”一节对结果做判定字段聚合（把 `--session-id` 换成 `--last-hours 1`），再按报告输出契约作答：查询范围为最近一小时、匹配总数、待核项清单、计数表。不要按顶层 `result` 概括，也不要把 `succeeded` / `failed` 解释为扫描 verdict。
 
 ### 查询本次会话的安全事件
 
@@ -101,7 +211,7 @@ agent-sec-cli events --session-id '<current_session_id>' --output json
 agent-sec-cli events --last-hours 1 --output json
 ```
 
-**回答：** cosh-ng 上说明使用的 `session_id`、匹配数量和安全类别，并不要退而使用 `$COSH_SESSION_ID`。其他运行时必须说明实际查询的是最近 N 小时而不是“本次会话”，不要把结果表述成本次会话的结论。
+**回答：** 先按“风险审查”一节完成判定字段聚合，再按报告输出契约作答。cosh-ng 上说明使用的 `session_id`、匹配数量、待核项清单和计数表，不要退而使用 `$COSH_SESSION_ID`。其他运行时必须说明实际查询的是最近 N 小时而不是“本次会话”，不要把结果表述成本次会话的结论。
 
 ### 复盘本次会话的安全情况（cosh-ng）
 
@@ -113,7 +223,7 @@ agent-sec-cli events --last-hours 1 --output json
 agent-sec-cli observability report --session-id '<provider_session_id>' --format json
 ```
 
-**回答：** 汇总会话范围、`tool_breakdown` 和 `security_verdicts`；需要具体扫描 verdict 时，用同一个 `session_id` 查询 `events --output json` 并检查 `details`。不要改用 `--last`：它查询最近记录的会话，在并发或嵌套会话下可能不是本次会话。
+**回答：** `observability report` 只提供会话范围、`tool_breakdown` 和按顶层 `result` 聚合的 `security_verdicts`，**不足以支撑安全结论**。必须再用同一个 `session_id` 执行“风险审查”一节的聚合命令，并按报告输出契约给出待核项清单。不要改用 `--last`：它查询最近记录的会话，在并发或嵌套会话下可能不是本次会话。
 
 ### 查询最近一次会话的安全复盘
 
@@ -125,11 +235,7 @@ agent-sec-cli observability report --session-id '<provider_session_id>' --format
 agent-sec-cli observability report --last --format json
 ```
 
-**回答：** 汇总会话范围、工具调用和 `security_verdicts`；若需要具体扫描 verdict，再使用返回的 `session_id` 查询：
-
-```bash
-agent-sec-cli events --session-id '<session_id>' --output json
-```
+**回答：** 汇总会话范围与工具调用后，**必须**用返回的 `session_id` 执行“风险审查”一节的聚合命令，再按报告输出契约作答。不要仅凭 `security_verdicts` 下结论——它按顶层 `result` 聚合，不反映扫描判定。
 
 ## 安全事件查询
 
@@ -152,24 +258,13 @@ agent-sec-cli events --last-hours 8 --category code_scan --count
 
 ```bash
 # 查询最近一小时的代码扫描事件
-agent-sec-cli events \
-  --last-hours 1 \
-  --category code_scan \
-  --output json
+agent-sec-cli events --last-hours 1 --category code_scan --output json
 
 # 按 session 和 run 精确关联，并以 JSONL 输出
-agent-sec-cli events \
-  --session-id '<session_id>' \
-  --run-id '<run_id>' \
-  --output jsonl
+agent-sec-cli events --session-id '<session_id>' --run-id '<run_id>' --output jsonl
 
 # 查询 ISO-8601 时间区间；since 包含边界，until 不包含边界
-agent-sec-cli events \
-  --since '2026-08-05T00:00:00Z' \
-  --until '2026-08-06T00:00:00Z' \
-  --limit 100 \
-  --offset 0 \
-  --output json
+agent-sec-cli events --since '2026-08-05T00:00:00Z' --until '2026-08-06T00:00:00Z' --limit 100 --offset 0 --output json
 ```
 
 ### 参数
@@ -251,7 +346,9 @@ agent-sec-cli events \
 | `call_id`, `tool_call_id` | string \| null | LLM 与工具调用关联标识 |
 | `details` | object | 后端专属结构化数据 |
 
-`details` 没有跨事件类型的固定 schema。只读取当前任务需要且实际存在的字段，不要根据其他类别的事件臆测字段。安全判定可能位于 `details.verdict` 或 `details.result.verdict`；使用前先检查类型和存在性。
+`details` 没有跨事件类型的固定 schema。只读取当前任务需要且实际存在的字段，不要根据其他类别的事件臆测字段。
+
+扫描判定固定位于 `details.result` 之下：扫描类事件用 `details.result.verdict`，`sandbox_prehook` 用 `details.result.decision`。**`details.verdict` 不是有效路径**，不要按它取值。取值前先检查类型与存在性，缺失时按“风险审查”一节记为 `MISSING` 并列为待核项。
 
 ### 计数输出
 
@@ -279,9 +376,7 @@ agent-sec-cli events \
 agent-sec-cli observability report --last --format json
 
 # 指定会话
-agent-sec-cli observability report \
-  --session-id '<session_id>' \
-  --format json
+agent-sec-cli observability report --session-id '<session_id>' --format json
 ```
 
 选择 `--last` 或 `--session-id` 之一：`--last` 查询最近记录的会话，`--session-id '<session_id>'` 查询指定会话。命令没有默认目标；两者都不提供时返回错误。`--format` 支持 `text` 和 `json`，供 Agent 解析时必须使用 `json`。
@@ -322,7 +417,7 @@ agent-sec-cli observability report \
 | `security_verdicts` | object<string, object<string, integer>> | 安全类别到 `result` 计数的映射 |
 | `security_hint` | string \| null | 安全事件不可用、未关联或查询失败时的说明 |
 
-`security_verdicts` 当前按安全事件顶层 `result`（如 `succeeded` / `failed`）聚合；不要把它解释为扫描器的 `pass` / `warn` / `deny`。如需具体扫描 verdict，再通过相同 `session_id` 查询 `events --output json` 并检查对应事件的 `details`。
+`security_verdicts` 当前按安全事件顶层 `result`（如 `succeeded` / `failed`）聚合；不要把它解释为扫描器的 `pass` / `warn` / `deny`。顶层 `result` 只反映扫描进程是否执行成功，几乎恒为 `succeeded`，因此 `security_verdicts` **全 `succeeded` 不代表无风险**，不能作为安全结论的依据。得出任何安全结论前，必须用相同 `session_id` 执行“风险审查”一节的聚合命令。
 
 ## 关联与报告规则
 
@@ -331,3 +426,5 @@ agent-sec-cli observability report \
 - 会话报告没有安全事件时，检查 `security_hint`，不要直接断言“没有发生安全检测”。查询返回 0 条时，先确认传入的 `session_id` 确实是当前会话的 ID，再下结论。
 - table 与 summary 是人类展示格式，不承诺稳定列结构；自动化处理必须选择 JSON/JSONL。
 - 报告事件时给出查询范围、筛选条件、匹配数量和必要结论。除非用户明确要求，不完整输出 `details` 中的命令、输入、证据或诊断信息。
+- **安全结论必须来自“风险审查”一节的聚合输出，不得来自对 JSON 的自由阅读。** 顶层 `result` 与 `security_verdicts` 都不是判定依据。未完成聚合时，不得输出“无风险”“无安全事件”“一切正常”一类表述；待核项非 0 时，必须逐条列出。
+- 事件总数接近或超过 `--limit`（默认 100）时，先调大 `--limit` 或分页取全量，再做聚合。基于被截断的结果得出的“无风险”结论是错误的。
