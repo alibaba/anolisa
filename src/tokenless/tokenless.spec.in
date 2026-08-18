@@ -491,6 +491,10 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Tue Aug 18 2026 林生 <linyan.lin@alibaba-inc.com> - 0.7.8-1
+- feat(tokenless): skip TOON encoding for payloads under 500 chars
+- fix(tokenless): drop conflicting bin entries from npm platform packages
+
 * Mon Aug 17 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.7-1
 - feat(tokenless): expose a source-built Python runtime wheel
 - feat(tokenless): add AgentScope 1.x and 2.x response compression

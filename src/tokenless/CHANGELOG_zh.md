@@ -9,6 +9,16 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.7.8] - 2026-08-18
+
+### 变更
+
+- 当载荷少于 500 字符时跳过 TOON 编码；低于该阈值时 token 节省几乎为零，而每次事件的编码开销保持不变（[#2613](https://github.com/alibaba/anolisa/pull/2613)）。
+
+### 修复
+
+- npm 平台包（`@anolisa/tokenless-*`）不再声明 `tokenless`/`rtk`/`toon` bin 入口。与根包的同名冲突会导致 npm 在安装时删除所有冲突的 `.bin` 链接，使安装后没有可用的 `tokenless` 可执行文件（[#2613](https://github.com/alibaba/anolisa/pull/2613)）。
+
 ## [0.7.7] - 2026-08-17
 
 ### 新增

@@ -9,6 +9,16 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.7.8] - 2026-08-18
+
+### Changed
+
+- TOON encoding is now skipped for payloads under 500 characters; below that threshold the token savings are near-zero while the per-event encode cost stays the same ([#2613](https://github.com/alibaba/anolisa/pull/2613)).
+
+### Fixed
+
+- npm platform packages (`@anolisa/tokenless-*`) no longer declare `tokenless`/`rtk`/`toon` bin entries. The name collision with the root package made npm remove every conflicting `.bin` link during install, leaving installs without a usable `tokenless` executable ([#2613](https://github.com/alibaba/anolisa/pull/2613)).
+
 ## [0.7.7] - 2026-08-17
 
 ### Added
