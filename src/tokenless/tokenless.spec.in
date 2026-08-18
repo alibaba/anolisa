@@ -491,6 +491,11 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Tue Aug 18 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.9-1
+- feat(tokenless): add the framework-neutral Python SDK
+- feat(tokenless): attach full SDK lifecycles to AgentScope
+- fix(tokenless): match the Cosh-NG shell tool in the RTK hook
+
 * Tue Aug 18 2026 林生 <linyan.lin@alibaba-inc.com> - 0.7.8-1
 - feat(tokenless): skip TOON encoding for payloads under 500 chars
 - fix(tokenless): drop conflicting bin entries from npm platform packages

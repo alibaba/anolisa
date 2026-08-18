@@ -9,6 +9,20 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.7.9] - 2026-08-18
+
+### 新增
+
+- `anolisa-tokenless` Python Wheel 现在开放框架无关的 `before_model`、`before_tool_call`、`after_tool_call` 和 `retrieve` 生命周期，内置 RTK，并提供原生 Schema 与 Response 压缩、TOON、受 Marker 授权的 Retrieve 和逐调用归属（[#2627](https://github.com/alibaba/anolisa/pull/2627)）。
+
+### 变更
+
+- AgentScope 1.0.11 至 1.x 以及 AgentScope 2.0.x 集成现在挂载相同的完整 SDK 契约，在已有 Response 压缩与 Retrieve 支持上增加 Schema 压缩、命令改写、TOON、环境错误提示和逐调用归属（[#2627](https://github.com/alibaba/anolisa/pull/2627)）。
+
+### 修复
+
+- Cosh-NG Extension 的 RTK 重写 Hook 现在直接匹配小写 `shell` 工具名，因此无需依赖宿主侧工具名别名也能重写 Shell 命令（[#2611](https://github.com/alibaba/anolisa/pull/2611)）。
+
 ## [0.7.8] - 2026-08-18
 
 ### 变更

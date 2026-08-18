@@ -9,6 +9,20 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-08-18
+
+### Added
+
+- The `anolisa-tokenless` Python wheel now exposes framework-neutral `before_model`, `before_tool_call`, `after_tool_call`, and `retrieve` lifecycles, with bundled RTK plus native schema and response compression, TOON, marker-authorized retrieval, and per-call attribution ([#2627](https://github.com/alibaba/anolisa/pull/2627)).
+
+### Changed
+
+- AgentScope 1.0.11 through 1.x and AgentScope 2.0.x integrations now attach the same complete SDK contract, adding schema compression, command rewriting, TOON, environment-error guidance, and per-call attribution to the existing response compression and retrieval support ([#2627](https://github.com/alibaba/anolisa/pull/2627)).
+
+### Fixed
+
+- The Cosh-NG extension's RTK rewrite hook now matches the lowercase `shell` tool name directly, so shell commands are rewritten without depending on host-side tool-name aliases ([#2611](https://github.com/alibaba/anolisa/pull/2611)).
+
 ## [0.7.8] - 2026-08-18
 
 ### Changed
