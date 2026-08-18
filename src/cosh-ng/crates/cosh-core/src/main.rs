@@ -32,10 +32,6 @@ mod truncator;
 use clap::Parser;
 use cosh_core::provider;
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(unix)]
-use std::sync::Arc;
-#[cfg(unix)]
 use std::time::Duration;
 
 use config::CoreConfig;
@@ -122,11 +118,15 @@ async fn main() {
 
 #[cfg(unix)]
 async fn run_until_sigint() {
-    let sigint_received = install_sigint_handler();
-
     tokio::select! {
-        _ = wait_for_sigint(sigint_received) => {
-            tracing::info!("received SIGINT, shutting down cosh-core");
+        signal = wait_for_sigint() => {
+            match signal {
+                Ok(()) => tracing::info!("received SIGINT, shutting down cosh-core"),
+                Err(error) => {
+                    eprintln!("failed to install SIGINT handler: {error}");
+                    std::process::exit(1);
+                }
+            }
         }
         _ = run() => {}
     }
@@ -195,22 +195,8 @@ fn is_agent_headless_mode(args: &cli::CliArgs) -> bool {
 }
 
 #[cfg(unix)]
-fn install_sigint_handler() -> Arc<AtomicBool> {
-    let received = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&received)).unwrap_or_else(
-        |error| {
-            eprintln!("failed to install SIGINT handler: {error}");
-            std::process::exit(1);
-        },
-    );
-    received
-}
-
-#[cfg(unix)]
-async fn wait_for_sigint(received: Arc<AtomicBool>) {
-    while !received.load(Ordering::Relaxed) {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+async fn wait_for_sigint() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
 }
 
 #[cfg(test)]
