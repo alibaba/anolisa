@@ -119,9 +119,19 @@ _cosh_maybe_emit_native_history_file_marker() {
   fi
 }
 _cosh_maybe_emit_native_history_file_marker
-_cosh_now_ms() {
-  date +%s000
-}
+# builtin strftime keeps the marker emission path free of an external
+# `date` exec (NS-009 fork hygiene; the enclosing $() substitution remains
+# a one-shot subshell). %(...)T needs bash >= 4.2, so probe once and keep
+# the `date` fallback for older hosts (e.g. macOS /bin/bash 3.2 in dev).
+if printf '%(%s)T' -1 >/dev/null 2>&1; then
+  _cosh_now_ms() {
+    printf '%(%s)T000\n' -1
+  }
+else
+  _cosh_now_ms() {
+    date +%s000
+  }
+fi
 _cosh_history_entry() {
   local saved_fmt="$HISTTIMEFORMAT"
   HISTTIMEFORMAT=
@@ -455,8 +465,13 @@ _cosh_begin_attempt() {
   if _cosh_command_has_secret "$input"; then
     _COSH_ATTEMPT_SENSITIVE=1
   fi
-  _cosh_utf8_han_status "$input"
-  utf8_status=$?
+  # Guarded call: the helper reports its enum status (1 = plain ASCII)
+  # through the return value by design, so a bare call would surface an
+  # internal "failure" on every ordinary dispatch — fatal under a user
+  # `set -e` session (SEM-019) and noisy for user ERR traps. The
+  # conditional context keeps the 0/1/2 tri-state intact.
+  utf8_status=0
+  _cosh_utf8_han_status "$input" || utf8_status=$?
   if (( utf8_status == 2 )); then
     _COSH_ATTEMPT_UNSAFE=1
     _COSH_ATTEMPT_TOKEN_FINGERPRINT="$(_cosh_token_fingerprint "$top_token")" || _COSH_ATTEMPT_ACTIVE=0
@@ -515,7 +530,10 @@ command_not_found_handle() {
   fi
   if [[ "${_COSH_ATTEMPT_UNSAFE:-0}" == 1 ]]; then
     local command_fingerprint
-    command_fingerprint="$(_cosh_token_fingerprint "$command")"
+    # cksum failure inside the substitution must not leak a non-zero
+    # status into the user's errexit context; empty already means
+    # "delegate to native command_not_found" below.
+    command_fingerprint="$(_cosh_token_fingerprint "$command")" || command_fingerprint=""
     if [[ -z "$command_fingerprint"
        || "$command_fingerprint" != "${_COSH_ATTEMPT_TOKEN_FINGERPRINT:-}" ]]; then
       _cosh_delegate_bash_command_not_found "$command" "$@"
@@ -649,7 +667,100 @@ _cosh_compact_alias_expanded() {
   fi
 }
 
+# NS-009 aggregate exit invariant: after the first DEBUG firing of a line
+# has finished the preexec work, the trap stays DISARMED for the rest of
+# the line — per-command trap execution is what opens bash's mid-line job
+# reap/notify/cleanup window that serializes background jobs. Re-arm only
+# when (a) the active spec is not the marker's own (user ownership must
+# never be dropped), (b) a user OLD DEBUG chain exists (native bash with a
+# user DEBUG trap fires per command too — parity mode), or (c) the line
+# dispatch is still pending (stale-history retry loop). The prompt
+# boundary (_cosh_rearm_debug_trap) is the sole other re-arm authority.
+_cosh_debug_trap_exit() {
+  if [[ "$2" != true || -n "${_COSH_OLD_DEBUG_TRAP:-}" \
+        || "${_COSH_AT_PROMPT:-0}" == 1 ]]; then
+    eval "$1" 2>/dev/null || true
+  else
+    # Ledger for the prompt-boundary re-arm: an empty DEBUG trap at the
+    # prompt is only *our* dormant state if we disarmed it here; without
+    # this record an empty trap is treated as user-cleared and respected.
+    _COSH_DEBUG_TRAP_DORMANT=1
+  fi
+}
+# Prompt-boundary re-arm: snapshot whatever DEBUG trap is live (a user
+# hook may have installed one during this line) and decide ownership:
+#   - empty + user touched traps this line (MAY_CHANGE): the user cleared
+#     the trap on purpose — respect it, marker idles (self-heal semantics);
+#   - empty otherwise: our own dormant state — re-install the marker trap;
+#   - a user trap embedding the marker (combined form): the user owns the
+#     spec — keep it armed as-is so path generation stays fails-closed;
+#   - any other user trap: absorb into the OLD chain, then re-install.
+_cosh_rearm_debug_trap() {
+  local snapshot_file="${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.debug-trap"
+  local current=""
+  local may_change="${_COSH_DEBUG_TRAP_MAY_CHANGE:-0}"
+  unset _COSH_DEBUG_TRAP_MAY_CHANGE
+  _COSH_SNAPSHOT_DEBUG_TRAP=1
+  trap -p DEBUG > "$snapshot_file" 2>/dev/null || true
+  unset _COSH_SNAPSHOT_DEBUG_TRAP
+  IFS= read -r current < "$snapshot_file" || current=""
+  rm -f -- "$snapshot_file" 2>/dev/null || true
+  if [[ -z "$current" ]]; then
+    # Empty trap at the prompt: three-way ownership decision. A line that
+    # touched traps (MAY_CHANGE) means the user cleared it - respect it.
+    # Our own dormant ledger means the line-execution exit disarmed it -
+    # reinstall. Neither (unexpected) fails safe to the native state.
+    if [[ "$may_change" == 1 ]]; then
+      unset _COSH_DEBUG_TRAP_DORMANT
+      _COSH_ACTIVE_DEBUG_TRAP=""
+      return 0
+    fi
+    if [[ "${_COSH_DEBUG_TRAP_DORMANT:-0}" != 1 ]]; then
+      _COSH_ACTIVE_DEBUG_TRAP=""
+      return 0
+    fi
+  fi
+  unset _COSH_DEBUG_TRAP_DORMANT
+  if [[ -n "$current" && "$current" != "trap -- '_cosh_preexec_marker' DEBUG" ]]; then
+    local user_cmd="${current#trap -- \'}"
+    user_cmd="${user_cmd%\' DEBUG}"
+    user_cmd="${user_cmd//\'\\\'\'/\'}"
+    if [[ "$user_cmd" != *_cosh_preexec_marker* ]]; then
+      _COSH_OLD_DEBUG_TRAP="$user_cmd"
+    else
+      _COSH_ACTIVE_DEBUG_TRAP="$current"
+      return 0
+    fi
+  fi
+  _COSH_ACTIVE_DEBUG_TRAP="trap -- '_cosh_preexec_marker' DEBUG"
+  trap '_cosh_preexec_marker' DEBUG
+}
+# Frame-level errexit protection (SEM-019): the dispatch/prompt frames run
+# dozens of internal commands whose transient non-zero statuses must never
+# reach a user `set -e` session. The wrapper suspends errexit on entry and
+# restores it on exit; the veto path (non-zero return, extdebug skip) defers
+# restoration to the next frame entry so the trap's own non-zero return
+# cannot re-trigger errexit mid-veto (2541-D4; prompt-side unified restore
+# proven safe by the #2598 T1 probe).
 _cosh_preexec_marker() {
+  local _cosh_had_errexit=0
+  if [[ "${_COSH_RESTORE_ERREXIT:-0}" == 1 ]]; then
+    _cosh_had_errexit=1
+    unset _COSH_RESTORE_ERREXIT
+  fi
+  case $- in *e*) _cosh_had_errexit=1; set +e ;; esac
+  _cosh_preexec_marker_impl "$@"
+  local _cosh_ret=$?
+  if (( _cosh_had_errexit )); then
+    if (( _cosh_ret == 0 )); then
+      set -e
+    else
+      _COSH_RESTORE_ERREXIT=1
+    fi
+  fi
+  return "$_cosh_ret"
+}
+_cosh_preexec_marker_impl() {
   if [[ "${_COSH_SNAPSHOT_DEBUG_TRAP:-0}" == 1 ]]; then
     return 0
   fi
@@ -662,6 +773,7 @@ _cosh_preexec_marker() {
   if [[ -n "${COMP_TYPE:-}" && ( -n "${COMP_LINE:-}" || -n "${COMP_POINT:-}" ) ]]; then
     return 0
   fi
+  local path_trusted=false
   local active_debug_trap="${_COSH_ACTIVE_DEBUG_TRAP:-}"
   if [[ "${_COSH_IN_PROMPT_COMMAND:-0}" != 1 && "${_COSH_DEBUG_TRAP_MAY_CHANGE:-0}" == 1 ]]; then
     local trap_snapshot_file="${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.debug-trap"
@@ -673,7 +785,6 @@ _cosh_preexec_marker() {
     unset _COSH_DEBUG_TRAP_MAY_CHANGE
   fi
   trap - DEBUG
-  local path_trusted=false
   if [[ "$active_debug_trap" == "trap -- '_cosh_preexec_marker' DEBUG" ]]; then
     path_trusted=true
   fi
@@ -681,7 +792,28 @@ _cosh_preexec_marker() {
     eval "$_COSH_OLD_DEBUG_TRAP" 2>/dev/null || true
   fi
   if [[ "${_COSH_IN_PROMPT_COMMAND:-0}" == 1 ]]; then
-    eval "$active_debug_trap" 2>/dev/null || true
+    _cosh_debug_trap_exit "$active_debug_trap" "$path_trusted"
+    return 0
+  fi
+  # Internal-namespace ownership guard: statements from the marker's own
+  # frames (e.g. the errexit wrapper tail running under the freshly
+  # re-armed trap) must never enter the user dispatch path. Without this,
+  # the stale-history containment check can false-match an internal
+  # statement against the history entry (probed: `_cosh_debug_trap_exit`
+  # contains "exit", the preloaded history tail was `exit`, and the
+  # resulting begin_attempt poisoned the attempt state so the next real
+  # command's command_not_found dispatch delegated natively). `_cosh_`/
+  # `_COSH_` is the marker's reserved namespace; a user command carrying
+  # it degrades to native execution (fail-safe, same as a stale miss).
+  # One obligation survives the early exit: a trap-mutating line (e.g. a
+  # user installing a combined trap that embeds the marker) must still
+  # flag MAY_CHANGE so the next snapshot re-reads ownership — otherwise
+  # path generation would stay trusted under a user-owned trap.
+  if [[ "${BASH_COMMAND:-}" == *_cosh_* || "${BASH_COMMAND:-}" == *_COSH_* ]]; then
+    if [[ "${BASH_COMMAND:-}" == *trap*DEBUG* ]]; then
+      _COSH_DEBUG_TRAP_MAY_CHANGE=1
+    fi
+    _cosh_debug_trap_exit "$active_debug_trap" "$path_trusted"
     return 0
   fi
   if [[ "${_COSH_AT_PROMPT:-0}" == 1 ]]; then
@@ -718,16 +850,16 @@ _cosh_preexec_marker() {
       if fallback_reason="$(_cosh_should_intercept_unknown "$fallback_first_word" "$fallback_command" "$fallback_argc")"; then
         _cosh_emit_intercept_marker "$fallback_command" "$fallback_reason" false "$fallback_sensitive"
         _COSH_AT_PROMPT=0
-        eval "$active_debug_trap" 2>/dev/null || true
+        _cosh_debug_trap_exit "$active_debug_trap" "$path_trusted"
         return 1
       fi
       if _cosh_should_intercept_missing_path "$fallback_first_word" "$fallback_command"; then
         _cosh_emit_intercept_marker "$fallback_command" "natural_language" false "$fallback_sensitive"
         _COSH_AT_PROMPT=0
-        eval "$active_debug_trap" 2>/dev/null || true
+        _cosh_debug_trap_exit "$active_debug_trap" "$path_trusted"
         return 1
       fi
-      eval "$active_debug_trap" 2>/dev/null || true
+      _cosh_debug_trap_exit "$active_debug_trap" "$path_trusted"
       return 0
     fi
     if [[ -n "$history_no" && -n "$command" ]]; then
@@ -784,7 +916,7 @@ _cosh_preexec_marker() {
           fi
           _cosh_emit_intercept_marker "$command" "$reason" false "$intercept_sensitive"
           _COSH_AT_PROMPT=0
-          eval "$active_debug_trap" 2>/dev/null || true
+          _cosh_debug_trap_exit "$active_debug_trap" "$path_trusted"
           return 1
         fi
         if _cosh_should_intercept_missing_path "$first_word" "$command"; then
@@ -793,12 +925,16 @@ _cosh_preexec_marker() {
           fi
           _cosh_emit_intercept_marker "$command" "natural_language" false "$intercept_sensitive"
           _COSH_AT_PROMPT=0
-          eval "$active_debug_trap" 2>/dev/null || true
+          _cosh_debug_trap_exit "$active_debug_trap" "$path_trusted"
           return 1
         fi
         _cosh_begin_attempt "$command" "$first_word" "$attempt_expansion_drift"
       fi
-      if [[ "$command" == trap*DEBUG* ]]; then
+      # Containment form: a trap mutation may hide inside a compound on
+      # the same line (e.g. `f(){ trap - DEBUG; }; f`), not only at the
+      # line head. Cross-line indirection (function defined earlier,
+      # called later) stays undetectable and is a recorded deviation.
+      if [[ "$command" == *trap*DEBUG* ]]; then
         _COSH_DEBUG_TRAP_MAY_CHANGE=1
       fi
       if [[ "${_COSH_ATTEMPT_SENSITIVE:-0}" == 1
@@ -817,7 +953,7 @@ _cosh_preexec_marker() {
     fi
     _COSH_AT_PROMPT=0
   fi
-  eval "$active_debug_trap" 2>/dev/null || true
+  _cosh_debug_trap_exit "$active_debug_trap" "$path_trusted"
   return 0
 }
 _cosh_precmd_marker() {
@@ -875,8 +1011,56 @@ _cosh_run_user_prompt_command() {
   shopt -s extdebug 2>/dev/null || true
   return "$status"
 }
+# Companion wrapper to _cosh_preexec_marker: captures the user's $? (as
+# staged by the PROMPT_COMMAND guard value) before anything else runs,
+# hands it to the impl explicitly, and uses the same deferred errexit
+# restore as the preexec wrapper: a non-zero passthrough status would
+# otherwise fail the PROMPT_COMMAND list itself and errexit kills the
+# session (bash 3.2 and 5.2 both, probed in the #2598 T7 loop — the
+# earlier T1 "unified restore is safe" reading was an artifact of a
+# clobbered $? that pinned the status to 0). Restoration lands at the
+# next frame entry, before the next user command executes.
 _cosh_prompt_command() {
-  local status=$?
+  # Prefer the status captured by the PROMPT_COMMAND guard value (set
+  # before `declare -F` overwrote $?); fall back to $? for direct callers.
+  local _cosh_status="${_COSH_PROMPT_STATUS-$?}"
+  unset _COSH_PROMPT_STATUS
+  local _cosh_had_errexit=0
+  if [[ "${_COSH_RESTORE_ERREXIT:-0}" == 1 ]]; then
+    _cosh_had_errexit=1
+    unset _COSH_RESTORE_ERREXIT
+  fi
+  case $- in *e*) _cosh_had_errexit=1; set +e ;; esac
+  _cosh_prompt_command_impl "$_cosh_status"
+  local _cosh_ret=$?
+  if (( _cosh_had_errexit )); then
+    # Deferred restore, same mechanism as the veto path: a bare `set -e`
+    # here runs after the impl re-armed the trap and released the
+    # IN_PROMPT guard, so it dispatches as a DEBUG frame whose bare text
+    # bidirectionally matches a just-executed `set -e*` history entry
+    # (probed: duplicate preexec emit + native cnf leak on the next
+    # unknown command). The flag is consumed at the next frame entry
+    # inside the trap handler, where DEBUG does not recurse. If the
+    # marker trap is idle (user cleared it), no next frame would consume
+    # the flag, so restore in place - with no trap armed the bare
+    # statement cannot dispatch.
+    if [[ -n "${_COSH_ACTIVE_DEBUG_TRAP:-}" ]]; then
+      _COSH_RESTORE_ERREXIT=1
+    else
+      set -e
+    fi
+    # A non-zero passthrough would fail the PROMPT_COMMAND list itself and
+    # errexit kills the session (probed on bash 3.2 and 5.2). Returning 0
+    # is safe: bash restores the user's $? at the prompt boundary on its
+    # own (probed: PROMPT_COMMAND='false' leaves `echo $?` = 7 after a
+    # status-7 command, bash 3.2 and 5.2), so the passthrough below is a
+    # defensive redundancy, not the contract carrier.
+    return 0
+  fi
+  return "$_cosh_ret"
+}
+_cosh_prompt_command_impl() {
+  local status="$1"
   _COSH_IN_PROMPT_COMMAND=1
   _cosh_maybe_emit_native_history_file_marker
   _cosh_precmd_marker "$status"
@@ -893,6 +1077,7 @@ _cosh_prompt_command() {
   # The next visible shell bytes are the prompt paint. Keep this marker after
   # every user PROMPT_COMMAND so its output cannot masquerade as the prompt.
   _cosh_emit_marker "prompt_ready" "" "$status" false
+  _cosh_rearm_debug_trap
   _COSH_IN_PROMPT_COMMAND=0
   return "$status"
 }
@@ -908,6 +1093,19 @@ shopt -s extdebug 2>/dev/null || true
 _COSH_OLD_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null | sed "s/^trap -- '\\(.*\\)' DEBUG$/\\1/" || true)"
 _COSH_ACTIVE_DEBUG_TRAP="trap -- '_cosh_preexec_marker' DEBUG"
 trap '_cosh_preexec_marker' DEBUG
+# Record the export attribute before the wholesale replacement below:
+# `unset PROMPT_COMMAND` drops an env-inherited -x together with the
+# value, so a user reassignment (scalar or array) would show `declare -a`
+# where native bash keeps `declare -ax` (NS-005). Only the flags token of
+# `declare -p` is parsed — an "x" inside the value cannot false-positive.
+_COSH_USER_PROMPT_COMMAND_WAS_EXPORTED=0
+_cosh_pc_decl="$(declare -p PROMPT_COMMAND 2>/dev/null)" || _cosh_pc_decl=""
+_cosh_pc_flags="${_cosh_pc_decl#declare -}"
+_cosh_pc_flags="${_cosh_pc_flags%% *}"
+if [[ "$_cosh_pc_flags" == *x* ]]; then
+  _COSH_USER_PROMPT_COMMAND_WAS_EXPORTED=1
+fi
+unset _cosh_pc_decl _cosh_pc_flags
 if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
   unset _COSH_USER_PROMPT_COMMAND
   _COSH_USER_PROMPT_COMMAND_IS_ARRAY=0
@@ -934,7 +1132,22 @@ fi
 # and the in-function restore self-heals on the first prompt after the
 # user clears the trap.
 unset PROMPT_COMMAND
-PROMPT_COMMAND=_cosh_prompt_command
+# Guard-form hijack value: an env-leaked copy evaluated by a nested bash
+# (the -x restore below re-opens that path) must stay a silent no-op
+# instead of "command not found" noise at every prompt. `declare -F` only
+# matches shell functions — a PATH executable of the same name cannot be
+# injected through it. The leading status capture is part of the contract:
+# `declare -F` would otherwise clobber the user's $? before the prompt
+# chain reads it (ledger exit codes depend on it); in a nested bash the
+# assignment is equally silent. The re-arm stays inside the prompt frame
+# (not appended here): the frame's own tail statements firing the freshly
+# re-armed trap are absorbed by the dispatch guards, while a trailing list
+# member would run under a still-armed user trap before the frame marks
+# itself in-prompt, exploding into full junk dispatches per member.
+PROMPT_COMMAND='_COSH_PROMPT_STATUS=$?; declare -F _cosh_prompt_command >/dev/null && _cosh_prompt_command'
+if [[ "${_COSH_USER_PROMPT_COMMAND_WAS_EXPORTED:-0}" == 1 ]]; then
+  export PROMPT_COMMAND
+fi
 if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
   builtin history -c 2>/dev/null || true
 fi
