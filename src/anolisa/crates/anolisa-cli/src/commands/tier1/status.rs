@@ -3,8 +3,10 @@
 //! Reads `installed.toml` via the shared [`crate::commands::common`] helper
 //! and lists every `Component`-kind object, or filters down to a single
 //! name. A missing state file is the expected fresh-install case and yields
-//! an empty result; an unknown component name surfaces a synthetic
-//! `not_installed` record rather than an error (launch spec §7.1).
+//! an empty result. When the component index is available, unsupported names
+//! are rejected with discovery guidance; without an index, new names cannot
+//! be validated and fail explicitly. Exact identities already present in state
+//! always win and remain inspectable offline.
 //!
 //! This handler reports state-on-disk plus live read-only probes. Every
 //! persisted field in [`ComponentRecord`] is projected straight from
@@ -41,17 +43,24 @@ use crate::color::{Palette, pad_right};
 use crate::commands::common;
 use crate::commands::common::RepoPersistPolicy;
 use crate::commands::state_view::{StateScope, StateView, StateVisibility};
+use crate::commands::telemetry::status_command_for_service_target;
 use crate::commands::tier1::install::rpm_package_candidates_with_index;
 use crate::context::{CliContext, InstallMode};
 use crate::repo_config::BackendConfig;
-use crate::resolution::{ComponentIndex, ResolutionUse, load_optional_component_index};
+use crate::resolution::{
+    ComponentIndex, ResolutionUse, load_optional_component_index, lookup_component_alias,
+};
 use crate::response::{CliError, render_json};
 
 const COMMAND: &str = "status";
 
 #[derive(Parser)]
 pub struct StatusArgs {
-    /// Show detail for a specific component (omit for aggregate view).
+    /// Show detail for a specific ANOLISA component (omit for aggregate view).
+    ///
+    /// Run `anolisa list` to view supported component names.
+    ///
+    /// Use `anolisa telemetry status` for telemetry service state.
     pub component: Option<String>,
 }
 
@@ -177,15 +186,12 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
     let adapter_scan = common::build_adapter_manager(ctx).scan().ok();
 
     let query = RpmPackageQuery::system();
-    let selected_component = args
+    // A named query uses the component index both to validate/resolve its
+    // identity and, in system mode, to map the observed RPM probe below.
+    // Loading remains best-effort so installed state is inspectable offline.
+    let repo_config = args
         .component
-        .as_deref()
-        .map(|target| lookup_component_name_from_view(target, &view, ctx));
-
-    // repo_config / component_index are still needed for the observed-record
-    // probe below (system mode only). Name resolution above is handled by
-    // common::lookup_component_name which loads its own config.
-    let repo_config = (ctx.install_mode == InstallMode::System && args.component.is_some())
+        .is_some()
         .then(|| {
             common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::BestEffort).ok()
         })
@@ -195,6 +201,11 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
     let component_index = repo_config
         .as_ref()
         .and_then(|cfg| load_optional_component_index(&layout, &env, cfg));
+    let selected_component = args
+        .component
+        .as_deref()
+        .map(|target| resolve_component_target(target, &view, component_index.as_ref()))
+        .transpose()?;
 
     let system_scope_service = service_factory(InstallMode::System.as_str(), &env);
     let current_system_service = service_factory(ctx.install_mode.as_str(), &env);
@@ -249,6 +260,51 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
         render_quarantined(&quarantined, ctx.no_color);
     }
     Ok(())
+}
+
+fn resolve_component_target(
+    input: &str,
+    view: &StateView,
+    component_index: Option<&ComponentIndex>,
+) -> Result<String, CliError> {
+    if view.has_exact_component(input) {
+        return Ok(input.to_string());
+    }
+
+    if let Some(index) = component_index {
+        if index.components.iter().any(|entry| entry.name == input) {
+            return Ok(input.to_string());
+        }
+        if let Some(component) = lookup_component_alias(input, Some(index)) {
+            return Ok(component);
+        }
+    }
+
+    let management_command = status_command_for_service_target(input);
+    if let Some(command) = management_command {
+        return Err(CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "unsupported component '{input}'; run `{command}` to inspect telemetry state"
+            ),
+        });
+    }
+
+    if component_index.is_some() {
+        return Err(CliError::InvalidArgument {
+            command: COMMAND.to_string(),
+            reason: format!(
+                "unsupported component '{input}'; run `anolisa list` to view supported components"
+            ),
+        });
+    }
+
+    Err(CliError::Runtime {
+        command: COMMAND.to_string(),
+        reason: format!(
+            "component index is unavailable; cannot validate component '{input}'; run `anolisa list` to inspect repository metadata"
+        ),
+    })
 }
 
 /// Project the quarantined records of every visible root, optionally
@@ -314,13 +370,6 @@ pub(crate) fn migrate_view_states(view: &mut StateView) {
     if let Some(root) = view.visible_roots.iter().find(|root| root.writable) {
         view.writable = root.clone();
     }
-}
-
-fn lookup_component_name_from_view(input: &str, view: &StateView, ctx: &CliContext) -> String {
-    if view.has_exact_component(input) {
-        return input.to_string();
-    }
-    common::lookup_component_name_in_store(input, &view.writable.state, ctx, COMMAND)
 }
 
 /// Scope-routed service managers for the manifest health probe, built once
@@ -1159,6 +1208,107 @@ mod tests {
         ObjectKind, ObjectStatus, OwnedFile, OwnedFileKind, SubscriptionScope,
     };
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn telemetry_service_target_redirects_when_component_index_is_unavailable() {
+        let view = scoped_status_view(InstalledState::default(), InstalledState::default());
+        let error = resolve_component_target("anolisa-telemetry", &view, None)
+            .expect_err("a telemetry service is not a component target");
+
+        assert_eq!(error.code(), "INVALID_ARGUMENT");
+        assert_eq!(error.command(), COMMAND);
+        assert_eq!(
+            error.reason(),
+            "unsupported component 'anolisa-telemetry'; run `anolisa telemetry status` to inspect telemetry state",
+        );
+    }
+
+    #[test]
+    fn exact_stored_component_identity_wins_over_management_redirect() {
+        let mut state = InstalledState::default();
+        state.upsert_object(component_object(
+            "anolisa-telemetry",
+            "1.0.0",
+            ObjectStatus::Installed,
+        ));
+        let view = scoped_status_view(state, InstalledState::default());
+        let index = status_component_index();
+
+        assert_eq!(
+            resolve_component_target("anolisa-telemetry", &view, Some(&index))
+                .expect("exact component identity must win"),
+            "anolisa-telemetry",
+        );
+        assert_eq!(
+            resolve_component_target("anolisa-telemetry", &view, None)
+                .expect("exact component identity remains inspectable offline"),
+            "anolisa-telemetry",
+        );
+    }
+
+    #[test]
+    fn component_index_rejects_unsupported_target_with_discovery_help() {
+        let index = status_component_index();
+        let view = scoped_status_view(InstalledState::default(), InstalledState::default());
+        let error = resolve_component_target("unknown-component", &view, Some(&index))
+            .expect_err("an authoritative index can reject unknown names");
+
+        assert_eq!(error.code(), "INVALID_ARGUMENT");
+        assert_eq!(
+            error.reason(),
+            "unsupported component 'unknown-component'; run `anolisa list` to view supported components",
+        );
+    }
+
+    #[test]
+    fn component_index_accepts_canonical_names_and_aliases() {
+        let index = status_component_index();
+        let view = scoped_status_view(InstalledState::default(), InstalledState::default());
+
+        assert_eq!(
+            resolve_component_target("cosh", &view, Some(&index)).expect("canonical component"),
+            "cosh",
+        );
+        assert_eq!(
+            resolve_component_target("copilot-shell", &view, Some(&index)).expect("package alias"),
+            "cosh",
+        );
+    }
+
+    #[test]
+    fn unknown_target_fails_when_component_index_is_unavailable() {
+        let view = scoped_status_view(InstalledState::default(), InstalledState::default());
+        let error = resolve_component_target("unknown-component", &view, None)
+            .expect_err("new component identities require the component index");
+
+        assert_eq!(error.code(), "EXECUTION_FAILED");
+        assert_eq!(
+            error.reason(),
+            "component index is unavailable; cannot validate component 'unknown-component'; run `anolisa list` to inspect repository metadata",
+        );
+    }
+
+    fn status_component_index() -> ComponentIndex {
+        ComponentIndex::from_toml_str(
+            r#"
+schema_version = 2
+
+[[components]]
+name = "cosh"
+targets = [{ os = "linux", arch = "x86_64" }]
+
+[[components.backends]]
+kind = "rpm"
+package = "copilot-shell"
+
+[[components.aliases]]
+kind = "rpm-package"
+name = "copilot-shell"
+"#,
+            "components.toml",
+        )
+        .expect("component index")
+    }
 
     #[test]
     fn lifecycle_hints_preserve_record_scope() {
