@@ -23,7 +23,7 @@ pub use policy::{LoadedPolicy, PolicySource};
 use chrono::Utc;
 use cosh_types::audit::{
     Action, AuditActor, AuditActorKind, AuditComponent, AuditComponentName, AuditDecisionData,
-    AuditEventOutcome, AuditEventType, AuditEventV1, AuditIdentity, AuditOutcomeStatus,
+    AuditEventOutcome, AuditEventType, AuditEventV1, AuditIdentity, AuditMode, AuditOutcomeStatus,
     AuditRedaction, AuditRedactionStatus, AuditSubject, Decision, KnownAuditEventType, LogSource,
     Outcome,
 };
@@ -113,25 +113,48 @@ fn detected_shell_session_id() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// Runs a full policy evaluation and durably records its decision.
+/// Runs a full policy evaluation and records its decision when possible.
 ///
 /// # Errors
 ///
 /// Returns an audit error with the produced decision in safe structured
-/// details when the version 1 record cannot be persisted.
+/// details when a deny or approval-required decision cannot be persisted.
+/// Allowed decisions remain available in best-effort mode if recording fails.
 pub fn check(
     action: Action,
     source: LogSource,
     loaded: &LoadedPolicy,
 ) -> Result<Decision, CoshError> {
+    let settings = config::load_audit_settings(None)?.settings;
+    check_with_mode(action, source, loaded, settings.mode)
+}
+
+fn check_with_mode(
+    action: Action,
+    source: LogSource,
+    loaded: &LoadedPolicy,
+    mode: AuditMode,
+) -> Result<Decision, CoshError> {
     let decision = evaluate(&action, loaded);
-    if let Err(mut error) = record_to_log(action, &decision, source) {
-        if let Ok(value) = serde_json::to_value(&decision) {
-            error = error.with_details(serde_json::json!({ "decision": value }));
+    match record_to_log(action, &decision, source) {
+        Ok(()) => Ok(decision),
+        Err(error) if decision.outcome == Outcome::Allow && mode == AuditMode::BestEffort => {
+            tracing::warn!(
+                target: "cosh_audit",
+                decision = ?decision,
+                audit_mode = ?mode,
+                error = %error,
+                "failed to persist allowed audit decision in best-effort mode; allowing action"
+            );
+            Ok(decision)
         }
-        return Err(error);
+        Err(mut error) => {
+            if let Ok(value) = serde_json::to_value(&decision) {
+                error = error.with_details(serde_json::json!({ "decision": value }));
+            }
+            Err(error)
+        }
     }
-    Ok(decision)
 }
 
 /// Records a pre-decided policy result without evaluating it again.
@@ -244,7 +267,7 @@ mod tests {
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     use super::*;
-    use cosh_types::audit::{ActionSubsystem, Outcome};
+    use cosh_types::audit::{ActionSubsystem, AuditMode, Outcome};
 
     fn env_lock() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -272,6 +295,14 @@ mod tests {
             original_shell_session_id,
             _lock: lock,
         }
+    }
+
+    fn failing_audit_env() -> AuditEnvGuard {
+        let guard = temp_audit_env();
+        let file_root = guard.directory.path().join("not-a-directory");
+        std::fs::write(&file_root, []).unwrap();
+        std::env::set_var("COSH_AUDIT_DIR", file_root);
+        guard
     }
 
     impl Drop for AuditEnvGuard {
@@ -303,7 +334,13 @@ mod tests {
     fn check_records_one_v1_policy_event() {
         let guard = temp_audit_env();
         let loaded = builtin::balanced();
-        let decision = check(package_install(), LogSource::Cli, &loaded).unwrap();
+        let decision = check_with_mode(
+            package_install(),
+            LogSource::Cli,
+            &loaded,
+            AuditMode::BestEffort,
+        )
+        .unwrap();
         assert_eq!(decision.outcome, Outcome::RequireApproval);
         let read = reader::read_all(guard.directory.path(), false).unwrap();
         assert_eq!(read.events.len(), 1);
@@ -311,11 +348,76 @@ mod tests {
     }
 
     #[test]
+    fn check_allows_allowed_action_when_audit_persistence_fails() {
+        let _guard = failing_audit_env();
+
+        let decision = check_with_mode(
+            parse_action_string("echo hello").unwrap(),
+            LogSource::Cli,
+            &builtin::balanced(),
+            AuditMode::BestEffort,
+        )
+        .unwrap();
+
+        assert_eq!(decision.outcome, Outcome::Allow);
+    }
+
+    #[test]
+    fn check_fails_closed_for_non_allow_actions_when_audit_persistence_fails() {
+        let _guard = failing_audit_env();
+
+        for (action_string, expected_outcome) in [
+            ("rm /tmp/test", Outcome::Deny),
+            ("touch /tmp/test", Outcome::RequireApproval),
+        ] {
+            let error = check_with_mode(
+                parse_action_string(action_string).unwrap(),
+                LogSource::Cli,
+                &builtin::balanced(),
+                AuditMode::BestEffort,
+            )
+            .unwrap_err();
+            let details = error
+                .details
+                .expect("audit error must include its decision");
+
+            assert_eq!(
+                details["decision"]["outcome"],
+                serde_json::to_value(expected_outcome).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn check_fails_closed_for_allowed_action_when_audit_is_required() {
+        let _guard = failing_audit_env();
+
+        let error = check_with_mode(
+            parse_action_string("echo hello").unwrap(),
+            LogSource::Cli,
+            &builtin::balanced(),
+            AuditMode::Required,
+        )
+        .unwrap_err();
+        let details = error
+            .details
+            .expect("audit error must include its decision");
+
+        assert_eq!(details["decision"]["outcome"], "Allow");
+    }
+
+    #[test]
     fn policy_event_records_cosh_session_as_shell_identity() {
         let guard = temp_audit_env();
         std::env::set_var("COSH_SESSION_ID", "raw-session-identity-test");
 
-        check(package_install(), LogSource::Cli, &builtin::balanced()).unwrap();
+        check_with_mode(
+            package_install(),
+            LogSource::Cli,
+            &builtin::balanced(),
+            AuditMode::BestEffort,
+        )
+        .unwrap();
 
         let read = reader::read_all(guard.directory.path(), false).unwrap();
         let identity = &read.events[0].event.identity;
@@ -342,7 +444,13 @@ mod tests {
         let guard = temp_audit_env();
         std::env::remove_var("COSH_SESSION_ID");
 
-        check(package_install(), LogSource::Cli, &builtin::balanced()).unwrap();
+        check_with_mode(
+            package_install(),
+            LogSource::Cli,
+            &builtin::balanced(),
+            AuditMode::BestEffort,
+        )
+        .unwrap();
 
         let read = reader::read_all(guard.directory.path(), false).unwrap();
         let identity = &read.events[0].event.identity;
@@ -361,7 +469,7 @@ mod tests {
             args: vec![("password".to_string(), "hunter2".to_string())],
             raw: None,
         };
-        check(action, LogSource::Cli, &loaded).unwrap();
+        check_with_mode(action, LogSource::Cli, &loaded, AuditMode::BestEffort).unwrap();
         let files = std::fs::read_dir(guard.directory.path().join("v1/segments"))
             .unwrap()
             .flat_map(|date| std::fs::read_dir(date.unwrap().path()).unwrap())
