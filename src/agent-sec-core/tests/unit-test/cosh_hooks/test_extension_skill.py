@@ -61,6 +61,8 @@ def test_security_observability_skill_documents_cli_and_output_contracts() -> No
     assert "--since" in content
     assert "--until" in content
     assert "category`、`event_type`、`trace_id`" in content
+    assert "--limit '<matching_count_or_safe_page_size>'" in content
+    assert "--count" in content
 
     event_fields = {
         "event_id",
@@ -106,8 +108,8 @@ def test_security_observability_skill_includes_few_shot_queries() -> None:
     assert "events --last-hours 1 --output json" in content
     assert "帮我查询本次会话出现的安全事件" in content
     assert "events --session-id '<current_session_id>' --output json" in content
-    assert "帮我复盘最近一次 Agent 会话的安全情况" in content
-    assert "observability report --last --format json" in content
+    assert "帮我复盘本次会话的安全情况" in content
+    assert "帮我复盘最近一次 Agent 会话的安全情况" not in content
 
 
 def test_security_observability_skill_documents_cosh_ng_session_id_lookup() -> None:
@@ -122,6 +124,8 @@ def test_security_observability_skill_documents_cosh_ng_session_id_lookup() -> N
     assert "### cosh-ng 特别用法：`runtime_context` 工具" in content
     assert "`provider_session_id`" in content
     assert "events --session-id '<provider_session_id>' --output json" in content
+    assert "它应当是 UUID" in content
+    assert "必须继续按 `^[0-9a-fA-F]" in content
     assert (
         "observability report --session-id '<provider_session_id>' --format json"
         in content
@@ -151,6 +155,19 @@ def test_security_observability_skill_scopes_session_queries_to_cosh_ng() -> Non
     assert "不要因为拿不到 `session_id` 而停下来反复询问用户" in content
 
 
+def test_security_observability_skill_allows_safe_correlation_ids() -> None:
+    content = _SKILL_PATH.read_text(encoding="utf-8")
+    agents = _AGENTS_PATH.read_text(encoding="utf-8")
+
+    assert "不一定是 UUID" in content
+    assert "session-001" in content
+    assert "thread_xxx" in content
+    assert "长度不超过 256 字符" in content
+    assert "^[A-Za-z0-9][A-Za-z0-9._:@+=,/-]{0,255}$" in content
+    assert "cosh-ng `runtime_context.provider_session_id`" in agents
+    assert "which is expected to be a UUID" in agents
+
+
 def test_security_observability_parameters_are_covered_by_agents_contract() -> None:
     content = _AGENTS_PATH.read_text(encoding="utf-8")
 
@@ -160,3 +177,6 @@ def test_security_observability_parameters_are_covered_by_agents_contract() -> N
     assert "Do not replace it with instructions" in content
     assert "--help" in content
     assert "contract tests" in content
+    assert "explicit `--limit`" in content
+    assert "counts between 101 and 200" in content
+    assert "bounded safe-character full-match" in content

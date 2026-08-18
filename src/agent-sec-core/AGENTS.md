@@ -503,15 +503,20 @@ uv run --project agent-sec-cli pytest tests/unit-test/hermes-plugin/ -v
 - The aggregation output is counts + RISK lines only; `pass`/`allow` events
   never get a per-event line and their `details` are not fetched. This is a
   context-cost invariant, not cosmetics: a security report must not flood the
-  Agent conversation. Keep the "上下文开销控制" guidance (count first, expand
+  Agent conversation. Keep the "上下文开销控制" guidance (count first, set an
+  explicit `--limit` or paginate until every matching event is covered, expand
   only pending items, drill by `event_id` on demand, aggregate through the
-  pipe) intact when editing.
+  pipe) intact when editing. Never let the aggregation path rely on the CLI
+  default `--limit 100`: counts between 101 and 200 must still be fetched in
+  full before reporting risk totals.
 - The "参数取值约束" section is a security control, not style. Every documented
   command interpolates `<session_id>`/`<event_id>` into a single-quoted shell
-  string, and the skill explicitly accepts a user-supplied `session_id`, so an
+  string, and the skill explicitly accepts user-supplied correlation IDs, so an
   unvalidated value closes the quote and yields command injection (verified
-  reproducible). Keep the strict UUID full-match requirement whenever adding or
-  editing a command that carries an ID placeholder.
+  reproducible). Do not narrow all IDs to UUIDs: adapters persist values such as
+  `session-001` or `thread_xxx`. Keep a bounded safe-character full-match
+  requirement for generic correlation IDs, and keep the stricter UUID check for
+  cosh-ng `runtime_context.provider_session_id`, which is expected to be a UUID.
 - The "获取单条事件细节" section exists because `events` has **no `--event-id`
   filter**; single-event drill-down must go through client-side `jq` selection.
   Keep it that way unless the CLI gains such a filter. Detail lives under the
@@ -534,8 +539,9 @@ uv run --project agent-sec-cli pytest tests/unit-test/hermes-plugin/ -v
   exposes that tool as of this release. If one starts to, update both the skill
   section and its contract test.
 - Only cosh-ng lets an Agent resolve its own `session_id`. Every other runtime
-  must fall back to a time range or `--last` and state the real query scope in
-  its answer, so keep the skill from telling those Agents to ask the user for an
+  must fall back to a time range or, only when the user explicitly asks for the
+  latest recorded session, `--last`, and state the real query scope in its
+  answer, so keep the skill from telling those Agents to ask the user for an
   id they cannot obtain. `run_id` and `trace_id` are never self-resolvable.
 - Keep the warning that `COSH_SESSION_ID` is not the agent session id. In
   cosh-ng it is the shell/terminal identity recorded as `shell_session_id`, so

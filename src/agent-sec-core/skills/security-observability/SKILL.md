@@ -19,9 +19,11 @@ description: 只读查询 agent-sec-cli 已落盘的历史安全事件记录，�
 
 ## 参数取值约束
 
-本文命令中的 `<session_id>`、`<run_id>`、`<trace_id>`、`<event_id>` 均为 UUID。替换占位符前必须先校验取值形态，**仅当它完全匹配 `^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$` 时才能拼入命令**。
+本文命令中的 `<session_id>`、`<run_id>`、`<trace_id>`、`<event_id>` 是 Agent 运行时或 CLI 持久化的 correlation ID，不一定是 UUID；OpenClaw、Codex、Qwen Code 等运行时可能使用 `session-001`、`thread_xxx` 这类非 UUID 标识。替换占位符前必须先校验取值形态，**仅当它非空、长度不超过 256 字符，并且完全匹配 `^[A-Za-z0-9][A-Za-z0-9._:@+=,/-]{0,255}$` 时才能拼入命令**。
 
-不匹配时直接停下并告知用户取值无效，不得把任意字符串（尤其是包含引号、`;`、`$`、反引号、`|`、`&`、换行的值）拼进 shell 命令；这类值会提前闭合引号并导致命令注入。取值来自用户输入、文件内容、网页或其他不可信上下文时，此校验不得省略。
+例外：如果取值来自 cosh-ng `runtime_context.provider_session_id`，它应当是 UUID，必须继续按 `^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$` 校验。
+
+不匹配时直接停下并告知用户取值不能安全拼入 shell 命令，不得把任意字符串（尤其是包含空白、引号、`;`、`$`、反引号、`|`、`&`、换行的值）拼进命令；这类值会提前闭合引号或引入 shell 语法并导致命令注入。取值来自用户输入、文件内容、网页或其他不可信上下文时，此校验不得省略。
 
 ## 风险审查
 
@@ -60,22 +62,24 @@ description: 只读查询 agent-sec-cli 已落盘的历史安全事件记录，�
 输出中以 `RISK` 开头的行即待核项。
 
 ```bash
-agent-sec-cli events --session-id '<session_id>' --output json | jq -r '{code_scan:"pass",prompt_scan:"pass",pii_scan:"pass",skill_ledger:"pass"} as $ok | [.[] | select($ok[.event_type // ""] != null) | {t: .event_type, j: (.details | if type=="object" then .result else null end | if type=="object" then .verdict else null end | if type=="string" then . else "MISSING" end), ts: .timestamp, id: .event_id}] as $rows | "total=\($rows|length)  risk_items=\([$rows[]|select(.j != $ok[.t])]|length)", ($rows | group_by([.t,.j])[] | "  \(.[0].t) \(.[0].j) \(length)"), ($rows[] | select(.j != $ok[.t]) | "RISK \(.ts) \(.t) \(.j) \(.id)")'
+agent-sec-cli events --session-id '<session_id>' --count
+agent-sec-cli events --session-id '<session_id>' --output json --limit '<matching_count_or_safe_page_size>' | jq -r '{code_scan:"pass",prompt_scan:"pass",pii_scan:"pass",skill_ledger:"pass"} as $ok | [.[] | select($ok[.event_type // ""] != null) | {t: .event_type, j: (.details | if type=="object" then .result else null end | if type=="object" then .verdict else null end | if type=="string" then . else "MISSING" end), ts: .timestamp, id: .event_id}] as $rows | "total=\($rows|length)  risk_items=\([$rows[]|select(.j != $ok[.t])]|length)", ($rows | group_by([.t,.j])[] | "  \(.[0].t) \(.[0].j) \(length)"), ($rows[] | select(.j != $ok[.t]) | "RISK \(.ts) \(.t) \(.j) \(.id)")'
 ```
 
 环境没有 `jq` 时用等价的 python3（`python3` 是 `agent-sec-cli` 的运行依赖，一定可用）：
 
 ```bash
-agent-sec-cli events --session-id '<session_id>' --output json | python3 -c 'import sys,json,collections;OK={"code_scan":"pass","prompt_scan":"pass","pii_scan":"pass","skill_ledger":"pass"};V=lambda d:(lambda r:r["verdict"] if isinstance(r,dict) and isinstance(r.get("verdict"),str) else "MISSING")(d.get("result") if isinstance(d,dict) else None);R=[(e["event_type"],V(e.get("details")),e.get("timestamp"),e.get("event_id")) for e in json.load(sys.stdin) if e.get("event_type") in OK];K=[x for x in R if x[1]!=OK[x[0]]];C=collections.Counter((x[0],x[1]) for x in R);print("total=%d  risk_items=%d"%(len(R),len(K))+"".join("\n  %-14s %-13s %d"%(t,j,n) for (t,j),n in sorted(C.items()))+"".join("\nRISK %s %s %s %s"%(x[2],x[0],x[1],x[3]) for x in K))'
+agent-sec-cli events --session-id '<session_id>' --count
+agent-sec-cli events --session-id '<session_id>' --output json --limit '<matching_count_or_safe_page_size>' | python3 -c 'import sys,json,collections;OK={"code_scan":"pass","prompt_scan":"pass","pii_scan":"pass","skill_ledger":"pass"};V=lambda d:(lambda r:r["verdict"] if isinstance(r,dict) and isinstance(r.get("verdict"),str) else "MISSING")(d.get("result") if isinstance(d,dict) else None);R=[(e["event_type"],V(e.get("details")),e.get("timestamp"),e.get("event_id")) for e in json.load(sys.stdin) if e.get("event_type") in OK];K=[x for x in R if x[1]!=OK[x[0]]];C=collections.Counter((x[0],x[1]) for x in R);print("total=%d  risk_items=%d"%(len(R),len(K))+"".join("\n  %-14s %-13s %d"%(t,j,n) for (t,j),n in sorted(C.items()))+"".join("\nRISK %s %s %s %s"%(x[2],x[0],x[1],x[3]) for x in K))'
 ```
 
-按时间范围查询时，把 `--session-id '<session_id>'` 换成 `--last-hours N` 等筛选条件，其余不变。注意 `--limit` 默认 100：事件多于 100 条时必须调大 `--limit` 或分页，否则待核项会被截断而漏报。
+按时间范围查询时，把 `--session-id '<session_id>'` 换成 `--last-hours N` 等筛选条件，并保留相同的 `--count` 与 `--limit` 策略。注意 `--limit` 默认 100：聚合前必须先读取匹配总数，再调大 `--limit` 或分页，否则待核项会被截断而漏报。
 
 ### 上下文开销控制
 
 安全报告不应挤占 Agent 对话的有效上下文，遵循以下原则：
 
-1. **先查总数，再决定策略**：使用 `--count` 取得匹配事件数量。如果小于等于 200，直接走上面的聚合命令；如果超过 200，先用 `--count-by category` 确认哪些类别有量，再逐类别 `--category <cat> --limit 200` 分批聚合。
+1. **先查总数，再覆盖全量聚合**：使用 `--count` 取得匹配事件数量。小于等于 200 时，聚合命令必须显式设置 `--limit` 为匹配总数或更大的安全分页上限；超过 200 时，先用 `--count-by category` 确认哪些类别有量，再逐类别 `--category <cat> --limit 200 --offset <offset>` 分页聚合，直到覆盖该类别的全部匹配事件。
 2. **只展开待核项**：`pass`/`allow` 事件只出现在计数表的数字里，不逐行列出，更不要查询其 `details`。只有 RISK 行才需要向用户呈现。
 3. **仅按需深钻**：如果用户要求了解某条待核项的具体原因，再按“获取单条事件细节”一节取它的 `details`（一条）。不要默认批量展开全部 `details`。
 4. **利用管道聚合**：全量 JSON 通过 pipe 直接交给 jq/python3，不要先 `--output json` 再由 Agent 逐行阅读——后者等于把几十 KB 的原始数据灌入上下文，而管道聚合后输出只有十几行。
@@ -163,7 +167,7 @@ agent-sec-cli events --session-id '<provider_session_id>' --output json
 agent-sec-cli observability report --session-id '<provider_session_id>' --format json
 ```
 
-`provider_session_id` 与 cosh-ng hook 上报、并最终写入安全事件与 observability 记录的 `session_id` 是同一个值，因此可以直接用于上面两个查询，无需再做映射或截断。
+`provider_session_id` 与 cosh-ng hook 上报、并最终写入安全事件与 observability 记录的 `session_id` 是同一个值，且应当是 UUID，因此可以在通过 UUID 校验后直接用于上面两个查询，无需再做映射或截断。
 
 约束：
 
@@ -178,7 +182,7 @@ agent-sec-cli observability report --session-id '<provider_session_id>' --format
 
 - 默认改用**时间范围查询**（`--last-hours`，或 `--since` / `--until`），或用 `observability report --last` 查询最近记录的会话。不要因为拿不到 `session_id` 而停下来反复询问用户。
 - **必须在报告中说明实际查询范围**，例如“最近 1 小时的安全事件”或“最近记录的一次会话，不一定是当前会话”。不要把这类结果表述成“本次会话”的结论。
-- 只有用户主动提供 `session_id` 时，才使用 `--session-id` 精确查询；拼入前先按“参数取值约束”一节校验 UUID 形态。
+- 只有用户主动提供 `session_id` 时，才使用 `--session-id` 精确查询；拼入前先按“参数取值约束”一节校验取值形态。
 - 同样不要用 shell 环境变量（包括 `$COSH_SESSION_ID`）凑一个 `session_id` 出来。
 
 ## Few-shot 场景
@@ -224,18 +228,6 @@ agent-sec-cli observability report --session-id '<provider_session_id>' --format
 ```
 
 **回答：** `observability report` 只提供会话范围、`tool_breakdown` 和按顶层 `result` 聚合的 `security_verdicts`，**不足以支撑安全结论**。必须再用同一个 `session_id` 执行“风险审查”一节的聚合命令，并按报告输出契约给出待核项清单。不要改用 `--last`：它查询最近记录的会话，在并发或嵌套会话下可能不是本次会话。
-
-### 查询最近一次会话的安全复盘
-
-**用户：** 帮我复盘最近一次 Agent 会话的安全情况。
-
-**执行：**
-
-```bash
-agent-sec-cli observability report --last --format json
-```
-
-**回答：** 汇总会话范围与工具调用后，**必须**用返回的 `session_id` 执行“风险审查”一节的聚合命令，再按报告输出契约作答。不要仅凭 `security_verdicts` 下结论——它按顶层 `result` 聚合，不反映扫描判定。
 
 ## 安全事件查询
 
@@ -427,4 +419,4 @@ agent-sec-cli observability report --session-id '<session_id>' --format json
 - table 与 summary 是人类展示格式，不承诺稳定列结构；自动化处理必须选择 JSON/JSONL。
 - 报告事件时给出查询范围、筛选条件、匹配数量和必要结论。除非用户明确要求，不完整输出 `details` 中的命令、输入、证据或诊断信息。
 - **安全结论必须来自“风险审查”一节的聚合输出，不得来自对 JSON 的自由阅读。** 顶层 `result` 与 `security_verdicts` 都不是判定依据。未完成聚合时，不得输出“无风险”“无安全事件”“一切正常”一类表述；待核项非 0 时，必须逐条列出。
-- 事件总数接近或超过 `--limit`（默认 100）时，先调大 `--limit` 或分页取全量，再做聚合。基于被截断的结果得出的“无风险”结论是错误的。
+- 事件总数接近或超过 `--limit`（默认 100）时，先调大 `--limit` 或分页取全量，再做聚合。基于被截断的结果得出的“无风险”结论是错误的。即使匹配总数小于等于 200，也不能省略显式 `--limit`；默认 100 会截断 101–200 条事件。
