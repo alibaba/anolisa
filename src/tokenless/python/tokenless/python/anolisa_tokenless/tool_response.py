@@ -87,6 +87,10 @@ class TokenlessConfig:
     min_chars: int = 200
     excluded_tools: Collection[str] = field(default_factory=tuple)
     retrieve_tool_name: str = "tokenless_retrieve"
+    schema_compression_enabled: bool = True
+    response_compression_enabled: bool = True
+    toon_enabled: bool = True
+    rtk_enabled: bool = True
 
     def __post_init__(self) -> None:
         """Normalize configuration at the framework boundary."""
@@ -111,13 +115,18 @@ class TokenlessConfig:
 class ToolResponseCompressor:
     """Apply common Tokenless policy without depending on an agent framework."""
 
-    def __init__(self, config: TokenlessConfig) -> None:
+    def __init__(
+        self,
+        config: TokenlessConfig,
+        *,
+        runtime: TokenlessRuntime | None = None,
+    ) -> None:
         """Create a compressor and its tenant-scoped runtime."""
         self.config = config
-        self.runtime = TokenlessRuntime(config.data_dir)
+        self.runtime = runtime or TokenlessRuntime(config.data_dir)
 
     def is_excluded(self, tool_name: str) -> bool:
-        """Return whether policy excludes a tool from response compression."""
+        """Return whether policy excludes a tool from response optimization."""
         if tool_name in self.config.excluded_tools:
             return True
         return (

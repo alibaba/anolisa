@@ -1,6 +1,6 @@
 {
   "name": "tokenless",
-  "version": "0.7.0",
+  "version": "0.7.9",
   "contextFileName": "COPILOT.md",
   "hooks": {
     "PreToolUse": [
@@ -20,7 +20,7 @@
         ]
       },
       {
-        "matcher": "^(Bash|run_shell_command|terminal|Shell|exec|process)$",
+        "matcher": "^(Bash|run_shell_command|terminal|Shell|shell|exec|process)$",
         "hooks": [
           {
             "type": "command",

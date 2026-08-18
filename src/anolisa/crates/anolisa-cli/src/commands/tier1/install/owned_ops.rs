@@ -1473,7 +1473,11 @@ fn owned_file_rows(
                 OwnedFileKind::File
             },
             referent: f.referent.clone(),
-            mode: expected_mode_for_path(&f.path, contract_files),
+            mode: expected_mode_for_path(&f.path, contract_files).or_else(|| {
+                (f.referent.is_none())
+                    .then(|| recorded_mode(&f.path))
+                    .flatten()
+            }),
             capabilities: capabilities_for_path(&f.path, applied_capabilities),
         })
         .collect();
@@ -1502,7 +1506,17 @@ fn expected_mode_for_path(path: &Path, contract_files: &[ResolvedInstallFile]) -
                     && path.starts_with(&file.dest))
         })
         .and_then(|file| {
-            let raw = file.mode.as_deref().unwrap_or("0755");
+            let raw = match file.mode.as_deref() {
+                Some(raw) => raw,
+                None if file
+                    .source
+                    .as_deref()
+                    .is_some_and(|source| source.ends_with('/')) =>
+                {
+                    return None;
+                }
+                None => "0755",
+            };
             let octal = raw.trim().strip_prefix("0o").unwrap_or(raw.trim());
             u32::from_str_radix(octal, 8)
                 .ok()
@@ -1639,6 +1653,69 @@ mod tests {
 
         assert_eq!(row.mode.as_deref(), Some("0755"));
         assert_eq!(row.capabilities, vec!["CAP_BPF".to_string()]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn owned_file_rows_record_directory_source_modes_from_placed_files() {
+        use anolisa_core::{IntegrityStatus, check_owned_file};
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout =
+            FsLayout::user_with_overrides(tmp.path().to_path_buf(), None, None, None, None, None);
+        let adapter_root = layout.datadir.join("adapters/tokenless/codex");
+        let script = adapter_root.join("scripts/tool-ready");
+        let hooks = adapter_root.join("hooks/hooks.json");
+        let manifest = layout.datadir.join("components/tokenless/component.toml");
+        fs::create_dir_all(script.parent().expect("script parent")).expect("script parent");
+        fs::create_dir_all(hooks.parent().expect("hooks parent")).expect("hooks parent");
+        fs::create_dir_all(manifest.parent().expect("manifest parent")).expect("manifest parent");
+        fs::write(&script, b"#!/usr/bin/env python3\n").expect("script");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod script");
+        fs::write(&hooks, br#"{"hooks":{}}"#).expect("hooks");
+        fs::set_permissions(&hooks, fs::Permissions::from_mode(0o644)).expect("chmod hooks");
+        fs::write(&manifest, b"[component]\nname = \"tokenless\"\n").expect("manifest");
+
+        let placed = vec![
+            InstalledFile {
+                path: script.clone(),
+                sha256: sha256_hex(b"#!/usr/bin/env python3\n"),
+                referent: None,
+            },
+            InstalledFile {
+                path: hooks.clone(),
+                sha256: sha256_hex(br#"{"hooks":{}}"#),
+                referent: None,
+            },
+        ];
+
+        let rows = owned_file_rows(
+            &placed,
+            &manifest,
+            "[component]\nname = \"tokenless\"\n",
+            &[ResolvedInstallFile {
+                source: Some("adapters/tokenless/codex/".to_string()),
+                dest: adapter_root,
+                mode: None,
+                kind: FileKind::Data,
+                render: None,
+            }],
+            &[],
+        );
+
+        let script_row = rows
+            .iter()
+            .find(|row| row.path == script)
+            .expect("script row");
+        let hooks_row = rows
+            .iter()
+            .find(|row| row.path == hooks)
+            .expect("hooks row");
+        assert_eq!(script_row.mode.as_deref(), Some("0755"));
+        assert_eq!(hooks_row.mode.as_deref(), Some("0644"));
+        assert_eq!(check_owned_file(&layout, script_row), IntegrityStatus::Ok);
+        assert_eq!(check_owned_file(&layout, hooks_row), IntegrityStatus::Ok);
     }
 
     /// Teardown pruning must remove the directory chain the file removal

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "anolisa-tokenless-agentscope"
 version = "@VERSION@"
-description = "Tokenless response-compression integration for AgentScope"
+description = "Complete Tokenless lifecycle integration for AgentScope"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]

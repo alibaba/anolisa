@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.2
+
+### Features
+- Enforce size limits on sqlite stores. (#2644)
+- Make dashboard UI bilingual (en/zh). (#2612)
+- Add raw packaging for immutable release artifacts. (#2550)
+- Add LLM latency metrics API. (#2578)
+
+### Fixes
+- Match latency agents case-insensitively. (#2590)
+- Address latency metrics CI follow-ups. (#2583)
+
 ## 0.10.1
 
 ### Features

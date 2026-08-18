@@ -479,6 +479,24 @@ impl TokenStore {
         Ok(deleted as u64)
     }
 
+    /// Delete the oldest N records by timestamp.
+    ///
+    /// Used for size-based pruning when the database file exceeds its
+    /// configured maximum.
+    pub fn delete_oldest_batch(&self, limit: usize) -> anyhow::Result<usize> {
+        let sql = format!(
+            "DELETE FROM {} WHERE id IN (
+                SELECT id FROM {} ORDER BY timestamp_ns ASC LIMIT ?1
+            )",
+            self.table_name, self.table_name
+        );
+        let deleted = self
+            .conn
+            .execute(&sql, params![limit as i64])
+            .map_err(|e| anyhow::anyhow!("Failed to delete oldest token records: {e}"))?;
+        Ok(deleted)
+    }
+
     /// Execute WAL checkpoint to flush WAL data back to the main database file
     pub fn checkpoint(&self) -> anyhow::Result<()> {
         wal_checkpoint(&self.conn)

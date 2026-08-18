@@ -662,8 +662,11 @@ impl InterruptionStore {
                     break;
                 }
             }
-            // Reclaim free pages after bulk deletes.
-            let _ = self.vacuum();
+            // Reclaim free pages after bulk deletes. VACUUM may fail if
+            // disk is full; freed pages are still reusable by future inserts.
+            if let Err(e) = self.vacuum() {
+                log::warn!("VACUUM after interruption purge failed: {e}");
+            }
         }
 
         Ok(total_deleted)

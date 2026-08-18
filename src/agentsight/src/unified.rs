@@ -612,6 +612,7 @@ impl AgentSight {
             token_consumption_table: "token_consumption".to_string(),
             retention_days: config.retention_days,
             purge_interval: config.purge_interval,
+            max_db_size_mb: config.max_db_size_mb,
         };
         Storage::with_sqlite_config(&sqlite_config)
     }

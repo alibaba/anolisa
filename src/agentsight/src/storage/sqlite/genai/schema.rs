@@ -231,9 +231,17 @@ impl GenAISqliteStore {
         total
     }
 
-    /// Check database size and prune if approaching limit
+    /// Check database size and prune if approaching limit.
     ///
-    /// Keeps pruning until size drops below threshold to avoid repeated triggers.
+    /// Uses adaptive pruning: the fraction of records deleted per iteration
+    /// scales with how far the database exceeds the configured maximum, so a
+    /// severely oversized database is brought back under control quickly
+    /// instead of inching down 5% at a time.
+    ///
+    /// VACUUM failures (e.g. insufficient temporary disk space) are
+    /// tolerated — deleted records leave free pages that SQLite reuses for
+    /// future inserts, preventing further file growth even when VACUUM cannot
+    /// shrink the file.
     pub(super) fn check_and_prune_if_needed(&self) -> Result<(), Box<dyn std::error::Error>> {
         let mut current_size = self.get_total_db_size();
         let threshold = get_prune_threshold();
@@ -242,45 +250,129 @@ impl GenAISqliteStore {
             return Ok(());
         }
 
+        let max_size = get_max_db_size();
+        let overshoot = current_size as f64 / max_size as f64;
+
+        // Delete a larger fraction when the database is far over the limit.
+        //   1–2× over → 10% per iteration
+        //   2–5× over → 25% per iteration
+        //   5×+  over → 50% per iteration
+        let prune_pct = if overshoot > 5.0 {
+            0.50
+        } else if overshoot > 2.0 {
+            0.25
+        } else {
+            0.10
+        };
+
         log::info!(
-            "Database size {}MB exceeding threshold {}MB, pruning old records",
+            "Database size {}MB exceeding threshold {}MB (overshoot {:.1}×), \
+             pruning {:.0}% per iteration",
             current_size / 1024 / 1024,
-            threshold / 1024 / 1024
+            threshold / 1024 / 1024,
+            overshoot,
+            prune_pct * 100.0
         );
 
-        // Keep pruning until below threshold (max 5 iterations to prevent infinite loop)
-        let mut iterations = 0;
-        while current_size >= threshold && iterations < 5 {
+        const MAX_ITERATIONS: u32 = 20;
+        let mut iterations = 0u32;
+        let mut last_size = current_size;
+        // Consecutive iterations where file size did not decrease — signals
+        // that VACUUM is failing (e.g. disk full). Once this hits the limit
+        // we stop: the freed pages will be reused by future inserts, so the
+        // file will not grow further even without VACUUM.
+        let mut size_stuck_count = 0u32;
+
+        while current_size >= threshold && iterations < MAX_ITERATIONS {
             iterations += 1;
-            self.prune_old_records()?;
-            self.checkpoint()?;
-            current_size = self.get_total_db_size();
+
+            if let Err(e) = self.prune_old_records_with_percent(prune_pct) {
+                log::warn!("Prune failed on iteration {iterations}: {e}");
+                break;
+            }
+
+            // VACUUM may fail when disk space is tight; continue regardless.
+            if let Err(e) = self.checkpoint() {
+                log::warn!("VACUUM/checkpoint failed on iteration {iterations}: {e}");
+            }
+
+            let new_size = self.get_total_db_size();
+            if new_size < last_size {
+                size_stuck_count = 0;
+            } else {
+                size_stuck_count += 1;
+            }
+            last_size = new_size;
+            current_size = new_size;
+
+            // If the file hasn't shrunk for several iterations, VACUUM is
+            // likely failing. Stop — deleted pages are now free and will be
+            // reused, preventing further growth. Escalate with the remaining
+            // record count so operators can judge how much prunable data is
+            // left behind.
+            if size_stuck_count >= 3 {
+                let remaining: i64 = {
+                    let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+                    conn.query_row("SELECT COUNT(*) FROM genai_events", [], |row| row.get(0))
+                        .unwrap_or(-1)
+                };
+                log::error!(
+                    "GenAI prune stalled: file is {}MB (threshold {}MB) with {remaining} \
+                     records remaining after {iterations} iterations. VACUUM is likely \
+                     failing (e.g. disk full) — manual intervention required \
+                     (free disk space or remove the database).",
+                    current_size / 1024 / 1024,
+                    threshold / 1024 / 1024,
+                );
+                break;
+            }
 
             if current_size >= threshold {
                 log::info!(
-                    "Database still {}MB (threshold {}MB), continue pruning (iteration {})",
+                    "Database still {}MB (threshold {}MB), continue pruning \
+                     (iteration {iterations}/{MAX_ITERATIONS})",
                     current_size / 1024 / 1024,
                     threshold / 1024 / 1024,
-                    iterations
                 );
             }
         }
 
-        log::info!(
-            "Pruning complete, database size now {}MB",
-            current_size / 1024 / 1024
-        );
+        if current_size >= threshold {
+            log::warn!(
+                "Database size {}MB still above threshold {}MB after pruning; \
+                 will retry on next write",
+                current_size / 1024 / 1024,
+                threshold / 1024 / 1024,
+            );
+        } else {
+            log::info!(
+                "Pruning complete, database size now {}MB",
+                current_size / 1024 / 1024
+            );
+        }
 
         Ok(())
     }
 
-    /// Prune old records to free up space
+    /// Prune old records using the default 5% ratio.
     ///
-    /// Deletes a percentage of oldest records based on id.
+    /// Thin wrapper around [`prune_old_records_with_percent`] for callers that
+    /// only need the conservative default (e.g. SQLITE_FULL retry).
     pub(super) fn prune_old_records(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.prune_old_records_with_percent(PRUNE_PERCENT)
+    }
+
+    /// Delete the oldest `percent` fraction of records, ordered by id.
+    ///
+    /// `percent` is clamped to \[0.0, 1.0\]. At least one record is deleted
+    /// when the table is non-empty and `percent` > 0.
+    fn prune_old_records_with_percent(
+        &self,
+        percent: f64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let pct = percent.clamp(0.0, 1.0);
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Get total count
         let count: i64 =
             conn.query_row("SELECT COUNT(*) FROM genai_events", [], |row| row.get(0))?;
 
@@ -288,17 +380,15 @@ impl GenAISqliteStore {
             return Ok(());
         }
 
-        // Calculate how many to delete (5% of total)
-        let delete_count = ((count as f64) * PRUNE_PERCENT).max(1.0) as i64;
+        let delete_count = ((count as f64) * pct).max(1.0) as i64;
 
         log::info!(
             "Pruning {} of {} records ({:.1}%)",
             delete_count,
             count,
-            PRUNE_PERCENT * 100.0
+            pct * 100.0
         );
 
-        // Delete oldest records by id
         let deleted = conn.execute(
             "DELETE FROM genai_events WHERE id IN (
                 SELECT id FROM genai_events ORDER BY id ASC LIMIT ?1

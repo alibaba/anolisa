@@ -28,7 +28,11 @@ pub(super) fn emit_fake_tool_approval_stream(
         // turn and offers "Allow all this turn". Portable medium-risk
         // commands keep the scripted-PTY case green on macOS and Linux.
         thread::sleep(Duration::from_millis(100));
-        for command in ["ps aux | head", "ps aux | head -20", "df -h | head"] {
+        for command in [
+            "ps aux | head",
+            "ps aux | head -20",
+            "printf 'alpha\\nbeta\\n' | awk '\n{ print $0 }\n'",
+        ] {
             sink(AgentEvent::ToolCall {
                 run_id: run_id.clone(),
                 tool_id: None,
@@ -218,6 +222,23 @@ pub(super) fn emit_fake_tool_approval_stream(
         sink(AgentEvent::AgentCompleted {
             run_id,
             summary: "multiline stream approval fake analysis completed".to_string(),
+        })?;
+        return Ok(true);
+    }
+
+    if input.contains("stream quoted multiline pipeline approval") {
+        sink(AgentEvent::TextDelta {
+            run_id: run_id.clone(),
+            text: "Preparing a quoted multiline pipeline request before finishing.".to_string(),
+        })?;
+        emit_bash_tool_after_short_delay(
+            sink,
+            &run_id,
+            "printf 'alpha\\nbeta\\n' | awk '\n{ print $0 }\n'",
+        )?;
+        sink(AgentEvent::AgentCompleted {
+            run_id,
+            summary: "quoted multiline pipeline fake analysis completed".to_string(),
         })?;
         return Ok(true);
     }

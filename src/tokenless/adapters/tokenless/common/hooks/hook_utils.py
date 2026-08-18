@@ -408,7 +408,13 @@ def unwrap_string_json(raw: str) -> str | None:
     if isinstance(inner, str):
         inner_obj = try_parse_json(inner)
         if inner_obj is not None and isinstance(inner_obj, (dict, list)):
-            return json.dumps(inner_obj, separators=(",", ":"))
+            # ensure_ascii=False: downstream size gates count Unicode
+            # characters (code points), not \uXXXX escape sequences, so
+            # string-wrapped payloads are measured the same way as the
+            # dict/list branch and the OpenClaw adapter.
+            return json.dumps(
+                inner_obj, separators=(",", ":"), ensure_ascii=False
+            )
         return None
     return raw
 

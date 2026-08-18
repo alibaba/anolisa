@@ -22,6 +22,13 @@ use crate::response::{CliError, render_json};
 const SERVICE_NAME: &str = "anolisa-telemetry";
 /// Filename of the unit written into the system unit directory.
 const UNIT_FILENAME: &str = "anolisa-telemetry.service";
+/// User-facing command for inspecting telemetry state.
+const STATUS_COMMAND: &str = "anolisa telemetry status";
+
+/// Returns the management command for a telemetry systemd unit target.
+pub(crate) fn status_command_for_service_target(target: &str) -> Option<&'static str> {
+    matches!(target, SERVICE_NAME | UNIT_FILENAME).then_some(STATUS_COMMAND)
+}
 
 #[derive(Parser)]
 pub struct TelemetryArgs {
@@ -344,6 +351,17 @@ mod tests {
             parse(&["t", "status"]),
             TelemetryCommands::Status { json: false }
         ));
+    }
+
+    #[test]
+    fn service_targets_share_the_canonical_status_command() {
+        for target in [SERVICE_NAME, UNIT_FILENAME] {
+            assert_eq!(
+                status_command_for_service_target(target),
+                Some("anolisa telemetry status"),
+            );
+        }
+        assert_eq!(status_command_for_service_target("telemetry"), None);
     }
 
     #[test]

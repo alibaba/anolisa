@@ -88,6 +88,26 @@ function mergeExecContextEnv(
 
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes — retry after auto-fix installs
 
+// Minimum payload size for the TOON encoding step. TOON on small JSON saves
+// only a few characters (observed ~0.3% below ~500 chars) while the
+// per-event encode cost stays the same, so payloads under this threshold
+// keep the response-compressed form and skip TOON entirely.
+const MIN_TOON_CHARS = 500;
+
+// True when `text` contains at least `threshold` Unicode code points.
+// Iterating a string counts code points (a surrogate pair counts once), so
+// the threshold uses the same unit as the Python adapters' len(). The loop
+// returns as soon as the threshold is reached, so large payloads only pay
+// for scanning the first `threshold` characters.
+function hasAtLeastChars(text: string, threshold: number): boolean {
+  let count = 0;
+  for (const _ch of text) {
+    count += 1;
+    if (count >= threshold) return true;
+  }
+  return false;
+}
+
 let rtkAvailable: boolean | null = null;
 let rtkCheckedAt: number | null = null;
 let tokenlessAvailable: boolean | null = null;
@@ -326,6 +346,12 @@ function tryCompressResponse(response: any, sessionId?: string, toolCallId?: str
 function tryCompressToon(response: any, sessionId?: string, toolCallId?: string): { toonText: string; savingsPct: number } | null {
   try {
     const input = JSON.stringify(response);
+    // Skip payloads below the minimum threshold: TOON savings on small
+    // JSON are near-zero but the encode cost is paid on every tool result.
+    // Count Unicode code points, not UTF-16 code units (String.length), so
+    // non-BMP text (e.g. emoji) is measured the same way as the Python
+    // adapters' character counts.
+    if (!hasAtLeastChars(input, MIN_TOON_CHARS)) return null;
     const beforeChars = input.length;
     const args = ["compress-toon", "--agent-id", "openclaw"];
     if (sessionId) args.push("--session-id", sessionId);

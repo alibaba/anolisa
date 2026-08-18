@@ -16,6 +16,12 @@ pub(super) struct EofShutdown {
     kill_sent: bool,
 }
 
+impl EofShutdown {
+    pub(super) fn remaining(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+}
+
 pub(super) fn request_eof_shutdown(
     master: &File,
     terminal: &File,

@@ -150,25 +150,25 @@ fn map_operation_to_category(operation: &str) -> &str {
 /// Map operation to a human-readable title.
 fn map_operation_to_title(operation: &str) -> &str {
     match operation {
-        "compress-response" => "MCP响应压缩",
-        "rewrite-command" => "工具输出优化",
-        "compress-schema" => "Schema 压缩",
-        "compress-toon" => "TOON 编码",
-        _ => "其他优化",
+        "compress-response" => "MCP Response Compression",
+        "rewrite-command" => "Tool Output Optimization",
+        "compress-schema" => "Schema Compression",
+        "compress-toon" => "TOON Encoding",
+        _ => "Other Optimization",
     }
 }
 
 /// Map operation to a human-readable strategy label.
 ///
-/// Note: unknown operations all map to "其他优化", and the aggregation logic
+/// Note: unknown operations all map to "Other Optimization", and the aggregation logic
 /// uses this label as the grouping key to avoid duplicate pie chart slices.
 fn map_operation_to_strategy_label(operation: &str) -> &str {
     match operation {
-        "compress-schema" => "Schema 压缩",
-        "compress-response" => "响应压缩",
-        "rewrite-command" => "命令重写",
-        "compress-toon" => "TOON 编码",
-        _ => "其他优化",
+        "compress-schema" => "Schema Compression",
+        "compress-response" => "Response Compression",
+        "rewrite-command" => "Command Rewrite",
+        "compress-toon" => "TOON Encoding",
+        _ => "Other Optimization",
     }
 }
 
@@ -182,18 +182,18 @@ fn generate_optimization_reason(operation: &str, before_tokens: i64, after_token
     };
     match operation {
         "compress-response" => format!(
-            "MCP 服务器返回的响应内容经过压缩处理，移除冗余字段和重复信息，节省 {pct}%（{saved} tokens）"
+            "MCP server responses were compressed, removing redundant fields and duplicates, saving {pct}% ({saved} tokens)"
         ),
         "rewrite-command" => format!(
-            "工具调用的输出内容经过精简重写，保留关键语义同时降低 token 开销，节省 {pct}%（{saved} tokens）"
+            "Tool call outputs were concisely rewritten, preserving key semantics while cutting token cost, saving {pct}% ({saved} tokens)"
         ),
         "compress-schema" => format!(
-            "工具的 JSON Schema 定义经过压缩，移除描述性文本和可选字段，节省 {pct}%（{saved} tokens）"
+            "Tool JSON Schema definitions were compressed, removing descriptive text and optional fields, saving {pct}% ({saved} tokens)"
         ),
         "compress-toon" => format!(
-            "使用 TOON 结构化编码替代原始 JSON，大幅缩减 token 占用，节省 {pct}%（{saved} tokens）"
+            "TOON structured encoding replaced raw JSON, greatly shrinking token usage, saving {pct}% ({saved} tokens)"
         ),
-        _ => format!("内容经过优化处理，节省 {pct}%（{saved} tokens）"),
+        _ => format!("Content was optimized, saving {pct}% ({saved} tokens)"),
     }
 }
 
@@ -351,12 +351,12 @@ pub(crate) fn build_explanation(
 ) -> String {
     if category == "mcp_response" {
         format!(
-            "MCP响应压缩: 原始 {} tokens → {} tokens，压缩率 {:.1}%。后续 {} 轮LLM调用均受益，复合节省 {} tokens。",
+            "MCP Response Compression: original {} tokens → {} tokens, ratio {:.1}%. The following {} LLM calls benefit, compounding to {} tokens saved.",
             before_tokens, after_tokens, compression_ratio, compounding_turns, compounded
         )
     } else {
         format!(
-            "工具输出优化: 原始 {} tokens → {} tokens，压缩率 {:.1}%。后续 {} 轮LLM调用均受益，复合节省 {} tokens。",
+            "Tool Output Optimization: original {} tokens → {} tokens, ratio {:.1}%. The following {} LLM calls benefit, compounding to {} tokens saved.",
             before_tokens, after_tokens, compression_ratio, compounding_turns, compounded
         )
     }
@@ -376,23 +376,23 @@ pub(crate) fn generate_optimization_tips(
     if !stats_available {
         tips.push(OptimizationTip {
             level: "warning".to_string(),
-            title: "未检测到 Tokenless 组件".to_string(),
-            description: "未发现 stats.db，请确认 tokenless 组件已安装并启用。启用后可自动压缩工具输出和 MCP 响应，显著降低 Token 消耗。".to_string(),
+            title: "Tokenless component not detected".to_string(),
+            description: "stats.db not found. Make sure the tokenless component is installed and enabled; it automatically compresses tool output and MCP responses, significantly cutting token consumption.".to_string(),
         });
     } else if grand_compounded_rate < 15.0 && grand_total > 0 {
         tips.push(OptimizationTip {
             level: "warning".to_string(),
-            title: "节省率较低".to_string(),
-            description: "当前复合节省率不足 15%，建议检查 tokenless 配置是否已对所有 Agent 生效，确保工具输出和 MCP 响应压缩均已开启。".to_string(),
+            title: "Savings rate is low".to_string(),
+            description: "The compounded savings rate is below 15%. Check that tokenless is enabled for all agents and that both tool-output and MCP-response compression are on.".to_string(),
         });
     }
 
     if grand_compounded_tool_saved > 0 && grand_compounded_mcp_saved == 0 && grand_total > 0 {
         tips.push(OptimizationTip {
             level: "info".to_string(),
-            title: "建议开启 MCP 响应压缩".to_string(),
+            title: "Consider enabling MCP response compression".to_string(),
             description:
-                "当前仅有工具输出优化，未检测到 MCP 响应压缩。开启后可进一步降低 Token 消耗。"
+                "Only tool-output optimization is active; MCP response compression was not detected. Enabling it would cut token consumption further."
                     .to_string(),
         });
     }
@@ -400,9 +400,9 @@ pub(crate) fn generate_optimization_tips(
     if grand_compounded_mcp_saved > 0 && grand_compounded_tool_saved == 0 && grand_total > 0 {
         tips.push(OptimizationTip {
             level: "info".to_string(),
-            title: "建议开启工具输出优化".to_string(),
+            title: "Consider enabling tool-output optimization".to_string(),
             description:
-                "当前仅有 MCP 响应压缩，未检测到工具输出优化。开启后可进一步降低 Token 消耗。"
+                "Only MCP response compression is active; tool-output optimization was not detected. Enabling it would cut token consumption further."
                     .to_string(),
         });
     }
@@ -414,26 +414,26 @@ pub(crate) fn generate_optimization_tips(
     if zero_savings_sessions > 0 {
         tips.push(OptimizationTip {
             level: "info".to_string(),
-            title: format!("发现 {} 个未优化会话", zero_savings_sessions),
-            description: "部分会话消耗较高但无优化记录，可能是对应 Agent 未启用 tokenless 或工具调用较少。建议检查这些会话的 Agent 配置。".to_string(),
+            title: format!("Found {} unoptimized sessions", zero_savings_sessions),
+            description: "Some sessions have high consumption but no optimization records; the corresponding agents may not have tokenless enabled or make few tool calls. Check the agent configuration for these sessions.".to_string(),
         });
     }
 
     if grand_compounded_rate >= 30.0 {
         tips.push(OptimizationTip {
             level: "success".to_string(),
-            title: "节省效果优秀".to_string(),
+            title: "Excellent savings".to_string(),
             description: format!(
-                "当前复合节省率 {:.1}%，表现优秀！继续保持当前配置。",
+                "Current compounded savings rate is {:.1}% — excellent! Keep the current configuration.",
                 grand_compounded_rate
             ),
         });
     } else if grand_compounded_rate >= 15.0 {
         tips.push(OptimizationTip {
             level: "success".to_string(),
-            title: "节省效果良好".to_string(),
+            title: "Good savings".to_string(),
             description: format!(
-                "当前复合节省率 {:.1}%，已达到良好水平。可尝试调整压缩策略以进一步提升。",
+                "Current compounded savings rate is {:.1}% — a good level. Try tuning compression strategies to improve further.",
                 grand_compounded_rate
             ),
         });
@@ -519,7 +519,7 @@ pub async fn get_token_savings(
     let mut grand_compounded_tool_saved: i64 = 0;
     let mut grand_compounded_mcp_saved: i64 = 0;
     // FIX(#2): aggregate by strategy *label* (not raw operation) so that
-    // unknown operations merge into a single "其他优化" slice in the pie chart.
+    // unknown operations merge into a single "Other Optimization" slice in the pie chart.
     let mut grand_strategy_map: std::collections::HashMap<String, (String, i64, i64)> =
         std::collections::HashMap::new();
 
@@ -610,8 +610,8 @@ pub async fn get_token_savings(
                     compounding_turns,
                     compression_ratio,
                     explanation,
-                    before_summary: format!("原始内容 {} tokens", row.before_tokens),
-                    after_summary: format!("优化后 {} tokens", row.after_tokens),
+                    before_summary: format!("Original {} tokens", row.before_tokens),
+                    after_summary: format!("Optimized {} tokens", row.after_tokens),
                     optimization_reason,
                     before_text: row.before_text.clone(),
                     after_text: row.after_text.clone(),
@@ -823,8 +823,8 @@ pub async fn get_session_savings(
                     compounding_turns,
                     compounded,
                 ),
-                before_summary: format!("原始内容 {} tokens", row.before_tokens),
-                after_summary: format!("优化后 {} tokens", row.after_tokens),
+                before_summary: format!("Original {} tokens", row.before_tokens),
+                after_summary: format!("Optimized {} tokens", row.after_tokens),
                 optimization_reason: generate_optimization_reason(
                     &row.operation,
                     row.before_tokens,
@@ -968,32 +968,44 @@ mod tests {
 
     #[test]
     fn test_map_operation_to_title() {
-        assert_eq!(map_operation_to_title("compress-response"), "MCP响应压缩");
-        assert_eq!(map_operation_to_title("rewrite-command"), "工具输出优化");
-        assert_eq!(map_operation_to_title("compress-schema"), "Schema 压缩");
-        assert_eq!(map_operation_to_title("compress-toon"), "TOON 编码");
-        assert_eq!(map_operation_to_title("other"), "其他优化");
+        assert_eq!(
+            map_operation_to_title("compress-response"),
+            "MCP Response Compression"
+        );
+        assert_eq!(
+            map_operation_to_title("rewrite-command"),
+            "Tool Output Optimization"
+        );
+        assert_eq!(
+            map_operation_to_title("compress-schema"),
+            "Schema Compression"
+        );
+        assert_eq!(map_operation_to_title("compress-toon"), "TOON Encoding");
+        assert_eq!(map_operation_to_title("other"), "Other Optimization");
     }
 
     #[test]
     fn test_map_operation_to_strategy_label() {
         assert_eq!(
             map_operation_to_strategy_label("compress-schema"),
-            "Schema 压缩"
+            "Schema Compression"
         );
         assert_eq!(
             map_operation_to_strategy_label("compress-response"),
-            "响应压缩"
+            "Response Compression"
         );
         assert_eq!(
             map_operation_to_strategy_label("rewrite-command"),
-            "命令重写"
+            "Command Rewrite"
         );
         assert_eq!(
             map_operation_to_strategy_label("compress-toon"),
-            "TOON 编码"
+            "TOON Encoding"
         );
-        assert_eq!(map_operation_to_strategy_label("unknown"), "其他优化");
+        assert_eq!(
+            map_operation_to_strategy_label("unknown"),
+            "Other Optimization"
+        );
     }
 
     // ─── Integration tests for handlers ───────────────────────────────────
@@ -1182,7 +1194,7 @@ mod tests {
     #[test]
     fn test_generate_optimization_reason_rewrite_command() {
         let reason = generate_optimization_reason("rewrite-command", 500, 200);
-        assert!(reason.contains("工具调用"));
+        assert!(reason.contains("Tool call"));
         assert!(reason.contains("60%"));
     }
 
@@ -1203,7 +1215,7 @@ mod tests {
     #[test]
     fn test_generate_optimization_reason_unknown() {
         let reason = generate_optimization_reason("unknown-op", 100, 50);
-        assert!(reason.contains("优化处理"));
+        assert!(reason.contains("optimized"));
         assert!(reason.contains("50%"));
     }
 
@@ -1357,7 +1369,7 @@ mod tests {
     #[test]
     fn test_build_explanation_tool_output() {
         let explanation = build_explanation("tool_output", 500, 100, 80.0, 2, 800);
-        assert!(explanation.contains("工具输出"));
+        assert!(explanation.contains("Tool Output"));
         assert!(explanation.contains("500"));
         assert!(explanation.contains("100"));
     }
@@ -1375,7 +1387,7 @@ mod tests {
         let tips = generate_optimization_tips(true, 10000, 10.0, 100, 200, &[]);
         assert!(
             tips.iter()
-                .any(|t| t.level == "warning" && t.title.contains("节省率"))
+                .any(|t| t.level == "warning" && t.title.contains("Savings rate"))
         );
     }
 
@@ -1423,7 +1435,7 @@ mod tests {
         assert!(
             !tips
                 .iter()
-                .any(|t| t.level == "warning" && t.title.contains("节省率"))
+                .any(|t| t.level == "warning" && t.title.contains("Savings rate"))
         );
         assert!(tips.iter().any(|t| t.level == "success"));
     }
@@ -1433,7 +1445,7 @@ mod tests {
         let tips = generate_optimization_tips(true, 10000, 30.0, 2000, 1000, &[]);
         assert!(
             tips.iter()
-                .any(|t| t.level == "success" && t.title.contains("优秀"))
+                .any(|t| t.level == "success" && t.title.contains("Excellent"))
         );
     }
 
@@ -1442,7 +1454,7 @@ mod tests {
         let tips = generate_optimization_tips(true, 10000, 14.9, 500, 500, &[]);
         assert!(
             tips.iter()
-                .any(|t| t.level == "warning" && t.title.contains("节省率"))
+                .any(|t| t.level == "warning" && t.title.contains("Savings rate"))
         );
     }
 
@@ -1460,7 +1472,7 @@ mod tests {
         let tips = generate_optimization_tips(true, 10000, 10.0, 0, 500, &[]);
         assert!(
             tips.iter()
-                .any(|t| t.level == "info" && t.title.contains("工具"))
+                .any(|t| t.level == "info" && t.title.contains("tool-output"))
         );
     }
 
@@ -1479,7 +1491,7 @@ mod tests {
         let tips = generate_optimization_tips(true, 10000, 35.0, 2000, 1500, &[]);
         assert!(
             tips.iter()
-                .any(|t| t.level == "success" && t.title.contains("优秀"))
+                .any(|t| t.level == "success" && t.title.contains("Excellent"))
         );
     }
 
@@ -1488,7 +1500,7 @@ mod tests {
         let tips = generate_optimization_tips(true, 10000, 20.0, 1000, 1000, &[]);
         assert!(
             tips.iter()
-                .any(|t| t.level == "success" && t.title.contains("良好"))
+                .any(|t| t.level == "success" && t.title.contains("Good"))
         );
     }
 

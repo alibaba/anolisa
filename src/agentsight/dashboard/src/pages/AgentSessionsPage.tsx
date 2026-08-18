@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { fetchSessions, fetchTrajectories } from '../utils/apiClient';
 import type { SessionSummary, TrajectorySummary } from '../utils/apiClient';
 import { CopyButton } from '../components/CopyButton';
+import { useI18n, useLocaleTag } from '../i18n';
+import type { MessageKey } from '../i18n';
 
 // ─── Merged session model ─────────────────────────────────────────────────────
 
@@ -139,14 +141,18 @@ export function mergeSessions(
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-export function timeAgo(ms: number | null): string {
+export function timeAgo(
+  t: (key: MessageKey, params?: Record<string, string | number>) => string,
+  localeTag: string,
+  ms: number | null,
+): string {
   if (ms === null) return '-';
   const diff = Math.floor((Date.now() - ms) / 1000);
-  if (diff < 60) return '刚刚';
-  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
-  if (diff < 604800) return `${Math.floor(diff / 86400)} 天前`;
-  return new Date(ms).toLocaleDateString('zh-CN');
+  if (diff < 60) return t('common.justNow');
+  if (diff < 3600) return t('common.minutesAgo', { n: Math.floor(diff / 60) });
+  if (diff < 86400) return t('common.hoursAgo', { n: Math.floor(diff / 3600) });
+  if (diff < 604800) return t('as.daysAgo', { n: Math.floor(diff / 86400) });
+  return new Date(ms).toLocaleDateString(localeTag);
 }
 
 function fmtTokens(n: number | null): string {
@@ -158,15 +164,16 @@ function fmtTokens(n: number | null): string {
 
 const PAGE_SIZE = 15;
 
-const TIME_PRESETS = [
-  { label: '最近 24h', ms: 24 * 3600 * 1000 },
-  { label: '最近 7d', ms: 7 * 24 * 3600 * 1000 },
-  { label: '最近 30d', ms: 30 * 24 * 3600 * 1000 },
+const TIME_PRESETS: { labelKey: MessageKey; ms: number }[] = [
+  { labelKey: 'as.timePreset.last24h', ms: 24 * 3600 * 1000 },
+  { labelKey: 'as.timePreset.last7d', ms: 7 * 24 * 3600 * 1000 },
+  { labelKey: 'as.timePreset.last30d', ms: 30 * 24 * 3600 * 1000 },
 ];
 
-const SOURCE_LABEL: Record<SessionSource, string> = { ebpf: 'eBPF', log: '日志' };
+const SOURCE_LABEL: Record<SessionSource, MessageKey> = { ebpf: 'as.source.ebpf', log: 'as.source.log' };
 
 const SourceBadge: React.FC<{ sources?: SessionSource[] }> = ({ sources }) => {
+  const { t } = useI18n();
   const sourceRows = Array.isArray(sources) ? sources : [];
   return (
     <span className="inline-flex gap-1">
@@ -177,7 +184,7 @@ const SourceBadge: React.FC<{ sources?: SessionSource[] }> = ({ sources }) => {
             s === 'ebpf' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'
           }`}
         >
-          {SOURCE_LABEL[s]}
+          {t(SOURCE_LABEL[s])}
         </span>
       ))}
     </span>
@@ -187,6 +194,8 @@ const SourceBadge: React.FC<{ sources?: SessionSource[] }> = ({ sources }) => {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export const AgentSessionsPage: React.FC = () => {
+  const { t } = useI18n();
+  const localeTag = useLocaleTag();
   const navigate = useNavigate();
   const [merged, setMerged] = useState<MergedSession[]>([]);
   const [loading, setLoading] = useState(true);
@@ -211,11 +220,11 @@ export const AgentSessionsPage: React.FC = () => {
       setMerged(mergeSessions(ebpf, logs));
       setError(null);
     } catch (e: any) {
-      setError(e.message || '获取会话列表失败');
+      setError(e.message || t('as.fetchError'));
     } finally {
       setLoading(false);
     }
-  }, [rangeMs]);
+  }, [rangeMs, t]);
 
   useEffect(() => {
     loadData();
@@ -287,12 +296,12 @@ export const AgentSessionsPage: React.FC = () => {
       {/* ── Toolbar: total + time range + refresh ── */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex flex-wrap items-center gap-4">
         <span className="text-sm text-gray-600">
-          共 <strong className="text-gray-900">{filtered.length}</strong> 个会话
+          {t('as.totalSessions', { n: filtered.length })}
         </span>
         <div className="flex gap-2">
-          {TIME_PRESETS.map(({ label, ms }) => (
+          {TIME_PRESETS.map(({ labelKey, ms }) => (
             <button
-              key={label}
+              key={labelKey}
               onClick={() => setRangeMs(ms)}
               className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
                 rangeMs === ms
@@ -300,7 +309,7 @@ export const AgentSessionsPage: React.FC = () => {
                   : 'bg-gray-100 hover:bg-gray-200 text-gray-600'
               }`}
             >
-              {label}
+              {t(labelKey)}
             </button>
           ))}
         </div>
@@ -311,14 +320,14 @@ export const AgentSessionsPage: React.FC = () => {
               checked={autoRefresh}
               onChange={(e) => setAutoRefresh(e.target.checked)}
             />
-            自动刷新
+            {t('as.autoRefresh')}
           </label>
           <button
             onClick={loadData}
             disabled={loading}
             className="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
           >
-            {loading ? '加载中...' : '刷新'}
+            {loading ? t('common.loading') : t('common.refresh')}
           </button>
         </div>
       </div>
@@ -327,10 +336,10 @@ export const AgentSessionsPage: React.FC = () => {
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex flex-wrap items-center gap-4">
         <div className="flex gap-1">
           {([
-            { id: 'all', label: '全部' },
-            { id: 'ebpf', label: 'eBPF 采集' },
-            { id: 'log', label: '日志采集' },
-          ] as const).map(({ id, label }) => (
+            { id: 'all', labelKey: 'as.filter.allSources' as MessageKey },
+            { id: 'ebpf', labelKey: 'as.source.ebpf' as MessageKey },
+            { id: 'log', labelKey: 'as.source.log' as MessageKey },
+          ] as const).map(({ id, labelKey }) => (
             <button
               key={id}
               onClick={() => setSourceFilter(id)}
@@ -340,7 +349,7 @@ export const AgentSessionsPage: React.FC = () => {
                   : 'bg-gray-100 hover:bg-gray-200 text-gray-600'
               }`}
             >
-              {label}
+              {t(labelKey)}
             </button>
           ))}
         </div>
@@ -349,14 +358,14 @@ export const AgentSessionsPage: React.FC = () => {
           value={agentFilter}
           onChange={(e) => setAgentFilter(e.target.value)}
         >
-          <option value="all">全部 Agent</option>
+          <option value="all">{t('common.allAgents')}</option>
           {agentNames.map((a) => (
             <option key={a} value={a}>{a}</option>
           ))}
         </select>
         <input
           type="text"
-          placeholder="搜索会话 ID / 项目 / 消息内容..."
+          placeholder={t('as.searchPlaceholder')}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="flex-1 min-w-[220px] border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
@@ -371,24 +380,24 @@ export const AgentSessionsPage: React.FC = () => {
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
         {loading && merged.length === 0 ? (
-          <div className="p-10 text-center text-gray-500 text-sm">正在加载会话列表...</div>
+          <div className="p-10 text-center text-gray-500 text-sm">{t('as.loadingSessions')}</div>
         ) : filtered.length === 0 ? (
           <div className="p-10 text-center text-gray-500 text-sm">
             {search || sourceFilter !== 'all' || agentFilter !== 'all'
-              ? '没有匹配的会话'
-              : '当前时间范围内没有会话数据'}
+              ? t('as.noMatchingSessions')
+              : t('as.noSessionsInRange')}
           </div>
         ) : (
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-gray-50 text-left text-xs text-gray-500 uppercase">
-                <th className="px-4 py-3">来源</th>
-                <th className="px-4 py-3">Agent</th>
-                <th className="px-4 py-3">项目</th>
-                <th className="px-4 py-3">首条消息</th>
-                <th className="px-4 py-3">最新消息</th>
-                <th className="px-4 py-3 text-right">最近活跃</th>
-                <th className="px-4 py-3 text-center">操作</th>
+                <th className="px-4 py-3">{t('as.source')}</th>
+                <th className="px-4 py-3">{t('common.agent')}</th>
+                <th className="px-4 py-3">{t('as.project')}</th>
+                <th className="px-4 py-3">{t('as.firstMessage')}</th>
+                <th className="px-4 py-3">{t('as.lastMessage')}</th>
+                <th className="px-4 py-3 text-right">{t('as.lastActive')}</th>
+                <th className="px-4 py-3 text-center">{t('common.actions')}</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
@@ -397,7 +406,7 @@ export const AgentSessionsPage: React.FC = () => {
                   key={s.session_id}
                   className="hover:bg-gray-50 cursor-pointer transition-colors"
                   onClick={() => window.open(`#/atif?type=session&id=${encodeURIComponent(s.session_id)}`, '_blank')}
-                  title="点击在新窗口查看轨迹详情"
+                  title={t('as.openInNewWindow')}
                 >
                   <td className="px-4 py-3"><SourceBadge sources={s.sources} /></td>
                   <td className="px-4 py-3">
@@ -411,14 +420,14 @@ export const AgentSessionsPage: React.FC = () => {
                       <span className="font-mono text-xs text-gray-400 max-w-[150px] truncate" title={s.session_id}>
                         {s.session_id}
                       </span>
-                      <CopyButton text={s.session_id} title="复制会话 ID" />
+                      <CopyButton text={s.session_id} title={t('as.copySessionId')} />
                     </div>
                     {s.subagent_count > 0 && (
                       <span
                         className="inline-flex items-center gap-1 mt-1 px-1.5 py-0.5 bg-indigo-50 text-indigo-600 rounded text-xs font-medium"
-                        title={`该会话派生了 ${s.subagent_count} 个子代理`}
+                        title={t('as.subagentBadgeTitle', { n: s.subagent_count })}
                       >
-                        🤖 {s.subagent_count} 子代理
+                        🤖 {t('as.subagentCount', { n: s.subagent_count })}
                       </span>
                     )}
                   </td>
@@ -434,19 +443,19 @@ export const AgentSessionsPage: React.FC = () => {
                   </td>
                   <td
                     className="px-4 py-3 text-right text-gray-600 whitespace-nowrap"
-                    title={`消息/步数 ${s.count} · Tokens ${fmtTokens(s.input_tokens)} / ${fmtTokens(s.output_tokens)}`}
+                    title={t('as.metricsTooltip', { count: s.count, inTokens: fmtTokens(s.input_tokens), outTokens: fmtTokens(s.output_tokens) })}
                   >
-                    <span title={s.last_active_ms ? new Date(s.last_active_ms).toLocaleString('zh-CN') : ''}>
-                      {timeAgo(s.last_active_ms)}
+                    <span title={s.last_active_ms ? new Date(s.last_active_ms).toLocaleString(localeTag) : ''}>
+                      {timeAgo(t, localeTag, s.last_active_ms)}
                     </span>
                   </td>
                   <td className="px-4 py-3 text-center" onClick={(e) => e.stopPropagation()}>
                     <button
                       onClick={() => navigate(`/optimization/${encodeURIComponent(s.session_id)}`)}
                       className="px-3 py-1 text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors"
-                      title="对该会话运行优化分析"
+                      title={t('as.runOptimizationTitle')}
                     >
-                      🔬 分析
+                      {t('as.analyze')}
                     </button>
                   </td>
                 </tr>
@@ -460,7 +469,7 @@ export const AgentSessionsPage: React.FC = () => {
       {filtered.length > PAGE_SIZE && (
         <div className="flex items-center justify-between text-sm text-gray-600">
           <span>
-            {filtered.length} 条结果 · 第 {safePage}/{totalPages} 页
+            {t('as.paginationSummary', { total: filtered.length, cur: safePage, totalPages })}
           </span>
           <div className="flex gap-1">
             <button

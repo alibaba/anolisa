@@ -16,6 +16,21 @@ const {
 const {
   containmentLifecyclePresentation,
 } = require(process.env.AGENTSIGHT_CONTAINMENT_LIFECYCLE_BUILD);
+const {
+  formatNs,
+  formatNsPadded,
+  formatMsCompact,
+  formatNsCompact,
+} = require(process.env.AGENTSIGHT_DATETIME_BUILD);
+const {
+  fmtTime,
+  securityDetailRows,
+} = require(process.env.AGENTSIGHT_SECURITY_UTILS_BUILD);
+const {
+  SAME_PLACE,
+  fixLocusDiverges,
+  fixLocusLabel,
+} = require(process.env.AGENTSIGHT_ACCURACY_ATTRIBUTION_BUILD);
 
 function enforcementHealth(alternatePidRetarget) {
   return {
@@ -264,5 +279,71 @@ test('terminal containment lifecycle overrides historical blocked time', () => {
     blocked_at_ns: 10,
   });
 
-  assert.equal(presentation.label, '已到期');
+  assert.equal(presentation.labelKey, 'cont.lifecycle.expired.label');
+});
+
+// 2026-08-17T08:00:00Z expressed in nanoseconds.
+const SAMPLE_NS = 1_786_608_000_000_000_000;
+
+test('datetime helpers honor the requested locale', () => {
+  // The exact rendering depends on the host timezone, so assert on
+  // locale-sensitive differences rather than a fixed string.
+  assert.notEqual(formatNs(SAMPLE_NS, 'en-US'), formatNs(SAMPLE_NS, 'zh-CN'));
+  assert.match(formatNsPadded(SAMPLE_NS, 'zh-CN'), /\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}/);
+  assert.equal(
+    formatNsCompact(SAMPLE_NS, 'zh-CN'),
+    formatMsCompact(SAMPLE_NS / 1_000_000, 'zh-CN'),
+  );
+});
+
+test('formatNsCompact renders a dash for missing timestamps', () => {
+  assert.equal(formatNsCompact(null, 'en-US'), '—');
+  assert.equal(formatNsCompact(0, 'zh-CN'), '—');
+});
+
+test('fmtTime formats via the caller-provided locale', () => {
+  const event = { timestamp_ns: SAMPLE_NS };
+  assert.equal(fmtTime(event, 'zh-CN'), formatMsCompact(SAMPLE_NS / 1_000_000, 'zh-CN'));
+  assert.equal(fmtTime(event, 'en-US'), formatMsCompact(SAMPLE_NS / 1_000_000, 'en-US'));
+  assert.equal(fmtTime({}, 'en-US'), '-');
+});
+
+test('securityDetailRows emits stable ids and message keys', () => {
+  const rows = securityDetailRows({
+    verdict: 'deny',
+    reason: 'policy matched',
+    nested: { error_message: 'boom' },
+  });
+
+  assert.deepEqual(
+    rows.map((row) => ({ id: row.id, labelKey: row.labelKey })),
+    [
+      { id: 'verdict', labelKey: 'sec.detail.verdict' },
+      { id: 'error', labelKey: 'sec.detail.error' },
+      { id: 'reason', labelKey: 'sec.detail.reason' },
+    ],
+  );
+  assert.equal(rows.find((row) => row.id === 'verdict').value, 'deny');
+  assert.equal(rows.find((row) => row.id === 'error').value, 'boom');
+});
+
+// The API serializes `FixLocus::None` as the Chinese sentinel '无'. Translating
+// that literal in SAME_PLACE would make every Env/Input issue look divergent.
+test('fix locus comparison uses protocol values, not translated labels', () => {
+  assert.equal(SAME_PLACE.Env, '无');
+  assert.equal(SAME_PLACE.Input, '无');
+
+  assert.equal(fixLocusDiverges('Env', '无'), false);
+  assert.equal(fixLocusDiverges('Input', '无'), false);
+  assert.equal(fixLocusDiverges('Env', 'Skill'), true);
+  assert.equal(fixLocusDiverges('Skill', 'Skill'), false);
+  // Orchestration has no in-place fix, so any locus counts as divergent.
+  assert.equal(fixLocusDiverges('Orchestration', 'Skill'), true);
+});
+
+test('fixLocusLabel translates only the sentinel value', () => {
+  const t = (key) => (key === 'opt.accuracy.fixLocusNone' ? 'None' : `??${key}`);
+  assert.equal(fixLocusLabel('无', t), 'None');
+  assert.equal(fixLocusLabel('Skill', t), 'Skill');
+  assert.equal(fixLocusLabel('Context-policy', t), 'Context-policy');
 });

@@ -31,11 +31,13 @@ fn render_raw_inline_events<W: Write>(
         audit.observe_shell_events(events);
     }
     let mut terminal_output = CrLfWriter::new(output);
-    redraw_active_question_if_width_changed(
-        inline_state,
-        &mut terminal_output,
-        RatatuiInlineRenderer::for_terminal().with_language(inline_state.language),
-    )?;
+    if inline_state.questions.active_panel_id.is_some() {
+        redraw_active_question_if_width_changed(
+            inline_state,
+            &mut terminal_output,
+            RatatuiInlineRenderer::for_terminal().with_language(inline_state.language),
+        )?;
+    }
     let snapshot = ShellEventSnapshot::new(events);
     let actions = RuntimeDispatcher::dispatch_inline_batch(
         &snapshot,

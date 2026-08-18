@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useI18n } from '../i18n';
+import type { MessageKey } from '../i18n';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
 } from 'recharts';
@@ -23,6 +25,7 @@ function fmtNs(ns: number): string {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export const SkillMetricsPage: React.FC = () => {
+  const { t } = useI18n();
   const now = Date.now();
   const [startMs, setStartMs] = useState(now - 7 * 24 * 3600_000);
   const [endMs, setEndMs] = useState(now);
@@ -42,11 +45,11 @@ export const SkillMetricsPage: React.FC = () => {
       const data = await fetchSkillMetrics(startNs, endNs, agentName || undefined, granularity);
       setReport(data);
     } catch (e: any) {
-      setError(e.message || '获取技能指标失败');
+      setError((e && e.message) || t('skill.error.loadFailed'));
     } finally {
       setLoading(false);
     }
-  }, [startMs, endMs, agentName, granularity]);
+  }, [startMs, endMs, agentName, granularity, t]);
 
   useEffect(() => {
     loadData();
@@ -63,19 +66,19 @@ export const SkillMetricsPage: React.FC = () => {
       {/* ── Filter bar ── */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex flex-wrap items-end gap-4">
         {/* Time range */}
-        <DateTimePicker label="开始时间" value={startMs} onChange={setStartMs} />
-        <DateTimePicker label="结束时间" value={endMs} onChange={setEndMs} />
+        <DateTimePicker label={t('common.startTime')} value={startMs} onChange={setStartMs} />
+        <DateTimePicker label={t('common.endTime')} value={endMs} onChange={setEndMs} />
 
         {/* Quick presets */}
         <div className="flex gap-2 flex-wrap">
-          {[
-            { label: '最近 1h', ms: 3600 * 1000 },
-            { label: '最近 6h', ms: 6 * 3600 * 1000 },
-            { label: '最近 24h', ms: 24 * 3600 * 1000 },
-            { label: '最近 7d', ms: 7 * 24 * 3600 * 1000 },
-          ].map(({ label, ms }) => (
+          {([
+            { labelKey: 'common.last1h', ms: 3600 * 1000 },
+            { labelKey: 'common.last6h', ms: 6 * 3600 * 1000 },
+            { labelKey: 'common.last24h', ms: 24 * 3600 * 1000 },
+            { labelKey: 'common.last7d', ms: 7 * 24 * 3600 * 1000 },
+          ] as { labelKey: MessageKey; ms: number }[]).map(({ labelKey, ms }) => (
             <button
-              key={label}
+              key={labelKey}
               onClick={() => {
                 const n = Date.now();
                 setEndMs(n);
@@ -83,20 +86,20 @@ export const SkillMetricsPage: React.FC = () => {
               }}
               className="px-3 py-1.5 text-xs bg-gray-100 hover:bg-gray-200 rounded-lg text-gray-600 transition-colors"
             >
-              {label}
+              {t(labelKey)}
             </button>
           ))}
         </div>
 
         {/* Agent name selector */}
         <div className="flex items-center gap-2">
-          <label className="text-sm text-gray-600 whitespace-nowrap">Agent</label>
+          <label className="text-sm text-gray-600 whitespace-nowrap">{t('common.agent')}</label>
           <select
             className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 min-w-[160px]"
             value={agentName}
             onChange={(e) => setAgentName(e.target.value)}
           >
-            <option value="">全部 Agent</option>
+            <option value="">{t('common.allAgents')}</option>
             {agents.map((a) => (
               <option key={a} value={a}>{a}</option>
             ))}
@@ -109,7 +112,7 @@ export const SkillMetricsPage: React.FC = () => {
           disabled={loading}
           className="ml-auto px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
         >
-          {loading ? '查询中...' : '查询'}
+          {loading ? t('common.querying') : t('common.query')}
         </button>
       </div>
 
@@ -123,29 +126,29 @@ export const SkillMetricsPage: React.FC = () => {
         <>
           {/* Concept explanation */}
           <p className="text-xs text-gray-500">
-            本页面统计单位为一次 LLM 调用（对应一条 GenAI 事件记录）。
+            {t('skill.concept.note')}
           </p>
 
           {/* Summary Cards */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <SummaryCard label="分析调用数" value={report.event_count.toLocaleString()} />
+            <SummaryCard labelKey="skill.summary.eventCount" value={report.event_count.toLocaleString()} />
             <SummaryCard
-              label="已发现技能"
+              labelKey="skill.summary.discoveredSkills"
               value={report.downloads ? Object.keys(report.downloads.downloads).length.toString() : '0'}
             />
             <SummaryCard
-              label="总加载次数"
+              labelKey="skill.summary.totalLoads"
               value={report.loads?.total_loads.toLocaleString() ?? '0'}
             />
             <SummaryCard
-              label="技能使用率"
+              labelKey="skill.summary.usageRatio"
               value={report.usage_ratio ? `${(report.usage_ratio.ratio * 100).toFixed(1)}%` : '-'}
             />
           </div>
 
           {/* Skill Loads Bar Chart */}
           {report.loads && Object.keys(report.loads.loads).length > 0 && (
-            <Section title="技能加载次数">
+            <Section titleKey="skill.section.loads">
               <div className="h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart
@@ -167,7 +170,7 @@ export const SkillMetricsPage: React.FC = () => {
 
           {/* Distribution Histogram */}
           {report.distribution && (
-            <Section title="单次调用技能数分布">
+            <Section titleKey="skill.section.skillsPerCall">
               <div className="flex gap-8 items-center">
                 <div className="h-48 flex-1">
                   <ResponsiveContainer width="100%" height="100%">
@@ -178,7 +181,7 @@ export const SkillMetricsPage: React.FC = () => {
                       }))}
                       margin={{ top: 10, right: 20, left: 20, bottom: 10 }}
                     >
-                      <XAxis dataKey="bucket" fontSize={12} label={{ value: '单次调用技能数', position: 'bottom', offset: -5 }} />
+                      <XAxis dataKey="bucket" fontSize={12} label={{ value: t('skill.distribution.axisLabel'), position: 'bottom', offset: -5 }} />
                       <YAxis fontSize={11} />
                       <Tooltip />
                       <Bar dataKey="count" fill="#10b981" radius={[4, 4, 0, 0]} maxBarSize={60} />
@@ -186,9 +189,9 @@ export const SkillMetricsPage: React.FC = () => {
                   </ResponsiveContainer>
                 </div>
                 <div className="text-sm text-gray-600 space-y-1">
-                  <p>最小值: <span className="font-mono">{report.distribution.min}</span></p>
-                  <p>最大值: <span className="font-mono">{report.distribution.max}</span></p>
-                  <p>均值: <span className="font-mono">{report.distribution.mean.toFixed(2)}</span></p>
+                  <p>{t('skill.distribution.min')}: <span className="font-mono">{report.distribution.min}</span></p>
+                  <p>{t('skill.distribution.max')}: <span className="font-mono">{report.distribution.max}</span></p>
+                  <p>{t('skill.distribution.mean')}: <span className="font-mono">{report.distribution.mean.toFixed(2)}</span></p>
                 </div>
               </div>
             </Section>
@@ -196,30 +199,30 @@ export const SkillMetricsPage: React.FC = () => {
 
           {/* Hotness Ranking Table */}
           {report.hotness && report.hotness.rankings.length > 0 && (
-            <Section title="技能热度排行">
+            <Section titleKey="skill.section.hotnessRanking">
               <div className="flex items-center gap-2 mb-3">
-                <span className="text-xs text-gray-500">趋势粒度:</span>
+                <span className="text-xs text-gray-500">{t('skill.hotness.granularityLabel')}</span>
                 <button
                   onClick={() => { setGranularity('day'); }}
                   className={`px-2 py-0.5 text-xs rounded ${granularity === 'day' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
                 >
-                  按天
+                  {t('skill.hotness.day')}
                 </button>
                 <button
                   onClick={() => { setGranularity('week'); }}
                   className={`px-2 py-0.5 text-xs rounded ${granularity === 'week' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
                 >
-                  按周
+                  {t('skill.hotness.week')}
                 </button>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b text-left text-gray-500">
-                      <th className="py-2 pr-4">排名</th>
-                      <th className="py-2 pr-4">技能</th>
-                      <th className="py-2 pr-4">总加载次数</th>
-                      <th className="py-2 pr-4">趋势</th>
+                      <th className="py-2 pr-4">{t('skill.hotness.rank')}</th>
+                      <th className="py-2 pr-4">{t('skill.hotness.skillName')}</th>
+                      <th className="py-2 pr-4">{t('skill.hotness.totalLoads')}</th>
+                      <th className="py-2 pr-4">{t('skill.hotness.trend')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -247,7 +250,7 @@ export const SkillMetricsPage: React.FC = () => {
       )}
 
       {!loading && !report && !error && (
-        <div className="text-center text-gray-400 py-12">暂无数据</div>
+        <div className="text-center text-gray-400 py-12">{t('common.noData')}</div>
       )}
     </div>
   );
@@ -255,16 +258,22 @@ export const SkillMetricsPage: React.FC = () => {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-const SummaryCard: React.FC<{ label: string; value: string }> = ({ label, value }) => (
-  <div className="bg-white border border-gray-200 rounded-lg p-4">
-    <div className="text-xs text-gray-500 tracking-wide">{label}</div>
-    <div className="mt-1 text-2xl font-bold text-gray-900">{value}</div>
-  </div>
-);
+const SummaryCard: React.FC<{ labelKey: MessageKey; value: string }> = ({ labelKey, value }) => {
+  const { t } = useI18n();
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg p-4">
+      <div className="text-xs text-gray-500 tracking-wide">{t(labelKey)}</div>
+      <div className="mt-1 text-2xl font-bold text-gray-900">{value}</div>
+    </div>
+  );
+};
 
-const Section: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
-  <div className="bg-white border border-gray-200 rounded-lg p-4">
-    <h2 className="text-sm font-semibold text-gray-700 mb-3">{title}</h2>
-    {children}
-  </div>
-);
+const Section: React.FC<{ titleKey: MessageKey; children: React.ReactNode }> = ({ titleKey, children }) => {
+  const { t } = useI18n();
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg p-4">
+      <h2 className="text-sm font-semibold text-gray-700 mb-3">{t(titleKey)}</h2>
+      {children}
+    </div>
+  );
+};

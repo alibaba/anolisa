@@ -1,7 +1,7 @@
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use super::card_capture::{events::releases_capture, CardInputState};
+use super::event_sender::RawInputEventSink;
 use super::mode::RawInputMode;
 use super::{RawInputCapture, RawInputEvent};
 
@@ -16,7 +16,7 @@ pub(super) fn consume_captured_input(
     capture: &RawInputCapture,
     generation: u64,
     bytes: &[u8],
-    input_events: &Sender<RawInputEvent>,
+    input_events: &dyn RawInputEventSink,
     input_mode: &Arc<Mutex<RawInputMode>>,
 ) -> CaptureConsumeResult {
     let Ok(mut mode) = input_mode.lock() else {

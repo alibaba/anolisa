@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-08-18
+
+### Added
+
+- Telemetry instance snapshots now include the detected container runtime as
+  `instance.container` for Docker, Podman, containerd, Kubernetes cgroups, and
+  LXC, while bare-metal hosts omit the field. This gives downstream deployment
+  statistics and troubleshooting a container-aware signal without collecting
+  container or pod identities
+  ([#2642](https://github.com/alibaba/anolisa/pull/2642)).
+
+### Changed
+
+- `anolisa status <component>` now validates new targets against the component
+  index, resolves package aliases, rejects unsupported names with `anolisa list`
+  guidance, and directs telemetry service targets to
+  `anolisa telemetry status`. Exact installed identities remain inspectable
+  when repository metadata is unavailable
+  ([#2626](https://github.com/alibaba/anolisa/pull/2626)).
+
+### Fixed
+
+- Raw adapter bundle installs now preserve each archive file's mode and record
+  the effective mode for integrity checks. Framework hooks and scripts retain
+  their executable bit instead of being installed uniformly as data files
+  ([#2619](https://github.com/alibaba/anolisa/pull/2619)).
+
 ## [0.3.2] - 2026-08-17
 
 ### Added

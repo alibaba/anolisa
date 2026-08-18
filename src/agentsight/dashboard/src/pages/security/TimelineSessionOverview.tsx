@@ -1,4 +1,5 @@
 import React from 'react';
+import { useI18n } from '../../i18n';
 import type {
   SecurityApiResponse,
   SecurityEventRecord,
@@ -23,6 +24,7 @@ export const TimelineSessionOverview: React.FC<{
   loading: boolean;
   error: string | null;
 }> = ({ session, run, eventsResponse, loading, error }) => {
+  const { t } = useI18n();
   const events = eventsResponse?.data.items ?? [];
   const totalSecurityEvents = eventsResponse?.data.total ?? session?.security_event_count ?? 0;
   const verdictItems = verdictCountItems(events);
@@ -33,41 +35,41 @@ export const TimelineSessionOverview: React.FC<{
   }).length;
   const hasRiskVerdict = events.some((event) => verdictTone(securityEventVerdict(event)) === 'risk');
 
-  let statusLabel = '选择 Session 后统计 verdict';
+  let statusLabel = t('sec.selectSessionToAggregate');
   let statusClasses = 'bg-gray-100 text-gray-700';
   if (loading) {
-    statusLabel = 'Verdict 统计中...';
+    statusLabel = t('sec.aggregatingVerdicts');
   } else if (error) {
-    statusLabel = 'Verdict 统计失败';
+    statusLabel = t('sec.verdictAggregationFailed');
     statusClasses = 'bg-red-100 text-red-700';
   } else if (!session) {
-    statusLabel = '未选择 Session';
+    statusLabel = t('sec.noSessionSelected');
   } else if (totalSecurityEvents === 0) {
-    statusLabel = '无安全事件';
+    statusLabel = t('sec.noSecurityEventsShort');
   } else if (verdictTotal === 0) {
-    statusLabel = '暂无 verdict';
+    statusLabel = t('sec.noVerdictsYet');
   } else if (nonPassCount === 0) {
-    statusLabel = '全部 verdict 为 pass';
+    statusLabel = t('sec.allVerdictsPass');
     statusClasses = 'bg-green-100 text-green-700';
   } else {
-    statusLabel = `存在 ${nonPassCount} 个非 pass verdict`;
+    statusLabel = t('sec.nonPassVerdicts', { n: nonPassCount });
     statusClasses = hasRiskVerdict ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-800';
   }
 
   const metrics = [
-    ['Session', shortId(session?.session_id, 18)],
-    ['当前 Run', shortId(run?.run_id, 18)],
-    ['Turns', fmtNumber(session?.turn_count)],
-    ['观测事件', fmtNumber(session?.observability_event_count)],
-    ['安全事件', fmtNumber(totalSecurityEvents)],
+    [t('sec.session'), shortId(session?.session_id, 18)],
+    [t('sec.currentRun'), shortId(run?.run_id, 18)],
+    [t('sec.turns'), fmtNumber(session?.turn_count)],
+    [t('sec.observabilityEvents'), fmtNumber(session?.observability_event_count)],
+    [t('sec.securityEventsCount'), fmtNumber(totalSecurityEvents)],
   ];
 
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold text-gray-900">Session 总览</h3>
-          <p className="mt-1 text-xs text-gray-500">按当前时间范围统计所选 session 的安全事件 verdict</p>
+          <h3 className="text-sm font-semibold text-gray-900">{t('sec.sessionOverview')}</h3>
+          <p className="mt-1 text-xs text-gray-500">{t('sec.sessionOverviewDesc')}</p>
         </div>
         <span className={`rounded px-2 py-0.5 text-xs font-medium ${statusClasses}`}>
           {statusLabel}

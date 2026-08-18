@@ -4,13 +4,18 @@ import type {
   SecurityCountItem,
   SecurityStatusData,
 } from '../../utils/apiClient';
-import { fmtNumber, stateClasses, stateLabel } from './utils';
+import { useI18n } from '../../i18n';
+import { fmtNumber, stateClasses, stateLabelKey } from './utils';
 
-export const StatePill: React.FC<{ state: string }> = ({ state }) => (
-  <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${stateClasses(state)}`}>
-    {stateLabel(state)}
-  </span>
-);
+export const StatePill: React.FC<{ state: string }> = ({ state }) => {
+  const { t } = useI18n();
+  const labelKey = stateLabelKey(state);
+  return (
+    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${stateClasses(state)}`}>
+      {labelKey ? t(labelKey) : state}
+    </span>
+  );
+};
 
 export const MetricCard: React.FC<{ label: string; value: number | string; sublabel?: string }> = ({
   label,
@@ -30,10 +35,11 @@ export const StatusPanel: React.FC<{
   error: string | null;
   onRetry: () => void;
 }> = ({ status, loading, error, onRetry }) => {
+  const { t } = useI18n();
   if (loading && !status) {
     return (
       <div className="rounded-lg border border-gray-200 bg-white p-6 text-sm text-gray-500">
-        加载安全观测状态...
+        {t('sec.loadingSecurityStatus')}
       </div>
     );
   }
@@ -43,14 +49,14 @@ export const StatusPanel: React.FC<{
       <div className="rounded-lg border border-red-200 bg-red-50 p-5">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="text-sm font-semibold text-red-700">安全观测状态加载失败</p>
+            <p className="text-sm font-semibold text-red-700">{t('sec.statusLoadFailed')}</p>
             <p className="mt-1 text-sm text-red-600">{error}</p>
           </div>
           <button
             onClick={onRetry}
             className="rounded-lg border border-red-300 bg-white px-3 py-1.5 text-sm text-red-700 hover:bg-red-50"
           >
-            重试
+            {t('common.retry')}
           </button>
         </div>
       </div>
@@ -72,7 +78,7 @@ export const StatusPanel: React.FC<{
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
-            <p className="text-sm font-semibold text-gray-900">agent-sec daemon</p>
+            <p className="text-sm font-semibold text-gray-900">{t('sec.daemon')}</p>
             <StatePill state={status.state} />
           </div>
           {status.message && <p className="mt-1 text-sm text-gray-600">{status.message}</p>}
@@ -82,7 +88,7 @@ export const StatusPanel: React.FC<{
           disabled={loading}
           className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
         >
-          {loading ? '刷新中...' : '刷新状态'}
+          {loading ? t('sec.refreshing') : t('sec.refreshStatus')}
         </button>
       </div>
     </div>

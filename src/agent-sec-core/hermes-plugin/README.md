@@ -91,8 +91,10 @@ enabled = true
 timeout = 5
 ```
 
-`timeout` 控制 `agent-sec-cli observability record` 子进程。CLI 失败、超时、invalid record
-或缺少必需 metadata 都是 fail-open。
+`timeout` 控制每次 PII 脱敏和 `agent-sec-cli observability record` 子进程，默认 5 秒。
+`OBSERVABILITY_TIMEOUT` 可覆盖该值；空值、非法值或非正数回退到 capability 配置值，
+配置值和环境变量均封顶为 5 秒。
+CLI 失败、超时、invalid record 或缺少必需 metadata 都是 fail-open。
 
 Observability hook 默认开启。启动 Hermes 前设置
 `OBSERVABILITY_HOOK_ENABLED=false` 可关闭记录而无需修改 `config.toml`；未设置或值无效时

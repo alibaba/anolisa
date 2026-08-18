@@ -1,4 +1,5 @@
 import React from 'react';
+import { useI18n, useLocaleTag } from '../../i18n';
 import type {
   SecurityApiResponse,
   SecurityEventRecord,
@@ -54,12 +55,15 @@ export const TimelineTab: React.FC<{
   timelineError,
   observabilityItemsById,
   onSelectEvent,
-}) => (
+}) => {
+  const { t } = useI18n();
+  const locale = useLocaleTag();
+  return (
   <section className="space-y-4">
     <div className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
       <div className="grid gap-4 lg:grid-cols-2">
         <label className="text-xs text-gray-500">
-          Session
+          {t('sec.session')}
           <select
             value={selectedSessionId ?? ''}
             onChange={(event) => setSelectedSessionId(event.target.value || null)}
@@ -75,7 +79,7 @@ export const TimelineTab: React.FC<{
           </select>
         </label>
         <label className="text-xs text-gray-500">
-          Run
+          {t('sec.run')}
           <select
             value={selectedRunId ?? ''}
             onChange={(event) => setSelectedRunId(event.target.value || null)}
@@ -85,7 +89,7 @@ export const TimelineTab: React.FC<{
             <option value="">-</option>
             {(securityRuns?.data.items ?? []).map((run) => (
               <option key={run.run_id} value={run.run_id}>
-                {shortId(run.run_id, 40)} · {run.user_input_preview ?? fmtTime(run)}
+                {shortId(run.run_id, 40)} · {run.user_input_preview ?? fmtTime(run, locale)}
               </option>
             ))}
           </select>
@@ -113,12 +117,12 @@ export const TimelineTab: React.FC<{
     )}
     {timelineLoading && (
       <div className="rounded-lg border border-gray-200 bg-white p-6 text-center text-sm text-gray-400">
-        加载 timeline...
+        {t('sec.loadingTimeline')}
       </div>
     )}
     {!timelineLoading && !timelineError && timeline?.state === 'empty' && (
       <div className="rounded-lg border border-gray-200 bg-gray-50 p-6 text-center text-sm text-gray-500">
-        该 run 暂无 timeline 数据。
+        {t('sec.noTimelineData')}
       </div>
     )}
     {!timelineLoading && !timelineError && timeline && timeline.data.items.length > 0 && (
@@ -134,4 +138,5 @@ export const TimelineTab: React.FC<{
       </div>
     )}
   </section>
-);
+  );
+};

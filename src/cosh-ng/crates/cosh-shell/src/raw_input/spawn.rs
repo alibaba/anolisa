@@ -1,5 +1,7 @@
 use std::fs::File;
 use std::io::{self, Read};
+use std::os::fd::RawFd;
+use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -10,6 +12,7 @@ use crate::input::InputClassifier;
 use super::capture_bridge::{consume_captured_input, CaptureConsumeResult};
 use super::card_capture::CardInputState;
 use super::event_parser::{CandidateLineBuffer, NativeLineState};
+use super::event_sender::{RawInputEventSink, WakingRawInputEventSender};
 use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
 use super::mode::{
     abandon_active_capture, complete_capture_chain_if_pending, complete_capture_replay,
@@ -25,19 +28,21 @@ use super::{MainPromptGate, PromptGhostRoute, RawInputEvent, ESC};
 
 mod action;
 mod capture;
+mod deadline;
 mod prompt_ghost;
 mod reader;
 mod state;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use action::spawn_raw_action_relay;
 use action::{flush_pending_delay_escape, resolve_pending_delay_escape, PendingDelayEscape};
+pub(crate) use action::{spawn_raw_action_relay, spawn_raw_action_relay_with_wake};
 use capture::{
     capture_generation, capture_owns_input, capture_quarantine_generation, drain_abandoned_capture,
     relay_input_chunk, CaptureOwnedInput,
 };
 pub(super) use capture::{finish_input_relay, relay_late_capture_input};
+use deadline::{next_pending_deadline, receive_input};
 use prompt_ghost::{
     dismiss_replaced_prompt_ghost, PendingPromptGhostEscape, PendingReplacedPromptGhostSuffix,
 };
@@ -70,7 +75,7 @@ struct RelayReadContext<'a> {
 
 pub(crate) fn spawn_raw_input_relay<R>(
     input: R,
-    mut master: File,
+    master: File,
     input_events: Sender<RawInputEvent>,
     input_classifier: InputClassifier,
     input_mode: Arc<Mutex<RawInputMode>>,
@@ -81,11 +86,42 @@ pub(crate) fn spawn_raw_input_relay<R>(
 where
     R: Read + Send + 'static,
 {
+    spawn_raw_input_relay_with_wake(
+        input,
+        master,
+        input_events,
+        input_classifier,
+        input_mode,
+        input_generation,
+        main_prompt_gate,
+        slash_route_enabled,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_raw_input_relay_with_wake<R>(
+    input: R,
+    mut master: File,
+    input_events: Sender<RawInputEvent>,
+    input_classifier: InputClassifier,
+    input_mode: Arc<Mutex<RawInputMode>>,
+    input_generation: UserPtyInputGeneration,
+    main_prompt_gate: MainPromptGate,
+    slash_route_enabled: bool,
+    input_fd: Option<RawFd>,
+    wake: Option<UnixStream>,
+) -> JoinHandle<io::Result<()>>
+where
+    R: Read + Send + 'static,
+{
     thread::spawn(move || {
+        let input_events = WakingRawInputEventSender::new(input_events, wake);
         let (read_tx, read_rx) = mpsc::sync_channel(INPUT_READ_AHEAD_CAPACITY);
         // The relay must wake without a later keystroke to resolve a bare ESC.
         let reader_input_mode = input_mode.clone();
-        thread::spawn(move || read_input_chunks(input, read_tx, reader_input_mode));
+        thread::spawn(move || read_input_chunks(input, read_tx, reader_input_mode, input_fd));
 
         let mut state = RawInputRelayState::with_generation_and_gate(
             input_generation,
@@ -134,6 +170,7 @@ where
                         &input_mode,
                         &mut state,
                     )?;
+                    input_events.notify_relay();
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => InputRead::Eof,
@@ -201,6 +238,7 @@ where
                             },
                         )?;
                     }
+                    input_events.notify_relay();
                 }
                 InputRead::Eof => {
                     finish_input_relay(
@@ -210,6 +248,7 @@ where
                         &input_mode,
                         &mut state,
                     )?;
+                    input_events.notify_relay();
                     return Ok(());
                 }
                 InputRead::Error(error) => return Err(error),
@@ -235,46 +274,11 @@ fn stale_delay_escape_reached_interactive_owner(
         )
 }
 
-fn receive_input(
-    receiver: &Receiver<InputRead>,
-    state: &mut RawInputRelayState,
-) -> Result<InputRead, RecvTimeoutError> {
-    if let Some(input) = state.deferred_input.take() {
-        return Ok(input);
-    }
-    match next_pending_deadline(state) {
-        Some(deadline) => receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())),
-        None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
-    }
-}
-
-pub(super) fn next_pending_deadline(state: &RawInputRelayState) -> Option<Instant> {
-    state
-        .pending_prompt_ghost_escape
-        .as_ref()
-        .map(|pending| pending.deadline)
-        .into_iter()
-        .chain(
-            state
-                .pending_delay_escape
-                .as_ref()
-                .map(|pending| pending.deadline),
-        )
-        .chain(
-            state
-                .pending_replaced_prompt_ghost_suffix
-                .as_ref()
-                .map(|pending| pending.deadline),
-        )
-        .chain(state.pending_draft_escape_deadline)
-        .min()
-}
-
 pub(super) fn relay_input_bytes(
     bytes: &[u8],
     received_at: Instant,
     master: &mut File,
-    input_events: &Sender<RawInputEvent>,
+    input_events: &dyn RawInputEventSink,
     input_classifier: &InputClassifier,
     input_mode: &Arc<Mutex<RawInputMode>>,
     state: &mut RawInputRelayState,
@@ -295,7 +299,7 @@ fn relay_input_bytes_with_read_ahead(
     bytes: &[u8],
     received_at: Instant,
     master: &mut File,
-    input_events: &Sender<RawInputEvent>,
+    input_events: &dyn RawInputEventSink,
     input_classifier: &InputClassifier,
     input_mode: &Arc<Mutex<RawInputMode>>,
     state: &mut RawInputRelayState,
@@ -544,7 +548,7 @@ fn flush_pending_replaced_prompt_ghost_suffix(
     now: Instant,
     mode: &RawInputMode,
     master: &mut File,
-    input_events: &Sender<RawInputEvent>,
+    input_events: &dyn RawInputEventSink,
     input_classifier: &InputClassifier,
     input_mode: &Arc<Mutex<RawInputMode>>,
     state: &mut RawInputRelayState,
@@ -583,7 +587,7 @@ fn relay_input_for_mode(
     bytes: &[u8],
     mode: RawInputMode,
     master: &mut File,
-    input_events: &Sender<RawInputEvent>,
+    input_events: &dyn RawInputEventSink,
     input_classifier: &InputClassifier,
     input_mode: &Arc<Mutex<RawInputMode>>,
     state: &mut RawInputRelayState,
@@ -631,7 +635,7 @@ fn flush_pending_prompt_ghost_escape(
     force: bool,
     now: Instant,
     master: &mut File,
-    input_events: &Sender<RawInputEvent>,
+    input_events: &dyn RawInputEventSink,
     input_classifier: &InputClassifier,
     input_mode: &Arc<Mutex<RawInputMode>>,
     state: &mut RawInputRelayState,

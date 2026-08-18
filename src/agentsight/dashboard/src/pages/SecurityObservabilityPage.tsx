@@ -40,12 +40,15 @@ import {
   mapToCountItems,
   msToNs,
 } from './security/utils';
+import { useI18n } from '../i18n';
+import type { MessageKey } from '../i18n';
 
 function isSecurityAvailableState(state: string | null | undefined): boolean {
   return state === 'daemon_reachable';
 }
 
 export const SecurityObservabilityPage: React.FC = () => {
+  const { t } = useI18n();
   const now = Date.now();
   const [startMs, setStartMs] = useState(now - 24 * 3600 * 1000);
   const [endMs, setEndMs] = useState(now);
@@ -110,12 +113,12 @@ export const SecurityObservabilityPage: React.FC = () => {
       return nextStatus;
     } catch (error) {
       setStatus(null);
-      setStatusError(errorMessage(error));
+      setStatusError(errorMessage(error, t));
       return null;
     } finally {
       setStatusLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const loadOverview = useCallback(async () => {
     setOverviewLoading(true);
@@ -139,7 +142,7 @@ export const SecurityObservabilityPage: React.FC = () => {
         setter(result.value);
         return result.value;
       }
-      errors.push(errorMessage(result.reason));
+      errors.push(errorMessage(result.reason, t));
       return null;
     };
 
@@ -163,7 +166,7 @@ export const SecurityObservabilityPage: React.FC = () => {
 
     setOverviewError(errors.length > 0 ? errors.join('; ') : null);
     setOverviewLoading(false);
-  }, [rangeParams]);
+  }, [rangeParams, t]);
 
   const loadEvents = useCallback(async (offset: number, filters = appliedEventFilters) => {
     if (!isAvailable) return;
@@ -179,11 +182,11 @@ export const SecurityObservabilityPage: React.FC = () => {
       });
       setEvents(response);
     } catch (error) {
-      setEventsError(errorMessage(error));
+      setEventsError(errorMessage(error, t));
     } finally {
       setEventsLoading(false);
     }
-  }, [appliedEventFilters, isAvailable, rangeParams]);
+  }, [appliedEventFilters, isAvailable, rangeParams, t]);
 
   const loadSessions = useCallback(async () => {
     if (!isAvailable) return;
@@ -197,11 +200,11 @@ export const SecurityObservabilityPage: React.FC = () => {
         ? current
         : response.data.items[0]?.session_id ?? null);
     } catch (error) {
-      setSessionsError(errorMessage(error));
+      setSessionsError(errorMessage(error, t));
     } finally {
       setSessionsLoading(false);
     }
-  }, [isAvailable, rangeParams]);
+  }, [isAvailable, rangeParams, t]);
 
   const loadEventDetail = useCallback(async (eventId: string) => {
     setEventDetailLoading(true);
@@ -210,11 +213,11 @@ export const SecurityObservabilityPage: React.FC = () => {
     try {
       setEventDetail(await fetchSecurityEvent(eventId));
     } catch (error) {
-      setEventDetailError(errorMessage(error));
+      setEventDetailError(errorMessage(error, t));
     } finally {
       setEventDetailLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     loadStatus();
@@ -264,7 +267,7 @@ export const SecurityObservabilityPage: React.FC = () => {
         if (!cancelled) setSessionEvents(response);
       })
       .catch((error) => {
-        if (!cancelled) setSessionEventsError(errorMessage(error));
+        if (!cancelled) setSessionEventsError(errorMessage(error, t));
       })
       .finally(() => {
         if (!cancelled) setSessionEventsLoading(false);
@@ -273,7 +276,7 @@ export const SecurityObservabilityPage: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [activeTab, isAvailable, rangeParams, selectedSessionId, timelineRefreshNonce]);
+  }, [activeTab, isAvailable, rangeParams, selectedSessionId, timelineRefreshNonce, t]);
 
   useEffect(() => {
     if (!isAvailable || activeTab !== 'timeline' || !selectedSessionId) {
@@ -297,7 +300,7 @@ export const SecurityObservabilityPage: React.FC = () => {
       })
       .catch((error) => {
         if (!cancelled) {
-          setRunsError(errorMessage(error));
+          setRunsError(errorMessage(error, t));
           setSelectedRunId(null);
         }
       })
@@ -308,7 +311,7 @@ export const SecurityObservabilityPage: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [activeTab, isAvailable, rangeParams, selectedSessionId, timelineRefreshNonce]);
+  }, [activeTab, isAvailable, rangeParams, selectedSessionId, timelineRefreshNonce, t]);
 
   useEffect(() => {
     if (!isAvailable || activeTab !== 'timeline' || !selectedSessionId || !selectedRunId) {
@@ -329,7 +332,7 @@ export const SecurityObservabilityPage: React.FC = () => {
         if (!cancelled) setTimeline(response);
       })
       .catch((error) => {
-        if (!cancelled) setTimelineError(errorMessage(error));
+        if (!cancelled) setTimelineError(errorMessage(error, t));
       })
       .finally(() => {
         if (!cancelled) setTimelineLoading(false);
@@ -338,7 +341,7 @@ export const SecurityObservabilityPage: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [activeTab, isAvailable, rangeParams, selectedRunId, selectedSessionId, timelineRefreshNonce]);
+  }, [activeTab, isAvailable, rangeParams, selectedRunId, selectedSessionId, timelineRefreshNonce, t]);
 
   const handleRefresh = useCallback(async () => {
     const nextStatus = await loadStatus();
@@ -349,7 +352,7 @@ export const SecurityObservabilityPage: React.FC = () => {
       await loadSessions();
       setTimelineRefreshNonce((current) => current + 1);
     }
-  }, [activeTab, loadEvents, loadOverview, loadSessions, loadStatus]);
+  }, [activeTab, loadEvents, loadOverview, loadSessions, loadStatus, t]);
 
   const overviewEvents = recentEvents?.data.items ?? summary?.data.latest_events ?? [];
   const latestEvents = overviewEvents.slice(0, 10);
@@ -368,8 +371,8 @@ export const SecurityObservabilityPage: React.FC = () => {
     <main className="mx-auto max-w-screen-xl space-y-6 px-6 py-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">安全可观测</h1>
-          <p className="mt-1 text-sm text-gray-500">Security Observability / agent-sec daemon</p>
+          <h1 className="text-2xl font-bold text-gray-900">{t('sec.securityObservability')}</h1>
+          <p className="mt-1 text-sm text-gray-500">{t('sec.securityObservabilityDesc')}</p>
         </div>
         <div className="flex items-center gap-2">
           {status && <StatePill state={status.state} />}
@@ -378,21 +381,21 @@ export const SecurityObservabilityPage: React.FC = () => {
             disabled={statusLoading || overviewLoading || eventsLoading}
             className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
           >
-            刷新
+            {t('sec.refresh')}
           </button>
         </div>
       </div>
 
       <div className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
         <div className="flex flex-wrap items-end gap-4">
-          <DateTimePicker label="开始时间" value={startMs} onChange={setStartMs} />
-          <DateTimePicker label="结束时间" value={endMs} onChange={setEndMs} />
+          <DateTimePicker label={t('common.startTime')} value={startMs} onChange={setStartMs} />
+          <DateTimePicker label={t('common.endTime')} value={endMs} onChange={setEndMs} />
           <div className="flex flex-wrap gap-2">
             {[
-              { label: '最近 1h', ms: 3600 * 1000 },
-              { label: '最近 6h', ms: 6 * 3600 * 1000 },
-              { label: '最近 24h', ms: 24 * 3600 * 1000 },
-              { label: '最近 7d', ms: 7 * 24 * 3600 * 1000 },
+              { label: t('common.last1h'), ms: 3600 * 1000 },
+              { label: t('common.last6h'), ms: 6 * 3600 * 1000 },
+              { label: t('common.last24h'), ms: 24 * 3600 * 1000 },
+              { label: t('common.last7d'), ms: 7 * 24 * 3600 * 1000 },
             ].map((item) => (
               <button
                 key={item.label}
@@ -421,9 +424,9 @@ export const SecurityObservabilityPage: React.FC = () => {
         <>
           <div className="flex gap-2 border-b border-gray-200">
             {[
-              ['overview', '概览'],
-              ['events', '安全事件'],
-              ['timeline', '全链路事件'],
+              ['overview', t('sec.overview')],
+              ['events', t('sec.securityEvents')],
+              ['timeline', t('sec.fullChainEvents')],
             ].map(([key, label]) => (
               <button
                 key={key}
@@ -511,7 +514,7 @@ export const SecurityObservabilityPage: React.FC = () => {
 
       {!isAvailable && status && !isSecurityAvailableState(status.state) && (
         <div className="rounded-lg border border-gray-200 bg-white p-6 text-sm text-gray-500">
-          当前状态为 <span className="font-mono">{status.state}</span>，安全数据视图未加载。
+          {t('sec.currentState', { state: status.state })}
         </div>
       )}
 

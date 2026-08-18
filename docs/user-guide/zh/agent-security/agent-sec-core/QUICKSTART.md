@@ -280,12 +280,17 @@ OpenClaw、Hermes、cosh、Qwen Code、Qoder 和 Codex 集成默认启用 Observ
 宿主进程。该变量仅接受 `true` / `false`（忽略大小写和首尾空白）；未设置或值无效时保持
 默认开启。
 
+`OBSERVABILITY_TIMEOUT` 控制每次本地 PII 脱敏和 Observability 数据写入 CLI 调用的超时秒数。
+默认值为 `5`；未设置、空值、非法值或非正数同样使用 `5`。所有集成都会将大于 `5` 的值
+封顶为 `5`。
+
 对于 OpenClaw 和 Hermes，原有 Observability capability 的 `enabled` 配置仍是独立开关。
 任一开关关闭都会停止记录；`OBSERVABILITY_HOOK_ENABLED=true` 不会覆盖插件配置中已关闭的
 capability。
 
 ```bash
 export OBSERVABILITY_HOOK_ENABLED=false
+export OBSERVABILITY_TIMEOUT=5
 ```
 
 ```bash

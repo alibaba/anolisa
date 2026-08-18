@@ -134,7 +134,7 @@ agent-sec-core/
 └── README_zh.md
 ```
 
-## Observability Hook 开关
+## Observability Hook 配置
 
 OpenClaw、Hermes、cosh、Qwen Code、Qoder 和 Codex 集成默认都会启用
 Observability hook。若需关闭，请在启动对应宿主前设置：
@@ -145,6 +145,10 @@ export OBSERVABILITY_HOOK_ENABLED=false
 
 该变量仅接受 `true` / `false`（忽略大小写和首尾空白）；未设置或值无效时保持默认开启。
 修改后需重启对应宿主进程。
+
+`OBSERVABILITY_TIMEOUT` 控制每次本地 PII 脱敏和 Observability 数据写入 CLI 调用的超时秒数。
+默认值为 `5`；未设置、空值、非法值或非正数同样使用 `5`。所有集成都会将大于 `5` 的值
+封顶为 `5`。
 
 对于 OpenClaw 和 Hermes，原有 Observability capability 的 `enabled` 配置仍是独立开关。
 任一开关关闭都会停止记录；将该环境变量设为 `true`，不会重新启用已在插件配置中关闭的
@@ -411,6 +415,8 @@ agent-sec-cli capabilities --agent hermes --capability pii-check --output json
 ```
 
 支持的 capability 名称固定为：`code-scan`、`prompt-scan`、`pii-check`、`skill-ledger` 和 `observability`。CLI 过滤参数不接受 `scan-code` 或 `pii-scan-user-input` 等插件内部 ID。
+
+对于 `observability`，该视图会对六种集成都应用 `OBSERVABILITY_TIMEOUT` 语义：默认值为 5 秒，非法值或非正数回退到 5，大于 5 的值封顶为 5。Hermes 插件配置仍可在未设置环境变量时指定更低的运行时 timeout；该配置不在此纯环境变量视图的解析范围内。
 
 表格输出仅包含稳定的用户可见列：`CAPABILITY`、`ENABLED`、`MODE`、`SCAN_MODE`、`TIMEOUT(s)` 和 `DIAGNOSTICS`。JSON 输出保留同样的用户字段，并额外包含经过脱敏投影的 `env` 条目，其中只含 `effective` 和 `default`。两种格式都不会暴露 hook matcher 列表、source 标签、Agent config 内容、config 路径或原始环境变量值。诊断信息只说明哪个设置无效及 fallback 行为，不回显原始值。
 

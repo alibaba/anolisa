@@ -1,4 +1,6 @@
 import { SecurityApiClientError } from '../../utils/apiClient';
+import { formatMsCompact } from '../../utils/datetime';
+import type { MessageKey } from '../../i18n';
 import type {
   SecurityCountItem,
   SecurityEventRecord,
@@ -41,24 +43,21 @@ export function timestampToMs(input: {
   return null;
 }
 
-export function fmtTime(input: Parameters<typeof timestampToMs>[0]): string {
+export function fmtTime(input: Parameters<typeof timestampToMs>[0], locale: string): string {
   const ms = timestampToMs(input);
   if (ms == null) return '-';
-  return new Date(ms).toLocaleString('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
+  return formatMsCompact(ms, locale);
 }
 
-export function errorMessage(error: unknown): string {
+export function errorMessage(
+  error: unknown,
+  t?: (key: MessageKey) => string,
+): string {
   if (error instanceof SecurityApiClientError) {
     return `${error.code}: ${error.message}`;
   }
   if (error instanceof Error) return error.message;
-  return '安全观测接口请求失败';
+  return t ? t('sec.apiRequestFailed') : 'Security observability API request failed';
 }
 
 export function mapToCountItems(map: Record<string, number> | undefined): SecurityCountItem[] {
@@ -119,11 +118,11 @@ export function timelineObservabilityContext(
   };
 }
 
-const SECURITY_DETAIL_FIELDS: Array<{ label: string; keys: string[] }> = [
-  { label: 'verdict', keys: ['verdict'] },
-  { label: 'error', keys: ['error_message', 'error', 'message'] },
-  { label: 'reason', keys: ['reason', 'policy_reason', 'explanation'] },
-  { label: 'finding', keys: ['finding', 'findings'] },
+const SECURITY_DETAIL_FIELDS: Array<{ id: string; labelKey: MessageKey; keys: string[] }> = [
+  { id: 'verdict', labelKey: 'sec.detail.verdict', keys: ['verdict'] },
+  { id: 'error', labelKey: 'sec.detail.error', keys: ['error_message', 'error', 'message'] },
+  { id: 'reason', labelKey: 'sec.detail.reason', keys: ['reason', 'policy_reason', 'explanation'] },
+  { id: 'finding', labelKey: 'sec.detail.finding', keys: ['finding', 'findings'] },
 ];
 
 export function findDetailValue(value: unknown, keys: string[], depth = 0): unknown {
@@ -148,16 +147,18 @@ export function findDetailValue(value: unknown, keys: string[], depth = 0): unkn
   return undefined;
 }
 
-export function securityDetailRows(details: unknown): Array<{ label: string; value: string }> {
-  const rows: Array<{ label: string; value: string }> = [];
+export function securityDetailRows(
+  details: unknown,
+): Array<{ id: string; labelKey: MessageKey; value: string }> {
+  const rows: Array<{ id: string; labelKey: MessageKey; value: string }> = [];
   const seen = new Set<string>();
   for (const field of SECURITY_DETAIL_FIELDS) {
     const value = findDetailValue(details, field.keys);
     if (value === undefined || value === null) continue;
     const preview = recordPreview(value);
-    if (preview === '-' || seen.has(`${field.label}:${preview}`)) continue;
-    seen.add(`${field.label}:${preview}`);
-    rows.push({ label: field.label, value: preview });
+    if (preview === '-' || seen.has(`${field.id}:${preview}`)) continue;
+    seen.add(`${field.id}:${preview}`);
+    rows.push({ id: field.id, labelKey: field.labelKey, value: preview });
   }
   return rows;
 }
@@ -288,20 +289,21 @@ export function fmtPercent(numerator: number, denominator: number): string {
   return value >= 10 ? `${Math.round(value)}%` : `${value.toFixed(1)}%`;
 }
 
-export function stateLabel(state: string): string {
-  const labels: Record<string, string> = {
-    daemon_reachable: 'daemon 可达',
-    disabled: '已禁用',
-    daemon_unreachable: 'daemon 不可达',
-    store_unavailable: '数据不可用',
-    schema_mismatch: 'schema 不兼容',
-    ok: '正常',
-    empty: '无数据',
-    partial: '部分数据',
-    found: '已找到',
-    not_found: '未找到',
-  };
-  return labels[state] ?? state;
+const STATE_LABEL_KEY: Record<string, MessageKey> = {
+  daemon_reachable: 'sec.daemonReachable',
+  disabled: 'sec.disabled',
+  daemon_unreachable: 'sec.daemonUnreachable',
+  store_unavailable: 'sec.storeUnavailable',
+  schema_mismatch: 'sec.schemaMismatch',
+  ok: 'sec.ok',
+  empty: 'sec.empty',
+  partial: 'sec.partial',
+  found: 'sec.found',
+  not_found: 'sec.notFound',
+};
+
+export function stateLabelKey(state: string): MessageKey | null {
+  return STATE_LABEL_KEY[state] ?? null;
 }
 
 export function stateClasses(state: string): string {

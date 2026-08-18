@@ -1,4 +1,5 @@
 import React from 'react';
+import { useI18n, useLocaleTag } from '../../i18n';
 import type { SecurityTimelineItem } from '../../utils/apiClient';
 import {
   badgeClasses,
@@ -17,6 +18,8 @@ export const TimelineItem: React.FC<{
   observabilityItemsById: Map<string, SecurityTimelineItem>;
   onSelectEvent: (eventId: string) => void;
 }> = ({ item, observabilityItemsById, onSelectEvent }) => {
+  const { t } = useI18n();
+  const locale = useLocaleTag();
   const securityEvent = item.kind === 'security' ? item.event : undefined;
   const observabilityContext = timelineObservabilityContext(item, observabilityItemsById);
   const eventTitle = securityEvent?.event_type ?? securityEvent?.event_id;
@@ -51,17 +54,17 @@ export const TimelineItem: React.FC<{
               <h4 className="truncate text-sm font-semibold text-gray-900">{title}</h4>
               {securityEvent && observabilityContext.hook && (
                 <span className="rounded bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">
-                  observability {observabilityContext.hook}
+                  {t('sec.observabilityHook', { hook: observabilityContext.hook })}
                 </span>
               )}
-              {item.redacted && <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-800">redacted</span>}
-              {item.truncated && <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-800">truncated</span>}
+              {item.redacted && <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-800">{t('sec.redacted')}</span>}
+              {item.truncated && <span className="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-800">{t('sec.truncated')}</span>}
             </div>
-            <p className="mt-1 text-xs text-gray-500">{fmtTime(item)}</p>
+            <p className="mt-1 text-xs text-gray-500">{fmtTime(item, locale)}</p>
           </div>
           {item.match && (
             <span className="rounded bg-green-100 px-2 py-0.5 text-xs text-green-700">
-              match {recordPreview(item.match.reason)}
+              {t('sec.matchReason', { reason: recordPreview(item.match.reason) })}
             </span>
           )}
         </div>
@@ -83,17 +86,17 @@ export const TimelineItem: React.FC<{
               <button
                 onClick={() => onSelectEvent(securityEvent.event_id)}
                 className={`ml-auto rounded border bg-white px-2 py-1 text-xs font-medium ${securityClasses.button}`}
-                aria-label={`查看安全事件详情 ${securityEvent.event_id}`}
+                aria-label={t('sec.viewEventDetailsAria', { id: securityEvent.event_id })}
               >
-                详情
+                {t('common.details')}
               </button>
             </div>
             {detailRows.length > 0 && (
               <div className="mt-3 grid gap-2 sm:grid-cols-2">
                 {detailRows.map((row) => (
-                  <div key={row.label} className="rounded border border-white/60 bg-white/70 px-3 py-2">
-                    <p className={`text-xs ${securityClasses.detailLabel}`}>{row.label}</p>
-                    <p className={`mt-1 break-words font-mono text-xs ${row.label === 'verdict' ? verdictBadgeClasses(row.value) : securityClasses.detailValue} ${row.label === 'verdict' ? 'inline-block rounded px-2 py-0.5' : ''}`}>
+                  <div key={row.id} className="rounded border border-white/60 bg-white/70 px-3 py-2">
+                    <p className={`text-xs ${securityClasses.detailLabel}`}>{t(row.labelKey)}</p>
+                    <p className={`mt-1 break-words font-mono text-xs ${row.id === 'verdict' ? verdictBadgeClasses(row.value) : securityClasses.detailValue} ${row.id === 'verdict' ? 'inline-block rounded px-2 py-0.5' : ''}`}>
                       {row.value}
                     </p>
                   </div>
@@ -104,19 +107,19 @@ export const TimelineItem: React.FC<{
         )}
         {correlated.length > 0 && (
           <div className="mt-3 rounded-lg border border-red-100 bg-red-50 p-3 text-sm text-red-800">
-            关联安全事件 {correlated.length} 条
+            {t('sec.correlatedEvents', { n: correlated.length })}
           </div>
         )}
 
         <div className="mt-3 grid gap-2 text-xs text-gray-500 sm:grid-cols-3">
-          <span className="font-mono">session {shortId(sessionId)}</span>
-          <span className="font-mono">run {shortId(runId)}</span>
-          <span className="font-mono">tool {shortId(toolCallId)}</span>
+          <span className="font-mono">{t('sec.sessionLabel', { id: shortId(sessionId) })}</span>
+          <span className="font-mono">{t('sec.runLabel', { id: shortId(runId) })}</span>
+          <span className="font-mono">{t('sec.toolLabel', { id: shortId(toolCallId) })}</span>
         </div>
 
         {(itemMetadata || itemMetrics) && (
           <details className="mt-3">
-            <summary className="cursor-pointer text-xs text-gray-500">metadata / metrics</summary>
+            <summary className="cursor-pointer text-xs text-gray-500">{t('sec.metadataMetrics')}</summary>
             <pre className="mt-2 max-h-60 overflow-auto rounded bg-gray-950 p-3 text-xs text-gray-100">
               {JSON.stringify({ metadata: itemMetadata, metrics: itemMetrics }, null, 2)}
             </pre>

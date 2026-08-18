@@ -42,6 +42,7 @@ class EnvSpec:
     aliases: Mapping[str, str] = field(default_factory=dict)
     value_kind: str = "string"
     max_value: float | None = None
+    require_positive: bool = False
 
 
 @dataclass(frozen=True)
@@ -94,8 +95,24 @@ def _timeout(
     default: str,
     value_kind: str = "int",
     max_value: float | None = None,
+    require_positive: bool = False,
 ) -> EnvSpec:
-    return EnvSpec(name, default, value_kind=value_kind, max_value=max_value)
+    return EnvSpec(
+        name,
+        default,
+        value_kind=value_kind,
+        max_value=max_value,
+        require_positive=require_positive,
+    )
+
+
+def _observability_timeout() -> EnvSpec:
+    return _timeout(
+        "OBSERVABILITY_TIMEOUT",
+        "5",
+        max_value=5.0,
+        require_positive=True,
+    )
 
 
 def _mode(name: str, default: str, valid_values: set[str]) -> EnvSpec:
@@ -265,7 +282,11 @@ def _agent_specs(
         "pii-check": CapabilitySpec(hooks["pii-check"], tuple(pii_env)),
         "skill-ledger": CapabilitySpec(hooks["skill-ledger"], tuple(skill_env), "ask"),
         "observability": CapabilitySpec(
-            hooks["observability"], (_hook_enabled("OBSERVABILITY_HOOK_ENABLED"),)
+            hooks["observability"],
+            (
+                _hook_enabled("OBSERVABILITY_HOOK_ENABLED"),
+                _observability_timeout(),
+            ),
         ),
     }
 
@@ -349,25 +370,19 @@ AGENT_SPECS["cosh"]["prompt-scan"] = CapabilitySpec(
 )
 
 STATIC_DEFAULT_TIMEOUTS = {
-    ("qoder", "observability"): "3",
     ("qwen", "skill-ledger"): "5",
-    ("qwen", "observability"): "3",
-    ("codex", "observability"): "3",
     ("cosh", "code-scan"): "10",
     ("cosh", "prompt-scan"): "10",
     ("cosh", "pii-check"): "10",
     ("cosh", "skill-ledger"): "5",
-    ("cosh", "observability"): "3",
     ("openclaw", "code-scan"): "10",
     ("openclaw", "prompt-scan"): "10",
     ("openclaw", "pii-check"): "10",
     ("openclaw", "skill-ledger"): "5",
-    ("openclaw", "observability"): "5",
     ("hermes", "code-scan"): "10",
     ("hermes", "prompt-scan"): "15",
     ("hermes", "pii-check"): "10",
     ("hermes", "skill-ledger"): "5",
-    ("hermes", "observability"): "5",
 }
 
 
@@ -545,9 +560,14 @@ def _resolve_timeout(spec: EnvSpec, raw: str | None, diagnostics: list[str]) -> 
         if spec.value_kind == "int":
             value = int(text)
             if value <= 0:
+                if spec.require_positive:
+                    diagnostics.append(_fallback_diagnostic(spec))
+                    return str(spec.default)
                 diagnostics.append(
                     f"{spec.name} is nonpositive; the hook subprocess may fail open"
                 )
+            if spec.max_value is not None:
+                value = min(value, int(spec.max_value))
             return str(value)
         value = float(text)
     except (TypeError, ValueError):

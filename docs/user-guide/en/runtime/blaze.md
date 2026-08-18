@@ -93,7 +93,11 @@ responds.
 Blaze exposes sandbox lifecycle and guest operations under `/v1/sandboxes`.
 Clients use this namespace to list, create, inspect, and delete sandboxes and
 to execute commands, read files, and write files inside them. Sandbox
-destruction uses `DELETE /v1/sandboxes/{id}`.
+destruction uses `DELETE /v1/sandboxes/{id}`. Checkpoint capture and history
+use
+`POST /v1/sandboxes/{id}/checkpoint` and
+`GET /v1/sandboxes/{id}/checkpoints`. Restore uses
+`POST /v1/sandboxes/{id}/rollback/{checkpoint_id}`.
 
 ## Host Integration Boundary
 
@@ -210,6 +214,108 @@ The metrics endpoint no longer publishes `blaze_instances_resets_total`,
 The lifecycle invariants behind these compatibility responses are recorded in
 the
 [lifecycle state consistency and compatibility design](../../../../src/blaze/docs/design/lifecycle-state-consistency.md).
+
+## Checkpoint Capture, History, and Restore
+
+Blaze captures a running sandbox through
+`POST /v1/sandboxes/{id}/checkpoint`.
+
+Capture requires both the selected backend and the storage provider to
+advertise full-checkpoint support. The built-in file provider captures the
+writable root filesystem, and the built-in mock backend supplies a complete
+development implementation. Firecracker, Bubblewrap, and the other process
+backends do not advertise capture support in this release. An unsupported
+combination returns HTTP 501 before the sandbox is paused or its lifecycle
+record is changed.
+
+For a supported running sandbox, Blaze holds the sandbox operation lock,
+validates its current checkpoint parent, pauses the backend, and captures three
+self-contained files: `vmstate.snap`, `memory.snap`, and `rootfs.snap`. It
+synchronizes and hashes those files, publishes the manifest, atomically updates
+the sandbox checkpoint HEAD, and resumes the backend. Guest operations and
+other lifecycle changes wait for the same operation lock while capture is in
+progress.
+
+A successful response contains the complete published manifest. The existing
+`checkpoint_id` and `instance_id` fields identify the same checkpoint and
+sandbox as `id` and `sandbox_id`:
+
+```json
+{
+  "checkpoint_id": "ckpt-11111111-1111-4111-8111-111111111111",
+  "instance_id": "22222222-2222-4222-8222-222222222222",
+  "format_version": 1,
+  "id": "ckpt-11111111-1111-4111-8111-111111111111",
+  "parent": null,
+  "sandbox_id": "22222222-2222-4222-8222-222222222222",
+  "policy_name": "agent-tool",
+  "image_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "backend": "mock",
+  "backend_version": "mock-v1",
+  "created_at": "2026-08-14T00:00:00Z",
+  "snapshot_kind": "full",
+  "artifacts": [
+    {
+      "name": "vmstate.snap",
+      "size_bytes": 4096,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "memory.snap",
+      "size_bytes": 8192,
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "name": "rootfs.snap",
+      "size_bytes": 8589934592,
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  ]
+}
+```
+
+Use `GET /v1/sandboxes/{id}/checkpoints` to list committed history. Each list
+entry contains `id`, `parent`, `created_at`, total logical `size_bytes`,
+`is_head`, and `on_head_chain`. The list is a summary and does not repeat the
+complete artifact manifest returned by capture.
+
+A failure known to occur before publication removes its temporary data,
+resumes the backend, and leaves the sandbox running. If Blaze cannot prove the
+publication, HEAD update, persistence, or backend-resume outcome, it retains
+the durable record and reports `RecoveryRequired`; do not retry capture until
+the sandbox has been reconciled or destroyed. A committed checkpoint that did
+not become HEAD can still appear in history with `is_head: false`.
+
+Restore a running sandbox with:
+
+```http
+POST /v1/sandboxes/{id}/rollback/{checkpoint_id}
+```
+
+Restore requires a verified full checkpoint, an exact match for the sandbox's
+policy, image, backend, and backend version, plus explicit restore support from
+both the backend adapter and storage provider. The built-in mock adapter and
+file provider implement this contract. Other backend adapters return HTTP 501
+before stopping the current runtime until they implement restore.
+
+A `checkpoint_id` that is not in canonical form is rejected with HTTP 400, and a
+canonical identifier that names no committed checkpoint is reported as HTTP 404.
+Both answers are final: neither changes the running sandbox, so retrying the
+same selection cannot succeed.
+
+The file provider stages the selected root filesystem while the current
+backend remains running. Blaze then stops the old backend, activates the staged
+root, starts and checks the replacement owner, moves checkpoint HEAD, and
+commits storage. The dividing line is whether Blaze has begun stopping the old
+backend: a failure before that point, while still validating and staging the
+replacement root, preserves the running sandbox untouched. Once Blaze starts
+stopping the old backend, any later failure — including the stop itself failing
+or Blaze being unable to confirm the old backend actually stopped — retains the
+resources that actually exist and marks the sandbox `RecoveryRequired` so
+destruction can finish cleanup. Restore moves checkpoint HEAD but does not
+rewrite `last_checkpoint` or capture history.
+
+Checkpoint deletion and pruning are not provided by this API.
 
 ## Storage Artifact Synchronization
 

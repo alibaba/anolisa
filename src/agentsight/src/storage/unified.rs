@@ -82,6 +82,8 @@ pub struct SqliteConfig {
     pub retention_days: u64,
     /// Auto-purge check interval (every N inserts, 0 = disabled)
     pub purge_interval: u64,
+    /// Max database file size in MB (0 = no size-based limit)
+    pub max_db_size_mb: u64,
 }
 
 impl Default for SqliteConfig {
@@ -95,6 +97,7 @@ impl Default for SqliteConfig {
             token_consumption_table: "token_consumption".to_string(),
             retention_days: 30,
             purge_interval: 100000,
+            max_db_size_mb: 500,
         }
     }
 }
@@ -131,6 +134,10 @@ pub struct Storage {
     retention_days: u64,
     /// Auto-purge check interval (every N inserts, 0 = disabled)
     purge_interval: u64,
+    /// Max database file size in bytes (0 = no size-based limit)
+    max_db_size_bytes: u64,
+    /// Path to the SQLite database file (for size checking)
+    db_path: PathBuf,
     /// Insert counter for auto-purge triggering
     insert_count: AtomicU64,
 }
@@ -159,7 +166,7 @@ impl Storage {
         let http_store = HttpStore::with_table(&db_path, &config.http_table)?;
         let token_consumption_store =
             TokenConsumptionStore::with_table(&db_path, &config.token_consumption_table)?;
-        Ok(Storage {
+        let storage = Storage {
             backend: StorageBackend::Sqlite,
             audit_store,
             token_store,
@@ -167,8 +174,21 @@ impl Storage {
             token_consumption_store,
             retention_days: config.retention_days,
             purge_interval: config.purge_interval,
+            max_db_size_bytes: config.max_db_size_mb * 1024 * 1024,
+            db_path,
             insert_count: AtomicU64::new(0),
-        })
+        };
+
+        // If the database is already oversized on startup (e.g. from a prior
+        // crash or a config change), prune immediately rather than waiting for
+        // the next purge interval.
+        if storage.max_db_size_bytes > 0 {
+            if let Err(e) = storage.purge_oversized() {
+                log::warn!("Startup size-based cleanup failed: {e}");
+            }
+        }
+
+        Ok(storage)
     }
 
     /// Create a new Storage with default SQLite config
@@ -199,6 +219,8 @@ impl Storage {
             token_consumption_store,
             retention_days: 0,
             purge_interval: 0,
+            max_db_size_bytes: 0,
+            db_path,
             insert_count: AtomicU64::new(0),
         }
     }
@@ -268,11 +290,18 @@ impl Storage {
         }?;
 
         // Auto-purge check: trigger every `purge_interval` inserts
-        if self.purge_interval > 0 && self.retention_days > 0 {
+        if self.purge_interval > 0 {
             let count = self.insert_count.fetch_add(1, Ordering::Relaxed) + 1;
             if count.is_multiple_of(self.purge_interval) {
-                if let Err(e) = self.purge_expired() {
-                    log::warn!("Auto-purge failed: {e}");
+                if self.retention_days > 0 {
+                    if let Err(e) = self.purge_expired() {
+                        log::warn!("Auto-purge (age-based) failed: {e}");
+                    }
+                }
+                if self.max_db_size_bytes > 0 {
+                    if let Err(e) = self.purge_oversized() {
+                        log::warn!("Auto-purge (size-based) failed: {e}");
+                    }
                 }
             }
         }
@@ -317,9 +346,137 @@ impl Storage {
                 http_deleted,
                 consumption_deleted,
             );
+
+            // Reclaim free pages after bulk deletes. VACUUM writes through
+            // the WAL, so a TRUNCATE checkpoint is needed for the file to
+            // actually shrink. Both are best-effort: freed pages are reusable
+            // by future inserts even when they fail.
+            if let Err(e) = self.audit_store.vacuum() {
+                log::warn!("VACUUM after age-based purge failed: {e}");
+            }
+            if let Err(e) = self.audit_store.checkpoint() {
+                log::warn!("WAL checkpoint after age-based purge failed: {e}");
+            }
         }
 
         Ok(total_deleted)
+    }
+
+    /// Purge oldest records when the database exceeds the size limit.
+    ///
+    /// Size accounting includes the main file plus the `-wal` and `-shm`
+    /// companions — in WAL mode a large share of recent data lives in the WAL
+    /// file, so checking the main file alone would under-report.
+    ///
+    /// Work is organized in rounds: each round deletes a fixed number of
+    /// oldest-record batches from all tables, then runs one VACUUM +
+    /// checkpoint before re-measuring. VACUUM rewrites the whole file, so it
+    /// must not run per batch — bounding it per round keeps a multi-GB
+    /// cleanup tractable. VACUUM failures are tolerated: freed pages are
+    /// still reusable by future inserts.
+    ///
+    /// Rounds continue until the size is within the limit; termination is
+    /// guaranteed because every round must strictly shrink the file (or empty
+    /// the tables), otherwise the purge stops and reports the stall.
+    ///
+    /// Called automatically by `store()` during purge checks and by
+    /// `with_sqlite_config()` on startup.
+    pub fn purge_oversized(&self) -> Result<()> {
+        if self.max_db_size_bytes == 0 {
+            return Ok(());
+        }
+
+        // Rows deleted per table per batch, and batches per round: up to
+        // 20 000 rows per table between two VACUUM runs.
+        const BATCH_ROWS: usize = 1000;
+        const BATCHES_PER_ROUND: u32 = 20;
+
+        let mut prev_size = u64::MAX;
+        let mut round = 0u32;
+
+        loop {
+            let size = self.total_db_size();
+            if size <= self.max_db_size_bytes {
+                break;
+            }
+
+            // A round of deletes + VACUUM that does not shrink the file means
+            // VACUUM is failing (e.g. disk full). Deleting further rows would
+            // destroy data without freeing disk space, so stop and escalate:
+            // freed pages are still reused by future inserts, which prevents
+            // the main file from growing, but the size cap is no longer
+            // enforceable without operator action.
+            if size >= prev_size {
+                log::error!(
+                    "Size-based purge stalled: database is {} bytes (limit {}) and \
+                     did not shrink after round {round}. VACUUM is likely failing \
+                     (e.g. disk full). Size enforcement is suspended — manual \
+                     intervention required (free disk space or remove the database).",
+                    size,
+                    self.max_db_size_bytes
+                );
+                break;
+            }
+            prev_size = size;
+            round += 1;
+
+            let mut round_deleted = 0usize;
+            for _ in 0..BATCHES_PER_ROUND {
+                let deleted = self.audit_store.delete_oldest_batch(BATCH_ROWS)?
+                    + self.token_store.delete_oldest_batch(BATCH_ROWS)?
+                    + self.http_store.delete_oldest_batch(BATCH_ROWS)?
+                    + self
+                        .token_consumption_store
+                        .delete_oldest_batch(BATCH_ROWS)?;
+                round_deleted += deleted;
+                if deleted == 0 {
+                    break; // All tables empty
+                }
+            }
+
+            // VACUUM first, then checkpoint: in WAL mode VACUUM writes the
+            // rebuilt database through the WAL, so the file only shrinks once
+            // a TRUNCATE checkpoint flushes it back. Both are best-effort:
+            // freed pages are reusable even when they fail.
+            if let Err(e) = self.audit_store.vacuum() {
+                log::warn!("VACUUM during size-based purge failed: {e}");
+            }
+            if let Err(e) = self.audit_store.checkpoint() {
+                log::warn!("WAL checkpoint during size-based purge failed: {e}");
+            }
+
+            log::info!(
+                "Size-based purge round {round}: deleted {round_deleted} rows, \
+                 database now {} bytes (limit {})",
+                self.total_db_size(),
+                self.max_db_size_bytes
+            );
+
+            if round_deleted == 0 {
+                break; // Nothing left to delete
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Total on-disk size of the database: main file + `-wal` + `-shm`.
+    ///
+    /// A missing companion file is normal (e.g. after a TRUNCATE checkpoint)
+    /// and counts as zero; any other metadata error is logged because it can
+    /// under-report the size and mask an oversized database.
+    fn total_db_size(&self) -> u64 {
+        let len = |path: &str| match std::fs::metadata(path) {
+            Ok(m) => m.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => {
+                log::warn!("Cannot stat {path} for size accounting, assuming 0 bytes: {e}");
+                0
+            }
+        };
+        len(&self.db_path.display().to_string())
+            + len(&format!("{}-wal", self.db_path.display()))
+            + len(&format!("{}-shm", self.db_path.display()))
     }
 
     /// Compute the cutoff timestamp for retention
@@ -378,6 +535,7 @@ impl Drop for Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analyzer::token::TokenRecord;
 
     #[test]
     fn test_noop_storage_is_noop() {
@@ -418,5 +576,236 @@ mod tests {
         // Just verify it doesn't panic
         let _ = storage.is_noop();
         drop(storage);
+    }
+
+    /// Unique per-test directory under the system temp dir.
+    fn unique_base_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "agentsight_unified_{label}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn test_config(base_path: PathBuf, max_db_size_mb: u64) -> SqliteConfig {
+        SqliteConfig {
+            base_path,
+            // Disable both auto-purge paths so tests trigger purges explicitly.
+            retention_days: 0,
+            purge_interval: 0,
+            max_db_size_mb,
+            ..Default::default()
+        }
+    }
+
+    /// Token record with a payload of roughly `payload_bytes` for growing the
+    /// database file quickly in size-limit tests.
+    fn bulky_token_record(timestamp_ns: u64, payload_bytes: usize) -> TokenRecord {
+        TokenRecord {
+            id: 0,
+            timestamp_ns,
+            pid: 1,
+            comm: "test".to_string(),
+            agent: None,
+            model: None,
+            provider: "test".to_string(),
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+            request_id: None,
+            // `endpoint` is a persisted TEXT column, so the payload actually
+            // lands in the database file (`reasoning_content` is not stored).
+            endpoint: Some("x".repeat(payload_bytes)),
+            tool_calls: vec![],
+            reasoning_content: None,
+        }
+    }
+
+    #[test]
+    fn test_purge_oversized_disabled_when_limit_zero() {
+        let dir = unique_base_dir("limit_zero");
+        let storage = Storage::with_sqlite_config(&test_config(dir.clone(), 0)).unwrap();
+
+        for i in 0..10 {
+            storage
+                .token_store
+                .insert(&bulky_token_record(i, 64))
+                .unwrap();
+        }
+        storage.purge_oversized().unwrap();
+
+        assert_eq!(storage.token_store.count(), 10, "limit 0 must never delete");
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_purge_oversized_noop_when_below_limit() {
+        let dir = unique_base_dir("below_limit");
+        let storage = Storage::with_sqlite_config(&test_config(dir.clone(), 500)).unwrap();
+
+        for i in 0..10 {
+            storage
+                .token_store
+                .insert(&bulky_token_record(i, 64))
+                .unwrap();
+        }
+        storage.purge_oversized().unwrap();
+
+        assert_eq!(
+            storage.token_store.count(),
+            10,
+            "below-limit purge must not delete"
+        );
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_purge_oversized_shrinks_db_below_limit() {
+        let dir = unique_base_dir("shrink");
+        let limit_mb = 1u64;
+        let storage = Storage::with_sqlite_config(&test_config(dir.clone(), limit_mb)).unwrap();
+
+        // ~3MB of data: 300 rows × 10KB payload, well over the 1MB limit.
+        for i in 0..300 {
+            storage
+                .token_store
+                .insert(&bulky_token_record(i, 10 * 1024))
+                .unwrap();
+        }
+        storage.checkpoint().unwrap();
+        assert!(
+            storage.total_db_size() > limit_mb * 1024 * 1024,
+            "test setup must produce an oversized database"
+        );
+
+        storage.purge_oversized().unwrap();
+
+        assert!(
+            storage.total_db_size() <= limit_mb * 1024 * 1024,
+            "database must be within the size limit after purge, got {} bytes",
+            storage.total_db_size()
+        );
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_purge_oversized_runs_on_startup() {
+        let dir = unique_base_dir("startup");
+        let limit_mb = 1u64;
+
+        // Grow the database past the limit with size checks disabled.
+        {
+            let storage = Storage::with_sqlite_config(&test_config(dir.clone(), 0)).unwrap();
+            for i in 0..300 {
+                storage
+                    .token_store
+                    .insert(&bulky_token_record(i, 10 * 1024))
+                    .unwrap();
+            }
+            storage.checkpoint().unwrap();
+            assert!(storage.total_db_size() > limit_mb * 1024 * 1024);
+        }
+
+        // Reopening with a limit must trigger the startup cleanup.
+        let storage = Storage::with_sqlite_config(&test_config(dir.clone(), limit_mb)).unwrap();
+        assert!(
+            storage.total_db_size() <= limit_mb * 1024 * 1024,
+            "startup cleanup must bring the database within the limit"
+        );
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_total_db_size_counts_wal_file() {
+        let dir = unique_base_dir("wal_size");
+        let storage = Storage::with_sqlite_config(&test_config(dir.clone(), 500)).unwrap();
+
+        // Without a checkpoint, recent writes stay in the -wal file.
+        for i in 0..20 {
+            storage
+                .token_store
+                .insert(&bulky_token_record(i, 1024))
+                .unwrap();
+        }
+
+        let wal_len = std::fs::metadata(format!("{}-wal", storage.db_path.display()))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        assert!(
+            wal_len > 0,
+            "WAL file should hold the un-checkpointed writes"
+        );
+
+        let main_len = std::fs::metadata(&storage.db_path).unwrap().len();
+        assert!(
+            storage.total_db_size() >= main_len + wal_len,
+            "size accounting must include the WAL file"
+        );
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_delete_oldest_batch_removes_oldest_rows() {
+        let dir = unique_base_dir("oldest_batch");
+        let storage = Storage::with_sqlite_config(&test_config(dir.clone(), 0)).unwrap();
+
+        for ts in 1..=10 {
+            storage
+                .token_store
+                .insert(&bulky_token_record(ts, 64))
+                .unwrap();
+        }
+
+        let deleted = storage.token_store.delete_oldest_batch(4).unwrap();
+        assert_eq!(deleted, 4);
+
+        let remaining = storage.token_store.all();
+        assert_eq!(remaining.len(), 6);
+        let min_ts = remaining.iter().map(|r| r.timestamp_ns).min().unwrap();
+        assert_eq!(min_ts, 5, "the four oldest rows (ts 1-4) must be gone");
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `store()` must run both purge paths (age-based and size-based) every
+    /// `purge_interval` inserts, including the VACUUM after an age purge.
+    #[test]
+    fn test_store_triggers_auto_purge() {
+        let dir = unique_base_dir("auto_purge");
+        let config = SqliteConfig {
+            base_path: dir.clone(),
+            retention_days: 1,
+            purge_interval: 1, // purge check on every insert
+            max_db_size_mb: 500,
+            ..Default::default()
+        };
+        let storage = Storage::with_sqlite_config(&config).unwrap();
+
+        // ts=1ns is far older than the 1-day retention cutoff: the purge
+        // check right after this insert must delete it again.
+        let expired = crate::analyzer::AnalysisResult::Token(bulky_token_record(1, 64));
+        storage.store(&expired).unwrap();
+        assert_eq!(storage.token_store.count(), 0, "expired row must be purged");
+
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let fresh = crate::analyzer::AnalysisResult::Token(bulky_token_record(now_ns, 64));
+        storage.store(&fresh).unwrap();
+        assert_eq!(storage.token_store.count(), 1, "fresh row must survive");
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

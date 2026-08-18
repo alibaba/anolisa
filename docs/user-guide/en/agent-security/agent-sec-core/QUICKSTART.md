@@ -287,6 +287,11 @@ their observability hooks by default. To disable hook recording, set
 after changing it. The variable accepts only `true` / `false` (ignoring case and
 surrounding whitespace); an unset or invalid value keeps recording enabled.
 
+`OBSERVABILITY_TIMEOUT` sets the timeout in seconds for each local PII
+redaction and observability record CLI call. It defaults to `5`; an unset,
+empty, invalid, or non-positive value also uses `5`. Every integration caps
+larger values at `5`.
+
 For OpenClaw and Hermes, the existing observability capability `enabled` setting
 is an independent gate. Either switch can disable recording;
 `OBSERVABILITY_HOOK_ENABLED=true` does not override a capability disabled in
@@ -294,6 +299,7 @@ plugin configuration.
 
 ```bash
 export OBSERVABILITY_HOOK_ENABLED=false
+export OBSERVABILITY_TIMEOUT=5
 ```
 
 ```bash

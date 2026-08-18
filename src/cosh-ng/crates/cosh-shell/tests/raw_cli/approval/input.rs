@@ -105,6 +105,7 @@ fn assert_turn_batch_consent_serializes_handoffs(args: &[&str]) {
             ),
         ],
     );
+    let normalized = strip_ansi_escape(&output).replace('\r', "");
 
     assert!(output.contains("Allow all this turn"), "{output}");
     assert!(output.contains("Approved for this turn req-1"), "{output}");
@@ -113,6 +114,8 @@ fn assert_turn_batch_consent_serializes_handoffs(args: &[&str]) {
     // The swept requests never present their own cards.
     assert!(!output.contains("Approval req-2"), "{output}");
     assert!(!output.contains("Approval req-3"), "{output}");
+    assert!(!output.contains("Blocked req-3"), "{output}");
+    assert!(normalized.contains("\nalpha\nbeta\n"), "{output}");
     assert!(
         output.contains("Received shell prompt request: ?? batch-handoff-follow-up"),
         "a follow-up Agent run must start after every batched handoff closes: {output}"

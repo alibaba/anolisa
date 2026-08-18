@@ -22,8 +22,8 @@ Agent adapters are available for:
 - **OpenCode plugin** — schema/response/TOON compression, registered but hard-disabled Tool Ready, and command rewriting via OpenCode's local plugin API.
 - **DeepSeek Harness plugin** — native response compression and environment-error attribution through DSH's `tools/post-execute` seam.
 
-For framework developers, the separate **AgentScope Python integration** replaces successful
-final tool responses and provides a marker-scoped native retrieval Tool.
+For framework developers, the self-contained Python SDK and separate **AgentScope integration**
+cover schema compression, RTK rewriting, response compression, TOON, retrieval, and attribution.
 
 ## Features
 
@@ -43,7 +43,7 @@ final tool responses and provides a marker-scoped native retrieval Tool.
 | Codex plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Response compression ✅, TOON ✅ |
 | OpenCode plugin | — | Tool Ready ⛔ hard-disabled, Command rewriting ✅, Schema compression ✅, Response compression ✅, TOON ✅ |
 | DeepSeek Harness plugin | — | Response compression ✅, Environment-error attribution ✅ |
-| AgentScope framework integration | — | Response compression ✅, Native retrieval Tool ✅ |
+| AgentScope framework integration | — | Schema ✅, RTK ✅, Response ✅, TOON ✅, Retrieval ✅ |
 | Zero runtime deps | — | Pure Rust, single static binary |
 
 ## Applicable Scenarios & Expected Effects
@@ -201,10 +201,11 @@ uses `uvx` to provision Maturin by default. Install
 plain workspace-default Cargo commands exclude the Python extension.
 
 The `anolisa_tokenless` module supports CPython 3.11 and later on the platform
-where its native wheel was built. It currently exposes JSON response
-compression and Stash retrieval; it does not bundle the CLI, RTK, TOON, or a
-framework integration. The package is built and tested in this repository but is
-not yet published to PyPI. See the [runtime design](docs/design/runtime-library.md)
+where its native wheel was built. It exposes the four Tokenless lifecycle
+methods and bundles the matching RTK executable; TOON is linked into the native
+runtime. It does not require the Tokenless CLI or system helper binaries. The
+package is built and tested in this repository but is not yet published to
+PyPI. See the [runtime design](docs/design/runtime-library.md)
 and the [user manual](../../docs/user-guide/en/token-saving/tokenless/user-manual.md#build-the-python-runtime-from-source).
 
 ## CLI Usage
@@ -581,9 +582,9 @@ The public entry point and configuration are the same across both major
 versions. AgentScope 1.x and 2.x expose different lifecycle hooks, so only the
 final attachment step differs.
 
-AgentScope 1.x must install the integration after the Agent and all of its tool
-functions have been created. Installation binds retrieval to that Agent's
-memory so a stash hash cannot be retrieved unless its marker is visible there.
+AgentScope 1.x uses a Tokenless Toolkit so tools registered before or after
+Agent construction, including MCP tools, receive the same lifecycle handling.
+Installation requires an explicit session identifier.
 
 ```python
 from agentscope.agent import ReActAgent
@@ -595,8 +596,10 @@ integration = TokenlessAgentScope(
         data_dir="/absolute/path/to/tenant-tokenless-data",
     ),
 )
+toolkit = integration.create_toolkit()
+toolkit.register_tool_function(application_tool)
 agent = ReActAgent(..., toolkit=toolkit)
-integration.install(agent)
+integration.install(agent, session_id="conversation-id")
 ```
 
 AgentScope 2.x receives the retrieval Tool and middleware during construction;
@@ -650,16 +653,20 @@ Toolkit mutation or automatic Tool collection.
 | `balanced` | Skip Read/Glob/Grep; use 65,536 / 128 / depth 8 for Shell and conservative limits elsewhere |
 | `aggressive` | Skip Read/Glob/Grep; use CLI defaults of 4,096 / 32 / depth 8 elsewhere |
 
-`balanced` is the default. The read-only retrieval Tool is auto-allowed only
-for a 24-character hash whose marker is present in AgentScope 1.x memory or the
-AgentScope 2.x context/summary. In 1.x, call `install()` only after registering
-the tools that should be compressed; tools registered later are not wrapped.
-Pass a different absolute `data_dir` to each user or tenant for direct Agents;
+`balanced` is the default. The read-only retrieval Tool is published to the
+model only when a marker is visible and accepts only a hash from the exact
+marker set retained for that model call. Pass a different absolute `data_dir`
+to each user or tenant for direct Agents;
 `TOKENLESS_DATA_DIR` is only a process-wide fallback when `data_dir` is omitted.
 Retain the default one-hour stash TTL unless the application has a deliberate
-lifecycle policy, and do not expect retrieval across nodes. This integration
-does not enable Shell, MCP, TOON, RTK, or schema compression. Its source lives
-under `python/agentscope/` for independent wheel distribution.
+lifecycle policy, and do not expect retrieval across nodes.
+
+Both AgentScope adapters enable schema compression, RTK command rewriting,
+response compression, TOON, retrieval, environment-error guidance, and
+per-call attribution. The native wheel contains RTK and links TOON directly;
+it does not search for system executables. Host objects and streaming chunks
+remain unchanged; only copied call arguments and final model-visible text are
+transformed. Tool Ready remains hard-disabled.
 
 
 ## Build

@@ -10,6 +10,9 @@ import { EvaluationBadge } from '../components/EvaluationBadge';
 import { EvaluationPanel } from '../components/EvaluationPanel';
 import { DateTimePicker } from '../components/DateTimePicker';
 import { SessionIdHelp } from '../components/SessionIdHelp';
+import { useI18n, useLocaleTag } from '../i18n';
+import type { MessageKey } from '../i18n';
+import { formatNsPadded as nsToDate } from '../utils/datetime';
 import {
   fetchSessions,
   fetchTraces,
@@ -32,30 +35,18 @@ import {
   SessionInterruptionCount,
   ConversationInterruptionCount,
   EvaluationResult,
-  INTERRUPTION_TYPE_CN,
 } from '../utils/apiClient';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Convert nanoseconds to a display string */
-function nsToDate(ns: number): string {
-  return new Date(ns / 1_000_000).toLocaleString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
-}
 
 /** Truncate a long ID for display */
 function shortId(id: string, len = 16): string {
   return id.length > len ? id.slice(0, len) + '…' : id;
 }
 
-/** 复制按钮组件，点击后短暂显示「已复制」反馈 */
+/** Copy button with a brief "Copied" feedback */
 const CopyButton: React.FC<{ text: string }> = ({ text }) => {
+  const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleCopy = (e: React.MouseEvent) => {
@@ -65,7 +56,7 @@ const CopyButton: React.FC<{ text: string }> = ({ text }) => {
       if (timerRef.current) clearTimeout(timerRef.current);
       timerRef.current = setTimeout(() => setCopied(false), 1500);
     };
-    // HTTP 环境下 clipboard API 可能不可用，使用 execCommand fallback
+    // Clipboard API may be unavailable over HTTP; fall back to execCommand
     if (navigator.clipboard && window.isSecureContext) {
       navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
     } else {
@@ -80,9 +71,9 @@ const CopyButton: React.FC<{ text: string }> = ({ text }) => {
           ? 'bg-green-100 text-green-600'
           : 'bg-gray-100 hover:bg-gray-200 text-gray-500 hover:text-gray-700'
       }`}
-      title="复制完整 ID"
+      title={t('common.copyFullId')}
     >
-      {copied ? '✓ 已复制' : '复制'}
+      {copied ? t('common.copied') : t('common.copy')}
     </button>
   );
 };
@@ -113,6 +104,8 @@ interface TraceDetailModalProps {
 }
 
 const TraceDetailModal: React.FC<TraceDetailModalProps> = ({ traceId, onClose }) => {
+  const { t } = useI18n();
+  const locale = useLocaleTag();
   const [events, setEvents] = useState<TraceEventDetail[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -201,7 +194,7 @@ const TraceDetailModal: React.FC<TraceDetailModalProps> = ({ traceId, onClose })
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <div>
-            <h2 className="text-lg font-bold text-gray-900">Trace 详情</h2>
+            <h2 className="text-lg font-bold text-gray-900">{t('cl.traceDetails')}</h2>
             <p className="text-xs text-gray-400 font-mono mt-0.5">{traceId}</p>
           </div>
           <button
@@ -216,7 +209,7 @@ const TraceDetailModal: React.FC<TraceDetailModalProps> = ({ traceId, onClose })
         <div className="flex-1 overflow-y-auto p-6">
           {loading && (
             <div className="flex items-center justify-center py-12 text-gray-400">
-              加载中...
+              {t('common.loading')}
             </div>
           )}
           {error && (
@@ -225,7 +218,7 @@ const TraceDetailModal: React.FC<TraceDetailModalProps> = ({ traceId, onClose })
             </div>
           )}
           {!loading && !error && events.length === 0 && (
-            <div className="text-center py-12 text-gray-400">该 Trace 暂无数据</div>
+            <div className="text-center py-12 text-gray-400">{t('cl.noDataForTrace')}</div>
           )}
           {events.map((ev, idx) => {
             const inputMsgs = parseMessages(ev.input_messages);
@@ -251,22 +244,22 @@ const TraceDetailModal: React.FC<TraceDetailModalProps> = ({ traceId, onClose })
                     <span className="text-xs text-gray-400 font-mono w-4">{idx + 1}</span>
                     <div>
                       <span className="text-sm font-medium text-gray-900">
-                        {ev.model ?? 'unknown model'}
+                        {ev.model ?? t('cl.unknownModel')}
                       </span>
                       <span className="ml-3 text-xs text-gray-400">
-                        {nsToDate(ev.start_timestamp_ns)}
+                        {nsToDate(ev.start_timestamp_ns, locale)}
                       </span>
                     </div>
                   </div>
                   <div className="flex items-center gap-4">
                     <span className="text-xs text-blue-600">
-                      输入 {fmtTokens(ev.input_tokens)}
+                      {t('common.input')} {fmtTokens(ev.input_tokens)}
                     </span>
                     <span className="text-xs text-green-600">
-                      输出 {fmtTokens(ev.output_tokens)}
+                      {t('common.output')} {fmtTokens(ev.output_tokens)}
                     </span>
                     <span className="text-xs text-gray-500">
-                      总计 {fmtTokens(ev.total_tokens)}
+                      {t('common.total')} {fmtTokens(ev.total_tokens)}
                     </span>
                     <span className="text-gray-400 text-xs">{isExpanded ? '▲' : '▼'}</span>
                   </div>
@@ -276,7 +269,7 @@ const TraceDetailModal: React.FC<TraceDetailModalProps> = ({ traceId, onClose })
                 {isExpanded && (
                   <div className="p-4 space-y-2">
                     {allMsgs.length === 0 && (
-                      <p className="text-xs text-gray-400">无消息数据</p>
+                      <p className="text-xs text-gray-400">{t('cl.noMessageData')}</p>
                     )}
                     {allMsgs.map((msg: any, mi: number) => (
                       <div key={mi} className="flex gap-3 items-start">
@@ -314,6 +307,8 @@ interface TraceSubTableProps {
 const PAGE_SIZE = 10;
 
 const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationInterruptionCounts, startNs, endNs, onResolvedEvent }) => {
+  const { t } = useI18n();
+  const locale = useLocaleTag();
   const navigate = useNavigate();
   const [traces, setTraces] = useState<TraceSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -414,7 +409,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
     return (
       <tr>
         <td colSpan={10} className="px-8 py-4 text-sm text-gray-400 bg-blue-50">
-          加载 Trace 列表...
+          {t('cl.loadingTraces')}
         </td>
       </tr>
     );
@@ -433,14 +428,14 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
       <tr className="bg-blue-50 border-t border-blue-100">
         <td colSpan={10} className="px-4 lg:px-8 py-2">
           <div className="grid grid-cols-[230px_244px_110px_110px_150px_74px_100px_90px] text-xs font-semibold text-blue-700 uppercase tracking-wide min-w-[900px]">
-            <div>Conversation ID</div>
-            <div>用户请求</div>
-            <div>输入 Token</div>
-            <div>输出 Token</div>
-            <div>开始时间</div>
-            <div>操作</div>
-            <div>质量评估</div>
-            <div>中断</div>
+            <div>{t('cl.conversationId')}</div>
+            <div>{t('cl.userQuery')}</div>
+            <div>{t('cl.inputTokens')}</div>
+            <div>{t('cl.outputTokens')}</div>
+            <div>{t('cl.startTime')}</div>
+            <div>{t('cl.actions')}</div>
+            <div>{t('cl.qualityEval')}</div>
+            <div>{t('cl.interrupts')}</div>
           </div>
         </td>
       </tr>
@@ -448,7 +443,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
       {traces.length === 0 && (
         <tr className="bg-blue-50">
           <td colSpan={10} className="px-4 lg:px-8 py-3 text-sm text-gray-400">
-            该 Session 下暂无 Trace
+            {t('cl.noTraces')}
           </td>
         </tr>
       )}
@@ -489,13 +484,13 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
                 <div className="text-green-600 font-semibold">
                   {fmtTokens(tr.total_output_tokens)}
                 </div>
-                <div className="text-xs text-gray-500">{nsToDate(tr.start_ns)}</div>
+                <div className="text-xs text-gray-500">{nsToDate(tr.start_ns, locale)}</div>
                 <div>
                   <button
                     onClick={() => navigate(`/atif?type=conversation&id=${encodeURIComponent(tr.conversation_id)}`)}
                     className="px-3 py-1 bg-white border border-blue-300 text-blue-700 rounded-lg text-xs hover:bg-blue-50 transition-colors"
                   >
-                    详情
+                    {t('common.details')}
                   </button>
                 </div>
                 <div>
@@ -525,12 +520,12 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
                         ) : lookupFailed ? (
                           <span
                             className="text-red-600"
-                            title="质量评估结果加载失败，点击重试"
+                            title={t('cl.loadFailedTooltip')}
                           >
-                            加载失败
+                            {t('cl.loadFailed')}
                           </span>
                         ) : (
-                          '评估'
+                          t('cl.eval')
                         )}
                       </button>
                     );
@@ -587,20 +582,20 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
         </React.Fragment>
       ))}
 
-      {/* 分页控制 */}
+      {/* Pagination controls */}
       {totalPages > 1 && (
         <tr className="bg-blue-50 border-t border-blue-100">
           <td colSpan={10} className="px-4 lg:px-8 py-2">
             <div className="flex items-center gap-2 justify-end">
               <span className="text-xs text-gray-500">
-                {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, traces.length)} / {traces.length} 条
+                {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, traces.length)} / {traces.length}
               </span>
               <button
                 onClick={() => setPage((p) => Math.max(0, p - 1))}
                 disabled={page === 0}
                 className="px-2 py-0.5 text-xs border border-blue-300 text-blue-700 rounded hover:bg-blue-50 disabled:opacity-40 transition-colors"
               >
-                &lsaquo; 上一页
+                &lsaquo; {t('common.prev')}
               </button>
               {Array.from({ length: totalPages }, (_, i) => (
                 <button
@@ -620,7 +615,7 @@ const TraceSubTable: React.FC<TraceSubTableProps> = ({ sessionId, conversationIn
                 disabled={page === totalPages - 1}
                 className="px-2 py-0.5 text-xs border border-blue-300 text-blue-700 rounded hover:bg-blue-50 disabled:opacity-40 transition-colors"
               >
-                下一页 &rsaquo;
+                {t('common.next')} &rsaquo;
               </button>
             </div>
           </td>
@@ -720,14 +715,15 @@ interface TokenTimeseriesChartProps {
 }
 
 const TOKEN_SERIES = [
-  { key: 'input', name: '输入 Token', color: '#3b82f6' },
-  { key: 'output', name: '输出 Token', color: '#10b981' },
-  { key: 'total', name: '总 Token', color: '#6366f1' },
+  { key: 'input', nameKey: 'cl.inputTokens' as const, color: '#3b82f6' },
+  { key: 'output', nameKey: 'cl.outputTokens' as const, color: '#10b981' },
+  { key: 'total', nameKey: 'cl.totalTokens' as const, color: '#6366f1' },
 ] as const;
 
 const TokenTimeseriesChart: React.FC<TokenTimeseriesChartProps> = ({
   data, startNs, endNs, bucketCount = 30,
 }) => {
+  const { t } = useI18n();
   const spanMs = (endNs - startNs) / 1_000_000;
   const filled = fillTokenBuckets(data, startNs, endNs, bucketCount);
   const chartData: TokenChartData[] = filled.map((b) => ({
@@ -750,7 +746,7 @@ const TokenTimeseriesChart: React.FC<TokenTimeseriesChartProps> = ({
   if (filled.every((b) => b.total_tokens === 0)) {
     return (
       <div className="flex items-center justify-center h-32 text-gray-400 text-sm">
-        暂无时序数据
+        {t('cl.noTimeseriesData')}
       </div>
     );
   }
@@ -774,12 +770,12 @@ const TokenTimeseriesChart: React.FC<TokenTimeseriesChartProps> = ({
             </span>
           )}
         />
-        {TOKEN_SERIES.map(({ key, name, color }) => (
+        {TOKEN_SERIES.map(({ key, nameKey, color }) => (
           <Line
             key={key}
             type="monotone"
             dataKey={key}
-            name={name}
+            name={t(nameKey)}
             stroke={color}
             dot={false}
             strokeWidth={2}
@@ -803,6 +799,7 @@ interface ModelTimeseriesChartProps {
 const ModelTimeseriesChart: React.FC<ModelTimeseriesChartProps> = ({
   data, startNs, endNs, bucketCount = 30,
 }) => {
+  const { t } = useI18n();
   const spanMs = (endNs - startNs) / 1_000_000;
   const models = Array.from(new Set(data.map((d) => d.model))).sort();
   const filled = fillModelBuckets(data, startNs, endNs, bucketCount, models);
@@ -829,7 +826,7 @@ const ModelTimeseriesChart: React.FC<ModelTimeseriesChartProps> = ({
   if (models.length === 0) {
     return (
       <div className="flex items-center justify-center h-32 text-gray-400 text-sm">
-        暂无模型时序数据
+        {t('cl.noModelTimeseriesData')}
       </div>
     );
   }
@@ -875,6 +872,8 @@ export interface ConversationListProps {
 }
 
 export const ConversationList: React.FC<ConversationListProps> = () => {
+  const { t } = useI18n();
+  const locale = useLocaleTag();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Restore state from URL params (set when navigating to detail page)
@@ -1069,12 +1068,12 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
     try {
       await runQuery(startNs, endNs, agent);
     } catch (e: any) {
-      setError(e.message ?? '查询失败');
+      setError(e.message ?? t('cl.queryFailed'));
     } finally {
       setLoading(false);
       setTimeseriesLoading(false);
     }
-  }, [startMs, selectedAgent, syncParams, runQuery]);
+  }, [startMs, selectedAgent, syncParams, runQuery, t]);
 
   // Auto-load on mount: show all records for the default time range immediately
   const hasRestoredRef = React.useRef(false);
@@ -1089,7 +1088,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
       setTimeseriesLoading(true);
       setQueryRangeNs([startNs, endNs]);
       runQuery(startNs, endNs, agent).catch((e: any) => {
-        setError(e.message ?? '查询失败');
+        setError(e.message ?? t('cl.queryFailed'));
       }).finally(() => {
         setLoading(false);
         setTimeseriesLoading(false);
@@ -1107,16 +1106,16 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
         {/* ── Filter bar ── */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex flex-wrap items-end gap-4">
           {/* Time range */}
-          <DateTimePicker label="开始时间" value={startMs} onChange={setStartMs} />
-          <DateTimePicker label="结束时间" value={endMs} onChange={setEndMs} />
+          <DateTimePicker label={t('common.startTime')} value={startMs} onChange={setStartMs} />
+          <DateTimePicker label={t('common.endTime')} value={endMs} onChange={setEndMs} />
 
           {/* Quick presets */}
           <div className="flex gap-2 flex-wrap">
             {[
-              { label: '最近 1h', ms: 3600 * 1000 },
-              { label: '最近 6h', ms: 6 * 3600 * 1000 },
-              { label: '最近 24h', ms: 24 * 3600 * 1000 },
-              { label: '最近 7d', ms: 7 * 24 * 3600 * 1000 },
+              { label: t('common.last1h'), ms: 3600 * 1000 },
+              { label: t('common.last6h'), ms: 6 * 3600 * 1000 },
+              { label: t('common.last24h'), ms: 24 * 3600 * 1000 },
+              { label: t('common.last7d'), ms: 7 * 24 * 3600 * 1000 },
             ].map(({ label, ms }) => (
               <button
                 key={label}
@@ -1134,20 +1133,20 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
 
           {/* Agent name selector */}
           <div className="flex items-center gap-2">
-            <label className="text-sm text-gray-600 whitespace-nowrap">Agent</label>
+            <label className="text-sm text-gray-600 whitespace-nowrap">{t('common.agent')}</label>
             <select
               className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 min-w-[160px]"
               value={selectedAgent}
               onChange={(e) => setSelectedAgent(e.target.value)}
               disabled={agentNamesLoading}
             >
-              <option value="">全部 Agent</option>
+              <option value="">{t('common.allAgents')}</option>
               {agentNames.map((n) => (
                 <option key={n} value={n}>{n}</option>
               ))}
             </select>
             {agentNamesLoading && (
-              <span className="text-xs text-gray-400">加载中...</span>
+              <span className="text-xs text-gray-400">{t('common.loading')}</span>
             )}
           </div>
 
@@ -1157,7 +1156,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
             disabled={loading}
             className="ml-auto px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
           >
-            {loading ? '查询中...' : '查询'}
+            {loading ? t('common.querying') : t('common.query')}
           </button>
         </div>
 
@@ -1174,24 +1173,24 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
             {/* Summary cards */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-                <p className="text-sm text-gray-500">Sessions</p>
+                <p className="text-sm text-gray-500">{t('cl.sessions')}</p>
                 <p className="text-3xl font-bold text-gray-900 mt-1">{sessions.length}</p>
               </div>
               <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-                <p className="text-sm text-gray-500">总输入 Token</p>
+                <p className="text-sm text-gray-500">{t('cl.totalInputTokens')}</p>
                 <p className="text-3xl font-bold text-blue-600 mt-1">
                   {fmtTokens(totalInputTokens)}
                 </p>
               </div>
               <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-                <p className="text-sm text-gray-500">总输出 Token</p>
+                <p className="text-sm text-gray-500">{t('cl.totalOutputTokens')}</p>
                 <p className="text-3xl font-bold text-green-600 mt-1">
                   {fmtTokens(totalOutputTokens)}
                 </p>
               </div>
-              {/* ── 异常中断卡片 ── */}
+              {/* ── Interruption card ── */}
               <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-                <p className="text-sm text-gray-500">异常中断</p>
+                <p className="text-sm text-gray-500">{t('cl.interruptions')}</p>
                 {interruptionCount === null ? (
                   <p className="text-3xl font-bold text-gray-400 mt-1">—</p>
                 ) : (
@@ -1201,10 +1200,10 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                       <div className="flex flex-wrap gap-1.5 mt-2">
                         {(
                           [
-                            { key: 'critical', label: '严重', bg: 'bg-red-100 text-red-700 border border-red-300' },
-                            { key: 'high',     label: '重要', bg: 'bg-orange-100 text-orange-700 border border-orange-300' },
-                            { key: 'medium',   label: '中等', bg: 'bg-yellow-100 text-yellow-700 border border-yellow-300' },
-                            { key: 'low',      label: '轻微', bg: 'bg-blue-100 text-blue-700 border border-blue-300' },
+                            { key: 'critical', label: t('common.critical'), bg: 'bg-red-100 text-red-700 border border-red-300' },
+                            { key: 'high',     label: t('common.high'), bg: 'bg-orange-100 text-orange-700 border border-orange-300' },
+                            { key: 'medium',   label: t('common.medium'), bg: 'bg-yellow-100 text-yellow-700 border border-yellow-300' },
+                            { key: 'low',      label: t('common.low'), bg: 'bg-blue-100 text-blue-700 border border-blue-300' },
                           ] as const
                         ).map(({ key, label, bg }) => {
                           const cnt = interruptionCount.by_severity[key];
@@ -1212,7 +1211,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                           const tooltipLines = interruptionStats
                             .filter((s) => s.severity === key)
                             .sort((a, b) => b.count - a.count)
-                            .map((s) => `${INTERRUPTION_TYPE_CN[s.interruption_type] ?? s.interruption_type}: ${s.count} 次`);
+                            .map((s) => `${s.interruption_type}: ${s.count}`);
                           return (
                             <span
                               key={key}
@@ -1241,9 +1240,9 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               {/* Token time-series */}
               <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-                <h2 className="text-sm font-semibold text-gray-700 mb-3">Token 时序（输入 / 输出 / 总计）</h2>
+                <h2 className="text-sm font-semibold text-gray-700 mb-3">{t('cl.tokenTimeseries')}</h2>
                 {timeseriesLoading ? (
-                  <div className="flex items-center justify-center h-32 text-gray-400 text-sm">加载中...</div>
+                  <div className="flex items-center justify-center h-32 text-gray-400 text-sm">{t('common.loading')}</div>
                 ) : (
                   <TokenTimeseriesChart data={tokenSeries} startNs={queryRangeNs[0]} endNs={queryRangeNs[1]} />
                 )}
@@ -1251,9 +1250,9 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
 
               {/* Model token time-series */}
               <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-                <h2 className="text-sm font-semibold text-gray-700 mb-3">模型 Token 时序（堆叠）</h2>
+                <h2 className="text-sm font-semibold text-gray-700 mb-3">{t('cl.modelTokenTimeseries')}</h2>
                 {timeseriesLoading ? (
-                  <div className="flex items-center justify-center h-32 text-gray-400 text-sm">加载中...</div>
+                  <div className="flex items-center justify-center h-32 text-gray-400 text-sm">{t('common.loading')}</div>
                 ) : (
                   <ModelTimeseriesChart data={modelSeries} startNs={queryRangeNs[0]} endNs={queryRangeNs[1]} />
                 )}
@@ -1268,36 +1267,36 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                     <tr>
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[220px]">
                         <span className="inline-flex items-center gap-1.5">
-                          <span>Session ID</span>
+                          <span>{t('cl.sessionId')}</span>
                           <SessionIdHelp />
                         </span>
                       </th>
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[120px]">
-                        Agent
+                        {t('cl.agent')}
                       </th>
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[100px]">
-                        Model
+                        {t('cl.model')}
                       </th>
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[80px]">
-                        对话数
+                        {t('cl.conversations')}
                       </th>
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[110px]">
-                        输入 Token
+                        {t('cl.inputTokens')}
                       </th>
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[100px]">
-                        节省 Token
+                        {t('cl.savedTokens')}
                       </th>
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[110px]">
-                        输出 Token
+                        {t('cl.outputTokens')}
                       </th>
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[150px]">
-                        最近活跃
+                        {t('cl.lastActive')}
                       </th>
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[80px]">
-                        操作
+                        {t('cl.actions')}
                       </th>
                       <th className="px-4 lg:px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide w-[100px]">
-                        中断
+                        {t('cl.interrupts')}
                       </th>
                     </tr>
                   </thead>
@@ -1306,8 +1305,8 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                     <tr>
                       <td colSpan={10} className="px-4 lg:px-6 py-12 text-center text-gray-400">
                         <div className="text-4xl mb-2">🔍</div>
-                        <p>所选时间范围内暂无 Session 数据</p>
-                        <p className="text-xs mt-1">请确认 agentsight 服务已启动并有数据写入</p>
+                        <p>{t('cl.noSessions')}</p>
+                        <p className="text-xs mt-1">{t('cl.ensureServiceRunning')}</p>
                       </td>
                     </tr>
                   )}
@@ -1386,7 +1385,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                             {fmtTokens(sess.total_output_tokens)}
                           </td>
                           <td className="px-4 lg:px-6 py-4 text-xs text-gray-500">
-                            {nsToDate(sess.last_seen_ns)}
+                            {nsToDate(sess.last_seen_ns, locale)}
                           </td>
                           <td className="px-4 lg:px-6 py-4">
                             <a
@@ -1394,7 +1393,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                               onClick={(e) => e.stopPropagation()}
                               className="px-3 py-1 bg-white border border-blue-300 text-blue-700 rounded-lg text-xs hover:bg-blue-50 transition-colors whitespace-nowrap"
                             >
-                              详情
+                              {t('common.details')}
                             </a>
                           </td>
                           <td className="px-4 lg:px-6 py-4" onClick={(e) => e.stopPropagation()}>
@@ -1435,14 +1434,14 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                 return (
                   <div className="flex items-center gap-2 justify-end px-4 py-3 border-t border-gray-100">
                     <span className="text-xs text-gray-500">
-                      {sessionPage * SESSION_PAGE_SIZE + 1}–{Math.min((sessionPage + 1) * SESSION_PAGE_SIZE, sessions.length)} / {sessions.length} 条
+                      {sessionPage * SESSION_PAGE_SIZE + 1}–{Math.min((sessionPage + 1) * SESSION_PAGE_SIZE, sessions.length)} / {sessions.length}
                     </span>
                     <button
                       onClick={() => setSessionPage((p) => Math.max(0, p - 1))}
                       disabled={sessionPage === 0}
                       className="px-2 py-0.5 text-xs border border-gray-300 text-gray-600 rounded hover:bg-gray-50 disabled:opacity-40 transition-colors"
                     >
-                      &lsaquo; 上一页
+                      &lsaquo; {t('common.prev')}
                     </button>
                     {Array.from({ length: sessionTotalPages }, (_, i) => (
                       <button
@@ -1462,7 +1461,7 @@ export const ConversationList: React.FC<ConversationListProps> = () => {
                       disabled={sessionPage === sessionTotalPages - 1}
                       className="px-2 py-0.5 text-xs border border-gray-300 text-gray-600 rounded hover:bg-gray-50 disabled:opacity-40 transition-colors"
                     >
-                      下一页 &rsaquo;
+                      {t('common.next')} &rsaquo;
                     </button>
                   </div>
                 );

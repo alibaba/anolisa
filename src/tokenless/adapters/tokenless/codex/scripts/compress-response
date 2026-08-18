@@ -166,6 +166,10 @@ else:
 AGENT_ID = os.environ.get("TOKENLESS_AGENT_ID", "codex")
 MIN_RESPONSE_CHARS: int = 500
 LARGE_RESPONSE_CHARS: int = 4000
+# TOON on small JSON saves only a few characters (observed ~0.3% below
+# ~500 chars) while the per-event encode cost stays the same, so payloads
+# under this threshold keep the compressed form and skip the TOON pass.
+MIN_TOON_CHARS: int = 500
 
 # 3-layer compression strategy:
 #   Layer 1: Content retrieval + task management → skip all compression
@@ -372,7 +376,7 @@ def main() -> None:
         toon_input = compression_input
 
     toon_parsed = _try_parse_json(toon_input)
-    if toon_parsed is not None:
+    if toon_parsed is not None and len(toon_input) >= MIN_TOON_CHARS:
         toon_text = _run_tokenless(
             tokenless_bin, "compress-toon",
             toon_input, session_id, tool_use_id, timeout=10,

@@ -172,7 +172,7 @@ def _with_trace_context(
 
 def record_hermes_observability(
     record: dict[str, Any],
-    timeout: float = 10.0,
+    timeout: float = 5.0,
 ) -> CliResult:
     """Emit one Hermes observability record via agent-sec-cli stdin."""
     safe_record = _redact_observability_record(record, timeout)

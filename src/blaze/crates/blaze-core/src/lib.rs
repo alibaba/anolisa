@@ -9,12 +9,14 @@
 //! - [`config`]: daemon TOML configuration
 //! - [`policy`]: workload class + policy file schema
 //! - [`backend`]: backend kinds + selection / fallback
+//! - [`checkpoint`]: pure checkpoint records and manifest validation
 //! - [`guest_protocol`]: guest-agent wire DTOs
 //! - [`lifecycle`]: sandbox state machine + JSON persistence
 //! - [`kernel`]: kernel hook registry, per-hook mutex
 //! - [`error`]: unified [`BlazeError`] error enum
 
 pub mod backend;
+pub mod checkpoint;
 pub mod config;
 pub mod error;
 pub mod guest_protocol;

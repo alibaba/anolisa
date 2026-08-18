@@ -39,6 +39,9 @@ pub const DEFAULT_RETENTION_DAYS: u64 = 30;
 /// Default purge check interval (every N inserts)
 pub const DEFAULT_PURGE_INTERVAL: u64 = 1000;
 
+/// Default max database file size in MB (0 = no size-based limit)
+pub const DEFAULT_MAX_DB_SIZE_MB: u64 = 500;
+
 /// Default bounded channel capacity for probe → event loop events.
 pub const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 10_000;
 
@@ -796,6 +799,8 @@ pub struct AgentsightConfig {
     pub retention_days: u64,
     /// Purge check interval (run purge every N inserts, 0 = never auto-purge)
     pub purge_interval: u64,
+    /// Max database file size in MB (0 = no size-based limit)
+    pub max_db_size_mb: u64,
 
     // --- Trace Control ---
     /// Controls whether SLS-uploaded `LLMCall` records carry conversation
@@ -920,6 +925,7 @@ impl Default for AgentsightConfig {
             http_table: DEFAULT_HTTP_TABLE.to_string(),
             retention_days: DEFAULT_RETENTION_DAYS,
             purge_interval: DEFAULT_PURGE_INTERVAL,
+            max_db_size_mb: DEFAULT_MAX_DB_SIZE_MB,
 
             // Trace control defaults
             // Default = false (privacy-safe): SLS uploads carry only token /
@@ -1532,6 +1538,7 @@ mod tests {
         assert!(!config.cgroup_filter_enabled);
         assert_eq!(config.retention_days, 30);
         assert_eq!(config.purge_interval, 1000);
+        assert_eq!(config.max_db_size_mb, 500);
     }
 
     /// `traceEnabled` is **off** by default (privacy-safe). Conversation

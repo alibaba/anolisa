@@ -180,6 +180,12 @@ logger = logging.getLogger(__name__)
 AGENT_ID = "hermes-agent"
 _MIN_RESPONSE_LEN = 200
 
+# Minimum payload size for the TOON encoding step. TOON on small JSON
+# saves only a few characters (observed ~0.3% below ~500 chars) while
+# the per-event encode cost stays the same, so payloads under this
+# threshold keep the response-compressed form and skip TOON entirely.
+_MIN_TOON_CHARS = 500
+
 _SKIP_TOOLS: set[str] = _SKIP_TOOLS_SHARED | {
     "session_search", "list_sessions",
 }
@@ -513,8 +519,12 @@ def on_transform_tool_result(
                                      str(session_id), str(tool_call_id))
     current = compressed if compressed else result
 
-    # Step 2: TOON encoding
-    toon_result = _encode_toon(current, str(session_id), str(tool_call_id))
+    # Step 2: TOON encoding — only for payloads at or above the minimum
+    # threshold; small JSON gains near-zero chars from TOON but would still
+    # pay the full encode cost on every tool result.
+    toon_result = None
+    if len(current) >= _MIN_TOON_CHARS:
+        toon_result = _encode_toon(current, str(session_id), str(tool_call_id))
     used_compression = compressed is not None
     used_toon = toon_result is not None
 

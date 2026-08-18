@@ -82,7 +82,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::ApprovalShellHandoffValidationEmptyCommand => "Shell handoff command is empty.",
         MessageId::ApprovalShellHandoffValidationMultilineCommand => {
-            "Shell handoff command contains a newline; multiline handoff is not enabled."
+            "Shell handoff command contains an unsupported line break. Only line feeds inside complete single-quoted arguments are allowed."
         }
         MessageId::ApprovalShellHandoffValidationControlCharacter => {
             "Shell handoff command contains a blocked control character."

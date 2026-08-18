@@ -99,6 +99,62 @@ pub struct SpawnRequest {
     pub vm: Option<VmConfig>,
 }
 
+/// Backend identity and snapshot semantics accepted by a restore adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreCapability {
+    /// Concrete backend implementation that can consume the checkpoint.
+    pub backend: BackendKind,
+    /// Exact backend version required by versioned snapshot formats.
+    pub version: Option<String>,
+    /// Snapshot flavor accepted by the adapter.
+    pub snapshot_kind: SnapshotKind,
+}
+
+/// Complete input for restoring an owned backend instance.
+#[derive(Debug, Clone)]
+pub struct RestoreRequest {
+    /// Stable sandbox identifier.
+    pub instance_id: Uuid,
+    /// Backend executable selected from the current daemon configuration.
+    pub binary_path: PathBuf,
+    /// Storage resources reconstructed for this sandbox.
+    pub storage: StorageSlot,
+    /// VM-state artifact from a committed checkpoint.
+    pub snapshot_path: PathBuf,
+    /// Guest-memory artifact from the same checkpoint.
+    pub mem_path: PathBuf,
+    /// Backend identity frozen into the checkpoint metadata.
+    pub checkpoint_backend: BackendKind,
+    /// Backend version frozen into the checkpoint metadata.
+    pub expected_version: Option<String>,
+    /// Snapshot flavor frozen into the checkpoint metadata.
+    pub snapshot_kind: SnapshotKind,
+    /// Whether the captured runtime exposed the stable run-directory guest transport.
+    pub expose_guest_socket: bool,
+}
+
+/// Snapshot flavor requested from a backend.
+///
+/// The file provider currently requires self-contained artifacts, so only
+/// full snapshots are exposed until a restore-independent delta format exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SnapshotKind {
+    /// Self-contained VM and memory snapshot.
+    Full,
+}
+
+/// Paths and semantics for one snapshot operation.
+#[derive(Debug, Clone)]
+pub struct SnapshotRequest {
+    /// Destination for VM state.
+    pub snapshot_path: PathBuf,
+    /// Destination for guest memory.
+    pub mem_path: PathBuf,
+    /// Snapshot flavor.
+    pub kind: SnapshotKind,
+}
+
 /// Probed availability of a single backend on this host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendStatus {
@@ -202,5 +258,13 @@ mod tests {
         }];
         let err = select_backend(&priority, &available).expect_err("must fail");
         assert!(matches!(err, BlazeError::BackendUnavailable { .. }));
+    }
+
+    #[test]
+    fn snapshot_kind_serializes_as_a_stable_lowercase_value() {
+        assert_eq!(
+            serde_json::to_value(SnapshotKind::Full).expect("snapshot kind"),
+            serde_json::json!("full")
+        );
     }
 }

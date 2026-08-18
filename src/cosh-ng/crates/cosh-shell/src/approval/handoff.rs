@@ -162,7 +162,7 @@ pub(crate) fn approval_shell_handoff_validation_message(i18n: &I18n, message: &s
         "empty shell handoff command" => {
             Some(MessageId::ApprovalShellHandoffValidationEmptyCommand)
         }
-        "shell handoff command contains newline; multiline handoff is not enabled" => {
+        "shell handoff command contains an unsupported line break" => {
             Some(MessageId::ApprovalShellHandoffValidationMultilineCommand)
         }
         "shell handoff command contains blocked control character" => {

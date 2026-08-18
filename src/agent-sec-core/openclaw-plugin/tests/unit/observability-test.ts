@@ -128,14 +128,17 @@ function beforeToolCallEvent() {
 
 let capturedArgs: string[] | undefined;
 let capturedStdin: string | undefined;
-let capturedRecords: { args: string[]; stdin: string | undefined }[] = [];
+let capturedRecords: { args: string[]; stdin: string | undefined; timeout: number | undefined }[] = [];
+let capturedTimeouts: Array<number | undefined> = [];
 let previousObservabilityHookEnabled: string | undefined;
+let previousObservabilityTimeout: string | undefined;
 
 function mockCli(
   result: CliResult = { exitCode: 0, stdout: "", stderr: "" },
   redact: (text: string) => string | undefined = (text) => text,
 ) {
   _setCliMock(async (args, opts) => {
+    capturedTimeouts.push(opts.timeout);
     const offset = args[0] === "--trace-context" ? 2 : 0;
     if (args[offset] === "scan-pii") {
       const redactedText = redact(opts.stdin ?? "");
@@ -150,7 +153,7 @@ function mockCli(
     }
     capturedArgs = args;
     capturedStdin = opts.stdin;
-    capturedRecords.push({ args, stdin: opts.stdin });
+    capturedRecords.push({ args, stdin: opts.stdin, timeout: opts.timeout });
     return result;
   });
 }
@@ -173,8 +176,11 @@ describe("observability", () => {
     capturedArgs = undefined;
     capturedStdin = undefined;
     capturedRecords = [];
+    capturedTimeouts = [];
     previousObservabilityHookEnabled = process.env.OBSERVABILITY_HOOK_ENABLED;
+    previousObservabilityTimeout = process.env.OBSERVABILITY_TIMEOUT;
     delete process.env.OBSERVABILITY_HOOK_ENABLED;
+    delete process.env.OBSERVABILITY_TIMEOUT;
   });
 
   afterEach(() => {
@@ -183,6 +189,11 @@ describe("observability", () => {
       delete process.env.OBSERVABILITY_HOOK_ENABLED;
     } else {
       process.env.OBSERVABILITY_HOOK_ENABLED = previousObservabilityHookEnabled;
+    }
+    if (previousObservabilityTimeout === undefined) {
+      delete process.env.OBSERVABILITY_TIMEOUT;
+    } else {
+      process.env.OBSERVABILITY_TIMEOUT = previousObservabilityTimeout;
     }
   });
 
@@ -262,6 +273,53 @@ describe("observability", () => {
       tool_name: "exec",
       parameters: beforeToolCallEvent().params,
     });
+    assert.deepEqual(capturedTimeouts, [5000, 5000]);
+  });
+
+  it("uses the observability timeout for redaction and record calls", async () => {
+    process.env.OBSERVABILITY_TIMEOUT = "3";
+    mockCli();
+    const { api, hooks } = createMockApi();
+    observability.register(api);
+    const hook = hooks.find((item) => item.hookName === "before_tool_call");
+    assert.ok(hook);
+
+    hook.handler(beforeToolCallEvent(), { sessionId: "session-001" });
+    await flushObservabilityWork();
+
+    assert.deepEqual(capturedTimeouts, [3000, 3000]);
+  });
+
+  it("caps the observability timeout", async () => {
+    mockCli();
+    const { api, hooks } = createMockApi();
+    observability.register(api);
+    const hook = hooks.find((item) => item.hookName === "before_tool_call");
+    assert.ok(hook);
+
+    for (const value of ["7", "999999"]) {
+      capturedTimeouts = [];
+      process.env.OBSERVABILITY_TIMEOUT = value;
+      hook.handler(beforeToolCallEvent(), { sessionId: "session-001" });
+      await flushObservabilityWork();
+      assert.deepEqual(capturedTimeouts, [5000, 5000]);
+    }
+  });
+
+  it("falls back to the default observability timeout for invalid values", async () => {
+    mockCli();
+    const { api, hooks } = createMockApi();
+    observability.register(api);
+    const hook = hooks.find((item) => item.hookName === "before_tool_call");
+    assert.ok(hook);
+
+    for (const value of ["", "invalid", "0", "-1", "1.5"]) {
+      capturedTimeouts = [];
+      process.env.OBSERVABILITY_TIMEOUT = value;
+      hook.handler(beforeToolCallEvent(), { sessionId: "session-001" });
+      await flushObservabilityWork();
+      assert.deepEqual(capturedTimeouts, [5000, 5000]);
+    }
   });
 
   it("redacts sensitive observability payload before record", async () => {

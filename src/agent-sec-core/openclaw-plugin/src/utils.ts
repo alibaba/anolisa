@@ -214,8 +214,25 @@ const OBSERVABILITY_SENSITIVE_KEYS = new Set([
   "tool_calls",
 ]);
 const DROP = Symbol("drop-sensitive-observability-field");
+const DEFAULT_OBSERVABILITY_TIMEOUT_SECONDS = 5;
+const MAX_OBSERVABILITY_TIMEOUT_SECONDS = 5;
 
-async function redactTextForObservability(text: string): Promise<string | undefined> {
+function observabilityTimeoutMs(): number {
+  const rawTimeout = process.env.OBSERVABILITY_TIMEOUT;
+  if (rawTimeout === undefined) {
+    return DEFAULT_OBSERVABILITY_TIMEOUT_SECONDS * 1000;
+  }
+  const seconds = Number(rawTimeout);
+  if (!Number.isSafeInteger(seconds) || seconds <= 0) {
+    return DEFAULT_OBSERVABILITY_TIMEOUT_SECONDS * 1000;
+  }
+  return Math.min(seconds, MAX_OBSERVABILITY_TIMEOUT_SECONDS) * 1000;
+}
+
+async function redactTextForObservability(
+  text: string,
+  timeout: number,
+): Promise<string | undefined> {
   const result = await callAgentSecCli(
     [
       "scan-pii",
@@ -226,7 +243,7 @@ async function redactTextForObservability(text: string): Promise<string | undefi
       "--source",
       "observability",
     ],
-    { stdin: text },
+    { stdin: text, timeout },
   );
   if (result.exitCode !== 0) {
     return undefined;
@@ -239,9 +256,12 @@ async function redactTextForObservability(text: string): Promise<string | undefi
   }
 }
 
-async function redactSensitiveValue(value: unknown): Promise<unknown | typeof DROP> {
+async function redactSensitiveValue(
+  value: unknown,
+  timeout: number,
+): Promise<unknown | typeof DROP> {
   if (typeof value === "string") {
-    const redacted = await redactTextForObservability(value);
+    const redacted = await redactTextForObservability(value, timeout);
     return redacted === undefined ? DROP : redacted;
   }
 
@@ -251,7 +271,7 @@ async function redactSensitiveValue(value: unknown): Promise<unknown | typeof DR
   } catch {
     serialized = String(value);
   }
-  const redacted = await redactTextForObservability(serialized);
+  const redacted = await redactTextForObservability(serialized, timeout);
   if (redacted === undefined) {
     return DROP;
   }
@@ -262,17 +282,22 @@ async function redactSensitiveValue(value: unknown): Promise<unknown | typeof DR
   }
 }
 
-async function redactObservabilityValue(value: unknown): Promise<unknown | typeof DROP> {
+async function redactObservabilityValue(
+  value: unknown,
+  timeout: number,
+): Promise<unknown | typeof DROP> {
   if (Array.isArray(value)) {
-    const redactedItems = await Promise.all(value.map((item) => redactObservabilityValue(item)));
+    const redactedItems = await Promise.all(
+      value.map((item) => redactObservabilityValue(item, timeout)),
+    );
     return redactedItems.filter((item) => item !== DROP);
   }
   if (value && typeof value === "object") {
     const entries = await Promise.all(
       Object.entries(value as Record<string, unknown>).map(async ([key, item]) => {
         const safeItem = OBSERVABILITY_SENSITIVE_KEYS.has(key)
-          ? await redactSensitiveValue(item)
-          : await redactObservabilityValue(item);
+          ? await redactSensitiveValue(item, timeout)
+          : await redactObservabilityValue(item, timeout);
         return [key, safeItem] as const;
       }),
     );
@@ -289,12 +314,13 @@ async function redactObservabilityValue(value: unknown): Promise<unknown | typeo
 
 async function redactObservabilityRecord(
   event: OpenClawObservabilityRecord,
+  timeout: number,
 ): Promise<OpenClawObservabilityRecord> {
   const metrics = event.metrics;
   if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) {
     return event;
   }
-  const safeMetrics = await redactObservabilityValue(metrics);
+  const safeMetrics = await redactObservabilityValue(metrics, timeout);
   return {
     ...event,
     metrics:
@@ -311,11 +337,13 @@ async function redactObservabilityRecord(
 export async function recordOpenClawObservability(
   event: OpenClawObservabilityRecord,
 ): Promise<CliResult> {
-  const safeEvent = await redactObservabilityRecord(event);
+  const timeout = observabilityTimeoutMs();
+  const safeEvent = await redactObservabilityRecord(event, timeout);
   return callAgentSecCli(
     ["observability", "record", "--format", "json", "--stdin"],
     {
       stdin: JSON.stringify(safeEvent),
+      timeout,
     },
   );
 }

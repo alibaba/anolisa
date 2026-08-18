@@ -92,6 +92,13 @@ impl GenAISqliteStore {
     /// the full response arrives, or marked 'interrupted' by the stale-scan thread
     /// if the agent crashes before the response is received.
     pub fn insert_pending(&self, info: &PendingCallInfo) -> Result<(), Box<dyn std::error::Error>> {
+        // Enforce size limit before creating a new row. Best-effort: if
+        // pruning fails (e.g. VACUUM error), proceed with the INSERT — a
+        // missed prune is better than losing the event entirely.
+        if let Err(e) = self.check_and_prune_if_needed() {
+            log::warn!("Pre-insert size check failed: {e}");
+        }
+
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let instance = crate::genai::instance_id::get_instance_id();
         conn.execute(

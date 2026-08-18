@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::Child;
 use std::sync::mpsc::Receiver;
@@ -21,6 +22,7 @@ use super::prompt_replay::{
     prompt_prefixed_replay_bytes, prompt_replay_bytes, PromptReplayTracker,
 };
 
+mod activity;
 mod eof_shutdown;
 mod input_events;
 mod input_readiness;
@@ -29,6 +31,11 @@ mod pty_emit;
 mod terminal_recovery;
 mod terminal_size;
 
+use activity::{
+    poll_driver_completion, relay_wait_timeout, wait_for_relay_activity, RelayActivity,
+};
+pub(super) use activity::{DriverCompletion, RawActionWatchdog};
+use eof_shutdown::{advance_eof_shutdown, request_eof_shutdown};
 use input_events::{candidate_display_columns, drain_raw_input_events};
 use input_readiness::RawInputReadinessProbe;
 use interactive_sentinel::{
@@ -44,25 +51,7 @@ use terminal_size::sync_outer_terminal_winsize;
 // terminals. Unlike CSI s/u, they also restore the cursor in macOS Terminal.
 const SAVE_CURSOR: &str = "\x1b7";
 const RESTORE_CURSOR: &str = "\x1b8";
-
-pub(super) struct RawActionWatchdog {
-    grace: Duration,
-}
-
-impl RawActionWatchdog {
-    pub(super) fn new(grace: Duration) -> Self {
-        Self { grace }
-    }
-
-    fn expired(&self, driver_completed_at: Option<Instant>) -> bool {
-        driver_completed_at.is_some_and(|done| done.elapsed() > self.grace)
-    }
-}
-
-pub(super) struct DriverCompletion {
-    pub(super) result: io::Result<()>,
-    pub(super) completed_at: Instant,
-}
+const PTY_READ_BATCH_BYTES: usize = 256 * 1024;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn read_raw_until_exit<W: Write, F>(
@@ -74,6 +63,8 @@ pub(super) fn read_raw_until_exit<W: Write, F>(
     event_observer: &mut F,
     input_events: &Receiver<RawInputEvent>,
     driver_completion: &Receiver<DriverCompletion>,
+    wake: &mut UnixStream,
+    resize: &mut UnixStream,
     input_mode: &Arc<Mutex<RawInputMode>>,
     input_generation: &UserPtyInputGeneration,
     last_winsize: &mut Winsize,
@@ -109,8 +100,8 @@ where
     // unsupporting terminals ignore it, RawModeGuard withdraws it on exit.
     output.write_all(b"\x1b[>4;1m")?;
     output.flush()?;
+    sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
     loop {
-        sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
         if restore_terminal_after_interrupted_command(
             terminal.as_raw_fd(),
             parser,
@@ -171,10 +162,12 @@ where
             )?;
             output.flush()?;
         }
+        let mut batch_bytes = 0usize;
         loop {
             match master.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(n) => {
+                    batch_bytes = batch_bytes.saturating_add(n);
                     last_pty_output = Some(Instant::now());
                     sentinel_throttle.note_output();
                     // Output resumed => the foreground is no longer sitting
@@ -197,7 +190,8 @@ where
                     )? {
                         request_eof_shutdown(master, terminal, child, &mut eof_shutdown)?;
                     }
-                    for (cut, cut_kind) in parser.drain_intervention_display_cuts() {
+                    let display_cuts = parser.drain_intervention_display_cuts();
+                    for (cut, cut_kind) in display_cuts {
                         let cut = cut.min(parser.display.len());
                         // Only a real prompt boundary (precmd) confirms the
                         // shell finished responding to the relay writes seen
@@ -276,45 +270,12 @@ where
                             output.flush()?;
                         }
                     }
-                    observer_action = merge_pending_prompt_restore(
-                        observe_with_input_mode_lock(
-                            event_observer,
-                            &parser.events,
-                            output,
-                            input_mode,
-                        )?,
-                        &mut pending_prompt_restore,
-                    );
-                    observer_action = resolve_pty_emit(
-                        master,
-                        child.id(),
-                        terminal.as_raw_fd(),
-                        parser,
-                        output,
-                        input_mode,
-                        observer_action,
-                        &mut display_start,
-                        &mut prompt_replay,
-                        &mut pending_terminal_restore,
-                        recovery_request_file,
-                        handoff_request_file,
-                    )?;
-                    remember_pending_prompt_restore(&observer_action, &mut pending_prompt_restore);
-                    update_input_mode(
-                        input_mode,
-                        &observer_action,
-                        latest_capture_submission_generation(&parser.events),
-                    );
-                    hold_shell_output = observer_action.hold_shell_output();
-                    if !hold_shell_output && parser.display.len() > display_start {
-                        write_pending_display_preserving_prompt_ghost(
-                            parser,
-                            output,
-                            &mut display_start,
-                            &mut prompt_replay,
-                            input_mode,
-                        )?;
-                        output.flush()?;
+                    // Ordinary display and passive runtime transitions are
+                    // resolved once after the readiness batch. Intervention
+                    // cuts stay immediate because they define semantic
+                    // boundaries that can change the input owner.
+                    if batch_bytes >= PTY_READ_BATCH_BYTES {
+                        break;
                     }
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
@@ -375,7 +336,6 @@ where
                 ));
             }
         }
-        sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
         if restore_terminal_after_interrupted_command(
             terminal.as_raw_fd(),
             parser,
@@ -425,6 +385,10 @@ where
             &observer_action,
             latest_capture_submission_generation(&parser.events),
         );
+        let runtime_poll_pending = matches!(
+            &observer_action,
+            RawObserverAction::HoldShellOutput | RawObserverAction::DelayShellOutput
+        );
         hold_shell_output = observer_action.hold_shell_output();
         if !hold_shell_output && parser.display.len() > display_start {
             write_pending_display_preserving_prompt_ghost(
@@ -447,37 +411,28 @@ where
             parser.has_prompt_painted_since_ready(),
             last_pty_output,
         );
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn poll_driver_completion(
-    receiver: &Receiver<DriverCompletion>,
-    master: &File,
-    terminal: &File,
-    child: &mut Child,
-    completed_at: &mut Option<Instant>,
-) -> io::Result<()> {
-    let Ok(completion) = receiver.try_recv() else {
-        return Ok(());
-    };
-    *completed_at = Some(completion.completed_at);
-    if let Err(error) = completion.result {
-        shutdown_and_reap_child(master, terminal, child);
-        return Err(error);
-    }
-    Ok(())
-}
-
-fn shutdown_and_reap_child(master: &File, terminal: &File, child: &mut Child) {
-    let mut shutdown = None;
-    if request_eof_shutdown(master, terminal, child, &mut shutdown).is_ok() {
-        while let Ok(false) = advance_eof_shutdown(&mut shutdown) {
-            thread::sleep(Duration::from_millis(10));
+        let foreground_command_active = parser.has_active_foreground_command();
+        let activity = wait_for_relay_activity(
+            master.as_raw_fd(),
+            wake,
+            resize,
+            relay_wait_timeout(
+                watchdog,
+                driver_completed_at,
+                eof_shutdown.as_ref(),
+                runtime_poll_pending,
+                foreground_command_active,
+                prompt_replay.idle_reconcile_remaining(
+                    foreground_command_active,
+                    parser.has_prompt_painted_since_ready(),
+                    last_pty_output,
+                ),
+            ),
+        )?;
+        if activity.resize {
+            sync_outer_terminal_winsize(master.as_raw_fd(), child.id(), last_winsize)?;
         }
     }
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 fn latest_capture_submission_generation(events: &[ShellEvent]) -> Option<u64> {
@@ -688,4 +643,3 @@ fn mark_pending_prompt_replayed(parser: &OscParser, prompt: &[u8], display_start
 #[cfg(test)]
 #[path = "raw_relay_tests.rs"]
 mod tests;
-use eof_shutdown::{advance_eof_shutdown, request_eof_shutdown, EofShutdown};

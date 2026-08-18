@@ -70,8 +70,8 @@ tokenless 只优化**工具调用响应**进入 LLM 上下文前的冗余，不�
 
 ### Agent 开发框架集成
 
-- **AgentScope Python 集成** — 替换成功的最终工具响应，并提供受 marker 约束的原生
-  恢复 Tool。
+- **AgentScope Python 集成** — 完整开放 Schema 压缩、RTK 改写、响应压缩、TOON、
+  受 marker 约束的恢复和归属统计。
 
 ## 快速开始
 
@@ -155,8 +155,9 @@ Maturin。请先安装 [`uv`](https://docs.astral.sh/uv/)，或者在 `PATH` 中
 命令不包含 Python Extension。
 
 `anolisa_tokenless` 模块支持 CPython 3.11 及更高版本，但只能在构建该原生
-Wheel 的对应平台使用。当前只开放 JSON 响应压缩和 Stash 取回，不捆绑
-CLI、RTK、TOON 或框架集成。仓库会构建并测试该包，但目前尚未发布到
+Wheel 的对应平台使用。它开放四个 Tokenless 生命周期接口并内置对应平台的 RTK；
+TOON 已链接进原生 Runtime，不依赖 Tokenless CLI 或系统 helper。仓库会构建并测试该包，
+但目前尚未发布到
 PyPI。具体见 [Runtime 设计](docs/design/runtime-library_zh.md) 和
 [用户手册](../../docs/user-guide/zh/token-saving/tokenless/user-manual.md#从源码构建-python-runtime)。
 
@@ -211,8 +212,8 @@ python -m pip install \
 两个大版本使用相同的公开入口和配置对象；由于 AgentScope 1.x 与 2.x 提供的生命周期
 扩展点不同，仅最后的挂载方式不同。
 
-AgentScope 1.x 必须在 Agent 和所有工具函数创建后安装集成。安装时会把恢复工具绑定到
-该 Agent 的 memory，只有 memory 中可见的 marker 才能授权恢复对应 stash。
+AgentScope 1.x 使用 Tokenless Toolkit，因此在 Agent 构造前后动态注册的普通工具和
+MCP 工具都会获得相同的生命周期处理。安装时必须显式提供 Session 标识。
 
 ```python
 from agentscope.agent import ReActAgent
@@ -224,8 +225,10 @@ integration = TokenlessAgentScope(
         data_dir="/absolute/path/to/tenant-tokenless-data",
     ),
 )
+toolkit = integration.create_toolkit()
+toolkit.register_tool_function(application_tool)
 agent = ReActAgent(..., toolkit=toolkit)
-integration.install(agent)
+integration.install(agent, session_id="conversation-id")
 ```
 
 AgentScope 2.x 在构造阶段接收恢复 Tool 和中间件；该方式从 2.0.0 即可使用，不依赖后续
@@ -274,13 +277,16 @@ AgentScope 2.0.0 尚未提供 App 级 Agent middleware 和 Tool 注入，因此�
 | `balanced` | 跳过 Read/Glob/Grep；Shell 使用 65,536 / 128 / 深度 8，其他采用 conservative 限制 |
 | `aggressive` | 跳过 Read/Glob/Grep；其他采用 CLI 默认的 4,096 / 32 / 深度 8 |
 
-默认模式为 `balanced`。只读恢复 Tool 仅在 24 位哈希对应的 marker 出现在
-AgentScope 1.x memory 或 AgentScope 2.x context/summary 中时自动允许。1.x 的
-`install()` 必须在待压缩工具注册完成后调用；之后动态注册的工具不会被包装。直接构造
-Agent 时，每个用户或租户必须显式传入不同的绝对 `data_dir`；省略 `data_dir` 时，
+默认模式为 `balanced`。只有模型当前可见 marker 时才会向模型发布只读恢复 Tool，
+并且它只接受本次模型调用保留的精确 marker 集合中的 hash。直接构造 Agent 时，每个
+用户或租户必须显式传入不同的绝对 `data_dir`；省略 `data_dir` 时，
 `TOKENLESS_DATA_DIR` 只作为进程级回退。除非应用有明确生命周期策略，否则保留默认
-一小时 stash TTL，且不要依赖跨节点恢复。该集成不启用 Shell、MCP、TOON、RTK 或
-Schema 压缩。源码位于 `python/agentscope/`，可后续独立发布 Wheel。
+一小时 stash TTL，且不要依赖跨节点恢复。
+
+两个 AgentScope Adapter 都启用 Schema 压缩、RTK 命令改写、响应压缩、TOON、恢复、
+环境错误提示和逐调用归属。原生 Wheel 内置 RTK 并直接链接 TOON，不搜索系统可执行文件。
+宿主对象和流式 chunk 保持不变，只转换复制后的调用参数和最终模型可见文本。Tool Ready
+仍保持硬关闭。
 
 ## Raw 打包
 

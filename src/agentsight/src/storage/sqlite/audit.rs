@@ -187,6 +187,32 @@ impl AuditStore {
         Ok(deleted as u64)
     }
 
+    /// Delete the oldest N records by timestamp.
+    ///
+    /// Used for size-based pruning when the database file exceeds its
+    /// configured maximum, regardless of record age.
+    pub fn delete_oldest_batch(&self, limit: usize) -> Result<usize> {
+        let sql = format!(
+            "DELETE FROM {} WHERE id IN (
+                SELECT id FROM {} ORDER BY timestamp_ns ASC LIMIT ?1
+            )",
+            self.table_name, self.table_name
+        );
+        let deleted = self.conn.execute(&sql, params![limit as i64])?;
+        Ok(deleted)
+    }
+
+    /// Run VACUUM to reclaim free pages after bulk deletes.
+    ///
+    /// Since all stores in `Storage` share one database file, calling
+    /// this on any store vacuums the entire file. Re-enables WAL mode
+    /// afterwards as a defensive measure (VACUUM may reset it).
+    pub fn vacuum(&self) -> Result<()> {
+        self.conn
+            .execute_batch("VACUUM; PRAGMA journal_mode=WAL;")?;
+        Ok(())
+    }
+
     /// Execute WAL checkpoint to flush WAL data back to the main database file
     pub fn checkpoint(&self) -> Result<()> {
         wal_checkpoint(&self.conn)

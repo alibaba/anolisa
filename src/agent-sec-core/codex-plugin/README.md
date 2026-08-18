@@ -75,6 +75,7 @@ codex plugin marketplace remove agent-sec
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `OBSERVABILITY_HOOK_ENABLED` | `true` | 仅显式设为 `false` 时关闭 Observability hook；修改后需重启 Codex |
+| `OBSERVABILITY_TIMEOUT` | `5` | Observability agent-sec-cli 超时秒数；空值、非法值、非正数或大于 `5` 的值使用 `5` |
 | `CODE_SCANNER_HOOK_ENABLED` | `true` | `false` 时在读取 hook input 和调用 CLI 前短路；非法值等价于未设置 |
 | `CODE_SCANNER_MODE` | `observe` | `observe` 静默审计；`block` 对 scanner `warn` / `deny` 阻断；`debug` 等价于 `observe`，`deny` 等价于 `block`；`ask`、`warn` 及非法值等价于未设置，并向 stderr 写入 bounded diagnostic |
 | `CODE_SCANNER_TIMEOUT` | `10` | 代码扫描 agent-sec-cli 超时秒数 |

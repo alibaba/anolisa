@@ -81,6 +81,12 @@ from hook_utils import (
 
 _MIN_RESPONSE_CHARS = 200
 
+# Minimum payload size for the TOON encoding step. TOON on small JSON
+# saves only a few characters (observed ~0.3% below ~500 chars) while the
+# per-event encode cost stays the same, so payloads under this threshold
+# keep the response-compressed form and skip the TOON pass entirely.
+_MIN_TOON_CHARS = 500
+
 # Claude Code added hookSpecificOutput.updatedToolOutput (normal-path tool
 # output replacement for all tools) in v2.1.121. Older versions only support
 # the additive additionalContext, which would duplicate the payload.
@@ -231,7 +237,11 @@ def _build_replacement_output(
         return False, None
 
     # Restoring empty schema fields can cancel out a marginal win.
-    serialized = json.dumps(updated_output, separators=(",", ":"))
+    # ensure_ascii=False keeps the size comparison in Unicode characters,
+    # consistent with the non-escaped normalization below.
+    serialized = json.dumps(
+        updated_output, separators=(",", ":"), ensure_ascii=False
+    )
     if len(serialized) >= len(tool_response):
         return False, None
     return True, updated_output
@@ -313,7 +323,13 @@ def main() -> None:
             skip()  # Plain text, not JSON
         tool_response = unwrapped
     elif isinstance(model_visible_before, (dict, list)):
-        tool_response = json.dumps(model_visible_before, separators=(",", ":"))
+        # ensure_ascii=False: size gates below must count Unicode
+        # characters (code points), not \uXXXX escape sequences, so
+        # structured payloads are measured the same way as JSON string
+        # inputs and the OpenClaw adapter.
+        tool_response = json.dumps(
+            model_visible_before, separators=(",", ":"), ensure_ascii=False
+        )
     else:
         skip()
 
@@ -380,10 +396,12 @@ def main() -> None:
         except Exception as e:
             warn(f"Response compression error: {e}")
 
-    # 16. Step 2: TOON encoding
+    # 16. Step 2: TOON encoding — only for payloads at or above the
+    # minimum threshold; small JSON gains near-zero chars from TOON but
+    # would still pay the full encode cost on every PostToolUse event.
     toon_output = ""
 
-    if tokenless_bin:
+    if tokenless_bin and len(compressed) >= _MIN_TOON_CHARS:
         toon_parsed = try_parse_json(compressed)
         if toon_parsed is not None:
             toon_cmd = [tokenless_bin, "compress-toon", "--agent-id", agent_id]

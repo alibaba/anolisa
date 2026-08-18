@@ -292,7 +292,14 @@ impl GenAISqliteStore {
         Ok(result)
     }
 
-    /// Store a single GenAI event with size limit enforcement
+    /// Store a single GenAI event with size limit enforcement.
+    ///
+    /// Size is checked via [`check_and_prune_if_needed`] before the write.
+    /// If the insert fails with `SQLITE_FULL`, up to `MAX_PRUNE_RETRIES`
+    /// retries are attempted — each retry prunes 5% of the oldest records and
+    /// runs VACUUM. VACUUM failures (e.g. disk-full) are tolerated: the
+    /// `DELETE` still frees internal pages that SQLite can reuse for the
+    /// retry insert.
     pub(super) fn store_event(
         &self,
         event: &GenAISemanticEvent,
@@ -318,7 +325,11 @@ impl GenAISqliteStore {
                                 "Database full (SQLITE_FULL), pruning old records (attempt {retries}/{MAX_PRUNE_RETRIES})"
                             );
                             self.prune_old_records()?;
-                            self.checkpoint()?;
+                            // VACUUM may fail if disk is full; continue
+                            // anyway — freed pages are reusable by the retry.
+                            if let Err(vacuum_err) = self.checkpoint() {
+                                log::warn!("VACUUM failed during SQLITE_FULL retry: {vacuum_err}");
+                            }
                             continue;
                         }
                     }

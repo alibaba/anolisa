@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 use tokenless_ccr::{SqliteStore, StashStore, extract_hash, is_valid_hash};
-use tokenless_schema::ResponseCompressor;
+use tokenless_schema::{ResponseCompressor, SchemaCompressor};
 use tokenless_stats::{
     CompressionMode, OperationType, SlsWriter, StatsRecord, StatsRecorder, ensure_state_dir,
     estimate_tokens, get_home_dir, resolve_data_dir, validate_data_dir, validate_database_path,
@@ -177,6 +177,9 @@ pub enum RuntimeError {
     /// A response could not be serialized after compression.
     #[error("failed to serialize compressed response: {0}")]
     Serialize(serde_json::Error),
+    /// A JSON value could not be encoded as TOON.
+    #[error("TOON encode failed: {0}")]
+    ToonEncode(String),
     /// Retrieve input was neither a marker nor a bare 24-character hash.
     #[error("invalid stash hash: {value:?} (expected 24 hex chars or a <<tokenless:HASH>> marker)")]
     InvalidHash {
@@ -281,7 +284,43 @@ impl TokenlessRuntime {
             self.config.compression_enabled,
             self.stash_store.as_ref(),
         )?;
-        self.record_stats(input, &result, attribution);
+        self.record_stats(OperationType::CompressResponse, input, &result, attribution);
+        Ok(result)
+    }
+
+    /// Compress one OpenAI Function Calling schema with reversible markers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError`] for oversized or invalid JSON input, or if the
+    /// compressed schema cannot be serialized.
+    pub fn compress_schema(
+        &self,
+        input: &str,
+        attribution: &Attribution,
+    ) -> Result<CompressResult, RuntimeError> {
+        let result = compress_schema_with_store(
+            input,
+            self.config.compression_enabled,
+            self.stash_store.as_ref(),
+        )?;
+        self.record_stats(OperationType::CompressSchema, input, &result, attribution);
+        Ok(result)
+    }
+
+    /// Encode one JSON value as TOON when doing so reduces estimated tokens.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError`] for oversized or invalid JSON input, or when
+    /// the TOON encoder rejects the value.
+    pub fn compress_toon(
+        &self,
+        input: &str,
+        attribution: &Attribution,
+    ) -> Result<CompressResult, RuntimeError> {
+        let result = compress_toon(input, self.config.compression_enabled)?;
+        self.record_stats(OperationType::CompressToon, input, &result, attribution);
         Ok(result)
     }
 
@@ -327,7 +366,13 @@ impl TokenlessRuntime {
         self.stats_error.as_deref()
     }
 
-    fn record_stats(&self, input: &str, result: &CompressResult, attribution: &Attribution) {
+    fn record_stats(
+        &self,
+        operation: OperationType,
+        input: &str,
+        result: &CompressResult,
+        attribution: &Attribution,
+    ) {
         if !self.config.stats_enabled && !self.config.sls_enabled {
             return;
         }
@@ -349,7 +394,7 @@ impl TokenlessRuntime {
             CompressionMode::DryRun
         };
         let mut record = StatsRecord::new(
-            OperationType::CompressResponse,
+            operation,
             attribution.agent_id.clone(),
             input.len(),
             before_tokens,
@@ -377,6 +422,127 @@ impl TokenlessRuntime {
     }
 }
 
+/// Compress a schema using an optional caller-owned stash store.
+///
+/// # Errors
+///
+/// Returns [`RuntimeError`] for oversized or invalid JSON input, or if the
+/// compressed schema cannot be serialized.
+pub fn compress_schema_with_store(
+    input: &str,
+    compression_enabled: bool,
+    stash_store: Option<&Arc<dyn StashStore>>,
+) -> Result<CompressResult, RuntimeError> {
+    validate_input_size(input)?;
+    let value: serde_json::Value = serde_json::from_str(input)?;
+    let attached_store = if compression_enabled {
+        stash_store
+    } else {
+        None
+    };
+    let mut compressor = SchemaCompressor::new();
+    if let Some(store) = attached_store {
+        compressor = compressor.with_stash_store(Arc::clone(store));
+    }
+    let compressed = compressor.compress(&value);
+    let compressed_output = serde_json::to_string(&compressed).map_err(RuntimeError::Serialize)?;
+    let before_tokens = estimate_tokens(input);
+    let after_tokens = estimate_tokens(&compressed_output);
+    let compression_stash_errors = attached_store.map(|_| compressor.stash_errors());
+    let disposition = if after_tokens >= before_tokens {
+        CompressionDisposition::NoSavings
+    } else if !compression_enabled {
+        CompressionDisposition::DryRun
+    } else if attached_store.is_none() || compression_stash_errors.is_some_and(|count| count > 0) {
+        CompressionDisposition::ReversibilityUnavailable
+    } else {
+        CompressionDisposition::Applied
+    };
+    let (stash_writes, stash_errors) = if disposition != CompressionDisposition::Applied {
+        compressor.rollback_stash_writes();
+        (
+            attached_store.map(|_| compressor.stash_writes()),
+            attached_store.map(|_| compressor.stash_errors()),
+        )
+    } else {
+        let metrics = (
+            attached_store.map(|_| compressor.stash_writes()),
+            attached_store.map(|_| compressor.stash_errors()),
+        );
+        compressor.clear_stash_session();
+        metrics
+    };
+    let stash_size = attached_store.map(|store| store.len());
+    let output = if disposition == CompressionDisposition::Applied {
+        compressed_output.clone()
+    } else {
+        input.to_string()
+    };
+    Ok(CompressResult {
+        output,
+        compressed_output,
+        disposition,
+        before_tokens,
+        after_tokens,
+        stash_writes,
+        stash_errors,
+        unrecoverable_truncations: None,
+        stash_size,
+    })
+}
+
+/// Encode JSON as TOON and apply the shared no-savings and dry-run policy.
+///
+/// # Errors
+///
+/// Returns [`RuntimeError`] for oversized or invalid JSON input, or when the
+/// TOON encoder rejects the value.
+pub fn compress_toon(
+    input: &str,
+    compression_enabled: bool,
+) -> Result<CompressResult, RuntimeError> {
+    validate_input_size(input)?;
+    let value: serde_json::Value = serde_json::from_str(input)?;
+    let compressed_output = toon_format::encode_default(&value)
+        .map_err(|error| RuntimeError::ToonEncode(error.to_string()))?
+        .trim_end()
+        .to_string();
+    let before_tokens = estimate_tokens(input);
+    let after_tokens = estimate_tokens(&compressed_output);
+    let disposition = if compressed_output.is_empty() || after_tokens >= before_tokens {
+        CompressionDisposition::NoSavings
+    } else if !compression_enabled {
+        CompressionDisposition::DryRun
+    } else {
+        CompressionDisposition::Applied
+    };
+    let output = if disposition == CompressionDisposition::Applied {
+        compressed_output.clone()
+    } else {
+        input.to_string()
+    };
+    Ok(CompressResult {
+        output,
+        compressed_output,
+        disposition,
+        before_tokens,
+        after_tokens,
+        stash_writes: None,
+        stash_errors: None,
+        unrecoverable_truncations: None,
+        stash_size: None,
+    })
+}
+
+fn validate_input_size(input: &str) -> Result<(), RuntimeError> {
+    if input.len() > MAX_INPUT_BYTES {
+        return Err(RuntimeError::InputTooLarge {
+            limit_mib: MAX_INPUT_BYTES / (1024 * 1024),
+        });
+    }
+    Ok(())
+}
+
 /// Compress a response using an optional caller-owned stash store.
 ///
 /// CLI and embedded frontends use this function to share candidate selection,
@@ -392,11 +558,7 @@ pub fn compress_response_with_store(
     compression_enabled: bool,
     stash_store: Option<&Arc<dyn StashStore>>,
 ) -> Result<CompressResult, RuntimeError> {
-    if input.len() > MAX_INPUT_BYTES {
-        return Err(RuntimeError::InputTooLarge {
-            limit_mib: MAX_INPUT_BYTES / (1024 * 1024),
-        });
-    }
+    validate_input_size(input)?;
     let value: serde_json::Value = serde_json::from_str(input)?;
     let mut compressor = ResponseCompressor::new();
     if let Some(value) = options.truncate_strings_at {
@@ -810,6 +972,69 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].before_tokens, result.before_tokens);
         assert_eq!(records[0].after_tokens, result.after_tokens);
+    }
+
+    #[test]
+    fn schema_compression_is_reversible_and_attributed() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = TokenlessRuntime::new(RuntimeConfig {
+            data_dir: Some(directory.path().to_path_buf()),
+            stats_enabled: true,
+            ..RuntimeConfig::default()
+        })
+        .unwrap();
+        let description = format!("SCHEMA_SENTINEL {}", "details ".repeat(200));
+        let input = serde_json::to_string(&serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": description,
+                "parameters": {"type": "object", "properties": {}}
+            }
+        }))
+        .unwrap();
+        let attribution = Attribution {
+            agent_id: "python-sdk".to_string(),
+            session_id: Some("schema-session".to_string()),
+            tool_use_id: None,
+        };
+        let result = runtime.compress_schema(&input, &attribution).unwrap();
+        assert!(result.applied());
+        let hash = extract_hash(&result.output).unwrap();
+        assert_eq!(runtime.retrieve(hash).unwrap(), description);
+
+        let recorder = StatsRecorder::new(directory.path().join("stats.db")).unwrap();
+        let records = recorder.records_by_session("schema-session", None).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].operation, OperationType::CompressSchema);
+    }
+
+    #[test]
+    fn schema_no_savings_rolls_back_stash() {
+        let input = r#"{"type":"function","function":{"name":"small","parameters":{}}}"#;
+        let store = Arc::new(InMemoryStore::new()) as Arc<dyn StashStore>;
+        let result = compress_schema_with_store(input, true, Some(&store)).unwrap();
+        assert_eq!(result.disposition, CompressionDisposition::NoSavings);
+        assert_eq!(result.output, input);
+        assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn toon_uses_only_a_smaller_encoding() {
+        let input = serde_json::to_string(&serde_json::json!({
+            "items": (0..100)
+                .map(|index| serde_json::json!({"name": "same", "value": index}))
+                .collect::<Vec<_>>()
+        }))
+        .unwrap();
+        let result = compress_toon(&input, true).unwrap();
+        assert!(result.applied());
+        assert!(result.after_tokens < result.before_tokens);
+
+        let tiny = "null";
+        let result = compress_toon(tiny, true).unwrap();
+        assert_eq!(result.disposition, CompressionDisposition::NoSavings);
+        assert_eq!(result.output, tiny);
     }
 
     #[test]

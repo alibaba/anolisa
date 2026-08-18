@@ -1372,3 +1372,131 @@ fn test_update_fallback_session_id_keeps_non_hex_32_chars() {
         assert_eq!(session_id_of(&store, "c1").as_deref(), Some(existing));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Size-based pruning (check_and_prune_if_needed / startup cleanup)
+// ---------------------------------------------------------------------------
+
+/// Cap the genai database at 1MB for size-limit tests.
+///
+/// All tests set the same value, so parallel execution never observes
+/// conflicting limits, and other tests' databases stay far below the
+/// resulting 0.9MB prune threshold.
+fn set_test_db_limit() {
+    unsafe { std::env::set_var("AGENTSIGHT_GENAI_DB_MAX_SIZE_MB", "1") };
+}
+
+fn unique_size_test_db(label: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "test_genai_size_{label}_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+fn cleanup_size_test_db(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+    let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+}
+
+/// Insert `rows` records of roughly `payload` bytes each via direct SQL,
+/// bypassing store_event's size checks so the test controls the file size.
+fn grow_db(store: &GenAISqliteStore, rows: usize, payload: usize) {
+    let blob = "x".repeat(payload);
+    {
+        let conn = store.conn.lock().unwrap();
+        for i in 0..rows {
+            conn.execute(
+                "INSERT INTO genai_events (event_type, start_timestamp_ns, event_json)
+                 VALUES ('llm_call', ?1, ?2)",
+                rusqlite::params![i as i64, blob],
+            )
+            .unwrap();
+        }
+    }
+    store.wal_checkpoint().unwrap();
+}
+
+fn row_count(store: &GenAISqliteStore) -> i64 {
+    let conn = store.conn.lock().unwrap();
+    conn.query_row("SELECT COUNT(*) FROM genai_events", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// Covers all three adaptive prune branches: overshoot 1-2x (10% per
+/// iteration), 2-5x (25%), and 5x+ (50%). Each scenario must converge
+/// below the prune threshold within the iteration bound.
+#[test]
+fn check_and_prune_converges_for_all_overshoot_levels() {
+    set_test_db_limit();
+    // (label, rows x 10KB) => ~1.5MB / ~3MB / ~6MB against a 1MB cap.
+    for (label, rows) in [("low", 150), ("mid", 300), ("high", 600)] {
+        let path = unique_size_test_db(label);
+        let store = GenAISqliteStore::new_with_path(&path).unwrap();
+        grow_db(&store, rows, 10 * 1024);
+        let threshold = super::schema::get_prune_threshold();
+        assert!(
+            store.get_total_db_size() > threshold,
+            "{label}: setup must exceed the prune threshold"
+        );
+
+        store.check_and_prune_if_needed().unwrap();
+
+        assert!(
+            store.get_total_db_size() < threshold,
+            "{label}: database must shrink below threshold, got {} bytes",
+            store.get_total_db_size()
+        );
+        assert!(
+            row_count(&store) < rows as i64,
+            "{label}: oldest records must have been deleted"
+        );
+        drop(store);
+        cleanup_size_test_db(&path);
+    }
+}
+
+/// A no-op when the database is already within the threshold.
+#[test]
+fn check_and_prune_noop_below_threshold() {
+    set_test_db_limit();
+    let path = unique_size_test_db("noop");
+    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    grow_db(&store, 10, 64);
+
+    store.check_and_prune_if_needed().unwrap();
+
+    assert_eq!(
+        row_count(&store),
+        10,
+        "below-threshold prune must not delete"
+    );
+    drop(store);
+    cleanup_size_test_db(&path);
+}
+
+/// Reopening an oversized database triggers the startup cleanup path in
+/// `new_with_path_and_batch`.
+#[test]
+fn startup_cleanup_prunes_oversized_db() {
+    set_test_db_limit();
+    let path = unique_size_test_db("startup");
+    {
+        let store = GenAISqliteStore::new_with_path(&path).unwrap();
+        grow_db(&store, 300, 10 * 1024); // ~3MB > 1MB cap
+    }
+
+    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+
+    let threshold = super::schema::get_prune_threshold();
+    assert!(
+        store.get_total_db_size() < threshold,
+        "startup cleanup must bring the database below the threshold"
+    );
+    drop(store);
+    cleanup_size_test_db(&path);
+}

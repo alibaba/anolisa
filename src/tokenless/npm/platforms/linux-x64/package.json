@@ -1,6 +1,6 @@
 {
   "name": "@anolisa/tokenless-linux-x64",
-  "version": "0.7.7",
+  "version": "0.7.9",
   "private": true,
   "description": "Token-Less native binaries for Linux x86_64",
   "license": "Apache-2.0",
@@ -12,11 +12,6 @@
   "os": ["linux"],
   "cpu": ["x64"],
   "libc": ["glibc"],
-  "bin": {
-    "tokenless": "bin/tokenless",
-    "rtk": "bin/rtk",
-    "toon": "bin/toon"
-  },
   "files": [
     "bin/"
   ],

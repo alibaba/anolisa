@@ -110,16 +110,13 @@ impl ShellHandoffRequest {
         if self.command.contains('\0') {
             return Err("shell handoff command contains NUL byte".to_string());
         }
-        if self.command.chars().any(|ch| matches!(ch, '\n' | '\r')) {
-            return Err(
-                "shell handoff command contains newline; multiline handoff is not enabled"
-                    .to_string(),
-            );
+        if has_unsafe_line_break(&self.command) {
+            return Err("shell handoff command contains an unsupported line break".to_string());
         }
         if self
             .command
             .chars()
-            .any(|ch| ch.is_control() && !matches!(ch, '\t'))
+            .any(|ch| ch.is_control() && !matches!(ch, '\t' | '\n'))
         {
             return Err("shell handoff command contains blocked control character".to_string());
         }
@@ -162,6 +159,73 @@ impl ShellHandoffRequest {
     }
 }
 
+// A quoted line feed continues one shell command, which covers multiline
+// jq, awk, and interpreter programs carried by an approved pipeline. Bare
+// line feeds could dispatch additional commands under one approval, while
+// carriage returns and escaped continuations have terminal-dependent input
+// semantics, so those remain fail-closed.
+//
+// This scans physical line-feed and carriage-return characters in the raw
+// command. Textual escape sequences such as `\n` are ordinary command bytes.
+fn has_unsafe_line_break(command: &str) -> bool {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Quote {
+        Single,
+        Double,
+    }
+
+    let mut quote = None;
+    let mut saw_quoted_line_feed = false;
+    let mut comment_can_start = true;
+    let mut in_comment = false;
+    let mut chars = command.chars();
+    while let Some(ch) = chars.next() {
+        if in_comment {
+            if matches!(ch, '\n' | '\r') {
+                return true;
+            }
+            continue;
+        }
+
+        match (quote, ch) {
+            (_, '\r') => return true,
+            (Some(Quote::Single), '\n') => saw_quoted_line_feed = true,
+            (Some(Quote::Single), '\'') => quote = None,
+            (Some(Quote::Single), _) => {}
+            (Some(Quote::Double), '\n') => return true,
+            (Some(Quote::Double), '"') => quote = None,
+            (Some(Quote::Double), '\\') => {
+                if chars.next().is_some_and(|next| matches!(next, '\n' | '\r')) {
+                    return true;
+                }
+            }
+            (Some(Quote::Double), _) => {}
+            (None, '\n') => return true,
+            (None, '\'') => {
+                quote = Some(Quote::Single);
+                comment_can_start = false;
+            }
+            (None, '"') => {
+                quote = Some(Quote::Double);
+                comment_can_start = false;
+            }
+            (None, '\\') => {
+                if chars.next().is_some_and(|next| matches!(next, '\n' | '\r')) {
+                    return true;
+                }
+                comment_can_start = false;
+            }
+            (None, '#') if comment_can_start => in_comment = true,
+            (None, ' ' | '\t' | ';' | '|' | '&' | '(' | ')' | '<' | '>') => {
+                comment_can_start = true;
+            }
+            (None, _) => comment_can_start = false,
+        }
+    }
+
+    saw_quoted_line_feed && quote == Some(Quote::Single)
+}
+
 fn preview_hash(value: &str) -> String {
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;
@@ -194,15 +258,33 @@ mod tests {
     }
 
     #[test]
-    fn shell_handoff_rejects_empty_nul_newline_and_control_chars() {
+    fn shell_handoff_rejects_empty_nul_unquoted_newline_and_control_chars() {
         for command in [
             "",
             "printf '\0'",
             "printf one\nprintf two",
+            "printf 'one\ntwo'\nprintf three",
+            "printf \"one\ntwo\"",
+            "printf \"apostrophe ' one\ntwo\"",
+            "printf \\'one\nprintf two",
+            "printf approved # '\nprintf UNAPPROVED\n# '",
+            "printf 'one\ntwo",
+            "printf 'one\rtwo'",
             "printf '\u{1b}[31mred'",
         ] {
             assert!(handoff(command).is_err(), "{command:?}");
         }
+    }
+
+    #[test]
+    fn shell_handoff_allows_pipeline_with_quoted_multiline_script() {
+        let command = "printf 'alpha\\nbeta\\n' | awk '\n# shell-literal comment\n{ print $0 }\n'";
+        let request = handoff(command).expect("quoted multiline pipeline handoff");
+
+        assert_eq!(
+            request.pty_bytes().unwrap(),
+            format!("{command}\n").as_bytes()
+        );
     }
 
     #[test]

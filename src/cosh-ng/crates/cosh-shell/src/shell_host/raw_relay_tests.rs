@@ -3,6 +3,92 @@ use crate::raw_input::UserPtyInputGeneration;
 
 const TEST_MARKER_TOKEN: &str = "test-marker-token";
 
+#[test]
+fn relay_wake_bytes_are_coalesced_and_fully_drained() {
+    let (master, _master_writer) = nix::unistd::pipe().expect("master pipe");
+    let (mut wake_reader, mut wake_writer) = UnixStream::pair().expect("wake pair");
+    let (mut resize_reader, _resize_writer) = UnixStream::pair().expect("resize pair");
+    wake_reader.set_nonblocking(true).expect("nonblocking wake");
+    resize_reader
+        .set_nonblocking(true)
+        .expect("nonblocking resize");
+    wake_writer
+        .set_nonblocking(true)
+        .expect("nonblocking writer");
+    wake_writer.write_all(&[1; 128]).expect("queue wakes");
+
+    let activity = wait_for_relay_activity(
+        master.as_raw_fd(),
+        &mut wake_reader,
+        &mut resize_reader,
+        Duration::from_millis(50),
+    )
+    .expect("wait for wake");
+    assert_eq!(
+        activity,
+        RelayActivity {
+            pty: false,
+            wake: true,
+            resize: false,
+        }
+    );
+
+    let drained = wait_for_relay_activity(
+        master.as_raw_fd(),
+        &mut wake_reader,
+        &mut resize_reader,
+        Duration::from_millis(2),
+    )
+    .expect("wait after drain");
+    assert_eq!(drained, RelayActivity::default());
+}
+
+#[test]
+fn relay_wait_returns_when_pty_becomes_readable() {
+    let (master, master_writer) = nix::unistd::pipe().expect("master pipe");
+    let (mut wake_reader, _wake_writer) = UnixStream::pair().expect("wake pair");
+    let (mut resize_reader, _resize_writer) = UnixStream::pair().expect("resize pair");
+    wake_reader.set_nonblocking(true).expect("nonblocking wake");
+    resize_reader
+        .set_nonblocking(true)
+        .expect("nonblocking resize");
+    nix::unistd::write(&master_writer, b"output").expect("write master output");
+
+    let activity = wait_for_relay_activity(
+        master.as_raw_fd(),
+        &mut wake_reader,
+        &mut resize_reader,
+        Duration::from_secs(1),
+    )
+    .expect("wait for pty");
+    assert!(activity.pty);
+    assert!(!activity.wake);
+    assert!(!activity.resize);
+}
+
+#[test]
+fn relay_wait_distinguishes_resize_from_regular_wake() {
+    let (master, _master_writer) = nix::unistd::pipe().expect("master pipe");
+    let (mut wake_reader, _wake_writer) = UnixStream::pair().expect("wake pair");
+    let (mut resize_reader, mut resize_writer) = UnixStream::pair().expect("resize pair");
+    wake_reader.set_nonblocking(true).expect("nonblocking wake");
+    resize_reader
+        .set_nonblocking(true)
+        .expect("nonblocking resize");
+    resize_writer.write_all(&[1]).expect("queue resize");
+
+    let activity = wait_for_relay_activity(
+        master.as_raw_fd(),
+        &mut wake_reader,
+        &mut resize_reader,
+        Duration::from_secs(1),
+    )
+    .expect("wait for resize");
+    assert!(!activity.pty);
+    assert!(!activity.wake);
+    assert!(activity.resize);
+}
+
 fn parser_for_test(name: &str) -> OscParser {
     let dir = std::env::temp_dir().join(format!("cosh-raw-relay-{name}"));
     OscParser::new(name.to_string(), dir, TEST_MARKER_TOKEN.to_string())

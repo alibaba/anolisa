@@ -89,6 +89,9 @@ interface CausalAttributionPanelProps {
   sessionId: string;
   roundIndex?: number;
   roundLabel?: string;
+  /** Whether the selected round only carries the system prompt. Supplied as a
+   *  flag rather than inferred from `roundLabel`, which is localized. */
+  isPreambleRound?: boolean;
   /** "conversation" when the parent page is viewing a conversation_id; unset otherwise. */
   idKind?: 'session' | 'conversation';
   /** Called when the user clicks a causal node — parent scrolls the trajectory to that step. */
@@ -483,6 +486,7 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
   sessionId,
   roundIndex,
   roundLabel,
+  isPreambleRound = false,
   idKind,
   onScrollToStep,
 }) => {
@@ -608,7 +612,7 @@ export const CausalAttributionPanel: React.FC<CausalAttributionPanelProps> = ({
         </span>
       </div>
 
-      {roundLabel === '前置' && (
+      {isPreambleRound && (
         <div className="mt-3 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800 leading-snug">
           <b>提示：</b>“前置”轮只包含系统 prompt，没有 agent 决策可分析。建议切到左侧某个“第 N 轮”再发起归因，结果会更有意义。
         </div>

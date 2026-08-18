@@ -202,7 +202,8 @@ scanner 返回 `deny`，才会按上述点位阻断。
 都不会改变 Qwen Code 的执行决策。敏感指标在写入前由本地 `scan-pii` 脱敏；脱敏失败时
 直接丢弃对应敏感字段。Observability hook 默认开启；启动 Qwen Code 前设置
 `OBSERVABILITY_HOOK_ENABLED=false` 可将其关闭，未设置或值无效时仍保持开启。修改后需
-重启 Qwen Code。
+重启 Qwen Code。`OBSERVABILITY_TIMEOUT` 控制 agent-sec-cli 超时秒数，默认且最大为 5 秒；
+空值、非法值、非正数或大于 5 的值使用 5 秒。
 
 Code scanner hook 与 observability hook 独立挂载，作为同步
 `PreToolUse` hook 仅处理 `run_shell_command`；默认 `CODE_SCANNER_MODE=observe` 不改变
