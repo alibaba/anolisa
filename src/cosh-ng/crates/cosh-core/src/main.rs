@@ -32,10 +32,6 @@ mod truncator;
 use clap::Parser;
 use cosh_core::provider;
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(unix)]
-use std::sync::Arc;
-#[cfg(unix)]
 use std::time::Duration;
 
 use config::CoreConfig;
@@ -122,10 +118,8 @@ async fn main() {
 
 #[cfg(unix)]
 async fn run_until_sigint() {
-    let sigint_received = install_sigint_handler();
-
     tokio::select! {
-        _ = wait_for_sigint(sigint_received) => {
+        _ = wait_for_sigint() => {
             tracing::info!("received SIGINT, shutting down cosh-core");
         }
         _ = run() => {}
@@ -195,21 +189,18 @@ fn is_agent_headless_mode(args: &cli::CliArgs) -> bool {
 }
 
 #[cfg(unix)]
-fn install_sigint_handler() -> Arc<AtomicBool> {
-    let received = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&received)).unwrap_or_else(
-        |error| {
-            eprintln!("failed to install SIGINT handler: {error}");
-            std::process::exit(1);
-        },
-    );
-    received
-}
-
-#[cfg(unix)]
-async fn wait_for_sigint(received: Arc<AtomicBool>) {
-    while !received.load(Ordering::Relaxed) {
-        tokio::time::sleep(Duration::from_millis(10)).await;
+async fn wait_for_sigint() {
+    // Event-driven SIGINT wait (#2608): the previous 10ms flag-polling loop
+    // kept the multi-thread runtime waking ~100 times per second while idle.
+    // If handler registration fails (restricted environments), fall back to
+    // the kernel default SIGINT disposition: warn once and never resolve,
+    // so the process keeps serving and Ctrl-C still terminates it.
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        eprintln!(
+            "failed to install SIGINT handler: {error}; \
+             falling back to the default SIGINT disposition"
+        );
+        std::future::pending::<()>().await;
     }
 }
 
