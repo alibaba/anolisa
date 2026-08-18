@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -14,10 +15,12 @@ use super::super::generation::UserPtyInputGeneration;
 use super::super::mode::RawInputMode;
 use super::super::pty::{set_pty_winsize, signal_process_group};
 use super::super::{MainPromptGate, RawInputEvent, RawRelayAction};
+use super::deadline::next_pending_deadline;
 use super::{
     finish_input_relay, flush_pending_prompt_ghost_escape,
-    flush_pending_replaced_prompt_ghost_suffix, next_pending_deadline, relay_input_bytes,
-    relay_input_bytes_with_read_ahead, relay_input_for_mode, RawInputRelayState, RelayReadContext,
+    flush_pending_replaced_prompt_ghost_suffix, relay_input_bytes,
+    relay_input_bytes_with_read_ahead, relay_input_for_mode, RawInputEventSink, RawInputRelayState,
+    RelayReadContext, WakingRawInputEventSender,
 };
 
 pub(super) struct PendingDelayEscape {
@@ -33,7 +36,7 @@ pub(super) fn resolve_pending_delay_escape(
     received_at: Instant,
     mode: &RawInputMode,
     master: &mut File,
-    input_events: &Sender<RawInputEvent>,
+    input_events: &dyn RawInputEventSink,
     input_classifier: &InputClassifier,
     input_mode: &Arc<Mutex<RawInputMode>>,
     state: &mut RawInputRelayState,
@@ -93,7 +96,7 @@ pub(super) fn flush_pending_delay_escape(
     force: bool,
     now: Instant,
     master: &mut File,
-    input_events: &Sender<RawInputEvent>,
+    input_events: &dyn RawInputEventSink,
     input_classifier: &InputClassifier,
     input_mode: &Arc<Mutex<RawInputMode>>,
     state: &mut RawInputRelayState,
@@ -132,7 +135,7 @@ pub(super) fn flush_pending_delay_escape(
 fn wait_for_raw_action(
     duration: Duration,
     master: &mut File,
-    input_events: &Sender<RawInputEvent>,
+    input_events: &WakingRawInputEventSender,
     input_classifier: &InputClassifier,
     input_mode: &Arc<Mutex<RawInputMode>>,
     state: &mut RawInputRelayState,
@@ -172,6 +175,7 @@ fn wait_for_raw_action(
             input_mode,
             state,
         )?;
+        input_events.notify_relay();
     }
     thread::sleep(action_end.saturating_duration_since(Instant::now()));
     Ok(())
@@ -179,6 +183,32 @@ fn wait_for_raw_action(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_raw_action_relay(
+    actions: Vec<RawRelayAction>,
+    master: File,
+    child_pid: u32,
+    input_events: Sender<RawInputEvent>,
+    input_classifier: InputClassifier,
+    input_mode: Arc<Mutex<RawInputMode>>,
+    input_generation: UserPtyInputGeneration,
+    main_prompt_gate: MainPromptGate,
+    slash_route_enabled: bool,
+) -> JoinHandle<io::Result<()>> {
+    spawn_raw_action_relay_with_wake(
+        actions,
+        master,
+        child_pid,
+        input_events,
+        input_classifier,
+        input_mode,
+        input_generation,
+        main_prompt_gate,
+        slash_route_enabled,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_raw_action_relay_with_wake(
     actions: Vec<RawRelayAction>,
     mut master: File,
     child_pid: u32,
@@ -188,8 +218,10 @@ pub(crate) fn spawn_raw_action_relay(
     input_generation: UserPtyInputGeneration,
     main_prompt_gate: MainPromptGate,
     slash_route_enabled: bool,
+    wake: Option<UnixStream>,
 ) -> JoinHandle<io::Result<()>> {
     thread::spawn(move || {
+        let input_events = WakingRawInputEventSender::new(input_events, wake);
         let mut state = RawInputRelayState::with_generation_and_gate(
             input_generation,
             main_prompt_gate,
@@ -248,13 +280,16 @@ pub(crate) fn spawn_raw_action_relay(
                     &mut state,
                 )?,
             }
+            input_events.notify_relay();
         }
-        finish_input_relay(
+        let result = finish_input_relay(
             &mut master,
             &input_events,
             &input_classifier,
             &input_mode,
             &mut state,
-        )
+        );
+        input_events.notify_relay();
+        result
     })
 }

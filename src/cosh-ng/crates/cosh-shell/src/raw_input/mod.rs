@@ -4,6 +4,7 @@ mod capture_bridge;
 mod card_capture;
 mod draft_editor;
 mod event_parser;
+mod event_sender;
 
 pub(crate) use draft_editor::PromptDraftEditor;
 mod generation;
@@ -23,7 +24,10 @@ pub(crate) use pty::{
     signal_foreground_process_group, signal_process_group, signal_process_group_id, write_all_pty,
 };
 pub use relay_action::RawRelayAction;
-pub(crate) use spawn::{spawn_raw_action_relay, spawn_raw_input_relay};
+pub(crate) use spawn::{
+    spawn_raw_action_relay, spawn_raw_action_relay_with_wake, spawn_raw_input_relay,
+    spawn_raw_input_relay_with_wake,
+};
 
 pub(super) const CTRL_C: u8 = 0x03;
 pub(super) const CTRL_U: u8 = 0x15;

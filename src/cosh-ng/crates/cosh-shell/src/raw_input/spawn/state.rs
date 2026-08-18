@@ -2,7 +2,6 @@
 //! split): the per-relay bookkeeping struct and its borrow-splitting helper.
 
 use std::fs::File;
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -11,11 +10,12 @@ use crate::input::InputClassifier;
 use super::super::capture_bridge::consume_captured_input;
 use super::super::card_capture::CardInputState;
 use super::super::event_parser::{CandidateLineBuffer, NativeLineState};
+use super::super::event_sender::RawInputEventSink;
 use super::super::generation::{LineSubmitCounter, UserPtyInputGeneration};
 use super::super::mode::current_raw_input_mode;
 use super::super::mode::RawInputMode;
 use super::super::relay::{ExplicitExitTracker, InputRelayContext};
-use super::super::{MainPromptGate, RawInputEvent};
+use super::super::MainPromptGate;
 use super::action::PendingDelayEscape;
 use super::capture::{drain_capture_submission, CaptureOwnedInput};
 use super::prompt_ghost::{PendingPromptGhostEscape, PendingReplacedPromptGhostSuffix};
@@ -61,7 +61,7 @@ impl RawInputRelayState {
 pub(super) fn input_relay_context<'a>(
     master: &'a mut File,
     input_classifier: &'a InputClassifier,
-    input_events: &'a Sender<RawInputEvent>,
+    input_events: &'a dyn RawInputEventSink,
     input_mode: &'a Arc<Mutex<RawInputMode>>,
     state: &'a mut RawInputRelayState,
 ) -> InputRelayContext<'a> {
@@ -106,7 +106,7 @@ pub(super) fn flush_pending_draft_escape(
     now: Instant,
     master: &mut File,
     input_classifier: &InputClassifier,
-    input_events: &Sender<RawInputEvent>,
+    input_events: &dyn RawInputEventSink,
     input_mode: &Arc<Mutex<RawInputMode>>,
     state: &mut RawInputRelayState,
 ) -> std::io::Result<()> {

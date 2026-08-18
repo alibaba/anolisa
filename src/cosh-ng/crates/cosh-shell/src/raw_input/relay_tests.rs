@@ -30,6 +30,65 @@ fn output_file(label: &str) -> (std::path::PathBuf, File) {
     (path, file)
 }
 
+struct PausingEventSink {
+    sender: mpsc::Sender<RawInputEvent>,
+    published: mpsc::SyncSender<()>,
+    resume: Mutex<mpsc::Receiver<()>>,
+}
+
+impl RawInputEventSink for PausingEventSink {
+    fn send(&self, event: RawInputEvent) -> Result<(), mpsc::SendError<RawInputEvent>> {
+        self.sender.send(event)?;
+        self.published.send(()).expect("publish barrier");
+        self.resume
+            .lock()
+            .expect("resume lock")
+            .recv()
+            .expect("resume event send");
+        Ok(())
+    }
+}
+
+#[test]
+fn pty_user_write_waits_until_its_event_is_visible() {
+    let (path, mut master) = output_file("event-before-pty-write");
+    let (event_tx, event_rx) = mpsc::channel();
+    let (published_tx, published_rx) = mpsc::sync_channel(0);
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let sink = PausingEventSink {
+        sender: event_tx,
+        published: published_tx,
+        resume: Mutex::new(resume_rx),
+    };
+    let writer = thread::spawn(move || {
+        write_user_bytes_to_pty(
+            &mut master,
+            &UserPtyInputGeneration::default(),
+            &mut LineSubmitCounter::default(),
+            &sink,
+            &super::super::MainPromptGate::default(),
+            b"echo ordered\n",
+        )
+    });
+
+    published_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("event publication");
+    assert!(matches!(
+        event_rx.try_recv().expect("visible PTY write event"),
+        RawInputEvent::PtyUserWrite {
+            line_submits: 1,
+            ..
+        }
+    ));
+    assert!(fs::read(&path).expect("read pre-write output").is_empty());
+
+    resume_tx.send(()).expect("allow PTY write");
+    writer.join().expect("writer join").expect("PTY write");
+    assert_eq!(fs::read(&path).expect("read PTY output"), b"echo ordered\n");
+    fs::remove_file(path).ok();
+}
+
 fn selection_input_mode() -> Arc<Mutex<RawInputMode>> {
     let candidates = vec![
         PromptGhostCandidate {

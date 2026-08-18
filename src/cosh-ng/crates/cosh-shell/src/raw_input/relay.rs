@@ -1,6 +1,5 @@
 use std::fs::File;
 use std::io;
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use crate::input::{InputClassifier, InputDecision, InterceptReason};
@@ -11,6 +10,7 @@ use super::event_parser::{
     starts_native_intercept_candidate, CandidateLineBuffer, CandidateLineStatus, NativeLineState,
     BRACKETED_PASTE_END, BRACKETED_PASTE_START,
 };
+use super::event_sender::RawInputEventSink;
 use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
 use super::mode::new_delay_input_mode;
 use super::soft_newline::{
@@ -21,7 +21,7 @@ use super::{write_all_pty, MainPromptGate, PromptGhostRoute, RawInputEvent, RawI
 pub(super) struct InputRelayContext<'a> {
     pub(super) master: &'a mut File,
     pub(super) input_classifier: &'a InputClassifier,
-    pub(super) input_events: &'a Sender<RawInputEvent>,
+    pub(super) input_events: &'a dyn RawInputEventSink,
     pub(super) input_mode: &'a Arc<Mutex<RawInputMode>>,
     pub(super) input_generation: &'a UserPtyInputGeneration,
     pub(super) line_submits: &'a mut LineSubmitCounter,
@@ -46,7 +46,7 @@ pub(super) fn write_user_bytes_to_pty(
     master: &mut File,
     input_generation: &UserPtyInputGeneration,
     line_submits: &mut LineSubmitCounter,
-    input_events: &Sender<RawInputEvent>,
+    input_events: &dyn RawInputEventSink,
     main_prompt_gate: &MainPromptGate,
     bytes: &[u8],
 ) -> io::Result<()> {
@@ -64,20 +64,20 @@ pub(super) fn write_user_bytes_to_pty(
     write_all_pty(master, bytes)
 }
 
-pub(super) fn send_raw_input_events(bytes: &[u8], input_events: &Sender<RawInputEvent>) {
+pub(super) fn send_raw_input_events(bytes: &[u8], input_events: &dyn RawInputEventSink) {
     if bytes.contains(&CTRL_C) {
         let _ = input_events.send(RawInputEvent::CtrlC);
     }
 }
 
-pub(super) fn send_shell_input_state(empty: bool, input_events: &Sender<RawInputEvent>) {
+pub(super) fn send_shell_input_state(empty: bool, input_events: &dyn RawInputEventSink) {
     let _ = input_events.send(RawInputEvent::ShellInputActivity { empty });
 }
 
 fn observe_native_line(
     state: &mut NativeLineState,
     bytes: &[u8],
-    input_events: &Sender<RawInputEvent>,
+    input_events: &dyn RawInputEventSink,
 ) {
     state.observe_shell_bytes(bytes);
     if state.take_multiline_paste_observed() {
@@ -280,7 +280,7 @@ pub(super) fn dismiss_prompt_ghost_input(
     relay_passthrough_input(bytes, relay)
 }
 
-pub(super) fn send_held_input_events(bytes: &[u8], input_events: &Sender<RawInputEvent>) {
+pub(super) fn send_held_input_events(bytes: &[u8], input_events: &dyn RawInputEventSink) {
     send_raw_input_events(bytes, input_events);
     if held_input_requests_cancel(bytes) {
         let _ = input_events.send(RawInputEvent::CtrlC);
@@ -563,7 +563,7 @@ fn submit_line_bytes_to_shell(
 }
 
 fn redraw_candidate_line(
-    input_events: &Sender<RawInputEvent>,
+    input_events: &dyn RawInputEventSink,
     line_buffer: &mut CandidateLineBuffer,
 ) {
     let original = line_buffer.visible_line_bytes();
@@ -603,7 +603,7 @@ fn redraw_candidate_line(
 /// shortcut is seen on a passthrough path (candidate buffer inactive), emit
 /// a signal so the runtime can surface a one-time tip at the next
 /// prompt-ready. The bytes themselves are always relayed unchanged.
-fn observe_passthrough_soft_newline(bytes: &[u8], input_events: &Sender<RawInputEvent>) {
+fn observe_passthrough_soft_newline(bytes: &[u8], input_events: &dyn RawInputEventSink) {
     if contains_soft_newline_sequence(bytes) {
         let _ = input_events.send(RawInputEvent::SoftNewlineShortcutObserved);
     }

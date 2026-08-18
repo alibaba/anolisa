@@ -1,5 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io;
+use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::super::{PromptGhostCandidate, RawInputCapture};
@@ -30,7 +31,7 @@ fn idle_reader_backs_off_between_would_block_retries() {
     let reader = thread::spawn({
         let reads = reads.clone();
         let stop = stop.clone();
-        move || read_input_chunks(IdleReader { reads, stop }, sender, input_mode)
+        move || read_input_chunks(IdleReader { reads, stop }, sender, input_mode, None)
     });
 
     thread::sleep(Duration::from_millis(120));
@@ -45,6 +46,45 @@ fn idle_reader_backs_off_between_would_block_retries() {
         "idle reader retried {} times",
         reads.load(Ordering::Relaxed)
     );
+}
+
+#[test]
+fn fd_reader_waits_for_readiness_without_backoff() {
+    let (read_fd, write_fd) = nix::unistd::pipe().expect("pipe");
+    let flags = unsafe { nix::libc::fcntl(read_fd.as_raw_fd(), nix::libc::F_GETFL) };
+    assert!(flags >= 0);
+    assert_eq!(
+        unsafe {
+            nix::libc::fcntl(
+                read_fd.as_raw_fd(),
+                nix::libc::F_SETFL,
+                flags | nix::libc::O_NONBLOCK,
+            )
+        },
+        0
+    );
+    let input_fd = read_fd.as_raw_fd();
+    let input = File::from(read_fd);
+    let mut writer = File::from(write_fd);
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let reader = thread::spawn(move || {
+        read_input_chunks(input, sender, input_mode, Some(input_fd));
+    });
+
+    thread::sleep(Duration::from_millis(10));
+    std::io::Write::write_all(&mut writer, b"x").expect("write input");
+    let received = receiver
+        .recv_timeout(Duration::from_millis(250))
+        .expect("poll wakes for input");
+    assert!(matches!(received, InputRead::Bytes { bytes, .. } if bytes == b"x"));
+
+    drop(writer);
+    assert!(matches!(
+        receiver.recv_timeout(Duration::from_millis(250)),
+        Ok(InputRead::Eof)
+    ));
+    reader.join().expect("fd reader");
 }
 
 #[test]

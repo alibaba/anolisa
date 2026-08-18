@@ -413,7 +413,7 @@ pub(in super::super) fn relay_late_capture_input(
     bytes: &[u8],
     generation: u64,
     master: &mut File,
-    input_events: &Sender<RawInputEvent>,
+    input_events: &dyn RawInputEventSink,
     input_classifier: &InputClassifier,
     input_mode: &Arc<Mutex<RawInputMode>>,
     state: &mut RawInputRelayState,
@@ -592,7 +592,7 @@ pub(super) fn drain_abandoned_capture(
 
 pub(in super::super) fn finish_input_relay(
     master: &mut File,
-    input_events: &Sender<RawInputEvent>,
+    input_events: &dyn RawInputEventSink,
     input_classifier: &InputClassifier,
     input_mode: &Arc<Mutex<RawInputMode>>,
     state: &mut RawInputRelayState,
