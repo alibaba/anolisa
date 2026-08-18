@@ -651,3 +651,42 @@ fn raw_cli_user_approved_bash_tool_supports_pipe() {
     assert!(!output.contains("Analysis continued after the approved command"));
     assert!(!output.contains("Thinking...Approval"));
 }
+
+#[test]
+fn raw_cli_user_approved_pipeline_supports_quoted_multiline_script() {
+    assert_user_approved_pipeline_supports_quoted_multiline_script(&[]);
+}
+
+#[test]
+fn raw_cli_zsh_user_approved_pipeline_supports_quoted_multiline_script() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+    assert_user_approved_pipeline_supports_quoted_multiline_script(&["--shell", "zsh"]);
+}
+
+fn assert_user_approved_pipeline_supports_quoted_multiline_script(args: &[&str]) {
+    let output = run_raw_cli_with_args_and_delayed_input(
+        "fake",
+        args,
+        vec![
+            (
+                b"?? stream quoted multiline pipeline approval\n".to_vec(),
+                Duration::ZERO,
+            ),
+            (b"\n".to_vec(), Duration::from_millis(1_200)),
+            (b"exit\n".to_vec(), Duration::from_millis(1_000)),
+        ],
+    );
+    let normalized = strip_ansi_escape(&output).replace('\r', "");
+
+    assert!(
+        output.contains("Preparing a quoted multiline pipeline request before finishing."),
+        "{output}"
+    );
+    assert_approval_prompt_visible(&output);
+    assert!(output.contains("Approved req-1"), "{output}");
+    assert!(!output.contains("Blocked req-1"), "{output}");
+    assert!(normalized.contains("\nalpha\nbeta\n"), "{output}");
+    assert!(output.contains("sent to shell"), "{output}");
+}

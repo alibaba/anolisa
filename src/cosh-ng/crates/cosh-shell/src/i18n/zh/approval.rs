@@ -72,7 +72,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         MessageId::ApprovalShellHandoffBlockedFooter => "命令没有写入前台 shell。",
         MessageId::ApprovalShellHandoffValidationEmptyCommand => "Shell handoff 命令为空。",
         MessageId::ApprovalShellHandoffValidationMultilineCommand => {
-            "Shell handoff 命令包含换行；尚未启用多行 handoff。"
+            "Shell handoff 命令包含不受支持的换行；仅允许完整单引号参数内的换行。"
         }
         MessageId::ApprovalShellHandoffValidationControlCharacter => {
             "Shell handoff 命令包含被阻止的控制字符。"
