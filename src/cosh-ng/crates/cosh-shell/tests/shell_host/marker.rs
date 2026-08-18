@@ -2911,3 +2911,219 @@ fn shell_host_bash_missing_path_counterproofs_stay_native() {
             .expect("restore opaque");
     }
 }
+
+// --- #2598 host-injection non-destruction contract (U2) regressions ---
+
+fn injection_contract_config(label: &str) -> ShellHostConfig {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-{label}-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    ShellHostConfig::new(label, &work_dir)
+}
+
+#[test]
+fn exported_prompt_command_array_reassignment_keeps_export_attribute() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    // NS-005 main cell: env-inherited -x must survive the marker hijack so
+    // a later array reassignment shows `declare -ax` like native bash.
+    let config = injection_contract_config("pc-export-array").with_env("PROMPT_COMMAND", "");
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("PROMPT_COMMAND=('printf p1' 'printf p2')"),
+            ScriptedInput::user_line("declare -p PROMPT_COMMAND"),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(
+        terminal.contains("declare -ax PROMPT_COMMAND"),
+        "{terminal}"
+    );
+}
+
+#[test]
+fn exported_prompt_command_scalar_reassignment_keeps_export_attribute() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let config = injection_contract_config("pc-export-scalar").with_env("PROMPT_COMMAND", "");
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("PROMPT_COMMAND='printf p1'"),
+            ScriptedInput::user_line("declare -p PROMPT_COMMAND"),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("declare -x PROMPT_COMMAND"), "{terminal}");
+}
+
+// INV-1 reverse cell (no inherited -x must not invent one) is not
+// constructible under this harness: shell_host_test_config always injects
+// an exported PROMPT_COMMAND="" into the inner bash env. The reverse cell
+// is covered by the container acceptance oracle arm (2540 matrix rows 1-2,
+// artifacts/cosh-2598-host-injection-baseline) where the environment is
+// fully controlled.
+
+#[test]
+fn exported_prompt_command_guard_value_is_silent_in_nested_bash() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    // INV-2: the guard-form hijack value leaks to child processes once -x
+    // is restored; a nested interactive bash evaluating it at every prompt
+    // must stay silent instead of spamming "command not found".
+    let config = injection_contract_config("pc-export-nested").with_env("PROMPT_COMMAND", "");
+    let output = run_scripted_bash(
+        &config,
+        &[
+            // `-i -c` never enters the interactive read loop, so
+            // PROMPT_COMMAND would not be evaluated at all; pipe the
+            // command through stdin so the nested bash serves real
+            // prompts and evaluates the leaked guard value at each one.
+            ScriptedInput::user_line(
+                "printf '%s\\n' 'printf nested-%s\\\\n done' exit \\
+                 | bash --noprofile --norc -i 2>&1",
+            ),
+            ScriptedInput::user_line("printf 'hooks-%s\\n' alive"),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("nested-done"), "{terminal}");
+    assert!(!terminal.contains("command not found"), "{terminal}");
+    // INV-3: the outer session's marker interception chain stays alive.
+    assert!(terminal.contains("hooks-alive"), "{terminal}");
+}
+
+#[test]
+fn errexit_session_survives_dispatch_and_exits_cleanly() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    // SEM-019: every dispatched command runs the marker DEBUG chain whose
+    // internal helper statuses must never trip a user `set -e` session.
+    // `false && :` keeps $? = 1 without an errexit exit, so the prompt
+    // chain also runs with a non-zero user status (2541 V-B4 cell).
+    let config = injection_contract_config("errexit-dispatch");
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("set -e"),
+            ScriptedInput::user_line("printf 'probe-%s\\n' one"),
+            ScriptedInput::user_line("false && :"),
+            ScriptedInput::user_line("printf 'probe-%s\\n' two"),
+            ScriptedInput::user_line("case $- in *e*) printf 'errexit-%s\\n' on ;; esac"),
+        ],
+    )
+    .expect("errexit session must complete without timing out");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("probe-one"), "{terminal}");
+    assert!(terminal.contains("probe-two"), "{terminal}");
+    // The user-visible errexit option survives the wrapper suspend/restore.
+    assert!(terminal.contains("errexit-on"), "{terminal}");
+}
+
+#[test]
+fn errexit_compound_payload_keeps_session_exit_code_clean() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    // SEM-019 measured axis (#2541-B): with the original compound payload
+    // the framed output is identical on both sides and the only divergence
+    // is the session exit code (oracle exits 0 - the failing `false` sits
+    // before the final `&&`, so errexit does not trigger, and the last
+    // `printf` resets $? to 0). The harness ends the session with a bare
+    // `exit`, which propagates the last command status - the exact
+    // last-status path SEM-019 measured, so `exit_status` pins that axis.
+    let config = injection_contract_config("errexit-exit-code");
+    let output = run_scripted_bash(
+        &config,
+        &[ScriptedInput::user_line(
+            "{ set -e; false && printf 'SEM019-%s\n' leaked; printf 'errexit-%s\n' context; }",
+        )],
+    )
+    .expect("errexit compound session must complete");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("errexit-context"), "{terminal}");
+    // `false` short-circuits the && list: the guarded printf never runs
+    // (the echoed input keeps `%s` unexpanded, so this only matches output).
+    assert!(!terminal.contains("SEM019-leaked"), "{terminal}");
+    assert_eq!(
+        output.exit_status,
+        Some(0),
+        "marker internals must not pollute the session exit code: {terminal}"
+    );
+}
+
+#[test]
+fn background_jobs_keep_concurrent_job_numbers() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    // NS-009: with the DEBUG trap disarmed for the rest of the line after
+    // its first firing, mid-line job reaping stops and the three background
+    // jobs get distinct, concurrent job numbers like native bash.
+    let config = injection_contract_config("job-concurrency");
+    let pids = config.work_dir.join("bg-pids");
+    let line = format!(
+        "for i in 1 2 3; do sleep 0.2 & printf '%s\\n' \"$!\" >> {p}; done; wait; \
+         printf 'uniq-pids-%s\\n' \"$(sort -u {p} | grep -c .)\"; printf 'jobs-%s\\n' done",
+        p = shell_arg(&pids)
+    );
+    let output =
+        run_scripted_bash(&config, &[ScriptedInput::user_line(line)]).expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("jobs-done"), "{terminal}");
+    assert!(
+        terminal.contains("[2]") && terminal.contains("[3]"),
+        "background jobs were serialized onto job slot [1]: {terminal}"
+    );
+    // NS-009 also covers `$!`: the three background jobs must expose three
+    // distinct pids to the loop body, matching native bash.
+    assert!(terminal.contains("uniq-pids-3"), "{terminal}");
+}
+
+#[test]
+fn user_debug_trap_installed_mid_session_keeps_firing() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    // V-N5: a user DEBUG trap installed during the session must be absorbed
+    // into the OLD chain (per-command parity mode), not clobbered by the
+    // prompt-boundary re-arm.
+    let config = injection_contract_config("user-debug-trap");
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("trap 'printf UDBG-%s\\\\n fired' DEBUG"),
+            ScriptedInput::user_line("printf 'cmd-%s\\n' ran"),
+            ScriptedInput::user_line("printf 'cmd2-%s\\n' ran"),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("cmd-ran"), "{terminal}");
+    assert!(terminal.contains("cmd2-ran"), "{terminal}");
+    assert!(terminal.contains("UDBG-fired"), "{terminal}");
+}

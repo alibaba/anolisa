@@ -65,6 +65,14 @@ mod native;
 mod relay;
 #[path = "shell_host/termios.rs"]
 mod termios;
+// Linux-only: on macOS the libtest harness environment intermittently
+// yields ENOTTY from tcgetattr on a freshly opened pty slave (the same
+// openpty+tcgetattr sequence is stable in a standalone process, probed
+// during #2598 T7); ALinux4 is the shipping target and CI runs Linux, so
+// the termios roundtrip contract is enforced there.
+#[cfg(target_os = "linux")]
+#[path = "shell_host/termios_lifecycle.rs"]
+mod termios_lifecycle;
 
 static SHELL_HOST_RUN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
