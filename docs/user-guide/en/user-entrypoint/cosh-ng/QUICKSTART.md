@@ -6,14 +6,31 @@ cosh-ng adds an Agent to a normal bash or zsh session. Start `cosh`, run Shell c
 
 ## 1. Install
 
-Install the ANOLISA CLI and cosh-ng:
+On Alibaba Cloud Linux 4, install the ANOLISA CLI, then install cosh-ng from
+the RPM backend in system scope:
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash
-sudo anolisa --install-mode system install cosh-ng
+export PATH="$HOME/.local/bin:$PATH"
+sudo "$HOME/.local/bin/anolisa" --install-mode system install cosh-ng --backend rpm
 ```
 
-Alibaba Cloud Linux users can install the RPM instead:
+The public installer can combine the CLI and component installation. It prompts
+for `sudo` only when running the component action:
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --backend rpm --install-mode system
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+On macOS arm64, use user scope instead:
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --backend raw --install-mode user
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Alibaba Cloud Linux 4 users can also install the RPM directly:
 
 ```bash
 sudo yum install cosh-ng
@@ -28,7 +45,12 @@ cosh-cli --version
 
 Package and service changes normally need root privileges. Workspace checkpoint commands also need a running `ws-ckpt` daemon.
 
-These packaged paths target Linux. Source builds are for contributors; follow the [developer setup](../../../../developer-guide/en/cosh-ng/getting-started.md) after the packaged options above.
+The published Linux raw contract is not currently portable across all routed
+distributions, so it is not the recommended Linux installation path. The raw
+package supports macOS arm64, where Linux-only package and service operations
+remain unavailable. Source builds are for contributors; follow the
+[developer setup](../../../../developer-guide/en/cosh-ng/getting-started.md)
+after the packaged options above.
 
 ## 2. Start the terminal
 

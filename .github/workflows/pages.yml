@@ -82,6 +82,7 @@ jobs:
       - name: Validate public installer
         run: |
           bash -n website/static/install.sh
+          website/scripts/test-install.sh
           cmp website/static/install.sh website/build/install.sh
 
       - name: Smoke-test stable installer

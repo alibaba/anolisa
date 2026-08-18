@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-cosh-ng 是一个 AI 原生 Linux 终端。它以你已经在用的 Shell 为基础。
+cosh-ng 是一个 AI 原生终端。它以你已经在用的 Shell 为基础。
 启动 `cosh` 后，bash 或 zsh 照常工作。遇到更复杂的任务，直接用自然语言请 Agent
 检查或操作即可。Shell 命令、Skills、审批卡片和可恢复对话都留在同一个终端里。
 需要自动化或集成其他 Agent 时，还可以使用结构化 JSON 和 JSONL 接口。
@@ -22,21 +22,46 @@ cosh-ng 是一个 AI 原生 Linux 终端。它以你已经在用的 Shell 为基
 
 ## 安装
 
-使用 ANOLISA CLI 安装。
+在 Alibaba Cloud Linux 4 上，通过 ANOLISA CLI 和 RPM backend 把 cosh-ng
+安装到 system 范围。
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash
-sudo anolisa --install-mode system install cosh-ng
+export PATH="$HOME/.local/bin:$PATH"
+sudo "$HOME/.local/bin/anolisa" --install-mode system install cosh-ng --backend rpm
 ```
 
-在 Alibaba Cloud Linux 上，也可以直接安装 RPM。
+公共安装脚本可以合并上述步骤。
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --backend rpm --install-mode system
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+后续升级或卸载也使用同一个入口。
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --install-mode system --upgrade
+curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --install-mode system --uninstall
+```
+
+在 macOS arm64 上改用 user 范围：
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --backend raw --install-mode user
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+在 Alibaba Cloud Linux 4 上，也可以直接安装 RPM。
 
 ```bash
 sudo yum install cosh-ng
 ```
 
-以上安装方式目前面向 Linux。macOS 请按照
-[开发者入门指南](../../docs/developer-guide/zh/cosh-ng/getting-started.md)从源码构建。
+当前发布的 Linux raw 契约无法覆盖所有已路由的发行版，因此不作为推荐的
+Linux 安装路径。raw 包支持 macOS arm64，但依赖 Linux 的软件包和服务操作
+不可用。源码构建仅供贡献者使用，请参阅
+[开发者入门指南](../../docs/developer-guide/zh/cosh-ng/getting-started.md)。
 
 ## 30 秒开始使用
 

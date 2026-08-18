@@ -28,8 +28,19 @@ Qwen Code 或 cosh，然后确认一条压缩前后的 Token 记录。
 
 根据环境选择终端：
 
-- [开始使用 cosh-ng](user-guide/zh/user-entrypoint/cosh-ng/QUICKSTART.md)——面向 AI 时代重构的 Linux 终端
+- [开始使用 cosh-ng](user-guide/zh/user-entrypoint/cosh-ng/QUICKSTART.md)——面向 AI 时代重构的终端
 - [开始使用 Copilot Shell](user-guide/zh/user-entrypoint/copilot-shell/QUICKSTART.md)——可扩展的 Agent Shell
+
+在 Alibaba Cloud Linux 4 上使用 RPM backend，让 dnf 选择匹配的系统库。
+脚本只会为组件操作调用 `sudo`。
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --component cosh-ng --backend rpm --install-mode system
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+`--cosh-ng` 仍可作为 `--component cosh-ng` 的简写。在 macOS arm64 上改用
+`--backend raw --install-mode user`。
 
 ### 增加可观测性、安全或运行时控制
 

@@ -6,14 +6,30 @@ cosh-ng 在普通 bash 或 zsh 会话中加入 Agent。启动 `cosh` 后可以�
 
 ## 1. 安装
 
-安装 ANOLISA CLI 和 cosh-ng：
+在 Alibaba Cloud Linux 4 上安装 ANOLISA CLI，再通过 RPM backend 把
+cosh-ng 安装到 system 范围。
 
 ```bash
 curl -fsSL https://get.agentic-os.sh | bash
-sudo anolisa --install-mode system install cosh-ng
+export PATH="$HOME/.local/bin:$PATH"
+sudo "$HOME/.local/bin/anolisa" --install-mode system install cosh-ng --backend rpm
 ```
 
-Alibaba Cloud Linux 用户也可以改用 RPM：
+公共安装脚本可以合并 CLI 和组件安装，并且只在执行组件操作时请求 `sudo`。
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --backend rpm --install-mode system
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+在 macOS arm64 上改用 user 范围：
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --cosh-ng --backend raw --install-mode user
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Alibaba Cloud Linux 4 用户也可以直接安装 RPM。
 
 ```bash
 sudo yum install cosh-ng
@@ -28,7 +44,10 @@ cosh-cli --version
 
 修改软件包和服务通常需要 root 权限；工作区快照命令还需要运行中的 `ws-ckpt` 守护进程。
 
-以上安装方式面向 Linux。源码构建仅供贡献者使用；完成上述安装方式后，请参阅[开发者入门指南](../../../../developer-guide/zh/cosh-ng/getting-started.md)。
+当前发布的 Linux raw 契约无法覆盖所有已路由的发行版，因此不作为推荐的
+Linux 安装路径。raw 包支持 macOS arm64，但依赖 Linux 的软件包和服务操作
+不可用。源码构建仅供贡献者使用，请参阅
+[开发者入门指南](../../../../developer-guide/zh/cosh-ng/getting-started.md)。
 
 ## 2. 启动终端
 

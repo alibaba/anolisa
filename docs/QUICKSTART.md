@@ -29,8 +29,19 @@ Qwen Code, or cosh, then verify a before/after Token record.
 
 Choose the terminal that matches your environment:
 
-- [Start with cosh-ng](user-guide/en/user-entrypoint/cosh-ng/QUICKSTART.md) — an AI-native Linux terminal
+- [Start with cosh-ng](user-guide/en/user-entrypoint/cosh-ng/QUICKSTART.md) — an AI-native terminal
 - [Start with Copilot Shell](user-guide/en/user-entrypoint/copilot-shell/QUICKSTART.md) — an extensible Agent Shell
+
+On Alibaba Cloud Linux 4, use the RPM backend so dnf selects the matching
+system libraries. Only the component action uses `sudo`:
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --component cosh-ng --backend rpm --install-mode system
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+`--cosh-ng` remains available as shorthand for `--component cosh-ng`. On
+macOS arm64, use `--backend raw --install-mode user` instead.
 
 ### Add observability, security, or runtime controls
 

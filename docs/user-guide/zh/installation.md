@@ -16,6 +16,21 @@
 curl -fsSL https://get.agentic-os.sh | bash
 ```
 
+同一个脚本准备好 CLI 后，可以立即管理一个已发布组件。参数使用 ANOLISA
+registry 中的组件名，并指定 backend 和范围。默认 backend 是 raw。在
+Alibaba Cloud Linux 4 上通过 RPM backend 安装 cosh-ng，让 dnf 选择匹配的
+系统库。
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --component cosh-ng --backend rpm --install-mode system
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+`--cosh-ng` 是 `--component cosh-ng` 的简写。组件、backend 和平台检查仍由
+CLI 负责，安装脚本不维护第二份组件白名单。显式使用 system 模式时，脚本只为
+组件操作调用 `sudo`，CLI 仍安装在当前用户目录。未指定 `--install-mode` 时，
+范围沿用 ANOLISA 的 euid 默认规则。
+
 ### 方式 B YUM（Alinux）
 
 ```bash
@@ -75,7 +90,7 @@ anolisa install <component>
 | 组件 | 说明 | 支持的模式 |
 |------|------|------------|
 | `cosh` | Copilot Shell AI 终端助手 | user、system |
-| `cosh-ng` | AI 原生 Linux 终端与 Agent 运行时（实验阶段） | **system** |
+| `cosh-ng` | AI 原生终端与 Agent 运行时（实验阶段） | system（Linux）、user 或 system（macOS arm64） |
 | `os-skills` | 系统管理与 DevOps 技能 | user、system |
 | `tokenless` | Token 优化（压缩） | user、system |
 | `ws-ckpt` | 工作区快照/回滚 | **system** |
@@ -89,11 +104,26 @@ anolisa install <component>
 > sudo anolisa --install-mode system install agentsight
 > ```
 
-以 system 模式安装 cosh-ng，随后运行 `cosh` 进入终端。
+在 Alibaba Cloud Linux 4 上，通过 RPM backend 把 cosh-ng 安装到 system
+范围，随后运行 `cosh` 进入终端。
 
 ```bash
-sudo anolisa --install-mode system install cosh-ng
+sudo anolisa --install-mode system install cosh-ng --backend rpm
 cosh
+```
+
+公共安装脚本可以合并 CLI 引导和组件安装。
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --component cosh-ng --backend rpm --install-mode system
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+在 macOS arm64 上，cosh-ng raw 包使用独立的 user scope 契约。
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --component cosh-ng --backend raw --install-mode user
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 ANOLISA CLI 使用组件名 `sec-core`。Alinux 的 RPM 包名仍然是
@@ -213,6 +243,13 @@ anolisa doctor
 anolisa uninstall <component>
 ```
 
+公共安装脚本也可以接收已安装的组件名进行卸载。它会先刷新 stable CLI，再把
+操作交给 `anolisa uninstall`。
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --component cosh-ng --install-mode system --uninstall
+```
+
 当前没有批量卸载命令。先列出安装记录，再逐个卸载目标组件，以便分别确认其
 权限来源和系统软件包移除策略。
 
@@ -229,6 +266,12 @@ anolisa uninstall <component>
 
 ```bash
 anolisa update <component>
+```
+
+同时更新指定组件和脚本安装的 stable CLI。
+
+```bash
+curl -fsSL https://get.agentic-os.sh | bash -s -- --component cosh-ng --install-mode system --upgrade
 ```
 
 更新所有已安装组件。
