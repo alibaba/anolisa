@@ -375,7 +375,7 @@ pub(super) fn stage_assessment(program: &str, tokens: &[String]) -> StageAssessm
     }
     if program == "awk" {
         let high = tokens.iter().any(|token| {
-            token.contains("system(") || token.contains("getline") || token.contains('>')
+            has_awk_system_call(token) || token.contains("getline") || token.contains('>')
         });
         return StageAssessment {
             impact: if high {
@@ -480,6 +480,51 @@ pub(super) fn stage_assessment(program: &str, tokens: &[String]) -> StageAssessm
         side_effects: vec![SideEffectClass::Unknown],
         reasons: vec!["unknown-command"],
     }
+}
+
+fn has_awk_system_call(program: &str) -> bool {
+    let bytes = program.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"system")
+            && is_awk_identifier_boundary(bytes, index.checked_sub(1))
+            && is_awk_identifier_boundary(bytes, index.checked_add(6))
+        {
+            let next = skip_awk_call_separators(bytes, index + 6);
+            if bytes.get(next) == Some(&b'(') {
+                return true;
+            }
+            index = next;
+        } else {
+            index += 1;
+        }
+    }
+
+    false
+}
+
+fn skip_awk_call_separators(bytes: &[u8], mut index: usize) -> usize {
+    loop {
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+
+        let continuation_len = match (bytes.get(index + 1), bytes.get(index + 2)) {
+            (Some(b'\n'), _) if bytes.get(index) == Some(&b'\\') => 2,
+            (Some(b'\r'), Some(b'\n')) if bytes.get(index) == Some(&b'\\') => 3,
+            _ => break,
+        };
+        index += continuation_len;
+    }
+
+    index
+}
+
+fn is_awk_identifier_boundary(bytes: &[u8], index: Option<usize>) -> bool {
+    index
+        .and_then(|index| bytes.get(index))
+        .is_none_or(|byte| !matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_'))
 }
 
 fn assess_container_or_cluster(program: &str, tokens: &[String]) -> StageAssessment {
