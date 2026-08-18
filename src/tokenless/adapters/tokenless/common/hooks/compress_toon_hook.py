@@ -39,7 +39,11 @@ from hook_utils import (
 # -- constants ---------------------------------------------------------------
 
 _AGENT_ID = resolve_agent_id()
-_MIN_RESPONSE_CHARS = 200
+
+# Minimum payload size for TOON encoding. TOON on small JSON saves only a
+# few characters (observed ~0.3% below ~500 chars) while the per-event
+# encode cost stays the same, so smaller responses pass through untouched.
+_MIN_TOON_CHARS = 500
 
 
 # -- main --------------------------------------------------------------------
@@ -84,15 +88,22 @@ def main() -> None:
         if tool_response is None:
             skip()  # Plain text, not JSON
     elif isinstance(tool_response_raw, (dict, list)):
-        tool_response = json.dumps(tool_response_raw, separators=(",", ":"))
+        # ensure_ascii=False: the threshold below counts Unicode
+        # characters (code points), not \uXXXX escape sequences, so
+        # structured payloads are measured the same way as JSON string
+        # inputs and the OpenClaw adapter.
+        tool_response = json.dumps(
+            tool_response_raw, separators=(",", ":"), ensure_ascii=False
+        )
     else:
         skip()
 
     if not tool_response:
         skip()
 
-    # 7. Skip small responses (character count, not byte length)
-    if len(tool_response) < _MIN_RESPONSE_CHARS:
+    # 7. Skip payloads below the TOON minimum threshold (character count,
+    # not byte length): TOON savings on small JSON are near-zero
+    if len(tool_response) < _MIN_TOON_CHARS:
         skip()
 
     # 8. Validate it's JSON

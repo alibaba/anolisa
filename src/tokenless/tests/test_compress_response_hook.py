@@ -635,5 +635,263 @@ class TestNonReplacementAdapters(unittest.TestCase):
                          "Non-replacement adapters should not use updatedToolOutput")
 
 
+def _create_toon_marker_tokenless(tmpdir: str) -> str:
+    """Mock tokenless: compress-response passes through; compress-toon
+    records a call marker next to itself and emits a smaller TOON-like
+    output, so tests can tell whether the TOON step ran at all."""
+    mock_script = os.path.join(tmpdir, "tokenless")
+    script = textwrap.dedent("""\
+        #!/usr/bin/env python3
+        import os, sys
+        data = sys.stdin.read()
+        if sys.argv[1] == "compress-response":
+            print(data)
+        elif sys.argv[1] == "compress-toon":
+            marker = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "toon_called")
+            open(marker, "a").close()
+            print("toon:" + data[: len(data) // 2])
+    """)
+    with open(mock_script, "w") as f:
+        f.write(script)
+    os.chmod(mock_script, os.stat(mock_script).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IEXEC)
+    return mock_script
+
+
+def _json_string_payload(char_target: int) -> str:
+    """A JSON string tool_response of roughly ``char_target`` characters."""
+    inner = "x" * max(char_target - 30, 1)
+    return json.dumps({"stdout": inner, "exit_code": 0})
+
+
+@unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
+class TestToonMinPayloadThreshold(unittest.TestCase):
+    """The TOON step must only run for payloads >= _MIN_TOON_CHARS (500).
+
+    TOON on small JSON saves only a handful of characters (~0.3% below
+    ~500 chars) while the per-event encode cost stays the same, so below
+    the threshold the hook must not invoke ``tokenless compress-toon``
+    at all — no subprocess, no encode, no stats noise.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.isolated_home = tempfile.mkdtemp(prefix="test_hook_home_")
+        self.mock_bin = _create_toon_marker_tokenless(self.tmpdir)
+        self.mock_claude = _create_mock_claude(self.tmpdir)
+        self.toon_marker = os.path.join(self.tmpdir, "toon_called")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        shutil.rmtree(self.isolated_home, ignore_errors=True)
+
+    def test_toon_runs_at_or_above_threshold(self):
+        """A >=500-char payload still reaches compress-toon."""
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": _json_string_payload(600),
+                "session_id": "test-session",
+                "tool_use_id": "toolu_test",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertTrue(os.path.exists(self.toon_marker),
+                        "compress-toon must run for payloads >= threshold")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertEqual(hso.get("hookEventName"), "PostToolUse")
+        self.assertIn("toon:", str(hso.get("updatedToolOutput", "")),
+                      "TOON output should be used for large payloads")
+
+    def test_toon_skipped_below_threshold(self):
+        """A payload under 500 chars never reaches compress-toon."""
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": _json_string_payload(300),
+                "session_id": "test-session",
+                "tool_use_id": "toolu_test",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertFalse(os.path.exists(self.toon_marker),
+                         "compress-toon must not run below the threshold")
+        self.assertEqual(result, {},
+                         "No compression happened, so the hook skips")
+
+    def test_toon_skipped_for_small_structured_non_bmp_payload(self):
+        """Structured non-BMP payloads are gated by Unicode character count.
+
+        {"stdout": "😀" × 40, ...} is ~67 Unicode characters but 507
+        characters once serialized with \\u escapes; counting the escaped
+        form would wrongly run compress-toon.
+        """
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": {"stdout": "😀" * 40, "exit_code": 0},
+                "session_id": "test-session",
+                "tool_use_id": "toolu_test",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertFalse(os.path.exists(self.toon_marker),
+                         "compress-toon must not run for a structured payload "
+                         "whose character count is below the threshold")
+        self.assertEqual(result, {},
+                         "No compression happened, so the hook skips")
+
+    def test_toon_skipped_below_threshold_for_medium_structured_non_bmp(self):
+        """200 emoji ≈ 227 Unicode chars (about 2,427 chars once escaped).
+
+        Passes the 200-character entry gate, so this case isolates the
+        TOON gate: the escaped form is above 500 but the character
+        count is not, so compress-toon must still be skipped.
+        """
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": {"stdout": "😀" * 200, "exit_code": 0},
+                "session_id": "test-session",
+                "tool_use_id": "toolu_test",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertFalse(os.path.exists(self.toon_marker),
+                         "compress-toon must not run below the character "
+                         "threshold even when the escaped form is longer")
+
+    def test_toon_runs_for_large_structured_non_bmp_payload(self):
+        """520 emoji ≈ 547 Unicode chars: above threshold, TOON runs."""
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": {"stdout": "😀" * 520, "exit_code": 0},
+                "session_id": "test-session",
+                "tool_use_id": "toolu_test",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertTrue(os.path.exists(self.toon_marker),
+                        "compress-toon must run at/above the character "
+                        "threshold for structured non-BMP payloads")
+        # TOON text cannot replace a structured response without changing
+        # the host tool schema, and the echo-only compress-response mock
+        # yields no JSON win, so the hook still skips the replacement.
+        self.assertEqual(result, {})
+
+    def test_toon_skipped_for_small_string_wrapped_non_bmp_payload(self):
+        """String-wrapped JSON takes the unwrap_string_json path.
+
+        A wrapped {"stdout": "😀" × 40, ...} payload unwraps to ~67
+        Unicode characters (wrapped input ~73), but ASCII-escaping the
+        inner object inflates it to 507 characters; the gate must count
+        the unwrapped code points and never run compress-toon.
+        """
+        inner = json.dumps({"stdout": "😀" * 40, "exit_code": 0},
+                           ensure_ascii=False)
+        wrapped = json.dumps(inner, ensure_ascii=False)
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": wrapped,
+                "session_id": "test-session",
+                "tool_use_id": "toolu_test",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertFalse(os.path.exists(self.toon_marker),
+                         "compress-toon must not run for a string-wrapped "
+                         "payload whose character count is below the threshold")
+        self.assertEqual(result, {},
+                         "No compression happened, so the hook skips")
+
+    def test_toon_skipped_below_threshold_for_medium_string_wrapped_non_bmp(self):
+        """Wrapped 200-emoji payload unwraps to ~227 Unicode chars.
+
+        Passes the 200-character entry gate, so this case isolates the
+        TOON gate: the ASCII-escaped form is ~2,427 characters but the
+        unwrapped character count is below 500, so compress-toon must
+        still be skipped.
+        """
+        inner = json.dumps({"stdout": "😀" * 200, "exit_code": 0},
+                           ensure_ascii=False)
+        wrapped = json.dumps(inner, ensure_ascii=False)
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": wrapped,
+                "session_id": "test-session",
+                "tool_use_id": "toolu_test",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertFalse(os.path.exists(self.toon_marker),
+                         "compress-toon must not run below the character "
+                         "threshold even when the escaped form is longer")
+
+    def test_toon_runs_for_large_string_wrapped_non_bmp_payload(self):
+        """Wrapped payload unwrapping to ~547 Unicode chars: TOON runs."""
+        inner = json.dumps({"stdout": "😀" * 520, "exit_code": 0},
+                           ensure_ascii=False)
+        wrapped = json.dumps(inner, ensure_ascii=False)
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": wrapped,
+                "session_id": "test-session",
+                "tool_use_id": "toolu_test",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertTrue(os.path.exists(self.toon_marker),
+                        "compress-toon must run at/above the character "
+                        "threshold for string-wrapped non-BMP payloads")
+        hso = result.get("hookSpecificOutput", {})
+        self.assertEqual(hso.get("hookEventName"), "PostToolUse")
+        self.assertIn("toon:", str(hso.get("updatedToolOutput", "")),
+                      "TOON output should be used for large payloads")
+
+
 if __name__ == "__main__":
     unittest.main()

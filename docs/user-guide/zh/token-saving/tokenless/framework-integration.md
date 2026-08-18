@@ -39,7 +39,7 @@ OpenCode 当前使用下文说明的随附生命周期脚本，本版本尚未�
 | Shell/exec | 字符串 65,536 字符、数组保留 128 项、深度 8 |
 | 其他结构化工具 | 字符串 1,048,576 字符、数组保留 65,536 项、深度 32 |
 
-共享响应 Hook、OpenClaw 和 Hermes 会跳过短于 200 字符的输入。Codex 会跳过短于 500 字符的输入；只有输入至少为 4,000 字符时才附加压缩内容，否则只追加诊断或摘要。共享路径还会跳过带 YAML frontmatter、形似 Skill 的文本。
+共享响应 Hook、OpenClaw 和 Hermes 会跳过短于 200 字符的输入。Codex 会跳过短于 500 字符的输入；只有输入至少为 4,000 字符时才附加压缩内容，否则只追加诊断或摘要。共享路径还会跳过带 YAML frontmatter、形似 Skill 的文本。TOON 编码仅对至少 500 字符的负载执行（当前实现的阈值，后续可能调整）；更小的负载保留压缩后的形式，因为 TOON 对小型 JSON 的节省可以忽略不计。该阈值适用于所有支持 TOON 的管线：共享响应 Hook、独立 TOON Hook、Codex、OpenClaw 和 Hermes。
 
 Claude Code 需要 2.1.121 或更高版本才能使用 `updatedToolOutput`。版本更旧或无法确定时，响应压缩会关闭，以免重复注入原文。结构化工具输出会保留宿主 Schema，不会转换成文本 TOON；以字符串承载的 JSON 在 TOON 更小时可以使用 TOON。
 
