@@ -42,8 +42,28 @@ description: 只读查询 agent-sec-cli 已落盘的历史安全事件记录，�
 | `code_scan` | `details.result.verdict` | `pass` / `warn` / `deny` / `error` | `pass` |
 | `prompt_scan` | `details.result.verdict` | `pass` / `warn` / `deny` / `error` | `pass` |
 | `pii_scan` | `details.result.verdict` | `pass` / `warn` / `deny` / `error` | `pass` |
-| `skill_ledger` | `details.result.verdict` | `pass` / `warn` / `deny` | `pass` |
+| `skill_ledger` | `details.result.verdict` | `pass` / `none` / `warn` / `unmanaged` / `drifted` / `deny` / `tampered` / `error` | `pass` |
 | 其他 `event_type` | — | — | **不属于扫描事件，聚合命令会在管道入口过滤掉** |
+
+### 取值语义
+
+向用户描述待核项时按下表解释取值，不要照抄 token，也不要自行推断含义。
+
+| verdict | 语义 | 适用 |
+|---|---|---|
+| `pass` | 已扫描，未发现问题 | 全部 |
+| `warn` | 发现低风险问题 | 全部 |
+| `deny` | 发现高风险问题 | 全部 |
+| `error` | **扫描器执行失败，本次未完成扫描** | 全部 |
+| `none` | 无 ledger 制品，或已核验的扫描状态为未扫描 | `skill_ledger` |
+| `unmanaged` | skill 目录不在 ledger 管理范围内 | `skill_ledger` |
+| `drifted` | 文件在上次认证后被改动 | `skill_ledger` |
+| `tampered` | ledger 元数据缺失或签名核验失败 | `skill_ledger` |
+| `MISSING` | 判定字段缺失，本次操作未产生判定 | 全部 |
+
+`skill_ledger` 出现 `MISSING` 通常是 `status`、`audit`、`list-scanners` 这类非判定命令留下的审计记录（查 `details.result.command` 可确认是哪个命令）。这类条目仍会出现在聚合输出的待核项里，但描述时应说明为“非判定操作”，不得断言为风险；`code_scan`、`prompt_scan`、`pii_scan` 出现 `MISSING` 才属异常，必须作为真实待核项呈现。
+
+`error`、`none`、`unmanaged` 表示**未取得有效判定**，既不能表述为“安全”“无风险”，也不能表述为“检测到高危”。正确表述是本次未完成扫描或该目标不在扫描范围内。
 
 ### 分类规则：用允许列表，不用拒绝列表
 
@@ -52,8 +72,8 @@ description: 只读查询 agent-sec-cli 已落盘的历史安全事件记录，�
 允许列表同时作用于两个维度：`event_type` 必须在上表四种中（其余一律过滤），**并且**判定字段显式等于对应的无风险取值。两个条件同时成立才可计入无风险。
 
 - 判定字段缺失、不是字符串、`details` 或 `details.result` 不是对象时，记为 `MISSING` 并列为待核项，不得当作 `pass`。
-- 已知类型但判定值不等于无风险取值时，一律列为待核项，包括上表未列出的新增取值（如 `error`）。
-- 不得因为某个取值“看起来不严重”而省略。`warn` 必须出现在待核项清单里。
+- 已知类型但判定值不等于无风险取值时，一律列为待核项，包括上表未列出的新增取值。
+- 不得因为某个取值“看起来不严重”而省略。`warn` 与 `none` 必须出现在待核项清单里。
 
 ### 聚合命令
 

@@ -500,6 +500,54 @@ uv run --project agent-sec-cli pytest tests/unit-test/hermes-plugin/ -v
 - Within an allowlisted type only an explicit `pass` counts as risk-free;
   new/other verdict values (including `error`), missing fields, and non-string
   verdicts must surface as pending (`MISSING`) items rather than silently pass.
+  This is what keeps the skill correct despite per-type enum differences, so do
+  not rewrite the aggregation into a per-type reject list.
+- The verdict enums are not uniform across scan types, and they do not all come
+  from a `Verdict` class. `code_scan`, `prompt_scan`, and `pii_scan` use their
+  own `Verdict` enums (`pass`/`warn`/`deny`/`error`), but `skill_ledger` events
+  carry a projected verdict gated by `_VERDICT_SEVERITY` in
+  `security_middleware/backends/skill_ledger.py`, which is wider: `pass`,
+  `none`, `warn`, `unmanaged`, `drifted`, `deny`, `tampered`, `error`. Read that
+  dict — not `skill_ledger/models/scan.py`'s `_SEVERITY_ORDER`, which is a
+  different four-value ordering used for aggregating a skill's own scan status
+  and ranks `none` *below* `pass` — when updating the skill's verdict table.
+- The "取值语义" table exists so a report explains a verdict instead of echoing
+  the raw token. Two entries are counter-intuitive and must keep their explicit
+  wording: `error` means the scanner itself failed (`prompt_scanner/result.py`:
+  "Scanner execution failed"), not a high-risk finding; `none` means unscanned
+  (`status.py` maps an all-`none` ledger to health `unscanned`). Reporting either
+  one as "safe" or as "high risk" is a factual error in both directions.
+  `drifted` and `tampered` sit on different axes: `drifted` is a `fileHashes`
+  mismatch against the signed snapshot (`skill_ledger/core/checker.py`), while
+  `tampered` means the ledger metadata or signature itself failed authentication.
+- Semantic wording is sourced, not invented. Take per-status phrasing from
+  `skill_ledger/cli.py`'s integrity-status help text (note it omits `unmanaged`
+  and `error`). The skill deliberately carries **no severity ranking**: it was
+  tried and removed as needless complexity, since the per-value semantics plus
+  the "no valid verdict" caveat already tell the Agent what to say. If a ranking
+  is ever reintroduced, source it from `_VERDICT_SEVERITY` in
+  `security_middleware/backends/skill_ledger.py` — the same dict that gates event
+  verdicts, and the only ordering covering all eight tokens. Never source it from
+  `skill_ledger/core/status.py`'s `_CRITICAL_STATUSES` / `_ATTENTION_STATUSES`:
+  those are `health` values of the separate `skill-ledger status` command, never
+  appear in `events` output, and omit `unmanaged`. An earlier revision imported
+  that critical/attention vocabulary and had to be reverted.
+- `skill_ledger` is the only scan type whose events can legitimately carry no
+  verdict. Eleven `skill-ledger` subcommands route through `invoke()` and emit
+  events, but `_project_event_verdict` only projects six (`init`, `scan`,
+  `check`, `show`, `certify`, `decide`); the rest (`status`, `audit`,
+  `list-scanners`, `export`, `init-keys`) produce an audit record with no
+  verdict, so the aggregation reports them as `MISSING`. Verified on a live host:
+  of 1476 events, `pii_scan`/`code_scan`/`prompt_scan` were 100% verdict-bearing
+  while three of four `skill_ledger` events lacked one.
+- That `MISSING` noise is handled **in the "取值语义" table, not by filtering**.
+  A judgment-command allowlist in the pipeline was considered and rejected as too
+  complex for the one-line command constraint. Accepted residual cost: the
+  `risk_items` headline count still includes non-judgment `skill_ledger` records,
+  so the skill instructs the Agent to report them as "非判定操作" and to treat
+  `MISSING` as a real pending item only for the other three scan types. Do not
+  "fix" this by making `MISSING` risk-free across the board — that would blind the
+  three scanners where a missing verdict is genuinely anomalous.
 - The aggregation output is counts + RISK lines only; `pass`/`allow` events
   never get a per-event line and their `details` are not fetched. This is a
   context-cost invariant, not cosmetics: a security report must not flood the
