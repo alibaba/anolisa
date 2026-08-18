@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.17.1] — 2026-08-18
+
+### Fixed
+- Reduce interactive echo latency from p50 20 ms to sub-millisecond and eliminate high-frequency idle CPU polling in long-running sessions by making the raw relay and SIGINT paths event-driven (#2622)
+- Keep allowed commands executing when best-effort audit storage writes fail (#2631)
+- Allow approved pipelines whose single-quoted arguments contain quoted newlines, such as multi-line jq or awk scripts (#2638)
+
 ## [0.17.0] — 2026-08-17
 
 ### Added
