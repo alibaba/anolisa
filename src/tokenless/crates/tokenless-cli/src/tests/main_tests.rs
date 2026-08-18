@@ -63,6 +63,70 @@ impl TempDbGuard {
     }
 }
 
+struct PersistConfigGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    _dir: tempfile::TempDir,
+    path: PathBuf,
+    prev_stats: Option<std::ffi::OsString>,
+    prev_sls: Option<std::ffi::OsString>,
+    prev_compression: Option<std::ffi::OsString>,
+}
+
+impl PersistConfigGuard {
+    fn with_file_and_env(
+        file_json: &str,
+        stats_env: &str,
+        sls_env: &str,
+        compression_env: &str,
+    ) -> Self {
+        let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, file_json).unwrap();
+        TokenlessConfig::override_config_path_for_tests(Some(path.clone()));
+        let prev_stats = std::env::var_os("TOKENLESS_STATS_ENABLED");
+        let prev_sls = std::env::var_os("TOKENLESS_SLS_ENABLED");
+        let prev_compression = std::env::var_os("TOKENLESS_COMPRESSION_ENABLED");
+        unsafe {
+            std::env::set_var("TOKENLESS_STATS_ENABLED", stats_env);
+            std::env::set_var("TOKENLESS_SLS_ENABLED", sls_env);
+            std::env::set_var("TOKENLESS_COMPRESSION_ENABLED", compression_env);
+        }
+        Self {
+            _lock: lock,
+            _dir: dir,
+            path,
+            prev_stats,
+            prev_sls,
+            prev_compression,
+        }
+    }
+
+    fn read_persisted(&self) -> TokenlessConfig {
+        serde_json::from_str(&std::fs::read_to_string(&self.path).unwrap()).unwrap()
+    }
+}
+
+impl Drop for PersistConfigGuard {
+    fn drop(&mut self) {
+        TokenlessConfig::override_config_path_for_tests(None);
+        unsafe {
+            match &self.prev_stats {
+                Some(v) => std::env::set_var("TOKENLESS_STATS_ENABLED", v),
+                None => std::env::remove_var("TOKENLESS_STATS_ENABLED"),
+            }
+            match &self.prev_sls {
+                Some(v) => std::env::set_var("TOKENLESS_SLS_ENABLED", v),
+                None => std::env::remove_var("TOKENLESS_SLS_ENABLED"),
+            }
+            match &self.prev_compression {
+                Some(v) => std::env::set_var("TOKENLESS_COMPRESSION_ENABLED", v),
+                None => std::env::remove_var("TOKENLESS_COMPRESSION_ENABLED"),
+            }
+        }
+    }
+}
+
 impl Drop for TempDbGuard {
     fn drop(&mut self) {
         unsafe {
@@ -1096,6 +1160,38 @@ fn stats_persist_snapshot_disable_keeps_file_compression_and_sls() {
         compression_enabled: false,
     };
     let persisted = stats_persist_snapshot(file, false);
+    assert!(!persisted.stats_enabled);
+    assert!(!persisted.sls_enabled);
+    assert!(!persisted.compression_enabled);
+}
+
+#[test]
+fn run_command_stats_enable_does_not_persist_env_overrides() {
+    // Drive the production Enable arm (load_from_file + save). Replacing
+    // load_from_file() with load() would write the session env values.
+    let guard = PersistConfigGuard::with_file_and_env(
+        "{\"stats_enabled\":false,\"sls_enabled\":true,\"compression_enabled\":true}",
+        "0",
+        "0",
+        "0",
+    );
+    run_command(Commands::Stats(StatsCommands::Enable)).unwrap();
+    let persisted = guard.read_persisted();
+    assert!(persisted.stats_enabled);
+    assert!(persisted.sls_enabled);
+    assert!(persisted.compression_enabled);
+}
+
+#[test]
+fn run_command_stats_disable_does_not_persist_env_overrides() {
+    let guard = PersistConfigGuard::with_file_and_env(
+        "{\"stats_enabled\":true,\"sls_enabled\":false,\"compression_enabled\":false}",
+        "1",
+        "1",
+        "1",
+    );
+    run_command(Commands::Stats(StatsCommands::Disable)).unwrap();
+    let persisted = guard.read_persisted();
     assert!(!persisted.stats_enabled);
     assert!(!persisted.sls_enabled);
     assert!(!persisted.compression_enabled);

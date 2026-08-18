@@ -337,6 +337,61 @@ fn test_serde_round_trip() {
     assert!(deserialized.compression_enabled);
 }
 
+static CONFIG_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct ConfigPathEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    prev_stats: Option<std::ffi::OsString>,
+    prev_sls: Option<std::ffi::OsString>,
+    prev_compression: Option<std::ffi::OsString>,
+}
+
+impl ConfigPathEnvGuard {
+    fn new(
+        path: std::path::PathBuf,
+        stats_env: &str,
+        sls_env: &str,
+        compression_env: &str,
+    ) -> Self {
+        let lock = CONFIG_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        TokenlessConfig::override_config_path_for_tests(Some(path));
+        let prev_stats = std::env::var_os("TOKENLESS_STATS_ENABLED");
+        let prev_sls = std::env::var_os("TOKENLESS_SLS_ENABLED");
+        let prev_compression = std::env::var_os("TOKENLESS_COMPRESSION_ENABLED");
+        unsafe {
+            std::env::set_var("TOKENLESS_STATS_ENABLED", stats_env);
+            std::env::set_var("TOKENLESS_SLS_ENABLED", sls_env);
+            std::env::set_var("TOKENLESS_COMPRESSION_ENABLED", compression_env);
+        }
+        Self {
+            _lock: lock,
+            prev_stats,
+            prev_sls,
+            prev_compression,
+        }
+    }
+}
+
+impl Drop for ConfigPathEnvGuard {
+    fn drop(&mut self) {
+        TokenlessConfig::override_config_path_for_tests(None);
+        unsafe {
+            match &self.prev_stats {
+                Some(v) => std::env::set_var("TOKENLESS_STATS_ENABLED", v),
+                None => std::env::remove_var("TOKENLESS_STATS_ENABLED"),
+            }
+            match &self.prev_sls {
+                Some(v) => std::env::set_var("TOKENLESS_SLS_ENABLED", v),
+                None => std::env::remove_var("TOKENLESS_SLS_ENABLED"),
+            }
+            match &self.prev_compression {
+                Some(v) => std::env::set_var("TOKENLESS_COMPRESSION_ENABLED", v),
+                None => std::env::remove_var("TOKENLESS_COMPRESSION_ENABLED"),
+            }
+        }
+    }
+}
+
 #[test]
 fn load_from_file_ignores_would_be_env_overrides() {
     // `stats enable`/`disable` persist from this snapshot. A session
@@ -344,29 +399,25 @@ fn load_from_file_ignores_would_be_env_overrides() {
     // compression toggle when the user only asked to flip stats recording.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.json");
-    let _ = std::fs::write(
+    std::fs::write(
         &path,
         "{\"stats_enabled\":false,\"sls_enabled\":true,\"compression_enabled\":true}",
-    );
+    )
+    .unwrap();
+    let _guard = ConfigPathEnvGuard::new(path, "1", "0", "0");
 
-    let runtime = TokenlessConfig::load_with_envs_and_path(
-        Some("1"),
-        Some("0"),
-        Some("0"),
-        Some(&path),
-    );
+    let runtime = TokenlessConfig::load();
     assert!(runtime.is_stats_enabled());
     assert!(!runtime.is_sls_enabled());
     assert!(!runtime.is_compression_enabled());
 
-    let mut persist = TokenlessConfig::load_with_envs_and_path(None, None, None, Some(&path));
-    persist.stats_enabled = true;
-    assert!(persist.is_stats_enabled());
+    let persist = TokenlessConfig::load_from_file();
+    assert!(!persist.is_stats_enabled());
     assert!(persist.is_sls_enabled());
     assert!(persist.is_compression_enabled());
 
     let json = serde_json::to_value(&persist).unwrap();
-    assert_eq!(json["stats_enabled"], true);
+    assert_eq!(json["stats_enabled"], false);
     assert_eq!(json["sls_enabled"], true);
     assert_eq!(json["compression_enabled"], true);
 }
@@ -375,24 +426,20 @@ fn load_from_file_ignores_would_be_env_overrides() {
 fn stats_disable_persist_keeps_file_compression_and_sls() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.json");
-    let _ = std::fs::write(
+    std::fs::write(
         &path,
         "{\"stats_enabled\":true,\"sls_enabled\":false,\"compression_enabled\":false}",
-    );
+    )
+    .unwrap();
+    let _guard = ConfigPathEnvGuard::new(path, "0", "1", "1");
 
-    let runtime = TokenlessConfig::load_with_envs_and_path(
-        Some("0"),
-        Some("1"),
-        Some("1"),
-        Some(&path),
-    );
+    let runtime = TokenlessConfig::load();
     assert!(!runtime.is_stats_enabled());
     assert!(runtime.is_sls_enabled());
     assert!(runtime.is_compression_enabled());
 
-    let mut persist = TokenlessConfig::load_with_envs_and_path(None, None, None, Some(&path));
-    persist.stats_enabled = false;
-    assert!(!persist.is_stats_enabled());
+    let persist = TokenlessConfig::load_from_file();
+    assert!(persist.is_stats_enabled());
     assert!(!persist.is_sls_enabled());
     assert!(!persist.is_compression_enabled());
 }

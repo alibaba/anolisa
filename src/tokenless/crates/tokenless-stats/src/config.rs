@@ -7,7 +7,16 @@
 //! those session overrides are not written back.
 
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::path::PathBuf;
+
+thread_local! {
+    /// Test-only redirect for [`TokenlessConfig::config_path`].
+    ///
+    /// This is a thread-local API call, not an environment variable, so it
+    /// does not weaken the passwd-rooted `$HOME` refusal below.
+    static CONFIG_PATH_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
 
 /// Global tokenless configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +60,9 @@ fn parse_env_bool(val: &str) -> bool {
 
 impl TokenlessConfig {
     fn config_path() -> PathBuf {
+        if let Some(path) = CONFIG_PATH_OVERRIDE.with(|slot| slot.borrow().clone()) {
+            return path;
+        }
         // Resolve home via the shared passwd-rooted helper so an attacker
         // cannot redirect the config path by setting $HOME before invoking
         // any tokenless binary. When no trusted home is available, return
@@ -62,6 +74,17 @@ impl TokenlessConfig {
             return PathBuf::from("/dev/null/.tokenless/config.json");
         }
         PathBuf::from(home).join(".tokenless/config.json")
+    }
+
+    /// Redirect [`Self::config_path`] for the current thread.
+    ///
+    /// Production CLI never calls this. Tests use it so [`Self::load`],
+    /// [`Self::load_from_file`], and [`Self::save`] can run against an
+    /// isolated file without writing the passwd-backed
+    /// `~/.tokenless/config.json`.
+    #[doc(hidden)]
+    pub fn override_config_path_for_tests(path: Option<PathBuf>) {
+        CONFIG_PATH_OVERRIDE.with(|slot| *slot.borrow_mut() = path);
     }
 
     /// Whether a config file exists on disk.
