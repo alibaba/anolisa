@@ -76,7 +76,21 @@ _cosh_prompt_command() {
   _cosh_prompt_command_impl "$_cosh_status"
   local _cosh_ret=$?
   if (( _cosh_had_errexit )); then
-    set -e
+    # Deferred restore, same mechanism as the veto path: a bare `set -e`
+    # here runs after the impl re-armed the trap and released the
+    # IN_PROMPT guard, so it dispatches as a DEBUG frame whose bare text
+    # bidirectionally matches a just-executed `set -e*` history entry
+    # (probed: duplicate preexec emit + native cnf leak on the next
+    # unknown command). The flag is consumed at the next frame entry
+    # inside the trap handler, where DEBUG does not recurse. If the
+    # marker trap is idle (user cleared it), no next frame would consume
+    # the flag, so restore in place - with no trap armed the bare
+    # statement cannot dispatch.
+    if [[ -n "${_COSH_ACTIVE_DEBUG_TRAP:-}" ]]; then
+      _COSH_RESTORE_ERREXIT=1
+    else
+      set -e
+    fi
     # A non-zero passthrough would fail the PROMPT_COMMAND list itself and
     # errexit kills the session (probed on bash 3.2 and 5.2). Returning 0
     # is safe: bash restores the user's $? at the prompt boundary on its
