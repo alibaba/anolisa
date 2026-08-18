@@ -132,6 +132,25 @@ for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
     done
 done
 
+# Platform packages must not declare bin entries: they would collide with
+# the root package's tokenless/rtk/toon bins, and npm resolves such
+# collisions by removing every conflicting .bin link, leaving installs
+# without a tokenless executable. The root package's postinstall links its
+# bins to these platform binaries instead (esbuild's platform packages use
+# the same model).
+for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+    node - "$ROOT/npm/dist/tokenless-$target/package.json" <<'JS'
+const fs = require('node:fs');
+const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+if (manifest.bin !== undefined) {
+  throw new Error(
+    `${manifest.name} must not declare bin entries; ` +
+    'the root package owns the tokenless/rtk/toon bin names',
+  );
+}
+JS
+done
+
 node - "$ROOT/npm/dist/tokenless/package.json" <<'JS'
 const fs = require('node:fs');
 const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));

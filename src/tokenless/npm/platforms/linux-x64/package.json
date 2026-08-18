@@ -12,11 +12,6 @@
   "os": ["linux"],
   "cpu": ["x64"],
   "libc": ["glibc"],
-  "bin": {
-    "tokenless": "bin/tokenless",
-    "rtk": "bin/rtk",
-    "toon": "bin/toon"
-  },
   "files": [
     "bin/"
   ],

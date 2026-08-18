@@ -307,13 +307,16 @@ function packagePlatform(target, binaryPaths) {
     chmodSync(destination, 0o755);
   }
 
-  // Build bin map for package.json
-  const binMap = {};
-  for (const bin of Object.keys(binaryPaths)) {
-    binMap[bin] = `bin/${bin}`;
-  }
-
   // Write package.json
+  //
+  // Deliberately declare NO `bin` entries here: the platform packages would
+  // otherwise claim the same `tokenless`/`rtk`/`toon` bin names as the root
+  // package. When multiple packages in a tree claim the same bin, npm's
+  // reify removes every conflicting `.bin` link instead of picking a
+  // winner, leaving installs without a `tokenless` executable. esbuild ships
+  // its platform packages the same way (binaries in bin/, no bin field); the
+  // root package owns the bin entries and its postinstall links them to
+  // these native binaries.
   const archLabel = target.npm_cpu === 'x64' ? 'x86_64' : 'aarch64';
   const pkgJson = {
     name: pkgName,
@@ -330,7 +333,6 @@ function packagePlatform(target, binaryPaths) {
     // Binaries target *-unknown-linux-gnu — keep musl (Alpine) installs from
     // matching a package whose ELF they cannot run.
     ...(target.npm_os === 'linux' ? { libc: ['glibc'] } : {}),
-    bin: binMap,
     files: ['bin/'],
     preferUnplugged: true,
     publishConfig: PUBLISH_CONFIG,
