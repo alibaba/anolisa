@@ -9,6 +9,31 @@
 
 ## [未发布]
 
+## [0.3.3] - 2026-08-18
+
+### 新增
+
+- Telemetry instance snapshot 现会将检测到的 Docker、Podman、containerd、
+  Kubernetes cgroup 或 LXC runtime 写入 `instance.container`，bare-metal host
+  则省略该字段。这为下游 deployment statistics 与 troubleshooting 提供
+  container-aware signal，同时不会采集 container 或 pod identity
+  ([#2642](https://github.com/alibaba/anolisa/pull/2642))。
+
+### 变更
+
+- `anolisa status <component>` 现会依据 component index 验证新 target、解析
+  package alias，并为不支持的名称提示 `anolisa list`，同时将 telemetry service
+  target 引导至 `anolisa telemetry status`。Repository metadata 不可用时，仍可
+  检查已精确记录的 installed identity
+  ([#2626](https://github.com/alibaba/anolisa/pull/2626))。
+
+### 修复
+
+- Raw adapter bundle 安装现会保留 archive 中每个 file 的 mode，并记录 effective
+  mode 供 integrity check 使用。Framework hook 与 script 不再统一按 data file
+  安装，可继续保留 executable bit
+  ([#2619](https://github.com/alibaba/anolisa/pull/2619))。
+
 ## [0.3.2] - 2026-08-17
 
 ### 新增
