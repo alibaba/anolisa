@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   fetchAgentHealth,
   deleteAgentHealth,
@@ -44,6 +44,71 @@ const STATUS_TOOLTIP_KEY: Record<string, MessageKey> = {
   no_port: 'ah.tooltip.noPort',
   offline: 'ah.tooltip.offline',
 };
+
+type AgentStatus = AgentHealthStatus['status'];
+
+const AGGREGATE_SEVERITY_RANK: Record<AgentStatus, number> = {
+  unknown: 0,
+  no_port: 1,
+  healthy: 2,
+  offline: 3,
+  unhealthy: 4,
+  hung: 5,
+};
+
+const CARD_STATUS_ORDER: Record<AgentStatus, number> = {
+  hung: 0,
+  unhealthy: 1,
+  healthy: 2,
+  no_port: 3,
+  unknown: 4,
+  offline: 5,
+};
+
+interface AgentGroup {
+  agentName: string;
+  agents: AgentHealthStatus[];
+  status: AgentStatus;
+}
+
+function getAggregateStatus(group: AgentHealthStatus[]): AgentStatus {
+  let worst: AgentStatus = 'unknown';
+
+  for (const agent of group) {
+    if (AGGREGATE_SEVERITY_RANK[agent.status] > AGGREGATE_SEVERITY_RANK[worst]) {
+      worst = agent.status;
+    }
+  }
+
+  return worst;
+}
+
+function groupAgentsByName(agents: AgentHealthStatus[]): AgentGroup[] {
+  const groups = new Map<string, AgentHealthStatus[]>();
+
+  for (const agent of agents) {
+    const group = groups.get(agent.agent_name);
+    if (group) {
+      group.push(agent);
+    } else {
+      groups.set(agent.agent_name, [agent]);
+    }
+  }
+
+  return Array.from(groups, ([agentName, group]) => ({
+    agentName,
+    agents: group,
+    status: getAggregateStatus(group),
+  }));
+}
+
+function isPromotedGatewayRunning(agent: AgentHealthStatus): boolean {
+  return (
+    agent.role === 'gateway' &&
+    agent.status === 'no_port' &&
+    (agent.ports?.length ?? 0) === 0
+  );
+}
 
 /** Format relative time */
 function relativeTime(timestampMs: number, t: (key: MessageKey, params?: Record<string, string | number>) => string): string {
@@ -138,7 +203,16 @@ const AgentCard: React.FC<{
   onRestart: (pid: number) => void;
   restarting: boolean;
   latency?: LatencyMetricsSummary;
-}> = ({ agent, related, onDelete, onRestart, restarting, latency }) => {
+  showProcessDetails?: boolean;
+}> = ({
+  agent,
+  related,
+  onDelete,
+  onRestart,
+  restarting,
+  latency,
+  showProcessDetails = false,
+}) => {
   const { t } = useI18n();
   const [showRelated, setShowRelated] = useState(false);
 
@@ -147,11 +221,10 @@ const AgentCard: React.FC<{
   // these should not carry a "Gateway" label since they have no gateway concept.
   const hasPorts = (agent.ports?.length ?? 0) > 0;
   const isRealGateway = agent.role === 'gateway' && hasPorts;
-  const isPromotedGateway = agent.role === 'gateway' && !hasPorts;
 
   // Promoted Gateway + status=no_port uses the green "Running" label to avoid
   // the gray "client process" semantics conflicting with main-card identity.
-  const useRunningStatus = isPromotedGateway && agent.status === 'no_port';
+  const useRunningStatus = isPromotedGatewayRunning(agent);
   const dotColor = useRunningStatus
     ? 'bg-green-500'
     : STATUS_COLORS[agent.status] || 'bg-gray-400';
@@ -229,8 +302,25 @@ const AgentCard: React.FC<{
       <div className="mt-2 text-xs text-gray-500 space-y-0.5">
         <div className="flex items-center gap-3">
           <span>PID {agent.pid}</span>
-          {agent.latency_ms !== null && agent.status === 'healthy' && (
-            <span className="text-green-600">{agent.latency_ms}ms</span>
+          {showProcessDetails && (
+            <span className="text-gray-400">
+              {agent.ports?.length ? agent.ports.map(port => `:${port}`).join(', ') : '—'}
+            </span>
+          )}
+          {showProcessDetails ? (
+            <span
+              className={
+                agent.latency_ms !== null && agent.status === 'healthy'
+                  ? 'text-green-600'
+                  : 'text-gray-400'
+              }
+            >
+              {agent.latency_ms !== null ? `${agent.latency_ms}ms` : '—'}
+            </span>
+          ) : (
+            agent.latency_ms !== null && agent.status === 'healthy' && (
+              <span className="text-green-600">{agent.latency_ms}ms</span>
+            )
           )}
           <span className="text-gray-400">{relativeTime(agent.last_check_time, t)}</span>
         </div>
@@ -296,6 +386,103 @@ const AgentCard: React.FC<{
           )}
         </div>
       )}
+    </div>
+  );
+};
+
+const AgentGroupCard: React.FC<{
+  group: AgentGroup;
+  clientAgents: AgentHealthStatus[];
+  onDelete: (pid: number) => void;
+  onRestart: (pid: number) => void;
+  restartingPids: Set<number>;
+  latency?: LatencyMetricsSummary;
+}> = ({ group, clientAgents, onDelete, onRestart, restartingPids, latency }) => {
+  const { t } = useI18n();
+  const isHung = group.status === 'hung';
+  const isUnhealthy = group.status === 'unhealthy';
+  const isOffline = group.status === 'offline';
+  const hasAbnormalProcess = isHung || isUnhealthy;
+  const [showProcesses, setShowProcesses] = useState(hasAbnormalProcess);
+
+  useEffect(() => {
+    if (hasAbnormalProcess) {
+      setShowProcesses(true);
+    }
+  }, [hasAbnormalProcess]);
+
+  const useRunningStatus = group.agents.every(isPromotedGatewayRunning);
+  const dotColor = useRunningStatus
+    ? 'bg-green-500'
+    : STATUS_COLORS[group.status] || 'bg-gray-400';
+  const labelKey = STATUS_LABEL_KEY[group.status];
+  const label = useRunningStatus
+    ? t('ah.running')
+    : labelKey ? t(labelKey) : group.status;
+  const tooltipKey = STATUS_TOOLTIP_KEY[group.status];
+  const tooltip = useRunningStatus
+    ? t('ah.tooltip.running')
+    : tooltipKey ? t(tooltipKey) : '';
+  const borderClass = isHung
+    ? 'border-orange-300 bg-orange-50'
+    : isUnhealthy
+    ? 'border-red-300 bg-red-50'
+    : 'border-gray-200 bg-white';
+  const nameColor = isOffline
+    ? 'text-gray-500'
+    : isHung
+    ? 'text-orange-700'
+    : isUnhealthy
+    ? 'text-red-700'
+    : 'text-gray-900';
+  const labelColor = isOffline
+    ? 'text-gray-400'
+    : isHung
+    ? 'text-orange-500 font-semibold'
+    : isUnhealthy
+    ? 'text-red-500 font-semibold'
+    : 'text-gray-400';
+
+  return (
+    <div className={`rounded-lg border shadow-sm p-4 ${borderClass}`} title={tooltip}>
+      <div className="flex items-center gap-2">
+        <span
+          className={`inline-block w-2.5 h-2.5 rounded-full flex-shrink-0 ${dotColor}`}
+        />
+        <span className={`font-medium text-sm truncate ${nameColor}`}>{group.agentName}</span>
+        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600 font-semibold">
+          ×{group.agents.length}
+        </span>
+        <span className={`ml-auto text-xs flex-shrink-0 ${labelColor}`}>{label}</span>
+      </div>
+      {tooltip && (
+        <div className="mt-1.5 text-[11px] leading-snug text-gray-500 italic">ℹ️ {tooltip}</div>
+      )}
+      {latency && <LatencyMetricsRow metrics={latency} />}
+      <div className="mt-2 pt-2 border-t border-gray-100">
+        <button
+          onClick={() => setShowProcesses(open => !open)}
+          className="text-[11px] text-gray-500 hover:text-gray-700 flex items-center gap-1"
+        >
+          <span className={`transition-transform ${showProcesses ? 'rotate-90' : ''}`}>▶</span>
+          {t('ah.processList', { n: group.agents.length })}
+        </button>
+        {showProcesses && (
+          <div className="mt-2 space-y-2">
+            {group.agents.map(agent => (
+              <AgentCard
+                key={agent.pid}
+                agent={agent}
+                related={clientAgents.filter(client => client.parent_pid === agent.pid)}
+                onDelete={onDelete}
+                onRestart={onRestart}
+                restarting={restartingPids.has(agent.pid)}
+                showProcessDetails
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 };
@@ -395,18 +582,13 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
     void loadLatency();
   }, [loadLatency]);
 
-  // Sort: hung/unhealthy first (real problems), healthy in the middle, offline last (less prominent)
-  const sorted = [...agents].sort((a, b) => {
-    const order: Record<string, number> = {
-      hung: 0,
-      unhealthy: 1,
-      healthy: 2,
-      no_port: 3,
-      unknown: 4,
-      offline: 5,
-    };
-    return (order[a.status] ?? 6) - (order[b.status] ?? 6);
-  });
+  const groupedAgents = useMemo(
+    () =>
+      groupAgentsByName(agents).sort(
+        (a, b) => CARD_STATUS_ORDER[a.status] - CARD_STATUS_ORDER[b.status],
+    ),
+    [agents],
+  );
 
   const healthyCount = agents.filter(a => a.status === 'healthy').length;
   const offlineCount = agents.filter(a => a.status === 'offline').length;
@@ -431,7 +613,7 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
     return summaries?.length === 1 ? summaries[0] : undefined;
   };
 
-  const gatewayPids = new Set(sorted.map(a => a.pid));
+  const gatewayPids = new Set(agents.map(a => a.pid));
   // Orphaned related processes: workers whose parent is not any main card (should not happen, fallback).
   // Filter out status=offline processes — they are TTL-cleaned after 5 minutes.
   const orphans = clientAgents.filter(
@@ -501,25 +683,37 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
         <div className="py-8 text-center text-sm text-gray-400">{t('common.loading')}</div>
       ) : error ? (
         <div className="py-8 text-center text-sm text-red-400">{error}</div>
-      ) : sorted.length === 0 ? (
+      ) : groupedAgents.length === 0 ? (
         <div className="py-8 text-center text-sm text-gray-400 bg-white rounded-lg border border-gray-200">
           {t('ah.noAgents')}
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-          {sorted.map(agent => (
-            <AgentCard
-              key={agent.pid}
-              agent={agent}
-              // Only attach processes whose parent_pid strictly matches the current main card pid,
-              // avoiding merging same-named independent instances.
-              related={clientAgents.filter(c => c.parent_pid === agent.pid)}
-              onDelete={handleDelete}
-              onRestart={handleRestart}
-              restarting={restartingPids.has(agent.pid)}
-              latency={latencyForAgent(agent.agent_name)}
-            />
-          ))}
+          {groupedAgents.map(group =>
+            group.agents.length === 1 ? (
+              <AgentCard
+                key={group.agents[0].pid}
+                agent={group.agents[0]}
+                // Only attach processes whose parent_pid strictly matches the current main card pid,
+                // avoiding merging same-named independent instances.
+                related={clientAgents.filter(c => c.parent_pid === group.agents[0].pid)}
+                onDelete={handleDelete}
+                onRestart={handleRestart}
+                restarting={restartingPids.has(group.agents[0].pid)}
+                latency={latencyForAgent(group.agentName)}
+              />
+            ) : (
+              <AgentGroupCard
+                key={group.agentName}
+                group={group}
+                clientAgents={clientAgents}
+                onDelete={handleDelete}
+                onRestart={handleRestart}
+                restartingPids={restartingPids}
+                latency={latencyForAgent(group.agentName)}
+              />
+            ),
+          )}
         </div>
       )}
 
