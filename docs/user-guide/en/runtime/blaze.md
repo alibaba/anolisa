@@ -222,11 +222,24 @@ Blaze captures a running sandbox through
 
 Capture requires both the selected backend and the storage provider to
 advertise full-checkpoint support. The built-in file provider captures the
-writable root filesystem, and the built-in mock backend supplies a complete
-development implementation. Firecracker, Bubblewrap, and the other process
-backends do not advertise capture support in this release. An unsupported
-combination returns HTTP 501 before the sandbox is paused or its lifecycle
-record is changed.
+writable root filesystem. Firecracker captures guest memory and device state
+through its own snapshot API, and the built-in mock backend supplies a complete
+development implementation. Bubblewrap and the other process backends do not
+advertise capture support in this release. An unsupported combination returns
+HTTP 501 before the sandbox is paused or its lifecycle record is changed.
+
+A Firecracker checkpoint records the exact version of the running virtual machine
+monitor, because a snapshot can only be loaded back by that same version. Keep
+the recorded version installed for as long as you intend to restore from a
+checkpoint: upgrading the Firecracker binary does not invalidate stored
+checkpoints, but it does mean they can no longer be restored until that version is
+available again.
+
+Because that recorded version is what makes a checkpoint restorable at all, capture
+refuses a Firecracker sandbox whose monitor does not report one, before the sandbox
+is paused. A stored checkpoint without a recorded version therefore cannot be
+produced, and the same shape is rejected if it appears in a manifest that is read
+back.
 
 For a supported running sandbox, Blaze holds the sandbox operation lock,
 validates its current checkpoint parent, pauses the backend, and captures three

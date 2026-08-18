@@ -182,6 +182,7 @@ pub fn validate_commit_checkpoint(
         checkpoint_id,
         &input.policy_name,
         &input.image_digest,
+        input.backend,
         input.backend_version.as_deref(),
     )
 }
@@ -234,6 +235,7 @@ pub fn validate_checkpoint_manifest(
         &metadata.id,
         &metadata.policy_name,
         &metadata.image_digest,
+        metadata.backend,
         metadata.backend_version.as_deref(),
     )?;
     validate_artifact_manifest(&metadata.id, &metadata.artifacts)
@@ -243,6 +245,7 @@ fn validate_runtime_identity(
     checkpoint_id: &str,
     policy_name: &str,
     image_digest: &str,
+    backend: BackendKind,
     backend_version: Option<&str>,
 ) -> Result<(), CheckpointValidationError> {
     if policy_name.trim().is_empty() {
@@ -264,6 +267,13 @@ fn validate_runtime_identity(
             checkpoint_id: checkpoint_id.to_string(),
             field: "backend_version",
             reason: "present version is empty".to_string(),
+        });
+    }
+    if backend == BackendKind::Firecracker && backend_version.is_none() {
+        return Err(CheckpointValidationError::InvalidField {
+            checkpoint_id: checkpoint_id.to_string(),
+            field: "backend_version",
+            reason: "Firecracker captures require a backend version".to_string(),
         });
     }
     Ok(())
@@ -439,5 +449,39 @@ mod tests {
             snapshot_kind: SnapshotKind::Full,
         };
         assert!(validate_commit_checkpoint(&id, &input).is_err());
+    }
+
+    #[test]
+    fn firecracker_checkpoint_records_require_a_backend_version() {
+        let mut metadata = metadata();
+        metadata.backend = BackendKind::Firecracker;
+        metadata.backend_version = None;
+        let error = validate_checkpoint_manifest(&metadata, metadata.sandbox_id, &metadata.id)
+            .expect_err("missing version must fail");
+        assert!(matches!(
+            error,
+            CheckpointValidationError::InvalidField {
+                field: "backend_version",
+                ..
+            }
+        ));
+
+        let input = CommitCheckpoint {
+            parent: metadata.parent,
+            policy_name: metadata.policy_name,
+            image_digest: metadata.image_digest,
+            backend: metadata.backend,
+            backend_version: metadata.backend_version,
+            snapshot_kind: metadata.snapshot_kind,
+        };
+        let error = validate_commit_checkpoint(&metadata.id, &input)
+            .expect_err("missing version must fail");
+        assert!(matches!(
+            error,
+            CheckpointValidationError::InvalidField {
+                field: "backend_version",
+                ..
+            }
+        ));
     }
 }

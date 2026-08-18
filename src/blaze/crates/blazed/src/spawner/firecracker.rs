@@ -9,11 +9,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use blaze_core::backend::BackendKind;
 #[cfg(test)]
 use blaze_core::backend::SpawnRequest;
+use blaze_core::backend::{BackendKind, SnapshotKind, SnapshotRequest};
 use blaze_core::policy::{FirecrackerConfig, VmConfig, parse_memory_value, to_mib_ceil};
 use blaze_core::{BlazeError, Result};
+use http_body_util::{BodyExt, Full};
+use hyper::body::Bytes;
+use hyper::client::conn::http1;
+use hyper::{Method, Request};
+use hyper_util::rt::TokioIo;
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -29,10 +34,39 @@ use super::{
 };
 
 const NETWORK_BOOT_IP: &str = "ip=169.254.0.2::169.254.0.1:255.255.255.252::eth0:off";
+const MAX_API_RESPONSE_BYTES: usize = 64 * 1024;
+/// Slowest guest-memory throughput a snapshot deadline still tolerates.
+///
+/// A control request such as `/version` or a pause should answer immediately, so
+/// a short bound catches a wedged VMM. Snapshot work is different: it moves the
+/// whole guest memory, so its duration scales with memory size and storage
+/// speed, and a bound that does not scale with it would abandon work that is
+/// still progressing. Because a timeout is reported as an unknown outcome, that
+/// would fail checkpoints for larger guests and push them into recovery even
+/// though Firecracker would have finished. Guest memory has no configured upper
+/// bound, so no fixed deadline can be correct for every size.
+///
+/// Bare metal measured 512 MiB in about 29 s, so roughly 18 MiB/s once pause and
+/// fsync overhead is included. This floor sits well below that so slower storage
+/// still fits, because the deadline exists to catch a VMM that never answers, not
+/// to enforce a latency target.
+const SNAPSHOT_MIN_THROUGHPUT_BYTES_PER_SEC: u64 = 4 * 1024 * 1024;
+/// Floor for a snapshot deadline, covering fixed request and fsync overhead.
+const SNAPSHOT_TIMEOUT_FLOOR: Duration = Duration::from_secs(120);
+
+/// Deadline for moving `memory_bytes` of guest memory.
+fn snapshot_timeout(memory_bytes: u64) -> Duration {
+    let scaled = Duration::from_secs(memory_bytes / SNAPSHOT_MIN_THROUGHPUT_BYTES_PER_SEC);
+    scaled.max(SNAPSHOT_TIMEOUT_FLOOR)
+}
+const CHECKPOINT_SCRATCH_PREFIX: &str = ".firecracker-checkpoint-";
+const CHECKPOINT_SCRATCH_FILES: [&str; 2] = ["vmstate.snap", "memory.snap"];
 
 /// Firecracker backend factory.
 pub struct FirecrackerSpawner {
     images_dir: PathBuf,
+    /// Bound for each Firecracker HTTP request over the API socket.
+    api_timeout: Duration,
     socket_timeout: Duration,
     network: Arc<NetworkManager>,
     network_required: bool,
@@ -61,6 +95,7 @@ impl FirecrackerSpawner {
     pub fn new(images_dir: PathBuf) -> Self {
         Self {
             images_dir,
+            api_timeout: Duration::from_secs(30),
             socket_timeout: Duration::from_secs(5),
             network: Arc::new(NetworkManager::default()),
             network_required: false,
@@ -129,6 +164,7 @@ impl FirecrackerSpawner {
                         let owner: DynBackendInstance = Arc::new(FirecrackerInstance::new(
                             request.instance_id,
                             None,
+                            None,
                             runtime_files(
                                 api_socket,
                                 guest_socket,
@@ -144,6 +180,7 @@ impl FirecrackerSpawner {
                     if let Err(cleanup) = remove_if_exists(&network_file).await {
                         let owner: DynBackendInstance = Arc::new(FirecrackerInstance::new(
                             request.instance_id,
+                            None,
                             None,
                             runtime_files(
                                 api_socket,
@@ -168,6 +205,7 @@ impl FirecrackerSpawner {
                     if let Err(cleanup) = remove_if_exists(&network_temp_file).await {
                         let owner: DynBackendInstance = Arc::new(FirecrackerInstance::new(
                             request.instance_id,
+                            None,
                             None,
                             runtime_files(
                                 api_socket,
@@ -195,6 +233,12 @@ impl FirecrackerSpawner {
         } else {
             None
         };
+
+        // Guest memory size decides how long a snapshot of this VM may
+        // legitimately take, so resolve it once and freeze it into the owner.
+        let memory_bytes = resolve_memory(&fc_config, request.vm.as_ref())
+            .map(|mib| mib.saturating_mul(1024 * 1024))
+            .unwrap_or(0);
 
         let mut command = build_launch_command(
             &request.binary_path,
@@ -311,6 +355,7 @@ impl FirecrackerSpawner {
             let owner: DynBackendInstance = Arc::new(FirecrackerInstance::new(
                 request.instance_id,
                 Some(child),
+                None,
                 runtime_files(
                     api_socket,
                     guest_socket,
@@ -324,9 +369,40 @@ impl FirecrackerSpawner {
             return Err(SpawnFailure::compensate_started(error, owner).await);
         }
 
+        // Resolve the version from the running VM rather than from the
+        // configured binary, and freeze it into the owner. A concurrent binary
+        // replacement therefore cannot make a capture claim a version this VM
+        // was never started with.
+        //
+        // A VM that answers on its API socket but not for its version is still a
+        // usable sandbox, so it keeps running and only gives up checkpoint capture:
+        // the owner carries no capture context, reports no version, and
+        // `supports_checkpoint_capture` is false, so a later capture is refused
+        // before anything is paused. Treating this as fatal instead would turn a
+        // lost checkpoint capability into a failed sandbox creation.
+        let capture = match FirecrackerCapture::from_running(
+            api_socket.clone(),
+            self.api_timeout,
+            memory_bytes,
+        )
+        .await
+        {
+            Ok(capture) => Some(capture),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    instance = %request.instance_id,
+                    "Firecracker did not report a version; the sandbox stays running \
+                     without checkpoint capture"
+                );
+                None
+            }
+        };
+
         let instance = FirecrackerInstance::new(
             request.instance_id,
             Some(child),
+            capture,
             configured_runtime_files(
                 runtime_files(
                     api_socket,
@@ -339,7 +415,8 @@ impl FirecrackerSpawner {
             ),
             network,
             self.network.clone(),
-        );
+        )
+        .with_run_dir(request.run_dir.clone());
         Ok(Arc::new(instance))
     }
 
@@ -355,6 +432,7 @@ impl FirecrackerSpawner {
         }
         let owner: DynBackendInstance = Arc::new(FirecrackerInstance::new(
             instance_id,
+            None,
             None,
             files,
             network,
@@ -405,6 +483,13 @@ struct FirecrackerInstance {
     instance_id: Uuid,
     child: Mutex<Option<Child>>,
     exit_result: Mutex<Option<SpawnResult>>,
+    /// API ownership plus the version frozen when this owner started.
+    ///
+    /// Absent when the API could not be reached, which also disables checkpoint
+    /// capture instead of reporting a capability the owner cannot honour.
+    capture: Option<FirecrackerCapture>,
+    /// Retained runtime directory used to root the private snapshot scratch.
+    run_dir: Option<OwnedRunDir>,
     files: FirecrackerRuntimeFiles,
     network: Mutex<Option<NetworkSlot>>,
     network_manager: Arc<NetworkManager>,
@@ -450,6 +535,7 @@ impl FirecrackerInstance {
     fn new(
         instance_id: Uuid,
         child: Option<Child>,
+        capture: Option<FirecrackerCapture>,
         files: FirecrackerRuntimeFiles,
         network: Option<NetworkSlot>,
         network_manager: Arc<NetworkManager>,
@@ -458,6 +544,8 @@ impl FirecrackerInstance {
             instance_id,
             child: Mutex::new(child),
             exit_result: Mutex::new(None),
+            capture,
+            run_dir: None,
             files,
             network: Mutex::new(network),
             network_manager,
@@ -465,16 +553,150 @@ impl FirecrackerInstance {
             killed: AtomicBool::new(false),
         }
     }
+
+    fn with_run_dir(mut self, run_dir: OwnedRunDir) -> Self {
+        self.run_dir = Some(run_dir);
+        self
+    }
+
+    /// Borrow the API client, refusing checkpoint work without API ownership.
+    fn capture_api(&self) -> Result<&FirecrackerApiClient> {
+        self.capture
+            .as_ref()
+            .map(|capture| &capture.api)
+            .ok_or_else(|| BlazeError::BackendError {
+                msg: "Firecracker API ownership is unavailable".to_string(),
+            })
+    }
 }
 
 #[async_trait]
 impl BackendInstance for FirecrackerInstance {
+    fn instance_id(&self) -> Uuid {
+        self.instance_id
+    }
+
     fn backend(&self) -> BackendKind {
         BackendKind::Firecracker
     }
 
+    /// Report the version frozen into this owner when it started.
+    ///
+    /// Firecracker snapshot formats are tied to the exact binary version, so a
+    /// capture records this value and a later restore refuses to load a snapshot
+    /// taken by a different build.
+    fn version(&self) -> Option<&str> {
+        self.capture
+            .as_ref()
+            .map(|capture| capture.backend_version.as_str())
+    }
+
+    fn supports_checkpoint_capture(&self) -> bool {
+        self.capture.is_some()
+    }
+
     fn guest_socket_path(&self) -> &Path {
         &self.files.guest_socket
+    }
+
+    async fn pause(&self) -> Result<()> {
+        self.capture_api()?
+            .call_json(
+                Method::PATCH,
+                "/vm",
+                Some(serde_json::json!({"state": "Paused"})),
+            )
+            .await
+            .map(|_| ())
+            .map_err(FirecrackerApiError::into_error)
+    }
+
+    async fn resume(&self) -> Result<()> {
+        self.capture_api()?
+            .call_json(
+                Method::PATCH,
+                "/vm",
+                Some(serde_json::json!({"state": "Resumed"})),
+            )
+            .await
+            .map(|_| ())
+            .map_err(FirecrackerApiError::into_error)
+    }
+
+    /// Capture a full snapshot into the caller's destinations.
+    ///
+    /// Firecracker writes snapshot files itself, and it runs inside a private
+    /// mount namespace, so the request names a scratch directory below the
+    /// runtime directory it already owns. The artifacts are then transferred to
+    /// the destinations the checkpoint publisher chose.
+    ///
+    /// The scratch is only reclaimed when the outcome is known. A rejected
+    /// request means Firecracker never wrote anything, so the scratch is
+    /// removed. An unknown outcome means Firecracker may still be writing into
+    /// it, so the scratch is retained for reconciliation instead of being
+    /// deleted underneath a live writer.
+    async fn snapshot(&self, request: SnapshotRequest) -> Result<()> {
+        let capture = self
+            .capture
+            .as_ref()
+            .ok_or_else(|| BlazeError::BackendError {
+                msg: "Firecracker API ownership is unavailable".to_string(),
+            })?;
+        let run_dir = self
+            .run_dir
+            .as_ref()
+            .ok_or_else(|| BlazeError::BackendError {
+                msg: "Firecracker runtime-directory ownership is unavailable".to_string(),
+            })?;
+        let SnapshotRequest {
+            snapshot_path,
+            mem_path,
+            kind: SnapshotKind::Full,
+        } = request;
+        let scratch = SnapshotScratch::new(run_dir)?;
+        let snapshot_child_path = scratch.snapshot_path.clone();
+        let memory_child_path = scratch.memory_path.clone();
+        let api_result = capture
+            .api
+            .call_json_within(
+                Method::PUT,
+                "/snapshot/create",
+                Some(serde_json::json!({
+                    "snapshot_path": snapshot_child_path,
+                    "mem_file_path": memory_child_path,
+                    "snapshot_type": "Full"
+                })),
+                snapshot_timeout(capture.memory_bytes),
+            )
+            .await;
+        match api_result {
+            Ok(_) => {}
+            Err(FirecrackerApiError::Known(error)) => {
+                if let Err(cleanup) = scratch.cleanup() {
+                    return Err(unknown_scratch_cleanup_error(
+                        Some(error),
+                        cleanup,
+                        "rejected snapshot request",
+                    ));
+                }
+                return Err(error);
+            }
+            Err(FirecrackerApiError::Unknown(error)) => {
+                return Err(BlazeError::BackendError {
+                    msg: format!(
+                        "{error}; Firecracker snapshot has an unknown outcome and its \
+                         checkpoint scratch is retained for reconciliation"
+                    ),
+                });
+            }
+        }
+        crate::failpoint::spawn_blocking(move || scratch.transfer_into(&snapshot_path, &mem_path))
+            .await
+            .map_err(|error| BlazeError::BackendError {
+                msg: format!(
+                    "Firecracker snapshot transfer task failed with an unknown outcome: {error}"
+                ),
+            })?
     }
 
     async fn try_wait(&self) -> Result<Option<SpawnResult>> {
@@ -523,6 +745,368 @@ impl BackendInstance for FirecrackerInstance {
     }
 }
 
+struct FirecrackerCapture {
+    api: FirecrackerApiClient,
+    backend_version: String,
+    /// Guest memory size, which sets how long a snapshot may legitimately take.
+    memory_bytes: u64,
+}
+
+impl FirecrackerCapture {
+    #[cfg(all(test, target_os = "linux"))]
+    fn new(
+        api_socket: PathBuf,
+        api_timeout: Duration,
+        backend_version: String,
+        memory_bytes: u64,
+    ) -> Self {
+        Self {
+            api: FirecrackerApiClient::new(api_socket, api_timeout),
+            backend_version,
+            memory_bytes,
+        }
+    }
+
+    async fn from_running(
+        api_socket: PathBuf,
+        api_timeout: Duration,
+        memory_bytes: u64,
+    ) -> Result<Self> {
+        let api = FirecrackerApiClient::new(api_socket, api_timeout);
+        let response = api
+            .call_json(Method::GET, "/version", None)
+            .await
+            .map_err(FirecrackerApiError::into_error)?;
+        let backend_version = parse_runtime_version(&response)?;
+        Ok(Self {
+            api,
+            backend_version,
+            memory_bytes,
+        })
+    }
+}
+
+#[derive(Debug)]
+enum FirecrackerApiError {
+    Known(BlazeError),
+    Unknown(BlazeError),
+}
+
+impl FirecrackerApiError {
+    fn into_error(self) -> BlazeError {
+        match self {
+            Self::Known(error) | Self::Unknown(error) => error,
+        }
+    }
+}
+
+/// Private child-visible snapshot namespace.  Its path is rooted at the
+/// runtime directory descriptor inherited by Firecracker, never at a daemon
+/// checkpoint descriptor or a configured runtime pathname.
+struct SnapshotScratch {
+    directory: PathBuf,
+    snapshot_path: PathBuf,
+    memory_path: PathBuf,
+}
+
+impl SnapshotScratch {
+    fn new(run_dir: &OwnedRunDir) -> Result<Self> {
+        let directory = run_dir
+            .path()
+            .join(format!("{CHECKPOINT_SCRATCH_PREFIX}{}", Uuid::new_v4()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
+        }
+        #[cfg(not(unix))]
+        std::fs::create_dir(&directory)?;
+        Ok(Self {
+            snapshot_path: directory.join("vmstate.snap"),
+            memory_path: directory.join("memory.snap"),
+            directory,
+        })
+    }
+
+    /// Move captured artifacts to their destinations and reclaim the scratch.
+    ///
+    /// A transfer failure whose scratch was reclaimed is reported as-is. When the
+    /// scratch itself cannot be reclaimed the outcome is unknown, so the error
+    /// says so and the retained directory waits for reconciliation.
+    fn transfer_into(self, snapshot_target: &Path, memory_target: &Path) -> Result<()> {
+        let transfer = (|| {
+            transfer_snapshot_file(&self.snapshot_path, snapshot_target)?;
+            transfer_snapshot_file(&self.memory_path, memory_target)?;
+            Ok(())
+        })();
+        let cleanup = self.cleanup();
+        match (transfer, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(cleanup)) => Err(unknown_scratch_cleanup_error(
+                None,
+                cleanup,
+                "completed snapshot transfer",
+            )),
+            (Err(error), Err(cleanup)) => Err(unknown_scratch_cleanup_error(
+                Some(error),
+                cleanup,
+                "failed snapshot transfer",
+            )),
+        }
+    }
+
+    fn cleanup(&self) -> Result<()> {
+        cleanup_snapshot_scratch_directory(&self.directory)?;
+        let parent = self
+            .directory
+            .parent()
+            .ok_or_else(|| BlazeError::BackendError {
+                msg: format!(
+                    "Firecracker checkpoint scratch {} has no parent directory",
+                    self.directory.display()
+                ),
+            })?;
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    }
+}
+
+/// Describe a boundary whose outcome could not be confirmed.
+///
+/// Retained scratch is the only remaining evidence of what Firecracker wrote, so
+/// the message names the boundary and keeps the original cause alongside the
+/// cleanup failure.
+fn unknown_scratch_cleanup_error(
+    original: Option<BlazeError>,
+    cleanup: BlazeError,
+    boundary: &str,
+) -> BlazeError {
+    let original = original
+        .map(|error| format!("{error}; "))
+        .unwrap_or_default();
+    BlazeError::BackendError {
+        msg: format!(
+            "{original}Firecracker {boundary} could not clean its checkpoint scratch, so the \
+             outcome is unknown and the scratch is retained: {cleanup}"
+        ),
+    }
+}
+
+fn cleanup_snapshot_scratch(run_dir: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(run_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(id) = name.strip_prefix(CHECKPOINT_SCRATCH_PREFIX) else {
+            continue;
+        };
+        let Ok(id) = Uuid::parse_str(id) else {
+            continue;
+        };
+        if format!("{CHECKPOINT_SCRATCH_PREFIX}{id}") != name {
+            continue;
+        }
+        cleanup_snapshot_scratch_directory(&entry.path())?;
+    }
+    std::fs::File::open(run_dir)?.sync_all()?;
+    Ok(())
+}
+
+fn cleanup_snapshot_scratch_directory(directory: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(directory)?;
+    if !metadata.file_type().is_dir() {
+        return Err(BlazeError::BackendError {
+            msg: format!(
+                "Firecracker checkpoint scratch {} is not a directory",
+                directory.display()
+            ),
+        });
+    }
+    let mut artifacts = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(BlazeError::BackendError {
+                msg: format!(
+                    "Firecracker checkpoint scratch {} contains a non-UTF-8 entry",
+                    directory.display()
+                ),
+            });
+        };
+        if !CHECKPOINT_SCRATCH_FILES.contains(&name) {
+            return Err(BlazeError::BackendError {
+                msg: format!(
+                    "Firecracker checkpoint scratch {} contains unexpected entry {name}",
+                    directory.display()
+                ),
+            });
+        }
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if !metadata.file_type().is_file() {
+            return Err(BlazeError::BackendError {
+                msg: format!(
+                    "Firecracker checkpoint scratch artifact {} is not a regular file",
+                    entry.path().display()
+                ),
+            });
+        }
+        artifacts.push(entry.path());
+    }
+    for artifact in artifacts {
+        std::fs::remove_file(artifact)?;
+    }
+    std::fs::remove_dir(directory)?;
+    Ok(())
+}
+
+fn transfer_snapshot_file(source: &Path, target: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(source)?;
+    if !metadata.file_type().is_file() {
+        return Err(BlazeError::BackendError {
+            msg: format!(
+                "Firecracker snapshot artifact {} is not a regular file",
+                source.display()
+            ),
+        });
+    }
+    let parent = target.parent().ok_or_else(|| BlazeError::BackendError {
+        msg: format!("checkpoint target {} has no parent", target.display()),
+    })?;
+    let name = target.file_name().ok_or_else(|| BlazeError::BackendError {
+        msg: format!("checkpoint target {} has no file name", target.display()),
+    })?;
+    let temporary = parent.join(format!(
+        ".{}.firecracker-transfer-{}",
+        name.to_string_lossy(),
+        Uuid::new_v4()
+    ));
+    let result = (|| -> std::io::Result<()> {
+        let mut input = std::fs::File::open(source)?;
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        std::io::copy(&mut input, &mut output)?;
+        output.sync_all()?;
+        std::fs::rename(&temporary, target)?;
+        std::fs::File::open(parent)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(Into::into)
+}
+
+#[derive(Debug, Clone)]
+struct FirecrackerApiClient {
+    socket: PathBuf,
+    timeout: Duration,
+}
+
+impl FirecrackerApiClient {
+    fn new(socket: PathBuf, timeout: Duration) -> Self {
+        Self { socket, timeout }
+    }
+
+    /// Issue a control request under the short bound.
+    async fn call_json(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> std::result::Result<Vec<u8>, FirecrackerApiError> {
+        self.call_json_within(method, path, body, self.timeout)
+            .await
+    }
+
+    /// Issue a request under a caller-chosen bound.
+    async fn call_json_within(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        timeout: Duration,
+    ) -> std::result::Result<Vec<u8>, FirecrackerApiError> {
+        let operation = async {
+            let stream = UnixStream::connect(&self.socket)
+                .await
+                .map_err(|error| FirecrackerApiError::Known(error.into()))?;
+            let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
+                .await
+                .map_err(|error| FirecrackerApiError::Known(backend_protocol_error(error)))?;
+            tokio::spawn(async move {
+                if let Err(error) = connection.await {
+                    tracing::debug!(%error, "firecracker API connection ended");
+                }
+            });
+            let bytes = match body {
+                Some(body) => serde_json::to_vec(&body).map_err(|error| {
+                    FirecrackerApiError::Known(BlazeError::BackendError {
+                        msg: format!("serialize Firecracker API request: {error}"),
+                    })
+                })?,
+                None => Vec::new(),
+            };
+            let mut builder = Request::builder()
+                .method(method.clone())
+                .uri(format!("http://localhost{path}"));
+            if !bytes.is_empty() {
+                builder = builder.header("content-type", "application/json");
+            }
+            let request = builder
+                .body(Full::new(Bytes::from(bytes)))
+                .map_err(|error| {
+                    FirecrackerApiError::Known(BlazeError::BackendError {
+                        msg: format!("build Firecracker API request: {error}"),
+                    })
+                })?;
+            let response = sender
+                .send_request(request)
+                .await
+                .map_err(|error| FirecrackerApiError::Unknown(backend_protocol_error(error)))?;
+            let status = response.status();
+            let mut response_body = response.into_body();
+            let mut collected = Vec::new();
+            while let Some(frame) = response_body.frame().await {
+                let frame = frame
+                    .map_err(|error| FirecrackerApiError::Unknown(backend_protocol_error(error)))?;
+                if let Ok(data) = frame.into_data() {
+                    let remaining = MAX_API_RESPONSE_BYTES.saturating_sub(collected.len());
+                    collected.extend_from_slice(&data[..data.len().min(remaining)]);
+                    if data.len() > remaining {
+                        return Err(FirecrackerApiError::Unknown(BlazeError::BackendError {
+                            msg: format!(
+                                "Firecracker {method} {path} response exceeded \
+                                 {MAX_API_RESPONSE_BYTES} bytes"
+                            ),
+                        }));
+                    }
+                }
+            }
+            if !status.is_success() {
+                return Err(FirecrackerApiError::Known(BlazeError::BackendError {
+                    msg: format!(
+                        "Firecracker {method} {path} returned {status}: {}",
+                        String::from_utf8_lossy(&collected)
+                    ),
+                }));
+            }
+            Ok(collected)
+        };
+        tokio::time::timeout(timeout, operation)
+            .await
+            .map_err(|_| {
+                FirecrackerApiError::Unknown(BlazeError::BackendError {
+                    msg: format!("Firecracker {method} {path} timed out after {timeout:?}"),
+                })
+            })?
+    }
+}
+
 impl FirecrackerInstance {
     async fn cleanup(&self) -> Result<()> {
         if self.cleanup_complete.load(Ordering::Acquire) {
@@ -531,6 +1115,11 @@ impl FirecrackerInstance {
         remove_if_exists(&self.files.api_socket).await?;
         remove_if_exists(&self.files.guest_socket).await?;
         remove_if_exists(&self.files.pid_file).await?;
+        // Reclaim scratch a capture retained after an unknown outcome. Destroy
+        // is the point where the writer is gone for certain.
+        if let Some(run_dir) = self.run_dir.as_ref() {
+            cleanup_snapshot_scratch(run_dir.path())?;
+        }
         let mut network = self.network.lock().await;
         if let Some(slot) = network.as_ref().cloned() {
             self.network_manager.destroy(&slot).await?;
@@ -737,6 +1326,25 @@ fn parse_backend_version(stdout: &[u8]) -> Result<String> {
     Ok(version.to_string())
 }
 
+fn parse_runtime_version(response: &[u8]) -> Result<String> {
+    #[derive(serde::Deserialize)]
+    struct VersionResponse {
+        firecracker_version: String,
+    }
+
+    let response: VersionResponse =
+        serde_json::from_slice(response).map_err(|error| BlazeError::BackendError {
+            msg: format!("invalid Firecracker /version response: {error}"),
+        })?;
+    let version = response.firecracker_version.trim();
+    if version.is_empty() || version.chars().any(char::is_whitespace) {
+        return Err(BlazeError::BackendError {
+            msg: "Firecracker /version response has an invalid version".to_string(),
+        });
+    }
+    Ok(format!("Firecracker v{version}"))
+}
+
 async fn wait_for_socket(socket: &Path, child: &mut Child, timeout: Duration) -> Result<()> {
     let started = Instant::now();
     loop {
@@ -882,6 +1490,12 @@ fn path_string<'a>(path: &'a Path, label: &str) -> Result<&'a str> {
     })
 }
 
+fn backend_protocol_error(error: hyper::Error) -> BlazeError {
+    BlazeError::BackendError {
+        msg: format!("Firecracker API protocol error: {error}"),
+    }
+}
+
 async fn cleanup_orphan_run_dir_with(
     instance_id: Uuid,
     run_dir: &Path,
@@ -952,6 +1566,9 @@ async fn cleanup_orphan_run_dir_with(
         record_backend_stopped(&stopped_marker).await?;
     }
 
+    // Startup reclamation also owns any scratch a previous capture retained.
+    cleanup_snapshot_scratch(run_dir)?;
+
     if let Some((network, _)) = network_record {
         network_manager.destroy(&network).await?;
         remove_if_exists(&network_file).await?;
@@ -966,10 +1583,87 @@ async fn cleanup_orphan_run_dir_with(
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    #[test]
+    fn an_owner_without_a_version_keeps_running_but_refuses_capture() {
+        // A start whose VM answers on its API socket but not for its version stays
+        // usable and only loses checkpoint capture. This pins the contract the
+        // degrade relies on: no capture context means no advertised capability and
+        // no reported version, so a later capture is refused by the generic layer
+        // before anything is paused — rather than the sandbox failing to be created.
+        let temp = tempfile::tempdir().expect("temp");
+        let instance_id = Uuid::new_v4();
+        let instance = FirecrackerInstance::new(
+            instance_id,
+            None,
+            None,
+            runtime_files(
+                temp.path().join("api.sock"),
+                temp.path().join("vsock.uds"),
+                temp.path().join("firecracker.pid"),
+                stopped_marker(temp.path()),
+                temp.path().join("network.json"),
+            ),
+            None,
+            Arc::new(NetworkManager::default()),
+        );
+
+        assert_eq!(instance.instance_id(), instance_id);
+        assert_eq!(
+            instance.version(),
+            None,
+            "an owner without a capture context reports no version"
+        );
+        assert!(
+            !instance.supports_checkpoint_capture(),
+            "capture must not be advertised without a confirmed version"
+        );
+    }
+
+    #[test]
+    fn snapshot_deadline_scales_with_guest_memory() {
+        // Guest memory has no configured upper bound, so a fixed deadline cannot
+        // hold: at the measured rate a 16 GiB guest already outlives a
+        // 15-minute bound, and a timeout is reported as an unknown outcome that
+        // fails the checkpoint while Firecracker may still be writing.
+        let gib = 1024 * 1024 * 1024_u64;
+        let small = snapshot_timeout(512 * 1024 * 1024);
+        let large = snapshot_timeout(16 * gib);
+        let huge = snapshot_timeout(128 * gib);
+
+        assert!(
+            large > Duration::from_secs(15 * 60),
+            "a 16 GiB guest must outlive a fixed 15-minute bound, got {large:?}"
+        );
+        assert!(large < huge, "the deadline must keep scaling with memory");
+        assert!(
+            small >= SNAPSHOT_TIMEOUT_FLOOR,
+            "small guests keep a floor for fixed request and fsync overhead"
+        );
+        assert_eq!(
+            snapshot_timeout(0),
+            SNAPSHOT_TIMEOUT_FLOOR,
+            "an unknown size still gets the floor rather than no time at all"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    use std::convert::Infallible;
 
     use blaze_core::storage::StorageSlot;
+    #[cfg(target_os = "linux")]
+    use hyper::Response;
+    #[cfg(target_os = "linux")]
+    use hyper::server::conn::http1 as server_http1;
+    #[cfg(target_os = "linux")]
+    use hyper::service::service_fn;
+    #[cfg(target_os = "linux")]
+    use tokio::net::UnixListener;
+    #[cfg(target_os = "linux")]
+    use tokio::sync::oneshot;
 
     use crate::spawner::netns::{IpCommandRunner, IpOutput, NetworkManager, test_network_slot};
+    #[cfg(target_os = "linux")]
+    use crate::{checkpoint_store::CheckpointStore, state_store::StateStore};
 
     use super::*;
 
@@ -1246,6 +1940,7 @@ mod tests {
         let owner: DynBackendInstance = Arc::new(FirecrackerInstance::new(
             slot.owner(),
             None,
+            None,
             runtime_files(
                 temp.path().join("api.sock"),
                 temp.path().join("guest.sock"),
@@ -1297,6 +1992,7 @@ mod tests {
         let instance = FirecrackerInstance::new(
             slot.owner(),
             Some(child),
+            None,
             runtime_files(
                 temp.path().join("api.sock"),
                 temp.path().join("guest.sock"),
@@ -1629,6 +2325,7 @@ mod tests {
         )));
         let spawner = FirecrackerSpawner {
             images_dir: temp.path().join("images"),
+            api_timeout: Duration::from_secs(1),
             socket_timeout: Duration::from_secs(1),
             network,
             network_required: false,
@@ -1656,6 +2353,7 @@ mod tests {
         let owner: DynBackendInstance = Arc::new(FirecrackerInstance::new(
             Uuid::new_v4(),
             Some(child),
+            None,
             runtime_files(
                 temp.path().join("api.sock"),
                 temp.path().join("guest.sock"),
@@ -1781,5 +2479,691 @@ mod tests {
             stdout: Vec::new(),
             stderr: stderr.as_bytes().to_vec(),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn spawn_api(
+        socket: &Path,
+        call_count: usize,
+    ) -> oneshot::Receiver<Vec<(Method, String, serde_json::Value)>> {
+        let listener = UnixListener::bind(socket).expect("bind");
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let observed = Arc::new(Mutex::new(Vec::with_capacity(call_count)));
+            for _ in 0..call_count {
+                let (stream, _) = listener.accept().await.expect("accept");
+                let observed = observed.clone();
+                let service = service_fn(move |request: Request<hyper::body::Incoming>| {
+                    let observed = observed.clone();
+                    async move {
+                        let method = request.method().clone();
+                        let path = request.uri().path().to_string();
+                        let body = request
+                            .into_body()
+                            .collect()
+                            .await
+                            .expect("request body")
+                            .to_bytes();
+                        let body = if body.is_empty() {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::from_slice(&body).expect("request JSON")
+                        };
+                        if path == "/snapshot/create" {
+                            let snapshot = body["snapshot_path"].as_str().expect("snapshot path");
+                            let memory = body["mem_file_path"].as_str().expect("memory path");
+                            std::fs::write(snapshot, b"vmstate").expect("write snapshot");
+                            std::fs::write(memory, b"memory").expect("write memory");
+                        }
+                        observed.lock().await.push((method, path, body));
+                        Ok::<_, Infallible>(
+                            Response::builder()
+                                .status(hyper::StatusCode::NO_CONTENT)
+                                .body(Full::new(Bytes::new()))
+                                .expect("response"),
+                        )
+                    }
+                });
+                server_http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await
+                    .expect("serve");
+            }
+            let calls = observed.lock().await.clone();
+            let _ = tx.send(calls);
+        });
+        rx
+    }
+
+    #[cfg(target_os = "linux")]
+    fn spawn_api_response(
+        socket: &Path,
+        status: hyper::StatusCode,
+        body: Vec<u8>,
+        delay: Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        let listener = UnixListener::bind(socket).expect("bind");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let body = Bytes::from(body);
+            let service = service_fn(move |_request: Request<hyper::body::Incoming>| {
+                let body = body.clone();
+                async move {
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                    Ok::<_, Infallible>(
+                        Response::builder()
+                            .status(status)
+                            .body(Full::new(body))
+                            .expect("response"),
+                    )
+                }
+            });
+            let _ = server_http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn spawn_api_disconnect(socket: &Path) -> tokio::task::JoinHandle<()> {
+        let listener = UnixListener::bind(socket).expect("bind");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let service = service_fn(|request: Request<hyper::body::Incoming>| async move {
+                assert_eq!(request.method(), Method::PATCH);
+                assert_eq!(request.uri().path(), "/vm");
+                Err::<Response<Full<Bytes>>, _>(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "close after accepting the request",
+                ))
+            });
+            let _ = server_http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn spawn_snapshot_api_disconnect(socket: &Path) -> tokio::task::JoinHandle<PathBuf> {
+        let listener = UnixListener::bind(socket).expect("bind");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let scratch = Arc::new(Mutex::new(None));
+            let observed_scratch = scratch.clone();
+            let service = service_fn(move |request: Request<hyper::body::Incoming>| {
+                let scratch = scratch.clone();
+                async move {
+                    assert_eq!(request.method(), Method::PUT);
+                    assert_eq!(request.uri().path(), "/snapshot/create");
+                    let body = request
+                        .into_body()
+                        .collect()
+                        .await
+                        .expect("request body")
+                        .to_bytes();
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&body).expect("request JSON");
+                    let snapshot =
+                        PathBuf::from(body["snapshot_path"].as_str().expect("snapshot path"));
+                    let memory =
+                        PathBuf::from(body["mem_file_path"].as_str().expect("memory path"));
+                    assert_eq!(snapshot.parent(), memory.parent());
+                    std::fs::write(&snapshot, b"vmstate").expect("write snapshot");
+                    std::fs::write(&memory, b"memory").expect("write memory");
+                    *scratch.lock().await = snapshot.parent().map(Path::to_path_buf);
+                    Err::<Response<Full<Bytes>>, _>(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "close after snapshot request",
+                    ))
+                }
+            });
+            let _ = server_http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+            observed_scratch
+                .lock()
+                .await
+                .take()
+                .expect("observed scratch directory")
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn spawn_snapshot_api_with_unexpected_scratch_entry(
+        socket: &Path,
+        status: hyper::StatusCode,
+    ) -> tokio::task::JoinHandle<PathBuf> {
+        let listener = UnixListener::bind(socket).expect("bind");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let scratch = Arc::new(Mutex::new(None));
+            let observed_scratch = scratch.clone();
+            let service = service_fn(move |request: Request<hyper::body::Incoming>| {
+                let scratch = scratch.clone();
+                async move {
+                    assert_eq!(request.method(), Method::PUT);
+                    assert_eq!(request.uri().path(), "/snapshot/create");
+                    let body = request
+                        .into_body()
+                        .collect()
+                        .await
+                        .expect("request body")
+                        .to_bytes();
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&body).expect("request JSON");
+                    let snapshot =
+                        PathBuf::from(body["snapshot_path"].as_str().expect("snapshot path"));
+                    let memory =
+                        PathBuf::from(body["mem_file_path"].as_str().expect("memory path"));
+                    let directory = snapshot.parent().expect("snapshot scratch").to_path_buf();
+                    assert_eq!(Some(directory.as_path()), memory.parent());
+                    if status.is_success() {
+                        std::fs::write(&snapshot, b"vmstate").expect("write snapshot");
+                        std::fs::write(&memory, b"memory").expect("write memory");
+                    }
+                    std::fs::write(directory.join("unexpected"), b"retain")
+                        .expect("write unexpected scratch entry");
+                    *scratch.lock().await = Some(directory);
+                    Ok::<_, Infallible>(
+                        Response::builder()
+                            .status(status)
+                            .body(Full::new(Bytes::from_static(b"snapshot response")))
+                            .expect("response"),
+                    )
+                }
+            });
+            server_http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await
+                .expect("serve");
+            observed_scratch
+                .lock()
+                .await
+                .take()
+                .expect("observed scratch directory")
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_version_binary(path: &Path, output: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, format!("#!/bin/sh\nprintf '%s\\n' '{output}'\n"))
+            .expect("write version binary");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("make version binary executable");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn capture_instance(temp: &tempfile::TempDir, api_socket: PathBuf) -> FirecrackerInstance {
+        let instance_id = Uuid::new_v4();
+        let run_dir = OwnedRunDir::for_test(instance_id, temp.path().join("run"));
+        FirecrackerInstance::new(
+            instance_id,
+            None,
+            Some(FirecrackerCapture::new(
+                api_socket.clone(),
+                Duration::from_secs(1),
+                "Firecracker v1.16.0".to_string(),
+            )),
+            runtime_files(
+                api_socket,
+                PathBuf::new(),
+                temp.path().join("firecracker.pid"),
+                stopped_marker(temp.path()),
+                temp.path().join("network.json"),
+            ),
+            None,
+            Arc::new(NetworkManager::default()),
+        )
+        .with_run_dir(run_dir)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn capture_freezes_the_running_api_version_after_binary_probe() {
+        let temp = tempfile::tempdir().expect("temp");
+        let binary = temp.path().join("firecracker");
+        write_version_binary(&binary, "Firecracker v1.15.0");
+        let spawner = FirecrackerSpawner::new(temp.path().join("images"));
+        assert!(spawner.probe(&binary).await.expect("probe"));
+
+        // Replacing the configured executable after the probe must not change
+        // provenance: the running API is the authority for a capture.
+        write_version_binary(&binary, "Firecracker v1.17.0");
+        let socket = temp.path().join("api.sock");
+        let server = spawn_api_response(
+            &socket,
+            hyper::StatusCode::OK,
+            br#"{"firecracker_version":"1.16.0"}"#.to_vec(),
+            Duration::ZERO,
+        );
+        let capture = FirecrackerCapture::from_running(socket, Duration::from_secs(1))
+            .await
+            .expect("capture API version");
+        server.await.expect("server");
+        assert_eq!(capture.backend_version, "Firecracker v1.16.0");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn probe_checks_each_requested_binary() {
+        let temp = tempfile::tempdir().expect("temp");
+        let valid = temp.path().join("valid");
+        let invalid = temp.path().join("invalid");
+        write_version_binary(&valid, "Firecracker v1.16.0");
+        write_version_binary(&invalid, "not a Firecracker version");
+        let spawner = FirecrackerSpawner::new(temp.path().join("images"));
+
+        assert!(spawner.probe(&valid).await.expect("valid probe"));
+        assert!(!spawner.probe(&invalid).await.expect("invalid probe"));
+
+        write_version_binary(&invalid, "Firecracker v1.17.0");
+        assert!(spawner.probe(&invalid).await.expect("replaced probe"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn instance_reports_version_and_captures_full_snapshot_over_uds() {
+        let temp = tempfile::tempdir().expect("temp");
+        let api_socket = temp.path().join("api.sock");
+        let observed = spawn_api(&api_socket, 3).await;
+        let child = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn child");
+        let instance_id = Uuid::new_v4();
+        let run_dir = OwnedRunDir::for_test(instance_id, temp.path().join("run"));
+        let instance = FirecrackerInstance::new(
+            instance_id,
+            Some(child),
+            Some(FirecrackerCapture::new(
+                api_socket,
+                Duration::from_secs(1),
+                "Firecracker v1.16.0".to_string(),
+            )),
+            runtime_files(
+                temp.path().join("api.sock"),
+                PathBuf::new(),
+                temp.path().join("firecracker.pid"),
+                stopped_marker(temp.path()),
+                temp.path().join("network.json"),
+            ),
+            None,
+            Arc::new(NetworkManager::default()),
+        )
+        .with_run_dir(run_dir);
+        let target = temp.path().join("checkpoint");
+        std::fs::create_dir(&target).expect("checkpoint target");
+        let snapshot_path = target.join("vmstate.snap");
+        let mem_path = target.join("memory.snap");
+
+        assert_eq!(instance.instance_id(), instance_id);
+        assert_eq!(instance.version(), Some("Firecracker v1.16.0"));
+        assert!(instance.supports_checkpoint_capture());
+        instance.pause().await.expect("pause");
+        instance
+            .snapshot(SnapshotRequest {
+                snapshot_path: snapshot_path.clone(),
+                mem_path: mem_path.clone(),
+                kind: SnapshotKind::Full,
+            })
+            .await
+            .expect("snapshot");
+        instance.resume().await.expect("resume");
+
+        let calls = observed.await.expect("observed calls");
+        assert_eq!(
+            calls[0],
+            (
+                Method::PATCH,
+                "/vm".to_string(),
+                serde_json::json!({"state": "Paused"})
+            )
+        );
+        assert_eq!(calls[1].0, Method::PUT);
+        assert_eq!(calls[1].1, "/snapshot/create");
+        assert!(
+            calls[1].2["snapshot_path"]
+                .as_str()
+                .expect("path")
+                .starts_with("/proc/self/fd/")
+        );
+        assert!(
+            calls[1].2["mem_file_path"]
+                .as_str()
+                .expect("path")
+                .starts_with("/proc/self/fd/")
+        );
+        assert_eq!(
+            calls[2],
+            (
+                Method::PATCH,
+                "/vm".to_string(),
+                serde_json::json!({"state": "Resumed"})
+            )
+        );
+        assert_eq!(std::fs::read(&snapshot_path).expect("snapshot"), b"vmstate");
+        assert_eq!(std::fs::read(&mem_path).expect("memory"), b"memory");
+        instance.kill().await.expect("kill");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn snapshot_transfer_uses_inherited_run_and_retained_stage_descriptors() {
+        let temp = tempfile::tempdir().expect("temp");
+        let id = Uuid::new_v4();
+        let configured = temp.path().join("run");
+        let run_dir = OwnedRunDir::for_test(id, configured.clone());
+        let retained = temp.path().join("retained-run");
+        std::fs::rename(&configured, &retained).expect("retain original run directory");
+        std::fs::create_dir(&configured).expect("replace configured runtime path");
+
+        let scratch = SnapshotScratch::new(&run_dir).expect("scratch namespace");
+        let snapshot_child_path = scratch.snapshot_path.clone();
+        let memory_child_path = scratch.memory_path.clone();
+        let mut child = Command::new("sh");
+        run_dir.inherit_into(&mut child);
+        let status = child
+            .arg("-c")
+            .arg("printf vmstate > \"$1\"; printf memory > \"$2\"")
+            .arg("sh")
+            .arg(&snapshot_child_path)
+            .arg(&memory_child_path)
+            .status()
+            .await
+            .expect("run child");
+        assert!(status.success());
+
+        let configured_state = temp.path().join("state");
+        std::fs::create_dir(&configured_state).expect("state root");
+        let checkpoint_store = CheckpointStore::new(StateStore::new(configured_state.clone()));
+        let stage = checkpoint_store.begin(id).expect("checkpoint stage");
+        let snapshot_target = stage
+            .artifact_path("vmstate.snap")
+            .expect("snapshot target");
+        let memory_target = stage.artifact_path("memory.snap").expect("memory target");
+        let retained_state = temp.path().join("retained-state");
+        std::fs::rename(&configured_state, &retained_state).expect("retain opened state root");
+        std::fs::create_dir(&configured_state).expect("replace configured state root");
+        scratch
+            .transfer_into(&snapshot_target, &memory_target)
+            .expect("transfer from retained run directory");
+
+        assert_eq!(
+            std::fs::read(&snapshot_target).expect("snapshot"),
+            b"vmstate"
+        );
+        assert_eq!(std::fs::read(&memory_target).expect("memory"), b"memory");
+        assert!(
+            std::fs::read_dir(&configured)
+                .expect("replacement")
+                .next()
+                .is_none()
+        );
+        assert!(retained.is_dir());
+        assert!(retained_state.is_dir());
+        assert!(
+            std::fs::read_dir(configured_state)
+                .expect("replacement state root")
+                .next()
+                .is_none()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn unknown_snapshot_scratch_is_removed_only_after_backend_stop() {
+        let temp = tempfile::tempdir().expect("temp");
+        let instance_id = Uuid::new_v4();
+        let run_dir = OwnedRunDir::for_test(instance_id, temp.path().join("run"));
+        let api_socket = temp.path().join("api.sock");
+        let server = spawn_snapshot_api_disconnect(&api_socket);
+        let child = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn child");
+        let instance = FirecrackerInstance::new(
+            instance_id,
+            Some(child),
+            Some(FirecrackerCapture::new(
+                api_socket.clone(),
+                Duration::from_secs(1),
+                "Firecracker v1.16.0".to_string(),
+            )),
+            runtime_files(
+                api_socket,
+                PathBuf::new(),
+                temp.path().join("firecracker.pid"),
+                stopped_marker(temp.path()),
+                temp.path().join("network.json"),
+            ),
+            None,
+            Arc::new(NetworkManager::default()),
+        )
+        .with_run_dir(run_dir);
+        let target = temp.path().join("checkpoint");
+        std::fs::create_dir(&target).expect("checkpoint target");
+
+        let error = instance
+            .snapshot(SnapshotRequest {
+                snapshot_path: target.join("vmstate.snap"),
+                mem_path: target.join("memory.snap"),
+                kind: SnapshotKind::Full,
+            })
+            .await
+            .expect_err("response loss makes delivery unknown");
+        let scratch = server.await.expect("server");
+
+        assert!(
+            error.to_string().contains("unknown"),
+            "unknown outcomes must say so: {error}"
+        );
+        assert_eq!(
+            std::fs::read(scratch.join("vmstate.snap")).expect("snapshot"),
+            b"vmstate"
+        );
+        assert_eq!(
+            std::fs::read(scratch.join("memory.snap")).expect("memory"),
+            b"memory"
+        );
+        assert!(!target.join("vmstate.snap").exists());
+        assert!(!target.join("memory.snap").exists());
+
+        instance
+            .kill()
+            .await
+            .expect("stop backend and clean scratch");
+        assert!(!scratch.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn rejected_snapshot_with_uncleanable_scratch_is_unknown() {
+        let temp = tempfile::tempdir().expect("temp");
+        let api_socket = temp.path().join("api.sock");
+        let server = spawn_snapshot_api_with_unexpected_scratch_entry(
+            &api_socket,
+            hyper::StatusCode::BAD_REQUEST,
+        );
+        let instance = capture_instance(&temp, api_socket);
+        let target = temp.path().join("checkpoint");
+        std::fs::create_dir(&target).expect("checkpoint target");
+
+        let error = instance
+            .snapshot(SnapshotRequest {
+                snapshot_path: target.join("vmstate.snap"),
+                mem_path: target.join("memory.snap"),
+                kind: SnapshotKind::Full,
+            })
+            .await
+            .expect_err("scratch cleanup failure must be unsafe to compensate");
+        let scratch = server.await.expect("server");
+
+        assert!(
+            error.to_string().contains("unknown"),
+            "unknown outcomes must say so: {error}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("400 Bad Request"));
+        assert!(message.contains("could not clean its checkpoint scratch"));
+        assert!(scratch.join("unexpected").is_file());
+        assert!(!target.join("vmstate.snap").exists());
+        assert!(!target.join("memory.snap").exists());
+
+        std::fs::remove_file(scratch.join("unexpected")).expect("remove unexpected entry");
+        instance.kill().await.expect("clean retained scratch");
+        assert!(!scratch.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn completed_transfer_with_uncleanable_scratch_is_unknown() {
+        let temp = tempfile::tempdir().expect("temp");
+        let api_socket = temp.path().join("api.sock");
+        let server =
+            spawn_snapshot_api_with_unexpected_scratch_entry(&api_socket, hyper::StatusCode::OK);
+        let instance = capture_instance(&temp, api_socket);
+        let target = temp.path().join("checkpoint");
+        std::fs::create_dir(&target).expect("checkpoint target");
+
+        let error = instance
+            .snapshot(SnapshotRequest {
+                snapshot_path: target.join("vmstate.snap"),
+                mem_path: target.join("memory.snap"),
+                kind: SnapshotKind::Full,
+            })
+            .await
+            .expect_err("completed transfer cannot hide scratch cleanup failure");
+        let scratch = server.await.expect("server");
+
+        assert!(
+            error.to_string().contains("unknown"),
+            "unknown outcomes must say so: {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("completed snapshot transfer could not clean its checkpoint scratch")
+        );
+        assert_eq!(
+            std::fs::read(target.join("vmstate.snap")).expect("snapshot target"),
+            b"vmstate"
+        );
+        assert_eq!(
+            std::fs::read(target.join("memory.snap")).expect("memory target"),
+            b"memory"
+        );
+        assert!(scratch.join("vmstate.snap").is_file());
+        assert!(scratch.join("memory.snap").is_file());
+        assert!(scratch.join("unexpected").is_file());
+
+        std::fs::remove_file(scratch.join("unexpected")).expect("remove unexpected entry");
+        instance.kill().await.expect("clean retained scratch");
+        assert!(!scratch.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn api_client_reports_non_success_response_body() {
+        let temp = tempfile::tempdir().expect("temp");
+        let socket = temp.path().join("api.sock");
+        let server = spawn_api_response(
+            &socket,
+            hyper::StatusCode::BAD_REQUEST,
+            b"invalid VM state".to_vec(),
+            Duration::ZERO,
+        );
+        let client = FirecrackerApiClient::new(socket, Duration::from_secs(1));
+
+        let error = client
+            .call_json(Method::PATCH, "/vm", None)
+            .await
+            .expect_err("non-success response");
+        server.await.expect("server");
+
+        assert!(matches!(&error, FirecrackerApiError::Known(_)));
+        let message = error.into_error().to_string();
+        assert!(message.contains("400 Bad Request"));
+        assert!(message.contains("invalid VM state"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn api_client_classifies_disconnect_after_delivery_as_unknown() {
+        let temp = tempfile::tempdir().expect("temp");
+        let socket = temp.path().join("api.sock");
+        let server = spawn_api_disconnect(&socket);
+        let client = FirecrackerApiClient::new(socket, Duration::from_secs(1));
+
+        let error = client
+            .call_json(
+                Method::PATCH,
+                "/vm",
+                Some(serde_json::json!({"state": "Paused"})),
+            )
+            .await
+            .expect_err("disconnect after delivery");
+        server.await.expect("server");
+
+        assert!(matches!(error, FirecrackerApiError::Unknown(_)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn api_client_rejects_an_oversized_response() {
+        let temp = tempfile::tempdir().expect("temp");
+        let socket = temp.path().join("api.sock");
+        let server = spawn_api_response(
+            &socket,
+            hyper::StatusCode::OK,
+            vec![b'x'; MAX_API_RESPONSE_BYTES + 1],
+            Duration::ZERO,
+        );
+        let client = FirecrackerApiClient::new(socket, Duration::from_secs(1));
+
+        let error = client
+            .call_json(Method::GET, "/vm", None)
+            .await
+            .expect_err("oversized response");
+        server.await.expect("server");
+
+        assert!(matches!(&error, FirecrackerApiError::Unknown(_)));
+        assert!(
+            error
+                .into_error()
+                .to_string()
+                .contains("response exceeded 65536 bytes")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn api_client_times_out_a_stalled_response() {
+        let temp = tempfile::tempdir().expect("temp");
+        let socket = temp.path().join("api.sock");
+        let server = spawn_api_response(
+            &socket,
+            hyper::StatusCode::OK,
+            Vec::new(),
+            Duration::from_millis(200),
+        );
+        let client = FirecrackerApiClient::new(socket, Duration::from_millis(20));
+
+        let error = client
+            .call_json(Method::GET, "/vm", None)
+            .await
+            .expect_err("stalled response");
+        server.await.expect("server");
+
+        assert!(matches!(&error, FirecrackerApiError::Unknown(_)));
+        assert!(
+            error
+                .into_error()
+                .to_string()
+                .contains("timed out after 20ms")
+        );
     }
 }

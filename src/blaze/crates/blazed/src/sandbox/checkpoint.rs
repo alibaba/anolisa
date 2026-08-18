@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use blaze_core::backend::{SnapshotKind, SnapshotRequest};
+use blaze_core::backend::{BackendKind, SnapshotKind, SnapshotRequest};
 use blaze_core::checkpoint::{CheckpointInfo, CheckpointMetadata, CommitCheckpoint};
 use blaze_core::lifecycle::{OperationPhase, SandboxInstance, SandboxState};
 use tokio::sync::OwnedMutexGuard;
@@ -120,6 +120,7 @@ impl SandboxManager {
         if backend_version
             .as_deref()
             .is_some_and(|version| version.trim().is_empty())
+            || (backend.backend() == BackendKind::Firecracker && backend_version.is_none())
         {
             return Err(BlazeDaemonError::UnsupportedOperation(format!(
                 "instance {id} backend {} does not report a usable checkpoint version",
