@@ -340,15 +340,19 @@ _cosh_classify_missing() {
     printf '%s' "unsafe"
     return 0
   fi
-  _cosh_utf8_han_status "$original"
-  original_han_status=$?
+  # Guarded calls: the classifier runs inside $(...) substitutions whose
+  # subshells inherit the user's errexit; a bare helper call returning 1
+  # (plain ASCII) would abort the subshell before printf and drift the
+  # intent under `set -e`. Conditional context keeps the tri-state.
+  original_han_status=0
+  _cosh_utf8_han_status "$original" || original_han_status=$?
   if (( original_han_status == 2 )); then
     printf '%s' "unsafe"
     return 0
   fi
 
-  _cosh_utf8_han_status "$top_token"
-  top_han_status=$?
+  top_han_status=0
+  _cosh_utf8_han_status "$top_token" || top_han_status=$?
   if (( top_han_status == 2 )); then
     printf '%s' "unsafe"
     return 0
