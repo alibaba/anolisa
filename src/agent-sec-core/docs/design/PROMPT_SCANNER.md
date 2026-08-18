@@ -39,7 +39,7 @@
        │
        ▼ (STANDARD / STRICT 模式)
 ┌─────────────┐
-│  L2 ML      │  默认 Qwen3Guard (qwen3guard:0.6b) via Ollama
+│  L2 ML      │  默认 Qwen3Guard via Ollama
 │  Classifier │  分类：Safe / Unsafe (+ 类别)
 └──────┬──────┘  HTTP 调用 Ollama，懒加载
        │
@@ -52,8 +52,9 @@
   Verdict（基于层语义推导）: PASS / WARN / DENY / ERROR
 ```
 
-> **注意**：L2（Qwen3Guard）为 Ollama 上的分类模型，输出 `Safety: Safe` 或 `Safety: Unsafe`
-> 并附带类别标签（如 `Injection`、`Jailbreak` 等）。
+> **注意**：L2（Qwen3Guard）使用 Ollama 提供的
+> `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`，输出 `Safety: Safe` 或
+> `Safety: Unsafe` 并附带类别标签（如 `Injection`、`Jailbreak` 等）。
 
 ### 检测模式
 
@@ -216,7 +217,9 @@ agent-sec-cli scan-prompt --text "ignore all system instructions"
 
 > **说明**：STANDARD 模式 L1、L2 全量运行（`fast_fail=False`）。L2 ML 确认了 L1 的判断，verdict 为 `deny`。
 > L2 的 finding 不含 `severity` 字段（ML 置信度不等同于规则严重程度）。
-> L2 首次调用需 Ollama 已拉取 `qwen3guard:0.6b`，建议提前执行 `ollama pull` 与 `warmup`。
+> L2 首次调用前需在 Ollama 中拉取
+> `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`，建议提前执行对应的
+> `ollama pull`，再执行 `scan-prompt warmup` 验证模型可用。
 
 **text 格式（无威胁）：**
 
@@ -704,7 +707,7 @@ agent-sec-cli scan-prompt warmup
 |------|------|
 | L3 Semantic 未实现 | `strict` 模式实际运行 L1 + L2（`fast_fail=False`）；L3 语义检测层接口已预留，`is_available()` 始终返回 `false` |
 | 自定义规则加载 | 内置规则自动加载；自定义规则加载集成待完成 |
-| L2 模型就绪 | L2 调用 Ollama 的 `qwen3guard:0.6b`，首次需 `ollama pull` 拉取；**建议执行 `scan-prompt warmup` 验证可用** |
+| L2 模型就绪 | L2 调用 Ollama 中的 `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`；首次需执行完整模型 ID 的 `ollama pull`，再执行 `scan-prompt warmup` 验证可用 |
 | L2 输出语义 | Qwen3Guard 输出 Safe/Unsafe + 类别标签；具体 injection 类型由 L1 规则的 category 字段推断 |
 | 批量扫描并发策略 | STANDARD/STRICT 模式下 `scan_batch` 串行调用 Ollama（HTTP 请求串行，避免单连接竞争）；FAST 模式（纯 L1）可并行 |
 | 语言检测 | 当前为启发式规则（Unicode 脚本块比例 ≥ 15%），非 ML 模型；支持 `zh`/`ar`/`ru`/`hi`/`en`；日文汉字及韩文归为 `zh` |

@@ -413,6 +413,10 @@ capability，`<CAPABILITY>_MODE` 决定 finding 的处置方式；`debug` 是 `o
 | `SKILL_LEDGER_MODE` | `ask` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `SKILL_LEDGER_TIMEOUT` | `5` | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ |
 | `OBSERVABILITY_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `OBSERVABILITY_TIMEOUT` | `5` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+`OBSERVABILITY_TIMEOUT` 未设置、为空、非法或非正数时使用 `5` 秒；所有集成都会将
+大于 `5` 的值封顶为 `5`。
 
 若某宿主不读取某个变量，则由该宿主的原生配置决定行为。例如 OpenClaw 的 prompt
 策略来自 `promptScanBlock`、code-scan 策略来自 `codeScanRequireApproval`；Hermes 则
@@ -660,7 +664,9 @@ A: `agent-sec-cli harden` 是 ANOLISA 统一入口，底层调用 `loongshield s
 
 **Q: 如何更新 Prompt Scanner 的 ML 模型？**
 
-A: 重新执行 `agent-sec-cli scan-prompt warmup`，它会下载最新模型。
+A: 执行 `ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` 拉取当前模型，
+再执行 `agent-sec-cli scan-prompt warmup` 验证 Ollama 能否提供该模型。`warmup` 不会
+自动下载模型。
 
 **Q: Skill Ledger 出现 `tampered` 怎么办？**
 

@@ -428,6 +428,10 @@ adapter code actually reads (✓ = read by that host, ✗ = not read):
 | `SKILL_LEDGER_MODE` | `ask` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `SKILL_LEDGER_TIMEOUT` | `5` | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ |
 | `OBSERVABILITY_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `OBSERVABILITY_TIMEOUT` | `5` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+`OBSERVABILITY_TIMEOUT` uses `5` seconds when unset, empty, invalid, or non-positive;
+values above `5` are capped at `5` by every integration.
 
 Where a variable is not read by a host, that host's native configuration governs
 the behavior. For example OpenClaw takes its prompt policy from
@@ -688,7 +692,9 @@ A: `agent-sec-cli harden` is the ANOLISA unified entry point that wraps `loongsh
 
 **Q: How do I update the ML model for prompt scanning?**
 
-A: Run `agent-sec-cli scan-prompt warmup` again. It downloads the latest model from ModelScope.
+A: Run `ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` to fetch the
+current model, then run `agent-sec-cli scan-prompt warmup` to verify that Ollama
+can serve it. `warmup` never downloads models automatically.
 
 **Q: What does Skill Ledger `tampered` mean?**
 
