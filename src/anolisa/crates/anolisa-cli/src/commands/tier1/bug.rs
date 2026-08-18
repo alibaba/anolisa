@@ -107,12 +107,14 @@ fn build_payload(
     ctx: &CliContext,
 ) -> Result<BugReportPayload, CliError> {
     let environment = collect_environment(ctx);
-    // Resolve component alias before filtering state and logs.
-    let resolved = component.map(|name| {
-        let state = common::load_state_store(ctx, COMMAND)
-            .unwrap_or_else(|_| anolisa_core::state_store::StateStore::empty());
-        common::lookup_component_name_in_store(name, &state, ctx, COMMAND)
-    });
+    // Resolve the component identity before filtering state and logs.
+    let resolved = component
+        .map(|name| {
+            let state = common::load_state_store(ctx, COMMAND)
+                .unwrap_or_else(|_| anolisa_core::state_store::StateStore::empty());
+            common::lookup_component_name_in_store(name, &state, ctx, COMMAND)
+        })
+        .transpose()?;
     let components = collect_components(resolved.as_deref(), ctx)?;
     let recent_logs = collect_recent_logs(resolved.as_deref(), limit, ctx)?;
     let markdown = render_markdown(&environment, &components, &recent_logs);

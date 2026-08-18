@@ -1443,6 +1443,14 @@ mod tests {
         let root = prefix
             .as_deref()
             .expect("stateful uninstall tests require an isolated prefix");
+        // Identity resolution consults the component index for names absent
+        // from state; a seeded local index keeps fixture names supported.
+        if install_mode == InstallMode::System {
+            crate::commands::tier1::install::tests::seed_repo_config_with_index(
+                &anolisa_platform::fs_layout::FsLayout::system(Some(root.to_path_buf())),
+                crate::commands::tier1::install::tests::TEST_INDEX_COMPONENTS,
+            );
+        }
         crate::test_support::context_for_root(
             root,
             install_mode,

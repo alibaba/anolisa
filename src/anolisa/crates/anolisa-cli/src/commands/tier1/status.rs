@@ -48,7 +48,7 @@ use crate::commands::tier1::install::rpm_package_candidates_with_index;
 use crate::context::{CliContext, InstallMode};
 use crate::repo_config::BackendConfig;
 use crate::resolution::{
-    ComponentIndex, ResolutionUse, load_optional_component_index, lookup_component_alias,
+    ComponentIndex, IndexIdentity, load_optional_component_index, resolve_index_identity,
 };
 use crate::response::{CliError, render_json};
 
@@ -271,40 +271,34 @@ fn resolve_component_target(
         return Ok(input.to_string());
     }
 
-    if let Some(index) = component_index {
-        if index.components.iter().any(|entry| entry.name == input) {
-            return Ok(input.to_string());
+    // Exhaustive on the verdict so a future `IndexIdentity` variant is a
+    // compile error here instead of silently collapsing into one refusal.
+    match resolve_index_identity(input, component_index) {
+        IndexIdentity::Resolved(component) => Ok(component),
+        IndexIdentity::Unsupported => {
+            reject_telemetry_service_target(input)?;
+            Err(common::unsupported_component_error(COMMAND, input))
         }
-        if let Some(component) = lookup_component_alias(input, Some(index)) {
-            return Ok(component);
+        IndexIdentity::Unavailable => {
+            reject_telemetry_service_target(input)?;
+            Err(common::component_index_unavailable_error(COMMAND, input))
         }
     }
+}
 
-    let management_command = status_command_for_service_target(input);
-    if let Some(command) = management_command {
-        return Err(CliError::InvalidArgument {
+/// A telemetry service name is a management target, not a component; the
+/// redirect outranks both generic refusals so the guidance stays useful
+/// whether or not an index could be loaded.
+fn reject_telemetry_service_target(input: &str) -> Result<(), CliError> {
+    match status_command_for_service_target(input) {
+        Some(command) => Err(CliError::InvalidArgument {
             command: COMMAND.to_string(),
             reason: format!(
                 "unsupported component '{input}'; run `{command}` to inspect telemetry state"
             ),
-        });
+        }),
+        None => Ok(()),
     }
-
-    if component_index.is_some() {
-        return Err(CliError::InvalidArgument {
-            command: COMMAND.to_string(),
-            reason: format!(
-                "unsupported component '{input}'; run `anolisa list` to view supported components"
-            ),
-        });
-    }
-
-    Err(CliError::Runtime {
-        command: COMMAND.to_string(),
-        reason: format!(
-            "component index is unavailable; cannot validate component '{input}'; run `anolisa list` to inspect repository metadata"
-        ),
-    })
 }
 
 /// Project the quarantined records of every visible root, optionally
@@ -568,15 +562,9 @@ fn observed_record(
 ) -> Option<ComponentRecord> {
     // Same resolver as adopt (§5), minus the CLI `--package` override (status
     // takes no such flag).
-    let candidates = rpm_package_candidates_with_index(
-        None,
-        rpm_backend,
-        component_index,
-        query,
-        component,
-        ResolutionUse::StatusObserved,
-    )
-    .ok()?;
+    let candidates =
+        rpm_package_candidates_with_index(None, rpm_backend, component_index, query, component)
+            .ok()?;
     for target in candidates {
         let Ok(Some(info)) = query.query_installed(&target.package) else {
             // Not this candidate (absent), or a hard error / multi-version
@@ -1202,7 +1190,6 @@ mod tests {
     use super::*;
     use crate::commands::state_view::{ScopedStateRoot, StateScope, StateView};
     use crate::repo_config::RepoConfig;
-    use crate::resolution::resolve_rpm_component_name;
     use anolisa_core::{
         FileOwner, HealthEntry, InstalledObject, InstalledState, NotSupportedServiceManager,
         ObjectKind, ObjectStatus, OwnedFile, OwnedFileKind, SubscriptionScope,
@@ -3003,15 +2990,19 @@ name = "copilot-shell"
                 .find(|(n, _)| n == package)
                 .map(|(_, r)| r.clone()))
         }
-        fn provided_capabilities_installed(
+        fn what_provides_installed(
             &self,
-            package: &str,
+            capability: &str,
         ) -> Result<Vec<String>, PackageQueryError> {
-            if self.installed.iter().any(|(n, _)| n == package) {
-                Ok(vec![format!("anolisa-component({package})")])
-            } else {
-                Ok(Vec::new())
-            }
+            // Fake convention: every installed package provides
+            // `anolisa-component(<its own name>)`.
+            Ok(capability
+                .strip_prefix("anolisa-component(")
+                .and_then(|rest| rest.strip_suffix(')'))
+                .into_iter()
+                .filter(|name| self.installed.iter().any(|(n, _)| n == name))
+                .map(str::to_string)
+                .collect())
         }
     }
 
@@ -3050,19 +3041,6 @@ name = "copilot-shell"
             "components.toml",
         )
         .expect("component index");
-        let q = FakeQuery::default();
-
-        assert_eq!(
-            resolve_rpm_component_name(
-                "copilot-shell",
-                None,
-                Some(&idx),
-                &q,
-                ResolutionUse::StatusObserved,
-            )
-            .unwrap_or_else(|| "copilot-shell".to_string()),
-            "cosh"
-        );
 
         let mut state = InstalledState::default();
         state.upsert_object(component_object(
@@ -3070,14 +3048,11 @@ name = "copilot-shell"
             "2.6.0-1.alnx4",
             ObjectStatus::Installed,
         ));
-        let resolved = resolve_rpm_component_name(
-            "copilot-shell",
-            None,
-            Some(&idx),
-            &q,
-            ResolutionUse::StatusObserved,
-        )
-        .unwrap_or_else(|| "copilot-shell".to_string());
+        let resolved = match resolve_index_identity("copilot-shell", Some(&idx)) {
+            IndexIdentity::Resolved(component) => component,
+            other => panic!("expected the alias to resolve, got {other:?}"),
+        };
+        assert_eq!(resolved, "cosh");
         let records = select_components(
             &store_with(&state),
             &dummy_layout(),

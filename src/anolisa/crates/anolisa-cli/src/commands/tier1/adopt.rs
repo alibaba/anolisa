@@ -39,7 +39,7 @@ use crate::commands::tier1::install::{
 use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install;
 use crate::context::{CliContext, InstallMode};
-use crate::resolution::{ResolutionUse, load_optional_component_index};
+use crate::resolution::load_optional_component_index;
 use crate::response::{CliError, render_json};
 
 /// Command label for JSON envelopes and error routing.
@@ -130,7 +130,7 @@ pub(crate) fn adopt_with_query(
     let now = now_iso8601();
     let env = anolisa_env::EnvService::detect();
 
-    let (mut component, view) = common::resolve_mutation_target(target, ctx, &command)?;
+    let (component, view) = common::resolve_adopt_target(target, ctx, &command)?;
     let store = view.writable.state;
 
     // Quarantined records and pending journals decide the outcome before any
@@ -213,7 +213,7 @@ pub(crate) fn adopt_with_query(
                 // (its first guard), so nothing touches the rpmdb here.
                 (None, AdoptShape::Fresh)
             } else {
-                let (package, resolved_component) = resolve_fresh_adopt(
+                let package = resolve_fresh_adopt(
                     cli_override,
                     ctx,
                     &layout,
@@ -222,7 +222,6 @@ pub(crate) fn adopt_with_query(
                     query,
                     &command,
                 )?;
-                component = resolved_component;
                 (Some(package), AdoptShape::Fresh)
             }
         }
@@ -300,11 +299,12 @@ pub(crate) fn adopt_with_query(
     )
 }
 
-/// Candidate-chain resolution for a component with no record: CLI
+/// Candidate-chain package resolution for a component with no record: CLI
 /// `--package` override, repo-side component index, repo.toml `package_map`,
-/// then rpmdb Provides metadata. repo.toml is supplementary here, so an
-/// unreadable config degrades to "no rpm backend config" rather than
-/// failing the adopt.
+/// then rpmdb Provides metadata. The component identity is already settled;
+/// this only selects the RPM package that backs it. repo.toml is
+/// supplementary here, so an unreadable config degrades to "no rpm backend
+/// config" rather than failing the adopt.
 fn resolve_fresh_adopt(
     cli_override: Option<&str>,
     ctx: &CliContext,
@@ -313,7 +313,7 @@ fn resolve_fresh_adopt(
     component: &str,
     query: &dyn PackageQuery,
     command: &str,
-) -> Result<(String, String), CliError> {
+) -> Result<String, CliError> {
     let repo_config =
         common::load_repo_config(ctx, layout, COMMAND, RepoPersistPolicy::BestEffort).ok();
     let rpm_backend = repo_config.as_ref().and_then(|c| c.backends.get("rpm"));
@@ -327,7 +327,6 @@ fn resolve_fresh_adopt(
         component_index.as_ref(),
         query,
         component,
-        ResolutionUse::Adopt,
     )
     .map_err(|err| match err {
         PackageQueryError::CommandMissing { command: bin } => {
@@ -339,10 +338,10 @@ fn resolve_fresh_adopt(
         [] => Err(CliError::InvalidArgument {
             command: command.to_string(),
             reason: format!(
-                "component '{component}' is not an ANOLISA RPM component; configure the repo-side component index or publish Provides: anolisa-component({component})"
+                "no RPM package is mapped for component '{component}'; add an rpm backend entry to the repo-side component index or publish Provides: anolisa-component({component})"
             ),
         }),
-        [single] => Ok((single.package.clone(), single.component.clone())),
+        [single] => Ok(single.package.clone()),
         many => Err(CliError::InvalidArgument {
             command: command.to_string(),
             reason: format!(
@@ -701,6 +700,7 @@ mod tests {
         InstallMode as StateInstallMode, InstalledObject, InstalledState, ObjectStatus, Ownership,
         RpmMetadata,
     };
+    use anolisa_core::transaction::{Transaction, TransactionOutcomeStatus};
     use anolisa_platform::pkg_query::{PackageInfo, PackageQueryError, PackageVersion};
 
     /// In-memory [`PackageQuery`] for the adopt tests. Adopt runs no
@@ -853,14 +853,17 @@ mod tests {
         )
     }
 
-    fn package_component_provide(package: &str, component: &str) -> (String, Vec<String>) {
-        (
-            package.to_string(),
-            vec![format!("anolisa-component({component})")],
-        )
-    }
-
     fn ctx(prefix: PathBuf, install_mode: InstallMode, dry_run: bool) -> CliContext {
+        // Identity resolution consults the component index for fresh adopt
+        // targets; a seeded local index keeps fixture names supported. The
+        // user-mode refusal test asserts an untouched prefix, so only the
+        // system-mode fixtures seed it.
+        if install_mode == InstallMode::System {
+            crate::commands::tier1::install::tests::seed_repo_config_with_index(
+                &anolisa_platform::fs_layout::FsLayout::system(Some(prefix.clone())),
+                crate::commands::tier1::install::tests::TEST_INDEX_COMPONENTS,
+            );
+        }
         crate::test_support::context_for_root(
             &prefix,
             install_mode,
@@ -970,7 +973,7 @@ mod tests {
                 "copilot-shell".to_string(),
                 pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64"),
             )],
-            package_provides: vec![package_component_provide("copilot-shell", "copilot-shell")],
+            provides: vec![component_provider("copilot-shell", "copilot-shell")],
             origins: vec![("copilot-shell".to_string(), "@System".to_string())],
             ..Default::default()
         };
@@ -1342,7 +1345,7 @@ mod tests {
                 "copilot-shell".to_string(),
                 pkg_info("copilot-shell", "2.2.0", Some("1.al8"), "x86_64"),
             )],
-            package_provides: vec![package_component_provide("copilot-shell", "copilot-shell")],
+            provides: vec![component_provider("copilot-shell", "copilot-shell")],
             ..Default::default()
         };
         adopt_with_query("copilot-shell", None, &c, &q).expect("dry-run ok");
@@ -1366,6 +1369,124 @@ mod tests {
         let err = adopt_with_query("cosh", Some("copilot-shell"), &c, &q)
             .expect_err("adopt must not bypass a pending managed install");
         assert!(err.reason().contains("repair cosh"));
+    }
+
+    /// Historical evidence that is not an exact component identity must not
+    /// authorize an adopt once the component index cannot vouch for the name
+    /// (issue #2630): a terminal journal left behind by a finished operation
+    /// and a dropped legacy capability row both fail identity validation
+    /// before the candidate chain runs, even though a `package_map` entry or
+    /// rpmdb Provides metadata could still resolve a package — otherwise a
+    /// fresh adopt would mint a component record the index never authorized.
+    #[test]
+    fn historical_state_evidence_does_not_authorize_adopt_identity() {
+        for fixture in ["terminal-journal", "legacy-capability"] {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+            let layout = common::resolve_layout(&c);
+            let state_path = layout.state_dir.join("installed.toml");
+            std::fs::create_dir_all(&layout.state_dir).expect("state dir");
+            // Bait for both fixtures: rpmdb Provides and an installed package
+            // could back the name if the candidate chain were ever consulted.
+            let q = FakeQuery {
+                installed: vec![(
+                    "ghost-pkg".to_string(),
+                    pkg_info("ghost-pkg", "1.0.0", Some("1.al8"), "x86_64"),
+                )],
+                provides: vec![component_provider("ghost", "ghost-pkg")],
+                ..Default::default()
+            };
+            let (expected_code, expected_reason) = match fixture {
+                "terminal-journal" => {
+                    // The seeded index stays available but does not know
+                    // "ghost"; a package_map entry additionally baits the
+                    // candidate chain.
+                    std::fs::write(
+                        layout.etc_dir.join("repo.toml"),
+                        format!(
+                            "schema_version = 1\ndefault_backend = \"raw\"\n\n\
+                             [backends.raw]\nbase_url = \"file://{}\"\n\n\
+                             [backends.rpm]\nbase_url = \"https://repo.example/anolisa\"\n\n\
+                             [backends.rpm.package_map]\nghost = \"ghost-pkg\"\n",
+                            layout.etc_dir.join("test-index-repo").join("v1").display()
+                        ),
+                    )
+                    .expect("write repo.toml");
+                    let mut journal = Transaction::begin_with_subject(
+                        "install",
+                        Some("ghost"),
+                        state_path.clone(),
+                        &rpm_install::journal_dir(&layout),
+                    )
+                    .expect("begin subject journal");
+                    journal
+                        .finish(TransactionOutcomeStatus::Failed)
+                        .expect("finish journal");
+                    ("INVALID_ARGUMENT", "unsupported component 'ghost'")
+                }
+                _ => {
+                    // No repository publishes an index, so nothing can
+                    // validate the name; the dropped capability row must not
+                    // stand in for that validation.
+                    std::fs::write(
+                        layout.etc_dir.join("repo.toml"),
+                        format!(
+                            "schema_version = 1\ndefault_backend = \"raw\"\n\n\
+                             [backends.raw]\nbase_url = \"file://{}\"\n",
+                            tmp.path().join("no-such-repo/v1").display()
+                        ),
+                    )
+                    .expect("write repo.toml");
+                    seed(
+                        &c,
+                        vec![InstalledObject {
+                            kind: ObjectKind::Capability,
+                            name: "ghost".to_string(),
+                            version: "0.1.0".to_string(),
+                            status: ObjectStatus::Installed,
+                            manifest_digest: None,
+                            distribution_source: None,
+                            raw_package: None,
+                            install_backend: None,
+                            ownership: None,
+                            rpm_metadata: None,
+                            installed_at: "2026-06-01T10:00:00Z".to_string(),
+                            last_operation_id: None,
+                            managed: true,
+                            adopted: false,
+                            subscription_scope: Default::default(),
+                            enabled_features: Vec::new(),
+                            component_refs: Vec::new(),
+                            files: Vec::new(),
+                            external_modified_files: Vec::new(),
+                            services: Vec::new(),
+                            health: Vec::new(),
+                            provisioned_packages: Vec::new(),
+                        }],
+                    );
+                    ("EXECUTION_FAILED", "component index is unavailable")
+                }
+            };
+
+            let err = adopt_with_query("ghost", None, &c, &q)
+                .expect_err("historical evidence must not authorize the adopt identity");
+            assert_eq!(err.code(), expected_code, "fixture: {fixture}");
+            assert!(
+                err.reason().contains(expected_reason),
+                "identity validation must reject the name (fixture: {fixture}): {}",
+                err.reason()
+            );
+            assert_eq!(
+                q.calls.get(),
+                0,
+                "the refusal must precede any rpmdb resolution (fixture: {fixture})"
+            );
+            let store = StateStore::load(&state_path, 0).expect("load state");
+            assert!(
+                store.find(ObjectKind::Component, "ghost").is_none(),
+                "no component record may be written (fixture: {fixture})"
+            );
+        }
     }
 
     /// `--package` pins the RPM name, bypassing the candidate chain.

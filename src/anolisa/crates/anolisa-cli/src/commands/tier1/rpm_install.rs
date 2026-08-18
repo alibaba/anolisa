@@ -118,6 +118,51 @@ fn has_legacy_state_marker(step: &TransactionStep) -> bool {
     step.phase == STATE_PHASE || step.action == STATE_ACTION
 }
 
+/// Whether one journal claims `component` as its recorded state identity:
+/// an explicit subject attribution or a legacy `rpm-state` step.
+fn journal_claims(entry: &anolisa_core::facts::JournalEntry, component: &str) -> bool {
+    entry.transaction().subject.as_deref() == Some(component)
+        || entry
+            .transaction()
+            .steps
+            .iter()
+            .any(|step| has_legacy_state_marker(step) && step.target == component)
+}
+
+/// Whether any journal on disk claims `component` as its recorded state
+/// identity.
+///
+/// Mutation identity resolution treats such a claim as exact local state, so
+/// an interrupted (or still-uncleared) operation stays addressable under its
+/// recorded name even when the component index cannot validate it
+/// (issue #2630). Deliberately not gated on the pending flag — a terminal
+/// journal that repair has yet to clear still names the component.
+pub(crate) fn journal_claims_component(
+    inventory: &anolisa_core::facts::JournalInventory,
+    component: &str,
+) -> bool {
+    inventory
+        .entries()
+        .iter()
+        .any(|entry| journal_claims(entry, component))
+}
+
+/// [`journal_claims_component`] restricted to effectively-pending journals.
+///
+/// Install uses this narrower claim: only a pending operation needs to reach
+/// its recovery guidance, while a terminal journal left behind by a finished
+/// operation must not keep authorizing an identity the component index no
+/// longer recognizes.
+pub(crate) fn pending_journal_claims_component(
+    inventory: &anolisa_core::facts::JournalInventory,
+    component: &str,
+) -> bool {
+    inventory
+        .entries()
+        .iter()
+        .any(|entry| entry.is_effectively_pending() && journal_claims(entry, component))
+}
+
 /// Find one live RPM claim matching a component or package alias.
 ///
 /// `operations` is the operation history the claims are checked against; the

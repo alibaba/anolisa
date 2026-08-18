@@ -40,6 +40,7 @@ use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install;
 use crate::context::CliContext;
 use crate::progress::{self, Activity};
+use crate::repo_config::RepoConfig;
 use crate::resolution::ComponentIndex;
 use crate::response::{CliError, render_json, render_json_with_status};
 
@@ -52,8 +53,8 @@ use super::{COMMAND, InstallArgs};
 use super::io_util::now_iso8601;
 use super::{
     PlannedComponent, PlannedRoute, RpmdbProbe, handle_one, handle_one_with_planned_components,
-    host_backends, plan_component, quarantined, require_configured_rpm_backend,
-    revalidate_native_absence, step_label,
+    host_backends, normalized_repo_override, plan_component, quarantined,
+    require_configured_rpm_backend, revalidate_native_absence, step_label,
 };
 // ── --all support ───────────────────────────────────────────────────
 
@@ -93,7 +94,9 @@ pub(crate) fn handle_all(args: InstallArgs, ctx: &CliContext) -> Result<(), CliE
         progress::feedback_for_stderr(ctx.json, ctx.quiet),
         "Preparing batch installation...",
     );
-    let names = resolve_all_components(ctx, args.backend.as_deref())?;
+    let index_base_override = normalized_repo_override(&args)?;
+    let names =
+        resolve_all_components(ctx, args.backend.as_deref(), index_base_override.as_deref())?;
     if names.is_empty() {
         activity.finish();
         if !ctx.quiet && !ctx.json {
@@ -518,7 +521,13 @@ fn execute_merged_group_with_deps(
             Ok(config) => config,
             Err(err) => return all_failed(&group, &err.reason()),
         };
-    if let Err(err) = require_configured_rpm_backend(&repo_config, BATCH_COMMAND) {
+    let index_base_override = match normalized_repo_override(args) {
+        Ok(override_url) => override_url,
+        Err(err) => return all_failed(&group, &err.reason()),
+    };
+    if let Err(err) =
+        require_configured_rpm_backend(&repo_config, index_base_override.as_deref(), BATCH_COMMAND)
+    {
         return all_failed(&group, &err.reason());
     }
     if !is_root {
@@ -856,28 +865,46 @@ fn component_names_for_target(
 pub(crate) fn resolve_all_components(
     ctx: &CliContext,
     backend: Option<&str>,
+    index_base_override: Option<&str>,
 ) -> Result<Vec<String>, CliError> {
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
     let repo_config =
         common::load_repo_config(ctx, &layout, "install --all", RepoPersistPolicy::Require)?;
-    let index =
-        crate::resolution::load_component_index(&layout, &env, &repo_config).map_err(|err| {
-            CliError::Runtime {
+    // A `--repo` override's published index is the enumeration authority,
+    // matching identity and package resolution for each member install.
+    let index = match index_base_override {
+        Some(base_url) => crate::resolution::load_component_index_from_base(&layout, base_url),
+        None => crate::resolution::load_component_index(&layout, &env, &repo_config),
+    }
+    .map_err(|err| CliError::Runtime {
+        command: "install --all".to_string(),
+        reason: format!("failed to load component index: {err}"),
+    })?;
+    // An override enumerates its own published index and pins the DNF/raw
+    // source, so an explicitly named backend need not be configured in
+    // repo.toml — the name only filters index rows by backend kind. It must
+    // still be a known backend: a typo yields the same INVALID_ARGUMENT as
+    // the single-component path, never a successful empty batch.
+    let selected_backend = match (index_base_override, backend) {
+        (Some(_), Some(name)) => RepoConfig::known_backend_name(name)
+            .map_err(|err| CliError::InvalidArgument {
                 command: "install --all".to_string(),
-                reason: format!("failed to load component index: {err}"),
-            }
-        })?;
-    let (selected_backend, _) =
-        repo_config
+                reason: format!("{err}"),
+            })?
+            .to_string(),
+        _ => repo_config
             .select_backend(backend)
             .map_err(|err| CliError::InvalidArgument {
                 command: "install --all".to_string(),
                 reason: format!("{err}"),
-            })?;
+            })?
+            .0
+            .to_string(),
+    };
     Ok(component_names_for_target(
         &index,
-        selected_backend,
+        &selected_backend,
         &env.os,
         &env.arch,
     ))
@@ -1037,7 +1064,6 @@ mod tests {
         PlannedComponent {
             command: format!("install {component}"),
             component: component.to_string(),
-            component_identity_pinned: false,
             family: "rpm".to_string(),
             native_package: Some(package.to_string()),
             delegated_pin: None,

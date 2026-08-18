@@ -58,8 +58,8 @@ use crate::context::CliContext;
 use crate::progress;
 use crate::repo_config::{BackendConfig, RepoConfig};
 use crate::resolution::{
-    BackendKind, ComponentIndex, ComponentResolver, ResolutionSet, ResolutionUse, ResolveOptions,
-    rpm_component_provide,
+    BackendKind, ComponentIndex, ComponentResolver, IndexIdentity, ResolutionSet, ResolveOptions,
+    resolve_index_identity, rpm_component_provide,
 };
 use crate::response::CliError;
 
@@ -407,20 +407,65 @@ fn run_update_check(inputs: CheckInputs<'_>) -> UpdateCheckReport {
     }
 
     // Profile defaults absent from ANOLISA state are surfaced as a gap (issue
-    // #1411 performs the install). Absence from `installed.toml` is not the same
-    // as absence from the host, though, so each candidate is cross-checked
-    // against rpmdb first — a default already installed as an RPM (but never
-    // adopted) is evaluated for upgrades instead of falsely reported as missing.
+    // #1411 performs the install). The default's canonical identity comes
+    // first (issue #2630): a name absent from state is a new identity that
+    // only the component index may authorize, and comparing against state and
+    // the other defaults under the canonical name keeps an alias default from
+    // duplicating an already-tracked component as absent. Absence from
+    // `installed.toml` is still not the same as absence from the host, so each
+    // remaining candidate is cross-checked against rpmdb — a default already
+    // installed as an RPM (but never adopted) is evaluated for upgrades
+    // instead of falsely reported as missing.
     if let Some(profile) = &inputs.target {
+        let mut seen_defaults = std::collections::BTreeSet::new();
         for name in &profile.default_components {
+            // An exact state identity precedes index normalization
+            // (issue #2630): a record tracked under the literal default name
+            // was already checked by the installed loop above, and must not
+            // be re-normalized into a second identity — or, with no index,
+            // into a spurious validation error.
             if inputs.installed.find(ObjectKind::Component, name).is_some() {
+                seen_defaults.insert(name.clone());
+                continue;
+            }
+            let canonical = match resolve_index_identity(name, inputs.component_index) {
+                IndexIdentity::Resolved(component) => component,
+                IndexIdentity::Unsupported => {
+                    components.push(default_component_error(
+                        name,
+                        None,
+                        format!(
+                            "unsupported component '{name}' in target-profile defaults; the component index has no entry for it"
+                        ),
+                        &mut summary,
+                    ));
+                    continue;
+                }
+                IndexIdentity::Unavailable => {
+                    components.push(default_component_error(
+                        name,
+                        None,
+                        format!(
+                            "component index is unavailable; cannot validate target-profile default '{name}'"
+                        ),
+                        &mut summary,
+                    ));
+                    continue;
+                }
+            };
+            if !seen_defaults.insert(canonical.clone())
+                || inputs
+                    .installed
+                    .find(ObjectKind::Component, &canonical)
+                    .is_some()
+            {
                 continue;
             }
             components.push(check_default_component(
                 inputs.query,
                 inputs.component_index,
                 inputs.rpm_backend,
-                name,
+                &canonical,
                 inputs.arch,
                 &mut summary,
             ));
@@ -694,16 +739,42 @@ fn check_component(
     }
 }
 
+/// Item error for a target-profile default, counted into the summary.
+fn default_component_error(
+    name: &str,
+    package: Option<String>,
+    reason: String,
+    summary: &mut CheckSummary,
+) -> ComponentCheck {
+    summary.errors += 1;
+    ComponentCheck {
+        component: name.to_string(),
+        package,
+        ownership: None,
+        installed: None,
+        available: None,
+        action: ACTION_ERROR.to_string(),
+        error: Some(reason),
+        absent_from_state: true,
+        backfill_rpm_metadata: false,
+    }
+}
+
 /// Evaluate a profile default that is absent from ANOLISA state.
 ///
-/// A default missing from `installed.toml` may still be installed on the host —
-/// e.g. baked into a system image and never adopted, which is common for
-/// `legacy_adopt` packages predating the `anolisa-component(...)` provide.
-/// Reporting such a default as `install` would be a false positive on the
-/// default-profile MOTD, so rpmdb is consulted first (via the component provide
-/// and its index-mapped package name). A present-but-unadopted default is
-/// checked for upgrades like an rpm-observed component; only a default genuinely
-/// absent from rpmdb too is reported installable.
+/// `name` is the default's canonical identity — the caller validated it
+/// against the component index and deduplicated it against state before
+/// this evaluation runs (issue #2630).
+///
+/// A supported default missing from `installed.toml` may still be installed
+/// on the host — e.g. baked into a system image and never adopted, which is
+/// common for `legacy_adopt` packages predating the `anolisa-component(...)`
+/// provide. Reporting such a default as `install` would be a false positive
+/// on the default-profile MOTD, so rpmdb is consulted first (via the
+/// component provide and its index-mapped package name). A
+/// present-but-unadopted default is checked for upgrades like an rpm-observed
+/// component; only a default genuinely absent from rpmdb too is reported
+/// installable.
 fn check_default_component(
     query: &dyn PackageQuery,
     index: Option<&ComponentIndex>,
@@ -726,18 +797,7 @@ fn check_default_component(
             let package = match resolve_default_install_package(query, index, rpm_backend, name) {
                 Ok(package) => package,
                 Err(reason) => {
-                    summary.errors += 1;
-                    return ComponentCheck {
-                        component: name.to_string(),
-                        package: None,
-                        ownership: None,
-                        installed: None,
-                        available: None,
-                        action: ACTION_ERROR.to_string(),
-                        error: Some(reason),
-                        absent_from_state: true,
-                        backfill_rpm_metadata: false,
-                    };
+                    return default_component_error(name, None, reason, summary);
                 }
             };
             match query.query_installed(&package) {
@@ -746,20 +806,10 @@ fn check_default_component(
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    summary.errors += 1;
-                    return ComponentCheck {
-                        component: name.to_string(),
-                        package: Some(package),
-                        ownership: None,
-                        installed: None,
-                        available: None,
-                        action: ACTION_ERROR.to_string(),
-                        error: Some(format!(
-                            "cannot query installed version of resolved package for default component '{name}': {err}"
-                        )),
-                        absent_from_state: true,
-                        backfill_rpm_metadata: false,
-                    };
+                    let reason = format!(
+                        "cannot query installed version of resolved package for default component '{name}': {err}"
+                    );
+                    return default_component_error(name, Some(package), reason, summary);
                 }
             }
             summary.missing_defaults += 1;
@@ -779,20 +829,7 @@ fn check_default_component(
         // This is an item error, not a missing default — reporting "install"
         // here would be the false positive the rpmdb cross-check exists to
         // avoid.
-        DefaultProbe::Indeterminate(reason) => {
-            summary.errors += 1;
-            ComponentCheck {
-                component: name.to_string(),
-                package: None,
-                ownership: None,
-                installed: None,
-                available: None,
-                action: ACTION_ERROR.to_string(),
-                error: Some(reason),
-                absent_from_state: true,
-                backfill_rpm_metadata: false,
-            }
-        }
+        DefaultProbe::Indeterminate(reason) => default_component_error(name, None, reason, summary),
     }
 }
 
@@ -808,12 +845,7 @@ fn resolve_default_install_package(
     name: &str,
 ) -> Result<String, String> {
     let resolver = ComponentResolver::new(index, rpm_backend, Some(query));
-    match resolver.resolve(
-        name,
-        BackendKind::Rpm,
-        ResolutionUse::Install,
-        ResolveOptions::default(),
-    ) {
+    match resolver.resolve(name, BackendKind::Rpm, ResolveOptions::default()) {
         Ok(ResolutionSet::Unique(target)) => Ok(target.package),
         Ok(ResolutionSet::None) => Err(format!(
             "cannot resolve RPM package for default component '{name}': no package mapping or provider found"
@@ -841,12 +873,7 @@ fn resolve_legacy_component_package(
     name: &str,
 ) -> Result<String, String> {
     let resolver = ComponentResolver::new(index, rpm_backend, Some(query));
-    match resolver.resolve(
-        name,
-        BackendKind::Rpm,
-        ResolutionUse::RepairLegacy,
-        ResolveOptions::default(),
-    ) {
+    match resolver.resolve(name, BackendKind::Rpm, ResolveOptions::default()) {
         Ok(ResolutionSet::Unique(target)) => Ok(target.package),
         Ok(ResolutionSet::None) => Err(format!(
             "component '{name}' is recorded as RPM-backed without package metadata, and no RPM package could be resolved; run `anolisa repair {name}`"

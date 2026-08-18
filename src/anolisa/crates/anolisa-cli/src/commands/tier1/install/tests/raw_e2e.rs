@@ -142,7 +142,10 @@ fn install_reports_missing_local_repository_index_from_override() {
     let repo_root = tmp.path().join("repo");
     let repo_url = write_local_repo(&repo_root);
     let index_path = repo_root.join("v1/index.toml");
-    std::fs::remove_dir_all(&repo_root).expect("remove repository directory");
+    // Remove only the distribution index: the published component index
+    // stays so identity validation passes and the missing-index diagnostic
+    // below is what surfaces.
+    std::fs::remove_file(&index_path).expect("remove repository index");
 
     let mut a = args("agentsight");
     a.repo = Some(repo_url);
@@ -214,7 +217,10 @@ fn install_reports_config_path_for_missing_local_repository_index() {
     let repo_root = tmp.path().join("repo");
     let repo_url = write_local_repo(&repo_root);
     let index_path = repo_root.join("v1/index.toml");
-    std::fs::remove_dir_all(&repo_root).expect("remove repository directory");
+    // Remove only the distribution index: the published component index
+    // stays so identity validation passes and the config-attributed
+    // missing-index diagnostic below is what surfaces.
+    std::fs::remove_file(&index_path).expect("remove repository index");
 
     std::fs::create_dir_all(&layout.etc_dir).expect("create repo config directory");
     let config_path = layout.etc_dir.join("repo.toml");
@@ -1329,6 +1335,7 @@ fn write_local_repo_with_conflicts(
 ) -> String {
     let v1 = root.join("v1");
     std::fs::create_dir_all(&v1).expect("create repo dirs");
+    write_component_index_v2(&v1, &[component]);
 
     let manifest = component_manifest_toml_with_conflicts(component, version, modes, conflicts);
     let manifest_sha = format!("{:x}", Sha256::digest(manifest.as_bytes()));
@@ -1639,6 +1646,76 @@ fn install_all_dry_run_rejects_conflicts_between_planned_components() {
     assert!(
         cached_names.iter().all(|name| !name.ends_with(".tar.gz")),
         "dry-run must not fetch batch artifacts; cache entries: {cached_names:?}"
+    );
+}
+
+/// `install --all --repo <URL>` enumerates the override repository's
+/// component index — the same authority identity and package resolution
+/// consult — instead of the repo.toml chain, so an override-only component
+/// installs while the default index plays no part (issue #2630 review
+/// follow-up). Runs in user mode like the batch conflict test above, so the
+/// pipeline never consults the host's real rpm tooling.
+#[test]
+fn install_all_with_repo_override_enumerates_the_override_index() {
+    let sandbox = TestSandbox::new();
+    // repo.toml points at a repository whose index lists nothing.
+    let default_repo = write_empty_repo(&sandbox.root().join("default-repo"));
+    let ctx = sandbox.context_with(InstallMode::User, TestContextOptions::default());
+    let layout = common::resolve_layout(&ctx);
+    std::fs::create_dir_all(&layout.etc_dir).expect("create config dir");
+    std::fs::write(
+        layout.etc_dir.join("repo.toml"),
+        format!(
+            "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"{default_repo}\"\n"
+        ),
+    )
+    .expect("write repo config");
+    // The override repository publishes agentsight with its meta sidecar. The
+    // batch enumeration only lists entries with a matching backend row, so
+    // the override index declares the raw backend explicitly.
+    let override_root = sandbox.root().join("override");
+    let override_url =
+        write_published_layout_repo_with_meta(&override_root, "agentsight", "0.2.0", &["user"]);
+    let env = anolisa_env::EnvService::detect();
+    std::fs::write(
+        override_root.join("v1/components-v2.toml"),
+        format!(
+            r#"schema_version = 2
+
+[[components]]
+name = "agentsight"
+targets = [{{ os = "{os}", arch = "{arch}" }}]
+
+[[components.backends]]
+kind = "raw"
+package = "agentsight"
+"#,
+            os = env.os,
+            arch = env.arch,
+        ),
+    )
+    .expect("override component index");
+
+    let batch_args = InstallArgs {
+        component: None,
+        all: true,
+        fail_fast: false,
+        version: None,
+        backend: Some("raw".to_string()),
+        repo: Some(override_url),
+        package: None,
+    };
+    handle_all(batch_args, &ctx)
+        .expect("the override-only component must be enumerated and installed");
+
+    assert!(
+        layout.bin_dir.join("agentsight").exists(),
+        "the override-only component must be installed"
+    );
+    let store = load_v5_store(&layout);
+    assert!(
+        store.find(ObjectKind::Component, "agentsight").is_some(),
+        "the override-only component must be recorded"
     );
 }
 

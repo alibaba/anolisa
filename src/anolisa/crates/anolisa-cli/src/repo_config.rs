@@ -430,6 +430,21 @@ impl RepoConfig {
         }
     }
 
+    /// Canonical spelling of `name` when it is a known backend, otherwise the
+    /// same unknown-backend error [`Self::select_backend`] reports. Name
+    /// validation only — whether the backend is configured in repo.toml is a
+    /// separate question some callers (a `--repo` override) do not ask.
+    pub(crate) fn known_backend_name(name: &str) -> Result<&'static str, RepoConfigError> {
+        let canonical = Self::canonical_backend_name(name);
+        KNOWN_BACKENDS
+            .iter()
+            .find(|known| **known == canonical)
+            .copied()
+            .ok_or_else(|| RepoConfigError::UnknownBackend {
+                name: canonical.to_string(),
+            })
+    }
+
     pub(crate) fn backend_name_deprecation_warning(name: &str) -> Option<&'static str> {
         (name == LEGACY_RPM_BACKEND).then_some(LEGACY_RPM_BACKEND_NAME_WARNING)
     }
@@ -505,12 +520,7 @@ impl RepoConfig {
         &self,
         cli_override: Option<&str>,
     ) -> Result<(&str, &BackendConfig), RepoConfigError> {
-        let name = Self::canonical_backend_name(cli_override.unwrap_or(&self.default_backend));
-        if !KNOWN_BACKENDS.contains(&name) {
-            return Err(RepoConfigError::UnknownBackend {
-                name: name.to_string(),
-            });
-        }
+        let name = Self::known_backend_name(cli_override.unwrap_or(&self.default_backend))?;
         match self.backends.get_key_value(name) {
             Some((key, cfg)) => Ok((key.as_str(), cfg)),
             None => Err(RepoConfigError::BackendNotConfigured {
@@ -1247,6 +1257,15 @@ base_url = "https://example.com/$typo_var/repo"
             RepoConfigError::BackendNotConfigured { name } if name == "npm"
         ));
         let err = cfg.select_backend(Some("pip")).expect_err("pip unknown");
+        assert!(matches!(err, RepoConfigError::UnknownBackend { name } if name == "pip"));
+    }
+
+    #[test]
+    fn known_backend_name_validates_without_requiring_configuration() {
+        assert_eq!(RepoConfig::known_backend_name("raw").expect("raw"), "raw");
+        assert_eq!(RepoConfig::known_backend_name("yum").expect("yum"), "rpm");
+        assert_eq!(RepoConfig::known_backend_name("npm").expect("npm"), "npm");
+        let err = RepoConfig::known_backend_name("pip").expect_err("pip unknown");
         assert!(matches!(err, RepoConfigError::UnknownBackend { name } if name == "pip"));
     }
 

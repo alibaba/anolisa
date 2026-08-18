@@ -556,6 +556,16 @@ mod tests {
         let root = prefix
             .as_deref()
             .unwrap_or_else(|| std::path::Path::new("/tmp/anolisa-restart-validation"));
+        // Identity resolution consults the component index for names absent
+        // from state; a seeded local index keeps fixture names supported.
+        if install_mode == InstallMode::System
+            && let Some(prefix) = prefix.as_ref()
+        {
+            crate::commands::tier1::install::tests::seed_repo_config_with_index(
+                &anolisa_platform::fs_layout::FsLayout::system(Some(prefix.clone())),
+                crate::commands::tier1::install::tests::TEST_INDEX_COMPONENTS,
+            );
+        }
         crate::test_support::context_for_root(
             root,
             install_mode,

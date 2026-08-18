@@ -619,7 +619,7 @@ fn incomplete_system_visibility_blocks_adapter_alias_inference() {
 }
 
 #[test]
-fn incomplete_system_visibility_pins_a_user_install_to_the_literal_name() {
+fn incomplete_system_visibility_blocks_install_alias_inference() {
     for failure in [
         SystemStateFailure::FutureSchema,
         SystemStateFailure::InvalidToml,
@@ -628,16 +628,35 @@ fn incomplete_system_visibility_pins_a_user_install_to_the_literal_name() {
         let fixture = ScopeFixture::new();
         fixture.break_system_state(failure);
 
+        // `legacy-name` is an index alias of `cosh`: remapping it needs
+        // complete visibility, because the unreadable system root could hold
+        // an exact `legacy-name` record. The literal input is no longer
+        // pinned as a new identity (issue #2630) — the install refuses.
         let output = fixture.run("install");
         let envelope = json(&output);
 
+        assert!(
+            !output.status.success(),
+            "alias install must refuse under incomplete visibility: {envelope}"
+        );
+        let reason = envelope["error"]["reason"].as_str().expect("error reason");
+        assert!(
+            reason.contains("visible state is incomplete"),
+            "wrong failure: {reason}"
+        );
+
+        // A canonical index name involves no remapping and stays addressable
+        // even while the system root is unreadable — here it hits the
+        // fixture's existing user record and reports the idempotent NoOp.
+        let output = fixture.run_args(&["install", "cosh"], true);
+        let envelope = json(&output);
         assert_eq!(
             output.status.code(),
             Some(0),
-            "literal user install should remain available: {envelope}; stderr: {}",
+            "canonical user install should remain available: {envelope}; stderr: {}",
             String::from_utf8_lossy(&output.stderr),
         );
-        assert_eq!(envelope["data"]["component"], "legacy-name");
-        assert_eq!(envelope["data"]["action"], "planned");
+        assert_eq!(envelope["data"]["component"], "cosh");
+        assert_eq!(envelope["data"]["action"], "already-installed");
     }
 }

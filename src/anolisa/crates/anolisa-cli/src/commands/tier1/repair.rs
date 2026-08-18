@@ -61,7 +61,7 @@ use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install::{self, PendingRpmInstall};
 use crate::commands::tier1::update::rpm_repo_source_for_update;
 use crate::context::CliContext;
-use crate::resolution::{ResolutionUse, load_optional_component_index};
+use crate::resolution::load_optional_component_index;
 use crate::response::{CliError, render_json};
 
 /// Command label for JSON envelopes and error routing.
@@ -1981,7 +1981,6 @@ fn resolve_repair_package(
         component_index.as_ref(),
         query,
         component,
-        ResolutionUse::RepairLegacy,
     ) {
         Ok(candidates) => candidates,
         Err(PackageQueryError::CommandMissing { command: bin }) => {
@@ -2512,6 +2511,14 @@ mod tests {
     }
 
     fn ctx(prefix: PathBuf, install_mode: InstallMode, dry_run: bool) -> CliContext {
+        // Identity resolution consults the component index for names absent
+        // from state; a seeded local index keeps fixture names supported.
+        if install_mode == InstallMode::System {
+            crate::commands::tier1::install::tests::seed_repo_config_with_index(
+                &anolisa_platform::fs_layout::FsLayout::system(Some(prefix.clone())),
+                crate::commands::tier1::install::tests::TEST_INDEX_COMPONENTS,
+            );
+        }
         crate::test_support::context_for_root(
             &prefix,
             install_mode,

@@ -241,7 +241,9 @@ fn diagnose(component: Option<&str>, ctx: &CliContext) -> Result<DoctorPayload, 
     let mut view = StateView::load(ctx, COMMAND, StateVisibility::UserPlusSystem)?;
     status::migrate_view_states(&mut view);
     let rpm_query = RpmPackageQuery::system();
-    let component = component.map(|name| lookup_component_name_from_view(name, &view, ctx));
+    let component = component
+        .map(|name| lookup_component_name_from_view(name, &view, ctx))
+        .transpose()?;
     let env = anolisa_env::EnvService::detect();
     let resolver_env = resolver_env_from_facts(&env);
     let current_system_service = service_for_install_mode(ctx.install_mode.as_str(), &env);
@@ -327,9 +329,13 @@ fn diagnose_from_view(
     }
 }
 
-fn lookup_component_name_from_view(input: &str, view: &StateView, ctx: &CliContext) -> String {
+fn lookup_component_name_from_view(
+    input: &str,
+    view: &StateView,
+    ctx: &CliContext,
+) -> Result<String, CliError> {
     if view.has_exact_component(input) {
-        return input.to_string();
+        return Ok(input.to_string());
     }
     common::lookup_component_name_in_store(input, &view.writable.state, ctx, COMMAND)
 }

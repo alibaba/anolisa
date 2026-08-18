@@ -2628,6 +2628,14 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn ctx(prefix: PathBuf, install_mode: InstallMode, dry_run: bool) -> CliContext {
+        // Identity resolution consults the component index for names absent
+        // from state; a seeded local index keeps fixture names supported.
+        if install_mode == InstallMode::System {
+            crate::commands::tier1::install::tests::seed_repo_config_with_index(
+                &anolisa_platform::fs_layout::FsLayout::system(Some(prefix.clone())),
+                crate::commands::tier1::install::tests::TEST_INDEX_COMPONENTS,
+            );
+        }
         crate::test_support::context_for_root(
             &prefix,
             install_mode,
@@ -3200,7 +3208,14 @@ pub(crate) mod tests {
     #[test]
     fn bare_update_errors_before_repo_config_provisioning() {
         let tmp = tempfile::tempdir().expect("tmpdir");
-        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        // Deliberately not the shared ctx helper: this test asserts that the
+        // invalid invocation writes no repo.toml, so nothing may pre-seed one.
+        let c = crate::test_support::context_for_root(
+            tmp.path(),
+            InstallMode::System,
+            Some(tmp.path().to_path_buf()),
+            Default::default(),
+        );
         let repo_toml = common::resolve_layout(&c).etc_dir.join("repo.toml");
 
         let err = handle(

@@ -262,6 +262,20 @@ fn run_with_index_and_backend(
     })
 }
 
+/// Identity-only component index naming `components`, so profile defaults
+/// pass identity validation while package resolution still flows through
+/// `package_map` and RPM `Provides`.
+fn identity_index(components: &[&str]) -> crate::resolution::ComponentIndex {
+    let mut toml = String::from("schema_version = 2\n");
+    for component in components {
+        toml.push_str(&format!(
+            "\n[[components]]\nname = \"{component}\"\ntargets = [{{ os = \"linux\", arch = \"x86_64\" }}]\n"
+        ));
+    }
+    crate::resolution::ComponentIndex::from_toml_str(&toml, "test-components.toml")
+        .expect("identity index parses")
+}
+
 fn system_ctx() -> CliContext {
     crate::test_support::context_for_root(
         std::path::Path::new("/tmp/anolisa-update-check-validation"),
@@ -466,7 +480,14 @@ fn update_check_missing_default_reports_install() {
         default_components: vec!["cosh".to_string(), "sec-core".to_string()],
     };
 
-    let report = run(&host, &state, Some(profile), Some("image-v1.0".to_string()));
+    let index = identity_index(&["cosh", "sec-core"]);
+    let report = run_with_index(
+        &host,
+        &state,
+        Some(profile),
+        Some("image-v1.0".to_string()),
+        Some(&index),
+    );
     assert_eq!(report.target.as_deref(), Some("image-v1.0"));
     assert_eq!(report.summary.missing_defaults, 2);
     assert!(
@@ -518,11 +539,13 @@ fn update_check_default_present_via_provide_is_not_missing() {
         default_components: vec!["cosh".to_string()],
     };
 
-    let report = run(
+    let index = identity_index(&["cosh"]);
+    let report = run_with_index(
         &host,
         &state,
         Some(profile),
         Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+        Some(&index),
     );
     let item = report
         .components
@@ -559,11 +582,13 @@ fn update_check_default_present_via_provide_reports_upgrade() {
         default_components: vec!["cosh".to_string()],
     };
 
-    let report = run(
+    let index = identity_index(&["cosh"]);
+    let report = run_with_index(
         &host,
         &state,
         Some(profile),
         Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+        Some(&index),
     );
     let item = &report.components[0];
     assert_eq!(item.action, ACTION_UPDATE);
@@ -618,12 +643,13 @@ fn update_check_default_present_via_package_map_without_provide() {
         default_components: vec!["cosh".to_string()],
     };
 
+    let index = identity_index(&["cosh"]);
     let report = run_with_index_and_backend(
         &host,
         &state,
         Some(profile),
         Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
-        None,
+        Some(&index),
         Some(&backend),
     );
 
@@ -644,11 +670,13 @@ fn update_check_unresolved_missing_default_is_item_error() {
         default_components: vec!["cosh".to_string()],
     };
 
-    let report = run(
+    let index = identity_index(&["cosh"]);
+    let report = run_with_index(
         &host,
         &state,
         Some(profile),
         Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+        Some(&index),
     );
     let item = &report.components[0];
     assert_eq!(item.action, ACTION_ERROR);
@@ -671,12 +699,13 @@ fn update_check_missing_default_resolves_package_from_package_map() {
     };
     let backend = rpm_backend_with_package_map("cosh", "copilot-shell");
 
+    let index = identity_index(&["cosh"]);
     let report = run_with_index_and_backend(
         &host,
         &state,
         Some(profile),
         Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
-        None,
+        Some(&index),
         Some(&backend),
     );
 
@@ -698,17 +727,282 @@ fn update_check_missing_default_resolves_package_from_available_provide() {
         default_components: vec!["cosh".to_string()],
     };
 
-    let report = run(
+    let index = identity_index(&["cosh"]);
+    let report = run_with_index(
         &host,
         &state,
         Some(profile),
         Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+        Some(&index),
     );
 
     let item = &report.components[0];
     assert_eq!(item.action, ACTION_INSTALL);
     assert_eq!(item.package.as_deref(), Some("copilot-shell"));
     assert_eq!(report.summary.missing_defaults, 1);
+}
+
+/// A profile default the index does not know is rejected even when a
+/// site-local `package_map` entry could name a package for it: package
+/// selection must not create a component identity (issue #2630).
+#[test]
+fn update_check_default_absent_from_index_is_unsupported_despite_package_map() {
+    let host = FakeHost::with_cli_noop();
+    let state = state_with(vec![]);
+    let profile = TargetProfile {
+        default_components: vec!["site-only".to_string()],
+    };
+    let backend = rpm_backend_with_package_map("site-only", "site-package");
+
+    let index = identity_index(&["cosh"]);
+    let report = run_with_index_and_backend(
+        &host,
+        &state,
+        Some(profile),
+        Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+        Some(&index),
+        Some(&backend),
+    );
+
+    let item = &report.components[0];
+    assert_eq!(item.action, ACTION_ERROR);
+    assert!(
+        item.error
+            .as_deref()
+            .unwrap_or("")
+            .contains("unsupported component 'site-only'"),
+        "package_map must not authorize the identity: {:?}",
+        item.error
+    );
+    assert_eq!(report.summary.missing_defaults, 0);
+    assert_eq!(report.summary.errors, 1);
+}
+
+/// A profile default the index does not know is rejected even when an RPM
+/// repository provider declares `anolisa-component(...)` for it: Provides
+/// resolves packages, never identities (issue #2630).
+#[test]
+fn update_check_default_absent_from_index_is_unsupported_despite_provides() {
+    let mut host = FakeHost::with_cli_noop();
+    host.available_providers.insert(
+        "anolisa-component(site-only)".to_string(),
+        vec!["site-package".to_string()],
+    );
+    let state = state_with(vec![]);
+    let profile = TargetProfile {
+        default_components: vec!["site-only".to_string()],
+    };
+
+    let index = identity_index(&["cosh"]);
+    let report = run_with_index(
+        &host,
+        &state,
+        Some(profile),
+        Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+        Some(&index),
+    );
+
+    let item = &report.components[0];
+    assert_eq!(item.action, ACTION_ERROR);
+    assert!(
+        item.error
+            .as_deref()
+            .unwrap_or("")
+            .contains("unsupported component 'site-only'"),
+        "an RPM provider must not authorize the identity: {:?}",
+        item.error
+    );
+    assert_eq!(report.summary.missing_defaults, 0);
+    assert_eq!(report.summary.errors, 1);
+}
+
+/// Without any component index a profile default absent from state cannot be
+/// validated at all — even a `package_map` entry plus a matching provider
+/// yields the explicit index-unavailable item error, never an install item.
+#[test]
+fn update_check_default_without_index_is_unvalidated() {
+    let mut host = FakeHost::with_cli_noop();
+    host.available_providers.insert(
+        "anolisa-component(cosh)".to_string(),
+        vec!["copilot-shell".to_string()],
+    );
+    let state = state_with(vec![]);
+    let profile = TargetProfile {
+        default_components: vec!["cosh".to_string()],
+    };
+    let backend = rpm_backend_with_package_map("cosh", "copilot-shell");
+
+    let report = run_with_index_and_backend(
+        &host,
+        &state,
+        Some(profile),
+        Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+        None,
+        Some(&backend),
+    );
+
+    let item = &report.components[0];
+    assert_eq!(item.action, ACTION_ERROR);
+    assert!(
+        item.error
+            .as_deref()
+            .unwrap_or("")
+            .contains("component index is unavailable"),
+        "an unvalidatable default must name the missing index: {:?}",
+        item.error
+    );
+    assert_eq!(report.summary.missing_defaults, 0);
+    assert_eq!(report.summary.errors, 1);
+}
+
+/// Index naming `cosh` with `copilot-shell` declared as its rpm-package
+/// alias, for the alias-default tests below.
+fn alias_index() -> crate::resolution::ComponentIndex {
+    crate::resolution::ComponentIndex::from_toml_str(
+        "schema_version = 2\n\n[[components]]\nname = \"cosh\"\ntargets = [{ os = \"linux\", arch = \"x86_64\" }]\n\n[[components.aliases]]\nkind = \"rpm-package\"\nname = \"copilot-shell\"\n",
+        "test-components.toml",
+    )
+    .expect("alias index parses")
+}
+
+/// An alias profile default whose canonical component is already tracked in
+/// state must not be re-reported as absent (issue #2630): identity
+/// resolution and the state comparison both run on the canonical name, for
+/// RPM-backed and raw-backed records alike.
+#[test]
+fn update_check_alias_default_with_installed_canonical_is_not_reported() {
+    for object in [
+        rpm_component(
+            "cosh",
+            "copilot-shell",
+            "1.0.0-1.al4",
+            Ownership::RpmManaged,
+        ),
+        raw_component("cosh", "1.0.0"),
+    ] {
+        let mut host = FakeHost::with_cli_noop();
+        host.installed.insert(
+            "copilot-shell".to_string(),
+            info("copilot-shell", "1.0.0", Some("1.al4")),
+        );
+        let state = state_with(vec![object]);
+        let profile = TargetProfile {
+            default_components: vec!["copilot-shell".to_string()],
+        };
+
+        let index = alias_index();
+        let report = run_with_index(
+            &host,
+            &state,
+            Some(profile),
+            Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+            Some(&index),
+        );
+
+        assert_eq!(report.summary.missing_defaults, 0);
+        assert!(
+            report.components.iter().all(|c| !c.absent_from_state),
+            "the alias default must dedupe against the tracked canonical record: {:?}",
+            report
+                .components
+                .iter()
+                .map(|c| (&c.component, &c.action, c.absent_from_state))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            report
+                .components
+                .iter()
+                .filter(|c| c.component == "cosh")
+                .count(),
+            1,
+            "the tracked component is reported exactly once"
+        );
+    }
+}
+
+/// Defaults spelling the same component canonically and via an alias
+/// evaluate once, under the canonical name.
+#[test]
+fn update_check_duplicate_alias_defaults_evaluate_once_as_canonical() {
+    let mut host = FakeHost::with_cli_noop();
+    host.available_providers.insert(
+        "anolisa-component(cosh)".to_string(),
+        vec!["copilot-shell".to_string()],
+    );
+    let state = state_with(vec![]);
+    let profile = TargetProfile {
+        default_components: vec!["copilot-shell".to_string(), "cosh".to_string()],
+    };
+
+    let index = alias_index();
+    let report = run_with_index(
+        &host,
+        &state,
+        Some(profile),
+        Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+        Some(&index),
+    );
+
+    assert_eq!(report.summary.missing_defaults, 1);
+    assert_eq!(
+        report.components.len(),
+        1,
+        "one evaluation for one identity"
+    );
+    let item = &report.components[0];
+    assert_eq!(item.component, "cosh", "reported under the canonical name");
+    assert_eq!(item.action, ACTION_INSTALL);
+}
+
+/// A default already tracked in state under its exact (legacy) name is not
+/// re-normalized into a second identity: the installed loop above owns that
+/// record, so the default neither duplicates it under the canonical name nor
+/// — with no index at all — produces a spurious validation error.
+#[test]
+fn update_check_exact_legacy_default_is_not_renormalized() {
+    let index = alias_index();
+    for index in [Some(&index), None] {
+        let host = FakeHost::with_cli_noop();
+        // "copilot-shell" is the record's exact name and, in the index, an
+        // alias of "cosh".
+        let state = state_with(vec![raw_component("copilot-shell", "1.0.0")]);
+        let profile = TargetProfile {
+            default_components: vec!["copilot-shell".to_string()],
+        };
+
+        let report = run_with_index(
+            &host,
+            &state,
+            Some(profile),
+            Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+            index,
+        );
+
+        assert_eq!(report.summary.missing_defaults, 0);
+        assert_eq!(
+            report.summary.errors,
+            0,
+            "the exact record must preempt index validation: {:?}",
+            report
+                .components
+                .iter()
+                .map(|c| (&c.component, &c.action, &c.error))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            report
+                .components
+                .iter()
+                .all(|c| !c.absent_from_state && c.component != "cosh"),
+            "no second identity may appear: {:?}",
+            report
+                .components
+                .iter()
+                .map(|c| (&c.component, &c.action, c.absent_from_state))
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 #[test]
@@ -723,11 +1017,13 @@ fn update_check_ambiguous_missing_default_is_item_error() {
         default_components: vec!["cosh".to_string()],
     };
 
-    let report = run(
+    let index = identity_index(&["cosh"]);
+    let report = run_with_index(
         &host,
         &state,
         Some(profile),
         Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+        Some(&index),
     );
 
     let item = &report.components[0];
@@ -749,15 +1045,24 @@ fn update_check_default_provide_query_error_is_item_error() {
         default_components: vec!["cosh".to_string()],
     };
 
-    let report = run(
+    let index = identity_index(&["cosh"]);
+    let report = run_with_index(
         &host,
         &state,
         Some(profile),
         Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+        Some(&index),
     );
     let item = &report.components[0];
     assert_eq!(item.action, ACTION_ERROR);
-    assert!(item.error.is_some());
+    assert!(
+        item.error
+            .as_deref()
+            .unwrap_or("")
+            .contains("cannot determine"),
+        "the probe failure must be the reported error: {:?}",
+        item.error
+    );
     assert_eq!(
         report.summary.missing_defaults, 0,
         "an indeterminate probe must not count as a missing default"
@@ -779,11 +1084,13 @@ fn update_check_default_multiple_providers_is_item_error() {
         default_components: vec!["cosh".to_string()],
     };
 
-    let report = run(
+    let index = identity_index(&["cosh"]);
+    let report = run_with_index(
         &host,
         &state,
         Some(profile),
         Some(DEFAULT_TARGET_PROFILE_NAME.to_string()),
+        Some(&index),
     );
     let item = &report.components[0];
     assert_eq!(item.action, ACTION_ERROR);

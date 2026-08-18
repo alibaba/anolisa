@@ -45,8 +45,8 @@ use crate::repo_config::{
     BackendConfig, HostVars, RepoConfig, RepoConfigError, normalize_override_url,
 };
 use crate::resolution::{
-    BackendKind, ComponentResolver, ResolutionSet, ResolutionUse, ResolveOptions,
-    load_optional_component_index,
+    BackendKind, ComponentIndex, ComponentResolver, ResolutionSet, ResolveOptions,
+    load_component_index_from_base, load_optional_component_index,
 };
 use crate::response::{CliError, render_json};
 
@@ -133,11 +133,13 @@ pub(crate) fn host_backends(
     let layout = common::resolve_layout(ctx);
     let env = anolisa_env::EnvService::detect();
     let repo_config = common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::Require)?;
-    let (resolved, view, _) = common::resolve_install_target(component, ctx, &command)?;
+    let index_base_override = normalized_repo_override(args)?;
+    let (resolved, view) =
+        common::resolve_install_target(component, ctx, &command, index_base_override.as_deref())?;
     let store = &view.writable.state;
 
     let rpm_repo = if install_family(args, store, &resolved, &repo_config) == "rpm" {
-        configured_rpm_repo_source(&repo_config, &env)?
+        rpm_repo_source_for_invocation(&repo_config, &env, index_base_override.as_deref())?
     } else {
         None
     };
@@ -150,6 +152,34 @@ pub(crate) fn host_backends(
         None => RpmTransaction::system(),
     };
     Ok((query, txn))
+}
+
+/// Validated `--repo` base URL, when the caller supplied one. Normalization
+/// runs before identity resolution so a malformed override is refused as a
+/// bad argument rather than surfacing as an unavailable component index.
+pub(crate) fn normalized_repo_override(args: &InstallArgs) -> Result<Option<String>, CliError> {
+    args.repo
+        .as_deref()
+        .map(|url| normalize_override_url(url).map_err(|err| repo_config_err(err, true)))
+        .transpose()
+}
+
+/// Component index for this invocation, best-effort.
+///
+/// A `--repo` override's published index answers every question the install
+/// asks — identity, package selection, and the batch enumeration — so the
+/// invocation never mixes the override repository with the repo.toml chain.
+/// Without an override the repo.toml raw backend chain is used as usual.
+pub(crate) fn invocation_component_index(
+    layout: &FsLayout,
+    env: &anolisa_env::EnvFacts,
+    repo_config: &RepoConfig,
+    index_base_override: Option<&str>,
+) -> Option<ComponentIndex> {
+    match index_base_override {
+        Some(base_url) => load_component_index_from_base(layout, base_url).ok(),
+        None => load_optional_component_index(layout, env, repo_config),
+    }
 }
 
 /// Provider family for this invocation: explicit `--backend` (canonical
@@ -184,11 +214,6 @@ fn install_family(
 pub(crate) struct PlannedComponent {
     pub(crate) command: String,
     pub(crate) component: String,
-    /// Lifecycle resolution pinned the literal input, so backend-level
-    /// package aliases must not rewrite it to another component. This holds
-    /// for an exact visible identity and for incomplete cross-scope
-    /// visibility where aliasing would be unsafe.
-    pub(crate) component_identity_pinned: bool,
     pub(crate) family: String,
     pub(crate) native_package: Option<String>,
     /// Resolved candidate for a `--version`-pinned delegated install, carried
@@ -259,11 +284,6 @@ impl RawPin {
             source_repo: resolution.base_url.clone(),
         }
     }
-}
-
-struct ResolvedInstallIdentity {
-    component: String,
-    pinned: bool,
 }
 
 /// Which executor family the plan routed to, or the idempotent NoOp.
@@ -398,9 +418,11 @@ pub(crate) fn plan_component(
 
     // Resolve identity across all visible roots, but bind install planning to
     // the writable scope only. A user install may therefore shadow an
-    // existing system installation without mutating or inheriting it.
-    let (mut component, view, component_identity_pinned) =
-        common::resolve_install_target(input, ctx, &command)?;
+    // existing system installation without mutating or inheriting it. A
+    // `--repo` override makes that repository's index the identity authority.
+    let index_base_override = normalized_repo_override(args)?;
+    let (component, view) =
+        common::resolve_install_target(input, ctx, &command, index_base_override.as_deref())?;
     let store = view.writable.state;
 
     if let Some(explicit) = args.backend.as_deref()
@@ -524,7 +546,6 @@ pub(crate) fn plan_component(
                     query,
                     &command,
                 )?;
-                component = fresh.component;
                 delegated_pin = fresh.pin;
                 (fresh.target, Some(fresh.package))
             }
@@ -622,7 +643,6 @@ pub(crate) fn plan_component(
     Ok(PlannedComponent {
         command,
         component,
-        component_identity_pinned,
         family,
         native_package,
         delegated_pin,
@@ -654,7 +674,6 @@ fn execute_planned(
     let PlannedComponent {
         command,
         mut component,
-        component_identity_pinned,
         family,
         native_package,
         delegated_pin,
@@ -665,6 +684,7 @@ fn execute_planned(
     } = planned;
     let layout = common::resolve_layout(ctx);
     let repo_config = common::load_repo_config(ctx, &layout, COMMAND, RepoPersistPolicy::Require)?;
+    let index_base_override = normalized_repo_override(args)?;
     let state_path = layout.state_dir.join("installed.toml");
     let journal_dir = rpm_install::journal_dir(&layout);
 
@@ -701,10 +721,7 @@ fn execute_planned(
                 &layout,
                 env,
                 &repo_config,
-                ResolvedInstallIdentity {
-                    component: component.clone(),
-                    pinned: component_identity_pinned,
-                },
+                component.clone(),
                 &command,
             )?;
             component = resolution.component.clone();
@@ -819,6 +836,7 @@ fn execute_planned(
         delegated_pin.as_ref(),
         &provider,
         &repo_config,
+        index_base_override.as_deref(),
         is_root,
         &command,
         reporter,
@@ -887,13 +905,9 @@ fn resolve_owned_artifact(
     layout: &FsLayout,
     env: &anolisa_env::EnvFacts,
     repo_config: &RepoConfig,
-    identity: ResolvedInstallIdentity,
+    component: String,
     command: &str,
 ) -> Result<RawResolution, CliError> {
-    let ResolvedInstallIdentity {
-        component,
-        pinned: component_identity_pinned,
-    } = identity;
     let (backend_name, backend) = repo_config
         .select_backend(Some("raw"))
         .map_err(|err| repo_config_err(err, true))?;
@@ -925,14 +939,15 @@ fn resolve_owned_artifact(
             (base_url, origin)
         }
     };
-    let (component, package) = resolve_raw_identity(
+    let index_base_override = normalized_repo_override(args)?;
+    let package = resolve_raw_package(
         layout,
         env,
         repo_config,
         backend,
-        component,
+        &component,
         args.package.as_deref(),
-        component_identity_pinned,
+        index_base_override.as_deref(),
     );
     resolve_raw(
         ctx,
@@ -1055,14 +1070,15 @@ fn system_probe_package(
             .clone()
             .unwrap_or_else(|| component.to_string())
     };
-    let component_index = load_optional_component_index(layout, env, repo_config);
+    let index_base_override = normalized_repo_override(args)?;
+    let component_index =
+        invocation_component_index(layout, env, repo_config, index_base_override.as_deref());
     let candidates = match rpm_package_candidates_with_index(
         args.package.as_deref(),
         repo_config.backends.get("rpm"),
         component_index.as_ref(),
         query,
         component,
-        ResolutionUse::Install,
     ) {
         Ok(candidates) => candidates,
         Err(PackageQueryError::CommandMissing { command: bin }) => {
@@ -1080,12 +1096,11 @@ fn system_probe_package(
 }
 
 /// Fresh delegated resolution result: the provider target, its bare package,
-/// the resolved component name (aliases may re-map the input), and — when a
-/// `--version` was pinned — the resolved candidate metadata for reporting.
+/// and — when a `--version` was pinned — the resolved candidate metadata for
+/// reporting. The component identity is the caller's and never re-mapped.
 struct FreshDelegated {
     target: ProviderTarget,
     package: String,
-    component: String,
     pin: Option<DelegatedPin>,
 }
 
@@ -1103,14 +1118,15 @@ fn resolve_fresh_delegated(
     query: &dyn PackageQuery,
     command: &str,
 ) -> Result<FreshDelegated, CliError> {
-    let component_index = load_optional_component_index(layout, env, repo_config);
+    let index_base_override = normalized_repo_override(args)?;
+    let component_index =
+        invocation_component_index(layout, env, repo_config, index_base_override.as_deref());
     let candidates = rpm_package_candidates_with_index(
         args.package.as_deref(),
         repo_config.backends.get("rpm"),
         component_index.as_ref(),
         query,
         component,
-        ResolutionUse::Install,
     )
     .map_err(|err| match err {
         PackageQueryError::CommandMissing { command: bin } => {
@@ -1122,12 +1138,11 @@ fn resolve_fresh_delegated(
         [] => Err(CliError::InvalidArgument {
             command: command.to_string(),
             reason: format!(
-                "component '{component}' is not an ANOLISA RPM component; use the ANOLISA component name and configure the repo-side component index or publish Provides: anolisa-component({component})"
+                "no RPM package is mapped for component '{component}'; add an rpm backend entry to the repo-side component index or publish Provides: anolisa-component({component})"
             ),
         }),
         [single] => {
             let package = single.package.clone();
-            let resolved_component = single.component.clone();
             // A `--version` pin resolves the bare package to an exact
             // repository candidate before any mutation; the NEVRA is the only
             // value that reaches the native transaction. An unpinned install
@@ -1136,14 +1151,7 @@ fn resolve_fresh_delegated(
                 Some(version) => {
                     let pinned = resolve_pinned_candidate(query, &package, version, &env.arch)
                         .map_err(|err| {
-                            pin_error_to_cli(
-                                err,
-                                command,
-                                &resolved_component,
-                                &package,
-                                version,
-                                &env.arch,
-                            )
+                            pin_error_to_cli(err, command, component, &package, version, &env.arch)
                         })?;
                     let pin = DelegatedPin {
                         requested_version: version.to_string(),
@@ -1164,7 +1172,6 @@ fn resolve_fresh_delegated(
                     artifact,
                 },
                 package,
-                component: resolved_component,
                 pin,
             })
         }
@@ -1360,14 +1367,15 @@ fn install_delegated(
     delegated_pin: Option<&DelegatedPin>,
     provider: &DelegatedProvider,
     repo_config: &RepoConfig,
+    index_base_override: Option<&str>,
     is_root: bool,
     command: &str,
     reporter: &mut dyn ProgressReporter,
 ) -> Result<InstallOutcome, CliError> {
-    // A fresh delegated install pulls from the configured ANOLISA RPM
-    // repository; without one, dnf would resolve against arbitrary host
-    // repos.
-    require_configured_rpm_backend(repo_config, command)?;
+    // A fresh delegated install pulls from the repository its DNF source was
+    // pinned to: the `--repo` override when one was given, the configured
+    // ANOLISA RPM backend otherwise.
+    require_configured_rpm_backend(repo_config, index_base_override, command)?;
 
     if !is_root {
         return Err(CliError::PermissionDenied {
@@ -1555,6 +1563,34 @@ fn rpmdb_appeared_error(command: &str, target: &str) -> CliError {
     }
 }
 
+/// DNF repository source for this invocation's RPM family.
+///
+/// A normalized `--repo` override replaces the configured base URL — the
+/// flag is a one-off base URL for the selected backend, so the repository
+/// that resolved identity and package also serves availability queries, the
+/// native transaction, and the locked re-checks. Settings other than the URL
+/// (gpgcheck) stay with the repo.toml rpm backend when one is configured.
+pub(crate) fn rpm_repo_source_for_invocation(
+    repo_config: &RepoConfig,
+    env: &anolisa_env::EnvFacts,
+    index_base_override: Option<&str>,
+) -> Result<Option<DnfRepoSource>, CliError> {
+    match index_base_override {
+        Some(base_url) => {
+            let gpgcheck = repo_config
+                .backends
+                .get("rpm")
+                .and_then(|backend| backend.gpgcheck);
+            Ok(Some(DnfRepoSource::new(
+                ANOLISA_RPM_REPO_ID,
+                base_url.to_string(),
+                gpgcheck,
+            )))
+        }
+        None => configured_rpm_repo_source(repo_config, env),
+    }
+}
+
 pub(crate) fn configured_rpm_repo_source(
     repo_config: &RepoConfig,
     env: &anolisa_env::EnvFacts,
@@ -1576,11 +1612,18 @@ pub(crate) fn configured_rpm_repo_source(
     )))
 }
 
+/// Require a repository the delegated transaction can be pinned to.
+///
+/// Without one, dnf would resolve against arbitrary host repos. A normalized
+/// `--repo` override IS that repository — the DNF source is built from it —
+/// so the configured-backend requirement only applies when no override
+/// pinned the source.
 pub(crate) fn require_configured_rpm_backend(
     repo_config: &RepoConfig,
+    index_base_override: Option<&str>,
     command: &str,
 ) -> Result<(), CliError> {
-    if repo_config.backends.contains_key("rpm") {
+    if index_base_override.is_some() || repo_config.backends.contains_key("rpm") {
         Ok(())
     } else {
         Err(repo_config_err(
@@ -1593,44 +1636,31 @@ pub(crate) fn require_configured_rpm_backend(
     }
 }
 
-/// Resolve the raw package while preserving a literal lifecycle identity.
+/// Resolve the raw distribution package for a settled component identity.
 ///
-/// `component_identity_pinned` prevents the backend-specific alias pass from
-/// changing the component selected by lifecycle resolution. Pinning applies
-/// both to exact visible identities and to incomplete cross-scope visibility;
-/// explicit package overrides and package maps may still choose the
-/// distribution package.
-pub(crate) fn resolve_raw_identity(
+/// Explicit package overrides and repo.toml `package_map` entries choose the
+/// distribution package first; otherwise the raw backend row of this
+/// invocation's component index — the `--repo` override's index when one was
+/// given — decides. The component itself is never rewritten — identity was
+/// settled by lifecycle resolution before this pass.
+pub(crate) fn resolve_raw_package(
     layout: &FsLayout,
     env: &anolisa_env::EnvFacts,
     repo_config: &RepoConfig,
     backend: &BackendConfig,
-    component: String,
+    component: &str,
     cli_override: Option<&str>,
-    component_identity_pinned: bool,
-) -> (String, String) {
-    if cli_override.is_some() || backend.package_map.contains_key(&component) {
-        let package = repo_config.package_name(backend, &component, cli_override);
-        return (component, package);
+    index_base_override: Option<&str>,
+) -> String {
+    if cli_override.is_some() || backend.package_map.contains_key(component) {
+        return repo_config.package_name(backend, component, cli_override);
     }
 
-    let component_index = load_optional_component_index(layout, env, repo_config);
+    let component_index = invocation_component_index(layout, env, repo_config, index_base_override);
     let resolver = ComponentResolver::new(component_index.as_ref(), None, None);
-    match resolver.resolve(
-        &component,
-        BackendKind::Raw,
-        ResolutionUse::Install,
-        ResolveOptions::default(),
-    ) {
-        Ok(ResolutionSet::Unique(target))
-            if !component_identity_pinned || target.component == component =>
-        {
-            (target.component, target.package)
-        }
-        _ => {
-            let package = repo_config.package_name(backend, &component, cli_override);
-            (component, package)
-        }
+    match resolver.resolve(component, BackendKind::Raw, ResolveOptions::default()) {
+        Ok(ResolutionSet::Unique(target)) => target.package,
+        _ => repo_config.package_name(backend, component, cli_override),
     }
 }
 
@@ -2422,42 +2452,79 @@ package = "agent-sec-core"
         let layout = FsLayout::system(Some(tmp.path().join("root")));
         let env = anolisa_env::EnvService::detect();
 
-        let exact = resolve_raw_identity(
+        // An exact state identity that only appears as an index alias keeps
+        // its own name as the distribution package: alias rows resolve
+        // identities before this pass and never redirect package selection.
+        let exact_alias_name = resolve_raw_package(
             &layout,
             &env,
             &repo_config,
             backend,
-            "legacy-name".to_string(),
+            "legacy-name",
             None,
-            true,
+            None,
         );
-        let alias = resolve_raw_identity(
+        let canonical =
+            resolve_raw_package(&layout, &env, &repo_config, backend, "cosh", None, None);
+        let mapped_package =
+            resolve_raw_package(&layout, &env, &repo_config, backend, "sec-core", None, None);
+
+        assert_eq!(exact_alias_name, "legacy-name");
+        assert_eq!(canonical, "cosh");
+        assert_eq!(mapped_package, "agent-sec-core");
+    }
+
+    /// A `--repo` override's published index decides the raw package, the
+    /// same authority identity resolution consults — the repo.toml chain is
+    /// never mixed in (issue #2630 review follow-up).
+    #[test]
+    fn repo_override_index_decides_the_raw_package() {
+        let tmp = tempdir().expect("tempdir");
+        let override_v1 = tmp.path().join("override").join("v1");
+        std::fs::create_dir_all(&override_v1).expect("override repo");
+        std::fs::write(
+            override_v1.join("components-v2.toml"),
+            r#"
+schema_version = 2
+
+[[components]]
+name = "cosh"
+targets = [{ os = "linux", arch = "x86_64" }]
+
+[[components.backends]]
+kind = "raw"
+package = "cosh-artifact"
+"#,
+        )
+        .expect("component index");
+        let repo_config = RepoConfig::from_toml_str(
+            "schema_version = 1\ndefault_backend = \"raw\"\n[backends.raw]\nbase_url = \"https://example.invalid/raw\"\n",
+        )
+        .expect("repo config");
+        let backend = repo_config.backends.get("raw").expect("raw backend");
+        let layout = FsLayout::system(Some(tmp.path().join("root")));
+        let env = anolisa_env::EnvService::detect();
+        let override_base = format!("file://{}", override_v1.display());
+
+        let with_override = resolve_raw_package(
             &layout,
             &env,
             &repo_config,
             backend,
-            "legacy-name".to_string(),
+            "cosh",
             None,
-            false,
+            Some(&override_base),
         );
-        let exact_with_mapped_package = resolve_raw_identity(
-            &layout,
-            &env,
-            &repo_config,
-            backend,
-            "sec-core".to_string(),
-            None,
-            true,
-        );
+        let without_override =
+            resolve_raw_package(&layout, &env, &repo_config, backend, "cosh", None, None);
 
         assert_eq!(
-            exact,
-            ("legacy-name".to_string(), "legacy-name".to_string())
+            with_override, "cosh-artifact",
+            "the override repository's index must decide the raw package"
         );
-        assert_eq!(alias, ("cosh".to_string(), "cosh".to_string()));
         assert_eq!(
-            exact_with_mapped_package,
-            ("sec-core".to_string(), "agent-sec-core".to_string())
+            without_override, "cosh",
+            "without an override the unreachable repo.toml index falls back to the component name"
         );
     }
 
@@ -2524,10 +2591,11 @@ package = "agent-sec-core"
     #[test]
     fn install_unconfigured_backend_is_invalid_argument() {
         let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().to_path_buf();
+        seed_repo_config_with_index(&FsLayout::system(Some(prefix.clone())), &["agentsight"]);
         let mut a = args("agentsight");
         a.backend = Some("npm".to_string());
-        let err = handle(a, &ctx_with_prefix(false, Some(tmp.path().to_path_buf())))
-            .expect_err("must error");
+        let err = handle(a, &ctx_with_prefix(false, Some(prefix))).expect_err("must error");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(err.reason().contains("npm"), "got: {}", err.reason());
         assert!(
@@ -2540,10 +2608,11 @@ package = "agent-sec-core"
     #[test]
     fn install_unknown_backend_is_invalid_argument() {
         let tmp = tempdir().expect("tmpdir");
+        let prefix = tmp.path().to_path_buf();
+        seed_repo_config_with_index(&FsLayout::system(Some(prefix.clone())), &["agentsight"]);
         let mut a = args("agentsight");
         a.backend = Some("pip".to_string());
-        let err = handle(a, &ctx_with_prefix(false, Some(tmp.path().to_path_buf())))
-            .expect_err("must error");
+        let err = handle(a, &ctx_with_prefix(false, Some(prefix))).expect_err("must error");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(err.reason().contains("pip"));
     }
@@ -2554,18 +2623,23 @@ package = "agent-sec-core"
         let prefix = tmp.path().to_path_buf();
         let layout = FsLayout::system(Some(prefix.clone()));
         std::fs::create_dir_all(&layout.etc_dir).expect("etc dir");
+        let v1 = layout.etc_dir.join("test-index-repo").join("v1");
+        write_component_index_v2(&v1, &["agentsight"]);
         std::fs::write(
             layout.etc_dir.join("repo.toml"),
-            r#"schema_version = 1
+            format!(
+                r#"schema_version = 1
 default_backend = "raw"
 
 [backends.raw]
-base_url = "https://example.com/anolisa"
+base_url = "file://{}"
 
 [backends.npm]
 base_url = "https://registry.npmjs.org"
 scope = "@anolisa"
 "#,
+                v1.display()
+            ),
         )
         .expect("write repo.toml");
 
@@ -2585,6 +2659,51 @@ scope = "@anolisa"
             .expect_err("must error");
         assert_eq!(err.code(), "INVALID_ARGUMENT");
         assert!(err.reason().contains("ftp"), "got: {}", err.reason());
+    }
+
+    /// A `--repo` override replaces the DNF source's base URL — the same
+    /// repository that resolved identity and package also serves queries and
+    /// the native transaction — while backend-scoped settings (gpgcheck)
+    /// stay with the repo.toml rpm backend when one is configured.
+    #[test]
+    fn rpm_repo_source_honors_the_repo_override() {
+        let repo = RepoConfig::from_toml_str(
+            r#"schema_version = 1
+default_backend = "rpm"
+[backends.rpm]
+base_url = "https://repo.example/anolisa"
+gpgcheck = false
+"#,
+        )
+        .expect("parse repo");
+
+        let overridden =
+            rpm_repo_source_for_invocation(&repo, &linux_env(), Some("https://mirror.example/os"))
+                .expect("resolve rpm repo")
+                .expect("override source");
+        assert_eq!(overridden.id(), ANOLISA_RPM_REPO_ID);
+        assert_eq!(overridden.base_url(), "https://mirror.example/os");
+        assert_eq!(overridden.gpgcheck(), Some(false));
+
+        let configured = rpm_repo_source_for_invocation(&repo, &linux_env(), None)
+            .expect("resolve rpm repo")
+            .expect("configured source");
+        assert_eq!(configured.base_url(), "https://repo.example/anolisa");
+
+        // Without a configured rpm backend the override still yields a
+        // source; backend-scoped settings simply stay unset.
+        let raw_only = RepoConfig::from_toml_str(
+            "schema_version = 1\ndefault_backend = \"raw\"\n[backends.raw]\nbase_url = \"https://example.com/anolisa\"\n",
+        )
+        .expect("parse repo");
+        let overridden = rpm_repo_source_for_invocation(
+            &raw_only,
+            &linux_env(),
+            Some("https://mirror.example/os"),
+        )
+        .expect("resolve rpm repo")
+        .expect("override source");
+        assert_eq!(overridden.gpgcheck(), None);
     }
 
     #[test]

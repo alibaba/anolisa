@@ -395,6 +395,14 @@ mod tests {
     use crate::context::InstallMode;
 
     fn ctx(prefix: PathBuf, install_mode: InstallMode, dry_run: bool) -> CliContext {
+        // Identity resolution consults the component index for names absent
+        // from state; a seeded local index keeps fixture names supported.
+        if install_mode == InstallMode::System {
+            crate::commands::tier1::install::tests::seed_repo_config_with_index(
+                &anolisa_platform::fs_layout::FsLayout::system(Some(prefix.clone())),
+                crate::commands::tier1::install::tests::TEST_INDEX_COMPONENTS,
+            );
+        }
         crate::test_support::context_for_root(
             &prefix,
             install_mode,
@@ -659,9 +667,29 @@ mod tests {
         );
     }
 
-    /// Forgetting an absent component routes to NOT_INSTALLED (exit 2).
+    /// Forgetting an absent but index-supported component routes to
+    /// NOT_INSTALLED (exit 2).
     #[test]
-    fn forget_unknown_component_routes_to_not_installed() {
+    fn forget_absent_supported_component_routes_to_not_installed() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
+        let err = handle(
+            ForgetArgs {
+                component: "agentsight".to_string(),
+            },
+            &c,
+        )
+        .expect_err("absent component must error");
+        assert_eq!(err.code(), "NOT_INSTALLED");
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.reason().contains("not installed"));
+    }
+
+    /// A name neither state nor the component index knows is rejected as an
+    /// unsupported component, not reported as merely not installed
+    /// (issue #2630).
+    #[test]
+    fn forget_unsupported_component_is_rejected() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let c = ctx(tmp.path().to_path_buf(), InstallMode::System, false);
         let err = handle(
@@ -670,10 +698,13 @@ mod tests {
             },
             &c,
         )
-        .expect_err("absent component must error");
-        assert_eq!(err.code(), "NOT_INSTALLED");
-        assert_eq!(err.exit_code(), 2);
-        assert!(err.reason().contains("not installed"));
+        .expect_err("unsupported component must error");
+        assert_eq!(err.code(), "INVALID_ARGUMENT");
+        assert!(
+            err.reason().contains("unsupported component 'ghost'"),
+            "got: {}",
+            err.reason()
+        );
     }
 
     /// A component with an adapter receipt is refused until the adapter is
