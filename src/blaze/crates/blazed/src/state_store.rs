@@ -1008,6 +1008,19 @@ impl OwnedRunDir {
         self.inner.instance_id
     }
 
+    /// Borrow the retained descriptor for this sandbox directory.
+    ///
+    /// Hibernation resolves its image directory relative to this descriptor so
+    /// it never reopens a configured pathname after startup validation.
+    pub(crate) fn descriptor(&self) -> &OwnedFd {
+        &self.inner.directory
+    }
+
+    /// Report the configured pathname for diagnostics only.
+    pub(crate) fn configured_path(&self) -> &Path {
+        &self.inner.configured_path
+    }
+
     fn same_object(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }

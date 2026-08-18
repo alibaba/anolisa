@@ -12,9 +12,13 @@ Blaze 通过 HTTP API 管理 sandbox 实例的完整生命周期，支持策略�
 
 - **HTTP API** — Unix domain socket (`/run/blaze/api.sock`) + TCP (`:14159`)
 - **策略驱动后端选择** — workload class → 后端优先级列表
-- **生命周期状态机** — 持久化状态，并支持重启恢复
+- **生命周期状态机** — 持久化状态，并支持重启恢复，共 13 种状态：Pending、
+  Creating、Running、Paused、Checkpointed、Restoring、Hibernating、
+  Hibernated、Resuming、RecoveryRequired、Reset、Warm 和 Destroyed
 - **检查点捕获** — 对支持该能力的后端和存储提供程序捕获完整 VM 状态、客体
   内存和可写根文件系统，并提供历史查询
+- **休眠与恢复** — 在发布经过校验的休眠镜像后释放运行中的后端，之后再恢复
+  运行，跨 daemon 重启也可以恢复
 - **Guest 操作** — 对提供 guest endpoint 的运行中后端执行有界命令和文件传输
 - **Template catalog** — 有界导入并原子发布可复用 artifact
 - **内核 hook 注册** — 前/后置 hook 状态追踪
@@ -144,6 +148,8 @@ Blaze 通过 `/v1/sandboxes` 提供沙箱生命周期和客户机操作。
 | POST | `/v1/sandboxes/{id}/checkpoint` | 捕获完整检查点 |
 | GET | `/v1/sandboxes/{id}/checkpoints` | 列出已提交的检查点历史 |
 | POST | `/v1/sandboxes/{id}/rollback/{checkpoint_id}` | 使用经过校验的检查点替换正在运行的 sandbox |
+| POST | `/v1/sandboxes/{id}/hibernate` | 持久化 VM 状态并释放正在运行的后端 |
+| POST | `/v1/sandboxes/{id}/resume` | 恢复休眠的 sandbox，并等待已启用的 guest 通信就绪 |
 | GET | `/v1/pools` | 预留接口；返回 `501` |
 | GET | `/v1/pools/{backend}/{class}` | 预留接口；返回 `501` |
 | POST | `/v1/pools/{backend}/{class}/drain` | 预留接口；返回 `501` |
@@ -198,6 +204,14 @@ daemon 启动时，Blaze 会先校验完整的生命周期清单。只有清单�
 daemon 才会逐个处理未结束的 sandbox。后续逐项恢复期间，如果单个 sandbox
 清理失败，该 sandbox 会保留为 `RecoveryRequired`，但不会阻止其他已通过校验的
 记录继续处理，也不会阻止 API 启动。
+
+已经完成休眠的 sandbox 不在这轮清理范围内，会保留下来等待以后恢复；中断的
+休眠或恢复操作会以 `RecoveryRequired` 保留，等待显式销毁，而不会被误认为
+仍在运行。
+
+正常关闭时，daemon 会先停止接收新请求，再关停其后台 worker。此时不会拆除仍在
+运行的后端：它们的持久化记录留待下一次 daemon 启动时校验，届时已完成的休眠仍可
+恢复，被中断的操作则以 `RecoveryRequired` 保留、等待显式处理。
 
 清单校验采用 fail-closed 策略。如果 UUID 所属条目不是规范命名的目录，
 `state.json` 缺失、不可读、是符号链接或目录、存在其他
@@ -258,6 +272,40 @@ sandbox 标记为 `RecoveryRequired`（需要恢复）状态，这样之后调�
 
 响应字段、受支持的能力组合和失败处理方式参见
 [检查点捕获与恢复用户指南](../../docs/user-guide/zh/runtime/blaze.md#检查点捕获历史与恢复)。
+
+### 休眠与恢复
+
+休眠用于在暂时不需要一个 sandbox 时释放它占用的后端运行资源，同时把运行
+状态完整保存下来，之后再原样恢复运行。只有当运行中的后端支持完整快照捕获，
+并且配置的适配器能够恢复相同的后端版本时，休眠才可用；这些兼容性检查都在
+改动生命周期记录之前完成，因此不满足条件的组合会让 sandbox 保持运行。至于
+如何把工作负载带到一致的停止点，则交给后端的“捕获前静止（quiesce）”钩子：
+其默认行为是暂停后端，而自冻结后端（捕获原语自身会停止工作负载的后端）会
+覆盖该钩子，因而无需单独支持暂停。一次成功的休眠依次完成四件事：
+
+1. 记录操作意图、为捕获而静止后端，并把后端载荷和内存写入隐藏的暂存目录；
+2. 刷新保留下来的存储空间，并在清单中记录各文件的大小和 SHA-256 摘要；
+3. 在停止后端之前，先把整份休眠镜像同步落盘；
+4. 发布休眠目录，并提交 `Hibernated`（已休眠）状态。
+
+后端被停止之前失败会让 sandbox 保持 `Running`，但有一个例外：若持久化休眠意图
+时跨越了不确定的耐久性边界（状态改名成功但其目录同步失败），或此后暂存镜像
+失败，则持久化记录可能与存活的运行实例不一致，此时 sandbox 会保留为
+`RecoveryRequired`。
+
+恢复的顺序同样是先校验、再切换。Blaze 会先核对清单记录的身份、文件集合是否
+完全一致以及每个文件的摘要，确认无误后才启动替代后端。manager 先取得这个新
+后端的归属，再等待可选的 guest 通信就绪，只有最后一次存活检查也通过，才提交
+`Running`。如果在替代后端启动之前失败，sandbox 会回到 `Hibernated`，可以重试；
+如果无法确认替代后端的清理是否彻底，其归属和操作记录会通过 `RecoveryRequired`
+保留下来，交由显式销毁收尾。
+
+休眠期间存储空间会继续保留，不会被回收。恢复成功后，最近一次的休眠镜像也会
+保留，直到下一次休眠覆盖它，或者显式销毁把它删除——这是用磁盘空间换取可重复
+恢复能力的取舍。daemon 重启后不会自动续做中断的休眠或恢复操作。
+
+状态码约定、制品校验和失败归属参见
+[休眠与恢复运行用户指南](../../docs/user-guide/zh/runtime/blaze.md#休眠与恢复运行)。
 
 ### Guest 操作
 

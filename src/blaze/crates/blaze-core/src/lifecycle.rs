@@ -24,6 +24,12 @@ pub enum SandboxState {
     Checkpointed,
     /// The previous backend is stopped while replacement resources are owned.
     Restoring,
+    /// A live backend is being converted into durable hibernation artifacts.
+    Hibernating,
+    /// Durable hibernation artifacts and storage are retained without a backend.
+    Hibernated,
+    /// A backend is being started from retained hibernation artifacts.
+    Resuming,
     RecoveryRequired,
     Reset,
     Warm,
@@ -39,6 +45,9 @@ impl SandboxState {
             SandboxState::Paused => "paused",
             SandboxState::Checkpointed => "checkpointed",
             SandboxState::Restoring => "restoring",
+            SandboxState::Hibernating => "hibernating",
+            SandboxState::Hibernated => "hibernated",
+            SandboxState::Resuming => "resuming",
             SandboxState::RecoveryRequired => "recovery-required",
             SandboxState::Reset => "reset",
             SandboxState::Warm => "warm",
@@ -57,6 +66,10 @@ pub enum OperationKind {
     Checkpoint,
     /// A running sandbox is being replaced from a selected checkpoint.
     Restore,
+    /// A live backend is being stopped after durable artifacts are prepared.
+    Hibernate,
+    /// A backend is being started from retained hibernation artifacts.
+    Resume,
     /// Runtime resources are being destroyed.
     Destroy,
 }
@@ -67,6 +80,8 @@ impl OperationKind {
             OperationKind::Create => "create",
             OperationKind::Checkpoint => "checkpoint",
             OperationKind::Restore => "restore",
+            OperationKind::Hibernate => "hibernate",
+            OperationKind::Resume => "resume",
             OperationKind::Destroy => "destroy",
         }
     }
@@ -108,6 +123,24 @@ pub enum OperationPhase {
     RestoreHeadUpdated,
     /// The storage replacement is committed and can no longer be aborted.
     RestoreStorageCommitted,
+    /// Hibernate intent is durable, but the backend is still running.
+    HibernatePreparing,
+    /// The backend is paused while hibernation artifacts are written.
+    HibernatePaused,
+    /// Hibernation artifacts are complete and durable.
+    HibernateArtifactsSynced,
+    /// The live backend has stopped and no longer owns runtime resources.
+    HibernateBackendStopped,
+    /// The replacement hibernation directory is durably visible.
+    HibernatePublished,
+    /// Resume intent is durable and no backend has started.
+    ResumePreparing,
+    /// Backend ownership intent is durable before restore starts.
+    ResumeBackendStarting,
+    /// A restored backend is owned, but readiness is not yet confirmed.
+    ResumeBackendStarted,
+    /// The restored backend and optional guest transport are ready.
+    ResumeBackendReady,
 }
 
 impl OperationPhase {
@@ -124,6 +157,15 @@ impl OperationPhase {
             OperationPhase::RestoreBackendStarted => "restore-backend-started",
             OperationPhase::RestoreHeadUpdated => "restore-head-updated",
             OperationPhase::RestoreStorageCommitted => "restore-storage-committed",
+            OperationPhase::HibernatePreparing => "hibernate-preparing",
+            OperationPhase::HibernatePaused => "hibernate-paused",
+            OperationPhase::HibernateArtifactsSynced => "hibernate-artifacts-synced",
+            OperationPhase::HibernateBackendStopped => "hibernate-backend-stopped",
+            OperationPhase::HibernatePublished => "hibernate-published",
+            OperationPhase::ResumePreparing => "resume-preparing",
+            OperationPhase::ResumeBackendStarting => "resume-backend-starting",
+            OperationPhase::ResumeBackendStarted => "resume-backend-started",
+            OperationPhase::ResumeBackendReady => "resume-backend-ready",
         }
     }
 
@@ -140,6 +182,15 @@ impl OperationPhase {
             | OperationPhase::RestoreBackendStarted
             | OperationPhase::RestoreHeadUpdated
             | OperationPhase::RestoreStorageCommitted => OperationKind::Restore,
+            OperationPhase::HibernatePreparing
+            | OperationPhase::HibernatePaused
+            | OperationPhase::HibernateArtifactsSynced
+            | OperationPhase::HibernateBackendStopped
+            | OperationPhase::HibernatePublished => OperationKind::Hibernate,
+            OperationPhase::ResumePreparing
+            | OperationPhase::ResumeBackendStarting
+            | OperationPhase::ResumeBackendStarted
+            | OperationPhase::ResumeBackendReady => OperationKind::Resume,
         }
     }
 
@@ -156,6 +207,15 @@ impl OperationPhase {
             OperationPhase::RestoreBackendStarted => 4,
             OperationPhase::RestoreHeadUpdated => 5,
             OperationPhase::RestoreStorageCommitted => 6,
+            OperationPhase::HibernatePreparing => 0,
+            OperationPhase::HibernatePaused => 1,
+            OperationPhase::HibernateArtifactsSynced => 2,
+            OperationPhase::HibernateBackendStopped => 3,
+            OperationPhase::HibernatePublished => 4,
+            OperationPhase::ResumePreparing => 0,
+            OperationPhase::ResumeBackendStarting => 1,
+            OperationPhase::ResumeBackendStarted => 2,
+            OperationPhase::ResumeBackendReady => 3,
         }
     }
 }
@@ -315,6 +375,54 @@ impl SandboxInstance {
         self.advance_operation_phase(OperationKind::Restore, phase)
     }
 
+    /// Record hibernation intent before pausing the backend.
+    pub fn begin_hibernate_operation(&mut self) -> Result<()> {
+        if let Some(active) = &self.operation {
+            return Err(BlazeError::OperationInProgress {
+                active: active.kind.to_string(),
+                requested: OperationKind::Hibernate.to_string(),
+            });
+        }
+        let now = Utc::now();
+        self.operation = Some(OperationJournal {
+            kind: OperationKind::Hibernate,
+            started_at: now,
+            checkpoint_id: None,
+            phase: Some(OperationPhase::HibernatePreparing),
+        });
+        self.updated_at = now;
+        Ok(())
+    }
+
+    /// Advance the active hibernation journal without replacing its identity.
+    pub fn advance_hibernate_phase(&mut self, phase: OperationPhase) -> Result<()> {
+        self.advance_operation_phase(OperationKind::Hibernate, phase)
+    }
+
+    /// Record resume intent before preparing a replacement backend.
+    pub fn begin_resume_operation(&mut self) -> Result<()> {
+        if let Some(active) = &self.operation {
+            return Err(BlazeError::OperationInProgress {
+                active: active.kind.to_string(),
+                requested: OperationKind::Resume.to_string(),
+            });
+        }
+        let now = Utc::now();
+        self.operation = Some(OperationJournal {
+            kind: OperationKind::Resume,
+            started_at: now,
+            checkpoint_id: None,
+            phase: Some(OperationPhase::ResumePreparing),
+        });
+        self.updated_at = now;
+        Ok(())
+    }
+
+    /// Advance the active resume journal without replacing its identity.
+    pub fn advance_resume_phase(&mut self, phase: OperationPhase) -> Result<()> {
+        self.advance_operation_phase(OperationKind::Resume, phase)
+    }
+
     fn advance_operation_phase(
         &mut self,
         requested_kind: OperationKind,
@@ -375,7 +483,52 @@ impl SandboxInstance {
             }
             _ => true,
         };
-        if !restore_boundary_reached || !is_valid_transition(self.state, target) {
+        let hibernate_boundary_reached = match (self.state, target) {
+            (SandboxState::Running, SandboxState::Hibernating) => self.operation_phase_reached(
+                OperationKind::Hibernate,
+                OperationPhase::HibernatePreparing,
+            ),
+            (SandboxState::Hibernating, SandboxState::Hibernated) => {
+                self.backend_ownership == BackendOwnership::Stopped
+                    && self.operation_phase_reached(
+                        OperationKind::Hibernate,
+                        OperationPhase::HibernatePublished,
+                    )
+            }
+            (SandboxState::Hibernating, SandboxState::Running) => {
+                self.backend_ownership == BackendOwnership::Running
+                    && self
+                        .operation
+                        .as_ref()
+                        .is_some_and(|operation| operation.kind == OperationKind::Hibernate)
+            }
+            (SandboxState::Hibernated, SandboxState::Resuming) => {
+                self.backend_ownership == BackendOwnership::Stopped
+                    && self.operation_phase_reached(
+                        OperationKind::Resume,
+                        OperationPhase::ResumePreparing,
+                    )
+            }
+            (SandboxState::Resuming, SandboxState::Running) => {
+                self.backend_ownership == BackendOwnership::Running
+                    && self.operation_phase_reached(
+                        OperationKind::Resume,
+                        OperationPhase::ResumeBackendReady,
+                    )
+            }
+            (SandboxState::Resuming, SandboxState::Hibernated) => {
+                self.backend_ownership == BackendOwnership::Stopped
+                    && self
+                        .operation
+                        .as_ref()
+                        .is_some_and(|operation| operation.kind == OperationKind::Resume)
+            }
+            _ => true,
+        };
+        if !restore_boundary_reached
+            || !hibernate_boundary_reached
+            || !is_valid_transition(self.state, target)
+        {
             return Err(BlazeError::InvalidStateTransition {
                 from: self.state.to_string(),
                 to: target.to_string(),
@@ -396,12 +549,19 @@ impl SandboxInstance {
     }
 
     fn restore_phase_reached(&self, minimum: OperationPhase) -> bool {
-        minimum.operation_kind() == OperationKind::Restore
+        self.operation_phase_reached(OperationKind::Restore, minimum)
+    }
+
+    fn operation_phase_reached(
+        &self,
+        operation_kind: OperationKind,
+        minimum: OperationPhase,
+    ) -> bool {
+        minimum.operation_kind() == operation_kind
             && self.operation.as_ref().is_some_and(|operation| {
-                operation.kind == OperationKind::Restore
+                operation.kind == operation_kind
                     && operation.phase.is_some_and(|phase| {
-                        phase.operation_kind() == OperationKind::Restore
-                            && phase.rank() >= minimum.rank()
+                        phase.operation_kind() == operation_kind && phase.rank() >= minimum.rank()
                     })
             })
     }
@@ -436,7 +596,8 @@ impl SandboxInstance {
 
 fn is_valid_transition(from: SandboxState, to: SandboxState) -> bool {
     use SandboxState::{
-        Checkpointed, Creating, Destroyed, Paused, Pending, RecoveryRequired, Restoring, Running,
+        Checkpointed, Creating, Destroyed, Hibernated, Hibernating, Paused, Pending,
+        RecoveryRequired, Restoring, Resuming, Running,
     };
     if to == Destroyed {
         // `* → destroyed` is always valid (terminal sink).
@@ -454,6 +615,16 @@ fn is_valid_transition(from: SandboxState, to: SandboxState) -> bool {
         (Checkpointed, Running) => true,
         (Running, Restoring) => true,
         (Restoring, Running) => true,
+        (Running, Hibernating) => true,
+        (Hibernating, Hibernated) => true,
+        (Hibernating, Running) => true,
+        (Hibernated, Resuming) => true,
+        (Resuming, Running) => true,
+        (Resuming, Hibernated) => true,
+        // `Reset` and `Warm` are retained only so records from the removed
+        // pool implementation still deserialize; they have no forward runtime
+        // transition and may proceed only through cleanup to `Destroyed` or
+        // `RecoveryRequired`, both handled above.
         _ => false,
     }
 }
@@ -531,6 +702,57 @@ mod tests {
     }
 
     #[test]
+    fn hibernation_state_requires_durable_ownership_boundaries() {
+        let mut inst = fresh();
+        inst.transition(SandboxState::Creating).expect("creating");
+        inst.transition(SandboxState::Running).expect("running");
+        inst.backend_ownership = BackendOwnership::Running;
+
+        let error = inst
+            .transition(SandboxState::Hibernating)
+            .expect_err("hibernate requires a journal");
+        assert!(matches!(error, BlazeError::InvalidStateTransition { .. }));
+
+        inst.begin_hibernate_operation().expect("begin hibernate");
+        inst.transition(SandboxState::Hibernating)
+            .expect("hibernate starts");
+        inst.advance_hibernate_phase(OperationPhase::HibernateArtifactsSynced)
+            .expect("artifacts durable");
+        let error = inst
+            .transition(SandboxState::Hibernated)
+            .expect_err("a live backend prevents hibernated state");
+        assert!(matches!(error, BlazeError::InvalidStateTransition { .. }));
+
+        inst.backend_ownership = BackendOwnership::Stopped;
+        inst.advance_hibernate_phase(OperationPhase::HibernatePublished)
+            .expect("publish hibernation");
+        inst.transition(SandboxState::Hibernated)
+            .expect("hibernate commits");
+        inst.finish_operation();
+
+        let error = inst
+            .transition(SandboxState::Resuming)
+            .expect_err("resume requires a journal");
+        assert!(matches!(error, BlazeError::InvalidStateTransition { .. }));
+
+        inst.begin_resume_operation().expect("begin resume");
+        inst.transition(SandboxState::Resuming)
+            .expect("resume starts");
+        inst.advance_resume_phase(OperationPhase::ResumeBackendStarted)
+            .expect("backend started");
+        inst.backend_ownership = BackendOwnership::Running;
+        let error = inst
+            .transition(SandboxState::Running)
+            .expect_err("readiness must precede running state");
+        assert!(matches!(error, BlazeError::InvalidStateTransition { .. }));
+
+        inst.advance_resume_phase(OperationPhase::ResumeBackendReady)
+            .expect("backend ready");
+        inst.transition(SandboxState::Running)
+            .expect("resume commits");
+    }
+
+    #[test]
     fn destroy_is_always_legal_except_from_destroyed() {
         let mut inst = fresh();
         inst.transition(SandboxState::Destroyed).expect("ok");
@@ -579,6 +801,22 @@ mod tests {
         for target in [SandboxState::Reset, SandboxState::Warm] {
             let error = inst.transition(target).expect_err("legacy-only state");
             assert!(matches!(error, BlazeError::InvalidStateTransition { .. }));
+        }
+    }
+
+    #[test]
+    fn legacy_pool_states_have_no_forward_runtime_transition() {
+        use SandboxState::{Creating, Destroyed, RecoveryRequired, Reset, Warm};
+        // `Reset` and `Warm` survive only for deserialization of records from
+        // the removed pool implementation. They must not become eligible for
+        // reuse: the only legal moves are cleanup to `Destroyed` or
+        // `RecoveryRequired`.
+        assert!(!is_valid_transition(Reset, Warm));
+        assert!(!is_valid_transition(Warm, Creating));
+        assert!(!is_valid_transition(Reset, Creating));
+        for legacy in [Reset, Warm] {
+            assert!(is_valid_transition(legacy, Destroyed));
+            assert!(is_valid_transition(legacy, RecoveryRequired));
         }
     }
 

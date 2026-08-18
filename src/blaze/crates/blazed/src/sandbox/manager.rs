@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Recoverable sandbox create, destroy, and startup cleanup.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -238,6 +238,29 @@ impl SandboxManager {
             .get(&id)
             .cloned()
             .ok_or_else(|| BlazeDaemonError::NotFound(format!("instance {id}")))
+    }
+
+    /// Return every sandbox for which lifecycle cleanup still owns resources.
+    ///
+    /// Shutdown uses this snapshot to start cleanup concurrently while all
+    /// mutations remain serialized by the manager's per-sandbox locks.
+    pub(crate) fn owned_instance_ids(&self) -> Result<BTreeSet<Uuid>> {
+        let mut ids = self
+            .instances
+            .lock()
+            .map_err(|_| poisoned("instances"))?
+            .values()
+            .filter(|instance| requires_automatic_cleanup(instance))
+            .map(|instance| instance.id)
+            .collect::<BTreeSet<_>>();
+        ids.extend(
+            self.backend_instances
+                .lock()
+                .map_err(|_| poisoned("backend_instances"))?
+                .keys()
+                .copied(),
+        );
+        Ok(ids)
     }
 
     /// Execute one command through the running sandbox guest.
@@ -630,6 +653,17 @@ impl SandboxManager {
             )));
         }
 
+        if let Err(error) = self.cleanup_hibernate_artifacts(id).await {
+            let recovery = self.mark_recovery(id).err();
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "destroy {id}: backend stopped but hibernation cleanup failed: {error}; \
+                 storage retained{}",
+                recovery
+                    .map(|error| format!("; recovery state persistence failed: {error}"))
+                    .unwrap_or_default()
+            )));
+        }
+
         if let Err(error) = self.storage.release_by_id(&id.to_string()).await {
             let recovery = self.mark_recovery(id).err();
             return Err(BlazeDaemonError::RecoveryRequired(format!(
@@ -677,42 +711,9 @@ impl SandboxManager {
 
     /// Reconcile every non-terminal record without aborting on one failure.
     pub async fn reconcile_startup(&self) -> ReconcileReport {
-        let ids = match self.instances.lock() {
-            Ok(instances) => instances
-                .values()
-                .filter(|instance| instance.state != SandboxState::Destroyed)
-                .map(|instance| instance.id)
-                .collect::<Vec<_>>(),
-            Err(poisoned) => poisoned
-                .into_inner()
-                .values()
-                .filter(|instance| instance.state != SandboxState::Destroyed)
-                .map(|instance| instance.id)
-                .collect::<Vec<_>>(),
-        };
-        let mut report = ReconcileReport {
-            attempted: ids.len(),
-            ..ReconcileReport::default()
-        };
-        for id in ids {
-            let operation_lock = self.operation_lock(id);
-            let _operation = operation_lock.lock().await;
-            match self.destroy_locked(id).await {
-                Ok(_) => report.completed += 1,
-                Err(error) => {
-                    let recovery = self.mark_recovery(id).err();
-                    report.failures.push(ReconcileFailure {
-                        instance_id: id,
-                        error: match recovery {
-                            Some(recovery) => {
-                                format!("{error}; recovery state persistence failed: {recovery}")
-                            }
-                            None => error.to_string(),
-                        },
-                    });
-                }
-            }
-        }
+        let mut classification_failures = self.classify_interrupted_hibernation();
+        let mut report = self.cleanup_owned_instances().await;
+        report.failures.append(&mut classification_failures);
         report
     }
 
@@ -725,6 +726,50 @@ impl SandboxManager {
             )));
         }
         Ok(operation)
+    }
+
+    fn classify_interrupted_hibernation(&self) -> Vec<ReconcileFailure> {
+        let interrupted = match self.instances.lock() {
+            Ok(instances) => instances
+                .values()
+                .filter(|instance| {
+                    matches!(
+                        instance.state,
+                        SandboxState::Hibernating | SandboxState::Resuming
+                    ) || matches!(
+                        instance.operation.as_ref().map(|operation| operation.kind),
+                        Some(OperationKind::Hibernate | OperationKind::Resume)
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .values()
+                .filter(|instance| {
+                    matches!(
+                        instance.state,
+                        SandboxState::Hibernating | SandboxState::Resuming
+                    ) || matches!(
+                        instance.operation.as_ref().map(|operation| operation.kind),
+                        Some(OperationKind::Hibernate | OperationKind::Resume)
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>(),
+        };
+        interrupted
+            .into_iter()
+            .filter_map(|instance| {
+                let id = instance.id;
+                self.mark_instance_recovery(instance)
+                    .err()
+                    .map(|error| ReconcileFailure {
+                        instance_id: id,
+                        error: format!("interrupted hibernation classification failed: {error}"),
+                    })
+            })
+            .collect()
     }
 
     fn guest_client(&self, id: Uuid) -> Result<GuestClient> {
@@ -767,6 +812,50 @@ impl SandboxManager {
         )
         .wait_ready(GUEST_REQUEST_TIMEOUT, &CancellationToken::new())
         .await
+    }
+
+    /// Release every instance that lifecycle cleanup still owns.
+    ///
+    /// Startup reconciliation has no external deadline, so each record gets the
+    /// full per-sandbox operation lock without a timeout.
+    pub async fn cleanup_owned_instances(&self) -> ReconcileReport {
+        let ids = match self.owned_instance_ids() {
+            Ok(ids) => ids,
+            Err(error) => {
+                return ReconcileReport {
+                    attempted: 0,
+                    completed: 0,
+                    failures: vec![ReconcileFailure {
+                        instance_id: Uuid::nil(),
+                        error: format!("owned instance inventory unavailable: {error}"),
+                    }],
+                };
+            }
+        };
+        let mut report = ReconcileReport {
+            attempted: ids.len(),
+            ..ReconcileReport::default()
+        };
+        for id in ids {
+            let operation_lock = self.operation_lock(id);
+            let _operation = operation_lock.lock().await;
+            match self.destroy_locked(id).await {
+                Ok(_) => report.completed += 1,
+                Err(error) => {
+                    let recovery = self.mark_recovery(id).err();
+                    report.failures.push(ReconcileFailure {
+                        instance_id: id,
+                        error: match recovery {
+                            Some(recovery) => {
+                                format!("{error}; recovery state persistence failed: {recovery}")
+                            }
+                            None => error.to_string(),
+                        },
+                    });
+                }
+            }
+        }
+        report
     }
 
     async fn cleanup_failed_create(
@@ -996,4 +1085,25 @@ impl SandboxManager {
 
 fn poisoned(name: &str) -> BlazeDaemonError {
     BlazeDaemonError::Internal(format!("{name} lock poisoned"))
+}
+
+fn is_clean_terminal(instance: &SandboxInstance) -> bool {
+    instance.state == SandboxState::Destroyed
+        && instance.operation.is_none()
+        && matches!(
+            instance.backend_ownership,
+            BackendOwnership::NotStarted | BackendOwnership::Stopped
+        )
+}
+
+fn requires_automatic_cleanup(instance: &SandboxInstance) -> bool {
+    !(is_clean_terminal(instance)
+        || (instance.state == SandboxState::Hibernated
+            && instance.operation.is_none()
+            && instance.backend_ownership == BackendOwnership::Stopped)
+        || (instance.state == SandboxState::RecoveryRequired
+            && matches!(
+                instance.operation.as_ref().map(|operation| operation.kind),
+                Some(OperationKind::Hibernate | OperationKind::Resume)
+            )))
 }

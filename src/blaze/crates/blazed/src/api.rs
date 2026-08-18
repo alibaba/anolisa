@@ -26,7 +26,9 @@ use uuid::Uuid;
 
 use crate::error::{BlazeDaemonError, Result};
 use crate::guest::MAX_GUEST_FILE_BYTES;
-use crate::sandbox::{CreateSandbox, RestoreSandbox, RestoreSandboxResult};
+use crate::sandbox::{
+    CreateSandbox, HibernateSandbox, RestoreSandbox, RestoreSandboxResult, ResumeSandbox,
+};
 use crate::state::ServerState;
 
 const MAX_EXEC_TIMEOUT_SECS: u32 = 20;
@@ -145,6 +147,8 @@ async fn dispatch(
         ("POST", ["v1", "sandboxes", id, "rollback", checkpoint_id]) => {
             rollback(state, id, checkpoint_id).await
         }
+        ("POST", ["v1", "sandboxes", id, "hibernate"]) => hibernate(state, id).await,
+        ("POST", ["v1", "sandboxes", id, "resume"]) => resume(state, id).await,
         ("DELETE", ["v1", "sandboxes", id]) => destroy_sandbox(state, id).await,
         ("GET", ["v1", "pools"])
         | ("GET", ["v1", "pools", _, _])
@@ -374,6 +378,44 @@ async fn rollback(
         "restored": true,
         "state": restored.instance.state,
     }))
+}
+
+async fn hibernate(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>>> {
+    let uuid = parse_uuid(id)?;
+    let instance = state.manager.get(uuid)?;
+    let binary_path = configured_backend_path(state, instance.backend)?;
+    json_ok(
+        &state
+            .manager
+            .hibernate(uuid, HibernateSandbox { binary_path })
+            .await?,
+    )
+}
+
+async fn resume(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>>> {
+    let uuid = parse_uuid(id)?;
+    let instance = state.manager.get(uuid)?;
+    let binary_path = configured_backend_path(state, instance.backend)?;
+    json_ok(
+        &state
+            .manager
+            .resume(uuid, ResumeSandbox { binary_path })
+            .await?,
+    )
+}
+
+fn configured_backend_path(
+    state: &ServerState,
+    backend: BackendKind,
+) -> Result<std::path::PathBuf> {
+    Ok(state
+        .config
+        .lock()
+        .map_err(|_| BlazeDaemonError::Internal("config lock poisoned".into()))?
+        .backends
+        .get(backend.as_str())
+        .cloned()
+        .unwrap_or_default())
 }
 
 async fn destroy_sandbox(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>>> {
@@ -2012,6 +2054,527 @@ mod tests {
             SandboxState::Destroyed
         );
         assert!(!checkpoint_namespace.exists());
+    }
+
+    #[tokio::test]
+    async fn hibernate_releases_the_backend_and_resume_survives_restart() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config.clone(),
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        state
+            .manager
+            .write_file(uuid, "/tmp/value".to_string(), b"hibernate-memory")
+            .await
+            .expect("write guest state");
+
+        let (status, hibernated) = dispatched_json(
+            &state,
+            Method::POST,
+            &format!("/v1/sandboxes/{id}/hibernate"),
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(hibernated["state"], "hibernated");
+        assert_eq!(hibernated["backend_ownership"], "stopped");
+        assert!(state.manager.backend_owner(uuid).is_none());
+        let hibernate_dir = config.daemon.state_dir.join(id).join("hibernate");
+        // The guest mock captures a directory-shaped payload into its own
+        // subtree; the manifest inventories it beside the payload root.
+        for name in [
+            "manifest.json",
+            "backend/image/checkpoint.img",
+            "backend/image/pages.bin",
+            "backend/bundle/config.json",
+        ] {
+            assert!(hibernate_dir.join(name).is_file(), "{name} is missing");
+        }
+        let report = state.manager.reconcile_startup().await;
+        assert_eq!(report.attempted, 0);
+        assert!(report.failures.is_empty());
+        drop(state);
+
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let restarted = build_test_state(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(GuestMockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+        assert_eq!(
+            restarted.manager.get(uuid).expect("loaded state").state,
+            SandboxState::Hibernated
+        );
+        let report = restarted.manager.reconcile_startup().await;
+        assert_eq!(report.attempted, 0);
+        assert!(report.failures.is_empty());
+
+        let (status, resumed) = dispatched_json(
+            &restarted,
+            Method::POST,
+            &format!("/v1/sandboxes/{id}/resume"),
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resumed["state"], "running");
+        assert_eq!(
+            restarted
+                .manager
+                .read_file(uuid, "/tmp/value".to_string())
+                .await
+                .expect("read resumed guest state"),
+            b"hibernate-memory"
+        );
+        assert!(
+            hibernate_dir.is_dir(),
+            "the last hibernation image remains available until replacement or destroy"
+        );
+        assert!(restarted.manager.destroy(uuid).await.expect("destroy"));
+        assert!(!hibernate_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn hibernate_rejects_a_capture_only_backend_before_state_mutation() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(CaptureOnlyMockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        let owner = state.manager.backend_owner(uuid).expect("owner");
+
+        let error = state
+            .manager
+            .hibernate(
+                uuid,
+                HibernateSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect_err("resume capability is required");
+
+        assert!(matches!(error, BlazeDaemonError::UnsupportedOperation(_)));
+        let retained = state.manager.backend_owner(uuid).expect("retained owner");
+        assert!(Arc::ptr_eq(&owner, &retained));
+        let lifecycle = state.manager.get(uuid).expect("lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::Running);
+        assert!(lifecycle.operation.is_none());
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_corrupted_hibernation_artifacts_without_starting_a_backend() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config.clone(),
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        state
+            .manager
+            .hibernate(
+                uuid,
+                HibernateSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("hibernate");
+        tokio::fs::write(
+            config
+                .daemon
+                .state_dir
+                .join(id)
+                .join("hibernate/backend/memory.snap"),
+            b"corrupted",
+        )
+        .await
+        .expect("corrupt artifact");
+
+        let error = state
+            .manager
+            .resume(
+                uuid,
+                ResumeSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect_err("corrupted artifact must fail closed");
+
+        assert!(matches!(error, BlazeDaemonError::RecoveryRequired(_)));
+        assert!(state.manager.backend_owner(uuid).is_none());
+        let lifecycle = state.manager.get(uuid).expect("lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::RecoveryRequired);
+        assert!(lifecycle.operation.is_none());
+        assert!(state.manager.destroy(uuid).await.expect("destroy"));
+    }
+
+    #[tokio::test]
+    async fn startup_retains_an_interrupted_hibernation_for_explicit_cleanup() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let mut instance = SandboxInstance::new(
+            BackendKind::Mock,
+            WorkloadClass::AgentTool,
+            "sha256:ownership-test".into(),
+            "ownership-test".into(),
+        );
+        instance
+            .transition(SandboxState::Creating)
+            .expect("creating");
+        instance.transition(SandboxState::Running).expect("running");
+        instance.backend_ownership = BackendOwnership::Running;
+        instance
+            .begin_hibernate_operation()
+            .expect("begin hibernation");
+        instance
+            .transition(SandboxState::Hibernating)
+            .expect("hibernating");
+        instance.persist(&config.daemon.state_dir).expect("persist");
+        storage
+            .acquire(&AcquireOpts {
+                instance_id: instance.id.to_string(),
+                rootfs_size: 4096,
+                mem_size: 4096,
+            })
+            .await
+            .expect("storage");
+        let id = instance.id;
+        let state = build_test_state(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+
+        let report = state.manager.reconcile_startup().await;
+        assert_eq!(report.attempted, 0);
+        assert!(report.failures.is_empty());
+        let retained = state.manager.get(id).expect("retained lifecycle");
+        assert_eq!(retained.state, SandboxState::RecoveryRequired);
+        assert_eq!(
+            retained.operation.as_ref().map(|operation| operation.kind),
+            Some(OperationKind::Hibernate)
+        );
+        assert!(state.manager.destroy(id).await.expect("explicit destroy"));
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn hibernate_snapshot_failure_resumes_the_existing_backend() {
+        let temp = tempfile::tempdir().expect("temp");
+        let state = mock_state(&temp);
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        let owner = state.manager.backend_owner(uuid).expect("owner");
+        let hook = crate::failpoint::TestFailpoint::new(&["hibernate-snapshot"]);
+
+        hook.run(state.manager.hibernate(
+            uuid,
+            HibernateSandbox {
+                binary_path: PathBuf::new(),
+            },
+        ))
+        .await
+        .expect_err("snapshot failure");
+
+        let retained = state.manager.backend_owner(uuid).expect("retained owner");
+        assert!(Arc::ptr_eq(&owner, &retained));
+        let lifecycle = state.manager.get(uuid).expect("lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::Running);
+        assert_eq!(lifecycle.backend_ownership, BackendOwnership::Running);
+        assert!(lifecycle.operation.is_none());
+        let names = std::fs::read_dir(temp.path().join("state").join(id))
+            .expect("instance directory")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect::<Vec<_>>();
+        assert!(
+            names
+                .iter()
+                .all(|name| !name.to_string_lossy().starts_with(".hibernate."))
+        );
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn hibernate_compensation_requires_guest_readiness() {
+        let temp = tempfile::tempdir().expect("temp");
+        let state = guest_mock_state(&temp);
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        let hook =
+            crate::failpoint::TestFailpoint::new(&["hibernate-snapshot", "resume-guest-ready"]);
+
+        let error = hook
+            .run(state.manager.hibernate(
+                uuid,
+                HibernateSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            ))
+            .await
+            .expect_err("guest readiness must fail closed");
+
+        assert!(matches!(error, BlazeDaemonError::RecoveryRequired(_)));
+        assert!(state.manager.backend_owner(uuid).is_some());
+        let lifecycle = state.manager.get(uuid).expect("lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::RecoveryRequired);
+        assert_eq!(lifecycle.backend_ownership, BackendOwnership::Unknown);
+        assert_eq!(
+            lifecycle.operation.as_ref().map(|operation| operation.kind),
+            Some(OperationKind::Hibernate)
+        );
+        assert!(state.manager.destroy(uuid).await.expect("destroy"));
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn uncertain_hibernate_stop_retains_the_existing_owner() {
+        let temp = tempfile::tempdir().expect("temp");
+        let state = mock_state(&temp);
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        let owner = state.manager.backend_owner(uuid).expect("owner");
+        let hook = crate::failpoint::TestFailpoint::new(&["hibernate-backend-stop"]);
+
+        let error = hook
+            .run(state.manager.hibernate(
+                uuid,
+                HibernateSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            ))
+            .await
+            .expect_err("uncertain stop must retain ownership");
+
+        assert!(matches!(error, BlazeDaemonError::RecoveryRequired(_)));
+        let retained = state.manager.backend_owner(uuid).expect("retained owner");
+        assert!(Arc::ptr_eq(&owner, &retained));
+        let lifecycle = state.manager.get(uuid).expect("lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::RecoveryRequired);
+        assert_eq!(lifecycle.backend_ownership, BackendOwnership::Unknown);
+        assert_eq!(
+            lifecycle
+                .operation
+                .as_ref()
+                .and_then(|operation| operation.phase),
+            Some(OperationPhase::HibernateArtifactsSynced)
+        );
+        assert!(state.manager.destroy(uuid).await.expect("destroy"));
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn hibernate_publish_failure_retains_stopped_ownership_for_destroy() {
+        let temp = tempfile::tempdir().expect("temp");
+        let state = mock_state(&temp);
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        let hook = crate::failpoint::TestFailpoint::new(&["hibernate-publish"]);
+
+        let error = hook
+            .run(state.manager.hibernate(
+                uuid,
+                HibernateSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            ))
+            .await
+            .expect_err("publish failure follows backend stop");
+
+        assert!(matches!(error, BlazeDaemonError::RecoveryRequired(_)));
+        assert!(state.manager.backend_owner(uuid).is_none());
+        let lifecycle = state.manager.get(uuid).expect("lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::RecoveryRequired);
+        assert_eq!(lifecycle.backend_ownership, BackendOwnership::Stopped);
+        assert_eq!(
+            lifecycle
+                .operation
+                .as_ref()
+                .and_then(|operation| operation.phase),
+            Some(OperationPhase::HibernateBackendStopped)
+        );
+        assert!(state.manager.destroy(uuid).await.expect("destroy"));
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn resume_start_failure_preserves_retryable_hibernation() {
+        let temp = tempfile::tempdir().expect("temp");
+        let state = mock_state(&temp);
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        state
+            .manager
+            .hibernate(
+                uuid,
+                HibernateSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("hibernate");
+        let hook = crate::failpoint::TestFailpoint::new(&["resume-backend-start"]);
+
+        hook.run(state.manager.resume(
+            uuid,
+            ResumeSandbox {
+                binary_path: PathBuf::new(),
+            },
+        ))
+        .await
+        .expect_err("resume start failure");
+
+        assert!(state.manager.backend_owner(uuid).is_none());
+        let lifecycle = state.manager.get(uuid).expect("lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::Hibernated);
+        assert_eq!(lifecycle.backend_ownership, BackendOwnership::Stopped);
+        assert!(lifecycle.operation.is_none());
+        state
+            .manager
+            .resume(
+                uuid,
+                ResumeSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("retry resume");
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn resume_readiness_failure_cleans_the_replacement_backend() {
+        let temp = tempfile::tempdir().expect("temp");
+        let state = guest_mock_state(&temp);
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        state
+            .manager
+            .hibernate(
+                uuid,
+                HibernateSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("hibernate");
+        let hook = crate::failpoint::TestFailpoint::new(&["resume-guest-ready"]);
+
+        hook.run(state.manager.resume(
+            uuid,
+            ResumeSandbox {
+                binary_path: PathBuf::new(),
+            },
+        ))
+        .await
+        .expect_err("readiness failure");
+
+        assert!(state.manager.backend_owner(uuid).is_none());
+        let lifecycle = state.manager.get(uuid).expect("lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::Hibernated);
+        assert_eq!(lifecycle.backend_ownership, BackendOwnership::Stopped);
+        assert!(lifecycle.operation.is_none());
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn resume_cleanup_failure_retains_the_replacement_owner() {
+        let temp = tempfile::tempdir().expect("temp");
+        let state = guest_mock_state(&temp);
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        state
+            .manager
+            .hibernate(
+                uuid,
+                HibernateSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("hibernate");
+        let hook =
+            crate::failpoint::TestFailpoint::new(&["resume-guest-ready", "resume-backend-stop"]);
+
+        let error = hook
+            .run(state.manager.resume(
+                uuid,
+                ResumeSandbox {
+                    binary_path: PathBuf::new(),
+                },
+            ))
+            .await
+            .expect_err("failed cleanup must retain ownership");
+
+        assert!(matches!(error, BlazeDaemonError::RecoveryRequired(_)));
+        assert!(state.manager.backend_owner(uuid).is_some());
+        let lifecycle = state.manager.get(uuid).expect("lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::RecoveryRequired);
+        assert_eq!(lifecycle.backend_ownership, BackendOwnership::Unknown);
+        assert_eq!(
+            lifecycle.operation.as_ref().map(|operation| operation.kind),
+            Some(OperationKind::Resume)
+        );
+        assert_eq!(
+            lifecycle
+                .operation
+                .as_ref()
+                .and_then(|operation| operation.phase),
+            Some(OperationPhase::ResumeBackendStarted)
+        );
+        assert!(state.manager.destroy(uuid).await.expect("destroy"));
     }
 
     #[tokio::test]
