@@ -16,6 +16,7 @@ mod raw_relay;
 mod raw_runner;
 mod routing;
 mod scripted;
+pub(crate) mod sigpipe;
 
 pub use line_interactive::{run_line_interactive_bash, LineInteractiveOutput};
 pub(crate) use model::HintCardRenderer;

@@ -30,6 +30,10 @@ pub(crate) fn adapter_name_from_args(args: &[String]) -> Option<&str> {
                     idx += 1;
                 }
             }
+            // Standalone allowlist flags share one vocabulary source with the
+            // classifier, so a token admitted into the TUI there can never be
+            // read as an adapter name here.
+            arg if crate::runtime::invocation::TUI_STANDALONE_FLAGS.contains(&arg) => idx += 1,
             arg if arg.starts_with("--shell=") => idx += 1,
             arg if arg.starts_with("--resume=") => idx += 1,
             arg if arg.starts_with("--") => idx += 1,
@@ -74,31 +78,6 @@ pub(crate) fn raw_shell_from_args(args: &[String]) -> Option<RawShellKind> {
     }
 
     None
-}
-
-pub(crate) fn should_start_default_raw(args: &[String]) -> bool {
-    let mut idx = 0;
-    while idx < args.len() {
-        match args[idx].as_str() {
-            "--shell" => {
-                if !matches!(args.get(idx + 1), Some(value) if !value.starts_with("--")) {
-                    return false;
-                }
-                idx += 2;
-            }
-            "--resume" => {
-                idx += 1;
-                if args.get(idx).is_some_and(|value| !value.starts_with('-')) {
-                    idx += 1;
-                }
-            }
-            "--isolated" | "--login" | "-l" => idx += 1,
-            arg if arg.starts_with("--shell=") || arg.starts_with("--resume=") => idx += 1,
-            _ => return false,
-        }
-    }
-
-    true
 }
 
 pub(crate) fn parse_raw_shell(value: &str) -> RawShellKind {
@@ -195,8 +174,8 @@ fn cosh_shell_default_state_path_for_home(home: &std::path::Path) -> std::path::
 mod tests {
     use super::{
         adapter_name_from_args, cosh_shell_default_state_path_for_home, launch_options_from_args,
-        parse_raw_shell, raw_shell_from_args, shell_from_default_or_auto, should_start_default_raw,
-        RawShellKind, ResumeLaunch,
+        parse_raw_shell, raw_shell_from_args, shell_from_default_or_auto, RawShellKind,
+        ResumeLaunch,
     };
 
     #[test]
@@ -290,30 +269,51 @@ mod tests {
     }
 
     #[test]
-    fn no_subcommand_interactive_raw_accepts_only_shell_entry_options() {
-        assert!(should_start_default_raw(&[]));
-        assert!(should_start_default_raw(&["--login".to_string()]));
-        assert!(should_start_default_raw(&["-l".to_string()]));
-        assert!(should_start_default_raw(&[
-            "--shell".to_string(),
-            "zsh".to_string(),
-            "--isolated".to_string()
-        ]));
-        assert!(should_start_default_raw(&["--shell=bash".to_string()]));
-        assert!(should_start_default_raw(&["--resume".to_string()]));
-        assert!(should_start_default_raw(&[
-            "--resume".to_string(),
-            "00000000-0000-4000-8000-000000000000".to_string(),
-            "--shell=zsh".to_string(),
-        ]));
+    fn tui_allowlist_shapes_never_parse_an_adapter_name() {
+        // Vocabulary contract shared with the invocation classifier. The
+        // standalone-flag shapes are generated from the classifier's own
+        // vocabulary (`TUI_STANDALONE_FLAGS`), so a flag added there is
+        // covered here mechanically; only the value-carrying shapes
+        // (`--shell`, `--resume`) remain hand-enumerated because their
+        // shapes are flag-specific.
+        use crate::runtime::invocation::{classify_invocation, Invocation, TUI_STANDALONE_FLAGS};
+        use std::ffi::{OsStr, OsString};
 
-        assert!(!should_start_default_raw(&["fake".to_string()]));
-        assert!(!should_start_default_raw(&["--shell".to_string()]));
-        assert!(!should_start_default_raw(&[
-            "--shell".to_string(),
-            "--isolated".to_string()
-        ]));
-        assert!(!should_start_default_raw(&["--unknown".to_string()]));
+        let mut shapes: Vec<Vec<String>> = vec![vec![]];
+        for flag in TUI_STANDALONE_FLAGS {
+            shapes.push(vec![flag.to_string()]);
+        }
+        // All standalone flags combined, and each behind a consumed --shell.
+        shapes.push(TUI_STANDALONE_FLAGS.iter().map(|s| s.to_string()).collect());
+        for flag in TUI_STANDALONE_FLAGS {
+            shapes.push(vec!["--shell".into(), "zsh".into(), flag.to_string()]);
+        }
+        for value_shape in [
+            vec!["--resume".to_string()],
+            vec![
+                "--resume".to_string(),
+                "00000000-0000-4000-8000-000000000000".to_string(),
+            ],
+            vec!["--shell=bash".to_string()],
+        ] {
+            shapes.push(value_shape);
+        }
+
+        for args in shapes {
+            let os_args: Vec<OsString> = args.iter().map(OsString::from).collect();
+            assert!(
+                matches!(
+                    classify_invocation(OsStr::new("cosh"), &os_args, true, true, true),
+                    Invocation::Tui(_)
+                ),
+                "allowlist shape must stay TUI: {args:?}"
+            );
+            assert_eq!(
+                adapter_name_from_args(&args),
+                None,
+                "allowlist token misread as adapter: {args:?}"
+            );
+        }
     }
 
     #[test]

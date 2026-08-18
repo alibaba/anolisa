@@ -3,9 +3,9 @@ use std::time::{Duration, Instant};
 
 use super::{
     append_startup_auth_hint, extract_bootstrap_path, merge_path_lists, plan_startup_for_render,
-    raw_passthrough_args, record_visible_personal_impressions,
-    render_pending_recommendation_notice, startup_suggestion_mode, visible_personal_candidates,
-    write_startup_suggestion_card, StartupSuggestionMode,
+    record_visible_personal_impressions, render_pending_recommendation_notice,
+    startup_suggestion_mode, visible_personal_candidates, write_startup_suggestion_card,
+    StartupSuggestionMode,
 };
 use crate::config::Language;
 use crate::diagnostics::health::{
@@ -523,46 +523,6 @@ fn bootstrap_path_merge_keeps_existing_and_common_dirs() {
             "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
         ]),
         "/opt/homebrew/bin:/usr/bin:/bin:/usr/local/bin:/usr/sbin:/sbin"
-    );
-}
-
-#[test]
-fn raw_passthrough_args_strips_raw_adapter_for_dash_c() {
-    assert_eq!(
-        raw_passthrough_args(&[
-            "cosh-shell".to_string(),
-            "raw".to_string(),
-            "cosh-core".to_string(),
-            "-c".to_string(),
-            "echo ok".to_string()
-        ]),
-        Some(vec![
-            "cosh-shell".to_string(),
-            "-c".to_string(),
-            "echo ok".to_string()
-        ])
-    );
-}
-
-#[test]
-fn raw_passthrough_args_preserves_shell_option() {
-    assert_eq!(
-        raw_passthrough_args(&[
-            "cosh-shell".to_string(),
-            "raw".to_string(),
-            "--shell".to_string(),
-            "bash".to_string(),
-            "cosh-core".to_string(),
-            "-c".to_string(),
-            "echo ok".to_string()
-        ]),
-        Some(vec![
-            "cosh-shell".to_string(),
-            "--shell".to_string(),
-            "bash".to_string(),
-            "-c".to_string(),
-            "echo ok".to_string()
-        ])
     );
 }
 

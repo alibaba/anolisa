@@ -110,6 +110,9 @@ fn start_shell_session(
 
     unsafe {
         command.pre_exec(|| {
+            // The inner user shell must observe the SIGPIPE disposition the
+            // host process inherited, not the Rust runtime's rewrite.
+            super::sigpipe::restore_in_child()?;
             if libc::setsid() < 0 {
                 return Err(io::Error::last_os_error());
             }

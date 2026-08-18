@@ -45,22 +45,11 @@ install -m 0755 target/release/cosh-shell %{buildroot}%{_libexecdir_cosh}/cosh-s
 install -d %{buildroot}%{_bindir}
 install -m 0755 target/release/cosh-cli %{buildroot}%{_bindir}/cosh-cli
 
-# Install launcher script
-cat > %{buildroot}%{_bindir}/cosh << 'EOF'
-#!/bin/bash
-case "${1:-}" in
-  -c|--|--help|--version)
-    exec %{_libexecdir_cosh}/cosh-shell "$@"
-    ;;
-esac
-
-if [ "$#" -eq 0 ] && [ ! -t 0 ]; then
-  exec %{_libexecdir_cosh}/cosh-shell "$@"
-fi
-
-exec %{_libexecdir_cosh}/cosh-shell raw cosh-core "$@"
-EOF
-chmod 0755 %{buildroot}%{_bindir}/cosh
+# /usr/bin/cosh is the compiled entry: a symlink onto cosh-shell, which
+# dispatches on argv[0]. A script launcher would lose the login argv[0]
+# (binfmt_script) and add an interpreter hop to the execve chain; the
+# TUI-vs-passthrough decision lives in cosh-shell's invocation classifier.
+ln -s %{_libexecdir_cosh}/cosh-shell %{buildroot}%{_bindir}/cosh
 
 # Install cosh-switch script
 cat > %{buildroot}%{_bindir}/cosh-switch << 'EOF'

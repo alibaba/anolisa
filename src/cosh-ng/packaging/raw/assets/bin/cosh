@@ -41,15 +41,10 @@ for runtime_dir in \
         [ -x "$runtime_dir/cosh-shell" ] && \
         [ -x "$runtime_dir/cosh-core" ]; then
         export PATH="$runtime_dir:$PATH"
-        case "${1:-}" in
-            -c | -- | --help | --version)
-                exec "$runtime_dir/cosh-shell" "$@"
-                ;;
-        esac
-        if [ "$#" -eq 0 ] && [ ! -t 0 ]; then
-            exec "$runtime_dir/cosh-shell"
-        fi
-        exec "$runtime_dir/cosh-shell" raw cosh-core "$@"
+        # This wrapper only resolves the private runtime; the TUI-vs-
+        # passthrough decision is cosh-shell's invocation classifier,
+        # keyed off the forwarded invocation name.
+        exec -a "$0" "$runtime_dir/cosh-shell" "$@"
     fi
 done
 

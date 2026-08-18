@@ -1,8 +1,9 @@
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus};
 use std::time::Duration;
 
 use crate::diagnostics::health::{
@@ -20,6 +21,9 @@ use crate::recommendation::personal_planner::{
     plan_startup, HealthResolution, PlannerCandidate, PlannerContext,
 };
 use crate::runtime::cli_args::RawShellKind;
+use crate::runtime::invocation::{
+    classify_invocation, exec_shell, normalize_raw_invocation, Invocation,
+};
 use crate::runtime::prelude::*;
 use crate::runtime::state::PendingInputGhostBinding;
 
@@ -203,6 +207,9 @@ pub(crate) fn bootstrap_process_path_from_shell(shell_kind: &RawShellKind, login
 }
 
 pub(crate) fn passthrough_non_interactive(args: &[String]) -> Option<i32> {
+    // Documented `cosh-shell` extension: `-- <command> [args…]` executes the
+    // command directly (no shell). The `/usr/bin/cosh` entry never reaches
+    // this path; there `--` is handed to bash verbatim.
     if args.get(1).map(String::as_str) == Some("--") {
         let Some(command) = args.get(2) else {
             eprintln!("cosh-shell: missing command after --");
@@ -221,36 +228,15 @@ pub(crate) fn passthrough_non_interactive(args: &[String]) -> Option<i32> {
         return Some(status);
     }
 
-    if args.iter().any(|a| a == "-c") {
-        let shell = detect_passthrough_shell(args);
-        let pass_args = passthrough_shell_args(args);
-        let status = Command::new(&shell)
-            .args(&pass_args)
-            .status()
-            .map(passthrough_exit_code)
-            .unwrap_or_else(|err| {
-                eprintln!("cosh-shell: exec {shell} failed: {err}");
-                126
-            });
-        return Some(status);
+    let argv0 = OsString::from(args[0].as_str());
+    let rest = args[1..].iter().map(OsString::from).collect::<Vec<_>>();
+    let stdin_tty = std::io::stdin().is_terminal();
+    let stdout_tty = std::io::stdout().is_terminal();
+    let stderr_tty = std::io::stderr().is_terminal();
+    match classify_invocation(&argv0, &rest, stdin_tty, stdout_tty, stderr_tty) {
+        Invocation::ExecShell(plan) => Some(exec_shell(plan)),
+        Invocation::Tui(_) => None,
     }
-
-    if !std::io::stdin().is_terminal() {
-        let shell = detect_passthrough_shell(args);
-        let pass_args = passthrough_shell_args(args);
-        let status = Command::new(&shell)
-            .args(&pass_args)
-            .stdin(Stdio::inherit())
-            .status()
-            .map(passthrough_exit_code)
-            .unwrap_or_else(|err| {
-                eprintln!("cosh-shell: exec {shell} failed: {err}");
-                126
-            });
-        return Some(status);
-    }
-
-    None
 }
 
 fn passthrough_exit_code(status: ExitStatus) -> i32 {
@@ -261,89 +247,27 @@ fn passthrough_exit_code(status: ExitStatus) -> i32 {
 }
 
 pub(crate) fn passthrough_raw_non_interactive(args: &[String]) -> Option<i32> {
-    let passthrough_args = raw_passthrough_args(args)?;
-    passthrough_non_interactive(&passthrough_args)
-}
-
-fn raw_passthrough_args(args: &[String]) -> Option<Vec<String>> {
-    if args.get(1).map(String::as_str) != Some("raw") {
-        return None;
+    let rest = args[1..].iter().map(OsString::from).collect::<Vec<_>>();
+    let normalized = normalize_raw_invocation(&rest)?;
+    // Leading `--`: same documented direct-exec extension as the bare
+    // `cosh-shell` surface.
+    if normalized.first().and_then(|arg| arg.to_str()) == Some("--") {
+        let mut forwarded = vec![args[0].clone()];
+        forwarded.extend(
+            normalized
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned()),
+        );
+        return passthrough_non_interactive(&forwarded);
     }
-
-    let mut out = vec![args[0].clone()];
-    let mut skipped_adapter = false;
-    let mut idx = 2;
-    while idx < args.len() {
-        let arg = &args[idx];
-        match arg.as_str() {
-            "--" => {
-                out.push(arg.clone());
-                out.extend(args[idx + 1..].iter().cloned());
-                break;
-            }
-            "-c" => {
-                out.extend(args[idx..].iter().cloned());
-                break;
-            }
-            "--shell" => {
-                out.push(arg.clone());
-                if let Some(value) = args.get(idx + 1) {
-                    out.push(value.clone());
-                    idx += 2;
-                } else {
-                    idx += 1;
-                }
-            }
-            "--isolated" | "--login" | "-l" => {
-                out.push(arg.clone());
-                idx += 1;
-            }
-            _ if arg.starts_with("--shell=") => {
-                out.push(arg.clone());
-                idx += 1;
-            }
-            _ if !arg.starts_with('-') && !skipped_adapter => {
-                skipped_adapter = true;
-                idx += 1;
-            }
-            _ => return None,
-        }
+    // `raw` is an explicit TUI request, so the remaining `-c` candidate is
+    // classified on argv shape alone (terminals assumed): piped drivers
+    // must never be diverted away from an interactive session.
+    let argv0 = OsString::from(args[0].as_str());
+    match classify_invocation(&argv0, &normalized, true, true, true) {
+        Invocation::ExecShell(plan) => Some(exec_shell(plan)),
+        Invocation::Tui(_) => None,
     }
-
-    let has_dash_c = out.iter().any(|arg| arg == "-c");
-    let has_double_dash = out.get(1).map(String::as_str) == Some("--");
-    (has_dash_c || has_double_dash).then_some(out)
-}
-
-fn detect_passthrough_shell(args: &[String]) -> String {
-    for (i, arg) in args.iter().enumerate() {
-        if arg == "--shell" {
-            if let Some(val) = args.get(i + 1) {
-                return val.clone();
-            }
-        }
-        if let Some(val) = arg.strip_prefix("--shell=") {
-            return val.to_string();
-        }
-    }
-    std::env::var("COSH_SHELL_DEFAULT_SHELL").unwrap_or_else(|_| "bash".to_string())
-}
-
-fn passthrough_shell_args(args: &[String]) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut iter = args.iter().skip(1).peekable();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--shell" => {
-                let _ = iter.next();
-            }
-            "--isolated" => {}
-            "--login" => out.push("-l".to_string()),
-            _ if arg.starts_with("--shell=") => {}
-            _ => out.push(arg.clone()),
-        }
-    }
-    out
 }
 
 pub(crate) fn print_usage_help() {

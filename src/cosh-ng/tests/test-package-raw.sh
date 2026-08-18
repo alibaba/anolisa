@@ -255,7 +255,9 @@ LINKED_BIN="$TMP/linked-bin"
 install -d -m 0755 "$LINKED_BIN"
 ln -s "$EXTRACTED/bin/cosh" "$LINKED_BIN/cosh"
 test "$(bash "$LINKED_BIN/cosh" --version)" = $'1\n--version'
-test "$("$EXTRACTED/bin/cosh" prompt)" = $'3\nraw\ncosh-core\nprompt'
+# The wrapper forwards argv untouched (no injected raw/adapter prefix);
+# dispatch belongs to cosh-shell's invocation classifier.
+test "$("$EXTRACTED/bin/cosh" prompt)" = $'1\nprompt'
 test "$(printf '' | "$EXTRACTED/bin/cosh")" = "0"
 
 NO_RPM_OUTPUT="$TMP/cosh-switch-no-rpm.out"

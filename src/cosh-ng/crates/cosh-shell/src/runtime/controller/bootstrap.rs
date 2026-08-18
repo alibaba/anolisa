@@ -67,7 +67,10 @@ pub(crate) fn run_raw(
     shell_kind: RawShellKind,
     launch_options: LaunchOptions,
 ) -> i32 {
-    let args = std::env::args().collect::<Vec<_>>();
+    // args_os: argv[0] may be arbitrary bytes (the classifier admits any
+    // byte sequence whose basename is `cosh`), so String iteration would
+    // panic here.
+    let args = std::env::args_os().collect::<Vec<_>>();
 
     let Some(kind) = AdapterKind::parse(adapter_name) else {
         let adapter_name = crate::evidence::redact_sensitive_text(adapter_name).0;
@@ -98,8 +101,9 @@ pub(crate) fn run_raw(
             }
         }
     }
-    let login = args.first().is_some_and(|a| a.starts_with('-'))
-        || args.iter().any(|a| a == "--login" || a == "-l");
+    let login = args
+        .first()
+        .is_some_and(|argv0| crate::runtime::invocation::is_login_invocation(argv0, &args[1..]));
     config.login_shell = login;
     if config.native_mode {
         bootstrap_process_path_from_shell(&shell_kind, login);
