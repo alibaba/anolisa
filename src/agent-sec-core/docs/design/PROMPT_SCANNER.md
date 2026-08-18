@@ -360,7 +360,7 @@ d = result.to_dict()
 
 ## 配置说明
 
-> ⚠️ **本节描述的 Python `ScanConfig` 已被 Rust 原生实现取代**，保留作为历史设计参考。当前配置通过环境变量（见下方「L2 模型与 Ollama 配置」章）与 CLI 参数完成。
+> ⚠️ **本节描述的 Python `ScanConfig` 已被 Rust 原生实现取代**，保留作为历史设计参考。表中的 `LLM-Research/Llama-Prompt-Guard-2-86M` 是旧 Python 实现的历史默认值，不代表当前支持模型。当前 L2 仅支持 `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`，配置通过环境变量（见下方「L2 模型与 Ollama 配置」章）与 CLI 参数完成；需先执行 `ollama pull`，`scan-prompt warmup` 只验证模型可用性。
 
 ### ScanConfig 全量参数
 
@@ -368,7 +368,7 @@ d = result.to_dict()
 |------|------|--------|------|
 | `layers` | `list[str]` | `["rule_engine", "ml_classifier"]` | 启用的检测层，按顺序执行 |
 | `fast_fail` | `bool` | `True` | 首层命中后立即停止，跳过后续层。**STANDARD / STRICT 预设固定为 `False`**（L1 正则误报率高于 L2 ML，始终运行 L2 以纠正误报）|
-| `model_name` | `str` | `LLM-Research/Llama-Prompt-Guard-2-86M` | ModelScope 模型 ID（也可使用 22M 轻量版）|
+| `model_name` | `str` | `LLM-Research/Llama-Prompt-Guard-2-86M` | 旧 Python 实现的历史 ModelScope 模型 ID；当前 Rust 实现不使用此默认值 |
 | `model_device` | `str` | `"cpu"` | 推理设备：`cpu` / `cuda` / `mps`（默认自动检测最优设备）|
 | `detect_encoding` | `bool` | `True` | 检测并解码 Base64/ROT13/URL/Hex 混淆 |
 | `custom_rules_path` | `str \| None` | `None` | 自定义规则 YAML 文件路径（加载逻辑待集成）|
