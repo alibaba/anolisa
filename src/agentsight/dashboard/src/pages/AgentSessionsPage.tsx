@@ -233,9 +233,7 @@ export const AgentSessionsPage: React.FC = () => {
   // Auto-refresh every 10s when enabled
   useEffect(() => {
     if (!autoRefresh) return;
-    const interval = setInterval(() => {
-      void loadData();
-    }, 10_000);
+    const interval = setInterval(loadData, 10_000);
     return () => clearInterval(interval);
   }, [autoRefresh, loadData]);
 
@@ -378,6 +376,7 @@ export const AgentSessionsPage: React.FC = () => {
         </div>
       )}
 
+      {/* ── Session table ── */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
         {loading && merged.length === 0 ? (
           <div className="p-10 text-center text-gray-500 text-sm">{t('as.loadingSessions')}</div>
