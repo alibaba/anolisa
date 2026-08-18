@@ -59,7 +59,7 @@ use super::render::repo_config_err;
 use super::rpm::{
     PinError, RpmTarget, resolve_pinned_candidate, rpm_package_candidates_with_index,
 };
-use super::types::{InstallOutcome, RawResolution, ResolveInputs};
+use super::types::{InstallOutcome, RawRepositoryOrigin, RawResolution, ResolveInputs};
 use super::{ANOLISA_RPM_REPO_ID, COMMAND, InstallArgs};
 
 /// Dispatch `install <component>` against the live host.
@@ -899,7 +899,7 @@ fn resolve_owned_artifact(
         .map_err(|err| repo_config_err(err, true))?;
 
     let mut warnings: Vec<String> = Vec::new();
-    let base_url = match args.repo.as_deref() {
+    let (base_url, repository_origin) = match args.repo.as_deref() {
         Some(override_url) => {
             let normalized =
                 normalize_override_url(override_url).map_err(|err| repo_config_err(err, true))?;
@@ -908,17 +908,21 @@ fn resolve_owned_artifact(
                     "--repo uses plaintext http ({normalized}) — artifacts are still sha256-verified on the raw backend, but the index itself is unauthenticated",
                 ));
             }
-            normalized
+            (normalized, Some(RawRepositoryOrigin::CliOverride))
         }
         None => {
             let host = HostVars {
                 os: env.os.clone(),
                 arch: env.arch.clone(),
             };
-            repo_config
+            let base_url = repo_config
                 .resolved_base_url(backend_name, backend, &host)
                 // Variable errors are fixed by editing [vars] in repo.toml.
-                .map_err(|err| repo_config_err(err, true))?
+                .map_err(|err| repo_config_err(err, true))?;
+            let origin = repo_config
+                .source_path()
+                .map(|path| RawRepositoryOrigin::Config(path.to_path_buf()));
+            (base_url, origin)
         }
     };
     let (component, package) = resolve_raw_identity(
@@ -939,6 +943,7 @@ fn resolve_owned_artifact(
             package,
             backend: backend_name.to_string(),
             base_url,
+            repository_origin,
             version: args.version.as_deref(),
             warnings,
         },

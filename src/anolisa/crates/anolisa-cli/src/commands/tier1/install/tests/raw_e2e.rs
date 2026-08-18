@@ -136,7 +136,7 @@ fn install_dry_run_does_not_download_the_artifact() {
 }
 
 #[test]
-fn install_reports_missing_local_repository_index() {
+fn install_reports_missing_local_repository_index_from_override() {
     let tmp = tempdir().expect("tmpdir");
     let prefix = tmp.path().join("sys");
     let repo_root = tmp.path().join("repo");
@@ -158,12 +158,12 @@ fn install_reports_missing_local_repository_index() {
         "missing-index diagnostic must identify {index_path:?}; got: {reason}"
     );
     assert!(
-        reason.contains("repo.toml"),
-        "missing-index diagnostic must name repo.toml; got: {reason}"
+        reason.contains("one-off --repo <URL> override"),
+        "missing-index diagnostic must identify the one-off override; got: {reason}"
     );
     assert!(
-        reason.contains("--repo <URL>"),
-        "missing-index diagnostic must name the one-off override; got: {reason}"
+        !reason.contains("repo.toml"),
+        "override diagnostic must not blame repo.toml; got: {reason}"
     );
     assert!(
         !reason.contains("failed to fetch distribution index"),
@@ -207,6 +207,52 @@ fn install_reports_missing_local_repository_index() {
 }
 
 #[test]
+fn install_reports_config_path_for_missing_local_repository_index() {
+    let tmp = tempdir().expect("tmpdir");
+    let prefix = tmp.path().join("sys");
+    let layout = FsLayout::system(Some(prefix.clone()));
+    let repo_root = tmp.path().join("repo");
+    let repo_url = write_local_repo(&repo_root);
+    let index_path = repo_root.join("v1/index.toml");
+    std::fs::remove_dir_all(&repo_root).expect("remove repository directory");
+
+    std::fs::create_dir_all(&layout.etc_dir).expect("create repo config directory");
+    let config_path = layout.etc_dir.join("repo.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "schema_version = 1\ndefault_backend = \"raw\"\n\n[backends.raw]\nbase_url = \"{repo_url}\"\n"
+        ),
+    )
+    .expect("write repo config");
+
+    let err = handle_with_fake_rpm(args("agentsight"), &ctx_with_prefix(false, Some(prefix)))
+        .expect_err("missing repository index must fail");
+    let reason = err.reason();
+
+    assert!(
+        reason.contains(&index_path.display().to_string()),
+        "missing-index diagnostic must identify {index_path:?}; got: {reason}"
+    );
+    assert!(
+        reason.contains(&config_path.display().to_string()),
+        "missing-index diagnostic must identify active config {config_path:?}; got: {reason}"
+    );
+    assert!(
+        reason.contains("move it aside and retry"),
+        "config diagnostic must recommend a non-destructive recovery; got: {reason}"
+    );
+    assert!(
+        reason.contains("--repo <URL>"),
+        "config diagnostic must mention the one-off override escape hatch; got: {reason}"
+    );
+    assert!(
+        !reason.contains("one-off --repo <URL> override selected this repository"),
+        "config diagnostic must not claim a CLI override was used; got: {reason}"
+    );
+}
+
+#[test]
 fn install_preserves_non_not_found_index_fetch_error() {
     let tmp = tempdir().expect("tmpdir");
     let index_path = tmp.path().join("repo/v1/index.toml");
@@ -216,7 +262,7 @@ fn install_preserves_non_not_found_index_fetch_error() {
         source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "index access denied"),
     };
     let rendered_download_error = download_error.to_string();
-    let err = super::super::raw::index_fetch_error(&index_url, download_error);
+    let err = super::super::raw::index_fetch_error(&index_url, download_error, None);
 
     assert_eq!(
         err.reason(),
@@ -240,7 +286,7 @@ fn install_preserves_not_found_away_from_index_path() {
         source: std::io::Error::new(std::io::ErrorKind::NotFound, "cache path missing"),
     };
     let rendered_download_error = download_error.to_string();
-    let err = super::super::raw::index_fetch_error(&index_url, download_error);
+    let err = super::super::raw::index_fetch_error(&index_url, download_error, None);
 
     assert_eq!(
         err.reason(),
@@ -707,6 +753,7 @@ fn prepare_raw_execution_resolves_declared_capabilities() {
             package: "agentsight".to_string(),
             backend: "raw".to_string(),
             base_url: repo_url,
+            repository_origin: None,
             version: None,
             warnings: Vec::new(),
         },
@@ -785,6 +832,7 @@ fn prepare_raw_execution_resolves_declared_services() {
             package: "agentsight".to_string(),
             backend: "raw".to_string(),
             base_url: repo_url,
+            repository_origin: None,
             version: None,
             warnings: Vec::new(),
         },
@@ -1721,6 +1769,7 @@ fn agentsight_resolve_inputs(repo_url: String) -> ResolveInputs<'static> {
         package: "agentsight".to_string(),
         backend: "raw".to_string(),
         base_url: repo_url,
+        repository_origin: None,
         version: None,
         warnings: Vec::new(),
     }
@@ -1953,6 +2002,7 @@ install_modes = ["system"]
         package: "sec-core".to_string(),
         backend: "raw".to_string(),
         base_url: repo_url.clone(),
+        repository_origin: None,
         version,
         warnings: Vec::new(),
     };
@@ -2043,6 +2093,7 @@ install_modes = ["system"]
             package: "cosh".to_string(),
             backend: "raw".to_string(),
             base_url: repo_url,
+            repository_origin: None,
             version: None,
             warnings: Vec::new(),
         },
@@ -2105,6 +2156,7 @@ install_modes = [1]
             package: "sec-core".to_string(),
             backend: "raw".to_string(),
             base_url: repo_url,
+            repository_origin: None,
             version: None,
             warnings: Vec::new(),
         },

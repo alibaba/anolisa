@@ -54,6 +54,15 @@ pub(crate) enum InstallContractSource {
     SidecarMeta,
 }
 
+/// Source that selected the raw repository URL for this resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RawRepositoryOrigin {
+    /// URL loaded from the active repository configuration file.
+    Config(PathBuf),
+    /// URL supplied by the invocation's one-off `--repo` option.
+    CliOverride,
+}
+
 /// What `handle_one` did, so `--all` can distinguish outcomes in its batch
 /// summary (§7.5). The dry-run vs real distinction is layered on by the
 /// caller from `CliContext::dry_run`. Install never adopts (I3 refuses and
@@ -73,6 +82,7 @@ pub(crate) struct ResolveInputs<'a> {
     pub(crate) package: String,
     pub(crate) backend: String,
     pub(crate) base_url: String,
+    pub(crate) repository_origin: Option<RawRepositoryOrigin>,
     pub(crate) version: Option<&'a str>,
     pub(crate) warnings: Vec<String>,
 }

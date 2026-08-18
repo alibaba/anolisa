@@ -230,6 +230,9 @@ pub struct RepoConfig {
     pub backends: BTreeMap<String, BackendConfig>,
     #[serde(skip)]
     legacy_rpm_backend: bool,
+    /// Discovery path that supplied this config; absent for in-memory parses.
+    #[serde(skip)]
+    source_path: Option<PathBuf>,
 }
 
 /// `[vars]` overrides for `base_url` substitution. Every field is
@@ -333,7 +336,7 @@ impl RepoConfig {
             .clone()
             .ok_or(RepoConfigProvisionError::Load(RepoConfigError::NotFound))?;
         let body = fetch_repo_config_body(bootstrap_url)?;
-        let config = Self::from_toml_str(&body).map_err(|err| {
+        let mut config = Self::from_toml_str(&body).map_err(|err| {
             RepoConfigProvisionError::InvalidDownloaded {
                 reason: err.to_string(),
             }
@@ -350,13 +353,16 @@ impl RepoConfig {
         }
 
         match write_repo_config(&dest, &body) {
-            Ok(()) => Ok(RepoConfigLoadResult {
-                config,
-                provisioning: RepoConfigProvisioning::Downloaded {
-                    url: bootstrap_url.to_string(),
-                    dest,
-                },
-            }),
+            Ok(()) => {
+                config.source_path = Some(dest.clone());
+                Ok(RepoConfigLoadResult {
+                    config,
+                    provisioning: RepoConfigProvisioning::Downloaded {
+                        url: bootstrap_url.to_string(),
+                        dest,
+                    },
+                })
+            }
             Err(err) => Ok(RepoConfigLoadResult {
                 config,
                 provisioning: RepoConfigProvisioning::DownloadedPersistFailed {
@@ -374,8 +380,9 @@ impl RepoConfig {
             if let Some(path) = candidate.as_deref()
                 && path.is_file()
             {
-                let config = Self::from_path(path)?;
+                let mut config = Self::from_path(path)?;
                 config.emit_deprecation_warnings(path);
+                config.source_path = Some(path.to_path_buf());
                 return Ok(config);
             }
         }
@@ -397,6 +404,11 @@ impl RepoConfig {
     #[allow(dead_code)]
     pub fn from_toml_str(s: &str) -> Result<Self, RepoConfigError> {
         Self::parse_with_path(s, Path::new("<memory>"))
+    }
+
+    /// Path selected by local config discovery, when this config came from disk.
+    pub(crate) fn source_path(&self) -> Option<&Path> {
+        self.source_path.as_deref()
     }
 
     fn parse_with_path(s: &str, path: &Path) -> Result<Self, RepoConfigError> {

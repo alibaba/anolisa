@@ -28,7 +28,11 @@ use super::COMMAND;
 use super::render::{artifact_ext, artifact_type_wire, repo_config_err};
 use super::types::*;
 
-pub(super) fn index_fetch_error(index_url: &str, err: DownloadError) -> CliError {
+pub(super) fn index_fetch_error(
+    index_url: &str,
+    err: DownloadError,
+    repository_origin: Option<&RawRepositoryOrigin>,
+) -> CliError {
     match err {
         DownloadError::Io {
             ref path,
@@ -38,11 +42,21 @@ pub(super) fn index_fetch_error(index_url: &str, err: DownloadError) -> CliError
                 .strip_prefix("file://")
                 .is_some_and(|expected| path.as_path() == Path::new(expected)) =>
         {
+            let guidance = match repository_origin {
+                Some(RawRepositoryOrigin::Config(config_path)) => format!(
+                    "repository config: {}; move it aside and retry to restore the default config, or pass --repo <URL> once",
+                    config_path.display()
+                ),
+                Some(RawRepositoryOrigin::CliOverride) =>
+                    "the one-off --repo <URL> override selected this repository; pass a reachable URL or omit the override"
+                        .to_string(),
+                None => "check the raw repository URL in repo.toml or, if supplied, the one-off --repo <URL> override".to_string(),
+            };
             CliError::Runtime {
                 command: COMMAND.to_string(),
                 reason: format!(
-                    "local raw repository index not found at {}; check the raw repository URL in repo.toml or, if supplied, the one-off --repo <URL> override",
-                    path.display()
+                    "local raw repository index not found at {}; {guidance}",
+                    path.display(),
                 ),
             }
         }
@@ -73,6 +87,7 @@ fn remote_file_absent(err: &DownloadError) -> bool {
 fn fetch_raw_index(
     cache: &DownloadCache,
     base_url: &str,
+    repository_origin: Option<&RawRepositoryOrigin>,
 ) -> Result<(String, std::path::PathBuf), CliError> {
     let v2_url = raw_index_v2_url(base_url);
     match cache.fetch(&v2_url, None) {
@@ -83,10 +98,10 @@ fn fetch_raw_index(
             let v1_url = raw_index_url(base_url);
             let downloaded = cache
                 .fetch(&v1_url, None)
-                .map_err(|err| index_fetch_error(&v1_url, err))?;
+                .map_err(|err| index_fetch_error(&v1_url, err, repository_origin))?;
             Ok((v1_url, downloaded.cached_path))
         }
-        Err(err) => Err(index_fetch_error(&v2_url, err)),
+        Err(err) => Err(index_fetch_error(&v2_url, err, repository_origin)),
     }
 }
 
@@ -101,6 +116,7 @@ pub(crate) fn resolve_raw(
         package,
         backend,
         base_url,
+        repository_origin,
         version,
         mut warnings,
     } = inputs;
@@ -108,7 +124,8 @@ pub(crate) fn resolve_raw(
     // The index is always re-fetched (DownloadCache overwrites on conflict),
     // so a republished repo is picked up without a cache flush.
     let cache = DownloadCache::new(layout.cache_dir.clone());
-    let (index_url, cached_index_path) = fetch_raw_index(&cache, &base_url)?;
+    let (index_url, cached_index_path) =
+        fetch_raw_index(&cache, &base_url, repository_origin.as_ref())?;
     // Entry-tolerant parse: a row shaped for a future CLI fails closed for
     // its own component (skipped, surfaced as a warning) instead of taking
     // the whole shared index — and every unrelated component — down with it.
@@ -310,6 +327,9 @@ pub(crate) fn resolve_raw_inputs_for_component(
         package,
         backend: backend_name.to_string(),
         base_url,
+        repository_origin: repo_config
+            .source_path()
+            .map(|path| RawRepositoryOrigin::Config(path.to_path_buf())),
         version: None,
         warnings: Vec::new(),
     })
@@ -1081,7 +1101,8 @@ mod tests {
         std::fs::write(root.join("index-v2.toml"), "schema_version = 2\n").unwrap();
         let cache = tempdir().unwrap();
         let dl = DownloadCache::new(cache.path().to_path_buf());
-        let (url, path) = fetch_raw_index(&dl, &format!("file://{}", root.display())).unwrap();
+        let (url, path) =
+            fetch_raw_index(&dl, &format!("file://{}", root.display()), None).unwrap();
         assert!(url.ends_with("/index-v2.toml"), "got {url}");
         let content = std::fs::read_to_string(path).unwrap();
         assert!(content.contains("schema_version = 2"));
@@ -1096,7 +1117,8 @@ mod tests {
         std::fs::write(root.join("index.toml"), "schema_version = 1\n").unwrap();
         let cache = tempdir().unwrap();
         let dl = DownloadCache::new(cache.path().to_path_buf());
-        let (url, path) = fetch_raw_index(&dl, &format!("file://{}", root.display())).unwrap();
+        let (url, path) =
+            fetch_raw_index(&dl, &format!("file://{}", root.display()), None).unwrap();
         assert!(url.ends_with("/index.toml"), "got {url}");
         let content = std::fs::read_to_string(path).unwrap();
         assert!(content.contains("schema_version = 1"));
@@ -1111,7 +1133,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let cache = tempdir().unwrap();
         let dl = DownloadCache::new(cache.path().to_path_buf());
-        let err = fetch_raw_index(&dl, &format!("file://{}", root.display())).unwrap_err();
+        let err = fetch_raw_index(&dl, &format!("file://{}", root.display()), None).unwrap_err();
         let CliError::Runtime { reason, .. } = err else {
             panic!("expected runtime error");
         };
