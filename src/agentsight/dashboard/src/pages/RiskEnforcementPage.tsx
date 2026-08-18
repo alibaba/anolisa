@@ -1,4 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { Pagination } from '../components/Pagination';
 import {
   createCredentialBinding,
   detachEnforcementBinding,
@@ -36,6 +38,13 @@ const modeLabels: Record<EnforcementPolicyMode, MessageKey> = {
   enforce: 'risk.mode.enforce',
 };
 
+// 模式徐章配色：观察/审计为低风险灰/琥珀，拦截为高风险红
+const modeBadgeClass: Record<EnforcementPolicyMode, string> = {
+  observe: 'bg-gray-100 text-gray-600',
+  audit: 'bg-amber-100 text-amber-700',
+  enforce: 'bg-red-100 text-red-700',
+};
+
 function formatTimestamp(timestampNs: number, localeTag: string): string {
   return new Intl.DateTimeFormat(localeTag, {
     dateStyle: 'short',
@@ -50,6 +59,16 @@ const bindingStateLabels: Record<EnforcementBinding['state'], MessageKey> = {
   degraded: 'risk.bindingState.degraded',
   detaching: 'risk.bindingState.detaching',
   detached: 'risk.bindingState.detached',
+};
+
+// binding 状态徐章配色：区分生效/异常/已退出
+const bindingStateBadgeClass: Record<EnforcementBinding['state'], string> = {
+  pending: 'bg-amber-100 text-amber-700',
+  enforced: 'bg-green-100 text-green-700',
+  failed: 'bg-red-100 text-red-700',
+  degraded: 'bg-orange-100 text-orange-700',
+  detaching: 'bg-gray-100 text-gray-600',
+  detached: 'bg-gray-100 text-gray-500',
 };
 
 const effectLabels: Record<EnforcementViolation['effect'], MessageKey> = {
@@ -71,6 +90,7 @@ const SummaryCard: React.FC<{ label: string; value: React.ReactNode; error?: str
 );
 
 export const RiskEnforcementPage: React.FC = () => {
+  const [searchParams, setSearchParams] = useSearchParams();
   const { t } = useI18n();
   const localeTag = useLocaleTag();
 
@@ -91,6 +111,15 @@ export const RiskEnforcementPage: React.FC = () => {
   const [mode, setMode] = useState<EnforcementPolicyMode>('audit');
   const [trustedEndpoint, setTrustedEndpoint] = useState('');
   const loadEpoch = useRef(0);
+  const [highlightedBindingId, setHighlightedBindingId] = useState<string | null>(null);
+  const highlightRef = useRef<HTMLTableRowElement | null>(null);
+  const [violationOffset, setViolationOffset] = useState(0);
+  const VIOLATION_LIMIT = 20;
+
+  const agentIdFilter = searchParams.get('agent_id');
+  const highlightBindingParam = searchParams.get('highlight_binding');
+  // policy_id available for future use
+  const _policyIdParam = searchParams.get('policy_id');
 
   const errorMessage = (error: unknown): string => (
     error instanceof Error ? error.message : t('risk.error.requestFailed')
@@ -132,6 +161,35 @@ export const RiskEnforcementPage: React.FC = () => {
     void loadAll();
   }, [loadAll]);
 
+  // Highlight binding from URL param
+  useEffect(() => {
+    if (highlightBindingParam && bindings.length > 0) {
+      const match = bindings.find((b) => b.request.binding_id === highlightBindingParam);
+      if (match) {
+        setHighlightedBindingId(highlightBindingParam);
+        setTimeout(() => {
+          highlightRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 100);
+        // Fade out after 3s
+        const timer = setTimeout(() => setHighlightedBindingId(null), 3000);
+        return () => clearTimeout(timer);
+      }
+    }
+  }, [highlightBindingParam, bindings]);
+
+  const clearAgentFilter = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('agent_id');
+    setSearchParams(next);
+  };
+
+  const filteredBindings = agentIdFilter
+    ? bindings.filter((b) => b.request.agent_id === agentIdFilter)
+    : bindings;
+  const filteredViolations = agentIdFilter
+    ? violations.filter((v) => v.agent_id === agentIdFilter)
+    : violations;
+
   const activeBindings = bindings.filter((binding) => binding.state === 'enforced');
   const displayedViolations = enforcementViolationTotal(violations, health);
   const supportsMode = (candidate: EnforcementPolicyMode): boolean => (
@@ -148,8 +206,9 @@ export const RiskEnforcementPage: React.FC = () => {
       && !bindingLimitReached,
   );
   const canDetach = !detachingId;
-  const newestViolations = [...violations]
+  const newestViolations = [...filteredViolations]
     .sort((left, right) => right.occurred_at_ns - left.occurred_at_ns);
+  const paginatedViolations = newestViolations.slice(violationOffset, violationOffset + VIOLATION_LIMIT);
   const handleCreate = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!canCreate) return;
@@ -245,6 +304,15 @@ export const RiskEnforcementPage: React.FC = () => {
         </button>
       </header>
 
+      {agentIdFilter && (
+        <div className="flex items-center gap-2">
+          <span className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-2 py-0.5 text-xs text-blue-700">
+            已按 Agent: {agentIdFilter} 过滤
+            <button type="button" onClick={clearAgentFilter} className="ml-0.5 text-blue-500 hover:text-blue-800">✕</button>
+          </span>
+        </div>
+      )}
+
       <section className="grid grid-cols-1 gap-4 sm:grid-cols-3">
         <SummaryCard
           label={t('risk.summary.enforcerStatus')}
@@ -282,14 +350,22 @@ export const RiskEnforcementPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {bindings.length === 0 ? (
+                {filteredBindings.length === 0 ? (
                   <tr>
                     <td colSpan={5} className="px-4 py-10 text-center text-gray-400">
                       {t('risk.bindings.empty')}
                     </td>
                   </tr>
-                ) : bindings.map((binding) => (
-                  <tr key={binding.request.binding_id}>
+                ) : filteredBindings.map((binding) => (
+                  <tr
+                    key={binding.request.binding_id}
+                    ref={binding.request.binding_id === highlightedBindingId ? highlightRef : undefined}
+                    className={`transition-all duration-500 ${
+                      binding.request.binding_id === highlightedBindingId
+                        ? 'ring-2 ring-blue-400 bg-blue-50'
+                        : ''
+                    }`}
+                  >
                     <td className="px-4 py-3">
                       <div className="font-medium text-gray-900">{binding.request.agent_id}</div>
                       <div className="text-xs text-gray-500">PID {binding.request.root_pid}</div>
@@ -309,15 +385,22 @@ export const RiskEnforcementPage: React.FC = () => {
                       {policyFilePath(binding.request.policy_dsl)}
                     </td>
                     <td className="px-4 py-3 text-gray-700">
-                      <div>
-                        {t(modeLabels[binding.request.policy_mode ?? legacyBindingMode(binding.request.policy_dsl)])}
-                      </div>
-                      <div className="text-xs text-gray-500">
+                      {(() => {
+                        const bindingMode = binding.request.policy_mode ?? legacyBindingMode(binding.request.policy_dsl);
+                        return (
+                          <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${modeBadgeClass[bindingMode]}`}>
+                            {t(modeLabels[bindingMode])}
+                          </span>
+                        );
+                      })()}
+                      <div className="mt-1 text-xs text-gray-500">
                         {t('risk.bindings.revisionLabel', { revision: binding.request.policy_revision })}
                       </div>
                     </td>
                     <td className="px-4 py-3 text-gray-700">
-                      <div>{t(bindingStateLabels[binding.state])}</div>
+                      <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${bindingStateBadgeClass[binding.state]}`}>
+                        {t(bindingStateLabels[binding.state])}
+                      </span>
                       {binding.message && (
                         <div className="mt-1 max-w-xs break-words text-xs text-gray-500">
                           {binding.message}
@@ -394,7 +477,7 @@ export const RiskEnforcementPage: React.FC = () => {
                 <option value="audit" disabled={!supportsMode('audit')}>
                   {t('risk.form.mode.auditOption')}
                 </option>
-                <option value="enforce" disabled={!supportsMode('enforce')}>
+                <option value="enforce" disabled title={t('risk.form.mode.enforceDisabledTooltip')}>
                   {t('risk.form.mode.enforceOption')}
                 </option>
               </select>
@@ -439,7 +522,7 @@ export const RiskEnforcementPage: React.FC = () => {
           )}
           {bindingLimitReached && (
             <p className="mt-2 text-xs text-amber-700">
-              {t('risk.form.bindingLimitWarning', { maxActiveBindings })}
+              {t('risk.form.bindingLimitWarning', { maxActiveBindings: maxActiveBindings ?? 0 })}
             </p>
           )}
           <p aria-live="polite" className="mt-3 min-h-5 text-sm text-gray-700">
@@ -471,13 +554,13 @@ export const RiskEnforcementPage: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {newestViolations.length === 0 ? (
+              {paginatedViolations.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="px-4 py-10 text-center text-gray-400">
                     {t('risk.violations.empty')}
                   </td>
                 </tr>
-              ) : newestViolations.map((event) => (
+              ) : paginatedViolations.map((event) => (
                 <tr key={event.event_id}>
                   <td className="whitespace-nowrap px-4 py-3 text-gray-600">
                     {formatTimestamp(event.occurred_at_ns, localeTag)}
@@ -495,32 +578,45 @@ export const RiskEnforcementPage: React.FC = () => {
                   <td className="px-4 py-3 font-mono text-xs text-gray-700">{event.operation}</td>
                   <td className="max-w-sm break-all px-4 py-3 font-mono text-xs text-gray-700">{event.target}</td>
                   <td className="px-4 py-3">
-                    <span
-                      className={`rounded-full px-2 py-1 text-xs font-semibold ${
-                        event.blocked ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700'
-                      }`}
-                    >
-                      {event.blocked
-                        ? t('risk.violations.result.blocked')
-                        : event.killed
-                          ? t('risk.violations.result.killed')
-                          : t('risk.violations.result.logged')}
-                    </span>
+                    {(() => {
+                      // observe/audit 仅记录（琥珀）；enforce 已阻断/已终止（红）
+                      const enforced = event.blocked || event.killed;
+                      return (
+                        <span className={`rounded-full px-2 py-1 text-xs font-semibold ${
+                          enforced ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'
+                        }`}>
+                          {event.blocked
+                            ? t('risk.violations.result.blocked')
+                            : event.killed
+                              ? t('risk.violations.result.killed')
+                              : t('risk.violations.result.logged')}
+                        </span>
+                      );
+                    })()}
                     <div className="mt-2 font-mono text-[11px] text-gray-400">
                       effect {event.effect} ({t(effectLabels[event.effect])})
                     </div>
                   </td>
                   <td className="px-4 py-3 text-gray-600">
                     <div>{event.reason || '—'}</div>
-                    <div className="mt-1 font-mono text-[11px] text-gray-400">
-                      ActPlane {event.actplane_revision}
-                    </div>
+                    {event.case_id && (
+                      <a href={`#/audit?case_id=${event.case_id}`}
+                         className="text-xs text-blue-600 hover:underline">
+                        查看案件
+                      </a>
+                    )}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+        <Pagination
+          total={newestViolations.length}
+          limit={VIOLATION_LIMIT}
+          offset={violationOffset}
+          onPageChange={setViolationOffset}
+        />
       </section>
     </div>
   );

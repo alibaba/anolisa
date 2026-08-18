@@ -1313,6 +1313,7 @@ export interface SecurityEvidenceEvent {
   occurred_at_ns: number;
   identity: {
     pid: number;
+    ppid?: number | null;
     session_id?: string | null;
     tool_call_id?: string | null;
     [key: string]: unknown;

@@ -26,6 +26,7 @@ pub(super) struct ViolationQuery {
 }
 
 const FILE_POLICY_REVISION: &str = "agentsight-file-open-v1";
+const CREDENTIAL_POLICY_ID: &str = "agentsight-credential-exfiltration";
 
 /// Product-level fields for binding a sensitive file to an agent process.
 #[derive(Debug, Deserialize)]
@@ -92,6 +93,53 @@ pub(super) async fn preview_agent_protection(
             false,
         );
     };
+    if query.directory.is_none() {
+        if let Some(coordinator) = data.enforcement.clone() {
+            let active_policy = web::block(move || {
+                let binding_id = coordinator
+                    .bindings()?
+                    .into_iter()
+                    .filter(|binding| is_active_credential_binding(binding, pid))
+                    .max_by_key(|binding| {
+                        binding
+                            .request
+                            .policy_revision
+                            .parse::<u64>()
+                            .unwrap_or_default()
+                    })
+                    .map(|binding| binding.request.binding_id);
+                match binding_id {
+                    Some(binding_id) => coordinator.credential_policy_snapshot(binding_id),
+                    None => Ok(None),
+                }
+            })
+            .await;
+            match active_policy {
+                Ok(Ok(Some(snapshot))) => match snapshot.policy() {
+                    Ok(policy) => {
+                    if let Some(preview) = protection_preview_from_policy(
+                        agent.agent_name.clone(),
+                        pid,
+                        agent.workspace_path.as_deref().map(Path::new),
+                        policy,
+                    ) {
+                        return HttpResponse::Ok().json(preview);
+                    }
+                    }
+                    Err(error) => {
+                        log::warn!("ignoring invalid credential policy preview: {error}");
+                    }
+                },
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => {
+                    log::warn!("could not load active Agent protection policy: {error}");
+                }
+                Err(error) => {
+                    log::warn!("could not join Agent protection policy lookup: {error}");
+                }
+            }
+        }
+    }
     let Some(workspace) = agent.workspace_path.as_deref().map(PathBuf::from) else {
         return error_response(
             actix_web::http::StatusCode::CONFLICT,
@@ -102,7 +150,15 @@ pub(super) async fn preview_agent_protection(
     };
     let root = query.directory.as_deref().unwrap_or(&workspace);
     let root = match root.canonicalize() {
-        Ok(root) if root.is_dir() => root,
+        Ok(root) if root.is_dir() && root != Path::new("/") => root,
+        Ok(_) => {
+            return error_response(
+                actix_web::http::StatusCode::BAD_REQUEST,
+                "unsafe_protection_directory",
+                "protection directory cannot be the filesystem root",
+                false,
+            );
+        }
         _ => {
             return error_response(
                 actix_web::http::StatusCode::BAD_REQUEST,
@@ -122,6 +178,65 @@ pub(super) async fn preview_agent_protection(
         mode: PolicyMode::Audit,
         max_trusted_endpoints: 1,
     })
+}
+
+fn is_active_credential_binding(binding: &Binding, pid: u32) -> bool {
+    binding.request.root_pid == pid as i32
+        && binding.request.policy_id == CREDENTIAL_POLICY_ID
+        && matches!(
+            binding.state,
+            BindingState::Pending | BindingState::Enforced | BindingState::Degraded
+        )
+}
+
+fn protection_preview_from_policy(
+    agent_id: String,
+    root_pid: u32,
+    workspace: Option<&Path>,
+    policy: &CredentialExfiltrationPolicy,
+) -> Option<ProtectionPreview> {
+    let workspace = workspace
+        .filter(|path| path.is_absolute() && *path != Path::new("/"))
+        .map(Path::to_path_buf);
+    let source_paths = workspace
+        .as_ref()
+        .map(|root| {
+            policy
+                .source_patterns
+                .iter()
+                .filter(|path| Path::new(path).starts_with(root))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .filter(|paths| !paths.is_empty())
+        .unwrap_or_else(|| policy.source_patterns.clone());
+    let workspace_path = workspace
+        .filter(|root| source_paths.iter().all(|path| Path::new(path).starts_with(root)))
+        .or_else(|| common_source_directory(&source_paths))
+        .filter(|path| path.is_absolute() && path != Path::new("/"))?;
+
+    Some(ProtectionPreview {
+        agent_id,
+        root_pid,
+        workspace_path: workspace_path.to_string_lossy().into_owned(),
+        source_paths,
+        trusted_endpoints: policy.trusted_endpoints.clone(),
+        mode: policy.mode,
+        max_trusted_endpoints: 1,
+    })
+}
+
+fn common_source_directory(source_paths: &[String]) -> Option<PathBuf> {
+    let mut common = Path::new(source_paths.first()?).parent()?.to_path_buf();
+    while !source_paths
+        .iter()
+        .all(|path| Path::new(path).starts_with(&common))
+    {
+        if !common.pop() {
+            return Some(PathBuf::from("/"));
+        }
+    }
+    Some(common)
 }
 
 fn discover_sensitive_files(root: &Path, max_depth: usize, limit: usize) -> Vec<String> {
@@ -751,6 +866,63 @@ mod tests {
         );
         assert!(discovered.iter().all(|path| !path.contains("node_modules")));
         fs::remove_dir_all(directory).expect("fixture directory should be removed");
+    }
+
+    #[test]
+    fn restores_agent_protection_preview_from_active_policy() {
+        let policy = CredentialExfiltrationPolicy {
+            policy_id: "agentsight-credential-exfiltration".into(),
+            revision: 7,
+            source_patterns: vec![
+                "/root/agentsight-demo/.env".into(),
+                "/root/agentsight-demo/config/credential.json".into(),
+            ],
+            trusted_endpoints: vec!["10.0.0.8:443".into()],
+            taint_label: "CREDENTIAL".into(),
+            taint_ttl_secs: 900,
+            destination_scope: DestinationScope::PublicIpv4,
+            mode: PolicyMode::Audit,
+        };
+
+        let preview = protection_preview_from_policy("Hermes".into(), 9073, &policy);
+
+        assert_eq!(preview.agent_id, "Hermes");
+        assert_eq!(preview.root_pid, 9073);
+        assert_eq!(preview.workspace_path, "/root/agentsight-demo");
+        assert_eq!(preview.source_paths, policy.source_patterns);
+        assert_eq!(preview.trusted_endpoints, ["10.0.0.8:443"]);
+        assert_eq!(preview.mode, PolicyMode::Audit);
+    }
+
+    #[test]
+    fn only_current_credential_bindings_restore_agent_protection() {
+        let request = ApplyPolicy {
+            binding_id: Uuid::new_v4(),
+            agent_id: "Hermes".into(),
+            session_id: None,
+            root_pid: 9073,
+            process_start_time: 1,
+            policy_id: "agentsight-credential-exfiltration".into(),
+            policy_revision: "7".into(),
+            policy_dsl: "fixture".into(),
+            policy_mode: Some(PolicyMode::Audit),
+        };
+        let active = Binding {
+            request: request.clone(),
+            state: BindingState::Enforced,
+            message: None,
+            domain_id: Some(1),
+        };
+        let detached = Binding {
+            request,
+            state: BindingState::Detached,
+            message: None,
+            domain_id: None,
+        };
+
+        assert!(is_active_credential_binding(&active, 9073));
+        assert!(!is_active_credential_binding(&active, 9074));
+        assert!(!is_active_credential_binding(&detached, 9073));
     }
 
     #[test]
