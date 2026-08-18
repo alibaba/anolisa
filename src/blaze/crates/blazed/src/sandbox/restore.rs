@@ -169,8 +169,21 @@ impl SandboxManager {
                 target_metadata.backend
             ))
         })?;
+        // Pin the executable once. The capability check below and the launch
+        // that happens after the running sandbox is stopped must name the same
+        // file, or an executable replaced in between would only be noticed once
+        // the original was already gone. A backend that needs no executable of
+        // its own carries no configured path, and refusing it here would hide
+        // the adapter's own answer about whether it supports restore at all.
+        let executable = if request.binary_path.as_os_str().is_empty() {
+            None
+        } else {
+            Some(std::sync::Arc::new(crate::spawner::PinnedExecutable::open(
+                &request.binary_path,
+            )?))
+        };
         let capability = spawner
-            .restore_capability(&request.binary_path)
+            .restore_capability(executable.as_deref())
             .await?
             .ok_or_else(|| {
                 BlazeDaemonError::UnsupportedOperation(format!(
@@ -196,6 +209,11 @@ impl SandboxManager {
         }
         let storage = self.storage.reconstruct(&id.to_string()).await?;
         let expose_guest_socket = !current_backend.guest_socket_path().as_os_str().is_empty();
+        // Probe the network shape while the captured owner is still alive: its
+        // cleanup removes the host device the snapshot names, so the replacement
+        // has to be started with the same shape to rebind during load.
+        let preserve_network = current_backend.holds_network_slot();
+        let record_console_log = current_backend.records_console_log();
 
         instance.begin_restore_operation(request.checkpoint_id.clone())?;
         crate::failpoint::state("restore-begin-state")
@@ -345,8 +363,11 @@ impl SandboxManager {
                     expected_version: target_metadata.backend_version.clone(),
                     snapshot_kind: target_metadata.snapshot_kind,
                     expose_guest_socket,
+                    preserve_network,
+                    record_console_log,
                 },
                 run_dir,
+                executable.clone(),
             ) {
                 Ok(request) => restore_with_runtime_directory(spawner.as_ref(), request).await,
                 Err(error) => Err(crate::spawner::SpawnFailure::clean(error)),

@@ -307,9 +307,22 @@ POST /v1/sandboxes/{id}/rollback/{checkpoint_id}
 
 Restore requires a verified full checkpoint, an exact match for the sandbox's
 policy, image, backend, and backend version, plus explicit restore support from
-both the backend adapter and storage provider. The built-in mock adapter and
-file provider implement this contract. Other backend adapters return HTTP 501
-before stopping the current runtime until they implement restore.
+both the backend adapter and storage provider. The Firecracker adapter, the
+built-in mock adapter, and the file provider implement this contract. Other
+backend adapters return HTTP 501 before stopping the current runtime until they
+implement restore.
+
+Restoring a Firecracker sandbox replaces its virtual machine monitor with a new
+process that loads the captured memory and device state, so the process
+identifier changes while the sandbox identifier does not. The replacement is
+started with the same host shape the checkpoint was taken with — its network slot,
+guest transport, and console recording — because the snapshot refers to those
+devices by name. Console output and monitor diagnostics recorded before the
+restore are kept rather than overwritten.
+
+A restore is refused before the running sandbox is stopped whenever the installed
+Firecracker version does not match the one the checkpoint recorded, so a version
+mismatch costs you nothing.
 
 A `checkpoint_id` that is not in canonical form is rejected with HTTP 400, and a
 canonical identifier that names no committed checkpoint is reported as HTTP 404.

@@ -131,6 +131,17 @@ pub struct RestoreRequest {
     pub snapshot_kind: SnapshotKind,
     /// Whether the captured runtime exposed the stable run-directory guest transport.
     pub expose_guest_socket: bool,
+    /// Whether the captured runtime held a per-sandbox host network slot.
+    ///
+    /// The replacement must recreate the same shape, because a snapshot
+    /// references its network device by host name and the previous owner's
+    /// cleanup already removed that device.
+    pub preserve_network: bool,
+    /// Whether the captured runtime recorded guest console output.
+    ///
+    /// Carried so a restore does not silently stop recording console output for
+    /// a sandbox whose operator asked for it.
+    pub record_console_log: bool,
 }
 
 /// Snapshot flavor requested from a backend.

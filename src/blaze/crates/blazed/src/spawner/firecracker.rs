@@ -9,10 +9,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-#[cfg(test)]
-use blaze_core::backend::SpawnRequest;
-use blaze_core::backend::{BackendKind, SnapshotKind, SnapshotRequest};
-use blaze_core::policy::{FirecrackerConfig, VmConfig, parse_memory_value, to_mib_ceil};
+use blaze_core::backend::{
+    BackendKind, RestoreCapability, RestoreRequest, SnapshotKind, SnapshotRequest, SpawnRequest,
+};
+use blaze_core::policy::{
+    BackendConfigs, FirecrackerConfig, VmConfig, parse_memory_value, to_mib_ceil,
+};
 use blaze_core::{BlazeError, Result};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -28,9 +30,10 @@ use super::netns::{NetworkManager, NetworkSlot};
 #[cfg(target_os = "linux")]
 use super::terminate_recorded_process;
 use super::{
-    BackendInstance, BackendSpawnRequest, BackendSpawner, DynBackendInstance, OwnedRunDir,
-    SpawnFailure, SpawnResult, configure_pid_handoff, prepare_pid_handoff, record_backend_stopped,
-    remove_file_if_exists, spawn_result, stopped_marker, terminate_child,
+    BackendInstance, BackendRestoreRequest, BackendSpawnRequest, BackendSpawner,
+    DynBackendInstance, OwnedRunDir, PinnedExecutable, RestoreResult, SpawnFailure, SpawnResult,
+    configure_pid_handoff, prepare_pid_handoff, record_backend_stopped, remove_file_if_exists,
+    spawn_result, stopped_marker, terminate_child,
 };
 
 const NETWORK_BOOT_IP: &str = "ip=169.254.0.2::169.254.0.1:255.255.255.252::eth0:off";
@@ -119,13 +122,26 @@ impl FirecrackerSpawner {
         self.network.probe().await
     }
 
+    /// Start a Firecracker owner, optionally loading a checkpoint into it.
+    ///
+    /// A cold start writes a VM configuration and boots the guest kernel. A
+    /// restore instead starts a bare VMM and hands it the captured VM state and
+    /// guest memory, because the snapshot already carries the machine
+    /// configuration the capture froze.
     async fn start(
         &self,
         request: BackendSpawnRequest,
+        restore: Option<FirecrackerRestoreContext>,
     ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
-        validate_regular_file(&request.binary_path, "firecracker binary")?;
+        // A restore runs the file pinned during preflight, which was already
+        // checked when it was opened; only a cold start resolves the path here.
+        if restore.is_none() {
+            validate_regular_file(&request.binary_path, "firecracker binary")?;
+        }
         validate_regular_file(&request.storage.rootfs_path, "rootfs")?;
-        validate_regular_file(&self.images_dir.join("vmlinux"), "vmlinux")?;
+        if restore.is_none() {
+            validate_regular_file(&self.images_dir.join("vmlinux"), "vmlinux")?;
+        }
         let api_socket = request.run_dir.path().join("api.sock");
         let guest_socket = request.run_dir.path().join("vsock.uds");
         let pid_file = request.run_dir.path().join("firecracker.pid");
@@ -174,6 +190,7 @@ impl FirecrackerSpawner {
                             ),
                             Some(network),
                             self.network.clone(),
+                            false,
                         ));
                         return Err(SpawnFailure::compensate_started(source, owner).await);
                     }
@@ -191,6 +208,7 @@ impl FirecrackerSpawner {
                             ),
                             None,
                             self.network.clone(),
+                            false,
                         ));
                         return Err(SpawnFailure::compensate_started(
                             BlazeError::BackendError {
@@ -216,6 +234,7 @@ impl FirecrackerSpawner {
                             ),
                             None,
                             self.network.clone(),
+                            false,
                         ));
                         return Err(SpawnFailure::compensate_started(
                             BlazeError::BackendError {
@@ -235,44 +254,63 @@ impl FirecrackerSpawner {
         };
 
         // Guest memory size decides how long a snapshot of this VM may
-        // legitimately take, so resolve it once and freeze it into the owner.
-        let memory_bytes = resolve_memory(&fc_config, request.vm.as_ref())
-            .map(|mib| mib.saturating_mul(1024 * 1024))
-            .unwrap_or(0);
-
-        let mut command = build_launch_command(
-            &request.binary_path,
-            network.as_ref(),
-            &api_socket,
-            request.instance_id,
-        );
-        request.run_dir.inherit_into(&mut command);
-        let config_path = match write_vm_config(
-            &self.images_dir,
-            &request,
-            &fc_config,
-            &guest_socket,
-            network.as_ref(),
-        ) {
-            Ok(path) => path,
-            Err(error) => {
-                return Err(self
-                    .compensate_before_spawn(
-                        request.instance_id,
-                        runtime_files(
-                            api_socket,
-                            guest_socket,
-                            pid_file,
-                            stopped_marker,
-                            network_file,
-                        ),
-                        network,
-                        error,
-                    )
-                    .await);
-            }
+        // legitimately take, including snapshots taken long after a restore. A
+        // restore writes no VM configuration to resolve it from, so take it from
+        // the captured image, whose size is the guest memory it holds. Reading it
+        // from the reconstructed configuration instead would freeze the default
+        // into a restored owner and leave a later capture of a large guest with
+        // the minimum deadline.
+        let memory_bytes = match restore.as_ref() {
+            Some(context) => std::fs::metadata(&context.restore.memory)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+            None => resolve_memory(&fc_config, request.vm.as_ref())
+                .map(|mib| mib.saturating_mul(1024 * 1024))
+                .unwrap_or(0),
         };
-        command.arg("--config-file").arg(config_path);
+
+        // A restore executes the pinned file rather than the configured path, so
+        // replacing the binary after preflight cannot redirect this launch.
+        let program = match restore.as_ref() {
+            Some(context) => context.executable.program(),
+            None => request.binary_path.clone(),
+        };
+        let mut command =
+            build_launch_command(&program, network.as_ref(), &api_socket, request.instance_id);
+        request.run_dir.inherit_into(&mut command);
+        if let Some(context) = restore.as_ref() {
+            context.executable.inherit_into(&mut command);
+        }
+        // A restore carries its machine configuration inside the snapshot, so
+        // only a cold start writes and passes a configuration file.
+        if restore.is_none() {
+            let config_path = match write_vm_config(
+                &self.images_dir,
+                &request,
+                &fc_config,
+                &guest_socket,
+                network.as_ref(),
+            ) {
+                Ok(path) => path,
+                Err(error) => {
+                    return Err(self
+                        .compensate_before_spawn(
+                            request.instance_id,
+                            runtime_files(
+                                api_socket,
+                                guest_socket,
+                                pid_file,
+                                stopped_marker,
+                                network_file,
+                            ),
+                            network,
+                            error,
+                        )
+                        .await);
+                }
+            };
+            command.arg("--config-file").arg(config_path);
+        }
         if let Err(error) =
             configure_logs(&mut command, request.run_dir.path(), fc_config.serial_log)
         {
@@ -365,6 +403,7 @@ impl FirecrackerSpawner {
                 ),
                 network,
                 self.network.clone(),
+                false,
             ));
             return Err(SpawnFailure::compensate_started(error, owner).await);
         }
@@ -388,6 +427,27 @@ impl FirecrackerSpawner {
         .await
         {
             Ok(capture) => Some(capture),
+            // A restore stays fatal: it must load the snapshot into a VM whose
+            // version was confirmed to match the one that captured it, and an
+            // unverified replacement is worse than a refused restore.
+            Err(error) if restore.is_some() => {
+                let owner: DynBackendInstance = Arc::new(FirecrackerInstance::new(
+                    request.instance_id,
+                    Some(child),
+                    None,
+                    runtime_files(
+                        api_socket,
+                        guest_socket,
+                        pid_file,
+                        stopped_marker,
+                        network_file,
+                    ),
+                    network,
+                    self.network.clone(),
+                    false,
+                ));
+                return Err(SpawnFailure::compensate_started(error, owner).await);
+            }
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -415,8 +475,27 @@ impl FirecrackerSpawner {
             ),
             network,
             self.network.clone(),
+            fc_config.serial_log,
         )
         .with_run_dir(request.run_dir.clone());
+
+        // Load the checkpoint only after the owner exists, so a failed load
+        // transfers a runtime whose cleanup is still owned rather than leaking a
+        // started VMM.
+        if let Some(restore) = restore.as_ref().map(|context| &context.restore) {
+            if let Err(error) = validate_restore_compatibility(
+                restore,
+                instance.version().unwrap_or_default(),
+                &fc_config,
+            ) {
+                let owner: DynBackendInstance = Arc::new(instance);
+                return Err(SpawnFailure::compensate_started(error, owner).await);
+            }
+            if let Err(error) = instance.load_snapshot(restore).await {
+                let owner: DynBackendInstance = Arc::new(instance);
+                return Err(SpawnFailure::compensate_started(error, owner).await);
+            }
+        }
         Ok(Arc::new(instance))
     }
 
@@ -437,6 +516,7 @@ impl FirecrackerSpawner {
             files,
             network,
             self.network.clone(),
+            false,
         ));
         SpawnFailure::compensate_started(source, owner).await
     }
@@ -452,7 +532,96 @@ impl BackendSpawner for FirecrackerSpawner {
         &self,
         request: BackendSpawnRequest,
     ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
-        self.start(request).await
+        self.start(request, None).await
+    }
+
+    /// Report what this executable can consume from a committed checkpoint.
+    ///
+    /// The version is read from the configured binary, so a restore is only
+    /// attempted when the checkpoint recorded that exact version.
+    async fn restore_capability(
+        &self,
+        executable: Option<&PinnedExecutable>,
+    ) -> Result<Option<RestoreCapability>> {
+        let executable = executable.ok_or_else(|| BlazeError::BackendError {
+            msg: "no firecracker binary is configured, so its version cannot be \
+                  compared with the checkpoint"
+                .to_string(),
+        })?;
+        Ok(Some(RestoreCapability {
+            backend: BackendKind::Firecracker,
+            version: Some(read_pinned_backend_version(executable).await?),
+            snapshot_kind: SnapshotKind::Full,
+        }))
+    }
+
+    async fn restore(&self, request: BackendRestoreRequest) -> RestoreResult {
+        let run_dir = request.run_dir.clone();
+        let RestoreRequest {
+            instance_id,
+            binary_path,
+            storage,
+            snapshot_path,
+            mem_path,
+            checkpoint_backend,
+            expected_version,
+            snapshot_kind,
+            expose_guest_socket,
+            preserve_network,
+            record_console_log,
+        } = request.request;
+        let executable = request
+            .executable
+            .clone()
+            .ok_or_else(|| BlazeError::BackendError {
+                msg: "no firecracker binary is configured".to_string(),
+            })
+            .map_err(SpawnFailure::clean)?;
+        let restore = FirecrackerRestore {
+            vm_state: snapshot_path,
+            memory: mem_path,
+            expected_version,
+            checkpoint_backend,
+            snapshot_kind,
+            expose_guest_socket,
+        };
+        let spawn = BackendSpawnRequest::new(
+            SpawnRequest {
+                instance_id,
+                binary_path,
+                storage,
+                backend: BackendConfigs {
+                    // Three of these fields shape the host and must travel with
+                    // the request rather than fall back to defaults:
+                    // `enable_network` and `enable_vsock` name host devices the
+                    // snapshot references, and `serial_log` decides whether
+                    // console output keeps being recorded.
+                    //
+                    // `boot_args`, `vcpus` and `memory` only feed
+                    // `write_vm_config`, which a restore skips because the
+                    // snapshot carries the machine configuration. Guest memory
+                    // size is still needed, for snapshot deadlines, but `start`
+                    // takes it from the captured image rather than from here.
+                    firecracker: Some(FirecrackerConfig {
+                        enable_vsock: expose_guest_socket,
+                        enable_network: preserve_network,
+                        serial_log: record_console_log,
+                        ..FirecrackerConfig::default()
+                    }),
+                },
+                vm: None,
+            },
+            run_dir,
+        )
+        .map_err(SpawnFailure::clean)?;
+        self.start(
+            spawn,
+            Some(FirecrackerRestoreContext {
+                restore,
+                executable,
+            }),
+        )
+        .await
     }
 
     async fn probe(&self, binary_path: &Path) -> Result<bool> {
@@ -490,6 +659,13 @@ struct FirecrackerInstance {
     capture: Option<FirecrackerCapture>,
     /// Retained runtime directory used to root the private snapshot scratch.
     run_dir: Option<OwnedRunDir>,
+    /// Whether this owner created a per-sandbox netns, tap and NAT slot.
+    ///
+    /// Recorded at construction because the shape cannot change afterwards, and
+    /// because a restore needs it without awaiting the network lock.
+    holds_network_slot: bool,
+    /// Whether this owner sends guest console output to `serial.log`.
+    records_console_log: bool,
     files: FirecrackerRuntimeFiles,
     network: Mutex<Option<NetworkSlot>>,
     network_manager: Arc<NetworkManager>,
@@ -539,6 +715,7 @@ impl FirecrackerInstance {
         files: FirecrackerRuntimeFiles,
         network: Option<NetworkSlot>,
         network_manager: Arc<NetworkManager>,
+        records_console_log: bool,
     ) -> Self {
         Self {
             instance_id,
@@ -546,6 +723,8 @@ impl FirecrackerInstance {
             exit_result: Mutex::new(None),
             capture,
             run_dir: None,
+            holds_network_slot: network.is_some(),
+            records_console_log,
             files,
             network: Mutex::new(network),
             network_manager,
@@ -567,6 +746,45 @@ impl FirecrackerInstance {
             .ok_or_else(|| BlazeError::BackendError {
                 msg: "Firecracker API ownership is unavailable".to_string(),
             })
+    }
+
+    /// Load a checkpoint into this freshly started VMM.
+    ///
+    /// The tap name comes from the network slot this owner just created, so the
+    /// restored guest attaches to the device that exists now rather than the one
+    /// recorded at capture.
+    async fn load_snapshot(&self, restore: &FirecrackerRestore) -> Result<()> {
+        let tap_name = self
+            .network
+            .lock()
+            .await
+            .as_ref()
+            .map(|network| network.tap_name().to_string());
+        let guest_socket = restore
+            .expose_guest_socket
+            .then(|| self.files.guest_socket.clone());
+        // A load reads the captured memory image back, and the owner already
+        // holds that image's size as this VM's guest memory, so both directions
+        // are bounded from one source rather than two guesses.
+        let memory_bytes = self
+            .capture
+            .as_ref()
+            .map(|capture| capture.memory_bytes)
+            .unwrap_or(0);
+        self.capture_api()?
+            .call_json_within(
+                Method::PUT,
+                "/snapshot/load",
+                Some(snapshot_load_payload(
+                    restore,
+                    tap_name.as_deref(),
+                    guest_socket.as_deref(),
+                )?),
+                snapshot_timeout(memory_bytes),
+            )
+            .await
+            .map(|_| ())
+            .map_err(FirecrackerApiError::into_error)
     }
 }
 
@@ -597,6 +815,14 @@ impl BackendInstance for FirecrackerInstance {
 
     fn guest_socket_path(&self) -> &Path {
         &self.files.guest_socket
+    }
+
+    fn holds_network_slot(&self) -> bool {
+        self.holds_network_slot
+    }
+
+    fn records_console_log(&self) -> bool {
+        self.records_console_log
     }
 
     async fn pause(&self) -> Result<()> {
@@ -798,6 +1024,112 @@ impl FirecrackerApiError {
             Self::Known(error) | Self::Unknown(error) => error,
         }
     }
+}
+
+/// Checkpoint artifacts and identity a restore must honour.
+///
+/// The generic restore transaction already verified these artifacts and their
+/// hashes, so the adapter receives the paths directly and only needs to confirm
+/// that this backend can consume them.
+/// A restore in progress, with the executable pinned during preflight.
+///
+/// The pin travels with the restore so the launch runs the same file the
+/// capability check accepted, rather than whatever the configured path names by
+/// the time the replacement starts.
+struct FirecrackerRestoreContext {
+    restore: FirecrackerRestore,
+    executable: Arc<PinnedExecutable>,
+}
+
+struct FirecrackerRestore {
+    vm_state: PathBuf,
+    memory: PathBuf,
+    expected_version: Option<String>,
+    checkpoint_backend: BackendKind,
+    snapshot_kind: SnapshotKind,
+    expose_guest_socket: bool,
+}
+
+/// Refuse a checkpoint this executable cannot load.
+///
+/// Firecracker serializes VM state in a version-specific layout, so loading a
+/// snapshot taken by a different build can fail in ways that are not detectable
+/// up front. The network and guest-transport shapes must match too, because the
+/// snapshot references devices by name and a mismatch would restore a VM whose
+/// devices do not exist.
+fn validate_restore_compatibility(
+    restore: &FirecrackerRestore,
+    actual_version: &str,
+    config: &FirecrackerConfig,
+) -> Result<()> {
+    if restore.checkpoint_backend != BackendKind::Firecracker {
+        return Err(BlazeError::BackendError {
+            msg: format!(
+                "checkpoint backend {:?} cannot be restored by Firecracker",
+                restore.checkpoint_backend
+            ),
+        });
+    }
+    if restore.snapshot_kind != SnapshotKind::Full {
+        return Err(BlazeError::BackendError {
+            msg: "Firecracker restore requires a full snapshot".to_string(),
+        });
+    }
+    match restore.expected_version.as_deref() {
+        Some(expected) if expected == actual_version => {}
+        Some(expected) => {
+            return Err(BlazeError::BackendError {
+                msg: format!(
+                    "Firecracker checkpoint version {expected:?} does not match \
+                     executable version {actual_version:?}"
+                ),
+            });
+        }
+        None => {
+            return Err(BlazeError::BackendError {
+                msg: "Firecracker checkpoint records no backend version".to_string(),
+            });
+        }
+    }
+    if restore.expose_guest_socket != config.enable_vsock {
+        return Err(BlazeError::BackendError {
+            msg: "Firecracker checkpoint guest transport does not match restore policy".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Build the `/snapshot/load` request body.
+///
+/// The tap device and guest socket are recreated with fresh host names on every
+/// start, so the load overrides the names the snapshot recorded instead of
+/// requiring the previous host resources to still exist.
+fn snapshot_load_payload(
+    restore: &FirecrackerRestore,
+    tap_name: Option<&str>,
+    guest_socket: Option<&Path>,
+) -> Result<serde_json::Value> {
+    let mut payload = serde_json::json!({
+        "snapshot_path": path_string(&restore.vm_state, "VM-state snapshot")?,
+        "mem_backend": {
+            "backend_type": "File",
+            "backend_path": path_string(&restore.memory, "memory snapshot")?
+        },
+        "track_dirty_pages": false,
+        "resume_vm": true
+    });
+    if let Some(tap_name) = tap_name {
+        payload["network_overrides"] = serde_json::json!([{
+            "iface_id": "eth0",
+            "host_dev_name": tap_name
+        }]);
+    }
+    if let Some(guest_socket) = guest_socket {
+        payload["vsock_override"] = serde_json::json!({
+            "uds_path": path_string(guest_socket, "guest socket")?
+        });
+    }
+    Ok(payload)
 }
 
 /// Private child-visible snapshot namespace.  Its path is rooted at the
@@ -1266,15 +1598,53 @@ fn configure_logs(command: &mut Command, run_dir: &Path, serial_log: bool) -> Re
     if serial_log {
         let serial_log = run_dir.join("serial.log");
         rotate_serial_log_if_needed(&serial_log)?;
-        let stdout = std::fs::File::create(serial_log)?;
+        // Append rather than truncate, here and for stderr below. A cold start
+        // owns a fresh runtime directory, so there is nothing to append to, but
+        // a restore reuses the directory of the sandbox it replaces; truncating
+        // would erase the console output and VMM diagnostics captured before the
+        // restore, including the diagnostics a failed replacement would be
+        // debugged from. Rotation above still bounds the console log.
+        let stdout = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(serial_log)?;
         command.stdout(stdout);
     } else {
         command.stdout(Stdio::null());
     }
-    let stderr = std::fs::File::create(run_dir.join("stderr.log"))?;
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(run_dir.join("stderr.log"))?;
     command.stderr(stderr);
     command.stdin(Stdio::null());
     Ok(())
+}
+
+/// Read the version from a pinned executable rather than a path.
+async fn read_pinned_backend_version(executable: &PinnedExecutable) -> Result<String> {
+    let program = executable.program();
+    let mut command = Command::new(&program);
+    command.arg("--version");
+    executable.inherit_into(&mut command);
+    let output = tokio::time::timeout(Duration::from_secs(5), command.output())
+        .await
+        .map_err(|_| BlazeError::BackendError {
+            msg: format!(
+                "firecracker probe timed out: {}",
+                executable.configured_path().display()
+            ),
+        })??;
+    if !output.status.success() {
+        return Err(BlazeError::BackendError {
+            msg: format!(
+                "firecracker version probe failed with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    parse_backend_version(&output.stdout)
 }
 
 async fn read_backend_version(binary_path: &Path) -> Result<String> {
@@ -1605,6 +1975,7 @@ mod tests {
             ),
             None,
             Arc::new(NetworkManager::default()),
+            false,
         );
 
         assert_eq!(instance.instance_id(), instance_id);
@@ -1616,6 +1987,37 @@ mod tests {
         assert!(
             !instance.supports_checkpoint_capture(),
             "capture must not be advertised without a confirmed version"
+        );
+    }
+
+    #[test]
+    fn restored_owner_is_sized_by_the_captured_image() {
+        // A restore writes no VM configuration, so a restored owner that read its
+        // memory size from the reconstructed configuration would freeze the
+        // default. A later capture of a restored large guest would then get the
+        // minimum deadline and time out with an unknown outcome.
+        let temp = tempfile::tempdir().expect("temp");
+        let memory = temp.path().join("memory.snap");
+        let captured = 16 * 1024 * 1024 * 1024_u64;
+        // Size the artifact without writing 16 GiB of zeroes.
+        let file = std::fs::File::create(&memory).expect("create memory artifact");
+        file.set_len(captured).expect("size memory artifact");
+        drop(file);
+
+        let from_artifact = std::fs::metadata(&memory).expect("stat artifact").len();
+        assert_eq!(from_artifact, captured);
+        assert!(
+            snapshot_timeout(from_artifact)
+                > snapshot_timeout(
+                    FirecrackerConfig::default()
+                        .memory
+                        .as_deref()
+                        .and_then(|value| parse_memory_value(value).ok())
+                        .unwrap_or(256)
+                        * 1024
+                        * 1024
+                ),
+            "a restored large guest must not inherit the default's deadline"
         );
     }
 
@@ -1666,6 +2068,211 @@ mod tests {
     use crate::{checkpoint_store::CheckpointStore, state_store::StateStore};
 
     use super::*;
+
+    fn full_restore(expose_guest_socket: bool) -> FirecrackerRestore {
+        FirecrackerRestore {
+            vm_state: PathBuf::from("/checkpoint/vmstate.snap"),
+            memory: PathBuf::from("/checkpoint/memory.snap"),
+            expected_version: Some("Firecracker v1.16.0".to_string()),
+            checkpoint_backend: BackendKind::Firecracker,
+            snapshot_kind: SnapshotKind::Full,
+            expose_guest_socket,
+        }
+    }
+
+    #[test]
+    fn snapshot_load_rebinds_host_resources_created_by_this_start() {
+        let payload = snapshot_load_payload(
+            &full_restore(true),
+            Some("tap0"),
+            Some(Path::new("/run/blaze/instance/vsock.uds")),
+        )
+        .expect("load payload");
+
+        assert_eq!(payload["snapshot_path"], "/checkpoint/vmstate.snap");
+        assert_eq!(
+            payload["mem_backend"]["backend_path"],
+            "/checkpoint/memory.snap"
+        );
+        assert_eq!(payload["mem_backend"]["backend_type"], "File");
+        assert_eq!(payload["track_dirty_pages"], false);
+        assert_eq!(payload["resume_vm"], true);
+        // The tap and guest socket are recreated per start, so the load must
+        // override whatever names the snapshot recorded.
+        assert_eq!(payload["network_overrides"][0]["iface_id"], "eth0");
+        assert_eq!(payload["network_overrides"][0]["host_dev_name"], "tap0");
+        assert_eq!(
+            payload["vsock_override"]["uds_path"],
+            "/run/blaze/instance/vsock.uds"
+        );
+    }
+
+    #[test]
+    fn snapshot_load_omits_overrides_the_sandbox_does_not_own() {
+        let payload =
+            snapshot_load_payload(&full_restore(false), None, None).expect("load payload");
+
+        assert!(payload.get("network_overrides").is_none());
+        assert!(payload.get("vsock_override").is_none());
+        assert_eq!(payload["resume_vm"], true);
+    }
+
+    #[test]
+    fn console_log_survives_a_restore_into_the_same_runtime_directory() {
+        // A restore reuses the runtime directory of the sandbox it replaces, so
+        // reopening the console log must not discard what was captured before.
+        let temp = tempfile::tempdir().expect("temp");
+        let serial_log = temp.path().join("serial.log");
+        std::fs::write(&serial_log, b"pre-restore console output\n").expect("seed log");
+        let stderr_log = temp.path().join("stderr.log");
+        std::fs::write(&stderr_log, b"pre-restore vmm diagnostics\n").expect("seed stderr");
+
+        let mut command = Command::new("true");
+        configure_logs(&mut command, temp.path(), true).expect("configure logs");
+        drop(command);
+
+        let retained = std::fs::read(&serial_log).expect("read log");
+        assert_eq!(
+            retained, b"pre-restore console output\n",
+            "reopening the console log must preserve pre-restore history"
+        );
+        let retained_stderr = std::fs::read(&stderr_log).expect("read stderr");
+        assert_eq!(
+            retained_stderr, b"pre-restore vmm diagnostics\n",
+            "reopening the VMM diagnostics must preserve pre-restore history"
+        );
+    }
+
+    #[test]
+    fn console_log_is_left_alone_when_recording_is_disabled() {
+        let temp = tempfile::tempdir().expect("temp");
+        std::fs::write(
+            temp.path().join("stderr.log"),
+            b"pre-restore vmm diagnostics\n",
+        )
+        .expect("seed stderr");
+        let mut command = Command::new("true");
+        configure_logs(&mut command, temp.path(), false).expect("configure logs");
+        drop(command);
+
+        assert!(
+            !temp.path().join("serial.log").exists(),
+            "a sandbox without console recording must not create the log"
+        );
+        assert_eq!(
+            std::fs::read(temp.path().join("stderr.log")).expect("read stderr"),
+            b"pre-restore vmm diagnostics\n",
+            "VMM diagnostics are kept regardless of console recording"
+        );
+    }
+
+    #[test]
+    fn restore_config_preserves_the_captured_host_shape() {
+        // Regression: reconstructing the spawn config from
+        // `FirecrackerConfig::default()` silently dropped every policy-driven
+        // field. Networking was the severe case — the load then referenced a tap
+        // the previous owner's cleanup had removed, after the running VM was
+        // already stopped — and console logging silently stopped being recorded.
+        //
+        // A restore consumes exactly these three fields; `boot_args`, `vcpus`
+        // and `memory` only feed `write_vm_config`, which a restore skips.
+        for expose_guest_socket in [false, true] {
+            for preserve_network in [false, true] {
+                for record_console_log in [false, true] {
+                    let config = FirecrackerConfig {
+                        enable_vsock: expose_guest_socket,
+                        enable_network: preserve_network,
+                        serial_log: record_console_log,
+                        ..FirecrackerConfig::default()
+                    };
+                    assert_eq!(config.enable_vsock, expose_guest_socket);
+                    assert_eq!(config.enable_network, preserve_network);
+                    assert_eq!(config.serial_log, record_console_log);
+
+                    // The reconstructed shape must also satisfy the
+                    // compatibility check that runs before anything is stopped.
+                    let restore = FirecrackerRestore {
+                        expose_guest_socket,
+                        ..full_restore(expose_guest_socket)
+                    };
+                    validate_restore_compatibility(&restore, "Firecracker v1.16.0", &config)
+                        .expect("a faithfully reconstructed shape must be accepted");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn restore_requires_the_exact_captured_version() {
+        let restore = full_restore(false);
+        let policy = FirecrackerConfig::default();
+        validate_restore_compatibility(&restore, "Firecracker v1.16.0", &policy)
+            .expect("matching version restores");
+
+        let error = validate_restore_compatibility(&restore, "Firecracker v1.15.0", &policy)
+            .expect_err("a different build must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match executable version"),
+            "unexpected error: {error}"
+        );
+
+        let unversioned = FirecrackerRestore {
+            expected_version: None,
+            ..full_restore(false)
+        };
+        let error = validate_restore_compatibility(&unversioned, "Firecracker v1.16.0", &policy)
+            .expect_err("a record without a version cannot be loaded safely");
+        assert!(
+            error.to_string().contains("records no backend version"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn restore_refuses_a_checkpoint_another_backend_captured() {
+        let restore = FirecrackerRestore {
+            checkpoint_backend: BackendKind::Mock,
+            ..full_restore(false)
+        };
+        let error = validate_restore_compatibility(
+            &restore,
+            "Firecracker v1.16.0",
+            &FirecrackerConfig::default(),
+        )
+        .expect_err("foreign checkpoints must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot be restored by Firecracker"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn restore_requires_the_captured_guest_transport_shape() {
+        // The snapshot references its vsock device, so restoring it under a
+        // policy without the guest transport would produce a VM whose device
+        // does not exist.
+        let error = validate_restore_compatibility(
+            &full_restore(true),
+            "Firecracker v1.16.0",
+            &FirecrackerConfig::default(),
+        )
+        .expect_err("a missing guest transport must be refused");
+        assert!(
+            error.to_string().contains("guest transport does not match"),
+            "unexpected error: {error}"
+        );
+
+        let enabled = FirecrackerConfig {
+            enable_vsock: true,
+            ..FirecrackerConfig::default()
+        };
+        validate_restore_compatibility(&full_restore(true), "Firecracker v1.16.0", &enabled)
+            .expect("matching guest transport restores");
+    }
 
     #[test]
     fn version_parser_discards_non_version_log_lines() {
@@ -1950,6 +2557,7 @@ mod tests {
             ),
             Some(slot.clone()),
             network_manager,
+            false,
         ));
 
         owner.kill().await.expect_err("first cleanup must fail");
@@ -2002,6 +2610,7 @@ mod tests {
             ),
             Some(slot.clone()),
             Arc::new(NetworkManager::with_runner(runner.clone())),
+            false,
         );
 
         let first_error = loop {
@@ -2363,6 +2972,7 @@ mod tests {
             ),
             None,
             Arc::new(NetworkManager::default()),
+            false,
         ));
         let failure = SpawnFailure::compensate_started(
             BlazeError::BackendError {
@@ -2707,6 +3317,7 @@ mod tests {
                 api_socket.clone(),
                 Duration::from_secs(1),
                 "Firecracker v1.16.0".to_string(),
+                512 * 1024 * 1024,
             )),
             runtime_files(
                 api_socket,
@@ -2717,6 +3328,7 @@ mod tests {
             ),
             None,
             Arc::new(NetworkManager::default()),
+            false,
         )
         .with_run_dir(run_dir)
     }
@@ -2740,9 +3352,10 @@ mod tests {
             br#"{"firecracker_version":"1.16.0"}"#.to_vec(),
             Duration::ZERO,
         );
-        let capture = FirecrackerCapture::from_running(socket, Duration::from_secs(1))
-            .await
-            .expect("capture API version");
+        let capture =
+            FirecrackerCapture::from_running(socket, Duration::from_secs(1), 512 * 1024 * 1024)
+                .await
+                .expect("capture API version");
         server.await.expect("server");
         assert_eq!(capture.backend_version, "Firecracker v1.16.0");
     }
@@ -2783,6 +3396,7 @@ mod tests {
                 api_socket,
                 Duration::from_secs(1),
                 "Firecracker v1.16.0".to_string(),
+                512 * 1024 * 1024,
             )),
             runtime_files(
                 temp.path().join("api.sock"),
@@ -2793,6 +3407,7 @@ mod tests {
             ),
             None,
             Arc::new(NetworkManager::default()),
+            false,
         )
         .with_run_dir(run_dir);
         let target = temp.path().join("checkpoint");
@@ -2932,6 +3547,7 @@ mod tests {
                 api_socket.clone(),
                 Duration::from_secs(1),
                 "Firecracker v1.16.0".to_string(),
+                512 * 1024 * 1024,
             )),
             runtime_files(
                 api_socket,
@@ -2942,6 +3558,7 @@ mod tests {
             ),
             None,
             Arc::new(NetworkManager::default()),
+            false,
         )
         .with_run_dir(run_dir);
         let target = temp.path().join("checkpoint");

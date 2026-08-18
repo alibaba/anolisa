@@ -83,6 +83,22 @@ pub trait BackendInstance: Send + Sync {
     fn guest_socket_path(&self) -> &Path {
         Path::new("")
     }
+    /// Whether this owner holds a per-sandbox host network slot.
+    ///
+    /// A restore must recreate the same shape: a snapshot references its network
+    /// device, and the previous owner's cleanup removed the host device that
+    /// device named, so the replacement needs a fresh slot to rebind to.
+    fn holds_network_slot(&self) -> bool {
+        false
+    }
+    /// Whether this owner records guest console output to the runtime directory.
+    ///
+    /// A restore that dropped this would silently stop recording console output
+    /// for a sandbox whose operator asked for it, so the replacement keeps the
+    /// same setting.
+    fn records_console_log(&self) -> bool {
+        false
+    }
     /// Report an observed backend exit without waiting.
     ///
     /// `None` means the owned process or task was running when checked.
@@ -178,6 +194,14 @@ impl BackendInstance for RuntimeOwnedBackend {
         self.inner.guest_socket_path()
     }
 
+    fn holds_network_slot(&self) -> bool {
+        self.inner.holds_network_slot()
+    }
+
+    fn records_console_log(&self) -> bool {
+        self.inner.records_console_log()
+    }
+
     async fn try_wait(&self) -> Result<Option<SpawnResult>> {
         self.inner.try_wait().await
     }
@@ -232,16 +256,273 @@ pub(crate) async fn spawn_with_runtime_directory(
     }
 }
 
+/// A backend executable pinned by descriptor.
+///
+/// Preflight reads a backend's version from the file at a configured path, and
+/// the launch that follows must run that same file. A restore makes the gap
+/// consequential: it stops the running sandbox before it launches the
+/// replacement, so an executable replaced in between would only be noticed
+/// afterwards, once the original was already gone. That turns a restore that
+/// preflight could have refused without harm into a sandbox left needing
+/// recovery. Holding the descriptor open makes both steps name the same file,
+/// even if the configured path is later pointed elsewhere.
+#[derive(Debug)]
+pub struct PinnedExecutable {
+    /// Path the operator configured, kept for diagnostics.
+    configured_path: PathBuf,
+    #[cfg(target_os = "linux")]
+    file: std::os::fd::OwnedFd,
+}
+
+impl PinnedExecutable {
+    /// Pin the executable currently at `path`.
+    pub(crate) fn open(path: &Path) -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            use rustix::fs::{MemfdFlags, Mode, OFlags, SealFlags};
+            use std::io::{Read, Write};
+            use std::os::fd::AsRawFd;
+            use std::os::unix::fs::MetadataExt;
+
+            let mut source = std::fs::File::from(
+                rustix::fs::open(path, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty()).map_err(
+                    |error| BlazeError::BackendError {
+                        msg: format!("cannot open backend executable {}: {error}", path.display()),
+                    },
+                )?,
+            );
+            let metadata = source
+                .metadata()
+                .map_err(|error| BlazeError::BackendError {
+                    msg: format!(
+                        "cannot inspect backend executable {}: {error}",
+                        path.display()
+                    ),
+                })?;
+            // Check the opened file itself, so a path repointed between the
+            // check and the copy cannot substitute something that is not a
+            // program.
+            if !metadata.is_file() {
+                return Err(BlazeError::BackendError {
+                    msg: format!(
+                        "backend executable {} is not a regular file",
+                        path.display()
+                    ),
+                });
+            }
+
+            // The sealed copy below is executable in its own right, so without
+            // this a restore could run a backend a cold start would refuse,
+            // quietly overriding an operator who withdrew execute permission.
+            //
+            // Ask about the file already opened above, not the path: the path can
+            // be repointed in between, which would check a replacement while the
+            // copy below still reads this descriptor. Naming the descriptor
+            // through `/proc` resolves to the same file whatever the path now
+            // says, and `EACCESS` asks for the identity that will run it.
+            let source_fd = format!("/proc/self/fd/{}", source.as_raw_fd());
+            if rustix::fs::accessat(
+                rustix::fs::CWD,
+                source_fd.as_str(),
+                rustix::fs::Access::EXEC_OK,
+                rustix::fs::AtFlags::EACCESS,
+            )
+            .is_err()
+            {
+                return Err(BlazeError::BackendError {
+                    msg: format!("backend executable {} is not executable", path.display()),
+                });
+            }
+
+            // Name the copy after the file it was read from. A process running
+            // from a sealed copy reports `/memfd:<name> (deleted)` as its
+            // executable and the descriptor as `argv[0]`, so without this an
+            // operator inspecting a running backend could no longer tell which
+            // program it is.
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("backend");
+            // `MFD_EXEC` is required on kernels that default to sealing memory
+            // files against execution, and is rejected as unknown by kernels
+            // that predate the flag, so fall back for those.
+            let sealable = MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING;
+            let copy =
+                match rustix::fs::memfd_create(name, sealable | MemfdFlags::EXEC) {
+                    Ok(file) => file,
+                    Err(rustix::io::Errno::INVAL) => rustix::fs::memfd_create(name, sealable)
+                        .map_err(|error| BlazeError::BackendError {
+                            msg: format!("cannot pin backend executable: {error}"),
+                        })?,
+                    Err(error) => {
+                        return Err(BlazeError::BackendError {
+                            msg: format!("cannot pin backend executable: {error}"),
+                        });
+                    }
+                };
+            let mut writer = std::fs::File::from(copy);
+            let mut buffer = [0_u8; 64 * 1024];
+            let mut copied = 0_u64;
+            loop {
+                let read = source
+                    .read(&mut buffer)
+                    .map_err(|error| BlazeError::BackendError {
+                        msg: format!("cannot read backend executable {}: {error}", path.display()),
+                    })?;
+                if read == 0 {
+                    break;
+                }
+                writer
+                    .write_all(&buffer[..read])
+                    .map_err(|error| BlazeError::BackendError {
+                        msg: format!("cannot pin backend executable: {error}"),
+                    })?;
+                copied += read as u64;
+            }
+
+            // Sealing protects the copy, not the reading of the source. An
+            // in-place rewrite during the loop above would splice an old prefix
+            // onto new bytes, or truncate the tail, and that mixed image would
+            // then be sealed permanently. It might still answer `--version`
+            // while failing the real startup path, which is the worst shape to
+            // discover after the running sandbox is already stopped. Refuse a
+            // source that did not hold still: refusing during preflight leaves
+            // the sandbox untouched, so it costs nothing to be strict here.
+            //
+            // Length and modification time are not sufficient on their own,
+            // because a same-length rewrite followed by `utimensat` restores
+            // both. Inode change time is the indicator a writer cannot put back:
+            // a write advances it, and restoring the modification time advances
+            // it again.
+            let after = source
+                .metadata()
+                .map_err(|error| BlazeError::BackendError {
+                    msg: format!(
+                        "cannot re-inspect backend executable {}: {error}",
+                        path.display()
+                    ),
+                })?;
+            let stable = copied == metadata.len()
+                && after.len() == metadata.len()
+                && after.modified().ok() == metadata.modified().ok()
+                && (after.ctime(), after.ctime_nsec()) == (metadata.ctime(), metadata.ctime_nsec());
+            if !stable {
+                return Err(BlazeError::BackendError {
+                    msg: format!(
+                        "backend executable {} changed while it was being read, so the \
+                         pinned copy cannot be trusted",
+                        path.display()
+                    ),
+                });
+            }
+
+            let copy: std::os::fd::OwnedFd = writer.into();
+            // Seal the copy so the bytes preflight measured cannot change, and
+            // seal sealing itself so nothing can loosen that afterwards.
+            rustix::fs::fcntl_add_seals(
+                &copy,
+                SealFlags::WRITE | SealFlags::SHRINK | SealFlags::GROW | SealFlags::SEAL,
+            )
+            .map_err(|error| BlazeError::BackendError {
+                msg: format!("cannot seal pinned backend executable: {error}"),
+            })?;
+
+            Ok(Self {
+                configured_path: path.to_path_buf(),
+                file: copy,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Without `/proc` there is nothing to pin to, so this platform keeps
+            // the configured path and only reproduces the same error contract.
+            let metadata = std::fs::metadata(path).map_err(|error| BlazeError::BackendError {
+                msg: format!("cannot open backend executable {}: {error}", path.display()),
+            })?;
+            if !metadata.is_file() {
+                return Err(BlazeError::BackendError {
+                    msg: format!(
+                        "backend executable {} is not a regular file",
+                        path.display()
+                    ),
+                });
+            }
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                return Err(BlazeError::BackendError {
+                    msg: format!("backend executable {} is not executable", path.display()),
+                });
+            }
+            Ok(Self {
+                configured_path: path.to_path_buf(),
+            })
+        }
+    }
+
+    /// Program to execute, naming the pinned file rather than the path.
+    pub(crate) fn program(&self) -> PathBuf {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+
+            PathBuf::from(format!("/proc/self/fd/{}", self.file.as_raw_fd()))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.configured_path.clone()
+        }
+    }
+
+    /// Path the operator configured. Only for messages, never for execution.
+    pub(crate) fn configured_path(&self) -> &Path {
+        &self.configured_path
+    }
+
+    /// Keep the pinned descriptor open across the child's exec chain, so
+    /// [`Self::program`] still resolves once the child replaces its image.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn inherit_into(&self, command: &mut tokio::process::Command) {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+
+        let descriptor = self.file.as_raw_fd();
+        // SAFETY: `fcntl` is async-signal-safe. The closure only changes the
+        // child-side copy of a descriptor this owner keeps alive across the
+        // spawn call.
+        unsafe {
+            command.as_std_mut().pre_exec(move || {
+                if libc::fcntl(descriptor, libc::F_SETFD, 0) == -1 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn inherit_into(&self, _command: &mut tokio::process::Command) {}
+}
+
 /// Backend restore inputs paired with the opened runtime-directory owner.
 #[derive(Debug, Clone)]
 pub struct BackendRestoreRequest {
     request: RestoreRequest,
     /// Opened directory used for all replacement runtime artifacts.
     pub run_dir: OwnedRunDir,
+    /// Backend executable pinned during preflight.
+    ///
+    /// `None` when no executable is configured for this backend, which is the
+    /// shape of a backend that runs no separate program of its own.
+    pub executable: Option<Arc<PinnedExecutable>>,
 }
 
 impl BackendRestoreRequest {
-    pub(crate) fn new(request: RestoreRequest, run_dir: OwnedRunDir) -> Result<Self> {
+    pub(crate) fn new(
+        request: RestoreRequest,
+        run_dir: OwnedRunDir,
+        executable: Option<Arc<PinnedExecutable>>,
+    ) -> Result<Self> {
         if request.instance_id != run_dir.instance_id() {
             return Err(BlazeError::BackendError {
                 msg: format!(
@@ -251,7 +532,11 @@ impl BackendRestoreRequest {
                 ),
             });
         }
-        Ok(Self { request, run_dir })
+        Ok(Self {
+            request,
+            run_dir,
+            executable,
+        })
     }
 }
 
@@ -380,9 +665,13 @@ pub trait BackendSpawner: Send + Sync {
     /// Report the restore identity of the requested backend executable.
     ///
     /// `None` means restore is unsupported. Implementations that return a
-    /// version must inspect `binary_path` for every call rather than reusing
-    /// mutable process-wide state.
-    async fn restore_capability(&self, _binary_path: &Path) -> Result<Option<RestoreCapability>> {
+    /// version must read it from `executable` for every call, rather than
+    /// reusing mutable process-wide state or reopening the configured path:
+    /// the launch that follows runs that same pinned file.
+    async fn restore_capability(
+        &self,
+        _executable: Option<&PinnedExecutable>,
+    ) -> Result<Option<RestoreCapability>> {
         Ok(None)
     }
 
@@ -576,7 +865,10 @@ impl BackendSpawner for MockSpawner {
             .map_err(SpawnFailure::from)
     }
 
-    async fn restore_capability(&self, _binary_path: &Path) -> Result<Option<RestoreCapability>> {
+    async fn restore_capability(
+        &self,
+        _executable: Option<&PinnedExecutable>,
+    ) -> Result<Option<RestoreCapability>> {
         Ok(Some(RestoreCapability {
             backend: BackendKind::Mock,
             version: Some("mock-v1".to_string()),
@@ -1415,6 +1707,232 @@ fn spawn_result(instance_id: Uuid, status: std::process::ExitStatus) -> SpawnRes
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pinned_executable_survives_an_in_place_rewrite() {
+        use std::io::Write;
+
+        // A descriptor pins the inode, not its contents, so an in-place rewrite
+        // would still be visible through it. The kernel refuses that write only
+        // while some process executes the inode, which stops holding once a
+        // restore kills the runtime it is replacing.
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("backend");
+        std::fs::write(&path, b"original-backend-bytes").expect("write original");
+        make_executable(&path);
+
+        let pinned = PinnedExecutable::open(&path).expect("pin the original");
+
+        // Rewrite in place, keeping the same inode.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .expect("reopen for rewrite")
+            .write_all(b"rewritten-bytes")
+            .expect("rewrite in place");
+
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(
+                std::fs::read(pinned.program()).expect("read through the pin"),
+                b"original-backend-bytes",
+                "the sealed copy must keep the bytes preflight accepted"
+            );
+        }
+        assert_eq!(pinned.configured_path(), path.as_path());
+    }
+
+    #[test]
+    fn pinned_executable_survives_a_replaced_path() {
+        // The other direction: the path is repointed at a different file, the
+        // way an atomic package upgrade does it.
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("backend");
+        std::fs::write(&path, b"#!/bin/sh\nexit 0\n").expect("write original");
+        make_executable(&path);
+
+        let pinned = PinnedExecutable::open(&path).expect("pin the original");
+
+        // Replace the path the way a package upgrade would.
+        std::fs::remove_file(&path).expect("remove original");
+        std::fs::write(&path, b"#!/bin/sh\nexit 1\n").expect("write replacement");
+
+        assert_eq!(
+            pinned.configured_path(),
+            path.as_path(),
+            "the configured path stays available for diagnostics"
+        );
+        #[cfg(target_os = "linux")]
+        {
+            let program = pinned.program();
+            assert!(
+                program.starts_with("/proc/self/fd/"),
+                "a restore must execute the pinned descriptor, got {}",
+                program.display()
+            );
+            assert_eq!(
+                std::fs::read(&program).expect("read through the pin"),
+                b"#!/bin/sh\nexit 0\n",
+                "the pin must still resolve to the file preflight accepted"
+            );
+        }
+    }
+
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("mark executable");
+    }
+
+    #[test]
+    fn pinning_rejects_an_executable_an_operator_disabled() {
+        // The sealed copy is executable in its own right, so a restore must not
+        // run a backend that a cold start would refuse.
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("backend");
+        std::fs::write(&path, b"#!/bin/sh\nexit 0\n").expect("write backend");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("withdraw execute permission");
+
+        let error = PinnedExecutable::open(&path).expect_err("must refuse a non-executable file");
+        assert!(
+            format!("{error}").contains("not executable"),
+            "unexpected error: {error}"
+        );
+
+        make_executable(&path);
+        PinnedExecutable::open(&path).expect("an executable file is accepted");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pinning_checks_executability_of_the_file_it_copies() {
+        // The permission check must describe the file that gets sealed. Checking
+        // the path instead would let a replacement vouch for a source that is
+        // not executable, reinstating the bypass through the back door.
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("backend");
+        std::fs::write(&path, b"non-executable-source").expect("write source");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("withdraw execute permission");
+
+        // Hold the non-executable file open, then repoint the path at an
+        // executable one, which is what a replacement racing preflight looks
+        // like from here.
+        let held = std::fs::File::open(&path).expect("hold the source open");
+        std::fs::remove_file(&path).expect("unlink the source");
+        std::fs::write(&path, b"executable-replacement").expect("write replacement");
+        make_executable(&path);
+
+        // Opening now legitimately succeeds: it reads the replacement, which is
+        // executable. The point of the test is the inverse case below.
+        PinnedExecutable::open(&path).expect("the replacement is executable");
+        drop(held);
+
+        // With the path still naming a non-executable file, the check must fail
+        // rather than consult anything else.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("withdraw execute permission again");
+        let error = PinnedExecutable::open(&path).expect_err("must refuse what it would copy");
+        assert!(
+            format!("{error}").contains("not executable"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn timestamp_preserving_rewrites_are_still_detectable() {
+        // A same-length rewrite followed by `utimensat` puts length and
+        // modification time back, so neither can carry the check on its own. This
+        // pins the property the check relies on: inode change time still moves,
+        // because the write advances it and restoring the timestamps advances it
+        // again, and no ordinary writer can put it back.
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("backend");
+        std::fs::write(&path, b"AAAA").expect("write source");
+        let before = std::fs::metadata(&path).expect("stat source");
+
+        // Same length, then both timestamps restored.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, b"BBBB").expect("rewrite in place");
+        let times = [
+            rustix::fs::Timespec {
+                tv_sec: before.atime(),
+                tv_nsec: before.atime_nsec() as _,
+            },
+            rustix::fs::Timespec {
+                tv_sec: before.mtime(),
+                tv_nsec: before.mtime_nsec() as _,
+            },
+        ];
+        rustix::fs::utimensat(
+            rustix::fs::CWD,
+            &path,
+            &rustix::fs::Timestamps {
+                last_access: times[0],
+                last_modification: times[1],
+            },
+            rustix::fs::AtFlags::empty(),
+        )
+        .expect("restore timestamps");
+
+        let after = std::fs::metadata(&path).expect("re-stat source");
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "length is restored by construction"
+        );
+        assert_eq!(
+            after.modified().ok(),
+            before.modified().ok(),
+            "modification time is restored, so it cannot carry the check"
+        );
+        assert_ne!(
+            (after.ctime(), after.ctime_nsec()),
+            (before.ctime(), before.ctime_nsec()),
+            "inode change time must still reveal the rewrite"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pinned_copy_holds_the_whole_source() {
+        // The stability check rejects a pin whose copied length disagrees with
+        // the size measured before the copy, so a successful pin must carry the
+        // source in full — a short copy would otherwise be sealed as a truncated
+        // program and only fail once the sandbox it replaces is already stopped.
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("backend");
+        // Larger than the copy buffer, so the loop takes several reads.
+        let contents: Vec<u8> = (0..300 * 1024).map(|index| index as u8).collect();
+        std::fs::write(&path, &contents).expect("write source");
+        make_executable(&path);
+
+        let pinned = PinnedExecutable::open(&path).expect("pin a stable source");
+        assert_eq!(
+            std::fs::read(pinned.program()).expect("read the sealed copy"),
+            contents,
+            "the sealed copy must hold every byte of the source"
+        );
+    }
+
+    #[test]
+    fn pinning_rejects_a_path_that_is_not_a_regular_file() {
+        let temp = tempfile::tempdir().expect("temp");
+        let error = PinnedExecutable::open(temp.path()).expect_err("a directory is not a program");
+        assert!(
+            format!("{error}").contains("regular file"),
+            "unexpected error: {error}"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     use std::time::Duration;
 
@@ -1658,12 +2176,17 @@ mod tests {
             expected_version: None,
             snapshot_kind: SnapshotKind::Full,
             expose_guest_socket: true,
+            preserve_network: false,
+            record_console_log: false,
         };
-        let restore = BackendRestoreRequest::new(restore, run_dir).expect("restore request");
+        let executable =
+            Arc::new(PinnedExecutable::open(Path::new("/bin/sh")).expect("pin a real executable"));
+        let restore = BackendRestoreRequest::new(restore, run_dir, Some(executable.clone()))
+            .expect("restore request");
 
         assert!(
             BubblewrapSpawner
-                .restore_capability(Path::new(""))
+                .restore_capability(Some(&executable))
                 .await
                 .expect("capability")
                 .is_none()

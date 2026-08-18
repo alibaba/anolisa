@@ -1305,7 +1305,7 @@ mod tests {
 
         async fn restore_capability(
             &self,
-            _binary_path: &Path,
+            _executable: Option<&crate::spawner::PinnedExecutable>,
         ) -> blaze_core::Result<Option<blaze_core::backend::RestoreCapability>> {
             // Match the identity the guest-mock owner freezes into the
             // checkpoint so the sweep reaches the readiness contract instead of
