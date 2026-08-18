@@ -209,6 +209,13 @@ impl ScanResult {
                 .and_then(Value::as_u64)
                 .unwrap_or(0)),
         );
+        // Same accounting group, one question further: was every configured
+        // layer able to answer?  `degraded` is always present so consumers can
+        // gate on it without probing for keys, and `layers_failed` says which
+        // layer dropped out and why.  Additive to schema 1.0.
+        let failed = self.failed_layers();
+        out.insert("degraded".into(), json!(!failed.is_empty()));
+        out.insert("layers_failed".into(), Value::Array(failed.to_vec()));
         Value::Object(out)
     }
 
@@ -221,6 +228,25 @@ impl ScanResult {
     ///
     /// A missing or 0.0 score suppresses the confidence suffix.
     fn build_summary(&self) -> String {
+        // Degraded scan with no positive finding: the verdict is a PASS backed
+        // by fewer layers than configured, so neither the threat template below
+        // (which would print a nonsensical "[unknown] Benign detected") nor a
+        // plain "No threats detected" is honest here.  State which layer was
+        // missing and that the result is unverified.  A degraded scan that *did*
+        // detect something skips this and keeps its threat summary, with the
+        // outage appended as a suffix.
+        let failed_names: Vec<&str> = self
+            .failed_layers()
+            .iter()
+            .filter_map(|entry| entry.get("layer").and_then(Value::as_str))
+            .collect();
+        if !failed_names.is_empty() && !self.layer_results.iter().any(|lr| lr.detected) {
+            return format!(
+                "Scan degraded: {} unavailable; remaining layers found no threat \
+                 — verdict unverified, treat with caution",
+                failed_names.join(", ")
+            );
+        }
         if self.layer_results.is_empty() {
             return self
                 .metadata
@@ -291,10 +317,40 @@ impl ScanResult {
 
         let threat_label = title_case(&self.threat_type.as_str().replace('_', " "));
         let base = format!("[{layer_tag}] {threat_label} detected{conf_str}");
+        let degraded = self.degraded_suffix();
         match evidence {
-            Some(ev) => format!("{base} — \"{ev}\""),
-            None => base,
+            Some(ev) => format!("{base} — \"{ev}\"{degraded}"),
+            None => format!("{base}{degraded}"),
         }
+    }
+
+    /// Note naming the layers that could not answer, empty for a full scan.
+    ///
+    /// Only reached from the threat summary: a degraded scan with no finding
+    /// gets its own dedicated line instead, so this always trails a detection
+    /// — the reader has to know the verdict rests on fewer layers than
+    /// configured.
+    fn degraded_suffix(&self) -> String {
+        let failed: Vec<&str> = self
+            .failed_layers()
+            .iter()
+            .filter_map(|entry| entry.get("layer").and_then(Value::as_str))
+            .collect();
+        if failed.is_empty() {
+            return String::new();
+        }
+        format!(" [degraded scan: {} unavailable]", failed.join(", "))
+    }
+
+    /// Pipeline record of the layers that failed, `{layer, error}` each.
+    ///
+    /// Empty for a complete scan.
+    fn failed_layers(&self) -> &[Value] {
+        self.metadata
+            .get("layers_failed")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 }
 
@@ -522,7 +578,8 @@ mod tests {
         // Top-level keys in logical order: schema_version, ok, verdict,
         // risk_level, threat_type, confidence, summary, findings,
         // layer_results, engine_version, elapsed_ms, engine_init_ms,
-        // scan_ms.
+        // scan_ms, input_truncated, input_bytes_scanned, degraded,
+        // layers_failed.
         assert!(pos("schema_version") < pos("ok"));
         assert!(pos("ok") < pos("verdict"));
         assert!(pos("verdict") < pos("risk_level"));
@@ -536,6 +593,11 @@ mod tests {
         // The breakdown follows the total it decomposes.
         assert!(pos("elapsed_ms") < pos("engine_init_ms"));
         assert!(pos("engine_init_ms") < pos("scan_ms"));
+        // Scan-completeness accounting closes the object.
+        assert!(pos("scan_ms") < pos("input_truncated"));
+        assert!(pos("input_truncated") < pos("input_bytes_scanned"));
+        assert!(pos("input_bytes_scanned") < pos("degraded"));
+        assert!(pos("degraded") < pos("layers_failed"));
         // Keys within a finding, in logical order: rule_id, title, message,
         // evidence, category.
         assert!(pos("rule_id") < pos("title"));
@@ -664,5 +726,32 @@ mod tests {
         let value = result.to_json_value();
         assert_eq!(value["input_truncated"], false);
         assert_eq!(value["input_bytes_scanned"], 0);
+        // A complete scan states so explicitly rather than omitting the keys.
+        assert_eq!(value["degraded"], false);
+        assert_eq!(value["layers_failed"], json!([]));
+    }
+
+    #[test]
+    fn json_reports_degradation_structurally_and_in_the_summary() {
+        // A verdict backed by fewer layers than configured must be machine
+        // readable, not only mentioned in prose: hooks decide how loudly to
+        // warn based on `degraded`.
+        let mut metadata = Map::new();
+        metadata.insert(
+            "layers_failed".into(),
+            json!([{"layer": "ml_classifier", "error": "model inference failed"}]),
+        );
+        let result = ScanResult {
+            metadata,
+            ..threat_result()
+        };
+        let value = result.to_json_value();
+        assert_eq!(value["degraded"], true);
+        assert_eq!(value["layers_failed"][0]["layer"], "ml_classifier");
+        assert_eq!(value["layers_failed"][0]["error"], "model inference failed");
+        assert!(value["summary"]
+            .as_str()
+            .expect("summary")
+            .ends_with("[degraded scan: ml_classifier unavailable]"));
     }
 }

@@ -136,6 +136,21 @@ def _parse_result(proc: subprocess.CompletedProcess) -> dict:
     return json.loads(proc.stdout)
 
 
+def _skip_if_degraded(result: dict) -> None:
+    """Skip when a configured layer could not answer (e.g. Ollama offline).
+
+    L2-backed modes report ``degraded`` with the failing layers when the model
+    service is unreachable.  A degraded benign scan still reports PASS, but
+    that verdict is backed by L1 alone — asserting on it would green-light
+    the mode without L2 ever answering, hiding an environment problem behind
+    a passing test.  Reading the scanner's own flag keeps the guard exact: no
+    separate Ollama probe that could disagree with the scan.
+    """
+    if result.get("degraded"):
+        failed = [entry.get("layer") for entry in result.get("layers_failed") or []]
+        pytest.skip(f"scan degraded, layer(s) unavailable: {failed}")
+
+
 def _wait_for_security_event(trace_context: dict[str, str]) -> dict:
     """Return a security event matching *trace_context*."""
     deadline = time.monotonic() + 5
@@ -488,10 +503,12 @@ class TestModeVariants:
 
     def test_standard_mode_passes_benign(self) -> None:
         result = _parse_result(_run_scan(self._BENIGN, mode="standard"))
+        _skip_if_degraded(result)
         assert result["verdict"] == "pass"
 
     def test_strict_mode_passes_benign(self) -> None:
         result = _parse_result(_run_scan(self._BENIGN, mode="strict"))
+        _skip_if_degraded(result)
         assert result["verdict"] == "pass"
 
 

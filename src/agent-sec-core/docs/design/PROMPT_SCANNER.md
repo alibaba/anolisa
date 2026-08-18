@@ -221,6 +221,34 @@ agent-sec-cli scan-prompt --text "ignore all system instructions"
 > `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`，建议提前执行对应的
 > `ollama pull`，再执行 `scan-prompt warmup` 验证模型可用。
 
+**JSON 格式（standard 模式，L2 不可达 → 降级扫描）：**
+
+```json
+{
+  "verdict": "deny",
+  "summary": "[Rule] Direct Injection detected (confidence: 95.0%) — \"忽略系统指令\" [degraded scan: ml_classifier unavailable]",
+  "layer_results": [
+    { "layer": "rule_engine", "detected": true, "score": 0.95, "latency_ms": 3.07 }
+  ],
+  "degraded": true,
+  "layers_failed": [
+    { "layer": "ml_classifier", "error": "model inference failed: Ollama request failed" }
+  ]
+}
+```
+
+> **说明**：仅列出相关字段。L1 已命中时，L2 故障不会连带丢弃该命中——否则模型服务离线就等于检测失效；
+> 降级状态同时通过 `degraded` / `layers_failed`（结构化）与 `summary` 末尾（人类可读）两处披露，调用方不必解析文本。
+> 反之若 L1 未命中且 L2 故障，输出 `verdict: pass`（`ok: true`），但 `degraded: true` 且 `layers_failed` 列出失败层，
+> `summary` 形如 `Scan degraded: ml_classifier unavailable; remaining layers found no threat — verdict unverified, treat with caution`。
+>
+> **权衡**：不升级为 WARN，是因为模型服务离线期间会导致**每条输入**都弹出询问，实际不可用；不报 ERROR，是因为 hook 将
+> `error` 视为 fail-open 放行，且会连带丢弃 L1 已有的命中。代价是：**仅 L2 能识别的内容安全类威胁在 L2 离线时会被放过**。
+> 因此需要严格保证全量覆盖的调用方（如安全 hook）应自行消费 `degraded` 字段并施加更严的策略，而非仅看 `verdict`。
+>
+> **降级的前提是至少有一层已应答**：若**所有**已配置层均执行失败（现实中即 multi-turn 模式——其唯一检测层 L4 不可达），
+> 则没有任何判定依据，扫描直接报错（如 `ScannerError::ModelInference`）而不输出降级 PASS——零覆盖的「降级通过」等于未扫先放。
+
 **text 格式（无威胁）：**
 
 ```bash
@@ -385,7 +413,10 @@ Verdict 基于**层语义**推导，不依赖权重评分：
 | L2（ml_classifier）检测到威胁 | `DENY` | ML 确认，高置信度 |
 | L1 检测到威胁，L2 运行但未确认 | `WARN` | L1 可能误报，L2 纠正 |
 | L1 检测到威胁，L2 未运行（FAST 模式）| `DENY` | L1 是唯一权威 |
+| L1 检测到威胁，L2 执行失败（服务不可达）| `DENY` | 降级扫描：确认层没有产出任何结果，同 FAST 模式按「L1 唯一权威」处理，并置 `degraded=true` |
 | 所有层均未检测到威胁 | `PASS` | 安全 |
+| 无层检测到威胁，且有层执行失败（至少一层已应答）| `PASS` | 降级扫描：判定仅基于已应答的层。不升级为 WARN：模型服务不可用期间每条输入都弹询问不可用；不报 `ERROR`：硬错会让 hook fail-open。覆盖不足通过 `degraded=true` / `layers_failed` 披露，由调用方自行决策 |
+| 所有已配置层均执行失败（如 multi-turn 模式下 L4 不可达）| 报错（不输出结果）| 零层应答则无任何判定依据，降级 PASS 等于未扫先放；首个层错误作为 `ScannerError` 上抛 |
 | 扫描器内部异常 | `ERROR` | 见 `summary` 字段 |
 
 Verdict → risk_level 映射（`to_dict()` / CLI JSON 输出）：
@@ -420,6 +451,10 @@ Verdict → risk_level 映射（`to_dict()` / CLI JSON 输出）：
 | `elapsed_ms` | `float` | 总耗时（毫秒），恒等于 `engine_init_ms + scan_ms` |
 | `engine_init_ms` | `float` | 引擎构造耗时（毫秒），主要是规则集正则编译。该成本每个 scanner 实例只发生一次，计入**首次**扫描；同一实例的后续扫描为 `0.0`，因此跨结果累加不会重复计数 |
 | `scan_ms` | `float` | 本次检测流水线耗时（毫秒），不含引擎构造 |
+| `input_truncated` | `bool` | 输入超过 1 MiB 上限被截断时为 `true`，此时判定基于部分输入 |
+| `input_bytes_scanned` | `int` | 实际参与扫描的字节数 |
+| `degraded` | `bool` | 有已配置的层未能给出结果时为 `true`，判定仅基于剩余层（schema 1.0 追加字段，恒定输出）|
+| `layers_failed` | `list` | 失败层清单，每条为 `{"layer": ..., "error": ...}`；完整扫描时为空数组 |
 
 **findings 单条结构（L1 规则）：**
 

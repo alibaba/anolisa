@@ -72,8 +72,10 @@ impl DetectionLayer for MlClassifier {
     /// Always `true`: reachability is not probed here.
     ///
     /// L2 is mandatory in standard/strict modes, so a transient service
-    /// outage must surface as a scan error rather than silently degrading
-    /// the pipeline to L1-only.
+    /// outage must not silently drop the layer at construction time.  It
+    /// surfaces at scan time instead, where the scanner records it in
+    /// `layers_failed` and degrades — preserving what other layers found —
+    /// or propagates it as an error when no layer at all could answer.
     fn is_available(&self) -> bool {
         true
     }
