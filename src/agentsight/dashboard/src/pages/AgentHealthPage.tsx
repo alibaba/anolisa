@@ -64,13 +64,81 @@ interface Toast {
   message: string;
 }
 
+function formatMetricValue(value: number): string {
+  return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function formatMetricP50(metric: MetricPercentiles | null, unit: string): string {
+  return metric ? formatMetricValue(metric.p50) + ' ' + unit : '—';
+}
+
+const LatencyMetricsRow: React.FC<{ metrics: LatencyMetricsSummary }> = ({ metrics }) => {
+  const { t } = useI18n();
+  const items = [
+    { label: t('latency.ttft'), metric: metrics.ttft_ms, unit: 'ms' },
+    { label: t('latency.tps'), metric: metrics.tps_tokens_per_second, unit: 'tokens/s' },
+    { label: t('latency.tpot'), metric: metrics.tpot_ms_per_token, unit: 'ms/token' },
+    { label: t('latency.e2e'), metric: metrics.e2e_latency_ms, unit: 'ms' },
+  ];
+
+  if (!items.some(item => item.metric !== null)) return null;
+
+  const tooltip = items
+    .map(({ label, metric, unit }) => {
+      if (!metric) return label + ' —';
+      return (
+        label +
+        ' ' +
+        t('latency.p50') +
+        ' ' +
+        formatMetricValue(metric.p50) +
+        ' ' +
+        unit +
+        ' · ' +
+        t('latency.p95') +
+        ' ' +
+        formatMetricValue(metric.p95) +
+        ' ' +
+        unit +
+        ' · ' +
+        t('latency.p99') +
+        ' ' +
+        formatMetricValue(metric.p99) +
+        ' ' +
+        unit
+      );
+    })
+    .join(' · ');
+
+  return (
+    <div
+      className="mt-2 pt-2 border-t border-gray-100 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-gray-700"
+      title={tooltip}
+      aria-label={tooltip}
+    >
+      {items.map(({ label, metric, unit }) => (
+        <span key={label}>
+          <span className="text-gray-400">{label}</span> {formatMetricP50(metric, unit)}
+        </span>
+      ))}
+    </div>
+  );
+};
+
+const LATENCY_TIME_PRESETS = [
+  { key: 'latency.range24h', ms: 24 * 3600 * 1000 },
+  { key: 'latency.range7d', ms: 7 * 24 * 3600 * 1000 },
+  { key: 'latency.range30d', ms: 30 * 24 * 3600 * 1000 },
+] as const;
+
 const AgentCard: React.FC<{
   agent: AgentHealthStatus;
   related: AgentHealthStatus[];
   onDelete: (pid: number) => void;
   onRestart: (pid: number) => void;
   restarting: boolean;
-}> = ({ agent, related, onDelete, onRestart, restarting }) => {
+  latency?: LatencyMetricsSummary;
+}> = ({ agent, related, onDelete, onRestart, restarting, latency }) => {
   const [showRelated, setShowRelated] = useState(false);
 
   // 区分：真 Gateway = 本身在监听端口的服务进程（如 OpenClaw Gateway）
@@ -175,6 +243,7 @@ const AgentCard: React.FC<{
           </div>
         )}
       </div>
+      {latency && <LatencyMetricsRow metrics={latency} />}
       {(isOffline || canRestart) && (
         <div className="mt-2 flex items-center gap-3">
           {isOffline && (
@@ -225,6 +294,7 @@ const AgentCard: React.FC<{
 };
 
 const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ addToast }) => {
+  const { t } = useI18n();
   const [agents, setAgents] = useState<AgentHealthStatus[]>([]);
   const [clientAgents, setClientAgents] = useState<AgentHealthStatus[]>([]);
   const [showOrphans, setShowOrphans] = useState(false);
@@ -233,6 +303,34 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
   const [error, setError] = useState<string | null>(null);
   const [restartingPids, setRestartingPids] = useState<Set<number>>(new Set());
   const hasDataRef = useRef(false);
+  const [rangeMs, setRangeMs] = useState(7 * 24 * 3600 * 1000);
+  const [latencyMetrics, setLatencyMetrics] = useState<LatencyMetricsSummary[]>([]);
+  const [latencyLoading, setLatencyLoading] = useState(true);
+  const [latencyError, setLatencyError] = useState<string | null>(null);
+  const latencyRequestIdRef = useRef(0);
+
+  const loadLatency = useCallback(async () => {
+    const requestId = ++latencyRequestIdRef.current;
+    setLatencyLoading(true);
+    setLatencyError(null);
+    try {
+      const endNs = Date.now() * 1_000_000;
+      const startNs = endNs - rangeMs * 1_000_000;
+      const data = await fetchLatencyMetrics(startNs, endNs);
+      if (requestId === latencyRequestIdRef.current) {
+        setLatencyMetrics(data);
+        setLatencyError(null);
+      }
+    } catch (e: any) {
+      if (requestId === latencyRequestIdRef.current) {
+        setLatencyError(e.message || '');
+      }
+    } finally {
+      if (requestId === latencyRequestIdRef.current) {
+        setLatencyLoading(false);
+      }
+    }
+  }, [rangeMs]);
 
   const refresh = useCallback(async () => {
     try {
@@ -286,6 +384,10 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
     return () => clearInterval(timer);
   }, [refresh]);
 
+  useEffect(() => {
+    void loadLatency();
+  }, [loadLatency]);
+
   // 排序：hung/unhealthy 首位（真有问题），正常中间，offline 最后（不抢眼）
   const sorted = [...agents].sort((a, b) => {
     const order: Record<string, number> = {
@@ -303,6 +405,24 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
   const offlineCount = agents.filter(a => a.status === 'offline').length;
   const hungCount = agents.filter(a => a.status === 'hung').length;
   const totalCount = agents.length;
+  const canonicalAgentKey = (agentName: string): string => agentName.toLowerCase();
+  const latencyByAgent = new Map<string, LatencyMetricsSummary[]>();
+  for (const metric of latencyMetrics) {
+    if (metric.agent_name !== null) {
+      const key = canonicalAgentKey(metric.agent_name);
+      const summaries = latencyByAgent.get(key);
+      if (summaries) {
+        summaries.push(metric);
+      } else {
+        latencyByAgent.set(key, [metric]);
+      }
+    }
+  }
+  const latencyForAgent = (agentName: string): LatencyMetricsSummary | undefined => {
+    const summaries = latencyByAgent.get(canonicalAgentKey(agentName));
+    // Do not silently choose one when casing variants produce separate summaries.
+    return summaries?.length === 1 ? summaries[0] : undefined;
+  };
 
   const gatewayPids = new Set(sorted.map(a => a.pid));
   // 孤儿关联进程：Worker 但父进程不是任何主卡（不应出现，兜底）。
@@ -339,9 +459,38 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
             </span>
           )}
         </div>
-        {lastScan > 0 && (
-          <span className="text-xs text-gray-400">上次扫描: {relativeTime(lastScan)}</span>
-        )}
+        <div className="flex items-center gap-2 flex-wrap justify-end">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] text-gray-400">{t('latency.title')}</span>
+            {LATENCY_TIME_PRESETS.map(({ key, ms }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setRangeMs(ms)}
+                aria-pressed={rangeMs === ms}
+                className={rangeMs === ms
+                  ? 'px-2 py-1 text-[11px] rounded bg-blue-100 text-blue-700 font-medium'
+                  : 'px-2 py-1 text-[11px] rounded bg-gray-100 hover:bg-gray-200 text-gray-600'}
+              >
+                {t(key)}
+              </button>
+            ))}
+          </div>
+          {latencyLoading && (
+            <span className="text-[11px] text-gray-400">{t('latency.loading')}</span>
+          )}
+          {latencyError !== null && (
+            <span
+              className="text-[11px] text-red-400"
+              title={latencyError || t('latency.error')}
+            >
+              {t('latency.error')}
+            </span>
+          )}
+          {lastScan > 0 && (
+            <span className="text-xs text-gray-400">上次扫描: {relativeTime(lastScan)}</span>
+          )}
+        </div>
       </div>
 
       {loading ? (
@@ -364,6 +513,7 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
               onDelete={handleDelete}
               onRestart={handleRestart}
               restarting={restartingPids.has(agent.pid)}
+              latency={latencyForAgent(agent.agent_name)}
             />
           ))}
         </div>
@@ -394,159 +544,6 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
           )}
         </div>
       )}
-    </section>
-  );
-};
-
-// ─── Latency metrics section ─────────────────────────────────────────────────
-
-function formatMetricValue(value: number): string {
-  return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
-}
-
-interface PercentileLabels {
-  p50: string;
-  p95: string;
-  p99: string;
-}
-
-const MetricPercentileCell: React.FC<{
-  metric: MetricPercentiles | null;
-  unit: string;
-  labels: PercentileLabels;
-}> = ({ metric, unit, labels }) => {
-  if (!metric) return <span className="text-gray-400">&mdash;</span>;
-
-  return (
-    <div className="space-y-0.5 whitespace-nowrap text-xs">
-      <div><span className="text-gray-400">{labels.p50}</span> {formatMetricValue(metric.p50)} {unit}</div>
-      <div><span className="text-gray-400">{labels.p95}</span> {formatMetricValue(metric.p95)} {unit}</div>
-      <div><span className="text-gray-400">{labels.p99}</span> {formatMetricValue(metric.p99)} {unit}</div>
-    </div>
-  );
-};
-
-const LATENCY_TIME_PRESETS = [
-  { key: 'latency.range24h', ms: 24 * 3600 * 1000 },
-  { key: 'latency.range7d', ms: 7 * 24 * 3600 * 1000 },
-  { key: 'latency.range30d', ms: 30 * 24 * 3600 * 1000 },
-] as const;
-
-const LatencyMetricsSection: React.FC = () => {
-  const { t } = useI18n();
-  const [rangeMs, setRangeMs] = useState(7 * 24 * 3600 * 1000);
-  const [latencyMetrics, setLatencyMetrics] = useState<LatencyMetricsSummary[]>([]);
-  const [latencyLoading, setLatencyLoading] = useState(true);
-  const [latencyError, setLatencyError] = useState<string | null>(null);
-  const latencyRequestIdRef = useRef(0);
-
-  const loadLatency = useCallback(async () => {
-    const requestId = ++latencyRequestIdRef.current;
-    setLatencyLoading(true);
-    setLatencyError(null);
-    try {
-      const endNs = Date.now() * 1_000_000;
-      const startNs = endNs - rangeMs * 1_000_000;
-      const data = await fetchLatencyMetrics(startNs, endNs);
-      if (requestId === latencyRequestIdRef.current) {
-        setLatencyMetrics(data);
-        setLatencyError(null);
-      }
-    } catch (e: any) {
-      if (requestId === latencyRequestIdRef.current) {
-        setLatencyError(e.message || '');
-      }
-    } finally {
-      if (requestId === latencyRequestIdRef.current) {
-        setLatencyLoading(false);
-      }
-    }
-  }, [rangeMs]);
-
-  useEffect(() => {
-    void loadLatency();
-  }, [loadLatency]);
-
-  const percentileLabels: PercentileLabels = {
-    p50: t('latency.p50'),
-    p95: t('latency.p95'),
-    p99: t('latency.p99'),
-  };
-
-  return (
-    <section className="mt-8">
-      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-        <h2 className="text-lg font-semibold text-gray-800">{t('latency.title')}</h2>
-        <div className="flex gap-2">
-          {LATENCY_TIME_PRESETS.map(({ key, ms }) => (
-            <button
-              key={key}
-              onClick={() => setRangeMs(ms)}
-              className={rangeMs === ms
-                ? 'px-3 py-1.5 text-xs rounded-lg transition-colors bg-blue-100 text-blue-700 font-medium'
-                : 'px-3 py-1.5 text-xs rounded-lg transition-colors bg-gray-100 hover:bg-gray-200 text-gray-600'}
-            >
-              {t(key)}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div
-        className="bg-white rounded-lg border border-gray-200 overflow-x-auto"
-        aria-busy={latencyLoading}
-      >
-        {latencyLoading && latencyMetrics.length > 0 && (
-          <div className="px-4 py-2 text-xs text-gray-400">{t('latency.loading')}</div>
-        )}
-        {latencyError !== null && latencyMetrics.length > 0 && (
-          <div className="px-4 py-2 text-xs text-red-400">{latencyError || t('latency.error')}</div>
-        )}
-        {latencyError !== null && latencyMetrics.length === 0 ? (
-          <div className="py-8 text-center text-sm text-red-400">{latencyError || t('latency.error')}</div>
-        ) : latencyMetrics.length === 0 ? (
-          <div className="py-8 text-center text-sm text-gray-400">
-            {latencyLoading ? t('latency.loading') : t('latency.empty')}
-          </div>
-        ) : (
-          <table className="w-full min-w-[820px] text-sm">
-            <thead>
-              <tr className="bg-gray-50 text-left text-xs text-gray-500 uppercase">
-                <th className="px-4 py-3">{t('latency.agent')}</th>
-                <th className="px-4 py-3">{t('latency.calls')}</th>
-                <th className="px-4 py-3">{t('latency.streaming')}</th>
-                <th className="px-4 py-3">{t('latency.ttft')} <span className="font-normal">(ms)</span></th>
-                <th className="px-4 py-3">{t('latency.tps')} <span className="font-normal">(tokens/s)</span></th>
-                <th className="px-4 py-3">{t('latency.tpot')} <span className="font-normal">(ms/token)</span></th>
-                <th className="px-4 py-3">{t('latency.e2e')} <span className="font-normal">(ms)</span></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {latencyMetrics.map((metric, index) => (
-                <tr key={(metric.agent_name ?? 'unknown') + '-' + index} className="align-top">
-                  <td className="px-4 py-3 text-gray-800 font-medium">
-                    {metric.agent_name ?? <span>&mdash;</span>}
-                  </td>
-                  <td className="px-4 py-3 text-gray-700">{metric.call_count.toLocaleString()}</td>
-                  <td className="px-4 py-3 text-gray-700">{metric.streaming_call_count.toLocaleString()}</td>
-                  <td className="px-4 py-3">
-                    <MetricPercentileCell metric={metric.ttft_ms} unit="ms" labels={percentileLabels} />
-                  </td>
-                  <td className="px-4 py-3">
-                    <MetricPercentileCell metric={metric.tps_tokens_per_second} unit="tokens/s" labels={percentileLabels} />
-                  </td>
-                  <td className="px-4 py-3">
-                    <MetricPercentileCell metric={metric.tpot_ms_per_token} unit="ms/token" labels={percentileLabels} />
-                  </td>
-                  <td className="px-4 py-3">
-                    <MetricPercentileCell metric={metric.e2e_latency_ms} unit="ms" labels={percentileLabels} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
     </section>
   );
 };
@@ -990,7 +987,6 @@ export const AgentHealthPage: React.FC = () => {
       </div>
 
       <AgentStatusSection addToast={addToast} />
-      <LatencyMetricsSection />
       <InterruptionSection addToast={addToast} />
     </div>
   );
