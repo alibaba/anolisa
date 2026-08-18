@@ -19,3 +19,4 @@ python/agentscope/src/*.egg-info/
 # Python bytecode cache
 __pycache__/
 *.pyc
+python/tokenless/python/anolisa_tokenless/_bin/rtk

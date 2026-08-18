@@ -123,6 +123,62 @@ impl PyTokenlessRuntime {
         })
     }
 
+    #[pyo3(signature = (
+        input,
+        *,
+        agent_id="python",
+        session_id=None,
+        tool_use_id=None
+    ))]
+    fn compress_schema(
+        &self,
+        py: Python<'_>,
+        input: String,
+        agent_id: &str,
+        session_id: Option<String>,
+        tool_use_id: Option<String>,
+    ) -> PyResult<PyCompressionResult> {
+        let attribution = Attribution {
+            agent_id: agent_id.to_string(),
+            session_id,
+            tool_use_id,
+        };
+        py.allow_threads(|| {
+            self.inner
+                .compress_schema(&input, &attribution)
+                .map(PyCompressionResult::from)
+                .map_err(to_python_error)
+        })
+    }
+
+    #[pyo3(signature = (
+        input,
+        *,
+        agent_id="python",
+        session_id=None,
+        tool_use_id=None
+    ))]
+    fn compress_toon(
+        &self,
+        py: Python<'_>,
+        input: String,
+        agent_id: &str,
+        session_id: Option<String>,
+        tool_use_id: Option<String>,
+    ) -> PyResult<PyCompressionResult> {
+        let attribution = Attribution {
+            agent_id: agent_id.to_string(),
+            session_id,
+            tool_use_id,
+        };
+        py.allow_threads(|| {
+            self.inner
+                .compress_toon(&input, &attribution)
+                .map(PyCompressionResult::from)
+                .map_err(to_python_error)
+        })
+    }
+
     fn retrieve(&self, py: Python<'_>, hash_or_marker: String) -> PyResult<String> {
         py.allow_threads(|| {
             self.inner

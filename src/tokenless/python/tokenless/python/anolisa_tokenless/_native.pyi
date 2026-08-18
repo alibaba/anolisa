@@ -46,6 +46,22 @@ class TokenlessRuntime:
         stash_enabled: bool = True,
         require_reversible: bool = True,
     ) -> CompressionResult: ...
+    def compress_schema(
+        self,
+        input: str,
+        *,
+        agent_id: str = "python",
+        session_id: str | None = None,
+        tool_use_id: str | None = None,
+    ) -> CompressionResult: ...
+    def compress_toon(
+        self,
+        input: str,
+        *,
+        agent_id: str = "python",
+        session_id: str | None = None,
+        tool_use_id: str | None = None,
+    ) -> CompressionResult: ...
     def retrieve(self, hash_or_marker: str) -> str: ...
     @property
     def data_dir(self) -> str: ...

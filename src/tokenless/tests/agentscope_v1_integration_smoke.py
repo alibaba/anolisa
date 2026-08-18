@@ -7,15 +7,44 @@ import json
 import re
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
+from typing import Any
 
 import agentscope
+from agentscope.agent import ReActAgent
+from agentscope.formatter import FormatterBase
 from agentscope.memory import InMemoryMemory
 from agentscope.message import Msg, TextBlock, ToolResultBlock, ToolUseBlock
-from agentscope.tool import Toolkit, ToolResponse
+from agentscope.model import ChatModelBase, ChatResponse
+from agentscope.tool import ToolResponse
 from tokenless_agentscope import TokenlessAgentScope, TokenlessConfig
 
 _RECOVERY_PAYLOAD = "RECOVERY_SENTINEL=世界\n" + ("内容" * 3_000) + "TRAILING_NEWLINE\n"
+_SCHEMA_DESCRIPTION = "SCHEMA_SENTINEL " + ("details " * 200)
+_SHELL_COMMANDS: list[str] = []
+
+
+class CaptureFormatter(FormatterBase):
+    """Preserve enough prompt structure to exercise the model proxy."""
+
+    async def format(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        del args
+        return [
+            {"role": message.role, "content": str(message.content)}
+            for message in kwargs["msgs"]
+        ]
+
+
+class CaptureModel(ChatModelBase):
+    """Capture the schemas delivered through a real ReActAgent boundary."""
+
+    def __init__(self) -> None:
+        super().__init__(model_name="capture", stream=False)
+        self.tools: list[dict] = []
+
+    async def __call__(self, *args: Any, **kwargs: Any) -> ChatResponse:
+        del args
+        self.tools = kwargs.get("tools", [])
+        return ChatResponse(content=[TextBlock(type="text", text="done")])
 
 
 async def large_result() -> ToolResponse:
@@ -29,6 +58,17 @@ async def large_result() -> ToolResponse:
     )
 
 
+async def shell(command: str) -> ToolResponse:
+    """Capture the command after the AgentScope pre-acting hook."""
+    _SHELL_COMMANDS.append(command)
+    return ToolResponse(content=[TextBlock(type="text", text="shell-ok")])
+
+
+async def tokenless_retrieve() -> ToolResponse:
+    """Represent an application attempt to replace Tokenless retrieval."""
+    return ToolResponse(content=[TextBlock(type="text", text="application")])
+
+
 async def main() -> None:
     """Run one real AgentScope 1.x postprocessor and retrieval cycle."""
     version = tuple(int(part) for part in agentscope.__version__.split(".")[:3])
@@ -36,10 +76,6 @@ async def main() -> None:
     with tempfile.TemporaryDirectory(
         prefix="tokenless-agentscope-v1-smoke-"
     ) as directory:
-        toolkit = Toolkit()
-        toolkit.register_tool_function(large_result)
-        memory = InMemoryMemory()
-        agent = SimpleNamespace(name="smoke", toolkit=toolkit, memory=memory)
         integration = TokenlessAgentScope(
             TokenlessConfig(
                 mode="aggressive",
@@ -47,7 +83,64 @@ async def main() -> None:
                 min_chars=0,
             ),
         )
-        integration.install(agent)
+        toolkit = integration.create_toolkit()
+        for options in ({}, {"namesake_strategy": "override"}):
+            try:
+                toolkit.register_tool_function(tokenless_retrieve, **options)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("Tokenless retrieval name collision was accepted")
+        toolkit.register_tool_function(
+            large_result,
+            json_schema={
+                "type": "function",
+                "function": {
+                    "name": "large_result",
+                    "description": _SCHEMA_DESCRIPTION,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        )
+        toolkit.register_tool_function(shell)
+        memory = InMemoryMemory()
+        model = CaptureModel()
+        agent = ReActAgent(
+            name="smoke",
+            sys_prompt="Exercise deterministic Tokenless boundaries.",
+            model=model,
+            formatter=CaptureFormatter(),
+            toolkit=toolkit,
+            memory=memory,
+            enable_rewrite_query=False,
+        )
+        integration.install(agent, session_id="smoke-session")
+
+        await agent._reasoning()
+        serialized_tools = json.dumps(model.tools, ensure_ascii=False)
+        assert _SCHEMA_DESCRIPTION not in serialized_tools, serialized_tools
+        assert re.search(r"<<tokenless:[0-9a-f]{24}>>", serialized_tools)
+        assert any(
+            tool["function"]["name"] == "tokenless_retrieve" for tool in model.tools
+        )
+
+        _SHELL_COMMANDS.clear()
+        await agent._acting(
+            ToolUseBlock(
+                type="tool_use",
+                id="call-shell",
+                name="shell",
+                input={"command": "grep needle file.txt"},
+            ),
+        )
+        assert len(_SHELL_COMMANDS) == 1
+        assert str(integration.sdk._rtk_path) in _SHELL_COMMANDS[0]
+        assert "TOKENLESS_SESSION_ID=smoke-session" in _SHELL_COMMANDS[0]
+        assert "TOKENLESS_TOOL_USE_ID=call-shell" in _SHELL_COMMANDS[0]
 
         tool_call = ToolUseBlock(
             type="tool_use",
@@ -78,6 +171,8 @@ async def main() -> None:
                 ],
             ),
         )
+        await agent._reasoning()
+        assert marker.group(1) in toolkit.visible_markers
         retrieve_call = ToolUseBlock(
             type="tool_use",
             id="call-retrieve",

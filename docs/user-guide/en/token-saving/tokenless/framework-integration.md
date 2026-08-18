@@ -307,7 +307,7 @@ The Python package supports AgentScope 1.0.11 through 1.0.x and AgentScope
 
 | AgentScope version | Supported entry point |
 |---|---|
-| 1.0.11 through 1.0.x | Direct Agent through `integration.install(agent)` |
+| 1.0.11 through 1.0.x | Tokenless Toolkit plus `install(..., session_id=...)` |
 | 2.0.0 | Direct Agent construction with `integration.tools` and `integration.middlewares` |
 | 2.0.1 through 2.0.x | Direct Agent construction or App through `integration.app_options()` |
 
@@ -323,9 +323,8 @@ python -m pip install \
 ```
 
 Both major versions use `TokenlessAgentScope` and `TokenlessConfig`; only the
-final attachment step differs. In AgentScope 1.x, create the Agent and all tool
-functions before installing the integration. Tools registered afterward are
-not wrapped:
+final attachment step differs. AgentScope 1.x uses a Tokenless Toolkit whose
+regular and MCP registration paths also cover tools added after construction:
 
 ```python
 from agentscope.agent import ReActAgent
@@ -337,8 +336,10 @@ integration = TokenlessAgentScope(
         data_dir="/absolute/path/to/tenant-tokenless-data",
     ),
 )
+toolkit = integration.create_toolkit()
+toolkit.register_tool_function(application_tool)
 agent = ReActAgent(..., toolkit=toolkit)
-integration.install(agent)
+integration.install(agent, session_id="conversation-id")
 ```
 
 In AgentScope 2.x, pass the retrieval Tool and middleware when constructing the
@@ -396,27 +397,26 @@ Choose a mode according to how much inline truncation the application accepts:
 | `balanced` (default) | Skip | Shell: 65,536 / 128 / depth 8; others: conservative limits |
 | `aggressive` | Skip | CLI defaults: 4,096 / 32 / depth 8 |
 
-The integration passes intermediate streaming chunks through unchanged and only replaces a
-successful final `ToolResponse`, preserves response and block identifiers and
-metadata, and keeps the original whenever Tokenless fails or does not make the
-UTF-8 result strictly smaller. JSON objects and arrays remain JSON; ordinary
-text remains text. `DataBlock` values are never changed.
+The integration passes intermediate streaming chunks through unchanged, preserves framework
+objects, and transforms only copied call arguments and final model-visible text. Tokenless keeps
+the original whenever an optimization fails or does not make the UTF-8 result strictly smaller.
+`DataBlock` values are never changed.
 
 The integration also exposes a retrieval Tool named `tokenless_retrieve` by
-default. It returns content only for an exact 24-character hexadecimal hash
-whose `<<tokenless:HASH>>` marker is visible in AgentScope 1.x memory or the
-AgentScope 2.x context/summary. The Tool is permanently excluded from
-compression. This narrow permission still depends on storage isolation: pass a
+default. It is published to the model only when a marker is visible and returns
+content only for an exact 24-character hexadecimal hash retained in that
+session's marker set. The Tool is permanently excluded from compression. This
+narrow permission still depends on storage isolation: pass a
 separate absolute `data_dir` for every user or tenant. If `data_dir` is omitted,
 `TOKENLESS_DATA_DIR` is only a process-wide fallback and must not be shared by
 multiple tenants. Retrieval does not work across nodes. Stash entries expire
 after the current fixed one-hour TTL, so the Agent should retrieve necessary
 content before that boundary.
 
-Compression and retrieval call the in-process `anolisa-tokenless` runtime from
-an async worker thread; the integration does not start a CLI process or grant Shell
-access. It also does not add MCP, TOON, RTK command rewriting, or schema
-compression.
+Both adapters enable schema compression, RTK command rewriting, response compression, TOON,
+retrieval, environment-error guidance, and per-call attribution. The platform wheel contains RTK
+and links TOON directly, so it does not search for system helper binaries. Tool Ready remains
+hard-disabled.
 
 ## Verify the actual integration
 

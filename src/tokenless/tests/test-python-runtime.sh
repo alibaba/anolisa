@@ -27,8 +27,17 @@ esac
 python3 -m venv "$TEST_ENV/venv"
 "$TEST_ENV/venv/bin/python" -m pip install \
     --disable-pip-version-check --no-deps "${WHEELS[0]}" >/dev/null
-"$TEST_ENV/venv/bin/python" -m unittest discover \
+env PATH=/usr/bin:/bin "$TEST_ENV/venv/bin/python" -m unittest discover \
     -s "$ROOT/python/tokenless/tests" -v
+
+env PATH=/usr/bin:/bin "$TEST_ENV/venv/bin/python" - <<'PY'
+import os
+from importlib.resources import files
+
+rtk = files("anolisa_tokenless").joinpath("_bin", "rtk")
+assert rtk.is_file()
+assert os.access(rtk, os.X_OK)
+PY
 
 EXPECTED_VERSION="$(sed -n \
     's/^version = "\([^"]*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"

@@ -874,6 +874,7 @@ dependencies = [
  "tokenless-ccr",
  "tokenless-schema",
  "tokenless-stats",
+ "toon-format",
 ]
 
 [[package]]

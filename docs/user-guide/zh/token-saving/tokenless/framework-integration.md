@@ -302,7 +302,7 @@ Python 包支持 AgentScope 1.0.11 至 1.0.x 和 AgentScope 2.0.x。应根据已
 
 | AgentScope 版本 | 支持的入口 |
 |---|---|
-| 1.0.11 至 1.0.x | 通过 `integration.install(agent)` 接入直接构造的 Agent |
+| 1.0.11 至 1.0.x | 使用 Tokenless Toolkit 和 `install(..., session_id=...)` |
 | 2.0.0 | 通过 `integration.tools` 和 `integration.middlewares` 直接构造 Agent |
 | 2.0.1 至 2.0.x | 直接构造 Agent，或通过 `integration.app_options()` 接入 App |
 
@@ -317,7 +317,7 @@ python -m pip install \
 ```
 
 两个大版本都使用 `TokenlessAgentScope` 和 `TokenlessConfig`，只有最后的挂载方式不同。
-AgentScope 1.x 必须先创建 Agent 和所有工具函数，再安装集成；之后注册的工具不会被包装：
+AgentScope 1.x 使用 Tokenless Toolkit；普通工具与 MCP 注册入口也会覆盖构造后新增的工具：
 
 ```python
 from agentscope.agent import ReActAgent
@@ -329,8 +329,10 @@ integration = TokenlessAgentScope(
         data_dir="/absolute/path/to/tenant-tokenless-data",
     ),
 )
+toolkit = integration.create_toolkit()
+toolkit.register_tool_function(application_tool)
 agent = ReActAgent(..., toolkit=toolkit)
-integration.install(agent)
+integration.install(agent, session_id="conversation-id")
 ```
 
 AgentScope 2.x 应在构造 Toolkit 和 Agent 时传入恢复 Tool 和中间件。该方式从 2.0.0
@@ -384,20 +386,19 @@ Agent。原有 `TokenlessMiddleware` 2.x API 继续保留兼容；新代码应�
 | `balanced`（默认） | 跳过 | Shell：65,536 / 128 / 深度 8；其他采用 conservative 限制 |
 | `aggressive` | 跳过 | CLI 默认值：4,096 / 32 / 深度 8 |
 
-集成会原样转发中间流式 chunk，只替换成功的最终 `ToolResponse`；响应和 block 的
-标识、元数据都会保留。Tokenless 失败或 UTF-8 结果没有严格变小时保留原文。
-JSON object/array 仍为 JSON，普通文本仍为文本，`DataBlock` 永不修改。
+集成会原样转发中间流式 chunk 并保留框架对象，只转换复制后的调用参数和最终模型可见
+文本。Tokenless 优化失败或 UTF-8 结果没有严格变小时保留原文，`DataBlock` 永不修改。
 
-集成还提供默认名为 `tokenless_retrieve` 的恢复 Tool。只有参数是严格的 24 位十六进制
-哈希，且对应的 `<<tokenless:HASH>>` marker 在 AgentScope 1.x memory 或 AgentScope
-2.x context/summary 中可见时，才会返回内容；该 Tool 永远不参与压缩。这一窄权限仍依赖
+集成还提供默认名为 `tokenless_retrieve` 的恢复 Tool。只有 marker 对当前模型可见时才
+会向模型发布该 Tool，并且只接受该 Session 精确保留的 marker 集合中的 24 位十六进制
+hash；该 Tool 永远不参与压缩。这一窄权限仍依赖
 存储隔离：每个用户或租户必须显式传入独立的绝对 `data_dir`。省略 `data_dir` 时，
 `TOKENLESS_DATA_DIR` 只作为进程级回退，不得由多个租户共用；也不要依赖跨节点恢复。
 stash 当前使用固定的一小时 TTL，Agent 应在这一边界前恢复所需内容。
 
-压缩和恢复会从 async worker thread 调用进程内 `anolisa-tokenless` Runtime；该集成
-不会启动 CLI 进程或授予 Shell 权限，也不接入 MCP、TOON、RTK 命令重写或
-Schema 压缩。
+两个 Adapter 都启用 Schema 压缩、RTK 命令改写、响应压缩、TOON、恢复、环境错误提示
+和逐调用归属。平台 Wheel 内置 RTK 并直接链接 TOON，不会搜索系统 helper。Tool Ready
+仍保持硬关闭。
 
 ## 验证是否真正接入
 

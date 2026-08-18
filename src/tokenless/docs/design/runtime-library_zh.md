@@ -4,87 +4,51 @@
 
 ## 目标
 
-框架集成需要在进程内完成响应压缩和 Stash 取回，避免每个工具结果都启动一次
-`tokenless` 子进程。Runtime 库提供这一能力，并让 CLI 与语言绑定复用同一套压缩实现。
+`anolisa-tokenless` 是框架无关的进程内 Tokenless SDK。平台 Wheel 同时包含 PyO3
+Runtime 和固定版本的 RTK 可执行文件，因此 Python 应用不要求 `tokenless`、`rtk` 或
+`toon` 出现在 `PATH` 中。
 
-本设计新增两个公开层次：
+公开的 `TokenlessSdk` 把宿主框架的四个生命周期映射为 Tokenless 行为：
 
-- `tokenless-runtime`：负责状态、策略和归因的可复用 Rust crate。
-- `anolisa-tokenless`：通过 PyO3 暴露 Runtime 的原生 Python 包。
+| 生命周期 | 行为 |
+|---|---|
+| `before_model` | 可恢复的 Function Calling Schema 压缩，并按需发布恢复工具 |
+| `before_tool_call` | 对 Adapter 明确指定的命令字段执行 RTK 改写 |
+| `after_tool_call` | 响应压缩、TOON 候选选择和环境错误提示 |
+| `retrieve` | 受可见 marker 授权的 byte-exact Stash 恢复 |
 
-首版 Python 接口覆盖 JSON 响应压缩与 Stash 取回，并提供框架无关的
-`TokenlessConfig` 和 `ToolResponseCompressor`，使不同框架复用策略、类型保真、节省检查
-和 marker 约束恢复，同时保留各自的生命周期代码。Schema 压缩、TOON 编码、RTK 命令
-改写、MCP 和框架专用 Middleware 不属于该库。独立的 `tokenless_agentscope` 包使用这个
-API，并负责 AgentScope 生命周期契约。
+Tool Ready 在产品范围内硬关闭，不属于该 API。
 
-## 架构
+## 协议与状态
 
-```text
-tokenless-schema ─┐
-tokenless-ccr ────┼──> tokenless-runtime ──> tokenless CLI
-tokenless-stats ──┘              └─────────> PyO3 ──> anolisa_tokenless
-                                                       └──> tokenless_agentscope
-```
+Adapter 把框架对象转换为不可变的 `ModelRequest`、`ToolCall`、`ToolResult` 和
+`RetrieveRequest`。`Attribution` 要求 Agent 和 Session 标识；工具生命周期还必须提供
+Tool Use 标识。工具 Schema 统一为 OpenAI Function Calling JSON，但生命周期 Envelope
+是 Tokenless 自身协议，不是 OpenAI 请求。
 
-`tokenless-runtime` 是高层应用 API。它只打开一次 Stash 和统计数据库，每次调用执行
-一次策略决策，并把调用方提供的 Agent、Session 和工具调用标识写入统计。CLI 把响应
-压缩和取回委托给相同函数，因此 Python 包不会复制压缩算法。
+`tokenless-runtime` 统一持有 SQLite Stash 和统计记录器。Schema 与响应压缩共享 Stash，
+候选被丢弃时会回滚对应 key。TOON 作为 Rust 库直接链接，不启动进程。只有 Adapter
+提供 `command_field` 时才调用 RTK；每个改写后的 wrapper 都锚定到 Wheel 内置文件，并
+携带本次执行的归属信息。
 
-Python 扩展面向 CPython 3.11 stable ABI 构建。Wheel 仍然与操作系统和 CPU 架构相关，
-但同一平台的一个 Wheel 可以供 CPython 3.11 及更高版本使用。压缩和取回期间会释放
-Python GIL。共享的 SQLite 状态沿用现有的同步 Stash 与统计实现，因此同一个 Runtime
-实例可以处理并发工具调用，无需全局归因变量。
+SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可见 marker 集合，Adapter
+把它保存在框架 Session 状态中，`retrieve` 只接受该集合中的 hash。宿主应用继续保存
+原始工具结果供 UI 和业务逻辑使用，只把复制后的模型可见文本传给 `after_tool_call`。
 
-## Runtime 契约
-
-构造函数可以接收显式数据目录。未提供时，Runtime 依次使用 `TOKENLESS_DATA_DIR` 和
-passwd 中的用户主目录，并遵循与 CLI 相同的路径策略。Stash marker 可以访问对应目录
-中的数据，因此每个用户或租户都应使用独立目录。
-
-`compress_response` 接收 JSON 字符串，返回包含以下字段的结构化结果：
-
-- 调用方应使用的输出，以及计算得到的压缩候选结果；
-- `applied`、`dry-run`、`no-savings` 或 `reversibility-unavailable` 状态；
-- 估算 Token 数、Stash 写入指标，以及无法生成可取回 marker 的截断次数。
-
-Python 绑定的 `require_reversible` 默认为 `True`。请求使用 Stash 但数据库无法打开或
-写入，或配置阈值无法容纳取回 marker 时，Runtime 返回原始响应，并报告
-`reversibility-unavailable`。这种 fail-open 行为避免宿主框架在不知情时接受无法
-恢复的截断结果。CLI 则保留现有语义：Stash
-失败后可以输出有损候选结果，并沿用原有告警。
-
-非法 JSON 和非法状态路径会返回显式错误。没有节省或可逆存储失败属于策略结果，
-不会抛出异常。取回接口接受 24 位十六进制哈希，或包含 Tokenless marker 的字符串，
-并原样返回存储的 UTF-8 Payload。
+非法输入、内置 RTK 缺失、挂载失败和工具重名会快速失败。压缩或单次命令改写失败属于
+可选优化失败，会告警并保留原值。候选只有严格更短时才会采用；Schema 和响应截断还必须
+能够恢复。
 
 ## 打包与验证
 
-`make python-wheel` 使用 Maturin 把 `anolisa-tokenless` 构建到 `target/wheels/`。自定义
-Cargo `python-release` profile 使用 unwind panic 语义，因为 Rust panic 不应终止嵌入
-它的解释器。`make test-python-runtime` 会在全新虚拟环境中安装 Wheel，并验证压缩、
-Unicode 原样取回、错误映射、并发调用和逐调用统计归因。
+`make python-wheel` 会构建固定版本 RTK，把它暂存为
+`anolisa_tokenless/_bin/rtk`，再生成 CPython 3.11 stable ABI 平台 Wheel。跨平台构建器
+可以通过 `PYTHON_RTK_BINARY` 指定为同一 Wheel 目标构建的 RTK 文件。
+`make test-python-runtime` 会在全新环境安装 Wheel，并在不依赖系统 RTK 的条件下验证
+四个生命周期。
 
-`python/agentscope/` 是独立的纯 Python Distribution，支持 AgentScope 1.0.11 至 1.0.x
-以及 AgentScope 2.0.x。稳定入口 `TokenlessAgentScope` 会选择两个生命周期后端之一：
-AgentScope 1.x 串接 Toolkit postprocessor，并把恢复绑定到 Agent memory；AgentScope 2.x
-在 Agent 构造阶段提供 middleware 和显式恢复 Tool。AgentScope 2.0.0 支持直接构造
-Agent；其 App 尚无 Agent middleware 或 Tool 注入能力，因此 App 集成从 2.0.1 开始。
-
-`make agentscope-wheel` 会把它构建到同一个 `target/wheels/` 输出目录；
-`make test-agentscope-integration` 会配合同版本的原生 Runtime Wheel，对 1.0.11、最新
-1.0.x、2.0.0、2.0.1 App 边界、2.0.3 Tool ABI 边界和最新 2.0.x 验证压缩及 byte-exact
-恢复。
-
-本仓库负责构建和测试两个 Python Distribution，但不会把它们发布到 PyPI。正式发布
-还需要发布流水线为每个受支持平台构建 Wheel，按发布策略签名或生成证明，再使用发布
-凭据上传。
-
-## 兼容性与演进
-
-Rust API 和 Python 包从 alpha 接口开始。运行在兼容 Python 进程内的新框架集成
-应依赖 Python API，而不是调用 CLI。现有 CLI 和 Hook 集成仍受支持，无需迁移。
-
-AgentScope 包负责流式 Block 保真、生命周期挂载和模型可见状态提取。Python Runtime 包
-负责公共压缩模式、工具策略、类型/节省检查和 marker 授权。该边界把补丁版本差异限制在
-框架包内，并让未来框架集成复用同一公共策略。
+`anolisa-tokenless-agentscope` 支持 AgentScope 1.0.11 至 1.0.x 和 2.0.x。1.x Adapter
+使用 Tokenless Toolkit、模型代理和公开的实例 Hook；2.x Adapter 使用 `on_model_call`
+和 `on_acting`。2.0.0 在配对的 Middleware/Tool 中保存 marker，后续版本还会把它持久化
+到 `AgentState.middle_context`。两者都开放完整 SDK；2.0.0 支持直接构造 Agent，App
+集成从 2.0.1 开始。
