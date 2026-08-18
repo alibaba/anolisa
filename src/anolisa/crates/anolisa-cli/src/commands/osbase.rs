@@ -1,15 +1,16 @@
-use std::os::unix::net::UnixStream;
+use std::path::Path;
 
 use clap::{Parser, Subcommand};
 
 use anolisa_core::osbase_install::{
     self, OsbaseDomain, OsbaseInstallError, OsbaseInstallRequest, RegisterHandler,
 };
-use anolisa_core::system_helper::{HelperRequest, HelperResponse};
-use anolisa_platform::ipc::{SYSTEM_HELPER_SOCKET, recv_message, send_message};
+use anolisa_core::system_helper::HelperRequest;
+use anolisa_platform::ipc::SYSTEM_HELPER_SOCKET;
 use anolisa_platform::privilege;
 
 use crate::context::CliContext;
+use crate::helper_client::{HelperClient, HelperClientError};
 use crate::response::{CliError, render_json};
 
 #[derive(Parser)]
@@ -187,10 +188,10 @@ fn handle_sandbox(command: SandboxCommands, ctx: &CliContext) -> Result<(), CliE
             no_verify,
         } => handle_sandbox_install(ctx, mode, target, dry_run, force, no_verify),
         SandboxCommands::Uninstall { scenario, dry_run } => match mode {
-            ExecutionMode::ViaHelper(mut stream) => {
+            ExecutionMode::ViaHelper(mut client) => {
                 eprintln!("[osbase] scenario: {scenario}");
                 let req = HelperRequest::OsbaseUninstall { scenario, dry_run };
-                send_helper_request(&mut stream, &req, "osbase sandbox uninstall")
+                send_helper_request(&mut client, &req, "osbase sandbox uninstall")
             }
             ExecutionMode::Direct => {
                 match osbase_install::execute_uninstall(&scenario, dry_run) {
@@ -203,12 +204,12 @@ fn handle_sandbox(command: SandboxCommands, ctx: &CliContext) -> Result<(), CliE
             }
         },
         SandboxCommands::Remove { target, purge, .. } => match mode {
-            ExecutionMode::ViaHelper(mut stream) => {
+            ExecutionMode::ViaHelper(mut client) => {
                 let req = HelperRequest::OsbaseRemove {
                     scenario: target,
                     purge,
                 };
-                send_helper_request(&mut stream, &req, "osbase sandbox remove")
+                send_helper_request(&mut client, &req, "osbase sandbox remove")
             }
             ExecutionMode::Direct => Err(CliError::not_implemented(format!(
                 "osbase sandbox remove {target}"
@@ -216,9 +217,9 @@ fn handle_sandbox(command: SandboxCommands, ctx: &CliContext) -> Result<(), CliE
         },
         SandboxCommands::List { .. } => unreachable!(),
         SandboxCommands::Status { target, .. } => match mode {
-            ExecutionMode::ViaHelper(mut stream) => {
+            ExecutionMode::ViaHelper(mut client) => {
                 let req = HelperRequest::OsbaseStatus { scenario: target };
-                send_helper_request(&mut stream, &req, "osbase sandbox status")
+                send_helper_request(&mut client, &req, "osbase sandbox status")
             }
             ExecutionMode::Direct => Err(CliError::not_implemented("osbase sandbox status")),
         },
@@ -234,7 +235,7 @@ fn handle_sandbox_install(
     no_verify: bool,
 ) -> Result<(), CliError> {
     match mode {
-        ExecutionMode::ViaHelper(mut stream) => {
+        ExecutionMode::ViaHelper(mut client) => {
             let req = HelperRequest::OsbaseInstall {
                 scenario: target.clone(),
                 register_handler: "none".to_string(),
@@ -246,7 +247,7 @@ fn handle_sandbox_install(
                 dry_run: dry_run || ctx.dry_run,
             };
             eprintln!("[osbase] scenario: {target}");
-            send_helper_request(&mut stream, &req, "osbase sandbox install")
+            send_helper_request(&mut client, &req, "osbase sandbox install")
         }
         ExecutionMode::Direct => {
             let request = OsbaseInstallRequest {
@@ -338,57 +339,51 @@ fn handle_sandbox_list(json: bool) -> Result<(), CliError> {
 // ===========================================================================
 
 /// Execution path for osbase operations.
-pub enum ExecutionMode {
+enum ExecutionMode {
     /// Proxy execution via the privileged system-helper daemon.
-    ViaHelper(UnixStream),
+    ViaHelper(HelperClient),
     /// Direct execution (process already has root privileges).
     Direct,
 }
 
 fn osbase_preflight() -> Result<ExecutionMode, CliError> {
+    osbase_preflight_with(
+        || HelperClient::connect(Path::new(SYSTEM_HELPER_SOCKET)),
+        privilege::is_root(),
+    )
+}
+
+fn osbase_preflight_with<F>(connect: F, is_root: bool) -> Result<ExecutionMode, CliError>
+where
+    F: FnOnce() -> Result<HelperClient, HelperClientError>,
+{
     // 1. Try connecting to the system-helper socket.
-    match UnixStream::connect(SYSTEM_HELPER_SOCKET) {
-        Ok(mut stream) => {
+    match connect() {
+        Ok(mut client) => {
             // Perform version handshake.
-            let req = HelperRequest::Handshake {
-                cli_version: env!("CARGO_PKG_VERSION").to_string(),
-            };
-            send_message(&mut stream, &req).map_err(|e| CliError::Runtime {
-                command: "osbase".to_string(),
-                reason: format!("failed to send handshake to system-helper: {e}"),
-            })?;
-            let resp: HelperResponse =
-                recv_message(&mut stream).map_err(|e| CliError::Runtime {
+            let handshake = client
+                .handshake(env!("CARGO_PKG_VERSION"))
+                .map_err(|error| CliError::Runtime {
                     command: "osbase".to_string(),
-                    reason: format!("failed to receive handshake from system-helper: {e}"),
+                    reason: preflight_handshake_error(error),
                 })?;
-            match resp {
-                HelperResponse::HandshakeOk {
-                    compatible,
-                    helper_version,
-                } => {
-                    if !compatible {
-                        let cli_version = env!("CARGO_PKG_VERSION");
-                        return Err(CliError::Runtime {
-                            command: "osbase".to_string(),
-                            reason: format!(
-                                "anolisa-system-helper version mismatch \
-                                 (installed: {helper_version}, required: {cli_version}); \
-                                 run 'sudo anolisa system setup' to upgrade"
-                            ),
-                        });
-                    }
-                    Ok(ExecutionMode::ViaHelper(stream))
-                }
-                _ => Err(CliError::Runtime {
+            if !handshake.compatible {
+                let cli_version = env!("CARGO_PKG_VERSION");
+                return Err(CliError::Runtime {
                     command: "osbase".to_string(),
-                    reason: "system-helper returned unexpected handshake response".to_string(),
-                }),
+                    reason: format!(
+                        "anolisa-system-helper version mismatch \
+                         (installed: {}, required: {cli_version}); \
+                         run 'sudo anolisa system setup' to upgrade",
+                        handshake.helper_version
+                    ),
+                });
             }
+            Ok(ExecutionMode::ViaHelper(client))
         }
         Err(_) => {
             // 2. Socket not available — check if we already have root.
-            if privilege::is_root() {
+            if is_root {
                 Ok(ExecutionMode::Direct)
             } else {
                 // 3. Non-root + no helper → actionable error.
@@ -409,59 +404,77 @@ fn osbase_preflight() -> Result<ExecutionMode, CliError> {
     }
 }
 
+fn preflight_handshake_error(error: HelperClientError) -> String {
+    match error {
+        HelperClientError::Send { source, .. } => {
+            format!("failed to send handshake to system-helper: {source}")
+        }
+        HelperClientError::Receive { source, .. } => {
+            format!("failed to receive handshake from system-helper: {source}")
+        }
+        HelperClientError::Remote { .. } | HelperClientError::UnexpectedResponse { .. } => {
+            "system-helper returned unexpected handshake response".to_string()
+        }
+        HelperClientError::Connect { path, source } => {
+            format!("failed to connect to {}: {source}", path.display())
+        }
+    }
+}
+
 // ===========================================================================
 // Helper IPC utilities
 // ===========================================================================
 
 fn send_helper_request(
-    stream: &mut UnixStream,
+    client: &mut HelperClient,
     req: &HelperRequest,
     command_label: &str,
 ) -> Result<(), CliError> {
-    send_message(stream, req).map_err(|e| CliError::Runtime {
+    let outcome = client.execute(req).map_err(|error| CliError::Runtime {
         command: command_label.to_string(),
-        reason: format!("failed to send request to system-helper: {e}"),
+        reason: helper_operation_error(error),
     })?;
 
-    let resp: HelperResponse = recv_message(stream).map_err(|e| CliError::Runtime {
-        command: command_label.to_string(),
-        reason: format!("failed to receive response from system-helper: {e}"),
-    })?;
-
-    match resp {
-        HelperResponse::Success { message, exit_code } => {
-            if exit_code == 0 || exit_code == 2 {
-                // exit_code 0 = full success, 2 = degraded (non-fatal
-                // verify/state warnings). Both are reported as success;
-                // the core already printed diagnostics to stderr.
-                for line in message.lines() {
-                    eprintln!("[osbase] {line}");
-                }
-                if exit_code == 2 {
-                    eprintln!("[osbase] install completed with degraded status (non-fatal)");
-                }
-                Ok(())
-            } else {
-                // exit_code = 1 → phase failure.  Print the phase summary
-                // (from the helper response) before reporting the error so
-                // the user sees which phases passed and which failed.
-                for line in message.lines() {
-                    eprintln!("[osbase] {line}");
-                }
-                Err(CliError::Runtime {
-                    command: command_label.to_string(),
-                    reason: format!("install failed (exit_code={exit_code})"),
-                })
-            }
+    if outcome.exit_code == 0 || outcome.exit_code == 2 {
+        // exit_code 0 = full success, 2 = degraded (non-fatal
+        // verify/state warnings). Both are reported as success;
+        // the core already printed diagnostics to stderr.
+        for line in outcome.message.lines() {
+            eprintln!("[osbase] {line}");
         }
-        HelperResponse::Error { code, message } => Err(CliError::Runtime {
+        if outcome.exit_code == 2 {
+            eprintln!("[osbase] install completed with degraded status (non-fatal)");
+        }
+        Ok(())
+    } else {
+        // exit_code = 1 → phase failure.  Print the phase summary
+        // (from the helper response) before reporting the error so
+        // the user sees which phases passed and which failed.
+        for line in outcome.message.lines() {
+            eprintln!("[osbase] {line}");
+        }
+        Err(CliError::Runtime {
             command: command_label.to_string(),
-            reason: format!("[{code}] {message}"),
-        }),
-        other => Err(CliError::Runtime {
-            command: command_label.to_string(),
-            reason: format!("unexpected response from system-helper: {other:?}"),
-        }),
+            reason: format!("install failed (exit_code={})", outcome.exit_code),
+        })
+    }
+}
+
+fn helper_operation_error(error: HelperClientError) -> String {
+    match error {
+        HelperClientError::Send { source, .. } => {
+            format!("failed to send request to system-helper: {source}")
+        }
+        HelperClientError::Receive { source, .. } => {
+            format!("failed to receive response from system-helper: {source}")
+        }
+        HelperClientError::Remote { code, message, .. } => format!("[{code}] {message}"),
+        HelperClientError::UnexpectedResponse { response, .. } => {
+            format!("unexpected response from system-helper: {response:?}")
+        }
+        HelperClientError::Connect { path, source } => {
+            format!("failed to connect to {}: {source}", path.display())
+        }
     }
 }
 
@@ -482,5 +495,123 @@ fn map_osbase_err(err: OsbaseInstallError, action: &str, target: &str) -> CliErr
             command,
             reason: err.to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::path::PathBuf;
+
+    use anolisa_core::system_helper::HelperResponse;
+
+    use super::*;
+    use crate::helper_client::ScriptedTransport;
+
+    fn client_with_responses(responses: Vec<HelperResponse>) -> HelperClient {
+        let (transport, _) =
+            ScriptedTransport::new(Vec::new(), responses.into_iter().map(Ok).collect());
+        HelperClient::with_transport(transport)
+    }
+
+    fn connect_error() -> HelperClientError {
+        HelperClientError::Connect {
+            path: PathBuf::from(SYSTEM_HELPER_SOCKET),
+            source: io::Error::new(io::ErrorKind::NotFound, "missing helper socket"),
+        }
+    }
+
+    #[test]
+    fn preflight_preserves_root_fallback_when_connection_fails() {
+        let root = osbase_preflight_with(|| Err(connect_error()), true).expect("root fallback");
+        assert!(matches!(root, ExecutionMode::Direct));
+
+        let error = match osbase_preflight_with(|| Err(connect_error()), false) {
+            Ok(_) => panic!("non-root connection failure must not fall back"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, CliError::PermissionDenied { .. }));
+    }
+
+    #[test]
+    fn preflight_preserves_handshake_compatibility() {
+        let compatible = client_with_responses(vec![HelperResponse::HandshakeOk {
+            helper_version: env!("CARGO_PKG_VERSION").to_string(),
+            compatible: true,
+        }]);
+        let mode = osbase_preflight_with(|| Ok(compatible), false).expect("compatible helper");
+        assert!(matches!(mode, ExecutionMode::ViaHelper(_)));
+
+        let incompatible = client_with_responses(vec![HelperResponse::HandshakeOk {
+            helper_version: "0.0.1".to_string(),
+            compatible: false,
+        }]);
+        let error = match osbase_preflight_with(|| Ok(incompatible), false) {
+            Ok(_) => panic!("incompatible helper must fail"),
+            Err(error) => error,
+        };
+        match error {
+            CliError::Runtime { reason, .. } => {
+                assert!(reason.contains("version mismatch"));
+                assert!(reason.contains("0.0.1"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn helper_operation_preserves_success_degraded_and_failure_codes() {
+        for (exit_code, succeeds) in [(0, true), (2, true), (1, false)] {
+            let mut client = client_with_responses(vec![HelperResponse::Success {
+                message: "phase summary".to_string(),
+                exit_code,
+            }]);
+
+            let result = send_helper_request(
+                &mut client,
+                &HelperRequest::OsbaseStatus { scenario: None },
+                "osbase sandbox status",
+            );
+
+            assert_eq!(result.is_ok(), succeeds, "exit code {exit_code}");
+            if let Err(CliError::Runtime { reason, .. }) = result {
+                assert_eq!(reason, "install failed (exit_code=1)");
+            }
+        }
+    }
+
+    #[test]
+    fn helper_operation_maps_remote_and_unexpected_responses() {
+        let cases = [
+            (
+                HelperResponse::Error {
+                    code: "DENIED".to_string(),
+                    message: "no access".to_string(),
+                },
+                "[DENIED] no access",
+            ),
+            (
+                HelperResponse::HandshakeOk {
+                    helper_version: "0.3.2".to_string(),
+                    compatible: true,
+                },
+                "unexpected response from system-helper",
+            ),
+        ];
+
+        for (response, expected) in cases {
+            let mut client = client_with_responses(vec![response]);
+            let error = send_helper_request(
+                &mut client,
+                &HelperRequest::OsbaseStatus { scenario: None },
+                "osbase sandbox status",
+            )
+            .expect_err("response must fail");
+
+            match error {
+                CliError::Runtime { reason, .. } => assert!(reason.contains(expected)),
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
     }
 }

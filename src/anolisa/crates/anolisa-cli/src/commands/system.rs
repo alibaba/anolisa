@@ -8,7 +8,6 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -18,13 +17,13 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 use anolisa_core::daemon_server::DaemonServer;
-use anolisa_core::system_helper::{HelperRequest, HelperResponse};
 use anolisa_platform::fs_layout::FsLayout;
-use anolisa_platform::ipc::{self, SYSTEM_HELPER_SOCKET};
+use anolisa_platform::ipc::SYSTEM_HELPER_SOCKET;
 use anolisa_platform::privilege;
 use anolisa_platform::systemd::{Systemd, SystemdError};
 
 use crate::context::CliContext;
+use crate::helper_client::{HandshakeResult, HelperClient, HelperClientError, HelperStatus};
 use crate::response::{self, CliError};
 
 #[derive(Parser)]
@@ -403,41 +402,46 @@ fn verify_socket(cmd: &str) -> Result<(), CliError> {
         });
     }
 
-    // Try a handshake to validate the daemon is responding.
-    let mut stream =
-        std::os::unix::net::UnixStream::connect(SYSTEM_HELPER_SOCKET).map_err(|e| {
-            CliError::Runtime {
-                command: cmd.to_string(),
-                reason: format!("failed to connect to {SYSTEM_HELPER_SOCKET}: {e}"),
-            }
+    verify_helper_connection(cmd, || HelperClient::connect(socket_path))
+}
+
+fn verify_helper_connection<F>(cmd: &str, connect: F) -> Result<(), CliError>
+where
+    F: FnOnce() -> Result<HelperClient, HelperClientError>,
+{
+    let mut client = connect().map_err(|error| CliError::Runtime {
+        command: cmd.to_string(),
+        reason: verify_connection_error(error),
+    })?;
+    let handshake = client
+        .handshake(env!("CARGO_PKG_VERSION"))
+        .map_err(|error| CliError::Runtime {
+            command: cmd.to_string(),
+            reason: verify_connection_error(error),
         })?;
-
-    let handshake = HelperRequest::Handshake {
-        cli_version: env!("CARGO_PKG_VERSION").to_string(),
-    };
-    ipc::send_message(&mut stream, &handshake).map_err(|e| CliError::Runtime {
-        command: cmd.to_string(),
-        reason: format!("handshake send failed: {e}"),
-    })?;
-
-    let resp: HelperResponse = ipc::recv_message(&mut stream).map_err(|e| CliError::Runtime {
-        command: cmd.to_string(),
-        reason: format!("handshake recv failed: {e}"),
-    })?;
-
-    match resp {
-        HelperResponse::HandshakeOk { compatible, .. } if compatible => {
-            eprintln!("[setup] handshake verified — helper is operational");
-            Ok(())
-        }
-        HelperResponse::HandshakeOk { compatible, .. } if !compatible => Err(CliError::Runtime {
+    if !handshake.compatible {
+        return Err(CliError::Runtime {
             command: cmd.to_string(),
             reason: "handshake succeeded but version is incompatible".to_string(),
-        }),
-        other => Err(CliError::Runtime {
-            command: cmd.to_string(),
-            reason: format!("unexpected handshake response: {other:?}"),
-        }),
+        });
+    }
+    eprintln!("[setup] handshake verified — helper is operational");
+    Ok(())
+}
+
+fn verify_connection_error(error: HelperClientError) -> String {
+    match error {
+        HelperClientError::Connect { path, source } => {
+            format!("failed to connect to {}: {source}", path.display())
+        }
+        HelperClientError::Send { source, .. } => format!("handshake send failed: {source}"),
+        HelperClientError::Receive { source, .. } => format!("handshake recv failed: {source}"),
+        HelperClientError::Remote { code, message, .. } => format!(
+            "unexpected handshake response: Error {{ code: {code:?}, message: {message:?} }}"
+        ),
+        HelperClientError::UnexpectedResponse { response, .. } => {
+            format!("unexpected handshake response: {response:?}")
+        }
     }
 }
 
@@ -575,27 +579,37 @@ fn handle_status(json: bool, ctx: &CliContext) -> Result<(), CliError> {
     let socket_exists = Path::new(SYSTEM_HELPER_SOCKET).exists();
 
     // 3. Try connect + handshake + SystemStatus.
-    let (socket_connectable, handshake_info, status_info) = if socket_exists {
+    let connection = if socket_exists {
         try_status_connection(&cli_version)
     } else {
-        (false, None, None)
+        HelperConnectionStatus::disconnected()
     };
 
     // Derive fields.
-    let helper_version = handshake_info.as_ref().map(|(v, _)| v.clone());
-    let version_compatible = handshake_info
+    let helper_version = connection
+        .handshake
         .as_ref()
-        .map(|(_, compat)| *compat)
+        .map(|handshake| handshake.helper_version.clone());
+    let version_compatible = connection
+        .handshake
+        .as_ref()
+        .map(|handshake| handshake.compatible)
         .unwrap_or(false);
 
-    let uptime_secs = status_info.as_ref().map(|s| s.0);
-    let last_operation = status_info.as_ref().and_then(|s| s.1.clone());
-    let last_operation_time = status_info.as_ref().and_then(|s| s.2.clone());
+    let uptime_secs = connection.status.as_ref().map(|status| status.uptime_secs);
+    let last_operation = connection
+        .status
+        .as_ref()
+        .and_then(|status| status.last_operation.clone());
+    let last_operation_time = connection
+        .status
+        .as_ref()
+        .and_then(|status| status.last_operation_time.clone());
 
     let report = StatusReport {
         service_active: service_state == StatusServiceState::Active,
         socket_exists,
-        socket_connectable,
+        socket_connectable: connection.connectable,
         helper_version: helper_version.clone(),
         cli_version: cli_version.clone(),
         version_compatible,
@@ -612,7 +626,7 @@ fn handle_status(json: bool, ctx: &CliContext) -> Result<(), CliError> {
     print_status_human(
         &service_state,
         socket_exists,
-        socket_connectable,
+        connection.connectable,
         helper_version.as_deref(),
         &cli_version,
         version_compatible,
@@ -663,57 +677,61 @@ fn check_service_state() -> StatusServiceState {
     }
 }
 
-/// Handshake result: (helper_version, compatible)
-type HandshakeInfo = (String, bool);
-/// Status info: (uptime_secs, last_operation, last_operation_time)
-type StatusInfo = (u64, Option<String>, Option<String>);
+#[derive(Debug)]
+struct HelperConnectionStatus {
+    connectable: bool,
+    handshake: Option<HandshakeResult>,
+    status: Option<HelperStatus>,
+}
+
+impl HelperConnectionStatus {
+    fn disconnected() -> Self {
+        Self {
+            connectable: false,
+            handshake: None,
+            status: None,
+        }
+    }
+}
 
 /// Attempt to connect to the helper socket, perform handshake, and query
-/// system status. Returns (connectable, handshake_info, status_info).
-fn try_status_connection(cli_version: &str) -> (bool, Option<HandshakeInfo>, Option<StatusInfo>) {
-    let mut stream = match UnixStream::connect(SYSTEM_HELPER_SOCKET) {
-        Ok(s) => s,
-        Err(_) => return (false, None, None),
+/// system status while retaining partial typed evidence.
+fn try_status_connection(cli_version: &str) -> HelperConnectionStatus {
+    try_status_connection_with(cli_version, || {
+        HelperClient::connect(Path::new(SYSTEM_HELPER_SOCKET))
+    })
+}
+
+fn try_status_connection_with<F>(cli_version: &str, connect: F) -> HelperConnectionStatus
+where
+    F: FnOnce() -> Result<HelperClient, HelperClientError>,
+{
+    let mut client = match connect() {
+        Ok(client) => client,
+        Err(_) => return HelperConnectionStatus::disconnected(),
     };
 
-    // Handshake.
-    let handshake_req = HelperRequest::Handshake {
-        cli_version: cli_version.to_string(),
+    let handshake = match client.handshake(cli_version) {
+        Ok(handshake) => handshake,
+        Err(_) => {
+            return HelperConnectionStatus {
+                connectable: true,
+                handshake: None,
+                status: None,
+            };
+        }
     };
-    if ipc::send_message(&mut stream, &handshake_req).is_err() {
-        return (true, None, None);
+
+    let status = if handshake.compatible {
+        client.system_status().ok()
+    } else {
+        None
+    };
+    HelperConnectionStatus {
+        connectable: true,
+        handshake: Some(handshake),
+        status,
     }
-    let handshake_resp: HelperResponse = match ipc::recv_message(&mut stream) {
-        Ok(r) => r,
-        Err(_) => return (true, None, None),
-    };
-    let handshake_info = match &handshake_resp {
-        HelperResponse::HandshakeOk {
-            helper_version,
-            compatible,
-        } => Some((helper_version.clone(), *compatible)),
-        _ => None,
-    };
-
-    // SystemStatus query.
-    if ipc::send_message(&mut stream, &HelperRequest::SystemStatus).is_err() {
-        return (true, handshake_info, None);
-    }
-    let status_resp: HelperResponse = match ipc::recv_message(&mut stream) {
-        Ok(r) => r,
-        Err(_) => return (true, handshake_info, None),
-    };
-    let status_info = match status_resp {
-        HelperResponse::Status {
-            uptime_secs,
-            last_operation,
-            last_operation_time,
-            ..
-        } => Some((uptime_secs, last_operation, last_operation_time)),
-        _ => None,
-    };
-
-    (true, handshake_info, status_info)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -777,5 +795,167 @@ fn format_status_uptime(secs: u64) -> String {
         format!("{hours}h {mins:02}m")
     } else {
         format!("{mins}m")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use anolisa_core::system_helper::HelperResponse;
+
+    use super::*;
+    use crate::helper_client::ScriptedTransport;
+
+    fn client_with_responses(responses: Vec<HelperResponse>) -> HelperClient {
+        let (transport, _) =
+            ScriptedTransport::new(Vec::new(), responses.into_iter().map(Ok).collect());
+        HelperClient::with_transport(transport)
+    }
+
+    fn connect_error() -> HelperClientError {
+        HelperClientError::Connect {
+            path: PathBuf::from(SYSTEM_HELPER_SOCKET),
+            source: io::Error::new(io::ErrorKind::ConnectionRefused, "not listening"),
+        }
+    }
+
+    #[test]
+    fn setup_verification_uses_typed_handshake_result() {
+        let compatible = client_with_responses(vec![HelperResponse::HandshakeOk {
+            helper_version: env!("CARGO_PKG_VERSION").to_string(),
+            compatible: true,
+        }]);
+        verify_helper_connection("system setup", || Ok(compatible)).expect("compatible helper");
+
+        let incompatible = client_with_responses(vec![HelperResponse::HandshakeOk {
+            helper_version: "0.0.1".to_string(),
+            compatible: false,
+        }]);
+        let error = verify_helper_connection("system setup", || Ok(incompatible))
+            .expect_err("incompatible helper");
+        match error {
+            CliError::Runtime { reason, .. } => {
+                assert_eq!(reason, "handshake succeeded but version is incompatible");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn setup_verification_preserves_unexpected_response_messages() {
+        let cases = [
+            (
+                HelperResponse::Error {
+                    code: "DENIED".to_string(),
+                    message: "no access".to_string(),
+                },
+                "unexpected handshake response: Error { code: \"DENIED\", message: \"no access\" }",
+            ),
+            (
+                HelperResponse::Success {
+                    message: "wrong response".to_string(),
+                    exit_code: 0,
+                },
+                "unexpected handshake response: Success { message: \"wrong response\", exit_code: 0 }",
+            ),
+        ];
+
+        for (response, expected) in cases {
+            let client = client_with_responses(vec![response]);
+            let error = verify_helper_connection("system setup", || Ok(client))
+                .expect_err("unexpected response");
+
+            match error {
+                CliError::Runtime { reason, .. } => assert_eq!(reason, expected),
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn status_marks_connection_failure_as_not_connectable() {
+        let result = try_status_connection_with("0.3.2", || Err(connect_error()));
+
+        assert!(!result.connectable);
+        assert!(result.handshake.is_none());
+        assert!(result.status.is_none());
+    }
+
+    #[test]
+    fn status_retains_connectability_when_handshake_fails() {
+        let (transport, _) = ScriptedTransport::new(
+            vec![Err(io::Error::new(io::ErrorKind::BrokenPipe, "send"))],
+            Vec::new(),
+        );
+        let client = HelperClient::with_transport(transport);
+
+        let result = try_status_connection_with("0.3.2", || Ok(client));
+
+        assert!(result.connectable);
+        assert!(result.handshake.is_none());
+        assert!(result.status.is_none());
+    }
+
+    #[test]
+    fn status_skips_query_for_incompatible_helper() {
+        let client = client_with_responses(vec![HelperResponse::HandshakeOk {
+            helper_version: "0.0.1".to_string(),
+            compatible: false,
+        }]);
+
+        let result = try_status_connection_with("0.3.2", || Ok(client));
+
+        assert!(result.connectable);
+        let handshake = result.handshake.expect("handshake evidence");
+        assert_eq!(handshake.helper_version, "0.0.1");
+        assert!(!handshake.compatible);
+        assert!(result.status.is_none());
+    }
+
+    #[test]
+    fn status_retains_handshake_when_status_query_fails() {
+        let client = client_with_responses(vec![
+            HelperResponse::HandshakeOk {
+                helper_version: "0.3.2".to_string(),
+                compatible: true,
+            },
+            HelperResponse::Error {
+                code: "UNAVAILABLE".to_string(),
+                message: "status unavailable".to_string(),
+            },
+        ]);
+
+        let result = try_status_connection_with("0.3.2", || Ok(client));
+
+        assert!(result.connectable);
+        assert!(result.handshake.expect("handshake evidence").compatible);
+        assert!(result.status.is_none());
+    }
+
+    #[test]
+    fn status_returns_complete_typed_evidence() {
+        let client = client_with_responses(vec![
+            HelperResponse::HandshakeOk {
+                helper_version: "0.3.2".to_string(),
+                compatible: true,
+            },
+            HelperResponse::Status {
+                running: true,
+                version: "0.3.2".to_string(),
+                uptime_secs: 75,
+                last_operation: Some("install".to_string()),
+                last_operation_time: Some("now".to_string()),
+            },
+        ]);
+
+        let result = try_status_connection_with("0.3.2", || Ok(client));
+
+        assert!(result.connectable);
+        assert!(result.handshake.expect("handshake evidence").compatible);
+        let status = result.status.expect("status evidence");
+        assert_eq!(status.uptime_secs, 75);
+        assert_eq!(status.last_operation.as_deref(), Some("install"));
+        assert_eq!(status.last_operation_time.as_deref(), Some("now"));
     }
 }
