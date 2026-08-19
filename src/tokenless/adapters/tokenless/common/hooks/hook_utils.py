@@ -47,7 +47,7 @@ _RTK_LOCAL_SHARE = _user_path(
 )
 _RTK_LOCAL_LIB = _user_path(".local", "lib", "anolisa", "tokenless", "rtk")
 
-_TOKENLESS_HELPER_BINARIES = frozenset({"rtk", "toon"})
+_TOKENLESS_HELPER_BINARIES = frozenset({"rtk"})
 
 
 def _known_binary_paths(name: str, home: str | None = None) -> tuple[str, ...]:

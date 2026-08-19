@@ -7,7 +7,7 @@
 Token-Less combines complementary strategies to minimize LLM token consumption:
 
 - **Schema & Response Compression** — Compresses OpenAI Function Calling tool definitions and API responses via the `tokenless-schema` library, cutting structural overhead before tokens ever reach the context window.
-- **TOON Context Compression** — Encodes JSON responses to TOON (Token-Oriented Object Notation) format via the `toon` binary, reducing token usage by 15-40% for structured data.
+- **TOON Context Compression** — Encodes JSON responses to TOON (Token-Oriented Object Notation) format via the `toon-format` library linked into `tokenless`, reducing token usage by 15-40% for structured data.
 - **Command Rewriting** — Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI command output, eliminating noise that would otherwise waste 60–90% of tokens.
 - **Tool Ready (legacy, hard-disabled)** — Its pre-call dependency checks are retained in source but unconditionally bypassed while the readiness model is redesigned.
 
@@ -119,7 +119,7 @@ Token-Less/
 Install the published component with the ANOLISA CLI:
 
 The install script places `anolisa` in `~/.local/bin`, and a user-mode
-Tokenless installation places `tokenless`, `rtk`, and `toon` in that same
+Tokenless installation places `tokenless` and `rtk` in that same
 directory. Export it once if the current shell has not picked it up yet.
 
 ```bash
@@ -180,8 +180,8 @@ cd Token-Less
 make setup
 ```
 
-The source setup installs `tokenless` to `~/.local/bin`, places the `rtk` and
-`toon` helpers alongside it, and deploys all adapters for development.
+The source setup installs `tokenless` to `~/.local/bin`, places the `rtk`
+helper alongside it, and deploys all adapters for development.
 
 ### Build the Python runtime
 
@@ -673,9 +673,8 @@ transformed. Tool Ready remains hard-disabled.
 
 | Target | Description |
 |---|---|
-| `make build` | Build `tokenless` + `rtk` + `toon` (release mode) |
+| `make build` | Build `tokenless` + `rtk` (release mode) |
 | `make build-tokenless` | Build `tokenless` + `rtk` (via justfile) |
-| `make build-toon` | Install TOON binary via `cargo install toon-format` |
 | `make python-wheel` | Build the native `anolisa-tokenless` wheel |
 | `make agentscope-wheel` | Build the pure-Python AgentScope integration wheel |
 | `make test-python-runtime` | Install and test the wheel in an isolated environment |
@@ -713,7 +712,7 @@ make install BIN_DIR=/usr/local/bin
 
 ## Raw Packaging
 
-Raw packaging accepts already-built `tokenless`, `rtk`, and `toon`
+Raw packaging accepts already-built `tokenless` and `rtk`
 executables in one directory and applies the stable component payload layout:
 
 ```bash

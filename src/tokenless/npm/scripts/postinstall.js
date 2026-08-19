@@ -17,8 +17,8 @@
  * Platform packages follow the naming convention:
  *   @anolisa/tokenless-{os}-{arch}
  *
- * Each platform package ships three native binaries:
- *   bin/tokenless, bin/rtk, bin/toon
+ * Each platform package ships two native binaries:
+ *   bin/tokenless, bin/rtk
  *
  * Exit codes: on a supported platform, a missing platform package or a
  * missing binary is a hard failure (non-zero exit) so `npm install` fails
@@ -47,7 +47,7 @@ const require = createRequire(import.meta.url);
 const packageRoot = join(__dirname, '..');
 const binDir = join(packageRoot, 'bin');
 
-const BINARIES = ['tokenless', 'rtk', 'toon'];
+const BINARIES = ['tokenless', 'rtk'];
 
 // Map Node.js platform/arch to package names
 const PLATFORM_MAP = {

@@ -37,7 +37,7 @@ assert_not_empty() {
 # ========== 环境检查 ==========
 section "环境检查"
 
-for cmd in toon tokenless jq openclaw; do
+for cmd in tokenless jq openclaw; do
     if command -v "$cmd" &>/dev/null; then
         version=$("$cmd" --version 2>/dev/null || echo "installed")
         pass "$cmd 可用 ($version)"
@@ -168,34 +168,15 @@ assert_contains "$result" "items[0]" "空数组编码"
 scenario "1.6 文件输入/输出"
 
 echo '{"from":"file","value":42}' > /tmp/toon_file_test.json
-result=$(toon /tmp/toon_file_test.json 2>/dev/null)
+result=$(tokenless compress-toon -f /tmp/toon_file_test.json 2>/dev/null)
 assert_contains "$result" "from: file" "文件输入编码"
 
-toon -e -o /tmp/toon_file_output.toon /tmp/toon_file_test.json 2>/dev/null
+tokenless compress-toon -f /tmp/toon_file_test.json > /tmp/toon_file_output.toon 2>/dev/null
 result=$(cat /tmp/toon_file_output.toon 2>/dev/null)
 assert_contains "$result" "from: file" "文件输出编码"
 rm -f /tmp/toon_file_test.json /tmp/toon_file_output.toon
 
-scenario "1.7 高级选项"
-
-# --stats
-result=$(echo '{"a":{"b":{"c":[1,2,3,4,5]}}}' | toon -e --stats 2>&1)
-assert_contains "$result" "Tokens" "--stats 输出"
-assert_contains "$result" "Savings" "--stats 压缩率"
-
-# --fold-keys
-result=$(echo '{"a":{"b":{"c":42}}}' | toon -e --fold-keys 2>/dev/null)
-assert_contains "$result" "a.b.c" "--fold-keys 路径折叠"
-
-# --delimiter pipe
-result=$(echo '{"items":["x","y","z"]}' | toon -e --delimiter pipe 2>/dev/null)
-assert_contains "$result" "|" "pipe 分隔符"
-
-# --delimiter tab
-result=$(echo '{"items":["x","y","z"]}' | toon -e --delimiter tab 2>/dev/null)
-assert_contains "$result" "	" "tab 分隔符"
-
-scenario "1.8 往返转换完整性"
+scenario "1.7 往返转换完整性"
 
 python3 -c "
 import json, subprocess, sys
@@ -213,11 +194,23 @@ all_passed = True
 for i, case in enumerate(test_cases):
     original = json.dumps(case, sort_keys=True)
     # Encode
-    p1 = subprocess.run(['toon', '-e'], input=original, capture_output=True, text=True)
+    p1 = subprocess.run(['tokenless', 'compress-toon'], input=original, capture_output=True, text=True)
     toon_out = p1.stdout.strip()
-    # Decode
-    p2 = subprocess.run(['toon', '-d'], input=toon_out, capture_output=True, text=True)
-    roundtrip = json.loads(p2.stdout)
+    if p1.returncode != 0 or not toon_out:
+        print(f'Case {i} ENCODE FAILED (exit {p1.returncode}): {p1.stderr.strip()}', file=sys.stderr)
+        all_passed = False
+        continue
+    # compress-toon falls back to the original JSON when TOON offers no
+    # savings; that passthrough still round-trips by definition.
+    try:
+        roundtrip = json.loads(toon_out)
+    except ValueError:
+        p2 = subprocess.run(['tokenless', 'decompress-toon'], input=toon_out, capture_output=True, text=True)
+        if p2.returncode != 0 or not p2.stdout.strip():
+            print(f'Case {i} DECODE FAILED (exit {p2.returncode}): {p2.stderr.strip()}', file=sys.stderr)
+            all_passed = False
+            continue
+        roundtrip = json.loads(p2.stdout)
     roundtrip_json = json.dumps(roundtrip, sort_keys=True)
     if original != roundtrip_json:
         print(f'Case {i} MISMATCH: {original} vs {roundtrip_json}', file=sys.stderr)

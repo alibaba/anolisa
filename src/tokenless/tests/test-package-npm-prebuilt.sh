@@ -73,10 +73,10 @@ if target.startswith("linux-"):
 else:
     cpu = {"darwin-x64": 0x01000007, "darwin-arm64": 0x0100000C}[target]
     content = struct.pack("<IiiIIIII", 0xFEEDFACF, cpu, 0, 2, 0, 0, 0, 0)
-for name in ("tokenless", "rtk", "toon"):
+for name in ("tokenless", "rtk"):
     (root / name).write_bytes(content + f"\n{name}-{target}\n".encode())
 PY
-    chmod 0755 "$destination/tokenless" "$destination/rtk" "$destination/toon"
+    chmod 0755 "$destination/tokenless" "$destination/rtk"
 }
 
 for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
@@ -126,14 +126,14 @@ for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
     package="$ROOT/npm/dist/tokenless-$target"
     test -f "$package/package.json"
     test -f "$package"/*.tgz
-    for binary in tokenless rtk toon; do
+    for binary in tokenless rtk; do
         cmp "$PREBUILT/$target/$binary" "$package/bin/$binary"
         test "$(stat -c '%a' "$package/bin/$binary")" = 755
     done
 done
 
 # Platform packages must not declare bin entries: they would collide with
-# the root package's tokenless/rtk/toon bins, and npm resolves such
+# the root package's tokenless/rtk bins, and npm resolves such
 # collisions by removing every conflicting .bin link, leaving installs
 # without a tokenless executable. The root package's postinstall links its
 # bins to these platform binaries instead (esbuild's platform packages use
@@ -145,7 +145,7 @@ const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 if (manifest.bin !== undefined) {
   throw new Error(
     `${manifest.name} must not declare bin entries; ` +
-    'the root package owns the tokenless/rtk/toon bin names',
+    'the root package owns the tokenless/rtk bin names',
   );
 }
 JS

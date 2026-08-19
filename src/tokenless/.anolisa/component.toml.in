@@ -50,19 +50,8 @@ mode = "0755"
 type = "executable"
 
 [[component.layout.files]]
-source = "libexec/anolisa/tokenless/toon"
-target = "{libexecdir}/tokenless/toon"
-mode = "0755"
-type = "executable"
-
-[[component.layout.files]]
 source = "{libexecdir}/tokenless/rtk"
 target = "{bindir}/rtk"
-type = "symlink"
-
-[[component.layout.files]]
-source = "{libexecdir}/tokenless/toon"
-target = "{bindir}/toon"
 type = "symlink"
 
 # Shared hooks are interpreter-loaded resources, so the common tree stays

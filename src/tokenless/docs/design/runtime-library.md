@@ -5,8 +5,8 @@
 ## Purpose
 
 `anolisa-tokenless` is the framework-neutral, in-process Tokenless SDK. A platform wheel contains
-the PyO3 runtime and the pinned RTK executable, so Python applications do not require `tokenless`,
-`rtk`, or `toon` on `PATH`.
+the PyO3 runtime and the pinned RTK executable, so Python applications do not require `tokenless`
+or `rtk` on `PATH`.
 
 The public `TokenlessSdk` maps four host lifecycle boundaries to Tokenless behavior:
 

@@ -73,7 +73,7 @@ cd src/os-skills   # Skill definitions are static assets, no compilation needed
 
 # tokenless (per-component)
 cd src/tokenless
-make build       # tokenless + RTK + TOON + OpenClaw plugin
+make build       # tokenless + RTK + OpenClaw plugin
 make lint
 make test        # Rust + hooks + integration + adapters
 

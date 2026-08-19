@@ -77,8 +77,8 @@ tokenless 只优化**工具调用响应**进入 LLM 上下文前的冗余，不�
 
 首选 ANOLISA CLI 安装已发布的组件。
 
-安装脚本会把 `anolisa` 放到 `~/.local/bin`。user mode 安装的 `tokenless`、
-`rtk` 和 `toon` 也在这个目录。如果当前 Shell 还找不到命令，先把该目录加入
+安装脚本会把 `anolisa` 放到 `~/.local/bin`。user mode 安装的 `tokenless`
+和 `rtk` 也在这个目录。如果当前 Shell 还找不到命令，先把该目录加入
 `PATH`。
 
 ```bash
@@ -135,7 +135,7 @@ cd Token-Less
 make setup
 ```
 
-源码安装会把 `tokenless` 放在 `~/.local/bin`，`rtk` 和 `toon` 辅助
+源码安装会把 `tokenless` 放在 `~/.local/bin`，`rtk` 辅助
 二进制也位于同一个目录，并部署开发所需的全部 adapter。
 
 ### 构建 Python Runtime
@@ -290,7 +290,7 @@ AgentScope 2.0.0 尚未提供 App 级 Agent middleware 和 Tool 注入，因此�
 
 ## Raw 打包
 
-Raw 打包接收同一目录中已经构建好的 `tokenless`、`rtk`、`toon`，并按照
+Raw 打包接收同一目录中已经构建好的 `tokenless` 和 `rtk`，并按照
 组件维护的稳定目录结构生成制品：
 
 ```bash

@@ -1639,23 +1639,21 @@ build_tokenless() {
         return 0
     fi
 
-    local component_root bin rtk_bin toon_bin
+    local component_root bin rtk_bin
     component_root="$(component_target_dir tokenless)"
     bin="$component_root/bin/tokenless"
     rtk_bin="$component_root/libexec/anolisa/tokenless/rtk"
-    toon_bin="$component_root/libexec/anolisa/tokenless/toon"
-    if [[ -f "$bin" ]] && [[ -f "$rtk_bin" ]] && [[ -f "$toon_bin" ]]; then
+    if [[ -f "$bin" ]] && [[ -f "$rtk_bin" ]]; then
         if [[ ! -d "$component_root/share/anolisa/adapters/tokenless" ]]; then
             warn "tokenless adapter resources staged empty"
         fi
         if [[ ! -d "$component_root/share/anolisa/extensions/tokenless" ]]; then
             warn "tokenless cosh extension staged empty"
         fi
-        ok "tokenless, rtk, and toon built successfully"
+        ok "tokenless and rtk built successfully"
     else
         [[ -f "$bin" ]]     || warn "Expected artifact $bin not found"
         [[ -f "$rtk_bin" ]] || warn "Expected artifact $rtk_bin not found"
-        [[ -f "$toon_bin" ]] || warn "Expected artifact $toon_bin not found"
     fi
 }
 
@@ -2111,9 +2109,9 @@ uninstall_tokenless() {
     local dir="$PROJECT_ROOT/src/tokenless"
     run_component_make_uninstall "tokenless" "$dir" || true
     if $DRY_RUN; then
-        ok "tokenless, rtk, and toon uninstall plan generated"
+        ok "tokenless and rtk uninstall plan generated"
     else
-        ok "tokenless, rtk, and toon uninstalled"
+        ok "tokenless and rtk uninstalled"
     fi
 }
 

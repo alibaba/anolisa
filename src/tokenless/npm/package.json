@@ -21,8 +21,7 @@
   ],
   "bin": {
     "tokenless": "bin/tokenless",
-    "rtk": "bin/rtk",
-    "toon": "bin/toon"
+    "rtk": "bin/rtk"
   },
   "files": [
     "bin/",

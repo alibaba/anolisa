@@ -17,7 +17,7 @@ cargo build --release --locked -p tokenless-cli
 ./target/release/tokenless --version
 ```
 
-This path produces only the standalone `tokenless` CLI. It does not install `rtk`, `toon`, or the agent integration resources. To use the complete feature set in an agent, install through the anolisa CLI as described in the [Quick Start](QUICKSTART.md).
+This path produces only the standalone `tokenless` CLI. It does not install `rtk` or the agent integration resources. To use the complete feature set in an agent, install through the anolisa CLI as described in the [Quick Start](QUICKSTART.md).
 
 ## Build the Python runtime from source
 

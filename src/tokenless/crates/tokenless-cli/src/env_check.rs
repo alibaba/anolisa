@@ -532,7 +532,7 @@ fn binary_fallback_paths(binary: &str, home: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(home) = user_home {
         paths.push(home.join(".local/bin").join(binary));
-        if matches!(binary, "rtk" | "toon") {
+        if binary == "rtk" {
             paths.extend([
                 // Anolisa CLI user mode.
                 home.join(".local/lib/anolisa/libexec/tokenless")
@@ -543,12 +543,12 @@ fn binary_fallback_paths(binary: &str, home: &str) -> Vec<PathBuf> {
         }
     }
     paths.push(PathBuf::from("/usr/local/bin").join(binary));
-    if matches!(binary, "rtk" | "toon") {
+    if binary == "rtk" {
         // Anolisa CLI system mode.
         paths.push(PathBuf::from("/usr/local/libexec/anolisa/tokenless").join(binary));
     }
     paths.push(PathBuf::from("/usr/bin").join(binary));
-    if matches!(binary, "rtk" | "toon") {
+    if binary == "rtk" {
         paths.extend([
             // Makefile system mode and RPM.
             PathBuf::from("/usr/libexec/anolisa/tokenless").join(binary),

@@ -295,7 +295,7 @@ resolve_binary() {
     candidates+=("$USER_HOME/.local/bin/$name")
   fi
   case "$name" in
-    rtk|toon)
+    rtk)
       if [ -n "$USER_HOME" ]; then
         candidates+=(
           "$USER_HOME/.local/lib/anolisa/libexec/tokenless/$name"
@@ -306,13 +306,13 @@ resolve_binary() {
   esac
   candidates+=("/usr/local/bin/$name")
   case "$name" in
-    rtk|toon)
+    rtk)
       candidates+=("/usr/local/libexec/anolisa/tokenless/$name")
       ;;
   esac
   candidates+=("/usr/bin/$name")
   case "$name" in
-    rtk|toon)
+    rtk)
       candidates+=(
         "/usr/libexec/anolisa/tokenless/$name"
         "/usr/lib/anolisa/tokenless/$name"

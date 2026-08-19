@@ -170,9 +170,6 @@ test_toon_compression() {
 
     # --- 5.0 Environment check ---
     log_info "Test 5.0: Environment check"
-    if command -v toon &> /dev/null; then
-        log_pass "TOON available: $(toon --version)"
-    else log_fail "TOON not found"; fi
     if command -v tokenless &> /dev/null; then
         log_pass "tokenless available: $(tokenless --version)"
     else log_fail "tokenless not found"; fi
@@ -278,7 +275,7 @@ test_toon_compression() {
         '{"data":{"results":[{"k":"v1"},{"k":"v2"}],"count":2,"ok":true}}'
     do
         local plen=${#payload}
-        local tlen=$(echo "$payload" | toon -e 2>/dev/null | wc -c)
+        local tlen=$(echo "$payload" | tokenless compress-toon 2>/dev/null | wc -c)
         total_before=$((total_before + plen))
         total_after_toon=$((total_after_toon + tlen))
         total_records=$((total_records + 1))

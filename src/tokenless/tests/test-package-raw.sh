@@ -101,10 +101,10 @@ if os_name == "linux":
 else:
     cpu = {"aarch64": 0x0100000C}[arch]
     content = struct.pack("<IiiIIIII", 0xFEEDFACF, cpu, 0, 2, 0, 0, 0, 0)
-for name in ("tokenless", "rtk", "toon"):
+for name in ("tokenless", "rtk"):
     (root / name).write_bytes(content)
 PY
-    chmod 0755 "$destination/tokenless" "$destination/rtk" "$destination/toon"
+    chmod 0755 "$destination/tokenless" "$destination/rtk"
 }
 
 LINUX_X64="$TMP/bin-linux-x64"
@@ -157,7 +157,6 @@ tar -xzf "$OUT_ONE/$LINUX_ARTIFACT" -C "$EXTRACTED"
 cmp "$CONTRACT" "$EXTRACTED/.anolisa/component.toml"
 cmp "$LINUX_X64/tokenless" "$EXTRACTED/bin/tokenless"
 cmp "$LINUX_X64/rtk" "$EXTRACTED/libexec/anolisa/tokenless/rtk"
-cmp "$LINUX_X64/toon" "$EXTRACTED/libexec/anolisa/tokenless/toon"
 
 for relative in \
     adapters/claude-code/hooks/run-hook.sh \

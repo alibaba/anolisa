@@ -17,7 +17,7 @@ cargo build --release --locked -p tokenless-cli
 ./target/release/tokenless --version
 ```
 
-这条路径只生成独立的 `tokenless` CLI，不会安装 `rtk`、`toon` 或 Agent 接入资源。需要在 Agent 中使用完整能力时，请按照[快速开始](QUICKSTART.md)通过 anolisa CLI 安装。
+这条路径只生成独立的 `tokenless` CLI，不会安装 `rtk` 或 Agent 接入资源。需要在 Agent 中使用完整能力时，请按照[快速开始](QUICKSTART.md)通过 anolisa CLI 安装。
 
 ## 从源码构建 Python Runtime
 

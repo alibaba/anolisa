@@ -5,8 +5,8 @@
 ## 目标
 
 `anolisa-tokenless` 是框架无关的进程内 Tokenless SDK。平台 Wheel 同时包含 PyO3
-Runtime 和固定版本的 RTK 可执行文件，因此 Python 应用不要求 `tokenless`、`rtk` 或
-`toon` 出现在 `PATH` 中。
+Runtime 和固定版本的 RTK 可执行文件，因此 Python 应用不要求 `tokenless` 或 `rtk`
+出现在 `PATH` 中。
 
 公开的 `TokenlessSdk` 把宿主框架的四个生命周期映射为 Tokenless 行为：
 

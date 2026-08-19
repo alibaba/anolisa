@@ -6,7 +6,8 @@ Version:        @VERSION@
 Release:        %{anolis_release}%{?dist}
 Summary:        LLM Token Optimization Toolkit - Schema/Response Compression + Command Rewriting + Tool Ready
 
-# Tokenless and RTK are Apache-2.0; the bundled toon-format binary is MIT.
+# Tokenless and RTK are Apache-2.0; the statically linked toon-format
+# library crate is MIT.
 License:        Apache-2.0 AND MIT
 URL:            https://github.com/alibaba/anolisa
 Source0:        %{name}-%{version}.tar.gz
@@ -16,7 +17,7 @@ Source0:        %{name}-%{version}.tar.gz
 # The 1.89 minimum is set because tokenless-cli uses str::floor_char_boundary
 # (stable since 1.89) via a hand-written compat fallback, and CI pins 1.89.0
 # to avoid local/CI version divergence. Vendored rtk source in tarball.
-# toon-format built via cargo install (requires network access to crates.io or mirror).
+# Workspace deps (including the toon-format library) come from crates.io, so
 # RPM build environments must configure a crates.io mirror (e.g. sparse+https://mirrors.aliyun.com/crates.io-index/).
 BuildRequires:  cargo
 BuildRequires:  rust >= 1.89
@@ -47,9 +48,9 @@ Core Features:
 - Statistics Tracking: SQLite-based metrics for compression effectiveness
 
 The package includes:
-- tokenless: CLI tool for schema/response compression and toon integration
+- tokenless: CLI tool for schema/response compression and TOON encoding
+  (TOON is linked in via the crates.io toon-format library)
 - rtk: High-performance CLI proxy for command rewriting (vendored source, Apache-2.0, excluded from workspace)
-- toon: JSON to TOON format encoder/decoder (crates.io toon-format v0.5.0)
 
 Note: OpenClaw plugin is available under /usr/share/anolisa/adapters/tokenless/openclaw/.
 Native DeepSeek Harness (dsh) plugin bundle is available under
@@ -83,16 +84,6 @@ cargo clean --release
 # Build tokenless (rtk excluded from workspace — built separately)
 cargo build --release
 cargo build --release --manifest-path third_party/rtk/Cargo.toml
-
-# Build toon (standalone binary for Python hooks)
-# Note: toon-format's transitive deps (darling, image, time, plist, etc.)
-# have MSRV 1.88+, which exceeds the build environment's Rust 1.86.
-# Fall back to the system-provided toon binary when available.
-if test -x "%{_bindir}/toon"; then
-    echo "toon (system) already available, skipping cargo install"
-else
-    cargo install toon-format --version 0.5.0 --root %{_builddir}/toon-root --locked
-fi
 
 # Compile the OpenClaw TS plugin via the project Makefile.
 # Produces adapters/tokenless/openclaw/dist/index.js, which package.json
@@ -128,19 +119,9 @@ mkdir -p %{buildroot}%{_docdir}/tokenless
 # Install binaries — tokenless (user-facing) to /usr/bin, helpers to /usr/libexec/anolisa/tokenless
 install -m 0755 target/release/tokenless %{buildroot}%{_bindir}/tokenless
 install -m 0755 third_party/rtk/target/release/rtk %{buildroot}%{_libexecdir}/anolisa/tokenless/rtk
-# Install toon — prefer cargo build output, fall back to system binary
-if [ -f %{_builddir}/toon-root/bin/toon ]; then
-    install -m 0755 %{_builddir}/toon-root/bin/toon %{buildroot}%{_libexecdir}/anolisa/tokenless/toon
-elif command -v toon &>/dev/null; then
-    cp "$(command -v toon)" %{buildroot}%{_libexecdir}/anolisa/tokenless/toon
-else
-    echo "ERROR: toon binary not found"
-    exit 1
-fi
 
-# Create symlinks so rtk and toon are discoverable via PATH
+# Create a symlink so rtk is discoverable via PATH
 ln -sf %{_libexecdir}/anolisa/tokenless/rtk %{buildroot}%{_bindir}/rtk
-ln -sf %{_libexecdir}/anolisa/tokenless/toon %{buildroot}%{_bindir}/toon
 
 # Install documentation. The bilingual user manual moved to the
 # repository-level docs/user-guide tree and is published with the ANOLISA
@@ -248,10 +229,8 @@ install -m 0644 adapters/tokenless/common/commands/tokenless-stats.toml %{buildr
 %defattr(0644,root,root,0755)
 %attr(0755,root,root) %{_bindir}/tokenless
 %attr(0755,root,root) %{_bindir}/rtk
-%attr(0755,root,root) %{_bindir}/toon
 %dir %attr(0755,root,root) %{_libexecdir}/anolisa/tokenless
 %attr(0755,root,root) %{_libexecdir}/anolisa/tokenless/rtk
-%attr(0755,root,root) %{_libexecdir}/anolisa/tokenless/toon
 %doc %{_docdir}/tokenless/LICENSE
 %doc %{_docdir}/tokenless/response-compression.md
 %dir %{_datadir}/anolisa

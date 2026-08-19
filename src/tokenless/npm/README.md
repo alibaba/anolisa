@@ -21,7 +21,10 @@ This automatically installs the correct prebuilt binary for your platform.
 |--------|-------------|
 | `tokenless` | Main CLI — schema compression, response compression, TOON encoding, stats |
 | `rtk` | Command rewriting engine (filters CLI output noise) |
-| `toon` | TOON (Token-Oriented Object Notation) format encoder |
+
+TOON (Token-Oriented Object Notation) encoding is built into `tokenless`
+via the `toon-format` library — see `tokenless compress-toon` /
+`tokenless decompress-toon` below.
 
 ## Platform Support
 
@@ -113,10 +116,10 @@ The npm packer reads prebuilt native executables from this fixed layout:
 
 ```text
 target/npm-prebuilt/
-├── linux-x64/{tokenless,rtk,toon}
-├── linux-arm64/{tokenless,rtk,toon}
-├── darwin-x64/{tokenless,rtk,toon}
-└── darwin-arm64/{tokenless,rtk,toon}
+├── linux-x64/{tokenless,rtk}
+├── linux-arm64/{tokenless,rtk}
+├── darwin-x64/{tokenless,rtk}
+└── darwin-arm64/{tokenless,rtk}
 ```
 
 Validating Linux packages requires GNU `readelf` from binutils. The packer
