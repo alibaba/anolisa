@@ -9,6 +9,25 @@
 
 ## [未发布]
 
+## [0.3.4] - 2026-08-19
+
+### 变更
+
+- 面向组件的命令现将 repository component index 作为 local state 中不存在的
+  名称的唯一身份权威。已安装和 recovery identity 在离线时仍可使用；不支持的
+  名称返回 `INVALID_ARGUMENT`，index 不可用返回 `EXECUTION_FAILED`，而
+  `NOT_INSTALLED` 现可明确表示受支持的组件尚未安装。`--repo` override 同时决定
+  整个 invocation 的 identity 与 package selection，因此 site-local package
+  mapping 和 RPM `Provides` metadata 不再能创建 index 未识别的组件名称
+  ([#2637](https://github.com/alibaba/anolisa/pull/2637))。
+
+### 修复
+
+- 本地 Raw repository index 缺失时，错误信息现会指出 active repository 来自
+  具体的 `repo.toml` path 还是一次性的 `--repo` override，并提供对应的 recovery
+  guidance。用户无需再猜测缺失 repository 由哪个配置来源指定
+  ([#2650](https://github.com/alibaba/anolisa/pull/2650))。
+
 ## [0.3.3] - 2026-08-18
 
 ### 新增

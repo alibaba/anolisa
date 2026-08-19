@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-08-19
+
+### Changed
+
+- Component-targeting commands now use the repository component index as the
+  sole authority for names absent from local state. Installed and recovery
+  identities remain usable offline, while unsupported names return
+  `INVALID_ARGUMENT`, an unavailable index returns `EXECUTION_FAILED`, and
+  `NOT_INSTALLED` now reliably means a supported component is absent. A
+  `--repo` override also governs identity and package selection for the whole
+  invocation, so site-local package mappings and RPM `Provides` metadata can
+  no longer establish unrecognized component names
+  ([#2637](https://github.com/alibaba/anolisa/pull/2637)).
+
+### Fixed
+
+- Missing local Raw repository index errors now identify whether the active
+  repository came from the exact `repo.toml` path or a one-off `--repo`
+  override and provide matching recovery guidance. Users no longer need to
+  guess which source configured the missing repository
+  ([#2650](https://github.com/alibaba/anolisa/pull/2650)).
+
 ## [0.3.3] - 2026-08-18
 
 ### Added

@@ -143,7 +143,11 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Tue Aug 18 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Wed Aug 19 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Component commands now validate new identities through the component index.
+- Missing local Raw index errors now identify the active repository source.
+
+* Tue Aug 18 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.3-1
 - Telemetry snapshots now report the detected container runtime flavor.
 - Component status now validates targets and redirects telemetry service queries.
 - Raw adapter bundle installs now preserve per-file archive modes.
