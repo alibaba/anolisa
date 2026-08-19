@@ -1,7 +1,10 @@
+use super::commands::render_slash_command;
+use super::parser::SlashCommand;
 use super::skills::{
     completion_skill_names, format_skill_detail, format_skills_list, render_skills_command,
 };
 use crate::runtime::prelude::*;
+use crate::types::ShellEvent;
 
 fn zh_state() -> InlineState {
     InlineState {
@@ -174,4 +177,104 @@ fn completion_names_are_sorted_unique_and_enabled() {
         completion_skill_names(&data),
         vec!["release-notes".to_string(), "repo-review".to_string()]
     );
+}
+
+/// Pins the dispatch-layer cwd fallback: the Rust intercept path (zsh,
+/// or bash with `COSH_SLASH_VIA_SHELL=0`) delivers events with
+/// `cwd=None` because the input never reaches the shell, so
+/// `render_slash_command` must fall back to the dispatcher-tracked
+/// `shell_prompt_cwd` (last `ShellReady` report) when forwarding
+/// `--workspace` to the registry subprocess. The adapter-layer
+/// priority is covered by `registry_query_short_workspace_priority`.
+#[test]
+fn dispatch_falls_back_to_shell_prompt_cwd_when_event_cwd_missing() {
+    let (adapter, script) = mock_core(
+        r#"workspace=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --workspace) shift; workspace="${1:-}";;
+  esac
+  shift
+done
+IFS= read -r line || exit 1
+printf '{"success":true,"data":[{"name":"ws:%s","level":"system"}]}\n' "$workspace"
+exit 0"#,
+    );
+
+    // Post-ShellReady state: the dispatcher recorded the shell cwd
+    // from the OSC 1337 report, but the intercept event itself has
+    // no cwd to offer.
+    let mut state = InlineState {
+        language: Language::EnUs,
+        shell_prompt_cwd: Some("/shell/prompt/cwd".to_string()),
+        ..InlineState::default()
+    };
+
+    let event = ShellEvent::user_input_intercepted("test", "/skills list");
+    let mut buf = Vec::new();
+    let command = SlashCommand::Skills(Some("list"), None);
+
+    // shell_cwd=None simulates the Rust intercept path.
+    render_slash_command(command, &event, &[], &adapter, &mut state, None, &mut buf)
+        .expect("render_slash_command should succeed");
+
+    let _ = std::fs::remove_file(script);
+    let output = String::from_utf8(buf).unwrap();
+
+    assert!(
+        output.contains("/shell/prompt/cwd"),
+        "dispatch should fall back to shell_prompt_cwd when event cwd is None: {output}"
+    );
+}
+
+/// After a valid cwd has been cached, a subsequent `cd` may have its
+/// OSC 1337 markers lost. The dispatcher clears `shell_prompt_cwd`
+/// on the next PTY write, so when an intercept event then arrives
+/// with `cwd=None` the dispatch layer must clear the adapter cache
+/// instead of reusing the stale `/repo-a` value.
+#[test]
+fn dispatch_clears_stale_shell_cwd_after_pty_invalidation() {
+    let (adapter, script) = mock_core(
+        r#"workspace=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --workspace) shift; workspace="${1:-}";;
+  esac
+  shift
+done
+IFS= read -r line || exit 1
+printf '{"success":true,"data":[{"name":"ws:%s","level":"system"}]}\n' "$workspace"
+exit 0"#,
+    );
+
+    // Seed the adapter with /repo-a as if an earlier slash command
+    // in that directory ran successfully.
+    if let crate::adapter::AdapterInstance::CoshCore(core) = &adapter {
+        core.set_shell_cwd(Some("/repo-a"));
+    }
+
+    // Simulate the PTY-write invalidation that follows a marker-lost
+    // `cd /repo-b`: the dispatcher no longer trusts shell_prompt_cwd.
+    let mut state = InlineState {
+        language: Language::EnUs,
+        shell_prompt_cwd: None,
+        ..InlineState::default()
+    };
+
+    let event = ShellEvent::user_input_intercepted("test", "/skills list");
+    let mut buf = Vec::new();
+    let command = SlashCommand::Skills(Some("list"), None);
+
+    // Both event cwd and dispatcher prompt cwd are unavailable.
+    render_slash_command(command, &event, &[], &adapter, &mut state, None, &mut buf)
+        .expect("render_slash_command should succeed");
+
+    let _ = std::fs::remove_file(script);
+
+    if let crate::adapter::AdapterInstance::CoshCore(core) = &adapter {
+        assert!(
+            core.shell_cwd.lock().unwrap().is_none(),
+            "stale shell_cwd should be cleared when both cwd sources are unavailable"
+        );
+    }
 }

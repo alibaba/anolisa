@@ -1202,3 +1202,74 @@ done
     drop(adapter);
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// Verifies that `registry_query_short` forwards `--workspace` to the
+/// short-lived `cosh-core --registry` subprocess using the correct
+/// priority: `shell_cwd` -> active session scope -> omit `--workspace`.
+/// Also pins the last-known-value retention when `set_shell_cwd(None)`
+/// is called after a valid cwd.
+#[test]
+fn registry_query_short_workspace_priority() {
+    let script = write_mock_core(
+        "workspace-priority",
+        r#"#!/bin/sh
+workspace=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --workspace) shift; workspace="${1:-}";;
+  esac
+  shift
+done
+IFS= read -r line || exit 1
+request_id=$(printf '%s\n' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+printf '{"type":"registry_response","request_id":"%s","success":true,"data":{"workspace":"%s"}}\n' "$request_id" "$workspace"
+exit 0
+"#,
+    );
+
+    // 1. shell_cwd wins over session scope.
+    {
+        let adapter = CoshCoreAdapter::new(script.to_string_lossy().into_owned(), false);
+        adapter.set_shell_cwd(Some("/shell/cwd/path"));
+        *adapter.session.lock().unwrap() = SessionRuntimeState::with_active(
+            "00000000-0000-4000-8000-000000000000",
+            "/session/scope/path".to_string(),
+        );
+        let result = adapter
+            .registry_query("skills", "list", serde_json::Value::Null)
+            .expect("shell_cwd should take priority");
+        assert_eq!(result["workspace"], "/shell/cwd/path");
+    }
+
+    // 2. Falls back to session scope when shell_cwd is absent.
+    {
+        let adapter = CoshCoreAdapter::new(script.to_string_lossy().into_owned(), false);
+        *adapter.session.lock().unwrap() = SessionRuntimeState::with_active(
+            "00000000-0000-4000-8000-000000000000",
+            "/session/scope/path".to_string(),
+        );
+        let result = adapter
+            .registry_query("skills", "list", serde_json::Value::Null)
+            .expect("session scope should be used as fallback");
+        assert_eq!(result["workspace"], "/session/scope/path");
+    }
+
+    // 3. set_shell_cwd(None) retains the last known value instead of
+    //    clearing it, so subsequent registry queries keep using the real
+    //    shell cwd rather than silently degrading to session scope.
+    {
+        let adapter = CoshCoreAdapter::new(script.to_string_lossy().into_owned(), false);
+        adapter.set_shell_cwd(Some("/shell/cwd/path"));
+        adapter.set_shell_cwd(None);
+        *adapter.session.lock().unwrap() = SessionRuntimeState::with_active(
+            "00000000-0000-4000-8000-000000000000",
+            "/session/scope/path".to_string(),
+        );
+        let result = adapter
+            .registry_query("skills", "list", serde_json::Value::Null)
+            .expect("last-known shell_cwd should survive None update");
+        assert_eq!(result["workspace"], "/shell/cwd/path");
+    }
+
+    let _ = std::fs::remove_file(&script);
+}

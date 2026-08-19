@@ -26,6 +26,23 @@ pub(super) fn render_slash_command<W: Write>(
     shell_cwd: Option<&str>,
     output: &mut W,
 ) -> std::io::Result<bool> {
+    // Propagate the shell cwd to the adapter so registry queries
+    // (skills/hooks/extensions) spawn cosh-core with the correct
+    // --workspace and discover project-level skills and hooks.
+    // The Rust intercept path (zsh, or bash with
+    // COSH_SLASH_VIA_SHELL=0) creates events with cwd=None because
+    // the input never reaches the shell; fall back to the last
+    // ShellReady cwd tracked by the dispatcher so registry queries
+    // still resolve the correct project root. If both sources are
+    // unavailable the cached cwd may be stale (e.g. a `cd` whose OSC
+    // 1337 markers were lost), so clear it rather than forwarding the
+    // old project root.
+    if let AdapterInstance::CoshCore(cosh_core) = adapter {
+        match shell_cwd.or(state.shell_prompt_cwd.as_deref()) {
+            Some(cwd) => cosh_core.set_shell_cwd(Some(cwd)),
+            None => cosh_core.clear_shell_cwd(),
+        }
+    }
     match command {
         SlashCommand::Noop => Ok(true),
         SlashCommand::Auth => {

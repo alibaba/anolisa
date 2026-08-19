@@ -42,6 +42,9 @@ pub struct CoshCoreAdapter {
     /// Atomically owned active session, workspace, generation, and recovery state.
     pub session: Arc<Mutex<SessionRuntimeState>>,
     pub(crate) runtime: Arc<PersistentCoshCoreRuntime>,
+    /// Shell cwd tracked from the PTY host so that short-lived `--registry`
+    /// processes resolve the same project root as the headless runtime.
+    pub(crate) shell_cwd: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for CoshCoreAdapter {
@@ -62,6 +65,7 @@ impl Default for CoshCoreAdapter {
             allow_model_call: false,
             session: Arc::new(Mutex::new(SessionRuntimeState::default())),
             runtime: Arc::new(PersistentCoshCoreRuntime::default()),
+            shell_cwd: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -74,6 +78,7 @@ impl CoshCoreAdapter {
             allow_model_call,
             session: Arc::new(Mutex::new(SessionRuntimeState::default())),
             runtime: Arc::new(PersistentCoshCoreRuntime::default()),
+            shell_cwd: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -81,6 +86,36 @@ impl CoshCoreAdapter {
     pub fn with_model_call(mut self, allow: bool) -> Self {
         self.allow_model_call = allow;
         self
+    }
+
+    /// Update the shell cwd used to forward `--workspace` to short-lived
+    /// `--registry` cosh-core processes. Without this, registry-mode
+    /// invocations fall back to the cosh-shell process cwd and fail to
+    /// discover project-level skills and hooks.
+    ///
+    /// `None` means the caller has no cwd to report (e.g. programmatic
+    /// path without a PTY); the last known value is retained rather than
+    /// cleared so subsequent registry queries keep using the real shell cwd
+    /// instead of silently degrading to the session workspace scope.
+    pub(crate) fn set_shell_cwd(&self, cwd: Option<&str>) {
+        if let Some(cwd) = cwd {
+            if let Ok(mut guard) = self.shell_cwd.lock() {
+                *guard = Some(cwd.to_string());
+            }
+        }
+    }
+
+    /// Clears the cached shell cwd.
+    ///
+    /// The dispatch layer calls this when both the event and the
+    /// dispatcher-tracked prompt cwd are unavailable. That combination
+    /// means the previously reported cwd may be stale (e.g. after a `cd`
+    /// whose OSC 1337 markers were lost), so continuing to forward it as
+    /// `--workspace` would target the wrong project.
+    pub(crate) fn clear_shell_cwd(&self) {
+        if let Ok(mut guard) = self.shell_cwd.lock() {
+            *guard = None;
+        }
     }
 
     /// Inspects a persisted session summary without selecting it.

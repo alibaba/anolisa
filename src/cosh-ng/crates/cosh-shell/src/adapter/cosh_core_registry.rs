@@ -98,6 +98,26 @@ impl CoshCoreAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .process_group(0);
+
+        // Forward the user's shell cwd so the registry-mode cosh-core
+        // resolves the same project root as the headless runtime. Falls
+        // back to the active session's workspace scope when the shell
+        // cwd is unavailable (e.g. programmatic callers without a PTY).
+        let workspace = self
+            .shell_cwd
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .or_else(|| {
+                self.session
+                    .lock()
+                    .ok()
+                    .and_then(|s| s.active_workspace_scope().map(str::to_string))
+            });
+        if let Some(workspace) = workspace {
+            command.arg("--workspace").arg(workspace);
+        }
+
         let mut child = command.spawn().map_err(|error| {
             RegistryQueryError::Transport(format!("failed to spawn cosh-core --registry: {error}"))
         })?;
