@@ -101,6 +101,30 @@ pub trait BackendInstance: Send + Sync {
             msg: format!("{} does not support checkpoint resume", self.backend()),
         })
     }
+    /// Bring the workload to a consistent stop before a snapshot is taken.
+    ///
+    /// VM backends must be paused externally before their state is readable,
+    /// so the default delegates to [`Self::pause`]. Backends whose capture
+    /// primitive freezes the workload itself (for example `runsc checkpoint`)
+    /// override this as a no-op instead of tolerating a redundant pause.
+    ///
+    /// The quiesce must hold until [`Self::unquiesce_after_capture`]: storage
+    /// synchronization and the rootfs capture run after [`Self::snapshot`]
+    /// returns, so a workload that resumes earlier can write into the rootfs
+    /// image without appearing in the captured state. A capture primitive
+    /// that restarts the workload itself (for example a leave-running
+    /// checkpoint) therefore must not pair with no-op hooks.
+    async fn quiesce_for_capture(&self) -> Result<()> {
+        self.pause().await
+    }
+    /// Return the workload to execution after a capture attempt.
+    ///
+    /// Called on both the publication and the compensation path. Backends
+    /// whose capture leaves the workload running override this as a no-op,
+    /// mirroring their [`Self::quiesce_for_capture`].
+    async fn unquiesce_after_capture(&self) -> Result<()> {
+        self.resume().await
+    }
     /// Write a self-contained snapshot.
     async fn snapshot(&self, _request: SnapshotRequest) -> Result<()> {
         Err(BlazeError::BackendError {
@@ -188,6 +212,14 @@ impl BackendInstance for RuntimeOwnedBackend {
 
     async fn resume(&self) -> Result<()> {
         self.inner.resume().await
+    }
+
+    async fn quiesce_for_capture(&self) -> Result<()> {
+        self.inner.quiesce_for_capture().await
+    }
+
+    async fn unquiesce_after_capture(&self) -> Result<()> {
+        self.inner.unquiesce_after_capture().await
     }
 
     async fn snapshot(&self, request: SnapshotRequest) -> Result<()> {
@@ -1803,7 +1835,48 @@ mod tests {
         assert!(!instance.supports_checkpoint_capture());
         assert!(instance.pause().await.is_err());
         assert!(instance.resume().await.is_err());
+        // The quiesce hooks delegate to pause/resume by default, so a
+        // backend without either capability fails closed on both.
+        assert!(instance.quiesce_for_capture().await.is_err());
+        assert!(instance.unquiesce_after_capture().await.is_err());
         assert!(instance.snapshot(request).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn self_freezing_backends_can_bypass_pause_for_capture() {
+        struct SelfFreezing;
+
+        #[async_trait]
+        impl BackendInstance for SelfFreezing {
+            fn backend(&self) -> BackendKind {
+                BackendKind::Mock
+            }
+
+            async fn try_wait(&self) -> Result<Option<SpawnResult>> {
+                Ok(None)
+            }
+
+            // The capture primitive freezes the workload itself, so the
+            // orchestration hooks are no-ops while the pause/resume
+            // primitives stay unimplemented.
+            async fn quiesce_for_capture(&self) -> Result<()> {
+                Ok(())
+            }
+
+            async fn unquiesce_after_capture(&self) -> Result<()> {
+                Ok(())
+            }
+
+            async fn kill(&self) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let instance = SelfFreezing;
+        assert!(instance.pause().await.is_err());
+        assert!(instance.resume().await.is_err());
+        assert!(instance.quiesce_for_capture().await.is_ok());
+        assert!(instance.unquiesce_after_capture().await.is_ok());
     }
 
     #[tokio::test]

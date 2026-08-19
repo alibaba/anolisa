@@ -221,7 +221,7 @@ impl SandboxManager {
         crate::failpoint::pause("checkpoint-after-begin").await;
 
         let paused = match crate::failpoint::backend("checkpoint-pause") {
-            Ok(()) => backend.pause().await,
+            Ok(()) => backend.quiesce_for_capture().await,
             Err(error) => Err(error),
         };
         if let Err(error) = paused {
@@ -454,7 +454,7 @@ impl SandboxManager {
         crate::failpoint::pause("checkpoint-after-head").await;
 
         let resumed = match crate::failpoint::backend("checkpoint-resume") {
-            Ok(()) => backend.resume().await,
+            Ok(()) => backend.unquiesce_after_capture().await,
             Err(error) => Err(error),
         };
         if let Err(error) = resumed {
@@ -614,7 +614,7 @@ impl SandboxManager {
 
     async fn resume_backend(&self, backend: &DynBackendInstance) -> Result<()> {
         match crate::failpoint::backend("checkpoint-compensation-resume") {
-            Ok(()) => backend.resume().await?,
+            Ok(()) => backend.unquiesce_after_capture().await?,
             Err(error) => return Err(error.into()),
         }
         self.verify_backend_ready(backend.instance_id(), backend)
