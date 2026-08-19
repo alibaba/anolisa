@@ -686,8 +686,20 @@ fn analysis_only_continuation_blocks_streamed_shell_tool_fallback() {
     )
     .expect("render auto approval");
 
-    assert!(handled);
-    assert!(state.approvals.requests.is_empty());
+    // #2639: refusing one event no longer claims the batch — that is what
+    // used to strand the control approvals queued behind it. The refusal is
+    // recorded as resolved instead, so nothing executes and no card asks the
+    // user to approve a command the policy already turned down.
+    assert!(!handled);
+    assert_eq!(state.approvals.requests.len(), 1);
+    assert_eq!(
+        state.approvals.requests[0].status,
+        ApprovalRequestStatus::Denied
+    );
+    assert_eq!(
+        state.approvals.requests[0].execution_path,
+        Some("not_executed_shell_request_policy_local")
+    );
     assert!(state.control.shell_handoff().approved_is_empty());
 }
 

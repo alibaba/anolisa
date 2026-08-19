@@ -354,6 +354,38 @@ pub(crate) fn record_auto_approved_request(
     request
 }
 
+/// Records a shell request the shell-request policy refused (#2639).
+///
+/// The refusal is already on the wire (or had no provider to reach), so the
+/// entry exists to give the request a terminal home: the tail record pass
+/// dedups on it instead of surfacing a card for a refused command, and
+/// `mark_responded` settles the #1940 lifecycle ledger so the batch drain
+/// cannot deny the same control request a second time.
+pub(crate) fn record_policy_refused_request(
+    state: &mut InlineState,
+    mut request: RuntimeApprovalRequest,
+) {
+    request.status = ApprovalRequestStatus::Denied;
+    request.execution_path = Some(if request.request_id.is_some() {
+        "not_executed_shell_request_policy"
+    } else {
+        // Streamed fallbacks have no provider lifecycle entry. This local
+        // home only prevents the tail pass from resurfacing a refused card.
+        "not_executed_shell_request_policy_local"
+    });
+    if let Some(request_id) = request.request_id.as_deref() {
+        state
+            .control
+            .approval_ledger_mut()
+            .mark_responded(&request.run_id, request_id);
+    }
+    state
+        .approvals
+        .journal
+        .push(approval_journal_entry(&request, "cosh-shell"));
+    state.approvals.requests.push(request);
+}
+
 pub(crate) fn record_deferred_fallback_request(
     state: &mut InlineState,
     mut request: RuntimeApprovalRequest,

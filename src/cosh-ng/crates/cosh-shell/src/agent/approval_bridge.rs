@@ -92,9 +92,13 @@ pub(crate) fn render_trusted_tool<W: Write>(
             render_approval_requests(state, &blocked_approval_ids, output)?;
             return Ok(true);
         }
-        if handle_shell_request_policy(state, run_request, &request) {
-            render_approval_requests(state, &blocked_approval_ids, output)?;
-            return Ok(true);
+        match handle_shell_request_policy(state, run_request, &request) {
+            ShellRequestPolicyHandling::Continue => {}
+            ShellRequestPolicyHandling::Refused => continue,
+            ShellRequestPolicyHandling::AwaitingTerminalSweep => {
+                render_approval_requests(state, &blocked_approval_ids, output)?;
+                return Ok(true);
+            }
         }
         if trust_mode_blocks_shell_request(&mut request, AssessmentSource::ProviderShellTool) {
             blocked_approval_ids.extend(record_approval_requests(
@@ -253,8 +257,13 @@ pub(crate) fn render_auto_approved_tool<W: Write>(
             }
             continue;
         }
-        if handle_shell_request_policy(state, run_request, &request) {
-            return Ok(true);
+        match handle_shell_request_policy(state, run_request, &request) {
+            ShellRequestPolicyHandling::Continue => {}
+            ShellRequestPolicyHandling::Refused => continue,
+            ShellRequestPolicyHandling::AwaitingTerminalSweep => {
+                render_approval_requests(state, &blocked_approval_ids, output)?;
+                return Ok(true);
+            }
         }
 
         let raw_cmd = request
@@ -471,23 +480,38 @@ pub(super) enum ShellRequestPolicyDecision {
     DenyDuplicateHostExecuted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellRequestPolicyHandling {
+    Continue,
+    Refused,
+    AwaitingTerminalSweep,
+}
+
+/// Applies the shell-request policy gate to one event.
+///
+/// A delivered refusal is event-local, so callers keep processing the batch.
+/// Without a live owner, callers stop before the tail record pass so the
+/// detached terminal sweep retains responsibility for the response.
 fn handle_shell_request_policy(
-    state: &InlineState,
+    state: &mut InlineState,
     run_request: Option<&AgentRequest>,
     request: &RuntimeApprovalRequest,
-) -> bool {
-    match shell_request_policy_decision(state, run_request, request) {
-        ShellRequestPolicyDecision::Continue => false,
+) -> ShellRequestPolicyHandling {
+    let reason = match shell_request_policy_decision(state, run_request, request) {
+        ShellRequestPolicyDecision::Continue => return ShellRequestPolicyHandling::Continue,
         ShellRequestPolicyDecision::DenyAnalysisOnly => {
-            deny_shell_tool_during_analysis_continuation(state, request);
-            true
+            crate::adapter::ANALYSIS_ONLY_SHELL_DENY_MESSAGE
         }
         ShellRequestPolicyDecision::DenyDuplicateHostExecuted => {
-            deny_duplicate_host_executed_shell_request(state, request);
-            true
+            DUPLICATE_HOST_EXECUTED_SHELL_DENY_MESSAGE
         }
-    }
+    };
+    deny_policy_refused_shell_request(state, request, reason)
 }
+
+/// Refusal reason for a shell tool call the host already executed once and
+/// whose result was delivered through the control protocol.
+const DUPLICATE_HOST_EXECUTED_SHELL_DENY_MESSAGE: &str = "Duplicate shell tool request was already completed via host-executed shell result; no second foreground execution was run.";
 
 pub(super) fn shell_request_policy_decision(
     state: &InlineState,
@@ -906,15 +930,24 @@ fn respond_auto_approval_to_provider(
     true
 }
 
-fn deny_shell_tool_during_analysis_continuation(
-    state: &InlineState,
+/// Refuses one shell request on policy grounds: answer the owning provider
+/// when there is a control request to answer, then record the refusal.
+///
+/// A successfully delivered control refusal gets a terminal home so the tail
+/// pass cannot resurface it. If delivery is unavailable, the request remains
+/// unhomed for the active or detached terminal sweep. Streamed fallbacks have
+/// no provider response and are recorded as shell-local refusals.
+fn deny_policy_refused_shell_request(
+    state: &mut InlineState,
     request: &RuntimeApprovalRequest,
-) -> bool {
-    let Some(request_id) = request.request_id.as_ref() else {
-        return false;
+    reason: &str,
+) -> ShellRequestPolicyHandling {
+    let Some(request_id) = request.request_id.as_deref() else {
+        record_policy_refused_request(state, request.clone());
+        return ShellRequestPolicyHandling::Refused;
     };
     let Some(active_run) = state.agent_run.active.as_ref() else {
-        return true;
+        return ShellRequestPolicyHandling::AwaitingTerminalSweep;
     };
     let response = provider_deny_response(
         ProviderResponseInput {
@@ -922,30 +955,11 @@ fn deny_shell_tool_during_analysis_continuation(
             tool_use_id: request.tool_use_id.as_deref(),
             tool_input: request.tool_input.as_ref(),
         },
-        "The foreground shell command already completed and its output was injected. Summarize the existing shell evidence or ask the user to start a new request before running another shell command.".to_string(),
+        reason.to_string(),
     );
-    let _ = active_run.handle.respond_approval(response);
-    true
-}
-
-fn deny_duplicate_host_executed_shell_request(
-    state: &InlineState,
-    request: &RuntimeApprovalRequest,
-) -> bool {
-    let Some(request_id) = request.request_id.as_ref() else {
-        return false;
-    };
-    let Some(active_run) = state.agent_run.active.as_ref() else {
-        return true;
-    };
-    let response = provider_deny_response(
-        ProviderResponseInput {
-            request_id,
-            tool_use_id: request.tool_use_id.as_deref(),
-            tool_input: request.tool_input.as_ref(),
-        },
-        "Duplicate shell tool request was already completed via host-executed shell result; no second foreground execution was run.".to_string(),
-    );
-    let _ = active_run.handle.respond_approval(response);
-    true
+    if active_run.handle.respond_approval(response).is_err() {
+        return ShellRequestPolicyHandling::AwaitingTerminalSweep;
+    }
+    record_policy_refused_request(state, request.clone());
+    ShellRequestPolicyHandling::Refused
 }
