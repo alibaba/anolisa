@@ -7,6 +7,7 @@ mod retention;
 pub use containment::DueContainmentAction;
 pub use containment::{ContainmentActivationResult, ContainmentClaimResult};
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
@@ -550,35 +551,56 @@ impl AuditStore {
     /// # Errors
     ///
     /// Returns a typed database, stored-data, or lock error.
-    pub fn list_cases(&self, limit: usize, offset: i64) -> Result<Vec<RiskCase>, AuditError> {
+    pub fn list_cases(&self, limit: usize, offset: i64, agent_id: Option<&str>) -> Result<Vec<RiskCase>, AuditError> {
         let conn = self.connection()?;
-        let mut statement = conn.prepare(
-            "SELECT case_id, correlation_key, policy_id, policy_revision, agent_id, session_id,
-                    severity, risk_score, status, blocked, opened_at_ns, updated_at_ns, summary
-             FROM risk_cases
-             ORDER BY updated_at_ns DESC, case_id ASC
-             LIMIT ?1 OFFSET ?2",
-        )?;
-        let rows = statement.query_map(
-            params![limit.clamp(1, 1_000) as i64, offset.max(0)],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, i64>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, i64>(9)?,
-                    row.get::<_, i64>(10)?,
-                    row.get::<_, i64>(11)?,
-                    row.get::<_, String>(12)?,
-                ))
-            },
-        )?;
+        let (sql, use_agent_filter) = match agent_id {
+            Some(_) => (
+                "SELECT case_id, correlation_key, policy_id, policy_revision, agent_id, session_id,
+                        severity, risk_score, status, blocked, opened_at_ns, updated_at_ns, summary
+                 FROM risk_cases
+                 WHERE agent_id = ?3
+                 ORDER BY updated_at_ns DESC, case_id ASC
+                 LIMIT ?1 OFFSET ?2",
+                true,
+            ),
+            None => (
+                "SELECT case_id, correlation_key, policy_id, policy_revision, agent_id, session_id,
+                        severity, risk_score, status, blocked, opened_at_ns, updated_at_ns, summary
+                 FROM risk_cases
+                 ORDER BY updated_at_ns DESC, case_id ASC
+                 LIMIT ?1 OFFSET ?2",
+                false,
+            ),
+        };
+        let mut statement = conn.prepare(sql)?;
+        let row_mapper = |row: &rusqlite::Row<'_>| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, i64>(10)?,
+                row.get::<_, i64>(11)?,
+                row.get::<_, String>(12)?,
+            ))
+        };
+        let rows = if use_agent_filter {
+            statement.query_map(
+                params![limit.clamp(1, 1_000) as i64, offset.max(0), agent_id.unwrap()],
+                row_mapper,
+            )?
+        } else {
+            statement.query_map(
+                params![limit.clamp(1, 1_000) as i64, offset.max(0)],
+                row_mapper,
+            )?
+        };
         rows.map(|row| row.map_err(Into::into).and_then(risk_case_from_row))
             .collect()
     }
@@ -588,10 +610,16 @@ impl AuditStore {
     /// # Errors
     ///
     /// Returns a typed database, stored-data, or lock error.
-    pub fn case_count(&self) -> Result<u64, AuditError> {
-        let count: i64 =
-            self.connection()?
-                .query_row("SELECT COUNT(*) FROM risk_cases", [], |row| row.get(0))?;
+    pub fn case_count(&self, agent_id: Option<&str>) -> Result<u64, AuditError> {
+        let conn = self.connection()?;
+        let count: i64 = match agent_id {
+            Some(id) => conn.query_row(
+                "SELECT COUNT(*) FROM risk_cases WHERE agent_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )?,
+            None => conn.query_row("SELECT COUNT(*) FROM risk_cases", [], |row| row.get(0))?,
+        };
         unsigned(count, "case_total")
     }
 
@@ -614,6 +642,29 @@ impl AuditStore {
             open: unsigned(open, "case_open")?,
             blocked: unsigned(blocked, "case_blocked")?,
         })
+    }
+
+    /// Returns a mapping from `(agent_id, policy_id)` to the most recent case ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed database, stored-data, or lock error.
+    pub fn case_index_by_agent_policy(&self) -> Result<HashMap<(String, String), Uuid>, AuditError> {
+        let conn = self.connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT agent_id, policy_id, case_id FROM risk_cases ORDER BY updated_at_ns DESC",
+        )?;
+        let mut index = HashMap::new();
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?;
+        for row in rows {
+            let (agent_id, policy_id, case_id_str) = row?;
+            let case_id = uuid::Uuid::parse_str(&case_id_str)
+                .map_err(|_| AuditError::InvalidData(format!("bad case_id: {case_id_str}")))?;
+            index.entry((agent_id, policy_id)).or_insert(case_id);
+        }
+        Ok(index)
     }
 
     /// Loads one risk case with immutable evidence in correlation order.

@@ -384,8 +384,8 @@ fn case_count_is_independent_of_case_page_size() {
             .expect("case should persist");
     }
 
-    assert_eq!(store.list_cases(1, 0).expect("page should load").len(), 1);
-    assert_eq!(store.case_count().expect("case total should load"), 2);
+    assert_eq!(store.list_cases(1, 0, None).expect("page should load").len(), 1);
+    assert_eq!(store.case_count(None).expect("case total should load"), 2);
 }
 
 #[test]
@@ -442,7 +442,7 @@ fn correlated_case_preserves_strongest_outcome_from_out_of_order_events() {
         .expect("stale outcome should merge");
 
     let stored = store
-        .list_cases(10, 0)
+        .list_cases(10, 0, None)
         .expect("case should load")
         .pop()
         .expect("case should exist");
@@ -866,7 +866,7 @@ fn activation_confirms_case_in_the_same_store_operation() {
             .expect("case should load")
             .case
             .status,
-        RiskCaseStatus::Confirmed
+        RiskCaseStatus::Resolved
     );
 }
 

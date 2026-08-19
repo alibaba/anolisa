@@ -458,9 +458,27 @@ pub(super) async fn list_violations(
     let Some(coordinator) = data.enforcement.clone() else {
         return unavailable();
     };
+    let audit_service = Arc::clone(&data.audit_service);
     let limit = query.limit.unwrap_or(100).clamp(1, 1000);
     match web::block(move || coordinator.violations(limit)).await {
-        Ok(Ok(violations)) => HttpResponse::Ok().json(json!({ "violations": violations })),
+        Ok(Ok(violations)) => {
+            let case_index = audit_service
+                .case_index_by_agent_policy()
+                .unwrap_or_default();
+            let enriched: Vec<serde_json::Value> = violations
+                .iter()
+                .map(|v| {
+                    let mut obj = serde_json::to_value(v).unwrap_or_default();
+                    if let Some(case_id) =
+                        case_index.get(&(v.agent_id.clone(), v.policy_id.clone()))
+                    {
+                        obj["case_id"] = serde_json::json!(case_id.to_string());
+                    }
+                    obj
+                })
+                .collect();
+            HttpResponse::Ok().json(json!({ "violations": enriched }))
+        }
         Ok(Err(error)) => coordinator_error(error),
         Err(error) => blocking_error(error),
     }

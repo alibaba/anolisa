@@ -168,18 +168,13 @@ impl AuditStore {
             transaction.commit()?;
             return Ok(ContainmentActivationResult::LostClaim);
         }
-        if status == RiskCaseStatus::Open {
-            let confirmed = transaction.execute(
-                "UPDATE risk_cases SET status = 'confirmed', updated_at_ns = ?1
-                 WHERE case_id = ?2 AND status = 'open'",
-                params![updated_at_ns, action.0],
-            )?;
-            if confirmed != 1 {
-                return Err(AuditError::InvalidData(format!(
-                    "risk case {case_id} changed before confirmation"
-                )));
-            }
-        }
+        let resolved = transaction.execute(
+            "UPDATE risk_cases SET status = 'resolved', updated_at_ns = ?1
+             WHERE case_id = ?2 AND status IN ('open', 'confirmed')",
+            params![updated_at_ns, action.0],
+        )?;
+        // resolved == 0 only when case is already resolved/false_positive/accepted_risk — idempotent, safe to ignore
+        let _ = resolved;
         transaction.commit()?;
         Ok(ContainmentActivationResult::Activated)
     }

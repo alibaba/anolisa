@@ -155,11 +155,12 @@ pub(super) async fn cases(
 ) -> HttpResponse {
     let limit = query.limit.unwrap_or(100).clamp(1, 1_000);
     let offset = query.offset.unwrap_or(0).max(0);
-    let total = match data.audit_service.case_count() {
+    let agent_id = query.agent_id.as_deref();
+    let total = match data.audit_service.case_count(agent_id) {
         Ok(total) => total,
         Err(error) => return store_error(error),
     };
-    match data.audit_service.cases(limit, offset) {
+    match data.audit_service.cases(limit, offset, agent_id) {
         Ok(items) => response(
             StatusCode::OK,
             if items.is_empty() { "empty" } else { "ok" },

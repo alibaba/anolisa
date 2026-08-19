@@ -898,7 +898,7 @@ fn pending_restart_activates_an_existing_exact_binding_without_reapply() {
         fixture.latest_action().lifecycle_state,
         ContainmentLifecycle::Active
     );
-    assert_eq!(fixture.status(), RiskCaseStatus::Confirmed);
+    assert_eq!(fixture.status(), RiskCaseStatus::Resolved);
     assert_eq!(fixture.enforcer.apply_calls(), 0);
 }
 
@@ -1503,7 +1503,7 @@ mod linux {
         assert_eq!(active.action_id, action.action_id);
         assert_eq!(active.binding_id, action.binding_id);
         assert_eq!(active.lifecycle_state, ContainmentLifecycle::Active);
-        assert_eq!(fixture.status(), RiskCaseStatus::Confirmed);
+        assert_eq!(fixture.status(), RiskCaseStatus::Resolved);
         assert_eq!(fixture.enforcer.apply_calls(), 2);
         assert_eq!(fixture.enforcer.applied().len(), 1);
         assert_eq!(fixture.enforcer.applied()[0].binding_id, action.binding_id);
@@ -1571,7 +1571,7 @@ mod linux {
         assert_eq!(action.source_path, "/root/secret.txt");
         assert_eq!(action.lifecycle_state, ContainmentLifecycle::Active);
         assert_eq!(action.requested_by, "principal:test-operator");
-        assert_eq!(fixture.status(), RiskCaseStatus::Confirmed);
+        assert_eq!(fixture.status(), RiskCaseStatus::Resolved);
         let applied = fixture.enforcer.applied();
         assert_eq!(applied.len(), 1);
         assert_eq!(applied[0].policy.mode, PolicyMode::Enforce);

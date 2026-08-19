@@ -7,6 +7,7 @@ use agentsight_enforcement_protocol::{
     SecurityEventKind,
 };
 use std::collections::HashSet;
+use std::collections::HashMap;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -110,8 +111,8 @@ impl AuditService {
     /// # Errors
     ///
     /// Returns a typed persistence error when the count fails.
-    pub fn case_count(&self) -> Result<u64, AuditError> {
-        self.store.case_count()
+    pub fn case_count(&self, agent_id: Option<&str>) -> Result<u64, AuditError> {
+        self.store.case_count(agent_id)
     }
 
     /// Returns complete correlated-case totals for summary views.
@@ -128,8 +129,17 @@ impl AuditService {
     /// # Errors
     ///
     /// Returns a typed persistence or stored-data error when the query fails.
-    pub fn cases(&self, limit: usize, offset: i64) -> Result<Vec<RiskCase>, AuditError> {
-        self.store.list_cases(limit, offset)
+    pub fn cases(&self, limit: usize, offset: i64, agent_id: Option<&str>) -> Result<Vec<RiskCase>, AuditError> {
+        self.store.list_cases(limit, offset, agent_id)
+    }
+
+    /// Returns a mapping from (agent_id, policy_id) to the most recent case_id.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed persistence or stored-data error when the query fails.
+    pub fn case_index_by_agent_policy(&self) -> Result<HashMap<(String, String), Uuid>, AuditError> {
+        self.store.case_index_by_agent_policy()
     }
 
     /// Returns one risk case and its ordered immutable evidence.

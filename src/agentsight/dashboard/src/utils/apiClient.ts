@@ -173,6 +173,8 @@ export interface EnforcementViolation {
   occurred_at_ns: number;
   observed_at_ns: number;
   actplane_revision: string;
+  /** Correlated risk case id (enriched by the backend), when available. */
+  case_id?: string | null;
 }
 
 export interface FileBindingInput {
@@ -1629,7 +1631,7 @@ export async function fetchAuditSessions(
 }
 
 export async function fetchSecurityCases(
-  params?: { limit?: number; offset?: number },
+  params?: { limit?: number; offset?: number; agent_id?: string },
 ): Promise<SecurityApiResponse<SecurityPaginated<SecurityRiskCase>>> {
   return auditFetch<SecurityPaginated<SecurityRiskCase>>(
     `${API_BASE}/api/audit/cases${buildQuery(params)}`,
