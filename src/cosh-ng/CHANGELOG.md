@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.17.2] — 2026-08-19
+
+### Fixed
+- Cap `run_command` output at 32 MB to prevent out-of-memory kills from runaway commands such as `dd if=/dev/zero` or `yes`; when stdout or stderr exceeds the limit, the process group is killed and an `OutputTooLarge` error is returned instead of growing unbounded (#2405)
+- Make RPM `%post` /etc/shells registration idempotent by normalizing content and probing before appending, and add a `%preun` scriptlet that fails closed when users still reference `/usr/bin/cosh` as their login shell, preventing dangling shells after `rpm -e cosh-ng` (#2599)
+
 ## [0.17.1] — 2026-08-18
 
 ### Fixed
