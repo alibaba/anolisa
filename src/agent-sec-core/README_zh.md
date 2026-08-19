@@ -128,8 +128,9 @@ export OBSERVABILITY_HOOK_ENABLED=false
 修改后需重启对应宿主进程。
 
 `OBSERVABILITY_TIMEOUT` 控制每次本地 PII 脱敏和 Observability 数据写入 CLI 调用的超时秒数。
-默认值为 `5`；未设置、空值、非法值或非正数同样使用 `5`。所有集成都会将大于 `5` 的值
-封顶为 `5`。
+其余五个非 Hermes 集成默认使用 `5`；未设置、为空、非法或非正数时也使用 `5`。
+Hermes 则回退到 Observability capability 的 `timeout`，并将其封顶为 `5`；有效环境变量
+大于 `5` 时，所有集成都封顶为 `5`。
 
 对于 OpenClaw 和 Hermes，原有 Observability capability 的 `enabled` 配置仍是独立开关。
 任一开关关闭都会停止记录；将该环境变量设为 `true`，不会重新启用已在插件配置中关闭的

@@ -133,9 +133,10 @@ whitespace). An unset or invalid value keeps the hook enabled. Restart the host
 after changing it.
 
 `OBSERVABILITY_TIMEOUT` sets the timeout in seconds for each local PII
-redaction and observability record CLI call. It defaults to `5`; an unset,
-empty, invalid, or non-positive value also uses `5`. Every integration caps
-larger values at `5`.
+redaction and observability record CLI call. The five non-Hermes integrations
+default to `5` and use `5` for an unset, empty, invalid, or non-positive value.
+Hermes instead falls back to its observability capability `timeout`, bounded to
+at most `5`. Every integration caps a valid environment value above `5` at `5`.
 
 For OpenClaw and Hermes, the existing observability capability `enabled` setting
 remains an independent gate. Either switch can disable recording; setting this
