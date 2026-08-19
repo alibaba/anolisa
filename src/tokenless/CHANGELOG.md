@@ -9,6 +9,21 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.7.10] - 2026-08-19
+
+### Added
+
+- Gemini-native `functionDeclarations` tool schemas are now compressed in `BeforeModel` integrations such as copilot-shell, including declarations that use `parametersJsonSchema`, while preserving unrelated Gemini Tool fields ([#2663](https://github.com/alibaba/anolisa/pull/2663)).
+- The `anolisa-tokenless` Python SDK now exposes typed, read-only status, summary, list, show, diff, and comparison queries through `TokenlessStats`, using the same Runtime data directory and returning stored tool content only for explicit show and diff calls ([#2666](https://github.com/alibaba/anolisa/pull/2666)).
+
+### Changed
+
+- Raw, RPM, npm, and source installations no longer build or ship the unused standalone `toon` executable; TOON encoding remains available through `tokenless compress-toon` and `tokenless decompress-toon`, and upgrades remove only Tokenless-owned legacy artifacts ([#2657](https://github.com/alibaba/anolisa/pull/2657)).
+
+### Fixed
+
+- The AgentScope integration wheel now declares `tqdm`, so clean installations using the supported AgentScope 1.x range continue to import with OpenAI 3.3.0 and later without a manual dependency workaround ([#2665](https://github.com/alibaba/anolisa/pull/2665)).
+
 ## [0.7.9] - 2026-08-18
 
 ### Added

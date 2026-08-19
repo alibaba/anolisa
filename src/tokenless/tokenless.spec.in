@@ -470,6 +470,12 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Wed Aug 19 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.10-1
+- feat(tokenless): compress Gemini tool schemas
+- feat(tokenless): expose Python stats queries
+- refactor(tokenless): remove the standalone toon binary
+- fix(tokenless): declare tqdm for AgentScope 1.x
+
 * Tue Aug 18 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.9-1
 - feat(tokenless): add the framework-neutral Python SDK
 - feat(tokenless): attach full SDK lifecycles to AgentScope

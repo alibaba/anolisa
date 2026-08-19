@@ -9,6 +9,21 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.7.10] - 2026-08-19
+
+### 新增
+
+- Gemini 原生 `functionDeclarations` 工具 Schema 现在可在 copilot-shell 等 `BeforeModel` 集成中压缩，包括使用 `parametersJsonSchema` 的声明，同时保留无关的 Gemini Tool 字段（[#2663](https://github.com/alibaba/anolisa/pull/2663)）。
+- `anolisa-tokenless` Python SDK 现在通过 `TokenlessStats` 开放类型化的只读 Status、Summary、List、Show、Diff 和 Comparison 查询，复用同一个 Runtime 数据目录，并且只在显式 Show 和 Diff 调用中返回已存储的 Tool 内容（[#2666](https://github.com/alibaba/anolisa/pull/2666)）。
+
+### 变更
+
+- Raw、RPM、npm 和源码安装不再构建或提供未使用的独立 `toon` 可执行文件；TOON 编码仍可通过 `tokenless compress-toon` 与 `tokenless decompress-toon` 使用，升级时只清理 Tokenless 所属的旧版残留文件（[#2657](https://github.com/alibaba/anolisa/pull/2657)）。
+
+### 修复
+
+- AgentScope 集成 Wheel 现在声明 `tqdm` 依赖，因此使用受支持 AgentScope 1.x 范围的全新安装在搭配 OpenAI 3.3.0 及更高版本时可以直接导入，无需手动补装依赖（[#2665](https://github.com/alibaba/anolisa/pull/2665)）。
+
 ## [0.7.9] - 2026-08-18
 
 ### 新增
