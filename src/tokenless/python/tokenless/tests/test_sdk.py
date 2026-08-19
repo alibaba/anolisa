@@ -237,6 +237,14 @@ class TokenlessSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(await sdk.after_tool_call(result), result)
         sdk._compress_toon.assert_not_awaited()
 
+    def test_stats_client_is_lazy_and_uses_runtime_data_dir(self) -> None:
+        sdk = self.sdk(rtk_enabled=False)
+        self.assertIsNone(sdk._stats)
+
+        stats = sdk.stats
+        self.assertIs(stats, sdk.stats)
+        self.assertEqual(stats.status.data_dir, sdk.runtime.data_dir)
+
 
 if __name__ == "__main__":
     unittest.main()

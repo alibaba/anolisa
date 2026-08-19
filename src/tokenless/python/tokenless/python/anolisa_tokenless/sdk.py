@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from anolisa_tokenless._native import TokenlessError, TokenlessRuntime
+from anolisa_tokenless.stats import TokenlessStats
 from anolisa_tokenless.tool_response import TokenlessConfig, ToolResponseCompressor
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,14 @@ class TokenlessSdk:
         self.runtime = TokenlessRuntime(self.config.data_dir)
         self._response = ToolResponseCompressor(self.config, runtime=self.runtime)
         self._rtk_path = self._resolve_rtk() if self.config.rtk_enabled else None
+        self._stats: TokenlessStats | None = None
+
+    @property
+    def stats(self) -> TokenlessStats:
+        """Return a lazy query client bound to this SDK's state directory."""
+        if self._stats is None:
+            self._stats = TokenlessStats(self.runtime.data_dir)
+        return self._stats
 
     async def before_model(self, request: ModelRequest) -> ModelRequest:
         """Compress function schemas and publish retrieve only when usable."""

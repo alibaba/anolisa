@@ -11,12 +11,18 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from importlib.metadata import distribution
 from pathlib import Path
+from unittest.mock import patch
 
 from anolisa_tokenless import (
     RetrievalError,
+    StatsDiffSort,
+    StatsMode,
+    StatsNotFoundError,
+    StatsOperation,
     TokenlessConfig,
     TokenlessError,
     TokenlessRuntime,
+    TokenlessStats,
     ToolResponseCompressor,
     __version__,
 )
@@ -166,6 +172,143 @@ class TokenlessRuntimeTests(unittest.TestCase):
         self.assertEqual(compressor.thresholds_for("Bash"), (65_536, 128, 8))
         with self.assertRaisesRegex(ValueError, "absolute path"):
             TokenlessConfig(data_dir="relative")
+
+    def test_stats_query_empty_database_and_invalid_path(self) -> None:
+        data_dir = Path(self.temporary_directory.name, "empty-stats")
+        stats = TokenlessStats(data_dir)
+
+        self.assertTrue(stats.status.available)
+        self.assertEqual(stats.status.records, 0)
+        self.assertEqual(stats.summary().total.records, 0)
+        self.assertEqual(stats.list(), ())
+        with patch.dict("os.environ", {"TOKENLESS_DATA_DIR": str(data_dir)}):
+            self.assertEqual(TokenlessStats().status.data_dir, str(data_dir))
+        with self.assertRaisesRegex(ValueError, "absolute path"):
+            TokenlessStats("relative")
+
+    def test_stats_query_full_read_only_surface(self) -> None:
+        data_dir = Path(self.temporary_directory.name, "stats-query")
+        original = self.long_response("STATS-SENTINEL")
+        baseline = TokenlessRuntime(
+            data_dir,
+            compression_enabled=False,
+            stats_enabled=True,
+        )
+        baseline_result = baseline.compress_response(
+            original,
+            truncate_arrays_at=2,
+            agent_id="python-stats",
+            session_id="baseline-session",
+            tool_use_id="tool-baseline",
+        )
+        self.assertEqual(baseline_result.disposition, "dry-run")
+        del baseline
+
+        active = TokenlessRuntime(data_dir, stats_enabled=True)
+        active_result = active.compress_response(
+            original,
+            truncate_arrays_at=2,
+            agent_id="python-stats",
+            session_id="tokenless-session",
+            tool_use_id="tool-active",
+        )
+        self.assertTrue(active_result.applied)
+
+        stats = TokenlessStats(data_dir)
+        status = stats.status
+        self.assertTrue(status.available)
+        self.assertEqual(status.records, 2)
+        self.assertEqual(Path(status.data_dir), data_dir)
+
+        summary = stats.summary()
+        self.assertEqual(summary.total.records, 2)
+        self.assertGreater(summary.total.tokens_saved, 0)
+        self.assertIn(StatsOperation.COMPRESS_RESPONSE, summary.by_operation)
+        self.assertEqual(stats.summary(limit=1).total.records, 1)
+
+        records = stats.list()
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0].session_id, "tokenless-session")
+        self.assertEqual(records[0].mode, StatsMode.ACTIVE)
+        self.assertIsNone(records[0].before_text)
+        self.assertIsNone(records[0].after_text)
+        self.assertEqual(len(stats.list(limit=1)), 1)
+
+        shown = stats.show(records[0].id)
+        self.assertEqual(shown.before_text, original)
+        self.assertIsNotNone(shown.after_text)
+        self.assertGreater(shown.tokens_saved, 0)
+        with self.assertRaises(StatsNotFoundError):
+            stats.show(9_999_999)
+
+        record_diff = stats.diff(record_id=shown.id, context=1)
+        self.assertEqual(record_diff.scope.kind, "record")
+        self.assertEqual(record_diff.scope.record_id, shown.id)
+        self.assertIsNotNone(record_diff.chains[0].diff)
+
+        session_diff = stats.diff(
+            session_id="tokenless-session",
+            limit=1,
+            sort=StatsDiffSort.TIME,
+        )
+        self.assertEqual(session_diff.scope.kind, "session")
+        self.assertEqual(len(session_diff.chains), 1)
+        self.assertIsNone(session_diff.chains[0].diff)
+
+        tool_diff = stats.diff(
+            session_id="tokenless-session",
+            tool_use_id="tool-active",
+            context=0,
+        )
+        self.assertEqual(tool_diff.scope.kind, "tool-use")
+        self.assertEqual(tool_diff.scope.tool_use_id, "tool-active")
+        self.assertIsNotNone(tool_diff.chains[0].diff)
+
+        comparison = stats.compare("baseline-session", "tokenless-session")
+        self.assertGreater(comparison.baseline_tokens, comparison.tokenless_tokens)
+        self.assertGreater(comparison.saved_tokens, 0)
+        self.assertIn(
+            StatsOperation.COMPRESS_RESPONSE,
+            comparison.baseline_by_operation,
+        )
+
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            stats.diff()
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            stats.diff(record_id=shown.id, session_id="tokenless-session")
+        with self.assertRaisesRegex(ValueError, "requires session_id"):
+            stats.diff(record_id=shown.id, tool_use_id="tool-active")
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            stats.list(limit=0)
+        with self.assertRaisesRegex(ValueError, "record_id"):
+            stats.show(0)
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            stats.diff(record_id=shown.id, context=-1)
+        with self.assertRaises(ValueError):
+            stats.diff(record_id=shown.id, sort="invalid")
+        with self.assertRaises(StatsNotFoundError):
+            stats.diff(session_id="missing-session")
+        with self.assertRaisesRegex(
+            StatsNotFoundError,
+            "baseline session 'missing-session'",
+        ):
+            stats.compare("missing-session", "tokenless-session")
+        with self.assertRaisesRegex(
+            StatsNotFoundError,
+            "Tokenless session 'missing-session'",
+        ):
+            stats.compare("baseline-session", "missing-session")
+
+    def test_stats_query_reports_unavailable_database(self) -> None:
+        data_dir = Path(self.temporary_directory.name, "broken-stats-query")
+        data_dir.mkdir()
+        Path(data_dir, "stats.db").write_bytes(b"not a sqlite database")
+
+        stats = TokenlessStats(data_dir)
+        self.assertFalse(stats.status.available)
+        self.assertIsNotNone(stats.status.error)
+        with self.assertRaises(TokenlessError):
+            stats.summary()
 
     def test_invalid_json_raises_package_error(self) -> None:
         with self.assertRaisesRegex(TokenlessError, "JSON parse error"):

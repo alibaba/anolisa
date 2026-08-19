@@ -161,6 +161,24 @@ TOON 已链接进原生 Runtime，不依赖 Tokenless CLI 或系统 helper。仓
 PyPI。具体见 [Runtime 设计](docs/design/runtime-library_zh.md) 和
 [用户手册](../../docs/user-guide/zh/token-saving/tokenless/user-manual.md#从源码构建-python-runtime)。
 
+同一个 Wheel 还提供不依赖 CLI 的只读 typed Stats 查询。可以让 `TokenlessStats` 指向
+Runtime 使用的状态目录，或使用延迟创建的 `sdk.stats`：
+
+```python
+from anolisa_tokenless import TokenlessStats
+
+stats = TokenlessStats("/absolute/path/to/tokenless-data")
+summary = stats.summary()
+print(summary.total.tokens_saved, summary.total.tokens_saved_percent)
+```
+
+Token 数量是估算值，并且只有产生正向节省的操作才会记录。`show()` 和详细 `diff()`
+结果可能包含 `stats.db` 中保存的敏感工具输入与输出。这里的只读是指 API 能力；客户端
+打开时遵循 CLI 初始化流程，可能创建或迁移 `stats.db`，因此数据目录必须可写。
+`summary(limit=None)` 和 `compare(..., limit=None)` 最多查询最近 10,000 条记录；Session
+或 Tool-use Diff 最多读取最近 10,000 条匹配记录。要获得有意义的对比，应先传入 dry-run
+Session，再传入启用 Tokenless 的 Session。
+
 ### OpenCode 安装
 
 OpenCode 适配器通过 `tool.execute.before/after` 原生插件事件注册已硬关闭的 Tool Ready、

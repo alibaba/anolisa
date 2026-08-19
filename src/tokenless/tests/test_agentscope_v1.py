@@ -81,6 +81,7 @@ class _Toolkit:
 
 def _install_stubs() -> None:
     native = types.ModuleType("anolisa_tokenless._native")
+    native._StatsQuery = object
     native.CompressionResult = _CompressionResult
     native.TokenlessError = _TokenlessError
     native.TokenlessRuntime = _Runtime

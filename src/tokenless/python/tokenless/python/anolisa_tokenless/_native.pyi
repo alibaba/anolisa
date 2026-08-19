@@ -2,6 +2,29 @@ import os
 
 class TokenlessError(Exception): ...
 
+class _StatsQuery:
+    def __init__(self, data_dir: str | os.PathLike[str] | None = None) -> None: ...
+    def status_json(self) -> str: ...
+    def summary_json(self, limit: int | None = None) -> str: ...
+    def list_json(self, limit: int = 20) -> str: ...
+    def show_json(self, record_id: int) -> str | None: ...
+    def diff_json(
+        self,
+        *,
+        record_id: int | None = None,
+        session_id: str | None = None,
+        tool_use_id: str | None = None,
+        limit: int = 20,
+        sort: str = "saved",
+        context: int = 3,
+    ) -> str | None: ...
+    def compare_json(
+        self,
+        baseline_session_id: str,
+        tokenless_session_id: str,
+        limit: int | None = None,
+    ) -> str: ...
+
 class CompressionResult:
     @property
     def output(self) -> str: ...

@@ -322,6 +322,34 @@ python -m pip install \
   target/wheels/anolisa_tokenless_agentscope-*.whl
 ```
 
+The native wheel also exposes the same read-only statistics capabilities as
+the CLI through typed Python values:
+
+```python
+from anolisa_tokenless import TokenlessStats
+
+stats = TokenlessStats("/absolute/path/to/tenant-tokenless-data")
+
+status = stats.status
+summary = stats.summary()
+recent = stats.list(limit=20)
+record = stats.show(recent[0].id)
+session_diff = stats.diff(session_id="conversation-id")
+comparison = stats.compare("baseline-session", "tokenless-session")
+```
+
+`TokenlessSdk.stats` lazily returns a client bound to that SDK's data directory.
+Token counts are estimates and only operations with positive savings are
+recorded. `show()` and record/tool-use `diff()` results may contain sensitive
+tool input and output from `stats.db`; summary, list, and comparison results do
+not return stored content. The API cannot clear data or change recording
+settings. Read-only describes those public operations: opening the client
+follows CLI initialization and may create or migrate `stats.db`, so the data
+directory must be writable. `limit=None` for summary or comparison reads at most
+the newest 10,000 records. Session and tool-use diffs also read at most the
+newest 10,000 matching records. For a meaningful comparison, pass a dry-run
+baseline session first and an active Tokenless session second.
+
 Both major versions use `TokenlessAgentScope` and `TokenlessConfig`; only the
 final attachment step differs. AgentScope 1.x uses a Tokenless Toolkit whose
 regular and MCP registration paths also cover tools added after construction:

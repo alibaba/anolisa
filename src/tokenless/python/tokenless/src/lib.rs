@@ -1,12 +1,17 @@
 //! Python bindings for the in-process Tokenless runtime.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use pyo3::create_exception;
-use pyo3::exceptions::PyException;
+use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
 use tokenless_runtime::{
     Attribution, CompressOptions, CompressResult, RuntimeConfig, TokenlessRuntime as NativeRuntime,
+};
+use tokenless_stats::{
+    DiffSort, StatsRecord, StatsRecorder, ensure_state_dir, format_compare_json,
+    format_summary_json, get_home_dir, record_report, resolve_data_dir, session_report,
+    tool_use_report, validate_data_dir, validate_database_path,
 };
 
 create_exception!(_native, TokenlessError, PyException);
@@ -49,6 +54,211 @@ impl From<CompressResult> for PyCompressionResult {
 #[pyclass(name = "TokenlessRuntime")]
 struct PyTokenlessRuntime {
     inner: NativeRuntime,
+}
+
+/// Native query handle used by the typed Python statistics client.
+#[pyclass(name = "_StatsQuery")]
+struct PyStatsQuery {
+    data_dir: PathBuf,
+    database_path: PathBuf,
+    recorder: Option<StatsRecorder>,
+    error: Option<String>,
+}
+
+#[pymethods]
+impl PyStatsQuery {
+    #[new]
+    fn new(data_dir: Option<PathBuf>) -> PyResult<Self> {
+        let data_dir = match data_dir {
+            Some(path) => validate_data_dir(&path).map_err(to_value_error)?,
+            None => {
+                let home = get_home_dir();
+                let home = (!home.is_empty()).then(|| Path::new(&home));
+                let override_path = std::env::var("TOKENLESS_DATA_DIR").ok();
+                resolve_data_dir(home, override_path.as_deref()).map_err(to_python_error_message)?
+            }
+        };
+        let database_path = data_dir.join("stats.db");
+
+        let open_result = ensure_state_dir(&data_dir)
+            .map_err(|error| format!("cannot create stats directory: {error}"))
+            .and_then(|()| {
+                validate_database_path(&database_path, &[&data_dir])
+                    .map_err(|error| error.to_string())
+            })
+            .and_then(|path| StatsRecorder::new(path).map_err(|error| error.to_string()));
+        let (recorder, error) = match open_result {
+            Ok(recorder) => (Some(recorder), None),
+            Err(error) => (None, Some(error)),
+        };
+
+        Ok(Self {
+            data_dir,
+            database_path,
+            recorder,
+            error,
+        })
+    }
+
+    fn status_json(&self, py: Python<'_>) -> PyResult<String> {
+        let records = match self.recorder.as_ref() {
+            Some(recorder) => Some(
+                py.allow_threads(|| recorder.count())
+                    .map_err(to_stats_error)?,
+            ),
+            None => None,
+        };
+        Ok(serde_json::json!({
+            "data_dir": self.data_dir.to_string_lossy(),
+            "database_path": self.database_path.to_string_lossy(),
+            "available": self.recorder.is_some(),
+            "error": self.error,
+            "records": records,
+        })
+        .to_string())
+    }
+
+    #[pyo3(signature = (limit=None))]
+    fn summary_json(&self, py: Python<'_>, limit: Option<usize>) -> PyResult<String> {
+        let recorder = self.require_recorder()?;
+        let records = py
+            .allow_threads(|| recorder.all_records(limit))
+            .map_err(to_stats_error)?;
+        Ok(format_summary_json(&records, None))
+    }
+
+    #[pyo3(signature = (limit=20))]
+    fn list_json(&self, py: Python<'_>, limit: usize) -> PyResult<String> {
+        let recorder = self.require_recorder()?;
+        let records = py
+            .allow_threads(|| recorder.all_records(Some(limit)))
+            .map_err(to_stats_error)?;
+        let records = records.iter().map(record_metadata_json).collect::<Vec<_>>();
+        serde_json::to_string(&records).map_err(to_json_error)
+    }
+
+    fn show_json(&self, py: Python<'_>, record_id: i64) -> PyResult<Option<String>> {
+        let recorder = self.require_recorder()?;
+        let record = py
+            .allow_threads(|| recorder.record_by_id(record_id))
+            .map_err(to_stats_error)?;
+        record
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(to_json_error)
+    }
+
+    #[pyo3(signature = (
+        *,
+        record_id=None,
+        session_id=None,
+        tool_use_id=None,
+        limit=20,
+        sort="saved",
+        context=3
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn diff_json(
+        &self,
+        py: Python<'_>,
+        record_id: Option<i64>,
+        session_id: Option<String>,
+        tool_use_id: Option<String>,
+        limit: usize,
+        sort: &str,
+        context: usize,
+    ) -> PyResult<Option<String>> {
+        let recorder = self.require_recorder()?;
+        let report = match (record_id, session_id) {
+            (Some(record_id), None) => {
+                let record = py
+                    .allow_threads(|| recorder.record_by_id(record_id))
+                    .map_err(to_stats_error)?;
+                record.map(|record| record_report(&record, context))
+            }
+            (None, Some(session_id)) => {
+                let records = py
+                    .allow_threads(|| {
+                        recorder.records_for_diff(&session_id, tool_use_id.as_deref())
+                    })
+                    .map_err(to_stats_error)?;
+                if records.is_empty() {
+                    None
+                } else if let Some(tool_use_id) = tool_use_id {
+                    Some(tool_use_report(
+                        &records,
+                        &session_id,
+                        &tool_use_id,
+                        context,
+                    ))
+                } else {
+                    let sort = match sort {
+                        "saved" => DiffSort::Saved,
+                        "time" => DiffSort::Time,
+                        _ => {
+                            return Err(PyValueError::new_err(
+                                "sort must be either 'saved' or 'time'",
+                            ));
+                        }
+                    };
+                    Some(session_report(&records, &session_id, limit, sort))
+                }
+            }
+            _ => {
+                return Err(PyValueError::new_err(
+                    "specify exactly one of record_id or session_id",
+                ));
+            }
+        };
+        report
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(to_json_error)
+    }
+
+    #[pyo3(signature = (baseline_session_id, tokenless_session_id, limit=None))]
+    fn compare_json(
+        &self,
+        py: Python<'_>,
+        baseline_session_id: &str,
+        tokenless_session_id: &str,
+        limit: Option<usize>,
+    ) -> PyResult<String> {
+        let recorder = self.require_recorder()?;
+        let (baseline, tokenless) = py
+            .allow_threads(|| {
+                let baseline = recorder.records_by_session(baseline_session_id, limit)?;
+                let tokenless = recorder.records_by_session(tokenless_session_id, limit)?;
+                Ok::<_, tokenless_stats::StatsError>((baseline, tokenless))
+            })
+            .map_err(to_stats_error)?;
+        let mut missing_sessions = Vec::new();
+        if baseline.is_empty() {
+            missing_sessions.push("baseline");
+        }
+        if tokenless.is_empty() {
+            missing_sessions.push("tokenless");
+        }
+        if !missing_sessions.is_empty() {
+            return Ok(serde_json::json!({ "missing_sessions": missing_sessions }).to_string());
+        }
+        Ok(format_compare_json(&baseline, &tokenless))
+    }
+}
+
+impl PyStatsQuery {
+    fn require_recorder(&self) -> PyResult<&StatsRecorder> {
+        self.recorder.as_ref().ok_or_else(|| {
+            TokenlessError::new_err(
+                self.error
+                    .as_deref()
+                    .unwrap_or("statistics database is unavailable")
+                    .to_string(),
+            )
+        })
+    }
 }
 
 #[pymethods]
@@ -217,11 +427,52 @@ fn to_python_error(error: tokenless_runtime::RuntimeError) -> PyErr {
     TokenlessError::new_err(error.to_string())
 }
 
+fn to_python_error_message(error: impl std::fmt::Display) -> PyErr {
+    TokenlessError::new_err(error.to_string())
+}
+
+fn to_value_error(error: impl std::fmt::Display) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+fn to_stats_error(error: tokenless_stats::StatsError) -> PyErr {
+    TokenlessError::new_err(error.to_string())
+}
+
+fn to_json_error(error: serde_json::Error) -> PyErr {
+    TokenlessError::new_err(format!("cannot serialize statistics result: {error}"))
+}
+
+fn record_metadata_json(record: &StatsRecord) -> serde_json::Value {
+    serde_json::json!({
+        "id": record.id,
+        "timestamp": record.timestamp,
+        "operation": record.operation,
+        "agent_id": record.agent_id,
+        "source_pid": record.source_pid,
+        "session_id": record.session_id,
+        "tool_use_id": record.tool_use_id,
+        "before_chars": record.before_chars,
+        "before_tokens": record.before_tokens,
+        "after_chars": record.after_chars,
+        "after_tokens": record.after_tokens,
+        "before_text": null,
+        "after_text": null,
+        "before_output": null,
+        "after_output": null,
+        "mode": record.mode,
+        "stash_writes": record.stash_writes,
+        "stash_errors": record.stash_errors,
+        "stash_size": record.stash_size,
+    })
+}
+
 /// Register the native Tokenless module.
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyTokenlessRuntime>()?;
     module.add_class::<PyCompressionResult>()?;
+    module.add_class::<PyStatsQuery>()?;
     module.add("TokenlessError", module.py().get_type::<TokenlessError>())?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

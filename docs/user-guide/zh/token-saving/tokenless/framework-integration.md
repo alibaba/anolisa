@@ -316,6 +316,30 @@ python -m pip install \
   target/wheels/anolisa_tokenless_agentscope-*.whl
 ```
 
+原生 Wheel 还通过 typed Python 对象开放与 CLI 相同的只读 Stats 查询能力：
+
+```python
+from anolisa_tokenless import TokenlessStats
+
+stats = TokenlessStats("/absolute/path/to/tenant-tokenless-data")
+
+status = stats.status
+summary = stats.summary()
+recent = stats.list(limit=20)
+record = stats.show(recent[0].id)
+session_diff = stats.diff(session_id="conversation-id")
+comparison = stats.compare("baseline-session", "tokenless-session")
+```
+
+`TokenlessSdk.stats` 会延迟返回绑定该 SDK 数据目录的客户端。Token 数量是估算值，并且
+只有产生正向节省的操作才会记录。`show()` 和 Record/Tool-use 的 `diff()` 结果可能包含
+`stats.db` 中保存的敏感工具输入与输出；Summary、List 和 Compare 不返回保存的内容。
+该 API 不能清空数据或修改记录开关。这里的只读是指这些公开操作；打开客户端时遵循
+CLI 初始化流程，可能创建或迁移 `stats.db`，所以数据目录必须可写。Summary 或 Compare
+未指定 Limit 时，最多读取最近 10,000 条记录；Session 和 Tool-use Diff 同样最多读取
+最近 10,000 条匹配记录。要获得有意义的对比，应先传入 dry-run Baseline Session，再
+传入启用 Tokenless 的 Session。
+
 两个大版本都使用 `TokenlessAgentScope` 和 `TokenlessConfig`，只有最后的挂载方式不同。
 AgentScope 1.x 使用 Tokenless Toolkit；普通工具与 MCP 注册入口也会覆盖构造后新增的工具：
 

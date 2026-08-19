@@ -861,7 +861,9 @@ name = "tokenless-python"
 version = "0.7.9"
 dependencies = [
  "pyo3",
+ "serde_json",
  "tokenless-runtime",
+ "tokenless-stats",
 ]
 
 [[package]]

@@ -208,6 +208,28 @@ package is built and tested in this repository but is not yet published to
 PyPI. See the [runtime design](docs/design/runtime-library.md)
 and the [user manual](../../docs/user-guide/en/token-saving/tokenless/user-manual.md#build-the-python-runtime-from-source).
 
+The same wheel provides typed, read-only statistics queries without requiring
+the CLI. Point `TokenlessStats` at the state directory used by the runtime, or
+use the lazy `sdk.stats` client:
+
+```python
+from anolisa_tokenless import TokenlessStats
+
+stats = TokenlessStats("/absolute/path/to/tokenless-data")
+summary = stats.summary()
+print(summary.total.tokens_saved, summary.total.tokens_saved_percent)
+```
+
+Token counts are estimates and only operations with positive savings are
+recorded. `show()` and detailed `diff()` results may contain sensitive tool
+input and output stored in `stats.db`. Read-only describes the API surface:
+opening the client follows CLI initialization and may create or migrate
+`stats.db`, so the data directory must be writable. `summary(limit=None)` and
+`compare(..., limit=None)` inspect at most the newest 10,000 records. For a
+session or tool-use diff, at most the newest 10,000 matching records are read.
+For a meaningful comparison, pass a dry-run session first and an active
+Tokenless session second.
+
 ## CLI Usage
 
 ### compress-schema

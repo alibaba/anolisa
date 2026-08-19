@@ -39,13 +39,30 @@ SDK 不保存进程级“当前 Session”。`before_model` 返回精确的可�
 可选优化失败，会告警并保留原值。候选只有严格更短时才会采用；Schema 和响应截断还必须
 能够恢复。
 
+## Stats 查询
+
+`TokenlessStats` 是只读的公开查询客户端，复用 CLI 相同的 Rust `StatsRecorder` 和
+`stats.db` Schema。它提供 typed 的状态、汇总、最近记录、记录详情、结构化 Diff 和
+baseline 对比结果。`TokenlessSdk.stats` 会针对 Runtime 数据目录延迟创建该客户端，
+因此 Stats 数据库损坏不会改变生命周期初始化或压缩侧的 fail-open 行为。这里的只读是
+指公开操作；为与 CLI 保持一致，打开客户端时可能创建或迁移 `stats.db`，所以数据目录
+必须可写。
+
+Summary、List 和 Compare 只开放指标；记录详情以及 Record/Tool-use 的详细 Diff 可能
+包含保存的工具内容，并继续遵守现有 1 MiB 输入和 500 行 Diff 上限。Token 数量是估算值，
+Runtime 只记录候选确实减少估算 Token 的操作。Summary 或 Compare 未指定 Limit 时，
+使用 Recorder 的 10,000 条记录上限；Session 和 Tool-use Diff 同样最多加载最近 10,000
+条匹配记录。Compare 预期先传入 dry-run Baseline Session，再传入启用 Tokenless 的
+Session；客户端不会推断或强制这两种模式。Python API 不清空数据，也不修改全局记录
+开关。
+
 ## 打包与验证
 
 `make python-wheel` 会构建固定版本 RTK，把它暂存为
 `anolisa_tokenless/_bin/rtk`，再生成 CPython 3.11 stable ABI 平台 Wheel。跨平台构建器
 可以通过 `PYTHON_RTK_BINARY` 指定为同一 Wheel 目标构建的 RTK 文件。
 `make test-python-runtime` 会在全新环境安装 Wheel，并在不依赖系统 RTK 的条件下验证
-四个生命周期。
+四个生命周期和 Stats 查询。
 
 `anolisa-tokenless-agentscope` 支持 AgentScope 1.0.11 至 1.0.x 和 2.0.x。1.x Adapter
 使用 Tokenless Toolkit、模型代理和公开的实例 Hook；2.x Adapter 使用 `on_model_call`
