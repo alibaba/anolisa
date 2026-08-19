@@ -50,15 +50,20 @@ run_smoke() {
     local venv="$TEST_ROOT/$venv_name"
 
     uv venv --python python3 "$venv" >/dev/null
-    uv pip install --python "$venv/bin/python" \
-        "$agentscope_requirement" \
-        "${RUNTIME_WHEELS[0]}" "${INTEGRATION_WHEELS[0]}" >/dev/null
+    local extra_requirements=()
+    local smoke_script="$ROOT/tests/agentscope_integration_smoke.py"
     if [[ "$agentscope_requirement" == agentscope==1.* \
         || "$agentscope_requirement" == 'agentscope>=1.0.11,<1.1' ]]; then
-        "$venv/bin/python" "$ROOT/tests/agentscope_v1_integration_smoke.py"
-    else
-        "$venv/bin/python" "$ROOT/tests/agentscope_integration_smoke.py"
+        # AgentScope 1.x imports tqdm at package import time without
+        # declaring it; it used to arrive transitively through openai,
+        # which dropped the tqdm dependency in openai 3.3.0.
+        extra_requirements+=(tqdm)
+        smoke_script="$ROOT/tests/agentscope_v1_integration_smoke.py"
     fi
+    uv pip install --python "$venv/bin/python" \
+        "$agentscope_requirement" "${extra_requirements[@]}" \
+        "${RUNTIME_WHEELS[0]}" "${INTEGRATION_WHEELS[0]}" >/dev/null
+    "$venv/bin/python" "$smoke_script"
     "$venv/bin/python" - <<'PY'
 import agentscope
 
