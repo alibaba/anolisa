@@ -296,8 +296,9 @@ agent-sec-cli harden --downstream-help
 `true` / `false`（忽略大小写和首尾空白）；未设置或值无效时保持默认开启。
 
 `OBSERVABILITY_TIMEOUT` 控制每次本地 PII 脱敏和 Observability 数据写入 CLI 调用的超时秒数。
-默认值为 `5`；未设置、空值、非法值或非正数同样使用 `5`。所有集成都会将大于 `5` 的值
-封顶为 `5`。
+其余五个非 Hermes 集成默认使用 `5`；未设置、为空、非法或非正数时也使用 `5`。
+Hermes 则回退到 Observability capability 的 `timeout`，并将其封顶为 `5`；有效环境变量
+大于 `5` 时，所有集成都封顶为 `5`。
 
 对于 OpenClaw 和 Hermes，原有 Observability capability 的 `enabled` 配置仍是独立开关。
 任一开关关闭都会停止记录；`OBSERVABILITY_HOOK_ENABLED=true` 不会覆盖插件配置中已关闭的
@@ -415,8 +416,10 @@ capability，`<CAPABILITY>_MODE` 决定 finding 的处置方式；`debug` 是 `o
 | `OBSERVABILITY_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `OBSERVABILITY_TIMEOUT` | `5` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-`OBSERVABILITY_TIMEOUT` 未设置、为空、非法或非正数时使用 `5` 秒；所有集成都会将
-大于 `5` 的值封顶为 `5`。
+矩阵中的默认值 `5` 与其余五个非 Hermes 集成及 Hermes 随附配置一致。对于 Hermes，
+`OBSERVABILITY_TIMEOUT` 未设置、为空、非法或非正数时，会回退到 Observability capability
+的 `timeout` 并封顶为 `5`，因此更低的 capability 配置值仍然生效。有效环境变量大于 `5`
+时，所有集成都封顶为 `5`。
 
 若某宿主不读取某个变量，则由该宿主的原生配置决定行为。例如 OpenClaw 的 prompt
 策略来自 `promptScanBlock`、code-scan 策略来自 `codeScanRequireApproval`；Hermes 则

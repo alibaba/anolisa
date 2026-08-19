@@ -307,9 +307,10 @@ restart the host after changing it. The variable accepts only `true` / `false`
 recording enabled.
 
 `OBSERVABILITY_TIMEOUT` sets the timeout in seconds for each local PII
-redaction and observability record CLI call. It defaults to `5`; an unset,
-empty, invalid, or non-positive value also uses `5`. Every integration caps
-larger values at `5`.
+redaction and observability record CLI call. The five non-Hermes integrations
+default to `5`; an unset, empty, invalid, or non-positive value also uses `5`.
+Hermes instead falls back to its observability capability `timeout`, bounded to
+at most `5`. Every integration caps a valid environment value above `5` at `5`.
 
 For OpenClaw and Hermes, the existing observability capability `enabled` setting
 is an independent gate. Either switch can disable recording;
@@ -430,8 +431,11 @@ adapter code actually reads (✓ = read by that host, ✗ = not read):
 | `OBSERVABILITY_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `OBSERVABILITY_TIMEOUT` | `5` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-`OBSERVABILITY_TIMEOUT` uses `5` seconds when unset, empty, invalid, or non-positive;
-values above `5` are capped at `5` by every integration.
+The matrix default is `5`, matching the five non-Hermes integrations and the
+bundled Hermes configuration. For Hermes, an unset, empty, invalid, or
+non-positive `OBSERVABILITY_TIMEOUT` falls back to the observability capability
+`timeout`, bounded to at most `5`; a lower configured value therefore remains
+effective. Every integration caps a valid environment value above `5` at `5`.
 
 Where a variable is not read by a host, that host's native configuration governs
 the behavior. For example OpenClaw takes its prompt policy from
