@@ -879,8 +879,7 @@ impl BackendSpawner for MockSpawner {
     async fn restore(&self, request: BackendRestoreRequest) -> RestoreResult {
         let RestoreRequest {
             instance_id,
-            snapshot_path,
-            mem_path,
+            payload_dir,
             checkpoint_backend,
             expected_version,
             snapshot_kind,
@@ -895,7 +894,7 @@ impl BackendSpawner for MockSpawner {
                     .to_string(),
             }));
         }
-        let vmstate: serde_json::Value = match tokio::fs::read(&snapshot_path)
+        let vmstate: serde_json::Value = match tokio::fs::read(payload_dir.join("vmstate.snap"))
             .await
             .map_err(BlazeError::from)
             .and_then(|bytes| {
@@ -917,7 +916,7 @@ impl BackendSpawner for MockSpawner {
                 msg: "mock VM state does not match the requested sandbox".to_string(),
             }));
         }
-        match tokio::fs::read(&mem_path).await {
+        match tokio::fs::read(payload_dir.join("memory.snap")).await {
             Ok(bytes) if bytes == b"blaze-mock-memory-v1" => spawn_mock_instance(instance_id)
                 .await
                 .map_err(SpawnFailure::from),
@@ -1009,14 +1008,10 @@ impl BackendInstance for MockInstance {
     }
 
     async fn snapshot(&self, request: SnapshotRequest) -> Result<()> {
-        for path in [&request.snapshot_path, &request.mem_path] {
-            if let Some(parent) = path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-            {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-        }
+        // The mock keeps the classic VM shape — two named files in the root
+        // of its payload subtree — so flat payloads stay covered next to the
+        // directory-shaped guest mock.
+        tokio::fs::create_dir_all(&request.payload_dir).await?;
         let vmstate = serde_json::to_vec(&serde_json::json!({
             "format": "blaze-mock-v1",
             "instance_id": self.instance_id,
@@ -1025,8 +1020,12 @@ impl BackendInstance for MockInstance {
         .map_err(|error| BlazeError::BackendError {
             msg: format!("serialize mock VM state: {error}"),
         })?;
-        tokio::fs::write(&request.snapshot_path, vmstate).await?;
-        tokio::fs::write(&request.mem_path, b"blaze-mock-memory-v1").await?;
+        tokio::fs::write(request.payload_dir.join("vmstate.snap"), vmstate).await?;
+        tokio::fs::write(
+            request.payload_dir.join("memory.snap"),
+            b"blaze-mock-memory-v1",
+        )
+        .await?;
         Ok(())
     }
 
@@ -1058,7 +1057,94 @@ impl BackendSpawner for GuestMockSpawner {
         &self,
         request: BackendSpawnRequest,
     ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
-        spawn_guest_mock_instance(request.instance_id, &request.run_dir)
+        spawn_guest_mock_instance(request.instance_id, &request.run_dir, HashMap::new())
+            .await
+            .map_err(SpawnFailure::from)
+    }
+
+    async fn restore_capability(
+        &self,
+        _executable: Option<&PinnedExecutable>,
+    ) -> Result<Option<RestoreCapability>> {
+        Ok(Some(RestoreCapability {
+            backend: BackendKind::Mock,
+            version: Some("guest-mock-v1".to_string()),
+            snapshot_kind: blaze_core::backend::SnapshotKind::Full,
+        }))
+    }
+
+    /// Restore from the directory-shaped payload written by
+    /// [`GuestMockInstance::snapshot`], proving the payload contract carries
+    /// a container-backend layout end to end.
+    async fn restore(&self, request: BackendRestoreRequest) -> RestoreResult {
+        let run_dir = request.run_dir.clone();
+        let RestoreRequest {
+            instance_id,
+            payload_dir,
+            checkpoint_backend,
+            expected_version,
+            snapshot_kind,
+            ..
+        } = request.request;
+        if checkpoint_backend != BackendKind::Mock
+            || expected_version.as_deref() != Some("guest-mock-v1")
+            || snapshot_kind != blaze_core::backend::SnapshotKind::Full
+        {
+            return Err(SpawnFailure::clean(BlazeError::BackendError {
+                msg: "guest mock checkpoint identity is incompatible with the restore adapter"
+                    .to_string(),
+            }));
+        }
+        let read_json = |path: PathBuf| async move {
+            tokio::fs::read(&path)
+                .await
+                .map_err(BlazeError::from)
+                .and_then(|bytes| {
+                    serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|error| {
+                        BlazeError::BackendError {
+                            msg: format!("decode guest mock payload {}: {error}", path.display()),
+                        }
+                    })
+                })
+        };
+        let vmstate = match read_json(payload_dir.join("image/checkpoint.img")).await {
+            Ok(vmstate) => vmstate,
+            Err(error) => return Err(SpawnFailure::clean(error)),
+        };
+        if vmstate.get("format").and_then(serde_json::Value::as_str) != Some("blaze-guest-mock-v1")
+            || vmstate
+                .get("instance_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(instance_id.to_string().as_str())
+        {
+            return Err(SpawnFailure::clean(BlazeError::BackendError {
+                msg: "guest mock VM state does not match the requested sandbox".to_string(),
+            }));
+        }
+        let spec = match read_json(payload_dir.join("bundle/config.json")).await {
+            Ok(spec) => spec,
+            Err(error) => return Err(SpawnFailure::clean(error)),
+        };
+        if spec.get("instance_id").and_then(serde_json::Value::as_str)
+            != Some(instance_id.to_string().as_str())
+        {
+            return Err(SpawnFailure::clean(BlazeError::BackendError {
+                msg: "guest mock spec does not match the requested sandbox".to_string(),
+            }));
+        }
+        let files: HashMap<String, Vec<u8>> =
+            match tokio::fs::read(payload_dir.join("image/pages.bin"))
+                .await
+                .map_err(BlazeError::from)
+                .and_then(|bytes| {
+                    serde_json::from_slice(&bytes).map_err(|error| BlazeError::BackendError {
+                        msg: format!("decode guest mock memory: {error}"),
+                    })
+                }) {
+                Ok(files) => files,
+                Err(error) => return Err(SpawnFailure::clean(error)),
+            };
+        spawn_guest_mock_instance(instance_id, &run_dir, files)
             .await
             .map_err(SpawnFailure::from)
     }
@@ -1086,6 +1172,7 @@ struct GuestMockInstance {
 async fn spawn_guest_mock_instance(
     instance_id: Uuid,
     run_dir: &OwnedRunDir,
+    files: HashMap<String, Vec<u8>>,
 ) -> Result<DynBackendInstance> {
     let socket = run_dir.path().join("vsock.uds");
     if socket.exists() {
@@ -1094,7 +1181,7 @@ async fn spawn_guest_mock_instance(
     let listener = UnixListener::bind(&socket)?;
     let cancellation = CancellationToken::new();
     let task_token = cancellation.clone();
-    let files = Arc::new(Mutex::new(HashMap::new()));
+    let files = Arc::new(Mutex::new(files));
     let task_files = files.clone();
     let task = tokio::spawn(async move {
         loop {
@@ -1178,6 +1265,13 @@ impl BackendInstance for GuestMockInstance {
     }
 
     async fn snapshot(&self, request: SnapshotRequest) -> Result<()> {
+        // Directory-shaped payload mirroring a runsc checkpoint: an image
+        // directory plus the spec copied beside it. This is the layout the
+        // payload contract must be able to carry for container backends.
+        let image_dir = request.payload_dir.join("image");
+        let bundle_dir = request.payload_dir.join("bundle");
+        tokio::fs::create_dir_all(&image_dir).await?;
+        tokio::fs::create_dir_all(&bundle_dir).await?;
         let vmstate = serde_json::to_vec(&serde_json::json!({
             "format": "blaze-guest-mock-v1",
             "instance_id": self.instance_id,
@@ -1191,8 +1285,16 @@ impl BackendInstance for GuestMockInstance {
                 msg: format!("serialize guest mock memory: {error}"),
             }
         })?;
-        tokio::fs::write(&request.snapshot_path, vmstate).await?;
-        tokio::fs::write(&request.mem_path, memory).await?;
+        let spec = serde_json::to_vec(&serde_json::json!({
+            "format": "blaze-guest-mock-spec-v1",
+            "instance_id": self.instance_id,
+        }))
+        .map_err(|error| BlazeError::BackendError {
+            msg: format!("serialize guest mock spec: {error}"),
+        })?;
+        tokio::fs::write(image_dir.join("checkpoint.img"), vmstate).await?;
+        tokio::fs::write(image_dir.join("pages.bin"), memory).await?;
+        tokio::fs::write(bundle_dir.join("config.json"), spec).await?;
         Ok(())
     }
 
@@ -2144,12 +2246,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn guest_mock_directory_payload_round_trips() {
+        let temp = tempfile::tempdir().expect("temp");
+        let request = request(temp.path());
+        let instance_id = request.instance_id;
+        let binary_path = request.binary_path.clone();
+        let storage = request.storage.clone();
+        let run_dir = request.run_dir.clone();
+        let instance = spawn_with_runtime_directory(&GuestMockSpawner, request)
+            .await
+            .expect("spawn");
+        let client = GuestClient::new(
+            instance.guest_socket_path().to_path_buf(),
+            Duration::from_secs(1),
+            1024,
+        );
+        client
+            .write_file("/tmp/mark".into(), b"survives the payload")
+            .await
+            .expect("write guest state");
+
+        let payload_dir = temp.path().join("payload");
+        instance
+            .snapshot(SnapshotRequest {
+                payload_dir: payload_dir.clone(),
+                kind: SnapshotKind::Full,
+            })
+            .await
+            .expect("snapshot");
+        // The payload is a subtree, not a fixed file pair: the contract must
+        // carry a container-backend layout without renaming anything.
+        assert!(payload_dir.join("image/checkpoint.img").is_file());
+        assert!(payload_dir.join("image/pages.bin").is_file());
+        assert!(payload_dir.join("bundle/config.json").is_file());
+        // The captured host shape is probed while the owner is still alive,
+        // matching the generic restore transaction.
+        let preserve_network = instance.holds_network_slot();
+        let record_console_log = instance.records_console_log();
+        instance.kill().await.expect("kill");
+
+        let restore = RestoreRequest {
+            instance_id,
+            binary_path,
+            storage,
+            payload_dir,
+            checkpoint_backend: BackendKind::Mock,
+            expected_version: Some("guest-mock-v1".to_string()),
+            snapshot_kind: SnapshotKind::Full,
+            expose_guest_socket: true,
+            preserve_network,
+            record_console_log,
+        };
+        // The guest mock runs no pinned executable: it owns an in-process task
+        // rather than a backend binary.
+        let restore = BackendRestoreRequest::new(restore, run_dir, None).expect("restore request");
+        let restored = restore_with_runtime_directory(&GuestMockSpawner, restore)
+            .await
+            .expect("restore");
+        let client = GuestClient::new(
+            restored.guest_socket_path().to_path_buf(),
+            Duration::from_secs(1),
+            1024,
+        );
+        assert_eq!(
+            client
+                .read_file("/tmp/mark".into())
+                .await
+                .expect("read restored guest state"),
+            b"survives the payload"
+        );
+        restored.kill().await.expect("kill restored");
+    }
+
+    #[tokio::test]
     async fn checkpoint_capture_defaults_fail_closed() {
         let temp = tempfile::tempdir().expect("temp");
         let instance = UnsupportedInstance;
         let request = SnapshotRequest {
-            snapshot_path: temp.path().join("vmstate.snap"),
-            mem_path: temp.path().join("memory.snap"),
+            payload_dir: temp.path().join("payload"),
             kind: SnapshotKind::Full,
         };
 
@@ -2170,8 +2344,7 @@ mod tests {
             instance_id: spawn.instance_id,
             binary_path: spawn.binary_path.clone(),
             storage: spawn.storage.clone(),
-            snapshot_path: temp.path().join("vmstate.snap"),
-            mem_path: temp.path().join("memory.snap"),
+            payload_dir: temp.path().join("payload"),
             checkpoint_backend: BackendKind::Bubblewrap,
             expected_version: None,
             snapshot_kind: SnapshotKind::Full,
@@ -2206,8 +2379,9 @@ mod tests {
         let spawn = request(temp.path());
         let instance_id = spawn.instance_id;
         let instance = MockSpawner.spawn(spawn).await.expect("spawn");
-        let snapshot_path = temp.path().join("checkpoint/vmstate.snap");
-        let mem_path = temp.path().join("checkpoint/memory.snap");
+        let payload_dir = temp.path().join("checkpoint");
+        let snapshot_path = payload_dir.join("vmstate.snap");
+        let mem_path = payload_dir.join("memory.snap");
 
         assert_eq!(instance.instance_id(), instance_id);
         assert_eq!(instance.version(), Some("mock-v1"));
@@ -2215,8 +2389,7 @@ mod tests {
         instance.pause().await.expect("pause");
         instance
             .snapshot(SnapshotRequest {
-                snapshot_path: snapshot_path.clone(),
-                mem_path: mem_path.clone(),
+                payload_dir,
                 kind: SnapshotKind::Full,
             })
             .await

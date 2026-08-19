@@ -71,12 +71,18 @@ replaces an existing target.
 
 The checkpoint catalog is derived from the retained state-root directory. Each
 sandbox has private staging entries, committed checkpoint directories, and one
-HEAD reference. Publication verifies the required backend-state, memory, and
-writable-root artifacts, records their sizes and SHA-256 digests, synchronizes
-the files and directories, and publishes the checkpoint with a no-replace
-rename. HEAD is updated atomically only after that publication is durable.
-Listing reopens and validates committed manifests and artifacts before
-reporting history and HEAD reachability.
+HEAD reference. A checkpoint carries two producer-owned payload subtrees:
+`backend/`, whose internal layout is private to the backend adapter, and
+`storage/`, where the storage provider captures the writable root as
+`rootfs.snap`. Publication walks both subtrees, refuses symbolic links and
+non-regular files, requires the writable-root capture to be present, records
+every file's relative path, size, and SHA-256 digest as the manifest
+inventory, synchronizes the files and directories, and publishes the
+checkpoint with a no-replace rename. HEAD is updated atomically only after
+that publication is durable. Listing reopens committed manifests, and
+verification requires the directory contents and the manifest inventory to
+account for each other exactly before reporting history and HEAD
+reachability.
 
 Blocking file copies, manifest publication, and HEAD updates remain supervised
 after request cancellation and retain the sandbox operation lock until their

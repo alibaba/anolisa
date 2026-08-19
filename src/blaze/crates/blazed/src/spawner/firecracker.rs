@@ -63,7 +63,14 @@ fn snapshot_timeout(memory_bytes: u64) -> Duration {
     scaled.max(SNAPSHOT_TIMEOUT_FLOOR)
 }
 const CHECKPOINT_SCRATCH_PREFIX: &str = ".firecracker-checkpoint-";
-const CHECKPOINT_SCRATCH_FILES: [&str; 2] = ["vmstate.snap", "memory.snap"];
+/// Names the Firecracker payload subtree carries. The layout inside a payload
+/// belongs to the backend that wrote it, so these names are private to this
+/// adapter: capture writes both files and restore reads the same two back.
+/// The child-visible scratch is named from the same pair, so a transfer never
+/// has to translate between two layouts.
+const PAYLOAD_VM_STATE_FILE: &str = "vmstate.snap";
+const PAYLOAD_MEMORY_FILE: &str = "memory.snap";
+const CHECKPOINT_SCRATCH_FILES: [&str; 2] = [PAYLOAD_VM_STATE_FILE, PAYLOAD_MEMORY_FILE];
 
 /// Firecracker backend factory.
 pub struct FirecrackerSpawner {
@@ -561,8 +568,7 @@ impl BackendSpawner for FirecrackerSpawner {
             instance_id,
             binary_path,
             storage,
-            snapshot_path,
-            mem_path,
+            payload_dir,
             checkpoint_backend,
             expected_version,
             snapshot_kind,
@@ -578,8 +584,10 @@ impl BackendSpawner for FirecrackerSpawner {
             })
             .map_err(SpawnFailure::clean)?;
         let restore = FirecrackerRestore {
-            vm_state: snapshot_path,
-            memory: mem_path,
+            // The payload subtree is this adapter's own capture output, so the
+            // two files are addressed by the names capture wrote.
+            vm_state: payload_dir.join(PAYLOAD_VM_STATE_FILE),
+            memory: payload_dir.join(PAYLOAD_MEMORY_FILE),
             expected_version,
             checkpoint_backend,
             snapshot_kind,
@@ -849,12 +857,13 @@ impl BackendInstance for FirecrackerInstance {
             .map_err(FirecrackerApiError::into_error)
     }
 
-    /// Capture a full snapshot into the caller's destinations.
+    /// Capture a full snapshot into the payload subtree this backend owns.
     ///
     /// Firecracker writes snapshot files itself, and it runs inside a private
     /// mount namespace, so the request names a scratch directory below the
-    /// runtime directory it already owns. The artifacts are then transferred to
-    /// the destinations the checkpoint publisher chose.
+    /// runtime directory it already owns. The artifacts are then transferred
+    /// into the payload subtree under the two names this adapter reads back on
+    /// restore; no component outside it needs that layout.
     ///
     /// The scratch is only reclaimed when the outcome is known. A rejected
     /// request means Firecracker never wrote anything, so the scratch is
@@ -875,10 +884,11 @@ impl BackendInstance for FirecrackerInstance {
                 msg: "Firecracker runtime-directory ownership is unavailable".to_string(),
             })?;
         let SnapshotRequest {
-            snapshot_path,
-            mem_path,
+            payload_dir,
             kind: SnapshotKind::Full,
         } = request;
+        let snapshot_path = payload_dir.join(PAYLOAD_VM_STATE_FILE);
+        let mem_path = payload_dir.join(PAYLOAD_MEMORY_FILE);
         let scratch = SnapshotScratch::new(run_dir)?;
         let snapshot_child_path = scratch.snapshot_path.clone();
         let memory_child_path = scratch.memory_path.clone();
@@ -1154,8 +1164,8 @@ impl SnapshotScratch {
         #[cfg(not(unix))]
         std::fs::create_dir(&directory)?;
         Ok(Self {
-            snapshot_path: directory.join("vmstate.snap"),
-            memory_path: directory.join("memory.snap"),
+            snapshot_path: directory.join(PAYLOAD_VM_STATE_FILE),
+            memory_path: directory.join(PAYLOAD_MEMORY_FILE),
             directory,
         })
     }
@@ -2064,8 +2074,6 @@ mod tests {
     use tokio::sync::oneshot;
 
     use crate::spawner::netns::{IpCommandRunner, IpOutput, NetworkManager, test_network_slot};
-    #[cfg(target_os = "linux")]
-    use crate::{checkpoint_store::CheckpointStore, state_store::StateStore};
 
     use super::*;
 
@@ -3412,6 +3420,8 @@ mod tests {
         .with_run_dir(run_dir);
         let target = temp.path().join("checkpoint");
         std::fs::create_dir(&target).expect("checkpoint target");
+        // The payload subtree layout is the adapter's own, so the names are
+        // spelled out here rather than taken from the request.
         let snapshot_path = target.join("vmstate.snap");
         let mem_path = target.join("memory.snap");
 
@@ -3421,8 +3431,7 @@ mod tests {
         instance.pause().await.expect("pause");
         instance
             .snapshot(SnapshotRequest {
-                snapshot_path: snapshot_path.clone(),
-                mem_path: mem_path.clone(),
+                payload_dir: target.clone(),
                 kind: SnapshotKind::Full,
             })
             .await
@@ -3465,9 +3474,20 @@ mod tests {
         instance.kill().await.expect("kill");
     }
 
+    /// The scratch is read back through the run-directory descriptor
+    /// Firecracker inherited, so replacing the configured runtime pathname
+    /// cannot redirect a transfer that is already in flight.
+    ///
+    /// The destination is a configured payload pathname rather than a
+    /// descriptor name, because a backend adapter may hand the payload
+    /// directory to a process that cannot resolve this daemon's
+    /// `/proc/self/fd` entries. Integrity does not rest on that path:
+    /// publication reopens and hashes the payload subtree through the retained
+    /// stage descriptors, so a redirected destination leaves that subtree empty
+    /// and fails the capture instead of committing foreign bytes.
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn snapshot_transfer_uses_inherited_run_and_retained_stage_descriptors() {
+    async fn snapshot_transfer_reads_through_the_inherited_run_descriptor() {
         let temp = tempfile::tempdir().expect("temp");
         let id = Uuid::new_v4();
         let configured = temp.path().join("run");
@@ -3492,17 +3512,10 @@ mod tests {
             .expect("run child");
         assert!(status.success());
 
-        let configured_state = temp.path().join("state");
-        std::fs::create_dir(&configured_state).expect("state root");
-        let checkpoint_store = CheckpointStore::new(StateStore::new(configured_state.clone()));
-        let stage = checkpoint_store.begin(id).expect("checkpoint stage");
-        let snapshot_target = stage
-            .artifact_path("vmstate.snap")
-            .expect("snapshot target");
-        let memory_target = stage.artifact_path("memory.snap").expect("memory target");
-        let retained_state = temp.path().join("retained-state");
-        std::fs::rename(&configured_state, &retained_state).expect("retain opened state root");
-        std::fs::create_dir(&configured_state).expect("replace configured state root");
+        let payload_dir = temp.path().join("payload");
+        std::fs::create_dir(&payload_dir).expect("payload subtree");
+        let snapshot_target = payload_dir.join(PAYLOAD_VM_STATE_FILE);
+        let memory_target = payload_dir.join(PAYLOAD_MEMORY_FILE);
         scratch
             .transfer_into(&snapshot_target, &memory_target)
             .expect("transfer from retained run directory");
@@ -3519,13 +3532,6 @@ mod tests {
                 .is_none()
         );
         assert!(retained.is_dir());
-        assert!(retained_state.is_dir());
-        assert!(
-            std::fs::read_dir(configured_state)
-                .expect("replacement state root")
-                .next()
-                .is_none()
-        );
     }
 
     #[cfg(target_os = "linux")]
@@ -3566,8 +3572,7 @@ mod tests {
 
         let error = instance
             .snapshot(SnapshotRequest {
-                snapshot_path: target.join("vmstate.snap"),
-                mem_path: target.join("memory.snap"),
+                payload_dir: target.clone(),
                 kind: SnapshotKind::Full,
             })
             .await
@@ -3611,8 +3616,7 @@ mod tests {
 
         let error = instance
             .snapshot(SnapshotRequest {
-                snapshot_path: target.join("vmstate.snap"),
-                mem_path: target.join("memory.snap"),
+                payload_dir: target.clone(),
                 kind: SnapshotKind::Full,
             })
             .await
@@ -3648,8 +3652,7 @@ mod tests {
 
         let error = instance
             .snapshot(SnapshotRequest {
-                snapshot_path: target.join("vmstate.snap"),
-                mem_path: target.join("memory.snap"),
+                payload_dir: target.clone(),
                 kind: SnapshotKind::Full,
             })
             .await

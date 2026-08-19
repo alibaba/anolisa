@@ -873,13 +873,21 @@ mod tests {
             phase,
             OperationPhase::CheckpointPublished | OperationPhase::CheckpointHeadUpdated
         ) {
-            for (name, contents) in [
-                ("vmstate.snap", b"crashed-vmstate".as_slice()),
-                ("memory.snap", b"crashed-memory".as_slice()),
-                ("rootfs.snap", b"crashed-rootfs".as_slice()),
+            for (path, contents) in [
+                (
+                    stage.backend_payload_dir().join("vmstate.snap"),
+                    b"crashed-vmstate".as_slice(),
+                ),
+                (
+                    stage.backend_payload_dir().join("memory.snap"),
+                    b"crashed-memory".as_slice(),
+                ),
+                (
+                    stage.storage_payload_dir().join("rootfs.snap"),
+                    b"crashed-rootfs".as_slice(),
+                ),
             ] {
-                std::fs::write(stage.artifact_path(name).expect("artifact path"), contents)
-                    .expect("checkpoint artifact");
+                std::fs::write(path, contents).expect("checkpoint artifact");
             }
             store
                 .publish(
@@ -1906,7 +1914,7 @@ mod tests {
             .join("checkpoints")
             .join(id)
             .join(checkpoint_id)
-            .join("rootfs.snap");
+            .join("storage/rootfs.snap");
         assert_eq!(
             tokio::fs::read(&captured_rootfs)
                 .await
@@ -3486,8 +3494,8 @@ mod tests {
             .join("checkpoints")
             .join(&id)
             .join(format!(".{checkpoint_id}.tmp"));
-        let stage_entries = || {
-            let mut entries = std::fs::read_dir(&staging)
+        let stage_entries = |subtree: &str| {
+            let mut entries = std::fs::read_dir(staging.join(subtree))
                 .expect("checkpoint staging directory")
                 .map(|entry| {
                     entry
@@ -3500,24 +3508,25 @@ mod tests {
             entries.sort();
             entries
         };
-        let entries_before_cancel = stage_entries();
+        let backend_before_cancel = stage_entries("backend");
         assert!(
-            entries_before_cancel
+            backend_before_cancel
                 .iter()
                 .any(|name| name == "vmstate.snap")
         );
         assert!(
-            entries_before_cancel
+            backend_before_cancel
                 .iter()
                 .any(|name| name == "memory.snap")
         );
+        let storage_before_cancel = stage_entries("storage");
         assert!(
-            entries_before_cancel
+            storage_before_cancel
                 .iter()
                 .any(|name| name.starts_with(".rootfs.snap.capture-") && name.ends_with(".tmp"))
         );
         assert!(
-            !entries_before_cancel
+            !storage_before_cancel
                 .iter()
                 .any(|name| name == "rootfs.snap")
         );
@@ -3548,7 +3557,8 @@ mod tests {
                 .is_err(),
             "destroy must wait for blocking storage capture"
         );
-        assert_eq!(stage_entries(), entries_before_cancel);
+        assert_eq!(stage_entries("backend"), backend_before_cancel);
+        assert_eq!(stage_entries("storage"), storage_before_cancel);
         assert!(slot.rootfs_path.exists());
 
         hook.release();

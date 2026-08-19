@@ -202,10 +202,12 @@ Firecracker 可执行文件不会让已有检查点失效，但在该版本重�
 同样的形态也会被拒绝。
 
 对于受支持且正在运行的 sandbox，Blaze 会持有该 sandbox 的操作锁，验证当前
-检查点的父项，暂停后端，并捕获三个自包含文件：`vmstate.snap`、`memory.snap`
-和 `rootfs.snap`。随后会同步文件、计算摘要、发布清单、原子更新该 sandbox 的
-检查点 HEAD，再恢复后端。捕获期间，对虚拟机内部执行的命令和文件操作，以及
-其他生命周期变更都会等待同一把操作锁。
+检查点的父项，让后端进入静止状态，并以两棵由生产者各自持有的子树捕获载荷：
+后端适配器在 `backend/` 下写入自己的私有布局（VM 后端在其中保存 VM 状态与
+客户机内存），存储提供程序把可写根文件系统捕获为 `storage/rootfs.snap`。
+随后 Blaze 清点每个捕获文件、同步并计算摘要、发布清单、原子更新该 sandbox 的
+检查点 HEAD，再让工作负载恢复执行。捕获期间，对虚拟机内部执行的命令和文件
+操作，以及其他生命周期变更都会等待同一把操作锁。
 
 成功响应包含已发布的完整清单。现有 `checkpoint_id` 和 `instance_id` 字段与
 `id` 和 `sandbox_id` 分别指向同一个检查点和 sandbox：
@@ -214,7 +216,7 @@ Firecracker 可执行文件不会让已有检查点失效，但在该版本重�
 {
   "checkpoint_id": "ckpt-11111111-1111-4111-8111-111111111111",
   "instance_id": "22222222-2222-4222-8222-222222222222",
-  "format_version": 1,
+  "format_version": 2,
   "id": "ckpt-11111111-1111-4111-8111-111111111111",
   "parent": null,
   "sandbox_id": "22222222-2222-4222-8222-222222222222",
@@ -226,23 +228,28 @@ Firecracker 可执行文件不会让已有检查点失效，但在该版本重�
   "snapshot_kind": "full",
   "artifacts": [
     {
-      "name": "vmstate.snap",
-      "size_bytes": 4096,
-      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    },
-    {
-      "name": "memory.snap",
+      "name": "backend/memory.snap",
       "size_bytes": 8192,
       "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     },
     {
-      "name": "rootfs.snap",
+      "name": "backend/vmstate.snap",
+      "size_bytes": 4096,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "storage/rootfs.snap",
       "size_bytes": 8589934592,
       "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
     }
   ]
 }
 ```
+
+`artifacts` 清单按字典序列出每个捕获文件相对检查点目录的斜杠分隔路径。清单的
+具体内容由产生该检查点的后端决定：上例为内置 mock 后端，容器形态的后端可能记录
+整棵镜像目录。此前格式（`format_version: 1`）的检查点仍可恢复，但新捕获一律
+发布版本 2。
 
 可以通过 `GET /v1/sandboxes/{id}/checkpoints` 查询已提交的历史。每个列表项
 包含 `id`、`parent`、`created_at`、总逻辑大小 `size_bytes`、`is_head` 和

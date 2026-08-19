@@ -8,8 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-#[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -17,14 +16,15 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use blaze_core::checkpoint::{
-    CHECKPOINT_FORMAT_VERSION, CheckpointArtifact, CheckpointInfo, CheckpointMetadata,
-    CheckpointValidationError, CommitCheckpoint, REQUIRED_ARTIFACTS, validate_artifact_name,
-    validate_checkpoint_id, validate_checkpoint_manifest, validate_commit_checkpoint,
+    CHECKPOINT_FORMAT_V1, CHECKPOINT_FORMAT_VERSION, CheckpointArtifact, CheckpointInfo,
+    CheckpointMetadata, CheckpointValidationError, CommitCheckpoint, PAYLOAD_BACKEND_DIR,
+    PAYLOAD_STORAGE_DIR, validate_artifact_path, validate_checkpoint_id,
+    validate_checkpoint_manifest, validate_commit_checkpoint,
 };
 use chrono::Utc;
 use rustix::fs::{
-    AtFlags, Dir, Mode, OFlags, RenameFlags, fchmod, fstat, fsync, mkdirat, openat, renameat,
-    renameat_with, unlinkat,
+    AtFlags, Dir, FileType, Mode, OFlags, RenameFlags, fchmod, fstat, fsync, mkdirat, openat,
+    renameat, renameat_with, statat, unlinkat,
 };
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
@@ -41,6 +41,21 @@ const TOMBSTONE_SUFFIX: &str = ".tombstone";
 const ABORT_TOMBSTONE_PREFIX: &str = ".abort.";
 const CHECKPOINT_DIRECTORY_MODE: Mode = Mode::RWXU;
 const CHECKPOINT_FILE_MODE: Mode = Mode::RUSR.union(Mode::WUSR);
+/// Deepest payload nesting the daemon will walk. Matches the pure
+/// artifact-path bound, so every committable payload is enumerable.
+const MAX_PAYLOAD_DEPTH: usize = 16;
+/// Deepest nesting removal will traverse. Deliberately far above
+/// [`MAX_PAYLOAD_DEPTH`]: a payload rejected for being too deep must still
+/// be removable by the compensation path, so this bound only protects the
+/// daemon from descriptor exhaustion on a pathological tree. Backend
+/// adapters are in-process trait implementations, not untrusted input; a
+/// tree deeper than this is a daemon-level defect, and the removal error
+/// keeps the sandbox in recovery rather than walking an unbounded tree.
+const MAX_REMOVAL_DEPTH: usize = 256;
+/// Writable-root artifact the storage provider must capture. Restore
+/// consumes it unconditionally, so publication refuses a checkpoint
+/// without it.
+const STORAGE_ROOTFS_FILE: &str = "rootfs.snap";
 
 /// Failure while reading or mutating the daemon checkpoint catalog.
 #[derive(Debug, Error)]
@@ -215,6 +230,8 @@ pub struct CheckpointStage {
     catalog: OwnedStateDirectory,
     sandbox: OwnedStateDirectory,
     directory: OwnedStateDirectory,
+    backend_dir: OwnedStateDirectory,
+    storage_dir: OwnedStateDirectory,
     staging_name: String,
 }
 
@@ -224,10 +241,21 @@ impl CheckpointStage {
         &self.id
     }
 
-    /// Resolve one artifact through the retained stage directory.
-    pub fn artifact_path(&self, name: &str) -> Result<PathBuf> {
-        validate_artifact_name(name)?;
-        Ok(self.directory.path().join(name))
+    /// Payload subtree owned by the backend adapter for this capture.
+    ///
+    /// The layout below this directory is private to the backend; publication
+    /// inventories whatever regular files it wrote. The configured pathname
+    /// is returned because capture may exec an external backend process that
+    /// cannot resolve this daemon's `/proc/self/fd` names; integrity never
+    /// depends on this path, since publication reopens, hashes, and
+    /// revalidates every entry through the retained stage descriptors.
+    pub fn backend_payload_dir(&self) -> PathBuf {
+        self.backend_dir.configured_path().to_path_buf()
+    }
+
+    /// Payload subtree owned by the storage provider for this capture.
+    pub fn storage_payload_dir(&self) -> PathBuf {
+        self.storage_dir.configured_path().to_path_buf()
     }
 }
 
@@ -236,17 +264,30 @@ struct OwnedArtifact {
     file: File,
 }
 
+/// Retained payload subtree descriptors of one committed checkpoint.
+///
+/// Version-1 checkpoints keep every artifact in the checkpoint root, so both
+/// producer subtrees map onto the root directory itself. This is what lets a
+/// pre-split checkpoint stay restorable without rewriting it on disk.
+#[derive(Debug)]
+struct PayloadDirs {
+    backend: Option<OwnedStateDirectory>,
+    storage: Option<OwnedStateDirectory>,
+}
+
 struct VerifiedCheckpoint {
     metadata: CheckpointMetadata,
     directory: OwnedStateDirectory,
     metadata_file: OwnedArtifact,
-    artifacts: Vec<OwnedArtifact>,
+    artifacts: Vec<(String, OwnedArtifact)>,
+    payload: PayloadDirs,
 }
 
 /// Restore target retained through the complete replacement operation.
 ///
-/// The catalog, sandbox, checkpoint directory, and artifact descriptors stay
-/// open so path replacement cannot redirect either restore input or HEAD.
+/// The catalog, sandbox, checkpoint directory, payload subtrees, and artifact
+/// descriptors stay open so path replacement cannot redirect either restore
+/// input or HEAD.
 pub(crate) struct RestoreCheckpoint {
     catalog: OwnedStateDirectory,
     sandbox: OwnedStateDirectory,
@@ -258,13 +299,30 @@ impl RestoreCheckpoint {
         &self.verified.metadata
     }
 
-    pub(crate) fn artifact_path(&self, name: &str) -> Result<PathBuf> {
-        validate_artifact_name(name)?;
-        let index = REQUIRED_ARTIFACTS
-            .iter()
-            .position(|candidate| *candidate == name)
-            .ok_or_else(|| invariant(format!("checkpoint has no required artifact {name}")))?;
-        Ok(self.verified.artifacts[index].stable_path())
+    /// Backend-owned payload subtree for the restore adapter to consume.
+    ///
+    /// The configured pathname is returned because restore may exec an
+    /// external backend process that cannot resolve this daemon's
+    /// `/proc/self/fd` names. Trust does not derive from the path: the
+    /// artifacts were hashed against the retained descriptors during
+    /// verification, the catalog tree is daemon-owned with mode 0700, and
+    /// [`CheckpointStore::set_head_verified`] revalidates every retained
+    /// artifact identity through the held descriptors before the restore
+    /// can commit — a descendant swapped in after verification fails that
+    /// revalidation and aborts the transaction instead of becoming HEAD.
+    pub(crate) fn backend_payload_dir(&self) -> PathBuf {
+        match &self.verified.payload.backend {
+            Some(directory) => directory.configured_path().to_path_buf(),
+            None => self.verified.directory.configured_path().to_path_buf(),
+        }
+    }
+
+    /// Storage-owned payload subtree for the storage provider to consume.
+    pub(crate) fn storage_payload_dir(&self) -> PathBuf {
+        match &self.verified.payload.storage {
+            Some(directory) => directory.configured_path().to_path_buf(),
+            None => self.verified.directory.configured_path().to_path_buf(),
+        }
     }
 }
 
@@ -272,7 +330,8 @@ struct LoadedCheckpointMetadata {
     metadata: CheckpointMetadata,
     directory: OwnedStateDirectory,
     metadata_file: OwnedArtifact,
-    artifacts: Vec<OwnedArtifact>,
+    artifacts: Vec<(String, OwnedArtifact)>,
+    payload: PayloadDirs,
 }
 
 pub(crate) struct PublishedCheckpoint {
@@ -300,57 +359,94 @@ impl PublishedCheckpoint {
 
 impl LoadedCheckpointMetadata {
     fn require_linked(&self, sandbox: &OwnedStateDirectory, directory_name: &str) -> Result<()> {
-        validate_exact_entries(
+        require_linked_checkpoint(
+            &self.metadata,
             &self.directory,
-            &[
-                REQUIRED_ARTIFACTS[0],
-                REQUIRED_ARTIFACTS[1],
-                REQUIRED_ARTIFACTS[2],
-                METADATA_FILE,
-            ],
-        )?;
-        require_linked_file(&self.directory, METADATA_FILE, &self.metadata_file)?;
-        for (name, artifact) in REQUIRED_ARTIFACTS.iter().zip(&self.artifacts) {
-            require_linked_file(&self.directory, name, artifact)?;
-        }
-        require_linked_directory(sandbox, directory_name, &self.directory)
+            &self.metadata_file,
+            &self.artifacts,
+            sandbox,
+            directory_name,
+        )
     }
 }
 
 impl VerifiedCheckpoint {
     fn require_linked(&self, sandbox: &OwnedStateDirectory, checkpoint_id: &str) -> Result<()> {
-        validate_exact_entries(
+        require_linked_checkpoint(
+            &self.metadata,
             &self.directory,
-            &[
-                REQUIRED_ARTIFACTS[0],
-                REQUIRED_ARTIFACTS[1],
-                REQUIRED_ARTIFACTS[2],
-                METADATA_FILE,
-            ],
-        )?;
-        require_linked_file(&self.directory, METADATA_FILE, &self.metadata_file)?;
-        for (name, artifact) in REQUIRED_ARTIFACTS.iter().zip(&self.artifacts) {
-            require_linked_file(&self.directory, name, artifact)?;
-        }
-        require_linked_directory(sandbox, checkpoint_id, &self.directory)
+            &self.metadata_file,
+            &self.artifacts,
+            sandbox,
+            checkpoint_id,
+        )
     }
 }
 
-impl OwnedArtifact {
-    fn stable_path(&self) -> PathBuf {
-        #[cfg(target_os = "linux")]
-        {
-            PathBuf::from(format!(
-                "/proc/{}/fd/{}",
-                std::process::id(),
-                self.file.as_raw_fd()
-            ))
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            self.path.clone()
-        }
+/// Revalidate that a committed checkpoint still has exactly the layout its
+/// manifest records, and that every retained descriptor is still the object
+/// linked at its catalog name.
+///
+/// The manifest is the single source of truth here: version-2 checkpoints
+/// carry backend-private layouts, so the daemon cannot whitelist names. What
+/// it can still reject is any file the manifest does not account for.
+fn require_linked_checkpoint(
+    metadata: &CheckpointMetadata,
+    directory: &OwnedStateDirectory,
+    metadata_file: &OwnedArtifact,
+    artifacts: &[(String, OwnedArtifact)],
+    sandbox: &OwnedStateDirectory,
+    directory_name: &str,
+) -> Result<()> {
+    if metadata.format_version == CHECKPOINT_FORMAT_V1 {
+        let mut expected: Vec<&str> = metadata
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.name.as_str())
+            .collect();
+        expected.push(METADATA_FILE);
+        validate_exact_entries(directory, &expected)?;
+    } else {
+        validate_exact_entries(
+            directory,
+            &[METADATA_FILE, PAYLOAD_BACKEND_DIR, PAYLOAD_STORAGE_DIR],
+        )?;
+        require_manifest_matches_payload(metadata, directory)?;
     }
+    require_linked_file(directory, METADATA_FILE, metadata_file)?;
+    for (rel_path, artifact) in artifacts {
+        require_linked_path(directory, rel_path, artifact)?;
+    }
+    require_linked_directory(sandbox, directory_name, directory)
+}
+
+/// Reject any payload file the manifest does not record, and any recorded
+/// file that is no longer present.
+fn require_manifest_matches_payload(
+    metadata: &CheckpointMetadata,
+    directory: &OwnedStateDirectory,
+) -> Result<()> {
+    let mut found = Vec::new();
+    let mut dirs = Vec::new();
+    for subtree in [PAYLOAD_BACKEND_DIR, PAYLOAD_STORAGE_DIR] {
+        let payload =
+            required_child_directory(directory, subtree, "open checkpoint payload subtree")?;
+        collect_payload_files(&payload, subtree, 1, &mut found, &mut dirs)?;
+    }
+    let mut found_names: Vec<&str> = found.iter().map(|(name, _)| name.as_str()).collect();
+    found_names.sort_unstable();
+    let manifest_names: Vec<&str> = metadata
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.name.as_str())
+        .collect();
+    if found_names != manifest_names {
+        return Err(invariant(format!(
+            "checkpoint {} payload does not match its manifest: found {:?}, recorded {:?}",
+            metadata.id, found_names, manifest_names
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -456,6 +552,35 @@ impl CheckpointStore {
                         };
                     }
                 };
+            // Both producer subtrees exist from the start, so a producer can
+            // never be confused about where its payload belongs and an empty
+            // subtree stays representable.
+            let subtrees = (|| -> Result<(OwnedStateDirectory, OwnedStateDirectory)> {
+                let backend_dir = create_child_directory(&directory, PAYLOAD_BACKEND_DIR)?;
+                let storage_dir = create_child_directory(&directory, PAYLOAD_STORAGE_DIR)?;
+                checkpoint_store_failpoint(
+                    "checkpoint-store-stage-payload-sync",
+                    directory.configured_path(),
+                )?;
+                sync_directory(&directory)?;
+                Ok((backend_dir, storage_dir))
+            })();
+            let (backend_dir, storage_dir) = match subtrees {
+                Ok(subtrees) => subtrees,
+                Err(subtree_error) => {
+                    return match self.abort_owned_stage(&sandbox, &staging_name, directory) {
+                        Ok(()) => Err(subtree_error.into()),
+                        Err(cleanup_error) => Err(CheckpointBeginError::recovery_required(
+                            id,
+                            invariant(format!(
+                                "checkpoint stage payload preparation failed: \
+                                 {subtree_error}; owned-stage cleanup also failed: \
+                                 {cleanup_error}"
+                            )),
+                        )),
+                    };
+                }
+            };
             let sync_result = checkpoint_store_failpoint(
                 "checkpoint-store-stage-parent-sync",
                 sandbox.configured_path(),
@@ -480,6 +605,8 @@ impl CheckpointStore {
                 catalog,
                 sandbox,
                 directory,
+                backend_dir,
+                storage_dir,
                 staging_name,
             });
         }
@@ -513,18 +640,76 @@ impl CheckpointStore {
                     stage.sandbox.configured_path().join(&stage.id).display()
                 )));
             }
-            validate_exact_entries(&stage.directory, &REQUIRED_ARTIFACTS)?;
+            validate_exact_entries(
+                &stage.directory,
+                &[PAYLOAD_BACKEND_DIR, PAYLOAD_STORAGE_DIR],
+            )?;
+            // `validate_exact_entries` only inspects the staging directory. A
+            // capture that escaped its configured payload path (for example
+            // through `payload_dir.join("../../capture.log")`) can instead have
+            // dropped an entry directly in the sandbox checkpoint namespace,
+            // which publication would leave in place and a later destroy would
+            // reject through `validate_checkpoint_id`, stranding the sandbox in
+            // `RecoveryRequired` with storage retained. Reject it now, before
+            // the capture is committed.
+            require_publishable_sandbox_namespace(&stage.sandbox, &stage.staging_name)?;
 
-            let mut opened_artifacts = Vec::with_capacity(REQUIRED_ARTIFACTS.len());
-            for name in REQUIRED_ARTIFACTS {
-                let artifact =
-                    open_required_file(&stage.directory, name, "open checkpoint artifact")?;
-                validate_checkpoint_artifact_owner(&artifact)?;
-                opened_artifacts.push((name, artifact));
+            // Inventory whatever the producers wrote. The backend owns its
+            // subtree layout, so publication walks the payload instead of
+            // expecting fixed names; the walk also pins every file and
+            // directory it will hash or sync.
+            let mut opened_artifacts = Vec::new();
+            let mut payload_dirs = Vec::new();
+            let backend_file_count = collect_payload_files(
+                &stage.backend_dir,
+                PAYLOAD_BACKEND_DIR,
+                1,
+                &mut opened_artifacts,
+                &mut payload_dirs,
+            )?;
+            collect_payload_files(
+                &stage.storage_dir,
+                PAYLOAD_STORAGE_DIR,
+                1,
+                &mut opened_artifacts,
+                &mut payload_dirs,
+            )?;
+            opened_artifacts.sort_by(|left, right| left.0.cmp(&right.0));
+            if opened_artifacts.is_empty() {
+                return Err(invariant(format!(
+                    "checkpoint stage {} has an empty payload",
+                    stage.directory.configured_path().display()
+                )));
+            }
+            if backend_file_count == 0 {
+                return Err(invariant(format!(
+                    "checkpoint stage {} has an empty backend payload subtree; \
+                     the snapshot adapter must produce at least one artifact",
+                    stage.directory.configured_path().display()
+                )));
+            }
+            // The restore path consumes the writable-root capture
+            // unconditionally, so a checkpoint without it would publish as
+            // valid and only fail when someone tries to restore it.
+            let rootfs_rel = format!("{PAYLOAD_STORAGE_DIR}/{STORAGE_ROOTFS_FILE}");
+            if !opened_artifacts
+                .iter()
+                .any(|(rel_path, _)| rel_path == &rootfs_rel)
+            {
+                return Err(invariant(format!(
+                    "checkpoint stage {} has no {rootfs_rel} capture",
+                    stage.directory.configured_path().display()
+                )));
             }
 
-            let mut artifacts = Vec::with_capacity(REQUIRED_ARTIFACTS.len());
-            for (name, artifact) in &mut opened_artifacts {
+            // Ownership validation finishes across the whole inventory before
+            // any permission changes, so a rejected payload is left exactly
+            // as the producers wrote it.
+            for (_, artifact) in &opened_artifacts {
+                validate_checkpoint_artifact_owner(artifact)?;
+            }
+            let mut artifacts = Vec::with_capacity(opened_artifacts.len());
+            for (rel_path, artifact) in &mut opened_artifacts {
                 fchmod(&artifact.file, CHECKPOINT_FILE_MODE).map_err(|source| {
                     io_error(
                         "restrict checkpoint artifact permissions",
@@ -535,8 +720,15 @@ impl CheckpointStore {
                 artifact.file.sync_all().map_err(|source| {
                     io_error("sync checkpoint artifact", &artifact.path, source)
                 })?;
-                artifacts.push(hash_artifact(artifact, name)?);
+                artifacts.push(hash_artifact(artifact, rel_path)?);
             }
+            // Nested directory entries become durable with their parents;
+            // the stage root is synced after the manifest lands below.
+            for payload_dir in &payload_dirs {
+                sync_directory(payload_dir)?;
+            }
+            sync_directory(&stage.backend_dir)?;
+            sync_directory(&stage.storage_dir)?;
 
             let metadata = CheckpointMetadata {
                 format_version: CHECKPOINT_FORMAT_VERSION,
@@ -562,10 +754,11 @@ impl CheckpointStore {
                 metadata,
                 directory: stage.directory.clone(),
                 metadata_file,
-                artifacts: opened_artifacts
-                    .into_iter()
-                    .map(|(_, artifact)| artifact)
-                    .collect(),
+                artifacts: opened_artifacts,
+                payload: PayloadDirs {
+                    backend: Some(stage.backend_dir.clone()),
+                    storage: Some(stage.storage_dir.clone()),
+                },
             };
             loaded.require_linked(&stage.sandbox, &stage.staging_name)?;
             checkpoint_store_failpoint(
@@ -849,8 +1042,9 @@ impl CheckpointStore {
     /// recoverable destroy record instead of deleting an unrelated object.
     pub fn remove_sandbox(&self, sandbox_id: Uuid) -> Result<()> {
         enum OwnedEntry {
-            Directory(String, OwnedStateDirectory),
+            Directory(std::ffi::OsString, OwnedStateDirectory),
             File(String, OwnedArtifact),
+            Stray(std::ffi::OsString),
         }
 
         let catalog = self.root()?;
@@ -862,39 +1056,88 @@ impl CheckpointStore {
             )?;
             return sync_directory(&catalog);
         };
-        let mut names: Vec<_> = directory_names(&sandbox, "scan sandbox checkpoint namespace")?
-            .into_iter()
-            .collect();
+        let mut names = directory_names_os(&sandbox, "scan sandbox checkpoint namespace")?;
         names.sort();
 
         let mut entries = Vec::with_capacity(names.len());
         for entry in names {
-            let kind = if entry == HEAD_FILE {
-                ScratchKind::File
-            } else if let Some(kind) = classify_scratch_name(&entry)? {
-                kind
-            } else {
-                validate_checkpoint_id(&entry)?;
-                ScratchKind::Directory
-            };
-            match kind {
-                ScratchKind::Directory => entries.push(OwnedEntry::Directory(
+            let named_kind = entry.to_str().and_then(|entry| {
+                if entry == HEAD_FILE {
+                    Some(ScratchKind::File)
+                } else if let Ok(Some(kind)) = classify_scratch_name(entry) {
+                    Some(kind)
+                } else if validate_checkpoint_id(entry).is_ok() {
+                    Some(ScratchKind::Directory)
+                } else {
+                    None
+                }
+            });
+            match named_kind {
+                Some(ScratchKind::Directory) => entries.push(OwnedEntry::Directory(
                     entry.clone(),
-                    required_child_directory(&sandbox, &entry, "open owned checkpoint directory")?,
+                    required_child_directory_os(
+                        &sandbox,
+                        &entry,
+                        "open owned checkpoint directory",
+                    )?,
                 )),
-                ScratchKind::File => entries.push(OwnedEntry::File(
-                    entry.clone(),
-                    open_required_file(&sandbox, &entry, "open owned checkpoint file")?,
-                )),
+                Some(ScratchKind::File) => {
+                    let name = entry
+                        .to_str()
+                        .expect("recognised checkpoint file names are UTF-8")
+                        .to_owned();
+                    entries.push(OwnedEntry::File(
+                        name.clone(),
+                        open_required_file(&sandbox, &name, "open owned checkpoint file")?,
+                    ));
+                }
+                None => {
+                    // An unrecognised entry can only be here if a capture escaped
+                    // its payload path and dropped it directly in the namespace
+                    // (publication now rejects that, but a record predating the
+                    // check may still carry one). Destroy must reclaim it whatever
+                    // its type, or the terminal transition is permanently blocked;
+                    // classify it by inspecting the filesystem rather than the
+                    // name.
+                    let stat = statat(sandbox.descriptor(), &entry, AtFlags::SYMLINK_NOFOLLOW)
+                        .map_err(|source| {
+                            io_error(
+                                "inspect stray checkpoint namespace entry",
+                                sandbox.configured_path().join(&entry),
+                                std::io::Error::from(source),
+                            )
+                        })?;
+                    if FileType::from_raw_mode(stat.st_mode as _) == FileType::Directory {
+                        entries.push(OwnedEntry::Directory(
+                            entry.clone(),
+                            required_child_directory_os(
+                                &sandbox,
+                                &entry,
+                                "open stray checkpoint directory",
+                            )?,
+                        ));
+                    } else {
+                        entries.push(OwnedEntry::Stray(entry));
+                    }
+                }
             }
         }
 
         for entry in entries {
             match entry {
                 OwnedEntry::Directory(name, directory) => {
-                    remove_owned_directory(&sandbox, &name, directory)?;
+                    remove_owned_directory_bounded(&sandbox, &name, directory, 0)?;
                 }
                 OwnedEntry::File(name, file) => remove_owned_file(&sandbox, &name, file)?,
+                OwnedEntry::Stray(name) => {
+                    unlinkat(sandbox.descriptor(), &name, AtFlags::empty()).map_err(|source| {
+                        io_error(
+                            "remove stray checkpoint namespace entry",
+                            sandbox.configured_path().join(&name),
+                            std::io::Error::from(source),
+                        )
+                    })?;
+                }
             }
         }
         sync_directory(&sandbox)?;
@@ -1036,22 +1279,19 @@ impl CheckpointStore {
             directory,
             metadata_file,
             mut artifacts,
+            payload,
         } = self.load_checkpoint_metadata(sandbox, sandbox_id, checkpoint_id)?;
 
-        for (name, artifact) in REQUIRED_ARTIFACTS.iter().zip(&mut artifacts) {
-            let expected = metadata
-                .artifacts
-                .iter()
-                .find(|artifact| artifact.name == *name)
-                .ok_or_else(|| {
-                    invariant(format!(
-                        "validated checkpoint {checkpoint_id} has no record for {name}"
-                    ))
-                })?;
-            let actual = hash_artifact(artifact, name)?;
+        for (expected, (rel_path, artifact)) in metadata.artifacts.iter().zip(&mut artifacts) {
+            if &expected.name != rel_path {
+                return Err(invariant(format!(
+                    "validated checkpoint {checkpoint_id} has no record for {rel_path}"
+                )));
+            }
+            let actual = hash_artifact(artifact, rel_path)?;
             if &actual != expected {
                 return Err(invariant(format!(
-                    "checkpoint {checkpoint_id} artifact {name} failed integrity validation"
+                    "checkpoint {checkpoint_id} artifact {rel_path} failed integrity validation"
                 )));
             }
         }
@@ -1060,6 +1300,7 @@ impl CheckpointStore {
             directory,
             metadata_file,
             artifacts,
+            payload,
         };
         verified.require_linked(sandbox, checkpoint_id)?;
         Ok(verified)
@@ -1077,15 +1318,6 @@ impl CheckpointStore {
             checkpoint_id,
             "open committed checkpoint directory",
         )?;
-        validate_exact_entries(
-            &directory,
-            &[
-                REQUIRED_ARTIFACTS[0],
-                REQUIRED_ARTIFACTS[1],
-                REQUIRED_ARTIFACTS[2],
-                METADATA_FILE,
-            ],
-        )?;
         let mut metadata_file =
             open_required_file(&directory, METADATA_FILE, "open checkpoint metadata")?;
         let bytes = read_file(&mut metadata_file, "read checkpoint metadata")?;
@@ -1095,19 +1327,84 @@ impl CheckpointStore {
                 source,
             })?;
         validate_checkpoint_manifest(&metadata, sandbox_id, checkpoint_id)?;
-        let mut artifacts = Vec::with_capacity(REQUIRED_ARTIFACTS.len());
-        for name in REQUIRED_ARTIFACTS {
-            artifacts.push(open_required_file(
+
+        // The validated manifest is the inventory; the directory must agree
+        // with it exactly. Version 1 keeps its frozen flat layout, version 2
+        // is walked through the two producer subtrees.
+        let (artifacts, payload) = if metadata.format_version == CHECKPOINT_FORMAT_V1 {
+            let mut expected: Vec<&str> = metadata
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.name.as_str())
+                .collect();
+            expected.push(METADATA_FILE);
+            validate_exact_entries(&directory, &expected)?;
+            let mut artifacts = Vec::with_capacity(metadata.artifacts.len());
+            for record in &metadata.artifacts {
+                artifacts.push((
+                    record.name.clone(),
+                    open_required_file(&directory, &record.name, "open checkpoint artifact")?,
+                ));
+            }
+            (
+                artifacts,
+                PayloadDirs {
+                    backend: None,
+                    storage: None,
+                },
+            )
+        } else {
+            validate_exact_entries(
                 &directory,
-                name,
-                "open checkpoint artifact",
-            )?);
-        }
+                &[METADATA_FILE, PAYLOAD_BACKEND_DIR, PAYLOAD_STORAGE_DIR],
+            )?;
+            let backend_dir = required_child_directory(
+                &directory,
+                PAYLOAD_BACKEND_DIR,
+                "open checkpoint payload subtree",
+            )?;
+            let storage_dir = required_child_directory(
+                &directory,
+                PAYLOAD_STORAGE_DIR,
+                "open checkpoint payload subtree",
+            )?;
+            let mut found = Vec::new();
+            let mut dirs = Vec::new();
+            collect_payload_files(&backend_dir, PAYLOAD_BACKEND_DIR, 1, &mut found, &mut dirs)?;
+            collect_payload_files(&storage_dir, PAYLOAD_STORAGE_DIR, 1, &mut found, &mut dirs)?;
+            found.sort_by(|left, right| left.0.cmp(&right.0));
+            let found_names: Vec<&str> = found.iter().map(|(name, _)| name.as_str()).collect();
+            let manifest_names: Vec<&str> = metadata
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.name.as_str())
+                .collect();
+            if found_names != manifest_names {
+                return Err(invariant(format!(
+                    "checkpoint {checkpoint_id} payload does not match its manifest: \
+                     found {found_names:?}, recorded {manifest_names:?}"
+                )));
+            }
+            let rootfs_rel = format!("{PAYLOAD_STORAGE_DIR}/{STORAGE_ROOTFS_FILE}");
+            if !manifest_names.contains(&rootfs_rel.as_str()) {
+                return Err(invariant(format!(
+                    "checkpoint {checkpoint_id} has no {rootfs_rel} capture"
+                )));
+            }
+            (
+                found,
+                PayloadDirs {
+                    backend: Some(backend_dir),
+                    storage: Some(storage_dir),
+                },
+            )
+        };
         let loaded = LoadedCheckpointMetadata {
             metadata,
             directory,
             metadata_file,
             artifacts,
+            payload,
         };
         loaded.require_linked(sandbox, checkpoint_id)?;
         Ok(loaded)
@@ -1330,6 +1627,26 @@ fn required_child_directory(
     })
 }
 
+/// Open a child directory by a name that need not be valid UTF-8.
+///
+/// Only removal needs this: publication rejects non-UTF-8 names, so no other
+/// path can be holding one.
+fn required_child_directory_os(
+    parent: &OwnedStateDirectory,
+    name: &std::ffi::OsStr,
+    operation: &'static str,
+) -> Result<OwnedStateDirectory> {
+    let path = parent.configured_path().join(name);
+    let descriptor = openat(
+        parent.descriptor(),
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|source| io_error(operation, &path, std::io::Error::from(source)))?;
+    Ok(OwnedStateDirectory::new(path, descriptor))
+}
+
 fn create_new_file(
     directory: &OwnedStateDirectory,
     name: &str,
@@ -1482,6 +1799,55 @@ fn directory_names(
     Ok(names)
 }
 
+/// Enumerate every directory entry by raw `OsString`, including names that
+/// are not valid UTF-8.
+///
+/// Publication rejects non-UTF-8 names, but removal must be able to clean
+/// up a directory a backend populated with arbitrary names: rejecting the
+/// scan would strand the sandbox in `RecoveryRequired` with destroy as the
+/// only exit, and destroy itself calls this removal path.
+fn directory_names_os(
+    directory: &OwnedStateDirectory,
+    operation: &'static str,
+) -> Result<Vec<std::ffi::OsString>> {
+    let scan = openat(
+        directory.descriptor(),
+        ".",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|source| {
+        io_error(
+            operation,
+            directory.configured_path(),
+            std::io::Error::from(source),
+        )
+    })?;
+    let entries = Dir::read_from(&scan).map_err(|source| {
+        io_error(
+            operation,
+            directory.configured_path(),
+            std::io::Error::from(source),
+        )
+    })?;
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| {
+            io_error(
+                operation,
+                directory.configured_path(),
+                std::io::Error::from(source),
+            )
+        })?;
+        let name = entry.file_name();
+        let name_bytes = name.to_bytes();
+        if name_bytes != b"." && name_bytes != b".." {
+            names.push(std::ffi::OsStr::from_bytes(name_bytes).to_os_string());
+        }
+    }
+    Ok(names)
+}
+
 fn hash_artifact(artifact: &mut OwnedArtifact, name: &str) -> Result<CheckpointArtifact> {
     artifact
         .file
@@ -1554,6 +1920,21 @@ fn require_linked_directory(
             parent.configured_path().join(name).display()
         ))
     })?;
+    if !same_directory(&linked, expected)? {
+        return Err(invariant(format!(
+            "checkpoint directory {} changed identity",
+            parent.configured_path().join(name).display()
+        )));
+    }
+    Ok(())
+}
+
+fn require_linked_directory_os(
+    parent: &OwnedStateDirectory,
+    name: &std::ffi::OsStr,
+    expected: &OwnedStateDirectory,
+) -> Result<()> {
+    let linked = required_child_directory_os(parent, name, "revalidate checkpoint directory")?;
     if !same_directory(&linked, expected)? {
         return Err(invariant(format!(
             "checkpoint directory {} changed identity",
@@ -1647,23 +2028,68 @@ fn remove_owned_directory(
     name: &str,
     directory: OwnedStateDirectory,
 ) -> Result<()> {
-    require_linked_directory(parent, name, &directory)?;
-    let mut entries: Vec<_> = directory_names(&directory, "scan checkpoint scratch directory")?
-        .into_iter()
-        .collect();
+    remove_owned_directory_bounded(parent, std::ffi::OsStr::new(name), directory, 0)
+}
+
+/// Remove one owned directory and everything below it, fail-closed.
+///
+/// Committed checkpoints carry backend-private subtrees, so removal must
+/// recurse; the depth bound keeps a corrupted or hostile tree from walking
+/// the daemon into unbounded work.
+///
+/// Entries are enumerated as raw `OsString`, so a name a backend created that
+/// is not valid UTF-8 is still removable. Publication rejects such a name, but
+/// refusing to remove one would strand the sandbox in `RecoveryRequired` with
+/// destroy as its only exit, and destroy runs this same path.
+///
+fn remove_owned_directory_bounded(
+    parent: &OwnedStateDirectory,
+    name: &std::ffi::OsStr,
+    directory: OwnedStateDirectory,
+    depth: usize,
+) -> Result<()> {
+    if depth > MAX_REMOVAL_DEPTH {
+        return Err(invariant(format!(
+            "checkpoint directory {} is nested too deeply to remove",
+            directory.configured_path().display()
+        )));
+    }
+    require_linked_directory_os(parent, name, &directory)?;
+    let mut entries = directory_names_os(&directory, "scan checkpoint scratch directory")?;
     entries.sort();
-    let files = entries
-        .into_iter()
-        .map(|entry| {
-            let file = open_required_file(&directory, &entry, "open checkpoint scratch entry")?;
-            Ok((entry, file))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    for (entry, file) in files {
-        remove_owned_file(&directory, &entry, file)?;
+    for entry in entries {
+        // Classification is deliberately laxer than payload validation:
+        // publication rejects symlinks, FIFOs, sockets, and devices, and
+        // removal must be able to delete exactly those rejected entries,
+        // so anything that is not a directory is simply unlinked.
+        let stat = statat(directory.descriptor(), &entry, AtFlags::SYMLINK_NOFOLLOW).map_err(
+            |source| {
+                io_error(
+                    "inspect checkpoint scratch entry",
+                    directory.configured_path().join(&entry),
+                    std::io::Error::from(source),
+                )
+            },
+        )?;
+        if FileType::from_raw_mode(stat.st_mode as _) == FileType::Directory {
+            let child = required_child_directory_os(
+                &directory,
+                &entry,
+                "open checkpoint scratch directory",
+            )?;
+            remove_owned_directory_bounded(&directory, &entry, child, depth + 1)?;
+        } else {
+            unlinkat(directory.descriptor(), &entry, AtFlags::empty()).map_err(|source| {
+                io_error(
+                    "remove checkpoint scratch file",
+                    directory.configured_path().join(&entry),
+                    std::io::Error::from(source),
+                )
+            })?;
+        }
     }
     sync_directory(&directory)?;
-    require_linked_directory(parent, name, &directory)?;
+    require_linked_directory_os(parent, name, &directory)?;
     unlinkat(parent.descriptor(), name, AtFlags::REMOVEDIR).map_err(|source| {
         io_error(
             "remove checkpoint scratch directory",
@@ -1671,6 +2097,162 @@ fn remove_owned_directory(
             std::io::Error::from(source),
         )
     })
+}
+
+/// One directory entry pinned by an open descriptor.
+enum PayloadEntry {
+    Directory(OwnedStateDirectory),
+    File(OwnedArtifact),
+}
+
+/// Open one payload entry without following symbolic links.
+///
+/// Payloads may only contain regular files and directories: a symbolic link
+/// could redirect hashing or restore outside the checkpoint, and any other
+/// object kind has no defined capture semantics, so both fail closed.
+fn open_payload_entry(parent: &OwnedStateDirectory, name: &str) -> Result<PayloadEntry> {
+    let path = parent.configured_path().join(name);
+    let descriptor = openat(
+        parent.descriptor(),
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(|source| {
+        io_error(
+            "open checkpoint payload entry",
+            &path,
+            std::io::Error::from(source),
+        )
+    })?;
+    let stat = fstat(&descriptor).map_err(|source| {
+        io_error(
+            "inspect checkpoint payload entry",
+            &path,
+            std::io::Error::from(source),
+        )
+    })?;
+    match FileType::from_raw_mode(stat.st_mode as _) {
+        FileType::Directory => Ok(PayloadEntry::Directory(OwnedStateDirectory::new(
+            path, descriptor,
+        ))),
+        FileType::RegularFile => Ok(PayloadEntry::File(OwnedArtifact {
+            path,
+            file: File::from(descriptor),
+        })),
+        _ => Err(invariant(format!(
+            "checkpoint payload entry {} is neither a regular file nor a directory",
+            path.display()
+        ))),
+    }
+}
+
+/// Walk one payload subtree, collecting every regular file with its
+/// slash-separated path relative to the checkpoint root, plus every
+/// directory visited so callers can sync or revalidate them. Returns the
+/// number of files found below `directory`.
+///
+/// Empty directories are rejected: the manifest inventories files only, so
+/// an empty directory would be invisible to integrity validation while the
+/// producing backend might rely on it.
+fn collect_payload_files(
+    directory: &OwnedStateDirectory,
+    prefix: &str,
+    depth: usize,
+    files: &mut Vec<(String, OwnedArtifact)>,
+    dirs: &mut Vec<OwnedStateDirectory>,
+) -> Result<usize> {
+    if depth > MAX_PAYLOAD_DEPTH {
+        return Err(invariant(format!(
+            "checkpoint payload at {} is nested too deeply",
+            directory.configured_path().display()
+        )));
+    }
+    let mut names: Vec<_> = directory_names(directory, "scan checkpoint payload")?
+        .into_iter()
+        .collect();
+    names.sort();
+    let mut file_count = 0_usize;
+    for name in names {
+        let rel_path = format!("{prefix}/{name}");
+        // Reject a path the manifest format cannot carry while the producer
+        // is still compensable, instead of committing an inventory that
+        // every later load would refuse.
+        validate_artifact_path(&rel_path).map_err(|error| invariant(error.to_string()))?;
+        match open_payload_entry(directory, &name)? {
+            PayloadEntry::Directory(child) => {
+                let child_files = collect_payload_files(&child, &rel_path, depth + 1, files, dirs)?;
+                if child_files == 0 {
+                    return Err(invariant(format!(
+                        "checkpoint payload directory {rel_path} is empty and cannot be \
+                         carried by the manifest inventory"
+                    )));
+                }
+                file_count += child_files;
+                dirs.push(child);
+            }
+            PayloadEntry::File(file) => {
+                files.push((rel_path, file));
+                file_count += 1;
+            }
+        }
+    }
+    Ok(file_count)
+}
+
+/// Revalidate that the file at `rel_path` below `root` is still the retained
+/// artifact, walking each path segment through directory descriptors.
+fn require_linked_path(
+    root: &OwnedStateDirectory,
+    rel_path: &str,
+    expected: &OwnedArtifact,
+) -> Result<()> {
+    let mut current = root.clone();
+    let mut segments = rel_path.split('/').peekable();
+    while let Some(segment) = segments.next() {
+        if segments.peek().is_none() {
+            return require_linked_file(&current, segment, expected);
+        }
+        current =
+            required_child_directory(&current, segment, "revalidate checkpoint payload directory")?;
+    }
+    Err(invariant(format!(
+        "checkpoint artifact path {rel_path:?} is empty"
+    )))
+}
+
+/// Reject a stray entry a capture may have created directly in the sandbox
+/// checkpoint namespace by escaping its configured payload path.
+///
+/// Only three kinds of name may legitimately appear there: `HEAD`, a scratch
+/// name (recognised by [`classify_scratch_name`]), and a committed checkpoint
+/// id. A capture that escaped through a parent component such as
+/// `payload_dir.join("../../capture.log")` can instead leave an unrecognised
+/// entry beside the checkpoints. Publication would keep it, and a later
+/// `remove_sandbox` would fail `validate_checkpoint_id` on it and strand the
+/// sandbox in `RecoveryRequired`. Rejecting it before the capture commits
+/// leaves the checkpoint uncommitted and the sandbox untouched. The active
+/// staging directory is expected and skipped.
+fn require_publishable_sandbox_namespace(
+    sandbox: &OwnedStateDirectory,
+    staging_name: &str,
+) -> Result<()> {
+    for name in directory_names(sandbox, "scan sandbox checkpoint namespace")? {
+        if name == staging_name || name == HEAD_FILE {
+            continue;
+        }
+        if classify_scratch_name(&name)?.is_some() {
+            continue;
+        }
+        if validate_checkpoint_id(&name).is_err() {
+            return Err(invariant(format!(
+                "sandbox checkpoint namespace entry {} is neither a checkpoint, \
+                 HEAD, nor recognised scratch",
+                sandbox.configured_path().join(&name).display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn classify_scratch_name(name: &str) -> Result<Option<ScratchKind>> {
@@ -1766,10 +2348,30 @@ mod tests {
         }
     }
 
+    /// Relative payload layout used by store tests: the classic VM pair in
+    /// the backend subtree and the rootfs in the storage subtree.
+    const TEST_ARTIFACTS: [(&str, &str); 3] = [
+        ("backend", "memory.snap"),
+        ("backend", "vmstate.snap"),
+        ("storage", "rootfs.snap"),
+    ];
+
+    fn stage_subtree<'stage>(
+        stage: &'stage CheckpointStage,
+        subtree: &str,
+    ) -> &'stage OwnedStateDirectory {
+        match subtree {
+            "backend" => &stage.backend_dir,
+            "storage" => &stage.storage_dir,
+            other => panic!("unknown payload subtree {other}"),
+        }
+    }
+
     fn populate(stage: &CheckpointStage, suffix: &str) {
-        for name in REQUIRED_ARTIFACTS {
-            let mut artifact = create_new_file(&stage.directory, name, "create test artifact")
-                .expect("create artifact");
+        for (subtree, name) in TEST_ARTIFACTS {
+            let mut artifact =
+                create_new_file(stage_subtree(stage, subtree), name, "create test artifact")
+                    .expect("create artifact");
             artifact
                 .file
                 .write_all(format!("{name}-{suffix}").as_bytes())
@@ -1793,6 +2395,433 @@ mod tests {
             store.set_head(sandbox_id, &id).expect("move HEAD");
         }
         id
+    }
+
+    #[test]
+    fn new_captures_commit_the_subtree_format() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        let checkpoint_id = publish(&store, sandbox_id, None, true);
+
+        let metadata = store.verify(sandbox_id, &checkpoint_id).expect("verify");
+        assert_eq!(metadata.format_version, CHECKPOINT_FORMAT_VERSION);
+        let names: Vec<&str> = metadata
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "backend/memory.snap",
+                "backend/vmstate.snap",
+                "storage/rootfs.snap"
+            ],
+            "the manifest inventories producer subtrees in sorted order"
+        );
+    }
+
+    #[test]
+    fn publish_rejects_an_empty_payload() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        let stage = store.begin(sandbox_id).expect("begin checkpoint");
+
+        let error = store
+            .publish(&stage, commit_input(None))
+            .expect_err("a checkpoint without any artifact is meaningless");
+
+        assert_eq!(error.outcome(), CheckpointPublishOutcome::KnownUnpublished);
+        assert!(error.to_string().contains("empty payload"));
+        assert!(store.list(sandbox_id).expect("list").is_empty());
+    }
+
+    #[test]
+    fn publish_rejects_a_payload_without_the_rootfs_capture() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        let stage = store.begin(sandbox_id).expect("begin checkpoint");
+        // Only the backend produced output; the storage provider captured
+        // nothing. Restore consumes the rootfs unconditionally, so this
+        // checkpoint must never publish as valid.
+        let mut artifact =
+            create_new_file(&stage.backend_dir, "vmstate.snap", "create test artifact")
+                .expect("create artifact");
+        artifact
+            .file
+            .write_all(b"vm state only")
+            .expect("write artifact");
+
+        let error = store
+            .publish(&stage, commit_input(None))
+            .expect_err("a checkpoint without a rootfs capture is unrestorable");
+
+        assert_eq!(error.outcome(), CheckpointPublishOutcome::KnownUnpublished);
+        assert!(error.to_string().contains("storage/rootfs.snap"));
+        assert!(store.list(sandbox_id).expect("list").is_empty());
+    }
+
+    #[test]
+    fn publish_rejects_an_empty_payload_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        let stage = store.begin(sandbox_id).expect("begin checkpoint");
+        populate(&stage, "empty-dir");
+        fs::create_dir(stage.backend_payload_dir().join("hollow"))
+            .expect("empty payload directory");
+
+        let error = store
+            .publish(&stage, commit_input(None))
+            .expect_err("an empty payload directory is invisible to the manifest");
+
+        assert_eq!(error.outcome(), CheckpointPublishOutcome::KnownUnpublished);
+        assert!(error.to_string().contains("is empty"));
+        store
+            .abort(stage)
+            .expect("a rejected payload must remain removable");
+    }
+
+    #[test]
+    fn publish_rejects_an_empty_backend_subtree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        let stage = store.begin(sandbox_id).expect("begin checkpoint");
+        // Write only the storage rootfs capture; leave the backend subtree empty.
+        std::fs::write(stage.storage_payload_dir().join("rootfs.snap"), b"rootfs")
+            .expect("rootfs capture");
+
+        let error = store
+            .publish(&stage, commit_input(None))
+            .expect_err("an empty backend subtree must fail even with rootfs present");
+
+        assert_eq!(error.outcome(), CheckpointPublishOutcome::KnownUnpublished);
+        assert!(error.to_string().contains("empty backend payload subtree"));
+        store
+            .abort(stage)
+            .expect("a rejected payload must remain removable");
+    }
+
+    #[test]
+    fn publish_rejects_a_stray_entry_in_the_sandbox_namespace() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        let stage = store.begin(sandbox_id).expect("begin checkpoint");
+        let id = stage.id().to_string();
+        populate(&stage, &id);
+        // A capture that escaped its payload path through `../../capture.log`
+        // lands an entry directly in the sandbox checkpoint namespace. It is
+        // neither a checkpoint id, HEAD, nor recognised scratch, so a later
+        // destroy would fail on it. Publication must reject it now.
+        std::fs::write(
+            stage.sandbox.configured_path().join("capture.log"),
+            b"escaped",
+        )
+        .expect("stray namespace entry");
+
+        let error = store
+            .publish(&stage, commit_input(None))
+            .expect_err("a stray namespace entry must block publication");
+        assert_eq!(error.outcome(), CheckpointPublishOutcome::KnownUnpublished);
+        assert!(error.to_string().contains("neither a checkpoint"));
+        store
+            .abort(stage)
+            .expect("a rejected capture must remain removable");
+    }
+
+    #[test]
+    fn remove_sandbox_reclaims_a_stray_namespace_entry() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        // Publish a real checkpoint so the sandbox namespace exists, then plant
+        // a stray file beside it as an escaped capture would. Destroy must
+        // reclaim the whole namespace instead of failing `validate_checkpoint_id`
+        // and stranding the sandbox.
+        let id = publish(&store, sandbox_id, None, true);
+        let catalog = store.root().expect("catalog");
+        let sandbox = optional_child_directory(&catalog, &sandbox_id.to_string())
+            .expect("open sandbox")
+            .expect("sandbox namespace exists");
+        std::fs::write(sandbox.configured_path().join("capture.log"), b"escaped")
+            .expect("stray namespace entry");
+
+        store
+            .remove_sandbox(sandbox_id)
+            .expect("destroy must reclaim a stray namespace entry");
+        assert!(
+            optional_child_directory(&catalog, &sandbox_id.to_string())
+                .expect("probe sandbox namespace")
+                .is_none(),
+            "the sandbox namespace should be gone"
+        );
+        let _ = id;
+    }
+
+    #[test]
+    fn remove_sandbox_reclaims_malformed_scratch_like_entries() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        publish(&store, sandbox_id, None, true);
+        let catalog = store.root().expect("catalog");
+        let sandbox = optional_child_directory(&catalog, &sandbox_id.to_string())
+            .expect("open sandbox")
+            .expect("sandbox namespace exists");
+
+        std::fs::create_dir(sandbox.configured_path().join(".ckpt-invalid.tmp"))
+            .expect("malformed checkpoint scratch directory");
+        std::fs::write(
+            sandbox.configured_path().join(".HEAD.invalid.tmp"),
+            b"stale",
+        )
+        .expect("malformed HEAD scratch file");
+
+        store
+            .remove_sandbox(sandbox_id)
+            .expect("destroy must classify malformed scratch entries by filesystem type");
+        assert!(
+            optional_child_directory(&catalog, &sandbox_id.to_string())
+                .expect("probe sandbox namespace")
+                .is_none(),
+            "the sandbox namespace should be gone"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn remove_sandbox_reclaims_non_utf8_namespace_entries() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        publish(&store, sandbox_id, None, true);
+        let catalog = store.root().expect("catalog");
+        let sandbox = optional_child_directory(&catalog, &sandbox_id.to_string())
+            .expect("open sandbox")
+            .expect("sandbox namespace exists");
+
+        let stray_file = OsStr::from_bytes(b"capture-\xff.log");
+        let stray_directory = OsStr::from_bytes(b".ckpt-\xfe.tmp");
+        std::fs::write(sandbox.configured_path().join(stray_file), b"escaped")
+            .expect("non-UTF-8 namespace file");
+        let stray_directory_path = sandbox.configured_path().join(stray_directory);
+        std::fs::create_dir(&stray_directory_path).expect("non-UTF-8 namespace directory");
+        std::fs::write(stray_directory_path.join("artifact"), b"escaped")
+            .expect("nested escaped artifact");
+
+        store
+            .remove_sandbox(sandbox_id)
+            .expect("destroy must reclaim non-UTF-8 namespace entries");
+        assert!(
+            optional_child_directory(&catalog, &sandbox_id.to_string())
+                .expect("probe sandbox namespace")
+                .is_none(),
+            "the sandbox namespace should be gone"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_payload_with_a_symlink_stays_removable() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        let stage = store.begin(sandbox_id).expect("begin checkpoint");
+        populate(&stage, "symlinked");
+        let outside = temp.path().join("outside");
+        fs::write(&outside, b"outside").expect("outside file");
+        symlink(&outside, stage.backend_payload_dir().join("escape"))
+            .expect("plant payload symlink");
+
+        let error = store
+            .publish(&stage, commit_input(None))
+            .expect_err("a payload containing a symlink must not publish");
+        assert_eq!(error.outcome(), CheckpointPublishOutcome::KnownUnpublished);
+
+        store
+            .abort(stage)
+            .expect("a rejected payload must remain removable");
+        assert!(store.list(sandbox_id).expect("list").is_empty());
+        assert!(outside.is_file(), "the symlink target must not be followed");
+    }
+
+    #[test]
+    fn a_payload_too_deep_to_publish_stays_removable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        let stage = store.begin(sandbox_id).expect("begin checkpoint");
+        populate(&stage, "too-deep");
+        // Nest one level past the payload bound: publication must reject the
+        // stage, and the compensation path must still be able to remove it.
+        let mut deep = stage.backend_payload_dir();
+        for _ in 0..MAX_PAYLOAD_DEPTH {
+            deep.push("d");
+        }
+        fs::create_dir_all(&deep).expect("deep payload tree");
+        fs::write(deep.join("stranded.bin"), b"too deep").expect("deep artifact");
+
+        let error = store
+            .publish(&stage, commit_input(None))
+            .expect_err("a payload past the depth bound must not publish");
+        assert_eq!(error.outcome(), CheckpointPublishOutcome::KnownUnpublished);
+
+        store
+            .abort(stage)
+            .expect("a rejected payload must remain removable");
+        assert!(store.list(sandbox_id).expect("list").is_empty());
+    }
+
+    #[test]
+    fn verify_rejects_unregistered_payload_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        let checkpoint_id = publish(&store, sandbox_id, None, true);
+        let committed = store
+            .configured_root()
+            .join(sandbox_id.to_string())
+            .join(&checkpoint_id);
+
+        fs::write(committed.join("backend/unregistered.bin"), b"smuggled")
+            .expect("write unregistered payload file");
+
+        let error = store
+            .verify(sandbox_id, &checkpoint_id)
+            .expect_err("files outside the manifest must fail closed");
+        assert!(error.to_string().contains("does not match its manifest"));
+    }
+
+    #[test]
+    fn nested_payload_directories_publish_verify_and_pin() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        let stage = store.begin(sandbox_id).expect("begin checkpoint");
+        let checkpoint_id = stage.id().to_string();
+        // A container-shaped payload: an image directory plus the spec
+        // beside it, exactly what a runsc-style backend writes.
+        let image = stage.backend_payload_dir().join("image");
+        let bundle = stage.backend_payload_dir().join("bundle");
+        fs::create_dir_all(&image).expect("image directory");
+        fs::create_dir_all(&bundle).expect("bundle directory");
+        fs::write(image.join("checkpoint.img"), b"sentry state").expect("image state");
+        fs::write(image.join("pages.bin"), b"guest pages").expect("image pages");
+        fs::write(bundle.join("config.json"), b"{}").expect("spec copy");
+        fs::write(
+            stage.storage_payload_dir().join("rootfs.snap"),
+            b"rootfs capture",
+        )
+        .expect("rootfs artifact");
+
+        let metadata = store
+            .publish(&stage, commit_input(None))
+            .expect("publish nested payload");
+        let names: Vec<&str> = metadata
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "backend/bundle/config.json",
+                "backend/image/checkpoint.img",
+                "backend/image/pages.bin",
+                "storage/rootfs.snap"
+            ]
+        );
+        store.set_head(sandbox_id, &checkpoint_id).expect("HEAD");
+        store
+            .verify(sandbox_id, &checkpoint_id)
+            .expect("verify nested payload");
+
+        let target = store
+            .verify_restore_target(sandbox_id, &checkpoint_id)
+            .expect("restore target");
+        assert!(
+            target
+                .backend_payload_dir()
+                .join("image/pages.bin")
+                .is_file(),
+            "the pinned backend subtree must expose the nested layout"
+        );
+        assert!(
+            target.storage_payload_dir().join("rootfs.snap").is_file(),
+            "the pinned storage subtree must expose the rootfs capture"
+        );
+    }
+
+    #[test]
+    fn v1_checkpoints_stay_verifiable_and_map_payloads_to_the_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        // Force catalog creation, then hand-write a pre-split checkpoint the
+        // way version 1 committed it: flat artifacts beside metadata.json.
+        let _ = publish(&store, sandbox_id, None, false);
+        let checkpoint_id = format!("ckpt-{}", Uuid::new_v4());
+        let directory = store
+            .configured_root()
+            .join(sandbox_id.to_string())
+            .join(&checkpoint_id);
+        fs::create_dir(&directory).expect("v1 checkpoint directory");
+        let contents: [(&str, &[u8]); 3] = [
+            ("vmstate.snap", b"vm"),
+            ("memory.snap", b"mem"),
+            ("rootfs.snap", b"root"),
+        ];
+        let mut artifacts = Vec::new();
+        for (name, bytes) in contents {
+            fs::write(directory.join(name), bytes).expect("v1 artifact");
+            artifacts.push(CheckpointArtifact {
+                name: name.to_string(),
+                size_bytes: bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(bytes)),
+            });
+        }
+        let metadata = CheckpointMetadata {
+            format_version: CHECKPOINT_FORMAT_V1,
+            id: checkpoint_id.clone(),
+            parent: None,
+            sandbox_id,
+            policy_name: "default".to_string(),
+            image_digest: "sha256:test".to_string(),
+            backend: BackendKind::Mock,
+            backend_version: Some("mock-v1".to_string()),
+            created_at: Utc::now(),
+            snapshot_kind: SnapshotKind::Full,
+            artifacts,
+        };
+        fs::write(
+            directory.join(METADATA_FILE),
+            serde_json::to_vec_pretty(&metadata).expect("encode v1 metadata"),
+        )
+        .expect("write v1 metadata");
+
+        let verified = store
+            .verify(sandbox_id, &checkpoint_id)
+            .expect("v1 checkpoints stay readable");
+        assert_eq!(verified.format_version, CHECKPOINT_FORMAT_V1);
+
+        // Both producer subtrees map onto the checkpoint root, so a backend
+        // that wrote flat files before the split finds them unchanged.
+        let target = store
+            .verify_restore_target(sandbox_id, &checkpoint_id)
+            .expect("v1 restore target");
+        assert!(target.backend_payload_dir().join("vmstate.snap").is_file());
+        assert!(target.backend_payload_dir().join("memory.snap").is_file());
+        assert!(target.storage_payload_dir().join("rootfs.snap").is_file());
     }
 
     #[test]
@@ -1834,10 +2863,15 @@ mod tests {
         assert_mode(&root, 0o700);
         assert_mode(&sandbox, 0o700);
         assert_mode(&staging, 0o700);
+        assert_mode(&staging.join(PAYLOAD_BACKEND_DIR), 0o700);
+        assert_mode(&staging.join(PAYLOAD_STORAGE_DIR), 0o700);
 
-        for name in REQUIRED_ARTIFACTS {
-            fs::set_permissions(staging.join(name), fs::Permissions::from_mode(0o666))
-                .expect("make backend artifact permissive");
+        for (subtree, name) in TEST_ARTIFACTS {
+            fs::set_permissions(
+                staging.join(subtree).join(name),
+                fs::Permissions::from_mode(0o666),
+            )
+            .expect("make backend artifact permissive");
         }
         let checkpoint_id = stage.id().to_string();
         store
@@ -1849,8 +2883,8 @@ mod tests {
 
         let committed = sandbox.join(&checkpoint_id);
         assert_mode(&committed, 0o700);
-        for name in REQUIRED_ARTIFACTS {
-            assert_mode(&committed.join(name), 0o600);
+        for (subtree, name) in TEST_ARTIFACTS {
+            assert_mode(&committed.join(subtree).join(name), 0o600);
         }
         assert_mode(&committed.join(METADATA_FILE), 0o600);
         assert_mode(&sandbox.join(HEAD_FILE), 0o600);
@@ -1863,8 +2897,8 @@ mod tests {
         let sandbox_id = Uuid::new_v4();
         let stage = store.begin(sandbox_id).expect("begin checkpoint");
         populate(&stage, "hard-linked");
-        let vmstate = stage.artifact_path("vmstate.snap").expect("VM state path");
-        let rootfs = stage.artifact_path("rootfs.snap").expect("rootfs path");
+        let vmstate = stage.backend_payload_dir().join("vmstate.snap");
+        let rootfs = stage.storage_payload_dir().join("rootfs.snap");
         let external = temp.path().join("external-rootfs");
         fs::set_permissions(&vmstate, fs::Permissions::from_mode(0o666))
             .expect("make preceding artifact permissive");
@@ -1895,10 +2929,11 @@ mod tests {
         let store = store(&temp);
         let sandbox_id = Uuid::new_v4();
         let stage = store.begin(sandbox_id).expect("begin checkpoint");
-        let rootfs = stage.artifact_path("rootfs.snap").expect("rootfs path");
+        let rootfs = stage.storage_payload_dir().join("rootfs.snap");
         let temporary = stage
             .directory
             .configured_path()
+            .join(PAYLOAD_STORAGE_DIR)
             .join(".rootfs.snap.capture-interrupted.tmp");
         fs::write(&temporary, b"partial rootfs").expect("write temporary rootfs");
         fs::hard_link(&temporary, &rootfs).expect("link captured rootfs");
@@ -1951,10 +2986,16 @@ mod tests {
         let expected = store.list(sandbox_id).expect("list intact checkpoints");
         let sandbox = store.configured_root().join(sandbox_id.to_string());
 
-        fs::write(sandbox.join(&root).join("rootfs.snap"), b"corrupted root")
-            .expect("corrupt historical checkpoint artifact");
-        fs::write(sandbox.join(&head).join("memory.snap"), b"corrupted head")
-            .expect("corrupt HEAD checkpoint artifact");
+        fs::write(
+            sandbox.join(&root).join("storage/rootfs.snap"),
+            b"corrupted root",
+        )
+        .expect("corrupt historical checkpoint artifact");
+        fs::write(
+            sandbox.join(&head).join("backend/memory.snap"),
+            b"corrupted head",
+        )
+        .expect("corrupt HEAD checkpoint artifact");
 
         assert_eq!(
             store.list(sandbox_id).expect("list from metadata"),
@@ -2002,8 +3043,11 @@ mod tests {
         let head = publish(&store, sandbox_id, Some(root.clone()), true);
         let sandbox = store.configured_root().join(sandbox_id.to_string());
 
-        fs::write(sandbox.join(&root).join("rootfs.snap"), b"corrupted root")
-            .expect("corrupt non-HEAD ancestor artifact");
+        fs::write(
+            sandbox.join(&root).join("storage/rootfs.snap"),
+            b"corrupted root",
+        )
+        .expect("corrupt non-HEAD ancestor artifact");
 
         assert_eq!(
             store.read_head(sandbox_id).expect("read intact HEAD"),
@@ -2318,7 +3362,7 @@ mod tests {
             .configured_root()
             .join(sandbox_id.to_string())
             .join(&stage.staging_name)
-            .join("rootfs.snap");
+            .join("storage/rootfs.snap");
         let retained = temp.path().join("retained-rootfs.snap");
         store.set_before_publish_revalidation(move || {
             fs::rename(&rootfs, &retained).expect("move retained artifact");
@@ -2346,7 +3390,7 @@ mod tests {
             .configured_root()
             .join(sandbox_id.to_string())
             .join(&checkpoint_id)
-            .join("rootfs.snap");
+            .join("storage/rootfs.snap");
         fs::remove_file(&artifact).expect("remove artifact");
         let outside = temp.path().join("outside");
         fs::write(&outside, b"outside").expect("write outside file");
@@ -2525,7 +3569,7 @@ mod tests {
             .expect("publish checkpoint with retained owners");
 
         let sandbox = store.configured_root().join(sandbox_id.to_string());
-        let artifact = sandbox.join(&checkpoint_id).join("rootfs.snap");
+        let artifact = sandbox.join(&checkpoint_id).join("storage/rootfs.snap");
         let displaced = sandbox.join("displaced-rootfs.snap");
         let bytes = fs::read(&artifact).expect("read published rootfs");
         fs::rename(&artifact, &displaced).expect("move retained rootfs");

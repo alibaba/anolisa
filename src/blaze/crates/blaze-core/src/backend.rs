@@ -119,10 +119,9 @@ pub struct RestoreRequest {
     pub binary_path: PathBuf,
     /// Storage resources reconstructed for this sandbox.
     pub storage: StorageSlot,
-    /// VM-state artifact from a committed checkpoint.
-    pub snapshot_path: PathBuf,
-    /// Guest-memory artifact from the same checkpoint.
-    pub mem_path: PathBuf,
+    /// Backend-owned payload subtree from a committed checkpoint. The
+    /// layout inside is whatever the same backend wrote during capture.
+    pub payload_dir: PathBuf,
     /// Backend identity frozen into the checkpoint metadata.
     pub checkpoint_backend: BackendKind,
     /// Backend version frozen into the checkpoint metadata.
@@ -158,10 +157,11 @@ pub enum SnapshotKind {
 /// Paths and semantics for one snapshot operation.
 #[derive(Debug, Clone)]
 pub struct SnapshotRequest {
-    /// Destination for VM state.
-    pub snapshot_path: PathBuf,
-    /// Destination for guest memory.
-    pub mem_path: PathBuf,
+    /// Payload subtree owned by the backend for this capture. The daemon
+    /// guarantees it exists and is empty; the backend chooses the internal
+    /// layout, so a VM backend can write two named files while a
+    /// container-shaped backend can write a whole image directory.
+    pub payload_dir: PathBuf,
     /// Snapshot flavor.
     pub kind: SnapshotKind,
 }

@@ -242,12 +242,15 @@ produced, and the same shape is rejected if it appears in a manifest that is rea
 back.
 
 For a supported running sandbox, Blaze holds the sandbox operation lock,
-validates its current checkpoint parent, pauses the backend, and captures three
-self-contained files: `vmstate.snap`, `memory.snap`, and `rootfs.snap`. It
-synchronizes and hashes those files, publishes the manifest, atomically updates
-the sandbox checkpoint HEAD, and resumes the backend. Guest operations and
-other lifecycle changes wait for the same operation lock while capture is in
-progress.
+validates its current checkpoint parent, quiesces the backend, and captures
+the payload as two producer-owned subtrees: the backend adapter writes its
+own layout under `backend/` (a VM backend saves its VM state and guest
+memory there), and the storage provider captures the writable root
+filesystem as `storage/rootfs.snap`. Blaze inventories every captured file,
+synchronizes and hashes it, publishes the manifest, atomically updates the
+sandbox checkpoint HEAD, and returns the workload to execution. Guest
+operations and other lifecycle changes wait for the same operation lock while
+capture is in progress.
 
 A successful response contains the complete published manifest. The existing
 `checkpoint_id` and `instance_id` fields identify the same checkpoint and
@@ -257,7 +260,7 @@ sandbox as `id` and `sandbox_id`:
 {
   "checkpoint_id": "ckpt-11111111-1111-4111-8111-111111111111",
   "instance_id": "22222222-2222-4222-8222-222222222222",
-  "format_version": 1,
+  "format_version": 2,
   "id": "ckpt-11111111-1111-4111-8111-111111111111",
   "parent": null,
   "sandbox_id": "22222222-2222-4222-8222-222222222222",
@@ -269,23 +272,30 @@ sandbox as `id` and `sandbox_id`:
   "snapshot_kind": "full",
   "artifacts": [
     {
-      "name": "vmstate.snap",
-      "size_bytes": 4096,
-      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    },
-    {
-      "name": "memory.snap",
+      "name": "backend/memory.snap",
       "size_bytes": 8192,
       "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     },
     {
-      "name": "rootfs.snap",
+      "name": "backend/vmstate.snap",
+      "size_bytes": 4096,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "storage/rootfs.snap",
       "size_bytes": 8589934592,
       "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
     }
   ]
 }
 ```
+
+The `artifacts` inventory lists every captured file under its slash-separated
+path relative to the checkpoint, sorted lexicographically. Its exact contents
+belong to the backend that produced the checkpoint: the example above shows
+the built-in mock backend, while a container-shaped backend may record a whole
+image directory. Checkpoints written before this format (`format_version: 1`)
+remain restorable, but new captures always publish version 2.
 
 Use `GET /v1/sandboxes/{id}/checkpoints` to list committed history. Each list
 entry contains `id`, `parent`, `created_at`, total logical `size_bytes`,

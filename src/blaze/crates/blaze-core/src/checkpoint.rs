@@ -14,15 +14,36 @@ use uuid::Uuid;
 use crate::backend::{BackendKind, SnapshotKind};
 
 /// Current on-disk checkpoint metadata format.
-pub const CHECKPOINT_FORMAT_VERSION: u32 = 1;
+///
+/// Version 2 hands each payload producer an owned subtree instead of a fixed
+/// pair of named VM files, so directory-shaped payloads (for example a runsc
+/// checkpoint image) commit without changing the format again.
+pub const CHECKPOINT_FORMAT_VERSION: u32 = 2;
 
-/// Self-contained artifacts required for every committed checkpoint.
-pub const REQUIRED_ARTIFACTS: [&str; 3] = ["vmstate.snap", "memory.snap", "rootfs.snap"];
+/// First on-disk format, kept readable so checkpoints captured before the
+/// payload-subtree split can still be restored. New captures never write it.
+pub const CHECKPOINT_FORMAT_V1: u32 = 1;
+
+/// Payload subtree owned by the backend adapter. Its internal layout is
+/// private to the backend that produced the checkpoint.
+pub const PAYLOAD_BACKEND_DIR: &str = "backend";
+
+/// Payload subtree owned by the storage provider (rootfs capture).
+pub const PAYLOAD_STORAGE_DIR: &str = "storage";
+
+/// Artifacts required by every version-1 checkpoint. Retained only to
+/// validate pre-split manifests; version-2 manifests are inventory-driven.
+const V1_REQUIRED_ARTIFACTS: [&str; 3] = ["vmstate.snap", "memory.snap", "rootfs.snap"];
+
+/// Bounds for one artifact path. Deeper or longer paths are always a bug in
+/// the producing backend, and bounding them keeps manifest handling cheap.
+const MAX_ARTIFACT_PATH_BYTES: usize = 1024;
+const MAX_ARTIFACT_PATH_DEPTH: usize = 16;
 
 /// One content digest recorded in a checkpoint manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointArtifact {
-    /// File name relative to the checkpoint directory.
+    /// Slash-separated path relative to the checkpoint directory.
     pub name: String,
     /// Logical file size in bytes.
     pub size_bytes: u64,
@@ -130,9 +151,9 @@ pub enum CheckpointValidationError {
         reason: String,
     },
 
-    /// A requested artifact name is outside the frozen format.
-    #[error("artifact name {name:?} is not part of the checkpoint format")]
-    InvalidArtifactName { name: String },
+    /// A manifest path cannot be safely resolved inside the payload root.
+    #[error("artifact path {path:?} is invalid: {reason}")]
+    InvalidArtifactPath { path: String, reason: String },
 }
 
 /// Validate a canonical `ckpt-<hyphenated-uuid>` identifier.
@@ -151,15 +172,43 @@ pub fn validate_checkpoint_id(checkpoint_id: &str) -> Result<Uuid, CheckpointVal
     Ok(uuid)
 }
 
-/// Validate a name before the daemon resolves it inside a checkpoint stage.
-pub fn validate_artifact_name(name: &str) -> Result<(), CheckpointValidationError> {
-    if REQUIRED_ARTIFACTS.contains(&name) {
-        Ok(())
-    } else {
-        Err(CheckpointValidationError::InvalidArtifactName {
-            name: name.to_string(),
-        })
+/// Validate one manifest path before the daemon resolves it inside a
+/// checkpoint payload.
+///
+/// Backends own their payload layout, so the format cannot whitelist names.
+/// What it must still guarantee is that every recorded path resolves inside
+/// the payload root: relative, slash-separated, and free of `.` and `..`
+/// segments, so resolution through a directory descriptor cannot escape.
+pub fn validate_artifact_path(path: &str) -> Result<(), CheckpointValidationError> {
+    if path.is_empty() {
+        return Err(invalid_artifact_path(path, "path is empty"));
     }
+    if path.len() > MAX_ARTIFACT_PATH_BYTES {
+        return Err(invalid_artifact_path(path, "path is too long"));
+    }
+    if path.starts_with('/') {
+        return Err(invalid_artifact_path(path, "path is absolute"));
+    }
+    if path.contains('\\') {
+        return Err(invalid_artifact_path(path, "backslash is not a separator"));
+    }
+    if path.bytes().any(|byte| byte == 0) {
+        return Err(invalid_artifact_path(path, "path contains a NUL byte"));
+    }
+    let mut depth = 0usize;
+    for segment in path.split('/') {
+        depth += 1;
+        if depth > MAX_ARTIFACT_PATH_DEPTH {
+            return Err(invalid_artifact_path(path, "path is too deep"));
+        }
+        if segment.is_empty() {
+            return Err(invalid_artifact_path(path, "path has an empty segment"));
+        }
+        if segment == "." || segment == ".." {
+            return Err(invalid_artifact_path(path, "path traverses directories"));
+        }
+    }
+    Ok(())
 }
 
 /// Validate daemon-supplied values before constructing a durable manifest.
@@ -198,7 +247,9 @@ pub fn validate_checkpoint_manifest(
 ) -> Result<(), CheckpointValidationError> {
     validate_checkpoint_id(expected_checkpoint_id)?;
     validate_checkpoint_id(&metadata.id)?;
-    if metadata.format_version != CHECKPOINT_FORMAT_VERSION {
+    if metadata.format_version != CHECKPOINT_FORMAT_VERSION
+        && metadata.format_version != CHECKPOINT_FORMAT_V1
+    {
         return Err(CheckpointValidationError::UnsupportedFormat {
             checkpoint_id: metadata.id.clone(),
             actual: metadata.format_version,
@@ -238,7 +289,7 @@ pub fn validate_checkpoint_manifest(
         metadata.backend,
         metadata.backend_version.as_deref(),
     )?;
-    validate_artifact_manifest(&metadata.id, &metadata.artifacts)
+    validate_artifact_manifest(&metadata.id, metadata.format_version, &metadata.artifacts)
 }
 
 fn validate_runtime_identity(
@@ -281,14 +332,49 @@ fn validate_runtime_identity(
 
 fn validate_artifact_manifest(
     checkpoint_id: &str,
+    format_version: u32,
     artifacts: &[CheckpointArtifact],
 ) -> Result<(), CheckpointValidationError> {
-    if artifacts.len() != REQUIRED_ARTIFACTS.len() {
+    if format_version == CHECKPOINT_FORMAT_V1 {
+        return validate_v1_artifact_manifest(checkpoint_id, artifacts);
+    }
+    if artifacts.is_empty() {
+        return Err(invalid_artifacts(
+            checkpoint_id,
+            "artifact manifest is empty",
+        ));
+    }
+    // Strictly ascending order makes the manifest canonical: equal payloads
+    // always serialize identically, and duplicates are rejected for free.
+    let mut previous: Option<&str> = None;
+    for artifact in artifacts {
+        validate_artifact_path(&artifact.name)
+            .map_err(|error| invalid_artifacts(checkpoint_id, error.to_string()))?;
+        validate_artifact_digest(checkpoint_id, artifact)?;
+        if let Some(previous) = previous
+            && previous >= artifact.name.as_str()
+        {
+            return Err(invalid_artifacts(
+                checkpoint_id,
+                format!("artifact {:?} is duplicated or out of order", artifact.name),
+            ));
+        }
+        previous = Some(artifact.name.as_str());
+    }
+    Ok(())
+}
+
+/// Validate the frozen artifact set of a pre-split (version 1) manifest.
+fn validate_v1_artifact_manifest(
+    checkpoint_id: &str,
+    artifacts: &[CheckpointArtifact],
+) -> Result<(), CheckpointValidationError> {
+    if artifacts.len() != V1_REQUIRED_ARTIFACTS.len() {
         return Err(invalid_artifacts(
             checkpoint_id,
             format!(
                 "expected {} artifacts, found {}",
-                REQUIRED_ARTIFACTS.len(),
+                V1_REQUIRED_ARTIFACTS.len(),
                 artifacts.len()
             ),
         ));
@@ -296,37 +382,45 @@ fn validate_artifact_manifest(
 
     let mut names = HashSet::with_capacity(artifacts.len());
     for artifact in artifacts {
-        validate_artifact_name(&artifact.name).map_err(|_| {
-            invalid_artifacts(
+        if !V1_REQUIRED_ARTIFACTS.contains(&artifact.name.as_str()) {
+            return Err(invalid_artifacts(
                 checkpoint_id,
                 format!("unexpected artifact {:?}", artifact.name),
-            )
-        })?;
+            ));
+        }
         if !names.insert(artifact.name.as_str()) {
             return Err(invalid_artifacts(
                 checkpoint_id,
                 format!("duplicate artifact {:?}", artifact.name),
             ));
         }
-        if artifact.sha256.len() != 64
-            || !artifact
-                .sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(invalid_artifacts(
-                checkpoint_id,
-                format!("artifact {:?} has an invalid SHA-256 digest", artifact.name),
-            ));
-        }
+        validate_artifact_digest(checkpoint_id, artifact)?;
     }
-    if REQUIRED_ARTIFACTS
+    if V1_REQUIRED_ARTIFACTS
         .iter()
         .any(|required| !names.contains(required))
     {
         return Err(invalid_artifacts(
             checkpoint_id,
             "one or more required artifacts are missing",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_artifact_digest(
+    checkpoint_id: &str,
+    artifact: &CheckpointArtifact,
+) -> Result<(), CheckpointValidationError> {
+    if artifact.sha256.len() != 64
+        || !artifact
+            .sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(invalid_artifacts(
+            checkpoint_id,
+            format!("artifact {:?} has an invalid SHA-256 digest", artifact.name),
         ));
     }
     Ok(())
@@ -342,6 +436,13 @@ fn invalid_identifier(checkpoint_id: &str, reason: impl Into<String>) -> Checkpo
 fn invalid_artifacts(checkpoint_id: &str, reason: impl Into<String>) -> CheckpointValidationError {
     CheckpointValidationError::InvalidArtifacts {
         checkpoint_id: checkpoint_id.to_string(),
+        reason: reason.into(),
+    }
+}
+
+fn invalid_artifact_path(path: &str, reason: impl Into<String>) -> CheckpointValidationError {
+    CheckpointValidationError::InvalidArtifactPath {
+        path: path.to_string(),
         reason: reason.into(),
     }
 }
@@ -372,10 +473,22 @@ mod tests {
             created_at: Utc::now(),
             snapshot_kind: SnapshotKind::Full,
             artifacts: vec![
+                artifact("backend/memory.snap", 'a'),
+                artifact("backend/vmstate.snap", 'b'),
+                artifact("storage/rootfs.snap", 'c'),
+            ],
+        }
+    }
+
+    fn v1_metadata() -> CheckpointMetadata {
+        CheckpointMetadata {
+            format_version: CHECKPOINT_FORMAT_V1,
+            artifacts: vec![
                 artifact("vmstate.snap", 'a'),
                 artifact("memory.snap", 'b'),
                 artifact("rootfs.snap", 'c'),
             ],
+            ..metadata()
         }
     }
 
@@ -417,14 +530,93 @@ mod tests {
     }
 
     #[test]
-    fn manifest_requires_the_exact_artifact_set() {
-        let mut metadata = metadata();
-        metadata.artifacts[2].name = "memory.snap".to_string();
-        let error = validate_checkpoint_manifest(&metadata, metadata.sandbox_id, &metadata.id)
-            .expect_err("duplicate artifact must fail");
+    fn manifest_rejects_duplicate_or_unsorted_artifacts() {
+        let mut duplicated = metadata();
+        duplicated.artifacts[2].name = "backend/memory.snap".to_string();
+        let error =
+            validate_checkpoint_manifest(&duplicated, duplicated.sandbox_id, &duplicated.id)
+                .expect_err("duplicate artifact must fail");
         assert!(matches!(
             error,
             CheckpointValidationError::InvalidArtifacts { .. }
+        ));
+
+        let mut unsorted = metadata();
+        unsorted.artifacts.swap(0, 1);
+        assert!(
+            validate_checkpoint_manifest(&unsorted, unsorted.sandbox_id, &unsorted.id).is_err(),
+            "unsorted manifest must fail"
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_an_empty_artifact_inventory() {
+        let mut metadata = metadata();
+        metadata.artifacts.clear();
+        assert!(
+            validate_checkpoint_manifest(&metadata, metadata.sandbox_id, &metadata.id).is_err()
+        );
+    }
+
+    #[test]
+    fn artifact_paths_must_stay_inside_the_payload_root() {
+        for path in [
+            "",
+            "/etc/passwd",
+            "backend/../escape",
+            "./relative",
+            "backend//double",
+            "backend/",
+            "back\\slash",
+            "..",
+        ] {
+            assert!(
+                validate_artifact_path(path).is_err(),
+                "path {path:?} must be rejected"
+            );
+        }
+        assert!(validate_artifact_path("backend/image/pages.bin").is_ok());
+        assert!(validate_artifact_path("vmstate.snap").is_ok());
+    }
+
+    #[test]
+    fn artifact_paths_are_bounded_in_length_and_depth() {
+        let deep = std::iter::repeat_n("d", 17).collect::<Vec<_>>().join("/");
+        assert!(validate_artifact_path(&deep).is_err());
+        let long = "a".repeat(1025);
+        assert!(validate_artifact_path(&long).is_err());
+    }
+
+    #[test]
+    fn v1_manifest_still_requires_the_frozen_artifact_set() {
+        let metadata = v1_metadata();
+        validate_checkpoint_manifest(&metadata, metadata.sandbox_id, &metadata.id)
+            .expect("legacy manifest stays readable");
+
+        let mut broken = v1_metadata();
+        broken.artifacts[2].name = "memory.snap".to_string();
+        assert!(
+            validate_checkpoint_manifest(&broken, broken.sandbox_id, &broken.id).is_err(),
+            "duplicate legacy artifact must fail"
+        );
+
+        let mut renamed = v1_metadata();
+        renamed.artifacts[0].name = "backend/vmstate.snap".to_string();
+        assert!(
+            validate_checkpoint_manifest(&renamed, renamed.sandbox_id, &renamed.id).is_err(),
+            "v1 manifests must keep the frozen names"
+        );
+    }
+
+    #[test]
+    fn unknown_format_versions_are_rejected() {
+        let mut metadata = metadata();
+        metadata.format_version = CHECKPOINT_FORMAT_VERSION + 1;
+        let error = validate_checkpoint_manifest(&metadata, metadata.sandbox_id, &metadata.id)
+            .expect_err("future format must fail");
+        assert!(matches!(
+            error,
+            CheckpointValidationError::UnsupportedFormat { .. }
         ));
     }
 

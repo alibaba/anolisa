@@ -122,15 +122,11 @@ impl SandboxManager {
             ))
         })??;
         let target_metadata = target.metadata().clone();
-        let snapshot_path = target
-            .artifact_path("vmstate.snap")
-            .map_err(checkpoint_store_error)?;
-        let memory_path = target
-            .artifact_path("memory.snap")
-            .map_err(checkpoint_store_error)?;
-        let rootfs_path = target
-            .artifact_path("rootfs.snap")
-            .map_err(checkpoint_store_error)?;
+        // The backend adapter re-reads its own capture layout from its
+        // payload subtree; the storage provider re-materializes the rootfs
+        // from its own. Both paths pin the retained directory descriptors.
+        let backend_payload_dir = target.backend_payload_dir();
+        let rootfs_path = target.storage_payload_dir().join("rootfs.snap");
         if target_metadata.policy_name != instance.policy_name
             || target_metadata.image_digest != instance.image_digest
             || target_metadata.backend != instance.backend
@@ -357,8 +353,7 @@ impl SandboxManager {
                     instance_id: id,
                     binary_path: request.binary_path,
                     storage,
-                    snapshot_path,
-                    mem_path: memory_path,
+                    payload_dir: backend_payload_dir,
                     checkpoint_backend: target_metadata.backend,
                     expected_version: target_metadata.backend_version.clone(),
                     snapshot_kind: target_metadata.snapshot_kind,

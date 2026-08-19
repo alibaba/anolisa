@@ -69,7 +69,6 @@ pub(crate) struct OwnedStateDirectory {
 
 struct OwnedStateDirectoryInner {
     configured_path: PathBuf,
-    stable_path: PathBuf,
     directory: OwnedFd,
 }
 
@@ -1050,21 +1049,12 @@ impl OwnedRunDir {
 
 impl OwnedStateDirectory {
     pub(crate) fn new(configured_path: PathBuf, directory: OwnedFd) -> Self {
-        #[cfg(target_os = "linux")]
-        let stable_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
-        #[cfg(not(target_os = "linux"))]
-        let stable_path = configured_path.clone();
         Self {
             inner: Arc::new(OwnedStateDirectoryInner {
                 configured_path,
-                stable_path,
                 directory,
             }),
         }
-    }
-
-    pub(crate) fn path(&self) -> &Path {
-        &self.inner.stable_path
     }
 
     pub(crate) fn configured_path(&self) -> &Path {
