@@ -247,6 +247,10 @@ export class HookTranslatorImpl {
         overrides['presencePenalty'] = cfg.presencePenalty;
       if (cfg.frequencyPenalty !== undefined)
         overrides['frequencyPenalty'] = cfg.frequencyPenalty;
+      // Apply hook-modified tools so BeforeModel hooks (e.g. tokenless
+      // schema compression) can replace the tool set. Without this,
+      // hook-modified tools are silently discarded.
+      if (cfg['tools'] !== undefined) overrides['tools'] = cfg['tools'];
 
       result.config = {
         ...baseConfig,
