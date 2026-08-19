@@ -122,7 +122,8 @@ fn sqlite_full_rolls_back_task_event_receipt_and_outbox() {
 fn storage_fault_control_is_debug_only_and_has_no_fault_input() {
     let module_source = include_str!("../src/storage.rs");
     let harness_source = include_str!("../src/storage/fault_harness.rs");
-    let task_store_source = include_str!("../src/storage/task_store.rs");
+    let task_store_owner_source = include_str!("../src/storage/task_store.rs");
+    let task_store_commit_source = include_str!("../src/storage/task_store/commit.rs");
     assert!(module_source.contains("#[cfg(debug_assertions)]\nmod fault_harness;"));
     assert!(module_source.contains(
         "#[cfg(debug_assertions)]\n#[doc(hidden)]\npub use task_store::{OutboxIntent, TaskCommit};"
@@ -130,8 +131,9 @@ fn storage_fault_control_is_debug_only_and_has_no_fault_input() {
     assert!(module_source.contains(
         "#[cfg(not(debug_assertions))]\npub(crate) use task_store::{OutboxIntent, TaskCommit};"
     ));
-    assert!(task_store_source.contains("pub(crate) fn commit_task("));
-    assert!(task_store_source.contains(
+    assert!(task_store_owner_source.contains("include!(\"task_store/commit.rs\");"));
+    assert!(task_store_commit_source.contains("pub(crate) fn commit_task("));
+    assert!(task_store_commit_source.contains(
         "#[cfg(debug_assertions)]\n    #[doc(hidden)]\n    pub fn commit_task_for_test("
     ));
     assert!(harness_source

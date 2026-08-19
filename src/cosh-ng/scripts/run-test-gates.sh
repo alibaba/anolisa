@@ -131,6 +131,7 @@ run_rpm_packaging() {
 case "${1:-all}" in
   fast)
     scripts/check-test-inventory.sh
+    scripts/check-source-layout.sh
     crates/cosh-shell/scripts/check-layout.sh
     run_raw_packaging
     run_rpm_packaging
@@ -149,6 +150,7 @@ case "${1:-all}" in
     ;;
   all)
     scripts/check-test-inventory.sh
+    scripts/check-source-layout.sh
     crates/cosh-shell/scripts/check-layout.sh
     run_raw_packaging
     run_rpm_packaging
