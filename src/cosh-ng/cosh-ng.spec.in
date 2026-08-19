@@ -1,6 +1,7 @@
 %define anolis_release 2
 %global debug_package %{nil}
 %global _libexecdir_cosh %{_libexecdir}/anolisa/cosh-ng
+%define cosh_replacement_ready ( [ -x "%{_bindir}/cosh" ] && rpm -q --qf '%%{NAME}\\n' -f "%{_bindir}/cosh" 2>/dev/null | awk '$0 == "copilot-shell" { found=1 } END { exit found ? 0 : 1 }' )
 
 Name:           cosh-ng
 Version:        @VERSION@
@@ -16,6 +17,7 @@ BuildRequires:  gcc
 BuildRequires:  openssl-devel
 Requires(post):   lua
 Requires(postun): lua
+Requires(preun):  /usr/bin/getent /usr/bin/awk
 Requires:       openssl-libs
 Provides:       %{_bindir}/cosh-cli %{_bindir}/cosh
 Provides:       anolisa-component(cosh-ng)
@@ -97,6 +99,27 @@ install -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/cosh-n
 %{_libexecdir_cosh}/cosh-core
 %{_libexecdir_cosh}/cosh-shell
 %{_datadir}/anolisa/components/cosh-ng/component.toml
+
+%preun
+if [ "$1" -eq 0 ]; then
+  if ! passwd_entries=$(getent passwd); then
+    echo "error: cannot uninstall cosh-ng: failed to enumerate passwd entries with getent." >&2
+    exit 1
+  fi
+  if [ -z "$passwd_entries" ]; then
+    echo "error: cannot uninstall cosh-ng: getent returned no passwd entries." >&2
+    exit 1
+  fi
+  if ! users=$(printf '%s\n' "$passwd_entries" | awk -F: '$7 == "%{_bindir}/cosh" { print $1 }'); then
+    echo "error: cannot uninstall cosh-ng: failed to inspect passwd login shells." >&2
+    exit 1
+  fi
+  if [ -n "$users" ] && ! %{cosh_replacement_ready}; then
+    echo "error: cannot uninstall cosh-ng while users still use %{_bindir}/cosh as their login shell:" >&2
+    printf '%s\n' "$users" >&2
+    exit 1
+  fi
+fi
 
 %post -p <lua>
 local nl = '\n'
