@@ -71,6 +71,219 @@ fn test_protected_fields_preserved() {
 }
 
 #[test]
+fn test_compress_gemini_function_declarations() {
+    let compressor = SchemaCompressor::new();
+    let schema = json!({
+        "functionDeclarations": [
+            {
+                "name": "task",
+                "description": "Launch a new agent to handle complex, multi-step tasks autonomously. It contains a lot of text that goes on and on. The quick brown fox jumps over the lazy dog. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "subagent_type": {
+                            "type": "string",
+                            "description": "Another long description for a parameter that should be truncated to a shorter length. This text is intentionally verbose to test the truncation logic properly.",
+                            "enum": ["general-purpose", "code-reviewer"]
+                        }
+                    },
+                    "required": ["subagent_type"]
+                }
+            }
+        ]
+    });
+
+    let result = compressor.compress(&schema);
+
+    // Wrapper structure preserved
+    assert!(result.get("functionDeclarations").is_some());
+    let decls = result["functionDeclarations"].as_array().unwrap();
+    assert_eq!(decls.len(), 1);
+
+    // Name, type, required, enum preserved
+    assert_eq!(decls[0]["name"], "task");
+    assert_eq!(decls[0]["parameters"]["type"], "object");
+    assert!(decls[0]["parameters"]["required"].is_array());
+    assert_eq!(
+        decls[0]["parameters"]["properties"]["subagent_type"]["enum"],
+        json!(["general-purpose", "code-reviewer"])
+    );
+
+    // Function description truncated to <= 256
+    let func_desc = decls[0]["description"].as_str().unwrap();
+    assert!(func_desc.len() <= 256);
+    assert!(
+        func_desc.len()
+            < schema["functionDeclarations"][0]["description"]
+                .as_str()
+                .unwrap()
+                .len()
+    );
+
+    // Parameter description truncated to <= 160
+    let param_desc = decls[0]["parameters"]["properties"]["subagent_type"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(param_desc.len() <= 160);
+}
+
+#[test]
+fn test_gemini_tool_preserves_non_schema_keys() {
+    let compressor = SchemaCompressor::new();
+    let schema = json!({
+        "functionDeclarations": [
+            {
+                "name": "greet",
+                "description": "Say hello",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Name to greet" }
+                    }
+                }
+            }
+        ],
+        "googleSearchRetrieval": {}
+    });
+
+    let result = compressor.compress(&schema);
+
+    // Non-schema Tool key untouched
+    assert!(result.get("googleSearchRetrieval").is_some());
+    // functionDeclarations still present
+    assert_eq!(result["functionDeclarations"][0]["name"], "greet");
+}
+
+#[test]
+fn test_gemini_empty_function_declarations_no_panic() {
+    let compressor = SchemaCompressor::new();
+    let result = compressor.compress(&json!({"functionDeclarations": []}));
+    assert!(result["functionDeclarations"].is_array());
+    assert!(
+        result["functionDeclarations"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn test_compress_gemini_parameters_json_schema() {
+    // Mirrors copilot-shell's DeclarativeTool.schema payload: the parameter
+    // schema lives under `parametersJsonSchema` (Gemini SDK JSON Schema
+    // format), not `parameters`. Without explicit handling, parameter-level
+    // descriptions/titles/examples would escape compression entirely.
+    let compressor = SchemaCompressor::new();
+    let schema = json!({
+        "functionDeclarations": [{
+            "name": "write_file",
+            "description": "Write a file to the local filesystem. This is a deliberately long description that exceeds the default 256-character function description limit so the compressor must truncate it. The quick brown fox jumps over the lazy dog. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam.",
+            "parametersJsonSchema": {
+                "title": "WriteFileParams",
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "title": "Path",
+                        "type": "string",
+                        "description": "Absolute path of the file to write. This parameter description is intentionally verbose to exceed the default 160-character parameter description limit and verify truncation applies to the parametersJsonSchema branch, not just the legacy parameters field.",
+                        "examples": ["/tmp/example.txt"]
+                    }
+                },
+                "required": ["path"],
+                "additionalProperties": false,
+                "$schema": "http://json-schema.org/draft-07/schema#"
+            }
+        }]
+    });
+
+    let result = compressor.compress(&schema);
+    let decl = &result["functionDeclarations"][0];
+
+    // The parametersJsonSchema field is preserved (not renamed to parameters).
+    assert!(decl.get("parametersJsonSchema").is_some());
+    assert!(decl.get("parameters").is_none());
+    let params = &decl["parametersJsonSchema"];
+
+    // Structural keys preserved.
+    assert_eq!(params["type"], "object");
+    assert_eq!(params["required"], json!(["path"]));
+    assert_eq!(params["additionalProperties"], false);
+    assert_eq!(params["$schema"], "http://json-schema.org/draft-07/schema#");
+
+    // Function description truncated to <= 256.
+    let func_desc = decl["description"].as_str().unwrap();
+    assert!(func_desc.chars().count() <= 256);
+
+    // Parameter description truncated to <= 160.
+    let param_desc = params["properties"]["path"]["description"].as_str().unwrap();
+    assert!(param_desc.chars().count() <= 160);
+
+    // Title and examples dropped (drop_titles / drop_examples default true).
+    assert!(params.get("title").is_none());
+    assert!(params["properties"]["path"].get("title").is_none());
+    assert!(params["properties"]["path"].get("examples").is_none());
+}
+
+#[test]
+fn test_parameters_json_schema_stash_roundtrip() {
+    // Regression: copilot-shell's DeclarativeTool.schema puts the parameter
+    // schema under `parametersJsonSchema`. With a stash store attached,
+    // truncated descriptions must carry a retrievable marker and retrieve
+    // must yield the verbatim original — for both the function-level
+    // description and nested parameter descriptions.
+    use std::sync::Arc;
+    use tokenless_ccr::{InMemoryStore, StashStore, extract_hash};
+
+    let store = Arc::new(InMemoryStore::new());
+    let compressor = SchemaCompressor::new()
+        .with_func_desc_max_len(100)
+        .with_param_desc_max_len(120)
+        .with_stash_store(store.clone());
+
+    let func_desc_orig = format!("FUNCORIG_{}", "a".repeat(200));
+    let param_desc_orig = format!("PARAMORIG_{}", "b".repeat(200));
+    let schema = json!({
+        "functionDeclarations": [{
+            "name": "write_file",
+            "description": func_desc_orig,
+            "parametersJsonSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": param_desc_orig
+                    }
+                },
+                "required": ["path"]
+            }
+        }]
+    });
+
+    let result = compressor.compress(&schema);
+    let decl = &result["functionDeclarations"][0];
+
+    // Function-level description: marker present, fits limit, retrieves verbatim.
+    let func_desc = decl["description"].as_str().unwrap();
+    assert!(func_desc.contains("tokenless:"), "function desc must carry marker");
+    assert!(func_desc.chars().count() <= 100);
+    let func_key = extract_hash(func_desc).expect("function desc marker has hash");
+    let func_retrieved = store.retrieve(func_key).unwrap().unwrap();
+    assert_eq!(func_retrieved, func_desc_orig);
+    assert!(!func_retrieved.contains("tokenless:"));
+
+    // Parameter-level description: marker present, fits limit, retrieves verbatim.
+    let param_desc = decl["parametersJsonSchema"]["properties"]["path"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(param_desc.contains("tokenless:"), "param desc must carry marker");
+    assert!(param_desc.chars().count() <= 120);
+    let param_key = extract_hash(param_desc).expect("param desc marker has hash");
+    let param_retrieved = store.retrieve(param_key).unwrap().unwrap();
+    assert_eq!(param_retrieved, param_desc_orig);
+    assert!(!param_retrieved.contains("tokenless:"));
+}
+
+#[test]
 fn test_title_and_examples_removed() {
     let compressor = SchemaCompressor::new();
     let schema = json!({
