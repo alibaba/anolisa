@@ -11,18 +11,18 @@ use std::sync::Arc;
 use tokenless_ccr::{SqliteStore, StashStore};
 use tokenless_runtime::{
     CompressOptions, CompressionDisposition, MAX_INPUT_BYTES, compress_response_with_store,
-    retrieve_from_store,
+    compress_toon, retrieve_from_store,
 };
 use tokenless_schema::SchemaCompressor;
 use tokenless_stats::{
     CompressionMode, DiffSort, OperationType, StatsRecord, StatsRecorder, TokenlessConfig,
+    estimate_tokens,
 };
 use tokenless_stats::{
     ensure_state_dir, format_compare, format_compare_json, format_diff_report, format_list,
     format_show, format_summary, record_report, resolve_data_dir, session_report, tool_use_report,
     validate_database_path,
 };
-use tokenless_stats::{estimate_tokens, estimate_tokens_from_bytes};
 
 #[derive(Parser)]
 #[command(
@@ -879,39 +879,40 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             tool_use_id,
         } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
-            let value: serde_json::Value = serde_json::from_str(&input)
-                .map_err(|e| (format!("JSON parse error: {}", e), 2))?;
-            let output = toon_format::encode_default(&value)
-                .map_err(|e| (format!("toon encode failed: {}", e), 2))?;
-            let output = output.trim_end().to_string();
-
-            // If no token savings, output original instead of TOON result
-            let before_tokens = estimate_tokens_from_bytes(input.len());
-            let after_tokens = estimate_tokens_from_bytes(output.len());
-            let no_savings = output.is_empty() || after_tokens >= before_tokens;
-            if no_savings {
+            let config = TokenlessConfig::load();
+            let compression_on = config.is_compression_enabled();
+            // Share runtime scoring so CLI dry-run predictions match
+            // `stats summary` and the Python/SDK compress_toon path. The
+            // previous bytes/4 heuristic under-counted CJK.
+            let result = compress_toon(&input, compression_on).map_err(|error| {
+                let code = if matches!(
+                    error,
+                    tokenless_runtime::RuntimeError::InvalidJson(_)
+                        | tokenless_runtime::RuntimeError::InputTooLarge { .. }
+                ) {
+                    2
+                } else {
+                    1
+                };
+                (error.to_string(), code)
+            })?;
+            if result.disposition == CompressionDisposition::NoSavings {
                 eprintln!(
                     "tokenless: TOON encoding did not reduce size ({} -> {} est. tokens), outputting original JSON",
-                    before_tokens, after_tokens
+                    result.before_tokens, result.after_tokens
                 );
             }
 
-            let config = TokenlessConfig::load();
-            let compression_on = config.is_compression_enabled();
-            let mode = resolve_mode(compression_on, before_tokens, after_tokens);
-            // Active: emit the TOON result (or original if no savings).
-            // Dry-run: emit the original so context stays uncompressed, but
-            // still record the TOON result as the predicted savings below.
-            let emit_text = if compression_on && !no_savings {
-                output.clone()
-            } else {
-                input.clone()
-            };
-            println!("{}", emit_text);
+            let mode = resolve_mode(compression_on, result.before_tokens, result.after_tokens);
+            println!("{}", result.output);
 
             // Recorded `after` = the predicted TOON result (or original when
             // TOON did not reduce size), so dry-run captures the prediction.
-            let record_after = if no_savings { input.clone() } else { output };
+            let record_after = if result.disposition == CompressionDisposition::NoSavings {
+                input.clone()
+            } else {
+                result.compressed_output
+            };
             let database_paths = DatabasePathResolver::default();
             record_compression_stats(
                 &config,

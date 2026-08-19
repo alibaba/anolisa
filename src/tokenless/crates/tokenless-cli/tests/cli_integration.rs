@@ -2,7 +2,10 @@ use std::process::Command;
 
 use tokenless_ccr::StashStore;
 use tokenless_runtime::{CompressOptions, compress_response_with_store};
-use tokenless_stats::{OperationType, StatsRecord, StatsRecorder, estimate_tokens, get_home_dir};
+use tokenless_stats::{
+    OperationType, StatsRecord, StatsRecorder, estimate_tokens, estimate_tokens_from_bytes,
+    get_home_dir,
+};
 
 fn tokenless_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_tokenless"))
@@ -838,6 +841,156 @@ fn compress_toon_from_stdin() {
         .unwrap();
     // compress-toon may or may not succeed depending on input format
     let _ = output.status;
+}
+
+fn run_compress_toon(
+    fixture: &TempDataDir,
+    input: &str,
+    compression_enabled: &str,
+    session_id: &str,
+) -> std::process::Output {
+    fixture
+        .command()
+        .env("TOKENLESS_COMPRESSION_ENABLED", compression_enabled)
+        .env("TOKENLESS_STATS_ENABLED", "1")
+        .env("TOKENLESS_SLS_ENABLED", "0")
+        .args([
+            "compress-toon",
+            "--agent-id",
+            "integration-agent",
+            "--session-id",
+            session_id,
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(input.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap()
+}
+
+/// CJK payload where bytes/4 and the character estimator disagree. Dry-run
+/// stderr must publish the same predicted counts that `stats summary` stores.
+#[test]
+fn compress_toon_dry_run_predicted_tokens_match_recorded_stats_for_cjk() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let input = serde_json::to_string(&serde_json::json!({
+        "msg": "你好世界你好世界"
+    }))
+    .unwrap();
+    assert_ne!(
+        estimate_tokens(&input),
+        estimate_tokens_from_bytes(input.len()),
+        "fixture must be a CJK case where the two estimators disagree"
+    );
+
+    let output = run_compress_toon(&fixture, &input, "0", "cjk-toon-dry-run");
+    assert!(
+        output.status.success(),
+        "compress-toon dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim_end(),
+        input,
+        "dry-run must emit the original JSON"
+    );
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let recorder = StatsRecorder::new(fixture.data_dir.join("stats.db")).unwrap();
+    let records = recorder
+        .records_by_session("cjk-toon-dry-run", None)
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    let predicted = format!(
+        "predicted {} -> {} est. tokens",
+        records[0].before_tokens, records[0].after_tokens
+    );
+    assert!(
+        stderr.contains(&predicted),
+        "dry-run stderr must match recorded stats, got stderr={stderr:?} stats={}:{} predicted={predicted}",
+        records[0].before_tokens,
+        records[0].after_tokens
+    );
+    assert_eq!(records[0].before_tokens, estimate_tokens(&input));
+}
+
+/// ASCII JSON where both estimators agree still encodes to TOON when smaller.
+#[test]
+fn compress_toon_ascii_emits_toon_when_character_estimator_saves() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let input = r#"{"content":"some content","debug":"remove"}"#;
+    assert_eq!(
+        estimate_tokens(input),
+        estimate_tokens_from_bytes(input.len()),
+        "ascii fixture should keep the two estimators in agreement"
+    );
+
+    let output = run_compress_toon(&fixture, input, "1", "ascii-toon-active");
+    assert!(
+        output.status.success(),
+        "compress-toon failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let emitted = stdout.trim_end();
+    assert_ne!(emitted, input, "active TOON with savings must replace JSON");
+    assert!(
+        emitted.contains("content:") || emitted.starts_with("content:"),
+        "expected TOON object encoding, got {emitted:?}"
+    );
+
+    let recorder = StatsRecorder::new(fixture.data_dir.join("stats.db")).unwrap();
+    let records = recorder
+        .records_by_session("ascii-toon-active", None)
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].before_tokens, estimate_tokens(input));
+    assert_eq!(records[0].after_tokens, estimate_tokens(emitted));
+    assert!(records[0].after_tokens < records[0].before_tokens);
+}
+
+#[test]
+fn compress_toon_cjk_active_emits_toon_and_records_character_tokens() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let input = serde_json::to_string(&serde_json::json!({
+        "msg": "你好世界你好世界"
+    }))
+    .unwrap();
+    let output = run_compress_toon(&fixture, &input, "1", "cjk-toon-active");
+    assert!(
+        output.status.success(),
+        "compress-toon failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let emitted = String::from_utf8(output.stdout).unwrap();
+    let emitted = emitted.trim_end();
+    assert_ne!(emitted, input);
+    assert!(
+        emitted.contains("msg:"),
+        "expected TOON encoding, got {emitted:?}"
+    );
+
+    let recorder = StatsRecorder::new(fixture.data_dir.join("stats.db")).unwrap();
+    let records = recorder
+        .records_by_session("cjk-toon-active", None)
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].before_tokens, estimate_tokens(&input));
+    assert_eq!(records[0].after_tokens, estimate_tokens(emitted));
 }
 
 #[test]

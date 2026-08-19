@@ -45,6 +45,14 @@ fn byte_estimate_vs_char_estimate() {
 }
 
 #[test]
+fn byte_estimate_undercounts_cjk() {
+    // 4 CJK chars are 12 UTF-8 bytes: bytes/4 → 3, character estimator → 4.
+    let text = "你好世界";
+    assert_eq!(estimate_tokens(text), 4);
+    assert_eq!(estimate_tokens_from_bytes(text.len()), 3);
+}
+
+#[test]
 fn tokenizer_struct_methods() {
     let tokenizer = Tokenizer::new();
     assert_eq!(tokenizer.estimate_tokens("hello world"), 3);
