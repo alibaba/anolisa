@@ -99,12 +99,18 @@ install -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/cosh-n
 %{_datadir}/anolisa/components/cosh-ng/component.toml
 
 %post -p <lua>
-nl        = '\n'
-cosh      = '%{_bindir}/cosh'..nl
-f = io.open('/etc/shells', 'a+')
+local nl = '\n'
+local cosh = '%{_bindir}/cosh'
+local f = io.open('/etc/shells', 'a+')
 if f then
-  local shells = nl..f:read('*all')..nl
-  if not shells:find(nl..cosh) then f:write(cosh) end
+  f:seek('set')
+  local shells = f:read('*all') or ''
+  local normalized = nl..shells
+  if shells ~= '' and shells:sub(-1) ~= nl then normalized = normalized..nl end
+  if not normalized:find(nl..cosh..nl, 1, true) then
+    local separator = (shells ~= '' and shells:sub(-1) ~= nl) and nl or ''
+    f:write(separator, cosh, nl)
+  end
   f:close()
 end
 
