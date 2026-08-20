@@ -17,6 +17,7 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 use anolisa_core::daemon_server::DaemonServer;
+use anolisa_platform::command::CommandRunner;
 use anolisa_platform::fs_layout::FsLayout;
 use anolisa_platform::ipc::SYSTEM_HELPER_SOCKET;
 use anolisa_platform::privilege;
@@ -129,11 +130,10 @@ fn handle_setup(
         None => layout.libexec_dir.join("anolisa-system-helper"),
     };
     let unit_path = layout.systemd_unit_dir.join(UNIT_FILENAME);
+    let systemd = Systemd::system();
 
     // 2. Stop the service if it's running (avoids "Text file busy" on binary overwrite)
-    let _ = Command::new("systemctl")
-        .args(["stop", SERVICE_NAME])
-        .output();
+    stop_service_before_setup(&systemd);
 
     // 3. Copy current exe to helper_path
     let current_exe = std::env::current_exe().map_err(|e| CliError::Runtime {
@@ -187,7 +187,7 @@ fn handle_setup(
     deploy_sandbox_config(cmd, &layout)?;
 
     // 10. systemctl daemon-reload + enable + start/restart
-    reload_and_start_service(cmd, upgrade)?;
+    reload_and_start_service(cmd, upgrade, &systemd)?;
 
     // 11. Verify socket
     verify_socket(cmd)?;
@@ -354,36 +354,54 @@ fn write_unit_file(cmd: &str, helper_path: &Path, unit_path: &Path) -> Result<()
     Ok(())
 }
 
-fn reload_and_start_service(cmd: &str, upgrade: bool) -> Result<(), CliError> {
-    run_systemctl(cmd, &["daemon-reload"])?;
-    run_systemctl(cmd, &["enable", SERVICE_NAME])?;
+fn reload_and_start_service<R: CommandRunner>(
+    cmd: &str,
+    upgrade: bool,
+    systemd: &Systemd<R>,
+) -> Result<(), CliError> {
+    systemd
+        .daemon_reload()
+        .map_err(|error| systemd_cli_error(cmd, &["daemon-reload"], error))?;
+    systemd
+        .enable_unit_file(SERVICE_NAME)
+        .map_err(|error| systemd_cli_error(cmd, &["enable", SERVICE_NAME], error))?;
 
     if upgrade {
-        run_systemctl(cmd, &["restart", SERVICE_NAME])?;
+        systemd
+            .restart_unit(SERVICE_NAME)
+            .map_err(|error| systemd_cli_error(cmd, &["restart", SERVICE_NAME], error))?;
     } else {
-        run_systemctl(cmd, &["start", SERVICE_NAME])?;
+        systemd
+            .start_unit(SERVICE_NAME)
+            .map_err(|error| systemd_cli_error(cmd, &["start", SERVICE_NAME], error))?;
     }
     eprintln!("[setup] service {SERVICE_NAME} active");
     Ok(())
 }
 
-fn run_systemctl(cmd: &str, args: &[&str]) -> Result<(), CliError> {
-    let output = Command::new("systemctl")
-        .args(args)
-        .output()
-        .map_err(|e| CliError::Runtime {
-            command: cmd.to_string(),
-            reason: format!("failed to run systemctl {}: {e}", args.join(" ")),
-        })?;
+fn stop_service_before_setup<R: CommandRunner>(systemd: &Systemd<R>) {
+    let _ = systemd.stop_unit(SERVICE_NAME);
+}
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CliError::Runtime {
-            command: cmd.to_string(),
-            reason: format!("systemctl {} failed: {stderr}", args.join(" ")),
-        });
+fn systemd_cli_error(cmd: &str, args: &[&str], error: SystemdError) -> CliError {
+    let reason = match error {
+        SystemdError::Spawn { source, .. } => {
+            format!("failed to run systemctl {}: {source}", args.join(" "))
+        }
+        SystemdError::NonZeroExit(failure) => {
+            format!("systemctl {} failed: {}", args.join(" "), failure.stderr)
+        }
+        SystemdError::NotFound(unit) => {
+            format!(
+                "systemctl {} failed: service not found: {unit}",
+                args.join(" ")
+            )
+        }
+    };
+    CliError::Runtime {
+        command: cmd.to_string(),
+        reason,
     }
-    Ok(())
 }
 
 fn verify_socket(cmd: &str) -> Result<(), CliError> {
@@ -460,27 +478,10 @@ fn handle_teardown(ctx: &CliContext) -> Result<(), CliError> {
     let helper_path = layout.libexec_dir.join("anolisa-system-helper");
     let unit_path = layout.systemd_unit_dir.join(UNIT_FILENAME);
     let mut warnings: Vec<String> = Vec::new();
+    let systemd = Systemd::system();
 
-    // 2. Stop service (ignore "not loaded" errors)
-    if let Err(e) = run_systemctl(cmd, &["stop", SERVICE_NAME]) {
-        let msg = format!("{e}");
-        if msg.contains("not loaded") || msg.contains("not found") {
-            warnings.push(format!(
-                "service {SERVICE_NAME} was not loaded (already stopped)"
-            ));
-        } else {
-            warnings.push(format!("failed to stop {SERVICE_NAME}: {msg}"));
-        }
-    } else {
-        eprintln!("[teardown] stopped {SERVICE_NAME}");
-    }
-
-    // 3. Disable service (ignore errors)
-    if let Err(e) = run_systemctl(cmd, &["disable", SERVICE_NAME]) {
-        warnings.push(format!("failed to disable {SERVICE_NAME}: {e}"));
-    } else {
-        eprintln!("[teardown] disabled {SERVICE_NAME}");
-    }
+    // 2-3. Stop and disable service while retaining failures as warnings.
+    stop_and_disable_service(cmd, &systemd, &mut warnings);
 
     // 4. Delete unit file
     if unit_path.exists() {
@@ -497,11 +498,7 @@ fn handle_teardown(ctx: &CliContext) -> Result<(), CliError> {
     }
 
     // 5. Reload systemd
-    if let Err(e) = run_systemctl(cmd, &["daemon-reload"]) {
-        warnings.push(format!("daemon-reload failed: {e}"));
-    } else {
-        eprintln!("[teardown] systemd daemon-reload complete");
-    }
+    reload_systemd_after_teardown(cmd, &systemd, &mut warnings);
 
     // 6. Delete helper binary
     if helper_path.exists() {
@@ -549,6 +546,59 @@ fn handle_teardown(ctx: &CliContext) -> Result<(), CliError> {
     }
     eprintln!("[teardown] system helper teardown complete.");
     Ok(())
+}
+
+fn stop_and_disable_service<R: CommandRunner>(
+    cmd: &str,
+    systemd: &Systemd<R>,
+    warnings: &mut Vec<String>,
+) {
+    match systemd.stop_unit(SERVICE_NAME) {
+        Ok(()) => eprintln!("[teardown] stopped {SERVICE_NAME}"),
+        Err(SystemdError::NotFound(_)) => {
+            warnings.push(format!(
+                "service {SERVICE_NAME} was not loaded (already stopped)"
+            ));
+        }
+        Err(error @ SystemdError::NonZeroExit(_)) => {
+            if matches!(
+                systemd.unit_status(SERVICE_NAME),
+                Err(SystemdError::NotFound(_))
+            ) {
+                warnings.push(format!(
+                    "service {SERVICE_NAME} was not loaded (already stopped)"
+                ));
+            } else {
+                let error = systemd_cli_error(cmd, &["stop", SERVICE_NAME], error);
+                warnings.push(format!("failed to stop {SERVICE_NAME}: {error}"));
+            }
+        }
+        Err(error) => {
+            let error = systemd_cli_error(cmd, &["stop", SERVICE_NAME], error);
+            warnings.push(format!("failed to stop {SERVICE_NAME}: {error}"));
+        }
+    }
+
+    match systemd.disable_unit_file(SERVICE_NAME) {
+        Ok(()) => eprintln!("[teardown] disabled {SERVICE_NAME}"),
+        Err(error) => {
+            let error = systemd_cli_error(cmd, &["disable", SERVICE_NAME], error);
+            warnings.push(format!("failed to disable {SERVICE_NAME}: {error}"));
+        }
+    }
+}
+
+fn reload_systemd_after_teardown<R: CommandRunner>(
+    cmd: &str,
+    systemd: &Systemd<R>,
+    warnings: &mut Vec<String>,
+) {
+    if let Err(error) = systemd.daemon_reload() {
+        let error = systemd_cli_error(cmd, &["daemon-reload"], error);
+        warnings.push(format!("daemon-reload failed: {error}"));
+    } else {
+        eprintln!("[teardown] systemd daemon-reload complete");
+    }
 }
 
 // ─── Status command ─────────────────────────────────────────────────────────────────
@@ -800,12 +850,286 @@ fn format_status_uptime(secs: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
     use std::io;
+    use std::rc::Rc;
 
     use anolisa_core::system_helper::HelperResponse;
+    use anolisa_platform::command::{CommandOutput, CommandRunner};
 
     use super::*;
     use crate::helper_client::ScriptedTransport;
+
+    enum FakeOutcome {
+        Output(CommandOutput),
+        Spawn(io::ErrorKind),
+    }
+
+    type FakeCalls = Rc<RefCell<VecDeque<(Vec<String>, FakeOutcome)>>>;
+
+    struct FakeSystemdRunner {
+        calls: FakeCalls,
+    }
+
+    impl CommandRunner for FakeSystemdRunner {
+        fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
+            assert_eq!(program, "systemctl");
+            let (expected, outcome) = self
+                .calls
+                .borrow_mut()
+                .pop_front()
+                .expect("unexpected systemctl call");
+            assert_eq!(args, expected);
+            match outcome {
+                FakeOutcome::Output(output) => Ok(output),
+                FakeOutcome::Spawn(kind) => {
+                    Err(io::Error::new(kind, "fake systemctl spawn failure"))
+                }
+            }
+        }
+    }
+
+    fn fake_systemd(
+        calls: Vec<(Vec<&str>, FakeOutcome)>,
+    ) -> (Systemd<FakeSystemdRunner>, FakeCalls) {
+        let calls = Rc::new(RefCell::new(
+            calls
+                .into_iter()
+                .map(|(args, outcome)| (args.into_iter().map(str::to_string).collect(), outcome))
+                .collect(),
+        ));
+        let runner = FakeSystemdRunner {
+            calls: Rc::clone(&calls),
+        };
+        (Systemd::with_runner(runner), calls)
+    }
+
+    fn success() -> FakeOutcome {
+        FakeOutcome::Output(CommandOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+    }
+
+    fn non_zero(code: i32, stderr: &str) -> FakeOutcome {
+        FakeOutcome::Output(CommandOutput {
+            code: Some(code),
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        })
+    }
+
+    fn loaded_status() -> FakeOutcome {
+        FakeOutcome::Output(CommandOutput {
+            code: Some(0),
+            stdout: "LoadState=loaded\nActiveState=inactive\nUnitFileState=enabled\nDescription=ANOLISA\n"
+                .to_string(),
+            stderr: String::new(),
+        })
+    }
+
+    fn missing_status() -> FakeOutcome {
+        FakeOutcome::Output(CommandOutput {
+            code: Some(0),
+            stdout:
+                "LoadState=not-found\nActiveState=inactive\nUnitFileState=\nDescription=missing\n"
+                    .to_string(),
+            stderr: String::new(),
+        })
+    }
+
+    fn assert_systemd_finished(calls: &FakeCalls) {
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn setup_service_lifecycle_preserves_non_upgrade_order() {
+        let (systemd, calls) = fake_systemd(vec![
+            (vec!["daemon-reload"], success()),
+            (vec!["enable", SERVICE_NAME], success()),
+            (vec!["start", SERVICE_NAME], success()),
+        ]);
+
+        reload_and_start_service("system setup", false, &systemd)
+            .expect("setup lifecycle should succeed");
+
+        assert_systemd_finished(&calls);
+    }
+
+    #[test]
+    fn setup_best_effort_stop_never_probes_status() {
+        let cases = [
+            success(),
+            non_zero(5, "missing\n"),
+            FakeOutcome::Spawn(io::ErrorKind::NotFound),
+        ];
+
+        for outcome in cases {
+            let (systemd, calls) = fake_systemd(vec![(vec!["stop", SERVICE_NAME], outcome)]);
+
+            stop_service_before_setup(&systemd);
+
+            assert_systemd_finished(&calls);
+        }
+    }
+
+    #[test]
+    fn setup_service_lifecycle_restarts_during_upgrade() {
+        let (systemd, calls) = fake_systemd(vec![
+            (vec!["daemon-reload"], success()),
+            (vec!["enable", SERVICE_NAME], success()),
+            (vec!["restart", SERVICE_NAME], success()),
+        ]);
+
+        reload_and_start_service("system setup", true, &systemd)
+            .expect("upgrade lifecycle should succeed");
+
+        assert_systemd_finished(&calls);
+    }
+
+    #[test]
+    fn setup_service_lifecycle_preserves_spawn_failure_message() {
+        let (systemd, calls) = fake_systemd(vec![(
+            vec!["daemon-reload"],
+            FakeOutcome::Spawn(io::ErrorKind::PermissionDenied),
+        )]);
+
+        let error = reload_and_start_service("system setup", false, &systemd)
+            .expect_err("spawn should fail setup");
+
+        assert_eq!(
+            error.reason(),
+            "failed to run systemctl daemon-reload: fake systemctl spawn failure"
+        );
+        assert_systemd_finished(&calls);
+    }
+
+    #[test]
+    fn setup_service_lifecycle_preserves_non_zero_exit_message() {
+        let (systemd, calls) = fake_systemd(vec![
+            (vec!["daemon-reload"], success()),
+            (
+                vec!["enable", SERVICE_NAME],
+                non_zero(1, "enable refused\n"),
+            ),
+        ]);
+
+        let error = reload_and_start_service("system setup", false, &systemd)
+            .expect_err("enable should fail setup");
+
+        assert_eq!(
+            error.reason(),
+            format!("systemctl enable {SERVICE_NAME} failed: enable refused\n")
+        );
+        assert_systemd_finished(&calls);
+    }
+
+    #[test]
+    fn teardown_missing_unit_uses_typed_status_and_continues() {
+        let (systemd, calls) = fake_systemd(vec![
+            (
+                vec!["stop", SERVICE_NAME],
+                non_zero(5, "translated missing-unit diagnostic\n"),
+            ),
+            (
+                vec![
+                    "show",
+                    SERVICE_NAME,
+                    "--no-pager",
+                    "--property=LoadState,ActiveState,UnitFileState,Description",
+                ],
+                missing_status(),
+            ),
+            (vec!["disable", SERVICE_NAME], success()),
+        ]);
+        let mut warnings = Vec::new();
+
+        stop_and_disable_service("system teardown", &systemd, &mut warnings);
+
+        assert_eq!(
+            warnings,
+            vec![format!(
+                "service {SERVICE_NAME} was not loaded (already stopped)"
+            )]
+        );
+        assert_systemd_finished(&calls);
+    }
+
+    #[test]
+    fn teardown_preserves_stop_disable_reload_order() {
+        let (systemd, calls) = fake_systemd(vec![
+            (vec!["stop", SERVICE_NAME], success()),
+            (vec!["disable", SERVICE_NAME], success()),
+            (vec!["daemon-reload"], success()),
+        ]);
+        let mut warnings = Vec::new();
+
+        stop_and_disable_service("system teardown", &systemd, &mut warnings);
+        reload_systemd_after_teardown("system teardown", &systemd, &mut warnings);
+
+        assert!(warnings.is_empty());
+        assert_systemd_finished(&calls);
+    }
+
+    #[test]
+    fn teardown_preserves_disable_and_reload_failure_warnings() {
+        let (systemd, calls) = fake_systemd(vec![
+            (vec!["stop", SERVICE_NAME], success()),
+            (
+                vec!["disable", SERVICE_NAME],
+                non_zero(1, "disable refused\n"),
+            ),
+            (vec!["daemon-reload"], non_zero(1, "reload refused\n")),
+        ]);
+        let mut warnings = Vec::new();
+
+        stop_and_disable_service("system teardown", &systemd, &mut warnings);
+        reload_systemd_after_teardown("system teardown", &systemd, &mut warnings);
+
+        assert_eq!(
+            warnings,
+            vec![
+                format!(
+                    "failed to disable {SERVICE_NAME}: execution failed: systemctl disable \
+                     {SERVICE_NAME} failed: disable refused\n"
+                ),
+                "daemon-reload failed: execution failed: systemctl daemon-reload failed: \
+                 reload refused\n"
+                    .to_string(),
+            ]
+        );
+        assert_systemd_finished(&calls);
+    }
+
+    #[test]
+    fn teardown_non_missing_stop_failure_warns_and_disables() {
+        let (systemd, calls) = fake_systemd(vec![
+            (vec!["stop", SERVICE_NAME], non_zero(1, "access denied\n")),
+            (
+                vec![
+                    "show",
+                    SERVICE_NAME,
+                    "--no-pager",
+                    "--property=LoadState,ActiveState,UnitFileState,Description",
+                ],
+                loaded_status(),
+            ),
+            (vec!["disable", SERVICE_NAME], success()),
+        ]);
+        let mut warnings = Vec::new();
+
+        stop_and_disable_service("system teardown", &systemd, &mut warnings);
+
+        assert_eq!(
+            warnings,
+            vec![format!(
+                "failed to stop {SERVICE_NAME}: execution failed: systemctl stop {SERVICE_NAME} failed: access denied\n"
+            )]
+        );
+        assert_systemd_finished(&calls);
+    }
 
     fn client_with_responses(responses: Vec<HelperResponse>) -> HelperClient {
         let (transport, _) =

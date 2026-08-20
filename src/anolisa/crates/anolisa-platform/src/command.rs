@@ -59,3 +59,35 @@ impl CommandRunner for SystemCommandRunner {
         })
     }
 }
+
+/// Runs real [`std::process::Command`]s with the caller's environment.
+///
+/// Use this runner when command diagnostics are user-visible and must retain
+/// the caller's locale.
+pub struct InheritedLocaleCommandRunner;
+
+impl CommandRunner for InheritedLocaleCommandRunner {
+    fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
+        let output = Command::new(program).args(args).output()?;
+        Ok(CommandOutput {
+            code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inherited_locale_runner_preserves_lc_all() {
+        let output = InheritedLocaleCommandRunner
+            .run("sh", &["-c", "printf %s \"$LC_ALL\""])
+            .expect("shell should run");
+
+        assert_eq!(output.code, Some(0));
+        assert_eq!(output.stdout, std::env::var("LC_ALL").unwrap_or_default());
+    }
+}

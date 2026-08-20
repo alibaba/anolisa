@@ -5,7 +5,7 @@
 
 use thiserror::Error;
 
-use crate::command::{CommandOutput, CommandRunner, SystemCommandRunner};
+use crate::command::{CommandOutput, CommandRunner, InheritedLocaleCommandRunner};
 
 const SYSTEMCTL: &str = "systemctl";
 
@@ -44,7 +44,7 @@ pub enum SystemdError {
         #[source]
         source: std::io::Error,
     },
-    /// The unit name is empty or a successful status query reports it missing.
+    /// The unit name is empty or typed status evidence reports it missing.
     #[error("service not found: {0}")]
     NotFound(String),
     /// `systemctl` exited unsuccessfully.
@@ -69,20 +69,20 @@ pub struct UnitStatus {
 ///
 /// Production code uses [`Systemd::system`]; tests use
 /// [`Systemd::with_runner`] to avoid invoking the host's service manager.
-pub struct Systemd<R: CommandRunner = SystemCommandRunner> {
+pub struct Systemd<R: CommandRunner = InheritedLocaleCommandRunner> {
     runner: R,
 }
 
-impl Systemd<SystemCommandRunner> {
+impl Systemd<InheritedLocaleCommandRunner> {
     /// Build a bridge that runs the host's real `systemctl` binary.
     pub fn system() -> Self {
         Self {
-            runner: SystemCommandRunner,
+            runner: InheritedLocaleCommandRunner,
         }
     }
 }
 
-impl Default for Systemd<SystemCommandRunner> {
+impl Default for Systemd<InheritedLocaleCommandRunner> {
     fn default() -> Self {
         Self::system()
     }
@@ -155,6 +155,65 @@ impl<R: CommandRunner> Systemd<R> {
         })
     }
 
+    /// Reload systemd manager configuration (`systemctl daemon-reload`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed systemd error when the command cannot complete.
+    pub fn daemon_reload(&self) -> Result<(), SystemdError> {
+        self.run_operation("daemon-reload", &["daemon-reload"])
+    }
+
+    /// Enable a unit without starting it (`systemctl enable <unit>`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed systemd error when the unit is empty or the command
+    /// cannot complete.
+    pub fn enable_unit_file(&self, unit: &str) -> Result<(), SystemdError> {
+        self.run_unit_operation("enable", &["enable", unit], unit)
+    }
+
+    /// Start a systemd unit (`systemctl start <unit>`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed systemd error when the unit is empty or the command
+    /// cannot complete.
+    pub fn start_unit(&self, unit: &str) -> Result<(), SystemdError> {
+        self.run_unit_operation("start", &["start", unit], unit)
+    }
+
+    /// Restart a systemd unit (`systemctl restart <unit>`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed systemd error when the unit is empty or the command
+    /// cannot complete.
+    pub fn restart_unit(&self, unit: &str) -> Result<(), SystemdError> {
+        self.run_unit_operation("restart", &["restart", unit], unit)
+    }
+
+    /// Stop a systemd unit (`systemctl stop <unit>`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed systemd error when the unit is empty or the command
+    /// cannot complete.
+    pub fn stop_unit(&self, unit: &str) -> Result<(), SystemdError> {
+        self.run_unit_operation("stop", &["stop", unit], unit)
+    }
+
+    /// Disable a unit without stopping it (`systemctl disable <unit>`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed systemd error when the unit is empty or the command
+    /// cannot complete.
+    pub fn disable_unit_file(&self, unit: &str) -> Result<(), SystemdError> {
+        self.run_unit_operation("disable", &["disable", unit], unit)
+    }
+
     /// Enable and start a systemd unit (`systemctl enable --now <unit>`).
     ///
     /// # Errors
@@ -213,6 +272,14 @@ impl<R: CommandRunner> Systemd<R> {
             return Ok(());
         }
         Err(command_failure(operation, Some(unit), out))
+    }
+
+    fn run_operation(&self, operation: &str, args: &[&str]) -> Result<(), SystemdError> {
+        let out = self.run_systemctl(operation, args)?;
+        if out.code == Some(0) {
+            return Ok(());
+        }
+        Err(command_failure(operation, None, out))
     }
 }
 
@@ -323,6 +390,75 @@ mod tests {
         assert!(matches!(
             systemd.disable_unit_deferred(" "),
             Err(SystemdError::NotFound(unit)) if unit == "<empty>"
+        ));
+        assert!(matches!(
+            systemd.start_unit(" "),
+            Err(SystemdError::NotFound(unit)) if unit == "<empty>"
+        ));
+        assert!(matches!(
+            systemd.restart_unit(" "),
+            Err(SystemdError::NotFound(unit)) if unit == "<empty>"
+        ));
+        assert!(matches!(
+            systemd.stop_unit(" "),
+            Err(SystemdError::NotFound(unit)) if unit == "<empty>"
+        ));
+        assert!(matches!(
+            systemd.enable_unit_file(" "),
+            Err(SystemdError::NotFound(unit)) if unit == "<empty>"
+        ));
+        assert!(matches!(
+            systemd.disable_unit_file(" "),
+            Err(SystemdError::NotFound(unit)) if unit == "<empty>"
+        ));
+        assert_finished(&systemd);
+    }
+
+    #[test]
+    fn service_lifecycle_operations_preserve_systemctl_argv() {
+        let systemd = systemd(vec![
+            call(&["daemon-reload"], Some(0), "", ""),
+            call(&["enable", "anolisa.service"], Some(0), "", ""),
+            call(&["start", "anolisa.service"], Some(0), "", ""),
+            call(&["restart", "anolisa.service"], Some(0), "", ""),
+            call(&["stop", "anolisa.service"], Some(0), "", ""),
+            call(&["disable", "anolisa.service"], Some(0), "", ""),
+        ]);
+
+        systemd.daemon_reload().expect("reload should succeed");
+        systemd
+            .enable_unit_file("anolisa.service")
+            .expect("enable should succeed");
+        systemd
+            .start_unit("anolisa.service")
+            .expect("start should succeed");
+        systemd
+            .restart_unit("anolisa.service")
+            .expect("restart should succeed");
+        systemd
+            .stop_unit("anolisa.service")
+            .expect("stop should succeed");
+        systemd
+            .disable_unit_file("anolisa.service")
+            .expect("disable should succeed");
+        assert_finished(&systemd);
+    }
+
+    #[test]
+    fn stop_non_zero_exit_does_not_probe_status() {
+        let systemd = systemd(vec![call(
+            &["stop", "missing.service"],
+            Some(5),
+            "",
+            "arbitrary localized diagnostic\n",
+        )]);
+
+        assert!(matches!(
+            systemd.stop_unit("missing.service"),
+            Err(SystemdError::NonZeroExit(failure))
+                if failure.operation == "stop"
+                    && failure.unit.as_deref() == Some("missing.service")
+                    && failure.code == Some(5)
         ));
         assert_finished(&systemd);
     }
