@@ -185,10 +185,10 @@ pub async fn run(
             .handle_user_message(prompt, &mut lines, &mut writer)
             .await;
         let persist_result = session.persist(&engine);
+        let upload_handle;
         match combine_turn_and_persist(turn_result, persist_result) {
             Ok(()) => {
                 let duration = start.elapsed();
-                sls::append_sls_log(&engine.build_sls_record(duration));
                 let result_msg = OutputMessage::Result {
                     subtype: Some("success".to_string()),
                     is_error: false,
@@ -202,17 +202,31 @@ pub async fn run(
                     env_delta: None,
                     duration_ms: Some(duration.as_millis() as u64),
                 };
+                // Emit the result before awaiting telemetry so a stalled
+                // metadata probe does not delay the visible turn result.
                 engine.emit(&mut writer, &result_msg);
+                upload_handle = sls::emit(&engine.build_sls_record(duration)).await;
                 session.recommend_auto_compaction(&mut engine, &mut writer);
             }
             Err(failure) => {
-                sls::append_sls_log(&engine.build_sls_record(start.elapsed()));
                 let err_msg = failure.output_message(&engine.session_id);
+                // Emit the error result before awaiting telemetry so a stalled
+                // metadata probe does not delay the visible turn result.
                 engine.emit(&mut writer, &err_msg);
+                upload_handle = sls::emit(&engine.build_sls_record(start.elapsed())).await;
             }
         }
         let transport_failed = engine.control_transport_failure().is_some();
         engine.shutdown_extension_runtime().await;
+        // Await the standalone upload handle with a 1-second grace period
+        // reserved for the POST itself. The region probe (also bounded, see
+        // `metadata_probe_deadline`) already completed before this handle was
+        // returned, so the upload budget is not consumed by discovery. Telemetry
+        // is best-effort and a slow or unreachable network must not delay the
+        // CLI exit.
+        if let Some(handle) = upload_handle {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+        }
         return Ok(if transport_failed {
             EXIT_CONTROL_TRANSPORT_FAILURE
         } else {
@@ -621,7 +635,6 @@ where
             match combine_turn_and_persist(turn_result, persist_result) {
                 Ok(()) => {
                     let duration = start.elapsed();
-                    sls::append_sls_log(&engine.build_sls_record(duration));
                     let result_msg = OutputMessage::Result {
                         subtype: Some("success".to_string()),
                         is_error: false,
@@ -635,7 +648,11 @@ where
                         env_delta: None,
                         duration_ms: Some(duration.as_millis() as u64),
                     };
+                    // Emit the result before awaiting telemetry so a stalled
+                    // metadata probe does not delay the visible turn result.
                     engine.emit(writer, &result_msg);
+                    // Interactive mode: the process stays alive, so fire-and-forget is safe.
+                    let _ = sls::emit(&engine.build_sls_record(duration)).await;
                     // Idle boundary: the Agent run finished and its transcript
                     // was persisted, so background compaction is safe now. The
                     // shell owns the compactor process so its prompt returns
@@ -643,9 +660,11 @@ where
                     session.recommend_auto_compaction(engine, writer);
                 }
                 Err(failure) => {
-                    sls::append_sls_log(&engine.build_sls_record(start.elapsed()));
                     let err_msg = failure.output_message(&engine.session_id);
+                    // Emit the error result before awaiting telemetry so a stalled
+                    // metadata probe does not delay the visible turn result.
                     engine.emit(writer, &err_msg);
+                    let _ = sls::emit(&engine.build_sls_record(start.elapsed())).await;
                 }
             }
             engine.drain_retired_extension_snapshots().await;

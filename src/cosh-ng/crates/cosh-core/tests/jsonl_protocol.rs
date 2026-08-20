@@ -1,7 +1,9 @@
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use serde_json::Value;
+
+mod common;
 
 fn private_wire_corpus() -> Value {
     serde_json::from_str(include_str!("fixtures/cosh-private-wire-dual-version.json"))
@@ -10,18 +12,6 @@ fn private_wire_corpus() -> Value {
 
 fn json_line(value: &Value) -> String {
     serde_json::to_string(value).expect("serializable private wire fixture")
-}
-
-fn binary_path() -> std::path::PathBuf {
-    let mut path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    path.push("cosh-core");
-    path
 }
 
 fn run_with_input(lines: &[&str]) -> Vec<Value> {
@@ -57,17 +47,15 @@ fn run_process_at_home_args(
     args: &[&str],
     lines: &[&str],
 ) -> std::process::Output {
-    let bin = binary_path();
-    let mut command = Command::new(&bin);
+    let mut command = common::cosh_core_command(home);
     command
         .args(args)
-        .env("HOME", home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command
         .spawn()
-        .unwrap_or_else(|e| panic!("Failed to spawn {}: {e}", bin.display()));
+        .unwrap_or_else(|e| panic!("Failed to spawn {}: {e}", common::binary_path().display()));
 
     {
         let stdin = child.stdin.as_mut().unwrap();
@@ -562,10 +550,8 @@ fn output_format_matches_cosh_shell_expectations() {
 
 #[test]
 fn invalid_jsonl_input_returns_error_and_fails() {
-    let bin = binary_path();
     let home = tempfile::tempdir().expect("temp home");
-    let mut child = Command::new(&bin)
-        .env("HOME", home.path())
+    let mut child = common::cosh_core_command(home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

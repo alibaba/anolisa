@@ -180,6 +180,29 @@ acceptance before treating a particular ACP installation as production-validated
 - [Architecture](../../docs/developer-guide/en/cosh-ng/architecture.md)
 - [Contributing](CONTRIBUTING.md)
 
+## Data Collection
+
+cosh-ng collects anonymous operational metrics to improve service quality.
+This includes tool call counts, token usage, approval statistics,
+OS type/architecture, and a persistent installation UUID for
+cross-session correlation. **No user prompts, code content, or
+conversation content is collected.**
+
+To disable telemetry for the current user:
+
+```bash
+mkdir -p ~/.copilot-shell
+touch ~/.copilot-shell/telemetry_disabled
+```
+
+A system administrator can also disable telemetry for all users on the
+machine by creating the system-level sentinel:
+
+```bash
+sudo mkdir -p /etc/anolisa
+sudo touch /etc/anolisa/.telemetry_disabled
+```
+
 ## Contribute
 
 Source builds are a contributor workflow. Start with the

@@ -6,6 +6,8 @@ use std::thread;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+mod common;
+
 fn binary_path() -> std::path::PathBuf {
     let mut path = std::env::current_exe()
         .unwrap()
@@ -174,15 +176,16 @@ fn mcp_login_completes_discovery_registration_and_callback() {
         "[mcp.servers.remote]\nurl = \"${MCP_OAUTH_TEST_URL}\"\n",
     )
     .unwrap();
-    let mut child = Command::new(binary_path())
+    let mut command = Command::new(binary_path());
+    command
         .args(["mcp", "login", "remote"])
         .env("HOME", home.path())
         .env("MCP_OAUTH_TEST_URL", format!("http://{address}/mcp"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::piped());
+    common::opt_out_telemetry(&mut command, home.path());
+    let mut child = command.spawn().unwrap();
     let stderr = child.stderr.take().unwrap();
     let mut stderr = BufReader::new(stderr);
     let mut authorization_url = None;
@@ -272,11 +275,12 @@ fn mcp_inspect_does_not_reuse_credentials_after_endpoint_changes() {
     )
     .unwrap();
 
-    let output = Command::new(binary_path())
+    let mut command = Command::new(binary_path());
+    command
         .args(["mcp", "inspect", "remote"])
-        .env("HOME", home.path())
-        .output()
-        .unwrap();
+        .env("HOME", home.path());
+    common::opt_out_telemetry(&mut command, home.path());
+    let output = command.output().unwrap();
 
     assert!(!output.status.success());
     assert!(!String::from_utf8_lossy(&output.stderr).contains("stale-access-token"));

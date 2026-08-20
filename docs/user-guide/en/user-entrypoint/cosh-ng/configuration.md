@@ -147,6 +147,33 @@ max_disk_bytes = 1073741824
 root is `$XDG_STATE_HOME/cosh/audit` or `~/.local/state/cosh/audit`; set
 `COSH_AUDIT_DIR` to an absolute path to override it.
 
+## Telemetry opt-out
+
+cosh-ng collects anonymous operational metrics to improve service quality.
+This includes tool call counts, token usage, approval statistics, OS
+type/architecture, and a persistent installation UUID for cross-session
+correlation. **No user prompts, code content, or conversation content is
+collected.**
+
+Telemetry is enabled by default. To disable it for the current user, create
+the per-user sentinel file:
+
+```bash
+mkdir -p ~/.copilot-shell
+touch ~/.copilot-shell/telemetry_disabled
+```
+
+A system administrator can disable telemetry for all users on the machine by
+creating the system-level sentinel file:
+
+```bash
+sudo mkdir -p /etc/anolisa
+sudo touch /etc/anolisa/.telemetry_disabled
+```
+
+Either sentinel takes effect immediately for running processes; no restart is
+required.
+
 ## Environment overrides
 
 | Variables | Effect |

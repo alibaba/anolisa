@@ -6,6 +6,8 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 
+mod common;
+
 fn binary_path() -> PathBuf {
     let mut path = std::env::current_exe()
         .expect("current test executable")
@@ -68,13 +70,14 @@ persist_dir = "{}"
 }
 
 fn run_core(fixture: &Fixture, args: &[&str]) -> Output {
-    Command::new(binary_path())
+    let mut command = Command::new(binary_path());
+    command
         .env("HOME", &fixture.home)
         .args(["--headless", "--workspace"])
         .arg(&fixture.workspace)
-        .args(args)
-        .output()
-        .expect("run cosh-core")
+        .args(args);
+    common::opt_out_telemetry(&mut command, &fixture.home);
+    command.output().expect("run cosh-core")
 }
 
 fn json_lines(output: &Output) -> Vec<Value> {

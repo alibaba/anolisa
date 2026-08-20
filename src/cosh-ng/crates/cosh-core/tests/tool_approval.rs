@@ -1,30 +1,18 @@
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use serde_json::Value;
 
-fn binary_path() -> std::path::PathBuf {
-    let mut path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    path.push("cosh-core");
-    path
-}
+mod common;
 
 fn interact(messages: &[&str]) -> Vec<Value> {
-    let bin = binary_path();
     let home = tempfile::tempdir().expect("temp home");
-    let mut child = Command::new(&bin)
-        .env("HOME", home.path())
+    let mut child = common::cosh_core_command(home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .unwrap_or_else(|e| panic!("Failed to spawn {}: {e}", bin.display()));
+        .unwrap_or_else(|e| panic!("Failed to spawn {}: {e}", common::binary_path().display()));
 
     {
         let stdin = child.stdin.as_mut().unwrap();
@@ -174,9 +162,7 @@ name = "test-hook"
     )
     .unwrap();
 
-    let bin = binary_path();
-    let mut child = Command::new(&bin)
-        .env("HOME", home.path())
+    let mut child = common::cosh_core_command(home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

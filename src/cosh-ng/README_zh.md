@@ -167,6 +167,26 @@ system-operations 路径，不会为这个 Gateway profile 增加 checkpoint cap
 - [架构](../../docs/developer-guide/zh/cosh-ng/architecture.md)
 - [贡献指南](CONTRIBUTING_zh.md)
 
+## 数据采集
+
+cosh-ng 会采集匿名的运行指标用于改进服务质量，包括工具调用次数、token 用量、
+审批统计、操作系统类型/架构，以及一个持久的安装 UUID 用于跨会话
+关联。**不采集用户输入内容、代码内容或对话内容。**
+
+关闭当前用户的遥测：
+
+```bash
+mkdir -p ~/.copilot-shell
+touch ~/.copilot-shell/telemetry_disabled
+```
+
+系统管理员也可以通过创建系统级哨兵文件，为整台机器上的所有用户关闭遥测：
+
+```bash
+sudo mkdir -p /etc/anolisa
+sudo touch /etc/anolisa/.telemetry_disabled
+```
+
 ## 参与贡献
 
 源码构建主要面向贡献者，请从[开发者指南](../../docs/developer-guide/zh/cosh-ng/getting-started.md)

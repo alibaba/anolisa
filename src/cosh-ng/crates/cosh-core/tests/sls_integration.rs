@@ -3,21 +3,16 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
-fn binary_path() -> std::path::PathBuf {
-    let mut path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    path.push("cosh-core");
-    path
-}
+mod common;
 
 /// End-to-end: cosh-core writes a SLS JSONL record after handling a user message.
 #[test]
 fn user_message_produces_sls_record() {
+    if common::system_telemetry_is_disabled() {
+        eprintln!("skipping enabled-telemetry test because the host opted out system-wide");
+        return;
+    }
+
     let home = tempfile::tempdir().expect("temp home");
     let sls_dir = home.path().join("sls");
     std::fs::create_dir_all(&sls_dir).unwrap();
@@ -25,15 +20,20 @@ fn user_message_produces_sls_record() {
     // Pre-create the file (platform provisioning)
     std::fs::write(&sls_file, "").unwrap();
 
-    let bin = binary_path();
-    let mut child = Command::new(&bin)
+    // Unified-channel test: the pre-created cosh.jsonl file prevents any
+    // standalone self-upload, so keep the per-user sentinel absent. A real
+    // system-level opt-out is checked above and never bypassed.
+    let absent_user_sentinel = home.path().join("telemetry_disabled_absent");
+
+    let mut child = Command::new(common::binary_path())
         .env("HOME", home.path())
+        .env("COSH_TELEMETRY_DISABLED_PATH", &absent_user_sentinel)
         .env("COSH_SLS_LOG_PATH", sls_file.to_str().unwrap())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .unwrap_or_else(|e| panic!("Failed to spawn {}: {e}", bin.display()));
+        .unwrap_or_else(|e| panic!("Failed to spawn {}: {e}", common::binary_path().display()));
 
     {
         let stdin = child.stdin.as_mut().unwrap();
@@ -90,9 +90,7 @@ fn sls_not_created_when_missing() {
     let home = tempfile::tempdir().expect("temp home");
     let sls_file = home.path().join("nonexistent-sls.jsonl");
 
-    let bin = binary_path();
-    let mut child = Command::new(&bin)
-        .env("HOME", home.path())
+    let mut child = common::cosh_core_command(home.path())
         .env("COSH_SLS_LOG_PATH", sls_file.to_str().unwrap())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -8,6 +8,8 @@ use std::thread::JoinHandle;
 use rustix::fs::{flock, FlockOperation};
 use serde_json::{json, Value};
 
+mod common;
+
 fn binary_path() -> PathBuf {
     let mut path = std::env::current_exe()
         .expect("current test executable")
@@ -185,6 +187,7 @@ fn isolated_command(home: &Path) -> Command {
     ] {
         command.env_remove(variable);
     }
+    common::opt_out_telemetry(&mut command, home);
     command
 }
 
@@ -313,14 +316,15 @@ persist_dir = "project-sessions"
     )
     .expect("write requested project config");
 
-    let output = Command::new(binary_path())
+    let mut command = Command::new(binary_path());
+    command
         .env("HOME", &home)
         .current_dir(&process_workspace)
         .args(["--headless", "--workspace"])
         .arg(&requested_workspace)
-        .arg("workspace-owned config")
-        .output()
-        .expect("run from another cwd");
+        .arg("workspace-owned config");
+    common::opt_out_telemetry(&mut command, &home);
+    let output = command.output().expect("run from another cwd");
     let messages = json_lines(&output);
     let init = messages
         .iter()
@@ -353,14 +357,15 @@ persist_dir = "project-sessions"
     )
     .expect("write requested project config");
 
-    let output = Command::new(binary_path())
+    let mut command = Command::new(binary_path());
+    command
         .env("HOME", &home)
         .current_dir(&process_workspace)
         .args(["--headless", "--workspace"])
         .arg(&requested_workspace)
-        .arg("persist in requested workspace")
-        .output()
-        .expect("persist with requested config");
+        .arg("persist in requested workspace");
+    common::opt_out_telemetry(&mut command, &home);
+    let output = command.output().expect("persist with requested config");
     let session_id = json_lines(&output)
         .iter()
         .find(|message| message["type"] == "result")
@@ -405,12 +410,15 @@ fn process_cwd_legacy_session_cannot_be_claimed_by_another_workspace() {
     )
     .expect("write legacy history");
 
-    let output = Command::new(binary_path())
+    let mut command = Command::new(binary_path());
+    command
         .env("HOME", &home)
         .current_dir(&process_workspace)
         .args(["--headless", "--workspace"])
         .arg(&requested_workspace)
-        .args(["--resume", session_id, "must not see A"])
+        .args(["--resume", session_id, "must not see A"]);
+    common::opt_out_telemetry(&mut command, &home);
+    let output = command
         .output()
         .expect("attempt cross-workspace legacy resume");
     let messages = json_lines(&output);
@@ -460,14 +468,15 @@ model = "mock-history"
     )
     .expect("write legacy session");
 
-    let output = Command::new(binary_path())
+    let mut command = Command::new(binary_path());
+    command
         .env("HOME", &home)
         .current_dir(&workspace)
         .args(["--headless", "--workspace"])
         .arg(&workspace)
-        .args(["--resume", session_id, "continue migrated history"])
-        .output()
-        .expect("resume pre-workspace session");
+        .args(["--resume", session_id, "continue migrated history"]);
+    common::opt_out_telemetry(&mut command, &home);
+    let output = command.output().expect("resume pre-workspace session");
     let messages = json_lines(&output);
     let assistant = messages
         .iter()
@@ -1375,9 +1384,10 @@ fn session_control_output(home: &Path, request: Value) -> Output {
 }
 
 fn session_control_bytes_output(home: &Path, request: &[u8]) -> Output {
-    let mut child = Command::new(binary_path())
-        .env("HOME", home)
-        .arg("--session-control")
+    let mut command = Command::new(binary_path());
+    command.env("HOME", home).arg("--session-control");
+    common::opt_out_telemetry(&mut command, home);
+    let mut child = command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
