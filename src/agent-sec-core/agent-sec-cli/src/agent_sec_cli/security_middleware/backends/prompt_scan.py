@@ -137,7 +137,18 @@ def error_payload(message: str) -> dict[str, Any]:
     """Build the spec ERROR verdict payload (``schema_version: "1.0"``).
 
     Shared with the scan-prompt CLI so error output keeps a single shape
-    regardless of where the failure is caught.
+    regardless of where the failure is caught.  Every always-present
+    field of the Rust ``to_json_value`` contract is emitted here: the
+    timing trio (``elapsed_ms`` / ``engine_init_ms`` / ``scan_ms``, all
+    zero, preserving the documented ``elapsed == init + scan`` identity)
+    and the scan-completeness group (``input_truncated`` /
+    ``input_bytes_scanned`` / ``degraded`` / ``layers_failed``), so
+    consumers can gate on ``degraded`` without probing for keys.  Nothing
+    was scanned on this path, so ``degraded`` is ``True`` (fail-safe: a
+    hook gating on it applies its stricter policy instead of trusting an
+    unscanned input), and ``layers_failed`` is empty because the failure
+    is top-level, not per-layer -- the human-readable cause stays in
+    ``summary``.
     """
     return {
         "schema_version": "1.0",
@@ -151,6 +162,12 @@ def error_payload(message: str) -> dict[str, Any]:
         "layer_results": [],
         "engine_version": _engine_version(),
         "elapsed_ms": 0,
+        "engine_init_ms": 0,
+        "scan_ms": 0,
+        "input_truncated": False,
+        "input_bytes_scanned": 0,
+        "degraded": True,
+        "layers_failed": [],
     }
 
 

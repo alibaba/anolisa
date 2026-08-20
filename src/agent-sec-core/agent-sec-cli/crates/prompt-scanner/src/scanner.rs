@@ -17,21 +17,6 @@ use crate::preprocessor::Preprocessor;
 use crate::result::{LayerResult, ScanResult, ThreatType, Verdict};
 use crate::verdict::determine_verdict;
 
-/// Detectors that may be skipped silently when unavailable.
-///
-/// L1, L2, and L4 are mandatory when configured: their failure must surface
-/// as a construction error so the caller knows the scan could not be
-/// performed.  Only the future L3 semantic layer is optional.
-const OPTIONAL_DETECTORS: [&str; 1] = ["semantic"];
-
-/// Human-readable skip reason for an unavailable optional detector.
-fn skip_reason(name: &str) -> String {
-    match name {
-        "semantic" => "L3 semantic detection is not available".to_string(),
-        other => format!("{other} is not available"),
-    }
-}
-
 /// Hard cap (1 MiB, mirroring PII's `DEFAULT_MAX_BYTES`) bounding regex/NFKC/decode
 /// work across every scan entry point.  Oversized inputs are cut to the first
 /// `MAX_INPUT_BYTES` bytes and the tail is discarded without scanning (same semantics
@@ -74,8 +59,11 @@ fn truncate_to_bytes(text: &str, max_bytes: usize) -> (Cow<'_, str>, bool, usize
 pub struct PromptScanner {
     config: ScanConfig,
     preprocessor: Preprocessor,
+    /// Every configured layer, in order.  No layer is optional, so this is
+    /// always the full set named by [`ScanConfig::layers`] — which is what
+    /// makes `degraded` / `layers_failed` an exact account of the coverage a
+    /// scan achieved.
     detectors: Vec<Box<dyn DetectionLayer>>,
-    skipped_detectors: Vec<String>,
     /// Wall time spent in [`PromptScanner::new`], dominated by compiling the
     /// rule set's regexes.  Reported so callers can see the cold-start cost
     /// instead of it hiding outside every measured scan.
@@ -88,10 +76,9 @@ pub struct PromptScanner {
 impl PromptScanner {
     /// Build a scanner from an explicit config.
     ///
-    /// Mandatory detectors (`rule_engine`, `ml_classifier`,
-    /// `multi_turn_intent`) fail construction when unavailable; only the
-    /// future L3 `semantic` layer is optional and will be skipped with a
-    /// warning in the result metadata.
+    /// Every detector is mandatory: an unavailable layer fails construction
+    /// rather than being skipped, so a scanner that builds always covers the
+    /// full configured set.
     ///
     /// # Errors
     ///
@@ -103,7 +90,6 @@ impl PromptScanner {
         let t_init = Instant::now();
         let preprocessor = Preprocessor::new(config.detect_encoding);
         let mut detectors: Vec<Box<dyn DetectionLayer>> = Vec::new();
-        let mut skipped_detectors: Vec<String> = Vec::new();
         for name in &config.layers {
             let detector: Box<dyn DetectionLayer> = match name.as_str() {
                 "rule_engine" => Box::new(RuleEngine::new()?),
@@ -114,11 +100,6 @@ impl PromptScanner {
                 other => return Err(ScannerError::Config(format!("Unknown detector: {other}"))),
             };
             if !detector.is_available() {
-                if OPTIONAL_DETECTORS.contains(&name.as_str()) {
-                    log::warn!("Detector {name:?} is not available and will be skipped.");
-                    skipped_detectors.push(name.clone());
-                    continue;
-                }
                 return Err(ScannerError::LayerNotAvailable(format!(
                     "Detector {name:?} is not available. Check that its dependencies \
                      are installed."
@@ -130,7 +111,6 @@ impl PromptScanner {
             config,
             preprocessor,
             detectors,
-            skipped_detectors,
             init_ms: t_init.elapsed().as_secs_f64() * 1000.0,
             init_charged: AtomicBool::new(false),
         })
@@ -344,15 +324,6 @@ impl PromptScanner {
             );
         }
 
-        if self.detectors.is_empty() {
-            let reasons: Vec<String> = self
-                .skipped_detectors
-                .iter()
-                .map(|name| skip_reason(name))
-                .collect();
-            metadata.insert("skip_reason".into(), json!(reasons.join("; ")));
-        }
-
         let verdict = determine_verdict(&layer_results);
         let threat_type = determine_threat_type(&layer_results);
         let is_threat = matches!(verdict, Verdict::Warn | Verdict::Deny);
@@ -508,7 +479,6 @@ mod tests {
             config: ScanConfig::preset(ScanMode::Standard),
             preprocessor: Preprocessor::new(true),
             detectors: vec![Box::new(RuleEngine::new().unwrap()), Box::new(ml)],
-            skipped_detectors: vec![],
             init_ms: 0.0,
             init_charged: AtomicBool::new(false),
         }
@@ -527,7 +497,6 @@ mod tests {
             config: ScanConfig::preset(ScanMode::MultiTurn),
             preprocessor: Preprocessor::new(true),
             detectors: vec![Box::new(l4)],
-            skipped_detectors: vec![],
             init_ms: 0.0,
             init_charged: AtomicBool::new(false),
         }
@@ -760,7 +729,6 @@ mod tests {
             config: ScanConfig::preset(ScanMode::Standard),
             preprocessor: Preprocessor::new(true),
             detectors: vec![Box::new(RuleEngine::new().unwrap()), Box::new(ml)],
-            skipped_detectors: vec![],
             init_ms: 0.0,
             init_charged: AtomicBool::new(false),
         }
@@ -864,7 +832,6 @@ mod tests {
             config: ScanConfig::preset(ScanMode::MultiTurn),
             preprocessor: Preprocessor::new(true),
             detectors: vec![Box::new(l4)],
-            skipped_detectors: vec![],
             init_ms: 0.0,
             init_charged: AtomicBool::new(false),
         };
@@ -910,10 +877,19 @@ mod tests {
     }
 
     #[test]
-    fn multi_turn_intent_is_mandatory() {
-        // L4 is required when the caller explicitly selects multi_turn mode;
-        // it must not be silently skipped like the future L3 semantic layer.
-        assert!(!OPTIONAL_DETECTORS.contains(&"multi_turn_intent"));
+    fn semantic_layer_is_a_config_error_until_l3_lands() {
+        // L3 has no detector yet, so naming it fails construction the same way
+        // an unsupported L2 model does.  It must never be silently skipped:
+        // that would leave `degraded` claiming full coverage over a layer that
+        // never answered.
+        let config = ScanConfig {
+            layers: vec!["semantic".to_string()],
+            ..ScanConfig::default()
+        };
+        assert!(matches!(
+            PromptScanner::new(config),
+            Err(ScannerError::Config(_))
+        ));
     }
 
     // --- batch & warmup ---------------------------------------------------

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from agent_sec_cli.security_middleware.backends.base import BaseBackend
 from agent_sec_cli.security_middleware.backends.prompt_scan import (
     PromptScanBackend,
+    error_payload,
 )
 from agent_sec_cli.security_middleware.context import RequestContext
 
@@ -266,6 +267,58 @@ class TestPromptScanBackendMultiTurn(unittest.TestCase):
             mode="multi_turn",
             source=None,
             model=None,
+        )
+
+
+class TestErrorPayloadContract(unittest.TestCase):
+    """The ERROR payload must satisfy the same "always present" contract as
+    the Rust ``to_json_value`` output, so a caller gating on ``degraded``
+    never hits a missing key on the worst-coverage (nothing scanned) path.
+    """
+
+    @patch(
+        "agent_sec_cli.security_middleware.backends.prompt_scan._engine_version",
+        return_value="unknown",
+    )
+    def test_always_present_fields_match_rust_contract(self, _mock_version):
+        payload = error_payload("boom")
+        # These fields are documented as constant output; the ERROR path
+        # used to omit them, inverting a `degraded` gate to fail-open.
+        for field in (
+            "degraded",
+            "layers_failed",
+            "input_truncated",
+            "input_bytes_scanned",
+            "engine_init_ms",
+            "scan_ms",
+        ):
+            self.assertIn(field, payload)
+
+    @patch(
+        "agent_sec_cli.security_middleware.backends.prompt_scan._engine_version",
+        return_value="unknown",
+    )
+    def test_degraded_is_true_for_unscanned_error(self, _mock_version):
+        # Nothing was scanned, so the fail-safe value is degraded=True: a
+        # security hook gating on it must not treat this as full coverage.
+        payload = error_payload("boom")
+        self.assertTrue(payload["degraded"])
+        self.assertEqual(payload["layers_failed"], [])
+        self.assertFalse(payload["input_truncated"])
+        self.assertEqual(payload["input_bytes_scanned"], 0)
+
+    @patch(
+        "agent_sec_cli.security_middleware.backends.prompt_scan._engine_version",
+        return_value="unknown",
+    )
+    def test_timing_fields_satisfy_elapsed_identity(self, _mock_version):
+        # The documented invariant `elapsed_ms == engine_init_ms + scan_ms`
+        # must hold on the ERROR payload too, so consumers can decompose
+        # timing uniformly across verdicts.
+        payload = error_payload("boom")
+        self.assertEqual(
+            payload["elapsed_ms"],
+            payload["engine_init_ms"] + payload["scan_ms"],
         )
 
 

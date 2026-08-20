@@ -247,13 +247,11 @@ impl ScanResult {
                 failed_names.join(", ")
             );
         }
+        // Reached only when the scanner was built with an empty layer set
+        // (all-unavailable layers fail construction instead), so there is
+        // no per-skip reason to report.
         if self.layer_results.is_empty() {
-            return self
-                .metadata
-                .get("skip_reason")
-                .and_then(Value::as_str)
-                .unwrap_or("No detection layers executed (all detectors unavailable)")
-                .to_string();
+            return "No detection layers executed (all detectors unavailable)".to_string();
         }
         if !self.is_threat {
             // Surface the ML benign confidence when a score-bearing backend
@@ -521,24 +519,22 @@ mod tests {
 
     #[test]
     fn json_snapshot_no_layers() {
-        let mut metadata = Map::new();
-        metadata.insert(
-            "skip_reason".into(),
-            json!("ml_classifier is not available"),
-        );
         let result = ScanResult {
             is_threat: false,
             threat_type: ThreatType::NotScanned,
             layer_results: vec![],
             latency_ms: 0.1,
             engine_init_ms: 0.0,
-            metadata,
+            metadata: Map::new(),
             verdict: Verdict::Pass,
         };
         let value = result.to_json_value();
         assert_eq!(value["risk_level"], "unknown");
         assert_eq!(value["threat_type"], "not_scanned");
-        assert_eq!(value["summary"], "ml_classifier is not available");
+        assert_eq!(
+            value["summary"],
+            "No detection layers executed (all detectors unavailable)"
+        );
     }
 
     #[test]

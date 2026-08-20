@@ -244,10 +244,15 @@ agent-sec-cli scan-prompt --text "ignore all system instructions"
 >
 > **权衡**：不升级为 WARN，是因为模型服务离线期间会导致**每条输入**都弹出询问，实际不可用；不报 ERROR，是因为 hook 将
 > `error` 视为 fail-open 放行，且会连带丢弃 L1 已有的命中。代价是：**仅 L2 能识别的内容安全类威胁在 L2 离线时会被放过**。
+> DENY 方向：降级期间 L1 命中不再经 L2 纠偏，直接判为 DENY；已开启拦截模式（`promptScanBlock=true`）的部署会实际阻断请求。
 > 因此需要严格保证全量覆盖的调用方（如安全 hook）应自行消费 `degraded` 字段并施加更严的策略，而非仅看 `verdict`。
 >
 > **降级的前提是至少有一层已应答**：若**所有**已配置层均执行失败（现实中即 multi-turn 模式——其唯一检测层 L4 不可达），
 > 则没有任何判定依据，扫描直接报错（如 `ScannerError::ModelInference`）而不输出降级 PASS——零覆盖的「降级通过」等于未扫先放。
+>
+> **边界：降级只覆盖扫描期的层失败。** 构造期（`PromptScanner::new`）的配置类错误（如 L2 模型名无对应 backend、`AGENT_SEC_MODEL_SERVICE_BASE_URL` scheme 非法、backend 非 `ollama`）不产生逐层降级：构造失败经 PyO3 映射为 `RuntimeError`，由统一的 error payload 输出 `verdict: "error"`，同样携带 `degraded: true` 与 `layers_failed: []`（top-level 失败而非 per-layer，原因记入 `summary`）。仅按 `verdict` 行事的 hook 仍会将该路径 fail-open 放行；消费 `degraded` 的 hook 则可对构造失败施加更严策略。
+>
+> **不存在「已配置但被跳过」的层。** 所有层一律 mandatory：依赖缺失在构造期报错，而非静默跳过后照常输出 `degraded: false`。L3 落地时沿用 L2 契约（配置错误在构造期报 `error`，运行期故障计入 `layers_failed` 并置 `degraded: true`），因此 `degraded` / `layers_failed` 始终是对已配置层的完整交代。
 
 **text 格式（无威胁）：**
 
@@ -453,8 +458,8 @@ Verdict → risk_level 映射（`to_dict()` / CLI JSON 输出）：
 | `scan_ms` | `float` | 本次检测流水线耗时（毫秒），不含引擎构造 |
 | `input_truncated` | `bool` | 输入超过 1 MiB 上限被截断时为 `true`，此时判定基于部分输入 |
 | `input_bytes_scanned` | `int` | 实际参与扫描的字节数 |
-| `degraded` | `bool` | 有已配置的层未能给出结果时为 `true`，判定仅基于剩余层（schema 1.0 追加字段，恒定输出）|
-| `layers_failed` | `list` | 失败层清单，每条为 `{"layer": ..., "error": ...}`；完整扫描时为空数组 |
+| `degraded` | `bool` | 有已配置的层在扫描期未能给出结果时为 `true`，判定仅基于剩余层（schema 1.0 追加字段，恒定输出）。所有层均为 mandatory，不存在「已配置但被跳过却不计入」的层；`error` verdict（扫描未发生）时恒为 `true` |
+| `layers_failed` | `list` | 失败层清单，每条为 `{"layer": ..., "error": ...}`；完整扫描时为空数组。`error` verdict 时亦为空数组——top-level 失败不计入 per-layer 清单，原因记入 `summary` |
 
 **findings 单条结构（L1 规则）：**
 
