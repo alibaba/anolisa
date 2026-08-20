@@ -67,6 +67,19 @@ DATA_DIR_ENV = "AGENT_SEC_DATA_DIR"
 
 # Turns the "L2 backend unavailable" skip into a failure, for environments
 # that are supposed to serve the model.
+#
+# Default (unset): the standard/strict L2 cases self-skip on hosts without a
+# served model, so L1 coverage still runs everywhere. There is deliberately no
+# CI lane that provisions the model yet; until one exists this switch is opt-in.
+#
+# To exercise the real L2 backend locally once the environment is ready:
+#   ollama serve &                      # start the backend
+#   ollama pull <model>                 # L2 backend: PROMPT_SCANNER_L2_MODEL when set,
+#                                       # otherwise the built-in Qwen3Guard default
+#   PROMPT_SCANNER_E2E_REQUIRE_L2=1 \
+#     uv run --project agent-sec-cli pytest tests/e2e/prompt-scanner -v
+# With the flag set, an unusable backend fails instead of skipping, so a broken
+# L2 path cannot pass unnoticed.
 _REQUIRE_L2_ENV = "PROMPT_SCANNER_E2E_REQUIRE_L2"
 
 

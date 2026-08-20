@@ -5,8 +5,7 @@
 //! name.  Two Ollama-served backends exist today:
 //!
 //! - Qwen3Guard (default): prompt-domain moderation, nine categories.
-//! - Warden-Gen: adds nine categories and also covers the code and
-//!   Skill domains.
+//! - Warden-Gen: adds nine categories and also covers the code domain.
 //!
 //! Adding another model means writing a wrapper and extending the factory —
 //! nothing else changes.

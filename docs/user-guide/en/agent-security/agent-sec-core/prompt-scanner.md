@@ -63,8 +63,13 @@ agent-sec-cli scan-prompt --model modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF --t
 ```
 
 Every host hook shells out to `scan-prompt`, so the variable applies to them as well. The value
-must be the full model name used in the `ollama pull` above; a typo makes the scan fail loudly
-instead of silently disabling L2. An empty or unset value keeps the Qwen3Guard default.
+must be the full model name used in the `ollama pull` above. A typo is loud only at the CLI
+boundary: the engine rejects an unsupported name at construction, so `scan-prompt` returns an
+`error` verdict and exits `1` instead of silently disabling L2. All six host hooks are fail-open on
+that non-zero exit, so inside a host the same typo is only audited as a failed `prompt_scan` event
+and blocks nothing — that host runs without prompt scanning until the name is fixed. Run
+`agent-sec-cli scan-prompt warmup` after changing the variable so the failure surfaces before a
+host loads it. An empty or unset value keeps the Qwen3Guard default.
 
 L2 runs exactly one backend at a time — no cascading, no voting.
 

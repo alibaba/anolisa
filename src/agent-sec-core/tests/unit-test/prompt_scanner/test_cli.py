@@ -481,6 +481,76 @@ def test_scan_prompt_input_file_uses_one_backend_for_all_lines(tmp_path, monkeyp
     )
 
 
+def test_scan_prompt_warns_when_model_flag_ignored_in_fast_mode(monkeypatch):
+    """fast mode has no L2 layer to configure, so an override must warn."""
+    monkeypatch.delenv("PROMPT_SCANNER_L2_MODEL", raising=False)
+    with _patch_invoke(_make_native_result(verdict="pass")) as invoke_mock:
+        rv = runner.invoke(
+            scanner_app,
+            ["--mode", "fast", "--text", "hello", "--model", _WARDEN_GEN],
+        )
+    assert rv.exit_code == 0
+    assert "--model" in rv.output
+    assert "ignored in fast mode" in rv.output
+    # The override is still forwarded; the warning reports it is inert, not dropped.
+    assert invoke_mock.call_args.kwargs["model"] == _WARDEN_GEN
+
+
+def test_scan_prompt_warns_when_env_model_ignored_in_multi_turn(monkeypatch):
+    """PROMPT_SCANNER_L2_MODEL is inert in multi_turn mode, so it must warn."""
+    monkeypatch.setenv("PROMPT_SCANNER_L2_MODEL", _WARDEN_GEN)
+    payload = {"history": [], "current_query": "hello", "assistant_response": ""}
+    result = _make_native_result(
+        layer_results=[{"layer": "multi_turn_intent", "detected": False}]
+    )
+    with _patch_invoke(multi_turn_result=result):
+        rv = runner.invoke(
+            scanner_app, ["--mode", "multi_turn"], input=json.dumps(payload)
+        )
+    assert rv.exit_code == 0
+    assert "PROMPT_SCANNER_L2_MODEL" in rv.output
+    assert "ignored in multi_turn mode" in rv.output
+
+
+def test_scan_prompt_no_model_warning_in_standard_mode(monkeypatch):
+    """standard mode consumes the override, so it must stay silent."""
+    monkeypatch.delenv("PROMPT_SCANNER_L2_MODEL", raising=False)
+    with _patch_invoke(_make_native_result(verdict="pass")):
+        rv = runner.invoke(
+            scanner_app,
+            ["--mode", "standard", "--text", "hello", "--model", _WARDEN_GEN],
+        )
+    assert rv.exit_code == 0
+    assert "is ignored" not in rv.output
+
+
+def test_scan_prompt_warmup_warns_when_model_flag_ignored_in_fast_mode(monkeypatch):
+    """fast mode warmup builds no L2 layer, so an override must warn."""
+    monkeypatch.delenv("PROMPT_SCANNER_L2_MODEL", raising=False)
+    native = MagicMock()
+    with patch("agent_sec_cli.prompt_scanner.cli._load_native", return_value=native):
+        rv = runner.invoke(
+            scanner_app, ["warmup", "--mode", "fast", "--model", _WARDEN_GEN]
+        )
+    assert rv.exit_code == 0
+    assert "--model" in rv.output
+    assert "ignored in fast mode" in rv.output
+    # The override is still forwarded; the warning reports it is inert, not dropped.
+    native.warmup_scanner.assert_called_once_with(mode="fast", model=_WARDEN_GEN)
+
+
+def test_scan_prompt_warmup_no_model_warning_in_standard_mode(monkeypatch):
+    """standard mode warmup consumes the override, so it must stay silent."""
+    monkeypatch.delenv("PROMPT_SCANNER_L2_MODEL", raising=False)
+    native = MagicMock()
+    with patch("agent_sec_cli.prompt_scanner.cli._load_native", return_value=native):
+        rv = runner.invoke(
+            scanner_app, ["warmup", "--mode", "standard", "--model", _WARDEN_GEN]
+        )
+    assert rv.exit_code == 0
+    assert "is ignored" not in rv.output
+
+
 def test_scan_prompt_warmup_rejects_invalid_mode():
     rv = runner.invoke(scanner_app, ["warmup", "--mode", "bogus"])
     assert rv.exit_code == 1

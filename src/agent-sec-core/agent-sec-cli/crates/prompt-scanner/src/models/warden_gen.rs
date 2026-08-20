@@ -5,11 +5,11 @@
 //! [`crate::models::qwen3_guard`]; only the model tag, the category vocabulary
 //! and the generation options live here.
 //!
-//! The checkpoint is trained over three domains (prompt, code, PII), which
-//! shows up in two behaviours a caller must expect:
+//! The checkpoint is trained over two domains (prompt, code), which shows up
+//! in one behaviour a caller must expect:
 //!
 //! - Code and command inputs are judged `Unsafe` with `Categories: None` —
-//!   concrete categories only appear for the prompt and PII domains, so a
+//!   concrete categories only appear for the prompt domain, so a
 //!   detection without a category is normal rather than a parse failure.
 //!
 //! ## The `Reason:` line is intentionally not enabled
@@ -41,7 +41,7 @@ use crate::models::qwen3_guard::{build_category_re, classify_via_chat, Qwen3Guar
 use crate::models::{Classifier, ClassifierResult};
 use model_service::{create_client, ModelClient, ModelOptions};
 
-/// Ollama tag for the Warden-Gen three-domain model.
+/// Ollama tag for the Warden-Gen model (prompt and code domains).
 ///
 /// Points at the project-owned ModelScope repository, which Ollama can pull
 /// directly by this path — the repository resolves an untagged name to

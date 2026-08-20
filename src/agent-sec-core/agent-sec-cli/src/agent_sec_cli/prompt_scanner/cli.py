@@ -19,6 +19,9 @@ from agent_sec_cli.security_middleware.result import ActionResult
 _SUPPORTED_MODES = frozenset({"fast", "standard", "strict", "multi_turn"})
 _MULTITURN_MODE = "multi_turn"
 _L2_MODEL_ENV = "PROMPT_SCANNER_L2_MODEL"
+# Modes whose pipeline includes the L2 ml_classifier layer; an L2 model
+# override is inert in every other mode.
+_L2_MODES = frozenset({"standard", "strict"})
 
 # Selectable L2 backends, listed in the help epilog rather than in the
 # ``--model`` help text: the option column is ~45 chars wide, so these 46-50
@@ -52,6 +55,25 @@ def _resolve_l2_model(cli_model: str | None = None) -> str | None:
     if cli_model and cli_model.strip():
         return cli_model.strip()
     return os.environ.get(_L2_MODEL_ENV, "").strip() or None
+
+
+def _warn_inert_l2_model(
+    mode: str, model: str | None, resolved_model: str | None
+) -> None:
+    """Warn when an L2 backend override has no effect in ``mode``.
+
+    ``--model`` / ``PROMPT_SCANNER_L2_MODEL`` only reconfigures the L2 layer,
+    which runs in standard/strict.  fast (L1 only) and multi_turn (fixed L4
+    model) ignore it entirely, so warn rather than let an operator mistake an
+    inert override for a real backend switch when troubleshooting.
+    """
+    if resolved_model and mode not in _L2_MODES:
+        origin = "--model" if (model and model.strip()) else _L2_MODEL_ENV
+        typer.echo(
+            f"Warning: {origin} '{resolved_model}' is ignored in {mode} mode; "
+            "it only applies to standard/strict (L2).",
+            err=True,
+        )
 
 
 def _print_error_json(message: str) -> None:
@@ -165,9 +187,12 @@ def warmup_model(
         )
         raise typer.Exit(code=1)
 
+    resolved_model = _resolve_l2_model(model)
+    _warn_inert_l2_model(mode, model, resolved_model)
+
     try:
         native = _load_native()
-        native.warmup_scanner(mode=mode, model=_resolve_l2_model(model))
+        native.warmup_scanner(mode=mode, model=resolved_model)
     except Exception as exc:  # noqa: BLE001 - CLI error surface
         typer.echo(f"Warmup failed: {exc}", err=True)
         raise typer.Exit(code=1)
@@ -256,6 +281,11 @@ def scan_prompt(
         )
         raise typer.Exit(code=1)
 
+    # Resolve the L2 backend once so every path (multi_turn and the per-line
+    # batch below) uses the same model.
+    resolved_model = _resolve_l2_model(model)
+    _warn_inert_l2_model(mode, model, resolved_model)
+
     # --- MULTI_TURN mode: read JSON payload from stdin ---
     if mode == _MULTITURN_MODE:
         if text is not None or input_file:
@@ -302,7 +332,7 @@ def scan_prompt(
             history=history,
             mode=mode,
             source=source or None,
-            model=_resolve_l2_model(model),
+            model=resolved_model,
         )
 
         # L4 is mandatory in multi_turn mode, so an empty ``layer_results``
@@ -346,8 +376,6 @@ def scan_prompt(
 
     # --- Scan each text through the middleware ---
     exit_code = 0
-    # Resolve the backend once so every prompt in a batch uses the same model.
-    resolved_model = _resolve_l2_model(model)
     for t in texts:
         result = _invoke_prompt_scan(
             text=t,

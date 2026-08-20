@@ -61,7 +61,10 @@ agent-sec-cli scan-prompt --model modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF --t
 ```
 
 所有宿主 hook 都通过命令行调用 `scan-prompt`，因此环境变量对它们同样生效；`--model` 主要用于终端临时切换。两者取值都必须是
-上面 `ollama pull` 使用的完整模型名，拼错会让扫描直接报错而不是静默关闭 L2。两者都为空时沿用默认的 Qwen3Guard。
+上面 `ollama pull` 使用的完整模型名。拼错只在 CLI 层“直接报错”：引擎在构造期就拒绝不支持的模型名，`scan-prompt` 返回
+`error` verdict 并以 `1` 退出，而不是静默关闭 L2。但六个宿主 hook 对这个非零退出码一律 fail-open，所以宿主内的同一个拼错
+只会被记为一条 failed 的 `prompt_scan` 事件，不阻断任何 prompt——在改回正确模型名之前，该宿主实际处于无 prompt 防护状态。
+改完环境变量后执行 `agent-sec-cli scan-prompt warmup`，让失败在宿主加载前暴露。两者都为空时沿用默认的 Qwen3Guard。
 
 L2 同一时刻只跑一个后端，不做级联或投票。
 

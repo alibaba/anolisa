@@ -70,7 +70,10 @@ test-python: ## Run Python unit and integration tests
 	uv run --project agent-sec-cli python3 tests/e2e/skill-ledger/e2e_test.py
 
 .PHONY: test-prompt-scanner-e2e
-test-prompt-scanner-e2e: ## Run prompt-scanner e2e tests
+test-prompt-scanner-e2e: ## Run prompt-scanner e2e tests (L2 cases self-skip unless a model is served)
+	@# L2 (standard/strict) cases skip when no model backend is reachable. To run
+	@# them, serve the model (e.g. `ollama serve` + `ollama pull <model>`) and set
+	@# PROMPT_SCANNER_E2E_REQUIRE_L2=1 to turn the skip into a hard failure.
 	@echo "🧪 Running prompt-scanner e2e tests..."
 	uv run --project agent-sec-cli pytest tests/e2e/prompt-scanner
 

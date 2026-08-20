@@ -406,7 +406,7 @@ agent-sec-cli capabilities --agent qwen --capability pii-check --output json
 
 Supported capability names are exactly `code-scan`, `prompt-scan`, `pii-check`, `skill-ledger`, and `observability`; plugin-internal IDs such as `scan-code`, `prompt-scan-user-input`, or `pii-scan-user-input` are rejected. Table output is grouped by Agent and includes only `CAPABILITY`, `ENABLED`, `MODE`, `SCAN_MODE`, `TIMEOUT(s)`, and `DIAGNOSTICS`; `MODE` is the hook interaction mode, while `SCAN_MODE` is the prompt scanner engine mode (`fast`, `standard`, or `strict`). JSON output uses the same user-facing fields and sanitized `env` entries containing only `effective` and `default` values. Neither format exposes hook matcher lists, source labels, Agent config contents, config paths, or raw environment variable values. Diagnostics name the invalid setting and fallback behavior without echoing the original value.
 
-The configured L2 backend is the one deliberate exception: a model name is only useful verbatim, so `PROMPT_SCANNER_L2_MODEL` is reported case-preserved (escaped and length-capped) as an `env` entry of `prompt-scan`. Its `default` — and the `effective` value when the variable is unset — is the default backend reported by the native scanner engine, and a name no backend supports is reported as configured plus a diagnostic, because the engine rejects it at construction and scans then fail rather than falling back. It has no table column, so read it with `--capability prompt-scan --output json`.
+The configured L2 backend is the one deliberate exception: a model name is only useful verbatim, so `PROMPT_SCANNER_L2_MODEL` is reported case-preserved (escaped and length-capped) as an `env` entry of `prompt-scan`. Its `default` — and the `effective` value when the variable is unset — is the default backend reported by the native scanner engine, and a name no backend supports is reported as configured plus a diagnostic, because the engine rejects it at construction and scans then fail rather than falling back. Because host hooks are fail-open on a failed scan, this diagnostic is usually the only place the misconfiguration is visible before prompts start flowing unscanned. It has no table column, so read it with `--capability prompt-scan --output json`.
 
 View source and limits:
 
@@ -454,8 +454,10 @@ every host shells out to `agent-sec-cli scan-prompt`, which resolves the L2
 backend, so all six inherit whatever the host process environment carries. A
 blank or whitespace-only value means "not set" and keeps the built-in Qwen3Guard
 backend; any other unsupported name makes the scan fail at engine construction
-instead of silently disabling L2. See [Prompt Scanner](prompt-scanner.md) for the
-selectable backends.
+instead of silently disabling L2 — but because every host hook is fail-open on a
+non-zero `scan-prompt` exit, that failure is only audited and never blocks, so the
+host runs without prompt scanning until the name is fixed. See
+[Prompt Scanner](prompt-scanner.md) for the selectable backends.
 
 The matrix default is `5`, matching the five non-Hermes integrations and the
 bundled Hermes configuration. For Hermes, an unset, empty, invalid, or
