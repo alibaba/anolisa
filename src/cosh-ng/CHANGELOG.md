@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-08-20
+
+### Added
+- Cap in-memory transcript growth in long-running interactive sessions by keeping bounded working windows while spooling full terminal output to session files (#2682)
+- Enable MCP tools that require long-running task augmentation, returning actionable errors when tasks fail or time out (#2645)
+
+### Changed
+- **BREAKING**: `/usr/bin/cosh` now forwards non-TUI invocations directly to the configured shell; `cosh --version`, `cosh --help`, and `cosh <script>` outside an interactive terminal behave like the shell rather than opening the cosh TUI (#2625)
+
+### Fixed
+- In trust approval mode under the cosh-core driver, hook-blocked shell commands can no longer execute through the staging grace window (#2125)
+- Approval decisions are now resolved correctly when an external component has already logged the initial request (#2402)
+- Approving a hook-rewritten shell command no longer fails with "could not route this approval" when another request in the same batch was refused (#2667)
+- Audit logs now include a paired cancellation resolution when a pending turn extension is superseded, instead of leaving an orphaned request entry (#2695)
+
 ## [0.17.2] — 2026-08-19
 
 ### Fixed
