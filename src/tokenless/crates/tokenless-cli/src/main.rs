@@ -1,5 +1,6 @@
 //! Tokenless CLI - LLM token optimization via schema and response compression.
 mod env_check;
+mod init;
 mod mcp;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -147,6 +148,18 @@ enum Commands {
         /// Output machine-readable JSON (for hook/plugin consumption)
         #[arg(long)]
         json: bool,
+    },
+    /// Detect installed agent frameworks and install tokenless adapters
+    Init {
+        /// Install a specific framework by name (e.g. claude-code, qoder)
+        #[arg(long)]
+        framework: Option<String>,
+        /// Install all installable frameworks without prompting
+        #[arg(long)]
+        all: bool,
+        /// List framework status without installing
+        #[arg(long)]
+        list: bool,
     },
     /// Start the tokenless MCP stdio server (exposes `tokenless_retrieve` so
     /// an MCP-connected agent can recover stashed payloads on demand).
@@ -947,6 +960,13 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             json,
         } => {
             env_check::run(tool.as_deref(), all, fix, checklist, json)?;
+        }
+        Commands::Init {
+            framework,
+            all,
+            list,
+        } => {
+            init::run(framework, all, list)?;
         }
         Commands::Mcp(McpCommands::Serve) => {
             mcp::serve()?;
