@@ -1014,6 +1014,9 @@ pub struct DeactivationOutcome {
 /// each unit is stopped *and* disabled unconditionally — the executor does
 /// not need to know which units were enabled at install time.
 ///
+/// A bare service template is stopped as `name@*.service` so every loaded
+/// instance is deactivated; disabling still targets the declared template.
+///
 /// **Best-effort**: a failed stop still proceeds to disable, and neither
 /// failure aborts or rolls back the uninstall — warnings surface on the
 /// verb's outcome instead. An `!manager.supported()` host produces a
@@ -1046,19 +1049,24 @@ pub fn deactivate_services(
             continue;
         }
 
-        match manager.stop_service(unit) {
+        // A template name cannot be stopped directly. systemctl expands this
+        // pattern against loaded units, covering every live instance.
+        let stop_target = unit
+            .strip_suffix("@.service")
+            .map_or_else(|| unit.clone(), |prefix| format!("{prefix}@*.service"));
+        match manager.stop_service(&stop_target) {
             Ok(_) => {
                 record_service_op(
                     log,
                     ServiceOp::Stop,
                     component,
-                    unit,
+                    &stop_target,
                     operation_id,
                     actor,
                     install_mode,
                     None,
                 );
-                outcome.stopped.push(unit.clone());
+                outcome.stopped.push(stop_target.clone());
             }
             Err(err) => {
                 let msg = err.to_string();
@@ -1066,13 +1074,15 @@ pub fn deactivate_services(
                     log,
                     ServiceOp::Stop,
                     component,
-                    unit,
+                    &stop_target,
                     operation_id,
                     actor,
                     install_mode,
                     Some(&msg),
                 );
-                outcome.warnings.push(format!("stop {unit} failed: {msg}"));
+                outcome
+                    .warnings
+                    .push(format!("stop {stop_target} failed: {msg}"));
             }
         }
 
@@ -1869,6 +1879,23 @@ mod tests {
         );
         assert_eq!(out.stopped, vec!["agentsight.service".to_string()]);
         assert_eq!(out.disabled, vec!["agentsight.service".to_string()]);
+        assert!(out.warnings.is_empty());
+    }
+
+    #[test]
+    fn deactivate_services_stops_template_instances_before_disabling_template() {
+        let m = FakeServiceManager::new();
+        let units = vec![unit("cosh-ng", "cosh-gateway@.service")];
+        let out = deactivate_services(&m, &units, None, "op1", "cli", "system");
+        assert_eq!(
+            m.calls(),
+            vec![
+                (ServiceOp::Stop, "cosh-gateway@*.service".to_string()),
+                (ServiceOp::Disable, "cosh-gateway@.service".to_string()),
+            ]
+        );
+        assert_eq!(out.stopped, vec!["cosh-gateway@*.service".to_string()]);
+        assert_eq!(out.disabled, vec!["cosh-gateway@.service".to_string()]);
         assert!(out.warnings.is_empty());
     }
 
