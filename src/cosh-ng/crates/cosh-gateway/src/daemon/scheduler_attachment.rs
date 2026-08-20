@@ -27,10 +27,11 @@ impl GatewayDaemon {
             ));
         }
         self.scheduler = Some(
-            TaskScheduler::open(
+            TaskScheduler::open_for_capability_profile(
                 &self.database_path,
                 Some(self.coordinator.installation_id.clone()),
                 worker_id,
+                self.capability_profile,
                 factory,
             )?
             .with_brokered_execution_driver(driver),
@@ -61,10 +62,11 @@ impl GatewayDaemon {
                 "Gateway scheduler is already attached".to_owned(),
             ));
         }
-        self.scheduler = Some(TaskScheduler::open(
+        self.scheduler = Some(TaskScheduler::open_for_capability_profile(
             &self.database_path,
             Some(self.coordinator.installation_id.clone()),
             worker_id,
+            self.capability_profile,
             factory,
         )?);
         self.runtime_containment = Some(containment);

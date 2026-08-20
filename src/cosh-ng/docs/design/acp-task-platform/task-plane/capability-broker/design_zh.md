@@ -4,9 +4,11 @@
 
 ## 状态与决策
 
-本文基于上游提交 `e90d9d94`。通用 Broker 模型仍是目标架构，不是已验收的 Phase 1 声明。
+当前增量基于上游提交 `a6592234`。通用 Broker 模型仍是目标架构，不是已验收的 Phase 1 声明。
 已验收 production scope 更窄：`serve` 与 library daemon 只接纳 `core` / `gateway-brokered-v1`，其
-immutable inventory 是 task-only，只有 `ask_user_question`。本 PR 不接入 production
+immutable inventory 绑定固定 `task-only-v1` manifest，只有 `ask_user_question`。Gateway、durable
+Runtime start intent 与 Core v3 negotiation 会在 launch 或 Task input 前校验 identity 与准确 inventory。
+本 PR 不接入 production
 `ExecutionTarget`，也不依赖 checkpoint/ws-ckpt。该 profile 禁用其他 side-effecting hook、Skill、MCP、
 扩展、Shell、file、process 与 network path。ACP `doctor`/`run`、legacy CLI command 与 standalone Shell
 是明确 ungoverned 的 interoperability/rollback path，不能作为 governed evidence。
@@ -353,7 +355,8 @@ denial，不能回显 secret input 或无界 target output。Transport timeout �
    production execution 仍未实现。**
 4. Production `serve` 只接纳带 task-only inventory 的 `core` / `gateway-brokered-v1`；旧 CLI 与 ACP `doctor`/`run` 明确
    ungoverned。
-5. 使用 private COSH brokered v2，只暴露 task-only 的 `ask_user_question` capability。
+5. 使用 private COSH brokered v3，绑定固定 `task-only-v1` manifest，只暴露
+   `ask_user_question`。
 6. Shell/ACP/Skills/MCP/扩展保持禁用，等待后续 phase 提供完整 adapter。
 7. Parity 与 recovery acceptance 通过后，删除或显式隔离 legacy bypass。
 

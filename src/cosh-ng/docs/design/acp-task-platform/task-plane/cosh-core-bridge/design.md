@@ -4,11 +4,11 @@
 
 ## Status and decision
 
-This Phase 1 implementation is based on upstream commit
-`e90d9d9402c7fa1c8122267eb4e075c0adda51f5`. `CoshCoreBridge` adapts the private cosh-core
+The current capability-admission increment is based on upstream commit
+`a6592234341a095b2b9446601642caa87314e2c5`. `CoshCoreBridge` adapts the private cosh-core
 newline-delimited JSONL control protocol to neutral `AgentRuntimePort`. Private COSH legacy v1
 remains the Shell/Core compatibility protocol; Gateway's closed brokered profile negotiates
-private COSH v2 and `gateway_brokered_v1`. Neither version is ACP. ACP v1 remains a separate
+private COSH v3 and `gateway_brokered_v1`. Neither version is ACP. ACP v1 remains a separate
 interoperability protocol used by ungoverned `doctor`/`run`, not production `serve`.
 
 `RuntimeSupervisor` is the only owner of cosh-core and future ACP/provider child processes. The
@@ -70,7 +70,8 @@ installed brokered Core Runtime factory used by production `serve`:
   with an explicit discarded-byte count.
 - [`cosh_core_jsonl.rs`](../../../../../crates/cosh-gateway/src/runtime/cosh_core_jsonl.rs) is a
   pure dual-profile codec. Legacy uses **private COSH v1**; the Gateway brokered profile requires
-  **private COSH v2**, exact `gateway_brokered_v1`, correlation, and capabilities. It permits only
+  **private COSH v3**, exact `gateway_brokered_v1`, capability-profile identity, exact Runtime
+  tool inventory, correlation, and capabilities. It permits only
   bounded auth bootstrap before readiness,
   decodes current system/stream/assistant/tool/control/registry/result shapes into runtime-local
   observations, and synthesizes EOF-without-result once.
@@ -94,7 +95,7 @@ flowchart LR
     ARP --> CCB["CoshCoreBridge"]
     CCB --> RS["RuntimeSupervisor\nsole child owner"]
     RS --> CORE["cosh-core child"]
-    CORE <--> J["private COSH JSONL\nlegacy v1 / brokered v2"]
+    CORE <--> J["private COSH JSONL\nlegacy v1 / brokered v3"]
     J <--> CCB
     CCB --> RES["RuntimeEventSink"]
     CCB --> CB["CapabilityBrokerPort"]
@@ -118,9 +119,11 @@ cosh-shell remains standalone
 
 There is no Rust dependency from `cosh-gateway` to the cosh-core implementation crate, from
 `cosh-core` back to Gateway, or between Gateway and `cosh-shell`. The bridge launches the binary
-and speaks the private JSONL contract. Canonical JSON fixtures are mirrored across core, Shell,
-and Gateway tests to detect drift. Neutral Runtime IDs/events follow the Phase 0 G0 schema-first
-decision and planned side-effect-free `cosh-gateway-contracts` leaf.
+and speaks the private JSONL contract. Core owns a narrow private v3 profile mirror while Gateway
+owns the canonical admitted profile; neither imports the other's domain crate. Canonical JSON
+fixtures are mirrored across Core, Shell, and Gateway tests to detect drift. Neutral Runtime
+IDs/events follow the Phase 0 G0 schema-first decision and planned side-effect-free
+`cosh-gateway-contracts` leaf.
 
 ## Agent Runtime Port
 
@@ -162,19 +165,20 @@ and causation/correlation IDs where applicable.
 ### Initialization
 
 Before a user message, legacy Shell/Core sends private v1. Gateway production sends a correlated
-`control_request.initialize` with `protocol_version: 2`, `execution_profile:
-gateway_brokered_v1`, and `fire_session_start: false`. It requires the matching v2 response,
-profile, and exact safe capability snapshot before input. Missing version remains compatible only
+`control_request.initialize` with `protocol_version: 3`, `execution_profile:
+gateway_brokered_v1`, the pinned `task-only-v1` manifest identity, and
+`fire_session_start: false`. It requires the matching v3 response, identical profile identity,
+exact `ask_user_question` Runtime inventory, and safe capability snapshot before input. Missing version remains compatible only
 for legacy v1 and is rejected by the brokered profile. Current headless startup may request authentication
 before it consumes initialization, so one bounded `auth_required` bootstrap exchange is allowed
 through the secret-safe credential port. No Task user turn is admitted during that exchange.
 Mismatch, malformed response, any other output before negotiation, or deadline expiry terminates
 the runtime attempt before input admission.
 
-`CONTROL_PROTOCOL_VERSION = 1` and `BROKERED_CONTROL_PROTOCOL_VERSION = 2` are private COSH
+`CONTROL_PROTOCOL_VERSION = 1` and `BROKERED_CONTROL_PROTOCOL_VERSION = 3` are private COSH
 constants. They are unrelated to ACP SDK or wire versions. One shared golden corpus is consumed by
-Core serializers/parsers and the Gateway codec for v1/v2 initialize, task/question request,
-acknowledgement, result, and negative version/profile/capability cases. Shell need not support v2.
+Core serializers/parsers and the Gateway codec for v1/v3 initialize, task/question request,
+acknowledgement, result, and negative version/profile/capability cases. Shell need not support v3.
 
 ### Input mapping
 
@@ -384,7 +388,7 @@ migration work remains.
 | --- | --- | --- |
 | Is one persistent core reused across Tasks? | Runtime owner | One active turn; reuse only after clean settlement and profile/workspace validation. |
 | Which core tools are exposed in brokered profile? | Core/Broker owners | Only audited non-effecting or host-delegated tools. |
-| Does brokered profile require private protocol v2? | Core/Bridge owners | Yes. The task/question profile and capability binding are frozen in private COSH v2; checkpoint remains future. |
+| Does brokered profile require private protocol v3? | Core/Bridge owners | Yes. The task-only profile identity and exact Runtime inventory are frozen in private COSH v3; checkpoint remains future. |
 | How are credentials supplied? | Secret/security owner | Opaque credential reference; no Task/event secret values. |
 | What is the maximum durable event lag? | Runtime/Task owners | Benchmark bounded queue; cancel safely before control-event loss. |
 | Can a failed turn resume the provider session? | Runtime/product owners | Only with validated session and explicit no-uncertain-effect policy. |

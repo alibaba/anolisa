@@ -2,6 +2,7 @@
 pub struct TaskCoordinator {
     store: SqliteTaskStore,
     installation_id: InstallationId,
+    expected_profile: GatewayCapabilityProfile,
 }
 
 impl TaskCoordinator {
@@ -14,11 +15,24 @@ impl TaskCoordinator {
         database_path: impl AsRef<Path>,
         requested_installation_id: Option<InstallationId>,
     ) -> Result<Self, GatewayDaemonError> {
+        Self::open_for_capability_profile(
+            database_path,
+            requested_installation_id,
+            GatewayCapabilityProfile::task_only_v1(),
+        )
+    }
+
+    fn open_for_capability_profile(
+        database_path: impl AsRef<Path>,
+        requested_installation_id: Option<InstallationId>,
+        expected_profile: GatewayCapabilityProfile,
+    ) -> Result<Self, GatewayDaemonError> {
         let mut store = SqliteTaskStore::open(database_path)?;
         let installation_id = store.bind_installation_id(requested_installation_id.as_ref())?;
         Ok(Self {
             store,
             installation_id,
+            expected_profile,
         })
     }
 
@@ -66,6 +80,7 @@ impl TaskCoordinator {
             intent: request.intent,
             target: submitted_target(&submitted)?,
             workspace: workspace.clone(),
+            capability_profile: self.expected_profile.identity(),
         };
         let outbox = OutboxIntent {
             delivery_id: DeliveryId::new(),
@@ -279,9 +294,9 @@ impl TaskCoordinator {
             &request.task_id,
             &request.previous_run_id,
         )?;
-        let mut start_intent = serde_json::from_value::<scheduler::RuntimeStartIntent>(payload)?;
-        if start_intent.schema_version != scheduler::RUNTIME_START_SCHEMA_VERSION
-            || start_intent.actor != *actor
+        let mut start_intent =
+            scheduler::decode_runtime_start_intent(payload, self.expected_profile)?;
+        if start_intent.actor != *actor
             || start_intent.task_id != request.task_id
             || start_intent.run_id != request.previous_run_id
             || current.target() != target

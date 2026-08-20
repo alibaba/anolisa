@@ -5,9 +5,9 @@
 ## Baseline result
 
 **Overall: PARTIAL implementation on a candidate based on upstream
-`e90d9d94`; Phase 1 remains NOT ACCEPTED.** The candidate adds a neutral
+`a6592234`; Phase 1 remains NOT ACCEPTED.** The candidate adds a neutral
 `AgentRuntimePort` and a supervised `CoshCoreBridge` over two explicitly private
-COSH profiles: legacy Shell/Core v1 and Gateway brokered v2. The bridge fences
+COSH profiles: legacy Shell/Core v1 and Gateway brokered v3. The bridge fences
 public identity and event order, bounds retained state, and settles cancellation
 through process cleanup. The contained Gateway production profile is task-only
 and exposes only `ask_user_question`. It has no production `ExecutionTarget`
@@ -28,7 +28,7 @@ validation remain unaccepted.
 
 ## Evidence inspected
 
-- Upstream source baseline: `e90d9d94`.
+- Upstream source baseline: `a6592234`.
 - [`protocol.rs`](../../../../../crates/cosh-core/src/protocol.rs) defines exact private protocol v1
   and all current message shapes.
 - [`headless.rs`](../../../../../crates/cosh-core/src/headless.rs) negotiates and runs provider turns.
@@ -44,7 +44,9 @@ validation remain unaccepted.
 - [`runtime/bounded_io.rs`](../../../../../crates/cosh-gateway/src/runtime/bounded_io.rs) implements
   bounded stdout framing and stderr-tail retention.
 - [`runtime/cosh_core_jsonl.rs`](../../../../../crates/cosh-gateway/src/runtime/cosh_core_jsonl.rs)
-  implements strict private v1/v2 initialization and typed wire observations without ACP naming.
+  implements strict private v1/v3 initialization and typed wire observations without ACP naming.
+- [`profile.rs`](../../../../../crates/cosh-gateway-contracts/src/profile.rs) pins the
+  `task-only-v1` manifest identity, governed target, and exact Runtime inventory.
 - [`runtime/port.rs`](../../../../../crates/cosh-gateway/src/runtime/port.rs) defines the
   provider-neutral, object-safe command/event boundary and redacted errors.
 - [`runtime/cosh_core_bridge.rs`](../../../../../crates/cosh-gateway/src/runtime/cosh_core_bridge.rs)
@@ -56,9 +58,9 @@ validation remain unaccepted.
 | ID | Criterion | Baseline | Evidence or missing artifact |
 | --- | --- | --- | --- |
 | CCB-001 | Bridge implements neutral `AgentRuntimePort`. | PASS for library slice | Object-safe port and Core implementation compile and pass focused lifecycle tests. |
-| CCB-002 | Private COSH v1/v2 are explicitly distinct from ACP v1. | PASS | The shared dual-version corpus and both codecs use COSH names and versions; neither profile is presented as ACP. |
-| CCB-003 | Exact initialization succeeds before Task input admission. | PARTIAL | Gateway negotiates brokered v2 before Prompt and requires `SessionOpened` first; the daemon persists Runtime binding before prompt, while complete Core recovery remains. |
-| CCB-004 | Gateway production rejects legacy, missing, and mismatched negotiation. | PASS | Cross-implementation negative fixtures reject wrong/missing version, profile, and capability before input; production requires exact brokered v2. |
+| CCB-002 | Private COSH v1/v3 are explicitly distinct from ACP v1. | PASS | The shared dual-version corpus and both codecs use COSH names and versions; neither profile is presented as ACP. |
+| CCB-003 | Exact initialization succeeds before Task input admission. | PARTIAL | Gateway negotiates brokered v3 before Prompt and requires `SessionOpened` first; the daemon persists Runtime binding before prompt, while complete Core recovery remains. |
+| CCB-004 | Gateway production rejects legacy, missing, and mismatched negotiation. | PASS | Cross-implementation negative fixtures reject wrong/missing version, execution profile, capability-profile identity, Runtime inventory, and capability before input; production requires exact brokered v3. |
 | CCB-005 | `RuntimeSupervisor` solely owns child process lifecycle. | PARTIAL | New supervisor owns one child/group/pipes/reap; existing Shell core owner and restart policy are not migrated. |
 | CCB-006 | Every JSONL message maps to a bounded ordered Runtime event/command. | PARTIAL | Session, text, tool observation, result, cancel, and transport failure map with monotonic sequence; question/auth/tool permission, usage, environment, durable backpressure, and full goldens remain. |
 | CCB-007 | Task/Run/runtime/Agent/provider IDs remain distinct. | PARTIAL | The daemon persists fenced Runtime binding and rejects stale generation; complete provider-session recovery remains. |
@@ -70,8 +72,8 @@ validation remain unaccepted.
 | CCB-013 | Process cancel escalates, kills the group, and reaps children. | PARTIAL | Focused tests cover interrupt, cancelled terminal, TERM/KILL/reap, and synchronous fallback cleanup; descendant and cancel/result/EOF race fixtures remain. |
 | CCB-014 | Provider session persists separately from Task storage. | PASS | Current `SessionStore` is workspace-scoped provider state. |
 | CCB-015 | Crash/restart never silently resends an uncertain prompt. | PARTIAL | Runtime binding/restart convergence is durable and fail closed; side-effect uncertainty reconciliation and complete prompt/recovery fixtures remain future work. |
-| CCB-016 | Gateway has no Rust dependency on core implementation or Shell. | PASS | `cosh-gateway` speaks mirrored private wire types and has no core/Shell crate dependency. |
-| CCB-017 | Phase 1 brokered inventory and private-protocol profile decision are frozen. | PASS for scope decision | Gateway production uses private COSH v2 and exposes only task-only `ask_user_question`. Legacy v1 stays with standalone Shell; checkpoint/ws-ckpt and Shell attachment/owner migration are future work. |
+| CCB-016 | Gateway and Core preserve the one-way process/wire boundary. | PASS | `cosh-gateway` has no core/Shell crate dependency, and `cosh-core` has no Gateway crate dependency. Each owns its private wire shape, with the shared golden corpus detecting drift. |
+| CCB-017 | Phase 1 brokered inventory and private-protocol profile decision are frozen. | PASS for scope decision | Gateway production uses private COSH v3 with the pinned `task-only-v1` identity and exposes only `ask_user_question`. Legacy v1 stays with standalone Shell; checkpoint/ws-ckpt and Shell attachment/owner migration are future work. |
 
 Legacy Shell behavior and ACP `doctor`/`run` interoperability are ungoverned compatibility paths,
 not proof of a Gateway-governed path.
@@ -80,7 +82,7 @@ not proof of a Gateway-governed path.
 
 | Artifact | Required proof |
 | --- | --- |
-| `cosh-private-wire-dual-version` canonical corpus | Legacy v1 initialize/ack, brokered v2 task/question request/ack/result, and wrong/missing version/profile/capability cases. |
+| `cosh-private-wire-dual-version` canonical corpus | Legacy v1 initialize/ack, brokered v3 task/question request/ack/result, and wrong/missing version/profile/manifest/inventory/capability cases. |
 | Cross-implementation fixture report | Core encoder, Shell mirror, and Gateway decoder agree. |
 | `runtime-supervisor-killpoints` | Spawn, negotiate, stream, cancel, EOF, wait, shutdown, restart races. |
 | `runtime-event-mapping` goldens | Bounded normalized events and ID correlation for every message. |
@@ -98,20 +100,26 @@ cargo test --package cosh-core --test jsonl_protocol
 cargo test --package cosh-gateway-contracts runtime_schema
 ```
 
-Current bridge-targeted evidence on the uncommitted candidate:
+Current scoped evidence on the rebased candidate:
 
 ```bash
-cargo +1.88.0 test --locked --package cosh-gateway cosh_core_bridge
-cargo +1.88.0 test --locked --package cosh-core --test jsonl_protocol
-cargo +1.88.0 test --locked --package cosh-gateway cosh_core_jsonl
+cargo test --locked -p cosh-gateway-contracts profile
+cargo test --locked -p cosh-core brokered_profile
+cargo test --locked -p cosh-core private_wire_dual_version_corpus_matches_core_types
+cargo test --locked -p cosh-gateway runtime_tool_inventory
+cargo test --locked -p cosh-gateway stale_validated_outbox_attempt_is_normal_contention
+cargo test --locked -p cosh-gateway invalid_start_intents_are_rejected_before_outbox_claim
+cargo test --locked -p cosh-gateway exact_task_only_v2_intent_maps_to_current_profile
+cargo clippy --locked -p cosh-gateway-contracts --all-targets -- -D warnings
+cargo clippy --locked -p cosh-core -p cosh-gateway --all-targets -- -D warnings
+cargo doc --locked --no-deps -p cosh-gateway-contracts
+bash scripts/check-source-layout.sh
 ```
 
-This covers identity fencing, stream and terminal mapping, single terminal delivery, open timeout,
-cross-Run rejection, SessionOpened-before-Prompt ordering, idle-cancel rejection, aggregate Prompt
-bounds, retained tool-ID bounds, process cleanup on cancellation, and the shared dual-version wire
-corpus. It does not replace the full process-tree/race, universal Broker, recovery, backpressure,
-real-provider, or PTY gates. Rustdoc and Clippy evidence are recorded only after their final scoped
-commands complete.
+This covers manifest and inventory admission, Core/Gateway dependency isolation, exact legacy-v2
+mapping, stale Outbox-attempt contention, and the shared dual-version wire corpus. It does not
+replace full package/workspace, process-tree/race, universal Broker, recovery, backpressure,
+real-provider, or PTY gates; broader coverage remains delegated to CI.
 
 ## Exit criteria
 

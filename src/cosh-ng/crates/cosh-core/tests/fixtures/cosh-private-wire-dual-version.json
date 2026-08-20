@@ -27,26 +27,37 @@
       }
     }
   },
-  "gateway_brokered_v2": {
+  "gateway_brokered_v3": {
     "initialize_request": {
       "type": "control_request",
-      "request_id": "gateway-init-v2",
+      "request_id": "gateway-init-v3",
       "request": {
         "subtype": "initialize",
         "fire_session_start": false,
-        "protocol_version": 2,
-        "execution_profile": "gateway_brokered_v1"
+        "protocol_version": 3,
+        "execution_profile": "gateway_brokered_v1",
+        "capability_profile": {
+          "profile_id": "task-only-v1",
+          "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+        }
       }
     },
     "initialize_ack": {
       "type": "control_response",
       "response": {
         "subtype": "success",
-        "request_id": "gateway-init-v2",
+        "request_id": "gateway-init-v3",
         "response": {
           "subtype": "initialize",
-          "protocol_version": 2,
+          "protocol_version": 3,
           "execution_profile": "gateway_brokered_v1",
+          "capability_profile": {
+            "profile_id": "task-only-v1",
+            "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+          },
+          "runtime_tools": [
+            "ask_user_question"
+          ],
           "capabilities": {
             "can_handle_can_use_tool": true,
             "can_handle_host_executed_shell_tool_result": false,
@@ -91,7 +102,11 @@
         "request_id": "init",
         "request": {
           "subtype": "initialize",
-          "execution_profile": "gateway_brokered_v1"
+          "execution_profile": "gateway_brokered_v1",
+          "capability_profile": {
+            "profile_id": "task-only-v1",
+            "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+          }
         }
       },
       "wrong_version": {
@@ -99,8 +114,12 @@
         "request_id": "init",
         "request": {
           "subtype": "initialize",
-          "protocol_version": 1,
-          "execution_profile": "gateway_brokered_v1"
+          "protocol_version": 2,
+          "execution_profile": "gateway_brokered_v1",
+          "capability_profile": {
+            "profile_id": "task-only-v1",
+            "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+          }
         }
       },
       "missing_profile": {
@@ -108,7 +127,11 @@
         "request_id": "init",
         "request": {
           "subtype": "initialize",
-          "protocol_version": 2
+          "protocol_version": 3,
+          "capability_profile": {
+            "profile_id": "task-only-v1",
+            "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+          }
         }
       },
       "wrong_profile": {
@@ -116,8 +139,34 @@
         "request_id": "init",
         "request": {
           "subtype": "initialize",
-          "protocol_version": 2,
-          "execution_profile": "legacy"
+          "protocol_version": 3,
+          "execution_profile": "legacy",
+          "capability_profile": {
+            "profile_id": "task-only-v1",
+            "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+          }
+        }
+      },
+      "missing_capability_profile": {
+        "type": "control_request",
+        "request_id": "init",
+        "request": {
+          "subtype": "initialize",
+          "protocol_version": 3,
+          "execution_profile": "gateway_brokered_v1"
+        }
+      },
+      "drifted_capability_profile": {
+        "type": "control_request",
+        "request_id": "init",
+        "request": {
+          "subtype": "initialize",
+          "protocol_version": 3,
+          "execution_profile": "gateway_brokered_v1",
+          "capability_profile": {
+            "profile_id": "task-only-v1",
+            "manifest_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
         }
       }
     },
@@ -126,10 +175,14 @@
         "type": "control_response",
         "response": {
           "subtype": "success",
-          "request_id": "gateway-init-v2",
+          "request_id": "gateway-init-v3",
           "response": {
             "subtype": "initialize",
             "execution_profile": "gateway_brokered_v1",
+            "capability_profile": {
+              "profile_id": "task-only-v1",
+              "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+            },
             "capabilities": {}
           }
         }
@@ -138,11 +191,15 @@
         "type": "control_response",
         "response": {
           "subtype": "success",
-          "request_id": "gateway-init-v2",
+          "request_id": "gateway-init-v3",
           "response": {
             "subtype": "initialize",
-            "protocol_version": 1,
+            "protocol_version": 2,
             "execution_profile": "gateway_brokered_v1",
+            "capability_profile": {
+              "profile_id": "task-only-v1",
+              "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+            },
             "capabilities": {}
           }
         }
@@ -151,10 +208,14 @@
         "type": "control_response",
         "response": {
           "subtype": "success",
-          "request_id": "gateway-init-v2",
+          "request_id": "gateway-init-v3",
           "response": {
             "subtype": "initialize",
-            "protocol_version": 2,
+            "protocol_version": 3,
+            "capability_profile": {
+              "profile_id": "task-only-v1",
+              "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+            },
             "capabilities": {}
           }
         }
@@ -163,11 +224,45 @@
         "type": "control_response",
         "response": {
           "subtype": "success",
-          "request_id": "gateway-init-v2",
+          "request_id": "gateway-init-v3",
           "response": {
             "subtype": "initialize",
-            "protocol_version": 2,
+            "protocol_version": 3,
             "execution_profile": "legacy",
+            "capability_profile": {
+              "profile_id": "task-only-v1",
+              "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+            },
+            "capabilities": {}
+          }
+        }
+      },
+      "missing_capability_profile": {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "gateway-init-v3",
+          "response": {
+            "subtype": "initialize",
+            "protocol_version": 3,
+            "execution_profile": "gateway_brokered_v1",
+            "capabilities": {}
+          }
+        }
+      },
+      "drifted_capability_profile": {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "gateway-init-v3",
+          "response": {
+            "subtype": "initialize",
+            "protocol_version": 3,
+            "execution_profile": "gateway_brokered_v1",
+            "capability_profile": {
+              "profile_id": "task-only-v1",
+              "manifest_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
             "capabilities": {}
           }
         }
@@ -176,11 +271,18 @@
         "type": "control_response",
         "response": {
           "subtype": "success",
-          "request_id": "gateway-init-v2",
+          "request_id": "gateway-init-v3",
           "response": {
             "subtype": "initialize",
-            "protocol_version": 2,
-            "execution_profile": "gateway_brokered_v1"
+            "protocol_version": 3,
+            "execution_profile": "gateway_brokered_v1",
+            "capability_profile": {
+              "profile_id": "task-only-v1",
+              "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+            },
+            "runtime_tools": [
+              "ask_user_question"
+            ]
           }
         }
       },
@@ -188,11 +290,18 @@
         "type": "control_response",
         "response": {
           "subtype": "success",
-          "request_id": "gateway-init-v2",
+          "request_id": "gateway-init-v3",
           "response": {
             "subtype": "initialize",
-            "protocol_version": 2,
+            "protocol_version": 3,
             "execution_profile": "gateway_brokered_v1",
+            "capability_profile": {
+              "profile_id": "task-only-v1",
+              "manifest_digest": "2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"
+            },
+            "runtime_tools": [
+              "ask_user_question"
+            ],
             "capabilities": {
               "can_handle_can_use_tool": true,
               "can_handle_host_executed_shell_tool_result": true,

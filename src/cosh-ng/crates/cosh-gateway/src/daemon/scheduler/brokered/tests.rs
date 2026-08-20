@@ -810,6 +810,57 @@ struct ConclusiveSchedulerFixture {
     resolve_calls: Arc<Mutex<usize>>,
 }
 
+#[test]
+fn default_task_only_driver_rejects_before_approval() {
+    let root = TempDir::new().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let database_path = root.path().join("gateway.db");
+    let installation = InstallationId::new();
+    let mut coordinator =
+        TaskCoordinator::open(&database_path, Some(installation.clone())).unwrap();
+    let actor_id = actor_id_for_uid(&installation, 1000).unwrap();
+    let task = coordinator
+        .submit(&actor_id, submission("task-only-rejects-side-effect"))
+        .unwrap();
+    drop(coordinator);
+    let writes = Arc::new(Mutex::new(RuntimeWrites::default()));
+    let started_at = now_ms().unwrap().saturating_add(1);
+    let mut scheduler = TaskScheduler::open(
+        &database_path,
+        Some(installation),
+        BoundedOpaque::new("task-only-rejecting-worker").unwrap(),
+        BrokeredFactory {
+            writes: Arc::clone(&writes),
+            expires_at_ms: started_at + 10_000,
+            fail_acknowledgement: false,
+            fail_result: false,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        scheduler.tick(started_at).unwrap(),
+        SchedulerTick::Started(_)
+    ));
+    assert!(matches!(
+        scheduler.tick(started_at + 1).unwrap(),
+        SchedulerTick::Settled(TaskView {
+            state: TaskState::Failed,
+            ..
+        })
+    ));
+    let events = scheduler
+        .coordinator
+        .events(&actor_id, &task.task_id, None, 64)
+        .unwrap();
+    assert!(!events
+        .events
+        .iter()
+        .any(|event| matches!(event.event, TaskEvent::ApprovalRequested { .. })));
+    let writes = writes.lock().unwrap();
+    assert!(writes.acknowledgements.is_empty());
+    assert!(writes.results.is_empty());
+}
+
 fn conclusive_scheduler(
     mode: ConclusiveDriverMode,
     submission_key: &str,
@@ -1496,14 +1547,10 @@ fn submission(key: &str) -> SubmitTask {
         request_id: RequestId::new(),
         idempotency_key: IdempotencyKey::new(key).unwrap(),
         intent: BoundedText::new("create a checkpoint").unwrap(),
-        target: TargetRef {
-            kind: BoundedName::new("local").unwrap(),
-            authority: BoundedName::new("test").unwrap(),
-            identifier: BoundedOpaque::new("host").unwrap(),
-        },
+        target: GatewayCapabilityProfile::task_only_v1().governed_target(),
         runtime: RuntimeSelector {
-            runtime: BoundedName::new("acp").unwrap(),
-            profile: Some(BoundedName::new("cosh-core-brokered").unwrap()),
+            runtime: BoundedName::new("core").unwrap(),
+            profile: Some(BoundedName::new("gateway-brokered-v1").unwrap()),
         },
     }
 }

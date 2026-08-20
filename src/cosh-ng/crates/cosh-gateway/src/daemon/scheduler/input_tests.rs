@@ -146,11 +146,7 @@ fn submission(key: &str) -> SubmitTask {
         request_id: RequestId::new(),
         idempotency_key: IdempotencyKey::new(key).unwrap(),
         intent: BoundedText::new("ask for input").unwrap(),
-        target: TargetRef {
-            kind: BoundedName::new("local").unwrap(),
-            authority: BoundedName::new("test").unwrap(),
-            identifier: BoundedOpaque::new("host").unwrap(),
-        },
+        target: GatewayCapabilityProfile::task_only_v1().governed_target(),
         runtime: RuntimeSelector {
             runtime: BoundedName::new("core").unwrap(),
             profile: Some(BoundedName::new("gateway-brokered-v1").unwrap()),

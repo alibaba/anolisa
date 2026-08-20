@@ -92,14 +92,9 @@ fn task_submit_defaults_to_brokered_core_and_fixed_task_only_target() {
         defaults.runtime_profile,
         GATEWAY_BROKERED_CORE_RUNTIME_PROFILE
     );
-    assert_eq!(task_only_target().kind.as_str(), TASK_ONLY_TARGET_KIND);
     assert_eq!(
-        task_only_target().authority.as_str(),
-        TASK_ONLY_TARGET_AUTHORITY
-    );
-    assert_eq!(
-        task_only_target().identifier.as_str(),
-        TASK_ONLY_TARGET_IDENTIFIER
+        task_only_target(),
+        GatewayCapabilityProfile::task_only_v1().governed_target()
     );
 
     let explicit = Cli::try_parse_from([

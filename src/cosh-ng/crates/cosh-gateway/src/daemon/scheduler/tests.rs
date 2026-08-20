@@ -5,13 +5,14 @@ use std::{fs, os::unix::fs::PermissionsExt};
 use cosh_gateway_contracts::capability::{CapabilityRequest, CapabilityScope, OperationDescriptor};
 use cosh_gateway_contracts::common::{
     BoundedName, BoundedOpaque, BoundedText, Digest, IdempotencyKey, RuntimeBindingRef,
-    RuntimeSelector, TargetRef,
+    RuntimeSelector,
 };
 use cosh_gateway_contracts::external::{ExternalRef, ExternalRefKind};
 use cosh_gateway_contracts::ids::{
     AgentSessionId, ApprovalId, InstallationId, RequestId, RuntimeBindingId, RuntimeInstanceId,
     TurnId,
 };
+use cosh_gateway_contracts::profile::GatewayCapabilityProfile;
 use cosh_gateway_contracts::runtime::ToolSummary;
 use tempfile::TempDir;
 
@@ -23,14 +24,10 @@ fn submission(key: &str) -> SubmitTask {
         request_id: RequestId::new(),
         idempotency_key: IdempotencyKey::new(key).unwrap(),
         intent: BoundedText::new("inspect service").unwrap(),
-        target: TargetRef {
-            kind: BoundedName::new("local").unwrap(),
-            authority: BoundedName::new("test").unwrap(),
-            identifier: BoundedOpaque::new("host").unwrap(),
-        },
+        target: GatewayCapabilityProfile::task_only_v1().governed_target(),
         runtime: RuntimeSelector {
-            runtime: BoundedName::new("acp").unwrap(),
-            profile: Some(BoundedName::new("codex").unwrap()),
+            runtime: BoundedName::new("core").unwrap(),
+            profile: Some(BoundedName::new("gateway-brokered-v1").unwrap()),
         },
     }
 }
@@ -230,6 +227,130 @@ impl RuntimeHandle for PermissionHandle {
 
 fn test_digest() -> Digest {
     Digest::parse("a".repeat(64)).unwrap()
+}
+
+#[test]
+fn invalid_start_intents_are_rejected_before_outbox_claim() {
+    for case in ["profile-drift", "v2-target", "v2-runtime", "future-schema"] {
+        let root = TempDir::new().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let database_path = root.path().join("gateway.db");
+        let installation = InstallationId::new();
+        let mut coordinator =
+            TaskCoordinator::open(&database_path, Some(installation.clone())).unwrap();
+        let actor = actor_id_for_uid(&installation, 1000).unwrap();
+        coordinator.submit(&actor, submission(case)).unwrap();
+        let now = now_ms().unwrap().saturating_add(1);
+        let candidate = coordinator
+            .store
+            .peek_ready_outbox(&runtime_start_delivery_kind(), now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(candidate.attempt, 0, "case {case}");
+        let mut payload = candidate.payload;
+        match case {
+            "profile-drift" => {
+                payload["capability_profile"]["manifest_digest"] =
+                    serde_json::json!("b".repeat(64));
+            }
+            "v2-target" => {
+                payload["schema_version"] = serde_json::json!(2);
+                payload
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("capability_profile");
+                payload["target"]["identifier"] = serde_json::json!("another-target");
+            }
+            "v2-runtime" => {
+                payload["schema_version"] = serde_json::json!(2);
+                payload
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("capability_profile");
+                payload["runtime"] = serde_json::json!({"runtime": "acp", "profile": "codex"});
+            }
+            "future-schema" => payload["schema_version"] = serde_json::json!(4),
+            _ => unreachable!(),
+        }
+        coordinator
+            .store
+            .replace_outbox_payload_for_test(&candidate.delivery_id, &payload)
+            .unwrap();
+        drop(coordinator);
+
+        let starts = Arc::new(AtomicUsize::new(0));
+        let mut scheduler = TaskScheduler::open(
+            &database_path,
+            Some(installation),
+            BoundedOpaque::new(format!("invalid-start-{case}")).unwrap(),
+            NeverStartFactory(Arc::clone(&starts)),
+        )
+        .unwrap();
+        assert!(
+            matches!(scheduler.tick(now), Err(GatewayDaemonError::Protocol(_))),
+            "case {case}"
+        );
+        let candidate = scheduler
+            .coordinator
+            .store
+            .peek_ready_outbox(&runtime_start_delivery_kind(), now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(candidate.attempt, 0, "case {case}");
+        assert_eq!(starts.load(Ordering::Relaxed), 0, "case {case}");
+    }
+}
+
+#[test]
+fn exact_task_only_v2_intent_maps_to_current_profile() {
+    let root = TempDir::new().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let database_path = root.path().join("gateway.db");
+    let installation = InstallationId::new();
+    let mut coordinator =
+        TaskCoordinator::open(&database_path, Some(installation.clone())).unwrap();
+    let actor = actor_id_for_uid(&installation, 1000).unwrap();
+    coordinator
+        .submit(&actor, submission("compatible-v2-start"))
+        .unwrap();
+    let now = now_ms().unwrap().saturating_add(1);
+    let candidate = coordinator
+        .store
+        .peek_ready_outbox(&runtime_start_delivery_kind(), now)
+        .unwrap()
+        .unwrap();
+    let mut payload = candidate.payload;
+    payload["schema_version"] = serde_json::json!(2);
+    payload
+        .as_object_mut()
+        .unwrap()
+        .remove("capability_profile");
+    coordinator
+        .store
+        .replace_outbox_payload_for_test(&candidate.delivery_id, &payload)
+        .unwrap();
+    drop(coordinator);
+
+    let mut scheduler = TaskScheduler::open(
+        &database_path,
+        Some(installation),
+        BoundedOpaque::new("compatible-v2-worker").unwrap(),
+        UpdateFactory,
+    )
+    .unwrap();
+    assert!(matches!(
+        scheduler.tick(now).unwrap(),
+        SchedulerTick::Started(_)
+    ));
+    assert_eq!(
+        scheduler
+            .active
+            .as_ref()
+            .unwrap()
+            .scheduled
+            .capability_profile,
+        GatewayCapabilityProfile::task_only_v1().identity()
+    );
 }
 
 #[test]

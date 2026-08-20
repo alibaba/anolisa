@@ -6,16 +6,19 @@
 
 **Overall: PARTIAL. Generic Broker foundations exist; Phase 1 does not pass.** The
 implementation worktree is based on
-`e90d9d9402c7fa1c8122267eb4e075c0adda51f5`.
+`a6592234341a095b2b9446601642caa87314e2c5`.
 
 The foundational Broker logic validates Capability request expiry, authoritative Task, Run, complete Actor
 provenance, target, operation descriptor, complete operation digest, and requested scope before
 policy. It separates policy decisions from permits, issues exactly bound single-use permits, and
-atomically consumes them in a process-local memory store. Eight targeted tests pass. These are
+atomically consumes them in a process-local memory store. Targeted capability tests pass. These are
 generic contract/logic foundations, not production execution evidence.
 
 This result is not a universal governance claim. The production `CoshBrokered`
-profile is task-only and exposes `ask_user_question` only. It has no production
+profile is bound to the pinned `task-only-v1` manifest and exposes
+`ask_user_question` only. The daemon, durable start intent, installed Core
+factory, and private v3 handshake verify the identity before execution or Task
+input. It has no production
 `ExecutionTarget` and no checkpoint/ws-ckpt dependency. Generic Capability,
 Permit, and Execution contracts/ledger rows remain future foundations. Shell,
 Skill, MCP, extension-tool, legacy CLI, and interactive Core mutation paths
@@ -65,6 +68,7 @@ gating, execution, and reconciliation remain future optional capability work.
 | [`memory.rs`](../../../../../crates/cosh-gateway/src/capability/memory.rs) | Holds permit validation and consumption under one mutex; mismatch, expiry, and replay fail closed |
 | [`memory/tests.rs`](../../../../../crates/cosh-gateway/src/capability/memory/tests.rs) | Covers parent and actor-provenance substitution, policy branches/failures, permit binding, mismatch, expiry/replay, and concurrent consumption |
 | [`capability.rs`](../../../../../crates/cosh-gateway-contracts/src/capability.rs) | Defines neutral request, decision, approval, and permit contracts with Actor/Task/Run/Execution/target/operation/policy/expiry bindings |
+| [`profile.rs`](../../../../../crates/cosh-gateway-contracts/src/profile.rs) | Pins the only admitted `task-only-v1` identity, canonical manifest digest, governed target, and exact `ask_user_question` Runtime inventory |
 | [`scheduler.rs`](../../../../../crates/cosh-gateway/src/daemon/scheduler.rs) | Keeps durable Task/Run/Outbox/lease/input/cancel/retry/recovery coordination separate from future execution-target adapters |
 
 The Broker source depends on contracts and its two explicit ports. It does not import Task storage,
@@ -88,30 +92,23 @@ Runtime bridges, OS operators, ACP, or network APIs.
 | CBR-012 | Typed policy has allow/deny/require-approval outcomes. | PASS | Neutral `PolicyPort` and deterministic tests cover all three outcomes plus unavailable/invalid authority. |
 | CBR-013 | Execution start in the profile requires durable security audit. | NOT IMPLEMENTED | No production execution start or target exists in the task-only profile. |
 | CBR-014 | Direct Core side-effecting tools are disabled or delegated in the profile. | PASS for task-only scope | The immutable inventory contains only `ask_user_question`; hooks, MCP, Skills, extensions, Shell, file, process, network, and checkpoint paths are disabled. |
-| CBR-015 | Production Gateway operations cannot bypass permit in governed mode. | PASS for task-only scope | `serve` and the library daemon admit only the task-only selector; no production side-effect operation can bypass a permit. ACP `doctor`/`run` and legacy CLI are explicitly outside the governed claim. |
+| CBR-015 | Production Gateway operations cannot bypass permit in governed mode. | PASS for task-only scope | `serve` and the library daemon derive the target from the pinned profile; Runtime start schema v3 and the Core handshake reject identity or inventory drift before launch/input. No production side-effect operation can bypass a permit. ACP `doctor`/`run` and legacy CLI are explicitly outside the governed claim. |
 | CBR-016 | Remote identity is disabled until a v2 attestation decision is approved. | PASS for scope decision | Phase 1 is local installation-scoped single-tenant; remote and `TenantId`/multi-tenant support are future v2. |
 
 ## Validation evidence
 
-Commands run from `src/cosh-ng`:
+Commands run from `src/cosh-ng` on the rebased candidate:
 
 ```text
-cargo fmt --package cosh-gateway -- --check
-cargo test --locked --package cosh-gateway-contracts
-result: package tests and doc-test targets passed
-
-cargo test --locked --package cosh-gateway capability::
-result: targeted capability suite passed
-
-cargo clippy --locked --package cosh-gateway-contracts --all-targets -- -D warnings
-cargo clippy --locked --package cosh-gateway --all-targets -- -D warnings
-result: passed with zero warnings
-
-cargo doc --locked --package cosh-gateway-contracts --package cosh-gateway --no-deps
-result: passed
+cargo fmt --all -- --check
+cargo test --locked -p cosh-gateway-contracts profile
+cargo test --locked -p cosh-gateway capability::
+cargo clippy --locked -p cosh-gateway-contracts --all-targets -- -D warnings
+cargo clippy --locked -p cosh-core -p cosh-gateway --all-targets -- -D warnings
+cargo doc --locked --no-deps -p cosh-gateway-contracts
 ```
 
-The eight tests prove:
+The targeted tests prove:
 
 - request expiry and Task, Run, Actor ID, issuer, assurance, target, operation descriptor,
   complete operation digest, and scope substitution fail closed before policy;

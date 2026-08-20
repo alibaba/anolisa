@@ -11,10 +11,28 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
         worker_id: BoundedOpaque,
         factory: F,
     ) -> Result<Self, GatewayDaemonError> {
-        Self::open_with_config(
+        Self::open_for_capability_profile(
             database_path,
             requested_installation_id,
             worker_id,
+            GatewayCapabilityProfile::task_only_v1(),
+            factory,
+        )
+    }
+
+    /// Opens durable scheduling bound to one trusted capability profile.
+    pub(crate) fn open_for_capability_profile(
+        database_path: impl AsRef<Path>,
+        requested_installation_id: Option<InstallationId>,
+        worker_id: BoundedOpaque,
+        expected_profile: GatewayCapabilityProfile,
+        factory: F,
+    ) -> Result<Self, GatewayDaemonError> {
+        Self::open_with_profile_and_config(
+            database_path,
+            requested_installation_id,
+            worker_id,
+            expected_profile,
             factory,
             TaskSchedulerConfig::default(),
         )
@@ -28,8 +46,30 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
         factory: F,
         config: TaskSchedulerConfig,
     ) -> Result<Self, GatewayDaemonError> {
+        Self::open_with_profile_and_config(
+            database_path,
+            requested_installation_id,
+            worker_id,
+            GatewayCapabilityProfile::task_only_v1(),
+            factory,
+            config,
+        )
+    }
+
+    fn open_with_profile_and_config(
+        database_path: impl AsRef<Path>,
+        requested_installation_id: Option<InstallationId>,
+        worker_id: BoundedOpaque,
+        expected_profile: GatewayCapabilityProfile,
+        factory: F,
+        config: TaskSchedulerConfig,
+    ) -> Result<Self, GatewayDaemonError> {
         Ok(Self {
-            coordinator: TaskCoordinator::open(database_path, requested_installation_id)?,
+            coordinator: TaskCoordinator::open_for_capability_profile(
+                database_path,
+                requested_installation_id,
+                expected_profile,
+            )?,
             worker_id,
             config: config.validate()?,
             factory,

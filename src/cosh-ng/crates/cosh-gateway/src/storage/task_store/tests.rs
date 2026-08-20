@@ -744,6 +744,109 @@ fn outbox_claim_is_exclusive_and_stale_attempt_is_fenced() {
 }
 
 #[test]
+fn validated_outbox_candidate_never_falls_through_to_the_next_delivery() {
+    let root = TempDir::new().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let path = root.path().join("gateway.db");
+    let mut validating_store = SqliteTaskStore::open(&path).unwrap();
+    let task_id = TaskId::new();
+    let actor_id = ActorId::new();
+    let event = submitted(&task_id, &actor_id);
+    validating_store
+        .commit_task(&task_commit(
+            &task_id,
+            &actor_id,
+            "candidate-race",
+            'f',
+            vec![event.clone()],
+            vec![
+                outbox(&event, DeliveryId::new()),
+                outbox(&event, DeliveryId::new()),
+            ],
+        ))
+        .unwrap();
+    let mut competing_store = SqliteTaskStore::open(&path).unwrap();
+    let kind = BoundedName::new("task_event").unwrap();
+    let validated = validating_store
+        .peek_ready_outbox(&kind, 100)
+        .unwrap()
+        .unwrap();
+
+    let competing_claim = competing_store
+        .claim_outbox(&kind, &BoundedOpaque::new("worker-b").unwrap(), 100, 200)
+        .unwrap()
+        .unwrap();
+    assert_eq!(competing_claim.delivery_id, validated.delivery_id);
+    assert!(validating_store
+        .claim_outbox_candidate(
+            &kind,
+            &validated,
+            &BoundedOpaque::new("worker-a").unwrap(),
+            100,
+            200,
+        )
+        .unwrap()
+        .is_none());
+
+    let next = validating_store
+        .peek_ready_outbox(&kind, 100)
+        .unwrap()
+        .unwrap();
+    assert_ne!(next.delivery_id, validated.delivery_id);
+    assert_eq!(next.attempt, 0);
+}
+
+#[test]
+fn stale_validated_outbox_attempt_is_normal_contention() {
+    let root = TempDir::new().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let path = root.path().join("gateway.db");
+    let mut validating_store = SqliteTaskStore::open(&path).unwrap();
+    let task_id = TaskId::new();
+    let actor_id = ActorId::new();
+    let event = submitted(&task_id, &actor_id);
+    validating_store
+        .commit_task(&task_commit(
+            &task_id,
+            &actor_id,
+            "stale-candidate-attempt",
+            '9',
+            vec![event.clone()],
+            vec![outbox(&event, DeliveryId::new())],
+        ))
+        .unwrap();
+    let mut competing_store = SqliteTaskStore::open(&path).unwrap();
+    let kind = BoundedName::new("task_event").unwrap();
+    let stale = validating_store
+        .peek_ready_outbox(&kind, 100)
+        .unwrap()
+        .unwrap();
+
+    let competing_claim = competing_store
+        .claim_outbox(&kind, &BoundedOpaque::new("worker-b").unwrap(), 100, 200)
+        .unwrap()
+        .unwrap();
+    assert_eq!(competing_claim.attempt, 1);
+    assert!(validating_store
+        .claim_outbox_candidate(
+            &kind,
+            &stale,
+            &BoundedOpaque::new("worker-a").unwrap(),
+            200,
+            300,
+        )
+        .unwrap()
+        .is_none());
+
+    let refreshed = validating_store
+        .peek_ready_outbox(&kind, 200)
+        .unwrap()
+        .unwrap();
+    assert_eq!(refreshed.delivery_id, stale.delivery_id);
+    assert_eq!(refreshed.attempt, 1);
+}
+
+#[test]
 fn outbox_retry_preserves_identity_and_increments_attempt() {
     let mut store = SqliteTaskStore::open_in_memory().unwrap();
     let task_id = TaskId::new();

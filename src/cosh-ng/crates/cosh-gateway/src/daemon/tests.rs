@@ -38,11 +38,7 @@ fn submit(key: &str) -> SubmitTask {
         request_id: RequestId::new(),
         idempotency_key: IdempotencyKey::new(key).unwrap(),
         intent: BoundedText::new("inspect the failed service").unwrap(),
-        target: TargetRef {
-            kind: BoundedName::new("local").unwrap(),
-            authority: BoundedName::new("test").unwrap(),
-            identifier: BoundedOpaque::new("host").unwrap(),
-        },
+        target: GatewayCapabilityProfile::task_only_v1().governed_target(),
         runtime: brokered_core_runtime(),
     }
 }
@@ -65,7 +61,7 @@ fn daemon_config(socket_path: PathBuf, database_path: PathBuf) -> GatewayDaemonC
         socket_path,
         database_path,
         installation_id: None,
-        target: submit("daemon-config").target,
+        capability_profile: GatewayCapabilityProfile::task_only_v1(),
         workspace: WorkspaceRef {
             scope_digest: sha256_digest(b"cosh.gateway.test.workspace.v1"),
             display_name: None,
@@ -386,6 +382,20 @@ fn retryable_failure_requires_explicit_retry_and_replays_the_new_start_intent() 
         .submit(&actor.actor_id, submit("retryable-run"))
         .unwrap();
     let previous_run_id = queued.active_run_id.clone().unwrap();
+    let submitted_candidate = coordinator
+        .store
+        .peek_ready_outbox(
+            &scheduler::runtime_start_delivery_kind(),
+            now_ms().unwrap().saturating_add(1),
+        )
+        .unwrap()
+        .unwrap();
+    let original_identity = scheduler::decode_runtime_start_intent(
+        submitted_candidate.payload,
+        GatewayCapabilityProfile::task_only_v1(),
+    )
+    .unwrap()
+    .capability_profile;
     let retryable = ContractError::new(
         "runtime_busy",
         ErrorCategory::RuntimeUnavailable,
@@ -428,7 +438,7 @@ fn retryable_failure_requires_explicit_retry_and_replays_the_new_start_intent() 
     let retried = coordinator
         .retry_admitted(
             &actor,
-            &config.target,
+            &config.capability_profile.governed_target(),
             &config.workspace,
             &config.runtime,
             retry.clone(),
@@ -437,11 +447,26 @@ fn retryable_failure_requires_explicit_retry_and_replays_the_new_start_intent() 
     assert_eq!(retried.state, TaskState::Queued);
     let next_run_id = retried.active_run_id.clone().unwrap();
     assert_ne!(next_run_id, previous_run_id);
+    let retry_candidate = coordinator
+        .store
+        .peek_ready_outbox(
+            &scheduler::runtime_start_delivery_kind(),
+            now_ms().unwrap().saturating_add(1),
+        )
+        .unwrap()
+        .unwrap();
+    let retry_intent = scheduler::decode_runtime_start_intent(
+        retry_candidate.payload,
+        GatewayCapabilityProfile::task_only_v1(),
+    )
+    .unwrap();
+    assert_eq!(retry_intent.run_id, next_run_id);
+    assert_eq!(retry_intent.capability_profile, original_identity);
     assert_eq!(
         coordinator
             .retry_admitted(
                 &actor,
-                &config.target,
+                &config.capability_profile.governed_target(),
                 &config.workspace,
                 &config.runtime,
                 retry.clone(),
@@ -455,7 +480,7 @@ fn retryable_failure_requires_explicit_retry_and_replays_the_new_start_intent() 
     assert!(matches!(
         coordinator.retry_admitted(
             &actor,
-            &config.target,
+            &config.capability_profile.governed_target(),
             &config.workspace,
             &config.runtime,
             conflicting,
@@ -547,7 +572,7 @@ fn retry_waits_for_crash_window_lease_recovery_before_queueing() {
     };
     let blocked = coordinator.retry_admitted(
         &actor,
-        &admission.target,
+        &admission.capability_profile.governed_target(),
         &admission.workspace,
         &admission.runtime,
         retry.clone(),
@@ -597,7 +622,7 @@ fn retry_waits_for_crash_window_lease_recovery_before_queueing() {
     let retried = coordinator
         .retry_admitted(
             &actor,
-            &admission.target,
+            &admission.capability_profile.governed_target(),
             &admission.workspace,
             &admission.runtime,
             retry,
@@ -648,7 +673,7 @@ fn terminal_tasks_are_never_reopened_by_retry() {
     assert!(matches!(
         coordinator.retry_admitted(
             &actor,
-            &config.target,
+            &config.capability_profile.governed_target(),
             &config.workspace,
             &config.runtime,
             RetryTask {
@@ -686,7 +711,7 @@ fn terminal_tasks_are_never_reopened_by_retry() {
     assert!(matches!(
         coordinator.retry_admitted(
             &actor,
-            &config.target,
+            &config.capability_profile.governed_target(),
             &config.workspace,
             &config.runtime,
             RetryTask {
@@ -720,7 +745,7 @@ fn terminal_tasks_are_never_reopened_by_retry() {
     assert!(matches!(
         coordinator.retry_admitted(
             &actor,
-            &config.target,
+            &config.capability_profile.governed_target(),
             &config.workspace,
             &config.runtime,
             RetryTask {

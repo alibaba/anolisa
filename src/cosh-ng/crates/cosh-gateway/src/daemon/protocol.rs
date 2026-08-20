@@ -7,8 +7,8 @@ pub struct GatewayDaemonConfig {
     pub database_path: PathBuf,
     /// Durable identity shared by events in this database.
     pub installation_id: Option<InstallationId>,
-    /// Exact target admitted by this per-user daemon instance.
-    pub target: TargetRef,
+    /// Closed capability profile selected by trusted daemon configuration.
+    pub capability_profile: GatewayCapabilityProfile,
     /// Canonical workspace projection resolved from trusted daemon config.
     pub workspace: WorkspaceRef,
     /// Exact installed Runtime kind and profile admitted by this daemon instance.

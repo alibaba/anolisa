@@ -5,6 +5,7 @@ pub struct GatewayDaemon {
     socket_path: PathBuf,
     socket_identity: (u64, u64),
     owner_uid: u32,
+    capability_profile: GatewayCapabilityProfile,
     admitted_target: TargetRef,
     admitted_workspace: WorkspaceRef,
     admitted_runtime: RuntimeSelector,
@@ -20,15 +21,22 @@ impl GatewayDaemon {
     ///
     /// Returns a fail-closed path, storage, socket, or already-running error.
     pub fn bind(config: GatewayDaemonConfig) -> Result<Self, GatewayDaemonError> {
-        if !supported_daemon_runtime(&config.runtime) {
+        let admitted_target = config.capability_profile.governed_target();
+        if config.capability_profile != GatewayCapabilityProfile::task_only_v1()
+            || !supported_daemon_runtime(&config.runtime)
+        {
             return Err(GatewayDaemonError::Protocol(
-                "daemon Runtime selector is not supported".to_owned(),
+                "daemon capability profile or Runtime selector is not supported".to_owned(),
             ));
         }
         let owner_uid = Uid::effective().as_raw();
         prepare_socket_path(&config.socket_path, owner_uid)?;
         let database_path = config.database_path.clone();
-        let coordinator = TaskCoordinator::open(&database_path, config.installation_id)?;
+        let coordinator = TaskCoordinator::open_for_capability_profile(
+            &database_path,
+            config.installation_id,
+            config.capability_profile,
+        )?;
         let listener = UnixListener::bind(&config.socket_path)?;
         fs::set_permissions(&config.socket_path, fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
@@ -39,7 +47,8 @@ impl GatewayDaemon {
             socket_path: config.socket_path,
             socket_identity: (metadata.dev(), metadata.ino()),
             owner_uid,
-            admitted_target: config.target,
+            capability_profile: config.capability_profile,
+            admitted_target,
             admitted_workspace: config.workspace,
             admitted_runtime: config.runtime,
             database_path,

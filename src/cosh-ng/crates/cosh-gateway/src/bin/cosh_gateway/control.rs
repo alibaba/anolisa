@@ -138,12 +138,7 @@ fn bounded_name(value: String) -> Result<BoundedName, CliError> {
 }
 
 pub(super) fn task_only_target() -> TargetRef {
-    TargetRef {
-        kind: BoundedName::new(TASK_ONLY_TARGET_KIND).unwrap_or_else(|_| unreachable!()),
-        authority: BoundedName::new(TASK_ONLY_TARGET_AUTHORITY).unwrap_or_else(|_| unreachable!()),
-        identifier: BoundedOpaque::new(TASK_ONLY_TARGET_IDENTIFIER)
-            .unwrap_or_else(|_| unreachable!()),
-    }
+    GatewayCapabilityProfile::task_only_v1().governed_target()
 }
 
 fn parse_task(value: &str) -> Result<TaskId, CliError> {

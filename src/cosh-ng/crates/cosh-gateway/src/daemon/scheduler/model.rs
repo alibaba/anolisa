@@ -1,4 +1,4 @@
-pub(super) const RUNTIME_START_SCHEMA_VERSION: u16 = 2;
+pub(super) const RUNTIME_START_SCHEMA_VERSION: u16 = 3;
 const DEFAULT_LEASE_DURATION_MS: u64 = 180_000;
 const DEFAULT_LEASE_RENEWAL_MARGIN_MS: u64 = 60_000;
 const DEFAULT_RUNTIME_OPERATION_TIMEOUT_MS: u64 = 70_000;
@@ -19,6 +19,95 @@ pub(super) struct RuntimeStartIntent {
     pub(super) intent: BoundedText,
     pub(super) target: TargetRef,
     pub(super) workspace: WorkspaceRef,
+    pub(super) capability_profile: GatewayCapabilityProfileIdentity,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeStartIntentV2 {
+    schema_version: u16,
+    actor: ActorRef,
+    task_id: TaskId,
+    run_id: RunId,
+    runtime: RuntimeSelector,
+    intent: BoundedText,
+    target: TargetRef,
+    workspace: WorkspaceRef,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RuntimeStartIntentHeader {
+    schema_version: u16,
+}
+
+pub(super) fn decode_runtime_start_intent(
+    value: serde_json::Value,
+    expected_profile: GatewayCapabilityProfile,
+) -> Result<RuntimeStartIntent, GatewayDaemonError> {
+    let header = serde_json::from_value::<RuntimeStartIntentHeader>(value.clone()).map_err(
+        |error| {
+            GatewayDaemonError::Protocol(format!(
+                "runtime start intent has no valid schema version: {error}"
+            ))
+        },
+    )?;
+    let intent = match header.schema_version {
+        RUNTIME_START_SCHEMA_VERSION => serde_json::from_value::<RuntimeStartIntent>(value)?,
+        2 => {
+            let legacy = serde_json::from_value::<RuntimeStartIntentV2>(value)?;
+            if legacy.schema_version != 2 {
+                return Err(GatewayDaemonError::Protocol(
+                    "runtime start v2 decoder observed another schema".to_owned(),
+                ));
+            }
+            let legacy_profile = GatewayCapabilityProfile::task_only_v1();
+            if legacy.target != legacy_profile.governed_target()
+                || !is_task_only_runtime(&legacy.runtime)
+            {
+                return Err(GatewayDaemonError::Protocol(
+                    "runtime start v2 intent is compatible only with the exact task-only target and Runtime"
+                        .to_owned(),
+                ));
+            }
+            RuntimeStartIntent {
+                schema_version: RUNTIME_START_SCHEMA_VERSION,
+                actor: legacy.actor,
+                task_id: legacy.task_id,
+                run_id: legacy.run_id,
+                runtime: legacy.runtime,
+                intent: legacy.intent,
+                target: legacy.target,
+                workspace: legacy.workspace,
+                capability_profile: legacy_profile.identity(),
+            }
+        }
+        version if version > RUNTIME_START_SCHEMA_VERSION => {
+            return Err(GatewayDaemonError::Protocol(format!(
+                "runtime start intent schema {version} is newer than supported schema {RUNTIME_START_SCHEMA_VERSION}"
+            )))
+        }
+        version => {
+            return Err(GatewayDaemonError::Protocol(format!(
+                "runtime start intent schema {version} is not supported"
+            )))
+        }
+    };
+    expected_profile
+        .verify_identity(&intent.capability_profile)
+        .map_err(|error| GatewayDaemonError::Protocol(error.to_string()))?;
+    if intent.target != expected_profile.governed_target()
+        || !is_task_only_runtime(&intent.runtime)
+    {
+        return Err(GatewayDaemonError::Protocol(
+            "runtime start intent does not match the task-only capability profile".to_owned(),
+        ));
+    }
+    Ok(intent)
+}
+
+fn is_task_only_runtime(runtime: &RuntimeSelector) -> bool {
+    runtime.runtime.as_str() == "core"
+        && runtime.profile.as_ref().map(BoundedName::as_str) == Some("gateway-brokered-v1")
 }
 
 /// Immutable work description passed to an injected Runtime factory.
@@ -38,6 +127,8 @@ pub struct ScheduledRun {
     pub target: TargetRef,
     /// Trusted public projection of the canonical workspace.
     pub workspace: WorkspaceRef,
+    /// Capability identity durably selected when this Run was admitted.
+    pub capability_profile: GatewayCapabilityProfileIdentity,
     /// Current Run-lease generation.
     pub lease_generation: u64,
 }

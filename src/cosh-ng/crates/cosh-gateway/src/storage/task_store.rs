@@ -59,6 +59,15 @@ pub struct OutboxClaim {
     pub lease_expires_at_ms: u64,
 }
 
+/// Read-only next-delivery snapshot used to validate before taking a lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutboxCandidate {
+    pub(crate) delivery_id: DeliveryId,
+    pub(crate) task_id: TaskId,
+    pub(crate) payload: serde_json::Value,
+    pub(crate) attempt: u64,
+}
+
 /// Complete unit of work admitted by the single Task writer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TaskCommit {

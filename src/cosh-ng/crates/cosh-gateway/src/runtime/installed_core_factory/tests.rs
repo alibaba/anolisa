@@ -54,7 +54,7 @@ fn admitted(
 ) -> (InstalledBrokeredCoreRuntimePortFactory, ScheduledRun) {
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).unwrap();
-    let expected_target = target("primary");
+    let expected_target = GatewayCapabilityProfile::task_only_v1().governed_target();
     let installation = InstallationId::new();
     let actors = LocalOsActorResolver::new(installation.clone(), 1000);
     let actor = actors.actor_ref().clone();
@@ -86,6 +86,7 @@ fn admitted(
         intent: BoundedText::new("create a checkpoint").unwrap(),
         target: expected_target,
         workspace: workspace_ref,
+        capability_profile: GatewayCapabilityProfile::task_only_v1().identity(),
         lease_generation: 9,
     };
     (factory, run)
@@ -132,6 +133,12 @@ fn factory_rejects_runtime_profile_and_actor_substitution_before_launch() {
         "runtime_profile_invalid"
     );
     run.runtime.profile = Some(BoundedName::new(GATEWAY_BROKERED_CORE_RUNTIME_PROFILE).unwrap());
+    run.capability_profile.manifest_digest = Digest::parse("b".repeat(64)).unwrap();
+    assert_eq!(
+        factory.create(&run).err().unwrap().code.as_str(),
+        "runtime_profile_invalid"
+    );
+    run.capability_profile = GatewayCapabilityProfile::task_only_v1().identity();
     run.actor.actor_id = cosh_gateway_contracts::ids::ActorId::new();
     assert_eq!(
         factory.create(&run).err().unwrap().code.as_str(),

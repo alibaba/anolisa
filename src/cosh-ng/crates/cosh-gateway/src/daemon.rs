@@ -33,6 +33,7 @@ use cosh_gateway_contracts::ids::{
     ActorId, ApprovalId, DeliveryId, InputRequestId, InstallationId, MessageId, RequestId, RunId,
     TaskId,
 };
+use cosh_gateway_contracts::profile::GatewayCapabilityProfile;
 use cosh_gateway_contracts::runtime::RuntimeInputResponse;
 use cosh_gateway_contracts::task::{
     CancelReason, CancellationStage, TaskEvent, TaskEventEnvelope, TaskState,

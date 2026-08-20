@@ -3,6 +3,7 @@
 
 mod audit;
 mod auth;
+mod brokered_profile;
 mod cli;
 mod compaction;
 mod compression;

@@ -847,7 +847,7 @@ impl CoreConfig {
     /// The launch profile is already fixed before this method is called. It
     /// deliberately excludes the project layer and clears every local runtime
     /// contribution so startup cannot run hooks, skills, MCP, or registry
-    /// migration before the private v2 handshake.
+    /// migration before the private v3 handshake.
     pub(crate) fn load_gateway_brokered() -> Self {
         let user_path = config_dir().join("config.toml");
         let system_path = PathBuf::from("/etc/copilot-shell/config.toml");

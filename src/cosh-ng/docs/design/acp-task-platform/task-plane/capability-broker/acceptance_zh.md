@@ -5,16 +5,18 @@
 ## 结果
 
 **整体结果为 PARTIAL。通用 Broker foundation 已存在，Phase 1 尚未通过。**
-实现 worktree 基于 `e90d9d9402c7fa1c8122267eb4e075c0adda51f5`。
+实现 worktree 基于 `a6592234341a095b2b9446601642caa87314e2c5`。
 
 基础 Broker logic 会在 policy 前校验 Capability request expiry，以及 authoritative Task、Run、完整 Actor
 provenance、target、operation descriptor、完整 operation digest 与 requested scope。它将 policy
 decision 与 permit 分开，为 permit 绑定准确 authority，并通过 process-local memory store atomically
-consume single-use permit。八个 targeted test 通过。这些是通用 contract/logic foundation，不是
+consume single-use permit。定向 capability test 通过。这些是通用 contract/logic foundation，不是
 production execution 证据。
 
-该结果不构成通用治理声明。Production `CoshBrokered` profile 是 task-only，只有
-`ask_user_question`，没有 production `ExecutionTarget`，也不依赖 checkpoint/ws-ckpt。通用
+该结果不构成通用治理声明。Production `CoshBrokered` profile 绑定固定 `task-only-v1` manifest，只有
+`ask_user_question`。Daemon、durable start intent、installed Core factory 与 private v3 handshake 会在
+execution 或 Task input 前校验 identity。它没有 production `ExecutionTarget`，也不依赖
+checkpoint/ws-ckpt。通用
 Capability、Permit 与 Execution contract/ledger row 作为后续基础保留。Shell、Skill、MCP、扩展工具、
 legacy CLI 与 interactive Core mutation path 仍在该边界之外。
 
@@ -59,6 +61,7 @@ capability，仍待完成。
 | [`memory.rs`](../../../../../crates/cosh-gateway/src/capability/memory.rs) | 在同一个 mutex 内校验并 consume permit；mismatch、expiry 与 replay fail closed |
 | [`memory/tests.rs`](../../../../../crates/cosh-gateway/src/capability/memory/tests.rs) | 覆盖 parent 与 actor-provenance substitution、policy branch/failure、permit binding、mismatch、expiry/replay 与 concurrent consumption |
 | [`capability.rs`](../../../../../crates/cosh-gateway-contracts/src/capability.rs) | 定义中立 request、decision、approval 与 permit contract，包含 Actor/Task/Run/Execution/target/operation/policy/expiry binding |
+| [`profile.rs`](../../../../../crates/cosh-gateway-contracts/src/profile.rs) | 固定唯一接纳的 `task-only-v1` identity、canonical manifest digest、governed target 与准确的 `ask_user_question` Runtime inventory |
 | [`scheduler.rs`](../../../../../crates/cosh-gateway/src/daemon/scheduler.rs) | 保持 durable Task/Run/Outbox/lease/input/cancel/retry/recovery coordination 与未来 execution-target adapter 分离 |
 
 Broker source 只依赖 contracts 和两个显式 port，不 import Task storage、Runtime bridge、OS operator、
@@ -82,30 +85,23 @@ ACP 或 network API。
 | CBR-012 | Typed policy 有 allow/deny/require-approval outcome。 | PASS | Neutral `PolicyPort` 与 deterministic test 覆盖三个 outcome，以及 unavailable/invalid authority。 |
 | CBR-013 | 该 profile 的 execution start 要求 durable security audit。 | NOT IMPLEMENTED | Task-only profile 没有 production execution start 或 target。 |
 | CBR-014 | 该 profile 禁用或 delegated Core direct side-effecting tool。 | Task-only scope PASS | Immutable inventory 只有 `ask_user_question`；hook、MCP、Skill、扩展、Shell、file、process、network 与 checkpoint path 均禁用。 |
-| CBR-015 | Governed mode 下 production Gateway operation 不能绕过 permit。 | Task-only scope PASS | `serve` 与 library daemon 只接纳 task-only selector；没有 production side-effect operation 可以绕过 permit。ACP `doctor`/`run` 与 legacy CLI 明确不在 governed claim 内。 |
+| CBR-015 | Governed mode 下 production Gateway operation 不能绕过 permit。 | Task-only scope PASS | `serve` 与 library daemon 从固定 profile 派生 target；Runtime start schema v3 与 Core handshake 会在 launch/input 前拒绝 identity 或 inventory drift。没有 production side-effect operation 可以绕过 permit。ACP `doctor`/`run` 与 legacy CLI 明确不在 governed claim 内。 |
 | CBR-016 | Remote identity 在 v2 attestation 决策批准前保持禁用。 | Scope decision PASS | Phase 1 是 local installation-scoped single-tenant；remote 与 `TenantId`/multi-tenant support 属未来 v2。 |
 
 ## 验证证据
 
-从 `src/cosh-ng` 运行：
+从 `src/cosh-ng` 在 rebased candidate 上运行：
 
 ```text
-cargo fmt --package cosh-gateway -- --check
-cargo test --locked --package cosh-gateway-contracts
-result: package test 与 doc-test target passed
-
-cargo test --locked --package cosh-gateway capability::
-result: targeted capability suite passed
-
-cargo clippy --locked --package cosh-gateway-contracts --all-targets -- -D warnings
-cargo clippy --locked --package cosh-gateway --all-targets -- -D warnings
-result: passed with zero warnings
-
-cargo doc --locked --package cosh-gateway-contracts --package cosh-gateway --no-deps
-result: passed
+cargo fmt --all -- --check
+cargo test --locked -p cosh-gateway-contracts profile
+cargo test --locked -p cosh-gateway capability::
+cargo clippy --locked -p cosh-gateway-contracts --all-targets -- -D warnings
+cargo clippy --locked -p cosh-core -p cosh-gateway --all-targets -- -D warnings
+cargo doc --locked --no-deps -p cosh-gateway-contracts
 ```
 
-八个测试证明：
+定向测试证明：
 
 - Request expiry，以及 Task、Run、Actor ID、issuer、assurance、target、operation descriptor、
   完整 operation digest 与 scope substitution 在 policy 前 fail closed；

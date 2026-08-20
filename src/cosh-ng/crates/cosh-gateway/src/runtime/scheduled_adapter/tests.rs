@@ -131,6 +131,9 @@ impl Fixture {
                     identifier: BoundedOpaque::new("host").unwrap(),
                 },
                 workspace: workspace.clone(),
+                capability_profile:
+                    cosh_gateway_contracts::profile::GatewayCapabilityProfile::task_only_v1()
+                        .identity(),
                 lease_generation: 1,
             },
             workspace,

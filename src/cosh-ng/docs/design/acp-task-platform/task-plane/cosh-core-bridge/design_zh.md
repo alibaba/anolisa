@@ -4,10 +4,10 @@
 
 ## 状态与决策
 
-本文的 Phase 1 实现基于上游提交 `e90d9d9402c7fa1c8122267eb4e075c0adda51f5`。
+当前 capability admission 增量基于上游提交 `a6592234341a095b2b9446601642caa87314e2c5`。
 `CoshCoreBridge` 将 private cosh-core newline-delimited JSONL control protocol 适配到 neutral
 `AgentRuntimePort`。Private COSH legacy v1 继续用于 Shell/Core compatibility；Gateway 的封闭 brokered
-profile negotiation private COSH v2 与 `gateway_brokered_v1`。两个版本都不是 ACP。ACP v1 只用于
+profile negotiation private COSH v3 与 `gateway_brokered_v1`。两个版本都不是 ACP。ACP v1 只用于
 ungoverned `doctor`/`run` interoperability，不用于 production `serve`。
 
 `RuntimeSupervisor` 是 cosh-core 与未来 ACP/provider child process 的唯一 owner。Bridge 拥有 protocol
@@ -65,8 +65,9 @@ runtime binding 或 brokered core launch profile。
 - [`bounded_io.rs`](../../../../../crates/cosh-gateway/src/runtime/bounded_io.rs) 在整行分配前限制 stdout
   JSONL frame，并持续 drain 固定容量的 stderr tail，同时明确记录 discarded byte 数量。
 - [`cosh_core_jsonl.rs`](../../../../../crates/cosh-gateway/src/runtime/cosh_core_jsonl.rs) 是 dual-profile
-  纯 codec。Legacy 使用 **private COSH v1**；Gateway brokered profile 要求 **private COSH v2**、
-  exact `gateway_brokered_v1`、correlation 与 capability，readiness 前只允许有界 auth bootstrap，将当前
+  纯 codec。Legacy 使用 **private COSH v1**；Gateway brokered profile 要求 **private COSH v3**、
+  exact `gateway_brokered_v1`、capability-profile identity、准确 Runtime tool inventory、correlation 与
+  capability，readiness 前只允许有界 auth bootstrap，将当前
   system/stream/assistant/tool/control/registry/result shape 解码为 runtime-local observation，并且只生成
   一次 EOF-without-result。
 - Public Task、Run、Runtime 与 Agent ID/event 继续由 `cosh-gateway-contracts` 拥有。Codec 不复制这些
@@ -86,7 +87,7 @@ flowchart LR
     ARP --> CCB["CoshCoreBridge"]
     CCB --> RS["RuntimeSupervisor\nchild 唯一 owner"]
     RS --> CORE["cosh-core child"]
-    CORE <--> J["private COSH JSONL\nlegacy v1 / brokered v2"]
+    CORE <--> J["private COSH JSONL\nlegacy v1 / brokered v3"]
     J <--> CCB
     CCB --> RES["RuntimeEventSink"]
     CCB --> CB["CapabilityBrokerPort"]
@@ -110,9 +111,10 @@ cosh-shell remains standalone
 
 不存在 `cosh-gateway` 到 cosh-core implementation crate 的 Rust dependency，也不存在 `cosh-core`
 反向依赖 Gateway，或 Gateway 与 `cosh-shell` 之间的 crate dependency。Bridge 启动 binary 并使用 private
-JSONL contract。Core、Shell 与 Gateway test 通过 canonical JSON fixture mirror 检测 drift。Neutral
-Runtime ID/event 遵循 Phase 0 G0 schema-first 决策和计划中的 side-effect-free
-`cosh-gateway-contracts` leaf。
+JSONL contract。Core 只持有 private v3 profile mirror，Gateway 持有 canonical admitted profile，
+双方都不导入对方的 domain crate。Core、Shell 与 Gateway test 通过 canonical JSON fixture mirror
+检测 drift。Neutral Runtime ID/event 遵循 Phase 0 G0 schema-first 决策和计划中的
+side-effect-free `cosh-gateway-contracts` leaf。
 
 ## Agent Runtime Port
 
@@ -153,18 +155,19 @@ RuntimeProcessExited, RuntimeProtocolFailed
 ### Initialization
 
 发送 user message 前，legacy Shell/Core 使用 private v1。Gateway production 发送相关联的
-`control_request.initialize`，携带 `protocol_version: 2`、`execution_profile:
-gateway_brokered_v1` 与 `fire_session_start: false`。Bridge 在 input 前要求 matching v2 response、profile
-与准确 safe capability snapshot。Missing version 只对 legacy v1 compatibility 有效，brokered profile 会拒绝。
+`control_request.initialize`，携带 `protocol_version: 3`、`execution_profile:
+gateway_brokered_v1`、固定 `task-only-v1` manifest identity 与 `fire_session_start: false`。Bridge 在
+input 前要求 matching v3 response、相同 profile identity、准确的 `ask_user_question` Runtime inventory
+与 safe capability snapshot。Missing version 只对 legacy v1 compatibility 有效，brokered profile 会拒绝。
 当前 headless startup 可能
 在消费 initialization 前请求 authentication，因此允许通过 secret-safe credential port 完成一次有界
 `auth_required` bootstrap exchange，期间不能接收 Task user turn。Mismatch、malformed response、其他
 negotiation 前 output 或 deadline expiry 都会在 input admission 前结束 runtime attempt。
 
-`CONTROL_PROTOCOL_VERSION = 1` 与 `BROKERED_CONTROL_PROTOCOL_VERSION = 2` 都是 private COSH
+`CONTROL_PROTOCOL_VERSION = 1` 与 `BROKERED_CONTROL_PROTOCOL_VERSION = 3` 都是 private COSH
 constant，与 ACP SDK 或 wire version 无关。Core serializer/parser 与 Gateway codec 共同消费一份 golden
-corpus，覆盖 v1/v2 initialize、task/question request、ack、result，以及 version/profile/capability 负例。
-Shell 无需支持 v2。
+corpus，覆盖 v1/v3 initialize、task/question request、ack、result，以及 version/profile/capability 负例。
+Shell 无需支持 v3。
 
 ### Input mapping
 
@@ -358,7 +361,7 @@ backpressure、real-provider 与 Phase 2 Shell migration 仍待完成。
 | --- | --- | --- |
 | 是否跨 Task 复用一个 persistent core？ | Runtime owner | 单 active turn；clean settlement 且 profile/workspace validation 后才复用。 |
 | Brokered profile 暴露哪些 core tool？ | Core/Broker owner | 只暴露 audited non-effecting 或 host-delegated tool。 |
-| Brokered profile 是否要求 private protocol v2？ | Core/Bridge owner | 是。Task/question profile 与 profile/capability binding 已固化在 private COSH v2；checkpoint 属后续。 |
+| Brokered profile 是否要求 private protocol v3？ | Core/Bridge owner | 是。Task-only profile identity 与准确 Runtime inventory 已固化在 private COSH v3；checkpoint 属后续。 |
 | 如何提供 credential？ | Secret/security owner | Opaque credential reference；Task/event 不存 secret value。 |
 | 最大 durable event lag 是多少？ | Runtime/Task owner | Benchmark bounded queue；在 control-event loss 前安全 cancel。 |
 | Failed turn 能否 resume provider session？ | Runtime/product owner | 只有 validated session 且明确无 uncertain effect 时允许。 |

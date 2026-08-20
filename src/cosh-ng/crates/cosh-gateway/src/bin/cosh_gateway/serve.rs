@@ -37,7 +37,8 @@ pub(super) fn serve(args: ServeArgs, reporter: &Reporter) -> Result<u8, CliError
         .map_err(|error| CliError::Daemon(error.to_string()))?;
     // The production daemon owns one neutral target. Keeping this mapping in
     // the entrypoint prevents a caller from widening authority with flags.
-    let target = task_only_target();
+    let capability_profile = GatewayCapabilityProfile::task_only_v1();
+    let target = capability_profile.governed_target();
     let configured_workspace = if args.workspace.is_absolute() {
         args.workspace.clone()
     } else {
@@ -71,7 +72,7 @@ pub(super) fn serve(args: ServeArgs, reporter: &Reporter) -> Result<u8, CliError
         socket_path: daemon_socket_path(args.socket.as_ref())?,
         database_path: daemon_database_path(args.database.as_ref())?,
         installation_id,
-        target,
+        capability_profile,
         workspace: workspace.workspace_ref().clone(),
         runtime,
     };

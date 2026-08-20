@@ -232,9 +232,9 @@ fn versioned_initialize_returns_negotiated_version() {
 }
 
 #[test]
-fn gateway_brokered_profile_acks_v2_without_initializing_local_runtime() {
+fn gateway_brokered_profile_acks_v3_without_initializing_local_runtime() {
     let corpus = private_wire_corpus();
-    let initialize = json_line(&corpus["gateway_brokered_v2"]["initialize_request"]);
+    let initialize = json_line(&corpus["gateway_brokered_v3"]["initialize_request"]);
     let home = tempfile::tempdir().expect("temp home");
     let workspace = tempfile::tempdir().expect("temp workspace");
     let hook_marker = home.path().join("hook-ran");
@@ -299,7 +299,7 @@ startup_timeout_ms = 1000
         .iter()
         .find(|message| message["type"] == "control_response")
         .expect("profile acknowledgement");
-    assert_eq!(response, &corpus["gateway_brokered_v2"]["initialize_ack"]);
+    assert_eq!(response, &corpus["gateway_brokered_v3"]["initialize_ack"]);
     let init = messages
         .iter()
         .find(|message| message["type"] == "system" && message["subtype"] == "init")
@@ -318,7 +318,7 @@ startup_timeout_ms = 1000
 #[test]
 fn gateway_brokered_profile_rejects_legacy_or_missing_ack_without_fallback() {
     let corpus = private_wire_corpus();
-    let invalid = corpus["gateway_brokered_v2"]["invalid_initialize_requests"]
+    let invalid = corpus["gateway_brokered_v3"]["invalid_initialize_requests"]
         .as_object()
         .expect("invalid initialize request map");
     for (case, initialize) in invalid {
@@ -339,7 +339,7 @@ fn gateway_brokered_profile_rejects_legacy_or_missing_ack_without_fallback() {
             .find(|message| message["type"] == "control_response")
             .unwrap_or_else(|| panic!("profile error for {case}"));
         assert_eq!(response["response"]["subtype"], "error");
-        assert_eq!(response["response"]["response"]["protocol_version"], 2);
+        assert_eq!(response["response"]["response"]["protocol_version"], 3);
         assert_eq!(
             response["response"]["response"]["execution_profile"],
             "gateway_brokered_v1"
@@ -352,12 +352,14 @@ fn gateway_brokered_profile_rejects_legacy_or_missing_ack_without_fallback() {
 
 #[test]
 fn gateway_brokered_profile_rejects_runtime_and_registry_mutation() {
+    let corpus = private_wire_corpus();
+    let initialize = json_line(&corpus["gateway_brokered_v3"]["initialize_request"]);
     let home = tempfile::tempdir().expect("temp home");
     let output = run_process_at_home_args(
         home.path(),
         &["--headless", "--execution-profile", "gateway-brokered-v1"],
         &[
-            r#"{"type":"control_request","request_id":"init","request":{"subtype":"initialize","protocol_version":2,"execution_profile":"gateway_brokered_v1"}}"#,
+            &initialize,
             r#"{"type":"control_request","request_id":"config","request":{"subtype":"config_override","approval_mode":"trust","allowed_tools":["shell"]}}"#,
             r#"{"type":"control_request","request_id":"reload","request":{"subtype":"reload_config"}}"#,
             r#"{"type":"registry_request","request_id":"registry","domain":"extensions","action":"install","params":{}}"#,

@@ -105,8 +105,22 @@ impl TaskCoordinator {
         now_ms: u64,
         lease_expires_at_ms: u64,
     ) -> Result<RuntimeStartClaim, GatewayDaemonError> {
-        let Some(claim) = self.store.claim_outbox(
-            &runtime_start_delivery_kind(),
+        let delivery_kind = runtime_start_delivery_kind();
+        let Some(candidate) = self.store.peek_ready_outbox(&delivery_kind, now_ms)? else {
+            return Ok(RuntimeStartClaim::Empty);
+        };
+        let intent = decode_runtime_start_intent(
+            candidate.payload.clone(),
+            self.expected_profile,
+        )?;
+        if intent.task_id != candidate.task_id {
+            return Err(GatewayDaemonError::Protocol(
+                "runtime start Outbox identity mismatch".to_owned(),
+            ));
+        }
+        let Some(claim) = self.store.claim_outbox_candidate(
+            &delivery_kind,
+            &candidate,
             worker_id,
             now_ms,
             lease_expires_at_ms,
@@ -114,13 +128,6 @@ impl TaskCoordinator {
         else {
             return Ok(RuntimeStartClaim::Empty);
         };
-        let intent = serde_json::from_value::<RuntimeStartIntent>(claim.payload.clone())?;
-        if intent.schema_version != RUNTIME_START_SCHEMA_VERSION || intent.task_id != claim.task_id
-        {
-            return Err(GatewayDaemonError::Protocol(
-                "runtime start Outbox identity or schema mismatch".to_owned(),
-            ));
-        }
         let task = self.store.load_task(&intent.task_id)?;
         if task.owner_actor_id() != &intent.actor.actor_id
             || task.active_run_id() != Some(&intent.run_id)

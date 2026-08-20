@@ -36,6 +36,7 @@ use cosh_gateway_contracts::{
     ids::{
         ApprovalId, InputRequestId, InstallationId, RequestId, RunId, RuntimeInstanceId, TaskId,
     },
+    profile::GatewayCapabilityProfile,
     runtime::{RuntimeInputResponse, RuntimeInputSelections},
 };
 use serde_json::{json, Value};
@@ -53,7 +54,9 @@ mod serve;
 #[cfg(test)]
 use acp_command::with_observation_sequence;
 use acp_command::{doctor, install_interrupt_handler, run};
-use control::{admin, task, task_only_target};
+#[cfg(test)]
+use control::task_only_target;
+use control::{admin, task};
 use input::{read_intent, read_prompt, terminal_safe};
 use serve::{serve, ServeArgs};
 
@@ -62,13 +65,6 @@ const MAX_PROMPT_BYTES: usize = 256 * 1024;
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const EVENT_DEADLINE: Duration = Duration::from_secs(15);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
-
-// Task submission is intentionally bound to a side-effect-free target. The
-// target identity remains explicit in durable Task records without exposing
-// target assembly to a local CLI caller.
-const TASK_ONLY_TARGET_KIND: &str = "workspace";
-const TASK_ONLY_TARGET_AUTHORITY: &str = "cosh";
-const TASK_ONLY_TARGET_IDENTIFIER: &str = "task-only-v1";
 
 const EXIT_INPUT: u8 = 10;
 const EXIT_PROFILE: u8 = 11;

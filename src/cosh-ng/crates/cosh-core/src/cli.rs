@@ -8,7 +8,7 @@ pub(crate) enum ExecutionProfile {
     /// Existing direct Core/Shell behavior and private control protocol v1.
     #[default]
     Legacy,
-    /// Gateway owns every hosted side effect through private protocol v2.
+    /// Gateway owns every hosted side effect through private protocol v3.
     GatewayBrokeredV1,
 }
 

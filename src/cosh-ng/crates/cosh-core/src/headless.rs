@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+use crate::brokered_profile::{verify_task_only_runtime_tools, BrokeredCapabilityProfileIdentity};
 use crate::cli::CliArgs;
 use crate::compaction::{ContextBudget, ModelCapability};
 #[cfg(test)]
@@ -328,6 +329,8 @@ fn negotiate_profile(
     profile: crate::cli::ExecutionProfile,
     protocol_version: Option<u32>,
     requested_profile: Option<&str>,
+    requested_capability_profile: Option<&BrokeredCapabilityProfileIdentity>,
+    runtime_tools: &[String],
 ) -> Result<(), String> {
     if profile.is_brokered() {
         if protocol_version != Some(BROKERED_CONTROL_PROTOCOL_VERSION) {
@@ -341,6 +344,13 @@ fn negotiate_profile(
                 profile.wire_name()
             ));
         }
+        let requested_capability_profile = requested_capability_profile.ok_or_else(|| {
+            "gateway brokered profile requires a capability_profile identity".to_string()
+        })?;
+        requested_capability_profile
+            .verify_task_only_v1()
+            .map_err(str::to_owned)?;
+        verify_task_only_runtime_tools(runtime_tools).map_err(str::to_owned)?;
         return Ok(());
     }
 
@@ -418,13 +428,21 @@ where
                 protocol_version,
                 capabilities,
                 execution_profile,
+                capability_profile,
             } => {
                 engine.client_capabilities = capabilities;
+                let runtime_tools = engine.tool_names();
                 let negotiation = negotiate_profile(
                     protocol.profile,
                     protocol_version,
                     execution_profile.as_deref(),
+                    capability_profile.as_ref(),
+                    &runtime_tools,
                 );
+                let expected_capability_profile = protocol
+                    .profile
+                    .is_brokered()
+                    .then(BrokeredCapabilityProfileIdentity::task_only_v1);
                 if let Err(error) = negotiation {
                     let expected_version = if protocol.profile.is_brokered() {
                         BROKERED_CONTROL_PROTOCOL_VERSION
@@ -440,6 +458,7 @@ where
                                 .profile
                                 .is_brokered()
                                 .then(|| protocol.profile.wire_name()),
+                            expected_capability_profile,
                             error,
                         ),
                     );
@@ -459,13 +478,18 @@ where
                             .profile
                             .is_brokered()
                             .then(|| protocol.profile.wire_name()),
+                        expected_capability_profile,
+                        protocol
+                            .profile
+                            .is_brokered()
+                            .then(|| runtime_tools.clone()),
                         !protocol.profile.is_brokered() && args.enable_shell_evidence_tool,
                     ),
                 );
                 let init_msg = OutputMessage::system_init(
                     &engine.session_id,
                     &engine.model,
-                    engine.tool_names(),
+                    runtime_tools,
                     session.resumable(),
                 );
                 engine.emit(writer, &init_msg);
@@ -982,33 +1006,83 @@ mod tests {
     use super::*;
 
     #[test]
-    fn brokered_profile_requires_exact_v2_and_profile_ack() {
+    fn brokered_profile_requires_exact_v3_profile_and_inventory() {
         let profile = crate::cli::ExecutionProfile::GatewayBrokeredV1;
+        let capability_profile = BrokeredCapabilityProfileIdentity::task_only_v1();
+        let runtime_tools = vec!["ask_user_question".to_string()];
         assert!(negotiate_profile(
             profile,
             Some(BROKERED_CONTROL_PROTOCOL_VERSION),
-            Some(profile.wire_name())
+            Some(profile.wire_name()),
+            Some(&capability_profile),
+            &runtime_tools,
         )
         .is_ok());
-        assert!(negotiate_profile(profile, None, Some(profile.wire_name())).is_err());
-        assert!(negotiate_profile(profile, Some(CONTROL_PROTOCOL_VERSION), None).is_err());
+        assert!(negotiate_profile(
+            profile,
+            None,
+            Some(profile.wire_name()),
+            Some(&capability_profile),
+            &runtime_tools,
+        )
+        .is_err());
         assert!(negotiate_profile(
             profile,
             Some(BROKERED_CONTROL_PROTOCOL_VERSION),
-            Some("legacy")
+            Some(profile.wire_name()),
+            None,
+            &runtime_tools,
+        )
+        .is_err());
+        assert!(negotiate_profile(
+            profile,
+            Some(BROKERED_CONTROL_PROTOCOL_VERSION),
+            Some("legacy"),
+            Some(&capability_profile),
+            &runtime_tools,
         )
         .is_err());
     }
 
     #[test]
-    fn legacy_profile_keeps_unversioned_and_v1_compatibility() {
-        let profile = crate::cli::ExecutionProfile::Legacy;
-        assert!(negotiate_profile(profile, None, None).is_ok());
-        assert!(negotiate_profile(profile, Some(CONTROL_PROTOCOL_VERSION), None).is_ok());
+    fn brokered_profile_rejects_digest_and_inventory_drift() {
+        let profile = crate::cli::ExecutionProfile::GatewayBrokeredV1;
+        let mut drifted_identity = BrokeredCapabilityProfileIdentity::task_only_v1();
+        drifted_identity.manifest_digest = "0".repeat(64);
+
         assert!(negotiate_profile(
             profile,
             Some(BROKERED_CONTROL_PROTOCOL_VERSION),
-            Some("gateway_brokered_v1")
+            Some(profile.wire_name()),
+            Some(&drifted_identity),
+            &["ask_user_question".to_string()],
+        )
+        .unwrap_err()
+        .contains("manifest digest"));
+        assert!(negotiate_profile(
+            profile,
+            Some(BROKERED_CONTROL_PROTOCOL_VERSION),
+            Some(profile.wire_name()),
+            Some(&BrokeredCapabilityProfileIdentity::task_only_v1()),
+            &["ask_user_question".to_string(), "shell".to_string()],
+        )
+        .unwrap_err()
+        .contains("tool inventory"));
+    }
+
+    #[test]
+    fn legacy_profile_keeps_unversioned_and_v1_compatibility() {
+        let profile = crate::cli::ExecutionProfile::Legacy;
+        assert!(negotiate_profile(profile, None, None, None, &[]).is_ok());
+        assert!(
+            negotiate_profile(profile, Some(CONTROL_PROTOCOL_VERSION), None, None, &[],).is_ok()
+        );
+        assert!(negotiate_profile(
+            profile,
+            Some(BROKERED_CONTROL_PROTOCOL_VERSION),
+            Some("gateway_brokered_v1"),
+            None,
+            &[],
         )
         .is_err());
     }

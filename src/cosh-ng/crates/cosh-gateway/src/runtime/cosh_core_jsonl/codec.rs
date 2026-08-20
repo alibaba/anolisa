@@ -1,5 +1,6 @@
 //! Stateful encoder and decoder for private cosh-core JSONL frames.
 
+use cosh_gateway_contracts::profile::{GatewayCapabilityProfile, GatewayCapabilityProfileIdentity};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -12,6 +13,7 @@ pub struct CoshCoreJsonlCodec {
     max_frame_bytes: usize,
     phase: CoshCoreProtocolPhase,
     profile: CoshCoreExecutionProfile,
+    capability_profile: Option<GatewayCapabilityProfileIdentity>,
 }
 
 impl CoshCoreJsonlCodec {
@@ -32,10 +34,11 @@ impl CoshCoreJsonlCodec {
             max_frame_bytes,
             phase: CoshCoreProtocolPhase::Created,
             profile: CoshCoreExecutionProfile::Legacy,
+            capability_profile: None,
         })
     }
 
-    /// Creates a codec that requires the exact brokered v2 acknowledgement.
+    /// Creates a codec that requires the exact brokered v3 acknowledgement.
     ///
     /// # Errors
     ///
@@ -46,6 +49,7 @@ impl CoshCoreJsonlCodec {
     ) -> Result<Self, CoshCoreCodecError> {
         let mut codec = Self::new(initialize_request_id, max_frame_bytes)?;
         codec.profile = CoshCoreExecutionProfile::GatewayBrokeredV1;
+        codec.capability_profile = Some(GatewayCapabilityProfile::task_only_v1().identity());
         Ok(codec)
     }
 
@@ -75,6 +79,7 @@ impl CoshCoreJsonlCodec {
                     fire_session_start,
                     protocol_version: self.profile.protocol_version(),
                     execution_profile: self.profile.wire_name(),
+                    capability_profile: self.capability_profile.as_ref(),
                 },
             },
             self.max_frame_bytes,
@@ -344,6 +349,21 @@ impl CoshCoreJsonlCodec {
         if acknowledged_profile != self.profile.wire_name() {
             return Err(CoshCoreCodecError::InitializeProfileMismatch);
         }
+        if envelope.response.response.capability_profile != self.capability_profile {
+            return Err(CoshCoreCodecError::InitializeProfileMismatch);
+        }
+        if self.profile == CoshCoreExecutionProfile::GatewayBrokeredV1 {
+            let runtime_tools = envelope
+                .response
+                .response
+                .runtime_tools
+                .as_ref()
+                .ok_or(CoshCoreCodecError::InitializeCapabilitiesMissing)?;
+            let runtime_tools = runtime_tools.iter().map(String::as_str).collect::<Vec<_>>();
+            GatewayCapabilityProfile::task_only_v1()
+                .verify_runtime_tools(&runtime_tools)
+                .map_err(|_| CoshCoreCodecError::InitializeCapabilitiesInvalid)?;
+        }
         let capabilities = envelope
             .response
             .response
@@ -471,16 +491,18 @@ struct InitializeInput<'a> {
     #[serde(rename = "type")]
     message_type: &'static str,
     request_id: &'a str,
-    request: InitializeRequest,
+    request: InitializeRequest<'a>,
 }
 
 #[derive(Serialize)]
-struct InitializeRequest {
+struct InitializeRequest<'a> {
     subtype: &'static str,
     fire_session_start: bool,
     protocol_version: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_profile: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capability_profile: Option<&'a GatewayCapabilityProfileIdentity>,
 }
 
 #[derive(Serialize)]
@@ -568,6 +590,10 @@ struct WireInitializeBody {
     protocol_version: Option<u32>,
     #[serde(default)]
     execution_profile: Option<String>,
+    #[serde(default)]
+    capability_profile: Option<GatewayCapabilityProfileIdentity>,
+    #[serde(default)]
+    runtime_tools: Option<Vec<String>>,
     #[serde(default)]
     capabilities: Option<CoshCoreCapabilities>,
     #[serde(default)]

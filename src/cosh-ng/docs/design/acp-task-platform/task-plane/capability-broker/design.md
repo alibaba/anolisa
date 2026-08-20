@@ -4,10 +4,12 @@
 
 ## Status and decision
 
-This design is based on upstream commit `e90d9d94`. Its universal Broker model remains the
+This increment is based on upstream commit `a6592234`. Its universal Broker model remains the
 architecture target, not an accepted Phase 1 claim. The accepted production scope is narrower:
 `serve` and the library daemon admit only `core` / `gateway-brokered-v1`, whose immutable inventory
-is task-only and contains `ask_user_question` only. No production `ExecutionTarget` or
+is bound to the pinned `task-only-v1` manifest and contains `ask_user_question` only. Gateway,
+durable Runtime start intent, and Core v3 negotiation verify that identity and exact inventory
+before launch or Task input. No production `ExecutionTarget` or
 checkpoint/ws-ckpt dependency is wired in this PR. Every side-effecting hook, Skill, MCP, extension,
 Shell, file, process, and network path is disabled in this profile. ACP `doctor`/`run`, legacy CLI
 commands, and standalone Shell are explicitly ungoverned interoperability/rollback paths and
@@ -381,7 +383,8 @@ output. Transport timeout is not evidence that an effect did not occur.
    production execution remains unimplemented.**
 4. Admit only `core` / `gateway-brokered-v1` with the task-only inventory in production `serve`; keep old CLI and ACP
    `doctor`/`run` explicitly ungoverned.
-5. Use private COSH brokered v2 and expose only the task-only `ask_user_question` capability.
+5. Use private COSH brokered v3, bind the pinned `task-only-v1` manifest, and expose only
+   `ask_user_question`.
 6. Keep Shell/ACP/Skills/MCP/extensions disabled until a later phase provides complete adapters.
 7. Remove or explicitly isolate legacy bypasses only after parity and recovery acceptance passes.
 

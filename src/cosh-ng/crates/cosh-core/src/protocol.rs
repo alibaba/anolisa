@@ -4,12 +4,13 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::brokered_profile::BrokeredCapabilityProfileIdentity;
 use crate::config::ApprovalMode;
 
 /// Exact legacy shell-to-core control protocol version supported by this binary.
 pub const CONTROL_PROTOCOL_VERSION: u32 = 1;
 /// Exact private protocol version for the Gateway-owned execution profile.
-pub const BROKERED_CONTROL_PROTOCOL_VERSION: u32 = 2;
+pub const BROKERED_CONTROL_PROTOCOL_VERSION: u32 = 3;
 
 // =====================================================================
 // Auth types (used by CoreControlRequest::AuthRequired)
@@ -152,9 +153,12 @@ pub enum ShellControlRequest {
         protocol_version: Option<u32>,
         #[serde(default)]
         capabilities: ClientControlCapabilities,
-        /// Exact launch profile requested by a v2 Gateway peer.
+        /// Exact launch profile requested by a brokered Gateway peer.
         #[serde(default)]
         execution_profile: Option<String>,
+        /// Closed capability identity requested by a v3 Gateway peer.
+        #[serde(default)]
+        capability_profile: Option<BrokeredCapabilityProfileIdentity>,
     },
 
     #[serde(rename = "interrupt")]
@@ -308,6 +312,10 @@ pub struct CoreControlResponseBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub capability_profile: Option<BrokeredCapabilityProfileIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_tools: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<CoreControlCapabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -323,7 +331,7 @@ pub struct CoreControlCapabilities {
     /// sends receipts to a core that understands them; older or mock
     /// providers without this capability never see receipt lines.
     pub can_handle_approval_receipt: bool,
-    /// v2 can suspend one side-effect-free question for Gateway resolution.
+    /// Brokered control can suspend one side-effect-free question for Gateway resolution.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub can_handle_brokered_ask_user: bool,
 }
@@ -532,6 +540,8 @@ impl OutputMessage {
             request_id,
             CONTROL_PROTOCOL_VERSION,
             None,
+            None,
+            None,
             can_handle_shell_evidence_tool,
         )
     }
@@ -541,6 +551,8 @@ impl OutputMessage {
         request_id: &str,
         protocol_version: u32,
         execution_profile: Option<&str>,
+        capability_profile: Option<BrokeredCapabilityProfileIdentity>,
+        runtime_tools: Option<Vec<String>>,
         can_handle_shell_evidence_tool: bool,
     ) -> Self {
         Self::ControlResponse {
@@ -551,6 +563,8 @@ impl OutputMessage {
                     subtype: "initialize".to_string(),
                     protocol_version,
                     execution_profile: execution_profile.map(str::to_string),
+                    capability_profile,
+                    runtime_tools,
                     capabilities: Some(CoreControlCapabilities {
                         can_handle_can_use_tool: true,
                         can_handle_host_executed_shell_tool_result: execution_profile.is_none(),
@@ -570,6 +584,7 @@ impl OutputMessage {
             request_id,
             CONTROL_PROTOCOL_VERSION,
             None,
+            None,
             format!(
                 "unsupported control protocol version {received_version}; expected exact version {CONTROL_PROTOCOL_VERSION}"
             ),
@@ -581,6 +596,7 @@ impl OutputMessage {
         request_id: &str,
         protocol_version: u32,
         execution_profile: Option<&str>,
+        capability_profile: Option<BrokeredCapabilityProfileIdentity>,
         error: String,
     ) -> Self {
         Self::ControlResponse {
@@ -591,6 +607,8 @@ impl OutputMessage {
                     subtype: "initialize".to_string(),
                     protocol_version,
                     execution_profile: execution_profile.map(str::to_string),
+                    capability_profile,
+                    runtime_tools: None,
                     capabilities: None,
                     error: Some(error),
                 },
@@ -998,12 +1016,14 @@ mod tests {
                         protocol_version,
                         capabilities,
                         execution_profile,
+                        capability_profile,
                     } => {
                         assert!(fire_session_start);
                         assert!(protocol_version.is_none());
                         assert!(!capabilities.can_handle_can_use_tool);
                         assert!(!capabilities.can_handle_host_executed_shell);
                         assert!(execution_profile.is_none());
+                        assert!(capability_profile.is_none());
                     }
                     _ => panic!("expected Initialize variant"),
                 }
@@ -1014,23 +1034,42 @@ mod tests {
 
     #[test]
     fn parse_initialize_request_preserves_profile_and_capabilities() {
-        let json = r#"{"request_id":"init-2","type":"control_request","request":{"subtype":"initialize","protocol_version":2,"capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell":true},"execution_profile":"gateway_brokered_v1"}}"#;
-        let msg: InputMessage = serde_json::from_str(json).expect("should parse initialize");
+        let identity = BrokeredCapabilityProfileIdentity::task_only_v1();
+        let json = serde_json::json!({
+            "request_id": "init-3",
+            "type": "control_request",
+            "request": {
+                "subtype": "initialize",
+                "protocol_version": BROKERED_CONTROL_PROTOCOL_VERSION,
+                "capabilities": {
+                    "can_handle_can_use_tool": true,
+                    "can_handle_host_executed_shell": true
+                },
+                "execution_profile": "gateway_brokered_v1",
+                "capability_profile": identity
+            }
+        });
+        let msg: InputMessage = serde_json::from_value(json).expect("should parse initialize");
         match msg {
             InputMessage::ControlRequest {
                 request_id,
                 request,
             } => {
-                assert_eq!(request_id, "init-2");
+                assert_eq!(request_id, "init-3");
                 match request {
                     ShellControlRequest::Initialize {
                         capabilities,
                         execution_profile,
+                        capability_profile,
                         ..
                     } => {
                         assert!(capabilities.can_handle_can_use_tool);
                         assert!(capabilities.can_handle_host_executed_shell);
                         assert_eq!(execution_profile.as_deref(), Some("gateway_brokered_v1"));
+                        assert_eq!(
+                            capability_profile,
+                            Some(BrokeredCapabilityProfileIdentity::task_only_v1())
+                        );
                     }
                     _ => panic!("expected Initialize variant"),
                 }
@@ -1212,11 +1251,14 @@ mod tests {
     }
 
     #[test]
-    fn serialize_brokered_initialize_ack_is_v2_and_profile_bound() {
+    fn serialize_brokered_initialize_ack_is_v3_and_profile_bound() {
+        let capability_profile = BrokeredCapabilityProfileIdentity::task_only_v1();
         let msg = OutputMessage::initialize_success_for_profile(
             "init-brokered",
             BROKERED_CONTROL_PROTOCOL_VERSION,
             Some("gateway_brokered_v1"),
+            Some(capability_profile.clone()),
+            Some(vec!["ask_user_question".to_string()]),
             false,
         );
         let value = serde_json::to_value(msg).unwrap();
@@ -1226,6 +1268,14 @@ mod tests {
             BROKERED_CONTROL_PROTOCOL_VERSION
         );
         assert_eq!(response["execution_profile"], "gateway_brokered_v1");
+        assert_eq!(
+            response["capability_profile"],
+            serde_json::json!(capability_profile)
+        );
+        assert_eq!(
+            response["runtime_tools"],
+            serde_json::json!(["ask_user_question"])
+        );
         assert!(response["capabilities"]
             .get("can_handle_hosted_checkpoint_create")
             .is_none());
@@ -1249,6 +1299,8 @@ mod tests {
             "gateway-init-1",
             CONTROL_PROTOCOL_VERSION,
             None,
+            None,
+            None,
             false,
         );
         assert_eq!(
@@ -1257,14 +1309,16 @@ mod tests {
         );
 
         let brokered_ack = OutputMessage::initialize_success_for_profile(
-            "gateway-init-v2",
+            "gateway-init-v3",
             BROKERED_CONTROL_PROTOCOL_VERSION,
             Some("gateway_brokered_v1"),
+            Some(BrokeredCapabilityProfileIdentity::task_only_v1()),
+            Some(vec!["ask_user_question".to_string()]),
             false,
         );
         assert_eq!(
             serde_json::to_value(brokered_ack).unwrap(),
-            corpus["gateway_brokered_v2"]["initialize_ack"]
+            corpus["gateway_brokered_v3"]["initialize_ack"]
         );
 
         let ask_user_request = OutputMessage::ControlRequest {
@@ -1282,11 +1336,11 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(ask_user_request).unwrap(),
-            corpus["gateway_brokered_v2"]["ask_user_request"]
+            corpus["gateway_brokered_v3"]["ask_user_request"]
         );
 
         let ask_user_answer: InputMessage =
-            serde_json::from_value(corpus["gateway_brokered_v2"]["ask_user_answer"].clone())
+            serde_json::from_value(corpus["gateway_brokered_v3"]["ask_user_answer"].clone())
                 .unwrap();
         assert!(matches!(
             ask_user_answer,

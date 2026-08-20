@@ -28,9 +28,9 @@ fn initialized_codec() -> CoshCoreJsonlCodec {
 
 fn initialized_brokered_codec() -> CoshCoreJsonlCodec {
     let corpus = private_wire_corpus();
-    let mut codec = CoshCoreJsonlCodec::new_gateway_brokered("gateway-init-v2", 4096).unwrap();
+    let mut codec = CoshCoreJsonlCodec::new_gateway_brokered("gateway-init-v3", 4096).unwrap();
     codec.initialize_frame(false).unwrap();
-    let response = fixture_frame(&corpus["gateway_brokered_v2"]["initialize_ack"]);
+    let response = fixture_frame(&corpus["gateway_brokered_v3"]["initialize_ack"]);
     assert!(matches!(
         codec.decode_frame(&response).unwrap(),
         CoshCoreObservation::Initialized(_)
@@ -51,23 +51,28 @@ fn initialize_is_explicitly_private_version_one() {
 }
 
 #[test]
-fn brokered_initialize_is_exact_private_v2_and_profile_bound() {
+fn brokered_initialize_is_exact_private_v3_and_profile_bound() {
     let corpus = private_wire_corpus();
-    let mut codec = CoshCoreJsonlCodec::new_gateway_brokered("gateway-init-v2", 4096).unwrap();
+    let mut codec = CoshCoreJsonlCodec::new_gateway_brokered("gateway-init-v3", 4096).unwrap();
     let frame = codec.initialize_frame(false).unwrap();
     let value: Value = serde_json::from_str(frame.trim()).unwrap();
-    assert_eq!(value, corpus["gateway_brokered_v2"]["initialize_request"]);
+    assert_eq!(value, corpus["gateway_brokered_v3"]["initialize_request"]);
 }
 
 #[test]
 fn brokered_initialize_rejects_missing_or_wrong_profile_and_capabilities() {
     let corpus = private_wire_corpus();
-    let invalid = corpus["gateway_brokered_v2"]["invalid_initialize_acks"]
+    let invalid = corpus["gateway_brokered_v3"]["invalid_initialize_acks"]
         .as_object()
         .expect("invalid initialize acknowledgement map");
 
-    for case in ["missing_profile", "wrong_profile"] {
-        let mut codec = CoshCoreJsonlCodec::new_gateway_brokered("gateway-init-v2", 4096).unwrap();
+    for case in [
+        "missing_profile",
+        "wrong_profile",
+        "missing_capability_profile",
+        "drifted_capability_profile",
+    ] {
+        let mut codec = CoshCoreJsonlCodec::new_gateway_brokered("gateway-init-v3", 4096).unwrap();
         codec.initialize_frame(false).unwrap();
         let response = fixture_frame(&invalid[case]);
         assert!(
@@ -85,7 +90,7 @@ fn brokered_initialize_rejects_missing_or_wrong_profile_and_capabilities() {
         ("missing_capabilities", "missing_capabilities"),
         ("wrong_capabilities", "wrong_capabilities"),
     ] {
-        let mut codec = CoshCoreJsonlCodec::new_gateway_brokered("gateway-init-v2", 4096).unwrap();
+        let mut codec = CoshCoreJsonlCodec::new_gateway_brokered("gateway-init-v3", 4096).unwrap();
         codec.initialize_frame(false).unwrap();
         let response = fixture_frame(&invalid[case]);
         let error = codec.decode_frame(&response).unwrap_err();
@@ -95,8 +100,8 @@ fn brokered_initialize_rejects_missing_or_wrong_profile_and_capabilities() {
                 "wrong_version" => matches!(
                     error,
                     CoshCoreCodecError::InitializeVersionMismatch {
-                        required: 2,
-                        actual: 1
+                        required: 3,
+                        actual: 2
                     }
                 ),
                 "missing_capabilities" => {
@@ -109,6 +114,39 @@ fn brokered_initialize_rejects_missing_or_wrong_profile_and_capabilities() {
             },
             "case {case}: {error:?}"
         );
+    }
+}
+
+#[test]
+fn brokered_initialize_rejects_runtime_tool_inventory_drift() {
+    let corpus = private_wire_corpus();
+    let mut missing = corpus["gateway_brokered_v3"]["initialize_ack"].clone();
+    missing["response"]["response"]
+        .as_object_mut()
+        .unwrap()
+        .remove("runtime_tools");
+    let mut null = corpus["gateway_brokered_v3"]["initialize_ack"].clone();
+    null["response"]["response"]["runtime_tools"] = serde_json::json!(null);
+    for acknowledgement in [missing, null] {
+        let mut codec = CoshCoreJsonlCodec::new_gateway_brokered("gateway-init-v3", 4096).unwrap();
+        codec.initialize_frame(false).unwrap();
+        assert!(matches!(
+            codec.decode_frame(&fixture_frame(&acknowledgement)),
+            Err(CoshCoreCodecError::InitializeCapabilitiesMissing)
+        ));
+    }
+    for runtime_tools in [
+        serde_json::json!([]),
+        serde_json::json!(["ask_user_question", "shell"]),
+    ] {
+        let mut acknowledgement = corpus["gateway_brokered_v3"]["initialize_ack"].clone();
+        acknowledgement["response"]["response"]["runtime_tools"] = runtime_tools;
+        let mut codec = CoshCoreJsonlCodec::new_gateway_brokered("gateway-init-v3", 4096).unwrap();
+        codec.initialize_frame(false).unwrap();
+        assert!(matches!(
+            codec.decode_frame(&fixture_frame(&acknowledgement)),
+            Err(CoshCoreCodecError::InitializeCapabilitiesInvalid)
+        ));
     }
 }
 
@@ -138,14 +176,14 @@ fn brokered_callback_frames_are_closed_golden_shapes() {
             .trim(),
     )
     .unwrap();
-    assert_eq!(answer, corpus["gateway_brokered_v2"]["ask_user_answer"]);
+    assert_eq!(answer, corpus["gateway_brokered_v3"]["ask_user_answer"]);
 }
 
 #[test]
 fn brokered_ask_user_request_is_strictly_typed() {
     let corpus = private_wire_corpus();
     let mut codec = initialized_brokered_codec();
-    let request = fixture_frame(&corpus["gateway_brokered_v2"]["ask_user_request"]);
+    let request = fixture_frame(&corpus["gateway_brokered_v3"]["ask_user_request"]);
 
     assert_eq!(
         codec.decode_frame(&request).unwrap(),

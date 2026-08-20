@@ -42,6 +42,7 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
             intent: intent.intent,
             target: intent.target,
             workspace: intent.workspace,
+            capability_profile: intent.capability_profile,
             lease_generation: lease.generation,
         };
         match self.factory.open(&scheduled) {

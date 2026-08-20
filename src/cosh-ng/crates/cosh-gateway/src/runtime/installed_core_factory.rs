@@ -11,6 +11,7 @@ use cosh_gateway_contracts::{
     common::{BoundedName, Digest},
     error::{ContractError, ErrorCategory},
     ids::{AgentSessionId, InstallationId, RuntimeBindingId, RuntimeInstanceId},
+    profile::GatewayCapabilityProfile,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -168,7 +169,11 @@ impl InstalledBrokeredCoreRuntimePortFactory {
 
 impl AgentRuntimePortFactory for InstalledBrokeredCoreRuntimePortFactory {
     fn create(&mut self, run: &ScheduledRun) -> Result<ScheduledRuntimePort, ContractError> {
-        if run.runtime.runtime.as_str() != "core"
+        if GatewayCapabilityProfile::task_only_v1()
+            .verify_identity(&run.capability_profile)
+            .is_err()
+            || run.target != GatewayCapabilityProfile::task_only_v1().governed_target()
+            || run.runtime.runtime.as_str() != "core"
             || run.runtime.profile.as_ref().map(BoundedName::as_str)
                 != Some(GATEWAY_BROKERED_CORE_RUNTIME_PROFILE)
         {

@@ -422,7 +422,7 @@ fn brokered_profile_rejects_checkpoint_request_before_capability() {
     let workspace = tempfile::tempdir().unwrap();
     let script = r#"
 IFS= read -r line
-printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"__INIT_REQUEST_ID__","response":{"subtype":"initialize","protocol_version":2,"execution_profile":"gateway_brokered_v1","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":false,"can_handle_approval_receipt":true,"can_handle_hosted_checkpoint_create":false,"can_handle_brokered_ask_user":true}}}}'
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"__INIT_REQUEST_ID__","response":{"subtype":"initialize","protocol_version":3,"execution_profile":"gateway_brokered_v1","capability_profile":{"profile_id":"task-only-v1","manifest_digest":"2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"},"runtime_tools":["ask_user_question"],"capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":false,"can_handle_approval_receipt":true,"can_handle_hosted_checkpoint_create":false,"can_handle_brokered_ask_user":true}}}}'
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"provider-session"}'
 IFS= read -r line
 printf '%s\n' '{"type":"stream_event","event":{"type":"message_start"}}'
@@ -475,7 +475,7 @@ fn brokered_ask_user_is_exact_single_use_and_side_effect_free() {
     let workspace = tempfile::tempdir().unwrap();
     let script = r#"
 IFS= read -r line
-printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"__INIT_REQUEST_ID__","response":{"subtype":"initialize","protocol_version":2,"execution_profile":"gateway_brokered_v1","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":false,"can_handle_approval_receipt":true,"can_handle_hosted_checkpoint_create":false,"can_handle_brokered_ask_user":true}}}}'
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"__INIT_REQUEST_ID__","response":{"subtype":"initialize","protocol_version":3,"execution_profile":"gateway_brokered_v1","capability_profile":{"profile_id":"task-only-v1","manifest_digest":"2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"},"runtime_tools":["ask_user_question"],"capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":false,"can_handle_approval_receipt":true,"can_handle_hosted_checkpoint_create":false,"can_handle_brokered_ask_user":true}}}}'
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"provider-session"}'
 IFS= read -r line
 printf '%s\n' '{"type":"stream_event","event":{"type":"message_start"}}'
@@ -603,7 +603,7 @@ fn brokered_ask_user_resolution_after_cancel_fails_closed() {
     let workspace = tempfile::tempdir().unwrap();
     let script = r#"
 IFS= read -r line
-printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"__INIT_REQUEST_ID__","response":{"subtype":"initialize","protocol_version":2,"execution_profile":"gateway_brokered_v1","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":false,"can_handle_approval_receipt":true,"can_handle_hosted_checkpoint_create":false,"can_handle_brokered_ask_user":true}}}}'
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"__INIT_REQUEST_ID__","response":{"subtype":"initialize","protocol_version":3,"execution_profile":"gateway_brokered_v1","capability_profile":{"profile_id":"task-only-v1","manifest_digest":"2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"},"runtime_tools":["ask_user_question"],"capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":false,"can_handle_approval_receipt":true,"can_handle_hosted_checkpoint_create":false,"can_handle_brokered_ask_user":true}}}}'
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"provider-session"}'
 IFS= read -r line
 printf '%s\n' '{"type":"stream_event","event":{"type":"message_start"}}'
@@ -675,7 +675,7 @@ fn brokered_profile_rejects_generic_permission_and_unknown_intent() {
     let workspace = tempfile::tempdir().unwrap();
     let script = r#"
 IFS= read -r line
-printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"__INIT_REQUEST_ID__","response":{"subtype":"initialize","protocol_version":2,"execution_profile":"gateway_brokered_v1","capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":false,"can_handle_approval_receipt":true,"can_handle_hosted_checkpoint_create":false,"can_handle_brokered_ask_user":true}}}}'
+printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"__INIT_REQUEST_ID__","response":{"subtype":"initialize","protocol_version":3,"execution_profile":"gateway_brokered_v1","capability_profile":{"profile_id":"task-only-v1","manifest_digest":"2b95e0f3e28df8eb2b7930f2dec3650ffe399f971671c971865e4663c382c94a"},"runtime_tools":["ask_user_question"],"capabilities":{"can_handle_can_use_tool":true,"can_handle_host_executed_shell_tool_result":false,"can_handle_approval_receipt":true,"can_handle_hosted_checkpoint_create":false,"can_handle_brokered_ask_user":true}}}}'
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"provider-session"}'
 IFS= read -r line
 printf '%s\n' '{"type":"stream_event","event":{"type":"message_start"}}'

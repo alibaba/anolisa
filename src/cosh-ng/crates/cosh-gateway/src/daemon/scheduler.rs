@@ -19,6 +19,7 @@ use cosh_gateway_contracts::common::{
 };
 use cosh_gateway_contracts::error::{ContractError, ErrorCategory};
 use cosh_gateway_contracts::ids::{ActorId, InputRequestId, InstallationId, RunId, TaskId};
+use cosh_gateway_contracts::profile::{GatewayCapabilityProfile, GatewayCapabilityProfileIdentity};
 use cosh_gateway_contracts::task::{
     CancelReason, CancellationStage, RuntimeUpdate, TaskEvent, TaskState,
 };

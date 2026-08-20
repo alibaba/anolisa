@@ -4,9 +4,9 @@
 
 ## 基线结果
 
-**整体结果：基于上游 `e90d9d94` 的候选实现为 PARTIAL，Phase 1 仍是 NOT ACCEPTED。**
+**整体结果：基于上游 `a6592234` 的候选实现为 PARTIAL，Phase 1 仍是 NOT ACCEPTED。**
 候选实现加入 neutral `AgentRuntimePort`，并在两个明确私有的 COSH profile 上实现 supervised
-`CoshCoreBridge`：legacy Shell/Core v1 与 Gateway brokered v2。Bridge 已约束 public identity 与
+`CoshCoreBridge`：legacy Shell/Core v1 与 Gateway brokered v3。Bridge 已约束 public identity 与
 event 顺序、限制 retained state，并通过 process cleanup 结算 cancel。受约束的 Gateway production
 profile 是 task-only，只有 `ask_user_question`，没有 production `ExecutionTarget`，也不依赖
 checkpoint/ws-ckpt。通用 Capability/Permit/Execution contract 属后续基础。更广的 tool execution、
@@ -24,7 +24,7 @@ resume/recovery、Shell ownership migration、real-provider evidence 与人工 T
 
 ## 已检查证据
 
-- 上游源码基线：`e90d9d94`。
+- 上游源码基线：`a6592234`。
 - [`protocol.rs`](../../../../../crates/cosh-core/src/protocol.rs) 定义 exact private protocol v1 和全部当前
   message shape。
 - [`headless.rs`](../../../../../crates/cosh-core/src/headless.rs) negotiation 并运行 provider turn。
@@ -39,7 +39,9 @@ resume/recovery、Shell ownership migration、real-provider evidence 与人工 T
 - [`runtime/bounded_io.rs`](../../../../../crates/cosh-gateway/src/runtime/bounded_io.rs) 实现 bounded
   stdout framing 与 stderr-tail retention。
 - [`runtime/cosh_core_jsonl.rs`](../../../../../crates/cosh-gateway/src/runtime/cosh_core_jsonl.rs) 实现严格的
-  private v1/v2 initialization 与 typed wire observation，不使用 ACP 命名。
+  private v1/v3 initialization 与 typed wire observation，不使用 ACP 命名。
+- [`profile.rs`](../../../../../crates/cosh-gateway-contracts/src/profile.rs) 固定
+  `task-only-v1` manifest identity、governed target 与准确 Runtime inventory。
 - [`runtime/port.rs`](../../../../../crates/cosh-gateway/src/runtime/port.rs) 定义 provider-neutral、
   object-safe command/event boundary 与脱敏 error。
 - [`runtime/cosh_core_bridge.rs`](../../../../../crates/cosh-gateway/src/runtime/cosh_core_bridge.rs) 绑定
@@ -51,9 +53,9 @@ resume/recovery、Shell ownership migration、real-provider evidence 与人工 T
 | ID | 验收项 | 基线 | 证据或缺失产物 |
 | --- | --- | --- | --- |
 | CCB-001 | Bridge 实现 neutral `AgentRuntimePort`。 | Library 切片 PASS | Object-safe port 与 Core implementation 可编译，并通过 focused lifecycle test。 |
-| CCB-002 | Private COSH v1/v2 与 ACP v1 显式分离。 | PASS | Shared dual-version corpus 与两侧 codec 都使用 COSH 名称和版本，两个 profile 均不冒充 ACP。 |
-| CCB-003 | Task input admission 前 exact initialization 成功。 | PARTIAL | Gateway 在 Prompt 前完成 brokered v2 negotiation 并要求先交付 `SessionOpened`；daemon 在 prompt 前持久化 Runtime binding，完整 Core recovery 仍缺。 |
-| CCB-004 | Gateway production 拒绝 legacy、missing 与 mismatched negotiation。 | PASS | Cross-implementation negative fixture 在 input 前拒绝错误或缺失的 version/profile/capability；production 要求精确 brokered v2。 |
+| CCB-002 | Private COSH v1/v3 与 ACP v1 显式分离。 | PASS | Shared dual-version corpus 与两侧 codec 都使用 COSH 名称和版本，两个 profile 均不冒充 ACP。 |
+| CCB-003 | Task input admission 前 exact initialization 成功。 | PARTIAL | Gateway 在 Prompt 前完成 brokered v3 negotiation 并要求先交付 `SessionOpened`；daemon 在 prompt 前持久化 Runtime binding，完整 Core recovery 仍缺。 |
+| CCB-004 | Gateway production 拒绝 legacy、missing 与 mismatched negotiation。 | PASS | Cross-implementation negative fixture 在 input 前拒绝错误或缺失的 version、execution profile、capability-profile identity、Runtime inventory 与 capability；production 要求精确 brokered v3。 |
 | CCB-005 | `RuntimeSupervisor` 是 child process lifecycle 唯一 owner。 | PARTIAL | 新 supervisor 独占一个 child/group/pipe/reap；现有 Shell core owner 与 restart policy 尚未迁移。 |
 | CCB-006 | 每种 JSONL message 映射成有界有序 Runtime event/command。 | PARTIAL | Session、text、tool observation、result、cancel 与 transport failure 已用 monotonic sequence 映射；question/auth/tool permission、usage、environment、durable backpressure 与完整 golden 仍缺。 |
 | CCB-007 | Task/Run/runtime/Agent/provider ID 保持独立。 | PARTIAL | Daemon 持久化 fenced Runtime binding 并拒绝 stale generation；完整 provider-session recovery 仍缺。 |
@@ -65,8 +67,8 @@ resume/recovery、Shell ownership migration、real-provider evidence 与人工 T
 | CCB-013 | Process cancel escalation、kill group 并 reap child。 | PARTIAL | Focused test 覆盖 interrupt、cancelled terminal、TERM/KILL/reap 与同步 fallback cleanup；仍缺 descendant 与 cancel/result/EOF race fixture。 |
 | CCB-014 | Provider session persistence 与 Task storage 分离。 | PASS | 当前 `SessionStore` 是 workspace-scoped provider state。 |
 | CCB-015 | Crash/restart 不会静默重发 uncertain prompt。 | PARTIAL | Runtime binding/restart convergence 已持久且 fail closed；side-effect uncertainty reconciliation 与完整 prompt/recovery fixture 属后续工作。 |
-| CCB-016 | Gateway 不通过 Rust dependency 依赖 core implementation 或 Shell。 | PASS | `cosh-gateway` mirror private wire type，不依赖 core/Shell crate。 |
-| CCB-017 | Phase 1 brokered inventory 与 private-protocol profile 决策已固化。 | Scope decision PASS | Gateway production 使用 private COSH v2，只暴露 task-only `ask_user_question`。Legacy v1 留给 standalone Shell；checkpoint/ws-ckpt 与 Shell attachment/owner migration 属后续工作。 |
+| CCB-016 | Gateway 与 Core 保持单向 process/wire boundary。 | PASS | `cosh-gateway` 不依赖 core/Shell crate，`cosh-core` 也不依赖 Gateway crate。双方各自持有 private wire shape，并通过 shared golden corpus 检测 drift。 |
+| CCB-017 | Phase 1 brokered inventory 与 private-protocol profile 决策已固化。 | Scope decision PASS | Gateway production 使用带固定 `task-only-v1` identity 的 private COSH v3，只暴露 `ask_user_question`。Legacy v1 留给 standalone Shell；checkpoint/ws-ckpt 与 Shell attachment/owner migration 属后续工作。 |
 
 Legacy Shell behavior 与 ACP `doctor`/`run` interoperability 是 ungoverned compatibility path，不证明
 Gateway-governed path 已存在。
@@ -75,7 +77,7 @@ Gateway-governed path 已存在。
 
 | 产物 | 必须提供的证明 |
 | --- | --- |
-| `cosh-private-wire-dual-version` canonical corpus | Legacy v1 initialize/ack、brokered v2 task/question request/ack/result，以及 wrong/missing version/profile/capability case。 |
+| `cosh-private-wire-dual-version` canonical corpus | Legacy v1 initialize/ack、brokered v3 task/question request/ack/result，以及 wrong/missing version/profile/manifest/inventory/capability case。 |
 | Cross-implementation fixture report | Core encoder、Shell mirror 与 Gateway decoder 一致。 |
 | `runtime-supervisor-killpoints` | Spawn、negotiate、stream、cancel、EOF、wait、shutdown 与 restart race。 |
 | `runtime-event-mapping` golden | 每种 message 的有界 normalized event 与 ID correlation。 |
@@ -93,19 +95,25 @@ cargo test --package cosh-core --test jsonl_protocol
 cargo test --package cosh-gateway-contracts runtime_schema
 ```
 
-当前未提交候选实现的 bridge-targeted evidence：
+当前 rebased candidate 的 scoped evidence：
 
 ```bash
-cargo +1.88.0 test --locked --package cosh-gateway cosh_core_bridge
-cargo +1.88.0 test --locked --package cosh-core --test jsonl_protocol
-cargo +1.88.0 test --locked --package cosh-gateway cosh_core_jsonl
+cargo test --locked -p cosh-gateway-contracts profile
+cargo test --locked -p cosh-core brokered_profile
+cargo test --locked -p cosh-core private_wire_dual_version_corpus_matches_core_types
+cargo test --locked -p cosh-gateway runtime_tool_inventory
+cargo test --locked -p cosh-gateway stale_validated_outbox_attempt_is_normal_contention
+cargo test --locked -p cosh-gateway invalid_start_intents_are_rejected_before_outbox_claim
+cargo test --locked -p cosh-gateway exact_task_only_v2_intent_maps_to_current_profile
+cargo clippy --locked -p cosh-gateway-contracts --all-targets -- -D warnings
+cargo clippy --locked -p cosh-core -p cosh-gateway --all-targets -- -D warnings
+cargo doc --locked --no-deps -p cosh-gateway-contracts
+bash scripts/check-source-layout.sh
 ```
 
-这覆盖 identity fencing、stream 与 terminal mapping、single terminal delivery、open timeout、cross-Run
-rejection、SessionOpened-before-Prompt ordering、idle-cancel rejection、aggregate Prompt bound、retained
-tool-ID bound、cancel 时的 process cleanup，以及 shared dual-version wire corpus。它不能替代完整
-process-tree/race、通用 Broker、recovery、backpressure、real-provider 或 PTY gate。Rustdoc 与 Clippy
-evidence 只会在最终 scoped command 完成后记录。
+这覆盖 manifest 与 inventory admission、Core/Gateway dependency isolation、exact legacy-v2 mapping、
+stale Outbox-attempt contention 和 shared dual-version wire corpus。它不能替代完整 package/workspace、
+process-tree/race、通用 Broker、recovery、backpressure、real-provider 或 PTY gate；更广覆盖交给 CI。
 
 ## Exit criteria
 

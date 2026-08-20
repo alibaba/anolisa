@@ -1,4 +1,60 @@
 impl SqliteTaskStore {
+    /// Reads the same eligible delivery that [`Self::claim_outbox`] would lease.
+    pub(crate) fn peek_ready_outbox(
+        &self,
+        delivery_kind: &BoundedName,
+        now_ms: u64,
+    ) -> Result<Option<OutboxCandidate>, StoreError> {
+        let now = sqlite_integer(now_ms, "Outbox peek timestamp")?;
+        let candidate = self
+            .connection()
+            .query_row(
+                "SELECT delivery_id, task_id, payload_json, attempt
+                 FROM outbox
+                 WHERE delivery_kind = ?1 AND next_attempt_at_ms <= ?2
+                   AND (state = 'pending'
+                        OR (state = 'leased' AND lease_expires_at_ms <= ?2))
+                 ORDER BY next_attempt_at_ms, created_at_ms, delivery_id
+                 LIMIT 1",
+                params![delivery_kind.as_str(), now],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((delivery_id, task_id, payload_json, attempt)) = candidate else {
+            return Ok(None);
+        };
+        Ok(Some(OutboxCandidate {
+            delivery_id: DeliveryId::parse(&delivery_id).map_err(|error| {
+                corrupt(&format!("invalid Outbox delivery identity: {error}"))
+            })?,
+            task_id: TaskId::parse(&task_id)
+                .map_err(|error| corrupt(&format!("invalid Outbox Task identity: {error}")))?,
+            payload: serde_json::from_str(&payload_json)?,
+            attempt: u64::try_from(attempt)
+                .map_err(|_| corrupt("negative Outbox attempt"))?,
+        }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_outbox_payload_for_test(
+        &mut self,
+        delivery_id: &DeliveryId,
+        payload: &serde_json::Value,
+    ) -> Result<(), StoreError> {
+        let payload = serde_json::to_string(payload)?;
+        self.connection_mut().execute(
+            "UPDATE outbox SET payload_json=?2 WHERE delivery_id=?1",
+            params![delivery_id.as_str(), payload],
+        )?;
+        Ok(())
+    }
 
     /// Claims the oldest ready delivery of one kind in an immediate transaction.
     ///
@@ -16,6 +72,41 @@ impl SqliteTaskStore {
         now_ms: u64,
         lease_expires_at_ms: u64,
     ) -> Result<Option<OutboxClaim>, StoreError> {
+        self.claim_outbox_matching(
+            delivery_kind,
+            None,
+            lease_owner,
+            now_ms,
+            lease_expires_at_ms,
+        )
+    }
+
+    /// Claims only the delivery previously inspected by [`Self::peek_ready_outbox`].
+    pub(crate) fn claim_outbox_candidate(
+        &mut self,
+        delivery_kind: &BoundedName,
+        candidate: &OutboxCandidate,
+        lease_owner: &BoundedOpaque,
+        now_ms: u64,
+        lease_expires_at_ms: u64,
+    ) -> Result<Option<OutboxClaim>, StoreError> {
+        self.claim_outbox_matching(
+            delivery_kind,
+            Some(candidate),
+            lease_owner,
+            now_ms,
+            lease_expires_at_ms,
+        )
+    }
+
+    fn claim_outbox_matching(
+        &mut self,
+        delivery_kind: &BoundedName,
+        expected: Option<&OutboxCandidate>,
+        lease_owner: &BoundedOpaque,
+        now_ms: u64,
+        lease_expires_at_ms: u64,
+    ) -> Result<Option<OutboxClaim>, StoreError> {
         if lease_expires_at_ms <= now_ms {
             return Err(invalid("Outbox lease deadline must be in the future"));
         }
@@ -29,11 +120,16 @@ impl SqliteTaskStore {
                 "SELECT delivery_id, task_id, event_id, payload_json, attempt
                  FROM outbox
                  WHERE delivery_kind = ?1 AND next_attempt_at_ms <= ?2
+                   AND (?3 IS NULL OR delivery_id = ?3)
                    AND (state = 'pending'
                         OR (state = 'leased' AND lease_expires_at_ms <= ?2))
                  ORDER BY next_attempt_at_ms, created_at_ms, delivery_id
                  LIMIT 1",
-                params![delivery_kind.as_str(), now],
+                params![
+                    delivery_kind.as_str(),
+                    now,
+                    expected.map(|candidate| candidate.delivery_id.as_str()),
+                ],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -49,6 +145,23 @@ impl SqliteTaskStore {
             transaction.commit()?;
             return Ok(None);
         };
+        let payload = serde_json::from_str(&payload_json)?;
+        if let Some(expected) = expected {
+            let attempt = u64::try_from(attempt)
+                .map_err(|_| corrupt("negative Outbox attempt"))?;
+            if delivery_id != expected.delivery_id.as_str()
+                || task_id != expected.task_id.as_str()
+                || payload != expected.payload
+            {
+                return Err(corrupt(
+                    "Outbox delivery changed after its read-only validation",
+                ));
+            }
+            if attempt != expected.attempt {
+                transaction.commit()?;
+                return Ok(None);
+            }
+        }
         let next_attempt = attempt
             .checked_add(1)
             .ok_or_else(|| corrupt("Outbox attempt overflow"))?;
@@ -79,7 +192,7 @@ impl SqliteTaskStore {
             event_id: MessageId::parse(&event_id)
                 .map_err(|error| corrupt(&format!("invalid Outbox event identity: {error}")))?,
             delivery_kind: delivery_kind.clone(),
-            payload: serde_json::from_str(&payload_json)?,
+            payload,
             attempt: u64::try_from(next_attempt).map_err(|_| corrupt("negative Outbox attempt"))?,
             lease_owner: lease_owner.clone(),
             lease_expires_at_ms,

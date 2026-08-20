@@ -9,7 +9,7 @@ use thiserror::Error;
 /// Exact private Shell/Core control protocol version implemented by cosh-core.
 pub const PRIVATE_COSH_CONTROL_PROTOCOL_VERSION: u32 = 1;
 /// Exact private protocol version for the Gateway-brokered Core profile.
-pub const BROKERED_COSH_CONTROL_PROTOCOL_VERSION: u32 = 2;
+pub const BROKERED_COSH_CONTROL_PROTOCOL_VERSION: u32 = 3;
 /// Exact launch and acknowledgement name for the brokered Core profile.
 pub const GATEWAY_BROKERED_EXECUTION_PROFILE: &str = "gateway_brokered_v1";
 
