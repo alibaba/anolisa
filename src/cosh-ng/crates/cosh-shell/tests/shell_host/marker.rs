@@ -1166,6 +1166,176 @@ fn shell_host_rejects_forged_osc_markers_without_session_token() {
 }
 
 #[test]
+fn shell_host_pty_statusless_precmd_marker_fails_inflight_command() {
+    // Issue #2413, live-PTY verification: the unit tests feed the parser
+    // directly, but the issue explicitly asks for live-PTY evidence. A real
+    // scripted bash session prints a syntactically valid, token-carrying
+    // precmd marker whose `status` field is omitted (the protocol-drift /
+    // truncation shape) while that printf's own preexec is still in flight;
+    // the host must finish the command as Failed with the -1 missing-exit
+    // sentinel instead of fabricating success. The `toke""n` split keeps
+    // the literal line out of the marker script's secret-redaction patterns
+    // while the shell still prints a well-formed `"token"` key, and
+    // "$COSH_MARKER_TOKEN" expands the session's real token so the
+    // parser's exact-match check accepts the sequence.
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-pty-precmd-driftless-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+
+    let statusless_injection = "printf \"\\033]1337;COSH;{\\\"event\\\":\\\"precmd\\\",\\\"toke\"\"n\\\":\\\"%s\\\",\\\"cwd\\\":\\\"/tmp/driftless-probe\\\"}\\a\" \"$COSH_MARKER_TOKEN\"";
+
+    // The genuine-chain control runs BEFORE the injection: once the forged
+    // precmd has been consumed mid-command, the marker script's own
+    // history/DEBUG-trap state machine treats follow-up queued lines
+    // differently, so the control must not depend on post-injection input.
+    // Isolated mode keeps the host-environment PROMPT_COMMAND/PS1 (e.g. an
+    // audit hook plus a backticked `pwd` prompt on bash 4.2) out of the
+    // session: those make the marker script's DEBUG-trap snapshot logic
+    // clear _COSH_ACTIVE_DEBUG_TRAP after the first prompt, silencing every
+    // later preexec marker and drowning the assertion under environment
+    // noise unrelated to #2413.
+    let mut config = ShellHostConfig::new("pty-precmd-driftless", &work_dir);
+    config.native_mode = false;
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("echo drift-real-probe"),
+            ScriptedInput::user_line(statusless_injection),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    // Discriminating assertion: the status-less precmd must finish its
+    // in-flight printf as Failed with the -1 sentinel, never Completed/0
+    // (the pre-fix behavior from issue #2413).
+    let drifted = output
+        .events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind,
+                ShellEventKind::CommandCompleted | ShellEventKind::CommandFailed
+            ) && event
+                .command
+                .as_deref()
+                .is_some_and(|command| command.contains("driftless-probe"))
+        })
+        .expect("drifted injection command finish event");
+    assert_eq!(drifted.kind, ShellEventKind::CommandFailed);
+    assert_eq!(drifted.exit_code, Some(-1));
+
+    // Control: the genuine marker chain keeps reporting real completions
+    // after the drifted sequence.
+    let real = output
+        .events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind,
+                ShellEventKind::CommandCompleted | ShellEventKind::CommandFailed
+            ) && event
+                .command
+                .as_deref()
+                .is_some_and(|command| command.contains("drift-real-probe"))
+        })
+        .expect("real command finish event");
+    assert_eq!(real.kind, ShellEventKind::CommandCompleted);
+    assert_eq!(real.exit_code, Some(0));
+
+    // The ledger agrees: the drifted command lands as a Failed block with
+    // the -1 sentinel, matching the journal-replay contract (#2105/PR
+    // #2412).
+    let ledger = build_command_blocks(&output.events);
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+    let drifted_block = ledger
+        .blocks
+        .iter()
+        .find(|block| block.command.contains("driftless-probe"))
+        .expect("drifted command block");
+    assert_eq!(drifted_block.exit_code, -1);
+    assert_eq!(
+        drifted_block.status,
+        cosh_shell::types::CommandStatus::Failed
+    );
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+}
+
+#[test]
+fn shell_host_pty_statusful_precmd_marker_completes_inflight_command() {
+    // Control for the #2413 live-PTY verification: the same injection
+    // mechanism carrying an explicit status:0 must finish the in-flight
+    // printf as Completed/0 on both the fixed and the pre-fix code — this
+    // proves the drift verdict above comes from the missing status field,
+    // not from the injection harness itself.
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-pty-precmd-driftzero-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&work_dir).expect("work dir");
+
+    let status_zero_injection = "printf \"\\033]1337;COSH;{\\\"event\\\":\\\"precmd\\\",\\\"toke\"\"n\\\":\\\"%s\\\",\\\"cwd\\\":\\\"/tmp/drift-zero-probe\\\",\\\"status\\\":0}\\a\" \"$COSH_MARKER_TOKEN\"";
+
+    // Isolated mode, same rationale as the driftless case above.
+    let mut config = ShellHostConfig::new("pty-precmd-driftzero", &work_dir);
+    config.native_mode = false;
+    let output = run_scripted_bash(
+        &config,
+        &[
+            ScriptedInput::user_line("echo drift-real-probe"),
+            ScriptedInput::user_line(status_zero_injection),
+        ],
+    )
+    .expect("scripted bash pty");
+
+    let status_zero = output
+        .events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind,
+                ShellEventKind::CommandCompleted | ShellEventKind::CommandFailed
+            ) && event
+                .command
+                .as_deref()
+                .is_some_and(|command| command.contains("drift-zero-probe"))
+        })
+        .expect("status-zero injection command finish event");
+    assert_eq!(status_zero.kind, ShellEventKind::CommandCompleted);
+    assert_eq!(status_zero.exit_code, Some(0));
+
+    let real = output
+        .events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind,
+                ShellEventKind::CommandCompleted | ShellEventKind::CommandFailed
+            ) && event
+                .command
+                .as_deref()
+                .is_some_and(|command| command.contains("drift-real-probe"))
+        })
+        .expect("real command finish event");
+    assert_eq!(real.kind, ShellEventKind::CommandCompleted);
+    assert_eq!(real.exit_code, Some(0));
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+}
+
+#[test]
 fn shell_host_zsh_adapter_emits_shared_command_events() {
     if Command::new("zsh").arg("--version").output().is_err() {
         return;

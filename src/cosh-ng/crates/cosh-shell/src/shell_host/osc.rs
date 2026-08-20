@@ -343,7 +343,8 @@ impl OscParser {
                 let status = if is_shell_exit_command(&current.command) {
                     0
                 } else {
-                    marker.status.unwrap_or(0)
+                    // Missing status = truncation/forgery/drift (always emitted) → -1, not success (#2413/#2105).
+                    marker.status.unwrap_or(-1)
                 };
                 let output_end = self.clean.position();
                 let output_ref =

@@ -392,6 +392,43 @@ fn precmd_count_tracks_shell_ready_and_command_events() {
     assert_eq!(parser.precmd_count(), 3);
 }
 
+// #2413: a status-less precmd marker can only be truncated, forged, or
+// protocol-drifted — both generator scripts (marker/bash.rs, marker/zsh.rs)
+// emit `"status":%s` unconditionally with the shell's `$?` value. Defaulting
+// the missing field to success fabricates a CommandCompleted for a command
+// whose real outcome is unknown; fall toward the -1 missing-exit-code
+// sentinel instead, matching the ledger contract from #2105/PR #2412 and the
+// agent host-executed chain.
+#[test]
+fn precmd_marker_without_status_fails_with_missing_exit_sentinel() {
+    let mut parser = parser_for_test("precmd-missing-status");
+    feed_preexec(&mut parser, "echo maybe-truncated");
+    let marker =
+        b"\x1b]1337;COSH;{\"event\":\"precmd\",\"token\":\"test-marker-token\",\"cwd\":\"/tmp\"}\x07";
+    parser.feed(marker).expect("feed statusless precmd");
+
+    let finished = parser
+        .events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind,
+                ShellEventKind::CommandCompleted | ShellEventKind::CommandFailed
+            )
+        })
+        .expect("command finish event");
+    assert_eq!(finished.kind, ShellEventKind::CommandFailed);
+    assert_eq!(finished.exit_code, Some(-1));
+
+    // The ledger keeps the explicit -1 verbatim with a Failed status, so the
+    // live marker path and the journal-replay path agree on missing status.
+    let ledger = build_command_blocks(&parser.events);
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+    assert_eq!(ledger.blocks.len(), 1);
+    assert_eq!(ledger.blocks[0].exit_code, -1);
+    assert_eq!(ledger.blocks[0].status, crate::types::CommandStatus::Failed);
+}
+
 #[test]
 fn pending_handoff_origin_is_consumed_by_matching_preexec() {
     let mut parser = parser_for_test("origin-match");
