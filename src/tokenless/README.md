@@ -62,7 +62,13 @@ tokenless only removes redundancy from **tool call responses** before they enter
 ### Where it pays little or doesn't apply
 
 - **Chat-heavy / few tool calls**: tool-response share is tiny, overall savings approach 0.
-- **Already-short responses**: when `after >= before`, the CLI emits the original and records no stats (expected).
+- **No fixed minimum payload**: `compress-schema` and `compress-response` build a
+  candidate for every accepted valid JSON input. In active mode, they emit it only
+  when its estimated token count is strictly lower than the original. A small input
+  with removable content can still compress, while a larger already-compact input can
+  pass through unchanged; the CLI writes the reason to stderr and records no stats.
+  In dry-run mode, the CLI always emits the original and may record a smaller candidate
+  as a predicted saving.
 - **Model inference tokens / billed tokens**: outside what tokenless touches.
 
 ### Estimating the effect
@@ -231,6 +237,14 @@ For a meaningful comparison, pass a dry-run session first and an active
 Tokenless session second.
 
 ## CLI Usage
+
+The standalone `compress-schema` and `compress-response` commands use this
+content-dependent savings check rather than a fixed byte or character minimum.
+The description, string, array, and depth limits in the
+[CLI reference](../../docs/user-guide/en/token-saving/tokenless/cli-reference.md)
+trigger individual transformations; they are not minimum total payload sizes.
+Agent adapters may apply separate pre-check thresholds; see the
+[framework integration guide](../../docs/user-guide/en/token-saving/tokenless/framework-integration.md#adapter-processing-rules).
 
 ### compress-schema
 

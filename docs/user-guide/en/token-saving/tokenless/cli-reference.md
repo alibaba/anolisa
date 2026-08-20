@@ -40,6 +40,26 @@ cat response.json | tokenless compress-response
 - JSON commands require valid JSON.
 - If compression does not reduce the estimated token count, the CLI explains this on stderr and returns the original.
 
+### Minimum useful payload
+
+`compress-schema` and `compress-response` have no fixed minimum input size. For
+every accepted valid JSON input, the CLI builds a candidate and estimates both
+versions as one token per CJK character plus one token per four other characters,
+rounded up. In active mode, it emits the candidate only when its estimate is strictly
+lower than the original (`after < before`). Otherwise stdout receives the original
+input, stderr reports `did not reduce size`, and no statistics record is written.
+In dry-run mode (`TOKENLESS_COMPRESSION_ENABLED=0` or
+`compression_enabled=false`), stdout always receives the original input; a smaller
+candidate is recorded as a predicted saving when statistics or SLS recording is enabled.
+
+The break-even point therefore depends on content and JSON shape, not only on
+bytes or characters. A small payload with a removable field can compress, while
+a larger already-compact payload can pass through unchanged. The description,
+string, array, and depth thresholds below only decide when individual
+transformations run; they are not minimum total payload sizes. Agent adapters
+can apply separate pre-spawn size gates; see
+[Adapter processing rules](framework-integration.md#adapter-processing-rules).
+
 ## `compress-schema`
 
 Compress one OpenAI Function Calling schema:

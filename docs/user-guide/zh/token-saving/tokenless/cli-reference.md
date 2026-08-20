@@ -40,6 +40,22 @@ cat response.json | tokenless compress-response
 - JSON 相关命令要求输入为合法 JSON。
 - 压缩后没有 Token 收益时，CLI 向 stderr 说明原因，并输出原文。
 
+### 最小有效 Payload
+
+`compress-schema` 和 `compress-response` 没有固定的最小输入大小。对于每个通过输入
+规则的合法 JSON，CLI 都会生成候选结果，并用同一个启发式规则估算两者的 Token 数：每个 CJK
+字符计一个 Token，其他字符每四个计一个 Token 并向上取整。在 Active 模式下，只有候选结果的
+估算值严格小于原文（`after < before`）时才会输出候选结果；否则 stdout 输出原文，stderr
+报告 `did not reduce size`，且不写入统计记录。在 Dry-run 模式
+（`TOKENLESS_COMPRESSION_ENABLED=0` 或 `compression_enabled=false`）下，stdout 始终输出
+原文；候选结果更小时，如果已启用 Stats 或 SLS 记录，则把它记为预测节省。
+
+因此，盈亏平衡点取决于内容和 JSON 结构，而不只取决于字节数或字符数。包含可移除字段
+的小 Payload 仍可能被压缩，而已经紧凑的较大 Payload 也可能原样透传。下文的描述、
+字符串、数组和深度阈值只决定单项转换何时触发，并不是整个 Payload 的最小大小。
+Agent Adapter 还可能在启动 CLI 前应用独立的大小门槛，详见
+[Adapter 处理规则](framework-integration.md#adapter-处理规则)。
+
 ## `compress-schema`
 
 压缩单个 OpenAI Function Calling Schema：

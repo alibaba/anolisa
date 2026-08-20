@@ -34,7 +34,14 @@ tokenless 只优化**工具调用响应**进入 LLM 上下文前的冗余，不�
 ### 哪些场景收益低或不适用
 
 - **纯对话/少工具调用**：工具响应占比极低，整体节省接近 0。
-- **响应本就短小**：压缩后 `after >= before`，CLI 输出原文且不记录统计（属正常）。
+- **没有固定最小 Payload**：`compress-schema` 和 `compress-response` 会为每个通过输入
+  规则的合法 JSON 生成候选结果。在 Active 模式下，只有候选结果的估算 Token 数严格少于原文时
+  才输出它。包含可移除内容的小输入仍可能被压缩，而已经紧凑的较大输入也可能原样透传；CLI 会把
+  原因写入 stderr，且不记录统计。在 Dry-run 模式下，CLI 始终输出原文，并可能把较小的候选结果
+  记为预测节省。[CLI 参考](../../docs/user-guide/zh/token-saving/tokenless/cli-reference.md)
+  中的描述、字符串、数组和深度阈值只决定单项转换何时触发，并不是整个 Payload 的最小大小；
+  Agent Adapter 还可能应用独立的
+  [预检门槛](../../docs/user-guide/zh/token-saving/tokenless/framework-integration.md#adapter-处理规则)。
 - **模型推理 token / 计费 token**：不在 tokenless 经手范围。
 
 ### 预期效果估算
