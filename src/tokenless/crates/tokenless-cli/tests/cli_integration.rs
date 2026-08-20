@@ -993,6 +993,24 @@ fn compress_toon_cjk_active_emits_toon_and_records_character_tokens() {
     assert_eq!(records[0].after_tokens, estimate_tokens(emitted));
 }
 
+/// Parse failures keep the documented compress-command exit code 2 now
+/// that errors flow through the runtime mapping.
+#[test]
+fn compress_toon_invalid_json_exits_with_code_2() {
+    let fixture = match TempDataDir::new() {
+        Some(fixture) => fixture,
+        None => return,
+    };
+    let output = run_compress_toon(&fixture, "not json", "1", "toon-invalid-json");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "invalid JSON must exit 2, stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("JSON parse error"));
+}
+
 #[test]
 fn env_check_without_spec() {
     let output = tokenless_bin().args(["env-check"]).output().unwrap();

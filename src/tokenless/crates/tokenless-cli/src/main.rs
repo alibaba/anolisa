@@ -885,10 +885,13 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             // `stats summary` and the Python/SDK compress_toon path. The
             // previous bytes/4 heuristic under-counted CJK.
             let result = compress_toon(&input, compression_on).map_err(|error| {
+                // JSON parse, oversized input, and TOON encode keep the
+                // documented compress-command exit code 2.
                 let code = if matches!(
                     error,
                     tokenless_runtime::RuntimeError::InvalidJson(_)
                         | tokenless_runtime::RuntimeError::InputTooLarge { .. }
+                        | tokenless_runtime::RuntimeError::ToonEncode(_)
                 ) {
                     2
                 } else {

@@ -9,6 +9,10 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+### 修复
+
+- `tokenless compress-toon` 现在用与 `stats summary` 以及 Python/SDK 路径相同的 CJK 感知字符估算器计算 TOON 节省，因此 dry-run 的 stderr 预测计数与记录的 `before_tokens`/`after_tokens` 一致。JSON 解析、超限输入和 TOON 编码失败仍以退出码 2 结束（[#2681](https://github.com/alibaba/anolisa/pull/2681)）。
+
 ## [0.7.10] - 2026-08-19
 
 ### 新增

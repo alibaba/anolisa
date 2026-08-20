@@ -9,6 +9,10 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+### Fixed
+
+- `tokenless compress-toon` now scores TOON savings with the same CJK-aware character estimator as `stats summary` and the Python/SDK path, so dry-run stderr predicted counts match recorded `before_tokens`/`after_tokens`. JSON parse, oversized input, and TOON encode failures still exit 2 ([#2681](https://github.com/alibaba/anolisa/pull/2681)).
+
 ## [0.7.10] - 2026-08-19
 
 ### Added
