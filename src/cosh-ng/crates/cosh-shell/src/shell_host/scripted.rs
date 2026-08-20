@@ -93,7 +93,7 @@ fn run_scripted_shell(
         Duration::from_millis(300),
         |_| false,
     )?;
-    session.parser.flush_pending();
+    session.parser.flush_pending()?;
     let exit_status = wait_pty_foreground_bounded(
         &session.master,
         &session.terminal,
@@ -167,9 +167,13 @@ where
         Duration::from_millis(300),
         |_| false,
     )?;
-    let display_start = session.parser.display.len();
-    session.parser.flush_pending();
-    output.write_all(&session.parser.display[display_start..])?;
+    let display_start = session.parser.display_position();
+    session.parser.flush_pending()?;
+    session.parser.write_display_range(
+        display_start,
+        session.parser.display_position(),
+        &mut output,
+    )?;
     output.flush()?;
 
     let exit_status = wait_pty_foreground_bounded(

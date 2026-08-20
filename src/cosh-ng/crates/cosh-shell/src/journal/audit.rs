@@ -136,6 +136,21 @@ impl ShellAuditRecorder {
         self.seen_events = events.len();
     }
 
+    /// Projects an already de-duplicated absolute-cursor event batch.
+    pub(crate) fn observe_shell_event_batch(&mut self, events: &[ShellEvent]) {
+        for event in events {
+            if matches!(
+                event.kind,
+                ShellEventKind::CommandStarted
+                    | ShellEventKind::CommandCompleted
+                    | ShellEventKind::CommandFailed
+            ) {
+                self.record_command(event);
+            }
+        }
+        self.seen_events = self.seen_events.saturating_add(events.len());
+    }
+
     /// Returns whether the current session has an unclosed audit gap.
     pub(crate) fn is_degraded(&self) -> bool {
         self.degraded

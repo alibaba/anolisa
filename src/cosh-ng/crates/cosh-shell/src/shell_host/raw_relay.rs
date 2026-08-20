@@ -17,6 +17,7 @@ use crate::raw_input::{
 };
 use crate::types::{CommandOrigin, ShellEvent, ShellEventKind};
 
+use super::model::ShellEventView;
 use super::osc::{DisplayCutKind, OscParser};
 use super::prompt_replay::{
     prompt_prefixed_replay_bytes, prompt_replay_bytes, PromptReplayTracker,
@@ -78,10 +79,10 @@ pub(super) fn read_raw_until_exit<W: Write, F>(
     hint_card_renderer: Option<&crate::shell_host::HintCardRenderer>,
 ) -> io::Result<bool>
 where
-    F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
+    F: FnMut(ShellEventView<'_>, &mut W) -> io::Result<RawObserverAction>,
 {
     let mut buffer = [0_u8; 8192];
-    let mut display_start = parser.display.len();
+    let mut display_start = parser.display_position();
     let mut native_candidate_echoed_len = 0;
     let mut prompt_replay = PromptReplayTracker::new(input_generation.clone());
     let mut last_pty_output: Option<Instant> = None;
@@ -128,7 +129,7 @@ where
             &mut driver_completed_at,
         )?;
         let mut observer_action = merge_pending_prompt_restore(
-            observe_with_input_mode_lock(event_observer, &parser.events, output, input_mode)?,
+            observe_with_input_mode_lock(event_observer, parser, output, input_mode)?,
             &mut pending_prompt_restore,
         );
         observer_action = resolve_pty_emit(
@@ -152,7 +153,7 @@ where
             latest_capture_submission_generation(&parser.events),
         );
         let mut hold_shell_output = observer_action.hold_shell_output();
-        if !hold_shell_output && parser.display.len() > display_start {
+        if !hold_shell_output && parser.display_position() > display_start {
             write_pending_display_preserving_prompt_ghost(
                 parser,
                 output,
@@ -192,7 +193,7 @@ where
                     }
                     let display_cuts = parser.drain_intervention_display_cuts();
                     for (cut, cut_kind) in display_cuts {
-                        let cut = cut.min(parser.display.len());
+                        let cut = cut.min(parser.display_position());
                         // Only a real prompt boundary (precmd) confirms the
                         // shell finished responding to the relay writes seen
                         // so far; an intercepted line's remaining response is
@@ -207,7 +208,7 @@ where
                                 if parser.take_synthetic_prompt_repaint()
                                     && cut > display_start
                                     && candidate_display_columns(
-                                        &parser.display[display_start..cut],
+                                        parser.read_display_range(display_start, cut)?.as_ref(),
                                     ) == 0
                                 {
                                     display_start = cut;
@@ -229,7 +230,7 @@ where
                         observer_action = merge_pending_prompt_restore(
                             observe_with_input_mode_lock(
                                 event_observer,
-                                &parser.events,
+                                parser,
                                 output,
                                 input_mode,
                             )?,
@@ -259,7 +260,7 @@ where
                             latest_capture_submission_generation(&parser.events),
                         );
                         hold_shell_output = observer_action.hold_shell_output();
-                        if !hold_shell_output && parser.display.len() > display_start {
+                        if !hold_shell_output && parser.display_position() > display_start {
                             write_pending_display_preserving_prompt_ghost(
                                 parser,
                                 output,
@@ -286,7 +287,6 @@ where
                     }
                     release_held_shell_output(
                         event_observer,
-                        &parser.events,
                         parser,
                         output,
                         &mut display_start,
@@ -305,7 +305,6 @@ where
             }
             release_held_shell_output(
                 event_observer,
-                &parser.events,
                 parser,
                 output,
                 &mut display_start,
@@ -362,7 +361,7 @@ where
             &mut driver_completed_at,
         )?;
         observer_action = merge_pending_prompt_restore(
-            observe_with_input_mode_lock(event_observer, &parser.events, output, input_mode)?,
+            observe_with_input_mode_lock(event_observer, parser, output, input_mode)?,
             &mut pending_prompt_restore,
         );
         observer_action = resolve_pty_emit(
@@ -390,7 +389,7 @@ where
             RawObserverAction::HoldShellOutput | RawObserverAction::DelayShellOutput
         );
         hold_shell_output = observer_action.hold_shell_output();
-        if !hold_shell_output && parser.display.len() > display_start {
+        if !hold_shell_output && parser.display_position() > display_start {
             write_pending_display_preserving_prompt_ghost(
                 parser,
                 output,
@@ -452,35 +451,34 @@ fn latest_capture_submission_generation(events: &[ShellEvent]) -> Option<u64> {
 }
 fn observe_with_input_mode_lock<W: Write, F>(
     event_observer: &mut F,
-    events: &[ShellEvent],
+    parser: &mut OscParser,
     output: &mut W,
     input_mode: &Arc<Mutex<RawInputMode>>,
 ) -> io::Result<RawObserverAction>
 where
-    F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
+    F: FnMut(ShellEventView<'_>, &mut W) -> io::Result<RawObserverAction>,
 {
     let Ok(mut mode) = input_mode.lock() else {
-        return event_observer(events, output);
+        return parser.observe_events(output, event_observer);
     };
-    let action = event_observer(events, output)?;
-    let acknowledged = latest_capture_submission_generation(events);
+    let action = parser.observe_events(output, event_observer)?;
+    let acknowledged = latest_capture_submission_generation(&parser.events);
     update_locked_input_mode(&mut mode, &action, acknowledged);
     Ok(action)
 }
 
 fn release_held_shell_output<W: Write, F>(
     event_observer: &mut F,
-    events: &[ShellEvent],
-    parser: &OscParser,
+    parser: &mut OscParser,
     output: &mut W,
     display_start: &mut usize,
     prompt_replay: &mut PromptReplayTracker,
 ) -> io::Result<()>
 where
-    F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
+    F: FnMut(ShellEventView<'_>, &mut W) -> io::Result<RawObserverAction>,
 {
-    drain_observer_until_released(event_observer, events, output)?;
-    if parser.display.len() > *display_start {
+    drain_observer_until_released(event_observer, parser, output)?;
+    if parser.display_position() > *display_start {
         write_pending_display(parser, output, display_start, prompt_replay)?;
         output.flush()?;
     }
@@ -493,7 +491,7 @@ fn write_pending_display<W: Write>(
     display_start: &mut usize,
     prompt_replay: &mut PromptReplayTracker,
 ) -> io::Result<()> {
-    let display_end = parser.display.len();
+    let display_end = parser.display_position();
     write_display_slice(parser, output, *display_start, display_end, prompt_replay)?;
     *display_start = display_end;
     Ok(())
@@ -538,21 +536,30 @@ fn write_display_slice<W: Write>(
     display_end: usize,
     prompt_replay: &mut PromptReplayTracker,
 ) -> io::Result<()> {
-    let bytes = prompt_replay.strip(&parser.display[display_start..display_end]);
     let prompt = parser.last_prompt_display();
-    output.write_all(&prompt_prefixed_replay_bytes(bytes, prompt))
+    let prefix_len = display_end
+        .saturating_sub(display_start)
+        .min(prompt.len().max(prompt_replay.pending_prompt_len()).max(1));
+    let prefix_end = display_start.saturating_add(prefix_len);
+    let prefix = parser.read_display_range(display_start, prefix_end)?;
+    let bytes = prompt_replay.strip(prefix.as_ref());
+    output.write_all(&prompt_prefixed_replay_bytes(bytes, prompt))?;
+    parser.write_display_range(prefix_end, display_end, output)
 }
 
 fn drain_observer_until_released<W: Write, F>(
     event_observer: &mut F,
-    events: &[ShellEvent],
+    parser: &mut OscParser,
     output: &mut W,
 ) -> io::Result<()>
 where
-    F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
+    F: FnMut(ShellEventView<'_>, &mut W) -> io::Result<RawObserverAction>,
 {
     for _ in 0..1_000 {
-        if !event_observer(events, output)?.hold_shell_output() {
+        if !parser
+            .observe_events(output, event_observer)?
+            .hold_shell_output()
+        {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(10));
@@ -631,13 +638,18 @@ fn remember_pending_prompt_restore(
     }
 }
 
-fn mark_pending_prompt_replayed(parser: &OscParser, prompt: &[u8], display_start: &mut usize) {
-    if prompt.is_empty() || *display_start > parser.display.len() {
-        return;
+fn mark_pending_prompt_replayed(
+    parser: &OscParser,
+    prompt: &[u8],
+    display_start: &mut usize,
+) -> io::Result<()> {
+    if prompt.is_empty() || *display_start > parser.display_position() {
+        return Ok(());
     }
-    if parser.display[*display_start..].starts_with(prompt) {
+    if parser.display_starts_with_at(*display_start, prompt)? {
         *display_start += prompt.len();
     }
+    Ok(())
 }
 
 #[cfg(test)]

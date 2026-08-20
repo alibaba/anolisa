@@ -56,7 +56,7 @@ pub(super) fn read_until_streaming<W: Write>(
 ) -> io::Result<bool> {
     let deadline = Instant::now() + timeout;
     let mut buffer = [0_u8; 8192];
-    let mut display_start = parser.display.len();
+    let mut display_start = parser.display_position();
 
     while Instant::now() < deadline {
         loop {
@@ -64,10 +64,11 @@ pub(super) fn read_until_streaming<W: Write>(
                 Ok(0) => break,
                 Ok(n) => {
                     parser.feed(&buffer[..n])?;
-                    if parser.display.len() > display_start {
-                        output.write_all(&parser.display[display_start..])?;
+                    if parser.display_position() > display_start {
+                        let display_end = parser.display_position();
+                        parser.write_display_range(display_start, display_end, output)?;
                         output.flush()?;
-                        display_start = parser.display.len();
+                        display_start = display_end;
                     }
                     if condition(parser) {
                         return Ok(true);

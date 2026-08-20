@@ -19,7 +19,7 @@ use crate::types::ShellEvent;
 use super::bootstrap::{start_bash_session, start_zsh_session, PtySession};
 use super::io_loop::{read_until_streaming, wait_child_preserving_signal};
 use super::lifecycle::{build_shell_host_output, push_shell_exited_event};
-use super::model::{ShellHostConfig, ShellHostOutput};
+use super::model::{ShellEventView, ShellHostConfig, ShellHostOutput};
 use super::raw_relay::{read_raw_until_exit, DriverCompletion, RawActionWatchdog};
 
 mod interactive;
@@ -29,6 +29,9 @@ mod wake;
 pub use interactive::{
     run_raw_interactive_bash, run_raw_interactive_bash_with_observer,
     run_raw_interactive_bash_with_output_control, run_raw_interactive_zsh_with_output_control,
+};
+pub(crate) use interactive::{
+    run_raw_interactive_bash_with_event_view, run_raw_interactive_zsh_with_event_view,
 };
 #[cfg(test)]
 use raw_mode_guard::RawModeGuard;
@@ -75,7 +78,14 @@ where
     W: Write,
     F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
 {
-    run_raw_relay_bash_with_output_control_and_input_fd(config, input, output, event_observer, None)
+    let mut event_observer = event_observer;
+    run_raw_relay_bash_with_output_control_and_input_fd(
+        config,
+        input,
+        output,
+        move |view, output| event_observer(view.events(), output),
+        None,
+    )
 }
 
 fn run_raw_relay_bash_with_output_control_and_input_fd<R, W, F>(
@@ -88,7 +98,7 @@ fn run_raw_relay_bash_with_output_control_and_input_fd<R, W, F>(
 where
     R: Read + Send + 'static,
     W: Write,
-    F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
+    F: FnMut(ShellEventView<'_>, &mut W) -> io::Result<RawObserverAction>,
 {
     run_raw_relay_with_driver(
         config,
@@ -134,7 +144,14 @@ where
     W: Write,
     F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
 {
-    run_raw_relay_zsh_with_output_control_and_input_fd(config, input, output, event_observer, None)
+    let mut event_observer = event_observer;
+    run_raw_relay_zsh_with_output_control_and_input_fd(
+        config,
+        input,
+        output,
+        move |view, output| event_observer(view.events(), output),
+        None,
+    )
 }
 
 fn run_raw_relay_zsh_with_output_control_and_input_fd<R, W, F>(
@@ -147,7 +164,7 @@ fn run_raw_relay_zsh_with_output_control_and_input_fd<R, W, F>(
 where
     R: Read + Send + 'static,
     W: Write,
-    F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
+    F: FnMut(ShellEventView<'_>, &mut W) -> io::Result<RawObserverAction>,
 {
     run_raw_relay_with_driver(
         config,
@@ -249,8 +266,8 @@ where
         config,
         start_bash_session,
         output,
-        move |events, output| {
-            event_observer(events, output)?;
+        move |view, output| {
+            event_observer(view.events(), output)?;
             Ok(RawObserverAction::Continue)
         },
         config.input_classifier.clone(),
@@ -291,11 +308,12 @@ where
     W: Write,
     F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
 {
+    let mut event_observer = event_observer;
     run_raw_relay_with_driver(
         config,
         start_bash_session,
         output,
-        event_observer,
+        move |view, output| event_observer(view.events(), output),
         config.input_classifier.clone(),
         Some(config.raw_action_watchdog),
         config.slash_via_shell,
@@ -336,7 +354,7 @@ fn run_raw_relay_with_driver<W, F, D>(
 ) -> io::Result<ShellHostOutput>
 where
     W: Write,
-    F: FnMut(&[ShellEvent], &mut W) -> io::Result<RawObserverAction>,
+    F: FnMut(ShellEventView<'_>, &mut W) -> io::Result<RawObserverAction>,
     D: FnOnce(
         File,
         u32,
@@ -438,14 +456,20 @@ where
         config.input_wait_timeout_secs,
         config.hint_card_renderer.as_ref(),
     )?;
-    let display_start = session.parser.display.len();
-    session.parser.flush_pending();
-    output.write_all(&session.parser.display[display_start..])?;
+    let display_start = session.parser.display_position();
+    session.parser.flush_pending()?;
+    session.parser.write_display_range(
+        display_start,
+        session.parser.display_position(),
+        &mut output,
+    )?;
     output.flush()?;
 
     let exit_status = wait_child_preserving_signal(&mut session.child, eof_shutdown)?;
     push_shell_exited_event(&mut session.parser, config, exit_status)?;
-    event_observer(&session.parser.events, &mut output)?;
+    session
+        .parser
+        .observe_events(&mut output, &mut event_observer)?;
     output.flush()?;
     build_shell_host_output(config, session.parser, exit_status)
 }

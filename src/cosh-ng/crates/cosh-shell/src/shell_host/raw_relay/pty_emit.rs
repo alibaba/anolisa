@@ -200,11 +200,11 @@ pub(super) fn resolve_pty_emit<W: Write>(
                     ghost_route,
                 });
             }
-            if parser.display.len() > *display_start {
+            if parser.display_position() > *display_start {
                 write_pending_display(parser, output, display_start, prompt_replay)?;
             } else {
                 output.write_all(prompt)?;
-                mark_pending_prompt_replayed(parser, raw_prompt, display_start);
+                mark_pending_prompt_replayed(parser, raw_prompt, display_start)?;
                 prompt_replay.arm_for_replay(raw_prompt);
             }
             if let Some(text) = &ghost_text {
@@ -269,7 +269,7 @@ pub(super) fn restore_prompt_display_before_handoff<W: Write>(
     display_start: &mut usize,
     prompt_replay: &mut PromptReplayTracker,
 ) -> io::Result<()> {
-    if parser.display.len() > *display_start {
+    if parser.display_position() > *display_start {
         write_pending_display(parser, output, display_start, prompt_replay)?;
         output.flush()?;
         return Ok(());
@@ -282,7 +282,7 @@ pub(super) fn restore_prompt_display_before_handoff<W: Write>(
     }
     output.write_all(prompt)?;
     output.flush()?;
-    mark_pending_prompt_replayed(parser, raw_prompt, display_start);
+    mark_pending_prompt_replayed(parser, raw_prompt, display_start)?;
     prompt_replay.arm_for_replay(raw_prompt);
     Ok(())
 }

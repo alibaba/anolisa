@@ -187,16 +187,26 @@ impl OscParser {
         let Some(start) = self.last_prompt_display_start else {
             return &[];
         };
-        if start >= self.display.len() {
-            return &[];
+        if self.display.is_full() {
+            return self
+                .display
+                .resident_slice()
+                .get(start..)
+                .unwrap_or_default();
         }
-        &self.display[start..]
+        &self.last_prompt_display
+    }
+
+    pub(super) fn start_prompt_display_capture(&mut self) {
+        self.last_prompt_display_start = Some(self.display.position());
+        self.last_prompt_display.clear();
+        self.capture_prompt_display = true;
     }
 
     /// True after the shell's post-hook marker is followed by visible prompt
     /// bytes, excluding output produced by user prompt hooks.
     pub(crate) fn has_prompt_painted_since_ready(&self) -> bool {
         self.prompt_ready_display_start
-            .is_some_and(|start| start < self.display.len())
+            .is_some_and(|start| start < self.display.position())
     }
 }

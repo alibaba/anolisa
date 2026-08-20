@@ -16,7 +16,7 @@ use crate::runtime::prelude::*;
 use crate::runtime::startup::bootstrap_process_path_from_shell;
 use crate::runtime::state::{AnalysisMode, InlineState};
 
-use super::render_raw_inline_events;
+use super::render_raw_inline_event_view;
 
 fn build_adapter(kind: AdapterKind) -> AdapterInstance {
     match adapter_for_kind(kind) {
@@ -90,6 +90,7 @@ pub(crate) fn run_raw(
             .unwrap_or_default()
     );
     let mut config = ShellHostConfig::new(session_id, work_dir);
+    config.bound_interactive_transcript();
 
     let isolated = args.iter().any(|a| a == "--isolated")
         || std::env::var("COSH_SHELL_ISOLATED").as_deref() == Ok("1");
@@ -241,15 +242,13 @@ pub(crate) fn run_raw(
 
     let raw_result = match shell_kind {
         RawShellKind::Bash => {
-            run_raw_interactive_bash_with_output_control(&config, |events, output| {
-                render_raw_inline_events(events, output, &adapter, "bash", &mut inline_state)
+            run_raw_interactive_bash_with_event_view(&config, |events, output| {
+                render_raw_inline_event_view(events, output, &adapter, "bash", &mut inline_state)
             })
         }
-        RawShellKind::Zsh => {
-            run_raw_interactive_zsh_with_output_control(&config, |events, output| {
-                render_raw_inline_events(events, output, &adapter, "zsh", &mut inline_state)
-            })
-        }
+        RawShellKind::Zsh => run_raw_interactive_zsh_with_event_view(&config, |events, output| {
+            render_raw_inline_event_view(events, output, &adapter, "zsh", &mut inline_state)
+        }),
         RawShellKind::MissingShellValue => {
             eprintln!("missing value for --shell; supported shells: bash, zsh");
             return 2;

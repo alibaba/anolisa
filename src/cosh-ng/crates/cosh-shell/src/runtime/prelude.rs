@@ -42,8 +42,8 @@ pub(crate) use crate::parser::{
 };
 pub(crate) use crate::raw_input::{RawInputCapture, RawObserverAction};
 pub(crate) use crate::shell_host::{
-    run_line_interactive_bash, run_raw_interactive_bash_with_output_control,
-    run_raw_interactive_zsh_with_output_control, run_scripted_bash, ScriptedInput, ShellHostConfig,
+    run_line_interactive_bash, run_raw_interactive_bash_with_event_view,
+    run_raw_interactive_zsh_with_event_view, run_scripted_bash, ScriptedInput, ShellHostConfig,
 };
 pub(crate) use crate::slash::registry::{
     active_slash_commands, visible_slash_commands, SlashCommandSpec,

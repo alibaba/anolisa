@@ -59,6 +59,13 @@ fn spawn_hook_session(
     (session, session_started_rx)
 }
 
+fn large_hook_input_command() -> Vec<u8> {
+    let mut command = b"printf '' #".to_vec();
+    command.resize(command.len() + 1024 * 1024, b'x');
+    command.push(b'\n');
+    command
+}
+
 #[test]
 fn raw_cli_external_hook_executes_pinned_file_after_path_replacement() {
     let home = temp_shell_home("external-hook-pinned-exec");
@@ -306,9 +313,11 @@ fn raw_cli_external_hook_ignoring_large_stdin_respects_deadline() {
     );
     install_user_hook(&home, "ignore_stdin.sh", &body);
 
-    // One valid UTF-8 line larger than a pipe buffer makes the serialized
-    // hook payload block when the hook never reads stdin.
-    let (session, session_started) = spawn_hook_session(&home, b"printf '%1048576s' x\n");
+    // Keep the serialized command itself larger than a pipe buffer. Bounded
+    // output retention may replace an oversized output line with a short
+    // fail-closed placeholder before hook evaluation.
+    let command = large_hook_input_command();
+    let (session, session_started) = spawn_hook_session(&home, &command);
     session_started.recv().expect("raw CLI session to start");
     let pids = wait_for_pids(&pid_file, 1);
     let ready_at = std::time::Instant::now();
@@ -366,7 +375,8 @@ fn raw_cli_external_hook_stdin_holder_is_killed() {
     );
     install_user_hook(&home, "stdin_holder.sh", &body);
 
-    let (session, session_started) = spawn_hook_session(&home, b"printf '%1048576s' x\n");
+    let command = large_hook_input_command();
+    let (session, session_started) = spawn_hook_session(&home, &command);
     session_started.recv().expect("raw CLI session to start");
     let pids = wait_for_pids(&pid_file, 2);
     let ready_at = std::time::Instant::now();

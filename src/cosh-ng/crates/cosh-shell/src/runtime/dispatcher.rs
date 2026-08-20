@@ -6,9 +6,9 @@ use crate::activity::runtime::{
 use crate::adapter::AgentAdapter;
 use crate::agent::events::flush_held_agent_events;
 use crate::agent::failed_command::{
-    block_end_event_index, collect_failed_command_insights, failed_command_candidate,
-    failed_command_intervention, render_post_failure_actions, start_agent_for_block,
-    FailedCommandAgentStartOptions, FailedCommandAnalysisTrigger,
+    block_end_event_index, collect_failed_command_insights_with_history_base,
+    failed_command_candidate, failed_command_intervention, render_post_failure_actions,
+    start_agent_for_block, FailedCommandAgentStartOptions, FailedCommandAnalysisTrigger,
 };
 use crate::agent::intercept::render_intercept_agent_guidance;
 use crate::agent::poll::{poll_active_agent_run, poll_active_agent_run_deferred};
@@ -30,8 +30,9 @@ use crate::runtime::details::render_runtime_details_card_actions;
 use crate::runtime::evidence_delivery::shell_handoff_continuation_requests;
 use crate::runtime::evidence_requests::render_evidence_request_actions;
 use crate::runtime::hooks::{
-    handle_consultation_events, record_blocks_followed_by_user_input, record_command_hook_findings,
-    render_queued_hook_consultation, render_recorded_hook_findings,
+    handle_consultation_events, record_blocks_followed_by_user_input,
+    record_command_hook_findings_with_history_base, render_queued_hook_consultation,
+    render_recorded_hook_findings,
 };
 use crate::runtime::insight::render_pending_command_insight;
 use crate::runtime::prelude::{
@@ -108,6 +109,7 @@ fn render_inline_guidance_from_batch<W: Write>(
 ) -> std::io::Result<()> {
     state.personalization.poll_ready();
     let events = snapshot.events();
+    let history_index_base = snapshot.base();
     let action_events = batch.events;
     let event_index_base = batch.global_index(0);
     if action_events.is_empty() {
@@ -126,11 +128,9 @@ fn render_inline_guidance_from_batch<W: Write>(
     // Positive evidence of command activity (R9): incomplete or
     // unmatched markers produce ledger errors instead of blocks, so an
     // empty `session_blocks` alone never proves the shell has not run
-    // (and cd'd inside) a command. `events` is the session's cumulative
-    // stream (the raw relay always passes the parser's full event vec,
-    // which is append-only), so once a command marker is present it is
-    // present in an incremental batch at most once, so this flag is
-    // monotonic without rescanning the cumulative stream.
+    // (and cd'd inside) a command. Absolute cursors make each marker part of
+    // an incremental batch at most once even after the retained event window
+    // compacts, so this flag stays monotonic without full-history rescans.
     state.shell_command_activity_observed |= action_events.iter().any(|event| {
         matches!(
             event.kind,
@@ -282,7 +282,13 @@ fn render_inline_guidance_from_batch<W: Write>(
     record_blocks_followed_by_user_input(events, &ledger.blocks, state);
     handle_consultation_events(action_events, &ledger.blocks, adapter, state, output)?;
     render_queued_hook_consultation(state, output)?;
-    record_command_hook_findings(events, &ledger.blocks, state, event_index_base);
+    record_command_hook_findings_with_history_base(
+        events,
+        &ledger.blocks,
+        state,
+        history_index_base,
+        event_index_base,
+    );
     render_recorded_hook_findings(&ledger.blocks, state, output)?;
     render_intercept_agent_guidance(
         action_events,
@@ -311,7 +317,9 @@ fn render_inline_guidance_from_batch<W: Write>(
             auto_runtime_available
                 && block.origin == crate::types::CommandOrigin::UserInteractive
                 && !state.hooks.block_followed_by_user_input(&block.id)
-                && block_end_event_index(events, block).is_some_and(|idx| idx >= event_index_base)
+                && block_end_event_index(events, block)
+                    .map(|idx| history_index_base.saturating_add(idx))
+                    .is_some_and(|idx| idx >= event_index_base)
         })
         .collect::<Vec<_>>();
     for block in auto_blocks {
@@ -324,6 +332,7 @@ fn render_inline_guidance_from_batch<W: Write>(
         let user_has_not_continued = !state.hooks.block_followed_by_user_input(&block.id);
         let gates = InterventionGates {
             same_dispatch_batch: block_end_event_index(events, block)
+                .map(|idx| history_index_base.saturating_add(idx))
                 .is_some_and(|idx| idx >= event_index_base),
             input_empty: user_has_not_continued,
             foreground_idle: !shell_busy,
@@ -360,14 +369,22 @@ fn render_inline_guidance_from_batch<W: Write>(
             state,
             output,
             FailedCommandAgentStartOptions {
-                selectable_after_event_index: block_end_event_index(events, block),
+                selectable_after_event_index: block_end_event_index(events, block)
+                    .map(|idx| history_index_base.saturating_add(idx)),
                 trigger: FailedCommandAnalysisTrigger::Auto,
             },
         )?;
         output.flush()?;
     }
 
-    collect_failed_command_insights(events, &ledger.blocks, state, output, event_index_base)?;
+    collect_failed_command_insights_with_history_base(
+        events,
+        &ledger.blocks,
+        state,
+        output,
+        history_index_base,
+        event_index_base,
+    )?;
     if pending_card_capture(state).is_none() {
         render_pending_command_insight(state, output)?;
     } else {

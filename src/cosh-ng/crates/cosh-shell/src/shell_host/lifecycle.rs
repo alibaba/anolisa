@@ -75,16 +75,23 @@ pub(super) fn finish_shell_host_output(
 
 pub(super) fn build_shell_host_output(
     config: &ShellHostConfig,
-    parser: OscParser,
+    mut parser: OscParser,
     exit_status: Option<i32>,
 ) -> io::Result<ShellHostOutput> {
-    let journal_path = config.work_dir.join("events.jsonl");
-    let events = redacted_shell_events(&parser.events);
-    write_shell_events(&journal_path, &events)?;
+    let incremental_journal = parser.uses_incremental_event_journal();
+    let journal_path = parser
+        .incremental_event_journal_path()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| config.work_dir.join("events.jsonl"));
+    let events = redacted_shell_events(&parser.take_output_events()?);
+    if !incremental_journal {
+        write_shell_events(&journal_path, &events)?;
+    }
+    let terminal_output = parser.clean.into_output_bytes();
 
     Ok(ShellHostOutput {
         events,
-        terminal_output: parser.clean,
+        terminal_output,
         work_dir: config.work_dir.clone(),
         journal_path,
         exit_status,

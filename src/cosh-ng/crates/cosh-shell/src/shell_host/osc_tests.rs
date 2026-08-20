@@ -1,7 +1,10 @@
 use super::marker::{bash_marker_script, zsh_marker_script};
-use super::model::{ShellEnvironmentObserver, ShellHistoryFileObserver};
+use super::model::{ShellEnvironmentObserver, ShellHistoryFileObserver, ShellHostConfig};
 use super::osc::*;
+use super::raw_runner::run_raw_relay_bash_with_actions;
+use super::transcript::TranscriptRetention;
 use crate::ledger::build_command_blocks;
+use crate::raw_input::RawRelayAction;
 use crate::types::{
     CommandOrigin, ShellEventKind, ShellHandoffRequest, COMMAND_OUTPUT_REF_MAX_BYTES,
     SESSION_OUTPUT_REF_MAX_BYTES,
@@ -10,6 +13,50 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Mutex};
 
 const TEST_MARKER_TOKEN: &str = "test-marker-token";
+
+#[test]
+fn bounded_raw_session_spools_output_without_materializing_result() {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-bounded-raw-session-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&work_dir);
+    let mut config = ShellHostConfig::new("bounded-raw-session", &work_dir);
+    config.native_mode = false;
+    config.bound_interactive_transcript();
+
+    let mut rendered = Vec::new();
+    let result = run_raw_relay_bash_with_actions(
+        &config,
+        vec![RawRelayAction::line("yes x | head -c 700000")],
+        &mut rendered,
+    )
+    .expect("bounded raw session");
+
+    assert!(result.terminal_output.is_empty());
+    assert!(result.events.is_empty());
+    assert!(rendered.len() >= 700_000);
+    let journal = std::fs::read_to_string(&result.journal_path).expect("event journal");
+    assert!(journal.lines().count() >= 4, "{journal}");
+    let spool_paths = std::fs::read_dir(&work_dir)
+        .expect("session files")
+        .map(|entry| entry.expect("session entry").path())
+        .filter(|path| {
+            path.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                name.starts_with("terminal-output-") || name.starts_with("display-")
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(spool_paths.len(), 2);
+    for path in spool_paths {
+        let metadata = std::fs::metadata(&path).expect("spool metadata");
+        assert!(metadata.len() >= 700_000, "{}", path.display());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    }
+    let _ = std::fs::remove_dir_all(work_dir);
+}
 
 #[test]
 fn routing_markers_require_matching_attempt_generation() {
@@ -276,10 +323,10 @@ fn parser_clean_strips_zsh_bracketed_paste_and_applies_backspace() {
     parser.feed(input).expect("feed");
 
     assert_eq!(
-        String::from_utf8_lossy(&parser.clean),
+        String::from_utf8_lossy(parser.clean.resident_slice()),
         "cosh-osc$ echo ok\r\n"
     );
-    assert_eq!(parser.display, input);
+    assert_eq!(parser.display.resident_slice(), input);
 }
 
 #[test]
@@ -290,7 +337,10 @@ fn parser_clean_handles_split_zsh_bracketed_paste_control() {
     assert!(parser.clean.is_empty());
     parser.feed(b"04hcmd\x1b[?2004l").expect("feed remainder");
 
-    assert_eq!(String::from_utf8_lossy(&parser.clean), "cmd");
+    assert_eq!(
+        String::from_utf8_lossy(parser.clean.resident_slice()),
+        "cmd"
+    );
 }
 
 #[test]
@@ -731,9 +781,9 @@ fn parser_preserves_pending_handoff_command_echo_for_crlf() {
     parser.register_pending_handoff_origin(&request);
     parser.feed(&echo).expect("feed handoff echo");
 
-    let display = String::from_utf8_lossy(&parser.display);
+    let display = String::from_utf8_lossy(parser.display.resident_slice());
     assert_eq!(display, "prompt$ printf hi\r\nhi");
-    let clean = String::from_utf8_lossy(&parser.clean);
+    let clean = String::from_utf8_lossy(parser.clean.resident_slice());
     assert_eq!(clean, "prompt$ printf hi\r\nhi");
 }
 
@@ -759,9 +809,9 @@ fn parser_preserves_pending_handoff_command_echo_for_cr() {
     parser.register_pending_handoff_origin(&request);
     parser.feed(&echo).expect("feed handoff echo");
 
-    let display = String::from_utf8_lossy(&parser.display);
+    let display = String::from_utf8_lossy(parser.display.resident_slice());
     assert_eq!(display, "prompt$ printf hi\x1b[?2004l\rhi");
-    let clean = String::from_utf8_lossy(&parser.clean);
+    let clean = String::from_utf8_lossy(parser.clean.resident_slice());
     assert_eq!(clean, "prompt$ printf hi\rhi");
 }
 
@@ -1001,6 +1051,118 @@ fn parser_for_test(name: &str) -> OscParser {
         std::env::temp_dir().join(format!("cosh-shell-osc-test-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("output ref dir");
     OscParser::new(name.to_string(), dir, TEST_MARKER_TOKEN.to_string())
+}
+
+fn bounded_parser_for_test(name: &str, window_bytes: usize) -> (OscParser, std::path::PathBuf) {
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bounded-osc-test-{name}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&work_dir);
+    let output_ref_dir = work_dir.join("output-refs");
+    std::fs::create_dir_all(&output_ref_dir).expect("output ref dir");
+    let parser = OscParser::with_retention(
+        name.to_string(),
+        output_ref_dir,
+        TEST_MARKER_TOKEN.to_string(),
+        TranscriptRetention::Bounded { window_bytes },
+        &work_dir,
+    )
+    .expect("bounded parser");
+    (parser, work_dir)
+}
+
+#[test]
+fn bounded_parser_caps_long_command_across_multiple_windows() {
+    let (mut parser, work_dir) = bounded_parser_for_test("long-command", 128);
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"preexec\",\"token\":\"test-marker-token\",\"command\":\"long\",\"cwd\":\"/tmp\",\"timestamp_ms\":10}\x07")
+        .expect("preexec");
+    for _ in 0..20 {
+        parser.feed(&[b'x'; 97]).expect("command output");
+        assert!(parser.clean.window_len() <= 256);
+        assert!(parser.display.window_len() <= 256);
+    }
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"precmd\",\"token\":\"test-marker-token\",\"status\":0,\"cwd\":\"/tmp\",\"timestamp_ms\":20}\x07")
+        .expect("precmd");
+
+    let completed = parser
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandCompleted)
+        .expect("completed event");
+    assert_eq!(completed.terminal_output_bytes, Some(20 * 97));
+    let output_ref = completed
+        .terminal_output_ref
+        .as_deref()
+        .expect("output ref");
+    let captured = std::fs::read(output_ref).expect("captured output");
+    assert_eq!(captured.len(), 20 * 97);
+    assert!(parser.clean.window_len() <= 256);
+    assert!(parser.display.window_len() <= 256);
+    let _ = std::fs::remove_dir_all(work_dir);
+}
+
+#[test]
+fn bounded_parser_caps_prompt_capture_on_each_append() {
+    let (mut parser, work_dir) = bounded_parser_for_test("prompt-capture", 64);
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"precmd\",\"token\":\"test-marker-token\",\"cwd\":\"/tmp\"}\x07")
+        .expect("precmd");
+    parser.feed(&[b'h'; 256]).expect("large prompt output");
+
+    assert_eq!(parser.last_prompt_display(), &[b'h'; 64]);
+    parser.feed(b"tail").expect("prompt tail");
+    assert_eq!(parser.last_prompt_display().len(), 64);
+    assert!(parser.last_prompt_display().ends_with(b"tail"));
+    let _ = std::fs::remove_dir_all(work_dir);
+}
+
+#[test]
+fn bounded_parser_keeps_prompt_replay_after_hook_output_compacts() {
+    let (mut parser, work_dir) = bounded_parser_for_test("prompt-replay", 64);
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"precmd\",\"token\":\"test-marker-token\",\"cwd\":\"/tmp\"}\x07")
+        .expect("precmd");
+    parser.feed(&vec![b'h'; 1024]).expect("large prompt hook");
+    parser
+        .feed(b"\x1b]1337;COSH;{\"event\":\"prompt_ready\",\"token\":\"test-marker-token\"}\x07cosh$ ")
+        .expect("prompt ready");
+
+    assert_eq!(parser.last_prompt_display(), b"cosh$ ");
+    assert!(parser.has_prompt_painted_since_ready());
+    assert!(parser.display.window_len() <= 128);
+    let _ = std::fs::remove_dir_all(work_dir);
+}
+
+#[test]
+fn bounded_parser_handles_many_commands_without_rebasing_offsets() {
+    let (mut parser, work_dir) = bounded_parser_for_test("many-commands", 96);
+    for command in 0..12 {
+        let preexec = format!(
+            "\x1b]1337;COSH;{{\"event\":\"preexec\",\"token\":\"{TEST_MARKER_TOKEN}\",\"command\":\"echo {command}\",\"cwd\":\"/tmp\"}}\x07"
+        );
+        parser.feed(preexec.as_bytes()).expect("preexec");
+        parser.feed(&[b'a' + command as u8; 41]).expect("output");
+        let precmd = format!(
+            "\x1b]1337;COSH;{{\"event\":\"precmd\",\"token\":\"{TEST_MARKER_TOKEN}\",\"status\":0,\"cwd\":\"/tmp\"}}\x07"
+        );
+        parser.feed(precmd.as_bytes()).expect("precmd");
+    }
+
+    let completed = parser
+        .events
+        .iter()
+        .filter(|event| event.kind == ShellEventKind::CommandCompleted)
+        .collect::<Vec<_>>();
+    assert_eq!(completed.len(), 12);
+    assert!(completed
+        .iter()
+        .all(|event| event.terminal_output_bytes == Some(41)));
+    assert!(parser.clean.window_len() <= 192);
+    assert!(parser.display.window_len() <= 192);
+    let _ = std::fs::remove_dir_all(work_dir);
 }
 
 // S3 (stall-class audit 20260803, fixed by #2142): the pending handoff

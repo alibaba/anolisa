@@ -24,12 +24,22 @@ impl ShellEventBatch<'_> {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ShellEventSnapshot<'a> {
+    base: usize,
     events: &'a [ShellEvent],
 }
 
 impl<'a> ShellEventSnapshot<'a> {
+    #[cfg(test)]
     pub(crate) fn new(events: &'a [ShellEvent]) -> Self {
-        Self { events }
+        Self { base: 0, events }
+    }
+
+    pub(crate) fn with_base(base: usize, events: &'a [ShellEvent]) -> Self {
+        Self { base, events }
+    }
+
+    pub(crate) fn base(&self) -> usize {
+        self.base
     }
 
     pub(crate) fn events(&self) -> &[ShellEvent] {
@@ -37,15 +47,15 @@ impl<'a> ShellEventSnapshot<'a> {
     }
 
     pub(crate) fn cursor(&self) -> ShellEventCursor {
-        ShellEventCursor(self.events.len())
+        ShellEventCursor(self.base.saturating_add(self.events.len()))
     }
 
     pub(crate) fn batch_since(&self, cursor: ShellEventCursor) -> ShellEventBatch<'a> {
-        let from = cursor.position().min(self.events.len());
+        let from = cursor.position().clamp(self.base, self.cursor().position());
         ShellEventBatch {
             from: ShellEventCursor(from),
             to: self.cursor(),
-            events: &self.events[from..],
+            events: &self.events[from - self.base..],
         }
     }
 }
@@ -93,5 +103,21 @@ mod tests {
         };
 
         assert_eq!(batch.global_index(0), 7);
+    }
+
+    #[test]
+    fn compacted_snapshot_keeps_absolute_cursor_and_batch_indices() {
+        let events = [
+            ShellEvent::user_input_intercepted("s", "one"),
+            ShellEvent::user_input_intercepted("s", "two"),
+        ];
+        let snapshot = ShellEventSnapshot::with_base(4_096, &events);
+        let batch = snapshot.batch_since(ShellEventCursor(4_097));
+
+        assert_eq!(snapshot.cursor().position(), 4_098);
+        assert_eq!(batch.from.position(), 4_097);
+        assert_eq!(batch.to.position(), 4_098);
+        assert_eq!(batch.global_index(0), 4_097);
+        assert_eq!(batch.events[0].input.as_deref(), Some("two"));
     }
 }

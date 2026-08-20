@@ -9,6 +9,34 @@ use crate::input::InputClassifier;
 use crate::types::{ShellEnvironmentSnapshot, ShellEvent};
 
 use super::raw_relay::interactive_sentinel::InputWaitStatus;
+use super::transcript::TranscriptRetention;
+
+pub(super) const INTERACTIVE_TRANSCRIPT_WINDOW_BYTES: usize = 256 * 1024;
+pub(super) const INTERACTIVE_EVENT_WINDOW_EVENTS: usize = 1024;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ShellEventView<'a> {
+    base: usize,
+    events: &'a [ShellEvent],
+}
+
+impl<'a> ShellEventView<'a> {
+    pub(crate) fn new(base: usize, events: &'a [ShellEvent]) -> Self {
+        Self { base, events }
+    }
+
+    pub(crate) fn base(self) -> usize {
+        self.base
+    }
+
+    pub(crate) fn events(self) -> &'a [ShellEvent] {
+        self.events
+    }
+
+    pub(crate) fn position(self) -> usize {
+        self.base.saturating_add(self.events.len())
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct ShellEnvironmentObserver(
@@ -119,6 +147,7 @@ pub struct ShellHostConfig {
     pub(crate) input_wait_timeout_secs: u64,
     pub(super) shell_environment_observer: Option<ShellEnvironmentObserver>,
     pub(super) shell_history_file_observer: Option<ShellHistoryFileObserver>,
+    pub(super) transcript_retention: TranscriptRetention,
 }
 
 impl ShellHostConfig {
@@ -143,6 +172,7 @@ impl ShellHostConfig {
             input_wait_timeout_secs: 120,
             shell_environment_observer: None,
             shell_history_file_observer: None,
+            transcript_retention: TranscriptRetention::Full,
         }
     }
 
@@ -189,6 +219,14 @@ impl ShellHostConfig {
 
     pub(crate) fn clear_shell_history_file_observer(&mut self) {
         self.shell_history_file_observer = None;
+    }
+
+    /// Bounds byte-transcript memory for the real interactive runtime. Public
+    /// and scripted callers keep full retention unless they enter this path.
+    pub(crate) fn bound_interactive_transcript(&mut self) {
+        self.transcript_retention = TranscriptRetention::Bounded {
+            window_bytes: INTERACTIVE_TRANSCRIPT_WINDOW_BYTES,
+        };
     }
 }
 

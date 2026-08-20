@@ -1,10 +1,40 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use crate::types::ShellEvent;
 
 pub(crate) mod audit;
+
+#[derive(Debug)]
+pub(crate) struct ShellEventJournal {
+    writer: BufWriter<File>,
+}
+
+impl ShellEventJournal {
+    pub(crate) fn create(path: impl AsRef<Path>) -> io::Result<Self> {
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let file = options.open(path)?;
+        #[cfg(unix)]
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        Ok(Self {
+            writer: BufWriter::new(file),
+        })
+    }
+
+    pub(crate) fn append(&mut self, events: &[ShellEvent]) -> io::Result<()> {
+        for event in events {
+            serde_json::to_writer(&mut self.writer, &redacted_event(event)).map_err(json_to_io)?;
+            self.writer.write_all(b"\n")?;
+        }
+        self.writer.flush()
+    }
+}
 
 pub fn write_shell_events(path: impl AsRef<Path>, events: &[ShellEvent]) -> io::Result<()> {
     let mut options = OpenOptions::new();
@@ -33,7 +63,7 @@ pub(crate) fn redacted_shell_events(events: &[ShellEvent]) -> Vec<ShellEvent> {
     events.iter().map(redacted_event).collect()
 }
 
-fn redacted_event(event: &ShellEvent) -> ShellEvent {
+pub(crate) fn redacted_event(event: &ShellEvent) -> ShellEvent {
     let mut event = event.clone();
     event.session_id = redact(&event.session_id);
     event.command_id = event.command_id.as_deref().map(redact);

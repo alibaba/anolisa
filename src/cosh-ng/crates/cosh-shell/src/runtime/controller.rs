@@ -6,6 +6,7 @@ use crate::runtime::approval_state::ApprovalRequestStatus;
 use crate::runtime::prelude::*;
 use crate::runtime::question_terminal::redraw_active_question_if_width_changed;
 use crate::runtime::state::InlineState;
+use crate::shell_host::ShellEventView;
 
 use super::dispatcher::RuntimeDispatcher;
 use super::events::ShellEventSnapshot;
@@ -20,15 +21,17 @@ pub(crate) use bootstrap::{
     run_adapter_demo, run_demo, run_host_demo, run_interactive, run_interactive_demo, run_raw,
 };
 
-fn render_raw_inline_events<W: Write>(
-    events: &[ShellEvent],
+fn render_raw_inline_event_view<W: Write>(
+    view: ShellEventView<'_>,
     output: &mut W,
     adapter: &AdapterInstance,
     shell_label: &str,
     inline_state: &mut InlineState,
 ) -> std::io::Result<RawObserverAction> {
+    let snapshot = ShellEventSnapshot::with_base(view.base(), view.events());
     if let Some(audit) = inline_state.audit.as_mut() {
-        audit.observe_shell_events(events);
+        let batch = snapshot.batch_since(inline_state.control.event_cursor());
+        audit.observe_shell_event_batch(batch.events);
     }
     let mut terminal_output = CrLfWriter::new(output);
     if inline_state.questions.active_panel_id.is_some() {
@@ -38,7 +41,6 @@ fn render_raw_inline_events<W: Write>(
             RatatuiInlineRenderer::for_terminal().with_language(inline_state.language),
         )?;
     }
-    let snapshot = ShellEventSnapshot::new(events);
     let actions = RuntimeDispatcher::dispatch_inline_batch(
         &snapshot,
         adapter,
@@ -50,7 +52,7 @@ fn render_raw_inline_events<W: Write>(
     if let Some(request) = inline_state
         .control
         .shell_handoff_mut()
-        .emit_next_approved(snapshot.events().len())
+        .emit_next_approved(snapshot.cursor().position())
     {
         if inline_state.trigger_pty_prompt {
             inline_state.trigger_pty_prompt = false;
@@ -99,6 +101,23 @@ fn render_raw_inline_events<W: Write>(
     } else {
         Ok(RawObserverAction::Continue)
     }
+}
+
+#[cfg(test)]
+fn render_raw_inline_events<W: Write>(
+    events: &[ShellEvent],
+    output: &mut W,
+    adapter: &AdapterInstance,
+    shell_label: &str,
+    inline_state: &mut InlineState,
+) -> std::io::Result<RawObserverAction> {
+    render_raw_inline_event_view(
+        ShellEventView::new(0, events),
+        output,
+        adapter,
+        shell_label,
+        inline_state,
+    )
 }
 
 fn shell_handoff_timeout_recovery_action<W: Write>(

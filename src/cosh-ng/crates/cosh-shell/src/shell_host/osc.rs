@@ -4,12 +4,15 @@
 // state and the display-window helpers are owned by osc/command.rs.
 mod alt_screen;
 mod command;
+mod event_store;
 mod handoff_claim;
 mod routing;
+mod transcript_store;
 
 use alt_screen::AltScreenTracker;
 use command::CurrentCommand;
 pub(crate) use command::{VisibleTailTracker, VISIBLE_TAIL_MAX_CHARS};
+use event_store::EventStore;
 use handoff_claim::{
     claim_pending_command_origin, pending_origin_for_request, PendingCommandOrigin,
 };
@@ -22,17 +25,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 
 use super::model::{ShellEnvironmentObserver, ShellHistoryFileObserver};
+use super::transcript::Transcript;
 use crate::types::{
     CommandOrigin, ShellCaptureLifecycle, ShellCaptureMetadata, ShellCommandAuditIdentity,
     ShellEnvironmentSnapshot, ShellEvent, ShellEventKind, ShellHandoffRequest,
-    SESSION_OUTPUT_REF_MAX_BYTES,
 };
 
 #[cfg(test)]
-pub(super) use super::osc_output::{capped_output_ref_bytes, write_output_ref};
 pub(super) use super::osc_output::{
-    write_output_ref_with_session_cap, OutputRefCapture, OutputRefCaptureStatus,
+    capped_output_ref_bytes, write_output_ref, write_output_ref_with_session_cap,
 };
+pub(super) use super::osc_output::{OutputRefCapture, OutputRefCaptureStatus};
 
 const OSC_PREFIX: &[u8] = b"\x1b]1337;COSH;";
 const BRACKETED_PASTE_ENABLE: &[u8] = b"\x1b[?2004h";
@@ -59,9 +62,9 @@ pub(super) enum DisplayCutKind {
 pub(super) struct OscParser {
     pub(super) session_id: String,
     output_ref_dir: PathBuf,
-    pub(super) events: Vec<ShellEvent>,
-    pub(super) clean: Vec<u8>,
-    pub(super) display: Vec<u8>,
+    pub(super) events: EventStore,
+    pub(super) clean: Transcript,
+    pub(super) display: Transcript,
     marker_token: String,
     pending: Vec<u8>,
     pending_clean_control: Vec<u8>,
@@ -70,6 +73,8 @@ pub(super) struct OscParser {
     intervention_cuts: Vec<usize>,
     intervention_display_cuts: Vec<(usize, DisplayCutKind)>,
     last_prompt_display_start: Option<usize>,
+    last_prompt_display: Vec<u8>,
+    capture_prompt_display: bool,
     prompt_ready_display_start: Option<usize>,
     /// #1932: the soft-newline upgrade submitted a synthetic empty line so
     /// bash repaints PS1; its visually blank accept echo is dropped at the
@@ -115,37 +120,6 @@ enum PendingHandoffEchoAction {
 }
 
 impl OscParser {
-    pub(super) fn new(session_id: String, output_ref_dir: PathBuf, marker_token: String) -> Self {
-        Self {
-            session_id,
-            output_ref_dir,
-            events: Vec::new(),
-            clean: Vec::new(),
-            display: Vec::new(),
-            marker_token,
-            pending: Vec::new(),
-            pending_clean_control: Vec::new(),
-            current: None,
-            command_seq: 0,
-            intervention_cuts: Vec::new(),
-            intervention_display_cuts: Vec::new(),
-            last_prompt_display_start: None,
-            prompt_ready_display_start: None,
-            synthetic_prompt_repaint_armed: false,
-            captured_output_ref_bytes: 0,
-            pending_command_origin: None,
-            expired_handoff_staging: false,
-            pending_handoff_echo: None,
-            shell_environment_snapshot: None,
-            environment_observer: None,
-            history_file_observer: None,
-            main_prompt_gate: crate::raw_input::MainPromptGate::default(),
-            pty_input_barrier_pushed: false,
-            visible_tail: VisibleTailTracker::default(),
-            alt_screen: AltScreenTracker::default(),
-        }
-    }
-
     /// Shares the main-prompt gate with the raw input relay (#1721 D16).
     pub(crate) fn set_main_prompt_gate(&mut self, gate: crate::raw_input::MainPromptGate) {
         self.main_prompt_gate = gate;
@@ -181,7 +155,7 @@ impl OscParser {
                 let flush_len = self.pending.len().saturating_sub(keep);
                 if flush_len > 0 {
                     let passthrough = self.pending[..flush_len].to_vec();
-                    self.append_passthrough(&passthrough);
+                    self.append_passthrough(&passthrough)?;
                     self.pending.drain(..flush_len);
                 }
                 return Ok(());
@@ -189,7 +163,7 @@ impl OscParser {
 
             if start > 0 {
                 let passthrough = self.pending[..start].to_vec();
-                self.append_passthrough(&passthrough);
+                self.append_passthrough(&passthrough)?;
                 self.pending.drain(..start);
             }
 
@@ -266,13 +240,22 @@ impl OscParser {
 
         match marker.event.as_str() {
             "prompt_ready" => {
-                self.prompt_ready_display_start = Some(self.display.len());
+                // In bounded mode user prompt hooks may emit arbitrarily large
+                // output between precmd and this marker. Reset here so replay
+                // retains only the actual PS1 bytes that follow.
+                if !self.display.is_full() {
+                    self.start_prompt_display_capture();
+                }
+                self.prompt_ready_display_start = Some(self.display.position());
                 // #1721 D16: the shell marker emits prompt_ready only for the
                 // primary prompt (PS1), so this is the authoritative "CJK
                 // drafts may open" signal.
                 self.main_prompt_gate.set_at_prompt(true);
             }
             "preexec" => {
+                if !self.display.is_full() {
+                    self.capture_prompt_display = false;
+                }
                 self.main_prompt_gate.set_at_prompt(false);
                 // #2196 R7: the visible-tail window starts at the command
                 // boundary, so earlier output can never resurface as the
@@ -294,7 +277,7 @@ impl OscParser {
                     origin,
                     audit_identity: audit_identity.clone(),
                     started_at_ms: timestamp,
-                    output_start: self.clean.len(),
+                    output_start: self.clean.position(),
                     attempt_generation: marker.generation,
                     shell_environment_generation: marker
                         .path_trusted
@@ -315,10 +298,10 @@ impl OscParser {
             "precmd" => {
                 self.prompt_ready_display_start = None;
                 let Some(current) = self.current.take() else {
-                    self.intervention_cuts.push(self.clean.len());
+                    self.intervention_cuts.push(self.clean.position());
                     self.intervention_display_cuts
-                        .push((self.display.len(), DisplayCutKind::PromptBoundary));
-                    self.last_prompt_display_start = Some(self.display.len());
+                        .push((self.display.position(), DisplayCutKind::PromptBoundary));
+                    self.start_prompt_display_capture();
                     // A fresh command-less prompt report re-arms the
                     // PTY-input invalidation barrier: the cwd carried
                     // here supersedes any earlier barrier.
@@ -362,12 +345,13 @@ impl OscParser {
                 } else {
                     marker.status.unwrap_or(0)
                 };
-                let output = self.clean[current.output_start..].to_vec();
-                let output_ref = self.capture_command_output_ref(&current.id, &output)?;
-                self.intervention_cuts.push(self.clean.len());
+                let output_end = self.clean.position();
+                let output_ref =
+                    self.capture_command_output_ref(&current.id, current.output_start, output_end)?;
+                self.intervention_cuts.push(output_end);
                 self.intervention_display_cuts
-                    .push((self.display.len(), DisplayCutKind::PromptBoundary));
-                self.last_prompt_display_start = Some(self.display.len());
+                    .push((self.display.position(), DisplayCutKind::PromptBoundary));
+                self.start_prompt_display_capture();
                 let kind = if status == 0 {
                     ShellEventKind::CommandCompleted
                 } else {
@@ -386,7 +370,8 @@ impl OscParser {
                 event.cwd = Some(current.cwd.clone());
                 event.end_cwd = marker.cwd.or(Some(current.cwd));
                 event.duration_ms = Some(timestamp.saturating_sub(current.started_at_ms));
-                event.terminal_output_bytes = Some(output.len() as u64);
+                event.terminal_output_bytes =
+                    Some(output_end.saturating_sub(current.output_start) as u64);
                 event.command_origin = Some(current.origin);
                 event.audit_identity = current.audit_identity;
                 event.shell_environment_generation = current.shell_environment_generation;
@@ -453,39 +438,22 @@ impl OscParser {
         }
     }
 
-    fn capture_command_output_ref(
-        &mut self,
-        command_id: &str,
-        output: &[u8],
-    ) -> io::Result<OutputRefCapture> {
-        let capture = write_output_ref_with_session_cap(
-            &self.output_ref_dir,
-            command_id,
-            output,
-            self.captured_output_ref_bytes,
-            SESSION_OUTPUT_REF_MAX_BYTES,
-        )?;
-        self.captured_output_ref_bytes = self
-            .captured_output_ref_bytes
-            .saturating_add(capture.captured_bytes);
-        Ok(capture)
-    }
-
-    pub(super) fn flush_pending(&mut self) {
+    pub(super) fn flush_pending(&mut self) -> io::Result<()> {
         let pending = std::mem::take(&mut self.pending);
-        self.append_passthrough(&pending);
-        self.flush_pending_clean_control();
+        self.append_passthrough(&pending)?;
+        self.flush_pending_clean_control()
     }
 
-    fn append_passthrough(&mut self, data: &[u8]) {
+    fn append_passthrough(&mut self, data: &[u8]) -> io::Result<()> {
         let data = self.filter_pending_handoff_echo(data);
         if data.is_empty() {
-            return;
+            return Ok(());
         }
         self.alt_screen.observe(&data);
         self.visible_tail.feed(&data);
-        self.display.extend_from_slice(&data);
-        self.append_clean(&data);
+        self.display.append(&data)?;
+        self.append_prompt_display_tail(&data);
+        self.append_clean(&data)
     }
 
     /// #2025: whether the foreground application currently owns the
@@ -556,43 +524,54 @@ impl OscParser {
         Some(PendingHandoffEchoAction::Mismatch(bytes))
     }
 
-    fn append_clean(&mut self, data: &[u8]) {
+    fn append_clean(&mut self, data: &[u8]) -> io::Result<()> {
         let mut bytes = Vec::new();
         if !self.pending_clean_control.is_empty() {
             bytes.append(&mut self.pending_clean_control);
         }
         bytes.extend_from_slice(data);
 
+        let mut run = Vec::with_capacity(bytes.len());
         let mut idx = 0;
         while idx < bytes.len() {
             let rest = &bytes[idx..];
             if let Some(control_len) = known_clean_control_len(rest) {
+                self.clean.append(&run)?;
+                run.clear();
                 idx += control_len;
                 continue;
             }
             if is_known_clean_control_prefix(rest) {
+                self.clean.append(&run)?;
                 self.pending_clean_control.extend_from_slice(rest);
-                return;
+                return Ok(());
             }
-
-            self.push_clean_byte(bytes[idx]);
+            if bytes[idx] == b'\x08' {
+                self.clean.append(&run)?;
+                run.clear();
+                self.clean.pop_last_utf8_char()?;
+            } else {
+                run.push(bytes[idx]);
+            }
             idx += 1;
         }
+        self.clean.append(&run)?;
+        Ok(())
     }
 
-    fn push_clean_byte(&mut self, byte: u8) {
+    fn push_clean_byte(&mut self, byte: u8) -> io::Result<()> {
         if byte == b'\x08' {
-            pop_last_utf8_char(&mut self.clean);
-            return;
+            return self.clean.pop_last_utf8_char();
         }
-        self.clean.push(byte);
+        self.clean.append(&[byte])
     }
 
-    fn flush_pending_clean_control(&mut self) {
+    fn flush_pending_clean_control(&mut self) -> io::Result<()> {
         let pending = std::mem::take(&mut self.pending_clean_control);
         for byte in pending {
-            self.push_clean_byte(byte);
+            self.push_clean_byte(byte)?;
         }
+        Ok(())
     }
 
     pub(super) fn finish_current_on_exit(&mut self, status: i32) -> io::Result<()> {
@@ -601,8 +580,9 @@ impl OscParser {
         };
 
         let ended_at = now_ms();
-        let output = self.clean[current.output_start..].to_vec();
-        let output_ref = self.capture_command_output_ref(&current.id, &output)?;
+        let output_end = self.clean.position();
+        let output_ref =
+            self.capture_command_output_ref(&current.id, current.output_start, output_end)?;
         let status = if is_shell_exit_command(&current.command) {
             0
         } else {
@@ -625,7 +605,7 @@ impl OscParser {
         event.cwd = Some(current.cwd.clone());
         event.end_cwd = Some(current.cwd);
         event.duration_ms = Some(ended_at.saturating_sub(current.started_at_ms));
-        event.terminal_output_bytes = Some(output.len() as u64);
+        event.terminal_output_bytes = Some(output_end.saturating_sub(current.output_start) as u64);
         event.command_origin = Some(current.origin);
         event.audit_identity = current.audit_identity;
         event.shell_environment_generation = current.shell_environment_generation;
@@ -637,7 +617,10 @@ impl OscParser {
         if prompt.is_empty() {
             return 0;
         }
+        // Bounded mode uses this only for the isolated-shell startup gate;
+        // the prompt that just painted is necessarily in the resident tail.
         self.clean
+            .resident_slice()
             .windows(prompt.len())
             .filter(|window| *window == prompt)
             .count()
@@ -980,14 +963,6 @@ fn is_known_clean_control_prefix(bytes: &[u8]) -> bool {
     ]
     .into_iter()
     .any(|control| control.starts_with(bytes))
-}
-
-fn pop_last_utf8_char(bytes: &mut Vec<u8>) {
-    while let Some(byte) = bytes.pop() {
-        if byte & 0b1100_0000 != 0b1000_0000 {
-            break;
-        }
-    }
 }
 
 pub(super) fn now_ms() -> u64 {

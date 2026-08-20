@@ -75,10 +75,21 @@ use crate::types::HookFinding;
 
 const MAX_HOOK_FINDINGS: usize = 32;
 
+#[cfg(test)]
 pub(crate) fn record_command_hook_findings(
     events: &[ShellEvent],
     blocks: &[CommandBlock],
     state: &mut InlineState,
+    event_index_base: usize,
+) {
+    record_command_hook_findings_with_history_base(events, blocks, state, 0, event_index_base);
+}
+
+pub(crate) fn record_command_hook_findings_with_history_base(
+    events: &[ShellEvent],
+    blocks: &[CommandBlock],
+    state: &mut InlineState,
+    history_index_base: usize,
     event_index_base: usize,
 ) {
     for block in blocks {
@@ -98,6 +109,7 @@ pub(crate) fn record_command_hook_findings(
         let user_has_not_continued = !state.hooks.block_followed_by_user_input(&block.id);
         let gates = InterventionGates {
             same_dispatch_batch: command_end_event_index(events, block)
+                .map(|index| history_index_base.saturating_add(index))
                 .is_some_and(|idx| idx >= event_index_base),
             input_empty: user_has_not_continued,
             foreground_idle: !shell_has_active_foreground_command(events),
