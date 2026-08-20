@@ -379,11 +379,123 @@ pub fn is_bounded_positive_count(value: &str, max: u32) -> bool {
     count > 0 && count <= max
 }
 
+/// Returns true when the path targets the special kernel filesystems
+/// (`/dev`, `/proc`, `/sys`) under any lexical spelling: the raw prefix
+/// match runs first so a blocked spelling stays blocked even when its
+/// lexical resolution escapes the blocklist (`/proc/../etc` fails
+/// closed), then traversal spellings (`/../proc`, `/./proc`, `//proc`)
+/// are caught by re-matching the lexically normalized form (issue #2184).
+/// Relative spellings (`../proc/version`, `proc/version`) are blocked
+/// cwd-independently — see `first_component_targets_special_dir` — and
+/// a leading `~`/`~user` that a `..` would pop is unresolvable at this
+/// layer (the shell expands it only at execution time), so those
+/// spellings fail closed as well.
+///
+/// `$`-quoting and variable-expansion spellings (`2>$DEV_NULL`,
+/// `$'/proc/self/cmdline'`) are intentionally out of scope: this layer
+/// passes them through, and both automatic-execution chains upstream
+/// intercept them — the broker's `is_shell_meta` hard-denies `$` and
+/// quote characters, and the readonly compound executor's rule 5 rejects
+/// tokens containing `$` or backticks (issue #2184 investigation).
+/// Evaluate-pass / execute-intercept is the division of labor; new
+/// callers must not treat this predicate as a complete sandbox check.
 pub fn is_blocked_special_path(path: &str) -> bool {
+    if has_blocked_special_prefix(path) {
+        return true;
+    }
+    // Unresolvable normalization (a `..` popping a leading `~`) fails
+    // closed.
+    let Some(normalized) = normalize_path_lexically(path) else {
+        return true;
+    };
+    has_blocked_special_prefix(&normalized) || first_component_targets_special_dir(&normalized)
+}
+
+/// Blocks relative spellings whose first surviving component — after
+/// skipping any leading `..` chain — names a special directory
+/// (`../proc/version`, `proc/version`, `./proc/version`). The readonly
+/// executors run with the shell's working directory, so a relative
+/// spelling resolves against whatever the cwd happens to be; this layer
+/// has no filesystem access and no cwd, so it fails closed and refuses
+/// the spelling for every cwd — one of them (`/`, or a child of it when
+/// a `..` chain leads) resolves the spelling into the blocklist.
+/// Accepted cost: an ordinary directory literally named
+/// `proc`/`dev`/`sys` is refused too — the user can still approve the
+/// command interactively.
+fn first_component_targets_special_dir(normalized: &str) -> bool {
+    // After lexical normalization surviving `..` segments can only lead
+    // the path (inner ones are popped by the normalizer).
+    let mut rest = normalized;
+    while let Some(suffix) = rest.strip_prefix("../") {
+        rest = suffix;
+    }
+    if rest == ".." {
+        // Pure traversal with no target component.
+        return false;
+    }
+    matches!(rest.split('/').next(), Some("dev" | "proc" | "sys"))
+}
+
+fn has_blocked_special_prefix(path: &str) -> bool {
     path == "/dev"
         || path.starts_with("/dev/")
         || path == "/proc"
         || path.starts_with("/proc/")
         || path == "/sys"
         || path.starts_with("/sys/")
+}
+
+/// Lexically normalizes `.` / `..` segments and duplicate slashes. Pure
+/// string operation — never touches the filesystem.
+///
+/// Contract:
+/// - Absolute inputs keep the leading `/`; `..` above the root is dropped
+///   (POSIX: `/..` resolves to `/`).
+/// - Relative inputs keep leading `..` segments verbatim: they cannot be
+///   resolved without the working directory.
+/// - A leading `~`/`~user` segment of a relative path expands to a
+///   home directory only when the shell executes the command, so a `..`
+///   that would pop it is unresolvable here: the function returns
+///   `None` and the caller fails closed. A `~` appearing after another
+///   segment is a literal directory name (no shell expansion) and pops
+///   normally.
+/// - Symlink aliases are intentionally not covered: resolving them would
+///   require filesystem access, which this purely lexical pass never
+///   performs by contract.
+fn normalize_path_lexically(path: &str) -> Option<String> {
+    let absolute = path.starts_with('/');
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            // Empty segments come from leading/duplicate slashes.
+            "" | "." => {}
+            ".." => {
+                let last = segments.last().copied();
+                match last {
+                    Some(seg) if !absolute && segments.len() == 1 && seg.starts_with('~') => {
+                        return None;
+                    }
+                    Some(seg) if seg != ".." => {
+                        segments.pop();
+                    }
+                    _ => {
+                        if !absolute {
+                            // Relative `..` with nothing to pop stays in the path.
+                            segments.push("..");
+                        }
+                    }
+                }
+            }
+            other => segments.push(other),
+        }
+    }
+
+    let joined = if absolute {
+        format!("/{}", segments.join("/"))
+    } else if segments.is_empty() {
+        ".".to_string()
+    } else {
+        segments.join("/")
+    };
+    Some(joined)
 }
