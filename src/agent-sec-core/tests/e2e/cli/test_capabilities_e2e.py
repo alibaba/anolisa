@@ -2,9 +2,12 @@
 
 import json
 import os
+import re
 
 import pytest
 from cli.conftest import run_cli
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 _CAPABILITY_ENV_NAMES = (
     "CODE_SCANNER_HOOK_ENABLED",
@@ -373,10 +376,15 @@ def test_capabilities_rejects_invalid_cli_values(
 
 
 def test_capabilities_help_documents_filters_and_environment_scope() -> None:
-    result = run_cli("capabilities", "--help")
+    # Rich colorizes help output on CI, which splits option names across escape
+    # sequences and rewraps prose at the detected width. Pin both so the literal
+    # matches below describe the documented text rather than the rendering.
+    with _EnvPatch(NO_COLOR="1", COLUMNS="200"):
+        result = run_cli("capabilities", "--help")
 
     assert result.returncode == 0, result.stderr
-    assert "--agent" in result.stdout
-    assert "--capability" in result.stdout
-    assert "--output" in result.stdout
-    assert "current CLI environment" in result.stdout
+    help_text = _ANSI_ESCAPE.sub("", result.stdout)
+    assert "--agent" in help_text
+    assert "--capability" in help_text
+    assert "--output" in help_text
+    assert "current CLI environment" in help_text
