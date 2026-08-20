@@ -276,7 +276,7 @@ fn is_transient(err: &ureq::Error) -> bool {
 ///
 /// Returns [`ModelServiceError::Config`] for an unsupported backend name or
 /// a base URL without an `http://`/`https://` scheme.  An unparseable or
-/// out-of-range timeout silently falls back to the default, matching the
+/// out-of-range timeout is logged and falls back to the default, matching the
 /// tolerant behaviour of the surrounding tooling.
 pub fn create_client() -> Result<Box<dyn ModelClient>, ModelServiceError> {
     Ok(Box::new(ollama_from_env()?))
@@ -338,11 +338,28 @@ fn is_loopback_url(base_url: &str) -> bool {
 }
 
 /// Parse a timeout in seconds, falling back to [`DEFAULT_TIMEOUT_SECS`] when
-/// the value is missing, unparseable, zero, or above [`MAX_TIMEOUT_SECS`].
+/// the value is missing.  A present but unusable value (unparseable, zero, or
+/// above [`MAX_TIMEOUT_SECS`]) also falls back, but is logged rather than
+/// silently dropped: the operator picked a scan budget deliberately, so
+/// quietly serving a different one turns a typo into unexplained latency with
+/// nothing to trace it to.
 fn timeout_secs_or_default(raw: Option<String>) -> u64 {
-    raw.and_then(|raw| raw.trim().parse::<u64>().ok())
-        .filter(|secs| (1..=MAX_TIMEOUT_SECS).contains(secs))
-        .unwrap_or(DEFAULT_TIMEOUT_SECS)
+    let Some(raw) = raw
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+    else {
+        return DEFAULT_TIMEOUT_SECS;
+    };
+    match raw.parse::<u64>() {
+        Ok(secs) if (1..=MAX_TIMEOUT_SECS).contains(&secs) => secs,
+        _ => {
+            log::warn!(
+                "Ignoring {ENV_TIMEOUT}={raw:?}: expected an integer in 1..={MAX_TIMEOUT_SECS}; \
+                 falling back to {DEFAULT_TIMEOUT_SECS}s"
+            );
+            DEFAULT_TIMEOUT_SECS
+        }
+    }
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -485,6 +502,7 @@ mod tests {
     fn timeout_in_range_is_used() {
         assert_eq!(timeout_secs_or_default(Some("45".into())), 45);
         assert_eq!(timeout_secs_or_default(Some("1".into())), 1);
+        assert_eq!(timeout_secs_or_default(Some(" 45 ".into())), 45);
         assert_eq!(
             timeout_secs_or_default(Some(MAX_TIMEOUT_SECS.to_string())),
             MAX_TIMEOUT_SECS
@@ -505,15 +523,21 @@ mod tests {
 
     #[test]
     fn timeout_missing_or_unparseable_falls_back_to_default() {
-        assert_eq!(timeout_secs_or_default(None), DEFAULT_TIMEOUT_SECS);
-        assert_eq!(
-            timeout_secs_or_default(Some("not-a-number".into())),
-            DEFAULT_TIMEOUT_SECS
-        );
-        assert_eq!(
-            timeout_secs_or_default(Some("-5".into())),
-            DEFAULT_TIMEOUT_SECS
-        );
+        for raw in [
+            None,
+            Some(String::new()),
+            Some("   ".into()),
+            Some("not-a-number".into()),
+            Some("-5".into()),
+            // A digit-transposing typo: 30 mistyped as 3O.
+            Some("3O".into()),
+        ] {
+            assert_eq!(
+                timeout_secs_or_default(raw.clone()),
+                DEFAULT_TIMEOUT_SECS,
+                "{raw:?} must fall back to the default timeout"
+            );
+        }
     }
 
     #[test]

@@ -154,6 +154,14 @@ fn scanner_engine_info() -> String {
 /// Available as `from agent_sec_cli._native import ...` in Python.
 #[pymodule]
 fn _native(_py: Python, m: &PyModule) -> PyResult<()> {
+    // Route Rust `log` records into Python's `logging`.  This is the only
+    // place a logger can be installed: the crate ships as a cdylib with no
+    // `main`, so without this call the `log` facade discards every record —
+    // including the model-service warnings about a non-loopback base URL and
+    // about rejected tuning values.  An Err means a logger is already
+    // installed (module reload, sub-interpreter); the existing bridge stays
+    // valid, so importing must not fail over it.
+    let _ = pyo3_log::try_init();
     m.add_function(wrap_pyfunction!(scan_prompt_json, m)?)?;
     m.add_function(wrap_pyfunction!(scan_multi_turn_json, m)?)?;
     m.add_function(wrap_pyfunction!(warmup_scanner, m)?)?;

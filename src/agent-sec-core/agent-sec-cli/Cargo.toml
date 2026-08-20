@@ -14,6 +14,7 @@ base64 = "0.22"
 log = "0.4"
 percent-encoding = "2.3"
 pyo3 = { version = "0.20", features = ["extension-module"] }
+pyo3-log = "0.9"
 regex = "1.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
@@ -39,5 +40,8 @@ crate-type = ["cdylib"]
 [dependencies]
 # PyO3: Rust bindings for Python
 pyo3 = { workspace = true }
+# Installs the `log` implementation for the whole extension; without it every
+# log::warn! in the dependency tree is a no-op.
+pyo3-log = { workspace = true }
 prompt-scanner = { path = "crates/prompt-scanner" }
 serde_json = { workspace = true }
