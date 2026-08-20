@@ -2388,11 +2388,13 @@ fn apply_retro_session_fixup(
 /// Record `agent_crash` interruption events for the pending calls of an
 /// exited agent process, and mark those calls as interrupted.
 ///
-/// Skips entirely when the process terminated voluntarily with exit code 0:
-/// a single-shot agent finishing its run with still-unresolved pending calls
-/// is not a crash (issue #1989). Abnormal exits (non-zero code or fatal
-/// signal, which covers the SIGKILL sent by the OOM killer) keep the previous
-/// behavior, with the decoded exit status embedded in the detail JSON.
+/// Skips entirely when the process terminated without a crash: a voluntary
+/// exit with code 0, or a graceful parent-initiated reap via
+/// SIGTERM/SIGINT/SIGHUP with no core dump (a single-shot agent finishing its
+/// run with still-unresolved pending calls is not a crash; issue #1989).
+/// Abnormal exits (non-zero code, fatal signal, core dump, or the SIGKILL
+/// sent by the OOM killer) keep the previous behavior, with the decoded exit
+/// status embedded in the detail JSON.
 ///
 /// Extracted as a free function so the crash decision is unit-testable
 /// without constructing a full `AgentSight` instance.
@@ -2404,7 +2406,9 @@ fn record_agent_crash_interruptions(
     istore: &InterruptionStore,
     genai_store: Option<&GenAISqliteStore>,
 ) {
-    use crate::interruption::{InterruptionEvent, InterruptionType, was_pid_oom_killed};
+    use crate::interruption::{
+        InterruptionEvent, InterruptionType, is_reap_worker_agent, was_pid_oom_killed,
+    };
 
     // Nothing to record without pending calls; guard here so future callers
     // cannot emit call-less crash events by accident.
@@ -2412,7 +2416,9 @@ fn record_agent_crash_interruptions(
         return;
     }
 
-    if exit_status.is_clean() {
+    let clean_exit = exit_status.is_clean()
+        || (exit_status.is_graceful_reap() && is_reap_worker_agent(agent_name));
+    if clean_exit {
         log::info!(
             "[CrashDetect] Agent {agent_name} (pid={pid}) exited cleanly with {} pending call(s) — not a crash",
             pending_calls.len(),
@@ -2568,6 +2574,72 @@ mod tests {
                 .len(),
             1,
             "pending call must stay pending on clean exit"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_sigterm_reap_with_pending_call_records_no_agent_crash() {
+        // A known per-request worker family (CoshNG) reaped with SIGTERM (raw
+        // 0x0f) is a deliberate graceful shutdown: no agent_crash may be
+        // recorded even when the process left pending calls behind.
+        let pid = 3_999_994;
+        let (dir, genai_store, istore) = setup_crash_stores("sigterm-exit", pid);
+        let pending = genai_store
+            .list_pending_for_pids(&[pid])
+            .expect("list pending");
+
+        record_agent_crash_interruptions(
+            pid as u32,
+            "CoshNG",
+            ProcessExitStatus::decode(0x0f),
+            &pending,
+            &istore,
+            Some(genai_store.as_ref()),
+        );
+
+        assert!(
+            list_crash_events(&istore).is_empty(),
+            "SIGTERM reap must not produce an agent_crash interruption"
+        );
+        // The pending call must NOT be stamped as interrupted either.
+        assert_eq!(
+            genai_store
+                .list_pending_for_pids(&[pid])
+                .expect("list pending")
+                .len(),
+            1,
+            "pending call must stay pending on graceful reap"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_sigterm_non_worker_agent_still_records_agent_crash() {
+        // The graceful-reap exemption is limited to known worker families. A
+        // non-worker agent (Codex) interrupted by SIGTERM with a pending call
+        // is still a mid-session disappearance and must record a crash.
+        let pid = 3_999_995;
+        let (dir, genai_store, istore) = setup_crash_stores("sigterm-codex", pid);
+        let pending = genai_store
+            .list_pending_for_pids(&[pid])
+            .expect("list pending");
+
+        record_agent_crash_interruptions(
+            pid as u32,
+            "Codex",
+            ProcessExitStatus::decode(0x0f),
+            &pending,
+            &istore,
+            Some(genai_store.as_ref()),
+        );
+
+        assert_eq!(
+            list_crash_events(&istore).len(),
+            1,
+            "SIGTERM on a non-worker agent must still record agent_crash"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

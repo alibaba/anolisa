@@ -12,7 +12,8 @@ use super::port_detector::detect_listening_ports;
 use super::store::{AgentHealthState, AgentHealthStatus, AgentRole, HealthStore, now_ms};
 use crate::discovery::AgentScanner;
 use crate::interruption::{
-    InterruptionEvent, InterruptionType, ProcessExitStatus, was_pid_oom_killed,
+    InterruptionEvent, InterruptionType, ProcessExitStatus, is_reap_worker_agent,
+    was_pid_oom_killed,
 };
 use crate::storage::sqlite::{GenAISqliteStore, InterruptionStore};
 
@@ -264,7 +265,10 @@ impl HealthChecker {
                             })
                             .collect();
                         let all_clean_exit = exit_status_by_pid.len() == pids.len()
-                            && exit_status_by_pid.values().all(|s| s.is_clean());
+                            && exit_status_by_pid.values().all(|s| {
+                                s.is_clean()
+                                    || (s.is_graceful_reap() && is_reap_worker_agent(agent_name))
+                            });
                         if all_clean_exit {
                             log::debug!(
                                 "Agent {agent_name} (pids={pids:?}) exited cleanly (trace-recorded exit status) — treating as normal shutdown despite {} pending call(s)",
@@ -683,7 +687,7 @@ mod tests {
     fn offline_status(pid: u32) -> AgentHealthStatus {
         AgentHealthStatus {
             pid,
-            agent_name: "cosh-core".to_string(),
+            agent_name: "CoshNG".to_string(),
             category: "cli".to_string(),
             exe_path: "/usr/bin/cosh-core".to_string(),
             ports: vec![],
@@ -731,6 +735,55 @@ mod tests {
                 .len(),
             1,
             "pending call must not be marked interrupted on clean exit"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_offline_with_pending_and_sigterm_reap_record_skips_agent_crash() {
+        let pid = 4_100_004;
+        let (dir, checker, genai_store, istore) = setup_checker("sigterm", pid);
+
+        // Trace mode recorded a graceful SIGTERM reap (raw 0x0f) for this pid:
+        // the checker backup path must not re-report it as a crash.
+        istore.record_process_exit(pid, 0x0f).expect("record exit");
+
+        checker.record_offline_agent_crashes(&[offline_status(pid as u32)]);
+
+        assert!(
+            list_crash_events(&istore).is_empty(),
+            "SIGTERM reap recorded by trace must not be re-reported as agent_crash"
+        );
+        assert_eq!(
+            genai_store
+                .list_pending_for_pids(&[pid])
+                .expect("list pending")
+                .len(),
+            1,
+            "pending call must not be marked interrupted on graceful reap"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_offline_with_pending_and_sigterm_non_worker_still_records_agent_crash() {
+        let pid = 4_100_005;
+        let (dir, checker, _genai_store, istore) = setup_checker("sigterm-nonworker", pid);
+
+        // A non-worker agent (Codex) interrupted by SIGTERM is not eligible for
+        // the graceful-reap exemption; the checker backup path must record it.
+        istore.record_process_exit(pid, 0x0f).expect("record exit");
+        let mut status = offline_status(pid as u32);
+        status.agent_name = "Codex".to_string();
+
+        checker.record_offline_agent_crashes(&[status]);
+
+        assert_eq!(
+            list_crash_events(&istore).len(),
+            1,
+            "SIGTERM on a non-worker agent must still be recorded as agent_crash"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

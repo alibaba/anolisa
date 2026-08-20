@@ -239,6 +239,23 @@ impl ProcessExitStatus {
     pub fn is_clean(self) -> bool {
         self.signal == 0 && self.code == 0
     }
+
+    /// True when the process was reaped with SIGTERM and produced no core
+    /// dump. This is the canonical parent-initiated shutdown for per-request
+    /// worker agents, but it is not proof of graceful shutdown by itself:
+    /// callers must also verify the agent belongs to a known worker lifecycle
+    /// via [`is_reap_worker_agent`] before suppressing a crash.
+    pub fn is_graceful_reap(self) -> bool {
+        self.signal == libc::SIGTERM as u32 && !self.core_dump
+    }
+}
+
+/// Agent families known to fork a short-lived worker per request and reap it
+/// with SIGTERM after completion. The graceful-reap exemption is limited to
+/// these families; every other agent keeps the historical crash behavior for
+/// signal termination.
+pub fn is_reap_worker_agent(agent_name: &str) -> bool {
+    matches!(agent_name, "Cosh" | "CoshNG")
 }
 
 #[cfg(test)]
@@ -588,6 +605,51 @@ mod tests {
         assert!(!s.core_dump);
         assert_eq!(s.code, 0);
         assert!(!s.is_clean());
+    }
+
+    #[test]
+    fn test_decode_sigterm_reap_is_clean() {
+        // SIGTERM → raw 0x0f (measured on a real kernel). Signal termination is
+        // not a clean exit by itself, but it is a candidate graceful reap that
+        // callers may accept only for known worker-lifecycle agents.
+        let s = ProcessExitStatus::decode(0x0f);
+        assert_eq!(s.signal, 15);
+        assert!(!s.core_dump);
+        assert_eq!(s.code, 0);
+        assert!(!s.is_clean(), "SIGTERM alone must not be a clean exit");
+        assert!(
+            s.is_graceful_reap(),
+            "SIGTERM without core dump is a reap candidate"
+        );
+    }
+
+    #[test]
+    fn test_decode_sigint_and_sighup_are_not_graceful_reaps() {
+        // Ctrl-C (SIGINT) and terminal hangup (SIGHUP) interrupt a session; they
+        // must never be classified as the parent-initiated reap of a worker.
+        assert!(!ProcessExitStatus::decode(0x02).is_clean());
+        assert!(!ProcessExitStatus::decode(0x02).is_graceful_reap());
+        assert!(!ProcessExitStatus::decode(0x01).is_clean());
+        assert!(!ProcessExitStatus::decode(0x01).is_graceful_reap());
+    }
+
+    #[test]
+    fn test_decode_sigterm_with_core_dump_is_not_clean() {
+        // SIGTERM with the core-dump bit set (0x80 | 0x0f) must remain a
+        // crash: a core dump is hard evidence of a fault.
+        let s = ProcessExitStatus::decode(0x8f);
+        assert_eq!(s.signal, 15);
+        assert!(s.core_dump);
+        assert!(!s.is_clean());
+        assert!(!s.is_graceful_reap());
+    }
+
+    #[test]
+    fn test_is_reap_worker_agent() {
+        assert!(is_reap_worker_agent("Cosh"));
+        assert!(is_reap_worker_agent("CoshNG"));
+        assert!(!is_reap_worker_agent("Codex"));
+        assert!(!is_reap_worker_agent("Claude"));
     }
 
     #[test]
