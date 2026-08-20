@@ -89,13 +89,20 @@ Pod 恢复 Ready 后，重新执行挂载视图验证命令。
 
 1. 将 `skill-source` 替换为自己的 PVC；
 2. 删除示例 ConfigMap 和 `seed-example` init container；
-3. 将 `SKILLFS_PROBE_FILE` 设置为挂载视图中的稳定文件；
+3. 将 `SKILLFS_PROBE_FILE` 设置为挂载视图中在 mount 生命周期内始终可见的稳定非空
+   文件；
 4. 替换 `agent` 镜像和命令；
 5. 保留 SkillFS mount 的 `Bidirectional` 和工作负载 mount 的
    `HostToContainer`。
 
 工作负载 readiness probe 应读取有意义的 SkillFS 内容，不应只检查目录存在或运行
 `skillfs --version`。
+
+参考 manifest 在第一次 FUSE 读取失败后将 Pod 标记为 NotReady，并在连续两次
+liveness 失败后只重启 SkillFS Sidecar。单次失败阈值意味着偶发 probe 超时也会立即
+将 Pod 标记为 NotReady，高并发时可能触发流量切走。工作负载刻意不配置 liveness
+probe。消费方遇到 `EIO` 或 `ENOTCONN` 后必须关闭失败的文件描述符，并在 Pod 恢复
+Ready 后重新打开文件。
 
 ## 故障排查
 

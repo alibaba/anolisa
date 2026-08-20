@@ -208,18 +208,24 @@ spec:
       readinessProbe:
         exec:
           command: ["/usr/local/bin/skillfs-mount-probe", "--readiness"]
-        periodSeconds: 10
-        timeoutSeconds: 10
-        failureThreshold: 3
+        # Remove the Pod from service after the first failed FUSE read. This
+        # probe changes readiness only; it does not restart the sidecar.
+        periodSeconds: 2
+        timeoutSeconds: 5
+        failureThreshold: 1
       # Fails when the FUSE session stops answering, including the hung case
       # where the process is still alive. The startup probe gates this one, so
       # no initialDelaySeconds is needed.
       livenessProbe:
         exec:
           command: ["/usr/local/bin/skillfs-mount-probe", "--liveness"]
-        periodSeconds: 20
-        timeoutSeconds: 10
-        failureThreshold: 3
+        # Restart after two consecutive failed FUSE reads. This 10-second
+        # termination budget is shorter than this Pod's 30-second shutdown
+        # budget so a dead mount cannot leave the container Running indefinitely.
+        periodSeconds: 5
+        timeoutSeconds: 5
+        failureThreshold: 2
+        terminationGracePeriodSeconds: 10
       resources:
         requests:
           cpu: 100m
@@ -284,9 +290,9 @@ spec:
               ! ls -1 "$SKILLFS_VIEW" | grep -Fxq skillfs-container-reserve
               timeout 5 grep -q '^name: skillfs-container-reserve$' "$r"
         initialDelaySeconds: 3
-        periodSeconds: 5
+        periodSeconds: 2
         timeoutSeconds: 10
-        failureThreshold: 24
+        failureThreshold: 1
       resources:
         requests:
           cpu: 50m

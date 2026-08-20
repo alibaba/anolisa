@@ -42,12 +42,20 @@ virtual `skill-discover/SKILL.md`. It also opens a secondary skill through the
 path advertised by `skill-discover`. Secondary skills stay out of the directory
 listing but remain readable through their advertised paths.
 
+The SkillFS readiness probe removes the Pod from service after one failed FUSE
+read. Its liveness probe restarts the sidecar after two consecutive failures
+and gives that probe-triggered shutdown 10 seconds to finish. The workload has
+no liveness probe, so a broken FUSE view cannot restart the consumer and repeat
+the same failure. Consumers should close failed file descriptors and reopen
+files after the Pod becomes Ready again.
+
 ## Use your own skills
 
 Before using the manifest for a workload:
 
 1. replace `skill-source` with a PVC;
 2. remove the example ConfigMap and `seed-example` init container;
-3. update `SKILLFS_PROBE_FILE`;
+3. update `SKILLFS_PROBE_FILE` to a stable, non-empty file that remains visible
+   for the lifetime of the mount;
 4. replace the `agent` image and command;
 5. keep the shared-volume mount propagation settings unchanged.

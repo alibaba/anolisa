@@ -91,13 +91,22 @@ Edit `src/skillfs/deploy/kubernetes/20-pod.yaml`:
 
 1. replace `skill-source` with your PVC;
 2. remove the example ConfigMap and `seed-example` init container;
-3. set `SKILLFS_PROBE_FILE` to a stable file in the mounted view;
+3. set `SKILLFS_PROBE_FILE` to a stable, non-empty file that remains visible
+   for the lifetime of the mount;
 4. replace the `agent` image and command;
 5. keep `Bidirectional` on the SkillFS mount and `HostToContainer` on the
    workload mount.
 
 The workload readiness probe should read meaningful SkillFS content, not only
 check the directory or run `skillfs --version`.
+
+The reference manifest marks the Pod unready after one failed FUSE read and
+restarts only the SkillFS sidecar after two consecutive liveness failures. The
+single-failure threshold means that a transient probe timeout also immediately
+marks the Pod unready, which may shift traffic under high concurrency. The
+workload intentionally has no liveness probe. After an `EIO` or `ENOTCONN`, a
+consumer must close the failed file descriptor and reopen the file after the
+Pod becomes Ready again.
 
 ## Troubleshoot
 
