@@ -110,8 +110,25 @@ fn test_parse_output_invalid_json() {
 fn test_parse_output_tool_calls_only() {
     let json = r#"[{"role":"assistant","parts":[{"type":"tool_call","name":"read_file"},{"type":"tool_call","name":"write_file"}]}]"#;
     let (tools, text) = parse_output_messages_for_loop_detection(Some(json));
-    assert_eq!(tools, vec!["read_file", "write_file"]);
+    let names: Vec<&str> = tools.iter().map(|k| k.name.as_str()).collect();
+    assert_eq!(names, vec!["read_file", "write_file"]);
+    // No arguments field -> no fingerprint
+    assert!(tools.iter().all(|k| k.args_fingerprint.is_none()));
     assert!(text.is_empty());
+}
+
+#[test]
+fn test_parse_output_tool_call_args_fingerprint() {
+    // Same tool with different arguments must yield different keys (#2691),
+    // while identical arguments yield identical keys.
+    let json_a = r#"[{"role":"assistant","parts":[{"type":"tool_call","name":"terminal","arguments":{"command":"pip list"}}]}]"#;
+    let json_b = r#"[{"role":"assistant","parts":[{"type":"tool_call","name":"terminal","arguments":{"command":"cat foo"}}]}]"#;
+    let (tools_a, _) = parse_output_messages_for_loop_detection(Some(json_a));
+    let (tools_a2, _) = parse_output_messages_for_loop_detection(Some(json_a));
+    let (tools_b, _) = parse_output_messages_for_loop_detection(Some(json_b));
+    assert!(tools_a[0].args_fingerprint.is_some());
+    assert_eq!(tools_a, tools_a2);
+    assert_ne!(tools_a, tools_b);
 }
 
 #[test]
@@ -126,7 +143,8 @@ fn test_parse_output_text_only() {
 fn test_parse_output_mixed() {
     let json = r#"[{"role":"assistant","parts":[{"type":"tool_call","name":"search"},{"type":"text","content":"Found results"}]}]"#;
     let (tools, text) = parse_output_messages_for_loop_detection(Some(json));
-    assert_eq!(tools, vec!["search"]);
+    let names: Vec<&str> = tools.iter().map(|k| k.name.as_str()).collect();
+    assert_eq!(names, vec!["search"]);
     assert_eq!(text, "Found results");
 }
 

@@ -551,11 +551,11 @@ impl GenAISqliteStore {
 
         rows.filter_map(|r| r.ok())
             .map(|(call_id, output_json, input_tokens, output_tokens)| {
-                let (tool_call_names, output_text_snippet) =
+                let (tool_calls, output_text_snippet) =
                     parse_output_messages_for_loop_detection(output_json.as_deref());
                 crate::interruption::RecentCallSummary {
                     call_id,
-                    tool_call_names,
+                    tool_calls,
                     output_text_snippet,
                     input_tokens,
                     output_tokens,
@@ -747,15 +747,18 @@ impl GenAISqliteStore {
 
 // ─── Helper for loop detection ───────────────────────────────────────────────
 
-/// Parse the `output_messages` JSON column to extract tool call names and text snippets.
+/// Parse the `output_messages` JSON column to extract tool call keys and text snippets.
 ///
 /// The JSON structure follows the OTel GenAI parts format stored by `store_event()`:
 /// ```json
-/// [{"role":"assistant","parts":[{"type":"tool_call","name":"read_file",...},{"type":"text","content":"..."}]}]
+/// [{"role":"assistant","parts":[{"type":"tool_call","name":"read_file","arguments":{...}},{"type":"text","content":"..."}]}]
 /// ```
+///
+/// Tool call arguments are reduced to a fingerprint so the loop detector can
+/// distinguish the same tool invoked with different arguments (#2691).
 pub(super) fn parse_output_messages_for_loop_detection(
     json_str: Option<&str>,
-) -> (Vec<String>, String) {
+) -> (Vec<crate::interruption::ToolCallKey>, String) {
     let Some(json_str) = json_str else {
         return (vec![], String::new());
     };
@@ -765,7 +768,7 @@ pub(super) fn parse_output_messages_for_loop_detection(
         Err(_) => return (vec![], String::new()),
     };
 
-    let mut tool_names = Vec::new();
+    let mut tool_calls = Vec::new();
     let mut text_parts = Vec::new();
 
     for msg in &messages {
@@ -774,7 +777,13 @@ pub(super) fn parse_output_messages_for_loop_detection(
                 match part.get("type").and_then(|t| t.as_str()) {
                     Some("tool_call") => {
                         if let Some(name) = part.get("name").and_then(|n| n.as_str()) {
-                            tool_names.push(name.to_string());
+                            let args_fingerprint = part
+                                .get("arguments")
+                                .map(crate::interruption::ToolCallKey::fingerprint_args);
+                            tool_calls.push(crate::interruption::ToolCallKey {
+                                name: name.to_string(),
+                                args_fingerprint,
+                            });
                         }
                     }
                     Some("text") => {
@@ -796,5 +805,5 @@ pub(super) fn parse_output_messages_for_loop_detection(
         full_text
     };
 
-    (tool_names, snippet)
+    (tool_calls, snippet)
 }
