@@ -1035,7 +1035,7 @@ export const AtifViewerPage: React.FC = () => {
                     <p className="text-xl font-bold text-green-600">
                       -{fmtTokens(savingsDetail.total_compounded_saved)}
                       <span className="text-sm font-normal text-gray-400 ml-1">
-                        ({savingsDetail.savings_rate.toFixed(1)}%)
+                        ({(savingsDetail.savings_rate * 100).toFixed(1)}%)
                       </span>
                     </p>
                   </div>

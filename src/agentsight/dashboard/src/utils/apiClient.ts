@@ -648,7 +648,9 @@ export interface SessionSavings {
   baseline_tokens: number;
   saved_tokens: number;
   compounded_saved: number;
+  /** Fraction of tokens saved, in [0, 1] (not a percentage). */
   savings_rate: number;
+  /** Fraction saved including compounding, in [0, 1] (not a percentage). */
   compounded_savings_rate: number;
   request_count: number;
   tool_saved: number;
@@ -670,7 +672,9 @@ export interface SavingsSummary {
   baseline_tokens: number;
   total_saved_tokens: number;
   total_compounded_saved: number;
+  /** Fraction of tokens saved, in [0, 1] (not a percentage). */
   savings_rate: number;
+  /** Fraction saved including compounding, in [0, 1] (not a percentage). */
   compounded_savings_rate: number;
   total_tool_saved: number;
   total_mcp_saved: number;
@@ -716,6 +720,7 @@ export interface SessionSavingsDetail {
   total_actual_tokens: number;
   total_compounded_saved: number;
   total_original_tokens: number;
+  /** Fraction of tokens saved, in [0, 1] (not a percentage). */
   savings_rate: number;
   items: OptimizationItem[];
 }

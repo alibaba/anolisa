@@ -40,7 +40,9 @@ pub struct SavingsSummary {
     pub baseline_tokens: i64,
     pub total_saved_tokens: i64,
     pub total_compounded_saved: i64,
+    /// Fraction of tokens saved: `total_saved_tokens / total_tokens`, in [0.0, 1.0].
     pub savings_rate: f64,
+    /// Fraction saved including the compounding effect, in [0.0, 1.0].
     pub compounded_savings_rate: f64,
     pub total_tool_saved: i64,
     pub total_mcp_saved: i64,
@@ -91,7 +93,9 @@ pub struct SessionSavingsDto {
     pub baseline_tokens: i64,
     pub saved_tokens: i64,
     pub compounded_saved: i64,
+    /// Fraction of tokens saved: `saved_tokens / total_tokens`, in [0.0, 1.0].
     pub savings_rate: f64,
+    /// Fraction saved including the compounding effect, in [0.0, 1.0].
     pub compounded_savings_rate: f64,
     pub request_count: i64,
     pub tool_saved: i64,
@@ -124,6 +128,7 @@ pub struct SessionSavingsDetail {
     pub total_actual_tokens: i64,
     pub total_compounded_saved: i64,
     pub total_original_tokens: i64,
+    /// Fraction of tokens saved: `total_compounded_saved / total_actual_tokens`, in [0.0, 1.0].
     pub savings_rate: f64,
     pub items: Vec<OptimizationItemDto>,
 }
@@ -363,6 +368,8 @@ pub(crate) fn build_explanation(
 }
 
 /// Generate optimization tips based on aggregated savings data.
+///
+/// `grand_compounded_rate` is a fraction in [0.0, 1.0] (not a percentage).
 pub(crate) fn generate_optimization_tips(
     stats_available: bool,
     grand_total: i64,
@@ -379,7 +386,7 @@ pub(crate) fn generate_optimization_tips(
             title: "Tokenless component not detected".to_string(),
             description: "stats.db not found. Make sure the tokenless component is installed and enabled; it automatically compresses tool output and MCP responses, significantly cutting token consumption.".to_string(),
         });
-    } else if grand_compounded_rate < 15.0 && grand_total > 0 {
+    } else if grand_compounded_rate < 0.15 && grand_total > 0 {
         tips.push(OptimizationTip {
             level: "warning".to_string(),
             title: "Savings rate is low".to_string(),
@@ -419,22 +426,22 @@ pub(crate) fn generate_optimization_tips(
         });
     }
 
-    if grand_compounded_rate >= 30.0 {
+    if grand_compounded_rate >= 0.30 {
         tips.push(OptimizationTip {
             level: "success".to_string(),
             title: "Excellent savings".to_string(),
             description: format!(
                 "Current compounded savings rate is {:.1}% — excellent! Keep the current configuration.",
-                grand_compounded_rate
+                grand_compounded_rate * 100.0
             ),
         });
-    } else if grand_compounded_rate >= 15.0 {
+    } else if grand_compounded_rate >= 0.15 {
         tips.push(OptimizationTip {
             level: "success".to_string(),
             title: "Good savings".to_string(),
             description: format!(
                 "Current compounded savings rate is {:.1}% — a good level. Try tuning compression strategies to improve further.",
-                grand_compounded_rate
+                grand_compounded_rate * 100.0
             ),
         });
     }
@@ -622,12 +629,12 @@ pub async fn get_token_savings(
 
         // FIX(#1): use compounded/total_tokens for both list and detail pages
         let savings_rate = if total_tokens > 0 {
-            session_saved as f64 / total_tokens as f64 * 100.0
+            session_saved as f64 / total_tokens as f64
         } else {
             0.0
         };
         let compounded_savings_rate = if total_tokens > 0 {
-            session_compounded_saved as f64 / total_tokens as f64 * 100.0
+            session_compounded_saved as f64 / total_tokens as f64
         } else {
             0.0
         };
@@ -661,12 +668,12 @@ pub async fn get_token_savings(
 
     let grand_total = grand_input + grand_output;
     let grand_rate = if grand_total > 0 {
-        grand_saved as f64 / grand_total as f64 * 100.0
+        grand_saved as f64 / grand_total as f64
     } else {
         0.0
     };
     let grand_compounded_rate = if grand_total > 0 {
-        grand_compounded_saved as f64 / grand_total as f64 * 100.0
+        grand_compounded_saved as f64 / grand_total as f64
     } else {
         0.0
     };
@@ -842,7 +849,7 @@ pub async fn get_session_savings(
 
     // FIX(#1): use compounded/total_tokens — consistent with get_token_savings
     let savings_rate = if total_tokens > 0 {
-        total_compounded_saved as f64 / total_tokens as f64 * 100.0
+        total_compounded_saved as f64 / total_tokens as f64
     } else {
         0.0
     };
@@ -1088,6 +1095,21 @@ mod tests {
         let total_saved = body["summary"]["total_saved_tokens"].as_i64().unwrap();
         assert!(total_saved > 0);
 
+        // Rates are fractions in [0.0, 1.0]: 2200 saved / 2700 total tokens
+        let expected_rate = 2200.0 / 2700.0;
+        let rate = body["summary"]["savings_rate"].as_f64().unwrap();
+        assert!((rate - expected_rate).abs() < 1e-9, "got {rate}");
+        let compounded_rate = body["summary"]["compounded_savings_rate"].as_f64().unwrap();
+        assert!(
+            (compounded_rate - expected_rate).abs() < 1e-9,
+            "got {compounded_rate}"
+        );
+        let session_rate = body["sessions"][0]["savings_rate"].as_f64().unwrap();
+        assert!(
+            (session_rate - expected_rate).abs() < 1e-9,
+            "got {session_rate}"
+        );
+
         // Restore HOME
         match orig_home {
             Some(v) => unsafe { std::env::set_var("HOME", v) },
@@ -1172,6 +1194,9 @@ mod tests {
         assert!(items[0]["strategy_label"].as_str().is_some());
         let compounded = body["total_compounded_saved"].as_i64().unwrap();
         assert!(compounded > 0);
+        // Rate is a fraction in [0.0, 1.0]: 2200 compounded saved / 2700 total tokens
+        let rate = body["savings_rate"].as_f64().unwrap();
+        assert!((rate - 2200.0 / 2700.0).abs() < 1e-9, "got {rate}");
 
         // Restore HOME
         match orig_home {
@@ -1384,7 +1409,7 @@ mod tests {
 
     #[test]
     fn test_tips_low_savings_rate() {
-        let tips = generate_optimization_tips(true, 10000, 10.0, 100, 200, &[]);
+        let tips = generate_optimization_tips(true, 10000, 0.10, 100, 200, &[]);
         assert!(
             tips.iter()
                 .any(|t| t.level == "warning" && t.title.contains("Savings rate"))
@@ -1431,7 +1456,7 @@ mod tests {
 
     #[test]
     fn test_tips_boundary_at_15_no_warning() {
-        let tips = generate_optimization_tips(true, 10000, 15.0, 1000, 500, &[]);
+        let tips = generate_optimization_tips(true, 10000, 0.15, 1000, 500, &[]);
         assert!(
             !tips
                 .iter()
@@ -1442,7 +1467,7 @@ mod tests {
 
     #[test]
     fn test_tips_boundary_at_30_excellent() {
-        let tips = generate_optimization_tips(true, 10000, 30.0, 2000, 1000, &[]);
+        let tips = generate_optimization_tips(true, 10000, 0.30, 2000, 1000, &[]);
         assert!(
             tips.iter()
                 .any(|t| t.level == "success" && t.title.contains("Excellent"))
@@ -1451,7 +1476,7 @@ mod tests {
 
     #[test]
     fn test_tips_boundary_just_below_15_warning() {
-        let tips = generate_optimization_tips(true, 10000, 14.9, 500, 500, &[]);
+        let tips = generate_optimization_tips(true, 10000, 0.149, 500, 500, &[]);
         assert!(
             tips.iter()
                 .any(|t| t.level == "warning" && t.title.contains("Savings rate"))
@@ -1460,7 +1485,7 @@ mod tests {
 
     #[test]
     fn test_tips_only_tool_saved_suggest_mcp() {
-        let tips = generate_optimization_tips(true, 10000, 10.0, 500, 0, &[]);
+        let tips = generate_optimization_tips(true, 10000, 0.10, 500, 0, &[]);
         assert!(
             tips.iter()
                 .any(|t| t.level == "info" && t.title.contains("MCP"))
@@ -1469,7 +1494,7 @@ mod tests {
 
     #[test]
     fn test_tips_only_mcp_saved_suggest_tool() {
-        let tips = generate_optimization_tips(true, 10000, 10.0, 0, 500, &[]);
+        let tips = generate_optimization_tips(true, 10000, 0.10, 0, 500, &[]);
         assert!(
             tips.iter()
                 .any(|t| t.level == "info" && t.title.contains("tool-output"))
@@ -1482,13 +1507,13 @@ mod tests {
             make_session_for_tips(0, 5000),
             make_session_for_tips(200, 3000),
         ];
-        let tips = generate_optimization_tips(true, 8000, 10.0, 100, 100, &sessions);
+        let tips = generate_optimization_tips(true, 8000, 0.10, 100, 100, &sessions);
         assert!(tips.iter().any(|t| t.title.contains("1")));
     }
 
     #[test]
     fn test_tips_excellent_rate() {
-        let tips = generate_optimization_tips(true, 10000, 35.0, 2000, 1500, &[]);
+        let tips = generate_optimization_tips(true, 10000, 0.35, 2000, 1500, &[]);
         assert!(
             tips.iter()
                 .any(|t| t.level == "success" && t.title.contains("Excellent"))
@@ -1497,7 +1522,7 @@ mod tests {
 
     #[test]
     fn test_tips_good_rate() {
-        let tips = generate_optimization_tips(true, 10000, 20.0, 1000, 1000, &[]);
+        let tips = generate_optimization_tips(true, 10000, 0.20, 1000, 1000, &[]);
         assert!(
             tips.iter()
                 .any(|t| t.level == "success" && t.title.contains("Good"))

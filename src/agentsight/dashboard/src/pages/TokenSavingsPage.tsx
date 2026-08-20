@@ -428,11 +428,11 @@ const SessionRow: React.FC<{
             <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden max-w-[80px]">
               <div
                 className="h-full bg-green-500 rounded-full"
-                style={{ width: `${Math.min(session.compounded_savings_rate, 100)}%` }}
+                style={{ width: `${Math.min(session.compounded_savings_rate * 100, 100)}%` }}
               />
             </div>
             <span className="text-xs font-semibold text-green-600">
-              {session.compounded_savings_rate.toFixed(1)}%
+              {(session.compounded_savings_rate * 100).toFixed(1)}%
             </span>
           </div>
         </td>
@@ -565,7 +565,6 @@ export const TokenSavingsPage: React.FC = () => {
   const totalCompoundedSaved = summary?.total_compounded_saved ?? 0;
   const totalCompoundedToolSaved = summary?.total_compounded_tool_saved ?? 0;
   const totalCompoundedMcpSaved = summary?.total_compounded_mcp_saved ?? 0;
-  const compoundedSavingsRate = summary?.compounded_savings_rate ?? 0;
   const savingsRate = baselineTokens > 0 ? (totalCompoundedSaved / baselineTokens) * 100 : 0;
 
   return (
