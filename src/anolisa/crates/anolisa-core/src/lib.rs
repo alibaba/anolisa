@@ -16,6 +16,7 @@ pub mod dependency;
 pub mod distribution;
 pub mod domain;
 pub mod download;
+pub mod execution;
 pub mod executor;
 pub mod facts;
 pub mod feature_flags;
@@ -80,6 +81,7 @@ pub use distribution::{
     ResolveQuery,
 };
 pub use download::{DownloadCache, DownloadError, DownloadedArtifact};
+pub use execution::{CommandOutcome, CommandOutcomeStatus, ExecutionIntent, PreparedExecution};
 pub use feature_flags::FeatureStore;
 pub use health::{
     CheckEnv, CheckOutcome, CheckSpec, CheckStatus, Protocol, ServiceProbes, run_check,
