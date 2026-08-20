@@ -466,12 +466,18 @@ completes. Daemon-wide connection draining and runtime cleanup remain separate.
 
 Blaze can atomically publish operator-prepared runtime artifacts and expose
 their metadata through the daemon API. `/v1/templates` is the single
-operator-facing template resource. Publishing an entry does not yet make
-sandbox creation select or boot it.
+operator-facing template resource. A `POST /v1/sandboxes` request selects a
+published entry through the optional `template` field, and the daemon restores
+the new sandbox from that entry.
 
-Future sandbox-create support will resolve an optional template name from this
-same catalog; there is no separate process-local registry for operators to
-configure or monitor.
+Sandbox creation resolves the optional template name from this same catalog;
+there is no separate process-local registry for operators to configure or
+monitor. The named entry must appear in the matched policy's `select.templates`
+allow-list, and its recorded image, backend, version, and (for Firecracker) VM
+and guest-transport shape must match what the policy would launch. Each
+template-backed sandbox receives an independent copy of the artifacts, so it can
+be checkpointed, rolled back, and deleted like any other sandbox without
+affecting the catalog or its siblings.
 
 ### Configuration
 
@@ -495,7 +501,13 @@ instance, and policy roots, from every executable path configured in
 file is opened for this startup, from that file's configured pathname, and from
 the configured `daemon.socket` path and the host network coordination path
 `/run/lock/blaze-network.lock`. They must also remain disjoint from the
-conventional named network namespace trees `/var/run/netns` and `/run/netns`.
+conventional named network namespace trees `/var/run/netns` and `/run/netns`,
+and from the fixed snapshot-view rootfs path
+`/run/blaze-snapshot-view/rootfs.ext4`. Every Firecracker sandbox creates that
+file as the bind-mount target for its own root filesystem, so a catalog root
+configured at `/run/blaze-snapshot-view` — or reachable through a symbolic link
+that resolves there — is rejected at startup rather than allowed to accumulate a
+root-level file that catalog accounting would read as a malformed entry.
 Relative `[backends]` paths are resolved once against the daemon's startup
 working directory; boundary checks, backend probing, and sandbox launch then
 reuse that absolute path. When a configured backend path is a symbolic link,
@@ -542,6 +554,98 @@ The source contains top-level regular files `vmstate.snap`, `mem.bin`, and
 directories and files must be owned by the daemon user and not writable by
 group or other users. Nested directories, links, and special files are
 rejected.
+
+An entry that a create request will select must carry complete boot metadata in
+`template.json`. Import itself only checks that the file is a JSON object, so an
+entry without this metadata publishes successfully and is then rejected with
+`409 Conflict` at create time:
+
+| Field | Meaning |
+|-------|---------|
+| `format_version` | Must be `1` |
+| `name` | Must equal the published catalog name |
+| `image_digest` | Image identity the create request must also declare |
+| `backend` | Backend that captured the snapshot |
+| `backend_version` | Must equal the version the backend's restore adapter reports; `mock-v1` for the built-in Mock backend, and the exact capturing binary version for Firecracker |
+| `boot_args` | Firecracker kernel command line captured in the snapshot; it must exactly match the selected policy's effective cold-start command line, including Blaze's fixed `ip=` argument when networking is enabled |
+| `snapshot_kind` | Snapshot flavor, currently `full` |
+| `expose_guest_socket` | Whether the captured runtime exposed the guest transport |
+| `network` | Whether the captured runtime held a host network slot |
+| `vcpus` / `memory_mib` | Firecracker VM shape captured in the snapshot; both must be non-zero and exactly match the selected policy |
+| `rootfs_size` / `memory_size` | Byte sizes, must match `rootfs.ext4` and `mem.bin` |
+| `artifacts` | Exactly three entries for `vmstate.snap`, `mem.bin`, and `rootfs.ext4`, each with `size_bytes` and a lowercase-hex `sha256` |
+
+Create compares the manifest's `backend`, `backend_version`, and `snapshot_kind`
+against what the selected backend's restore adapter reports, and a mismatch is
+refused with `501 Not Implemented` even though the entry published successfully.
+The status depends on where the problem is caught: a Firecracker manifest that
+omits `backend_version` fails the manifest's own bootability rules first and is
+refused with `409 Conflict`, while a Mock manifest that omits it satisfies those
+rules and is refused with `501` by the adapter comparison.
+For example, the built-in Mock adapter reports `mock-v1`; recording `mock-v2`
+also returns `501`, which means the manifest value must be corrected rather
+than selecting a different backend.
+
+Firecracker entries additionally require `resource_layout = "portable-v1"`, a
+present `boot_args` value, non-zero `vcpus` and `memory_mib`, and a `memory_size`
+equal to `memory_mib` expressed in bytes. Those rules are also part of the
+manifest's bootability check, so violating them yields `409 Conflict`. The
+policy's effective cold-start kernel command line, VM shape, and guest-transport
+settings must match these values exactly. When networking is enabled, the
+effective command line includes the fixed `ip=` argument that Blaze appends.
+Restore uses the command line captured in the snapshot rather than rebuilding it
+from the current policy.
+A missing or zero `vcpus`/`memory_mib`, or a VM shape that differs from the
+policy, returns `409 Conflict` during preflight before lifecycle state or
+storage allocation and therefore cannot leave a residual sandbox directory.
+
+The built-in Mock backend does not restore guest transport or host networking,
+so Mock entries must set both `expose_guest_socket` and `network` to `false`.
+Requesting either unsupported resource is refused with `501 Not Implemented`
+before any sandbox lifecycle state is written.
+
+Template-backed create uses the same recoverable cleanup as ordinary create:
+
+- Policy, image, backend, version, VM-shape, and guest-transport refusals occur
+  before create intent or storage allocation. They return `409 Conflict` for a
+  request or manifest conflict, or `501 Not Implemented` for an unsupported
+  storage or restore capability, and leave no sandbox-owned storage.
+- Copy, backend restore, guest-readiness, and final-state failures occur after
+  create intent. Blaze first tries to stop the backend, release storage, and
+  commit the sandbox as destroyed. If all compensation succeeds, it returns the
+  original error and retains no sandbox resources.
+- Incomplete compensation returns HTTP 500 with an error beginning `operation
+  requires recovery`; the named sandbox remains in `RecoveryRequired` and may
+  retain its storage or backend owner. Send
+  `DELETE /v1/sandboxes/{id}` later to retry cleanup.
+
+```json
+{
+  "format_version": 1,
+  "name": "runtime-base",
+  "image_digest": "sha256:...",
+  "backend": "firecracker",
+  "backend_version": "Firecracker v1.16.0",
+  "resource_layout": "portable-v1",
+  "boot_args": "console=ttyS0 reboot=k panic=1 pci=off",
+  "snapshot_kind": "full",
+  "expose_guest_socket": false,
+  "network": false,
+  "vcpus": 1,
+  "memory_mib": 256,
+  "rootfs_size": 536870912,
+  "memory_size": 268435456,
+  "artifacts": [
+    {"name": "vmstate.snap", "size_bytes": 14174, "sha256": "..."},
+    {"name": "mem.bin", "size_bytes": 268435456, "sha256": "..."},
+    {"name": "rootfs.ext4", "size_bytes": 536870912, "sha256": "..."}
+  ]
+}
+```
+
+Every artifact is re-hashed against these values when a create request selects
+the entry, so the digests must describe the published files exactly.
+
 Published files must have exactly one hard link, and catalog entries and staging
 directories must remain on the catalog root's mount. Blaze stops rather than
 changing or traversing data that violates these boundaries.
@@ -579,5 +683,6 @@ import. Graceful shutdown rejects new imports, cancels active copies, and waits
 for their file handles to close.
 
 The API validates artifact structure, not whether a snapshot can boot with a
-particular backend. Sandbox create does not yet accept a template name, and the
-catalog does not yet expose deletion or reference tracking.
+particular backend; boot compatibility is checked only when a create request
+selects the entry. The catalog does not yet expose deletion or reference
+tracking.

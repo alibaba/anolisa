@@ -360,6 +360,8 @@ impl SandboxManager {
                     expose_guest_socket,
                     preserve_network,
                     record_console_log,
+                    // A rollback reloads this sandbox's own capture.
+                    snapshot_from_other_sandbox: false,
                 },
                 run_dir,
                 executable.clone(),

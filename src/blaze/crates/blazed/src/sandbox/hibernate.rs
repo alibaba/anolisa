@@ -748,6 +748,8 @@ impl SandboxManager {
                         // and a resume may run after a daemon restart.
                         preserve_network: manifest.preserve_network,
                         record_console_log: manifest.record_console_log,
+                        // Resume reloads this sandbox's own hibernation image.
+                        snapshot_from_other_sandbox: false,
                     },
                     run_dir,
                     executable.clone(),

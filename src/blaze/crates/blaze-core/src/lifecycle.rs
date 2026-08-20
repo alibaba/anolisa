@@ -276,6 +276,9 @@ pub struct SandboxInstance {
     pub backend: BackendKind,
     pub workload_class: WorkloadClass,
     pub image_digest: String,
+    /// Catalog entry used to restore this sandbox, if it was template-backed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
     pub start_path: StartPath,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -306,6 +309,7 @@ impl SandboxInstance {
             backend,
             workload_class,
             image_digest,
+            template: None,
             start_path: StartPath::Cold,
             created_at: now,
             updated_at: now,
@@ -850,7 +854,20 @@ mod tests {
         let loaded: SandboxInstance = serde_json::from_value(value).expect("legacy state");
         assert!(loaded.operation.is_none());
         assert!(loaded.last_checkpoint.is_none());
+        assert!(loaded.template.is_none());
         assert_eq!(loaded.backend_ownership, BackendOwnership::Unknown);
+    }
+
+    #[test]
+    fn template_identity_round_trips() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut instance = fresh();
+        instance.template = Some("runtime-base".to_string());
+        instance.persist(tmp.path()).expect("persist");
+
+        let loaded = SandboxInstance::load(tmp.path(), instance.id).expect("load");
+
+        assert_eq!(loaded.template.as_deref(), Some("runtime-base"));
     }
 
     #[test]

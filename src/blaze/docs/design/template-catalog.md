@@ -7,12 +7,91 @@ configured by `template.dir`. Imports are disabled unless an operator
 also configures `template.import_root`.
 
 `/v1/templates` is the daemon's single public template resource. The catalog
-provides durable publication and lookup, but sandbox creation does not yet
-select catalog entries.
+provides durable publication and lookup, and sandbox creation restores from a
+catalog entry when a create request names one.
 
-A later sandbox-create change will accept an optional template name and resolve
-that name against this catalog. It will not add a second template registry or
-another template API namespace.
+A create request selects an entry through the optional `template` field on
+`POST /v1/sandboxes`, resolved against this catalog. There is no second template
+registry or other template API namespace.
+
+## Creating a sandbox from a catalog entry
+
+A create request restores from a published entry by setting the optional
+`template` field to a catalog name:
+
+```json
+{
+  "workload_class": "agent-tool",
+  "image_digest": "sha256:...",
+  "template": "runtime-base"
+}
+```
+
+The name must appear in the matched policy's `select.templates` allow-list;
+otherwise the request is rejected before any lifecycle state is written. The
+daemon then resolves the entry, re-hashes each artifact against the manifest,
+and confirms the recorded image identity, backend, exact backend version,
+snapshot kind, and — for Firecracker — the guest-transport and VM shape the
+policy would launch. Only after these checks pass does it publish create
+intent.
+
+The published `template.json` must therefore describe the entry completely:
+`format_version` of `1`, a `name` equal to the catalog name, a non-empty
+`image_digest`, the capturing `backend`, `snapshot_kind`, the
+`expose_guest_socket` and `network` flags the capture ran with, non-zero
+`rootfs_size` and `memory_size`, and exactly three `artifacts` entries for
+`vmstate.snap`, `mem.bin`, and `rootfs.ext4`, each carrying `size_bytes` and a
+lowercase-hex `sha256`. The recorded rootfs and memory sizes must agree with the
+corresponding artifact sizes. Firecracker entries additionally require
+`resource_layout` of `portable-v1`, the captured kernel `boot_args`, non-zero
+`vcpus` and `memory_mib`, and a `memory_size` equal to `memory_mib` expressed in
+bytes.
+
+`backend`, `backend_version`, and `snapshot_kind` are compared for equality
+against what the selected backend's restore adapter reports, for every backend
+rather than only for Firecracker. A manifest that omits `backend_version`
+therefore publishes but cannot be created from: the built-in Mock adapter
+reports `mock-v1`, and Firecracker reports its exact binary version. The two
+refusals differ because they are caught at different stages — a violated
+manifest rule is a conflict, while an adapter that cannot serve the recorded
+identity is an unsupported operation.
+
+The built-in Mock adapter cannot restore guest transport or host networking,
+so Mock entries must record both `expose_guest_socket` and `network` as `false`.
+The daemon rejects either unsupported shape before publishing create intent.
+
+Restore adapters must also distinguish a template restore from a rollback. A
+template snapshot records the source sandbox's identity but may create many new
+sandboxes, so its restore request marks the snapshot as coming from another
+sandbox. A rollback clears that marker because it must restore a checkpoint
+captured by the same sandbox. Backends that record sandbox identity may relax
+only that identity comparison for template restores; the format, snapshot kind,
+backend, and backend-version checks remain unchanged.
+
+Because a Firecracker snapshot records the host path of its root drive and
+`PUT /snapshot/load` overrides only the network and vsock resources, each owner
+binds its own rootfs onto one stable in-namespace path that the recorded machine
+configuration names. `portable-v1` is the label for that layout, which is what
+allows one published entry to restore into many independent sandboxes.
+Restore also retains the snapshot's captured kernel command line because it
+does not write a new machine configuration. Template preflight therefore
+requires `boot_args` to equal the matched policy's effective cold-start value
+exactly, including the fixed `ip=` argument Blaze appends when networking is
+enabled.
+Before launch, the daemon creates the fixed mount target when absent and
+refuses an existing directory, symbolic link, or other non-regular object.
+
+Materialization copies the VM-state, memory, and rootfs into a fresh
+provider-owned slot, so every template-backed sandbox owns an independent copy;
+mutating or destroying one never changes the catalog or another sandbox created
+from the same entry. A networked template receives a fresh network allocation
+rather than inheriting the source sandbox's slot. The sandbox is started
+through the backend restore path, and its catalog name is persisted so ordinary
+checkpoint, rollback, and delete continue to work. Copy,
+restore, readiness, and final-state failures use the existing recoverable
+create cleanup, retaining residual storage for a later destroy when rollback
+cannot complete.
+
 
 ## Import request
 
@@ -34,7 +113,11 @@ by group or other users.
 
 The source must contain top-level regular files named `vmstate.snap`,
 `mem.bin`, and `rootfs.ext4`. An optional `template.json` must contain a JSON
-object. Nested directories, links, and special files are rejected. The daemon
+object. Import validates only that shape, so an entry intended for create must
+additionally carry the complete boot manifest described in
+[Creating a sandbox from a catalog entry](#creating-a-sandbox-from-a-catalog-entry);
+without it the entry publishes successfully and is refused at create time.
+Nested directories, links, and special files are rejected. The daemon
 sets `name` from the request, applies a non-empty request description, and
 fills `rootfs_size` and `memory_size` defaults when either field is absent or
 is not an unsigned integer.
@@ -61,7 +144,10 @@ resolved location captured when the daemon configuration file is opened for
 this startup, that file's configured pathname, the `daemon.socket` path, or the
 host network coordination path `/run/lock/blaze-network.lock`. The conventional
 named network namespace trees `/var/run/netns` and `/run/netns` are protected
-as well.
+as well, as is the fixed snapshot-view rootfs path
+`/run/blaze-snapshot-view/rootfs.ext4` that every Firecracker owner uses as its
+bind-mount target. Both the literal and its resolved target are reserved, so a
+symlinked parent cannot place that file inside a catalog root.
 Relative `[backends]` paths are
 resolved once against the daemon's startup working directory, and that absolute
 path is reused for boundary validation, probing, and launch. For a configured
@@ -145,8 +231,8 @@ another item request receives `503 Service Unavailable` until the retained body
 is released. Corrupt published metadata is reported instead of silently
 hidden. These routes manage stored artifacts only. Validation is structural;
 it does not prove that a snapshot is bootable or compatible with a particular
-backend. Sandbox creation does not yet accept a template name, and the catalog
-does not yet expose deletion or reference tracking.
+backend — that is confirmed only when a create request selects the entry. The
+catalog does not yet expose deletion or reference tracking.
 
 The catalog limits above apply to imported artifacts and metadata. This change
 does not add a daemon-wide HTTP request-body limit; that input boundary must be

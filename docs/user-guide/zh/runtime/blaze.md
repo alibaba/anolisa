@@ -386,11 +386,17 @@ runtime 清理仍属于独立职责。
 ## Template Catalog
 
 Blaze 可以原子发布运维人员准备的 runtime artifact，并通过 daemon API 提供
-其 metadata。`/v1/templates` 是唯一面向运维人员的 template 资源；发布条目
-目前不会让 sandbox create 自动选择或启动它。
+其 metadata。`/v1/templates` 是唯一面向运维人员的 template 资源；
+`POST /v1/sandboxes` 请求通过可选的 `template` 字段选择已发布条目，daemon
+会从该条目恢复新的 sandbox。
 
-后续 sandbox create 支持会从同一个 catalog 解析可选的 template name；运维
-人员不需要配置或监控另一套进程内 registry。
+sandbox create 会从同一个 catalog 解析可选的 template name；运维人员不需要
+配置或监控另一套进程内 registry。所指定的条目必须出现在所匹配 policy 的
+`select.templates` 允许列表中，且其记录的镜像、backend、版本，以及（对
+Firecracker）VM 与 guest 通信规格必须与 policy 将要启动的一致。每个
+template-backed sandbox 都会获得 artifact 的独立副本，因此可以像其他 sandbox
+一样做 checkpoint、rollback 和 delete，而不会影响 catalog 或同源的
+其他 sandbox。
 
 ### 配置方法
 
@@ -412,7 +418,11 @@ policy 根目录、`[backends]` 中配置的任一 executable 路径、本次启
 打开 daemon 配置文件时捕获的解析位置、该文件的配置路径或配置的
 `daemon.socket` 路径以及宿主机网络协调路径
 `/run/lock/blaze-network.lock` 重叠，也不能与宿主机上两种常见的命名网络空间
-目录 `/var/run/netns` 和 `/run/netns` 重叠。
+目录 `/var/run/netns` 和 `/run/netns` 重叠，还不能与固定的 snapshot view rootfs
+路径 `/run/blaze-snapshot-view/rootfs.ext4` 重叠。每个 Firecracker sandbox 都会把
+该文件作为自身根文件系统的 bind-mount 目标，因此把 catalog 根目录配置在
+`/run/blaze-snapshot-view`（或通过符号链接解析到该位置）会在启动时被拒绝，而不是
+放任其中出现被 catalog 记账当成损坏条目的根级文件。
 `[backends]` 中的相对路径会在启动时根据 daemon 的工作目录解析一次；目录边界
 检查、backend probe 和 sandbox launch 随后复用该绝对路径。如果配置的 backend 路径
 是符号链接，则该链接的配置位置及其解析目标都不能进入 template catalog ownership。
@@ -450,6 +460,87 @@ Content-Type: application/json
 `vmstate.snap`、`mem.bin` 和 `rootfs.ext4`；可选的 `template.json` 必须是
 JSON object。源目录和文件必须属于 daemon 用户，且不能允许 group 或其他用户
 写入。嵌套目录、链接和特殊文件都会被拒绝。
+
+如果条目要被 create 请求选择，`template.json` 必须包含完整的启动元数据。导入本身
+只校验它是 JSON object，因此缺少这些元数据的条目仍能成功发布，但会在 create 时
+返回 `409 Conflict`：
+
+| 字段 | 含义 |
+|------|------|
+| `format_version` | 必须为 `1` |
+| `name` | 必须与发布的 catalog 名称一致 |
+| `image_digest` | 镜像标识，create 请求必须声明相同值 |
+| `backend` | 捕获该快照的 backend |
+| `backend_version` | 必须与该 backend restore adapter 报告的版本一致；内置 Mock backend 为 `mock-v1`，Firecracker 为捕获时的精确二进制版本 |
+| `boot_args` | Firecracker 快照中捕获的内核启动参数，必须与所选 policy 冷启动时的实际参数完全一致；启用网络时包括 Blaze 自动追加的固定 `ip=` 参数 |
+| `snapshot_kind` | 快照类型，当前为 `full` |
+| `expose_guest_socket` | 捕获时是否暴露 guest 通信通道 |
+| `network` | 捕获时是否持有宿主网络 slot |
+| `vcpus` / `memory_mib` | Firecracker 快照中捕获的 VM 规格；两者必须非零，并与所选 policy 完全一致 |
+| `rootfs_size` / `memory_size` | 字节大小，必须与 `rootfs.ext4`、`mem.bin` 一致 |
+| `artifacts` | 恰好三项，对应 `vmstate.snap`、`mem.bin`、`rootfs.ext4`，每项含 `size_bytes` 和小写十六进制 `sha256` |
+
+create 会把清单中的 `backend`、`backend_version` 和 `snapshot_kind` 与所选 backend
+的 restore adapter 报告值逐项比对，不一致时返回 `501 Not Implemented`，即使该条目
+本身已成功发布。具体状态码取决于问题在哪一步被发现：Firecracker 清单遗漏
+`backend_version` 会先违反清单自身的可启动性规则，返回 `409 Conflict`；而 Mock
+清单遗漏该字段能通过这些规则，最终由 adapter 比对返回 `501`。
+例如，内置 Mock adapter 固定报告 `mock-v1`；清单填写 `mock-v2` 同样返回
+`501`，表示应修正清单值，而不是改用其他 backend。
+
+Firecracker 条目还必须提供 `resource_layout = "portable-v1"`、`boot_args`、
+非零的 `vcpus` 与 `memory_mib`，且 `memory_size` 必须等于 `memory_mib`
+换算成字节的值。这些同样属于清单可启动性校验，因此违反时返回
+`409 Conflict`。policy 冷启动时实际生效的内核启动参数、VM 规格与 guest 通信设置
+必须与这些值完全一致。启用网络时，实际启动参数包括 Blaze 自动追加的固定 `ip=`
+参数。恢复使用快照中捕获的启动参数，不会根据当前 policy 重建。
+如果 `vcpus`/`memory_mib` 缺失或为零，或者 VM 规格与 policy 不一致，会在
+写入生命周期状态或分配存储之前返回 `409 Conflict`，因此不会留下残留的
+sandbox 目录。
+
+内置 Mock backend 不支持恢复 guest 通信或宿主网络，因此 Mock 条目的
+`expose_guest_socket` 与 `network` 都必须为 `false`。请求任一不支持的资源会在写入
+任何 sandbox 生命周期状态之前返回 `501 Not Implemented`。
+
+从 template 创建 sandbox 与普通创建使用相同的可恢复清理机制：
+
+- policy、镜像、backend、版本、VM 规格或 guest 通信校验失败时，尚未写入 create
+  intent，也未分配存储。请求或清单冲突返回 `409 Conflict`；存储或恢复能力
+  不支持时返回 `501 Not Implemented`，两者都不会留下 sandbox 独占存储。
+- artifact 复制、backend 恢复、guest 就绪或最终状态持久化失败时，create
+  intent 已经写入。Blaze 会先尝试停止 backend、释放存储，并把 sandbox 提交为
+  `Destroyed`。如果补偿全部成功，返回原始错误，且不保留 sandbox 资源。
+- 补偿未完成时返回 HTTP 500，错误文本以 `operation requires recovery`
+  开头；错误中指明的 sandbox 会保持 `RecoveryRequired`，并可能仍持有存储或
+  backend owner。后续发送 `DELETE /v1/sandboxes/{id}` 可重试清理。
+
+```json
+{
+  "format_version": 1,
+  "name": "runtime-base",
+  "image_digest": "sha256:...",
+  "backend": "firecracker",
+  "backend_version": "Firecracker v1.16.0",
+  "resource_layout": "portable-v1",
+  "boot_args": "console=ttyS0 reboot=k panic=1 pci=off",
+  "snapshot_kind": "full",
+  "expose_guest_socket": false,
+  "network": false,
+  "vcpus": 1,
+  "memory_mib": 256,
+  "rootfs_size": 536870912,
+  "memory_size": 268435456,
+  "artifacts": [
+    {"name": "vmstate.snap", "size_bytes": 14174, "sha256": "..."},
+    {"name": "mem.bin", "size_bytes": 268435456, "sha256": "..."},
+    {"name": "rootfs.ext4", "size_bytes": 536870912, "sha256": "..."}
+  ]
+}
+```
+
+create 请求选择条目时会按这些值重新校验每个 artifact 的摘要，因此摘要必须与已发布
+文件完全对应。
+
 已发布文件只能有一个硬链接，catalog 条目和 staging 目录也必须留在 catalog
 根目录所在的挂载点。发现不满足这些边界的数据时，Blaze 会停止处理，不会修改或
 继续遍历这些数据。
@@ -480,5 +571,5 @@ catalog 根目录上取得并持续持有独占锁；使用同一 catalog 的第
 检查或清理仍在使用的 staging 目录前直接失败。正常关闭时会拒绝新导入、取消
 正在复制的任务，并等待相关文件句柄关闭。
 
-API 只校验 artifact 结构，不证明 snapshot 能在特定 backend 上启动。当前的
-sandbox create 不接受 template name，catalog 也尚未提供删除或引用跟踪。
+API 只校验 artifact 结构，不证明 snapshot 能在特定 backend 上启动；只有当
+create 请求选择该条目时才会核对启动兼容性。catalog 尚未提供删除或引用跟踪。

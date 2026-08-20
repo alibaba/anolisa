@@ -141,6 +141,15 @@ pub struct RestoreRequest {
     /// Carried so a restore does not silently stop recording console output for
     /// a sandbox whose operator asked for it.
     pub record_console_log: bool,
+    /// Whether the snapshot was captured by a different sandbox.
+    ///
+    /// A checkpoint restore reloads this sandbox's own capture, so a recorded
+    /// sandbox identity must still match. A template restore deliberately loads
+    /// one published capture into many new sandboxes, so its recorded identity
+    /// belongs to the source and cannot match. Adapters that bind a snapshot to
+    /// a sandbox identity use this to tell the two apart instead of dropping the
+    /// check for both.
+    pub snapshot_from_other_sandbox: bool,
 }
 
 /// Snapshot flavor requested from a backend.

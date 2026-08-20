@@ -205,9 +205,9 @@ fails, the startup warning includes the additional error and the durable record
 may still contain its previous state. Reconciliation continues with other
 accepted records.
 
-The `/v1/templates` routes are the single operator-facing template catalog.
-Importing an entry does not yet make sandbox creation select it; future create
-support will resolve optional names from this same catalog. See the
+The `/v1/templates` routes are the single operator-facing template catalog. A
+create request restores from an entry through the optional `template` field on
+`POST /v1/sandboxes`, resolved from this same catalog. See the
 [template catalog user guide](../../docs/user-guide/en/runtime/blaze.md#template-catalog)
 for configuration, accepted artifacts, limits, and publication rules.
 

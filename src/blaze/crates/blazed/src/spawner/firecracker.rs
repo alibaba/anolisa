@@ -38,6 +38,26 @@ use super::{
 
 const NETWORK_BOOT_IP: &str = "ip=169.254.0.2::169.254.0.1:255.255.255.252::eth0:off";
 const MAX_API_RESPONSE_BYTES: usize = 64 * 1024;
+const FIRECRACKER_LAUNCH_TOOLS: [&str; 3] = ["unshare", "mount", "sh"];
+/// Stable in-namespace path every Firecracker owner sees as its root drive.
+///
+/// A Firecracker snapshot records the block device's host path, and
+/// `PUT /snapshot/load` overrides only the network and vsock resources. Binding
+/// each sandbox's own rootfs onto one shared path keeps that recorded path valid
+/// for any sandbox, which is what lets one published template restore into many
+/// independent sandboxes.
+pub(crate) const PORTABLE_ROOTFS_PATH: &str = "/run/blaze-snapshot-view/rootfs.ext4";
+#[cfg(target_os = "linux")]
+const MOUNT_AND_EXEC: &str = r#"set -eu
+rootfs_source=$1
+rootfs_target=$2
+binary=$3
+api_socket=$4
+instance_id=$5
+shift 5
+mount --bind "$rootfs_source" "$rootfs_target"
+exec "$binary" --api-sock "$api_socket" --id "$instance_id" "$@"
+"#;
 /// Slowest guest-memory throughput a snapshot deadline still tolerates.
 ///
 /// A control request such as `/version` or a pause should answer immediately, so
@@ -149,6 +169,7 @@ impl FirecrackerSpawner {
         if restore.is_none() {
             validate_regular_file(&self.images_dir.join("vmlinux"), "vmlinux")?;
         }
+        prepare_portable_view_target().await?;
         let api_socket = request.run_dir.path().join("api.sock");
         let guest_socket = request.run_dir.path().join("vsock.uds");
         let pid_file = request.run_dir.path().join("firecracker.pid");
@@ -282,8 +303,13 @@ impl FirecrackerSpawner {
             Some(context) => context.executable.program(),
             None => request.binary_path.clone(),
         };
-        let mut command =
-            build_launch_command(&program, network.as_ref(), &api_socket, request.instance_id);
+        let mut command = build_launch_command(
+            &program,
+            network.as_ref(),
+            &api_socket,
+            request.instance_id,
+            &request.storage.rootfs_path,
+        );
         request.run_dir.inherit_into(&mut command);
         if let Some(context) = restore.as_ref() {
             context.executable.inherit_into(&mut command);
@@ -575,6 +601,9 @@ impl BackendSpawner for FirecrackerSpawner {
             expose_guest_socket,
             preserve_network,
             record_console_log,
+            // Firecracker binds no sandbox identity into its snapshot, so a
+            // template capture and a rollback capture load the same way.
+            snapshot_from_other_sandbox: _,
         } = request.request;
         let executable = request
             .executable
@@ -633,7 +662,7 @@ impl BackendSpawner for FirecrackerSpawner {
     }
 
     async fn probe(&self, binary_path: &Path) -> Result<bool> {
-        if !binary_path.is_file() || !executable_in_path("unshare") {
+        if !binary_path.is_file() || !firecracker_launch_tools_available(executable_in_path) {
             return Ok(false);
         }
         if !self.network_probe_ready().await? {
@@ -1474,20 +1503,33 @@ impl FirecrackerInstance {
     }
 }
 
-fn write_vm_config(
-    images_dir: &Path,
-    request: &BackendSpawnRequest,
+/// Resolve the effective vCPU and memory-MiB shape for one Firecracker config.
+///
+/// Template create uses this to confirm that a published snapshot's recorded VM
+/// shape matches the shape the current policy would launch, using the same
+/// precedence (backend override, then policy `[vm]`, then code default) as the
+/// normal boot path in [`write_vm_config`].
+pub(crate) fn effective_vm_shape(
     config: &FirecrackerConfig,
-    guest_socket: &Path,
-    network: Option<&NetworkSlot>,
-) -> Result<PathBuf> {
-    let vcpus = config
-        .vcpus
-        .or(request.vm.as_ref().map(|vm| vm.vcpus))
-        .unwrap_or(1);
-    let memory_mib = resolve_memory(config, request.vm.as_ref())?;
+    vm: Option<&VmConfig>,
+) -> Result<(u32, u64)> {
+    let vcpus = config.vcpus.or(vm.map(|vm| vm.vcpus)).unwrap_or(1);
+    let memory_mib = resolve_memory(config, vm)?;
+    Ok((vcpus, memory_mib))
+}
+
+/// Resolve the kernel command line a cold start would write into Firecracker's
+/// machine configuration.
+///
+/// Networking uses one fixed guest address. Keep that derived argument in one
+/// place so a template restore can compare its captured command line with the
+/// exact command line a cold start under the same policy would use.
+pub(crate) fn effective_boot_args(
+    config: &FirecrackerConfig,
+    network_enabled: bool,
+) -> Result<String> {
     let mut boot_args = config.boot_args.clone();
-    if network.is_some() {
+    if network_enabled {
         let network_arguments = boot_args
             .split_whitespace()
             .filter(|argument| argument.starts_with("ip="))
@@ -1512,6 +1554,22 @@ fn write_vm_config(
             }
         }
     }
+    Ok(boot_args)
+}
+
+fn write_vm_config(
+    images_dir: &Path,
+    request: &BackendSpawnRequest,
+    config: &FirecrackerConfig,
+    guest_socket: &Path,
+    network: Option<&NetworkSlot>,
+) -> Result<PathBuf> {
+    let vcpus = config
+        .vcpus
+        .or(request.vm.as_ref().map(|vm| vm.vcpus))
+        .unwrap_or(1);
+    let memory_mib = resolve_memory(config, request.vm.as_ref())?;
+    let boot_args = effective_boot_args(config, network.is_some())?;
     let mut value = serde_json::json!({
         "boot-source": {
             "kernel_image_path": path_string(&images_dir.join("vmlinux"), "vmlinux")?,
@@ -1519,7 +1577,9 @@ fn write_vm_config(
         },
         "drives": [{
             "drive_id": "rootfs",
-            "path_on_host": path_string(&request.storage.rootfs_path, "rootfs")?,
+            // Name the stable in-namespace path, not this sandbox's own path, so
+            // a snapshot captured here stays loadable by another sandbox.
+            "path_on_host": PORTABLE_ROOTFS_PATH,
             "is_root_device": true,
             "is_read_only": false
         }],
@@ -1564,11 +1624,75 @@ fn resolve_memory(config: &FirecrackerConfig, vm: Option<&VmConfig>) -> Result<u
         })
 }
 
+/// Ensure the shared bind-mount target for the portable rootfs path exists.
+///
+/// The target is only a mount point: each sandbox binds its own rootfs over it
+/// inside a private mount namespace, so the empty file on the host is never
+/// read and no sandbox observes another's mount.
+#[cfg(target_os = "linux")]
+async fn prepare_portable_view_target() -> Result<()> {
+    let target = Path::new(PORTABLE_ROOTFS_PATH);
+    prepare_portable_view_target_at(target).await
+}
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+async fn prepare_portable_view_target_at(target: &Path) -> Result<()> {
+    if let Some(parent) = target.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| BlazeError::BackendError {
+                msg: format!(
+                    "cannot create snapshot view directory {}: {error}",
+                    parent.display()
+                ),
+            })?;
+    }
+    match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = tokio::fs::symlink_metadata(target).await.map_err(|error| {
+                BlazeError::BackendError {
+                    msg: format!(
+                        "cannot inspect snapshot view target {}: {error}",
+                        target.display()
+                    ),
+                }
+            })?;
+            if !metadata.file_type().is_file() {
+                return Err(BlazeError::BackendError {
+                    msg: format!(
+                        "snapshot view target {} is not a regular file",
+                        target.display()
+                    ),
+                });
+            }
+            Ok(())
+        }
+        Err(error) => Err(BlazeError::BackendError {
+            msg: format!(
+                "cannot create snapshot view target {}: {error}",
+                target.display()
+            ),
+        }),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn prepare_portable_view_target() -> Result<()> {
+    Ok(())
+}
+
 fn build_launch_command(
     binary: &Path,
     network: Option<&NetworkSlot>,
     api_socket: &Path,
     instance_id: Uuid,
+    rootfs_source: &Path,
 ) -> Command {
     #[cfg(target_os = "linux")]
     let mut command = if let Some(network) = network {
@@ -1581,8 +1705,7 @@ fn build_launch_command(
             .arg("--mount")
             .arg("--propagation")
             .arg("private")
-            .arg("--")
-            .arg(binary);
+            .arg("--");
         command
     } else {
         let mut command = Command::new("unshare");
@@ -1590,17 +1713,36 @@ fn build_launch_command(
             .arg("--mount")
             .arg("--propagation")
             .arg("private")
-            .arg("--")
-            .arg(binary);
+            .arg("--");
         command
     };
     #[cfg(not(target_os = "linux"))]
     let mut command = {
-        let _ = network;
+        let _ = (network, rootfs_source);
         Command::new(binary)
     };
-    command.arg("--api-sock").arg(api_socket);
-    command.arg("--id").arg(format!("fc-{instance_id}"));
+    // Bind this sandbox's own rootfs onto one stable path inside the private
+    // mount namespace, then exec Firecracker. The machine configuration a
+    // snapshot records therefore names a path that resolves to whichever
+    // sandbox is running, so a snapshot captured by one sandbox restores
+    // against the restoring sandbox's independent copy instead of the
+    // capture-time path.
+    #[cfg(target_os = "linux")]
+    command
+        .arg("sh")
+        .arg("-c")
+        .arg(MOUNT_AND_EXEC)
+        .arg("blaze-firecracker")
+        .arg(rootfs_source)
+        .arg(PORTABLE_ROOTFS_PATH)
+        .arg(binary)
+        .arg(api_socket)
+        .arg(format!("fc-{instance_id}"));
+    #[cfg(not(target_os = "linux"))]
+    {
+        command.arg("--api-sock").arg(api_socket);
+        command.arg("--id").arg(format!("fc-{instance_id}"));
+    }
     command
 }
 
@@ -1827,6 +1969,10 @@ fn executable_in_path(name: &str) -> bool {
         return false;
     };
     std::env::split_paths(&path).any(|directory| is_executable_file(&directory.join(name)))
+}
+
+fn firecracker_launch_tools_available(is_available: impl FnMut(&str) -> bool) -> bool {
+    FIRECRACKER_LAUNCH_TOOLS.into_iter().all(is_available)
 }
 
 fn is_executable_file(candidate: &Path) -> bool {
@@ -2307,15 +2453,59 @@ mod tests {
             None,
             Path::new("/proc/self/fd/17/api.sock"),
             instance_id,
+            Path::new("/var/lib/blaze/instances/owner/rootfs.ext4"),
         );
-        let arguments = command.as_std().get_args().collect::<Vec<_>>();
-        let id_index = arguments
-            .iter()
-            .position(|argument| *argument == "--id")
-            .expect("--id argument");
+        let arguments = command
+            .as_std()
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
         let expected = format!("fc-{instance_id}");
 
-        assert_eq!(arguments.get(id_index + 1), Some(&expected.as_ref()));
+        assert!(
+            arguments.contains(&expected),
+            "backend id missing from {arguments:?}"
+        );
+    }
+
+    /// The launch must bind this sandbox's own rootfs onto the shared path the
+    /// recorded machine configuration names, or a restored snapshot would read
+    /// the capture-time disk instead of this sandbox's copy.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn launch_command_binds_the_owned_rootfs_to_the_portable_path() {
+        let owned = Path::new("/var/lib/blaze/instances/owner/rootfs.ext4");
+        let command = build_launch_command(
+            Path::new("/usr/bin/firecracker"),
+            None,
+            Path::new("/proc/self/fd/17/api.sock"),
+            Uuid::new_v4(),
+            owned,
+        );
+        let arguments = command
+            .as_std()
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(
+            arguments.iter().any(|argument| argument
+                == "mount --bind \"$rootfs_source\" \"$rootfs_target\""
+                || argument.contains("mount --bind")),
+            "bind-mount step missing from {arguments:?}"
+        );
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument == owned.to_string_lossy().as_ref()),
+            "owned rootfs source missing from {arguments:?}"
+        );
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument == PORTABLE_ROOTFS_PATH),
+            "portable rootfs target missing from {arguments:?}"
+        );
     }
 
     #[test]
@@ -2423,6 +2613,24 @@ mod tests {
                 .as_str()
                 .expect("boot args")
                 .contains("::eth0:off")
+        );
+    }
+
+    #[test]
+    fn effective_boot_arguments_include_the_cold_start_network_argument() {
+        let config = FirecrackerConfig {
+            enable_network: true,
+            ..FirecrackerConfig::default()
+        };
+
+        assert_eq!(
+            effective_boot_args(&config, config.enable_network)
+                .expect("effective network command line"),
+            format!("{} {NETWORK_BOOT_IP}", config.boot_args)
+        );
+        assert_eq!(
+            effective_boot_args(&config, false).expect("non-network command line"),
+            config.boot_args
         );
     }
 
@@ -3383,6 +3591,38 @@ mod tests {
 
         write_version_binary(&invalid, "Firecracker v1.17.0");
         assert!(spawner.probe(&invalid).await.expect("replaced probe"));
+    }
+
+    #[test]
+    fn launch_tool_probe_requires_the_shell_used_by_the_mount_wrapper() {
+        let mut checked = Vec::new();
+
+        assert!(!firecracker_launch_tools_available(|tool| {
+            checked.push(tool.to_string());
+            tool != "sh"
+        }));
+        assert_eq!(checked, FIRECRACKER_LAUNCH_TOOLS);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn portable_view_target_rejects_existing_non_files() {
+        let temp = tempfile::tempdir().expect("temp");
+        let directory = temp.path().join("directory");
+        std::fs::create_dir(&directory).expect("directory target");
+
+        let directory_error = prepare_portable_view_target_at(&directory)
+            .await
+            .expect_err("directory target must be rejected");
+        assert!(directory_error.to_string().contains("not a regular file"));
+
+        let dangling = temp.path().join("dangling");
+        std::os::unix::fs::symlink(temp.path().join("missing"), &dangling)
+            .expect("dangling target");
+        let symlink_error = prepare_portable_view_target_at(&dangling)
+            .await
+            .expect_err("symlink target must be rejected");
+        assert!(symlink_error.to_string().contains("not a regular file"));
     }
 
     #[cfg(target_os = "linux")]

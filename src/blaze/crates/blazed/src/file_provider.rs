@@ -4,6 +4,7 @@
 //! instance slots use separate roots.
 
 use std::ffi::OsString;
+use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::OwnedFd;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -12,12 +13,13 @@ use async_trait::async_trait;
 use rustix::fs::{
     AtFlags, Mode, OFlags, RenameFlags, fstat, fsync, open, openat, renameat_with, statat, unlinkat,
 };
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use blaze_core::error::{BlazeError, Result};
 use blaze_core::storage::{
     AcquireOpts, PoolStatus, StorageAcquireError, StorageProvider, StorageRestoreTransaction,
-    StorageSlot,
+    StorageSlot, TemplateArtifact, TemplateStorage, TemplateStorageSlot,
 };
 
 mod restore;
@@ -388,6 +390,114 @@ impl StorageProvider for FileStorageProvider {
         Ok(slot)
     }
 
+    async fn acquire_template(
+        &self,
+        opts: &AcquireOpts,
+        source: TemplateStorage,
+    ) -> std::result::Result<TemplateStorageSlot, StorageAcquireError> {
+        crate::failpoint::storage("storage-acquire-template")?;
+        if opts.rootfs_size != source.rootfs.size_bytes || opts.mem_size != source.memory.size_bytes
+        {
+            return Err(StorageAcquireError::clean(BlazeError::StorageError {
+                msg: format!(
+                    "acquire template '{}': requested rootfs {} and memory {} do not match the \
+                     template artifacts {} and {}",
+                    opts.instance_id,
+                    opts.rootfs_size,
+                    opts.mem_size,
+                    source.rootfs.size_bytes,
+                    source.memory.size_bytes
+                ),
+            }));
+        }
+        let slot = self.slot_for_id(&opts.instance_id)?;
+        let instance_dir = slot.instance_dir.clone();
+
+        match tokio::fs::create_dir(&instance_dir).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(StorageAcquireError::clean(BlazeError::StorageError {
+                    msg: format!(
+                        "acquire template '{}': instance directory already exists",
+                        opts.instance_id
+                    ),
+                }));
+            }
+            Err(error) => {
+                return Err(StorageAcquireError::clean(BlazeError::StorageError {
+                    msg: format!(
+                        "acquire template '{}': create dir: {error}",
+                        opts.instance_id
+                    ),
+                }));
+            }
+        }
+
+        let payload_dir = instance_dir.join("backend");
+        let snapshot_path = payload_dir.join("vmstate.snap");
+        let payload_memory_path = payload_dir.join("memory.snap");
+        let result = async {
+            tokio::fs::create_dir(&payload_dir).await?;
+            copy_template_artifact(source.rootfs, &slot.rootfs_path).await?;
+            copy_template_artifact(source.memory, &slot.mem_path).await?;
+            // The storage slot and restore payload refer to the same private
+            // memory image. A hard link gives the backend its payload name
+            // without duplicating a potentially large sparse file.
+            tokio::fs::hard_link(&slot.mem_path, &payload_memory_path).await?;
+            copy_template_artifact(source.vmstate, &snapshot_path).await?;
+            create_empty_durable_file(&slot.mem_diff_path).await?;
+            create_empty_durable_file(&slot.rootfs_diff_path).await?;
+            crate::failpoint::storage("storage-acquire-template-artifacts")?;
+            tokio::fs::File::open(&payload_dir)
+                .await?
+                .sync_all()
+                .await?;
+            tokio::fs::File::open(&instance_dir)
+                .await?
+                .sync_all()
+                .await?;
+            Ok::<(), BlazeError>(())
+        }
+        .await;
+
+        if let Err(error) = result {
+            let rollback = match crate::failpoint::storage("storage-acquire-rollback") {
+                Ok(()) => tokio::fs::remove_dir_all(&instance_dir)
+                    .await
+                    .map_err(BlazeError::from),
+                Err(cleanup) => Err(cleanup),
+            };
+            return match rollback {
+                Ok(()) => Err(StorageAcquireError::clean(BlazeError::StorageError {
+                    msg: format!(
+                        "acquire template '{}': artifact setup failed, rolled back: {error}",
+                        opts.instance_id
+                    ),
+                })),
+                Err(cleanup) => Err(StorageAcquireError::with_residual(
+                    BlazeError::StorageError {
+                        msg: format!(
+                            "acquire template '{}': artifact setup failed ({error}); rollback \
+                             failed for {}: {cleanup}",
+                            opts.instance_id,
+                            instance_dir.display()
+                        ),
+                    },
+                    slot,
+                )),
+            };
+        }
+
+        Ok(TemplateStorageSlot {
+            storage: slot,
+            payload_dir,
+        })
+    }
+
+    fn supports_templates(&self) -> bool {
+        true
+    }
+
     async fn release(&self, slot: StorageSlot) -> Result<()> {
         crate::failpoint::storage("storage-release")?;
         // Re-derive the canonical path from instances_dir + slot.id. Do not
@@ -689,6 +799,97 @@ async fn create_or_copy(
     if size > 0 {
         file.set_len(size).await?;
     }
+    Ok(())
+}
+
+/// Copy one template artifact into provider-owned storage and revalidate it.
+///
+/// The source is an already-open object, so the copy cannot be redirected by
+/// replacing a catalog path after validation. Size and digest are checked
+/// again against the provider-owned destination after the sparse copy. Hashing
+/// the copied object verifies the exact bytes the sandbox will use without
+/// expanding holes in rootfs or guest-memory artifacts.
+async fn copy_template_artifact(source: TemplateArtifact, target: &Path) -> Result<()> {
+    let metadata = source
+        .file
+        .metadata()
+        .map_err(|error| BlazeError::StorageError {
+            msg: format!("inspect template artifact: {error}"),
+        })?;
+    if !metadata.is_file() || metadata.len() != source.size_bytes {
+        return Err(BlazeError::StorageError {
+            msg: format!(
+                "template artifact has size {}; expected {}",
+                metadata.len(),
+                source.size_bytes
+            ),
+        });
+    }
+
+    let target = target.to_path_buf();
+    let expected_size = source.size_bytes;
+    let expected_digest = source.sha256;
+    crate::failpoint::spawn_blocking(move || {
+        let mut destination = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&target)?;
+        copy_sparse_file(&source.file, &destination)?;
+
+        let copied = destination.metadata()?.len();
+        if copied != expected_size {
+            return Err(BlazeError::StorageError {
+                msg: format!("template artifact has {copied} bytes; expected {expected_size}"),
+            });
+        }
+        destination.seek(SeekFrom::Start(0))?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0_u8; 1024 * 1024];
+        let mut hashed = 0_u64;
+        loop {
+            let read = destination.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hashed = hashed
+                .checked_add(u64::try_from(read).unwrap_or(u64::MAX))
+                .ok_or_else(|| BlazeError::StorageError {
+                    msg: "template artifact size overflow".to_string(),
+                })?;
+            digest.update(&buffer[..read]);
+        }
+        if hashed != expected_size {
+            return Err(BlazeError::StorageError {
+                msg: format!("template artifact has {hashed} bytes; expected {expected_size}"),
+            });
+        }
+        let actual = format!("{:x}", digest.finalize());
+        if actual != expected_digest {
+            return Err(BlazeError::StorageError {
+                msg: format!(
+                    "template artifact digest mismatch: expected {expected_digest}, got {actual}"
+                ),
+            });
+        }
+        destination.sync_all()?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| BlazeError::StorageError {
+        msg: format!("copy template artifact task failed: {error}"),
+    })?
+}
+
+/// Create one empty writable-diff file and persist its directory entry.
+async fn create_empty_durable_file(path: &Path) -> Result<()> {
+    tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await?
+        .sync_all()
+        .await?;
     Ok(())
 }
 
@@ -1016,6 +1217,23 @@ fn validate_instance_id(instance_id: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    fn sha256_file(path: &Path) -> String {
+        use std::io::Read;
+
+        let mut file = std::fs::File::open(path).expect("open digest source");
+        let mut digest = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer).expect("read digest source");
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+        }
+        format!("{:x}", digest.finalize())
+    }
+
     async fn checkpoint_fixture(
         instance_id: &str,
     ) -> (tempfile::TempDir, FileStorageProvider, StorageSlot, PathBuf) {
@@ -1073,6 +1291,99 @@ mod tests {
             tokio::fs::metadata(&slot.mem_path).await.unwrap().len(),
             512
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn template_artifact_copy_preserves_sparse_regions_and_revalidates_digest() {
+        use std::io::{Read, Seek, Write};
+        use std::os::unix::fs::MetadataExt;
+
+        const LOGICAL_LEN: u64 = 64 * 1024 * 1024;
+        const FIRST_OFFSET: u64 = 8 * 1024;
+        const LAST_OFFSET: u64 = 48 * 1024 * 1024 + 91;
+        const FIRST_DATA: &[u8] = b"template-first-extent";
+        const LAST_DATA: &[u8] = b"template-last-extent";
+
+        let temp = tempfile::tempdir().expect("temp");
+        let source_path = temp.path().join("source.img");
+        let mut source = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&source_path)
+            .expect("source");
+        source.set_len(LOGICAL_LEN).expect("logical source length");
+        source
+            .seek(std::io::SeekFrom::Start(FIRST_OFFSET))
+            .expect("first offset");
+        source.write_all(FIRST_DATA).expect("first data");
+        source
+            .seek(std::io::SeekFrom::Start(LAST_OFFSET))
+            .expect("last offset");
+        source.write_all(LAST_DATA).expect("last data");
+        source.sync_all().expect("source sync");
+        let source_blocks = source.metadata().expect("source metadata").blocks();
+        drop(source);
+        let expected_digest = sha256_file(&source_path);
+
+        let target_path = temp.path().join("target.img");
+        copy_template_artifact(
+            TemplateArtifact {
+                file: std::fs::File::open(&source_path).expect("open source"),
+                size_bytes: LOGICAL_LEN,
+                sha256: expected_digest.clone(),
+            },
+            &target_path,
+        )
+        .await
+        .expect("copy sparse template artifact");
+
+        let metadata = std::fs::metadata(&target_path).expect("target metadata");
+        assert_eq!(metadata.len(), LOGICAL_LEN);
+        assert!(
+            metadata.blocks().saturating_mul(512) < LOGICAL_LEN / 4,
+            "template copy allocated {} bytes for a {LOGICAL_LEN}-byte sparse source",
+            metadata.blocks().saturating_mul(512)
+        );
+        assert!(
+            metadata.blocks() <= source_blocks.saturating_add(32),
+            "template copy used {} blocks for a source using {source_blocks} blocks",
+            metadata.blocks()
+        );
+        assert_eq!(sha256_file(&target_path), expected_digest);
+
+        let mut target = std::fs::File::open(&target_path).expect("target");
+        let mut first = vec![0; FIRST_DATA.len()];
+        target
+            .seek(std::io::SeekFrom::Start(FIRST_OFFSET))
+            .expect("target first offset");
+        target.read_exact(&mut first).expect("target first data");
+        assert_eq!(first, FIRST_DATA);
+        let mut last = vec![0; LAST_DATA.len()];
+        target
+            .seek(std::io::SeekFrom::Start(LAST_OFFSET))
+            .expect("target last offset");
+        target.read_exact(&mut last).expect("target last data");
+        assert_eq!(last, LAST_DATA);
+        let mut hole = [1_u8; 4096];
+        target
+            .seek(std::io::SeekFrom::Start(24 * 1024 * 1024))
+            .expect("target hole offset");
+        target.read_exact(&mut hole).expect("target hole");
+        assert!(hole.iter().all(|byte| *byte == 0));
+
+        let mismatch = copy_template_artifact(
+            TemplateArtifact {
+                file: std::fs::File::open(&source_path).expect("reopen source"),
+                size_bytes: LOGICAL_LEN,
+                sha256: "0".repeat(64),
+            },
+            &temp.path().join("digest-mismatch.img"),
+        )
+        .await
+        .expect_err("digest mismatch");
+        assert!(mismatch.to_string().contains("digest mismatch"));
     }
 
     #[tokio::test]

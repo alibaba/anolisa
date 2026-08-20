@@ -922,6 +922,7 @@ impl BackendSpawner for MockSpawner {
             checkpoint_backend,
             expected_version,
             snapshot_kind,
+            snapshot_from_other_sandbox,
             ..
         } = request.request;
         if checkpoint_backend != BackendKind::Mock
@@ -944,11 +945,23 @@ impl BackendSpawner for MockSpawner {
             Ok(vmstate) => vmstate,
             Err(error) => return Err(SpawnFailure::clean(error)),
         };
+        // A template capture belongs to its source sandbox, so it must carry a
+        // valid, non-nil identity that differs from the new owner. A rollback
+        // must instead name the sandbox being restored. The cross-sandbox flag
+        // relaxes equality only; it must not make a missing or malformed
+        // identity acceptable.
+        let recorded_identity = vmstate
+            .get("instance_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .filter(|value| !value.is_nil());
+        let identity_matches = match recorded_identity {
+            Some(recorded) if snapshot_from_other_sandbox => recorded != instance_id,
+            Some(recorded) => recorded == instance_id,
+            None => false,
+        };
         if vmstate.get("format").and_then(serde_json::Value::as_str) != Some("blaze-mock-v1")
-            || vmstate
-                .get("instance_id")
-                .and_then(serde_json::Value::as_str)
-                != Some(instance_id.to_string().as_str())
+            || !identity_matches
             || vmstate.get("kind").and_then(serde_json::Value::as_str) != Some("full")
         {
             return Err(SpawnFailure::clean(BlazeError::BackendError {
@@ -2335,6 +2348,7 @@ mod tests {
             expose_guest_socket: true,
             preserve_network,
             record_console_log,
+            snapshot_from_other_sandbox: false,
         };
         // The guest mock runs no pinned executable: it owns an in-process task
         // rather than a backend binary.
@@ -2376,6 +2390,128 @@ mod tests {
         assert!(instance.quiesce_for_capture().await.is_err());
         assert!(instance.unquiesce_after_capture().await.is_err());
         assert!(instance.snapshot(request).await.is_err());
+    }
+
+    /// A template capture records its source sandbox, so the mock adapter must
+    /// accept a differing identity for a template restore while still refusing
+    /// one for a same-sandbox rollback.
+    #[tokio::test]
+    async fn mock_restore_accepts_a_foreign_identity_only_for_templates() {
+        for from_other_sandbox in [false, true] {
+            let temp = tempfile::tempdir().expect("temp");
+            let spawn = request(temp.path());
+            let run_dir = spawn.run_dir.clone();
+            let payload_dir = temp.path().join("payload");
+            std::fs::create_dir(&payload_dir).expect("payload directory");
+            let snapshot_path = payload_dir.join("vmstate.snap");
+            let mem_path = payload_dir.join("memory.snap");
+            // Record a different sandbox, exactly as a published template does.
+            std::fs::write(
+                &snapshot_path,
+                serde_json::to_vec(&serde_json::json!({
+                    "format": "blaze-mock-v1",
+                    "instance_id": Uuid::new_v4(),
+                    "kind": "full",
+                }))
+                .expect("mock vmstate"),
+            )
+            .expect("write vmstate");
+            std::fs::write(&mem_path, b"blaze-mock-memory-v1").expect("write memory");
+
+            let restore = BackendRestoreRequest::new(
+                RestoreRequest {
+                    instance_id: spawn.instance_id,
+                    binary_path: PathBuf::new(),
+                    storage: spawn.storage.clone(),
+                    payload_dir,
+                    checkpoint_backend: BackendKind::Mock,
+                    expected_version: Some("mock-v1".to_string()),
+                    snapshot_kind: SnapshotKind::Full,
+                    expose_guest_socket: false,
+                    preserve_network: false,
+                    record_console_log: false,
+                    snapshot_from_other_sandbox: from_other_sandbox,
+                },
+                run_dir,
+                None,
+            )
+            .expect("restore request");
+
+            let restored = MockSpawner.restore(restore).await;
+            if from_other_sandbox {
+                let owner = restored.expect("template restore accepts a foreign identity");
+                assert_eq!(owner.instance_id(), spawn.instance_id);
+                owner.kill().await.expect("release mock owner");
+            } else {
+                let error = restored.err().expect("rollback rejects a foreign identity");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("does not match the requested sandbox"),
+                    "{error}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_template_restore_requires_a_valid_foreign_identity() {
+        for identity_case in ["missing", "malformed", "nil", "target"] {
+            let temp = tempfile::tempdir().expect("temp");
+            let spawn = request(temp.path());
+            let payload_dir = temp.path().join("payload");
+            std::fs::create_dir(&payload_dir).expect("payload directory");
+            let snapshot_path = payload_dir.join("vmstate.snap");
+            let mem_path = payload_dir.join("memory.snap");
+            let mut vmstate = serde_json::json!({
+                "format": "blaze-mock-v1",
+                "kind": "full",
+            });
+            match identity_case {
+                "missing" => {}
+                "malformed" => vmstate["instance_id"] = serde_json::json!("not-a-uuid"),
+                "nil" => vmstate["instance_id"] = serde_json::json!(Uuid::nil()),
+                "target" => vmstate["instance_id"] = serde_json::json!(spawn.instance_id),
+                _ => unreachable!("covered identity case"),
+            }
+            std::fs::write(
+                &snapshot_path,
+                serde_json::to_vec(&vmstate).expect("mock vmstate"),
+            )
+            .expect("write vmstate");
+            std::fs::write(&mem_path, b"blaze-mock-memory-v1").expect("write memory");
+
+            let restore = BackendRestoreRequest::new(
+                RestoreRequest {
+                    instance_id: spawn.instance_id,
+                    binary_path: PathBuf::new(),
+                    storage: spawn.storage.clone(),
+                    payload_dir,
+                    checkpoint_backend: BackendKind::Mock,
+                    expected_version: Some("mock-v1".to_string()),
+                    snapshot_kind: SnapshotKind::Full,
+                    expose_guest_socket: false,
+                    preserve_network: false,
+                    record_console_log: false,
+                    snapshot_from_other_sandbox: true,
+                },
+                spawn.run_dir.clone(),
+                None,
+            )
+            .expect("restore request");
+
+            let error = MockSpawner
+                .restore(restore)
+                .await
+                .err()
+                .expect("invalid template source identity must be rejected");
+            assert!(
+                error
+                    .to_string()
+                    .contains("does not match the requested sandbox"),
+                "{identity_case}: {error}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2431,6 +2567,7 @@ mod tests {
             expose_guest_socket: true,
             preserve_network: false,
             record_console_log: false,
+            snapshot_from_other_sandbox: false,
         };
         let executable =
             Arc::new(PinnedExecutable::open(Path::new("/bin/sh")).expect("pin a real executable"));

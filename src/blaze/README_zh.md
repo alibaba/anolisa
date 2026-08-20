@@ -189,8 +189,8 @@ Blaze 仍可读取旧版本写入的 `Reset`、`Warm` 和 `start_path = "warm"` 
 持久化也失败，启动警告会记录附加错误，磁盘上的记录可能仍是先前状态。其他已通过
 校验的记录仍会继续恢复。
 
-`/v1/templates` 是唯一面向运维人员的 template catalog。导入条目目前不会让
-sandbox create 自动选择它；后续 create 支持会从同一个 catalog 解析可选名称。
+`/v1/templates` 是唯一面向运维人员的 template catalog。create 请求通过
+`POST /v1/sandboxes` 上可选的 `template` 字段从同一个 catalog 解析条目并恢复。
 配置方法、接受的 artifact、上限和发布规则参见
 [Template catalog 用户指南](../../docs/user-guide/zh/runtime/blaze.md#template-catalog)。
 

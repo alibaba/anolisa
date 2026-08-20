@@ -5,6 +5,7 @@
 //! (copy-on-write, content-addressable dedup) but present
 //! a uniform interface to the daemon layer.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -66,6 +67,40 @@ pub struct AcquireOpts {
     pub mem_size: u64,
 }
 
+/// One already-open template artifact.
+///
+/// The open file object binds later materialization to the object the catalog
+/// validated, even if its catalog path is replaced afterward.
+#[derive(Debug)]
+pub struct TemplateArtifact {
+    /// Stable source object positioned at the beginning of the artifact.
+    pub file: File,
+    /// Exact byte length recorded by the template manifest.
+    pub size_bytes: u64,
+    /// Lowercase SHA-256 digest recorded by the template manifest.
+    pub sha256: String,
+}
+
+/// Self-contained artifacts needed to restore one template.
+#[derive(Debug)]
+pub struct TemplateStorage {
+    /// Backend VM-state snapshot.
+    pub vmstate: TemplateArtifact,
+    /// Guest-memory snapshot.
+    pub memory: TemplateArtifact,
+    /// Independent root filesystem snapshot.
+    pub rootfs: TemplateArtifact,
+}
+
+/// Provider-owned storage produced from one template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateStorageSlot {
+    /// Writable storage owned by the new sandbox.
+    pub storage: StorageSlot,
+    /// Provider-owned backend payload ready for the restore adapter.
+    pub payload_dir: PathBuf,
+}
+
 /// Storage allocation failure with an optional residual slot owner.
 ///
 /// A provider returns `residual` only when rollback could not remove resources
@@ -119,6 +154,29 @@ pub trait StorageProvider: Send + Sync {
         &self,
         opts: &AcquireOpts,
     ) -> std::result::Result<StorageSlot, StorageAcquireError>;
+
+    /// Materialize a self-contained template into a new owned slot.
+    ///
+    /// Providers must not retain paths into the catalog. Every artifact used
+    /// by the restored sandbox must be copied into provider-owned storage.
+    async fn acquire_template(
+        &self,
+        opts: &AcquireOpts,
+        source: TemplateStorage,
+    ) -> std::result::Result<TemplateStorageSlot, StorageAcquireError> {
+        let _ = (opts, source);
+        Err(StorageAcquireError::clean(BlazeError::StorageError {
+            msg: "storage provider does not support templates".to_string(),
+        }))
+    }
+
+    /// Report whether template materialization is implemented.
+    ///
+    /// The default is conservative so existing providers do not advertise a
+    /// data path they have not implemented.
+    fn supports_templates(&self) -> bool {
+        false
+    }
 
     /// Release a storage slot (cleanup all associated resources).
     async fn release(&self, slot: StorageSlot) -> Result<()>;

@@ -219,6 +219,9 @@ struct CreateInstanceReq {
     labels: HashMap<String, String>,
     #[serde(default)]
     kernel_version: Option<String>,
+    /// Optional published template to restore this sandbox from.
+    #[serde(default)]
+    template: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -323,6 +326,7 @@ async fn create_sandbox(state: &Arc<ServerState>, body: &[u8]) -> Result<Respons
             image_digest: req.image_digest,
             runtime_backend,
             binary_path,
+            template: req.template,
         })
         .await?;
     json_created(&CreateInstanceResp {
@@ -684,6 +688,7 @@ mod tests {
     use blaze_core::storage::{
         AcquireOpts, PoolStatus, StorageAcquireError, StorageProvider, StorageSlot,
     };
+    use sha2::{Digest, Sha256};
 
     #[cfg(feature = "test-failpoints")]
     use crate::checkpoint_store::CheckpointStore;
@@ -6702,5 +6707,328 @@ mod tests {
             .await
             .expect_err("duplicate");
         assert!(matches!(duplicate, BlazeDaemonError::Conflict(_)));
+    }
+
+    // ---- template-backed create -------------------------------------------
+
+    /// Write a Mock-backend template source directory with a valid manifest.
+    fn write_template_source(root: &Path, expose_guest_socket: bool) {
+        std::fs::create_dir_all(root).expect("template source");
+        let memory = vec![0_u8; 1024 * 1024];
+        std::fs::write(root.join("vmstate.snap"), b"snapshot").expect("template VM state");
+        std::fs::write(root.join("mem.bin"), &memory).expect("template memory");
+        std::fs::write(root.join("rootfs.ext4"), b"rootfs").expect("template rootfs");
+        let digest = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
+        let metadata = json!({
+            "format_version": 1,
+            "name": "source",
+            "image_digest": "sha256:template-image",
+            "backend": "mock",
+            "backend_version": "guest-mock-v1",
+            "snapshot_kind": "full",
+            "expose_guest_socket": expose_guest_socket,
+            "network": false,
+            "rootfs_size": 6,
+            "memory_size": 1048576,
+            "artifacts": [
+                {"name": "vmstate.snap", "size_bytes": 8, "sha256": digest(b"snapshot")},
+                {"name": "mem.bin", "size_bytes": 1048576, "sha256": digest(&memory)},
+                {"name": "rootfs.ext4", "size_bytes": 6, "sha256": digest(b"rootfs")}
+            ]
+        });
+        std::fs::write(
+            root.join("template.json"),
+            serde_json::to_vec(&metadata).expect("template metadata"),
+        )
+        .expect("write template metadata");
+    }
+
+    /// Inputs a template-backed restore observed, for isolation assertions.
+    struct ObservedTemplateRestore {
+        instance_id: Uuid,
+        preserve_network: bool,
+        snapshot: Vec<u8>,
+        memory: Vec<u8>,
+        rootfs: Vec<u8>,
+    }
+
+    /// A spawner that refuses cold spawn and records restore inputs, then hands
+    /// off to the guest-ready mock owner so create reaches its readiness gate.
+    struct TemplateRestoreSpawner {
+        observed: Arc<std::sync::Mutex<Option<ObservedTemplateRestore>>>,
+    }
+
+    #[async_trait]
+    impl BackendSpawner for TemplateRestoreSpawner {
+        async fn spawn(
+            &self,
+            _request: BackendSpawnRequest,
+        ) -> std::result::Result<DynBackendInstance, SpawnFailure> {
+            Err(SpawnFailure::clean(BlazeError::BackendError {
+                msg: "template create must use restore".to_string(),
+            }))
+        }
+
+        async fn restore_capability(
+            &self,
+            _executable: Option<&crate::spawner::PinnedExecutable>,
+        ) -> blaze_core::Result<Option<blaze_core::backend::RestoreCapability>> {
+            Ok(Some(blaze_core::backend::RestoreCapability {
+                backend: BackendKind::Mock,
+                version: Some("guest-mock-v1".to_string()),
+                snapshot_kind: blaze_core::backend::SnapshotKind::Full,
+            }))
+        }
+
+        async fn restore(
+            &self,
+            request: crate::spawner::BackendRestoreRequest,
+        ) -> crate::spawner::RestoreResult {
+            let observed = ObservedTemplateRestore {
+                instance_id: request.instance_id,
+                preserve_network: request.preserve_network,
+                snapshot: tokio::fs::read(request.payload_dir.join("vmstate.snap"))
+                    .await
+                    .map_err(SpawnFailure::from)?,
+                memory: tokio::fs::read(request.payload_dir.join("memory.snap"))
+                    .await
+                    .map_err(SpawnFailure::from)?,
+                rootfs: tokio::fs::read(&request.storage.rootfs_path)
+                    .await
+                    .map_err(SpawnFailure::from)?,
+            };
+            *self.observed.lock().expect("template observation") = Some(observed);
+            let spawn = BackendSpawnRequest::new(
+                blaze_core::backend::SpawnRequest {
+                    instance_id: request.instance_id,
+                    binary_path: request.binary_path.clone(),
+                    storage: request.storage.clone(),
+                    backend: BackendConfigs::default(),
+                    vm: None,
+                },
+                request.run_dir.clone(),
+            )
+            .map_err(SpawnFailure::clean)?;
+            GuestMockSpawner.spawn(spawn).await
+        }
+
+        async fn probe(&self, _binary_path: &Path) -> blaze_core::Result<bool> {
+            Ok(true)
+        }
+
+        async fn cleanup_orphan(
+            &self,
+            instance_id: Uuid,
+            run_dir: &OwnedRunDir,
+        ) -> blaze_core::Result<()> {
+            GuestMockSpawner.cleanup_orphan(instance_id, run_dir).await
+        }
+    }
+
+    /// Build a Mock-backend server state with one imported `runtime-base`
+    /// template. `allowed` controls whether the policy lists it as selectable.
+    async fn template_test_state(
+        temp: &tempfile::TempDir,
+        allowed: bool,
+        expose_guest_socket: bool,
+    ) -> (
+        Arc<ServerState>,
+        Arc<std::sync::Mutex<Option<ObservedTemplateRestore>>>,
+        DaemonConfig,
+    ) {
+        let mut config = test_config(temp);
+        // The catalog refuses symlink components in its root. Resolve the
+        // temporary directory first so these tests also run where the system
+        // temporary path itself is a symlink, as on macOS.
+        let resolved = std::fs::canonicalize(temp.path()).expect("resolve temp root");
+        config.daemon.state_dir = resolved.join("state");
+        config.storage.images_dir = resolved.join("images");
+        config.storage.instances_dir = resolved.join("instances");
+        config.template.dir = resolved.join("templates");
+        let import_root = resolved.join("imports");
+        write_template_source(&import_root.join("source"), expose_guest_socket);
+        config.template.import_root = Some(import_root);
+        let binary = resolved.join("test-backend");
+        std::fs::write(&binary, b"test backend").expect("backend fixture");
+        // Preflight pins the configured executable, which requires the file to
+        // actually be executable.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+                .expect("backend fixture permissions");
+        }
+        config.backends.insert("mock".to_string(), binary);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let mut policy = test_policy(BackendKind::Mock);
+        if allowed {
+            policy.select.templates =
+                vec!["runtime-base".to_string(), "missing-template".to_string()];
+        }
+        let state = build_test_state(
+            config.clone(),
+            policy,
+            spawners(
+                BackendKind::Mock,
+                Arc::new(TemplateRestoreSpawner {
+                    observed: observed.clone(),
+                }),
+            ),
+            BackendKind::Mock,
+            storage,
+        );
+        state
+            .manager
+            .import_template(
+                "runtime-base".to_string(),
+                PathBuf::from("source"),
+                String::new(),
+            )
+            .await
+            .expect("import template");
+        (state, observed, config)
+    }
+
+    #[tokio::test]
+    async fn template_create_restores_independent_sandboxes() {
+        let temp = tempfile::tempdir().expect("temp");
+        let (state, observed, config) = template_test_state(&temp, true, false).await;
+        let request = serde_json::to_vec(&json!({
+            "workload_class": "agent-tool",
+            "image_digest": "sha256:template-image",
+            "template": "runtime-base"
+        }))
+        .expect("create request");
+
+        let first = created_json(&state, &request).await;
+        let first_id =
+            Uuid::parse_str(first["instance"]["id"].as_str().expect("instance id")).expect("uuid");
+        let first_restore = observed
+            .lock()
+            .expect("observation")
+            .take()
+            .expect("first restore");
+        // Mutating one sandbox's private rootfs must not affect the next.
+        let first_rootfs = config
+            .storage
+            .instances_dir
+            .join(first_id.to_string())
+            .join("rootfs.ext4");
+        std::fs::write(&first_rootfs, b"cloned").expect("mutate first rootfs");
+
+        let second = created_json(&state, &request).await;
+        let second_id =
+            Uuid::parse_str(second["instance"]["id"].as_str().expect("instance id")).expect("uuid");
+        let second_restore = observed
+            .lock()
+            .expect("observation")
+            .take()
+            .expect("second restore");
+        let catalog_rootfs = config.template.dir.join("runtime-base/rootfs.ext4");
+
+        assert_ne!(first_id, second_id);
+        assert_eq!(first["instance"]["template"], "runtime-base");
+        assert_eq!(second["instance"]["template"], "runtime-base");
+        assert_eq!(first_restore.instance_id, first_id);
+        assert_eq!(second_restore.instance_id, second_id);
+        // A new sandbox never inherits the source network slot.
+        assert!(!first_restore.preserve_network);
+        // Each restore observed the published artifacts, byte for byte.
+        assert_eq!(first_restore.snapshot, b"snapshot");
+        assert_eq!(second_restore.rootfs, b"rootfs");
+        assert_eq!(first_restore.memory.len(), 1024 * 1024);
+        // The catalog copy is untouched by a per-sandbox mutation.
+        assert_eq!(
+            std::fs::read(&catalog_rootfs).expect("catalog rootfs"),
+            b"rootfs"
+        );
+        assert_eq!(
+            std::fs::read(&first_rootfs).expect("first rootfs"),
+            b"cloned"
+        );
+    }
+
+    #[tokio::test]
+    async fn template_create_is_rejected_when_policy_disallows_it() {
+        let temp = tempfile::tempdir().expect("temp");
+        let (state, observed, config) = template_test_state(&temp, false, false).await;
+        let instances_dir = config.storage.instances_dir.clone();
+
+        let error = create_sandbox(
+            &state,
+            &serde_json::to_vec(&json!({
+                "workload_class": "agent-tool",
+                "image_digest": "sha256:template-image",
+                "template": "runtime-base"
+            }))
+            .expect("create request"),
+        )
+        .await
+        .expect_err("policy must allow the template");
+
+        assert!(matches!(error, BlazeDaemonError::Conflict(_)));
+        assert!(observed.lock().expect("observation").is_none());
+        assert!(state.manager.list().expect("instances").is_empty());
+        assert_eq!(
+            std::fs::read_dir(instances_dir).expect("instances").count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn template_create_rejects_mismatched_image_without_lifecycle_state() {
+        let temp = tempfile::tempdir().expect("temp");
+        let (state, observed, config) = template_test_state(&temp, true, false).await;
+        let instances_dir = config.storage.instances_dir.clone();
+
+        let error = create_sandbox(
+            &state,
+            &serde_json::to_vec(&json!({
+                "workload_class": "agent-tool",
+                "image_digest": "sha256:different-image",
+                "template": "runtime-base"
+            }))
+            .expect("create request"),
+        )
+        .await
+        .expect_err("image identity must match the template");
+
+        assert!(matches!(error, BlazeDaemonError::Conflict(_)));
+        assert!(observed.lock().expect("observation").is_none());
+        assert!(state.manager.list().expect("instances").is_empty());
+        assert_eq!(
+            std::fs::read_dir(instances_dir).expect("instances").count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn template_create_rejects_unsupported_mock_guest_socket_without_lifecycle_state() {
+        let temp = tempfile::tempdir().expect("temp");
+        let (state, observed, config) = template_test_state(&temp, true, true).await;
+        let instances_dir = config.storage.instances_dir.clone();
+
+        let error = create_sandbox(
+            &state,
+            &serde_json::to_vec(&json!({
+                "workload_class": "agent-tool",
+                "image_digest": "sha256:template-image",
+                "template": "runtime-base"
+            }))
+            .expect("create request"),
+        )
+        .await
+        .expect_err("Mock cannot restore a guest transport");
+
+        assert!(matches!(error, BlazeDaemonError::UnsupportedOperation(_)));
+        assert!(observed.lock().expect("observation").is_none());
+        assert!(state.manager.list().expect("instances").is_empty());
+        assert_eq!(
+            std::fs::read_dir(instances_dir).expect("instances").count(),
+            0
+        );
     }
 }
