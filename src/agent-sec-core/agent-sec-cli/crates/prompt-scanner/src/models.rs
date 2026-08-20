@@ -2,6 +2,7 @@
 
 pub mod multi_turn_intent;
 pub mod qwen3_guard;
+pub mod warden_gen;
 
 use std::collections::BTreeMap;
 
@@ -35,8 +36,9 @@ pub struct ClassifierResult {
 
 /// A model-backed classifier for the L2 detection layer.
 ///
-/// Each backend (Qwen3Guard today; future verdict+reason models) implements
-/// this trait so [`MlClassifier`](crate::detectors::ml_classifier::MlClassifier)
+/// Each backend (Qwen3Guard and Warden-Gen today; future verdict+reason
+/// models) implements this trait so
+/// [`MlClassifier`](crate::detectors::ml_classifier::MlClassifier)
 /// stays decoupled from any single model's label schema. Adding a model means
 /// writing a wrapper and registering it in the layer's factory — nothing
 /// downstream changes.

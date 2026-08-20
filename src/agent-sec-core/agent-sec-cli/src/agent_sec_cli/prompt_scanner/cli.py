@@ -6,6 +6,7 @@ with ``scan-pii`` and the other security commands.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -15,13 +16,42 @@ from agent_sec_cli.security_middleware import invoke
 from agent_sec_cli.security_middleware.backends.prompt_scan import error_payload
 from agent_sec_cli.security_middleware.result import ActionResult
 
+_SUPPORTED_MODES = frozenset({"fast", "standard", "strict", "multi_turn"})
+_MULTITURN_MODE = "multi_turn"
+_L2_MODEL_ENV = "PROMPT_SCANNER_L2_MODEL"
+
+# Selectable L2 backends, listed in the help epilog rather than in the
+# ``--model`` help text: the option column is ~45 chars wide, so these 46-50
+# char names get truncated with an ellipsis there and stop being copyable.
+# The native layer owns the authoritative list (it rejects anything else at
+# construction) and reports the same set through ``scanner_engine_info``.
+_L2_BACKENDS_EPILOG = (
+    f"L2 backends for --model / {_L2_MODEL_ENV}:\n\n"
+    "modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF  (default)\n\n"
+    "modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF"
+)
+
 scanner_app = typer.Typer(
     name="scan-prompt",
     help="Prompt injection / jailbreak scanner",
+    epilog=_L2_BACKENDS_EPILOG,
 )
 
-_SUPPORTED_MODES = frozenset({"fast", "standard", "strict", "multi_turn"})
-_MULTITURN_MODE = "multi_turn"
+
+def _resolve_l2_model(cli_model: str | None = None) -> str | None:
+    """Resolve the L2 backend override.
+
+    Priority: ``--model`` > ``PROMPT_SCANNER_L2_MODEL`` > ``None`` (the
+    scanner's built-in default). A blank or whitespace-only value at either
+    layer means "not set" and falls through to the next one.
+
+    Every plugin hook shells out to this command, so the environment variable
+    lets all of them switch backends without a change of their own, while
+    ``--model`` covers ad-hoc terminal use and per-invocation overrides.
+    """
+    if cli_model and cli_model.strip():
+        return cli_model.strip()
+    return os.environ.get(_L2_MODEL_ENV, "").strip() or None
 
 
 def _print_error_json(message: str) -> None:
@@ -106,13 +136,19 @@ def _load_native() -> Any:
     return _native
 
 
-@scanner_app.command("warmup")
+@scanner_app.command("warmup", epilog=_L2_BACKENDS_EPILOG)
 def warmup_model(
     mode: str = typer.Option(
         "standard",
         "--mode",
         help="Detection mode to warm up: fast, standard, strict, multi_turn",
         case_sensitive=False,
+    ),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        help="L2 backend model to warm up; see the backend list below. "
+        f"Overrides {_L2_MODEL_ENV}.",
     ),
 ) -> None:
     """Verify required models are served and load them to avoid cold-start latency.
@@ -131,7 +167,7 @@ def warmup_model(
 
     try:
         native = _load_native()
-        native.warmup_scanner(mode=mode, model=None)
+        native.warmup_scanner(mode=mode, model=_resolve_l2_model(model))
     except Exception as exc:  # noqa: BLE001 - CLI error surface
         typer.echo(f"Warmup failed: {exc}", err=True)
         raise typer.Exit(code=1)
@@ -168,6 +204,12 @@ def scan_prompt(
         "--input",
         help="Path to a file containing prompts (one per line). "
         "If omitted, reads from stdin.",
+    ),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        help="L2 backend model; see the backend list below. "
+        f"Overrides {_L2_MODEL_ENV}.",
     ),
 ) -> None:
     """Scan prompt text for injection / jailbreak attempts.
@@ -260,7 +302,7 @@ def scan_prompt(
             history=history,
             mode=mode,
             source=source or None,
-            model=None,
+            model=_resolve_l2_model(model),
         )
 
         # L4 is mandatory in multi_turn mode, so an empty ``layer_results``
@@ -304,12 +346,14 @@ def scan_prompt(
 
     # --- Scan each text through the middleware ---
     exit_code = 0
+    # Resolve the backend once so every prompt in a batch uses the same model.
+    resolved_model = _resolve_l2_model(model)
     for t in texts:
         result = _invoke_prompt_scan(
             text=t,
             mode=mode,
             source=source or None,
-            model=None,
+            model=resolved_model,
         )
         _print_result(result, output_format)
         if result.exit_code != 0:

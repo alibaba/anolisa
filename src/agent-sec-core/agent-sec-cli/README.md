@@ -123,6 +123,8 @@ For `observability`, the view applies the shared `OBSERVABILITY_TIMEOUT` environ
 
 Table output is limited to the stable user-facing columns `CAPABILITY`, `ENABLED`, `MODE`, `SCAN_MODE`, `TIMEOUT(s)`, and `DIAGNOSTICS`. JSON output uses the same user-facing fields plus sanitized `env` entries with `effective` and `default` values. Neither format exposes hook matcher lists, source labels, Agent config contents, config paths, or raw environment variable values. Diagnostics name the invalid setting and fallback behavior without echoing the original value.
 
+For `prompt-scan`, the `env` entries also carry `PROMPT_SCANNER_L2_MODEL`, the L2 backend shared by all six integrations: no hook reads it itself, but each one shells out to `scan-prompt`, which resolves it. Because a model name is only meaningful verbatim, it is the one entry reported case-preserved (escaped and length-capped) instead of as a normalized keyword. The reported `default` comes from the native scanner engine (`scanner_engine_info`), so the view never carries a second copy of the backend list; before the extension is built it degrades to an empty default. A backend the engine does not support is reported as configured plus a diagnostic rather than replaced by the default, because the engine rejects it at construction and the scan then fails. It has no table column, so use `--capability prompt-scan --output json` to read it.
+
 ### Observability Records
 
 `agent-sec-cli observability record` accepts one JSON object from stdin and writes

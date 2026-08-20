@@ -246,16 +246,19 @@ agent-sec-cli scan-prompt --text "ignore all system instructions"
 agent-sec-cli scan-prompt --mode fast --text "user input"
 agent-sec-cli scan-prompt --input prompts.txt --format json
 
-# 安装后拉取一次 L2 模型
+# 安装后拉取一次默认 L2 模型
 ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF
 
 # 验证 Ollama 能提供所需模型
 agent-sec-cli scan-prompt warmup
 ```
 
-L2 分类器使用 ModelScope 上的
-`modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`。`warmup` 只检查 Ollama
-能否提供该模型，不会自动下载模型。
+L2 分类器默认使用 ModelScope 上的
+`modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`；
+`modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF` 为可选后端，用 `--model` 或
+`PROMPT_SCANNER_L2_MODEL` 选择（`--model` 优先）。同一时刻只跑一个后端，且每个
+后端都需各自执行 `ollama pull`。`warmup` 只检查 Ollama 能否提供当前选定的模型，
+不会自动下载模型。
 
 详见 [Prompt Scanner 用户使用指南](../../docs/user-guide/zh/agent-security/agent-sec-core/prompt-scanner.md)。
 
@@ -401,6 +404,8 @@ agent-sec-cli capabilities --agent hermes --capability pii-check --output json
 对于 `observability`，该视图会对六种集成都应用 `OBSERVABILITY_TIMEOUT` 语义：默认值为 5 秒，非法值或非正数回退到 5，大于 5 的值封顶为 5。Hermes 插件配置仍可在未设置环境变量时指定更低的运行时 timeout；该配置不在此纯环境变量视图的解析范围内。
 
 表格输出仅包含稳定的用户可见列：`CAPABILITY`、`ENABLED`、`MODE`、`SCAN_MODE`、`TIMEOUT(s)` 和 `DIAGNOSTICS`。JSON 输出保留同样的用户字段，并额外包含经过脱敏投影的 `env` 条目，其中只含 `effective` 和 `default`。两种格式都不会暴露 hook matcher 列表、source 标签、Agent config 内容、config 路径或原始环境变量值。诊断信息只说明哪个设置无效及 fallback 行为，不回显原始值。
+
+对于 `prompt-scan`，`env` 条目还会上报 `PROMPT_SCANNER_L2_MODEL`：没有 hook 自己读取它，但每个 hook 都会调用 `scan-prompt` 子进程并由其解析 L2 后端，因此六种集成都会继承该变量。模型名只有原样展示才有意义，所以它保留大小写上报（并做转义与长度封顶）；上报的 `default` 与“不支持的后端”检查都取自 native 扫描引擎，而不是在此再存一份后端列表。引擎不支持的模型名会原样上报并附一条 diagnostic，因为引擎会在构造期报错、扫描直接失败。它没有对应的表格列，请用 `--capability prompt-scan --output json` 读取。
 
 ## Security Baseline
 

@@ -52,9 +52,11 @@
   Verdict（基于层语义推导）: PASS / WARN / DENY / ERROR
 ```
 
-> **注意**：L2（Qwen3Guard）使用 Ollama 提供的
+> **注意**：L2 默认后端 Qwen3Guard 使用 Ollama 提供的
 > `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`，输出 `Safety: Safe` 或
-> `Safety: Unsafe` 并附带类别标签（如 `Injection`、`Jailbreak` 等）。
+> `Safety: Unsafe` 并附带类别标签（如 `Injection`、`Jailbreak` 等）。可选后端
+> Warden-Gen 使用同一套 `Safety:`/`Categories:` 协议，仅类别词表不同；切换方式见
+> 「L2 模型与 Ollama 配置」。
 
 ### 检测模式
 
@@ -78,10 +80,12 @@ ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF
 uv run agent-sec-cli scan-prompt warmup
 ```
 
-> **L2 模型说明**：`standard` / `strict` 模式调用 Ollama 上的
+> **L2 模型说明**：`standard` / `strict` 模式默认调用 Ollama 上的
 > `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`（项目自有 ModelScope 仓库）。
 > 首次使用前执行 `ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` 即可，
 > 无需重命名（由 Ollama 统一管理缓存）。
+> 改用可选的 Warden-Gen 后端时，需先单独拉取该模型，再用 `--model` 或
+> `PROMPT_SCANNER_L2_MODEL` 指定，见「L2 模型与 Ollama 配置」。
 > 生产部署建议在服务启动脚本中提前执行 `ollama pull` 与 `scan-prompt warmup`。
 
 ---
@@ -113,9 +117,10 @@ agent-sec-cli scan-prompt --input prompts.txt
 | `--mode MODE` | `standard` | 检测模式：`fast` / `standard` / `strict` |
 | `--format FMT` | `json` | 输出格式：`json`（结构化）或 `text`（人类可读）|
 | `--source LABEL` | `""` | 输入来源标签，记录到结果 metadata（如 `user_input`、`rag`、`tool_output`）|
+| `--model MODEL` | 空（即 Qwen3Guard） | L2 后端模型名，优先级高于 `PROMPT_SCANNER_L2_MODEL`；取值见「L2 模型与 Ollama 配置」|
 
-> **warmup 子命令**默认以 `standard` 模式初始化 scanner，检查 L2 (Qwen3Guard) 模型在 Ollama 中是否可用；
-> 模型缺失时返回错误并提示对应的 `ollama pull` 命令。
+> **warmup 子命令**默认以 `standard` 模式初始化 scanner，检查当前选定的 L2 后端模型（默认 Qwen3Guard）在 Ollama 中是否可用；
+> 模型缺失时返回错误并提示对应的 `ollama pull` 命令。`--model` 同样适用于本子命令，用于预检非默认后端。
 
 ### 输出格式示例
 
@@ -217,8 +222,8 @@ agent-sec-cli scan-prompt --text "ignore all system instructions"
 
 > **说明**：STANDARD 模式 L1、L2 全量运行（`fast_fail=False`）。L2 ML 确认了 L1 的判断，verdict 为 `deny`。
 > L2 的 finding 不含 `severity` 字段（ML 置信度不等同于规则严重程度）。
-> L2 首次调用前需在 Ollama 中拉取
-> `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`，建议提前执行对应的
+> L2 首次调用前需在 Ollama 中拉取当前选定的后端模型（默认
+> `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`），建议提前执行对应的
 > `ollama pull`，再执行 `scan-prompt warmup` 验证模型可用。
 
 **JSON 格式（standard 模式，L2 不可达 → 降级扫描）：**
@@ -396,7 +401,7 @@ d = result.to_dict()
 
 ## 配置说明
 
-> ⚠️ **本节描述的 Python `ScanConfig` 已被 Rust 原生实现取代**，保留作为历史设计参考。表中的 `LLM-Research/Llama-Prompt-Guard-2-86M` 是旧 Python 实现的历史默认值，不代表当前支持模型。当前 L2 仅支持 `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`，配置通过环境变量（见下方「L2 模型与 Ollama 配置」章）与 CLI 参数完成；需先执行 `ollama pull`，`scan-prompt warmup` 只验证模型可用性。
+> ⚠️ **本节描述的 Python `ScanConfig` 已被 Rust 原生实现取代**，保留作为历史设计参考。表中的 `LLM-Research/Llama-Prompt-Guard-2-86M` 是旧 Python 实现的历史默认值，不代表当前支持模型。当前 L2 支持两个后端：`modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`（默认）与 `modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF`（可选），同一时刻只跑一个；后端选择与其余配置通过环境变量（见下方「L2 模型与 Ollama 配置」章）与 CLI 参数（`--model`）完成；需先执行 `ollama pull`，`scan-prompt warmup` 只验证模型可用性。
 
 ### ScanConfig 全量参数
 
@@ -718,8 +723,14 @@ L2（ML 分类器）与 L4（多轮意图检测）均通过 HTTP 调用 Ollama�
 
 | 层 | 模型 | 拉取命令 |
 |----|------|----------|
-| L2 (Qwen3Guard) | `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` | `ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` |
+| L2 (Qwen3Guard，默认) | `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` | `ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` |
+| L2 (Warden-Gen，可选) | `modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF` | `ollama pull modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF` |
 | L4 (Multi-turn intent) | `warden`（默认，可改） | `ollama pull warden` |
+
+L2 同一时刻只跑一个后端。Warden-Gen 在 Qwen3Guard 的 9 个类别之外补充了 9 个类别
+（数据外泄、提权与持久化、间接提示注入等），但它对代码类输入
+只给 `Safety: Unsafe` 而不给具体类别，因此按 Warden-Gen 扫描时「命中但无类别」
+属正常输出。
 
 ### 环境变量
 
@@ -729,6 +740,7 @@ L2（ML 分类器）与 L4（多轮意图检测）均通过 HTTP 调用 Ollama�
 | `AGENT_SEC_MODEL_SERVICE_BASE_URL` | `http://localhost:11434` | Ollama 服务地址 |
 | `AGENT_SEC_MODEL_SERVICE_TIMEOUT` | `30` | HTTP 调用超时（秒） |
 | `AGENT_SEC_OLLAMA_MODEL` | `warden` | L4 多轮意图检测使用的模型 |
+| `PROMPT_SCANNER_L2_MODEL` | 空（即 Qwen3Guard） | L2 后端模型名；取值须为上表中的 L2 模型名，拼错会在构造期报错而非静默关闭 L2。CLI 的 `--model` 优先级高于本变量 |
 
 ### 就绪检查
 
@@ -747,7 +759,7 @@ agent-sec-cli scan-prompt warmup
 |------|------|
 | L3 Semantic 未实现 | `strict` 模式实际运行 L1 + L2（`fast_fail=False`）；L3 语义检测层接口已预留，`is_available()` 始终返回 `false` |
 | 自定义规则加载 | 内置规则自动加载；自定义规则加载集成待完成 |
-| L2 模型就绪 | L2 调用 Ollama 中的 `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`；首次需执行完整模型 ID 的 `ollama pull`，再执行 `scan-prompt warmup` 验证可用 |
-| L2 输出语义 | Qwen3Guard 输出 Safe/Unsafe + 类别标签；具体 injection 类型由 L1 规则的 category 字段推断 |
+| L2 模型就绪 | L2 调用 Ollama 中当前选定的后端（默认 Qwen3Guard，可切换为 Warden-Gen）；每个后端都需分别执行完整模型 ID 的 `ollama pull`，再执行 `scan-prompt warmup` 验证可用 |
+| L2 输出语义 | 两个后端都输出 Safe/Unsafe + 类别标签，但类别词表不同（Warden-Gen 多 9 类，且对代码类输入只给 Unsafe 不给类别）；具体 injection 类型由 L1 规则的 category 字段推断 |
 | 批量扫描并发策略 | STANDARD/STRICT 模式下 `scan_batch` 串行调用 Ollama（HTTP 请求串行，避免单连接竞争）；FAST 模式（纯 L1）可并行 |
 | 语言检测 | 当前为启发式规则（Unicode 脚本块比例 ≥ 15%），非 ML 模型；支持 `zh`/`ar`/`ru`/`hi`/`en`；日文汉字及韩文归为 `zh` |

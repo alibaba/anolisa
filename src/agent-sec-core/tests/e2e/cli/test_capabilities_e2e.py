@@ -3,6 +3,7 @@
 import json
 import os
 import re
+from functools import lru_cache
 
 import pytest
 from cli.conftest import run_cli
@@ -39,7 +40,9 @@ _CAPABILITIES = (
 
 
 class _EnvPatch:
-    def __init__(self, **values: str) -> None:
+    """Override env vars for a block; ``None`` unsets one for its duration."""
+
+    def __init__(self, **values: str | None) -> None:
         self.values = values
         self.previous: dict[str, str | None] = {}
 
@@ -47,10 +50,11 @@ class _EnvPatch:
         names = set(_CAPABILITY_ENV_NAMES) | self.values.keys()
         for name in names:
             self.previous[name] = os.environ.get(name)
-            if name in self.values:
-                os.environ[name] = self.values[name]
-            else:
+            value = self.values.get(name)
+            if value is None:
                 os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
     def __exit__(self, *_args: object) -> None:
         for name, value in self.previous.items():
@@ -126,6 +130,81 @@ def test_capabilities_json_reads_observability_timeout_environment() -> None:
         "effective": "3",
         "default": "5",
     }
+
+
+@lru_cache(maxsize=1)
+def _engine_l2_default() -> str:
+    """L2 default the CLI reports, or `""` when the extension is not built.
+
+    Probed through the CLI instead of importing the extension here: the
+    installed-artifact runs drive a binary whose interpreter is not the one
+    running pytest and cannot import the package at all, so an in-process
+    probe would report no engine while the CLI reports a real default.
+    """
+    with _EnvPatch(PROMPT_SCANNER_L2_MODEL=None):
+        result = run_cli(
+            "capabilities",
+            "--capability",
+            "prompt-scan",
+            "--output",
+            "json",
+        )
+
+    assert result.returncode == 0, result.stderr
+    default = json.loads(result.stdout)[0]["env"]["PROMPT_SCANNER_L2_MODEL"]["default"]
+    assert isinstance(default, str), default
+    return default
+
+
+def test_capabilities_json_reports_prompt_scanner_l2_model() -> None:
+    model = "modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF"
+    with _EnvPatch(PROMPT_SCANNER_L2_MODEL=model):
+        result = run_cli(
+            "capabilities",
+            "--capability",
+            "prompt-scan",
+            "--output",
+            "json",
+        )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert len(payload) == 6
+    for record in payload:
+        assert record["env"]["PROMPT_SCANNER_L2_MODEL"] == {
+            "effective": model,
+            "default": _engine_l2_default(),
+        }
+        assert record["diagnostics"] == []
+
+
+def test_capabilities_json_flags_unsupported_prompt_scanner_l2_model() -> None:
+    model = "modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF-3Domain:q4_K_M"
+    with _EnvPatch(PROMPT_SCANNER_L2_MODEL=model):
+        result = run_cli(
+            "capabilities",
+            "--agent",
+            "qoder",
+            "--capability",
+            "prompt-scan",
+            "--output",
+            "json",
+        )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    # The value is always reported; only the check needs the engine, so without
+    # the extension the same run must stay diagnostic-free.
+    expected_diagnostics = (
+        [
+            "PROMPT_SCANNER_L2_MODEL is not a supported L2 backend; "
+            "prompt scans will fail"
+        ]
+        if _engine_l2_default()
+        else []
+    )
+    assert payload[0]["env"]["PROMPT_SCANNER_L2_MODEL"]["effective"] == model
+    assert payload[0]["diagnostics"] == expected_diagnostics
 
 
 def test_capabilities_rejects_noncanonical_capability_name() -> None:

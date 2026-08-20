@@ -391,11 +391,14 @@ agent-sec-cli capabilities --agent qwen --capability pii-check --output json
 
 支持的 capability 名称只能是 `code-scan`、`prompt-scan`、`pii-check`、`skill-ledger` 和 `observability`；`scan-code`、`prompt-scan-user-input`、`pii-scan-user-input` 等插件内部 ID 会被拒绝。表格输出按 Agent 分块展示，仅包含 `CAPABILITY`、`ENABLED`、`MODE`、`SCAN_MODE`、`TIMEOUT(s)` 和 `DIAGNOSTICS`；`MODE` 表示 hook 交互方式，`SCAN_MODE` 表示 prompt scanner 引擎档位（`fast`、`standard` 或 `strict`）。JSON 输出使用同样的用户可见字段，并包含经过脱敏投影的 `env` 条目，其中只含 `effective` 和 `default`。两种格式都不会暴露 hook matcher 列表、source 标签、Agent config 内容、config 路径或原始环境变量值。诊断信息只说明哪个设置无效及 fallback 行为，不回显原始值。
 
+当前配置的 L2 后端是唯一有意保留的例外：模型名只有原样展示才有意义，因此 `PROMPT_SCANNER_L2_MODEL` 会作为 `prompt-scan` 的 `env` 条目原样上报（保留大小写，并做转义与长度封顶）。它的 `default`（以及变量未设置时的 `effective`）取自 native 扫描引擎上报的默认后端；若取值不属于引擎支持的后端，则原样上报并附一条 diagnostic——因为引擎会在构造期直接报错，扫描会失败而不是回退到默认后端。它没有对应的表格列，请用 `--capability prompt-scan --output json` 读取。
+
 视图来源和限制：
 
 - 来源：静态 hook capability metadata 加当前 CLI 进程可见的环境变量。
 - 不包含：OpenClaw、Hermes 或其他 Agent 配置文件；Agent home 目录；实时 hook 加载或注册状态。
 - 已知偏移：从不同 shell/container/service 运行命令，或真实 Agent 使用不同配置时，输出可能与真实运行行为不同。
+- 已知偏移：L2 后端的默认值和“不支持的后端”检查都来自 native 扫描引擎，所以在扩展尚未编译时，视图会把 `PROMPT_SCANNER_L2_MODEL` 的 default 报为空，也无法标记不支持的模型名。
 
 ## Agent Hook 环境变量
 
@@ -416,6 +419,7 @@ capability，`<CAPABILITY>_MODE` 决定 finding 的处置方式；`debug` 是 `o
 | `PROMPT_SCANNER_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `PROMPT_SCANNER_MODE` | `observe` | ✗ | ✓ | ✓ | ✓ | ✗ | ✗ |
 | `PROMPT_SCANNER_SCAN_MODE` | `standard` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `PROMPT_SCANNER_L2_MODEL` | 未设置（Qwen3Guard） | ✓* | ✓* | ✓* | ✓* | ✓* | ✓* |
 | `PROMPT_SCANNER_TIMEOUT` | `10` | ✗ | ✓ | ✓ | ✓ | ✗ | ✗ |
 | `PII_CHECKER_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `PII_CHECKER_MODE` | `observe` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -427,6 +431,12 @@ capability，`<CAPABILITY>_MODE` 决定 finding 的处置方式；`debug` 是 `o
 | `SKILL_LEDGER_TIMEOUT` | `5` | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ |
 | `OBSERVABILITY_HOOK_ENABLED` | `true` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `OBSERVABILITY_TIMEOUT` | `5` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+`PROMPT_SCANNER_L2_MODEL` 标记为 `✓*`，因为没有任何 adapter 直接读取它：每个宿主都
+是调用 `agent-sec-cli scan-prompt` 子进程，由该命令解析 L2 后端，所以六家都会继承
+宿主进程环境中的取值。值为空或只有空白等同于未设置，仍使用内置的 Qwen3Guard 后端；
+其余不支持的模型名会让扫描在引擎构造期直接失败，而不是静默关掉 L2。
+可选后端见 [Prompt Scanner](prompt-scanner.md)。
 
 矩阵中的默认值 `5` 与其余五个非 Hermes 集成及 Hermes 随附配置一致。对于 Hermes，
 `OBSERVABILITY_TIMEOUT` 未设置、为空、非法或非正数时，会回退到 Observability capability

@@ -2,14 +2,21 @@
 //!
 //! The concrete model is pluggable: [`MlClassifier`] holds a boxed
 //! [`Classifier`] chosen by [`build_classifier`] from the configured model
-//! name. Qwen3Guard served by Ollama is the only backend today; adding another
-//! means writing a wrapper and extending the factory — nothing else changes.
+//! name.  Two Ollama-served backends exist today:
+//!
+//! - Qwen3Guard (default): prompt-domain moderation, nine categories.
+//! - Warden-Gen: adds nine categories and also covers the code and
+//!   Skill domains.
+//!
+//! Adding another model means writing a wrapper and extending the factory —
+//! nothing else changes.
 
 use std::time::Instant;
 
 use crate::detectors::{DetectInput, DetectionLayer};
 use crate::error::ScannerError;
 use crate::models::qwen3_guard::{is_qwen3_guard_model, Qwen3GuardClassifier, MODEL_QWEN3_GUARD};
+use crate::models::warden_gen::{is_warden_gen_model, WardenGenClassifier, MODEL_WARDEN_GEN};
 use crate::models::{Classifier, ClassifierResult};
 use crate::result::{LayerResult, ThreatDetail};
 
@@ -29,9 +36,12 @@ const DEFAULT_THREAT_CATEGORY: &str = "unsafe";
 fn build_classifier(model_name: &str) -> Result<Box<dyn Classifier>, ScannerError> {
     if is_qwen3_guard_model(model_name) {
         Ok(Box::new(Qwen3GuardClassifier::new(model_name)?))
+    } else if is_warden_gen_model(model_name) {
+        Ok(Box::new(WardenGenClassifier::new(model_name)?))
     } else {
         Err(ScannerError::Config(format!(
-            "Unsupported L2 model: {model_name:?}. Supported: {MODEL_QWEN3_GUARD}"
+            "Unsupported L2 model: {model_name:?}. \
+             Supported: {MODEL_QWEN3_GUARD}, {MODEL_WARDEN_GEN}"
         )))
     }
 }
@@ -260,10 +270,25 @@ mod tests {
 
     #[test]
     fn unsupported_model_is_rejected_at_construction() {
-        assert!(matches!(
-            MlClassifier::new("LLM-Research/Llama-Prompt-Guard-2-86M"),
-            Err(ScannerError::Config(_))
-        ));
+        let Err(ScannerError::Config(message)) =
+            MlClassifier::new("LLM-Research/Llama-Prompt-Guard-2-86M")
+        else {
+            panic!("unknown model must fail fast with a config error");
+        };
+        // The message must list every selectable backend, otherwise a typo
+        // gives no hint about what is available.
+        assert!(message.contains(MODEL_QWEN3_GUARD), "{message}");
+        assert!(message.contains(MODEL_WARDEN_GEN), "{message}");
+    }
+
+    #[test]
+    fn both_backends_are_selectable_by_model_name() {
+        for model in [MODEL_QWEN3_GUARD, MODEL_WARDEN_GEN] {
+            let Ok(layer) = MlClassifier::new(model) else {
+                panic!("backend {model} must be selectable");
+            };
+            assert_eq!(layer.model_name(), model);
+        }
     }
 
     #[test]

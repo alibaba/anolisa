@@ -30,6 +30,7 @@ Useful options:
 | `--mode MODE` | Detection mode: `fast`, `standard`, `strict`, or `multi_turn`; default is `standard` |
 | `--format FMT` | Output format: `json` (default) or `text` (human-readable) |
 | `--source SOURCE` | Input origin label recorded in metadata, such as `user_input`, `rag`, or `tool_output` |
+| `--model MODEL` | L2 backend model; overrides `PROMPT_SCANNER_L2_MODEL`, defaults to Qwen3Guard when unset |
 
 ## Detection modes
 
@@ -40,10 +41,38 @@ Useful options:
 | `strict` | L1 + L2 ML classifier (L3 reserved) | `False` | 50–200 ms | High-security scenarios |
 | `multi_turn` | L4 multi-turn intent detection | — | Varies | JSON history input via stdin (Ollama) |
 
-The L2 classifier calls `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`, served by Ollama
-from the project's ModelScope repository. Pull it once with
-`ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` — no renaming is needed — then
+By default the L2 classifier calls `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`, served by
+Ollama from the project's ModelScope repository. Pull it once with
+`ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` — then
 run `agent-sec-cli scan-prompt warmup` to verify the model is available before the first scan.
+
+### Switching the L2 backend
+
+Set `PROMPT_SCANNER_L2_MODEL` to run L2 on the Warden-Gen model instead (or use
+`--model` for a one-off override; precedence is `--model` > env var > default):
+
+```bash
+ollama pull modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF
+
+# Option 1: environment variable (applies to every host hook)
+export PROMPT_SCANNER_L2_MODEL=modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF
+agent-sec-cli scan-prompt warmup
+
+# Option 2: --model for a single command
+agent-sec-cli scan-prompt --model modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF --text "..."
+```
+
+Every host hook shells out to `scan-prompt`, so the variable applies to them as well. The value
+must be the full model name used in the `ollama pull` above; a typo makes the scan fail loudly
+instead of silently disabling L2. An empty or unset value keeps the Qwen3Guard default.
+
+L2 runs exactly one backend at a time — no cascading, no voting.
+
+To confirm which backend a host would use, run
+`agent-sec-cli capabilities --capability prompt-scan --output json` from that
+host's environment and read the `PROMPT_SCANNER_L2_MODEL` entry under `env`. It
+reports the default backend when the variable is unset, and adds a diagnostic
+when the configured name is not one the engine supports.
 
 ## Verdicts
 

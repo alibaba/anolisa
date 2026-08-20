@@ -4,7 +4,8 @@
 //!
 //! - preprocessing: Unicode normalisation and obfuscation decoding
 //! - L1 `rule_engine`: regex rules over the prompt and decoded variants
-//! - L2 `ml_classifier`: model-backed classification (Qwen3Guard on Ollama)
+//! - L2 `ml_classifier`: model-backed classification (Qwen3Guard or
+//!   Warden-Gen on Ollama)
 //! - L4 `multi_turn_intent`: conversation-level intent classification
 //!
 //! Layers are selected by [`ScanMode`] presets and combined into a final
@@ -32,6 +33,7 @@ pub use error::ScannerError;
 pub use model_service::{ModelClient, OllamaClient};
 pub use models::multi_turn_intent::Turn;
 pub use models::qwen3_guard::MODEL_QWEN3_GUARD;
+pub use models::warden_gen::MODEL_WARDEN_GEN;
 pub use models::{Classifier, ClassifierResult};
 pub use result::{LayerResult, ScanResult, Severity, ThreatDetail, ThreatType, Verdict};
 pub use scanner::PromptScanner;

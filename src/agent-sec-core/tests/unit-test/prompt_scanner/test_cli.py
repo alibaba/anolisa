@@ -5,7 +5,9 @@ from contextlib import contextmanager
 from io import StringIO
 from unittest.mock import MagicMock, patch
 
+import pytest
 from agent_sec_cli.prompt_scanner.cli import (
+    _L2_BACKENDS_EPILOG,
     _print_result,
     _print_text,
     scanner_app,
@@ -15,6 +17,9 @@ from agent_sec_cli.security_middleware.result import ActionResult
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+# Non-default L2 backend used to prove the override reaches the native layer.
+_WARDEN_GEN = "modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF"
 
 
 def _make_native_result(
@@ -357,8 +362,11 @@ def test_scan_prompt_multi_turn_rejects_non_list_history():
     assert "history" in rv.output
 
 
-def test_scan_prompt_warmup_subcommand():
+def test_scan_prompt_warmup_subcommand(monkeypatch):
     native = MagicMock()
+    # The override is read from the environment, so clear it to assert the
+    # default rather than whatever the developer's shell exports.
+    monkeypatch.delenv("PROMPT_SCANNER_L2_MODEL", raising=False)
     with patch("agent_sec_cli.prompt_scanner.cli._load_native", return_value=native):
         rv = runner.invoke(scanner_app, ["warmup", "--mode", "standard"])
     assert rv.exit_code == 0
@@ -366,10 +374,154 @@ def test_scan_prompt_warmup_subcommand():
     native.warmup_scanner.assert_called_once_with(mode="standard", model=None)
 
 
+def test_scan_prompt_forwards_l2_model_from_env(monkeypatch):
+    """``PROMPT_SCANNER_L2_MODEL`` selects the L2 backend for a single scan."""
+    monkeypatch.setenv("PROMPT_SCANNER_L2_MODEL", _WARDEN_GEN)
+    with _patch_invoke(_make_native_result(verdict="pass")) as invoke_mock:
+        rv = runner.invoke(scanner_app, ["--mode", "standard", "--text", "hello"])
+    assert rv.exit_code == 0
+    assert invoke_mock.call_args.kwargs["model"] == _WARDEN_GEN
+
+
+def test_scan_prompt_multi_turn_forwards_l2_model_from_env(monkeypatch):
+    monkeypatch.setenv("PROMPT_SCANNER_L2_MODEL", _WARDEN_GEN)
+    payload = {"history": [], "current_query": "hello", "assistant_response": ""}
+    result = _make_native_result(
+        layer_results=[{"layer": "multi_turn_intent", "detected": False}]
+    )
+    with _patch_invoke(multi_turn_result=result) as invoke_mock:
+        rv = runner.invoke(
+            scanner_app, ["--mode", "multi_turn"], input=json.dumps(payload)
+        )
+    assert rv.exit_code == 0
+    assert invoke_mock.call_args.kwargs["model"] == _WARDEN_GEN
+
+
+def test_scan_prompt_warmup_forwards_l2_model_from_env(monkeypatch):
+    monkeypatch.setenv("PROMPT_SCANNER_L2_MODEL", _WARDEN_GEN)
+    native = MagicMock()
+    with patch("agent_sec_cli.prompt_scanner.cli._load_native", return_value=native):
+        rv = runner.invoke(scanner_app, ["warmup"])
+    assert rv.exit_code == 0
+    native.warmup_scanner.assert_called_once_with(mode="standard", model=_WARDEN_GEN)
+
+
+def test_scan_prompt_blank_l2_model_env_keeps_the_default(monkeypatch):
+    """A blank value must not be forwarded as an empty model name."""
+    monkeypatch.setenv("PROMPT_SCANNER_L2_MODEL", "   ")
+    with _patch_invoke(_make_native_result(verdict="pass")) as invoke_mock:
+        rv = runner.invoke(scanner_app, ["--mode", "standard", "--text", "hello"])
+    assert rv.exit_code == 0
+    assert invoke_mock.call_args.kwargs["model"] is None
+
+
+def test_scan_prompt_model_flag_selects_backend(monkeypatch):
+    """``--model`` selects the L2 backend for a single scan."""
+    monkeypatch.delenv("PROMPT_SCANNER_L2_MODEL", raising=False)
+    with _patch_invoke(_make_native_result(verdict="pass")) as invoke_mock:
+        rv = runner.invoke(
+            scanner_app,
+            ["--mode", "standard", "--text", "hello", "--model", _WARDEN_GEN],
+        )
+    assert rv.exit_code == 0
+    assert invoke_mock.call_args.kwargs["model"] == _WARDEN_GEN
+
+
+def test_scan_prompt_model_flag_overrides_env(monkeypatch):
+    """``--model`` wins over ``PROMPT_SCANNER_L2_MODEL``."""
+    monkeypatch.setenv("PROMPT_SCANNER_L2_MODEL", "env-model")
+    with _patch_invoke(_make_native_result(verdict="pass")) as invoke_mock:
+        rv = runner.invoke(
+            scanner_app,
+            ["--mode", "standard", "--text", "hello", "--model", _WARDEN_GEN],
+        )
+    assert rv.exit_code == 0
+    assert invoke_mock.call_args.kwargs["model"] == _WARDEN_GEN
+
+
+def test_scan_prompt_multi_turn_model_flag_overrides_env(monkeypatch):
+    monkeypatch.setenv("PROMPT_SCANNER_L2_MODEL", "env-model")
+    payload = {"history": [], "current_query": "hello", "assistant_response": ""}
+    result = _make_native_result(
+        layer_results=[{"layer": "multi_turn_intent", "detected": False}]
+    )
+    with _patch_invoke(multi_turn_result=result) as invoke_mock:
+        rv = runner.invoke(
+            scanner_app,
+            ["--mode", "multi_turn", "--model", _WARDEN_GEN],
+            input=json.dumps(payload),
+        )
+    assert rv.exit_code == 0
+    assert invoke_mock.call_args.kwargs["model"] == _WARDEN_GEN
+
+
+def test_scan_prompt_warmup_model_flag_overrides_env(monkeypatch):
+    monkeypatch.setenv("PROMPT_SCANNER_L2_MODEL", "env-model")
+    native = MagicMock()
+    with patch("agent_sec_cli.prompt_scanner.cli._load_native", return_value=native):
+        rv = runner.invoke(scanner_app, ["warmup", "--model", _WARDEN_GEN])
+    assert rv.exit_code == 0
+    native.warmup_scanner.assert_called_once_with(mode="standard", model=_WARDEN_GEN)
+
+
+def test_scan_prompt_input_file_uses_one_backend_for_all_lines(tmp_path, monkeypatch):
+    """Every prompt in a batch is scanned with the resolved backend."""
+    monkeypatch.delenv("PROMPT_SCANNER_L2_MODEL", raising=False)
+    prompts = tmp_path / "prompts.txt"
+    prompts.write_text("one\ntwo\n", encoding="utf-8")
+    with _patch_invoke(_make_native_result(verdict="pass")) as invoke_mock:
+        rv = runner.invoke(
+            scanner_app,
+            ["--mode", "fast", "--input", str(prompts), "--model", _WARDEN_GEN],
+        )
+    assert rv.exit_code == 0
+    assert invoke_mock.call_count == 2
+    assert all(
+        call.kwargs["model"] == _WARDEN_GEN for call in invoke_mock.call_args_list
+    )
+
+
 def test_scan_prompt_warmup_rejects_invalid_mode():
     rv = runner.invoke(scanner_app, ["warmup", "--mode", "bogus"])
     assert rv.exit_code == 1
     assert "Invalid mode" in rv.output
+
+
+def _help_text(*args: str) -> str:
+    """Help output with line wrapping removed, so long values match."""
+    rv = runner.invoke(scanner_app, [*args, "--help"])
+    assert rv.exit_code == 0
+    # Typer wraps and pads help columns; collapse whitespace before matching.
+    return " ".join(rv.output.split())
+
+
+def test_model_option_help_lists_selectable_backends():
+    """``--help`` must name the backends, not just say a string is expected."""
+    for args in ([], ["warmup"]):
+        text = _help_text(*args)
+        assert "modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF (default)" in text, args
+        assert _WARDEN_GEN in text, args
+        assert "PROMPT_SCANNER_L2_MODEL" in text, args
+
+
+def test_epilog_backend_list_matches_native_engine_info():
+    """The epilog's hardcoded backend names must track the native layer.
+
+    The native layer owns the authoritative list (it rejects unknown names at
+    construction), so the copyable names in ``--help`` are literals.  Whenever
+    the extension is importable, cross-check them against
+    ``scanner_engine_info`` so a renamed backend cannot drift silently.
+    """
+    native = pytest.importorskip(
+        "agent_sec_cli._native",
+        reason="native extension not built; the drift check runs where it is",
+    )
+    info = json.loads(native.scanner_engine_info())
+    epilog = " ".join(_L2_BACKENDS_EPILOG.split())
+    for model in info["l2_models"]:
+        assert model in epilog, f"epilog does not name backend {model}"
+    # The default marker must sit on the backend the native layer defaults to.
+    assert f"{info['l2_model']} (default)" in epilog
 
 
 def test_scan_prompt_invokes_middleware_and_writes_event():

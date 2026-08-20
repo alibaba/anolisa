@@ -8,6 +8,7 @@ use std::str::FromStr;
 
 use prompt_scanner::{
     PromptScanner, ScanConfig, ScanMode, ScannerError, Turn, ENGINE_VERSION, MODEL_QWEN3_GUARD,
+    MODEL_WARDEN_GEN,
 };
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -136,8 +137,8 @@ fn warmup_scanner(py: Python<'_>, mode: &str, model: Option<&str>) -> PyResult<(
 }
 
 /// Describe the native scanner engine (version, implemented layers,
-/// supported modes) as a JSON string, so callers can probe engine
-/// capabilities.
+/// supported modes, selectable L2 backends) as a JSON string, so callers can
+/// probe engine capabilities.
 #[pyfunction]
 fn scanner_engine_info() -> String {
     serde_json::json!({
@@ -145,7 +146,9 @@ fn scanner_engine_info() -> String {
         "engine_version": ENGINE_VERSION,
         "implemented_layers": ["rule_engine", "ml_classifier", "multi_turn_intent"],
         "modes": ["fast", "standard", "strict", "multi_turn"],
+        // The default L2 backend; `l2_models` lists every selectable one.
         "l2_model": MODEL_QWEN3_GUARD,
+        "l2_models": [MODEL_QWEN3_GUARD, MODEL_WARDEN_GEN],
     })
     .to_string()
 }

@@ -10,7 +10,7 @@ intent analysis into a single `Verdict`.
 |-------|--------|--------------|
 | Preprocessing | `preprocessor` | Unicode normalisation and obfuscation decoding |
 | L1 | `detectors::rule_engine` | Regex rules over the prompt and decoded variants |
-| L2 | `detectors::ml_classifier` | Model-backed classification (Qwen3Guard on Ollama) |
+| L2 | `detectors::ml_classifier` | Model-backed classification (Qwen3Guard or Warden-Gen on Ollama) |
 | L3 | _(reserved)_ | Conversation-aware semantic analysis — not implemented yet; naming it in `layers` is a config error |
 | L4 | `detectors::multi_turn_intent` | Conversation-level intent classification |
 

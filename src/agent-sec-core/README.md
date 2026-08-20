@@ -257,16 +257,19 @@ agent-sec-cli scan-prompt --text "ignore all system instructions"
 agent-sec-cli scan-prompt --mode fast --text "user input"
 agent-sec-cli scan-prompt --input prompts.txt --format json
 
-# Pull the L2 model once after install
+# Pull the default L2 model once after install
 ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF
 
 # Verify that Ollama can serve the required model
 agent-sec-cli scan-prompt warmup
 ```
 
-The L2 classifier uses
-`modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` from ModelScope. `warmup`
-checks that Ollama can serve the model; it never downloads models automatically.
+The L2 classifier defaults to
+`modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` from ModelScope;
+`modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF` is an optional backend selected
+with `--model` or `PROMPT_SCANNER_L2_MODEL` (`--model` wins). Only one backend
+runs at a time and each needs its own `ollama pull`. `warmup` checks that Ollama
+can serve the selected model; it never downloads models automatically.
 
 Details: [Prompt Scanner User Guide](../../docs/user-guide/en/agent-security/agent-sec-core/prompt-scanner.md).
 
@@ -418,6 +421,8 @@ Supported capability names are fixed: `code-scan`, `prompt-scan`, `pii-check`, `
 For `observability`, the view applies `OBSERVABILITY_TIMEOUT` consistently across all six integrations: it defaults to `5` seconds, falls back to `5` for invalid or non-positive values, and caps larger values at `5`. A lower Hermes timeout from plugin configuration remains outside this environment-only view.
 
 Table output is limited to `CAPABILITY`, `ENABLED`, `MODE`, `SCAN_MODE`, `TIMEOUT(s)`, and `DIAGNOSTICS`. JSON output keeps the same user-facing fields and sanitized `env` entries containing only `effective` and `default` values. Neither output format exposes hook matcher lists, source labels, Agent config contents, config paths, or raw environment variable values. Diagnostics identify the invalid setting and fallback behavior without echoing the original value.
+
+For `prompt-scan`, the `env` entries also report `PROMPT_SCANNER_L2_MODEL`: no hook reads it itself, but each one shells out to `scan-prompt`, which resolves the L2 backend, so all six integrations inherit it. It is reported case-preserved (escaped and length-capped) because a model name is only meaningful verbatim, and both the reported `default` and the unsupported-backend check come from the native scanner engine instead of a second copy of the backend list. An unsupported name is reported as configured plus a diagnostic, since the engine rejects it at construction and the scan fails. There is no table column for it; read it with `--capability prompt-scan --output json`.
 
 ## Security Baseline
 

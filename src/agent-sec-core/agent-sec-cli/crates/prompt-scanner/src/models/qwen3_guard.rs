@@ -8,6 +8,10 @@
 //! Safety: Unsafe
 //! Categories: Violent
 //! ```
+//!
+//! Models derived from Qwen3Guard speak the same protocol, so the parsing and
+//! chat plumbing here take a crate-internal `Qwen3GuardDialect` instead of
+//! hard-coding Qwen3Guard's vocabulary — see [`crate::models::warden_gen`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::LazyLock;
@@ -52,8 +56,43 @@ const EMPTY_CATEGORY_SENTINELS: [&str; 5] = ["none", "null", "n/a", "na", "safe"
 
 /// Alternation over [`KNOWN_CATEGORIES`], longest first so that
 /// "personally identifiable information" wins over "pii".
-static CATEGORY_RE: LazyLock<Regex> = LazyLock::new(|| {
-    let mut names: Vec<&str> = KNOWN_CATEGORIES.to_vec();
+static CATEGORY_RE: LazyLock<Regex> = LazyLock::new(|| build_category_re(&KNOWN_CATEGORIES));
+
+/// Qwen3Guard's own dialect of the protocol.
+static QWEN3GUARD_DIALECT: Qwen3GuardDialect = Qwen3GuardDialect {
+    display_name: "Qwen3Guard",
+    category_re: &CATEGORY_RE,
+};
+
+/// The per-model half of the Qwen3Guard output protocol.
+///
+/// Qwen3Guard and the models derived from it (today Warden-Gen) emit the same
+/// `Safety:`/`Categories:` shape, so parsing, confidence recovery and the chat
+/// round trip are shared; only the accepted category vocabulary and the name
+/// shown in logs differ.
+///
+/// Vocabularies must stay per-model and must never be merged: Warden-Gen
+/// declares the short `pii` while Qwen3Guard also declares the long
+/// `personally identifiable information`, so an alias a model never emits
+/// would disturb the longest-first match order in [`build_category_re`].
+pub(crate) struct Qwen3GuardDialect {
+    /// Model name used in logs and error messages.
+    pub(crate) display_name: &'static str,
+    /// Alternation over this model's category vocabulary.
+    pub(crate) category_re: &'static LazyLock<Regex>,
+}
+
+/// Compile a case-insensitive alternation over `names`, longest first.
+///
+/// Longest first so that a long category name wins over a shorter alias of
+/// itself (`personally identifiable information` over `pii`).
+pub(crate) fn build_category_re(names: &[&str]) -> Regex {
+    if names.is_empty() {
+        // An empty alternation matches the empty string at every position,
+        // which would push blank categories into the parsed result.
+        return Regex::new(r"[^\s\S]").expect("never-matching class is valid");
+    }
+    let mut names: Vec<&str> = names.to_vec();
     names.sort_by_key(|name| std::cmp::Reverse(name.len()));
     let alternation = names
         .iter()
@@ -61,7 +100,7 @@ static CATEGORY_RE: LazyLock<Regex> = LazyLock::new(|| {
         .collect::<Vec<_>>()
         .join("|");
     Regex::new(&format!("(?i){alternation}")).expect("category alternation is valid")
-});
+}
 
 /// Runs of characters that are not alphanumeric, collapsed to `_` when
 /// building a label identifier.
@@ -153,43 +192,15 @@ impl Qwen3GuardClassifier {
     pub fn classify(&self, text: &str) -> Result<ClassifierResult, ScannerError> {
         let mut options: ModelOptions = Map::new();
         options.insert("temperature".into(), json!(0));
-        let body = self
-            .client
-            .chat(
-                &self.model_name,
-                &[("user", text)],
-                &options,
-                // Request per-token logprobs so the chosen label's confidence
-                // can be recovered at the `Safety:` token position.  Old
-                // Ollama versions silently omit the field; that degrades to
-                // `None`, matching the original label-only behaviour.
-                true,
-                // Cover Safe / Controversial / Unsafe plus two spillover
-                // tokens.
-                5,
-            )
-            .map_err(|err| {
-                ScannerError::ModelInference(format!(
-                    "Qwen3Guard inference failed ({err}). Ensure Ollama is reachable \
-                     and run `ollama pull {}` before scanning.",
-                    self.model_name
-                ))
-            })?;
-        let raw_text = extract_response_text(&body);
-        if raw_text.is_empty() {
-            // An empty response indicates a service error, not a valid
-            // classification.
-            return Err(ScannerError::ModelInference(format!(
-                "Qwen3Guard returned empty response for model={}. \
-                 Check Ollama service status.",
-                self.model_name
-            )));
-        }
-        let logprobs = body
-            .get("logprobs")
-            .and_then(Value::as_array)
-            .map(|v| v.as_slice());
-        Ok(response_to_result(&raw_text, logprobs))
+        // No `num_predict` cap: Qwen3Guard has not shown the runaway
+        // repetition that made Warden-Gen need one.
+        classify_via_chat(
+            self.client.as_ref(),
+            &QWEN3GUARD_DIALECT,
+            &self.model_name,
+            text,
+            &options,
+        )
     }
 
     /// Classify prompts sequentially; each text triggers its own request.
@@ -221,6 +232,66 @@ impl Classifier for Qwen3GuardClassifier {
     }
 }
 
+/// Run one classification over the chat endpoint and parse the reply.
+///
+/// Shared by every model of this family: the request shape, the empty-response
+/// check and the truncation warning are protocol-level concerns, so a new
+/// backend cannot forget one of them.
+///
+/// # Errors
+///
+/// Returns [`ScannerError::ModelInference`] when inference fails or the
+/// response carries no assistant text.
+pub(crate) fn classify_via_chat(
+    client: &dyn ModelClient,
+    dialect: &Qwen3GuardDialect,
+    model_name: &str,
+    text: &str,
+    options: &ModelOptions,
+) -> Result<ClassifierResult, ScannerError> {
+    let model = dialect.display_name;
+    let body = client
+        .chat(
+            model_name,
+            &[("user", text)],
+            options,
+            // Request per-token logprobs so the chosen label's confidence
+            // can be recovered at the `Safety:` token position.  Old
+            // Ollama versions silently omit the field; that degrades to
+            // `None`, matching the original label-only behaviour.
+            true,
+            // Cover Safe / Controversial / Unsafe plus two spillover
+            // tokens.
+            5,
+        )
+        .map_err(|err| {
+            ScannerError::ModelInference(format!(
+                "{model} inference failed ({err}). Ensure Ollama is reachable \
+                 and run `ollama pull {model_name}` before scanning."
+            ))
+        })?;
+    let raw_text = extract_response_text(&body);
+    if raw_text.is_empty() {
+        // An empty response indicates a service error, not a valid
+        // classification.
+        return Err(ScannerError::ModelInference(format!(
+            "{model} returned empty response for model={model_name}. \
+             Check Ollama service status."
+        )));
+    }
+    // A reply cut off by the token budget can lose part of the `Categories:`
+    // line, so the truncation must stay visible instead of being classified on
+    // silently.
+    if body.get("done_reason").and_then(Value::as_str) == Some("length") {
+        log::warn!("{model} response hit the token limit: {raw_text:?}");
+    }
+    let logprobs = body
+        .get("logprobs")
+        .and_then(Value::as_array)
+        .map(|v| v.as_slice());
+    Ok(response_to_result(&raw_text, logprobs, dialect))
+}
+
 /// Extract assistant text from an Ollama chat response.
 ///
 /// A present-but-malformed `message` object yields an empty string rather
@@ -242,7 +313,7 @@ fn extract_response_text(body: &Value) -> String {
         .unwrap_or_default()
 }
 
-/// Convert Qwen3Guard text output into a [`ClassifierResult`].
+/// Convert Qwen3Guard-family text output into a [`ClassifierResult`].
 ///
 /// `logprobs` carries Ollama's per-token log probabilities (when available);
 /// the confidence is recovered from the label token position so the result
@@ -250,10 +321,17 @@ fn extract_response_text(body: &Value) -> String {
 /// Unsafe.  Missing logprobs (old Ollama or unparseable output) yields
 /// `confidence: None`, matching the original label-only behaviour.
 /// `probabilities` stays a one-hot representation for interface compatibility.
-fn response_to_result(raw_text: &str, logprobs: Option<&[Value]>) -> ClassifierResult {
+fn response_to_result(
+    raw_text: &str,
+    logprobs: Option<&[Value]>,
+    dialect: &Qwen3GuardDialect,
+) -> ClassifierResult {
     let parsed = parse_guard_response(raw_text);
     let safety = normalize_safety(parsed.get("safety").map(String::as_str).unwrap_or(""));
-    let categories = parse_categories(parsed.get("categories").map(String::as_str).unwrap_or(""));
+    let categories = parse_categories(
+        parsed.get("categories").map(String::as_str).unwrap_or(""),
+        dialect,
+    );
 
     // The wrapper owns the threat decision: Controversial/Unsafe are threats,
     // Safe is benign, and unparseable output fails open (detected = false).
@@ -273,7 +351,7 @@ fn response_to_result(raw_text: &str, logprobs: Option<&[Value]>) -> ClassifierR
         _ => {
             // Unparseable output — surfaced as UNKNOWN and logged.  Not
             // positive evidence of a threat, so nothing is blocked.
-            log::warn!("Unparseable Qwen3Guard output: {raw_text:?}");
+            log::warn!("Unparseable {} output: {raw_text:?}", dialect.display_name);
             (LABEL_UNKNOWN.to_string(), false, None)
         }
     };
@@ -287,7 +365,7 @@ fn response_to_result(raw_text: &str, logprobs: Option<&[Value]>) -> ClassifierR
         detected,
         confidence,
         category,
-        // Qwen3Guard emits structured categories, not a free-text rationale.
+        // This family emits structured categories, not a free-text rationale.
         reason: None,
         probabilities,
     }
@@ -418,14 +496,14 @@ fn normalize_safety(raw_safety: &str) -> String {
 
 /// Extract known categories as normalized lowercase strings.
 ///
-/// Matches against the known-category alternation, lowercases, and
+/// Matches against the dialect's category alternation, lowercases, and
 /// deduplicates while preserving first-seen order.
-fn parse_categories(raw_categories: &str) -> Vec<String> {
+fn parse_categories(raw_categories: &str, dialect: &Qwen3GuardDialect) -> Vec<String> {
     if raw_categories.is_empty() {
         return Vec::new();
     }
     let mut categories: Vec<String> = Vec::new();
-    for m in CATEGORY_RE.find_iter(raw_categories) {
+    for m in dialect.category_re.find_iter(raw_categories) {
         let category = m.as_str().to_lowercase();
         if !categories.contains(&category) {
             categories.push(category);
@@ -436,7 +514,10 @@ fn parse_categories(raw_categories: &str) -> Vec<String> {
     }
     let stripped = raw_categories.trim().to_lowercase();
     if !stripped.is_empty() && !EMPTY_CATEGORY_SENTINELS.contains(&stripped.as_str()) {
-        log::warn!("Qwen3Guard returned non-standard categories: {raw_categories:?}");
+        log::warn!(
+            "{} returned non-standard categories: {raw_categories:?}",
+            dialect.display_name
+        );
     }
     Vec::new()
 }
@@ -545,8 +626,8 @@ mod tests {
 
     #[test]
     fn model_tag_recognition_is_case_insensitive() {
-        // The ModelScope path is the only accepted tag; its mixed case must
-        // survive matching.
+        // The ModelScope path is the only accepted repository; its mixed case
+        // must survive matching.
         assert!(is_qwen3_guard_model(MODEL_QWEN3_GUARD));
         assert!(is_qwen3_guard_model(
             "modelscope.cn/anolisa/qwen3guard-gen-0.6b-gguf"
@@ -719,9 +800,17 @@ mod tests {
     #[test]
     fn category_sentinels_are_not_logged_as_categories() {
         for sentinel in ["None", "null", "N/A", "safe", ""] {
-            let categories = parse_categories(sentinel);
+            let categories = parse_categories(sentinel, &QWEN3GUARD_DIALECT);
             assert!(categories.is_empty(), "sentinel {sentinel:?}");
         }
+    }
+
+    #[test]
+    fn an_empty_vocabulary_matches_nothing() {
+        // An empty alternation would match the empty string at every position
+        // and turn blanks into categories.
+        assert!(!build_category_re(&[]).is_match("Violent"));
+        assert!(!build_category_re(&[]).is_match(""));
     }
 
     #[test]

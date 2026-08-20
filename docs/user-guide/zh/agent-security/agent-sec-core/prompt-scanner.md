@@ -29,6 +29,7 @@ agent-sec-cli scan-prompt --input prompts.txt --format json
 | `--mode MODE` | 检测模式：`fast` / `standard` / `strict` / `multi_turn`；默认 `standard` |
 | `--format FMT` | 输出格式：`json`（默认）或 `text`（人类可读）|
 | `--source SOURCE` | 输入来源标签，写入 metadata，例如 `user_input`、`rag`、`tool_output` |
+| `--model MODEL` | L2 后端模型名；优先于 `PROMPT_SCANNER_L2_MODEL`，未设时用默认 Qwen3Guard |
 
 ## 检测模式
 
@@ -39,10 +40,35 @@ agent-sec-cli scan-prompt --input prompts.txt --format json
 | `strict` | L1 + L2 ML 分类器（L3 预留） | `False` | 50–200 ms | 高安全场景 |
 | `multi_turn` | L4 多轮意图检测 | — | 取决于模型 | 从 stdin 传入 JSON history（Ollama） |
 
-L2 分类器调用 `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`，由 Ollama 从项目自有的
+L2 分类器默认调用 `modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`，由 Ollama 从项目自有的
 ModelScope 仓库拉取。执行一次
 `ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF` 即可（无需重命名），
 再执行 `agent-sec-cli scan-prompt warmup` 验证模型可用，避免首次扫描时才发现模型缺失。
+
+### 切换 L2 后端
+
+设置 `PROMPT_SCANNER_L2_MODEL` 可把 L2 换成 Warden-Gen（也可用 `--model` 临时指定，优先级 `--model` > 环境变量 > 默认）：
+
+```bash
+ollama pull modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF
+
+# 方式一：环境变量（对所有宿主 hook 生效）
+export PROMPT_SCANNER_L2_MODEL=modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF
+agent-sec-cli scan-prompt warmup
+
+# 方式二：--model 临时指定（仅本次命令）
+agent-sec-cli scan-prompt --model modelscope.cn/ANOLISA/Warden-Gen-0.6B-GGUF --text "..."
+```
+
+所有宿主 hook 都通过命令行调用 `scan-prompt`，因此环境变量对它们同样生效；`--model` 主要用于终端临时切换。两者取值都必须是
+上面 `ollama pull` 使用的完整模型名，拼错会让扫描直接报错而不是静默关闭 L2。两者都为空时沿用默认的 Qwen3Guard。
+
+L2 同一时刻只跑一个后端，不做级联或投票。
+
+想确认某个宿主实际会用哪个后端，可在该宿主的环境中执行
+`agent-sec-cli capabilities --capability prompt-scan --output json`，查看 `env`
+下的 `PROMPT_SCANNER_L2_MODEL` 条目：变量未设置时它会上报默认后端；若配的模型名
+不在引擎支持范围内，还会附一条 diagnostic。
 
 ## Verdict
 
