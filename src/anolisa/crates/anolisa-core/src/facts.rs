@@ -13,7 +13,12 @@ use std::path::{Path, PathBuf};
 use anolisa_platform::fs_layout::FsLayout;
 use thiserror::Error;
 
-use crate::domain::{InstallationScope, ProviderBinding};
+use crate::component_snapshot::{
+    ComponentSnapshot, ComponentSnapshotRequest, JournalProvenance, NativePackageProvenance,
+    NativePackageSnapshot, PendingJournalSnapshot, ProbeEvidence, SnapshotContractError,
+    SnapshotProbe, StateProvenance, StateSnapshot,
+};
+use crate::domain::{InstallationScope, NativePm, ProviderBinding};
 use crate::integrity::{IntegrityStatus, check_owned_file};
 use crate::planner::{Facts, NativeProbe, RecordFacts};
 use crate::providers::{DelegatedProvider, ProviderError};
@@ -320,6 +325,217 @@ pub enum FactsError {
         #[source]
         source: TransactionError,
     },
+    /// Snapshot request and collected evidence violate the observation contract.
+    #[error(transparent)]
+    SnapshotContract(#[from] SnapshotContractError),
+    /// A requested snapshot probe has no usable source.
+    #[error("snapshot probe {probe:?} has no usable source: {reason}")]
+    SnapshotSource {
+        /// Probe that cannot be collected.
+        probe: SnapshotProbe,
+        /// Why the required source is unavailable.
+        reason: String,
+    },
+    /// Snapshot evidence cannot safely drive lifecycle planning.
+    #[error("snapshot probe {probe:?} cannot drive lifecycle planning: {reason}")]
+    SnapshotEvidence {
+        /// Probe whose evidence is insufficient.
+        probe: SnapshotProbe,
+        /// Why the evidence cannot be projected.
+        reason: String,
+    },
+}
+
+/// Collect the initial component snapshot probes from existing read-only sources.
+///
+/// The native source is currently RPM-only because [`NativePm`] has no other
+/// production adapter. Provider and journal failures remain typed errors for
+/// mutation callers; read-only consumers may later choose to turn them into
+/// [`ProbeEvidence::Unavailable`] without changing the snapshot contract.
+///
+/// # Errors
+///
+/// Returns [`FactsError`] when a requested source is missing, a read fails, or
+/// the collected evidence violates the snapshot request.
+pub fn assemble_component_snapshot(
+    request: ComponentSnapshotRequest,
+    native_package: Option<&str>,
+    observed_at: &str,
+    store: &StateStore,
+    provider: Option<&DelegatedProvider<'_>>,
+    layout: &FsLayout,
+    journal_dir: &Path,
+) -> Result<ComponentSnapshot, FactsError> {
+    if matches!(request.scope(), InstallationScope::User { .. })
+        && request.requests(SnapshotProbe::NativePackage)
+    {
+        return Err(SnapshotContractError::UnsupportedProbeScope {
+            probe: SnapshotProbe::NativePackage,
+            scope: request.scope(),
+        }
+        .into());
+    }
+
+    let state = if request.requests(SnapshotProbe::State) {
+        let provenance = StateProvenance {
+            path: layout.state_dir.join("installed.toml"),
+        };
+        match store.record_facts(ObjectKind::Component, request.component()) {
+            RecordFacts::Absent => ProbeEvidence::Absent { provenance },
+            RecordFacts::Active(installation) => ProbeEvidence::Present {
+                provenance,
+                value: StateSnapshot::Active(Box::new(installation)),
+            },
+            RecordFacts::Quarantined(reason) => ProbeEvidence::Present {
+                provenance,
+                value: StateSnapshot::Quarantined(reason),
+            },
+        }
+    } else {
+        ProbeEvidence::NotRequested
+    };
+
+    let native_package_evidence = if request.requests(SnapshotProbe::NativePackage) {
+        let package = native_package.ok_or_else(|| FactsError::SnapshotSource {
+            probe: SnapshotProbe::NativePackage,
+            reason: "no native package identity was resolved".to_string(),
+        })?;
+        let provider = provider.ok_or_else(|| FactsError::SnapshotSource {
+            probe: SnapshotProbe::NativePackage,
+            reason: "no native package provider was supplied".to_string(),
+        })?;
+        let provenance = NativePackageProvenance {
+            manager: NativePm::Rpm,
+            package: package.to_string(),
+        };
+        match provider.observe(package, observed_at)? {
+            NativeProbe::NotProbed => {
+                unreachable!("DelegatedProvider::observe always performs the requested probe")
+            }
+            NativeProbe::Absent => ProbeEvidence::Absent { provenance },
+            NativeProbe::Present { observation, .. } => ProbeEvidence::Present {
+                provenance,
+                value: NativePackageSnapshot::Installed(observation),
+            },
+            NativeProbe::MultipleVersions { .. } => ProbeEvidence::Present {
+                provenance,
+                value: NativePackageSnapshot::MultipleVersions,
+            },
+        }
+    } else {
+        ProbeEvidence::NotRequested
+    };
+
+    let pending_journal = if request.requests(SnapshotProbe::PendingJournal) {
+        let provenance = JournalProvenance {
+            directory: journal_dir.to_path_buf(),
+        };
+        match pending_journal_for(
+            JournalEvidence::new(journal_dir, &store.operations),
+            request.component(),
+        )? {
+            Some(path) => ProbeEvidence::Present {
+                provenance,
+                value: PendingJournalSnapshot { path },
+            },
+            None => ProbeEvidence::Absent { provenance },
+        }
+    } else {
+        ProbeEvidence::NotRequested
+    };
+
+    ComponentSnapshot::from_parts(request, state, native_package_evidence, pending_journal)
+        .map_err(FactsError::from)
+}
+
+/// Project a component snapshot into the existing lifecycle planner facts.
+///
+/// State and journal evidence are mandatory because the lifecycle planner
+/// cannot represent either probe as not requested. A native probe may remain
+/// unrequested for owned-only and user-scope plans.
+///
+/// # Errors
+///
+/// Returns [`FactsError::SnapshotEvidence`] when required evidence was not
+/// requested or a requested source was unavailable.
+pub fn lifecycle_facts_from_snapshot(
+    snapshot: &ComponentSnapshot,
+    active_adapter_claims: Vec<String>,
+    owned_files_verified: Option<bool>,
+) -> Result<Facts, FactsError> {
+    let record = match snapshot.state() {
+        ProbeEvidence::Absent { .. } => RecordFacts::Absent,
+        ProbeEvidence::Present {
+            value: StateSnapshot::Active(installation),
+            ..
+        } => RecordFacts::Active(installation.as_ref().clone()),
+        ProbeEvidence::Present {
+            value: StateSnapshot::Quarantined(reason),
+            ..
+        } => RecordFacts::Quarantined(reason.clone()),
+        ProbeEvidence::NotRequested => {
+            return Err(FactsError::SnapshotEvidence {
+                probe: SnapshotProbe::State,
+                reason: "state was not requested".to_string(),
+            });
+        }
+        ProbeEvidence::Unavailable { reason, .. } => {
+            return Err(FactsError::SnapshotEvidence {
+                probe: SnapshotProbe::State,
+                reason: reason.clone(),
+            });
+        }
+    };
+
+    let native = match snapshot.native_package() {
+        ProbeEvidence::NotRequested => NativeProbe::NotProbed,
+        ProbeEvidence::Absent { .. } => NativeProbe::Absent,
+        ProbeEvidence::Present {
+            provenance,
+            value: NativePackageSnapshot::Installed(observation),
+        } => NativeProbe::Present {
+            package: provenance.package.clone(),
+            observation: observation.clone(),
+        },
+        ProbeEvidence::Present {
+            provenance,
+            value: NativePackageSnapshot::MultipleVersions,
+        } => NativeProbe::MultipleVersions {
+            package: provenance.package.clone(),
+        },
+        ProbeEvidence::Unavailable { reason, .. } => {
+            return Err(FactsError::SnapshotEvidence {
+                probe: SnapshotProbe::NativePackage,
+                reason: reason.clone(),
+            });
+        }
+    };
+
+    let pending_journal = match snapshot.pending_journal() {
+        ProbeEvidence::Absent { .. } => false,
+        ProbeEvidence::Present { .. } => true,
+        ProbeEvidence::NotRequested => {
+            return Err(FactsError::SnapshotEvidence {
+                probe: SnapshotProbe::PendingJournal,
+                reason: "pending journal was not requested".to_string(),
+            });
+        }
+        ProbeEvidence::Unavailable { reason, .. } => {
+            return Err(FactsError::SnapshotEvidence {
+                probe: SnapshotProbe::PendingJournal,
+                reason: reason.clone(),
+            });
+        }
+    };
+
+    Ok(Facts {
+        scope: snapshot.request().scope(),
+        record,
+        native,
+        pending_journal,
+        active_adapter_claims,
+        owned_files_verified,
+    })
 }
 
 /// Assemble [`Facts`] for one object.
@@ -612,6 +828,104 @@ mod tests {
         assert!(matches!(
             facts.native,
             NativeProbe::Present { ref package, .. } if package == "cosh"
+        ));
+    }
+
+    #[test]
+    fn component_snapshot_projects_typed_sources_into_lifecycle_facts() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let layout = layout_under(tmp.path());
+        let store = StateStore::empty();
+        let mut query = FakeQuery::default();
+        query.installed.insert(
+            "cosh".to_string(),
+            InstalledOutcome::Present(pkg_info("cosh", "2.7.0", Some("1.al4"), "x86_64")),
+        );
+        let txn = FakeTxn::default();
+        let provider = DelegatedProvider::new(&query, &txn);
+        let snapshot = assemble_component_snapshot(
+            ComponentSnapshotRequest::new(
+                "cosh",
+                InstallationScope::System,
+                [
+                    SnapshotProbe::State,
+                    SnapshotProbe::NativePackage,
+                    SnapshotProbe::PendingJournal,
+                ],
+            ),
+            Some("cosh"),
+            NOW,
+            &store,
+            Some(&provider),
+            &layout,
+            &layout.state_dir.join("journal"),
+        )
+        .expect("snapshot");
+
+        assert!(matches!(
+            snapshot.state(),
+            ProbeEvidence::Absent { provenance }
+                if provenance.path == layout.state_dir.join("installed.toml")
+        ));
+        assert!(matches!(
+            snapshot.native_package(),
+            ProbeEvidence::Present {
+                provenance,
+                value: NativePackageSnapshot::Installed(observation),
+            } if provenance.manager == NativePm::Rpm
+                && provenance.package == "cosh"
+                && observation.version == "2.7.0"
+        ));
+        assert!(matches!(
+            snapshot.pending_journal(),
+            ProbeEvidence::Absent { provenance }
+                if provenance.directory == layout.state_dir.join("journal")
+        ));
+
+        let facts =
+            lifecycle_facts_from_snapshot(&snapshot, Vec::new(), None).expect("lifecycle facts");
+        assert!(matches!(facts.record, RecordFacts::Absent));
+        assert!(matches!(
+            facts.native,
+            NativeProbe::Present { ref package, ref observation }
+                if package == "cosh" && observation.version == "2.7.0"
+        ));
+        assert!(!facts.pending_journal);
+    }
+
+    #[test]
+    fn component_snapshot_rejects_user_native_probe_before_query() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let layout = layout_under(tmp.path());
+        let store = StateStore::empty();
+        let mut query = FakeQuery::default();
+        query
+            .installed
+            .insert("cosh".to_string(), InstalledOutcome::Fail);
+        let txn = FakeTxn::default();
+        let provider = DelegatedProvider::new(&query, &txn);
+
+        let error = assemble_component_snapshot(
+            ComponentSnapshotRequest::new(
+                "cosh",
+                InstallationScope::User { uid: 1000 },
+                [SnapshotProbe::NativePackage],
+            ),
+            Some("cosh"),
+            NOW,
+            &store,
+            Some(&provider),
+            &layout,
+            &layout.state_dir.join("journal"),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            FactsError::SnapshotContract(SnapshotContractError::UnsupportedProbeScope {
+                probe: SnapshotProbe::NativePackage,
+                scope: InstallationScope::User { uid: 1000 },
+            })
         ));
     }
 
