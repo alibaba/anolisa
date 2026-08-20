@@ -170,6 +170,16 @@ spec:
           value: skills/skillfs-container-example/SKILL.md
         - name: SKILLFS_PROBE_TIMEOUT
           value: "5"
+        # The in-container supervisor repairs a failed FUSE session before the
+        # slower kubelet liveness probe needs to restart the whole sidecar.
+        - name: SKILLFS_SUPERVISOR_PROBE_INTERVAL_SECONDS
+          value: "2"
+        - name: SKILLFS_SUPERVISOR_FAILURE_THRESHOLD
+          value: "2"
+        # Only a recovery that survives three liveness probes resets the retry
+        # budget, preventing a rapid mount/crash loop from running forever.
+        - name: SKILLFS_SUPERVISOR_STABLE_HEALTHY_PROBES
+          value: "3"
         - name: RUST_LOG
           value: info
       securityContext:

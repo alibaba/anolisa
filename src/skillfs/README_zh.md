@@ -385,6 +385,9 @@ scripts/          build.sh、test.sh 与可选 POSIX harness
 SkillFS 可以通过特权 Sidecar 向非特权工作负载提供 FUSE view。部署需要
 Kubernetes 1.29+、`/dev/fuse`，并允许 Sidecar 使用特权模式。
 
+Sidecar supervisor 检测 FUSE 读取失败，并在容器内重新挂载。可通过
+`SKILLFS_SUPERVISOR_*` 配置恢复预算；默认值和恢复边界见下方 Sidecar 用户指南。
+
 ```bash
 cd src/skillfs
 IMAGE=registry.example.com/anolisa/skillfs-sidecar:$(git rev-parse --short=12 HEAD)

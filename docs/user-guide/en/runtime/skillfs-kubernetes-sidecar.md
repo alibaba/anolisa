@@ -71,19 +71,54 @@ propagation described below.
 
 ## How the image starts
 
-With no command arguments, the image runs its preflight checks and then starts
-this fixed container lifecycle:
+With no command arguments, the image starts a PID 1 supervisor that runs
+preflight before each attempt and launches a foreground mount worker:
 
 ```text
-skillfs mount "$SKILLFS_SOURCE" "$SKILLFS_MOUNTPOINT" \
-  --foreground --allow-other
+skillfs-supervisor
+  └─ skillfs mount "$SKILLFS_SOURCE" "$SKILLFS_MOUNTPOINT" --foreground --allow-other
 ```
 
 `SKILLFS_DISCOVER_ROOT` and `SKILLFS_EXTRA_ARGS` add optional mount arguments.
-Do not add `--managed`; the foreground SkillFS process must remain PID 1 so the
-kubelet can restart it and deliver `SIGTERM` directly. Passing command arguments
-to the image replaces the mount command completely, which is why the version
-smoke check works without `/dev/fuse`.
+Do not add `--managed`; the container supervisor owns worker recovery and
+forwards shutdown signals. Passing command arguments to the image replaces
+this lifecycle completely, so the version smoke check needs no `/dev/fuse`.
+
+## Automatic mount recovery
+
+The supervisor reuses `skillfs-mount-probe` to read `SKILLFS_PROBE_FILE` through
+FUSE. After consecutive failures it stops and reaps the worker, uses preflight
+to clear the residual FUSE mount at the configured mountpoint, and starts a new
+worker. One transient failure does not trigger a remount. Keep the probe file
+stable, nonempty, and readable under the deployed visibility policy; deleting
+or hiding it is also treated as a health failure.
+
+Both image variants accept these environment variables:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SKILLFS_SUPERVISOR_PROBE_INTERVAL_SECONDS` | `2` | Delay between probes |
+| `SKILLFS_SUPERVISOR_FAILURE_THRESHOLD` | `2` | Consecutive runtime failures before recovery |
+| `SKILLFS_SUPERVISOR_STABLE_HEALTHY_PROBES` | `3` | Consecutive successful runtime probes needed to reset the recovery budget |
+| `SKILLFS_SUPERVISOR_STARTUP_TIMEOUT_SECONDS` | `30` | Startup health budget, checked after each probe |
+| `SKILLFS_SUPERVISOR_STOP_TIMEOUT_SECONDS` | `10` | Worker stop budget before SIGKILL |
+| `SKILLFS_SUPERVISOR_MAX_FAILED_ATTEMPTS` | `5` | Consecutive failed cycles before the supervisor exits |
+| `SKILLFS_SUPERVISOR_BACKOFF_INITIAL_SECONDS` | `1` | Initial retry delay, doubled after each failed cycle |
+| `SKILLFS_SUPERVISOR_BACKOFF_MAX_SECONDS` | `30` | Maximum retry delay |
+
+Values must be positive; counts and startup/stop budgets must be integers.
+The initial retry delay must not exceed its maximum. With immediate I/O errors,
+default detection takes roughly 2–4 seconds; probe timeouts, worker shutdown,
+cleanup, and startup add to recovery time. Keep kubelet probes enabled: the
+reference liveness probe runs every 5 seconds and restarts after two failures,
+so it can take over before in-container retries are exhausted.
+
+Recovery restores new path opens. It cannot prevent a runtime from invalidating
+FUSE, guarantee uninterrupted reads, or repair already-open handles. Consumers
+must close failed handles and retry fresh opens within a bounded budget. For
+ACS restart validation, restart an unrelated container in a disposable Pod and
+check reads from both the sidecar and workload, recovery logs, and container
+restart counts; local supervisor tests do not validate mount propagation.
 
 ## Required Pod topology
 

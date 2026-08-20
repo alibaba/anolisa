@@ -425,6 +425,10 @@ SkillFS can expose its FUSE view to a non-privileged workload from a privileged
 sidecar. This requires Kubernetes 1.29+, `/dev/fuse`, and permission to run the
 sidecar as privileged.
 
+The sidecar supervisor detects failed FUSE reads and remounts inside the
+container. Its recovery budget is configurable through `SKILLFS_SUPERVISOR_*`;
+see the sidecar guide below for defaults and recovery limits.
+
 ```bash
 cd src/skillfs
 IMAGE=registry.example.com/anolisa/skillfs-sidecar:$(git rev-parse --short=12 HEAD)

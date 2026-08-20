@@ -2,9 +2,9 @@
 #
 # SkillFS sidecar preflight.
 #
-# Validates every prerequisite the foreground FUSE mount needs before the
-# entrypoint `exec`s SkillFS, so a broken Pod fails during container startup
-# with a specific diagnostic instead of a generic mount error.
+# Validates every prerequisite the foreground FUSE worker needs before the
+# sidecar supervisor starts it, so a broken attempt fails with a specific
+# diagnostic instead of a generic mount error.
 #
 # Configuration (environment):
 #   SKILLFS_SOURCE            absolute path to the writable skill source root
@@ -12,6 +12,10 @@
 #   SKILLFS_FUSE_DEVICE       FUSE character device (default /dev/fuse)
 #   SKILLFS_FUSE_CONF         libfuse config file (default /etc/fuse.conf)
 #   SKILLFS_RESIDUAL_UNMOUNT  1 (default) to clear a stale mount, 0 to only report
+#
+# Usage:
+#   skillfs-preflight                 validate all prerequisites and clean residue
+#   skillfs-preflight --cleanup-only  clean only the configured residual mount
 #
 # Exit codes are stable so operators can identify the failed prerequisite:
 #   0   all prerequisites satisfied
@@ -38,6 +42,7 @@ MOUNTPOINT="${SKILLFS_MOUNTPOINT:-}"
 FUSE_DEVICE="${SKILLFS_FUSE_DEVICE:-/dev/fuse}"
 FUSE_CONF="${SKILLFS_FUSE_CONF:-/etc/fuse.conf}"
 RESIDUAL_UNMOUNT="${SKILLFS_RESIDUAL_UNMOUNT:-1}"
+MODE="full"
 
 log() {
 	printf '[skillfs-preflight] %s\n' "$*" >&2
@@ -288,6 +293,11 @@ check_fuse_conf() {
 main() {
 	log "starting preflight as uid=$(id -u) gid=$(id -g)"
 	check_config
+	if [[ "$MODE" == "cleanup-only" ]]; then
+		check_residual_mount
+		log "residual-mount cleanup complete"
+		return 0
+	fi
 	check_fuse_device
 	check_fusermount
 	check_fuse_conf
@@ -295,5 +305,14 @@ main() {
 	check_mountpoint
 	log "all prerequisites satisfied"
 }
+
+case "${1:-}" in
+"") ;;
+--cleanup-only) MODE="cleanup-only" ;;
+*) die "$EX_CONFIG" "unknown argument '$1' (expected --cleanup-only or no arguments)" ;;
+esac
+if (($# > 1)); then
+	die "$EX_CONFIG" "unexpected extra arguments: ${*:2}"
+fi
 
 main "$@"

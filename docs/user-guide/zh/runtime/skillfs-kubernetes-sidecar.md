@@ -67,17 +67,49 @@ docker push "$IMAGE"
 
 ## 镜像启动方式
 
-没有传入 command argument 时，镜像先运行 preflight，然后按下面的固定方式启动。
+没有传入 command argument 时，镜像启动 PID 1 supervisor，在每次尝试前运行
+preflight，并启动前台 mount worker：
 
 ```text
-skillfs mount "$SKILLFS_SOURCE" "$SKILLFS_MOUNTPOINT" \
-  --foreground --allow-other
+skillfs-supervisor
+  └─ skillfs mount "$SKILLFS_SOURCE" "$SKILLFS_MOUNTPOINT" --foreground --allow-other
 ```
 
-`SKILLFS_DISCOVER_ROOT` 和 `SKILLFS_EXTRA_ARGS` 可以追加可选 mount argument。不要
-加入 `--managed`。前台 SkillFS 进程需要保持为 PID 1，让 kubelet 可以重启它，并把
-`SIGTERM` 直接交给进程。给镜像传入 command argument 会完全替换 mount 命令，因此
-版本 smoke check 不需要 `/dev/fuse`。
+`SKILLFS_DISCOVER_ROOT` 和 `SKILLFS_EXTRA_ARGS` 可以追加可选 mount argument。
+不要加入 `--managed`；容器 supervisor 负责 worker 恢复和关停信号转发。给镜像
+传入 command argument 会完全替换这套生命周期，因此版本 smoke check 不需要
+`/dev/fuse`。
+
+## 自动恢复挂载
+
+Supervisor 复用 `skillfs-mount-probe`，通过 FUSE 读取 `SKILLFS_PROBE_FILE`。
+连续失败后，它停止并回收 worker，通过 preflight 清理配置挂载点上的残留 FUSE
+mount，再启动新 worker。单次瞬时失败不会触发 remount。Probe 文件必须稳定、
+非空，并在部署的可见性策略下可读；删除或隐藏该文件也会被视为健康检查失败。
+
+两种镜像都接受以下环境变量：
+
+| 变量 | 默认值 | 含义 |
+| --- | --- | --- |
+| `SKILLFS_SUPERVISOR_PROBE_INTERVAL_SECONDS` | `2` | 两次 probe 之间的等待时间 |
+| `SKILLFS_SUPERVISOR_FAILURE_THRESHOLD` | `2` | 运行期连续失败多少次后恢复 |
+| `SKILLFS_SUPERVISOR_STABLE_HEALTHY_PROBES` | `3` | 连续成功多少次运行期 probe 后重置恢复预算 |
+| `SKILLFS_SUPERVISOR_STARTUP_TIMEOUT_SECONDS` | `30` | 启动健康预算，每次 probe 结束后检查 |
+| `SKILLFS_SUPERVISOR_STOP_TIMEOUT_SECONDS` | `10` | 发送 SIGKILL 前的 worker 停止预算 |
+| `SKILLFS_SUPERVISOR_MAX_FAILED_ATTEMPTS` | `5` | 连续失败多少个周期后 supervisor 退出 |
+| `SKILLFS_SUPERVISOR_BACKOFF_INITIAL_SECONDS` | `1` | 初始重试等待时间，每次失败周期后翻倍 |
+| `SKILLFS_SUPERVISOR_BACKOFF_MAX_SECONDS` | `30` | 最大重试等待时间 |
+
+所有值必须为正数；次数及启动、停止预算必须为整数。初始重试等待时间不能超过
+最大值。I/O 立即报错时，默认检测耗时约 2–4 秒；probe 超时、worker 停止、清理
+和启动耗时还需另外计算。保留 kubelet probe：参考 liveness 每 5 秒检查一次，
+连续失败两次后重启，因此可能在容器内重试耗尽前接管恢复。
+
+恢复作用于新的路径打开操作，不能阻止 runtime 使 FUSE 失效、保证读取不中断，
+或修复已打开的旧句柄。消费方必须关闭失败句柄，并在有限预算内重新打开路径。
+验证 ACS 重启行为时，应在可删除的测试 Pod 中重启无关容器，检查 Sidecar 和
+workload 两侧读取、恢复日志及容器 restart count；本地 supervisor 测试不能
+验证 mount propagation。
 
 ## Pod 必需结构
 
