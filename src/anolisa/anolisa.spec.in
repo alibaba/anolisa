@@ -143,7 +143,10 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
-* Wed Aug 19 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+* Thu Aug 20 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - @VERSION@-1
+- Component uninstall now stops every loaded systemd template instance.
+
+* Wed Aug 19 2026 Shangyuxin <jiawa.syx@alibaba-inc.com> - 0.3.4-1
 - Component commands now validate new identities through the component index.
 - Missing local Raw index errors now identify the active repository source.
 

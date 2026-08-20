@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-08-20
+
+### Fixed
+
+- Uninstalling a component with a bare systemd service template now stops
+  every loaded instance through `name@*.service` before disabling the declared
+  `name@.service` template. Template-backed services no longer remain running
+  after `anolisa uninstall`, while individual stop failures continue to surface
+  as warnings without blocking cleanup
+  ([#2603](https://github.com/alibaba/anolisa/pull/2603)).
+
 ## [0.3.4] - 2026-08-19
 
 ### Changed

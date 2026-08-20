@@ -9,6 +9,16 @@
 
 ## [未发布]
 
+## [0.3.5] - 2026-08-20
+
+### 修复
+
+- 卸载声明 bare systemd service template 的组件时，ANOLISA 现会通过
+  `name@*.service` 停止所有已加载实例，再禁用声明的 `name@.service` template。
+  基于 template 的 service 不会在 `anolisa uninstall` 后继续运行；单个实例停止
+  失败仍会以 warning 呈现，而不会阻止后续清理
+  ([#2603](https://github.com/alibaba/anolisa/pull/2603))。
+
 ## [0.3.4] - 2026-08-19
 
 ### 变更
