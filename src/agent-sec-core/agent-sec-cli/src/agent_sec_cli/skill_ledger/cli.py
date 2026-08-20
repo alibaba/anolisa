@@ -27,13 +27,17 @@ app = typer.Typer(
         "  5. certify   Import external findings and sign the manifest\n"
         "  6. status    Show overall ledger health overview\n"
         "  7. audit     Deep-verify the full version history\n\n"
-        "Integrity statuses:\n\n"
+        "Integrity states:\n\n"
         "  pass      Files unchanged, signature valid, scan clean\n"
         "  none      No ledger artifacts, or verified scan status is none\n"
         "  drifted   Skill files changed since last certification\n"
         "  warn      Scan found low-risk issues\n"
         "  deny      Scan found high-risk issues\n"
-        "  tampered  Ledger metadata is incomplete or fails authenticity checks"
+        "  tampered  Ledger metadata is incomplete or fails authenticity checks\n\n"
+        "Other command outcomes:\n\n"
+        "  unmanaged Skill directory is not covered by any managed skill\n"
+        "            directory, or ledger state is not writable\n"
+        "  error     Check could not be completed for the skill"
     ),
     add_completion=True,
 )
@@ -186,6 +190,10 @@ def cmd_check(
       warn      Signature valid, but scan found low-risk issues
       deny      Signature valid, but scan found high-risk issues
       tampered  Ledger metadata is incomplete or fails authenticity checks
+      error     Check could not run for the skill (e.g. missing SKILL.md);
+                single checks print a JSON object with status and error
+                keys and exit 1, while --all records it as a per-skill
+                entry and checks the rest
 
     Use --all to check every registered skill and receive a JSON array of
     enriched results. Skill discovery uses built-in default directories plus
