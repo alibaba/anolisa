@@ -11,10 +11,37 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from agent_sec_cli.daemon.env import DAEMON_DISABLED_ENV, SOCKET_ENV
-from agent_sec_cli.telemetry.config import TELEMETRY_LOG_PATH_ENV
 
+# The env-var names the CLI reads are part of its black-box contract, so they
+# are spelled out here rather than imported: the RPM e2e runs on a system
+# interpreter that cannot import the package at all (it lives in a private
+# site-packages together with its third-party deps).  ``_assert_env_contract``
+# below still cross-checks these literals against the package constants
+# whenever the package *is* importable, so a rename cannot drift silently.
+SOCKET_ENV = "AGENT_SEC_DAEMON_SOCKET"
+DAEMON_DISABLED_ENV = "AGENT_SEC_DAEMON_DISABLED"
+TELEMETRY_LOG_PATH_ENV = "AGENT_SEC_TELEMETRY_LOG_PATH"
 DATA_DIR_ENV = "AGENT_SEC_DATA_DIR"
+
+
+def _assert_env_contract() -> None:
+    """Fail fast when the CLI renamed an env var this suite drives.
+
+    No-op where the package is not importable (installed-artifact runs); the
+    dev and CI coverage runs import it and therefore own the drift check.
+    """
+    try:
+        from agent_sec_cli.daemon import env  # noqa: PLC0415 - optional import
+        from agent_sec_cli.telemetry import config  # noqa: PLC0415
+    except ImportError:
+        return
+    assert (env.SOCKET_ENV, env.DAEMON_DISABLED_ENV) == (
+        SOCKET_ENV,
+        DAEMON_DISABLED_ENV,
+    ), "daemon env-var contract drifted from this suite"
+    assert (
+        config.TELEMETRY_LOG_PATH_ENV == TELEMETRY_LOG_PATH_ENV
+    ), "telemetry env-var contract drifted from this suite"
 
 
 @dataclass(frozen=True)
@@ -34,6 +61,7 @@ def prompt_scan_execution_path(
     attempting to reach a daemon socket.
     """
     tmp_path = tmp_path_factory.mktemp("prompt_scan_middleware")
+    _assert_env_contract()
     data_dir = tmp_path / "data"
     telemetry_path = data_dir / "telemetry.jsonl"
     telemetry_path.parent.mkdir(parents=True, exist_ok=True)

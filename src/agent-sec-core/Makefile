@@ -65,13 +65,14 @@ test-python: ## Run Python unit and integration tests
 	uv run --project agent-sec-cli pytest tests/ --ignore=tests/e2e/ -v
 	uv run --project agent-sec-cli pytest tests/e2e/cli -v
 	uv run --project agent-sec-cli pytest tests/e2e/daemon -v
+	uv run --project agent-sec-cli pytest tests/e2e/prompt-scanner -v
 	@echo "🧪 Running skill-ledger e2e tests..."
 	uv run --project agent-sec-cli python3 tests/e2e/skill-ledger/e2e_test.py
 
 .PHONY: test-prompt-scanner-e2e
 test-prompt-scanner-e2e: ## Run prompt-scanner e2e tests
 	@echo "🧪 Running prompt-scanner e2e tests..."
-	uv run --project agent-sec-cli pytest tests/e2e/prompt-scanner/e2e_test.py
+	uv run --project agent-sec-cli pytest tests/e2e/prompt-scanner
 
 .PHONY: test-e2e-rpm
 test-e2e-rpm: ## Run E2E tests against RPM-installed agent-sec-cli binary
@@ -81,7 +82,6 @@ test-e2e-rpm: ## Run E2E tests against RPM-installed agent-sec-cli binary
 	python3 -m pytest tests/e2e/ \
 		--import-mode=importlib \
 		--ignore=tests/e2e/linux-sandbox \
-		--ignore=tests/e2e/prompt-scanner \
 		-k 'not test_error_event_writes_to_sqlite' \
 		-v --tb=short
 	@# linux-sandbox e2e skipped: requires privileged container
@@ -96,7 +96,6 @@ test-e2e-source-build: ## Run E2E tests against source-build-installed agent-sec
 	$(VENV_PYTHON) -m pytest tests/e2e/ \
 		--import-mode=importlib \
 		--ignore=tests/e2e/linux-sandbox \
-		--ignore=tests/e2e/prompt-scanner \
 		-k 'not test_error_event_writes_to_sqlite' \
 		-v --tb=short
 	@# linux-sandbox e2e skipped: requires privileged container
@@ -107,7 +106,6 @@ test-python-coverage: ## Run Python tests with coverage report
 	cd agent-sec-cli && uv sync
 	uv run --project agent-sec-cli pytest tests/ \
 		--ignore=tests/e2e/linux-sandbox \
-		--ignore=tests/e2e/prompt-scanner \
 		--ignore=tests/e2e/skill-ledger \
 		--ignore=tests/e2e/skill-signing \
 		-v --cov --cov-config=agent-sec-cli/pyproject.toml --cov-report=xml --cov-report=term-missing
