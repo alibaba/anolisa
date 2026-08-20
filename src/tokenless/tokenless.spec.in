@@ -470,6 +470,9 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Thu Aug 20 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.11-1
+- fix(tokenless): align TOON CLI token scoring and exit codes
+
 * Wed Aug 19 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.10-1
 - feat(tokenless): compress Gemini tool schemas
 - feat(tokenless): expose Python stats queries
