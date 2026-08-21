@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.11.0
+
+**Prompt Scanner**
+
+- Rewrote prompt scanner core in Rust for native performance. (#2409)
+- Added ATR (Agent Threat Rules) rule packs and reduced compile time. (#2531)
+- Added Warden-Gen L2 backend option for prompt scanning. (#2699)
+- Routed Rust native extension logs to Python logging framework. (#2640)
+
+**Hermes Hook Integration**
+
+- Dropped Hermes synthetic warning injection; PII and Skill Ledger policies now use native observe/block boundaries. (#2712)
+
+**PII Checker**
+
+- Refined PII detection to reduce JWT and Email false positives and aligned user notices across all host adapters. (#2443)
+
+**Skill Ledger Runtime**
+
+- Added SkillFS HMAC peer authentication for cross-container Skill Ledger deployments. (#2493)
+
+**Security Events & CLI**
+
+- Added `agent-sec-cli capabilities` subcommand for environment-based hook configuration inspection. (#2356)
+- Set observability hook timeout to 10s and CLI default timeout to 5s. (#2346)
+- Added security observability skill for structured event and session report queries. (#2245)
+
+**Documentation**
+
+- Corrected and restructured user docs to align with 0.10.x shipped behavior. (#2456)
+
 ## 0.10.1
 
 **OpenClaw & cosh Hook Integrations**
