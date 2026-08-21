@@ -136,4 +136,4 @@ agent-sec-cli scan-prompt --text "hello, how are you?" --format text
 
 - 退出码 `0` 表示扫描器正常运行（包括检测到威胁），退出码 `1` 表示参数错误。判断是否有威胁应解析 JSON 中的 `verdict` 字段，而非依赖退出码。
 - 如果 ML 依赖未安装（未执行 `uv sync --extra ml`），scanner 会自动降级为仅 L1 模式并输出 WARNING 日志，不会报错。此时 `--mode standard` 实际只执行 L1。
-- 首次使用 `standard` / `strict` 模式会触发模型下载（约 1 GB），可提前执行 `agent-sec-cli scan-prompt warmup` 预热以避免冷启动延迟。
+- `standard` / `strict` 模式依赖 L2 模型，模型不会自动下载，需先执行 `ollama pull modelscope.cn/ANOLISA/Qwen3Guard-Gen-0.6B-GGUF`。`agent-sec-cli scan-prompt warmup` 只检查 Ollama 能否提供该模型，不会把模型加载进内存，因此首次扫描仍会有秒级冷启动开销。

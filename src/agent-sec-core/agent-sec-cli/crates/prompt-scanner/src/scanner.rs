@@ -125,7 +125,11 @@ impl PromptScanner {
         PromptScanner::new(ScanConfig::preset(mode))
     }
 
-    /// Prepare every layer so the first scan pays no cold-start cost.
+    /// Check every layer's prerequisites before the first scan.
+    ///
+    /// Availability only: an L2 model that Ollama can serve is reported ready
+    /// without being loaded into memory, so the first scan still pays the
+    /// model's cold-start cost.
     ///
     /// # Errors
     ///

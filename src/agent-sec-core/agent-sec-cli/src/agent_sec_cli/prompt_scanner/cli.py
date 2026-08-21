@@ -22,6 +22,10 @@ _L2_MODEL_ENV = "PROMPT_SCANNER_L2_MODEL"
 # Modes whose pipeline includes the L2 ml_classifier layer; an L2 model
 # override is inert in every other mode.
 _L2_MODES = frozenset({"standard", "strict"})
+# Modes whose warmup actually reaches Ollama: standard/strict probe the L2
+# model, multi_turn the fixed L4 one.  fast is L1-only, so its warmup builds
+# the rule engine and nothing else.
+_MODEL_BACKED_MODES = _L2_MODES | {_MULTITURN_MODE}
 
 # Selectable L2 backends, listed in the help epilog rather than in the
 # ``--model`` help text: the option column is ~45 chars wide, so these 46-50
@@ -163,17 +167,23 @@ def warmup_model(
     mode: str = typer.Option(
         "standard",
         "--mode",
-        help="Detection mode to warm up: fast, standard, strict, multi_turn",
+        help="Detection mode to check: fast, standard, strict, multi_turn",
         case_sensitive=False,
     ),
     model: str | None = typer.Option(
         None,
         "--model",
-        help="L2 backend model to warm up; see the backend list below. "
+        help="L2 backend model to check; see the backend list below. "
         f"Overrides {_L2_MODEL_ENV}.",
     ),
 ) -> None:
-    """Verify required models are served and load them to avoid cold-start latency.
+    """Check that Ollama can serve the models the selected mode requires.
+
+    fast requires none, so there the check only covers the rule engine.
+
+    Availability only: a model Ollama can serve is reported ready without
+    being loaded into memory, so the first scan still pays the model's
+    cold-start cost.
 
     Models are never downloaded automatically; pull them into Ollama first
     (e.g. ``ollama pull <model>``).
@@ -194,10 +204,15 @@ def warmup_model(
         native = _load_native()
         native.warmup_scanner(mode=mode, model=resolved_model)
     except Exception as exc:  # noqa: BLE001 - CLI error surface
-        typer.echo(f"Warmup failed: {exc}", err=True)
+        typer.echo(f"Model check failed: {exc}", err=True)
         raise typer.Exit(code=1)
 
-    typer.echo("Warmup complete. Model is ready.")
+    if mode in _MODEL_BACKED_MODES:
+        typer.echo("Check complete. Ollama can serve the model.")
+    else:
+        typer.echo(
+            f"Check complete. {mode} mode runs rules only; no model was checked."
+        )
 
 
 @scanner_app.callback(invoke_without_command=True)

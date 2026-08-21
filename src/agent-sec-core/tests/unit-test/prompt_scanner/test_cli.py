@@ -370,8 +370,21 @@ def test_scan_prompt_warmup_subcommand(monkeypatch):
     with patch("agent_sec_cli.prompt_scanner.cli._load_native", return_value=native):
         rv = runner.invoke(scanner_app, ["warmup", "--mode", "standard"])
     assert rv.exit_code == 0
-    assert "Warmup complete" in rv.output
+    assert "Check complete" in rv.output
+    assert "Ollama can serve the model" in rv.output
     native.warmup_scanner.assert_called_once_with(mode="standard", model=None)
+
+
+def test_scan_prompt_warmup_fast_mode_claims_no_model_check(monkeypatch):
+    """fast builds no model-backed layer, so success must not name Ollama."""
+    monkeypatch.delenv("PROMPT_SCANNER_L2_MODEL", raising=False)
+    native = MagicMock()
+    with patch("agent_sec_cli.prompt_scanner.cli._load_native", return_value=native):
+        rv = runner.invoke(scanner_app, ["warmup", "--mode", "fast"])
+    assert rv.exit_code == 0
+    assert "Check complete" in rv.output
+    assert "Ollama" not in rv.output
+    assert "no model was checked" in rv.output
 
 
 def test_scan_prompt_forwards_l2_model_from_env(monkeypatch):

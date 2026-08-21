@@ -65,7 +65,10 @@ pub trait DetectionLayer: Send + Sync {
         true
     }
 
-    /// Prepare the layer so the first scan pays no cold-start cost.
+    /// Check the layer's prerequisites before the first scan.
+    ///
+    /// Availability only: a layer reported ready may still pay a cold-start
+    /// cost on its first scan.
     ///
     /// # Errors
     ///
