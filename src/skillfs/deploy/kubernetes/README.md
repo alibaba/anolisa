@@ -26,7 +26,7 @@ for the complete workflow.
 ## Deploy
 
 ```bash
-export IMAGE=registry.example.com/anolisa/skillfs-sidecar:0.4.0
+export IMAGE=registry.example.com/anolisa/skillfs-sidecar:0.4.1
 export NS=skillfs-container-example
 
 kubectl apply -f 00-namespace.yaml

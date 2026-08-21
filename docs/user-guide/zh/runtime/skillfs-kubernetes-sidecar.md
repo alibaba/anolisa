@@ -19,7 +19,7 @@ source。
 请为目标节点架构构建镜像：
 
 ```bash
-export IMAGE=registry.example.com/anolisa/skillfs-sidecar:0.4.0
+export IMAGE=registry.example.com/anolisa/skillfs-sidecar:0.4.1
 export PLATFORM=linux/amd64
 
 docker buildx build \

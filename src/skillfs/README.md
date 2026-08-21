@@ -427,7 +427,7 @@ sidecar as privileged.
 
 ```bash
 cd src/skillfs
-IMAGE=registry.example.com/anolisa/skillfs-sidecar:0.4.0
+IMAGE=registry.example.com/anolisa/skillfs-sidecar:0.4.1
 docker build -f container/Dockerfile -t "$IMAGE" .
 docker push "$IMAGE"
 kubectl apply -f deploy/kubernetes/00-namespace.yaml

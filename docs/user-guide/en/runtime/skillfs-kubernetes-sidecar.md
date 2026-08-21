@@ -19,7 +19,7 @@ FUSE mount; the workload stays non-privileged and receives the propagated view.
 Build for the target node architecture:
 
 ```bash
-export IMAGE=registry.example.com/anolisa/skillfs-sidecar:0.4.0
+export IMAGE=registry.example.com/anolisa/skillfs-sidecar:0.4.1
 export PLATFORM=linux/amd64
 
 docker buildx build \
