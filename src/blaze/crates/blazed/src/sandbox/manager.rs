@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Recoverable sandbox create, destroy, and startup cleanup.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use blaze_core::BlazeError;
@@ -78,7 +78,7 @@ pub struct ReconcileReport {
 pub struct SandboxManager {
     instances: Arc<Mutex<HashMap<Uuid, SandboxInstance>>>,
     backend_instances: Arc<Mutex<HashMap<Uuid, DynBackendInstance>>>,
-    operation_locks: Mutex<HashMap<Uuid, Arc<AsyncMutex<()>>>>,
+    operation_locks: Mutex<OperationLockRegistry>,
     pub(super) storage_sync_inflight: Arc<Mutex<HashSet<Uuid>>>,
     pub(super) storage_sync_permits: Arc<Semaphore>,
     spawners: Arc<SpawnerRegistry>,
@@ -129,11 +129,6 @@ impl SandboxManager {
             mem_size,
             template_catalog,
         } = init;
-        let operation_locks = instances
-            .keys()
-            .copied()
-            .map(|id| (id, Arc::new(AsyncMutex::new(()))))
-            .collect();
         let instances = Arc::new(Mutex::new(instances));
         let backend_instances = Arc::new(Mutex::new(HashMap::new()));
         let metrics = Arc::new(Metrics::new());
@@ -147,7 +142,7 @@ impl SandboxManager {
             Self {
                 instances,
                 backend_instances,
-                operation_locks: Mutex::new(operation_locks),
+                operation_locks: Mutex::new(OperationLockRegistry::default()),
                 storage_sync_inflight: Arc::new(Mutex::new(HashSet::new())),
                 // The periodic worker is sequential. Retain that bound when a
                 // timed-out provider operation has to finish in the background.
@@ -168,17 +163,7 @@ impl SandboxManager {
 
     /// Return the async operation lock that serializes one sandbox mutation.
     pub fn operation_lock(&self, id: Uuid) -> Arc<AsyncMutex<()>> {
-        match self.operation_locks.lock() {
-            Ok(mut locks) => locks
-                .entry(id)
-                .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-                .clone(),
-            Err(poisoned) => poisoned
-                .into_inner()
-                .entry(id)
-                .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-                .clone(),
-        }
+        operation_lock(&self.operation_locks, id)
     }
 
     pub(crate) fn backend_owner(&self, id: Uuid) -> Option<DynBackendInstance> {
@@ -996,4 +981,125 @@ impl SandboxManager {
 
 fn poisoned(name: &str) -> BlazeDaemonError {
     BlazeDaemonError::Internal(format!("{name} lock poisoned"))
+}
+
+const OPERATION_LOCK_PRUNE_BATCH: usize = 4;
+
+#[derive(Default)]
+struct OperationLockRegistry {
+    locks: HashMap<Uuid, Weak<AsyncMutex<()>>>,
+    prune_queue: VecDeque<Uuid>,
+}
+
+fn operation_lock(registry: &Mutex<OperationLockRegistry>, id: Uuid) -> Arc<AsyncMutex<()>> {
+    let mut registry = match registry.lock() {
+        Ok(registry) => registry,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let lock = match registry.locks.get(&id).and_then(Weak::upgrade) {
+        Some(lock) => lock,
+        None => {
+            let lock = Arc::new(AsyncMutex::new(()));
+            if registry.locks.insert(id, Arc::downgrade(&lock)).is_none() {
+                registry.prune_queue.push_back(id);
+            }
+            lock
+        }
+    };
+
+    // Bound cleanup work so one lookup never scans the complete live registry.
+    let candidates = registry.prune_queue.len().min(OPERATION_LOCK_PRUNE_BATCH);
+    for _ in 0..candidates {
+        let Some(candidate) = registry.prune_queue.pop_front() else {
+            break;
+        };
+        if registry
+            .locks
+            .get(&candidate)
+            .is_some_and(|candidate| candidate.strong_count() > 0)
+        {
+            registry.prune_queue.push_back(candidate);
+        } else {
+            registry.locks.remove(&candidate);
+        }
+    }
+    lock
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Barrier;
+    use std::thread;
+
+    use super::*;
+
+    #[test]
+    fn operation_locks_reuse_live_entries_and_prune_dead_ones() {
+        let registry = Mutex::new(OperationLockRegistry::default());
+        let id = Uuid::new_v4();
+        let first = operation_lock(&registry, id);
+        let second = operation_lock(&registry, id);
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(registry.lock().expect("registry lock").locks.len(), 1);
+
+        drop(first);
+        drop(second);
+        for _ in 0..256 {
+            drop(operation_lock(&registry, Uuid::new_v4()));
+        }
+
+        assert_eq!(registry.lock().expect("registry lock").locks.len(), 1);
+    }
+
+    #[test]
+    fn operation_lock_pruning_is_bounded() {
+        let registry = Mutex::new(OperationLockRegistry::default());
+        let locks = (0..(OPERATION_LOCK_PRUNE_BATCH * 3))
+            .map(|_| operation_lock(&registry, Uuid::new_v4()))
+            .collect::<Vec<_>>();
+        drop(locks);
+
+        let survivor_id = Uuid::new_v4();
+        let survivor = operation_lock(&registry, survivor_id);
+        {
+            let registry = registry.lock().expect("registry lock");
+            assert_eq!(registry.locks.len(), OPERATION_LOCK_PRUNE_BATCH * 2 + 1);
+        }
+
+        for _ in 0..OPERATION_LOCK_PRUNE_BATCH {
+            let reused = operation_lock(&registry, survivor_id);
+            assert!(Arc::ptr_eq(&survivor, &reused));
+        }
+
+        let registry = registry.lock().expect("registry lock");
+        assert_eq!(registry.locks.len(), 1);
+        assert_eq!(registry.prune_queue.len(), 1);
+    }
+
+    #[test]
+    fn concurrent_operation_lock_requests_share_one_mutex() {
+        const REQUESTS: usize = 32;
+
+        let registry = Arc::new(Mutex::new(OperationLockRegistry::default()));
+        let barrier = Arc::new(Barrier::new(REQUESTS));
+        let id = Uuid::new_v4();
+        let handles = (0..REQUESTS)
+            .map(|_| {
+                let registry = registry.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    operation_lock(&registry, id)
+                })
+            })
+            .collect::<Vec<_>>();
+        let locks = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("operation lock request"))
+            .collect::<Vec<_>>();
+
+        assert!(locks.iter().all(|lock| Arc::ptr_eq(&locks[0], lock)));
+        assert_eq!(registry.lock().expect("registry lock").locks.len(), 1);
+    }
 }
