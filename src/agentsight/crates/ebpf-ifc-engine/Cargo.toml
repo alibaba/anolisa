@@ -1,0 +1,18 @@
+[package]
+name = "ebpf-ifc-engine"
+version = "0.1.9"
+edition = "2021"
+description = "eBPF information-flow control engine with TTL support"
+license = "MIT"
+
+[lib]
+name = "ebpf_ifc_engine"
+path = "src/lib.rs"
+
+[dependencies]
+aya = "0.13"
+libc = "0.2"
+libbpf-sys = "1.7"
+
+[dev-dependencies]
+actplane-ifc-compiler = { path = "../actplane-ifc-compiler" }

@@ -202,8 +202,7 @@ dependencies = [
 
 [[package]]
 name = "actplane-ifc-compiler"
-version = "0.1.8"
-source = "git+https://github.com/eunomia-bpf/ActPlane.git?rev=a62e5d9d96f91101cda019519053e950d532380a#a62e5d9d96f91101cda019519053e950d532380a"
+version = "0.1.9"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -1570,9 +1569,9 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ebpf-ifc-engine"
-version = "0.1.8"
-source = "git+https://github.com/eunomia-bpf/ActPlane.git?rev=a62e5d9d96f91101cda019519053e950d532380a#a62e5d9d96f91101cda019519053e950d532380a"
+version = "0.1.9"
 dependencies = [
+ "actplane-ifc-compiler",
  "aya",
  "libbpf-sys",
  "libc",

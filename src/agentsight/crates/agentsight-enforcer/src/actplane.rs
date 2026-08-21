@@ -29,6 +29,15 @@ use uuid::Uuid;
 use crate::event_hub::SecurityEventHub;
 use crate::{BackendError, EnforcementBackend, EventHub, SubscriberClass};
 
+// Compile-time guard: compiler and engine must agree on CConfig ABI size.
+// If this fails, one crate's CRule definition was modified without updating the other.
+const _: () = assert!(
+    actplane_ifc_compiler::COMPILED_CONFIG_BLOB_SIZE
+        == ebpf_ifc_engine::EXPECTED_CONFIG_BLOB_SIZE,
+    "BPF ABI mismatch: actplane-ifc-compiler and ebpf-ifc-engine CConfig sizes diverged. \
+     Update both crates' CRule/CConfig definitions to match."
+);
+
 /// Exact official upstream revision compiled into this adapter.
 pub const ACTPLANE_REVISION: &str = "a62e5d9d96f91101cda019519053e950d532380a";
 
@@ -670,10 +679,10 @@ fn unsupported_runtime_handoff(source: &Binding) -> ReplaceOutcome {
 /// Translates the stable credential-exfiltration model into pinned ActPlane DSL.
 ///
 /// The current ActPlane endpoint-condition ABI can represent one trusted target
-/// per rule but has no duration primitive. Observe and audit policies therefore
-/// use notify rules plus adapter-side TTL and `public_ipv4` filtering. Enforce
-/// mode is rejected because filtering after an LSM decision cannot restore an
-/// expired or out-of-scope connection.
+/// per rule. Observe and audit policies use notify rules plus adapter-side TTL
+/// and `public_ipv4` filtering. Enforce mode emits a `block` rule with an
+/// `expires` clause so the pinned ABI honours taint TTL directly, and requires
+/// at least one trusted endpoint to avoid blocking all outbound connections.
 ///
 /// # Errors
 ///
@@ -687,11 +696,6 @@ pub fn compile_credential_exfiltration_policy(
         .validate()
         .map_err(|error| BackendError::CompileFailure(error.to_string()))?;
     validate_label(&policy.taint_label)?;
-    if policy.mode == PolicyMode::Enforce {
-        return Err(BackendError::CompileFailure(
-            "the pinned ActPlane ABI cannot enforce taint TTL and public_ipv4 destinations without weakening product semantics".into(),
-        ));
-    }
 
     let mut sources = policy.source_patterns.clone();
     sources.sort();
@@ -711,6 +715,11 @@ pub fn compile_credential_exfiltration_policy(
             "the pinned ActPlane ABI supports one trusted endpoint exception per rule".into(),
         ));
     }
+    if policy.mode == PolicyMode::Enforce && trusted.is_empty() {
+        return Err(BackendError::CompileFailure(
+            "enforce mode requires at least one trusted_endpoint to avoid blocking all outbound connections".into(),
+        ));
+    }
 
     let mut dsl = String::from("source AGENT = exec \"**\"\n");
     for source in sources {
@@ -720,13 +729,21 @@ pub fn compile_credential_exfiltration_policy(
         ));
     }
     dsl.push_str("rule agentsight-credential-exfiltration:\n  ");
-    dsl.push_str("notify");
+    let effect_keyword = match policy.mode {
+        PolicyMode::Enforce => "block",
+        _ => "notify",
+    };
+    dsl.push_str(effect_keyword);
     dsl.push_str(" connect endpoint \"*\" if ");
     dsl.push_str(&policy.taint_label);
     if let Some(endpoint) = trusted.first() {
         dsl.push_str(" unless target \"");
         dsl.push_str(endpoint);
         dsl.push('"');
+    }
+    // Add TTL expires clause for enforce mode using the existing taint TTL field.
+    if policy.mode == PolicyMode::Enforce {
+        dsl.push_str(&format!(" expires {}s", policy.taint_ttl_secs));
     }
     dsl.push_str("\n  because \"credential-derived data reached an untrusted network target\"\n");
 
@@ -1185,12 +1202,25 @@ mod tests {
     }
 
     #[test]
-    fn enforce_policy_rejects_unrepresentable_ttl_and_public_scope() {
-        let error = compile_credential_exfiltration_policy(&credential_policy())
-            .expect_err("kernel enforcement must not weaken product semantics");
+    fn enforce_policy_compiles_block_rule_with_expires() {
+        let policy = credential_policy();
+        let dsl = compile_credential_exfiltration_policy(&policy)
+            .expect("enforce policy with a trusted endpoint should compile");
 
-        assert!(error.to_string().contains("taint TTL"));
-        assert!(error.to_string().contains("public_ipv4 destinations"));
+        assert!(dsl.contains("block connect endpoint \"*\" if CREDENTIAL"));
+        assert!(dsl.contains("unless target \"10.0.0.8\""));
+        assert!(dsl.contains("expires 900s"));
+        assert!(compile_str(&dsl).is_ok());
+    }
+
+    #[test]
+    fn enforce_policy_requires_trusted_endpoint() {
+        let mut policy = credential_policy();
+        policy.trusted_endpoints.clear();
+        let error = compile_credential_exfiltration_policy(&policy)
+            .expect_err("enforce mode without a trusted endpoint must fail closed");
+
+        assert!(error.to_string().contains("trusted_endpoint"));
     }
 
     #[test]

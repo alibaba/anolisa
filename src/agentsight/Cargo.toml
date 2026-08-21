@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     ".",
+    "crates/actplane-ifc-compiler",
     "crates/agentsight-audit",
     "crates/agentsight-atif",
     "crates/agentsight-enforcer",
@@ -9,6 +10,7 @@ members = [
     "crates/agentsight-opt-store",
     "crates/agentsight-trajectory-collector",
     "crates/enforcement-protocol",
+    "crates/ebpf-ifc-engine",
 ]
 
 [workspace.package]
@@ -19,12 +21,12 @@ edition = "2024"
 # migrated to workspace deps incrementally.
 [workspace.dependencies]
 anyhow = "1.0.86"
-actplane-ifc-compiler = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
+actplane-ifc-compiler = { path = "crates/actplane-ifc-compiler" }
 async-trait = "0.1.89"
 chrono = { version = "0.4.41", features = ["serde"] }
 ctrlc = "3.4"
 dirs = "6"
-ebpf-ifc-engine = { git = "https://github.com/eunomia-bpf/ActPlane.git", rev = "a62e5d9d96f91101cda019519053e950d532380a" }
+ebpf-ifc-engine = { path = "crates/ebpf-ifc-engine" }
 futures = "0.3.32"
 libc = "0.2.155"
 log = "0.4.22"
