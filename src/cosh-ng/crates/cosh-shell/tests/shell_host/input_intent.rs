@@ -333,10 +333,6 @@ fn command_veto_matrix_is_consistent() {
             "./\u{4e2d}\u{6587}\u{811a}\u{672c}",
             "./\u{4e2d}\u{6587}\u{811a}\u{672c}",
         ),
-        (
-            "\u{5e2e}\u{6211}\u{770b} \"$PATH\"",
-            "\u{5e2e}\u{6211}\u{770b}",
-        ),
         ("review --all", "review"),
         ("review FOO=bar", "review"),
         ("review this | cat", "review"),
@@ -345,6 +341,7 @@ fn command_veto_matrix_is_consistent() {
     ] {
         assert_bash_zsh(input, top_token, "command");
     }
+    assert_bash_zsh("帮我看 \"$PATH\"", "帮我看", "natural_language");
 }
 
 #[test]
@@ -480,8 +477,10 @@ fn missing_path_context_keeps_conservative_vetoes() {
             "https://example.com/foo",
             "ambiguous",
         ),
-        // pipe metacharacter still vetoes
+        // A pipeline is still executable after command-not-found returns.
         ("打开./config.toml | cat", "打开./config.toml", "command"),
+        // The missing-path context never broadens the ASCII command path.
+        ("open ./config.toml | cat", "open", "command"),
         // option token still vetoes
         ("./run.sh --all", "./run.sh", "command"),
         // Han-leading assignment syntax is Tier A.
@@ -534,8 +533,14 @@ fn routing_c1_classifier_han_tier_matrix() {
         ("解释 ps aux | grep java", "解释", "command"),
         ("解释 true && touch x", "解释", "command"),
         ("解释 false || touch x", "解释", "command"),
-        ("解释 \"$HOME\"", "解释", "command"),
-        ("解释 'a>b'", "解释", "command"),
+        ("解释 \"$HOME\"", "解释", "natural_language"),
+        ("解释 'a>b'", "解释", "natural_language"),
+        ("解释 $HOME", "解释", "natural_language"),
+        ("解释 \"${evil@P}\"", "解释", "command"),
+        ("解释 \"${(e)evil}\"", "解释", "command"),
+        ("解释 foo; bar", "解释", "command"),
+        ("解释 input < file", "解释", "command"),
+        ("解释 output > file", "解释", "command"),
         ("解释 $((1 + 1))", "解释", "command"),
         ("解释 <(printf x)", "解释", "command"),
         ("解释 `printf x`", "解释", "command"),

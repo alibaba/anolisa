@@ -371,6 +371,125 @@ fn shell_host_zsh_missing_natural_language_closes_started_command() {
 }
 
 #[test]
+fn shell_host_han_parameter_expansion_routes_to_agent() {
+    let inputs = ["帮我解释 $HOME 变量"];
+    for shell in ["bash", "zsh"] {
+        if Command::new(shell).arg("--version").output().is_err() {
+            continue;
+        }
+        if shell == "bash" && !bash_supports_command_not_found_handler() {
+            continue;
+        }
+
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-shell-han-metachar-{shell}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let mut config = ShellHostConfig::new(format!("han-metachar-{shell}"), &work_dir);
+        config.native_mode = false;
+        for input in inputs {
+            let output = if shell == "bash" {
+                run_scripted_bash(&config, &[ScriptedInput::user_line(input)])
+            } else {
+                run_scripted_zsh(&config, &[ScriptedInput::user_line(input)])
+            }
+            .unwrap_or_else(|error| panic!("{shell}: {input:?}: {error}"));
+            assert!(
+                output.events.iter().any(|event| {
+                    event.kind == ShellEventKind::UserInputIntercepted
+                        && event.input.as_deref() == Some(input)
+                        && event.component.as_deref() == Some("natural_language")
+                }),
+                "{shell}: {input:?}: {:?}",
+                output.events
+            );
+        }
+    }
+}
+
+#[test]
+fn shell_host_han_re_evaluated_parameter_expansion_stays_shell_owned() {
+    for (shell, expansion) in [("bash", "${evil@P}"), ("zsh", "${(e)evil}")] {
+        if Command::new(shell).arg("--version").output().is_err() {
+            continue;
+        }
+        if shell == "bash" && !bash_supports_command_not_found_handler() {
+            continue;
+        }
+
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-shell-han-re-eval-{shell}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let input = format!("解释 \"{expansion}\"");
+        let mut config = ShellHostConfig::new(format!("han-re-eval-{shell}"), &work_dir);
+        config.native_mode = false;
+        let steps = [
+            ScriptedInput::command("evil='$(printf __han_re_eval__)'"),
+            ScriptedInput::user_line(&input),
+        ];
+        let output = if shell == "bash" {
+            run_scripted_bash(&config, &steps)
+        } else {
+            run_scripted_zsh(&config, &steps)
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+
+        assert!(
+            !output.events.iter().any(|event| {
+                event.kind == ShellEventKind::UserInputIntercepted
+                    && event.input.as_deref() == Some(input.as_str())
+            }),
+            "{shell}: {:?}",
+            output.events
+        );
+    }
+}
+
+#[test]
+fn shell_host_han_control_operator_stays_shell_owned() {
+    for shell in ["bash", "zsh"] {
+        if Command::new(shell).arg("--version").output().is_err() {
+            continue;
+        }
+        if shell == "bash" && !bash_supports_command_not_found_handler() {
+            continue;
+        }
+
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-shell-han-control-operator-{shell}-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        let side_effect = work_dir.join("must-not-exist");
+        let input = format!("解释 false && touch {}", side_effect.display());
+        let mut config = ShellHostConfig::new(format!("han-control-operator-{shell}"), &work_dir);
+        config.native_mode = false;
+        let output = if shell == "bash" {
+            run_scripted_bash(&config, &[ScriptedInput::user_line(&input)])
+        } else {
+            run_scripted_zsh(&config, &[ScriptedInput::user_line(&input)])
+        }
+        .unwrap_or_else(|error| panic!("{shell}: {error}"));
+
+        assert!(
+            !output.events.iter().any(|event| {
+                event.kind == ShellEventKind::UserInputIntercepted
+                    && event.input.as_deref() == Some(input.as_str())
+            }),
+            "{shell}: {:?}",
+            output.events
+        );
+        assert!(
+            !side_effect.exists(),
+            "{shell}: command-not-found must not enable the && branch"
+        );
+    }
+}
+
+#[test]
 fn shell_host_zsh_ambiguous_phrase_stays_in_shell() {
     if Command::new("zsh").arg("--version").output().is_err() {
         return;

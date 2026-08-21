@@ -203,7 +203,7 @@ _cosh_command_veto() {
 
   if (( top_han_status == 0 )); then
     case "$scan" in
-      *'|'*|*'&'*|*';'*|*'<'*|*'>'*|*'$'*|*'`'*|*[[:cntrl:]]*)
+      *[[:cntrl:]]*)
         return 0
         ;;
     esac
@@ -236,6 +236,30 @@ _cosh_command_veto() {
           ;;
         '('|')')
           [[ -z "$quote" ]] && return 0
+          ;;
+        '|'|'&'|';'|'<'|'>')
+          # command-not-found runs after parsing. A successful intercept
+          # would otherwise alter the status of an executable shell list.
+          [[ -z "$quote" ]] && return 0
+          ;;
+        '`')
+          # Backticks expand inside double quotes, but are literal in single
+          # quotes. Never let command substitution reach the shell.
+          [[ "$quote" != "'" ]] && return 0
+          ;;
+        '$')
+          # Only simple parameter references are safe to quote for the Agent.
+          # Shell-specific expansion operators can evaluate their value before
+          # command-not-found runs, so they remain shell-owned.
+          if [[ "$quote" != "'" ]]; then
+            case "${scan:$index:1}" in
+              [A-Za-z_]) ;;
+              '{')
+                [[ "${scan:$index}" =~ ^\{[A-Za-z_][A-Za-z0-9_]*\} ]] || return 0
+                ;;
+              *) return 0 ;;
+            esac
+          fi
           ;;
       esac
     done
