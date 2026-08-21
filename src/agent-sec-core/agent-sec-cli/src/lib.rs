@@ -153,15 +153,27 @@ fn scanner_engine_info() -> String {
 /// Python module implemented in Rust.
 /// Available as `from agent_sec_cli._native import ...` in Python.
 #[pymodule]
-fn _native(_py: Python, m: &PyModule) -> PyResult<()> {
+fn _native(py: Python, m: &PyModule) -> PyResult<()> {
     // Route Rust `log` records into Python's `logging`.  This is the only
     // place a logger can be installed: the crate ships as a cdylib with no
     // `main`, so without this call the `log` facade discards every record —
     // including the model-service warnings about a non-loopback base URL and
-    // about rejected tuning values.  An Err means a logger is already
-    // installed (module reload, sub-interpreter); the existing bridge stays
-    // valid, so importing must not fail over it.
-    let _ = pyo3_log::try_init();
+    // about rejected tuning values.
+    //
+    // Caching is off on purpose.  The cached variants pin each target's Python
+    // logger and level on first use and can only be invalidated through the
+    // `ResetHandle` returned here, so any later reconfiguration on the Python
+    // side — attaching a handler at runtime, or the per-test logging reset in
+    // `cli_logging` — would silently keep routing records by stale settings.
+    // Holding the handle instead would mean exposing a reset hook back to
+    // Python; not worth it for a dependency tree that logs a handful of
+    // warnings per invocation.
+    //
+    // A failing `install` means a logger is already registered (module reload,
+    // sub-interpreter); the existing bridge stays valid, so importing must not
+    // fail over it.  A failing `new` means `import logging` itself broke, which
+    // is worth propagating.
+    let _ = pyo3_log::Logger::new(py, pyo3_log::Caching::Nothing)?.install();
     m.add_function(wrap_pyfunction!(scan_prompt_json, m)?)?;
     m.add_function(wrap_pyfunction!(scan_multi_turn_json, m)?)?;
     m.add_function(wrap_pyfunction!(warmup_scanner, m)?)?;
