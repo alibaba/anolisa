@@ -394,6 +394,7 @@ pub async fn run_server(host: &str, port: u16) -> std::io::Result<()> {
             .service(optimize::list_optimization_history)
             .service(optimize::get_optimize_config)
             .service(optimize::update_optimize_config)
+            .service(optimize::semantic_search_sessions)
             .service(export_atif_unavailable)
             // Catch-all for unregistered API endpoints (returns empty array)
             .service(api_fallback)

@@ -318,6 +318,41 @@ export async function fetchSessions(
   return apiFetch<SessionSummary[]>(`${API_BASE}/api/sessions${qs}`);
 }
 
+/** Candidate session summary sent to the semantic search endpoint. */
+export interface SemanticSearchCandidate {
+  session_id: string;
+  first_message: string | null;
+  last_message: string | null;
+  project: string | null;
+}
+
+/** One LLM-ranked semantic match. */
+export interface SemanticSearchResult {
+  session_id: string;
+  relevance: 'high' | 'medium';
+  reason: string;
+}
+
+export interface SemanticSearchResponse {
+  results: SemanticSearchResult[];
+}
+
+/**
+ * Ask the configured LLM to rank candidate sessions by semantic relevance to
+ * `query`. Returns an empty list when semantic search is unavailable or the
+ * caller sent too few candidates.
+ */
+export async function semanticSearchSessions(body: {
+  query: string;
+  candidates: SemanticSearchCandidate[];
+}): Promise<SemanticSearchResponse> {
+  return apiFetch<SemanticSearchResponse>(`${API_BASE}/api/sessions/search`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
 /**
  * List all trace IDs within a session, with per-trace token stats.
  * Optional startNs/endNs are forwarded as query parameters for future

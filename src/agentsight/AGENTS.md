@@ -205,6 +205,7 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/health` | GET | 健康检查 |
 | `/metrics` | GET | Prometheus token 指标 |
 | `/api/sessions` | GET | 会话列表 |
+| `/api/sessions/search` | POST | 语义会话搜索（复用优化 LLM，Body: `{"query","candidates":[{session_id,first_message,last_message,project}]}`，候选 ≤200、≤5 跳过 LLM） |
 | `/api/sessions/{id}/traces` | GET | 会话下的 trace |
 | `/api/traces/{id}` | GET | trace 详情 |
 | `/api/conversations/{id}` | GET | conversation 事件详情 |

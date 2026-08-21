@@ -1,7 +1,16 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { fetchSessions, fetchTrajectories } from '../utils/apiClient';
-import type { SessionSummary, TrajectorySummary } from '../utils/apiClient';
+import {
+  fetchSessions,
+  fetchTrajectories,
+  fetchOptimizeConfig,
+  semanticSearchSessions,
+} from '../utils/apiClient';
+import type {
+  SessionSummary,
+  TrajectorySummary,
+  SemanticSearchResult,
+} from '../utils/apiClient';
 import { CopyButton } from '../components/CopyButton';
 import { useI18n, useLocaleTag } from '../i18n';
 import type { MessageKey } from '../i18n';
@@ -204,6 +213,9 @@ export const AgentSessionsPage: React.FC = () => {
   const [sourceFilter, setSourceFilter] = useState<'all' | SessionSource>('all');
   const [agentFilter, setAgentFilter] = useState('all');
   const [search, setSearch] = useState('');
+  const [semanticEnabled, setSemanticEnabled] = useState(false);
+  const [semanticLoading, setSemanticLoading] = useState(false);
+  const [semanticMatches, setSemanticMatches] = useState<Record<string, SemanticSearchResult>>({});
   const [page, setPage] = useState(1);
   const [autoRefresh, setAutoRefresh] = useState(false);
 
@@ -237,6 +249,94 @@ export const AgentSessionsPage: React.FC = () => {
     return () => clearInterval(interval);
   }, [autoRefresh, loadData]);
 
+  // Semantic search is an optional enhancement; it only runs when the LLM is
+  // configured in the optimization settings.
+  useEffect(() => {
+    fetchOptimizeConfig()
+      .then((cfg) => setSemanticEnabled(Boolean(cfg.configured)))
+      .catch(() => setSemanticEnabled(false));
+  }, []);
+
+  // Clear stale semantic results as soon as the query or filters change, so
+  // the 500ms debounce window never shows results for the previous query.
+  useEffect(() => {
+    setSemanticMatches({});
+    setSemanticLoading(false);
+  }, [search, sourceFilter, agentFilter, rangeMs]);
+
+  // Candidate pool shared by the debounce effect and the `filtered` memo:
+  // sessions within the selected time range, source, and agent filters.
+  // /api/trajectories has no time-range support, so log-collected sessions
+  // must be pruned client-side to honour the selected range; otherwise the
+  // list appears unchanged when switching presets.
+  const base = useMemo(() => {
+    const rangeStartMs = Date.now() - rangeMs;
+    return merged.filter((s) => {
+      if (s.last_active_ms !== null && s.last_active_ms < rangeStartMs) return false;
+      const sources = Array.isArray(s.sources) ? s.sources : [];
+      if (sourceFilter !== 'all' && !sources.includes(sourceFilter)) return false;
+      if (
+        agentFilter !== 'all' &&
+        (s.agent_name ?? '').toLowerCase() !== agentFilter.toLowerCase()
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [merged, rangeMs, sourceFilter, agentFilter]);
+
+  // Debounce the LLM semantic search. Pure-LLM search: no client-side
+  // substring fast path — every query goes through the backend ranking.
+  useEffect(() => {
+    const query = search.trim();
+    if (!query || !semanticEnabled) {
+      setSemanticMatches({});
+      setSemanticLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      if (base.length <= 5) {
+        setSemanticMatches({});
+        setSemanticLoading(false);
+        return;
+      }
+
+      const candidates = base.slice(0, 50).map((s) => ({
+        session_id: s.session_id,
+        first_message: s.first_message,
+        last_message: s.last_message,
+        project: s.project,
+      }));
+
+      setSemanticLoading(true);
+      semanticSearchSessions({ query, candidates })
+        .then((res) => {
+          if (cancelled) return;
+          const next: Record<string, SemanticSearchResult> = {};
+          for (const r of res.results) {
+            next[r.session_id] = {
+              ...r,
+              relevance: r.relevance === 'high' ? 'high' : 'medium',
+            };
+          }
+          setSemanticMatches(next);
+        })
+        .catch(() => {
+          if (!cancelled) setSemanticMatches({});
+        })
+        .finally(() => {
+          if (!cancelled) setSemanticLoading(false);
+        });
+    }, 500);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [search, semanticEnabled, base]);
+
   // Reset to page 1 when filters change
   useEffect(() => {
     setPage(1);
@@ -256,34 +356,24 @@ export const AgentSessionsPage: React.FC = () => {
   }, [merged]);
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    // /api/trajectories has no time-range support, so log-collected sessions
-    // must be pruned client-side to honour the selected range; otherwise the
-    // list appears unchanged when switching presets.
-    const rangeStartMs = Date.now() - rangeMs;
-    return merged.filter((s) => {
-      if (s.last_active_ms !== null && s.last_active_ms < rangeStartMs) return false;
-      const sources = Array.isArray(s.sources) ? s.sources : [];
-      if (sourceFilter !== 'all' && !sources.includes(sourceFilter)) return false;
-      if (
-        agentFilter !== 'all' &&
-        (s.agent_name ?? '').toLowerCase() !== agentFilter.toLowerCase()
-      ) {
-        return false;
-      }
-      if (q) {
-        return (
-          s.session_id.toLowerCase().includes(q) ||
-          (s.project ?? '').toLowerCase().includes(q) ||
-          (s.agent_name ?? '').toLowerCase().includes(q) ||
-          (s.model ?? '').toLowerCase().includes(q) ||
-          (s.first_message ?? '').toLowerCase().includes(q) ||
-          (s.last_message ?? '').toLowerCase().includes(q)
-        );
-      }
-      return true;
-    });
-  }, [merged, rangeMs, sourceFilter, agentFilter, search]);
+    const q = search.trim();
+    if (!q) return base;
+
+    // Pure-LLM search: display the ranked semantic matches, relevance first.
+    const ranked: MergedSession[] = [];
+    const entries = Object.entries(semanticMatches).sort(
+      ([, a], [, b]) =>
+        (a.relevance === 'high' ? 0 : 1) - (b.relevance === 'high' ? 0 : 1),
+    );
+    for (const [id] of entries) {
+      const s = base.find((x) => x.session_id === id);
+      if (s) ranked.push(s);
+    }
+
+    // Too few candidates to justify an LLM call — show them all instead.
+    if (ranked.length === 0 && base.length <= 5) return base;
+    return ranked;
+  }, [base, search, semanticMatches]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
@@ -368,6 +458,9 @@ export const AgentSessionsPage: React.FC = () => {
           onChange={(e) => setSearch(e.target.value)}
           className="flex-1 min-w-[220px] border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
         />
+        {semanticLoading && (
+          <span className="text-xs text-blue-500 whitespace-nowrap">AI ...</span>
+        )}
       </div>
 
       {error && (
@@ -382,9 +475,13 @@ export const AgentSessionsPage: React.FC = () => {
           <div className="p-10 text-center text-gray-500 text-sm">{t('as.loadingSessions')}</div>
         ) : filtered.length === 0 ? (
           <div className="p-10 text-center text-gray-500 text-sm">
-            {search || sourceFilter !== 'all' || agentFilter !== 'all'
-              ? t('as.noMatchingSessions')
-              : t('as.noSessionsInRange')}
+            {search
+              ? semanticEnabled
+                ? t('as.noMatchingSessions')
+                : t('as.semanticSearchUnavailable')
+              : sourceFilter !== 'all' || agentFilter !== 'all'
+                ? t('as.noMatchingSessions')
+                : t('as.noSessionsInRange')}
           </div>
         ) : (
           <table className="w-full text-sm">
@@ -421,6 +518,14 @@ export const AgentSessionsPage: React.FC = () => {
                       </span>
                       <CopyButton text={s.session_id} title={t('as.copySessionId')} />
                     </div>
+                    {semanticMatches[s.session_id] && (
+                      <span
+                        className="inline-flex items-center gap-1 mt-1 px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded text-xs font-medium"
+                        title={semanticMatches[s.session_id].reason}
+                      >
+                        AI · {semanticMatches[s.session_id].relevance}
+                      </span>
+                    )}
                     {s.subagent_count > 0 && (
                       <span
                         className="inline-flex items-center gap-1 mt-1 px-1.5 py-0.5 bg-indigo-50 text-indigo-600 rounded text-xs font-medium"

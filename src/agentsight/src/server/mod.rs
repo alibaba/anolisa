@@ -11,6 +11,7 @@ mod enforcement;
 mod handlers;
 pub mod optimize;
 mod secret;
+pub mod semantic_search;
 mod system_audit;
 mod token_savings;
 
@@ -285,6 +286,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(optimize::list_optimization_history)
                 .service(optimize::get_optimize_config)
                 .service(optimize::update_optimize_config)
+                .service(optimize::semantic_search_sessions)
                 // Causal attribution API routes
                 .service(causal::run_causal_attribution)
                 // Trajectory collection API routes (filters before the dynamic segment)
@@ -322,6 +324,11 @@ const API_ROUTES: &[(&str, &str, &str)] = &[
     ),
     ("GET", "/api/docs", "This route list"),
     ("GET", "/api/sessions", "List observed agent sessions"),
+    (
+        "POST",
+        "/api/sessions/search",
+        "Semantic session search via the configured LLM",
+    ),
     (
         "GET",
         "/api/sessions/{session_id}/traces",

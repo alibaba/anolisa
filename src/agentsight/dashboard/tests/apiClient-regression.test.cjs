@@ -12,6 +12,7 @@ const {
   fetchSecurityCase,
   fetchSecurityStatus,
   reviewSecurityCase,
+  semanticSearchSessions,
 } = require(process.env.AGENTSIGHT_API_CLIENT_BUILD);
 const {
   containmentLifecyclePresentation,
@@ -156,6 +157,45 @@ test('fetchLatencyMetrics omits agent_name when no filter is provided', async ()
   assert.equal(url.searchParams.get('start_ns'), '3000000000');
   assert.equal(url.searchParams.get('end_ns'), '4000000000');
   assert.equal(url.searchParams.has('agent_name'), false);
+});
+
+test('semanticSearchSessions posts the query and candidates and returns ranked results', async () => {
+  let capturedUrl = '';
+  let capturedBody = null;
+  global.fetch = async (url, init) => {
+    capturedUrl = String(url);
+    capturedBody = JSON.parse(init.body);
+    return new Response(JSON.stringify({
+      results: [
+        { session_id: 'sess-1', relevance: 'high', reason: 'mentions OOM' },
+        { session_id: 'sess-2', relevance: 'medium', reason: 'performance tuning' },
+      ],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  const response = await semanticSearchSessions({
+    query: 'OOM',
+    candidates: [
+      { session_id: 'sess-1', first_message: 'help with memory', last_message: null, project: 'web' },
+    ],
+  });
+
+  assert.ok(capturedUrl.endsWith('/api/sessions/search'), capturedUrl);
+  assert.equal(capturedBody.query, 'OOM');
+  assert.equal(capturedBody.candidates.length, 1);
+  assert.equal(response.results[0].relevance, 'high');
+  assert.equal(response.results[0].session_id, 'sess-1');
+});
+
+test('semanticSearchSessions rejects a non-2xx response so the caller can degrade silently', async () => {
+  global.fetch = async () => new Response('service unavailable', { status: 503 });
+  await assert.rejects(
+    () => semanticSearchSessions({
+      query: 'performance',
+      candidates: [{ session_id: 'sess-1', first_message: 'slow query', last_message: null, project: null }],
+    }),
+    /\/api\/sessions\/search -> 503/,
+  );
 });
 
 test('fetchSecurityCase accepts a valid system-audit detail response', async () => {

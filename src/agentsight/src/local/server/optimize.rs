@@ -12,6 +12,8 @@ use agentsight_opt_store::{Dimension, OptimizationStore};
 use agentsight_trajectory_collector::TrajectoryStore;
 use serde::{Deserialize, Serialize};
 
+use crate::server::semantic_search;
+
 const CONFIG_FILE_NAME: &str = "optimization_config.json";
 const DB_FILE_NAME: &str = "optimization.db";
 
@@ -446,6 +448,28 @@ pub async fn update_optimize_config(
         "model": updated.effective_model(),
         "configured": updated.effective_api_key().is_some(),
     }))
+}
+
+// ─── Semantic session search ────────────────────────────────────────────────
+//
+// Delegates to the shared ranking module so the dashboard's semantic search
+// also works on macOS, where ServeCommand delegates to this local server.
+
+/// POST /api/sessions/search
+#[post("/api/sessions/search")]
+pub async fn semantic_search_sessions(
+    data: web::Data<OptimizeAppState>,
+    body: web::Json<semantic_search::SemanticSearchRequest>,
+) -> impl Responder {
+    let client = match data.optimize.build_client() {
+        Ok(c) => c,
+        Err(_) => {
+            return HttpResponse::Ok()
+                .json(semantic_search::SemanticSearchResponse { results: vec![] });
+        }
+    };
+    let request = body.into_inner();
+    semantic_search::handle_semantic_search(&client, &request).await
 }
 
 #[cfg(test)]
