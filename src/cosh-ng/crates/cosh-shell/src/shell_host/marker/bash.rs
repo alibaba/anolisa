@@ -882,7 +882,13 @@ _cosh_prompt_command() {
   _cosh_precmd_marker "$status"
   _cosh_run_user_prompt_command "$status"
   _cosh_maybe_emit_native_history_file_marker
-  if [[ -n "${_COSH_USER_PROMPT_COMMAND+x}" ]]; then
+  # bash < 5 suspends the DEBUG trap while PROMPT_COMMAND runs (#2736):
+  # `trap -p DEBUG` prints nothing inside the hook, and the empty snapshot
+  # read would poison _COSH_ACTIVE_DEBUG_TRAP, permanently dropping the
+  # trap after the first command. Suspension guarantees the trap is
+  # untouched during the hook, so only bash >= 5 — where `trap -p DEBUG`
+  # stays truthful — needs the snapshot.
+  if (( BASH_VERSINFO[0] >= 5 )) && [[ -n "${_COSH_USER_PROMPT_COMMAND+x}" ]]; then
     local trap_snapshot_file="${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.debug-trap"
     _COSH_SNAPSHOT_DEBUG_TRAP=1
     trap -p DEBUG > "$trap_snapshot_file" 2>/dev/null || true
