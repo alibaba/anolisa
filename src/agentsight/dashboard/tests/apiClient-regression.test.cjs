@@ -15,6 +15,9 @@ const {
   semanticSearchSessions,
 } = require(process.env.AGENTSIGHT_API_CLIENT_BUILD);
 const {
+  applySemanticRanking,
+} = require(process.env.AGENTSIGHT_SEMANTIC_FILTER_BUILD);
+const {
   containmentLifecyclePresentation,
 } = require(process.env.AGENTSIGHT_CONTAINMENT_LIFECYCLE_BUILD);
 const {
@@ -196,6 +199,35 @@ test('semanticSearchSessions rejects a non-2xx response so the caller can degrad
     }),
     /\/api\/sessions\/search -> 503/,
   );
+});
+
+test('applySemanticRanking keeps the full list while the LLM is loading', () => {
+  // Regression for the review finding: during the LLM round-trip the table
+  // must not flash "no matching sessions" when ranked results are empty.
+  const base = Array.from({ length: 6 }, (_, i) => ({ session_id: `s-${i}` }));
+  const result = applySemanticRanking(base, 'OOM', {}, true);
+  assert.equal(result.length, 6);
+});
+
+test('applySemanticRanking ranks high relevance first and ignores unknown ids', () => {
+  const base = [{ session_id: 'a' }, { session_id: 'b' }, { session_id: 'c' }];
+  const matches = {
+    b: { relevance: 'high', reason: 'x' },
+    a: { relevance: 'medium', reason: 'y' },
+    z: { relevance: 'high', reason: 'not in base' },
+  };
+  const result = applySemanticRanking(base, 'query', matches, false);
+  assert.deepEqual(result.map((s) => s.session_id), ['b', 'a']);
+});
+
+test('applySemanticRanking shows all candidates when the list is tiny', () => {
+  const base = [{ session_id: 'a' }];
+  assert.equal(applySemanticRanking(base, 'query', {}, false).length, 1);
+});
+
+test('applySemanticRanking returns the base list for an empty search', () => {
+  const base = [{ session_id: 'a' }];
+  assert.equal(applySemanticRanking(base, '   ', {}, false), base);
 });
 
 test('fetchSecurityCase accepts a valid system-audit detail response', async () => {

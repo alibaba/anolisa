@@ -11,6 +11,7 @@ import type {
   TrajectorySummary,
   SemanticSearchResult,
 } from '../utils/apiClient';
+import { applySemanticRanking } from '../utils/semanticSearchFilter';
 import { CopyButton } from '../components/CopyButton';
 import { useI18n, useLocaleTag } from '../i18n';
 import type { MessageKey } from '../i18n';
@@ -259,10 +260,13 @@ export const AgentSessionsPage: React.FC = () => {
 
   // Clear stale semantic results as soon as the query or filters change, so
   // the 500ms debounce window never shows results for the previous query.
+  // Enter the loading state immediately too: the LLM request does not start
+  // until the debounce fires, and without this flag the table would flash
+  // "no matching sessions" during that window.
   useEffect(() => {
     setSemanticMatches({});
-    setSemanticLoading(false);
-  }, [search, sourceFilter, agentFilter, rangeMs]);
+    setSemanticLoading(search.trim().length > 0 && semanticEnabled);
+  }, [search, sourceFilter, agentFilter, rangeMs, semanticEnabled]);
 
   // Candidate pool shared by the debounce effect and the `filtered` memo:
   // sessions within the selected time range, source, and agent filters.
@@ -356,24 +360,8 @@ export const AgentSessionsPage: React.FC = () => {
   }, [merged]);
 
   const filtered = useMemo(() => {
-    const q = search.trim();
-    if (!q) return base;
-
-    // Pure-LLM search: display the ranked semantic matches, relevance first.
-    const ranked: MergedSession[] = [];
-    const entries = Object.entries(semanticMatches).sort(
-      ([, a], [, b]) =>
-        (a.relevance === 'high' ? 0 : 1) - (b.relevance === 'high' ? 0 : 1),
-    );
-    for (const [id] of entries) {
-      const s = base.find((x) => x.session_id === id);
-      if (s) ranked.push(s);
-    }
-
-    // Too few candidates to justify an LLM call — show them all instead.
-    if (ranked.length === 0 && base.length <= 5) return base;
-    return ranked;
-  }, [base, search, semanticMatches]);
+    return applySemanticRanking(base, search, semanticMatches, semanticLoading);
+  }, [base, search, semanticMatches, semanticLoading]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
@@ -475,7 +463,9 @@ export const AgentSessionsPage: React.FC = () => {
           <div className="p-10 text-center text-gray-500 text-sm">{t('as.loadingSessions')}</div>
         ) : filtered.length === 0 ? (
           <div className="p-10 text-center text-gray-500 text-sm">
-            {search
+            {semanticLoading
+              ? t('as.semanticSearching')
+              : search
               ? semanticEnabled
                 ? t('as.noMatchingSessions')
                 : t('as.semanticSearchUnavailable')
