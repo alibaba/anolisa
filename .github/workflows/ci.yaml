@@ -943,7 +943,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: 'rustfmt, clippy'
 
@@ -974,7 +974,7 @@ jobs:
       # ── Rust coverage gate ──────────────────────────────────────────────
       - name: Rust coverage gate (≥45%)
         run: |
-          cargo install cargo-tarpaulin --locked
+          cargo install cargo-tarpaulin --version 0.37.2 --locked
           cd src/ws-ckpt/src
           cargo tarpaulin --workspace --out Stdout --fail-under 45
 
@@ -1240,6 +1240,9 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.cosh_ng == 'true'
     runs-on: anolisa-k8s-general-ci-x64
+    env:
+      # Keep lint upgrades explicit; this overrides the workspace's `stable` channel.
+      RUSTUP_TOOLCHAIN: '1.97.1'
     steps:
       - uses: actions/checkout@v4
 
@@ -1247,7 +1250,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: 'rustfmt, clippy'
 
