@@ -8,6 +8,7 @@
 - Added ATR (Agent Threat Rules) rule packs and reduced compile time. (#2531)
 - Added Warden-Gen L2 backend option for prompt scanning. (#2699)
 - Routed Rust native extension logs to Python logging framework. (#2640)
+- Corrected warmup documentation to describe model availability checks and silenced per-invocation scan mode logging in the Codex, cosh, and Qwen Code prompt scanner hooks. (#2745)
 
 **Hermes Hook Integration**
 
