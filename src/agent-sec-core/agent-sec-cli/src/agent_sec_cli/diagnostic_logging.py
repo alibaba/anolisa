@@ -308,6 +308,11 @@ class PythonLogRecordDiagnosticLogging(BaseDiagnosticLogging):
     """Base class for components that route Python logging into JSONL."""
 
     python_logger_name = ""
+    # Logger trees outside `python_logger_name` whose records still belong to
+    # this component's stream. Needed because a record's logger name is not
+    # always chosen by this codebase: pyo3-log maps Rust `log` targets onto
+    # top-level Python logger names that no component namespace covers.
+    extra_logger_names: tuple[str, ...] = ()
     event = "python_log"
     propagate_on_enable: bool | None = None
     propagate_on_reset: bool | None = None
@@ -319,20 +324,32 @@ class PythonLogRecordDiagnosticLogging(BaseDiagnosticLogging):
         self._handler: logging.Handler | None = None
 
     def _setup_enabled(self, config: DiagnosticLoggingConfig) -> None:
-        python_logger = self.get_python_logger()
         handler = self.create_record_handler(config.log_file)
         handler.setLevel(config.level)
-        # Keep the component logger's level under application control. Changing
-        # it here would affect every other handler attached to the same logger
-        # tree, not just this diagnostic JSONL handler.
-        python_logger.addHandler(handler)
-        if self.propagate_on_enable is not None:
-            python_logger.propagate = self.propagate_on_enable
+        # One handler instance serves every tree so that a single stream, and a
+        # single level, stay authoritative for the component.
+        for python_logger in self.get_python_loggers():
+            # Keep the component logger's level under application control. Changing
+            # it here would affect every other handler attached to the same logger
+            # tree, not just this diagnostic JSONL handler.
+            python_logger.addHandler(handler)
+            if self.propagate_on_enable is not None:
+                python_logger.propagate = self.propagate_on_enable
         self._handler = handler
 
     def get_python_logger(self) -> logging.Logger:
         """Return the Python logger tree this diagnostic logger owns."""
         return logging.getLogger(self.python_logger_name)
+
+    def get_python_loggers(self) -> tuple[logging.Logger, ...]:
+        """Return every logger tree this diagnostic logger attaches to.
+
+        The owned tree comes first, followed by the `extra_logger_names` trees.
+        """
+        return (
+            self.get_python_logger(),
+            *(logging.getLogger(name) for name in self.extra_logger_names),
+        )
 
     def create_record_handler(self, path: str | Path) -> "DiagnosticLogRecordHandler":
         """Create the handler that converts LogRecord objects into JSONL."""
@@ -444,13 +461,19 @@ class PythonLogRecordDiagnosticLogging(BaseDiagnosticLogging):
 
     def reset_for_tests(self) -> None:
         """Reset attached Python logging handler state for tests."""
-        python_logger = self.get_python_logger()
-        for handler in list(python_logger.handlers):
-            if self.should_remove_handler(handler):
-                python_logger.removeHandler(handler)
-                handler.close()
-        if self.propagate_on_reset is not None:
-            python_logger.propagate = self.propagate_on_reset
+        detached: list[logging.Handler] = []
+        for python_logger in self.get_python_loggers():
+            for handler in list(python_logger.handlers):
+                if self.should_remove_handler(handler):
+                    python_logger.removeHandler(handler)
+                    if handler not in detached:
+                        detached.append(handler)
+            if self.propagate_on_reset is not None:
+                python_logger.propagate = self.propagate_on_reset
+        # The same handler is shared by several trees, so it can only be closed
+        # once it is detached from all of them.
+        for handler in detached:
+            handler.close()
         self._handler = None
         super().reset_for_tests()
 

@@ -11,6 +11,12 @@ from agent_sec_cli.diagnostic_logging import (
 )
 
 _LOGGER_NAME = "agent_sec_cli"
+# Rust records reach Python through pyo3-log, which names the logger after the
+# emitting crate's `log` target — `model_service`, `prompt_scanner.<module>` —
+# not after `agent_sec_cli`. Left out of the CLI tree they bubble to a root
+# with no handler, hit logging.lastResort on stderr, and are then discarded by
+# hooks that capture stderr and parse only stdout.
+_RUST_LOGGER_NAMES = ("model_service", "prompt_scanner")
 _ENV_LOG_LEVEL = "AGENT_SEC_CLI_LOG_LEVEL"
 # Diagnostic stream is sized smaller than the business streams: default
 # WARNING volume is low, and DEBUG bursts roll over quickly.
@@ -30,6 +36,7 @@ class CliDiagnosticLogging(PythonLogRecordDiagnosticLogging):
     max_bytes = CLI_LOG_MAX_BYTES
     backup_count = CLI_LOG_BACKUP_COUNT
     python_logger_name = _LOGGER_NAME
+    extra_logger_names = _RUST_LOGGER_NAMES
     event = "cli_log"
     propagate_on_enable = False
     propagate_on_reset = True
