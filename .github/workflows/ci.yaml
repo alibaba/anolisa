@@ -1240,6 +1240,9 @@ jobs:
     needs: detect-changes
     if: needs.detect-changes.outputs.cosh_ng == 'true'
     runs-on: anolisa-k8s-general-ci-x64
+    env:
+      # This override takes precedence over the workspace's `stable` channel.
+      RUSTUP_TOOLCHAIN: '1.97.1'
     steps:
       - uses: actions/checkout@v4
 
@@ -1247,7 +1250,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: 'rustfmt, clippy'
 
