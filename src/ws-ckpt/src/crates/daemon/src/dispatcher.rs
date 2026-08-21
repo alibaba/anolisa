@@ -438,6 +438,7 @@ struct PolicyCtx {
 /// `WorkspaceNotFound` Response. One tiny read lock snapshots ws_id +
 /// `policy_io_mu` Arc, so all 4 policy handlers (Get / Reset / Patch /
 /// ReloadWorkspacePolicy) share the same boilerplate.
+#[allow(clippy::result_large_err)]
 async fn resolve_ws_for_policy(
     state: &Arc<DaemonState>,
     workspace: &str,

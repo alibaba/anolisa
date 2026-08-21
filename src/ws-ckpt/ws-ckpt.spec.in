@@ -138,6 +138,14 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Wed Aug 19 2026 yuanhong.pyh <yummypeng@linux.alibaba.com> - 0.4.3-1
+- Added k8s sidecar containerized deployment support
+- Fixed daemon memory leak under sustained checkpoint workloads (OOM)
+- Fixed loop-device checkpoint latency under concurrent IO (up to 5x improvement)
+- Fixed bootstrap failure leaving orphan images and silent exit on startup errors
+- Fixed init cryptic EBUSY on already-mounted workspace path
+- Added RPM component identity declaration for adapter discovery
+
 * Thu Jul 23 2026 ziqi02 <ziqi02@alibaba-inc.com> - 0.4.2-1
 - Added an telemetry gate to ops log writes
 - Fixed auto-recover orphan .pre-init-bak from interrupted init
