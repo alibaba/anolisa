@@ -6,13 +6,19 @@ LLM Token 优化工具包——Schema/响应压缩 + 命令重写 + 工具环境
 
 ## 核心能力
 
-| 能力 | Token 节省 | 说明 |
+| 能力 | 节省率示例 | 说明 |
 |------|-----------|------|
-| Schema 压缩 | ~57% | 压缩 OpenAI Function Calling 工具定义 |
-| 响应压缩 | ~26–78% | 压缩 API/工具响应（因内容类型而异） |
-| TOON 上下文压缩 | 15–40% | 将 JSON 编码为 TOON 格式 |
+| Schema 压缩 | 参考 fixture 47.3% | 压缩 OpenAI Function Calling 工具定义 |
+| 响应压缩 | 参考 fixture 65.8% | 压缩 API/工具响应 |
+| TOON 上下文压缩 | 参考响应 17.0% | 将 JSON 编码为 TOON 格式 |
 | 命令重写 | 60–90% | 通过 RTK 过滤 CLI 输出（支持 70+ 命令） |
 | Tool Ready | 减少重试浪费 | 旧版调用前预检、自动修复与阻断；当前硬关闭 |
+
+表中 Schema、响应和 TOON 数字是 Tokenless 0.7.11 对仓库内置参考 fixture 的独立测试
+结果，既不是生产范围，也不能相加。实际压缩率取决于 Payload 的大小和结构、可移除字段、
+配置阈值，以及工具数据在会话中的占比。短小或已经紧凑的 Payload 可能只节省几个百分
+点，也可能直接原样透传。精确输入、命令、完整结果和限制见
+[Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md#运行仓库参考负载)。
 
 Tool Ready 当前在所有 Adapter 中无条件硬旁路，不会读取依赖规范、执行调用前检查、自动修复环境或阻止工具调用。任何环境变量都无法恢复旧行为；重新启用必须修改源码并重新发布。
 
@@ -20,15 +26,17 @@ Tool Ready 当前在所有 Adapter 中无条件硬旁路，不会读取依赖规
 
 ## 适用场景与预期效果
 
-tokenless 只优化**工具调用响应**进入 LLM 上下文前的冗余，不触及模型推理与对话历史。收益高度取决于会话中工具响应的占比与形态。
+tokenless 优化进入 LLM 上下文前、由它实际处理的工具相关内容，包括工具 Schema、
+工具/API 响应和受支持的 Shell 输出；它不触及模型推理与对话历史。收益高度取决于
+这些内容在会话中的占比与形态。
 
 ### 哪些场景收益高
 
 | 工作负载 | 主要受益策略 | 原因 |
 |----------|-------------|------|
 | Shell 密集（编译/测试/排查） | 命令重写（RTK） | `cargo`/`npm`/`go`/`pytest` 等输出含大量进度/警告噪声，RTK 削减 60–90% |
-| API/抓取密集（REST、web_fetch） | 响应压缩 + TOON | JSON 含 debug/null/空值与语法开销，压缩 26–78%，TOON 再省 15–40% |
-| 工具数量多的 Agent | Schema 压缩 | 大量 Function Calling 定义冗余描述，~57% |
+| API/抓取密集（REST、web_fetch） | 响应压缩 + TOON | JSON 可能含可移除的 debug/null/空值；足够大且结构规则的数据也有可削减的语法开销 |
+| 工具数量多的 Agent | Schema 压缩 | 大量 Function Calling 定义可能含冗长描述和可移除元数据 |
 | 长响应需保真 | 可逆压缩（Stash） | 截断后可 `retrieve` 原文，端到端无损，可放心收紧阈值 |
 
 ### 哪些场景收益低或不适用

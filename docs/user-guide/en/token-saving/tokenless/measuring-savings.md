@@ -130,6 +130,43 @@ anolisa adapter status tokenless
 
 Then see [No statistics appear after enabling the adapter](troubleshooting.md#no-statistics-appear-after-enabling-the-adapter).
 
+## Run the repository reference workload
+
+The source tree includes deterministic fixtures for comparing compressor
+behavior across Tokenless revisions. On Linux, run the following command from
+`src/tokenless/benchmark/l1-compressor` in an ANOLISA source checkout:
+
+```bash
+cargo run --release --bin compression_rate -- --json
+```
+
+The report uses the committed
+`src/tokenless/benchmark/l1-compressor/fixtures/tool_response.json` and
+`src/tokenless/benchmark/l1-compressor/fixtures/schema_search.json` with the
+checked-out compressor defaults. Tokenless 0.7.11 produces this reference
+snapshot:
+
+| JSON field | Isolated stage and input | Saving |
+|---|---|---:|
+| `canonical.response.savings_pct` | Response compression on the canonical response | 65.8% |
+| `canonical.schema.savings_pct` | Schema compression on the canonical schema | 47.3% |
+| `canonical.response.toon_only_savings_pct` | TOON encoding of the uncompressed canonical response | 17.0% |
+| `canonical.schema.toon_only_savings_pct` | TOON encoding of the uncompressed canonical schema | -2.3% |
+
+A negative isolated TOON result means that encoding made this input larger. In
+active mode, the runtime emits the original JSON whenever a candidate does not
+reduce the estimated token count.
+
+This is a regression workload, not a promised production range. The response
+fixture is synthetic and compression-friendly, the suite uses one response and
+one schema, and token counts use the approximate `ceil(bytes / 4)` rule rather
+than a model tokenizer. It also excludes adapter behavior and the share of tool
+data in a complete session. Use the snapshot only to check that the same source
+revision behaves comparably; use your own representative payloads and the
+dry-run comparison below to evaluate an actual workload. See the
+[benchmark methodology and limitations](../../../../../src/tokenless/benchmark/l1-compressor/README.md#methodology)
+for details.
+
 ## Run a dry-run comparison
 
 Dry-run computes the compressed result and predicted savings but returns the original to its caller. A minimal reproducible comparison for the same input is:

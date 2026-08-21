@@ -130,6 +130,37 @@ anolisa adapter status tokenless
 
 继续参阅[启用后没有产生统计记录](troubleshooting.md#启用后没有产生统计记录)。
 
+## 运行仓库参考负载
+
+源码树提供了确定性的 fixture，用于比较不同 Tokenless 版本的压缩行为。在 Linux 上，
+进入 ANOLISA 源码中的 `src/tokenless/benchmark/l1-compressor` 后运行：
+
+```bash
+cargo run --release --bin compression_rate -- --json
+```
+
+报告使用仓库内置的
+`src/tokenless/benchmark/l1-compressor/fixtures/tool_response.json` 和
+`src/tokenless/benchmark/l1-compressor/fixtures/schema_search.json`，并应用当前检出源码的
+默认压缩配置。Tokenless 0.7.11 的参考结果如下：
+
+| JSON 字段 | 独立测试阶段与输入 | 节省率 |
+|---|---|---:|
+| `canonical.response.savings_pct` | 对 canonical 响应执行响应压缩 | 65.8% |
+| `canonical.schema.savings_pct` | 对 canonical Schema 执行 Schema 压缩 | 47.3% |
+| `canonical.response.toon_only_savings_pct` | 对未压缩的 canonical 响应执行 TOON 编码 | 17.0% |
+| `canonical.schema.toon_only_savings_pct` | 对未压缩的 canonical Schema 执行 TOON 编码 | -2.3% |
+
+TOON 独立测试出现负数，表示编码后反而变大。Active 模式下，Runtime 会在候选结果
+没有减少估算 Token 数时输出原始 JSON。
+
+这是一组回归参考负载，不是承诺的生产压缩率范围。响应 fixture 是特意构造的、易于
+压缩的合成数据；测试只使用一个响应和一个 Schema，并以近似 `ceil(bytes / 4)` 规则
+估算 Token，而不调用模型 Tokenizer。测试也不包含 Adapter 行为以及工具数据在完整
+会话中的占比。因此，这组结果只用于确认同一源码版本的行为是否相近；评估真实工作
+负载时，应使用有代表性的自有 Payload，并执行下文的 dry-run 双跑。详细口径见
+[benchmark 方法与限制](../../../../../src/tokenless/benchmark/l1-compressor/README.md#methodology)。
+
 ## 用 dry-run 做双跑对比
 
 dry-run 会计算压缩结果和预测节省，但向调用方返回原文。要对同一输入做最小可重复对比：

@@ -7,7 +7,7 @@
 Token-Less combines complementary strategies to minimize LLM token consumption:
 
 - **Schema & Response Compression** — Compresses OpenAI Function Calling tool definitions and API responses via the `tokenless-schema` library, cutting structural overhead before tokens ever reach the context window.
-- **TOON Context Compression** — Encodes JSON responses to TOON (Token-Oriented Object Notation) format via the `toon-format` library linked into `tokenless`, reducing token usage by 15-40% for structured data.
+- **TOON Context Compression** — Encodes JSON responses to TOON (Token-Oriented Object Notation) format via the `toon-format` library linked into `tokenless`, reducing syntax overhead for suitable structured data.
 - **Command Rewriting** — Integrates [RTK](https://github.com/rtk-ai/rtk) to filter and rewrite CLI command output, eliminating noise that would otherwise waste 60–90% of tokens.
 - **Tool Ready (legacy, hard-disabled)** — Its pre-call dependency checks are retained in source but unconditionally bypassed while the readiness model is redesigned.
 
@@ -27,12 +27,12 @@ cover schema compression, RTK rewriting, response compression, TOON, retrieval, 
 
 ## Features
 
-| Capability | Token Savings | Details |
+| Capability | Savings indicator | Details |
 |---|---|---|
-| Schema compression | ~57% | Compresses OpenAI Function Calling tool schemas |
-| Response compression | ~26–78% | Compresses API / tool responses (varies by content type) |
+| Schema compression | 47.3% on reference fixture | Compresses OpenAI Function Calling tool schemas |
+| Response compression | 65.8% on reference fixture | Compresses API / tool responses |
 | Reversible compression (stash) | — | Dropped array items are stashed and retrievable via `<<tokenless:KEY>>` markers |
-| TOON context compression | 15–40% | Encodes JSON to TOON format for LLMs |
+| TOON context compression | 17.0% on reference response | Encodes JSON to TOON format for LLMs |
 | Command rewriting | 60–90% | Filters CLI output via RTK (70+ commands supported) |
 | Tool Ready | reduces retry waste | Legacy pre-call check, auto-fix, and blocking; hard-disabled |
 | OpenClaw plugin | — | Command rewriting ✅, Response compression ✅, Schema compression ✅ |
@@ -46,17 +46,28 @@ cover schema compression, RTK rewriting, response compression, TOON, retrieval, 
 | AgentScope framework integration | — | Schema ✅, RTK ✅, Response ✅, TOON ✅, Retrieval ✅ |
 | Zero runtime deps | — | Pure Rust, single static binary |
 
+The schema, response, and TOON figures above are isolated Tokenless 0.7.11
+results on the repository's committed reference fixtures; they are neither a
+production range nor additive. Compression depends on payload size and shape,
+removable fields, configured thresholds, and the share of tool data in the
+session. Short or already compact payloads may save only a few percent or pass
+through unchanged. See [Measuring Tokenless Savings](../../docs/user-guide/en/token-saving/tokenless/measuring-savings.md#run-the-repository-reference-workload)
+for the exact inputs, command, full output, and limitations.
+
 ## Applicable Scenarios & Expected Effects
 
-tokenless only removes redundancy from **tool call responses** before they enter the LLM context; it does not touch model reasoning or conversation history. The payoff depends heavily on the share and shape of tool responses in the session.
+tokenless optimizes the tool-related content it handles—tool schemas, tool/API
+responses, and supported shell output—before it enters the LLM context. It does
+not touch model reasoning or conversation history. The payoff depends heavily
+on the share and shape of that content in the session.
 
 ### Where it pays off
 
 | Workload | Primary strategy | Why |
 |----------|-----------------|-----|
 | Shell-heavy (build/test/triage) | Command rewriting (RTK) | `cargo`/`npm`/`go`/`pytest` output carries lots of progress/warning noise; RTK cuts 60–90% |
-| API/fetch-heavy (REST, web_fetch) | Response compression + TOON | JSON carries debug/null/empty and syntax overhead; 26–78% compression, TOON adds 15–40% |
-| Agents with many tools | Schema compression | Many Function Calling definitions carry verbose descriptions; ~57% |
+| API/fetch-heavy (REST, web_fetch) | Response compression + TOON | JSON may carry removable debug/null/empty fields; sufficiently large, regular structures also have reducible syntax overhead |
+| Agents with many tools | Schema compression | Many Function Calling definitions carry verbose descriptions and removable metadata |
 | Long responses that must stay faithful | Reversible compression (Stash) | Truncated content is `retrieve`-able end-to-end lossless; thresholds can be tightened safely |
 
 ### Where it pays little or doesn't apply
