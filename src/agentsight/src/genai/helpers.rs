@@ -92,6 +92,12 @@ pub(super) fn classify_call_kind(request: &LLMRequest) -> CallKind {
         {
             return CallKind::Recap;
         }
+        // Cosh-shell personal analyzer background summary (#2750): fixed
+        // prompt from cosh-ng recommendation/personal_analyzer.rs; runs in a
+        // setsid child process, must not surface as a user session.
+        if text.starts_with("Summarize only grounded work into the supplied JSON schema") {
+            return CallKind::Recap;
+        }
         // QwenCode memory extraction subagent
         if text.starts_with("Managed memory has TWO directories") {
             return CallKind::Recap;
@@ -165,6 +171,8 @@ pub(super) fn classify_call_kind_from_raw(
             && first_user_text.contains("Do NOT call any tools"))
         || first_user_text.starts_with("Managed memory has TWO directories")
         || first_user_text.starts_with("[SUGGESTION MODE:")
+        // Cosh-shell personal analyzer background summary (#2750)
+        || first_user_text.starts_with("Summarize only grounded work into the supplied JSON schema")
     {
         "recap"
     } else if first_user_text.contains("Perform a web search for the query:") {
@@ -706,6 +714,35 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_cosh_personal_analyzer_recap() {
+        // cosh-shell personal analyzer background summary: fixed prompt from
+        // cosh-ng recommendation/personal_analyzer.rs build_fixed_prompt (#2750).
+        let req = make_llm_request(vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "Summarize only grounded work into the supplied JSON schema. List every business entity mentioned by a summary or prompt in that item's entities field.\nSCHEMA:\n{}".to_string(),
+            }],
+            name: None,
+        }]);
+        assert_eq!(classify_call_kind(&req), CallKind::Recap);
+    }
+
+    #[test]
+    fn test_classify_similar_analyzer_wording_stays_main() {
+        // Similar summarize wording without the analyzer's fixed prefix must
+        // not be misclassified (#2750).
+        let req = make_llm_request(vec![InputMessage {
+            role: "user".to_string(),
+            parts: vec![MessagePart::Text {
+                content: "Please summarize only grounded work into a JSON report for me"
+                    .to_string(),
+            }],
+            name: None,
+        }]);
+        assert_eq!(classify_call_kind(&req), CallKind::Main);
+    }
+
+    #[test]
     fn test_classify_claude_web_search() {
         let req = make_llm_request(vec![InputMessage {
             role: "user".to_string(),
@@ -1204,6 +1241,18 @@ mod tests {
     fn test_raw_classify_recap_claude_code() {
         let first_user = "Your task is to create a detailed summary of the conversation so far. Please Do NOT call any tools in this turn.";
         assert_eq!(classify_call_kind_from_raw(&None, first_user), "recap");
+    }
+
+    #[test]
+    fn test_raw_classify_recap_cosh_personal_analyzer() {
+        let first_user = "Summarize only grounded work into the supplied JSON schema. List every business entity mentioned by a summary or prompt in that item's entities field.\nSCHEMA:\n{}";
+        assert_eq!(classify_call_kind_from_raw(&None, first_user), "recap");
+    }
+
+    #[test]
+    fn test_raw_classify_similar_analyzer_wording_stays_main() {
+        let first_user = "Please summarize only grounded work into a JSON report for me";
+        assert_eq!(classify_call_kind_from_raw(&None, first_user), "main");
     }
 
     #[test]
