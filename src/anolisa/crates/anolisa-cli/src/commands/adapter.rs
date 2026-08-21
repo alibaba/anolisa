@@ -262,10 +262,14 @@ fn handle_scan(ctx: &CliContext) -> Result<(), CliError> {
         );
     }
 
-    if !ctx.quiet {
-        for warning in &report.warnings {
-            eprintln!("warning: {warning}");
-        }
+    // Warnings, the empty-state line, and the table are all non-error
+    // output. Gate the whole human report so `--quiet` matches `list`.
+    if ctx.quiet {
+        return Ok(());
+    }
+
+    for warning in &report.warnings {
+        eprintln!("warning: {warning}");
     }
 
     if report.entries.is_empty() {
@@ -577,6 +581,10 @@ fn handle_status(ctx: &CliContext, component: Option<&str>) -> Result<(), CliErr
             })
             .collect();
         return render_json(COMMAND, StatusPayload { receipts });
+    }
+
+    if ctx.quiet {
+        return Ok(());
     }
 
     if report.entries.is_empty() {
