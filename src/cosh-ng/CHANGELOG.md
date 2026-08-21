@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-08-21
+
+### Added
+- Add a local gateway control plane with durable Task scheduling, runtime leases, and crash recovery, exposed through `cosh agent task ...` commands (#2603)
+- Add direct ACP entrypoints `cosh agent doctor` and `cosh agent run` to verify and drive locally installed ACP adapters from outside the interactive Shell, with a once-only permission flow that prompts only on the local controlling terminal and records redacted evidence (#2603)
+
+### Fixed
+- Detect `system()` calls in awk programs even when whitespace or line continuations appear before the opening parenthesis (#2655)
+- Map missing precmd status markers to -1 instead of fabricating exit 0, preserving ledger integrity for interrupted or forged markers (#2709)
+
 ## [0.18.0] — 2026-08-20
 
 ### Added
