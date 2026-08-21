@@ -292,3 +292,50 @@ class TestCoshHookSubprocess:
         assert "sensitive data here" not in captured["args"]
         # Must be piped via stdin
         assert captured["input"] == "sensitive data here"
+
+
+# ---------------------------------------------------------------------------
+# Scan mode configuration diagnostics
+# ---------------------------------------------------------------------------
+
+
+def _run_hook_process(scan_mode: str | None) -> subprocess.CompletedProcess[str]:
+    """Run the hook with one PROMPT_SCANNER_SCAN_MODE value and keep stderr.
+
+    The empty prompt short-circuits before the CLI call, so stderr carries the
+    configuration diagnostic alone.
+    """
+    env = os.environ.copy()
+    if scan_mode is None:
+        env.pop("PROMPT_SCANNER_SCAN_MODE", None)
+    else:
+        env["PROMPT_SCANNER_SCAN_MODE"] = scan_mode
+    proc = subprocess.run(
+        [sys.executable, _COSH_HOOK],
+        input=json.dumps({"prompt": ""}),
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=15,
+        env=env,
+    )
+    assert proc.returncode == 0, f"Hook stderr: {proc.stderr}"
+    return proc
+
+
+class TestScanModeDiagnostics:
+    """Only a misconfigured PROMPT_SCANNER_SCAN_MODE may reach stderr."""
+
+    def test_invalid_scan_mode_reports_fallback(self):
+        proc = _run_hook_process("banana")
+        assert (
+            "[prompt-scanner] invalid PROMPT_SCANNER_SCAN_MODE 'banana'; "
+            "using 'standard'" in proc.stderr
+        )
+
+    @pytest.mark.parametrize("scan_mode", ["fast", "standard", "strict", "  STRICT "])
+    def test_valid_scan_mode_stays_silent(self, scan_mode):
+        assert _run_hook_process(scan_mode).stderr == ""
+
+    def test_unset_scan_mode_stays_silent(self):
+        assert _run_hook_process(None).stderr == ""
