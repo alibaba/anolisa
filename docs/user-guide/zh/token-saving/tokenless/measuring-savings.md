@@ -69,6 +69,8 @@ tokenless stats summary --json
 tokenless stats summary --limit 1000
 ```
 
+`--limit` 必须为正整数。`--limit 0` 会在解析阶段以非零退出码被拒绝，行为与 `stats diff --limit` 一致。
+
 ## 查看单条记录
 
 列出最近记录：
@@ -188,6 +190,8 @@ tokenless stats summary \
 注意：
 
 - `--compare` 必须提供恰好两个 Session ID，顺序为 baseline、active。
+- 任一 Session 没有记录时，命令以错误退出，而不是报告 0% 节省。
+- `--limit` 必须为正整数。`--limit 0` 会在解析阶段被拒绝，而不会被误报为 Session 缺失。
 - baseline 应为 dry-run，active 应为真实压缩；模式不匹配时 CLI 会告警。
 - 对真实 Agent 任务做对比时，应尽量使用相同输入、工具版本和环境。
 - dry-run 仍会把压缩前后文本写入本地统计数据库。

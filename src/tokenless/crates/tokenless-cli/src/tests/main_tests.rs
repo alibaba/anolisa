@@ -985,6 +985,38 @@ fn stats_diff_cli_validates_scope_and_limit() {
 }
 
 #[test]
+fn stats_summary_cli_rejects_zero_limit() {
+    let zero = match Cli::try_parse_from(["tokenless", "stats", "summary", "--limit", "0"]) {
+        Err(error) => error,
+        Ok(_) => panic!("summary --limit 0 must fail at parse time"),
+    };
+    assert!(zero.to_string().contains("greater than zero"));
+
+    let compare_zero = match Cli::try_parse_from([
+        "tokenless",
+        "stats",
+        "summary",
+        "--limit",
+        "0",
+        "--compare",
+        "baseline-run",
+        "active-run",
+    ]) {
+        Err(error) => error,
+        Ok(_) => panic!("compare --limit 0 must fail at parse time"),
+    };
+    assert!(compare_zero.to_string().contains("greater than zero"));
+
+    let parsed = Cli::try_parse_from(["tokenless", "stats", "summary", "--limit", "1"]).unwrap();
+    match parsed.command {
+        Commands::Stats(StatsCommands::Summary { limit, .. }) => {
+            assert_eq!(limit, Some(1));
+        }
+        _ => panic!("expected stats summary"),
+    }
+}
+
+#[test]
 fn run_command_compress_response_large_with_truncation() {
     let _guard = TempDbGuard::new();
 
@@ -1198,25 +1230,173 @@ fn run_command_stats_disable_does_not_persist_env_overrides() {
 }
 
 #[test]
+fn missing_compare_sessions_reports_each_empty_side() {
+    let record = StatsRecord::new(
+        OperationType::CompressSchema,
+        "cli".to_string(),
+        100,
+        40,
+        50,
+        20,
+    );
+    assert!(
+        missing_compare_sessions(
+            "b",
+            "t",
+            std::slice::from_ref(&record),
+            std::slice::from_ref(&record)
+        )
+        .is_none()
+    );
+
+    let both = missing_compare_sessions("b", "t", &[], &[]).unwrap();
+    assert!(both.starts_with("No records found for "));
+    assert!(both.contains("baseline session \"b\""));
+    assert!(both.contains("tokenless session \"t\""));
+    assert!(both.contains(" and "));
+
+    let baseline_only =
+        missing_compare_sessions("b", "t", &[], std::slice::from_ref(&record)).unwrap();
+    assert!(baseline_only.contains("baseline session \"b\""));
+    assert!(!baseline_only.contains("tokenless session"));
+
+    let tokenless_only = missing_compare_sessions("b", "t", &[record], &[]).unwrap();
+    assert!(tokenless_only.contains("tokenless session \"t\""));
+    assert!(!tokenless_only.contains("baseline session"));
+}
+
+#[test]
+fn missing_compare_sessions_debug_escapes_control_chars() {
+    let message = missing_compare_sessions(
+        "base\u{1b}]0;INJECTED\u{7}",
+        "tls\u{1b}]52;c;INJECTED\u{7}",
+        &[],
+        &[],
+    )
+    .unwrap();
+    assert!(!message.contains('\u{1b}'));
+    assert!(!message.contains('\u{7}'));
+    assert!(message.contains("INJECTED"));
+}
+
+fn seed_compare_record(session_id: &str, mode: CompressionMode, before: usize, after: usize) {
+    let recorder = open_recorder().expect("open recorder");
+    recorder
+        .record(
+            &StatsRecord::new(
+                OperationType::CompressResponse,
+                "cli".to_string(),
+                before * 4,
+                before,
+                after * 4,
+                after,
+            )
+            .with_session_id(session_id)
+            .with_mode(mode),
+        )
+        .expect("seed compare record");
+}
+
+#[test]
 fn run_command_stats_compare() {
-    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
+    let _guard = match TempDbGuard::new() {
+        Some(g) => g,
+        None => return,
+    };
     let result = run_command(Commands::Stats(StatsCommands::Summary {
         limit: None,
         json: false,
-        compare: Some(vec!["baseline-sess".to_string(), "tokenless-sess".to_string()]),
+        compare: Some(vec![
+            "baseline-sess".to_string(),
+            "tokenless-sess".to_string(),
+        ]),
     }));
-    assert!(result.is_ok());
+    let err = result.expect_err("empty compare sessions must fail closed");
+    assert_eq!(err.1, 1);
+    assert!(err.0.contains("No records found"));
+    assert!(err.0.contains("baseline session \"baseline-sess\""));
+    assert!(err.0.contains("tokenless session \"tokenless-sess\""));
 }
 
 #[test]
 fn run_command_stats_compare_json() {
-    let _guard = match TempDbGuard::new() { Some(g) => g, None => return };
+    let _guard = match TempDbGuard::new() {
+        Some(g) => g,
+        None => return,
+    };
     let result = run_command(Commands::Stats(StatsCommands::Summary {
         limit: None,
         json: true,
-        compare: Some(vec!["baseline-sess".to_string(), "tokenless-sess".to_string()]),
+        compare: Some(vec![
+            "baseline-sess".to_string(),
+            "tokenless-sess".to_string(),
+        ]),
+    }));
+    let err = result.expect_err("empty JSON compare must not emit a 0% report");
+    assert_eq!(err.1, 1);
+    assert!(err.0.contains("No records found"));
+}
+
+#[test]
+fn run_command_stats_compare_one_side_missing() {
+    let _guard = match TempDbGuard::new() {
+        Some(g) => g,
+        None => return,
+    };
+    seed_compare_record("tokenless-sess", CompressionMode::Active, 400, 200);
+    let baseline_missing = run_command(Commands::Stats(StatsCommands::Summary {
+        limit: None,
+        json: false,
+        compare: Some(vec![
+            "baseline-sess".to_string(),
+            "tokenless-sess".to_string(),
+        ]),
+    }))
+    .expect_err("missing baseline must fail");
+    assert!(baseline_missing.0.contains("baseline session \"baseline-sess\""));
+    assert!(!baseline_missing.0.contains("tokenless session"));
+
+    seed_compare_record("baseline-sess", CompressionMode::DryRun, 400, 200);
+    let tokenless_missing = run_command(Commands::Stats(StatsCommands::Summary {
+        limit: None,
+        json: true,
+        compare: Some(vec![
+            "baseline-sess".to_string(),
+            "absent-tokenless".to_string(),
+        ]),
+    }))
+    .expect_err("missing tokenless side must fail");
+    assert!(tokenless_missing.0.contains("tokenless session \"absent-tokenless\""));
+    assert!(!tokenless_missing.0.contains("baseline session"));
+}
+
+#[test]
+fn run_command_stats_compare_populated_sessions() {
+    let _guard = match TempDbGuard::new() {
+        Some(g) => g,
+        None => return,
+    };
+    seed_compare_record("baseline-sess", CompressionMode::DryRun, 400, 200);
+    seed_compare_record("tokenless-sess", CompressionMode::Active, 400, 200);
+    let result = run_command(Commands::Stats(StatsCommands::Summary {
+        limit: None,
+        json: false,
+        compare: Some(vec![
+            "baseline-sess".to_string(),
+            "tokenless-sess".to_string(),
+        ]),
     }));
     assert!(result.is_ok());
+
+    let json = run_command(Commands::Stats(StatsCommands::Summary {
+        limit: None,
+        json: true,
+        compare: Some(vec![
+            "baseline-sess".to_string(),
+            "tokenless-sess".to_string(),
+        ]),
+    }));
+    assert!(json.is_ok());
 }
 
 #[test]

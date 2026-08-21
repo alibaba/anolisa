@@ -69,6 +69,8 @@ The summary reads at most the latest 10,000 records by default. Limit the query 
 tokenless stats summary --limit 1000
 ```
 
+`--limit` must be a positive integer. `--limit 0` is rejected at parse time with a non-zero exit, matching `stats diff --limit`.
+
 ## Inspect individual records
 
 List recent records:
@@ -194,6 +196,8 @@ tokenless stats summary \
 Notes:
 
 - `--compare` requires exactly two session IDs in baseline, active order.
+- If either session has no records, the command exits with an error instead of reporting 0% savings.
+- `--limit` must be a positive integer. `--limit 0` is rejected at parse time instead of looking like a missing session.
 - The baseline should be a dry-run and the active session should apply compression. The CLI warns on a mode mismatch.
 - For real agent tasks, keep inputs, tool versions, and the environment as similar as possible.
 - Dry-run still writes the complete before/after text to the local statistics database.

@@ -181,7 +181,7 @@ impl From<DiffSortArg> for DiffSort {
 enum StatsCommands {
     /// Show summary statistics with breakdown by operation
     Summary {
-        #[arg(long)]
+        #[arg(long, value_parser = parse_positive_usize)]
         limit: Option<usize>,
         /// Output machine-readable JSON
         #[arg(long)]
@@ -699,6 +699,14 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                         let tokenless = recorder
                             .records_by_session(tokenless_sid, limit)
                             .map_err(|e| (format!("Failed to query tokenless: {}", e), 1))?;
+                        if let Some(message) = missing_compare_sessions(
+                            baseline_sid,
+                            tokenless_sid,
+                            &baseline,
+                            &tokenless,
+                        ) {
+                            return Err((message, 1));
+                        }
                         // Warn if a session's records do not match the expected mode,
                         // i.e. the baseline run was not recorded as dry-run.
                         warn_mode_mismatch("baseline", &baseline, CompressionMode::DryRun);
@@ -972,6 +980,27 @@ fn resolve_mode(
         );
         CompressionMode::DryRun
     }
+}
+
+/// Error text when a `--compare` side has no recorded stats.
+///
+/// An empty side used to format as a successful 0% report, which hid typos
+/// and made A/B scripts look like "no savings". Fail closed like
+/// `stats diff --session` and the Python `TokenlessStats.compare` client.
+fn missing_compare_sessions(
+    baseline_sid: &str,
+    tokenless_sid: &str,
+    baseline: &[StatsRecord],
+    tokenless: &[StatsRecord],
+) -> Option<String> {
+    let mut missing = Vec::new();
+    if baseline.is_empty() {
+        missing.push(format!("baseline session {baseline_sid:?}"));
+    }
+    if tokenless.is_empty() {
+        missing.push(format!("tokenless session {tokenless_sid:?}"));
+    }
+    (!missing.is_empty()).then(|| format!("No records found for {}", missing.join(" and ")))
 }
 
 /// Warn (to stderr) when a session's records were not recorded in the expected

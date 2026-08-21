@@ -353,10 +353,13 @@ node npm/scripts/package-npm.js --all
 
 ## 查看 Token 节省明细
 
-`show` 用于原样打印完整的压缩前后内容；`diff` 用于解释估算 Token
-节省，并只突出发生变化的行：
+`stats summary` 用于查看合计；`show` 用于原样打印完整的压缩前后内容；
+`diff` 用于解释估算 Token 节省，并只突出发生变化的行：
 
 ```bash
+tokenless stats summary
+tokenless stats summary --limit 1000
+tokenless stats summary --compare <baseline-session> <active-session>
 tokenless stats show 42
 tokenless stats diff 42
 tokenless stats diff --session <session-id>
@@ -364,9 +367,11 @@ tokenless stats diff --session <session-id> --tool-use-id <tool-use-id>
 tokenless stats diff 42 --json
 ```
 
-Session 总览只包含指标；单记录和 tool-use 报告包含 unified content
-diff。只有相邻 active 阶段的输出与输入内容完全一致时才会串成一条链，
-从而避免重复计算中间阶段的 Token。完整选项和度量限制见
+`stats summary --limit` 必须为正整数；`--limit 0` 会在解析阶段被拒绝。
+`--compare` 在任一 Session 没有记录时失败，而不是报告 0% 节省。Session
+总览只包含指标；单记录和 tool-use 报告包含 unified content diff。只有相邻
+active 阶段的输出与输入内容完全一致时才会串成一条链，从而避免重复计算中间
+阶段的 Token。完整选项和度量限制见
 [Tokenless 效果度量](../../docs/user-guide/zh/token-saving/tokenless/measuring-savings.md)。
 
 ## 数据库位置

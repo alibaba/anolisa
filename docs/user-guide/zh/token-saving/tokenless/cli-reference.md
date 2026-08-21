@@ -249,6 +249,7 @@ tokenless env-check --tool Shell --fix
 ```bash
 tokenless stats summary
 tokenless stats summary --json
+tokenless stats summary --limit 1000
 tokenless stats list --limit 20
 tokenless stats show <record-id>
 tokenless stats diff <record-id>
@@ -264,6 +265,8 @@ tokenless stats clear --yes
 ```bash
 tokenless stats summary --compare <baseline-session> <active-session>
 ```
+
+Session ID 不存在时以非零退出码失败，而不是输出 0% 对比，行为与 `stats diff --session` 一致。`stats summary --limit` 必须为正整数；`--limit 0` 会在解析阶段被拒绝，行为与 `stats diff --limit` 一致。
 
 查看单条记录，或一次工具调用中可确认衔接的阶段：
 

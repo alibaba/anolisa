@@ -255,6 +255,7 @@ tokenless env-check --tool Shell --fix
 ```bash
 tokenless stats summary
 tokenless stats summary --json
+tokenless stats summary --limit 1000
 tokenless stats list --limit 20
 tokenless stats show <record-id>
 tokenless stats diff <record-id>
@@ -270,6 +271,8 @@ Dual-run comparison:
 ```bash
 tokenless stats summary --compare <baseline-session> <active-session>
 ```
+
+A missing session ID fails with a non-zero exit instead of a 0% comparison, matching `stats diff --session`. `stats summary --limit` must be a positive integer; `--limit 0` is rejected at parse time, matching `stats diff --limit`.
 
 Inspect one record or the verified stages of one tool call:
 

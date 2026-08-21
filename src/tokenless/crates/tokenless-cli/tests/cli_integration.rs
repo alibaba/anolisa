@@ -3,8 +3,8 @@ use std::process::Command;
 use tokenless_ccr::StashStore;
 use tokenless_runtime::{CompressOptions, compress_response_with_store};
 use tokenless_stats::{
-    OperationType, StatsRecord, StatsRecorder, estimate_tokens, estimate_tokens_from_bytes,
-    get_home_dir,
+    CompressionMode, OperationType, StatsRecord, StatsRecorder, estimate_tokens,
+    estimate_tokens_from_bytes, get_home_dir,
 };
 
 fn tokenless_bin() -> Command {
@@ -1242,4 +1242,190 @@ fn env_check_hard_bypass_json_is_stable_across_processes() {
             index + 1
         );
     }
+}
+
+#[test]
+fn stats_summary_compare_rejects_missing_sessions() {
+    let db = match TempStatsDb::new() {
+        Some(db) => db,
+        None => return,
+    };
+    let output = db
+        .command()
+        .args(["stats", "summary", "--compare", "missing-a", "missing-b"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("No records found"));
+    assert!(stderr.contains("missing-a"));
+    assert!(stderr.contains("missing-b"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("Tokenless Comparison Report"));
+    assert!(!stdout.contains("saved_percent"));
+}
+
+#[test]
+fn stats_summary_compare_json_rejects_one_missing_side() {
+    let db = match TempStatsDb::new() {
+        Some(db) => db,
+        None => return,
+    };
+    let output = db
+        .command()
+        .args([
+            "stats",
+            "summary",
+            "--json",
+            "--compare",
+            "missing-baseline",
+            "integration-session",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("baseline session \"missing-baseline\""));
+    assert!(!stderr.contains("tokenless session"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("saved_percent"));
+}
+
+#[test]
+fn stats_summary_compare_reports_populated_sessions() {
+    let db = match TempStatsDb::new() {
+        Some(db) => db,
+        None => return,
+    };
+    let recorder = StatsRecorder::new(&db.path).unwrap();
+    recorder
+        .record(
+            &StatsRecord::new(
+                OperationType::CompressResponse,
+                "integration-agent".to_string(),
+                1600,
+                400,
+                800,
+                200,
+            )
+            .with_session_id("baseline-run")
+            .with_mode(CompressionMode::DryRun),
+        )
+        .unwrap();
+    recorder
+        .record(
+            &StatsRecord::new(
+                OperationType::CompressResponse,
+                "integration-agent".to_string(),
+                1600,
+                400,
+                800,
+                200,
+            )
+            .with_session_id("active-run")
+            .with_mode(CompressionMode::Active),
+        )
+        .unwrap();
+
+    let text = db
+        .command()
+        .args([
+            "stats",
+            "summary",
+            "--compare",
+            "baseline-run",
+            "active-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        text.status.success(),
+        "compare populated sessions; stderr: {}",
+        String::from_utf8_lossy(&text.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(stdout.contains("Tokenless Comparison Report"));
+    assert!(stdout.contains("TOTAL"));
+
+    let json = db
+        .command()
+        .args([
+            "stats",
+            "summary",
+            "--json",
+            "--compare",
+            "baseline-run",
+            "active-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(json.status.success());
+    let parsed: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(parsed["baseline_tokens"], 400);
+    assert_eq!(parsed["tokenless_tokens"], 200);
+    assert_eq!(parsed["saved_tokens"], 200);
+}
+
+#[test]
+fn stats_summary_compare_rejects_zero_limit() {
+    let db = match TempStatsDb::new() {
+        Some(db) => db,
+        None => return,
+    };
+    let recorder = StatsRecorder::new(&db.path).unwrap();
+    recorder
+        .record(
+            &StatsRecord::new(
+                OperationType::CompressResponse,
+                "integration-agent".to_string(),
+                1600,
+                400,
+                800,
+                200,
+            )
+            .with_session_id("baseline-run")
+            .with_mode(CompressionMode::DryRun),
+        )
+        .unwrap();
+    recorder
+        .record(
+            &StatsRecord::new(
+                OperationType::CompressResponse,
+                "integration-agent".to_string(),
+                1600,
+                400,
+                800,
+                200,
+            )
+            .with_session_id("active-run")
+            .with_mode(CompressionMode::Active),
+        )
+        .unwrap();
+
+    let output = db
+        .command()
+        .args([
+            "stats",
+            "summary",
+            "--limit",
+            "0",
+            "--compare",
+            "baseline-run",
+            "active-run",
+        ])
+        .output()
+        .unwrap();
+    assert_ne!(output.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("greater than zero"),
+        "zero limit must fail at parse time; stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("No records found"),
+        "populated sessions with --limit 0 must not look missing; stderr: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("Tokenless Comparison Report"));
+    assert!(!stdout.contains("saved_percent"));
 }
