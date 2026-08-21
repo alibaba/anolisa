@@ -24,6 +24,8 @@ pub(crate) struct GatewayPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TuiEntry {
     pub(crate) login: bool,
+    /// Arguments consumed by the TUI after any entry subcommand is removed.
+    pub(crate) launch_args: Vec<OsString>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +114,20 @@ pub(crate) fn classify_invocation(
     stdout_tty: bool,
     stderr_tty: bool,
 ) -> Invocation {
+    if args.first().and_then(|arg| arg.to_str()) == Some("raw") {
+        // Keep the legacy non-interactive escape hatches (`raw -c` and
+        // `raw --`) transparent, but treat every other raw shape as the
+        // explicit TUI request that the direct cosh-shell entry accepts.
+        if let Some(args) = normalize_raw_invocation(args) {
+            return classify_invocation(argv0, &args, stdin_tty, stdout_tty, stderr_tty);
+        }
+
+        return Invocation::Tui(TuiEntry {
+            login: is_login_invocation(argv0, args),
+            launch_args: args[1..].to_vec(),
+        });
+    }
+
     let mut kept: Vec<OsString> = Vec::new();
     let mut shell_override: Option<OsString> = None;
     let mut idx = 0;
@@ -173,6 +189,7 @@ pub(crate) fn classify_invocation(
     if stdin_tty && stdout_tty && stderr_tty {
         Invocation::Tui(TuiEntry {
             login: is_login_invocation(argv0, args),
+            launch_args: args.to_vec(),
         })
     } else {
         Invocation::ExecShell(ExecPlan {
@@ -333,22 +350,13 @@ mod tests {
     }
 
     #[test]
-    fn agent_namespace_builds_gateway_plan_without_the_namespace_token() {
-        assert_eq!(
-            gateway_plan(&os(&["agent", "task", "get", "task-1"])),
-            Some(GatewayPlan {
-                args: os(&["task", "get", "task-1"]),
-            })
-        );
-        assert_eq!(gateway_plan(&os(&["agentic"])), None);
-        assert_eq!(gateway_plan(&[]), None);
-    }
-
-    #[test]
     fn classify_row_1_bare_terminal_enters_tui() {
         assert_eq!(
             classify("cosh", &[], ALL_TTY),
-            Invocation::Tui(TuiEntry { login: false })
+            Invocation::Tui(TuiEntry {
+                login: false,
+                launch_args: os(&[]),
+            })
         );
     }
 
@@ -375,7 +383,10 @@ mod tests {
     fn classify_row_3_login_argv0_sets_login_and_preserves_arg0() {
         assert_eq!(
             classify("-cosh", &[], ALL_TTY),
-            Invocation::Tui(TuiEntry { login: true })
+            Invocation::Tui(TuiEntry {
+                login: true,
+                launch_args: os(&[]),
+            })
         );
         match classify("-cosh", &["-c", "id"], ALL_TTY) {
             Invocation::ExecShell(plan) => assert_eq!(plan.arg0, OsString::from("-cosh")),
@@ -388,7 +399,10 @@ mod tests {
         for flag in ["-l", "--login"] {
             assert_eq!(
                 classify("cosh", &[flag], ALL_TTY),
-                Invocation::Tui(TuiEntry { login: true })
+                Invocation::Tui(TuiEntry {
+                    login: true,
+                    launch_args: os(&[flag]),
+                })
             );
             assert_eq!(
                 exec_args(classify("cosh", &[flag], (false, false, false))),
@@ -636,16 +650,6 @@ mod tests {
     }
 
     #[test]
-    fn cosh_entry_matches_only_the_cosh_basename() {
-        for argv0 in ["cosh", "-cosh", "/usr/bin/cosh", "./cosh"] {
-            assert!(is_cosh_entry(OsStr::new(argv0)), "argv0 {argv0}");
-        }
-        for argv0 in ["cosh-shell", "-cosh-shell", "/usr/libexec/cosh-shell", ""] {
-            assert!(!is_cosh_entry(OsStr::new(argv0)), "argv0 {argv0}");
-        }
-    }
-
-    #[test]
     fn normalize_raw_diverts_only_command_string_and_double_dash() {
         assert_eq!(
             normalize_raw_invocation(&os(&["raw", "cosh-core", "-c", "echo ok"])),
@@ -680,3 +684,7 @@ mod tests {
         assert_eq!(normalize_raw_invocation(&os(&["-c", "echo ok"])), None);
     }
 }
+
+#[cfg(test)]
+#[path = "invocation_tests.rs"]
+mod invocation_tests;

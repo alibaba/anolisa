@@ -105,20 +105,21 @@ fn main() {
             stderr_tty,
         ) {
             Invocation::ExecShell(plan) => std::process::exit(exec_shell(plan)),
-            Invocation::Tui(_) => {
+            Invocation::Tui(entry) => {
                 runtime::terminal::install_terminal_recovery();
                 let cosh_config = config::load_config();
                 runtime::logging::init_logging(&cosh_config.log_level);
                 tracing::info!(version = env!("CARGO_PKG_VERSION"), "cosh-shell starting");
-                // The allowlist only admits valid UTF-8 tokens in args[1..];
-                // argv[0] may be arbitrary bytes, so it is converted lossily
-                // (the TUI never re-parses it).
-                let args = args_os
+                // The classifier only admits valid UTF-8 launch arguments;
+                // argv[0] may be arbitrary bytes, so it never reaches the
+                // TUI parser.
+                let launch_args = entry
+                    .launch_args
                     .iter()
                     .map(|arg| arg.to_string_lossy().into_owned())
                     .collect::<Vec<_>>();
                 let (adapter_name, shell_kind, launch_options) =
-                    configured_raw_invocation(&args[1..]);
+                    configured_raw_invocation(&launch_args);
                 let status =
                     runtime::controller::run_raw(&adapter_name, shell_kind, launch_options);
                 std::process::exit(status);
