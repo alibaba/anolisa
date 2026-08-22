@@ -470,6 +470,15 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Sat Aug 22 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.12-1
+- feat(tokenless): preserve tail items during array truncation
+- fix(tokenless): surface skipped schema compression
+- fix(tokenless): persist stats without environment overrides
+- fix(tokenless): reject invalid stats comparisons
+- fix(tokenless): compress top-level request tool schemas
+- fix(tokenless): report missing L2 retention items
+- fix(tokenless): keep plain truncation markers TOON-safe
+
 * Thu Aug 20 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.11-1
 - fix(tokenless): align TOON CLI token scoring and exit codes
 

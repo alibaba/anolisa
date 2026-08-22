@@ -9,6 +9,21 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.7.12] - 2026-08-22
+
+### Changed
+
+- Response compression now keeps a configurable tail window after the retained array head (8 items by default, controlled by `--array-tail-preserve` and the Runtime API), so final statuses and error details remain inline while Stash stores only the omitted middle segment ([#2433](https://github.com/alibaba/anolisa/pull/2433)).
+- The `BeforeModel` schema hook now warns once per session when a payload is malformed or carries no tool declarations, making a skipped hook distinguishable from a successful run that produced no savings; explicitly empty tool arrays still pass through silently ([#2606](https://github.com/alibaba/anolisa/pull/2606)).
+- L2 benchmark JSON, Markdown, and semantic-gate findings now identify the missing ground-truth items behind retention failures instead of reporting counts alone ([#2433](https://github.com/alibaba/anolisa/pull/2433)).
+
+### Fixed
+
+- `tokenless stats enable` and `stats disable` now persist only the Stats toggle from the on-disk configuration, so temporary compression and SLS environment overrides are not copied into `config.json` ([#2592](https://github.com/alibaba/anolisa/pull/2592)).
+- `tokenless stats summary --compare` now fails when either Session has no records, and `--limit 0` is rejected, preventing typos or empty samples from appearing as successful 0% comparisons ([#2674](https://github.com/alibaba/anolisa/pull/2674)).
+- Schema compression now handles complete request objects with a top-level `tools` array, compressing Function Calling entries while preserving non-function tools and fields outside the array ([#2758](https://github.com/alibaba/anolisa/pull/2758)).
+- Lossy array truncation markers now survive TOON round trips intact, and extremely large tail-preservation values keep the full array instead of overflowing ([#2433](https://github.com/alibaba/anolisa/pull/2433)).
+
 ## [0.7.11] - 2026-08-20
 
 ### Fixed
