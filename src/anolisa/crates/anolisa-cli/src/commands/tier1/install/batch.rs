@@ -919,6 +919,7 @@ mod tests {
 
     use anolisa_core::domain::{InstallationScope, ManagementRelation, ProviderBinding};
     use anolisa_core::facts::{JournalEvidence, pending_journal_for};
+    use anolisa_core::planner::{InstallRequest, Plan, ProviderTarget};
     use anolisa_platform::pkg_query::{PackageInfo, PackageQueryError};
     use anolisa_platform::pkg_transaction::PackageTransactionError;
 
@@ -1070,6 +1071,18 @@ mod tests {
             scope: InstallationScope::System,
             now: NOW.to_string(),
             store: StateStore::empty(),
+            request: InstallRequest {
+                target: ProviderTarget::Delegated {
+                    pm: NativePm::Rpm,
+                    package: package.to_string(),
+                    artifact: None,
+                },
+                requested_version: None,
+            },
+            plan: Plan::Execute {
+                steps: steps.clone(),
+                notes: Vec::new(),
+            },
             route: PlannedRoute::Delegated { steps },
         }
     }

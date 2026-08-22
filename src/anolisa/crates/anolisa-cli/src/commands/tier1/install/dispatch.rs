@@ -1,5 +1,4 @@
-//! Command dispatch for `install`: provider-family selection, target
-//! resolution, and the observe → plan → execute pipeline for one component.
+//! Planning and effect adapters used by the single-component install application service.
 //!
 //! The handler resolves the requested component to a [`ProviderTarget`],
 //! assembles host facts, asks the planner for a step sequence (decision
@@ -10,9 +9,15 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use anolisa_core::component_snapshot::{
+    ComponentSnapshot, ComponentSnapshotRequest, ProbeEvidence, SnapshotProbe, StateSnapshot,
+};
+use anolisa_core::execution::{
+    CommandOutcome, CommandOutcomeStatus, ExecutionIntent, PreparedExecution,
+};
 use anolisa_core::executor::{DelegatedExecutionTarget, execute_delegated_steps};
 use anolisa_core::facts::{
-    FactsError, JournalEvidence, ObserveRequest, assemble_facts, pending_journal_for,
+    FactsError, JournalEvidence, assemble_component_snapshot, lifecycle_facts_from_snapshot,
 };
 use anolisa_core::lock::InstallLock;
 use anolisa_core::owned_executor::{OwnedExecutionError, execute_owned_steps};
@@ -31,7 +36,6 @@ use anolisa_platform::rpm_query::RpmPackageQuery;
 use anolisa_platform::rpm_repo::DnfRepoSource;
 use anolisa_platform::rpm_transaction::RpmTransaction;
 use chrono::{SecondsFormat, Utc};
-use serde::Serialize;
 
 use anolisa_core::domain::{InstallationScope, NativePm, ProviderBinding};
 
@@ -40,7 +44,7 @@ use crate::commands::common::RepoPersistPolicy;
 use crate::commands::tier1::recovery::LockedJournalGate;
 use crate::commands::tier1::rpm_install;
 use crate::context::{CliContext, InstallMode};
-use crate::progress::{self, Activity, ProgressReporter};
+use crate::progress::{self, ProgressReporter};
 use crate::repo_config::{
     BackendConfig, HostVars, RepoConfig, RepoConfigError, normalize_override_url,
 };
@@ -48,8 +52,9 @@ use crate::resolution::{
     BackendKind, ComponentIndex, ComponentResolver, ResolutionSet, ResolveOptions,
     load_component_index_from_base, load_optional_component_index,
 };
-use crate::response::{CliError, render_json};
+use crate::response::CliError;
 
+use super::application::{InstallApplicationOutcome, InstallChange, InstallSubject};
 use super::owned_ops::{
     RawInstallOps, ValidatedInstall, installed_version_label, validate_component_conflict,
     validate_owned_install,
@@ -59,65 +64,8 @@ use super::render::repo_config_err;
 use super::rpm::{
     PinError, RpmTarget, resolve_pinned_candidate, rpm_package_candidates_with_index,
 };
-use super::types::{InstallOutcome, RawRepositoryOrigin, RawResolution, ResolveInputs};
+use super::types::{RawRepositoryOrigin, RawResolution, ResolveInputs};
 use super::{ANOLISA_RPM_REPO_ID, COMMAND, InstallArgs};
-
-/// Dispatch `install <component>` against the live host.
-pub(crate) fn handle_one(
-    component: String,
-    args: InstallArgs,
-    ctx: &CliContext,
-) -> Result<InstallOutcome, CliError> {
-    let mut activity = install_activity(&component, ctx);
-    let (query, txn) = host_backends(&component, &args, ctx)?;
-    let env = anolisa_env::EnvService::detect();
-    let rpmdb = RpmdbProbe::for_host(&env);
-    install_component_with_deps_and_planned(
-        &component,
-        &args,
-        ctx,
-        &env,
-        &rpmdb,
-        &query,
-        &txn,
-        privilege::is_root(),
-        &HashSet::new(),
-        &mut activity,
-    )
-}
-
-/// Dispatch one batch member while treating earlier successful dry-run
-/// members as installed for directional manifest-conflict validation.
-pub(crate) fn handle_one_with_planned_components(
-    component: String,
-    args: InstallArgs,
-    ctx: &CliContext,
-    planned_components: &HashSet<String>,
-) -> Result<InstallOutcome, CliError> {
-    let mut activity = install_activity(&component, ctx);
-    let (query, txn) = host_backends(&component, &args, ctx)?;
-    let env = anolisa_env::EnvService::detect();
-    let rpmdb = RpmdbProbe::for_host(&env);
-    install_component_with_deps_and_planned(
-        &component,
-        &args,
-        ctx,
-        &env,
-        &rpmdb,
-        &query,
-        &txn,
-        privilege::is_root(),
-        planned_components,
-        &mut activity,
-    )
-}
-
-fn install_activity(component: &str, ctx: &CliContext) -> Activity {
-    Activity::start(
-        progress::feedback_for_stderr(ctx.json, ctx.quiet),
-        &format!("Preparing to install {component}..."),
-    )
-}
 
 /// Real host backends for one component invocation.
 ///
@@ -223,6 +171,9 @@ pub(crate) struct PlannedComponent {
     pub(crate) scope: InstallationScope,
     pub(crate) now: String,
     pub(crate) store: StateStore,
+    pub(crate) request: InstallRequest,
+    /// Exact planner output consumed by [`ExecutionIntent`].
+    pub(crate) plan: Plan,
     pub(crate) route: PlannedRoute,
 }
 
@@ -308,87 +259,48 @@ impl PlannedRoute {
     }
 }
 
-/// Core of [`handle_one`] with the package backends injected so tests drive
-/// every branch without a live rpmdb/dnf or real privileges.
-#[cfg(test)]
-pub(crate) fn install_component_with_deps(
-    input: &str,
-    args: &InstallArgs,
-    ctx: &CliContext,
-    query: &dyn PackageQuery,
-    txn: &dyn PackageTransaction,
-    is_root: bool,
-) -> Result<InstallOutcome, CliError> {
-    let env = anolisa_env::EnvService::detect();
-    install_component_with_deps_and_env(
-        input,
-        args,
-        ctx,
-        &env,
-        &RpmdbProbe::absent(),
-        query,
-        txn,
-        is_root,
+#[expect(clippy::too_many_arguments)]
+fn observe_install_snapshot(
+    component: &str,
+    scope: InstallationScope,
+    native_package: Option<&str>,
+    observed_at: &str,
+    store: &StateStore,
+    provider: Option<&DelegatedProvider<'_>>,
+    layout: &FsLayout,
+    journal_dir: &Path,
+) -> Result<ComponentSnapshot, FactsError> {
+    let mut probes = vec![SnapshotProbe::State, SnapshotProbe::PendingJournal];
+    if native_package.is_some() {
+        probes.push(SnapshotProbe::NativePackage);
+    }
+    assemble_component_snapshot(
+        ComponentSnapshotRequest::new(component, scope, probes),
+        native_package,
+        observed_at,
+        store,
+        provider,
+        layout,
+        journal_dir,
     )
 }
 
-/// Test variant with the host facts injected, so family-sensitive branches
-/// (deb degrade, rpm fail-closed, unknown fail-closed) are covered
-/// deterministically instead of depending on the runner's /etc/os-release.
-#[cfg(test)]
-#[expect(clippy::too_many_arguments)]
-pub(crate) fn install_component_with_deps_and_env(
-    input: &str,
-    args: &InstallArgs,
-    ctx: &CliContext,
-    env: &anolisa_env::EnvFacts,
-    rpmdb: &RpmdbProbe,
-    query: &dyn PackageQuery,
-    txn: &dyn PackageTransaction,
-    is_root: bool,
-) -> Result<InstallOutcome, CliError> {
-    let mut activity = install_activity(input, ctx);
-    install_component_with_deps_and_planned(
-        input,
-        args,
-        ctx,
-        env,
-        rpmdb,
-        query,
-        txn,
-        is_root,
-        &HashSet::new(),
-        &mut activity,
-    )
-}
-
-// Tests vary each execution dependency independently; keeping them explicit
-// makes the host boundary visible instead of hiding it in an opaque test bag.
-#[expect(clippy::too_many_arguments)]
-fn install_component_with_deps_and_planned(
-    input: &str,
-    args: &InstallArgs,
-    ctx: &CliContext,
-    env: &anolisa_env::EnvFacts,
-    rpmdb: &RpmdbProbe,
-    query: &dyn PackageQuery,
-    txn: &dyn PackageTransaction,
-    is_root: bool,
-    planned_components: &HashSet<String>,
-    reporter: &mut dyn ProgressReporter,
-) -> Result<InstallOutcome, CliError> {
-    let planned = plan_component(input, args, ctx, env, rpmdb, query, txn)?;
-    execute_planned(
-        planned,
-        args,
-        ctx,
-        env,
-        rpmdb,
-        query,
-        txn,
-        is_root,
-        planned_components,
-        reporter,
+fn observe_install_state(
+    component: &str,
+    scope: InstallationScope,
+    observed_at: &str,
+    store: &StateStore,
+    layout: &FsLayout,
+    journal_dir: &Path,
+) -> Result<ComponentSnapshot, FactsError> {
+    assemble_component_snapshot(
+        ComponentSnapshotRequest::new(component, scope, [SnapshotProbe::State]),
+        None,
+        observed_at,
+        store,
+        None,
+        layout,
+        journal_dir,
     )
 }
 
@@ -462,33 +374,73 @@ pub(crate) fn plan_component(
         ));
     }
 
-    // I10 short-circuit: a quarantined record decides the outcome before any
-    // network or rpmdb resolution has to run.
-    if quarantined(&store, &component) {
-        return Err(plan_error_to_cli(
-            PlanError::NeedsAttention,
-            &component,
-            &command,
-        ));
-    }
-
-    // Same for a pending operation journal: it blocks any new mutation, and
-    // the refusal must not depend on the rpm candidate chain or the raw repo
-    // resolving.
-    let pending = pending_journal_for(
-        JournalEvidence::new(&journal_dir, &store.operations),
+    // State and journal decide the early refusal order before provider or
+    // repository resolution. The second snapshot below adds native evidence.
+    let initial_snapshot =
+        observe_install_state(&component, scope, &now, &store, &layout, &journal_dir).map_err(
+            |err| CliError::Runtime {
+                command: command.clone(),
+                reason: err.to_string(),
+            },
+        )?;
+    let active_binding = match initial_snapshot.state() {
+        ProbeEvidence::Absent { .. } => None,
+        ProbeEvidence::Present {
+            value: StateSnapshot::Active(installation),
+            ..
+        } => Some(installation.binding.clone()),
+        ProbeEvidence::Present {
+            value: StateSnapshot::Quarantined(_),
+            ..
+        } => {
+            return Err(plan_error_to_cli(
+                PlanError::NeedsAttention,
+                &component,
+                &command,
+            ));
+        }
+        ProbeEvidence::Unavailable { reason, .. } => {
+            return Err(CliError::Runtime {
+                command,
+                reason: reason.clone(),
+            });
+        }
+        ProbeEvidence::NotRequested => {
+            unreachable!("install snapshot always requests state evidence")
+        }
+    };
+    let journal_snapshot = observe_install_snapshot(
         &component,
+        scope,
+        None,
+        &now,
+        &store,
+        None,
+        &layout,
+        &journal_dir,
     )
     .map_err(|err| CliError::Runtime {
         command: command.clone(),
         reason: err.to_string(),
     })?;
-    if pending.is_some() {
-        return Err(plan_error_to_cli(
-            PlanError::PendingOperation,
-            &component,
-            &command,
-        ));
+    match journal_snapshot.pending_journal() {
+        ProbeEvidence::Present { .. } => {
+            return Err(plan_error_to_cli(
+                PlanError::PendingOperation,
+                &component,
+                &command,
+            ));
+        }
+        ProbeEvidence::Absent { .. } => {}
+        ProbeEvidence::Unavailable { reason, .. } => {
+            return Err(CliError::Runtime {
+                command,
+                reason: reason.clone(),
+            });
+        }
+        ProbeEvidence::NotRequested => {
+            unreachable!("install snapshot always requests pending journal evidence")
+        }
     }
 
     // Resolve the provider target and the native probe package. Nothing here
@@ -496,9 +448,6 @@ pub(crate) fn plan_component(
     // or a refusal (I4–I9, I11), and a fresh owned target's plan does not
     // depend on the resolved version — only the probe answer (I3) matters,
     // and that answer must not depend on the repo being reachable.
-    let active_binding = store
-        .find(ObjectKind::Component, &component)
-        .map(|installation| installation.binding.clone());
     let mut delegated_pin: Option<DelegatedPin> = None;
     let (target, native_package): (ProviderTarget, Option<String>) = match &active_binding {
         Some(binding) => target_for_active_record(binding, &family, args, &component),
@@ -553,14 +502,6 @@ pub(crate) fn plan_component(
     };
 
     let provider = DelegatedProvider::new(query, txn);
-    let observe_request = ObserveRequest {
-        kind: ObjectKind::Component,
-        name: &component,
-        scope,
-        native_package: native_package.as_deref(),
-        observed_at: &now,
-        verify_owned_files: false,
-    };
     // A missing rpm/dnf binary is a hard error whenever a probe was needed:
     // without it the host cannot prove the component is not an unobserved
     // system RPM, and a raw install over one could corrupt it (I3). The one
@@ -569,8 +510,11 @@ pub(crate) fn plan_component(
     // The package identity is kept: the executor's locked recheck re-probes
     // it and applies the same CommandMissing policy, so tooling (and an RPM)
     // appearing between planning and placement is still caught.
-    let facts = match assemble_facts(
-        &observe_request,
+    let snapshot = match observe_install_snapshot(
+        &component,
+        scope,
+        native_package.as_deref(),
+        &now,
         &store,
         Some(&provider),
         &layout,
@@ -583,20 +527,20 @@ pub(crate) fn plan_component(
             if family != "raw" || missing_rpm_tooling_is_fatal(env, rpmdb) {
                 return Err(rpm_tooling_missing_error(&command, &bin, &component));
             }
-            let observe_request = ObserveRequest {
-                kind: ObjectKind::Component,
-                name: &component,
+            observe_install_snapshot(
+                &component,
                 scope,
-                native_package: None,
-                observed_at: &now,
-                verify_owned_files: false,
-            };
-            assemble_facts(&observe_request, &store, None, &layout, &journal_dir).map_err(
-                |err| CliError::Runtime {
-                    command: command.clone(),
-                    reason: err.to_string(),
-                },
-            )?
+                None,
+                &now,
+                &store,
+                None,
+                &layout,
+                &journal_dir,
+            )
+            .map_err(|err| CliError::Runtime {
+                command: command.clone(),
+                reason: err.to_string(),
+            })?
         }
         Err(err) => {
             return Err(CliError::Runtime {
@@ -605,13 +549,28 @@ pub(crate) fn plan_component(
             });
         }
     };
+    let active_adapter_claims = store
+        .adapter_claims
+        .iter()
+        .filter(|claim| claim.component == component)
+        .map(|claim| claim.framework.clone())
+        .collect();
+    let facts =
+        lifecycle_facts_from_snapshot(&snapshot, active_adapter_claims, None).map_err(|err| {
+            CliError::Runtime {
+                command: command.clone(),
+                reason: err.to_string(),
+            }
+        })?;
 
     let request = InstallRequest {
         target,
         requested_version: args.version.clone(),
     };
-    let route = match plan(&Intent::Install(request), &facts) {
-        Ok(Plan::Execute { steps, .. }) => {
+    let install_plan = plan(&Intent::Install(request.clone()), &facts)
+        .map_err(|err| plan_error_to_cli(err, &component, &command))?;
+    let route = match &install_plan {
+        Plan::Execute { steps, .. } => {
             // Route by step family: a delegated plan requests one native
             // transaction, an owned plan places the resolved artifact through
             // the raw backend.
@@ -625,19 +584,22 @@ pub(crate) fn plan_component(
                 )
             });
             if is_delegated_plan {
-                PlannedRoute::Delegated { steps }
+                PlannedRoute::Delegated {
+                    steps: steps.clone(),
+                }
             } else {
-                PlannedRoute::Owned { steps }
+                PlannedRoute::Owned {
+                    steps: steps.clone(),
+                }
             }
         }
-        Ok(Plan::NoOp { .. }) => {
+        Plan::NoOp { .. } => {
             // I4/I8: install is idempotent over a healthy record.
             let version = store
                 .find(ObjectKind::Component, &component)
                 .map(installed_version_label);
             PlannedRoute::AlreadyInstalled { version }
         }
-        Err(err) => return Err(plan_error_to_cli(err, &component, &command)),
     };
 
     Ok(PlannedComponent {
@@ -649,18 +611,17 @@ pub(crate) fn plan_component(
         scope,
         now,
         store,
+        request,
+        plan: install_plan,
         route,
     })
 }
 
-/// Execution half of [`handle_one`]: render the idempotent
-/// NoOp, place a resolved owned artifact, or run the delegated native
-/// transaction. Dry-run renders the plan and stops before any side effect.
-// Mirrors the explicit planner/executor dependency boundary above, with the
-// reporter added so terminal lifecycle remains injectable in tests.
+/// Execute prepared single-component work and return a typed application result.
 #[expect(clippy::too_many_arguments)]
-fn execute_planned(
+pub(super) fn execute_planned(
     planned: PlannedComponent,
+    prepared: PreparedExecution,
     args: &InstallArgs,
     ctx: &CliContext,
     env: &anolisa_env::EnvFacts,
@@ -670,7 +631,7 @@ fn execute_planned(
     is_root: bool,
     planned_components: &HashSet<String>,
     reporter: &mut dyn ProgressReporter,
-) -> Result<InstallOutcome, CliError> {
+) -> Result<InstallApplicationOutcome, CliError> {
     let PlannedComponent {
         command,
         mut component,
@@ -680,6 +641,8 @@ fn execute_planned(
         scope,
         now,
         store,
+        request,
+        plan: _,
         route,
     } = planned;
     let layout = common::resolve_layout(ctx);
@@ -690,30 +653,40 @@ fn execute_planned(
 
     // Only a settled owned plan resolves the raw artifact (network) — every
     // planning refusal is independent of the raw repo being reachable.
-    let (steps, resolution) = match route {
-        PlannedRoute::AlreadyInstalled { version } => {
+    let (steps, preview, resolution) = match (route, prepared) {
+        (PlannedRoute::AlreadyInstalled { version, .. }, PreparedExecution::NoOp { reason }) => {
             reporter.finish();
-            render_result(
-                ctx,
-                &InstallResultPayload {
-                    component: component.clone(),
+            return Ok(InstallApplicationOutcome::NoOp {
+                subject: InstallSubject {
+                    component,
                     package: native_package,
                     version,
                     backend: family,
-                    action: "already-installed",
-                    operation_id: None,
                     requested_version: None,
                     resolved_version: None,
                     source_repo: None,
                     artifact: None,
-                    dry_run: ctx.dry_run,
-                    plan: Vec::new(),
                 },
-            )?;
-            return Ok(InstallOutcome::AlreadyInstalled);
+                reason,
+            });
         }
-        PlannedRoute::Delegated { steps } => (steps, None),
-        PlannedRoute::Owned { steps } => {
+        (PlannedRoute::Delegated { .. }, PreparedExecution::Preview { steps, .. }) => {
+            (steps, true, None)
+        }
+        (PlannedRoute::Delegated { .. }, PreparedExecution::Apply { steps, .. }) => {
+            (steps, false, None)
+        }
+        (PlannedRoute::Delegated { .. }, PreparedExecution::NoOp { .. }) => {
+            unreachable!("a delegated execution route cannot prepare as no-op")
+        }
+        (PlannedRoute::Owned { .. }, prepared) => {
+            let (steps, preview) = match prepared {
+                PreparedExecution::Preview { steps, .. } => (steps, true),
+                PreparedExecution::Apply { steps, .. } => (steps, false),
+                PreparedExecution::NoOp { .. } => {
+                    unreachable!("an owned route cannot prepare as no-op")
+                }
+            };
             reporter.report(&format!("Resolving {component}..."));
             let resolution = resolve_owned_artifact(
                 args,
@@ -725,11 +698,12 @@ fn execute_planned(
                 &command,
             )?;
             component = resolution.component.clone();
-            (steps, Some(resolution))
+            (steps, preview, Some(resolution))
+        }
+        (PlannedRoute::AlreadyInstalled { .. }, _) => {
+            unreachable!("a no-op route cannot prepare executable steps")
         }
     };
-
-    let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
 
     // Pin evidence for an owned `--version` install, captured while the
     // resolution is still whole (contract validation consumes it below).
@@ -738,11 +712,12 @@ fn execute_planned(
         _ => None,
     };
 
-    if ctx.dry_run {
+    if preview {
         reporter.finish();
-        for warning in resolution.iter().flat_map(|r| r.warnings.iter()) {
-            eprintln!("warning: {warning}");
-        }
+        let mut warnings: Vec<String> = resolution
+            .iter()
+            .flat_map(|resolution| resolution.warnings.iter().cloned())
+            .collect();
         if let Some(resolution) = resolution.as_ref() {
             match load_dry_run_install_contract(ctx, &layout, resolution)? {
                 Some(contract) => {
@@ -753,10 +728,10 @@ fn execute_planned(
                         &command,
                     )?;
                 }
-                None => eprintln!(
-                    "warning: dry-run could not validate component conflicts for '{}' because the repository has no lightweight meta.toml; the full artifact was not downloaded",
+                None => warnings.push(format!(
+                    "dry-run could not validate component conflicts for '{}' because the repository has no lightweight meta.toml; the full artifact was not downloaded",
                     resolution.component
-                ),
+                )),
             }
         }
         // A pinned dry-run reports the version it resolved against the
@@ -766,28 +741,27 @@ fn execute_planned(
             .as_ref()
             .map(|r| r.entry.version.clone())
             .or_else(|| args.version.clone());
-        let mut payload = InstallResultPayload {
+        let mut subject = InstallSubject {
             component,
             package: native_package,
             version: base_version,
             backend: family,
-            action: "planned",
-            operation_id: None,
             requested_version: None,
             resolved_version: None,
             source_repo: None,
             artifact: None,
-            dry_run: true,
-            plan: plan_labels,
         };
         if let Some(pin) = &delegated_pin {
-            payload = payload.with_pin(pin);
+            apply_delegated_pin(&mut subject, pin);
         }
         if let Some(pin) = &raw_pin {
-            payload = payload.with_raw_pin(pin);
+            apply_raw_pin(&mut subject, pin);
         }
-        render_result(ctx, &payload)?;
-        return Ok(InstallOutcome::Installed);
+        return Ok(InstallApplicationOutcome::Preview {
+            subject,
+            steps,
+            warnings,
+        });
     }
 
     if let Some(resolution) = resolution {
@@ -799,7 +773,7 @@ fn execute_planned(
         let validated = validate_owned_install(ctx, &layout, &store, resolution, &command)?;
         reporter.report(&format!("Installing {component}..."));
         let provider = DelegatedProvider::new(query, txn);
-        return install_owned(
+        return install_applied(
             &component,
             ctx,
             &layout,
@@ -807,40 +781,62 @@ fn execute_planned(
             &journal_dir,
             scope,
             &now,
-            &steps,
-            &plan_labels,
-            validated,
-            raw_pin.as_ref(),
-            native_package.as_deref(),
-            (!missing_rpm_tooling_is_fatal(env, rpmdb)).then_some(rpmdb),
+            &request,
             &provider,
             &command,
             reporter,
+            InstallApply::Owned {
+                validated: Box::new(validated),
+                raw_pin: raw_pin.as_ref(),
+                native_package: native_package.as_deref(),
+                degraded_rpmdb: (!missing_rpm_tooling_is_fatal(env, rpmdb)).then_some(rpmdb),
+            },
         );
     }
 
     reporter.report(&format!("Installing {component}..."));
     let provider = DelegatedProvider::new(query, txn);
     let package = native_package.unwrap_or_else(|| component.clone());
-    install_delegated(
+    install_applied(
         &component,
-        &package,
         ctx,
         &layout,
         &state_path,
         &journal_dir,
         scope,
         &now,
-        &steps,
-        &plan_labels,
-        delegated_pin.as_ref(),
+        &request,
         &provider,
-        &repo_config,
-        index_base_override.as_deref(),
-        is_root,
         &command,
         reporter,
+        InstallApply::Delegated {
+            package: &package,
+            delegated_pin: delegated_pin.as_ref(),
+            repo_config: &repo_config,
+            index_base_override: index_base_override.as_deref(),
+            is_root,
+        },
     )
+}
+
+fn apply_delegated_pin(subject: &mut InstallSubject, pin: &DelegatedPin) {
+    subject.requested_version = Some(pin.requested_version.clone());
+    subject.resolved_version = Some(pin.resolved_evr.clone());
+    subject.source_repo.clone_from(&pin.source_repo);
+    subject.artifact = Some(pin.artifact.clone());
+    if subject.version.is_none() {
+        subject.version = Some(pin.resolved_version.clone());
+    }
+}
+
+fn apply_raw_pin(subject: &mut InstallSubject, pin: &RawPin) {
+    subject.requested_version = Some(pin.requested_version.clone());
+    subject.resolved_version = Some(pin.resolved_version.clone());
+    subject.source_repo = Some(pin.source_repo.clone());
+    subject.artifact = Some(pin.artifact.clone());
+    if subject.version.is_none() {
+        subject.version = Some(pin.resolved_version.clone());
+    }
 }
 
 /// Target shape for an existing active record. No remote resolution: the
@@ -1220,12 +1216,25 @@ fn pin_error_to_cli(
     }
 }
 
-/// Execute an owned install plan (I1) through the raw backend.
-///
-/// The state and relevant system package are re-read under the install lock,
-/// preventing a stale fresh-install plan from claiming either authority.
+enum InstallApply<'a> {
+    Owned {
+        validated: Box<ValidatedInstall>,
+        raw_pin: Option<&'a RawPin>,
+        native_package: Option<&'a str>,
+        degraded_rpmdb: Option<&'a RpmdbProbe>,
+    },
+    Delegated {
+        package: &'a str,
+        delegated_pin: Option<&'a DelegatedPin>,
+        repo_config: &'a RepoConfig,
+        index_base_override: Option<&'a str>,
+        is_root: bool,
+    },
+}
+
+/// Apply one provider-specific install under the shared lock and journal protocol.
 #[expect(clippy::too_many_arguments)]
-fn install_owned(
+fn install_applied(
     target: &str,
     ctx: &CliContext,
     layout: &FsLayout,
@@ -1233,24 +1242,39 @@ fn install_owned(
     journal_dir: &Path,
     scope: InstallationScope,
     now: &str,
-    steps: &[Step],
-    plan_labels: &[String],
-    validated: ValidatedInstall,
-    raw_pin: Option<&RawPin>,
-    native_package: Option<&str>,
-    degraded_rpmdb: Option<&RpmdbProbe>,
+    request: &InstallRequest,
     provider: &DelegatedProvider,
     command: &str,
     reporter: &mut dyn ProgressReporter,
-) -> Result<InstallOutcome, CliError> {
-    // No root pre-check for an owned install: `--prefix` may point at a
-    // user-writable tree, and a genuine permission problem fails the exact
-    // step and unwinds honestly instead of a blanket refusal.
-    let package = validated.package().to_string();
-    let version = validated.version().to_string();
-    let resolve_warnings = validated.warnings().to_vec();
+    apply: InstallApply<'_>,
+) -> Result<InstallApplicationOutcome, CliError> {
+    if let InstallApply::Delegated {
+        repo_config,
+        index_base_override,
+        is_root,
+        ..
+    } = &apply
+    {
+        require_configured_rpm_backend(repo_config, *index_base_override, command)?;
+        if !is_root {
+            return Err(CliError::PermissionDenied {
+                command: command.to_string(),
+                reason: "installing an RPM-backed component runs dnf and requires root".to_string(),
+                hint: Some(format!("sudo anolisa install {target}")),
+            });
+        }
+    }
 
-    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
+    let (native_package, degraded_rpmdb) = match &apply {
+        InstallApply::Owned {
+            native_package,
+            degraded_rpmdb,
+            ..
+        } => (*native_package, *degraded_rpmdb),
+        InstallApply::Delegated { package, .. } => (Some(*package), None),
+    };
+
+    let lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
         command: command.to_string(),
         reason: format!("failed to acquire install lock: {err}"),
     })?;
@@ -1259,49 +1283,130 @@ fn install_owned(
             command: command.to_string(),
             reason: format!("failed to load installed state: {err}"),
         })?;
-    if store.find(ObjectKind::Component, target).is_some() || quarantined(&store, target) {
-        return Err(CliError::Runtime {
-            command: command.to_string(),
-            reason: format!(
-                "a record for '{target}' appeared while this install was resolving; nothing was changed — re-run `anolisa install {target}`"
-            ),
-        });
-    }
-    revalidate_native_absence(
+    let locked_steps = locked_install_steps(
+        target,
+        scope,
         native_package,
         provider,
         now,
-        target,
-        command,
+        &store,
+        layout,
+        journal_dir,
+        request,
         degraded_rpmdb,
+        command,
     )?;
 
     let evidence = JournalEvidence::new(journal_dir, &store.operations);
-    let mut journal_gate = LockedJournalGate::load(&_lock, evidence, command)?;
+    let mut journal_gate = LockedJournalGate::load(&lock, evidence, command)?;
     let mut journal = journal_gate.begin(COMMAND, target, state_path.to_path_buf(), command)?;
     let operation_id = journal.operation_id.clone();
 
-    let (result, retained_note) = {
-        let mut ops = RawInstallOps::new(
-            ctx,
-            layout,
-            target.to_string(),
-            scope,
-            now.to_string(),
-            operation_id.clone(),
-            validated,
-            &mut store,
-            state_path,
-            journal_gate.inventory(),
-        );
-        let result = execute_owned_steps(steps, &mut ops, &mut journal);
-        // Auto-provisioned system packages are retained on failure; the note
-        // must be read out before the ops (and their borrow) are dropped.
-        let note = ops.retained_packages_note();
-        (result, note)
+    let (subject, change, provider_warnings) = match apply {
+        InstallApply::Owned {
+            validated, raw_pin, ..
+        } => {
+            // Owned installs rely on exact filesystem errors rather than a
+            // blanket root pre-check because a relocated prefix may be writable.
+            let package = validated.package().to_string();
+            let version = validated.version().to_string();
+            let mut warnings = validated.warnings().to_vec();
+            let (result, retained_note) = {
+                let mut ops = RawInstallOps::new(
+                    ctx,
+                    layout,
+                    target.to_string(),
+                    scope,
+                    now.to_string(),
+                    operation_id.clone(),
+                    *validated,
+                    &mut store,
+                    state_path,
+                    journal_gate.inventory(),
+                );
+                let result = execute_owned_steps(&locked_steps, &mut ops, &mut journal);
+                let note = ops.retained_packages_note();
+                (result, note)
+            };
+            let outcome = result
+                .map_err(|err| owned_error_to_cli(err, target, scope, command, &retained_note))?;
+            warnings.extend(outcome.warnings);
+            let mut subject = InstallSubject {
+                component: target.to_string(),
+                package: Some(package),
+                version: Some(version),
+                backend: "raw".to_string(),
+                requested_version: None,
+                resolved_version: None,
+                source_repo: None,
+                artifact: None,
+            };
+            if let Some(pin) = raw_pin {
+                apply_raw_pin(&mut subject, pin);
+            }
+            (subject, InstallChange::OwnedInstalled, warnings)
+        }
+        InstallApply::Delegated {
+            package,
+            delegated_pin,
+            ..
+        } => {
+            let context = RecordContext {
+                kind: ObjectKind::Component,
+                name: target.to_string(),
+                scope,
+                now: now.to_string(),
+                operation_id: Some(operation_id.clone()),
+                delegated: Some(DelegatedIdentity {
+                    pm: NativePm::Rpm,
+                    package: package.to_string(),
+                }),
+                owned_artifact: None,
+            };
+            let mut exec_target = DelegatedExecutionTarget::new(NativePm::Rpm, Some(package));
+            if let Some(pin) = delegated_pin {
+                exec_target = exec_target.with_pinned_artifact(
+                    &pin.artifact,
+                    &pin.resolved_evr,
+                    &pin.resolved_arch,
+                );
+            }
+            let outcome = {
+                let mut sink = StoreRecordSink::new(&mut store, state_path, context);
+                execute_delegated_steps(
+                    &locked_steps,
+                    exec_target,
+                    provider,
+                    &mut sink,
+                    &mut journal,
+                    now,
+                )
+            }
+            .map_err(|err| CliError::Runtime {
+                command: command.to_string(),
+                reason: format!(
+                    "install of '{target}' failed: {err}; the native transaction is never undone automatically — run `anolisa repair {target}` to reconcile"
+                ),
+            })?;
+            let mut subject = InstallSubject {
+                component: target.to_string(),
+                package: Some(package.to_string()),
+                version: outcome
+                    .observation
+                    .as_ref()
+                    .map(|observation| observation.version.clone()),
+                backend: "rpm".to_string(),
+                requested_version: None,
+                resolved_version: None,
+                source_repo: None,
+                artifact: None,
+            };
+            if let Some(pin) = delegated_pin {
+                apply_delegated_pin(&mut subject, pin);
+            }
+            (subject, InstallChange::DelegatedInstalled, Vec::new())
+        }
     };
-    let outcome =
-        result.map_err(|err| owned_error_to_cli(err, target, scope, command, &retained_note))?;
 
     reporter.report(&format!("Finalizing {target} installation..."));
 
@@ -1316,85 +1421,52 @@ fn install_owned(
         finished_at: Some(now_iso8601()),
         parent_operation_id: None,
     });
+    let mut warnings = Vec::new();
     if let Err(err) = store.save(state_path) {
-        progress::suspend_output(|| {
-            eprintln!("warning: failed to record operation history: {err}")
-        });
+        warnings.push(format!("failed to record operation history: {err}"));
     }
-
-    for warning in resolve_warnings.iter().chain(outcome.warnings.iter()) {
-        progress::suspend_output(|| eprintln!("warning: {warning}"));
+    warnings.extend(provider_warnings);
+    if change == InstallChange::DelegatedInstalled {
+        warnings.extend(super::io_util::snapshot_datadir_contract(
+            layout,
+            target,
+            command,
+            ctx.packaged_data_probe(),
+        ));
     }
-
     reporter.finish();
-    render_result(ctx, &{
-        let mut payload = InstallResultPayload {
-            component: target.to_string(),
-            package: Some(package),
-            version: Some(version),
-            backend: "raw".to_string(),
-            action: "installed",
-            operation_id: Some(operation_id),
-            requested_version: None,
-            resolved_version: None,
-            source_repo: None,
-            artifact: None,
-            dry_run: false,
-            plan: plan_labels.to_vec(),
-        };
-        if let Some(pin) = raw_pin {
-            payload = payload.with_raw_pin(pin);
-        }
-        payload
-    })?;
-    Ok(InstallOutcome::Installed)
+    Ok(InstallApplicationOutcome::Applied {
+        subject,
+        steps: locked_steps,
+        outcome: CommandOutcome::new(
+            CommandOutcomeStatus::Completed,
+            Some(operation_id),
+            vec![change],
+            warnings,
+        ),
+    })
 }
 
-/// Execute a delegated install plan (I2): one native transaction, a fresh
-/// observation, and a managed record.
 #[expect(clippy::too_many_arguments)]
-fn install_delegated(
+fn locked_install_steps(
     target: &str,
-    package: &str,
-    ctx: &CliContext,
-    layout: &FsLayout,
-    state_path: &Path,
-    journal_dir: &Path,
     scope: InstallationScope,
+    native_package: Option<&str>,
+    provider: &DelegatedProvider<'_>,
     now: &str,
-    steps: &[Step],
-    plan_labels: &[String],
-    delegated_pin: Option<&DelegatedPin>,
-    provider: &DelegatedProvider,
-    repo_config: &RepoConfig,
-    index_base_override: Option<&str>,
-    is_root: bool,
+    store: &StateStore,
+    layout: &FsLayout,
+    journal_dir: &Path,
+    request: &InstallRequest,
+    degraded_rpmdb: Option<&RpmdbProbe>,
     command: &str,
-    reporter: &mut dyn ProgressReporter,
-) -> Result<InstallOutcome, CliError> {
-    // A fresh delegated install pulls from the repository its DNF source was
-    // pinned to: the `--repo` override when one was given, the configured
-    // ANOLISA RPM backend otherwise.
-    require_configured_rpm_backend(repo_config, index_base_override, command)?;
-
-    if !is_root {
-        return Err(CliError::PermissionDenied {
-            command: command.to_string(),
-            reason: "installing an RPM-backed component runs dnf and requires root".to_string(),
-            hint: Some(format!("sudo anolisa install {target}")),
-        });
-    }
-
-    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to acquire install lock: {err}"),
-    })?;
-    let mut store = StateStore::load_for_layout(state_path, privilege::effective_uid(), layout)
+) -> Result<Vec<Step>, CliError> {
+    let state_snapshot = observe_install_state(target, scope, now, store, layout, journal_dir)
         .map_err(|err| CliError::Runtime {
             command: command.to_string(),
-            reason: format!("failed to load installed state: {err}"),
+            reason: err.to_string(),
         })?;
-    if store.find(ObjectKind::Component, target).is_some() || quarantined(&store, target) {
+    if !matches!(state_snapshot.state(), ProbeEvidence::Absent { .. }) {
         return Err(CliError::Runtime {
             command: command.to_string(),
             reason: format!(
@@ -1402,95 +1474,93 @@ fn install_delegated(
             ),
         });
     }
-    revalidate_native_absence(Some(package), provider, now, target, command, None)?;
 
-    let evidence = JournalEvidence::new(journal_dir, &store.operations);
-    let mut journal_gate = LockedJournalGate::load(&_lock, evidence, command)?;
-    let mut journal = journal_gate.begin(COMMAND, target, state_path.to_path_buf(), command)?;
-    let operation_id = journal.operation_id.clone();
+    if let Some(rpmdb) = degraded_rpmdb
+        && rpmdb.rpmdb_exists()
+    {
+        return Err(rpmdb_appeared_error(command, target));
+    }
 
-    let context = RecordContext {
-        kind: ObjectKind::Component,
-        name: target.to_string(),
+    let snapshot = match observe_install_snapshot(
+        target,
         scope,
-        now: now.to_string(),
-        operation_id: Some(operation_id.clone()),
-        delegated: Some(DelegatedIdentity {
-            pm: NativePm::Rpm,
-            package: package.to_string(),
-        }),
-        owned_artifact: None,
+        native_package,
+        now,
+        store,
+        Some(provider),
+        layout,
+        journal_dir,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(FactsError::Probe(ProviderError::Query(PackageQueryError::CommandMissing {
+            command: bin,
+        }))) => match degraded_rpmdb {
+            None => return Err(rpm_tooling_missing_error(command, &bin, target)),
+            Some(rpmdb) if rpmdb.rpmdb_exists() => {
+                return Err(rpmdb_appeared_error(command, target));
+            }
+            Some(_) => {
+                observe_install_snapshot(target, scope, None, now, store, None, layout, journal_dir)
+                    .map_err(|err| CliError::Runtime {
+                        command: command.to_string(),
+                        reason: err.to_string(),
+                    })?
+            }
+        },
+        Err(FactsError::Probe(err)) => {
+            let package = native_package.unwrap_or(target);
+            return Err(CliError::Runtime {
+                command: command.to_string(),
+                reason: format!("locked rpm query failed for '{package}': {err}"),
+            });
+        }
+        Err(err) => {
+            return Err(CliError::Runtime {
+                command: command.to_string(),
+                reason: err.to_string(),
+            });
+        }
     };
-    // Pin the execution target to the resolved artifact so the executor both
-    // constrains the native transaction to the exact NEVRA and verifies the
-    // freshly installed EVR/arch before committing the record.
-    let mut exec_target = DelegatedExecutionTarget::new(NativePm::Rpm, Some(package));
-    if let Some(pin) = delegated_pin {
-        exec_target =
-            exec_target.with_pinned_artifact(&pin.artifact, &pin.resolved_evr, &pin.resolved_arch);
-    }
-    let outcome = {
-        let mut sink = StoreRecordSink::new(&mut store, state_path, context);
-        execute_delegated_steps(steps, exec_target, provider, &mut sink, &mut journal, now)
-    }
-    .map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!(
-            "install of '{target}' failed: {err}; the native transaction is never undone automatically — run `anolisa repair {target}` to reconcile"
-        ),
-    })?;
 
-    reporter.report(&format!("Finalizing {target} installation..."));
-
-    // Operation history is best-effort bookkeeping on top of the committed
-    // record, exactly like the owned path.
-    store.operations.push(OperationRecord {
-        id: operation_id.clone(),
-        command: command.to_string(),
-        status: "ok".to_string(),
-        started_at: now.to_string(),
-        finished_at: Some(now_iso8601()),
-        parent_operation_id: None,
-    });
-    if let Err(err) = store.save(state_path) {
-        progress::suspend_output(|| {
-            eprintln!("warning: failed to record operation history: {err}")
+    if matches!(snapshot.native_package(), ProbeEvidence::Present { .. }) {
+        let package = native_package.unwrap_or(target);
+        return Err(CliError::InvalidArgument {
+            command: command.to_string(),
+            reason: format!(
+                "system RPM '{package}' appeared while '{target}' was being resolved; nothing was changed — run `sudo anolisa --install-mode system adopt {target}` or retry after removing the external package"
+            ),
         });
     }
 
-    // Best-effort: snapshot the datadir component contract so adapter
-    // commands can discover declared adapters. Missing or unwritable
-    // contracts produce warnings, never failures.
-    for warning in super::io_util::snapshot_datadir_contract(
-        layout,
-        target,
-        command,
-        ctx.packaged_data_probe(),
-    ) {
-        progress::suspend_output(|| eprintln!("warning: {warning}"));
+    let active_adapter_claims = store
+        .adapter_claims
+        .iter()
+        .filter(|claim| claim.component == target)
+        .map(|claim| claim.framework.clone())
+        .collect();
+    let facts =
+        lifecycle_facts_from_snapshot(&snapshot, active_adapter_claims, None).map_err(|err| {
+            CliError::Runtime {
+                command: command.to_string(),
+                reason: err.to_string(),
+            }
+        })?;
+    let prepared = ExecutionIntent::Apply.prepare(
+        plan(&Intent::Install(request.clone()), &facts)
+            .map_err(|err| plan_error_to_cli(err, target, command))?,
+    );
+    match prepared {
+        PreparedExecution::Apply { steps, .. } => Ok(steps),
+        PreparedExecution::NoOp { .. } => Err(CliError::Runtime {
+            command: command.to_string(),
+            reason: format!(
+                "the facts for '{target}' changed while this install was resolving; nothing was changed — re-run `anolisa install {target}`"
+            ),
+        }),
+        PreparedExecution::Preview { .. } => {
+            unreachable!("ExecutionIntent::Apply cannot produce a preview")
+        }
     }
-
-    let version = outcome.observation.as_ref().map(|o| o.version.clone());
-    let mut payload = InstallResultPayload {
-        component: target.to_string(),
-        package: Some(package.to_string()),
-        version,
-        backend: "rpm".to_string(),
-        action: "installed",
-        operation_id: Some(operation_id),
-        requested_version: None,
-        resolved_version: None,
-        source_repo: None,
-        artifact: None,
-        dry_run: false,
-        plan: plan_labels.to_vec(),
-    };
-    if let Some(pin) = delegated_pin {
-        payload = payload.with_pin(pin);
-    }
-    reporter.finish();
-    render_result(ctx, &payload)?;
-    Ok(InstallOutcome::Installed)
 }
 
 /// Locked recheck that the native package is still absent before mutation.
@@ -1833,147 +1903,15 @@ pub(crate) fn step_label(step: &Step) -> String {
     }
 }
 
-/// JSON payload for a completed (or previewed, or idempotent) install.
-///
-/// The pin fields (`requested_version`, `resolved_version`, `source_repo`,
-/// `artifact`) are additive and only present for a version-pinned install.
-/// Their concrete shape is backend-dependent — a delegated pin reports the
-/// resolved EVR and the exact NEVRA handed to dnf, an owned (raw) pin the
-/// resolved distribution version and the exact artifact URL — while
-/// `version` keeps its existing meaning (the effective/installed version)
-/// across every route, so the wire contract stays backward compatible.
-#[derive(Debug, Serialize)]
-struct InstallResultPayload {
-    component: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    package: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    version: Option<String>,
-    backend: String,
-    /// `installed` | `planned` (dry-run) | `already-installed`.
-    action: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    operation_id: Option<String>,
-    /// `--version` value the caller requested (version-pinned installs only).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    requested_version: Option<String>,
-    /// Resolved candidate of the pin (version-pinned only): the full EVR for
-    /// a delegated install, the distribution entry version for a raw one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    resolved_version: Option<String>,
-    /// Source repository the pinned candidate came from (version-pinned
-    /// only): the dnf repo id for a delegated install, the raw repository
-    /// base URL for a raw one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    source_repo: Option<String>,
-    /// Exact artifact the pin resolved to (version-pinned only): the NEVRA
-    /// handed to dnf for a delegated install, the artifact URL for a raw one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    artifact: Option<String>,
-    dry_run: bool,
-    plan: Vec<String>,
-}
-
-impl InstallResultPayload {
-    /// Copy the resolved-candidate fields from a delegated version pin. The
-    /// pin's resolved EVR becomes `resolved_version`; `version` is set to the
-    /// upstream version so the existing field stays a clear, compatible
-    /// answer for pinned installs too.
-    fn with_pin(mut self, pin: &DelegatedPin) -> Self {
-        self.requested_version = Some(pin.requested_version.clone());
-        self.resolved_version = Some(pin.resolved_evr.clone());
-        self.source_repo = pin.source_repo.clone();
-        self.artifact = Some(pin.artifact.clone());
-        if self.version.is_none() {
-            self.version = Some(pin.resolved_version.clone());
-        }
-        self
-    }
-
-    /// Copy the resolved-candidate fields from an owned (raw) version pin:
-    /// the resolved entry version, the exact artifact URL, and the source
-    /// repository — same additive contract as the delegated pin, so agents
-    /// read one shape for both backends.
-    fn with_raw_pin(mut self, pin: &RawPin) -> Self {
-        self.requested_version = Some(pin.requested_version.clone());
-        self.resolved_version = Some(pin.resolved_version.clone());
-        self.source_repo = Some(pin.source_repo.clone());
-        self.artifact = Some(pin.artifact.clone());
-        if self.version.is_none() {
-            self.version = Some(pin.resolved_version.clone());
-        }
-        self
-    }
-}
-
-/// Detail lines shown above the plan in a dry-run preview.
-///
-/// For a version-pinned install this makes the resolved candidate explicit
-/// — package, requested version, resolved version (EVR for delegated,
-/// distribution version for raw), exact artifact (NEVRA or artifact URL),
-/// and source repository — so the preview proves what would be installed
-/// rather than echoing the request. Unpinned installs contribute no pin
-/// fields and yield an empty list (the plan alone is shown).
-fn dry_run_detail_lines(payload: &InstallResultPayload) -> Vec<String> {
-    let mut lines = Vec::new();
-    // Only a version pin populates these; guard on `artifact` so unpinned
-    // dry-runs render exactly as before (plan only).
-    if payload.artifact.is_some() {
-        if let Some(package) = &payload.package {
-            lines.push(format!("package: {package}"));
-        }
-        if let Some(requested) = &payload.requested_version {
-            lines.push(format!("requested version: {requested}"));
-        }
-        if let Some(resolved) = &payload.resolved_version {
-            lines.push(format!("resolved version: {resolved}"));
-        }
-        if let Some(artifact) = &payload.artifact {
-            lines.push(format!("artifact: {artifact}"));
-        }
-        if let Some(repo) = &payload.source_repo {
-            lines.push(format!("repository: {repo}"));
-        }
-    }
-    lines
-}
-
-fn render_result(ctx: &CliContext, payload: &InstallResultPayload) -> Result<(), CliError> {
-    if ctx.json {
-        return render_json(COMMAND, payload);
-    }
-    if ctx.quiet {
-        return Ok(());
-    }
-    if payload.dry_run {
-        println!("install {} (dry-run):", payload.component);
-        for line in dry_run_detail_lines(payload) {
-            println!("  {line}");
-        }
-        for label in &payload.plan {
-            println!("  - {label}");
-        }
-        return Ok(());
-    }
-    match (payload.action, &payload.version) {
-        ("already-installed", Some(version)) => {
-            println!("{} {version} is already installed", payload.component);
-        }
-        ("already-installed", None) => println!("{} is already installed", payload.component),
-        (_, Some(version)) => println!("installed {} {version}", payload.component),
-        (_, None) => println!("installed {}", payload.component),
-    }
-    Ok(())
-}
-
 fn now_iso8601() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::handle;
+    use super::super::application::{InstallRequest as ApplicationRequest, run_with_dependencies};
     use super::super::tests::*;
+    use super::super::{InstallResultPayload, dry_run_detail_lines, handle};
     use super::*;
     use crate::repo_config::RepoConfig;
     use anolisa_platform::fs_layout::FsLayout;
@@ -2180,9 +2118,12 @@ mod tests {
         install_args.backend = Some("rpm".to_string());
         let mut reporter = RecordingProgress::default();
 
-        let outcome = install_component_with_deps_and_planned(
-            "copilot-shell",
-            &install_args,
+        let outcome = run_with_dependencies(
+            ApplicationRequest {
+                component: "copilot-shell",
+                args: &install_args,
+                intent: ExecutionIntent::Apply,
+            },
             &ctx,
             &linux_env(),
             &RpmdbProbe::absent(),
@@ -2194,7 +2135,29 @@ mod tests {
         )
         .expect("delegated install");
 
-        assert_eq!(outcome, InstallOutcome::Installed);
+        let InstallApplicationOutcome::Applied {
+            subject,
+            steps,
+            outcome: command_outcome,
+        } = &outcome
+        else {
+            panic!("fresh delegated install must return an applied outcome");
+        };
+        assert_eq!(subject.component, "copilot-shell");
+        assert_eq!(subject.package.as_deref(), Some("copilot-shell"));
+        assert_eq!(subject.version.as_deref(), Some("2.3.0"));
+        assert_eq!(subject.backend, "rpm");
+        assert!(!steps.is_empty());
+        assert_eq!(command_outcome.status(), CommandOutcomeStatus::Completed);
+        assert!(command_outcome.operation_id().is_some());
+        assert_eq!(
+            command_outcome.changes(),
+            &[InstallChange::DelegatedInstalled]
+        );
+        assert_eq!(
+            outcome.batch_outcome(),
+            super::super::InstallOutcome::Installed
+        );
         assert_eq!(
             reporter.messages.borrow().as_slice(),
             [
@@ -2347,23 +2310,22 @@ mod tests {
         // The owned pin must fill the same additive envelope fields as the
         // delegated pin: requested/resolved version, source repo, and the
         // exact artifact (the URL, the raw analog of a NEVRA). `version`
-        // starts as None so the pin's fallback fills it — the compatible
-        // field must stay answered on the pinned path too.
+        // remains the resolved distribution version for compatibility.
+        let pin = sample_raw_pin();
         let payload = InstallResultPayload {
             component: "agentsight".to_string(),
             package: Some("agentsight".to_string()),
-            version: None,
+            version: Some(pin.resolved_version.clone()),
             backend: "raw".to_string(),
             action: "installed",
             operation_id: Some("op-install-1".to_string()),
-            requested_version: None,
-            resolved_version: None,
-            source_repo: None,
-            artifact: None,
+            requested_version: Some(pin.requested_version),
+            resolved_version: Some(pin.resolved_version),
+            source_repo: Some(pin.source_repo),
+            artifact: Some(pin.artifact),
             dry_run: false,
             plan: Vec::new(),
-        }
-        .with_raw_pin(&sample_raw_pin());
+        };
 
         let json = serde_json::to_value(&payload).expect("serialize payload");
         assert_eq!(json["backend"], "raw");
@@ -2383,21 +2345,21 @@ mod tests {
     fn raw_pinned_dry_run_detail_lines_show_resolved_version_and_artifact() {
         // The raw pinned preview shares the delegated detail contract: the
         // resolved candidate is spelled out instead of echoing the request.
+        let pin = sample_raw_pin();
         let payload = InstallResultPayload {
             component: "agentsight".to_string(),
             package: None,
-            version: None,
+            version: Some(pin.resolved_version.clone()),
             backend: "raw".to_string(),
             action: "planned",
             operation_id: None,
-            requested_version: None,
-            resolved_version: None,
-            source_repo: None,
-            artifact: None,
+            requested_version: Some(pin.requested_version),
+            resolved_version: Some(pin.resolved_version),
+            source_repo: Some(pin.source_repo),
+            artifact: Some(pin.artifact),
             dry_run: true,
             plan: Vec::new(),
-        }
-        .with_raw_pin(&sample_raw_pin());
+        };
 
         assert_eq!(
             dry_run_detail_lines(&payload),
