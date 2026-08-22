@@ -9,6 +9,21 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.7.12] - 2026-08-22
+
+### 变更
+
+- Response 压缩现在会在保留数组头部后继续保留可配置的尾部窗口（默认 8 项，可通过 `--array-tail-preserve` 和 Runtime API 控制），使最终状态与错误细节继续内联，而 Stash 只存储被省略的中间段（[#2433](https://github.com/alibaba/anolisa/pull/2433)）。
+- 当 `BeforeModel` Payload 格式错误或未携带工具声明时，Schema Hook 现在会每个 Session 警告一次，使 Hook 被跳过与正常执行但未产生节省可以区分；显式空工具数组仍会静默透传（[#2606](https://github.com/alibaba/anolisa/pull/2606)）。
+- L2 Benchmark 的 JSON、Markdown 与 Semantic Gate Finding 现在会列出保真失败时缺失的 Ground Truth 项，不再只报告计数（[#2433](https://github.com/alibaba/anolisa/pull/2433)）。
+
+### 修复
+
+- `tokenless stats enable` 与 `stats disable` 现在只基于磁盘配置持久化 Stats 开关，因此临时的压缩与 SLS 环境变量覆盖不会被写入 `config.json`（[#2592](https://github.com/alibaba/anolisa/pull/2592)）。
+- 当任一 Session 没有记录时，`tokenless stats summary --compare` 现在会失败，并且 `--limit 0` 会被拒绝，避免拼写错误或空样本显示为成功的 0% 对比（[#2674](https://github.com/alibaba/anolisa/pull/2674)）。
+- Schema 压缩现在支持包含顶层 `tools` 数组的完整请求对象，在保留非 Function 工具与数组外字段的同时压缩 Function Calling 条目（[#2758](https://github.com/alibaba/anolisa/pull/2758)）。
+- 无 Stash 的数组截断 Marker 现在可以完整通过 TOON 往返，极大的尾部保留值也会保留完整数组而不再溢出（[#2433](https://github.com/alibaba/anolisa/pull/2433)）。
+
 ## [0.7.11] - 2026-08-20
 
 ### 修复
