@@ -80,7 +80,19 @@ Accepted item shapes (detected per item):
 - Direct schema: `{"name", "description", "parameters"}`
 - Gemini / copilot-shell wrapper: `{"functionDeclarations": [{"name", "description", "parameters" | "parametersJsonSchema"}, ...]}`; copilot-shell BeforeModel hooks deliver tool declarations in this shape (`llm_request.config.tools`). Declarations inside the wrapper are compressed individually (the parameter schema is read from `parametersJsonSchema` when present, otherwise from `parameters`); the wrapper itself and any sibling fields are preserved.
 
-An array input enables batch handling automatically. Common options:
+An array input enables batch handling automatically.
+
+A complete request object with a top-level `tools` array is also accepted. Its
+Function Calling entries may be OpenAI `{"function": {...}}` wrappers, Gemini
+`{"functionDeclarations": [...]}` tool objects, or bare
+`{name, description, parameters}` declarations. Do not pass `--batch` for this
+shape; non-function tools and fields outside `tools` are preserved.
+
+```bash
+tokenless compress-schema -f request.json
+```
+
+Common options:
 
 | Option | Description |
 |--------|-------------|

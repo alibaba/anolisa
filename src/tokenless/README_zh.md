@@ -140,6 +140,24 @@ anolisa adapter enable tokenless dsh --profile <profile>
 dsh --profile <profile>
 ```
 
+### Schema 压缩 CLI
+
+`compress-schema` 支持单个工具定义、工具定义 JSON 数组，以及包含顶层
+`tools` 数组的完整请求对象。处理完整请求对象时不传 `--batch`；其中的 OpenAI
+Wrapper、Gemini `functionDeclarations` 工具对象及裸 Function Calling 定义会被压缩，
+非函数工具及 `tools` 之外的字段会原样保留。
+
+```bash
+# 单个工具定义
+tokenless compress-schema -f tool.json
+
+# 工具定义数组
+tokenless compress-schema -f tools.json --batch
+
+# 包含顶层 tools 数组的请求对象
+tokenless compress-schema -f request.json
+```
+
 从源码构建适合开发者。
 
 ```bash

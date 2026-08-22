@@ -378,6 +378,68 @@ fn compress_schema_batch_gemini_function_declarations() {
 }
 
 #[test]
+fn compress_schema_tools_request_container() {
+    let input = serde_json::to_string_pretty(&serde_json::json!({
+        "model": "example-model",
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "A".repeat(2000),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "B".repeat(1000)
+                        }
+                    }
+                }
+            }
+        }]
+    }))
+    .unwrap();
+    let output = tokenless_bin()
+        .env("TOKENLESS_COMPRESSION_ENABLED", "1")
+        .env("TOKENLESS_STATS_ENABLED", "0")
+        .args(["compress-schema", "--no-stash"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(input.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "compress-schema failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["model"], "example-model");
+    assert!(
+        result["tools"][0]["function"]["description"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count()
+            <= 256
+    );
+    assert!(
+        result["tools"][0]["function"]["parameters"]["properties"]["query"]["description"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count()
+            <= 160
+    );
+}
+
+#[test]
 fn compress_response_from_stdin() {
     let response =
         r#"{"data":"value","debug":"remove","trace":"remove","empty_field":"","null_field":null}"#;

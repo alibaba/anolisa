@@ -218,12 +218,15 @@ impl SchemaCompressor {
         self.stash_errors.set(self.stash_errors.get() + 1);
     }
 
-    /// Compress a function-calling tool declaration.
+    /// Compress a function-calling tool declaration or request envelope.
     ///
-    /// Supports three wrapper shapes:
-    /// - Gemini `{"functionDeclarations": [{name, description, parametersJsonSchema}, ...]}`
+    /// Supports these declaration and wrapper shapes:
     /// - OpenAI `{"function": {name, description, parameters}}`
-    /// - Bare schema `{name, description, parameters}`
+    /// - Gemini `{"functionDeclarations": [{name, description, parametersJsonSchema}, ...]}`
+    /// - Bare `{name, description, parameters}` declarations, optionally with
+    ///   `"type": "function"`
+    /// - Request envelopes whose top-level `tools` array contains any of the
+    ///   shapes above
     ///
     /// The Gemini SDK stores the parameter schema under `parametersJsonSchema`
     /// (JSON Schema format, used by copilot-shell's `DeclarativeTool`); the
@@ -238,9 +241,23 @@ impl SchemaCompressor {
 
         let mut result = tool.clone();
 
-        // Dispatch by wrapper shape: Gemini `functionDeclarations` array,
-        // OpenAI `function` object, or a bare schema.
-        if let Some(decls) = result.get_mut("functionDeclarations") {
+        // Dispatch by wrapper shape: a request `tools` array, Gemini
+        // `functionDeclarations`, an OpenAI `function`, or a bare declaration.
+        if let Some(tools) = result.get_mut("tools").and_then(Value::as_array_mut) {
+            for entry in tools {
+                let is_bare_declaration = entry.get("type").is_none()
+                    && entry.get("name").and_then(Value::as_str).is_some()
+                    && (entry.get("parameters").is_some()
+                        || entry.get("parametersJsonSchema").is_some());
+                let is_function = entry.get("type").and_then(Value::as_str) == Some("function")
+                    || entry.get("function").is_some()
+                    || entry.get("functionDeclarations").is_some()
+                    || is_bare_declaration;
+                if is_function {
+                    *entry = self.compress(entry);
+                }
+            }
+        } else if let Some(decls) = result.get_mut("functionDeclarations") {
             // Gemini tools format: a Tool object wraps an array of
             // declarations `{ "functionDeclarations": [{name, description,
             // parametersJsonSchema}, ...] }`. Compress each declaration in

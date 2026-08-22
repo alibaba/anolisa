@@ -362,4 +362,7 @@ tokenless stats summary
 | 含 debug/trace 的 API 响应 | ~78% | ~82-85% | 响应压缩移除冗余字段后，TOON 消除剩余 JSON 语法 |
 | 表格数据 `[{...}]` | ~5-10% | ~40-60% | 响应压缩对表格效果有限，TOON 效果显著（实测 44%） |
 | 简单扁平对象 | ~0-10% | ~15-25% | JSON 语法开销占比有限 |
-| 嵌套 Schema 定义 | ~57% | ~60-65% | Schema 压缩由专门的 SchemaCompressor 处理 |
+
+Schema 压缩不经过本表的响应压缩或 TOON 流程。Tokenless 0.7.11 在仓库参考
+fixture 上的独立 Schema 压缩结果为 47.3%；该数字不是生产范围或任意 Schema
+的保证值，实际结果取决于输入结构、description 长度和可移除字段。

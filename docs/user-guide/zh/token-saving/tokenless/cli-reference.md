@@ -76,7 +76,18 @@ cat tools.json | tokenless compress-schema --batch
 - 直接 Schema：`{"name", "description", "parameters"}`
 - Gemini / copilot-shell 包装：`{"functionDeclarations": [{"name", "description", "parameters" | "parametersJsonSchema"}, ...]}`；copilot-shell 的 BeforeModel hook 以该形态下发工具声明（`llm_request.config.tools`）。包装内的声明逐个压缩（参数 schema 优先取 `parametersJsonSchema`，其次取 `parameters`），包装本身及其同级字段原样保留。
 
-输入本身是数组时会自动使用 batch 处理。常用参数：
+输入本身是数组时会自动使用 batch 处理。
+
+包含顶层 `tools` 数组的完整请求对象也受支持，其中的 Function Calling 定义可以是
+OpenAI `{"function": {...}}` Wrapper、Gemini `{"functionDeclarations": [...]}` 工具对象，
+或裸 `{name, description, parameters}` 定义。该结构不要传 `--batch`；非函数工具及
+`tools` 之外的字段会原样保留。
+
+```bash
+tokenless compress-schema -f request.json
+```
+
+常用参数：
 
 | 参数 | 说明 |
 |------|------|

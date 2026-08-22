@@ -275,6 +275,15 @@ Compress a batch of tools (JSON array):
 tokenless compress-schema -f tools.json --batch
 ```
 
+A top-level request object with a `tools` array is also accepted without
+`--batch`; OpenAI wrappers, Gemini `functionDeclarations` tool objects, and
+bare Function Calling declarations are compressed while non-function tools and
+fields outside `tools` are preserved:
+
+```bash
+tokenless compress-schema -f request.json
+```
+
 ### compress-response
 
 Compress an API response:

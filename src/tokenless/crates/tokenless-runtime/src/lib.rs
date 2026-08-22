@@ -288,7 +288,7 @@ impl TokenlessRuntime {
         Ok(result)
     }
 
-    /// Compress one OpenAI Function Calling schema with reversible markers.
+    /// Compress a Function Calling schema or top-level `tools` request with reversible markers.
     ///
     /// # Errors
     ///
@@ -422,7 +422,7 @@ impl TokenlessRuntime {
     }
 }
 
-/// Compress a schema using an optional caller-owned stash store.
+/// Compress a Function Calling schema or top-level `tools` request using an optional stash store.
 ///
 /// # Errors
 ///
@@ -1007,6 +1007,60 @@ mod tests {
         let records = recorder.records_by_session("schema-session", None).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].operation, OperationType::CompressSchema);
+    }
+
+    #[test]
+    fn schema_compression_handles_tools_request_container() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = TokenlessRuntime::new(RuntimeConfig {
+            data_dir: Some(directory.path().to_path_buf()),
+            ..RuntimeConfig::default()
+        })
+        .unwrap();
+        let input = serde_json::to_string(&serde_json::json!({
+            "model": "example-model",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "description": "A".repeat(2000),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "B".repeat(1000)
+                            }
+                        }
+                    }
+                }
+            }]
+        }))
+        .unwrap();
+
+        let result = runtime
+            .compress_schema(&input, &Attribution::new("runtime-test"))
+            .unwrap();
+        assert!(result.applied());
+
+        let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(output["model"], "example-model");
+        assert!(
+            output["tools"][0]["function"]["description"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count()
+                <= 256
+        );
+        assert!(
+            output["tools"][0]["function"]["parameters"]["properties"]["query"]["description"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count()
+                <= 160
+        );
     }
 
     #[test]

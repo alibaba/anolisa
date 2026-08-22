@@ -33,6 +33,149 @@ fn test_compress_long_description() {
 }
 
 #[test]
+fn compress_openai_tools_request_container() {
+    let compressor = SchemaCompressor::new();
+    let schema = json!({
+        "model": "example-model",
+        "tool_choice": "auto",
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "description": "A".repeat(2000),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "B".repeat(1000)
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                "type": "web_search_preview",
+                "search_context_size": "low",
+                "title": "Preserve built-in tool metadata",
+                "description": "C".repeat(400),
+                "examples": ["preserve"]
+            }
+        ]
+    });
+
+    let result = compressor.compress(&schema);
+    let function = &result["tools"][0]["function"];
+
+    assert!(
+        function["description"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count()
+            <= 256
+    );
+    assert!(
+        function["parameters"]["properties"]["query"]["description"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count()
+            <= 160
+    );
+    assert_eq!(result["model"], "example-model");
+    assert_eq!(result["tool_choice"], "auto");
+    assert_eq!(result["tools"][1], schema["tools"][1]);
+}
+
+#[test]
+fn compress_gemini_tools_request_container() {
+    let compressor = SchemaCompressor::new();
+    let schema = json!({
+        "model": "example-model",
+        "tools": [{
+            "functionDeclarations": [{
+                "name": "lookup",
+                "description": "A".repeat(2000),
+                "parametersJsonSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "B".repeat(1000)
+                        }
+                    }
+                }
+            }]
+        }]
+    });
+
+    let result = compressor.compress(&schema);
+    let function = &result["tools"][0]["functionDeclarations"][0];
+
+    assert!(
+        function["description"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count()
+            <= 256
+    );
+    assert!(
+        function["parametersJsonSchema"]["properties"]["query"]["description"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count()
+            <= 160
+    );
+    assert_eq!(result["model"], schema["model"]);
+}
+
+#[test]
+fn compress_bare_declaration_in_tools_request_container() {
+    let compressor = SchemaCompressor::new();
+    let schema = json!({
+        "model": "example-model",
+        "tools": [{
+            "name": "lookup",
+            "description": "A".repeat(2000),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "B".repeat(1000)
+                    }
+                }
+            }
+        }]
+    });
+
+    let result = compressor.compress(&schema);
+    let function = &result["tools"][0];
+
+    assert!(
+        function["description"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count()
+            <= 256
+    );
+    assert!(
+        function["parameters"]["properties"]["query"]["description"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count()
+            <= 160
+    );
+    assert_eq!(result["model"], schema["model"]);
+}
+
+#[test]
 fn test_protected_fields_preserved() {
     let compressor = SchemaCompressor::new();
     let schema = json!({
