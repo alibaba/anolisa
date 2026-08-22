@@ -79,6 +79,10 @@ pub async fn delete_snapshots_locked(
                     .insert(snap_id.clone(), meta.clone());
             }
             Ok(_) => {
+                // Successful deletion ends the receipt's retention lifetime.
+                // Do this only after the backend confirms deletion so a failed
+                // cleanup can restore both metadata and evidence together.
+                arc.write().await.index.governed_evidence.remove(snap_id);
                 info!("{}: removed snapshot {}", label, snap_id);
                 removed.push(snap_id.clone());
             }
@@ -101,25 +105,27 @@ pub async fn delete_snapshots_locked(
     CleanupOutcome { removed, failed }
 }
 
-/// After [`delete_snapshots_locked`] succeeded for ≥1 snap, snapshot the
-/// in-memory index outside the lock and persist to `index.json` + manifest.
-/// Both writes are best-effort and warn-only — by the time we get here the
-/// subvolumes are already gone, so an index-save failure just means restart
-/// will rebuild from fs (cheap), and a manifest failure leaves stale entries
-/// but the ws is still usable.
+/// After [`delete_snapshots_locked`] succeeded for ≥1 snap, persist the
+/// current in-memory index to `index.json` + manifest. The index save retains a
+/// read lock so a stale cleanup writer cannot overwrite a concurrently published
+/// checkpoint. Both writes are best-effort and warn-only — by the time we get
+/// here the subvolumes are already gone, so an index-save failure just means
+/// restart will rebuild from fs (cheap), and a manifest failure leaves stale
+/// entries but the ws is still usable.
 pub async fn persist_index_after_cleanup(
     state: &DaemonState,
     arc: &Arc<RwLock<WorkspaceState>>,
     snap_dir: &Path,
     label: &str,
 ) {
-    let index_to_persist = {
-        let ws = arc.read().await;
-        ws.index.clone()
-    };
-    if let Err(e) = index_store::save(snap_dir, &index_to_persist).await {
+    // Keep the read guard through the rename. A stale cleanup snapshot must
+    // not overwrite guarded evidence that a concurrent checkpoint has
+    // already durably published under the workspace write lock.
+    let ws = arc.read().await;
+    if let Err(e) = index_store::save(snap_dir, &ws.index).await {
         tracing::warn!("{}: failed to save index: {:#}", label, e);
     }
+    drop(ws);
     if let Err(e) = state.save_manifest().await {
         tracing::warn!("{}: save_manifest failed: {:#}", label, e);
     }
@@ -173,7 +179,10 @@ pub async fn checkpoint(
     }
 
     // 3. Check snapshot ID uniqueness within this workspace
-    if ws.index.snapshots.contains_key(id) {
+    // Guarded evidence permanently reserves its checkpoint ID. Allowing the
+    // legacy endpoint to reuse an ID after cleanup would let historical
+    // evidence falsely identify the replacement subvolume as the original.
+    if ws.index.snapshots.contains_key(id) || ws.index.governed_evidence.contains_key(id) {
         return Ok(Response::Error {
             code: ErrorCode::SnapshotAlreadyExists,
             message: format!("snapshot id '{}' already exists in workspace", id),
@@ -590,7 +599,9 @@ mod tests {
     use std::path::PathBuf;
     use ws_ckpt_common::backend::StorageBackend;
     use ws_ckpt_common::{
-        CleanupRetention, DaemonConfig, ErrorCode, Response, SnapshotIndex, SnapshotMeta,
+        CleanupRetention, DaemonConfig, ErrorCode, GuardedCheckpointEvidenceV2,
+        GuardedCheckpointOutcomeV2, Response, SnapshotIndex, SnapshotMeta,
+        WorkspaceGenerationTokenV2,
     };
 
     fn test_backend() -> Arc<dyn StorageBackend> {
@@ -740,6 +751,50 @@ mod tests {
                 assert!(message.contains("existing-id"));
             }
             _ => panic!("expected SnapshotAlreadyExists error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_cannot_reuse_id_reserved_by_guarded_evidence() {
+        use ws_ckpt_common::{
+            GuardedCheckpointEvidenceV2, GuardedCheckpointOutcomeV2, WorkspaceGenerationTokenV2,
+        };
+
+        let state = Arc::new(crate::state::DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
+        let mut index = SnapshotIndex::new(PathBuf::from("/home/user/ws"));
+        index.governed_evidence.insert(
+            "reserved-id".to_string(),
+            GuardedCheckpointEvidenceV2 {
+                ws_id: "ws-abcdef".to_string(),
+                registered_path: "/home/user/ws".to_string(),
+                generation: WorkspaceGenerationTokenV2::from_bytes([1; 32]),
+                checkpoint_id: "reserved-id".to_string(),
+                operation_digest: [2; 32],
+                caller_uid: 1000,
+                outcome: GuardedCheckpointOutcomeV2::Created {
+                    snapshot_id: "reserved-id".to_string(),
+                },
+            },
+        );
+        state.register_workspace(
+            "ws-abcdef".to_string(),
+            PathBuf::from("/home/user/ws"),
+            index,
+        );
+
+        let response = checkpoint(&state, "ws-abcdef", "reserved-id", None, None, false)
+            .await
+            .unwrap();
+        match response {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::SnapshotAlreadyExists);
+                assert!(message.contains("reserved-id"));
+            }
+            other => panic!("expected SnapshotAlreadyExists, got {other:?}"),
         }
     }
 
@@ -1391,9 +1446,22 @@ mod tests {
         let mut idx = SnapshotIndex::new(ws_path.clone());
         let now = Utc::now();
         for (i, off) in [0i64, 1, 2, 3, 4].iter().enumerate() {
+            let snapshot_id = format!("snap-{}", i + 1);
             idx.snapshots.insert(
-                format!("snap-{}", i + 1),
+                snapshot_id.clone(),
                 make_snapshot_meta_at(false, now - Duration::seconds(*off)),
+            );
+            idx.governed_evidence.insert(
+                snapshot_id.clone(),
+                GuardedCheckpointEvidenceV2 {
+                    ws_id: "ws-partial".to_string(),
+                    registered_path: ws_path.to_string_lossy().into_owned(),
+                    generation: WorkspaceGenerationTokenV2::from_bytes([1; 32]),
+                    checkpoint_id: snapshot_id.clone(),
+                    operation_digest: [i as u8; 32],
+                    caller_uid: 1000,
+                    outcome: GuardedCheckpointOutcomeV2::Created { snapshot_id },
+                },
             );
         }
         state.register_workspace("ws-partial".to_string(), ws_path.clone(), idx);
@@ -1422,6 +1490,8 @@ mod tests {
         let ws = arc.read().await;
         assert_eq!(ws.index.snapshots.len(), 1, "only the failed snap remains");
         assert!(ws.index.snapshots.contains_key("snap-3"));
+        assert_eq!(ws.index.governed_evidence.len(), 1);
+        assert!(ws.index.governed_evidence.contains_key("snap-3"));
 
         // Persisted index reflects the same — earlier successes were saved
         // even though the caller bailed.
@@ -1430,5 +1500,7 @@ mod tests {
             .expect("index.json saved");
         assert_eq!(on_disk.snapshots.len(), 1);
         assert!(on_disk.snapshots.contains_key("snap-3"));
+        assert_eq!(on_disk.governed_evidence.len(), 1);
+        assert!(on_disk.governed_evidence.contains_key("snap-3"));
     }
 }

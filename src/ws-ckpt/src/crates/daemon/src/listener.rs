@@ -120,16 +120,17 @@ async fn handle_connection(
     // Decode request
     let request: Request = decode_payload(&payload).context("Failed to decode request")?;
 
-    let agent_name = stream
-        .peer_cred()
-        .ok()
+    let peer_cred = stream.peer_cred().ok();
+    let agent_name = peer_cred
+        .as_ref()
         .and_then(|cred| cred.pid().map(|p| p as u32))
         .map(crate::ops_log::detect_agent_name)
         .unwrap_or_else(|| "user".to_string());
     let ops_name = crate::ops_log::ops_name_from_request(&request);
 
     // Dispatch
-    let response = crate::dispatcher::dispatch(&state, request).await;
+    let context = crate::dispatcher::DispatchContext::new(peer_cred.map(|cred| cred.uid()));
+    let response = crate::dispatcher::dispatch_with_context(&state, request, context).await;
 
     if let Some(name) = ops_name {
         crate::ops_log::log_operation(name, &agent_name, &response);

@@ -61,10 +61,13 @@ async fn adopt_existing_subvol(
         SnapshotIndex::new(registered_path.clone())
     };
     if index.snapshots.is_empty() {
-        if let Ok(rebuilt) =
+        if let Ok(mut rebuilt) =
             index_store::rebuild_from_fs(&btrfs_snap_dir, registered_path.clone()).await
         {
             if !rebuilt.snapshots.is_empty() {
+                // Re-adoption may recover orphan snapshot metadata, but it
+                // must not discard guarded receipts loaded from index.json.
+                rebuilt.governed_evidence = index.governed_evidence.clone();
                 info!(
                     "Recovered {} snapshot(s) from filesystem for {}",
                     rebuilt.snapshots.len(),
@@ -495,6 +498,7 @@ pub async fn delete_snapshot(
     // 5. Unlink from DAG, then remove from index + save
     ws.index.unlink_node(&resolved_id);
     ws.index.snapshots.remove(&resolved_id);
+    ws.index.governed_evidence.remove(&resolved_id);
     let snap_dir = state.index_dir(&ws.ws_id);
     tokio::fs::create_dir_all(&snap_dir)
         .await

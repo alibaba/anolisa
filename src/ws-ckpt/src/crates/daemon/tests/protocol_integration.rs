@@ -10,8 +10,9 @@ use tokio::net::{UnixListener, UnixStream};
 
 use ws_ckpt_common::{
     decode_payload, encode_frame, ChangeType, CleanupRetention, ConfigReport, DiffEntry,
-    EffectivePolicy, GlobalPolicySnapshot, PolicyFieldOp, Request, Response, SnapshotEntry,
-    SnapshotMeta, StatusReport, WorkspaceInfo, WorkspacePolicy,
+    EffectivePolicy, GlobalPolicySnapshot, GuardedCheckpointEvidenceV2, GuardedCheckpointOutcomeV2,
+    PolicyFieldOp, Request, Response, SnapshotEntry, SnapshotMeta, StatusReport,
+    WorkspaceGenerationTokenV2, WorkspaceInfo, WorkspacePolicy,
 };
 
 /// Helper: create a temporary socket path using tempfile
@@ -208,6 +209,49 @@ async fn mock_server_handle(mut stream: tokio::net::UnixStream) {
                 },
             }
         }
+        Request::WorkspaceIdentityV2 { registration_path } => Response::WorkspaceIdentityV2Ok {
+            protocol_version: 2,
+            ws_id: "ws-abcdef".to_string(),
+            registered_path: registration_path,
+            generation: WorkspaceGenerationTokenV2::from_bytes([7; 32]),
+        },
+        Request::GuardedCheckpointV2 {
+            ws_id,
+            expected_generation,
+            checkpoint_id,
+            operation_digest,
+            ..
+        } => Response::GuardedCheckpointV2Ok {
+            evidence: GuardedCheckpointEvidenceV2 {
+                ws_id,
+                registered_path: "/tmp/ws".to_string(),
+                generation: expected_generation,
+                checkpoint_id: checkpoint_id.clone(),
+                operation_digest,
+                caller_uid: 1000,
+                outcome: GuardedCheckpointOutcomeV2::Created {
+                    snapshot_id: checkpoint_id,
+                },
+            },
+        },
+        Request::CheckpointEvidenceV2 {
+            ws_id,
+            expected_generation,
+            checkpoint_id,
+            operation_digest,
+        } => Response::CheckpointEvidenceV2Ok {
+            evidence: Some(GuardedCheckpointEvidenceV2 {
+                ws_id,
+                registered_path: "/tmp/ws".to_string(),
+                generation: expected_generation,
+                checkpoint_id: checkpoint_id.clone(),
+                operation_digest,
+                caller_uid: 1000,
+                outcome: GuardedCheckpointOutcomeV2::Skipped {
+                    reason: "empty workspace".to_string(),
+                },
+            }),
+        },
     };
 
     // 5. Encode and send response frame
@@ -829,5 +873,64 @@ async fn full_reload_workspace_policy_over_socket() {
             assert_eq!(config.mount_path, "/mnt/btrfs-workspace");
         }
         other => panic!("expected ReloadConfigOk, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn full_guarded_checkpoint_v2_over_socket() {
+    let generation = WorkspaceGenerationTokenV2::from_bytes([7; 32]);
+    let response = run_policy_request(Request::GuardedCheckpointV2 {
+        ws_id: "ws-abcdef".to_string(),
+        expected_generation: generation,
+        checkpoint_id: "checkpoint-1".to_string(),
+        operation_digest: [9; 32],
+        message: Some("guarded".to_string()),
+        metadata: Some(r#"{"source":"test"}"#.to_string()),
+        pin: true,
+    })
+    .await;
+
+    match response {
+        Response::GuardedCheckpointV2Ok { evidence } => {
+            assert_eq!(evidence.ws_id, "ws-abcdef");
+            assert_eq!(evidence.generation, generation);
+            assert_eq!(evidence.operation_digest, [9; 32]);
+            assert_eq!(evidence.caller_uid, 1000);
+            assert_eq!(
+                evidence.outcome,
+                GuardedCheckpointOutcomeV2::Created {
+                    snapshot_id: "checkpoint-1".to_string()
+                }
+            );
+        }
+        other => panic!("expected GuardedCheckpointV2Ok, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn full_checkpoint_evidence_v2_over_socket() {
+    let generation = WorkspaceGenerationTokenV2::from_bytes([8; 32]);
+    let response = run_policy_request(Request::CheckpointEvidenceV2 {
+        ws_id: "ws-abcdef".to_string(),
+        expected_generation: generation,
+        checkpoint_id: "checkpoint-2".to_string(),
+        operation_digest: [10; 32],
+    })
+    .await;
+
+    match response {
+        Response::CheckpointEvidenceV2Ok {
+            evidence: Some(evidence),
+        } => {
+            assert_eq!(evidence.generation, generation);
+            assert_eq!(evidence.operation_digest, [10; 32]);
+            assert_eq!(
+                evidence.outcome,
+                GuardedCheckpointOutcomeV2::Skipped {
+                    reason: "empty workspace".to_string()
+                }
+            );
+        }
+        other => panic!("expected CheckpointEvidenceV2Ok, got {other:?}"),
     }
 }

@@ -157,6 +157,51 @@ pub fn atomic_write(
     bytes: &[u8],
     #[cfg_attr(not(unix), allow(unused_variables))] mode: Option<u32>,
 ) -> Result<()> {
+    let target = atomic_write_and_rename(dir, name, bytes, mode)?;
+
+    // Best-effort: a fsync_dir failure doesn't roll back the rename, and
+    // propagating it as Err would cause the memory-vs-disk drift described
+    // in the docstring above.
+    if let Err(e) = fsync_dir(dir) {
+        tracing::warn!(
+            "atomic_write: rename of {} succeeded but parent dir fsync failed: {:#} \
+             (data is in the right place; durability across a crash is best-effort on this fs)",
+            target.display(),
+            e
+        );
+    }
+    Ok(())
+}
+
+/// Atomically writes a file and requires both content and directory-entry durability.
+///
+/// Unlike [`atomic_write`], a parent-directory fsync failure is returned to the
+/// caller. Because the rename precedes that fsync, the target may already contain
+/// the new bytes when this function returns an error.
+pub fn atomic_write_strict(dir: &Path, name: &str, bytes: &[u8], mode: Option<u32>) -> Result<()> {
+    atomic_write_strict_with_dir_sync(dir, name, bytes, mode, fsync_dir)
+}
+
+fn atomic_write_strict_with_dir_sync<F>(
+    dir: &Path,
+    name: &str,
+    bytes: &[u8],
+    mode: Option<u32>,
+    sync_dir: F,
+) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    atomic_write_and_rename(dir, name, bytes, mode)?;
+    sync_dir(dir)
+}
+
+fn atomic_write_and_rename(
+    dir: &Path,
+    name: &str,
+    bytes: &[u8],
+    #[cfg_attr(not(unix), allow(unused_variables))] mode: Option<u32>,
+) -> Result<PathBuf> {
     fs::create_dir_all(dir)
         .with_context(|| format!("Failed to create directory: {}", dir.display()))?;
 
@@ -194,19 +239,7 @@ pub fn atomic_write(
             target.display()
         )
     })?;
-
-    // Best-effort: a fsync_dir failure doesn't roll back the rename, and
-    // propagating it as Err would cause the memory-vs-disk drift described
-    // in the docstring above.
-    if let Err(e) = fsync_dir(dir) {
-        tracing::warn!(
-            "atomic_write: rename of {} succeeded but parent dir fsync failed: {:#} \
-             (data is in the right place; durability across a crash is best-effort on this fs)",
-            target.display(),
-            e
-        );
-    }
-    Ok(())
+    Ok(target)
 }
 
 /// fsync a directory so a `rename` / `unlink` inside it is durable across a
@@ -325,6 +358,37 @@ mod tests {
         // Should not exist .tmp file after successful write
         let tmp_path = dir.path().join(format!("{}.tmp", STATE_FILE));
         assert!(!tmp_path.exists());
+    }
+
+    #[test]
+    fn atomic_write_strict_persists_content_without_tmp_residue() {
+        let dir = tempfile::tempdir().unwrap();
+        atomic_write_strict(dir.path(), "evidence.json", b"durable", None).unwrap();
+
+        assert_eq!(
+            fs::read(dir.path().join("evidence.json")).unwrap(),
+            b"durable"
+        );
+        assert!(!dir.path().join("evidence.json.tmp").exists());
+    }
+
+    #[test]
+    fn atomic_write_strict_propagates_parent_fsync_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = atomic_write_strict_with_dir_sync(
+            dir.path(),
+            "evidence.json",
+            b"renamed",
+            None,
+            |_| anyhow::bail!("injected parent fsync failure"),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("injected parent fsync failure"));
+        assert_eq!(
+            fs::read(dir.path().join("evidence.json")).unwrap(),
+            b"renamed"
+        );
     }
 
     #[cfg(unix)]

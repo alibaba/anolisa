@@ -75,6 +75,9 @@ pub enum Request {
     GetWorkspacePolicy,
     ResetWorkspacePolicy,
     PatchWorkspacePolicy,
+    WorkspaceIdentityV2,
+    GuardedCheckpointV2,
+    CheckpointEvidenceV2,
 }
 
 pub enum Response {
@@ -93,6 +96,10 @@ pub enum Response {
     HealthAdvisoryOk,
     WorkspacePolicyOk,
     ConfigOverviewOk,
+    WorkspaceIdentityV2Ok,
+    GuardedCheckpointV2Ok,
+    CheckpointEvidenceV2Ok,
+    GuardedCheckpointV2Rejected,
     Error,
 }
 
@@ -131,6 +138,9 @@ pub enum ErrorCode {
 | `BtrfsError` / `IoError` / `InvalidPath` / `DiskSpaceInsufficient` / `ConfirmationRequired` / `InternalError` | 通用错误                                                                         | 见 dispatcher / backend                    |
 
 CLI 把 `ErrorCode` 翻译成人类可读消息 + 退出码；Plugin 进一步映射成对 LLM 友好的提示（见 [plugin 设计文档](./ws-ckpt-plugin-design.md) 中的 `mapErrorToLLMMessage`）。
+
+Guarded checkpoint V2 的完整说明见独立的
+[双语设计文档](design/guarded-checkpoint-v2_zh.md)。
 
 ---
 

@@ -9,10 +9,11 @@ use tracing::{error, info, warn};
 
 use ws_ckpt_common::backend::*;
 use ws_ckpt_common::persist::LoopImgState;
-use ws_ckpt_common::{DaemonConfig, DiffEntry, WorkspaceInfo, SNAPSHOTS_DIR};
+use ws_ckpt_common::{
+    DaemonConfig, DiffEntry, WorkspaceGenerationTokenV2, WorkspaceInfo, SNAPSHOTS_DIR,
+};
 
-use super::btrfs_common;
-use super::rollback_recovery;
+use super::{btrfs_common, btrfs_identity, rollback_recovery};
 use crate::util::{is_mounted, run_command, run_command_checked};
 use btrfs_common::{backup_path_for, recover_orphan_backup, resolve_symlink_path};
 
@@ -154,6 +155,10 @@ impl StorageBackend for BtrfsLoopBackend {
 
     fn snapshots_root(&self) -> &Path {
         &self.snapshots_dir
+    }
+
+    async fn live_generation(&self, ws_id: &str) -> anyhow::Result<WorkspaceGenerationTokenV2> {
+        btrfs_identity::live_generation(&self.mount_path, ws_id)
     }
 
     async fn init_workspace(

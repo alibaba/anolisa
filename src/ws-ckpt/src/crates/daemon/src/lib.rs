@@ -2,6 +2,7 @@ pub mod backend_detect;
 pub mod backends;
 pub mod dispatcher;
 pub mod fs_watcher;
+mod guarded_checkpoint;
 pub mod index_store;
 pub mod listener;
 mod lockfile;
