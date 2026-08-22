@@ -19,9 +19,8 @@ use crate::types::{CommandOrigin, ShellEvent, ShellEventKind};
 
 use super::model::ShellEventView;
 use super::osc::{DisplayCutKind, OscParser};
-use super::prompt_replay::{
-    prompt_prefixed_replay_bytes, prompt_replay_bytes, PromptReplayTracker,
-};
+use super::prompt_presentation::PromptPresentation;
+use super::prompt_replay::{prompt_replay_bytes, PromptReplayTracker};
 
 mod activity;
 mod eof_shutdown;
@@ -60,6 +59,7 @@ pub(super) fn read_raw_until_exit<W: Write, F>(
     terminal: &File,
     child: &mut Child,
     parser: &mut OscParser,
+    prompt_presentation: &mut PromptPresentation,
     output: &mut W,
     event_observer: &mut F,
     input_events: &Receiver<RawInputEvent>,
@@ -118,6 +118,7 @@ where
             prompt,
             &mut native_candidate_echoed_len,
             &mut prompt_replay,
+            prompt_presentation,
         )? {
             request_eof_shutdown(master, terminal, child, &mut eof_shutdown)?;
         }
@@ -142,6 +143,7 @@ where
             observer_action,
             &mut display_start,
             &mut prompt_replay,
+            prompt_presentation,
             &mut pending_terminal_restore,
             recovery_request_file,
             handoff_request_file,
@@ -159,6 +161,7 @@ where
                 output,
                 &mut display_start,
                 &mut prompt_replay,
+                prompt_presentation,
                 input_mode,
             )?;
             output.flush()?;
@@ -176,6 +179,7 @@ where
                     // the next eligible sample (#2161 clear-on-activity).
                     input_wait_status.clear();
                     parser.feed(&buffer[..n])?;
+                    prompt_presentation.observe(parser);
                     // Relay-side events sent before a PTY write (e.g. the
                     // synthetic prompt-repaint arm) must land before the
                     // display cuts produced by that write's echo are
@@ -188,6 +192,7 @@ where
                         prompt,
                         &mut native_candidate_echoed_len,
                         &mut prompt_replay,
+                        prompt_presentation,
                     )? {
                         request_eof_shutdown(master, terminal, child, &mut eof_shutdown)?;
                     }
@@ -217,7 +222,7 @@ where
                             DisplayCutKind::Intercept => prompt_replay.observe_intercept_cut(),
                         }
                         if !hold_shell_output && cut > display_start {
-                            write_display_slice(
+                            prompt_presentation.write_display_slice(
                                 parser,
                                 output,
                                 display_start,
@@ -246,6 +251,7 @@ where
                             observer_action,
                             &mut display_start,
                             &mut prompt_replay,
+                            prompt_presentation,
                             &mut pending_terminal_restore,
                             recovery_request_file,
                             handoff_request_file,
@@ -266,6 +272,7 @@ where
                                 output,
                                 &mut display_start,
                                 &mut prompt_replay,
+                                prompt_presentation,
                                 input_mode,
                             )?;
                             output.flush()?;
@@ -291,6 +298,7 @@ where
                         output,
                         &mut display_start,
                         &mut prompt_replay,
+                        prompt_presentation,
                     )?;
                     return Ok(eof_shutdown.is_some());
                 }
@@ -309,6 +317,7 @@ where
                 output,
                 &mut display_start,
                 &mut prompt_replay,
+                prompt_presentation,
             )?;
             return Ok(eof_shutdown.is_some());
         }
@@ -350,6 +359,7 @@ where
             prompt,
             &mut native_candidate_echoed_len,
             &mut prompt_replay,
+            prompt_presentation,
         )? {
             request_eof_shutdown(master, terminal, child, &mut eof_shutdown)?;
         }
@@ -374,6 +384,7 @@ where
             observer_action,
             &mut display_start,
             &mut prompt_replay,
+            prompt_presentation,
             &mut pending_terminal_restore,
             recovery_request_file,
             handoff_request_file,
@@ -395,6 +406,7 @@ where
                 output,
                 &mut display_start,
                 &mut prompt_replay,
+                prompt_presentation,
                 input_mode,
             )?;
             output.flush()?;
@@ -473,13 +485,20 @@ fn release_held_shell_output<W: Write, F>(
     output: &mut W,
     display_start: &mut usize,
     prompt_replay: &mut PromptReplayTracker,
+    prompt_presentation: &mut PromptPresentation,
 ) -> io::Result<()>
 where
     F: FnMut(ShellEventView<'_>, &mut W) -> io::Result<RawObserverAction>,
 {
     drain_observer_until_released(event_observer, parser, output)?;
     if parser.display_position() > *display_start {
-        write_pending_display(parser, output, display_start, prompt_replay)?;
+        write_pending_display(
+            parser,
+            output,
+            display_start,
+            prompt_replay,
+            prompt_presentation,
+        )?;
         output.flush()?;
     }
     Ok(())
@@ -490,9 +509,16 @@ fn write_pending_display<W: Write>(
     output: &mut W,
     display_start: &mut usize,
     prompt_replay: &mut PromptReplayTracker,
+    prompt_presentation: &mut PromptPresentation,
 ) -> io::Result<()> {
     let display_end = parser.display_position();
-    write_display_slice(parser, output, *display_start, display_end, prompt_replay)?;
+    prompt_presentation.write_display_slice(
+        parser,
+        output,
+        *display_start,
+        display_end,
+        prompt_replay,
+    )?;
     *display_start = display_end;
     Ok(())
 }
@@ -502,9 +528,16 @@ fn write_pending_display_preserving_prompt_ghost<W: Write>(
     output: &mut W,
     display_start: &mut usize,
     prompt_replay: &mut PromptReplayTracker,
+    prompt_presentation: &mut PromptPresentation,
     input_mode: &Arc<Mutex<RawInputMode>>,
 ) -> io::Result<()> {
-    write_pending_display(parser, output, display_start, prompt_replay)?;
+    write_pending_display(
+        parser,
+        output,
+        display_start,
+        prompt_replay,
+        prompt_presentation,
+    )?;
     let ghost = input_mode.lock().ok().and_then(|mode| match &*mode {
         RawInputMode::PromptGhost { text, route } => Some((
             text.clone(),
@@ -527,24 +560,6 @@ fn write_prompt_ghost<W: Write>(output: &mut W, text: &str, selection: bool) -> 
         output,
         "{SAVE_CURSOR}\x1b[2m{marker} {text}\x1b[0m{RESTORE_CURSOR}"
     )
-}
-
-fn write_display_slice<W: Write>(
-    parser: &OscParser,
-    output: &mut W,
-    display_start: usize,
-    display_end: usize,
-    prompt_replay: &mut PromptReplayTracker,
-) -> io::Result<()> {
-    let prompt = parser.last_prompt_display();
-    let prefix_len = display_end
-        .saturating_sub(display_start)
-        .min(prompt.len().max(prompt_replay.pending_prompt_len()).max(1));
-    let prefix_end = display_start.saturating_add(prefix_len);
-    let prefix = parser.read_display_range(display_start, prefix_end)?;
-    let bytes = prompt_replay.strip(prefix.as_ref());
-    output.write_all(&prompt_prefixed_replay_bytes(bytes, prompt))?;
-    parser.write_display_range(prefix_end, display_end, output)
 }
 
 fn drain_observer_until_released<W: Write, F>(
@@ -572,13 +587,14 @@ fn clear_prompt_ghost_line<W: Write>(
     output: &mut W,
     fallback_prompt: &str,
     native_candidate_echoed_len: &mut usize,
+    prompt_presentation: &PromptPresentation,
 ) -> io::Result<()> {
     write!(output, "\r\x1b[2K")?;
     let replay = prompt_replay_bytes(parser.last_prompt_display());
     if replay.is_empty() {
-        output.write_all(fallback_prompt.as_bytes())?;
+        prompt_presentation.write_replayed_prompt(output, fallback_prompt.as_bytes())?;
     } else {
-        output.write_all(replay)?;
+        prompt_presentation.write_replayed_prompt(output, replay)?;
     }
     *native_candidate_echoed_len = 0;
     output.flush()

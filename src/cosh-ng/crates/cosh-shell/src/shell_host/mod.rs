@@ -11,6 +11,7 @@ mod osc;
 mod osc_output;
 #[cfg(test)]
 mod osc_tests;
+mod prompt_presentation;
 mod prompt_replay;
 mod raw_relay;
 mod raw_runner;
@@ -21,7 +22,7 @@ mod transcript;
 
 pub use line_interactive::{run_line_interactive_bash, LineInteractiveOutput};
 pub(crate) use model::{HintCardRenderer, ShellEventView};
-pub use model::{ScriptedInput, ShellHostConfig, ShellHostOutput};
+pub use model::{ScriptedInput, ShellHostConfig, ShellHostOutput, ShellIntegration};
 pub(crate) use raw_relay::interactive_sentinel::InputWaitStatus;
 pub use raw_runner::{
     run_raw_interactive_bash, run_raw_interactive_bash_with_observer,

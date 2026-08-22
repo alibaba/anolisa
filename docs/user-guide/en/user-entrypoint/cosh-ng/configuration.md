@@ -55,6 +55,7 @@ log_level = "warn"
 
 [shell]
 default = "auto"
+integration = "enhanced"
 adapter_default = "cosh-core"
 analysis_mode = "smart"
 approval_mode = "auto"
@@ -127,6 +128,15 @@ name = "nginx"
 expected = "active"
 ```
 
+`integration` accepts `native` or `enhanced`. Enhanced is the default and starts
+in Assisted mode (`◇ `), with marker-based Agent routing and command events.
+At an empty prompt, `Shift+Tab` switches between Assisted and Shell-only
+(`◌ `); Shell-only keeps command events and post-command insights but sends
+ordinary input to bash or zsh. Native leaves input, Shell options, traps, and
+startup files under bash or zsh ownership and provides no Cosh observation or
+insights. The integration value is read when `cosh` starts, so changing it
+requires a new session. Invalid values reject startup with a visible error.
+
 `analysis_mode` accepts `smart`, `auto`, or `manual`; shell approval accepts
 `recommend`, `auto`, or `trust`. `health.services.expected` accepts `active` or
 `inactive`.
@@ -156,6 +166,7 @@ root is `$XDG_STATE_HOME/cosh/audit` or `~/.local/state/cosh/audit`; set
 | `DASHSCOPE_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL` | OpenAI-compatible credentials and URL fallbacks |
 | `ALIBABA_CLOUD_ACCESS_KEY_ID`, `ALIBABA_CLOUD_ACCESS_KEY_SECRET`, `ALIBABA_CLOUD_SECURITY_TOKEN` | Aliyun credential fallbacks |
 | `COSH_SHELL_DEFAULT_SHELL`, `COSH_SHELL_ADAPTER`, `COSH_SHELL_ANALYSIS_MODE`, `COSH_SHELL_APPROVAL_MODE` | Interactive shell choices |
+| `COSH_SHELL_INTEGRATION` | `native` or `enhanced` Shell integration for the next session |
 | `COSH_SHELL_LANG`, `COSH_SHELL_AI`, `COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | Shell language, AI toggle, and input-wait timeout |
 | `COSH_RECOMMENDATIONS_BASH_HISTORY` | Opt in to Bash-history recommendations |
 | `COSH_LOG`, `RUST_LOG` | Log filtering (`COSH_LOG` wins) |

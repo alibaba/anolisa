@@ -36,6 +36,13 @@ if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
 fi
 _COSH_AI_ENABLED="$_COSH_SESSION_AI_ENABLED"
 readonly _COSH_AI_ENABLED
+_cosh_assistance_enabled() {
+  [[ -n "${COSH_ASSISTANCE_STATE_FILE:-}"
+     && -f "$COSH_ASSISTANCE_STATE_FILE" ]]
+}
+_cosh_ai_enabled() {
+  [[ "${_COSH_AI_ENABLED:-1}" == 1 ]] && _cosh_assistance_enabled
+}
 _cosh_load_native_zsh_history_if_empty() {
   if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
     return 0
@@ -156,6 +163,7 @@ _cosh_emit_top_level_missing_marker() {
 }
 _cosh_should_intercept_unknown() {
   local command="$1"
+  _cosh_assistance_enabled || return 1
   if _cosh_is_slash_control_candidate "$command"; then
     printf '%s' "slash"
     return 0
@@ -489,7 +497,7 @@ command_not_found_handler() {
   fi
   local intent
   intent="$(_cosh_classify_missing "$original" "$command")"
-  if [[ "$intent" == "natural_language" && "${_COSH_AI_ENABLED:-1}" == 1 ]]; then
+  if [[ "$intent" == "natural_language" ]] && _cosh_ai_enabled; then
     if [[ "${_COSH_HAS_USER_COMMAND_NOT_FOUND:-0}" == 1 ]]; then
       _cosh_emit_top_level_missing_marker "$intent" "$sensitive" false
       _cosh_delegate_zsh_command_not_found "$command" "$@"
@@ -611,7 +619,7 @@ _cosh_precmd_marker() {
 # commands starting with / that zsh would try to exec as an absolute path.
 # The actual interception and marker emission happens in _cosh_preexec_marker.
 for _cosh_sc in about agent allow answer approval-mode approve audit auth cancel clear config copy debug deny details explain extensions health help hooks mcp mode new recommendations resume select send-to-shell session shell skills stats status; do
-  functions[/$_cosh_sc]=':'
+  functions[/$_cosh_sc]='_cosh_assistance_enabled || command "$0" "$@"'
 done
 unset _cosh_sc
 autoload -Uz add-zsh-hook

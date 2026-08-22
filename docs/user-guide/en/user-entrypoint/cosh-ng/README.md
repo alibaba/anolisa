@@ -2,7 +2,9 @@
 
 [中文版](../../../zh/user-entrypoint/cosh-ng/README.md)
 
-cosh-ng is an AI-native Linux terminal that keeps normal Shell work and Agent tasks together. Start with the quick start, then use the task-based links below for the feature or command you need.
+cosh-ng is an AI-native Linux terminal with Enhanced Assisted as its default
+and an explicit hook-free Native integration. Start with the quick start, then
+use the task-based links below for the feature or command you need.
 
 ## Start here
 
@@ -15,7 +17,7 @@ cosh-ng is an AI-native Linux terminal that keeps normal Shell work and Agent ta
 
 | Goal | Read next |
 |---|---|
-| Run Shell commands and natural-language tasks together | [Interactive terminal](shell/overview.md) |
+| Use Shell commands and natural-language tasks together | [Interactive terminal](shell/overview.md) |
 | Choose when Agent tool calls require confirmation | [Tool approval](shell/approval.md) |
 | Resume or compact a conversation | [Session recovery](shell/session-recovery.md) |
 | Learn slash commands and keyboard behavior | [Interactive behavior](shell/interactive-mode.md) |

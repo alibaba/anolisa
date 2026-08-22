@@ -9,17 +9,18 @@ use std::time::{Duration, Instant};
 
 use nix::libc;
 
-use crate::input::InputClassifier;
+use crate::input::{AssistanceControl, InputClassifier};
 use crate::raw_input::{
     spawn_raw_action_relay_with_wake, spawn_raw_input_relay_with_wake, MainPromptGate,
     RawInputEvent, RawInputMode, RawObserverAction, RawRelayAction, UserPtyInputGeneration,
 };
 use crate::types::ShellEvent;
 
-use super::bootstrap::{start_bash_session, start_zsh_session, PtySession};
-use super::io_loop::{read_until_streaming, wait_child_preserving_signal};
+use super::bootstrap::{assistance_state_file, start_bash_session, start_zsh_session, PtySession};
+use super::io_loop::{read_until_streaming_with_presentation, wait_child_preserving_signal};
 use super::lifecycle::{build_shell_host_output, push_shell_exited_event};
 use super::model::{ShellEventView, ShellHostConfig, ShellHostOutput};
+use super::prompt_presentation::PromptPresentation;
 use super::raw_relay::{read_raw_until_exit, DriverCompletion, RawActionWatchdog};
 
 mod interactive;
@@ -367,22 +368,38 @@ where
         UnixStream,
     ) -> JoinHandle<io::Result<()>>,
 {
+    let assistance_control = config
+        .integration
+        .uses_markers()
+        .then(|| AssistanceControl::enabled(assistance_state_file(config)));
+    let input_classifier = match assistance_control.as_ref() {
+        Some(control) => input_classifier.with_assistance_control(control.clone()),
+        None => input_classifier,
+    };
     let mut session = start_session(config)?;
+    let mut prompt_presentation = PromptPresentation::new(config.integration.uses_markers());
+    if let Some(control) = assistance_control.as_ref() {
+        session.parser.set_assistance_control(control.clone());
+        prompt_presentation = prompt_presentation.with_assistance_control(control.clone());
+    }
 
-    read_until_streaming(
-        &mut session.master,
-        &mut session.child,
-        &mut session.parser,
-        &mut output,
-        Duration::from_secs(5),
-        |parser| {
-            if config.native_mode {
-                parser.precmd_count() >= 1
-            } else {
-                parser.prompt_count(config.prompt.as_bytes()) >= 1
-            }
-        },
-    )?;
+    if config.integration.uses_markers() {
+        read_until_streaming_with_presentation(
+            &mut session.master,
+            &mut session.child,
+            &mut session.parser,
+            &mut output,
+            &mut prompt_presentation,
+            Duration::from_secs(5),
+            |parser| {
+                if config.native_mode {
+                    parser.precmd_count() >= 1
+                } else {
+                    parser.prompt_count(config.prompt.as_bytes()) >= 1
+                }
+            },
+        )?;
+    }
 
     let input_master = session.master.try_clone()?;
     let (input_event_sender, input_event_receiver) = mpsc::channel();
@@ -397,7 +414,8 @@ where
     // Slash-via-shell routing (issue #1718) needs a markered native session
     // so the prompt gate can prove bash is at its prompt; everything else
     // keeps the Rust intercept path.
-    let slash_route_enabled = slash_via_shell && config.native_mode;
+    let slash_route_enabled =
+        config.integration.uses_markers() && slash_via_shell && config.native_mode;
     let (mut wake_reader, wake_writer, mut resize_reader, _resize_wake) =
         RelayWake::new()?.into_parts();
     // Keep the channel open after the driver and completion notifier exit;
@@ -408,7 +426,7 @@ where
         input_master,
         session.child.id(),
         input_event_sender,
-        input_classifier,
+        input_classifier.with_shell_passthrough(!config.integration.uses_markers()),
         Arc::clone(&input_mode),
         input_generation.clone(),
         main_prompt_gate,
@@ -428,7 +446,7 @@ where
     });
     let watchdog = action_watchdog.map(RawActionWatchdog::new);
     let mut last_winsize = config.winsize;
-    let relay_prompt = if config.native_mode {
+    let relay_prompt = if config.native_mode || !config.integration.uses_markers() {
         ""
     } else {
         &config.prompt
@@ -438,6 +456,7 @@ where
         &session.terminal,
         &mut session.child,
         &mut session.parser,
+        &mut prompt_presentation,
         &mut output,
         &mut event_observer,
         &input_event_receiver,
@@ -458,7 +477,9 @@ where
     )?;
     let display_start = session.parser.display_position();
     session.parser.flush_pending()?;
-    session.parser.write_display_range(
+    prompt_presentation.observe(&mut session.parser);
+    prompt_presentation.write_range(
+        &session.parser,
         display_start,
         session.parser.display_position(),
         &mut output,

@@ -14,6 +14,7 @@ use super::super::{
     UserPtyInputGeneration,
 };
 use super::*;
+use crate::input::AssistanceControl;
 
 fn output_file(label: &str) -> (std::path::PathBuf, File) {
     let path = std::env::temp_dir().join(format!(
@@ -120,6 +121,203 @@ fn expect_prompt_ghost_dismissal(receiver: &mpsc::Receiver<RawInputEvent>) {
         }
     }
     panic!("missing prompt ghost dismissal event");
+}
+
+#[test]
+fn shift_tab_toggles_enhanced_routing_only_at_an_empty_prompt() {
+    let (path, mut master) = output_file("assistance-toggle");
+    let state_file = path.with_extension("enabled");
+    fs::write(&state_file, b"enabled\n").expect("initial state file");
+    let control = AssistanceControl::enabled(state_file.clone());
+    let classifier = InputClassifier::default().with_assistance_control(control.clone());
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let (tx, rx) = mpsc::channel();
+    let gate = MainPromptGate::default();
+    gate.set_at_prompt(true);
+    control.set_at_prompt(true);
+    let mut state = RawInputRelayState::with_generation_and_gate(
+        UserPtyInputGeneration::default(),
+        gate.clone(),
+        false,
+    );
+
+    for bytes in [b"\x1b".as_slice(), b"[".as_slice(), b"Z".as_slice()] {
+        relay_input_bytes(
+            bytes,
+            Instant::now(),
+            &mut master,
+            &tx,
+            &classifier,
+            &input_mode,
+            &mut state,
+        )
+        .expect("split Shift+Tab");
+    }
+
+    assert!(!control.is_enabled());
+    assert!(!state_file.exists());
+    assert!(rx
+        .try_iter()
+        .any(|event| event == RawInputEvent::AssistanceToggled));
+    assert!(fs::read(&path).expect("toggle output").is_empty());
+
+    relay_input_bytes(
+        b"/help\n",
+        Instant::now(),
+        &mut master,
+        &tx,
+        &classifier,
+        &input_mode,
+        &mut state,
+    )
+    .expect("shell-only input");
+    assert_eq!(fs::read(&path).expect("shell-only output"), b"/help\n");
+
+    gate.set_at_prompt(true);
+    control.set_at_prompt(true);
+    relay_input_bytes(
+        b"\x1b[Z",
+        Instant::now(),
+        &mut master,
+        &tx,
+        &classifier,
+        &input_mode,
+        &mut state,
+    )
+    .expect("reenable assistance");
+    assert!(control.is_enabled());
+    assert!(state_file.is_file());
+
+    relay_input_bytes(
+        b"draft",
+        Instant::now(),
+        &mut master,
+        &tx,
+        &classifier,
+        &input_mode,
+        &mut state,
+    )
+    .expect("draft input");
+    relay_input_bytes(
+        b"\x1b[Z",
+        Instant::now(),
+        &mut master,
+        &tx,
+        &classifier,
+        &input_mode,
+        &mut state,
+    )
+    .expect("draft Shift+Tab");
+    assert!(control.is_enabled());
+    assert!(fs::read(&path)
+        .expect("draft output")
+        .ends_with(b"draft\x1b[Z"));
+
+    fs::remove_file(path).ok();
+    fs::remove_file(state_file).ok();
+}
+
+#[test]
+fn shift_tab_reenables_assistance_while_shell_only_insight_is_visible() {
+    let (path, mut master) = output_file("assistance-toggle-shell-only-insight");
+    let state_file = path.with_extension("enabled");
+    fs::write(&state_file, b"enabled\n").expect("initial state file");
+    let control = AssistanceControl::enabled(state_file.clone());
+    control.toggle().expect("disable assistance");
+    control.set_at_prompt(true);
+    let classifier = InputClassifier::default().with_assistance_control(control.clone());
+    let input_mode = Arc::new(Mutex::new(RawInputMode::PromptGhost {
+        text: "analyze failed input".to_string(),
+        route: PromptGhostRoute::AgentIntercept {
+            suggestion_id: Some("insight-1".to_string()),
+        },
+    }));
+    let (tx, rx) = mpsc::channel();
+    let gate = MainPromptGate::default();
+    gate.set_at_prompt(true);
+    let mut state = RawInputRelayState::with_generation_and_gate(
+        UserPtyInputGeneration::default(),
+        gate,
+        false,
+    );
+
+    relay_input_bytes(
+        b"\x1b[Z",
+        Instant::now(),
+        &mut master,
+        &tx,
+        &classifier,
+        &input_mode,
+        &mut state,
+    )
+    .expect("reenable assistance over shell-only insight");
+
+    assert!(control.is_enabled());
+    assert!(state_file.is_file());
+    assert_eq!(
+        *input_mode.lock().expect("input mode"),
+        RawInputMode::Passthrough
+    );
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![
+            RawInputEvent::PromptGhostClear,
+            RawInputEvent::PromptGhostDismissed,
+            RawInputEvent::AssistanceToggled,
+        ]
+    );
+    assert!(fs::read(&path).expect("toggle output").is_empty());
+}
+
+#[test]
+fn shift_tab_disables_assistance_while_failure_insight_is_visible() {
+    let (path, mut master) = output_file("assistance-disable-over-insight");
+    let state_file = path.with_extension("enabled");
+    fs::write(&state_file, b"enabled\n").expect("initial state file");
+    let control = AssistanceControl::enabled(state_file.clone());
+    control.set_at_prompt(true);
+    let classifier = InputClassifier::default().with_assistance_control(control.clone());
+    let input_mode = Arc::new(Mutex::new(RawInputMode::PromptGhost {
+        text: "analyze failed input".to_string(),
+        route: PromptGhostRoute::AgentIntercept {
+            suggestion_id: Some("insight-1".to_string()),
+        },
+    }));
+    let (tx, rx) = mpsc::channel();
+    let gate = MainPromptGate::default();
+    gate.set_at_prompt(true);
+    let mut state = RawInputRelayState::with_generation_and_gate(
+        UserPtyInputGeneration::default(),
+        gate,
+        false,
+    );
+
+    relay_input_bytes(
+        b"\x1b[Z",
+        Instant::now(),
+        &mut master,
+        &tx,
+        &classifier,
+        &input_mode,
+        &mut state,
+    )
+    .expect("disable assistance over failure insight");
+
+    assert!(!control.is_enabled());
+    assert!(!state_file.exists());
+    assert_eq!(
+        *input_mode.lock().expect("input mode"),
+        RawInputMode::Passthrough
+    );
+    assert_eq!(
+        rx.try_iter().collect::<Vec<_>>(),
+        vec![
+            RawInputEvent::PromptGhostClear,
+            RawInputEvent::PromptGhostDismissed,
+            RawInputEvent::AssistanceToggled,
+        ]
+    );
+    assert!(fs::read(&path).expect("toggle output").is_empty());
 }
 
 struct ChannelReader {

@@ -124,8 +124,8 @@ fn raw_cli_startup_banner_renders_when_enabled() {
         "no hooks line when hooks are disabled: {output}"
     );
     assert!(!output.contains("no command ran"), "{output}");
-    assert!(!output.contains("cosh-osc$ ╭ cosh-shell"), "{output}");
-    assert_inline_before_followup(&output, "╭ cosh-shell", "exit");
+    assert!(!output.contains("cosh-osc$ ╭ · cosh-shell"), "{output}");
+    assert_inline_before_followup(&output, "╭ · cosh-shell", "exit");
     assert!(!output.contains("Thinking..."), "{output}");
 }
 
@@ -410,7 +410,7 @@ fn raw_cli_startup_health_healthy_fixture_renders_startup_row_in_banner() {
     assert!(output.contains("Disk"), "{output}");
     assert!(!output.contains("Health check"), "{output}");
     assert!(!output.contains("Suggested prompts"), "{output}");
-    assert_inline_before_followup(&output, "╭ cosh-shell", "exit");
+    assert_inline_before_followup(&output, "╭ · cosh-shell", "exit");
 }
 
 #[test]

@@ -3,16 +3,18 @@
 [中文版](README_zh.md)
 
 cosh-ng is an AI-native terminal built around the shell you already use.
-Start `cosh` to run bash or zsh as usual, then describe larger tasks in natural
-language when you want the Agent to investigate or act. Shell commands, Skills,
-approval cards, and resumable conversations stay in one terminal. Structured
-JSON and JSONL interfaces are available for automation and Agent integration.
+`cosh` starts in Enhanced Assisted mode by default, preserving implicit
+natural-language routing, Skills, approval cards, and resumable Agent
+conversations in the same terminal. Choose Native integration at startup when
+bash or zsh must own the session without Cosh hooks, observation, or insights.
+Structured JSON and JSONL interfaces remain available for automation and
+Agent integration.
 
 ## Why cosh-ng
 
 | In a conventional terminal | In cosh-ng |
 |---|---|
-| You translate intent into commands | Ask in natural language or run commands directly |
+| You translate intent into commands | Mix natural language and commands in the default Assisted mode |
 | Automation is scattered across scripts | Package repeatable workflows as Skills |
 | AI context is tied to one chat window | Resume workspace-scoped Agent conversations |
 | AI actions are hard to inspect | Review tool calls in approval cards and audit records |
@@ -72,20 +74,35 @@ cd your-project
 cosh
 ```
 
-Then mix shell commands and Agent requests in the same session:
+Enhanced Assisted is the default. The `◇ ` prefix shows that Cosh may classify
+and route submitted input before the foreground Shell executes it:
 
 ```text
-$ git status
-$ explain why this service keeps restarting and show me the evidence
-$ /agent
-$ /skills list
-$ /session status
+◇ user@host:~/project$ git status
+◇ user@host:~/project$ explain why this service keeps restarting
+```
+
+At an empty prompt, press `Shift+Tab` to switch to Enhanced Shell-only. Its
+`◌ ` prefix means ordinary input goes to the Shell while post-command insights
+remain available. Press `Shift+Tab` again to return to Assisted mode.
+
+Start Native explicitly when the session must have no Cosh hooks, observation,
+or insights:
+
+```bash
+COSH_SHELL_INTEGRATION=native cosh
+```
+
+```text
+$ hello
+bash: hello: command not found
 ```
 
 Use `/auth` to choose a supported provider plan, `/help` to list current slash
 commands, and `/mode approval recommend` when every Agent tool call should wait
 for confirmation. Approval settings use `recommend`, `auto`, or `trust` across
-the shell and Core. With the cosh-core runtime, `/agent` opens a one-shot
+the shell and Core. In enhanced integration, the cosh-core runtime makes
+`/agent` open a one-shot
 Composer that accepts a leading `/skill:<name>` and validated workspace-local
 `@path` references.
 

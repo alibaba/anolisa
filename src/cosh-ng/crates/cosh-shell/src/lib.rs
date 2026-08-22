@@ -14,6 +14,12 @@ mod evidence;
 #[path = "hooks/public.rs"]
 mod hooks;
 
+#[cfg(test)]
+#[path = "ui/card_kind_tests.rs"]
+mod card_kind_tests;
+#[cfg(test)]
+#[path = "types/card_tests.rs"]
+mod card_tests;
 mod i18n;
 mod input;
 #[allow(dead_code)]

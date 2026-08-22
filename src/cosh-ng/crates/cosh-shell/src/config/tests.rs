@@ -50,6 +50,7 @@ fn temp_home_path(label: &str) -> PathBuf {
 fn default_config_values() {
     let cfg = CoshConfig::default();
     assert_eq!(cfg.shell_default, "auto");
+    assert_eq!(cfg.shell_integration, "enhanced");
     assert_eq!(cfg.analysis_mode, "smart");
     assert_eq!(cfg.approval_mode, CoshApprovalMode::Auto);
     assert_eq!(cfg.adapter_default, "cosh-core");
@@ -212,6 +213,7 @@ language = "fr-FR"
 fn parse_simple_key_value() {
     let content = r#"
 shell.default = "zsh"
+shell.integration = enhanced
 shell.analysis_mode = conservative
 shell.approval_mode = recommend
 shell.adapter_default = "qwen"
@@ -220,6 +222,7 @@ ui.language = zh-CN
     let mut cfg = CoshConfig::default();
     parse_simple_config(content, &mut cfg);
     assert_eq!(cfg.shell_default, "zsh");
+    assert_eq!(cfg.shell_integration, "enhanced");
     assert_eq!(cfg.analysis_mode, "conservative");
     assert_eq!(cfg.approval_mode, CoshApprovalMode::Recommend);
     assert_eq!(cfg.adapter_default, "qwen");

@@ -2,7 +2,8 @@
 
 [English](../../../en/user-entrypoint/cosh-ng/README.md)
 
-cosh-ng 是一个 AI 原生 Linux 终端，让日常 Shell 操作和 Agent 任务在同一个终端中完成。先阅读快速开始，再按下面的任务导航查找所需功能或命令。
+cosh-ng 是一个 AI 原生 Linux 终端，默认使用 Enhanced Assisted，也提供显式的
+无 Hook Native 集成。先阅读快速开始，再按下面的任务导航查找所需功能或命令。
 
 ## 从这里开始
 
@@ -15,7 +16,7 @@ cosh-ng 是一个 AI 原生 Linux 终端，让日常 Shell 操作和 Agent 任�
 
 | 目标 | 继续阅读 |
 |---|---|
-| 在同一会话中运行 Shell 命令和自然语言任务 | [交互式终端](shell/overview.md) |
+| 在同一会话中使用 Shell 命令和自然语言任务 | [交互式终端](shell/overview.md) |
 | 选择 Agent 工具调用何时需要确认 | [工具审批](shell/approval.md) |
 | 恢复或压缩会话 | [会话恢复](shell/session-recovery.md) |
 | 了解斜杠命令和按键行为 | [交互行为](shell/interactive-mode.md) |

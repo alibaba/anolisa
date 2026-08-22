@@ -1,6 +1,88 @@
 use super::*;
 
 #[test]
+fn raw_cli_shift_tab_reenables_assistance_over_shell_only_failure_insight() {
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ANALYSIS_MODE", "smart"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+        vec![
+            (b"\x1b[Z".to_vec(), Duration::from_millis(500)),
+            (
+                b"cosh-command-that-does-not-exist\n".to_vec(),
+                Duration::from_millis(200),
+            ),
+            (b"\x1b[Z".to_vec(), Duration::from_millis(1_000)),
+            (b"exit 0\n".to_vec(), Duration::from_millis(300)),
+        ],
+    );
+    let visible = strip_ansi_escape(&output);
+
+    assert!(
+        visible.contains("cosh-command-that-does-not-exist: command not found"),
+        "{output}"
+    );
+    assert!(
+        visible.contains("The previous input did not run successfully"),
+        "{output}"
+    );
+    assert!(count_occurrences(&visible, "◇ ") >= 2, "{output}");
+}
+
+#[test]
+fn raw_cli_shift_tab_disables_assistance_over_assisted_failure_insight() {
+    let home = temp_shell_home("assistance-disable-over-insight");
+    fs::write(home.join(".bashrc"), "PS1='insight-owner$ '\n").unwrap();
+    let home_str = home.to_string_lossy().into_owned();
+    let output = run_raw_cli_with_args_env_and_delayed_input(
+        "fake",
+        &[],
+        &[
+            ("HOME", home_str.as_str()),
+            ("COSH_SHELL_INTEGRATION", "enhanced"),
+            ("COSH_SHELL_ISOLATED", "0"),
+            ("COSH_SHELL_ANALYSIS_MODE", "smart"),
+            ("COSH_SHELL_STARTUP_BANNER", "0"),
+        ],
+        vec![
+            (
+                b"cosh-command-that-does-not-exist\n".to_vec(),
+                Duration::from_millis(500),
+            ),
+            (b"\x1b[Z".to_vec(), Duration::from_millis(1_000)),
+            (
+                b"printf '__SHELL_ONLY__\\n'\n".to_vec(),
+                Duration::from_millis(300),
+            ),
+            (b"exit 0\n".to_vec(), Duration::from_millis(300)),
+        ],
+    );
+    let _ = fs::remove_dir_all(&home);
+    let visible = strip_ansi_escape(&output);
+
+    assert!(
+        visible.contains("cosh-command-that-does-not-exist: command not found"),
+        "{output}"
+    );
+    assert!(
+        visible.contains("The previous input did not run successfully"),
+        "{output}"
+    );
+    assert!(
+        visible.contains("◌ insight-owner$ printf '__SHELL_ONLY__\\n'"),
+        "{output}"
+    );
+    assert!(
+        !visible.contains("◇ insight-owner$ printf '__SHELL_ONLY__\\n'"),
+        "{output}"
+    );
+}
+
+#[test]
 fn raw_cli_slash_after_failed_command_invokes_adapter() {
     let output = run_raw_cli_with_env(
         "fake",

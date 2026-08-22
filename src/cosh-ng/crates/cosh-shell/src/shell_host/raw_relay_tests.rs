@@ -135,6 +135,7 @@ fn handoff_prompt_restore_strips_duplicate_prompt_echo() {
     parser.feed(b"bash-4.4$ ").expect("feed prompt");
     let mut display_start = parser.display.len();
     let (_generation, mut prompt_replay) = tracker_for_test();
+    let mut prompt_presentation = PromptPresentation::new(false);
     let mut output = Vec::new();
 
     restore_prompt_display_before_handoff(
@@ -142,6 +143,7 @@ fn handoff_prompt_restore_strips_duplicate_prompt_echo() {
         &mut output,
         &mut display_start,
         &mut prompt_replay,
+        &mut prompt_presentation,
     )
     .expect("restore prompt");
 
@@ -151,8 +153,14 @@ fn handoff_prompt_restore_strips_duplicate_prompt_echo() {
     parser
         .feed(b"bash-4.4$ echo ok\r\n")
         .expect("feed echoed handoff");
-    write_pending_display(&parser, &mut output, &mut display_start, &mut prompt_replay)
-        .expect("write echoed handoff");
+    write_pending_display(
+        &parser,
+        &mut output,
+        &mut display_start,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("write echoed handoff");
 
     assert_eq!(String::from_utf8_lossy(&output), "bash-4.4$ echo ok\r\n");
     assert!(!prompt_replay.is_armed());
@@ -165,6 +173,7 @@ fn user_pty_input_expires_armed_prompt_replay_before_echo_is_parsed() {
     parser.feed(b"prompt> \x1b[?2004h").expect("feed prompt");
     let mut display_start = parser.display.len();
     let (generation, mut prompt_replay) = tracker_for_test();
+    let mut prompt_presentation = PromptPresentation::new(false);
     let mut output = Vec::new();
 
     restore_prompt_display_before_handoff(
@@ -172,6 +181,7 @@ fn user_pty_input_expires_armed_prompt_replay_before_echo_is_parsed() {
         &mut output,
         &mut display_start,
         &mut prompt_replay,
+        &mut prompt_presentation,
     )
     .expect("restore prompt");
     assert!(prompt_replay.is_armed());
@@ -183,13 +193,25 @@ fn user_pty_input_expires_armed_prompt_replay_before_echo_is_parsed() {
     parser
         .feed(b"\x1b[?2004l\r\r\n")
         .expect("feed empty enter accept");
-    write_pending_display(&parser, &mut output, &mut display_start, &mut prompt_replay)
-        .expect("write empty enter accept");
+    write_pending_display(
+        &parser,
+        &mut output,
+        &mut display_start,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("write empty enter accept");
     parser
         .feed(b"prompt> \x1b[?2004h")
         .expect("feed fresh prompt");
-    write_pending_display(&parser, &mut output, &mut display_start, &mut prompt_replay)
-        .expect("write fresh prompt");
+    write_pending_display(
+        &parser,
+        &mut output,
+        &mut display_start,
+        &mut prompt_replay,
+        &mut prompt_presentation,
+    )
+    .expect("write fresh prompt");
 
     assert_eq!(
         String::from_utf8_lossy(&output),
@@ -225,6 +247,7 @@ fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut output = Vec::new();
     let mut echoed = 0usize;
+    let prompt_presentation = PromptPresentation::new(false);
 
     let barrier_count = |parser: &OscParser| {
         parser
@@ -252,6 +275,7 @@ fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
         "prompt> ",
         &mut echoed,
         &mut prompt_replay,
+        &prompt_presentation,
     )
     .expect("drain pty writes");
     assert_eq!(
@@ -276,6 +300,7 @@ fn any_pty_user_write_emits_the_prompt_cwd_invalidation_barrier() {
         "prompt> ",
         &mut echoed,
         &mut prompt_replay,
+        &prompt_presentation,
     )
     .expect("drain post-prompt write");
     assert_eq!(
@@ -292,6 +317,7 @@ fn candidate_hint_uses_terminfo_cursor_save_restore() {
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut output = Vec::new();
     let mut echoed = 0usize;
+    let prompt_presentation = PromptPresentation::new(false);
 
     sender
         .send(crate::raw_input::RawInputEvent::CandidateRedraw {
@@ -306,6 +332,7 @@ fn candidate_hint_uses_terminfo_cursor_save_restore() {
         "",
         &mut echoed,
         &mut prompt_replay,
+        &prompt_presentation,
     )
     .expect("draw candidate hint");
 
@@ -329,6 +356,7 @@ fn candidate_hint_disables_autowrap_in_both_branches() {
         let (sender, receiver) = std::sync::mpsc::channel();
         let mut output = Vec::new();
         let mut echoed = 0usize;
+        let prompt_presentation = PromptPresentation::new(false);
 
         sender
             .send(crate::raw_input::RawInputEvent::CandidateRedraw {
@@ -343,6 +371,7 @@ fn candidate_hint_disables_autowrap_in_both_branches() {
             prompt,
             &mut echoed,
             &mut prompt_replay,
+            &prompt_presentation,
         )
         .expect("draw candidate hint");
 
@@ -678,6 +707,7 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
     let (_generation, mut prompt_replay) = tracker_for_test();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
     let mut pending_terminal_restore = PendingTerminalRecovery::default();
+    let mut prompt_presentation = PromptPresentation::new(false);
     let mut null = File::open("/dev/null").expect("open null");
 
     let action = resolve_pty_emit(
@@ -693,6 +723,7 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
         },
         &mut display_start,
         &mut prompt_replay,
+        &mut prompt_presentation,
         &mut pending_terminal_restore,
         Path::new("/tmp/cosh-test-recovery"),
         Path::new("/tmp/cosh-test-handoff"),
@@ -708,6 +739,7 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
         &mut output,
         &mut display_start,
         &mut prompt_replay,
+        &mut prompt_presentation,
         &input_mode,
     )
     .expect("write prompt fragment");

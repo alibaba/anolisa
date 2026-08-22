@@ -12,6 +12,7 @@ use crate::raw_input::{
 use crate::types::{ImplicitPagerPolicy, ShellHandoffRequest};
 
 use super::super::osc::OscParser;
+use super::super::prompt_presentation::PromptPresentation;
 use super::super::prompt_replay::{prompt_replay_bytes, PromptReplayTracker};
 use super::terminal_recovery::{PendingTerminalRecovery, TerminalRecoveryOwner};
 use super::{mark_pending_prompt_replayed, write_pending_display, write_prompt_ghost};
@@ -129,6 +130,7 @@ pub(super) fn resolve_pty_emit<W: Write>(
     action: RawObserverAction,
     display_start: &mut usize,
     prompt_replay: &mut PromptReplayTracker,
+    prompt_presentation: &mut PromptPresentation,
     pending_terminal_restore: &mut PendingTerminalRecovery,
     recovery_request_file: &Path,
     handoff_request_file: &Path,
@@ -151,6 +153,7 @@ pub(super) fn resolve_pty_emit<W: Write>(
                 request,
                 display_start,
                 prompt_replay,
+                prompt_presentation,
                 pending_terminal_restore,
                 handoff_request_file,
                 false,
@@ -166,6 +169,7 @@ pub(super) fn resolve_pty_emit<W: Write>(
                 request,
                 display_start,
                 prompt_replay,
+                prompt_presentation,
                 pending_terminal_restore,
                 handoff_request_file,
                 true,
@@ -201,9 +205,15 @@ pub(super) fn resolve_pty_emit<W: Write>(
                 });
             }
             if parser.display_position() > *display_start {
-                write_pending_display(parser, output, display_start, prompt_replay)?;
+                write_pending_display(
+                    parser,
+                    output,
+                    display_start,
+                    prompt_replay,
+                    prompt_presentation,
+                )?;
             } else {
-                output.write_all(prompt)?;
+                prompt_presentation.write_replayed_prompt(output, prompt)?;
                 mark_pending_prompt_replayed(parser, raw_prompt, display_start)?;
                 prompt_replay.arm_for_replay(raw_prompt);
             }
@@ -236,13 +246,20 @@ fn emit_to_pty<W: Write>(
     request: ShellHandoffRequest,
     display_start: &mut usize,
     prompt_replay: &mut PromptReplayTracker,
+    prompt_presentation: &mut PromptPresentation,
     pending_terminal_restore: &mut PendingTerminalRecovery,
     handoff_request_file: &Path,
     restore_prompt: bool,
 ) -> io::Result<()> {
     output.flush()?;
     if restore_prompt {
-        restore_prompt_display_before_handoff(parser, output, display_start, prompt_replay)?;
+        restore_prompt_display_before_handoff(
+            parser,
+            output,
+            display_start,
+            prompt_replay,
+            prompt_presentation,
+        )?;
     }
     let bytes = request.pty_bytes().map_err(|message| {
         io::Error::new(
@@ -268,9 +285,16 @@ pub(super) fn restore_prompt_display_before_handoff<W: Write>(
     output: &mut W,
     display_start: &mut usize,
     prompt_replay: &mut PromptReplayTracker,
+    prompt_presentation: &mut PromptPresentation,
 ) -> io::Result<()> {
     if parser.display_position() > *display_start {
-        write_pending_display(parser, output, display_start, prompt_replay)?;
+        write_pending_display(
+            parser,
+            output,
+            display_start,
+            prompt_replay,
+            prompt_presentation,
+        )?;
         output.flush()?;
         return Ok(());
     }
@@ -280,7 +304,7 @@ pub(super) fn restore_prompt_display_before_handoff<W: Write>(
     if prompt.is_empty() {
         return Ok(());
     }
-    output.write_all(prompt)?;
+    prompt_presentation.write_replayed_prompt(output, prompt)?;
     output.flush()?;
     mark_pending_prompt_replayed(parser, raw_prompt, display_start)?;
     prompt_replay.arm_for_replay(raw_prompt);

@@ -26,6 +26,13 @@ if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
 fi
 _COSH_AI_ENABLED="$_COSH_SESSION_AI_ENABLED"
 readonly _COSH_AI_ENABLED
+_cosh_assistance_enabled() {
+  [[ -n "${COSH_ASSISTANCE_STATE_FILE:-}"
+     && -f "$COSH_ASSISTANCE_STATE_FILE" ]]
+}
+_cosh_ai_enabled() {
+  [[ "${_COSH_AI_ENABLED:-1}" == 1 ]] && _cosh_assistance_enabled
+}
 _cosh_load_native_bash_history_if_empty() {
   if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
     return 0
@@ -230,6 +237,7 @@ _cosh_emit_top_level_missing_marker() {
 }
 _cosh_should_intercept_unknown() {
   local command="$1"
+  _cosh_assistance_enabled || return 1
   if _cosh_is_slash_control_candidate "$command"; then
     printf '%s' "slash"
     return 0
@@ -262,7 +270,7 @@ _cosh_should_intercept_missing_path() {
   local first_word="$1"
   local command="$2"
   [[ "$first_word" == */* ]] || return 1
-  [[ "${_COSH_AI_ENABLED:-1}" == 1 ]] || return 1
+  _cosh_ai_enabled || return 1
   _cosh_path_provably_missing "$first_word" || return 1
   local intent
   intent="$(_cosh_classify_missing "$command" "$first_word" missing_path)"
@@ -548,7 +556,7 @@ command_not_found_handle() {
   fi
   local intent
   intent="$(_cosh_classify_missing "$original" "$command")"
-  if [[ "$intent" == "natural_language" && "${_COSH_AI_ENABLED:-1}" == 1 ]]; then
+  if [[ "$intent" == "natural_language" ]] && _cosh_ai_enabled; then
     if [[ "${_COSH_HAS_USER_COMMAND_NOT_FOUND:-0}" == 1 ]]; then
       _cosh_emit_top_level_missing_marker "$intent" "$sensitive" false
       _cosh_delegate_bash_command_not_found "$command" "$@"

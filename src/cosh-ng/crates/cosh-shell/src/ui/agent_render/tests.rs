@@ -192,7 +192,7 @@ fn notice_panel_lines_matches_write_form_and_closes_borders() {
 
     // Plain form: same content contract, no box drawing.
     let plain = RatatuiInlineRenderer::plain_with_width(44).notice_panel_lines(model());
-    assert!(plain[0].starts_with("Command is waiting for input:"));
+    assert!(plain[0].starts_with("· Command is waiting for input:"));
     assert!(plain.iter().all(|l| !l.contains('│')));
 }
 

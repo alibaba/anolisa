@@ -21,12 +21,13 @@ use super::mode::{
 use super::pty::write_all_pty;
 use super::relay::{
     dismiss_prompt_ghost_input, relay_delayed_input, relay_passthrough_input,
-    relay_prompt_ghost_input, send_held_input_events, send_raw_input_events,
-    write_user_bytes_to_pty, ExplicitExitTracker, InputRelayContext,
+    relay_prompt_ghost_input, relay_shell_only_input, send_held_input_events,
+    send_raw_input_events, write_user_bytes_to_pty, ExplicitExitTracker, InputRelayContext,
 };
 use super::{MainPromptGate, PromptGhostRoute, RawInputEvent, ESC};
 
 mod action;
+mod assistance;
 mod capture;
 mod deadline;
 mod prompt_ghost;
@@ -35,8 +36,13 @@ mod state;
 #[cfg(test)]
 mod tests;
 
-use action::{flush_pending_delay_escape, resolve_pending_delay_escape, PendingDelayEscape};
+pub(in crate::raw_input) use action::relay_input_bytes;
+use action::{
+    flush_pending_delay_escape, resolve_pending_delay_escape,
+    stale_delay_escape_reached_interactive_owner, PendingDelayEscape,
+};
 pub(crate) use action::{spawn_raw_action_relay, spawn_raw_action_relay_with_wake};
+use assistance::{flush_pending_assistance_escape, resolve_assistance_shortcut};
 use capture::{
     capture_generation, capture_owns_input, capture_quarantine_generation, drain_abandoned_capture,
     relay_input_chunk, CaptureOwnedInput,
@@ -133,6 +139,15 @@ where
             let input = match receive_input(&read_rx, &mut state) {
                 Ok(input) => input,
                 Err(RecvTimeoutError::Timeout) => {
+                    flush_pending_assistance_escape(
+                        false,
+                        Instant::now(),
+                        &mut master,
+                        &input_events,
+                        &input_classifier,
+                        &input_mode,
+                        &mut state,
+                    )?;
                     flush_pending_draft_escape(
                         Instant::now(),
                         &mut master,
@@ -257,44 +272,6 @@ where
     })
 }
 
-fn stale_delay_escape_reached_interactive_owner(
-    bytes: &[u8],
-    observed_mode: &RawInputMode,
-    current_mode: &RawInputMode,
-) -> bool {
-    bytes == [ESC]
-        && matches!(observed_mode, RawInputMode::Delay { .. })
-        && matches!(
-            current_mode,
-            RawInputMode::Capture { .. }
-                | RawInputMode::Submitted { .. }
-                | RawInputMode::Draining { .. }
-                | RawInputMode::Terminal { .. }
-                | RawInputMode::PromptGhost { .. }
-        )
-}
-
-pub(super) fn relay_input_bytes(
-    bytes: &[u8],
-    received_at: Instant,
-    master: &mut File,
-    input_events: &dyn RawInputEventSink,
-    input_classifier: &InputClassifier,
-    input_mode: &Arc<Mutex<RawInputMode>>,
-    state: &mut RawInputRelayState,
-) -> io::Result<()> {
-    relay_input_bytes_with_read_ahead(
-        bytes,
-        received_at,
-        master,
-        input_events,
-        input_classifier,
-        input_mode,
-        state,
-        RelayReadContext::default(),
-    )
-}
-
 fn relay_input_bytes_with_read_ahead(
     bytes: &[u8],
     received_at: Instant,
@@ -305,6 +282,15 @@ fn relay_input_bytes_with_read_ahead(
     state: &mut RawInputRelayState,
     read_context: RelayReadContext<'_>,
 ) -> io::Result<()> {
+    flush_pending_assistance_escape(
+        false,
+        received_at,
+        master,
+        input_events,
+        input_classifier,
+        input_mode,
+        state,
+    )?;
     let prompt_ghost_timed_out = state
         .pending_prompt_ghost_escape
         .as_ref()
@@ -329,6 +315,20 @@ fn relay_input_bytes_with_read_ahead(
             .cloned()
             .unwrap_or_else(|| current_raw_input_mode(input_mode))
     };
+
+    let Some(bytes) = resolve_assistance_shortcut(
+        bytes,
+        received_at,
+        &mode,
+        input_events,
+        input_classifier,
+        input_mode,
+        state,
+    )?
+    else {
+        return Ok(());
+    };
+    let bytes = bytes.as_ref();
     flush_pending_replaced_prompt_ghost_suffix(
         false,
         received_at,
@@ -593,6 +593,18 @@ fn relay_input_for_mode(
     state: &mut RawInputRelayState,
     read_context: RelayReadContext<'_>,
 ) -> io::Result<()> {
+    if input_classifier.shell_owns_input() {
+        // Native integration has no Cosh prompt/capture state to maintain.
+        // Writing directly also avoids translating ordinary PTY writes into
+        // synthetic UserInputIntercepted events consumed by Agent context.
+        state.exit_tracker.observe_shell_bytes(bytes);
+        return write_all_pty(master, bytes);
+    }
+    if !input_classifier.assistance_enabled() && matches!(mode, RawInputMode::Passthrough) {
+        let mut relay =
+            input_relay_context(master, input_classifier, input_events, input_mode, state);
+        return relay_shell_only_input(bytes, &mut relay);
+    }
     let RawInputRelayState {
         card_state,
         line_buffer,

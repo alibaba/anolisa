@@ -380,10 +380,11 @@ fn raw_cli_session_status_shows_active_and_selected_ids() {
 }
 
 #[test]
-fn raw_cli_launch_resume_value_and_picker_share_session_manager() {
+fn raw_cli_launch_resume_enables_integration_for_value_and_picker() {
     let direct = SessionFixture::new("launch-direct", FixtureMode::Ready);
-    let output = direct.run(
+    let output = direct.run_with_env(
         &["--resume", SESSION_ONE],
+        &[("COSH_SHELL_INTEGRATION", RAW_CLI_UNSET_ENV)],
         vec![
             (
                 b"/session status\n?? continue recovered task\n".to_vec(),
@@ -404,8 +405,9 @@ fn raw_cli_launch_resume_value_and_picker_share_session_manager() {
     assert!(output.contains("recovery state: active"), "{output}");
 
     let picker = SessionFixture::new("launch-picker", FixtureMode::Ready);
-    let output = picker.run(
+    let output = picker.run_with_env(
         &["--resume"],
+        &[("COSH_SHELL_INTEGRATION", RAW_CLI_UNSET_ENV)],
         vec![
             (b"\x1b".to_vec(), Duration::from_millis(700)),
             (
@@ -607,12 +609,23 @@ impl SessionFixture {
     }
 
     fn run(&self, args: &[&str], chunks: Vec<(Vec<u8>, Duration)>) -> String {
+        self.run_with_env(args, &[], chunks)
+    }
+
+    fn run_with_env(
+        &self,
+        args: &[&str],
+        extra_env: &[(&str, &str)],
+        chunks: Vec<(Vec<u8>, Duration)>,
+    ) -> String {
         let home = self.home.to_string_lossy().into_owned();
         let core = self.core.to_string_lossy().into_owned();
+        let mut env = vec![("HOME", home.as_str()), ("COSH_CORE_PATH", core.as_str())];
+        env.extend_from_slice(extra_env);
         run_raw_cli_with_args_env_current_dir_and_delayed_input_after_marker(
             "cosh-core",
             args,
-            &[("HOME", &home), ("COSH_CORE_PATH", &core)],
+            &env,
             &self.workspace,
             "cosh-osc$ ",
             chunks,

@@ -55,7 +55,7 @@ session、取消 Task 或终止 foreground shell。
 | --- | --- | --- |
 | [`shell_host/bootstrap.rs`](../../../../../crates/cosh-shell/src/shell_host/bootstrap.rs) | `PtySession` 拥有 master/slave file、child process、parser 和 recovery file；bash/zsh 成为带 controlling TTY 的 session leader | PTY lifetime 与 file descriptor 继续由 Shell process 拥有 |
 | [`shell_host/raw_runner.rs`](../../../../../crates/cosh-shell/src/shell_host/raw_runner.rs) | Relay input/output，跟踪 process group、terminal size、prompt gate 和 child exit | Attachment 不得阻塞或替代 relay loop |
-| [`shell_host/model.rs`](../../../../../crates/cosh-shell/src/shell_host/model.rs) | `ShellHostConfig` 默认 native mode，并可禁用 AI classification | Direct local shell 继续作为明确 compatibility boundary |
+| [`shell_host/model.rs`](../../../../../crates/cosh-shell/src/shell_host/model.rs) | `ShellHostConfig` 默认 Enhanced，也可选择无 Hook Native mode | Direct local shell 继续作为明确 compatibility boundary |
 | [`runtime/state.rs`](../../../../../crates/cosh-shell/src/runtime/state.rs) | `InlineState` 在内存保存 approval、question、Agent run、event cursor、card、shell block 和 session ID | 持久 Task state 必须移到 Gateway 后方；`InlineState` 变成 view/cache state |
 | [`runtime/dispatcher.rs`](../../../../../crates/cosh-shell/src/runtime/dispatcher.rs) | Shell event snapshot 驱动 inline action 和 rendering | Presenter 可复用 rendering 概念，但不能把 shell-event domain 当作 Task schema |
 | [`runtime/controller.rs`](../../../../../crates/cosh-shell/src/runtime/controller.rs) | Inline rendering 同时向 PTY 发射 approved handoff 并 capture card input | Task command 与 PTY action 需要独立 Port 和显式 correlation |

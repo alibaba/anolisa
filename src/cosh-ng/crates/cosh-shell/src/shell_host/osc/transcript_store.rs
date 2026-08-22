@@ -35,10 +35,36 @@ impl OscParser {
         retention: TranscriptRetention,
         work_dir: &Path,
     ) -> io::Result<Self> {
-        // Production marker tokens are random hex. Keeping the token in the
-        // name prevents a crash remnant plus PID reuse from blocking a later
-        // session while create_new still rejects pre-positioned symlinks.
+        Self::with_optional_marker(
+            session_id,
+            output_ref_dir,
+            Some(marker_token),
+            retention,
+            work_dir,
+        )
+    }
+
+    pub(crate) fn passthrough_with_retention(
+        session_id: String,
+        output_ref_dir: PathBuf,
+        retention: TranscriptRetention,
+        work_dir: &Path,
+    ) -> io::Result<Self> {
+        Self::with_optional_marker(session_id, output_ref_dir, None, retention, work_dir)
+    }
+
+    fn with_optional_marker(
+        session_id: String,
+        output_ref_dir: PathBuf,
+        marker_token: Option<String>,
+        retention: TranscriptRetention,
+        work_dir: &Path,
+    ) -> io::Result<Self> {
+        // Enhanced marker tokens are random hex. Native sessions use a fixed
+        // suffix because each session already owns a private work directory.
         let spool_suffix = marker_token
+            .as_deref()
+            .unwrap_or("native")
             .chars()
             .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
             .collect::<String>();
@@ -68,6 +94,7 @@ impl OscParser {
             last_prompt_display: Vec::new(),
             capture_prompt_display: false,
             prompt_ready_display_start: None,
+            prompt_ready_display_starts: Vec::new(),
             synthetic_prompt_repaint_armed: false,
             captured_output_ref_bytes: 0,
             pending_command_origin: None,
@@ -77,6 +104,7 @@ impl OscParser {
             environment_observer: None,
             history_file_observer: None,
             main_prompt_gate: crate::raw_input::MainPromptGate::default(),
+            assistance_control: None,
             pty_input_barrier_pushed: false,
             visible_tail: VisibleTailTracker::default(),
             alt_screen: AltScreenTracker::default(),

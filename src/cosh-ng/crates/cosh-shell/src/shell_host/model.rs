@@ -14,6 +14,34 @@ use super::transcript::TranscriptRetention;
 pub(super) const INTERACTIVE_TRANSCRIPT_WINDOW_BYTES: usize = 256 * 1024;
 pub(super) const INTERACTIVE_EVENT_WINDOW_EVENTS: usize = 1024;
 
+/// Selects whether Cosh participates in shell command routing.
+///
+/// Native sessions leave command ownership entirely with the child shell.
+/// Enhanced sessions use the marker hooks needed for implicit Agent routing
+/// and command-boundary events, and remain the default for compatibility.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ShellIntegration {
+    /// Leaves all input, startup files, options, and traps under Shell ownership.
+    Native,
+    /// Enables the marker hooks required for implicit Agent routing and command events.
+    #[default]
+    Enhanced,
+}
+
+impl ShellIntegration {
+    pub(crate) fn parse_config(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "native" => Some(Self::Native),
+            "enhanced" => Some(Self::Enhanced),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn uses_markers(self) -> bool {
+        self == Self::Enhanced
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ShellEventView<'a> {
     base: usize,
@@ -122,6 +150,11 @@ pub struct ShellHostConfig {
     pub prompt: String,
     pub winsize: Winsize,
     pub input_classifier: InputClassifier,
+    /// Chooses transparent Shell ownership or marker integration.
+    pub integration: ShellIntegration,
+    /// Controls whether user startup files are loaded. This remains
+    /// orthogonal to `integration`: isolated sessions can run with or without
+    /// Cosh marker hooks.
     pub native_mode: bool,
     pub login_shell: bool,
     /// Routes exact slash-control submissions through bash so they enter
@@ -161,6 +194,7 @@ impl ShellHostConfig {
             prompt: "cosh-osc$ ".to_string(),
             winsize,
             input_classifier: InputClassifier::default(),
+            integration: ShellIntegration::Enhanced,
             native_mode: true,
             login_shell: false,
             slash_via_shell: slash_via_shell_default(),
@@ -183,6 +217,12 @@ impl ShellHostConfig {
 
     pub fn with_ai_enabled(mut self, enabled: bool) -> Self {
         self.input_classifier = self.input_classifier.with_ai_enabled(enabled);
+        self
+    }
+
+    /// Selects the Shell integration policy for this host session.
+    pub fn with_integration(mut self, integration: ShellIntegration) -> Self {
+        self.integration = integration;
         self
     }
 

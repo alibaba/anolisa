@@ -86,6 +86,8 @@ pub(crate) enum RawInputEvent {
         text: String,
     },
     PromptGhostDismissed,
+    /// Shift+Tab changed whether the Enhanced session may route input to AI.
+    AssistanceToggled,
     PromptGhostIntercept {
         input: String,
         suggestion_id: Option<String>,

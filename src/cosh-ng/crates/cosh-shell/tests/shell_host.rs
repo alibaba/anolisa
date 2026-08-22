@@ -19,7 +19,7 @@ use cosh_shell::shell_host::{
     run_raw_relay_zsh_with_actions as shell_run_raw_relay_zsh_with_actions,
     run_raw_relay_zsh_with_output_control as shell_run_raw_relay_zsh_with_output_control,
     run_scripted_bash as shell_run_scripted_bash, run_scripted_zsh as shell_run_scripted_zsh,
-    LineInteractiveOutput, ScriptedInput, ShellHostConfig, ShellHostOutput,
+    LineInteractiveOutput, ScriptedInput, ShellHostConfig, ShellHostOutput, ShellIntegration,
 };
 use cosh_shell::types::{
     AgentEvent, GovernanceDecision, ImplicitPagerPolicy, Policy, ShellEvent, ShellEventKind,
@@ -77,6 +77,7 @@ fn shell_host_run_guard() -> MutexGuard<'static, ()> {
 
 fn shell_host_test_config(config: &ShellHostConfig) -> ShellHostConfig {
     let mut config = config.clone();
+    config.integration = ShellIntegration::Enhanced;
     if !config.env_overrides.iter().any(|(key, _)| key == "INPUTRC") {
         config = with_raw_byte_readline(config);
     }

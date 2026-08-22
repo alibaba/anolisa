@@ -17,6 +17,7 @@ use super::super::mode::RawInputMode;
 use super::super::relay::{ExplicitExitTracker, InputRelayContext};
 use super::super::MainPromptGate;
 use super::action::PendingDelayEscape;
+use super::assistance::PendingAssistanceEscape;
 use super::capture::{drain_capture_submission, CaptureOwnedInput};
 use super::prompt_ghost::{PendingPromptGhostEscape, PendingReplacedPromptGhostSuffix};
 use super::InputRead;
@@ -36,6 +37,7 @@ pub(in super::super) struct RawInputRelayState {
     pub(super) slash_route_enabled: bool,
     pub(super) pending_prompt_ghost_escape: Option<PendingPromptGhostEscape>,
     pub(super) pending_delay_escape: Option<PendingDelayEscape>,
+    pub(super) pending_assistance_escape: Option<PendingAssistanceEscape>,
     pub(super) pending_replaced_prompt_ghost_suffix: Option<PendingReplacedPromptGhostSuffix>,
     pub(super) capture_owned_input: CaptureOwnedInput,
     pub(super) deferred_input: Option<InputRead>,
@@ -45,7 +47,7 @@ pub(in super::super) struct RawInputRelayState {
 }
 
 impl RawInputRelayState {
-    pub(super) fn with_generation_and_gate(
+    pub(in crate::raw_input) fn with_generation_and_gate(
         input_generation: UserPtyInputGeneration,
         main_prompt_gate: MainPromptGate,
         slash_route_enabled: bool,

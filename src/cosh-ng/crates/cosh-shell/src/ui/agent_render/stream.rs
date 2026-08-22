@@ -15,6 +15,7 @@ use super::wrap::{
     should_buffer_word_char, strip_ansi_escape, wrap_plain_line,
 };
 use super::RatatuiInlineRenderer;
+use crate::types::CardKind;
 
 pub struct StreamingAgentBlock {
     width: usize,
@@ -414,14 +415,17 @@ impl MarkdownStreamBlock {
                 writeln!(
                     output,
                     "{}:",
-                    self.renderer.i18n().t(crate::MessageId::AgentResponseTitle)
+                    CardKind::AgentResponse
+                        .title(self.renderer.i18n().t(crate::MessageId::AgentResponseTitle))
                 )?;
             } else {
                 writeln!(
                     output,
                     "{}",
-                    self.frame()
-                        .top(self.renderer.i18n().t(crate::MessageId::AgentResponseTitle))
+                    self.frame().top(
+                        &CardKind::AgentResponse
+                            .title(self.renderer.i18n().t(crate::MessageId::AgentResponseTitle)),
+                    )
                 )?;
             }
             self.started = true;
@@ -461,8 +465,10 @@ impl MarkdownStreamBlock {
             writeln!(
                 output,
                 "{}",
-                self.frame()
-                    .top(self.renderer.i18n().t(crate::MessageId::AgentResponseTitle))
+                self.frame().top(
+                    &CardKind::AgentResponse
+                        .title(self.renderer.i18n().t(crate::MessageId::AgentResponseTitle)),
+                )
             )?;
             self.started = true;
         }

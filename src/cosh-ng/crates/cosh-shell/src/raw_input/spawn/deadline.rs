@@ -36,6 +36,12 @@ pub(super) fn next_pending_deadline(state: &RawInputRelayState) -> Option<Instan
                 .as_ref()
                 .map(|pending| pending.deadline),
         )
+        .chain(
+            state
+                .pending_assistance_escape
+                .as_ref()
+                .map(|pending| pending.deadline),
+        )
         .chain(state.pending_draft_escape_deadline)
         .min()
 }

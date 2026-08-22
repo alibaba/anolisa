@@ -7,7 +7,10 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::raw_input::RawInputEvent;
 
-use super::{clear_prompt_ghost_line, OscParser, PromptReplayTracker, RESTORE_CURSOR, SAVE_CURSOR};
+use super::{
+    clear_prompt_ghost_line, OscParser, PromptPresentation, PromptReplayTracker, RESTORE_CURSOR,
+    SAVE_CURSOR,
+};
 
 /// Terminal display columns of candidate echo bytes: ANSI escape sequences
 /// are zero-width; other content is measured per Unicode width (CJK = 2).
@@ -75,6 +78,7 @@ pub(super) fn drain_raw_input_events<W: Write>(
     prompt: &str,
     native_candidate_echoed_len: &mut usize,
     prompt_replay: &mut PromptReplayTracker,
+    prompt_presentation: &PromptPresentation,
 ) -> io::Result<bool> {
     let native_mode = prompt.is_empty();
     let mut eof_shutdown_requested = false;
@@ -178,18 +182,35 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 output.flush()?;
             }
             RawInputEvent::PromptGhostClear => {
-                clear_prompt_ghost_line(parser, output, prompt, native_candidate_echoed_len)?;
+                clear_prompt_ghost_line(
+                    parser,
+                    output,
+                    prompt,
+                    native_candidate_echoed_len,
+                    prompt_presentation,
+                )?;
             }
             RawInputEvent::PromptGhostAccepted { suggestion_id } => {
                 parser.push_prompt_ghost_event("accepted", suggestion_id.as_deref());
             }
             RawInputEvent::PromptGhostCycle { text } => {
-                clear_prompt_ghost_line(parser, output, prompt, native_candidate_echoed_len)?;
+                clear_prompt_ghost_line(
+                    parser,
+                    output,
+                    prompt,
+                    native_candidate_echoed_len,
+                    prompt_presentation,
+                )?;
                 super::write_prompt_ghost(output, &text, true)?;
                 output.flush()?;
             }
             RawInputEvent::PromptGhostDismissed => {
                 parser.push_prompt_ghost_event("dismissed", None)
+            }
+            RawInputEvent::AssistanceToggled => {
+                write!(output, "\r\x1b[2K")?;
+                prompt_presentation.write_replayed_prompt(output, parser.last_prompt_display())?;
+                output.flush()?;
             }
             RawInputEvent::PromptGhostIntercept {
                 input,

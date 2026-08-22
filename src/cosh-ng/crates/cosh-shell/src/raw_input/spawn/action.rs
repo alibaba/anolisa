@@ -14,19 +14,57 @@ use crate::input::InputClassifier;
 use super::super::generation::UserPtyInputGeneration;
 use super::super::mode::RawInputMode;
 use super::super::pty::{set_pty_winsize, signal_process_group};
-use super::super::{MainPromptGate, RawInputEvent, RawRelayAction};
+use super::super::{MainPromptGate, RawInputEvent, RawRelayAction, ESC};
 use super::deadline::next_pending_deadline;
 use super::{
     finish_input_relay, flush_pending_prompt_ghost_escape,
-    flush_pending_replaced_prompt_ghost_suffix, relay_input_bytes,
-    relay_input_bytes_with_read_ahead, relay_input_for_mode, RawInputEventSink, RawInputRelayState,
-    RelayReadContext, WakingRawInputEventSender,
+    flush_pending_replaced_prompt_ghost_suffix, relay_input_bytes_with_read_ahead,
+    relay_input_for_mode, RawInputEventSink, RawInputRelayState, RelayReadContext,
+    WakingRawInputEventSender,
 };
 
 pub(super) struct PendingDelayEscape {
     pub(super) bytes: Vec<u8>,
     pub(super) deadline: Instant,
     pub(super) generation: u64,
+}
+
+pub(super) fn stale_delay_escape_reached_interactive_owner(
+    bytes: &[u8],
+    observed_mode: &RawInputMode,
+    current_mode: &RawInputMode,
+) -> bool {
+    bytes == [ESC]
+        && matches!(observed_mode, RawInputMode::Delay { .. })
+        && matches!(
+            current_mode,
+            RawInputMode::Capture { .. }
+                | RawInputMode::Submitted { .. }
+                | RawInputMode::Draining { .. }
+                | RawInputMode::Terminal { .. }
+                | RawInputMode::PromptGhost { .. }
+        )
+}
+
+pub(in crate::raw_input) fn relay_input_bytes(
+    bytes: &[u8],
+    received_at: Instant,
+    master: &mut File,
+    input_events: &dyn RawInputEventSink,
+    input_classifier: &InputClassifier,
+    input_mode: &Arc<Mutex<RawInputMode>>,
+    state: &mut RawInputRelayState,
+) -> io::Result<()> {
+    relay_input_bytes_with_read_ahead(
+        bytes,
+        received_at,
+        master,
+        input_events,
+        input_classifier,
+        input_mode,
+        state,
+        RelayReadContext::default(),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

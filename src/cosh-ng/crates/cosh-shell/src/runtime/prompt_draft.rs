@@ -2,9 +2,9 @@
 //!
 //! Consumes the `component == "prompt_draft"` lifecycle events forwarded by
 //! the shell host (open/changed/submit/cancel), keeps the card state on
-//! [`InlineState`], and redraws the V2 rounded card in place with the same
-//! height-accounting approach as the question panel: cyan border while
-//! editing, dim frozen card after submit/cancel (D15).
+//! [`InlineState`], and redraws the editor in place. General drafts use the
+//! V2 rounded card; Agent composition uses a borderless `◆` prompt so input
+//! ownership is visible before submission.
 
 use std::io::Write;
 
@@ -15,7 +15,7 @@ use crate::agent::composer::{
 };
 use crate::i18n::MessageId;
 use crate::runtime::state::InlineState;
-use crate::types::{ShellEvent, ShellEventKind};
+use crate::types::{InputOwner, ShellEvent, ShellEventKind};
 
 /// Active draft card bookkeeping (viewport snapshot + rendered height).
 #[derive(Debug, Clone, Default)]
@@ -342,15 +342,13 @@ fn draw_card<W: Write>(
     output: &mut W,
     phase: CardPhase,
 ) -> std::io::Result<()> {
+    if card.kind == PromptDraftKind::AgentComposer {
+        return draw_agent_composer(card, state, output, phase);
+    }
+
     let i18n = state.i18n();
-    let title = i18n.t(match card.kind {
-        PromptDraftKind::Draft => MessageId::PromptDraftTitle,
-        PromptDraftKind::AgentComposer => MessageId::AgentComposerTitle,
-    });
+    let title = i18n.t(MessageId::PromptDraftTitle);
     let footer = match phase {
-        CardPhase::Editing if card.kind == PromptDraftKind::AgentComposer => {
-            i18n.t(MessageId::AgentComposerFooterEditing)
-        }
         CardPhase::Editing => i18n.t(MessageId::PromptDraftFooterEditing),
         CardPhase::Submitted => i18n.t(MessageId::PromptDraftFooterSubmitted),
         CardPhase::Cancelled => i18n.t(MessageId::PromptDraftFooterCancelled),
@@ -371,17 +369,6 @@ fn draw_card<W: Write>(
         "{border}╭{reset}\x1b[2m{title_text}\x1b[22m{border}{}╮{reset}",
         "─".repeat(title_pad)
     ));
-    if card.kind == PromptDraftKind::AgentComposer {
-        let runtime = format!(
-            "{}: {}",
-            i18n.t(MessageId::PromptDraftRuntimeLabel),
-            card.runtime
-        );
-        lines.push(format!(
-            "{border}│{reset} \x1b[2m{runtime}{}\x1b[22m {border}│{reset}",
-            " ".repeat(budget.saturating_sub(columns(&runtime)))
-        ));
-    }
     if card.hidden_above > 0 {
         let marker = format!("… ↑ {}", card.hidden_above);
         lines.push(format!(
@@ -398,14 +385,6 @@ fn draw_card<W: Write>(
         let body = content_row(row, cursor_col, budget, dim_body);
         lines.push(format!("{border}│{reset} {body} {border}│{reset}"));
     }
-    if phase == CardPhase::Editing && card.kind == PromptDraftKind::AgentComposer {
-        for (index, completion) in card.completions.iter().enumerate() {
-            let marker = if index == 0 { "›" } else { " " };
-            let suggestion = format!("{marker} {}", completion.display);
-            let body = content_row(&suggestion, None, budget, index != 0);
-            lines.push(format!("{border}│{reset} {body} {border}│{reset}"));
-        }
-    }
     if card.hidden_below > 0 {
         let marker = format!("… ↓ {}", card.hidden_below);
         lines.push(format!(
@@ -420,18 +399,81 @@ fn draw_card<W: Write>(
         "─".repeat(footer_pad)
     ));
 
-    // In-place redraw: climb over the previous frame, clear, repaint. The
-    // frame may shrink (viewport, hidden markers), so clear the leftovers.
+    repaint_editor(card, output, phase, &lines)
+}
+
+fn draw_agent_composer<W: Write>(
+    card: &mut PromptDraftCardState,
+    state: &mut InlineState,
+    output: &mut W,
+    phase: CardPhase,
+) -> std::io::Result<()> {
+    let i18n = state.i18n();
+    let width = card_width();
+    let budget = width.saturating_sub(2);
+    let dim_body = phase != CardPhase::Editing;
+    let mut lines = Vec::new();
+
+    if card.hidden_above > 0 {
+        lines.push(format!("  \x1b[2m… ↑ {}\x1b[22m", card.hidden_above));
+    }
+    for (row_index, row) in card.rows.iter().enumerate() {
+        let cursor_col = if phase == CardPhase::Editing && row_index == card.cursor.0 {
+            Some(card.cursor.1)
+        } else {
+            None
+        };
+        let prefix = if row_index == 0 {
+            format!("{} ", InputOwner::Agent.symbol())
+        } else {
+            "  ".to_string()
+        };
+        let body = content_row(row, cursor_col, budget, dim_body);
+        lines.push(format!("{prefix}{body}"));
+    }
+    if phase == CardPhase::Editing {
+        for (index, completion) in card.completions.iter().enumerate() {
+            let marker = if index == 0 { "›" } else { " " };
+            let suggestion = format!("{marker} {}", completion.display);
+            let body = content_row(&suggestion, None, budget, index != 0);
+            lines.push(format!("  {body}"));
+        }
+    }
+    if card.hidden_below > 0 {
+        lines.push(format!("  \x1b[2m… ↓ {}\x1b[22m", card.hidden_below));
+    }
+
+    let footer = match phase {
+        CardPhase::Editing => i18n.t(MessageId::AgentComposerFooterEditing),
+        CardPhase::Submitted => i18n.t(MessageId::PromptDraftFooterSubmitted),
+        CardPhase::Cancelled => i18n.t(MessageId::PromptDraftFooterCancelled),
+    };
+    let status = format!(
+        "{} · {}: {} · {footer}",
+        i18n.t(MessageId::AgentComposerTitle),
+        i18n.t(MessageId::PromptDraftRuntimeLabel),
+        card.runtime
+    );
+    lines.push(format!("  {}", content_row(&status, None, budget, true)));
+
+    repaint_editor(card, output, phase, &lines)
+}
+
+fn repaint_editor<W: Write>(
+    card: &mut PromptDraftCardState,
+    output: &mut W,
+    phase: CardPhase,
+    lines: &[String],
+) -> std::io::Result<()> {
+    // Climb over the previous render, clear, and repaint. The editor may
+    // shrink as viewport markers or completions disappear.
     if card.panel_height > 0 {
         write!(output, "\x1b[{}A", card.panel_height)?;
     } else if card.line_break_before {
-        // First paint: leave the bash prompt line untouched above the card
-        // (the inline candidate echo was already erased by the relay) and
-        // open the card on a fresh line.
+        // Relay-driven drafts start with the cursor on the Shell prompt line.
         write!(output, "\x1b[?25l\r\n")?;
     } else {
-        // First paint from the slash dispatcher: the cursor already sits
-        // at a fresh column, so only hide it (no extra blank line).
+        // Slash dispatch already left the cursor at a fresh column.
         write!(output, "\x1b[?25l")?;
     }
     let repaint_rows = card.panel_height.max(lines.len());
@@ -496,6 +538,11 @@ mod tests {
         draw_card(&mut composer, &mut state, &mut out, CardPhase::Editing).expect("draw");
         let rendered = String::from_utf8(out).expect("utf8");
         assert!(rendered.contains("Runtime: fake"), "{rendered:?}");
+        assert!(rendered.contains("◆ "), "{rendered:?}");
+        assert!(
+            !rendered.contains("╭"),
+            "composer input is borderless: {rendered:?}"
+        );
 
         let mut relay_card = card_with_rows(&[""], (0, 0));
         let mut out: Vec<u8> = Vec::new();
@@ -559,11 +606,9 @@ mod tests {
         draw_card(&mut card, &mut state, &mut out, CardPhase::Editing).expect("draw");
 
         let rendered = String::from_utf8(out).expect("utf8");
+        assert!(rendered.contains("◆ review @Car"), "{rendered}");
         assert!(rendered.contains("› @Cargo.toml"), "{rendered}");
-        assert_eq!(
-            card.panel_height, 5,
-            "title + runtime + input + result + footer"
-        );
+        assert_eq!(card.panel_height, 3, "input + result + status");
     }
 
     #[test]

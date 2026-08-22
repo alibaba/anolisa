@@ -15,6 +15,7 @@ use crate::runtime::cli_args::{LaunchOptions, RawShellKind, ResumeLaunch};
 use crate::runtime::prelude::*;
 use crate::runtime::startup::bootstrap_process_path_from_shell;
 use crate::runtime::state::{AnalysisMode, InlineState};
+use crate::shell_host::ShellIntegration;
 
 use super::render_raw_inline_event_view;
 
@@ -42,7 +43,8 @@ pub(crate) fn run_host_demo() -> i32 {
     let work_dir =
         std::env::temp_dir().join(format!("cosh-shell-host-demo-{}", std::process::id()));
     let _work_dir_cleanup = TempSessionDir::new(work_dir.clone());
-    let config = ShellHostConfig::new("host-demo-session", work_dir);
+    let config = ShellHostConfig::new("host-demo-session", work_dir)
+        .with_integration(ShellIntegration::Enhanced);
     let inputs = vec![
         ScriptedInput::user_line("/explain last error"),
         ScriptedInput::user_line("echo ok"),
@@ -106,11 +108,28 @@ pub(crate) fn run_raw(
         .first()
         .is_some_and(|argv0| crate::runtime::invocation::is_login_invocation(argv0, &args[1..]));
     config.login_shell = login;
-    if config.native_mode {
+    let cosh_config = load_config();
+    let Some(configured_integration) =
+        ShellIntegration::parse_config(&cosh_config.shell_integration)
+    else {
+        eprintln!(
+            "invalid shell integration; expected shell.integration or \
+             COSH_SHELL_INTEGRATION to be native or enhanced"
+        );
+        return 2;
+    };
+    // Resume is an explicit Agent action. It needs the ShellReady boundary
+    // that opens the requested provider session even when Native is the
+    // configured default.
+    config.integration = if launch_options.resume.is_some() {
+        ShellIntegration::Enhanced
+    } else {
+        configured_integration
+    };
+    let enhanced_integration = config.integration.uses_markers();
+    if config.native_mode && enhanced_integration {
         bootstrap_process_path_from_shell(&shell_kind, login);
     }
-
-    let cosh_config = load_config();
     let recommendations_environment_override = parse_recommendations_environment_override(
         std::env::var("COSH_RECOMMENDATIONS_ENABLED")
             .ok()
@@ -144,63 +163,65 @@ pub(crate) fn run_raw(
     }
     inline_state.personalization.bash_history = cosh_config.recommendations.bash_history;
     inline_state.personalization.ai_disabled = !cosh_config.ai_enabled;
-    inline_state.personalization.analyzer_cancellation = Some(AnalyzerCancellation::new());
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        let root = home.join(".copilot-shell/cosh/recommendations");
-        let configured_enabled = cosh_config.recommendations.enabled;
-        let environment_override = recommendations_environment_override;
-        inline_state.personalization.store_root = Some(root.clone());
-        inline_state.personalization.configured_enabled = configured_enabled;
-        inline_state.personalization.environment_override = environment_override;
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        inline_state.personalization.writer_pending = Some(receiver);
-        let _ = std::thread::Builder::new()
-            .name("cosh-recommendation-load".to_string())
-            .spawn(move || {
-                if let Ok(runtime) = PersonalRuntime::open_with_environment(
-                    configured_enabled,
-                    environment_override,
-                    root,
-                    now_hour_bucket(),
-                ) {
-                    if let Ok(writer) = runtime.spawn_writer() {
-                        let _ = sender.send(writer);
-                    }
-                }
-            });
-    }
-    if matches!(&shell_kind, RawShellKind::Bash)
-        && config.native_mode
-        && cosh_config.recommendations.enabled
-        && recommendations_environment_override != Some(false)
-        && cosh_config.recommendations.bash_history
-    {
-        let (sender, receiver) = std::sync::mpsc::channel();
-        inline_state.personalization.history_file_pending = Some(receiver);
-        config.set_shell_history_file_observer(move |path| {
-            let _ = sender.send(path);
-        });
-    }
-    let snapshot_publisher = inline_state.shell_rewrite.start_worker();
-    config.set_shell_environment_observer(move |snapshot| {
-        snapshot_publisher.publish(snapshot);
-    });
-    if startup_health_scan_enabled_for_env(&cosh_config.health) {
-        inline_state.startup_health.pending =
-            Some(spawn_startup_health_scan(cosh_config.health.clone()));
-    }
-    // The credential probe only feeds startup-banner surfaces; without a
-    // banner it would just cost an extra cosh-core process per launch.
-    if cosh_config.ai_enabled && crate::runtime::startup::startup_banner_enabled() {
-        if let AdapterInstance::CoshCore(core) = &adapter {
-            let core = core.clone();
+    if enhanced_integration {
+        inline_state.personalization.analyzer_cancellation = Some(AnalyzerCancellation::new());
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            let root = home.join(".copilot-shell/cosh/recommendations");
+            let configured_enabled = cosh_config.recommendations.enabled;
+            let environment_override = recommendations_environment_override;
+            inline_state.personalization.store_root = Some(root.clone());
+            inline_state.personalization.configured_enabled = configured_enabled;
+            inline_state.personalization.environment_override = environment_override;
             let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-            inline_state.startup_auth.pending = Some(receiver);
+            inline_state.personalization.writer_pending = Some(receiver);
             let _ = std::thread::Builder::new()
-                .name("cosh-startup-auth-probe".to_string())
+                .name("cosh-recommendation-load".to_string())
                 .spawn(move || {
-                    let _ = sender.send(core.ai_configured().ok());
+                    if let Ok(runtime) = PersonalRuntime::open_with_environment(
+                        configured_enabled,
+                        environment_override,
+                        root,
+                        now_hour_bucket(),
+                    ) {
+                        if let Ok(writer) = runtime.spawn_writer() {
+                            let _ = sender.send(writer);
+                        }
+                    }
                 });
+        }
+        if matches!(&shell_kind, RawShellKind::Bash)
+            && config.native_mode
+            && cosh_config.recommendations.enabled
+            && recommendations_environment_override != Some(false)
+            && cosh_config.recommendations.bash_history
+        {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            inline_state.personalization.history_file_pending = Some(receiver);
+            config.set_shell_history_file_observer(move |path| {
+                let _ = sender.send(path);
+            });
+        }
+        let snapshot_publisher = inline_state.shell_rewrite.start_worker();
+        config.set_shell_environment_observer(move |snapshot| {
+            snapshot_publisher.publish(snapshot);
+        });
+        if startup_health_scan_enabled_for_env(&cosh_config.health) {
+            inline_state.startup_health.pending =
+                Some(spawn_startup_health_scan(cosh_config.health.clone()));
+        }
+        // The credential probe only feeds startup-banner surfaces; without a
+        // banner it would just cost an extra cosh-core process per launch.
+        if cosh_config.ai_enabled && crate::runtime::startup::startup_banner_enabled() {
+            if let AdapterInstance::CoshCore(core) = &adapter {
+                let core = core.clone();
+                let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+                inline_state.startup_auth.pending = Some(receiver);
+                let _ = std::thread::Builder::new()
+                    .name("cosh-startup-auth-probe".to_string())
+                    .spawn(move || {
+                        let _ = sender.send(core.ai_configured().ok());
+                    });
+            }
         }
     }
     let hook_feedback = load_hook_feedback_preferences();
@@ -329,7 +350,8 @@ where
     let work_dir =
         std::env::temp_dir().join(format!("cosh-shell-{session_id}-{}", std::process::id()));
     let _work_dir_cleanup = TempSessionDir::new(work_dir.clone());
-    let config = ShellHostConfig::new(session_id, work_dir);
+    let config =
+        ShellHostConfig::new(session_id, work_dir).with_integration(ShellIntegration::Enhanced);
     let shell_output = match run_line_interactive_bash(&config, input, output) {
         Ok(output) => output,
         Err(err) => {

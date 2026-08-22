@@ -8,7 +8,8 @@ Use this page to start `cosh` and control a running session. Run `/help` to see 
 
 | Command | Use |
 |---|---|
-| `cosh` | Start the configured bash or zsh and Agent adapter. |
+| `cosh` | Start Enhanced Assisted (`◇ `) with Agent and slash-command routing. |
+| `COSH_SHELL_INTEGRATION=native cosh` | Start Native without Cosh hooks, observation, or insights. |
 | `cosh --shell zsh` | Select zsh explicitly. |
 | `cosh --isolated` | Skip user rcfiles. |
 | `cosh --login` | Start a login shell. |
@@ -17,16 +18,24 @@ Use this page to start `cosh` and control a running session. Run `/help` to see 
 | `cosh -- <program> [args...]` | Run a program directly and exit. |
 
 If no shell is selected, `cosh` uses its configured or detected bash/zsh and falls back to bash.
+Integration is selected at startup. Enhanced is the default. Set
+`shell.integration = "native"` in the user config for persistent hook-free
+sessions, or use the environment variable for one launch.
 
 ## Input and editing
 
-- Shell syntax is sent to the foreground bash or zsh.
-- A natural-language request starts an Agent request. Analysis mode controls proactive failure assistance, not explicit requests.
-- A leading `/` runs a cosh control command; a slash inside an ordinary sentence does not.
+- Native integration sends every input byte to the foreground bash or zsh.
+- Enhanced Assisted (`◇ `) routes Shell syntax to the foreground Shell and can
+  turn a natural-language request into an Agent request.
+- At an empty Enhanced prompt, `Shift+Tab` switches to Shell-only (`◌ `).
+  Ordinary input, including a leading `/`, then goes to the Shell while
+  post-command insights remain available. Press it again to restore Assisted.
+- A leading `/` runs a Cosh control command only in Enhanced Assisted. In
+  Native and Enhanced Shell-only it remains Shell input.
 - `Shift+Enter` inserts a newline when supported. Multiline paste remains one submission.
 - Up-arrow history includes shell input and slash commands. `Ctrl+C` cancels the active command or Agent request.
 
-## Public slash commands
+## Enhanced integration slash commands
 
 | Command | Purpose |
 |---|---|
@@ -75,7 +84,7 @@ that starts with `@` requests a file or directory from the current workspace:
   turn starts, and are omitted from its structured reference context.
 
 Plain text without a Skill or references is also valid. Other provider runtimes
-leave `/agent` unavailable; use an ordinary natural-language request or
-multiline input instead.
+leave `/agent` unavailable; an enhanced session can still use an ordinary
+natural-language request or multiline input instead.
 
 For approval behavior, see [Tool approval](approval.md). For proactive failure help, see [AI analysis](ai-analysis.md).

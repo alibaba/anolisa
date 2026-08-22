@@ -18,6 +18,11 @@ use super::osc::OscParser;
 
 const OUTPUT_REF_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const ISOLATED_INPUTRC: &str = "set input-meta on\nset convert-meta off\nset output-meta on\n";
+const ASSISTANCE_STATE_FILENAME: &str = "assistance-enabled";
+
+pub(super) fn assistance_state_file(config: &ShellHostConfig) -> PathBuf {
+    config.work_dir.join(ASSISTANCE_STATE_FILENAME)
+}
 
 pub(super) struct PtySession {
     pub(super) master: File,
@@ -46,23 +51,32 @@ fn start_shell_session(
     fs::create_dir_all(&output_ref_dir)?;
     fs::set_permissions(&output_ref_dir, fs::Permissions::from_mode(0o700))?;
     cleanup_expired_output_refs(&output_ref_dir, OUTPUT_REF_RETENTION)?;
-    let rcfile = config.work_dir.join(adapter.marker_filename());
     let recovery_request_file = config.work_dir.join("terminal-recovery-request");
     let handoff_request_file = config.work_dir.join("shell-handoff-request");
-    let marker_token = generate_marker_token();
-    let recovery_request_file_str = recovery_request_file.to_string_lossy().to_string();
-    let handoff_request_file_str = handoff_request_file.to_string_lossy().to_string();
-    fs::write(
-        &rcfile,
-        marker_script_with_token(
-            adapter.marker_script(),
-            &marker_token,
-            &recovery_request_file_str,
-            &handoff_request_file_str,
-            config.input_classifier.ai_enabled(),
-        ),
-    )?;
-    fs::set_permissions(&rcfile, fs::Permissions::from_mode(0o600))?;
+    let marker = if config.integration.uses_markers() {
+        let rcfile = config.work_dir.join(adapter.marker_filename());
+        let assistance_state_file = assistance_state_file(config);
+        fs::write(&assistance_state_file, b"enabled\n")?;
+        fs::set_permissions(&assistance_state_file, fs::Permissions::from_mode(0o600))?;
+        let marker_token = generate_marker_token();
+        let recovery_request_file_str = recovery_request_file.to_string_lossy().to_string();
+        let handoff_request_file_str = handoff_request_file.to_string_lossy().to_string();
+        fs::write(
+            &rcfile,
+            marker_script_with_token(
+                adapter.marker_script(),
+                &marker_token,
+                &recovery_request_file_str,
+                &handoff_request_file_str,
+                &assistance_state_file.to_string_lossy(),
+                config.input_classifier.ai_enabled(),
+            ),
+        )?;
+        fs::set_permissions(&rcfile, fs::Permissions::from_mode(0o600))?;
+        Some((rcfile, marker_token))
+    } else {
+        None
+    };
     let isolated_inputrc = if config.native_mode || !adapter.isolates_readline() {
         None
     } else {
@@ -88,12 +102,18 @@ fn start_shell_session(
     set_close_on_exec(stdout.as_raw_fd())?;
 
     let mut command = Command::new(adapter.executable(config));
-    adapter.configure_command(&mut command, &rcfile, config);
+    adapter.configure_command(
+        &mut command,
+        marker.as_ref().map(|(path, _)| path.as_path()),
+        config,
+    );
     command
-        .env("COSH_SESSION_ID", &config.session_id)
         .stdin(Stdio::from(stdin))
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(slave));
+    if config.integration.uses_markers() {
+        command.env("COSH_SESSION_ID", &config.session_id);
+    }
     if !config.native_mode {
         command
             .env("COSH_HISTFILE", config.work_dir.join("history"))
@@ -127,13 +147,21 @@ fn start_shell_session(
         });
     }
 
-    let mut parser = OscParser::with_retention(
-        config.session_id.clone(),
-        output_ref_dir,
-        marker_token,
-        config.transcript_retention,
-        &config.work_dir,
-    )?;
+    let mut parser = match marker {
+        Some((_, marker_token)) => OscParser::with_retention(
+            config.session_id.clone(),
+            output_ref_dir,
+            marker_token,
+            config.transcript_retention,
+            &config.work_dir,
+        )?,
+        None => OscParser::passthrough_with_retention(
+            config.session_id.clone(),
+            output_ref_dir,
+            config.transcript_retention,
+            &config.work_dir,
+        )?,
+    };
     if let Some(observer) = config.shell_environment_observer.clone() {
         parser = parser.with_environment_observer(observer);
     }

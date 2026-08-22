@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 mod agent_status;
 pub mod audit;
+mod card;
 pub(crate) mod composer;
 mod continuation;
 pub mod hooks;
@@ -9,6 +10,7 @@ mod shell_event_metadata;
 mod shell_handoff;
 
 pub(crate) use agent_status::{TOOL_ARGUMENTS_STATUS_PHASE, TOOL_ARGUMENTS_STATUS_PREFIX};
+pub(crate) use card::{CardKind, CardModel, InputModel, InputOwner, PermissionCardRequest};
 pub(crate) use continuation::*;
 
 pub(crate) use hooks::BuiltinFactRecord;

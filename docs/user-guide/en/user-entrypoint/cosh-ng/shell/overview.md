@@ -2,14 +2,17 @@
 
 [中文版](../../../../zh/user-entrypoint/cosh-ng/shell/overview.md)
 
-`cosh` is a bash or zsh terminal with an Agent available for natural-language work. Use ordinary shell syntax for commands you know, and describe larger tasks when you want the Agent to investigate or act.
+`cosh` starts in Enhanced Assisted mode. The `◇ ` prefix shows that Cosh may
+route natural-language input before bash or zsh executes it. Press `Shift+Tab`
+at an empty prompt for Enhanced Shell-only (`◌ `), or select Native at startup
+when the session must have no Cosh hooks, observation, or insights.
 
 ## A typical workflow
 
 1. Change to the target directory and run `cosh`.
 2. Run familiar commands normally.
-3. Describe an investigation or task in natural language, including constraints such as “inspect only” or “ask before changing files.”
-4. Review approval cards before allowing side effects.
+3. Press `Shift+Tab` when ordinary input should remain Shell-only.
+4. Describe a task in Assisted mode and review cards before side effects.
 5. Use `/session status` before leaving a long-running investigation.
 
 Useful starts:
@@ -18,24 +21,39 @@ Useful starts:
 cosh
 cosh --shell zsh
 cosh --resume
+COSH_SHELL_INTEGRATION=native cosh
 ```
 
 ## How input is routed
 
-| Input | Result |
-|---|---|
-| `git status` | Runs in the foreground shell. |
-| `why did the last command fail?` | Starts an Agent request with recent terminal evidence. |
-| `/session list` | Runs a cosh control command. |
-| Agent tool request | Runs automatically or shows an approval card according to the approval mode. |
+| Input | Native | Enhanced Shell-only `◌` | Enhanced Assisted `◇` |
+|---|---|---|---|
+| `git status` | Runs in the Shell. | Runs in the Shell; an execution insight may follow. | Runs in the Shell; an execution insight may follow. |
+| `hello` | The Shell normally reports a missing command. | The Shell normally reports a missing command. | The classifier evaluates it and currently leaves this ambiguous single word to the Shell. |
+| `why did the last command fail?` | The Shell handles the text. | The Shell handles the text. | Starts an Agent request with recent terminal evidence. |
+| `/session list` | The Shell handles the text. | The Shell handles the text. | Runs a Cosh control command. |
+| Agent tool request | Unavailable. | Available after explicitly accepting an insight or Agent entry. | Runs or shows an approval card according to the approval mode. |
 
-Approved shell commands stay in the foreground shell, so prompts, output, job control, and `Ctrl+C` remain usable. See [Tool approval](approval.md) for the safety rules.
+Native integration does not install Cosh `DEBUG`, `RETURN`, or `ERR` traps and
+does not enable `extdebug`, `functrace`, or `errtrace`. Enhanced is the default;
+select Native with `shell.integration = "native"` or
+`COSH_SHELL_INTEGRATION=native`. Restart `cosh` to switch integrations.
+`Shift+Tab` changes only the Enhanced routing substate, without restarting.
+
+Approved Shell commands in enhanced integration stay in the foreground Shell,
+so prompts, output, job control, and `Ctrl+C` remain usable. See
+[Tool approval](approval.md) for the safety rules.
 
 ## Sessions and proactive help
 
-- Sessions are persisted by cosh-core and scoped to the workspace where cosh started. Recovery restores model-visible conversation context, not terminal processes or old terminal output. See [Session recovery](session-recovery.md).
-- `smart` is the default analysis mode. Use [AI analysis](ai-analysis.md) to choose how much proactive failure help appears.
-- `/help` is the source of truth for commands in the installed version; use [Interactive commands](interactive-mode.md) for a concise reference.
+- Enhanced sessions are persisted by cosh-core and scoped to the workspace
+  where cosh started. Recovery restores model-visible conversation context,
+  not terminal processes or old terminal output. See
+  [Session recovery](session-recovery.md).
+- `smart` is the default analysis mode inside enhanced integration. Use
+  [AI analysis](ai-analysis.md) to choose how much proactive failure help appears.
+- `/help` is the source of truth for enhanced-mode commands; use
+  [Interactive commands](interactive-mode.md) for a concise reference.
 
 ## Next steps
 

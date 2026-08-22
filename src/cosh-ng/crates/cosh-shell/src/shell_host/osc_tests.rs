@@ -1,5 +1,7 @@
 use super::marker::{bash_marker_script, zsh_marker_script};
-use super::model::{ShellEnvironmentObserver, ShellHistoryFileObserver, ShellHostConfig};
+use super::model::{
+    ShellEnvironmentObserver, ShellHistoryFileObserver, ShellHostConfig, ShellIntegration,
+};
 use super::osc::*;
 use super::raw_runner::run_raw_relay_bash_with_actions;
 use super::transcript::TranscriptRetention;
@@ -23,6 +25,7 @@ fn bounded_raw_session_spools_output_without_materializing_result() {
     ));
     let _ = std::fs::remove_dir_all(&work_dir);
     let mut config = ShellHostConfig::new("bounded-raw-session", &work_dir);
+    config.integration = ShellIntegration::Enhanced;
     config.native_mode = false;
     config.bound_interactive_transcript();
 

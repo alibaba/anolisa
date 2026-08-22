@@ -364,6 +364,26 @@ fn relay_native_passthrough(
     Ok(false)
 }
 
+pub(super) fn relay_shell_only_input(
+    bytes: &[u8],
+    relay: &mut InputRelayContext<'_>,
+) -> io::Result<()> {
+    send_raw_input_events(bytes, relay.input_events);
+    observe_native_line(relay.native_line_state, bytes, relay.input_events);
+    if !bytes.is_empty() {
+        send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
+    }
+    relay.exit_tracker.observe_shell_bytes(bytes);
+    write_user_bytes_to_pty(
+        relay.master,
+        relay.input_generation,
+        relay.line_submits,
+        relay.input_events,
+        relay.main_prompt_gate,
+        bytes,
+    )
+}
+
 fn relay_candidate_line(
     relay: &mut InputRelayContext<'_>,
     emit_activity: bool,

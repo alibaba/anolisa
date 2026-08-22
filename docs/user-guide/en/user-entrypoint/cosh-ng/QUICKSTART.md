@@ -2,7 +2,9 @@
 
 [中文版](../../../zh/user-entrypoint/cosh-ng/QUICKSTART.md)
 
-cosh-ng adds an Agent to a normal bash or zsh session. Start `cosh`, run Shell commands as usual, and describe a larger task in natural language when you need help.
+cosh-ng starts in Enhanced Assisted mode, where bash or zsh remains interactive
+and Cosh may route natural-language requests to an Agent. Native integration is
+an explicit startup choice for sessions that must load no Cosh hooks.
 
 ## 1. Install
 
@@ -61,17 +63,30 @@ cd your-project
 cosh
 ```
 
-Run commands in the same session, and describe a larger task as ordinary input:
+The default Enhanced Assisted mode uses `◇ ` to show that submitted input may
+be classified and routed before Shell execution:
 
 ```text
-$ git status
+◇ user@host:~/project$ git status
+◇ user@host:~/project$ investigate the last failed deployment
 ```
 
-For example, ask the Agent to investigate the last failed deployment and inspect it without making changes.
+At an empty prompt, `Shift+Tab` switches to Enhanced Shell-only. The prefix
+becomes `◌ `, ordinary input stays with the Shell, and post-command insights
+remain available. Press `Shift+Tab` again to return to Assisted.
+
+Start Native when the session must have no Cosh hooks, observation, or insight:
+
+```bash
+COSH_SHELL_INTEGRATION=native cosh
+```
+
+Native and Enhanced integration are selected at startup; restart `cosh` to
+change between them. The Assisted and Shell-only substates switch in place.
 
 When an operation needs consent, cosh shows an approval or question card before it proceeds.
 
-Useful first commands:
+Useful first commands in Enhanced Assisted mode:
 
 ```text
 /auth

@@ -6,6 +6,7 @@ use crate::types::CoshApprovalMode;
 #[derive(Debug, Clone)]
 pub struct CoshConfig {
     pub shell_default: String,
+    pub shell_integration: String,
     pub analysis_mode: String,
     pub approval_mode: CoshApprovalMode,
     pub adapter_default: String,
@@ -89,6 +90,7 @@ impl Default for CoshConfig {
     fn default() -> Self {
         Self {
             shell_default: "auto".into(),
+            shell_integration: "enhanced".into(),
             analysis_mode: "smart".into(),
             approval_mode: CoshApprovalMode::Auto,
             adapter_default: "cosh-core".into(),

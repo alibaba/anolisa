@@ -65,7 +65,7 @@ pub(super) struct OscParser {
     pub(super) events: EventStore,
     pub(super) clean: Transcript,
     pub(super) display: Transcript,
-    marker_token: String,
+    marker_token: Option<String>,
     pending: Vec<u8>,
     pending_clean_control: Vec<u8>,
     current: Option<CurrentCommand>,
@@ -76,6 +76,7 @@ pub(super) struct OscParser {
     last_prompt_display: Vec<u8>,
     capture_prompt_display: bool,
     prompt_ready_display_start: Option<usize>,
+    prompt_ready_display_starts: Vec<usize>,
     /// #1932: the soft-newline upgrade submitted a synthetic empty line so
     /// bash repaints PS1; its visually blank accept echo is dropped at the
     /// matching prompt boundary instead of surfacing as a blank line.
@@ -93,6 +94,7 @@ pub(super) struct OscParser {
     /// #1721 D16: shared "bash sits at PS1" gate consumed by the raw input
     /// relay; prompt_ready raises it, preexec lowers it.
     main_prompt_gate: crate::raw_input::MainPromptGate,
+    assistance_control: Option<crate::input::AssistanceControl>,
     /// Collapses consecutive PTY input writes into one prompt-cwd
     /// invalidation barrier; a fresh command-less prompt report
     /// (`ShellReady`) re-arms it.
@@ -125,6 +127,10 @@ impl OscParser {
         self.main_prompt_gate = gate;
     }
 
+    pub(crate) fn set_assistance_control(&mut self, control: crate::input::AssistanceControl) {
+        self.assistance_control = Some(control);
+    }
+
     pub(super) fn with_environment_observer(mut self, observer: ShellEnvironmentObserver) -> Self {
         self.environment_observer = Some(observer);
         self
@@ -148,6 +154,9 @@ impl OscParser {
     }
 
     pub(super) fn feed(&mut self, data: &[u8]) -> io::Result<()> {
+        if self.marker_token.is_none() {
+            return self.append_passthrough(data);
+        }
         self.pending.extend_from_slice(data);
         loop {
             let Some(start) = find_bytes(&self.pending, OSC_PREFIX) else {
@@ -207,7 +216,7 @@ impl OscParser {
     }
 
     fn handle_marker(&mut self, marker: Marker) -> io::Result<()> {
-        if marker.token.as_deref() != Some(self.marker_token.as_str()) {
+        if marker.token.as_deref() != self.marker_token.as_deref() {
             return Ok(());
         }
 
@@ -247,16 +256,24 @@ impl OscParser {
                     self.start_prompt_display_capture();
                 }
                 self.prompt_ready_display_start = Some(self.display.position());
+                self.prompt_ready_display_starts
+                    .push(self.display.position());
                 // #1721 D16: the shell marker emits prompt_ready only for the
                 // primary prompt (PS1), so this is the authoritative "CJK
                 // drafts may open" signal.
                 self.main_prompt_gate.set_at_prompt(true);
+                if let Some(control) = &self.assistance_control {
+                    control.set_at_prompt(true);
+                }
             }
             "preexec" => {
                 if !self.display.is_full() {
                     self.capture_prompt_display = false;
                 }
                 self.main_prompt_gate.set_at_prompt(false);
+                if let Some(control) = &self.assistance_control {
+                    control.set_at_prompt(false);
+                }
                 // #2196 R7: the visible-tail window starts at the command
                 // boundary, so earlier output can never resurface as the
                 // prompt tail.
@@ -643,6 +660,10 @@ impl OscParser {
 
     pub(super) fn drain_intervention_display_cuts(&mut self) -> Vec<(usize, DisplayCutKind)> {
         std::mem::take(&mut self.intervention_display_cuts)
+    }
+
+    pub(super) fn drain_prompt_ready_display_starts(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.prompt_ready_display_starts)
     }
 
     /// Arms the one-shot blank-echo drop for the synthetic PS1 repaint

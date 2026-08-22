@@ -1,13 +1,87 @@
+use std::fs::{self, OpenOptions};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+#[derive(Debug, Clone)]
+pub(crate) struct AssistanceControl {
+    enabled: Arc<AtomicBool>,
+    at_prompt: Arc<AtomicBool>,
+    state_file: PathBuf,
+}
+
+impl AssistanceControl {
+    pub(crate) fn enabled(state_file: PathBuf) -> Self {
+        Self {
+            enabled: Arc::new(AtomicBool::new(true)),
+            at_prompt: Arc::new(AtomicBool::new(false)),
+            state_file,
+        }
+    }
+
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_at_prompt(&self, at_prompt: bool) {
+        self.at_prompt.store(at_prompt, Ordering::Release);
+    }
+
+    pub(crate) fn is_at_prompt(&self) -> bool {
+        self.at_prompt.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn toggle(&self) -> std::io::Result<bool> {
+        let enabled = !self.is_enabled();
+        if enabled {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&self.state_file)?;
+        } else if let Err(error) = fs::remove_file(&self.state_file) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(error);
+            }
+        }
+        self.enabled.store(enabled, Ordering::Release);
+        Ok(enabled)
+    }
+}
+
+impl PartialEq for AssistanceControl {
+    fn eq(&self, other: &Self) -> bool {
+        self.state_file == other.state_file
+            && self.is_enabled() == other.is_enabled()
+            && self.is_at_prompt() == other.is_at_prompt()
+    }
+}
+
+impl Eq for AssistanceControl {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputClassifier {
     slash_commands: Vec<String>,
     slash_hint_commands: Vec<String>,
     ai_enabled: bool,
+    shell_passthrough: bool,
+    assistance_control: Option<AssistanceControl>,
 }
 
 impl InputClassifier {
     pub fn with_ai_enabled(mut self, ai_enabled: bool) -> Self {
         self.ai_enabled = ai_enabled;
+        self
+    }
+
+    pub(crate) fn with_shell_passthrough(mut self, shell_passthrough: bool) -> Self {
+        self.shell_passthrough = shell_passthrough;
+        self
+    }
+
+    pub(crate) fn with_assistance_control(mut self, control: AssistanceControl) -> Self {
+        self.assistance_control = Some(control);
         self
     }
 }
@@ -22,6 +96,8 @@ impl Default for InputClassifier {
                 .map(str::to_string)
                 .collect(),
             ai_enabled: true,
+            shell_passthrough: false,
+            assistance_control: None,
         }
     }
 }
@@ -29,6 +105,20 @@ impl Default for InputClassifier {
 impl InputClassifier {
     pub(crate) fn ai_enabled(&self) -> bool {
         self.ai_enabled
+    }
+
+    pub(crate) fn shell_owns_input(&self) -> bool {
+        self.shell_passthrough
+    }
+
+    pub(crate) fn assistance_control(&self) -> Option<&AssistanceControl> {
+        self.assistance_control.as_ref()
+    }
+
+    pub(crate) fn assistance_enabled(&self) -> bool {
+        self.assistance_control
+            .as_ref()
+            .is_none_or(AssistanceControl::is_enabled)
     }
 
     pub(crate) fn is_slash_control_candidate(&self, token: &str) -> bool {
@@ -44,6 +134,9 @@ impl InputClassifier {
     }
 
     pub fn classify(&self, input: &str) -> InputDecision {
+        if self.shell_passthrough {
+            return InputDecision::SendToShell(input.to_string());
+        }
         let trimmed = input.trim();
         if trimmed.is_empty() {
             return InputDecision::SendToShell(input.to_string());

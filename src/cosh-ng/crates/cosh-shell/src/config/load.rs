@@ -51,6 +51,9 @@ pub(super) fn dirs_next_or_home() -> Option<PathBuf> {
 }
 
 fn apply_env_overrides(config: &mut CoshConfig) {
+    if let Ok(value) = std::env::var("COSH_SHELL_INTEGRATION") {
+        config.shell_integration = value;
+    }
     if let Ok(v) = std::env::var("COSH_SHELL_ANALYSIS_MODE") {
         config.analysis_mode = v;
     }

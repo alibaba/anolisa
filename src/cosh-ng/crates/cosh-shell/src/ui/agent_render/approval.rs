@@ -23,6 +23,7 @@ use super::approval_warning::{irrecoverable_warning_text, render_irrecoverable_w
 use super::{
     buffer_to_lines, buffer_to_styled_lines, char_width, display_width, RatatuiInlineRenderer,
 };
+use crate::types::CardKind;
 
 #[derive(Debug, Clone)]
 pub struct ApprovalPanelModel<'a> {
@@ -111,7 +112,7 @@ impl RatatuiInlineRenderer {
                 max_preview_rows(model.expanded),
             );
             let mut lines = vec![
-                i18n.t(crate::MessageId::ApprovalRequiredTitle).to_string(),
+                CardKind::Permission.title(i18n.t(crate::MessageId::ApprovalRequiredTitle)),
                 command_request_heading(model.subject, i18n).to_string(),
             ];
             for warning in &model.hook_warnings {
@@ -163,7 +164,8 @@ impl RatatuiInlineRenderer {
         }
 
         if is_hook_approval_request(&model) {
-            let mut lines = vec![i18n.t(crate::MessageId::ApprovalHookHeading).to_string()];
+            let mut lines =
+                vec![CardKind::Permission.title(i18n.t(crate::MessageId::ApprovalHookHeading))];
             for warning in &model.hook_warnings {
                 let icon = hook_warning_icon(warning.decision);
                 lines.push(format!("\u{2502} {icon} {}", warning.hook_name));
@@ -196,7 +198,7 @@ impl RatatuiInlineRenderer {
             &queue_suffix,
         );
         let mut lines = vec![
-            i18n.t(crate::MessageId::ApprovalRequiredTitle).to_string(),
+            CardKind::Permission.title(i18n.t(crate::MessageId::ApprovalRequiredTitle)),
             format!("{subject} · {risk_label}{queue_suffix}"),
         ];
         if let Some(reason) = model.reason {
@@ -342,7 +344,10 @@ fn render_approval_panel(
         .padding(Padding::horizontal(1))
         .title(Line::from(vec![
             Span::styled(
-                format!(" {} ", i18n.t(crate::MessageId::ApprovalTitle)),
+                format!(
+                    " {} ",
+                    CardKind::Permission.title(i18n.t(crate::MessageId::ApprovalTitle))
+                ),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!("{} ", model.id)),
@@ -509,7 +514,10 @@ fn render_command_tool_approval_panel(
         .padding(Padding::horizontal(1))
         .title(Line::from(vec![
             Span::styled(
-                format!(" {} ", i18n.t(crate::MessageId::ApprovalTitle)),
+                format!(
+                    " {} ",
+                    CardKind::Permission.title(i18n.t(crate::MessageId::ApprovalTitle))
+                ),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!("{} ", model.id)),
@@ -655,7 +663,10 @@ fn render_hook_approval_panel(
         .padding(Padding::horizontal(1))
         .title(Line::from(vec![
             Span::styled(
-                format!(" {} ", i18n.t(crate::MessageId::ApprovalHookHeading)),
+                format!(
+                    " {} ",
+                    CardKind::Permission.title(i18n.t(crate::MessageId::ApprovalHookHeading))
+                ),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!("{} ", model.id)),

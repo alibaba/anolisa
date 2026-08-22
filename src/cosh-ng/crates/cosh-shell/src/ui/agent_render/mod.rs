@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{block::Padding, Block, BorderType, Paragraph, Widget, Wrap},
 };
 
-use crate::types::{AgentEvent, GovernedEvent};
+use crate::types::{AgentEvent, CardKind, GovernedEvent};
 
 mod actions;
 mod activity;
@@ -151,7 +151,7 @@ impl RatatuiInlineRenderer {
         }
         self.write_block(
             output,
-            self.i18n().t(crate::MessageId::AgentGovernanceTitle),
+            &CardKind::AgentResponse.title(self.i18n().t(crate::MessageId::AgentGovernanceTitle)),
             lines,
             None,
         )
@@ -164,7 +164,7 @@ impl RatatuiInlineRenderer {
     pub fn write_loading_text<W: Write>(&self, output: &mut W, text: &str) -> io::Result<()> {
         self.write_block(
             output,
-            self.i18n().t(crate::MessageId::AgentResponseTitle),
+            &CardKind::AgentResponse.title(self.i18n().t(crate::MessageId::AgentResponseTitle)),
             vec![text.to_string()],
             None,
         )
@@ -178,7 +178,7 @@ impl RatatuiInlineRenderer {
         StreamingAgentBlock::new(
             self.content_width(),
             self.plain,
-            self.i18n().t(crate::MessageId::AgentResponseTitle),
+            &CardKind::AgentResponse.title(self.i18n().t(crate::MessageId::AgentResponseTitle)),
         )
     }
 
@@ -212,7 +212,7 @@ impl RatatuiInlineRenderer {
             }
             return self.write_styled_block(
                 output,
-                self.i18n().t(crate::MessageId::AgentResponseTitle),
+                &CardKind::AgentResponse.title(self.i18n().t(crate::MessageId::AgentResponseTitle)),
                 body,
             );
         }
@@ -224,7 +224,7 @@ impl RatatuiInlineRenderer {
         };
         self.write_block(
             output,
-            self.i18n().t(crate::MessageId::AgentResponseTitle),
+            &CardKind::AgentResponse.title(self.i18n().t(crate::MessageId::AgentResponseTitle)),
             body,
             footer,
         )
@@ -237,7 +237,7 @@ impl RatatuiInlineRenderer {
         body: Vec<String>,
         footer: Option<&str>,
     ) -> io::Result<()> {
-        self.write_block(output, title, body, footer)
+        self.write_block(output, &CardKind::System.title(title), body, footer)
     }
 
     pub fn write_notice_panel<W: Write>(
@@ -245,7 +245,19 @@ impl RatatuiInlineRenderer {
         output: &mut W,
         model: NoticePanelModel<'_>,
     ) -> io::Result<()> {
-        for line in self.notice_panel_lines(model) {
+        for line in self.typed_notice_panel_lines(CardKind::System, model) {
+            writeln!(output, "{line}")?;
+        }
+        Ok(())
+    }
+
+    /// Renders a notice owned by an explicit slash-command invocation.
+    pub(crate) fn write_slash_notice_panel<W: Write>(
+        &self,
+        output: &mut W,
+        model: NoticePanelModel<'_>,
+    ) -> io::Result<()> {
+        for line in self.typed_notice_panel_lines(CardKind::SlashCommand, model) {
             writeln!(output, "{line}")?;
         }
         Ok(())
@@ -257,9 +269,13 @@ impl RatatuiInlineRenderer {
     /// a live PTY stream with `\r\n` endings — reuse the exact panel
     /// family framing, width contract, and plain fallback.
     pub fn notice_panel_lines(&self, model: NoticePanelModel<'_>) -> Vec<String> {
+        self.typed_notice_panel_lines(CardKind::System, model)
+    }
+
+    fn typed_notice_panel_lines(&self, kind: CardKind, model: NoticePanelModel<'_>) -> Vec<String> {
         let lines = model.body.into_iter().map(Line::from).collect();
         self.block_lines(
-            model.title,
+            &kind.title(model.title),
             self.render_lines(lines, self.content_width()),
             model.footer,
         )

@@ -66,6 +66,10 @@ fn raw_cli_agent_composer_sends_validated_references_and_skill_to_cosh_core() {
     );
 
     assert!(output.contains("Runtime: cosh-core"), "{output}");
+    assert!(
+        output.contains("◆ "),
+        "Agent must own composer input: {output}"
+    );
     assert!(output.contains("COSH CORE COMPOSER FINAL"), "{output}");
     assert!(output.contains("References skipped"), "{output}");
     assert!(output.contains("\"../Cargo.toml\""), "{output}");

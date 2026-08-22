@@ -2,16 +2,17 @@
 
 [English](README.md)
 
-cosh-ng 是一个 AI 原生终端。它以你已经在用的 Shell 为基础。
-启动 `cosh` 后，bash 或 zsh 照常工作。遇到更复杂的任务，直接用自然语言请 Agent
-检查或操作即可。Shell 命令、Skills、审批卡片和可恢复对话都留在同一个终端里。
-需要自动化或集成其他 Agent 时，还可以使用结构化 JSON 和 JSONL 接口。
+cosh-ng 是一个以现有 Shell 为基础的 AI 原生终端。`cosh` 默认使用 Enhanced
+Assisted 模式，保留隐式自然语言路由、Skills、审批卡片和可恢复 Agent 对话。
+如果要求 bash 或 zsh 独占会话，不加载 Cosh Hook、不观察也不提供洞察，可以
+在启动时选择 Native 集成。自动化或其他 Agent 集成仍可使用结构化 JSON 和
+JSONL 接口。
 
 ## 为什么使用 cosh-ng
 
 | 传统终端 | cosh-ng |
 |---|---|
-| 需要把意图翻译成命令 | 可以直接运行命令，也可以用自然语言描述任务 |
+| 需要把意图翻译成命令 | 默认 Assisted 模式可混合自然语言和命令 |
 | 自动化散落在脚本中 | 用 Skills 封装可复用工作流 |
 | AI 上下文绑定在单个聊天窗口 | 按工作空间恢复 Agent 对话 |
 | AI 操作难以检查 | 通过审批卡片和审计记录检查工具调用 |
@@ -70,19 +71,31 @@ cd your-project
 cosh
 ```
 
-进入后，可以在同一个会话里运行 Shell 命令，也可以直接交代 Agent 任务。
+Enhanced Assisted 是默认模式。`◇ ` 前缀表示 Cosh 可能在前台 Shell 执行前
+分类并路由本次输入。
 
 ```text
-$ git status
-$ 分析这个服务为什么反复重启，并展示判断依据
-$ /agent
-$ /skills list
-$ /session status
+◇ user@host:~/project$ git status
+◇ user@host:~/project$ 分析这个服务为什么反复重启
+```
+
+在空提示符按 `Shift+Tab` 可切换到 Enhanced Shell-only。`◌ ` 前缀表示普通
+输入交给 Shell，但仍可获得命令执行后的洞察。再次按下即可返回 Assisted。
+
+如果会话要求完全不加载 Cosh Hook、不观察也不提供洞察，可显式启动 Native。
+
+```bash
+COSH_SHELL_INTEGRATION=native cosh
+```
+
+```text
+$ hello
+bash: hello: command not found
 ```
 
 用 `/auth` 选择 provider，用 `/help` 查看当前版本支持的命令。如果希望每次 Agent
 调用工具前都等待确认，运行 `/mode approval recommend`。Shell 和 Core 的审批设置
-统一使用 `recommend`、`auto` 或 `trust`。使用 cosh-core runtime 时，`/agent`
+统一使用 `recommend`、`auto` 或 `trust`。增强集成使用 cosh-core runtime 时，`/agent`
 会打开一次性 Composer，可在开头指定 `/skill:<name>`，并添加经过验证的工作空间内
 `@路径`引用。
 

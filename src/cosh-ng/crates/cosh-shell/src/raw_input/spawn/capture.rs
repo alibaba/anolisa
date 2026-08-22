@@ -605,6 +605,7 @@ pub(in super::super) fn finish_input_relay(
         || state.pending_replaced_prompt_ghost_suffix.take().is_some()
         || matches!(current_mode, RawInputMode::PromptGhost { .. });
     state.pending_delay_escape.take();
+    state.pending_assistance_escape.take();
     if dismiss_prompt_ghost {
         let _ = input_events.send(RawInputEvent::CandidateClearLine);
         let _ = input_events.send(RawInputEvent::PromptGhostDismissed);

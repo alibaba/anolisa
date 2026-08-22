@@ -49,6 +49,7 @@ log_level = "warn"
 
 [shell]
 default = "auto"
+integration = "enhanced"
 adapter_default = "cosh-core"
 analysis_mode = "smart"
 approval_mode = "auto"
@@ -113,7 +114,15 @@ name = "nginx"
 expected = "active"
 ```
 
-`analysis_mode` 支持 `smart`、`auto`、`manual`；Shell 审批支持 `recommend`、`auto`、`trust`。`health.services.expected` 支持 `active` 或 `inactive`。
+`integration` 支持 `native` 和 `enhanced`。默认的 Enhanced 从 Assisted
+模式（`◇ `）启动，提供基于 marker 的 Agent 路由和命令事件。在空提示符按
+`Shift+Tab` 可在 Assisted 与 Shell-only（`◌ `）之间切换。Shell-only 保留
+命令事件和执行后洞察，但把普通输入交给 bash 或 zsh。Native 把输入、Shell
+选项、trap 和启动文件完全交给 bash 或 zsh，不进行 Cosh 观察，也不提供洞察。
+`cosh` 在启动时读取集成值，修改后需要新建会话；非法值会显示错误并拒绝启动。
+
+`analysis_mode` 支持 `smart`、`auto`、`manual`；Shell 审批支持 `recommend`、
+`auto`、`trust`。`health.services.expected` 支持 `active` 或 `inactive`。
 
 ## 审计设置
 
@@ -137,6 +146,7 @@ max_disk_bytes = 1073741824
 | `DASHSCOPE_API_KEY`、`OPENAI_API_KEY`、`OPENAI_BASE_URL` | OpenAI-compatible 凭据和 URL 回退 |
 | `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`、`ALIBABA_CLOUD_SECURITY_TOKEN` | Aliyun 凭据回退 |
 | `COSH_SHELL_DEFAULT_SHELL`、`COSH_SHELL_ADAPTER`、`COSH_SHELL_ANALYSIS_MODE`、`COSH_SHELL_APPROVAL_MODE` | 交互式 Shell 选择 |
+| `COSH_SHELL_INTEGRATION` | 下一次会话使用 `native` 或 `enhanced` Shell 集成 |
 | `COSH_SHELL_LANG`、`COSH_SHELL_AI`、`COSH_SHELL_INPUT_WAIT_TIMEOUT_SECS` | Shell 语言、AI 开关和输入等待超时 |
 | `COSH_RECOMMENDATIONS_BASH_HISTORY` | 允许使用 Bash history 生成建议 |
 | `COSH_LOG`、`RUST_LOG` | 日志过滤（`COSH_LOG` 优先） |

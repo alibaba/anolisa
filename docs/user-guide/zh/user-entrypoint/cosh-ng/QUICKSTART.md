@@ -2,7 +2,9 @@
 
 [English](../../../en/user-entrypoint/cosh-ng/QUICKSTART.md)
 
-cosh-ng 在普通 bash 或 zsh 会话中加入 Agent。启动 `cosh` 后可以照常运行 Shell 命令，也可以在需要时用自然语言描述更复杂的任务。
+cosh-ng 默认启动 Enhanced Assisted 模式。bash 或 zsh 仍可交互，Cosh 也可能
+把自然语言请求路由给 Agent。要求完全不加载 Cosh Hook 的会话可在启动时显式
+选择 Native 集成。
 
 ## 1. 安装
 
@@ -58,17 +60,28 @@ cd your-project
 cosh
 ```
 
-在同一个会话中运行命令，也可以把更复杂的任务作为普通输入交给 Agent：
+默认的 Enhanced Assisted 使用 `◇ ` 表示输入可能在 Shell 执行前被分类和路由。
 
 ```text
-$ git status
+◇ user@host:~/project$ git status
+◇ user@host:~/project$ 分析上次部署失败的原因
 ```
 
-例如，可以要求 Agent 分析上次部署失败的原因，先检查而不做任何修改。
+在空提示符按 `Shift+Tab` 可切换到 Enhanced Shell-only。此时前缀变为 `◌ `，
+普通输入交给 Shell，但仍可获得命令执行后的洞察。再次按下即可返回 Assisted。
+
+要求不加载 Cosh Hook、不观察也不提供洞察时，显式启动 Native。
+
+```bash
+COSH_SHELL_INTEGRATION=native cosh
+```
+
+Native 和 Enhanced 集成在启动时确定，二者切换需要重新启动 `cosh`；Assisted
+与 Shell-only 子状态可在会话中直接切换。
 
 操作需要同意时，cosh 会先显示审批卡片或问题卡片。
 
-常用的起始命令：
+Enhanced Assisted 中的常用起始命令如下。
 
 ```text
 /auth
