@@ -4,14 +4,20 @@
 
 ## 状态与决策
 
-当前增量基于上游提交 `a6592234`。通用 Broker 模型仍是目标架构，不是已验收的 Phase 1 声明。
+当前增量基于上游提交 `a43ab817`。通用 Broker 模型仍是目标架构，不是已验收的 Phase 1 声明。
 已验收 production scope 更窄：`serve` 与 library daemon 只接纳 `core` / `gateway-brokered-v1`，其
 immutable inventory 绑定固定 `task-only-v1` manifest，只有 `ask_user_question`。Gateway、durable
 Runtime start intent 与 Core v3 negotiation 会在 launch 或 Task input 前校验 identity 与准确 inventory。
-本 PR 不接入 production
-`ExecutionTarget`，也不依赖 checkpoint/ws-ckpt。该 profile 禁用其他 side-effecting hook、Skill、MCP、
+该 profile 禁用其他 side-effecting hook、Skill、MCP、
 扩展、Shell、file、process 与 network path。ACP `doctor`/`run`、legacy CLI command 与 standalone Shell
 是明确 ungoverned 的 interoperability/rollback path，不能作为 governed evidence。
+
+Gateway 现在额外拥有可选的 `workspace-checkpoint-v1` capability profile，以及对所有 profile 都 **withhold**
+checkpoint provider 的 sealed capability provider registry。**不存在 checkpoint execution target**：它被推迟到
+ws-ckpt 协议提供 identity-only checkpoint 请求与不可复用的 workspace generation token 之后——没有这两者，
+checkpoint-create permit 可能让 daemon 在其授予范围之外改动主机。`serve`、打包的 systemd unit 与 brokered
+execution driver 同样未改动。已验收声明是“封闭 profile 与 sealed provider set 已存在且 fail closed，checkpoint
+transport 的 effect 分类正确”，不是“存在 ws-ckpt target”，也不是“checkpoint 已端到端 governed”。
 
 通用目标仍要求每个 enabled OS side effect 都把 `CapabilityBroker` 作为 mandatory policy
 enforcement 与 permit authority。Execution target 只有收到绑定 target 和 operation 的有效 permit 才能
@@ -41,14 +47,106 @@ authority。Process-local
 authority。
 
 `MemoryPermitStore` 仍是 process-local logic fixture，不承载 production authority。通用 durable
-approval/permit/execution ledger contract 可以作为可复用基础保留，但本 PR 不把它们接入 production
-execution target。Task-only production profile 没有 side-effecting operation，只有 `ask_user_question`；
-不调用 checkpoint provider，也不依赖 ws-ckpt。Checkpoint/ws-ckpt support、target resolution、
-pre-effect audit、result reconciliation 与 production permit loop 都属于后续可选 capability，不能作为
-本 PR 的验收证据。
+approval/permit/execution ledger contract 可以作为可复用基础保留。Task-only production profile 没有
+side-effecting operation，只有 `ask_user_question`；不调用 checkpoint provider，也不依赖 ws-ckpt。
 
 Phase 1 是 installation-scoped single-tenant。`InstallationId` 与 authenticated local peer credential
 构成 v1 boundary。`TenantId`、remote peer 与 cross-tenant isolation 属未来 v2，本文不作相关声明。
+
+## 可选 sealed provider set 与被推迟的 checkpoint target
+
+Capability profile 固化 instance 可触达的准确有序 side-effect provider 集合。
+[`GatewayCapabilityProfile::providers`](../../../../../crates/cosh-gateway-contracts/src/profile.rs)
+对 `task-only-v1` 返回空集，对 `workspace-checkpoint-v1` 精确返回 `ws-ckpt`；`verify_providers` 拒绝
+缺失、额外、重排或替换的 provider。因此“主机上恰好运行 ws-ckpt daemon”本身永远不是 authority。
+
+[`SealedCapabilityProviderRegistry`](../../../../../crates/cosh-gateway/src/capability/provider.rs)
+是 instance 获得副作用 authority 的唯一边界。请求 provider 的 task-only instance 会被拒绝而不是被扩权，
+且 sealed set 在其他一切之前先完成校验。
+
+该边界对**所有** profile 都 withhold checkpoint provider，因此 instance 唯一能达到的形态是空 provider 集合。
+**本 crate 中不存在 checkpoint execution target。** 该 target 是被推迟，而不只是未接线：下文的约束是任何未来
+实现都必须满足的前置条件，其中两条需要 ws-ckpt 协议变更，任何 Gateway 侧代码都无法替代。
+
+让 `cosh-gateway` 不含 checkpoint adapter 也保持了它的依赖方向。在内部 crate 中它只依赖无副作用的
+`cosh-gateway-contracts` 叶子；复用既有 `CkptClient` 的 Gateway 侧 target 会新增 `cosh-platform` 与
+`cosh-types` 两条边，因此被推迟的 slice 必须先决定 checkpoint transport 应该放在哪里。
+
+### 为什么 withhold checkpoint authority
+
+一个 `workspace_checkpoint_create` permit 必须只授权在一个被准入的 workspace 上创建一个快照。ws-ckpt 的
+checkpoint 请求无法被约束到这个范围。
+
+Checkpoint dispatch 会在尝试快照之前无条件先跑 workspace auto-init。Auto-init 解析请求里的 workspace 字段，而
+该解析在没有任何注册匹配时会继续把该值当作**相对路径**处理。Workspace 初始化是真实的主机变更：它会注册
+workspace、可能收养已存在的 subvolume、把原目录改名移开、创建 symlink，并在报告 invalid path 之前删除损坏的
+symlink。
+
+用 daemon 拥有的 workspace identity 而不是路径名，可以消除常规触发条件——已注册的 identity 会直接解析成功、不进
+auto-init。但它消除不了那个窗口：任何前置 identity 查询与 checkpoint 请求都是两次独立往返，因此期间发生的
+`recover` 把 workspace unregister 之后，daemon 会把失效 identity 字符串当相对路径解析。它究竟会碰到什么，取决于
+daemon 的工作目录——而这既不由 Gateway 控制，也未被 Gateway 校验。
+
+Gateway 侧没有任何检查能关闭它。副作用后的比较只能把上报结果降级为不确定，无法阻止或撤销 daemon 已经完成的注册；
+“把窗口缩小”也不是安全属性。
+
+**前置条件**：ws-ckpt 提供严格解析 workspace identity、绝不 auto-init 的 checkpoint 请求。
+
+### 为被推迟的 target 已确立的约束
+
+以下结论来自 target 原型阶段，记录在此以免被推迟的 slice 重新踩一遍。每一条都是要求，而不是已交付行为的描述。
+
+**Socket 可信性不能建立在路径元数据上。** daemon 故意发布可被任意进程连接的 socket，因此其 mode 不是证据。
+可信性要求 socket owner 为 root 或 Gateway owner，且**每一级**上级目录直到根都由 root 或 Gateway owner 拥有、
+并且除带 sticky bit 外不对其他 principal 可写——只检查直接父目录会让该父目录自身的目录项仍可被替换。即便如此，
+路径检查也关不掉“检查到 `connect`”之间的窗口：必须在连接之后、写出任何请求字节之前用 kernel peer credentials
+认证对端。Pin socket 的 device、inode 与 owner 仍可用于检出替换，但真正保护请求的是认证。
+
+**一个 workspace 有两种并不相同的表示。** 初始化之后 daemon 会把原目录搬进 backend 并在 user-facing 路径留下
+symlink，随后其 registry、`Status` 与 `List` 始终报告那个注册路径；而对同一路径做 descriptor-pinned open 会穿过
+symlink 得到 backend 目录。要求二者相等会拒绝所有正常初始化过的 workspace，因此必须同时绑定：逐字用于 daemon
+查询与证据比较的注册路径，以及作为本地 identity 的 pinned directory。
+
+**device 与 inode 无法标识 btrfs subvolume。** 每个 subvolume 根的 inode 恒为 256，而 subvolume 的 anonymous
+device number 在首次访问时分配、在 subvolume 被删除后可被复用。Rollback 会把 live subvolume 改名移开、在同一路径
+创建新的 writable snapshot、再删除旧的，因此两个不同 subvolume 的 device 与 inode 可能完全相等。
+`BTRFS_IOC_INO_LOOKUP` 给出的所属 subvolume ID 来自持久递增计数器且不被复用，但它只在单个文件系统内唯一，因此
+必须用 `BTRFS_IOC_FS_INFO` 的文件系统标识为其定作用域。identity 因此是 `(filesystem ID, subvolume ID, inode)`，
+且 scheme 标记也要参与绑定，使 workspace 无法静默退回 device/inode identity。
+
+**Workspace identity 不是 generation fence。** daemon 由 workspace 路径派生其 workspace ID，因此同一路径在
+unregister 之后再次注册会复用它；`rollback` 到当前 DAG head 会替换 live subvolume，同时保持 workspace ID、注册
+路径与 `index.head` 不变。在请求前后比较 volume identity 能检出所有持续到某次比较之后的 rollback，但完全落在
+create 窗口内的 rollback 不可见，也没有任何可观测协议取值能与创建原子校验。因此确定性 receipt 最多只能证明被注册
+的 workspace、checkpoint identity 与被报告的快照，**绝不能**证明 workspace 内容的 generation。
+
+**前置条件**：ws-ckpt 协议提供不可复用的 workspace generation token 并与 checkpoint 创建原子校验，然后 checkpoint
+receipt 才可能绑定 workspace 内容。
+
+### Effect 分类与 reconcile
+
+这部分的 transport 原语实现在
+[`CkptClient`](../../../../../crates/cosh-platform/src/checkpoint.rs)，也是本增量中唯一交付的 checkpoint 相关
+代码——因为它自成一体，且其正确性不依赖 target。
+
+Governed 原语 `create_classified` 与 `find_snapshot` 在结构上强制要求 peer 认证：caller 必须配置
+`require_trusted_peer(owner_uid)`。缺少该配置时，两者都会在检查或访问 socket 之前拒绝请求。
+`create_classified` 将这种拒绝报告为 `KnownNoEffect`，`find_snapshot` 则返回 permission error。该 fail-closed
+要求只适用于这两个 governed 原语；legacy `CkptClient` operation 保留现有的 optional peer-auth 行为。
+
+`create_classified` 报告失败请求是否可能已经改变 daemon 状态。只有在任何请求字节进入 kernel 之前发生的失败才是
+可证明的 `KnownNoEffect`：缺少 trusted-peer 配置、socket 缺失、连接被拒绝、peer 不可信、零字节写入。其后的
+一切都是 `PossiblyApplied`——部分写入、响应丢失或截断、payload 无法解码、意外响应 variant，**以及每一个
+daemon 报告的错误码**。
+
+任何响应码都不被当作 pre-effect 证据。Checkpoint dispatch 路径会先 auto-init workspace 再尝试快照，因此在产生
+`WriteLockConflict`、`SnapshotAlreadyExists` 或 `InvalidPath` 之类错误码之前，注册、subvolume 收养或删除损坏的
+workspace symlink 可能已经发生。这些错误码只证明没有创建快照，不证明 daemon 状态未变化。
+
+`find_snapshot` 是只读 evidence 原语：它按一个 workspace 与一个准确 checkpoint identity 精确匹配，
+报告 daemon 是否仍把该快照列为存在。未来 target 与 ledger-side reconciler 可在
+`PossiblyApplied` 失败后使用该证据，而不是再创建一个快照；本增量不会把它转成
+确定结果或 durable uncertain outcome。
 
 ## 目标
 
@@ -357,8 +455,17 @@ denial，不能回显 secret input 或无界 target output。Transport timeout �
    ungoverned。
 5. 使用 private COSH brokered v3，绑定固定 `task-only-v1` manifest，只暴露
    `ask_user_question`。
-6. Shell/ACP/Skills/MCP/扩展保持禁用，等待后续 phase 提供完整 adapter。
-7. Parity 与 recovery acceptance 通过后，删除或显式隔离 legacy bypass。
+6. 增加可选 `workspace-checkpoint-v1` profile、其 sealed provider set，以及 checkpoint transport 的 effect
+   分类。**Provider 准入被 withheld；不存在 execution target。**
+7. 先落地 ws-ckpt 协议前置条件，再实现 checkpoint execution target、把 Runtime checkpoint request 经
+   durable approval 与 single-use permit 接入，并在 private Core wire 上镜像第二个 profile。**未实现。**
+8. Shell/ACP/Skills/MCP/扩展保持禁用，等待后续 phase 提供完整 adapter。
+9. Parity 与 recovery acceptance 通过后，删除或显式隔离 legacy bypass。
+
+可选 profile 从不改变可移植 profile。`task-only-v1` canonical manifest 与原始版本逐字节一致，因此
+private Core v3 mirror 继续校验同一个固定 digest，task-only instance 也继续在没有 ws-ckpt package、
+socket、service 与 provider 的情况下启动。ws-ckpt daemon 不可用只能使 checkpoint-enabled instance 拒绝
+准入，绝不能阻塞 task-only instance。
 
 Rollback 保留 standalone Shell 与 legacy binary。Production `serve` 继续 fail closed，不能 fallback 到
 ACP 或 legacy mutation backend。Release 只能宣传 task-only `ask_user_question` profile，不能宣传“all
@@ -405,8 +512,19 @@ claim。仍需更广的 security suite：
 - Concurrent consume test 证明一个 permit 最多产生一个 claimed Execution ID。
 - 在 claim、audit start、OS invocation、result capture 和 Task callback 前后执行 kill-point test。
 - Typed success、typed failure、in-progress 与 unknown effect 的 reconciliation test。
-- Bypass test 证明当前 production inventory 是 task-only 且没有 `ExecutionTarget`；每个未来
+- Bypass test 证明打包的 production service 仍是 task-only 且不依赖 ws-ckpt；每个未来
   Gateway/Core/Shell/ACP/Skill/MCP mutation path 都必须先补相应测试才能启用。
+
+可选 profile 与被 withhold 的 provider 补充确定性覆盖，不涉及真实 ws-ckpt daemon、btrfs 文件系统、ECS 实例或
+人工终端：
+
+- Profile test 固定第二个 canonical manifest 与 digest，并拒绝缺失、额外、重排或改名的 tool 以及任何
+  provider set 漂移，包含此前已被拒绝的 `ws-ckpt-v1` 名称。
+- Registry test 证明 task-only instance 在没有任何 ws-ckpt 配置时接纳空 provider set 并拒绝被请求的 provider、
+  checkpoint-enabled instance 在缺少 provider 时拒绝准入，以及固化该 provider 的 profile 同样被 withhold。
+- 穷举 (profile × requested provider) 全部组合的 test 证明没有任何准入结果会产生 checkpoint 副作用 authority。
+- Transport test 把每个请求阶段分类为可证明无副作用或可能已应用，覆盖全部十三个 daemon 错误码，并覆盖 peer
+  认证与准确的只读 reconcile 查询。
 
 ## 开放问题
 

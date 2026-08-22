@@ -4,6 +4,7 @@ mod approval;
 mod broker;
 mod execution;
 mod memory;
+mod provider;
 
 pub use approval::{
     BrokeredApprovalBinding, DurableApprovalCoordinator, DurableApprovalError,
@@ -20,3 +21,4 @@ pub use execution::{
     SecurityAuditError, SecurityAuditGate,
 };
 pub use memory::MemoryPermitStore;
+pub use provider::{SealedCapabilityProviderRegistry, SealedProviderAdmissionError};

@@ -4,16 +4,24 @@
 
 ## Status and decision
 
-This increment is based on upstream commit `a6592234`. Its universal Broker model remains the
+This increment is based on upstream commit `a43ab817`. Its universal Broker model remains the
 architecture target, not an accepted Phase 1 claim. The accepted production scope is narrower:
 `serve` and the library daemon admit only `core` / `gateway-brokered-v1`, whose immutable inventory
 is bound to the pinned `task-only-v1` manifest and contains `ask_user_question` only. Gateway,
 durable Runtime start intent, and Core v3 negotiation verify that identity and exact inventory
-before launch or Task input. No production `ExecutionTarget` or
-checkpoint/ws-ckpt dependency is wired in this PR. Every side-effecting hook, Skill, MCP, extension,
+before launch or Task input. Every side-effecting hook, Skill, MCP, extension,
 Shell, file, process, and network path is disabled in this profile. ACP `doctor`/`run`, legacy CLI
 commands, and standalone Shell are explicitly ungoverned interoperability/rollback paths and
 cannot be cited as governed evidence.
+
+The Gateway now additionally owns an optional `workspace-checkpoint-v1` capability profile and a sealed
+capability provider registry that **withholds** the checkpoint provider for every profile. **No checkpoint
+execution target exists**: it is deferred until the ws-ckpt protocol offers an identity-only checkpoint
+request and a non-reusable workspace generation token, because without them a checkpoint-create permit
+could make the daemon mutate the host outside the authority it grants. `serve`, the packaged systemd unit,
+and the brokered execution driver are unchanged as well. The accepted claim is "the closed profile and the
+sealed provider set exist and fail closed, and the checkpoint transport classifies effects correctly", not
+"a ws-ckpt target exists" and not "checkpoints are governed end to end".
 
 The universal target still requires `CapabilityBroker` as the mandatory policy enforcement and
 permit authority for every enabled OS side effect, regardless of origin. An execution target
@@ -45,16 +53,132 @@ fields and marks a permit consumed under one mutex, so exactly one concurrent ca
 A failed binding check does not consume authority.
 
 `MemoryPermitStore` remains a process-local logic fixture and is not production authority. Generic
-durable approval/permit/execution ledger contracts may be retained as reusable foundations, but this
-PR does not wire them to a production execution target. The task-only production profile has no
-side-effecting operation beyond `ask_user_question`; it does not invoke a checkpoint provider and has
-no ws-ckpt dependency. Checkpoint/ws-ckpt support, target resolution, pre-effect audit, result
-reconciliation, and any production permit loop are follow-up optional capability work, not accepted
-evidence here.
+durable approval/permit/execution ledger contracts may be retained as reusable foundations. The
+task-only production profile has no side-effecting operation beyond `ask_user_question`; it does not
+invoke a checkpoint provider and has no ws-ckpt dependency.
 
 Phase 1 is installation-scoped and single-tenant. `InstallationId` plus authenticated local peer
 credentials form the v1 boundary. `TenantId`, remote peers, and cross-tenant isolation are future
 v2 work and are not claimed here.
+
+## Optional sealed provider set and the deferred checkpoint target
+
+A capability profile seals the exact ordered set of side-effect providers an instance may reach.
+[`GatewayCapabilityProfile::providers`](../../../../../crates/cosh-gateway-contracts/src/profile.rs)
+returns an empty set for `task-only-v1` and exactly `ws-ckpt` for `workspace-checkpoint-v1`, and
+`verify_providers` rejects a missing, additional, reordered, or substituted provider. A host that
+happens to run the ws-ckpt daemon is therefore never authority on its own.
+
+[`SealedCapabilityProviderRegistry`](../../../../../crates/cosh-gateway/src/capability/provider.rs)
+is the single boundary at which an instance would gain side-effect authority. A Task-only instance that
+requests a provider is rejected rather than widened, and the sealed set is verified before anything else.
+
+That boundary **withholds** the checkpoint provider for every profile, so the only shape an instance can
+reach is the empty provider set. **No checkpoint execution target exists in this crate.** The target is
+deferred, not merely unwired: the constraints below are prerequisites any future implementation must
+satisfy, and two of them require ws-ckpt protocol changes that no Gateway-side code can substitute for.
+
+Keeping `cosh-gateway` free of a checkpoint adapter also preserves its dependency direction. Among
+internal crates it depends only on the side-effect-free `cosh-gateway-contracts` leaf. A Gateway-side
+target that reused the existing `CkptClient` would add `cosh-platform` and `cosh-types` edges, so the
+deferred slice must first decide where a checkpoint transport may live.
+
+### Why checkpoint authority is withheld
+
+A `workspace_checkpoint_create` permit must authorize exactly one snapshot creation on one admitted
+workspace. The ws-ckpt checkpoint request cannot be constrained to that.
+
+Checkpoint dispatch unconditionally runs workspace auto-initialization before it attempts a snapshot.
+Auto-initialization resolves the request's workspace field, and that resolution falls through to treating
+the value as a relative path when no registration matches it. Workspace initialization is a real host
+mutation: it registers a workspace, can adopt an existing subvolume, moves the original directory aside,
+creates a symlink, and removes a broken symlink before reporting an invalid path.
+
+Naming the daemon-owned workspace identity instead of a pathname removes the ordinary trigger, because a
+registered identity resolves without auto-initialization. It does not remove the window. Any pre-request
+identity query and the checkpoint request are separate round trips, so a `recover` that unregisters the
+workspace in between leaves the daemon resolving a stale identity string as a relative path. What it then
+touches depends on the daemon's working directory, which the Gateway neither controls nor verifies.
+
+No Gateway-side check closes this. A post-request comparison can only downgrade the reported outcome to
+indeterminate; it cannot prevent or undo a registration the daemon already performed. Bounding the window
+is not a security property either.
+
+**Prerequisite.** A ws-ckpt checkpoint request that resolves a workspace identity strictly and never
+auto-initializes.
+
+### Established constraints for the deferred target
+
+These were derived while prototyping the target and are recorded so the deferred slice does not rediscover
+them. Each is a requirement, not a description of shipped behaviour.
+
+**Socket trust cannot rest on path metadata.** The daemon publishes a world-connectable socket on purpose,
+so the socket's mode is not evidence. Trust requires the socket owner to be root or the Gateway owner and
+**every** ancestor directory up to the root to be owned by root or the Gateway owner and not writable by
+other principals unless it carries the sticky bit; checking only the immediate parent leaves that parent's
+own directory entry replaceable. Even then, path checks cannot close the window between a check and
+`connect`. The connected peer must be authenticated with kernel credentials after connecting and before
+any request byte is written. Pinning the socket device, inode, and owner remains useful for detecting
+replacement, but authentication is what secures the request.
+
+**A workspace has two representations that are not the same string.** After initialization the daemon moves
+the original directory into its backend and leaves a symlink at the user-facing path, then keeps reporting
+that registered path in its registry, `Status`, and `List`. A descriptor-pinned open of the same path
+resolves through the symlink to the backend directory. Requiring the two to be equal rejects every normally
+initialized workspace, so both must be bound: the registered path verbatim for daemon queries and evidence
+comparison, and the pinned directory for local identity.
+
+**Device and inode do not identify a btrfs subvolume.** Every subvolume root carries inode 256, and a
+subvolume's anonymous device number is allocated at first access and may be reused once the subvolume is
+deleted. Rollback renames the live subvolume aside, creates a new writable snapshot at the same path, and
+deletes the old one, so device and inode can compare equal across two different subvolumes. The containing
+subvolume ID from `BTRFS_IOC_INO_LOOKUP` comes from a persistent increasing counter and is not reused, but
+it is unique only inside one filesystem, so the filesystem identifier from `BTRFS_IOC_FS_INFO` must scope
+it. The identity is therefore `(filesystem ID, subvolume ID, inode)`, with the scheme tag bound so a
+workspace cannot silently move to a device-and-inode identity.
+
+**Workspace identity is not a generation fence.** The daemon derives its workspace ID from the workspace
+path, so it is reused when the same path is registered again after an unregister, and `rollback` to the
+current DAG head replaces the live subvolume while leaving the workspace ID, the registration path, and
+`index.head` unchanged. Comparing the volume identity before and after a request detects every rollback
+that persists past either comparison, but a rollback confined entirely to the create window is invisible,
+and no observable protocol value could be validated atomically with creation. A conclusive receipt could
+therefore attest the registered workspace, the checkpoint identity, and the reported snapshot — never the
+generation of the workspace contents.
+
+**Prerequisite.** A non-reusable workspace generation token in the ws-ckpt protocol, validated atomically
+with checkpoint creation, before any checkpoint receipt may bind workspace contents.
+
+### Effect classification and reconciliation
+
+The transport primitives for this are implemented in
+[`CkptClient`](../../../../../crates/cosh-platform/src/checkpoint.rs) and are the one part of the
+checkpoint work that ships in this increment, because they are self-contained and correct independently of
+the target.
+
+The governed primitives `create_classified` and `find_snapshot` structurally require peer
+authentication: the caller must configure `require_trusted_peer(owner_uid)`. Without that configuration,
+both reject before inspecting or accessing the socket. `create_classified` reports this rejection as
+`KnownNoEffect`, while `find_snapshot` returns a permission error. This fail-closed requirement is scoped
+to these two governed primitives; legacy `CkptClient` operations retain their existing optional-peer-auth
+behavior.
+
+`create_classified` reports whether a failed request may already have changed daemon state. Only failures
+raised strictly before any request byte reaches the kernel are proven `KnownNoEffect`: missing trusted-peer
+configuration, a missing socket, a refused connection, an untrusted peer, or a write that transferred
+nothing. Everything after that is `PossiblyApplied` — a partial write, a lost or truncated response, an
+undecodable payload, an unexpected response variant, **and every daemon-reported error code**.
+
+No response code is treated as pre-effect evidence. The checkpoint dispatch path auto-initializes the
+workspace before it attempts a snapshot, so registration, subvolume adoption, or removal of a broken
+workspace symlink may already have happened before a code such as `WriteLockConflict`,
+`SnapshotAlreadyExists`, or `InvalidPath` is produced. Those codes prove that no snapshot was created; they
+do not prove that daemon state is unchanged.
+
+`find_snapshot` is the read-only evidence primitive: it matches one workspace and one exact checkpoint
+identity and reports whether the daemon still lists the snapshot as present. A future target and ledger-side
+reconciler can use that evidence after a `PossiblyApplied` failure instead of creating a second snapshot,
+but this increment does not turn it into a conclusive or durable uncertain outcome.
 
 ## Goals
 
@@ -385,8 +509,19 @@ output. Transport timeout is not evidence that an effect did not occur.
    `doctor`/`run` explicitly ungoverned.
 5. Use private COSH brokered v3, bind the pinned `task-only-v1` manifest, and expose only
    `ask_user_question`.
-6. Keep Shell/ACP/Skills/MCP/extensions disabled until a later phase provides complete adapters.
-7. Remove or explicitly isolate legacy bypasses only after parity and recovery acceptance passes.
+6. Add the optional `workspace-checkpoint-v1` profile, its sealed provider set, and the checkpoint
+   transport's effect classification. **Provider admission withheld; no execution target.**
+7. Land the ws-ckpt protocol prerequisites, then implement the checkpoint execution target, wire the
+   Runtime checkpoint request through durable approval and a single-use permit, and mirror the second
+   profile on the private Core wire. **Not implemented.**
+8. Keep Shell/ACP/Skills/MCP/extensions disabled until a later phase provides complete adapters.
+9. Remove or explicitly isolate legacy bypasses only after parity and recovery acceptance passes.
+
+The optional profile never changes the portable one. The `task-only-v1` canonical manifest stays
+byte-identical to its original revision, so the private Core v3 mirror keeps verifying the same pinned
+digest, and a Task-only instance keeps starting with no ws-ckpt package, socket, service, or provider.
+An unavailable ws-ckpt daemon can only make a checkpoint-enabled instance refuse admission; it can
+never block a Task-only instance.
 
 Rollback preserves standalone Shell and legacy binaries. Production `serve` remains fail-closed;
 it cannot fall back to ACP or a legacy mutation backend. A release may advertise only the
@@ -435,9 +570,22 @@ consumption, expiry/replay, and eight-way concurrent claim. The broader security
 - Concurrent consume tests proving one permit produces at most one claimed Execution ID.
 - Kill-point tests before/after claim, audit start, OS invocation, result capture, and Task callback.
 - Reconciliation tests for typed success, typed failure, in-progress, and unknown effects.
-- Bypass tests proving the current production inventory is task-only with no
-  `ExecutionTarget`, plus future tests for each Gateway/Core/Shell/ACP/Skill/MCP
-  mutation path before it may be enabled.
+- Bypass tests proving the packaged production service stays task-only with no ws-ckpt dependency,
+  plus future tests for each Gateway/Core/Shell/ACP/Skill/MCP mutation path before it may be enabled.
+
+The optional profile and its withheld provider add deterministic coverage, with no real ws-ckpt daemon,
+btrfs filesystem, ECS instance, or manual terminal involved:
+
+- Profile tests pinning the second canonical manifest and digest, and rejecting a missing, extra,
+  reordered, or renamed tool and any provider-set drift, including the previously rejected
+  `ws-ckpt-v1` name.
+- Registry tests proving a Task-only instance admits an empty provider set with no ws-ckpt configuration
+  present and rejects a requested provider, that a checkpoint-enabled instance refuses admission without
+  one, and that the checkpoint provider is withheld for the profile that seals it.
+- An exhaustive test over every profile and requested-provider combination proving no admission outcome
+  yields checkpoint side-effect authority.
+- Transport tests classifying every request phase as proven no-effect or possibly applied, including all
+  thirteen daemon error codes, and covering peer authentication and the exact read-only reconcile query.
 
 ## Open questions
 
