@@ -9,6 +9,20 @@
 
 ## [未发布]
 
+## [0.3.6] - 2026-08-22
+
+### 修复
+
+- `anolisa --quiet adapter scan` 和 `anolisa --quiet adapter status` 现会
+  抑制所有非错误的人类可读输出，包括空状态提示与结果表格；`--json` 仍会输出
+  标准响应封装。Agent 可依赖 quiet 模式的 adapter 检查不产生人类可读输出
+  ([#2752](https://github.com/alibaba/anolisa/pull/2752))。
+- `anolisa --dry-run forget <component>` 现会与真实执行一样，以
+  `INVALID_ARGUMENT`、退出码 2 和 `adapter disable` 指引，拒绝仍有已启用
+  adapter 的 component。预览不再误报无法执行的 forget 会成功，同时仍会忽略
+  无关 component 的 adapter receipt
+  ([#2762](https://github.com/alibaba/anolisa/pull/2762))。
+
 ## [0.3.5] - 2026-08-20
 
 ### 修复

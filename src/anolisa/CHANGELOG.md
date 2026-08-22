@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-08-22
+
+### Fixed
+
+- `anolisa --quiet adapter scan` and `anolisa --quiet adapter status` now
+  suppress all non-error human output, including empty-state messages and
+  result tables, while `--json` continues to emit the standard envelope.
+  Agents can rely on quiet adapter inspection producing no human output
+  ([#2752](https://github.com/alibaba/anolisa/pull/2752)).
+- `anolisa --dry-run forget <component>` now refuses a component that still
+  has enabled adapters with the same `INVALID_ARGUMENT`, exit code 2, and
+  `adapter disable` guidance as the real operation. Previews no longer report
+  that an impossible forget would succeed, while unrelated adapter receipts
+  remain ignored
+  ([#2762](https://github.com/alibaba/anolisa/pull/2762)).
+
 ## [0.3.5] - 2026-08-20
 
 ### Fixed
