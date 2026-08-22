@@ -3,8 +3,13 @@
 //! Execute already refuses a component that still has enabled adapters.
 //! Dry-run must preview that same refusal (error envelope, exit 2) instead
 //! of a successful "would forget" payload. An unrelated receipt must not
-//! block this component. Subprocesses pin `--install-mode system` and a
-//! temporary `--prefix` so host state cannot change the assertions.
+//! block this component.
+//!
+//! Subprocesses stay on `--dry-run` with `--install-mode system` and a
+//! temporary `--prefix`. A real system-mode forget is a ModeScopedMutation
+//! and needs root; the privilege gate would hide the adapter envelope on
+//! non-root runners. In-process `forget_refuses_with_enabled_adapter_claim`
+//! covers the execute path.
 
 use std::path::PathBuf;
 use std::process::Output;
@@ -40,21 +45,19 @@ impl ForgetFixture {
         Self { _tmp: tmp, prefix }
     }
 
-    fn run(&self, dry_run: bool) -> Output {
+    fn run_dry_run(&self) -> Output {
         let prefix = self.prefix.to_string_lossy().into_owned();
-        let mut args = vec![
+        common::run(&[
             "--json",
             "--no-color",
+            "--dry-run",
             "--install-mode",
             "system",
             "--prefix",
             prefix.as_str(),
-        ];
-        if dry_run {
-            args.push("--dry-run");
-        }
-        args.extend_from_slice(&["forget", TARGET]);
-        common::run(&args)
+            "forget",
+            TARGET,
+        ])
     }
 }
 
@@ -188,21 +191,15 @@ fn parse_error(output: &Output) -> Value {
 }
 
 #[test]
-fn forget_dry_run_json_refuses_enabled_adapter_like_execute() {
+fn forget_dry_run_json_refuses_enabled_adapter() {
     let fixture = ForgetFixture::with_claim_on(TARGET);
-    let dry = parse_error(&fixture.run(true));
-    let real = parse_error(&fixture.run(false));
-    assert_eq!(
-        dry.get("error"),
-        real.get("error"),
-        "dry-run must preview the same adapter refusal as execute"
-    );
+    parse_error(&fixture.run_dry_run());
 }
 
 #[test]
 fn forget_dry_run_json_ignores_unrelated_adapter_claim() {
     let fixture = ForgetFixture::with_claim_on(OTHER);
-    let output = fixture.run(true);
+    let output = fixture.run_dry_run();
     assert_eq!(
         Some(0),
         output.status.code(),
