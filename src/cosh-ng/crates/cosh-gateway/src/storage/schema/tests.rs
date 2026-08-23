@@ -72,7 +72,7 @@ fn existing_v1_database_migrates_without_rewriting_v1() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     let v1_checksum: String = connection
         .query_row(
             "SELECT checksum FROM schema_migrations WHERE version=1",
@@ -107,7 +107,7 @@ fn existing_v8_database_adds_private_runtime_input_tables() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     let tables = connection
         .prepare(
             "SELECT name FROM sqlite_schema
@@ -122,6 +122,33 @@ fn existing_v8_database_adds_private_runtime_input_tables() {
         tables,
         ["runtime_input_dispatches", "runtime_input_requests"]
     );
+}
+
+#[test]
+fn existing_v9_database_adds_provider_recovery_binding() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .unwrap();
+    migrate_to_for_test(&mut connection, 9).unwrap();
+
+    let before = columns(&connection, "brokered_requests");
+    assert!(!before.iter().any(|column| column == "provider_binding"));
+
+    migrate(&mut connection).unwrap();
+
+    let after = columns(&connection, "brokered_requests");
+    assert!(after.iter().any(|column| column == "provider_binding"));
+}
+
+fn columns(connection: &Connection, table: &str) -> Vec<String> {
+    connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
 }
 
 #[test]

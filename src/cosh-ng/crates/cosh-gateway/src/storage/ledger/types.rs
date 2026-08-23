@@ -219,6 +219,15 @@ pub struct ExecutionRecord {
     pub updated_at_ms: u64,
 }
 
+/// Started brokered effect plus the exact request needed for read-only recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokeredExecutionRecoveryCandidate {
+    /// Started durable execution.
+    pub execution: ExecutionRecord,
+    /// Original request including its provider-owned opaque binding.
+    pub request: BrokeredRequestRecord,
+}
+
 /// Availability of the typed result associated with an execution row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -294,6 +303,8 @@ pub struct BrokeredRequestRecord {
     pub target_identity_digest: Digest,
     /// Exact Runtime and renewable Run-lease fence.
     pub runtime_fence: RuntimeExecutionFence,
+    /// Provider-owned versioned admission binding, absent for legacy rows.
+    pub provider_binding: Option<BoundedOpaque>,
     /// Optional approval created with this request.
     pub approval_id: Option<ApprovalId>,
     /// Durable creation timestamp.

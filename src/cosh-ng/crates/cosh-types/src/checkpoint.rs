@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 /// Default socket path for ws-ckpt daemon.
 pub const DEFAULT_SOCKET_PATH: &str = "/run/ws-ckpt/ws-ckpt.sock";
+/// Exact protocol version implemented by the guarded checkpoint API.
+pub const GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2: u16 = 2;
 
 // ===========================================================================
 // Wire protocol types (must match ws-ckpt-common exactly)
@@ -78,6 +80,27 @@ pub enum WsCkptRequest {
         workspace: String,
         to: Option<String>,
         num_ancestors: Option<u32>,
+    },
+    /// Resolves the stable identity of an already-registered workspace.
+    WorkspaceIdentityV2 {
+        registration_path: String,
+    },
+    /// Creates a checkpoint under an atomic workspace-generation fence.
+    GuardedCheckpointV2 {
+        ws_id: String,
+        expected_generation: WorkspaceGenerationTokenV2,
+        checkpoint_id: String,
+        operation_digest: [u8; 32],
+        message: Option<String>,
+        metadata: Option<String>,
+        pin: bool,
+    },
+    /// Queries exact durable evidence for one guarded operation.
+    CheckpointEvidenceV2 {
+        ws_id: String,
+        expected_generation: WorkspaceGenerationTokenV2,
+        checkpoint_id: String,
+        operation_digest: [u8; 32],
     },
 }
 
@@ -153,6 +176,26 @@ pub enum WsCkptResponse {
         to: String,
         changes: Vec<DiffEntry>,
     },
+    /// Stable identity returned for an already-registered workspace.
+    WorkspaceIdentityV2Ok {
+        protocol_version: u16,
+        ws_id: String,
+        registered_path: String,
+        generation: WorkspaceGenerationTokenV2,
+    },
+    /// Durable evidence returned after a guarded checkpoint request.
+    GuardedCheckpointV2Ok {
+        evidence: GuardedCheckpointEvidenceV2,
+    },
+    /// Exact evidence lookup result; absence is represented by `None`.
+    CheckpointEvidenceV2Ok {
+        evidence: Option<GuardedCheckpointEvidenceV2>,
+    },
+    /// A guarded request rejected before checkpoint backend execution.
+    GuardedCheckpointV2Rejected {
+        code: GuardedCheckpointRejectionCodeV2,
+        message: String,
+    },
 }
 
 /// Error codes from ws-ckpt daemon.
@@ -172,6 +215,80 @@ pub enum WsCkptErrorCode {
     DiskSpaceInsufficient,
     CwdOccupied,
     CwdScanFailed,
+}
+
+/// Opaque identity of one live writable-subvolume generation.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WorkspaceGenerationTokenV2([u8; 32]);
+
+impl WorkspaceGenerationTokenV2 {
+    /// Constructs a token from its exact fixed-width wire representation.
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrows the exact fixed-width wire representation.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Consumes the token and returns its wire representation.
+    pub const fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for WorkspaceGenerationTokenV2 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("WorkspaceGenerationTokenV2(<opaque>)")
+    }
+}
+
+/// Terminal outcome durably bound to one guarded checkpoint operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuardedCheckpointOutcomeV2 {
+    /// The backend created this snapshot.
+    Created { snapshot_id: String },
+    /// The daemon intentionally skipped backend creation.
+    Skipped { reason: String },
+}
+
+/// Durable proof binding a caller operation to one workspace generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuardedCheckpointEvidenceV2 {
+    pub ws_id: String,
+    pub registered_path: String,
+    pub generation: WorkspaceGenerationTokenV2,
+    pub checkpoint_id: String,
+    pub operation_digest: [u8; 32],
+    pub caller_uid: u32,
+    pub outcome: GuardedCheckpointOutcomeV2,
+}
+
+/// Reasons a guarded request can be rejected before checkpoint backend execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GuardedCheckpointRejectionCodeV2 {
+    DaemonNotReady,
+    PeerCredentialsUnavailable,
+    InvalidRegistrationPath,
+    InvalidWorkspaceId,
+    InvalidCheckpointId,
+    InvalidMetadata,
+    WorkspaceNotFound,
+    GenerationMismatch,
+    OperationConflict,
+    WriteLockConflict,
+    CallerMismatch,
+    EvidenceCapacityReached,
+}
+
+/// Stable registered-workspace identity used to bind guarded requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceIdentityV2 {
+    pub protocol_version: u16,
+    pub ws_id: String,
+    pub registered_path: String,
+    pub generation: WorkspaceGenerationTokenV2,
 }
 
 // ===========================================================================

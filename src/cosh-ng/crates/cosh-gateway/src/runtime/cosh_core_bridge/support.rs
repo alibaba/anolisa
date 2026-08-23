@@ -40,6 +40,17 @@ fn safe_error(
         .unwrap_or_else(|_| unreachable!("static contract error must remain valid"))
 }
 
+fn digest_json(value: &impl serde::Serialize) -> Result<Digest, AgentRuntimePortError> {
+    let bytes = serde_json::to_vec(value).map_err(|_| AgentRuntimePortError::Protocol)?;
+    Ok(sha256_digest(&bytes))
+}
+
+fn sha256_digest(bytes: &[u8]) -> Digest {
+    let digest = Sha256::digest(bytes);
+    Digest::parse(format!("{digest:x}"))
+        .unwrap_or_else(|_| unreachable!("SHA-256 lower hex is a valid contract digest"))
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

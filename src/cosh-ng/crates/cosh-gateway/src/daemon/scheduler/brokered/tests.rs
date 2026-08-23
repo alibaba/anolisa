@@ -205,6 +205,7 @@ impl BrokeredExecutionDriver for DenyingDriver {
                 expires_at_ms: context.request.expires_at_ms,
             },
             target_identity_digest: test_digest(),
+            provider_binding: None,
         })
     }
 
@@ -288,6 +289,7 @@ impl BrokeredExecutionDriver for ConclusiveDriver {
                 expires_at_ms: context.request.expires_at_ms,
             },
             target_identity_digest: test_digest(),
+            provider_binding: None,
         })
     }
 
@@ -470,6 +472,7 @@ impl BrokeredExecutionDriver for UncertainDriver {
                 expires_at_ms: context.request.expires_at_ms,
             },
             target_identity_digest: test_digest(),
+            provider_binding: None,
         })
     }
 

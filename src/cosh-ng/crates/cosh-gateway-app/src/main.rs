@@ -27,20 +27,22 @@ use cosh_gateway::runtime::{
     AcpV1ClientConfig, AcpV1Observation, AcpV1PermissionDecision, AcpV1PermissionOptionKind,
     AcpV1StopReason, InstalledBrokeredCoreRuntimePortFactory, LinuxSystemdContainmentVerifier,
     LocalOsActorResolver, ScheduledAgentRuntimeFactory, TrustedWorkspaceResolver,
-    GATEWAY_BROKERED_CORE_RUNTIME_PROFILE,
+    GATEWAY_BROKERED_CORE_RUNTIME_PROFILE, GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE,
 };
-use cosh_gateway::storage::{inspect_task_store, StoreInspectionOutcome};
+use cosh_gateway::storage::{inspect_task_store, SqliteTaskStore, StoreInspectionOutcome};
 use cosh_gateway_contracts::{
     capability::ApprovalDecision,
     common::{BoundedName, BoundedOpaque, BoundedText, IdempotencyKey, RuntimeSelector, TargetRef},
     ids::{
         ApprovalId, InputRequestId, InstallationId, RequestId, RunId, RuntimeInstanceId, TaskId,
     },
-    profile::GatewayCapabilityProfile,
+    profile::{GatewayCapabilityProfile, GatewayCapabilityProfileId},
     runtime::{RuntimeInputResponse, RuntimeInputSelections},
 };
 use serde_json::{json, Value};
 use thiserror::Error;
+
+mod checkpoint;
 
 #[path = "cosh_gateway/acp_command.rs"]
 mod acp_command;

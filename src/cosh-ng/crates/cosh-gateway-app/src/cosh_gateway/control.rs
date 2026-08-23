@@ -33,7 +33,7 @@ pub(super) fn task(args: TaskArgs, reporter: &Reporter) -> Result<u8, CliError> 
                     .map_err(|error| CliError::InvalidInput(error.to_string()))?,
                 intent: BoundedText::new(read_intent(command.intent_file.as_ref())?)
                     .map_err(|error| CliError::InvalidInput(error.to_string()))?,
-                target: task_only_target(),
+                target: target_for_runtime_profile(&command.runtime_profile)?,
                 runtime: RuntimeSelector {
                     runtime: bounded_name(command.runtime)?,
                     profile: Some(bounded_name(command.runtime_profile)?),
@@ -139,6 +139,18 @@ fn bounded_name(value: String) -> Result<BoundedName, CliError> {
 
 pub(super) fn task_only_target() -> TargetRef {
     GatewayCapabilityProfile::task_only_v1().governed_target()
+}
+
+pub(super) fn target_for_runtime_profile(profile: &str) -> Result<TargetRef, CliError> {
+    match profile {
+        GATEWAY_BROKERED_CORE_RUNTIME_PROFILE => Ok(task_only_target()),
+        GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE => {
+            Ok(GatewayCapabilityProfile::workspace_checkpoint_v1().governed_target())
+        }
+        _ => Err(CliError::Profile(
+            "unsupported brokered Core Runtime profile".to_owned(),
+        )),
+    }
 }
 
 fn parse_task(value: &str) -> Result<TaskId, CliError> {

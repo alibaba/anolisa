@@ -38,6 +38,19 @@ fn initialized_brokered_codec() -> CoshCoreJsonlCodec {
     codec
 }
 
+fn initialized_checkpoint_codec() -> CoshCoreJsonlCodec {
+    let corpus = private_wire_corpus();
+    let mut codec =
+        CoshCoreJsonlCodec::new_gateway_brokered_checkpoint("gateway-init-v4", 4096).unwrap();
+    codec.initialize_frame(false).unwrap();
+    let response = fixture_frame(&corpus["gateway_brokered_checkpoint_v4"]["initialize_ack"]);
+    assert!(matches!(
+        codec.decode_frame(&response).unwrap(),
+        CoshCoreObservation::Initialized(_)
+    ));
+    codec
+}
+
 #[test]
 fn initialize_is_explicitly_private_version_one() {
     let corpus = private_wire_corpus();
@@ -57,6 +70,69 @@ fn brokered_initialize_is_exact_private_v3_and_profile_bound() {
     let frame = codec.initialize_frame(false).unwrap();
     let value: Value = serde_json::from_str(frame.trim()).unwrap();
     assert_eq!(value, corpus["gateway_brokered_v3"]["initialize_request"]);
+}
+
+#[test]
+fn checkpoint_initialize_is_exact_private_v4_and_profile_bound() {
+    let corpus = private_wire_corpus();
+    let mut codec =
+        CoshCoreJsonlCodec::new_gateway_brokered_checkpoint("gateway-init-v4", 4096).unwrap();
+    let frame = codec.initialize_frame(false).unwrap();
+    let value: Value = serde_json::from_str(frame.trim()).unwrap();
+
+    assert_eq!(
+        value,
+        corpus["gateway_brokered_checkpoint_v4"]["initialize_request"]
+    );
+}
+
+#[test]
+fn checkpoint_initialize_rejects_capability_or_inventory_drift() {
+    let acknowledged = |runtime_tools: Value, hosted_checkpoint: bool| {
+        serde_json::json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": "gateway-init-v4",
+                "response": {
+                    "subtype": "initialize",
+                    "protocol_version": 4,
+                    "execution_profile": "gateway_brokered_checkpoint_v1",
+                    "capability_profile": {
+                        "profile_id": "workspace-checkpoint-v1",
+                        "manifest_digest": "6b3e7093e7b8656d4a7cf21faa85b9eed761ef415d002623cfc442f3ef3c8ae1"
+                    },
+                    "runtime_tools": runtime_tools,
+                    "capabilities": {
+                        "can_handle_can_use_tool": true,
+                        "can_handle_host_executed_shell_tool_result": false,
+                        "can_handle_approval_receipt": true,
+                        "can_handle_hosted_checkpoint_create": hosted_checkpoint,
+                        "can_handle_brokered_ask_user": true
+                    }
+                }
+            }
+        })
+    };
+    for acknowledgement in [
+        acknowledged(
+            serde_json::json!(["workspace_checkpoint_create", "ask_user_question"]),
+            true,
+        ),
+        acknowledged(serde_json::json!(["ask_user_question"]), true),
+        acknowledged(
+            serde_json::json!(["ask_user_question", "workspace_checkpoint_create"]),
+            false,
+        ),
+    ] {
+        let mut codec =
+            CoshCoreJsonlCodec::new_gateway_brokered_checkpoint("gateway-init-v4", 4096).unwrap();
+        codec.initialize_frame(false).unwrap();
+        assert!(matches!(
+            codec.decode_frame(&fixture_frame(&acknowledgement)),
+            Err(CoshCoreCodecError::InitializeCapabilitiesInvalid)
+        ));
+    }
 }
 
 #[test]
@@ -180,6 +256,114 @@ fn brokered_callback_frames_are_closed_golden_shapes() {
 }
 
 #[test]
+fn checkpoint_terminal_frames_are_typed_and_hide_gateway_authority() {
+    use cosh_gateway_contracts::{
+        common::{BoundedOpaque, BoundedText},
+        ids::{CheckpointId, ExecutionId, RequestId},
+        runtime::{
+            BrokeredExecutionDelivery, BrokeredExecutionOutcome, BrokeredOperationResult,
+            WorkspaceCheckpointCreateV1Outcome, WorkspaceCheckpointCreateV1Result,
+        },
+    };
+
+    let corpus = private_wire_corpus();
+    let codec = initialized_checkpoint_codec();
+    let request_id = RequestId::new();
+    let checkpoint_id = CheckpointId::parse("ckp_123e4567-e89b-12d3-a456-426614174000").unwrap();
+    let success = BrokeredExecutionDelivery {
+        request_id: request_id.clone(),
+        outcome: BrokeredExecutionOutcome::Succeeded {
+            execution_id: ExecutionId::new(),
+            result: BrokeredOperationResult::WorkspaceCheckpointCreateV1(
+                WorkspaceCheckpointCreateV1Result {
+                    checkpoint_id: checkpoint_id.clone(),
+                    outcome: WorkspaceCheckpointCreateV1Outcome::Created {
+                        snapshot_id: BoundedOpaque::new("snap-1").unwrap(),
+                    },
+                },
+            ),
+        },
+    };
+    let success: Value = serde_json::from_str(
+        codec
+            .brokered_checkpoint_result_frame("checkpoint-request-1", &success)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    assert_eq!(
+        success,
+        corpus["gateway_brokered_checkpoint_v4"]["checkpoint_created"]
+    );
+    assert!(success.to_string().find("execution_id").is_none());
+    assert!(success.to_string().find(request_id.as_str()).is_none());
+
+    let denied = BrokeredExecutionDelivery {
+        request_id: RequestId::new(),
+        outcome: BrokeredExecutionOutcome::Denied {
+            code: cosh_gateway_contracts::capability::DenialCode::ApprovalDenied,
+            safe_message: BoundedText::new("denied once").unwrap(),
+        },
+    };
+    let denied = codec
+        .brokered_checkpoint_result_frame("private-checkpoint-2", &denied)
+        .unwrap();
+    assert!(denied.contains(r#""behavior":"deny","message":"denied once""#));
+
+    for (outcome, expected) in [
+        (
+            BrokeredExecutionOutcome::Failed {
+                execution_id: ExecutionId::new(),
+                error: cosh_gateway_contracts::error::ContractError::new(
+                    "checkpoint_failed",
+                    cosh_gateway_contracts::error::ErrorCategory::Internal,
+                    false,
+                    "Checkpoint creation failed",
+                )
+                .unwrap(),
+            },
+            serde_json::json!({
+                "behavior": "host_executed_checkpoint_error",
+                "checkpointError": {
+                    "outcome": "failed",
+                    "code": "checkpoint_failed",
+                    "message": "Checkpoint creation failed"
+                }
+            }),
+        ),
+        (
+            BrokeredExecutionOutcome::Uncertain {
+                execution_id: ExecutionId::new(),
+                error: cosh_gateway_contracts::error::ContractError::new(
+                    "checkpoint_unknown",
+                    cosh_gateway_contracts::error::ErrorCategory::Transport,
+                    false,
+                    "Exact evidence was not available",
+                )
+                .unwrap(),
+            },
+            corpus["gateway_brokered_checkpoint_v4"]["checkpoint_uncertain"]["response"]
+                ["response"]
+                .clone(),
+        ),
+    ] {
+        let delivery = BrokeredExecutionDelivery {
+            request_id: RequestId::new(),
+            outcome,
+        };
+        let frame: Value = serde_json::from_str(
+            codec
+                .brokered_checkpoint_result_frame("private-checkpoint-error", &delivery)
+                .unwrap()
+                .trim(),
+        )
+        .unwrap();
+        assert_eq!(frame["response"]["response"], expected);
+        assert!(frame.to_string().find("execution_id").is_none());
+    }
+}
+
+#[test]
 fn brokered_ask_user_request_is_strictly_typed() {
     let corpus = private_wire_corpus();
     let mut codec = initialized_brokered_codec();
@@ -205,6 +389,25 @@ fn brokered_ask_user_request_is_strictly_typed() {
     let malformed = br#"{"type":"control_request","request_id":"question-2","request":{"subtype":"ask_user","tool_use_id":"question-call","question":"q","options":[{"label":"x","secret":"raw"}],"allow_free_text":true,"multi_select":false}}"#;
     assert!(matches!(
         codec.decode_frame(malformed),
+        Err(CoshCoreCodecError::Malformed(_))
+    ));
+}
+
+#[test]
+fn checkpoint_request_is_strictly_typed_before_bridge_normalization() {
+    let mut codec = initialized_checkpoint_codec();
+    let request = br#"{"type":"control_request","request_id":"checkpoint-1","request":{"subtype":"can_use_tool","tool_name":"workspace_checkpoint_create","input":{},"tool_use_id":"checkpoint-call","hook_requires_approval":true}}"#;
+    assert!(matches!(
+        codec.decode_frame(request).unwrap(),
+        CoshCoreObservation::ControlRequest(CoshCoreControlRequestEnvelope {
+            request: CoshCoreControlRequest::CanUseTool { ref tool_name, ref input, .. },
+            ..
+        }) if tool_name == "workspace_checkpoint_create" && input == &serde_json::json!({})
+    ));
+
+    let unknown = br#"{"type":"control_request","request_id":"checkpoint-2","request":{"subtype":"can_use_tool","tool_name":"workspace_checkpoint_create","input":{},"tool_use_id":"checkpoint-call","hidden_authority":"forbidden"}}"#;
+    assert!(matches!(
+        codec.decode_frame(unknown),
         Err(CoshCoreCodecError::Malformed(_))
     ));
 }

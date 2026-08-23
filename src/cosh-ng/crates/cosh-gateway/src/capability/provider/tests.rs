@@ -42,7 +42,6 @@ fn task_only_instance_rejects_a_requested_checkpoint_provider() {
     )
     .expect_err("an installed provider is not authority for a Task-only instance");
 
-    // The narrower sealed-set mismatch is reported before the withheld decision.
     assert_eq!(
         error,
         SealedProviderAdmissionError::ProviderSet(
@@ -51,23 +50,19 @@ fn task_only_instance_rejects_a_requested_checkpoint_provider() {
     );
 }
 
-/// The checkpoint provider is withheld even for the profile that seals it.
-///
-/// ws-ckpt has no identity-only checkpoint request, so a checkpoint-create permit
-/// could cause workspace registration. Admission is refused at this boundary
-/// rather than letting an adapter attempt to bound an effect it cannot undo.
 #[test]
-fn checkpoint_provider_admission_is_withheld_until_requests_are_identity_only() {
-    let error = SealedCapabilityProviderRegistry::admit(
+fn checkpoint_profile_admits_only_its_identity_only_provider() {
+    let registry = SealedCapabilityProviderRegistry::admit(
         GatewayCapabilityProfile::workspace_checkpoint_v1(),
         &[CapabilityProviderId::WsCkpt],
     )
-    .expect_err("checkpoint side-effect authority is not granted yet");
+    .expect("C0 guarded requests make checkpoint admission identity-only");
 
     assert_eq!(
-        error,
-        SealedProviderAdmissionError::CheckpointProviderWithheld
+        registry.profile().id(),
+        GatewayCapabilityProfileId::WorkspaceCheckpointV1
     );
+    assert_eq!(registry.providers(), [CapabilityProviderId::WsCkpt]);
 }
 
 #[test]
@@ -86,22 +81,14 @@ fn checkpoint_instance_rejects_a_missing_provider() {
     );
 }
 
-/// No profile and no requested set yields side-effect authority.
-///
-/// This enumerates every reachable admission outcome. No checkpoint execution
-/// target exists in this crate, so there is no other path to cover.
 #[test]
-fn no_instance_can_obtain_checkpoint_side_effect_authority() {
+fn every_profile_admits_exactly_its_sealed_provider_set() {
     for (profile, sealed) in profiles() {
         for requested in [&[][..], &[CapabilityProviderId::WsCkpt][..]] {
             match SealedCapabilityProviderRegistry::admit(profile, requested) {
                 Ok(registry) => {
-                    assert_eq!(profile.id(), GatewayCapabilityProfileId::TaskOnlyV1);
-                    assert_eq!(registry.providers(), []);
-                }
-                Err(SealedProviderAdmissionError::CheckpointProviderWithheld) => {
-                    assert_eq!(sealed, [CapabilityProviderId::WsCkpt]);
-                    assert_eq!(requested, [CapabilityProviderId::WsCkpt]);
+                    assert_eq!(requested, sealed);
+                    assert_eq!(registry.providers(), sealed);
                 }
                 Err(SealedProviderAdmissionError::ProviderSet(_)) => {
                     assert_ne!(requested, sealed);

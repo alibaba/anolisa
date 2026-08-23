@@ -1,4 +1,67 @@
 impl CoshCoreBridge {
+    fn acknowledge_brokered_request(
+        &mut self,
+        acknowledgement: cosh_gateway_contracts::runtime::BrokeredRequestAcknowledgement,
+    ) -> Result<(), AgentRuntimePortError> {
+        if self.config.execution_profile != CoshCoreExecutionProfile::GatewayBrokeredCheckpointV1 {
+            return Err(AgentRuntimePortError::Unsupported {
+                operation: "brokered acknowledgement",
+            });
+        }
+        self.require_state(BridgeState::PromptActive, "acknowledge_brokered_request")?;
+        let pending = self
+            .pending_brokered
+            .as_ref()
+            .ok_or(AgentRuntimePortError::IdentityMismatch)?;
+        if pending.request_id != acknowledgement.request_id || pending.acknowledged {
+            return Err(AgentRuntimePortError::IdentityMismatch);
+        }
+        let frame = self
+            .codec
+            .brokered_acknowledgement_frame(&pending.private_request_id)
+            .map_err(|_| AgentRuntimePortError::Protocol)?;
+        if self.supervisor.write_frame(&frame).is_err() {
+            self.fail_transport("core_brokered_acknowledgement_write_failed");
+            return Err(AgentRuntimePortError::Transport);
+        }
+        self.pending_brokered
+            .as_mut()
+            .ok_or(AgentRuntimePortError::IdentityMismatch)?
+            .acknowledged = true;
+        Ok(())
+    }
+
+    fn deliver_brokered_result(
+        &mut self,
+        delivery: BrokeredExecutionDelivery,
+    ) -> Result<(), AgentRuntimePortError> {
+        if self.config.execution_profile != CoshCoreExecutionProfile::GatewayBrokeredCheckpointV1 {
+            return Err(AgentRuntimePortError::Unsupported {
+                operation: "brokered result delivery",
+            });
+        }
+        self.require_state(BridgeState::PromptActive, "deliver_brokered_result")?;
+        let pending = self
+            .pending_brokered
+            .as_ref()
+            .ok_or(AgentRuntimePortError::IdentityMismatch)?;
+        if pending.request_id != delivery.request_id || !pending.acknowledged {
+            return Err(AgentRuntimePortError::IdentityMismatch);
+        }
+        validate_checkpoint_delivery(&pending.operation, &delivery)?;
+        let private_request_id = pending.private_request_id.clone();
+        let frame = self
+            .codec
+            .brokered_checkpoint_result_frame(&private_request_id, &delivery)
+            .map_err(|_| AgentRuntimePortError::Protocol)?;
+        if self.supervisor.write_frame(&frame).is_err() {
+            self.fail_transport("core_brokered_result_write_failed");
+            return Err(AgentRuntimePortError::Transport);
+        }
+        self.pending_brokered = None;
+        Ok(())
+    }
+
     fn resolve_input(
         &mut self,
         request_id: InputRequestId,
@@ -81,13 +144,27 @@ impl CoshCoreBridge {
                     return Err(AgentRuntimePortError::Protocol);
                 }
                 let tool_use_id = match self.tool_ids.entry(id) {
-                    Entry::Vacant(entry) => entry.insert(ToolUseId::new()).clone(),
+                    Entry::Vacant(entry) => {
+                        let observed = entry.insert(ObservedToolUse {
+                            tool_use_id: ToolUseId::new(),
+                            name: name.clone(),
+                        });
+                        observed.tool_use_id.clone()
+                    }
                     Entry::Occupied(_) => return Err(AgentRuntimePortError::Protocol),
                 };
                 let turn_id = self
                     .active_turn
                     .clone()
                     .ok_or(AgentRuntimePortError::Protocol)?;
+                let authority = if self.config.execution_profile
+                    == CoshCoreExecutionProfile::GatewayBrokeredCheckpointV1
+                    && name.as_str() == "workspace_checkpoint_create"
+                {
+                    ExecutionAuthority::CoshBrokered
+                } else {
+                    ExecutionAuthority::ProviderNativeObserved
+                };
                 Ok(Some(
                     self.event(AgentRuntimeEvent::ToolInvocationUpdated {
                         snapshot: ToolInvocationSnapshot {
@@ -100,7 +177,7 @@ impl CoshCoreBridge {
                                     .map_err(|_| AgentRuntimePortError::Protocol)?,
                             },
                             status: ToolInvocationStatus::Pending,
-                            authority: ExecutionAuthority::ProviderNativeObserved,
+                            authority,
                         },
                     }),
                 ))
@@ -296,4 +373,18 @@ impl CoshCoreBridge {
             Err(AgentRuntimePortError::Deadline { operation })
         }
     }
+}
+
+fn validate_checkpoint_delivery(
+    operation: &BrokeredOperation,
+    delivery: &BrokeredExecutionDelivery,
+) -> Result<(), AgentRuntimePortError> {
+    let BrokeredOperation::WorkspaceCheckpointCreateV1(operation) = operation;
+    if let BrokeredExecutionOutcome::Succeeded { result, .. } = &delivery.outcome {
+        let BrokeredOperationResult::WorkspaceCheckpointCreateV1(result) = result;
+        if result.checkpoint_id != operation.checkpoint_id {
+            return Err(AgentRuntimePortError::IdentityMismatch);
+        }
+    }
+    Ok(())
 }

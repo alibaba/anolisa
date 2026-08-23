@@ -23,6 +23,11 @@ pub struct BrokeredApprovalPlan {
     pub approval: ApprovalRequest,
     /// Digest produced by a trusted target resolver, never by the scheduler.
     pub target_identity_digest: Digest,
+    /// Provider-owned admission binding required to reconcile a started effect.
+    ///
+    /// The value is opaque to Gateway storage and is never exposed to the
+    /// Runtime. Concrete drivers must version and validate their own encoding.
+    pub provider_binding: Option<BoundedOpaque>,
 }
 
 /// Trusted input for resolving and optionally executing one brokered request.
@@ -41,6 +46,14 @@ pub struct BrokeredResolutionContext<'a> {
     pub decision: ApprovalDecision,
     /// Resolution timestamp.
     pub now_ms: u64,
+}
+
+/// Exact durable inputs available when reconciling a started external effect.
+pub struct BrokeredRecoveryContext<'a> {
+    /// Started execution whose one-shot authority was already consumed.
+    pub execution: &'a crate::storage::ExecutionRecord,
+    /// Original request, operation, and provider-owned binding.
+    pub request: &'a BrokeredRequestRecord,
 }
 
 /// Durable authority backing one terminal brokered Runtime result.
@@ -93,6 +106,18 @@ pub trait BrokeredExecutionDriver: Send {
         store: &mut SqliteTaskStore,
         context: BrokeredResolutionContext<'_>,
     ) -> Result<BrokeredResolution, ContractError>;
+
+    /// Queries exact provider evidence after ownership of a started effect was lost.
+    ///
+    /// The default is deliberately indeterminate. Implementations may return a
+    /// conclusive outcome only from evidence bound to the original durable
+    /// request; this method must never replay the external operation.
+    fn reconcile_started(
+        &mut self,
+        _context: BrokeredRecoveryContext<'_>,
+    ) -> crate::capability::ExecutionTargetOutcome {
+        crate::capability::ExecutionTargetOutcome::Unknown { safe_detail: None }
+    }
 }
 
 pub(super) struct RejectingBrokeredExecutionDriver;

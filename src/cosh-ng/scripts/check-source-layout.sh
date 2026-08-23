@@ -43,7 +43,8 @@ if [[ -f "$waiver_file" ]]; then
 fi
 
 mapfile -d '' production_files < <(
-  find crates/cosh-gateway/src crates/cosh-gateway-contracts/src \
+  find crates/cosh-gateway/src crates/cosh-gateway-app/src \
+    crates/cosh-gateway-contracts/src \
     -type f -name '*.rs' \
     ! -path '*/tests/*' \
     ! -name 'tests.rs' \
@@ -52,7 +53,8 @@ mapfile -d '' production_files < <(
 )
 
 mapfile -d '' source_symlinks < <(
-  find crates/cosh-gateway/src crates/cosh-gateway-contracts/src \
+  find crates/cosh-gateway/src crates/cosh-gateway-app/src \
+    crates/cosh-gateway-contracts/src \
     -type l -name '*.rs' -print0
 )
 

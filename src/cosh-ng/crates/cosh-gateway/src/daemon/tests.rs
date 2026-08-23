@@ -1221,11 +1221,17 @@ fn daemon_admission_accepts_only_the_exact_brokered_core_selector() {
     let admitted = brokered_core_runtime();
     request.runtime = admitted.clone();
 
-    assert!(supported_daemon_runtime(&admitted));
+    assert!(supported_daemon_runtime(
+        GatewayCapabilityProfile::task_only_v1(),
+        &admitted
+    ));
     assert!(handler::validate_submission_admission(&request, &request.target, &admitted).is_ok());
 
     request.runtime = acp_runtime();
-    assert!(!supported_daemon_runtime(&request.runtime));
+    assert!(!supported_daemon_runtime(
+        GatewayCapabilityProfile::task_only_v1(),
+        &request.runtime
+    ));
     assert!(matches!(
         handler::validate_submission_admission(&request, &request.target, &admitted),
         Err(GatewayDaemonError::Protocol(_))

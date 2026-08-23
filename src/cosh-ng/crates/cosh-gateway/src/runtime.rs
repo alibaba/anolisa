@@ -54,7 +54,7 @@ pub use installed_acp_factory::{
 };
 pub use installed_core_factory::{
     InstalledBrokeredCoreRuntimePortFactory, ResolvedBrokeredCoreRuntimeProfile,
-    GATEWAY_BROKERED_CORE_RUNTIME_PROFILE,
+    GATEWAY_BROKERED_CORE_RUNTIME_PROFILE, GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE,
 };
 pub use pinned_local::{PinnedDirectory, PinnedExecutable, PinnedFileIdentity};
 pub use port::{AgentRuntimePort, AgentRuntimePortError};

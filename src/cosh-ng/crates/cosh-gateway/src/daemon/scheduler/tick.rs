@@ -15,9 +15,12 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
         }
 
         let lease_deadline = deadline(now_ms, self.config.lease_duration_ms)?;
-        if let Some(view) =
-            self.coordinator
-                .recover_expired_active_run(&self.worker_id, now_ms, lease_deadline)?
+        if let Some(view) = self.coordinator.recover_expired_active_run(
+            self.brokered_driver.as_mut(),
+            &self.worker_id,
+            now_ms,
+            lease_deadline,
+        )?
         {
             return Ok(SchedulerTick::Settled(view));
         }
