@@ -110,6 +110,10 @@ fn report_gateway_result(reporter: &Reporter, result: GatewayResult) -> Result<(
             "task",
             serde_json::to_value(task).map_err(|error| CliError::Daemon(error.to_string()))?,
         ),
+        GatewayResult::Tasks(tasks) => reporter.event(
+            "tasks",
+            serde_json::to_value(tasks).map_err(|error| CliError::Daemon(error.to_string()))?,
+        ),
         GatewayResult::Events(events) => reporter.event(
             "task_events",
             serde_json::to_value(events).map_err(|error| CliError::Daemon(error.to_string()))?,

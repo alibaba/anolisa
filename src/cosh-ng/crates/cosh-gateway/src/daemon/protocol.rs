@@ -96,6 +96,22 @@ pub struct ResolveApproval {
     pub decision: ApprovalDecision,
 }
 
+/// Approval resolution whose Task binding is checked before mutation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveApprovalForTask {
+    /// Correlates one transport request and response.
+    pub request_id: RequestId,
+    /// Caller-stable replay key within the authenticated actor namespace.
+    pub idempotency_key: IdempotencyKey,
+    /// Task that must own the approval.
+    pub task_id: TaskId,
+    /// Durable approval awaiting this decision.
+    pub approval_id: ApprovalId,
+    /// Human decision dispatched once to the bound operation.
+    pub decision: ApprovalDecision,
+}
+
 /// Safe Task projection returned to an authorized local client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskView {
@@ -136,6 +152,13 @@ pub struct TaskEventPage {
     pub has_more: bool,
 }
 
+/// Bounded newest-first page of Tasks owned by the authenticated local actor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskListPage {
+    /// Authorized Task projections ordered by durable update time, then ID.
+    pub tasks: Vec<TaskView>,
+}
+
 /// Successful local Gateway response payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", content = "data", rename_all = "snake_case")]
@@ -144,6 +167,8 @@ pub enum GatewayResult {
     Pong,
     /// Current authorized Task projection.
     Task(TaskView),
+    /// Bounded authorized Task projections.
+    Tasks(TaskListPage),
     /// Bounded immutable event page.
     Events(TaskEventPage),
     /// Projection after a cancellation commit or replay.
@@ -214,6 +239,11 @@ enum GatewayRequest {
         request_id: RequestId,
         task_id: TaskId,
     },
+    List {
+        api_version: String,
+        request_id: RequestId,
+        limit: u16,
+    },
     Events {
         api_version: String,
         request_id: RequestId,
@@ -230,6 +260,11 @@ enum GatewayRequest {
         api_version: String,
         #[serde(flatten)]
         request: ResolveApproval,
+    },
+    ResolveApprovalForTask {
+        api_version: String,
+        #[serde(flatten)]
+        request: ResolveApprovalForTask,
     },
     Retry {
         api_version: String,
@@ -248,11 +283,13 @@ impl GatewayRequest {
         match self {
             Self::Ping { request_id, .. }
             | Self::Get { request_id, .. }
+            | Self::List { request_id, .. }
             | Self::Events { request_id, .. } => request_id,
             Self::Submit { request, .. } => &request.request_id,
             Self::Cancel { request, .. } => &request.request_id,
             Self::Retry { request, .. } => &request.request_id,
             Self::ResolveApproval { request, .. } => &request.request_id,
+            Self::ResolveApprovalForTask { request, .. } => &request.request_id,
             Self::AppendInput { request, .. } => &request.request_id,
         }
     }
@@ -262,11 +299,13 @@ impl GatewayRequest {
             Self::Ping { api_version, .. }
             | Self::Submit { api_version, .. }
             | Self::Get { api_version, .. }
+            | Self::List { api_version, .. }
             | Self::Events { api_version, .. }
             | Self::Cancel { api_version, .. }
             | Self::Retry { api_version, .. }
             | Self::AppendInput { api_version, .. }
             | Self::ResolveApproval { api_version, .. } => api_version,
+            Self::ResolveApprovalForTask { api_version, .. } => api_version,
         }
     }
 }

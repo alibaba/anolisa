@@ -129,12 +129,46 @@ remaining arguments unchanged.
   durable Task, Runtime, and Outbox state supports inspection, cancellation, and
   explicit retry without replaying an unknown side effect.
 - The task-only profile intentionally exposes no checkpoint, write, Shell,
-  slash-command, Web, channel, or remote capability. Interactive slash commands
+  slash-command, channel, or remote capability. Interactive slash commands
   remain owned by `cosh-shell`; they are not Gateway Task commands. `SIGINT` and
   `SIGTERM` initiate bounded scheduler and Runtime shutdown, and the Gateway
   listens only on its local Unix socket. Repository Fake-Adapter coverage is
   automated; real Codex/Claude Adapter checks and manual Terminal acceptance
   remain separate installation-specific gates.
+- A local single-user Web continuation beta presents the same Task API through
+  a loopback-only HTTP listener. It never reads SQLite, Outbox, ACP, or an
+  execution target directly. Create a private Bearer token outside the admitted
+  workspace while the Gateway service is running:
+
+  ```bash
+  workspace="$(pwd -P)"
+  web_state="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/cosh-web"
+  install -d -m 0700 "$web_state"
+  umask 077
+  openssl rand -hex 32 >"$web_state/token"
+  cosh agent web --socket "$gateway_socket" \
+    --workspace "$workspace" --capability-profile task-only-v1 \
+    --token-file "$web_state/token"
+  ```
+
+  Open the printed `http://127.0.0.1:8765/` URL and paste the token. The token
+  stays in page memory and is sent only in the Authorization header; query and
+  cookie tokens are rejected. The page lists the current OS actor's Tasks,
+  polls immutable events after a cursor, answers questions, resolves approvals
+  bound to that exact Task, and cancels or retries Runs with fresh idempotency
+  keys.
+
+  This is a local beta, not the full Phase 2 multi-client Web design. It has no
+  TLS, OIDC, cookies, roles, interaction leases, SSE, delivery receipts, or
+  public listener. Do not bind it to a LAN address. From another machine, use
+  `ssh -L 8765:127.0.0.1:8765 user@host` and still open the local loopback URL;
+  protect the token separately and do not put it in a URL.
+  Never place the token below the admitted workspace: an Agent with approved
+  read or command access there could capture it and take over the Web session.
+  The beta is unavailable for the development profile. Its workspace and
+  profile flags are operator declarations, not daemon attestation. Development
+  tools require daemon-attested binding and a sandbox that cannot read the
+  token or Web state before this presentation adapter can be used with them.
 - [Structured OS CLI](cli/overview.md) — command domains and safe automation patterns.
 - [Output format](output-format.md) — the `CoshResponse<T>` success and error envelope.
 - [Headless mode](core/headless-mode.md) — JSONL integration for other frontends.

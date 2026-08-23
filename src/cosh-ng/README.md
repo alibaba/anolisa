@@ -132,8 +132,9 @@ only inside the packaged systemd service, which owns the complete Runtime
 cgroup after a Gateway hard crash. The `gateway-brokered-v1` Core profile is
 intentionally task-only: its runtime inventory contains only the side-effect-free
 `ask_user_question` capability. It does not expose checkpoint, write, Shell,
-slash-command, Web, or remote capabilities, and this profile has no approvable
-side effect.
+slash-command, or remote capabilities, and this profile has no approvable side
+effect. A separate loopback-only Web beta can present the same authorized Task
+API without becoming a Runtime capability.
 
 Configure the workspace and start the account-named Gateway instance:
 
@@ -187,6 +188,32 @@ those direct ACP commands are not governed by the durable Task Plane.
 The Task Plane has no checkpoint or ws-ckpt dependency. The existing
 `cosh-cli checkpoint` commands remain a separate system-operations path and do
 not add checkpoint capability to this Gateway profile.
+
+To continue local Tasks in a browser, create a private token file outside the
+admitted workspace and start the presentation adapter in another Terminal:
+
+```bash
+workspace="$(pwd -P)"
+web_state="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/cosh-web"
+install -d -m 0700 "$web_state"
+umask 077
+openssl rand -hex 32 >"$web_state/token"
+cosh agent web --socket "$gateway_socket" \
+  --workspace "$workspace" --capability-profile task-only-v1 \
+  --token-file "$web_state/token"
+```
+
+Open the printed loopback URL and paste the token. The beta lists Tasks, polls
+events from a bounded cursor, answers questions, resolves Task-bound approvals,
+and cancels or retries a Run. It has no TLS, OIDC, multi-user roles, public bind,
+or direct database access. For another computer, keep the listener on loopback
+and use SSH port forwarding; never expose the port directly.
+Never place the token below the admitted workspace: an Agent with approved read
+or command access there could capture it and take over the Web session.
+The beta is unavailable for the development profile. The workspace and profile
+flags are operator declarations, not daemon attestation; before development
+tools are enabled, the daemon must attest both values and its command sandbox
+must make the token and Web state unreadable.
 
 `SIGINT` and `SIGTERM` trigger bounded scheduler and Runtime shutdown before the
 daemon exits. The daemon remains Unix-only and does not open a remote listener.

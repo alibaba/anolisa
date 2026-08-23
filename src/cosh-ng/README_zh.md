@@ -122,7 +122,8 @@ Package Gateway 提供一个受 containment 保护的本地 Task Plane。它只�
 systemd service 中调度 Task；即使 Gateway hard crash，该 service 仍负责完整 Runtime
 cgroup。`gateway-brokered-v1` Core profile 有意保持为 task-only：Runtime inventory
 只有无副作用的 `ask_user_question` capability。该 profile 不提供 checkpoint、write、Shell、
-slash command、Web 或 remote capability，也没有需要 approval 的 side effect。
+slash command 或 remote capability，也没有需要 approval 的 side effect。单独的 loopback-only
+Web beta 可以展示同一套 authorized Task API，但它不是 Runtime capability。
 
 配置 workspace 并启动按 account 命名的 Gateway instance。
 
@@ -168,6 +169,30 @@ canonical workspace，持久化 Runtime binding，并由 scheduler 投递 durabl
 ACP command 不受 durable Task Plane 治理。
 Task Plane 不依赖 checkpoint 或 ws-ckpt。现有的 `cosh-cli checkpoint` 命令仍是独立的
 system-operations 路径，不会为这个 Gateway profile 增加 checkpoint capability。
+
+如果想在 Browser 中继续本机 Task，请在 admitted workspace 之外创建 private token file，
+并在另一个 Terminal 启动 presentation adapter。
+
+```bash
+workspace="$(pwd -P)"
+web_state="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/cosh-web"
+install -d -m 0700 "$web_state"
+umask 077
+openssl rand -hex 32 >"$web_state/token"
+cosh agent web --socket "$gateway_socket" \
+  --workspace "$workspace" --capability-profile task-only-v1 \
+  --token-file "$web_state/token"
+```
+
+打开输出的 loopback URL，再粘贴 token。这个 beta 可以列出 Task、从有界 cursor 轮询 event、
+回答问题、处理绑定到 Task 的 approval，以及 cancel 或 retry Run。它不提供 TLS、OIDC、
+multi-user role、public bind，也不会直接读取 database。如果从另一台电脑使用，请保持 listener
+只绑定 loopback，并使用 SSH port forwarding，不能直接暴露端口。
+不要把 token 放在 admitted workspace 下面。拥有已批准 read 或 command access 的 Agent
+可能从那里获取 token，进而接管 Web session。
+这个 beta 不支持 development profile。Workspace 与 profile flag 是 operator declaration，
+不是 daemon attestation；启用 development tool 前，daemon 必须证明这两个值，并且 command
+sandbox 必须让 token 和 Web state 对 Runtime 不可读。
 
 `SIGINT` 与 `SIGTERM` 会在 Daemon 退出前触发有界的 scheduler 与 Runtime shutdown。Daemon
 仍然只监听 Unix socket，不开放 remote listener。

@@ -43,6 +43,7 @@ use serde_json::{json, Value};
 use thiserror::Error;
 
 mod checkpoint;
+mod web;
 
 #[path = "cosh_gateway/acp_command.rs"]
 mod acp_command;
@@ -61,6 +62,7 @@ use control::task_only_target;
 use control::{admin, task};
 use input::{read_intent, read_prompt, terminal_safe};
 use serve::{serve, ServeArgs};
+use web::{web, WebArgs};
 
 const MAX_ACP_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_PROMPT_BYTES: usize = 256 * 1024;
@@ -98,6 +100,8 @@ enum Command {
     Task(TaskArgs),
     /// Run local read-only Gateway administration commands.
     Admin(AdminArgs),
+    /// Open a loopback-only browser view for durable local Tasks.
+    Web(WebArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -370,6 +374,8 @@ enum CliError {
     Containment(String),
     #[error("Gateway store inspection failed: {0}")]
     StoreInspection(String),
+    #[error("local Web beta failed: {0}")]
+    Web(String),
     #[error("ACP Agent rejected or did not complete the prompt")]
     Agent,
     #[error("ACP operation was cancelled")]
@@ -393,6 +399,7 @@ impl CliError {
             | Self::Daemon(_)
             | Self::Containment(_)
             | Self::StoreInspection(_)
+            | Self::Web(_)
             | Self::Signal(_)
             | Self::Permission(_) => EXIT_RUNTIME,
             Self::Agent => EXIT_AGENT,
@@ -418,6 +425,7 @@ impl CliError {
             Self::Daemon(_) => "daemon_failed",
             Self::Containment(_) => "runtime_containment_unverified",
             Self::StoreInspection(_) => "store_inspection_failed",
+            Self::Web(_) => "web_failed",
             Self::Agent => "agent_incomplete",
             Self::Cancelled => "cancelled",
         }
@@ -463,6 +471,11 @@ impl Reporter {
             "doctor_ok" => println!("ACP adapter is ready"),
             "terminal" => {}
             "daemon_ready" => eprintln!("COSH Gateway daemon is ready"),
+            "web_ready" => {
+                if let Some(url) = fields.get("url").and_then(Value::as_str) {
+                    println!("COSH local Task Web beta: {url}");
+                }
+            }
             "task_submitted" => print_task_id(fields),
             "task" => println!("{}", human_json(fields)),
             "task_events" => println!("{}", human_json(fields)),
@@ -501,6 +514,7 @@ fn main() -> ExitCode {
         Command::Serve(args) => args.output,
         Command::Task(args) => args.output,
         Command::Admin(args) => args.output,
+        Command::Web(args) => args.output,
     };
     let reporter = Reporter { output };
     let result = match cli.command {
@@ -509,6 +523,7 @@ fn main() -> ExitCode {
         Command::Serve(args) => serve(args, &reporter),
         Command::Task(args) => task(args, &reporter),
         Command::Admin(args) => admin(args, &reporter),
+        Command::Web(args) => web(args, &reporter),
     };
     match result {
         Ok(code) => ExitCode::from(code),
