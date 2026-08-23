@@ -5,7 +5,8 @@ use cosh_gateway_contracts::ids::{ActorId, TaskId};
 
 use super::{
     AppendTaskInput, CancelTask, GatewayDaemonError, GatewayRequest, GatewayResult,
-    ResolveApproval, RetryTask, SubmitTask, TaskEventPage, TaskView, GATEWAY_API_VERSION,
+    ResolveApproval, ResolveApprovalForTask, RetryTask, SubmitTask, TaskEventPage, TaskListPage,
+    TaskView, GATEWAY_API_VERSION,
 };
 
 /// Mutating Task operations available to the transport handler.
@@ -38,6 +39,12 @@ pub(super) trait TaskCommandPort {
         request: ResolveApproval,
     ) -> Result<TaskView, GatewayDaemonError>;
 
+    fn resolve_approval_for_task(
+        &mut self,
+        actor_id: &ActorId,
+        request: ResolveApprovalForTask,
+    ) -> Result<TaskView, GatewayDaemonError>;
+
     fn append_input(
         &mut self,
         actor_id: &ActorId,
@@ -47,6 +54,8 @@ pub(super) trait TaskCommandPort {
 
 /// Read-only Task projections available to the transport handler.
 pub(super) trait TaskProjectionPort {
+    fn list(&self, actor_id: &ActorId, limit: u16) -> Result<TaskListPage, GatewayDaemonError>;
+
     fn get(&self, actor_id: &ActorId, task_id: &TaskId) -> Result<TaskView, GatewayDaemonError>;
 
     fn events(
@@ -91,6 +100,9 @@ where
         GatewayRequest::Get { task_id, .. } => ports
             .get(&actor.actor_id, &task_id)
             .map(GatewayResult::Task),
+        GatewayRequest::List { limit, .. } => {
+            ports.list(&actor.actor_id, limit).map(GatewayResult::Tasks)
+        }
         GatewayRequest::Events {
             task_id,
             after_revision,
@@ -113,6 +125,9 @@ where
             .map(GatewayResult::Retried),
         GatewayRequest::ResolveApproval { request, .. } => ports
             .resolve_approval(&actor.actor_id, request)
+            .map(GatewayResult::ApprovalResolved),
+        GatewayRequest::ResolveApprovalForTask { request, .. } => ports
+            .resolve_approval_for_task(&actor.actor_id, request)
             .map(GatewayResult::ApprovalResolved),
         GatewayRequest::AppendInput { request, .. } => ports
             .append_input(&actor.actor_id, request)

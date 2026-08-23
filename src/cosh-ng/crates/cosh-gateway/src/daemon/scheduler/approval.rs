@@ -1,4 +1,21 @@
 impl<F: RuntimeFactory> TaskScheduler<F> {
+    /// Resolves an approval only when its Task binding matches the caller.
+    pub fn resolve_approval_for_task(
+        &mut self,
+        actor_id: &ActorId,
+        idempotency_key: IdempotencyKey,
+        task_id: &TaskId,
+        approval_id: &ApprovalId,
+        decision: ApprovalDecision,
+        now_ms: u64,
+    ) -> Result<SchedulerTick, GatewayDaemonError> {
+        let approval = self.coordinator.store.load_approval_record(approval_id)?;
+        if approval.actor_id != *actor_id || approval.task_id != *task_id {
+            return Err(GatewayDaemonError::Unauthorized);
+        }
+        self.resolve_approval(actor_id, idempotency_key, approval_id, decision, now_ms)
+    }
+
     /// Resolves the only provider-native approval currently held by this worker.
     pub fn resolve_approval(
         &mut self,

@@ -630,6 +630,19 @@ fn provider_approval_is_dispatched_once_and_delivered_replay_is_read_only() {
         .saturating_add(1);
 
     assert!(matches!(
+        scheduler.resolve_approval_for_task(
+            &actor,
+            IdempotencyKey::new("wrong-task").unwrap(),
+            &TaskId::new(),
+            &approval_id,
+            ApprovalDecision::Approve,
+            decision_at,
+        ),
+        Err(GatewayDaemonError::Unauthorized)
+    ));
+    assert!(decisions.lock().unwrap().is_empty());
+
+    assert!(matches!(
         scheduler.resolve_approval(
             &ActorId::new(),
             IdempotencyKey::new("wrong-actor").unwrap(),

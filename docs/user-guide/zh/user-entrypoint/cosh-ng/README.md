@@ -116,11 +116,40 @@ Gateway binary；此时请替换为 `cosh-gateway doctor`、`cosh-gateway run` �
   `resolve-approval` 仍属于通用 API，但这个 profile 没有需要 approval 的 side effect，因此
   不会产生 approval flow。Idempotency key 让客户端在 I/O 不确定后可以安全重试；durable Task、
   Runtime 和 Outbox state 支持查看、取消和显式 retry，不会重放未知的 side effect。
-- Task-only profile 有意不暴露 checkpoint、write、Shell、slash command、Web、channel 或
+- Task-only profile 有意不暴露 checkpoint、write、Shell、slash command、channel 或
   remote capability。交互式 slash command 仍由 `cosh-shell` 负责，不是 Gateway Task command。
   `SIGINT` 与 `SIGTERM` 会触发有界的 scheduler 与 Runtime shutdown，Gateway 只监听本地 Unix
   socket。仓库自动执行 Fake Adapter conformance；真实 Codex/Claude Adapter 检查与人工 Terminal
   验收仍是独立的、与具体安装相关的 gate。
+- 本机单用户 Web continuation beta 通过 loopback-only HTTP listener 展示同一套 Task API。
+  它不会直接读取 SQLite、Outbox、ACP 或 execution target。Gateway service 运行后，在
+  admitted workspace 之外创建 private Bearer token 并启动 Web。
+
+  ```bash
+  workspace="$(pwd -P)"
+  web_state="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/cosh-web"
+  install -d -m 0700 "$web_state"
+  umask 077
+  openssl rand -hex 32 >"$web_state/token"
+  cosh agent web --socket "$gateway_socket" \
+    --workspace "$workspace" --capability-profile task-only-v1 \
+    --token-file "$web_state/token"
+  ```
+
+  打开输出的 `http://127.0.0.1:8765/` URL，再把 token 粘贴到页面。Token 只保留在页面
+  memory 中，并且只通过 Authorization header 发送；query 与 cookie 中的 token 会被拒绝。
+  页面可以列出当前 OS actor 的 Task、从 cursor 之后轮询 immutable event、回答问题、处理绑定
+  到该 Task 的 approval，以及使用新的 idempotency key cancel 或 retry Run。
+
+  这是 local beta，不是完整的 Phase 2 multi-client Web design。它没有 TLS、OIDC、cookie、role、
+  interaction lease、SSE、delivery receipt 或 public listener。不要绑定 LAN 地址。从另一台机器
+  访问时，使用 `ssh -L 8765:127.0.0.1:8765 user@host`，仍然打开本机 loopback URL；token
+  需要单独保护，不能放入 URL。
+  不要把 token 放在 admitted workspace 下面。拥有已批准 read 或 command access 的 Agent
+  可能从那里获取 token，进而接管 Web session。
+  这个 beta 不支持 development profile。Workspace 与 profile flag 是 operator declaration，
+  不是 daemon attestation。Development tool 必须先具备 daemon-attested binding，并由 sandbox
+  保证 Runtime 无法读取 token 或 Web state，才能接入这个 presentation adapter。
 - [结构化 OS CLI](cli/overview.md)：命令域和安全的自动化方式。
 - [输出格式](output-format.md)：`CoshResponse<T>` 成功和失败响应封装。
 - [无界面模式](core/headless-mode.md)：供其他前端使用的 JSONL 集成。

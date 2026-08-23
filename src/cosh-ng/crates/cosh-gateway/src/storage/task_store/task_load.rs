@@ -1,4 +1,41 @@
 impl SqliteTaskStore {
+    /// Loads a bounded newest-first list for one authenticated owner.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid bounds or any corrupt/divergent Task projection.
+    pub fn load_tasks_for_owner(
+        &self,
+        actor_id: &ActorId,
+        limit: u16,
+    ) -> Result<Vec<TaskAggregate>, StoreError> {
+        if limit == 0 || limit > 64 {
+            return Err(invalid("Task list limit must be between 1 and 64"));
+        }
+        let mut statement = self.connection().prepare(
+            "SELECT task_id FROM tasks WHERE owner_actor_id = ?1
+             ORDER BY updated_at_ms DESC, task_id DESC LIMIT ?2",
+        )?;
+        let ids = statement
+            .query_map(params![actor_id.as_str(), i64::from(limit)], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.into_iter()
+            .map(|id| {
+                let task_id = TaskId::parse(&id)
+                    .map_err(|error| corrupt(&format!("Task row has invalid identity: {error}")))?;
+                let task = load_verified_projection(self.connection(), &task_id)?
+                    .ok_or_else(|| corrupt("Task list row has no projection"))?;
+                if task.owner_actor_id() != actor_id {
+                    return Err(corrupt(
+                        "Task list owner row diverges from its immutable event owner",
+                    ));
+                }
+                Ok(task)
+            })
+            .collect()
+    }
 
     /// Loads the latest durable Task projection.
     ///

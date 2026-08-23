@@ -130,6 +130,26 @@ impl TaskCoordinator {
         Ok(TaskView::from(&task))
     }
 
+    fn list(
+        &self,
+        actor_id: &ActorId,
+        limit: u16,
+    ) -> Result<TaskListPage, GatewayDaemonError> {
+        let tasks = self
+            .store
+            .load_tasks_for_owner(actor_id, limit)?
+            .iter()
+            .map(TaskView::from)
+            .collect::<Vec<_>>();
+        let page = TaskListPage { tasks };
+        if serde_json::to_vec(&page)?.len() > MAX_GATEWAY_FRAME_BYTES.saturating_sub(4096) {
+            return Err(GatewayDaemonError::Protocol(
+                "Task list exceeds the response byte budget".to_owned(),
+            ));
+        }
+        Ok(page)
+    }
+
     fn events(
         &self,
         actor_id: &ActorId,
@@ -445,6 +465,31 @@ impl TaskCommandPort for DaemonTaskPorts<'_> {
         }
     }
 
+    fn resolve_approval_for_task(
+        &mut self,
+        actor_id: &ActorId,
+        request: ResolveApprovalForTask,
+    ) -> Result<TaskView, GatewayDaemonError> {
+        let scheduler = self.scheduler.as_mut().ok_or_else(|| {
+            GatewayDaemonError::Protocol("Gateway scheduler is not attached".to_owned())
+        })?;
+        match scheduler.resolve_approval_for_task(
+            actor_id,
+            request.idempotency_key,
+            &request.task_id,
+            &request.approval_id,
+            request.decision,
+            now_ms()?,
+        )? {
+            SchedulerTick::Started(view)
+            | SchedulerTick::Progressed(view)
+            | SchedulerTick::Settled(view) => Ok(view),
+            SchedulerTick::Idle => Err(GatewayDaemonError::Protocol(
+                "approval resolution made no durable progress".to_owned(),
+            )),
+        }
+    }
+
     fn append_input(
         &mut self,
         actor_id: &ActorId,
@@ -473,6 +518,14 @@ impl TaskCommandPort for DaemonTaskPorts<'_> {
 }
 
 impl TaskProjectionPort for DaemonTaskPorts<'_> {
+    fn list(
+        &self,
+        actor_id: &ActorId,
+        limit: u16,
+    ) -> Result<TaskListPage, GatewayDaemonError> {
+        self.coordinator.list(actor_id, limit)
+    }
+
     fn get(&self, actor_id: &ActorId, task_id: &TaskId) -> Result<TaskView, GatewayDaemonError> {
         self.coordinator.get(actor_id, task_id)
     }

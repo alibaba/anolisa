@@ -287,6 +287,24 @@ fn gateway_wire_v1_matches_frozen_golden_corpus() {
 }
 
 #[test]
+fn task_bound_approval_is_an_append_only_v1_command() {
+    let request = GatewayRequest::ResolveApprovalForTask {
+        api_version: GATEWAY_API_VERSION.to_owned(),
+        request: ResolveApprovalForTask {
+            request_id: RequestId::new(),
+            idempotency_key: IdempotencyKey::new("bound-approval").unwrap(),
+            task_id: TaskId::new(),
+            approval_id: ApprovalId::new(),
+            decision: ApprovalDecision::Approve,
+        },
+    };
+    let value = serde_json::to_value(request).unwrap();
+    assert_eq!(value["command"], "resolve_approval_for_task");
+    assert_eq!(value["api_version"], "cosh.gateway.v1");
+    assert!(value.get("task_id").is_some());
+}
+
+#[test]
 fn stable_actor_identity_depends_on_peer_uid() {
     let installation = InstallationId::new();
     let first = actor_id_for_uid(&installation, 1000).unwrap();
@@ -308,12 +326,48 @@ fn coordinator_replays_submit_and_hides_foreign_tasks() {
     let first = coordinator.submit(&owner, request.clone()).unwrap();
     let replay = coordinator.submit(&owner, request).unwrap();
     assert_eq!(first, replay);
+    assert_eq!(
+        coordinator.list(&owner, 64).unwrap().tasks,
+        vec![first.clone()]
+    );
+    assert!(coordinator
+        .list(
+            &actor_id_for_uid(&coordinator.installation_id, 1001).unwrap(),
+            64,
+        )
+        .unwrap()
+        .tasks
+        .is_empty());
     assert!(matches!(
         coordinator.get(
             &actor_id_for_uid(&coordinator.installation_id, 1001).unwrap(),
             &first.task_id
         ),
         Err(GatewayDaemonError::Store(StoreError::TaskNotFound))
+    ));
+}
+
+#[test]
+fn task_list_rejects_a_row_owner_diverging_from_events() {
+    let root = private_tempdir();
+    let database_path = root.path().join("gateway.db");
+    let mut coordinator =
+        TaskCoordinator::open(&database_path, Some(InstallationId::new())).unwrap();
+    let owner = actor_id_for_uid(&coordinator.installation_id, 1000).unwrap();
+    coordinator
+        .submit(&owner, submit("list-owner-corruption"))
+        .unwrap();
+    let forged = actor_id_for_uid(&coordinator.installation_id, 1001).unwrap();
+    rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET owner_actor_id=?1",
+            rusqlite::params![forged.as_str()],
+        )
+        .unwrap();
+    assert!(matches!(
+        coordinator.list(&forged, 64),
+        Err(GatewayDaemonError::Store(StoreError::Corrupt { .. }))
     ));
 }
 
@@ -899,6 +953,11 @@ fn local_client_controls_durable_task_through_authenticated_socket() {
         panic!("replay must return a Task")
     };
     assert_eq!(replay.task_id, task.task_id);
+
+    let GatewayResult::Tasks(tasks) = client.list(RequestId::new(), 64).unwrap() else {
+        panic!("list must return authorized Tasks")
+    };
+    assert_eq!(tasks.tasks, vec![task.clone()]);
 
     let GatewayResult::Events(page) = client
         .events(RequestId::new(), task.task_id.clone(), None, 1)

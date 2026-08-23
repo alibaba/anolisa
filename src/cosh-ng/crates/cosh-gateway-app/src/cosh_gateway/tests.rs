@@ -2,6 +2,15 @@ use super::*;
 
 use super::acp_command::prompt_exit_code;
 
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn web_is_not_advertised_or_accepted_off_linux() {
+    use clap::CommandFactory;
+
+    assert!(Cli::command().find_subcommand("web").is_none());
+    assert!(Cli::try_parse_from(["cosh-gateway", "web", "--help"]).is_err());
+}
+
 #[test]
 fn prompt_stop_reasons_map_to_stable_exit_codes() {
     assert_eq!(prompt_exit_code(AcpV1StopReason::EndTurn), 0);

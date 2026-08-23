@@ -40,6 +40,19 @@ impl LocalGatewayClient {
         })
     }
 
+    /// Reads a bounded newest-first list owned by the authenticated actor.
+    pub fn list(
+        &self,
+        request_id: RequestId,
+        limit: u16,
+    ) -> Result<GatewayResult, GatewayDaemonError> {
+        self.request(GatewayRequest::List {
+            api_version: GATEWAY_API_VERSION.to_owned(),
+            request_id,
+            limit,
+        })
+    }
+
     /// Reads a bounded authorized event page.
     pub fn events(
         &self,
@@ -90,6 +103,17 @@ impl LocalGatewayClient {
         request: ResolveApproval,
     ) -> Result<GatewayResult, GatewayDaemonError> {
         self.request(GatewayRequest::ResolveApproval {
+            api_version: GATEWAY_API_VERSION.to_owned(),
+            request,
+        })
+    }
+
+    /// Resolves an approval only for its explicitly bound Task.
+    pub fn resolve_approval_for_task(
+        &self,
+        request: ResolveApprovalForTask,
+    ) -> Result<GatewayResult, GatewayDaemonError> {
+        self.request(GatewayRequest::ResolveApprovalForTask {
             api_version: GATEWAY_API_VERSION.to_owned(),
             request,
         })
