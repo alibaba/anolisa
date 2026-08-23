@@ -34,7 +34,7 @@ anolisa update all
 | `status` | 显示组件健康状态 |
 | `doctor` | 诊断问题并给出修复建议 |
 | `logs` | 查询组件日志（`--severity`，别名 `--level`） |
-| `restart` | 重启组件服务 |
+| `restart` | 重启组件服务（`--dry-run` 仅列出 unit，不执行重启） |
 | `repair` | 手工修改 RPM 后协调 ANOLISA 状态与 rpmdb |
 | `adopt` | 将已有 system RPM 记录为已采纳安装 |
 | `forget` | 仅删除状态记录，不执行包操作 |

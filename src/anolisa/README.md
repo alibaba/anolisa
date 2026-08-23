@@ -34,7 +34,7 @@ anolisa update all
 | `status` | Show component health |
 | `doctor` | Diagnose issues and suggest fixes |
 | `logs` | Query component logs (`--severity`, alias `--level`) |
-| `restart` | Restart a component service |
+| `restart` | Restart a component service (`--dry-run` lists units without dispatching) |
 | `repair` | Reconcile state after manual RPM changes |
 | `adopt` | Record an existing system RPM as adopted without default removal authority |
 | `forget` | Drop state record without package operations |
