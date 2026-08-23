@@ -32,16 +32,10 @@ impl AgentRuntimePort for CoshCoreBridge {
                 })
             }
             AgentRuntimeCommand::AcknowledgeBrokeredRequest { acknowledgement } => {
-                let _ = acknowledgement;
-                Err(AgentRuntimePortError::Unsupported {
-                    operation: "brokered acknowledgement",
-                })
+                self.acknowledge_brokered_request(acknowledgement)
             }
             AgentRuntimeCommand::DeliverBrokeredResult { delivery } => {
-                let _ = delivery;
-                Err(AgentRuntimePortError::Unsupported {
-                    operation: "brokered result delivery",
-                })
+                self.deliver_brokered_result(delivery)
             }
             AgentRuntimeCommand::ResolveInput {
                 request_id,

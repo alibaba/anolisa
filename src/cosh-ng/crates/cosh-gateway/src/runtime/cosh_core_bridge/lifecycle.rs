@@ -12,8 +12,11 @@ impl CoshCoreBridge {
         }
         match (config.execution_profile, config.brokered_context.as_ref()) {
             (CoshCoreExecutionProfile::Legacy, None) => {}
-            (CoshCoreExecutionProfile::GatewayBrokeredV1, Some(context))
-                if config.identity.actor_id.as_ref() == Some(&context.actor.actor_id) => {}
+            (
+                CoshCoreExecutionProfile::GatewayBrokeredV1
+                | CoshCoreExecutionProfile::GatewayBrokeredCheckpointV1,
+                Some(context),
+            ) if config.identity.actor_id.as_ref() == Some(&context.actor.actor_id) => {}
             _ => return Err(AgentRuntimePortError::IdentityMismatch),
         }
         let initialize_request_id = format!("init-{}", config.identity.runtime_instance_id);
@@ -23,6 +26,12 @@ impl CoshCoreBridge {
             }
             CoshCoreExecutionProfile::GatewayBrokeredV1 => {
                 CoshCoreJsonlCodec::new_gateway_brokered(
+                    initialize_request_id,
+                    config.max_frame_bytes,
+                )
+            }
+            CoshCoreExecutionProfile::GatewayBrokeredCheckpointV1 => {
+                CoshCoreJsonlCodec::new_gateway_brokered_checkpoint(
                     initialize_request_id,
                     config.max_frame_bytes,
                 )
@@ -48,6 +57,7 @@ impl CoshCoreBridge {
             prompt_deadline: None,
             terminal_delivered: false,
             pending_input: None,
+            pending_brokered: None,
         })
     }
 
@@ -191,6 +201,7 @@ impl CoshCoreBridge {
         }
         self.active_turn = None;
         self.pending_input = None;
+        self.pending_brokered = None;
         self.settle(AgentRuntimeEvent::Completed {
             turn_id,
             outcome: TurnOutcome::Cancelled,
@@ -229,11 +240,11 @@ impl CoshCoreBridge {
                 outcome: TurnOutcome::Cancelled,
             });
             self.pending_input = None;
+            self.pending_brokered = None;
         } else {
             self.state = BridgeState::Terminal;
         }
         self.shutdown_process();
         Ok(())
     }
-
 }

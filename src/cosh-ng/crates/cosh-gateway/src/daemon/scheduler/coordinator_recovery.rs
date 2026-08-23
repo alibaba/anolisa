@@ -1,6 +1,7 @@
 impl TaskCoordinator {
     fn recover_expired_active_run(
         &mut self,
+        brokered_driver: &mut dyn BrokeredExecutionDriver,
         worker_id: &BoundedOpaque,
         now_ms: u64,
         lease_expires_at_ms: u64,
@@ -72,6 +73,7 @@ impl TaskCoordinator {
             .mark_provider_dispatches_unknown_for_run(&claim.run_id, now_ms)?;
         self.store
             .mark_brokered_dispatches_unknown_for_run(&claim.run_id, now_ms)?;
+        self.reconcile_started_brokered_executions(brokered_driver, &claim, now_ms)?;
         self.store
             .recover_brokered_executions_for_run(&claim.run_id, now_ms)?;
         let recovered_task = self.store.load_task(&claim.task_id)?;
@@ -97,6 +99,64 @@ impl TaskCoordinator {
         )?;
         self.release_lease(&claim, now_ms)?;
         Ok(Some(view))
+    }
+
+    fn reconcile_started_brokered_executions(
+        &mut self,
+        brokered_driver: &mut dyn BrokeredExecutionDriver,
+        claim: &LeaseClaim,
+        now_ms: u64,
+    ) -> Result<(), GatewayDaemonError> {
+        use crate::capability::ExecutionTargetOutcome;
+
+        let candidates = self
+            .store
+            .load_started_brokered_recovery_candidates(claim, now_ms)?;
+        for candidate in candidates {
+            let outcome = brokered_driver.reconcile_started(BrokeredRecoveryContext {
+                execution: &candidate.execution,
+                request: &candidate.request,
+            });
+            let ExecutionTargetOutcome::Conclusive {
+                succeeded,
+                receipt_digest,
+                safe_detail,
+                typed_result,
+            } = outcome
+            else {
+                continue;
+            };
+            let command = LedgerCommand {
+                actor_id: candidate.execution.actor_id.clone(),
+                idempotency_key: IdempotencyKey::new(format!(
+                    "scheduler-reconcile-execution-{}-{}",
+                    candidate.execution.execution_id.as_str(),
+                    claim.generation
+                ))
+                .map_err(|error| GatewayDaemonError::Protocol(error.to_string()))?,
+                command_digest: digest_json(&(
+                    "reconcile_started_execution",
+                    &candidate.execution.execution_id,
+                    claim.generation,
+                    &receipt_digest,
+                    succeeded,
+                    &typed_result,
+                ))?,
+                committed_at_ms: now_ms,
+            };
+            self.store.complete_execution(
+                &command,
+                &ExecutionCompletion {
+                    execution_id: candidate.execution.execution_id,
+                    expected_revision: candidate.execution.revision,
+                    succeeded,
+                    receipt_digest,
+                    safe_detail,
+                    typed_result,
+                },
+            )?;
+        }
+        Ok(())
     }
 
     fn claim_runtime_start(

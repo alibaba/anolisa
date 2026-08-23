@@ -354,6 +354,60 @@ fn exact_task_only_v2_intent_maps_to_current_profile() {
 }
 
 #[test]
+fn exact_checkpoint_intent_starts_only_under_checkpoint_profile() {
+    let root = TempDir::new().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let database_path = root.path().join("gateway.db");
+    let installation = InstallationId::new();
+    let profile = GatewayCapabilityProfile::workspace_checkpoint_v1();
+    let mut coordinator = TaskCoordinator::open_for_capability_profile(
+        &database_path,
+        Some(installation.clone()),
+        profile,
+    )
+    .unwrap();
+    let actor = actor_id_for_uid(&installation, 1000).unwrap();
+    coordinator
+        .submit(
+            &actor,
+            SubmitTask {
+                request_id: RequestId::new(),
+                idempotency_key: IdempotencyKey::new("checkpoint-start").unwrap(),
+                intent: BoundedText::new("checkpoint workspace").unwrap(),
+                target: profile.governed_target(),
+                runtime: RuntimeSelector {
+                    runtime: BoundedName::new("core").unwrap(),
+                    profile: Some(BoundedName::new("gateway-checkpoint-v1").unwrap()),
+                },
+            },
+        )
+        .unwrap();
+    drop(coordinator);
+
+    let mut scheduler = TaskScheduler::open_for_capability_profile(
+        &database_path,
+        Some(installation),
+        BoundedOpaque::new("checkpoint-worker").unwrap(),
+        profile,
+        UpdateFactory,
+    )
+    .unwrap();
+    assert!(matches!(
+        scheduler.tick(now_ms().unwrap().saturating_add(1)).unwrap(),
+        SchedulerTick::Started(_)
+    ));
+    assert_eq!(
+        scheduler
+            .active
+            .as_ref()
+            .unwrap()
+            .scheduled
+            .capability_profile,
+        profile.identity()
+    );
+}
+
+#[test]
 fn stale_scheduler_generation_cannot_settle_taken_over_run() {
     let root = TempDir::new().unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();

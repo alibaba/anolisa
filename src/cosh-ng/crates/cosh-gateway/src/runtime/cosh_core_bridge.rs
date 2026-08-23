@@ -7,6 +7,10 @@ use std::collections::{btree_map::Entry, BTreeMap, VecDeque};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cosh_gateway_contracts::{
+    capability::{
+        BrokeredOperation, CapabilityRequest, CapabilityScope, OperationDescriptor,
+        WorkspaceCheckpointCreateV1,
+    },
     common::{
         ActorRef, BoundedName, BoundedOpaque, BoundedText, ContentPart, ContractHeader,
         ContractSchema, Correlation, Digest, RuntimeBindingRef, TargetRef, WorkspaceRef,
@@ -14,15 +18,18 @@ use cosh_gateway_contracts::{
     error::{ContractError, ErrorCategory},
     external::{ExternalRef, ExternalRefKind},
     ids::{
-        ActorId, AgentSessionId, InputRequestId, InstallationId, MessageId, RunId,
-        RuntimeBindingId, RuntimeInstanceId, RuntimeMessageId, TaskId, ToolUseId, TurnId,
+        ActorId, AgentSessionId, CheckpointId, InputRequestId, InstallationId, MessageId,
+        RequestId, RunId, RuntimeBindingId, RuntimeInstanceId, RuntimeMessageId, TaskId, ToolUseId,
+        TurnId,
     },
     runtime::{
-        AgentRuntimeCommand, AgentRuntimeEvent, ExecutionAuthority, RuntimeEventEnvelope,
-        RuntimeInputOption, RuntimeInputRequest, RuntimeInputResponse, ToolInvocationSnapshot,
-        ToolInvocationStatus, ToolSummary, TurnOutcome,
+        AgentRuntimeCommand, AgentRuntimeEvent, BrokeredExecutionDelivery,
+        BrokeredExecutionOutcome, BrokeredOperationResult, ExecutionAuthority,
+        RuntimeEventEnvelope, RuntimeInputOption, RuntimeInputRequest, RuntimeInputResponse,
+        ToolInvocationSnapshot, ToolInvocationStatus, ToolSummary, TurnOutcome,
     },
 };
+use sha2::{Digest as _, Sha256};
 
 use super::{
     AgentRuntimePort, AgentRuntimePortError, CoshCoreContentBlockInfo, CoshCoreContentDelta,

@@ -17,6 +17,18 @@ pub struct SqliteTaskStore {
 }
 
 impl SqliteTaskStore {
+    /// Creates and validates the private parent for a future database open.
+    ///
+    /// This is useful when another fail-closed durable sink must be admitted
+    /// beside the database before the store connection itself is opened.
+    ///
+    /// # Errors
+    ///
+    /// Returns when any path component, owner, permission, or existing file is unsafe.
+    pub fn prepare_path(path: impl AsRef<Path>) -> Result<(), StoreError> {
+        prepare_private_parent(path.as_ref()).map(|_| ())
+    }
+
     /// Opens or creates a private local database and applies checked migrations.
     ///
     /// # Errors
@@ -643,5 +655,27 @@ mod tests {
             Err(StoreError::UnsafePath { .. })
         ));
         assert!(!actual.join("gateway/state.db").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_parent_does_not_manufacture_an_empty_database() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("private/gateway/state.db");
+
+        SqliteTaskStore::prepare_path(&path).unwrap();
+
+        assert!(!path.exists());
+        assert_eq!(
+            fs::symlink_metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        SqliteTaskStore::open(&path).unwrap();
     }
 }

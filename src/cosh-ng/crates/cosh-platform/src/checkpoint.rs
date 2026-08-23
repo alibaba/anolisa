@@ -121,9 +121,9 @@ impl CkptClient {
     /// verified directory between the check and `connect`. Kernel peer
     /// credentials are read after connecting and before any request byte is
     /// written, so an impostor listener is rejected with no possible effect.
-    /// [`Self::create_classified`] and [`Self::find_snapshot`] reject the client
-    /// before socket access unless this configuration is present; legacy
-    /// operations retain their existing optional-authentication behavior.
+    /// Governed operations reject the client before socket access unless this
+    /// configuration is present; legacy operations retain their existing
+    /// optional-authentication behavior.
     #[must_use]
     pub fn require_trusted_peer(mut self, owner_uid: u32) -> Self {
         self.trusted_peer_uid = Some(owner_uid);
@@ -255,6 +255,155 @@ impl CkptClient {
             // An unexpected variant means this client's model of the daemon is
             // wrong, so no-effect cannot be claimed.
             _ => Err(CkptRequestFailure::possibly_applied(unexpected_response())),
+        }
+    }
+
+    /// Resolves the exact V2 identity of an already-registered workspace.
+    ///
+    /// The daemon contract guarantees that this request performs no workspace
+    /// initialization or repair. Governed callers must still configure trusted
+    /// peer authentication so a substituted listener cannot supply authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns when trusted-peer authentication is absent, the transport or
+    /// protocol fails, the daemon is not V2-capable, or the workspace is not
+    /// registered under the exact supplied path.
+    pub fn workspace_identity_v2(
+        &self,
+        registration_path: &str,
+    ) -> Result<WorkspaceIdentityV2, CoshError> {
+        let owner_uid = self.governed_peer_uid()?;
+        let request = WsCkptRequest::WorkspaceIdentityV2 {
+            registration_path: registration_path.to_owned(),
+        };
+        match self
+            .send_request_classified_with_peer(&request, Some(owner_uid))
+            .map_err(|failure| failure.error)?
+        {
+            WsCkptResponse::WorkspaceIdentityV2Ok {
+                protocol_version,
+                ws_id,
+                registered_path,
+                generation,
+            } if protocol_version == GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2
+                && registered_path == registration_path =>
+            {
+                Ok(WorkspaceIdentityV2 {
+                    protocol_version,
+                    ws_id,
+                    registered_path,
+                    generation,
+                })
+            }
+            WsCkptResponse::GuardedCheckpointV2Rejected { code, .. } => {
+                Err(guarded_rejection_to_cosh(code))
+            }
+            WsCkptResponse::Error { code, message } => Err(ws_error_to_cosh(code, message)),
+            _ => Err(unexpected_response()),
+        }
+    }
+
+    /// Creates one checkpoint through the exact V2 generation fence.
+    ///
+    /// An explicit `GuardedCheckpointV2Rejected` response is `KnownNoEffect`
+    /// because that versioned daemon response promises the backend was not
+    /// invoked. Any legacy error, mismatched evidence, or failure after request
+    /// bytes were written remains `PossiblyApplied` and must be reconciled with
+    /// [`Self::checkpoint_evidence_v2`] rather than replayed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified authentication, transport, protocol, rejection, or
+    /// evidence-binding failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn guarded_create_v2(
+        &self,
+        ws_id: &str,
+        expected_generation: WorkspaceGenerationTokenV2,
+        checkpoint_id: &str,
+        operation_digest: [u8; 32],
+        message: Option<&str>,
+        metadata: Option<&str>,
+        pin: bool,
+    ) -> Result<GuardedCheckpointEvidenceV2, CkptRequestFailure> {
+        let owner_uid = self
+            .governed_peer_uid()
+            .map_err(CkptRequestFailure::known_no_effect)?;
+        let request = WsCkptRequest::GuardedCheckpointV2 {
+            ws_id: ws_id.to_owned(),
+            expected_generation,
+            checkpoint_id: checkpoint_id.to_owned(),
+            operation_digest,
+            message: message.map(str::to_owned),
+            metadata: metadata.map(str::to_owned),
+            pin,
+        };
+        match self.send_request_classified_with_peer(&request, Some(owner_uid))? {
+            WsCkptResponse::GuardedCheckpointV2Ok { evidence }
+                if evidence_matches_v2(
+                    &evidence,
+                    ws_id,
+                    expected_generation,
+                    checkpoint_id,
+                    operation_digest,
+                ) =>
+            {
+                Ok(evidence)
+            }
+            WsCkptResponse::GuardedCheckpointV2Rejected { code, .. } => Err(
+                CkptRequestFailure::known_no_effect(guarded_rejection_to_cosh(code)),
+            ),
+            WsCkptResponse::Error { code, message } => Err(CkptRequestFailure::possibly_applied(
+                ws_error_to_cosh(code, message),
+            )),
+            _ => Err(CkptRequestFailure::possibly_applied(unexpected_response())),
+        }
+    }
+
+    /// Queries exact durable V2 evidence without replaying checkpoint creation.
+    ///
+    /// # Errors
+    ///
+    /// Returns when trusted-peer authentication is absent, transport or protocol
+    /// validation fails, the daemon rejects the lookup, or returned evidence does
+    /// not reproduce every supplied operation binding.
+    pub fn checkpoint_evidence_v2(
+        &self,
+        ws_id: &str,
+        expected_generation: WorkspaceGenerationTokenV2,
+        checkpoint_id: &str,
+        operation_digest: [u8; 32],
+    ) -> Result<Option<GuardedCheckpointEvidenceV2>, CoshError> {
+        let owner_uid = self.governed_peer_uid()?;
+        let request = WsCkptRequest::CheckpointEvidenceV2 {
+            ws_id: ws_id.to_owned(),
+            expected_generation,
+            checkpoint_id: checkpoint_id.to_owned(),
+            operation_digest,
+        };
+        match self
+            .send_request_classified_with_peer(&request, Some(owner_uid))
+            .map_err(|failure| failure.error)?
+        {
+            WsCkptResponse::CheckpointEvidenceV2Ok { evidence: None } => Ok(None),
+            WsCkptResponse::CheckpointEvidenceV2Ok {
+                evidence: Some(evidence),
+            } if evidence_matches_v2(
+                &evidence,
+                ws_id,
+                expected_generation,
+                checkpoint_id,
+                operation_digest,
+            ) =>
+            {
+                Ok(Some(evidence))
+            }
+            WsCkptResponse::GuardedCheckpointV2Rejected { code, .. } => {
+                Err(guarded_rejection_to_cosh(code))
+            }
+            WsCkptResponse::Error { code, message } => Err(ws_error_to_cosh(code, message)),
+            _ => Err(unexpected_response()),
         }
     }
 
@@ -664,6 +813,91 @@ fn ws_error_to_cosh(code: WsCkptErrorCode, message: String) -> CoshError {
     err
 }
 
+fn evidence_matches_v2(
+    evidence: &GuardedCheckpointEvidenceV2,
+    ws_id: &str,
+    expected_generation: WorkspaceGenerationTokenV2,
+    checkpoint_id: &str,
+    operation_digest: [u8; 32],
+) -> bool {
+    let outcome_matches = match &evidence.outcome {
+        GuardedCheckpointOutcomeV2::Created { snapshot_id } => snapshot_id == checkpoint_id,
+        GuardedCheckpointOutcomeV2::Skipped { .. } => true,
+    };
+    evidence.ws_id == ws_id
+        && evidence.generation == expected_generation
+        && evidence.checkpoint_id == checkpoint_id
+        && evidence.operation_digest == operation_digest
+        && evidence.caller_uid == nix::unistd::Uid::effective().as_raw()
+        && outcome_matches
+}
+
+fn guarded_rejection_to_cosh(code: GuardedCheckpointRejectionCodeV2) -> CoshError {
+    let (error_code, message, recoverable) = match code {
+        GuardedCheckpointRejectionCodeV2::DaemonNotReady => (
+            ErrorCode::CheckpointDaemonUnavailable,
+            "ws-ckpt daemon is not ready for guarded checkpoints",
+            true,
+        ),
+        GuardedCheckpointRejectionCodeV2::PeerCredentialsUnavailable
+        | GuardedCheckpointRejectionCodeV2::CallerMismatch => (
+            ErrorCode::PermissionDenied,
+            "ws-ckpt rejected the authenticated checkpoint caller",
+            false,
+        ),
+        GuardedCheckpointRejectionCodeV2::InvalidRegistrationPath
+        | GuardedCheckpointRejectionCodeV2::InvalidWorkspaceId
+        | GuardedCheckpointRejectionCodeV2::InvalidCheckpointId
+        | GuardedCheckpointRejectionCodeV2::InvalidMetadata => (
+            ErrorCode::InvalidInput,
+            "ws-ckpt rejected invalid guarded checkpoint input",
+            false,
+        ),
+        GuardedCheckpointRejectionCodeV2::WorkspaceNotFound => (
+            ErrorCode::CheckpointNotFound,
+            "ws-ckpt does not know the guarded workspace identity",
+            false,
+        ),
+        GuardedCheckpointRejectionCodeV2::WriteLockConflict => (
+            ErrorCode::CheckpointCreateFailed,
+            "ws-ckpt rejected the guarded checkpoint because another operation holds the write lock",
+            true,
+        ),
+        GuardedCheckpointRejectionCodeV2::GenerationMismatch
+        | GuardedCheckpointRejectionCodeV2::OperationConflict
+        | GuardedCheckpointRejectionCodeV2::EvidenceCapacityReached => (
+            ErrorCode::CheckpointCreateFailed,
+            "ws-ckpt rejected the guarded checkpoint binding",
+            false,
+        ),
+    };
+
+    CoshError::new(error_code, message, "checkpoint")
+        .recoverable(recoverable)
+        .with_details(serde_json::json!({
+            "guarded_rejection": guarded_rejection_name(code),
+        }))
+}
+
+fn guarded_rejection_name(code: GuardedCheckpointRejectionCodeV2) -> &'static str {
+    match code {
+        GuardedCheckpointRejectionCodeV2::DaemonNotReady => "daemon_not_ready",
+        GuardedCheckpointRejectionCodeV2::PeerCredentialsUnavailable => {
+            "peer_credentials_unavailable"
+        }
+        GuardedCheckpointRejectionCodeV2::InvalidRegistrationPath => "invalid_registration_path",
+        GuardedCheckpointRejectionCodeV2::InvalidWorkspaceId => "invalid_workspace_id",
+        GuardedCheckpointRejectionCodeV2::InvalidCheckpointId => "invalid_checkpoint_id",
+        GuardedCheckpointRejectionCodeV2::InvalidMetadata => "invalid_metadata",
+        GuardedCheckpointRejectionCodeV2::WorkspaceNotFound => "workspace_not_found",
+        GuardedCheckpointRejectionCodeV2::GenerationMismatch => "generation_mismatch",
+        GuardedCheckpointRejectionCodeV2::OperationConflict => "operation_conflict",
+        GuardedCheckpointRejectionCodeV2::WriteLockConflict => "write_lock_conflict",
+        GuardedCheckpointRejectionCodeV2::CallerMismatch => "caller_mismatch",
+        GuardedCheckpointRejectionCodeV2::EvidenceCapacityReached => "evidence_capacity_reached",
+    }
+}
+
 fn unexpected_response() -> CoshError {
     protocol_error(ProtocolFailure::UnexpectedResponse)
 }
@@ -820,6 +1054,20 @@ mod tests {
         (dir, socket_path, handle)
     }
 
+    fn guarded_evidence() -> GuardedCheckpointEvidenceV2 {
+        GuardedCheckpointEvidenceV2 {
+            ws_id: "ws-abc123".to_owned(),
+            registered_path: "/workspace".to_owned(),
+            generation: WorkspaceGenerationTokenV2::from_bytes([7; 32]),
+            checkpoint_id: "ckp_1".to_owned(),
+            operation_digest: [9; 32],
+            caller_uid: nix::unistd::Uid::effective().as_raw(),
+            outcome: GuardedCheckpointOutcomeV2::Created {
+                snapshot_id: "ckp_1".to_owned(),
+            },
+        }
+    }
+
     #[test]
     fn test_default_timeout() {
         let client = CkptClient::new("/tmp/test.sock");
@@ -928,6 +1176,156 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[test]
+    fn guarded_v2_success_requires_exact_bound_evidence() {
+        let expected = guarded_evidence();
+        let (_dir, socket_path, daemon) =
+            spawn_one_shot_daemon(WsCkptResponse::GuardedCheckpointV2Ok {
+                evidence: expected.clone(),
+            });
+
+        let evidence = trusted_client(&socket_path)
+            .guarded_create_v2(
+                "ws-abc123",
+                WorkspaceGenerationTokenV2::from_bytes([7; 32]),
+                "ckp_1",
+                [9; 32],
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        daemon.join().unwrap();
+
+        assert_eq!(evidence, expected);
+    }
+
+    #[test]
+    fn guarded_v2_rejection_is_known_no_effect() {
+        for code in [
+            GuardedCheckpointRejectionCodeV2::DaemonNotReady,
+            GuardedCheckpointRejectionCodeV2::PeerCredentialsUnavailable,
+            GuardedCheckpointRejectionCodeV2::InvalidRegistrationPath,
+            GuardedCheckpointRejectionCodeV2::InvalidWorkspaceId,
+            GuardedCheckpointRejectionCodeV2::InvalidCheckpointId,
+            GuardedCheckpointRejectionCodeV2::InvalidMetadata,
+            GuardedCheckpointRejectionCodeV2::WorkspaceNotFound,
+            GuardedCheckpointRejectionCodeV2::GenerationMismatch,
+            GuardedCheckpointRejectionCodeV2::OperationConflict,
+            GuardedCheckpointRejectionCodeV2::WriteLockConflict,
+            GuardedCheckpointRejectionCodeV2::CallerMismatch,
+            GuardedCheckpointRejectionCodeV2::EvidenceCapacityReached,
+        ] {
+            let (_dir, socket_path, daemon) =
+                spawn_one_shot_daemon(WsCkptResponse::GuardedCheckpointV2Rejected {
+                    code,
+                    message: "daemon-private detail".to_owned(),
+                });
+            let failure = trusted_client(&socket_path)
+                .guarded_create_v2(
+                    "ws-abc123",
+                    WorkspaceGenerationTokenV2::from_bytes([7; 32]),
+                    "ckp_1",
+                    [9; 32],
+                    None,
+                    None,
+                    false,
+                )
+                .unwrap_err();
+            daemon.join().unwrap();
+
+            assert_eq!(failure.effect, CkptRequestEffect::KnownNoEffect);
+            assert!(!failure.error.message.contains("daemon-private"));
+        }
+    }
+
+    #[test]
+    fn legacy_error_for_guarded_v2_is_possibly_applied() {
+        let (_dir, socket_path, daemon) = spawn_one_shot_daemon(WsCkptResponse::Error {
+            code: WsCkptErrorCode::InvalidPath,
+            message: "legacy daemon".to_owned(),
+        });
+
+        let failure = trusted_client(&socket_path)
+            .guarded_create_v2(
+                "ws-abc123",
+                WorkspaceGenerationTokenV2::from_bytes([7; 32]),
+                "ckp_1",
+                [9; 32],
+                None,
+                None,
+                false,
+            )
+            .unwrap_err();
+        daemon.join().unwrap();
+
+        assert_eq!(failure.effect, CkptRequestEffect::PossiblyApplied);
+    }
+
+    #[test]
+    fn mismatched_guarded_v2_evidence_is_possibly_applied() {
+        let mut evidence = guarded_evidence();
+        evidence.operation_digest = [8; 32];
+        let (_dir, socket_path, daemon) =
+            spawn_one_shot_daemon(WsCkptResponse::GuardedCheckpointV2Ok { evidence });
+
+        let failure = trusted_client(&socket_path)
+            .guarded_create_v2(
+                "ws-abc123",
+                WorkspaceGenerationTokenV2::from_bytes([7; 32]),
+                "ckp_1",
+                [9; 32],
+                None,
+                None,
+                false,
+            )
+            .unwrap_err();
+        daemon.join().unwrap();
+
+        assert_eq!(failure.effect, CkptRequestEffect::PossiblyApplied);
+        assert_eq!(failure.error.code, ErrorCode::CheckpointProtocolError);
+    }
+
+    #[test]
+    fn guarded_v2_evidence_query_is_read_only_and_exact() {
+        let expected = guarded_evidence();
+        let (_dir, socket_path, daemon) =
+            spawn_one_shot_daemon(WsCkptResponse::CheckpointEvidenceV2Ok {
+                evidence: Some(expected.clone()),
+            });
+
+        let evidence = trusted_client(&socket_path)
+            .checkpoint_evidence_v2(
+                "ws-abc123",
+                WorkspaceGenerationTokenV2::from_bytes([7; 32]),
+                "ckp_1",
+                [9; 32],
+            )
+            .unwrap();
+        daemon.join().unwrap();
+
+        assert_eq!(evidence, Some(expected));
+    }
+
+    #[test]
+    fn workspace_identity_v2_requires_exact_version_and_path() {
+        let (_dir, socket_path, daemon) =
+            spawn_one_shot_daemon(WsCkptResponse::WorkspaceIdentityV2Ok {
+                protocol_version: GUARDED_CHECKPOINT_PROTOCOL_VERSION_V2,
+                ws_id: "ws-abc123".to_owned(),
+                registered_path: "/workspace".to_owned(),
+                generation: WorkspaceGenerationTokenV2::from_bytes([7; 32]),
+            });
+
+        let identity = trusted_client(&socket_path)
+            .workspace_identity_v2("/workspace")
+            .unwrap();
+        daemon.join().unwrap();
+
+        assert_eq!(identity.ws_id, "ws-abc123");
+        assert_eq!(identity.registered_path, "/workspace");
+    }
+
     #[test]
     fn lost_response_after_full_write_is_possibly_applied() {
         let (_dir, socket_path, daemon) = spawn_silent_daemon();
@@ -1127,6 +1525,30 @@ mod tests {
         assert_eq!(failure.effect, CkptRequestEffect::KnownNoEffect);
         assert_eq!(failure.error.code, ErrorCode::PermissionDenied);
         assert!(failure.error.message.contains("requires trusted peer"));
+        assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn missing_auth_guarded_v2_refuses_before_socket_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("ws-ckpt.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+
+        let failure = CkptClient::new(socket_path.to_str().unwrap())
+            .guarded_create_v2(
+                "ws-abc123",
+                WorkspaceGenerationTokenV2::from_bytes([7; 32]),
+                "ckp_1",
+                [9; 32],
+                None,
+                None,
+                false,
+            )
+            .unwrap_err();
+
+        assert_eq!(failure.effect, CkptRequestEffect::KnownNoEffect);
+        assert_eq!(failure.error.code, ErrorCode::PermissionDenied);
         assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
     }
 

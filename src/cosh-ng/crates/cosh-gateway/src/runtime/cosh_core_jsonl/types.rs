@@ -10,8 +10,12 @@ use thiserror::Error;
 pub const PRIVATE_COSH_CONTROL_PROTOCOL_VERSION: u32 = 1;
 /// Exact private protocol version for the Gateway-brokered Core profile.
 pub const BROKERED_COSH_CONTROL_PROTOCOL_VERSION: u32 = 3;
+/// Exact private protocol version for the Gateway checkpoint profile.
+pub const BROKERED_CHECKPOINT_COSH_CONTROL_PROTOCOL_VERSION: u32 = 4;
 /// Exact launch and acknowledgement name for the brokered Core profile.
 pub const GATEWAY_BROKERED_EXECUTION_PROFILE: &str = "gateway_brokered_v1";
+/// Exact launch and acknowledgement name for the brokered checkpoint profile.
+pub const GATEWAY_BROKERED_CHECKPOINT_EXECUTION_PROFILE: &str = "gateway_brokered_checkpoint_v1";
 
 /// Private Core execution boundary selected before process launch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -19,8 +23,10 @@ pub enum CoshCoreExecutionProfile {
     /// Existing Core behavior using private protocol v1.
     #[default]
     Legacy,
-    /// Gateway owns the task-only brokered profile using private protocol v2.
+    /// Gateway owns the task-only brokered profile using private protocol v3.
     GatewayBrokeredV1,
+    /// Gateway owns the closed checkpoint profile using private protocol v4.
+    GatewayBrokeredCheckpointV1,
 }
 
 impl CoshCoreExecutionProfile {
@@ -28,6 +34,7 @@ impl CoshCoreExecutionProfile {
         match self {
             Self::Legacy => PRIVATE_COSH_CONTROL_PROTOCOL_VERSION,
             Self::GatewayBrokeredV1 => BROKERED_COSH_CONTROL_PROTOCOL_VERSION,
+            Self::GatewayBrokeredCheckpointV1 => BROKERED_CHECKPOINT_COSH_CONTROL_PROTOCOL_VERSION,
         }
     }
 
@@ -35,7 +42,21 @@ impl CoshCoreExecutionProfile {
         match self {
             Self::Legacy => None,
             Self::GatewayBrokeredV1 => Some(GATEWAY_BROKERED_EXECUTION_PROFILE),
+            Self::GatewayBrokeredCheckpointV1 => {
+                Some(GATEWAY_BROKERED_CHECKPOINT_EXECUTION_PROFILE)
+            }
         }
+    }
+
+    pub(super) const fn is_brokered(self) -> bool {
+        matches!(
+            self,
+            Self::GatewayBrokeredV1 | Self::GatewayBrokeredCheckpointV1
+        )
+    }
+
+    pub(super) const fn hosts_checkpoint(self) -> bool {
+        matches!(self, Self::GatewayBrokeredCheckpointV1)
     }
 }
 
@@ -67,9 +88,10 @@ pub struct CoshCoreCapabilities {
     /// Core accepts durable approval-ownership receipts.
     #[serde(default)]
     pub can_handle_approval_receipt: bool,
-    /// Compatibility marker for a hosted checkpoint capability.
+    /// Core accepts a typed Gateway-hosted checkpoint terminal result.
     ///
-    /// The task-only Gateway profile requires this value to remain false.
+    /// The task-only Gateway profile requires this value to remain false and
+    /// the checkpoint profile requires it to be true.
     #[serde(default)]
     pub can_handle_hosted_checkpoint_create: bool,
     /// Core accepts a Gateway-resolved, side-effect-free user question.
@@ -316,7 +338,7 @@ pub struct CoshCoreControlRequestEnvelope {
 
 /// Private control requests that require a bridge-owned response.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(tag = "subtype")]
+#[serde(tag = "subtype", deny_unknown_fields)]
 pub enum CoshCoreControlRequest {
     /// Requests policy evaluation for provider tool intent.
     #[serde(rename = "can_use_tool")]

@@ -62,7 +62,7 @@ Prerequisites: Linux (or macOS for limited functionality), Rust 1.88+. pkg/svc c
 
 ## Architecture
 
-7-crate workspace. Dependency direction: `cosh-cli` / `cosh-core` → `cosh-platform` → `cosh-types`; `cosh-shell` is standalone (no internal crate deps). `cosh-gateway` depends only on the side-effect-free `cosh-gateway-contracts` leaf among internal crates.
+8-crate workspace. Dependency direction: `cosh-cli` / `cosh-core` → `cosh-platform` → `cosh-types`; `cosh-shell` is standalone (no internal crate deps). `cosh-gateway` depends only on the side-effect-free `cosh-gateway-contracts` leaf among internal crates. `cosh-gateway-app` is the installed composition root and may connect Gateway policy/storage to platform side-effect adapters.
 
 - **cosh-types**: Pure types, zero side effects. Defines `CoshResponse<T>` envelope, `CoshError` (with error codes, recoverable flag, hint), and ws-ckpt IPC protocol types.
 - **cosh-platform**: Platform abstraction layer. Distro detection from `/etc/os-release`, package manager routing (dnf/apt/zypper/brew), systemd service adapter, ws-ckpt daemon Unix socket IPC client.
@@ -70,7 +70,8 @@ Prerequisites: Linux (or macOS for limited functionality), Rust 1.88+. pkg/svc c
 - **cosh-core**: Unified agent core (binary: `cosh-core`). Headless JSONL backend + LLM provider integration (OpenAI-compat, SysOM/Aliyun). Includes hooks, tools, skills, extensions, and config management. Interactive TUI mode is declared but not yet implemented.
 - **cosh-shell**: AI-augmented interactive shell (binary: `cosh-shell`). PTY wrapper over bash/zsh with OSC marker-based command boundary detection, streaming AI analysis (Claude/Qwen adapters), inline card rendering (ratatui), tool approval control protocol.
 - **cosh-gateway-contracts**: Side-effect-free Gateway Task, Runtime, Capability, identity, and error contracts. It must not own storage, processes, transports, providers, or OS execution.
-- **cosh-gateway**: Gateway control plane: authenticated local Unix daemon/client, durable Task and governance storage, Runtime scheduling and supervision, restart reconciliation, private core transport, ACP v1 codec/bridge, installed adapter profiles/entrypoint, and local once-only permission evidence. Remote channels and accepted real-adapter conformance evidence are not yet implemented.
+- **cosh-gateway**: Gateway control-plane library: authenticated local Unix daemon/client, durable Task and governance storage, Runtime scheduling and supervision, restart reconciliation, private core transport, ACP v1 codec/bridge, and local once-only permission evidence.
+- **cosh-gateway-app**: Installed `cosh-gateway` binary and composition root. It owns CLI/serve wiring and concrete governed OS adapters so the Gateway library retains its contracts-only internal dependency boundary.
 
 ### cosh-shell Code Organization
 

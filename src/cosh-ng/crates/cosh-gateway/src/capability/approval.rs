@@ -5,7 +5,7 @@ use cosh_gateway_contracts::{
         ApprovalDecision, ApprovalRequest, BrokeredOperation, CapabilityRequest, ExecutionPermit,
         RuntimeExecutionFence,
     },
-    common::Digest,
+    common::{BoundedOpaque, Digest},
     ids::{ExecutionId, PermitId},
     runtime::RuntimePermissionRef,
 };
@@ -53,6 +53,8 @@ pub struct BrokeredApprovalBinding<'a> {
     pub target_identity_digest: &'a Digest,
     /// Exact Runtime and renewable Run-lease fence requesting authority.
     pub runtime_fence: &'a RuntimeExecutionFence,
+    /// Provider-owned data needed to execute or reconcile the exact admission.
+    pub provider_binding: Option<&'a BoundedOpaque>,
 }
 
 /// Trusted input for one provider-native observed approval resolution.
@@ -135,6 +137,7 @@ impl<'a> DurableApprovalCoordinator<'a> {
             request,
             approval,
             binding.operation,
+            binding.provider_binding,
             &record,
         )?))
     }

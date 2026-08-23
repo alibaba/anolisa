@@ -95,6 +95,7 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
                     operation: &operation,
                     target_identity_digest: &plan.target_identity_digest,
                     runtime_fence: &runtime_fence,
+                    provider_binding: plan.provider_binding.as_ref(),
                 },
             )
             .map_err(|error| GatewayDaemonError::Protocol(error.to_string()))?;

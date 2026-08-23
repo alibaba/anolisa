@@ -22,8 +22,7 @@ impl GatewayDaemon {
     /// Returns a fail-closed path, storage, socket, or already-running error.
     pub fn bind(config: GatewayDaemonConfig) -> Result<Self, GatewayDaemonError> {
         let admitted_target = config.capability_profile.governed_target();
-        if config.capability_profile != GatewayCapabilityProfile::task_only_v1()
-            || !supported_daemon_runtime(&config.runtime)
+        if !supported_daemon_runtime(config.capability_profile, &config.runtime)
         {
             return Err(GatewayDaemonError::Protocol(
                 "daemon capability profile or Runtime selector is not supported".to_owned(),
@@ -141,13 +140,25 @@ impl GatewayDaemon {
     }
 }
 
-fn supported_daemon_runtime(runtime: &RuntimeSelector) -> bool {
+fn supported_daemon_runtime(
+    profile: GatewayCapabilityProfile,
+    runtime: &RuntimeSelector,
+) -> bool {
     matches!(
         (
+            profile.id(),
             runtime.runtime.as_str(),
             runtime.profile.as_ref().map(BoundedName::as_str)
         ),
-        ("core", Some("gateway-brokered-v1"))
+        (
+            cosh_gateway_contracts::profile::GatewayCapabilityProfileId::TaskOnlyV1,
+            "core",
+            Some("gateway-brokered-v1")
+        ) | (
+            cosh_gateway_contracts::profile::GatewayCapabilityProfileId::WorkspaceCheckpointV1,
+            "core",
+            Some("gateway-checkpoint-v1")
+        )
     )
 }
 

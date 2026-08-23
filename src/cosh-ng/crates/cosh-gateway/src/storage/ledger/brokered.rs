@@ -205,6 +205,7 @@ impl SqliteTaskStore {
         operation: &BrokeredOperation,
         target_identity_digest: &Digest,
         runtime_fence: &RuntimeExecutionFence,
+        provider_binding: Option<&BoundedOpaque>,
     ) -> Result<LedgerOutcome<BrokeredRequestRecord>, StoreError> {
         validate_command(command)?;
         if request.actor.actor_id != command.actor_id
@@ -237,6 +238,7 @@ impl SqliteTaskStore {
             typed_operation_digest: brokered_operation_digest(operation)?,
             target_identity_digest: target_identity_digest.clone(),
             runtime_fence: runtime_fence.clone(),
+            provider_binding: provider_binding.cloned(),
             approval_id: None,
             created_at_ms: command.committed_at_ms,
         };
@@ -253,6 +255,7 @@ impl SqliteTaskStore {
         request: &CapabilityRequest,
         approval: &cosh_gateway_contracts::capability::ApprovalRequest,
         operation: &BrokeredOperation,
+        provider_binding: Option<&BoundedOpaque>,
         record: &ApprovalRecord,
     ) -> Result<LedgerOutcome<ApprovalRecord>, StoreError> {
         validate_command(command)?;
@@ -305,7 +308,8 @@ impl SqliteTaskStore {
                 operation: operation.clone(),
                 typed_operation_digest: brokered_operation_digest(operation)?,
                 target_identity_digest: target_identity_digest.clone(),
-                runtime_fence: runtime_fence.clone(),
+            runtime_fence: runtime_fence.clone(),
+            provider_binding: provider_binding.cloned(),
                 approval_id: Some(approval.approval_id.clone()),
                 created_at_ms: command.committed_at_ms,
             },

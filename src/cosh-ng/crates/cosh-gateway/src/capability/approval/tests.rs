@@ -291,6 +291,7 @@ fn approval_creates_no_authority_until_explicit_allow() {
     let approval = approval(&request);
     let (operation, target_identity_digest, runtime_fence) =
         brokered_binding(&mut store, &actor_id, &request);
+    let provider_binding = BoundedOpaque::new("checkpoint-binding-v2").unwrap();
     let mut coordinator = DurableApprovalCoordinator::new(&mut store);
     let pending = coordinator
         .record_pending(
@@ -301,18 +302,17 @@ fn approval_creates_no_authority_until_explicit_allow() {
                 operation: &operation,
                 target_identity_digest: &target_identity_digest,
                 runtime_fence: &runtime_fence,
+                provider_binding: Some(&provider_binding),
             },
         )
         .unwrap();
     assert_eq!(pending.state, ApprovalState::Pending);
-    assert_eq!(
-        coordinator
-            .store
-            .load_brokered_request(&request.request_id)
-            .unwrap()
-            .operation,
-        operation
-    );
+    let stored = coordinator
+        .store
+        .load_brokered_request(&request.request_id)
+        .unwrap();
+    assert_eq!(stored.operation, operation);
+    assert_eq!(stored.provider_binding, Some(provider_binding));
     let delivery_kind = BoundedName::new("brokered_approval_request").unwrap();
     let delivery = coordinator
         .store
@@ -370,6 +370,7 @@ fn denial_is_durable_and_never_issues_a_permit() {
                 operation: &operation,
                 target_identity_digest: &target_identity_digest,
                 runtime_fence: &runtime_fence,
+                provider_binding: None,
             },
         )
         .unwrap();
@@ -414,6 +415,7 @@ fn changed_approval_binding_fails_before_storage() {
             operation: &operation,
             target_identity_digest: &target_identity_digest,
             runtime_fence: &runtime_fence,
+            provider_binding: None,
         },
     );
     assert!(matches!(result, Err(DurableApprovalError::BindingMismatch)));

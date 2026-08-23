@@ -1,4 +1,4 @@
-//! Trusted admission and pinned launch policy for task-only cosh-core.
+//! Trusted admission and pinned launch policy for closed cosh-core profiles.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -26,6 +26,9 @@ use super::{
 const MAX_CORE_FRAME_BYTES: usize = 1024 * 1024;
 /// Exact Runtime selector profile for the installed task-only Core boundary.
 pub const GATEWAY_BROKERED_CORE_RUNTIME_PROFILE: &str = "gateway-brokered-v1";
+/// Exact Runtime selector profile for the installed checkpoint Core boundary.
+pub const GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE: &str = "gateway-checkpoint-v1";
+const GATEWAY_BROKERED_CHECKPOINT_CORE_LAUNCH_PROFILE: &str = "gateway-brokered-checkpoint-v1";
 const ALLOWED_ENVIRONMENT: &[&str] = &[
     "HOME",
     "PATH",
@@ -50,7 +53,7 @@ const ALLOWED_ENVIRONMENT: &[&str] = &[
     "DASHSCOPE_API_KEY",
 ];
 
-/// Canonical task-only Core launch inputs pinned before daemon socket admission.
+/// Canonical Core launch inputs pinned before daemon socket admission.
 pub struct ResolvedBrokeredCoreRuntimeProfile {
     executable: PinnedExecutable,
     environment: BTreeMap<OsString, OsString>,
@@ -66,10 +69,10 @@ impl fmt::Debug for ResolvedBrokeredCoreRuntimeProfile {
     }
 }
 
-/// Production factory for the task-only Gateway-brokered Core profile.
+/// Production factory for closed Gateway-brokered Core profiles.
 ///
-/// The profile admits side-effect-free user questions only; it does not bind a
-/// hosted checkpoint or other external execution target.
+/// Trusted daemon admission selects either the task-only v3 profile or the
+/// checkpoint v4 profile before this factory creates a child process.
 pub struct InstalledBrokeredCoreRuntimePortFactory {
     installation_id: InstallationId,
     actors: LocalOsActorResolver,
@@ -169,16 +172,7 @@ impl InstalledBrokeredCoreRuntimePortFactory {
 
 impl AgentRuntimePortFactory for InstalledBrokeredCoreRuntimePortFactory {
     fn create(&mut self, run: &ScheduledRun) -> Result<ScheduledRuntimePort, ContractError> {
-        if GatewayCapabilityProfile::task_only_v1()
-            .verify_identity(&run.capability_profile)
-            .is_err()
-            || run.target != GatewayCapabilityProfile::task_only_v1().governed_target()
-            || run.runtime.runtime.as_str() != "core"
-            || run.runtime.profile.as_ref().map(BoundedName::as_str)
-                != Some(GATEWAY_BROKERED_CORE_RUNTIME_PROFILE)
-        {
-            return Err(profile_error());
-        }
+        let execution_profile = admitted_execution_profile(run)?;
         let actor = self.actors.resolve(&run.actor)?;
         let workspace = self.workspaces.resolve(&run.target)?;
         if workspace.reference() != &run.workspace {
@@ -198,14 +192,15 @@ impl AgentRuntimePortFactory for InstalledBrokeredCoreRuntimePortFactory {
         if let Some(script) = &self.test_script {
             launch.arguments.push(script.as_os_str().to_owned());
         }
+        let launch_profile = if execution_profile == GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE {
+            GATEWAY_BROKERED_CHECKPOINT_CORE_LAUNCH_PROFILE
+        } else {
+            GATEWAY_BROKERED_CORE_RUNTIME_PROFILE
+        };
         launch.arguments.extend(
-            [
-                "--headless",
-                "--execution-profile",
-                GATEWAY_BROKERED_CORE_RUNTIME_PROFILE,
-            ]
-            .into_iter()
-            .map(OsString::from),
+            ["--headless", "--execution-profile", launch_profile]
+                .into_iter()
+                .map(OsString::from),
         );
         launch.environment.clone_from(&self.environment);
         launch.stdout_line_limit = MAX_CORE_FRAME_BYTES;
@@ -226,11 +221,16 @@ impl AgentRuntimePortFactory for InstalledBrokeredCoreRuntimePortFactory {
                 workspace.pinned_directory(),
             ),
         };
-        let config = CoshCoreBridgeConfig::new(launch, workspace.reference().clone(), identity)
-            .gateway_brokered(CoshCoreBrokeredContext {
-                actor,
-                target: run.target.clone(),
-            });
+        let context = CoshCoreBrokeredContext {
+            actor,
+            target: run.target.clone(),
+        };
+        let config = CoshCoreBridgeConfig::new(launch, workspace.reference().clone(), identity);
+        let config = if execution_profile == GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE {
+            config.gateway_brokered_checkpoint(context)
+        } else {
+            config.gateway_brokered(context)
+        };
         let port = CoshCoreBridge::launch(config).map_err(|_| {
             contract_error(
                 "runtime_launch_failed",
@@ -244,6 +244,28 @@ impl AgentRuntimePortFactory for InstalledBrokeredCoreRuntimePortFactory {
             workspace.reference().clone(),
         ))
     }
+}
+
+fn admitted_execution_profile(run: &ScheduledRun) -> Result<&'static str, ContractError> {
+    if run.runtime.runtime.as_str() != "core" {
+        return Err(profile_error());
+    }
+    let requested = run.runtime.profile.as_ref().map(BoundedName::as_str);
+    let task_only = GatewayCapabilityProfile::task_only_v1();
+    if task_only.verify_identity(&run.capability_profile).is_ok()
+        && run.target == task_only.governed_target()
+        && requested == Some(GATEWAY_BROKERED_CORE_RUNTIME_PROFILE)
+    {
+        return Ok(GATEWAY_BROKERED_CORE_RUNTIME_PROFILE);
+    }
+    let checkpoint = GatewayCapabilityProfile::workspace_checkpoint_v1();
+    if checkpoint.verify_identity(&run.capability_profile).is_ok()
+        && run.target == checkpoint.governed_target()
+        && requested == Some(GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE)
+    {
+        return Ok(GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE);
+    }
+    Err(profile_error())
 }
 
 fn scope_digest(

@@ -294,6 +294,7 @@ fn pending_brokered_fixture(
             &request,
             &approval_request,
             &operation,
+            None,
             &approval,
         )
         .unwrap();
@@ -1073,6 +1074,69 @@ fn run_scoped_started_recovery_is_atomic_and_idempotent() {
             .unwrap(),
         BrokeredExecutionRecoveryReport::default()
     );
+}
+
+#[test]
+fn takeover_can_complete_started_effect_from_original_request_evidence() {
+    let mut store = SqliteTaskStore::open_in_memory().unwrap();
+    let (actor_id, task_id, run_id, approval, lease) = approved_fixture(&mut store);
+    let permit = permit(&approval);
+    store
+        .issue_permit(
+            &command(&actor_id, "issue-evidence-recovery", '6', 30),
+            &permit,
+        )
+        .unwrap();
+    let started = claim_and_start(
+        &mut store,
+        &actor_id,
+        &permit,
+        &lease,
+        "evidence-recovery",
+        40,
+    );
+    let takeover = acquire_lease(
+        &mut store,
+        &actor_id,
+        &task_id,
+        &run_id,
+        "evidence-recovery-takeover",
+        201,
+        400,
+    );
+
+    let candidates = store
+        .load_started_brokered_recovery_candidates(&takeover, 202)
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].execution, started);
+    assert_eq!(candidates[0].request.request.request_id, permit.request_id);
+
+    let typed_result = successful_result(&store, &permit.request_id);
+    store
+        .complete_execution(
+            &command(&actor_id, "complete-evidence-recovery", '7', 202),
+            &ExecutionCompletion {
+                execution_id: permit.execution_id.clone(),
+                expected_revision: started.revision,
+                succeeded: true,
+                receipt_digest: digest('7'),
+                safe_detail: None,
+                typed_result: Some(typed_result),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .load_execution_record(&permit.execution_id)
+            .unwrap()
+            .state,
+        ExecutionState::Succeeded
+    );
+    assert!(store
+        .load_started_brokered_recovery_candidates(&takeover, 203)
+        .unwrap()
+        .is_empty());
 }
 
 fn runtime_binding(task_id: &TaskId, run_id: &RunId, generation: u64) -> RuntimeBindingRef {

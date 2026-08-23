@@ -5,8 +5,9 @@ mod brokered;
 mod input_tests;
 
 pub use brokered::{
-    BrokeredApprovalContext, BrokeredApprovalPlan, BrokeredExecutionDriver, BrokeredResolution,
-    BrokeredResolutionContext, BrokeredResolutionSource,
+    BrokeredApprovalContext, BrokeredApprovalPlan, BrokeredExecutionDriver,
+    BrokeredRecoveryContext, BrokeredResolution, BrokeredResolutionContext,
+    BrokeredResolutionSource,
 };
 use brokered::{PendingBrokered, RejectingBrokeredExecutionDriver};
 
@@ -19,7 +20,9 @@ use cosh_gateway_contracts::common::{
 };
 use cosh_gateway_contracts::error::{ContractError, ErrorCategory};
 use cosh_gateway_contracts::ids::{ActorId, InputRequestId, InstallationId, RunId, TaskId};
-use cosh_gateway_contracts::profile::{GatewayCapabilityProfile, GatewayCapabilityProfileIdentity};
+use cosh_gateway_contracts::profile::{
+    GatewayCapabilityProfile, GatewayCapabilityProfileId, GatewayCapabilityProfileIdentity,
+};
 use cosh_gateway_contracts::task::{
     CancelReason, CancellationStage, RuntimeUpdate, TaskEvent, TaskState,
 };
@@ -40,8 +43,8 @@ use serde::{Deserialize, Serialize};
 use crate::capability::DurableApprovalCoordinator;
 use crate::storage::{
     ApprovalRecord, ApprovalState, BrokeredRequestRecord, BrokeredRuntimeDispatchKind,
-    BrokeredRuntimeDispatchRecord, BrokeredRuntimeDispatchState, LeaseClaim, LeaseCommand,
-    LedgerCommand, LedgerOutcome, OutboxClaim, ProviderPermissionDispatchDecision,
+    BrokeredRuntimeDispatchRecord, BrokeredRuntimeDispatchState, ExecutionCompletion, LeaseClaim,
+    LeaseCommand, LedgerCommand, LedgerOutcome, OutboxClaim, ProviderPermissionDispatchDecision,
     ProviderPermissionDispatchState, RuntimeInputDispatchRecord, RuntimeInputDispatchState,
     RuntimeInputRequestRecord, RuntimeInputRequestState, SqliteTaskStore, StoreError, TaskCommit,
 };

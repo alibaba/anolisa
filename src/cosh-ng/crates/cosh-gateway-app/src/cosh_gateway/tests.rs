@@ -40,6 +40,19 @@ fn terminal_text_escapes_control_sequences() {
 }
 
 #[test]
+fn workspace_registration_path_is_lexically_normalized() {
+    assert_eq!(
+        super::serve::normalize_absolute_workspace(Path::new("/work/project/.")).unwrap(),
+        Path::new("/work/project")
+    );
+    assert_eq!(
+        super::serve::normalize_absolute_workspace(Path::new("/work/tmp/../project")).unwrap(),
+        Path::new("/work/project")
+    );
+    assert!(super::serve::normalize_absolute_workspace(Path::new("/../../project")).is_err());
+}
+
+#[test]
 fn json_observation_fields_include_driver_sequence() {
     assert_eq!(
         with_observation_sequence(7, json!({"text": "chunk"})),
@@ -118,6 +131,11 @@ fn task_submit_defaults_to_brokered_core_and_fixed_task_only_target() {
     };
     assert_eq!(explicit.runtime, "acp");
     assert_eq!(explicit.runtime_profile, "codex");
+    assert_eq!(
+        super::control::target_for_runtime_profile(GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE)
+            .unwrap(),
+        GatewayCapabilityProfile::workspace_checkpoint_v1().governed_target()
+    );
 }
 
 #[test]

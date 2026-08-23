@@ -96,10 +96,10 @@ pub(super) fn decode_runtime_start_intent(
         .verify_identity(&intent.capability_profile)
         .map_err(|error| GatewayDaemonError::Protocol(error.to_string()))?;
     if intent.target != expected_profile.governed_target()
-        || !is_task_only_runtime(&intent.runtime)
+        || !runtime_matches_profile(expected_profile, &intent.runtime)
     {
         return Err(GatewayDaemonError::Protocol(
-            "runtime start intent does not match the task-only capability profile".to_owned(),
+            "runtime start intent does not match its exact capability profile".to_owned(),
         ));
     }
     Ok(intent)
@@ -108,6 +108,20 @@ pub(super) fn decode_runtime_start_intent(
 fn is_task_only_runtime(runtime: &RuntimeSelector) -> bool {
     runtime.runtime.as_str() == "core"
         && runtime.profile.as_ref().map(BoundedName::as_str) == Some("gateway-brokered-v1")
+}
+
+fn runtime_matches_profile(
+    profile: GatewayCapabilityProfile,
+    runtime: &RuntimeSelector,
+) -> bool {
+    if runtime.runtime.as_str() != "core" {
+        return false;
+    }
+    let expected = match profile.id() {
+        GatewayCapabilityProfileId::TaskOnlyV1 => "gateway-brokered-v1",
+        GatewayCapabilityProfileId::WorkspaceCheckpointV1 => "gateway-checkpoint-v1",
+    };
+    runtime.profile.as_ref().map(BoundedName::as_str) == Some(expected)
 }
 
 /// Immutable work description passed to an injected Runtime factory.
