@@ -126,7 +126,8 @@ sudo anolisa --install-mode system restart <component>
 ```
 
 `--dry-run` 只列出将要重启的 unit，不会执行 `systemctl daemon-reload`
-或 `systemctl restart`。
+或 `systemctl restart`。system 模式预览只读已记录状态，不获取排他安装锁，
+因此不需要 state root 的写权限。
 
 ### upgrade
 

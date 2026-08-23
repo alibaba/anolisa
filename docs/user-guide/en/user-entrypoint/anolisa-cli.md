@@ -134,7 +134,9 @@ sudo anolisa --install-mode system restart <component>
 ```
 
 `--dry-run` lists the units that would restart and does not run
-`systemctl daemon-reload` or `systemctl restart`.
+`systemctl daemon-reload` or `systemctl restart`. System-mode preview
+reads recorded state without taking the exclusive install lock, so it
+does not need write access to the state root.
 
 ### upgrade
 

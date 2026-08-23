@@ -110,7 +110,7 @@ impl<'lock> LockedJournalGate<'lock> {
     }
 }
 
-fn pending_operation_error(command: &str, subject: &str, path: &Path) -> CliError {
+pub(crate) fn pending_operation_error(command: &str, subject: &str, path: &Path) -> CliError {
     CliError::Runtime {
         command: command.to_string(),
         reason: format!(

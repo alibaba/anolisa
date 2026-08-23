@@ -398,8 +398,8 @@ fn command_policy(command: &Commands) -> CommandPolicy {
             ComponentCommands::Doctor(_) => CommandPolicy::new("doctor", CommandScope::ReadOnly),
             ComponentCommands::Logs(_) => CommandPolicy::new("logs", CommandScope::ReadOnly),
             // Preview lists recorded/discovered units and does not
-            // daemon-reload or restart, so `--dry-run` can waive root
-            // like install/uninstall/repair/forget.
+            // daemon-reload, restart, or take the exclusive install lock,
+            // so `--dry-run` can waive root like install/uninstall/repair/forget.
             ComponentCommands::Restart(_) => mode_scoped("restart", true),
             // `update --check` is read-only upgrade detection: it only runs
             // read-only rpm/dnf queries (no package transaction, no state

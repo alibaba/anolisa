@@ -29,14 +29,17 @@
 //!   6. Calls `restart_service(unit)` per unit. Per-unit failures are collected
 //!      as warnings; a unit systemctl refuses does NOT abort the whole op.
 //!
-//! The selected state-root lock covers lookup through service dispatch. This
-//! prevents restart from racing teardown and makes the same pending-recovery
-//! gate used by other lifecycle mutations authoritative here as well.
+//! The execute path holds the exclusive state-root lock from lookup through
+//! service dispatch so restart cannot race teardown and the pending-recovery
+//! gate stays authoritative. `--dry-run` reads the same state and journals
+//! without creating or exclusively locking that root, matching
+//! forget/repair previews, so a non-root system preview can render a plan
+//! on a root-owned install.
 
 use clap::Parser;
 
 use anolisa_core::domain::{Installation, ProviderBinding};
-use anolisa_core::facts::JournalEvidence;
+use anolisa_core::facts::{JournalEvidence, pending_journal_for};
 use anolisa_core::lock::InstallLock;
 use anolisa_core::{
     ObjectKind, ServiceManager, ServiceScope, ServiceState,
@@ -50,7 +53,7 @@ use anolisa_platform::rpm_query::RpmPackageQuery;
 
 use crate::color::Palette;
 use crate::commands::common;
-use crate::commands::tier1::recovery::LockedJournalGate;
+use crate::commands::tier1::recovery::{LockedJournalGate, pending_operation_error};
 use crate::commands::tier1::rpm_install;
 use crate::context::CliContext;
 use crate::response::{CliError, render_json};
@@ -91,18 +94,33 @@ fn compute_restart_with(
 
     let install_mode = ctx.install_mode.as_str();
     let layout = common::resolve_layout(ctx);
-    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
-        command: command.clone(),
-        reason: format!("failed to acquire install lock: {err}"),
-    })?;
+    // Preview only reads recorded units and journals. Creating or exclusively
+    // locking `/var/lib/anolisa/lock` would fail on a root-owned install
+    // before a non-root `--dry-run` could print the plan.
+    let exclusive_lock = if ctx.dry_run {
+        None
+    } else {
+        Some(
+            InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
+                command: command.clone(),
+                reason: format!("failed to acquire install lock: {err}"),
+            })?,
+        )
+    };
     let (resolved, view) = common::resolve_mutation_target(input, ctx, &command)?;
     let journal_dir = rpm_install::journal_dir(&layout);
-    let journal_gate = LockedJournalGate::load(
-        &_lock,
-        JournalEvidence::new(&journal_dir, &view.writable.state.operations),
-        &command,
-    )?;
-    journal_gate.ensure_clear(&resolved, &command)?;
+    let evidence = JournalEvidence::new(&journal_dir, &view.writable.state.operations);
+    if let Some(ref lock) = exclusive_lock {
+        let journal_gate = LockedJournalGate::load(lock, evidence, &command)?;
+        journal_gate.ensure_clear(&resolved, &command)?;
+    } else if let Some(path) =
+        pending_journal_for(evidence, &resolved).map_err(|err| CliError::Runtime {
+            command: command.clone(),
+            reason: format!("failed to inspect operation journals: {err}"),
+        })?
+    {
+        return Err(pending_operation_error(&command, &resolved, &path));
+    }
     let comp = view
         .writable
         .state
@@ -1163,6 +1181,102 @@ mod tests {
         let err = compute_restart("agentsight", &ctx)
             .expect_err("pending lifecycle must block the preview too");
         assert!(err.reason().contains("pending operation journal"), "{err}");
+    }
+
+    #[test]
+    fn dry_run_does_not_create_the_exclusive_lock() {
+        let (_tmp, ctx) = planted_restart_ctx(true);
+        let layout = FsLayout::system(Some(ctx.prefix.clone().expect("planted prefix")));
+        assert!(
+            !layout.lock_file.exists(),
+            "fixture must start without a lock file"
+        );
+
+        let sys = FakeServiceManager::new();
+        let user = FakeServiceManager::with_scope(ServiceScope::User);
+        let payload =
+            compute_restart_with("agentsight", &ctx, Some((&sys, &user))).expect("dry-run preview");
+
+        assert!(payload.dry_run);
+        assert_eq!(payload.units[0].state, PLANNED_STATE);
+        assert!(
+            !layout.lock_file.exists(),
+            "preview must not create {}",
+            layout.lock_file.display()
+        );
+    }
+
+    #[test]
+    fn dry_run_previews_from_a_non_writable_system_state_root() {
+        // Root ignores directory mode bits, so this models a normal
+        // unprivileged preview against a root-owned `/var/lib/anolisa`.
+        if anolisa_platform::privilege::effective_uid() == 0 {
+            return;
+        }
+
+        let (tmp, dry_ctx) = planted_restart_ctx(true);
+        let layout = FsLayout::system(Some(tmp.path().to_path_buf()));
+        let exec_ctx = ctx_with_options(
+            InstallMode::System,
+            Some(tmp.path().to_path_buf()),
+            crate::test_support::TestContextOptions {
+                dry_run: false,
+                quiet: true,
+                no_color: true,
+                ..Default::default()
+            },
+        );
+        let _restore = RestorePermissions::dir_mode(&layout.state_dir, 0o555, 0o755);
+
+        let sys = FakeServiceManager::new();
+        let user = FakeServiceManager::with_scope(ServiceScope::User);
+        let payload = compute_restart_with("agentsight", &dry_ctx, Some((&sys, &user)))
+            .expect("non-writable preview must still list units");
+        assert!(payload.dry_run);
+        assert_eq!(payload.units[0].unit, PROBE_UNIT);
+        assert_eq!(payload.units[0].state, PLANNED_STATE);
+        assert!(
+            !layout.lock_file.exists(),
+            "preview must not create the exclusive lock"
+        );
+
+        let err = compute_restart("agentsight", &exec_ctx)
+            .expect_err("execute still needs a writable exclusive lock");
+        assert!(
+            err.reason().contains("failed to acquire install lock"),
+            "{err}"
+        );
+    }
+
+    struct RestorePermissions {
+        path: PathBuf,
+        restore: u32,
+    }
+
+    impl RestorePermissions {
+        fn dir_mode(path: &std::path::Path, restrict: u32, restore: u32) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path)
+                .expect("state dir metadata")
+                .permissions();
+            perms.set_mode(restrict);
+            std::fs::set_permissions(path, perms).expect("restrict state dir");
+            Self {
+                path: path.to_path_buf(),
+                restore,
+            }
+        }
+    }
+
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = std::fs::metadata(&self.path) {
+                let mut perms = metadata.permissions();
+                perms.set_mode(self.restore);
+                let _ = std::fs::set_permissions(&self.path, perms);
+            }
+        }
     }
 
     #[test]
