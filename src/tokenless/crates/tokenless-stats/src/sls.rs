@@ -122,8 +122,7 @@ fn resolve_sls_path(env_val: Option<&str>) -> PathBuf {
                 eprintln!(
                     "tokenless-sls: TOKENLESS_SLS_PATH rejected (must be under \
                      /var/log/ or /tmp/, and must not contain '..'), \
-                     falling back to default: {}",
-                    DEFAULT_SLS_PATH
+                     falling back to default: {DEFAULT_SLS_PATH}"
                 );
                 None
             }
@@ -246,7 +245,7 @@ impl SlsWriter {
         let line = match serde_json::to_string(&sls_record) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("tokenless-sls: serialization error: {}", e);
+                eprintln!("tokenless-sls: serialization error: {e}");
                 return;
             }
         };
@@ -374,7 +373,7 @@ mod tests {
             "tokenless.compression.tokens_saved_percent",
         ];
         for expected in &expected_keys {
-            assert!(keys.contains(expected), "missing key: {}", expected);
+            assert!(keys.contains(expected), "missing key: {expected}");
         }
         assert_eq!(keys.len(), expected_keys.len());
     }
@@ -389,8 +388,7 @@ mod tests {
         for key in obj.as_object().unwrap().keys() {
             assert!(
                 !key.chars().any(|c| c.is_ascii_uppercase()),
-                "key contains uppercase: {}",
-                key
+                "key contains uppercase: {key}"
             );
         }
     }
@@ -410,9 +408,7 @@ mod tests {
                         || c == '.'
                         || c == '_'
                         || c == '-',
-                    "invalid char '{}' in key: {}",
-                    c,
-                    key
+                    "invalid char '{c}' in key: {key}"
                 );
             }
         }

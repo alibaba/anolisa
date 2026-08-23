@@ -709,9 +709,9 @@ fn load_spec(
     spec_path: &PathBuf,
 ) -> Result<std::collections::HashMap<String, ToolDepSpec>, String> {
     let content =
-        fs::read_to_string(spec_path).map_err(|e| format!("Failed to read spec file: {}", e))?;
+        fs::read_to_string(spec_path).map_err(|e| format!("Failed to read spec file: {e}"))?;
     let value: Value =
-        serde_json::from_str(&content).map_err(|e| format!("Failed to parse spec JSON: {}", e))?;
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse spec JSON: {e}"))?;
 
     let mut specs = std::collections::HashMap::new();
     // Skip _comment key
@@ -855,7 +855,7 @@ fn format_dep_status(status: &DepStatus) -> String {
             installed,
             required,
         } => {
-            format!("version low ({} < {})", installed, required)
+            format!("version low ({installed} < {required})")
         }
     }
 }
@@ -869,7 +869,7 @@ fn format_dep_status_label(status: &DepStatus) -> String {
             installed,
             required,
         } => {
-            format!("OUTDATED ({}/{})", installed, required)
+            format!("OUTDATED ({installed}/{required})")
         }
     }
 }
@@ -906,15 +906,15 @@ fn generate_checklist(results: &[ToolReadyResult]) -> String {
         }
         for (cfg, ok) in &result.config_results {
             let label = if *ok { "INSTALLED" } else { "MISSING" };
-            output.push_str(&format!("  config:     {:12} {}\n", cfg, label));
+            output.push_str(&format!("  config:     {cfg:12} {label}\n"));
         }
         for (perm, ok) in &result.permission_results {
             let label = if *ok { "GRANTED" } else { "DENIED" };
-            output.push_str(&format!("  permission: {:12} {}\n", perm, label));
+            output.push_str(&format!("  permission: {perm:12} {label}\n"));
         }
         for (net, ok) in &result.network_results {
             let label = if *ok { "OK" } else { "FAIL" };
-            output.push_str(&format!("  network:    {:12} {}\n", net, label));
+            output.push_str(&format!("  network:    {net:12} {label}\n"));
         }
         if !result.required_results.is_empty()
             || !result.recommended_results.is_empty()
@@ -944,11 +944,10 @@ fn generate_checklist(results: &[ToolReadyResult]) -> String {
         .count();
 
     let mut summary = format!(
-        "Summary: {} ready, {} partial, {} not ready",
-        ready_count, partial_count, not_ready_count
+        "Summary: {ready_count} ready, {partial_count} partial, {not_ready_count} not ready"
     );
     if unknown_count > 0 {
-        summary.push_str(&format!(", {} unknown", unknown_count));
+        summary.push_str(&format!(", {unknown_count} unknown"));
     }
     summary.push_str(&format!(" (total: {})\n", results.len()));
     output.push_str(&summary);
@@ -1176,8 +1175,8 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
         })
         .collect();
 
-    let json_str = serde_json::to_string(&deps_json)
-        .map_err(|e| format!("Failed to serialize deps: {}", e))?;
+    let json_str =
+        serde_json::to_string(&deps_json).map_err(|e| format!("Failed to serialize deps: {e}"))?;
 
     // Use timeout if available (coreutils procps), otherwise run without timeout
     let has_timeout = Command::new("sh")
@@ -1196,7 +1195,7 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|e| format!("Failed to run env-fix: {}", e))?
+            .map_err(|e| format!("Failed to run env-fix: {e}"))?
     } else {
         Command::new("bash")
             .arg(&fix_script)
@@ -1205,7 +1204,7 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|e| format!("Failed to run env-fix: {}", e))?
+            .map_err(|e| format!("Failed to run env-fix: {e}"))?
     };
 
     let mut stdin_handle = child
@@ -1214,12 +1213,12 @@ fn auto_fix(missing_deps: &[DepEntry]) -> Result<String, String> {
         .ok_or_else(|| "Failed to open stdin for env-fix process".to_string())?;
     stdin_handle
         .write_all(json_str.as_bytes())
-        .map_err(|e| format!("Failed to write deps to env-fix stdin: {}", e))?;
+        .map_err(|e| format!("Failed to write deps to env-fix stdin: {e}"))?;
     drop(stdin_handle);
 
     let output = child
         .wait_with_output()
-        .map_err(|e| format!("Failed to wait for env-fix: {}", e))?;
+        .map_err(|e| format!("Failed to wait for env-fix: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.status.success() {
@@ -1309,7 +1308,7 @@ fn build_json_result(
     if *status == ReadyStatus::NotReady {
         let diag_parts: Vec<String> = missing
             .iter()
-            .map(|m| format!("required dependency missing: {}", m))
+            .map(|m| format!("required dependency missing: {m}"))
             .collect();
         obj.insert(
             "diagnostic".to_string(),
@@ -1369,8 +1368,8 @@ pub fn run(
             .collect();
         if json {
             let json_value = serde_json::to_string(&generate_checklist_json(&results))
-                .map_err(|e| (format!("Failed to serialize checklist JSON: {}", e), 1))?;
-            println!("{}", json_value);
+                .map_err(|e| (format!("Failed to serialize checklist JSON: {e}"), 1))?;
+            println!("{json_value}");
         } else {
             println!("{}", generate_checklist(&results));
         }
@@ -1448,7 +1447,7 @@ pub fn run(
             let fix_output = auto_fix(&fixable_deps).map_err(|e| (e, 1))?;
             if !json {
                 for line in fix_output.lines() {
-                    println!("  {}", line);
+                    println!("  {line}");
                 }
             }
 

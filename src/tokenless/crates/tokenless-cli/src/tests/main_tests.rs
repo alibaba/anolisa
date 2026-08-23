@@ -30,22 +30,22 @@ impl TempDbGuard {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let test_dir = format!("{}/.tokenless-test-{}", home, nanos);
-        let sls_dir = format!("/tmp/tokenless-sls-test-{}", nanos);
+        let test_dir = format!("{home}/.tokenless-test-{nanos}");
+        let sls_dir = format!("/tmp/tokenless-sls-test-{nanos}");
         std::fs::create_dir_all(&test_dir).unwrap();
         std::fs::create_dir_all(&sls_dir).unwrap();
-        let sls_path = format!("{}/tokenless.jsonl", sls_dir);
+        let sls_path = format!("{sls_dir}/tokenless.jsonl");
         // Pre-create the JSONL file so SlsWriter::write can open it.
         std::fs::write(&sls_path, "").unwrap();
         let prev_stats_db = std::env::var_os("TOKENLESS_STATS_DB");
         let prev_stash_db = std::env::var_os("TOKENLESS_STASH_DB");
         let prev_sls_path = std::env::var_os("TOKENLESS_SLS_PATH");
         unsafe {
-            std::env::set_var("TOKENLESS_STATS_DB", format!("{}/stats.db", test_dir));
-            std::env::set_var("TOKENLESS_STASH_DB", format!("{}/stash.db", test_dir));
+            std::env::set_var("TOKENLESS_STATS_DB", format!("{test_dir}/stats.db"));
+            std::env::set_var("TOKENLESS_STASH_DB", format!("{test_dir}/stash.db"));
             std::env::set_var("TOKENLESS_SLS_PATH", &sls_path);
         }
-        let stash_db_path = format!("{}/stash.db", test_dir);
+        let stash_db_path = format!("{test_dir}/stash.db");
         Some(TempDbGuard {
             _lock: lock,
             test_dir,
@@ -238,8 +238,7 @@ fn validate_db_path_canonicalizes_home_with_symlink_prefix() {
     let result = validate_db_path(&inner, home.to_str().unwrap(), None);
     assert!(
         result.is_ok(),
-        "raw (non-canonical) home should be accepted after internal canonicalization: {:?}",
-        result
+        "raw (non-canonical) home should be accepted after internal canonicalization: {result:?}"
     );
     std::fs::remove_dir_all(&home).ok();
 }
@@ -259,8 +258,7 @@ fn validate_db_path_rejects_parent_dir_bypass_with_nonexistent_parent() {
     );
     assert!(
         result.is_err(),
-        "ParentDir bypass via nonexistent intermediate must be rejected; got {:?}",
-        result
+        "ParentDir bypass via nonexistent intermediate must be rejected; got {result:?}"
     );
     std::fs::remove_dir_all(&home).ok();
 }
@@ -785,7 +783,7 @@ fn run_command_retrieve_with_marker() {
     }
     let store = store.unwrap();
     let key = store.stash("hello world").unwrap().key;
-    let marker = format!("<<tokenless:{}>>", key);
+    let marker = format!("<<tokenless:{key}>>");
     let result = run_command(Commands::Retrieve {
         hash: marker,
         stash_db: None,

@@ -165,10 +165,7 @@ impl SchemaCompressor {
                 Ok(false) => {}
                 Err(e) => {
                     self.record_stash_error();
-                    eprintln!(
-                        "[tokenless] stash: rollback delete failed for key {}: {e}",
-                        key
-                    );
+                    eprintln!("[tokenless] stash: rollback delete failed for key {key}: {e}");
                 }
             }
         }

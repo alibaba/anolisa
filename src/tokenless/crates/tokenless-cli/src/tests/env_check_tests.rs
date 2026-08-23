@@ -307,7 +307,7 @@ fn format_dep_status_all() {
 fn expand_path_home() {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let expanded = expand_path("~/.copilot-shell/settings.json");
-    assert_eq!(expanded, format!("{}/.copilot-shell/settings.json", home));
+    assert_eq!(expanded, format!("{home}/.copilot-shell/settings.json"));
 }
 
 #[test]
@@ -1111,7 +1111,7 @@ fn expand_path_tilde_subdir() {
         return;
     }
     let expanded = expand_path("~/.config");
-    assert_eq!(expanded, format!("{}/.config", home));
+    assert_eq!(expanded, format!("{home}/.config"));
 }
 
 #[test]

@@ -137,8 +137,7 @@ impl SqliteStore {
     fn lock_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|poisoned| {
             eprintln!(
-                "[tokenless-ccr] WARNING: sqlite mutex poisoned by a previous panic; recovering: {}",
-                poisoned
+                "[tokenless-ccr] WARNING: sqlite mutex poisoned by a previous panic; recovering: {poisoned}"
             );
             self.conn.clear_poison();
             poisoned.into_inner()
@@ -256,7 +255,7 @@ impl StashStore for SqliteStore {
         // `SqliteCcrStore::get`. Best-effort — a purge failure must not block
         // the lookup; it falls through to the SELECT below.
         if let Err(e) = conn.execute("DELETE FROM stash WHERE expires_at < ?", [now as i64]) {
-            eprintln!("[tokenless-ccr] WARNING: stash lazy-purge failed: {}", e);
+            eprintln!("[tokenless-ccr] WARNING: stash lazy-purge failed: {e}");
         }
         match conn.query_row(
             "SELECT payload FROM stash WHERE hash = ? AND expires_at >= ?",

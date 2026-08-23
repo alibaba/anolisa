@@ -554,8 +554,7 @@ fn test_truncate_at_sentence_boundary() {
     // Should truncate at a sentence boundary
     assert!(
         result.ends_with('.'),
-        "Result '{}' should end with '.'",
-        result
+        "Result '{result}' should end with '.'"
     );
     assert!(result.len() <= 60);
 }

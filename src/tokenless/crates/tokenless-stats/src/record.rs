@@ -41,7 +41,7 @@ impl FromStr for OperationType {
             "compress-response" => Ok(OperationType::CompressResponse),
             "rewrite-command" => Ok(OperationType::RewriteCommand),
             "compress-toon" => Ok(OperationType::CompressToon),
-            other => Err(format!("unknown operation type: {}", other)),
+            other => Err(format!("unknown operation type: {other}")),
         }
     }
 }
@@ -260,7 +260,7 @@ impl StatsRecord {
     pub fn format_summary_line(&self) -> String {
         let pid = self
             .source_pid
-            .map(|p| format!(" pid:{}", p))
+            .map(|p| format!(" pid:{p}"))
             .unwrap_or_default();
         let session = self.session_id.as_deref().unwrap_or("-");
         let tool = self.tool_use_id.as_deref().unwrap_or("-");

@@ -153,8 +153,7 @@ fn retrieve(args: Value, store: &Option<Arc<dyn StashStore>>) -> Value {
         None if is_valid_hash(hash) => hash,
         None => {
             return tool_error(&format!(
-                "invalid stash hash: {:?} (expected 24 hex chars or a <<tokenless:HASH>> marker)",
-                hash
+                "invalid stash hash: {hash:?} (expected 24 hex chars or a <<tokenless:HASH>> marker)"
             ));
         }
     };

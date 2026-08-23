@@ -236,10 +236,7 @@ impl ResponseCompressor {
                     // surface the failure — a silent orphan is worse than a
                     // loud warning (AGENTS.md: do not swallow operational errors).
                     self.record_stash_error();
-                    eprintln!(
-                        "[tokenless] stash: rollback delete failed for key {}: {e}",
-                        key
-                    );
+                    eprintln!("[tokenless] stash: rollback delete failed for key {key}: {e}");
                 }
             }
         }
@@ -385,7 +382,7 @@ impl ResponseCompressor {
         let truncated = &s[..truncate_pos];
 
         if attach_marker {
-            Value::String(format!("{}{}", truncated, LOSSY_MARKER))
+            Value::String(format!("{truncated}{LOSSY_MARKER}"))
         } else {
             Value::String(truncated.to_string())
         }
@@ -441,7 +438,7 @@ impl ResponseCompressor {
                     remaining,
                     marker_for(&key)
                 ),
-                None => format!("<... {} more items truncated, not stashed>", remaining),
+                None => format!("<... {remaining} more items truncated, not stashed>"),
             };
             result.push(Value::String(marker));
         } else if truncate && self.stash_store.is_some() {

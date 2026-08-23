@@ -11,7 +11,7 @@ use tokenless_schema::{ResponseCompressor, SchemaCompressor};
 
 fn load_fixture(dir: &str, name: &str) -> Value {
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let path = format!("{}/tests/fixtures/{}/{}", manifest, dir, name);
+    let path = format!("{manifest}/tests/fixtures/{dir}/{name}");
     let content = std::fs::read_to_string(&path).expect("load fixture");
     serde_json::from_str(&content).expect("parse fixture")
 }
@@ -130,21 +130,17 @@ fn main() {
     .map(|(name, _)| (*name, load_fixture("responses", name)))
     .collect();
 
-    println!("Tokenless Benchmark ({} iterations per test)\n", ITERATIONS);
+    println!("Tokenless Benchmark ({ITERATIONS} iterations per test)\n");
 
     println!("L1 — SchemaCompressor (no stash)");
     for (name, fixture) in &schema_fixtures {
-        print_result(&run_schema_bench(
-            &format!("schema/{}", name),
-            fixture,
-            false,
-        ));
+        print_result(&run_schema_bench(&format!("schema/{name}"), fixture, false));
     }
 
     println!("\nL1 — SchemaCompressor + Stash (reversible)");
     for (name, fixture) in &schema_fixtures {
         print_result(&run_schema_bench(
-            &format!("schema+stash/{}", name),
+            &format!("schema+stash/{name}"),
             fixture,
             true,
         ));

@@ -19,7 +19,7 @@ fn fixtures_dir() -> String {
 fn load_schema(name: &str) -> Value {
     let path = format!("{}/{}", fixtures_dir(), name);
     let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("Failed to load schema {}: {}", path, e));
+        .unwrap_or_else(|e| panic!("Failed to load schema {path}: {e}"));
     serde_json::from_str(&content).unwrap()
 }
 
@@ -30,7 +30,7 @@ fn response_fixtures_dir() -> String {
 fn load_response(name: &str) -> Value {
     let path = format!("{}/{}", response_fixtures_dir(), name);
     let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("Failed to load response {}: {}", path, e));
+        .unwrap_or_else(|e| panic!("Failed to load response {path}: {e}"));
     serde_json::from_str(&content).unwrap()
 }
 
@@ -410,9 +410,7 @@ fn test_fixture_hubspot_contact() {
     let comp_len = serde_json::to_string(&compressed).unwrap().len();
     assert!(
         comp_len < orig_len,
-        "Should compress: original={}, compressed={}",
-        orig_len,
-        comp_len
+        "Should compress: original={orig_len}, compressed={comp_len}"
     );
 
     // Enum preserved on lifecyclestage
@@ -436,9 +434,7 @@ fn test_fixture_stripe_payment() {
     let comp_len = serde_json::to_string(&compressed).unwrap().len();
     assert!(
         comp_len < orig_len,
-        "Should compress: original={}, compressed={}",
-        orig_len,
-        comp_len
+        "Should compress: original={orig_len}, compressed={comp_len}"
     );
 }
 
@@ -459,22 +455,19 @@ fn test_all_fixtures_produce_valid_json() {
         let compressed = compressor.compress(&schema);
 
         // Must be valid JSON object
-        assert!(compressed.is_object(), "{} should compress to object", name);
+        assert!(compressed.is_object(), "{name} should compress to object");
 
         // Serialization round-trip must succeed
         let json_str = serde_json::to_string(&compressed).unwrap();
         let reparsed: Value = serde_json::from_str(&json_str).unwrap();
-        assert!(reparsed.is_object(), "{} round-trip failed", name);
+        assert!(reparsed.is_object(), "{name} round-trip failed");
 
         // Compression ratio > 0
         let orig_len = serde_json::to_string(&schema).unwrap().len();
         let comp_len = json_str.len();
         assert!(
             comp_len <= orig_len,
-            "{}: compressed ({}) should be <= original ({})",
-            name,
-            comp_len,
-            orig_len
+            "{name}: compressed ({comp_len}) should be <= original ({orig_len})"
         );
 
         // The top-level "type": "function" discriminant must be preserved when present.
@@ -482,8 +475,7 @@ fn test_all_fixtures_produce_valid_json() {
             assert_eq!(
                 compressed.get("type"),
                 schema.get("type"),
-                "{}: top-level \"type\" field must survive compression",
-                name
+                "{name}: top-level \"type\" field must survive compression"
             );
         }
     }
@@ -512,25 +504,18 @@ fn test_fixture_compression_ratio_benchmark() {
         let comp = serde_json::to_string(&compressed).unwrap().len();
 
         let saved = (1.0 - comp as f64 / orig as f64) * 100.0;
-        println!(
-            "{:<30} {} -> {} bytes ({:.1}% saved)",
-            name, orig, comp, saved
-        );
+        println!("{name:<30} {orig} -> {comp} bytes ({saved:.1}% saved)");
 
         total_orig += orig;
         total_comp += comp;
     }
 
     let avg_saved = (1.0 - total_comp as f64 / total_orig as f64) * 100.0;
-    println!(
-        "TOTAL: {} -> {} ({:.1}% saved)",
-        total_orig, total_comp, avg_saved
-    );
+    println!("TOTAL: {total_orig} -> {total_comp} ({avg_saved:.1}% saved)");
 
     assert!(
         avg_saved >= 5.0,
-        "Average compression should be >= 5%, got {:.1}%",
-        avg_saved
+        "Average compression should be >= 5%, got {avg_saved:.1}%"
     );
 }
 
@@ -577,10 +562,7 @@ fn bench_l1_schema_compressor() {
         let orig = byte_len(&schema);
         let comp = byte_len(&compressed);
         let saved = (1.0 - comp as f64 / orig as f64) * 100.0;
-        println!(
-            "  {:<35} {:>6} -> {:>6} ({:.1}% saved)",
-            name, orig, comp, saved
-        );
+        println!("  {name:<35} {orig:>6} -> {comp:>6} ({saved:.1}% saved)");
         total_orig += orig;
         total_comp += comp;
     }
@@ -593,8 +575,7 @@ fn bench_l1_schema_compressor() {
 
     assert!(
         overall >= 5.0,
-        "L1 schema: expected >= 5% savings, got {:.1}%",
-        overall
+        "L1 schema: expected >= 5% savings, got {overall:.1}%"
     );
 }
 
@@ -612,10 +593,7 @@ fn bench_l1_response_compressor() {
         let orig = byte_len(&response);
         let comp = byte_len(&compressed);
         let saved = (1.0 - comp as f64 / orig as f64) * 100.0;
-        println!(
-            "  {:<35} {:>6} -> {:>6} ({:.1}% saved)",
-            name, orig, comp, saved
-        );
+        println!("  {name:<35} {orig:>6} -> {comp:>6} ({saved:.1}% saved)");
         total_orig += orig;
         total_comp += comp;
     }
@@ -628,8 +606,7 @@ fn bench_l1_response_compressor() {
 
     assert!(
         overall > 0.0,
-        "L1 response: expected some savings, got {:.1}%",
-        overall
+        "L1 response: expected some savings, got {overall:.1}%"
     );
 }
 
@@ -734,8 +711,7 @@ fn bench_l1_stash_response() {
         serde_json::from_str(&retrieved).expect("stashed payload must be valid JSON");
     assert!(
         tail.is_array(),
-        "stashed payload must be an array of the dropped items, got: {:?}",
-        tail
+        "stashed payload must be an array of the dropped items, got: {tail:?}"
     );
     assert!(
         !tail.as_array().unwrap().is_empty(),
@@ -770,14 +746,7 @@ fn bench_l2_schema_response_pipeline() {
             let combined_saved = (1.0 - combined_comp as f64 / combined_orig as f64) * 100.0;
 
             println!(
-                "  {} + {}: schema {:.1}% | response {:.1}% | combined {:.1}% ({} -> {})",
-                schema_name,
-                resp_name,
-                schema_saved,
-                resp_saved,
-                combined_saved,
-                combined_orig,
-                combined_comp
+                "  {schema_name} + {resp_name}: schema {schema_saved:.1}% | response {resp_saved:.1}% | combined {combined_saved:.1}% ({combined_orig} -> {combined_comp})"
             );
         }
     }
@@ -870,10 +839,7 @@ fn bench_l4_full_pipeline_aggregate() {
     }
 
     let overall = (1.0 - grand_comp as f64 / grand_orig as f64) * 100.0;
-    println!(
-        "\n  GRAND TOTAL: {} -> {} bytes ({:.1}% saved)",
-        grand_orig, grand_comp, overall
-    );
+    println!("\n  GRAND TOTAL: {grand_orig} -> {grand_comp} bytes ({overall:.1}% saved)");
     println!(
         "  Stash entries: {} (schema fields stashed reversibly; response savings include lossy field removal)",
         store.len()

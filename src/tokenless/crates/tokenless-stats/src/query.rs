@@ -350,10 +350,7 @@ pub fn format_compare(baseline: &[StatsRecord], tokenless: &[StatsRecord]) -> St
         } else {
             0.0
         };
-        output.push_str(&format!(
-            "{:<22}{:>12}{:>14}{:>10}{:>11.1}%\n",
-            op, b, t, saved, pct
-        ));
+        output.push_str(&format!("{op:<22}{b:>12}{t:>14}{saved:>10}{pct:>11.1}%\n"));
     }
 
     output.push_str(&"-".repeat(68));

@@ -281,10 +281,10 @@ fn read_input(file: &Option<String>) -> Result<String, String> {
         Some(path) => {
             let mut content = String::new();
             fs::File::open(path)
-                .map_err(|e| format!("Failed to open file '{}': {}", path, e))?
+                .map_err(|e| format!("Failed to open file '{path}': {e}"))?
                 .take(limit)
                 .read_to_string(&mut content)
-                .map_err(|e| format!("Failed to read file '{}': {}", path, e))?;
+                .map_err(|e| format!("Failed to read file '{path}': {e}"))?;
             if content.len() > MAX_INPUT_BYTES {
                 return Err(too_large());
             }
@@ -300,7 +300,7 @@ fn read_input(file: &Option<String>) -> Result<String, String> {
                 .lock()
                 .take(limit)
                 .read_to_string(&mut buf)
-                .map_err(|e| format!("Failed to read stdin: {}", e))?;
+                .map_err(|e| format!("Failed to read stdin: {e}"))?;
             if buf.len() > MAX_INPUT_BYTES {
                 return Err(too_large());
             }
@@ -365,7 +365,7 @@ fn get_db_path_with(paths: &DatabasePathResolver) -> Result<PathBuf, String> {
         Ok(env_path) if !env_path.is_empty() => {
             match validate_db_path(Path::new(&env_path), home, data_dir.ok()) {
                 Ok(path) => return Ok(path),
-                Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STATS_DB: {}", reason),
+                Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STATS_DB: {reason}"),
             }
         }
         _ => {}
@@ -390,7 +390,7 @@ fn validate_db_path(path: &Path, home: &str, data_dir: Option<&Path>) -> Result<
 fn ensure_db_dir(db_path: &Path) -> Result<(), (String, i32)> {
     if let Some(parent) = db_path.parent() {
         ensure_state_dir(parent)
-            .map_err(|e| (format!("Failed to create database directory: {}", e), 1))?;
+            .map_err(|e| (format!("Failed to create database directory: {e}"), 1))?;
     }
     Ok(())
 }
@@ -401,9 +401,9 @@ fn open_recorder() -> Result<StatsRecorder, (String, i32)> {
 
 fn open_recorder_with(paths: &DatabasePathResolver) -> Result<StatsRecorder, (String, i32)> {
     let db_path = get_db_path_with(paths)
-        .map_err(|error| (format!("Stats database unavailable: {}", error), 1))?;
+        .map_err(|error| (format!("Stats database unavailable: {error}"), 1))?;
     ensure_db_dir(&db_path)?;
-    StatsRecorder::new(db_path).map_err(|e| (format!("Failed to open database: {}", e), 1))
+    StatsRecorder::new(db_path).map_err(|e| (format!("Failed to open database: {e}"), 1))
 }
 
 /// Resolve the stash database path under a trusted state root.
@@ -424,7 +424,7 @@ fn get_stash_db_path_with(
     if let Some(p) = override_path.filter(|s| !s.is_empty()) {
         match validate_db_path(Path::new(p), home, data_dir.ok()) {
             Ok(valid) => return Ok(valid),
-            Err(reason) => eprintln!("[tokenless] rejecting --stash-db {}: {}", p, reason),
+            Err(reason) => eprintln!("[tokenless] rejecting --stash-db {p}: {reason}"),
         }
     }
     if let Ok(env_path) = std::env::var("TOKENLESS_STASH_DB")
@@ -432,7 +432,7 @@ fn get_stash_db_path_with(
     {
         match validate_db_path(Path::new(&env_path), home, data_dir.ok()) {
             Ok(path) => return Ok(path),
-            Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STASH_DB: {}", reason),
+            Err(reason) => eprintln!("[tokenless] ignoring TOKENLESS_STASH_DB: {reason}"),
         }
     }
     let data_dir = data_dir.map_err(str::to_string)?;
@@ -472,7 +472,7 @@ fn open_stash_store_with(
     match open_stash_store_or_err_with(paths, override_path) {
         Ok(store) => Some(store),
         Err(e) => {
-            eprintln!("[tokenless] stash disabled: {}", e);
+            eprintln!("[tokenless] stash disabled: {e}");
             None
         }
     }
@@ -495,8 +495,8 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             stash_db,
         } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
-            let value: serde_json::Value = serde_json::from_str(&input)
-                .map_err(|e| (format!("JSON parse error: {}", e), 2))?;
+            let value: serde_json::Value =
+                serde_json::from_str(&input).map_err(|e| (format!("JSON parse error: {e}"), 2))?;
 
             // Load config before deciding on the stash so we can skip it
             // entirely when compression is disabled (dry-run). Attaching the
@@ -532,8 +532,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             let after_tokens = estimate_tokens(&after_compact);
             let output_text = if after_tokens >= before_tokens {
                 eprintln!(
-                    "tokenless: schema compression did not reduce size ({} -> {} est. tokens), outputting original",
-                    before_tokens, after_tokens
+                    "tokenless: schema compression did not reduce size ({before_tokens} -> {after_tokens} est. tokens), outputting original"
                 );
                 // Discarded compressed output never reaches the LLM, so roll
                 // back stash keys created during this compress — otherwise
@@ -560,7 +559,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             } else {
                 input.clone()
             };
-            println!("{}", emit_text);
+            println!("{emit_text}");
 
             record_compression_stats(
                 &config,
@@ -676,7 +675,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             let store = match open_stash_store_or_err(stash_db.as_deref()) {
                 Ok(s) => s,
                 Err(e) => {
-                    return Err((format!("stash unavailable: {}", e), 1));
+                    return Err((format!("stash unavailable: {e}"), 1));
                 }
             };
             let payload = retrieve_from_store(store.as_ref(), &hash)
@@ -701,10 +700,10 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                         let tokenless_sid = sessions[1].as_str();
                         let baseline = recorder
                             .records_by_session(baseline_sid, limit)
-                            .map_err(|e| (format!("Failed to query baseline: {}", e), 1))?;
+                            .map_err(|e| (format!("Failed to query baseline: {e}"), 1))?;
                         let tokenless = recorder
                             .records_by_session(tokenless_sid, limit)
-                            .map_err(|e| (format!("Failed to query tokenless: {}", e), 1))?;
+                            .map_err(|e| (format!("Failed to query tokenless: {e}"), 1))?;
                         if let Some(message) = missing_compare_sessions(
                             baseline_sid,
                             tokenless_sid,
@@ -726,7 +725,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     }
                     let records = recorder
                         .all_records(limit)
-                        .map_err(|e| (format!("Failed to query records: {}", e), 1))?;
+                        .map_err(|e| (format!("Failed to query records: {e}"), 1))?;
                     if json {
                         println!("{}", tokenless_stats::format_summary_json(&records, None));
                     } else {
@@ -740,15 +739,15 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     let recorder = open_recorder()?;
                     let records = recorder
                         .all_records(Some(limit))
-                        .map_err(|e| (format!("Failed to query records: {}", e), 1))?;
+                        .map_err(|e| (format!("Failed to query records: {e}"), 1))?;
                     println!("{}", format_list(&records, limit));
                 }
                 StatsCommands::Show { id } => {
                     let recorder = open_recorder()?;
                     let record = recorder
                         .record_by_id(id)
-                        .map_err(|e| (format!("Failed to query record: {}", e), 1))?
-                        .ok_or_else(|| (format!("Record not found: {}", id), 1))?;
+                        .map_err(|e| (format!("Failed to query record: {e}"), 1))?
+                        .ok_or_else(|| (format!("Record not found: {id}"), 1))?;
                     println!("{}", format_show(&record));
                 }
                 StatsCommands::Diff {
@@ -766,20 +765,20 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                         (Some(id), None) => {
                             let record = recorder
                                 .record_by_id(id)
-                                .map_err(|e| (format!("Failed to query record: {}", e), 1))?
-                                .ok_or_else(|| (format!("Record not found: {}", id), 1))?;
+                                .map_err(|e| (format!("Failed to query record: {e}"), 1))?
+                                .ok_or_else(|| (format!("Record not found: {id}"), 1))?;
                             record_report(&record, context)
                         }
                         (None, Some(session_id)) => {
                             let records = recorder
                                 .records_for_diff(&session_id, tool_use_id.as_deref())
-                                .map_err(|e| (format!("Failed to query diff records: {}", e), 1))?;
+                                .map_err(|e| (format!("Failed to query diff records: {e}"), 1))?;
                             if records.is_empty() {
                                 let scope = tool_use_id.as_deref().map_or_else(
                                     || format!("session {session_id:?}"),
                                     |tool| format!("tool use {tool:?} in session {session_id:?}"),
                                 );
-                                return Err((format!("No records found for {}", scope), 1));
+                                return Err((format!("No records found for {scope}"), 1));
                             }
                             if let Some(tool_use_id) = tool_use_id {
                                 tool_use_report(&records, &session_id, &tool_use_id, context)
@@ -801,8 +800,8 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     };
                     if json {
                         let output = serde_json::to_string_pretty(&report)
-                            .map_err(|e| (format!("Failed to serialize diff report: {}", e), 1))?;
-                        println!("{}", output);
+                            .map_err(|e| (format!("Failed to serialize diff report: {e}"), 1))?;
+                        println!("{output}");
                     } else {
                         let color = !no_color
                             && std::env::var_os("NO_COLOR").is_none()
@@ -827,7 +826,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     }
                     recorder
                         .clear()
-                        .map_err(|e| (format!("Failed to clear: {}", e), 1))?;
+                        .map_err(|e| (format!("Failed to clear: {e}"), 1))?;
                     println!("Statistics cleared.");
                 }
                 StatsCommands::Status => {
@@ -852,7 +851,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     } else {
                         "default"
                     };
-                    println!("Stats recording: {} (via {})", stats_state, stats_source);
+                    println!("Stats recording: {stats_state} (via {stats_source})");
 
                     let sls_state = if config.is_sls_enabled() {
                         "ENABLED"
@@ -866,7 +865,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     } else {
                         "default"
                     };
-                    println!("SLS recording:   {} (via {})", sls_state, sls_source);
+                    println!("SLS recording:   {sls_state} (via {sls_source})");
                 }
                 StatsCommands::Enable => {
                     persist_stats_enabled(true)?;
@@ -941,12 +940,12 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
         Commands::DecompressToon { file } => {
             let input = read_input(&file).map_err(|e| (e, 2))?;
             let value: serde_json::Value = toon_format::decode_default(&input)
-                .map_err(|e| (format!("toon decode failed: {}", e), 2))?;
+                .map_err(|e| (format!("toon decode failed: {e}"), 2))?;
             let output = serde_json::to_string_pretty(&value)
-                .map_err(|e| (format!("Serialization error: {}", e), 2))?;
+                .map_err(|e| (format!("Serialization error: {e}"), 2))?;
             let output = output.trim_end().to_string();
             if !output.is_empty() {
-                println!("{}", output);
+                println!("{output}");
             }
         }
         Commands::EnvCheck {
@@ -981,8 +980,7 @@ fn resolve_mode(
         CompressionMode::Active
     } else {
         eprintln!(
-            "tokenless: dry-run mode (compression disabled) — emitted original, predicted {} -> {} est. tokens",
-            before_tokens, after_tokens
+            "tokenless: dry-run mode (compression disabled) — emitted original, predicted {before_tokens} -> {after_tokens} est. tokens"
         );
         CompressionMode::DryRun
     }
@@ -1037,7 +1035,7 @@ fn persist_stats_enabled(enabled: bool) -> Result<(), (String, i32)> {
     let config = stats_persist_snapshot(TokenlessConfig::load_from_file(), enabled);
     config
         .save()
-        .map_err(|e| (format!("Failed to save config: {}", e), 1))?;
+        .map_err(|e| (format!("Failed to save config: {e}"), 1))?;
     Ok(())
 }
 
@@ -1128,7 +1126,7 @@ fn record_compression_stats(
 
 fn main() {
     if let Err((msg, code)) = run() {
-        eprintln!("Error: {}", msg);
+        eprintln!("Error: {msg}");
         process::exit(code);
     }
 }
