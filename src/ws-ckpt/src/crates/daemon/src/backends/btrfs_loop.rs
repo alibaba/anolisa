@@ -12,6 +12,7 @@ use ws_ckpt_common::persist::LoopImgState;
 use ws_ckpt_common::{DaemonConfig, DiffEntry, WorkspaceInfo, SNAPSHOTS_DIR};
 
 use super::btrfs_common;
+use super::rollback_recovery;
 use crate::util::{is_mounted, run_command, run_command_checked};
 use btrfs_common::{backup_path_for, recover_orphan_backup, resolve_symlink_path};
 
@@ -29,6 +30,12 @@ impl BtrfsLoopBackend {
             img_path,
             snapshots_dir,
         }
+    }
+
+    async fn recover_interrupted_rollbacks(&self) -> anyhow::Result<()> {
+        rollback_recovery::recover_interrupted_rollbacks(&self.mount_path)
+            .await
+            .context("failed to recover interrupted BtrfsLoop rollback")
     }
 
     /// Internal init implementation; caller wraps with cleanup-on-failure. Sets `*backup_owned` after step 3.
@@ -527,6 +534,9 @@ impl StorageBackend for BtrfsLoopBackend {
         tokio::fs::create_dir_all(&snapshots_dir)
             .await
             .context("Failed to create snapshots directory")?;
+
+        // Startup awaits bootstrap before rebuilding workspace watchers.
+        self.recover_interrupted_rollbacks().await?;
 
         info!("BtrfsLoop bootstrap complete (img={:?})", self.img_path);
         Ok(())
@@ -1219,9 +1229,29 @@ fn parse_df_total(output: &str) -> anyhow::Result<u64> {
 mod tests {
     use super::{
         compute_target_size, derive_img_dir, parse_df_available, parse_df_total, parse_losetup_j,
+        BtrfsLoopBackend,
     };
+    use ws_ckpt_common::SNAPSHOTS_DIR;
 
     const GB: u64 = 1024 * 1024 * 1024;
+
+    #[tokio::test]
+    async fn recovery_scans_loop_mount_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mount_path = tmp.path().join("mount");
+        tokio::fs::create_dir_all(&mount_path).await.unwrap();
+        let candidate = mount_path.join("ws-abc123.rollback-tmp");
+        tokio::fs::write(&candidate, b"foreign").await.unwrap();
+        tokio::fs::create_dir_all(mount_path.join(SNAPSHOTS_DIR).join("ws-abc123"))
+            .await
+            .unwrap();
+        let backend = BtrfsLoopBackend::new(mount_path, tmp.path().join("image"));
+
+        let error = backend.recover_interrupted_rollbacks().await.unwrap_err();
+
+        assert!(format!("{error:#}").contains("ambiguous interrupted rollback"));
+        assert!(candidate.exists(), "unsafe candidate must be preserved");
+    }
 
     #[test]
     fn parses_available_column_from_df_b1() {

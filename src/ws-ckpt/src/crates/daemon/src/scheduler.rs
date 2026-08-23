@@ -1,18 +1,15 @@
-//! Background scheduler: auto-cleanup, health check, and orphan recovery.
+//! Background scheduler: auto-cleanup and health checks.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use tokio::time::Duration;
 use tracing::{debug, error, info, warn};
 
-use crate::backends::btrfs_common;
 use crate::snapshot_mgr::{delete_snapshots_locked, ensure_index_dir, persist_index_after_cleanup};
 use crate::state::DaemonState;
 use ws_ckpt_common::{CleanupRetention, EffectivePolicy};
 
-/// Start background scheduler tasks: orphan cleanup on boot, periodic auto-cleanup,
-/// and periodic health checks.
+/// Start background scheduler tasks: periodic auto-cleanup and health checks.
 ///
 /// Config hot-reload is **push-based**: the dispatcher calls
 /// `state.config_notify.notify_waiters()` after updating `state.config`, and
@@ -21,14 +18,6 @@ use ws_ckpt_common::{CleanupRetention, EffectivePolicy};
 /// (`auto_cleanup = false` or `*_interval_secs == 0`) blocks on the notify
 /// at zero CPU cost until a reload re-enables it.
 pub fn start_scheduler(state: Arc<DaemonState>) {
-    // Startup orphan cleanup
-    let mount_path = state.mount_path.clone();
-    tokio::spawn(async move {
-        if let Err(e) = cleanup_orphans(&mount_path).await {
-            error!("Failed to cleanup orphans: {}", e);
-        }
-    });
-
     // Periodic auto-cleanup: reacts to `ReloadConfig` via `config_notify`.
     let state_clone = state.clone();
     tokio::spawn(async move {
@@ -101,60 +90,6 @@ async fn health_check_loop(state: Arc<DaemonState>) {
             _ = notified.as_mut() => {}
         }
     }
-}
-
-/// Orphan recovery: clean up `.rollback-tmp` residual directories.
-///
-/// Scans the mount path for directories ending with `.rollback-tmp`
-/// and removes them. Returns the list of cleaned-up paths.
-pub async fn cleanup_orphans(mount_path: &Path) -> Result<Vec<String>, anyhow::Error> {
-    let mut cleaned = Vec::new();
-
-    let read_dir = match std::fs::read_dir(mount_path) {
-        Ok(rd) => rd,
-        Err(e) => {
-            warn!("Cannot read mount path for orphan cleanup: {}", e);
-            return Ok(cleaned);
-        }
-    };
-
-    for entry in read_dir {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy().to_string();
-        let path = entry.path();
-
-        if name_str.ends_with(".rollback-tmp") {
-            info!("Cleaning up orphan directory: {:?}", path);
-
-            // Try btrfs subvolume delete first, fall back to remove_dir_all
-            match btrfs_common::delete_subvolume(&path).await {
-                Ok(()) => {
-                    info!("Deleted orphan subvolume: {:?}", path);
-                }
-                Err(_) => {
-                    // Fallback: try regular directory removal
-                    if let Err(e) = tokio::fs::remove_dir_all(&path).await {
-                        warn!("Failed to remove orphan directory {:?}: {}", path, e);
-                        continue;
-                    }
-                    info!("Removed orphan directory: {:?}", path);
-                }
-            }
-
-            cleaned.push(path.to_string_lossy().to_string());
-        }
-    }
-
-    if !cleaned.is_empty() {
-        info!("Orphan cleanup complete: {} items removed", cleaned.len());
-    }
-
-    Ok(cleaned)
 }
 
 /// Auto-cleanup: purge non-pinned snapshots per `CleanupRetention` (pinned always kept).
@@ -297,48 +232,6 @@ async fn health_check(state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn cleanup_orphans_removes_rollback_tmp() {
-        let dir = tempfile::tempdir().unwrap();
-        let orphan1 = dir.path().join("ws-abc123.rollback-tmp");
-        let normal = dir.path().join("ws-normal");
-
-        std::fs::create_dir(&orphan1).unwrap();
-        std::fs::create_dir(&normal).unwrap();
-
-        let cleaned = cleanup_orphans(dir.path()).await.unwrap();
-
-        assert_eq!(cleaned.len(), 1);
-        assert!(!orphan1.exists(), "rollback-tmp should be removed");
-        assert!(normal.exists(), "normal directory should remain");
-    }
-
-    #[tokio::test]
-    async fn cleanup_orphans_empty_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let cleaned = cleanup_orphans(dir.path()).await.unwrap();
-        assert!(cleaned.is_empty());
-    }
-
-    #[tokio::test]
-    async fn cleanup_orphans_nonexistent_path() {
-        let result = cleanup_orphans(Path::new("/nonexistent/path/12345")).await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn cleanup_orphans_only_normal_dirs() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("ws-abc")).unwrap();
-        std::fs::create_dir(dir.path().join("snapshots")).unwrap();
-
-        let cleaned = cleanup_orphans(dir.path()).await.unwrap();
-        assert!(cleaned.is_empty());
-    }
-
     // ── Per-workspace effective policy invariants ──
     // Backend-free: only assert the routing rules `auto_cleanup_loop` relies on.
     use ws_ckpt_common::{CleanupRetention, DaemonConfig, WorkspacePolicy};
