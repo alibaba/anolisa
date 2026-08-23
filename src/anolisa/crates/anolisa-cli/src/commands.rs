@@ -397,7 +397,10 @@ fn command_policy(command: &Commands) -> CommandPolicy {
             ComponentCommands::Status(_) => CommandPolicy::new("status", CommandScope::ReadOnly),
             ComponentCommands::Doctor(_) => CommandPolicy::new("doctor", CommandScope::ReadOnly),
             ComponentCommands::Logs(_) => CommandPolicy::new("logs", CommandScope::ReadOnly),
-            ComponentCommands::Restart(_) => mode_scoped("restart", false),
+            // Preview lists recorded/discovered units and does not
+            // daemon-reload or restart, so `--dry-run` can waive root
+            // like install/uninstall/repair/forget.
+            ComponentCommands::Restart(_) => mode_scoped("restart", true),
             // `update --check` is read-only upgrade detection: it only runs
             // read-only rpm/dnf queries (no package transaction, no state
             // writes), so it must not be gated behind the mutating-update root
@@ -609,6 +612,28 @@ mod tests {
 
         validate_global_args_with_euid(&ctx, mode_scoped("install", true), 1000, true)
             .expect("non-root system dry-run should reach preview-capable handlers");
+    }
+
+    #[test]
+    fn restart_policy_allows_system_dry_run_without_root() {
+        let command =
+            Commands::Component(ComponentCommands::Restart(tier1::restart::RestartArgs {
+                component: "cosh".to_string(),
+            }));
+        let policy = command_policy(&command);
+        let mut ctx = ctx_with_prefix(PathBuf::from("/"));
+        ctx.dry_run = true;
+
+        validate_global_args_with_euid(&ctx, policy, 1000, true)
+            .expect("non-root system restart dry-run should reach the preview handler");
+        let err = validate_global_args_with_euid(
+            &ctx_with_prefix(PathBuf::from("/")),
+            policy,
+            1000,
+            true,
+        )
+        .expect_err("a real system restart still requires root");
+        assert_eq!(err.code(), "PERMISSION_DENIED");
     }
 
     #[test]

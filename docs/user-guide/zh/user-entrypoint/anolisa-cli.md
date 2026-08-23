@@ -119,9 +119,14 @@ system root 时，它会在修复建议中补全
 重启所选 scope 安装记录中的 service：
 
 ```bash
+anolisa --dry-run --install-mode user restart <component>
 anolisa --install-mode user restart <component>
+anolisa --dry-run --install-mode system restart <component>
 sudo anolisa --install-mode system restart <component>
 ```
+
+`--dry-run` 只列出将要重启的 unit，不会执行 `systemctl daemon-reload`
+或 `systemctl restart`。
 
 ### upgrade
 
