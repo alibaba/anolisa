@@ -49,6 +49,10 @@ sed 's|{libexecdir}/cosh-ng|%{_libexecdir_cosh}|g' \
     packaging/systemd/cosh-gateway@.service.in \
     > %{buildroot}%{_unitdir}/cosh-gateway@.service
 chmod 0644 %{buildroot}%{_unitdir}/cosh-gateway@.service
+sed 's|{libexecdir}/cosh-ng|%{_libexecdir_cosh}|g' \
+    packaging/systemd/cosh-gateway-acp@.service.in \
+    > %{buildroot}%{_unitdir}/cosh-gateway-acp@.service
+chmod 0644 %{buildroot}%{_unitdir}/cosh-gateway-acp@.service
 
 # Install CLI binary
 install -d %{buildroot}%{_bindir}
@@ -98,6 +102,7 @@ install -m 0644 component.toml %{buildroot}%{_datadir}/anolisa/components/cosh-n
 %{_libexecdir_cosh}/cosh-gateway
 %{_libexecdir_cosh}/cosh-shell
 %{_unitdir}/cosh-gateway@.service
+%{_unitdir}/cosh-gateway-acp@.service
 %{_datadir}/anolisa/components/cosh-ng/component.toml
 
 %preun
@@ -119,12 +124,14 @@ if [ "$1" -eq 0 ]; then
     printf '%s\n' "$users" >&2
     exit 1
   fi
-  if [ -d /run/systemd/system ] && ! systemctl stop 'cosh-gateway@*.service'; then
+  if [ -d /run/systemd/system ] && \
+      ! systemctl stop 'cosh-gateway@*.service' 'cosh-gateway-acp@*.service'; then
     echo "error: cannot uninstall cosh-ng: failed to stop running Gateway instances." >&2
     exit 1
   fi
 fi
 %systemd_preun cosh-gateway@.service
+%systemd_preun cosh-gateway-acp@.service
 
 %post -p <lua>
 local nl = '\n'

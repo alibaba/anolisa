@@ -16,6 +16,7 @@ use crate::slash::recommendations::render_recommendations_command;
 use crate::slash::session::render_session_command;
 use crate::slash::skills::{completion_skill_names, render_skills_command};
 use crate::slash::status::{render_stats_command, render_status_command};
+use crate::slash::task::render_task_command;
 
 pub(super) fn render_slash_command<W: Write>(
     command: SlashCommand<'_>,
@@ -134,6 +135,7 @@ pub(super) fn render_slash_command<W: Write>(
         SlashCommand::Session(arguments) => {
             render_session_command(arguments, blocks, adapter, state, output)
         }
+        SlashCommand::Task(arguments) => render_task_command(arguments, state, output),
         SlashCommand::Recommendations(sub, arg, extra) => {
             render_recommendations_command(sub, arg, extra, event, adapter, state, output)?;
             Ok(true)

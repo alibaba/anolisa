@@ -17,7 +17,7 @@ while IFS= read -r line; do
     step=$((step + 1))
     case "$step" in
         1)
-            printf '%s\n' '{"jsonrpc":"2.0","id":"cosh-acp-1","result":{"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":"entrypoint-fake","version":"1.0"}}}'
+            printf '%s\n' '{"jsonrpc":"2.0","id":"cosh-acp-1","result":{"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":"@agentclientprotocol/codex-acp","title":"Codex","version":"1.6.2"},"_meta":{"jetbrains":{"air":{"version":1,"capabilities":["sessionFailure","agentFileChangeReport"]}}}}}'
             ;;
         2)
             printf '%s\n' '{"jsonrpc":"2.0","id":"cosh-acp-2","result":{"sessionId":"entrypoint-session"}}'
@@ -46,7 +46,7 @@ while IFS= read -r line; do
     step=$((step + 1))
     case "$step" in
         1)
-            printf '%s\n' '{"jsonrpc":"2.0","id":"cosh-acp-1","result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            printf '%s\n' '{"jsonrpc":"2.0","id":"cosh-acp-1","result":{"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":"@agentclientprotocol/codex-acp","title":"Codex","version":"1.6.2"},"_meta":{"jetbrains":{"air":{"version":1,"capabilities":["sessionFailure","agentFileChangeReport"]}}}}}'
             ;;
         2)
             printf '%s\n' '{"jsonrpc":"2.0","id":"cosh-acp-2","result":{"sessionId":"permission-session"}}'
@@ -355,6 +355,8 @@ fn serve_help_exposes_closed_profile_runtime_inputs() {
         "--capability-profile",
         "--checkpoint-socket",
         "--security-audit",
+        "--acp-profile",
+        "--acp-adapter",
     ] {
         assert!(stdout.contains(governed), "{stdout}");
     }
@@ -472,6 +474,27 @@ fn packaged_base_service_is_task_only_and_free_of_ws_ckpt_dependency() {
     assert!(!unit.contains("--adapter="));
     assert!(!unit.contains("--profile="));
     assert!(!unit.contains("--runtime-backend="));
+}
+
+#[test]
+fn packaged_acp_service_keeps_tasks_alive_outside_ssh() {
+    let unit = include_str!("../../../packaging/systemd/cosh-gateway-acp@.service.in");
+
+    for required in [
+        "--capability-profile=delegated-acp-v1",
+        "--acp-profile=codex",
+        "--acp-adapter=${COSH_GATEWAY_ACP_ADAPTER}",
+        "--workspace=${COSH_GATEWAY_WORKSPACE}",
+        "KillMode=control-group",
+        "Restart=on-failure",
+        "NoNewPrivileges=true",
+        "ProtectSystem=full",
+        "RestrictSUIDSGID=true",
+    ] {
+        assert!(unit.contains(required), "{required}");
+    }
+    assert!(!unit.contains("--core-executable"));
+    assert!(!unit.contains("--checkpoint-socket"));
 }
 
 #[test]

@@ -13,7 +13,10 @@ use cosh_gateway_contracts::{
     },
 };
 
-use crate::daemon::{RuntimeFactory, RuntimeHandle, RuntimePoll, ScheduledRun, StartedRuntime};
+use crate::daemon::{
+    RuntimeCancellationCause, RuntimeFactory, RuntimeHandle, RuntimePoll, ScheduledRun,
+    StartedRuntime,
+};
 use cosh_gateway_contracts::task::CancelReason;
 
 use super::{AgentRuntimePort, AgentRuntimePortError};

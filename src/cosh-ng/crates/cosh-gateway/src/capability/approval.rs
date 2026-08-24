@@ -20,9 +20,9 @@ use crate::storage::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DurableApprovalOutcome {
     /// The actor denied the request and no executable authority was created.
-    NotPermitted(ApprovalRecord),
+    NotPermitted(Box<ApprovalRecord>),
     /// The actor approved and an exact single-use permit was persisted.
-    Permit(PermitRecord),
+    Permit(Box<PermitRecord>),
 }
 
 /// Complete trusted input for one approval resolution and optional permit issuance.
@@ -154,6 +154,7 @@ impl<'a> DurableApprovalCoordinator<'a> {
         request: &CapabilityRequest,
         approval: &ApprovalRequest,
         permission: &RuntimePermissionRef,
+        binding: &cosh_gateway_contracts::common::RuntimeBindingRef,
         lease: &LeaseClaim,
     ) -> Result<ApprovalRecord, DurableApprovalError> {
         validate_approval_binding(request, approval)?;
@@ -183,10 +184,9 @@ impl<'a> DurableApprovalCoordinator<'a> {
             created_at_ms: command.committed_at_ms,
             updated_at_ms: command.committed_at_ms,
         };
-        Ok(ledger_value(
-            self.store
-                .create_provider_approval(command, &record, lease)?,
-        ))
+        Ok(ledger_value(self.store.create_provider_approval(
+            command, approval, &record, binding, lease,
+        )?))
     }
 
     /// Resolves provider-native approval evidence and prepares one response.
@@ -242,7 +242,7 @@ impl<'a> DurableApprovalCoordinator<'a> {
         if resolution.decision == ApprovalDecision::Deny
             || resolved.state != ApprovalState::Approved
         {
-            return Ok(DurableApprovalOutcome::NotPermitted(resolved));
+            return Ok(DurableApprovalOutcome::NotPermitted(Box::new(resolved)));
         }
         if resolution.policy_revision == 0 {
             return Err(DurableApprovalError::InvalidPolicyRevision);
@@ -277,10 +277,10 @@ impl<'a> DurableApprovalCoordinator<'a> {
             valid_until_ms,
             single_use: true,
         };
-        Ok(DurableApprovalOutcome::Permit(ledger_value(
+        Ok(DurableApprovalOutcome::Permit(Box::new(ledger_value(
             self.store
                 .issue_permit(resolution.permit_command, &permit)?,
-        )))
+        ))))
     }
 }
 

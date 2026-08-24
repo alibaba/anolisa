@@ -70,6 +70,20 @@ fn daemon_config(socket_path: PathBuf, database_path: PathBuf) -> GatewayDaemonC
     }
 }
 
+fn delegated_daemon_config(socket_path: PathBuf, database_path: PathBuf) -> GatewayDaemonConfig {
+    GatewayDaemonConfig {
+        socket_path,
+        database_path,
+        installation_id: None,
+        capability_profile: GatewayCapabilityProfile::delegated_acp_v1(),
+        workspace: WorkspaceRef {
+            scope_digest: sha256_digest(b"cosh.gateway.test.delegated-workspace.v1"),
+            display_name: None,
+        },
+        runtime: acp_runtime(),
+    }
+}
+
 struct FakeFactory {
     polls: Option<VecDeque<RuntimePoll>>,
     started: Arc<Mutex<Vec<ScheduledRun>>>,
@@ -1345,6 +1359,25 @@ fn bind_accepts_the_exact_brokered_core_selector() {
 
     let daemon = GatewayDaemon::bind(daemon_config(socket_path.clone(), database_path.clone()))
         .expect("the exact brokered Core selector must be admitted");
+
+    assert!(socket_path.exists());
+    assert!(database_path.exists());
+    drop(daemon);
+    assert!(!socket_path.exists());
+}
+
+#[test]
+fn bind_accepts_the_exact_delegated_acp_selector() {
+    let root = private_tempdir();
+    let socket_dir = private_directory(&root, "runtime");
+    let socket_path = socket_dir.join("gateway.sock");
+    let database_path = root.path().join("gateway.db");
+
+    let daemon = GatewayDaemon::bind(delegated_daemon_config(
+        socket_path.clone(),
+        database_path.clone(),
+    ))
+    .expect("the exact delegated ACP selector must be admitted");
 
     assert!(socket_path.exists());
     assert!(database_path.exists());

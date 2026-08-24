@@ -44,13 +44,12 @@ pub(super) fn decode_runtime_start_intent(
     value: serde_json::Value,
     expected_profile: GatewayCapabilityProfile,
 ) -> Result<RuntimeStartIntent, GatewayDaemonError> {
-    let header = serde_json::from_value::<RuntimeStartIntentHeader>(value.clone()).map_err(
-        |error| {
+    let header =
+        serde_json::from_value::<RuntimeStartIntentHeader>(value.clone()).map_err(|error| {
             GatewayDaemonError::Protocol(format!(
                 "runtime start intent has no valid schema version: {error}"
             ))
-        },
-    )?;
+        })?;
     let intent = match header.schema_version {
         RUNTIME_START_SCHEMA_VERSION => serde_json::from_value::<RuntimeStartIntent>(value)?,
         2 => {
@@ -110,18 +109,25 @@ fn is_task_only_runtime(runtime: &RuntimeSelector) -> bool {
         && runtime.profile.as_ref().map(BoundedName::as_str) == Some("gateway-brokered-v1")
 }
 
-fn runtime_matches_profile(
-    profile: GatewayCapabilityProfile,
-    runtime: &RuntimeSelector,
-) -> bool {
-    if runtime.runtime.as_str() != "core" {
-        return false;
+fn runtime_matches_profile(profile: GatewayCapabilityProfile, runtime: &RuntimeSelector) -> bool {
+    match profile.id() {
+        GatewayCapabilityProfileId::TaskOnlyV1 => {
+            runtime.runtime.as_str() == "core"
+                && runtime.profile.as_ref().map(BoundedName::as_str) == Some("gateway-brokered-v1")
+        }
+        GatewayCapabilityProfileId::WorkspaceCheckpointV1 => {
+            runtime.runtime.as_str() == "core"
+                && runtime.profile.as_ref().map(BoundedName::as_str)
+                    == Some("gateway-checkpoint-v1")
+        }
+        GatewayCapabilityProfileId::DelegatedAcpV1 => {
+            runtime.runtime.as_str() == "acp"
+                && matches!(
+                    runtime.profile.as_ref().map(BoundedName::as_str),
+                    Some("codex" | "claude-code")
+                )
+        }
     }
-    let expected = match profile.id() {
-        GatewayCapabilityProfileId::TaskOnlyV1 => "gateway-brokered-v1",
-        GatewayCapabilityProfileId::WorkspaceCheckpointV1 => "gateway-checkpoint-v1",
-    };
-    runtime.profile.as_ref().map(BoundedName::as_str) == Some(expected)
 }
 
 /// Immutable work description passed to an injected Runtime factory.
@@ -173,6 +179,13 @@ pub enum RuntimePoll {
         /// Provider-facing operation description sanitized for actor review.
         summary: ToolSummary,
     },
+    /// The Runtime abandoned the exact provider permission callback.
+    PermissionAbandoned {
+        /// Monotonic Runtime event sequence carrying the abandonment.
+        sequence: u64,
+        /// Callback identity that must still match the durable pending approval.
+        permission: RuntimePermissionRef,
+    },
     /// A COSH-owned typed operation is paused before durable takeover.
     BrokeredExecutionRequested {
         /// Exact callback identity fenced to the active Runtime generation.
@@ -195,8 +208,26 @@ pub enum RuntimePoll {
     Succeeded,
     /// The Runtime completed with a safe bounded failure.
     Failed(ContractError),
-    /// The Runtime acknowledged an earlier cancellation request.
-    Cancelled,
+    /// The Runtime ended a turn for a previously established cancellation cause.
+    Cancelled {
+        /// Exact cause established before the terminal event was accepted.
+        cause: RuntimeCancellationCause,
+    },
+}
+
+/// Runtime-local evidence that makes a cancelled terminal expected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeCancellationCause {
+    /// The actor denied the exact provider-native operation.
+    ProviderPermissionDenied {
+        /// Callback whose durable denial preceded the provider response.
+        permission: RuntimePermissionRef,
+    },
+    /// The provider cancelled while the exact callback was still pending.
+    ProviderPermissionAbandoned {
+        /// Callback that was durably closed before accepting cancellation.
+        permission: RuntimePermissionRef,
+    },
 }
 
 /// Active provider-neutral Runtime owned by the scheduler.
@@ -366,6 +397,7 @@ struct ActiveRun {
     binding_closed: bool,
     task_settled: bool,
     pending_permission: Option<PendingPermission>,
+    expected_provider_terminal: Option<ExpectedProviderTerminal>,
     pending_brokered: Option<PendingBrokered>,
     pending_input: Option<RuntimeInputRequestRecord>,
     handle: Box<dyn RuntimeHandle>,
@@ -375,6 +407,18 @@ struct ActiveRun {
 struct PendingPermission {
     permission: RuntimePermissionRef,
     approval: ApprovalRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExpectedProviderTerminal {
+    Denied {
+        approval_id: ApprovalId,
+        permission: RuntimePermissionRef,
+    },
+    Abandoned {
+        approval_id: ApprovalId,
+        permission: RuntimePermissionRef,
+    },
 }
 
 #[derive(Debug, Clone)]

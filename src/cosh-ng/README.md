@@ -127,6 +127,54 @@ runtime. A permission callback prompts only on the local controlling terminal;
 without one, or with `--permission deny`, COSH cancels it. Once-only decisions
 are recorded as redacted evidence under the private local state directory.
 
+### Delegate a persistent Task to local Codex
+
+Install the pinned ACP adapter once, then enable the packaged delegated Task
+unit for one canonical workspace. The environment file also gives the service
+the absolute Node search path needed by an npm-installed adapter:
+
+```bash
+adapter_root="$HOME/.local/lib/cosh/acp-adapters"
+install -d -m 0700 "$(dirname "$adapter_root")"
+./scripts/install-acp-adapters.sh --prefix "$adapter_root"
+node_bin="$(dirname "$(command -v node)")"
+sudo install -d -m 0755 /etc/cosh
+printf 'COSH_GATEWAY_WORKSPACE=%s\nCOSH_GATEWAY_ACP_ADAPTER=%s\nPATH=%s:/usr/bin:/bin\n' \
+  "$(pwd -P)" "$adapter_root/node_modules/.bin/codex-acp" "$node_bin" | \
+  sudo tee "/etc/cosh/gateway-$USER.env" >/dev/null
+sudo systemctl enable --now "cosh-gateway-acp@$USER.service"
+```
+
+The installer and Gateway compatibility profile pin
+`@agentclientprotocol/codex-acp` exactly to `1.6.2`; a different reported
+package identity or version is rejected. With that profile, a typed terminal
+failure or a transport EOF before prompt completion fails the Task instead of
+turning partial output into success. These failure paths have automated and
+deterministic coverage, but the real Codex provider and ECS flow have not been
+rerun after this correction.
+
+The normal entry is the interactive Shell. The goal may contain spaces and
+quotes; Shell generates the idempotency key and selects `acp`/`codex` itself:
+
+```text
+/task upgrade the dependencies, update the code, and run the tests
+/task
+/task show
+/task show <tsk_UUID>
+```
+
+Submission returns a durable Task ID immediately. The system service, rather
+than the SSH session or Shell process, owns the Gateway and Codex adapter, so
+the Task continues after disconnect. `/task` lists recent Tasks and `/task
+show` rebuilds the latest result from durable event pages after reconnect.
+
+Selecting `delegated-acp-v1` is an explicit full-Task grant to the pinned Codex
+ACP adapter. Correlated provider callbacks receive only `allow_once`; COSH does
+not create `allow_always` rules. The adapter runs with the local user's real OS
+authority, not a workspace sandbox. Gateway persists lifecycle and reported
+output, but does not claim exact side-effect receipts for ACP-native tools.
+Checkpoint is optional and is not part of this first delegated profile.
+
 The packaged Gateway provides a contained local Task Plane. It schedules Tasks
 only inside the packaged systemd service, which owns the complete Runtime
 cgroup after a Gateway hard crash. The `gateway-brokered-v1` Core profile is
@@ -174,7 +222,7 @@ cosh agent task --socket "$gateway_socket" retry '<tsk_UUID>' \
 The daemon generates and persists its installation ID on first start; an
 operator may provision one explicitly with `--installation-id`. Replace the
 typed identifiers with values returned by the Task API. The Task API supports
-`submit`, `get`, `events`, `append`, `cancel`, `retry`, and
+`submit`, `list`, `get`, `events`, `append`, `cancel`, `retry`, and
 `resolve-approval`; `append` answers the profile's durable user questions, while
 this profile does not generate approval requests.
 Direct `serve` fails closed without the packaged unit's live `--systemd-unit`
@@ -183,8 +231,9 @@ authenticates the Unix peer as a local OS actor, fixes the target to
 `workspace/cosh/task-only-v1`, admits only the `core`/
 `gateway-brokered-v1` selector and configured canonical workspace, persists
 Runtime bindings, and dispatches durable Outbox work through the scheduler.
-Use `doctor` and `run`, not `serve`, for uncontained local ACP interoperability;
-those direct ACP commands are not governed by the durable Task Plane.
+`doctor` and `run` remain uncontained one-shot ACP interoperability commands.
+Production `serve` accepts ACP only through the exact `delegated-acp-v1`
+profile and its pinned configured adapter.
 The Task Plane has no checkpoint or ws-ckpt dependency. The existing
 `cosh-cli checkpoint` commands remain a separate system-operations path and do
 not add checkpoint capability to this Gateway profile.

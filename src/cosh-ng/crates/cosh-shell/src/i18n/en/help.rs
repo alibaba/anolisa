@@ -116,6 +116,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::HelpGroupSessions => "Sessions",
         MessageId::HelpSummarySession => "discover, resume, and clear Agent sessions",
+        MessageId::HelpSummaryTask => "delegate and inspect persistent local Agent Tasks",
         MessageId::HelpGroupRegistry => "Registry",
         MessageId::HelpSummaryExtensions => "list/manage cosh-core extensions",
         MessageId::HelpSummarySkills => "list/inspect cosh-core skills",

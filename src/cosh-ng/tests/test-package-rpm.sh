@@ -16,8 +16,9 @@ grep -q '^Requires(preun): ' "$SPEC"
 grep -Fxq \
     'Requires(preun):  (%{_bindir}/systemctl if systemd) /usr/bin/getent /usr/bin/awk' \
     "$SPEC"
-grep -Fq "systemctl stop 'cosh-gateway@*.service'" "$SPEC"
+grep -Fq "systemctl stop 'cosh-gateway@*.service' 'cosh-gateway-acp@*.service'" "$SPEC"
 grep -Fxq '%systemd_preun cosh-gateway@.service' "$SPEC"
+grep -Fxq '%systemd_preun cosh-gateway-acp@.service' "$SPEC"
 grep -q '^%post -p <lua>$' "$SPEC"
 # the extraction below slices on section boundaries, so the sections must
 # keep their order: %preun, then %post, then %postun
@@ -145,7 +146,8 @@ install -d -m 0755 "$SYSTEMD_RUNTIME"
 
 PREDICATE="$(sed -n 's/^%define cosh_replacement_ready //p' "$SPEC")"
 PREUN_RAW="$(awk '/^%preun$/{f=1;next} /^%post/{f=0} f' "$SPEC" |
-    sed '/^%systemd_preun cosh-gateway@\.service$/d')"
+    sed -e '/^%systemd_preun cosh-gateway@\.service$/d' \
+        -e '/^%systemd_preun cosh-gateway-acp@\.service$/d')"
 # Bash 5.2 enables patsub_replacement by default, which would expand every
 # unquoted '&' in the substituted predicate to the matched pattern text;
 # keep the replacement strings verbatim.
@@ -210,7 +212,7 @@ test ! -s "$SYSTEMCTL_LOG"
 
 write_stub getent "printf '%s\n' 'root:x:0:0:root:/root:/usr/bin/bash'"
 expect_preun "erase without cosh users" 0 0
-grep -Fxq 'stop cosh-gateway@*.service' "$SYSTEMCTL_LOG"
+grep -Fxq 'stop cosh-gateway@*.service cosh-gateway-acp@*.service' "$SYSTEMCTL_LOG"
 
 write_stub systemctl "printf '%s\n' \"\$*\" >> '$SYSTEMCTL_LOG'; exit 4"
 expect_preun "failed Gateway instance stop" 0 1

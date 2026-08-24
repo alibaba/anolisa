@@ -50,6 +50,18 @@ pub enum AgentRuntimeEvent {
         summary: ToolSummary,
         /// Neutral capability request evaluated by the broker.
         request: CapabilityRequest,
+        /// Complete digested fence for the live provider callback.
+        callback: ProviderPermissionCallbackV2,
+    },
+    /// A cancelled provider turn abandoned callbacks without decisions.
+    ///
+    /// Request identities are COSH-owned; raw provider correlation values do
+    /// not cross the Runtime boundary.
+    ExecutionPermissionsAbandoned {
+        /// Turn that was cancelled while callbacks were pending.
+        turn_id: TurnId,
+        /// Pending COSH permission requests abandoned by the provider.
+        request_ids: Vec<RequestId>,
     },
     /// Runtime requested a typed operation whose effect is owned by COSH.
     BrokeredExecutionRequested {

@@ -254,6 +254,107 @@ impl ToolInvocationAccumulator {
             .and_then(|entry| Self::project(self.authority, &key, entry).ok().flatten())
     }
 
+    /// Promotes a complete permission carrier into the observed tool lifecycle.
+    ///
+    /// This is intentionally valid only for a truly absent invocation. A
+    /// buffered partial update already owns the key and must not be replaced.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed, non-pending, oversized, conflicting, or
+    /// over-capacity carriers.
+    pub fn promote_permission_carrier(
+        &mut self,
+        session_id: &str,
+        turn_id: &TurnId,
+        carrier: &Value,
+    ) -> Result<AcpToolInvocationSnapshot, AcpToolAccumulatorError> {
+        self.validate_identifier("session id", session_id)?;
+        self.validate_payload(carrier)?;
+        let call: ToolCall = serde_json::from_value(carrier.clone())
+            .map_err(|error| AcpToolAccumulatorError::InvalidUpdate(error.to_string()))?;
+        let provider_tool_call_id = call.tool_call_id.to_string();
+        self.validate_identifier("tool call id", &provider_tool_call_id)?;
+        if call.title.is_empty() || call.status != ToolCallStatus::Pending {
+            return Err(AcpToolAccumulatorError::InvalidUpdate(
+                "permission carrier requires a nonempty title and pending status".into(),
+            ));
+        }
+        let key = ToolInvocationKey {
+            session_id: session_id.to_owned(),
+            turn_id: turn_id.clone(),
+            provider_tool_call_id: provider_tool_call_id.clone(),
+        };
+        self.ensure_capacity_for(&key)?;
+        if self.invocations.contains_key(&key) {
+            return Err(AcpToolAccumulatorError::ConflictingCreate {
+                tool_call_id: provider_tool_call_id,
+            });
+        }
+        match self.create(session_id, turn_id, call)? {
+            AcpToolAccumulation::Updated(snapshot) => Ok(snapshot),
+            _ => Err(AcpToolAccumulatorError::MissingAccumulatedCall),
+        }
+    }
+
+    /// Refines an in-progress invocation with a canonical permission carrier.
+    ///
+    /// Some ACP adapters first publish a presentation-oriented tool call and
+    /// later provide the exact executable operation in the permission request.
+    /// This transition preserves the existing COSH tool identity while making
+    /// the permission-bound operation the latest durable projection.
+    ///
+    /// # Errors
+    ///
+    /// Rejects absent, buffered, terminal, non-pending, oversized, or
+    /// mismatched carriers. Callers must additionally authenticate the
+    /// adapter-specific refinement shape before invoking this method.
+    pub fn refine_in_progress_permission_carrier(
+        &mut self,
+        session_id: &str,
+        turn_id: &TurnId,
+        carrier: &Value,
+    ) -> Result<AcpToolInvocationSnapshot, AcpToolAccumulatorError> {
+        self.validate_identifier("session id", session_id)?;
+        self.validate_payload(carrier)?;
+        let call: ToolCall = serde_json::from_value(carrier.clone())
+            .map_err(|error| AcpToolAccumulatorError::InvalidUpdate(error.to_string()))?;
+        let provider_tool_call_id = call.tool_call_id.to_string();
+        self.validate_identifier("tool call id", &provider_tool_call_id)?;
+        if call.title.is_empty() || call.status != ToolCallStatus::Pending {
+            return Err(AcpToolAccumulatorError::InvalidUpdate(
+                "permission refinement requires a nonempty title and pending status".into(),
+            ));
+        }
+        let key = ToolInvocationKey {
+            session_id: session_id.to_owned(),
+            turn_id: turn_id.clone(),
+            provider_tool_call_id: provider_tool_call_id.clone(),
+        };
+        let entry = self.invocations.get_mut(&key).ok_or_else(|| {
+            AcpToolAccumulatorError::ConflictingCreate {
+                tool_call_id: provider_tool_call_id.clone(),
+            }
+        })?;
+        let Some(current) = &entry.call else {
+            return Err(AcpToolAccumulatorError::ConflictingCreate {
+                tool_call_id: provider_tool_call_id,
+            });
+        };
+        if current.status != ToolCallStatus::InProgress || status_is_terminal(current.status) {
+            return Err(AcpToolAccumulatorError::ConflictingCreate {
+                tool_call_id: provider_tool_call_id,
+            });
+        }
+        validate_payload_limit(self.limits.max_payload_bytes, &call)?;
+        let revision = next_revision(entry.revision)?;
+        entry.call = Some(call);
+        entry.buffered = ToolCallUpdateFields::default();
+        entry.revision = revision;
+        Self::project(self.authority, &key, entry)?
+            .ok_or(AcpToolAccumulatorError::MissingAccumulatedCall)
+    }
+
     /// Drops all retained invocation state for a completed turn.
     ///
     /// The caller must persist any audit snapshot before releasing the state.

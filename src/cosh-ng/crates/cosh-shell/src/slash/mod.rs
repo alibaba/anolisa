@@ -25,3 +25,4 @@ pub(super) mod skills;
 #[cfg(test)]
 mod skills_tests;
 pub(super) mod status;
+pub(super) mod task;

@@ -3,8 +3,20 @@
 use serde_json::Value;
 use thiserror::Error;
 
+use cosh_gateway_contracts::common::Digest;
+
 /// Stable ACP wire version negotiated by the first COSH bridge profile.
 pub const ACP_WIRE_PROTOCOL_VERSION: u16 = 1;
+
+/// Adapter-specific protocol extensions enabled for one ACP connection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AcpV1AdapterProfile {
+    /// Use only stable ACP v1 fields.
+    #[default]
+    Generic,
+    /// Use the schema frozen to `@agentclientprotocol/codex-acp` 1.6.2.
+    Codex162,
+}
 
 /// Configuration for one ACP v1 codec instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +27,8 @@ pub struct AcpV1ClientConfig {
     pub version: String,
     /// Maximum accepted or emitted JSON-RPC frame size.
     pub max_frame_bytes: usize,
+    /// Explicit adapter extension profile; executable names never select it.
+    pub adapter_profile: AcpV1AdapterProfile,
 }
 
 impl AcpV1ClientConfig {
@@ -29,7 +43,15 @@ impl AcpV1ClientConfig {
             name: name.into(),
             version: version.into(),
             max_frame_bytes,
+            adapter_profile: AcpV1AdapterProfile::Generic,
         }
+    }
+
+    /// Enables extensions frozen to the selected trusted adapter profile.
+    #[must_use]
+    pub fn adapter_profile(mut self, adapter_profile: AcpV1AdapterProfile) -> Self {
+        self.adapter_profile = adapter_profile;
+        self
     }
 }
 
@@ -163,6 +185,8 @@ pub struct AcpV1PermissionRequest {
     pub tool_call: Value,
     /// Untrusted Agent-provided choices.
     pub options: Vec<AcpV1PermissionOption>,
+    /// Digest of the complete JSON-RPC callback carrier, including extensions.
+    pub callback_payload_digest: Digest,
 }
 
 /// Decision sent back after the COSH governance path resolves a permission.
@@ -222,6 +246,16 @@ pub enum AcpV1Observation {
         session_id: String,
         /// Normalized stable stop reason.
         stop_reason: AcpV1StopReason,
+    },
+    /// A cancelled prompt abandoned unresolved permission callbacks.
+    ///
+    /// Raw request identifiers remain connection-local and are consumed by
+    /// the Runtime port to recover COSH-owned request identities.
+    PromptCancelledWithPendingPermissions {
+        /// Bound Agent session identifier.
+        session_id: String,
+        /// Provider request identities abandoned by the terminal response.
+        request_ids: Vec<AcpV1RequestId>,
     },
     /// Agent returned a JSON-RPC error for a correlated COSH request.
     RequestFailed {
@@ -406,4 +440,20 @@ pub enum AcpV1CodecError {
         /// Number of callbacks still awaiting method-not-found.
         count: usize,
     },
+    /// A Codex profile did not identify the exact adapter schema frozen here.
+    #[error(
+        "Codex ACP adapter identity mismatch: expected @agentclientprotocol/codex-acp 1.6.2, received {name:?} {version:?}"
+    )]
+    CodexAdapterIdentityMismatch {
+        /// Received package identity, or `None` when `agentInfo` was absent.
+        name: Option<String>,
+        /// Received package version, or `None` when `agentInfo` was absent.
+        version: Option<String>,
+    },
+    /// The exact Codex adapter did not complete AIR v1 negotiation.
+    #[error("invalid Codex AIR sessionFailure negotiation: {0}")]
+    InvalidCodexSessionFailureNegotiation(&'static str),
+    /// A negotiated Codex session failure record violated the frozen schema.
+    #[error("invalid Codex AIR sessionFailure record: {0}")]
+    InvalidCodexSessionFailure(&'static str),
 }

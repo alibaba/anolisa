@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use super::{
-    AcpV1BridgeError, AcpV1ClientConfig, AcpV1RuntimeBridge, PinnedDirectory, PinnedExecutable,
-    RuntimeLaunchSpec,
+    AcpV1AdapterProfile, AcpV1BridgeError, AcpV1ClientConfig, AcpV1RuntimeBridge, PinnedDirectory,
+    PinnedExecutable, RuntimeLaunchSpec,
 };
 
 const COMMON_ENVIRONMENT: &[&str] = &[
@@ -229,6 +229,17 @@ impl ResolvedAcpRuntimeProfile {
         spec
     }
 
+    /// Binds protocol extensions to the selected profile without inspecting
+    /// executable contents or restricting user-selected package versions.
+    #[must_use]
+    pub fn bind_client_config(&self, client: AcpV1ClientConfig) -> AcpV1ClientConfig {
+        let adapter_profile = match self.profile {
+            AcpRuntimeProfileId::Codex => AcpV1AdapterProfile::Codex162,
+            AcpRuntimeProfileId::ClaudeCode => AcpV1AdapterProfile::Generic,
+        };
+        client.adapter_profile(adapter_profile)
+    }
+
     /// Launches the pinned adapter with the ACP v1 runtime bridge.
     ///
     /// # Errors
@@ -238,7 +249,8 @@ impl ResolvedAcpRuntimeProfile {
         &self,
         client: AcpV1ClientConfig,
     ) -> Result<AcpV1RuntimeBridge, AcpRuntimeProfileLaunchError> {
-        AcpV1RuntimeBridge::launch(&self.launch_spec(), client).map_err(Into::into)
+        AcpV1RuntimeBridge::launch(&self.launch_spec(), self.bind_client_config(client))
+            .map_err(Into::into)
     }
 }
 

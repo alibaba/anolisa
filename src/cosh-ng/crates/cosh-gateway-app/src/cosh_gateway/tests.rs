@@ -1,6 +1,6 @@
 use super::*;
 
-use super::acp_command::prompt_exit_code;
+use super::acp_command::{abandoned_permission_fields, prompt_exit_code};
 
 #[test]
 fn prompt_stop_reasons_map_to_stable_exit_codes() {
@@ -14,6 +14,24 @@ fn prompt_stop_reasons_map_to_stable_exit_codes() {
     ] {
         assert_eq!(prompt_exit_code(reason), EXIT_AGENT);
     }
+}
+
+#[test]
+fn abandoned_permission_report_is_cancelled_and_omits_provider_request_ids() {
+    let fields = abandoned_permission_fields(
+        "provider-session",
+        &[
+            AcpV1RequestId::Number(41),
+            AcpV1RequestId::String("raw-provider-request-string".to_owned()),
+        ],
+    );
+    let encoded = serde_json::to_string(&fields).unwrap();
+
+    assert_eq!(fields["pending_count"], 2);
+    assert_eq!(fields["stop_reason"], "cancelled");
+    assert!(!encoded.contains("41"));
+    assert!(!encoded.contains("raw-provider-request-string"));
+    assert_eq!(prompt_exit_code(AcpV1StopReason::Cancelled), EXIT_CANCELLED);
 }
 
 #[cfg(unix)]
@@ -50,6 +68,20 @@ fn workspace_registration_path_is_lexically_normalized() {
         Path::new("/work/project")
     );
     assert!(super::serve::normalize_absolute_workspace(Path::new("/../../project")).is_err());
+}
+
+#[test]
+fn delegated_acp_profile_selects_only_the_requested_adapter() {
+    let selector = super::serve::serve_runtime_selector(
+        GatewayCapabilityProfile::delegated_acp_v1(),
+        Profile::Codex,
+    )
+    .unwrap();
+    assert_eq!(selector.runtime.as_str(), "acp");
+    assert_eq!(
+        selector.profile.as_ref().map(BoundedName::as_str),
+        Some("codex")
+    );
 }
 
 #[test]
@@ -132,10 +164,27 @@ fn task_submit_defaults_to_brokered_core_and_fixed_task_only_target() {
     assert_eq!(explicit.runtime, "acp");
     assert_eq!(explicit.runtime_profile, "codex");
     assert_eq!(
+        super::control::target_for_runtime_profile("codex").unwrap(),
+        GatewayCapabilityProfile::delegated_acp_v1().governed_target()
+    );
+    assert_eq!(
         super::control::target_for_runtime_profile(GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE)
             .unwrap(),
         GatewayCapabilityProfile::workspace_checkpoint_v1().governed_target()
     );
+}
+
+#[test]
+fn task_list_has_a_small_bounded_default() {
+    let cli = Cli::try_parse_from(["cosh-gateway", "task", "list"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Task(TaskArgs {
+            command: TaskCommand::List(TaskListArgs { limit: 20 }),
+            ..
+        })
+    ));
+    assert!(Cli::try_parse_from(["cosh-gateway", "task", "list", "--limit", "65"]).is_err());
 }
 
 #[test]

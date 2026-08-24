@@ -57,6 +57,23 @@ impl AgentRuntimePort for FakePort {
         command: AgentRuntimeCommand,
         _deadline: Instant,
     ) -> Result<(), AgentRuntimePortError> {
+        if let AgentRuntimeCommand::Prompt { turn_id, .. } = &command {
+            for envelope in &mut self.events {
+                match &mut envelope.event {
+                    AgentRuntimeEvent::TurnStarted { turn_id: observed }
+                    | AgentRuntimeEvent::ExecutionPermissionRequested {
+                        turn_id: observed, ..
+                    }
+                    | AgentRuntimeEvent::ExecutionPermissionsAbandoned {
+                        turn_id: observed, ..
+                    }
+                    | AgentRuntimeEvent::Completed {
+                        turn_id: observed, ..
+                    } => *observed = turn_id.clone(),
+                    _ => {}
+                }
+            }
+        }
         self.commands.lock().expect("command log").push(command);
         Ok(())
     }
@@ -335,6 +352,243 @@ fn provider_permission_pauses_polling_until_allow_once_is_dispatched() {
         }
     )));
     assert_eq!(started.handle.poll(), RuntimePoll::Succeeded);
+}
+
+#[test]
+fn denied_provider_permission_makes_cancelled_terminal_expected() {
+    let fixture = Fixture::new();
+    let request = capability_request(&fixture);
+    let scripted = Arc::new(Mutex::new(VecDeque::from([fixture.session_opened()])));
+    let port = TurnAwarePort::new(
+        fixture.binding.binding_id.clone(),
+        Arc::clone(&fixture.commands),
+        scripted,
+        TurnOutcome::Cancelled,
+        Some(request),
+        None,
+    );
+    let mut factory = ScheduledAgentRuntimeFactory::new(SinglePortFactory {
+        port: Some(Box::new(port)),
+        workspace: fixture.workspace.clone(),
+    });
+    let mut started = factory.open(&fixture.run).unwrap();
+    started.handle.begin().unwrap();
+    assert_eq!(started.handle.poll(), RuntimePoll::Observed { sequence: 2 });
+    let RuntimePoll::PermissionRequested { permission, .. } = started.handle.poll() else {
+        panic!("provider permission must be observed")
+    };
+    started
+        .handle
+        .resolve_provider_permission(
+            &permission,
+            RuntimePermissionDecision::Deny {
+                code: DenialCode::ApprovalDenied,
+                safe_message: BoundedText::new("Denied by actor").unwrap(),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        started.handle.poll(),
+        RuntimePoll::Cancelled {
+            cause: RuntimeCancellationCause::ProviderPermissionDenied { permission },
+        }
+    );
+}
+
+#[test]
+fn allowed_provider_permission_does_not_authorize_a_cancelled_terminal() {
+    let fixture = Fixture::new();
+    let request = capability_request(&fixture);
+    let scripted = Arc::new(Mutex::new(VecDeque::from([fixture.session_opened()])));
+    let port = TurnAwarePort::new(
+        fixture.binding.binding_id.clone(),
+        Arc::clone(&fixture.commands),
+        scripted,
+        TurnOutcome::Cancelled,
+        Some(request),
+        None,
+    );
+    let mut factory = ScheduledAgentRuntimeFactory::new(SinglePortFactory {
+        port: Some(Box::new(port)),
+        workspace: fixture.workspace.clone(),
+    });
+    let mut started = factory.open(&fixture.run).unwrap();
+    started.handle.begin().unwrap();
+    assert_eq!(started.handle.poll(), RuntimePoll::Observed { sequence: 2 });
+    let RuntimePoll::PermissionRequested { permission, .. } = started.handle.poll() else {
+        panic!("provider permission must be observed")
+    };
+    started
+        .handle
+        .resolve_provider_permission(
+            &permission,
+            RuntimePermissionDecision::ProviderNativeAllowOnce,
+        )
+        .unwrap();
+
+    let RuntimePoll::Failed(error) = started.handle.poll() else {
+        panic!("cancellation after allow-once must remain a provider failure")
+    };
+    assert_eq!(error.code.as_str(), "runtime_turn_cancelled_unsolicited");
+}
+
+#[test]
+fn pending_permission_abandonment_precedes_expected_cancelled_terminal() {
+    let fixture = Fixture::new();
+    let request = capability_request(&fixture);
+    let request_id = request.request_id.clone();
+    let turn_id = TurnId::new();
+    let events = [
+        fixture.session_opened(),
+        fixture.event(
+            2,
+            AgentRuntimeEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+            },
+        ),
+        fixture.event(
+            3,
+            AgentRuntimeEvent::ExecutionPermissionRequested {
+                turn_id: turn_id.clone(),
+                tool_use_id: None,
+                summary: cosh_gateway_contracts::runtime::ToolSummary {
+                    name: BoundedName::new("shell").unwrap(),
+                    summary: BoundedText::new("Read the workspace").unwrap(),
+                },
+                callback: provider_callback(request.operation_digest.clone()),
+                request,
+            },
+        ),
+        fixture.event(
+            4,
+            AgentRuntimeEvent::ExecutionPermissionsAbandoned {
+                turn_id: turn_id.clone(),
+                request_ids: vec![request_id],
+            },
+        ),
+        fixture.event(
+            5,
+            AgentRuntimeEvent::Completed {
+                turn_id,
+                outcome: TurnOutcome::Cancelled,
+            },
+        ),
+    ];
+    let mut factory = fixture.factory(events);
+    let mut started = factory.open(&fixture.run).unwrap();
+    started.handle.begin().unwrap();
+    assert_eq!(started.handle.poll(), RuntimePoll::Observed { sequence: 2 });
+    let RuntimePoll::PermissionRequested { permission, .. } = started.handle.poll() else {
+        panic!("provider permission must be observed")
+    };
+    assert_eq!(
+        started.handle.poll(),
+        RuntimePoll::PermissionAbandoned {
+            sequence: 4,
+            permission: permission.clone(),
+        }
+    );
+    assert_eq!(
+        started.handle.poll(),
+        RuntimePoll::Cancelled {
+            cause: RuntimeCancellationCause::ProviderPermissionAbandoned { permission },
+        }
+    );
+}
+
+#[test]
+fn wrong_abandoned_permission_identity_fails_closed() {
+    let fixture = Fixture::new();
+    let request = capability_request(&fixture);
+    let turn_id = TurnId::new();
+    let events = [
+        fixture.session_opened(),
+        fixture.event(
+            2,
+            AgentRuntimeEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+            },
+        ),
+        fixture.event(
+            3,
+            AgentRuntimeEvent::ExecutionPermissionRequested {
+                turn_id: turn_id.clone(),
+                tool_use_id: None,
+                summary: cosh_gateway_contracts::runtime::ToolSummary {
+                    name: BoundedName::new("shell").unwrap(),
+                    summary: BoundedText::new("Read the workspace").unwrap(),
+                },
+                callback: provider_callback(request.operation_digest.clone()),
+                request,
+            },
+        ),
+        fixture.event(
+            4,
+            AgentRuntimeEvent::ExecutionPermissionsAbandoned {
+                turn_id,
+                request_ids: vec![RequestId::new()],
+            },
+        ),
+    ];
+    let mut factory = fixture.factory(events);
+    let mut started = factory.open(&fixture.run).unwrap();
+    started.handle.begin().unwrap();
+    assert_eq!(started.handle.poll(), RuntimePoll::Observed { sequence: 2 });
+    assert!(matches!(
+        started.handle.poll(),
+        RuntimePoll::PermissionRequested { .. }
+    ));
+    let RuntimePoll::Failed(error) = started.handle.poll() else {
+        panic!("wrong abandonment identity must fail")
+    };
+    assert_eq!(error.code.as_str(), "runtime_event_order_invalid");
+}
+
+#[test]
+fn second_permission_cannot_replace_the_pending_callback() {
+    let fixture = Fixture::new();
+    let first = capability_request(&fixture);
+    let second = capability_request(&fixture);
+    let turn_id = TurnId::new();
+    let permission_event = |sequence, request: CapabilityRequest| {
+        fixture.event(
+            sequence,
+            AgentRuntimeEvent::ExecutionPermissionRequested {
+                turn_id: turn_id.clone(),
+                tool_use_id: None,
+                summary: cosh_gateway_contracts::runtime::ToolSummary {
+                    name: BoundedName::new("shell").unwrap(),
+                    summary: BoundedText::new("Read the workspace").unwrap(),
+                },
+                callback: provider_callback(request.operation_digest.clone()),
+                request,
+            },
+        )
+    };
+    let events = [
+        fixture.session_opened(),
+        fixture.event(
+            2,
+            AgentRuntimeEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+            },
+        ),
+        permission_event(3, first),
+        permission_event(4, second),
+    ];
+    let mut factory = fixture.factory(events);
+    let mut started = factory.open(&fixture.run).unwrap();
+    started.handle.begin().unwrap();
+    assert_eq!(started.handle.poll(), RuntimePoll::Observed { sequence: 2 });
+    assert!(matches!(
+        started.handle.poll(),
+        RuntimePoll::PermissionRequested { .. }
+    ));
+    let RuntimePoll::Failed(error) = started.handle.poll() else {
+        panic!("a second live callback must fail closed")
+    };
+    assert_eq!(error.code.as_str(), "runtime_event_order_invalid");
 }
 
 #[test]
@@ -709,6 +963,7 @@ struct TurnAwarePort {
     fail_brokered_ack: bool,
     input_requested: bool,
     progress: Option<BoundedText>,
+    deferred_permission_terminal: Option<(TurnId, u64)>,
     cancelled: bool,
 }
 
@@ -738,6 +993,7 @@ impl TurnAwarePort {
             fail_brokered_ack: false,
             input_requested: false,
             progress,
+            deferred_permission_terminal: None,
             cancelled: false,
         }
     }
@@ -797,6 +1053,7 @@ impl AgentRuntimePort for TurnAwarePort {
                 self.events.lock().unwrap().push_back(progress);
                 next_sequence += 1;
             }
+            let permission_was_emitted = self.permission.is_some();
             if let Some(request) = self.permission.take() {
                 let mut permission = self.template.clone();
                 permission.sequence = next_sequence;
@@ -804,6 +1061,7 @@ impl AgentRuntimePort for TurnAwarePort {
                 permission.event = AgentRuntimeEvent::ExecutionPermissionRequested {
                     turn_id: turn_id.clone(),
                     tool_use_id: None,
+                    callback: provider_callback(request.operation_digest.clone()),
                     request,
                     summary: cosh_gateway_contracts::runtime::ToolSummary {
                         name: BoundedName::new("shell").unwrap(),
@@ -854,14 +1112,16 @@ impl AgentRuntimePort for TurnAwarePort {
                 self.events.lock().unwrap().push_back(input);
                 next_sequence += 1;
             }
-            let mut completed = self.template.clone();
-            completed.sequence = next_sequence;
-            completed.header.occurred_at_ms = completed.sequence;
-            completed.event = AgentRuntimeEvent::Completed {
-                turn_id: turn_id.clone(),
-                outcome: self.outcome.take().unwrap(),
-            };
-            self.events.lock().unwrap().push_back(completed);
+            if permission_was_emitted {
+                self.deferred_permission_terminal = Some((turn_id.clone(), next_sequence));
+            } else {
+                self.push_completion(turn_id.clone(), next_sequence);
+            }
+        }
+        if matches!(&command, AgentRuntimeCommand::ResolvePermission { .. }) {
+            if let Some((turn_id, sequence)) = self.deferred_permission_terminal.take() {
+                self.push_completion(turn_id, sequence);
+            }
         }
         let close_after_cancel =
             self.cancelled && matches!(&command, AgentRuntimeCommand::Close { .. });
@@ -892,6 +1152,32 @@ impl AgentRuntimePort for TurnAwarePort {
             .ok_or(AgentRuntimePortError::Deadline {
                 operation: "next_event",
             })
+    }
+}
+
+impl TurnAwarePort {
+    fn push_completion(&mut self, turn_id: TurnId, sequence: u64) {
+        let mut completed = self.template.clone();
+        completed.sequence = sequence;
+        completed.header.occurred_at_ms = sequence;
+        completed.event = AgentRuntimeEvent::Completed {
+            turn_id,
+            outcome: self.outcome.take().expect("one terminal outcome"),
+        };
+        self.events.lock().unwrap().push_back(completed);
+    }
+}
+
+fn provider_callback(
+    operation_digest: Digest,
+) -> cosh_gateway_contracts::runtime::ProviderPermissionCallbackV2 {
+    cosh_gateway_contracts::runtime::ProviderPermissionCallbackV2 {
+        provider_session_digest: digest('s'),
+        provider_request_id_digest: digest('r'),
+        provider_tool_call_id_digest: digest('t'),
+        ordered_option_set_digest: digest('o'),
+        callback_payload_digest: digest('c'),
+        normalized_operation_digest: operation_digest,
     }
 }
 

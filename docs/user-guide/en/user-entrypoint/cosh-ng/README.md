@@ -69,6 +69,55 @@ remaining arguments unchanged.
   identifiers, or workspace paths. Evidence persistence failure cancels the
   callback and fails the run. These direct ACP commands are ungoverned by the
   durable Gateway Task Plane and are intended for local interoperability.
+- To hand one persistent Task to local Codex, install the pinned `codex-acp`
+  bundle and enable the packaged `cosh-gateway-acp@.service` for one canonical
+  workspace. Its environment file requires `COSH_GATEWAY_WORKSPACE`, the
+  absolute `COSH_GATEWAY_ACP_ADAPTER`, and a `PATH` that can resolve Node.
+  Configure it once:
+
+  ```bash
+  adapter_root="$HOME/.local/lib/cosh/acp-adapters"
+  install -d -m 0700 "$(dirname "$adapter_root")"
+  ./src/cosh-ng/scripts/install-acp-adapters.sh --prefix "$adapter_root"
+  node_bin="$(dirname "$(command -v node)")"
+  sudo install -d -m 0755 /etc/cosh
+  printf 'COSH_GATEWAY_WORKSPACE=%s\nCOSH_GATEWAY_ACP_ADAPTER=%s\nPATH=%s:/usr/bin:/bin\n' \
+    "$(pwd -P)" "$adapter_root/node_modules/.bin/codex-acp" "$node_bin" | \
+    sudo tee "/etc/cosh/gateway-$USER.env" >/dev/null
+  sudo systemctl enable --now "cosh-gateway-acp@$USER.service"
+  ```
+
+  The bundle and Gateway compatibility profile pin
+  `@agentclientprotocol/codex-acp` exactly to `1.6.2`; Gateway rejects a
+  different reported package identity or version. For this profile, a
+  negotiated typed terminal failure or a transport EOF before prompt
+  completion settles the Run and Task as failed. Partial text remains visible
+  as progress but cannot become a successful terminal result. Deterministic
+  automated tests cover these corrections; the real Codex provider and ECS
+  path have not been rerun after them.
+
+  Inside `cosh`, use the short surface:
+
+  ```text
+  /task upgrade the dependencies, update the code, and run the tests
+  /task
+  /task show
+  /task show <tsk_UUID>
+  ```
+
+  `/task <goal>` generates an idempotency key and selects `acp`/`codex`.
+  Submission returns immediately; the system service owns Gateway and the ACP
+  child, so closing Shell or SSH does not stop the Task. Bare `/task` lists the
+  current user's recent Tasks. `/task show` selects the newest Task, follows all
+  bounded durable event pages, and displays reported progress and terminal
+  state; passing a Task ID selects another Task.
+
+  The exact `delegated-acp-v1` profile is a full-Task grant. A correlated ACP
+  provider callback is recorded and answered with `allow_once`; `allow_always`
+  is never selected. This is local-user authority, not workspace containment.
+  Gateway supervises the process and persists reported events, but cannot
+  attribute ACP-native side effects as governed executions. This profile does
+  not require or create a checkpoint.
 - For durable local Tasks, use the packaged system-scope
   `cosh-gateway@.service`. It selects the contained `core` runtime with the
   `gateway-brokered-v1` profile and admits the configured canonical workspace:
@@ -121,7 +170,7 @@ remaining arguments unchanged.
     --previous-run-id '<run_UUID>' --idempotency-key '<stable-retry-key>'
   ```
 
-  The Task API supports `submit`, `get`, `events`, `append`, `cancel`, `retry`,
+  The Task API supports `submit`, `list`, `get`, `events`, `append`, `cancel`, `retry`,
   and `resolve-approval`. `append` answers the profile's durable
   `ask_user_question` request. `resolve-approval` remains part of the generic
   API, but this profile has no approvable side effect and therefore produces no

@@ -1,4 +1,3 @@
-
 fn require_task_owner(
     transaction: &rusqlite::Connection,
     task_id: &TaskId,
@@ -247,8 +246,12 @@ fn require_provider_permission_context(
     expected_task_state: TaskState,
 ) -> Result<(), StoreError> {
     validate_permission_binding(approval, expected_permission)?;
+    let callback = expected_permission.callback.as_ref().ok_or_else(|| {
+        conflict("legacy provider permission binding cannot regain dispatch authority")
+    })?;
     if approval.actor_id != command.actor_id
         || approval.permission.as_ref() != Some(expected_permission)
+        || callback.normalized_operation_digest != approval.operation_digest
         || lease.task_id != approval.task_id
         || lease.run_id != approval.run_id
         || lease.generation != expected_permission.runtime_generation

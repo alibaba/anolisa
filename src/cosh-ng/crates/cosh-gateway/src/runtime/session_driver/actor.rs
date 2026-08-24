@@ -86,6 +86,7 @@ fn run_actor(
                 let finished = matches!(
                     observation,
                     AcpV1Observation::PromptFinished { .. }
+                        | AcpV1Observation::PromptCancelledWithPendingPermissions { .. }
                         | AcpV1Observation::RequestFailed { .. }
                 );
                 if events.emit(observation).is_err() {

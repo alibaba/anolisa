@@ -5,6 +5,6 @@
   "description": "Pinned official ACP adapters used only by cosh-ng conformance validation",
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.66.0",
-    "@agentclientprotocol/codex-acp": "1.2.0"
+    "@agentclientprotocol/codex-acp": "1.6.2"
   }
 }

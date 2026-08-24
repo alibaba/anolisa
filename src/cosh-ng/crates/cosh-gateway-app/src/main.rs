@@ -25,9 +25,10 @@ use cosh_gateway::runtime::{
     AcpRuntimeProfileId, AcpRuntimeProfileRequest, AcpRuntimeProfileResolver, AcpSessionDriver,
     AcpSessionDriverConfig, AcpSessionEvent, AcpSessionObservation, AcpSessionTerminalKind,
     AcpV1ClientConfig, AcpV1Observation, AcpV1PermissionDecision, AcpV1PermissionOptionKind,
-    AcpV1StopReason, InstalledBrokeredCoreRuntimePortFactory, LinuxSystemdContainmentVerifier,
-    LocalOsActorResolver, ScheduledAgentRuntimeFactory, TrustedWorkspaceResolver,
-    GATEWAY_BROKERED_CORE_RUNTIME_PROFILE, GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE,
+    AcpV1RequestId, AcpV1StopReason, InstalledAcpRuntimePortFactory,
+    InstalledBrokeredCoreRuntimePortFactory, LinuxSystemdContainmentVerifier, LocalOsActorResolver,
+    ScheduledAgentRuntimeFactory, TrustedWorkspaceResolver, GATEWAY_BROKERED_CORE_RUNTIME_PROFILE,
+    GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE,
 };
 use cosh_gateway::storage::{inspect_task_store, SqliteTaskStore, StoreInspectionOutcome};
 use cosh_gateway_contracts::{
@@ -142,6 +143,8 @@ struct TaskArgs {
 enum TaskCommand {
     /// Create one durable Task from stdin or a regular file.
     Submit(TaskSubmitArgs),
+    /// List recent durable Tasks owned by the current local user.
+    List(TaskListArgs),
     /// Read the current durable Task projection.
     Get(TaskIdArgs),
     /// Read a bounded page of durable Task events.
@@ -157,6 +160,13 @@ enum TaskCommand {
 }
 
 #[derive(Debug, Clone, Args)]
+struct TaskListArgs {
+    /// Maximum newest-first Task projections returned.
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=64))]
+    limit: u16,
+}
+
+#[derive(Debug, Clone, Args)]
 struct TaskSubmitArgs {
     /// Read Task intent from this regular file; default is stdin.
     #[arg(long, value_name = "PATH")]
@@ -164,13 +174,12 @@ struct TaskSubmitArgs {
     /// Caller-stable replay key; generate once and reuse after uncertain I/O.
     #[arg(long, value_name = "KEY")]
     idempotency_key: String,
-    /// Runtime kind requested for the first Run. The production daemon admits
-    /// only its configured brokered Core selector; other values are rejected
-    /// at daemon admission and cannot launch an ACP session through this CLI.
+    /// Runtime kind requested for the first Run. It must match the daemon's
+    /// closed capability profile, such as `core` or delegated `acp`.
     #[arg(long, default_value = "core")]
     runtime: String,
-    /// Runtime profile requested for the first Run. The production daemon
-    /// accepts only its configured brokered Core profile.
+    /// Exact Runtime profile requested for the first Run. The daemon rejects
+    /// profiles outside its configured closed capability profile.
     #[arg(long, default_value = GATEWAY_BROKERED_CORE_RUNTIME_PROFILE)]
     runtime_profile: String,
 }
@@ -467,6 +476,9 @@ impl Reporter {
                 Some("reject_once") => eprintln!("ACP permission rejected once"),
                 _ => eprintln!("ACP permission request cancelled"),
             },
+            "permission_callbacks_abandoned" => {
+                eprintln!("ACP prompt cancelled with pending permission callbacks")
+            }
             "prompt_finished" => eprintln!("\nACP prompt finished"),
             "doctor_ok" => println!("ACP adapter is ready"),
             "terminal" => {}
@@ -478,6 +490,7 @@ impl Reporter {
             }
             "task_submitted" => print_task_id(fields),
             "task" => println!("{}", human_json(fields)),
+            "tasks" => println!("{}", human_json(fields)),
             "task_events" => println!("{}", human_json(fields)),
             "task_cancelled" => print_task_id(fields),
             "store_inspection" => println!("{}", human_json(fields)),

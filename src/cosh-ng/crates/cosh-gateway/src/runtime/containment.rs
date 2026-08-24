@@ -110,7 +110,7 @@ impl LinuxSystemdContainmentVerifier {
     ///
     /// # Errors
     ///
-    /// Rejects units outside the bounded `cosh-gateway@.service` template.
+    /// Rejects units outside the bounded Gateway service templates.
     pub fn validate_unit(unit: &str) -> Result<(), RuntimeContainmentError> {
         validate_unit_name(unit)
     }
@@ -159,8 +159,9 @@ fn verify_with(
 }
 
 fn validate_unit_name(unit: &str) -> Result<(), RuntimeContainmentError> {
-    let instance = unit
-        .strip_prefix("cosh-gateway@")
+    let instance = ["cosh-gateway@", "cosh-gateway-acp@"]
+        .into_iter()
+        .find_map(|prefix| unit.strip_prefix(prefix))
         .and_then(|value| value.strip_suffix(".service"));
     if unit.len() > MAX_UNIT_NAME_BYTES
         || instance.is_none_or(str::is_empty)
@@ -440,6 +441,13 @@ mod tests {
         ));
         assert!(matches!(
             verify_with(&inspector, "../cosh-gateway.service"),
+            Err(RuntimeContainmentError::InvalidUnit)
+        ));
+        assert!(
+            LinuxSystemdContainmentVerifier::validate_unit("cosh-gateway-acp@root.service").is_ok()
+        );
+        assert!(matches!(
+            LinuxSystemdContainmentVerifier::validate_unit("cosh-gateway-untrusted@root.service"),
             Err(RuntimeContainmentError::InvalidUnit)
         ));
     }

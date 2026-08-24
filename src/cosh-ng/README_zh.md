@@ -118,6 +118,49 @@ printf '%s\n' 'summarize the current changes' | \
 `--permission deny` 时，COSH 会取消请求。Once-only decision 会以脱敏 evidence 形式记录到
 private local state directory。
 
+### 把持久 Task 委托给本机 Codex
+
+先安装一次 pinned ACP Adapter，再为一个 canonical workspace 启用 package 提供的
+delegated Task unit。Environment file 同时提供 npm Adapter 查找 Node 所需的绝对 PATH。
+
+```bash
+adapter_root="$HOME/.local/lib/cosh/acp-adapters"
+install -d -m 0700 "$(dirname "$adapter_root")"
+./scripts/install-acp-adapters.sh --prefix "$adapter_root"
+node_bin="$(dirname "$(command -v node)")"
+sudo install -d -m 0755 /etc/cosh
+printf 'COSH_GATEWAY_WORKSPACE=%s\nCOSH_GATEWAY_ACP_ADAPTER=%s\nPATH=%s:/usr/bin:/bin\n' \
+  "$(pwd -P)" "$adapter_root/node_modules/.bin/codex-acp" "$node_bin" | \
+  sudo tee "/etc/cosh/gateway-$USER.env" >/dev/null
+sudo systemctl enable --now "cosh-gateway-acp@$USER.service"
+```
+
+安装脚本与 Gateway compatibility profile 将
+`@agentclientprotocol/codex-acp` 精确 pin 到 `1.6.2`；Adapter 上报其他 package
+identity 或版本时会被拒绝。在这个 profile 下，typed terminal failure 或 prompt 完成前的
+transport EOF 会使 Task 失败，不会把 partial output 当成成功。这些 failure path 已有自动化
+deterministic coverage，但修正后尚未重跑真实 Codex provider 与 ECS 流程。
+
+日常入口始终是交互式 Shell。目标可以包含空格和引号，Shell 会自动生成 idempotency key，
+并选择 `acp`/`codex`。
+
+```text
+/task 升级依赖、修改代码并运行测试
+/task
+/task show
+/task show <tsk_UUID>
+```
+
+提交后会立即返回持久 Task ID。Gateway 与 Codex Adapter 由 system service 持有，不依赖
+SSH session 或 Shell process，因此断开后 Task 仍会继续。重新连接后，`/task` 列出最近
+Task，`/task show` 从持久 event page 重建最近 Task 的结果。
+
+选择 `delegated-acp-v1` 表示把整个 Task 显式授权给 pinned Codex ACP Adapter。
+相关 provider callback 只会收到 `allow_once`，COSH 不创建 `allow_always` rule。Adapter
+拥有本地用户真实的 OS authority，并不受 workspace sandbox 限制。Gateway 会持久化生命周期
+和 Adapter 上报的输出，但不会为 ACP native tool 声明精确 side-effect receipt。Checkpoint
+是可选能力，不属于首个 delegated profile。
+
 Package Gateway 提供一个受 containment 保护的本地 Task Plane。它只在 package 安装的
 systemd service 中调度 Task；即使 Gateway hard crash，该 service 仍负责完整 Runtime
 cgroup。`gateway-brokered-v1` Core profile 有意保持为 task-only：Runtime inventory
@@ -158,15 +201,15 @@ cosh agent task --socket "$gateway_socket" retry '<tsk_UUID>' \
 ```
 
 Daemon 首次启动时会生成并持久化 installation ID，也可以通过 `--installation-id` 显式 provision。
-请把示例中的 typed identifier 替换成 Task API 返回的值。Task API 支持 `submit`、`get`、
+请把示例中的 typed identifier 替换成 Task API 返回的值。Task API 支持 `submit`、`list`、`get`、
 `events`、`append`、`cancel`、`retry` 和 `resolve-approval`；`append` 用来回答 profile
 产生的 durable user question，而这个 profile 不会产生 approval request。
 Direct `serve` 没有 package unit 的 live `--systemd-unit` proof 时会 fail closed；Gateway 会在
 创建 socket 或 database 前完成校验。Daemon 会把 Unix peer 认证为 local OS actor，将 target
 固定为 `workspace/cosh/task-only-v1`，只接受 `core`/`gateway-brokered-v1` selector 与配置的
 canonical workspace，持久化 Runtime binding，并由 scheduler 投递 durable Outbox work。
-本地非托管 ACP interoperability 应使用 `doctor` 与 `run`，不能使用 `serve`；这两个 direct
-ACP command 不受 durable Task Plane 治理。
+`doctor` 与 `run` 仍是非托管的一次性 ACP interoperability command。Production `serve`
+只通过精确的 `delegated-acp-v1` profile 和 pinned configured Adapter 接纳 ACP。
 Task Plane 不依赖 checkpoint 或 ws-ckpt。现有的 `cosh-cli checkpoint` 命令仍是独立的
 system-operations 路径，不会为这个 Gateway profile 增加 checkpoint capability。
 

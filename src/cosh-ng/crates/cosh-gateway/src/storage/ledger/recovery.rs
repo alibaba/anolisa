@@ -1,5 +1,4 @@
 impl SqliteTaskStore {
-
     /// Loads started effects eligible for exact read-only reconciliation.
     ///
     /// The supplied lease must be the current unexpired takeover generation.
@@ -131,10 +130,30 @@ impl SqliteTaskStore {
              WHERE state='pending'",
             params![now],
         )?;
+        let permission_dispatches_abandoned = transaction.execute(
+            "UPDATE provider_permission_dispatches
+             SET state='abandoned', revision=revision+1, updated_at_ms=?1
+             WHERE state='prepared'
+               AND EXISTS (
+                   SELECT 1 FROM tasks
+                   WHERE tasks.task_id=provider_permission_dispatches.task_id
+                     AND tasks.state IN (
+                         'running', 'waiting_approval', 'waiting_input', 'suspended'
+                     )
+               )",
+            params![now],
+        )?;
         let permission_dispatches_unknown = transaction.execute(
             "UPDATE provider_permission_dispatches
              SET state='unknown', revision=revision+1, updated_at_ms=?1
-             WHERE state IN ('prepared', 'started')",
+             WHERE state IN ('write_started', 'written')
+               AND EXISTS (
+                   SELECT 1 FROM tasks
+                   WHERE tasks.task_id=provider_permission_dispatches.task_id
+                     AND tasks.state IN (
+                         'running', 'waiting_approval', 'waiting_input', 'suspended'
+                     )
+               )",
             params![now],
         )?;
         let brokered_dispatches_unknown = transaction.execute(
@@ -160,6 +179,7 @@ impl SqliteTaskStore {
         Ok(RecoveryReport {
             approvals_expired: approvals_expired as u64,
             approvals_cancelled: approvals_cancelled as u64,
+            permission_dispatches_abandoned: permission_dispatches_abandoned as u64,
             permission_dispatches_unknown: permission_dispatches_unknown as u64,
             brokered_dispatches_unknown: brokered_dispatches_unknown as u64,
             runtime_input_requests_cancelled,

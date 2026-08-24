@@ -10,6 +10,7 @@ use crate::checkpoint::CheckpointDriver;
 enum ServeCapabilityProfile {
     TaskOnlyV1,
     WorkspaceCheckpointV1,
+    DelegatedAcpV1,
 }
 
 impl ServeCapabilityProfile {
@@ -19,6 +20,7 @@ impl ServeCapabilityProfile {
             Self::WorkspaceCheckpointV1 => {
                 GatewayCapabilityProfileId::WorkspaceCheckpointV1.profile()
             }
+            Self::DelegatedAcpV1 => GatewayCapabilityProfileId::DelegatedAcpV1.profile(),
         }
     }
 }
@@ -46,6 +48,12 @@ pub(super) struct ServeArgs {
     /// Absolute installed cosh-core executable for the brokered Runtime.
     #[arg(long, value_name = "PATH")]
     core_executable: Option<PathBuf>,
+    /// ACP profile used by delegated-acp-v1.
+    #[arg(long, value_enum, default_value_t = Profile::Codex)]
+    acp_profile: Profile,
+    /// Absolute trusted ACP adapter used by delegated-acp-v1.
+    #[arg(long, value_name = "PATH")]
+    acp_adapter: Option<PathBuf>,
     /// Existing workspace directory admitted for every Task in this daemon.
     #[arg(long, default_value = ".")]
     pub(super) workspace: PathBuf,
@@ -64,11 +72,25 @@ pub(super) fn serve(args: ServeArgs, reporter: &Reporter) -> Result<u8, CliError
         .transpose()
         .map_err(|error| CliError::Daemon(error.to_string()))?;
     let capability_profile = args.capability_profile.profile();
-    if capability_profile.id() == GatewayCapabilityProfileId::TaskOnlyV1
+    if capability_profile.id() != GatewayCapabilityProfileId::WorkspaceCheckpointV1
         && (args.checkpoint_socket.is_some() || args.security_audit.is_some())
     {
         return Err(CliError::Profile(
             "checkpoint configuration requires workspace-checkpoint-v1".to_owned(),
+        ));
+    }
+    if capability_profile.id() == GatewayCapabilityProfileId::DelegatedAcpV1
+        && args.core_executable.is_some()
+    {
+        return Err(CliError::Profile(
+            "delegated-acp-v1 does not accept --core-executable".to_owned(),
+        ));
+    }
+    if capability_profile.id() != GatewayCapabilityProfileId::DelegatedAcpV1
+        && args.acp_adapter.is_some()
+    {
+        return Err(CliError::Profile(
+            "--acp-adapter requires delegated-acp-v1".to_owned(),
         ));
     }
     let target = capability_profile.governed_target();
@@ -90,18 +112,42 @@ pub(super) fn serve(args: ServeArgs, reporter: &Reporter) -> Result<u8, CliError
         CliError::Containment("production serve requires --systemd-unit".to_owned())
     })?;
     let environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
-    let resolved_core_profile = InstalledBrokeredCoreRuntimePortFactory::resolve(
-        required_absolute(
-            args.core_executable.as_ref(),
-            "brokered cosh-core executable",
-        )?,
-        environment,
-    )
-    .map_err(|error| CliError::Profile(error.safe_message.as_str().to_owned()))?;
+    let resolved_core_profile =
+        if capability_profile.id() == GatewayCapabilityProfileId::DelegatedAcpV1 {
+            None
+        } else {
+            Some(
+                InstalledBrokeredCoreRuntimePortFactory::resolve(
+                    required_absolute(
+                        args.core_executable.as_ref(),
+                        "brokered cosh-core executable",
+                    )?,
+                    environment.clone(),
+                )
+                .map_err(|error| CliError::Profile(error.safe_message.as_str().to_owned()))?,
+            )
+        };
+    let resolved_acp_profile =
+        if capability_profile.id() == GatewayCapabilityProfileId::DelegatedAcpV1 {
+            Some(
+                AcpRuntimeProfileResolver::resolve(AcpRuntimeProfileRequest {
+                    profile: args.acp_profile.into(),
+                    executable: Some(required_absolute(
+                        args.acp_adapter.as_ref(),
+                        "delegated ACP adapter executable",
+                    )?),
+                    workspace: configured_workspace.clone(),
+                    environment,
+                })
+                .map_err(|error| CliError::Profile(error.to_string()))?,
+            )
+        } else {
+            None
+        };
     let containment = LinuxSystemdContainmentVerifier::new()
         .verify(containment_unit)
         .map_err(|error| CliError::Containment(error.to_string()))?;
-    let runtime = serve_runtime_selector(capability_profile)?;
+    let runtime = serve_runtime_selector(capability_profile, args.acp_profile)?;
     let socket_path = daemon_socket_path(args.socket.as_ref())?;
     let database_path = daemon_database_path(args.database.as_ref())?;
     SqliteTaskStore::prepare_path(&database_path)
@@ -137,6 +183,12 @@ pub(super) fn serve(args: ServeArgs, reporter: &Reporter) -> Result<u8, CliError
                 .map_err(|error| CliError::Profile(error.to_string()))?,
             )
         }
+        GatewayCapabilityProfileId::DelegatedAcpV1 => {
+            capability_profile
+                .verify_providers(&[])
+                .map_err(|error| CliError::Profile(error.to_string()))?;
+            None
+        }
     };
     let config = GatewayDaemonConfig {
         socket_path,
@@ -155,14 +207,17 @@ pub(super) fn serve(args: ServeArgs, reporter: &Reporter) -> Result<u8, CliError
     );
     let worker_id = BoundedOpaque::new(RuntimeInstanceId::new().to_string())
         .map_err(|error| CliError::Daemon(error.to_string()))?;
-    let port_factory = InstalledBrokeredCoreRuntimePortFactory::from_resolved(
-        daemon.installation_id().clone(),
-        actor_resolver,
-        workspace,
-        resolved_core_profile,
-    )
-    .map_err(|error| CliError::Profile(error.safe_message.as_str().to_owned()))?;
     if let Some(driver) = checkpoint_driver.take() {
+        let resolved_core_profile = resolved_core_profile.ok_or_else(|| {
+            CliError::Profile("checkpoint profile requires brokered cosh-core".to_owned())
+        })?;
+        let port_factory = InstalledBrokeredCoreRuntimePortFactory::from_resolved(
+            daemon.installation_id().clone(),
+            actor_resolver,
+            workspace,
+            resolved_core_profile,
+        )
+        .map_err(|error| CliError::Profile(error.safe_message.as_str().to_owned()))?;
         daemon
             .attach_brokered_scheduler(
                 containment,
@@ -171,7 +226,34 @@ pub(super) fn serve(args: ServeArgs, reporter: &Reporter) -> Result<u8, CliError
                 Box::new(driver),
             )
             .map_err(|error| CliError::Daemon(error.to_string()))?;
+    } else if let Some(resolved_acp_profile) = resolved_acp_profile {
+        let mut profiles = BTreeMap::new();
+        profiles.insert(args.acp_profile.into(), resolved_acp_profile);
+        let port_factory = InstalledAcpRuntimePortFactory::from_resolved_profiles(
+            daemon.installation_id().clone(),
+            actor_resolver,
+            workspace,
+            profiles,
+        )
+        .map_err(|error| CliError::Profile(error.safe_message.as_str().to_owned()))?;
+        daemon
+            .attach_task_only_scheduler(
+                containment,
+                worker_id,
+                Box::new(ScheduledAgentRuntimeFactory::new(port_factory)),
+            )
+            .map_err(|error| CliError::Daemon(error.to_string()))?;
     } else {
+        let resolved_core_profile = resolved_core_profile.ok_or_else(|| {
+            CliError::Profile("task-only profile requires brokered cosh-core".to_owned())
+        })?;
+        let port_factory = InstalledBrokeredCoreRuntimePortFactory::from_resolved(
+            daemon.installation_id().clone(),
+            actor_resolver,
+            workspace,
+            resolved_core_profile,
+        )
+        .map_err(|error| CliError::Profile(error.safe_message.as_str().to_owned()))?;
         daemon
             .attach_task_only_scheduler(
                 containment,
@@ -229,15 +311,20 @@ fn audit_conflicts_database(audit_path: &Path, database_path: &Path) -> bool {
         .any(|companion| audit_path == companion)
 }
 
-fn serve_runtime_selector(profile: GatewayCapabilityProfile) -> Result<RuntimeSelector, CliError> {
-    let profile_name = match profile.id() {
-        GatewayCapabilityProfileId::TaskOnlyV1 => GATEWAY_BROKERED_CORE_RUNTIME_PROFILE,
+pub(super) fn serve_runtime_selector(
+    profile: GatewayCapabilityProfile,
+    acp_profile: Profile,
+) -> Result<RuntimeSelector, CliError> {
+    let (runtime_name, profile_name) = match profile.id() {
+        GatewayCapabilityProfileId::TaskOnlyV1 => ("core", GATEWAY_BROKERED_CORE_RUNTIME_PROFILE),
         GatewayCapabilityProfileId::WorkspaceCheckpointV1 => {
-            GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE
+            ("core", GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE)
         }
+        GatewayCapabilityProfileId::DelegatedAcpV1 => ("acp", profile_name(acp_profile)),
     };
     Ok(RuntimeSelector {
-        runtime: BoundedName::new("core").map_err(|error| CliError::Profile(error.to_string()))?,
+        runtime: BoundedName::new(runtime_name)
+            .map_err(|error| CliError::Profile(error.to_string()))?,
         profile: Some(
             BoundedName::new(profile_name).map_err(|error| CliError::Profile(error.to_string()))?,
         ),

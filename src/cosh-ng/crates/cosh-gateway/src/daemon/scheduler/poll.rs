@@ -72,21 +72,20 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
             .pending_permission
             .as_ref()
         {
-            if now_ms < pending.approval.expires_at_ms {
-                return Ok(SchedulerTick::Idle);
+            if now_ms >= pending.approval.expires_at_ms {
+                let (permission, approval_id) = {
+                    let active = self.active.as_ref().ok_or_else(no_active_run)?;
+                    let pending = active
+                        .pending_permission
+                        .as_ref()
+                        .ok_or_else(no_active_run)?;
+                    (
+                        pending.permission.clone(),
+                        pending.approval.approval_id.clone(),
+                    )
+                };
+                return self.expire_active_provider_approval(&approval_id, &permission, now_ms);
             }
-            let (permission, approval_id) = {
-                let active = self.active.as_ref().ok_or_else(no_active_run)?;
-                let pending = active
-                    .pending_permission
-                    .as_ref()
-                    .ok_or_else(no_active_run)?;
-                (
-                    pending.permission.clone(),
-                    pending.approval.approval_id.clone(),
-                )
-            };
-            return self.expire_active_provider_approval(&approval_id, &permission, now_ms);
         }
         let abort_error = self
             .active
@@ -158,29 +157,26 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
                 request,
                 summary,
             } => {
-                let active = self.active.as_ref().ok_or_else(no_active_run)?;
-                if permission.binding_id != active.binding.binding_id
-                    || permission.runtime_generation != active.binding.runtime_generation
-                    || permission.run_id != active.scheduled.run_id
-                    || request.actor.actor_id != active.scheduled.actor.actor_id
-                    || request.task_id != active.scheduled.task_id
-                    || request.run_id != active.scheduled.run_id
-                    || request.target != active.scheduled.target
-                {
-                    return self.finish_failed(
-                        runtime_lost_error(
-                            "runtime_permission_binding_invalid",
-                            "Runtime permission request did not match the active Run",
-                        )?,
-                        polled_at_ms,
-                    );
-                }
-                self.coordinator.record_runtime_binding_sequence(
-                    &active.lease,
-                    &active.binding,
-                    permission.event_sequence,
-                    polled_at_ms,
-                )?;
+                let (lease, binding) = {
+                    let active = self.active.as_ref().ok_or_else(no_active_run)?;
+                    if permission.binding_id != active.binding.binding_id
+                        || permission.runtime_generation != active.binding.runtime_generation
+                        || permission.run_id != active.scheduled.run_id
+                        || request.actor.actor_id != active.scheduled.actor.actor_id
+                        || request.task_id != active.scheduled.task_id
+                        || request.run_id != active.scheduled.run_id
+                        || request.target != active.scheduled.target
+                    {
+                        return self.finish_failed(
+                            runtime_lost_error(
+                                "runtime_permission_binding_invalid",
+                                "Runtime permission request did not match the active Run",
+                            )?,
+                            polled_at_ms,
+                        );
+                    }
+                    (active.lease.clone(), active.binding.clone())
+                };
                 let approval = ApprovalRequest {
                     approval_id: ApprovalId::new(),
                     request_id: request.request_id.clone(),
@@ -190,10 +186,11 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
                     expires_at_ms: request.expires_at_ms,
                 };
                 let view = self.coordinator.record_provider_approval(
-                    &self.active.as_ref().ok_or_else(no_active_run)?.lease,
+                    &lease,
                     &permission,
                     &request,
                     &approval,
+                    &binding,
                     polled_at_ms,
                 )?;
                 self.active
@@ -203,7 +200,117 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
                     permission,
                     approval,
                 });
-                Ok(SchedulerTick::Progressed(view))
+                if self
+                    .active
+                    .as_ref()
+                    .ok_or_else(no_active_run)?
+                    .scheduled
+                    .capability_profile
+                    .profile_id
+                    == GatewayCapabilityProfileId::DelegatedAcpV1
+                {
+                    let active = self.active.as_ref().ok_or_else(no_active_run)?;
+                    let actor_id = active.scheduled.actor.actor_id.clone();
+                    let approval_id = active
+                        .pending_permission
+                        .as_ref()
+                        .ok_or_else(no_active_run)?
+                        .approval
+                        .approval_id
+                        .clone();
+                    let key = IdempotencyKey::new(format!(
+                        "delegated-acp-allow-once-{}",
+                        approval_id.as_str()
+                    ))
+                    .map_err(|error| GatewayDaemonError::Protocol(error.to_string()))?;
+                    self.resolve_approval(
+                        &actor_id,
+                        key,
+                        &approval_id,
+                        ApprovalDecision::Approve,
+                        polled_at_ms,
+                    )
+                } else {
+                    Ok(SchedulerTick::Progressed(view))
+                }
+            }
+            RuntimePoll::PermissionAbandoned {
+                sequence,
+                permission,
+            } => {
+                let (actor_id, approval_id, lease, binding) = {
+                    let active = self.active.as_ref().ok_or_else(no_active_run)?;
+                    let pending = active.pending_permission.as_ref().ok_or_else(|| {
+                        GatewayDaemonError::Protocol(
+                            "Runtime abandoned a permission without a pending approval".to_owned(),
+                        )
+                    })?;
+                    if pending.permission != permission {
+                        return self.finish_failed(
+                            runtime_lost_error(
+                                "runtime_permission_abandonment_identity_invalid",
+                                "Runtime permission abandonment did not match the active callback",
+                            )?,
+                            polled_at_ms,
+                        );
+                    }
+                    (
+                        active.scheduled.actor.actor_id.clone(),
+                        pending.approval.approval_id.clone(),
+                        active.lease.clone(),
+                        active.binding.clone(),
+                    )
+                };
+                let command = LedgerCommand {
+                    actor_id,
+                    idempotency_key: IdempotencyKey::new(format!(
+                        "scheduler-abandon-provider-{}-{sequence}",
+                        approval_id.as_str()
+                    ))
+                    .map_err(|error| GatewayDaemonError::Protocol(error.to_string()))?,
+                    command_digest: digest_json(&(
+                        "abandon_provider_permission",
+                        &approval_id,
+                        &permission,
+                        &binding,
+                        sequence,
+                        lease.generation,
+                        ApprovalAbandonCause::ProviderCancelled,
+                    ))?,
+                    committed_at_ms: polled_at_ms,
+                };
+                let abandoned = match self.coordinator.store.abandon_provider_permission(
+                    &command,
+                    &approval_id,
+                    &permission,
+                    &binding,
+                    sequence,
+                    &lease,
+                    ApprovalAbandonCause::ProviderCancelled,
+                )? {
+                    LedgerOutcome::Applied(record) | LedgerOutcome::Replayed(record) => record,
+                };
+                if abandoned.state != ApprovalState::Cancelled {
+                    return Err(GatewayDaemonError::Protocol(
+                        "provider permission abandonment did not cancel its approval".to_owned(),
+                    ));
+                }
+                let task_id = {
+                    let active = self.active.as_mut().ok_or_else(no_active_run)?;
+                    active.pending_permission = None;
+                    active.expected_provider_terminal = Some(ExpectedProviderTerminal::Abandoned {
+                        approval_id,
+                        permission,
+                    });
+                    active.scheduled.task_id.clone()
+                };
+                let task = self.coordinator.store.load_task(&task_id)?;
+                if task.state() != TaskState::Running {
+                    return Err(GatewayDaemonError::Protocol(
+                        "provider permission abandonment did not resume its Task".to_owned(),
+                    ));
+                }
+                Ok(SchedulerTick::Progressed(TaskView::from(&task)))
             }
             RuntimePoll::BrokeredExecutionRequested {
                 brokered,
@@ -284,9 +391,84 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
             }
             RuntimePoll::Succeeded => self.finish_succeeded(polled_at_ms),
             RuntimePoll::Failed(error) => self.finish_failed(error, polled_at_ms),
-            RuntimePoll::Cancelled => Err(GatewayDaemonError::Protocol(
-                "Runtime reported cancellation without a durable request".to_owned(),
-            )),
+            RuntimePoll::Cancelled { cause } => {
+                let expected = self
+                    .active
+                    .as_mut()
+                    .ok_or_else(no_active_run)?
+                    .expected_provider_terminal
+                    .take();
+                match (expected, cause) {
+                    (
+                        Some(ExpectedProviderTerminal::Denied {
+                            approval_id,
+                            permission: expected,
+                        }),
+                        RuntimeCancellationCause::ProviderPermissionDenied { permission },
+                    ) if expected == permission => {
+                        let approval = self.coordinator.store.load_approval_record(&approval_id)?;
+                        if approval.state != ApprovalState::Denied
+                            || approval.permission.as_ref() != Some(&permission)
+                        {
+                            return self.finish_failed(
+                                runtime_lost_error(
+                                    "runtime_permission_cancellation_identity_invalid",
+                                    "The Agent cancellation did not match its durable denial",
+                                )?,
+                                polled_at_ms,
+                            );
+                        }
+                        self.finish_failed(
+                            runtime_lost_error(
+                                "provider_permission_denied",
+                                "The provider-native operation was denied",
+                            )?,
+                            polled_at_ms,
+                        )
+                    }
+                    (
+                        Some(ExpectedProviderTerminal::Abandoned {
+                            approval_id,
+                            permission: expected,
+                        }),
+                        RuntimeCancellationCause::ProviderPermissionAbandoned { permission },
+                    ) if expected == permission => {
+                        let approval = self.coordinator.store.load_approval_record(&approval_id)?;
+                        if approval.state != ApprovalState::Cancelled
+                            || approval.permission.as_ref() != Some(&permission)
+                        {
+                            return self.finish_failed(
+                                runtime_lost_error(
+                                    "runtime_permission_cancellation_identity_invalid",
+                                    "The Agent cancellation did not match its durable abandonment",
+                                )?,
+                                polled_at_ms,
+                            );
+                        }
+                        self.finish_failed(
+                            runtime_lost_error(
+                                "provider_permission_abandoned",
+                                "The provider cancelled while permission was pending",
+                            )?,
+                            polled_at_ms,
+                        )
+                    }
+                    (None, _) => self.finish_failed(
+                        runtime_lost_error(
+                            "runtime_turn_cancelled_unsolicited",
+                            "The Agent cancelled the turn without a durable cancellation cause",
+                        )?,
+                        polled_at_ms,
+                    ),
+                    (Some(_), _) => self.finish_failed(
+                        runtime_lost_error(
+                            "runtime_permission_cancellation_identity_invalid",
+                            "The Agent cancellation did not match its durable permission cause",
+                        )?,
+                        polled_at_ms,
+                    ),
+                }
+            }
         }
     }
 
@@ -483,5 +665,4 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
         self.require_active_lease_time(expired_at_ms)?;
         self.finish_failed(expiry_error, expired_at_ms)
     }
-
 }

@@ -12,6 +12,8 @@ use crate::common::{BoundedName, BoundedOpaque, Digest, TargetRef};
 pub const TASK_ONLY_V1_PROFILE: &str = "task-only-v1";
 /// Canonical wire and configuration name of the workspace-checkpoint profile.
 pub const WORKSPACE_CHECKPOINT_V1_PROFILE: &str = "workspace-checkpoint-v1";
+/// Canonical wire and configuration name of the full ACP delegation profile.
+pub const DELEGATED_ACP_V1_PROFILE: &str = "delegated-acp-v1";
 /// Runtime tool resolved by the Gateway without a host side effect.
 pub const ASK_USER_QUESTION_TOOL: &str = "ask_user_question";
 /// Runtime tool whose side effect must cross a governed checkpoint target.
@@ -52,16 +54,36 @@ pub const WORKSPACE_CHECKPOINT_V1_CANONICAL_MANIFEST: &str = concat!(
 /// Pinned SHA-256 digest of [`WORKSPACE_CHECKPOINT_V1_CANONICAL_MANIFEST`].
 pub const WORKSPACE_CHECKPOINT_V1_MANIFEST_DIGEST: &str =
     "6b3e7093e7b8656d4a7cf21faa85b9eed761ef415d002623cfc442f3ef3c8ae1";
+/// Canonical manifest of the profile that delegates one Task to an ACP Runtime.
+///
+/// The empty `runtime-tools` inventory means COSH hosts no individual tool for
+/// this profile. Instead, the explicit delegation grants the pinned ACP Runtime
+/// provider-native allow-once decisions for the lifetime of the Task Run.
+pub const DELEGATED_ACP_V1_CANONICAL_MANIFEST: &str = concat!(
+    "cosh.gateway.capability-profile.v1\n",
+    "profile:delegated-acp-v1\n",
+    "target:\n",
+    "workspace/cosh/delegated-acp-v1\n",
+    "runtime-tools:\n",
+    "delegation:\n",
+    "provider-native-allow-once\n",
+);
+/// Pinned SHA-256 digest of [`DELEGATED_ACP_V1_CANONICAL_MANIFEST`].
+pub const DELEGATED_ACP_V1_MANIFEST_DIGEST: &str =
+    "a6978e5eafa5befe62ba606e073fef71057278e75b6408f57318ddd94071a3f4";
 
 const TASK_ONLY_V1_RUNTIME_TOOLS: &[&str] = &[ASK_USER_QUESTION_TOOL];
 const WORKSPACE_CHECKPOINT_V1_RUNTIME_TOOLS: &[&str] =
     &[ASK_USER_QUESTION_TOOL, WORKSPACE_CHECKPOINT_CREATE_TOOL];
+const DELEGATED_ACP_V1_RUNTIME_TOOLS: &[&str] = &[];
 const NO_PROVIDERS: &[CapabilityProviderId] = &[];
 const WS_CKPT_PROVIDER_SET: &[CapabilityProviderId] = &[CapabilityProviderId::WsCkpt];
 
 /// Failure returned when a profile name is not an admitted production profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-#[error("unsupported capability profile; expected `task-only-v1` or `workspace-checkpoint-v1`")]
+#[error(
+    "unsupported capability profile; expected `task-only-v1`, `workspace-checkpoint-v1`, or `delegated-acp-v1`"
+)]
 pub struct CapabilityProfileParseError;
 
 /// Failure returned when a provider name is not an admitted production provider.
@@ -128,6 +150,8 @@ pub enum GatewayCapabilityProfileId {
     TaskOnlyV1,
     /// Optional profile that additionally admits one governed checkpoint target.
     WorkspaceCheckpointV1,
+    /// Profile that grants a pinned ACP Runtime full provider-native Task authority.
+    DelegatedAcpV1,
 }
 
 impl GatewayCapabilityProfileId {
@@ -137,6 +161,7 @@ impl GatewayCapabilityProfileId {
         match self {
             Self::TaskOnlyV1 => TASK_ONLY_V1_PROFILE,
             Self::WorkspaceCheckpointV1 => WORKSPACE_CHECKPOINT_V1_PROFILE,
+            Self::DelegatedAcpV1 => DELEGATED_ACP_V1_PROFILE,
         }
     }
 
@@ -150,6 +175,7 @@ impl GatewayCapabilityProfileId {
         match value {
             TASK_ONLY_V1_PROFILE => Ok(Self::TaskOnlyV1),
             WORKSPACE_CHECKPOINT_V1_PROFILE => Ok(Self::WorkspaceCheckpointV1),
+            DELEGATED_ACP_V1_PROFILE => Ok(Self::DelegatedAcpV1),
             _ => Err(CapabilityProfileParseError),
         }
     }
@@ -160,6 +186,7 @@ impl GatewayCapabilityProfileId {
         match self {
             Self::TaskOnlyV1 => GatewayCapabilityProfile::task_only_v1(),
             Self::WorkspaceCheckpointV1 => GatewayCapabilityProfile::workspace_checkpoint_v1(),
+            Self::DelegatedAcpV1 => GatewayCapabilityProfile::delegated_acp_v1(),
         }
     }
 }
@@ -201,6 +228,14 @@ impl GatewayCapabilityProfile {
         }
     }
 
+    /// Returns the profile that delegates one complete Run to a pinned ACP Runtime.
+    #[must_use]
+    pub const fn delegated_acp_v1() -> Self {
+        Self {
+            id: GatewayCapabilityProfileId::DelegatedAcpV1,
+        }
+    }
+
     /// Returns the versioned profile identity.
     #[must_use]
     pub const fn id(self) -> GatewayCapabilityProfileId {
@@ -215,6 +250,7 @@ impl GatewayCapabilityProfile {
             GatewayCapabilityProfileId::WorkspaceCheckpointV1 => {
                 WORKSPACE_CHECKPOINT_V1_CANONICAL_MANIFEST
             }
+            GatewayCapabilityProfileId::DelegatedAcpV1 => DELEGATED_ACP_V1_CANONICAL_MANIFEST,
         }
     }
 
@@ -226,6 +262,7 @@ impl GatewayCapabilityProfile {
             GatewayCapabilityProfileId::WorkspaceCheckpointV1 => {
                 WORKSPACE_CHECKPOINT_V1_MANIFEST_DIGEST
             }
+            GatewayCapabilityProfileId::DelegatedAcpV1 => DELEGATED_ACP_V1_MANIFEST_DIGEST,
         };
         Digest::parse(digest)
             .unwrap_or_else(|_| unreachable!("reviewed static profile digests are canonical"))
@@ -261,6 +298,7 @@ impl GatewayCapabilityProfile {
             GatewayCapabilityProfileId::WorkspaceCheckpointV1 => {
                 WORKSPACE_CHECKPOINT_V1_RUNTIME_TOOLS
             }
+            GatewayCapabilityProfileId::DelegatedAcpV1 => DELEGATED_ACP_V1_RUNTIME_TOOLS,
         }
     }
 
@@ -273,7 +311,14 @@ impl GatewayCapabilityProfile {
         match self.id {
             GatewayCapabilityProfileId::TaskOnlyV1 => NO_PROVIDERS,
             GatewayCapabilityProfileId::WorkspaceCheckpointV1 => WS_CKPT_PROVIDER_SET,
+            GatewayCapabilityProfileId::DelegatedAcpV1 => NO_PROVIDERS,
         }
+    }
+
+    /// Returns whether Task submission grants provider-native allow-once delegation.
+    #[must_use]
+    pub const fn delegates_provider_native(self) -> bool {
+        matches!(self.id, GatewayCapabilityProfileId::DelegatedAcpV1)
     }
 
     /// Verifies a durable or advertised identity against the configured profile.
@@ -407,6 +452,30 @@ mod tests {
     }
 
     #[test]
+    fn delegated_acp_manifest_and_digest_are_pinned() {
+        let profile = GatewayCapabilityProfile::delegated_acp_v1();
+        let actual_digest = format!("{:x}", Sha256::digest(profile.canonical_manifest()));
+
+        assert_eq!(profile.id().as_str(), DELEGATED_ACP_V1_PROFILE);
+        assert_eq!(
+            profile.canonical_manifest(),
+            DELEGATED_ACP_V1_CANONICAL_MANIFEST
+        );
+        assert_eq!(
+            profile.manifest_digest().as_str(),
+            DELEGATED_ACP_V1_MANIFEST_DIGEST
+        );
+        assert_eq!(actual_digest, DELEGATED_ACP_V1_MANIFEST_DIGEST);
+        assert!(profile.runtime_tools().is_empty());
+        assert!(profile.providers().is_empty());
+        assert!(profile.delegates_provider_native());
+        assert_eq!(profile.verify_identity(&profile.identity()), Ok(()));
+        assert!(profile
+            .canonical_manifest()
+            .ends_with("delegation:\nprovider-native-allow-once\n"));
+    }
+
+    #[test]
     fn optional_profile_never_alters_the_task_only_contract() {
         let task_only = GatewayCapabilityProfile::task_only_v1();
         let checkpoint = GatewayCapabilityProfile::workspace_checkpoint_v1();
@@ -495,6 +564,14 @@ mod tests {
             GatewayCapabilityProfileId::WorkspaceCheckpointV1.profile(),
             GatewayCapabilityProfile::workspace_checkpoint_v1()
         );
+        assert_eq!(
+            GatewayCapabilityProfileId::parse(DELEGATED_ACP_V1_PROFILE),
+            Ok(GatewayCapabilityProfileId::DelegatedAcpV1)
+        );
+        assert_eq!(
+            GatewayCapabilityProfileId::DelegatedAcpV1.profile(),
+            GatewayCapabilityProfile::delegated_acp_v1()
+        );
         for unknown in [
             "",
             "task-only",
@@ -507,6 +584,9 @@ mod tests {
             "workspace-checkpoint",
             "workspace-checkpoint-v2",
             "WORKSPACE-CHECKPOINT-V1",
+            "delegated-acp",
+            "delegated-acp-v2",
+            "DELEGATED-ACP-V1",
         ] {
             assert_eq!(
                 GatewayCapabilityProfileId::parse(unknown),
@@ -589,6 +669,11 @@ mod tests {
                 GatewayCapabilityProfile::workspace_checkpoint_v1(),
                 WORKSPACE_CHECKPOINT_V1_PROFILE,
                 WORKSPACE_CHECKPOINT_V1_MANIFEST_DIGEST,
+            ),
+            (
+                GatewayCapabilityProfile::delegated_acp_v1(),
+                DELEGATED_ACP_V1_PROFILE,
+                DELEGATED_ACP_V1_MANIFEST_DIGEST,
             ),
         ] {
             let identity = profile.identity();
