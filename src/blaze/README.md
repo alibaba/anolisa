@@ -158,6 +158,7 @@ Blaze exposes sandbox lifecycle and guest operations through `/v1/sandboxes`.
 | POST | `/v1/sandboxes/{id}/write` | Replace a guest file |
 | POST | `/v1/sandboxes/{id}/checkpoint` | Capture a full checkpoint |
 | GET | `/v1/sandboxes/{id}/checkpoints` | List committed checkpoint history |
+| POST | `/v1/sandboxes/{id}/checkpoints/prune` | Remove unreachable branches from a running sandbox; the full-history integrity scan can cause significant storage I/O, and other states return `409` |
 | POST | `/v1/sandboxes/{id}/rollback/{checkpoint_id}` | Replace a running sandbox from a verified checkpoint |
 | POST | `/v1/sandboxes/{id}/hibernate` | Persist VM state and release the live backend |
 | POST | `/v1/sandboxes/{id}/resume` | Resume a hibernated sandbox and wait for enabled guest transport |
@@ -278,6 +279,43 @@ sandbox state.
 `GET /v1/sandboxes/{id}/checkpoints` returns committed history summaries,
 including parentage, logical size, current-HEAD status, and HEAD reachability.
 
+`POST /v1/sandboxes/{id}/checkpoints/prune` removes branches that are not
+reachable from the current HEAD. The route has no request-body fields: the
+current HEAD and all of its ancestors are always retained, and every other
+committed branch is eligible for removal. For compatibility with Go Blaze, the
+server does not read or inspect the request body; an absent body, `{}`, obsolete
+fields, and non-JSON content are all ignored. The response contains `status`,
+`removed_count`, and the removed checkpoint identifiers. Prune accepts only a
+running sandbox with no unfinished operation; every other lifecycle state
+returns HTTP 409.
+
+Prune records its operation before changing the catalog and moves each selected
+checkpoint to a uniquely named tombstone before recursively deleting its
+version-2 payload tree. HTTP 200 is returned only after every tombstone created
+by the request has been removed and the checkpoint namespace has been
+synchronized. A partial or uncertain cleanup marks the sandbox
+`RecoveryRequired`; another prune request then returns HTTP 409 without changing
+the catalog. Destroy or startup reconciliation removes the retained runtime and
+checkpoint namespace. Operators should destroy the affected sandbox, or allow
+normal startup reconciliation to clean it after a daemon restart. They must not
+retry prune or treat checkpoint identifiers in the error text as an authoritative
+deletion result.
+
+An unreadable or invalid checkpoint catalog is not treated as empty history;
+neither is a non-empty catalog whose HEAD file is missing. Before prune loads
+the catalog, Blaze checks the complete top-level namespace: only the optional
+HEAD file and canonically named committed checkpoint directories are accepted.
+Unknown files, directories, staging entries, or cleanup remnants therefore
+stop prune before deletion. Before selecting candidates, Blaze verifies the
+exact file inventory, recorded size, and SHA-256 digest of every committed
+checkpoint, and verifies that every branch has existing parents and contains
+no cycle. If any namespace, catalog, ancestry, or artifact-integrity check
+fails before the first rename, prune returns HTTP 500, clears its operation
+record, and leaves HEAD and every checkpoint directory unchanged. This
+preflight reads every stored artifact, so prune time and storage input/output
+grow with the total checkpoint history. Operators should investigate storage
+corruption instead of repeatedly calling prune.
+
 `POST /v1/sandboxes/{id}/rollback/{checkpoint_id}` is available only when the
 current storage provider and checkpoint backend advertise compatible restore
 capabilities. The daemon verifies the selected checkpoint, its parent chain,
@@ -299,7 +337,7 @@ process ownership.
 `last_checkpoint` continues to mean the most recent completed capture. Restore
 moves catalog HEAD but does not rewrite capture history.
 
-See the [checkpoint capture and restore user guide](../../docs/user-guide/en/runtime/blaze.md#checkpoint-capture-history-and-restore)
+See the [checkpoint capture, pruning, and restore user guide](../../docs/user-guide/en/runtime/blaze.md#checkpoint-capture-history-and-restore)
 for response fields, supported capability combinations, and failure handling.
 
 ### Hibernation and resume

@@ -5,12 +5,13 @@ use std::sync::Arc;
 
 use blaze_core::backend::{BackendKind, SnapshotKind, SnapshotRequest};
 use blaze_core::checkpoint::{CheckpointInfo, CheckpointMetadata, CommitCheckpoint};
-use blaze_core::lifecycle::{OperationPhase, SandboxInstance, SandboxState};
+use blaze_core::lifecycle::{OperationKind, OperationPhase, SandboxInstance, SandboxState};
 use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 use crate::checkpoint_store::{
-    CheckpointHeadOutcome, CheckpointPublishOutcome, CheckpointStage, PublishedCheckpoint,
+    CheckpointHeadOutcome, CheckpointPublishOutcome, CheckpointStage, PruneOutcome,
+    PublishedCheckpoint,
 };
 use crate::error::{BlazeDaemonError, Result};
 use crate::spawner::DynBackendInstance;
@@ -505,6 +506,150 @@ impl SandboxManager {
         .map_err(|error| {
             BlazeDaemonError::Internal(format!("checkpoint list blocking task: {error}"))
         })?
+    }
+
+    /// Remove checkpoint branches that are unreachable from HEAD.
+    ///
+    /// A detached supervisor retains the per-sandbox operation lock until
+    /// deletion and lifecycle finalization finish, even if the caller leaves.
+    pub async fn prune_checkpoints(self: &Arc<Self>, id: Uuid) -> Result<Vec<String>> {
+        let operation = self.operation_lock(id).lock_owned().await;
+        let manager = Arc::clone(self);
+        crate::failpoint::spawn(
+            async move { manager.prune_checkpoints_supervised(id, operation).await },
+        )
+        .await
+        .map_err(|error| {
+            let recovery = self.mark_recovery(id).err();
+            BlazeDaemonError::RecoveryRequired(format!(
+                "checkpoint prune supervisor stopped unexpectedly: {error}{}",
+                recovery
+                    .map(|error| format!("; recovery state persistence failed: {error}"))
+                    .unwrap_or_default()
+            ))
+        })?
+    }
+
+    async fn prune_checkpoints_supervised(
+        self: Arc<Self>,
+        id: Uuid,
+        operation: OwnedMutexGuard<()>,
+    ) -> Result<Vec<String>> {
+        let manager = Arc::clone(&self);
+        let result = match crate::failpoint::spawn(async move {
+            manager.prune_checkpoints_worker(id).await
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let recovery = self.mark_recovery(id).err();
+                Err(BlazeDaemonError::RecoveryRequired(format!(
+                    "checkpoint prune worker stopped unexpectedly: {error}{}",
+                    recovery
+                        .map(|error| format!("; recovery state persistence failed: {error}"))
+                        .unwrap_or_default()
+                )))
+            }
+        };
+        drop(operation);
+        result
+    }
+
+    async fn prune_checkpoints_worker(self: Arc<Self>, id: Uuid) -> Result<Vec<String>> {
+        let mut instance = self.get(id)?;
+        if instance.state != SandboxState::Running {
+            return Err(BlazeDaemonError::Conflict(format!(
+                "instance {id} must be running before checkpoint history can be pruned"
+            )));
+        }
+        if let Some(journal) = &instance.operation {
+            return Err(BlazeDaemonError::Conflict(format!(
+                "instance {id} has unfinished {} operation",
+                journal.kind
+            )));
+        }
+
+        let checkpoint_history_expected = instance.last_checkpoint.is_some();
+        instance.begin_operation(OperationKind::Prune);
+        self.persist_and_retain(instance)?;
+
+        let checkpoints = self.checkpoints.clone();
+        let store_result = crate::failpoint::spawn_blocking(move || {
+            crate::failpoint::pause_blocking("checkpoint-before-store-prune");
+            checkpoints.prune_unreachable(id, checkpoint_history_expected)
+        })
+        .await;
+        let outcome = match store_result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let recovery = self.mark_recovery(id).err();
+                return Err(BlazeDaemonError::RecoveryRequired(format!(
+                    "checkpoint prune worker stopped unexpectedly: {error}{}",
+                    recovery
+                        .map(|error| format!("; recovery state persistence failed: {error}"))
+                        .unwrap_or_default()
+                )));
+            }
+        };
+
+        match outcome {
+            Ok(PruneOutcome::Complete { removed }) => {
+                self.finish_prune_operation(id, None)?;
+                Ok(removed)
+            }
+            Err(error) => {
+                let original = checkpoint_store_error(error);
+                self.finish_prune_operation(id, Some(&original))?;
+                Err(original)
+            }
+            Ok(PruneOutcome::Incomplete {
+                removed,
+                uncertain,
+                source,
+            }) => {
+                let recovery = self.mark_recovery(id).err();
+                Err(BlazeDaemonError::RecoveryRequired(format!(
+                    "checkpoint prune did not finish safely after removing {removed:?}{}: {source}{}",
+                    uncertain
+                        .map(|checkpoint_id| format!(
+                            "; outcome for checkpoint {checkpoint_id} is uncertain"
+                        ))
+                        .unwrap_or_default(),
+                    recovery
+                        .map(|error| format!("; recovery state persistence failed: {error}"))
+                        .unwrap_or_default()
+                )))
+            }
+        }
+    }
+
+    fn finish_prune_operation(&self, id: Uuid, original: Option<&BlazeDaemonError>) -> Result<()> {
+        let mut instance = self.get(id)?;
+        if !instance
+            .operation
+            .as_ref()
+            .is_some_and(|operation| operation.kind == OperationKind::Prune)
+        {
+            self.mark_recovery(id)?;
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "instance {id} lost its checkpoint prune operation record"
+            )));
+        }
+        instance.finish_operation();
+        if let Err(error) = self.persist_and_retain(instance) {
+            let recovery = self.mark_recovery(id).err();
+            return Err(BlazeDaemonError::RecoveryRequired(format!(
+                "checkpoint prune could not commit its final lifecycle record{}: {error}{}",
+                original
+                    .map(|original| format!(" after {original}"))
+                    .unwrap_or_default(),
+                recovery
+                    .map(|error| format!("; recovery state persistence failed: {error}"))
+                    .unwrap_or_default()
+            )));
+        }
+        Ok(())
     }
 
     async fn finish_failed_unpublished_checkpoint<T>(

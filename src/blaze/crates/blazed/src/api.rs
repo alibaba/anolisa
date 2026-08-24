@@ -57,11 +57,18 @@ where
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
 
-    let limit = guest_body_route(&method, &path).then_some(MAX_GUEST_HTTP_BODY_BYTES);
-
-    let response = match collect_body(req, limit).await {
-        Ok(body) => dispatch(&method, &path, &query, body, &state).await,
-        Err(e) => Err(e),
+    let response = if ignored_body_route(&method, &path) {
+        // Go Blaze does not read the prune body. Drop this stream without
+        // polling it so an oversized or indefinitely streamed body cannot
+        // delay pruning or consume daemon memory.
+        drop(req);
+        dispatch(&method, &path, &query, Vec::new(), &state).await
+    } else {
+        let limit = guest_body_route(&method, &path).then_some(MAX_GUEST_HTTP_BODY_BYTES);
+        match collect_body(req, limit).await {
+            Ok(body) => dispatch(&method, &path, &query, body, &state).await,
+            Err(e) => Err(e),
+        }
     };
 
     let resp = match response {
@@ -83,6 +90,21 @@ fn guest_body_route(method: &Method, path: &str) -> bool {
     matches!(
         parts.as_slice(),
         ["v1", "sandboxes", _, "exec" | "read" | "write"]
+    )
+}
+
+fn ignored_body_route(method: &Method, path: &str) -> bool {
+    if method != Method::POST {
+        return false;
+    }
+    let parts = path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    matches!(
+        parts.as_slice(),
+        ["v1", "sandboxes", _, "checkpoints", "prune"]
     )
 }
 
@@ -144,6 +166,9 @@ async fn dispatch(
         ("POST", ["v1", "sandboxes", id, "write"]) => write_sandbox_file(state, id, &body).await,
         ("POST", ["v1", "sandboxes", id, "checkpoint"]) => checkpoint(state, id).await,
         ("GET", ["v1", "sandboxes", id, "checkpoints"]) => list_checkpoints(state, id).await,
+        ("POST", ["v1", "sandboxes", id, "checkpoints", "prune"]) => {
+            prune_checkpoints(state, id).await
+        }
         ("POST", ["v1", "sandboxes", id, "rollback", checkpoint_id]) => {
             rollback(state, id, checkpoint_id).await
         }
@@ -349,6 +374,15 @@ async fn checkpoint(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<
 
 async fn list_checkpoints(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>>> {
     json_ok(&state.manager.list_checkpoints(parse_uuid(id)?).await?)
+}
+
+async fn prune_checkpoints(state: &Arc<ServerState>, id: &str) -> Result<Response<Full<Bytes>>> {
+    let removed = state.manager.prune_checkpoints(parse_uuid(id)?).await?;
+    json_ok(&json!({
+        "status": "pruned",
+        "removed_count": removed.len(),
+        "removed": removed,
+    }))
 }
 
 async fn rollback(
@@ -786,12 +820,10 @@ mod tests {
         )
     }
 
-    #[cfg(feature = "test-failpoints")]
     fn mock_state(temp: &tempfile::TempDir) -> Arc<ServerState> {
         mock_state_from_config(test_config(temp))
     }
 
-    #[cfg(feature = "test-failpoints")]
     fn mock_state_from_config(config: DaemonConfig) -> Arc<ServerState> {
         let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
             config.storage.images_dir.clone(),
@@ -1055,6 +1087,22 @@ mod tests {
             .to_bytes();
         let value = serde_json::from_slice(&body).expect("response json");
         (status, value)
+    }
+
+    struct BodyThatMustNotBeRead;
+
+    impl Body for BodyThatMustNotBeRead {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<std::result::Result<hyper::body::Frame<Bytes>, Infallible>>>
+        {
+            let _ = self;
+            panic!("ignored prune body was polled")
+        }
     }
 
     struct OwnershipObservingStorage {
@@ -1910,6 +1958,7 @@ mod tests {
         let lifecycle = state.manager.get(uuid).expect("lifecycle");
         assert_eq!(lifecycle.state, SandboxState::Running);
         assert!(lifecycle.operation.is_none());
+
         assert_eq!(
             std::fs::read(state_path).expect("persisted state"),
             persisted_before
@@ -2012,6 +2061,479 @@ mod tests {
                 .join(id)
                 .exists(),
             "destroy must remove the complete checkpoint namespace"
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_route_ignores_bodies_and_returns_go_compatible_response() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        let slot = write_checkpoint_fixture(&state, id).await;
+        let root = state
+            .manager
+            .checkpoint(uuid)
+            .await
+            .expect("root checkpoint")
+            .id;
+        tokio::fs::write(&slot.rootfs_path, b"second-rootfs")
+            .await
+            .expect("second rootfs");
+        let head = state
+            .manager
+            .checkpoint(uuid)
+            .await
+            .expect("head checkpoint")
+            .id;
+        tokio::fs::write(&slot.rootfs_path, b"unreachable-rootfs")
+            .await
+            .expect("unreachable rootfs");
+        let unreachable = state
+            .manager
+            .checkpoint(uuid)
+            .await
+            .expect("unreachable checkpoint")
+            .id;
+        state
+            .manager
+            .restore(
+                uuid,
+                RestoreSandbox {
+                    checkpoint_id: head.clone(),
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("move HEAD away from the unreachable branch");
+
+        let empty_object = serde_json::to_vec(&json!({})).expect("empty object");
+        let (status, response) = handled_json(
+            &state,
+            Method::POST,
+            &format!("/v1/sandboxes/{id}/checkpoints/prune"),
+            empty_object,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            response,
+            json!({
+                "status": "pruned",
+                "removed_count": 1,
+                "removed": [unreachable.clone()],
+            })
+        );
+
+        let obsolete_body = serde_json::to_vec(&json!({
+            "protected": [unreachable.clone()],
+        }))
+        .expect("obsolete prune body");
+        for ignored_body in [obsolete_body, b"not-json".to_vec()] {
+            let (status, response) = handled_json(
+                &state,
+                Method::POST,
+                &format!("/v1/sandboxes/{id}/checkpoints/prune"),
+                ignored_body,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                response,
+                json!({
+                    "status": "pruned",
+                    "removed_count": 0,
+                    "removed": [],
+                })
+            );
+        }
+
+        let unread_request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/v1/sandboxes/{id}/checkpoints/prune"))
+            .header(hyper::header::CONTENT_LENGTH, u64::MAX)
+            .body(BodyThatMustNotBeRead)
+            .expect("unread request");
+        let unread_response = handle_request(unread_request, state.clone())
+            .await
+            .expect("infallible response");
+        assert_eq!(unread_response.status(), StatusCode::OK);
+        let unread_body = unread_response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&unread_body).expect("response json"),
+            json!({
+                "status": "pruned",
+                "removed_count": 0,
+                "removed": [],
+            })
+        );
+        let remaining: std::collections::HashSet<String> = state
+            .manager
+            .list_checkpoints(uuid)
+            .await
+            .expect("list after prune")
+            .into_iter()
+            .map(|checkpoint| checkpoint.id)
+            .collect();
+        assert!(remaining.contains(&root));
+        assert!(remaining.contains(&head));
+        assert!(!remaining.contains(&unreachable));
+        let lifecycle = state.manager.get(uuid).expect("lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::Running);
+        assert!(lifecycle.operation.is_none());
+    }
+
+    #[tokio::test]
+    async fn prune_catalog_error_clears_operation_without_deleting_history() {
+        let temp = tempfile::tempdir().expect("temp");
+        let state = mock_state(&temp);
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        write_checkpoint_fixture(&state, id).await;
+        let head = state
+            .manager
+            .checkpoint(uuid)
+            .await
+            .expect("head checkpoint")
+            .id;
+        let namespace = configured_state_dir(&state).join("checkpoints").join(id);
+        let checkpoint = namespace.join(&head);
+        tokio::fs::write(checkpoint.join("metadata.json"), b"{")
+            .await
+            .expect("corrupt checkpoint metadata");
+
+        let (status, error) = handled_json(
+            &state,
+            Method::POST,
+            &format!("/v1/sandboxes/{id}/checkpoints/prune"),
+            Vec::new(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error["status"], 500);
+        assert!(
+            error["error"]
+                .as_str()
+                .expect("error")
+                .contains("checkpoint metadata")
+        );
+        let lifecycle = state.manager.get(uuid).expect("lifecycle after failure");
+        assert_eq!(lifecycle.state, SandboxState::Running);
+        assert!(lifecycle.operation.is_none());
+        assert!(checkpoint.is_dir());
+        assert_eq!(
+            std::fs::read_to_string(namespace.join("HEAD"))
+                .expect("checkpoint HEAD")
+                .trim(),
+            head
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_rejects_a_vanished_namespace_after_a_checkpoint() {
+        let temp = tempfile::tempdir().expect("temp");
+        let state = mock_state(&temp);
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        write_checkpoint_fixture(&state, id).await;
+        let checkpoint_id = state.manager.checkpoint(uuid).await.expect("checkpoint").id;
+        let namespace = configured_state_dir(&state).join("checkpoints").join(id);
+        tokio::fs::remove_dir_all(&namespace)
+            .await
+            .expect("remove checkpoint namespace");
+
+        let (status, error) = handled_json(
+            &state,
+            Method::POST,
+            &format!("/v1/sandboxes/{id}/checkpoints/prune"),
+            Vec::new(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error["status"], 500);
+        assert!(
+            error["error"]
+                .as_str()
+                .expect("error")
+                .contains("checkpoint namespace is missing")
+        );
+        let lifecycle = state.manager.get(uuid).expect("lifecycle after failure");
+        assert_eq!(lifecycle.state, SandboxState::Running);
+        assert!(lifecycle.operation.is_none());
+        assert_eq!(
+            lifecycle.last_checkpoint.as_deref(),
+            Some(checkpoint_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_rejects_a_nonempty_catalog_without_head() {
+        let temp = tempfile::tempdir().expect("temp");
+        let state = mock_state(&temp);
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        write_checkpoint_fixture(&state, id).await;
+        let checkpoint_id = state.manager.checkpoint(uuid).await.expect("checkpoint").id;
+        let namespace = configured_state_dir(&state).join("checkpoints").join(id);
+        tokio::fs::remove_file(namespace.join("HEAD"))
+            .await
+            .expect("remove checkpoint HEAD");
+
+        let (status, error) = handled_json(
+            &state,
+            Method::POST,
+            &format!("/v1/sandboxes/{id}/checkpoints/prune"),
+            Vec::new(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error["status"], 500);
+        assert!(
+            error["error"]
+                .as_str()
+                .expect("error")
+                .contains("committed checkpoints but no HEAD")
+        );
+        let lifecycle = state.manager.get(uuid).expect("lifecycle after failure");
+        assert_eq!(lifecycle.state, SandboxState::Running);
+        assert!(lifecycle.operation.is_none());
+        assert!(namespace.join(checkpoint_id).is_dir());
+        assert!(!namespace.join("HEAD").exists());
+    }
+
+    #[tokio::test]
+    async fn prune_route_rejects_a_hibernated_sandbox_without_mutation() {
+        let temp = tempfile::tempdir().expect("temp");
+        let state = mock_state(&temp);
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        {
+            let mut instances = state.instances.lock().expect("instances");
+            let instance = instances.get_mut(&uuid).expect("instance");
+            instance.state = SandboxState::Hibernated;
+            instance.backend_ownership = BackendOwnership::Stopped;
+        }
+
+        let (status, body) = handled_json(
+            &state,
+            Method::POST,
+            &format!("/v1/sandboxes/{id}/checkpoints/prune"),
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["status"], 409);
+        let lifecycle = state.manager.get(uuid).expect("lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::Hibernated);
+        assert!(lifecycle.operation.is_none());
+
+        {
+            let mut instances = state.instances.lock().expect("instances");
+            let instance = instances.get_mut(&uuid).expect("instance");
+            instance.state = SandboxState::RecoveryRequired;
+        }
+        let (status, body) = handled_json(
+            &state,
+            Method::POST,
+            &format!("/v1/sandboxes/{id}/checkpoints/prune"),
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["status"], 409);
+        let lifecycle = state.manager.get(uuid).expect("recovery lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::RecoveryRequired);
+        assert!(lifecycle.operation.is_none());
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn interrupted_prune_retains_a_recovery_record_and_destroy_cleans_it() {
+        let temp = tempfile::tempdir().expect("temp");
+        let config = test_config(&temp);
+        let storage: Arc<dyn StorageProvider> = Arc::new(FileStorageProvider::with_images(
+            config.storage.images_dir.clone(),
+            config.storage.instances_dir.clone(),
+        ));
+        let state = build_test_state(
+            config,
+            test_policy(BackendKind::Mock),
+            spawners(BackendKind::Mock, Arc::new(MockSpawner)),
+            BackendKind::Mock,
+            storage,
+        );
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id");
+        let uuid = Uuid::parse_str(id).expect("uuid");
+        let slot = state.storage.reconstruct(id).await.expect("storage slot");
+        tokio::fs::write(&slot.rootfs_path, b"first-rootfs")
+            .await
+            .expect("first rootfs");
+        let first = state
+            .manager
+            .checkpoint(uuid)
+            .await
+            .expect("first checkpoint");
+        tokio::fs::write(&slot.rootfs_path, b"second-rootfs")
+            .await
+            .expect("second rootfs");
+        let second = state
+            .manager
+            .checkpoint(uuid)
+            .await
+            .expect("second checkpoint");
+        state
+            .manager
+            .restore(
+                uuid,
+                RestoreSandbox {
+                    checkpoint_id: first.id,
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("move HEAD to the first checkpoint");
+
+        let hook = crate::failpoint::TestFailpoint::new(&["checkpoint-prune-after-tombstone"]);
+        let error = hook
+            .run(state.manager.prune_checkpoints(uuid))
+            .await
+            .expect_err("interrupted cleanup must require recovery");
+        assert!(matches!(error, BlazeDaemonError::RecoveryRequired(_)));
+        let lifecycle = state.manager.get(uuid).expect("lifecycle");
+        assert_eq!(lifecycle.state, SandboxState::RecoveryRequired);
+        assert_eq!(
+            lifecycle.operation.as_ref().map(|operation| operation.kind),
+            Some(OperationKind::Prune)
+        );
+        let checkpoint_namespace = configured_state_dir(&state).join("checkpoints").join(id);
+        assert!(!checkpoint_namespace.join(second.id).exists());
+        assert!(
+            std::fs::read_dir(&checkpoint_namespace)
+                .expect("checkpoint namespace")
+                .any(|entry| entry
+                    .expect("checkpoint entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".prune."))
+        );
+
+        state.manager.destroy(uuid).await.expect("destroy recovery");
+        assert!(!checkpoint_namespace.exists());
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn cancelled_prune_finishes_before_destroy() {
+        let temp = tempfile::tempdir().expect("temp");
+        let state = mock_state(&temp);
+        let created = created_json(&state, &test_request()).await;
+        let id = created["instance"]["id"].as_str().expect("id").to_string();
+        let uuid = Uuid::parse_str(&id).expect("uuid");
+        let slot = write_checkpoint_fixture(&state, &id).await;
+        let first = state
+            .manager
+            .checkpoint(uuid)
+            .await
+            .expect("first checkpoint");
+        tokio::fs::write(&slot.rootfs_path, b"second-rootfs")
+            .await
+            .expect("second rootfs");
+        let _second = state
+            .manager
+            .checkpoint(uuid)
+            .await
+            .expect("second checkpoint");
+        state
+            .manager
+            .restore(
+                uuid,
+                RestoreSandbox {
+                    checkpoint_id: first.id,
+                    binary_path: PathBuf::new(),
+                },
+            )
+            .await
+            .expect("move HEAD to the first checkpoint");
+
+        let hook = crate::failpoint::TestFailpoint::new(&["checkpoint-before-store-prune"]);
+        let prune_state = state.clone();
+        let prune_hook = hook.clone();
+        let prune = tokio::spawn(async move {
+            prune_hook
+                .run(prune_state.manager.prune_checkpoints(uuid))
+                .await
+        });
+        hook.wait_until_paused().await;
+        let interrupted = state.manager.get(uuid).expect("prune lifecycle");
+        assert_eq!(interrupted.state, SandboxState::Running);
+        assert_eq!(
+            interrupted
+                .operation
+                .as_ref()
+                .map(|operation| operation.kind),
+            Some(OperationKind::Prune)
+        );
+
+        prune.abort();
+        assert!(
+            prune
+                .await
+                .expect_err("outer prune request must be cancelled")
+                .is_cancelled()
+        );
+        assert!(
+            state.manager.operation_lock(uuid).try_lock().is_err(),
+            "the detached prune supervisor must retain checkpoint ownership"
+        );
+
+        let destroy_state = state.clone();
+        let mut destroy = tokio::spawn(async move { destroy_state.manager.destroy(uuid).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut destroy)
+                .await
+                .is_err(),
+            "destroy must wait for the detached prune supervisor"
+        );
+
+        hook.release();
+        tokio::time::timeout(Duration::from_secs(2), &mut destroy)
+            .await
+            .expect("detached prune supervisor and queued destroy must converge")
+            .expect("destroy task")
+            .expect("destroy after detached prune");
+        let destroyed = state.manager.get(uuid).expect("destroyed lifecycle");
+        assert_eq!(destroyed.state, SandboxState::Destroyed);
+        assert!(destroyed.operation.is_none());
+        assert!(
+            !configured_state_dir(&state)
+                .join("checkpoints")
+                .join(&id)
+                .exists()
         );
     }
 

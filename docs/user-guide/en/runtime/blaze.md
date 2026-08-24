@@ -96,7 +96,8 @@ to execute commands, read files, and write files inside them. Sandbox
 destruction uses `DELETE /v1/sandboxes/{id}`. Checkpoint capture and history
 use
 `POST /v1/sandboxes/{id}/checkpoint` and
-`GET /v1/sandboxes/{id}/checkpoints`. Restore uses
+`GET /v1/sandboxes/{id}/checkpoints`; unreachable branches are removed through
+`POST /v1/sandboxes/{id}/checkpoints/prune`. Restore uses
 `POST /v1/sandboxes/{id}/rollback/{checkpoint_id}`. Hibernation uses
 `POST /v1/sandboxes/{id}/hibernate` and `POST /v1/sandboxes/{id}/resume`.
 
@@ -310,6 +311,67 @@ the durable record and reports `RecoveryRequired`; do not retry capture until
 the sandbox has been reconciled or destroyed. A committed checkpoint that did
 not become HEAD can still appear in history with `is_head: false`.
 
+Remove checkpoint branches that are no longer reachable with:
+
+```http
+POST /v1/sandboxes/{id}/checkpoints/prune
+```
+
+The request has no defined fields. For compatibility with Go Blaze, the server
+does not read or inspect the request body. Clients may omit it, send `{}`, or
+send other content, including non-JSON bytes; all supplied content is ignored.
+Blaze retains the current HEAD and its complete parent chain, and removes every
+other committed branch.
+
+A successful response identifies exactly what left committed history:
+
+```json
+{
+  "status": "pruned",
+  "removed_count": 1,
+  "removed": ["ckpt-44444444-4444-4444-8444-444444444444"]
+}
+```
+
+The route defines no request-body fields and ignores supplied content. A body
+therefore cannot select checkpoints or protect an unreachable branch. Prune
+accepts only a `Running` sandbox with no unfinished operation; a hibernated,
+recovering, or otherwise unavailable sandbox returns HTTP 409.
+
+Capture, list, prune, guest operations, and lifecycle changes use the same
+per-sandbox operation lock. Before deleting anything, Blaze persists a prune
+operation record. Each selected checkpoint then moves atomically to a unique
+`.prune.<checkpoint>.<uuid>.tombstone` directory and is recursively removed,
+including nested backend payloads. The current HEAD chain is never a candidate;
+the candidate identity and current HEAD are revalidated before every rename.
+
+If cleanup fails before any rename, Blaze clears the operation record and no
+checkpoint is removed. If cleanup is partial or the rename result cannot be
+proved, the sandbox becomes `RecoveryRequired` and the operation record is
+retained. A later prune request in that state returns HTTP 409 without changing
+the catalog. Destroy, or normal reconciliation after a daemon restart, removes
+the owned runtime and complete checkpoint namespace. Operators should destroy
+the affected sandbox, or allow normal startup reconciliation to clean it after
+a daemon restart. They must not retry prune or infer an authoritative deletion
+set from checkpoint identifiers embedded in the error text. Blaze returns HTTP
+200 only after every tombstone created by the request is removed and the
+checkpoint namespace is synchronized.
+
+An unreadable or invalid checkpoint catalog is not treated as empty history;
+neither is a non-empty catalog whose HEAD file is missing. Before prune loads
+the catalog, Blaze checks the complete top-level namespace: only the optional
+HEAD file and canonically named committed checkpoint directories are accepted.
+Unknown files, directories, staging entries, or cleanup remnants therefore
+stop prune before deletion. Before selecting candidates, Blaze verifies the
+exact file inventory, recorded size, and SHA-256 digest of every committed
+checkpoint, and verifies that every branch has existing parents and contains
+no cycle. If any namespace, catalog, ancestry, or artifact-integrity check
+fails before the first rename, prune returns HTTP 500, clears its operation
+record, and leaves HEAD and every checkpoint directory unchanged. This
+preflight reads every stored artifact, so prune time and storage input/output
+grow with the total checkpoint history.
+Diagnose storage corruption instead of repeatedly calling prune.
+
 Restore a running sandbox with:
 
 ```http
@@ -351,8 +413,6 @@ or Blaze being unable to confirm the old backend actually stopped — retains th
 resources that actually exist and marks the sandbox `RecoveryRequired` so
 destruction can finish cleanup. Restore moves checkpoint HEAD but does not
 rewrite `last_checkpoint` or capture history.
-
-Checkpoint deletion and pruning are not provided by this API.
 
 ## Hibernation and Resume
 

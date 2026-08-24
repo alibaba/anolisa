@@ -14,8 +14,8 @@ can clean non-terminal records that contain them.
 This document defines all three boundaries. The inventory-publication protocol
 does not change the HTTP API, configuration keys, or persisted JSON format. The
 management API section defines the sandbox namespace and the reserved
-reusable-capacity boundary. The checkpoint section defines three sandbox routes —
-capture, history, and restore — the durable operation fields used to recover
+reusable-capacity boundary. The checkpoint section defines four sandbox routes —
+capture, history, pruning, and restore — the durable operation fields used to recover
 interrupted capture, and the restore journal and lifecycle contract that keep an
 interrupted restore recoverable.
 
@@ -133,8 +133,54 @@ persistence, or backend resume has an unknown or unsafe outcome, Blaze retains
 the durable operation and marks the sandbox `RecoveryRequired`. Startup does
 not restore a checkpoint or adopt an interrupted backend; normal reconciliation
 cleans the owned runtime and checkpoint transaction artifacts. Committed
-checkpoint history is retained until sandbox destruction. Deletion and pruning
-are outside this interface.
+checkpoint history is retained until explicit pruning or sandbox destruction.
+
+`POST /v1/sandboxes/{id}/checkpoints/prune` removes committed branches that
+are unreachable from the current HEAD. It has no request-body fields and
+accepts only a `Running` sandbox with no unfinished operation. The complete
+current HEAD lineage is derived before any mutation and is never selected for
+removal. For compatibility with Go Blaze, the request body is not inspected;
+the body stream is not polled, and an absent body, `{}`, obsolete fields, or
+non-JSON content does not change which checkpoints are retained or removed.
+
+Prune persists an `OperationKind::Prune` record before changing the catalog.
+Each candidate is revalidated and atomically renamed, without replacement, to
+a uniquely named prune tombstone before recursive removal. This supports the
+version-2 layout, whose backend-owned subtree may contain nested directories.
+Successful completion removes the tombstone and clears the operation record.
+
+A failure proven to precede the first rename clears the operation record and
+leaves committed history unchanged. After any earlier removal, the same
+failure is treated as partial completion. A failure after a rename, or an
+outcome whose namespace state cannot be proved, retains the operation and
+marks the sandbox `RecoveryRequired`. Prune cannot then be retried. Destroy or
+startup reconciliation removes the runtime and complete checkpoint namespace,
+including any recognised prune tombstone. A daemon interruption after prune
+intent is durable follows this same cleanup path instead of resuming deletion.
+Operators must destroy the affected sandbox or allow startup reconciliation to
+clean it after a daemon restart; checkpoint identifiers in the error text are
+diagnostic context, not an authoritative deletion inventory.
+An entry that starts like a prune tombstone but fails the strict name check is
+not resumed as prune work. Its presence indicates an unexpected catalog entry;
+operators should destroy the affected sandbox instead of renaming the entry by
+hand. Destroy removes the complete owned checkpoint namespace, including that
+entry.
+
+An unreadable or invalid checkpoint catalog is not treated as empty history;
+neither is a non-empty catalog whose HEAD file is missing. Before prune loads
+the catalog, Blaze enumerates the complete top-level namespace and accepts only
+the optional HEAD file and canonically named committed checkpoint directories.
+Unknown files, directories, staging entries, or cleanup remnants therefore stop
+prune before deletion. Before selecting candidates, Blaze verifies the exact
+file inventory, recorded size, and SHA-256 digest of every committed checkpoint.
+It also validates parent existence and cycle freedom across every branch,
+including branches outside the HEAD lineage. If any namespace, catalog,
+ancestry, or artifact-integrity check fails before the first rename, prune
+returns HTTP 500, clears its operation record, and leaves HEAD and every
+checkpoint directory unchanged. This preflight reads every stored artifact, so
+prune time and storage input/output grow with the total checkpoint history. A
+validation error indicates storage corruption and should be investigated
+instead of retried as an empty prune.
 
 `POST /v1/sandboxes/{id}/rollback/{checkpoint_id}` replaces a running sandbox
 from one verified full checkpoint. Before mutation, Blaze verifies the complete
@@ -167,8 +213,8 @@ recorded by `last_checkpoint`.
 Lifecycle and guest operations are registered under `/v1/sandboxes`.
 Action-style reset and destroy paths are unregistered and return
 `404 Not Found`. Canonical destruction remains
-`DELETE /v1/sandboxes/{id}`. Checkpoint capture, listing, and restore use the
-three routes defined in the preceding section.
+`DELETE /v1/sandboxes/{id}`. Checkpoint capture, listing, pruning, and restore
+use the four routes defined in the preceding section.
 
 The following reserved management routes also return `501 Not Implemented` and
 do not manage reusable capacity:
@@ -227,6 +273,9 @@ Future lifecycle-state changes must preserve these rules:
   supervised backend, storage, publication, and state task has converged;
 - a checkpoint is never exposed as committed history before its artifacts and
   manifest are durably published, and HEAD never names an unpublished entry;
+- checkpoint pruning records its operation before mutation, never selects a
+  HEAD-reachable lineage, and treats every uncertain rename or partial cleanup
+  as recovery-required;
 - pool-management rejections occur before lifecycle, runtime, or storage
   ownership changes; and
 - lifecycle operations cannot enter or reactivate `Reset` or `Warm`; legacy

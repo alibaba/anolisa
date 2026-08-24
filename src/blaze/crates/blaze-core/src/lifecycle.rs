@@ -64,6 +64,8 @@ pub enum OperationKind {
     Create,
     /// A point-in-time checkpoint is being captured and published.
     Checkpoint,
+    /// Unreachable checkpoint branches are being removed.
+    Prune,
     /// A running sandbox is being replaced from a selected checkpoint.
     Restore,
     /// A live backend is being stopped after durable artifacts are prepared.
@@ -79,6 +81,7 @@ impl OperationKind {
         match self {
             OperationKind::Create => "create",
             OperationKind::Checkpoint => "checkpoint",
+            OperationKind::Prune => "prune",
             OperationKind::Restore => "restore",
             OperationKind::Hibernate => "hibernate",
             OperationKind::Resume => "resume",
@@ -905,6 +908,20 @@ mod tests {
         );
         loaded.finish_operation();
         assert!(loaded.operation.is_none());
+    }
+
+    #[test]
+    fn prune_journal_round_trips_without_a_checkpoint_selection() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut instance = fresh();
+        instance.begin_operation(OperationKind::Prune);
+        instance.persist(tmp.path()).expect("persist");
+
+        let loaded = SandboxInstance::load(tmp.path(), instance.id).expect("load");
+        let journal = loaded.operation.expect("prune journal");
+        assert_eq!(journal.kind, OperationKind::Prune);
+        assert!(journal.checkpoint_id.is_none());
+        assert!(journal.phase.is_none());
     }
 
     #[test]

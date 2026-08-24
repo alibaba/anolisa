@@ -39,6 +39,7 @@ const HEAD_FILE: &str = "HEAD";
 const STAGING_SUFFIX: &str = ".tmp";
 const TOMBSTONE_SUFFIX: &str = ".tombstone";
 const ABORT_TOMBSTONE_PREFIX: &str = ".abort.";
+const PRUNE_TOMBSTONE_PREFIX: &str = ".prune.";
 const CHECKPOINT_DIRECTORY_MODE: Mode = Mode::RWXU;
 const CHECKPOINT_FILE_MODE: Mode = Mode::RUSR.union(Mode::WUSR);
 /// Deepest payload nesting the daemon will walk. Matches the pure
@@ -92,6 +93,21 @@ pub enum CheckpointStoreError {
 
 /// Convenient result type for checkpoint catalog operations.
 pub type Result<T> = std::result::Result<T, CheckpointStoreError>;
+
+/// Result of removing unreachable checkpoint branches.
+#[derive(Debug)]
+pub enum PruneOutcome {
+    /// Every selected checkpoint was removed and no prune tombstone remains.
+    Complete { removed: Vec<String> },
+    /// At least one checkpoint may already have left the committed catalog.
+    /// The caller must keep the sandbox unavailable until normal recovery
+    /// removes any retained tombstone.
+    Incomplete {
+        removed: Vec<String>,
+        uncertain: Option<String>,
+        source: Box<CheckpointStoreError>,
+    },
+}
 
 /// Failure while creating a checkpoint stage.
 #[derive(Debug, Error)]
@@ -262,6 +278,19 @@ impl CheckpointStage {
 struct OwnedArtifact {
     path: PathBuf,
     file: File,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct PruneScratchKey {
+    checkpoint_id: String,
+    nonce: Uuid,
+}
+
+enum CandidateSweep {
+    Removed,
+    Retained(CheckpointStoreError),
+    RemovedWithUnfinishedCleanup(CheckpointStoreError),
+    Uncertain(CheckpointStoreError),
 }
 
 /// Retained payload subtree descriptors of one committed checkpoint.
@@ -1010,6 +1039,231 @@ impl CheckpointStore {
         sync_directory(sandbox).map_err(CheckpointHeadError::unknown)
     }
 
+    /// Remove committed checkpoints that are unreachable from the current
+    /// HEAD.
+    ///
+    /// A candidate first moves to a uniquely named tombstone with a
+    /// no-replace rename. The committed catalog therefore changes at one
+    /// atomic boundary, while normal sandbox recovery can still recognise and
+    /// remove an interrupted cleanup. Every candidate is revalidated against
+    /// the original catalog and HEAD immediately before that boundary.
+    /// `checkpoint_history_expected` is derived from the durable sandbox
+    /// lifecycle record and prevents a vanished namespace from being mistaken
+    /// for a sandbox that has never captured a checkpoint.
+    pub fn prune_unreachable(
+        &self,
+        sandbox_id: Uuid,
+        checkpoint_history_expected: bool,
+    ) -> Result<PruneOutcome> {
+        let catalog_root = self.root()?;
+        let Some(sandbox) = optional_child_directory(&catalog_root, &sandbox_id.to_string())?
+        else {
+            if checkpoint_history_expected {
+                return Err(invariant(format!(
+                    "sandbox {sandbox_id} records completed checkpoints, but its checkpoint namespace is missing"
+                )));
+            }
+            return Ok(PruneOutcome::Complete {
+                removed: Vec::new(),
+            });
+        };
+        require_prunable_sandbox_namespace(&sandbox)?;
+        let catalog = self.load_catalog(&sandbox, sandbox_id)?;
+        validate_catalog_lineages(&catalog)?;
+        let head = self.read_head_id_from(&sandbox)?;
+        if head.is_none() && !catalog.is_empty() {
+            return Err(invariant(format!(
+                "checkpoint catalog for sandbox {sandbox_id} has committed checkpoints but no HEAD"
+            )));
+        }
+        if head.is_none() && checkpoint_history_expected {
+            return Err(invariant(format!(
+                "sandbox {sandbox_id} records completed checkpoints, but its checkpoint namespace has no HEAD"
+            )));
+        }
+        self.verify_catalog_artifacts(&sandbox, sandbox_id, &catalog)?;
+        let mut keep = HashSet::new();
+        if let Some(head_id) = head.as_deref() {
+            keep.extend(lineage_from(&catalog, head_id)?);
+        }
+        let mut candidates: Vec<String> = catalog
+            .keys()
+            .filter(|checkpoint_id| !keep.contains(*checkpoint_id))
+            .cloned()
+            .collect();
+        candidates.sort();
+
+        let mut removed = Vec::with_capacity(candidates.len());
+        for checkpoint_id in candidates {
+            match self.sweep_prune_candidate(
+                &sandbox,
+                sandbox_id,
+                &catalog,
+                head.as_deref(),
+                &checkpoint_id,
+            ) {
+                CandidateSweep::Removed => removed.push(checkpoint_id),
+                CandidateSweep::Retained(source) if removed.is_empty() => return Err(source),
+                CandidateSweep::Retained(source) => {
+                    return Ok(PruneOutcome::Incomplete {
+                        removed,
+                        uncertain: None,
+                        source: Box::new(source),
+                    });
+                }
+                CandidateSweep::RemovedWithUnfinishedCleanup(source) => {
+                    removed.push(checkpoint_id);
+                    return Ok(PruneOutcome::Incomplete {
+                        removed,
+                        uncertain: None,
+                        source: Box::new(source),
+                    });
+                }
+                CandidateSweep::Uncertain(source) => {
+                    return Ok(PruneOutcome::Incomplete {
+                        removed,
+                        uncertain: Some(checkpoint_id),
+                        source: Box::new(source),
+                    });
+                }
+            }
+        }
+        Ok(PruneOutcome::Complete { removed })
+    }
+
+    fn sweep_prune_candidate(
+        &self,
+        sandbox: &OwnedStateDirectory,
+        sandbox_id: Uuid,
+        catalog: &HashMap<String, CheckpointMetadata>,
+        planned_head: Option<&str>,
+        checkpoint_id: &str,
+    ) -> CandidateSweep {
+        macro_rules! retain {
+            ($expression:expr) => {
+                match $expression {
+                    Ok(value) => value,
+                    Err(source) => return CandidateSweep::Retained(source),
+                }
+            };
+        }
+
+        let expected = match catalog.get(checkpoint_id).cloned() {
+            Some(expected) => expected,
+            None => {
+                return CandidateSweep::Retained(invariant(
+                    "checkpoint prune candidate disappeared from its validated plan",
+                ));
+            }
+        };
+        let candidate = retain!(self.load_checkpoint_metadata(sandbox, sandbox_id, checkpoint_id));
+        if candidate.metadata != expected {
+            return CandidateSweep::Retained(invariant(format!(
+                "checkpoint prune candidate {checkpoint_id} changed after planning"
+            )));
+        }
+        let current_head = retain!(self.read_head_id_from(sandbox));
+        if current_head.as_deref() != planned_head {
+            return CandidateSweep::Retained(invariant(
+                "checkpoint HEAD changed after the prune plan was validated",
+            ));
+        }
+        if current_head.as_deref() == Some(checkpoint_id) {
+            return CandidateSweep::Retained(invariant(
+                "checkpoint prune candidate became HEAD after planning",
+            ));
+        }
+
+        let key = PruneScratchKey {
+            checkpoint_id: checkpoint_id.to_string(),
+            nonce: Uuid::new_v4(),
+        };
+        let tombstone_name = prune_tombstone_name(&key);
+        if let Err(source) = checkpoint_store_failpoint(
+            "checkpoint-prune-before-rename",
+            candidate.directory.configured_path(),
+        ) {
+            return CandidateSweep::Retained(source);
+        }
+        let rename_error = renameat_with(
+            sandbox.descriptor(),
+            checkpoint_id,
+            sandbox.descriptor(),
+            tombstone_name.as_str(),
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(|source| {
+            io_error(
+                "publish checkpoint prune tombstone",
+                sandbox.configured_path().join(&tombstone_name),
+                std::io::Error::from(source),
+            )
+        })
+        .err();
+
+        let probe = (|| -> Result<(bool, bool, bool)> {
+            let source = optional_child_directory(sandbox, checkpoint_id)?;
+            let tombstone = optional_child_directory(sandbox, &tombstone_name)?;
+            let source_matches = source
+                .as_ref()
+                .map(|directory| same_directory(directory, &candidate.directory))
+                .transpose()?
+                .unwrap_or(false);
+            let tombstone_matches = tombstone
+                .as_ref()
+                .map(|directory| same_directory(directory, &candidate.directory))
+                .transpose()?
+                .unwrap_or(false);
+            Ok((source.is_some(), source_matches, tombstone_matches))
+        })();
+        let (source_present, source_matches, tombstone_matches) = match probe {
+            Ok(probe) => probe,
+            Err(source) => {
+                return CandidateSweep::Uncertain(invariant(format!(
+                    "checkpoint prune rename could not be verified: {source}{}",
+                    rename_error
+                        .as_ref()
+                        .map(|error| format!("; rename reported: {error}"))
+                        .unwrap_or_default()
+                )));
+            }
+        };
+
+        if !source_present && tombstone_matches {
+            // The namespace proves that the rename took effect, even when the
+            // system call reported an error after applying it.
+        } else if source_matches && !tombstone_matches {
+            return CandidateSweep::Retained(rename_error.unwrap_or_else(|| {
+                invariant(format!(
+                    "checkpoint prune rename reported success but {checkpoint_id} remained committed"
+                ))
+            }));
+        } else {
+            return CandidateSweep::Uncertain(invariant(format!(
+                "checkpoint prune rename has an uncertain namespace outcome{}",
+                rename_error
+                    .as_ref()
+                    .map(|error| format!(": {error}"))
+                    .unwrap_or_default()
+            )));
+        }
+
+        let cleanup = (|| -> Result<()> {
+            require_linked_directory(sandbox, &tombstone_name, &candidate.directory)?;
+            sync_directory(sandbox)?;
+            checkpoint_store_failpoint(
+                "checkpoint-prune-after-tombstone",
+                &sandbox.configured_path().join(&tombstone_name),
+            )?;
+            remove_owned_directory(sandbox, &tombstone_name, candidate.directory)?;
+            sync_directory(sandbox)
+        })();
+        match cleanup {
+            Ok(()) => CandidateSweep::Removed,
+            Err(source) => CandidateSweep::RemovedWithUnfinishedCleanup(source),
+        }
+    }
+
     /// Return the persisted HEAD, if present.
     pub fn read_head(&self, sandbox_id: Uuid) -> Result<Option<String>> {
         let catalog = self.root()?;
@@ -1457,6 +1711,25 @@ impl CheckpointStore {
         Ok(catalog)
     }
 
+    fn verify_catalog_artifacts(
+        &self,
+        sandbox: &OwnedStateDirectory,
+        sandbox_id: Uuid,
+        catalog: &HashMap<String, CheckpointMetadata>,
+    ) -> Result<()> {
+        let mut checkpoint_ids: Vec<&str> = catalog.keys().map(String::as_str).collect();
+        checkpoint_ids.sort_unstable();
+        for checkpoint_id in checkpoint_ids {
+            let verified = self.verified_checkpoint(sandbox, sandbox_id, checkpoint_id)?;
+            if catalog.get(checkpoint_id) != Some(&verified.metadata) {
+                return Err(invariant(format!(
+                    "checkpoint {checkpoint_id} failed integrity validation: metadata changed during prune validation"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn read_head_id_from(&self, sandbox: &OwnedStateDirectory) -> Result<Option<String>> {
         let Some(mut head) = optional_file(sandbox, HEAD_FILE, "open checkpoint HEAD")? else {
             return Ok(None);
@@ -1551,6 +1824,38 @@ fn lineage_from(
         current = parent.clone();
     }
     Ok(lineage)
+}
+
+fn validate_catalog_lineages(catalog: &HashMap<String, CheckpointMetadata>) -> Result<()> {
+    let mut complete = HashSet::new();
+    for checkpoint_id in catalog.keys() {
+        if complete.contains(checkpoint_id) {
+            continue;
+        }
+        let mut current = checkpoint_id.clone();
+        let mut branch = HashSet::new();
+        loop {
+            if complete.contains(&current) {
+                break;
+            }
+            if !branch.insert(current.clone()) {
+                return Err(invariant(format!(
+                    "checkpoint parent cycle reaches {current}"
+                )));
+            }
+            let metadata = catalog.get(&current).ok_or_else(|| {
+                invariant(format!(
+                    "checkpoint lineage references missing parent {current}"
+                ))
+            })?;
+            let Some(parent) = &metadata.parent else {
+                break;
+            };
+            current = parent.clone();
+        }
+        complete.extend(branch);
+    }
+    Ok(())
 }
 
 fn create_child_directory(parent: &OwnedStateDirectory, name: &str) -> Result<OwnedStateDirectory> {
@@ -2255,6 +2560,29 @@ fn require_publishable_sandbox_namespace(
     Ok(())
 }
 
+/// Require the complete sandbox checkpoint namespace to be stable before a
+/// destructive prune is planned.
+///
+/// The lifecycle manager serialises checkpoint operations, so a prunable
+/// running sandbox can contain only committed checkpoints and the optional
+/// HEAD file. A staging name, cleanup tombstone, or any other entry means the
+/// namespace does not match that lifecycle state. Rejecting it before loading
+/// the catalog prevents a reduced view from selecting otherwise valid
+/// checkpoints for deletion. Read-only catalog listing deliberately keeps its
+/// existing behavior and may ignore a stage that a failed capture still owns.
+fn require_prunable_sandbox_namespace(sandbox: &OwnedStateDirectory) -> Result<()> {
+    for name in directory_names(sandbox, "scan prunable checkpoint namespace")? {
+        if name == HEAD_FILE || validate_checkpoint_id(&name).is_ok() {
+            continue;
+        }
+        return Err(invariant(format!(
+            "sandbox checkpoint namespace entry {} is neither HEAD nor a committed checkpoint",
+            sandbox.configured_path().join(&name).display()
+        )));
+    }
+    Ok(())
+}
+
 fn classify_scratch_name(name: &str) -> Result<Option<ScratchKind>> {
     if let Some(checkpoint_id) = name
         .strip_prefix('.')
@@ -2282,7 +2610,32 @@ fn classify_scratch_name(name: &str) -> Result<Option<ScratchKind>> {
         parse_uuid_component(nonce, "checkpoint tombstone")?;
         return Ok(Some(ScratchKind::Directory));
     }
+    if let Some(body) = name
+        .strip_prefix(PRUNE_TOMBSTONE_PREFIX)
+        .and_then(|name| name.strip_suffix(TOMBSTONE_SUFFIX))
+    {
+        parse_prune_scratch_key(body, name)?;
+        return Ok(Some(ScratchKind::Directory));
+    }
     Ok(None)
+}
+
+fn prune_tombstone_name(key: &PruneScratchKey) -> String {
+    format!(
+        "{PRUNE_TOMBSTONE_PREFIX}{}.{}{TOMBSTONE_SUFFIX}",
+        key.checkpoint_id, key.nonce
+    )
+}
+
+fn parse_prune_scratch_key(body: &str, name: &str) -> Result<PruneScratchKey> {
+    let (checkpoint_id, nonce) = body
+        .rsplit_once('.')
+        .ok_or_else(|| invariant(format!("invalid checkpoint prune tombstone name {name:?}")))?;
+    validate_checkpoint_id(checkpoint_id)?;
+    Ok(PruneScratchKey {
+        checkpoint_id: checkpoint_id.to_string(),
+        nonce: parse_uuid_component(nonce, "checkpoint prune tombstone")?,
+    })
 }
 
 fn parse_uuid_component(value: &str, label: &str) -> Result<Uuid> {
@@ -2843,6 +3196,301 @@ mod tests {
             listed
                 .iter()
                 .any(|info| info.id == unreachable && !info.on_head_chain)
+        );
+    }
+
+    #[test]
+    fn prune_preserves_head_lineage_and_removes_nested_payloads() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        let root = publish(&store, sandbox_id, None, true);
+        let head = publish(&store, sandbox_id, Some(root.clone()), true);
+        let stage = store.begin(sandbox_id).expect("begin nested checkpoint");
+        let unreachable = stage.id().to_string();
+        populate(&stage, "nested-unreachable");
+        let nested = stage.backend_payload_dir().join("image/layer");
+        fs::create_dir_all(&nested).expect("nested backend payload");
+        fs::write(nested.join("pages.bin"), b"nested-pages").expect("nested payload file");
+        store
+            .publish(&stage, commit_input(Some(root.clone())))
+            .expect("publish nested checkpoint");
+
+        let outcome = store
+            .prune_unreachable(sandbox_id, true)
+            .expect("prune unreachable branch");
+        match outcome {
+            PruneOutcome::Complete { removed } => {
+                assert_eq!(removed, vec![unreachable.clone()]);
+            }
+            other => panic!("expected complete prune, got {other:?}"),
+        }
+
+        let sandbox = store.configured_root().join(sandbox_id.to_string());
+        assert!(sandbox.join(&root).is_dir());
+        assert!(sandbox.join(&head).is_dir());
+        assert!(!sandbox.join(&unreachable).exists());
+        assert!(
+            fs::read_dir(&sandbox)
+                .expect("scan checkpoint namespace")
+                .all(|entry| !entry
+                    .expect("checkpoint entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(PRUNE_TOMBSTONE_PREFIX)),
+            "successful prune must leave no tombstone"
+        );
+    }
+
+    #[test]
+    fn prune_distinguishes_no_history_from_a_vanished_namespace() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+
+        let outcome = store
+            .prune_unreachable(sandbox_id, false)
+            .expect("a sandbox without checkpoint history has nothing to prune");
+        assert!(matches!(
+            outcome,
+            PruneOutcome::Complete { removed } if removed.is_empty()
+        ));
+
+        let error = store
+            .prune_unreachable(sandbox_id, true)
+            .expect_err("a missing namespace must not hide recorded checkpoint history");
+        assert!(
+            error
+                .to_string()
+                .contains("checkpoint namespace is missing")
+        );
+    }
+
+    #[test]
+    fn prune_rejects_unknown_namespace_entries_before_deletion() {
+        for entry_is_directory in [false, true] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let store = store(&temp);
+            let sandbox_id = Uuid::new_v4();
+            let root = publish(&store, sandbox_id, None, true);
+            let unreachable = publish(&store, sandbox_id, Some(root.clone()), false);
+            let sandbox = store.configured_root().join(sandbox_id.to_string());
+            let stray = sandbox.join(if entry_is_directory {
+                "unknown-directory"
+            } else {
+                "unknown-file"
+            });
+            if entry_is_directory {
+                fs::create_dir(&stray).expect("create unknown directory");
+            } else {
+                fs::write(&stray, b"unexpected").expect("create unknown file");
+            }
+
+            let error = store
+                .prune_unreachable(sandbox_id, true)
+                .expect_err("an unknown namespace entry must stop prune before deletion");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("is neither HEAD nor a committed checkpoint")
+            );
+            assert_eq!(
+                store.read_head(sandbox_id).expect("HEAD after rejection"),
+                Some(root.clone())
+            );
+            assert!(sandbox.join(&root).is_dir());
+            assert!(sandbox.join(&unreachable).is_dir());
+            assert!(stray.exists());
+            assert!(
+                fs::read_dir(&sandbox)
+                    .expect("scan checkpoint namespace")
+                    .all(|entry| !entry
+                        .expect("checkpoint entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(PRUNE_TOMBSTONE_PREFIX))
+            );
+        }
+    }
+
+    #[test]
+    fn prune_verifies_every_checkpoint_digest_before_deletion() {
+        for corrupt_unreachable in [false, true] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let store = store(&temp);
+            let sandbox_id = Uuid::new_v4();
+            let head = publish(&store, sandbox_id, None, true);
+            let unreachable = publish(&store, sandbox_id, Some(head.clone()), false);
+            let sandbox = store.configured_root().join(sandbox_id.to_string());
+            let corrupt_id = if corrupt_unreachable {
+                &unreachable
+            } else {
+                &head
+            };
+            let artifact = sandbox.join(corrupt_id).join("backend/memory.snap");
+            let mut bytes = fs::read(&artifact).expect("read artifact before corruption");
+            bytes[0] ^= 1;
+            fs::write(&artifact, bytes).expect("replace artifact without changing its size");
+
+            let error = store
+                .prune_unreachable(sandbox_id, true)
+                .expect_err("any corrupted checkpoint must stop prune before deletion");
+
+            assert!(error.to_string().contains("failed integrity validation"));
+            assert_eq!(
+                store
+                    .read_head_id(sandbox_id)
+                    .expect("HEAD identifier after rejection"),
+                Some(head.clone())
+            );
+            assert!(sandbox.join(&head).is_dir());
+            assert!(sandbox.join(&unreachable).is_dir());
+            assert!(
+                fs::read_dir(&sandbox)
+                    .expect("scan checkpoint namespace")
+                    .all(|entry| !entry
+                        .expect("checkpoint entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(PRUNE_TOMBSTONE_PREFIX))
+            );
+        }
+    }
+
+    #[test]
+    fn prune_rejects_an_unreachable_branch_with_a_missing_parent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        let root = publish(&store, sandbox_id, None, true);
+        let head = publish(&store, sandbox_id, Some(root.clone()), true);
+        let unreachable = publish(&store, sandbox_id, Some(root.clone()), false);
+        let sandbox = store.configured_root().join(sandbox_id.to_string());
+        let metadata_path = sandbox.join(&unreachable).join(METADATA_FILE);
+        let mut metadata: CheckpointMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).expect("read metadata"))
+                .expect("decode metadata");
+        metadata.parent = Some(format!("ckpt-{}", Uuid::new_v4()));
+        fs::write(
+            &metadata_path,
+            serde_json::to_vec(&metadata).expect("encode metadata with missing parent"),
+        )
+        .expect("write metadata with missing parent");
+
+        let error = store
+            .prune_unreachable(sandbox_id, true)
+            .expect_err("a missing parent must stop prune before deletion");
+
+        assert!(
+            error
+                .to_string()
+                .contains("checkpoint lineage references missing parent")
+        );
+        assert_eq!(
+            store.read_head(sandbox_id).expect("HEAD after rejection"),
+            Some(head.clone())
+        );
+        for checkpoint_id in [&root, &head, &unreachable] {
+            assert!(sandbox.join(checkpoint_id).is_dir());
+        }
+        assert!(
+            fs::read_dir(&sandbox)
+                .expect("scan checkpoint namespace")
+                .all(|entry| !entry
+                    .expect("checkpoint entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(PRUNE_TOMBSTONE_PREFIX))
+        );
+    }
+
+    #[test]
+    fn prune_rejects_a_cycle_outside_the_head_lineage() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        let root = publish(&store, sandbox_id, None, true);
+        let head = publish(&store, sandbox_id, Some(root.clone()), true);
+        let first = publish(&store, sandbox_id, Some(root.clone()), false);
+        let second = publish(&store, sandbox_id, Some(first.clone()), false);
+        let sandbox = store.configured_root().join(sandbox_id.to_string());
+        let metadata_path = sandbox.join(&first).join(METADATA_FILE);
+        let mut metadata: CheckpointMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).expect("read metadata"))
+                .expect("decode metadata");
+        metadata.parent = Some(second.clone());
+        fs::write(
+            &metadata_path,
+            serde_json::to_vec(&metadata).expect("encode cyclic metadata"),
+        )
+        .expect("write cyclic metadata");
+
+        let error = store
+            .prune_unreachable(sandbox_id, true)
+            .expect_err("an unreachable cycle must stop prune before deletion");
+
+        assert!(
+            error
+                .to_string()
+                .contains("checkpoint parent cycle reaches")
+        );
+        assert_eq!(
+            store.read_head(sandbox_id).expect("HEAD after rejection"),
+            Some(head.clone())
+        );
+        for checkpoint_id in [&root, &head, &first, &second] {
+            assert!(sandbox.join(checkpoint_id).is_dir());
+        }
+        assert!(
+            fs::read_dir(&sandbox)
+                .expect("scan checkpoint namespace")
+                .all(|entry| !entry
+                    .expect("checkpoint entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(PRUNE_TOMBSTONE_PREFIX))
+        );
+    }
+
+    #[cfg(feature = "test-failpoints")]
+    #[tokio::test]
+    async fn prune_reports_incomplete_cleanup_after_publishing_a_tombstone() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store(&temp);
+        let sandbox_id = Uuid::new_v4();
+        let root = publish(&store, sandbox_id, None, true);
+        let unreachable = publish(&store, sandbox_id, Some(root), false);
+        let hook = crate::failpoint::TestFailpoint::new(&["checkpoint-prune-after-tombstone"]);
+
+        let outcome = hook
+            .run(async { store.prune_unreachable(sandbox_id, true) })
+            .await
+            .expect("post-rename failure must retain its outcome");
+        match outcome {
+            PruneOutcome::Incomplete {
+                removed,
+                uncertain,
+                source,
+            } => {
+                assert_eq!(removed, vec![unreachable.clone()]);
+                assert!(uncertain.is_none());
+                assert!(!source.to_string().is_empty());
+            }
+            other => panic!("expected incomplete prune, got {other:?}"),
+        }
+
+        let sandbox = store.configured_root().join(sandbox_id.to_string());
+        assert!(!sandbox.join(&unreachable).exists());
+        assert!(
+            fs::read_dir(&sandbox)
+                .expect("scan checkpoint namespace")
+                .any(|entry| entry
+                    .expect("checkpoint entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(PRUNE_TOMBSTONE_PREFIX)),
+            "interrupted cleanup must retain a recognised tombstone"
         );
     }
 
