@@ -873,8 +873,15 @@ fn remote_subscription_rejection_precedes_local_disconnect_observation() {
 
     assert!(matches!(
         &result,
-        Err(EnforcementCoordinatorError::EnforcementUnavailable(message))
-            if message.contains("violation ingestion is not subscribed")
+        Err(EnforcementCoordinatorError::PersistedUnacknowledged {
+            state: BindingState::Degraded,
+            source,
+            ..
+        }) if matches!(
+            source.as_ref(),
+            EnforcementCoordinatorError::EnforcementUnavailable(message)
+                if message.contains("violation ingestion is not subscribed")
+        )
     ));
     assert_eq!(fixture.apply_attempts(), 1);
     assert!(fixture.bindings().is_empty());
@@ -1002,8 +1009,15 @@ fn disconnect_during_apply_never_reports_enforced_state() {
     assert!(
         matches!(
             &result,
-            Err(EnforcementCoordinatorError::EnforcementUnavailable(message))
-                if message.contains("violation ingestion is not subscribed")
+            Err(EnforcementCoordinatorError::PersistedUnacknowledged {
+                state: BindingState::Degraded,
+                source,
+                ..
+            }) if matches!(
+                source.as_ref(),
+                EnforcementCoordinatorError::EnforcementUnavailable(message)
+                    if message.contains("violation ingestion is not subscribed")
+            )
         ),
         "unexpected apply result after disconnect: {result:?}"
     );
