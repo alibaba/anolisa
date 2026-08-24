@@ -46,19 +46,17 @@ use serde::Serialize;
 use anolisa_core::adapter::claim::{self, AdapterSourceRevision};
 use anolisa_core::adapter::manager::{AdapterManager, VisibleRoot};
 use anolisa_core::central_log::{CentralLog, LogKind, LogRecord, LogStatus, Severity};
-use anolisa_core::domain::{
-    InstallationScope, ManagementRelation, NativePm, OwnedArtifact, ProviderBinding,
+use anolisa_core::component_snapshot::{
+    ComponentSnapshot, ComponentSnapshotRequest, SnapshotProbe,
 };
-use anolisa_core::executor::{DelegatedExecutionTarget, execute_delegated_steps};
-use anolisa_core::facts::{JournalEvidence, ObserveRequest, assemble_facts};
-use anolisa_core::lock::InstallLock;
-use anolisa_core::owned_executor::{OwnedExecutionError, execute_owned_steps};
+use anolisa_core::domain::{InstallationScope, ManagementRelation, OwnedArtifact, ProviderBinding};
+use anolisa_core::facts::{FactsError, assemble_component_snapshot, lifecycle_facts_from_snapshot};
+use anolisa_core::owned_executor::OwnedExecutionError;
 use anolisa_core::planner::{
     Facts, Intent, NativeProbe, OwnedUpdateResolution, Plan, PlanError, Step, UpdateRequest,
     VersionRelation, plan,
 };
 use anolisa_core::providers::DelegatedProvider;
-use anolisa_core::record_sink::{DelegatedIdentity, RecordContext, StoreRecordSink};
 use anolisa_core::self_update::{self, ProgressFn, SelfUpdateOutcome};
 use anolisa_core::state::{ObjectKind, OperationRecord};
 use anolisa_core::state_store::StateStore;
@@ -71,10 +69,8 @@ use anolisa_platform::rpm_repo::DnfRepoSource;
 use anolisa_platform::rpm_transaction::RpmTransaction;
 
 use super::install::{
-    RawReplayOps, RawResolution, refresh_datadir_contract_snapshot, resolve_raw,
-    resolve_raw_inputs_for_component,
+    RawResolution, refresh_datadir_contract_snapshot, resolve_raw, resolve_raw_inputs_for_component,
 };
-use super::recovery::LockedJournalGate;
 use super::rpm_install;
 use crate::color::Palette;
 use crate::commands::common;
@@ -86,6 +82,7 @@ use crate::response::{self, CliError};
 // `pub(crate)` so `anolisa upgrade` (issue #1411) can reuse the read-only
 // planner (`check::compute_update_check_report`) instead of re-deriving it.
 pub(crate) mod all;
+mod application;
 pub(crate) mod check;
 
 /// Command label for JSON envelopes and error routing.
@@ -403,8 +400,22 @@ pub(crate) fn render_adapter_action_notices(actions: &[AdapterAction], color: &P
 /// repo.toml), an owned record resolves its latest published version through
 /// the raw backend inside the pipeline.
 fn handle_component_update(component: &str, ctx: &CliContext) -> Result<(), CliError> {
-    let (query, txn) = update_backends(component, ctx)?;
-    update_component_with_deps(component, ctx, &query, &txn, privilege::is_root()).map(|_| ())
+    let outcome = application::run(
+        application::ApplicationRequest {
+            component,
+            intent: execution_intent(ctx),
+        },
+        ctx,
+    )?;
+    render_application_outcome(ctx, outcome).map(|_| ())
+}
+
+fn execution_intent(ctx: &CliContext) -> anolisa_core::execution::ExecutionIntent {
+    if ctx.dry_run {
+        anolisa_core::execution::ExecutionIntent::Plan
+    } else {
+        anolisa_core::execution::ExecutionIntent::Apply
+    }
 }
 
 /// Real host backends for one component update: rpm query/transaction
@@ -472,6 +483,8 @@ pub(crate) struct PlannedComponentUpdate {
     /// rpmdb EVR the planning observation saw, for the wire `from` field and
     /// the merged-failure fact check.
     pub(crate) native_from: Option<String>,
+    /// Typed planner output classified by the application execution intent.
+    pub(crate) plan: Plan,
     pub(crate) route: PlannedUpdateRoute,
 }
 
@@ -482,7 +495,7 @@ pub(crate) enum PlannedUpdateRoute {
     /// Delegated step family (U5: one native update, observe, refresh).
     Delegated { steps: Vec<Step> },
     /// Owned step family (U3: replace files through the raw backend).
-    Owned { steps: Vec<Step> },
+    Owned,
 }
 
 /// Core of [`handle_component_update`] with the package backends injected so
@@ -502,14 +515,23 @@ pub(crate) fn update_component_with_deps(
     txn: &dyn PackageTransaction,
     is_root: bool,
 ) -> ComponentUpdateResult {
-    let planned = plan_component_update(input, ctx, query, txn)?;
-    execute_planned_update(planned, ctx, query, txn, is_root)
+    let outcome = application::run_with_dependencies(
+        application::ApplicationRequest {
+            component: input,
+            intent: execution_intent(ctx),
+        },
+        ctx,
+        query,
+        txn,
+        is_root,
+    )?;
+    render_application_outcome(ctx, outcome)
 }
 
 /// Planning prefix of a component update: resolve the record, assemble host
 /// facts (and the owned artifact resolution when the record is owned), and
 /// ask the planner for the step sequence. Read-only against the host —
-/// every side effect belongs to [`execute_planned_update`].
+/// every side effect belongs to the application execution phase.
 pub(crate) fn plan_component_update(
     input: &str,
     ctx: &CliContext,
@@ -550,62 +572,18 @@ pub(crate) fn plan_component_update(
         None => None,
     };
 
-    // Whether the record's relation would drive a native transaction —
-    // decides between hard "install rpm/dnf" guidance and replanning without
-    // the probe (an observed record refuses with "adopt first" whether or
-    // not the tooling exists).
-    let record_needs_native = matches!(
-        store
-            .find(ObjectKind::Component, target)
-            .map(|r| &r.binding),
-        Some(ProviderBinding::Delegated {
-            relation: ManagementRelation::Managed { .. } | ManagementRelation::Adopted { .. },
-            ..
-        })
-    );
-
     let provider = DelegatedProvider::new(query, txn);
-    let observe_request = ObserveRequest {
-        kind: ObjectKind::Component,
-        name: target,
+    let facts = observe_update_facts(
+        target,
         scope,
-        native_package: native_package.as_deref(),
-        observed_at: &now,
-        verify_owned_files: false,
-    };
-    let facts = match assemble_facts(
-        &observe_request,
+        native_package.as_deref(),
+        &now,
         &store,
-        Some(&provider),
+        &provider,
         &layout,
         &journal_dir,
-    ) {
-        Ok(facts) => facts,
-        // rpm missing on PATH. An update that would run a package operation
-        // cannot proceed; anything else replans without the probe so the
-        // planner can name the real way out.
-        Err(anolisa_core::facts::FactsError::Probe(
-            anolisa_core::providers::ProviderError::Query(PackageQueryError::CommandMissing {
-                command: bin,
-            }),
-        )) => {
-            if record_needs_native {
-                return Err(tooling_missing_err(&command, &bin, target));
-            }
-            assemble_facts(&observe_request, &store, None, &layout, &journal_dir).map_err(
-                |err| CliError::Runtime {
-                    command: command.clone(),
-                    reason: err.to_string(),
-                },
-            )?
-        }
-        Err(err) => {
-            return Err(CliError::Runtime {
-                command: command.clone(),
-                reason: err.to_string(),
-            });
-        }
-    };
+        &command,
+    )?;
 
     // An owned record needs its update target resolved before planning: the
     // CLI resolves the latest published version and classifies it against
@@ -644,8 +622,10 @@ pub(crate) fn plan_component_update(
         .map(|(resolution, prior)| (prior.version.clone(), resolution.entry.version.clone()));
 
     let intent = Intent::Update(UpdateRequest { owned_resolution });
-    let route = match plan(&intent, &facts) {
-        Ok(Plan::Execute { steps, .. }) => {
+    let lifecycle_plan = plan(&intent, &facts)
+        .map_err(|err| plan_error_to_cli(err, target, &command, owned_versions.as_ref()))?;
+    let route = match &lifecycle_plan {
+        Plan::Execute { steps, .. } => {
             // Route by step family: owned plans replace files through the raw
             // backend, delegated plans re-run the native transaction.
             let is_delegated_plan = steps.iter().all(|step| {
@@ -658,20 +638,14 @@ pub(crate) fn plan_component_update(
                 )
             });
             if is_delegated_plan {
-                PlannedUpdateRoute::Delegated { steps }
+                PlannedUpdateRoute::Delegated {
+                    steps: steps.clone(),
+                }
             } else {
-                PlannedUpdateRoute::Owned { steps }
+                PlannedUpdateRoute::Owned
             }
         }
-        Ok(Plan::NoOp { .. }) => PlannedUpdateRoute::AlreadyCurrent,
-        Err(err) => {
-            return Err(plan_error_to_cli(
-                err,
-                target,
-                &command,
-                owned_versions.as_ref(),
-            ));
-        }
+        Plan::NoOp { .. } => PlannedUpdateRoute::AlreadyCurrent,
     };
 
     Ok(PlannedComponentUpdate {
@@ -683,450 +657,115 @@ pub(crate) fn plan_component_update(
         owned_execution,
         owned_versions,
         native_from: native_observed_version(&facts),
+        plan: lifecycle_plan,
         route,
     })
 }
 
-/// Execution half of [`update_component_with_deps`]: render the idempotent
-/// NoOp, replace an owned artifact's files, or run the delegated native
-/// transaction. Dry-run renders the plan and stops before any side effect.
-/// Returns the outcome plus any adapter follow-up actions (always empty on
-/// no-op, dry-run, and failure paths).
-fn execute_planned_update(
-    planned: PlannedComponentUpdate,
-    ctx: &CliContext,
-    query: &dyn PackageQuery,
-    txn: &dyn PackageTransaction,
-    is_root: bool,
-) -> ComponentUpdateResult {
-    let PlannedComponentUpdate {
-        command,
-        target,
+#[expect(clippy::too_many_arguments)]
+fn observe_update_snapshot(
+    component: &str,
+    scope: InstallationScope,
+    native_package: Option<&str>,
+    observed_at: &str,
+    store: &StateStore,
+    provider: Option<&DelegatedProvider<'_>>,
+    layout: &FsLayout,
+    journal_dir: &Path,
+) -> Result<ComponentSnapshot, FactsError> {
+    let mut probes = vec![SnapshotProbe::State, SnapshotProbe::PendingJournal];
+    if native_package.is_some() && provider.is_some() && matches!(scope, InstallationScope::System)
+    {
+        probes.push(SnapshotProbe::NativePackage);
+    }
+    assemble_component_snapshot(
+        ComponentSnapshotRequest::new(component, scope, probes),
         native_package,
-        scope,
-        now,
-        owned_execution,
-        owned_versions,
-        native_from,
-        route,
-    } = planned;
-    let target = target.as_str();
-    let layout = common::resolve_layout(ctx);
-    let state_path = layout.state_dir.join("installed.toml");
-    let journal_dir = rpm_install::journal_dir(&layout);
-    let uid = privilege::effective_uid();
-
-    let steps = match route {
-        PlannedUpdateRoute::AlreadyCurrent => {
-            // U2: the recorded version is already the latest published one.
-            let (from, to) = match owned_versions {
-                Some((from, to)) => (Some(from), Some(to)),
-                None => (None, None),
-            };
-            let package = owned_execution
-                .map(|(resolution, _)| resolution.package)
-                .or(native_package);
-            render_result(
-                ctx,
-                target,
-                package.as_deref(),
-                from.as_deref(),
-                to.as_deref(),
-                false,
-                ctx.dry_run,
-                &[],
-                None,
-                &[],
-            )?;
-            return Ok((UpdateOutcome::AlreadyCurrent, Vec::new()));
-        }
-        PlannedUpdateRoute::Owned { steps } => {
-            let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
-            if ctx.dry_run {
-                let from_version = owned_versions.as_ref().map(|(from, _)| from.clone());
-                let to_version = owned_versions.as_ref().map(|(_, to)| to.clone());
-                let package = owned_execution
-                    .as_ref()
-                    .map(|(resolution, _)| resolution.package.clone())
-                    .or_else(|| native_package.clone());
-                render_result(
-                    ctx,
-                    target,
-                    package.as_deref(),
-                    from_version.as_deref(),
-                    to_version.as_deref(),
-                    false,
-                    true,
-                    &plan_labels,
-                    None,
-                    &[],
-                )?;
-                return Ok((UpdateOutcome::Updated, Vec::new()));
-            }
-            let (resolution, prior) = owned_execution.ok_or_else(|| CliError::Runtime {
-                command: command.clone(),
-                reason: format!(
-                    "internal: planner produced an owned plan but no resolution was prepared for '{target}'"
-                ),
-            })?;
-            let adapter_actions = update_owned(
-                target,
-                ctx,
-                &layout,
-                &state_path,
-                &journal_dir,
-                scope,
-                &now,
-                &steps,
-                &plan_labels,
-                resolution,
-                prior,
-                &command,
-            )?;
-            return Ok((UpdateOutcome::Updated, adapter_actions));
-        }
-        PlannedUpdateRoute::Delegated { steps } => steps,
-    };
-
-    let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
-
-    if ctx.dry_run {
-        render_result(
-            ctx,
-            target,
-            native_package.as_deref(),
-            native_from.as_deref(),
-            None,
-            false,
-            true,
-            &plan_labels,
-            None,
-            &[],
-        )?;
-        return Ok((UpdateOutcome::Updated, Vec::new()));
-    }
-
-    // dnf transactions need root; check up front so the user gets an
-    // actionable message instead of dnf's raw mid-transaction refusal.
-    if !is_root {
-        return Err(CliError::Runtime {
-            command,
-            reason: format!(
-                "updating system RPM '{}' requires root privileges; re-run with sudo: `sudo anolisa update {target}`",
-                native_package.as_deref().unwrap_or(target)
-            ),
-        });
-    }
-
-    let provider = DelegatedProvider::new(query, txn);
-    let from_version = native_from;
-
-    // Real run under the install lock, with state re-read and the update
-    // authority re-validated inside it: dnf runs against the pre-lock
-    // package identity, and grafting its result onto a record a concurrent
-    // operation re-pointed or downgraded would corrupt it.
-    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
-        command: command.clone(),
-        reason: format!("failed to acquire install lock: {err}"),
-    })?;
-    let mut store = StateStore::load_for_layout(&state_path, uid, &layout).map_err(|err| {
-        CliError::Runtime {
-            command: command.clone(),
-            reason: format!("failed to load installed state: {err}"),
-        }
-    })?;
-    if !native_update_authorized(&store, target, native_package.as_deref()) {
-        return Err(CliError::Runtime {
-            command,
-            reason: format!(
-                "component '{target}' changed while this update was planning; nothing was changed — re-run `anolisa update {target}`"
-            ),
-        });
-    }
-    let prior_adapter_revisions = adapter_revision_snapshot(ctx, &layout, target);
-
-    let package = native_package.clone().unwrap_or_else(|| target.to_string());
-    let evidence = JournalEvidence::new(&journal_dir, &store.operations);
-    let mut journal_gate = LockedJournalGate::load(&_lock, evidence, &command)?;
-    let mut journal = journal_gate.begin(COMMAND, target, state_path.clone(), &command)?;
-    let operation_id = journal.operation_id.clone();
-
-    let context = RecordContext {
-        kind: ObjectKind::Component,
-        name: target.to_string(),
-        scope,
-        now: now.clone(),
-        operation_id: Some(operation_id.clone()),
-        delegated: Some(DelegatedIdentity {
-            pm: NativePm::Rpm,
-            package: package.clone(),
-        }),
-        owned_artifact: None,
-    };
-    let outcome = {
-        let mut sink = StoreRecordSink::new(&mut store, &state_path, context);
-        execute_delegated_steps(
-            &steps,
-            DelegatedExecutionTarget::new(NativePm::Rpm, Some(&package)),
-            &provider,
-            &mut sink,
-            &mut journal,
-            &now,
-        )
-    }
-    .map_err(|err| match err {
-        // dnf missing even though the rpmdb query succeeded: same guidance
-        // as the query-missing branch rather than a generic failure.
-        anolisa_core::executor::ExecutionError::TransactionFailed {
-            source:
-                anolisa_core::providers::ProviderError::Transaction(
-                    PackageTransactionError::CommandMissing { command: bin },
-                ),
-            ..
-        } => tooling_missing_err(&command, &bin, target),
-        other => CliError::Runtime {
-            command: command.clone(),
-            reason: format!(
-                "update of '{target}' failed: {other}; the native transaction is never undone automatically — run `anolisa repair {target}` to reconcile"
-            ),
-        },
-    })?;
-
-    // The record refresh was committed by the executor's sink; the shared
-    // completion persists the operation as `partial`, refreshes the
-    // package-owned contract snapshot, and promotes the operation to `ok`
-    // once the refresh landed — so `status`/`doctor`/adapter resolution
-    // read the new contract, and a crash mid-refresh leaves a discoverable
-    // `partial` record.
-    let completion_failure = complete_delegated_update(
-        &layout,
-        ctx,
-        target,
-        &package,
-        &command,
-        &mut store,
-        &state_path,
-        OperationRecord {
-            id: operation_id.clone(),
-            command: command.clone(),
-            status: String::new(),
-            started_at: now.clone(),
-            finished_at: Some(now_iso8601()),
-            parent_operation_id: None,
-        },
-    );
-
-    let to_version = outcome
-        .observation
-        .as_ref()
-        .map(|o| o.evr.clone().unwrap_or_else(|| o.version.clone()));
-    let updated = match (&from_version, &to_version) {
-        (Some(from), Some(to)) => from != to,
-        _ => true,
-    };
-
-    append_update_log(
-        &layout,
-        ctx,
-        target,
-        &command,
-        &operation_id,
-        &now,
-        &package,
-        to_version.as_deref(),
-        completion_failure.as_deref(),
-    );
-
-    if let Some(reason) = completion_failure {
-        return Err(CliError::Runtime {
-            command: command.clone(),
-            reason: format!(
-                "the update of '{target}' committed, but {reason}; run `anolisa repair {target}` to reconcile"
-            ),
-        });
-    }
-
-    // A no-op transaction changed nothing, so it cannot require adapter
-    // follow-up; a committed one may have replaced adapter resources
-    // (issue #1885).
-    let adapter_actions = if updated {
-        adapter_actions_after_update(ctx, &store, target, &prior_adapter_revisions)
-    } else {
-        Vec::new()
-    };
-
-    render_result(
-        ctx,
-        target,
-        Some(&package),
-        from_version.as_deref(),
-        to_version.as_deref(),
-        updated,
-        false,
-        &plan_labels,
-        Some(&operation_id),
-        &adapter_actions,
-    )?;
-    Ok((
-        if updated {
-            UpdateOutcome::Updated
-        } else {
-            UpdateOutcome::AlreadyCurrent
-        },
-        adapter_actions,
-    ))
+        observed_at,
+        store,
+        provider,
+        layout,
+        journal_dir,
+    )
 }
 
-/// Execute an owned update plan (U3) through the raw backend: replace the
-/// recorded files with the resolved latest published version, compensating
-/// back to the previous files on failure. Returns any adapter follow-up
-/// actions the committed update produced (issue #1885).
-///
-/// The store is re-read under the install lock so the backup/remove set can
-/// never come from a stale snapshot; a version drift under the lock aborts
-/// before anything is touched.
-#[expect(clippy::too_many_arguments)]
-fn update_owned(
-    target: &str,
-    ctx: &CliContext,
-    layout: &FsLayout,
-    state_path: &Path,
-    journal_dir: &Path,
-    scope: InstallationScope,
-    now: &str,
-    steps: &[Step],
-    plan_labels: &[String],
-    resolution: RawResolution,
-    prior: OwnedArtifact,
-    command: &str,
-) -> Result<Vec<AdapterAction>, CliError> {
-    // No root pre-check: `--prefix` may point at a user-writable tree, and a
-    // genuine permission problem fails the exact step and unwinds honestly
-    // instead of a blanket refusal.
-    let resolve_warnings = resolution.warnings.clone();
-    let package = resolution.package.clone();
-    let from_version = prior.version.clone();
-    let to_version = resolution.entry.version.clone();
+fn active_adapter_claims(store: &StateStore, component: &str) -> Vec<String> {
+    store
+        .adapter_claims
+        .iter()
+        .filter(|claim| claim.component == component)
+        .map(|claim| claim.framework.clone())
+        .collect()
+}
 
-    let _lock = InstallLock::acquire(&layout.lock_file).map_err(|err| CliError::Runtime {
-        command: command.to_string(),
-        reason: format!("failed to acquire install lock: {err}"),
-    })?;
-    let mut store = StateStore::load_for_layout(state_path, privilege::effective_uid(), layout)
-        .map_err(|err| CliError::Runtime {
-            command: command.to_string(),
-            reason: format!("failed to load installed state: {err}"),
-        })?;
-    // Hydrate a disposable view so pre-v5 required capability contracts can
-    // drive rollback without persisting inferred metadata for unrelated
-    // components when this update later saves the real store. Optional
-    // grants remain state-only inside the hydrator.
-    let mut prior_view = store.clone();
-    common::hydrate_owned_file_contracts(&mut prior_view, layout);
-    let prior = match prior_view
-        .find(ObjectKind::Component, target)
-        .map(|r| &r.binding)
-    {
-        Some(ProviderBinding::Owned { artifact }) if artifact.version == prior.version => {
-            artifact.clone()
+#[expect(clippy::too_many_arguments)]
+pub(super) fn observe_update_facts(
+    component: &str,
+    scope: InstallationScope,
+    native_package: Option<&str>,
+    observed_at: &str,
+    store: &StateStore,
+    provider: &DelegatedProvider<'_>,
+    layout: &FsLayout,
+    journal_dir: &Path,
+    command: &str,
+) -> Result<Facts, CliError> {
+    let record_needs_native = matches!(
+        store
+            .find(ObjectKind::Component, component)
+            .map(|record| &record.binding),
+        Some(ProviderBinding::Delegated {
+            relation: ManagementRelation::Managed { .. } | ManagementRelation::Adopted { .. },
+            ..
+        })
+    );
+    let snapshot = match observe_update_snapshot(
+        component,
+        scope,
+        native_package,
+        observed_at,
+        store,
+        Some(provider),
+        layout,
+        journal_dir,
+    ) {
+        Ok(snapshot) => snapshot,
+        // A native update cannot proceed without rpm/dnf. Other relations
+        // replan without the probe so the planner can name the real way out.
+        Err(FactsError::Probe(anolisa_core::providers::ProviderError::Query(
+            PackageQueryError::CommandMissing { command: binary },
+        ))) => {
+            if record_needs_native {
+                return Err(tooling_missing_err(command, &binary, component));
+            }
+            observe_update_snapshot(
+                component,
+                scope,
+                native_package,
+                observed_at,
+                store,
+                None,
+                layout,
+                journal_dir,
+            )
+            .map_err(|err| CliError::Runtime {
+                command: command.to_string(),
+                reason: err.to_string(),
+            })?
         }
-        Some(ProviderBinding::Owned { artifact }) => {
+        Err(err) => {
             return Err(CliError::Runtime {
                 command: command.to_string(),
-                reason: format!(
-                    "component '{target}' changed from {} to {} while this update was resolving; nothing was changed — re-run `anolisa update {target}`",
-                    prior.version, artifact.version
-                ),
-            });
-        }
-        _ => {
-            return Err(CliError::Runtime {
-                command: command.to_string(),
-                reason: format!(
-                    "component '{target}' is no longer an owned installation; nothing was changed — re-run `anolisa update {target}`"
-                ),
+                reason: err.to_string(),
             });
         }
     };
-    let prior_adapter_revisions = adapter_revision_snapshot(ctx, layout, target);
-
-    let evidence = JournalEvidence::new(journal_dir, &store.operations);
-    let mut journal_gate = LockedJournalGate::load(&_lock, evidence, command)?;
-    let mut journal = journal_gate.begin(COMMAND, target, state_path.to_path_buf(), command)?;
-    let operation_id = journal.operation_id.clone();
-
-    let outcome = {
-        let mut ops = RawReplayOps::new(
-            ctx,
-            layout,
-            target.to_string(),
-            scope,
-            now.to_string(),
-            operation_id.clone(),
-            resolution,
-            prior,
-            &mut store,
-            state_path,
-        )
-        .with_runtime_preflight();
-        let result = execute_owned_steps(steps, &mut ops, &mut journal);
-        if result.is_ok() {
-            // Per-operation backups are rollback scratch; a failed plan keeps
-            // them on disk for forensics.
-            ops.discard_backups();
-        }
-        result
-    }
-    .map_err(|err| owned_error_to_cli(err, target, scope, command))?;
-
-    // Operation history is best-effort bookkeeping on top of the committed
-    // record, exactly like the delegated path.
-    store.operations.push(OperationRecord {
-        id: operation_id.clone(),
-        command: command.to_string(),
-        status: "ok".to_string(),
-        started_at: now.to_string(),
-        finished_at: Some(now_iso8601()),
-        parent_operation_id: None,
-    });
-    if let Err(err) = store.save(state_path) {
-        eprintln!("warning: failed to record operation history: {err}");
-    }
-
-    for warning in resolve_warnings.iter().chain(outcome.warnings.iter()) {
-        eprintln!("warning: {warning}");
-    }
-
-    append_update_log(
-        layout,
-        ctx,
-        target,
-        command,
-        &operation_id,
-        now,
-        &package,
-        Some(&to_version),
-        // Owned updates replace the manifest as part of the owned artifact;
-        // there is no datadir contract refresh to fail.
-        None,
-    );
-
-    let adapter_actions =
-        adapter_actions_after_update(ctx, &store, target, &prior_adapter_revisions);
-
-    render_result(
-        ctx,
-        target,
-        Some(&package),
-        Some(&from_version),
-        Some(&to_version),
-        true,
-        false,
-        plan_labels,
-        Some(&operation_id),
-        &adapter_actions,
-    )?;
-    Ok(adapter_actions)
+    lifecycle_facts_from_snapshot(&snapshot, active_adapter_claims(store, component), None).map_err(
+        |err| CliError::Runtime {
+            command: command.to_string(),
+            reason: err.to_string(),
+        },
+    )
 }
 
 /// Classify a resolved `candidate` version against the `installed` one,
@@ -1490,6 +1129,94 @@ pub(crate) fn append_update_log(
     };
     if let Err(err) = log.append(&record) {
         eprintln!("warning: failed to write central log: {err}");
+    }
+}
+
+fn render_application_outcome(
+    ctx: &CliContext,
+    application_outcome: application::ApplicationOutcome,
+) -> ComponentUpdateResult {
+    match application_outcome {
+        application::ApplicationOutcome::NoOp { subject } => {
+            render_result(
+                ctx,
+                &subject.component,
+                subject.package.as_deref(),
+                subject.from_version.as_deref(),
+                subject.to_version.as_deref(),
+                false,
+                ctx.dry_run,
+                &[],
+                None,
+                &[],
+            )?;
+            Ok((UpdateOutcome::AlreadyCurrent, Vec::new()))
+        }
+        application::ApplicationOutcome::Preview { subject, steps } => {
+            let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
+            render_result(
+                ctx,
+                &subject.component,
+                subject.package.as_deref(),
+                subject.from_version.as_deref(),
+                subject.to_version.as_deref(),
+                false,
+                true,
+                &plan_labels,
+                None,
+                &[],
+            )?;
+            Ok((UpdateOutcome::Updated, Vec::new()))
+        }
+        application::ApplicationOutcome::Applied {
+            command,
+            subject,
+            steps,
+            outcome,
+            adapter_actions,
+        } => {
+            if matches!(
+                outcome.status(),
+                anolisa_core::execution::CommandOutcomeStatus::Partial
+            ) {
+                let reason = outcome
+                    .warnings()
+                    .first()
+                    .expect("partial update outcome carries its reconciliation failure");
+                return Err(CliError::Runtime {
+                    command,
+                    reason: format!(
+                        "the update of '{}' committed, but {reason}; run `anolisa repair {}` to reconcile",
+                        subject.component, subject.component
+                    ),
+                });
+            }
+            for warning in outcome.warnings() {
+                eprintln!("warning: {warning}");
+            }
+            let updated = !outcome.changes().is_empty();
+            let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
+            render_result(
+                ctx,
+                &subject.component,
+                subject.package.as_deref(),
+                subject.from_version.as_deref(),
+                subject.to_version.as_deref(),
+                updated,
+                false,
+                &plan_labels,
+                outcome.operation_id(),
+                &adapter_actions,
+            )?;
+            Ok((
+                if updated {
+                    UpdateOutcome::Updated
+                } else {
+                    UpdateOutcome::AlreadyCurrent
+                },
+                adapter_actions,
+            ))
+        }
     }
 }
 
@@ -2506,6 +2233,7 @@ pub(crate) mod tests {
         /// replacing package-owned files (e.g. an adapter resource bundle
         /// under the datadir).
         on_update: Option<Box<dyn Fn()>>,
+        query_calls: Cell<usize>,
         update_calls: Cell<usize>,
     }
 
@@ -2519,6 +2247,7 @@ pub(crate) mod tests {
                 multi_version: false,
                 post_update_missing: false,
                 on_update: None,
+                query_calls: Cell::new(0),
                 update_calls: Cell::new(0),
             }
         }
@@ -2549,6 +2278,7 @@ pub(crate) mod tests {
             if package != self.package {
                 return Ok(None);
             }
+            self.query_calls.set(self.query_calls.get() + 1);
             // Simulate a failed post-update re-read: the package "vanishes" only
             // after dnf update has run, so the pre-update query still succeeds.
             if self.post_update_missing && self.update_calls.get() > 0 {
@@ -2854,6 +2584,12 @@ pub(crate) mod tests {
         .upgrading_to(pkg_info("copilot-shell", "1.1.0", Some("1.al8"), "x86_64"));
 
         update_component_with_deps("copilot-shell", &c, &rpm, &rpm, true).expect("update ok");
+
+        assert_eq!(
+            rpm.query_calls.get(),
+            3,
+            "update must observe before planning, under the lock, and after the transaction"
+        );
 
         let record = find_component(&c, "copilot-shell");
         assert_eq!(observed_evr(&record).as_deref(), Some("1.1.0-1.al8"));
@@ -4334,7 +4070,7 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
         let mut stale = owned_artifact(&find_component(&c, "foo"));
         stale.version = "0.1.0".to_string();
 
-        let err = update_owned(
+        let err = application::apply_owned(
             "foo",
             &c,
             &layout,
@@ -4342,13 +4078,13 @@ packages = { rpm = "absent-tool", deb = "absent-tool" }
             &journal_dir,
             InstallationScope::System,
             "2026-07-16T00:00:00Z",
-            &[],
-            &[],
+            Vec::new(),
             resolution,
             stale,
             "update foo",
         )
-        .expect_err("a drifted snapshot must abort under the lock");
+        .err()
+        .expect("a drifted snapshot must abort under the lock");
         assert_eq!(err.code(), "EXECUTION_FAILED");
         assert!(
             err.reason().contains("while this update was resolving"),

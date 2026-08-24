@@ -811,6 +811,7 @@ mod tests {
 
     use anolisa_core::domain::InstallationScope;
     use anolisa_core::facts::{JournalEvidence, pending_journal_for};
+    use anolisa_core::planner::Plan;
     use anolisa_core::state::{
         InstallMode as StateInstallMode, InstalledObject, InstalledState, Ownership,
     };
@@ -974,6 +975,10 @@ mod tests {
             owned_execution: None,
             owned_versions: None,
             native_from: Some(from_evr.to_string()),
+            plan: Plan::Execute {
+                steps: steps.clone(),
+                notes: Vec::new(),
+            },
             route: PlannedUpdateRoute::Delegated { steps },
         }
     }
@@ -1001,9 +1006,7 @@ mod tests {
         );
 
         let mut owned = u5_planned("cosh", "copilot-shell", "1.0.0-1.al4");
-        owned.route = PlannedUpdateRoute::Owned {
-            steps: vec![Step::PlaceFiles],
-        };
+        owned.route = PlannedUpdateRoute::Owned;
         assert!(merged_update_package(&owned).is_none());
 
         let mut noop = u5_planned("cosh", "copilot-shell", "1.0.0-1.al4");
