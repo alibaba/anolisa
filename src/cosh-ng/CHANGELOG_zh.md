@@ -6,6 +6,17 @@
 
 ## [未发布]
 
+## [0.20.0] — 2026-08-24
+
+### 新功能
+- 在未安装 anolisa 统一上报器时，cosh-ng 可直接向 SLS 上报匿名运行遥测，不收集用户输入、代码或对话内容；可通过创建 `~/.copilot-shell/telemetry_disabled`（单用户）或 `/etc/anolisa/.telemetry_disabled`（全系统）随时关闭遥测 (#2715)
+- 将本地 Gateway 任务 profile 绑定到封闭的 `task-only-v1` manifest，使 Core/Gateway 版本不匹配在任务输入或副作用产生前即被拒绝 (#2728)
+
+### 修复
+- 修复 `/usr/bin/cosh raw <adapter>` 因透明分类器将 `raw` 子命令误交给 bash 而以 exit 127 退出的问题，恢复 TUI 启动 (#2743)
+- 修复含简单参数引用（如 `$HOME`）的汉字引导自然语言提示被漏过 NL 拦截落入 shell 的问题，同时保持可执行 shell 结构原生不被拦截 (#2746)
+- 修复 bash 4.2.x 上首条命令后 DEBUG trap 永久丢失导致命令审计标记停止输出的问题 (#2757)
+
 ## [0.19.0] — 2026-08-21
 
 ### 新功能

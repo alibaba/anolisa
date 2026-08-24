@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-08-24
+
+### Added
+- Report anonymous operational telemetry directly to SLS when cosh-ng runs without the anolisa unified uploader; no user prompts, code, or conversation content is collected; opt out at any time by creating `~/.copilot-shell/telemetry_disabled` (per-user) or `/etc/anolisa/.telemetry_disabled` (system-wide) (#2715)
+- Bind the local Gateway task profile to a closed `task-only-v1` manifest so mismatched Core/Gateway pairs are rejected before task input or side effects (#2728)
+
+### Fixed
+- Restore `/usr/bin/cosh raw <adapter>` to launch the TUI instead of failing with exit 127 after the transparency classifier misrouted the `raw` subcommand to bash (#2743)
+- Route Han-leading natural-language prompts containing simple parameter references such as `$HOME` to the Agent, while keeping executable shell structures native so an intercept cannot alter adjacent command execution (#2746)
+- Preserve the DEBUG trap across prompts on bash 4.2.x so command audit markers keep emitting after the first command (#2757)
+
 ## [0.19.0] — 2026-08-21
 
 ### Added
