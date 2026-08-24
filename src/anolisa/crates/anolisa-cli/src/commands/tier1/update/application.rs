@@ -78,6 +78,60 @@ pub(super) enum ApplicationOutcome {
     },
 }
 
+impl ApplicationOutcome {
+    /// Collapse the typed result to the legacy batch-member classification.
+    pub(super) fn batch_outcome(&self) -> Result<super::UpdateOutcome, CliError> {
+        match self {
+            Self::NoOp { .. } => Ok(super::UpdateOutcome::AlreadyCurrent),
+            Self::Preview { .. } => Ok(super::UpdateOutcome::Updated),
+            Self::Applied {
+                command,
+                subject,
+                outcome,
+                ..
+            } => {
+                if matches!(outcome.status(), CommandOutcomeStatus::Partial) {
+                    let reason = outcome
+                        .warnings()
+                        .first()
+                        .expect("partial update outcome carries its reconciliation failure");
+                    return Err(CliError::Runtime {
+                        command: command.clone(),
+                        reason: format!(
+                            "the update of '{}' committed, but {reason}; run `anolisa repair {}` to reconcile",
+                            subject.component, subject.component
+                        ),
+                    });
+                }
+                Ok(if outcome.changes().is_empty() {
+                    super::UpdateOutcome::AlreadyCurrent
+                } else {
+                    super::UpdateOutcome::Updated
+                })
+            }
+        }
+    }
+
+    /// Returns warnings that a batch caller must surface without rendering a
+    /// per-component result envelope.
+    pub(super) fn warnings(&self) -> &[String] {
+        match self {
+            Self::NoOp { .. } | Self::Preview { .. } => &[],
+            Self::Applied { outcome, .. } => outcome.warnings(),
+        }
+    }
+
+    /// Returns adapter follow-up actions produced by an applied update.
+    pub(super) fn adapter_actions(&self) -> &[AdapterAction] {
+        match self {
+            Self::Applied {
+                adapter_actions, ..
+            } => adapter_actions,
+            Self::NoOp { .. } | Self::Preview { .. } => &[],
+        }
+    }
+}
+
 /// Run one component update against production package backends.
 pub(super) fn run(
     request: ApplicationRequest<'_>,

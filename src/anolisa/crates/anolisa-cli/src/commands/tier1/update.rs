@@ -508,6 +508,7 @@ pub(crate) enum PlannedUpdateRoute {
 /// A committed update also reports the adapters it left with a stale
 /// resource bundle (issue #1885); no-op, dry-run, and failed updates report
 /// none.
+#[cfg(test)]
 pub(crate) fn update_component_with_deps(
     input: &str,
     ctx: &CliContext,
@@ -1136,6 +1137,7 @@ fn render_application_outcome(
     ctx: &CliContext,
     application_outcome: application::ApplicationOutcome,
 ) -> ComponentUpdateResult {
+    let batch_outcome = application_outcome.batch_outcome()?;
     match application_outcome {
         application::ApplicationOutcome::NoOp { subject } => {
             render_result(
@@ -1150,7 +1152,7 @@ fn render_application_outcome(
                 None,
                 &[],
             )?;
-            Ok((UpdateOutcome::AlreadyCurrent, Vec::new()))
+            Ok((batch_outcome, Vec::new()))
         }
         application::ApplicationOutcome::Preview { subject, steps } => {
             let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
@@ -1166,35 +1168,19 @@ fn render_application_outcome(
                 None,
                 &[],
             )?;
-            Ok((UpdateOutcome::Updated, Vec::new()))
+            Ok((batch_outcome, Vec::new()))
         }
         application::ApplicationOutcome::Applied {
-            command,
+            command: _,
             subject,
             steps,
             outcome,
             adapter_actions,
         } => {
-            if matches!(
-                outcome.status(),
-                anolisa_core::execution::CommandOutcomeStatus::Partial
-            ) {
-                let reason = outcome
-                    .warnings()
-                    .first()
-                    .expect("partial update outcome carries its reconciliation failure");
-                return Err(CliError::Runtime {
-                    command,
-                    reason: format!(
-                        "the update of '{}' committed, but {reason}; run `anolisa repair {}` to reconcile",
-                        subject.component, subject.component
-                    ),
-                });
-            }
             for warning in outcome.warnings() {
                 eprintln!("warning: {warning}");
             }
-            let updated = !outcome.changes().is_empty();
+            let updated = matches!(batch_outcome, UpdateOutcome::Updated);
             let plan_labels: Vec<String> = steps.iter().map(step_label).collect();
             render_result(
                 ctx,
@@ -1208,14 +1194,7 @@ fn render_application_outcome(
                 outcome.operation_id(),
                 &adapter_actions,
             )?;
-            Ok((
-                if updated {
-                    UpdateOutcome::Updated
-                } else {
-                    UpdateOutcome::AlreadyCurrent
-                },
-                adapter_actions,
-            ))
+            Ok((batch_outcome, adapter_actions))
         }
     }
 }
