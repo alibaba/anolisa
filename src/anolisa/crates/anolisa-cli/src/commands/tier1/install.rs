@@ -134,27 +134,6 @@ pub(crate) fn handle_one(
     Ok(batch_outcome)
 }
 
-/// Run one batch member while preserving batch-owned conflict context.
-pub(crate) fn handle_one_with_planned_components(
-    component: String,
-    args: InstallArgs,
-    ctx: &CliContext,
-    planned_components: &std::collections::HashSet<String>,
-) -> Result<InstallOutcome, CliError> {
-    let outcome = application::run_with_planned_components(
-        application::InstallRequest {
-            component: &component,
-            args: &args,
-            intent: execution_intent(ctx),
-        },
-        ctx,
-        planned_components,
-    )?;
-    let batch_outcome = outcome.batch_outcome();
-    render_outcome(ctx, outcome)?;
-    Ok(batch_outcome)
-}
-
 fn execution_intent(ctx: &CliContext) -> ExecutionIntent {
     if ctx.dry_run {
         ExecutionIntent::Plan

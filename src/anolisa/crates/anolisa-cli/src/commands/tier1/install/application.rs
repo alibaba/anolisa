@@ -81,6 +81,16 @@ impl InstallApplicationOutcome {
             Self::Preview { .. } | Self::Applied { .. } => InstallOutcome::Installed,
         }
     }
+
+    /// Returns warnings that a batch caller must surface without rendering a
+    /// per-component result envelope.
+    pub(super) fn warnings(&self) -> &[String] {
+        match self {
+            Self::NoOp { .. } => &[],
+            Self::Preview { warnings, .. } => warnings,
+            Self::Applied { outcome, .. } => outcome.warnings(),
+        }
+    }
 }
 
 /// Run one component against production host dependencies.
