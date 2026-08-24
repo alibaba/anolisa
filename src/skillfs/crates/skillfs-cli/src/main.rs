@@ -2582,15 +2582,18 @@ async fn cmd_mount(
         watcher.start();
     }
 
-    // A4: fire startup reconcile after mount is spawned. Runs on a
-    // background thread so daemon socket latency cannot block startup.
+    // A4: queue startup reconcile after mount is spawned. Delivery is owned
+    // by the notify worker, which retries transient failures (daemon socket
+    // not created yet, connection refused) with exponential backoff, so a
+    // SkillFS-before-daemon start order still converges. Enqueueing is
+    // non-blocking and cannot delay startup.
     // A5: after reconcile, schedule an immediate watcher check so
     // daemon-written activation is picked up without waiting for the
     // periodic interval.
     if let (Some(ctrl), Some(names)) = (reconcile_notify, &reconcile_skill_names) {
         let names_owned = names.clone();
         let watcher_for_reconcile = activation_watcher.clone();
-        ctrl.spawn_startup_reconcile(names_owned.clone());
+        ctrl.enqueue_startup_reconcile(&names_owned);
         if let Some(ref w) = watcher_for_reconcile {
             w.schedule_immediate_check(names_owned);
         }

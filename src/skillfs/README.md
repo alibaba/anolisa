@@ -530,8 +530,13 @@ Related security surfaces:
 - `--activation-events-log <PATH>` writes activation protocol events as JSONL.
 - `--activation-reload-mode poll` re-reads activation state after notify events
   and updates the resolver without a remount.
-- Startup reconcile sends best-effort notifications for known skills after
-  mount startup.
+- Startup reconcile queues known skills through the notify worker and retries
+  temporary delivery failures until the daemon acknowledges, so SkillFS can
+  start before the daemon and still converge. Non-retryable failures are
+  reported, while inconclusive authentication uses a shared bounded endpoint
+  budget to prevent retry storms. See
+  [Reconcile Delivery Durability](docs/security/runtime-activation-implementation-plan.md#reconcile-delivery-durability)
+  for retry and observability details.
 - `--ledger-backing-root <PATH>` provides a daemon-visible source view for
   in-place activation/notify mounts, because the public source path is a FUSE
   over-mount. Use `/run/user/$UID/skillfs-ledger/...` or

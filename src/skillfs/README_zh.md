@@ -479,7 +479,11 @@ SkillFS 不在文件系统核心中执行扫描、签名校验或风险判断。
 - `--activation-events-log <PATH>` 将 activation protocol events 写成 JSONL。
 - `--activation-reload-mode poll` 在 notify events 后重读 activation state，
   无需 remount 即可更新 resolver。
-- startup reconcile 会在挂载启动后对已知 skills 发送 best-effort 通知。
+- startup reconcile 会通过 notify worker 为已知 skill 入队，并在暂时性投递失败时
+  重试直至 daemon 确认，因此 SkillFS 先于 daemon 启动时仍能自行收敛。不可重试的
+  错误会被报告，认证结果不确定时则使用所有 skill 共享的有界 endpoint 预算，避免
+  重试风暴。重试与可观测性细节见
+  [Reconcile Delivery Durability](docs/security/runtime-activation-implementation-plan.md#reconcile-delivery-durability)。
 - `--ledger-backing-root <PATH>` 为 in-place activation/notify mount 提供
   daemon 可见的 source 视图，因为公开 source path 已经是 FUSE over-mount。
   推荐使用 `/run/user/$UID/skillfs-ledger/...` 或

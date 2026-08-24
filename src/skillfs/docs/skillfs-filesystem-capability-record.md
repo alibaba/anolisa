@@ -102,7 +102,7 @@ and write the resulting activation state.
 | Notify change client | Supported | Sends debounced change notifications over Unix socket. |
 | Protocol event log | Supported | Writes activation protocol JSONL events. |
 | Runtime activation reload | Supported | Polls activation after notify and refreshes the active resolver. |
-| Startup reconcile | Supported | Emits best-effort reconcile notifications after mount startup. |
+| Startup reconcile | Supported | Queues known skills through the notify worker, retries transient delivery until ACK, and bounds inconclusive authentication retries per endpoint. Exposes delivery counters and pending queue depth; see [Reconcile Delivery Durability](security/runtime-activation-implementation-plan.md#reconcile-delivery-durability). |
 | Ledger backing root | Supported | Private source-side work path for external daemons, especially under in-place mounts. Bind mounts are marked `MS_PRIVATE\|MS_REC` to isolate propagation and prevent the FUSE over-mount from leaking into the backing root. |
 | Control socket activation write | Supported | Trusted peers can write `activation.json` and activation xattr through the control socket instead of the FUSE mount path. Validates skill name, activation payload, writes atomically, and triggers reload. |
 | Direct final-skill pending install | Supported | Newly created, not-yet-activated skill directories are tracked as pending installs: hidden from listing, writable via exact path, intermediate mutations suppressed. After a quiet window, completeness check (parseable `SKILL.md`) gates the aggregated mutation notification. Activation still determines visibility. |
