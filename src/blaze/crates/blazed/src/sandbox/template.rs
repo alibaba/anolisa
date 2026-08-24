@@ -373,10 +373,45 @@ impl TemplateCatalog {
         Self::open_pinned(config, root, import_root)
     }
 
+    #[cfg(test)]
+    pub(crate) fn reopen_after_simulated_restart(config: &TemplateSection) -> Result<Self> {
+        Self::reopen_after_simulated_restart_with(config, || {})
+    }
+
+    #[cfg(test)]
+    fn reopen_after_simulated_restart_with(
+        config: &TemplateSection,
+        on_inherited_lock: impl FnOnce(),
+    ) -> Result<Self> {
+        reject_symlink_components(&config.dir, "template.dir")?;
+        if let Some(import_root) = config.import_root.as_deref() {
+            reject_symlink_components(import_root, "template.import_root")?;
+        }
+        let root = create_catalog_root(&config.dir)?;
+        enforce_owned_mode_file(&root, true, CATALOG_DIR_MODE, &config.dir)?;
+        let import_root = config
+            .import_root
+            .as_deref()
+            .map(pin_import_root)
+            .transpose()?;
+        Self::open_pinned_with_lock(config, root, import_root, |root| {
+            Self::acquire_root_lock_after_simulated_restart(root, on_inherited_lock)
+        })
+    }
+
     fn open_pinned(
         config: &TemplateSection,
         root: File,
         import_root: Option<ImportRoot>,
+    ) -> Result<Self> {
+        Self::open_pinned_with_lock(config, root, import_root, Self::acquire_root_lock)
+    }
+
+    fn open_pinned_with_lock(
+        config: &TemplateSection,
+        root: File,
+        import_root: Option<ImportRoot>,
+        acquire_root_lock: impl FnOnce(&File) -> Result<()>,
     ) -> Result<Self> {
         let limits = ImportLimits {
             max_files: config.max_files,
@@ -388,7 +423,7 @@ impl TemplateCatalog {
         let boundary = CatalogBoundary {
             mount_id: opened_mount_id(&root)?,
         };
-        Self::acquire_root_lock(&root)?;
+        acquire_root_lock(&root)?;
         cleanup_staging(&root, limits, boundary)?;
         let usage = catalog_usage(&root, limits, boundary)?;
         if usage.bytes > limits.max_total_bytes {
@@ -442,30 +477,6 @@ impl TemplateCatalog {
     // The root file is retained in `CatalogInner`, so this advisory lock
     // remains held for the complete catalog-owner lifetime.
     fn acquire_root_lock(root: &File) -> Result<()> {
-        #[cfg(test)]
-        {
-            let inherited_descriptor_deadline =
-                std::time::Instant::now() + std::time::Duration::from_millis(100);
-            loop {
-                match Self::acquire_root_lock_once(root) {
-                    Err(BlazeDaemonError::Conflict(_))
-                        if std::time::Instant::now() < inherited_descriptor_deadline =>
-                    {
-                        // Concurrent test processes can briefly inherit a CLOEXEC
-                        // descriptor between fork and exec. Production keeps the
-                        // non-blocking single-attempt behavior.
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
-                    result => return result,
-                }
-            }
-        }
-
-        #[cfg(not(test))]
-        Self::acquire_root_lock_once(root)
-    }
-
-    fn acquire_root_lock_once(root: &File) -> Result<()> {
         if unsafe { libc::flock(root.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
             return Ok(());
         }
@@ -482,6 +493,35 @@ impl TemplateCatalog {
         Err(BlazeDaemonError::Internal(format!(
             "could not lock runtime template catalog: {error}"
         )))
+    }
+
+    #[cfg(test)]
+    fn acquire_root_lock_after_simulated_restart(
+        root: &File,
+        on_inherited_lock: impl FnOnce(),
+    ) -> Result<()> {
+        match Self::acquire_root_lock(root) {
+            Ok(()) => return Ok(()),
+            Err(BlazeDaemonError::Conflict(message))
+                if message == "runtime template catalog is already owned by another daemon" =>
+            {
+                on_inherited_lock();
+            }
+            Err(error) => return Err(error),
+        }
+
+        loop {
+            if unsafe { libc::flock(root.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                return Ok(());
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(BlazeDaemonError::Internal(format!(
+                "could not wait for the released runtime template catalog: {error}"
+            )));
+        }
     }
 
     async fn list(&self) -> Result<Bytes> {
@@ -5658,7 +5698,8 @@ mod tests {
 
         let mut config = test_config(&root, &import_root);
         config.max_total_bytes = 8;
-        let catalog = TemplateCatalog::open(&config).expect("catalog");
+        let catalog =
+            TemplateCatalog::reopen_after_simulated_restart(&config).expect("catalog restart");
         let error = catalog
             .import("capacity".into(), PathBuf::from("source"), String::new())
             .await
@@ -5693,7 +5734,7 @@ mod tests {
         let owner = Arc::downgrade(&catalog.inner);
         drop(catalog);
         assert!(owner.upgrade().is_none(), "completed list released owner");
-        TemplateCatalog::open(&config).expect("bounded catalog reopens");
+        TemplateCatalog::reopen_after_simulated_restart(&config).expect("bounded catalog reopens");
     }
 
     #[tokio::test]
@@ -6350,9 +6391,10 @@ mod tests {
         }
 
         drop(catalog);
-        let startup_error = TemplateCatalog::open(&test_config(&root, &import_root))
-            .err()
-            .expect("startup must reject special artifact");
+        let startup_error =
+            TemplateCatalog::reopen_after_simulated_restart(&test_config(&root, &import_root))
+                .err()
+                .expect("startup must reject special artifact");
         assert!(matches!(
             startup_error,
             BlazeDaemonError::RecoveryRequired(message)
@@ -6570,9 +6612,43 @@ mod tests {
         assert!(matches!(error, BlazeDaemonError::Conflict(_)));
         assert!(staging.exists(), "second owner must not clean live staging");
 
+        let inherited_root = first.inner.root.try_clone().expect("inherited root owner");
         drop(first);
-        TemplateCatalog::open(&config).expect("catalog lock released with owner");
+        let retry_config = config.clone();
+        let (retrying, retry_observed) = std::sync::mpsc::sync_channel(1);
+        let reopen = std::thread::spawn(move || {
+            TemplateCatalog::reopen_after_simulated_restart_with(&retry_config, || {
+                let _ = retrying.try_send(());
+            })
+            .expect("catalog lock released after inherited owner");
+        });
+        retry_observed
+            .recv()
+            .expect("retry observes inherited owner");
+        drop(inherited_root);
+        reopen.join().expect("restart thread");
         assert!(!staging.exists(), "next owner cleans interrupted staging");
+    }
+
+    #[test]
+    fn production_open_rejects_a_live_catalog_owner() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let import_root = temp.path().join("imports");
+        std::fs::create_dir(&import_root).expect("import root");
+        let root = temp.path().join("catalog");
+        let config = test_config(&root, &import_root);
+        let first = TemplateCatalog::open(&config).expect("first catalog owner");
+        let staging = root.join(".import-live-uuid.tmp");
+        create_private_directory(&staging).expect("live staging");
+
+        let error = match TemplateCatalog::open(&config) {
+            Ok(_) => panic!("live owner must not be replaced"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, BlazeDaemonError::Conflict(_)));
+        assert!(staging.exists(), "second owner must not clean live staging");
+        drop(first);
     }
 
     #[test]

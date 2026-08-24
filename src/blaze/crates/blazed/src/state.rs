@@ -107,6 +107,44 @@ impl ServerState {
         )
     }
 
+    #[cfg(test)]
+    // Mirror the production constructor so restart tests replace only the
+    // catalog owner while preserving the same dependency assembly boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build_after_simulated_restart(
+        config: DaemonConfig,
+        policy: PolicyEngine,
+        pool: PoolManager,
+        hook: HookRegistry,
+        spawners: SpawnerRegistry,
+        active_backend: BackendKind,
+        storage: Arc<dyn StorageProvider>,
+    ) -> Result<Self> {
+        validate_template_roots(
+            &config.template,
+            &config.storage.images_dir,
+            &config.storage.instances_dir,
+            &config.policy.dir,
+            &config.backends,
+            &config.daemon.state_dir,
+            &config.daemon.socket,
+            None,
+        )?;
+        let template_catalog = TemplateCatalog::reopen_after_simulated_restart(&config.template)?;
+        let state_store = StateStore::new(config.daemon.state_dir.clone());
+        Self::assemble(
+            config,
+            policy,
+            pool,
+            hook,
+            spawners,
+            active_backend,
+            storage,
+            template_catalog,
+            state_store,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn assemble(
         config: DaemonConfig,

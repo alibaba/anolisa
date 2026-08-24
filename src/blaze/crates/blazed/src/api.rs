@@ -786,6 +786,27 @@ mod tests {
         )
     }
 
+    fn build_test_state_after_simulated_restart(
+        config: DaemonConfig,
+        policy: PolicyFile,
+        registry: SpawnerRegistry,
+        active_backend: BackendKind,
+        storage: Arc<dyn StorageProvider>,
+    ) -> Arc<ServerState> {
+        Arc::new(
+            ServerState::build_after_simulated_restart(
+                config,
+                PolicyEngine::with_policies(vec![policy]),
+                PoolManager::new(),
+                HookRegistry::new(),
+                registry,
+                active_backend,
+                storage,
+            )
+            .expect("state after simulated restart"),
+        )
+    }
+
     #[cfg(feature = "test-failpoints")]
     fn mock_state(temp: &tempfile::TempDir) -> Arc<ServerState> {
         mock_state_from_config(test_config(temp))
@@ -5216,7 +5237,7 @@ mod tests {
                 config.storage.images_dir.clone(),
                 config.storage.instances_dir.clone(),
             ));
-        let recovered = build_test_state(
+        let recovered = build_test_state_after_simulated_restart(
             config.clone(),
             test_policy(BackendKind::Bubblewrap),
             spawners(BackendKind::Bubblewrap, Arc::new(BubblewrapSpawner)),
@@ -5527,7 +5548,7 @@ mod tests {
                 config.storage.images_dir.clone(),
                 instances_dir.clone(),
             ));
-        let restarted = build_test_state(
+        let restarted = build_test_state_after_simulated_restart(
             config,
             test_policy(BackendKind::Firecracker),
             registry,
@@ -6269,7 +6290,7 @@ mod tests {
                 config.storage.images_dir.clone(),
                 instances_dir.clone(),
             ));
-        let restarted = build_test_state(
+        let restarted = build_test_state_after_simulated_restart(
             config,
             test_policy(BackendKind::Mock),
             spawners(

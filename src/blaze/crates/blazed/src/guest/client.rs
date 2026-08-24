@@ -478,6 +478,25 @@ mod tests {
         (stream, request)
     }
 
+    async fn wait_for_request_delivery<T: std::fmt::Debug>(
+        deliveries: &mut tokio::sync::mpsc::UnboundedReceiver<&'static str>,
+        expected: &'static str,
+        operation: &mut tokio::task::JoinHandle<Result<T>>,
+    ) -> std::result::Result<(), String> {
+        tokio::select! {
+            biased;
+            delivery = deliveries.recv() => match delivery {
+                Some(delivery) if delivery == expected => Ok(()),
+                other => Err(format!(
+                    "expected {expected} request delivery, received {other:?}"
+                )),
+            },
+            completed = operation => Err(format!(
+                "{expected} operation completed before request delivery: {completed:?}"
+            )),
+        }
+    }
+
     #[test]
     fn side_effect_errors_become_unknown_only_after_delivery_starts() {
         for operation in [GuestOp::Exec, GuestOp::Write] {
@@ -683,30 +702,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_delivery_wait_reports_early_operation_completion() {
+        let (_delivered, mut deliveries) = tokio::sync::mpsc::unbounded_channel();
+        let mut operation = tokio::spawn(async {
+            Err::<(), GuestError>(GuestError::Protocol(
+                "client stopped before request delivery".to_string(),
+            ))
+        });
+
+        let error = wait_for_request_delivery(&mut deliveries, "write", &mut operation)
+            .await
+            .expect_err("early operation completion must stop the delivery wait");
+        assert!(error.contains("write operation completed before request delivery"));
+    }
+
+    #[tokio::test]
+    async fn request_delivery_wait_prefers_queued_delivery() {
+        for _ in 0..32 {
+            let (delivered, mut deliveries) = tokio::sync::mpsc::unbounded_channel();
+            delivered.send("read").expect("queue request delivery");
+            let mut operation = tokio::spawn(async {
+                Err::<(), GuestError>(GuestError::Timeout("response deadline elapsed".to_string()))
+            });
+            while !operation.is_finished() {
+                tokio::task::yield_now().await;
+            }
+
+            wait_for_request_delivery(&mut deliveries, "read", &mut operation)
+                .await
+                .expect("queued delivery must win a ready tie");
+            operation
+                .await
+                .expect("operation task")
+                .expect_err("timeout");
+        }
+    }
+
+    #[tokio::test]
     async fn read_and_write_response_timeouts_are_bounded() {
         let temp = tempfile::tempdir().expect("temp");
         let socket = temp.path().join("vsock.uds");
         let listener = UnixListener::bind(&socket).expect("bind");
+        let (delivered, mut deliveries) = tokio::sync::mpsc::unbounded_channel();
+        let release = CancellationToken::new();
+        let server_release = release.clone();
         let server = tokio::spawn(async move {
-            for _ in 0..2 {
-                let (stream, _) = accept_request(&listener).await;
-                tokio::spawn(async move {
+            let mut connections = Vec::new();
+            for expected_operation in ["read", "write"] {
+                let (stream, request) = accept_request(&listener).await;
+                assert_eq!(request["op"].as_str(), Some(expected_operation));
+                delivered
+                    .send(expected_operation)
+                    .expect("report delivered request");
+                let connection_release = server_release.clone();
+                connections.push(tokio::spawn(async move {
                     let _stream = stream;
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                });
+                    connection_release.cancelled().await;
+                }));
+            }
+            for connection in connections {
+                connection.await.expect("connection task");
             }
         });
-        let client = GuestClient::new(socket, Duration::from_millis(30), 1024);
-        let read_error = client
-            .read_file("/tmp/x".into())
+        let client = GuestClient::new(socket, Duration::from_secs(1), 1024);
+        let read_client = client.clone();
+        let mut read = tokio::spawn(async move { read_client.read_file("/tmp/x".into()).await });
+        wait_for_request_delivery(&mut deliveries, "read", &mut read)
             .await
-            .expect_err("read timeout");
+            .expect("read request delivery");
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(1_001)).await;
+        let read_error = read.await.expect("read task").expect_err("read timeout");
+        tokio::time::resume();
         assert!(matches!(read_error, GuestError::Timeout(_)));
-        let write_error = client
-            .write_file("/tmp/x".into(), b"value")
+        let mut write =
+            tokio::spawn(async move { client.write_file("/tmp/x".into(), b"value").await });
+        wait_for_request_delivery(&mut deliveries, "write", &mut write)
             .await
-            .expect_err("write timeout");
+            .expect("write request delivery");
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(1_001)).await;
+        let write_error = write.await.expect("write task").expect_err("write timeout");
+        tokio::time::resume();
         assert!(matches!(write_error, GuestError::OutcomeUnknown(_)));
+        release.cancel();
         server.await.expect("server task");
     }
 
