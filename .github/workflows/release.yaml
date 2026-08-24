@@ -95,6 +95,52 @@ jobs:
           artifact-suffix: ''
           retention-days: 28
 
+  build_cosh_ng_prebuilt:
+    name: Build cosh-ng ${{ matrix.target-os }}-${{ matrix.target-arch }}
+    needs: package
+    if: needs.package.outputs.component == 'cosh-ng'
+    permissions:
+      contents: read
+    runs-on: [self-hosted, Linux, X64, anolisa-release-cross-x64]
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target-os: linux
+            target-arch: x86_64
+            profile: gnu2.28-x86_64
+          - target-os: linux
+            target-arch: aarch64
+            profile: gnu2.28-aarch64
+          - target-os: macos
+            target-arch: aarch64
+            profile: darwin11-aarch64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build precompiled package
+        id: prebuilt
+        uses: ./.github/actions/build-cosh-ng-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
+      - name: Upload precompiled package
+        uses: actions/upload-artifact@v4
+        with:
+          name: cosh-ng-prebuilt-${{ needs.package.outputs.version }}-${{ matrix.target-os }}-${{ matrix.target-arch }}
+          path: ${{ steps.prebuilt.outputs.artifact-directory }}/*
+          if-no-files-found: error
+          retention-days: 28
+
   # =========================================================================
   # Step 2: Publish (requires manual approval via GitHub Environment)
   #
@@ -102,13 +148,23 @@ jobs:
   # =========================================================================
   publish:
     name: Publish ${{ needs.package.outputs.tag }}
-    needs: package
+    needs: [package, build_cosh_ng_prebuilt]
+    if: >-
+      always() &&
+      needs.package.result == 'success' &&
+      (needs.package.outputs.component != 'cosh-ng' ||
+       needs.build_cosh_ng_prebuilt.result == 'success')
+    permissions:
+      contents: write
+      actions: read
     environment: release
     runs-on: anolisa-k8s-amd-release
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.ref }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Download official artifact
         uses: actions/download-artifact@v4
@@ -138,6 +194,23 @@ jobs:
         with:
           name: ${{ needs.package.outputs.component }}-${{ needs.package.outputs.version }}-vendor
           path: /tmp/archives
+
+      - name: Download cosh-ng precompiled packages
+        if: needs.package.outputs.component == 'cosh-ng'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cosh-ng-prebuilt-${{ needs.package.outputs.version }}-*
+          path: /tmp/cosh-ng-prebuilt
+
+      - name: Verify cosh-ng precompiled packages
+        if: needs.package.outputs.component == 'cosh-ng'
+        env:
+          COSH_NG_VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          python3 .github/actions/build-cosh-ng-prebuilt/verify-artifacts.py \
+            --directory /tmp/cosh-ng-prebuilt \
+            --version "$COSH_NG_VERSION" \
+            --layout actions
 
       - name: Create GitHub Release
         env:
@@ -175,6 +248,14 @@ jobs:
           VENDOR_ARCHIVE="/tmp/archives/${COMPONENT}-${VERSION}-vendor.tar.gz"
           if [ -f "$VENDOR_ARCHIVE" ]; then
             ASSETS+=("$VENDOR_ARCHIVE")
+          fi
+          if [ "$COMPONENT" = "cosh-ng" ]; then
+            while IFS= read -r asset; do
+              ASSETS+=("$asset")
+            done < <(
+              find /tmp/cosh-ng-prebuilt -mindepth 2 -maxdepth 2 -type f -print |
+                LC_ALL=C sort
+            )
           fi
 
           if gh release view "$TAG" > /dev/null 2>&1; then

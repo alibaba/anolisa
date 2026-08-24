@@ -65,3 +65,74 @@ jobs:
           version: ${{ inputs.version }}
           artifact-suffix: '.preview'
           retention-days: 14
+
+  build-cosh-ng-prebuilt-preview:
+    name: Preview cosh-ng ${{ matrix.target-os }}-${{ matrix.target-arch }}
+    if: inputs.component == 'cosh-ng'
+    permissions:
+      contents: read
+    runs-on: [self-hosted, Linux, X64, anolisa-release-cross-x64]
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target-os: linux
+            target-arch: x86_64
+            profile: gnu2.28-x86_64
+          - target-os: linux
+            target-arch: aarch64
+            profile: gnu2.28-aarch64
+          - target-os: macos
+            target-arch: aarch64
+            profile: darwin11-aarch64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build precompiled package
+        id: prebuilt
+        uses: ./.github/actions/build-cosh-ng-prebuilt
+        with:
+          version: ${{ inputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+
+      - name: Upload precompiled package
+        uses: actions/upload-artifact@v4
+        with:
+          name: cosh-ng-prebuilt-${{ inputs.version }}-${{ matrix.target-os }}-${{ matrix.target-arch }}
+          path: ${{ steps.prebuilt.outputs.artifact-directory }}/*
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-cosh-ng-prebuilt-preview:
+    name: Verify preview cosh-ng artifacts
+    needs: build-cosh-ng-prebuilt-preview
+    if: inputs.component == 'cosh-ng'
+    permissions:
+      actions: read
+      contents: read
+    runs-on: anolisa-k8s-amd-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download cosh-ng precompiled packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cosh-ng-prebuilt-${{ inputs.version }}-*
+          path: /tmp/cosh-ng-prebuilt-preview
+
+      - name: Verify cosh-ng precompiled packages
+        env:
+          COSH_NG_VERSION: ${{ inputs.version }}
+        run: |
+          python3 .github/actions/build-cosh-ng-prebuilt/verify-artifacts.py \
+            --directory /tmp/cosh-ng-prebuilt-preview \
+            --version "$COSH_NG_VERSION" \
+            --layout actions
