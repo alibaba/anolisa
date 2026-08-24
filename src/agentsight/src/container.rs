@@ -73,11 +73,11 @@ pub fn extract_container_id_cached(pid: u32) -> Option<String> {
 /// string operations and `Option`-returning methods are used.  Safe to call
 /// from FFI (`build_llm_data`).
 pub fn extract_container_id(pid: u32) -> Option<String> {
-    let path = format!("/proc/{pid}/cgroup");
+    let path = crate::utils::procfs::proc_pid_entry(pid, "cgroup");
     match std::fs::read_to_string(&path) {
         Ok(content) => parse_container_id_from_cgroup(&content),
         Err(e) => {
-            log::debug!("failed to read {path}: {e}");
+            log::debug!("failed to read {path:?}: {e}");
             None
         }
     }

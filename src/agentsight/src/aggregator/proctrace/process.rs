@@ -238,7 +238,7 @@ const SESSION_ENV_VARS: &[&str] = &[
 ];
 
 fn read_session_env(pid: u32) -> Option<String> {
-    let data = match std::fs::read(format!("/proc/{pid}/environ")) {
+    let data = match std::fs::read(crate::utils::procfs::proc_pid_entry(pid, "environ")) {
         Ok(d) => d,
         Err(e) => {
             log::debug!("read_session_env({pid}): {e}");

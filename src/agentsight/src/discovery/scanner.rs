@@ -1,16 +1,19 @@
 //! Agent process scanner
 //!
 //! This module provides functionality to scan the system for running AI agent processes
-//! by examining /proc filesystem entries and handling process lifecycle events.
+//! by examining procfs entries and handling process lifecycle events.
 //! It also manages deny rules and domain rules for unified rule-based decisions.
+//!
+//! Every procfs read here resolves through [`crate::utils::procfs`], so an
+//! observer in a container can be pointed at a bind-mounted host procfs.
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
 
 use super::agent::{AgentInfo, DiscoveredAgent};
 use super::matcher::{CmdlineGlobMatcher, ProcessContext, match_domain_glob};
 use crate::config::{CmdlineRule, HttpsRule};
+use crate::utils::procfs::{proc_pid_entry, proc_root};
 
 /// Scanner for discovering AI agent processes on the system
 ///
@@ -84,7 +87,7 @@ impl AgentScanner {
         if !self.matches_domain(domain) {
             return false;
         }
-        let cmdline = read_cmdline(&format!("/proc/{pid}/cmdline"));
+        let cmdline = read_cmdline(pid);
         // Fail-closed: if cmdline is empty (process already exited or unreadable),
         // do NOT attach — deny rules cannot be evaluated reliably.
         if cmdline.is_empty() {
@@ -106,9 +109,8 @@ impl AgentScanner {
     pub fn scan(&mut self) -> Vec<DiscoveredAgent> {
         let mut discovered = Vec::new();
 
-        // Read /proc directory
-        let proc_path = Path::new("/proc");
-        let entries = match fs::read_dir(proc_path) {
+        // Read the procfs root directory
+        let entries = match fs::read_dir(proc_root()) {
             Ok(e) => e,
             Err(_) => return discovered,
         };
@@ -151,22 +153,20 @@ impl AgentScanner {
         let comm = if bpf_comm.len() >= 3 {
             bpf_comm.to_string()
         } else {
-            // Fallback: read from /proc/[pid]/comm
-            let comm_path = format!("/proc/{pid}/comm");
-            fs::read_to_string(&comm_path)
+            // Fallback: read from <procfs root>/[pid]/comm
+            fs::read_to_string(proc_pid_entry(pid, "comm"))
                 .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| bpf_comm.to_string())
         };
 
-        // Read full command line from /proc/[pid]/cmdline
-        let cmdline_args = read_cmdline(&format!("/proc/{pid}/cmdline"));
+        // Read full command line from <procfs root>/[pid]/cmdline
+        let cmdline_args = read_cmdline(pid);
         log::trace!("Process created: pid={pid}, comm='{comm}', cmdline={cmdline_args:?}");
 
-        // Read executable path from /proc/[pid]/exe (symlink)
-        let exe_path_str = format!("/proc/{pid}/exe");
-        let exe = fs::read_link(&exe_path_str)
+        // Read executable path from <procfs root>/[pid]/exe (symlink)
+        let exe = fs::read_link(proc_pid_entry(pid, "exe"))
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
 
@@ -225,20 +225,15 @@ impl AgentScanner {
 
     /// Attempt to match a process against known agents
     pub fn try_match_process(&self, pid: u32) -> Option<DiscoveredAgent> {
-        let proc_dir = format!("/proc/{pid}");
-
-        // Read process name from /proc/[pid]/comm
-        let comm_path = format!("{proc_dir}/comm");
-        let comm = fs::read_to_string(&comm_path).ok()?;
+        // Read process name from <procfs root>/[pid]/comm
+        let comm = fs::read_to_string(proc_pid_entry(pid, "comm")).ok()?;
         let process_name = comm.trim().to_string();
 
-        // Read full command line from /proc/[pid]/cmdline
-        let cmdline_path = format!("{proc_dir}/cmdline");
-        let cmdline_args = read_cmdline(&cmdline_path);
+        // Read full command line from <procfs root>/[pid]/cmdline
+        let cmdline_args = read_cmdline(pid);
 
-        // Read executable path from /proc/[pid]/exe (symlink)
-        let exe_path = format!("{proc_dir}/exe");
-        let exe = fs::read_link(&exe_path)
+        // Read executable path from <procfs root>/[pid]/exe (symlink)
+        let exe = fs::read_link(proc_pid_entry(pid, "exe"))
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
 
@@ -282,23 +277,26 @@ impl AgentScanner {
     }
 }
 
-/// Read the process comm (`/proc/<pid>/comm`), trimmed.
+/// Read the process comm (`<procfs root>/<pid>/comm`), trimmed.
 ///
 /// Returns `None` when the file is unreadable (process gone) or empty. This is
 /// the *process* name (main-thread comm), not a per-event worker-thread name.
 pub fn read_comm(pid: u32) -> Option<String> {
-    fs::read_to_string(format!("/proc/{pid}/comm"))
+    fs::read_to_string(proc_pid_entry(pid, "comm"))
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
-/// Read and parse cmdline file
+/// Read and parse a process's cmdline
 ///
 /// The cmdline file contains arguments separated by null bytes.
-/// Returns a vector of command line arguments.
-pub fn read_cmdline(path: &str) -> Vec<String> {
-    match fs::read(path) {
+/// Returns a vector of command line arguments, empty when the process is gone.
+///
+/// Takes the pid rather than a path so every caller resolves through the
+/// configured procfs root (see [`crate::utils::procfs`]).
+pub fn read_cmdline(pid: impl std::fmt::Display) -> Vec<String> {
+    match fs::read(proc_pid_entry(pid, "cmdline")) {
         Ok(data) => {
             // Split by null bytes and collect non-empty strings
             data.split(|&b| b == 0)

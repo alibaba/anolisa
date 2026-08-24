@@ -16,7 +16,7 @@ mod elf_buildid;
 // Re-export commonly used types
 pub use filewatch::{FileWatch, FileWatchEvent};
 pub use filewrite::{FileWrite as FileWriteProbe, FileWriteEvent};
-pub use pidns::observer_in_init_pidns;
+pub use pidns::proc_root_is_init_pidns;
 pub use probes::{ChannelWatermarks, Probes, ProbesPoller};
 pub use procmon::{Event as ProcMonEventExt, ProcMon, ProcMonEvent};
 pub use proctrace::{ProcPoller, ProcTrace, VariableEvent as ProcEvent};

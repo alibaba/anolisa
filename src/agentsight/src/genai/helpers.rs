@@ -656,8 +656,8 @@ impl GenAIBuilder {
         if let Some(name) = cache.get_agent_name(&pid) {
             return Some(name.clone());
         }
-        // Read cmdline from /proc/{pid}/cmdline for accurate agent matching
-        let cmdline_args = std::fs::read(format!("/proc/{pid}/cmdline"))
+        // Read cmdline from <procfs root>/{pid}/cmdline for accurate agent matching
+        let cmdline_args = std::fs::read(crate::utils::procfs::proc_pid_entry(pid, "cmdline"))
             .ok()
             .map(|data| {
                 data.split(|&b| b == 0)
@@ -667,7 +667,7 @@ impl GenAIBuilder {
             })
             .unwrap_or_default();
 
-        let exe_path = std::fs::read_link(format!("/proc/{pid}/exe"))
+        let exe_path = std::fs::read_link(crate::utils::procfs::proc_pid_entry(pid, "exe"))
             .ok()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();

@@ -95,7 +95,7 @@ static inline u32 get_task_ns_pid(struct task_struct *task)
 }
 
 /* Set by user-space when it observes /proc through the initial pid namespace;
- * see probes::pidns::observer_in_init_pidns() for how that is determined.
+ * see probes::pidns::proc_root_is_init_pidns() for how that is determined.
  * Defaults to false so an unconfigured object keeps the historical behaviour. */
 const volatile bool observer_pidns_is_init = false;
 

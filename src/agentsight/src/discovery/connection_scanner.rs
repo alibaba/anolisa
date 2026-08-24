@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use super::scanner::{AgentScanner, read_cmdline};
+use crate::utils::procfs::{proc_pid_entry, proc_root};
 
 /// IP → domain name mapping cache
 pub type IpDomainCache = HashMap<IpAddr, String>;
@@ -81,7 +82,7 @@ impl<'a> ConnectionScanner<'a> {
             }
 
             // Read cmdline for deny check (fail-closed: skip if unreadable)
-            let cmdline = read_cmdline(&format!("/proc/{pid}/cmdline"));
+            let cmdline = read_cmdline(pid);
             if cmdline.is_empty() {
                 log::debug!("Connection scan: pid={pid} cmdline empty (process exited?), skipping");
                 continue;
@@ -144,6 +145,11 @@ fn resolve_domains(domain_patterns: &[String]) -> IpDomainCache {
 /// Scan /proc/net/tcp for ESTABLISHED connections to target IPs
 ///
 /// Returns: Vec<(inode, remote_ip, remote_port, domain)>
+///
+/// Deliberately reads the observer's own `/proc/net/tcp` rather than the
+/// configured procfs root: the connection table is network-namespace scoped, so
+/// the useful view is the netns we share (the host's, under `hostNetwork`). With
+/// no shared netns this finds nothing and the scan simply yields no candidates.
 fn scan_tcp_connections(ip_cache: &IpDomainCache) -> Vec<(u64, IpAddr, u16, String)> {
     use procfs::net::{TcpState, tcp};
 
@@ -172,21 +178,49 @@ fn scan_tcp_connections(ip_cache: &IpDomainCache) -> Vec<(u64, IpAddr, u16, Stri
     results
 }
 
-/// Resolve socket inodes to PIDs by scanning /proc/[pid]/fd/
+/// Resolve socket inodes to PIDs by scanning `<procfs root>/[pid]/fd/`
+///
+/// Walks the configured procfs root by hand instead of `procfs::all_processes()`,
+/// which hardcodes `/proc`: an observer pointed at a bind-mounted host procfs
+/// would otherwise enumerate only itself and resolve nothing.
+/// (`health::port_detector` carries the inverse lookup -- inodes *for* one pid --
+/// against the same file layout.)
 fn resolve_inodes_to_pids(target_inodes: &HashSet<u64>) -> HashMap<u64, u32> {
-    use procfs::process::all_processes;
-
     let mut map = HashMap::new();
-    if let Ok(procs) = all_processes() {
-        for proc in procs.flatten() {
-            if let Ok(fds) = proc.fd() {
-                for fd in fds.flatten() {
-                    if let procfs::process::FDTarget::Socket(inode) = fd.target {
-                        if target_inodes.contains(&inode) {
-                            map.insert(inode, proc.pid() as u32);
-                        }
-                    }
-                }
+    let entries = match std::fs::read_dir(proc_root()) {
+        Ok(e) => e,
+        Err(e) => {
+            log::warn!("Connection scan: failed to read {:?}: {e}", proc_root());
+            return map;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(fds) = std::fs::read_dir(proc_pid_entry(pid, "fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            // Socket fds link to "socket:[<inode>]".
+            let Ok(target) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
+            let Some(inode) = target
+                .to_str()
+                .and_then(|t| t.strip_prefix("socket:["))
+                .and_then(|t| t.strip_suffix(']'))
+                .and_then(|t| t.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            if target_inodes.contains(&inode) {
+                map.insert(inode, pid);
             }
         }
     }

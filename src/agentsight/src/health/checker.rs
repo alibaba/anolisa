@@ -568,10 +568,10 @@ fn build_restart_cmd(exe_path: &str, cmdline_args: &[String]) -> Vec<String> {
     cmd
 }
 
-/// Read the parent PID (ppid) from /proc/<pid>/stat.
+/// Read the parent PID (ppid) from `<procfs root>/<pid>/stat`.
 /// Returns None if the file cannot be read or parsed.
 fn read_ppid(pid: u32) -> Option<u32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let stat = std::fs::read_to_string(crate::utils::procfs::proc_pid_entry(pid, "stat")).ok()?;
     // Format: "pid (comm) state ppid ..."
     // Find the closing ')' first (comm may contain spaces/parens)
     let after_comm = stat.rsplit_once(')')?.1;
