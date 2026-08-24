@@ -187,20 +187,15 @@ fn root_from_path(dir: &Path) -> ScanRoot {
         };
     }
 
-    // Backward-compatible default: existing configs passed Qoder projects dirs.
+    // Backward-compatible default: recursively scan for .jsonl files.
+    // Known layouts (PerProject) are only used when the path matches a
+    // SESSION_ROOTS entry above; unknown dirs get Flat (recursive) so any
+    // directory structure works without special-casing.
     ScanRoot {
         dir: dir.to_path_buf(),
         source: source_from_path(dir),
-        layout: if path.contains(".codex") {
-            Layout::Flat
-        } else {
-            Layout::PerProject
-        },
-        scan_subdirs: if path.contains(".codex") {
-            &[]
-        } else {
-            &["transcript"]
-        },
+        layout: Layout::Flat,
+        scan_subdirs: &[],
     }
 }
 
@@ -219,6 +214,8 @@ fn source_from_path(dir: &Path) -> String {
         "cursor".to_string()
     } else if path.contains(".agentsight") {
         "agentsight".to_string()
+    } else if path.contains(".pi") {
+        "pi".to_string()
     } else {
         "qoder".to_string()
     }
@@ -348,11 +345,11 @@ fn discover_in_project_dir(
             continue;
         }
 
-        // Main session files: <uuid>.jsonl
+        // Main session files: *.jsonl (any non-agent file)
         if !is_dir && name.ends_with(".jsonl") {
             let stem = name.trim_end_matches(".jsonl");
             // Skip agent-* files (sub-agents are stored under subagents/)
-            if stem.starts_with("agent-") || !is_valid_session_id(stem) {
+            if stem.is_empty() || stem.starts_with("agent-") {
                 continue;
             }
             sessions.push(DiscoveredSession {
@@ -495,6 +492,18 @@ mod tests {
         dir
     }
 
+    /// Temp dir whose path contains `.qoder/projects` so `root_from_path`
+    /// matches a known SESSION_ROOTS entry and yields PerProject layout.
+    fn tmp_known_projects_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("traj-disc-{tag}-{}", std::process::id()))
+            .join(".qoder")
+            .join("projects");
+        let _ = std::fs::remove_dir_all(dir.ancestors().nth(2).unwrap());
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn test_decode_project_dir() {
         assert_eq!(decode_project_dir("-data-skillopt"), "data-skillopt");
@@ -538,15 +547,16 @@ mod tests {
 
     #[test]
     fn test_discover_filters_and_subagents() {
-        let projects = tmp_projects_dir("main");
+        let projects = tmp_known_projects_dir("main");
         let proj = projects.join("-data-myapp");
         std::fs::create_dir_all(&proj).unwrap();
 
         // Valid main session
         std::fs::write(proj.join(format!("{UUID_A}.jsonl")), "{}\n").unwrap();
-        // Invalid names must be skipped
-        std::fs::write(proj.join("notes.jsonl"), "{}\n").unwrap();
+        // agent-* files must be skipped (subagents handled separately)
         std::fs::write(proj.join(format!("agent-{UUID_B}.jsonl")), "{}\n").unwrap();
+        // Non-UUID names are now accepted as valid sessions
+        std::fs::write(proj.join("notes.jsonl"), "{}\n").unwrap();
         // Sub-agent session under <uuid>/subagents/ (legacy UUID name)
         let sub = proj.join(UUID_A).join("subagents");
         std::fs::create_dir_all(&sub).unwrap();
@@ -555,12 +565,15 @@ mod tests {
         std::fs::write(sub.join("agent-aExplore-b4b7e9141b9524f6.jsonl"), "{}\n").unwrap();
 
         let sessions = discover_under(&projects);
-        assert_eq!(sessions.len(), 3, "one main + two subagents: {sessions:?}");
+        assert_eq!(sessions.len(), 4, "two main + two subagents: {sessions:?}");
 
-        let main = sessions.iter().find(|s| !s.is_subagent).unwrap();
-        assert_eq!(main.session_id, UUID_A);
-        assert_eq!(main.project, "data-myapp");
-        assert_eq!(main.source, "qoder");
+        let mains: Vec<_> = sessions.iter().filter(|s| !s.is_subagent).collect();
+        assert_eq!(mains.len(), 2, "UUID session + notes.jsonl");
+        assert!(mains.iter().any(|s| s.session_id == UUID_A));
+        assert!(mains.iter().any(|s| s.session_id == "notes"));
+        let uuid_main = mains.iter().find(|s| s.session_id == UUID_A).unwrap();
+        assert_eq!(uuid_main.project, "data-myapp");
+        assert_eq!(uuid_main.source, "qoder");
 
         assert!(sessions
             .iter()
@@ -573,7 +586,7 @@ mod tests {
 
     #[test]
     fn test_discover_transcript_subdir_layout() {
-        let projects = tmp_projects_dir("transcript");
+        let projects = tmp_known_projects_dir("transcript");
         let proj = projects.join("-data-myapp");
         // Newer Qoder layout: sessions under <project>/transcript/
         let transcript = proj.join("transcript");

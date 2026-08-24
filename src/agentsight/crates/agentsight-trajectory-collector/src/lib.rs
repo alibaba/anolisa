@@ -10,6 +10,7 @@
 pub mod atif;
 pub mod codex;
 pub mod discovery;
+pub mod pi;
 pub mod qoder;
 pub mod store;
 
@@ -133,11 +134,14 @@ fn process_session(store: &TrajectoryStore, session: &DiscoveredSession) -> Resu
     }
 
     // Codex rollout files use an envelope schema (`{timestamp,type,payload}`)
-    // that needs a dedicated converter; everything else shares the
-    // Claude-style converter.
+    // that needs a dedicated converter; Pi uses `type: "message"` with role
+    // discrimination; everything else shares the Claude-style converter.
     let is_codex = session.source == "codex" || codex::is_codex_rollout(&events);
+    let is_pi = !is_codex && (session.source == "pi" || pi::is_pi_format(&events));
     let mut trajectory = if is_codex {
         codex::convert_codex_events(&events, &session.source)?
+    } else if is_pi {
+        pi::convert_pi_events(&events, &session.source)?
     } else {
         atif::convert_qoder_events(&events, &session.source)?
     };
@@ -155,6 +159,8 @@ fn process_session(store: &TrajectoryStore, session: &DiscoveredSession) -> Resu
     // Agent-private info (cwd, message counts, project) rides in `extra`.
     let private = if is_codex {
         codex::extract_private_metadata(&events, &session.project)
+    } else if is_pi {
+        pi::extract_private_metadata(&events, &session.project)
     } else {
         qoder::extract_private_metadata(&events, &session.project)
     };
@@ -250,7 +256,7 @@ mod tests {
     #[test]
     fn test_scan_once_ingests_and_skips_unchanged() {
         let base = tmp_dir("scan");
-        let projects = base.join("projects");
+        let projects = base.join(".qoder").join("projects");
         std::fs::create_dir_all(&projects).unwrap();
         write_session(&projects);
 
