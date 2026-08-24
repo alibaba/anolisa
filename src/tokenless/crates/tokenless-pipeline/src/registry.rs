@@ -57,6 +57,25 @@ pub struct CompressorSpec {
     pub cost_class: CostClass,
 }
 
+impl CompressorSpec {
+    /// The routing rule from principle 2: a spec matches when it supports
+    /// the detected content type, runs at the request's seam, and every
+    /// capability it requires is declared by the adapter.
+    #[must_use]
+    pub fn matches(
+        &self,
+        content_type: ContentType,
+        seam: Seam,
+        capabilities: Capabilities,
+    ) -> bool {
+        self.content_types.contains(&content_type)
+            && self.seams.contains(&seam)
+            && (!self.required_capabilities.replace_output || capabilities.replace_output)
+            && (!self.required_capabilities.publish_retrieve_tool
+                || capabilities.publish_retrieve_tool)
+    }
+}
+
 /// The production registry. Empty until existing compressors move behind
 /// the registry interface; entries are appended with the compressor that
 /// implements them, never speculatively.
@@ -70,13 +89,9 @@ pub fn candidates(
     seam: Seam,
     capabilities: Capabilities,
 ) -> impl Iterator<Item = &CompressorSpec> {
-    registry.iter().filter(move |spec| {
-        spec.content_types.contains(&content_type)
-            && spec.seams.contains(&seam)
-            && (!spec.required_capabilities.replace_output || capabilities.replace_output)
-            && (!spec.required_capabilities.publish_retrieve_tool
-                || capabilities.publish_retrieve_tool)
-    })
+    registry
+        .iter()
+        .filter(move |spec| spec.matches(content_type, seam, capabilities))
 }
 
 #[cfg(test)]

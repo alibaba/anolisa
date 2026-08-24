@@ -860,7 +860,10 @@ dependencies = [
 name = "tokenless-pipeline"
 version = "0.7.12"
 dependencies = [
+ "thiserror 2.0.18",
+ "tokenless-ccr",
  "tokenless-protocol",
+ "tokenless-stats",
 ]
 
 [[package]]
