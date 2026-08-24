@@ -151,16 +151,16 @@ fn lower_path(pat: &str) -> (u8, String) {
     }
     let repo_relative = !pat.starts_with('/');
     // **/middle/** → contains "/middle/" (substring search)
-    if let Some(inner) = pat.strip_prefix("**/").and_then(|r| r.strip_suffix("/**")) {
-        if !inner.contains('*') {
-            return (M_CONTAINS, shorten_contains_literal(&format!("/{inner}/")));
-        }
+    if let Some(inner) = pat.strip_prefix("**/").and_then(|r| r.strip_suffix("/**"))
+        && !inner.contains('*')
+    {
+        return (M_CONTAINS, shorten_contains_literal(&format!("/{inner}/")));
     }
     // **/middle/* → contains "/middle/" (files directly inside)
-    if let Some(inner) = pat.strip_prefix("**/").and_then(|r| r.strip_suffix("/*")) {
-        if !inner.contains('*') {
-            return (M_CONTAINS, shorten_contains_literal(&format!("/{inner}/")));
-        }
+    if let Some(inner) = pat.strip_prefix("**/").and_then(|r| r.strip_suffix("/*"))
+        && !inner.contains('*')
+    {
+        return (M_CONTAINS, shorten_contains_literal(&format!("/{inner}/")));
     }
     if let Some(inner) = pat.strip_prefix("**/") {
         if let Some(suffix) = inner.strip_prefix('*') {
@@ -318,11 +318,14 @@ fn lower_ipv4(pat: &str) -> (u32, u32) {
     (0, u32::MAX)
 }
 
+/// Gate dedup map: (kind, op, target, extra) → (label bit, gate index).
+type GateBits = HashMap<(u8, u8, String, Option<u8>), (u64, u32)>;
+
 struct Ctx {
     labels: HashMap<String, u64>,
     next_label: u32,
     updates: Vec<CUpdate>,
-    gate_bits: HashMap<(u8, u8, String, Option<u8>), (u64, u32)>,
+    gate_bits: GateBits,
     next_gate: u32,
     inval_slots: HashMap<(u8, u8, String, String), u32>,
     next_inval: u32,
