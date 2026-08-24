@@ -168,12 +168,16 @@ fn unix_epoch_ns() -> u64 {
 }
 
 /// Lists AgentSight's persisted desired binding states.
+///
+/// Detached bindings acknowledge successful deletion and are hidden so the
+/// list reflects the bindings an operator can still act on. Each item keeps
+/// its `state` field so failed or degraded bindings remain distinguishable.
 #[get("/enforcement/bindings")]
 pub(super) async fn list_bindings(data: web::Data<AppState>) -> HttpResponse {
     let Some(coordinator) = data.enforcement.clone() else {
         return unavailable();
     };
-    match web::block(move || coordinator.bindings()).await {
+    match web::block(move || coordinator.active_bindings()).await {
         Ok(Ok(bindings)) => HttpResponse::Ok().json(json!({
             "bindings": bindings.into_iter().map(public_binding).collect::<Vec<_>>()
         })),
@@ -367,6 +371,15 @@ fn build_credential_binding(
 }
 
 fn coordinator_error(error: EnforcementCoordinatorError) -> HttpResponse {
+    log::error!("enforcement coordinator request failed: {error}");
+    let (error, persisted) = match error {
+        EnforcementCoordinatorError::PersistedUnacknowledged {
+            binding_id,
+            state,
+            source,
+        } => (*source, Some((binding_id, state))),
+        error => (error, None),
+    };
     let (status, code, message, retryable) = match &error {
         EnforcementCoordinatorError::IngestionUnavailable => (
             actix_web::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -428,7 +441,11 @@ fn coordinator_error(error: EnforcementCoordinatorError) -> HttpResponse {
             false,
         ),
     };
-    log::error!("enforcement coordinator request failed: {error}");
+    if let Some((binding_id, state)) = persisted
+        && status == actix_web::http::StatusCode::SERVICE_UNAVAILABLE
+    {
+        return persisted_error_response(status, code, message, retryable, binding_id, state);
+    }
     error_response(status, code, message, retryable)
 }
 
@@ -459,6 +476,30 @@ fn error_response(
 ) -> HttpResponse {
     HttpResponse::build(status).json(json!({
         "error": { "code": code, "message": message, "retryable": retryable }
+    }))
+}
+
+/// Marks a 503 as "the desired state was persisted anyway".
+///
+/// Callers receiving this error can look up `binding_id` in the bindings list
+/// instead of assuming the failed request left no trace.
+fn persisted_error_response(
+    status: actix_web::http::StatusCode,
+    code: &str,
+    message: &str,
+    retryable: bool,
+    binding_id: Uuid,
+    state: BindingState,
+) -> HttpResponse {
+    HttpResponse::build(status).json(json!({
+        "error": {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+            "persisted": true,
+            "binding_id": binding_id,
+            "state": state,
+        }
     }))
 }
 
@@ -724,6 +765,8 @@ mod tests {
             serde_json::Value::String("enforcement_unavailable".into())
         );
         assert_eq!(value["error"]["retryable"], serde_json::Value::Bool(true));
+        // Health failures happen before persistence and must not claim otherwise.
+        assert!(value["error"].get("persisted").is_none());
     }
 
     #[actix_web::test]
@@ -785,5 +828,87 @@ mod tests {
             status.message.as_deref(),
             Some("enforcement backend is not ready")
         );
+    }
+
+    #[actix_web::test]
+    async fn persisted_apply_failures_expose_persisted_state_on_503() {
+        let binding_id = Uuid::new_v4();
+        let response = coordinator_error(EnforcementCoordinatorError::PersistedUnacknowledged {
+            binding_id,
+            state: BindingState::Failed,
+            source: Box::new(EnforcementCoordinatorError::Client(
+                crate::enforcement::EnforcementError::Remote {
+                    code: "internal_error".into(),
+                    message: "fixture apply rejection".into(),
+                },
+            )),
+        });
+
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .expect("error response body should load");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response should be JSON");
+        assert_eq!(value["error"]["code"], "enforcer_unavailable");
+        assert_eq!(value["error"]["persisted"], serde_json::Value::Bool(true));
+        assert_eq!(value["error"]["state"], "failed");
+        assert_eq!(
+            value["error"]["binding_id"],
+            serde_json::Value::String(binding_id.to_string())
+        );
+    }
+
+    #[actix_web::test]
+    async fn persisted_degraded_apply_failures_expose_state_on_503() {
+        let response = coordinator_error(EnforcementCoordinatorError::PersistedUnacknowledged {
+            binding_id: Uuid::new_v4(),
+            state: BindingState::Degraded,
+            source: Box::new(EnforcementCoordinatorError::EnforcementUnavailable(
+                "fixture backend lost".into(),
+            )),
+        });
+
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .expect("error response body should load");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response should be JSON");
+        assert_eq!(value["error"]["code"], "enforcement_unavailable");
+        assert_eq!(value["error"]["persisted"], serde_json::Value::Bool(true));
+        assert_eq!(value["error"]["state"], "degraded");
+    }
+
+    #[actix_web::test]
+    async fn persisted_policy_rejections_keep_actionable_status_without_state_detail() {
+        let response = coordinator_error(EnforcementCoordinatorError::PersistedUnacknowledged {
+            binding_id: Uuid::new_v4(),
+            state: BindingState::Failed,
+            source: Box::new(EnforcementCoordinatorError::Client(
+                crate::enforcement::EnforcementError::Remote {
+                    code: "compile_failure".into(),
+                    message: "fixture compile rejection".into(),
+                },
+            )),
+        });
+
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .expect("error response body should load");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("error response should be JSON");
+        assert_eq!(value["error"]["code"], "compile_failure");
+        assert!(value["error"].get("persisted").is_none());
     }
 }
