@@ -49,6 +49,8 @@ impl<T, P> ProbeEvidence<T, P> {
 pub enum SnapshotProbe {
     /// Read the ANOLISA installation state.
     State,
+    /// Verify the files owned by the active or quarantined component record.
+    OwnedFiles,
     /// Query the native package authority. Valid only in system scope.
     NativePackage,
     /// Inspect the transaction journal directory.
@@ -114,6 +116,13 @@ pub struct NativePackageProvenance {
     pub package: String,
 }
 
+/// Source of an owned-file integrity observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedFilesProvenance {
+    /// State file whose owned-file contract selected the paths to verify.
+    pub state_path: PathBuf,
+}
+
 /// Source of a pending-journal observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalProvenance {
@@ -139,6 +148,15 @@ pub enum NativePackageSnapshot {
     MultipleVersions,
 }
 
+/// Integrity of the files declared by an owned component record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnedFilesSnapshot {
+    /// Every verifiable owned path satisfies its recorded contract.
+    Verified,
+    /// At least one owned path has a decisive integrity failure.
+    Drifted,
+}
+
 /// Pending transaction selected for the requested component.
 ///
 /// A collector may inspect a multi-entry journal inventory, but each snapshot
@@ -154,6 +172,7 @@ pub struct PendingJournalSnapshot {
 pub struct ComponentSnapshot {
     request: ComponentSnapshotRequest,
     state: ProbeEvidence<StateSnapshot, StateProvenance>,
+    owned_files: ProbeEvidence<OwnedFilesSnapshot, OwnedFilesProvenance>,
     native_package: ProbeEvidence<NativePackageSnapshot, NativePackageProvenance>,
     pending_journal: ProbeEvidence<PendingJournalSnapshot, JournalProvenance>,
 }
@@ -172,6 +191,28 @@ impl ComponentSnapshot {
         native_package: ProbeEvidence<NativePackageSnapshot, NativePackageProvenance>,
         pending_journal: ProbeEvidence<PendingJournalSnapshot, JournalProvenance>,
     ) -> Result<Self, SnapshotContractError> {
+        Self::from_parts_with_owned_files(
+            request,
+            state,
+            ProbeEvidence::NotRequested,
+            native_package,
+            pending_journal,
+        )
+    }
+
+    /// Builds a snapshot that may include owned-file integrity evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotContractError`] under the same conditions as
+    /// [`Self::from_parts`], including mismatched owned-file probe evidence.
+    pub fn from_parts_with_owned_files(
+        request: ComponentSnapshotRequest,
+        state: ProbeEvidence<StateSnapshot, StateProvenance>,
+        owned_files: ProbeEvidence<OwnedFilesSnapshot, OwnedFilesProvenance>,
+        native_package: ProbeEvidence<NativePackageSnapshot, NativePackageProvenance>,
+        pending_journal: ProbeEvidence<PendingJournalSnapshot, JournalProvenance>,
+    ) -> Result<Self, SnapshotContractError> {
         if matches!(request.scope, InstallationScope::User { .. })
             && request.requests(SnapshotProbe::NativePackage)
         {
@@ -182,6 +223,11 @@ impl ComponentSnapshot {
         }
         validate_evidence(&request, SnapshotProbe::State, state.is_not_requested())?;
         validate_state_target(&request, &state)?;
+        validate_evidence(
+            &request,
+            SnapshotProbe::OwnedFiles,
+            owned_files.is_not_requested(),
+        )?;
         validate_evidence(
             &request,
             SnapshotProbe::NativePackage,
@@ -196,6 +242,7 @@ impl ComponentSnapshot {
         Ok(Self {
             request,
             state,
+            owned_files,
             native_package,
             pending_journal,
         })
@@ -209,6 +256,11 @@ impl ComponentSnapshot {
     /// Returns the installation-state evidence.
     pub fn state(&self) -> &ProbeEvidence<StateSnapshot, StateProvenance> {
         &self.state
+    }
+
+    /// Returns the owned-file integrity evidence.
+    pub fn owned_files(&self) -> &ProbeEvidence<OwnedFilesSnapshot, OwnedFilesProvenance> {
+        &self.owned_files
     }
 
     /// Returns the native package evidence.
