@@ -64,6 +64,49 @@ Gateway binary；此时请替换为 `cosh-gateway doctor`、`cosh-gateway run` �
   prompt、tool argument、option label、session identifier 或 workspace path。Evidence
   持久化失败时，callback 会被取消且本轮运行失败。这两个 direct ACP command 不受 durable
   Gateway Task Plane 治理，适合本地 interoperability。
+- 如果要把一个持久 Task 完整委托给本机 Codex，先安装 pinned `codex-acp` bundle，并为一个
+  canonical workspace 启用 package 提供的 `cosh-gateway-acp@.service`。它的 environment
+  file 需要 `COSH_GATEWAY_WORKSPACE`、绝对路径 `COSH_GATEWAY_ACP_ADAPTER`，以及能够找到
+  Node 的 `PATH`。先完成一次配置。
+
+  ```bash
+  adapter_root="$HOME/.local/lib/cosh/acp-adapters"
+  install -d -m 0700 "$(dirname "$adapter_root")"
+  ./src/cosh-ng/scripts/install-acp-adapters.sh --prefix "$adapter_root"
+  node_bin="$(dirname "$(command -v node)")"
+  sudo install -d -m 0755 /etc/cosh
+  printf 'COSH_GATEWAY_WORKSPACE=%s\nCOSH_GATEWAY_ACP_ADAPTER=%s\nPATH=%s:/usr/bin:/bin\n' \
+    "$(pwd -P)" "$adapter_root/node_modules/.bin/codex-acp" "$node_bin" | \
+    sudo tee "/etc/cosh/gateway-$USER.env" >/dev/null
+  sudo systemctl enable --now "cosh-gateway-acp@$USER.service"
+  ```
+
+  Bundle 与 Gateway compatibility profile 将
+  `@agentclientprotocol/codex-acp` 精确 pin 到 `1.6.2`；Gateway 会拒绝 Adapter
+  上报的其他 package identity 或版本。在这个 profile 下，协商后的 typed terminal
+  failure 或 prompt 完成前的 transport EOF 会把 Run 与 Task 收敛为失败。Partial text
+  仍作为 progress 可见，但不能成为成功 terminal result。这些修正已有 deterministic
+  自动化 test coverage；修正后尚未重跑真实 Codex provider 与 ECS 路径。
+
+  然后进入 `cosh` 使用短入口。
+
+  ```text
+  /task 升级依赖、修改代码并运行测试
+  /task
+  /task show
+  /task show <tsk_UUID>
+  ```
+
+  `/task <目标>` 会生成 idempotency key 并选择 `acp`/`codex`。提交立即返回，Gateway 与
+  ACP child 由 system service 持有，因此关闭 Shell 或 SSH 不会停止 Task。单独输入 `/task`
+  会列出当前用户最近的 Task。`/task show` 默认选择最新 Task，遍历有界的持久 event page，
+  显示 Adapter 上报的进度与 terminal state；传入 Task ID 可以查看其他 Task。
+
+  精确的 `delegated-acp-v1` profile 表示完整 Task 授权。相关 ACP provider callback 会先
+  被记录，再以 `allow_once` 回答；COSH 永远不会选择 `allow_always`。这是 local-user
+  authority，不是 workspace containment。Gateway 会监督进程并持久化 Adapter 上报的 event，
+  但不能把 ACP native side effect 归因为 governed execution。这个 profile 不要求也不创建
+  checkpoint。
 - 对于 durable local Task，使用 package 安装的 system-scope
   `cosh-gateway@.service` unit。它选择 contained `core` runtime 和
   `gateway-brokered-v1` profile，并接纳配置的 canonical workspace：
@@ -111,7 +154,7 @@ Gateway binary；此时请替换为 `cosh-gateway doctor`、`cosh-gateway run` �
     --previous-run-id '<run_UUID>' --idempotency-key '<stable-retry-key>'
   ```
 
-  Task API 支持 `submit`、`get`、`events`、`append`、`cancel`、`retry` 和
+  Task API 支持 `submit`、`list`、`get`、`events`、`append`、`cancel`、`retry` 和
   `resolve-approval`。`append` 用来回答 profile 的 durable `ask_user_question` request。
   `resolve-approval` 仍属于通用 API，但这个 profile 没有需要 approval 的 side effect，因此
   不会产生 approval flow。Idempotency key 让客户端在 I/O 不确定后可以安全重试；durable Task、

@@ -57,9 +57,6 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
         self.coordinator
             .store
             .cancel_pending_approvals_for_run(&run_id, now_ms)?;
-        self.coordinator
-            .store
-            .mark_provider_dispatches_unknown_for_run(&run_id, now_ms)?;
         if !binding_closed {
             self.coordinator
                 .close_runtime_binding(&actor_id, &lease, &binding, now_ms)?;

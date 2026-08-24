@@ -52,10 +52,23 @@ impl AcpV1Codec {
     /// Rejects repeated initialization and frames above the configured bound.
     pub fn initialize_frame(&mut self) -> Result<String, AcpV1CodecError> {
         self.require_phase(AcpV1ProtocolPhase::Created, "initialize_frame")?;
-        let request = InitializeRequest::new(ProtocolVersion::V1).client_info(Implementation::new(
-            self.config.name.clone(),
-            self.config.version.clone(),
-        ));
+        let mut request = InitializeRequest::new(ProtocolVersion::V1).client_info(
+            Implementation::new(self.config.name.clone(), self.config.version.clone()),
+        );
+        if self.config.adapter_profile == AcpV1AdapterProfile::Codex162 {
+            let meta = serde_json::json!({
+                "jetbrains": {
+                    "air": {
+                        "version": 1,
+                        "capabilities": ["sessionFailure"]
+                    }
+                }
+            })
+            .as_object()
+            .cloned()
+            .ok_or_else(|| AcpV1CodecError::Sdk("invalid static Codex capability".into()))?;
+            request = request.client_capabilities(ClientCapabilities::new().meta(meta));
+        }
         let (id, frame) = self.encode_request(ClientRequest::InitializeRequest(request))?;
         self.pending_outbound.insert(
             id,

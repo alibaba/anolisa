@@ -41,6 +41,7 @@ pub(super) fn task(args: TaskArgs, reporter: &Reporter) -> Result<u8, CliError> 
             };
             client.submit(request)
         }
+        TaskCommand::List(command) => client.list(RequestId::new(), command.limit),
         TaskCommand::Get(command) => client.get(RequestId::new(), parse_task(&command.task_id)?),
         TaskCommand::Events(command) => client.events(
             RequestId::new(),
@@ -151,8 +152,11 @@ pub(super) fn target_for_runtime_profile(profile: &str) -> Result<TargetRef, Cli
         GATEWAY_CHECKPOINT_CORE_RUNTIME_PROFILE => {
             Ok(GatewayCapabilityProfile::workspace_checkpoint_v1().governed_target())
         }
+        "codex" | "claude-code" => {
+            Ok(GatewayCapabilityProfile::delegated_acp_v1().governed_target())
+        }
         _ => Err(CliError::Profile(
-            "unsupported brokered Core Runtime profile".to_owned(),
+            "unsupported durable Task Runtime profile".to_owned(),
         )),
     }
 }

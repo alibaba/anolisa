@@ -24,7 +24,7 @@ use cosh_gateway_contracts::profile::{
     GatewayCapabilityProfile, GatewayCapabilityProfileId, GatewayCapabilityProfileIdentity,
 };
 use cosh_gateway_contracts::task::{
-    CancelReason, CancellationStage, RuntimeUpdate, TaskEvent, TaskState,
+    ApprovalAbandonCause, CancelReason, CancellationStage, RuntimeUpdate, TaskEvent, TaskState,
 };
 use cosh_gateway_contracts::{
     capability::{

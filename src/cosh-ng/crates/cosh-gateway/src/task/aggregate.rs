@@ -327,6 +327,16 @@ impl TaskAggregate {
                     self.run_outcome = RunOutcome::Active;
                 }
             }
+            TaskEvent::ApprovalAbandoned { approval_id, .. } => {
+                self.require_state(event, &[TaskState::WaitingApproval])?;
+                if !self.pending_approvals.remove(approval_id) {
+                    return Err(AggregateError::ApprovalNotPending);
+                }
+                if self.pending_approvals.is_empty() {
+                    self.state = TaskState::Running;
+                    self.run_outcome = RunOutcome::Active;
+                }
+            }
             TaskEvent::ExecutionPlanned { execution_id, .. } => {
                 self.require_active(event)?;
                 if !self.planned_executions.insert(execution_id.clone()) {

@@ -15,6 +15,56 @@ fn codec() -> AcpV1Codec {
     AcpV1Codec::new(AcpV1ClientConfig::new("cosh-ng", "0.15.0", FRAME_LIMIT)).unwrap()
 }
 
+fn codex_codec() -> AcpV1Codec {
+    AcpV1Codec::new(
+        AcpV1ClientConfig::new("cosh-ng", "0.15.0", FRAME_LIMIT)
+            .adapter_profile(AcpV1AdapterProfile::Codex162),
+    )
+    .unwrap()
+}
+
+fn initialize_codex(codec: &mut AcpV1Codec) -> AcpV1Observation {
+    let request: Value = serde_json::from_str(&codec.initialize_frame().unwrap()).unwrap();
+    assert_eq!(
+        request["params"]["clientCapabilities"]["_meta"],
+        json!({
+            "jetbrains": {
+                "air": {"version": 1, "capabilities": ["sessionFailure"]}
+            }
+        })
+    );
+    let response = codex_initialize_response(
+        "@agentclientprotocol/codex-acp",
+        "1.6.2",
+        json!({"version": 1, "capabilities": ["sessionFailure", "agentFileChangeReport"]}),
+    );
+    codec.decode_frame(response.to_string().as_bytes()).unwrap()
+}
+
+fn codex_initialize_response(name: &str, version: &str, air: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": "cosh-acp-1",
+        "result": {
+            "protocolVersion": 1,
+            "agentCapabilities": {},
+            "agentInfo": {"name": name, "title": "Codex", "version": version},
+            "_meta": {"jetbrains": {"air": air}}
+        }
+    })
+}
+
+fn session_failure(severity: &str) -> Value {
+    json!({
+        "id": "turn-1:error",
+        "revision": 1,
+        "category": "service",
+        "severity": severity,
+        "title": "Codex provider failed",
+        "actions": ["retry"]
+    })
+}
+
 fn initialize(codec: &mut AcpV1Codec, capabilities: Value) -> AcpV1Observation {
     let request = codec.initialize_frame().unwrap();
     let value: Value = serde_json::from_str(&request).unwrap();
@@ -108,6 +158,312 @@ fn initialization_pins_wire_v1_independently_from_sdk_version() {
         }
     );
     assert_eq!(ACP_WIRE_PROTOCOL_VERSION, 1);
+}
+
+#[test]
+fn codex_profile_negotiates_only_the_frozen_air_v1_contract() {
+    let mut codec = codex_codec();
+    let observation = initialize_codex(&mut codec);
+
+    assert!(matches!(
+        observation,
+        AcpV1Observation::Initialized {
+            agent_info: Some(AcpV1AgentInfo { ref name, ref version, .. }),
+            ..
+        } if name == "@agentclientprotocol/codex-acp" && version == "1.6.2"
+    ));
+    assert_eq!(codec.phase(), AcpV1ProtocolPhase::Ready);
+}
+
+#[test]
+fn codex_profile_rejects_unfrozen_identity_before_session_authority() {
+    for (name, version) in [
+        ("@agentclientprotocol/codex-acp", "1.2.0"),
+        ("@agentclientprotocol/codex-acp", "1.6.3"),
+        ("codex-acp", "1.6.2"),
+    ] {
+        let mut codec = codex_codec();
+        codec.initialize_frame().unwrap();
+        let response = codex_initialize_response(
+            name,
+            version,
+            json!({"version": 1, "capabilities": ["sessionFailure", "agentFileChangeReport"]}),
+        );
+        assert!(matches!(
+            codec.decode_frame(response.to_string().as_bytes()),
+            Err(AcpV1CodecError::CodexAdapterIdentityMismatch { .. })
+        ));
+        assert_eq!(codec.phase(), AcpV1ProtocolPhase::Terminal);
+    }
+
+    let mut missing = codex_codec();
+    missing.initialize_frame().unwrap();
+    let response = json!({
+        "jsonrpc": "2.0",
+        "id": "cosh-acp-1",
+        "result": {
+            "protocolVersion": 1,
+            "agentCapabilities": {},
+            "_meta": {"jetbrains": {"air": {
+                "version": 1,
+                "capabilities": ["sessionFailure", "agentFileChangeReport"]
+            }}}
+        }
+    });
+    assert!(matches!(
+        missing.decode_frame(response.to_string().as_bytes()),
+        Err(AcpV1CodecError::CodexAdapterIdentityMismatch {
+            name: None,
+            version: None
+        })
+    ));
+    assert_eq!(missing.phase(), AcpV1ProtocolPhase::Terminal);
+}
+
+#[test]
+fn codex_profile_rejects_missing_or_drifted_air_negotiation() {
+    for air in [
+        json!({}),
+        json!({"version": 2, "capabilities": ["sessionFailure", "agentFileChangeReport"]}),
+        json!({"version": 1, "capabilities": ["sessionFailure"]}),
+        json!({"version": 1, "capabilities": ["agentFileChangeReport", "sessionFailure"]}),
+    ] {
+        let mut codec = codex_codec();
+        codec.initialize_frame().unwrap();
+        let response = codex_initialize_response("@agentclientprotocol/codex-acp", "1.6.2", air);
+        assert!(matches!(
+            codec.decode_frame(response.to_string().as_bytes()),
+            Err(AcpV1CodecError::InvalidCodexSessionFailureNegotiation(_))
+        ));
+        assert_eq!(codec.phase(), AcpV1ProtocolPhase::Terminal);
+    }
+}
+
+#[test]
+fn codex_partial_text_then_typed_error_is_request_failure() {
+    let mut codec = codex_codec();
+    initialize_codex(&mut codec);
+    open_session(&mut codec);
+    start_prompt(&mut codec);
+    let partial = json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": SESSION_ID,
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "partial answer"}
+            }
+        }
+    });
+    assert!(matches!(
+        codec.decode_frame(partial.to_string().as_bytes()),
+        Ok(AcpV1Observation::SessionUpdate { .. })
+    ));
+    let response = json!({
+        "jsonrpc": "2.0",
+        "id": "cosh-acp-3",
+        "result": {
+            "stopReason": "end_turn",
+            "_meta": {
+                "quota": {"token_count": null, "model_usage": []},
+                "jetbrains": {"air": {"version": 1, "sessionFailure": session_failure("error")}}
+            }
+        }
+    });
+
+    assert_eq!(
+        codec.decode_frame(response.to_string().as_bytes()).unwrap(),
+        AcpV1Observation::RequestFailed {
+            request: AcpV1RequestKind::Prompt,
+            code: -32000,
+            message: "Codex provider failed".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn codex_warning_update_then_clean_end_turn_succeeds() {
+    let mut codec = codex_codec();
+    initialize_codex(&mut codec);
+    open_session(&mut codec);
+    start_prompt(&mut codec);
+    let warning = json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": SESSION_ID,
+            "update": {
+                "sessionUpdate": "session_info_update",
+                "_meta": {
+                    "jetbrains": {"air": {"version": 1, "sessionFailure": session_failure("warning")}}
+                }
+            }
+        }
+    });
+    assert!(matches!(
+        codec.decode_frame(warning.to_string().as_bytes()),
+        Ok(AcpV1Observation::SessionUpdate { .. })
+    ));
+    let response = json!({
+        "jsonrpc": "2.0",
+        "id": "cosh-acp-3",
+        "result": {"stopReason": "end_turn", "_meta": {"quota": {}}}
+    });
+    assert!(matches!(
+        codec.decode_frame(response.to_string().as_bytes()),
+        Ok(AcpV1Observation::PromptFinished {
+            stop_reason: AcpV1StopReason::EndTurn,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn codex_error_update_fails_closed_before_clean_terminal_response() {
+    let mut codec = codex_codec();
+    initialize_codex(&mut codec);
+    open_session(&mut codec);
+    start_prompt(&mut codec);
+    let error = json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": SESSION_ID,
+            "update": {
+                "sessionUpdate": "session_info_update",
+                "_meta": {
+                    "jetbrains": {"air": {"version": 1, "sessionFailure": session_failure("error")}}
+                }
+            }
+        }
+    });
+
+    assert!(matches!(
+        codec.decode_frame(error.to_string().as_bytes()),
+        Err(AcpV1CodecError::InvalidCodexSessionFailure(
+            "error used a non-terminal session_info_update carrier"
+        ))
+    ));
+    assert_eq!(codec.phase(), AcpV1ProtocolPhase::Terminal);
+}
+
+#[test]
+fn codex_warning_requires_session_info_update_carrier() {
+    let mut codec = codex_codec();
+    initialize_codex(&mut codec);
+    open_session(&mut codec);
+    start_prompt(&mut codec);
+    let wrong_carrier = json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": SESSION_ID,
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "retrying"},
+                "_meta": {
+                    "jetbrains": {"air": {"version": 1, "sessionFailure": session_failure("warning")}}
+                }
+            }
+        }
+    });
+
+    assert!(matches!(
+        codec.decode_frame(wrong_carrier.to_string().as_bytes()),
+        Err(AcpV1CodecError::InvalidCodexSessionFailure(
+            "failure notification used a non-session_info_update carrier"
+        ))
+    ));
+    assert_eq!(codec.phase(), AcpV1ProtocolPhase::Terminal);
+}
+
+#[test]
+fn codex_session_failure_schema_drift_fails_closed() {
+    let mut malformed_failures = vec![
+        json!({
+            "id": "turn-1:error", "revision": 1, "category": "future",
+            "severity": "error", "title": "failed", "actions": []
+        }),
+        json!({
+            "id": "turn-1:error", "revision": 1, "category": "service",
+            "severity": "fatal", "title": "failed", "actions": []
+        }),
+        json!({
+            "id": "turn-1:error", "revision": 0, "category": "service",
+            "severity": "error", "title": "failed", "actions": []
+        }),
+        json!({
+            "id": "turn-1:error", "revision": 1, "category": "service",
+            "severity": "error", "actions": []
+        }),
+        json!({
+            "id": "turn-1:error", "revision": 1, "category": "service",
+            "severity": "error", "title": "failed", "actions": [], "source": "provider"
+        }),
+        json!({
+            "id": "turn-1:error", "revision": 1, "category": "service",
+            "severity": "error", "title": "failed", "actions": ["future"]
+        }),
+        json!({
+            "id": "x".repeat(1025), "revision": 1, "category": "service",
+            "severity": "error", "title": "failed", "actions": []
+        }),
+    ];
+    malformed_failures.push(
+        serde_json::from_str(
+            r#"{"id":"turn-1:error","revision":18446744073709551616,"category":"service","severity":"error","title":"failed","actions":[]}"#,
+        )
+        .unwrap(),
+    );
+    for failure in malformed_failures {
+        let mut codec = codex_codec();
+        initialize_codex(&mut codec);
+        open_session(&mut codec);
+        start_prompt(&mut codec);
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": "cosh-acp-3",
+            "result": {
+                "stopReason": "end_turn",
+                "_meta": {"jetbrains": {"air": {"version": 1, "sessionFailure": failure}}}
+            }
+        });
+        assert!(matches!(
+            codec.decode_frame(response.to_string().as_bytes()),
+            Err(AcpV1CodecError::InvalidCodexSessionFailure(_))
+        ));
+        assert_eq!(codec.phase(), AcpV1ProtocolPhase::Terminal);
+    }
+}
+
+#[test]
+fn codex_session_failure_outer_drift_fails_closed() {
+    for meta in [
+        json!({"jetbrains": {"sessionFailure": session_failure("error")}}),
+        json!({"jetbrains": {"air": {
+            "version": 2, "sessionFailure": session_failure("error")
+        }}}),
+        json!({"jetbrains": {"air": {
+            "version": 1, "sessionFailure": session_failure("error"), "extra": true
+        }}}),
+    ] {
+        let mut codec = codex_codec();
+        initialize_codex(&mut codec);
+        open_session(&mut codec);
+        start_prompt(&mut codec);
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": "cosh-acp-3",
+            "result": {"stopReason": "end_turn", "_meta": meta}
+        });
+
+        assert!(matches!(
+            codec.decode_frame(response.to_string().as_bytes()),
+            Err(AcpV1CodecError::InvalidCodexSessionFailure(_))
+        ));
+        assert_eq!(codec.phase(), AcpV1ProtocolPhase::Terminal);
+    }
 }
 
 #[test]
@@ -470,6 +826,38 @@ fn permission_response_is_bound_to_offered_option() {
 }
 
 #[test]
+fn callback_digest_binds_extension_metadata_and_request_id_type() {
+    fn decode_callback(id: Value, marker: &str) -> AcpV1PermissionRequest {
+        let mut codec = codec();
+        initialize(&mut codec, json!({}));
+        open_session(&mut codec);
+        start_prompt(&mut codec);
+        let mut callback = permission_request(id);
+        callback["params"]["_meta"] = json!({
+            "codex": {"permission": {"marker": marker}}
+        });
+        let AcpV1Observation::PermissionRequested(request) =
+            codec.decode_frame(callback.to_string().as_bytes()).unwrap()
+        else {
+            panic!("expected permission request");
+        };
+        request
+    }
+
+    let first = decode_callback(json!(1), "first");
+    let different_meta = decode_callback(json!(1), "second");
+    let string_id = decode_callback(json!("1"), "first");
+    assert_ne!(
+        first.callback_payload_digest,
+        different_meta.callback_payload_digest
+    );
+    assert_ne!(
+        first.callback_payload_digest,
+        string_id.callback_payload_digest
+    );
+}
+
+#[test]
 fn batched_permission_responses_are_emitted_once_in_source_order() {
     let mut codec = codec();
     initialize(&mut codec, json!({}));
@@ -734,6 +1122,39 @@ fn prompt_cannot_finish_with_pending_permission() {
 }
 
 #[test]
+fn cancelled_prompt_reports_and_clears_pending_permissions() {
+    let mut codec = codec();
+    initialize(&mut codec, json!({}));
+    open_session(&mut codec);
+    start_prompt(&mut codec);
+    codec
+        .decode_frame(permission_request(json!(41)).to_string().as_bytes())
+        .unwrap();
+    let result = json!({
+        "jsonrpc": "2.0",
+        "id": "cosh-acp-3",
+        "result": { "stopReason": "cancelled" }
+    });
+
+    assert_eq!(
+        codec.decode_frame(result.to_string().as_bytes()).unwrap(),
+        AcpV1Observation::PromptCancelledWithPendingPermissions {
+            session_id: SESSION_ID.to_owned(),
+            request_ids: vec![AcpV1RequestId::Number(41)],
+        }
+    );
+
+    // The cancelled callback cannot receive a late decision or be replayed.
+    assert!(matches!(
+        codec.permission_response_frames(
+            &AcpV1RequestId::Number(41),
+            AcpV1PermissionDecision::Cancelled,
+        ),
+        Err(AcpV1CodecError::UnknownPermissionRequest(_))
+    ));
+}
+
+#[test]
 fn pending_agent_callback_count_is_bounded() {
     let mut codec = codec();
     initialize(&mut codec, json!({}));
@@ -848,6 +1269,65 @@ done
     assert_eq!(batch_reply.len(), 1);
     assert_eq!(batch_reply[0]["id"], Value::Null);
     assert_eq!(batch_reply[0]["error"]["code"], -32600);
+}
+
+#[cfg(unix)]
+#[test]
+fn bridge_reports_codex_typed_terminal_failure_after_partial_text() {
+    let workspace = tempfile::tempdir().unwrap();
+    let script = r#"
+step=0
+while IFS= read -r line; do
+    step=$((step + 1))
+    case "$step" in
+        1)
+            printf '%s\n' '{"jsonrpc":"2.0","id":"cosh-acp-1","result":{"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":"@agentclientprotocol/codex-acp","title":"Codex","version":"1.6.2"},"_meta":{"jetbrains":{"air":{"version":1,"capabilities":["sessionFailure","agentFileChangeReport"]}}}}}'
+            ;;
+        2)
+            printf '%s\n' '{"jsonrpc":"2.0","id":"cosh-acp-2","result":{"sessionId":"agent-session-1"}}'
+            ;;
+        3)
+            printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"agent-session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"partial"}}}}'
+            printf '%s\n' '{"jsonrpc":"2.0","id":"cosh-acp-3","result":{"stopReason":"end_turn","_meta":{"jetbrains":{"air":{"version":1,"sessionFailure":{"id":"turn-1:error","revision":1,"category":"service","severity":"error","title":"provider failed","actions":["retry"]}}}}}}'
+            ;;
+    esac
+done
+"#;
+    let mut spec = RuntimeLaunchSpec::new("/bin/sh", workspace.path());
+    spec.arguments = vec!["-c".into(), script.into()];
+    let mut bridge = AcpV1RuntimeBridge::launch(
+        &spec,
+        AcpV1ClientConfig::new("cosh-ng", "0.15.0", FRAME_LIMIT)
+            .adapter_profile(AcpV1AdapterProfile::Codex162),
+    )
+    .unwrap();
+
+    bridge.send_initialize().unwrap();
+    assert!(matches!(
+        bridge.read_observation().unwrap(),
+        Some(AcpV1Observation::Initialized { .. })
+    ));
+    bridge
+        .send_new_session(workspace.path(), Vec::new())
+        .unwrap();
+    assert!(matches!(
+        bridge.read_observation().unwrap(),
+        Some(AcpV1Observation::SessionOpened { .. })
+    ));
+    bridge.send_prompt("test typed failure").unwrap();
+    assert!(matches!(
+        bridge.read_observation().unwrap(),
+        Some(AcpV1Observation::SessionUpdate { .. })
+    ));
+    assert!(matches!(
+        bridge.read_observation().unwrap(),
+        Some(AcpV1Observation::RequestFailed {
+            request: AcpV1RequestKind::Prompt,
+            code: -32000,
+            ..
+        })
+    ));
+    bridge.shutdown(Duration::from_secs(1)).unwrap();
 }
 
 #[cfg(unix)]

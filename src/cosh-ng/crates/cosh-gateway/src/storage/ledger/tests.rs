@@ -1169,81 +1169,28 @@ fn provider_permission(
         turn_id: TurnId::new(),
         tool_use_id: Some(ToolUseId::new()),
         request_id: approval.request_id.clone(),
+        callback: Some(
+            cosh_gateway_contracts::runtime::ProviderPermissionCallbackV2 {
+                provider_session_digest: digest('a'),
+                provider_request_id_digest: digest('b'),
+                provider_tool_call_id_digest: digest('c'),
+                ordered_option_set_digest: digest('d'),
+                callback_payload_digest: digest('e'),
+                normalized_operation_digest: approval.operation_digest.clone(),
+            },
+        ),
     }
 }
 
-fn mark_waiting_approval(
-    store: &mut SqliteTaskStore,
-    actor_id: &ActorId,
-    approval: &ApprovalRecord,
-) {
-    let mut correlation = Correlation::new(InstallationId::new());
-    correlation.actor_id = Some(actor_id.clone());
-    correlation.task_id = Some(approval.task_id.clone());
-    correlation.run_id = Some(approval.run_id.clone());
-    let event = TaskEventEnvelope {
-        header: ContractHeader::new(ContractSchema::TaskEvent, MessageId::new(), 12, correlation),
+fn provider_approval_request(approval: &ApprovalRecord) -> ApprovalRequest {
+    ApprovalRequest {
+        approval_id: approval.approval_id.clone(),
+        request_id: approval.request_id.clone(),
         task_id: approval.task_id.clone(),
-        revision: 4,
-        event: TaskEvent::ApprovalRequested {
-            approval: cosh_gateway_contracts::capability::ApprovalRequest {
-                approval_id: approval.approval_id.clone(),
-                request_id: approval.request_id.clone(),
-                task_id: approval.task_id.clone(),
-                run_id: approval.run_id.clone(),
-                summary: BoundedText::new("approve provider tool").unwrap(),
-                expires_at_ms: approval.expires_at_ms,
-            },
-        },
-    };
-    store
-        .commit_task(&TaskCommit {
-            actor_id: actor_id.clone(),
-            idempotency_key: IdempotencyKey::new(format!("wait-{}", approval.approval_id.as_str()))
-                .unwrap(),
-            command_digest: digest('f'),
-            expected_revision: Some(3),
-            events: vec![event],
-            outbox: Vec::new(),
-            committed_at_ms: 12,
-        })
-        .unwrap();
-}
-
-fn mark_approval_resolved(
-    store: &mut SqliteTaskStore,
-    actor_id: &ActorId,
-    approval: &ApprovalRecord,
-    decision: ApprovalDecision,
-) {
-    let mut correlation = Correlation::new(InstallationId::new());
-    correlation.actor_id = Some(actor_id.clone());
-    correlation.task_id = Some(approval.task_id.clone());
-    correlation.run_id = Some(approval.run_id.clone());
-    let event = TaskEventEnvelope {
-        header: ContractHeader::new(ContractSchema::TaskEvent, MessageId::new(), 20, correlation),
-        task_id: approval.task_id.clone(),
-        revision: 5,
-        event: TaskEvent::ApprovalResolved {
-            approval_id: approval.approval_id.clone(),
-            decision,
-        },
-    };
-    store
-        .commit_task(&TaskCommit {
-            actor_id: actor_id.clone(),
-            idempotency_key: IdempotencyKey::new(format!(
-                "resolved-{}",
-                approval.approval_id.as_str()
-            ))
-            .unwrap(),
-            command_digest: digest('e'),
-            expected_revision: Some(4),
-            events: vec![event],
-            outbox: Vec::new(),
-            committed_at_ms: 20,
-        })
-        .unwrap();
+        run_id: approval.run_id.clone(),
+        summary: BoundedText::new("approve provider tool").unwrap(),
+        expires_at_ms: approval.expires_at_ms,
+    }
 }
 
 #[test]
@@ -1269,16 +1216,6 @@ fn provider_permission_resolution_is_exact_and_dispatch_start_is_not_replayed() 
             &lease,
         )
         .unwrap();
-    store
-        .record_runtime_sequence(
-            &binding.binding_id,
-            &binding.runtime_instance_id,
-            binding.runtime_generation,
-            1,
-            11,
-            &lease,
-        )
-        .unwrap();
     let mut approval = approval(&actor_id, &task_id, &run_id);
     approval.created_at_ms = 12;
     approval.updated_at_ms = 12;
@@ -1291,11 +1228,30 @@ fn provider_permission_resolution_is_exact_and_dispatch_start_is_not_replayed() 
     store
         .create_provider_approval(
             &command(&actor_id, "provider-pending", '5', 12),
+            &provider_approval_request(&approval),
             &approval,
+            &binding,
             &lease,
         )
         .unwrap();
-    mark_waiting_approval(&mut store, &actor_id, &approval);
+    let waiting = store.load_task(&task_id).unwrap();
+    assert_eq!(waiting.state(), TaskState::WaitingApproval);
+    assert_eq!(waiting.revision(), 4);
+    let durable_request_rows = store
+        .connection()
+        .query_row(
+            "SELECT (
+                 SELECT COUNT(*) FROM task_events
+                 WHERE task_id=?1 AND event_type='approval_requested'
+             ) + (
+                 SELECT COUNT(*) FROM outbox
+                 WHERE task_id=?1 AND delivery_kind='provider_approval_request'
+             )",
+            params![task_id.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(durable_request_rows, 2);
 
     let resolved = store
         .resolve_provider_permission(
@@ -1310,6 +1266,19 @@ fn provider_permission_resolution_is_exact_and_dispatch_start_is_not_replayed() 
     let LedgerOutcome::Applied(prepared) = resolved else {
         panic!("provider resolution must apply")
     };
+    let running = store.load_task(&task_id).unwrap();
+    assert_eq!(running.state(), TaskState::Running);
+    assert_eq!(running.revision(), 5);
+    let resolved_events = store
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM task_events
+             WHERE task_id=?1 AND event_type='approval_resolved'",
+            params![task_id.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(resolved_events, 1);
     assert_eq!(prepared.state, ProviderPermissionDispatchState::Prepared);
     assert_eq!(
         prepared.decision,
@@ -1324,7 +1293,6 @@ fn provider_permission_resolution_is_exact_and_dispatch_start_is_not_replayed() 
         0
     );
 
-    mark_approval_resolved(&mut store, &actor_id, &approval, ApprovalDecision::Approve);
     let start_command = command(&actor_id, "provider-start", '7', 21);
     let started = store
         .start_provider_permission_dispatch(&start_command, &approval.approval_id, 1, &lease)
@@ -1332,7 +1300,7 @@ fn provider_permission_resolution_is_exact_and_dispatch_start_is_not_replayed() 
     assert!(matches!(
         started,
         LedgerOutcome::Applied(ProviderPermissionDispatchRecord {
-            state: ProviderPermissionDispatchState::Started,
+            state: ProviderPermissionDispatchState::WriteStarted,
             ..
         })
     ));
@@ -1341,7 +1309,7 @@ fn provider_permission_resolution_is_exact_and_dispatch_start_is_not_replayed() 
             .start_provider_permission_dispatch(&start_command, &approval.approval_id, 1, &lease)
             .unwrap(),
         LedgerOutcome::Replayed(ProviderPermissionDispatchRecord {
-            state: ProviderPermissionDispatchState::Started,
+            state: ProviderPermissionDispatchState::WriteStarted,
             ..
         })
     ));
@@ -1353,6 +1321,246 @@ fn provider_permission_resolution_is_exact_and_dispatch_start_is_not_replayed() 
             &lease,
         )
         .is_err());
+}
+
+#[test]
+fn provider_approval_event_failure_rolls_back_the_record_and_outbox() {
+    let mut store = SqliteTaskStore::open_in_memory().unwrap();
+    let actor_id = ActorId::new();
+    let run_id = RunId::new();
+    let task_id = create_task(&mut store, &actor_id, &run_id);
+    let lease = acquire_lease(
+        &mut store,
+        &actor_id,
+        &task_id,
+        &run_id,
+        "provider-create-rollback",
+        5,
+        100,
+    );
+    let binding = runtime_binding(&task_id, &run_id, lease.generation);
+    store
+        .bind_runtime(
+            &command(&actor_id, "provider-create-rollback-bind", '1', 10),
+            &binding,
+            &lease,
+        )
+        .unwrap();
+    let mut approval = approval(&actor_id, &task_id, &run_id);
+    approval.created_at_ms = 12;
+    approval.updated_at_ms = 12;
+    approval.permission = Some(provider_permission(&approval, &binding, 1));
+    store
+        .connection()
+        .execute_batch(
+            "CREATE TEMP TRIGGER fail_provider_approval_event
+             BEFORE INSERT ON task_events
+             WHEN NEW.event_type='approval_requested'
+             BEGIN SELECT RAISE(ABORT, 'injected approval event failure'); END;",
+        )
+        .unwrap();
+
+    assert!(store
+        .create_provider_approval(
+            &command(&actor_id, "provider-create-rollback", '2', 12),
+            &provider_approval_request(&approval),
+            &approval,
+            &binding,
+            &lease,
+        )
+        .is_err());
+    assert_eq!(
+        store.load_task(&task_id).unwrap().state(),
+        TaskState::Running
+    );
+    assert_eq!(
+        store
+            .load_runtime_binding_record(&binding.binding_id)
+            .unwrap()
+            .last_sequence,
+        0
+    );
+    let rows = store
+        .connection()
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM approvals WHERE approval_id=?1)
+                  + (SELECT COUNT(*) FROM outbox WHERE task_id=?2)
+                  + (SELECT COUNT(*) FROM task_events
+                     WHERE task_id=?2 AND event_type='approval_requested')",
+            params![approval.approval_id.as_str(), task_id.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 0);
+}
+
+#[test]
+fn provider_dispatch_insert_failure_rolls_back_the_decision_and_task_event() {
+    let mut store = SqliteTaskStore::open_in_memory().unwrap();
+    let actor_id = ActorId::new();
+    let run_id = RunId::new();
+    let task_id = create_task(&mut store, &actor_id, &run_id);
+    let lease = acquire_lease(
+        &mut store,
+        &actor_id,
+        &task_id,
+        &run_id,
+        "provider-resolve-rollback",
+        5,
+        100,
+    );
+    let binding = runtime_binding(&task_id, &run_id, lease.generation);
+    store
+        .bind_runtime(
+            &command(&actor_id, "provider-resolve-rollback-bind", '3', 10),
+            &binding,
+            &lease,
+        )
+        .unwrap();
+    let mut approval = approval(&actor_id, &task_id, &run_id);
+    approval.created_at_ms = 12;
+    approval.updated_at_ms = 12;
+    let permission = provider_permission(&approval, &binding, 1);
+    approval.permission = Some(permission.clone());
+    store
+        .create_provider_approval(
+            &command(&actor_id, "provider-resolve-rollback-create", '4', 12),
+            &provider_approval_request(&approval),
+            &approval,
+            &binding,
+            &lease,
+        )
+        .unwrap();
+    store
+        .connection()
+        .execute_batch(
+            "CREATE TEMP TRIGGER fail_provider_dispatch_insert
+             BEFORE INSERT ON provider_permission_dispatches
+             BEGIN SELECT RAISE(ABORT, 'injected dispatch failure'); END;",
+        )
+        .unwrap();
+
+    assert!(store
+        .resolve_provider_permission(
+            &command(&actor_id, "provider-resolve-rollback", '5', 20),
+            &approval.approval_id,
+            1,
+            ApprovalResolution::Decide(ApprovalDecision::Approve),
+            &permission,
+            &lease,
+        )
+        .is_err());
+    assert_eq!(
+        store
+            .load_approval_record(&approval.approval_id)
+            .unwrap()
+            .state,
+        ApprovalState::Pending
+    );
+    assert_eq!(
+        store.load_task(&task_id).unwrap().state(),
+        TaskState::WaitingApproval
+    );
+    let resolved_rows = store
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM task_events
+             WHERE task_id=?1 AND event_type='approval_resolved'",
+            params![task_id.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(resolved_rows, 0);
+}
+
+#[test]
+fn provider_abandonment_atomically_closes_the_exact_callback_and_sequence() {
+    let mut store = SqliteTaskStore::open_in_memory().unwrap();
+    let actor_id = ActorId::new();
+    let run_id = RunId::new();
+    let task_id = create_task(&mut store, &actor_id, &run_id);
+    let lease = acquire_lease(
+        &mut store,
+        &actor_id,
+        &task_id,
+        &run_id,
+        "provider-abandon",
+        5,
+        100,
+    );
+    let binding = runtime_binding(&task_id, &run_id, lease.generation);
+    store
+        .bind_runtime(
+            &command(&actor_id, "provider-abandon-bind", '6', 10),
+            &binding,
+            &lease,
+        )
+        .unwrap();
+    let mut approval = approval(&actor_id, &task_id, &run_id);
+    approval.created_at_ms = 12;
+    approval.updated_at_ms = 12;
+    let permission = provider_permission(&approval, &binding, 1);
+    approval.permission = Some(permission.clone());
+    store
+        .create_provider_approval(
+            &command(&actor_id, "provider-abandon-create", '7', 12),
+            &provider_approval_request(&approval),
+            &approval,
+            &binding,
+            &lease,
+        )
+        .unwrap();
+
+    assert!(store
+        .abandon_provider_permission(
+            &command(&actor_id, "provider-abandon-wrong-sequence", '8', 13),
+            &approval.approval_id,
+            &permission,
+            &binding,
+            3,
+            &lease,
+            ApprovalAbandonCause::ProviderCancelled,
+        )
+        .is_err());
+    let abandoned = store
+        .abandon_provider_permission(
+            &command(&actor_id, "provider-abandon-exact", '9', 13),
+            &approval.approval_id,
+            &permission,
+            &binding,
+            2,
+            &lease,
+            ApprovalAbandonCause::ProviderCancelled,
+        )
+        .unwrap();
+    assert!(matches!(
+        abandoned,
+        LedgerOutcome::Applied(ApprovalRecord {
+            state: ApprovalState::Cancelled,
+            ..
+        })
+    ));
+    assert_eq!(
+        store.load_task(&task_id).unwrap().state(),
+        TaskState::Running
+    );
+    assert_eq!(
+        store
+            .load_runtime_binding_record(&binding.binding_id)
+            .unwrap()
+            .last_sequence,
+        2
+    );
+    let abandoned_events = store
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM task_events
+             WHERE task_id=?1 AND event_type='approval_abandoned'",
+            params![task_id.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(abandoned_events, 1);
 }
 
 #[test]
@@ -1378,16 +1586,6 @@ fn provider_permission_rejects_wrong_turn_actor_and_generation() {
             &lease,
         )
         .unwrap();
-    store
-        .record_runtime_sequence(
-            &binding.binding_id,
-            &binding.runtime_instance_id,
-            binding.runtime_generation,
-            1,
-            11,
-            &lease,
-        )
-        .unwrap();
     let mut approval = approval(&actor_id, &task_id, &run_id);
     approval.created_at_ms = 12;
     approval.updated_at_ms = 12;
@@ -1398,7 +1596,9 @@ fn provider_permission_rejects_wrong_turn_actor_and_generation() {
     assert!(matches!(
         store.create_provider_approval(
             &command(&actor_id, "provider-unrecorded-sequence", '9', 12),
+            &provider_approval_request(&future_callback),
             &future_callback,
+            &binding,
             &lease,
         ),
         Err(StoreError::LedgerConflict { .. })
@@ -1406,11 +1606,12 @@ fn provider_permission_rejects_wrong_turn_actor_and_generation() {
     store
         .create_provider_approval(
             &command(&actor_id, "provider-fence-pending", 'a', 12),
+            &provider_approval_request(&approval),
             &approval,
+            &binding,
             &lease,
         )
         .unwrap();
-    mark_waiting_approval(&mut store, &actor_id, &approval);
 
     let mut wrong_turn = permission.clone();
     wrong_turn.turn_id = TurnId::new();
@@ -1478,16 +1679,6 @@ fn provider_approval_expiry_is_deadline_fenced_and_idempotent() {
             &lease,
         )
         .unwrap();
-    store
-        .record_runtime_sequence(
-            &binding.binding_id,
-            &binding.runtime_instance_id,
-            binding.runtime_generation,
-            1,
-            11,
-            &lease,
-        )
-        .unwrap();
     let mut approval = approval(&actor_id, &task_id, &run_id);
     approval.created_at_ms = 12;
     approval.updated_at_ms = 12;
@@ -1497,11 +1688,12 @@ fn provider_approval_expiry_is_deadline_fenced_and_idempotent() {
     store
         .create_provider_approval(
             &command(&actor_id, "provider-expiry-pending", 'f', 12),
+            &provider_approval_request(&approval),
             &approval,
+            &binding,
             &lease,
         )
         .unwrap();
-    mark_waiting_approval(&mut store, &actor_id, &approval);
 
     assert!(matches!(
         store.expire_provider_approval(
@@ -1668,7 +1860,7 @@ fn run_scoped_recovery_does_not_mutate_another_run() {
             .load_provider_permission_dispatch_record(&first.approval_id)
             .unwrap()
             .state,
-        ProviderPermissionDispatchState::Unknown
+        ProviderPermissionDispatchState::Abandoned
     );
     assert_eq!(
         store
@@ -1677,6 +1869,106 @@ fn run_scoped_recovery_does_not_mutate_another_run() {
             .state,
         ProviderPermissionDispatchState::Prepared
     );
+}
+
+#[test]
+fn restart_marks_only_active_written_provider_responses_unknown() {
+    let mut store = SqliteTaskStore::open_in_memory().unwrap();
+    let actor_id = ActorId::new();
+    let active_run = RunId::new();
+    let terminal_run = RunId::new();
+    let active_task = create_task(&mut store, &actor_id, &active_run);
+    let terminal_task = create_task(&mut store, &actor_id, &terminal_run);
+    append_task_event(
+        &mut store,
+        &actor_id,
+        &terminal_task,
+        4,
+        "terminal-run-succeeded",
+        2,
+        TaskEvent::RunSucceeded {
+            run_id: terminal_run.clone(),
+        },
+    );
+    append_task_event(
+        &mut store,
+        &actor_id,
+        &terminal_task,
+        5,
+        "terminal-task-succeeded",
+        3,
+        TaskEvent::TaskSucceeded,
+    );
+
+    let rows = [
+        (
+            ApprovalId::new(),
+            RequestId::new(),
+            &active_task,
+            &active_run,
+        ),
+        (
+            ApprovalId::new(),
+            RequestId::new(),
+            &terminal_task,
+            &terminal_run,
+        ),
+    ];
+    for (approval_id, request_id, task_id, run_id) in &rows {
+        store
+            .connection()
+            .execute(
+                "INSERT INTO approvals(
+                     approval_id, request_id, actor_id, task_id, run_id, target_json,
+                     operation_digest, input_digest, state, revision, expires_at_ms,
+                     decided_by_actor_id, created_at_ms, updated_at_ms,
+                     permission_ref_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, '{}', ?6, ?6, 'approved', 2, 100,
+                         ?3, 1, 1, '{}')",
+                params![
+                    approval_id.as_str(),
+                    request_id.as_str(),
+                    actor_id.as_str(),
+                    task_id.as_str(),
+                    run_id.as_str(),
+                    digest('7').as_str(),
+                ],
+            )
+            .unwrap();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO provider_permission_dispatches(
+                     approval_id, actor_id, task_id, run_id, permission_ref_json,
+                     decision, state, revision, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, '{}', 'allow_once', 'written', 3, 1, 1)",
+                params![
+                    approval_id.as_str(),
+                    actor_id.as_str(),
+                    task_id.as_str(),
+                    run_id.as_str(),
+                ],
+            )
+            .unwrap();
+    }
+
+    let report = store.recover_gateway(10).unwrap();
+    assert_eq!(report.permission_dispatches_unknown, 1);
+    assert_eq!(report.permission_dispatches_abandoned, 0);
+    let states = rows
+        .iter()
+        .map(|(approval_id, _, _, _)| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT state FROM provider_permission_dispatches WHERE approval_id=?1",
+                    params![approval_id.as_str()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(states, ["unknown", "written"]);
 }
 
 #[test]

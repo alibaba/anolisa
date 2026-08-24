@@ -1,5 +1,4 @@
 impl SqliteTaskStore {
-
     /// Creates a pending approval bound to an actor, Task, Run, target, and digests.
     pub fn create_approval(
         &mut self,
@@ -35,7 +34,9 @@ impl SqliteTaskStore {
     pub fn create_provider_approval(
         &mut self,
         command: &LedgerCommand,
+        approval_request: &ApprovalRequest,
         approval: &ApprovalRecord,
+        binding: &RuntimeBindingRef,
         lease: &LeaseClaim,
     ) -> Result<LedgerOutcome<ApprovalRecord>, StoreError> {
         validate_command(command)?;
@@ -44,21 +45,100 @@ impl SqliteTaskStore {
             .permission
             .as_ref()
             .ok_or_else(|| conflict("provider approval is missing its Runtime permission"))?;
+        if approval_request.approval_id != approval.approval_id
+            || approval_request.request_id != approval.request_id
+            || approval_request.task_id != approval.task_id
+            || approval_request.run_id != approval.run_id
+            || approval_request.expires_at_ms != approval.expires_at_ms
+        {
+            return Err(conflict(
+                "provider approval request and durable record differ",
+            ));
+        }
         let transaction = immediate(self)?;
         if let Some(replayed) = replay(&transaction, command, "create_provider_approval")? {
             transaction.commit()?;
             return Ok(LedgerOutcome::Replayed(replayed));
         }
         validate_initial_approval(command, approval)?;
-        require_provider_permission_context(
+        validate_permission_binding(approval, permission)?;
+        let callback = permission.callback.as_ref().ok_or_else(|| {
+            conflict("legacy provider permission binding cannot regain dispatch authority")
+        })?;
+        if approval.actor_id != command.actor_id
+            || approval.permission.as_ref() != Some(permission)
+            || callback.normalized_operation_digest != approval.operation_digest
+            || lease.task_id != approval.task_id
+            || lease.run_id != approval.run_id
+            || lease.generation != permission.runtime_generation
+            || binding.binding_id != permission.binding_id
+            || binding.task_id != approval.task_id
+            || binding.run_id != approval.run_id
+            || binding.runtime_generation != permission.runtime_generation
+        {
+            return Err(conflict(
+                "provider permission admission binding does not match",
+            ));
+        }
+        require_current_lease(
             &transaction,
-            command,
-            approval,
-            permission,
             lease,
-            TaskState::Running,
+            &command.actor_id,
+            command.committed_at_ms,
         )?;
+        let task = load_authoritative_task(&transaction, &approval.task_id)?;
+        if task.state() != TaskState::Running || task.cancellation_requested() {
+            return Err(conflict(
+                "provider permission Task is not running for admission",
+            ));
+        }
+        let runtime = load_runtime_binding(&transaction, &permission.binding_id)?;
+        let expected_sequence = next_integer(runtime.last_sequence, "Runtime sequence")?;
+        if runtime.binding != *binding
+            || runtime.actor_id != command.actor_id
+            || runtime.state != RuntimeBindingState::Active
+            || permission.event_sequence != expected_sequence
+        {
+            return Err(conflict(
+                "provider permission callback is not the next live Runtime event",
+            ));
+        }
+        require_not_before(
+            command.committed_at_ms,
+            runtime.updated_at_ms,
+            "provider permission admission",
+        )?;
+        let sequence_changed = transaction.execute(
+            "UPDATE runtime_bindings SET last_sequence=?2, updated_at_ms=?3
+             WHERE binding_id=?1 AND state='active' AND runtime_instance_id=?4
+               AND runtime_generation=?5 AND last_sequence=?6",
+            params![
+                binding.binding_id.as_str(),
+                integer(permission.event_sequence, "Runtime permission sequence")?,
+                integer(command.committed_at_ms, "provider permission timestamp")?,
+                binding.runtime_instance_id.as_str(),
+                integer(binding.runtime_generation, "Runtime generation")?,
+                integer(runtime.last_sequence, "Runtime prior sequence")?,
+            ],
+        )?;
+        if sequence_changed != 1 {
+            return Err(conflict(
+                "provider permission admission lost its Runtime sequence precondition",
+            ));
+        }
         insert_approval(&transaction, approval, command.committed_at_ms)?;
+        let delivery_kind = BoundedName::new("provider_approval_request")
+            .map_err(|_| corrupt("static provider approval route is invalid"))?;
+        append_internal_task_event(
+            &transaction,
+            &approval.task_id,
+            &approval.actor_id,
+            command.committed_at_ms,
+            TaskEvent::ApprovalRequested {
+                approval: approval_request.clone(),
+            },
+            Some((delivery_kind, serde_json::to_value(approval_request)?)),
+        )?;
         insert_receipt(&transaction, command, "create_provider_approval", approval)?;
         transaction.commit()?;
         Ok(LedgerOutcome::Applied(approval.clone()))
@@ -195,22 +275,24 @@ impl SqliteTaskStore {
             ));
         }
 
-        let (approval_state, decided_by, dispatch_decision) = match resolution {
+        let (approval_state, decided_by, decision, dispatch_decision) = match resolution {
             ApprovalResolution::Decide(ApprovalDecision::Approve) => (
                 ApprovalState::Approved,
                 Some(command.actor_id.clone()),
+                ApprovalDecision::Approve,
                 ProviderPermissionDispatchDecision::AllowOnce,
             ),
             ApprovalResolution::Decide(ApprovalDecision::Deny) => (
                 ApprovalState::Denied,
                 Some(command.actor_id.clone()),
+                ApprovalDecision::Deny,
                 ProviderPermissionDispatchDecision::Deny,
             ),
-            ApprovalResolution::Cancel => (
-                ApprovalState::Cancelled,
-                None,
-                ProviderPermissionDispatchDecision::Deny,
-            ),
+            ApprovalResolution::Cancel => {
+                return Err(conflict(
+                    "provider permission cancellation requires exact abandonment",
+                ));
+            }
         };
         approval.state = approval_state;
         approval.revision = next_integer(approval.revision, "approval revision")?;
@@ -233,6 +315,18 @@ impl SqliteTaskStore {
                 "provider approval resolution lost its pending revision",
             ));
         }
+
+        append_internal_task_event(
+            &transaction,
+            &approval.task_id,
+            &approval.actor_id,
+            command.committed_at_ms,
+            TaskEvent::ApprovalResolved {
+                approval_id: approval_id.clone(),
+                decision,
+            },
+            None,
+        )?;
 
         let dispatch = ProviderPermissionDispatchRecord {
             approval_id: approval_id.clone(),
@@ -334,6 +428,120 @@ impl SqliteTaskStore {
         Ok(LedgerOutcome::Applied(approval))
     }
 
+    /// Atomically abandons one exact provider callback and advances its Runtime sequence.
+    ///
+    /// No provider response is prepared. The callback's live binding must
+    /// still be current, and the abandonment event must be the next sequence
+    /// emitted by that exact Runtime instance.
+    pub fn abandon_provider_permission(
+        &mut self,
+        command: &LedgerCommand,
+        approval_id: &ApprovalId,
+        expected_permission: &RuntimePermissionRef,
+        binding: &RuntimeBindingRef,
+        abandoned_event_sequence: u64,
+        lease: &LeaseClaim,
+        cause: ApprovalAbandonCause,
+    ) -> Result<LedgerOutcome<ApprovalRecord>, StoreError> {
+        validate_command(command)?;
+        integer(abandoned_event_sequence, "provider abandonment sequence")?;
+        let transaction = immediate(self)?;
+        if let Some(replayed) = replay(&transaction, command, "abandon_provider_permission")? {
+            transaction.commit()?;
+            return Ok(LedgerOutcome::Replayed(replayed));
+        }
+        let mut approval = load_approval(&transaction, approval_id)?;
+        require_provider_permission_context(
+            &transaction,
+            command,
+            &approval,
+            expected_permission,
+            lease,
+            TaskState::WaitingApproval,
+        )?;
+        if approval.state != ApprovalState::Pending {
+            return Err(conflict("provider approval is no longer pending"));
+        }
+        let runtime = load_runtime_binding(&transaction, &expected_permission.binding_id)?;
+        let next_sequence = next_integer(runtime.last_sequence, "Runtime sequence")?;
+        if runtime.binding != *binding
+            || runtime.actor_id != command.actor_id
+            || runtime.state != RuntimeBindingState::Active
+            || binding.binding_id != expected_permission.binding_id
+            || binding.task_id != approval.task_id
+            || binding.run_id != approval.run_id
+            || binding.runtime_generation != expected_permission.runtime_generation
+            || abandoned_event_sequence != next_sequence
+        {
+            return Err(conflict(
+                "provider abandonment does not match the next live Runtime event",
+            ));
+        }
+        require_not_before(
+            command.committed_at_ms,
+            runtime.updated_at_ms,
+            "provider abandonment",
+        )?;
+        let sequence_changed = transaction.execute(
+            "UPDATE runtime_bindings SET last_sequence=?2, updated_at_ms=?3
+             WHERE binding_id=?1 AND state='active' AND runtime_instance_id=?4
+               AND runtime_generation=?5 AND last_sequence=?6",
+            params![
+                binding.binding_id.as_str(),
+                integer(abandoned_event_sequence, "provider abandonment sequence")?,
+                integer(command.committed_at_ms, "provider abandonment timestamp")?,
+                binding.runtime_instance_id.as_str(),
+                integer(binding.runtime_generation, "Runtime generation")?,
+                integer(runtime.last_sequence, "Runtime prior sequence")?,
+            ],
+        )?;
+        if sequence_changed != 1 {
+            return Err(conflict(
+                "provider abandonment lost its Runtime sequence precondition",
+            ));
+        }
+        let prior_revision = approval.revision;
+        approval.state = ApprovalState::Cancelled;
+        approval.revision = next_integer(prior_revision, "approval revision")?;
+        approval.decided_by_actor_id = None;
+        approval.updated_at_ms = command.committed_at_ms;
+        let approval_changed = transaction.execute(
+            "UPDATE approvals SET state='cancelled', revision=?2,
+             decided_by_actor_id=NULL, updated_at_ms=?3
+             WHERE approval_id=?1 AND state='pending' AND revision=?4",
+            params![
+                approval_id.as_str(),
+                integer(approval.revision, "approval revision")?,
+                integer(command.committed_at_ms, "provider abandonment timestamp")?,
+                integer(prior_revision, "approval prior revision")?,
+            ],
+        )?;
+        if approval_changed != 1 {
+            return Err(conflict(
+                "provider abandonment lost its pending approval precondition",
+            ));
+        }
+        append_internal_task_event(
+            &transaction,
+            &approval.task_id,
+            &approval.actor_id,
+            command.committed_at_ms,
+            TaskEvent::ApprovalAbandoned {
+                approval_id: approval_id.clone(),
+                cause,
+            },
+            None,
+        )?;
+        insert_receipt(
+            &transaction,
+            command,
+            "abandon_provider_permission",
+            &approval,
+        )?;
+        transaction.commit()?;
+        Ok(LedgerOutcome::Applied(approval))
+    }
+
     /// Commits the non-replayable boundary before writing a provider response.
     ///
     /// Callers must write to the provider only for [`LedgerOutcome::Applied`].
@@ -374,7 +582,7 @@ impl SqliteTaskStore {
             dispatch.updated_at_ms,
             "provider permission dispatch start",
         )?;
-        dispatch.state = ProviderPermissionDispatchState::Started;
+        dispatch.state = ProviderPermissionDispatchState::WriteStarted;
         dispatch.revision = next_integer(dispatch.revision, "dispatch revision")?;
         dispatch.updated_at_ms = command.committed_at_ms;
         update_provider_permission_dispatch(
@@ -393,7 +601,10 @@ impl SqliteTaskStore {
         Ok(LedgerOutcome::Applied(dispatch))
     }
 
-    /// Records that the provider transport accepted a previously started response.
+    /// Records that the live provider transport write returned.
+    ///
+    /// This is not a provider acknowledgement and remains non-replayable after
+    /// the live Runtime session is lost.
     pub fn complete_provider_permission_dispatch(
         &mut self,
         command: &LedgerCommand,
@@ -409,7 +620,7 @@ impl SqliteTaskStore {
         let mut dispatch = load_provider_permission_dispatch(&transaction, approval_id)?;
         require_task_owner(&transaction, &dispatch.task_id, &command.actor_id)?;
         if dispatch.actor_id != command.actor_id
-            || dispatch.state != ProviderPermissionDispatchState::Started
+            || dispatch.state != ProviderPermissionDispatchState::WriteStarted
             || dispatch.revision != expected_revision
         {
             return Err(conflict(
@@ -421,10 +632,15 @@ impl SqliteTaskStore {
             dispatch.updated_at_ms,
             "provider permission dispatch completion",
         )?;
-        dispatch.state = ProviderPermissionDispatchState::Delivered;
+        dispatch.state = ProviderPermissionDispatchState::Written;
         dispatch.revision = next_integer(dispatch.revision, "dispatch revision")?;
         dispatch.updated_at_ms = command.committed_at_ms;
-        update_provider_permission_dispatch(&transaction, &dispatch, expected_revision, "started")?;
+        update_provider_permission_dispatch(
+            &transaction,
+            &dispatch,
+            expected_revision,
+            "write_started",
+        )?;
         insert_receipt(
             &transaction,
             command,

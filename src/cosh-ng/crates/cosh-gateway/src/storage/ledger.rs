@@ -1,8 +1,8 @@
 //! Durable approval, permit, execution, runtime binding, and run lease ledger.
 
 use cosh_gateway_contracts::capability::{
-    ApprovalDecision, BrokeredOperation, CapabilityRequest, DenialCode, ExecutionPermit,
-    RuntimeExecutionFence,
+    ApprovalDecision, ApprovalRequest, BrokeredOperation, CapabilityRequest, DenialCode,
+    ExecutionPermit, RuntimeExecutionFence,
 };
 use cosh_gateway_contracts::common::RuntimeBindingRef;
 use cosh_gateway_contracts::common::{
@@ -17,7 +17,9 @@ use cosh_gateway_contracts::runtime::{
     BrokeredExecutionDelivery, BrokeredExecutionOutcome, BrokeredExecutionRef,
     BrokeredOperationResult, RuntimeInputRequest, RuntimeInputResponse, RuntimePermissionRef,
 };
-use cosh_gateway_contracts::task::{ExecutionOutcome, TaskEvent, TaskState, UncertaintyCode};
+use cosh_gateway_contracts::task::{
+    ApprovalAbandonCause, ExecutionOutcome, TaskEvent, TaskState, UncertaintyCode,
+};
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};

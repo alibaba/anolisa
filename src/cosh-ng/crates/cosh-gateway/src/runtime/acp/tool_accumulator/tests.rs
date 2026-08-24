@@ -139,6 +139,143 @@ fn update_before_create_is_buffered_and_merged() {
 }
 
 #[test]
+fn permission_carrier_promotes_only_a_truly_absent_invocation() {
+    let carrier = json!({
+        "toolCallId": "call-1",
+        "title": "Read a file",
+        "kind": "read",
+        "status": "pending",
+        "rawInput": {"path": "README.md"}
+    });
+    let turn_id = TurnId::new();
+    let mut promoted = accumulator(1);
+    let snapshot = promoted
+        .promote_permission_carrier("session-1", &turn_id, &carrier)
+        .expect("complete carrier is promotable");
+    assert_eq!(snapshot.projection.revision, 1);
+    assert_eq!(snapshot.projection.status, ToolInvocationStatus::Pending);
+    assert_eq!(snapshot.tool_call["rawInput"]["path"], "README.md");
+
+    let mut buffered = accumulator(1);
+    assert!(matches!(
+        buffered.observe(
+            "session-1",
+            &turn_id,
+            &json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-1",
+                "rawInput": {"path": "substituted.md"}
+            })
+        ),
+        Ok(AcpToolAccumulation::Buffered { .. })
+    ));
+    assert!(matches!(
+        buffered.promote_permission_carrier("session-1", &turn_id, &carrier),
+        Err(AcpToolAccumulatorError::ConflictingCreate { .. })
+    ));
+}
+
+#[test]
+fn permission_refinement_preserves_identity_and_advances_revision() {
+    let mut accumulator = accumulator(1);
+    let turn_id = TurnId::new();
+    let AcpToolAccumulation::Updated(observed) = accumulator
+        .observe(
+            "session-1",
+            &turn_id,
+            &json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "command-1",
+                "title": "Read file '/workspace/proof.txt'",
+                "kind": "read",
+                "status": "in_progress",
+                "locations": [{"path": "/workspace/proof.txt"}]
+            }),
+        )
+        .unwrap()
+    else {
+        panic!("expected initial command-action projection");
+    };
+    let refined = accumulator
+        .refine_in_progress_permission_carrier(
+            "session-1",
+            &turn_id,
+            &json!({
+                "toolCallId": "command-1",
+                "title": "Run cwd=\"/workspace\", command=\"cat proof.txt\"",
+                "kind": "execute",
+                "status": "pending",
+                "rawInput": {"command": "cat proof.txt", "cwd": "/workspace"}
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        refined.projection.tool_use_id,
+        observed.projection.tool_use_id
+    );
+    assert_eq!(
+        refined.projection.revision,
+        observed.projection.revision + 1
+    );
+    assert_eq!(refined.projection.status, ToolInvocationStatus::Pending);
+    assert_eq!(refined.projection.summary.name.as_str(), "execute");
+    assert_eq!(refined.tool_call["rawInput"]["command"], "cat proof.txt");
+}
+
+#[test]
+fn permission_refinement_rejects_absent_buffered_and_terminal_calls() {
+    let carrier = json!({
+        "toolCallId": "command-1",
+        "title": "Run command=\"pwd\"",
+        "kind": "execute",
+        "status": "pending",
+        "rawInput": {"command": "pwd"}
+    });
+    let turn_id = TurnId::new();
+    let mut absent = accumulator(1);
+    assert!(matches!(
+        absent.refine_in_progress_permission_carrier("session-1", &turn_id, &carrier),
+        Err(AcpToolAccumulatorError::ConflictingCreate { .. })
+    ));
+
+    let mut buffered = accumulator(1);
+    buffered
+        .observe(
+            "session-1",
+            &turn_id,
+            &json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "command-1",
+                "rawInput": {"command": "substituted"}
+            }),
+        )
+        .unwrap();
+    assert!(matches!(
+        buffered.refine_in_progress_permission_carrier("session-1", &turn_id, &carrier),
+        Err(AcpToolAccumulatorError::ConflictingCreate { .. })
+    ));
+
+    let mut terminal = accumulator(1);
+    terminal
+        .observe(
+            "session-1",
+            &turn_id,
+            &json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "command-1",
+                "title": "Read",
+                "kind": "read",
+                "status": "completed"
+            }),
+        )
+        .unwrap();
+    assert!(matches!(
+        terminal.refine_in_progress_permission_carrier("session-1", &turn_id, &carrier),
+        Err(AcpToolAccumulatorError::ConflictingCreate { .. })
+    ));
+}
+
+#[test]
 fn duplicate_is_idempotent_but_conflicting_create_fails() {
     let mut accumulator = accumulator(4);
     let turn_id = TurnId::new();

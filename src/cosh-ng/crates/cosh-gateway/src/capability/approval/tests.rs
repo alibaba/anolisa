@@ -146,6 +146,16 @@ fn provider_permission(request: &CapabilityRequest) -> RuntimePermissionRef {
         turn_id: TurnId::new(),
         tool_use_id: Some(ToolUseId::new()),
         request_id: request.request_id.clone(),
+        callback: Some(
+            cosh_gateway_contracts::runtime::ProviderPermissionCallbackV2 {
+                provider_session_digest: digest('1'),
+                provider_request_id_digest: digest('2'),
+                provider_tool_call_id_digest: digest('3'),
+                ordered_option_set_digest: digest('4'),
+                callback_payload_digest: digest('5'),
+                normalized_operation_digest: request.operation_digest.clone(),
+            },
+        ),
     }
 }
 
@@ -257,23 +267,13 @@ fn provider_native_pending_records_observation_binding_without_permit() {
             &lease,
         )
         .unwrap();
-    store
-        .record_runtime_sequence(
-            &binding.binding_id,
-            &binding.runtime_instance_id,
-            binding.runtime_generation,
-            permission.event_sequence,
-            7,
-            &lease,
-        )
-        .unwrap();
-
     let pending = DurableApprovalCoordinator::new(&mut store)
         .record_provider_pending(
             &command(&actor_id, "provider-pending", 'c', 10),
             &request,
             &approval,
             &permission,
+            &binding,
             &lease,
         )
         .unwrap();

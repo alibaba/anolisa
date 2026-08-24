@@ -3,7 +3,7 @@ set -euo pipefail
 
 readonly INSTALL_MARKER=".cosh-acp-adapters"
 readonly CODEX_PACKAGE="@agentclientprotocol/codex-acp"
-readonly CODEX_VERSION="1.2.0"
+readonly CODEX_VERSION="1.6.2"
 readonly CLAUDE_PACKAGE="@agentclientprotocol/claude-agent-acp"
 readonly CLAUDE_VERSION="0.66.0"
 

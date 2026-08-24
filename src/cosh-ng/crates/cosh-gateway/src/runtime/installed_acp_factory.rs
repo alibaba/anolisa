@@ -351,11 +351,11 @@ impl AgentRuntimePortFactory for InstalledAcpRuntimePortFactory {
         let config = AcpAgentRuntimeConfig {
             session: AcpSessionDriverConfig::new(
                 resolved.launch_spec(),
-                AcpV1ClientConfig::new(
+                resolved.bind_client_config(AcpV1ClientConfig::new(
                     "cosh-gateway",
                     env!("CARGO_PKG_VERSION"),
                     MAX_ACP_FRAME_BYTES,
-                ),
+                )),
                 resolved.workspace(),
             ),
             workspace: workspace.reference().clone(),

@@ -6,6 +6,7 @@ use super::StoreError;
 
 mod migration_v1;
 mod migration_v10;
+mod migration_v11;
 mod migration_v2;
 mod migration_v3;
 mod migration_v4;
@@ -15,7 +16,7 @@ mod migration_v7;
 mod migration_v8;
 mod migration_v9;
 
-pub(super) const CURRENT_SCHEMA_VERSION: u32 = 10;
+pub(super) const CURRENT_SCHEMA_VERSION: u32 = 11;
 
 struct Migration {
     version: u32,
@@ -34,6 +35,7 @@ const MIGRATIONS: &[Migration] = &[
     migration_v8::MIGRATION,
     migration_v9::MIGRATION,
     migration_v10::MIGRATION,
+    migration_v11::MIGRATION,
 ];
 
 include!("schema/operations.rs");

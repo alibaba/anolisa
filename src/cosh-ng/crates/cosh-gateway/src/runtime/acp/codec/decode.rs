@@ -249,11 +249,14 @@ impl AcpV1Codec {
         &mut self,
         result: serde_json::Value,
     ) -> Result<AcpV1Observation, AcpV1CodecError> {
-        let response: InitializeResponse = serde_json::from_value(result)?;
+        let response: InitializeResponse = serde_json::from_value(result.clone())?;
         if response.protocol_version != ProtocolVersion::V1 {
             return Err(AcpV1CodecError::UnsupportedProtocolVersion {
                 actual: response.protocol_version.as_u16(),
             });
+        }
+        if self.config.adapter_profile == AcpV1AdapterProfile::Codex162 {
+            validate_codex_initialize(&response, &result)?;
         }
         let capabilities = copy_capabilities(&response.agent_capabilities);
         let agent_info = response.agent_info.map(|info| AcpV1AgentInfo {
@@ -286,8 +289,9 @@ impl AcpV1Codec {
         pending: PendingOutboundRequest,
         result: serde_json::Value,
     ) -> Result<AcpV1Observation, AcpV1CodecError> {
-        let response: PromptResponse = serde_json::from_value(result)?;
-        if !self.pending_permissions.is_empty() {
+        let response: PromptResponse = serde_json::from_value(result.clone())?;
+        let stop_reason = copy_stop_reason(response.stop_reason);
+        if !self.pending_permissions.is_empty() && stop_reason != AcpV1StopReason::Cancelled {
             return Err(AcpV1CodecError::PromptFinishedWithPendingPermissions {
                 count: self.pending_permissions.len(),
             });
@@ -299,12 +303,47 @@ impl AcpV1Codec {
         }
         let session_id = pending.session_id.ok_or(AcpV1CodecError::SessionNotOpen)?;
         self.require_session(&session_id)?;
+        let session_failure = if self.config.adapter_profile == AcpV1AdapterProfile::Codex162 {
+            parse_codex_session_failure(&result)?
+        } else {
+            None
+        };
+        if session_failure.is_some() && !self.pending_permissions.is_empty() {
+            return Err(AcpV1CodecError::PromptFinishedWithPendingPermissions {
+                count: self.pending_permissions.len(),
+            });
+        }
         self.prompt_request_id = None;
         self.cancellation_sent = false;
-        self.pending_permissions.clear();
+        if let Some(failure) = session_failure {
+            if failure.severity == CodexSessionFailureSeverity::Warning {
+                return Err(AcpV1CodecError::InvalidCodexSessionFailure(
+                    "warning used a terminal PromptResponse carrier",
+                ));
+            }
+            return Ok(AcpV1Observation::RequestFailed {
+                request: AcpV1RequestKind::Prompt,
+                code: CODEX_SESSION_FAILURE_ERROR_CODE,
+                message: failure.title,
+            });
+        }
+        if !self.pending_permissions.is_empty() {
+            let request_ids = std::mem::take(&mut self.pending_permissions)
+                .into_keys()
+                .collect();
+            // The provider closed the prompt before any client response could
+            // complete, so deferred batch response slots are unreachable.
+            self.pending_inbound_batches.clear();
+            return Ok(
+                AcpV1Observation::PromptCancelledWithPendingPermissions {
+                    session_id,
+                    request_ids,
+                },
+            );
+        }
         Ok(AcpV1Observation::PromptFinished {
             session_id,
-            stop_reason: copy_stop_reason(response.stop_reason),
+            stop_reason,
         })
     }
 
@@ -328,6 +367,22 @@ impl AcpV1Codec {
             return Err(AcpV1CodecError::CancellationAlreadySent);
         }
         let update = serde_json::to_value(notification.update)?;
+        if self.config.adapter_profile == AcpV1AdapterProfile::Codex162 {
+            if let Some(failure) = parse_codex_session_failure(&update)? {
+                if update.get("sessionUpdate").and_then(serde_json::Value::as_str)
+                    != Some("session_info_update")
+                {
+                    return Err(AcpV1CodecError::InvalidCodexSessionFailure(
+                        "failure notification used a non-session_info_update carrier",
+                    ));
+                }
+                if failure.severity != CodexSessionFailureSeverity::Warning {
+                    return Err(AcpV1CodecError::InvalidCodexSessionFailure(
+                        "error used a non-terminal session_info_update carrier",
+                    ));
+                }
+            }
+        }
         Ok(AcpV1Observation::SessionUpdate { session_id, update })
     }
 
@@ -365,7 +420,13 @@ impl AcpV1Codec {
         if self.cancellation_sent {
             return Err(AcpV1CodecError::CancellationAlreadySent);
         }
-        let request: RequestPermissionRequest = decode_params(params)?;
+        let raw_params = params.map_or(serde_json::Value::Null, RawJsonRpcParams::into_value);
+        let callback_payload_digest = permission_callback_digest(
+            &request_id,
+            CLIENT_METHOD_NAMES.session_request_permission,
+            &raw_params,
+        );
+        let request: RequestPermissionRequest = serde_json::from_value(raw_params)?;
         let session_id = request.session_id.0.to_string();
         self.require_session(&session_id)?;
         if request.options.is_empty() {
@@ -399,6 +460,7 @@ impl AcpV1Codec {
                 session_id,
                 tool_call,
                 options,
+                callback_payload_digest,
             },
         ))
     }

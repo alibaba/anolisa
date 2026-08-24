@@ -15,11 +15,11 @@ pub use bridge::{AcpV1BridgeError, AcpV1BridgeRead, AcpV1RuntimeBridge};
 pub use codec::AcpV1Codec;
 pub use tool_accumulator::{
     AcpToolAccumulation, AcpToolAccumulatorError, AcpToolAccumulatorLimits,
-    AcpToolInvocationSnapshot, ToolInvocationAccumulator,
+    AcpToolInvocationSnapshot, ToolInvocationAccumulator, DEFAULT_MAX_TOOL_IDENTIFIER_BYTES,
 };
 pub use types::{
-    AcpV1AgentCapabilities, AcpV1AgentInfo, AcpV1ClientConfig, AcpV1CodecError, AcpV1Observation,
-    AcpV1PermissionDecision, AcpV1PermissionOption, AcpV1PermissionOptionKind,
-    AcpV1PermissionRequest, AcpV1ProtocolPhase, AcpV1RequestId, AcpV1RequestKind, AcpV1StopReason,
-    ACP_WIRE_PROTOCOL_VERSION,
+    AcpV1AdapterProfile, AcpV1AgentCapabilities, AcpV1AgentInfo, AcpV1ClientConfig,
+    AcpV1CodecError, AcpV1Observation, AcpV1PermissionDecision, AcpV1PermissionOption,
+    AcpV1PermissionOptionKind, AcpV1PermissionRequest, AcpV1ProtocolPhase, AcpV1RequestId,
+    AcpV1RequestKind, AcpV1StopReason, ACP_WIRE_PROTOCOL_VERSION,
 };

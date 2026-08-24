@@ -22,9 +22,9 @@ mod supervisor;
 
 pub use acp::{
     AcpToolAccumulation, AcpToolAccumulatorError, AcpToolAccumulatorLimits,
-    AcpToolInvocationSnapshot, AcpV1AgentCapabilities, AcpV1AgentInfo, AcpV1BridgeError,
-    AcpV1BridgeRead, AcpV1ClientConfig, AcpV1Codec, AcpV1CodecError, AcpV1Observation,
-    AcpV1PermissionDecision, AcpV1PermissionOption, AcpV1PermissionOptionKind,
+    AcpToolInvocationSnapshot, AcpV1AdapterProfile, AcpV1AgentCapabilities, AcpV1AgentInfo,
+    AcpV1BridgeError, AcpV1BridgeRead, AcpV1ClientConfig, AcpV1Codec, AcpV1CodecError,
+    AcpV1Observation, AcpV1PermissionDecision, AcpV1PermissionOption, AcpV1PermissionOptionKind,
     AcpV1PermissionRequest, AcpV1ProtocolPhase, AcpV1RequestId, AcpV1RequestKind,
     AcpV1RuntimeBridge, AcpV1StopReason, ToolInvocationAccumulator, ACP_WIRE_PROTOCOL_VERSION,
 };

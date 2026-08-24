@@ -13,8 +13,8 @@ mod scheduler_attachment;
 pub use scheduler::{
     BrokeredApprovalContext, BrokeredApprovalPlan, BrokeredExecutionDriver,
     BrokeredRecoveryContext, BrokeredResolution, BrokeredResolutionContext,
-    BrokeredResolutionSource, RuntimeFactory, RuntimeHandle, RuntimePoll, ScheduledRun,
-    SchedulerTick, StartedRuntime, TaskScheduler, TaskSchedulerConfig,
+    BrokeredResolutionSource, RuntimeCancellationCause, RuntimeFactory, RuntimeHandle, RuntimePoll,
+    ScheduledRun, SchedulerTick, StartedRuntime, TaskScheduler, TaskSchedulerConfig,
 };
 
 use std::fs::{self, FileType, Metadata};

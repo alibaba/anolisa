@@ -225,6 +225,43 @@ done
 
 #[cfg(unix)]
 #[test]
+fn eof_during_prompt_is_a_failed_terminal_not_completion() {
+    let workspace = tempfile::tempdir().unwrap();
+    let script = r#"
+step=0
+while IFS= read -r line; do
+    step=$((step + 1))
+    case "$step" in
+        1) printf '%s\n' '{"jsonrpc":"2.0","id":"cosh-acp-1","result":{"protocolVersion":1,"agentCapabilities":{}}}' ;;
+        2) printf '%s\n' '{"jsonrpc":"2.0","id":"cosh-acp-2","result":{"sessionId":"session-1"}}' ;;
+        3) exit 0 ;;
+    esac
+done
+"#;
+    let driver = driver(script, &workspace);
+
+    driver.initialize().unwrap();
+    observation(&driver);
+    driver.open_session().unwrap();
+    observation(&driver);
+    driver.prompt("disconnect").unwrap();
+    let terminal = loop {
+        match driver.receive_timeout(Duration::from_secs(2)).unwrap() {
+            AcpSessionEvent::Terminal(terminal) => break terminal,
+            AcpSessionEvent::Observation(observation) => assert!(
+                !matches!(
+                    observation.observation,
+                    AcpV1Observation::PromptFinished { .. }
+                ),
+                "EOF cannot complete the prompt"
+            ),
+        }
+    };
+    assert_eq!(terminal.kind, AcpSessionTerminalKind::Failed);
+}
+
+#[cfg(unix)]
+#[test]
 fn independent_cancel_reaps_silent_agent() {
     let workspace = tempfile::tempdir().unwrap();
     let script = r#"

@@ -27,6 +27,8 @@ fn request() -> AcpV1PermissionRequest {
             "title": "Run tests",
             "rawInput": {"token": "credential-secret"}
         }),
+        callback_payload_digest: cosh_gateway_contracts::common::Digest::parse("5".repeat(64))
+            .unwrap(),
         options: vec![
             AcpV1PermissionOption {
                 option_id: "allow".to_owned(),

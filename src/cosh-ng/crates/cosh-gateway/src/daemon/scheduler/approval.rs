@@ -93,13 +93,15 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
             {
                 return Err(GatewayDaemonError::Unauthorized);
             }
-            if dispatch.state == ProviderPermissionDispatchState::Delivered {
+            if dispatch.state == ProviderPermissionDispatchState::Written {
                 let task = self.coordinator.store.load_task(&approval.task_id)?;
                 return Ok(SchedulerTick::Progressed(TaskView::from(&task)));
             }
             if matches!(
                 dispatch.state,
-                ProviderPermissionDispatchState::Started | ProviderPermissionDispatchState::Unknown
+                ProviderPermissionDispatchState::WriteStarted
+                    | ProviderPermissionDispatchState::Abandoned
+                    | ProviderPermissionDispatchState::Unknown
             ) {
                 self.coordinator
                     .store
@@ -187,11 +189,13 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
             return Err(GatewayDaemonError::Unauthorized);
         }
         match prepared.state {
-            ProviderPermissionDispatchState::Delivered => {
+            ProviderPermissionDispatchState::Written => {
                 let task = self.coordinator.store.load_task(&task_id)?;
                 return Ok(SchedulerTick::Progressed(TaskView::from(&task)));
             }
-            ProviderPermissionDispatchState::Started | ProviderPermissionDispatchState::Unknown => {
+            ProviderPermissionDispatchState::WriteStarted
+            | ProviderPermissionDispatchState::Abandoned
+            | ProviderPermissionDispatchState::Unknown => {
                 return self.fail_unknown_provider_dispatch(
                     runtime_lost_error(
                         "provider_permission_replay_unknown",
@@ -203,15 +207,7 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
             ProviderPermissionDispatchState::Prepared => {}
         }
         let task = self.coordinator.store.load_task(&task_id)?;
-        let view = if task.state() == TaskState::WaitingApproval {
-            self.coordinator.record_approval_resolved(
-                &lease,
-                approval_id,
-                decision,
-                prepared.permission.event_sequence,
-                now_ms,
-            )?
-        } else if task.state() == TaskState::Running {
+        let view = if task.state() == TaskState::Running {
             TaskView::from(&task)
         } else {
             return self.fail_unknown_provider_dispatch(
@@ -281,10 +277,15 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
                 dispatched_at_ms,
             );
         }
-        self.active
-            .as_mut()
-            .ok_or_else(no_active_run)?
-            .pending_permission = None;
+        let active = self.active.as_mut().ok_or_else(no_active_run)?;
+        active.pending_permission = None;
+        active.expected_provider_terminal = match decision {
+            ApprovalDecision::Deny => Some(ExpectedProviderTerminal::Denied {
+                approval_id: approval_id.clone(),
+                permission,
+            }),
+            ApprovalDecision::Approve => None,
+        };
         Ok(SchedulerTick::Progressed(view))
     }
 
@@ -319,5 +320,4 @@ impl<F: RuntimeFactory> TaskScheduler<F> {
         }
         self.finish_failed(error, refreshed_now_ms(now_ms)?)
     }
-
 }

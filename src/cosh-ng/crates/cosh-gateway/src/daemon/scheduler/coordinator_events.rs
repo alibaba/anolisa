@@ -40,6 +40,7 @@ impl TaskCoordinator {
         permission: &RuntimePermissionRef,
         request: &CapabilityRequest,
         approval: &ApprovalRequest,
+        binding: &RuntimeBindingRef,
         now_ms: u64,
     ) -> Result<TaskView, GatewayDaemonError> {
         self.require_current_lease(claim, now_ms)?;
@@ -55,63 +56,16 @@ impl TaskCoordinator {
                 request,
                 approval,
                 permission,
+                binding,
                 claim.generation,
             ))?,
             committed_at_ms: now_ms,
         };
         DurableApprovalCoordinator::new(&mut self.store)
-            .record_provider_pending(&command, request, approval, permission, claim)
+            .record_provider_pending(&command, request, approval, permission, binding, claim)
             .map_err(|error| GatewayDaemonError::Protocol(error.to_string()))?;
         let task = self.store.load_task(&claim.task_id)?;
-        let event = self.event(
-            task.owner_actor_id(),
-            &claim.task_id,
-            Some(&claim.run_id),
-            task.revision().saturating_add(1),
-            now_ms,
-            TaskEvent::ApprovalRequested {
-                approval: approval.clone(),
-            },
-        );
-        self.commit_internal(
-            task.owner_actor_id(),
-            claim,
-            "approval-request",
-            permission.event_sequence,
-            vec![event],
-            now_ms,
-        )
-    }
-
-    fn record_approval_resolved(
-        &mut self,
-        claim: &LeaseClaim,
-        approval_id: &ApprovalId,
-        decision: ApprovalDecision,
-        sequence: u64,
-        now_ms: u64,
-    ) -> Result<TaskView, GatewayDaemonError> {
-        self.require_current_lease(claim, now_ms)?;
-        let task = self.store.load_task(&claim.task_id)?;
-        let event = self.event(
-            task.owner_actor_id(),
-            &claim.task_id,
-            Some(&claim.run_id),
-            task.revision().saturating_add(1),
-            now_ms,
-            TaskEvent::ApprovalResolved {
-                approval_id: approval_id.clone(),
-                decision,
-            },
-        );
-        self.commit_internal(
-            task.owner_actor_id(),
-            claim,
-            "approval-resolve",
-            sequence,
-            vec![event],
-            now_ms,
-        )
+        Ok(TaskView::from(&task))
     }
 
     fn record_runtime_update(

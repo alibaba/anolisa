@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
-use crate::runtime::{ProcessExit, RuntimeSupervisor};
+use crate::runtime::{AcpV1ClientConfig, AcpV1Codec, ProcessExit, RuntimeSupervisor};
+use serde_json::Value;
 
 use super::{
     built_in_acp_runtime_profiles, AcpRuntimeProfileId, AcpRuntimeProfileRequest,
@@ -76,6 +77,27 @@ fn built_in_profiles_pin_official_adapter_commands() {
     assert_eq!(profiles[1].id(), AcpRuntimeProfileId::ClaudeCode);
     assert_eq!(profiles[1].executable_name(), "claude-agent-acp");
     assert!(profiles[1].arguments().is_empty());
+}
+
+#[test]
+fn resolved_codex_profile_binds_extension_without_package_version_resolution() {
+    let root = TempDir::new().unwrap();
+    let adapter = executable(root.path(), "codex-acp");
+    let resolved = AcpRuntimeProfileResolver::resolve(request(
+        AcpRuntimeProfileId::Codex,
+        Some(adapter),
+        root.path(),
+        BTreeMap::new(),
+    ))
+    .unwrap();
+    let config = resolved.bind_client_config(AcpV1ClientConfig::new("test", "1", 4096));
+    let mut codec = AcpV1Codec::new(config).unwrap();
+    let initialize: Value = serde_json::from_str(&codec.initialize_frame().unwrap()).unwrap();
+
+    assert_eq!(
+        initialize["params"]["clientCapabilities"]["_meta"]["jetbrains"]["air"],
+        serde_json::json!({"version": 1, "capabilities": ["sessionFailure"]})
+    );
 }
 
 #[test]

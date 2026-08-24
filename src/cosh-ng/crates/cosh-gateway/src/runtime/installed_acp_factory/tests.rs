@@ -359,6 +359,8 @@ fn generic_normalizer_never_copies_agent_labels_into_authority_fields() {
             "title": "forged-authority",
             "kind": "forged-operation"
         }),
+        callback_payload_digest: cosh_gateway_contracts::common::Digest::parse("5".repeat(64))
+            .unwrap(),
         options: Vec::new(),
     };
     let normalized = normalizer.normalize(&request, &context).unwrap();

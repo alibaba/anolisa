@@ -108,6 +108,7 @@ pub(super) fn message(id: MessageId) -> Option<&'static str> {
         }
         MessageId::HelpGroupSessions => "会话",
         MessageId::HelpSummarySession => "查找、恢复和清理智能体会话",
+        MessageId::HelpSummaryTask => "委托并查看本机持久 Agent Task",
         MessageId::HelpGroupRegistry => "Registry",
         MessageId::HelpSummaryExtensions => "列出/管理 cosh-core 扩展",
         MessageId::HelpSummarySkills => "列出/查看 cosh-core 技能",

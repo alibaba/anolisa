@@ -192,3 +192,15 @@ macro_rules! agent_composer_ids {
         );
     };
 }
+
+// Managed Task entrypoint additions remain trailing so existing stable
+// MessageId discriminants do not shift.
+macro_rules! managed_task_ids {
+    ($next:ident, $remaining:tt, $($ids:ident,)*) => {
+        $next!(
+            $remaining,
+            $($ids,)*
+            HelpSummaryTask,
+        );
+    };
+}

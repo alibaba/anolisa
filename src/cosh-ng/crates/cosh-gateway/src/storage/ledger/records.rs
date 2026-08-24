@@ -1,5 +1,4 @@
 impl SqliteTaskStore {
-
     /// Loads one durable approval record.
     pub fn load_approval_record(
         &self,
@@ -147,22 +146,51 @@ impl SqliteTaskStore {
         Ok(changed as u64)
     }
 
-    /// Marks non-terminal provider responses unknown only for one lost Run.
+    /// Converges provider responses for one lost, non-reattachable Run.
+    ///
+    /// Prepared records prove that zero bytes were written and become
+    /// abandoned. Writes that started or returned become unknown. Neither
+    /// class can be replayed into a replacement provider session.
     pub fn mark_provider_dispatches_unknown_for_run(
         &mut self,
         run_id: &RunId,
         now_ms: u64,
     ) -> Result<u64, StoreError> {
-        let changed = self.connection_mut().execute(
+        let transaction = immediate(self)?;
+        let abandoned = transaction.execute(
             "UPDATE provider_permission_dispatches
-             SET state='unknown', revision=revision+1, updated_at_ms=?2
-             WHERE run_id=?1 AND state IN ('prepared', 'started')",
+             SET state='abandoned', revision=revision+1, updated_at_ms=?2
+             WHERE run_id=?1 AND state='prepared'
+               AND EXISTS (
+                   SELECT 1 FROM tasks
+                   WHERE tasks.task_id=provider_permission_dispatches.task_id
+                     AND tasks.state IN (
+                         'running', 'waiting_approval', 'waiting_input', 'suspended'
+                     )
+               )",
             params![
                 run_id.as_str(),
                 integer(now_ms, "dispatch recovery timestamp")?
             ],
         )?;
-        Ok(changed as u64)
+        let unknown = transaction.execute(
+            "UPDATE provider_permission_dispatches
+             SET state='unknown', revision=revision+1, updated_at_ms=?2
+             WHERE run_id=?1 AND state IN ('write_started', 'written')
+               AND EXISTS (
+                   SELECT 1 FROM tasks
+                   WHERE tasks.task_id=provider_permission_dispatches.task_id
+                     AND tasks.state IN (
+                         'running', 'waiting_approval', 'waiting_input', 'suspended'
+                     )
+               )",
+            params![
+                run_id.as_str(),
+                integer(now_ms, "dispatch recovery timestamp")?
+            ],
+        )?;
+        transaction.commit()?;
+        Ok((abandoned + unknown) as u64)
     }
 
     /// Marks started brokered callbacks unknown only for one lost Run.

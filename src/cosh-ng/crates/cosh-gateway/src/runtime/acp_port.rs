@@ -19,16 +19,17 @@ use cosh_gateway_contracts::{
         RuntimeInstanceId, RuntimeMessageId, TaskId, TurnId,
     },
     runtime::{
-        AgentRuntimeCommand, AgentRuntimeEvent, RuntimeEventEnvelope, RuntimePermissionDecision,
-        TurnLimit, TurnOutcome,
+        AgentRuntimeCommand, AgentRuntimeEvent, ProviderPermissionCallbackV2, RuntimeEventEnvelope,
+        RuntimePermissionDecision, TurnLimit, TurnOutcome,
     },
 };
 
+use super::acp::DEFAULT_MAX_TOOL_IDENTIFIER_BYTES;
 use super::{
     AcpSessionDriver, AcpSessionDriverConfig, AcpSessionDriverError, AcpSessionEvent,
-    AcpSessionTerminalKind, AcpToolAccumulation, AcpV1Observation, AcpV1PermissionDecision,
-    AcpV1PermissionOptionKind, AcpV1PermissionRequest, AcpV1RequestId, AcpV1StopReason,
-    AgentRuntimePort, AgentRuntimePortError, ToolInvocationAccumulator,
+    AcpSessionTerminalKind, AcpToolAccumulation, AcpV1AdapterProfile, AcpV1Observation,
+    AcpV1PermissionDecision, AcpV1PermissionOptionKind, AcpV1PermissionRequest, AcpV1RequestId,
+    AcpV1StopReason, AgentRuntimePort, AgentRuntimePortError, ToolInvocationAccumulator,
 };
 use sha2::{Digest as ShaDigest, Sha256};
 
@@ -36,6 +37,7 @@ const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 // A shared namespace avoids widening transport state solely for file layout.
 include!("acp_port/model.rs");
+include!("acp_port/permission.rs");
 include!("acp_port/runtime.rs");
 include!("acp_port/port.rs");
 include!("acp_port/support.rs");

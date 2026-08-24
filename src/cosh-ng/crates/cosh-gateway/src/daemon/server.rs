@@ -158,6 +158,10 @@ fn supported_daemon_runtime(
             cosh_gateway_contracts::profile::GatewayCapabilityProfileId::WorkspaceCheckpointV1,
             "core",
             Some("gateway-checkpoint-v1")
+        ) | (
+            cosh_gateway_contracts::profile::GatewayCapabilityProfileId::DelegatedAcpV1,
+            "acp",
+            Some("codex" | "claude-code")
         )
     )
 }

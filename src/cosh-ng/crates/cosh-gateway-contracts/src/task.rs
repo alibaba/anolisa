@@ -256,6 +256,8 @@ pub enum TaskEventKind {
     ApprovalRequested,
     /// Approval was resolved.
     ApprovalResolved,
+    /// Approval became impossible to deliver without an actor decision.
+    ApprovalAbandoned,
     /// A governed execution was planned.
     ExecutionPlanned,
     /// A governed execution completed.
@@ -280,6 +282,14 @@ pub enum TaskEventKind {
     TaskFailed,
     /// The Task was cancelled.
     TaskCancelled,
+}
+
+/// Non-decision reason that closes a pending approval interaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalAbandonCause {
+    /// The provider cancelled the callback before accepting a response.
+    ProviderCancelled,
 }
 
 /// Immutable fact in a Task lifecycle.
@@ -344,6 +354,13 @@ pub enum TaskEvent {
         approval_id: ApprovalId,
         /// Actor decision.
         decision: ApprovalDecision,
+    },
+    /// A pending approval became undeliverable without an actor decision.
+    ApprovalAbandoned {
+        /// Pending approval whose provider callback disappeared.
+        approval_id: ApprovalId,
+        /// Typed reason no decision could be delivered.
+        cause: ApprovalAbandonCause,
     },
     /// A permit was bound to an execution identity.
     ExecutionPlanned {
@@ -431,6 +448,7 @@ impl TaskEvent {
             Self::InputSubmitted { .. } => TaskEventKind::InputSubmitted,
             Self::ApprovalRequested { .. } => TaskEventKind::ApprovalRequested,
             Self::ApprovalResolved { .. } => TaskEventKind::ApprovalResolved,
+            Self::ApprovalAbandoned { .. } => TaskEventKind::ApprovalAbandoned,
             Self::ExecutionPlanned { .. } => TaskEventKind::ExecutionPlanned,
             Self::ExecutionResultRecorded { .. } => TaskEventKind::ExecutionResultRecorded,
             Self::ExecutionUncertain { .. } => TaskEventKind::ExecutionUncertain,
