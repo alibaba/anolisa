@@ -137,8 +137,24 @@ read 响应过大时返回 HTTP 502 和
 
 可选 TCP listener 目前没有 daemon 级访问边界。在
 [issue #2223](https://github.com/alibaba/anolisa/issues/2223) 解决前，生产配置应
-保持 `listen.http_addr` 关闭。Daemon 停止时也不会等待全部 HTTP handler 或
-释放所有 runtime owner，因此正在执行的请求可能看到连接关闭。
+保持 `listen.http_addr` 关闭。
+
+## 守护进程关闭
+
+`GET /v1/health` 健康检查和 `GET /v1/metrics` 指标请求在管理请求处理饱和时
+仍能响应。其他管理请求可能需要等待处理容量。该可用性保证不会让已阻塞的
+持久化操作变得可取消。
+
+如果配置或策略状态正忙，SIGHUP 策略重载会失败，且不会更改当前策略。
+如果关闭流程在重载完成前开始，本次重载结果不会生效。
+
+收到 SIGTERM 或 SIGINT 后，守护进程会停止接受新连接，并给正在处理的 HTTP 请求
+最多 30 秒的完成时间。随后，守护进程最多再等待 5 秒让未完成请求结束；如果仍未结束，
+会报告失败并继续后续关闭阶段。打包提供的服务将进程停止上限设为 60 秒，
+为后续关闭阶段和进程退出留出时间。该流程目前不会将取消上下文传入每个管理器操作，
+也不会在此步骤释放全部运行时资源。通用取消由
+[问题 #2235](https://github.com/alibaba/anolisa/issues/2235) 跟踪，有序运行时
+清理由 [问题 #2295](https://github.com/alibaba/anolisa/issues/2295) 跟踪。
 
 ## 可复用实例管理
 
@@ -379,9 +395,8 @@ running 的 backend ownership，该记录属于不一致状态，会记为失败
 在此期间到达的 guest 和 lifecycle 操作会等待 provider 工作完成；
 `sync_timeout` 只限制 scheduler 的等待时间，不限制这些操作的等待时间。
 
-service loop 停止时，Blaze 会取消并等待周期 scheduler 退出。无法取消的
-provider 工作会继续由对应 sandbox lock 持有直至完成；daemon 级连接排空和
-runtime 清理仍属于独立职责。
+服务停止时，Blaze 会并行排空已接收连接并停止周期存储同步。无法取消的
+提供方工作会继续执行直至完成，在此期间可能延迟对应沙箱的操作。
 
 ## Template Catalog
 

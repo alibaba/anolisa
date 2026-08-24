@@ -161,8 +161,28 @@ supported.
 The optional TCP listener does not yet enforce a daemon-wide access boundary.
 Leave `listen.http_addr` disabled in production until
 [issue #2223](https://github.com/alibaba/anolisa/issues/2223) is resolved.
-Daemon shutdown also does not yet wait for every active HTTP handler or release
-all runtime owners, so an in-flight request may observe a closed connection.
+
+## Daemon shutdown
+
+`GET /v1/health` and `GET /v1/metrics` remain responsive while management
+request handling is saturated. Other management requests may wait until
+processing capacity is available. This availability guarantee does not make a
+blocked persistence operation cancellable.
+
+A SIGHUP policy reload fails without changing the active policy if
+configuration or policy state is busy. If shutdown begins before a reload
+finishes, its result is not installed.
+
+On SIGTERM or SIGINT, the daemon stops accepting new connections and gives
+in-flight HTTP requests up to 30 seconds to finish. It then allows up to 5 more
+seconds for unfinished requests to end before reporting the failure and
+continuing the remaining shutdown stages. The packaged service allows 60
+seconds for process shutdown, leaving time for those stages and process exit.
+The daemon does not yet pass a cancellation context through every manager
+operation or release all runtime resources. General cancellation is tracked by
+[issue #2235](https://github.com/alibaba/anolisa/issues/2235), and ordered
+runtime cleanup is tracked by
+[issue #2295](https://github.com/alibaba/anolisa/issues/2295).
 
 ## Reusable-Instance Management
 
@@ -458,9 +478,9 @@ lifecycle operations that arrive while the lock is retained wait for the
 provider work to finish; `sync_timeout` bounds scheduler waiting, not those
 operations.
 
-When the service loop stops, Blaze cancels and joins the periodic scheduler.
-Provider work that cannot be cancelled remains under its sandbox lock until it
-completes. Daemon-wide connection draining and runtime cleanup remain separate.
+When the service stops, Blaze drains accepted connections in parallel with
+stopping periodic synchronization. Provider work that cannot be cancelled
+continues to completion and may delay operations on its sandbox.
 
 ## Template Catalog
 

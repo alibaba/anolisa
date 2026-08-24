@@ -22,6 +22,7 @@ use hyper::header::CONTENT_TYPE;
 use hyper::{Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::error::{BlazeDaemonError, Result};
@@ -39,13 +40,27 @@ const MAX_GUEST_HTTP_BODY_BYTES: usize = 22 * 1024 * 1024;
 pub async fn handle(
     req: Request<Incoming>,
     state: Arc<ServerState>,
+    request_permits: Arc<Semaphore>,
 ) -> std::result::Result<Response<Full<Bytes>>, Infallible> {
-    handle_request(req, state).await
+    handle_request_with_admission(req, state, Some(request_permits)).await
 }
 
+#[cfg(test)]
 async fn handle_request<B>(
     req: Request<B>,
     state: Arc<ServerState>,
+) -> std::result::Result<Response<Full<Bytes>>, Infallible>
+where
+    B: Body<Data = Bytes> + Unpin,
+    B::Error: std::fmt::Display,
+{
+    handle_request_with_admission(req, state, None).await
+}
+
+async fn handle_request_with_admission<B>(
+    req: Request<B>,
+    state: Arc<ServerState>,
+    request_permits: Option<Arc<Semaphore>>,
 ) -> std::result::Result<Response<Full<Bytes>>, Infallible>
 where
     B: Body<Data = Bytes> + Unpin,
@@ -60,7 +75,23 @@ where
     let limit = guest_body_route(&method, &path).then_some(MAX_GUEST_HTTP_BODY_BYTES);
 
     let response = match collect_body(req, limit).await {
-        Ok(body) => dispatch(&method, &path, &query, body, &state).await,
+        Ok(body) => {
+            // Body transport is asynchronous and must not consume the permit
+            // reserved for dispatch work. Otherwise one incomplete body can
+            // queue every unrelated request behind the sole two-worker permit.
+            let _permit = match request_permits {
+                Some(permits) if !bypasses_dispatch_admission(&method, &path) => Some(
+                    permits
+                        .acquire_owned()
+                        .await
+                        .expect("request admission semaphore remains open"),
+                ),
+                // Health and metrics must remain observable while admitted
+                // management work occupies every dispatch permit.
+                Some(_) | None => None,
+            };
+            dispatch(&method, &path, &query, body, &state).await
+        }
         Err(e) => Err(e),
     };
 
@@ -69,6 +100,21 @@ where
         Err(e) => error_response(&e),
     };
     Ok(resp)
+}
+
+fn bypasses_dispatch_admission(method: &Method, path: &str) -> bool {
+    if method != Method::GET {
+        return false;
+    }
+
+    let mut parts = path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty());
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some("v1"), Some("health" | "metrics"), None)
+    )
 }
 
 fn guest_body_route(method: &Method, path: &str) -> bool {

@@ -311,10 +311,28 @@ sandbox 标记为 `RecoveryRequired`（需要恢复）状态，这样之后调�
 
 当 backend 提供兼容的 guest endpoint 时，运行中的 sandbox 可以执行有界
 命令和文件传输。生产环境的 mock fallback 不会声明该能力。请求格式、上限、
-就绪检查、错误处理和当前关闭边界参见
-[Blaze 用户指南](../../docs/user-guide/zh/runtime/blaze.md#guest-操作)。
+就绪检查和错误处理参见
+[Blaze 用户指南](../../docs/user-guide/zh/runtime/blaze.md#guest-操作)。守护进程关闭
+行为在[独立章节](../../docs/user-guide/zh/runtime/blaze.md#守护进程关闭)说明。
 
-#### 健康检查
+### 守护进程关闭
+
+`GET /v1/health` 健康检查和 `GET /v1/metrics` 指标请求在管理请求处理饱和时
+仍能响应。其他管理请求可能需要等待处理容量。该可用性保证不会让已阻塞的
+持久化操作变得可取消。
+
+如果配置或策略状态正忙，SIGHUP 策略重载会失败，且不会更改当前策略。
+如果关闭流程在重载完成前开始，本次重载结果不会生效。
+
+收到 SIGTERM 或 SIGINT 后，守护进程会停止接受新连接，并给正在处理的 HTTP 请求
+最多 30 秒的完成时间。随后，守护进程最多再等待 5 秒让未完成请求结束；如果仍未结束，
+会报告失败并继续后续关闭阶段。打包提供的服务将进程停止上限设为 60 秒，
+为后续关闭阶段和进程退出留出时间。
+请求取消传递由 [#2235](https://github.com/alibaba/anolisa/issues/2235) 跟踪，
+全部运行时资源的清理由
+[#2295](https://github.com/alibaba/anolisa/issues/2295) 跟踪，两者仍属于后续独立工作。
+
+### 健康检查
 
 `GET /v1/health` 返回 daemon 状态，包含存储容量信息：
 

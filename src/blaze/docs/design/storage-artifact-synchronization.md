@@ -109,14 +109,12 @@ may reach the persistence boundary in that attempt or a later one.
 
 ## Daemon shutdown
 
-The daemon supervises the periodic worker while serving requests. If the
-worker exits unexpectedly, the daemon leaves its accept loop and reports the
-worker failure. On a termination signal, the daemon first leaves that accept
-loop, then cancels and joins the periodic scheduler. Provider work that cannot
-be cancelled remains under its sandbox lock until it completes.
+On a termination signal, the daemon stops both listeners and rejects new
+template imports. It drains accepted HTTP/1 connections in parallel with
+stopping periodic storage synchronization. Provider work that cannot be
+cancelled remains under its sandbox lock until it completes, and failures from
+both shutdown paths remain visible.
 
-This change owns only the worker lifecycle. Draining already accepted
-connections and releasing daemon-wide runtime resources are separate shutdown
-responsibilities. Until those responsibilities are implemented, operators
-must not treat service-loop return as proof that every in-flight handler and
-runtime owner has finished.
+After both paths finish, the daemon waits for already registered template
+imports. Propagating cancellation through manager operations and releasing
+daemon-wide runtime resources remain separate shutdown responsibilities.

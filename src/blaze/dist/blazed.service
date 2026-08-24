@@ -15,7 +15,7 @@ LimitNPROC=infinity
 LimitCORE=infinity
 KillMode=process
 KillSignal=SIGTERM
-TimeoutStopSec=30
+TimeoutStopSec=60
 
 [Install]
 WantedBy=multi-user.target

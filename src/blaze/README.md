@@ -348,10 +348,32 @@ Running sandboxes can execute bounded commands and transfer bounded files when
 their backend exposes a compatible guest endpoint. Production mock fallback
 does not advertise this capability. See the
 [Blaze user guide](../../docs/user-guide/en/runtime/blaze.md#guest-operations)
-for request formats, limits, readiness, error handling, and current shutdown
-boundaries.
+for request formats, limits, readiness, and error handling. Daemon shutdown
+behavior is documented [separately](../../docs/user-guide/en/runtime/blaze.md#daemon-shutdown).
 
-#### Health Check
+### Daemon shutdown
+
+`GET /v1/health` and `GET /v1/metrics` remain responsive while management
+request handling is saturated. Other management requests may wait until
+processing capacity is available. This availability guarantee does not make a
+blocked persistence operation cancellable.
+
+A SIGHUP policy reload fails without changing the active policy if
+configuration or policy state is busy. If shutdown begins before a reload
+finishes, its result is not installed.
+
+On SIGTERM or SIGINT, the daemon stops accepting new connections and gives
+in-flight HTTP requests up to 30 seconds to finish. It then allows up to 5 more
+seconds for unfinished requests to end before reporting the failure and
+continuing the remaining shutdown stages. The packaged service allows 60
+seconds for process shutdown, leaving time for those stages and process exit.
+Request cancellation propagation
+([#2235](https://github.com/alibaba/anolisa/issues/2235))
+and cleanup of all runtime resources
+([#2295](https://github.com/alibaba/anolisa/issues/2295)) remain separate
+follow-up work.
+
+### Health Check
 
 `GET /v1/health` returns daemon status including storage capacity:
 

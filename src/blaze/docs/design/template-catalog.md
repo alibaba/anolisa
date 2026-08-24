@@ -207,11 +207,13 @@ therefore fails before it can interfere with an active import. The lock owner
 validates the type, ownership, permissions, contents, and capacity of published
 entries.
 
-During graceful shutdown, the daemon rejects new imports, requests
-cancellation of active imports, waits for their file handles and staging data
-to be released, and then returns from the service loop. Draining already
-accepted connections and releasing daemon-wide runtime resources are separate
-shutdown responsibilities.
+During graceful shutdown, the daemon rejects new imports and requests
+cancellation of active imports before draining accepted HTTP/1 connections.
+Connection draining runs in parallel with storage-synchronization shutdown;
+failures from both paths remain visible. After both paths finish, the daemon
+waits for registered imports to release their file handles and staging data.
+Propagating cancellation through manager operations and releasing daemon-wide
+runtime resources remain separate responsibilities.
 
 ## Lookup and current limits
 
