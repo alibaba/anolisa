@@ -387,8 +387,11 @@ Kubernetes 1.29+、`/dev/fuse`，并允许 Sidecar 使用特权模式。
 
 ```bash
 cd src/skillfs
-IMAGE=registry.example.com/anolisa/skillfs-sidecar:0.4.1
-docker build -f container/Dockerfile -t "$IMAGE" .
+IMAGE=registry.example.com/anolisa/skillfs-sidecar:$(git rev-parse --short=12 HEAD)
+DOCKERFILE=container/Dockerfile
+# Alibaba Cloud Linux 4 使用 container/Dockerfile.alinux4。
+docker build -f "$DOCKERFILE" -t "$IMAGE" .
+docker run --rm "$IMAGE" skillfs --version
 docker push "$IMAGE"
 kubectl apply -f deploy/kubernetes/00-namespace.yaml
 kubectl apply -f deploy/kubernetes/10-example-configmap.yaml

@@ -427,8 +427,11 @@ sidecar as privileged.
 
 ```bash
 cd src/skillfs
-IMAGE=registry.example.com/anolisa/skillfs-sidecar:0.4.1
-docker build -f container/Dockerfile -t "$IMAGE" .
+IMAGE=registry.example.com/anolisa/skillfs-sidecar:$(git rev-parse --short=12 HEAD)
+DOCKERFILE=container/Dockerfile
+# Use container/Dockerfile.alinux4 for Alibaba Cloud Linux 4.
+docker build -f "$DOCKERFILE" -t "$IMAGE" .
+docker run --rm "$IMAGE" skillfs --version
 docker push "$IMAGE"
 kubectl apply -f deploy/kubernetes/00-namespace.yaml
 kubectl apply -f deploy/kubernetes/10-example-configmap.yaml

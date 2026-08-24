@@ -13,7 +13,8 @@ for the complete workflow.
 - Kubernetes 1.29 or later.
 - Privileged containers and the `/dev/fuse` hostPath are allowed.
 - The target nodes provide `/dev/fuse`.
-- The SkillFS image is available to the cluster.
+- A self-built SkillFS image is available to the cluster. The repository does
+  not currently publish a dedicated sidecar image.
 
 ## Files
 
@@ -26,7 +27,7 @@ for the complete workflow.
 ## Deploy
 
 ```bash
-export IMAGE=registry.example.com/anolisa/skillfs-sidecar:0.4.1
+export IMAGE="registry.example.com/anolisa/skillfs-sidecar:$(git rev-parse --short=12 HEAD)"
 export NS=skillfs-container-example
 
 kubectl apply -f 00-namespace.yaml
@@ -36,6 +37,10 @@ kubectl -n "$NS" wait \
   --for=condition=Ready pod/skillfs-sidecar-example \
   --timeout=300s
 ```
+
+Build and verify the image with `container/Dockerfile`, or use
+`container/Dockerfile.alinux4` for an Alibaba Cloud Linux 4 runtime. The linked
+user guide documents both variants and their runtime configuration.
 
 The workload readiness probe reads the transformed default skill and the
 virtual `skill-discover/SKILL.md`. It also opens a secondary skill through the
