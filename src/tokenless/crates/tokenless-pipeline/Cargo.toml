@@ -1,0 +1,9 @@
+[package]
+name = "tokenless-pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Content taxonomy, deterministic detection, and the compile-time compressor registry"
+
+[dependencies]
+tokenless-protocol = { path = "../tokenless-protocol" }

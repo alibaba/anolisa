@@ -857,6 +857,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokenless-pipeline"
+version = "0.7.12"
+dependencies = [
+ "tokenless-protocol",
+]
+
+[[package]]
 name = "tokenless-protocol"
 version = "0.7.12"
 dependencies = [
