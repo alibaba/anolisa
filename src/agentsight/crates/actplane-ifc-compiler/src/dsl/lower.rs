@@ -311,7 +311,10 @@ fn lower_ipv4(pat: &str) -> (u32, u32) {
     }
 
     // Step 5: resolution failed — warn and return match-none
-    eprintln!("[lower_ipv4] warning: cannot resolve '{}', rule will never match", pat);
+    eprintln!(
+        "[lower_ipv4] warning: cannot resolve '{}', rule will never match",
+        pat
+    );
     (0, u32::MAX)
 }
 
@@ -392,10 +395,24 @@ impl Ctx {
         gate_exit: Option<u8>,
     ) -> Result<(u64, u32), String> {
         let (low_op, m, lit) = match gate_op {
-            Op::Exec => { let (m, l) = lower_exec(pat); (OP_EXEC, m, l) }
-            Op::Read | Op::Open => { let (m, l) = lower_path(pat); (OP_OPEN, m, l) }
-            Op::Write | Op::Unlink => { let (m, l) = lower_path(pat); (OP_WRITE, m, l) }
-            other => return Err(format!("`after {}` is not supported as a gate (use exec/read/write)", op_name(other))),
+            Op::Exec => {
+                let (m, l) = lower_exec(pat);
+                (OP_EXEC, m, l)
+            }
+            Op::Read | Op::Open => {
+                let (m, l) = lower_path(pat);
+                (OP_OPEN, m, l)
+            }
+            Op::Write | Op::Unlink => {
+                let (m, l) = lower_path(pat);
+                (OP_WRITE, m, l)
+            }
+            other => {
+                return Err(format!(
+                    "`after {}` is not supported as a gate (use exec/read/write)",
+                    op_name(other)
+                ));
+            }
         };
         if gate_exit.is_some() && low_op != OP_EXEC {
             return Err("`exits` is only valid on `after exec` gates".into());
@@ -429,7 +446,13 @@ impl Ctx {
     /// Allocate (or reuse) a `since` invalidator slot, returning its bit in the
     /// rule's `since_mask`. `op` is the lowered taint_op; the pattern is matched
     /// like a sink target (exec on comm, others on path).
-    fn inval_slot(&mut self, op: u8, kind: Kind, pat: &str, arg: Option<&str>) -> Result<u64, String> {
+    fn inval_slot(
+        &mut self,
+        op: u8,
+        kind: Kind,
+        pat: &str,
+        arg: Option<&str>,
+    ) -> Result<u64, String> {
         let (m, lit) = if op == OP_EXEC {
             lower_exec(pat)
         } else {
@@ -752,7 +775,8 @@ pub fn compile(pol: &Policy) -> Result<Compiled, String> {
                         gate_idx = idx;
                         for (op, pat, arg) in since {
                             let iop = inval_op(*op)?;
-                            since_mask |= ctx.inval_slot(iop, cl.target.kind, pat, arg.as_deref())?;
+                            since_mask |=
+                                ctx.inval_slot(iop, cl.target.kind, pat, arg.as_deref())?;
                         }
                     }
                 }

@@ -32,8 +32,7 @@ use crate::{BackendError, EnforcementBackend, EventHub, SubscriberClass};
 // Compile-time guard: compiler and engine must agree on CConfig ABI size.
 // If this fails, one crate's CRule definition was modified without updating the other.
 const _: () = assert!(
-    actplane_ifc_compiler::COMPILED_CONFIG_BLOB_SIZE
-        == ebpf_ifc_engine::EXPECTED_CONFIG_BLOB_SIZE,
+    actplane_ifc_compiler::COMPILED_CONFIG_BLOB_SIZE == ebpf_ifc_engine::EXPECTED_CONFIG_BLOB_SIZE,
     "BPF ABI mismatch: actplane-ifc-compiler and ebpf-ifc-engine CConfig sizes diverged. \
      Update both crates' CRule/CConfig definitions to match."
 );

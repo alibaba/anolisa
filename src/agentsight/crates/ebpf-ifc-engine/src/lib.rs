@@ -11,11 +11,11 @@
 //! The config blob is exactly the `struct taint_config` the collector's DSL
 //! compiler already produces (the same bytes the C loader read from `--config`).
 
+use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
 use std::io::{self, Read};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
 
 use aya::maps::{Array, HashMap, Map, MapData, MapError, ProgramArray, RingBuf};
 use aya::programs::{Lsm, ProgramFd, TracePoint};
@@ -1436,7 +1436,9 @@ impl Loader {
         let mut exec_sources: Vec<(String, u64)> = Vec::new();
         for i in 0..(cfg.n_updates as usize).min(MAX_UPDATES) {
             let u = &cfg.updates[i];
-            if u.op != OP_EXEC { continue; }
+            if u.op != OP_EXEC {
+                continue;
+            }
             let raw: &[u8] = &u.target;
             let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
             if let Ok(s) = std::str::from_utf8(&raw[..end]) {
@@ -1448,10 +1450,9 @@ impl Loader {
         // `RingBuf<MapData>`. Reused across hot-reload cycles to avoid aya 0.13
         // wrap-state bug (pos_cache=0 + stale consumer_pos).
         let ringbuf = match bpf.take_map("rb") {
-            Some(rb_map) => Some(
-                RingBuf::try_from(rb_map)
-                    .map_err(|e| err(format!("rb ringbuf: {e}")))?,
-            ),
+            Some(rb_map) => {
+                Some(RingBuf::try_from(rb_map).map_err(|e| err(format!("rb ringbuf: {e}")))?)
+            }
             None => None,
         };
 
@@ -1601,7 +1602,8 @@ impl Loader {
                     .ok_or_else(|| err("ts_agent_roots missing"))?,
             )
             .map_err(|e| err(format!("ts_agent_roots: {e}")))?;
-            agent_roots.insert(pid, 1u8, 0)
+            agent_roots
+                .insert(pid, 1u8, 0)
                 .map_err(|e| err(format!("register agent root: {e}")))?;
         }
         self.bind_state(
@@ -1849,9 +1851,10 @@ impl Loader {
         const MAX_ITEMS_PER_POLL: usize = 4096;
         const DEDUP_WINDOW: usize = 8192;
 
-        let ring = self.ringbuf.as_mut().ok_or_else(|| {
-            err("rb ringbuf not initialised (take_map failed at load?)")
-        })?;
+        let ring = self
+            .ringbuf
+            .as_mut()
+            .ok_or_else(|| err("rb ringbuf not initialised (take_map failed at load?)"))?;
         let fd = ring.as_raw_fd();
 
         let mut dedup = EventDedup::new(DEDUP_WINDOW);
@@ -1898,7 +1901,9 @@ impl Loader {
     pub fn scope_bit_for_command(&self, command: &str) -> Option<u8> {
         for (target, add) in &self.exec_sources {
             if target == command {
-                if *add == 0 { return None; }
+                if *add == 0 {
+                    return None;
+                }
                 return Some(add.trailing_zeros() as u8);
             }
         }
@@ -1931,7 +1936,10 @@ impl Loader {
             Ok(state) => Ok(state.labels),
             Err(e) => {
                 let msg = e.to_string();
-                if msg.contains("ENOENT") || msg.contains("No such file") || msg.contains("not found") {
+                if msg.contains("ENOENT")
+                    || msg.contains("No such file")
+                    || msg.contains("not found")
+                {
                     Ok(0)
                 } else {
                     Err(err(format!("ts_proc lookup: {e}")))
@@ -1976,8 +1984,12 @@ impl Loader {
                     .ok_or_else(|| err("map ts_counts missing"))?,
             )
             .map_err(|e| err(format!("ts_counts: {e}")))?;
-            counts.set(0, 0u32, 0).map_err(|e| err(format!("quiesce rules: {e}")))?;
-            counts.set(1, 0u32, 0).map_err(|e| err(format!("quiesce updates: {e}")))?;
+            counts
+                .set(0, 0u32, 0)
+                .map_err(|e| err(format!("quiesce rules: {e}")))?;
+            counts
+                .set(1, 0u32, 0)
+                .map_err(|e| err(format!("quiesce updates: {e}")))?;
         }
 
         // Phase 2: write updates
@@ -1994,8 +2006,12 @@ impl Loader {
                     .ok_or_else(|| err("map ts_counts missing"))?,
             )
             .map_err(|e| err(format!("ts_counts: {e}")))?;
-            counts.set(0, cfg.n_rules, 0).map_err(|e| err(format!("activate rules: {e}")))?;
-            counts.set(1, cfg.n_updates, 0).map_err(|e| err(format!("activate updates: {e}")))?;
+            counts
+                .set(0, cfg.n_rules, 0)
+                .map_err(|e| err(format!("activate rules: {e}")))?;
+            counts
+                .set(1, cfg.n_updates, 0)
+                .map_err(|e| err(format!("activate updates: {e}")))?;
         }
 
         // Phase 4.5: remap process labels
@@ -2018,15 +2034,24 @@ impl Loader {
 
             if !bit_remap.is_empty() {
                 let mut proc_map: HashMap<_, i32, ProcState> = HashMap::try_from(
-                    self.bpf.map_mut("ts_proc").ok_or_else(|| err("ts_proc missing"))?,
-                ).map_err(|e| err(format!("ts_proc for remapping: {e}")))?;
+                    self.bpf
+                        .map_mut("ts_proc")
+                        .ok_or_else(|| err("ts_proc missing"))?,
+                )
+                .map_err(|e| err(format!("ts_proc for remapping: {e}")))?;
 
                 let mut updates: Vec<(i32, ProcState)> = Vec::new();
                 for result in proc_map.iter() {
                     if let Ok((pid, state)) = result {
                         let new_labels = remap_labels(state.labels, &bit_remap);
                         if new_labels != state.labels {
-                            updates.push((pid, ProcState { labels: new_labels, lin_gates: state.lin_gates }));
+                            updates.push((
+                                pid,
+                                ProcState {
+                                    labels: new_labels,
+                                    lin_gates: state.lin_gates,
+                                },
+                            ));
                         }
                     }
                 }
@@ -2042,7 +2067,9 @@ impl Loader {
         self.exec_sources.clear();
         for i in 0..n {
             let u = &cfg.updates[i];
-            if u.op != OP_EXEC { continue; }
+            if u.op != OP_EXEC {
+                continue;
+            }
             let raw: &[u8] = &u.target;
             let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
             if let Ok(s) = std::str::from_utf8(&raw[..end]) {
@@ -2097,15 +2124,24 @@ impl Loader {
         }
 
         let mut proc_map: HashMap<_, i32, ProcState> = HashMap::try_from(
-            self.bpf.map_mut("ts_proc").ok_or_else(|| err("ts_proc missing"))?,
-        ).map_err(|e| err(format!("ts_proc for remapping: {e}")))?;
+            self.bpf
+                .map_mut("ts_proc")
+                .ok_or_else(|| err("ts_proc missing"))?,
+        )
+        .map_err(|e| err(format!("ts_proc for remapping: {e}")))?;
 
         let mut updates: Vec<(i32, ProcState)> = Vec::new();
         for result in proc_map.iter() {
             if let Ok((pid, state)) = result {
                 let new_labels = remap_labels(state.labels, &bit_remap);
                 if new_labels != state.labels {
-                    updates.push((pid, ProcState { labels: new_labels, lin_gates: state.lin_gates }));
+                    updates.push((
+                        pid,
+                        ProcState {
+                            labels: new_labels,
+                            lin_gates: state.lin_gates,
+                        },
+                    ));
                 }
             }
         }
@@ -2265,8 +2301,12 @@ impl ReloadHandle {
     }
 
     fn submit_raw(&self, data: &[u8]) -> io::Result<()> {
-        let fd = self.cap_req_fd.as_ref()
-            .ok_or_else(|| err("hot-reload via cap_req ringbuf not available on this kernel (5.10 compat)"))?
+        let fd = self
+            .cap_req_fd
+            .as_ref()
+            .ok_or_else(|| {
+                err("hot-reload via cap_req ringbuf not available on this kernel (5.10 compat)")
+            })?
             .as_raw_fd();
         unsafe {
             let rb = libbpf_sys::user_ring_buffer__new(fd, std::ptr::null());
@@ -2826,7 +2866,9 @@ fn build_full_bit_map(cfg: &CConfig) -> StdHashMap<String, u8> {
     let n = (cfg.n_updates as usize).min(MAX_UPDATES);
     for i in 0..n {
         let u = &cfg.updates[i];
-        if u.add == 0 { continue; }
+        if u.add == 0 {
+            continue;
+        }
         let raw: &[u8] = &u.target;
         let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
         if let Ok(s) = std::str::from_utf8(&raw[..end]) {
@@ -2836,7 +2878,6 @@ fn build_full_bit_map(cfg: &CConfig) -> StdHashMap<String, u8> {
     }
     map
 }
-
 
 #[cfg(test)]
 mod tests {

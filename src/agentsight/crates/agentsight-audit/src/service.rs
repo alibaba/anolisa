@@ -6,8 +6,8 @@ use agentsight_enforcement_protocol::{
     CredentialExfiltrationPolicy, DestinationClass, PolicyDecision, PolicyMode, SecurityEvent,
     SecurityEventKind,
 };
-use std::collections::HashSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -129,7 +129,12 @@ impl AuditService {
     /// # Errors
     ///
     /// Returns a typed persistence or stored-data error when the query fails.
-    pub fn cases(&self, limit: usize, offset: i64, agent_id: Option<&str>) -> Result<Vec<RiskCase>, AuditError> {
+    pub fn cases(
+        &self,
+        limit: usize,
+        offset: i64,
+        agent_id: Option<&str>,
+    ) -> Result<Vec<RiskCase>, AuditError> {
         self.store.list_cases(limit, offset, agent_id)
     }
 
@@ -138,7 +143,9 @@ impl AuditService {
     /// # Errors
     ///
     /// Returns a typed persistence or stored-data error when the query fails.
-    pub fn case_index_by_agent_policy(&self) -> Result<HashMap<(String, String), Uuid>, AuditError> {
+    pub fn case_index_by_agent_policy(
+        &self,
+    ) -> Result<HashMap<(String, String), Uuid>, AuditError> {
         self.store.case_index_by_agent_policy()
     }
 

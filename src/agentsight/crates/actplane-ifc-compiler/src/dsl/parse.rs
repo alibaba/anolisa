@@ -242,8 +242,12 @@ impl P {
     }
     fn clause(&mut self) -> Result<Clause, String> {
         let verb = self.word()?;
-        let effect = P::clause_effect(&verb)
-            .ok_or_else(|| format!("expected 'notify', 'block', 'kill', or 'allow', got '{}'", verb))?;
+        let effect = P::clause_effect(&verb).ok_or_else(|| {
+            format!(
+                "expected 'notify', 'block', 'kill', or 'allow', got '{}'",
+                verb
+            )
+        })?;
         let op = P::op(&self.word()?)?;
         let target = self.target(op)?;
         let when = if self.is_word("if") {

@@ -384,7 +384,13 @@ fn case_count_is_independent_of_case_page_size() {
             .expect("case should persist");
     }
 
-    assert_eq!(store.list_cases(1, 0, None).expect("page should load").len(), 1);
+    assert_eq!(
+        store
+            .list_cases(1, 0, None)
+            .expect("page should load")
+            .len(),
+        1
+    );
     assert_eq!(store.case_count(None).expect("case total should load"), 2);
 }
 

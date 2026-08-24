@@ -6,7 +6,7 @@
 
 pub mod dsl;
 
-pub use dsl::{compile_str, compile, Compiled, RuleMeta};
+pub use dsl::{Compiled, RuleMeta, compile, compile_str};
 
 /// Compiled policy blob size in bytes — ABI contract with ebpf-ifc-engine.
 pub const COMPILED_CONFIG_BLOB_SIZE: usize = std::mem::size_of::<dsl::lower::CConfig>();

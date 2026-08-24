@@ -117,14 +117,14 @@ pub(super) async fn preview_agent_protection(
             match active_policy {
                 Ok(Ok(Some(snapshot))) => match snapshot.policy() {
                     Ok(policy) => {
-                    if let Some(preview) = protection_preview_from_policy(
-                        agent.agent_name.clone(),
-                        pid,
-                        agent.workspace_path.as_deref().map(Path::new),
-                        policy,
-                    ) {
-                        return HttpResponse::Ok().json(preview);
-                    }
+                        if let Some(preview) = protection_preview_from_policy(
+                            agent.agent_name.clone(),
+                            pid,
+                            agent.workspace_path.as_deref().map(Path::new),
+                            policy,
+                        ) {
+                            return HttpResponse::Ok().json(preview);
+                        }
                     }
                     Err(error) => {
                         log::warn!("ignoring invalid credential policy preview: {error}");
@@ -211,7 +211,11 @@ fn protection_preview_from_policy(
         .filter(|paths| !paths.is_empty())
         .unwrap_or_else(|| policy.source_patterns.clone());
     let workspace_path = workspace
-        .filter(|root| source_paths.iter().all(|path| Path::new(path).starts_with(root)))
+        .filter(|root| {
+            source_paths
+                .iter()
+                .all(|path| Path::new(path).starts_with(root))
+        })
         .or_else(|| common_source_directory(&source_paths))
         .filter(|path| path.is_absolute() && path != Path::new("/"))?;
 

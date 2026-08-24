@@ -551,7 +551,12 @@ impl AuditStore {
     /// # Errors
     ///
     /// Returns a typed database, stored-data, or lock error.
-    pub fn list_cases(&self, limit: usize, offset: i64, agent_id: Option<&str>) -> Result<Vec<RiskCase>, AuditError> {
+    pub fn list_cases(
+        &self,
+        limit: usize,
+        offset: i64,
+        agent_id: Option<&str>,
+    ) -> Result<Vec<RiskCase>, AuditError> {
         let conn = self.connection()?;
         let (sql, use_agent_filter) = match agent_id {
             Some(_) => (
@@ -592,7 +597,11 @@ impl AuditStore {
         };
         let rows = if use_agent_filter {
             statement.query_map(
-                params![limit.clamp(1, 1_000) as i64, offset.max(0), agent_id.unwrap()],
+                params![
+                    limit.clamp(1, 1_000) as i64,
+                    offset.max(0),
+                    agent_id.unwrap()
+                ],
                 row_mapper,
             )?
         } else {
@@ -649,14 +658,20 @@ impl AuditStore {
     /// # Errors
     ///
     /// Returns a typed database, stored-data, or lock error.
-    pub fn case_index_by_agent_policy(&self) -> Result<HashMap<(String, String), Uuid>, AuditError> {
+    pub fn case_index_by_agent_policy(
+        &self,
+    ) -> Result<HashMap<(String, String), Uuid>, AuditError> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
             "SELECT agent_id, policy_id, case_id FROM risk_cases ORDER BY updated_at_ns DESC",
         )?;
         let mut index = HashMap::new();
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })?;
         for row in rows {
             let (agent_id, policy_id, case_id_str) = row?;
