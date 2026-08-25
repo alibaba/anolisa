@@ -117,7 +117,7 @@ jobs:
         if: inputs.component == 'anolisa'
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: '1.88.0'
+          toolchain: '1.93.1'
 
       - name: "Setup Python + uv (agent-sec-core)"
         if: inputs.component == 'agent-sec-core'

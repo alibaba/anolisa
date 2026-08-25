@@ -137,10 +137,10 @@ impl MetadataClient {
     ///    in the cloud-init datasource.
     fn query_cloud_init(&self, key: &str) -> Option<String> {
         // 1. Mapped path (e.g. instance/instance-type).
-        if let Some(path) = cloud_init_path_for_metadata_key(key) {
-            if let Some(v) = self.cloud_init_query_path(path) {
-                return Some(v);
-            }
+        if let Some(path) = cloud_init_path_for_metadata_key(key)
+            && let Some(v) = self.cloud_init_query_path(path)
+        {
+            return Some(v);
         }
 
         // 2. Direct ds.meta_data.<key> query.
@@ -179,10 +179,10 @@ impl MetadataClient {
         }
 
         // For slash-containing keys (e.g. "instance/instance-type"), try the last segment.
-        if let Some(short_key) = key.rsplit('/').next() {
-            if short_key != key {
-                return find_string_by_key(meta_data, short_key);
-            }
+        if let Some(short_key) = key.rsplit('/').next()
+            && short_key != key
+        {
+            return find_string_by_key(meta_data, short_key);
         }
         None
     }

@@ -4,7 +4,7 @@
 
 ## 前置条件
 
-- Rust >= 1.88（项目使用 edition 2024）
+- Rust >= 1.93（项目使用 edition 2024）
 - 工作目录：`src/anolisa/`（即 Cargo workspace 根）
 
 ```bash
@@ -13,7 +13,8 @@ cd src/anolisa
 
 ### Rustup 工具链源
 
-本 workspace 通过 `rust-toolchain.toml` 固定 Rust `1.88.0`。
+本 workspace 通过 `rust-toolchain.toml` 固定 Rust `1.93.1`——这是
+Alibaba Cloud Linux 4 打包的最新 Rust，以保证源码构建与 RPM 构建一致。
 使用 rustup 管理的 `cargo` 时，所需工具链会被自动选择；如果本机未安装，
 rustup 会自动尝试下载。
 
@@ -26,7 +27,7 @@ rustc -Vv
 rustdoc -Vv
 ```
 
-如果当前 rustup 工具链源无法提供 Rust `1.88.0`，请切换到可用源，
+如果当前 rustup 工具链源无法提供 Rust `1.93.1`，请切换到可用源，
 或在构建机上预装该工具链。
 
 bash/zsh:

@@ -1,5 +1,9 @@
 [workspace]
-resolver = "2"
+# MSRV-aware resolution: dependency versions are held back to what
+# `rust-version` below can still compile. RPM source builds use the
+# distro's rustc, so a dependency release that outruns the MSRV must not
+# be picked up silently by `cargo update`.
+resolver = "3"
 members = [
     "crates/anolisa-cli",
     "crates/anolisa-core",
@@ -12,7 +16,7 @@ members = [
 version = "0.3.6"
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.88"
+rust-version = "1.93"
 publish = false
 
 [workspace.dependencies]

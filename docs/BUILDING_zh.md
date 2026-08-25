@@ -49,7 +49,7 @@ Linux-only 组件。
 |------|------|
 | Node.js | `src/copilot-shell/package.json` 要求 Node.js `>=20.0.0`。agentsight、agent-sec-core、tokenless 和 ws-ckpt 的插件构建也会使用 npm。 |
 | Python 和 uv | `src/agent-sec-core/agent-sec-cli/pyproject.toml` 要求 Python `==3.11.6`，该项目使用 `uv`。不要把它扩展成仓库级 Python 最低版本。 |
-| Rust | `src/agent-sec-core/linux-sandbox/rust-toolchain.toml` 固定 `1.93.0`；`src/anolisa/rust-toolchain.toml` 和 `src/blaze/rust-toolchain.toml` 固定 `1.88.0`；`src/cosh-ng/rust-toolchain.toml` 跟随 `stable`。其他组件有 `rust-version` 时以各自 `Cargo.toml` 为准。 |
+| Rust | `src/agent-sec-core/linux-sandbox/rust-toolchain.toml` 固定 `1.93.0`；`src/anolisa/rust-toolchain.toml` 固定 `1.93.1`；`src/blaze/rust-toolchain.toml` 固定 `1.88.0`；`src/cosh-ng/rust-toolchain.toml` 跟随 `stable`。其他组件有 `rust-version` 时以各自 `Cargo.toml` 为准。 |
 | cosh-ng | Linux 源码构建需要 `pkg-config` 和 OpenSSL 开发文件。 |
 | agent-sec-core | Linux sandbox 运行和集成检查可能需要 bubblewrap、GnuPG 以及 `jq`。 |
 | agentsight | Linux eBPF 构建需要 clang、LLVM、libbpf 和 ELF 开发头文件、内核头文件，以及启用 BTF 的内核。`make build-mac` 构建不含 eBPF 的 macOS local viewer。 |

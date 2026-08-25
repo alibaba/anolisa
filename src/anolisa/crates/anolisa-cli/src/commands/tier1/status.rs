@@ -233,12 +233,10 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
         && ctx.install_mode == InstallMode::System
         && records.len() == 1
         && records[0].status == "not_installed"
-    {
-        if let Some(observed) =
+        && let Some(observed) =
             observed_record(target, rpm_backend, component_index.as_ref(), &query)
-        {
-            records = vec![observed];
-        }
+    {
+        records = vec![observed];
     }
 
     let quarantined = select_quarantined_from_view(&view, selected_component.as_deref());

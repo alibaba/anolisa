@@ -93,13 +93,12 @@ pub fn infer_contract_datadir_root(
     }
 
     // Snapshot hit — try provenance sidecar.
-    if let Some(prov) = read_snapshot_provenance(contract_path) {
-        if prov.source_kind == ContractSourceKind::Datadir
-            && scoped_datadir_roots.contains(&prov.datadir_root)
-            && FsLayout::component_contract_path(&prov.datadir_root, component) == prov.source_path
-        {
-            return Some(prov.datadir_root);
-        }
+    if let Some(prov) = read_snapshot_provenance(contract_path)
+        && prov.source_kind == ContractSourceKind::Datadir
+        && scoped_datadir_roots.contains(&prov.datadir_root)
+        && FsLayout::component_contract_path(&prov.datadir_root, component) == prov.source_path
+    {
+        return Some(prov.datadir_root);
     }
 
     // Fallback: content match against scoped datadir contracts.
@@ -515,7 +514,8 @@ layer = "runtime"
 
         let snapshot_path = FsLayout::component_manifest_snapshot_path(&state, "sec-core");
 
-        let root = infer_contract_datadir_root("sec-core", &snapshot_path, &[data.clone()]);
+        let root =
+            infer_contract_datadir_root("sec-core", &snapshot_path, std::slice::from_ref(&data));
         assert_eq!(
             root.as_ref(),
             Some(&data),
@@ -543,7 +543,8 @@ layer = "runtime"
         };
         write_snapshot_provenance(&snapshot_path, &prov).expect("write prov");
 
-        let root = infer_contract_datadir_root("sec-core", &snapshot_path, &[data.clone()]);
+        let root =
+            infer_contract_datadir_root("sec-core", &snapshot_path, std::slice::from_ref(&data));
         assert_eq!(
             root.as_ref(),
             Some(&data),
@@ -566,7 +567,8 @@ layer = "runtime"
         let bad = FsLayout::provenance_path_for_snapshot(&snapshot_path);
         fs::write(&bad, "this is not valid toml [[[").expect("write bad");
 
-        let root = infer_contract_datadir_root("sec-core", &snapshot_path, &[data.clone()]);
+        let root =
+            infer_contract_datadir_root("sec-core", &snapshot_path, std::slice::from_ref(&data));
         assert_eq!(
             root.as_ref(),
             Some(&data),
@@ -594,7 +596,8 @@ layer = "runtime"
         };
         write_snapshot_provenance(&snapshot_path, &prov).expect("write prov");
 
-        let root = infer_contract_datadir_root("sec-core", &snapshot_path, &[data.clone()]);
+        let root =
+            infer_contract_datadir_root("sec-core", &snapshot_path, std::slice::from_ref(&data));
         assert_eq!(
             root.as_ref(),
             Some(&data),
@@ -611,7 +614,8 @@ layer = "runtime"
         write_datadir(&data, "mycomp", &valid_toml("mycomp"));
         let datadir_path = FsLayout::component_contract_path(&data, "mycomp");
 
-        let root = infer_contract_datadir_root("mycomp", &datadir_path, &[data.clone()]);
+        let root =
+            infer_contract_datadir_root("mycomp", &datadir_path, std::slice::from_ref(&data));
         assert_eq!(root.as_ref(), Some(&data));
     }
 }

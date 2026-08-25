@@ -277,15 +277,17 @@ fn execute_restart_units(
     // reload the manager) aren't loadable until the manager reloads its unit
     // database, so restart would otherwise fail "unit not found". Reload once
     // per in-play scope, best-effort — a reload failure only adds a warning.
-    if used_sys && sys_manager.supported() {
-        if let Err(err) = sys_manager.daemon_reload() {
-            warnings.push(format!("daemon-reload (system scope) failed: {err}"));
-        }
+    if used_sys
+        && sys_manager.supported()
+        && let Err(err) = sys_manager.daemon_reload()
+    {
+        warnings.push(format!("daemon-reload (system scope) failed: {err}"));
     }
-    if used_user && user_manager.supported() {
-        if let Err(err) = user_manager.daemon_reload() {
-            warnings.push(format!("daemon-reload (user scope) failed: {err}"));
-        }
+    if used_user
+        && user_manager.supported()
+        && let Err(err) = user_manager.daemon_reload()
+    {
+        warnings.push(format!("daemon-reload (user scope) failed: {err}"));
     }
 
     let mut results: Vec<RestartResult> = Vec::with_capacity(units.len());

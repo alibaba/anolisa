@@ -221,13 +221,13 @@ impl InstanceProber {
     }
 
     fn write_cached_id(&self, id: &str) {
-        if let Some(parent) = self.instance_id_cache_path.parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                eprintln!(
-                    "[anolisa] warn: cannot create instance-id cache dir {}: {e}",
-                    parent.display()
-                );
-            }
+        if let Some(parent) = self.instance_id_cache_path.parent()
+            && let Err(e) = fs::create_dir_all(parent)
+        {
+            eprintln!(
+                "[anolisa] warn: cannot create instance-id cache dir {}: {e}",
+                parent.display()
+            );
         }
         if let Err(e) = fs::write(&self.instance_id_cache_path, id) {
             eprintln!(
@@ -286,10 +286,10 @@ impl InstanceProber {
 
     fn probe_image_id(&self) -> Option<String> {
         // 1. /etc/image-id (image_id="...")
-        if let Ok(content) = fs::read_to_string(&self.image_id_path) {
-            if let Some(id) = parse_image_id(&content) {
-                return Some(id);
-            }
+        if let Ok(content) = fs::read_to_string(&self.image_id_path)
+            && let Some(id) = parse_image_id(&content)
+        {
+            return Some(id);
         }
         // 2. Metadata API fallback
         self.client.query_metadata("image-id")
@@ -307,15 +307,15 @@ impl InstanceProber {
         let mut version: Option<String> = None;
 
         for line in content.lines() {
-            if id.is_none() {
-                if let Some(val) = line.strip_prefix("ID=") {
-                    id = Some(unquote(val));
-                }
+            if id.is_none()
+                && let Some(val) = line.strip_prefix("ID=")
+            {
+                id = Some(unquote(val));
             }
-            if version.is_none() {
-                if let Some(val) = line.strip_prefix("VERSION_ID=") {
-                    version = Some(unquote(val));
-                }
+            if version.is_none()
+                && let Some(val) = line.strip_prefix("VERSION_ID=")
+            {
+                version = Some(unquote(val));
             }
             if id.is_some() && version.is_some() {
                 break;

@@ -4,7 +4,7 @@
 
 ## Prerequisites
 
-- Rust >= 1.88 (project uses edition 2024)
+- Rust >= 1.93 (project uses edition 2024)
 - Working directory: `src/anolisa/` (Cargo workspace root)
 
 ```bash
@@ -13,8 +13,9 @@ cd src/anolisa
 
 ### Rustup Toolchain Source
 
-This workspace pins Rust `1.88.0` via `rust-toolchain.toml`. When using
-rustup-managed `cargo`, the required toolchain is selected automatically
+This workspace pins Rust `1.93.1` via `rust-toolchain.toml` — the newest
+Rust that Alibaba Cloud Linux 4 packages, so source and RPM builds agree.
+When using rustup-managed `cargo`, the toolchain is selected automatically
 and downloaded if missing.
 
 Before building, verify that `cargo`, `rustc`, and `rustdoc` come from the
@@ -27,7 +28,7 @@ rustc -Vv
 rustdoc -Vv
 ```
 
-If your configured rustup source cannot provide Rust `1.88.0`, configure a
+If your configured rustup source cannot provide Rust `1.93.1`, configure a
 working source or preinstall the toolchain on the build machine.
 
 For bash/zsh:

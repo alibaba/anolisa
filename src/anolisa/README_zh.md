@@ -98,7 +98,7 @@ planner 区分 ANOLISA 自有文件与 native package authority，并在副作�
 ## 环境要求
 
 - Linux（x86_64 / aarch64）或 macOS（arm64，功能受限）
-- 从源码构建需要 Rust ≥ 1.88
+- 从源码构建需要 Rust ≥ 1.93
 
 ## 许可证
 

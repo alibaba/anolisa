@@ -16,8 +16,8 @@ URL:            https://github.com/alibaba/anolisa
 Source0:        %{name}-%{version}.tar.gz
 Source1:        %{name}-%{version}-vendor.tar.gz
 
-BuildRequires:  rust >= 1.88
-BuildRequires:  cargo >= 1.88
+BuildRequires:  rust >= 1.93
+BuildRequires:  cargo >= 1.93
 BuildRequires:  gcc
 BuildRequires:  make
 
@@ -60,7 +60,7 @@ EOF
 
 %build
 # `rust-toolchain.toml` is rustup-only metadata; the system cargo (dnf-installed
-# rust-1.88) ignores it and uses the system rustc directly.
+# rust-1.93) ignores it and uses the system rustc directly.
 export CARGO_HOME=$(pwd)/.cargo-home
 mkdir -p "$CARGO_HOME"
 cp .cargo/config.toml "$CARGO_HOME/config.toml"

@@ -141,24 +141,24 @@ pub fn detect_product_type(release_path: &Path) -> ProductType {
 /// (metadata-unreachable) is shared across all probes.
 pub fn probe_product_type(release_path: &Path, client: &MetadataClient) -> String {
     // 1. /etc/anolisa-release PRODUCT_TYPE field
-    if let Ok(content) = fs::read_to_string(release_path) {
-        if let Some(pt) = find_product_type_in_release(&content) {
-            return pt;
-        }
+    if let Ok(content) = fs::read_to_string(release_path)
+        && let Some(pt) = find_product_type_in_release(&content)
+    {
+        return pt;
     }
 
     // 2. EDS detection: desktop-id starts with "ecd"
-    if let Some(desktop_id) = client.query("desktop-id") {
-        if desktop_id.starts_with("ecd") {
-            return "eds".to_string();
-        }
+    if let Some(desktop_id) = client.query("desktop-id")
+        && desktop_id.starts_with("ecd")
+    {
+        return "eds".to_string();
     }
 
     // 3. ECS detection: instance-type starts with "ecs"
-    if let Some(instance_type) = client.query("instance/instance-type") {
-        if instance_type.starts_with("ecs") {
-            return "ecs".to_string();
-        }
+    if let Some(instance_type) = client.query("instance/instance-type")
+        && instance_type.starts_with("ecs")
+    {
+        return "ecs".to_string();
     }
 
     "unknown".to_string()

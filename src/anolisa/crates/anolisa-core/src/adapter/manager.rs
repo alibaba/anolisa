@@ -994,10 +994,10 @@ impl AdapterManager {
         // `{datadir}/skills/<name>/`) must also be readable by the
         // Manager's controlled IO.
         for skill in &skills {
-            if let Some(ref src) = skill.source {
-                if !allowed_roots.iter().any(|r| src.starts_with(r)) {
-                    allowed_roots.push(src.clone());
-                }
+            if let Some(ref src) = skill.source
+                && !allowed_roots.iter().any(|r| src.starts_with(r))
+            {
+                allowed_roots.push(src.clone());
             }
         }
         drop(probe_ctx);
@@ -2400,10 +2400,10 @@ impl AdapterManager {
         scoped_datadir_roots: &[PathBuf],
     ) -> Option<PathBuf> {
         for datadir in scoped_datadir_roots {
-            if let Ok(path) = self.expand_dest_template(dest_template, component, datadir) {
-                if self.bundle_root_valid(framework, declared_entry, &path) {
-                    return Some(path);
-                }
+            if let Ok(path) = self.expand_dest_template(dest_template, component, datadir)
+                && self.bundle_root_valid(framework, declared_entry, &path)
+            {
+                return Some(path);
             }
         }
         None
@@ -3754,17 +3754,17 @@ fn declared_skills(
     // Framework-specific section takes precedence.
     match framework {
         "openclaw" => {
-            if let Some(ref oc) = adapter.openclaw {
-                if !oc.skills.is_empty() {
-                    return oc.skills.clone();
-                }
+            if let Some(ref oc) = adapter.openclaw
+                && !oc.skills.is_empty()
+            {
+                return oc.skills.clone();
             }
         }
         "hermes" => {
-            if let Some(ref h) = adapter.hermes {
-                if !h.skills.is_empty() {
-                    return h.skills.clone();
-                }
+            if let Some(ref h) = adapter.hermes
+                && !h.skills.is_empty()
+            {
+                return h.skills.clone();
             }
         }
         _ => {}
@@ -3856,12 +3856,11 @@ fn declared_config(
         None => return Vec::new(),
     };
     // Framework-specific section takes precedence.
-    if framework == "openclaw" {
-        if let Some(ref oc) = adapter.openclaw {
-            if !oc.config.is_empty() {
-                return oc.config.clone();
-            }
-        }
+    if framework == "openclaw"
+        && let Some(ref oc) = adapter.openclaw
+        && !oc.config.is_empty()
+    {
+        return oc.config.clone();
     }
     adapter.config.clone()
 }
@@ -3948,17 +3947,17 @@ fn declared_bundle_entry(manifest: &ComponentManifest, framework: &str) -> Optio
         .find(|a| a.framework.as_deref().map(str::trim) == Some(framework))?;
     match framework {
         "openclaw" => {
-            if let Some(ref oc) = adapter.openclaw {
-                if let Some(ref entry) = oc.bundle.entry {
-                    return Some(entry.clone());
-                }
+            if let Some(ref oc) = adapter.openclaw
+                && let Some(ref entry) = oc.bundle.entry
+            {
+                return Some(entry.clone());
             }
         }
         "hermes" => {
-            if let Some(ref h) = adapter.hermes {
-                if let Some(ref entry) = h.bundle.entry {
-                    return Some(entry.clone());
-                }
+            if let Some(ref h) = adapter.hermes
+                && let Some(ref entry) = h.bundle.entry
+            {
+                return Some(entry.clone());
             }
         }
         _ => {}

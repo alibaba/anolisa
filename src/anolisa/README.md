@@ -100,7 +100,7 @@ metadata is declared through `component.toml`.
 ## Requirements
 
 - Linux (x86_64 / aarch64) or macOS (arm64, limited)
-- Rust ≥ 1.88 (for source build)
+- Rust ≥ 1.93 (for source build)
 
 ## License
 
