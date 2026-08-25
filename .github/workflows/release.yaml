@@ -35,6 +35,8 @@ jobs:
       version: ${{ steps.parse.outputs.version }}
       tag: ${{ steps.parse.outputs.tag }}
       archive-sha256: ${{ steps.package-source.outputs.archive-sha256 }}
+      prebuilt-enabled: ${{ steps.plan-prebuilt.outputs.enabled }}
+      prebuilt-matrix: ${{ steps.plan-prebuilt.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -76,6 +78,14 @@ jobs:
           echo "| Component | \`$COMPONENT\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Version | \`$VERSION\` |" >> $GITHUB_STEP_SUMMARY
 
+      - name: Plan precompiled packages
+        id: plan-prebuilt
+        env:
+          COMPONENT: ${{ steps.parse.outputs.component }}
+        run: |
+          python3 .github/actions/prebuilt-rust-common/plan_matrix.py \
+            --component "$COMPONENT" >> "$GITHUB_OUTPUT"
+
       - name: Package source archive
         id: package-source
         uses: ./.github/actions/package-source
@@ -95,27 +105,17 @@ jobs:
           artifact-suffix: ''
           retention-days: 28
 
-  build_cosh_ng_prebuilt:
-    name: Build cosh-ng ${{ matrix.target-os }}-${{ matrix.target-arch }}
+  build_prebuilt:
+    name: Build precompiled packages
     needs: package
-    if: needs.package.outputs.component == 'cosh-ng'
+    if: needs.package.outputs.prebuilt-enabled == 'true'
     permissions:
       contents: read
     runs-on: [self-hosted, Linux, X64, anolisa-release-cross-x64]
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target-os: linux
-            target-arch: x86_64
-            profile: gnu2.28-x86_64
-          - target-os: linux
-            target-arch: aarch64
-            profile: gnu2.28-aarch64
-          - target-os: macos
-            target-arch: aarch64
-            profile: darwin11-aarch64
+      matrix: ${{ fromJSON(needs.package.outputs.prebuilt-matrix) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -123,8 +123,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Build precompiled package
-        id: prebuilt
+      - name: Build cosh-ng precompiled package
+        id: cosh-ng-prebuilt
+        if: matrix.component == 'cosh-ng'
         uses: ./.github/actions/build-cosh-ng-prebuilt
         with:
           version: ${{ needs.package.outputs.version }}
@@ -133,10 +134,40 @@ jobs:
           profile: ${{ matrix.profile }}
           tag: ${{ needs.package.outputs.tag }}
 
+      - name: Build Tokenless precompiled package
+        id: tokenless-prebuilt
+        if: matrix.component == 'tokenless'
+        uses: ./.github/actions/build-tokenless-prebuilt
+        with:
+          version: ${{ needs.package.outputs.version }}
+          target-os: ${{ matrix.target-os }}
+          target-arch: ${{ matrix.target-arch }}
+          profile: ${{ matrix.profile }}
+          tag: ${{ needs.package.outputs.tag }}
+
+      - name: Select precompiled package output
+        id: prebuilt
+        shell: bash
+        env:
+          COMPONENT: ${{ matrix.component }}
+          COSH_NG_DIRECTORY: ${{ steps.cosh-ng-prebuilt.outputs.artifact-directory }}
+          TOKENLESS_DIRECTORY: ${{ steps.tokenless-prebuilt.outputs.artifact-directory }}
+        run: |
+          case "$COMPONENT" in
+            cosh-ng) ARTIFACT_DIRECTORY="$COSH_NG_DIRECTORY" ;;
+            tokenless) ARTIFACT_DIRECTORY="$TOKENLESS_DIRECTORY" ;;
+            *) echo "::error::Unsupported prebuilt component: $COMPONENT"; exit 1 ;;
+          esac
+          if [ -z "$ARTIFACT_DIRECTORY" ]; then
+            echo "::error::Missing prebuilt output for $COMPONENT"
+            exit 1
+          fi
+          echo "artifact-directory=$ARTIFACT_DIRECTORY" >> "$GITHUB_OUTPUT"
+
       - name: Upload precompiled package
         uses: actions/upload-artifact@v4
         with:
-          name: cosh-ng-prebuilt-${{ needs.package.outputs.version }}-${{ matrix.target-os }}-${{ matrix.target-arch }}
+          name: ${{ matrix.component }}-prebuilt-${{ needs.package.outputs.version }}-${{ matrix.target-os }}-${{ matrix.target-arch }}
           path: ${{ steps.prebuilt.outputs.artifact-directory }}/*
           if-no-files-found: error
           retention-days: 28
@@ -148,12 +179,12 @@ jobs:
   # =========================================================================
   publish:
     name: Publish ${{ needs.package.outputs.tag }}
-    needs: [package, build_cosh_ng_prebuilt]
+    needs: [package, build_prebuilt]
     if: >-
       always() &&
       needs.package.result == 'success' &&
-      (needs.package.outputs.component != 'cosh-ng' ||
-       needs.build_cosh_ng_prebuilt.result == 'success')
+      (needs.package.outputs.prebuilt-enabled != 'true' ||
+       needs.build_prebuilt.result == 'success')
     permissions:
       contents: write
       actions: read
@@ -195,26 +226,29 @@ jobs:
           name: ${{ needs.package.outputs.component }}-${{ needs.package.outputs.version }}-vendor
           path: /tmp/archives
 
-      - name: Download cosh-ng precompiled packages
-        if: needs.package.outputs.component == 'cosh-ng'
+      - name: Download precompiled packages
+        if: needs.package.outputs.prebuilt-enabled == 'true'
         uses: actions/download-artifact@v4
         with:
-          pattern: cosh-ng-prebuilt-${{ needs.package.outputs.version }}-*
-          path: /tmp/cosh-ng-prebuilt
+          pattern: ${{ needs.package.outputs.component }}-prebuilt-${{ needs.package.outputs.version }}-*
+          path: /tmp/prebuilt
 
-      - name: Verify cosh-ng precompiled packages
-        if: needs.package.outputs.component == 'cosh-ng'
+      - name: Verify precompiled packages
+        if: needs.package.outputs.prebuilt-enabled == 'true'
         env:
-          COSH_NG_VERSION: ${{ needs.package.outputs.version }}
+          COMPONENT: ${{ needs.package.outputs.component }}
+          VERSION: ${{ needs.package.outputs.version }}
         run: |
-          python3 .github/actions/build-cosh-ng-prebuilt/verify-artifacts.py \
-            --directory /tmp/cosh-ng-prebuilt \
-            --version "$COSH_NG_VERSION" \
+          python3 .github/actions/prebuilt-rust-common/verify-artifacts.py \
+            --directory /tmp/prebuilt \
+            --component "$COMPONENT" \
+            --version "$VERSION" \
             --layout actions
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          PREBUILT_ENABLED: ${{ needs.package.outputs.prebuilt-enabled }}
         run: |
           COMPONENT="${{ needs.package.outputs.component }}"
           VERSION="${{ needs.package.outputs.version }}"
@@ -249,11 +283,11 @@ jobs:
           if [ -f "$VENDOR_ARCHIVE" ]; then
             ASSETS+=("$VENDOR_ARCHIVE")
           fi
-          if [ "$COMPONENT" = "cosh-ng" ]; then
+          if [ "$PREBUILT_ENABLED" = "true" ]; then
             while IFS= read -r asset; do
               ASSETS+=("$asset")
             done < <(
-              find /tmp/cosh-ng-prebuilt -mindepth 2 -maxdepth 2 -type f -print |
+              find /tmp/prebuilt -mindepth 2 -maxdepth 2 -type f -print |
                 LC_ALL=C sort
             )
           fi

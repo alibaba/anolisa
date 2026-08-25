@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
-# Run one Cargo command with a prepared cosh-ng release Cross profile.
+# Run one Cargo command with a prepared ANOLISA release Cross profile.
 set -euo pipefail
 
 RUST_VERSION=1.93.0
 RUST_TOOLCHAIN=1.93.0-x86_64-unknown-linux-gnu
 SCCACHE_VERSION=0.17.0
 SCCACHE_CACHE_SIZE=20G
+GNU217_X86_BASE="docker.io/dockcross/manylinux2014-x64@sha256:ab5968050aa67592ef8fde28f3d304881bf2a394f160010d0bb13e98b4ed1b3b"
+GNU217_X86_IMAGE="anolisa/rust-release-builder:gnu2.17-x86_64"
+GNU217_X86_IMAGE_ID="sha256:72b3599de7e2406e6d0b3d1fd803cf4f613486868972f83c73b1fa4e145ea42a"
+GNU217_ARM_BASE="docker.io/dockcross/manylinux2014-aarch64@sha256:86fb00cdd7f386dd13458ad6c55699ee78586da237087b14d0f94e1ea417ff54"
+GNU217_ARM_IMAGE="anolisa/rust-release-builder:gnu2.17-aarch64"
+GNU217_ARM_IMAGE_ID="sha256:4cec3c91665c86a79bb02aa4940eccbd40542bb3367bbaa4e24cced78aeb4421"
 GNU228_X86_BASE="docker.io/dockcross/manylinux_2_28-x64@sha256:263b776c5dc6ae7e50942c5fbb82eb24a1ec64016cd6dd10831d51c2201923cf"
 GNU228_X86_IMAGE="anolisa/rust-release-builder:gnu2.28-x86_64"
 GNU228_X86_IMAGE_ID="sha256:0a5c24bde830394d0fb585a4c7c2021b315e394bf3a3e3abb22401b70e4b35db"
@@ -24,33 +30,43 @@ die() {
 
 profile_target() {
     case "$1" in
-        gnu2.28-x86_64) printf 'x86_64-unknown-linux-gnu\n' ;;
-        gnu2.28-aarch64) printf 'aarch64-unknown-linux-gnu\n' ;;
+        gnu2.17-x86_64|gnu2.28-x86_64) printf 'x86_64-unknown-linux-gnu\n' ;;
+        gnu2.17-aarch64|gnu2.28-aarch64) printf 'aarch64-unknown-linux-gnu\n' ;;
         darwin11-aarch64) printf 'aarch64-apple-darwin\n' ;;
-        *) die "unsupported cosh-ng Cross profile: $1" ;;
+        *) die "unsupported release Cross profile: $1" ;;
     esac
 }
 
 profile_image() {
     case "$1" in
+        gnu2.17-x86_64) printf '%s\n' "$GNU217_X86_IMAGE" ;;
+        gnu2.17-aarch64) printf '%s\n' "$GNU217_ARM_IMAGE" ;;
         gnu2.28-x86_64) printf '%s\n' "$GNU228_X86_IMAGE" ;;
         gnu2.28-aarch64) printf '%s\n' "$GNU228_ARM_IMAGE" ;;
         darwin11-aarch64) printf '%s\n' "$DARWIN_IMAGE" ;;
-        *) die "unsupported cosh-ng Cross profile: $1" ;;
+        *) die "unsupported release Cross profile: $1" ;;
     esac
 }
 
 profile_image_id() {
     case "$1" in
+        gnu2.17-x86_64) printf '%s\n' "$GNU217_X86_IMAGE_ID" ;;
+        gnu2.17-aarch64) printf '%s\n' "$GNU217_ARM_IMAGE_ID" ;;
         gnu2.28-x86_64) printf '%s\n' "$GNU228_X86_IMAGE_ID" ;;
         gnu2.28-aarch64) printf '%s\n' "$GNU228_ARM_IMAGE_ID" ;;
         darwin11-aarch64) printf '%s\n' "$DARWIN_IMAGE_ID" ;;
-        *) die "unsupported cosh-ng Cross profile: $1" ;;
+        *) die "unsupported release Cross profile: $1" ;;
     esac
 }
 
 profile_path() {
     case "$1" in
+        gnu2.17-x86_64)
+            printf '/opt/rh/devtoolset-10/root/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n'
+            ;;
+        gnu2.17-aarch64)
+            printf '/usr/xcc/aarch64-unknown-linux-gnu/bin:/opt/rh/devtoolset-10/root/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n'
+            ;;
         gnu2.28-x86_64)
             printf '/opt/rh/gcc-toolset-14/root/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n'
             ;;
@@ -60,7 +76,7 @@ profile_path() {
         darwin11-aarch64)
             printf '/opt/osxcross/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n'
             ;;
-        *) die "unsupported cosh-ng Cross profile: $1" ;;
+        *) die "unsupported release Cross profile: $1" ;;
     esac
 }
 
@@ -88,29 +104,39 @@ verify_common_tools() {
 verify_linux_profile() {
     local profile="$1"
     local image="$2"
-    local base
+    local base glibc
 
     case "$profile" in
+        gnu2.17-x86_64)
+            base="$GNU217_X86_BASE"
+            glibc=2.17
+            ;;
+        gnu2.17-aarch64)
+            base="$GNU217_ARM_BASE"
+            glibc=2.17
+            ;;
         gnu2.28-x86_64)
             base="$GNU228_X86_BASE"
+            glibc=2.28
             ;;
         gnu2.28-aarch64)
             base="$GNU228_ARM_BASE"
+            glibc=2.28
             ;;
     esac
     [ "$(image_label "$image" org.anolisa.release-builder.profile)" = "$profile" ] || \
         die "$image does not identify profile $profile"
     [ "${base##*@}" = "$(image_label "$image" org.anolisa.release-builder.base-image | sed 's/^.*@//')" ] || \
         die "$image does not bind the pinned base image digest"
-    [ "$(docker run --rm --entrypoint getconf "$image" GNU_LIBC_VERSION)" = 'glibc 2.28' ] || \
-        die "$image is not a glibc 2.28 profile"
+    [ "$(docker run --rm --entrypoint getconf "$image" GNU_LIBC_VERSION)" = "glibc $glibc" ] || \
+        die "$image is not a glibc $glibc profile"
 
     if [ "$profile" = gnu2.28-x86_64 ]; then
         docker run --rm --entrypoint rpm "$image" -q \
             clang-devel llvm-devel elfutils-libelf-devel systemd-devel \
             fuse3-devel openssl-devel zlib-devel libzstd-devel \
             pkgconf-pkg-config >/dev/null
-    else
+    elif [ "$profile" = gnu2.28-aarch64 ]; then
         docker run --rm --entrypoint sh "$image" -c '
             set -eu
             sysroot="$(aarch64-unknown-linux-gnu-gcc --print-sysroot)"
@@ -120,6 +146,12 @@ verify_linux_profile() {
                 PKG_CONFIG_LIBDIR="$sysroot/usr/lib64/pkgconfig:$sysroot/usr/share/pkgconfig" \
                 pkg-config --exists openssl
         '
+    elif [ "$profile" = gnu2.17-x86_64 ]; then
+        docker run --rm --entrypoint sh "$image" -c \
+            'test "$(gcc -dumpmachine)" = x86_64-redhat-linux'
+    else
+        docker run --rm --entrypoint sh "$image" -c \
+            'test -x /usr/xcc/aarch64-unknown-linux-gnu/bin/aarch64-unknown-linux-gnu-gcc'
     fi
 }
 
@@ -191,8 +223,8 @@ run_profile() {
     cargo_home="${CARGO_HOME:-$HOME/.cargo}"
     install -d -m 0755 "$cargo_home/sccache"
     case "$profile" in
-        gnu2.28-x86_64) linker=gcc; archiver='ar' ;;
-        gnu2.28-aarch64)
+        gnu2.17-x86_64|gnu2.28-x86_64) linker=gcc; archiver='ar' ;;
+        gnu2.17-aarch64|gnu2.28-aarch64)
             linker=aarch64-unknown-linux-gnu-gcc
             archiver=aarch64-unknown-linux-gnu-ar
             ;;
@@ -234,7 +266,7 @@ run_profile() {
             "CXXFLAGS_${target//-/_}=-mmacosx-version-min=$deployment" \
             cross "$@" --target "$target"
     else
-        if [ "$profile" = gnu2.28-aarch64 ]; then
+        if [ "$profile" = gnu2.17-aarch64 ] || [ "$profile" = gnu2.28-aarch64 ]; then
             local sysroot=/usr/xcc/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot
             container_opts+=" --env=PKG_CONFIG_SYSROOT_DIR=$sysroot"
             container_opts+=" --env=PKG_CONFIG_LIBDIR=$sysroot/usr/lib64/pkgconfig:$sysroot/usr/share/pkgconfig"

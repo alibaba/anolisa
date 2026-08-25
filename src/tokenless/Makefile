@@ -141,7 +141,7 @@ $(AGENTSCOPE_PACKAGE_DIR)/pyproject.toml: \
 # for `openclaw plugins install` to succeed.
 build-openclaw-plugin: stamp-adapter-templates
 	@echo "==> Building tokenless OpenClaw plugin..."
-	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm install --legacy-peer-deps --no-audit --no-fund --package-lock=false
+	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm ci --legacy-peer-deps --ignore-scripts --no-audit --no-fund
 	cd $(OPENCLAW_PLUGIN_SRC_DIR) && npm run build
 	@test -f $(OPENCLAW_PLUGIN_SRC_DIR)/dist/index.js \
 	    || { echo "ERROR: $(OPENCLAW_PLUGIN_SRC_DIR)/dist/index.js was not produced"; exit 1; }
@@ -347,7 +347,6 @@ clean:
 	cargo clean --release --manifest-path third_party/rtk/Cargo.toml 2>/dev/null || true
 	rm -rf $(OPENCLAW_PLUGIN_SRC_DIR)/dist $(OPENCLAW_PLUGIN_SRC_DIR)/node_modules
 	rm -rf $(ADAPTER_SRC_DIR)/agentscope
-	rm -f  $(OPENCLAW_PLUGIN_SRC_DIR)/package-lock.json
 	rm -f  $(ADAPTER_TEMPLATES) $(COMPONENT_CONTRACT)
 	rm -f  $(AGENTSCOPE_PACKAGE_DIR)/pyproject.toml
 

@@ -3,6 +3,7 @@
 set -euo pipefail
 
 ACTION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_DIR="$(cd "$ACTION_DIR/../prebuilt-rust-common" && pwd)"
 REPO_ROOT="$(git -C "$ACTION_DIR" rev-parse --show-toplevel)"
 COMPONENT_ROOT="$REPO_ROOT/src/cosh-ng"
 TEMPORARY="$(mktemp -d)"
@@ -37,7 +38,7 @@ EMPTY_CARGO_HOME="$TEMPORARY/empty-cargo-home"
 DELEGATED_MARKER="$TEMPORARY/delegated-command"
 install -d -m 0755 "$EMPTY_CARGO_HOME"
 CARGO_HOME="$EMPTY_CARGO_HOME" \
-    python3 "$ACTION_DIR/reproducible-build.py" \
+    python3 "$COMMON_DIR/reproducible-build.py" \
         --source-root "$COMPONENT_ROOT" \
         --source-date-epoch 0 \
         -- sh -c "test \"\$SOURCE_DATE_EPOCH\" = 0; touch \"\$1\"" \
@@ -97,16 +98,18 @@ for platform in linux macos; do
     )
 done
 
-python3 "$ACTION_DIR/generate-sbom.py" \
+python3 "$COMMON_DIR/generate-sbom.py" \
     --artifact "$TEMPORARY/linux.tar.gz" \
+    --component cosh-ng \
     --version "$VERSION" \
     --os linux \
     --arch x86_64 \
     --target x86_64-unknown-linux-gnu \
     --project-dir "$COMPONENT_ROOT" \
     --source-date-epoch 0 >/dev/null
-python3 "$ACTION_DIR/generate-sbom.py" \
+python3 "$COMMON_DIR/generate-sbom.py" \
     --artifact "$TEMPORARY/macos.tar.gz" \
+    --component cosh-ng \
     --version "$VERSION" \
     --os macos \
     --arch aarch64 \

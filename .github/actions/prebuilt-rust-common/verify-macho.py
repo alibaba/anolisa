@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate an arm64 macOS executable and its deployment target."""
+"""Validate an arm64 macOS release executable and its deployment target."""
 
 from __future__ import annotations
 

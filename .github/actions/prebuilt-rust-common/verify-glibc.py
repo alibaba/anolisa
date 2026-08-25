@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify an internal release binary's architecture and glibc ceiling."""
+"""Verify a release binary's architecture and glibc ceiling."""
 
 from __future__ import annotations
 

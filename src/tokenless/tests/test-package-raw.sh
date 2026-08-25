@@ -45,6 +45,7 @@ write_json_version() {
 write_json_version "$ADAPTERS/manifest.json"
 write_json_version "$ADAPTERS/openclaw/package.json"
 write_json_version "$ADAPTERS/openclaw/openclaw.plugin.json"
+printf '{"lockfileVersion":3}\n' > "$ADAPTERS/openclaw/package-lock.json"
 write_json_version "$ADAPTERS/dsh/package.json"
 write_json_version "$ADAPTERS/qoder/.qoder-plugin/plugin.json"
 write_json_version "$ADAPTERS/claude-code/.claude-plugin/plugin.json"
@@ -174,6 +175,7 @@ test ! -e "$EXTRACTED/adapters/agentscope"
 test -z "$(find "$EXTRACTED" -type l -print -quit)"
 test -z "$(find "$EXTRACTED" \( \
     -name '*.in' -o \
+    -name package-lock.json -o \
     -name node_modules -o \
     -name build -o \
     -name '*.egg-info' -o \

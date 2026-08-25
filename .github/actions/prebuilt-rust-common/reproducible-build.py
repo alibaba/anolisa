@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a build command with stable Rust source paths and timestamps."""
+"""Run a Rust build command with stable source paths and timestamps."""
 
 from __future__ import annotations
 

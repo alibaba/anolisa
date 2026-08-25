@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify one flat cosh-ng package or a complete Actions Artifact download."""
+"""Verify one flat prebuilt package or a complete Actions Artifact download."""
 
 from __future__ import annotations
 
@@ -12,12 +12,7 @@ import tarfile
 from pathlib import Path
 from typing import Any
 
-
-TARGETS = (
-    ("linux", "x86_64"),
-    ("linux", "aarch64"),
-    ("macos", "aarch64"),
-)
+from targets import TARGETS
 
 
 def die(message: str) -> None:
@@ -81,9 +76,11 @@ def component_refs(component: dict[str, Any]) -> list[str]:
     return references
 
 
-def expected_files(version: str, target_os: str, target_arch: str) -> set[str]:
+def expected_files(
+    component_name: str, version: str, target_os: str, target_arch: str
+) -> set[str]:
     """Return the exact four release asset names for one target."""
-    archive = f"cosh-ng-{version}-{target_os}-{target_arch}.tar.gz"
+    archive = f"{component_name}-{version}-{target_os}-{target_arch}.tar.gz"
     return {
         archive,
         f"{archive}.sha256",
@@ -92,9 +89,15 @@ def expected_files(version: str, target_os: str, target_arch: str) -> set[str]:
     }
 
 
-def validate_directory(directory: Path, version: str, target_os: str, target_arch: str) -> None:
+def validate_directory(
+    directory: Path,
+    component_name: str,
+    version: str,
+    target_os: str,
+    target_arch: str,
+) -> None:
     """Validate one target's exact four-file output directory."""
-    expected = expected_files(version, target_os, target_arch)
+    expected = expected_files(component_name, version, target_os, target_arch)
     try:
         entries = list(directory.iterdir())
     except OSError as error:
@@ -108,7 +111,7 @@ def validate_directory(directory: Path, version: str, target_os: str, target_arc
             f"missing={missing or 'none'} extra={extra or 'none'}"
         )
 
-    archive_name = f"cosh-ng-{version}-{target_os}-{target_arch}.tar.gz"
+    archive_name = f"{component_name}-{version}-{target_os}-{target_arch}.tar.gz"
     archive = directory / archive_name
     archive_sha = sha256_file(archive)
     if read_sidecar(Path(f"{archive}.sha256"), archive.name) != archive_sha:
@@ -134,11 +137,11 @@ def validate_directory(directory: Path, version: str, target_os: str, target_arc
         die(f"SBOM is not CycloneDX 1.6: {sbom}")
     metadata = data.get("metadata")
     component = metadata.get("component") if isinstance(metadata, dict) else None
-    artifact_id = f"cosh-ng-{version}-{target_os}-{target_arch}-tar"
+    artifact_id = f"{component_name}-{version}-{target_os}-{target_arch}-tar"
     if not isinstance(metadata, dict) or not isinstance(component, dict):
         die(f"SBOM is missing metadata.component: {sbom}")
     if (
-        component.get("name") != "cosh-ng"
+        component.get("name") != component_name
         or component.get("version") != version
         or component.get("bom-ref") != artifact_id
     ):
@@ -202,23 +205,36 @@ def main() -> int:
     """Validate flat or downloaded Actions Artifact layout."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", required=True, type=Path)
+    parser.add_argument("--component", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--layout", choices=("flat", "actions"), required=True)
     parser.add_argument("--os", dest="target_os")
     parser.add_argument("--arch", dest="target_arch")
     args = parser.parse_args()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", args.component):
+        parser.error("component must be a lowercase release component name")
     root = args.directory.resolve()
     if args.layout == "flat":
         if not args.target_os or not args.target_arch:
             parser.error("flat layout requires --os and --arch")
-        validate_directory(root, args.version, args.target_os, args.target_arch)
+        validate_directory(
+            root,
+            args.component,
+            args.version,
+            args.target_os,
+            args.target_arch,
+        )
         return 0
     if args.target_os or args.target_arch:
         parser.error("actions layout does not accept --os or --arch")
 
+    component_targets = TARGETS.get(args.component)
+    if component_targets is None:
+        parser.error(f"component has no prebuilt target matrix: {args.component}")
     expected_directories = {
-        f"cosh-ng-prebuilt-{args.version}-{target_os}-{target_arch}"
-        for target_os, target_arch in TARGETS
+        f"{args.component}-prebuilt-{args.version}-"
+        f"{target['target-os']}-{target['target-arch']}"
+        for target in component_targets
     }
     try:
         entries = list(root.iterdir())
@@ -232,10 +248,17 @@ def main() -> int:
             "unexpected Actions Artifacts; "
             f"missing={missing or 'none'} extra={extra or 'none'}"
         )
-    for target_os, target_arch in TARGETS:
-        directory = root / f"cosh-ng-prebuilt-{args.version}-{target_os}-{target_arch}"
-        validate_directory(directory, args.version, target_os, target_arch)
-    print(f"Verified 12 cosh-ng prebuilt release assets under {root}")
+    for target in component_targets:
+        target_os = target["target-os"]
+        target_arch = target["target-arch"]
+        directory = (
+            root
+            / f"{args.component}-prebuilt-{args.version}-{target_os}-{target_arch}"
+        )
+        validate_directory(
+            directory, args.component, args.version, target_os, target_arch
+        )
+    print(f"Verified 12 {args.component} prebuilt release assets under {root}")
     return 0
 
 

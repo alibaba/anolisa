@@ -156,21 +156,8 @@ runs:
         set -euo pipefail
         cd /tmp/build/${ARCHIVE_NAME}
 
-        RTK_TAG="$(sed -n 's/^rtk_tag[[:space:]]*:=[[:space:]]*"\(.*\)"/\1/p' justfile)"
-        if [ -z "$RTK_TAG" ]; then
-          echo "ERROR: Could not resolve rtk_tag from justfile"
-          exit 1
-        fi
-
         rm -rf third_party/rtk
-        git clone --depth 1 --branch "$RTK_TAG" \
-          https://github.com/rtk-ai/rtk.git third_party/rtk
-
-        patch --forward -p1 --no-backup-if-mismatch \
-          -d third_party/rtk < third_party/patches/rtk-tokenless-stats.patch
-        patch --forward -p1 --no-backup-if-mismatch \
-          -d third_party/rtk < third_party/patches/rtk-pytest-error-report.patch
-
+        bash scripts/setup-rtk.sh third_party/rtk
         rm -rf third_party/rtk/.git
 
     - name: Generate tokenless component contract

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a deterministic CycloneDX 1.6 sidecar for a cosh-ng archive."""
+"""Generate a deterministic CycloneDX 1.6 sidecar for a Rust archive."""
 
 from __future__ import annotations
 
@@ -103,13 +103,16 @@ def cargo_metadata(project_dir: Path, target: str) -> dict[str, Any]:
 
 
 def resolved_package_identities(data: dict[str, Any]) -> set[tuple[str, str]]:
-    """Return normal dependencies reachable from every workspace member."""
+    """Return normal dependencies reachable from default workspace members."""
     packages = data.get("packages")
     workspace_members = data.get("workspace_members")
+    workspace_default_members = data.get("workspace_default_members")
     resolve = data.get("resolve")
     nodes = resolve.get("nodes") if isinstance(resolve, dict) else None
     if not isinstance(packages, list) or not isinstance(workspace_members, list):
         die("cargo metadata is missing packages or workspace_members")
+    if not isinstance(workspace_default_members, list):
+        workspace_default_members = workspace_members
     if not isinstance(nodes, list):
         die("cargo metadata is missing the resolved dependency graph")
 
@@ -124,7 +127,7 @@ def resolved_package_identities(data: dict[str, Any]) -> set[tuple[str, str]]:
             die("cargo metadata contains an invalid resolve node")
         nodes_by_id[node["id"]] = node
 
-    pending = list(workspace_members)
+    pending = list(workspace_default_members)
     reachable: set[str] = set()
     while pending:
         package_id = pending.pop()
@@ -310,9 +313,46 @@ def deduplicate_component_tree(component: dict[str, Any], seen: set[str]) -> Non
     component["components"] = unique
 
 
+def merge_sboms(documents: list[dict[str, Any]]) -> dict[str, Any]:
+    """Merge filtered cargo-sbom documents for every shipped Rust project."""
+    if not documents:
+        die("at least one cargo-sbom document is required")
+    merged = documents[0]
+    metadata = merged.get("metadata")
+    root = metadata.get("component") if isinstance(metadata, dict) else None
+    root_components = root.get("components") if isinstance(root, dict) else None
+    components = merged.get("components")
+    dependencies = merged.get("dependencies")
+    if not all(isinstance(value, list) for value in (root_components, components, dependencies)):
+        die("cargo-sbom output is missing mergeable component collections")
+
+    for document in documents[1:]:
+        other_metadata = document.get("metadata")
+        other_root = (
+            other_metadata.get("component")
+            if isinstance(other_metadata, dict)
+            else None
+        )
+        other_root_components = (
+            other_root.get("components") if isinstance(other_root, dict) else None
+        )
+        other_components = document.get("components")
+        other_dependencies = document.get("dependencies")
+        if not all(
+            isinstance(value, list)
+            for value in (other_root_components, other_components, other_dependencies)
+        ):
+            die("cargo-sbom output is missing mergeable component collections")
+        root_components.extend(other_root_components)
+        components.extend(other_components)
+        dependencies.extend(other_dependencies)
+    return merged
+
+
 def normalize_sbom(
     data: dict[str, Any],
     *,
+    component_name: str,
     version: str,
     target_os: str,
     target_arch: str,
@@ -328,11 +368,11 @@ def normalize_sbom(
     if not isinstance(metadata, dict) or not isinstance(root, dict):
         die("cargo-sbom output is missing metadata.component")
 
-    artifact_id = f"cosh-ng-{version}-{target_os}-{target_arch}-tar"
+    artifact_id = f"{component_name}-{version}-{target_os}-{target_arch}-tar"
     root.update(
         {
             "type": "application",
-            "name": "cosh-ng",
+            "name": component_name,
             "version": version,
             "bom-ref": artifact_id,
             "hashes": [{"alg": "SHA-256", "content": artifact_sha256}],
@@ -359,7 +399,8 @@ def normalize_sbom(
     )
     metadata["authors"] = [{"name": "ANOLISA Release Pipeline"}]
     serial_seed = (
-        f"anolisa:cosh-ng:{version}:{target_os}:{target_arch}:sha256:{artifact_sha256}"
+        f"anolisa:{component_name}:{version}:{target_os}:{target_arch}:"
+        f"sha256:{artifact_sha256}"
     )
     data["serialNumber"] = f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, serial_seed)}"
     data["version"] = 1
@@ -386,13 +427,23 @@ def normalize_sbom(
         deduplicate_component_tree(component, seen)
         unique.append(component)
     data["components"] = unique
+    merged_dependencies: dict[str, set[str]] = {}
     for dependency in dependencies:
         if not isinstance(dependency, dict):
             die("cargo-sbom output contains an invalid dependency")
+        reference = dependency.get("ref")
         depends_on = dependency.get("dependsOn")
-        if isinstance(depends_on, list):
-            dependency["dependsOn"] = sorted(set(depends_on))
-    dependencies.sort(key=lambda item: str(item.get("ref", "")))
+        if not isinstance(reference, str) or not isinstance(depends_on, list):
+            die("cargo-sbom output contains an invalid dependency edge")
+        targets = merged_dependencies.setdefault(reference, set())
+        for target in depends_on:
+            if not isinstance(target, str):
+                die("cargo-sbom output contains an invalid dependency target")
+            targets.add(target)
+    data["dependencies"] = [
+        {"ref": reference, "dependsOn": sorted(targets)}
+        for reference, targets in sorted(merged_dependencies.items())
+    ]
     return data
 
 
@@ -414,19 +465,26 @@ def main() -> int:
     """Generate the normalized SBOM and its checksum sidecar."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifact", required=True, type=Path)
+    parser.add_argument("--component", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--os", dest="target_os", required=True)
     parser.add_argument("--arch", dest="target_arch", required=True)
     parser.add_argument("--target", required=True)
-    parser.add_argument("--project-dir", required=True, type=Path)
+    parser.add_argument(
+        "--project-dir", required=True, action="append", type=Path
+    )
     parser.add_argument("--source-date-epoch", required=True, type=int)
     parser.add_argument("--tool", default="cargo-sbom")
     args = parser.parse_args()
 
     artifact = args.artifact.resolve()
-    project_dir = args.project_dir.resolve()
-    if not artifact.is_file() or not project_dir.is_dir():
-        die("artifact must be a file and project-dir must be a directory")
+    project_dirs = [project_dir.resolve() for project_dir in args.project_dir]
+    if not artifact.is_file() or any(
+        not project_dir.is_dir() for project_dir in project_dirs
+    ):
+        die("artifact must be a file and every project-dir must be a directory")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", args.component):
+        die("component must be a lowercase release component name")
     if args.source_date_epoch < 0:
         die("source-date-epoch must not be negative")
     expected_target = {
@@ -443,37 +501,43 @@ def main() -> int:
     if read_sidecar(Path(f"{artifact}.sha256"), artifact.name) != artifact_sha256:
         die(f"artifact checksum sidecar does not match {artifact}")
 
-    try:
-        result = subprocess.run(
-            [
-                args.tool,
-                "--output-format",
-                "cyclone_dx_json_1_6",
-                "--project-directory",
-                str(project_dir),
-            ],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+    documents: list[dict[str, Any]] = []
+    for project_dir in project_dirs:
+        try:
+            result = subprocess.run(
+                [
+                    args.tool,
+                    "--output-format",
+                    "cyclone_dx_json_1_6",
+                    "--project-directory",
+                    str(project_dir),
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except FileNotFoundError:
+            die(f"cargo-sbom command not found: {args.tool}")
+        except subprocess.CalledProcessError as error:
+            detail = (error.stderr or error.stdout or "").strip()
+            die(f"cargo-sbom failed: {detail or error.returncode}")
+        try:
+            raw = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            die(f"cargo-sbom returned invalid JSON: {error}")
+        if not isinstance(raw, dict):
+            die("cargo-sbom output must be a JSON object")
+        documents.append(
+            filter_sbom_for_target(
+                raw,
+                resolved_package_identities(cargo_metadata(project_dir, args.target)),
+            )
         )
-    except FileNotFoundError:
-        die(f"cargo-sbom command not found: {args.tool}")
-    except subprocess.CalledProcessError as error:
-        detail = (error.stderr or error.stdout or "").strip()
-        die(f"cargo-sbom failed: {detail or error.returncode}")
-    try:
-        raw = json.loads(result.stdout)
-    except json.JSONDecodeError as error:
-        die(f"cargo-sbom returned invalid JSON: {error}")
-    if not isinstance(raw, dict):
-        die("cargo-sbom output must be a JSON object")
-    raw = filter_sbom_for_target(
-        raw,
-        resolved_package_identities(cargo_metadata(project_dir, args.target)),
-    )
+    raw = merge_sboms(documents)
     normalized = normalize_sbom(
         raw,
+        component_name=args.component,
         version=args.version,
         target_os=args.target_os,
         target_arch=args.target_arch,
