@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-08-25
+
+### Changed
+
+- Source and RPM builds now require Rust 1.93, with the rustup toolchain pinned
+  to 1.93.1 and Cargo dependency resolution constrained by the declared MSRV.
+  Builders can use the newest compiler packaged by Alibaba Cloud Linux 4
+  without Cargo selecting dependencies that exceed the supported compiler;
+  older Rust toolchains must be upgraded
+  ([#2810](https://github.com/alibaba/anolisa/pull/2810)).
+
+### Fixed
+
+- `anolisa --dry-run restart <component>` now lists the units that would be
+  restarted without invoking `systemctl daemon-reload` or `systemctl restart`.
+  System-mode previews read recorded state without taking the exclusive install
+  lock, so they no longer require write access to the state root
+  ([#2774](https://github.com/alibaba/anolisa/pull/2774)).
+
 ## [0.3.6] - 2026-08-22
 
 ### Fixed

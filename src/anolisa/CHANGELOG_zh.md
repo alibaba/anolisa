@@ -9,6 +9,23 @@
 
 ## [未发布]
 
+## [0.3.7] - 2026-08-25
+
+### 变更
+
+- 源码构建与 RPM 构建现要求 Rust 1.93，rustup toolchain 固定为 1.93.1，
+  Cargo dependency resolution 同时受声明的 MSRV 约束。构建者可使用
+  Alibaba Cloud Linux 4 打包的最新 compiler，且 Cargo 不会选择超出受支持
+  compiler 的 dependency；更早的 Rust toolchain 需要升级
+  ([#2810](https://github.com/alibaba/anolisa/pull/2810))。
+
+### 修复
+
+- `anolisa --dry-run restart <component>` 现会列出将要重启的 unit，但不会调用
+  `systemctl daemon-reload` 或 `systemctl restart`。System mode 预览会读取已记录
+  状态而不获取 exclusive install lock，因此不再要求对 state root 拥有写权限
+  ([#2774](https://github.com/alibaba/anolisa/pull/2774))。
+
 ## [0.3.6] - 2026-08-22
 
 ### 修复
