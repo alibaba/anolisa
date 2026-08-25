@@ -85,6 +85,9 @@ test-e2e-rpm: ## Run E2E tests against RPM-installed agent-sec-cli binary
 	@echo "🧪 Running E2E tests on installed RPM..."
 	@command -v agent-sec-cli >/dev/null 2>&1 || { echo "ERROR: agent-sec-cli not found on PATH"; exit 1; }
 	@command -v pytest >/dev/null 2>&1 || pip3 install --quiet pytest
+	@# The code-scanner rule inventory test parses rule YAML directly, so PyYAML
+	@# is required even though the CLI itself is installed from the RPM.
+	@python3 -c 'import yaml' >/dev/null 2>&1 || pip3 install --quiet pyyaml
 	python3 -m pytest tests/e2e/ \
 		--import-mode=importlib \
 		--ignore=tests/e2e/linux-sandbox \
