@@ -721,8 +721,9 @@ impl InterruptionStore {
     ///
     /// * `retention_days` - delete rows whose `occurred_at_ns` is older than this
     ///   many days.  A value of 0 disables age-based purging.
-    /// * `max_db_size_mb` - if the database file is larger than this, delete the
-    ///   oldest rows until it fits.  A value of 0 disables size-based purging.
+    /// * `max_db_size_mb` - if the database (main file + WAL + SHM) is larger
+    ///   than this, delete the oldest rows until it fits.  A value of 0
+    ///   disables size-based purging.
     ///
     /// Returns the total number of rows deleted.
     pub fn purge_old_and_oversized(
@@ -743,26 +744,84 @@ impl InterruptionStore {
             total_deleted += self.purge_before(cutoff_ns)?;
         }
 
-        // 2. Size-based trimming: if file still exceeds max_db_size_mb, delete
-        // oldest records in batches until it fits or no rows remain.
+        // 2. Size-based trimming (checkpoints inside its own loop)
         if max_db_size_mb > 0 {
-            let max_bytes = (max_db_size_mb as u64) * 1024 * 1024;
-            let path = self.db_path();
-            for _ in 0..100 {
-                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                if size <= max_bytes {
-                    break;
-                }
-                let deleted = self.delete_oldest_batch(1000)?;
-                total_deleted += deleted;
-                if deleted == 0 {
-                    break;
-                }
+            total_deleted += self.trim_to_size_limit(max_db_size_mb)?;
+        }
+
+        // 3. Reclaim pages freed by age-based deletes. The size trim already
+        // checkpointed on its last iteration; one more pass is cheap on an
+        // already-compact file.
+        if total_deleted > 0 {
+            if let Err(e) = self.checkpoint() {
+                log::warn!("checkpoint after interruption purge failed: {e}");
             }
-            // Reclaim free pages after bulk deletes. VACUUM may fail if
-            // disk is full; freed pages are still reusable by future inserts.
-            if let Err(e) = self.vacuum() {
-                log::warn!("VACUUM after interruption purge failed: {e}");
+        }
+
+        Ok(total_deleted)
+    }
+
+    /// Delete oldest rows until the total on-disk size fits 90% of the limit.
+    ///
+    /// Trimming starts only once the database exceeds the configured limit;
+    /// the 90% mark is just the stop target, so a few inserts after a trim do
+    /// not immediately retrigger it.
+    fn trim_to_size_limit(&self, max_db_size_mb: u64) -> Result<usize, Box<dyn std::error::Error>> {
+        let max_bytes = (max_db_size_mb as u64) * 1024 * 1024;
+        if self.total_db_file_size() <= max_bytes {
+            return Ok(0);
+        }
+        let threshold = (max_bytes as f64 * 0.9) as u64;
+        let mut total_deleted = 0usize;
+        let mut stuck_rounds = 0u32;
+
+        for _ in 0..20 {
+            let size = self.total_db_file_size();
+            if size <= threshold {
+                break;
+            }
+            let rows = self.row_count()?;
+            if rows == 0 {
+                break;
+            }
+
+            // Bigger bites when far over the limit; mirrors the sibling genai
+            // store's prune policy.
+            let overshoot = size as f64 / max_bytes as f64;
+            let pct = if overshoot > 5.0 {
+                0.50
+            } else if overshoot > 2.0 {
+                0.25
+            } else {
+                0.10
+            };
+            let batch = ((rows as f64 * pct) as usize).max(1);
+            let deleted = self.delete_oldest_batch(batch)?;
+            total_deleted += deleted;
+            if deleted == 0 {
+                break;
+            }
+
+            // A DELETE in WAL mode does not shrink the main file (it appends
+            // to the WAL instead), so size must be re-measured after a
+            // checkpoint or the loop cannot observe progress.
+            if let Err(e) = self.checkpoint() {
+                log::warn!("checkpoint during interruption trim failed: {e}");
+            }
+
+            let new_size = self.total_db_file_size();
+            if new_size < size {
+                stuck_rounds = 0;
+            } else {
+                stuck_rounds += 1;
+                if stuck_rounds >= 3 {
+                    log::warn!(
+                        "Interruption trim stalled at {new_size} bytes \
+                         (threshold {threshold}, rows {rows}, overshoot {overshoot:.1}x); \
+                         VACUUM is likely failing, e.g. disk full"
+                    );
+                    break;
+                }
             }
         }
 
@@ -791,10 +850,44 @@ impl InterruptionStore {
             .unwrap_or_else(|| std::path::PathBuf::from("interruption_events.db"))
     }
 
-    /// Run VACUUM to reclaim free pages.
-    fn vacuum(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+    /// Total on-disk size: main file + WAL + SHM. Fresh writes land in the
+    /// WAL, so measuring the main file alone misses recent growth.
+    fn total_db_file_size(&self) -> u64 {
+        let path = self.db_path();
+        let mut total = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        // Append via OsString so non-UTF-8 db paths still resolve the sidecars.
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = path.clone().into_os_string();
+            sidecar.push(suffix);
+            if let Ok(meta) = std::fs::metadata(&sidecar) {
+                total += meta.len();
+            }
+        }
+        total
+    }
+
+    fn row_count(&self) -> Result<i64, Box<dyn std::error::Error>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("interruption store connection mutex poisoned: {e}"))?;
+        let count = conn.query_row("SELECT COUNT(*) FROM interruption_events", [], |r| r.get(0))?;
+        Ok(count)
+    }
+
+    /// Reclaim free pages and truncate the WAL.
+    ///
+    /// VACUUM rebuilds the main file; in WAL mode it can reset the journal
+    /// mode, so WAL is re-enabled before the truncating checkpoint. Mirrors
+    /// the sibling genai store's `checkpoint()`.
+    fn checkpoint(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| format!("interruption store connection mutex poisoned: {e}"))?;
         conn.execute_batch("VACUUM;")?;
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     }
 }
@@ -1601,6 +1694,130 @@ mod tests {
             deleted, 1,
             "very old row should be purged with 1-day retention"
         );
+    }
+
+    /// Regression for #2818: an oversized database must be trimmed to the
+    /// limit (newest rows survive) and the file must actually shrink, not
+    /// stay put while the table is wiped. Reverting to a main-file-only size
+    /// check without an in-loop checkpoint makes this fail: the loop then
+    /// cannot observe progress and deletes until the table is empty.
+    #[test]
+    fn purge_size_based_keeps_newest_and_shrinks_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "test_interruption_size_{}_{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = InterruptionStore::new_with_path(&path).unwrap();
+
+        // Seed ~1.3MB across 300 rows (~4KB detail each), over a 1MB limit.
+        let blob = "y".repeat(4 * 1024);
+        for i in 0..300 {
+            let mut e = make_event("conv-size", InterruptionType::LlmError);
+            e.interruption_id = format!("int-size-{i:04}");
+            e.occurred_at_ns = 1_000 + i as i64; // oldest first
+            e.detail = Some(blob.clone());
+            store.insert(&e).unwrap();
+        }
+        // Flush the WAL so the pre-purge size reflects the seeded rows.
+        store.checkpoint().unwrap();
+        assert!(
+            store.total_db_file_size() > 1024 * 1024,
+            "setup must exceed the 1MB limit, got {}",
+            store.total_db_file_size()
+        );
+
+        let deleted = store.purge_old_and_oversized(0, 1).unwrap();
+        assert!(deleted > 0, "oversized db must be trimmed");
+        assert!(
+            deleted < 300,
+            "must stop at the limit, not wipe the table (#2818)"
+        );
+
+        // Newest rows survive.
+        let remaining = store
+            .list(0, i64::MAX, None, None, None, None, 500)
+            .unwrap();
+        assert!(
+            remaining
+                .iter()
+                .any(|r| r.interruption_id == "int-size-0299"),
+            "newest row must survive size-based trim"
+        );
+
+        // File (main + WAL) actually shrank below the limit.
+        let size_after = store.total_db_file_size();
+        assert!(
+            size_after <= 1024 * 1024,
+            "file must fit after trim, got {size_after}"
+        );
+
+        // Once the file fits, the next purge is a no-op.
+        let deleted_again = store.purge_old_and_oversized(0, 1).unwrap();
+        assert_eq!(deleted_again, 0);
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    /// A database between 90% and 100% of the limit is not oversized and must
+    /// not be trimmed: the configured limit gates triggering, the 90% mark is
+    /// only the stop target once trimming started. With the 90% mark as the
+    /// trigger this test fails (rows would be deleted).
+    #[test]
+    fn purge_size_based_below_limit_is_noop() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "test_interruption_below_limit_{}_{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = InterruptionStore::new_with_path(&path).unwrap();
+
+        // Grow until the total size lands in (0.9MB, 1MB] with a 1MB limit.
+        // An un-checkpointed WAL holds many stale page versions and
+        // inflates the measurement several-fold, so always measure right
+        // after a checkpoint; one 20-row batch (~90KB compact) cannot jump
+        // over the 0.1MB window.
+        let blob = "y".repeat(4 * 1024);
+        let mut seeded = 0usize;
+        loop {
+            for _ in 0..20 {
+                let mut e = make_event("conv-below", InterruptionType::LlmError);
+                e.interruption_id = format!("int-below-{seeded:04}");
+                e.occurred_at_ns = 1_000 + seeded as i64;
+                e.detail = Some(blob.clone());
+                store.insert(&e).unwrap();
+                seeded += 1;
+            }
+            store.checkpoint().unwrap();
+            if store.total_db_file_size() > 943_718 {
+                break; // > 0.9MB
+            }
+            assert!(seeded < 400, "setup should reach 0.9MB within 400 rows");
+        }
+        let size = store.total_db_file_size();
+        assert!(
+            size > 943_718 && size <= 1_048_576,
+            "setup must land in (90%, 100%] of the limit, got {size}"
+        );
+
+        let deleted = store.purge_old_and_oversized(0, 1).unwrap();
+        assert_eq!(deleted, 0, "below the configured limit must not trim");
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
     }
 
     // ── pure helper functions ────────────────────────────────────────────────
