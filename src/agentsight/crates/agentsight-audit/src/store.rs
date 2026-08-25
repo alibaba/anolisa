@@ -679,7 +679,9 @@ impl AuditStore {
             let (agent_id, policy_id, policy_revision, case_id_str) = row?;
             let case_id = uuid::Uuid::parse_str(&case_id_str)
                 .map_err(|_| AuditError::InvalidData(format!("bad case_id: {case_id_str}")))?;
-            index.entry((agent_id, policy_id, policy_revision)).or_insert(case_id);
+            index
+                .entry((agent_id, policy_id, policy_revision))
+                .or_insert(case_id);
         }
         Ok(index)
     }

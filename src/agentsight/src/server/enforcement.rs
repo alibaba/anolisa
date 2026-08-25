@@ -473,9 +473,11 @@ pub(super) async fn list_violations(
                 .iter()
                 .map(|v| {
                     let mut obj = serde_json::to_value(v).unwrap_or_default();
-                    if let Some(case_id) =
-                        case_index.get(&(v.agent_id.clone(), v.policy_id.clone(), v.policy_revision.clone()))
-                    {
+                    if let Some(case_id) = case_index.get(&(
+                        v.agent_id.clone(),
+                        v.policy_id.clone(),
+                        v.policy_revision.clone(),
+                    )) {
                         obj["case_id"] = serde_json::json!(case_id.to_string());
                     }
                     obj
