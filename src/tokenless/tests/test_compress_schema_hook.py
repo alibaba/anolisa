@@ -46,22 +46,42 @@ def _hook_path() -> str:
     return os.path.join(hooks_dir, "compress_schema_hook.py")
 
 
-def _create_mock_tokenless(tmpdir: str, argv_log: str) -> str:
-    """Mock `tokenless compress-schema` that truncates descriptions.
+def _create_mock_tokenless(
+    tmpdir: str, argv_log: str, disposition: str = "applied"
+) -> str:
+    """Mock `tokenless` speaking the protocol-v1 `compress` entry.
 
-    Records its own argv to ``argv_log`` so tests can assert the agent ID the
-    hook attributed the invocation to.
+    Truncates every tool description in the request content and records the
+    argv plus the decoded request to ``argv_log`` so tests can assert the
+    agent ID the hook attributed the invocation to. A non-"applied"
+    ``disposition`` responds with the original content untouched, matching
+    the entry point's fail-open contract.
     """
     mock_script = os.path.join(tmpdir, "tokenless")
     script = textwrap.dedent(f"""\
         #!/usr/bin/env python3
         import json, sys
+        request = json.loads(sys.stdin.read())
         with open({argv_log!r}, "w") as log:
-            log.write(json.dumps(sys.argv[1:]))
-        tools = json.loads(sys.stdin.read())
-        for tool in tools:
-            tool["description"] = "compressed"
-        print(json.dumps(tools))
+            log.write(json.dumps({{"argv": sys.argv[1:], "request": request}}))
+        if sys.argv[1:] != ["compress"] or request.get("protocol_version") != 1:
+            sys.exit(2)
+        disposition = {disposition!r}
+        tools = json.loads(request["content"])
+        if disposition == "applied":
+            for tool in tools:
+                tool["description"] = "compressed"
+        print(json.dumps({{
+            "protocol_version": 1,
+            "output": json.dumps(tools, separators=(",", ":")),
+            "disposition": disposition,
+            "compressor_chain": ["schema-compress"] if disposition == "applied" else [],
+            "reversibility": "lossless",
+            "before_tokens": 100,
+            "after_tokens": 50 if disposition == "applied" else 100,
+            "stash_keys": [],
+            "tokenizer_id": "heuristic-v1",
+        }}))
     """)
     with open(mock_script, "w") as handle:
         handle.write(script)
@@ -155,8 +175,8 @@ class TestSchemaCompressionProtocol(unittest.TestCase):
 
     def _recorded_agent_id(self) -> str:
         with open(self.argv_log) as handle:
-            argv = json.load(handle)
-        return argv[argv.index("--agent-id") + 1]
+            logged = json.load(handle)
+        return logged["request"]["agent_id"]
 
     def test_reads_and_writes_canonical_config_tools(self):
         result = _run_hook(
@@ -168,6 +188,30 @@ class TestSchemaCompressionProtocol(unittest.TestCase):
         tools = result["hookSpecificOutput"]["llm_request"]["config"]["tools"]
         self.assertEqual(tools[0]["name"], "shell")
         self.assertEqual(tools[0]["description"], "compressed")
+
+    def test_reversibility_unavailable_warns_and_wraps_original(self):
+        """A stash failure keeps the schemas uncompressed; the warning is
+        what separates it from "nothing to compress" in hook logs."""
+        mock_dir = tempfile.mkdtemp(dir=self.tmpdir)
+        mock_bin = _create_mock_tokenless(
+            mock_dir, os.path.join(mock_dir, "argv.json"),
+            disposition="reversibility_unavailable",
+        )
+
+        proc = _run_hook_raw(
+            json.dumps(
+                {"session_id": "s1", "llm_request": {"config": {"tools": _TOOLS}}}
+            ),
+            mock_bin,
+            {"TOKENLESS_AGENT_ID": "copilot-shell"},
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        tools = json.loads(proc.stdout)["hookSpecificOutput"]["llm_request"][
+            "config"]["tools"]
+        self.assertEqual(tools[0]["description"], _TOOLS[0]["description"],
+                         "the original schemas must pass through untouched")
+        self.assertIn("stash unavailable", proc.stderr)
 
     def test_accepts_legacy_top_level_tools(self):
         result = _run_hook(

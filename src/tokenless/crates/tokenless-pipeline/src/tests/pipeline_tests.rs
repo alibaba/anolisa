@@ -14,10 +14,12 @@ use crate::registry::CostClass;
 const REPLACE_ONLY: Capabilities = Capabilities {
     replace_output: true,
     publish_retrieve_tool: false,
+    replace_with_text: false,
 };
 const FULL: Capabilities = Capabilities {
     replace_output: true,
     publish_retrieve_tool: true,
+    replace_with_text: false,
 };
 
 const fn test_spec(id: &'static str, stage: Stage, capabilities: Capabilities) -> CompressorSpec {

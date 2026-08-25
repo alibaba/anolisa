@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Tokenless schema compression hook.
 
-Reads a BeforeModel JSON from stdin, extracts the tools array,
-invokes ``tokenless compress-schema --batch`` via subprocess, and
-writes a HookOutput JSON to stdout.
+Reads a BeforeModel JSON from stdin, extracts the tools array, forwards it
+to the unified ``tokenless compress`` entry point (protocol v1, seam
+``before_model``, roadmap §5.4), and writes a HookOutput JSON to stdout.
+The entry point returns the original array on no-savings, which this hook
+wraps exactly like a compressed one — the historical behavior of the
+``compress-schema`` flow it replaces.
 
 Hook point: **BeforeModel**
 
@@ -16,7 +19,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import subprocess
 import sys
 
 try:  # POSIX hosts (cosh / Cosh-NG) — the platforms these hooks target.
@@ -30,9 +32,11 @@ from hook_utils import (
     _TOKENLESS_FALLBACK,
     _TOKENLESS_LOCAL_LIB,
     _TOKENLESS_LOCAL_SHARE,
+    build_compression_request,
     resolve_agent_id,
     resolve_binary,
     resolve_tool_call_id,
+    run_compress,
     secure_write_text,
     skip,
     warn,
@@ -41,6 +45,11 @@ from hook_utils import (
 # -- constants ---------------------------------------------------------------
 
 _AGENT_ID = resolve_agent_id()
+
+# Below the extension manifests' 10 s host wrapper, so a pathological batch
+# is killed here (fail-open skip) instead of racing the host's kill of the
+# whole hook (the old subprocess timeout was 10 s against a 10 s wrapper).
+_COMPRESS_TIMEOUT = 8
 
 # One marker file holds the session keys that already emitted the "no tool
 # declarations" warning — one key per line, most recent last — so the warning
@@ -272,36 +281,31 @@ def main() -> None:
     session_id = input_data.get("session_id", "")
     tool_use_id = resolve_tool_call_id(_AGENT_ID, input_data)
 
-    # 5. Compress schemas via tokenless compress-schema --batch
-    cmd = [tokenless_bin, "compress-schema", "--batch", "--agent-id", _AGENT_ID]
-    if session_id:
-        cmd.extend(["--session-id", session_id])
-    if tool_use_id:
-        cmd.extend(["--tool-use-id", tool_use_id])
-
-    try:
-        proc = subprocess.run(
-            cmd,
-            input=tools_json,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except Exception:
+    # 5. Compress schemas via the unified entry point (one subprocess).
+    request = build_compression_request(
+        tools_json,
+        _AGENT_ID,
+        "before_model",
+        session_id=session_id,
+        tool_use_id=tool_use_id,
+        replace_output=True,
+        publish_retrieve_tool=True,
+    )
+    response = run_compress(tokenless_bin, request, _COMPRESS_TIMEOUT)
+    if response is None:
         warn("Schema compression subprocess failed. Passing through unchanged.")
         skip()
-
-    if proc.returncode != 0:
-        detail = (proc.stderr or "").strip()[:200]
-        warn(
-            f"Schema compression failed with exit code {proc.returncode}: {detail}"
-            if detail
-            else f"Schema compression failed with exit code {proc.returncode}. Passing through unchanged."
-        )
+    if response.get("disposition") in {"error", "timeout"}:
+        warn("Schema compression failed. Passing through unchanged.")
         skip()
+    if response.get("disposition") == "reversibility_unavailable":
+        # Savings existed but the stash could not record the originals;
+        # the entry point returned the uncompressed schemas. Surface the
+        # distinction from "nothing to compress" (envelope unchanged).
+        warn("Schema stash unavailable; truncated descriptions would be lossy.")
 
-    compressed = proc.stdout.strip()
-    if not compressed or not _is_json_array(compressed):
+    compressed = response.get("output")
+    if not isinstance(compressed, str) or not _is_json_array(compressed):
         warn(
             "Schema compression returned invalid JSON. Passing through unchanged."
         )

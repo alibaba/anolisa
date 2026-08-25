@@ -38,42 +38,75 @@ def _make_large_json_payload(char_target: int = 500) -> dict:
 
 
 def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
-    """Create a mock tokenless binary that simulates compression behavior."""
+    """Create a mock `tokenless` speaking the protocol-v1 `compress` entry.
+
+    Every invocation appends its argv to a `spawn_log` file next to the
+    binary, so tests can assert the one-subprocess contract (§5.6). The
+    mock also validates the request shape: a malformed request from the
+    hook exits non-zero, which the hook fails open on — surfacing
+    request-construction bugs as envelope mismatches.
+
+    Behaviors: "compress" applies string-truncation (>20 chars → first 20)
+    to the content and responds applied; "no-savings" and "passthrough"
+    return the original content under the matching disposition.
+    """
     mock_script = os.path.join(tmpdir, "tokenless")
 
+    prologue = textwrap.dedent("""\
+        #!/usr/bin/env python3
+        import json, os, sys
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "spawn_log"), "a") as log:
+            log.write(" ".join(sys.argv[1:]) + "\\n")
+        if sys.argv[1:] != ["compress"]:
+            sys.exit(2)
+        request = json.loads(sys.stdin.read())
+        if request.get("protocol_version") != 1 or "capabilities" not in request:
+            sys.exit(2)
+        content = request["content"]
+
+        def respond(output, disposition):
+            print(json.dumps({
+                "protocol_version": 1,
+                "output": output,
+                "disposition": disposition,
+                "compressor_chain": ["response-cleanup"] if disposition == "applied" else [],
+                "reversibility": "lossless",
+                "before_tokens": 100,
+                "after_tokens": 50 if disposition == "applied" else 100,
+                "stash_keys": [],
+                "tokenizer_id": "heuristic-v1",
+            }))
+    """)
+
     if behavior == "compress":
-        script = textwrap.dedent("""\
-            #!/usr/bin/env python3
-            import json, sys
-            if sys.argv[1] == "compress-response":
-                data = json.loads(sys.stdin.read())
-                compressed = {}
-                for k, v in data.items():
-                    if isinstance(v, str) and len(v) > 20:
-                        compressed[k] = v[:20]
-                    else:
-                        compressed[k] = v
-                print(json.dumps(compressed))
-            elif sys.argv[1] == "compress-toon":
-                sys.exit(1)
+        script = prologue + textwrap.dedent("""\
+            data = json.loads(content)
+            if isinstance(data, str):
+                data = json.loads(data)
+            compressed = {
+                k: (v[:20] if isinstance(v, str) and len(v) > 20 else v)
+                for k, v in data.items()
+            }
+            respond(json.dumps(compressed, separators=(",", ":")), "applied")
         """)
     elif behavior == "no-savings":
-        script = textwrap.dedent("""\
-            #!/usr/bin/env python3
-            import json, sys
-            if sys.argv[1] == "compress-response":
-                data = json.loads(sys.stdin.read())
-                data["extra_padding"] = "x" * 200
-                print(json.dumps(data))
-            elif sys.argv[1] == "compress-toon":
-                sys.exit(1)
-        """)
+        script = prologue + 'respond(content, "no_savings")\n'
     elif behavior == "passthrough":
-        script = textwrap.dedent("""\
-            #!/usr/bin/env python3
-            import sys
-            data = sys.stdin.read()
-            print(data)
+        script = prologue + 'respond(content, "passthrough")\n'
+    elif behavior == "wrong-protocol-version":
+        script = prologue + textwrap.dedent("""\
+            print(json.dumps({
+                "protocol_version": 2,
+                "output": content[:20],
+                "disposition": "applied",
+                "compressor_chain": ["response-cleanup"],
+                "reversibility": "lossless",
+                "before_tokens": 100,
+                "after_tokens": 50,
+                "stash_keys": [],
+                "tokenizer_id": "heuristic-v1",
+            }))
         """)
     else:
         raise ValueError(f"Unknown behavior: {behavior}")
@@ -82,6 +115,16 @@ def _create_mock_tokenless(tmpdir: str, behavior: str = "compress") -> str:
         f.write(script)
     os.chmod(mock_script, os.stat(mock_script).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return mock_script
+
+
+def _spawn_log_lines(mock_tokenless_path: str) -> list:
+    """The argv lines the mock recorded, one per tokenless invocation."""
+    log_path = os.path.join(os.path.dirname(mock_tokenless_path), "spawn_log")
+    try:
+        with open(log_path) as f:
+            return [line.strip() for line in f if line.strip()]
+    except OSError:
+        return []
 
 
 def _create_mock_claude(tmpdir: str, version: str = "2.1.121") -> str:
@@ -556,6 +599,30 @@ class TestPassthrough(unittest.TestCase):
         self.assertEqual(result, {},
                          "Should skip when compression yields no savings")
 
+    def test_version_skewed_response_fails_open(self):
+        """A response declaring a protocol version this adapter does not
+        speak must never replace model-visible output."""
+        mock_dir = tempfile.mkdtemp(dir=self.tmpdir)
+        mock_bin = _create_mock_tokenless(mock_dir, "wrong-protocol-version")
+        _create_mock_claude(mock_dir)
+
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": _make_large_json_payload(),
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertEqual(result, {},
+                         "Version-skewed responses must fail open")
+
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
 class TestSkipTools(unittest.TestCase):
@@ -595,10 +662,33 @@ class TestSkipTools(unittest.TestCase):
         self.assertNotIn("updatedToolOutput", hso,
                          "Skip-tools should not replace tool output")
 
+    def test_skip_tools_spawn_nothing(self):
+        """Content retrieval is the hottest PostToolUse traffic: the
+        prefilter must save the spawn, not just discard the result."""
+        result = _run_hook(
+            {
+                "tool_name": "Read",
+                "tool_response": _make_large_json_payload(),
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="claude-code",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
+        self.assertEqual(result, {})
+        self.assertEqual(_spawn_log_lines(self.mock_bin), [],
+                         "skip-tool responses must not spawn tokenless")
+
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
 class TestNonReplacementAdapters(unittest.TestCase):
-    """Verify non-Claude-Code adapters still get the legacy additionalContext."""
+    """additionalContext-only hosts pass through (roadmap: additive
+    injection would append the compressed copy beside the still-visible
+    original, a net token increase)."""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -610,8 +700,9 @@ class TestNonReplacementAdapters(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
         shutil.rmtree(self.isolated_home, ignore_errors=True)
 
-    def test_qwencode_uses_additional_context(self):
-        """Qwen Code should use additionalContext (legacy path)."""
+    def test_qwencode_passes_through_without_spawning(self):
+        """Qwen Code declares no replacement capability: passthrough, and
+        the hook does not even spawn the subprocess."""
         large_payload = _make_large_json_payload()
 
         result = _run_hook(
@@ -628,269 +719,88 @@ class TestNonReplacementAdapters(unittest.TestCase):
 
         self.assertNotIn("_subprocess_error", result,
                          f"Hook subprocess failed: {result}")
+        self.assertEqual(result, {},
+                         "Hosts without true replacement remain passthrough")
+        self.assertEqual(_spawn_log_lines(self.mock_bin), [],
+                         "No-capability requests must not spawn tokenless")
+
+    def test_qwencode_still_receives_env_attribution(self):
+        """Environment attribution is genuinely additive and stays."""
+        result = _run_hook(
+            {
+                "tool_name": "Bash",
+                "tool_response": {"stdout": "", "stderr": "bash: rg: command not found",
+                                  "exit_code": 127},
+                "session_id": "s",
+                "tool_use_id": "t",
+            },
+            agent_id="qwencode",
+            mock_tokenless_path=self.mock_bin,
+            isolated_home=self.isolated_home,
+        )
+
+        self.assertNotIn("_subprocess_error", result,
+                         f"Hook subprocess failed: {result}")
         hso = result.get("hookSpecificOutput", {})
-        self.assertIn("additionalContext", hso,
-                       "Non-replacement adapters should use additionalContext")
-        self.assertNotIn("updatedToolOutput", hso,
-                         "Non-replacement adapters should not use updatedToolOutput")
-
-
-def _create_toon_marker_tokenless(tmpdir: str) -> str:
-    """Mock tokenless: compress-response passes through; compress-toon
-    records a call marker next to itself and emits a smaller TOON-like
-    output, so tests can tell whether the TOON step ran at all."""
-    mock_script = os.path.join(tmpdir, "tokenless")
-    script = textwrap.dedent("""\
-        #!/usr/bin/env python3
-        import os, sys
-        data = sys.stdin.read()
-        if sys.argv[1] == "compress-response":
-            print(data)
-        elif sys.argv[1] == "compress-toon":
-            marker = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "toon_called")
-            open(marker, "a").close()
-            print("toon:" + data[: len(data) // 2])
-    """)
-    with open(mock_script, "w") as f:
-        f.write(script)
-    os.chmod(mock_script, os.stat(mock_script).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IEXEC)
-    return mock_script
-
-
-def _json_string_payload(char_target: int) -> str:
-    """A JSON string tool_response of roughly ``char_target`` characters."""
-    inner = "x" * max(char_target - 30, 1)
-    return json.dumps({"stdout": inner, "exit_code": 0})
+        self.assertIn("[tokenless:env]", hso.get("additionalContext", ""))
+        self.assertNotIn("updatedToolOutput", hso)
 
 
 @unittest.skipIf(_needs_py39, "hook_utils requires Python 3.9+")
-class TestToonMinPayloadThreshold(unittest.TestCase):
-    """The TOON step must only run for payloads >= _MIN_TOON_CHARS (500).
+class TestSingleSubprocess(unittest.TestCase):
+    """One Tokenless subprocess per hook invocation (roadmap §5.6).
 
-    TOON on small JSON saves only a handful of characters (~0.3% below
-    ~500 chars) while the per-event encode cost stays the same, so below
-    the threshold the hook must not invoke ``tokenless compress-toon``
-    at all — no subprocess, no encode, no stats noise.
+    TOON selection and its 500-char gate live behind the entry point now
+    (see the Rust entry tests, including the non-BMP code-point cases);
+    what the hook owes the contract is that everything happens in a single
+    `tokenless compress` spawn.
     """
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         self.isolated_home = tempfile.mkdtemp(prefix="test_hook_home_")
-        self.mock_bin = _create_toon_marker_tokenless(self.tmpdir)
+        self.mock_bin = _create_mock_tokenless(self.tmpdir, "compress")
         self.mock_claude = _create_mock_claude(self.tmpdir)
-        self.toon_marker = os.path.join(self.tmpdir, "toon_called")
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
         shutil.rmtree(self.isolated_home, ignore_errors=True)
 
-    def test_toon_runs_at_or_above_threshold(self):
-        """A >=500-char payload still reaches compress-toon."""
+    def test_compressible_payload_spawns_exactly_once(self):
         result = _run_hook(
             {
                 "tool_name": "Bash",
-                "tool_response": _json_string_payload(600),
-                "session_id": "test-session",
-                "tool_use_id": "toolu_test",
+                "tool_response": _make_large_json_payload(1000),
+                "session_id": "s",
+                "tool_use_id": "t",
             },
             agent_id="claude-code",
             mock_tokenless_path=self.mock_bin,
             isolated_home=self.isolated_home,
         )
-
         self.assertNotIn("_subprocess_error", result,
                          f"Hook subprocess failed: {result}")
-        self.assertTrue(os.path.exists(self.toon_marker),
-                        "compress-toon must run for payloads >= threshold")
-        hso = result.get("hookSpecificOutput", {})
-        self.assertEqual(hso.get("hookEventName"), "PostToolUse")
-        self.assertIn("toon:", str(hso.get("updatedToolOutput", "")),
-                      "TOON output should be used for large payloads")
+        self.assertIn("updatedToolOutput", result.get("hookSpecificOutput", {}))
+        self.assertEqual(_spawn_log_lines(self.mock_bin), ["compress"],
+                         "exactly one tokenless subprocess per invocation")
 
-    def test_toon_skipped_below_threshold(self):
-        """A payload under 500 chars never reaches compress-toon."""
+    def test_small_payload_spawns_nothing(self):
         result = _run_hook(
             {
                 "tool_name": "Bash",
-                "tool_response": _json_string_payload(300),
-                "session_id": "test-session",
-                "tool_use_id": "toolu_test",
+                "tool_response": {"stdout": "short", "exit_code": 0},
+                "session_id": "s",
+                "tool_use_id": "t",
             },
             agent_id="claude-code",
             mock_tokenless_path=self.mock_bin,
             isolated_home=self.isolated_home,
         )
-
         self.assertNotIn("_subprocess_error", result,
                          f"Hook subprocess failed: {result}")
-        self.assertFalse(os.path.exists(self.toon_marker),
-                         "compress-toon must not run below the threshold")
-        self.assertEqual(result, {},
-                         "No compression happened, so the hook skips")
-
-    def test_toon_skipped_for_small_structured_non_bmp_payload(self):
-        """Structured non-BMP payloads are gated by Unicode character count.
-
-        {"stdout": "😀" × 40, ...} is ~67 Unicode characters but 507
-        characters once serialized with \\u escapes; counting the escaped
-        form would wrongly run compress-toon.
-        """
-        result = _run_hook(
-            {
-                "tool_name": "Bash",
-                "tool_response": {"stdout": "😀" * 40, "exit_code": 0},
-                "session_id": "test-session",
-                "tool_use_id": "toolu_test",
-            },
-            agent_id="claude-code",
-            mock_tokenless_path=self.mock_bin,
-            isolated_home=self.isolated_home,
-        )
-
-        self.assertNotIn("_subprocess_error", result,
-                         f"Hook subprocess failed: {result}")
-        self.assertFalse(os.path.exists(self.toon_marker),
-                         "compress-toon must not run for a structured payload "
-                         "whose character count is below the threshold")
-        self.assertEqual(result, {},
-                         "No compression happened, so the hook skips")
-
-    def test_toon_skipped_below_threshold_for_medium_structured_non_bmp(self):
-        """200 emoji ≈ 227 Unicode chars (about 2,427 chars once escaped).
-
-        Passes the 200-character entry gate, so this case isolates the
-        TOON gate: the escaped form is above 500 but the character
-        count is not, so compress-toon must still be skipped.
-        """
-        result = _run_hook(
-            {
-                "tool_name": "Bash",
-                "tool_response": {"stdout": "😀" * 200, "exit_code": 0},
-                "session_id": "test-session",
-                "tool_use_id": "toolu_test",
-            },
-            agent_id="claude-code",
-            mock_tokenless_path=self.mock_bin,
-            isolated_home=self.isolated_home,
-        )
-
-        self.assertNotIn("_subprocess_error", result,
-                         f"Hook subprocess failed: {result}")
-        self.assertFalse(os.path.exists(self.toon_marker),
-                         "compress-toon must not run below the character "
-                         "threshold even when the escaped form is longer")
-
-    def test_toon_runs_for_large_structured_non_bmp_payload(self):
-        """520 emoji ≈ 547 Unicode chars: above threshold, TOON runs."""
-        result = _run_hook(
-            {
-                "tool_name": "Bash",
-                "tool_response": {"stdout": "😀" * 520, "exit_code": 0},
-                "session_id": "test-session",
-                "tool_use_id": "toolu_test",
-            },
-            agent_id="claude-code",
-            mock_tokenless_path=self.mock_bin,
-            isolated_home=self.isolated_home,
-        )
-
-        self.assertNotIn("_subprocess_error", result,
-                         f"Hook subprocess failed: {result}")
-        self.assertTrue(os.path.exists(self.toon_marker),
-                        "compress-toon must run at/above the character "
-                        "threshold for structured non-BMP payloads")
-        # TOON text cannot replace a structured response without changing
-        # the host tool schema, and the echo-only compress-response mock
-        # yields no JSON win, so the hook still skips the replacement.
         self.assertEqual(result, {})
-
-    def test_toon_skipped_for_small_string_wrapped_non_bmp_payload(self):
-        """String-wrapped JSON takes the unwrap_string_json path.
-
-        A wrapped {"stdout": "😀" × 40, ...} payload unwraps to ~67
-        Unicode characters (wrapped input ~73), but ASCII-escaping the
-        inner object inflates it to 507 characters; the gate must count
-        the unwrapped code points and never run compress-toon.
-        """
-        inner = json.dumps({"stdout": "😀" * 40, "exit_code": 0},
-                           ensure_ascii=False)
-        wrapped = json.dumps(inner, ensure_ascii=False)
-        result = _run_hook(
-            {
-                "tool_name": "Bash",
-                "tool_response": wrapped,
-                "session_id": "test-session",
-                "tool_use_id": "toolu_test",
-            },
-            agent_id="claude-code",
-            mock_tokenless_path=self.mock_bin,
-            isolated_home=self.isolated_home,
-        )
-
-        self.assertNotIn("_subprocess_error", result,
-                         f"Hook subprocess failed: {result}")
-        self.assertFalse(os.path.exists(self.toon_marker),
-                         "compress-toon must not run for a string-wrapped "
-                         "payload whose character count is below the threshold")
-        self.assertEqual(result, {},
-                         "No compression happened, so the hook skips")
-
-    def test_toon_skipped_below_threshold_for_medium_string_wrapped_non_bmp(self):
-        """Wrapped 200-emoji payload unwraps to ~227 Unicode chars.
-
-        Passes the 200-character entry gate, so this case isolates the
-        TOON gate: the ASCII-escaped form is ~2,427 characters but the
-        unwrapped character count is below 500, so compress-toon must
-        still be skipped.
-        """
-        inner = json.dumps({"stdout": "😀" * 200, "exit_code": 0},
-                           ensure_ascii=False)
-        wrapped = json.dumps(inner, ensure_ascii=False)
-        result = _run_hook(
-            {
-                "tool_name": "Bash",
-                "tool_response": wrapped,
-                "session_id": "test-session",
-                "tool_use_id": "toolu_test",
-            },
-            agent_id="claude-code",
-            mock_tokenless_path=self.mock_bin,
-            isolated_home=self.isolated_home,
-        )
-
-        self.assertNotIn("_subprocess_error", result,
-                         f"Hook subprocess failed: {result}")
-        self.assertFalse(os.path.exists(self.toon_marker),
-                         "compress-toon must not run below the character "
-                         "threshold even when the escaped form is longer")
-
-    def test_toon_runs_for_large_string_wrapped_non_bmp_payload(self):
-        """Wrapped payload unwrapping to ~547 Unicode chars: TOON runs."""
-        inner = json.dumps({"stdout": "😀" * 520, "exit_code": 0},
-                           ensure_ascii=False)
-        wrapped = json.dumps(inner, ensure_ascii=False)
-        result = _run_hook(
-            {
-                "tool_name": "Bash",
-                "tool_response": wrapped,
-                "session_id": "test-session",
-                "tool_use_id": "toolu_test",
-            },
-            agent_id="claude-code",
-            mock_tokenless_path=self.mock_bin,
-            isolated_home=self.isolated_home,
-        )
-
-        self.assertNotIn("_subprocess_error", result,
-                         f"Hook subprocess failed: {result}")
-        self.assertTrue(os.path.exists(self.toon_marker),
-                        "compress-toon must run at/above the character "
-                        "threshold for string-wrapped non-BMP payloads")
-        hso = result.get("hookSpecificOutput", {})
-        self.assertEqual(hso.get("hookEventName"), "PostToolUse")
-        self.assertIn("toon:", str(hso.get("updatedToolOutput", "")),
-                      "TOON output should be used for large payloads")
+        self.assertEqual(_spawn_log_lines(self.mock_bin), [],
+                         "the sub-200-char prefilter must save the spawn")
 
 
 if __name__ == "__main__":

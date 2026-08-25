@@ -1,0 +1,59 @@
+{
+  "envelope": {
+    "hookSpecificOutput": {
+      "hookEventName": "BeforeModel",
+      "llm_request": {
+        "config": {
+          "tools": [
+            {
+              "function": {
+                "description": "Read a file from the workspace and return its contents as text. Large files are paginated into fixed-size windows and the response reports the window offset, total size, and whether more co… (truncated, retrieve with <<tokenless:80d761055e7dd3514662273d>>)",
+                "name": "read_file",
+                "parameters": {
+                  "properties": {
+                    "path": {
+                      "description": "Absolute path to the target inside the workspace.… (truncated, retrieve with <<tokenless:e4fec927ff0d548a6acd9376>>)",
+                      "type": "string"
+                    },
+                    "recursive": {
+                      "description": "Whether to descend into subdirectories when the target is a directory.… (truncated, retrieve with <<tokenless:4e1eaf882c7cd9c111d29c4b>>)",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "path"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "function"
+            },
+            {
+              "function": {
+                "description": "List the entries of a directory in the workspace, including file sizes, modification times, permission bits, and whether each entry is a file, directory, or symbolic link.… (truncated, retrieve with <<tokenless:0c653ffa023dfc93dca3dca5>>)",
+                "name": "list_directory",
+                "parameters": {
+                  "properties": {
+                    "path": {
+                      "description": "Absolute path to the target inside the workspace.… (truncated, retrieve with <<tokenless:e4fec927ff0d548a6acd9376>>)",
+                      "type": "string"
+                    },
+                    "recursive": {
+                      "description": "Whether to descend into subdirectories when the target is a directory.… (truncated, retrieve with <<tokenless:4e1eaf882c7cd9c111d29c4b>>)",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "path"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "function"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

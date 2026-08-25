@@ -65,7 +65,8 @@ PYPROJECT_BUILD ?= uvx --from 'build>=1,<2' pyproject-build
         setup help \
         npm-package npm-package-all npm-publish prepare-npm-native-binaries \
         python-wheel test-python-runtime agentscope-wheel \
-        test-agentscope-integration test-hooks test-claude-code-detect
+        test-agentscope-integration test-hooks test-claude-code-detect \
+        test-hook-parity
 
 # Default target
 all: build
@@ -227,9 +228,9 @@ uninstall:
 	rm -rf $(DESTDIR)$(COSH_EXTENSION_DIR)
 
 # Run tests
-test: test-tokenless test-hooks test-integration test-adapters \
-      test-claude-code-detect test-raw-package test-npm-package \
-      test-toon-cleanup
+test: test-tokenless test-hooks test-integration test-hook-parity \
+      test-adapters test-claude-code-detect test-raw-package \
+      test-npm-package test-toon-cleanup
 
 test-tokenless:
 	@echo "==> Testing tokenless..."
@@ -252,12 +253,21 @@ test-integration:
 	python3 tests/test_codex_toon_threshold.py
 	python3 tests/test_hermes_toon_threshold.py
 	python3 tests/test_compress_schema_hook.py
+	python3 tests/test_hook_contract.py
 	python3 tests/test_hermes_plugin_import.py
 	python3 tests/test_agentscope_middleware.py
 	python3 tests/test_agentscope_v1.py
 	python3 tests/test_rewrite_hook.py
 	python3 tests/test_cosh_extension_matcher.py
 	python3 tests/test_resolve_agent_id.py
+
+# Golden parity for the unified-entry hooks (roadmap §5.6): replays the
+# tests/contract corpus through the current hooks against the real debug
+# binary and diffs against goldens captured from the pre-PR-6 hooks.
+test-hook-parity:
+	@echo "==> Testing hook golden parity (real binary)..."
+	cargo build -p tokenless-cli
+	python3 tests/test_hook_parity.py
 
 test-adapters: build-openclaw-plugin build-dsh-plugin
 	@echo "==> Testing openclaw RTK context propagation..."

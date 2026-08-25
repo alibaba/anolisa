@@ -21,8 +21,11 @@ use tokenless_stats::{
     estimate_tokens, get_home_dir, resolve_data_dir, validate_data_dir, validate_database_path,
 };
 
+mod entry;
 mod response_cleanup;
+mod taxonomy;
 
+pub use entry::{EntryOptions, EntryOutcome, compress_with_store};
 use response_cleanup::ResponseCleanup;
 
 /// Why a compression attempt did or did not replace the input: the protocol
@@ -325,6 +328,36 @@ impl TokenlessRuntime {
         Ok(result)
     }
 
+    /// Route one protocol request through the unified entry point and
+    /// record any effective savings — the same pipeline the `tokenless
+    /// compress` subcommand runs, called in-process (roadmap §5.4).
+    pub fn compress(
+        &self,
+        request: &tokenless_protocol::CompressionRequest,
+    ) -> tokenless_protocol::CompressionResponse {
+        let options = EntryOptions {
+            compression_enabled: self.config.compression_enabled,
+            stash_enabled: true,
+        };
+        let outcome = compress_with_store(request, &options, self.stash_store.as_ref());
+        let result = CompressResult {
+            output: outcome.response.output.clone(),
+            compressed_output: outcome.stats_after_text.clone(),
+            disposition: outcome.response.disposition,
+            before_tokens: outcome.response.before_tokens as usize,
+            after_tokens: outcome.response.after_tokens as usize,
+            stash_writes: outcome.stash_writes,
+            stash_errors: outcome.stash_errors,
+            unrecoverable_truncations: None,
+            stash_size: outcome.stash_size,
+        };
+        let mut attribution = Attribution::new(request.agent_id.clone());
+        attribution.session_id = request.session_id.clone();
+        attribution.tool_use_id = request.tool_use_id.clone();
+        self.record_stats(outcome.stats_op, &request.content, &result, &attribution);
+        outcome.response
+    }
+
     /// Retrieve a payload by bare hash or text containing a marker.
     ///
     /// # Errors
@@ -446,6 +479,28 @@ pub fn compress_schema_with_store(
     }
     let compressed = compressor.compress(&value);
     let compressed_output = serde_json::to_string(&compressed).map_err(RuntimeError::Serialize)?;
+    Ok(finish_schema_compression(
+        input,
+        compressed_output,
+        compression_enabled,
+        attached_store,
+        &compressor,
+    ))
+}
+
+/// Applies the schema disposition ladder to an already-computed candidate:
+/// no-savings by tokens, dry-run, reversibility-unavailable when no store is
+/// attached or a stash write failed, then applied — rolling back or
+/// committing the compressor's stash session accordingly. Shared by
+/// [`compress_schema_with_store`] and the unified entry router so the
+/// hand-rolled ladder exists once.
+fn finish_schema_compression(
+    input: &str,
+    compressed_output: String,
+    compression_enabled: bool,
+    attached_store: Option<&Arc<dyn StashStore>>,
+    compressor: &SchemaCompressor,
+) -> CompressResult {
     let before_tokens = estimate_tokens(input);
     let after_tokens = estimate_tokens(&compressed_output);
     let compression_stash_errors = attached_store.map(|_| compressor.stash_errors());
@@ -478,7 +533,7 @@ pub fn compress_schema_with_store(
     } else {
         input.to_string()
     };
-    Ok(CompressResult {
+    CompressResult {
         output,
         compressed_output,
         disposition,
@@ -488,7 +543,7 @@ pub fn compress_schema_with_store(
         stash_errors,
         unrecoverable_truncations: None,
         stash_size,
-    })
+    }
 }
 
 /// Encode JSON as TOON and apply the shared no-savings and dry-run policy.
@@ -620,6 +675,70 @@ pub fn compress_response_with_store(
     // keeps invalid input a structured error for the CLI and bindings.
     serde_json::from_str::<serde::de::IgnoredAny>(input)?;
 
+    // Attribution reaches statistics separately until the §5.5 migration;
+    // the in-process request carries no frontend identity.
+    let mut request = CompressionRequest::new(input, "", Seam::PostTool);
+    request.capabilities = Capabilities {
+        replace_output: true,
+        publish_retrieve_tool: options.stash_enabled
+            && compression_enabled
+            && stash_store.is_some(),
+        // The legacy path never emits a non-JSON encoding; callers own
+        // their envelopes.
+        replace_with_text: false,
+    };
+    let run = run_response_pipeline(&request, options, compression_enabled, stash_store);
+
+    // Legacy measurement channel (see `CompressResult::compressed_output`):
+    // the candidate the adapter produced, or the original when none ran.
+    let compressed_output = run.candidate.unwrap_or_else(|| input.to_string());
+    // Both counts run the shared estimator locally, mirroring each other;
+    // this also avoids converting the response's u64 counts back to usize.
+    let before_tokens = estimate_tokens(input);
+    let after_tokens = estimate_tokens(&compressed_output);
+
+    Ok(CompressResult {
+        output: run.response.output,
+        compressed_output,
+        disposition: run.response.disposition,
+        before_tokens,
+        after_tokens,
+        stash_writes: run.stash_writes,
+        stash_errors: run.stash_errors,
+        unrecoverable_truncations: run.unrecoverable_truncations,
+        stash_size: run.stash_size,
+    })
+}
+
+/// Result of one pipeline execution over a post-tool request.
+struct ResponsePipelineRun {
+    response: tokenless_protocol::CompressionResponse,
+    /// Candidate the cleanup produced, or `None` when it never ran.
+    candidate: Option<String>,
+    /// Stash writes of the run, with their generations, so the entry router
+    /// can roll back rows whose markers its own acceptance checks keep from
+    /// reaching the model (the ledger inside [`tokenless_pipeline::run`]
+    /// only rolls back the pipeline's rejections).
+    committed_writes: Vec<StashWrite>,
+    /// Legacy stash metrics on the pre-pipeline contract documented for
+    /// [`CompressResult`]: rows still live after the ledger's rollback and
+    /// orphan-commit deletes; write and delete failures combined.
+    stash_writes: Option<usize>,
+    stash_errors: Option<usize>,
+    unrecoverable_truncations: Option<usize>,
+    stash_size: Option<usize>,
+}
+
+/// Runs the response cleanup behind the pipeline over `request.content`,
+/// shared by [`compress_response_with_store`] and the unified entry router:
+/// routing, staged execution, end-to-end arbitration, dry-run, timeout, and
+/// stash rollback all come from [`tokenless_pipeline::run`].
+fn run_response_pipeline(
+    request: &CompressionRequest,
+    options: &CompressOptions,
+    compression_enabled: bool,
+    stash_store: Option<&Arc<dyn StashStore>>,
+) -> ResponsePipelineRun {
     let mut compressor = ResponseCompressor::new();
     if let Some(value) = options.truncate_strings_at {
         compressor = compressor.with_truncate_strings_at(value);
@@ -647,13 +766,6 @@ pub fn compress_response_with_store(
     }
     let adapter = ResponseCleanup::new(compressor, attached_store.is_some());
 
-    // Attribution reaches statistics separately until the §5.5 migration;
-    // the in-process request carries no frontend identity.
-    let mut request = CompressionRequest::new(input, "", Seam::PostTool);
-    request.capabilities = Capabilities {
-        replace_output: true,
-        publish_retrieve_tool: attached_store.is_some(),
-    };
     let config = PipelineConfig {
         timeout: RESPONSE_PIPELINE_TIMEOUT,
         // The pre-pipeline policy is "always try to shrink": a permanently
@@ -672,23 +784,12 @@ pub fn compress_response_with_store(
         failed: AtomicUsize::new(0),
     });
     let response = tokenless_pipeline::run(
-        &request,
+        request,
         &[&adapter],
         tracker.as_ref().map(|tracker| tracker as &dyn StashStore),
         &config,
     );
 
-    // Legacy measurement channel (see `CompressResult::compressed_output`):
-    // the candidate the adapter produced, or the original when none ran.
-    let compressed_output = adapter
-        .take_candidate()
-        .unwrap_or_else(|| input.to_string());
-    // Both counts run the shared estimator locally, mirroring each other;
-    // this also avoids converting the response's u64 counts back to usize.
-    let before_tokens = estimate_tokens(input);
-    let after_tokens = estimate_tokens(&compressed_output);
-    // Rows still live after the ledger's rollback and orphan-commit deletes,
-    // and write/delete failures combined — the pre-pipeline metric contract.
     let stash_writes = tracker.as_ref().map(|tracker| {
         adapter
             .stash_writes()
@@ -700,17 +801,15 @@ pub fn compress_response_with_store(
     let unrecoverable_truncations = attached_store.map(|_| adapter.unrecoverable_truncations());
     let stash_size = attached_store.map(|store| store.len());
 
-    Ok(CompressResult {
-        output: response.output,
-        compressed_output,
-        disposition: response.disposition,
-        before_tokens,
-        after_tokens,
+    ResponsePipelineRun {
+        response,
+        candidate: adapter.take_candidate(),
+        committed_writes: adapter.take_writes(),
         stash_writes,
         stash_errors,
         unrecoverable_truncations,
         stash_size,
-    })
+    }
 }
 
 /// Retrieve from a caller-owned store using a bare hash or embedded marker.

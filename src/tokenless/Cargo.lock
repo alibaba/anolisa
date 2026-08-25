@@ -850,6 +850,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokenless-ccr",
+ "tokenless-protocol",
  "tokenless-runtime",
  "tokenless-schema",
  "tokenless-stats",

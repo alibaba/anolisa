@@ -108,6 +108,13 @@ pub struct Capabilities {
     /// equivalent), so retrievable-lossy markers are actually recoverable.
     #[serde(default)]
     pub publish_retrieve_tool: bool,
+    /// The host's replacement slot accepts arbitrary text. When `false`,
+    /// an applied post-tool output must remain valid JSON with a stable
+    /// top-level schema (a structured slot): non-JSON encodings such as
+    /// TOON never win, and empty top-level fields dropped by cleanup are
+    /// restored before final acceptance.
+    #[serde(default)]
+    pub replace_with_text: bool,
 }
 
 /// A compression request: the model-visible content plus attribution.

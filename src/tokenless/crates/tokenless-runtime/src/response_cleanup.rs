@@ -9,7 +9,7 @@
 
 use std::cell::RefCell;
 
-use tokenless_ccr::StashStore;
+use tokenless_ccr::{StashStore, StashWrite};
 use tokenless_pipeline::{
     CompressError, CompressOutcome, Compressor, CompressorSpec, RESPONSE_CLEANUP,
 };
@@ -29,6 +29,12 @@ pub(crate) struct ResponseCleanup {
     /// (dry-run statistics record the predicted candidate); removed with the
     /// statistics migration (roadmap §5.5).
     candidate: RefCell<Option<String>>,
+    /// The stash writes of the last `compress` call, retained so the entry
+    /// router can roll them back when it rejects a pipeline-applied
+    /// candidate after its own acceptance checks (the ledger inside
+    /// [`tokenless_pipeline::run`] only rolls back the pipeline's own
+    /// rejections).
+    writes: RefCell<Vec<StashWrite>>,
 }
 
 impl ResponseCleanup {
@@ -37,6 +43,7 @@ impl ResponseCleanup {
             inner,
             stash_attached,
             candidate: RefCell::new(None),
+            writes: RefCell::new(Vec::new()),
         }
     }
 
@@ -60,6 +67,11 @@ impl ResponseCleanup {
     /// Takes the retained candidate of the last `compress` call.
     pub(crate) fn take_candidate(&self) -> Option<String> {
         self.candidate.take()
+    }
+
+    /// Takes the retained stash writes of the last `compress` call.
+    pub(crate) fn take_writes(&self) -> Vec<StashWrite> {
+        self.writes.take()
     }
 }
 
@@ -96,10 +108,12 @@ impl Compressor for ResponseCleanup {
         };
 
         self.candidate.replace(Some(output.clone()));
+        let stash_writes = self.inner.take_stash_writes();
+        self.writes.replace(stash_writes.clone());
         Ok(CompressOutcome {
             output,
             reversibility,
-            stash_writes: self.inner.take_stash_writes(),
+            stash_writes,
         })
     }
 }

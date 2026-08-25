@@ -94,6 +94,20 @@ fn missing_optionals_take_defaults() {
     assert_eq!(req.tool_name, None);
     assert!(!req.capabilities.replace_output);
     assert!(!req.capabilities.publish_retrieve_tool);
+    assert!(!req.capabilities.replace_with_text);
+}
+
+#[test]
+fn replace_with_text_defaults_false_and_parses_when_declared() {
+    // Requests from adapters predating the field must keep the conservative
+    // structured-slot semantics.
+    let json = r#"{"protocol_version":1,"content":"x","agent_id":"a","seam":"post_tool","capabilities":{"replace_output":true}}"#;
+    let req = CompressionRequest::from_json(json).unwrap();
+    assert!(!req.capabilities.replace_with_text);
+
+    let json = r#"{"protocol_version":1,"content":"x","agent_id":"a","seam":"post_tool","capabilities":{"replace_output":true,"replace_with_text":true}}"#;
+    let req = CompressionRequest::from_json(json).unwrap();
+    assert!(req.capabilities.replace_with_text);
 }
 
 #[test]
@@ -160,7 +174,7 @@ fn wire_format_is_stable() {
     req.capabilities.replace_output = true;
     assert_eq!(
         req.to_json().unwrap(),
-        r#"{"protocol_version":1,"content":"c","agent_id":"a","seam":"post_tool","capabilities":{"replace_output":true,"publish_retrieve_tool":false}}"#
+        r#"{"protocol_version":1,"content":"c","agent_id":"a","seam":"post_tool","capabilities":{"replace_output":true,"publish_retrieve_tool":false,"replace_with_text":false}}"#
     );
 
     let resp = CompressionResponse {

@@ -1,0 +1,9 @@
+{
+  "envelope": {
+    "hookSpecificOutput": {
+      "additionalContext": "[tokenless:env] Bash failed: ENV_DEPENDENCY_MISSING (Missing dependency detected. Install it or ask the user for guidance.). Skip retry.",
+      "hookEventName": "PostToolUse"
+    },
+    "suppressOutput": true
+  }
+}

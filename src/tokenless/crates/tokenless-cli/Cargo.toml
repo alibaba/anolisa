@@ -10,6 +10,7 @@ name = "tokenless"
 path = "src/main.rs"
 
 [dependencies]
+tokenless-protocol = { path = "../tokenless-protocol" }
 tokenless-schema = { path = "../tokenless-schema" }
 tokenless-stats = { path = "../tokenless-stats" }
 tokenless-ccr = { path = "../tokenless-ccr" }

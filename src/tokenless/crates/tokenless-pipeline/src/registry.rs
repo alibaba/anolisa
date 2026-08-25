@@ -73,6 +73,7 @@ impl CompressorSpec {
             && (!self.required_capabilities.replace_output || capabilities.replace_output)
             && (!self.required_capabilities.publish_retrieve_tool
                 || capabilities.publish_retrieve_tool)
+            && (!self.required_capabilities.replace_with_text || capabilities.replace_with_text)
     }
 }
 
@@ -95,6 +96,7 @@ pub const RESPONSE_CLEANUP: CompressorSpec = CompressorSpec {
     required_capabilities: Capabilities {
         replace_output: true,
         publish_retrieve_tool: false,
+        replace_with_text: false,
     },
     stage: Stage::RetrievableLossy,
     cost_class: CostClass::Moderate,

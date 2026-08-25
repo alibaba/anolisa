@@ -4,10 +4,12 @@
 const FULL: Capabilities = Capabilities {
     replace_output: true,
     publish_retrieve_tool: true,
+    replace_with_text: false,
 };
 const NONE: Capabilities = Capabilities {
     replace_output: false,
     publish_retrieve_tool: false,
+    replace_with_text: false,
 };
 
 const TEST_REGISTRY: &[CompressorSpec] = &[
@@ -18,6 +20,7 @@ const TEST_REGISTRY: &[CompressorSpec] = &[
         required_capabilities: Capabilities {
             replace_output: true,
             publish_retrieve_tool: false,
+            replace_with_text: false,
         },
         stage: Stage::Lossless,
         cost_class: CostClass::Cheap,
@@ -45,6 +48,7 @@ const TEST_REGISTRY: &[CompressorSpec] = &[
         required_capabilities: Capabilities {
             replace_output: true,
             publish_retrieve_tool: false,
+            replace_with_text: false,
         },
         stage: Stage::Truncation,
         cost_class: CostClass::Cheap,
@@ -81,6 +85,7 @@ fn required_capabilities_must_be_declared() {
     let replace_only = Capabilities {
         replace_output: true,
         publish_retrieve_tool: false,
+        replace_with_text: false,
     };
     assert!(ids(ContentType::BuildLog, Seam::PostTool, replace_only).is_empty());
     // A spec requiring nothing is a candidate for a capability-less adapter.
@@ -127,6 +132,7 @@ fn production_registry_lists_exactly_the_implemented_compressors() {
         Capabilities {
             replace_output: true,
             publish_retrieve_tool: false,
+            replace_with_text: false,
         },
     ));
     assert!(!RESPONSE_CLEANUP.matches(ContentType::JsonRecords, Seam::PostTool, NONE));

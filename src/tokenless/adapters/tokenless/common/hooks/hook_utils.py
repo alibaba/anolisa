@@ -496,6 +496,73 @@ def run(args: list[str], input_data: str, timeout: int = 3) -> subprocess.Comple
         return None
 
 
+def build_compression_request(
+    content: str,
+    agent_id: str,
+    seam: str,
+    session_id: str = "",
+    tool_use_id: str = "",
+    tool_name: str = "",
+    replace_output: bool = False,
+    publish_retrieve_tool: bool = False,
+    replace_with_text: bool = False,
+) -> dict:
+    """Build a protocol-v1 CompressionRequest for ``tokenless compress``.
+
+    The adapter only copies the model-visible value and declares what its
+    host can do with the result (roadmap §4.5); all compression decisions
+    live behind the entry point.
+    """
+    request = {
+        "protocol_version": 1,
+        "content": content,
+        "agent_id": agent_id,
+        "seam": seam,
+        "capabilities": {
+            "replace_output": replace_output,
+            "publish_retrieve_tool": publish_retrieve_tool,
+            "replace_with_text": replace_with_text,
+        },
+    }
+    if session_id:
+        request["session_id"] = session_id
+    if tool_use_id:
+        request["tool_use_id"] = tool_use_id
+    if tool_name:
+        request["tool_name"] = tool_name
+    return request
+
+
+def run_compress(
+    tokenless_bin: str, request: dict, timeout: int
+) -> dict | None:
+    """Run ``tokenless compress`` on one request; None on any failure.
+
+    The single Tokenless subprocess of a hook invocation (roadmap §5.6).
+    Fail-open: a dead binary, non-zero exit, or malformed stdout all
+    return None so the caller passes the original through.
+    """
+    proc = run(
+        [tokenless_bin, "compress"],
+        json.dumps(request, ensure_ascii=False),
+        timeout=timeout,
+    )
+    if proc is None or proc.returncode != 0 or not proc.stdout.strip():
+        if proc is not None and proc.returncode != 0:
+            warn(f"tokenless compress exited {proc.returncode}")
+        return None
+    response = try_parse_json(proc.stdout.strip())
+    if not isinstance(response, dict):
+        warn("tokenless compress returned malformed output")
+        return None
+    if response.get("protocol_version") != 1:
+        # Version-skewed binary: never trust a response whose contract
+        # this adapter does not speak.
+        warn("tokenless compress returned an unsupported protocol version")
+        return None
+    return response
+
+
 def detect_cosh_ng_runtime() -> tuple | None:
     """Detect if we are running under Cosh-NG and return its version.
 

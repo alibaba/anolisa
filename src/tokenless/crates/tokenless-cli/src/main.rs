@@ -9,9 +9,10 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
 use tokenless_ccr::{SqliteStore, StashStore};
+use tokenless_protocol::CompressionRequest;
 use tokenless_runtime::{
-    CompressOptions, CompressResult, Disposition, MAX_INPUT_BYTES, compress_response_with_store,
-    compress_toon, retrieve_from_store,
+    CompressOptions, CompressResult, Disposition, EntryOptions, MAX_INPUT_BYTES,
+    compress_response_with_store, compress_toon, compress_with_store, retrieve_from_store,
 };
 use tokenless_schema::SchemaCompressor;
 use tokenless_stats::{
@@ -37,6 +38,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Compress via the protocol-v1 entry point: reads a CompressionRequest
+    /// JSON from stdin or --file and writes a CompressionResponse JSON to
+    /// stdout (roadmap §5.4). Fail-open: compression failures surface as
+    /// response dispositions with exit 0; exit 2 is reserved for
+    /// unreadable, oversized, or undecodable requests.
+    Compress {
+        #[arg(short, long)]
+        file: Option<String>,
+        /// Override the stash database path. Defaults to
+        /// $TOKENLESS_DATA_DIR/stash.db or ~/.tokenless/stash.db.
+        /// Must remain under the real home or selected data directory.
+        #[arg(long)]
+        stash_db: Option<String>,
+    },
     /// Compress OpenAI Function Calling tool schemas
     CompressSchema {
         #[arg(short, long)]
@@ -485,6 +500,69 @@ fn run() -> Result<(), (String, i32)> {
 
 fn run_command(command: Commands) -> Result<(), (String, i32)> {
     match command {
+        Commands::Compress { file, stash_db } => {
+            let input = read_input(&file).map_err(|e| (e, 2))?;
+            // Undecodable or version-mismatched requests carry no content to
+            // echo, so no fail-open response can be built: exit 2.
+            let request = CompressionRequest::from_json(&input).map_err(|e| (e.to_string(), 2))?;
+
+            // Load config before deciding on the stash so we can skip it
+            // entirely when compression is disabled (dry-run). Attaching the
+            // stash in dry-run would write entries whose `<<tokenless:KEY>>`
+            // markers never reach the LLM (the original input is emitted),
+            // orphaning them.
+            let config = TokenlessConfig::load();
+            let database_paths = DatabasePathResolver::default();
+            let compression_on = config.is_compression_enabled();
+            let stash = if !compression_on {
+                None
+            } else {
+                open_stash_store_with(&database_paths, stash_db.as_deref())
+            };
+            let outcome = compress_with_store(
+                &request,
+                &EntryOptions {
+                    compression_enabled: compression_on,
+                    stash_enabled: true,
+                },
+                stash.as_ref(),
+            );
+            if matches!(outcome.stash_errors, Some(errors) if errors > 0) {
+                eprintln!(
+                    "[tokenless] stash: {} stash operation(s) failed; truncated entries are not retrievable (check stash db health)",
+                    outcome.stash_errors.expect("checked Some above")
+                );
+            }
+            if outcome.response.disposition == Disposition::NoSavings {
+                eprintln!(
+                    "tokenless: compression did not reduce size ({} -> {} est. tokens), outputting original",
+                    outcome.response.before_tokens, outcome.response.after_tokens
+                );
+            }
+
+            let mode = resolve_mode(
+                compression_on,
+                outcome.response.before_tokens as usize,
+                outcome.response.after_tokens as usize,
+            );
+            let response_json = outcome.response.to_json().map_err(|e| (e.to_string(), 1))?;
+            println!("{response_json}");
+
+            record_compression_stats(
+                &config,
+                &database_paths,
+                outcome.stats_op,
+                Some(request.agent_id),
+                request.session_id,
+                request.tool_use_id,
+                request.content,
+                outcome.stats_after_text,
+                mode,
+                outcome.stash_writes,
+                outcome.stash_errors,
+                outcome.stash_size,
+            );
+        }
         Commands::CompressSchema {
             file,
             batch,
