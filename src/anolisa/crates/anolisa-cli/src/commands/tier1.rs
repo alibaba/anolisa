@@ -2,6 +2,7 @@
 
 pub mod adopt;
 pub mod bug;
+pub(crate) mod component_observation;
 pub mod doctor;
 pub mod env;
 pub mod forget;
