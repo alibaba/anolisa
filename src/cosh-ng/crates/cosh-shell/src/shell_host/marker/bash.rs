@@ -10,6 +10,12 @@ COSH_OSC_MARKER_LOADED=1
 if [[ $- != *i* ]]; then
   return 0 2>/dev/null || exit 0
 fi
+_COSH_ENHANCED_V2="${COSH_ENHANCED_V2:-0}"
+unset COSH_ENHANCED_V2 2>/dev/null || true
+readonly _COSH_MARKER_TOKEN="$COSH_MARKER_TOKEN"
+if [[ "${_COSH_ENHANCED_V2:-0}" == 1 ]]; then
+  unset COSH_MARKER_TOKEN 2>/dev/null || true
+fi
 export COSH_SESSION_ID="${COSH_SESSION_ID:-cosh-osc-$$}"
 export COSH_POC_PS1="${COSH_POC_PS1:-cosh-osc$ }"
 _COSH_INITIAL_COMMAND_NOT_FOUND_HANDLE="$(declare -f command_not_found_handle 2>/dev/null || true)"
@@ -22,6 +28,15 @@ if [[ -z "${COSH_SHELL_ISOLATED:-}" ]]; then
     fi
   else
     [[ -f ~/.bashrc ]] && source ~/.bashrc
+  fi
+fi
+trap -p DEBUG > "${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.user-debug-trap" 2>/dev/null || true
+trap - DEBUG
+if [[ "${_COSH_ENHANCED_V2:-0}" != 1 ]]; then
+  IFS= read -r _COSH_USER_DEBUG_TRAP < "${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.user-debug-trap" || true
+  rm -f -- "${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.user-debug-trap" 2>/dev/null || true
+  if [[ -n "${_COSH_USER_DEBUG_TRAP:-}" ]]; then
+    eval "$_COSH_USER_DEBUG_TRAP"
   fi
 fi
 _COSH_AI_ENABLED="$_COSH_SESSION_AI_ENABLED"
@@ -70,9 +85,14 @@ _COSH_ATTEMPT_SENSITIVE=0
 _COSH_ATTEMPT_UNSAFE=0
 _COSH_ATTEMPT_EXPANSION_DRIFT=0
 _COSH_ATTEMPT_SUBSHELL=
-_COSH_WRAPPER_ID="${COSH_SESSION_ID}:${COSH_MARKER_TOKEN}"
+_COSH_WRAPPER_ID="${COSH_SESSION_ID}:${_COSH_MARKER_TOKEN}"
 _cosh_apply_internal_recovery() {
   if [[ -z "${COSH_RECOVERY_REQUEST_FILE:-}" || ! -f "$COSH_RECOVERY_REQUEST_FILE" ]]; then
+    return 0
+  fi
+  if [[ "${_COSH_ENHANCED_V2:-0}" == 1 ]]; then
+    rm -f -- "$COSH_RECOVERY_REQUEST_FILE" 2>/dev/null || true
+    stty echo icanon isig iexten opost 2>/dev/null || true
     return 0
   fi
   trap - DEBUG
@@ -110,10 +130,18 @@ _cosh_native_history_file_path() {
 }
 _cosh_emit_native_history_file_marker() {
   local history_file="$1"
+  local restore_xtrace=0
+  if [[ "${_COSH_ENHANCED_V2:-0}" == 1 && $- == *x* ]]; then
+    restore_xtrace=1
+    set +x
+  fi
   printf '\033]1337;COSH;{"event":"history_file","token":"%s","session_id":"%s","history_file":"%s"}\a' \
-    "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
+    "$(_cosh_json_escape "$_COSH_MARKER_TOKEN")" \
     "$(_cosh_json_escape "$COSH_SESSION_ID")" \
     "$(_cosh_json_escape "$history_file")"
+  local marker_status=$?
+  (( restore_xtrace == 1 )) && set -x
+  return "$marker_status"
 }
 _cosh_maybe_emit_native_history_file_marker() {
   local history_file
@@ -180,6 +208,11 @@ _cosh_emit_marker() {
   local command="$2"
   local exit_status="$3"
   local path_trusted="${4:-false}"
+  local restore_xtrace=0
+  if [[ "${_COSH_ENHANCED_V2:-0}" == 1 && $- == *x* ]]; then
+    restore_xtrace=1
+    set +x
+  fi
   local timestamp
   timestamp="$(_cosh_now_ms)"
   # Optional handoff-claim fragment (#2142): only approved-handoff preexec
@@ -190,7 +223,7 @@ _cosh_emit_marker() {
   fi
   printf '\033]1337;COSH;{"event":"%s","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","status":%s,"path":"%s","path_trusted":%s,"generation":%s%s}\a' \
     "$(_cosh_json_escape "$event")" \
-    "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
+    "$(_cosh_json_escape "$_COSH_MARKER_TOKEN")" \
     "$(_cosh_json_escape "$COSH_SESSION_ID")" \
     "$timestamp" \
     "$(_cosh_json_escape "$PWD")" \
@@ -200,16 +233,24 @@ _cosh_emit_marker() {
     "$path_trusted" \
     "${_COSH_ATTEMPT_GENERATION:-0}" \
     "$handoff_fragment"
+  local marker_status=$?
+  (( restore_xtrace == 1 )) && set -x
+  return "$marker_status"
 }
 _cosh_emit_intercept_marker() {
   local input="$1"
   local reason="$2"
   local top_level_missing="${3:-false}"
   local sensitive="${4:-false}"
+  local restore_xtrace=0
+  if [[ "${_COSH_ENHANCED_V2:-0}" == 1 && $- == *x* ]]; then
+    restore_xtrace=1
+    set +x
+  fi
   local timestamp
   timestamp="$(_cosh_now_ms)"
   printf '\033]1337;COSH;{"event":"intercept","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","command":"%s","reason":"%s","status":0,"generation":%s,"top_level_missing":%s,"sensitive":%s}\a' \
-    "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
+    "$(_cosh_json_escape "$_COSH_MARKER_TOKEN")" \
     "$(_cosh_json_escape "$COSH_SESSION_ID")" \
     "$timestamp" \
     "$(_cosh_json_escape "$PWD")" \
@@ -218,15 +259,23 @@ _cosh_emit_intercept_marker() {
     "${_COSH_ATTEMPT_GENERATION:-0}" \
     "$top_level_missing" \
     "$sensitive"
+  local marker_status=$?
+  (( restore_xtrace == 1 )) && set -x
+  return "$marker_status"
 }
 _cosh_emit_top_level_missing_marker() {
   local intent="$1"
   local sensitive="${2:-false}"
   local unsafe="${3:-false}"
+  local restore_xtrace=0
+  if [[ "${_COSH_ENHANCED_V2:-0}" == 1 && $- == *x* ]]; then
+    restore_xtrace=1
+    set +x
+  fi
   local timestamp
   timestamp="$(_cosh_now_ms)"
   printf '\033]1337;COSH;{"event":"top_level_missing","token":"%s","session_id":"%s","timestamp_ms":%s,"cwd":"%s","generation":%s,"proven":true,"intent":"%s","sensitive":%s,"unsafe":%s}\a' \
-    "$(_cosh_json_escape "$COSH_MARKER_TOKEN")" \
+    "$(_cosh_json_escape "$_COSH_MARKER_TOKEN")" \
     "$(_cosh_json_escape "$COSH_SESSION_ID")" \
     "$timestamp" \
     "$(_cosh_json_escape "$PWD")" \
@@ -234,6 +283,9 @@ _cosh_emit_top_level_missing_marker() {
     "$(_cosh_json_escape "$intent")" \
     "$sensitive" \
     "$unsafe"
+  local marker_status=$?
+  (( restore_xtrace == 1 )) && set -x
+  return "$marker_status"
 }
 _cosh_should_intercept_unknown() {
   local command="$1"
@@ -505,6 +557,16 @@ unset _cosh_user_handler_definition _COSH_INITIAL_COMMAND_NOT_FOUND_HANDLE
 command_not_found_handle() {
   local command="$1"
   shift || true
+  if [[ "${_COSH_ENHANCED_V2:-0}" == 1
+     && "${_COSH_ATTEMPT_ACTIVE:-0}" != 1 ]]; then
+    local history_entry history_command first_word
+    history_entry="$(_cosh_history_entry)"
+    history_command="$(_cosh_history_command_from_entry "$history_entry")"
+    first_word="${history_command%%[[:space:]]*}"
+    if [[ -n "$history_command" && "$first_word" == "$command" ]]; then
+      _cosh_begin_attempt "$history_command" "$first_word" 0
+    fi
+  fi
   local original="${_COSH_ATTEMPT_INPUT:-}"
   if [[ "${_COSH_HANDOFF_ACTIVE:-0}" == 1 ]]; then
     _cosh_delegate_bash_command_not_found "$command" "$@"
@@ -562,7 +624,9 @@ command_not_found_handle() {
       _cosh_delegate_bash_command_not_found "$command" "$@"
       return $?
     fi
-    _cosh_emit_intercept_marker "$original" "natural_language" true "$sensitive"
+    local top_level_missing=true
+    [[ "${_COSH_ENHANCED_V2:-0}" == 1 ]] && top_level_missing=false
+    _cosh_emit_intercept_marker "$original" "natural_language" "$top_level_missing" "$sensitive"
     return 0
   fi
   _cosh_emit_top_level_missing_marker "$intent" "$sensitive" false
@@ -828,6 +892,57 @@ _cosh_preexec_marker() {
   eval "$active_debug_trap" 2>/dev/null || true
   return 0
 }
+_cosh_v2_preexec_marker() {
+  if [[ $- == *x* ]]; then
+    set +x
+  fi
+  local history_entry history_no command first_word argc=1 display_command sensitive=false
+  history_entry="$(_cosh_history_entry)"
+  history_no="$(_cosh_history_no "$history_entry")"
+  command="$(_cosh_history_command_from_entry "$history_entry")"
+  [[ -n "$history_no" && -n "$command" ]] || return 0
+  first_word="${command%%[[:space:]]*}"
+  [[ "$command" == *[[:space:]]* ]] && argc=2
+
+  # PS0 is observation-only and cannot suppress execution. Missing commands
+  # route through command_not_found_handle; slash and ?? controls stay in the
+  # Rust input relay. Do not open a command block for input routed to Agent.
+  local reason
+  if reason="$(_cosh_should_intercept_unknown "$first_word" "$command" "$argc")"; then
+    return 0
+  fi
+  if _cosh_should_intercept_missing_path "$first_word" "$command"; then
+    return 0
+  fi
+  if ! builtin type -t -- "$first_word" >/dev/null 2>&1; then
+    local intent
+    intent="$(_cosh_classify_missing "$command" "$first_word")"
+    if [[ "$intent" == natural_language ]] && _cosh_ai_enabled; then
+      return 0
+    fi
+  fi
+
+  display_command="$command"
+  _cosh_command_has_secret "$command" && sensitive=true
+  if [[ "$sensitive" == true ]]; then
+    display_command="<redacted sensitive command>"
+  fi
+  _COSH_ATTEMPT_GENERATION="$history_no"
+  _cosh_emit_marker "preexec" "$display_command" 0 false
+}
+_cosh_v2_prompt_marker() {
+  local status="${1:-$?}"
+  if [[ $- == *x* ]]; then
+    set +x
+  fi
+  _cosh_maybe_emit_native_history_file_marker
+  _cosh_precmd_marker "$status"
+  _cosh_maybe_emit_native_history_file_marker
+  # PS1 expansion runs after the user's native PROMPT_COMMAND. Keeping this
+  # boundary here avoids replacing that hook and keeps a normal user DEBUG
+  # trap out of Cosh internals when functrace was not requested.
+  _cosh_emit_marker "prompt_ready" "" "$status" false
+}
 _cosh_precmd_marker() {
   local status="${1:-$?}"
   _cosh_apply_internal_recovery
@@ -858,6 +973,17 @@ _cosh_run_user_prompt_command() {
   if [[ -z "${_COSH_USER_PROMPT_COMMAND+x}" ]]; then
     return "$status"
   fi
+  if [[ "${_COSH_ENHANCED_V2:-0}" == 1 ]]; then
+    if [[ "${_COSH_USER_PROMPT_COMMAND_IS_ARRAY:-0}" == 1 ]]; then
+      local _cosh_prompt_command
+      for _cosh_prompt_command in "${_COSH_USER_PROMPT_COMMAND[@]}"; do
+        _cosh_eval_user_prompt_hook "$_cosh_prompt_command"
+      done
+    elif [[ -n "${_COSH_USER_PROMPT_COMMAND:-}" ]]; then
+      _cosh_eval_user_prompt_hook "$_COSH_USER_PROMPT_COMMAND"
+    fi
+    return "$status"
+  fi
   # User prompt hooks run with extdebug off: while it is on, bash re-execs
   # shebang-less scripts with --debugger (ENOEXEC fallback), and hosts
   # without the bashdb package print debugger startup failures at every
@@ -885,18 +1011,31 @@ _cosh_run_user_prompt_command() {
 }
 _cosh_prompt_command() {
   local status=$?
+  local restore_xtrace=0
+  if [[ "${_COSH_ENHANCED_V2:-0}" == 1 && $- == *x* ]]; then
+    restore_xtrace=1
+    set +x
+  fi
   _COSH_IN_PROMPT_COMMAND=1
   _cosh_maybe_emit_native_history_file_marker
   _cosh_precmd_marker "$status"
+  (( restore_xtrace == 1 )) && set -x
   _cosh_run_user_prompt_command "$status"
+  restore_xtrace=0
+  if [[ "${_COSH_ENHANCED_V2:-0}" == 1 && $- == *x* ]]; then
+    restore_xtrace=1
+    set +x
+  fi
   _cosh_maybe_emit_native_history_file_marker
   # bash < 5 suspends the DEBUG trap while PROMPT_COMMAND runs (#2736):
   # `trap -p DEBUG` prints nothing inside the hook, and the empty snapshot
   # read would poison _COSH_ACTIVE_DEBUG_TRAP, permanently dropping the
   # trap after the first command. Suspension guarantees the trap is
   # untouched during the hook, so only bash >= 5 — where `trap -p DEBUG`
-  # stays truthful — needs the snapshot.
-  if (( BASH_VERSINFO[0] >= 5 )) && [[ -n "${_COSH_USER_PROMPT_COMMAND+x}" ]]; then
+  # stays truthful — needs the snapshot. Enhanced v2 never owns DEBUG.
+  if [[ "${_COSH_ENHANCED_V2:-0}" != 1 ]] \
+     && (( BASH_VERSINFO[0] >= 5 )) \
+     && [[ -n "${_COSH_USER_PROMPT_COMMAND+x}" ]]; then
     local trap_snapshot_file="${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.debug-trap"
     _COSH_SNAPSHOT_DEBUG_TRAP=1
     trap -p DEBUG > "$trap_snapshot_file" 2>/dev/null || true
@@ -908,6 +1047,7 @@ _cosh_prompt_command() {
   # every user PROMPT_COMMAND so its output cannot masquerade as the prompt.
   _cosh_emit_marker "prompt_ready" "" "$status" false
   _COSH_IN_PROMPT_COMMAND=0
+  (( restore_xtrace == 1 )) && set -x
   return "$status"
 }
 # If BASHOPTS arrived exported from the login environment it stays exported
@@ -917,40 +1057,56 @@ _cosh_prompt_command() {
 # would otherwise inherit the exported extdebug and fail debugger startup
 # (bashdb). Dropping -x only removes the export attribute; imported options
 # stay effective in this shell and the guard keeps a refusing bash fail-safe.
-export -n BASHOPTS 2>/dev/null || true
-shopt -s extdebug 2>/dev/null || true
-_COSH_OLD_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null | sed "s/^trap -- '\\(.*\\)' DEBUG$/\\1/" || true)"
-_COSH_ACTIVE_DEBUG_TRAP="trap -- '_cosh_preexec_marker' DEBUG"
-trap '_cosh_preexec_marker' DEBUG
-if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
-  unset _COSH_USER_PROMPT_COMMAND
-  _COSH_USER_PROMPT_COMMAND_IS_ARRAY=0
-elif [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
-  _COSH_USER_PROMPT_COMMAND_IS_ARRAY=1
-  _COSH_USER_PROMPT_COMMAND=("${PROMPT_COMMAND[@]}")
-elif [[ -n "${PROMPT_COMMAND+x}" ]]; then
-  _COSH_USER_PROMPT_COMMAND_IS_ARRAY=0
-  _COSH_USER_PROMPT_COMMAND="$PROMPT_COMMAND"
-else
-  unset _COSH_USER_PROMPT_COMMAND
-  _COSH_USER_PROMPT_COMMAND_IS_ARRAY=0
+if [[ "${_COSH_ENHANCED_V2:-0}" != 1 ]]; then
+  export -n BASHOPTS 2>/dev/null || true
+  shopt -s extdebug 2>/dev/null || true
+  _COSH_OLD_DEBUG_TRAP="$(trap -p DEBUG 2>/dev/null | sed "s/^trap -- '\\(.*\\)' DEBUG$/\\1/" || true)"
+  _COSH_ACTIVE_DEBUG_TRAP="trap -- '_cosh_preexec_marker' DEBUG"
+  trap '_cosh_preexec_marker' DEBUG
 fi
-# Replace wholesale: assigning over an array PROMPT_COMMAND (bash >= 5.1)
-# only overwrites element 0, and surviving user elements would keep running
-# natively at every prompt, outside the extdebug guard in
-# _cosh_run_user_prompt_command.
-#
-# Deliberately no top-level extdebug re-enable here: a hook that installs a
-# DEBUG trap ending in `return` unwinds every function frame, and with
-# extdebug back on that trap's top-level failure status would make bash
-# skip every subsequent command — bricking the session. With extdebug off
-# the session degrades to native-bash behavior (marker interception idles)
-# and the in-function restore self-heals on the first prompt after the
-# user clears the trap.
-unset PROMPT_COMMAND
-PROMPT_COMMAND=_cosh_prompt_command
+if [[ "${_COSH_ENHANCED_V2:-0}" == 1 ]]; then
+  _COSH_USER_PS0="${PS0-}"
+  PS0='$(_cosh_v2_preexec_marker)'"$_COSH_USER_PS0"
+  _COSH_USER_PS1="${PS1-}"
+  PS1='\[$(_cosh_v2_prompt_marker "$?")\]'"$_COSH_USER_PS1"
+else
+  if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
+    unset _COSH_USER_PROMPT_COMMAND
+    _COSH_USER_PROMPT_COMMAND_IS_ARRAY=0
+  elif [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
+    _COSH_USER_PROMPT_COMMAND_IS_ARRAY=1
+    _COSH_USER_PROMPT_COMMAND=("${PROMPT_COMMAND[@]}")
+  elif [[ -n "${PROMPT_COMMAND+x}" ]]; then
+    _COSH_USER_PROMPT_COMMAND_IS_ARRAY=0
+    _COSH_USER_PROMPT_COMMAND="$PROMPT_COMMAND"
+  else
+    unset _COSH_USER_PROMPT_COMMAND
+    _COSH_USER_PROMPT_COMMAND_IS_ARRAY=0
+  fi
+  # Replace wholesale: assigning over an array PROMPT_COMMAND (bash >= 5.1)
+  # only overwrites element 0, and surviving user elements would keep running
+  # natively at every prompt, outside the extdebug guard in
+  # _cosh_run_user_prompt_command.
+  #
+  # Deliberately no top-level extdebug re-enable here: a hook that installs a
+  # DEBUG trap ending in `return` unwinds every function frame, and with
+  # extdebug back on that trap's top-level failure status would make bash
+  # skip every subsequent command — bricking the session. With extdebug off
+  # the session degrades to native-bash behavior (marker interception idles)
+  # and the in-function restore self-heals on the first prompt after the
+  # user clears the trap.
+  unset PROMPT_COMMAND
+  PROMPT_COMMAND=_cosh_prompt_command
+fi
 if [[ -n "${COSH_SHELL_ISOLATED:-}" ]]; then
   builtin history -c 2>/dev/null || true
+fi
+if [[ "${_COSH_ENHANCED_V2:-0}" == 1 ]]; then
+  IFS= read -r _COSH_USER_DEBUG_TRAP < "${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.user-debug-trap" || true
+  rm -f -- "${COSH_RECOVERY_REQUEST_FILE:-/tmp/cosh-recovery}.user-debug-trap" 2>/dev/null || true
+  if [[ -n "${_COSH_USER_DEBUG_TRAP:-}" ]]; then
+    eval "$_COSH_USER_DEBUG_TRAP"
+  fi
 fi
 "#
 }

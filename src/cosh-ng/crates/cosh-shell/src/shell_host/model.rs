@@ -26,6 +26,8 @@ pub enum ShellIntegration {
     /// Enables the marker hooks required for implicit Agent routing and command events.
     #[default]
     Enhanced,
+    /// Uses bounded prompt and command-not-found hooks without a global DEBUG trap.
+    EnhancedV2,
 }
 
 impl ShellIntegration {
@@ -33,11 +35,16 @@ impl ShellIntegration {
         match value.trim().to_ascii_lowercase().as_str() {
             "native" => Some(Self::Native),
             "enhanced" => Some(Self::Enhanced),
+            "enhanced-v2" | "enhanced_v2" => Some(Self::EnhancedV2),
             _ => None,
         }
     }
 
     pub(crate) fn uses_markers(self) -> bool {
+        matches!(self, Self::Enhanced)
+    }
+
+    pub(crate) fn uses_debug_trap(self) -> bool {
         self == Self::Enhanced
     }
 }
@@ -335,4 +342,17 @@ pub struct ShellHostOutput {
     pub work_dir: PathBuf,
     pub journal_path: PathBuf,
     pub exit_status: Option<i32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ShellIntegration;
+
+    #[test]
+    fn enhanced_v2_config_is_marker_enabled_but_debug_free() {
+        let integration = ShellIntegration::parse_config("enhanced-v2").expect("integration");
+        assert_eq!(integration, ShellIntegration::EnhancedV2);
+        assert!(integration.uses_markers());
+        assert!(!integration.uses_debug_trap());
+    }
 }

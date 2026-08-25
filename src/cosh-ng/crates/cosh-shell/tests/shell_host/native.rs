@@ -139,6 +139,240 @@ fn enhanced_assisted_integration_remains_the_default() {
 }
 
 #[test]
+fn enhanced_v2_routes_without_global_debug_tracing() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+    if !bash_supports_command_not_found_handler() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-enhanced-v2-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        r#"PS1='v2$ '
+PS0='__USER_PS0__'
+shopt -u extdebug
+set +E +T
+trap 'printf "%s\n" "$BASH_COMMAND" >> "$HOME/debug-trap.log"' DEBUG
+"#,
+    )
+    .expect("bashrc");
+    let config = ShellHostConfig::new("enhanced-v2", &work_dir)
+        .with_integration(ShellIntegration::EnhancedV2)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("LANG", "C.UTF-8")
+        .with_env("LC_ALL", "C.UTF-8");
+
+    let mut rendered = Vec::new();
+    let output = shell_run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line("shopt -q extdebug; printf '__EXTDEBUG__=%s\\n' \"$?\""),
+            RawRelayAction::line("set -o | { grep -E '^(errtrace|functrace)[[:space:]]' || :; }"),
+            RawRelayAction::line("printf '__DEBUG__=%s\\n' \"$(trap -p DEBUG)\""),
+            RawRelayAction::line("printf '__PUBLIC_TOKEN__=%s\\n' \"${COSH_MARKER_TOKEN-unset}\""),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("hello there"),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            // Classify Bash's accepted Readline line, including edits, rather
+            // than relying on DEBUG-trap BASH_COMMAND state.
+            RawRelayAction::write(b"please helx\x7fp\n".to_vec()),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("请帮我分析"),
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line("missing-cosh-v2-command"),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line("set -x"),
+            RawRelayAction::line("printf '__XTRACE_ALIVE__\\n'"),
+            RawRelayAction::line("set +x"),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("enhanced v2 bash relay");
+
+    let terminal = String::from_utf8_lossy(&rendered);
+    assert!(terminal.contains("__USER_PS0__"), "{terminal}");
+    assert!(terminal.contains("__EXTDEBUG__=1"), "{terminal}");
+    assert!(
+        terminal.contains("errtrace") && terminal.contains("off"),
+        "{terminal}"
+    );
+    assert!(
+        terminal.contains("functrace") && terminal.contains("off"),
+        "{terminal}"
+    );
+    assert!(terminal.contains("__PUBLIC_TOKEN__=unset"), "{terminal}");
+    assert!(terminal.contains("__XTRACE_ALIVE__"), "{terminal}");
+    assert!(
+        terminal.contains("missing-cosh-v2-command: command not found"),
+        "{terminal}"
+    );
+    assert!(terminal.contains("trap -- 'printf"), "{terminal}");
+
+    let marker =
+        std::fs::read_to_string(work_dir.join("cosh-marker.bash")).expect("enhanced v2 marker");
+    let marker_token = marker
+        .lines()
+        .find_map(|line| line.strip_prefix("COSH_MARKER_TOKEN='")?.strip_suffix('\''))
+        .expect("marker token");
+    assert!(
+        !terminal.contains(marker_token),
+        "marker token leaked: {terminal}"
+    );
+
+    for input in ["hello there", "please help", "请帮我分析"] {
+        let intercepted = output
+            .events
+            .iter()
+            .filter(|event| {
+                event.kind == ShellEventKind::UserInputIntercepted
+                    && event.input.as_deref() == Some(input)
+                    && event.component.as_deref() == Some("natural_language")
+            })
+            .count();
+        assert_eq!(intercepted, 1, "unexpected routes for {input:?}");
+    }
+    assert!(!output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted
+            && event.input.as_deref() == Some("missing-cosh-v2-command")
+    }));
+
+    let debug_log =
+        std::fs::read_to_string(home_dir.join("debug-trap.log")).expect("user DEBUG trap log");
+    assert!(!debug_log.contains("_cosh_preexec_marker"), "{debug_log}");
+    assert!(!debug_log.contains(marker_token), "{debug_log}");
+    assert!(
+        debug_log
+            .lines()
+            .filter(|line| line.contains("_cosh") || line.contains("_COSH"))
+            .next()
+            .is_none(),
+        "{debug_log}"
+    );
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+}
+
+#[test]
+fn enhanced_v2_matches_bash_trap_and_option_oracle() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-enhanced-v2-oracle-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        r#"PS1='oracle$ '
+PS0='__ORACLE_PS0__'
+PROMPT_COMMAND='printf "__USER_PROMPT__=%s\n" "$?"'
+shopt -u extdebug
+set +E +T
+"#,
+    )
+    .expect("bashrc");
+    let config = ShellHostConfig::new("enhanced-v2-oracle", &work_dir)
+        .with_integration(ShellIntegration::EnhancedV2)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("LANG", "C.UTF-8")
+        .with_env("LC_ALL", "C.UTF-8");
+
+    let mut rendered = Vec::new();
+    let output = shell_run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line(
+                "trap 'printf \"DBG=[%s]\\n\" \"$BASH_COMMAND\" >> \"$HOME/debug.log\"' DEBUG",
+            ),
+            RawRelayAction::line(
+                "trap 'printf \"RET=[%s]\\n\" \"$BASH_COMMAND\" >> \"$HOME/return.log\"' RETURN",
+            ),
+            RawRelayAction::line(
+                "trap 'printf \"ERR=[%s]\\n\" \"$BASH_COMMAND\" >> \"$HOME/err.log\"' ERR",
+            ),
+            RawRelayAction::line(": > \"$HOME/debug.log\""),
+            RawRelayAction::line("echo user-visible-cmd"),
+            RawRelayAction::line("printf '__DASH__=%s\\n' \"$-\""),
+            RawRelayAction::line("set -o | { grep -E '^(errtrace|functrace)[[:space:]]' || :; }"),
+            RawRelayAction::line("shopt -q extdebug; printf '__EXTDEBUG__=%s\\n' \"$?\""),
+            RawRelayAction::line("printf '__DEBUG_TRAP__=%s\\n' \"$(trap -p DEBUG)\""),
+            RawRelayAction::line(
+                "printf '__PROMPT_COMMAND__=%s\\n' \"$(declare -p PROMPT_COMMAND)\"",
+            ),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("enhanced v2 bash oracle");
+
+    let terminal = String::from_utf8_lossy(&rendered);
+    assert!(terminal.contains("user-visible-cmd"), "{terminal}");
+    assert!(terminal.contains("__ORACLE_PS0__"), "{terminal}");
+    assert!(terminal.contains("__USER_PROMPT__"), "{terminal}");
+    assert!(terminal.contains("__EXTDEBUG__=1"), "{terminal}");
+    assert!(
+        terminal.contains("errtrace") && terminal.contains("off"),
+        "{terminal}"
+    );
+    assert!(
+        terminal.contains("functrace") && terminal.contains("off"),
+        "{terminal}"
+    );
+    assert!(terminal.contains("trap -- 'printf"), "{terminal}");
+    assert!(
+        terminal.contains("PROMPT_COMMAND=\"printf \\\"__USER_PROMPT__"),
+        "{terminal}"
+    );
+
+    let marker =
+        std::fs::read_to_string(work_dir.join("cosh-marker.bash")).expect("enhanced v2 marker");
+    let marker_token = marker
+        .lines()
+        .find_map(|line| line.strip_prefix("COSH_MARKER_TOKEN='")?.strip_suffix('\''))
+        .expect("marker token");
+    let debug_log = std::fs::read_to_string(home_dir.join("debug.log")).expect("DEBUG trap log");
+    let return_log = std::fs::read_to_string(home_dir.join("return.log")).unwrap_or_default();
+    let err_log = std::fs::read_to_string(home_dir.join("err.log")).unwrap_or_default();
+    for trap_log in [&debug_log, &return_log, &err_log] {
+        assert!(!trap_log.contains("_cosh"), "{trap_log}");
+        assert!(!trap_log.contains("_COSH"), "{trap_log}");
+        assert!(!trap_log.contains(marker_token), "{trap_log}");
+    }
+    assert!(
+        debug_log.contains("DBG=[echo user-visible-cmd]"),
+        "{debug_log}"
+    );
+    assert!(return_log.is_empty(), "{return_log}");
+    assert_eq!(err_log, "ERR=[shopt -q extdebug]\n", "{err_log}");
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::CommandStarted
+            && event.command.as_deref() == Some("echo user-visible-cmd")
+    }));
+    assert!(output.events.iter().any(|event| {
+        event.kind == ShellEventKind::CommandCompleted
+            && event.command.as_deref() == Some("echo user-visible-cmd")
+            && event.exit_code == Some(0)
+    }));
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+}
+
+#[test]
 fn enhanced_shift_tab_toggles_shell_only_routing_without_restarting_bash() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;

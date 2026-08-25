@@ -415,7 +415,7 @@ where
     // so the prompt gate can prove bash is at its prompt; everything else
     // keeps the Rust intercept path.
     let slash_route_enabled =
-        config.integration.uses_markers() && slash_via_shell && config.native_mode;
+        config.integration.uses_debug_trap() && slash_via_shell && config.native_mode;
     let (mut wake_reader, wake_writer, mut resize_reader, _resize_wake) =
         RelayWake::new()?.into_parts();
     // Keep the channel open after the driver and completion notifier exit;

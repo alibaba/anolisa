@@ -378,7 +378,7 @@ fn raw_cli_mode_root_and_language_guidance_are_canonical() {
     assert!(output.contains("approval: auto"), "{output}");
     assert!(output.contains("analysis: smart"), "{output}");
     assert!(
-        output.contains("Use /mode approval [recommend|auto|trust]"),
+        output.contains("Use /mode approval, /mode analysis, or /mode routing"),
         "{output}"
     );
     assert!(

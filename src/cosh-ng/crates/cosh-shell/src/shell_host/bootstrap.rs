@@ -113,6 +113,9 @@ fn start_shell_session(
         .stderr(Stdio::from(slave));
     if config.integration.uses_markers() {
         command.env("COSH_SESSION_ID", &config.session_id);
+        if !config.integration.uses_debug_trap() {
+            command.env("COSH_ENHANCED_V2", "1");
+        }
     }
     if !config.native_mode {
         command
