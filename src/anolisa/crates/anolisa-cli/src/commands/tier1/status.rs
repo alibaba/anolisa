@@ -8,30 +8,38 @@
 //! be validated and fail explicitly. Exact identities already present in state
 //! always win and remain inspectable offline.
 //!
-//! This handler reports state-on-disk plus live read-only probes. Every
-//! persisted field in [`ComponentRecord`] is projected straight from
-//! [`Installation`]; synthesized data is limited to read-only rpmdb,
-//! integrity, adapter, and manifest health observations. Quarantined
+//! This handler collects state-on-disk and live probes into a request-scoped
+//! [`ComponentSnapshot`] before projecting [`ComponentRecord`]. Synthesized
+//! data is limited to read-only rpmdb, integrity, adapter, and manifest health
+//! observations. Quarantined
 //! legacy records are surfaced as `needs-attention` rows with their exits
 //! (`repair`/`forget`) — `status` is the only command that shows them
 //! unprompted. Nothing here ever writes state.
 
+use std::path::PathBuf;
+
 use chrono::{SecondsFormat, Utc};
 use clap::Parser;
 use serde::Serialize;
+use thiserror::Error;
 
 use anolisa_core::adapter::claim::ClaimStatus;
-#[cfg(test)]
-use anolisa_core::adapter::manager::AdapterSourceStatus;
-use anolisa_core::adapter::manager::ScanEntry;
-use anolisa_core::domain::{Installation, ProviderBinding};
+use anolisa_core::adapter::manager::{AdapterSourceStatus, ScanEntry};
+use anolisa_core::domain::{
+    Installation, InstallationScope, NativePm, Observation, ProviderBinding,
+};
+use anolisa_core::facts::observe_owned_files;
 use anolisa_core::state::ObjectKind;
 use anolisa_core::state_migration::QuarantineReason;
 #[cfg(test)]
 use anolisa_core::state_store::StateStore;
 use anolisa_core::{
-    CheckEnv, CheckOutcome, CheckStatus, ComponentManifest, HealthEntry, IntegrityStatus,
-    ServiceManager, ServiceProbes, check_owned_file, run_check,
+    AdapterObservation, AdapterProvenance, AdapterSourceSnapshot, CheckEnv, CheckOutcome,
+    CheckStatus, ComponentManifest, ComponentSnapshot, ComponentSnapshotObservations,
+    ComponentSnapshotRequest, HealthEntry, IntegrityStatus, ManifestHealthProvenance,
+    ManifestHealthSnapshot, NativePackageProvenance, NativePackageSnapshot, OwnedFilesProvenance,
+    ProbeEvidence, ServiceManager, ServiceProbes, SnapshotContractError, SnapshotProbe,
+    StateProvenance, StateRootScope, StateSnapshot, StateVisibilitySnapshot, run_check,
     service_for_install_mode as service_factory, user_service_for_install_mode,
 };
 use anolisa_env::EnvService;
@@ -179,11 +187,34 @@ pub(crate) enum AggregateRecordSelection {
     AllVisible,
 }
 
+/// Internal failure while constructing or projecting a status snapshot.
+#[derive(Debug, Error)]
+pub(crate) enum StatusSnapshotError {
+    /// Collected evidence violated the shared snapshot contract.
+    #[error("component snapshot contract failed for {component:?}: {source}")]
+    Contract {
+        /// Component whose request and evidence disagreed.
+        component: String,
+        /// Underlying request/evidence contract violation.
+        #[source]
+        source: SnapshotContractError,
+    },
+    /// A status projection received state evidence it cannot render.
+    #[error("component snapshot for {component:?} does not contain active state")]
+    MissingActiveState { component: String },
+}
+
+enum AdapterScanEvidence<'a> {
+    NotRequested,
+    Available(&'a [ScanEntry]),
+    Unavailable(String),
+}
+
 pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
     let mut view = StateView::load(ctx, COMMAND, StateVisibility::UserPlusSystem)?;
     migrate_view_states(&mut view);
     let layout = common::resolve_layout(ctx);
-    let adapter_scan = common::build_adapter_manager(ctx).scan().ok();
+    let adapter_scan = common::build_adapter_manager(ctx).scan();
 
     let query = RpmPackageQuery::system();
     // A named query uses the component index both to validate/resolve its
@@ -216,14 +247,19 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
         user: user_service.as_ref(),
     };
 
-    let mut records = select_components_from_view(
+    let adapter_evidence = match &adapter_scan {
+        Ok(report) => AdapterScanEvidence::Available(&report.entries),
+        Err(error) => AdapterScanEvidence::Unavailable(error.to_string()),
+    };
+    let mut records = select_components_from_view_with_adapter_evidence(
         &view,
         selected_component.as_deref(),
         AggregateRecordSelection::AllVisible,
-        adapter_scan.as_ref().map(|r| r.entries.as_slice()),
+        adapter_evidence,
         Some(&service_backends),
         Some(&query),
-    );
+    )
+    .map_err(status_snapshot_cli_error)?;
 
     // Read-only Observed report (§8): when a named component is absent from
     // ANOLISA state but present in rpmdb (system mode), upgrade the synthetic
@@ -258,6 +294,13 @@ pub fn handle(args: StatusArgs, ctx: &CliContext) -> Result<(), CliError> {
         render_quarantined(&quarantined, ctx.no_color);
     }
     Ok(())
+}
+
+fn status_snapshot_cli_error(error: StatusSnapshotError) -> CliError {
+    CliError::Runtime {
+        command: COMMAND.to_string(),
+        reason: format!("failed to assemble component status snapshot: {error}"),
+    }
 }
 
 fn resolve_component_target(
@@ -394,7 +437,7 @@ impl ServiceProbeBackends<'_> {
 /// optionally filtered to a single name. Extracted so tests can exercise
 /// the filtering/synthetic-not-installed logic without mocking
 /// `CliContext` or touching the filesystem. Service probes answer
-/// unsupported here — routing is exercised through `record_from_object`
+/// unsupported here — routing is exercised through the snapshot collector
 /// with injected backends.
 #[cfg(test)]
 pub(crate) fn select_components(
@@ -412,32 +455,40 @@ pub(crate) fn select_components(
         current_system: &quiet,
         user: &quiet,
     };
-    let installed: Vec<&Installation> = state
-        .installations
-        .iter()
-        .filter(|o| o.kind == ObjectKind::Component)
-        .collect();
-
-    match name {
-        None => installed
-            .iter()
-            .map(|o| {
-                let mut rec = record_from_object(layout, install_mode, Some(&backends), o);
-                apply_current_scope(&mut rec, layout, install_mode);
-                rec.adapters = adapter_summaries_for(&o.name, adapter_scan);
-                rec
-            })
-            .collect(),
-        Some(target) => match installed.iter().find(|o| o.name == target) {
-            Some(obj) => {
-                let mut rec = record_from_object(layout, install_mode, Some(&backends), obj);
-                apply_current_scope(&mut rec, layout, install_mode);
-                rec.adapters = adapter_summaries_for(&obj.name, adapter_scan);
-                vec![rec]
-            }
-            None => vec![not_installed_record(target)],
-        },
+    let scope = if install_mode == "system" {
+        StateScope::System
+    } else {
+        StateScope::User
+    };
+    let mut state = state.clone();
+    for installation in &mut state.installations {
+        installation.scope = match scope {
+            StateScope::System => InstallationScope::System,
+            StateScope::User => InstallationScope::User { uid: 1000 },
+        };
     }
+    let root = crate::commands::state_view::ScopedStateRoot {
+        scope,
+        layout: layout.clone(),
+        state_path: layout.state_dir.join("installed.toml"),
+        writable: true,
+        state,
+    };
+    let view = StateView {
+        writable: root.clone(),
+        visible_roots: vec![root],
+        unavailable_roots: Vec::new(),
+        warnings: Vec::new(),
+    };
+    select_components_from_view(
+        &view,
+        name,
+        AggregateRecordSelection::AllVisible,
+        adapter_scan,
+        Some(&backends),
+        None,
+    )
+    .expect("test snapshot evidence must satisfy its request")
 }
 
 /// `manifest_probe` controls whether the projection executes each record's
@@ -451,7 +502,29 @@ pub(crate) fn select_components_from_view(
     adapter_scan: Option<&[ScanEntry]>,
     manifest_probe: Option<&ServiceProbeBackends<'_>>,
     rpm_query: Option<&dyn PackageQuery>,
-) -> Vec<ComponentRecord> {
+) -> Result<Vec<ComponentRecord>, StatusSnapshotError> {
+    let adapter_evidence = adapter_scan.map_or(
+        AdapterScanEvidence::NotRequested,
+        AdapterScanEvidence::Available,
+    );
+    select_components_from_view_with_adapter_evidence(
+        view,
+        name,
+        aggregate_selection,
+        adapter_evidence,
+        manifest_probe,
+        rpm_query,
+    )
+}
+
+fn select_components_from_view_with_adapter_evidence(
+    view: &StateView,
+    name: Option<&str>,
+    aggregate_selection: AggregateRecordSelection,
+    adapter_scan: AdapterScanEvidence<'_>,
+    manifest_probe: Option<&ServiceProbeBackends<'_>>,
+    rpm_query: Option<&dyn PackageQuery>,
+) -> Result<Vec<ComponentRecord>, StatusSnapshotError> {
     let visible_components = view.visible_components();
     let selected: Vec<_> = match name {
         None => visible_components
@@ -469,58 +542,284 @@ pub(crate) fn select_components_from_view(
     };
 
     let Some(target_records) = (!selected.is_empty()).then_some(selected) else {
-        return name
+        return Ok(name
             .map(|target| vec![not_installed_record(target)])
-            .unwrap_or_default();
+            .unwrap_or_default());
     };
 
     let checked_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let adapter_state_paths = view
+        .visible_roots
+        .iter()
+        .map(|root| root.state_path.clone())
+        .collect::<Vec<_>>();
     target_records
         .into_iter()
         .map(|record| {
-            let mut component = record_from_object(
-                &record.root.layout,
-                record.scope().label(),
+            let snapshot = collect_status_snapshot(
+                &record,
+                &adapter_scan,
+                &adapter_state_paths,
                 manifest_probe,
-                record.object,
+                rpm_query,
+                &checked_at,
             );
-            component.adapters = adapter_summaries_for(&component.name, adapter_scan);
-            apply_record_scope(&mut component, &record);
-            if let Some(query) = rpm_query {
-                apply_rpm_drift_to_record(&mut component, record.object, query, &checked_at);
-            }
-            component
+            snapshot.and_then(|snapshot| record_from_snapshot(&snapshot, &checked_at))
         })
         .collect()
 }
 
-fn apply_record_scope(
-    component: &mut ComponentRecord,
+fn collect_status_snapshot(
     record: &crate::commands::state_view::ScopedInstalledObject<'_>,
-) {
-    component.scope = record.scope().label().to_string();
-    component.active = record.active;
-    component.mutable_by_current_invocation = record.mutable_by_current_invocation;
-    component.shadowed_by = record
-        .shadowed_by
-        .map(StateScope::label)
-        .map(str::to_string);
-    component.state_path = Some(record.root.state_path.display().to_string());
+    adapter_scan: &AdapterScanEvidence<'_>,
+    adapter_state_paths: &[PathBuf],
+    manifest_probe: Option<&ServiceProbeBackends<'_>>,
+    rpm_query: Option<&dyn PackageQuery>,
+    observed_at: &str,
+) -> Result<ComponentSnapshot, StatusSnapshotError> {
+    let state = ProbeEvidence::Present {
+        provenance: StateProvenance {
+            path: record.root.state_path.clone(),
+        },
+        value: StateSnapshot::Active(Box::new(record.object.clone())),
+    };
+    let state_visibility = StateVisibilitySnapshot {
+        root_scope: snapshot_scope(record.scope()),
+        active: record.active,
+        mutable_by_current_invocation: record.mutable_by_current_invocation,
+        shadowed_by: record.shadowed_by.map(snapshot_scope),
+    };
+    let owned_files = match observe_owned_files(record.object, &record.root.layout) {
+        Some(value) => ProbeEvidence::Present {
+            provenance: OwnedFilesProvenance {
+                state_path: record.root.state_path.clone(),
+            },
+            value,
+        },
+        None => ProbeEvidence::Absent {
+            provenance: OwnedFilesProvenance {
+                state_path: record.root.state_path.clone(),
+            },
+        },
+    };
+    let manifest_health = collect_manifest_health(
+        &record.root.layout,
+        record.scope().label(),
+        manifest_probe,
+        record.object,
+    );
+    let pre_native_status = projected_health_status(
+        common::installation_status_str(record.object),
+        &owned_files,
+        &manifest_health,
+    );
+    let native_package =
+        collect_native_package(record.object, rpm_query, &pre_native_status, observed_at);
+    let adapters =
+        collect_adapter_observations(&record.object.name, adapter_scan, adapter_state_paths);
+
+    let mut probes = vec![SnapshotProbe::State, SnapshotProbe::OwnedFiles];
+    if !matches!(&native_package, ProbeEvidence::NotRequested) {
+        probes.push(SnapshotProbe::NativePackage);
+    }
+    if !matches!(&manifest_health, ProbeEvidence::NotRequested) {
+        probes.push(SnapshotProbe::ManifestHealth);
+    }
+    if !matches!(&adapters, ProbeEvidence::NotRequested) {
+        probes.push(SnapshotProbe::Adapters);
+    }
+    let request =
+        ComponentSnapshotRequest::new(record.object.name.clone(), record.object.scope, probes);
+
+    ComponentSnapshot::from_observations(
+        request,
+        ComponentSnapshotObservations {
+            state,
+            state_visibility: Some(state_visibility),
+            owned_files,
+            native_package,
+            manifest_health,
+            adapters,
+            pending_journal: ProbeEvidence::NotRequested,
+        },
+    )
+    .map_err(|source| StatusSnapshotError::Contract {
+        component: record.object.name.clone(),
+        source,
+    })
 }
 
-#[cfg(test)]
-fn apply_current_scope(component: &mut ComponentRecord, layout: &FsLayout, install_mode: &str) {
-    component.scope = install_mode.to_string();
-    component.active = true;
-    component.mutable_by_current_invocation = true;
-    component.shadowed_by = None;
-    component.state_path = Some(
-        layout
-            .state_dir
-            .join("installed.toml")
-            .display()
-            .to_string(),
+fn snapshot_scope(scope: StateScope) -> StateRootScope {
+    match scope {
+        StateScope::User => StateRootScope::User,
+        StateScope::System => StateRootScope::System,
+    }
+}
+
+fn collect_native_package(
+    installation: &Installation,
+    query: Option<&dyn PackageQuery>,
+    status: &str,
+    observed_at: &str,
+) -> ProbeEvidence<NativePackageSnapshot, NativePackageProvenance> {
+    if !matches!(status, "installed" | "adopted" | "observed")
+        || !matches!(installation.scope, InstallationScope::System)
+    {
+        return ProbeEvidence::NotRequested;
+    }
+    let ProviderBinding::Delegated { pm, package, .. } = &installation.binding else {
+        return ProbeEvidence::NotRequested;
+    };
+    let Some(package) = package.resolved_name() else {
+        return ProbeEvidence::NotRequested;
+    };
+    let Some(query) = query else {
+        return ProbeEvidence::NotRequested;
+    };
+
+    native_package_evidence(*pm, package, query, observed_at)
+}
+
+fn native_package_evidence(
+    manager: NativePm,
+    package: &str,
+    query: &dyn PackageQuery,
+    observed_at: &str,
+) -> ProbeEvidence<NativePackageSnapshot, NativePackageProvenance> {
+    let provenance = NativePackageProvenance {
+        manager,
+        package: package.to_string(),
+    };
+    match query.query_installed(package) {
+        Ok(Some(info)) => ProbeEvidence::Present {
+            provenance,
+            value: NativePackageSnapshot::Installed(Observation {
+                version: info.version.version.clone(),
+                evr: Some(info.version.to_string()),
+                arch: Some(info.arch),
+                source_repo: info.origin,
+                observed_at: observed_at.to_string(),
+            }),
+        },
+        Ok(None) => ProbeEvidence::Absent { provenance },
+        Err(PackageQueryError::UnexpectedOutput { detail, .. }) => ProbeEvidence::Present {
+            provenance,
+            value: NativePackageSnapshot::UnexpectedOutput { detail },
+        },
+        Err(error) => ProbeEvidence::Unavailable {
+            provenance,
+            reason: error.to_string(),
+        },
+    }
+}
+
+fn collect_manifest_health(
+    layout: &FsLayout,
+    install_mode: &str,
+    service_backends: Option<&ServiceProbeBackends<'_>>,
+    component: &Installation,
+) -> ProbeEvidence<ManifestHealthSnapshot, ManifestHealthProvenance> {
+    let Some(service_backends) = service_backends else {
+        return ProbeEvidence::NotRequested;
+    };
+    if component.binding.is_delegated() {
+        return ProbeEvidence::NotRequested;
+    }
+
+    let path = match common::installed_component_manifest_path(layout, &component.name, COMMAND) {
+        Ok(path) => path,
+        Err(_) => {
+            return ProbeEvidence::Absent {
+                provenance: ManifestHealthProvenance {
+                    path: layout.state_dir.join("component-manifests"),
+                },
+            };
+        }
+    };
+    let provenance = ManifestHealthProvenance { path: path.clone() };
+    if !path.is_file() {
+        return ProbeEvidence::Absent { provenance };
+    }
+    let manifest = match ComponentManifest::from_file(&path) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return ProbeEvidence::Unavailable {
+                provenance,
+                reason: format!("failed to parse installed manifest snapshot: {error}"),
+            };
+        }
+    };
+    let Some(spec) = manifest.health_spec() else {
+        return ProbeEvidence::Absent { provenance };
+    };
+
+    let outcome = run_check(
+        &spec,
+        &CheckEnv {
+            layout,
+            dry_run: false,
+            service_probes: Some(ServiceProbes {
+                system: service_backends.system_for_record_scope(install_mode),
+                user: service_backends.user,
+                declared: &manifest.install.services,
+            }),
+        },
     );
+    ProbeEvidence::Present {
+        provenance,
+        value: ManifestHealthSnapshot { outcome },
+    }
+}
+
+fn collect_adapter_observations(
+    component: &str,
+    scan: &AdapterScanEvidence<'_>,
+    state_paths: &[PathBuf],
+) -> ProbeEvidence<Vec<AdapterObservation>, AdapterProvenance> {
+    let provenance = AdapterProvenance {
+        state_paths: state_paths.to_vec(),
+    };
+    match scan {
+        AdapterScanEvidence::NotRequested => ProbeEvidence::NotRequested,
+        AdapterScanEvidence::Unavailable(reason) => ProbeEvidence::Unavailable {
+            provenance,
+            reason: reason.clone(),
+        },
+        AdapterScanEvidence::Available(entries) => {
+            let observations = entries
+                .iter()
+                .filter(|entry| entry.component == component)
+                .map(adapter_observation_from_scan)
+                .collect::<Vec<_>>();
+            if observations.is_empty() {
+                ProbeEvidence::Absent { provenance }
+            } else {
+                ProbeEvidence::Present {
+                    provenance,
+                    value: observations,
+                }
+            }
+        }
+    }
+}
+
+fn adapter_observation_from_scan(entry: &ScanEntry) -> AdapterObservation {
+    AdapterObservation {
+        component: entry.component.clone(),
+        framework: entry.framework.clone(),
+        declared: entry.declared,
+        resource_root: entry.resource_root.clone(),
+        driver_available: entry.driver_available,
+        framework_detected: entry.framework_detected,
+        adapter_type: entry.adapter_type.clone(),
+        enabled: entry.enabled,
+        claim_status: entry.claim_status,
+        source_status: entry.source_status.map(|status| match status {
+            AdapterSourceStatus::Available => AdapterSourceSnapshot::Available,
+            AdapterSourceStatus::Missing => AdapterSourceSnapshot::Missing,
+        }),
+        source_reason: entry.source_reason.clone(),
+    }
 }
 
 fn not_installed_record(name: &str) -> ComponentRecord {
@@ -543,6 +842,50 @@ fn not_installed_record(name: &str) -> ComponentRecord {
         rpm_source_repo: None,
         provisioned_packages: Vec::new(),
     }
+}
+
+#[cfg(test)]
+fn record_from_object(
+    layout: &FsLayout,
+    install_mode: &str,
+    manifest_probe: Option<&ServiceProbeBackends<'_>>,
+    installation: &Installation,
+) -> ComponentRecord {
+    let scope = if install_mode == "system" {
+        StateScope::System
+    } else {
+        StateScope::User
+    };
+    let mut state = StateStore::empty();
+    let mut installation = installation.clone();
+    installation.scope = match scope {
+        StateScope::System => InstallationScope::System,
+        StateScope::User => InstallationScope::User { uid: 1000 },
+    };
+    state.upsert(installation.clone());
+    let root = crate::commands::state_view::ScopedStateRoot {
+        scope,
+        layout: layout.clone(),
+        state_path: layout.state_dir.join("installed.toml"),
+        writable: true,
+        state,
+    };
+    let view = StateView {
+        writable: root.clone(),
+        visible_roots: vec![root],
+        unavailable_roots: Vec::new(),
+        warnings: Vec::new(),
+    };
+    select_components_from_view(
+        &view,
+        Some(&installation.name),
+        AggregateRecordSelection::AllVisible,
+        None,
+        manifest_probe,
+        None,
+    )
+    .expect("test snapshot evidence must satisfy its request")
+    .remove(0)
 }
 
 /// Probe rpmdb for `component` and, if a matching system RPM is installed,
@@ -623,33 +966,8 @@ pub(crate) fn probe_rpm_drift(
     recorded_evr: Option<&str>,
     query: &dyn PackageQuery,
 ) -> Option<RpmDrift> {
-    match query.query_installed(package) {
-        Ok(Some(info)) => {
-            let live = info.version.to_string();
-            match recorded_evr {
-                // Recorded EVR diverges from rpmdb: a manual dnf update/downgrade.
-                Some(recorded) if recorded != live => Some(RpmDrift::Drifted {
-                    reason: format!(
-                        "rpmdb reports {live} for package {package} but ANOLISA state records {recorded}"
-                    ),
-                }),
-                // EVR matches, or none recorded to compare against: no drift.
-                _ => None,
-            }
-        }
-        // State records the package but rpmdb no longer has it: an `rpm -e` drift.
-        Ok(None) => Some(RpmDrift::Missing),
-        // rpm returned output we can't reduce to a single installed version
-        // (several versions, a malformed `--qf` row, or none on a zero exit).
-        // The recorded version can no longer be trusted as-is, so surface it as
-        // drift carrying the backend's own detail rather than guessing the cause.
-        Err(PackageQueryError::UnexpectedOutput { detail, .. }) => Some(RpmDrift::Drifted {
-            reason: format!("rpmdb returned unexpected output for package {package}: {detail}"),
-        }),
-        // rpm/dnf absent, or a spawn/permission/query failure: cannot prove
-        // drift on an unrunnable query, so keep the recorded status untouched.
-        Err(_) => None,
-    }
+    let evidence = native_package_evidence(NativePm::Rpm, package, query, "");
+    rpm_drift_from_evidence(&evidence, recorded_evr)
 }
 
 /// The (package, recorded EVR) pair the drift probe compares against rpmdb,
@@ -667,22 +985,61 @@ pub(crate) fn drift_probe_identity(installation: &Installation) -> Option<(&str,
     }
 }
 
-fn apply_rpm_drift_to_record(
+fn rpm_drift_from_evidence(
+    evidence: &ProbeEvidence<NativePackageSnapshot, NativePackageProvenance>,
+    recorded_evr: Option<&str>,
+) -> Option<RpmDrift> {
+    match evidence {
+        ProbeEvidence::Absent { .. } => Some(RpmDrift::Missing),
+        ProbeEvidence::Present {
+            provenance,
+            value: NativePackageSnapshot::Installed(observation),
+        } => match (recorded_evr, observation.evr.as_deref()) {
+            (Some(recorded), Some(live)) if recorded != live => Some(RpmDrift::Drifted {
+                reason: format!(
+                    "rpmdb reports {live} for package {} but ANOLISA state records {recorded}",
+                    provenance.package
+                ),
+            }),
+            _ => None,
+        },
+        ProbeEvidence::Present {
+            provenance,
+            value: NativePackageSnapshot::MultipleVersions,
+        } => Some(RpmDrift::Drifted {
+            reason: format!(
+                "rpmdb reports multiple installed versions for package {}",
+                provenance.package
+            ),
+        }),
+        ProbeEvidence::Present {
+            provenance,
+            value: NativePackageSnapshot::UnexpectedOutput { detail },
+        } => Some(RpmDrift::Drifted {
+            reason: format!(
+                "rpmdb returned unexpected output for package {}: {detail}",
+                provenance.package
+            ),
+        }),
+        ProbeEvidence::NotRequested | ProbeEvidence::Unavailable { .. } => None,
+    }
+}
+
+fn apply_native_package_to_record(
     record: &mut ComponentRecord,
     installation: &Installation,
-    query: &dyn PackageQuery,
+    evidence: &ProbeEvidence<NativePackageSnapshot, NativePackageProvenance>,
     checked_at: &str,
 ) {
     // Only adjudicate drift on a clean live projection; never demote a
-    // failed/degraded/disabled record (see fn doc). This also bounds the
-    // rpm -q probes below to the records that can actually drift.
+    // failed, degraded, or disabled record.
     if !matches!(record.status.as_str(), "installed" | "adopted" | "observed") {
         return;
     }
     let Some((package, recorded_evr)) = drift_probe_identity(installation) else {
         return;
     };
-    let (status, reason) = match probe_rpm_drift(package, recorded_evr, query) {
+    let (status, reason) = match rpm_drift_from_evidence(evidence, recorded_evr) {
         Some(RpmDrift::Drifted { reason }) => ("drifted", reason),
         Some(RpmDrift::Missing) => (
             "missing",
@@ -699,69 +1056,32 @@ fn apply_rpm_drift_to_record(
     });
 }
 
-/// Build adapter summary records for `component` from the scan entries.
-fn adapter_summaries_for(component: &str, scan: Option<&[ScanEntry]>) -> Vec<AdapterSummaryRecord> {
-    let Some(entries) = scan else {
-        return Vec::new();
+fn record_from_snapshot(
+    snapshot: &ComponentSnapshot,
+    checked_at: &str,
+) -> Result<ComponentRecord, StatusSnapshotError> {
+    let ProbeEvidence::Present {
+        provenance: state_provenance,
+        value: StateSnapshot::Active(installation),
+    } = snapshot.state()
+    else {
+        return Err(StatusSnapshotError::MissingActiveState {
+            component: snapshot.request().component().to_string(),
+        });
     };
-    entries
-        .iter()
-        .filter(|e| e.component == component)
-        .map(|e| AdapterSummaryRecord {
-            component: e.component.clone(),
-            framework: e.framework.clone(),
-            declared: e.declared,
-            resource_present: e.resource_root.is_some(),
-            resource_root: e.resource_root.as_ref().map(|p| p.display().to_string()),
-            driver_available: e.driver_available,
-            framework_detected: e.framework_detected,
-            enabled: e.enabled,
-            claim_status: e.claim_status,
-            source_status: e.source_status.map(|status| status.label().to_string()),
-            source_reason: e.source_reason.clone(),
-        })
-        .collect()
-}
-
-fn record_from_object(
-    layout: &FsLayout,
-    install_mode: &str,
-    manifest_probe: Option<&ServiceProbeBackends<'_>>,
-    installation: &Installation,
-) -> ComponentRecord {
-    // Start from the state's last-known health entries, then layer the
-    // live integrity probe on top. The integrity probe is authoritative
-    // for owned-file existence and sha256; it can escalate the wire
-    // status from `installed` to `degraded` or `failed` without us
-    // touching the on-disk state.
-    let base_status = common::installation_status_str(installation).to_string();
     let mut health = installation.health.clone();
-    let (integrity_entries, integrity_status) = integrity_probe(layout, installation, &base_status);
-    health.extend(integrity_entries);
-
-    // Layer the manifest-declared health check on top, driven by the
-    // installed manifest snapshot (the same per-installation copy consumed
-    // by uninstall hooks, adapter discovery, and contract reconciliation).
-    //
-    // Delegated rows are exempt: their file layout is selected by RPM macros
-    // rather than ANOLISA's raw backend, so manifest checks against the raw
-    // layout can spuriously escalate a valid package. Delegated health is
-    // adjudicated by the rpmdb drift probe after this projection.
-    let manifest_status = match manifest_probe {
-        Some(service_backends) if !installation.binding.is_delegated() => {
-            let (manifest_entries, escalated) = manifest_health_probe(
-                layout,
-                install_mode,
-                service_backends,
-                installation,
-                &integrity_status,
-            );
-            health.extend(manifest_entries);
-            escalated
-        }
-        _ => integrity_status,
-    };
-
+    append_owned_file_health(snapshot.owned_files(), checked_at, &mut health);
+    append_manifest_health(
+        &installation.name,
+        snapshot.manifest_health(),
+        checked_at,
+        &mut health,
+    );
+    let status = projected_health_status(
+        common::installation_status_str(installation),
+        snapshot.owned_files(),
+        snapshot.manifest_health(),
+    );
     // Surface RPM provenance for delegated rows so human/JSON output shows
     // the package/EVR/repo behind the record.
     let (rpm_package, rpm_evr, rpm_source_repo) = match &installation.binding {
@@ -777,20 +1097,28 @@ fn record_from_object(
         ProviderBinding::Owned { .. } => (None, None, None),
     };
 
-    ComponentRecord {
+    let visibility = snapshot.state_visibility();
+    let mut record = ComponentRecord {
         name: installation.name.clone(),
-        status: manifest_status,
-        scope: "none".to_string(),
-        active: true,
-        mutable_by_current_invocation: false,
-        shadowed_by: None,
-        state_path: None,
+        status,
+        scope: visibility.map_or_else(
+            || installation_scope_label(snapshot.request().scope()).to_string(),
+            |metadata| state_root_scope_label(metadata.root_scope).to_string(),
+        ),
+        active: visibility.is_none_or(|metadata| metadata.active),
+        mutable_by_current_invocation: visibility
+            .is_some_and(|metadata| metadata.mutable_by_current_invocation),
+        shadowed_by: visibility
+            .and_then(|metadata| metadata.shadowed_by)
+            .map(state_root_scope_label)
+            .map(str::to_string),
+        state_path: Some(state_provenance.path.display().to_string()),
         version: record_version(installation),
         installed_at: Some(installation.installed_at.clone()),
         last_operation_id: installation.last_operation_id.clone(),
         enabled_features: installation.enabled_features.clone(),
         health,
-        adapters: Vec::new(),
+        adapters: adapter_summaries_from_snapshot(snapshot.adapters()),
         rpm_package,
         rpm_evr,
         rpm_source_repo,
@@ -798,7 +1126,58 @@ fn record_from_object(
             ProviderBinding::Owned { artifact } => artifact.provisioned_packages.clone(),
             ProviderBinding::Delegated { .. } => Vec::new(),
         },
+    };
+    apply_native_package_to_record(
+        &mut record,
+        installation,
+        snapshot.native_package(),
+        checked_at,
+    );
+    Ok(record)
+}
+
+fn installation_scope_label(scope: InstallationScope) -> &'static str {
+    match scope {
+        InstallationScope::System => "system",
+        InstallationScope::User { .. } => "user",
     }
+}
+
+fn state_root_scope_label(scope: StateRootScope) -> &'static str {
+    match scope {
+        StateRootScope::User => "user",
+        StateRootScope::System => "system",
+    }
+}
+
+fn adapter_summaries_from_snapshot(
+    evidence: &ProbeEvidence<Vec<AdapterObservation>, AdapterProvenance>,
+) -> Vec<AdapterSummaryRecord> {
+    let ProbeEvidence::Present { value, .. } = evidence else {
+        return Vec::new();
+    };
+    value
+        .iter()
+        .map(|observation| AdapterSummaryRecord {
+            component: observation.component.clone(),
+            framework: observation.framework.clone(),
+            declared: observation.declared,
+            resource_present: observation.resource_root.is_some(),
+            resource_root: observation
+                .resource_root
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            driver_available: observation.driver_available,
+            framework_detected: observation.framework_detected,
+            enabled: observation.enabled,
+            claim_status: observation.claim_status,
+            source_status: observation.source_status.map(|status| match status {
+                AdapterSourceSnapshot::Available => "available".to_string(),
+                AdapterSourceSnapshot::Missing => "missing".to_string(),
+            }),
+            source_reason: observation.source_reason.clone(),
+        })
+        .collect()
 }
 
 /// Displayed version: authoritative for owned artifacts; the last observed
@@ -812,56 +1191,20 @@ fn record_version(installation: &Installation) -> Option<String> {
     }
 }
 
-/// Probe the integrity of every file owned by `component` and return
-/// synthesized [`HealthEntry`] items plus the (possibly escalated) wire
-/// status label.
-///
-/// Escalation rules (only move toward more-broken, never back):
-/// - any [`IntegrityStatus::is_failure`] result → `"failed"`
-/// - any [`IntegrityStatus::Unverified`] or
-///   [`IntegrityStatus::ProbeLimitExceeded`] result on an otherwise-clean
-///   component → `"degraded"`
-/// - otherwise the base status (`installed`/`disabled`/etc) is preserved
-///
-/// Status is left untouched when the component is already `disabled`
-/// or `not_installed`: probing a disabled component and demoting it
-/// to `degraded` would be a regression in the meaning of `disabled`.
-fn integrity_probe(
-    layout: &FsLayout,
-    component: &Installation,
-    base_status: &str,
-) -> (Vec<HealthEntry>, String) {
-    let mut entries: Vec<HealthEntry> = Vec::new();
-    let mut had_failure = false;
-    let mut had_unverified = false;
-    let checked_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
-
-    let files: &[anolisa_core::state::OwnedFile] = match &component.binding {
-        ProviderBinding::Owned { artifact } => &artifact.files,
-        // Delegated rows own no files; the native package manager verifies
-        // its own payload.
-        ProviderBinding::Delegated { .. } => &[],
+/// Project typed owned-file observations into the existing health-entry wire.
+fn append_owned_file_health(
+    evidence: &ProbeEvidence<anolisa_core::OwnedFilesSnapshot, OwnedFilesProvenance>,
+    checked_at: &str,
+    entries: &mut Vec<HealthEntry>,
+) {
+    let ProbeEvidence::Present { value, .. } = evidence else {
+        return;
     };
-    for file in files {
-        let result = check_owned_file(layout, file);
-        if result == IntegrityStatus::Skipped {
+    for observation in &value.files {
+        if observation.status == IntegrityStatus::Skipped {
             continue;
         }
-        if result.is_failure() {
-            had_failure = true;
-        } else if matches!(
-            result,
-            IntegrityStatus::Unverified | IntegrityStatus::ProbeLimitExceeded { .. }
-        ) {
-            // Both mean "content not proved intact" — no digest recorded,
-            // or one recorded but the file was too large to hash. Neither
-            // proves damage, so they degrade rather than fail.
-            had_unverified = true;
-        }
-        // Spell the budget stop out. On its own the label reads like "this
-        // file is outside integrity policy", when in fact a digest is on
-        // record and only this run declined to re-read it.
-        let reason = match &result {
+        let reason = match &observation.status {
             IntegrityStatus::ProbeLimitExceeded { size, limit } => Some(format!(
                 "file size {size} exceeds the {limit}-byte integrity probe ceiling; \
                  the recorded digest was not re-checked this run"
@@ -869,105 +1212,75 @@ fn integrity_probe(
             _ => None,
         };
         entries.push(HealthEntry {
-            name: format!("integrity:{}", file.path.display()),
-            status: result.label().to_string(),
-            checked_at: checked_at.clone(),
+            name: format!("integrity:{}", observation.path.display()),
+            status: observation.status.label().to_string(),
+            checked_at: checked_at.to_string(),
             reason,
         });
     }
+}
 
-    // Only escalate from "installed"/"adopted" — keep "disabled"/"failed"
-    // as-is so a disabled component does not get demoted by a stale
-    // sha256 mismatch on disk.
-    let escalated = match base_status {
+/// Apply integrity and manifest-health evidence without downgrading an
+/// already disabled, degraded, or failed lifecycle status.
+fn projected_health_status(
+    base_status: &str,
+    owned_files: &ProbeEvidence<anolisa_core::OwnedFilesSnapshot, OwnedFilesProvenance>,
+    manifest_health: &ProbeEvidence<ManifestHealthSnapshot, ManifestHealthProvenance>,
+) -> String {
+    let mut had_failure = false;
+    let mut had_unverified = false;
+    if let ProbeEvidence::Present { value, .. } = owned_files {
+        for observation in &value.files {
+            if observation.status.is_failure() {
+                had_failure = true;
+            } else if matches!(
+                observation.status,
+                IntegrityStatus::Unverified | IntegrityStatus::ProbeLimitExceeded { .. }
+            ) {
+                had_unverified = true;
+            }
+        }
+    }
+    let integrity_status = match base_status {
         "installed" | "adopted" | "observed" if had_failure => "failed".to_string(),
         "installed" | "adopted" | "observed" if had_unverified => "degraded".to_string(),
         _ => base_status.to_string(),
     };
-    (entries, escalated)
+
+    let broken = match manifest_health {
+        ProbeEvidence::Unavailable { .. } => Some("degraded"),
+        ProbeEvidence::Present { value, .. } => match value.outcome.status {
+            CheckStatus::Failed => Some("failed"),
+            CheckStatus::Unsupported => Some("degraded"),
+            CheckStatus::Ok | CheckStatus::Skipped => None,
+        },
+        ProbeEvidence::NotRequested | ProbeEvidence::Absent { .. } => None,
+    };
+    match integrity_status.as_str() {
+        "installed" | "adopted" | "observed" => broken.unwrap_or(&integrity_status).to_string(),
+        _ => integrity_status,
+    }
 }
 
-/// Run the structured `[component.health_check]` declared by the installed
-/// manifest snapshot (`state_dir/component-manifests/<name>/component.toml`)
-/// through the shared health engine.
-///
-/// The snapshot is the same per-installation manifest copy consumed by
-/// uninstall hooks, adapter discovery, and contract reconciliation: the
-/// authoritative "what is installed here" record written at install time
-/// and refreshed by upgrade/repair. A missing snapshot is silent (adopted
-/// records and installs from before the snapshot machinery have nothing to
-/// probe); an unreadable one degrades the component — the record exists
-/// but cannot be verified.
-///
-/// Escalation rules (status moves only toward more-broken):
-/// - check failed → `"failed"`
-/// - check unsupported (cannot be proven either way: no service authority,
-///   probe path out of bounds, …) → `"degraded"`
-/// - on `"disabled"`/`"failed"`/`"not_installed"` the wire status is left
-///   alone — the same rationale as integrity_probe.
-fn manifest_health_probe(
-    layout: &FsLayout,
-    install_mode: &str,
-    service_backends: &ServiceProbeBackends<'_>,
-    component: &Installation,
-    base_status: &str,
-) -> (Vec<HealthEntry>, String) {
-    let mut entries: Vec<HealthEntry> = Vec::new();
-    let checked_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
-    let escalate = |broken: Option<&str>| match base_status {
-        "installed" | "adopted" | "observed" => broken.unwrap_or(base_status).to_string(),
-        // Already escalated by the integrity probe — preserve "failed" /
-        // "degraded" rather than letting a manifest "ok" downgrade it.
-        _ => base_status.to_string(),
-    };
-
-    let manifest = match common::installed_component_manifest_path(layout, &component.name, COMMAND)
-    {
-        Ok(path) if path.is_file() => match ComponentManifest::from_file(&path) {
-            Ok(manifest) => manifest,
-            Err(err) => {
-                entries.push(HealthEntry {
-                    name: format!("{}:manifest_snapshot", component.name),
-                    status: "unreadable".to_string(),
-                    checked_at,
-                    reason: Some(format!(
-                        "failed to parse installed manifest snapshot: {err}"
-                    )),
-                });
-                return (entries, escalate(Some("degraded")));
-            }
-        },
-        _ => return (entries, base_status.to_string()),
-    };
-
-    let Some(spec) = manifest.health_spec() else {
-        return (entries, base_status.to_string());
-    };
-
-    let outcome = run_check(
-        &spec,
-        &CheckEnv {
-            layout,
-            dry_run: false,
-            // Each `systemd_active` leaf routes to the manager owning its
-            // unit's declared scope — an aggregate spec may mix system-
-            // and user-scope services, so a single manager cannot answer
-            // the whole tree.
-            service_probes: Some(ServiceProbes {
-                system: service_backends.system_for_record_scope(install_mode),
-                user: service_backends.user,
-                declared: &manifest.install.services,
-            }),
-        },
-    );
-    let broken = match outcome.status {
-        CheckStatus::Failed => Some("failed"),
-        CheckStatus::Unsupported => Some("degraded"),
-        CheckStatus::Ok | CheckStatus::Skipped => None,
-    };
-    push_check_entries(&component.name, &outcome, &checked_at, &mut entries);
-
-    (entries, escalate(broken))
+/// Project typed manifest-health evidence into the existing health-entry wire.
+fn append_manifest_health(
+    component: &str,
+    evidence: &ProbeEvidence<ManifestHealthSnapshot, ManifestHealthProvenance>,
+    checked_at: &str,
+    entries: &mut Vec<HealthEntry>,
+) {
+    match evidence {
+        ProbeEvidence::Unavailable { reason, .. } => entries.push(HealthEntry {
+            name: format!("{component}:manifest_snapshot"),
+            status: "unreadable".to_string(),
+            checked_at: checked_at.to_string(),
+            reason: Some(reason.clone()),
+        }),
+        ProbeEvidence::Present { value, .. } => {
+            push_check_entries(component, &value.outcome, checked_at, entries);
+        }
+        ProbeEvidence::NotRequested | ProbeEvidence::Absent { .. } => {}
+    }
 }
 
 /// Flatten a check-outcome tree into wire health entries: aggregates keep
@@ -1195,6 +1508,21 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
+    fn snapshot_contract_error_names_component_and_probe() {
+        let error = StatusSnapshotError::Contract {
+            component: "agentsight".to_string(),
+            source: SnapshotContractError::MissingRequestedEvidence {
+                probe: SnapshotProbe::Adapters,
+            },
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "component snapshot contract failed for \"agentsight\": requested probe Adapters has no evidence",
+        );
+    }
+
+    #[test]
     fn telemetry_service_target_redirects_when_component_index_is_unavailable() {
         let view = scoped_status_view(InstalledState::default(), InstalledState::default());
         let error = resolve_component_target("anolisa-telemetry", &view, None)
@@ -1353,6 +1681,7 @@ name = "copilot-shell"
             }),
             rpm_query,
         )
+        .expect("test snapshot evidence must satisfy its request")
     }
 
     /// Baseline component install record. Owned `files` default to empty
@@ -1388,10 +1717,11 @@ name = "copilot-shell"
     /// Migrate a v4 fixture state into a v5 store; fixtures must migrate
     /// cleanly so tests exercise exactly the objects they seeded.
     fn store_with(state: &InstalledState) -> StateStore {
-        let migration = anolisa_core::state_migration::migrate_state(
-            &state.objects,
-            anolisa_core::domain::InstallationScope::System,
-        );
+        store_with_scope(state, InstallationScope::System)
+    }
+
+    fn store_with_scope(state: &InstalledState, scope: InstallationScope) -> StateStore {
+        let migration = anolisa_core::state_migration::migrate_state(&state.objects, scope);
         assert!(
             migration.quarantined.is_empty(),
             "fixtures must migrate cleanly"
@@ -1414,7 +1744,7 @@ name = "copilot-shell"
             ),
             state_path: PathBuf::from("/tmp/anolisa-user-state/installed.toml"),
             writable: true,
-            state: store_with(&user_state),
+            state: store_with_scope(&user_state, InstallationScope::User { uid: 1000 }),
         };
         let system_root = ScopedStateRoot {
             scope: StateScope::System,
@@ -2636,6 +2966,42 @@ name = "copilot-shell"
     }
 
     #[test]
+    fn adapter_scan_failure_is_unavailable_and_keeps_output_empty() {
+        let mut state = InstalledState::default();
+        state.upsert_object(component_object(
+            "agentsight",
+            "0.1.0",
+            ObjectStatus::Installed,
+        ));
+        let view = scoped_status_view(InstalledState::default(), state);
+        let visible = view.visible_components();
+        let state_paths = view
+            .visible_roots
+            .iter()
+            .map(|root| root.state_path.clone())
+            .collect::<Vec<_>>();
+        let snapshot = collect_status_snapshot(
+            &visible[0],
+            &AdapterScanEvidence::Unavailable("scan failed".to_string()),
+            &state_paths,
+            None,
+            None,
+            "2026-08-25T00:00:00Z",
+        )
+        .expect("status snapshot");
+
+        assert!(matches!(
+            snapshot.adapters(),
+            ProbeEvidence::Unavailable { reason, provenance }
+                if reason == "scan failed" && provenance.state_paths == state_paths
+        ));
+        let record =
+            record_from_snapshot(&snapshot, "2026-08-25T00:00:00Z").expect("status projection");
+        assert!(record.adapters.is_empty());
+        assert_eq!(record.status, "installed");
+    }
+
+    #[test]
     fn adapter_summaries_filtered_to_requested_component() {
         let mut state = InstalledState::default();
         state.upsert_object(component_object(
@@ -3130,6 +3496,45 @@ name = "copilot-shell"
         fn query_available(&self, _: &str) -> Result<Vec<PackageInfo>, PackageQueryError> {
             Ok(Vec::new())
         }
+    }
+
+    #[test]
+    fn native_query_failure_is_unavailable_and_keeps_recorded_status() {
+        let mut state = InstalledState::default();
+        state.upsert_object(rpm_observed_object(
+            "copilot-shell",
+            "copilot-shell",
+            "2.2.0-1.al8",
+        ));
+        let view = scoped_status_view(InstalledState::default(), state);
+        let visible = view.visible_components();
+        let state_paths = view
+            .visible_roots
+            .iter()
+            .map(|root| root.state_path.clone())
+            .collect::<Vec<_>>();
+        let query = ErrQuery(PackageQueryError::CommandMissing {
+            command: "rpm".to_string(),
+        });
+        let snapshot = collect_status_snapshot(
+            &visible[0],
+            &AdapterScanEvidence::NotRequested,
+            &state_paths,
+            None,
+            Some(&query),
+            "2026-08-25T00:00:00Z",
+        )
+        .expect("status snapshot");
+
+        assert!(matches!(
+            snapshot.native_package(),
+            ProbeEvidence::Unavailable { reason, provenance }
+                if reason == "command not found: rpm" && provenance.package == "copilot-shell"
+        ));
+        let record =
+            record_from_snapshot(&snapshot, "2026-08-25T00:00:00Z").expect("status projection");
+        assert_eq!(record.status, "adopted");
+        assert!(!record.health.iter().any(|entry| entry.name == "rpm:drift"));
     }
 
     /// rpmdb EVR matching the recorded one is not drift.

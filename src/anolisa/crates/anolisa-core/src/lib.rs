@@ -72,9 +72,12 @@ pub use central_log::{
 };
 pub use component::{Component, ComponentMeta, ComponentStatus};
 pub use component_snapshot::{
-    ComponentSnapshot, ComponentSnapshotRequest, JournalProvenance, NativePackageProvenance,
-    NativePackageSnapshot, PendingJournalSnapshot, ProbeEvidence, SnapshotContractError,
-    SnapshotProbe, StateProvenance, StateSnapshot,
+    AdapterObservation, AdapterProvenance, AdapterSourceSnapshot, ComponentSnapshot,
+    ComponentSnapshotObservations, ComponentSnapshotRequest, JournalProvenance,
+    ManifestHealthProvenance, ManifestHealthSnapshot, NativePackageProvenance,
+    NativePackageSnapshot, OwnedFileObservation, OwnedFilesProvenance, OwnedFilesSnapshot,
+    OwnedFilesVerdict, PendingJournalSnapshot, ProbeEvidence, SnapshotContractError, SnapshotProbe,
+    StateProvenance, StateRootScope, StateSnapshot, StateVisibilitySnapshot,
 };
 pub use distribution::{
     ArtifactType, DistributionEntry, DistributionError, DistributionIndex, ResolveError,

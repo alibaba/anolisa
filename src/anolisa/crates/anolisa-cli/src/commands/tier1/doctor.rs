@@ -258,14 +258,14 @@ fn diagnose(component: Option<&str>, ctx: &CliContext) -> Result<DoctorPayload, 
         dry_run: ctx.dry_run,
     };
 
-    Ok(diagnose_from_view(&view, component.as_deref(), &view_ctx))
+    diagnose_from_view(&view, component.as_deref(), &view_ctx)
 }
 
 fn diagnose_from_view(
     view: &StateView,
     component: Option<&str>,
     view_ctx: &DoctorViewContext<'_>,
-) -> DoctorPayload {
+) -> Result<DoctorPayload, CliError> {
     // `None` keeps the projection from executing manifest health checks:
     // doctor runs the same structured checks itself below (honoring
     // dry-run), and a second executor here would double every probe.
@@ -276,7 +276,11 @@ fn diagnose_from_view(
         None,
         None,
         None,
-    );
+    )
+    .map_err(|error| CliError::Runtime {
+        command: COMMAND.to_string(),
+        reason: format!("failed to assemble component status snapshot: {error}"),
+    })?;
     let warnings = view.warnings.clone();
     let mut components = Vec::new();
     let journal_roots = scan_journal_roots(view);
@@ -320,13 +324,13 @@ fn diagnose_from_view(
 
     let recovery_roots = collect_root_recovery(&journal_roots, &claimed_journals, component);
     let summary = summarize(&components, &recovery_roots);
-    DoctorPayload {
+    Ok(DoctorPayload {
         summary,
         components,
         recovery_roots,
         warnings,
         dry_run: view_ctx.dry_run,
-    }
+    })
 }
 
 fn lookup_component_name_from_view(
@@ -2359,7 +2363,7 @@ mod tests {
             user_service: &user_service,
             dry_run: false,
         };
-        diagnose_from_view(&view, Some("cosh"), &view_ctx)
+        diagnose_from_view(&view, Some("cosh"), &view_ctx).expect("diagnose test view")
     }
 
     fn diagnose_inactive_owned(layout: &FsLayout) -> DoctorPayload {
@@ -2381,7 +2385,7 @@ mod tests {
             user_service: &user_service,
             dry_run: false,
         };
-        diagnose_from_view(&view, Some("agentsight"), &view_ctx)
+        diagnose_from_view(&view, Some("agentsight"), &view_ctx).expect("diagnose test view")
     }
 
     fn state_with_component(installation: Installation) -> StateStore {
@@ -2440,7 +2444,13 @@ mod tests {
         store
     }
 
-    fn scoped_doctor_view(user_state: StateStore, system_state: StateStore) -> StateView {
+    fn scoped_doctor_view(mut user_state: StateStore, mut system_state: StateStore) -> StateView {
+        for installation in &mut user_state.installations {
+            installation.scope = InstallationScope::User { uid: 1000 };
+        }
+        for installation in &mut system_state.installations {
+            installation.scope = InstallationScope::System;
+        }
         let user_root = ScopedStateRoot {
             scope: StateScope::User,
             layout: FsLayout::user_with_overrides(
@@ -2525,7 +2535,7 @@ mod tests {
             user_service: &user_service,
             dry_run: true,
         };
-        diagnose_from_view(view, component, &view_ctx)
+        diagnose_from_view(view, component, &view_ctx).expect("diagnose test view")
     }
 
     #[test]
@@ -2668,7 +2678,8 @@ mod tests {
             dry_run: false,
         };
 
-        let payload = diagnose_from_view(&view, Some("agentsight"), &view_ctx);
+        let payload =
+            diagnose_from_view(&view, Some("agentsight"), &view_ctx).expect("diagnose test view");
 
         let service_ref = payload.components[0]
             .health_checks
@@ -2706,7 +2717,8 @@ mod tests {
             dry_run: false,
         };
 
-        let payload = diagnose_from_view(&view, Some("agent-memory"), &view_ctx);
+        let payload =
+            diagnose_from_view(&view, Some("agent-memory"), &view_ctx).expect("diagnose test view");
 
         let service_ref = payload.components[0]
             .health_checks
@@ -2766,7 +2778,8 @@ mod tests {
             dry_run: false,
         };
 
-        let payload = diagnose_from_view(&view, Some("agentsight"), &view_ctx);
+        let payload =
+            diagnose_from_view(&view, Some("agentsight"), &view_ctx).expect("diagnose test view");
 
         assert_eq!(
             system_service.calls(),
@@ -2827,7 +2840,8 @@ mod tests {
             dry_run: true,
         };
 
-        let payload = diagnose_from_view(&view, Some("agentsight"), &view_ctx);
+        let payload =
+            diagnose_from_view(&view, Some("agentsight"), &view_ctx).expect("diagnose test view");
 
         assert!(
             system_service.calls().is_empty() && user_service.calls().is_empty(),

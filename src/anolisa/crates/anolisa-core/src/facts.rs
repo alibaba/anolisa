@@ -15,10 +15,11 @@ use thiserror::Error;
 
 use crate::component_snapshot::{
     ComponentSnapshot, ComponentSnapshotRequest, JournalProvenance, NativePackageProvenance,
-    NativePackageSnapshot, OwnedFilesProvenance, OwnedFilesSnapshot, PendingJournalSnapshot,
-    ProbeEvidence, SnapshotContractError, SnapshotProbe, StateProvenance, StateSnapshot,
+    NativePackageSnapshot, OwnedFileObservation, OwnedFilesProvenance, OwnedFilesSnapshot,
+    OwnedFilesVerdict, PendingJournalSnapshot, ProbeEvidence, SnapshotContractError, SnapshotProbe,
+    StateProvenance, StateSnapshot,
 };
-use crate::domain::{InstallationScope, NativePm, ProviderBinding};
+use crate::domain::{Installation, InstallationScope, NativePm, ProviderBinding};
 use crate::integrity::{IntegrityStatus, check_owned_file};
 use crate::planner::{Facts, NativeProbe, RecordFacts};
 use crate::providers::{DelegatedProvider, ProviderError};
@@ -400,21 +401,14 @@ pub fn assemble_component_snapshot(
         let provenance = OwnedFilesProvenance {
             state_path: layout.state_dir.join("installed.toml"),
         };
-        match verify_owned_files(
+        match observe_owned_files_for_record(
             &record,
             store,
             ObjectKind::Component,
             request.component(),
             layout,
         ) {
-            Some(true) => ProbeEvidence::Present {
-                provenance,
-                value: OwnedFilesSnapshot::Verified,
-            },
-            Some(false) => ProbeEvidence::Present {
-                provenance,
-                value: OwnedFilesSnapshot::Drifted,
-            },
+            Some(value) => ProbeEvidence::Present { provenance, value },
             None => ProbeEvidence::Absent { provenance },
         }
     } else {
@@ -535,6 +529,15 @@ pub fn lifecycle_facts_from_snapshot(
         } => NativeProbe::MultipleVersions {
             package: provenance.package.clone(),
         },
+        ProbeEvidence::Present {
+            value: NativePackageSnapshot::UnexpectedOutput { detail },
+            ..
+        } => {
+            return Err(FactsError::SnapshotEvidence {
+                probe: SnapshotProbe::NativePackage,
+                reason: detail.clone(),
+            });
+        }
         ProbeEvidence::Unavailable { reason, .. } => {
             return Err(FactsError::SnapshotEvidence {
                 probe: SnapshotProbe::NativePackage,
@@ -563,14 +566,11 @@ pub fn lifecycle_facts_from_snapshot(
     let snapshot_owned_files_verified = match snapshot.owned_files() {
         ProbeEvidence::NotRequested => owned_files_verified,
         ProbeEvidence::Absent { .. } => None,
-        ProbeEvidence::Present {
-            value: OwnedFilesSnapshot::Verified,
-            ..
-        } => Some(true),
-        ProbeEvidence::Present {
-            value: OwnedFilesSnapshot::Drifted,
-            ..
-        } => Some(false),
+        ProbeEvidence::Present { value, .. } => match value.verdict {
+            OwnedFilesVerdict::Verified => Some(true),
+            OwnedFilesVerdict::Drifted => Some(false),
+            OwnedFilesVerdict::Inconclusive => None,
+        },
         ProbeEvidence::Unavailable { reason, .. } => {
             return Err(FactsError::SnapshotEvidence {
                 probe: SnapshotProbe::OwnedFiles,
@@ -623,7 +623,13 @@ pub fn assemble_facts(
         .collect();
 
     let owned_files_verified = if req.verify_owned_files {
-        verify_owned_files(&record, store, req.kind, req.name, layout)
+        observe_owned_files_for_record(&record, store, req.kind, req.name, layout).and_then(
+            |observation| match observation.verdict {
+                OwnedFilesVerdict::Verified => Some(true),
+                OwnedFilesVerdict::Drifted => Some(false),
+                OwnedFilesVerdict::Inconclusive => None,
+            },
+        )
     } else {
         None
     };
@@ -638,33 +644,32 @@ pub fn assemble_facts(
     })
 }
 
-/// Integrity verdict over a record's owned file list: `Some(true)` when
-/// every probe is healthy, `Some(false)` on any hard finding, `None` when
-/// the list cannot be judged — nothing to verify (no record, delegated
-/// binding, empty file list), or at least one file was too large to hash.
+/// Integrity observations over a record's owned file list. `None` means
+/// there is nothing to verify (no record, delegated binding, or empty file
+/// list); an over-budget path is retained with an inconclusive verdict.
 ///
 /// A quarantined record is verified against the legacy record's file list —
 /// that verdict is the evidence repair's R6 exit (rebuild the owned record)
-/// consumes. R6 treats `Some(true)` as a positive assertion that the
+/// consumes. R6 treats `Verified` as a positive assertion that the
 /// original file list still checks out, so a run that skipped a file must
-/// not report it: an over-limit file yields `None`, which fails R6 closed
+/// not report it: an over-limit file yields `Inconclusive`, which fails R6 closed
 /// (`RecordUnrecoverable`) rather than laundering unread bytes back into an
 /// active record.
 ///
-/// For an active record the caller only acts on `Some(false)` (replay), so
-/// `None` and `Some(true)` behave alike there — an over-limit file does not
+/// For an active record the caller only acts on `Drifted` (replay), so
+/// `Inconclusive` and `Verified` behave alike there — an over-limit file does not
 /// trigger a spurious reinstall.
 ///
 /// `Skipped` (not ANOLISA-owned) and `Unverified` (no recorded digest) count
 /// as healthy: neither proves drift, and treating absence of evidence as
 /// damage would route every digest-less install into repair.
-fn verify_owned_files(
+fn observe_owned_files_for_record(
     record: &RecordFacts,
     store: &StateStore,
     kind: ObjectKind,
     name: &str,
     layout: &FsLayout,
-) -> Option<bool> {
+) -> Option<OwnedFilesSnapshot> {
     let files: &[crate::state::OwnedFile] = match record {
         RecordFacts::Active(installation) => match &installation.binding {
             ProviderBinding::Owned { artifact } => &artifact.files,
@@ -679,23 +684,55 @@ fn verify_owned_files(
         }
         RecordFacts::Absent => return None,
     };
+    observe_owned_file_contract(files, layout)
+}
+
+/// Observe the owned-file contract of an active installation.
+///
+/// Returns `None` for delegated installations and owned records without
+/// declared files. Per-path results are retained so read-only consumers can
+/// explain the aggregate verdict without probing the filesystem again.
+pub fn observe_owned_files(
+    installation: &Installation,
+    layout: &FsLayout,
+) -> Option<OwnedFilesSnapshot> {
+    match &installation.binding {
+        ProviderBinding::Owned { artifact } => observe_owned_file_contract(&artifact.files, layout),
+        ProviderBinding::Delegated { .. } => None,
+    }
+}
+
+fn observe_owned_file_contract(
+    files: &[crate::state::OwnedFile],
+    layout: &FsLayout,
+) -> Option<OwnedFilesSnapshot> {
     if files.is_empty() {
         return None;
     }
-    let mut skipped_a_file = false;
-    for file in files {
-        match check_owned_file(layout, file) {
-            IntegrityStatus::Ok | IntegrityStatus::Skipped | IntegrityStatus::Unverified => {}
-            // The bytes were never read, so this file can be neither
-            // vouched for nor condemned. Downgrade the whole verdict to
-            // "cannot judge" instead of letting it pass as verified.
-            IntegrityStatus::ProbeLimitExceeded { .. } => skipped_a_file = true,
-            // Any hard finding is decisive on its own — report damage even
-            // if another file was skipped.
-            _ => return Some(false),
-        }
-    }
-    (!skipped_a_file).then_some(true)
+
+    let mut verdict = OwnedFilesVerdict::Verified;
+    let observations = files
+        .iter()
+        .map(|file| {
+            let status = check_owned_file(layout, file);
+            if status.is_failure() {
+                verdict = OwnedFilesVerdict::Drifted;
+            } else if matches!(status, IntegrityStatus::ProbeLimitExceeded { .. })
+                && verdict != OwnedFilesVerdict::Drifted
+            {
+                verdict = OwnedFilesVerdict::Inconclusive;
+            }
+            OwnedFileObservation {
+                path: file.path.clone(),
+                status,
+            }
+        })
+        .collect();
+
+    Some(OwnedFilesSnapshot {
+        verdict,
+        files: observations,
+    })
 }
 
 /// First pending journal attributed to `subject`, if any.
@@ -996,7 +1033,10 @@ mod tests {
             snapshot.owned_files(),
             ProbeEvidence::Present {
                 provenance,
-                value: OwnedFilesSnapshot::Verified,
+                value: OwnedFilesSnapshot {
+                    verdict: OwnedFilesVerdict::Verified,
+                    ..
+                },
             } if provenance.state_path == layout.state_dir.join("installed.toml")
         ));
         let facts =
@@ -1017,7 +1057,10 @@ mod tests {
         assert!(matches!(
             snapshot.owned_files(),
             ProbeEvidence::Present {
-                value: OwnedFilesSnapshot::Drifted,
+                value: OwnedFilesSnapshot {
+                    verdict: OwnedFilesVerdict::Drifted,
+                    ..
+                },
                 ..
             }
         ));
