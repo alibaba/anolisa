@@ -220,6 +220,19 @@ pub struct AgentTokenSummary {
     pub request_count: i64,
 }
 
+/// Per-agent activity aggregated from recorded LLM calls.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentActivitySummary {
+    /// Canonical display name observed in stored events, falling back to the process name.
+    pub agent_name: String,
+    /// Most recent call start or completion timestamp in nanoseconds.
+    pub last_seen_ns: i64,
+    /// Number of recorded LLM calls.
+    pub total_calls: i64,
+    /// Input, output, and cache tokens across all calls.
+    pub total_tokens: i64,
+}
+
 /// Percentiles for one latency or throughput metric.
 #[derive(Debug, serde::Serialize)]
 pub struct MetricPercentiles {
@@ -501,6 +514,40 @@ impl GenAISqliteStore {
         };
 
         Ok(rows)
+    }
+
+    /// Returns all historical LLM activity grouped by Agent or process name.
+    pub fn list_agent_activity_summaries(
+        &self,
+    ) -> Result<Vec<AgentActivitySummary>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT MIN(COALESCE(NULLIF(TRIM(agent_name), ''),
+                                NULLIF(TRIM(process_name), ''))) AS display_name,
+                    MAX(CASE WHEN end_timestamp_ns IS NOT NULL AND end_timestamp_ns > 0
+                             THEN end_timestamp_ns ELSE start_timestamp_ns END) AS last_seen_ns,
+                    COUNT(*) AS total_calls,
+                    COALESCE(SUM(COALESCE(input_tokens, 0)
+                               + COALESCE(output_tokens, 0)
+                               + COALESCE(cache_creation_tokens, 0)
+                               + COALESCE(cache_read_tokens, 0)), 0) AS total_tokens
+             FROM genai_events
+             WHERE event_type = 'llm_call'
+               AND COALESCE(NULLIF(TRIM(agent_name), ''),
+                            NULLIF(TRIM(process_name), '')) IS NOT NULL
+             GROUP BY COALESCE(NULLIF(TRIM(agent_name), ''),
+                               NULLIF(TRIM(process_name), '')) COLLATE NOCASE
+             ORDER BY last_seen_ns DESC, display_name ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(AgentActivitySummary {
+                agent_name: row.get(0)?,
+                last_seen_ns: row.get(1)?,
+                total_calls: row.get(2)?,
+                total_tokens: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// Return per-agent token usage aggregated over all recorded history.

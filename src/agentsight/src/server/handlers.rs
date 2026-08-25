@@ -889,8 +889,10 @@ mod tests {
     };
     use crate::grader::EvaluationStore;
     use crate::health::HealthStore;
-    use crate::storage::sqlite::genai::{PendingCallInfo, PendingOrigin};
-    use agentsight_trajectory_collector::{TrajectoryRecord, TrajectoryStore};
+    use crate::storage::sqlite::genai::{AgentActivitySummary, PendingCallInfo, PendingOrigin};
+    use agentsight_trajectory_collector::{
+        TrajectoryAgentActivitySummary, TrajectoryRecord, TrajectoryStore,
+    };
 
     use super::*;
 
@@ -1820,19 +1822,24 @@ mod tests {
     fn test_app_state_with_trajectory_store(
         store: Option<Arc<TrajectoryStore>>,
     ) -> web::Data<AppState> {
+        test_app_state_with_activity_stores(PathBuf::from(":memory:"), store)
+    }
+
+    fn test_app_state_with_activity_stores(
+        storage_path: PathBuf,
+        trajectory_store: Option<Arc<TrajectoryStore>>,
+    ) -> web::Data<AppState> {
         let auth_config = crate::config::ServerAuthConfig { enabled: false };
         let auth = Arc::new(crate::server::auth::DashboardAuth::init(
             &auth_config,
             std::path::Path::new("/tmp"),
         ));
         web::Data::new(AppState {
-            storage_path: PathBuf::from(":memory:"),
+            evaluation_store: Arc::new(EvaluationStore::new_with_path(&storage_path).unwrap()),
+            storage_path,
             start_time: Instant::now(),
             health_store: Arc::new(RwLock::new(HealthStore::new())),
             interruption_store: None,
-            evaluation_store: Arc::new(
-                EvaluationStore::new_with_path(std::path::Path::new(":memory:")).unwrap(),
-            ),
             enforcement: None,
             containment: None,
             audit_service: Arc::new(agentsight_audit::AuditService::new(
@@ -1843,7 +1850,7 @@ mod tests {
             security_observability: super::super::SecurityObservabilityConfig { timeout_ms: 0 },
             auth,
             optimize: None,
-            trajectory_store: Arc::new(RwLock::new(store)),
+            trajectory_store: Arc::new(RwLock::new(trajectory_store)),
         })
     }
 
@@ -2219,7 +2226,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn agent_health_filters_clients_and_allows_deletion() {
+    async fn agent_health_process_records_can_still_be_deleted() {
         let state = test_app_state(0);
         {
             let mut store = state.health_store.write().unwrap();
@@ -2284,29 +2291,28 @@ mod tests {
         let app = awtest::init_service(
             App::new()
                 .app_data(state)
-                .service(get_agent_health)
+                .service(get_agent_process_health)
                 .route("/agent-health/{pid}", web::delete().to(delete_agent_health)),
         )
         .await;
 
         let filtered = awtest::call_service(
             &app,
-            awtest::TestRequest::get().uri("/agent-health").to_request(),
+            awtest::TestRequest::get()
+                .uri("/agent-process-health")
+                .to_request(),
         )
         .await;
         let filtered_body = service_response_json(filtered).await;
         let filtered_agents = filtered_body["agents"].as_array().unwrap();
         assert_eq!(filtered_agents.len(), 1);
         assert_eq!(filtered_agents[0]["pid"], 1001);
-        assert_eq!(
-            filtered_body["filtered_count"], 2,
-            "hidden Cosh + client entries must be surfaced as filtered_count"
-        );
+        assert_eq!(filtered_body["filtered_count"], 2);
 
         let include_clients = awtest::call_service(
             &app,
             awtest::TestRequest::get()
-                .uri("/agent-health?include_clients=true")
+                .uri("/agent-process-health?include_clients=true")
                 .to_request(),
         )
         .await;
@@ -2333,6 +2339,91 @@ mod tests {
         )
         .await;
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[actix_web::test]
+    async fn agent_health_lists_activity_from_both_sqlite_stores() {
+        let genai_path = unique_handler_db("agent-activity-genai");
+        write_completed_conversation_event(&genai_path, "agent-health");
+        let trajectory_store = seeded_trajectory_store("agent-activity-trajectory");
+        let state = test_app_state_with_activity_stores(genai_path.clone(), Some(trajectory_store));
+        let app = awtest::init_service(App::new().app_data(state).service(get_agent_health)).await;
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get().uri("/agent-health").to_request(),
+        )
+        .await;
+        let body = service_response_json(response).await;
+        let agents = body["agents"].as_array().unwrap();
+
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0]["agent_name"], "claude");
+        assert_eq!(agents[0]["genai_calls"], 1);
+        assert_eq!(agents[0]["genai_tokens"], 15);
+        assert_eq!(agents[0]["trajectory_steps"], 0);
+        assert_eq!(agents[0]["source"], "genai_events");
+        assert_eq!(agents[1]["agent_name"], "qoder");
+        assert_eq!(agents[1]["genai_calls"], 0);
+        assert_eq!(agents[1]["trajectory_steps"], 4);
+        assert_eq!(agents[1]["trajectory_tokens"], 240);
+        assert_eq!(agents[1]["source"], "trajectories");
+
+        cleanup_db(&genai_path);
+    }
+
+    #[actix_web::test]
+    async fn agent_health_returns_empty_agents_for_empty_stores() {
+        let genai_path = unique_handler_db("agent-activity-empty");
+        let state = test_app_state_with_activity_stores(genai_path.clone(), None);
+        let app = awtest::init_service(App::new().app_data(state).service(get_agent_health)).await;
+
+        let response = awtest::call_service(
+            &app,
+            awtest::TestRequest::get().uri("/agent-health").to_request(),
+        )
+        .await;
+        let body = service_response_json(response).await;
+
+        assert_eq!(body["agents"], json!([]));
+        cleanup_db(&genai_path);
+    }
+
+    #[test]
+    fn agent_activity_merge_combines_source_totals() {
+        let genai = vec![AgentActivitySummary {
+            agent_name: "Claude".to_string(),
+            last_seen_ns: 200,
+            total_calls: 2,
+            total_tokens: 50,
+        }];
+        let trajectories = vec![
+            TrajectoryAgentActivitySummary {
+                agent_name: "claude".to_string(),
+                last_seen_ns: 300,
+                total_steps: 8,
+                total_tokens: 320,
+            },
+            TrajectoryAgentActivitySummary {
+                agent_name: "Qoder".to_string(),
+                last_seen_ns: 250,
+                total_steps: 5,
+                total_tokens: 120,
+            },
+        ];
+
+        let merged = merge_agent_activity_summaries(genai, trajectories);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].agent_name, "Claude");
+        assert_eq!(merged[0].last_seen_ns, 300);
+        assert_eq!(merged[0].genai_calls, 2);
+        assert_eq!(merged[0].genai_tokens, 50);
+        assert_eq!(merged[0].trajectory_steps, 8);
+        assert_eq!(merged[0].trajectory_tokens, 320);
+        assert_eq!(merged[0].source, "genai_events+trajectories");
+        assert_eq!(merged[1].agent_name, "Qoder");
+        assert_eq!(merged[1].source, "trajectories");
     }
 
     #[actix_web::test]
@@ -2811,40 +2902,187 @@ pub async fn metrics(data: web::Data<AppState>) -> impl Responder {
 /// Response body for /api/agent-health
 #[derive(Debug, Serialize)]
 pub struct AgentHealthResponse {
+    /// Historical activity summaries sorted by most recent observation.
+    pub agents: Vec<AgentActivity>,
+    /// Data sources that could not be queried; omitted when all available sources succeeded.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// Live process-health response retained for diagnostics and recovery actions.
+#[derive(Debug, Serialize)]
+pub struct AgentProcessHealthResponse {
     pub agents: Vec<AgentHealthStatus>,
     pub last_scan_time: u64,
     /// Entries hidden by the default view (Cosh + healthy client agents).
-    /// Non-zero tells callers the empty/short list is a filter result, not
-    /// missing data; pass `?include_clients=true` to see client agents.
     pub filtered_count: usize,
+}
+
+/// Historical activity for one Agent across the available SQLite stores.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentActivity {
+    /// Canonical Agent display name.
+    pub agent_name: String,
+    /// Most recent observation in either source, as Unix nanoseconds.
+    pub last_seen_ns: i64,
+    /// LLM calls recorded in `genai_events.db`.
+    pub genai_calls: i64,
+    /// Tokens recorded in `genai_events.db`.
+    pub genai_tokens: i64,
+    /// Steps recorded in `trajectories.db`.
+    pub trajectory_steps: i64,
+    /// Tokens recorded in `trajectories.db`.
+    pub trajectory_tokens: i64,
+    /// SQLite stores that contributed to this Agent summary.
+    pub source: String,
+}
+
+fn merge_agent_activity_summaries(
+    genai: Vec<crate::storage::sqlite::genai::AgentActivitySummary>,
+    trajectories: Vec<agentsight_trajectory_collector::TrajectoryAgentActivitySummary>,
+) -> Vec<AgentActivity> {
+    let mut by_name = HashMap::new();
+    for summary in genai {
+        let key = summary.agent_name.trim().to_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        by_name.insert(
+            key,
+            AgentActivity {
+                agent_name: summary.agent_name,
+                last_seen_ns: summary.last_seen_ns,
+                genai_calls: summary.total_calls,
+                genai_tokens: summary.total_tokens,
+                trajectory_steps: 0,
+                trajectory_tokens: 0,
+                source: "genai_events".to_string(),
+            },
+        );
+    }
+
+    for summary in trajectories {
+        let key = summary.agent_name.trim().to_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        if let Some(existing) = by_name.get_mut(&key) {
+            existing.last_seen_ns = existing.last_seen_ns.max(summary.last_seen_ns);
+            existing.trajectory_steps = summary.total_steps;
+            existing.trajectory_tokens = summary.total_tokens;
+            existing.source = "genai_events+trajectories".to_string();
+        } else {
+            by_name.insert(
+                key,
+                AgentActivity {
+                    agent_name: summary.agent_name,
+                    last_seen_ns: summary.last_seen_ns,
+                    genai_calls: 0,
+                    genai_tokens: 0,
+                    trajectory_steps: summary.total_steps,
+                    trajectory_tokens: summary.total_tokens,
+                    source: "trajectories".to_string(),
+                },
+            );
+        }
+    }
+
+    let mut agents: Vec<_> = by_name.into_values().collect();
+    agents.sort_by(|left, right| {
+        right
+            .last_seen_ns
+            .cmp(&left.last_seen_ns)
+            .then_with(|| left.agent_name.cmp(&right.agent_name))
+    });
+    agents
 }
 
 /// GET /api/agent-health
 ///
-/// Returns the latest health check results for all discovered agent processes.
-/// Cosh is excluded from the response: it has no HTTP port and no daemon process,
-/// so there is nothing meaningful to display in the UI. Agent-crash interruption
-/// detection for Cosh still works via the health checker background scan.
+/// Returns every Agent observed in either the GenAI event or trajectory store.
 #[get("/agent-health")]
-pub async fn get_agent_health(
+pub async fn get_agent_health(data: web::Data<AppState>) -> impl Responder {
+    let storage_path = data.storage_path.clone();
+    let app_state = data.clone();
+    let loaded = web::block(move || {
+        let genai = GenAISqliteStore::new_with_path(&storage_path)
+            .map_err(|error| error.to_string())
+            .and_then(|store| {
+                store
+                    .list_agent_activity_summaries()
+                    .map_err(|error| error.to_string())
+            });
+        let trajectories = app_state.trajectory_store().map(|store| {
+            store
+                .list_agent_activity_summaries()
+                .map_err(|error| error.to_string())
+        });
+        (genai, trajectories)
+    })
+    .await;
+
+    let Ok((genai_result, trajectory_result)) = loaded else {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": "Agent activity query worker failed"
+        }));
+    };
+
+    let mut warnings = Vec::new();
+    let (genai, genai_failed) = match genai_result {
+        Ok(summaries) => (summaries, false),
+        Err(error) => {
+            log::warn!("Failed to query GenAI Agent activity: {error}");
+            warnings.push("genai_events unavailable".to_string());
+            (Vec::new(), true)
+        }
+    };
+    let (trajectories, trajectory_available) = match trajectory_result {
+        Some(Ok(summaries)) => (summaries, true),
+        Some(Err(error)) => {
+            log::warn!("Failed to query trajectory Agent activity: {error}");
+            warnings.push("trajectories unavailable".to_string());
+            (Vec::new(), false)
+        }
+        None => (Vec::new(), false),
+    };
+
+    if genai_failed && !trajectory_available {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": "No Agent activity data source is available",
+            "warnings": warnings
+        }));
+    }
+
+    HttpResponse::Ok().json(AgentHealthResponse {
+        agents: merge_agent_activity_summaries(genai, trajectories),
+        warnings,
+    })
+}
+
+/// GET /api/agent-process-health
+///
+/// Returns live process-health snapshots used by hung detection and recovery UI.
+#[get("/agent-process-health")]
+pub async fn get_agent_process_health(
     data: web::Data<AppState>,
     req: actix_web::HttpRequest,
 ) -> impl Responder {
     let include_clients = req.query_string().contains("include_clients=true");
-    let store = data.health_store.read().unwrap();
+    let store = data.health_store.read().unwrap_or_else(|e| e.into_inner());
     let all = store.all_agents();
     let total = all.len();
     let agents: Vec<AgentHealthStatus> = all
         .into_iter()
-        .filter(|a| a.agent_name != "Cosh")
-        .filter(|a| {
+        .filter(|agent| agent.agent_name != "Cosh")
+        .filter(|agent| {
             include_clients
-                || a.role == crate::health::store::AgentRole::Gateway
-                || a.status == crate::health::store::AgentHealthState::Offline
+                || agent.role == crate::health::store::AgentRole::Gateway
+                || agent.status == crate::health::store::AgentHealthState::Offline
         })
         .collect();
-    let filtered_count = total - agents.len();
-    HttpResponse::Ok().json(AgentHealthResponse {
+    let filtered_count = total.saturating_sub(agents.len());
+
+    HttpResponse::Ok().json(AgentProcessHealthResponse {
         agents,
         last_scan_time: store.last_scan_time,
         filtered_count,

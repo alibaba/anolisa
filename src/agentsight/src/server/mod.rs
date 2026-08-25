@@ -228,6 +228,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig) {
                 .service(handlers::export_atif_session)
                 .service(handlers::export_atif_conversation)
                 .service(handlers::get_agent_health)
+                .service(handlers::get_agent_process_health)
                 .service(
                     web::resource("/agent-health/{pid}")
                         .route(web::delete().to(handlers::delete_agent_health)),
@@ -363,7 +364,12 @@ const API_ROUTES: &[(&str, &str, &str)] = &[
     (
         "GET",
         "/api/agent-health",
-        "Agent health list (see filtered_count)",
+        "Historical Agent activity from SQLite",
+    ),
+    (
+        "GET",
+        "/api/agent-process-health",
+        "Live Agent process health (see filtered_count)",
     ),
     (
         "DELETE",

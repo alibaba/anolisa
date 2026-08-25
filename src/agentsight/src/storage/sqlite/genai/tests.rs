@@ -1518,3 +1518,59 @@ fn startup_cleanup_prunes_oversized_db() {
     drop(store);
     cleanup_size_test_db(&path);
 }
+
+#[test]
+fn agent_activity_summaries_group_names_and_aggregate_calls() {
+    let path = unique_size_test_db("agent_activity");
+    let store = GenAISqliteStore::new_with_path(&path).unwrap();
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO genai_events
+             (event_type, start_timestamp_ns, end_timestamp_ns, agent_name,
+              input_tokens, output_tokens, cache_read_tokens, event_json)
+             VALUES ('llm_call', 100, 150, 'Claude', 10, 5, 2, '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO genai_events
+             (event_type, start_timestamp_ns, end_timestamp_ns, agent_name,
+              input_tokens, output_tokens, cache_creation_tokens, event_json)
+             VALUES ('llm_call', 200, 0, 'claude', 20, 10, 3, '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO genai_events
+             (event_type, start_timestamp_ns, agent_name, input_tokens,
+              output_tokens, event_json)
+             VALUES ('tool_use', 300, 'Claude', 999, 999, '{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO genai_events
+             (event_type, start_timestamp_ns, process_name, input_tokens,
+              output_tokens, event_json)
+             VALUES ('llm_call', 250, 'Codex', 7, 3, '{}')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let summaries = store.list_agent_activity_summaries().unwrap();
+
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries[0].agent_name, "Codex");
+    assert_eq!(summaries[0].last_seen_ns, 250);
+    assert_eq!(summaries[0].total_calls, 1);
+    assert_eq!(summaries[0].total_tokens, 10);
+    assert_eq!(summaries[1].agent_name, "Claude");
+    assert_eq!(summaries[1].last_seen_ns, 200);
+    assert_eq!(summaries[1].total_calls, 2);
+    assert_eq!(summaries[1].total_tokens, 50);
+
+    drop(store);
+    cleanup_size_test_db(&path);
+}

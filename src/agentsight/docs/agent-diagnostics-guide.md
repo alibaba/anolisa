@@ -111,9 +111,11 @@ AgentSight 对所有发现的 Agent 进程提供**两层监控**：
 | `NoPort` | 进程存活但无监听端口（仍可检测崩溃） |
 | `Offline` | 进程异常退出（仅关联了 crash 事件时保留） |
 
-### 2.4 Dashboard 侧边栏展示规则
+### 2.4 Dashboard 展示规则
 
-Dashboard 右侧「Agent 状态」侧边栏实时展示已发现的 Agent 进程健康状态，展示规则如下：
+Dashboard 的「Agent 看板」从 `genai_events.db` 与 `trajectories.db` 汇总历史活动，展示所有曾被采集到的 Agent、最后活跃时间、活动量、Token 与数据来源。
+
+独立的「运行时健康」区域继续实时展示已发现的 Agent 进程健康状态，展示规则如下：
 
 - **正常退出**（无未完成的 LLM 调用）：静默移除，不在侧边栏展示，不生成中断事件
 - **异常退出**（存在 pending LLM 调用被中断）：生成 `agent_crash` 中断事件，侧边栏展示崩溃记录，保留 5 分钟后自动清理
@@ -124,8 +126,11 @@ Dashboard 右侧「Agent 状态」侧边栏实时展示已发现的 Agent 进程
 ### 2.5 API 查询
 
 ```bash
-# 查询所有 Agent 健康状态
+# 查询历史 Agent 活动
 curl http://127.0.0.1:7396/api/agent-health
+
+# 查询当前进程健康（支持 include_clients=true）
+curl http://127.0.0.1:7396/api/agent-process-health
 ```
 
 响应示例：
@@ -134,15 +139,15 @@ curl http://127.0.0.1:7396/api/agent-health
 {
   "agents": [
     {
-      "pid": 12345,
       "agent_name": "OpenClaw",
-      "status": "healthy",
-      "ports": [8080],
-      "latency_ms": 12,
-      "last_check_time": 1717830000000
+      "last_seen_ns": 1717830000000000000,
+      "genai_calls": 128,
+      "genai_tokens": 500000,
+      "trajectory_steps": 42,
+      "trajectory_tokens": 120000,
+      "source": "genai_events+trajectories"
     }
-  ],
-  "last_scan_time": 1717830000000
+  ]
 }
 ```
 
@@ -483,7 +488,8 @@ AgentSight 自动识别并解析以下 LLM API 格式：
 | `/api/grader/evaluate` | POST | 手动评估 Conversation 质量 |
 | `/api/grader/latest` | GET | 查询最新 Conversation 评估结果 |
 | `/api/agent-names` | GET | Agent 名称列表 |
-| `/api/agent-health` | GET | Agent 健康状态 |
+| `/api/agent-health` | GET | SQLite 历史 Agent 活动 |
+| `/api/agent-process-health` | GET | 当前 Agent 进程健康状态 |
 | `/api/interruptions` | GET | 中断事件列表 |
 | `/api/interruptions/count` | GET | 中断统计（按严重级别） |
 | `/api/interruptions/stats` | GET | 中断统计（按类型） |

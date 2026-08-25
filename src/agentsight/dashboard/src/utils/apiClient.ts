@@ -644,7 +644,7 @@ export async function fetchTimeseries(
 
 // ─── ATIF export APIs ────────────────────────────────────────────────────────
 
-import type { AtifDocument, AgentHealthResponse } from '../types';
+import type { AtifDocument, AgentHealthResponse, AgentProcessHealthResponse } from '../types';
 
 // ─── Token Savings types ─────────────────────────────────────────────────────
 
@@ -1014,11 +1014,18 @@ export async function fetchInterruptionConversationCounts(
 // ─── Agent health API ─────────────────────────────────────────────────────────
 
 /**
- * Fetch the current health status of all discovered agent processes.
+ * Fetch historical activity for all Agents observed by either SQLite store.
  */
-export async function fetchAgentHealth(opts?: { includeClients?: boolean }): Promise<AgentHealthResponse> {
+export async function fetchAgentHealth(): Promise<AgentHealthResponse> {
+  return apiFetch<AgentHealthResponse>(`${API_BASE}/api/agent-health`);
+}
+
+/** Fetch live process health for diagnostics and restart actions. */
+export async function fetchAgentProcessHealth(opts?: {
+  includeClients?: boolean;
+}): Promise<AgentProcessHealthResponse> {
   const qs = opts?.includeClients ? '?include_clients=true' : '';
-  return apiFetch<AgentHealthResponse>(`${API_BASE}/api/agent-health${qs}`);
+  return apiFetch<AgentProcessHealthResponse>(`${API_BASE}/api/agent-process-health${qs}`);
 }
 
 /**

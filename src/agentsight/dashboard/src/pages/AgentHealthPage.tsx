@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   fetchAgentHealth,
+  fetchAgentProcessHealth,
   deleteAgentHealth,
   restartAgentHealth,
   fetchInterruptions,
@@ -8,7 +9,7 @@ import {
   fetchLatencyMetrics,
 } from '../utils/apiClient';
 import type { InterruptionRecord, InterruptionSeverity, LatencyMetricsSummary, MetricPercentiles } from '../utils/apiClient';
-import type { AgentHealthStatus } from '../types';
+import type { AgentActivitySummary, AgentHealthStatus } from '../types';
 import { useI18n, useLocaleTag, INTERRUPTION_TYPES, interruptionTypeKey } from '../i18n';
 import type { MessageKey } from '../i18n';
 import { formatNs } from '../utils/datetime';
@@ -124,6 +125,129 @@ interface Toast {
   id: number;
   message: string;
 }
+
+const ActivityMetric: React.FC<{ label: string; value: number; locale: string }> = ({
+  label,
+  value,
+  locale,
+}) => (
+  <div>
+    <dt className="text-gray-400">{label}</dt>
+    <dd className="mt-0.5 text-base font-semibold text-gray-800">
+      {value.toLocaleString(locale)}
+    </dd>
+  </div>
+);
+
+const AgentActivitySection: React.FC = () => {
+  const { t } = useI18n();
+  const locale = useLocaleTag();
+  const [agents, setAgents] = useState<AgentActivitySummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const hasDataRef = useRef(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const data = await fetchAgentHealth();
+      setAgents(Array.isArray(data?.agents) ? data.agents : []);
+      setWarnings(Array.isArray(data?.warnings) ? data.warnings : []);
+      setError(null);
+      hasDataRef.current = true;
+    } catch (requestError: unknown) {
+      if (!hasDataRef.current) {
+        setError(requestError instanceof Error ? requestError.message : t('ah.requestFailed'));
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [t]);
+
+  useEffect(() => {
+    void refresh();
+    const timer = setInterval(refresh, 30_000);
+    return () => clearInterval(timer);
+  }, [refresh]);
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-3">
+        <h2
+          className="text-lg font-semibold text-gray-800 cursor-help"
+          title={t('ah.agentDashboardTooltip')}
+        >
+          {t('ah.agentDashboard')}
+        </h2>
+        {!loading && !error && (
+          <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-600">
+            {t('ah.observedAgents', { n: agents.length })}
+          </span>
+        )}
+      </div>
+
+      {loading ? (
+        <div className="py-8 text-center text-sm text-gray-400">{t('common.loading')}</div>
+      ) : error ? (
+        <div className="py-8 text-center text-sm text-red-400">{error}</div>
+      ) : agents.length === 0 ? (
+        <div className="py-8 text-center text-sm text-gray-400 bg-white rounded-lg border border-gray-200">
+          {t('ah.noAgents')}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+          {agents.map(agent => (
+            <article
+              key={agent.agent_name.toLowerCase()}
+              className="rounded-lg border border-gray-200 bg-white shadow-sm p-4"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <h3 className="font-semibold text-sm text-gray-900 truncate">
+                  {agent.agent_name}
+                </h3>
+                <div className="flex flex-wrap justify-end gap-1">
+                  {agent.source.split('+').map(source => (
+                    <span
+                      key={source}
+                      className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-700"
+                    >
+                      {source === 'genai_events' ? 'GenAI' : 'Trajectory'}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 text-xs">
+                {agent.source.includes('genai_events') && (
+                  <>
+                    <ActivityMetric label={t('ah.genaiCalls')} value={agent.genai_calls} locale={locale} />
+                    <ActivityMetric label={t('ah.genaiTokens')} value={agent.genai_tokens} locale={locale} />
+                  </>
+                )}
+                {agent.source.includes('trajectories') && (
+                  <>
+                    <ActivityMetric label={t('ah.trajectorySteps')} value={agent.trajectory_steps} locale={locale} />
+                    <ActivityMetric label={t('ah.trajectoryTokens')} value={agent.trajectory_tokens} locale={locale} />
+                  </>
+                )}
+                <div className="col-span-2 pt-2 border-t border-gray-100">
+                  <dt className="text-gray-400">{t('ah.lastSeen')}</dt>
+                  <dd className="mt-0.5 text-gray-700">
+                    {agent.last_seen_ns > 0 ? formatNs(agent.last_seen_ns, locale) : '—'}
+                  </dd>
+                </div>
+              </dl>
+            </article>
+          ))}
+        </div>
+      )}
+      {warnings.length > 0 && (
+        <div className="mt-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+          {t('ah.partialData', { sources: warnings.join(', ') })}
+        </div>
+      )}
+    </section>
+  );
+};
 
 function formatMetricValue(value: number): string {
   return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -529,7 +653,7 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
   const refresh = useCallback(async () => {
     try {
       // Fetch all at once (including client/worker), then group by parent_pid under each main card
-      const data = await fetchAgentHealth({ includeClients: true });
+      const data = await fetchAgentProcessHealth({ includeClients: true });
       const agentRows = Array.isArray(data?.agents) ? data.agents : [];
       setAgents(agentRows.filter(a => a.role === 'gateway'));
       setClientAgents(agentRows.filter(a => a.role !== 'gateway'));
@@ -632,9 +756,9 @@ const AgentStatusSection: React.FC<{ addToast: (msg: string) => void }> = ({ add
         <div className="flex items-center gap-3">
           <h2
             className="text-lg font-semibold text-gray-800 cursor-help"
-            title={t('ah.agentDashboardTooltip')}
+            title={t('ah.runtimeHealthTooltip')}
           >
-            {t('ah.agentDashboard')}
+            {t('ah.runtimeHealth')}
           </h2>
           {offlineCount > 0 && (
             <span className="text-xs px-1.5 py-0.5 rounded-full bg-red-100 text-red-600 font-semibold">
@@ -1190,7 +1314,10 @@ export const AgentHealthPage: React.FC = () => {
         ))}
       </div>
 
-      <AgentStatusSection addToast={addToast} />
+      <AgentActivitySection />
+      <div className="mt-8">
+        <AgentStatusSection addToast={addToast} />
+      </div>
       <InterruptionSection addToast={addToast} />
     </div>
   );

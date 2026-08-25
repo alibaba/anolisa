@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { fetchAgentHealth } from '../utils/apiClient';
+import { fetchAgentProcessHealth } from '../utils/apiClient';
 import { useI18n } from '../i18n';
 
 interface Toast {
@@ -29,7 +29,7 @@ export const AgentHealthNotifier: React.FC = () => {
 
   const poll = useCallback(async () => {
     try {
-      const data = await fetchAgentHealth({ includeClients: true });
+      const data = await fetchAgentProcessHealth({ includeClients: true });
       const agents = Array.isArray(data?.agents) ? data.agents : [];
 
       // 检测新增异常退出（仅 has_crash=true 的才通知）和卡顿 agent

@@ -212,7 +212,8 @@ agentsight interruption --db /path/to/interruption_events.db list --last 48
 | `/api/agent-names` | GET | Agent 名称列表 |
 | `/api/timeseries` | GET | 时序 Token 统计 |
 | `/api/metrics/latency` | GET | LLM latency and throughput percentile metrics |
-| `/api/agent-health` | GET | Agent 健康状态 |
+| `/api/agent-health` | GET | 历史 Agent 活动（SQLite 聚合） |
+| `/api/agent-process-health` | GET | 当前 Agent 进程健康状态 |
 | `/api/agent-health/{pid}` | DELETE | 删除健康条目 |
 | `/api/agent-health/{pid}/restart` | POST | 重启 Agent |
 | `/api/export/atif/trace/{id}` | GET | ATIF trace 导出 |
