@@ -227,6 +227,17 @@ pub enum Response {
     /// confirm the landed state without a follow-up `Config` round-trip.
     ReloadConfigOk {
         config: ConfigReport,
+        /// Global config the daemon now operates from, as parsed from
+        /// [`CONFIG_FILE_PATH`] *in the daemon's own filesystem* — defaults
+        /// when that file is absent. `None` when the reload did not consult
+        /// the global file at all (per-workspace policy reload).
+        ///
+        /// `config` reports effective runtime values, which cannot expose a
+        /// bootstrap-only setting the daemon has not applied yet; this field
+        /// can. A client that just wrote the file compares it here to detect
+        /// that the daemon reloaded a different file, or none — the case
+        /// where CLI and daemon do not share `/etc/ws-ckpt`.
+        file: Option<FileConfig>,
     },
     CheckpointSkipped {
         reason: String,
@@ -2406,12 +2417,26 @@ mod tests {
                 img_size: 30,
                 img_max_percent: 40.0,
             },
+            file: Some(FileConfig {
+                auto_cleanup: Some(true),
+                auto_cleanup_keep: Some(CleanupRetention::age("30d").unwrap()),
+                ..Default::default()
+            }),
         };
         match round_trip_response(&resp) {
-            Response::ReloadConfigOk { config } => {
+            Response::ReloadConfigOk { config, file } => {
                 assert!(config.auto_cleanup);
                 assert_eq!(config.auto_cleanup_keep, CleanupRetention::Count(5));
                 assert_eq!(config.auto_cleanup_interval_secs, 3_600);
+                // Age retention re-derives secs from `raw` over the wire; the
+                // client compares this against the file it wrote, so the
+                // round-trip must preserve it exactly.
+                let file = file.expect("daemon-visible config file");
+                assert_eq!(file.auto_cleanup, Some(true));
+                assert_eq!(
+                    file.auto_cleanup_keep,
+                    Some(CleanupRetention::age("30d").unwrap())
+                );
             }
             _ => panic!("expected ReloadConfigOk variant"),
         }

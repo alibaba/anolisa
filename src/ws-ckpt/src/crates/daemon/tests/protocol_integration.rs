@@ -124,6 +124,7 @@ async fn mock_server_handle(mut stream: tokio::net::UnixStream) {
                 img_size: 30,
                 img_max_percent: 40.0,
             },
+            file: None,
         },
         Request::ConfigOverview => Response::ConfigOverviewOk {
             config: ConfigReport {
@@ -639,7 +640,7 @@ async fn full_reload_config_request_response_over_socket() {
 
     let response: Response = decode_payload(&payload).unwrap();
     match response {
-        Response::ReloadConfigOk { config } => {
+        Response::ReloadConfigOk { config, .. } => {
             assert_eq!(config.mount_path, "/mnt/btrfs-workspace");
             assert_eq!(config.auto_cleanup_keep, CleanupRetention::Count(20));
         }
@@ -829,7 +830,7 @@ async fn full_patch_workspace_policy_unchanged_only_over_socket() {
 
 // ── Reload IPCs: exercise every variant on the wire ──
 //
-// All three reload variants share the `ReloadConfigOk { config }` reply
+// All three reload variants share the `ReloadConfigOk { config, file }` reply
 // shape. Mock server returns the same body for all three (combined match
 // arm), so these tests verify the *request* tags round-trip distinctly
 // — a bincode tag shuffle that swapped `ReloadConfig` and
@@ -841,7 +842,7 @@ async fn full_patch_workspace_policy_unchanged_only_over_socket() {
 async fn full_reload_config_over_socket() {
     let resp = run_policy_request(Request::ReloadConfig).await;
     match resp {
-        Response::ReloadConfigOk { config } => {
+        Response::ReloadConfigOk { config, .. } => {
             assert_eq!(config.mount_path, "/mnt/btrfs-workspace");
             assert_eq!(config.auto_cleanup_keep, CleanupRetention::Count(20));
         }
@@ -853,7 +854,7 @@ async fn full_reload_config_over_socket() {
 async fn full_reload_global_config_over_socket() {
     let resp = run_policy_request(Request::ReloadGlobalConfig).await;
     match resp {
-        Response::ReloadConfigOk { config } => {
+        Response::ReloadConfigOk { config, .. } => {
             assert_eq!(config.mount_path, "/mnt/btrfs-workspace");
         }
         other => panic!("expected ReloadConfigOk, got {:?}", other),
@@ -867,7 +868,7 @@ async fn full_reload_workspace_policy_over_socket() {
     })
     .await;
     match resp {
-        Response::ReloadConfigOk { config } => {
+        Response::ReloadConfigOk { config, .. } => {
             // Mock reuses the same global config payload for the per-ws
             // reload reply; the point of the test is the request side.
             assert_eq!(config.mount_path, "/mnt/btrfs-workspace");

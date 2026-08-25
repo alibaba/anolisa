@@ -380,6 +380,7 @@ async fn handle_reload_config(state: &Arc<DaemonState>) -> Response {
             state.config_notify.notify_waiters();
             Response::ReloadConfigOk {
                 config: build_config_report(state),
+                file: Some(file_config),
             }
         }
         Err(e) => Response::Error {
@@ -399,6 +400,8 @@ async fn handle_reload_workspace_policy(state: &Arc<DaemonState>, workspace: &st
     state.config_notify.notify_waiters();
     Response::ReloadConfigOk {
         config: build_config_report(state),
+        // Global file untouched by a per-workspace reload.
+        file: None,
     }
 }
 
@@ -410,6 +413,7 @@ fn handle_reload_global_config(state: &Arc<DaemonState>) -> Response {
             state.config_notify.notify_waiters();
             Response::ReloadConfigOk {
                 config: build_config_report(state),
+                file: Some(file_config),
             }
         }
         Err(e) => Response::Error {
