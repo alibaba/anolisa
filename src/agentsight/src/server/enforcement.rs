@@ -906,7 +906,13 @@ mod tests {
             mode: PolicyMode::Audit,
         };
 
-        let preview = protection_preview_from_policy("Hermes".into(), 9073, &policy);
+        let preview = protection_preview_from_policy(
+            "Hermes".into(),
+            9073,
+            Some(Path::new("/root/agentsight-demo")),
+            &policy,
+        )
+        .expect("preview should be present");
 
         assert_eq!(preview.agent_id, "Hermes");
         assert_eq!(preview.root_pid, 9073);

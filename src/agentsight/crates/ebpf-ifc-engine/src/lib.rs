@@ -1110,7 +1110,7 @@ pub fn bpf_lsm_active() -> bool {
 }
 
 fn err(msg: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, msg.into())
+    io::Error::other(msg.into())
 }
 
 fn validate_config(cfg: &CConfig) -> io::Result<()> {
@@ -2041,18 +2041,16 @@ impl Loader {
                 .map_err(|e| err(format!("ts_proc for remapping: {e}")))?;
 
                 let mut updates: Vec<(i32, ProcState)> = Vec::new();
-                for result in proc_map.iter() {
-                    if let Ok((pid, state)) = result {
-                        let new_labels = remap_labels(state.labels, &bit_remap);
-                        if new_labels != state.labels {
-                            updates.push((
-                                pid,
-                                ProcState {
-                                    labels: new_labels,
-                                    lin_gates: state.lin_gates,
-                                },
-                            ));
-                        }
+                for (pid, state) in proc_map.iter().flatten() {
+                    let new_labels = remap_labels(state.labels, &bit_remap);
+                    if new_labels != state.labels {
+                        updates.push((
+                            pid,
+                            ProcState {
+                                labels: new_labels,
+                                lin_gates: state.lin_gates,
+                            },
+                        ));
                     }
                 }
 
@@ -2131,18 +2129,16 @@ impl Loader {
         .map_err(|e| err(format!("ts_proc for remapping: {e}")))?;
 
         let mut updates: Vec<(i32, ProcState)> = Vec::new();
-        for result in proc_map.iter() {
-            if let Ok((pid, state)) = result {
-                let new_labels = remap_labels(state.labels, &bit_remap);
-                if new_labels != state.labels {
-                    updates.push((
-                        pid,
-                        ProcState {
-                            labels: new_labels,
-                            lin_gates: state.lin_gates,
-                        },
-                    ));
-                }
+        for (pid, state) in proc_map.iter().flatten() {
+            let new_labels = remap_labels(state.labels, &bit_remap);
+            if new_labels != state.labels {
+                updates.push((
+                    pid,
+                    ProcState {
+                        labels: new_labels,
+                        lin_gates: state.lin_gates,
+                    },
+                ));
             }
         }
 
