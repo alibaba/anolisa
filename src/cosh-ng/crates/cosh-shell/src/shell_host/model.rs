@@ -26,8 +26,6 @@ pub enum ShellIntegration {
     /// Enables the marker hooks required for implicit Agent routing and command events.
     #[default]
     Enhanced,
-    /// Uses bounded prompt and command-not-found hooks without a global DEBUG trap.
-    EnhancedV2,
 }
 
 impl ShellIntegration {
@@ -35,17 +33,12 @@ impl ShellIntegration {
         match value.trim().to_ascii_lowercase().as_str() {
             "native" => Some(Self::Native),
             "enhanced" => Some(Self::Enhanced),
-            "enhanced-v2" | "enhanced_v2" => Some(Self::EnhancedV2),
             _ => None,
         }
     }
 
     pub(crate) fn uses_markers(self) -> bool {
         matches!(self, Self::Enhanced)
-    }
-
-    pub(crate) fn uses_debug_trap(self) -> bool {
-        self == Self::Enhanced
     }
 }
 
@@ -164,11 +157,8 @@ pub struct ShellHostConfig {
     /// Cosh marker hooks.
     pub native_mode: bool,
     pub login_shell: bool,
-    /// Routes exact slash-control submissions through bash so they enter
-    /// native history (issue #1718). Defaults from `COSH_SLASH_VIA_SHELL`
-    /// (on unless "0"); disabling restores the pre-#1718 Rust intercept
-    /// path end to end. Only bash runners consult it; zsh has no extdebug
-    /// return-suppression equivalent and always keeps the Rust path.
+    /// Retained for source compatibility. Bounded Enhanced integration always
+    /// routes slash controls in Rust before they reach the shell.
     pub slash_via_shell: bool,
     pub env_overrides: Vec<(String, String)>,
     pub raw_action_watchdog: Duration,
@@ -204,7 +194,7 @@ impl ShellHostConfig {
             integration: ShellIntegration::Enhanced,
             native_mode: true,
             login_shell: false,
-            slash_via_shell: slash_via_shell_default(),
+            slash_via_shell: false,
             env_overrides: Vec::new(),
             raw_action_watchdog: Duration::from_secs(120),
             input_wait_status: InputWaitStatus::default(),
@@ -277,14 +267,6 @@ impl ShellHostConfig {
     }
 }
 
-/// `COSH_SLASH_VIA_SHELL` gates the shell routing of exact slash
-/// submissions; any value other than "0" (including unset) keeps it on.
-fn slash_via_shell_default() -> bool {
-    std::env::var("COSH_SLASH_VIA_SHELL")
-        .map(|value| value != "0")
-        .unwrap_or(true)
-}
-
 fn default_winsize() -> Winsize {
     Winsize {
         ws_row: 40,
@@ -342,17 +324,4 @@ pub struct ShellHostOutput {
     pub work_dir: PathBuf,
     pub journal_path: PathBuf,
     pub exit_status: Option<i32>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ShellIntegration;
-
-    #[test]
-    fn enhanced_v2_config_is_marker_enabled_but_debug_free() {
-        let integration = ShellIntegration::parse_config("enhanced-v2").expect("integration");
-        assert_eq!(integration, ShellIntegration::EnhancedV2);
-        assert!(integration.uses_markers());
-        assert!(!integration.uses_debug_trap());
-    }
 }

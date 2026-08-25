@@ -727,6 +727,7 @@ fn prompt_fragment_after_restore_keeps_ghost_last_on_screen() {
         &mut pending_terminal_restore,
         Path::new("/tmp/cosh-test-recovery"),
         Path::new("/tmp/cosh-test-handoff"),
+        false,
     )
     .expect("restore prompt");
     assert_eq!(action, RawObserverAction::Continue);

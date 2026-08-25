@@ -6,6 +6,7 @@ mod alt_screen;
 mod command;
 mod event_store;
 mod handoff_claim;
+mod marker_sequence;
 mod routing;
 mod transcript_store;
 
@@ -16,13 +17,12 @@ use event_store::EventStore;
 use handoff_claim::{
     claim_pending_command_origin, pending_origin_for_request, PendingCommandOrigin,
 };
+use marker_sequence::{find_bytes, osc_prefix_suffix_len, HistoryFileTracker, Marker};
 
 use std::collections::HashSet;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-
-use serde::Deserialize;
 
 use super::model::{ShellEnvironmentObserver, ShellHistoryFileObserver};
 use super::transcript::Transcript;
@@ -47,7 +47,6 @@ const ERASE_TO_END_OF_SCREEN: &[u8] = b"\x1b[J";
 const ERASE_TO_END_OF_LINE: &[u8] = b"\x1b[K";
 const BEL: u8 = b'\x07';
 const SHELL_PATH_MAX_BYTES: usize = 8 * 1024;
-const SHELL_HISTORY_FILE_MAX_BYTES: usize = 4 * 1024;
 
 /// Why a display cut was recorded, so consumers can tell an intercepted
 /// input (shell has not painted a prompt for it yet) apart from a real
@@ -90,10 +89,16 @@ pub(super) struct OscParser {
     pending_handoff_echo: Option<PendingHandoffEcho>,
     pub(super) shell_environment_snapshot: Option<ShellEnvironmentSnapshot>,
     environment_observer: Option<ShellEnvironmentObserver>,
-    history_file_observer: Option<ShellHistoryFileObserver>,
+    history_file_tracker: HistoryFileTracker,
     /// #1721 D16: shared "bash sits at PS1" gate consumed by the raw input
     /// relay; prompt_ready raises it, preexec lowers it.
     main_prompt_gate: crate::raw_input::MainPromptGate,
+    /// Rust-owned controls read in the same batch as preceding shell lines.
+    /// Each counter reaches zero only after those submissions reach PS1.
+    pending_prompt_intercepts: Vec<(String, String, usize)>,
+    /// A preexec or routing marker proves the next prompt boundary belongs to
+    /// a submitted non-empty line rather than startup prompt initialization.
+    submission_boundary_observed: bool,
     assistance_control: Option<crate::input::AssistanceControl>,
     /// Collapses consecutive PTY input writes into one prompt-cwd
     /// invalidation barrier; a fresh command-less prompt report
@@ -137,7 +142,7 @@ impl OscParser {
     }
 
     pub(super) fn with_history_file_observer(mut self, observer: ShellHistoryFileObserver) -> Self {
-        self.history_file_observer = Some(observer);
+        self.history_file_tracker.set_observer(observer);
         self
     }
 
@@ -215,7 +220,7 @@ impl OscParser {
         }
     }
 
-    fn handle_marker(&mut self, marker: Marker) -> io::Result<()> {
+    fn handle_marker(&mut self, mut marker: Marker) -> io::Result<()> {
         if marker.token.as_deref() != self.marker_token.as_deref() {
             return Ok(());
         }
@@ -228,10 +233,13 @@ impl OscParser {
             return Ok(());
         }
 
+        let compact_prompt_marker = marker.normalize_compact_prompt();
+
+        if marker.has_trusted_history_context(&self.session_id, compact_prompt_marker) {
+            self.history_file_tracker
+                .observe(marker.history_file.as_deref());
+        }
         if marker.event == "history_file" {
-            if marker.session_id.as_deref() == Some(self.session_id.as_str()) {
-                self.observe_history_file(marker.history_file.as_deref());
-            }
             return Ok(());
         }
 
@@ -241,32 +249,20 @@ impl OscParser {
             .clone()
             .unwrap_or_else(|| self.session_id.clone());
         let timestamp = marker.timestamp_ms.unwrap_or_else(now_ms);
+        let prompt_ready_with_precmd = marker.prompt_ready.unwrap_or(false);
 
         if matches!(marker.event.as_str(), "intercept" | "top_level_missing") {
+            self.submission_boundary_observed = true;
             self.handle_routing_marker(marker, session_id, timestamp);
             return Ok(());
         }
 
         match marker.event.as_str() {
             "prompt_ready" => {
-                // In bounded mode user prompt hooks may emit arbitrarily large
-                // output between precmd and this marker. Reset here so replay
-                // retains only the actual PS1 bytes that follow.
-                if !self.display.is_full() {
-                    self.start_prompt_display_capture();
-                }
-                self.prompt_ready_display_start = Some(self.display.position());
-                self.prompt_ready_display_starts
-                    .push(self.display.position());
-                // #1721 D16: the shell marker emits prompt_ready only for the
-                // primary prompt (PS1), so this is the authoritative "CJK
-                // drafts may open" signal.
-                self.main_prompt_gate.set_at_prompt(true);
-                if let Some(control) = &self.assistance_control {
-                    control.set_at_prompt(true);
-                }
+                self.mark_prompt_ready(marker.cwd);
             }
             "preexec" => {
+                self.submission_boundary_observed = true;
                 if !self.display.is_full() {
                     self.capture_prompt_display = false;
                 }
@@ -315,6 +311,7 @@ impl OscParser {
             "precmd" => {
                 self.prompt_ready_display_start = None;
                 let Some(current) = self.current.take() else {
+                    let prompt_cwd = marker.cwd.clone();
                     self.intervention_cuts.push(self.clean.position());
                     self.intervention_display_cuts
                         .push((self.display.position(), DisplayCutKind::PromptBoundary));
@@ -354,6 +351,9 @@ impl OscParser {
                         routing: None,
                         capture: None,
                     });
+                    if prompt_ready_with_precmd {
+                        self.mark_prompt_ready(prompt_cwd);
+                    }
                     return Ok(());
                 };
 
@@ -386,6 +386,7 @@ impl OscParser {
                 );
                 event.command = Some(current.command);
                 event.cwd = Some(current.cwd.clone());
+                let prompt_cwd = marker.cwd.clone().or_else(|| Some(current.cwd.clone()));
                 event.end_cwd = marker.cwd.or(Some(current.cwd));
                 event.duration_ms = Some(timestamp.saturating_sub(current.started_at_ms));
                 event.terminal_output_bytes =
@@ -394,11 +395,41 @@ impl OscParser {
                 event.audit_identity = current.audit_identity;
                 event.shell_environment_generation = current.shell_environment_generation;
                 self.events.push(event);
+                if prompt_ready_with_precmd {
+                    self.mark_prompt_ready(prompt_cwd);
+                }
             }
             _ => {}
         }
 
         Ok(())
+    }
+
+    fn mark_prompt_ready(&mut self, prompt_cwd: Option<String>) {
+        if !self.display.is_full() {
+            self.start_prompt_display_capture();
+        }
+        self.prompt_ready_display_start = Some(self.display.position());
+        self.prompt_ready_display_starts
+            .push(self.display.position());
+        self.main_prompt_gate.set_at_prompt(true);
+        if let Some(control) = &self.assistance_control {
+            control.set_at_prompt(true);
+        }
+        let acknowledge_submission = std::mem::take(&mut self.submission_boundary_observed);
+        let pending = std::mem::take(&mut self.pending_prompt_intercepts);
+        let session_id = self.session_id.clone();
+        for (input, reason, mut remaining) in pending {
+            if acknowledge_submission {
+                remaining = remaining.saturating_sub(1);
+            }
+            if remaining == 0 {
+                self.push_intercept_event(&session_id, input, prompt_cwd.clone(), &reason);
+            } else {
+                self.pending_prompt_intercepts
+                    .push((input, reason, remaining));
+            }
+        }
     }
 
     fn observe_shell_environment(&mut self, marker: &Marker) -> Option<u64> {
@@ -438,22 +469,6 @@ impl OscParser {
             observer.observe(snapshot);
         }
         Some(generation)
-    }
-
-    fn observe_history_file(&self, history_file: Option<&str>) {
-        let Some(path) = history_file.filter(|value| {
-            value.len() <= SHELL_HISTORY_FILE_MAX_BYTES
-                && !value.chars().any(|character| character.is_control())
-        }) else {
-            return;
-        };
-        let path = PathBuf::from(path);
-        if !path.is_absolute() {
-            return;
-        }
-        if let Some(observer) = &self.history_file_observer {
-            observer.observe(path);
-        }
     }
 
     pub(super) fn flush_pending(&mut self) -> io::Result<()> {
@@ -687,6 +702,24 @@ impl OscParser {
         self.push_intercept_event_with_routing(session_id, input, cwd, reason, None, false, false);
     }
 
+    pub(super) fn push_intercept_event_at_prompt(
+        &mut self,
+        input: String,
+        reason: &str,
+        pending_submits: usize,
+    ) {
+        if pending_submits == 0 && self.main_prompt_gate.is_at_prompt() {
+            let session_id = self.session_id.clone();
+            self.push_intercept_event(&session_id, input, None, reason);
+        } else {
+            self.pending_prompt_intercepts.push((
+                input,
+                reason.to_string(),
+                pending_submits.max(1),
+            ));
+        }
+    }
+
     pub(super) fn push_control_event(&mut self, input: &str) {
         self.push_self_session_input_event(
             "control",
@@ -842,31 +875,6 @@ fn is_shell_exit_command(command: &str) -> bool {
     trimmed == "exit" || trimmed.starts_with("exit ") || trimmed == "logout"
 }
 
-#[derive(Debug, Deserialize)]
-struct Marker {
-    event: String,
-    token: Option<String>,
-    session_id: Option<String>,
-    timestamp_ms: Option<u64>,
-    cwd: Option<String>,
-    command: Option<String>,
-    reason: Option<String>,
-    status: Option<i32>,
-    path: Option<String>,
-    path_trusted: Option<bool>,
-    history_file: Option<String>,
-    generation: Option<u64>,
-    top_level_missing: Option<bool>,
-    proven: Option<bool>,
-    intent: Option<String>,
-    sensitive: Option<bool>,
-    #[serde(rename = "unsafe")]
-    unsafe_input: Option<bool>,
-    /// Handoff claim token echoed back by the marker script (#2142); absent
-    /// on every marker outside an approved handoff's preexec/precmd pair.
-    handoff: Option<String>,
-}
-
 fn command_finished_event(
     kind: ShellEventKind,
     session_id: String,
@@ -940,22 +948,6 @@ fn normalize_absolute_path(value: &str) -> Option<String> {
         }
     }
     Some(normalized.to_string_lossy().into_owned())
-}
-
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
-fn osc_prefix_suffix_len(pending: &[u8]) -> usize {
-    let max_keep = pending.len().min(OSC_PREFIX.len().saturating_sub(1));
-    for size in (1..=max_keep).rev() {
-        if OSC_PREFIX.starts_with(&pending[pending.len() - size..]) {
-            return size;
-        }
-    }
-    0
 }
 
 fn known_clean_control_len(bytes: &[u8]) -> Option<usize> {

@@ -1,5 +1,26 @@
 use super::*;
 
+fn assert_debug_log_has_only_bounded_cosh_capture(debug_log: &str) {
+    for line in debug_log
+        .lines()
+        .filter(|line| line.contains("_cosh") || line.contains("_COSH"))
+    {
+        let command = line
+            .strip_prefix("DBG=[")
+            .and_then(|line| line.strip_suffix(']'))
+            .unwrap_or(line);
+        assert!(
+            command.starts_with("_COSH_PROMPT_STATUS=")
+                || command.starts_with("_COSH_PROMPT_DEBUG_TRAP=")
+                || command.starts_with("_COSH_PROMPT_RETURN_TRAP=")
+                || command.starts_with("_COSH_PROMPT_ERR_TRAP=")
+                || (command.starts_with("trap -p DEBUG >")
+                    && command.contains("COSH_RECOVERY_REQUEST_FILE")),
+            "unexpected Cosh internals in DEBUG trap: {line}\n{debug_log}"
+        );
+    }
+}
+
 #[test]
 fn native_integration_leaves_bash_hooks_and_input_owned_by_bash() {
     if Command::new("bash").arg("--version").output().is_err() {
@@ -139,7 +160,7 @@ fn enhanced_assisted_integration_remains_the_default() {
 }
 
 #[test]
-fn enhanced_v2_routes_without_global_debug_tracing() {
+fn enhanced_routes_without_global_debug_tracing() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
@@ -148,7 +169,7 @@ fn enhanced_v2_routes_without_global_debug_tracing() {
     }
 
     let work_dir = std::env::temp_dir().join(format!(
-        "cosh-shell-enhanced-v2-{}-{}",
+        "cosh-shell-enhanced-bounded-{}-{}",
         std::process::id(),
         unique_suffix()
     ));
@@ -164,8 +185,8 @@ trap 'printf "%s\n" "$BASH_COMMAND" >> "$HOME/debug-trap.log"' DEBUG
 "#,
     )
     .expect("bashrc");
-    let config = ShellHostConfig::new("enhanced-v2", &work_dir)
-        .with_integration(ShellIntegration::EnhancedV2)
+    let config = ShellHostConfig::new("enhanced-bounded", &work_dir)
+        .with_integration(ShellIntegration::Enhanced)
         .with_env("HOME", home_dir.display().to_string())
         .with_env("LANG", "C.UTF-8")
         .with_env("LC_ALL", "C.UTF-8");
@@ -191,8 +212,15 @@ trap 'printf "%s\n" "$BASH_COMMAND" >> "$HOME/debug-trap.log"' DEBUG
             RawRelayAction::line("missing-cosh-v2-command"),
             RawRelayAction::wait(Duration::from_millis(100)),
             RawRelayAction::line("set -x"),
-            RawRelayAction::line("printf '__XTRACE_ALIVE__\\n'"),
+            RawRelayAction::line(
+                "K=XTRACE; case $- in *x*) V=PRESERVED;; *) V=LOST;; esac; printf '__%s_%s__\\n' \"$K\" \"$V\"",
+            ),
             RawRelayAction::line("set +x"),
+            RawRelayAction::line("set -u"),
+            RawRelayAction::line(":"),
+            RawRelayAction::line(":"),
+            RawRelayAction::line("printf '__NOUNSET_ALIVE__\\n'"),
+            RawRelayAction::line("set +u"),
             RawRelayAction::line("exit"),
         ],
         &mut rendered,
@@ -211,7 +239,12 @@ trap 'printf "%s\n" "$BASH_COMMAND" >> "$HOME/debug-trap.log"' DEBUG
         "{terminal}"
     );
     assert!(terminal.contains("__PUBLIC_TOKEN__=unset"), "{terminal}");
-    assert!(terminal.contains("__XTRACE_ALIVE__"), "{terminal}");
+    assert!(terminal.contains("__XTRACE_PRESERVED__"), "{terminal}");
+    assert!(terminal.contains("__NOUNSET_ALIVE__"), "{terminal}");
+    assert!(
+        !terminal.contains("HISTTIMEFORMAT: unbound variable"),
+        "{terminal}"
+    );
     assert!(
         terminal.contains("missing-cosh-v2-command: command not found"),
         "{terminal}"
@@ -250,26 +283,19 @@ trap 'printf "%s\n" "$BASH_COMMAND" >> "$HOME/debug-trap.log"' DEBUG
         std::fs::read_to_string(home_dir.join("debug-trap.log")).expect("user DEBUG trap log");
     assert!(!debug_log.contains("_cosh_preexec_marker"), "{debug_log}");
     assert!(!debug_log.contains(marker_token), "{debug_log}");
-    assert!(
-        debug_log
-            .lines()
-            .filter(|line| line.contains("_cosh") || line.contains("_COSH"))
-            .next()
-            .is_none(),
-        "{debug_log}"
-    );
+    assert_debug_log_has_only_bounded_cosh_capture(&debug_log);
 
     let _ = std::fs::remove_dir_all(&work_dir);
 }
 
 #[test]
-fn enhanced_v2_matches_bash_trap_and_option_oracle() {
+fn enhanced_matches_bash_trap_and_option_oracle() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
 
     let work_dir = std::env::temp_dir().join(format!(
-        "cosh-shell-enhanced-v2-oracle-{}-{}",
+        "cosh-shell-enhanced-oracle-{}-{}",
         std::process::id(),
         unique_suffix()
     ));
@@ -285,8 +311,8 @@ set +E +T
 "#,
     )
     .expect("bashrc");
-    let config = ShellHostConfig::new("enhanced-v2-oracle", &work_dir)
-        .with_integration(ShellIntegration::EnhancedV2)
+    let config = ShellHostConfig::new("enhanced-oracle", &work_dir)
+        .with_integration(ShellIntegration::Enhanced)
         .with_env("HOME", home_dir.display().to_string())
         .with_env("LANG", "C.UTF-8")
         .with_env("LC_ALL", "C.UTF-8");
@@ -334,8 +360,14 @@ set +E +T
         "{terminal}"
     );
     assert!(terminal.contains("trap -- 'printf"), "{terminal}");
+    let prompt_command_declaration = if bash_supports_prompt_command_array() {
+        "__PROMPT_COMMAND__=declare -a PROMPT_COMMAND="
+    } else {
+        "__PROMPT_COMMAND__=declare -- PROMPT_COMMAND="
+    };
     assert!(
-        terminal.contains("PROMPT_COMMAND=\"printf \\\"__USER_PROMPT__"),
+        terminal.contains(prompt_command_declaration)
+            && terminal.contains("printf \\\"__USER_PROMPT__=%s"),
         "{terminal}"
     );
 
@@ -350,9 +382,9 @@ set +E +T
     let err_log = std::fs::read_to_string(home_dir.join("err.log")).unwrap_or_default();
     for trap_log in [&debug_log, &return_log, &err_log] {
         assert!(!trap_log.contains("_cosh"), "{trap_log}");
-        assert!(!trap_log.contains("_COSH"), "{trap_log}");
         assert!(!trap_log.contains(marker_token), "{trap_log}");
     }
+    assert_debug_log_has_only_bounded_cosh_capture(&debug_log);
     assert!(
         debug_log.contains("DBG=[echo user-visible-cmd]"),
         "{debug_log}"
@@ -373,63 +405,272 @@ set +E +T
 }
 
 #[test]
-fn enhanced_shift_tab_toggles_shell_only_routing_without_restarting_bash() {
+fn enhanced_prompt_wrappers_preserve_user_variables() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
 
     let work_dir = std::env::temp_dir().join(format!(
-        "cosh-shell-enhanced-toggle-{}-{}",
+        "cosh-shell-enhanced-prompt-vars-{}-{}",
         std::process::id(),
         unique_suffix()
     ));
     let home_dir = work_dir.join("home");
     std::fs::create_dir_all(&home_dir).expect("home dir");
-    std::fs::write(home_dir.join(".bashrc"), "PS1='switch$ '\nKEEP_ME=alive\n").expect("bashrc");
-    let config = ShellHostConfig::new("enhanced-toggle", &work_dir)
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        "d=initial-d\n\
+         r=initial-r\n\
+         e=initial-e\n\
+         s=initial-s\n\
+         __prompt_status=initial-status\n\
+         PROMPT_COMMAND='d=hook-d; r=hook-r; e=hook-e; s=hook-s; \
+         __prompt_status=hook-status'\n",
+    )
+    .expect("bashrc");
+
+    let config = ShellHostConfig::new("enhanced-prompt-vars", &work_dir)
         .with_integration(ShellIntegration::Enhanced)
+        .with_env("HOME", home_dir.display().to_string());
+    let output = run_scripted_bash(
+        &config,
+        &[ScriptedInput::user_line(
+            "printf '__PROMPT_VARS__=%s|%s|%s|%s|%s\\n' \
+             \"$d\" \"$r\" \"$e\" \"$s\" \"$__prompt_status\"",
+        )],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(
+        terminal.contains("__PROMPT_VARS__=hook-d|hook-r|hook-e|hook-s|hook-status"),
+        "{terminal}"
+    );
+}
+
+#[test]
+fn enhanced_prompt_wrappers_do_not_assign_readonly_user_variables() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-enhanced-readonly-prompt-vars-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        "readonly d=readonly-d\n\
+         readonly r=readonly-r\n\
+         readonly e=readonly-e\n\
+         readonly s=readonly-s\n\
+         PROMPT_COMMAND='printf \"__READONLY_PROMPT_HOOK__\\n\"'\n",
+    )
+    .expect("bashrc");
+
+    let config = ShellHostConfig::new("enhanced-readonly-prompt-vars", &work_dir)
+        .with_integration(ShellIntegration::Enhanced)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("LANG", "C.UTF-8")
+        .with_env("LC_ALL", "C.UTF-8");
+    let output = run_scripted_bash(
+        &config,
+        &[ScriptedInput::user_line(
+            "printf '__READONLY_VARS__=%s|%s|%s|%s\\n' \"$d\" \"$r\" \"$e\" \"$s\"",
+        )],
+    )
+    .expect("scripted bash pty");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("__READONLY_PROMPT_HOOK__"), "{terminal}");
+    assert!(
+        terminal.contains("__READONLY_VARS__=readonly-d|readonly-r|readonly-e|readonly-s"),
+        "{terminal}"
+    );
+    assert!(!terminal.contains("readonly variable"), "{terminal}");
+}
+
+#[test]
+fn enhanced_prompt_boundary_survives_user_ps1_reassignment() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-enhanced-prompt-reset-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        "PS1='initial$ '\n\
+         PROMPT_COMMAND='PS1=\"reset$ \"; printf \"__RESET_HOOK__\\n\"'\n",
+    )
+    .expect("bashrc");
+    let config = ShellHostConfig::new("enhanced-prompt-reset", &work_dir)
         .with_env("HOME", home_dir.display().to_string());
 
     let mut rendered = Vec::new();
-    let output = shell_run_raw_relay_bash_with_actions(
+    let output = run_raw_relay_bash_with_actions(
         &config,
         vec![
             RawRelayAction::wait(Duration::from_millis(100)),
-            RawRelayAction::write(b"\x1b[Z".to_vec()),
-            RawRelayAction::line("hello there"),
-            RawRelayAction::wait(Duration::from_millis(300)),
-            RawRelayAction::line("/help"),
-            RawRelayAction::wait(Duration::from_millis(300)),
-            RawRelayAction::line("printf '__KEEP__=%s\\n' \"$KEEP_ME\""),
-            RawRelayAction::wait(Duration::from_millis(300)),
-            RawRelayAction::write(b"\x1b[Z".to_vec()),
+            RawRelayAction::line("echo first-boundary"),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line("echo second-boundary"),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("enhanced prompt reset relay");
+
+    let terminal = String::from_utf8_lossy(&rendered);
+    assert!(terminal.contains("__RESET_HOOK__"), "{terminal}");
+    assert!(terminal.contains("reset$ "), "{terminal}");
+    for command in ["echo first-boundary", "echo second-boundary"] {
+        assert!(
+            output.events.iter().any(|event| {
+                event.kind == ShellEventKind::CommandCompleted
+                    && event.command.as_deref() == Some(command)
+            }),
+            "missing boundary for {command}: {:?}",
+            output.events
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+}
+
+#[test]
+fn enhanced_history_disabled_emits_redacted_boundaries_and_keeps_shell_ownership() {
+    if Command::new("bash").arg("--version").output().is_err()
+        || !bash_supports_command_not_found_handler()
+    {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-enhanced-no-history-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(
+        home_dir.join(".bashrc"),
+        "PS1='no-history$ '\nset +o history\n",
+    )
+    .expect("bashrc");
+    let config = ShellHostConfig::new("enhanced-no-history", &work_dir)
+        .with_env("HOME", home_dir.display().to_string());
+
+    let mut rendered = Vec::new();
+    let output = run_raw_relay_bash_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line("printf '__NO_HISTORY_COMMAND__\\n'"),
+            RawRelayAction::wait(Duration::from_millis(100)),
             RawRelayAction::line("hello there"),
             RawRelayAction::wait(Duration::from_millis(100)),
             RawRelayAction::line("exit"),
         ],
         &mut rendered,
     )
-    .expect("enhanced toggle relay");
+    .expect("enhanced no-history relay");
 
     let terminal = String::from_utf8_lossy(&rendered);
-    assert!(terminal.contains("\r\x1b[2K◌ switch$ "), "{terminal}");
-    assert!(terminal.contains("\r\x1b[2K◇ switch$ "), "{terminal}");
-    assert!(terminal.contains("__KEEP__=alive"), "{terminal}");
-    let intercepted = output
-        .events
-        .iter()
-        .filter(|event| {
-            event.kind == ShellEventKind::UserInputIntercepted
-                && event.input.as_deref() == Some("hello there")
-        })
-        .count();
-    assert_eq!(intercepted, 1, "{:?}", output.events);
+    assert!(terminal.contains("__NO_HISTORY_COMMAND__"), "{terminal}");
+    assert!(terminal.contains("hello: command not found"), "{terminal}");
+    assert!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::CommandCompleted
+                && event.command.as_deref() == Some("<redacted untracked command>")
+        }),
+        "{:?}",
+        output.events
+    );
     assert!(!output.events.iter().any(|event| {
         event.kind == ShellEventKind::UserInputIntercepted
-            && event.input.as_deref() == Some("/help")
+            && event.input.as_deref() == Some("hello there")
     }));
 
     let _ = std::fs::remove_dir_all(&work_dir);
+}
+
+#[test]
+fn enhanced_shift_tab_toggles_shell_only_routing_without_restarting_bash() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    for enable_bracketed_paste in [false, true] {
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-shell-enhanced-toggle-{}-{}-{}",
+            enable_bracketed_paste,
+            std::process::id(),
+            unique_suffix()
+        ));
+        let home_dir = work_dir.join("home");
+        std::fs::create_dir_all(&home_dir).expect("home dir");
+        std::fs::write(home_dir.join(".bashrc"), "PS1='switch$ '\nKEEP_ME=alive\n")
+            .expect("bashrc");
+        let config = ShellHostConfig::new("enhanced-toggle", &work_dir)
+            .with_integration(ShellIntegration::Enhanced)
+            .with_env("HOME", home_dir.display().to_string());
+        let config = with_bracketed_paste_readline(config, enable_bracketed_paste);
+
+        let mut rendered = Vec::new();
+        let output = run_raw_relay_bash_with_actions(
+            &config,
+            vec![
+                RawRelayAction::wait(Duration::from_millis(100)),
+                RawRelayAction::write(b"\x1b[Z".to_vec()),
+                RawRelayAction::line("hello there"),
+                RawRelayAction::wait(Duration::from_millis(300)),
+                RawRelayAction::line("/help"),
+                RawRelayAction::wait(Duration::from_millis(300)),
+                RawRelayAction::line("printf '__KEEP__=%s\\n' \"$KEEP_ME\""),
+                // The toggle is valid only after the command boundary has
+                // repainted an empty prompt. Leave enough time for a loaded
+                // CI runner to observe and render that boundary.
+                RawRelayAction::wait(Duration::from_secs(1)),
+                RawRelayAction::write(b"\x1b[Z".to_vec()),
+                RawRelayAction::line("hello there"),
+                RawRelayAction::wait(Duration::from_millis(100)),
+                RawRelayAction::line("exit"),
+            ],
+            &mut rendered,
+        )
+        .expect("enhanced toggle relay");
+
+        let raw_terminal = String::from_utf8_lossy(&rendered);
+        let terminal = without_readline_mode_controls(&raw_terminal);
+        assert!(terminal.contains("\r\x1b[2K◌ switch$ "), "{terminal}");
+        assert!(terminal.contains("\r\x1b[2K◇ switch$ "), "{terminal}");
+        assert!(terminal.contains("__KEEP__=alive"), "{terminal}");
+        let intercepted = output
+            .events
+            .iter()
+            .filter(|event| {
+                event.kind == ShellEventKind::UserInputIntercepted
+                    && event.input.as_deref() == Some("hello there")
+            })
+            .count();
+        assert_eq!(intercepted, 1, "{:?}", output.events);
+        assert!(!output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && event.input.as_deref() == Some("/help")
+        }));
+
+        let _ = std::fs::remove_dir_all(&work_dir);
+    }
 }
 
 #[test]

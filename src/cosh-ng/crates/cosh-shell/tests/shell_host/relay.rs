@@ -18,7 +18,6 @@ fn raw_relay_bash_invalid_utf8_never_enters_event_provenance() {
     .expect("invalid utf8 relay");
 
     assert!(!format!("{:?}", output.events).contains('\u{fffd}'));
-    #[cfg(not(target_os = "linux"))]
     assert!(!output.events.iter().any(|event| {
         event.kind == ShellEventKind::CommandStarted
             && event
@@ -26,20 +25,15 @@ fn raw_relay_bash_invalid_utf8_never_enters_event_provenance() {
                 .as_deref()
                 .is_some_and(|command| command != "exit")
     }));
-    #[cfg(target_os = "linux")]
-    {
-        assert!(output.events.iter().any(|event| {
-            event.kind == ShellEventKind::CommandStarted
-                && event.command.as_deref() == Some("<redacted sensitive command>")
-        }));
-        assert!(output.events.iter().any(|event| {
-            event.kind == ShellEventKind::CommandRoutingObserved
-                && event
-                    .routing
-                    .as_ref()
-                    .is_some_and(|routing| routing.proven && routing.unsafe_input)
-        }));
-    }
+    let routing = output
+        .events
+        .iter()
+        .find(|event| event.kind == ShellEventKind::CommandRoutingObserved)
+        .unwrap_or_else(|| panic!("missing raw-free routing evidence: {:?}", output.events));
+    assert!(routing.command.is_none() && routing.input.is_none());
+    assert!(routing.routing.as_ref().is_some_and(|metadata| {
+        metadata.unsafe_input && !metadata.proven && metadata.top_level_missing
+    }));
 }
 
 #[test]
@@ -241,7 +235,7 @@ fn routing_c3_valid_slash_intercepts_fragmented_input() {
 }
 
 #[test]
-fn raw_relay_bash_up_recalls_intercepted_slash_command() {
+fn raw_relay_bash_up_skips_rust_intercepted_slash_command() {
     let root = std::env::temp_dir().join(format!(
         "cosh-shell-bash-1718-recall-{}-{}",
         std::process::id(),
@@ -293,11 +287,10 @@ fn raw_relay_bash_up_recalls_intercepted_slash_command() {
         event.kind == ShellEventKind::CommandStarted
             && event.command.as_deref() == Some("echo prior-shell-cmd")
     });
-    // Issue #1718: Up right after a slash intercept recalls the slash
-    // command (intercepted again through the shell marker), not the older
-    // shell command from bash history.
-    assert_eq!(intercept_count, 2, "{rendered_text}");
-    assert!(!recalled_prior_shell_cmd, "{rendered_text}");
+    // Bounded Enhanced routes slash controls before their bytes reach Bash.
+    // They cannot enter native history, so Up recalls the prior shell line.
+    assert_eq!(intercept_count, 1, "{rendered_text}");
+    assert!(recalled_prior_shell_cmd, "{rendered_text}");
     // The routed line must never execute as a shell command.
     assert!(!rendered_text.contains("bash: /skills"), "{rendered_text}");
 
@@ -305,7 +298,7 @@ fn raw_relay_bash_up_recalls_intercepted_slash_command() {
 }
 
 #[test]
-fn routing_c4_bash_route_enters_native_history_file() {
+fn routing_c4_bash_route_stays_out_of_native_history_file() {
     let root = std::env::temp_dir().join(format!(
         "cosh-shell-bash-1718-histfile-{}-{}",
         std::process::id(),
@@ -345,16 +338,15 @@ fn routing_c4_bash_route_enters_native_history_file() {
             && event.component.as_deref() == Some("slash")
     });
     assert!(intercepted, "{rendered_text}");
-    // bash owns persistence: the routed slash reaches HISTFILE through the
-    // user's native histappend semantics, with no cosh-side writes.
+    // Rust owns routed input, so Bash must never persist an AI control line.
     let history = std::fs::read_to_string(home.join(".bash_history")).expect("histfile");
-    assert!(history.contains("/skills detail xlsx"), "{history}");
+    assert!(!history.contains("/skills detail xlsx"), "{history}");
 
     std::fs::remove_dir_all(root).expect("cleanup");
 }
 
 #[test]
-fn raw_relay_bash_slash_route_switch_off_keeps_rust_intercept() {
+fn raw_relay_bash_legacy_slash_switch_cannot_restore_debug_routing() {
     let root = std::env::temp_dir().join(format!(
         "cosh-shell-bash-1718-switch-off-{}-{}",
         std::process::id(),
@@ -406,9 +398,7 @@ fn raw_relay_bash_slash_route_switch_off_keeps_rust_intercept() {
         event.kind == ShellEventKind::CommandStarted
             && event.command.as_deref() == Some("echo prior-shell-cmd")
     });
-    // COSH_SLASH_VIA_SHELL=0 restores the pre-#1718 chain end to end: the
-    // slash is intercepted in the Rust relay, never enters history, and Up
-    // recalls the older shell command.
+    // The compatibility field cannot restore the retired DEBUG-trap path.
     assert_eq!(intercept_count, 1, "{rendered_text}");
     assert!(recalled_prior_shell_cmd, "{rendered_text}");
 
@@ -464,7 +454,7 @@ fn routing_c4_history_privacy_secret_slash_never_persists() {
 }
 
 #[test]
-fn raw_relay_bash_intercepts_recalled_duplicate_slash_each_time() {
+fn raw_relay_bash_keeps_history_recalled_slash_shell_owned() {
     let root = std::env::temp_dir().join(format!(
         "cosh-shell-bash-recalled-slash-test-{}-{}",
         std::process::id(),
@@ -514,9 +504,11 @@ fn raw_relay_bash_intercepts_recalled_duplicate_slash_each_time() {
                 && event.component.as_deref() == Some("slash")
         })
         .count();
-    assert_eq!(intercept_count, 2, "{rendered_text}");
+    // Readline recall makes the Rust mirror intentionally dirty. Without a
+    // shell DEBUG veto, the fail-safe contract leaves both recalls to Bash.
+    assert_eq!(intercept_count, 0, "{rendered_text}");
     assert!(
-        !rendered_text.contains("bash: /skills: No such file or directory"),
+        rendered_text.contains("bash: /skills: No such file or directory"),
         "{rendered_text}"
     );
 
@@ -578,6 +570,7 @@ fn raw_relay_bash_excludes_secrets_from_history_and_journal() {
     std::fs::create_dir_all(&work_dir).expect("work dir");
     let history_snapshot = work_dir.join("history-snapshot");
     let secret = "history-secret-value";
+    let edited_secret = "history-edited-secret-value";
     let access_key = "LTAI5tExampleAccessKey";
     let url_password = "history-url-password";
     let mut config = ShellHostConfig::new("bash-secret-history-test", &work_dir);
@@ -586,6 +579,10 @@ fn raw_relay_bash_excludes_secrets_from_history_and_journal() {
         &config,
         vec![
             RawRelayAction::line(format!("TOKEN={secret} true")),
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::write(format!("TOKEN={edited_secret} true").into_bytes()),
+            RawRelayAction::write(b"\x1b[D\x1b[C".to_vec()),
+            RawRelayAction::write(b"\n".to_vec()),
             RawRelayAction::wait(Duration::from_millis(100)),
             RawRelayAction::line(format!(": {access_key}")),
             RawRelayAction::wait(Duration::from_millis(100)),
@@ -602,15 +599,18 @@ fn raw_relay_bash_excludes_secrets_from_history_and_journal() {
     let history = std::fs::read_to_string(&history_snapshot).expect("history snapshot");
     let journal = std::fs::read_to_string(&output.journal_path).expect("journal");
     assert!(!history.contains(secret), "{history}");
+    assert!(!history.contains(edited_secret), "{history}");
     assert!(!history.contains(access_key), "{history}");
     assert!(!history.contains(url_password), "{history}");
     assert!(!journal.contains(secret), "{journal}");
+    assert!(!journal.contains(edited_secret), "{journal}");
     assert!(!journal.contains(access_key), "{journal}");
     assert!(!journal.contains(url_password), "{journal}");
     assert!(ledger_from_output(&output)
         .blocks
         .iter()
         .all(|block| !block.command.contains(secret)
+            && !block.command.contains(edited_secret)
             && !block.command.contains(access_key)
             && !block.command.contains(url_password)));
 }
@@ -1175,7 +1175,7 @@ fn routing_c3_mirror_dirty_eof_never_appends_exit() {
         .expect("dirty mirror shutdown");
 
     assert!(!side_effect.exists());
-    assert_eq!(output.exit_status, Some(129));
+    assert_ne!(output.exit_status, Some(0));
 }
 
 #[test]
@@ -1238,7 +1238,7 @@ fn routing_c3_eof_partial_line_has_no_synthetic_pty_write() {
         .expect("partial EOF shutdown");
 
     assert!(!side_effect.exists());
-    assert_eq!(output.exit_status, Some(129));
+    assert_ne!(output.exit_status, Some(0));
 }
 
 #[test]

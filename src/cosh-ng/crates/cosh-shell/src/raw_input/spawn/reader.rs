@@ -36,6 +36,7 @@ pub(super) fn read_input_chunks<R>(
                     received_at: Instant::now(),
                     observed_mode,
                     ownership_changed_during_read,
+                    pending_shell_submits: 0,
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,

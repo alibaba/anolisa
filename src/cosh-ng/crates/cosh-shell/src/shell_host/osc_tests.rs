@@ -161,6 +161,7 @@ fn trusted_history_file_marker_is_private_and_observed() {
     let marker = b"\x1b]1337;COSH;{\"event\":\"history_file\",\"token\":\"test-marker-token\",\"session_id\":\"history-file\",\"history_file\":\"/home/test/.bash_history\"}\x07";
 
     parser.feed(marker).expect("feed history marker");
+    parser.feed(marker).expect("feed duplicate history marker");
 
     assert_eq!(
         *observed.lock().expect("history observer lock"),
@@ -206,85 +207,70 @@ fn bash_history_file_marker_is_native_only() {
 }
 
 #[test]
-fn bash_extdebug_does_not_leak_via_exported_bashopts() {
+fn bash_marker_never_enables_global_debug_tracing() {
     let script = bash_marker_script();
 
-    // extdebug lands in BASHOPTS; when BASHOPTS arrived exported from the
-    // environment it stays exported (readonly keeps -x), leaking extdebug to
-    // every child bash which then fails to load bashdb on hosts without it.
-    // The user rcfile runs before this hook setup, so its DEBUG trap is live
-    // in between: the export attribute must be dropped *before* extdebug is
-    // enabled, or a trap-spawned child inherits the leak.
-    //
-    // The prompt-hook toggle in _cosh_run_user_prompt_command sits earlier in
-    // the text but only executes at prompt time — after this hook setup — so
-    // anchor on the hook-setup enable, not the first textual `shopt -s
-    // extdebug`: the unexport must be immediately adjacent to it.
-    let unexport = script
-        .find("export -n BASHOPTS 2>/dev/null || true")
-        .expect("BASHOPTS export attribute must be dropped before enabling extdebug");
-    let hook_setup_shopt = script[unexport..]
-        .find("shopt -s extdebug 2>/dev/null || true")
-        .map(|offset| unexport + offset)
-        .expect("hook-setup extdebug enable should follow the unexport");
-    assert_eq!(
-        script[unexport..hook_setup_shopt].trim(),
-        "export -n BASHOPTS 2>/dev/null || true",
-        "export -n BASHOPTS must immediately precede the hook-setup extdebug enable"
-    );
-
-    // The unexport must land in the same hook-setup block, before the DEBUG
-    // trap is (re-)installed there, so no child spawned afterwards sees the
-    // leak. Anchor on the trap occurrence after the shopt line: earlier
-    // occurrences live inside recovery helper functions.
-    let debug_trap = script[hook_setup_shopt..]
-        .find("trap '_cosh_preexec_marker' DEBUG")
-        .map(|offset| hook_setup_shopt + offset)
-        .expect("hook-setup DEBUG trap installation should exist");
-    assert!(
-        unexport < debug_trap,
-        "export -n BASHOPTS must precede the DEBUG trap installation"
-    );
-
-    // BASHOPTS/extdebug are bash-only mechanisms; the zsh marker must not
-    // grow references to them.
+    assert!(!script.contains("shopt -s extdebug"));
+    assert!(!script.contains("set -T"));
+    assert!(!script.contains("set -E"));
+    assert!(!script.contains("trap '_cosh"));
+    assert!(!script.contains("_cosh_preexec_marker()"));
+    assert!(script.contains("_cosh_bounded_preexec_marker()"));
     assert!(!zsh_marker_script().contains("BASHOPTS"));
 }
 
 #[test]
-fn bash_preexec_marker_skips_completion_with_comp_type_guard() {
+fn bash_bounded_preexec_is_observation_only() {
     let script = bash_marker_script();
 
-    // Locate the start of _cosh_preexec_marker to ensure the guard is at the
-    // function entry, not somewhere later in the script.
     let fn_start = script
-        .find("_cosh_preexec_marker() {")
-        .expect("_cosh_preexec_marker should exist");
+        .find("_cosh_bounded_preexec_marker() {")
+        .expect("bounded preexec marker should exist");
     let fn_body = &script[fn_start..];
-    let guard = fn_body
-        .find("if [[ -n \"${COMP_TYPE:-}\" && ( -n \"${COMP_LINE:-}\" || -n \"${COMP_POINT:-}\" ) ]]; then")
-        .expect("completion guard with COMP_TYPE should be present");
-
-    // Guard must appear before the first heavy operation (trap snapshot).
-    let trap_snapshot = fn_body
-        .find("trap_snapshot_file")
-        .expect("trap snapshot should exist");
-    assert!(
-        guard < trap_snapshot,
-        "completion guard should precede heavy trap snapshot logic"
-    );
+    let fn_end = fn_body
+        .find("_cosh_bounded_prompt_marker() {")
+        .expect("bounded prompt marker should follow preexec");
+    let body = &fn_body[..fn_end];
+    assert!(body.contains("PS0 is observation-only"));
+    assert!(!body.contains("return 1"));
+    assert!(!body.contains("trap "));
 }
 
 #[test]
-fn prompt_ready_markers_follow_user_prompt_hooks() {
+fn bash_bounded_preexec_persists_only_the_history_cursor() {
+    let script = bash_marker_script();
+
+    assert!(script.contains(".preexec-history-no"));
+    assert!(script.contains("_cosh_last_preexec_history_no"));
+    assert!(script.contains("_cosh_remember_preexec_history_no \"$history_no\""));
+    assert!(!script.contains(".preexec-command"));
+}
+
+#[test]
+fn bash_bounded_prompt_marker_returns_success() {
+    let script = bash_marker_script();
+    let fn_start = script
+        .find("_cosh_bounded_prompt_marker() {")
+        .expect("bounded prompt marker should exist");
+    let fn_body = &script[fn_start..];
+    let fn_end = fn_body
+        .find("_cosh_precmd_marker() {")
+        .expect("precmd marker should follow bounded prompt marker");
+
+    assert!(fn_body[..fn_end].contains("  return 0\n"));
+}
+
+#[test]
+fn prompt_ready_boundaries_preserve_native_prompt_hooks() {
     let bash = bash_marker_script();
-    let prompt_command = bash
-        .find("_cosh_run_user_prompt_command \"$status\"")
-        .expect("bash user prompt command");
-    let bash_ready = bash
-        .find("_cosh_emit_marker \"prompt_ready\"")
-        .expect("bash prompt-ready marker");
-    assert!(prompt_command < bash_ready);
+    assert!(!bash.contains("_cosh_run_user_prompt_command"));
+    assert!(bash.contains("{\"e\":\"p\""));
+    assert!(!bash.contains("_cosh_emit_boundary_marker \"prompt_ready\""));
+    assert!(bash.contains("_cosh_bounded_prompt_marker \"$_COSH_PROMPT_STATUS\""));
+    assert!(!bash.contains("PS1='$("));
+    assert!(bash.contains("PROMPT_COMMAND+=(\"${_COSH_USER_PROMPT_COMMAND[@]}\")"));
+    assert!(bash.contains("BASH_VERSINFO[1] < 1"));
+    assert!(bash.contains("PROMPT_COMMAND=\"$_COSH_PROMPT_COMMAND_SCALAR\""));
 
     let zsh = zsh_marker_script();
     let precmd = zsh

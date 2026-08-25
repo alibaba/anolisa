@@ -94,6 +94,13 @@ pub(crate) enum RawInputEvent {
     },
     CandidateClearLine,
     UserIntercept(String, InterceptReason),
+    /// Delivers a queued control only after all preceding shell submissions
+    /// in the same input batch reach their primary prompts.
+    UserInterceptAtPrompt {
+        input: String,
+        reason: InterceptReason,
+        pending_submits: usize,
+    },
     /// A whitelisted soft-newline shortcut was observed on a passthrough
     /// path (candidate buffer inactive). Observe-only: the bytes were still
     /// relayed to the shell unchanged; downstream may surface a one-time

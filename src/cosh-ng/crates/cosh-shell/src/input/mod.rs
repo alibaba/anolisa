@@ -66,6 +66,7 @@ pub struct InputClassifier {
     slash_hint_commands: Vec<String>,
     ai_enabled: bool,
     shell_passthrough: bool,
+    bash_readline_history_privacy: bool,
     assistance_control: Option<AssistanceControl>,
 }
 
@@ -77,6 +78,11 @@ impl InputClassifier {
 
     pub(crate) fn with_shell_passthrough(mut self, shell_passthrough: bool) -> Self {
         self.shell_passthrough = shell_passthrough;
+        self
+    }
+
+    pub(crate) fn with_bash_readline_history_privacy(mut self, enabled: bool) -> Self {
+        self.bash_readline_history_privacy = enabled;
         self
     }
 
@@ -97,6 +103,7 @@ impl Default for InputClassifier {
                 .collect(),
             ai_enabled: true,
             shell_passthrough: false,
+            bash_readline_history_privacy: false,
             assistance_control: None,
         }
     }
@@ -109,6 +116,10 @@ impl InputClassifier {
 
     pub(crate) fn shell_owns_input(&self) -> bool {
         self.shell_passthrough
+    }
+
+    pub(crate) fn bash_readline_history_privacy_enabled(&self) -> bool {
+        self.bash_readline_history_privacy
     }
 
     pub(crate) fn assistance_control(&self) -> Option<&AssistanceControl> {

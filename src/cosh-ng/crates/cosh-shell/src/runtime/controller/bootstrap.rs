@@ -114,7 +114,7 @@ pub(crate) fn run_raw(
     else {
         eprintln!(
             "invalid shell integration; expected shell.integration or \
-             COSH_SHELL_INTEGRATION to be native, enhanced, or enhanced-v2"
+             COSH_SHELL_INTEGRATION to be native or enhanced"
         );
         return 2;
     };

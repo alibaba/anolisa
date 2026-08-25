@@ -74,7 +74,7 @@ fn raw_cli_zsh_native_pasted_mode_slash_does_not_reach_shell() {
         &[("COSH_SHELL_ISOLATED", "0")],
         vec![
             (
-                b"\x1b[200~/mode approval recommend\n\x1b[201~".to_vec(),
+                b"\x1b[200~/mode approval recommend\n\x1b[201~\n".to_vec(),
                 Duration::ZERO,
             ),
             (

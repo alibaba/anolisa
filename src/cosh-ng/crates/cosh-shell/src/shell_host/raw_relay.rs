@@ -72,6 +72,7 @@ pub(super) fn read_raw_until_exit<W: Write, F>(
     prompt: &str,
     recovery_request_file: &Path,
     handoff_request_file: &Path,
+    bounded_bash_handoff: bool,
     watchdog: Option<&RawActionWatchdog>,
     input_wait_status: &InputWaitStatus,
     hint_i18n: &crate::i18n::I18n,
@@ -147,6 +148,7 @@ where
             &mut pending_terminal_restore,
             recovery_request_file,
             handoff_request_file,
+            bounded_bash_handoff,
         )?;
         remember_pending_prompt_restore(&observer_action, &mut pending_prompt_restore);
         update_input_mode(
@@ -255,6 +257,7 @@ where
                             &mut pending_terminal_restore,
                             recovery_request_file,
                             handoff_request_file,
+                            bounded_bash_handoff,
                         )?;
                         remember_pending_prompt_restore(
                             &observer_action,
@@ -388,6 +391,7 @@ where
             &mut pending_terminal_restore,
             recovery_request_file,
             handoff_request_file,
+            bounded_bash_handoff,
         )?;
         remember_pending_prompt_restore(&observer_action, &mut pending_prompt_restore);
         update_input_mode(

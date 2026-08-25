@@ -185,6 +185,52 @@ fn emit_pager_policy_handoff_after<W: Write>(
 }
 
 #[test]
+fn raw_relay_bash_handoff_preserves_top_level_shell_state() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-bash-top-level-handoff-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let command = "declare -x COSH_HANDOFF_STATE=alive; set -- first second";
+    let config = ShellHostConfig::new("bash-top-level-handoff", &work_dir);
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(300)),
+            RawRelayAction::line(
+                "printf '__HANDOFF_STATE__=%s:%s:%s\\n' \"$COSH_HANDOFF_STATE\" \"$#\" \"$1\"",
+            ),
+            RawRelayAction::wait(Duration::from_millis(200)),
+            RawRelayAction::line("exit"),
+        ],
+        Vec::new(),
+        emit_pager_policy_handoff(command, ImplicitPagerPolicy::Inherit),
+    )
+    .expect("top-level Bash handoff");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(
+        terminal.contains("__HANDOFF_STATE__=alive:2:first"),
+        "{terminal}"
+    );
+    assert!(
+        output.events.iter().any(|event| {
+            event.kind == ShellEventKind::CommandCompleted
+                && event.command.as_deref() == Some(command)
+                && event.exit_code == Some(0)
+        }),
+        "{:?}",
+        output.events
+    );
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+}
+
+#[test]
 fn raw_relay_bash_agent_git_handoff_does_not_enter_the_implicit_pager() {
     if Command::new("bash").arg("--version").output().is_err() || !git_available() {
         return;
@@ -912,6 +958,89 @@ fn routing_c3_provider_no_regression_approved_handoff_does_not_leak() {
         !output_text.contains("COSH_SHELL_HANDOFF_BYPASS"),
         "{output_text}"
     );
+}
+
+#[test]
+fn raw_relay_bash_handoff_preserves_user_scratch_variables() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-handoff-vars-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("handoff-vars-test", &work_dir);
+    let setup = "d=before-d; r=before-r; e=before-e; s=before-s; \
+                 __prompt_status=before-status";
+    let command = "d=after-d; r=after-r; e=after-e; s=after-s; \
+                   __prompt_status=after-status; printf handoff-vars-updated";
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(500)),
+            RawRelayAction::line(setup),
+            RawRelayAction::wait(Duration::from_millis(700)),
+            RawRelayAction::line(
+                "printf '__HANDOFF_VARS__=%s|%s|%s|%s|%s\\n' \
+                 \"$d\" \"$r\" \"$e\" \"$s\" \"$__prompt_status\"",
+            ),
+            RawRelayAction::line("exit"),
+        ],
+        Vec::new(),
+        emit_pager_policy_handoff_after(setup, command, ImplicitPagerPolicy::Inherit),
+    )
+    .expect("raw relay bash handoff variables");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("handoff-vars-updated"), "{terminal}");
+    assert!(
+        terminal.contains("__HANDOFF_VARS__=after-d|after-r|after-e|after-s|after-status"),
+        "{terminal}"
+    );
+}
+
+#[test]
+fn raw_relay_bash_handoff_does_not_assign_readonly_user_variables() {
+    if Command::new("bash").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-handoff-readonly-vars-test-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let config = ShellHostConfig::new("handoff-readonly-vars-test", &work_dir)
+        .with_env("LANG", "C.UTF-8")
+        .with_env("LC_ALL", "C.UTF-8");
+    let setup = "readonly d=readonly-d r=readonly-r e=readonly-e s=readonly-s";
+    let command = "printf handoff-readonly-vars";
+    let output = run_raw_relay_bash_with_actions_output_control(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(500)),
+            RawRelayAction::line(setup),
+            RawRelayAction::wait(Duration::from_millis(700)),
+            RawRelayAction::line(
+                "printf '__HANDOFF_READONLY_VARS__=%s|%s|%s|%s\\n' \
+                 \"$d\" \"$r\" \"$e\" \"$s\"",
+            ),
+            RawRelayAction::line("exit"),
+        ],
+        Vec::new(),
+        emit_pager_policy_handoff_after(setup, command, ImplicitPagerPolicy::Inherit),
+    )
+    .expect("raw relay bash readonly handoff variables");
+
+    let terminal = String::from_utf8_lossy(&output.terminal_output);
+    assert!(terminal.contains("handoff-readonly-vars"), "{terminal}");
+    assert!(
+        terminal.contains("__HANDOFF_READONLY_VARS__=readonly-d|readonly-r|readonly-e|readonly-s"),
+        "{terminal}"
+    );
+    assert!(!terminal.contains("readonly variable"), "{terminal}");
 }
 
 #[test]

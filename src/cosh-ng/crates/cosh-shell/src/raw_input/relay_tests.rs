@@ -3162,10 +3162,10 @@ fn routing_c3_wrapped_multiline_paste_stays_shell_owned_across_chunks() {
     fs::remove_file(path).ok();
 }
 
-// A pasted slash command remains Shell-owned and never upgrades into the
-// draft card; native bracketed-paste semantics require Enter after the closer.
+// A pasted slash command remains pending until the explicit Enter after the
+// closer, then the Rust relay owns it without relying on a shell DEBUG trap.
 #[test]
-fn routing_c3_wrapped_slash_paste_stays_shell_owned() {
+fn routing_c3_wrapped_slash_paste_intercepts_on_explicit_enter() {
     let (path, mut master) = output_file("escape-slash-paste");
     let (tx, rx) = mpsc::channel();
     let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
@@ -3190,16 +3190,14 @@ fn routing_c3_wrapped_slash_paste_stays_shell_owned() {
         &main_prompt_gate,
     );
 
-    let mut paste = b"\x1b[200~".to_vec();
-    paste.extend_from_slice(b"/mode approval trust confirm\n");
-    paste.extend_from_slice(b"\x1b[201~");
-    relay_passthrough_input(&paste, &mut relay).expect("pasted slash command");
-    // The opener itself may split across reads (#1721): the held partial
-    // must join the classification input so the slash prefix stays visible.
-    relay_passthrough_input(b"\x1b[2", &mut relay).expect("split opener head");
-    let mut tail = b"00~".to_vec();
-    tail.extend_from_slice(b"/mode approval trust confirm\n\x1b[201~");
-    relay_passthrough_input(&tail, &mut relay).expect("split opener tail");
+    relay_passthrough_input(b"\x1b[200~/mode approval", &mut relay)
+        .expect("paste opener and partial payload");
+    relay_passthrough_input(b" trust confirm\n\x1b[201~", &mut relay)
+        .expect("paste payload and closer");
+    assert!(rx
+        .try_iter()
+        .all(|event| !matches!(event, RawInputEvent::UserIntercept(..))));
+    relay_passthrough_input(b"\n", &mut relay).expect("submit pasted slash");
     let _ = relay;
     master.sync_all().expect("sync test output");
 
@@ -3213,8 +3211,8 @@ fn routing_c3_wrapped_slash_paste_stays_shell_owned() {
                     if input == "/mode approval trust confirm"
             ))
             .count(),
-        0,
-        "ordinary paste must not enter slash ownership: {events:?}"
+        1,
+        "submitted slash paste must stay Rust-owned: {events:?}"
     );
     assert!(
         !events
@@ -3222,6 +3220,7 @@ fn routing_c3_wrapped_slash_paste_stays_shell_owned() {
             .any(|event| matches!(event, RawInputEvent::PromptDraftOpen { .. })),
         "slash paste must never open the draft card: {events:?}"
     );
+    assert_eq!(fs::read(&path).expect("read test output"), b"");
     fs::remove_file(path).ok();
 }
 
@@ -3833,21 +3832,148 @@ fn native_shell_submission_lowers_gate_before_follow_up_slash() {
         slash_route_enabled: true,
     };
 
-    relay_passthrough_input(b"python\n", &mut relay).expect("submit shell command");
+    relay_passthrough_input(b"python\n/mode approval\n", &mut relay)
+        .expect("submit shell command and queued slash");
     assert!(
         !main_prompt_gate.is_at_prompt(),
         "plain submission must lower the gate synchronously"
     );
-    relay_passthrough_input(b"/mode approval\n", &mut relay).expect("slash after submit");
     master.sync_all().expect("sync test output");
 
     let events = rx.try_iter().collect::<Vec<_>>();
     assert!(events.iter().any(|event| matches!(
         event,
-        RawInputEvent::UserIntercept(input, InterceptReason::Slash) if input == "/mode approval"
+        RawInputEvent::UserInterceptAtPrompt {
+            input,
+            reason: InterceptReason::Slash,
+            pending_submits: 1,
+        } if input == "/mode approval"
     )));
     // Only the shell command reaches the PTY; the slash stays Rust-side.
     assert_eq!(fs::read(&path).expect("read test output"), b"python\n");
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn chunked_native_submission_defers_follow_up_control() {
+    let (path, master) = output_file("chunked-native-submit-before-control");
+    let (input_tx, input_rx) = mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let relay = super::super::spawn_raw_input_relay(
+        ChannelReader {
+            receiver: input_rx,
+            pending: Vec::new(),
+        },
+        master.try_clone().expect("clone output file"),
+        event_tx,
+        InputClassifier::default(),
+        input_mode,
+        UserPtyInputGeneration::default(),
+        super::super::MainPromptGate::default(),
+        false,
+    );
+
+    input_tx
+        .send(b"echo ok".to_vec())
+        .expect("send partial line");
+    let mut events = Vec::new();
+    loop {
+        let event = event_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("partial line relay event");
+        let relayed = matches!(
+            event,
+            RawInputEvent::PtyUserWrite {
+                line_submits: 0,
+                ..
+            }
+        );
+        events.push(event);
+        if relayed {
+            break;
+        }
+    }
+    input_tx
+        .send(b"\n/mode routing shell-only\n".to_vec())
+        .expect("send submit and control");
+    drop(input_tx);
+    relay.join().expect("relay thread").expect("relay result");
+    events.extend(event_rx.try_iter());
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::UserInterceptAtPrompt {
+                input,
+                reason: InterceptReason::Slash,
+                pending_submits: 1,
+            } if input == "/mode routing shell-only"
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::UserIntercept(input, InterceptReason::Slash)
+                if input == "/mode routing shell-only"
+        )),
+        "{events:?}"
+    );
+    master.sync_all().expect("sync test output");
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"echo ok\nexit\n"
+    );
+    fs::remove_file(path).ok();
+}
+
+#[test]
+fn chunked_action_submission_defers_follow_up_control() {
+    let (path, master) = output_file("chunked-action-submit-before-control");
+    let (event_tx, event_rx) = mpsc::channel();
+    let input_mode = Arc::new(Mutex::new(RawInputMode::Passthrough));
+    let relay = super::super::spawn_raw_action_relay(
+        vec![
+            RawRelayAction::write(b"echo ok"),
+            RawRelayAction::write(b"\n/mode routing shell-only\n"),
+        ],
+        master.try_clone().expect("clone output file"),
+        0,
+        event_tx,
+        InputClassifier::default(),
+        input_mode,
+        UserPtyInputGeneration::default(),
+        super::super::MainPromptGate::default(),
+        false,
+    );
+
+    relay.join().expect("relay thread").expect("relay result");
+    let events = event_rx.try_iter().collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::UserInterceptAtPrompt {
+                input,
+                reason: InterceptReason::Slash,
+                pending_submits: 1,
+            } if input == "/mode routing shell-only"
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            RawInputEvent::UserIntercept(input, InterceptReason::Slash)
+                if input == "/mode routing shell-only"
+        )),
+        "{events:?}"
+    );
+    master.sync_all().expect("sync test output");
+    assert_eq!(
+        fs::read(&path).expect("read test output"),
+        b"echo ok\nexit\n"
+    );
     fs::remove_file(path).ok();
 }
 

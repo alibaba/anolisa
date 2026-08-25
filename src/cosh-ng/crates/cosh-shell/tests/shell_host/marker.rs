@@ -89,7 +89,7 @@ fn shell_host_runs_bash_pty_and_emits_command_events() {
         .find(|block| block.command.contains("/path/that/does/not/exist"))
         .expect("failed command block");
     assert_ne!(failed.exit_code, 0);
-    assert!(failed.shell_environment_generation.is_some());
+    assert!(failed.shell_environment_generation.is_none());
     let output_ref = failed
         .output
         .terminal_output_ref
@@ -274,7 +274,7 @@ fn shell_host_zsh_valid_cue_matrix_wins_over_natural_language() {
 }
 
 #[test]
-fn shell_host_bash_missing_natural_language_closes_started_command() {
+fn shell_host_bash_missing_natural_language_routes_without_command_block() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
@@ -302,15 +302,8 @@ fn shell_host_bash_missing_natural_language_closes_started_command() {
         })
         .unwrap_or_else(|| panic!("natural-language intercept: {:?}", output.events));
 
-    assert!(intercept.command_id.is_some(), "{:?}", output.events);
-    assert!(
-        intercept
-            .routing
-            .as_ref()
-            .is_some_and(|routing| routing.top_level_missing && routing.proven),
-        "{:?}",
-        output.events
-    );
+    assert!(intercept.command_id.is_none(), "{:?}", output.events);
+    assert!(intercept.routing.is_none(), "{:?}", output.events);
     let ledger = build_command_blocks(&output.events);
     assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
     assert!(!ledger
@@ -608,10 +601,9 @@ fn shell_host_sensitive_natural_language_routes_to_agent_with_flag() {
             .unwrap_or_else(|| panic!("{shell}: sensitive NL intercept: {:?}", output.events));
         assert_eq!(intercept.input.as_deref(), Some("<redacted>"), "{shell}");
         assert!(
-            intercept
-                .routing
-                .as_ref()
-                .is_some_and(|routing| routing.sensitive && routing.top_level_missing),
+            intercept.routing.as_ref().is_some_and(
+                |routing| routing.sensitive && routing.top_level_missing == (shell == "zsh")
+            ),
             "{shell}: {intercept:?}"
         );
         assert!(
@@ -725,7 +717,7 @@ fn shell_host_linux_bash_natural_language_routes_directly_to_agent() {
         assert!(output.events.iter().any(|event| {
             event.kind == ShellEventKind::UserInputIntercepted
                 && event.input.as_deref() == Some(input)
-                && event.command_id.is_some()
+                && event.command_id.is_none()
                 && event.component.as_deref() == Some("natural_language")
         }));
         let ledger = build_command_blocks(&output.events);
@@ -981,7 +973,7 @@ fn shell_host_zsh_preserves_user_missing_handler_contract() {
 }
 
 #[test]
-fn shell_host_owns_prompt_boundary_before_user_prompt_command() {
+fn shell_host_preserves_native_prompt_command_output() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
@@ -1020,17 +1012,17 @@ fn shell_host_owns_prompt_boundary_before_user_prompt_command() {
         .find(|block| block.command.contains("/path/that/does/not/exist"))
         .expect("failed command block");
     assert_ne!(failed.exit_code, 0);
-    assert_eq!(failed.shell_environment_generation, Some(2));
+    assert_eq!(failed.shell_environment_generation, None);
     let output_ref = failed
         .output
         .terminal_output_ref
         .as_deref()
         .expect("terminal output ref");
     let output_ref_text = std::fs::read_to_string(output_ref).expect("output ref text");
-    assert!(
-        !output_ref_text.contains("__cosh_prompt_noise__"),
-        "{output_ref_text}"
-    );
+    // Cosh no longer wraps PROMPT_COMMAND to manufacture an earlier boundary.
+    // Bash-native prompt output therefore remains part of the preceding
+    // command's observable terminal stream.
+    assert!(output_ref_text.contains("__cosh_prompt_noise__"));
 }
 
 #[test]
@@ -1061,9 +1053,10 @@ fn shell_host_bash_tracks_native_history_file_changes() {
     .expect("bashrc");
 
     let install_marker_sink = format!(
-        "_COSH_LAST_NATIVE_HISTORY_FILE=; \
-         _cosh_emit_native_history_file_marker() {{ \
-         printf '%s\\n' \"$1\" >> {}; \
+        "_cosh_native_history_file_fragment() {{ \
+         local history_file; \
+         history_file=$(_cosh_native_history_file_path) || return 0; \
+         printf '%s\\n' \"$history_file\" >> {}; \
          }}",
         shell_arg(&observed_history_files)
     );
@@ -1086,11 +1079,12 @@ fn shell_host_bash_tracks_native_history_file_changes() {
     )
     .expect("scripted bash pty");
 
-    let observed = std::fs::read_to_string(&observed_history_files)
+    let mut observed = std::fs::read_to_string(&observed_history_files)
         .expect("observed history files")
         .lines()
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    observed.dedup();
     let expected = [
         initial_history,
         alternate_history,
@@ -1144,9 +1138,10 @@ fn shell_host_bash_tracks_history_file_changed_by_prompt_command() {
     .expect("bashrc");
 
     let install_marker_sink = format!(
-        "_COSH_LAST_NATIVE_HISTORY_FILE=; \
-         _cosh_emit_native_history_file_marker() {{ \
-         printf '%s\\n' \"$1\" >> {}; \
+        "_cosh_native_history_file_fragment() {{ \
+         local history_file; \
+         history_file=$(_cosh_native_history_file_path) || return 0; \
+         printf '%s\\n' \"$history_file\" >> {}; \
          }}",
         shell_arg(&observed_history_files)
     );
@@ -1161,11 +1156,12 @@ fn shell_host_bash_tracks_history_file_changed_by_prompt_command() {
     )
     .expect("scripted bash pty");
 
-    let observed = std::fs::read_to_string(&observed_history_files)
+    let mut observed = std::fs::read_to_string(&observed_history_files)
         .expect("observed history files")
         .lines()
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    observed.dedup();
     assert_eq!(
         observed,
         vec![
@@ -1285,7 +1281,7 @@ fn shell_host_rejects_forged_osc_markers_without_session_token() {
 }
 
 #[test]
-fn shell_host_pty_statusless_precmd_marker_fails_inflight_command() {
+fn shell_host_pty_cannot_read_private_marker_token() {
     // Issue #2413, live-PTY verification: the unit tests feed the parser
     // directly, but the issue explicitly asks for live-PTY evidence. A real
     // scripted bash session prints a syntactically valid, token-carrying
@@ -1331,9 +1327,8 @@ fn shell_host_pty_statusless_precmd_marker_fails_inflight_command() {
     )
     .expect("scripted bash pty");
 
-    // Discriminating assertion: the status-less precmd must finish its
-    // in-flight printf as Failed with the -1 sentinel, never Completed/0
-    // (the pre-fix behavior from issue #2413).
+    // The public token variable is absent, so the forged marker is rejected
+    // and the printf completes through the genuine bounded marker chain.
     let drifted = output
         .events
         .iter()
@@ -1347,8 +1342,8 @@ fn shell_host_pty_statusless_precmd_marker_fails_inflight_command() {
                 .is_some_and(|command| command.contains("driftless-probe"))
         })
         .expect("drifted injection command finish event");
-    assert_eq!(drifted.kind, ShellEventKind::CommandFailed);
-    assert_eq!(drifted.exit_code, Some(-1));
+    assert_eq!(drifted.kind, ShellEventKind::CommandCompleted);
+    assert_eq!(drifted.exit_code, Some(0));
 
     // Control: the genuine marker chain keeps reporting real completions
     // after the drifted sequence.
@@ -1368,9 +1363,7 @@ fn shell_host_pty_statusless_precmd_marker_fails_inflight_command() {
     assert_eq!(real.kind, ShellEventKind::CommandCompleted);
     assert_eq!(real.exit_code, Some(0));
 
-    // The ledger agrees: the drifted command lands as a Failed block with
-    // the -1 sentinel, matching the journal-replay contract (#2105/PR
-    // #2412).
+    // The ledger agrees that no injected status reached the parser.
     let ledger = build_command_blocks(&output.events);
     assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
     let drifted_block = ledger
@@ -1378,10 +1371,10 @@ fn shell_host_pty_statusless_precmd_marker_fails_inflight_command() {
         .iter()
         .find(|block| block.command.contains("driftless-probe"))
         .expect("drifted command block");
-    assert_eq!(drifted_block.exit_code, -1);
+    assert_eq!(drifted_block.exit_code, 0);
     assert_eq!(
         drifted_block.status,
-        cosh_shell::types::CommandStatus::Failed
+        cosh_shell::types::CommandStatus::Completed
     );
 
     let _ = std::fs::remove_dir_all(&work_dir);
@@ -1649,11 +1642,11 @@ fn shell_host_bash_captured_debug_trap_keeps_path_generation_trusted() {
         .iter()
         .find(|block| block.command == "echo after-captured-trap")
         .expect("command after captured DEBUG trap");
-    assert!(block.shell_environment_generation.is_some());
+    assert_eq!(block.shell_environment_generation, None);
 }
 
 #[test]
-fn shell_host_bash_unexports_bashopts_while_keeping_extdebug_local() {
+fn shell_host_bash_preserves_bashopts_without_enabling_extdebug() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
@@ -1705,12 +1698,11 @@ fn shell_host_bash_unexports_bashopts_while_keeping_extdebug_local() {
     .expect("scripted bash pty");
 
     let terminal = String::from_utf8_lossy(&output.terminal_output);
-    // The marker keeps extdebug enabled in the interactive shell (DEBUG trap
-    // return-1 suppression depends on it) and keeps imported options alive.
-    assert!(terminal.contains("host-extdebug-rc=0"), "{terminal}");
+    // Enhanced preserves both the user's imported option and its export
+    // attribute while leaving extdebug at the user's actual setting.
+    assert!(terminal.contains("host-extdebug-rc=1"), "{terminal}");
     assert!(terminal.contains("host-cdspell-rc=0"), "{terminal}");
-    // The export attribute must be gone so shopt changes stop propagating.
-    assert!(terminal.contains("bashopts-export-rc=1"), "{terminal}");
+    assert!(terminal.contains("bashopts-export-rc=0"), "{terminal}");
     // A child bash spawned from the session must not start in extdebug mode
     // and must not trip the bashdb debugger-profile load.
     assert!(terminal.contains("child-extdebug-rc=1"), "{terminal}");
@@ -1852,7 +1844,7 @@ fn shell_host_bash_shebang_less_prompt_hook_avoids_debugger_reexec() {
     assert!(!terminal.contains("cannot start debugger"), "{terminal}");
     // extdebug must be back on for the next real command: the DEBUG trap
     // return-1 suppression depends on it.
-    assert!(terminal.contains("post-hook-extdebug-rc=0"), "{terminal}");
+    assert!(terminal.contains("post-hook-extdebug-rc=1"), "{terminal}");
 }
 
 #[test]
@@ -1860,7 +1852,7 @@ fn shell_host_bash_shebang_less_prompt_hook_array_form_avoids_debugger_reexec() 
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
-    // Array PROMPT_COMMAND only exists since bash 5.1.
+    // Bash executes every PROMPT_COMMAND array element only since 5.1.
     let version_probe = Command::new("bash")
         .args(["-c", "echo ${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}"])
         .output();
@@ -1922,7 +1914,7 @@ fn shell_host_bash_shebang_less_prompt_hook_array_form_avoids_debugger_reexec() 
     assert!(hook_ran.contains("array-hook-ran"), "{terminal}");
     assert!(!terminal.contains("bashdb"), "{terminal}");
     assert!(!terminal.contains("cannot start debugger"), "{terminal}");
-    assert!(terminal.contains("post-hook-extdebug-rc=0"), "{terminal}");
+    assert!(terminal.contains("post-hook-extdebug-rc=1"), "{terminal}");
 }
 
 fn bash_extdebug_clears_trace_options() -> bool {
@@ -1943,7 +1935,7 @@ fn bash_extdebug_clears_trace_options() -> bool {
 }
 
 #[test]
-fn shell_host_bash_prompt_hook_preserves_trace_option_inheritance() {
+fn shell_host_bash_prompt_hook_observes_only_bounded_capture() {
     if !bash_extdebug_clears_trace_options() {
         return;
     }
@@ -1982,30 +1974,41 @@ fn shell_host_bash_prompt_hook_preserves_trace_option_inheritance() {
 
     let terminal = String::from_utf8_lossy(&output.terminal_output);
     let trace_log = std::fs::read_to_string(&trace_log).unwrap_or_default();
-    let has_hook_trace = |event: &str| {
-        let prefix = format!("{event}\tfalse\t");
-        trace_log.lines().any(|line| {
-            let Some(functions) = line.strip_prefix(&prefix) else {
-                return false;
-            };
-            functions
-                .split_whitespace()
-                .any(|function| function == "_user_hook")
-        })
-    };
     assert!(
-        has_hook_trace("ERR"),
-        "ERR trap did not reach _user_hook false command\n{terminal}\n{trace_log}"
+        trace_log.contains("ERR\tfalse\t"),
+        "{terminal}\n{trace_log}"
     );
     assert!(
-        has_hook_trace("DEBUG"),
-        "DEBUG trap did not reach _user_hook false command\n{terminal}\n{trace_log}"
+        trace_log.contains("DEBUG\tfalse\t"),
+        "{terminal}\n{trace_log}"
     );
+    for line in trace_log
+        .lines()
+        .filter(|line| line.contains("_cosh") || line.contains("_COSH"))
+    {
+        let mut fields = line.splitn(3, '\t');
+        assert_eq!(fields.next(), Some("DEBUG"), "{line}\n{trace_log}");
+        let command = fields.next().unwrap_or_default();
+        let function_stack = fields.next().unwrap_or_default();
+        assert!(
+            command.starts_with("_COSH_PROMPT_STATUS=")
+                || command.starts_with("_COSH_PROMPT_DEBUG_TRAP=")
+                || command.starts_with("_COSH_PROMPT_RETURN_TRAP=")
+                || command.starts_with("_COSH_PROMPT_ERR_TRAP=")
+                || (command.starts_with("trap -p DEBUG >")
+                    && command.contains("COSH_RECOVERY_REQUEST_FILE")),
+            "unexpected Cosh internals in user trap: {line}\n{trace_log}"
+        );
+        assert!(
+            function_stack.is_empty(),
+            "user trap entered a Cosh function: {line}\n{trace_log}"
+        );
+    }
     assert!(terminal.contains("trace-options-preserved"), "{terminal}");
 }
 
 #[test]
-fn shell_host_bash_prompt_hook_survives_debug_trap_and_self_heals() {
+fn shell_host_bash_prompt_hook_does_not_enable_extdebug() {
     if !bash_extdebug_clears_trace_options() {
         return;
     }
@@ -2050,7 +2053,7 @@ fn shell_host_bash_prompt_hook_survives_debug_trap_and_self_heals() {
 
     let terminal = String::from_utf8_lossy(&output.terminal_output);
     assert!(terminal.contains("session-usable"), "{terminal}");
-    assert!(terminal.contains("post-heal-extdebug-rc=0"), "{terminal}");
+    assert!(terminal.contains("post-heal-extdebug-rc=1"), "{terminal}");
 }
 
 #[test]
@@ -2259,12 +2262,11 @@ fn shell_host_bash_stale_history_guard_still_intercepts_deduped_repeats() {
     assert_eq!(intercepts, 2, "{:?}", output.events);
 }
 
-// Issue #1919: a natural-language prompt whose IFS first token contains a
-// slash never reaches command_not_found_handle (bash executes the token as
-// a path), so the DEBUG trap reclassifies it with the missing-path context
-// and intercepts before execution.
+// Bounded Enhanced does not cancel slash-bearing commands: Bash never calls
+// command_not_found_handle for them, and PS0 is observation-only. Preserve
+// Shell ownership instead of reintroducing a global DEBUG trap.
 #[test]
-fn shell_host_bash_missing_path_natural_language_intercepts() {
+fn shell_host_bash_missing_path_natural_language_fails_in_shell() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
@@ -2291,34 +2293,17 @@ fn shell_host_bash_missing_path_natural_language_intercepts() {
     let output =
         run_scripted_bash(&config, &[ScriptedInput::user_line(prompt)]).expect("scripted bash pty");
 
-    let intercept = output
-        .events
-        .iter()
-        .find(|event| {
-            event.kind == ShellEventKind::UserInputIntercepted
-                && event.input.as_deref() == Some(prompt)
-                && event.component.as_deref() == Some("natural_language")
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "missing-path natural-language intercept: {:?}",
-                output.events
-            )
-        });
-    // Pre-execution intercepts are shaped like slash/agent-marker intercepts
-    // (no top_level_missing correlation: the command never started, so there
-    // is no in-flight attempt to correlate with).
-    assert!(intercept.routing.is_none(), "{:?}", output.events);
-    // Interception must prevent execution: no command block and no native
-    // bash path error may appear for the prompt (I4).
+    assert!(!output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted && event.input.as_deref() == Some(prompt)
+    }));
     let ledger = build_command_blocks(&output.events);
     assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
-    assert!(!ledger.blocks.iter().any(|block| block.command == prompt));
-    let terminal = String::from_utf8_lossy(&output.terminal_output);
-    assert!(
-        !terminal.contains("No such file or directory"),
-        "{terminal}"
-    );
+    let block = ledger
+        .blocks
+        .iter()
+        .find(|block| block.command == prompt)
+        .expect("missing-path Shell block");
+    assert_eq!(block.exit_code, 127);
 }
 
 /// #2138 review round 2: the missing-path route (#1919) must not keep its
@@ -2326,7 +2311,7 @@ fn shell_host_bash_missing_path_natural_language_intercepts() {
 /// like the CNF route, with the sensitive routing flag and the journal
 /// whole-field redaction (raw key never reaches durable evidence).
 #[test]
-fn shell_host_bash_sensitive_missing_path_natural_language_intercepts() {
+fn shell_host_bash_sensitive_missing_path_stays_redacted() {
     if Command::new("bash").arg("--version").output().is_err() {
         return;
     }
@@ -2350,35 +2335,14 @@ fn shell_host_bash_sensitive_missing_path_natural_language_intercepts() {
     let output =
         run_scripted_bash(&config, &[ScriptedInput::user_line(prompt)]).expect("scripted bash pty");
 
-    let intercept = output
-        .events
+    let ledger = build_command_blocks(&output.events);
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+    let block = ledger
+        .blocks
         .iter()
-        .find(|event| {
-            event.kind == ShellEventKind::UserInputIntercepted
-                && event.component.as_deref() == Some("natural_language")
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "sensitive missing-path natural-language intercept: {:?}",
-                output.events
-            )
-        });
-    // The harness returns journal-redacted events: the sensitive flag must
-    // trigger the whole-field redaction and no correlation exists (the
-    // command never started, so top_level_missing stays false).
-    assert_eq!(intercept.input.as_deref(), Some("<redacted>"));
-    assert!(
-        intercept
-            .routing
-            .as_ref()
-            .is_some_and(|routing| routing.sensitive && !routing.top_level_missing),
-        "{intercept:?}"
-    );
-    let terminal = String::from_utf8_lossy(&output.terminal_output);
-    assert!(
-        !terminal.contains("No such file or directory"),
-        "{terminal}"
-    );
+        .find(|block| block.command == "<redacted sensitive command>")
+        .expect("redacted missing-path block");
+    assert_eq!(block.exit_code, 127);
     assert!(
         !format!("{:?}", output.events).contains("sk-fbaa6"),
         "{:?}",
@@ -2541,7 +2505,7 @@ fn routing_c1_zsh_ascii_question_unmatched_routes_to_agent() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn routing_c1_missing_path_han_tier_a_routes_to_agent() {
+fn routing_c1_missing_path_han_tier_a_stays_shell_owned() {
     if !bash_supports_command_not_found_handler() {
         return;
     }
@@ -2555,11 +2519,16 @@ fn routing_c1_missing_path_han_tier_a_routes_to_agent() {
     config.native_mode = false;
     let output =
         run_scripted_bash(&config, &[ScriptedInput::user_line(input)]).expect("scripted bash");
-    assert!(output.events.iter().any(|event| {
-        event.kind == ShellEventKind::UserInputIntercepted
-            && event.input.as_deref() == Some(input)
-            && event.component.as_deref() == Some("natural_language")
+    assert!(!output.events.iter().any(|event| {
+        event.kind == ShellEventKind::UserInputIntercepted && event.input.as_deref() == Some(input)
     }));
+    let ledger = build_command_blocks(&output.events);
+    let block = ledger
+        .blocks
+        .iter()
+        .find(|block| block.command == input)
+        .expect("missing-path Shell block");
+    assert_eq!(block.exit_code, 127);
 }
 
 #[cfg(target_os = "linux")]

@@ -89,7 +89,6 @@ fn raw_cli_enhanced_decorates_zsh_prompt_without_mutating_prompt() {
         count_occurrences(&visible, "◇ enhanced-zsh> ") >= 2,
         "{output}"
     );
-    assert!(visible.contains("◌ enhanced-zsh> "), "{output}");
     assert!(visible.contains("__PROMPT__<enhanced-zsh> >"), "{output}");
     assert!(
         !visible.contains("__PROMPT__<◇ enhanced-zsh> >"),

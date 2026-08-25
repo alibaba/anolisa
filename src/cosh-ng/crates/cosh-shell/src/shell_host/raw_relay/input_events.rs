@@ -236,6 +236,11 @@ pub(super) fn drain_raw_input_events<W: Write>(
                 let session_id = parser.session_id.clone();
                 parser.push_intercept_event(&session_id, input, None, reason.as_str())
             }
+            RawInputEvent::UserInterceptAtPrompt {
+                input,
+                reason,
+                pending_submits,
+            } => parser.push_intercept_event_at_prompt(input, reason.as_str(), pending_submits),
             RawInputEvent::CaptureSubmitted {
                 kind,
                 target_id,

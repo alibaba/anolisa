@@ -41,8 +41,8 @@ impl TempReplayHome {
         }
     }
 
-    /// Seeds bash history so `Up` recalls a slash command through the
-    /// DEBUG-trap intercept path instead of the raw candidate relay.
+    /// Seeds bash history so `Up` exercises a Readline-owned command line
+    /// that the raw candidate relay cannot reconstruct safely.
     fn seed_bash_history(&self, line: &str) {
         fs::write(
             self.root.join(".bashrc"),
@@ -210,9 +210,10 @@ fn raw_cli_bash_bracketed_paste_empty_enter_within_delay_window_is_not_swallowed
 #[test]
 fn raw_cli_bash_recalled_slash_with_same_chunk_empty_enter_is_not_swallowed() {
     let home = TempReplayHome::new("paste-recall", "set enable-bracketed-paste on\n");
-    // The recalled line reaches bash itself, so the intercept travels the
-    // DEBUG-trap marker path (an `intercept` display cut, not a candidate
-    // relay intercept); the trailing empty Enter shares the same PTY write.
+    // Enhanced v2 deliberately leaves history-recalled lines Shell-owned:
+    // without a global DEBUG trap the raw relay cannot reconstruct Readline's
+    // edited buffer safely. The trailing empty Enter shares the same PTY
+    // write and must still reach Bash after the native command error.
     home.seed_bash_history("/skills disable xlsx");
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
@@ -236,10 +237,14 @@ fn raw_cli_bash_recalled_slash_with_same_chunk_empty_enter_is_not_swallowed() {
     );
 
     assert!(
-        !output.contains("bash: /skills"),
-        "recalled slash leaked to bash\n{output:?}"
+        output.contains("bash: /skills: No such file or directory"),
+        "history-recalled slash did not remain Shell-owned\n{output:?}"
     );
-    let between = between_panel_and_sentinel(&output, "replay-sentinel-recall");
+    let between = between_marker_and_sentinel(
+        &output,
+        "bash: /skills: No such file or directory",
+        "replay-sentinel-recall",
+    );
     assert!(
         count_occurrences(between, "\u{1b}[?2004l") >= 1,
         "bracketed paste disable of the empty Enter was swallowed\n{output:?}"
@@ -248,7 +253,13 @@ fn raw_cli_bash_recalled_slash_with_same_chunk_empty_enter_is_not_swallowed() {
         between.contains("\r\r\n") || between.contains("\r\n"),
         "empty Enter CRLF after the recalled slash was swallowed\n{output:?}"
     );
-    assert_no_prompt_run_on(&output, "replay-sentinel-recall");
+    let normalized = strip_ansi_escape(between);
+    for line in normalized.split(['\r', '\n']) {
+        assert!(
+            count_occurrences(line, PROMPT.trim_end()) <= 1,
+            "two prompts written on one line: {line:?}\n{output:?}"
+        );
+    }
     assert!(output.contains("replay-sentinel-recall"), "{output}");
 }
 
@@ -436,10 +447,8 @@ fn raw_cli_bash_slow_prompt_command_does_not_write_off_queued_enter() {
 #[test]
 fn raw_cli_bash_replay_dedup_recovers_after_foreground_program_consumed_enter() {
     let home = TempReplayHome::new("paste-read", "set enable-bracketed-paste on\n");
-    // The recalled slash reaches bash and is killed by the DEBUG trap, so
-    // bash repaints a real prompt afterwards: replay dedup must arm to strip
-    // it, making a stuck submission ledger visible as a duplicate prompt.
-    home.seed_bash_history("/skills disable xlsx");
+    // A Rust-owned slash panel after a foreground program verifies that the
+    // orphaned submission ledger was reconciled before prompt replay arms.
     let output = run_raw_cli_with_args_env_and_delayed_input(
         "fake",
         &[],
@@ -453,11 +462,12 @@ fn raw_cli_bash_replay_dedup_recovers_after_foreground_program_consumed_enter() 
             // submission ledger would otherwise stay off by one forever.
             (b"read value\r".to_vec(), Duration::from_millis(600)),
             (b"hello\r".to_vec(), Duration::from_millis(400)),
-            // Idle at the prompt long enough for the write-off, then recall
-            // the slash from history (twice up: past this session's `read
-            // value` entry): replay dedup must have recovered.
-            (b"\x1b[A\x1b[A".to_vec(), Duration::from_millis(800)),
-            (b"\r".to_vec(), Duration::from_millis(300)),
+            // Idle at the prompt long enough for the write-off, then open a
+            // Rust-owned slash panel: replay dedup must have recovered.
+            (
+                b"/skills disable xlsx\r".to_vec(),
+                Duration::from_millis(800),
+            ),
             (
                 b"echo replay-sentinel-read\n".to_vec(),
                 Duration::from_millis(1200),
@@ -466,17 +476,10 @@ fn raw_cli_bash_replay_dedup_recovers_after_foreground_program_consumed_enter() 
         ],
     );
 
-    // With a stuck ledger the panel's prompt restore cannot arm, so bash's
-    // late post-intercept repaint (prompt plus the recalled line text) is
-    // painted a second time after the synthesized replay.
+    // With a stuck ledger the panel's prompt restore cannot arm, so the next
+    // real prompt is painted alongside the synthesized replay.
     let between = between_panel_and_sentinel(&output, "replay-sentinel-read");
     let normalized = strip_ansi_escape(between);
-    let recalled = count_occurrences(&normalized, "/skills disable xlsx");
-    assert!(
-        recalled <= 1,
-        "replay dedup stayed disabled after a foreground `read`: \
-         the recalled line was painted {recalled} times after the panel\n{output:?}"
-    );
     let prompts = count_occurrences(&normalized, PROMPT.trim_end());
     assert!(
         prompts <= 2,

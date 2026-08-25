@@ -134,6 +134,7 @@ pub(super) fn resolve_pty_emit<W: Write>(
     pending_terminal_restore: &mut PendingTerminalRecovery,
     recovery_request_file: &Path,
     handoff_request_file: &Path,
+    bounded_bash_handoff: bool,
 ) -> io::Result<RawObserverAction> {
     // #2142 R4: a command-less prompt boundary expired an unclaimed handoff
     // (the runtime closes it as untracked at the same boundary). Remove the
@@ -157,6 +158,7 @@ pub(super) fn resolve_pty_emit<W: Write>(
                 pending_terminal_restore,
                 handoff_request_file,
                 false,
+                bounded_bash_handoff,
             )?;
             Ok(RawObserverAction::RawPassthrough)
         }
@@ -173,6 +175,7 @@ pub(super) fn resolve_pty_emit<W: Write>(
                 pending_terminal_restore,
                 handoff_request_file,
                 true,
+                bounded_bash_handoff,
             )?;
             Ok(RawObserverAction::RawPassthrough)
         }
@@ -250,6 +253,7 @@ fn emit_to_pty<W: Write>(
     pending_terminal_restore: &mut PendingTerminalRecovery,
     handoff_request_file: &Path,
     restore_prompt: bool,
+    bounded_bash_handoff: bool,
 ) -> io::Result<()> {
     output.flush()?;
     if restore_prompt {
@@ -261,7 +265,12 @@ fn emit_to_pty<W: Write>(
             prompt_presentation,
         )?;
     }
-    let bytes = request.pty_bytes().map_err(|message| {
+    let bytes = if bounded_bash_handoff {
+        request.bounded_handoff_pty_bytes()
+    } else {
+        request.pty_bytes()
+    }
+    .map_err(|message| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("blocked shell handoff: {message}"),

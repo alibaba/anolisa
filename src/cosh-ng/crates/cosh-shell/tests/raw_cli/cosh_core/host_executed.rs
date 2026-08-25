@@ -408,7 +408,9 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
         !output.contains("duplicate request was not denied"),
         "{output}"
     );
-    assert_eq!(count_occurrences(&normalized, "\ndf -h\n"), 1, "{output}");
+    // Bounded handoff executes from the owner-only sidecar, so the plaintext
+    // command is not echoed as a standalone terminal line.
+    assert_eq!(count_occurrences(&normalized, "\ndf -h\n"), 0, "{output}");
     assert_eq!(count_occurrences(&normalized, "Filesystem"), 1, "{output}");
     assert!(
         output.contains("host-executed shell result: delivered"),

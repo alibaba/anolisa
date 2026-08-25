@@ -12,15 +12,15 @@ use nix::libc;
 use crate::input::InputClassifier;
 
 use super::super::generation::UserPtyInputGeneration;
-use super::super::mode::RawInputMode;
+use super::super::mode::{current_raw_input_mode, RawInputMode};
 use super::super::pty::{set_pty_winsize, signal_process_group};
 use super::super::{MainPromptGate, RawInputEvent, RawRelayAction, ESC};
 use super::deadline::next_pending_deadline;
 use super::{
     finish_input_relay, flush_pending_prompt_ghost_escape,
-    flush_pending_replaced_prompt_ghost_suffix, relay_input_bytes_with_read_ahead,
-    relay_input_for_mode, RawInputEventSink, RawInputRelayState, RelayReadContext,
-    WakingRawInputEventSender,
+    flush_pending_replaced_prompt_ghost_suffix, is_pending_shell_submission,
+    relay_input_bytes_with_read_ahead, relay_input_for_mode, should_split_passthrough_batch,
+    RawInputEventSink, RawInputRelayState, RelayReadContext, WakingRawInputEventSender,
 };
 
 pub(super) struct PendingDelayEscape {
@@ -296,9 +296,8 @@ pub(crate) fn spawn_raw_action_relay_with_wake(
                 &mut state,
             )?;
             match action {
-                RawRelayAction::Write(bytes) => relay_input_bytes(
+                RawRelayAction::Write(bytes) => relay_action_write_batch(
                     &bytes,
-                    Instant::now(),
                     &mut master,
                     &input_events,
                     &input_classifier,
@@ -330,4 +329,77 @@ pub(crate) fn spawn_raw_action_relay_with_wake(
         input_events.notify_relay();
         result
     })
+}
+
+fn relay_action_write_batch(
+    bytes: &[u8],
+    master: &mut File,
+    input_events: &dyn RawInputEventSink,
+    input_classifier: &InputClassifier,
+    input_mode: &Arc<Mutex<RawInputMode>>,
+    state: &mut RawInputRelayState,
+) -> io::Result<()> {
+    let mode = current_raw_input_mode(input_mode);
+    if !should_split_passthrough_batch(bytes, &mode, input_classifier, state) {
+        return relay_input_bytes(
+            bytes,
+            Instant::now(),
+            master,
+            input_events,
+            input_classifier,
+            input_mode,
+            state,
+        );
+    }
+
+    let mut offset = 0;
+    let mut pending_shell_submits = 0usize;
+    while offset < bytes.len() {
+        let tail = &bytes[offset..];
+        let Some(submit) = tail.iter().position(|byte| matches!(byte, b'\n' | b'\r')) else {
+            relay_input_bytes_with_read_ahead(
+                tail,
+                Instant::now(),
+                master,
+                input_events,
+                input_classifier,
+                input_mode,
+                state,
+                RelayReadContext {
+                    pending_shell_submits,
+                    ..RelayReadContext::default()
+                },
+            )?;
+            break;
+        };
+        let submit_len = if tail.get(submit) == Some(&b'\r') && tail.get(submit + 1) == Some(&b'\n')
+        {
+            2
+        } else {
+            1
+        };
+        let end = submit + submit_len;
+        let line = &tail[..submit];
+        let mode = current_raw_input_mode(input_mode);
+        let shell_owned = matches!(mode, RawInputMode::Passthrough)
+            && is_pending_shell_submission(line, state, input_classifier);
+        relay_input_bytes_with_read_ahead(
+            &tail[..end],
+            Instant::now(),
+            master,
+            input_events,
+            input_classifier,
+            input_mode,
+            state,
+            RelayReadContext {
+                pending_shell_submits,
+                ..RelayReadContext::default()
+            },
+        )?;
+        if shell_owned {
+            pending_shell_submits = pending_shell_submits.saturating_add(1);
+        }
+        offset += end;
+    }
+    Ok(())
 }

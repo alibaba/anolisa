@@ -112,8 +112,7 @@ impl MatrixHarness {
             &mut self.card_state,
             &mut self.quarantine,
             &mut deferred_input,
-            None,
-            None,
+            RelayReadContext::default(),
             &mut relay,
         )
         .expect("relay chunk");

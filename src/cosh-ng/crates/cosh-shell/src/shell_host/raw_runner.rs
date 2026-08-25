@@ -108,7 +108,7 @@ where
         event_observer,
         config.input_classifier.clone(),
         None,
-        config.slash_via_shell,
+        true,
         |master,
          _,
          input_events,
@@ -273,7 +273,7 @@ where
         },
         config.input_classifier.clone(),
         Some(config.raw_action_watchdog),
-        config.slash_via_shell,
+        true,
         |master,
          child_pid,
          input_events,
@@ -317,7 +317,7 @@ where
         move |view, output| event_observer(view.events(), output),
         config.input_classifier.clone(),
         Some(config.raw_action_watchdog),
-        config.slash_via_shell,
+        true,
         |master,
          child_pid,
          input_events,
@@ -350,7 +350,7 @@ fn run_raw_relay_with_driver<W, F, D>(
     mut event_observer: F,
     input_classifier: InputClassifier,
     action_watchdog: Option<Duration>,
-    slash_via_shell: bool,
+    bounded_bash_handoff: bool,
     spawn_driver: D,
 ) -> io::Result<ShellHostOutput>
 where
@@ -411,11 +411,9 @@ where
     session
         .parser
         .set_main_prompt_gate(main_prompt_gate.clone());
-    // Slash-via-shell routing (issue #1718) needs a markered native session
-    // so the prompt gate can prove bash is at its prompt; everything else
-    // keeps the Rust intercept path.
-    let slash_route_enabled =
-        config.integration.uses_debug_trap() && slash_via_shell && config.native_mode;
+    // Bounded Enhanced hooks observe shell execution but cannot cancel it.
+    // Route slash controls in the Rust relay before bytes reach the PTY.
+    let slash_route_enabled = false;
     let (mut wake_reader, wake_writer, mut resize_reader, _resize_wake) =
         RelayWake::new()?.into_parts();
     // Keep the channel open after the driver and completion notifier exit;
@@ -426,7 +424,11 @@ where
         input_master,
         session.child.id(),
         input_event_sender,
-        input_classifier.with_shell_passthrough(!config.integration.uses_markers()),
+        input_classifier
+            .with_shell_passthrough(!config.integration.uses_markers())
+            .with_bash_readline_history_privacy(
+                bounded_bash_handoff && config.integration.uses_markers(),
+            ),
         Arc::clone(&input_mode),
         input_generation.clone(),
         main_prompt_gate,
@@ -469,6 +471,7 @@ where
         relay_prompt,
         &session.recovery_request_file,
         &session.handoff_request_file,
+        bounded_bash_handoff,
         watchdog.as_ref(),
         &config.input_wait_status,
         &crate::i18n::I18n::new(config.hint_language),

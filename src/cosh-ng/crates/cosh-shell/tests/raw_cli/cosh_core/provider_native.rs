@@ -73,7 +73,9 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-cosh-core
     assert!(!output.contains("Auto-approved req-2"), "{output}");
     assert!(!output.contains("auto-approved by provider"), "{output}");
     assert!(output.contains("Bash tool sent to shell"), "{output}");
-    assert!(normalized.contains("\nsudo -V\n"), "{output}");
+    // Bounded handoff keeps the plaintext command in its owner-only sidecar;
+    // the provider result remains visible without a standalone command echo.
+    assert!(!normalized.contains("\nsudo -V\n"), "{output}");
     assert!(
         output.contains("COSH CORE HOST EXECUTED ECHO FINAL"),
         "{output}"

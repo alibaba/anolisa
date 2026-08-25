@@ -92,10 +92,16 @@ Permission 卡牌只能从结构化 `ToolPermissionRequest` 创建。`! allow` �
 ## 对相关问题的影响
 
 Native 为 #2687 提供了干净的架构边界。用户可以选择完全不存在 marker 选项和
-trap 的会话，而不是隐藏其可观察状态。为了保留现有产品语义，Enhanced Assisted
-仍是默认值，因此 Enhanced 继续使用注入设计，也不宣称消除其中的 #2687 暴露。
-#2683 记录的 xtrace 与 helper 暴露需要继续单独处理。启用命令事件的路径仍须
-满足 #2541 对退出状态和信号的要求。
+trap 的会话，而不是隐藏其可观察状态。Enhanced v2 同时移除了全局 `DEBUG`
+trap，不再强制开启 `extdebug`、`functrace` 或 `errtrace`。它通过有界的提示符、
+command-not-found 和 PTY 集成点工作，同时保留用户自己的 trap 定义与选项状态，
+因此解决 #2687 的可观察契约，但不把 Enhanced 描述成零注入模式。为了保留现有
+产品语义，Enhanced Assisted 仍为默认值。
+
+Enhanced 剩余的集成面是显式且有限的，包括 `PS0`、`PROMPT_COMMAND`、
+`_cosh_*` helper、`command_not_found_handle` 和限定范围的 `COSH_*` 状态。
+Native 仍是严格零注入选择。#2683 记录的 xtrace 输出，以及 #2541 记录的退出
+状态和信号正确性，仍属于独立契约。
 
 ## 已知限制
 
@@ -107,4 +113,5 @@ trap 的会话，而不是隐藏其可观察状态。为了保留现有产品语
 - 当前原生会话没有安全的终端内 Agent 热键或面板。没有额外集成时，系统无法
   可靠证明 prompt 所有权。
 - Direct Exec 没有用户入口，也不渲染输入态。
-- 增强集成保留现有全局 Shell hook 行为，#2683 等隔离问题仍按缺陷处理。
+- 增强集成是有界集成而非零注入。若要求提示符、helper、环境变量和
+  command-not-found 均无集成，必须在启动时选择 Native 会话。

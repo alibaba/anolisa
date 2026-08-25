@@ -107,12 +107,18 @@ recursively interpreted.
 
 Native integration provides the clean architectural boundary requested by
 #2687: a user can choose a session where marker options and traps do not exist,
-instead of hiding their observable state. Enhanced Assisted remains the default
-to preserve existing product semantics, so Enhanced still uses the injection
-design and does not claim to eliminate #2687 exposure there. Its xtrace and
-helper exposure tracked by #2683 remains separate work. Exit-status and signal
-correctness tracked by #2541 remains required wherever command events are
-enabled.
+instead of hiding their observable state. Enhanced v2 also removes the global
+`DEBUG` trap and no longer forces `extdebug`, `functrace`, or `errtrace`. It uses
+bounded prompt, command-not-found, and PTY integration points while preserving
+the user's trap definitions and option state, which closes the observable
+contract in #2687 without claiming that Enhanced is injection-free. Enhanced
+Assisted remains the default to preserve existing product semantics.
+
+The remaining Enhanced integration surface is explicit: `PS0`,
+`PROMPT_COMMAND`, `_cosh_*` helpers, `command_not_found_handle`, and scoped
+`COSH_*` state. Native remains the strict zero-injection choice. Xtrace output
+tracked by #2683 and exit-status or signal correctness tracked by #2541 remain
+separate contracts.
 
 ## Known Limits
 
@@ -124,5 +130,6 @@ enabled.
 - The current Native session has no safe in-terminal Agent hotkey or panel
   because prompt ownership cannot be proven without additional integration.
 - Direct Exec has no user entry or rendered input state.
-- Enhanced integration retains its existing global Shell hook behavior and
-  must continue to treat #2683 and related isolation defects as bugs.
+- Enhanced integration is bounded rather than injection-free; users requiring
+  no prompt, helper, environment, or command-not-found integration must start
+  a Native session.

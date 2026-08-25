@@ -19,9 +19,9 @@ pub(crate) use implementation::{
     BuiltinFactRecord, BuiltinFindingFacts, CardKind, CardModel, EvaluatedHookFinding,
     HighMemoryProcessFacts, HookProvenance, InputModel, InputOwner, MemoryPressureFacts,
     MetricsConfidence, PermissionCardRequest, ProcessMemoryFact, ShellEnvironmentSnapshot,
-    NON_INTERACTIVE_PAGER_PREFIX, PROVIDER_TIMEOUT_ERROR_CODE, SHELL_HANDOFF_CONTINUATION_HINT,
-    SHELL_HANDOFF_UNTRACKED_STATUS, TOOL_ARGUMENTS_STATUS_PHASE, TOOL_ARGUMENTS_STATUS_PREFIX,
-    USER_APPROVAL_MODE_HINT_PREFIX,
+    BOUNDED_HANDOFF_COMMAND, NON_INTERACTIVE_PAGER_PREFIX, PROVIDER_TIMEOUT_ERROR_CODE,
+    SHELL_HANDOFF_CONTINUATION_HINT, SHELL_HANDOFF_UNTRACKED_STATUS, TOOL_ARGUMENTS_STATUS_PHASE,
+    TOOL_ARGUMENTS_STATUS_PREFIX, USER_APPROVAL_MODE_HINT_PREFIX,
 };
 
 pub(crate) use implementation::audit;

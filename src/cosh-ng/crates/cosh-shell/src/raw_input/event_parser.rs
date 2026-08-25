@@ -23,6 +23,9 @@ pub(super) struct CandidateLineBuffer {
     in_paste: bool,
     /// True once any bracketed-paste opener was consumed into this draft.
     saw_paste: bool,
+    /// Buffer offset immediately after the latest completed paste payload.
+    /// Bytes after this offset were typed outside the paste wrapper.
+    paste_closed_at: Option<usize>,
     /// Trailing bytes that form a proper prefix of a paste delimiter,
     /// held until the next chunk resolves them (#1721).
     pending_partial: Vec<u8>,
@@ -88,11 +91,13 @@ impl CandidateLineBuffer {
             if bytes[idx..].starts_with(BRACKETED_PASTE_START) {
                 self.in_paste = true;
                 self.saw_paste = true;
+                self.paste_closed_at = None;
                 idx += BRACKETED_PASTE_START.len();
                 continue;
             }
             if bytes[idx..].starts_with(BRACKETED_PASTE_END) {
                 self.in_paste = false;
+                self.paste_closed_at = Some(self.bytes.len());
                 idx += BRACKETED_PASTE_END.len();
                 continue;
             }
@@ -169,6 +174,7 @@ impl CandidateLineBuffer {
         self.forced_agent_suggestion_id = None;
         self.in_paste = false;
         self.saw_paste = false;
+        self.paste_closed_at = None;
         self.pending_partial.clear();
         self.pending_pasted_cr = false;
     }
@@ -179,6 +185,7 @@ impl CandidateLineBuffer {
         self.forced_agent_suggestion_id = None;
         self.in_paste = false;
         self.saw_paste = false;
+        self.paste_closed_at = None;
         self.pending_pasted_cr = false;
         let mut bytes = std::mem::take(&mut self.bytes);
         // A held partial delimiter is plain user bytes if the draft flushes
@@ -189,6 +196,10 @@ impl CandidateLineBuffer {
 
     pub(super) fn visible_line_bytes(&self) -> &[u8] {
         &self.bytes[..visible_line_end(&self.bytes, self.soft_newline_enabled)]
+    }
+
+    pub(super) fn paste_closed_at(&self) -> Option<usize> {
+        self.paste_closed_at
     }
 
     fn pop_visible_char(&mut self) {
@@ -274,6 +285,14 @@ impl NativeLineState {
         } else {
             Some(&self.visible)
         }
+    }
+
+    pub(super) fn history_mirror_requires_fail_closed(&self) -> bool {
+        self.dirty && !self.in_paste && self.pending_paste_delimiter.is_empty()
+    }
+
+    pub(super) fn paste_sequence_open(&self) -> bool {
+        self.in_paste || !self.pending_paste_delimiter.is_empty()
     }
 
     pub(super) fn observe_shell_bytes(&mut self, bytes: &[u8]) {

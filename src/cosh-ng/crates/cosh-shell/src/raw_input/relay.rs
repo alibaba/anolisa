@@ -2,13 +2,12 @@ use std::fs::File;
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use crate::input::{InputClassifier, InputDecision, InterceptReason};
+use crate::input::{InputClassifier, InterceptReason};
 
 use super::event_parser::{
-    candidate_inline_hint, candidate_line_status, native_candidate_allows_soft_newline,
+    candidate_inline_hint, native_candidate_allows_soft_newline,
     native_candidate_should_return_to_shell, redact_extension_setting_value,
-    starts_native_intercept_candidate, CandidateLineBuffer, CandidateLineStatus, NativeLineState,
-    BRACKETED_PASTE_END, BRACKETED_PASTE_START,
+    starts_native_intercept_candidate, CandidateLineBuffer, NativeLineState, BRACKETED_PASTE_START,
 };
 use super::event_sender::RawInputEventSink;
 use super::generation::{LineSubmitCounter, UserPtyInputGeneration};
@@ -92,10 +91,27 @@ pub(super) fn relay_passthrough_input(
     relay_passthrough_input_with_activity(bytes, relay, true)
 }
 
+pub(super) fn relay_passthrough_input_after_shell_submits(
+    bytes: &[u8],
+    pending_shell_submits: usize,
+    relay: &mut InputRelayContext<'_>,
+) -> io::Result<bool> {
+    relay_passthrough_input_with_policy(bytes, relay, true, pending_shell_submits)
+}
+
 fn relay_passthrough_input_with_activity(
     bytes: &[u8],
     relay: &mut InputRelayContext<'_>,
     emit_activity: bool,
+) -> io::Result<bool> {
+    relay_passthrough_input_with_policy(bytes, relay, emit_activity, 0)
+}
+
+fn relay_passthrough_input_with_policy(
+    bytes: &[u8],
+    relay: &mut InputRelayContext<'_>,
+    emit_activity: bool,
+    pending_shell_submits: usize,
 ) -> io::Result<bool> {
     if relay.line_buffer.force_agent_intercept && relay.line_buffer.is_active() {
         relay.line_buffer.soft_newline_enabled = true;
@@ -108,7 +124,7 @@ fn relay_passthrough_input_with_activity(
                 return Ok(true);
             }
             redraw_candidate_line(relay.input_events, relay.line_buffer);
-            return relay_candidate_line(relay, emit_activity);
+            return candidate::relay_candidate_line(relay, emit_activity, pending_shell_submits);
         }
         if !relay.line_buffer.is_active() {
             relay.line_buffer.clear();
@@ -118,9 +134,9 @@ fn relay_passthrough_input_with_activity(
             return Ok(true);
         }
         redraw_candidate_line(relay.input_events, relay.line_buffer);
-        return relay_candidate_line(relay, emit_activity);
+        return candidate::relay_candidate_line(relay, emit_activity, pending_shell_submits);
     }
-    relay_native_passthrough(bytes, relay, emit_activity)
+    relay_native_passthrough(bytes, relay, emit_activity, pending_shell_submits)
 }
 
 pub(super) fn relay_prompt_ghost_input(
@@ -162,6 +178,10 @@ pub(super) fn relay_prompt_ghost_input(
                 return Ok(true);
             }
         }
+        return match bytes.len() {
+            3 => Ok(true),
+            _ => relay_prompt_ghost_input(&bytes[3..], ghost_text, route, relay),
+        };
     }
     if matches!(bytes.first(), Some(b'\r' | b'\n')) {
         if let PromptGhostRoute::AgentSelection {
@@ -308,13 +328,16 @@ fn relay_native_passthrough(
     bytes: &[u8],
     relay: &mut InputRelayContext<'_>,
     emit_activity: bool,
+    pending_shell_submits: usize,
 ) -> io::Result<bool> {
     let starts_paste = bytes.starts_with(BRACKETED_PASTE_START)
         || (bytes.len() >= 2
             && bytes.len() < BRACKETED_PASTE_START.len()
             && BRACKETED_PASTE_START.starts_with(bytes));
+    let complete_paste = bytes.starts_with(BRACKETED_PASTE_START);
     if relay.line_buffer.is_active()
-        || (!starts_paste && starts_native_intercept_candidate(bytes, relay.native_line_state))
+        || complete_paste
+        || starts_native_intercept_candidate(bytes, relay.native_line_state)
     {
         // Route flags must consider the whole draft so far: a bracketed
         // paste opener may arrive as its own chunk (or split mid-delimiter,
@@ -333,7 +356,26 @@ fn relay_native_passthrough(
         // Control bytes such as Tab must reach readline without first changing
         // the outer terminal cursor, whose display width differs from byte count.
         redraw_candidate_line(relay.input_events, relay.line_buffer);
-        return relay_candidate_line(relay, emit_activity);
+        return candidate::relay_candidate_line(relay, emit_activity, pending_shell_submits);
+    }
+    if !starts_paste {
+        if let Some(submit) = bytes.iter().position(|byte| matches!(byte, b'\n' | b'\r')) {
+            let line_end = submit + 1;
+            if line_end < bytes.len() {
+                let (line, remainder) = bytes.split_at(line_end);
+                let submitted_nonempty = !relay.native_line_state.is_empty()
+                    || line[..submit]
+                        .iter()
+                        .any(|byte| !matches!(byte, b'\n' | b'\r'));
+                relay_native_passthrough(line, relay, emit_activity, pending_shell_submits)?;
+                return relay_passthrough_input_with_policy(
+                    remainder,
+                    relay,
+                    emit_activity,
+                    pending_shell_submits.saturating_add(usize::from(submitted_nonempty)),
+                );
+            }
+        }
     }
     // Non-slash input: send directly to PTY. Shell marker's preexec/
     // command_not_found hooks handle NL/CJK intercept on the shell side.
@@ -347,6 +389,14 @@ fn relay_native_passthrough(
         PromptLineSoftNewline::Stripped(stripped) => stripped.as_slice(),
         _ => bytes,
     };
+    let private_history_bytes = history_private_submission(
+        relay
+            .input_classifier
+            .bash_readline_history_privacy_enabled(),
+        relay.native_line_state,
+        relay.main_prompt_gate.is_at_prompt(),
+        bytes,
+    );
     send_raw_input_events(bytes, relay.input_events);
     observe_native_line(relay.native_line_state, bytes, relay.input_events);
     if emit_activity && !bytes.is_empty() {
@@ -359,178 +409,50 @@ fn relay_native_passthrough(
         relay.line_submits,
         relay.input_events,
         relay.main_prompt_gate,
-        bytes,
+        private_history_bytes.as_deref().unwrap_or(bytes),
     )?;
     Ok(false)
 }
 
-pub(super) fn relay_shell_only_input(
+fn history_private_submission(
+    bash_readline_history_privacy: bool,
+    state: &NativeLineState,
+    at_prompt: bool,
     bytes: &[u8],
-    relay: &mut InputRelayContext<'_>,
-) -> io::Result<()> {
-    send_raw_input_events(bytes, relay.input_events);
-    observe_native_line(relay.native_line_state, bytes, relay.input_events);
-    if !bytes.is_empty() {
-        send_shell_input_state(relay.native_line_state.is_empty(), relay.input_events);
+) -> Option<Vec<u8>> {
+    if !bash_readline_history_privacy || !at_prompt {
+        return None;
     }
-    relay.exit_tracker.observe_shell_bytes(bytes);
-    write_user_bytes_to_pty(
-        relay.master,
-        relay.input_generation,
-        relay.line_submits,
-        relay.input_events,
-        relay.main_prompt_gate,
-        bytes,
-    )
-}
+    let submit = bytes
+        .iter()
+        .position(|byte| matches!(byte, b'\n' | b'\r'))?;
+    let private = match state.clean_visible_line() {
+        Some(prior) => {
+            let mut command = Vec::with_capacity(prior.len() + submit);
+            command.extend_from_slice(prior);
+            command.extend_from_slice(&bytes[..submit]);
+            let command = std::str::from_utf8(&command).ok()?;
+            crate::evidence::redact_sensitive_text(command).1
+        }
+        // Readline cursor movement, completion, or a multiline paste makes
+        // the mirror unable to prove the final accepted line is non-secret.
+        // Exclude that one submission from history rather than persisting an
+        // input Cosh can no longer inspect safely.
+        None => state.history_mirror_requires_fail_closed(),
+    };
+    if !private {
+        return None;
+    }
 
-fn relay_candidate_line(
-    relay: &mut InputRelayContext<'_>,
-    emit_activity: bool,
-) -> io::Result<bool> {
-    // A bracketed paste is still streaming: defer every routing decision
-    // (submit, flush, card upgrade) until the closer arrives so embedded
-    // newlines can never execute early (#1721).
-    if relay.line_buffer.in_paste() {
-        return Ok(true);
-    }
-    match candidate_line_status(
-        &relay.line_buffer.bytes,
-        relay.line_buffer.soft_newline_enabled,
-    ) {
-        CandidateLineStatus::Pending => Ok(true),
-        CandidateLineStatus::Unsafe if relay.line_buffer.force_agent_intercept => {
-            relay.line_buffer.clear();
-            let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
-            let _ = relay.input_events.send(RawInputEvent::PromptGhostDismissed);
-            send_shell_input_state(true, relay.input_events);
-            Ok(true)
-        }
-        CandidateLineStatus::Unsafe => flush_candidate_line_to_shell(relay, emit_activity),
-        CandidateLineStatus::Complete { line, line_len } => {
-            let force_agent_intercept = relay.line_buffer.force_agent_intercept;
-            let suggestion_id = relay.line_buffer.forced_agent_suggestion_id.clone();
-            let saw_paste = relay.line_buffer.saw_paste();
-            let mut bytes = relay.line_buffer.take();
-            let remainder = bytes.split_off(line_len);
-            if force_agent_intercept {
-                let _ = relay.input_events.send(RawInputEvent::CandidateCommit(
-                    redact_extension_setting_value(line.as_bytes()),
-                ));
-                if let Ok(mut mode) = relay.input_mode.lock() {
-                    *mode = new_delay_input_mode();
-                }
-                let _ = relay
-                    .input_events
-                    .send(RawInputEvent::PromptGhostIntercept {
-                        input: line,
-                        suggestion_id,
-                    });
-                send_shell_input_state(true, relay.input_events);
-                if !remainder.is_empty() {
-                    relay_passthrough_input_with_activity(&remainder, relay, emit_activity)?;
-                }
-                return Ok(true);
-            }
-            if line.contains('\n') {
-                if line.trim().is_empty() {
-                    let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
-                    send_shell_input_state(true, relay.input_events);
-                } else {
-                    let _ = relay.input_events.send(RawInputEvent::CandidateCommit(
-                        redact_extension_setting_value(line.as_bytes()),
-                    ));
-                    if let Ok(mut mode) = relay.input_mode.lock() {
-                        *mode = new_delay_input_mode();
-                    }
-                    let _ = relay.input_events.send(RawInputEvent::UserIntercept(
-                        line,
-                        InterceptReason::AgentMarker,
-                    ));
-                    send_shell_input_state(true, relay.input_events);
-                }
-                if !remainder.is_empty() {
-                    relay_passthrough_input_with_activity(&remainder, relay, emit_activity)?;
-                }
-                return Ok(true);
-            }
-            if line.trim() == "??" {
-                // A lone `??` submit opens an empty prompt draft (#1932):
-                // the terminal-agnostic entry into multi-line composition,
-                // mirroring the soft-newline upgrade in redraw_candidate_line.
-                let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
-                let _ = relay.input_events.send(RawInputEvent::PromptDraftOpen {
-                    text: String::new(),
-                });
-                send_shell_input_state(true, relay.input_events);
-                if !remainder.is_empty() {
-                    relay_passthrough_input_with_activity(&remainder, relay, emit_activity)?;
-                }
-                return Ok(true);
-            }
-            match relay.input_classifier.classify(&line) {
-                InputDecision::Intercept { input, reason } => {
-                    if reason == InterceptReason::Slash
-                        && relay.slash_route_enabled
-                        && relay.main_prompt_gate.is_at_prompt()
-                        && relay.input_classifier.is_exact_slash_control_command(
-                            line.split_whitespace().next().unwrap_or_default(),
-                        )
-                    {
-                        // Submit the exact slash line through bash so
-                        // readline records it in native history (issue
-                        // #1718). The shell marker's DEBUG trap intercepts
-                        // it at the prompt boundary (#1724) and emits the
-                        // same UserInputIntercepted event as the Rust path
-                        // below. write_user_bytes_to_pty lowers the prompt
-                        // gate for this and every other line submission, so
-                        // follow-up slash bytes can never route into a
-                        // foreground process before the next prompt_ready.
-                        return submit_line_bytes_to_shell(relay, bytes, remainder, emit_activity);
-                    }
-                    let _ = relay.input_events.send(RawInputEvent::CandidateCommit(
-                        redact_extension_setting_value(line.as_bytes()),
-                    ));
-                    if let Ok(mut mode) = relay.input_mode.lock() {
-                        *mode = new_delay_input_mode();
-                    }
-                    let _ = relay
-                        .input_events
-                        .send(RawInputEvent::UserIntercept(input, reason));
-                    send_shell_input_state(true, relay.input_events);
-                    if !remainder.is_empty() {
-                        relay_passthrough_input_with_activity(&remainder, relay, emit_activity)?;
-                    }
-                    Ok(true)
-                }
-                InputDecision::SendToShell(_) => {
-                    let mut bytes = bytes;
-                    let mut remainder = remainder;
-                    if saw_paste {
-                        // Replay the whole pasted region as one bracketed
-                        // paste: bash inserts the bytes (incl. embedded
-                        // newlines) and waits for explicit Enter (#1721).
-                        bytes.extend_from_slice(&remainder);
-                        remainder = Vec::new();
-                        let mut wrapped = Vec::with_capacity(bytes.len() + 12);
-                        wrapped.extend_from_slice(b"\x1b[200~");
-                        wrapped.extend_from_slice(&bytes);
-                        wrapped.extend_from_slice(b"\x1b[201~");
-                        bytes = wrapped;
-                    }
-                    submit_line_bytes_to_shell(relay, bytes, remainder, emit_activity)
-                }
-                InputDecision::Consume => {
-                    let _ = relay.input_events.send(RawInputEvent::CandidateClearLine);
-                    send_shell_input_state(true, relay.input_events);
-                    if !remainder.is_empty() {
-                        relay_passthrough_input_with_activity(&remainder, relay, emit_activity)?;
-                    }
-                    Ok(false)
-                }
-            }
-        }
-    }
+    // Enhanced Bash enables `HISTCONTROL=ignorespace`. Insert a leading
+    // blank through Readline immediately before accepting the line, keeping
+    // the executed command byte-equivalent while excluding credentials from
+    // native history without a parent-shell post-command hook.
+    let mut private = Vec::with_capacity(bytes.len() + 3);
+    private.extend_from_slice(&bytes[..submit]);
+    private.extend_from_slice(b"\x01 \x05");
+    private.extend_from_slice(&bytes[submit..]);
+    Some(private)
 }
 
 fn flush_candidate_line_to_shell(
@@ -635,6 +557,7 @@ fn held_input_requests_cancel(bytes: &[u8]) -> bool {
         .any(|line| line.split_whitespace().next() == Some("/cancel"))
 }
 
+mod candidate;
 mod exit_tracker;
 mod soft_newline_upgrade;
 pub(super) use exit_tracker::ExplicitExitTracker;

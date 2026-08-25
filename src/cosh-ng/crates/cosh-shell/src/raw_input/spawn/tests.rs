@@ -11,6 +11,24 @@ struct IdleReader {
     stop: Arc<AtomicBool>,
 }
 
+#[test]
+fn only_nonempty_shell_lines_add_pending_boundaries() {
+    let classifier = InputClassifier::default();
+    let mut state = RawInputRelayState::default();
+
+    assert!(!is_pending_shell_submission(b"", &state, &classifier));
+    assert!(!is_pending_shell_submission(b"  \t", &state, &classifier));
+    assert!(!is_pending_shell_submission(
+        b"?? what happened",
+        &state,
+        &classifier
+    ));
+    assert!(is_pending_shell_submission(b"echo ok", &state, &classifier));
+
+    state.native_line_state.observe_shell_bytes(b"echo ok");
+    assert!(is_pending_shell_submission(b"", &state, &classifier));
+}
+
 impl Read for IdleReader {
     fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
         self.reads.fetch_add(1, Ordering::Relaxed);
@@ -145,6 +163,7 @@ fn relay_uses_the_validated_mode_snapshot() {
             read_ahead: None,
             expected_capture_generation: None,
             observed_mode: Some(&observed),
+            pending_shell_submits: 0,
         },
     )
     .expect("relay validated snapshot");
@@ -210,6 +229,7 @@ fn prompt_ghost_timeout_refreshes_the_validated_snapshot() {
             read_ahead: None,
             expected_capture_generation: None,
             observed_mode: Some(&observed),
+            pending_shell_submits: 0,
         },
     )
     .expect("flush escape and relay tab");
@@ -300,6 +320,7 @@ fn delayed_ghost_suffix_keeps_capture_generation_across_replacement() {
             read_ahead: None,
             expected_capture_generation: Some(7),
             observed_mode: None,
+            pending_shell_submits: 0,
         },
     )
     .expect("buffer partial replaced ghost suffix");
@@ -386,6 +407,7 @@ fn ghost_suffix_does_not_consume_input_from_a_new_capture_generation() {
             read_ahead: None,
             expected_capture_generation: Some(8),
             observed_mode: None,
+            pending_shell_submits: 0,
         },
     )
     .expect("relay new generation input");

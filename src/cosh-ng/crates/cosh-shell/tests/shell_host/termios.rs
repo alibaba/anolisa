@@ -222,10 +222,24 @@ fn transparent_ctrl_backslash_is_not_synthesized_from_ctrl_c() {
         .blocks
         .iter()
         .any(|block| block.command.contains("__AFTER_CTRL_C__")));
-    assert!(ledger
-        .blocks
-        .iter()
-        .any(|block| block.command.contains("__AFTER_QUIT__") && block.exit_code == 0));
+    assert_eq!(
+        ledger
+            .blocks
+            .iter()
+            .filter(|block| block.command.starts_with("bash -c 'trap"))
+            .count(),
+        1,
+        "stale history must not be attributed to a later command: {ledger:#?}"
+    );
+    assert!(
+        ledger
+            .blocks
+            .iter()
+            .any(|block| (block.command.contains("__AFTER_QUIT__")
+                || block.command == "<redacted untracked command>")
+                && block.exit_code == 0),
+        "{ledger:#?}"
+    );
 }
 
 #[test]

@@ -21,7 +21,7 @@ use super::mode::{
 use super::pty::write_all_pty;
 use super::relay::{
     dismiss_prompt_ghost_input, relay_delayed_input, relay_passthrough_input,
-    relay_prompt_ghost_input, relay_shell_only_input, send_held_input_events,
+    relay_passthrough_input_after_shell_submits, relay_prompt_ghost_input, send_held_input_events,
     send_raw_input_events, write_user_bytes_to_pty, ExplicitExitTracker, InputRelayContext,
 };
 use super::{MainPromptGate, PromptGhostRoute, RawInputEvent, ESC};
@@ -31,6 +31,7 @@ mod assistance;
 mod capture;
 mod deadline;
 mod prompt_ghost;
+mod read_batch;
 mod reader;
 mod state;
 #[cfg(test)]
@@ -52,6 +53,9 @@ use deadline::{next_pending_deadline, receive_input};
 use prompt_ghost::{
     dismiss_replaced_prompt_ghost, PendingPromptGhostEscape, PendingReplacedPromptGhostSuffix,
 };
+use read_batch::{
+    is_pending_shell_submission, should_split_passthrough_batch, InputRead, RelayReadContext,
+};
 use reader::read_input_chunks;
 pub(super) use state::RawInputRelayState;
 use state::{flush_pending_draft_escape, input_relay_context, sync_pending_draft_escape};
@@ -60,24 +64,6 @@ const PROMPT_GHOST_ESCAPE_TIMEOUT: Duration = Duration::from_millis(50);
 const DELAY_ESCAPE_TIMEOUT: Duration = Duration::from_millis(50);
 // Retain a complete split Shift+Tab sequence while the relay handles ESC.
 const INPUT_READ_AHEAD_CAPACITY: usize = 3;
-
-enum InputRead {
-    Bytes {
-        bytes: Vec<u8>,
-        received_at: Instant,
-        observed_mode: RawInputMode,
-        ownership_changed_during_read: bool,
-    },
-    Eof,
-    Error(io::Error),
-}
-
-#[derive(Clone, Copy, Default)]
-struct RelayReadContext<'a> {
-    read_ahead: Option<&'a Receiver<InputRead>>,
-    expected_capture_generation: Option<u64>,
-    observed_mode: Option<&'a RawInputMode>,
-}
 
 pub(crate) fn spawn_raw_input_relay<R>(
     input: R,
@@ -192,12 +178,33 @@ where
             };
             match input {
                 InputRead::Bytes {
-                    bytes,
+                    mut bytes,
                     received_at,
                     observed_mode,
                     ownership_changed_during_read,
+                    pending_shell_submits,
                 } => {
                     let mode = current_raw_input_mode(&input_mode);
+                    if should_split_passthrough_batch(&bytes, &mode, &input_classifier, &state) {
+                        let submit = bytes
+                            .iter()
+                            .position(|byte| matches!(byte, b'\n' | b'\r'))
+                            .expect("split predicate requires a submission");
+                        let remainder = bytes.split_off(submit + 1);
+                        let shell_owned = is_pending_shell_submission(
+                            &bytes[..submit],
+                            &state,
+                            &input_classifier,
+                        );
+                        state.deferred_input = Some(InputRead::Bytes {
+                            bytes: remainder,
+                            received_at,
+                            observed_mode: mode.clone(),
+                            ownership_changed_during_read: false,
+                            pending_shell_submits: pending_shell_submits
+                                .saturating_add(u16::from(shell_owned)),
+                        });
+                    }
                     let observed_generation = capture_generation(&observed_mode);
                     if stale_delay_escape_reached_interactive_owner(&bytes, &observed_mode, &mode) {
                         continue;
@@ -250,6 +257,7 @@ where
                                 read_ahead: Some(&read_rx),
                                 expected_capture_generation: observed_generation,
                                 observed_mode: Some(&mode),
+                                pending_shell_submits: usize::from(pending_shell_submits),
                             },
                         )?;
                     }
@@ -494,11 +502,7 @@ fn relay_input_bytes_with_read_ahead(
     };
     let bytes = delay_combined.as_deref().unwrap_or(bytes);
 
-    if let RawInputMode::PromptGhost {
-        text,
-        route: route @ PromptGhostRoute::AgentSelection { .. },
-    } = &mode
-    {
+    if let RawInputMode::PromptGhost { text, route } = &mode {
         if b"\x1b[Z".starts_with(bytes) && bytes.len() < 3 {
             state.pending_prompt_ghost_escape = Some(PendingPromptGhostEscape {
                 bytes: bytes.to_vec(),
@@ -579,6 +583,7 @@ fn flush_pending_replaced_prompt_ghost_suffix(
             read_ahead: None,
             expected_capture_generation: pending.expected_capture_generation,
             observed_mode: None,
+            pending_shell_submits: 0,
         },
     )
 }
@@ -603,7 +608,12 @@ fn relay_input_for_mode(
     if !input_classifier.assistance_enabled() && matches!(mode, RawInputMode::Passthrough) {
         let mut relay =
             input_relay_context(master, input_classifier, input_events, input_mode, state);
-        return relay_shell_only_input(bytes, &mut relay);
+        return relay_passthrough_input_after_shell_submits(
+            bytes,
+            read_context.pending_shell_submits,
+            &mut relay,
+        )
+        .map(|_| ());
     }
     let RawInputRelayState {
         card_state,
@@ -637,8 +647,7 @@ fn relay_input_for_mode(
         card_state,
         capture_owned_input,
         deferred_input,
-        read_context.read_ahead,
-        read_context.expected_capture_generation,
+        read_context,
         &mut relay,
     )
 }

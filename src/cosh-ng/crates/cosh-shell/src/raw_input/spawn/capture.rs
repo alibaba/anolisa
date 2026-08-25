@@ -96,10 +96,15 @@ pub(super) fn relay_input_chunk(
     card_state: &mut CardInputState,
     capture_owned_input: &mut CaptureOwnedInput,
     deferred_input: &mut Option<InputRead>,
-    read_ahead: Option<&Receiver<InputRead>>,
-    expected_capture_generation: Option<u64>,
+    read_context: RelayReadContext<'_>,
     relay: &mut InputRelayContext<'_>,
 ) -> io::Result<()> {
+    let RelayReadContext {
+        read_ahead,
+        expected_capture_generation,
+        pending_shell_submits,
+        ..
+    } = read_context;
     loop {
         match mode {
             RawInputMode::Capture {
@@ -176,7 +181,7 @@ pub(super) fn relay_input_chunk(
             }
             RawInputMode::Passthrough | RawInputMode::Terminal { .. } => {
                 card_state.reset();
-                relay_passthrough_input(bytes, relay)?;
+                relay_passthrough_input_after_shell_submits(bytes, pending_shell_submits, relay)?;
                 return Ok(());
             }
             RawInputMode::PromptGhost {
@@ -385,8 +390,7 @@ fn replay_or_reject_after_drain(
         card_state,
         capture_owned_input,
         &mut deferred_input,
-        None,
-        None,
+        RelayReadContext::default(),
         relay,
     )
 }
@@ -652,6 +656,7 @@ pub(in super::super) fn finish_input_relay(
     // Candidate bytes were never submitted to the Shell. EOF cancels them;
     // flushing a lone `?`, slash prefix, or partial paste delimiter before
     // `exit` would turn display state into executable input.
+    let candidate_paste_active = state.line_buffer.in_paste();
     if state.line_buffer.is_active() {
         state.line_buffer.clear();
         let _ = input_events.send(RawInputEvent::CandidateClearLine);
@@ -659,7 +664,7 @@ pub(in super::super) fn finish_input_relay(
     if state.exit_tracker.saw_explicit_exit() {
         return Ok(());
     }
-    if state.native_line_state.is_empty() {
+    if !candidate_paste_active && state.native_line_state.is_empty() {
         write_user_bytes_to_pty(
             master,
             &state.input_generation,
