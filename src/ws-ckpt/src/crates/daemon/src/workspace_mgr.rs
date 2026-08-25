@@ -156,10 +156,27 @@ pub async fn init(state: &Arc<DaemonState>, workspace: &str) -> anyhow::Result<R
     // 1. Canonicalize (resolves symlinks to real path)
     let abs_path = match tokio::fs::canonicalize(workspace).await {
         Ok(p) => p,
-        Err(_) => {
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                // Resolution happens in the daemon's mount namespace, which in a
+                // sidecar deployment shows only the volumes it shares with the
+                // client — so a path the caller can see may still be absent here.
+                return Ok(error_resp(
+                    ErrorCode::InvalidPath,
+                    format!(
+                        "path does not exist in the daemon's mount namespace: {}. \
+                         In a sidecar deployment the workspace must live on a volume \
+                         shared with the daemon container.",
+                        workspace
+                    ),
+                ));
+            }
+            // A different failure (symlink loop, permission, I/O) means the path
+            // exists but cannot be resolved — report the real cause instead of
+            // pointing at the sidecar shared-volume layout.
             return Ok(error_resp(
                 ErrorCode::InvalidPath,
-                format!("path does not exist: {}", workspace),
+                format!("cannot resolve workspace path {}: {}", workspace, e),
             ));
         }
     };
@@ -730,6 +747,40 @@ mod tests {
         match resp {
             Response::Error { code, .. } => assert_eq!(code, ErrorCode::InvalidPath),
             _ => panic!("expected InvalidPath error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn init_symlink_loop_reports_resolution_error_not_shared_volume_hint() {
+        let state = Arc::new(DaemonState::new(
+            test_config(),
+            test_backend(),
+            test_state_dir(),
+        ));
+        // A self-referential symlink exists on disk (so it passes any lstat-based
+        // pre-check), but canonicalize cannot resolve it (ELOOP). The error must
+        // report the real resolution failure, not the sidecar "path does not
+        // exist in the daemon's mount namespace" hint, which would send users
+        // looking at their shared-volume layout for a symlink problem.
+        let tmpdir = tempfile::tempdir().unwrap();
+        let loop_link = tmpdir.path().join("loop");
+        tokio::fs::symlink("loop", &loop_link).await.unwrap();
+        let resp = init(&state, &loop_link.to_string_lossy()).await.unwrap();
+        match resp {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::InvalidPath);
+                assert!(
+                    message.contains("cannot resolve"),
+                    "expected a resolution error, got: {}",
+                    message
+                );
+                assert!(
+                    !message.contains("shared with the daemon container"),
+                    "must not point at the sidecar shared-volume layout: {}",
+                    message
+                );
+            }
+            other => panic!("expected InvalidPath error, got {:?}", other),
         }
     }
 

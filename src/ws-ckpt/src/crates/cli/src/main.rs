@@ -397,9 +397,19 @@ async fn run(cli: Cli) -> Result<()> {
             ws_ckpt_daemon::run_daemon(config).await?;
         }
         Commands::Init { workspace } => {
-            let request = Request::Init {
-                workspace: resolve_workspace_arg(&workspace),
-            };
+            let workspace = resolve_workspace_arg(&workspace);
+            // Catch a plain missing path here so the caller gets that answer
+            // instead of the daemon's namespace-scoped one, which has to hedge
+            // about shared volumes. symlink_metadata, not exists(): a dangling
+            // workspace symlink is the daemon's re-init recovery path. Only
+            // NotFound is conclusive — the daemon is privileged and may reach
+            // paths this process cannot stat, so any other error goes to it.
+            if let Err(e) = std::fs::symlink_metadata(&workspace) {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    anyhow::bail!("path does not exist: {}", workspace);
+                }
+            }
+            let request = Request::Init { workspace };
             let response = send_request_to_daemon(&request).await?;
             handle_response(response, &request).await?;
         }
@@ -668,7 +678,7 @@ async fn send_request_to_daemon(request: &Request) -> Result<Response> {
         match e.kind() {
             std::io::ErrorKind::NotFound => {
                 eprintln!("\x1b[31m\u{2717} Daemon is not running.\x1b[0m");
-                eprintln!("  Start it with 'systemctl start ws-ckpt'.");
+                eprintln!("  Start the systemd service `ws-ckpt`, or its daemon container.");
                 process::exit(1);
             }
             std::io::ErrorKind::ConnectionRefused => {
