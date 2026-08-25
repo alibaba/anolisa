@@ -748,6 +748,9 @@ fn raw_relay_zsh_handoff_keeps_an_export_attribute_change_the_command_made() {
     config.native_mode = false;
     pin_pager_env(&mut config, "user-git-pager");
     let input = DelayedInput::new(vec![
+        // Wake the relay so the initial observer can stage the handoff before
+        // the first assertion-bearing command reaches the PTY.
+        (b"\n".to_vec(), Duration::from_millis(100)),
         (
             b"printf 'pager-after=%s\\n' \"${PAGER-unset}\"\n".to_vec(),
             Duration::from_millis(4_000),
