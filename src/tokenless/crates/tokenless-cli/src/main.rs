@@ -10,7 +10,7 @@ use std::process;
 use std::sync::Arc;
 use tokenless_ccr::{SqliteStore, StashStore};
 use tokenless_runtime::{
-    CompressOptions, CompressionDisposition, MAX_INPUT_BYTES, compress_response_with_store,
+    CompressOptions, CompressResult, Disposition, MAX_INPUT_BYTES, compress_response_with_store,
     compress_toon, retrieve_from_store,
 };
 use tokenless_schema::SchemaCompressor;
@@ -641,7 +641,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                     result.stash_errors.expect("checked Some above")
                 );
             }
-            if result.disposition == CompressionDisposition::NoSavings {
+            if result.disposition == Disposition::NoSavings {
                 eprintln!(
                     "tokenless: response compression did not reduce size ({} -> {} est. tokens), outputting original",
                     result.before_tokens, result.after_tokens
@@ -649,11 +649,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
             }
 
             let mode = resolve_mode(compression_on, result.before_tokens, result.after_tokens);
-            let output_text = if result.disposition == CompressionDisposition::NoSavings {
-                input.clone()
-            } else {
-                result.compressed_output.clone()
-            };
+            let output_text = stats_after_text(&result, &input);
             println!("{}", result.output);
 
             record_compression_stats(
@@ -904,7 +900,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
                 };
                 (error.to_string(), code)
             })?;
-            if result.disposition == CompressionDisposition::NoSavings {
+            if result.disposition == Disposition::NoSavings {
                 eprintln!(
                     "tokenless: TOON encoding did not reduce size ({} -> {} est. tokens), outputting original JSON",
                     result.before_tokens, result.after_tokens
@@ -916,11 +912,7 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
 
             // Recorded `after` = the predicted TOON result (or original when
             // TOON did not reduce size), so dry-run captures the prediction.
-            let record_after = if result.disposition == CompressionDisposition::NoSavings {
-                input.clone()
-            } else {
-                result.compressed_output
-            };
+            let record_after = stats_after_text(&result, &input);
             let database_paths = DatabasePathResolver::default();
             record_compression_stats(
                 &config,
@@ -963,6 +955,21 @@ fn run_command(command: Commands) -> Result<(), (String, i32)> {
     }
 
     Ok(())
+}
+
+/// Text recorded as the statistics "after" side for one compression result.
+///
+/// Only `Applied` and `DryRun` measure the candidate. Every other
+/// disposition (no-savings, timeout, passthrough, reversibility, error)
+/// emitted the original, so recording the discarded candidate would book
+/// savings that never reached the model. Mirrors the Runtime's
+/// `record_stats` selection; `record_compression_stats` then skips records
+/// whose after side is not smaller.
+fn stats_after_text(result: &CompressResult, input: &str) -> String {
+    match result.disposition {
+        Disposition::Applied | Disposition::DryRun => result.compressed_output.clone(),
+        _ => input.to_string(),
+    }
 }
 
 /// Resolve the recording mode from the compression toggle.

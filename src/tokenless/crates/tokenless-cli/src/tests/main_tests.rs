@@ -1672,3 +1672,43 @@ fn run_command_compress_response_with_stash_truncation() {
     // Compression with stash enabled and aggressive truncation succeeds.
     assert!(result.is_ok());
 }
+
+#[test]
+fn stats_after_text_records_the_candidate_only_when_it_was_measured() {
+    let result_with = |disposition: Disposition| CompressResult {
+        output: "original".to_string(),
+        compressed_output: "candidate".to_string(),
+        disposition,
+        before_tokens: 10,
+        after_tokens: 4,
+        stash_writes: None,
+        stash_errors: None,
+        unrecoverable_truncations: None,
+        stash_size: None,
+    };
+
+    // Applied and dry-run measured the candidate; dry-run is what keeps
+    // A/B prediction records alive.
+    for disposition in [Disposition::Applied, Disposition::DryRun] {
+        assert_eq!(
+            stats_after_text(&result_with(disposition), "original"),
+            "candidate"
+        );
+    }
+    // Every rejection emitted the original: recording the discarded
+    // candidate would book savings that never reached the model. Timeout
+    // is the regression case — the pipeline keeps the candidate text for
+    // the legacy measurement channel even though the output fell back.
+    for disposition in [
+        Disposition::NoSavings,
+        Disposition::Timeout,
+        Disposition::Passthrough,
+        Disposition::ReversibilityUnavailable,
+        Disposition::Error,
+    ] {
+        assert_eq!(
+            stats_after_text(&result_with(disposition), "original"),
+            "original"
+        );
+    }
+}

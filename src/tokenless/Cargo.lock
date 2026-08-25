@@ -889,10 +889,13 @@ dependencies = [
 name = "tokenless-runtime"
 version = "0.7.12"
 dependencies = [
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokenless-ccr",
+ "tokenless-pipeline",
+ "tokenless-protocol",
  "tokenless-schema",
  "tokenless-stats",
  "toon-format",

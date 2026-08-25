@@ -110,12 +110,24 @@ fn stage_and_cost_orderings_match_the_escalation_ladder() {
 }
 
 #[test]
-// The emptiness is exactly what this test locks in, so the "always true"
-// lint is expected until the first compressor migrates behind the registry.
-#[allow(clippy::const_is_empty)]
-fn production_registry_starts_empty() {
+fn production_registry_lists_exactly_the_implemented_compressors() {
     // Entries land together with the compressor that implements them, never
-    // speculatively. This assertion is updated by the change that migrates
-    // the first compressor behind the registry.
-    assert!(REGISTRY.is_empty());
+    // speculatively. The response cleanup (roadmap §5.3) is the first one.
+    assert_eq!(
+        REGISTRY.iter().map(|spec| spec.id).collect::<Vec<_>>(),
+        ["response-cleanup"]
+    );
+    assert_eq!(RESPONSE_CLEANUP.stage, Stage::RetrievableLossy);
+    // Routing requires only output replacement: without a stash the cleanup
+    // degrades (and arbitration enforces required reversibility), so a
+    // missing retrieve tool must not filter it out.
+    assert!(RESPONSE_CLEANUP.matches(
+        ContentType::JsonRecords,
+        Seam::PostTool,
+        Capabilities {
+            replace_output: true,
+            publish_retrieve_tool: false,
+        },
+    ));
+    assert!(!RESPONSE_CLEANUP.matches(ContentType::JsonRecords, Seam::PostTool, NONE));
 }

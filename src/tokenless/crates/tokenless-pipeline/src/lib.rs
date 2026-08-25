@@ -12,10 +12,11 @@
 //! - [`Compressor`] and [`run`]: the executable compressor interface and
 //!   the staged escalation engine with end-to-end arbitration.
 //!
-//! Until existing compressors move behind the registry, [`REGISTRY`] is
-//! empty and nothing routes through this crate. The roadmap section numbers
-//! refer to the tokenless evolution roadmap, which has not landed in this
-//! repository yet.
+//! [`REGISTRY`] lists the production compressors; the first entry is the
+//! existing JSON response cleanup ([`RESPONSE_CLEANUP`]), whose executable
+//! implementation lives with the Runtime that owns its stash and per-call
+//! configuration. The roadmap section numbers refer to the tokenless
+//! evolution roadmap, which has not landed in this repository yet.
 
 mod content;
 mod pipeline;
@@ -23,4 +24,4 @@ mod registry;
 
 pub use content::{ContentType, detect};
 pub use pipeline::{CompressError, CompressOutcome, Compressor, PipelineConfig, run};
-pub use registry::{CompressorSpec, CostClass, REGISTRY, Stage, candidates};
+pub use registry::{CompressorSpec, CostClass, REGISTRY, RESPONSE_CLEANUP, Stage, candidates};

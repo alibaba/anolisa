@@ -76,10 +76,33 @@ impl CompressorSpec {
     }
 }
 
-/// The production registry. Empty until existing compressors move behind
-/// the registry interface; entries are appended with the compressor that
+/// Routing spec of the existing JSON response cleanup (roadmap §5.3): the
+/// structural cleanup and truncation pass that predates the pipeline. Its
+/// [`Compressor`](crate::Compressor) implementation lives with the Runtime,
+/// which owns the stash and per-call configuration; its `spec()` returns a
+/// reference to this spec so the registry entry and the implementation
+/// cannot drift.
+///
+/// Registered as retrievable-lossy: truncated content is stashed and
+/// marker-referenced when a stash store is attached. Only `replace_output`
+/// is required — the compressor degrades to a lossless-only claim or an
+/// unrecoverable one depending on what it actually removed, and required
+/// reversibility is enforced by arbitration, not by routing.
+pub const RESPONSE_CLEANUP: CompressorSpec = CompressorSpec {
+    id: "response-cleanup",
+    content_types: &[ContentType::JsonRecords],
+    seams: &[Seam::PostTool],
+    required_capabilities: Capabilities {
+        replace_output: true,
+        publish_retrieve_tool: false,
+    },
+    stage: Stage::RetrievableLossy,
+    cost_class: CostClass::Moderate,
+};
+
+/// The production registry. Entries are appended with the compressor that
 /// implements them, never speculatively.
-pub const REGISTRY: &[CompressorSpec] = &[];
+pub const REGISTRY: &[CompressorSpec] = &[RESPONSE_CLEANUP];
 
 /// Filters `registry` down to the candidates for one request, preserving
 /// registration order (the pipeline groups by [`Stage`] on top of it).

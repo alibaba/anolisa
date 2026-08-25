@@ -930,3 +930,43 @@ fn test_array_tail_preserve_budget_wrapping_by_one_keeps_all() {
     assert_eq!(r[0].as_str().unwrap(), "a");
     assert_eq!(r[4].as_str().unwrap(), "e");
 }
+
+#[test]
+fn truncations_count_events_with_or_without_a_store() {
+    let compressor = ResponseCompressor::new()
+        .with_truncate_strings_at(10)
+        .with_truncate_arrays_at(1)
+        .with_array_tail_preserve(0);
+    compressor.compress(&json!({ "text": "x".repeat(40) }));
+    assert_eq!(compressor.truncations(), 1);
+    compressor.compress(&json!({ "items": ["a", "b", "c"] }));
+    assert_eq!(compressor.truncations(), 1);
+    // Dropped fields, nulls, and empties are cleanup, not truncation; the
+    // counter resets per call.
+    compressor.compress(&json!({ "keep": 1, "drop": null, "debug": "x" }));
+    assert_eq!(compressor.truncations(), 0);
+
+    let depth_limited = ResponseCompressor::new().with_max_depth(0);
+    depth_limited.compress(&json!({ "deep": { "leaf": 1 } }));
+    assert_eq!(depth_limited.truncations(), 1);
+}
+
+#[test]
+fn take_stash_writes_exposes_the_raw_events_without_breaking_rollback() {
+    use tokenless_ccr::InMemoryStore;
+
+    let store = Arc::new(InMemoryStore::new());
+    let compressor = ResponseCompressor::new()
+        .with_truncate_strings_at(80)
+        .with_stash_store(store.clone());
+    compressor.compress(&json!({ "tail": "x".repeat(400) }));
+
+    let writes = compressor.take_stash_writes();
+    assert_eq!(writes.len(), 1);
+    assert!(writes[0].created);
+    // Taking drains the events but leaves this compressor's own rollback
+    // bookkeeping intact.
+    assert!(compressor.take_stash_writes().is_empty());
+    assert_eq!(compressor.rollback_stash_writes(), 1);
+    assert_eq!(store.len(), 0);
+}

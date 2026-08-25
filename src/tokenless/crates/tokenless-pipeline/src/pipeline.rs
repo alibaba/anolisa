@@ -31,9 +31,10 @@ use crate::content::{ContentType, detect};
 use crate::registry::{CompressorSpec, Stage};
 
 /// One executable compression step. [`crate::CompressorSpec`] is the routing
-/// metadata; this trait is the behavior behind it. Existing compressors
-/// migrate onto it starting with the response cleanup (roadmap §5.3); until
-/// then only test doubles implement it.
+/// metadata; this trait is the behavior behind it. The first production
+/// implementation is the response cleanup (roadmap §5.3), registered as
+/// [`crate::RESPONSE_CLEANUP`] and implemented where the Runtime owns its
+/// stash and per-call configuration.
 pub trait Compressor {
     /// The routing spec this compressor registers under.
     fn spec(&self) -> &CompressorSpec;
@@ -43,7 +44,11 @@ pub trait Compressor {
     /// `stash` is present when the host can actually retrieve stashed
     /// payloads. A retrievable-lossy compressor records every write in
     /// [`CompressOutcome::stash_writes`], which is what lets the pipeline
-    /// roll them back when the end-to-end candidate is rejected.
+    /// roll them back when the end-to-end candidate is rejected. Every
+    /// reported write must target the store [`run`] was given — rollback
+    /// and marker-presence commits go through that store, so writes routed
+    /// anywhere else (e.g. a store attached at construction that differs
+    /// from the caller's) would leak on rejection.
     ///
     /// # Errors
     ///

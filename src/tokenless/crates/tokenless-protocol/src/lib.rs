@@ -190,10 +190,10 @@ impl CompressionRequest {
 /// shared vocabulary the M1 exit gate requires CLI and Runtime to agree on
 /// (roadmap §5.6).
 ///
-/// The Runtime's pre-protocol `CompressionDisposition::as_str` still prints
-/// kebab-case (`dry-run`, `no-savings`); the Runtime-integration change is
-/// expected to align those user-visible strings to these snake_case wire
-/// values rather than fork the vocabulary further.
+/// The Runtime shares this enum directly (its pre-protocol
+/// `CompressionDisposition` retired when response compression moved behind
+/// the registry), so user-visible strings come from [`Disposition::wire_str`]
+/// and cannot fork from the wire values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Disposition {
@@ -219,6 +219,23 @@ pub enum Disposition {
     /// An optional compression step failed; the original is preserved and
     /// a bounded diagnostic is recorded (roadmap principle 6).
     Error,
+}
+
+impl Disposition {
+    /// The `snake_case` wire name, identical to this enum's serde encoding.
+    /// The stable vocabulary for language bindings, logs, and statistics.
+    #[must_use]
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::DryRun => "dry_run",
+            Self::Passthrough => "passthrough",
+            Self::NoSavings => "no_savings",
+            Self::ReversibilityUnavailable => "reversibility_unavailable",
+            Self::Timeout => "timeout",
+            Self::Error => "error",
+        }
+    }
 }
 
 /// Recovery state of an applied transformation (roadmap principle 5).

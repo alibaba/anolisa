@@ -1,18 +1,34 @@
 //! Stateful application API shared by Tokenless frontends.
 //!
-//! The runtime composes response compression, reversible SQLite stash, and
-//! statistics without depending on a command-line or language-binding layer.
+//! The runtime composes the shared compression pipeline, reversible SQLite
+//! stash, and statistics without depending on a command-line or
+//! language-binding layer. Response compression routes through
+//! [`tokenless_pipeline::run`], with the existing cleanup registered as the
+//! first entry of the production registry (roadmap §5.3).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use thiserror::Error;
-use tokenless_ccr::{SqliteStore, StashStore, extract_hash, is_valid_hash};
+use tokenless_ccr::{SqliteStore, StashError, StashStore, StashWrite, extract_hash, is_valid_hash};
+use tokenless_pipeline::PipelineConfig;
+use tokenless_protocol::{Capabilities, CompressionRequest, Seam};
 use tokenless_schema::{ResponseCompressor, SchemaCompressor};
 use tokenless_stats::{
     CompressionMode, OperationType, SlsWriter, StatsRecord, StatsRecorder, ensure_state_dir,
     estimate_tokens, get_home_dir, resolve_data_dir, validate_data_dir, validate_database_path,
 };
+
+mod response_cleanup;
+
+use response_cleanup::ResponseCleanup;
+
+/// Why a compression attempt did or did not replace the input: the protocol
+/// disposition vocabulary, re-exported verbatim so CLI, Runtime, and
+/// language bindings share one set of names and wire strings (roadmap §5.6).
+pub use tokenless_protocol::Disposition;
 
 /// Maximum accepted response size, matching the standalone CLI input limit.
 pub const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
@@ -100,40 +116,19 @@ impl Attribution {
     }
 }
 
-/// Why a compression attempt did or did not replace the input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompressionDisposition {
-    /// The compressed response is returned to the caller.
-    Applied,
-    /// Compression was calculated for measurement but the original is returned.
-    DryRun,
-    /// The candidate did not reduce the estimated token count.
-    NoSavings,
-    /// Reversible output was required but stash was unavailable or failed.
-    ReversibilityUnavailable,
-}
-
-impl CompressionDisposition {
-    /// Stable lowercase name suitable for language bindings and logs.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Applied => "applied",
-            Self::DryRun => "dry-run",
-            Self::NoSavings => "no-savings",
-            Self::ReversibilityUnavailable => "reversibility-unavailable",
-        }
-    }
-}
-
 /// Structured response from one compression attempt.
 #[derive(Debug, Clone)]
 pub struct CompressResult {
     /// Text that the caller should pass to the model.
     pub output: String,
-    /// Compact candidate calculated before dry-run or fail-open policy.
+    /// Compact candidate calculated before dry-run or fail-open policy; the
+    /// original input when no candidate ran (passthrough, timeout, error).
+    /// Retained as the legacy measurement channel — dry-run statistics
+    /// record the predicted candidate from it — and scheduled for removal
+    /// with the statistics migration (roadmap §5.5).
     pub compressed_output: String,
     /// Policy decision applied to the candidate.
-    pub disposition: CompressionDisposition,
+    pub disposition: Disposition,
     /// Estimated tokens in the original input.
     pub before_tokens: usize,
     /// Estimated tokens in `compressed_output`.
@@ -152,7 +147,7 @@ pub struct CompressResult {
 impl CompressResult {
     /// Whether the caller-visible output is the compressed candidate.
     pub fn applied(&self) -> bool {
-        self.disposition == CompressionDisposition::Applied
+        self.disposition == Disposition::Applied
     }
 }
 
@@ -277,8 +272,7 @@ impl TokenlessRuntime {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError`] for oversized or invalid JSON input, or if the
-    /// compact response cannot be serialized.
+    /// Returns [`RuntimeError`] for oversized or invalid JSON input.
     pub fn compress_response(
         &self,
         input: &str,
@@ -384,11 +378,10 @@ impl TokenlessRuntime {
             return;
         }
         let (after, after_tokens) = match result.disposition {
-            CompressionDisposition::Applied | CompressionDisposition::DryRun => {
+            Disposition::Applied | Disposition::DryRun => {
                 (result.compressed_output.as_str(), result.after_tokens)
             }
-            CompressionDisposition::NoSavings
-            | CompressionDisposition::ReversibilityUnavailable => (input, result.before_tokens),
+            _ => (input, result.before_tokens),
         };
         let before_tokens = result.before_tokens;
         if after_tokens >= before_tokens {
@@ -457,15 +450,15 @@ pub fn compress_schema_with_store(
     let after_tokens = estimate_tokens(&compressed_output);
     let compression_stash_errors = attached_store.map(|_| compressor.stash_errors());
     let disposition = if after_tokens >= before_tokens {
-        CompressionDisposition::NoSavings
+        Disposition::NoSavings
     } else if !compression_enabled {
-        CompressionDisposition::DryRun
+        Disposition::DryRun
     } else if attached_store.is_none() || compression_stash_errors.is_some_and(|count| count > 0) {
-        CompressionDisposition::ReversibilityUnavailable
+        Disposition::ReversibilityUnavailable
     } else {
-        CompressionDisposition::Applied
+        Disposition::Applied
     };
-    let (stash_writes, stash_errors) = if disposition != CompressionDisposition::Applied {
+    let (stash_writes, stash_errors) = if disposition != Disposition::Applied {
         compressor.rollback_stash_writes();
         (
             attached_store.map(|_| compressor.stash_writes()),
@@ -480,7 +473,7 @@ pub fn compress_schema_with_store(
         metrics
     };
     let stash_size = attached_store.map(|store| store.len());
-    let output = if disposition == CompressionDisposition::Applied {
+    let output = if disposition == Disposition::Applied {
         compressed_output.clone()
     } else {
         input.to_string()
@@ -517,13 +510,13 @@ pub fn compress_toon(
     let before_tokens = estimate_tokens(input);
     let after_tokens = estimate_tokens(&compressed_output);
     let disposition = if compressed_output.is_empty() || after_tokens >= before_tokens {
-        CompressionDisposition::NoSavings
+        Disposition::NoSavings
     } else if !compression_enabled {
-        CompressionDisposition::DryRun
+        Disposition::DryRun
     } else {
-        CompressionDisposition::Applied
+        Disposition::Applied
     };
-    let output = if disposition == CompressionDisposition::Applied {
+    let output = if disposition == Disposition::Applied {
         compressed_output.clone()
     } else {
         input.to_string()
@@ -550,15 +543,71 @@ fn validate_input_size(input: &str) -> Result<(), RuntimeError> {
     Ok(())
 }
 
+/// Overall pipeline budget for one response compression. The pre-pipeline
+/// path had no timeout; this bound honors the one-budget contract (roadmap
+/// §5.3) while sitting far above any observed in-process compression time,
+/// so it only fires on pathological input. Timeout is fail-open: the
+/// original content is returned.
+const RESPONSE_PIPELINE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Forwards to the caller's store while counting the pipeline ledger's
+/// deletes, which is what keeps `CompressResult`'s legacy stash metrics on
+/// their pre-pipeline semantics: `stash_writes` reports the rows still live
+/// after a rollback, and a failed rollback delete surfaces in
+/// `stash_errors` so the CLI's stash-health warning still fires on orphaned
+/// rows.
+struct DeleteTracking<'a> {
+    inner: &'a dyn StashStore,
+    // Atomics because `StashStore` is `Sync`; this tracker never actually
+    // crosses threads within one compress call.
+    removed: AtomicUsize,
+    failed: AtomicUsize,
+}
+
+impl StashStore for DeleteTracking<'_> {
+    fn stash(&self, payload: &str) -> Result<StashWrite, StashError> {
+        self.inner.stash(payload)
+    }
+
+    fn retrieve(&self, hash: &str) -> Result<Option<String>, StashError> {
+        self.inner.retrieve(hash)
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn evict_expired(&self) -> Result<usize, StashError> {
+        self.inner.evict_expired()
+    }
+
+    fn delete(&self, hash: &str, generation: u64) -> Result<bool, StashError> {
+        let result = self.inner.delete(hash, generation);
+        match &result {
+            Ok(true) => {
+                self.removed.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(false) => {}
+            Err(_) => {
+                self.failed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        result
+    }
+}
+
 /// Compress a response using an optional caller-owned stash store.
 ///
-/// CLI and embedded frontends use this function to share candidate selection,
-/// no-savings fallback, dry-run behavior, and reversible fail-open policy.
+/// CLI and embedded frontends use this function to share the pipeline's
+/// routing, staged execution, and end-to-end arbitration (roadmap §4.3):
+/// no-savings fallback, dry-run behavior, reversibility policy, timeout,
+/// and stash rollback all come from [`tokenless_pipeline::run`]. A failing
+/// compression step is fail-open and reported through the disposition, not
+/// as an error.
 ///
 /// # Errors
 ///
-/// Returns [`RuntimeError`] for oversized or invalid JSON input, or if the
-/// compact response cannot be serialized.
+/// Returns [`RuntimeError`] for oversized or invalid JSON input.
 pub fn compress_response_with_store(
     input: &str,
     options: &CompressOptions,
@@ -566,7 +615,11 @@ pub fn compress_response_with_store(
     stash_store: Option<&Arc<dyn StashStore>>,
 ) -> Result<CompressResult, RuntimeError> {
     validate_input_size(input)?;
-    let value: serde_json::Value = serde_json::from_str(input)?;
+    // Boundary contract: response input must be JSON. The pipeline itself
+    // routes non-JSON content to passthrough, so this validation is what
+    // keeps invalid input a structured error for the CLI and bindings.
+    serde_json::from_str::<serde::de::IgnoredAny>(input)?;
+
     let mut compressor = ResponseCompressor::new();
     if let Some(value) = options.truncate_strings_at {
         compressor = compressor.with_truncate_strings_at(value);
@@ -581,6 +634,9 @@ pub fn compress_response_with_store(
         compressor = compressor.with_max_depth(value);
     }
 
+    // In dry-run no store is attached at all — the measured candidate is
+    // never emitted, so writing stash rows (even rolled-back ones) would be
+    // pure churn.
     let attached_store = if options.stash_enabled && compression_enabled {
         stash_store
     } else {
@@ -589,45 +645,65 @@ pub fn compress_response_with_store(
     if let Some(store) = attached_store {
         compressor = compressor.with_stash_store(Arc::clone(store));
     }
+    let adapter = ResponseCleanup::new(compressor, attached_store.is_some());
 
-    let compressed_value = compressor.compress(&value);
-    let compressed_output =
-        serde_json::to_string(&compressed_value).map_err(RuntimeError::Serialize)?;
+    // Attribution reaches statistics separately until the §5.5 migration;
+    // the in-process request carries no frontend identity.
+    let mut request = CompressionRequest::new(input, "", Seam::PostTool);
+    request.capabilities = Capabilities {
+        replace_output: true,
+        publish_retrieve_tool: attached_store.is_some(),
+    };
+    let config = PipelineConfig {
+        timeout: RESPONSE_PIPELINE_TIMEOUT,
+        // The pre-pipeline policy is "always try to shrink": a permanently
+        // unmet size target keeps the cleanup's retrievable-lossy stage on.
+        max_tokens: Some(0),
+        // Reversibility is enforced only when something would be emitted;
+        // in dry-run the pre-pipeline precedence (dry-run wins) applies.
+        require_reversibility: options.require_reversible
+            && options.stash_enabled
+            && compression_enabled,
+        dry_run: !compression_enabled,
+    };
+    let tracker = attached_store.map(|store| DeleteTracking {
+        inner: store.as_ref(),
+        removed: AtomicUsize::new(0),
+        failed: AtomicUsize::new(0),
+    });
+    let response = tokenless_pipeline::run(
+        &request,
+        &[&adapter],
+        tracker.as_ref().map(|tracker| tracker as &dyn StashStore),
+        &config,
+    );
+
+    // Legacy measurement channel (see `CompressResult::compressed_output`):
+    // the candidate the adapter produced, or the original when none ran.
+    let compressed_output = adapter
+        .take_candidate()
+        .unwrap_or_else(|| input.to_string());
+    // Both counts run the shared estimator locally, mirroring each other;
+    // this also avoids converting the response's u64 counts back to usize.
     let before_tokens = estimate_tokens(input);
     let after_tokens = estimate_tokens(&compressed_output);
-    let unrecoverable_truncations = attached_store.map(|_| compressor.unrecoverable_truncations());
-
-    let disposition = if after_tokens >= before_tokens {
-        CompressionDisposition::NoSavings
-    } else if !compression_enabled {
-        CompressionDisposition::DryRun
-    } else if options.require_reversible
-        && options.stash_enabled
-        && (attached_store.is_none() || unrecoverable_truncations.is_some_and(|count| count > 0))
-    {
-        CompressionDisposition::ReversibilityUnavailable
-    } else {
-        CompressionDisposition::Applied
-    };
-    // Discarded compressed output never reaches the LLM, so roll back stash
-    // keys created during this compress — otherwise markers live only in
-    // `compressed_output` and orphan stash rows.
-    if disposition != CompressionDisposition::Applied {
-        compressor.rollback_stash_writes();
-    }
-    let stash_writes = attached_store.map(|_| compressor.stash_writes());
-    let stash_errors = attached_store.map(|_| compressor.stash_errors());
+    // Rows still live after the ledger's rollback and orphan-commit deletes,
+    // and write/delete failures combined — the pre-pipeline metric contract.
+    let stash_writes = tracker.as_ref().map(|tracker| {
+        adapter
+            .stash_writes()
+            .saturating_sub(tracker.removed.load(Ordering::Relaxed))
+    });
+    let stash_errors = tracker
+        .as_ref()
+        .map(|tracker| adapter.stash_errors() + tracker.failed.load(Ordering::Relaxed));
+    let unrecoverable_truncations = attached_store.map(|_| adapter.unrecoverable_truncations());
     let stash_size = attached_store.map(|store| store.len());
-    let output = if disposition == CompressionDisposition::Applied {
-        compressed_output.clone()
-    } else {
-        input.to_string()
-    };
 
     Ok(CompressResult {
-        output,
+        output: response.output,
         compressed_output,
-        disposition,
+        disposition: response.disposition,
         before_tokens,
         after_tokens,
         stash_writes,
@@ -752,16 +828,13 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(
-            result.disposition,
-            CompressionDisposition::ReversibilityUnavailable,
-        );
+        assert_eq!(result.disposition, Disposition::ReversibilityUnavailable);
         assert_eq!(result.output, input);
     }
 
     #[test]
     fn reversible_policy_preserves_input_after_string_stash_failure() {
-        let input = serde_json::to_string(&"x".repeat(400)).unwrap();
+        let input = serde_json::to_string(&serde_json::json!({ "tail": "x".repeat(400) })).unwrap();
         let store = Arc::new(AlwaysFail) as Arc<dyn StashStore>;
         let result = compress_response_with_store(
             &input,
@@ -775,10 +848,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            result.disposition,
-            CompressionDisposition::ReversibilityUnavailable,
-        );
+        assert_eq!(result.disposition, Disposition::ReversibilityUnavailable);
         assert_eq!(result.output, input);
         assert_eq!(result.stash_errors, Some(1));
         assert_eq!(result.unrecoverable_truncations, Some(1));
@@ -803,10 +873,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            result.disposition,
-            CompressionDisposition::ReversibilityUnavailable,
-        );
+        assert_eq!(result.disposition, Disposition::ReversibilityUnavailable);
         assert_eq!(result.output, input);
         assert_eq!(result.stash_errors, Some(1));
         assert_eq!(result.unrecoverable_truncations, Some(1));
@@ -814,7 +881,7 @@ mod tests {
 
     #[test]
     fn reversible_policy_preserves_input_when_string_marker_cannot_fit() {
-        let input = serde_json::to_string(&"x".repeat(400)).unwrap();
+        let input = serde_json::to_string(&serde_json::json!({ "tail": "x".repeat(400) })).unwrap();
         let store = Arc::new(InMemoryStore::new()) as Arc<dyn StashStore>;
         let result = compress_response_with_store(
             &input,
@@ -828,10 +895,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            result.disposition,
-            CompressionDisposition::ReversibilityUnavailable,
-        );
+        assert_eq!(result.disposition, Disposition::ReversibilityUnavailable);
         assert_eq!(result.output, input);
         assert_eq!(result.stash_errors, Some(0));
         assert_eq!(result.unrecoverable_truncations, Some(1));
@@ -869,7 +933,7 @@ mod tests {
             Some(&store),
         )
         .unwrap();
-        assert_eq!(result.disposition, CompressionDisposition::DryRun);
+        assert_eq!(result.disposition, Disposition::DryRun);
         assert_eq!(result.output, input);
         assert_eq!(store.len(), 0);
         assert_eq!(result.stash_writes, None);
@@ -880,7 +944,7 @@ mod tests {
         let input = r#"{"value":1}"#;
         let result =
             compress_response_with_store(input, &CompressOptions::default(), true, None).unwrap();
-        assert_eq!(result.disposition, CompressionDisposition::NoSavings);
+        assert_eq!(result.disposition, Disposition::NoSavings);
         assert_eq!(result.output, input);
     }
 
@@ -898,10 +962,61 @@ mod tests {
             Some(&store),
         )
         .unwrap();
-        assert_eq!(result.disposition, CompressionDisposition::NoSavings);
+        assert_eq!(result.disposition, Disposition::NoSavings);
         assert_eq!(result.output, input);
         assert_eq!(store.len(), 0);
         assert_eq!(result.stash_writes, Some(0));
+    }
+
+    #[test]
+    fn rollback_delete_failures_surface_in_stash_errors() {
+        struct StashOkDeleteFails(InMemoryStore);
+
+        impl StashStore for StashOkDeleteFails {
+            fn stash(&self, payload: &str) -> Result<StashWrite, StashError> {
+                self.0.stash(payload)
+            }
+
+            fn retrieve(&self, hash: &str) -> Result<Option<String>, StashError> {
+                self.0.retrieve(hash)
+            }
+
+            fn len(&self) -> usize {
+                self.0.len()
+            }
+
+            fn evict_expired(&self) -> Result<usize, StashError> {
+                self.0.evict_expired()
+            }
+
+            fn delete(&self, _hash: &str, _generation: u64) -> Result<bool, StashError> {
+                Err(StashError::Backend("simulated delete failure".to_string()))
+            }
+        }
+
+        // Twelve short items: the truncation marker outgrows the removed
+        // tail, so the candidate is rejected as no-savings after stashing.
+        let input = r#"["a","b","c","d","e","f","g","h","i","j","k","l"]"#;
+        let store = Arc::new(StashOkDeleteFails(InMemoryStore::new())) as Arc<dyn StashStore>;
+        let result = compress_response_with_store(
+            input,
+            &CompressOptions {
+                truncate_arrays_at: Some(1),
+                array_tail_preserve: Some(0),
+                ..CompressOptions::default()
+            },
+            true,
+            Some(&store),
+        )
+        .unwrap();
+
+        assert_eq!(result.disposition, Disposition::NoSavings);
+        assert_eq!(result.output, input);
+        // The rollback delete failed: the orphaned row is still live and the
+        // failure is visible, so the CLI's stash-health warning fires.
+        assert_eq!(result.stash_writes, Some(1));
+        assert_eq!(result.stash_errors, Some(1));
+        assert_eq!(store.len(), 1);
     }
 
     #[test]
@@ -910,6 +1025,74 @@ mod tests {
             compress_response_with_store("not json", &CompressOptions::default(), true, None)
                 .unwrap_err();
         assert!(matches!(error, RuntimeError::InvalidJson(_)));
+    }
+
+    #[test]
+    fn non_record_json_passes_through_untouched() {
+        // Detection routes only record-shaped JSON ({...}/[...]) to the
+        // cleanup; a scalar root passes through, where the pre-pipeline path
+        // would truncate it. Deliberate: routing by detected content is the
+        // §4.2 contract, and non-record roots wait for their own compressor.
+        let input = serde_json::to_string(&"x".repeat(400)).unwrap();
+        let result = compress_response_with_store(
+            &input,
+            &CompressOptions {
+                truncate_strings_at: Some(80),
+                ..CompressOptions::default()
+            },
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.disposition, Disposition::Passthrough);
+        assert_eq!(result.output, input);
+        assert_eq!(result.after_tokens, result.before_tokens);
+    }
+
+    #[test]
+    fn pure_cleanup_savings_are_lossless_and_pass_required_reversibility() {
+        // Dropped debug fields, nulls, and empties keep the pre-pipeline
+        // judgment that they are cleanup, not content loss: with no
+        // truncation the candidate is lossless and applies even where
+        // reversible output is required and no stash exists. (The
+        // pre-pipeline path rejected exactly this combination.)
+        let input = serde_json::to_string(&serde_json::json!({
+            "value": 1,
+            "noise": null,
+            "debug": "x".repeat(200),
+        }))
+        .unwrap();
+        let result = compress_response_with_store(
+            &input,
+            &CompressOptions {
+                require_reversible: true,
+                ..CompressOptions::default()
+            },
+            true,
+            None,
+        )
+        .unwrap();
+        assert!(result.applied());
+        assert!(!result.output.contains("debug"));
+    }
+
+    #[test]
+    fn dry_run_wins_over_required_reversibility() {
+        let input = long_response();
+        let result = compress_response_with_store(
+            &input,
+            &CompressOptions {
+                truncate_arrays_at: Some(2),
+                require_reversible: true,
+                ..CompressOptions::default()
+            },
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.disposition, Disposition::DryRun);
+        assert_eq!(result.output, input);
+        assert!(result.after_tokens < result.before_tokens);
     }
 
     #[test]
@@ -1078,7 +1261,7 @@ mod tests {
         let input = r#"{"type":"function","function":{"name":"small","parameters":{}}}"#;
         let store = Arc::new(InMemoryStore::new()) as Arc<dyn StashStore>;
         let result = compress_schema_with_store(input, true, Some(&store)).unwrap();
-        assert_eq!(result.disposition, CompressionDisposition::NoSavings);
+        assert_eq!(result.disposition, Disposition::NoSavings);
         assert_eq!(result.output, input);
         assert_eq!(store.len(), 0);
     }
@@ -1097,7 +1280,7 @@ mod tests {
 
         let tiny = "null";
         let result = compress_toon(tiny, true).unwrap();
-        assert_eq!(result.disposition, CompressionDisposition::NoSavings);
+        assert_eq!(result.disposition, Disposition::NoSavings);
         assert_eq!(result.output, tiny);
     }
 

@@ -57,6 +57,14 @@ pub struct ResponseCompressor {
     /// the last `compress()` call. Includes backend failures and marker-budget
     /// limits without conflating the two causes.
     unrecoverable_truncations: Cell<usize>,
+    /// Total truncation events (string, array, depth) during the last
+    /// `compress()` call, counted whether or not a stash store is attached.
+    /// Zero means the call removed no content beyond dropped fields/nulls,
+    /// which lets callers report the candidate as lossless.
+    truncations: Cell<usize>,
+    /// Every successful stash write of the last `compress()` call, in order.
+    /// The pipeline's ledger consumes these to own rollback end-to-end.
+    stash_write_events: RefCell<Vec<StashWrite>>,
     /// Keys created during the last `compress()` call, mapped to the latest
     /// generation this call still owns. An in-compress refresh updates the
     /// generation only when `StashWrite::previous_generation` matches, so a
@@ -101,6 +109,8 @@ impl Default for ResponseCompressor {
             stash_writes: Cell::new(0),
             stash_errors: Cell::new(0),
             unrecoverable_truncations: Cell::new(0),
+            truncations: Cell::new(0),
+            stash_write_events: RefCell::new(Vec::new()),
             stash_keys_created: RefCell::new(HashMap::new()),
         }
     }
@@ -180,6 +190,8 @@ impl ResponseCompressor {
         self.stash_writes.set(0);
         self.stash_errors.set(0);
         self.unrecoverable_truncations.set(0);
+        self.truncations.set(0);
+        self.stash_write_events.borrow_mut().clear();
         self.stash_keys_created.borrow_mut().clear();
         let original_text = serde_json::to_string(response).unwrap_or_default();
         let result = self.compress_value(response, 0);
@@ -216,6 +228,21 @@ impl ResponseCompressor {
         self.unrecoverable_truncations.get()
     }
 
+    /// Total truncation events (string, array, depth) during the last
+    /// `compress()` call, with or without an attached stash. Zero means the
+    /// call removed nothing beyond dropped fields, nulls, and empty values.
+    pub fn truncations(&self) -> usize {
+        self.truncations.get()
+    }
+
+    /// Takes every successful stash write of the last `compress()` call, in
+    /// order. Callers that hand rollback to the pipeline's ledger consume
+    /// these instead of calling [`Self::rollback_stash_writes`]; taking them
+    /// does not affect this compressor's own rollback bookkeeping.
+    pub fn take_stash_writes(&self) -> Vec<StashWrite> {
+        std::mem::take(&mut *self.stash_write_events.borrow_mut())
+    }
+
     /// Delete stash entries created during the last `compress()` call.
     ///
     /// Call this when the compressed output (and its embedded markers) will
@@ -247,6 +274,7 @@ impl ResponseCompressor {
     }
 
     fn record_stash_success(&self, write: &StashWrite) {
+        self.stash_write_events.borrow_mut().push(write.clone());
         let mut pending = self.stash_keys_created.borrow_mut();
         if write.created {
             self.stash_writes.set(self.stash_writes.get() + 1);
@@ -278,6 +306,7 @@ impl ResponseCompressor {
     fn compress_value(&self, value: &Value, depth: usize) -> Value {
         // Check depth limit
         if depth > self.max_depth {
+            self.truncations.set(self.truncations.get() + 1);
             let type_name = match value {
                 Value::Null => "null",
                 Value::Bool(_) => "bool",
@@ -335,6 +364,7 @@ impl ResponseCompressor {
         if char_count <= self.truncate_strings_at {
             return Value::String(s.to_string());
         }
+        self.truncations.set(self.truncations.get() + 1);
 
         const LOSSY_MARKER: &str = "… (truncated)";
         let lossy_marker_len = LOSSY_MARKER.chars().count();
@@ -406,6 +436,9 @@ impl ResponseCompressor {
         // every index derived below stays within `arr`.
         let head_tail_budget = head_limit.saturating_add(self.array_tail_preserve);
         let truncate = arr.len() > head_limit && arr.len() > head_tail_budget;
+        if truncate {
+            self.truncations.set(self.truncations.get() + 1);
+        }
         // Tail preserves items from the end: the configured count when
         // truncation drops middle items, or the overflow beyond head_limit
         // when head+tail covers the array (no items lost).
@@ -477,7 +510,14 @@ impl ResponseCompressor {
         if dropped.is_empty() {
             return None;
         }
-        let payload = serde_json::to_string(dropped).ok()?;
+        let Ok(payload) = serde_json::to_string(dropped) else {
+            // Nothing was stashed, so the truncation is lossy despite the
+            // attached store — count it like the depth path does.
+            if self.stash_store.is_some() {
+                self.mark_unrecoverable_truncation();
+            }
+            return None;
+        };
         if payload.is_empty() {
             return None;
         }

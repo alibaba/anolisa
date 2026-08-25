@@ -33,7 +33,7 @@ struct PyCompressionResult {
 
 impl From<CompressResult> for PyCompressionResult {
     fn from(result: CompressResult) -> Self {
-        let disposition = result.disposition.as_str().to_string();
+        let disposition = result.disposition.wire_str().to_string();
         let applied = result.applied();
         Self {
             output: result.output,

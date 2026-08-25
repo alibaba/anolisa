@@ -207,6 +207,7 @@ fn all_seams_and_dispositions_round_trip() {
     ] {
         assert_eq!(serde_json::to_string(&disp).unwrap(), wire);
         assert_eq!(serde_json::from_str::<Disposition>(wire).unwrap(), disp);
+        assert_eq!(format!("\"{}\"", disp.wire_str()), wire);
     }
     for (rev, wire) in [
         (Reversibility::Lossless, "\"lossless\""),
