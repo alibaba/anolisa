@@ -96,7 +96,6 @@ jobs:
           retention-days: 28
 
   build_cosh_ng_prebuilt:
-    name: Build cosh-ng ${{ matrix.target-os }}-${{ matrix.target-arch }}
     needs: package
     if: needs.package.outputs.component == 'cosh-ng'
     permissions:
