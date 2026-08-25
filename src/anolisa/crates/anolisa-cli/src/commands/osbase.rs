@@ -1,17 +1,14 @@
-use std::path::Path;
+mod application;
 
 use clap::{Parser, Subcommand};
 
-use anolisa_core::osbase_install::{
-    self, OsbaseDomain, OsbaseInstallError, OsbaseInstallRequest, RegisterHandler,
-};
-use anolisa_core::system_helper::HelperRequest;
-use anolisa_platform::ipc::SYSTEM_HELPER_SOCKET;
-use anolisa_platform::privilege;
+use anolisa_core::execution::ExecutionIntent;
+use anolisa_core::osbase_install::{self, PhaseStatus};
 
 use crate::context::CliContext;
-use crate::helper_client::{HelperClient, HelperClientError};
 use crate::response::{CliError, render_json};
+
+use self::application::{SandboxOutcome, SandboxOutputEvent, SandboxRequest};
 
 #[derive(Parser)]
 pub struct OsbaseArgs {
@@ -179,134 +176,94 @@ fn handle_sandbox(command: SandboxCommands, ctx: &CliContext) -> Result<(), CliE
         return handle_sandbox_list(*json);
     }
 
-    let mode = osbase_preflight()?;
-    match command {
+    let request = match command {
         SandboxCommands::Install {
             target,
             dry_run,
             force,
             no_verify,
-        } => handle_sandbox_install(ctx, mode, target, dry_run, force, no_verify),
-        SandboxCommands::Uninstall { scenario, dry_run } => match mode {
-            ExecutionMode::ViaHelper(mut client) => {
-                eprintln!("[osbase] scenario: {scenario}");
-                let req = HelperRequest::OsbaseUninstall { scenario, dry_run };
-                send_helper_request(&mut client, &req, "osbase sandbox uninstall")
-            }
-            ExecutionMode::Direct => {
-                match osbase_install::execute_uninstall(&scenario, dry_run) {
-                    Ok(_msg) => {
-                        // Progress was already printed via eprintln! in the core.
-                        Ok(())
-                    }
-                    Err(err) => Err(map_osbase_err(err, "uninstall", &scenario)),
-                }
-            }
+        } => SandboxRequest::Install {
+            target,
+            intent: execution_intent(dry_run || ctx.dry_run),
+            force,
+            skip_verify: no_verify,
         },
-        SandboxCommands::Remove { target, purge, .. } => match mode {
-            ExecutionMode::ViaHelper(mut client) => {
-                let req = HelperRequest::OsbaseRemove {
-                    scenario: target,
-                    purge,
-                };
-                send_helper_request(&mut client, &req, "osbase sandbox remove")
-            }
-            ExecutionMode::Direct => Err(CliError::not_implemented(format!(
-                "osbase sandbox remove {target}"
-            ))),
+        SandboxCommands::Uninstall { scenario, dry_run } => SandboxRequest::Uninstall {
+            scenario,
+            intent: execution_intent(dry_run),
         },
+        SandboxCommands::Remove { target, purge, .. } => SandboxRequest::Remove { target, purge },
         SandboxCommands::List { .. } => unreachable!(),
-        SandboxCommands::Status { target, .. } => match mode {
-            ExecutionMode::ViaHelper(mut client) => {
-                let req = HelperRequest::OsbaseStatus { scenario: target };
-                send_helper_request(&mut client, &req, "osbase sandbox status")
-            }
-            ExecutionMode::Direct => Err(CliError::not_implemented("osbase sandbox status")),
-        },
+        SandboxCommands::Status { target, .. } => SandboxRequest::Status { target },
+    };
+    let mut output = render_sandbox_event;
+    let outcome = application::run(request, &mut output)?;
+    render_sandbox_outcome(outcome)
+}
+
+fn execution_intent(dry_run: bool) -> ExecutionIntent {
+    if dry_run {
+        ExecutionIntent::Plan
+    } else {
+        ExecutionIntent::Apply
     }
 }
 
-fn handle_sandbox_install(
-    ctx: &CliContext,
-    mode: ExecutionMode,
-    target: String,
-    dry_run: bool,
-    force: bool,
-    no_verify: bool,
-) -> Result<(), CliError> {
-    match mode {
-        ExecutionMode::ViaHelper(mut client) => {
-            let req = HelperRequest::OsbaseInstall {
-                scenario: target.clone(),
-                register_handler: "none".to_string(),
-                register_runtimeclass: false,
-                config_override: None,
-                set_default: false,
-                force,
-                skip_verify: no_verify,
-                dry_run: dry_run || ctx.dry_run,
-            };
-            eprintln!("[osbase] scenario: {target}");
-            send_helper_request(&mut client, &req, "osbase sandbox install")
-        }
-        ExecutionMode::Direct => {
-            let request = OsbaseInstallRequest {
-                domain: OsbaseDomain::Sandbox,
-                target: target.clone(),
-                register_handler: RegisterHandler::None,
-                register_runtimeclass: false,
-                config_override: None,
-                set_default: false,
-                force,
-                skip_verify: no_verify,
-                dry_run: dry_run || ctx.dry_run,
-            };
+fn render_sandbox_event(event: SandboxOutputEvent) {
+    match event {
+        SandboxOutputEvent::Scenario(scenario) => eprintln!("[osbase] scenario: {scenario}"),
+    }
+}
 
-            let env = anolisa_env::EnvService::detect();
-            match osbase_install::execute_install(&request, &env) {
-                Ok(outcome) => {
-                    if outcome.exit_code == 1 {
-                        // Phase failure — phases already printed to stderr by
-                        // the core.  Surface the failed phase in the error.
-                        let failed_phase = outcome
-                            .phases
-                            .iter()
-                            .rev()
-                            .find(|p| p.status == osbase_install::PhaseStatus::Failed);
-                        let reason = match failed_phase {
-                            Some(p) => format!(
-                                "phase '{}' failed: {}",
-                                p.name,
-                                p.message.as_deref().unwrap_or("unknown error")
-                            ),
-                            None => "install failed".to_string(),
-                        };
-                        for w in &outcome.warnings {
-                            eprintln!("[osbase] warning: {w}");
-                        }
-                        return Err(CliError::Runtime {
-                            command: format!("osbase sandbox install {target}"),
-                            reason,
-                        });
-                    }
-                    // exit_code 2 = degraded (non-fatal warnings already
-                    // printed to stderr by the core). CLI still returns
-                    // success so the user sees "install ok".
-                    if !outcome.warnings.is_empty() {
-                        eprintln!(
-                            "[osbase] install completed with {} warning(s)",
-                            outcome.warnings.len()
-                        );
-                    }
-                    // Print informational hints (not counted as warnings).
-                    for hint in &outcome.hints {
-                        eprintln!("[osbase] hint: {hint}");
-                    }
-                    Ok(())
-                }
-                Err(err) => Err(map_osbase_err(err, "install", &target)),
+fn render_sandbox_outcome(outcome: SandboxOutcome) -> Result<(), CliError> {
+    match outcome {
+        SandboxOutcome::Helper { command, outcome } => {
+            for line in outcome.message.lines() {
+                eprintln!("[osbase] {line}");
             }
+            if outcome.exit_code == 0 || outcome.exit_code == 2 {
+                if outcome.exit_code == 2 {
+                    eprintln!("[osbase] install completed with degraded status (non-fatal)");
+                }
+                return Ok(());
+            }
+            Err(CliError::Runtime {
+                command,
+                reason: format!("install failed (exit_code={})", outcome.exit_code),
+            })
         }
+        SandboxOutcome::DirectInstall { command, outcome } => {
+            if outcome.exit_code == 1 {
+                let failed_phase = outcome
+                    .phases
+                    .iter()
+                    .rev()
+                    .find(|phase| phase.status == PhaseStatus::Failed);
+                let reason = match failed_phase {
+                    Some(phase) => format!(
+                        "phase '{}' failed: {}",
+                        phase.name,
+                        phase.message.as_deref().unwrap_or("unknown error")
+                    ),
+                    None => "install failed".to_string(),
+                };
+                for warning in &outcome.warnings {
+                    eprintln!("[osbase] warning: {warning}");
+                }
+                return Err(CliError::Runtime { command, reason });
+            }
+            if !outcome.warnings.is_empty() {
+                eprintln!(
+                    "[osbase] install completed with {} warning(s)",
+                    outcome.warnings.len()
+                );
+            }
+            for hint in &outcome.hints {
+                eprintln!("[osbase] hint: {hint}");
+            }
+            Ok(())
+        }
+        SandboxOutcome::DirectUninstall => Ok(()),
     }
 }
 
@@ -334,244 +291,25 @@ fn handle_sandbox_list(json: bool) -> Result<(), CliError> {
     }
 }
 
-// ===========================================================================
-// Preflight
-// ===========================================================================
-
-/// Execution path for osbase operations.
-enum ExecutionMode {
-    /// Proxy execution via the privileged system-helper daemon.
-    ViaHelper(HelperClient),
-    /// Direct execution (process already has root privileges).
-    Direct,
-}
-
-fn osbase_preflight() -> Result<ExecutionMode, CliError> {
-    osbase_preflight_with(
-        || HelperClient::connect(Path::new(SYSTEM_HELPER_SOCKET)),
-        privilege::is_root(),
-    )
-}
-
-fn osbase_preflight_with<F>(connect: F, is_root: bool) -> Result<ExecutionMode, CliError>
-where
-    F: FnOnce() -> Result<HelperClient, HelperClientError>,
-{
-    // 1. Try connecting to the system-helper socket.
-    match connect() {
-        Ok(mut client) => {
-            // Perform version handshake.
-            let handshake = client
-                .handshake(env!("CARGO_PKG_VERSION"))
-                .map_err(|error| CliError::Runtime {
-                    command: "osbase".to_string(),
-                    reason: preflight_handshake_error(error),
-                })?;
-            if !handshake.compatible {
-                let cli_version = env!("CARGO_PKG_VERSION");
-                return Err(CliError::Runtime {
-                    command: "osbase".to_string(),
-                    reason: format!(
-                        "anolisa-system-helper version mismatch \
-                         (installed: {}, required: {cli_version}); \
-                         run 'sudo anolisa system setup' to upgrade",
-                        handshake.helper_version
-                    ),
-                });
-            }
-            Ok(ExecutionMode::ViaHelper(client))
-        }
-        Err(_) => {
-            // 2. Socket not available — check if we already have root.
-            if is_root {
-                Ok(ExecutionMode::Direct)
-            } else {
-                // 3. Non-root + no helper → actionable error.
-                let exe = std::env::current_exe()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| "anolisa".into());
-                Err(CliError::PermissionDenied {
-                    command: "osbase".to_string(),
-                    reason: "osbase requires root privileges and system-helper is not running"
-                        .to_string(),
-                    hint: Some(format!(
-                        "Either:\n  1. Install helper: sudo {exe} system setup\n  \
-                         2. Run directly: sudo {exe} osbase ..."
-                    )),
-                })
-            }
-        }
-    }
-}
-
-fn preflight_handshake_error(error: HelperClientError) -> String {
-    match error {
-        HelperClientError::Send { source, .. } => {
-            format!("failed to send handshake to system-helper: {source}")
-        }
-        HelperClientError::Receive { source, .. } => {
-            format!("failed to receive handshake from system-helper: {source}")
-        }
-        HelperClientError::Remote { .. } | HelperClientError::UnexpectedResponse { .. } => {
-            "system-helper returned unexpected handshake response".to_string()
-        }
-        HelperClientError::Connect { path, source } => {
-            format!("failed to connect to {}: {source}", path.display())
-        }
-    }
-}
-
-// ===========================================================================
-// Helper IPC utilities
-// ===========================================================================
-
-fn send_helper_request(
-    client: &mut HelperClient,
-    req: &HelperRequest,
-    command_label: &str,
-) -> Result<(), CliError> {
-    let outcome = client.execute(req).map_err(|error| CliError::Runtime {
-        command: command_label.to_string(),
-        reason: helper_operation_error(error),
-    })?;
-
-    if outcome.exit_code == 0 || outcome.exit_code == 2 {
-        // exit_code 0 = full success, 2 = degraded (non-fatal
-        // verify/state warnings). Both are reported as success;
-        // the core already printed diagnostics to stderr.
-        for line in outcome.message.lines() {
-            eprintln!("[osbase] {line}");
-        }
-        if outcome.exit_code == 2 {
-            eprintln!("[osbase] install completed with degraded status (non-fatal)");
-        }
-        Ok(())
-    } else {
-        // exit_code = 1 → phase failure.  Print the phase summary
-        // (from the helper response) before reporting the error so
-        // the user sees which phases passed and which failed.
-        for line in outcome.message.lines() {
-            eprintln!("[osbase] {line}");
-        }
-        Err(CliError::Runtime {
-            command: command_label.to_string(),
-            reason: format!("install failed (exit_code={})", outcome.exit_code),
-        })
-    }
-}
-
-fn helper_operation_error(error: HelperClientError) -> String {
-    match error {
-        HelperClientError::Send { source, .. } => {
-            format!("failed to send request to system-helper: {source}")
-        }
-        HelperClientError::Receive { source, .. } => {
-            format!("failed to receive response from system-helper: {source}")
-        }
-        HelperClientError::Remote { code, message, .. } => format!("[{code}] {message}"),
-        HelperClientError::UnexpectedResponse { response, .. } => {
-            format!("unexpected response from system-helper: {response:?}")
-        }
-        HelperClientError::Connect { path, source } => {
-            format!("failed to connect to {}: {source}", path.display())
-        }
-    }
-}
-
-// ===========================================================================
-// Error mapping
-// ===========================================================================
-
-fn map_osbase_err(err: OsbaseInstallError, action: &str, target: &str) -> CliError {
-    let command = format!("osbase sandbox {action} {target}");
-    match &err {
-        OsbaseInstallError::InvalidRequest { .. } | OsbaseInstallError::Unsupported(_) => {
-            CliError::InvalidArgument {
-                command,
-                reason: err.to_string(),
-            }
-        }
-        _ => CliError::Runtime {
-            command,
-            reason: err.to_string(),
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::io;
-    use std::path::PathBuf;
-
-    use anolisa_core::system_helper::HelperResponse;
+    use anolisa_core::osbase_install::{
+        OsbaseDomain, OsbaseInstallOutcome, PhaseResult, PhaseStatus,
+    };
 
     use super::*;
-    use crate::helper_client::ScriptedTransport;
-
-    fn client_with_responses(responses: Vec<HelperResponse>) -> HelperClient {
-        let (transport, _) =
-            ScriptedTransport::new(Vec::new(), responses.into_iter().map(Ok).collect());
-        HelperClient::with_transport(transport)
-    }
-
-    fn connect_error() -> HelperClientError {
-        HelperClientError::Connect {
-            path: PathBuf::from(SYSTEM_HELPER_SOCKET),
-            source: io::Error::new(io::ErrorKind::NotFound, "missing helper socket"),
-        }
-    }
-
-    #[test]
-    fn preflight_preserves_root_fallback_when_connection_fails() {
-        let root = osbase_preflight_with(|| Err(connect_error()), true).expect("root fallback");
-        assert!(matches!(root, ExecutionMode::Direct));
-
-        let error = match osbase_preflight_with(|| Err(connect_error()), false) {
-            Ok(_) => panic!("non-root connection failure must not fall back"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, CliError::PermissionDenied { .. }));
-    }
-
-    #[test]
-    fn preflight_preserves_handshake_compatibility() {
-        let compatible = client_with_responses(vec![HelperResponse::HandshakeOk {
-            helper_version: env!("CARGO_PKG_VERSION").to_string(),
-            compatible: true,
-        }]);
-        let mode = osbase_preflight_with(|| Ok(compatible), false).expect("compatible helper");
-        assert!(matches!(mode, ExecutionMode::ViaHelper(_)));
-
-        let incompatible = client_with_responses(vec![HelperResponse::HandshakeOk {
-            helper_version: "0.0.1".to_string(),
-            compatible: false,
-        }]);
-        let error = match osbase_preflight_with(|| Ok(incompatible), false) {
-            Ok(_) => panic!("incompatible helper must fail"),
-            Err(error) => error,
-        };
-        match error {
-            CliError::Runtime { reason, .. } => {
-                assert!(reason.contains("version mismatch"));
-                assert!(reason.contains("0.0.1"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
+    use crate::helper_client::HelperOperationOutcome;
 
     #[test]
     fn helper_operation_preserves_success_degraded_and_failure_codes() {
         for (exit_code, succeeds) in [(0, true), (2, true), (1, false)] {
-            let mut client = client_with_responses(vec![HelperResponse::Success {
-                message: "phase summary".to_string(),
-                exit_code,
-            }]);
-
-            let result = send_helper_request(
-                &mut client,
-                &HelperRequest::OsbaseStatus { scenario: None },
-                "osbase sandbox status",
-            );
+            let result = render_sandbox_outcome(SandboxOutcome::Helper {
+                command: "osbase sandbox status".to_string(),
+                outcome: HelperOperationOutcome {
+                    message: "phase summary".to_string(),
+                    exit_code,
+                },
+            });
 
             assert_eq!(result.is_ok(), succeeds, "exit code {exit_code}");
             if let Err(CliError::Runtime { reason, .. }) = result {
@@ -581,36 +319,36 @@ mod tests {
     }
 
     #[test]
-    fn helper_operation_maps_remote_and_unexpected_responses() {
-        let cases = [
-            (
-                HelperResponse::Error {
-                    code: "DENIED".to_string(),
-                    message: "no access".to_string(),
+    fn direct_install_preserves_success_degraded_and_phase_failure() {
+        for (exit_code, phase_status, succeeds) in [
+            (0, PhaseStatus::Success, true),
+            (2, PhaseStatus::Degraded, true),
+            (1, PhaseStatus::Failed, false),
+        ] {
+            let result = render_sandbox_outcome(SandboxOutcome::DirectInstall {
+                command: "osbase sandbox install runc".to_string(),
+                outcome: OsbaseInstallOutcome {
+                    domain: OsbaseDomain::Sandbox,
+                    target: "runc".to_string(),
+                    phases: vec![PhaseResult {
+                        name: "verify".to_string(),
+                        status: phase_status,
+                        message: Some("verification failed".to_string()),
+                        duration_ms: None,
+                    }],
+                    exit_code,
+                    warnings: if exit_code == 0 {
+                        Vec::new()
+                    } else {
+                        vec!["warning".to_string()]
+                    },
+                    hints: vec!["hint".to_string()],
                 },
-                "[DENIED] no access",
-            ),
-            (
-                HelperResponse::HandshakeOk {
-                    helper_version: "0.3.2".to_string(),
-                    compatible: true,
-                },
-                "unexpected response from system-helper",
-            ),
-        ];
+            });
 
-        for (response, expected) in cases {
-            let mut client = client_with_responses(vec![response]);
-            let error = send_helper_request(
-                &mut client,
-                &HelperRequest::OsbaseStatus { scenario: None },
-                "osbase sandbox status",
-            )
-            .expect_err("response must fail");
-
-            match error {
-                CliError::Runtime { reason, .. } => assert!(reason.contains(expected)),
-                other => panic!("unexpected error: {other:?}"),
+            assert_eq!(result.is_ok(), succeeds, "exit code {exit_code}");
+            if let Err(CliError::Runtime { reason, .. }) = result {
+                assert_eq!(reason, "phase 'verify' failed: verification failed");
             }
         }
     }
