@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-ccr"
-version = "0.7.12"
+version = "0.7.13"
 dependencies = [
  "blake3",
  "rusqlite",
@@ -694,7 +694,7 @@ dependencies = [
 
 [[package]]
 name = "tokenless-schema"
-version = "0.7.12"
+version = "0.7.13"
 dependencies = [
  "regex",
  "serde_json",
