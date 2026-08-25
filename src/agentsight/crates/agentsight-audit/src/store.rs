@@ -653,17 +653,18 @@ impl AuditStore {
         })
     }
 
-    /// Returns a mapping from `(agent_id, policy_id)` to the most recent case ID.
+    /// Returns a mapping from `(agent_id, policy_id, policy_revision)` to the most recent case ID.
     ///
     /// # Errors
     ///
     /// Returns a typed database, stored-data, or lock error.
     pub fn case_index_by_agent_policy(
         &self,
-    ) -> Result<HashMap<(String, String), Uuid>, AuditError> {
+    ) -> Result<HashMap<(String, String, String), Uuid>, AuditError> {
         let conn = self.connection()?;
         let mut stmt = conn.prepare(
-            "SELECT agent_id, policy_id, case_id FROM risk_cases ORDER BY updated_at_ns DESC",
+            "SELECT agent_id, policy_id, COALESCE(policy_revision, ''), case_id \
+             FROM risk_cases ORDER BY updated_at_ns DESC",
         )?;
         let mut index = HashMap::new();
         let rows = stmt.query_map([], |row| {
@@ -671,13 +672,14 @@ impl AuditStore {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
             ))
         })?;
         for row in rows {
-            let (agent_id, policy_id, case_id_str) = row?;
+            let (agent_id, policy_id, policy_revision, case_id_str) = row?;
             let case_id = uuid::Uuid::parse_str(&case_id_str)
                 .map_err(|_| AuditError::InvalidData(format!("bad case_id: {case_id_str}")))?;
-            index.entry((agent_id, policy_id)).or_insert(case_id);
+            index.entry((agent_id, policy_id, policy_revision)).or_insert(case_id);
         }
         Ok(index)
     }

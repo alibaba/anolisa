@@ -12,9 +12,12 @@ the AgentSight audit API.
 AgentSight remains the user-facing observability, audit, and policy-coordination
 component. A separately supervised `agentsight-enforcer` process owns the
 privileged ActPlane runtime and exposes a small, versioned Unix domain socket
-protocol. ActPlane remains the kernel enforcement engine and is consumed from an
-official, pinned upstream Git revision instead of the vendored copy under
-`oslevel-harness`.
+protocol. ActPlane remains the kernel enforcement engine. The workspace declares
+a pinned upstream Git revision (`a62e5d9d`) as the canonical dependency, with a
+`[patch]` override pointing to vendored copies under `crates/`. This dual-track
+approach preserves the attested build path (which fetches from the git source and
+applies `patches/actplane/*.patch`) while giving workspace builds and the
+compile-time ABI guard direct access to the local source tree.
 
 This is product-level consolidation with process-level privilege isolation and a
 protocol-level anti-corruption boundary.
