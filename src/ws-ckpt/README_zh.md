@@ -141,6 +141,8 @@ ws-ckpt config -w ~/my-workspace --reset               # 删除局部 policy.tom
 ws-ckpt reload
 ```
 
+`config -g` 写入全局配置后会校验 daemon 重载了相同的设置——若有字段不一致会以非零退出并逐项列出。Kubernetes sidecar 部署下 CLI 与 daemon 运行在不同容器，`/etc/ws-ckpt` 必须挂在两容器共享的卷上，否则全局设置无法送达 daemon。
+
 ## 命令总览
 
 | 命令 | 说明 |

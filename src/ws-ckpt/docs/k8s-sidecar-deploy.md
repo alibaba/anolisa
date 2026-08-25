@@ -86,6 +86,7 @@ kubectl logs wsckpt-smoke -c daemon      # 确认 bootstrap 成功
 | ws-state | hostPath `/var/lib/ws-ckpt` | **必须持久化** — 存放 btrfs-data.img、state.json、daemon.lock。丢失此 volume = 数据丢失。 |
 | ws-ckpt-mount | hostPath（anchor 目录） | daemon 在此 overmount btrfs；daemon 侧 `mountPropagation: Bidirectional`，app 侧 `HostToContainer` |
 | data | emptyDir | workspace 父目录；workspace 使用其子目录（如 `/data/workspace`） |
+| config | emptyDir | `/etc/ws-ckpt` —— 全局配置面。CLI 写 `config.toml`，daemon 重载同一份文件。**不共享则所有 `config --global` 设置对 daemon 无效。** |
 
 ## 关键约束
 
@@ -102,6 +103,10 @@ kubectl logs wsckpt-smoke -c daemon      # 确认 bootstrap 成功
 6. **`shareProcessNamespace: true`** — 使 `fuser -m`（rollback/recover/img-shrink 判断挂载是否空闲时调用）能看到 app 容器的进程。
 
 7. **后端自动检测**：若宿主机 `/var/lib` 在原生 btrfs 上，`auto_detect` 选择 BtrfsBase（直接操作 subvolume，无需 loop 设备）。BtrfsLoop overmount 路径仅在 ext4/xfs 宿主机上激活。两种后端均可正常工作，无需 ConfigMap 强制指定。
+
+8. **`/etc/ws-ckpt` 必须两容器共享**。全局配置是文件面而非 socket 面：`ws-ckpt config --global` 由 CLI 直接写 `/etc/ws-ckpt/config.toml`，daemon 重载时读**它自己容器内**的同一路径。两容器各用镜像层时，daemon 读不到文件即回落内置默认值，`auto-cleanup` 等策略全部失效。CLI 写入后会比对 daemon 的 effective 配置并报错，但根治方式是把 `/etc/ws-ckpt` 挂成共享 volume（`emptyDir` 即可）。
+
+   per-workspace 配置（`config -w`）走 daemon 状态，不受此约束。
 
 ## SIGTERM 与 Loop 设备清理
 

@@ -11,6 +11,8 @@
 #   ws-ckpt-mount — hostPath anchor, daemon overmounts btrfs here;
 #                   Bidirectional propagation carries the mount to app
 #   data          — emptyDir, workspace parent directory (/data/workspace)
+#   config        — emptyDir, /etc/ws-ckpt so `config --global` from app
+#                   reaches the daemon (see note below)
 #
 # Notes:
 # - shareProcessNamespace: true so fuser -m (used by rollback/recover/shrink)
@@ -19,6 +21,9 @@
 #   (no loop device needed); the overmount path only activates on ext4/xfs hosts.
 # - daemon does NOT umount/losetup -d on SIGTERM; preStop hook handles cleanup
 #   to prevent loop device leaks across pod restarts.
+# - /etc/ws-ckpt must be a shared volume: the CLI writes config.toml there and
+#   the daemon reads its own view of that path. Unshared, every global setting
+#   applies to nothing and the CLI reports the mismatch.
 
 apiVersion: v1
 kind: Pod
@@ -47,6 +52,10 @@ spec:
         type: DirectoryOrCreate
     - name: data                         # workspace parent dir; workspace uses subdir /data/workspace. Container rootfs dirs are private — only shared volumes align app writes with daemon operations
       emptyDir: {}                       # avoids ws-ckpt bug (mount point rename EBUSY)
+    # Global config plane: `ws-ckpt config --global` in app writes config.toml
+    # here, daemon reloads the same file.
+    - name: config
+      emptyDir: {}
   containers:
     - name: daemon
       image: localhost/ws-ckpt:smoke
@@ -71,6 +80,8 @@ spec:
           mountPropagation: Bidirectional
         - name: data
           mountPath: /data
+        - name: config
+          mountPath: /etc/ws-ckpt
       # Clean orphan loop devices on pod teardown. Dead containers leave
       # host-scoped loops pointing at phantom paths (container rootfs gone but
       # loop persists). Without this, the next pod sees a stale btrfs mount.
@@ -97,3 +108,5 @@ spec:
           mountPropagation: HostToContainer
         - name: data
           mountPath: /data               # workspace at subdir /data/workspace
+        - name: config
+          mountPath: /etc/ws-ckpt        # same file the daemon reloads
