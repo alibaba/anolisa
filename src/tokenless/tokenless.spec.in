@@ -470,6 +470,12 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Tue Aug 25 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.13-1
+- feat(tokenless): add protocol v1 compression types
+- feat(tokenless): add content detection and registry routing
+- feat(tokenless): add staged fail-open arbitration
+- feat(tokenless): route response compression through the registry
+
 * Sat Aug 22 2026 爱鲲 <jiawa.syx@alibaba-inc.com> - 0.7.12-1
 - feat(tokenless): preserve tail items during array truncation
 - fix(tokenless): surface skipped schema compression

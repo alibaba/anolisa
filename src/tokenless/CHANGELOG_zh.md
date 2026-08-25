@@ -9,6 +9,17 @@ Tokenless 的所有重要变更都会记录在此文件中。
 
 ## [未发布]
 
+## [0.7.13] - 2026-08-25
+
+### 新增
+
+- Rust 调用方现在可以使用 `tokenless-protocol` 与 `tokenless-pipeline` Crate，获得带版本的压缩 Request/Response、受限成本的内容探测、Registry 路由、分阶段执行和 fail-open 仲裁能力（[#2783](https://github.com/alibaba/anolisa/pull/2783)、[#2788](https://github.com/alibaba/anolisa/pull/2788)、[#2799](https://github.com/alibaba/anolisa/pull/2799)）。
+
+### 变更
+
+- CLI `compress-response` 命令、`TokenlessRuntime::compress_response` 与 Python Binding 现在通过共享 Pipeline 处理 Record 结构的 JSON；标量 JSON 根节点会保持原样透传，超时或被拒绝的候选结果会返回原始内容并回滚其 Stash 写入（[#2816](https://github.com/alibaba/anolisa/pull/2816)）。
+- Runtime 与 Python 的 `disposition` 值现在使用协议定义的 snake_case 形式（如 `dry_run` 和 `no_savings`），并可能返回 `passthrough`、`timeout` 或 `error`；当未发生截断时，纯清理节省现在无需 Stash 也可在 `require_reversible` 下生效（[#2816](https://github.com/alibaba/anolisa/pull/2816)）。
+
 ## [0.7.12] - 2026-08-22
 
 ### 变更

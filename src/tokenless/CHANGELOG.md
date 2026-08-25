@@ -9,6 +9,17 @@ Releases from 0.7.2 onward follow
 
 ## [Unreleased]
 
+## [0.7.13] - 2026-08-25
+
+### Added
+
+- Rust callers can now use the `tokenless-protocol` and `tokenless-pipeline` crates for versioned compression requests and responses, bounded content detection, registry routing, staged execution, and fail-open arbitration ([#2783](https://github.com/alibaba/anolisa/pull/2783), [#2788](https://github.com/alibaba/anolisa/pull/2788), [#2799](https://github.com/alibaba/anolisa/pull/2799)).
+
+### Changed
+
+- The CLI `compress-response` command, `TokenlessRuntime::compress_response`, and the Python binding now route record-shaped JSON through the shared pipeline; scalar JSON roots pass through unchanged, while timeouts and rejected candidates return the original content and roll back their Stash writes ([#2816](https://github.com/alibaba/anolisa/pull/2816)).
+- Runtime and Python `disposition` values now use the protocol's snake_case forms such as `dry_run` and `no_savings`, and may report `passthrough`, `timeout`, or `error`; cleanup-only savings can now apply under `require_reversible` without a Stash when no truncation occurred ([#2816](https://github.com/alibaba/anolisa/pull/2816)).
+
 ## [0.7.12] - 2026-08-22
 
 ### Changed
