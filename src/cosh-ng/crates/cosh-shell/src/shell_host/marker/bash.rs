@@ -31,8 +31,16 @@ trap - DEBUG
 _COSH_AI_ENABLED="$_COSH_SESSION_AI_ENABLED"
 readonly _COSH_AI_ENABLED
 _cosh_assistance_enabled() {
+  local status restore_xtrace=0
+  if [[ $- == *x* ]]; then
+    restore_xtrace=1
+    set +x
+  fi
   [[ -n "${COSH_ASSISTANCE_STATE_FILE:-}"
      && -f "$COSH_ASSISTANCE_STATE_FILE" ]]
+  status=$?
+  (( restore_xtrace == 1 )) && set -x
+  return "$status"
 }
 _cosh_ai_enabled() {
   [[ "${_COSH_AI_ENABLED:-1}" == 1 ]] && _cosh_assistance_enabled

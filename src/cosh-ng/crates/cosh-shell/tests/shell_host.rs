@@ -89,7 +89,6 @@ fn shell_host_run_guard() -> MutexGuard<'static, ()> {
 
 fn shell_host_test_config(config: &ShellHostConfig) -> ShellHostConfig {
     let mut config = config.clone();
-    config.integration = ShellIntegration::Enhanced;
     if !config.env_overrides.iter().any(|(key, _)| key == "INPUTRC") {
         config = with_raw_byte_readline(config);
     }

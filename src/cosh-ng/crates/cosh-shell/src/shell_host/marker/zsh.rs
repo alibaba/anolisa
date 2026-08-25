@@ -37,6 +37,7 @@ fi
 _COSH_AI_ENABLED="$_COSH_SESSION_AI_ENABLED"
 readonly _COSH_AI_ENABLED
 _cosh_assistance_enabled() {
+  setopt localoptions noxtrace
   [[ -n "${COSH_ASSISTANCE_STATE_FILE:-}"
      && -f "$COSH_ASSISTANCE_STATE_FILE" ]]
 }

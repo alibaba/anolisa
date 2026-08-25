@@ -27,98 +27,117 @@ fn native_integration_leaves_bash_hooks_and_input_owned_by_bash() {
         return;
     }
 
-    let work_dir = std::env::temp_dir().join(format!(
-        "cosh-shell-native-integration-{}-{}",
-        std::process::id(),
-        unique_suffix()
-    ));
-    let home_dir = work_dir.join("home");
-    std::fs::create_dir_all(&home_dir).expect("home dir");
-    std::fs::write(
-        home_dir.join(".bashrc"),
-        r#"PROMPT_COMMAND='printf "__USER_PROMPT_COMMAND__\n"'
+    for enable_bracketed_paste in [false, true] {
+        let work_dir = std::env::temp_dir().join(format!(
+            "cosh-shell-native-integration-{}-{}-{}",
+            enable_bracketed_paste,
+            std::process::id(),
+            unique_suffix()
+        ));
+        let home_dir = work_dir.join("home");
+        std::fs::create_dir_all(&home_dir).expect("home dir");
+        std::fs::write(
+            home_dir.join(".bashrc"),
+            r#"PROMPT_COMMAND='printf "__USER_PROMPT_COMMAND__\n"'
 trap 'printf "%s\n" "$BASH_COMMAND" >> "$HOME/debug-trap.log"' DEBUG
 trap 'printf "%s\n" "$BASH_COMMAND" >> "$HOME/return-trap.log"' RETURN
 trap 'printf "%s\n" "$BASH_COMMAND" >> "$HOME/err-trap.log"' ERR
 "#,
-    )
-    .expect("bashrc");
-    let config = ShellHostConfig::new("native-integration", &work_dir)
-        .with_integration(ShellIntegration::Native)
-        .with_env("HOME", home_dir.display().to_string())
-        .with_env("PATH", "/usr/bin:/bin");
-    assert_eq!(config.integration, ShellIntegration::Native);
+        )
+        .expect("bashrc");
+        let config = ShellHostConfig::new("native-integration", &work_dir)
+            .with_integration(ShellIntegration::Native)
+            .with_env("HOME", home_dir.display().to_string())
+            .with_env("PATH", "/usr/bin:/bin");
+        let config = with_bracketed_paste_readline(config, enable_bracketed_paste);
+        assert_eq!(config.integration, ShellIntegration::Native);
 
-    let mut rendered = Vec::new();
-    let output = shell_run_raw_relay_bash_with_actions(
-        &config,
-        vec![
-            RawRelayAction::wait(Duration::from_millis(100)),
-            RawRelayAction::line("printf '__FLAGS__=%s\\n' \"$-\""),
-            RawRelayAction::line("shopt -q extdebug; printf '__EXTDEBUG_STATUS__=%s\\n' \"$?\""),
-            RawRelayAction::line("set -o | { grep -E '^(errtrace|functrace)[[:space:]]' || :; }"),
-            RawRelayAction::line("printf '__DEBUG_TRAP__=%q\\n' \"$(trap -p DEBUG)\""),
-            RawRelayAction::line("printf '__COSH_SESSION_ID__=%s\\n' \"${COSH_SESSION_ID-unset}\""),
-            RawRelayAction::line("set -x"),
-            RawRelayAction::line("printf '__XTRACE_ALIVE__\\n'"),
-            RawRelayAction::line("set +x"),
-            RawRelayAction::line("hello"),
-            RawRelayAction::line("/"),
-            RawRelayAction::line("set -f; ??; set +f"),
-            RawRelayAction::wait(Duration::from_millis(200)),
-            RawRelayAction::line("exit"),
-        ],
-        &mut rendered,
-    )
-    .expect("native bash relay");
+        let mut rendered = Vec::new();
+        let output = run_raw_relay_bash_with_actions(
+            &config,
+            vec![
+                RawRelayAction::wait(Duration::from_millis(100)),
+                RawRelayAction::line("printf '__FLAGS__=%s\\n' \"$-\""),
+                RawRelayAction::line(
+                    "shopt -q extdebug; printf '__EXTDEBUG_STATUS__=%s\\n' \"$?\"",
+                ),
+                RawRelayAction::line(
+                    "set -o | { grep -E '^(errtrace|functrace)[[:space:]]' || :; }",
+                ),
+                RawRelayAction::line("printf '__DEBUG_TRAP__=%q\\n' \"$(trap -p DEBUG)\""),
+                RawRelayAction::line(
+                    "printf '__COSH_SESSION_ID__=%s\\n' \"${COSH_SESSION_ID-unset}\"",
+                ),
+                RawRelayAction::line("set -x"),
+                RawRelayAction::line("printf '__XTRACE_ALIVE__\\n'"),
+                RawRelayAction::line("set +x"),
+                RawRelayAction::line("hello"),
+                RawRelayAction::line("/"),
+                RawRelayAction::line("set -f; ??; set +f"),
+                RawRelayAction::wait(Duration::from_millis(200)),
+                RawRelayAction::line("exit"),
+            ],
+            &mut rendered,
+        )
+        .expect("native bash relay");
 
-    let terminal = String::from_utf8_lossy(&rendered);
-    let flags = terminal
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("__FLAGS__="))
-        .expect("shell flags");
-    assert!(!flags.contains('E'), "{terminal}");
-    assert!(!flags.contains('T'), "{terminal}");
-    assert!(terminal.contains("__EXTDEBUG_STATUS__=1"), "{terminal}");
-    assert!(
-        terminal.contains("errtrace") && terminal.contains("off"),
-        "{terminal}"
-    );
-    assert!(
-        terminal.contains("functrace") && terminal.contains("off"),
-        "{terminal}"
-    );
-    assert!(terminal.contains("__USER_PROMPT_COMMAND__"), "{terminal}");
-    assert!(terminal.contains("__XTRACE_ALIVE__"), "{terminal}");
-    assert!(terminal.contains("__COSH_SESSION_ID__=unset"), "{terminal}");
-    assert!(!terminal.contains("_cosh"), "{terminal}");
-    assert!(!terminal.contains("COSH_MARKER_TOKEN"), "{terminal}");
-    assert!(!work_dir.join("cosh-marker.bash").exists());
-    assert!(!output.events.iter().any(|event| {
-        event.kind == ShellEventKind::UserInputIntercepted
-            && matches!(event.input.as_deref(), Some("hello" | "/" | "??"))
-    }));
-    assert!(
-        output.events.iter().all(|event| {
-            matches!(
-                event.kind,
-                ShellEventKind::ShellStarted | ShellEventKind::ShellExited
-            )
-        }),
-        "{:?}",
-        output.events
-    );
-
-    for trap_log in ["debug-trap.log", "return-trap.log", "err-trap.log"] {
-        let content = std::fs::read_to_string(home_dir.join(trap_log)).unwrap_or_default();
-        assert!(!content.contains("_cosh"), "{trap_log}: {content}");
+        let raw_terminal = String::from_utf8_lossy(&rendered);
+        let terminal = without_readline_mode_controls(&raw_terminal);
+        let flags = terminal
+            .lines()
+            .find_map(|line| {
+                let start = line.find("__FLAGS__=")?;
+                let value = line[start + "__FLAGS__=".len()..].trim_end_matches('\r');
+                (!value.is_empty()
+                    && value
+                        .chars()
+                        .all(|character| character.is_ascii_alphabetic()))
+                .then_some(value)
+            })
+            .expect("shell flags");
+        assert!(!flags.contains('E'), "{terminal}");
+        assert!(!flags.contains('T'), "{terminal}");
+        assert!(terminal.contains("__EXTDEBUG_STATUS__=1"), "{terminal}");
         assert!(
-            !content.contains("COSH_MARKER_TOKEN"),
-            "{trap_log}: {content}"
+            terminal.contains("errtrace") && terminal.contains("off"),
+            "{terminal}"
         );
-    }
+        assert!(
+            terminal.contains("functrace") && terminal.contains("off"),
+            "{terminal}"
+        );
+        assert!(terminal.contains("__USER_PROMPT_COMMAND__"), "{terminal}");
+        assert!(terminal.contains("__XTRACE_ALIVE__"), "{terminal}");
+        assert!(terminal.contains("__COSH_SESSION_ID__=unset"), "{terminal}");
+        assert!(!terminal.contains("_cosh"), "{terminal}");
+        assert!(!terminal.contains("COSH_MARKER_TOKEN"), "{terminal}");
+        assert!(!work_dir.join("cosh-marker.bash").exists());
+        assert!(!output.events.iter().any(|event| {
+            event.kind == ShellEventKind::UserInputIntercepted
+                && matches!(event.input.as_deref(), Some("hello" | "/" | "??"))
+        }));
+        assert!(
+            output.events.iter().all(|event| {
+                matches!(
+                    event.kind,
+                    ShellEventKind::ShellStarted | ShellEventKind::ShellExited
+                )
+            }),
+            "{:?}",
+            output.events
+        );
 
-    let _ = std::fs::remove_dir_all(&work_dir);
+        for trap_log in ["debug-trap.log", "return-trap.log", "err-trap.log"] {
+            let content = std::fs::read_to_string(home_dir.join(trap_log)).unwrap_or_default();
+            assert!(!content.contains("_cosh"), "{trap_log}: {content}");
+            assert!(
+                !content.contains("COSH_MARKER_TOKEN"),
+                "{trap_log}: {content}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&work_dir);
+    }
 }
 
 #[test]
@@ -244,6 +263,11 @@ trap 'printf "%s\n" "$BASH_COMMAND" >> "$HOME/debug-trap.log"' DEBUG
     assert!(
         !terminal.contains("HISTTIMEFORMAT: unbound variable"),
         "{terminal}"
+    );
+    let assistance_state_path = work_dir.join("assistance-enabled").display().to_string();
+    assert!(
+        !terminal.contains(&assistance_state_path),
+        "assistance state path leaked through xtrace: {terminal}"
     );
     assert!(
         terminal.contains("missing-cosh-v2-command: command not found"),
@@ -717,6 +741,48 @@ fn native_integration_leaves_zsh_startup_and_input_owned_by_zsh() {
             ShellEventKind::ShellStarted | ShellEventKind::ShellExited
         )
     }));
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+}
+
+#[test]
+fn enhanced_zsh_xtrace_hides_assistance_state_path() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+
+    let work_dir = std::env::temp_dir().join(format!(
+        "cosh-shell-enhanced-zsh-xtrace-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let home_dir = work_dir.join("home");
+    std::fs::create_dir_all(&home_dir).expect("home dir");
+    std::fs::write(home_dir.join(".zshrc"), "PS1='zsh-xtrace% '\n").expect("zshrc");
+    let config = ShellHostConfig::new("enhanced-zsh-xtrace", &work_dir)
+        .with_env("HOME", home_dir.display().to_string())
+        .with_env("ZDOTDIR", home_dir.display().to_string());
+
+    let mut rendered = Vec::new();
+    run_raw_relay_zsh_with_actions(
+        &config,
+        vec![
+            RawRelayAction::wait(Duration::from_millis(100)),
+            RawRelayAction::line("set -x"),
+            RawRelayAction::line("_cosh_assistance_enabled"),
+            RawRelayAction::line("set +x"),
+            RawRelayAction::line("exit"),
+        ],
+        &mut rendered,
+    )
+    .expect("enhanced Zsh xtrace relay");
+
+    let terminal = String::from_utf8_lossy(&rendered);
+    let assistance_state_path = work_dir.join("assistance-enabled").display().to_string();
+    assert!(
+        !terminal.contains(&assistance_state_path),
+        "assistance state path leaked through Zsh xtrace: {terminal}"
+    );
 
     let _ = std::fs::remove_dir_all(&work_dir);
 }
